@@ -225,7 +225,7 @@ impl BaseTool for EditFileTool {
                 }
                 let new_content = content.replace(old_string, new_string);
                 let occurrences = content.matches(old_string).count();
-                match locked.guard_and_commit(&pre, new_content.as_bytes()) {
+                match locked.guard_and_commit(Some(pre), new_content.into_bytes()) {
                     Ok(()) => Ok(format!(
                         "{} to {} (replaced {} occurrence{})",
                         diff_desc,
@@ -279,7 +279,7 @@ impl BaseTool for EditFileTool {
                 .into());
                 }
                 let new_content = content.replacen(old_string, new_string, 1);
-                match locked.guard_and_commit(&pre, new_content.as_bytes()) {
+                match locked.guard_and_commit(Some(pre), new_content.into_bytes()) {
                     Ok(()) => Ok(format!("{} to {}", diff_desc, rel)),
                     Err(CommitError::Sentinel) => Err(ToolFailure::new(SENTINEL_REJECTION, SENTINEL_REJECTION).into()),
                     Err(CommitError::Io(error)) => Err(ToolFailure::new("Edit failed while committing the file. Check write permissions and available disk space; Read before retrying.", format!("Edit failed while committing {}: {error}", resolved.display())).into()),

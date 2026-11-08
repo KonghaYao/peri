@@ -1,7 +1,12 @@
 //! Workspace-owned, session-scoped reversal of recorded Write/Edit calls.
+//!
+//! Write replaces the whole file, so Git `HEAD` is not what the call replaced.
+//! The caller sends each call's tool-call id; this module restores the pre-image
+//! the Workspace recorded for that call and refuses when it is missing or the
+//! current content no longer equals the recorded output.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::{Component, Path, PathBuf},
 };
 
@@ -11,29 +16,39 @@ use rmcp::{
 };
 use serde::Deserialize;
 
+use crate::rewind_snapshot::RewindSnapshots;
+
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum Change {
     Write {
         path: String,
+        /// Written payload. Reversal uses the recorded pre/post images, but the
+        /// payload still proves the history entry and snapshot belong together.
         content: Option<String>,
+        tool_call_id: Option<String>,
     },
     Edit {
         path: String,
         old_string: String,
         new_string: String,
+        tool_call_id: Option<String>,
     },
 }
 
 pub(crate) async fn rewind_files(
     cwd: &str,
+    snapshots: &RewindSnapshots,
+    owner: Option<&str>,
     request: CustomRequest,
 ) -> Result<CustomResult, McpError> {
+    let params = request
+        .params
+        .as_ref()
+        .ok_or_else(|| invalid("missing changes"))?;
     let changes: Vec<Change> = serde_json::from_value(
-        request
-            .params
-            .as_ref()
-            .and_then(|p| p.get("changes"))
+        params
+            .get("changes")
             .cloned()
             .ok_or_else(|| invalid("missing changes"))?,
     )
@@ -44,74 +59,152 @@ pub(crate) async fn rewind_files(
     let root = tokio::fs::canonicalize(cwd)
         .await
         .map_err(|_| invalid("Workspace root unavailable"))?;
-    let mut planned: HashMap<PathBuf, Option<String>> = HashMap::new();
+    let mut planned: HashMap<PathBuf, Option<Vec<u8>>> = HashMap::new();
+    let mut expected_on_disk: HashMap<PathBuf, Option<Vec<u8>>> = HashMap::new();
     let mut order = Vec::new();
-    let mut completed_writes = HashSet::new();
     // Validate the complete batch before the first mutation. If any history record
     // no longer matches the current Workspace content, leave every file untouched.
     for change in changes.into_iter().rev() {
         let raw = match &change {
             Change::Write { path, .. } | Change::Edit { path, .. } => path,
         };
-        let (path, relative) = checked_path(&root, raw).await?;
-        // A later Write replaced all earlier contents of the same file. Once
-        // reversed to HEAD (or absence), older edits/writes need no replay.
-        if completed_writes.contains(&path) {
-            continue;
-        }
+        let (path, _) = checked_path(&root, raw).await?;
         let current = match planned.get(&path) {
             Some(content) => content.clone(),
-            None => tokio::fs::read_to_string(&path).await.ok(),
+            None => read_optional(&path).await?,
         };
         let replacement = match change {
-            Change::Write { content, .. } => {
-                let content = content
-                    .ok_or_else(|| invalid("Write history lacks content; rewind refused"))?;
-                if current.as_deref() != Some(content.as_str()) {
+            Change::Write {
+                content,
+                tool_call_id,
+                ..
+            } => {
+                let tool_call_id = tool_call_id
+                    .ok_or_else(|| invalid("Write rewind lacks call identity; rewind refused"))?;
+                let snapshot = snapshots
+                    .get(owner, &tool_call_id)
+                    .ok_or_else(|| invalid("Write pre-image unavailable; rewind refused"))?;
+                if snapshot.path != path {
+                    return Err(invalid("Write pre-image target mismatch; rewind refused"));
+                }
+                if !write_payload_matches(&snapshot, content.as_deref()) {
+                    return Err(invalid(
+                        "Write history does not match recorded pre-image; rewind refused",
+                    ));
+                }
+                if current.as_deref() != Some(snapshot.post.as_slice()) {
                     return Err(invalid("Write output changed externally; rewind refused"));
                 }
-                completed_writes.insert(path.clone());
-                head_content(&root, &relative).await?
+                snapshot.pre
             }
             Change::Edit {
                 old_string,
                 new_string,
+                tool_call_id,
                 ..
             } => {
-                if new_string.is_empty()
-                    || current
-                        .as_deref()
-                        .is_none_or(|text| text.matches(&new_string).count() != 1)
-                {
-                    return Err(invalid(
-                        "Edit output changed or is ambiguous; rewind refused",
-                    ));
+                let recorded = tool_call_id.as_deref().and_then(|id| {
+                    let snapshot = snapshots.get(owner, id)?;
+                    (snapshot.path == path).then_some(snapshot)
+                });
+                match recorded {
+                    Some(snapshot) => {
+                        if current.as_deref() != Some(snapshot.post.as_slice()) {
+                            return Err(invalid("Edit output changed externally; rewind refused"));
+                        }
+                        snapshot.pre
+                    }
+                    // Histories recorded before pre-image capture keep the
+                    // self-contained string reversal: the call itself carries the
+                    // exact old/new pair.
+                    None => reverse_edit(current.as_deref(), &old_string, &new_string)?,
                 }
-                Some(current.unwrap().replacen(&new_string, &old_string, 1))
             }
         };
         if !planned.contains_key(&path) {
             order.push(path.clone());
+            expected_on_disk.insert(path.clone(), current);
         }
         planned.insert(path, replacement);
     }
     for path in order {
-        match planned.remove(&path).expect("planned path") {
-            Some(content) => tokio::fs::write(&path, content).await.map_err(|_| {
-                McpError::internal_error(
-                    "Workspace rewind write failed; some files may already be changed",
-                    None,
-                )
-            })?,
-            None => tokio::fs::remove_file(&path).await.map_err(|_| {
-                McpError::internal_error(
-                    "Workspace rewind remove failed; some files may already be changed",
-                    None,
-                )
-            })?,
-        }
+        let replacement = planned.remove(&path).expect("planned path");
+        let expected = expected_on_disk.remove(&path).expect("expected path");
+        let apply_path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::filesystem::transaction::replace_if_unchanged(
+                &apply_path,
+                expected.as_deref(),
+                replacement.as_deref(),
+            )
+        })
+        .await
+        .map_err(|_| {
+            McpError::internal_error(
+                "Workspace rewind task failed; some files may already be changed",
+                None,
+            )
+        })?
+        .map_err(|error| {
+            let message = match error {
+                crate::filesystem::transaction::RewindCommitError::ChangedSinceValidation => {
+                    "Workspace rewind target changed during apply; some files may already be changed"
+                }
+                crate::filesystem::transaction::RewindCommitError::Commit(error) => {
+                    tracing::warn!(?error, "workspace rewind commit failed");
+                    "Workspace rewind write failed; some files may already be changed"
+                }
+            };
+            McpError::internal_error(message, None)
+        })?;
     }
     Ok(CustomResult::new(serde_json::json!({"ok": true})))
+}
+
+/// The recorded payload must be what the snapshot says the call produced:
+/// full replacement equals `post`, appended payload equals `post` after `pre`.
+fn write_payload_matches(
+    snapshot: &crate::rewind_snapshot::Snapshot,
+    content: Option<&str>,
+) -> bool {
+    let Some(content) = content else {
+        return true;
+    };
+    if snapshot.post == content.as_bytes() {
+        return true;
+    }
+    snapshot.pre.as_deref().is_some_and(|pre| {
+        let mut combined = Vec::with_capacity(pre.len() + content.len());
+        combined.extend_from_slice(pre);
+        combined.extend_from_slice(content.as_bytes());
+        combined == snapshot.post
+    })
+}
+
+/// Rebuild the pre-edit bytes from the recorded old/new pair.
+fn reverse_edit(
+    current: Option<&[u8]>,
+    old_string: &str,
+    new_string: &str,
+) -> Result<Option<Vec<u8>>, McpError> {
+    let text = current
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .filter(|_| !new_string.is_empty())
+        .ok_or_else(|| invalid("Edit output changed or is ambiguous; rewind refused"))?;
+    if text.matches(new_string).count() != 1 {
+        return Err(invalid(
+            "Edit output changed or is ambiguous; rewind refused",
+        ));
+    }
+    Ok(Some(text.replacen(new_string, old_string, 1).into_bytes()))
+}
+
+async fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, McpError> {
+    match tokio::fs::read(path).await {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(invalid("rewind file is not readable")),
+    }
 }
 
 async fn checked_path(root: &Path, raw: &str) -> Result<(PathBuf, PathBuf), McpError> {
@@ -138,53 +231,6 @@ async fn checked_path(root: &Path, raw: &str) -> Result<(PathBuf, PathBuf), McpE
         return Err(invalid("rewind file escapes Workspace or is not a file"));
     }
     Ok((actual, relative.to_path_buf()))
-}
-
-async fn head_content(root: &Path, relative: &Path) -> Result<Option<String>, McpError> {
-    let repo = tokio::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(root)
-        .output()
-        .await
-        .map_err(|_| invalid("git unavailable for Write rewind"))?;
-    if !repo.status.success() {
-        return Ok(None);
-    }
-    let repo_root =
-        tokio::fs::canonicalize(PathBuf::from(String::from_utf8_lossy(&repo.stdout).trim()))
-            .await
-            .map_err(|_| invalid("Git repository root unavailable"))?;
-    let repo_path = root
-        .join(relative)
-        .strip_prefix(&repo_root)
-        .map_err(|_| invalid("Workspace outside Git repository"))?
-        .iter()
-        .map(|part| part.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/");
-    let tracked = tokio::process::Command::new("git")
-        .args(["ls-files", "--error-unmatch", "--"])
-        .arg(&repo_path)
-        .current_dir(&repo_root)
-        .output()
-        .await
-        .map_err(|_| invalid("git index lookup failed"))?;
-    if !tracked.status.success() {
-        return Ok(None);
-    }
-    let spec = format!("HEAD:{repo_path}");
-    let output = tokio::process::Command::new("git")
-        .args(["show", &spec])
-        .current_dir(repo_root)
-        .output()
-        .await
-        .map_err(|_| invalid("git HEAD read failed"))?;
-    if !output.status.success() {
-        return Err(invalid("tracked file missing at HEAD"));
-    }
-    String::from_utf8(output.stdout)
-        .map(Some)
-        .map_err(|_| invalid("tracked HEAD file is not UTF-8"))
 }
 
 fn invalid(message: &'static str) -> McpError {

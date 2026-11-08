@@ -4,7 +4,7 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 use url::Url;
 
-use crate::{ModelResult, ProviderProtocol, RetryConfig, RetryObserver};
+use crate::{ModelResult, ModelTransportRoute, ProviderProtocol, RetryConfig, RetryObserver};
 
 const TRUNCATED_VALUE: &str = "[TRUNCATED]";
 
@@ -36,6 +36,7 @@ pub struct ModelRuntimeConfig {
     observation: ObservationConfig,
     retry: RetryConfig,
     retry_observer: Option<Arc<dyn RetryObserver>>,
+    transport_route: Option<ModelTransportRoute>,
 }
 
 impl Clone for ModelRuntimeConfig {
@@ -44,6 +45,7 @@ impl Clone for ModelRuntimeConfig {
             observation: self.observation.clone(),
             retry: self.retry.clone(),
             retry_observer: self.retry_observer.clone(),
+            transport_route: self.transport_route.clone(),
         }
     }
 }
@@ -54,6 +56,7 @@ impl fmt::Debug for ModelRuntimeConfig {
             .debug_struct("ModelRuntimeConfig")
             .field("observation", &self.observation)
             .field("retry", &self.retry)
+            .field("transport_route", &self.transport_route)
             .field(
                 "retry_observer",
                 &self.retry_observer.as_ref().map(|_| "[REGISTERED]"),
@@ -71,6 +74,7 @@ impl ModelRuntimeConfig {
             observation: ObservationConfig::full_content(),
             retry: RetryConfig::default(),
             retry_observer: None,
+            transport_route: None,
         }
     }
 
@@ -87,6 +91,15 @@ impl ModelRuntimeConfig {
 
     pub fn retry(&self) -> &RetryConfig {
         &self.retry
+    }
+
+    pub fn with_transport_route(mut self, route: ModelTransportRoute) -> Self {
+        self.transport_route = Some(route);
+        self
+    }
+
+    pub fn transport_route(&self) -> Option<&ModelTransportRoute> {
+        self.transport_route.as_ref()
     }
 
     pub(crate) fn retry_observer(&self) -> Option<Arc<dyn RetryObserver>> {

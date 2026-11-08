@@ -154,7 +154,7 @@ typecheck 或旧 dist 冒充。测试名省略文件时均为 `npm-packages/@per
   的 `waiting()` 类型错误消失。
 - `scripts/cargo-rmcp-patched.sh` 不再把目录或未配置版本的 mise shim 当 Python；优先可执行的
   `python3`，回退 `python`/`/usr/bin/python3`。
-- `examples/workers/wrangler.toml` 把 `snippets/**/*.js` 纳入 ESModule 规则，workerd 能附加
+- `npm-packages/@peri-sdk/examples/workers/wrangler.toml` 把 `snippets/**/*.js` 纳入 ESModule 规则，workerd 能附加
   Emscripten 生成的 `turso_serverless-*/inline0.js`。
 - 官方 build 需在 `mise exec` 下运行，以注入 `EMSDK`：`MISE_ENV=wasm mise exec -- bun run build`。
   CF 通过 `file:../@peri-sdk` + `bun install --force` 链接工作区包，无需手工复制。

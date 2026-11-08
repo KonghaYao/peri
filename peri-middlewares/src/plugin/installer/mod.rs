@@ -340,3 +340,7 @@ pub(crate) fn sanitize_plugin_id(plugin_id: &str) -> String {
 #[cfg(test)]
 #[path = "installer_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "install_path_test.rs"]
+mod install_path_tests;

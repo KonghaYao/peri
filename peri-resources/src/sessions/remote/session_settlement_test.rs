@@ -711,12 +711,8 @@ fn reminder(body: &str) -> peri_acp_types::system_reminder::TrustedSystemReminde
         .unwrap()
 }
 
-/// 远端 `settle_retained_mq` 仍走组合回退：提醒与 MQ 行分别提交。
-///
-/// 成功路径与 SQLite 单事务结果相同，但这里不证明原子性；下一步用例固定记录
-/// 组合路径的崩溃窗口，避免后续把远端关闭结算误当成单批实现。
 #[tokio::test]
-async fn remote_retained_mq_settlement_uses_composed_fallback() {
+async fn remote_retained_mq_settlement_commits_together() {
     use peri_acp_types::session::RetainedReminder;
 
     let fixture = fixture().await;
@@ -744,12 +740,8 @@ async fn remote_retained_mq_settlement_uses_composed_fallback() {
     assert_eq!(mq_rows(&fixture, &thread).await, 0);
 }
 
-/// 固定已记录的限制：远端关闭结算不是原子实现。
-///
-/// 提醒写入成功后删除 MQ 行的批被丢弃，组合回退返回错误，但已写提醒保留、待发行
-/// 仍在。若未来把远端 `settle_retained_mq` 改成托管批，本用例应随之更新。
 #[tokio::test]
-async fn remote_retained_mq_composed_fallback_is_not_atomic() {
+async fn remote_retained_mq_dropped_batch_changes_nothing() {
     use peri_acp_types::session::RetainedReminder;
 
     let fixture = fixture().await;
@@ -762,7 +754,7 @@ async fn remote_retained_mq_composed_fallback_is_not_atomic() {
     fixture
         .data
         .inject_faults(FaultPlan {
-            drop_before_send: Some("mq_receive".to_owned()),
+            drop_before_send: Some("settle_retained_mq".to_owned()),
             ..Default::default()
         })
         .await;
@@ -788,8 +780,55 @@ async fn remote_retained_mq_composed_fallback_is_not_atomic() {
     );
     assert_eq!(
         history_rows(&fixture, &thread).await,
-        1,
-        "组合回退已写下的提醒不会回滚"
+        0,
+        "未提交的批次不能写入提醒"
     );
     assert_eq!(mq_rows(&fixture, &thread).await, 1, "待发行仍在");
+}
+
+#[tokio::test]
+async fn remote_retained_delete_failure_rolls_back_reminder_and_retry_is_idempotent() {
+    use peri_acp_types::session::RetainedReminder;
+    let fixture = fixture().await;
+    let thread = thread("mq-thread");
+    let entry = fixture
+        .data
+        .mq_enqueue(&thread, input(MessageId::new(), "retained"))
+        .await
+        .unwrap();
+    let notices = [RetainedReminder {
+        id: MessageId::new(),
+        reminder: reminder("close"),
+    }];
+    sqlx::query(
+        "CREATE TRIGGER fail_retained_delete BEFORE DELETE ON thread_mq
+        BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END",
+    )
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    assert!(fixture
+        .data
+        .settle_retained_mq(&thread, &notices, std::slice::from_ref(&entry.entry))
+        .await
+        .is_err());
+    assert_eq!(
+        history_rows(&fixture, &thread).await,
+        0,
+        "提醒必须随删除失败回滚"
+    );
+    assert_eq!(mq_rows(&fixture, &thread).await, 1);
+    sqlx::query("DROP TRIGGER fail_retained_delete")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        fixture
+            .data
+            .settle_retained_mq(&thread, &notices, std::slice::from_ref(&entry.entry))
+            .await
+            .unwrap();
+    }
+    assert_eq!(history_rows(&fixture, &thread).await, 1);
+    assert_eq!(mq_rows(&fixture, &thread).await, 0);
 }

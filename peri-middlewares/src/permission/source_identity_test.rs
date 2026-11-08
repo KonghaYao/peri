@@ -131,7 +131,12 @@ async fn test_accept_edit_does_not_auto_approve_external_raw_write() {
     );
     let call = make_tool_call("Write");
     let results = mw
-        .process_batch_with_origins(&[call], &[mcp_origin("Write", false)], Some(&test_owner()))
+        .process_batch_with_origins(
+            &[call],
+            &[mcp_origin("Write", false)],
+            Some(&test_owner()),
+            None,
+        )
         .await;
     assert!(matches!(&results[0], Err(AgentError::ToolRejected { tool, .. }) if tool == "Write"));
 }
@@ -141,7 +146,12 @@ async fn test_builtin_raw_read_keeps_read_policy() {
     let mw = PermissionMiddleware::new(Arc::new(RejectBroker), default_requires_approval);
     let call = make_tool_call("Read");
     let results = mw
-        .process_batch_with_origins(&[call], &[mcp_origin("Read", true)], Some(&test_owner()))
+        .process_batch_with_origins(
+            &[call],
+            &[mcp_origin("Read", true)],
+            Some(&test_owner()),
+            None,
+        )
         .await;
     assert_eq!(results[0].as_ref().unwrap().name, "Read");
 }
@@ -155,6 +165,7 @@ async fn test_external_raw_artifact_cannot_inherit_builtin_no_approval() {
             &[call],
             &[mcp_origin("artifact", false)],
             Some(&test_owner()),
+            None,
         )
         .await;
     assert!(
@@ -163,6 +174,50 @@ async fn test_external_raw_artifact_cannot_inherit_builtin_no_approval() {
 }
 
 struct RecordingClassifier(Mutex<Vec<String>>);
+
+#[test]
+fn classifier_context_uses_explicit_approval_facts_and_tool_identity() {
+    struct ApprovalFacts {
+        session: Option<&'static str>,
+        binding: peri_acp_types::session::ExecutionBinding,
+        step: Option<usize>,
+    }
+    impl StateView for ApprovalFacts {
+        fn execution_binding(&self) -> Option<peri_acp_types::session::ExecutionBinding> {
+            Some(self.binding.clone())
+        }
+        fn session_id(&self) -> Option<&str> {
+            self.session
+        }
+        fn cwd(&self) -> &str {
+            "/tmp"
+        }
+        fn messages(&self) -> &[BaseMessage] {
+            &[]
+        }
+        fn current_step(&self) -> Option<usize> {
+            self.step
+        }
+    }
+    let mut facts = ApprovalFacts {
+        session: Some("session-a"),
+        binding: peri_acp_types::session::ExecutionBinding {
+            turn_id: peri_acp_types::session::TurnId::new(),
+            attempt_id: peri_acp_types::identity::AttemptId::new(),
+        },
+        step: Some(3),
+    };
+    let call = make_tool_call("Shell");
+    let context = classifier_context(&facts, &call).unwrap();
+    assert_eq!(context.owner, "session-a");
+    assert_eq!(context.execution, facts.binding.attempt_id.to_string());
+    assert_eq!(context.call, "auto-classify:3:test-id");
+    facts.step = None;
+    assert!(classifier_context(&facts, &call).is_none());
+    facts.step = Some(3);
+    facts.session = None;
+    assert!(classifier_context(&facts, &call).is_none());
+}
 
 #[async_trait]
 impl AutoClassifier for RecordingClassifier {
@@ -187,10 +242,16 @@ async fn test_auto_mode_classifies_external_mcp_with_server_and_wire_identity() 
             std::slice::from_ref(&call),
             &[mcp_origin("Write", false)],
             Some(&test_owner()),
+            None,
         )
         .await;
     let builtin = mw
-        .process_batch_with_origins(&[call], &[mcp_origin("Write", true)], Some(&test_owner()))
+        .process_batch_with_origins(
+            &[call],
+            &[mcp_origin("Write", true)],
+            Some(&test_owner()),
+            None,
+        )
         .await;
     assert!(external[0].is_ok());
     assert!(builtin[0].is_ok());

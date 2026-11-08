@@ -1,0 +1,95 @@
+{
+  "version": 2,
+  "id": "T06",
+  "title": "Prompt hook 的真实模型判定改写 Bash 输入",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.claude",
+      "home/.peri",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.claude/settings.json",
+        "sha256": "c35e39ae7bacb09ec8c6221c571212aced28eb5bbd1406fd89ceac71587fab72",
+        "size": 177,
+        "mode": 420
+      },
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-JmvELw",
+    "home": "/tmp/peri-wire-e2e-JmvELw/home",
+    "work": "/tmp/peri-wire-e2e-JmvELw/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b607-8e83-78d3-bd0c-085a769a6014"
+  },
+  "configurationFingerprint": "6c6363511235a9dc8c72a6a1fffbd0b5e1b09be117f8f94c54a76f3f6ad18645",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-JmvELw",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-JmvELw/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-JmvELw/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-07",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b607-8e83-78d3-bd0c-085a769a6014",
+      "anchor": "ACP session/new result"
+    }
+  ],
+  "portableResponses": []
+}

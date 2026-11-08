@@ -17,6 +17,7 @@ required-features = ["cloudflare"]
 [dependencies]
 peri-time = { path = "../peri-time" }
 async-trait.workspace = true
+base64 = { version = "0.23.1", features = ["alloc"] }
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -25,6 +26,9 @@ tokio-util.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 rand = "0.10"
 url = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net"] }
 
 [target.'cfg(target_os = "emscripten")'.dependencies]
 wasm-bindgen = { version = "=0.2.129", optional = true }

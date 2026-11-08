@@ -95,4 +95,4 @@
 ## 消费者
 
 - `npm-packages/peri-cf` 通过主入口与 `/view` 消费 Manager/Action/View/Replica；平台装配、HTTP/WS 与鉴权留在应用。索引见 [peri-cf](peri-cf.md)。
-- Workers smoke 入口在 `examples/workers/`；只证明当前 Host 方法表与本地 `workerd` 路径，不代表 hosted Workers 验收。
+- Workers smoke 入口在 `npm-packages/@peri-sdk/examples/workers/`；只证明当前 Host 方法表与本地 `workerd` 路径，不代表 hosted Workers 验收。

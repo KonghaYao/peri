@@ -132,13 +132,15 @@ async fn test_handoff_commit_reuses_frozen_execution_snapshot() {
 
 #[tokio::test]
 async fn test_close_settles_terminal_and_records_retained_input() {
-    let resources = crate::session::test_resources::mock::MockSessionResources::new();
+    let test = crate::session::test_resources::TestSession::open().await;
+    let child_id = test.thread_id();
+    let resources = test.resources();
     let child = ParkedChildOwner::new(
-        "child".into(),
+        child_id.clone(),
         "root".into(),
         Arc::new(TaskManager::new()),
         // 与生产同形：收件箱绑定同一份存储与 thread，结算才能在同一处删除 MQ 行。
-        MessageQueue::bind(resources.clone(), "child".to_owned()),
+        MessageQueue::bind(resources.clone(), child_id.clone()),
         Some(resources.clone()),
         None,
     );
@@ -153,24 +155,32 @@ async fn test_close_settles_terminal_and_records_retained_input() {
         None,
         serde_json::json!({}),
     );
-    child.queue.push_sync(
-        crate::session::QueuedMessage::system_reminder_with_delivery_id(
-            crate::session::MessageKind::Defer,
-            crate::session::MessageSource::SystemInjected,
-            terminal,
-            terminal_id,
-        ),
-    );
-    child.queue.push_sync(crate::session::QueuedMessage::prompt(
-        crate::session::MessageSource::UserInput,
-        crate::messages::BaseMessage::human("追加输入"),
-    ));
+    child
+        .queue
+        .enqueue(
+            crate::session::QueuedMessage::system_reminder_with_delivery_id(
+                crate::session::MessageKind::Defer,
+                crate::session::MessageSource::SystemInjected,
+                terminal,
+                terminal_id,
+            ),
+        )
+        .await
+        .unwrap();
+    child
+        .queue
+        .enqueue(crate::session::QueuedMessage::prompt(
+            crate::session::MessageSource::UserInput,
+            crate::messages::BaseMessage::human("追加输入"),
+        ))
+        .await
+        .unwrap();
     child.close().await.unwrap();
     assert!(
-        !child.queue.has_required_sync(),
+        !child.queue.has_required().await.unwrap(),
         "已结算输入不得残留 Required"
     );
-    let payloads = resources.payloads();
+    let payloads = resources.load_session_history(&child_id).await.unwrap();
     assert_eq!(payloads.len(), 2, "终态按原 ID 落库，未处理输入单独记录");
     assert!(payloads.iter().any(|payload| {
         matches!(payload, PersistedPayload::SystemReminder { reminder, .. }

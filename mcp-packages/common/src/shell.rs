@@ -362,7 +362,7 @@ pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
 
 /// 当输出被截断时，将完整内容写入临时文件。
 /// 返回追加到截断信息后的提示字符串。
-/// 文件路径：`{temp_dir}/peri-tool-output-{uuid}.txt`
+/// 文件落在进程私有的 0700 目录内，文件权限 0600。
 pub fn persist_truncated_output(full_content: &str) -> String {
     let (hint, _) = persist_truncated_output_with_ref(full_content);
     hint
@@ -372,13 +372,8 @@ pub fn persist_truncated_output(full_content: &str) -> String {
 /// The caller should carry the path as typed evidence instead of recovering it
 /// from rendered text.
 pub fn persist_truncated_output_with_ref(full_content: &str) -> (String, Option<String>) {
-    let id = uuid::Uuid::new_v4();
-    let dir = std::env::temp_dir();
-    let file_name = format!("peri-tool-output-{id}.txt");
-    let file_path = dir.join(&file_name);
-
-    match std::fs::write(&file_path, full_content) {
-        Ok(_) => (
+    match persist_private_output(full_content) {
+        Ok(file_path) => (
             format!(
                 // 指引指代 builtin 文件工具时必须用**模型面名字**（裸名已无提供面）；
                 // 查表未命中的兜底不含工具名，不得回落到裸名。
@@ -391,14 +386,14 @@ pub fn persist_truncated_output_with_ref(full_content: &str) -> (String, Option<
             ),
             Some(file_path.to_string_lossy().into_owned()),
         ),
-        Err(e) => (
-            format!(
-                "\n\n[Failed to save full output to {}: {e}]",
-                file_path.display()
-            ),
-            None,
-        ),
+        Err(error) => (format!("\n\n[Failed to save full output: {error}]"), None),
     }
+}
+
+/// Persist a full tool output in the process-private temp directory and return
+/// the written path. Callers own the user-facing hint wording.
+pub fn persist_private_output(full_content: &str) -> std::io::Result<std::path::PathBuf> {
+    crate::private_temp::write_output(full_content)
 }
 
 /// The caller owns this future until the TERM/KILL sequence has completed.

@@ -156,6 +156,7 @@ fn state_with(
         cwd: "/tmp".to_owned(),
         environment: None,
         closing: false,
+        close_in_flight: 0,
         context_ownership: ContextOwnership::Resident,
         history_payloads: vec![],
         structure_version,

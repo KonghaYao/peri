@@ -1,0 +1,149 @@
+{
+  "version": 2,
+  "id": "T01",
+  "title": "Write 后实际 Read 回同一文件",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-GjR7ql",
+    "home": "/tmp/peri-wire-e2e-GjR7ql/home",
+    "work": "/tmp/peri-wire-e2e-GjR7ql/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b607-7d64-77d1-b24f-3d0cc78516bd"
+  },
+  "configurationFingerprint": "6c6363511235a9dc8c72a6a1fffbd0b5e1b09be117f8f94c54a76f3f6ad18645",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-GjR7ql",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-GjR7ql/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-GjR7ql/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-07",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b607-7d64-77d1-b24f-3d0cc78516bd",
+      "anchor": "ACP session/new result"
+    }
+  ],
+  "portableResponses": [
+    {
+      "identity": {
+        "owner": "root",
+        "execution": "business-turn",
+        "call": "reason:1",
+        "attempt": 1,
+        "purpose": "reason"
+      },
+      "protocol": "anthropic",
+      "owner": "world",
+      "tools": [
+        {
+          "toolCallId": "t01-write",
+          "rules": [
+            {
+              "path": "/file_path",
+              "kind": "path",
+              "alias": "work",
+              "mode": "path-prefix"
+            }
+          ]
+        }
+      ],
+      "rulesVersion": "world-bindings-v1",
+      "fragmentPlan": {
+        "kind": "utf8",
+        "maxBytes": 128
+      },
+      "sourceSha256": "fdb908e9d7a301ea6fdcf40f33aed02540d69e53a121338ee93d61e2679fe6ec"
+    },
+    {
+      "identity": {
+        "owner": "root",
+        "execution": "business-turn",
+        "call": "reason:2",
+        "attempt": 1,
+        "purpose": "reason"
+      },
+      "protocol": "anthropic",
+      "owner": "world",
+      "tools": [
+        {
+          "toolCallId": "t01-read",
+          "rules": [
+            {
+              "path": "/file_path",
+              "kind": "path",
+              "alias": "work",
+              "mode": "path-prefix"
+            }
+          ]
+        }
+      ],
+      "rulesVersion": "world-bindings-v1",
+      "fragmentPlan": {
+        "kind": "utf8",
+        "maxBytes": 128
+      },
+      "sourceSha256": "3e0b16f1901d5e30878bc677fb9a73f96eae5d3ed3c4374c994031593bb34597"
+    }
+  ]
+}

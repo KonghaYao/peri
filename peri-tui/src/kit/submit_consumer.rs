@@ -5,10 +5,14 @@
 //! **首次会话懒初始化**：用户第一次提交时如果还没有 session，先创建。
 //!
 //! 设计：
-//! - 单消费者，从 `mpsc::UnboundedReceiver<SubmitRequest>` 顺序读取（保证提交顺序）
+//! - 单读取者，从 `mpsc::UnboundedReceiver<SubmitRequest>` 取请求；用户消息按
+//!   会话车道串行（同会话 FIFO，跨会话并行），控制/视图请求即时执行
 //! - 与 notifier / bridge 并行运行，三者通过独立 channel 解耦
 //! - shutdown 信号触发时干净退出，不发残留请求
 
+use std::collections::HashMap;
+use std::future::Future;
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -17,10 +21,11 @@ use fluent_bundle::FluentValue;
 use peri_acp_types::messages::MessageContent;
 use ratatui::text::Line;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::acp_client::AcpTuiClient;
+use crate::acp_client::{AcpTuiClient, AdmissionGuard};
 use crate::i18n;
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
 use crate::kit::atoms::{
@@ -31,8 +36,55 @@ use crate::kit::submit_request::{
     ExportMode, SessionControlRequest, SubmitRequest, ViewActionRequest,
 };
 
+use super::submit_admission::{
+    CohortMode, CohortState, CohortTicket, Cohorts, LaneKey, SessionIdentity, SubmitAdmission,
+    register_admission,
+};
+
 /// 取消通知的等待上限；超时不把未知结果当作已停止。
 const CANCEL_RPC_TIMEOUT_SECS: u64 = 2;
+
+/// 单会话提交车道：同会话按入队顺序串行，跨会话互不等待。
+///
+/// 旧服务端不支持 user-input queue：运行期输入缓存于 INPUT_BUFFER，TurnDone
+/// 一次排空。通道只保证入队顺序；`tokio::spawn` 后每条提交由 runtime 并行
+/// 调度，相邻 prompt 可能反向到达服务端——本地气泡按原顺序显示，模型却按
+/// 另一顺序处理（#210）。车道以提交时的会话为键，让后一条等前一条结束；
+/// 新式 steer 走独立 consumer，不受这里的串行约束。
+pub(super) struct SubmitLanes<K> {
+    tails: HashMap<K, JoinHandle<()>>,
+}
+
+impl<K: Eq + Hash> SubmitLanes<K> {
+    pub(super) fn new() -> Self {
+        Self {
+            tails: HashMap::new(),
+        }
+    }
+
+    /// 把 `work` 追加到 `key` 车道末尾。
+    ///
+    /// 前一条失败、panic 或被取消都只结束它自己，不阻断后续消息。
+    pub(super) fn push(&mut self, key: K, work: impl Future<Output = ()> + Send + 'static) {
+        // 已完成车道的句柄没有等待价值，顺手收敛 map（会话切换会换 key）。
+        self.tails.retain(|_, tail| !tail.is_finished());
+        let previous = self.tails.remove(&key);
+        let handle = tokio::spawn(async move {
+            if let Some(previous) = previous
+                && let Err(error) = previous.await
+            {
+                warn!(error = %error, "kit submit_consumer: previous submit task aborted");
+            }
+            work.await;
+        });
+        self.tails.insert(key, handle);
+    }
+
+    /// `key` 车道是否还有未完成的提交。
+    pub(super) fn is_active(&self, key: &K) -> bool {
+        self.tails.get(key).is_some_and(|tail| !tail.is_finished())
+    }
+}
 
 /// 启动提交消费者后台任务。
 ///
@@ -49,6 +101,8 @@ pub fn spawn_submit_consumer(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         info!("kit submit_consumer: started");
+        let mut lanes: SubmitLanes<LaneKey> = SubmitLanes::new();
+        let mut cohorts: Cohorts = Cohorts::new();
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => {
@@ -66,22 +120,79 @@ pub fn spawn_submit_consumer(
                                 &request,
                                 SubmitRequest::SessionControl(SessionControlRequest::Clear)
                             );
-                            // Issue 2026-08-06：每请求 spawn 分离 task，不再串行 await。
-                            // 旧实现单飞阻塞在 prompt() RPC 上直到 turn 完成——挂起期间
-                            // （await_wake，bg 任务活跃）RPC 会挂住，后续用户输入在
-                            // SUBMIT_TX channel 中排队，表现为"输入石沉大海"。spawn 化后
-                            // 每个请求独立推进：挂起期间的新 prompt 立即发出 RPC，服务端
-                            // 走注入路径（见 host dispatch_prompt_turn），无需等待 bg 完成。
+                            // 用户消息按会话串行：旧队列排空后每条都要等前一条
+                            // 的 prompt 完成，否则模型侧顺序可能与气泡相反
+                            // （#210）。控制/视图请求保持即时执行——它们不是
+                            // 消息，不能被长 turn 拖住。
+                            //
+                            // 车道身份在入队时固定：切换/clear 后迟到的提交仍
+                            // 留在原车道，执行前由 prompt 准入校验拒绝，不会改投
+                            // 新会话（P1）。身份尚未落定的提交按 cohort 分道，
+                            // 切换期间的新输入不会复用旧会话的采纳槽（P2）。
+                            //
+                            // 车道只服务旧服务端的直接 prompt 路径；新式服务端
+                            // 由 session inbox 自管顺序与挂起注入，占用车道会让
+                            // 一个 suspended prompt 挡住后续 KeepGoing/remote
+                            // command，使其到不了注入路径。
+                            let (lane, admission) = match &request {
+                                SubmitRequest::AgentText { .. } | SubmitRequest::KeepGoing => {
+                                    if acp_client.supports_user_input_queue() {
+                                        // 新式服务端不占车道，但远程命令仍可能
+                                        // 在没有会话时提交：无稳定身份就记下决策
+                                        // 序号，稍后在守卫下建立/等待会话。
+                                        let binding = acp_client.stable_session_identity();
+                                        let unbound_switch_seq =
+                                            binding.is_none().then(|| acp_client.session_switch_seq());
+                                        (
+                                            None,
+                                            Some(SubmitAdmission {
+                                                binding,
+                                                cohort: None,
+                                                unbound_switch_seq,
+                                            }),
+                                        )
+                                    } else {
+                                        cohorts.retain(|key, _| {
+                                            lanes.is_active(&LaneKey::Cohort(*key))
+                                        });
+                                        let (lane, admission) =
+                                            register_admission(&acp_client, &mut cohorts, &lanes);
+                                        (Some(lane), Some(admission))
+                                    }
+                                }
+                                _ => (None, None),
+                            };
+                            // 测试需要确认某条提交已被 consumer 接收并完成分道，
+                            // 生产构建不编译。带上文本标签，避免并行用例互相干扰。
+                            #[cfg(test)]
+                            {
+                                let label = match &request {
+                                    SubmitRequest::AgentText { text, .. } => Some(text.clone()),
+                                    SubmitRequest::KeepGoing => Some("<keepgoing>".to_string()),
+                                    _ => None,
+                                };
+                                if let (Some(lane), Some(label)) = (lane.as_ref(), label) {
+                                    admission_probe::note_registration(lane, label);
+                                }
+                            }
                             let client = acp_client.clone();
                             let cwd = cwd.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = handle_submit(&client, &cwd, request).await {
+                            let work = async move {
+                                if let Err(e) =
+                                    handle_submit(&client, &cwd, request, admission.as_ref()).await
+                                {
                                     error!(error = %e, "kit submit_consumer: prompt failed");
                                     if clear_session {
                                         clear_loading_state();
                                     }
                                 }
-                            });
+                            };
+                            match lane {
+                                Some(key) => lanes.push(key, work),
+                                None => {
+                                    tokio::spawn(work);
+                                }
+                            }
                         }
                     }
                 }
@@ -96,12 +207,13 @@ async fn handle_submit(
     acp_client: &AcpTuiClient,
     cwd: &str,
     request: SubmitRequest,
+    admission: Option<&SubmitAdmission>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match request {
         SubmitRequest::AgentText { text, attachments } => {
-            handle_agent_text_submit(acp_client, cwd, text, attachments).await
+            handle_agent_text_submit(acp_client, cwd, text, attachments, admission).await
         }
-        SubmitRequest::KeepGoing => handle_keepgoing_submit(acp_client, cwd).await,
+        SubmitRequest::KeepGoing => handle_keepgoing_submit(acp_client, cwd, admission).await,
         SubmitRequest::SessionControl(SessionControlRequest::Clear) => {
             handle_clear_submit(acp_client, cwd).await
         }
@@ -154,7 +266,14 @@ async fn handle_agent_text_submit(
     cwd: &str,
     text: String,
     attachments: Vec<crate::kit::atoms::PendingAttachment>,
+    admission: Option<&SubmitAdmission>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // 入队时绑定的会话已切换，或所属 cohort 已作废：显式取消，不得改投新会话（P1）。
+    if admission.is_some_and(|admission| admission_invalidated(acp_client, admission)) {
+        notify_cancelled_submit();
+        return Ok(());
+    }
+
     if acp_client.supports_user_input_queue() && !crate::kit::input_area::is_remote_command(&text) {
         if let Err(error) = crate::kit::steer_state::enqueue(text, attachments) {
             warn!(error = %error, "user input enqueue failed; draft retained for recovery");
@@ -166,14 +285,22 @@ async fn handle_agent_text_submit(
         return Ok(());
     }
 
-    // The client re-checks Stable under its lifecycle operation gate. This is
-    // shared with startup ensure and waits behind a reserved resume/continue
-    // load, so a delayed producer cannot replace this first prompt's session.
-    info!(cwd = %cwd, "kit submit_consumer: ensuring session");
-    acp_client.ensure_session(cwd, None).await?;
-    let session_id = acp_client
-        .current_session_id()
-        .ok_or_else(|| std::io::Error::other("no active session after ensure"))?;
+    // 身份在本 cohort 内落定：ensure/切换与采纳共用 operation gate，落定后
+    // 不会再读到另一个 generation（P1）。
+    let Some(identity) = resolve_admission_identity(acp_client, cwd, admission).await? else {
+        notify_cancelled_submit();
+        return Ok(());
+    };
+    #[cfg(test)]
+    admission_probe::pause(&identity).await;
+    if acp_client.stable_session_identity().as_ref() != Some(&identity) {
+        // 身份在落定后被切走：本 cohort 剩余消息都必须取消，不能重新初始化。
+        if let Some(cohort) = admission.and_then(|admission| admission.cohort.as_ref()) {
+            cohort.cancel();
+        }
+        notify_cancelled_submit();
+        return Ok(());
+    }
 
     // Issue 2026-08-05 返工：在发送 PromptSubmitted 之前生成本轮 prompt 的
     // request_id（uuid v7）——PromptSubmitted 事件与 prompt RPC 必须携带同一
@@ -190,7 +317,7 @@ async fn handle_agent_text_submit(
                 event: AcpEventData::PromptSubmitted {
                     request_id: Some(request_id.clone()),
                 },
-                active_session_id: session_id.clone(),
+                active_session_id: identity.0.clone(),
             });
         } else {
             warn!("LOCAL_EVENT_TX not initialized, PromptSubmitted event dropped");
@@ -208,9 +335,20 @@ async fn handle_agent_text_submit(
     // 上传式附件（图片 base64）与文本同一 content 上行；无附件时逐字等价于
     // 原有的 MessageContent::text（不改变无附件提交的在线形态）。
     let content = crate::kit::steer_state::content_with_attachments(trimmed, &attachments);
-    acp_client.prompt(&content, Some(request_id.clone())).await.map_err(|e| {
-        warn!(session_id = %session_id, request_id = %request_id, error = ?e, "kit submit_consumer: prompt RPC failed");
-        reset_failed_prompt(&session_id, &request_id);
+    let result = acp_client
+        .prompt_in_session(&content, Some(request_id.clone()), &identity)
+        .await;
+    if let Err(e) = result {
+        warn!(session_id = %identity.0, request_id = %request_id, error = ?e, "kit submit_consumer: prompt RPC failed");
+        reset_failed_prompt(&identity.0, &request_id);
+        if e.code == crate::acp_client::SESSION_BINDING_CHANGED_CODE {
+            // 准入时身份已变化：显式取消并反馈，绝不改投。
+            if let Some(cohort) = admission.and_then(|admission| admission.cohort.as_ref()) {
+                cohort.cancel();
+            }
+            notify_cancelled_submit();
+            return Ok(());
+        }
         if e.code == crate::kit::RECOVERY_EXECUTION_BLOCKED_CODE {
             // 非 steer 的直接提交只有日志；恢复阻断必须让用户看到原因。
             // 该路径没有把文本放回输入框，文案不能声称「原稿已保留」。
@@ -222,9 +360,86 @@ async fn handle_agent_text_submit(
                 until: peri_time::monotonic_now() + Duration::from_secs(15),
             }));
         }
-        Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-    })?;
+        return Err(Box::new(e));
+    }
     Ok(())
+}
+
+/// 提交的准入是否已经失效：所属 cohort 已作废，或绑定身份已不是当前稳定会话。
+fn admission_invalidated(acp_client: &AcpTuiClient, admission: &SubmitAdmission) -> bool {
+    if admission
+        .cohort
+        .as_ref()
+        .is_some_and(CohortTicket::is_cancelled)
+    {
+        return true;
+    }
+    admission
+        .binding
+        .as_ref()
+        .is_some_and(|binding| acp_client.stable_session_identity().as_ref() != Some(binding))
+}
+
+/// 解析本次提交实际要写入的会话身份。
+///
+/// 已绑定提交直接沿用入队身份；尚未落定的提交由所属 cohort 的首条成员在
+/// 生命周期同步内确定完整身份并写回 cohort，后续成员复用它。
+/// `None` 表示身份已失效（切换取代/落定失败），调用方必须显式取消。
+async fn resolve_admission_identity(
+    acp_client: &AcpTuiClient,
+    cwd: &str,
+    admission: Option<&SubmitAdmission>,
+) -> Result<Option<SessionIdentity>, Box<dyn std::error::Error + Send + Sync>> {
+    let Some(admission) = admission else {
+        // 无准入信息（直接调用方）：按首次提交处理，身份不再跨临界区重读。
+        return Ok(Some(acp_client.ensure_session_identity(cwd, None).await?));
+    };
+    if let Some(binding) = &admission.binding {
+        return Ok(Some(binding.clone()));
+    }
+    let Some(cohort) = &admission.cohort else {
+        // 新式服务端不占车道：远程命令在入队时的决策守卫下建立/等待会话，
+        // 期间发生切换则取消，不改投（P1）。
+        return match admission.unbound_switch_seq {
+            Some(switch_seq) => Ok(acp_client
+                .resolve_unbound_admission(cwd, switch_seq)
+                .await?),
+            None => Ok(None),
+        };
+    };
+    match &*cohort.state.lock().unwrap() {
+        CohortState::Adopted(identity) => return Ok(Some(identity.clone())),
+        CohortState::Cancelled => return Ok(None),
+        CohortState::Pending => {}
+    }
+
+    info!(cwd = %cwd, "kit submit_consumer: resolving session admission");
+    let allow_create = matches!(cohort.mode, CohortMode::Establish);
+    let guard =
+        AdmissionGuard::new(cohort.switch_seq, allow_create).with_operation(cohort.operation);
+    let mut resolved = None;
+    acp_client
+        .resolve_session_admission(cwd, guard, |identity| {
+            let mut state = cohort.state.lock().unwrap();
+            match identity {
+                Some(identity) => {
+                    resolved = Some(identity.clone());
+                    *state = CohortState::Adopted(identity.clone());
+                }
+                None => *state = CohortState::Cancelled,
+            }
+        })
+        .await?;
+    Ok(resolved)
+}
+
+/// 会话切换导致排队提交被取消时的用户可见反馈。
+fn notify_cancelled_submit() {
+    *NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
+        message: i18n::tr("submit-cancelled-session-changed"),
+        until: peri_time::monotonic_now() + Duration::from_secs(10),
+    });
+    RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
 }
 
 /// keepgoing 提交：向 ACP 发送空白 user prompt。
@@ -237,10 +452,29 @@ async fn handle_agent_text_submit(
 async fn handle_keepgoing_submit(
     acp_client: &AcpTuiClient,
     _cwd: &str,
+    admission: Option<&SubmitAdmission>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if !acp_client.has_session() {
+    if admission.is_some_and(|admission| admission_invalidated(acp_client, admission)) {
+        notify_cancelled_submit();
+        return Ok(());
+    }
+    let adopted = admission
+        .and_then(|admission| admission.cohort.as_ref())
+        .and_then(CohortTicket::adopted);
+    let expected = admission
+        .and_then(|admission| admission.binding.clone())
+        .or(adopted)
+        .or_else(|| acp_client.stable_session_identity());
+    let Some(identity) = expected else {
         // 无会话（或无可继续的轮次）时 no-op——按钮仅在有 summary 时显示，此为防御分支
         info!("kit submit_consumer: keepgoing ignored (no active session)");
+        return Ok(());
+    };
+    if acp_client.stable_session_identity().as_ref() != Some(&identity) {
+        if let Some(cohort) = admission.and_then(|admission| admission.cohort.as_ref()) {
+            cohort.cancel();
+        }
+        notify_cancelled_submit();
         return Ok(());
     }
 
@@ -248,9 +482,6 @@ async fn handle_keepgoing_submit(
     // 都是新 turn）——修复 v1 在 keepgoing 场景（无 LocalUserBubble、代际不变）
     // 下 stale 判定失效的漏洞。
     let request_id = uuid::Uuid::now_v7().to_string();
-    let session_id = acp_client
-        .current_session_id()
-        .ok_or_else(|| std::io::Error::other("no active session for keepgoing"))?;
 
     // 与 handle_agent_text_submit 相同的 loading 状态切换：PromptSubmitted 事件
     // 由 bridge 统一管理 phase/variant/is_loading 状态。
@@ -261,7 +492,7 @@ async fn handle_keepgoing_submit(
             event: AcpEventData::PromptSubmitted {
                 request_id: Some(request_id.clone()),
             },
-            active_session_id: session_id.clone(),
+            active_session_id: identity.0.clone(),
         });
     } else {
         warn!("LOCAL_EVENT_TX not initialized, PromptSubmitted event dropped");
@@ -273,14 +504,25 @@ async fn handle_keepgoing_submit(
         "submit_consumer: keepgoing prompt submitted, LOADING_EPOCH incremented",
     );
 
-    acp_client
-        .prompt(&MessageContent::text(""), Some(request_id.clone()))
+    if let Err(e) = acp_client
+        .prompt_in_session(
+            &MessageContent::text(""),
+            Some(request_id.clone()),
+            &identity,
+        )
         .await
-        .map_err(|e| {
-            warn!(session_id = %session_id, request_id = %request_id, error = ?e, "kit submit_consumer: keepgoing prompt RPC failed");
-            reset_failed_prompt(&session_id, &request_id);
-            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-        })?;
+    {
+        warn!(session_id = %identity.0, request_id = %request_id, error = ?e, "kit submit_consumer: keepgoing prompt RPC failed");
+        reset_failed_prompt(&identity.0, &request_id);
+        if e.code == crate::acp_client::SESSION_BINDING_CHANGED_CODE {
+            if let Some(cohort) = admission.and_then(|admission| admission.cohort.as_ref()) {
+                cohort.cancel();
+            }
+            notify_cancelled_submit();
+            return Ok(());
+        }
+        return Err(Box::new(e));
+    }
     Ok(())
 }
 
@@ -508,6 +750,62 @@ pub fn spawn_cancel_consumer(
             }
         }
     })
+}
+
+/// 测试用可控断点：在身份落定与准入校验之间暂停指定会话的提交。
+///
+/// 覆盖「ensure 选 A 之后、发送之前切换/重载」的窗口；生产构建不编译。
+#[cfg(test)]
+mod admission_probe {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use tokio::sync::{mpsc, oneshot};
+
+    static PROBE: Mutex<Option<(String, mpsc::UnboundedSender<oneshot::Sender<()>>)>> =
+        Mutex::new(None);
+
+    /// 每条提交完成分道后通告一次，供时序回归确认 consumer 已接收。
+    static REGISTRATIONS: Mutex<Option<mpsc::UnboundedSender<(String, super::LaneKey)>>> =
+        Mutex::new(None);
+
+    pub(super) fn install(session_id: &str, tx: mpsc::UnboundedSender<oneshot::Sender<()>>) {
+        *PROBE.lock().unwrap() = Some((session_id.to_string(), tx));
+    }
+
+    pub(super) fn clear() {
+        *PROBE.lock().unwrap() = None;
+    }
+
+    pub(super) fn install_registration_probe(tx: mpsc::UnboundedSender<(String, super::LaneKey)>) {
+        *REGISTRATIONS.lock().unwrap() = Some(tx);
+    }
+
+    pub(super) fn clear_registration_probe() {
+        *REGISTRATIONS.lock().unwrap() = None;
+    }
+
+    pub(super) fn note_registration(lane: &super::LaneKey, label: String) {
+        let probe = REGISTRATIONS.lock().unwrap();
+        if let Some(tx) = probe.as_ref() {
+            let _ = tx.send((label, lane.clone()));
+        }
+    }
+
+    pub(super) async fn pause(identity: &super::SessionIdentity) {
+        let probe = PROBE.lock().unwrap().clone();
+        let Some((session_id, tx)) = probe else {
+            return;
+        };
+        if session_id != identity.0 {
+            return;
+        }
+        let (release, wait) = oneshot::channel();
+        if tx.send(release).is_ok() {
+            // 测试挂死比断言失败更难排查：断点自带上限。
+            let _ = tokio::time::timeout(Duration::from_secs(5), wait).await;
+        }
+    }
 }
 
 #[cfg(test)]

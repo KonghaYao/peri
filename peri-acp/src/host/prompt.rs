@@ -22,8 +22,10 @@ use tracing::info;
 use peri_agent::session::exec::executor_helpers::CommandLookupFn;
 
 mod models;
+mod outcome;
 mod stage;
 mod telemetry;
+pub(super) use outcome::run_prompt_with_outcome;
 pub(crate) use stage::build_compact_hooks;
 
 use super::SharedSessions;
@@ -192,9 +194,10 @@ pub(crate) async fn approve_scheduled_trigger(
     )
 }
 
-#[allow(clippy::too_many_arguments)] // Shared host execution wiring plus optional Agent-owned input ticket.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)] // Test entry preserving the response-only host contract.
 pub(crate) async fn run_prompt(
-    mut params: Value,
+    params: Value,
     sessions: &SharedSessions,
     deployment: &super::AcpServerConfig,
     transport: &Arc<dyn crate::transport::AcpTransport>,
@@ -203,20 +206,7 @@ pub(crate) async fn run_prompt(
     continuation: bool,
     input_ticket: Option<super::user_input::UserInputRun>,
 ) -> Result<Value, AcpError> {
-    let notifications = super::execution::ExecutionNotifications::from_params(&mut params)?;
-    let session_id = super::extract_session_id(&params, "").to_owned();
-    let attempt_activation = match deployment.session_manager.get_session(&session_id) {
-        Some(runtime) => {
-            let activation = Arc::clone(&runtime.activation);
-            let queue = runtime.v2_message_queue.clone();
-            let result_watermark = runtime.async_result_mailbox.admission_watermark();
-            drop(runtime);
-            let watermark = queue.admission_watermark().await.unwrap_or(None);
-            Some((activation, watermark, result_watermark))
-        }
-        None => None,
-    };
-    let result = run_prompt_attempt(
+    run_prompt_with_outcome(
         params,
         sessions,
         deployment,
@@ -225,20 +215,9 @@ pub(crate) async fn run_prompt(
         cont_tx,
         continuation,
         input_ticket,
-        &notifications,
-        attempt_activation.as_ref(),
     )
-    .await;
-    if result.is_err() {
-        if let Some((activation, watermark, result_watermark)) = &attempt_activation {
-            activation.record_failed_attempt(watermark.clone());
-            activation.record_failed_result_watermark(*result_watermark);
-        }
-        notifications
-            .finish_early(&session_id, "error", deployment, transport)
-            .await;
-    }
-    result
+    .await
+    .map(|outcome| outcome.response)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -257,7 +236,7 @@ async fn run_prompt_attempt(
         Option<peri_acp_types::session::MqWatermark>,
         u64,
     )>,
-) -> Result<Value, AcpError> {
+) -> Result<outcome::PromptOutcome, AcpError> {
     // Borrow deployment services; turn-owned callbacks clone only their existing handles.
     // Provider/config snapshots remain below, after the session snapshot is captured.
     let provider = &deployment.provider;
@@ -301,11 +280,14 @@ async fn run_prompt_attempt(
     // Create cancel token and register in sessions.
     // `AgentCancellationToken` 即 `tokio_util::sync::CancellationToken` 别名
     // （peri-agent re-export；ACP 协议面直接使用底层类型，不经业务 crate）。
+    //
+    // 令牌在准入段（用户 prompt / 队列输入）或续跑提交段（epoch 入口）就与关闭
+    // 闸门同锁发布；这里只复用，绝不能再新建独立令牌，否则 close 取消不到本轮，
+    // 已准入的轮次会在关闭等锁期间开跑（#196 P2）。
     let cancel = {
         let sessions = sessions.lock().await;
         sessions
             .get(&session_id)
-            .filter(|state| continuation && state.continuation_in_flight)
             .and_then(|state| state.cancel_token.clone())
             .unwrap_or_default()
     };
@@ -316,7 +298,10 @@ async fn run_prompt_attempt(
                 .attach_attempt(&run.ticket, cancel.clone())
                 .await
             {
-                return Ok(Value::Null);
+                return Ok(outcome::PromptOutcome {
+                    response: Value::Null,
+                    execution_binding: None,
+                });
             }
             run.ticket.clone()
         }
@@ -396,6 +381,16 @@ async fn run_prompt_attempt(
         }
         if state.event_health().dirty {
             tracing::warn!(session_id = %session_id, "会话事件视图仍需重同步；开始新轮次不会清除丢失记录");
+        }
+        // 已准入但尚未开跑：关闭闸门必须在这里终止本轮，不能再把正文交给
+        // 执行器。令牌与闸门在准入段同锁发布，close 已经取消过它；继续开跑会让
+        // close 等一个它以为已经中断的 turn（#196 P2）。轮次级 Stop 不走这里：
+        // 已取消的令牌交给执行器，按既有语义收尾为 cancelled 而不是请求错误。
+        if state.closing || state.close_in_flight > 0 {
+            return Err(AcpError::new(
+                -32010,
+                "Session is closing before prompt execution",
+            ));
         }
         state.cancel_token = Some(cancel.clone());
         // 正文所有权在短锁内移交给执行器：Host 不再保留一份“以防万一”的全文。
@@ -485,19 +480,13 @@ async fn run_prompt_attempt(
     compact_config.apply_env_overrides();
     let retry_events = pool.lock().retry_events.clone();
 
-    let models::ModelFactories {
-        get_cached_llm,
-        fresh_auxiliary_model,
-        store_llm,
-        primary_llm_factory,
-        auto_classifier_factory,
-        subagent_llm_factory,
-    } = models::build_model_factories(
+    let model_factories = models::build_model_factories(
         &provider_snapshot,
         &peri_config_snapshot,
         &pool,
         &retry_events,
         &session_id,
+        deployment.model_transport_route.clone(),
     );
 
     // 事件端口（Controller 适配）
@@ -556,13 +545,13 @@ async fn run_prompt_attempt(
         effective_context_window,
         language,
         compact_config,
-        get_cached_llm,
-        fresh_auxiliary_model,
-        store_llm,
+        get_cached_llm: model_factories.get_cached_llm,
+        fresh_auxiliary_model: model_factories.fresh_auxiliary_model,
+        store_llm: model_factories.store_llm,
         retry_events: Some(Arc::new(retry_events)),
-        primary_llm_factory,
-        auto_classifier_factory,
-        subagent_llm_factory,
+        primary_llm_factory: model_factories.primary_llm_factory,
+        auto_classifier_factory: model_factories.auto_classifier_factory,
+        subagent_llm_factory: model_factories.subagent_llm_factory,
         session_id: session_id.clone(),
         cancel,
         broker,
@@ -705,6 +694,7 @@ async fn run_prompt_attempt(
 
     let compact_committed =
         result.history_replaced_by_compaction && !result.persistence_inconsistent;
+    let execution_binding = result.execution_binding.clone();
     let response = finish_prompt_turn(
         sessions,
         &session_id,
@@ -717,7 +707,10 @@ async fn run_prompt_attempt(
         // 幂等轻量通知：只发给仍有活动 V1 window ticket 的会话；失败不影响 durable commit。
         super::history_window::notify_commit_if_open(sessions, &session_id).await;
     }
-    Ok(response)
+    Ok(outcome::PromptOutcome {
+        response,
+        execution_binding,
+    })
 }
 
 /// ReloadRequired 热态在下次使用前从权威存储恢复有效上下文。

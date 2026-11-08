@@ -187,7 +187,7 @@ fn dispatch_wizard_event(event: Event) -> EventResult {
 
 // Durable save and runtime activation are separate stages. The wizard stays
 // open on either failure; only successful activation publishes the shared config.
-async fn finish_setup(draft: SetupWizardState) {
+pub(crate) async fn finish_setup(draft: SetupWizardState) {
     let from_command = draft.from_command;
     let saved = tokio::task::spawn_blocking(move || save_setup(&draft)).await;
     let config = match saved {

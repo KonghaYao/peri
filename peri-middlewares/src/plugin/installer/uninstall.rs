@@ -4,7 +4,7 @@ use std::{
 };
 
 use super::{
-    atomic_write_settings, get_marketplace_manifest, match_project_path,
+    atomic_write_settings, get_marketplace_manifest, install::declared_version, match_project_path,
     remove_from_enabled_plugins, sanitize_plugin_id, InstallerError, PluginUpdateInfo,
 };
 use crate::plugin::{
@@ -127,11 +127,10 @@ pub async fn check_updates(
 
         let manifest = &manifest_cache[marketplace];
         if let Some(latest) = manifest.plugins.iter().find(|p| p.name == name) {
-            let latest_version = latest
-                .sha
-                .as_ref()
-                .map(|s| s.chars().take(7).collect::<String>())
-                .unwrap_or_else(|| latest.version.clone());
+            // 未声明版本的条目无法与已安装时间戳比较，不报告更新。
+            let Some(latest_version) = declared_version(latest) else {
+                continue;
+            };
 
             if latest_version != plugin.version {
                 result.push(PluginUpdateInfo {

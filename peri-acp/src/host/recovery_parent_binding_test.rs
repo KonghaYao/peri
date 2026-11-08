@@ -508,15 +508,28 @@ async fn live_idle_parent_is_woken_by_the_recovered_result() {
     );
 }
 
-/// 结果固定投给持久父链上的直接父；显式 resume 的调用者不会改写收件人。
+/// 显式 resume 的实际调用者是收件人，历史父链保持不变。
 #[tokio::test]
-async fn recovery_result_targets_persistent_direct_parent_not_the_resumer() {
+async fn recovery_result_targets_saved_resumer_without_reparenting() {
     let harness = RecoveryHarness::new().await;
     let root = harness.thread_id.clone();
-    // B 只是同树的兄弟；C 的持久父是 A。B 显式 resume C 不改写 parent_thread_id，
-    // 因此崩溃后的恢复结果仍回到 A（直接父权威，不伪造 caller 目标）。
+    // C 最初由 A 创建，本次由 B resume，历史父链仍是 A。
     harness.add_child(&root, "child-b", &root).await;
     harness.add_child(&root, "child-c", &root).await;
+    harness
+        .cfg
+        .session_resources
+        .update_session_meta(
+            &"child-c".to_owned(),
+            &peri_acp_types::session_resources::SessionMetaPatch {
+                config: Some(Some(
+                    peri_acp_types::thread::with_completion_target(None, Some("child-b")).unwrap(),
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     harness.set_working("child-c").await;
     let recovery = harness.recovery();
 
@@ -528,7 +541,14 @@ async fn recovery_result_targets_persistent_direct_parent_not_the_resumer() {
         .expect("child session is published")
         .take_recovery_parent()
         .expect("recovery delivery must be retained");
-    assert_eq!(delivery.parent, ThreadId::from(root.clone()));
+    assert_eq!(delivery.parent, ThreadId::from("child-b"));
+    assert_eq!(
+        settled_meta(&harness, "child-c")
+            .await
+            .parent_thread_id
+            .as_deref(),
+        Some(root.as_str())
+    );
     deliver_child_turn(
         &harness.cfg,
         &harness.sessions,
@@ -539,9 +559,138 @@ async fn recovery_result_targets_persistent_direct_parent_not_the_resumer() {
         },
     )
     .await;
-    assert_eq!(parent_notices(&harness, &root).await.len(), 1);
+    assert_eq!(parent_notices(&harness, "child-b").await.len(), 1);
+    assert!(parent_notices(&harness, &root).await.is_empty());
+}
+
+#[tokio::test]
+async fn independent_recovered_child_keeps_inbox_and_survives_parent_stop() {
+    let mut harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-b", &root).await;
+    harness
+        .cfg
+        .session_resources
+        .update_session_meta(
+            &"child-b".to_owned(),
+            &peri_acp_types::session_resources::SessionMetaPatch {
+                cancel_policy: Some(CancelPolicy::Independent),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    harness.set_working("child-b").await;
+    harness.load_session("child-b").await;
+    let token = tokio_util::sync::CancellationToken::new();
+    harness
+        .sessions
+        .lock()
+        .await
+        .get_mut("child-b")
+        .unwrap()
+        .cancel_token = Some(token.clone());
+    harness
+        .cfg
+        .session_manager
+        .get_session("child-b")
+        .unwrap()
+        .record_recovery_parent(root.clone(), None);
     assert!(
-        parent_notices(&harness, "child-b").await.is_empty(),
-        "不得把结果伪造给 resumer"
+        register_recovered_child_for_turn(&harness.cfg, &harness.sessions, "child-b")
+            .await
+            .unwrap()
+    );
+    let parent = harness.cfg.session_manager.get_session(&root).unwrap();
+    let manager = parent.task_manager.clone();
+    assert_eq!(
+        parent.active_agents.get("child-b").unwrap().cancel_policy,
+        CancelPolicy::Independent
+    );
+    drop(parent);
+    let concrete = manager
+        .as_any()
+        .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
+        .unwrap();
+    assert!(concrete
+        .send_subagent_message("child-b", Some("continue with this instruction"))
+        .await
+        .unwrap()
+        .is_some());
+    assert!(manager
+        .snapshot()
+        .tasks
+        .iter()
+        .any(|task| task.child_thread_id.as_deref() == Some("child-b")));
+    let child = harness.cfg.session_manager.get_session("child-b").unwrap();
+    let queue = child.v2_message_queue.clone();
+    drop(child);
+    assert!(queue
+        .snapshot()
+        .await
+        .unwrap()
+        .iter()
+        .any(|entry| entry.source == peri_acp_types::session::MessageSource::SystemInjected));
+    let outcome = {
+        let mut states = harness.sessions.lock().await;
+        crate::host::notify::handle_notification(
+            "session/cancel",
+            &serde_json::json!({"sessionId": root}),
+            &mut states,
+            &harness.cfg,
+        )
+        .await
+    };
+    assert!(!token.is_cancelled());
+    assert!(!outcome
+        .stop_targets
+        .iter()
+        .any(|target| target.thread_id == "child-b"));
+    assert_eq!(
+        settled_meta(&harness, "child-b").await.work_state,
+        WorkState::Working
+    );
+    let delivery = harness
+        .cfg
+        .session_manager
+        .get_session("child-b")
+        .unwrap()
+        .take_recovery_parent()
+        .unwrap();
+    finish_recovered_child_without_result(&harness.cfg, &delivery);
+    assert!(concrete
+        .send_subagent_message("child-b", Some("after closure"))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn missing_completion_target_does_not_guess_the_historical_parent() {
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-b", &root).await;
+    harness
+        .cfg
+        .session_resources
+        .update_session_meta(
+            &"child-b".to_owned(),
+            &peri_acp_types::session_resources::SessionMetaPatch {
+                config: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    harness.set_working("child-b").await;
+    let report = harness.recovery().enter(&root).await.unwrap();
+    assert!(!report.recovered.contains(&"child-b".to_owned()));
+    assert!(report
+        .failures
+        .iter()
+        .any(|failure| failure.detail.contains("completion target")));
+    assert_eq!(
+        settled_meta(&harness, "child-b").await.work_state,
+        WorkState::Working
     );
 }

@@ -886,6 +886,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         host_task_spawner,
         mcp_task_owner: Some(Box::new(mcp_task_owner)),
         provider: Arc::new(RwLock::new(provider)),
+        model_transport_route: None,
         peri_config,
         permission_mode,
         cron_scheduler,

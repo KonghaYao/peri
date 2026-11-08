@@ -53,6 +53,7 @@ pub(super) fn attach_subagent_host(
             task_manager: Some(task_manager.clone()),
             bg_event_sender: Some(bg_event_tx),
             on_bg_complete: on_bg_complete.clone(),
+            completion_target: thread_persistence.parent_thread_id.clone(),
             register_runtime: thread_persistence.register_runtime.clone(),
             deregister_runtime: thread_persistence.deregister_runtime.clone(),
             // SubAgent Langfuse bridge：注入工厂构造独立 LangfuseBridge 实例

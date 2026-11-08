@@ -90,6 +90,7 @@ fn make_session_state(armed: bool, epoch: u64) -> SessionState {
         cwd: "/tmp".to_string(),
         environment: None,
         closing: false,
+        close_in_flight: 0,
         context_ownership: crate::host::ContextOwnership::Resident,
         history_payloads: vec![],
         structure_version: 0,

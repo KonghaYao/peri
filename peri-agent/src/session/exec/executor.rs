@@ -46,7 +46,8 @@
 //!   （`cmd.execute` 与 `cancel.cancelled()` 仍按原 biased 顺序，二者均触发 push_done）
 //! - `build_and_execute_agent_v2` 末尾的 cancel cascade 仍在循环失败后触发，
 //!   `LoopResult::Error` 分支先发 `AgentExecutionFailed` 事件再判断 stop_reason
-//! - `collect_result` 严格 "close → wait_for_pump(10s timeout) → drain recall"
+//! - `collect_result` 严格 "close → wait_for_pump(10s timeout) → drain recall"；
+//!   泵未送达终态时本轮按失败结算（done 缺失不能报告完成）
 
 use std::sync::Arc;
 
@@ -251,6 +252,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
             .filter_map(|payload| payload.as_message().cloned())
             .collect();
         return PromptResult {
+            execution_binding: None,
             persisted_payloads: history_payloads,
             messages,
             ok: true,
@@ -300,6 +302,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
                 .filter_map(|payload| payload.as_message().cloned())
                 .collect();
             return PromptResult {
+                execution_binding: None,
                 persisted_payloads: history_payloads,
                 messages,
                 ok: false,

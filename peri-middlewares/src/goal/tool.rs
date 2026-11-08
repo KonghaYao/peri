@@ -76,10 +76,12 @@ impl GoalTool {
             // 验证请求继承 auxiliary model 的输出预算，不用请求级 max_tokens
             // 压小它：reasoning 模型的 thinking 与正文共享输出预算，上限过小
             // 时 thinking 会先耗尽预算，正文为空，验证必然解析失败。
-            let request = ModelRequest::new(vec![
+            let mut request = ModelRequest::new(vec![
                 ModelMessage::system_text(Self::VERIFY_SYSTEM_PROMPT),
                 ModelMessage::user_text(user_content),
             ]);
+            request.call_context =
+                peri_agent::agent::model_call::tool_model_call_context("goal-verify");
 
             let response = model.complete(request, CancellationToken::new()).await?;
             let raw = response.assistant_text().unwrap_or_default();

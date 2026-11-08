@@ -3,9 +3,9 @@ use crate::kit::atoms::{self, CONFIRM_PAYLOAD};
 use peri_acp::transport::{
     AcpTransport,
     mpsc::{MpscServerTransport, mpsc_transport_pair},
-    types::{IncomingMessage, RequestId},
+    types::{AcpError, IncomingMessage, RequestId},
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::time::Duration;
 
 const TARGET: &str = "target-thread";

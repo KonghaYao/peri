@@ -150,6 +150,7 @@ pub(super) async fn build_subagent_session_v2(
         });
     session.set_async_result_mailbox(mailbox);
     host.parent_thread_id = Some(child_thread_id.clone());
+    host.completion_target = Some(child_thread_id.clone());
     host.on_bg_complete = Some(crate::session::bg_complete::task_bg_complete_callback(
         crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue_with_mailbox(
             session.queue().clone(),

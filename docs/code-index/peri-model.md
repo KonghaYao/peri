@@ -28,6 +28,7 @@ Emscripten 路径：`src/transport/http.rs` 复用 reqwest native/Hyper HTTP/SSE
 | 改观测/长度边界 | `src/runtime/request.rs`：`PreparedModelRequest`、`observe`、`ObservedProviderBody`、`ModelRuntimeConfig` | 配置显式构造，不读环境变量；`AnthropicConfig::new`/`OpenAiConfig::new` | 键、路径、URL/query、data URI 和 config Debug 保留原始内容，不做内容脱敏；观测级别和长度约束独立，契约 ARC-SECRET-001 |
 | 改错误类型/分类 | `src/runtime/error.rs`：`ModelError`、`ProtocolErrorKind` | `ModelError::protocol`、`http_status`、`with_message`、`with_body`、`with_causes` | 实际错误正文和原因链与分类共存；cancelled 与 interrupted 语义区分，协议形状与长度校验不做敏感内容判断 |
 | 改模型诊断 / 重试耗尽事实 | `src/runtime/error.rs` + `src/runtime/retry.rs` | `ModelErrorDiagnostic`；`ModelError::diagnostic`；`RetryObservation::diagnostic`；`retry_exhausted_with_context` | 保留 category/status/provider/request-id/transport/protocol/retry 事实及 message/body/causes；重试与中断转换不得丢弃原始原因，字段内容不脱敏；无信息时为 None，枚举使用 snake_case |
+| 录制／回放传输 | `src/protocol/call_context.rs`、`src/runtime/route.rs`、`src/transport/route.rs` | `ModelRequest.call_context`、`ModelRuntimeConfig::with_transport_route` | 请求构建完成后才改物理 URL；保留逻辑 provider 身份。调用上下文不序列化到模型请求；每次实际发送分配 attempt。缺少上下文时失败，不回落直连。 |
 
 ### Responses 新增入口
 

@@ -124,3 +124,26 @@ fn test_is_empty() {
     tb.on_tool_start("c1", "Read", serde_json::json!({}), &dummy_parent());
     assert!(!tb.is_empty());
 }
+
+/// [回归测试] 完成记录与 flush 应沿用输入及输出的分配，避免批次额外保留深拷贝。
+#[test]
+fn test_completed_tool_moves_payload_into_flush() {
+    let mut batch = ToolBatch::new();
+    let input = serde_json::json!({"content": "input".repeat(16_384)});
+    let input_ptr = input["content"].as_str().unwrap().as_ptr();
+    batch.on_tool_start("call", "Write", input, "parent");
+    let output = "output".repeat(16_384);
+    let completed = batch.on_tool_end("call", &output, false).unwrap();
+    let output_ptr = completed.output.as_ptr();
+    assert_eq!(
+        completed.input["content"].as_str().unwrap().as_ptr(),
+        input_ptr
+    );
+    let flush = batch.flush();
+    assert_eq!(
+        flush.tools[0].input["content"].as_str().unwrap().as_ptr(),
+        input_ptr
+    );
+    assert_eq!(flush.tools[0].output.as_ptr(), output_ptr);
+    assert_eq!(flush.tools[0].output, output);
+}

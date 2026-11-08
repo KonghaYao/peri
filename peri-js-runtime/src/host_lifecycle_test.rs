@@ -234,6 +234,50 @@ async fn test_cancelled_kill_retries_same_owner_for_redirected_descendant() {
     assert!(stopped, "kill 成功返回前后代必须已停止");
 }
 
+/// [回归测试] kill 不得无限期等待无人消费的入站队列。
+///
+/// workflow/start 应答前 runner 持有 receiver 但不消费；Node 输出超过队列容量后
+/// stdout reader 停在阻塞 send，回收不能依赖消费者继续读取。
+#[tokio::test]
+async fn test_kill_completes_when_incoming_queue_is_full() {
+    let directory = tempfile::tempdir().unwrap();
+    let ready = directory.path().join("ready");
+    // 300 > mpsc 容量 256：第 257 帧起 reader 必然阻塞在 send。
+    let total = 300;
+    let script = format!(
+        r#"const fs = require('node:fs');
+const ready = {};
+const total = {};
+let flushed = 0;
+for (let i = 0; i < total; i++) {{
+  process.stdout.write('{{"jsonrpc":"2.0","method":"fixture/fill","params":{{"i":' + i + '}}}}\n', () => {{
+    flushed += 1;
+    if (flushed === total) fs.writeFileSync(ready, 'ready');
+  }});
+}}
+setInterval(() => {{}}, 1000);"#,
+        serde_json::to_string(&ready).unwrap(),
+        total
+    );
+    let host = JsExecutionHost::spawn(JsProcessSpec::new("node", vec!["-e".into(), script]))
+        .expect("local Node fixture must spawn");
+    // 接收端存在但不消费：等价于 runner 在 start 应答前持有 receiver 的状态。
+    let _incoming = host.take_incoming().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while tokio::fs::metadata(&ready).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("fixture must flush more frames than the inbound queue holds");
+
+    let killed = tokio::time::timeout(Duration::from_secs(3), host.kill()).await;
+    assert!(
+        matches!(killed, Ok(Ok(()))),
+        "kill 不得因无人消费的入站队列而等待 reader: {killed:?}"
+    );
+}
+
 impl Drop for ExitedLeader {
     fn drop(&mut self) {
         if !self.cleaned {

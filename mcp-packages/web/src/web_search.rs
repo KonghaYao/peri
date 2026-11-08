@@ -1,11 +1,12 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use peri_agent::agent::async_tasks::truncate_bytes;
 use peri_agent::tools::BaseTool;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::web_common::WEB_CREDIBILITY_WARNING;
+use super::web_common::{read_body_capped, WEB_CREDIBILITY_WARNING};
 
 /// Tavily 兼容搜索后端默认地址（MCP 实例 env 未提供时使用）。
 const TAVILY_BASE_URL: &str = "https://tavily.claude-code-best.win";
@@ -21,6 +22,15 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 单条结果文本截断上限（字符数）
 const MAX_RESULT_TEXT_CHARS: usize = 500;
+
+/// 搜索 API 响应体上限（客户端强制）。
+///
+/// 合法响应远小于此值：最多 20 条结果，每条正文只展示 500 字符。该上限只防
+/// 失控后端返回超大响应，不约束正常结果。
+const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// 非 2xx 错误正文进入工具结果的显示上限。
+const MAX_ERROR_BODY_DISPLAY_BYTES: usize = 4 * 1024;
 
 /// Tavily /search 响应结构
 #[derive(Deserialize)]
@@ -223,19 +233,23 @@ impl BaseTool for WebSearchTool {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
+            let body = read_body_capped(resp, MAX_RESPONSE_BYTES, "Search").await?;
+            let text = String::from_utf8_lossy(&body);
+            let text = truncate_bytes(&text, MAX_ERROR_BODY_DISPLAY_BYTES);
             return Err(format!("Search API returned HTTP {status}: {text}").into());
         }
 
-        let tavily: TavilySearchResponse = resp
-            .json()
-            .await
+        let body = read_body_capped(resp, MAX_RESPONSE_BYTES, "Search").await?;
+        let tavily: TavilySearchResponse = serde_json::from_slice(&body)
             .map_err(|e| format!("Failed to parse search response: {e}"))?;
 
+        // `num_results` 只是请求参数，后端可能忽略并返回更多条目；只渲染请求数量，
+        // 避免响应体上限之外再出现无界的输出体积。
         let results: Vec<SearchResult> = tavily
             .results
             .into_iter()
             .filter(|item| !item.url.is_empty())
+            .take(max_results)
             .map(|item| SearchResult {
                 title: item.title,
                 url: item.url,

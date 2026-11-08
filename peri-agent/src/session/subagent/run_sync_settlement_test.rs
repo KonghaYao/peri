@@ -156,9 +156,31 @@ async fn handoff_completion_settles_done_idle_and_single_result() {
 #[tokio::test(start_paused = true)]
 async fn handoff_cancel_maps_to_cancelled_stopped() {
     let fixture = fixture();
-    fixture.session.config().cancel_token.cancel();
-    let (completion, delivered) = run_to_pending(&fixture, Ok(ChildRunOutcome::Interrupted)).await;
+    let delivered = Arc::new(parking_lot::Mutex::new(None));
+    let observed = delivered.clone();
+    let receipt = receipt(&fixture.session, &fixture.child_id);
+    let cancel = fixture.session.config().cancel_token.clone();
+    let completion = run_sync_with_registered_handoff(
+        fixture.session.clone(),
+        fixture.child_id.clone(),
+        "fixture".into(),
+        Some(fixture.parent_manager.clone()),
+        Some(fixture.task_id.clone()),
+        Some(Arc::new(move |result, _| {
+            *observed.lock() = Some(result.clone());
+            Ok(())
+        })),
+        Some(fixture.route.clone()),
+        move |handoff, _| async move {
+            handoff.sender.send(receipt).unwrap();
+            cancel.cancelled().await;
+            Ok(ChildRunOutcome::Interrupted)
+        },
+    )
+    .await
+    .unwrap();
     assert!(matches!(completion, SyncCompletion::Pending(_)));
+    fixture.session.config().cancel_token.cancel();
     wait_for_settlement(&fixture, &delivered).await;
 
     let meta = fixture
@@ -798,4 +820,70 @@ async fn wrapper_drop_after_handoff_keeps_execution_as_single_terminal_writer() 
         0,
         "未准入 worker 不得产生父 MQ 结果"
     );
+}
+
+#[tokio::test]
+async fn handoff_waits_for_working_commit_and_failure_never_returns_pending() {
+    use crate::session::test_resources::mock::ResumeLoadGate;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for fail in [false, true] {
+        let fixture = fixture();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *fixture.store.working_write_gate.lock().unwrap() = Some(ResumeLoadGate {
+            entered: entered_tx,
+            release: release_rx,
+            dropped: Arc::new(AtomicBool::new(false)),
+        });
+        fixture
+            .store
+            .fail_working_write
+            .store(fail, Ordering::SeqCst);
+        let receipt = receipt(&fixture.session, &fixture.child_id);
+        let cancel = fixture.session.config().cancel_token.clone();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let call = tokio::spawn(run_sync_with_registered_handoff(
+            fixture.session.clone(),
+            fixture.child_id.clone(),
+            "fixture".into(),
+            Some(fixture.parent_manager.clone()),
+            Some(fixture.task_id.clone()),
+            Some(Arc::new(|_, _| Ok(()))),
+            Some(fixture.route.clone()),
+            move |handoff, _| async move {
+                handoff.sender.send(receipt).unwrap();
+                tokio::select! { _ = finish_rx => {}, _ = cancel.cancelled() => {} }
+                Ok(ChildRunOutcome::Settled)
+            },
+        ));
+        entered_rx.await.unwrap();
+        assert!(!call.is_finished(), "持久化确认前不得返回 Pending");
+        assert_eq!(
+            fixture
+                .store
+                .load_session_meta(&fixture.child_id)
+                .await
+                .unwrap()
+                .work_state,
+            WorkState::Idle
+        );
+        release_tx.send(()).unwrap();
+        let result = call.await.unwrap();
+        if fail {
+            assert!(result.is_err());
+            assert!(fixture.session.config().cancel_token.clone().is_cancelled());
+        } else {
+            assert!(matches!(result.unwrap(), SyncCompletion::Pending(_)));
+            assert_eq!(
+                fixture
+                    .store
+                    .load_session_meta(&fixture.child_id)
+                    .await
+                    .unwrap()
+                    .work_state,
+                WorkState::Working
+            );
+        }
+        let _ = finish_tx.send(());
+    }
 }

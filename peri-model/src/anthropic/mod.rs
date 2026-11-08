@@ -121,7 +121,7 @@ impl AnthropicModel {
     /// transport 与 native request path 共享同一个 `reqwest::Client`（clone 仅
     /// 增加引用计数，连接池 / TLS session cache 复用），不再创建双 client。
     pub fn new(config: AnthropicConfig) -> Self {
-        let client = reqwest::Client::new();
+        let client = crate::transport::http::client_for_runtime(&config.runtime, true);
         Self {
             config,
             transport: Arc::new(ReqwestTransport::new(client.clone())),
@@ -172,14 +172,17 @@ impl AnthropicModel {
 #[async_trait]
 impl crate::Model for AnthropicModel {
     fn prepare_stream(&self, request: ModelRequest) -> ModelResult<crate::PreparedModelCall> {
+        let call_context = request.call_context.clone();
         let built = Arc::new(self.build_request(&request)?);
         let checkpoint =
             crate::protocol::prepared::checkpoint(PROVIDER_NAME, &built.endpoint, &built.body)?;
         let client = self.client.clone();
         let api_key = self.config.api_key.clone();
         let cache_enabled = self.config.enable_cache;
-        let request_factory =
-            Arc::new(move || Self::native_http_request(&client, &api_key, cache_enabled, &built));
+        let request_factory = Arc::new(move || {
+            Self::native_http_request(&client, &api_key, cache_enabled, &built)
+                .map(|wire| wire.with_call_context(call_context.clone()))
+        });
         let runtime = self.config.runtime.clone();
         let transport = Arc::clone(&self.transport);
         Ok(crate::PreparedModelCall::new(
@@ -228,13 +231,17 @@ impl crate::Model for AnthropicModel {
         if cancellation.is_cancelled() {
             return Err(ModelError::cancelled());
         }
+        let call_context = request.call_context.clone();
         let built = Arc::new(self.build_request(&request)?);
         let client = self.client.clone();
         let api_key = self.config.api_key.clone();
         let cache_enabled = self.config.enable_cache;
         let request_factory = {
             let built = Arc::clone(&built);
-            Arc::new(move || Self::native_http_request(&client, &api_key, cache_enabled, &built))
+            Arc::new(move || {
+                Self::native_http_request(&client, &api_key, cache_enabled, &built)
+                    .map(|wire| wire.with_call_context(call_context.clone()))
+            })
         };
         Ok(runtime_http_sse_stream(
             &self.config.runtime,

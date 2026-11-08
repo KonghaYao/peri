@@ -319,6 +319,9 @@ pub struct ModelRequest {
     pub temperature: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// 请求级关联元数据，不属于模型协议正文或持久化对话。
+    #[serde(skip)]
+    pub call_context: Option<super::ModelCallContext>,
 }
 
 impl ModelRequest {

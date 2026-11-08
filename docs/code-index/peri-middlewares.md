@@ -235,7 +235,7 @@ Builtin Workspace Bash 提醒只带退出信息与输出文件引用；提醒 me
 | --- | --- |
 | 加载 | loader.rs（parse_command_md / load_manifest / load_plugins / merge_plugin_mcp_servers / load_enabled_plugins_aggregated；MCP 专用严格入口 load_enabled_plugins_for_mcp + validate_mcp_server_config，非法 MCP 配置不降级为空配置） |
 | 配置 / 持久化 | config.rs（ClaudeSettings、installed_plugins 持久化、settings.json 启用名单） |
-| 安装 / 市场 | installer/（install.rs / update_plugin install.rs / uninstall.rs）；marketplace/（MarketplaceManager）；install_counts.rs |
+| 安装 / 市场 | installer/（install.rs / update_plugin install.rs / uninstall.rs）；marketplace/（MarketplaceManager）；install_counts.rs；安装目标字段（name/marketplace/version）必须是单一正常路径分量，删除或写入前再确认目标位于 `plugins/cache` 内（回归 `install_path_test.rs` 的 #198 用例） |
 | 宿主插件管理范围 | host_ports.rs（PluginManager）；installer/mod.rs（installation_for_mutation / enabled_plugins_settings_path）；installer/scope_test.rs、identity_test.rs | 安装前校验 scope/cwd；user 记录无 projectPath；update/uninstall 公共签名必须传 InstallScope，以 ID + scope + projectPath 精确匹配唯一记录，不猜 scoped、不跨范围回退；toggle 校验唯一可写记录；project/local 不清用户 pluginConfigs；真实端口回归模块 `plugin::installer::scope_tests`/`plugin::installer::identity_tests`；CLI `peri-tui/src/cli_plugin.rs` 的 plugin_scope_context 统一解析五类安装动作的 scope 与受信 current_dir，隔离测试 `cli_plugin_test.rs` |
 | 中间件 / 类型 | middleware.rs（PluginMiddleware）；types.rs（仅 re-export，事实源 peri-acp-types/src/plugin.rs） |
 
@@ -328,3 +328,5 @@ CI 回归：`assembly_once_scope_test.rs` 用原生 shell 与 UTF-8 日志验证
 - 发现与加载：`{{available_agents}}` 经 `AgentCatalogPort::catalog`（`host_ports::AgentCatalogProvider` 绑定同一 registry）；定义加载（`subagent/tool/definitions.rs`）与 workflow `resolve_agent_definition_via_registry` 统一走 registry；project 根顺序为 `.claude/agents` → `{cwd}/agents`，同一来源内同名先到先得。
 - 校验与授权：workflow 面拒绝 `mcp__*` 远端 id；远端 agent 的 `skills` 清空，声明不构成隐式授权；本地名按契约段校验并拒绝 `mcp__` 前缀；symlink 定义不可发现。
 - 项目指令：`peri-instruction://workspace/{main|local}`，P4 读取后冻结构建 `FrozenInstructions`；`AgentsMdMiddleware` 是纯 adapter（无 `std::fs`），excludes 由 provider 输入 `instruction_excludes`。
+
+模型录放的确定性投影：`src/mcp/client/queries.rs::resource_summary` 与 `src/mcp/middleware.rs::overview_text` 仅按 server name 排列无序集合；不改变每个 server 的资源定义、工具定义及状态事件顺序。回归：`prompt_server_sets_have_stable_order_without_reordering_server_resources`。

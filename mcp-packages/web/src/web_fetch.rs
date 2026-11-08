@@ -3,7 +3,7 @@ use peri_agent::tools::BaseTool;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::web_common::WEB_CREDIBILITY_WARNING;
+use super::web_common::{read_body_capped, WEB_CREDIBILITY_WARNING};
 use peri_agent::agent::async_tasks::truncate_bytes;
 use peri_mcp_common::shell::persist_truncated_output;
 
@@ -145,33 +145,6 @@ fn parse_allowed_url(url: &str) -> Result<reqwest::Url, String> {
     }
 }
 
-/// 读取响应体并强制 `cap` 字节上限。
-///
-/// `Content-Length` 预检只是快速失败；该字段可能缺失（压缩传输）或不可信，
-/// 流式累计才是权威上限。成功与非 2xx 分支共用本函数。
-async fn read_body_capped(mut resp: reqwest::Response, cap: u64) -> Result<Vec<u8>, String> {
-    if let Some(len) = resp.content_length() {
-        if len > cap {
-            return Err(format!(
-                "Extract response exceeds {cap} byte limit (Content-Length: {len})"
-            ));
-        }
-    }
-
-    let mut body = Vec::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| format!("Failed to read extract response: {e}"))?
-    {
-        if body.len() as u64 + chunk.len() as u64 > cap {
-            return Err(format!("Extract response exceeds {cap} byte limit"));
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
-}
-
 #[async_trait]
 impl BaseTool for WebFetchTool {
     fn name(&self) -> &str {
@@ -249,13 +222,13 @@ impl BaseTool for WebFetchTool {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = read_body_capped(resp, MAX_RESPONSE_BYTES).await?;
+            let body = read_body_capped(resp, MAX_RESPONSE_BYTES, "Extract").await?;
             let text = String::from_utf8_lossy(&body);
             let text = truncate_bytes(&text, MAX_ERROR_BODY_DISPLAY_BYTES);
             return Err(format!("Extract API returned HTTP {status}: {text}").into());
         }
 
-        let body = read_body_capped(resp, MAX_RESPONSE_BYTES).await?;
+        let body = read_body_capped(resp, MAX_RESPONSE_BYTES, "Extract").await?;
         let tavily: TavilyExtractResponse = serde_json::from_slice(&body)
             .map_err(|e| format!("Failed to parse extract response: {e}"))?;
 

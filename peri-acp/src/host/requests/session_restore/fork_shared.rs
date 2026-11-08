@@ -157,6 +157,7 @@ pub(crate) async fn handle_fork_shared(
         cwd: cwd.to_string(),
         environment: environment.clone(),
         closing: false,
+        close_in_flight: 0,
         context_ownership: crate::host::ContextOwnership::Resident,
         history_payloads: published_payloads,
         structure_version: 0,

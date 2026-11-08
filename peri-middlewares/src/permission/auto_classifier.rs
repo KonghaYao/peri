@@ -26,6 +26,16 @@ pub enum Classification {
 #[async_trait]
 pub trait AutoClassifier: Send + Sync {
     async fn classify(&self, tool_name: &str, tool_input: &serde_json::Value) -> Classification;
+
+    /// Per-request attribution from the actual approval's session and execution facts.
+    async fn classify_with_context(
+        &self,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+        _context: Option<peri_model::ModelCallContext>,
+    ) -> Classification {
+        self.classify(tool_name, tool_input).await
+    }
 }
 
 // ─── 缓存条目 ────────────────────────────────────────────────────────────────
@@ -105,20 +115,26 @@ impl LlmAutoClassifier {
     }
 
     /// 调用 LLM 进行分类
-    async fn call_llm(&self, tool_name: &str, tool_input: &serde_json::Value) -> Classification {
+    async fn call_llm(
+        &self,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+        context: Option<peri_model::ModelCallContext>,
+    ) -> Classification {
         let prompt = format!(
             "Determine whether the following tool call is safe. Tool: {}, Input: {}\nAnswer with exactly one word: ALLOW, DENY, or UNSURE. Do not explain.",
             tool_name,
             serde_json::to_string(tool_input).unwrap_or_default(),
         );
 
-        let request = ModelRequest::new(vec![
+        let mut request = ModelRequest::new(vec![
             ModelMessage::system_text(
                 "You are a tool call safety classifier. Respond with exactly one word: ALLOW, DENY, or UNSURE.",
             ),
             ModelMessage::user_text(prompt),
         ])
         .with_max_tokens(32);
+        request.call_context = context;
 
         let response = {
             let model = self.model.lock().await;
@@ -163,13 +179,23 @@ impl LlmAutoClassifier {
 #[async_trait]
 impl AutoClassifier for LlmAutoClassifier {
     async fn classify(&self, tool_name: &str, tool_input: &serde_json::Value) -> Classification {
+        self.classify_with_context(tool_name, tool_input, None)
+            .await
+    }
+
+    async fn classify_with_context(
+        &self,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+        context: Option<peri_model::ModelCallContext>,
+    ) -> Classification {
         let key = Self::cache_key(tool_name, tool_input);
 
         if let Some(cached) = self.lookup_cache(&key) {
             return cached;
         }
 
-        let result = self.call_llm(tool_name, tool_input).await;
+        let result = self.call_llm(tool_name, tool_input, context).await;
 
         self.insert_cache(key, result);
 

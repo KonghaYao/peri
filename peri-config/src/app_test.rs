@@ -104,6 +104,120 @@ fn test_merge_providers_empty_array_does_not_override() {
 }
 
 #[test]
+fn test_merge_workspace_provider_inherits_global_api_key_by_id() {
+    let mut global = make_global();
+    let workspace = AppConfig {
+        providers: vec![
+            ProviderConfig {
+                id: "openai-1".to_string(),
+                provider_type: "openai".to_string(),
+                ..Default::default()
+            },
+            ProviderConfig {
+                id: "ws-only".to_string(),
+                api_key: "sk-ws".to_string(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    global.merge_overrides(workspace);
+    assert_eq!(global.providers[0].api_key, "sk-global");
+    assert_eq!(global.providers[1].api_key, "sk-ws");
+}
+
+#[test]
+fn test_merge_workspace_provider_does_not_inherit_api_key_across_endpoints() {
+    let mut global = make_global();
+    let workspace = AppConfig {
+        providers: vec![ProviderConfig {
+            id: "openai-1".to_string(),
+            provider_type: "openai".to_string(),
+            base_url: "https://proxy.example.test/v1".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    global.merge_overrides(workspace);
+    assert!(
+        global.providers[0].api_key.is_empty(),
+        "同 id 但 endpoint 不同不得继承全局密钥"
+    );
+    assert_eq!(
+        global.providers[0].base_url,
+        "https://proxy.example.test/v1"
+    );
+}
+
+#[test]
+fn test_merge_workspace_provider_does_not_inherit_api_key_across_types() {
+    let mut global = make_global();
+    let workspace = AppConfig {
+        providers: vec![ProviderConfig {
+            id: "openai-1".to_string(),
+            provider_type: "anthropic".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    global.merge_overrides(workspace);
+    assert!(
+        global.providers[0].api_key.is_empty(),
+        "同 id 但 provider type 不同不得继承全局密钥"
+    );
+}
+
+#[test]
+fn test_merge_workspace_provider_does_not_inherit_api_key_across_auth_modes() {
+    let mut global = make_global();
+    global.providers[0].provider_type = "openai_responses".to_string();
+    global.providers[0].base_url = "https://api.openai.com/v1/responses".to_string();
+    global.providers[0].auth = Some(ProviderAuthConfig::ApiKey);
+    let workspace = AppConfig {
+        providers: vec![ProviderConfig {
+            id: "openai-1".to_string(),
+            provider_type: "openai_responses".to_string(),
+            base_url: "https://api.openai.com/v1/responses".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    global.merge_overrides(workspace);
+    assert!(
+        global.providers[0].api_key.is_empty(),
+        "同 id 但 auth 上下文不同不得继承全局密钥"
+    );
+}
+
+#[test]
+fn test_merge_workspace_chatgpt_plan_does_not_inherit_api_key() {
+    let mut global = make_global();
+    global.providers[0].provider_type = "openai_responses".to_string();
+    global.providers[0].base_url = "https://api.openai.com/v1/responses".to_string();
+    global.providers[0].auth = Some(ProviderAuthConfig::ApiKey);
+    let workspace = AppConfig {
+        providers: vec![ProviderConfig {
+            id: "openai-1".to_string(),
+            provider_type: "openai_responses".to_string(),
+            base_url: "https://api.openai.com/v1/responses".to_string(),
+            auth: Some(ProviderAuthConfig::ChatGptPlan {
+                store: std::path::PathBuf::from("/tmp/peri-credentials"),
+                account: "account".to_string(),
+                subject: "subject".to_string(),
+                client_id: "client".to_string(),
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    global.merge_overrides(workspace);
+    assert!(
+        global.providers[0].api_key.is_empty(),
+        "ChatGPT plan 必须以空 apiKey 表示，不能继承 API key"
+    );
+}
+
+#[test]
 fn test_merge_single_field_override() {
     let mut global = make_global();
     let workspace = AppConfig {
@@ -640,6 +754,67 @@ fn extract_overrides_roundtrip_providers_and_alias() {
         "active_alias 恒收录（豁免分层）"
     );
     assert_roundtrip(&global, &ws2);
+}
+
+#[test]
+fn extract_overrides_strips_inherited_api_key_but_keeps_workspace_key() {
+    let global = make_global();
+    let mut merged = global.clone();
+    merged.providers[0].name = Some("Global".to_string());
+    merged.providers.push(ProviderConfig {
+        id: "ws-only".to_string(),
+        provider_type: "anthropic".to_string(),
+        api_key: "sk-ws".to_string(),
+        ..Default::default()
+    });
+
+    let extracted = merged.extract_overrides(&global);
+    assert_eq!(extracted.providers[0].api_key, "");
+    assert_eq!(extracted.providers[0].name.as_deref(), Some("Global"));
+    assert_eq!(extracted.providers[1].api_key, "sk-ws");
+
+    let mut back = global.clone();
+    back.merge_overrides(extracted);
+    assert_eq!(back, merged, "剥离凭据后读取必须还原生效配置");
+}
+
+#[test]
+fn extract_overrides_drops_key_when_binding_context_changes() {
+    let global = make_global();
+    let mut merged = global.clone();
+    merged.providers[0].base_url = "https://proxy.example.test/v1".to_string();
+
+    let extracted = merged.extract_overrides(&global);
+    assert_eq!(
+        extracted.providers[0].api_key, "",
+        "全局同值密钥不得写进工作区"
+    );
+    assert_eq!(
+        extracted.providers[0].base_url,
+        "https://proxy.example.test/v1"
+    );
+
+    let mut back = global.clone();
+    back.merge_overrides(extracted);
+    assert!(
+        back.providers[0].api_key.is_empty(),
+        "endpoint 改写后不得回填全局密钥"
+    );
+    assert_eq!(back.providers[0].base_url, "https://proxy.example.test/v1");
+}
+
+#[test]
+fn extract_overrides_keeps_workspace_api_key_override() {
+    let global = make_global();
+    let mut merged = global.clone();
+    merged.providers[0].api_key = "sk-ws-override".to_string();
+
+    let extracted = merged.extract_overrides(&global);
+    assert_eq!(extracted.providers[0].api_key, "sk-ws-override");
+
+    let mut back = global.clone();
+    back.merge_overrides(extracted);
+    assert_eq!(back, merged);
 }
 
 #[test]

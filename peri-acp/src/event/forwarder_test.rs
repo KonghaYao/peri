@@ -247,9 +247,7 @@ async fn test_forwarder_without_bridge_keeps_mapper_path() {
     );
 }
 
-/// active_stage 借用的编译级不变量：forwarder 传入真实 HashMap 供 Stage 生命周期
-/// 跨事件保持（与 bridge_test C4 同入口语义，此处仅验证 stage 事件可经 forwarder
-/// 到达 bridge 且不 panic）。
+/// bridge 内部保持 Stage 生命周期；验证 stage 事件可经 forwarder 的共享入口到达。
 #[tokio::test]
 async fn test_forwarder_stage_events_reach_bridge() {
     let session = FakeLangfuseSession::new("sess_forwarder_stage");
@@ -317,5 +315,109 @@ async fn test_forwarder_stage_events_reach_bridge() {
     );
     assert!(
         matches!(&collected.lock()[0], ExecutorEvent::ToolStart { name, .. } if name == "Agent")
+    );
+}
+
+/// [回归测试] 主会话观测必须借用请求快照，结束后释放来源并导出完整 fallback。
+#[tokio::test]
+async fn test_forwarder_shares_snapshot_until_freeze_then_releases_it() {
+    use peri_acp_types::messages::BaseMessage;
+    use peri_acp_types::session::TurnTelemetryOutcome;
+    use peri_config::observability::LangfuseCompression;
+    use peri_controller::langfuse::session::{LangfuseSession, LangfuseShutdownReport};
+    use peri_controller::langfuse::session_like::LangfuseSessionLike;
+
+    let mut server = mockito::Server::new_async().await;
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&bodies);
+    let request = server
+        .mock("POST", "/api/public/otel/v1/traces")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body_from_request(move |request| {
+            captured.lock().push(
+                serde_json::from_slice::<serde_json::Value>(request.body().unwrap()).unwrap(),
+            );
+            b"{}".to_vec()
+        })
+        .expect_at_least(1)
+        .create_async()
+        .await;
+    let config = LangfuseConfig {
+        public_key: Some("pk-local".into()),
+        secret_key: Some("sk-local".into()),
+        host: server.url(),
+        compression: LangfuseCompression::None,
+        spool_enabled: false,
+        ..Default::default()
+    };
+    let session = Arc::new(
+        LangfuseSession::new(config.clone(), "shared-snapshot".into(), None)
+            .await
+            .unwrap(),
+    );
+    let tracer = Arc::new(Mutex::new(LangfuseTracer::new(
+        session.clone(),
+        "shared-snapshot".into(),
+        config,
+    )));
+    tracer.lock().on_turn_start("input");
+    let main_id = AgentId::new();
+    let bridge = LangfuseBridge::new(tracer.clone(), "local".into(), Some(main_id.to_string()));
+    let messages = Arc::new(vec![BaseMessage::human("shared-context🙂".repeat(4096))]);
+    let expected = serde_json::json!({"messages": messages.as_ref(), "tools": []});
+    let original = Arc::downgrade(&messages);
+    let (bus, handles) = EventBus::new(EventBusConfig::default());
+    bus.emit_observe(ObserveEvent::LlmCallStart {
+        turn_id: TurnId::new(),
+        agent_id: main_id,
+        step: 0,
+        messages: Arc::clone(&messages),
+        tools: vec![],
+    });
+    drop(bus);
+    let forwarder = spawn_eventbus_forwarder(
+        handles,
+        move |_, event| {
+            let ExecutorEvent::LlmCallStart { messages, .. } = event else {
+                panic!("unexpected mapped event");
+            };
+            // 单线程 runtime 中此同步回调先于 worker 运行，原快照、ev、mapper 与冻结来源各持一份 Arc。
+            assert_eq!(Arc::strong_count(&messages), 4);
+            assert!(Arc::ptr_eq(&messages, &original.upgrade().unwrap()));
+        },
+        Some(bridge),
+    );
+    forwarder.await.unwrap();
+    let end = tracer.lock().on_turn_end(TurnTelemetryOutcome::Completed);
+    end.await.unwrap();
+    assert_eq!(
+        session.flush().await.unwrap(),
+        langfuse_client::FlushReport::Complete
+    );
+    assert_eq!(Arc::strong_count(&messages), 1);
+    assert_eq!(session.shutdown().await, LangfuseShutdownReport::Complete);
+    request.assert_async().await;
+    let captured = bodies.lock();
+    let input = captured
+        .iter()
+        .flat_map(|body| body["resourceSpans"].as_array().unwrap())
+        .flat_map(|resource| resource["scopeSpans"].as_array().unwrap())
+        .flat_map(|scope| scope["spans"].as_array().unwrap())
+        .find(|span| {
+            span["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("step-"))
+        })
+        .and_then(|span| span["attributes"].as_array())
+        .unwrap()
+        .iter()
+        .find(|attribute| attribute["key"] == "langfuse.observation.input")
+        .unwrap()["value"]["stringValue"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(input).unwrap(),
+        expected
     );
 }

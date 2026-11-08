@@ -249,6 +249,23 @@ impl SessionResources for ClaimResources {
         }
         self.inner.update_session_meta(id, patch).await
     }
+    async fn settle_terminal_without_result(
+        &self,
+        child: &ThreadId,
+        status: AgentStatus,
+        work_state: peri_acp_types::thread::WorkState,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::TerminalSettlementOutcome> {
+        if self.terminal_error {
+            return Err(SessionResourceError::new(
+                SessionResourceErrorKind::Unavailable {
+                    detail: "terminal store offline".into(),
+                },
+            ));
+        }
+        self.inner
+            .settle_terminal_without_result(child, status, work_state)
+            .await
+    }
     async fn set_work_state(
         &self,
         id: &ThreadId,

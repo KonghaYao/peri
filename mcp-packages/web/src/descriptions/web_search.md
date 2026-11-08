@@ -3,7 +3,9 @@ Search the web using a search engine.
 Usage:
 - Provide a search query to find relevant web pages
 - Returns results as a numbered Markdown list with titles, URLs, and text snippets
+- At most the requested number of results is rendered, even if the backend returns more
 - Each result's text is truncated to 500 characters
+- Maximum search API response size: 4 MiB (enforced locally)
 - No API key required
 
 IMPORTANT:

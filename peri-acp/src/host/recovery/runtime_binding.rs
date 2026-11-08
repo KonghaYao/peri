@@ -1,14 +1,14 @@
-//! 恢复 child 的直接父级运行登记（设计 §5.3/§5.4）。
+//! 恢复 child 的实际接收会话运行登记（设计 §5.3/§5.4）。
 //!
-//! 只登记到 live 且未 closing 的直接父级：父级 TaskManager 的任务投影、父级
-//! `active_agents` 的 Cascade 取消关系，以及二者与 child turn 取消令牌的绑定。
+//! 只登记到 live 且未 closing 的实际接收会话：父级 TaskManager 的任务投影、父级
+//! `active_agents` 的持久化取消策略，以及二者与 child turn 取消令牌的绑定。
 //! 登记发生在 child turn 真正获得准入之后；早失败、未准入或父级未 live 都不登记，
 //! child 终态结算时收尾，不留 pending 任务。父级之后进入时对已在运行的 child 做
 //! adoption；不冷装配祖先链。
 
 use peri_acp_types::event::BackgroundTaskResult;
 use peri_acp_types::tasks::NoopTaskManager;
-use peri_acp_types::thread::{AgentStatus, CancelPolicy, ThreadId};
+use peri_acp_types::thread::{AgentStatus, ThreadId};
 use tokio_util::sync::CancellationToken;
 
 use super::super::{AcpServerConfig, SharedSessions};
@@ -20,7 +20,7 @@ pub(super) enum RecoveryTaskTerminal {
     Cancelled,
 }
 
-/// 恢复 turn 准入后的登记入口：读取该 child 的持久父级与本轮取消令牌。
+/// 恢复 turn 准入后的登记入口：读取该 child 的实际收件人与本轮取消令牌。
 ///
 /// 返回 `Ok(false)` 表示没有可登记的父级（未 live / 无恢复投递），不是失败；
 /// 父级 live 但登记失败返回 `Err`，调用方撤销本次启动资格并保留下一次重试机会。
@@ -103,7 +103,7 @@ pub(crate) async fn adopt_recovered_child(
     }
 }
 
-/// 在直接父级登记任务与运行时；父级不是 live/未 closing 时跳过。
+/// 在实际接收会话登记任务与运行时；父级不是 live/未 closing 时跳过。
 async fn register(
     cfg: &AcpServerConfig,
     sessions: &SharedSessions,
@@ -112,6 +112,12 @@ async fn register(
     child: &ThreadId,
     cancel_token: &CancellationToken,
 ) -> Result<bool, String> {
+    let cancel_policy = cfg
+        .session_resources
+        .load_session_meta(child)
+        .await
+        .map_err(|error| error.to_string())?
+        .cancel_policy;
     let Some(parent_session_id) = cfg.session_manager.session_id_for_thread(parent) else {
         return Ok(false);
     };
@@ -149,7 +155,7 @@ async fn register(
         return Ok(false);
     }
 
-    // 父级 `active_agents`：Cascade 让父 Stop/close 沿既有策略取消本 child。
+    // Stop follows the saved policy; closing the session still cancels all children.
     let Some(mut parent_session) = cfg.session_manager.get_session_mut(&parent_session_id) else {
         abort_recovery_launch(cfg, child_session_id);
         return Ok(false);
@@ -159,7 +165,7 @@ async fn register(
         peri_acp_types::session::AgentRuntime {
             thread_id: child.clone(),
             cancel_token: cancel_token.clone(),
-            cancel_policy: CancelPolicy::Cascade,
+            cancel_policy,
             status: AgentStatus::Active,
         },
     );

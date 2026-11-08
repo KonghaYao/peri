@@ -116,6 +116,8 @@ pub(super) async fn spawn_subagent_impl(
         .or(cwd_cfg)
         .ok_or("spawn_subagent: cwd 未提供（parent 缺失且 config.cwd 为 None）")?;
     let parent_thread_id = parent_thread_id_of(parent).or(parent_thread_id_cfg);
+    let completion_target =
+        super::completion_target(parent, on_bg_complete.as_ref(), parent_thread_id.clone());
     let frozen_claude_md = parent
         .map(|p| p.store().frozen.claude_md.to_string())
         .or(frozen_claude_md_cfg);
@@ -297,6 +299,12 @@ pub(super) async fn spawn_subagent_impl(
             inherited: inherited.clone(),
         };
         store.save_child(&child).await?;
+        super::persist_completion_target(
+            store.as_ref(),
+            &child_thread_id,
+            completion_target.as_deref(),
+        )
+        .await?;
     }
 
     // 5. 构造子 session + 链装配 + v2_ctx（共享 helper [build_subagent_session_v2]：
@@ -311,7 +319,7 @@ pub(super) async fn spawn_subagent_impl(
         &frozen_skill_summary,
         &frozen_date,
     );
-    let (session, v2_ctx) = build_subagent_session_v2(
+    let (session, mut v2_ctx) = build_subagent_session_v2(
         cwd.clone(),
         frozen,
         cancel_token.clone(),
@@ -341,6 +349,9 @@ pub(super) async fn spawn_subagent_impl(
         true,
     )
     .await?;
+    v2_ctx.context.session.model_parent =
+        crate::agent::model_call::capture_tool_parent(parent_tool_call_id.as_deref())
+            .filter(|parent| Some(parent.owner.as_str()) == parent_thread_id.as_deref());
 
     // 父上下文已作为只读 ancestor 装载；不可用原 ID append 到 child messages。
     //
@@ -388,11 +399,13 @@ pub(super) async fn spawn_subagent_impl(
     }
 
     // 终态结果投递到父会话的 MQ（无父 thread 时不做跨会话投递）。
-    let terminal_route = match (&session_resources, parent_thread_id.clone()) {
+    let terminal_route = match (&session_resources, completion_target.clone()) {
         (Some(store), Some(target)) => Some(super::super::terminal_settlement::TerminalMqRoute {
             store: Arc::clone(store),
             target: peri_acp_types::thread::ThreadId::from(target.as_str()),
-            mailbox: parent.map(|parent| parent.async_result_mailbox()),
+            mailbox: parent
+                .filter(|_| parent_thread_id.as_ref() == Some(&target))
+                .map(|parent| parent.async_result_mailbox()),
         }),
         _ => None,
     };

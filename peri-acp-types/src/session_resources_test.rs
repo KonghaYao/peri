@@ -1,7 +1,7 @@
 //! 门面契约的不变量测试：三个独立事实、效果确定性、定向更新语义。
 
 use super::*;
-use crate::thread::ThreadId;
+use crate::thread::{CancelPolicy, ThreadId};
 use crate::workspace::WorkspaceError;
 
 fn thread_id() -> ThreadId {
@@ -407,5 +407,39 @@ async fn history_window_reads_default_to_unsupported() {
             error.kind(),
             SessionResourceErrorKind::Unsupported
         ));
+    }
+}
+
+#[tokio::test]
+async fn unimplemented_atomic_settlements_fail_before_any_write() {
+    let store = SegmentlessResources;
+    let id = thread_id();
+    let input = crate::session::QueuedMessage::prompt(
+        crate::session::MessageSource::UserInput,
+        crate::messages::BaseMessage::human("result"),
+    );
+    let errors = [
+        store
+            .settle_terminal_without_result(&id, AgentStatus::Done, WorkState::Idle)
+            .await
+            .unwrap_err(),
+        store.settle_retained_mq(&id, &[], &[]).await.unwrap_err(),
+        store
+            .finalize_child_terminal(
+                &id,
+                AgentStatus::Done,
+                WorkState::Idle,
+                &id,
+                input.into_mq_input(),
+            )
+            .await
+            .unwrap_err(),
+    ];
+    for error in errors {
+        assert!(matches!(
+            error.kind(),
+            SessionResourceErrorKind::Unsupported
+        ));
+        assert_eq!(error.effect(), MutationOutcome::NotApplied);
     }
 }

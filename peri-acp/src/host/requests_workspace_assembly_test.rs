@@ -18,6 +18,7 @@ fn retain_failed_assembly(
             cwd: cwd.to_owned(),
             environment: Some(environment),
             closing: true,
+            close_in_flight: 0,
             context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads: Vec::new(),
             structure_version: 0,

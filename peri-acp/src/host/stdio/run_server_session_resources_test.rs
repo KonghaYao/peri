@@ -45,6 +45,7 @@ async fn test_fork_registers_session_and_copies_history() {
                 .to_owned(),
             environment: None,
             closing: false,
+            close_in_flight: 0,
             context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads: vec![source_payload],
             structure_version: 0,

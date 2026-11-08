@@ -23,7 +23,7 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 | 发布、解释与更新 | `system.rs`：`ConfigurationSystem::{resolve,current,explain,update,update_mcp}` | 校验、来源 revision 与目标文件字节 CAS 成功才 publish；失败保留 current |
 | 来源输入 | `source.rs`：`ConfigurationSource`、`McpConfigurationSource`、`read_environment`、`collect_with_layout` | 独立 bootstrap；可注入其他 adapter，不委托 provider 决定领域规则 |
 | settings schema 与合并 | `app.rs`：`PeriConfig`、`AppConfig`、`Profiles`、`ProfileConfig`、`ProviderConfig`、`BetasConfig` | `merge_overrides`、`extract_overrides`；profile 整体替换、MetaHarness 与 beta flag 逐 key 合并 |
-| 固定加载/保存布局 | `settings.rs`：`ConfigSource::{load_at,load_standalone,load_lenient,snapshot,reload_merged}`、`save(expected_revision, &PeriConfig) -> Result<Arc<ConfigurationSnapshot>>` | 编辑开始捕获 revision 随草稿提交；保存返回 accepted snapshot。正常持有 system、同文件不拆层；lenient 临时可读/不可写 |
+| 固定加载/保存布局 | `settings.rs`：`ConfigSource::{load_at,load_standalone,load_lenient,snapshot,reload_merged,preview}`、`save(expected_revision, &PeriConfig) -> Result<Arc<ConfigurationSnapshot>>` | 编辑开始捕获 revision 随草稿提交；保存返回 accepted snapshot。`preview` 用同一候选解析将发布的 snapshot 但不写目标文件，供提交前校验 accepted 投影；随后 save 仍核对 revision。正常持有 system、同文件不拆层；lenient 临时可读/不可写 |
 | 受信启动器的内存配置 | `settings.rs`：`ConfigSource::load_injected_at`；`source.rs::collect_with_layout_and_global` | 以内部启动帧提供完整 global settings 正文；不读取或写入 global/workspace settings 文件，仍使用同一 typed snapshot 与 provider/MCP 规则；该来源拒绝持久保存 |
 | 单文件 helpers | `settings.rs`：`load_from`、`save_to` | `save_to` 显式路径也用字节 CAS 保留其他顶层领域；不发布 scoped snapshot，不等同于 system revision 更新。lenient source 无 authority 时临时可读、不可写 |
 | 资源配置投影 | `resources.rs`：`ResourceConfiguration`、`resolve`；`system.rs::resources` | global `config.disableBundledSkills` 优先于旧顶层键，默认 false；workspace 资源 consumer 使用 snapshot 开关 |

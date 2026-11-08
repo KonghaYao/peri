@@ -6,7 +6,8 @@
 //! 定位目标消息后：
 //! 1. 截断 history 到目标消息之前
 //! 2. 从被移除的消息中提取 Write/Edit 工具调用（含 builtin `workspace` 实例的
-//!    effective name，如 `mcp__workspace__Write`），逆向恢复文件
+//!    effective name，如 `mcp__workspace__Write`），带 tool-call id 交给 Workspace 逆向恢复；
+//!    Write 只能恢复调用时记录的 pre-image，缺失即拒绝；Edit 可用调用自带的 old/new 反转
 //! 3. 验证保留消息的 ToolUse/ToolResult 配对完整性
 //! 4. 从 SQLite 持久化中删除被移除的消息
 //! 5. 提交成功后把 `threads.context_usage_tokens` 写回 NULL（旧快照随截断失效，§2.2）
@@ -79,11 +80,14 @@ pub(crate) enum FileChange {
     Write {
         path: String,
         content: Option<String>,
+        /// Model tool-call id; the Workspace keys its recorded pre-image by it.
+        tool_call_id: String,
     },
     Edit {
         path: String,
         old_string: String,
         new_string: String,
+        tool_call_id: String,
     },
 }
 
@@ -405,7 +409,7 @@ pub(crate) fn extract_file_changes(messages: &[BaseMessage]) -> Vec<FileChange> 
                 let name = original_tool_name_of_effective(&tc.name).unwrap_or(&tc.name);
                 // 短路求值：仅 Write/Edit 才插入 id（副作用只在首次出现时发生）
                 if (name == "Write" || name == "Edit") && seen_ids.insert(tc.id.clone()) {
-                    if let Some(change) = parse_tool_call(name, &tc.arguments) {
+                    if let Some(change) = parse_tool_call(name, &tc.arguments, &tc.id) {
                         changes.push(change);
                     }
                 }
@@ -425,7 +429,7 @@ pub(crate) fn extract_file_changes(messages: &[BaseMessage]) -> Vec<FileChange> 
                     let name = original_tool_name_of_effective(name).unwrap_or(name);
                     // 短路求值：仅 Write/Edit 才插入 id（副作用只在首次出现时发生）
                     if (name == "Write" || name == "Edit") && seen_ids.insert(id.clone()) {
-                        if let Some(change) = parse_tool_call(name, input) {
+                        if let Some(change) = parse_tool_call(name, input, id) {
                             changes.push(change);
                         }
                     }
@@ -437,7 +441,11 @@ pub(crate) fn extract_file_changes(messages: &[BaseMessage]) -> Vec<FileChange> 
 }
 
 /// 从工具调用参数中解析文件变更。
-pub(crate) fn parse_tool_call(name: &str, args: &serde_json::Value) -> Option<FileChange> {
+pub(crate) fn parse_tool_call(
+    name: &str,
+    args: &serde_json::Value,
+    tool_call_id: &str,
+) -> Option<FileChange> {
     let path = args.get("file_path")?.as_str()?.to_string();
     match name {
         "Write" => {
@@ -445,7 +453,11 @@ pub(crate) fn parse_tool_call(name: &str, args: &serde_json::Value) -> Option<Fi
                 .get("content")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string);
-            Some(FileChange::Write { path, content })
+            Some(FileChange::Write {
+                path,
+                content,
+                tool_call_id: tool_call_id.to_string(),
+            })
         }
         "Edit" => {
             let old_string = args
@@ -462,6 +474,7 @@ pub(crate) fn parse_tool_call(name: &str, args: &serde_json::Value) -> Option<Fi
                 path,
                 old_string,
                 new_string,
+                tool_call_id: tool_call_id.to_string(),
             })
         }
         _ => None,

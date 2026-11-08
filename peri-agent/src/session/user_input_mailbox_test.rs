@@ -456,7 +456,7 @@ async fn bound_queue_forwards_query_gate_to_the_store() {
 
 /// [回归] 历史查询无法回答时，`Unknown` 不是「不存在」：待发记录必须保留。
 #[tokio::test]
-async fn unknown_send_result_keeps_the_input_queued() {
+async fn unknown_send_result_keeps_the_input_dispatching() {
     let resources = MockSessionResources::new();
     let (mailbox, queue) = make_mock_mailbox(Arc::clone(&resources));
     mailbox
@@ -478,8 +478,14 @@ async fn unknown_send_result_keeps_the_input_queued() {
         .expect_err("无法确认移交时必须返回错误");
     assert!(matches!(error, UserInputQueueError::Store(_)));
     let (state, handed_off) = record_state(&mailbox, &input.input_id).expect("记录必须保留");
-    assert_eq!(state, UserInputState::Queued);
+    assert_eq!(state, UserInputState::Dispatching);
     assert!(!handed_off, "Unknown 不能宣称已移交");
+    mailbox.reclaim().await;
+    assert_eq!(
+        record_state(&mailbox, &input.input_id).unwrap().0,
+        UserInputState::Dispatching,
+        "MQ 缺失不证明发送未生效，收尾不能把未知记录重置成 Queued"
+    );
 }
 
 /// [回归] `Unknown` 的错误响应只能读投影：记录保留，恢复 MQ 行后同一 ID 可再次发送。
@@ -505,7 +511,7 @@ async fn unknown_error_response_keeps_record_and_retry_dispatches() {
         .await
         .expect_err("无法确认移交时必须返回错误");
     let (state, handed_off) = record_state(&mailbox, &input.input_id).expect("记录必须保留");
-    assert_eq!(state, UserInputState::Queued);
+    assert_eq!(state, UserInputState::Dispatching);
     assert!(!handed_off, "Unknown 不能宣称已移交");
 
     // ACP 错误响应只附加纯投影；这里模拟它不得清理记录或推进 revision。

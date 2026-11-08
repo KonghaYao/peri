@@ -28,6 +28,7 @@ pub(super) fn build_model_factories(
     pool: &Arc<parking_lot::Mutex<AgentPool>>,
     retry_events: &RetryEventForwarder,
     session_id: &str,
+    transport_route: Option<peri_model::ModelTransportRoute>,
 ) -> ModelFactories {
     // 主 LLM 缓存读取（AgentPool has_valid_cache + get_cached_llm 语义）
     let get_cached_llm: Option<Arc<dyn Fn() -> Option<CachedLlmInstances> + Send + Sync>> = {
@@ -46,11 +47,14 @@ pub(super) fn build_model_factories(
     let fresh_auxiliary_model: Option<Arc<dyn Fn() -> Arc<dyn peri_model::Model> + Send + Sync>> = {
         let pool = Arc::clone(pool);
         let provider = provider_snapshot.clone();
+        let transport_route = transport_route.clone();
         Some(Arc::new(move || {
             let provider = provider
                 .clone()
                 .with_retry_observer(Some(pool.lock().retry_events.as_retry_observer()));
-            provider.into_model().into()
+            provider
+                .into_model_with_transport_route(transport_route.clone())
+                .into()
         }))
     };
     // LLM 缓存回写（AgentPool store_llm 语义）
@@ -66,25 +70,27 @@ pub(super) fn build_model_factories(
         let pool = Arc::clone(pool);
         let provider = provider_snapshot.clone();
         let retry_events = retry_events.clone();
+        let transport_route = transport_route.clone();
         Some(Arc::new(move || {
             let fp = crate::session::agent_pool::fingerprint(&provider);
             crate::session::agent_pool::AgentPool::get_or_create_subagent_llm(&pool, &fp, || {
                 provider
                     .clone()
                     .with_retry_observer(Some(retry_events.as_retry_observer()))
-                    .into_model()
+                    .into_model_with_transport_route(transport_route.clone())
             })
         }))
     };
     let auto_classifier_factory: Option<executor::AutoClassifierFactory> = {
         let provider = provider_snapshot.clone();
         let retry_events = retry_events.clone();
+        let transport_route = transport_route.clone();
         Some(Arc::new(move || {
             Arc::new(tokio::sync::Mutex::new(
                 provider
                     .clone()
                     .with_retry_observer(Some(retry_events.as_retry_observer()))
-                    .into_model(),
+                    .into_model_with_transport_route(transport_route.clone()),
             ))
         }))
     };
@@ -120,11 +126,11 @@ pub(super) fn build_model_factories(
                         Some(p) => p
                             .clone()
                             .with_retry_observer(Some(retry_events.as_retry_observer()))
-                            .into_model(),
+                            .into_model_with_transport_route(transport_route.clone()),
                         None => provider
                             .clone()
                             .with_retry_observer(Some(retry_events.as_retry_observer()))
-                            .into_model(),
+                            .into_model_with_transport_route(transport_route.clone()),
                     },
                 );
             // H1：只产出模型来源（模型 + 名称 + session id）——bridge 的身份与

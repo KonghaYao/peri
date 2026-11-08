@@ -19,7 +19,8 @@ fn factories_cache_models_by_effective_capacity_for_every_provider() {
         let small = LlmProvider::from_config_for_alias(&config, "haiku").unwrap();
         let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));
         let retry = pool.lock().retry_events.clone();
-        let factories = build_model_factories(&large, &config, &pool, &retry, "fixture-session");
+        let factories =
+            build_model_factories(&large, &config, &pool, &retry, "fixture-session", None);
         let primary = factories.primary_llm_factory.as_ref().unwrap()();
         assert_eq!(primary.context_window(), Some(200_000));
         assert!(Arc::ptr_eq(
@@ -56,7 +57,7 @@ fn factories_cache_models_by_effective_capacity_for_every_provider() {
         let cached = factories.get_cached_llm.as_ref().unwrap()().unwrap();
         assert!(Arc::ptr_eq(&auxiliary, &cached.auxiliary_model));
         let small_factories =
-            build_model_factories(&small, &config, &pool, &retry, "fixture-session");
+            build_model_factories(&small, &config, &pool, &retry, "fixture-session", None);
         assert!(small_factories.get_cached_llm.as_ref().unwrap()().is_none());
         let small_primary = small_factories.primary_llm_factory.as_ref().unwrap()();
         assert!(Arc::ptr_eq(&child, &small_primary));
@@ -79,7 +80,8 @@ fn test_responses_factories_after_config_roundtrip_cover_primary_compact_and_sub
     let provider = LlmProvider::from_config_for_alias(&config, "opus").unwrap();
     let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));
     let retry = pool.lock().retry_events.clone();
-    let factories = build_model_factories(&provider, &config, &pool, &retry, "fixture-session");
+    let factories =
+        build_model_factories(&provider, &config, &pool, &retry, "fixture-session", None);
     for model in [
         factories.primary_llm_factory.as_ref().unwrap()(),
         factories.fresh_auxiliary_model.as_ref().unwrap()(),
@@ -103,4 +105,62 @@ fn test_responses_factories_after_config_roundtrip_cover_primary_compact_and_sub
         &cached,
         &pool.lock().subagent_llm_cache[&child_key]
     ));
+}
+
+#[tokio::test]
+async fn every_host_model_factory_keeps_the_captured_transport_route() {
+    let config: Arc<PeriConfig> = Arc::new(serde_json::from_value(json!({"config": {
+        "providers":[{"id":"responses", "type":"openai_responses",
+            "apiKey":"synthetic-key", "baseUrl":"http://unreachable.fixture.invalid/v1/responses"}],
+        "profiles":{
+            "opus":{"provider":"responses","model":"main-model","contextWindow":120000},
+            "haiku":{"provider":"responses","model":"small-model","contextWindow":64000}
+        }
+    }})).unwrap());
+    let provider = LlmProvider::from_config_for_alias(&config, "opus").unwrap();
+    let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));
+    let retry = pool.lock().retry_events.clone();
+    let route = peri_model::ModelTransportRoute::new(
+        url::Url::parse("http://127.0.0.1:9").unwrap(),
+        "route-test",
+    )
+    .unwrap();
+    let factories = build_model_factories(
+        &provider,
+        &config,
+        &pool,
+        &retry,
+        "fixture-session",
+        Some(route),
+    );
+    factories.subagent_llm_factory.as_ref().unwrap()(Some("haiku"));
+    let child = LlmProvider::from_config_for_alias(&config, "haiku").unwrap();
+    let child_key = crate::session::agent_pool::fingerprint(&child);
+    let child_model = pool.lock().subagent_llm_cache[&child_key].clone();
+    for model in [
+        factories.primary_llm_factory.as_ref().unwrap()(),
+        factories.fresh_auxiliary_model.as_ref().unwrap()(),
+        child_model,
+    ] {
+        assert_route_requires_context(model.as_ref()).await;
+    }
+    let classifier = factories.auto_classifier_factory.as_ref().unwrap()();
+    let classifier = classifier.lock().await;
+    assert_route_requires_context(classifier.as_ref()).await;
+}
+
+async fn assert_route_requires_context(model: &dyn peri_model::Model) {
+    // A missing immutable identity must be rejected before either proxy or provider I/O.
+    let request = ModelRequest::new(vec![peri_model::ModelMessage::user_text("hello")]);
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        model.complete(request, tokio_util::sync::CancellationToken::new()),
+    )
+    .await
+    .expect("route validation must precede network access")
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("requires a call context"),
+        "{error}"
+    );
 }

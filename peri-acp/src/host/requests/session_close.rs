@@ -52,6 +52,9 @@ pub(in crate::host::requests) async fn close_session(
         .get(session_id)
         .and_then(|state| state.environment.clone());
     let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+    // 本函数是 `SessionState.closing` 的唯一写入方（`server_loop` 不再预置）：
+    // 这里读到的就是本次尝试开始前的准入状态。持久化意图确认未成立时回滚到它，
+    // 否则关闭失败会把会话永久挡在续聊之外（#196）。
     let was_closing = sessions.get(session_id).is_some_and(|state| state.closing);
     if let Some(state) = sessions.get_mut(session_id) {
         state.closing = true;

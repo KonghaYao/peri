@@ -270,18 +270,14 @@ impl AcpSession {
         if delivery.parent != parent || delivery.task.is_some() {
             return Ok(false);
         }
-        let cancel_on_kill = cancel_token.clone();
         let task_id = child.to_string();
         let ticket = task_manager
-            .register(peri_acp_types::tasks::BgTaskRegistration {
-                // 任务身份 = 稳定 child thread id：adoption、重复进入与 resume 指令
-                // 都指向同一身份。`TaskRecord.child_thread_id` 仍为空，因为公共注册
-                // 契约不接受 live inbox；task_id 本身即 child 身份。
+            .register_live_agent(peri_acp_types::tasks::LiveAgentRegistration {
                 task_id: task_id.clone(),
-                kind: peri_acp_types::tasks::BgTaskKind::Agent,
+                child_thread_id: child.to_string(),
                 summary: "recovered subagent".to_owned(),
-                pid: None,
-                kill: Some(Box::new(move || cancel_on_kill.cancel())),
+                queue: self.v2_message_queue.clone(),
+                cancel: cancel_token.clone(),
             })
             .map_err(|error| format!("parent task projection rejected the child: {error}"))?;
         delivery.task = Some(RecoveryTaskBinding {

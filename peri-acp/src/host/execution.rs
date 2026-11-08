@@ -53,7 +53,7 @@ pub(super) async fn approve_schedule(
         let state = sessions
             .get_mut(&request.session_id)
             .ok_or_else(|| AcpError::new(-32602, "scheduled session missing"))?;
-        if state.closing {
+        if state.closing || state.close_in_flight > 0 {
             return Err(AcpError::new(-32800, "scheduled session is closing"));
         }
         state.cancel_token = Some(cancel.clone());

@@ -78,6 +78,7 @@ pub(super) fn create_session_workflow_chain(
         // （会话已登记时取到；未登记/print 模式为 None → 技能工具为空面）。
         cfg.session_manager.mcp_skill_registry_for(session_id),
         cfg.session_resources.clone(),
+        cfg.model_transport_route.clone(),
     )
 }
 
@@ -463,6 +464,7 @@ pub(crate) async fn new_session_from_prepared(
             cwd: cwd.clone(),
             environment: environment.clone(),
             closing: false,
+            close_in_flight: 0,
             context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads: Vec::new(),
             structure_version: 0,
@@ -843,6 +845,7 @@ pub(crate) async fn handle_fork(
             cwd: cwd.to_string(),
             environment: environment.clone(),
             closing: false,
+            close_in_flight: 0,
             context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads: published_payloads,
             structure_version: 0,

@@ -179,6 +179,7 @@ pub(in crate::host) async fn build_server_config(
         host_task_spawner,
         mcp_task_owner: Some(Box::new(mcp_task_owner)),
         provider: Arc::new(parking_lot::RwLock::new(provider)),
+        model_transport_route: None,
         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
         permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
         cron_scheduler: None,
@@ -365,6 +366,7 @@ async fn register_session_with_history(
             cwd: workspace.cwd.to_str().unwrap().to_owned(),
             environment: None,
             closing: false,
+            close_in_flight: 0,
             context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads,
             structure_version: 0,
@@ -621,6 +623,9 @@ mod workflow_cases;
 #[path = "requests_lifecycle_cases_test.rs"]
 mod lifecycle_cases;
 
+#[path = "requests_close_failure_test.rs"]
+mod close_failure;
+
 #[path = "requests_mcp_cases_test.rs"]
 mod mcp_cases;
 
@@ -724,6 +729,7 @@ async fn register_session_with_workflow(
                 .to_owned(),
             environment: None,
             closing: false,
+            close_in_flight: 0,
             context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads: Vec::new(),
             structure_version: 0,

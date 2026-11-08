@@ -316,6 +316,19 @@ impl RecoveryHarness {
             .save_child(&snapshot)
             .await
             .unwrap();
+        self.cfg
+            .session_resources
+            .update_session_meta(
+                &child.to_owned(),
+                &peri_acp_types::session_resources::SessionMetaPatch {
+                    config: Some(Some(
+                        peri_acp_types::thread::with_completion_target(None, Some(parent)).unwrap(),
+                    )),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
     }
 
     /// 生产同款 continuation scheduler；通道前面挂一层记录，观察启动门顺序。

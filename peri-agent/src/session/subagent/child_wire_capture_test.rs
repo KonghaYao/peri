@@ -266,6 +266,97 @@ async fn bound_parent(
     (store, parent, cwd, repo, db)
 }
 
+/// Identical child prompts bind through their creating tool calls even when both factories run
+/// concurrently and share a provider. Resume keeps the owner but starts a new real execution.
+#[tokio::test]
+async fn concurrent_child_requests_keep_parent_tool_causality_across_resume() {
+    use crate::agent::model_call::scope_tool_parent;
+
+    let (store, parent, cwd, _repo, _db) = bound_parent("child-call-context.db").await;
+    let model = CaptureModel::new("child done");
+    let turn = parent.start_turn();
+    let make_parent = |tool_call: &str| peri_model::ModelCallParent {
+        owner: parent.store().thread_id.clone().unwrap(),
+        execution: turn.execution_binding().attempt_id.to_string(),
+        call: "reason:0".into(),
+        tool_call: tool_call.into(),
+        slot: None,
+    };
+    let make_config = |tool_call: &str| {
+        let mut config = child_config(
+            Arc::clone(&store),
+            Arc::clone(&model),
+            Arc::new(ContributionAssembler {
+                contribution: Arc::new(Mutex::new(None)),
+            }),
+            false,
+            &cwd,
+        );
+        config.parent_tool_call_id = Some(tool_call.into());
+        config
+    };
+    let first_parent = make_parent("spawn-first");
+    let second_parent = make_parent("spawn-second");
+    let (first, second) = tokio::join!(
+        scope_tool_parent(
+            Some(first_parent.clone()),
+            SessionFactory::spawn_subagent(Some(&parent), make_config("spawn-first")),
+        ),
+        scope_tool_parent(
+            Some(second_parent.clone()),
+            SessionFactory::spawn_subagent(Some(&parent), make_config("spawn-second")),
+        ),
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    let contexts: Vec<_> = model
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| request.call_context.clone().unwrap())
+        .collect();
+    assert_eq!(contexts.len(), 2);
+    let first_context = contexts
+        .iter()
+        .find(|context| context.owner == first.child_thread_id)
+        .unwrap();
+    let second_context = contexts
+        .iter()
+        .find(|context| context.owner == second.child_thread_id)
+        .unwrap();
+    assert_eq!(first_context.parent, Some(first_parent));
+    assert_eq!(second_context.parent, Some(second_parent));
+    assert_ne!(first_context.execution, second_context.execution);
+    assert_eq!(first_context.call, "reason:1");
+    assert_eq!(second_context.call, "reason:1");
+
+    let resume_parent = make_parent("resume-first");
+    let mut resume = resume_config_with(
+        Arc::clone(&store),
+        first.child_thread_id.clone(),
+        SubagentLlmSource::model(
+            Arc::clone(&model) as Arc<dyn peri_model::Model>,
+            "capture-model",
+        ),
+        SubagentRunMode::Sync,
+        None,
+        None,
+    );
+    resume.parent_tool_call_id = Some("resume-first".into());
+    scope_tool_parent(
+        Some(resume_parent.clone()),
+        SessionFactory::resume_subagent(Some(&parent), resume),
+    )
+    .await
+    .unwrap();
+    let requests = model.requests.lock().unwrap();
+    let resumed = requests.last().unwrap().call_context.as_ref().unwrap();
+    assert_eq!(resumed.owner, first_context.owner);
+    assert_ne!(resumed.execution, first_context.execution);
+    assert_eq!(resumed.parent, Some(resume_parent));
+}
+
 /// [回归测试] 外部正文从冻结 owner 传到子请求，子身份历史不保存该正文；
 /// 冷/热恢复沿父快照复用，二级派生只从 owner 继承一次。
 #[tokio::test]

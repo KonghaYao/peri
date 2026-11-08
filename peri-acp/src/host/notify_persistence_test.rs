@@ -188,6 +188,7 @@ fn session_state(sid: &str, cwd: &str) -> SessionState {
         cwd: cwd.to_string(),
         environment: None,
         closing: false,
+        close_in_flight: 0,
         context_ownership: crate::host::ContextOwnership::Resident,
         history_payloads: Vec::new(),
         structure_version: 0,
