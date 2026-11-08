@@ -151,6 +151,9 @@ pub(super) fn ensure_listener(
                     biased;
                     _ = cancellation.cancelled() => return,
                     _ = shutdown.cancelled() => return,
+                    // 恢复启动门释放：监听器可能已消费本轮 watch 版本，必须重查
+                    // 独立可执行的普通工作（失败恢复提醒仍只由显式进入重试）。
+                    _ = listener_activation.gate_released() => {}
                     changed = wake.changed() => {
                         if changed.is_err() { return; }
                     }

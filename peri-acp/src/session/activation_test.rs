@@ -60,7 +60,10 @@ async fn explicit_stop_survives_failure_and_fresh_required_work() {
     activation.record_failed_attempt(watermark);
     enqueue(&queue, MessageKind::Defer).await;
     assert!(!activation.can_activate(&queue).await);
+    // 启动路径的 allow() 不清 Stop：新用户轮次准入才是显式继续的线性化点。
     activation.allow();
+    assert!(activation.user_stopped());
+    activation.begin_user_turn();
     assert!(activation.can_activate(&queue).await);
 }
 
@@ -73,15 +76,18 @@ fn recovery_allow_does_not_clear_an_explicit_stop() {
     assert!(activation.user_stopped());
     assert!(!activation.is_allowed());
 
-    // 显式继续仍是唯一能解除 Stop 的入口。
     activation.allow();
+    assert!(activation.user_stopped(), "启动路径不得清除显式 Stop");
     assert!(activation.is_allowed());
+
+    // 显式新用户轮次才是唯一能解除 Stop 的入口。
+    activation.begin_user_turn();
+    assert!(!activation.user_stopped());
 }
 
 #[test]
 fn recovery_allow_arms_execution_without_a_stop() {
     let activation = SessionActivation::default();
-    activation.suppress();
     activation.allow();
 
     assert!(activation.try_allow());

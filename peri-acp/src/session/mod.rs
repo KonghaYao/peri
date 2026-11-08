@@ -134,11 +134,6 @@ pub struct AcpSession {
     /// 任何一条路径发起，投递都只发生一次（收尾取走即清空）。种子取本次恢复提醒
     /// 的稳定 ID；同一 child 的多次恢复不能共用结果消息身份。
     pub(crate) recovery_parent: parking_lot::Mutex<Option<crate::session::RecoveryDelivery>>,
-    /// 恢复启动的 continuation 在 Receive 前失败（进程内事实，不持久化）。
-    ///
-    /// 由 prompt dispatch 写入、下一次显式进入 take 并清除：允许采纳同一提醒重试，
-    /// 不自动重试，也不新增持久相位。
-    pub(crate) recovery_launch_failed: std::sync::atomic::AtomicBool,
     /// 恢复准备失败且分类为不可执行时的执行阻断（仅内存，不持久化）。
     ///
     /// 每次 `session/load|resume` 重新尝试恢复：成功清除，失败按当前分类重设。
@@ -306,21 +301,18 @@ impl AcpSession {
 
     /// 记录一次恢复启动在 Receive 前失败；下一次显式进入读取并清除。
     pub(crate) fn mark_recovery_launch_failed(&self) {
-        self.recovery_launch_failed
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.activation.mark_recovery_launch_failed();
     }
 
     /// 读取并清除恢复启动早失败事实：同一次失败最多触发一次重新准入。
     pub(crate) fn take_recovery_launch_failed(&self) -> bool {
-        self.recovery_launch_failed
-            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        self.activation.take_recovery_launch_failed()
     }
 
     /// 仅测试：当前是否仍保留恢复启动早失败标记。
     #[cfg(test)]
     pub(crate) fn recovery_launch_failed(&self) -> bool {
-        self.recovery_launch_failed
-            .load(std::sync::atomic::Ordering::Acquire)
+        self.activation.recovery_launch_failed()
     }
 
     /// 设置执行阻断：恢复准备失败且当前分类不可执行。

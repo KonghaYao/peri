@@ -16,44 +16,6 @@ async fn durable_work_state(harness: &RecoveryHarness, thread_id: &str) -> WorkS
         .work_state
 }
 
-/// 以 `ServerLoop::dispatch_notification` 同序处理 Stop：先锁内捕获目标，再锁外
-/// 持久化。返回捕获的目标与持久化任务，测试负责在需要的屏障处等待/放行。
-async fn capture_and_spawn_stop(
-    harness: &RecoveryHarness,
-    thread_id: &str,
-) -> (
-    Vec<crate::host::notify::IntentTarget>,
-    tokio::task::JoinHandle<()>,
-) {
-    let targets = {
-        let mut states = harness.sessions.lock().await;
-        crate::host::notify::handle_notification(
-            "session/cancel",
-            &json!({"sessionId": thread_id}),
-            &mut states,
-            &harness.cfg,
-        )
-        .await
-        .stop_targets
-    };
-    let cfg = Arc::clone(&harness.cfg);
-    let sessions = Arc::clone(&harness.sessions);
-    let locks = Arc::clone(&harness.locks);
-    let persist_targets = targets.clone();
-    let persist = tokio::spawn(async move {
-        crate::host::notify::persist_notification_effects(
-            "session/cancel",
-            &cfg,
-            &sessions,
-            &locks,
-            persist_targets,
-            Vec::new(),
-        )
-        .await;
-    });
-    (targets, persist)
-}
-
 #[tokio::test]
 async fn work_state_commit_failure_rejects_prompt_before_model_call() {
     let harness = RecoveryHarness::new().await;
@@ -254,7 +216,7 @@ async fn stop_between_working_commit_and_epoch_advance_settles_stopped() {
         .await
         .expect("prompt 必须停在 working 提交之后、代次推进之前");
 
-    let (targets, persist) = capture_and_spawn_stop(&harness, &thread_id).await;
+    let (targets, persist) = harness.capture_and_spawn_stop(&thread_id).await;
     assert_eq!(targets.len(), 1);
     assert_eq!(
         targets[0].epoch, 0,
@@ -312,7 +274,7 @@ async fn stale_stop_across_close_load_cannot_override_new_working() {
     // 旧生命周期的 Stop：捕获代次 1，worker 暂停在 gate_for 之后。
     let stop_gate =
         crate::host::prompt_dispatch::admission_gate::install(&format!("{thread_id}:stop-persist"));
-    let (targets, persist) = capture_and_spawn_stop(&harness, &thread_id).await;
+    let (targets, persist) = harness.capture_and_spawn_stop(&thread_id).await;
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].epoch, 1);
     assert_eq!(targets[0].session_generation, Some(old_generation));
@@ -398,4 +360,174 @@ async fn stale_stop_across_close_load_cannot_override_new_working() {
         .expect("新 prompt 不得挂起")
         .expect("新 prompt 任务不得 panic");
     assert!(result.is_ok(), "新轮次应正常完成: {result:?}");
+}
+
+/// P2 复审：真实用户 prompt 落在 `working` 已提交、代次尚未推进的窗口时，
+/// Stop 的锁外持久化会被代次守卫跳过。本轮随后启动失败，必须按显式停止落
+/// durable `stopped`，而不是把 Stop 当普通中断回收成 idle。
+///
+/// 缺少冻结上下文是确定性的启动失败：若 Stop 被 `allow()` 清除，失败清理会按
+/// 普通失败结算；回归要求启动失败、零模型调用与 `stopped` 同时成立。
+#[tokio::test]
+async fn user_stop_between_working_commit_and_epoch_advance_settles_stopped() {
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    // 固定启动失败：清掉冻结上下文后，任何真正进入执行的尝试都会失败。
+    let frozen = {
+        let mut states = harness.sessions.lock().await;
+        let frozen = states.get_mut(&thread_id).expect("会话存在").frozen.take();
+        assert!(frozen.is_some(), "夹具必须带冻结上下文");
+        frozen
+    };
+
+    let gate = crate::host::prompt_dispatch::admission_gate::install(&format!(
+        "{thread_id}:working-committed"
+    ));
+    let prompt = {
+        let sessions = Arc::clone(&harness.sessions);
+        let locks = Arc::clone(&harness.locks);
+        let transport = Arc::clone(&harness.transport);
+        let cfg = Arc::clone(&harness.cfg);
+        let sender = Arc::clone(&harness.sender);
+        let thread_id = thread_id.clone();
+        tokio::spawn(async move {
+            dispatch_prompt_turn(
+                json!({
+                    "sessionId": thread_id,
+                    "prompt": [{"type": "text", "text": "hello"}],
+                }),
+                PromptOrigin::User,
+                None,
+                &sessions,
+                &locks,
+                &transport,
+                &cfg,
+                &sender,
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(WAIT_TIMEOUT, gate.entered.notified())
+        .await
+        .expect("prompt 必须停在 working 提交之后、代次推进之前");
+
+    let (targets, persist) = harness.capture_and_spawn_stop(&thread_id).await;
+    assert_eq!(targets.len(), 1);
+    assert_eq!(
+        targets[0].epoch, 0,
+        "Stop 必须读到代次推进前的值（复现迟到持久化的条件）"
+    );
+
+    gate.release.notify_one();
+    let result = tokio::time::timeout(WAIT_TIMEOUT, prompt)
+        .await
+        .expect("prompt 不得挂起")
+        .expect("prompt 任务不得 panic");
+    let error = result.expect_err("缺少冻结上下文必须启动失败");
+    assert_eq!(error.code, -32603, "{error:?}");
+    tokio::time::timeout(WAIT_TIMEOUT, persist)
+        .await
+        .expect("Stop 持久化不得挂起")
+        .expect("Stop 持久化任务不得 panic");
+
+    assert!(!harness._mock.matched(), "被 Stop 的轮次不得进入模型调用");
+    assert_eq!(
+        durable_work_state(&harness, &thread_id).await,
+        WorkState::Stopped,
+        "用户 Stop 不得被启动路径清除后按普通失败结算"
+    );
+    assert!(
+        harness
+            .sessions
+            .lock()
+            .await
+            .get(&thread_id)
+            .is_some_and(|state| state.cancel_token.is_none()),
+        "本轮准入令牌必须被清除"
+    );
+    assert_eq!(
+        harness.recovery_rows(&thread_id).await.len(),
+        0,
+        "用户 prompt 不产生恢复提醒"
+    );
+    drop(frozen);
+}
+
+/// P2 复审：Stop 落在尝试已 attach、启动尚未完成时，Stop 持久化先写 `stopped`；
+/// 若 `allow()` 清掉停止意图，随后的启动失败会把同一 thread 回收成 idle。
+///
+/// 屏障固定在 attach 之后：令牌此时仍有效，Stop 才会走「启动中取消」而不是
+/// 「attach 前拒绝」。持久化任务先完成，再由启动失败决定最终 durable 事实。
+#[tokio::test]
+async fn user_stop_after_attach_survives_startup_failure() {
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    {
+        let mut states = harness.sessions.lock().await;
+        assert!(
+            states
+                .get_mut(&thread_id)
+                .expect("会话存在")
+                .frozen
+                .take()
+                .is_some(),
+            "夹具必须带冻结上下文"
+        );
+    }
+
+    let gate = crate::host::prompt_dispatch::admission_gate::install(&format!(
+        "{thread_id}:attempt-attached"
+    ));
+    let prompt = {
+        let sessions = Arc::clone(&harness.sessions);
+        let locks = Arc::clone(&harness.locks);
+        let transport = Arc::clone(&harness.transport);
+        let cfg = Arc::clone(&harness.cfg);
+        let sender = Arc::clone(&harness.sender);
+        let thread_id = thread_id.clone();
+        tokio::spawn(async move {
+            dispatch_prompt_turn(
+                json!({
+                    "sessionId": thread_id,
+                    "prompt": [{"type": "text", "text": "hello"}],
+                }),
+                PromptOrigin::User,
+                None,
+                &sessions,
+                &locks,
+                &transport,
+                &cfg,
+                &sender,
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(WAIT_TIMEOUT, gate.entered.notified())
+        .await
+        .expect("prompt 必须停在 attach 之后、启动完成之前");
+
+    let (targets, persist) = harness.capture_and_spawn_stop(&thread_id).await;
+    assert_eq!(targets.len(), 1);
+    tokio::time::timeout(WAIT_TIMEOUT, persist)
+        .await
+        .expect("Stop 持久化不得挂起")
+        .expect("Stop 持久化任务不得 panic");
+    assert_eq!(
+        durable_work_state(&harness, &thread_id).await,
+        WorkState::Stopped,
+        "Stop 的锁外持久化应先落 stopped"
+    );
+
+    gate.release.notify_one();
+    let result = tokio::time::timeout(WAIT_TIMEOUT, prompt)
+        .await
+        .expect("prompt 不得挂起")
+        .expect("prompt 任务不得 panic");
+    assert!(result.is_err(), "缺少冻结上下文必须启动失败: {result:?}");
+    assert!(!harness._mock.matched(), "失败必须在模型调用之前");
+    assert_eq!(
+        durable_work_state(&harness, &thread_id).await,
+        WorkState::Stopped,
+        "启动失败不得把显式 Stop 覆盖成 idle"
+    );
 }

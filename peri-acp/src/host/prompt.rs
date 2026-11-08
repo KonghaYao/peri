@@ -310,6 +310,8 @@ async fn run_prompt_attempt(
             .await
             .ok_or_else(|| AcpError::new(-32800, "user input attempt superseded"))?,
     };
+    #[cfg(test)]
+    super::prompt_dispatch::admission_gate::wait(&format!("{session_id}:attempt-attached")).await;
     let mut input_attempt_guard = super::user_input::InputAttemptGuard::new(
         Arc::clone(&user_input_mailbox),
         input_attempt.clone(),

@@ -552,9 +552,11 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                 // 根/child 的恢复启动 continuation。保留 working 与提醒，供下一次
                 // 显式进入重试；不能按普通中断回收成 idle。
                 let recovery_attempt = recovery_settlement_pending || recovery_origin;
-                if never_finished && stopped_before_handoff && !recovery_attempt {
-                    // 已取消且从未移交执行器：显式停止必须落库。恢复来源保留既有
-                    // 「working + 提醒」语义，由恢复结算统一写终态（§5.3）。
+                if never_finished && stopped_before_handoff {
+                    // 显式停止优先于恢复早失败分类：User 与恢复来源都必须落 durable
+                    // `stopped`，否则启动路径会把用户 Stop 留成待自动恢复的 working。
+                    // 已取消令牌仍按既有契约移交执行器（cancelled/-32010 响应），
+                    // 启动失败时的终态只能由准入层按显式意图收敛。
                     stopped_thread = Some(state.thread_id.clone());
                 } else if never_finished && recovery_attempt {
                     recovery_early_failure = true;
@@ -621,7 +623,9 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         .get_session(&prompt_session_id)
         .and_then(|runtime| runtime.take_recovery_parent());
     if let Some(delivery) = recovery_delivery {
-        if recovery_early_failure {
+        if recovery_early_failure || stopped_before_handoff {
+            // 早失败没有终态可结算；显式停止的轮次也从未执行，不向父级投递
+            // 完成/失败结果事实，只收尾已登记的父级任务（§5.3）。
             super::recovery::finish_recovered_child_without_result(cfg, &delivery);
         } else {
             super::recovery::deliver_child_turn(

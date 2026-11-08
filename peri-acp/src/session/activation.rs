@@ -1,16 +1,18 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::Mutex;
-use peri_acp_types::session::{MessageQueue, MqWatermark};
+use peri_acp_types::session::{MessageQueue, MessageSource, MqWatermark};
 use peri_agent::session::async_result_mailbox::AsyncResultMailbox;
 
 #[derive(Default)]
 pub(crate) struct SessionActivation {
     pub(crate) listener_started: AtomicBool,
     allowed: AtomicBool,
-    /// 进程内显式 Stop 意图：`suppress()` 置位、`allow()` 清除。
+    /// 进程内显式 Stop 意图：`suppress()` 置位、新的用户/队列轮次准入清除。
     ///
     /// 与 `allowed` 分开：`allowed` 还会被失败尝试复位，恢复入口只信用户是否显式停止。
+    /// 启动路径的 `allow()` 不再清除它：Stop 可能落在准入与启动之间，清除会让
+    /// 执行前失败按普通失败结算。
     user_stop: AtomicBool,
     /// Stop 与恢复放行的线性化点：`try_allow()` 在同一把锁内确认停止意图，
     /// 复核之后落下的 Stop 不会被放行覆盖。
@@ -19,6 +21,13 @@ pub(crate) struct SessionActivation {
     /// 普通激活不得为同一条提醒并发下单。两条续跑在 prompt lock 上竞争时，
     /// 普通轮次的早失败会污染恢复的工作意图与提醒。
     recovery_launch_pending: AtomicBool,
+    /// 恢复启动门释放的唤醒源：监听器可能已消费 watch 版本后因门关闭返回，
+    /// 只清原子位会让已入队的普通工作等待无关事件。
+    gate_released: tokio::sync::Notify,
+    /// 恢复启动在 Receive 前失败：下一次显式进入读取并清除。
+    ///
+    /// 置位期间普通激活只处理独立来源，不自动重试失败的恢复提醒。
+    recovery_launch_failed: AtomicBool,
     /// 最近一次失败尝试开始时 MQ 接纳水位；只检查其后的 EnsureProcessing。
     failed_input_watermark: Mutex<Option<MqWatermark>>,
     /// 最近一次失败尝试开始时 mailbox 已接纳结果的最大代数。只有其后新到达的
@@ -30,7 +39,6 @@ impl SessionActivation {
     pub(crate) fn allow(&self) {
         *self.failed_input_watermark.lock() = None;
         self.failed_result_watermark.store(0, Ordering::Release);
-        self.user_stop.store(false, Ordering::Release);
         self.allowed.store(true, Ordering::Release);
     }
 
@@ -54,12 +62,37 @@ impl SessionActivation {
     }
 
     /// 幂等结束恢复启动门；跳过、提交准入与响应丢弃都可调用。
+    ///
+    /// 释放时唤醒监听器重查：它可能已消费本轮 watch 版本，仅清原子位会让
+    /// 已入队的普通工作等到无关事件才被看见。
     pub(crate) fn finish_recovery_launch(&self) {
-        self.recovery_launch_pending.store(false, Ordering::Release);
+        if self.recovery_launch_pending.swap(false, Ordering::AcqRel) {
+            self.gate_released.notify_one();
+        }
     }
 
     pub(crate) fn recovery_launch_pending(&self) -> bool {
         self.recovery_launch_pending.load(Ordering::Acquire)
+    }
+
+    /// 等待恢复启动门释放（监听器重查独立工作的唤醒源）。
+    pub(crate) async fn gate_released(&self) {
+        self.gate_released.notified().await;
+    }
+
+    /// 记录一次恢复启动在 Receive 前失败；下一次显式进入读取并清除。
+    pub(crate) fn mark_recovery_launch_failed(&self) {
+        self.recovery_launch_failed.store(true, Ordering::Release);
+    }
+
+    /// 读取并清除恢复启动早失败事实：同一次失败最多触发一次重新准入。
+    pub(crate) fn take_recovery_launch_failed(&self) -> bool {
+        self.recovery_launch_failed.swap(false, Ordering::AcqRel)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recovery_launch_failed(&self) -> bool {
+        self.recovery_launch_failed.load(Ordering::Acquire)
     }
 
     /// 恢复放行：与 [`suppress()`](Self::suppress) 共用互斥，显式 Stop 优先。
@@ -106,11 +139,19 @@ impl SessionActivation {
             return false;
         }
         let watermark = self.failed_input_watermark.lock().clone();
-        self.is_allowed()
-            && queue
-                .has_ensure_processing_after(&watermark)
+        let eligible = if self.recovery_launch_failed.load(Ordering::Acquire) {
+            // 恢复启动早失败后，恢复提醒只由下一次显式进入重试；其他来源仍是
+            // 独立可执行的普通工作，不能因同一队列里有一条失败提醒而搁置。
+            queue
+                .has_ensure_processing_after_excluding(
+                    &watermark,
+                    &[MessageSource::SessionRecovery],
+                )
                 .await
-                .unwrap_or(false)
+        } else {
+            queue.has_ensure_processing_after(&watermark).await
+        };
+        self.is_allowed() && eligible.unwrap_or(false)
     }
 
     /// Ready 结果是否构成新的、允许自动尝试的工作来源。

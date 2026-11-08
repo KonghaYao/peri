@@ -248,6 +248,44 @@ impl RecoveryHarness {
             .unwrap();
     }
 
+    /// 以 `ServerLoop::dispatch_notification` 同序处理 Stop：先锁内捕获目标，再锁外
+    /// 持久化。返回捕获的目标与持久化任务，测试负责在需要的屏障处等待/放行。
+    async fn capture_and_spawn_stop(
+        &self,
+        thread_id: &str,
+    ) -> (
+        Vec<crate::host::notify::IntentTarget>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let targets = {
+            let mut states = self.sessions.lock().await;
+            crate::host::notify::handle_notification(
+                "session/cancel",
+                &json!({"sessionId": thread_id}),
+                &mut states,
+                &self.cfg,
+            )
+            .await
+            .stop_targets
+        };
+        let cfg = Arc::clone(&self.cfg);
+        let sessions = Arc::clone(&self.sessions);
+        let locks = Arc::clone(&self.locks);
+        let persist_targets = targets.clone();
+        let persist = tokio::spawn(async move {
+            crate::host::notify::persist_notification_effects(
+                "session/cancel",
+                &cfg,
+                &sessions,
+                &locks,
+                persist_targets,
+                Vec::new(),
+            )
+            .await;
+        });
+        (targets, persist)
+    }
+
     fn queue(&self, thread_id: &str) -> peri_acp_types::session::MessageQueue {
         self.cfg
             .session_manager
@@ -431,6 +469,9 @@ fn reminder_body(entry: &peri_acp_types::session::MqEntry) -> String {
 
 #[path = "recovery_behavior_test.rs"]
 mod behavior_tests;
+
+#[path = "recovery_gate_test.rs"]
+mod gate_tests;
 
 #[path = "recovery_child_test.rs"]
 mod recovery_child;

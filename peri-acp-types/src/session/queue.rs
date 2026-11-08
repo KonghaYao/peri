@@ -826,6 +826,19 @@ impl MessageQueue {
         &self,
         watermark: &Option<MqWatermark>,
     ) -> Result<bool> {
+        self.has_ensure_processing_after_excluding(watermark, &[])
+            .await
+    }
+
+    /// 排除指定来源后，是否仍有需要模型处理的入队项。
+    ///
+    /// 恢复启动早失败后，`SessionRecovery` 提醒只由下一次显式进入重试；同一队列
+    /// 里的其他来源仍是独立可执行的普通工作，不能因失败提醒而一并搁置。
+    pub async fn has_ensure_processing_after_excluding(
+        &self,
+        watermark: &Option<MqWatermark>,
+        excluded_sources: &[MessageSource],
+    ) -> Result<bool> {
         let filter = MqFilter {
             after: watermark.clone(),
             ..Default::default()
@@ -833,7 +846,9 @@ impl MessageQueue {
         let entries = self.query(filter).await?;
         let selection = self.inner.send_selection.lock().clone();
         Ok(entries.iter().any(|entry| {
-            is_eligible_for_receive(entry, &selection) && entry.policy.ensures_processing()
+            is_eligible_for_receive(entry, &selection)
+                && entry.policy.ensures_processing()
+                && !excluded_sources.contains(&entry.source)
         }))
     }
 
