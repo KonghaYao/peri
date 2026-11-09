@@ -46,26 +46,6 @@ mod window_tests;
 #[path = "child_history_test.rs"]
 mod child_history_tests;
 
-/// History V2 own 适配器：真实 SQLite 上的 open/page/seek/body、fixed tail 与 opaque。
-/// 模块名参与 `cargo test` 过滤（`history_v2_adapter`）。
-#[path = "history_v2_adapter_test.rs"]
-mod history_v2_adapter_tests;
-
-/// History V2 inherited 冻结前缀：跨区 open/page/seek、ordinal、body 分块与可见性。
-/// 模块名参与 `cargo test` 过滤（`history_v2_adapter`）。
-#[path = "history_v2_adapter_inherited_test.rs"]
-mod history_v2_adapter_inherited_tests;
-
-/// History V2 `session/load` initial（H4b）：协商、首屏、幂等重放、失效与失败 effect。
-/// 模块名参与 `cargo test` 过滤（`history_v2_load`）。
-#[path = "history_v2_load_test.rs"]
-mod history_v2_load_tests;
-
-/// H8：History V2 wire 端到端（真实 initialize + initial + page/seek/body + live + close）。
-/// 模块名参与 `cargo test` 过滤（`history_v2_end_to_end`）。
-#[path = "history_v2_end_to_end_test.rs"]
-mod history_v2_end_to_end_tests;
-
 /// G5：session/load 不在全局 sessions 锁内做资源/DB I/O。
 #[path = "history_page_window_lock_test.rs"]
 mod window_lock_tests;

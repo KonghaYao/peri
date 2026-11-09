@@ -25,8 +25,6 @@ mod requests;
 mod session;
 mod session_load_reservation;
 mod steer;
-#[cfg(test)]
-pub(crate) mod test_support;
 mod workspace;
 
 pub(crate) use session::AdmissionGuard;

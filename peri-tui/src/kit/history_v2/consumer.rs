@@ -562,6 +562,7 @@ pub(crate) fn request_close_current() -> bool {
 }
 
 /// 关闭指定会话的当前 V2 窗口；会话不匹配时不动其他会话的窗口。
+#[cfg(test)]
 pub(crate) fn request_close_for_session(session_id: &str) -> bool {
     enqueue_close(Some(session_id))
 }
