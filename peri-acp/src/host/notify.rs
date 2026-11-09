@@ -315,6 +315,12 @@ async fn live_work_intent(
         })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct IntentCheck {
+    superseded: bool,
+    generation_moved: bool,
+}
+
 /// 捕获后目标是否已过期：同一生命周期内已有更新 turn 准入，或新生命周期的
 /// 用户 prompt 已推进意图水位。
 ///
@@ -325,18 +331,39 @@ async fn live_work_intent(
 /// `work_intent_epoch` 比较（覆盖所有 turn 准入）；实例代次不能省，否则
 /// close/load 后新旧 epoch 数值相同会让旧 Stop 覆盖新轮次的 `working`
 /// （见 `stale_stop_across_close_load_*`）。
-async fn intent_superseded(sessions: &SharedSessions, target: &IntentTarget) -> bool {
+async fn check_intent(sessions: &SharedSessions, target: &IntentTarget) -> IntentCheck {
     let Some((generation, epoch, user_epoch)) = live_work_intent(sessions, &target.thread_id).await
     else {
-        return false;
+        return IntentCheck {
+            superseded: false,
+            generation_moved: false,
+        };
     };
     let generation_moved = target
         .session_generation
         .is_some_and(|captured| captured != generation);
-    if generation_moved {
-        return user_epoch > 0;
+    let superseded = if generation_moved {
+        user_epoch > 0
+    } else {
+        epoch != target.epoch
+    };
+    IntentCheck {
+        superseded,
+        generation_moved,
     }
-    epoch != target.epoch
+}
+
+/// 跨生命周期的 Stop 落库后，抑制新实例的自动激活。
+///
+/// 旧 Stop 可能在恢复轮次已发布 `cancel_token`、尚未取得 `work_intent` 锁时落库；
+/// 抑制后该轮在写 `working` 前能看到用户停止意图并退出，不会覆盖 `stopped`。
+fn suppress_live_activation(cfg: &AcpServerConfig, thread_id: &ThreadId) {
+    let Some(session_id) = cfg.session_manager.session_id_for_thread(thread_id) else {
+        return;
+    };
+    if let Some(runtime) = cfg.session_manager.get_session(&session_id) {
+        runtime.activation.suppress();
+    }
 }
 
 /// 通知的锁外持久化副作用：Stop 意图与模型配置变化后的占用失效。
@@ -358,7 +385,8 @@ pub(crate) async fn persist_notification_effects(
         super::prompt_dispatch::admission_gate::wait(&format!("{}:stop-persist", target.thread_id))
             .await;
         let _guard = gate.work_intent.lock().await;
-        if intent_superseded(sessions, &target).await {
+        let check = check_intent(sessions, &target).await;
+        if check.superseded {
             debug!(
                 method,
                 thread_id = %target.thread_id,
@@ -367,6 +395,9 @@ pub(crate) async fn persist_notification_effects(
                 "stop intent superseded by newer session lifecycle or turn admission; skip persistence"
             );
             continue;
+        }
+        if check.generation_moved {
+            suppress_live_activation(cfg, &target.thread_id);
         }
         if let Err(error) = cfg
             .session_manager
@@ -388,7 +419,7 @@ pub(crate) async fn persist_notification_effects(
     for target in context_usage_invalidations {
         let gate = gate_for(sessions, prompt_locks, &target.thread_id).await;
         let _guard = gate.work_intent.lock().await;
-        if intent_superseded(sessions, &target).await {
+        if check_intent(sessions, &target).await.superseded {
             debug!(
                 method,
                 thread_id = %target.thread_id,

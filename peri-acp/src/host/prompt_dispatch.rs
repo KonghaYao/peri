@@ -416,6 +416,41 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     // `working` 落库与意图代次推进必须同在 work_intent 临界区内：Stop 持久化在
     // 同一把锁下复核代次，才不会把本轮的 working 覆盖回 stopped。
     let work_intent_guard = prompt_lock.work_intent.lock().await;
+    let activation = cfg
+        .session_manager
+        .get_session(&prompt_session_id)
+        .map(|runtime| Arc::clone(&runtime.activation));
+    // Stop 可能在本轮发布 cancel_token 之后、取得 work_intent 锁之前落库（例如
+    // close/load 后旧 Stop 与新恢复轮次交错）。恢复轮次此时必须放弃写 working；
+    // 普通续跑的取消响应与「Stop 后允许一次独立 child 自动轮次」语义保持不变。
+    if recovery_origin && activation.as_ref().is_some_and(|a| a.user_stopped()) {
+        drop(work_intent_guard);
+        rollback_turn_admission(
+            sessions,
+            &prompt_session_id,
+            is_continuation,
+            admitted_cancel.as_ref(),
+        )
+        .await;
+        tracing::debug!(
+            session_id = %prompt_session_id,
+            "user stop persisted during admission; skip before working commit"
+        );
+        return Ok(serde_json::Value::Null);
+    }
+    if is_user_intent
+        && activation.as_ref().is_some_and(|a| a.user_stopped())
+        && !admitted_cancel
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+    {
+        // 旧生命周期的 Stop 持久化可能在本轮首次 begin_user_turn 之后、取得
+        // work_intent 锁之前抑制了新实例；用户/队列输入是更新的意图，清掉它。
+        // 若本轮令牌已被新的 Stop 取消，则保持停止意图，交给准入后的停止分支。
+        if let Some(activation) = activation.as_ref() {
+            activation.begin_user_turn();
+        }
+    }
     if let Err(error) = cfg
         .session_manager
         .session_resources()

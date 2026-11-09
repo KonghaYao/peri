@@ -693,3 +693,76 @@ async fn review_pending_stop_survives_real_load_recovery() {
         "恢复 turn 的收尾不得把已落库的 stopped 改回 idle"
     );
 }
+
+/// P1：反向顺序 Stop→Working。恢复轮次已发布 cancel_token、停在 `:committed`
+/// （尚未取得 work_intent 锁）时旧 Stop 落库；恢复必须看到用户停止意图并退出，
+/// 不得再写 working、不得调用模型。
+#[tokio::test]
+async fn review_stop_before_recovery_commit_not_overwritten_by_working() {
+    let mut harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+    harness.spawn_continuation_scheduler();
+
+    let stop_gate =
+        crate::host::prompt_dispatch::admission_gate::install(&format!("{thread_id}:stop-persist"));
+    let (targets, persist) = harness.capture_and_spawn_stop(&thread_id).await;
+    assert_eq!(targets.len(), 1);
+    tokio::time::timeout(WAIT_TIMEOUT, stop_gate.entered.notified())
+        .await
+        .expect("Stop worker 必须停在 work_intent 锁之前");
+
+    // 真实 ServerLoop：close → load；恢复轮次停在 :committed（token 已发布，
+    // work_intent 锁尚未取得）。
+    let committed_gate =
+        crate::host::prompt_dispatch::admission_gate::install(&format!("{thread_id}:committed"));
+    push_request(
+        &harness,
+        1,
+        "session/close",
+        json!({"sessionId": thread_id.clone()}),
+    );
+    push_request(
+        &harness,
+        2,
+        "session/load",
+        json!({"sessionId": thread_id.clone()}),
+    );
+    run_server_loop(&harness).await;
+    tokio::time::timeout(WAIT_TIMEOUT, committed_gate.entered.notified())
+        .await
+        .expect("恢复轮次必须停在 :committed");
+
+    // 先放行旧 Stop：Stop 在恢复写 working 之前落库。
+    stop_gate.release.notify_one();
+    tokio::time::timeout(WAIT_TIMEOUT, persist)
+        .await
+        .expect("Stop 持久化不得挂起")
+        .expect("Stop 持久化任务不得 panic");
+    assert_eq!(
+        stored_work_state(&harness, &thread_id).await,
+        WorkState::Stopped,
+        "Stop 必须先在恢复写 working 前落库"
+    );
+
+    // 再放行恢复：它必须回滚准入并退出，不得覆盖 stopped，也不得调用模型。
+    committed_gate.release.notify_one();
+    wait_for("恢复轮次回滚准入", || async {
+        harness
+            .sessions
+            .lock()
+            .await
+            .get(&thread_id)
+            .is_some_and(|state| state.cancel_token.is_none())
+    })
+    .await;
+    assert!(
+        !harness._mock.matched(),
+        "Stop 已落库时恢复轮次不得调用模型"
+    );
+    assert_eq!(
+        stored_work_state(&harness, &thread_id).await,
+        WorkState::Stopped,
+        "恢复轮次不得把已落库的 stopped 覆盖为 working"
+    );
+}

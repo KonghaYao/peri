@@ -126,7 +126,7 @@ pub async fn run_acp_stdio(input: StdioInput) -> anyhow::Result<()> {
         Ok(())
     } else {
         Err(anyhow::anyhow!(
-            "ACP host shutdown did not settle: {report:?}"
+            "ACP host shutdown did not settle ({report:?}); pending Stop may not be persisted"
         ))
     }
 }

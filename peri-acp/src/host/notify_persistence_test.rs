@@ -598,11 +598,18 @@ async fn send_stdio_request(
     }
 }
 
-/// P1：正常 stdio EOF 走真实 wrapper。第一次 shutdown 因 Stop 持久化阻塞报
-/// `Incomplete` 后，wrapper 必须保留 context 重入 finish，而不是直接 Drop owner；
-/// 存储恢复后旧 Stop 仍落库，最终报告 Complete。
-#[tokio::test]
-async fn review_stdio_eof_preserves_pending_stop() {
+/// 真实 stdio 连接 + 阻塞 Stop 写 + EOF 的公共夹具。
+///
+/// `idle_before_stop` 用于构造「server 已运行超过 retry 窗口后才进入关闭」的
+/// 长寿命连接；Stop 写入被阻塞到 EOF 后的首轮 shutdown 报 Incomplete 之后才放行。
+async fn run_stdio_eof_with_blocked_stop(
+    idle_before_stop: Duration,
+) -> (
+    crate::host::AcpHostShutdownReport,
+    Arc<dyn SessionResources>,
+    String,
+    tempfile::TempDir,
+) {
     let tmp = tempfile::TempDir::new().unwrap();
     let (_bridge, facade) =
         peri_resources::sessions::open_store_and_facade_for_tests(tmp.path().join("threads.db"))
@@ -655,6 +662,9 @@ async fn review_stdio_eof_preserves_pending_stop() {
         .await
         .unwrap();
 
+    // 长寿命连接条件：server 与连接在 Stop 之前已运行超过 retry 窗口。
+    tokio::time::sleep(idle_before_stop).await;
+
     write_json_line(
         &mut input,
         json!({
@@ -668,15 +678,24 @@ async fn review_stdio_eof_preserves_pending_stop() {
         .await
         .expect("Stop 持久化必须走到被阻塞的 set_work_state");
 
-    // stdin EOF：生产 wrapper 开始关闭；首轮 shutdown 会在短时限后报 Incomplete。
+    // stdin EOF：首轮 shutdown 在短时限后报 Incomplete；再放行存储。
     drop(input);
     tokio::time::sleep(Duration::from_millis(400)).await;
     release.notify_one();
 
-    let report = tokio::time::timeout(Duration::from_secs(10), server)
+    let report = tokio::time::timeout(Duration::from_secs(20), server)
         .await
         .expect("wrapper 必须在有界窗口内返回")
         .expect("server task 不得 panic");
+    (report, resources, sid, tmp)
+}
+
+/// P1：正常 stdio EOF 走真实 wrapper。第一次 shutdown 因 Stop 持久化阻塞报
+/// `Incomplete` 后，wrapper 必须保留 context 重入 finish，而不是直接 Drop owner；
+/// 存储恢复后旧 Stop 仍落库，最终报告 Complete。
+#[tokio::test]
+async fn review_stdio_eof_preserves_pending_stop() {
+    let (report, resources, sid, _tmp) = run_stdio_eof_with_blocked_stop(Duration::ZERO).await;
     assert!(
         report.is_complete(),
         "存储恢复后 wrapper 必须让待持久化 Stop 完成: {report:?}"
@@ -685,5 +704,24 @@ async fn review_stdio_eof_preserves_pending_stop() {
         resources.load_session_meta(&sid).await.unwrap().work_state,
         WorkState::Stopped,
         "stdio EOF 关闭不得丢弃已接受的 Stop"
+    );
+}
+
+/// P1：retry 窗口必须从**首次 Incomplete** 起算，而不是从 server 启动起算。
+///
+/// 连接先运行 31s（超过 30s 窗口）再 EOF；旧实现用「启动时间 + 30s」作 deadline，
+/// 首轮 Incomplete 会立即超时并 Drop owner，abort 尚未落库的 Stop。
+#[tokio::test]
+async fn review_long_lived_stdio_eof_preserves_pending_stop() {
+    let (report, resources, sid, _tmp) =
+        run_stdio_eof_with_blocked_stop(Duration::from_secs(31)).await;
+    assert!(
+        report.is_complete(),
+        "长寿命连接关闭后 wrapper 必须让待持久化 Stop 完成: {report:?}"
+    );
+    assert_eq!(
+        resources.load_session_meta(&sid).await.unwrap().work_state,
+        WorkState::Stopped,
+        "长寿命 stdio 连接不得提前 abort 待落库的 Stop"
     );
 }

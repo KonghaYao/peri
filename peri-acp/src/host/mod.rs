@@ -506,22 +506,27 @@ pub(crate) type PromptLocks = Arc<tokio::sync::Mutex<HashMap<String, Arc<PromptG
 /// 正常部署关闭的等待窗口：已接受但受存储阻塞的 Stop 持久化仍可能留在
 /// `NotificationEffect` 中。保留 `AcpHostHandle` 的退出上下文并重入 `finish`，
 /// 给耐久任务完成机会；窗口有界，超时仍返回非 `Complete`，不会无限阻塞。
+///
+/// 期限从**首次 `Incomplete`** 起算，而不是从 server 启动起算：第一次
+/// `shutdown()` 先等 server 读到 EOF 并完成首轮排空，长寿命连接不占用重试窗口。
 const HOST_SHUTDOWN_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 const HOST_SHUTDOWN_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 async fn settle_host_shutdown(
     mut handle: lifecycle::AcpHostHandle,
 ) -> lifecycle::AcpHostShutdownReport {
-    let deadline = tokio::time::Instant::now() + HOST_SHUTDOWN_RETRY_WINDOW;
+    let mut retry_deadline = None;
     loop {
         let report = handle.shutdown().await;
         if report.is_complete() || !handle.retains_shutdown_context() {
             return report;
         }
+        let deadline = *retry_deadline
+            .get_or_insert_with(|| tokio::time::Instant::now() + HOST_SHUTDOWN_RETRY_WINDOW);
         if tokio::time::Instant::now() >= deadline {
             tracing::warn!(
                 ?report,
-                "ACP host shutdown retry window expired; deployment not settled"
+                "ACP host shutdown retry window expired; pending Stop may not be persisted"
             );
             return report;
         }
