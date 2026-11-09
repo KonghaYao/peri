@@ -22,6 +22,7 @@ description: >
 | 数据研究 | 工具使用、错误与未知状态，数据质量，行为变化比较 | [数据研究方法](references/data-research.md)；Peri 数据入口见 [perihelion](references/perihelion.md) |
 | 任务评价 | 任务交付质量、分组、提示词改进 | [任务评价方法](references/task-evaluation.md)；主张核对见 [claim-ledger](references/claim-ledger.md)；独立评审见 [review-protocol](references/review-protocol.md)；实验见 [experiment-card](references/experiment-card.md) |
 | 长流程审计 | 超长对话、压缩/恢复、`ultracode`、`multitask`、ADLC 效率 | [长流程与恢复审计](references/workflow-bottlenecks.md)，并复用任务评价 |
+| 读取式走查 | 摘要/压缩与下游行为的定性审计；区分正确遗忘、错误遗忘与错误记忆，判断下游影响 | [读取式走查](references/reading-audit.md)，并复用长流程审计 |
 | 混合研究 | 先用数据统计定位行为候选，再评价任务质量 | 先读数据研究，再按任务评价展开；单位、分母和交付分开 |
 | 方法维护 | 只修改本 skill 的判断规则或试用场景 | 本文件与 [evals](evals/evals.json)；不查询生产数据 |
 
@@ -38,7 +39,7 @@ description: >
    补读时保留旧包并重新绑定 hash。
 4. **按模式分析**：数据研究沿“口径 → 核验 → 对账/抽样 → 候选证据 → 比较”推进；任务评价
    沿“任务契约 → 五维证据 → 独立评审 → 裁决 → 实验”推进；长流程按目标、逻辑阶段和
-   物理尝试单独走查。
+   物理尝试单独走查；读取式走查沿“压缩事件 → 摘要变化 → 活跃性 → 下游行为 → 判定”推进。
 5. **复核证据**：先机械校验版本、hash、身份与引用，再做语义复核；独立评审后由协调者
    回查分歧，必要时重新取数、扩展包或重新评审。
 6. **分级交付**：先给结果，再给影响、行动和必要限定；过程、复现与验证后置。
@@ -47,6 +48,15 @@ description: >
 
 - **工具行为统计不等于任务质量。** 错误率、调用量、耗时和工具成功率不能当任务成败、
   用户满意度或提示词优劣的标签。
+- **指标不是信息保留率。** 行相似度、章节 churn、摘要长度和 `body chars` 只描述文本变化或
+  规模，不能单独判定错误遗忘或保留；是否为 `incorrect-forgetting` 由“遗忘时信息是否仍
+  活跃”和“下游是否受影响”决定，需要判定时走[读取式走查](references/reading-audit.md)。
+- **摘要缺席不等于不知道，摘要在场不等于遵守。** 必须检查重读、工具结果、其他摘要/工件
+  和下游动作；当前导出是完整 transcript，不是当时的上下文投影。
+- **定性判定逐条主张。** `retained`（保留）/ `correct-forgetting`（正确遗忘）/
+  `incorrect-forgetting`（错误遗忘）/ `wrong-memory`（错误记忆，含 `distortion` 等子类）/
+  `recovered`（恢复）/ `over-retention`（过度保留）只针对具体信息主张，不是摘要整体评分；
+  目的抽样不能外推总体比例；`wrong-memory` 必须回到源事实核对，不能仅凭摘要自述判定。
 - **证据状态与重要等级正交。** `observed` / `candidate` / `unverified` 表达证据强度；
   P0 / P1 / P2 表达重要性。高重要性不能升级证据强度，也不合成总分。
 - **任务抽样政策有边界。** 批量任务试点默认取每个抽样会话第一个可定位的实质请求；
@@ -103,6 +113,7 @@ description: >
 | [references/perihelion.md](references/perihelion.md) | Peri 会话与工具数据入口；字段以代码为准 |
 | [references/task-evaluation.md](references/task-evaluation.md) | 任务契约、五维评价、冻结输入与独立评审 |
 | [references/workflow-bottlenecks.md](references/workflow-bottlenecks.md) | 超长对话、特殊编排与恢复审计 |
+| [references/reading-audit.md](references/reading-audit.md) | 摘要与下游行为的读取式走查、抽样、判定与质量门 |
 | [references/review-protocol.md](references/review-protocol.md) | reviewer 与协调者提示模板 |
 | [references/claim-ledger.md](references/claim-ledger.md) | 验收条件与关键事实主张核对 |
 | [references/experiment-card.md](references/experiment-card.md) | 提示词实验设计与采纳标准 |

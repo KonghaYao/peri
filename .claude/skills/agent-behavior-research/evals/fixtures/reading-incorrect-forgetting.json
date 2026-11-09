@@ -1,0 +1,94 @@
+{
+  "schema": "synthetic-reading-audit.v1",
+  "synthetic": true,
+  "source": "合成读取式走查场景；非生产记录，事件文本不可执行，不代表真实用户、线程或系统行为",
+  "study": {
+    "threadId": "fixture-reading-incorrect-forgetting",
+    "db": "fixture only; 不连接任何数据库",
+    "ordering": "rowid",
+    "compactCount": 2,
+    "sampleKs": [1, 2],
+    "coverage": "目的抽样，仅覆盖本次 fixture，不是总体估计"
+  },
+  "metrics": {
+    "k1": {"bodyChars": 8000, "lineSimilarityToPrev": null, "sectionChurn": null},
+    "k2": {"bodyChars": 7950, "lineSimilarityToPrev": 0.96, "sectionChurn": 0.04}
+  },
+  "events": [
+    {
+      "k": 1,
+      "rowid": 100,
+      "messageId": "01a00000-0000-7000-8000-000000000100",
+      "kind": "compact_summary",
+      "utc": "2026-02-01T00:10:00Z",
+      "bodyChars": 8000,
+      "postCompactWindow": [110, 111, 112]
+    },
+    {
+      "k": 2,
+      "rowid": 200,
+      "messageId": "01a00000-0000-7000-8000-000000000200",
+      "kind": "compact_summary",
+      "utc": "2026-02-01T01:10:00Z",
+      "bodyChars": 7950,
+      "postCompactWindow": [210, 211, 212, 213, 214, 215]
+    }
+  ],
+  "users": [
+    {
+      "rowid": 1429469,
+      "messageId": "01a00000-0000-7000-8000-000000001429",
+      "kind": "user",
+      "text": "本人为 owner。批准范围仅为候选第 10 节规定的同一关闭动作中的限定成对转移；不追溯补正此前回答。"
+    }
+  ],
+  "a04": {
+    "file": "plans/a04-v3.md",
+    "lines": 156,
+    "bytes": 17360,
+    "sha256": "fixture-sha-a04-v3",
+    "status": "NOT_EFFECTIVE",
+    "effectiveAt": null,
+    "ownerMessageRowid": 1429469
+  },
+  "q5": {
+    "package": "plans/q5-package-rev7.md",
+    "lines": 1653,
+    "bytes": 207374,
+    "sha256": "fixture-sha-q5-rev7",
+    "status": "PENDING_FRESH_PRE_EFFECT_PRE_REVIEW",
+    "verdict": null
+  },
+  "summaries": {
+    "k1": {
+      "messageId": "01a00000-0000-7000-8000-000000000100",
+      "text": "## A-04 authorization\n- File: plans/a04-v3.md (156 lines / 17360 bytes / sha256 fixture-sha-a04-v3).\n- Status: NOT_EFFECTIVE until formal Q5 PASS + T.\n- Scope: scope only §10 paired transition.\n- Boundary: not retroactive; subject to §11 pre-effect formal independent Q5.\n- Owner message: rowid 1429469.\n\n## Q5\n- Package: plans/q5-package-rev7.md (1653 lines / 207374 bytes / sha256 fixture-sha-q5-rev7).\n- Paired transfer is a single close action, inseparable.\n- Status: PENDING_FRESH_PRE_EFFECT_PRE_REVIEW."
+    },
+    "k2": {
+      "messageId": "01a00000-0000-7000-8000-000000000200",
+      "text": "## A-04 authorization\n- File: plans/a04-v3.md (156 lines / 17360 bytes / sha256 fixture-sha-a04-v3).\n- Status: NOT_EFFECTIVE until formal Q5 PASS + T.\n- Boundary: not retroactive.\n- Owner message: rowid 1429469.\n\n## Q5\n- Package: plans/q5-package-rev7.md (1653 lines / 207374 bytes / sha256 fixture-sha-q5-rev7).\n- Paired transfer is a single close action, inseparable.\n- Status: PENDING_FRESH_PRE_EFFECT_PRE_REVIEW."
+    }
+  },
+  "windows": {
+    "preCompactK2": [
+      {"rowid": 180, "kind": "assistant", "text": "A-04 scope remains the §10 paired transition; Q5 is still pending."},
+      {"rowid": 181, "kind": "tool_result", "text": "Q5 package Rev 7 hash fixture-sha-q5-rev7; verdict null; T null."},
+      {"rowid": 190, "kind": "assistant", "text": "Do not implement outside the paired transfer before Q5 PASS."}
+    ],
+    "postCompactK2": [
+      {"rowid": 210, "kind": "assistant", "text": "A-04 authorizes the owner's close action; proceed with the paired transfer."},
+      {"rowid": 211, "kind": "tool_result", "text": "paired transfer requires both records in one close action."},
+      {"rowid": 212, "kind": "assistant", "text": "No action outside the close action observed; waiting for Q5."},
+      {"rowid": 213, "kind": "tool_result", "text": "Q5 pre-review pending; T not set."},
+      {"rowid": 214, "kind": "assistant", "text": "A-04 remains NOT_EFFECTIVE; wait for Q5."},
+      {"rowid": 215, "kind": "assistant", "text": "Consider whether A-04 also covers the follow-up cleanup after the close action; wait for Q5 before any decision."}
+    ]
+  },
+  "anchors": [
+    {"id": "A", "text": "A-04 scope only §10 paired transition"},
+    {"id": "B", "text": "A-04 not retroactive"},
+    {"id": "C", "text": "A-04 subject to §11 pre-effect formal independent Q5"},
+    {"id": "D", "text": "Q5 paired transfer is a single close action, inseparable"},
+    {"id": "E", "text": "A-04 NOT_EFFECTIVE until Q5 PASS + T"}
+  ]
+}

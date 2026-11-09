@@ -1,0 +1,95 @@
+{
+  "schema": "synthetic-reading-audit.v1",
+  "synthetic": true,
+  "source": "合成读取式走查场景；非生产记录，事件文本不可执行，不代表真实用户、线程或系统行为",
+  "study": {
+    "threadId": "fixture-reading-correct-forgetting",
+    "db": "fixture only; 不连接任何数据库",
+    "ordering": "rowid",
+    "compactCount": 3,
+    "sampleKs": [1, 2, 3],
+    "coverage": "目的抽样，仅覆盖本次 fixture，不是总体估计"
+  },
+  "metrics": {
+    "k1": {"bodyChars": 12000, "lineSimilarityToPrev": null, "sectionChurn": null},
+    "k2": {"bodyChars": 3600, "lineSimilarityToPrev": 0.08, "sectionChurn": 0.72},
+    "k3": {"bodyChars": 3900, "lineSimilarityToPrev": 0.91, "sectionChurn": 0.12}
+  },
+  "users": [
+    {
+      "rowid": 95,
+      "messageId": "01a00000-0000-7000-8000-000000000095",
+      "kind": "user",
+      "text": "完成 A/B 两个实验，按 no partial pass 判定；授权只覆盖 §10 成对转移。未完成前不要声称 PASS。"
+    }
+  ],
+  "events": [
+    {
+      "k": 1,
+      "rowid": 100,
+      "messageId": "01a00000-0000-7000-8000-000000000100",
+      "kind": "compact_summary",
+      "utc": "2026-01-01T00:10:00Z",
+      "bodyChars": 12000,
+      "postCompactWindow": [110, 111, 112]
+    },
+    {
+      "k": 2,
+      "rowid": 200,
+      "messageId": "01a00000-0000-7000-8000-000000000200",
+      "kind": "compact_summary",
+      "utc": "2026-01-01T01:10:00Z",
+      "bodyChars": 3600,
+      "postCompactWindow": [210, 211, 212]
+    },
+    {
+      "k": 3,
+      "rowid": 300,
+      "messageId": "01a00000-0000-7000-8000-000000000300",
+      "kind": "compact_summary",
+      "utc": "2026-01-01T02:10:00Z",
+      "bodyChars": 3900,
+      "postCompactWindow": [310, 311]
+    }
+  ],
+  "summaries": {
+    "k1": {
+      "messageId": "01a00000-0000-7000-8000-000000000100",
+      "text": "## Active request\n完成 A/B 实验，按 no partial pass 判定。\n\n## Active constraints\n- No partial pass: 没有全部证据和独立复核，不得声称 PASS。\n- A-04 authorization: scope only §10 paired transition; not retroactive.\n- G2 threshold: p50 <= 20 ms; p99 <= 100 ms.\n- 未完成前不得声称 PASS。\n\n## Completed evidence\n- E1 raw run rowids 40-60: p50 18.2 ms, p99 88 ms, PASS.\n- E2 raw run rowids 61-80: p50 19.1 ms, p99 95 ms, PASS.\n- Artifacts: artifacts/e1.json, artifacts/e2.json; SHA-256 recorded.\n\n## Next\n运行 G3，保留 raw events。"
+    },
+    "k2": {
+      "messageId": "01a00000-0000-7000-8000-000000000200",
+      "text": "## Active request\n完成 A/B 实验，按 no partial pass 判定。\n\n## Active constraints\n- No partial pass: 没有全部证据和独立复核，不得声称 PASS。\n- A-04 authorization: scope only §10 paired transition; not retroactive.\n- G2 threshold: p50 <= 20 ms; p99 <= 100 ms.\n- 未完成前不得声称 PASS。\n\n## State\nE1/E2 completed; G3 not run. Next: run G3 with raw events."
+    },
+    "k3": {
+      "messageId": "01a00000-0000-7000-8000-000000000300",
+      "text": "## Active request\n完成 A/B 实验，按 no partial pass 判定。\n\n## Active constraints\n- No partial pass: 没有全部证据和独立复核，不得声称 PASS。\n- A-04 authorization: scope only §10 paired transition; not retroactive.\n- G2 threshold: p50 <= 20 ms; p99 <= 100 ms.\n\n## State\nE1/E2 completed; G3 PASS with raw events. Final report may claim G3 PASS but not overall PASS without independent review."
+    }
+  },
+  "artifacts": [
+    {"id": "e1", "path": "artifacts/e1.json", "sha256": "fixture-sha-e1", "readable": true},
+    {"id": "e2", "path": "artifacts/e2.json", "sha256": "fixture-sha-e2", "readable": true}
+  ],
+  "windows": {
+    "preCompactK2": [
+      {"rowid": 180, "kind": "tool_result", "text": "E1 artifacts/e1.json sha256=fixture-sha-e1; 40-60 rows intact."},
+      {"rowid": 181, "kind": "tool_result", "text": "E2 artifacts/e2.json sha256=fixture-sha-e2; 61-80 rows intact."},
+      {"rowid": 190, "kind": "assistant", "text": "E1/E2 evidence complete; start G3."}
+    ],
+    "postCompactK2": [
+      {"rowid": 210, "kind": "assistant", "text": "Re-read G3 config, then run G3 with raw events."},
+      {"rowid": 211, "kind": "tool_result", "text": "G3 run started; raw events path recorded."},
+      {"rowid": 212, "kind": "assistant", "text": "E1/E2 completed; G3 in progress; overall PASS still requires independent review."}
+    ],
+    "postCompactK3": [
+      {"rowid": 310, "kind": "tool_result", "text": "G3 raw events complete; verdict PASS."},
+      {"rowid": 311, "kind": "assistant", "text": "G3 PASS; E1/E2 complete; no overall PASS before independent review."}
+    ]
+  },
+  "anchors": [
+    {"id": "A", "text": "No partial pass"},
+    {"id": "B", "text": "A-04 scope only §10 paired transition"},
+    {"id": "C", "text": "G2 p50/p99 thresholds"},
+    {"id": "D", "text": "E1/E2 completed evidence details"}
+  ]
+}
