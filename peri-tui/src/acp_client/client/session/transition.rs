@@ -278,28 +278,53 @@ impl AcpTuiClient {
         let previous_v2 = crate::kit::history_v2::snapshot();
         let history_v2 = self.history_v2_active();
         let limits = self.history_v2_limits();
-        let request_key = history_v2.then(crate::kit::history_v2::consumer::next_request_key);
-        let params = match request_key {
-            Some(request_key) => json!({
-                "sessionId": session_id,
-                "cwd": effective_cwd,
-                "model": model,
-                "_meta": {
-                    peri_acp_types::history_v2::HISTORY_META_KEY:
-                        crate::kit::history_v2::initial::initial_request_value(&limits, request_key),
-                },
-            }),
-            None => json!({ "sessionId": session_id, "cwd": effective_cwd, "model": model }),
-        };
         if history_v2 {
             // F2b：load 响应可能晚于服务端 flush 的 live 通知到达；先登记暂存。
             crate::kit::history_v2::live::begin_pending(session_id);
         }
-        let loaded = match self
-            .transport
-            .send_request("session/load", params.clone())
-            .await
-        {
+        // V2 load 与窗口/正文共用同一出站 FIFO：requestKey 分配与入队在同一临界区，
+        // 队列阻塞时 K+1 不会先于 K 上线。没有调度器时 submit 退化为直发。
+        let v2_load = history_v2.then(|| {
+            crate::kit::history_v2::outbound::submit_load(|request_key| {
+                json!({
+                    "sessionId": session_id,
+                    "cwd": effective_cwd,
+                    "model": model,
+                    "_meta": {
+                        peri_acp_types::history_v2::HISTORY_META_KEY:
+                            crate::kit::history_v2::initial::initial_request_value(&limits, request_key),
+                    },
+                })
+            })
+        });
+        let (request_key, loaded) = match v2_load {
+            None => (
+                None,
+                self.transport
+                    .send_request(
+                        "session/load",
+                        json!({ "sessionId": session_id, "cwd": effective_cwd, "model": model }),
+                    )
+                    .await,
+            ),
+            Some(Ok((request_key, crate::kit::history_v2::outbound::Submit::Queued(receiver)))) => {
+                (
+                    Some(request_key),
+                    receiver.await.unwrap_or_else(|_| {
+                        Err(AcpError::new(-32603, "history load scheduler closed"))
+                    }),
+                )
+            }
+            Some(Ok((request_key, crate::kit::history_v2::outbound::Submit::Direct(params)))) => (
+                Some(request_key),
+                self.transport.send_request("session/load", params).await,
+            ),
+            Some(Err(crate::kit::history_v2::outbound::SubmitError::Closed)) => (
+                None,
+                Err(AcpError::new(-32603, "history load scheduler closed")),
+            ),
+        };
+        let loaded = match loaded {
             Ok(loaded) => loaded,
             Err(error) => {
                 if history_v2 {

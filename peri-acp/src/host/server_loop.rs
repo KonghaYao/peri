@@ -974,22 +974,15 @@ impl ServerLoop<'_> {
         }
         let v2_initial_ok = live_v2_initial.is_some() && result.is_ok();
         let response_sent = diagnostics.send(transport.as_ref(), result).await.is_ok();
-        // 首屏响应先入通道，随后才补发 load 期间缓冲的实时更新；失败路径关闭未发布的流。
+        // 首屏响应先入通道，随后才补发 load 期间缓冲的实时更新。排空按批进行：
+        // 排空期间新事件继续入缓冲，因此不会越过已分配序号但尚未发送的批次。
         if let Some((session_id, live)) = live_v2_initial {
             if v2_initial_ok && response_sent {
-                for payload in live.resume_and_take(&session_id) {
-                    if let Err(error) = transport.send_notification("session/update", payload).await
-                    {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %error,
-                            "history v2 live flush failed; closing delivery stream"
-                        );
-                        live.close(&session_id);
-                        break;
-                    }
-                }
+                flush_live_updates(&live, &session_id, transport, true).await;
             } else {
+                // initial 未发布：候选期更新已并回旧流，先补发；从未发布首屏的暂停流
+                // 仍按既有语义关闭。
+                flush_live_updates(&live, &session_id, transport, false).await;
                 live.close_if_paused(&session_id);
             }
         }
@@ -1106,5 +1099,38 @@ impl ServerLoop<'_> {
             outcome.context_usage_invalidations,
         )
         .await;
+    }
+}
+
+/// 按批排空 History V2 实时缓冲，直到一次空批确认排空。
+///
+/// `resume_paused=true` 用于 initial 成功后恢复首屏边界；`false` 只补发 initial 失败
+/// 时并回旧流的候选更新，从未发布首屏的暂停流留给调用方关闭。
+async fn flush_live_updates(
+    live: &super::live_delivery::LiveDelivery,
+    session_id: &str,
+    transport: &Arc<dyn crate::transport::AcpTransport>,
+    resume_paused: bool,
+) {
+    loop {
+        let batch = if resume_paused {
+            live.resume_and_take(session_id)
+        } else {
+            live.drain_flushing(session_id)
+        };
+        if batch.is_empty() {
+            return;
+        }
+        for payload in batch {
+            if let Err(error) = transport.send_notification("session/update", payload).await {
+                tracing::warn!(
+                    session_id,
+                    error = %error,
+                    "history v2 live flush failed; closing delivery stream"
+                );
+                live.close(session_id);
+                return;
+            }
+        }
     }
 }

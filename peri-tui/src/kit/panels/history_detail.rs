@@ -635,12 +635,35 @@ fn spawn_v2_detail_chunk(binding: HistoryV2BodyBinding, offset: u64, max_bytes: 
         return;
     };
     tokio::spawn(async move {
-        let request = crate::kit::history_v2::consumer::body_request(&binding, offset, max_bytes);
-        let result = peri_time::timeout(
-            V2_DETAIL_FETCH_TIMEOUT,
-            client.history_v2_request(request.params()),
-        )
-        .await;
+        // 正文请求与窗口请求共用连接级 FIFO：requestKey 分配与入队同临界区，
+        // 队列阻塞时不得越过已入队的窗口请求。没有调度器时保持直发。
+        let result =
+            match crate::kit::history_v2::consumer::submit_body(&binding, offset, max_bytes) {
+                Ok(crate::kit::history_v2::outbound::Submit::Queued(receiver)) => {
+                    peri_time::timeout(V2_DETAIL_FETCH_TIMEOUT, async move {
+                        receiver.await.unwrap_or_else(|_| {
+                            Err(peri_acp::transport::types::AcpError::new(
+                                -32603,
+                                "history body scheduler closed",
+                            ))
+                        })
+                    })
+                    .await
+                }
+                Ok(crate::kit::history_v2::outbound::Submit::Direct(request)) => {
+                    peri_time::timeout(
+                        V2_DETAIL_FETCH_TIMEOUT,
+                        client.history_v2_request(request.params()),
+                    )
+                    .await
+                }
+                Err(crate::kit::history_v2::outbound::SubmitError::Closed) => {
+                    Ok(Err(peri_acp::transport::types::AcpError::new(
+                        -32603,
+                        "history body scheduler closed",
+                    )))
+                }
+            };
         let handle = crate::kit::atoms::HISTORY_DETAIL.state();
         let mut guard = handle.write();
         let Some(detail) = guard.as_mut() else {

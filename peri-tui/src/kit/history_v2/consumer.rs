@@ -200,31 +200,6 @@ pub(crate) fn next_request_key() -> DecimalU64 {
     DecimalU64::new(atoms::HISTORY_V2_NEXT_KEY.fetch_add(1, Ordering::Relaxed) + 1)
 }
 
-/// 详情正文请求：V1 详情面板的直接发送路径。
-///
-/// V2 主流程由 [`outbound::submit_body`] 排队；这里保留构造入口，供尚未迁移到
-/// 出站队列的调用方使用，二者共用 `next_request_key` 的单调分配。
-pub(crate) fn body_request(
-    binding: &crate::kit::history_window::HistoryV2BodyBinding,
-    offset: u64,
-    max_bytes: u32,
-) -> super::request::HistoryV2BodyRequest {
-    super::request::HistoryV2BodyRequest {
-        context: super::request::HistoryV2RequestContext {
-            request_key: next_request_key(),
-            session_id: binding.session_id.clone(),
-            window_id: binding.window_id.clone(),
-            snapshot_token: binding.snapshot_token.clone(),
-            read_ticket: binding.read_ticket.clone(),
-            view_epoch: 0,
-        },
-        body_key: String::new(),
-        body_ref: binding.body_ref.clone(),
-        offset: DecimalU64::new(offset),
-        max_bytes,
-    }
-}
-
 #[cfg(test)]
 pub(crate) fn reset_request_key_for_test() {
     atoms::HISTORY_V2_NEXT_KEY.store(0, Ordering::Relaxed);

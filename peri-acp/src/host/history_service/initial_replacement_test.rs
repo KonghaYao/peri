@@ -436,8 +436,9 @@ async fn candidate_starts_before_backend_open_and_preserves_sequence() {
         second.live_boundary.stream_id
     );
     assert_eq!(pending[0]["_meta"]["peri.delivery"]["eventSeq"], "2");
+    assert!(live.resume_and_take("s1").is_empty(), "空批确认排空");
 
-    // ── 失败路径：候选回收，旧流身份/序号不变 ──
+    // ── 失败路径：候选回收，候选期更新并回旧流按序补发 ──
     fake.set_open_result(Err(HistoryBackendError::BackendUnavailable));
     let gate = fake.gate_next_open();
     let task_service = service.clone();
@@ -468,15 +469,23 @@ async fn candidate_starts_before_backend_open_and_preserves_sequence() {
         live.has_stream_with_id("s1", &second.live_boundary.stream_id),
         "失败后旧流身份不变"
     );
+    let recovered = live.resume_and_take("s1");
+    assert_eq!(recovered.len(), 1, "候选期更新不得静默丢失");
+    assert_eq!(
+        recovered[0]["_meta"]["peri.delivery"]["streamId"],
+        second.live_boundary.stream_id
+    );
+    assert_eq!(
+        recovered[0]["_meta"]["peri.delivery"]["eventSeq"], "3",
+        "候选事件由旧流续号补发"
+    );
+    assert!(live.resume_and_take("s1").is_empty(), "空批确认排空");
     let next = publish(&live, "three");
     assert_eq!(
         next["_meta"]["peri.delivery"]["streamId"],
         second.live_boundary.stream_id
     );
-    assert_eq!(
-        next["_meta"]["peri.delivery"]["eventSeq"], "3",
-        "候选事件被丢弃后旧流序号仍从 afterSeq+1 继续"
-    );
+    assert_eq!(next["_meta"]["peri.delivery"]["eventSeq"], "4");
     assert_eq!(service.window_count(), 1);
     assert_eq!(service.opening_window_count(), 0);
 }
@@ -537,4 +546,76 @@ async fn initial_timeout_keeps_old_state_and_allows_same_key_retry() {
     assert_eq!(service.window_count(), 1);
     assert_ne!(retry.page.window_id, first_window.id);
     assert!(live.has_stream_with_id("s1", &retry.live_boundary.stream_id));
+}
+
+/// 超时期间发布的真实更新不得随候选一起消失：旧流身份与序号保持连续。
+#[tokio::test]
+async fn timeout_keeps_candidate_updates_on_the_old_stream() {
+    let clock = Arc::new(ManualClock::new());
+    let clock_ref: Arc<dyn HistoryClock> = clock.clone();
+    let service = Arc::new(HistoryV2Service::with_ledger_limits_and_timeout(
+        clock_ref,
+        LedgerLimits::default(),
+        Duration::from_millis(50),
+    ));
+    let fake = Arc::new(FakeBackend::new(snap_with(opaque_page())));
+    let live = Arc::new(LiveDelivery::new());
+    let first = service
+        .initial(request(1), context(&fake, &live))
+        .await
+        .expect("first initial");
+    live.resume_and_take("s1");
+    let first_stream = first.live_boundary.stream_id.clone();
+    assert_eq!(
+        publish(&live, "one")["_meta"]["peri.delivery"]["eventSeq"],
+        "1"
+    );
+
+    let _gate = fake.gate_next_open();
+    let task_service = service.clone();
+    let task_fake = fake.clone();
+    let task_live = live.clone();
+    let task = tokio::spawn(async move {
+        task_service
+            .initial(request(2), context(&task_fake, &task_live))
+            .await
+    });
+    fake.open_entered.notified().await;
+    assert!(matches!(
+        live.publish("s1", text_update("during-timeout")),
+        PublishOutcome::Buffered
+    ));
+    let error = task
+        .await
+        .expect("task")
+        .expect_err("gated open must time out");
+    assert_eq!(reason(&error), HistoryErrorReason::Timeout);
+    assert!(!live.has_candidate("s1"), "超时必须回收候选");
+    assert!(
+        live.has_stream_with_id("s1", &first_stream),
+        "超时不改变旧 streamId"
+    );
+
+    let recovered = live.resume_and_take("s1");
+    assert_eq!(recovered.len(), 1, "超时期间的更新不得静默丢失");
+    assert_eq!(
+        recovered[0]["_meta"]["peri.delivery"]["streamId"],
+        first_stream
+    );
+    assert_eq!(recovered[0]["_meta"]["peri.delivery"]["eventSeq"], "2");
+    assert!(live.resume_and_take("s1").is_empty(), "空批确认排空");
+    assert_eq!(
+        publish(&live, "after")["_meta"]["peri.delivery"]["eventSeq"],
+        "3"
+    );
+}
+
+fn text_update(text: &str) -> Value {
+    json!({
+        "sessionId": "s1",
+        "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": text },
+        },
+    })
 }

@@ -1115,3 +1115,178 @@ fn page_and_seek_send_failure_roll_back_in_flight_state() {
         assert_eq!(paging.reserved_bytes, 0, "seek 预留必须回滚");
     }
 }
+
+/// 窗口响应阻塞消费队列时，body 与 `session/load` 都不得越过已入队请求。
+///
+/// 顺序由「requestKey 分配 + 入队」同一临界区保证；这个用例覆盖生产调用点
+/// （load 走 `submit_load`，详情走 `submit_body`），而不仅是队列辅助函数。
+#[tokio::test]
+#[serial]
+async fn blocked_queue_keeps_body_and_load_in_enqueue_order() {
+    let _guard = atomics_guard();
+    reset_request_key_for_test();
+    let limits = HistoryLimits::default();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
+    let (client, _, _) = crate::acp_client::client::AcpTuiClient::new(transport);
+    client.install_history_v2_for_test(true, true, limits.clone());
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    *atoms::HISTORY_V2_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tx);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let consumer = spawn_history_v2_consumer(client.clone(), rx, shutdown.clone());
+
+    // K：占住消费者的窗口请求；响应返回前 FIFO 不再发送后续命令。
+    let blocking = match crate::kit::history_v2::outbound::enqueue_window(|request_key| {
+        Some(HistoryV2ConsumerRequest::Close {
+            session_id: "s1".into(),
+            request_key,
+            window_id: "w0".into(),
+            snapshot_token: "snap-0".into(),
+            read_ticket: "ticket-0".into(),
+        })
+    }) {
+        crate::kit::history_v2::outbound::WindowEnqueue::Sent(key) => key,
+        other => panic!("blocking request must enqueue: {other:?}"),
+    };
+    let (id, method, params) = next_wire_request(&server).await;
+    assert_eq!(method, peri_acp_types::history_v2::HISTORY_METHOD);
+    assert_eq!(params["action"], json!("close"));
+    let blocking_key = wire_key(&params["requestKey"]);
+    assert_eq!(blocking_key, blocking.get());
+
+    // K+1：V2 load；K+2：详情 body。两者都在 K 未结算时提交。
+    let (load_key, load_submission) = crate::kit::history_v2::outbound::submit_load(|request_key| {
+        json!({
+            "sessionId": "s1",
+            "_meta": {
+                peri_acp_types::history_v2::HISTORY_META_KEY:
+                    crate::kit::history_v2::initial::initial_request_value(&limits, request_key),
+            },
+        })
+    })
+    .expect("scheduler installed");
+    let load_receiver = match load_submission {
+        crate::kit::history_v2::outbound::Submit::Queued(receiver) => receiver,
+        crate::kit::history_v2::outbound::Submit::Direct(_) => {
+            panic!("load must be queued, not sent directly")
+        }
+    };
+    let binding = crate::kit::history_detail_binding::HistoryV2BodyBinding {
+        session_id: "s1".into(),
+        window_id: "w0".into(),
+        snapshot_token: "snap-0".into(),
+        read_ticket: "ticket-0".into(),
+        source: peri_acp_types::history_v2::HistorySource::Own,
+        entry_id: "s1:e2".into(),
+        sub_item_id: "s1:e2:0".into(),
+        body_ref: "body-1".into(),
+        representation: peri_acp_types::history_v2::HistoryRepresentation::DisplayText,
+        media_type: "text/plain; charset=utf-8".into(),
+    };
+    let body_receiver = match submit_body(&binding, 0, 128).expect("scheduler installed") {
+        crate::kit::history_v2::outbound::Submit::Queued(receiver) => receiver,
+        crate::kit::history_v2::outbound::Submit::Direct(_) => {
+            panic!("body must be queued, not sent directly")
+        }
+    };
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), server.recv())
+            .await
+            .is_err(),
+        "K 未结算时 load/body 不得上线"
+    );
+
+    respond_wire(&server, id, json!({})).await;
+    let (id, method, params) = next_wire_request(&server).await;
+    assert_eq!(method, "session/load", "load 必须排在 K 之后");
+    assert_eq!(
+        wire_key(&params["_meta"]["peri.history"]["requestKey"]),
+        load_key.get()
+    );
+    assert!(load_key.get() > blocking_key, "K+1 的 key 必须晚于 K");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), server.recv())
+            .await
+            .is_err(),
+        "load 未结算时 body 不得越队"
+    );
+
+    respond_wire(&server, id, json!({})).await;
+    let (id, method, params) = next_wire_request(&server).await;
+    assert_eq!(method, peri_acp_types::history_v2::HISTORY_METHOD);
+    assert_eq!(params["action"], json!("body"));
+    assert_eq!(
+        wire_key(&params["requestKey"]),
+        load_key.get() + 1,
+        "body 的 key 紧接 load"
+    );
+    respond_wire(&server, id, json!({})).await;
+
+    assert!(load_receiver.await.unwrap().is_ok());
+    assert!(body_receiver.await.unwrap().is_ok());
+    shutdown.cancel();
+    consumer.abort();
+    client.close();
+}
+
+/// 生产 `load_session` 走同一出站 FIFO：队列被占用时不得直发 `session/load`。
+#[tokio::test]
+#[serial]
+async fn load_session_waits_behind_a_blocked_queue() {
+    let _guard = atomics_guard();
+    reset_request_key_for_test();
+    let limits = HistoryLimits::default();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
+    let (client, _, _) = crate::acp_client::client::AcpTuiClient::new(transport);
+    client.install_history_v2_for_test(true, true, limits.clone());
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    *atoms::HISTORY_V2_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tx);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let consumer = spawn_history_v2_consumer(client.clone(), rx, shutdown.clone());
+
+    let blocking = match crate::kit::history_v2::outbound::enqueue_window(|request_key| {
+        Some(HistoryV2ConsumerRequest::Close {
+            session_id: "s1".into(),
+            request_key,
+            window_id: "w0".into(),
+            snapshot_token: "snap-0".into(),
+            read_ticket: "ticket-0".into(),
+        })
+    }) {
+        crate::kit::history_v2::outbound::WindowEnqueue::Sent(key) => key,
+        other => panic!("blocking request must enqueue: {other:?}"),
+    };
+    let (id, method, params) = next_wire_request(&server).await;
+    assert_eq!(method, peri_acp_types::history_v2::HISTORY_METHOD);
+    assert_eq!(params["action"], json!("close"));
+
+    let loader = client.clone();
+    let load = tokio::spawn(async move { loader.load_session("s1", "/tmp", None).await });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), server.recv())
+            .await
+            .is_err(),
+        "队列未结算时 load_session 不得直发"
+    );
+
+    respond_wire(&server, id, json!({})).await;
+    let (id, method, params) = next_wire_request(&server).await;
+    assert_eq!(method, "session/load");
+    let load_key = wire_key(&params["_meta"]["peri.history"]["requestKey"]);
+    assert_eq!(load_key, blocking.get() + 1, "load 的 key 紧接队列前序");
+    respond_wire(
+        &server,
+        id,
+        initial_response_for("s1", "w1", "before-1", &load_key.to_string()),
+    )
+    .await;
+    assert_eq!(load.await.unwrap().unwrap(), "s1");
+
+    shutdown.cancel();
+    consumer.abort();
+    client.close();
+}

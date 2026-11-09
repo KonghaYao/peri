@@ -32,11 +32,23 @@ struct BufferedUpdate {
     bytes: usize,
 }
 
+/// 流的投递阶段。排空期间新事件继续入缓冲，直到一次空批确认没有待发更新，
+/// 直发才不会越过已经分配序号但尚未发送的批次。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamState {
+    /// load 响应发送前：只缓冲。
+    Paused,
+    /// 正在排空缓冲：新事件继续入缓冲。
+    Flushing,
+    /// 排空确认完成：新事件直接发送。
+    Active,
+}
+
 struct LiveStream {
     stream_id: String,
     /// 已发出的最后序号；暂停期间不推进，恢复时按缓冲顺序续号。
     next_seq: u64,
-    paused: bool,
+    state: StreamState,
     buffer: VecDeque<BufferedUpdate>,
     buffered_bytes: usize,
     /// 缓冲溢出丢弃的条数：恢复时先推进序号，让客户端看到缺口而不是伪装连续。
@@ -48,7 +60,7 @@ impl LiveStream {
         Self {
             stream_id,
             next_seq,
-            paused: true,
+            state: StreamState::Paused,
             buffer: VecDeque::new(),
             buffered_bytes: 0,
             dropped: 0,
@@ -83,6 +95,38 @@ impl LiveStream {
         self.next_seq = self.next_seq.saturating_add(1);
         attach_delivery(&mut payload, &self.stream_id, self.next_seq);
         payload
+    }
+
+    /// 取一批缓冲更新并分配序号；空批表示排空完成，切换为直发。
+    fn take_batch(&mut self) -> Vec<Value> {
+        if self.dropped > 0 {
+            self.next_seq = self.next_seq.saturating_add(self.dropped);
+            self.dropped = 0;
+        }
+        let buffered = std::mem::take(&mut self.buffer);
+        self.buffered_bytes = 0;
+        if buffered.is_empty() {
+            self.state = StreamState::Active;
+            return Vec::new();
+        }
+        buffered
+            .into_iter()
+            .map(|update| self.deliver(update.payload))
+            .collect()
+    }
+
+    /// 候选失败时把候选期更新并回旧流：旧流身份与已发序号不变，事件按原顺序补发。
+    /// 旧流处于直发时先切到排空状态，后续事件不得越过这些更新。
+    fn absorb(&mut self, candidate: LiveStream) {
+        let absorbed = !candidate.buffer.is_empty();
+        self.dropped = self.dropped.saturating_add(candidate.dropped);
+        for update in candidate.buffer {
+            // 复用 `buffer` 的上限与缺口记账，合并后仍保持有界。
+            self.buffer(update.payload);
+        }
+        if absorbed && self.state == StreamState::Active {
+            self.state = StreamState::Flushing;
+        }
     }
 }
 
@@ -218,23 +262,32 @@ impl LiveDelivery {
         true
     }
 
-    /// 回收候选；旧流保持不变。用于失败、取消、超时与 drop。
+    /// 回收候选；旧流保持不变，候选期已缓冲的更新并回旧流按序补发。
+    ///
+    /// 失败/取消/超时都不得静默丢弃这段窗口内的真实更新：旧流仍在时把它们挂到旧流
+    /// 缓冲，交给失败路径统一排空；没有旧流（首次 load）时随候选一起丢弃。
     pub(crate) fn abort_candidate(&self, session_id: &str, candidate_id: &str) -> bool {
         let mut inner = self.lock();
         let matches = inner
             .candidates
             .get(session_id)
             .is_some_and(|candidate| candidate.candidate_id == candidate_id);
-        if matches {
-            inner.candidates.remove(session_id);
+        if !matches {
+            return false;
         }
-        matches
+        let Some(candidate) = inner.candidates.remove(session_id) else {
+            return false;
+        };
+        if let Some(stream) = inner.streams.get_mut(session_id) {
+            stream.absorb(candidate.stream);
+        }
+        true
     }
 
     /// 发布一条 transcript 更新。
     ///
     /// - 流不存在（非 V2 会话或已 close）：原样返回，不挂投递元数据；
-    /// - 暂停期：进入有界缓冲；
+    /// - 暂停或排空期：进入有界缓冲，避免越过尚未发送的批次；
     /// - 活动期：分配序号、写入元数据后返回待发送 payload。
     pub(crate) fn publish(&self, session_id: &str, payload: Value) -> PublishOutcome {
         let mut inner = self.lock();
@@ -245,32 +298,42 @@ impl LiveDelivery {
         let Some(stream) = inner.streams.get_mut(session_id) else {
             return PublishOutcome::Send(payload);
         };
-        if stream.paused {
+        if stream.state != StreamState::Active {
             return stream.buffer(payload);
         }
         PublishOutcome::Send(stream.deliver(payload))
     }
 
-    /// 结束暂停：按序为缓冲更新分配序号并返回待发送列表。
+    /// 开始或继续排空：按序为缓冲更新分配序号并返回一批待发送列表。
     ///
     /// 溢出丢弃的条数先推进 `next_seq`，因此第一条待发送事件的序号大于 `afterSeq + 1`，
-    /// 客户端据此检测缺口。调用后流进入直发状态；没有流时返回空列表。
+    /// 客户端据此检测缺口。调用方必须在发送完本批后再次调用，直到返回空列表；空批
+    /// 才把流切到直发状态，排空期间到达的事件仍进入缓冲，因此不会越过本批。
+    /// 没有流或流已直发时返回空列表。
     pub(crate) fn resume_and_take(&self, session_id: &str) -> Vec<Value> {
         let mut inner = self.lock();
         let Some(stream) = inner.streams.get_mut(session_id) else {
             return Vec::new();
         };
-        stream.paused = false;
-        if stream.dropped > 0 {
-            stream.next_seq = stream.next_seq.saturating_add(stream.dropped);
-            stream.dropped = 0;
+        if stream.state == StreamState::Active {
+            return Vec::new();
         }
-        let buffered = std::mem::take(&mut stream.buffer);
-        stream.buffered_bytes = 0;
-        buffered
-            .into_iter()
-            .map(|update| stream.deliver(update.payload))
-            .collect()
+        stream.state = StreamState::Flushing;
+        stream.take_batch()
+    }
+
+    /// 只排空处于排空态的流：initial 失败后补发并回旧流的候选更新。
+    ///
+    /// 暂停流（从未发布过首屏）保持暂停，由调用方按既有语义关闭。
+    pub(crate) fn drain_flushing(&self, session_id: &str) -> Vec<Value> {
+        let mut inner = self.lock();
+        let Some(stream) = inner.streams.get_mut(session_id) else {
+            return Vec::new();
+        };
+        if stream.state != StreamState::Flushing {
+            return Vec::new();
+        }
+        stream.take_batch()
     }
 
     /// 关闭并移除本会话的流与未提交候选；缓冲一并丢弃。之后的更新原样透传。
@@ -282,13 +345,13 @@ impl LiveDelivery {
 
     /// 只关闭仍处于暂停期的流（load 失败/响应未送达的清理路径）。
     ///
-    /// 对已进入直发状态的流是 no-op：一次失败的 initial 重试不得拆除既有实时交付。
+    /// 对已进入直发或排空状态的流是 no-op：一次失败的 initial 重试不得拆除既有实时交付。
     pub(crate) fn close_if_paused(&self, session_id: &str) {
         let mut inner = self.lock();
         if inner
             .streams
             .get(session_id)
-            .is_some_and(|stream| stream.paused)
+            .is_some_and(|stream| stream.state == StreamState::Paused)
         {
             inner.streams.remove(session_id);
         }
@@ -319,7 +382,15 @@ impl LiveDelivery {
         self.lock()
             .streams
             .get(session_id)
-            .is_some_and(|stream| stream.paused)
+            .is_some_and(|stream| stream.state == StreamState::Paused)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_flushing(&self, session_id: &str) -> bool {
+        self.lock()
+            .streams
+            .get(session_id)
+            .is_some_and(|stream| stream.state == StreamState::Flushing)
     }
 
     #[cfg(test)]

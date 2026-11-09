@@ -247,12 +247,22 @@ fn candidate_keeps_old_stream_identity_and_buffers_independently() {
     assert!(live.abort_candidate("s1", &candidate.candidate_id));
     assert!(!live.has_candidate("s1"));
     assert!(live.has_stream_with_id("s1", &first.stream_id));
+    assert!(
+        live.is_flushing("s1"),
+        "候选期更新并回旧流后必须先排空，之后才允许直发"
+    );
 
-    // 旧流序号未被候选消耗：下一条仍是 2。
+    // 候选期事件没有丢失：由旧流按原身份补发下一条序号。
+    let pending = live.resume_and_take("s1");
+    assert_eq!(pending.len(), 1, "候选缓冲必须并回旧流");
+    assert_eq!(delivery(&pending[0])["streamId"], first.stream_id.as_str());
+    assert_eq!(delivery(&pending[0])["eventSeq"], "2");
+    assert!(live.resume_and_take("s1").is_empty(), "空批确认排空");
+
     let PublishOutcome::Send(payload) = live.publish("s1", text_payload("three")) else {
         panic!("活动流直发");
     };
-    assert_eq!(delivery(&payload)["eventSeq"], "2");
+    assert_eq!(delivery(&payload)["eventSeq"], "3");
     assert_eq!(delivery(&payload)["streamId"], first.stream_id.as_str());
 }
 
@@ -305,4 +315,41 @@ fn close_discards_candidate_and_old_stream() {
         panic!("关闭后必须透传");
     };
     assert_eq!(sent, payload);
+}
+
+/// 排空返回的批次尚未发送时，并发 publish 必须继续缓冲：直接发送会让更大的
+/// eventSeq 越过批次中的序号，客户端记录 gap 后进入 detached。
+#[test]
+fn publish_during_flush_never_overtakes_the_pending_batch() {
+    let live = LiveDelivery::new();
+    live.begin("s1");
+    for index in 0..3 {
+        assert!(matches!(
+            live.publish("s1", text_payload(&index.to_string())),
+            PublishOutcome::Buffered
+        ));
+    }
+
+    let batch = live.resume_and_take("s1");
+    assert_eq!(batch.len(), 3);
+    assert_eq!(delivery(&batch[2])["eventSeq"], "3");
+    assert!(live.is_flushing("s1"), "批次未确认发送前不得直发");
+
+    // 模拟 server_loop 正在发送批次：此时到达的事件必须排队而不是抢跑。
+    assert!(
+        matches!(
+            live.publish("s1", text_payload("during-flush")),
+            PublishOutcome::Buffered
+        ),
+        "排空期间的并发事件不得直接发送"
+    );
+    let next = live.resume_and_take("s1");
+    assert_eq!(next.len(), 1);
+    assert_eq!(delivery(&next[0])["eventSeq"], "4", "批次之后才轮到新事件");
+    assert!(live.resume_and_take("s1").is_empty(), "空批确认排空");
+
+    let PublishOutcome::Send(payload) = live.publish("s1", text_payload("after")) else {
+        panic!("排空确认后恢复直发");
+    };
+    assert_eq!(delivery(&payload)["eventSeq"], "5");
 }

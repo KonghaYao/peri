@@ -45,6 +45,8 @@ async fn history_v2_live_buffers_transcript_updates_while_paused() {
             "恢复后首条从 afterSeq + 1 开始"
         );
     }
+    // 与 server_loop 一致：批次发送完后再次调用直到空批，流才进入直发。
+    assert!(live.resume_and_take("s1").is_empty());
 
     sink.push_event(
         "s1",
