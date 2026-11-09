@@ -14,9 +14,9 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 
 use super::mq::{
-    MqCancelOutcome, MqEnqueueDisposition, MqEnqueueOutcome, MqEntry, MqFilter, MqInput,
-    MqReceiveDisposition, MqReceiveItemOutcome, MqReceiveOutcome, MqReceiveSelection,
-    MqReceiveStatus, ThreadMqStore,
+    filter_headers, MqCancelOutcome, MqEnqueueDisposition, MqEnqueueOutcome, MqEntry, MqFilter,
+    MqHeader, MqInput, MqReceiveDisposition, MqReceiveItemOutcome, MqReceiveOutcome,
+    MqReceiveSelection, MqReceiveStatus, MqWatermark, ThreadMqStore,
 };
 use super::MessageSource;
 use crate::messages::MessageId;
@@ -164,6 +164,56 @@ impl ThreadMqStore for InMemoryMqStore {
             }
         }
         Ok(entries)
+    }
+
+    async fn mq_headers(
+        &self,
+        thread_id: &ThreadId,
+        filter: MqFilter,
+    ) -> SessionResourceResult<Vec<MqHeader>> {
+        let mut headers = self
+            .state
+            .lock()
+            .rows
+            .iter()
+            .filter(|row| row.thread_id == *thread_id)
+            .map(|row| row.entry.header())
+            .collect::<Vec<_>>();
+        headers.sort_by_key(MqHeader::watermark);
+        Ok(filter_headers(headers, &filter))
+    }
+
+    async fn mq_count(&self, thread_id: &ThreadId) -> SessionResourceResult<usize> {
+        Ok(self
+            .state
+            .lock()
+            .rows
+            .iter()
+            .filter(|row| row.thread_id == *thread_id)
+            .count())
+    }
+
+    async fn mq_exists(&self, thread_id: &ThreadId) -> SessionResourceResult<bool> {
+        Ok(self
+            .state
+            .lock()
+            .rows
+            .iter()
+            .any(|row| row.thread_id == *thread_id))
+    }
+
+    async fn mq_watermark(
+        &self,
+        thread_id: &ThreadId,
+    ) -> SessionResourceResult<Option<MqWatermark>> {
+        Ok(self
+            .state
+            .lock()
+            .rows
+            .iter()
+            .filter(|row| row.thread_id == *thread_id)
+            .map(|row| row.entry.watermark())
+            .max())
     }
 
     async fn mq_history_contains(

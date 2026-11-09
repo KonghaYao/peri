@@ -6,7 +6,7 @@
 //! 已移除——待发事实的唯一来源是 MQ 行（`docs/design/thread-mq.md` §4.1）。
 
 use super::mq::{
-    MqCancelOutcome, MqEnqueueDisposition, MqEnqueueOutcome, MqEntry, MqFilter, MqInput,
+    MqCancelOutcome, MqEnqueueDisposition, MqEnqueueOutcome, MqEntry, MqFilter, MqHeader, MqInput,
     MqReceiveDisposition, MqReceiveItem, MqReceiveOutcome, MqReceivePurpose, MqReceiveSelection,
     MqReceiveStatus, MqSendItemOutcome, MqSendOutcome, MqSendStatus, MqWatermark,
     SessionResourcesMqStore, ThreadMqStore,
@@ -825,37 +825,55 @@ impl MessageQueue {
     // 认为「有可消费工作」而空转。
 
     pub async fn has_ensure_processing(&self) -> Result<bool> {
-        let entries = self.query(MqFilter::default()).await?;
+        let headers = self
+            .inner
+            .store
+            .mq_headers(&self.inner.thread_id, MqFilter::default())
+            .await?;
         let selection = self.inner.send_selection.lock().clone();
-        Ok(entries.iter().any(|entry| {
-            is_eligible_for_receive(entry, &selection) && entry.policy.ensures_processing()
+        Ok(headers.iter().any(|header| {
+            is_header_eligible(header, &selection) && header.policy.ensures_processing()
         }))
     }
 
     pub async fn has_required_for_run(&self, execution: &ExecutionBinding) -> Result<bool> {
-        let entries = self.query(MqFilter::default()).await?;
+        let headers = self
+            .inner
+            .store
+            .mq_headers(&self.inner.thread_id, MqFilter::default())
+            .await?;
         let selection = self.inner.send_selection.lock().clone();
-        Ok(entries.iter().any(|entry| {
-            is_eligible_for_receive(entry, &selection)
-                && entry.policy.disposition(execution) == MessageDisposition::Process
+        Ok(headers.iter().any(|header| {
+            is_header_eligible(header, &selection)
+                && header.policy.disposition(execution) == MessageDisposition::Process
         }))
     }
 
     pub async fn has_required(&self) -> Result<bool> {
         Ok(self
-            .query(MqFilter::default())
+            .inner
+            .store
+            .mq_headers(&self.inner.thread_id, MqFilter::default())
             .await?
             .iter()
-            .any(|entry| entry.policy.requirement == super::MessageRequirement::Required))
+            .any(|header| header.policy.requirement == super::MessageRequirement::Required))
     }
 
     /// 按来源查询 required 消息，仅用于诊断；不授予来源调度权。
     pub async fn has_pending_defer(&self, source: &MessageSource) -> Result<bool> {
         Ok(self
-            .query(MqFilter::default())
+            .inner
+            .store
+            .mq_headers(
+                &self.inner.thread_id,
+                MqFilter {
+                    sources: vec![source.clone()],
+                    ..Default::default()
+                },
+            )
             .await?
             .iter()
-            .any(|entry| entry.policy.ensures_processing() && &entry.source == source))
+            .any(|header| header.policy.ensures_processing()))
     }
 
     /// 是否仍需建立执行处理 required MQ 消息。
@@ -869,21 +887,17 @@ impl MessageQueue {
 
     /// 队列是否为空。
     pub async fn is_empty(&self) -> Result<bool> {
-        Ok(self.query(MqFilter::default()).await?.is_empty())
+        Ok(!self.inner.store.mq_exists(&self.inner.thread_id).await?)
     }
 
     /// 队列长度。
     pub async fn len(&self) -> Result<usize> {
-        Ok(self.query(MqFilter::default()).await?.len())
+        Ok(self.inner.store.mq_count(&self.inner.thread_id).await?)
     }
 
     /// 当前 MQ 的最大 `(enqueued_at, id)`；空队列返回 `None`。
     pub async fn admission_watermark(&self) -> Result<Option<MqWatermark>> {
-        Ok(self
-            .query(MqFilter::default())
-            .await?
-            .last()
-            .map(MqEntry::watermark))
+        Ok(self.inner.store.mq_watermark(&self.inner.thread_id).await?)
     }
 
     /// 是否在水位之后有需要模型处理的入队项；`None` 表示检查全部。
@@ -895,10 +909,14 @@ impl MessageQueue {
             after: watermark.clone(),
             ..Default::default()
         };
-        let entries = self.query(filter).await?;
+        let headers = self
+            .inner
+            .store
+            .mq_headers(&self.inner.thread_id, filter)
+            .await?;
         let selection = self.inner.send_selection.lock().clone();
-        Ok(entries.iter().any(|entry| {
-            is_eligible_for_receive(entry, &selection) && entry.policy.ensures_processing()
+        Ok(headers.iter().any(|header| {
+            is_header_eligible(header, &selection) && header.policy.ensures_processing()
         }))
     }
 
@@ -915,6 +933,14 @@ impl MessageQueue {
 
     pub fn subscribe_wake(&self) -> tokio::sync::watch::Receiver<u64> {
         self.inner.wake_version.subscribe()
+    }
+
+    /// 请求激活 listener 重新读取一次 MQ：不改变任何队列事实，只补一次唤醒。
+    ///
+    /// 查询失败时调用方无法判断「有没有工作」；把重查责任交还 listener，避免一次
+    /// 瞬时错误消耗掉唯一一次已消费的唤醒。没有 listener 时是空操作。
+    pub fn request_recheck(&self) {
+        self.notify_wake();
     }
 
     /// 非破坏性等待可执行消息：先注册通知再检查 MQ，避免丢唤醒。
@@ -1144,7 +1170,16 @@ impl QueueOwner<'_> {
 /// 才参与本轮消费。所有「是否还有本轮工作」的判定都必须与 Receive 的选择一致，
 /// 否则会出现「判定有工作但取不出」的空转。
 fn is_eligible_for_receive(entry: &MqEntry, selection: &[MessageId]) -> bool {
-    entry.source != MessageSource::UserInput || selection.contains(&entry.id)
+    source_is_eligible(&entry.source, &entry.id, selection)
+}
+
+/// 控制面 header 与完整行共用同一条 eligibility 规则。
+fn is_header_eligible(header: &MqHeader, selection: &[MessageId]) -> bool {
+    source_is_eligible(&header.source, &header.id, selection)
+}
+
+fn source_is_eligible(source: &MessageSource, id: &MessageId, selection: &[MessageId]) -> bool {
+    *source != MessageSource::UserInput || selection.contains(id)
 }
 
 /// 空内容 Prompt 是 keepgoing 等控制信号的唤醒载体，消费后不得写入历史。

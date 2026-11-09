@@ -294,6 +294,152 @@ async fn query_orders_and_applies_each_filter() {
         "上限按升序取前 N 条"
     );
     assert_eq!(mq_count(&fixture, &thread).await, 3, "查询不消费");
+
+    // 控制面投影与完整行共享同一份过滤语义。
+    let header_ids = |headers: Vec<peri_acp_types::session::MqHeader>| {
+        headers
+            .into_iter()
+            .map(|header| header.id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        header_ids(
+            fixture
+                .data
+                .mq_headers(&thread, MqFilter::default())
+                .await
+                .unwrap()
+        ),
+        vec![first, second, third]
+    );
+    assert_eq!(
+        header_ids(
+            fixture
+                .data
+                .mq_headers(
+                    &thread,
+                    MqFilter {
+                        sources: vec![MessageSource::ShellComplete, MessageSource::SystemInjected],
+                        limit: Some(1),
+                        ..MqFilter::default()
+                    }
+                )
+                .await
+                .unwrap()
+        ),
+        vec![second],
+        "来源过滤与上限同样在 header 查询生效"
+    );
+    assert_eq!(
+        header_ids(
+            fixture
+                .data
+                .mq_headers(
+                    &thread,
+                    MqFilter {
+                        after: Some(all[0].watermark()),
+                        ..MqFilter::default()
+                    }
+                )
+                .await
+                .unwrap()
+        ),
+        vec![second, third],
+        "水位是严格晚于"
+    );
+    assert_eq!(
+        fixture.data.mq_watermark(&thread).await.unwrap(),
+        Some(all[2].watermark())
+    );
+    assert_eq!(fixture.data.mq_count(&thread).await.unwrap(), 3);
+    assert!(fixture.data.mq_exists(&thread).await.unwrap());
+}
+
+/// 128 条 64 KiB 正文：控制面查询与有界正文查询不得解码全部正文。
+///
+/// 把最后一条正文写成不可解析值：控制面（header/count/exists/水位）与
+/// `LIMIT 1` 仍须成功；只有无界正文查询失败关闭。这直接证明查询形状，
+/// 而不是靠耗时或内存猜测。
+#[tokio::test]
+async fn control_plane_queries_do_not_decode_mq_payloads() {
+    let fixture = Fixture::new().await;
+    let thread = fixture.thread("mq").await;
+    let body = "x".repeat(64 * 1024);
+    for _ in 0..128 {
+        let id = MessageId::new();
+        fixture
+            .data
+            .mq_enqueue(
+                &thread,
+                MqInput {
+                    id,
+                    kind: MessageKind::Defer,
+                    source: MessageSource::SubAgentComplete,
+                    payload: PersistedPayload::Message(human(id, &body)),
+                    policy: MessagePolicy::ensure_processing(),
+                    original_draft: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let headers = fixture
+        .data
+        .mq_headers(&thread, MqFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(headers.len(), 128);
+    let max_watermark = headers.last().unwrap().watermark();
+    assert_eq!(
+        fixture.data.mq_watermark(&thread).await.unwrap(),
+        Some(max_watermark)
+    );
+    assert_eq!(fixture.data.mq_count(&thread).await.unwrap(), 128);
+    assert!(fixture.data.mq_exists(&thread).await.unwrap());
+
+    sqlx::query("UPDATE thread_mq SET payload_json = 'not-json' WHERE thread_id = ?1 AND id = ?2")
+        .bind(thread.as_str())
+        .bind(headers.last().unwrap().id.as_uuid().to_string())
+        .execute(&fixture.store.database.pool)
+        .await
+        .unwrap();
+
+    assert!(fixture.data.mq_exists(&thread).await.unwrap());
+    assert_eq!(fixture.data.mq_count(&thread).await.unwrap(), 128);
+    assert_eq!(
+        fixture
+            .data
+            .mq_headers(&thread, MqFilter::default())
+            .await
+            .unwrap()
+            .len(),
+        128,
+        "header 查询不得因正文损坏失败"
+    );
+    assert_eq!(
+        fixture
+            .data
+            .mq_query(
+                &thread,
+                MqFilter {
+                    limit: Some(1),
+                    ..MqFilter::default()
+                }
+            )
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "LIMIT 必须在 SQL 侧生效，不能全量取回再过滤"
+    );
+    assert!(
+        fixture
+            .data
+            .mq_query(&thread, MqFilter::default())
+            .await
+            .is_err(),
+        "无界正文查询必须如实报告损坏，不能静默跳过"
+    );
 }
 
 /// 同 ID 同内容复用原接纳结果；不同内容或跨 thread 是身份冲突。
