@@ -196,6 +196,40 @@ fn metric_after_turn_clear_falls_back_to_own_trace() {
 }
 
 #[test]
+fn background_subagent_metric_after_turn_end_stays_on_turn_trace() {
+    let session = FakeLangfuseSession::new("sess_metrics_background");
+    session
+        .turn_traces()
+        .register_outliving_turn("child-bg", "turn-trace-1", Some("turn-trace-1"));
+    // 父 turn 结束：后台子 agent 仍在运行，登记保留
+    session.turn_traces().clear_trace("turn-trace-1");
+    let sink = sink_with(&session);
+
+    sink.record(metric(
+        "tool.error",
+        serde_json::json!({}),
+        Some("child-bg"),
+        None,
+    ));
+
+    let events = session.events_snapshot();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        event_trace_id(&events[0]),
+        "turn-trace-1",
+        "后台子 agent 的工具失败不能分裂成独立 root trace"
+    );
+    let IngestionEvent::EventCreate { body, .. } = &events[0] else {
+        panic!("metrics must be reported as EventCreate");
+    };
+    assert_eq!(
+        body.parent_observation_id.as_deref(),
+        Some("turn-trace-1"),
+        "指标仍挂原 turn 根 span"
+    );
+}
+
+#[test]
 fn metrics_of_different_sids_follow_their_own_trace() {
     let session = FakeLangfuseSession::new("sess_metrics_isolated");
     session

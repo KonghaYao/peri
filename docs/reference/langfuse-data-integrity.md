@@ -58,7 +58,7 @@ SHA-256 映射；父子关系共用 span ID 映射。类型以观测字段及 na
 | SPAN(compact) | `compact` / `micro-compact` | id(`span_*`)、input、output | metadata | **name 即类型**：Micro 策略记录 `micro-compact`，Full/Smart/Skip 记录 `compact`；input=执行前状态（strategy/trigger/estimated_tokens_before/cache_hit_rate_before），output=执行结果（summary/files_count/skills_count/micro_cleared/duration_ms/estimated_tokens_saved/estimated_tokens_after/full_escalation_reason/outcome）；失败时 output=`{"error_class":"compact_failure","message":...}` |
 | TOOL | 工具名（Bash/Read/Edit…） | id(`obs_*`)、input（工具入参）、output | level | 失败时 output 为 `{"error_class": "tool_failure"}` |
 | AGENT | `agent-run` / `subagent-*` | id、output、input | — | input = on_turn_start 的对话输入 |
-| EVENT | `cache-hit-rate-low` | id、input（告警指标）、level | output | 告警类；指标事件（`tool.error` / `mcp.error` 等）同属 EVENT，来源见 `peri-controller/src/langfuse/metric_sink.rs`。归属：指标事件挂到该会话活跃 turn 的 trace 根 span 下（父观测 = trace id 映射的根 span，不再制造第二个 root observation）；子 agent 的 thread id 也在 turn 生命周期内登记，其指标归同一 trace；未采样 turn 仍有登记，其指标共享该 turn trace 但无父观测；仅无活跃登记（turn 未开始 / 已结束、无 `sid`）才回退独立 root trace，事件不丢（`turn_traces.rs` 注册表，turn 开始登记/结束按 trace 清理） |
+| EVENT | `cache-hit-rate-low` | id、input（告警指标）、level | output | 告警类；指标事件（`tool.error` / `mcp.error` 等）同属 EVENT，来源见 `peri-controller/src/langfuse/metric_sink.rs`。归属：指标事件挂到该会话活跃 turn 的 trace 根 span 下（父观测 = trace id 映射的根 span，不再制造第二个 root observation）；子 agent 的 thread id 在 `on_subagent_start` 登记，其指标归同一 trace；前台子 agent 随 turn 结束清理，**后台子 agent 活过父 turn**，登记保留到自身 `on_subagent_stop`，避免 turn 结束后仍在产生的指标分裂成独立 root trace；未采样 turn 仍有登记，其指标共享该 turn trace 但无父观测；仅无活跃登记（turn 未开始 / 前台 turn 已结束 / 无 `sid`）才回退独立 root trace，事件不丢（`turn_traces.rs` 注册表，turn 开始登记、结束按 trace 清理，`clear_trace` 保留跨 turn 存活的后台登记） |
 
 ### 字段来源规则（OTLP attribute 映射）
 

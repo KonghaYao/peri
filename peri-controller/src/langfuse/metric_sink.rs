@@ -6,8 +6,9 @@
 //! 归属：指标自带 `sid`（会话 = thread id）时，优先挂到该 sid 当前活跃 turn 的
 //! 根 span 下（见 [`TurnTraceRegistry`](crate::langfuse::TurnTraceRegistry)），
 //! 不再为该 trace 制造第二个 root observation；未采样 turn 仍登记 trace 但无根
-//! span，其指标共享该 trace 而无父观测。只有无活跃登记（turn 未开始 / 已结束 /
-//! 指标无 sid）时才回退为独立 root trace，事件不丢。
+//! span，其指标共享该 trace 而无父观测。后台子 agent 活过父 turn 时，其登记
+//! 保留到自身 stop，turn 结束后产生的指标仍归原 trace。只有无活跃登记（turn
+//! 未开始 / 已结束 / 指标无 sid）时才回退为独立 root trace，事件不丢。
 
 use std::sync::Arc;
 

@@ -120,12 +120,16 @@ impl LangfuseTracer {
     ) {
         // 子 agent 的 thread id 就是 child_agent_id（与子 agent 会话上下文里的
         // session_id 一致）。先登记、再按采样早退：子 agent 的工具失败等指标经其
-        // thread id 归到本 turn trace，而不是各自开 root trace。
+        // thread id 归到本 turn trace，而不是各自开 root trace。后台子 agent 可能
+        // 活过父 turn，登记随其自身 stop 清理，不随 turn 结束清理。
         let sampled = self.sampling.should_emit(&self.trace_id, &self.session_id);
         let parent = sampled.then(|| self.trace_id.clone());
-        self.session
-            .turn_traces()
-            .register(child_agent_id, &self.trace_id, parent.as_deref());
+        let registry = self.session.turn_traces();
+        if is_background {
+            registry.register_outliving_turn(child_agent_id, &self.trace_id, parent.as_deref());
+        } else {
+            registry.register(child_agent_id, &self.trace_id, parent.as_deref());
+        }
 
         if !sampled {
             return;
