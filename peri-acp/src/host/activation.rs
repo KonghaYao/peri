@@ -14,6 +14,52 @@ use crate::transport::types::AcpError;
 const ACTIVATION_RETRY_INITIAL: std::time::Duration = std::time::Duration::from_millis(50);
 const ACTIVATION_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// 调度二次资格检查可占用 prompt lock 等待查询恢复的总时限。
+///
+/// 只吸收瞬时存储故障；超出后交还 listener，避免长时间阻塞同会话的用户输入。
+pub(super) const DISPATCH_RECHECK_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// 调度二次资格查询的可失败重查：与激活 listener 共用同一退避节奏。
+///
+/// `Err` 表示存储无法回答，不能折叠成「没有工作」；同一轮 dispatch 的多次查询
+/// 共享 `deadline`，预算耗尽后返回最后一次错误，由调用方
+/// [`MessageQueue::request_recheck`] 保留重查责任。
+pub(super) async fn checked_dispatch_query<T, E, F, Fut>(
+    session_id: &str,
+    query: &'static str,
+    deadline: tokio::time::Instant,
+    mut run: F,
+) -> Result<T, String>
+where
+    E: std::fmt::Display,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let mut retry_delay = ACTIVATION_RETRY_INITIAL;
+    loop {
+        match run().await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let error = error.to_string();
+                let giving_up = tokio::time::Instant::now() + retry_delay > deadline;
+                tracing::warn!(
+                    %session_id,
+                    query,
+                    %error,
+                    retry_after_ms = retry_delay.as_millis() as u64,
+                    exhausted = giving_up,
+                    "continuation dispatch query failed; bounded recheck"
+                );
+                if giving_up {
+                    return Err(error);
+                }
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = (retry_delay * 2).min(ACTIVATION_RETRY_MAX);
+            }
+        }
+    }
+}
+
 /// 调度准入只需要这几个布尔事实；复制后必须释放 sessions 锁，再查询 MQ。
 pub(super) struct PendingState {
     pub closing: bool,
@@ -232,17 +278,12 @@ pub(super) async fn mq_allowed_checked(
         .map_err(|error| error.to_string())
 }
 
-/// mq steering 的放行判定：正常激活之外，Host 注入且仍在队列里的恢复提醒也必须
-/// 能推进——失败水位记录的是「尝试开始时的 MQ 水位」，一个在 Receive 之前就失败的
-/// 尝试会把刚注入的提醒误算成已处理。提醒仍在队列是队列事实，epoch 与 Stop 判定
-/// 不变，因此这里只补回「已进入但尚未接管」的提醒，不放宽 superseded 保护。
-pub(super) async fn mq_steering_allowed(cfg: &AcpServerConfig, session_id: &str) -> bool {
-    mq_steering_allowed_checked(cfg, session_id)
-        .await
-        .unwrap_or(false)
-}
-
-/// [`mq_steering_allowed`] 的可失败形态：查询错误不等于明确拒绝。
+/// mq steering 的放行判定（可失败形态）：正常激活之外，Host 注入且仍在队列里的
+/// 恢复提醒也必须能推进——失败水位记录的是「尝试开始时的 MQ 水位」，一个在 Receive
+/// 之前就失败的尝试会把刚注入的提醒误算成已处理。提醒仍在队列是队列事实，epoch 与
+/// Stop 判定不变，因此这里只补回「已进入但尚未接管」的提醒，不放宽 superseded 保护。
+///
+/// `Err` 表示查询无法回答，不等于明确拒绝；调用方必须保留重查责任。
 pub(super) async fn mq_steering_allowed_checked(
     cfg: &AcpServerConfig,
     session_id: &str,

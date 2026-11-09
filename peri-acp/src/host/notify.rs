@@ -121,10 +121,23 @@ pub(crate) async fn handle_notification(
                     .get_session(session_id)
                     .map(|s| s.v2_message_queue.clone());
                 let has_pending = match queue {
-                    Some(queue) => queue
+                    Some(queue) => match queue
                         .has_pending_defer(&MessageSource::SubAgentComplete)
                         .await
-                        .unwrap_or(false),
+                    {
+                        Ok(pending) => pending,
+                        Err(error) => {
+                            // 查询失败不代表没有待消费的回调：补一次唤醒，让
+                            // listener 重查，避免已入队的 Defer 永久滞留。
+                            tracing::warn!(
+                                session_id = %session_id,
+                                %error,
+                                "cancel continuation check failed; requesting listener recheck"
+                            );
+                            queue.request_recheck();
+                            false
+                        }
+                    },
                     None => false,
                 };
                 if cancel_should_schedule_continuation(state, has_pending) {
