@@ -137,17 +137,35 @@ async fn build_config(
     tmp: &tempfile::TempDir,
     session_resources: Arc<dyn SessionResources>,
 ) -> Arc<AcpServerConfig> {
+    Arc::new(make_server_config(tmp, session_resources).await)
+}
+
+async fn make_server_config(
+    tmp: &tempfile::TempDir,
+    session_resources: Arc<dyn SessionResources>,
+) -> AcpServerConfig {
     let peri_config = test_peri_config();
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    Arc::new(
-        crate::host::requests::tests::build_server_config(
-            peri_config,
-            provider,
-            tmp,
-            session_resources,
-        )
-        .await,
-    )
+    crate::host::requests::tests::build_server_config(peri_config, provider, tmp, session_resources)
+        .await
+}
+
+/// 生产同形配置 + 可注入 shutdown 时限的 host task owner（P1-2 用短时限）。
+async fn build_config_with_owner(
+    tmp: &tempfile::TempDir,
+    session_resources: Arc<dyn SessionResources>,
+    cooperative_grace: Duration,
+    abort_drain_guard: Duration,
+) -> (Arc<AcpServerConfig>, crate::host::task_scope::HostTaskOwner) {
+    let mut cfg = make_server_config(tmp, session_resources).await;
+    let (owner, spawner) = crate::host::task_scope::HostTaskOwner::with_policy_for_tests(
+        cooperative_grace,
+        abort_drain_guard,
+    );
+    cfg.host_task_owner = Some(owner);
+    cfg.host_task_spawner = spawner;
+    let owner = cfg.host_task_owner.take().expect("host task owner");
+    (Arc::new(cfg), owner)
 }
 
 /// 建一条已绑定会话（与生产创建路径同形），使 `set_work_state` 有真实行可写。
@@ -402,4 +420,121 @@ async fn stale_stop_intent_does_not_override_new_admission() {
     )
     .await;
     assert_eq!(work_state(&cfg, &sid).await, WorkState::Stopped);
+}
+
+/// P1：正常 shutdown 的 abort 阶段不得丢弃已接受但未落库的 Stop。
+///
+/// 存储写入被固定阻塞时，shutdown 必须在有界等待后报告 `Incomplete`，不能因为
+/// abort 后任务排空就声称 `Complete`；任务本身继续存活，存储恢复后 Stop 仍落库。
+#[tokio::test]
+async fn review_shutdown_preserves_pending_stop_intent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (_bridge, facade) =
+        peri_resources::sessions::open_store_and_facade_for_tests(tmp.path().join("threads.db"))
+            .await
+            .unwrap();
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let blocking = Arc::new(BlockingResources {
+        inner: Arc::new(facade),
+        started: Arc::clone(&started),
+        release: Arc::clone(&release),
+    });
+    let (cfg, owner) = build_config_with_owner(
+        &tmp,
+        Arc::clone(&blocking) as Arc<dyn SessionResources>,
+        Duration::from_millis(1),
+        Duration::from_millis(200),
+    )
+    .await;
+    let cwd = tmp.path().to_str().unwrap();
+    let sid = "shutdown-stop-pending-session".to_string();
+    create_bound_session(&cfg, cwd, &sid).await;
+    cfg.session_resources
+        .set_work_state(&sid, WorkState::Working)
+        .await
+        .unwrap();
+    cfg.session_manager.ensure_session(&sid, cwd);
+    cfg.session_manager.ensure_session_caps(&sid);
+
+    let states: SharedSessions = Arc::new(tokio::sync::Mutex::new(HashMap::from([(
+        sid.clone(),
+        session_state(&sid, cwd),
+    )])));
+    let locks: PromptLocks = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+
+    // 真实通知分派捕获 Stop 目标。
+    let targets = {
+        let mut states = states.lock().await;
+        crate::host::notify::handle_notification(
+            "session/cancel",
+            &json!({"sessionId": sid}),
+            &mut states,
+            &cfg,
+        )
+        .await
+        .stop_targets
+    };
+    assert_eq!(targets.len(), 1);
+
+    // 与 `server_loop/notifications.rs` 相同的 host task 边界。
+    {
+        let spawner = cfg.host_task_spawner.clone();
+        let spawn_cfg = Arc::clone(&cfg);
+        let spawn_states = Arc::clone(&states);
+        let spawn_locks = Arc::clone(&locks);
+        spawner
+            .spawn(
+                crate::host::task_scope::HostTaskOwnerKind::Session,
+                crate::host::task_scope::HostTaskKind::NotificationEffect,
+                async move {
+                    crate::host::notify::persist_notification_effects(
+                        "session/cancel",
+                        &spawn_cfg,
+                        &spawn_states,
+                        &spawn_locks,
+                        targets,
+                        Vec::new(),
+                    )
+                    .await;
+                },
+            )
+            .expect("host task admission must stay open");
+    }
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("Stop 持久化必须走到被阻塞的 set_work_state");
+
+    // 正常关闭入口的用户：先停止会话准入，再收口 host task。
+    cfg.session_manager.pre_close_session(&sid);
+    let owner = Arc::new(tokio::sync::Mutex::new(owner));
+    let shutdown_owner = Arc::clone(&owner);
+    let shutdown = tokio::spawn(async move { shutdown_owner.lock().await.shutdown().await });
+    let report = tokio::time::timeout(Duration::from_secs(5), shutdown)
+        .await
+        .expect("shutdown 必须有界返回")
+        .expect("shutdown 任务不得 panic");
+    assert!(
+        matches!(
+            report,
+            crate::host::task_scope::HostShutdownReport::Incomplete { .. }
+        ),
+        "Stop 尚未落库时 shutdown 不得声称 Complete: {report:?}"
+    );
+
+    // 存储恢复：承载 Stop 的 host task 未被 abort，仍能完成 durable 写入。
+    release.notify_one();
+    wait_for_work_state(&cfg, &sid, WorkState::Stopped).await;
+
+    assert!(
+        cfg.session_manager.drain_session_tasks(&sid).await,
+        "会话任务必须可收口"
+    );
+    if let Some(session) = cfg.session_manager.take_for_close(&sid) {
+        assert!(
+            session.close_resources().await,
+            "Stop 落库后会话资源必须可关闭"
+        );
+    }
+    drop(owner);
 }

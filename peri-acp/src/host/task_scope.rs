@@ -43,6 +43,16 @@ pub(crate) enum HostTaskKind {
     CompactHook,
 }
 
+impl HostTaskKind {
+    /// 是否可以在 shutdown 超时后 abort。
+    ///
+    /// `NotificationEffect` 承载已接受的 Stop：abort 会丢掉尚未落库的停止意图，
+    /// 因此只能等它完成；等待仍有界，超时按 Incomplete 上报而不是静默丢弃。
+    fn abort_safe(self) -> bool {
+        !matches!(self, Self::NotificationEffect)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Admission {
     Open,
@@ -222,6 +232,14 @@ impl HostTaskOwner {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_policy_for_tests(
+        cooperative_grace: Duration,
+        abort_drain_guard: Duration,
+    ) -> (Self, HostTaskSpawner) {
+        Self::with_policy(cooperative_grace, abort_drain_guard)
+    }
+
     pub(crate) async fn shutdown(&mut self) -> HostShutdownReport {
         let Some(inner) = self.inner.as_ref().cloned() else {
             return HostShutdownReport::Complete;
@@ -237,7 +255,7 @@ impl HostTaskOwner {
             .await
             == WaitOutcome::Expired
         {
-            abort_remaining(&inner);
+            abort_remaining(&inner, false);
             if self
                 .wait_driver
                 .race(
@@ -248,9 +266,12 @@ impl HostTaskOwner {
                 .await
                 == WaitOutcome::Expired
             {
-                return HostShutdownReport::Incomplete {
-                    unfinished: active_count(&inner),
-                };
+                let unfinished = active_count(&inner);
+                tracing::warn!(
+                    unfinished,
+                    "host shutdown timed out with durable notification effects still pending"
+                );
+                return HostShutdownReport::Incomplete { unfinished };
             }
         }
         let mut state = inner.state.lock().expect("host task state poisoned");
@@ -264,7 +285,7 @@ impl Drop for HostTaskOwner {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
             begin_shutdown(&inner);
-            abort_remaining(&inner);
+            abort_remaining(&inner, true);
         }
     }
 }
@@ -324,7 +345,11 @@ fn begin_shutdown(inner: &HostTaskInner) {
     }
 }
 
-fn abort_remaining(inner: &HostTaskInner) {
+/// abort 未完成的宿主任务。
+///
+/// `include_durable=false` 用于正常 shutdown 的 abort 阶段：耐久副作用只能等待，
+/// 不能像普通任务一样被丢弃。owner Drop 时宿主已确定销毁，才连同它们一起 abort。
+fn abort_remaining(inner: &HostTaskInner, include_durable: bool) {
     let handles: Vec<_> = inner
         .state
         .lock()
@@ -332,6 +357,7 @@ fn abort_remaining(inner: &HostTaskInner) {
         .tasks
         .iter()
         .filter(|task| !task.abort.is_finished())
+        .filter(|task| include_durable || task.kind.abort_safe())
         .map(|task| {
             tracing::debug!(owner = ?task.owner, kind = ?task.kind, "aborting host-owned task");
             task.abort.clone()

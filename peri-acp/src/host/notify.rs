@@ -33,8 +33,10 @@ pub(crate) struct IntentTarget {
     /// 捕获时所属 live session 的实例代次。
     ///
     /// close/load 会发布新 `SessionState` 并把 `work_intent_epoch` 归零；只比 epoch
-    /// 会让旧生命周期的 Stop 在新一轮写到相同 epoch 时误覆盖。没有 live 实例的
-    /// cascade child 为 `None`（无从比较，照常写入）。
+    /// 会让旧生命周期的 Stop 在新一轮写到相同 epoch 时误覆盖。实例代次用于识别
+    /// 生命周期重建：重建本身不使 Stop 失效，只有新实例已准入 turn（epoch 前进）
+    /// 才算更晚的工作意图。没有 live 实例的 cascade child 为 `None`（无从比较，
+    /// 照常写入）。
     pub(crate) session_generation: Option<u64>,
     pub(crate) epoch: u64,
 }
@@ -304,10 +306,14 @@ async fn live_work_intent(sessions: &SharedSessions, thread_id: &ThreadId) -> Op
         .map(|state| (state.session_generation, state.work_intent_epoch))
 }
 
-/// 捕获后目标是否已过期：live 实例换了生命周期，或已有更新 turn 准入。
+/// 捕获后目标是否已过期：同一生命周期内已有更新 turn 准入，或新生命周期已
+/// 准入过 turn。
 ///
-/// 生命周期比较不可省：close/load 会把 `work_intent_epoch` 归零，旧生命周期的
-/// 代次与新实例重新计数的值可能相同，只有实例代次能区分两轮生命周期。
+/// close/load 会发布新实例并把 `work_intent_epoch` 归零；重建生命周期本身不是
+/// 新的用户工作意图，已接受的 Stop 必须由新实例承接。只有新实例的 epoch 已经
+/// 前进（该生命周期内确有 turn 准入）时，才说明存在更晚的意图。同一生命周期内
+/// 仍按 epoch 比较；实例代次不能省，否则 close/load 后新旧 epoch 数值相同会
+/// 让旧 Stop 覆盖新轮次的 `working`（见 `stale_stop_across_close_load_*`）。
 async fn intent_superseded(sessions: &SharedSessions, target: &IntentTarget) -> bool {
     let Some((generation, epoch)) = live_work_intent(sessions, &target.thread_id).await else {
         return false;
@@ -315,7 +321,10 @@ async fn intent_superseded(sessions: &SharedSessions, target: &IntentTarget) -> 
     let generation_moved = target
         .session_generation
         .is_some_and(|captured| captured != generation);
-    generation_moved || epoch != target.epoch
+    if generation_moved {
+        return epoch > 0;
+    }
+    epoch != target.epoch
 }
 
 /// 通知的锁外持久化副作用：Stop 意图与模型配置变化后的占用失效。

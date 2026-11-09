@@ -453,6 +453,68 @@ async fn user_stop_between_working_commit_and_epoch_advance_settles_stopped() {
     drop(frozen);
 }
 
+/// P1：Stop 已接受但尚未落库时 close → load，用户没有发出新 prompt。
+///
+/// 新生命周期会换实例代次并把 `work_intent_epoch` 归零；若把代次变化直接当作
+/// 「有更新的工作意图」，旧 Stop 会被跳过，durable 状态仍为 `working`，后续
+/// `recovery.enter` 会把它当作可恢复任务。重建生命周期必须承接已接受的 Stop。
+#[tokio::test]
+async fn review_pending_stop_survives_close_load_without_new_prompt() {
+    let mut harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+
+    // 旧 Stop worker 固定在 gate_for 之后、work_intent 锁之前。
+    let stop_gate =
+        crate::host::prompt_dispatch::admission_gate::install(&format!("{thread_id}:stop-persist"));
+    let (targets, persist) = harness.capture_and_spawn_stop(&thread_id).await;
+    assert_eq!(targets.len(), 1);
+    let old_generation = targets[0]
+        .session_generation
+        .expect("live 会话必须捕获实例代次");
+    tokio::time::timeout(WAIT_TIMEOUT, stop_gate.entered.notified())
+        .await
+        .expect("Stop worker 必须停在 work_intent 锁之前");
+
+    // 真实 close → load；期间不发送任何新 prompt。
+    {
+        let mut states = harness.sessions.lock().await;
+        crate::host::requests::session_lifecycle::handle_close(
+            &json!({"sessionId": thread_id}),
+            &harness.cfg,
+            &mut states,
+        )
+        .await
+        .expect("session/close 必须成功");
+        assert!(!states.contains_key(&thread_id), "close 必须移除 live 实例");
+    }
+    harness.load_session(&thread_id).await;
+    let new_generation = {
+        let states = harness.sessions.lock().await;
+        assert_eq!(
+            states[&thread_id].work_intent_epoch, 0,
+            "load 后尚未有 turn 准入"
+        );
+        states[&thread_id].session_generation
+    };
+    assert_ne!(
+        old_generation, new_generation,
+        "load 必须发布新的生命周期代次"
+    );
+
+    // 放行旧 worker：新生命周期没有更新的工作意图，Stop 必须落库。
+    stop_gate.release.notify_one();
+    tokio::time::timeout(WAIT_TIMEOUT, persist)
+        .await
+        .expect("Stop 持久化不得挂起")
+        .expect("Stop 持久化任务不得 panic");
+    assert_eq!(
+        durable_work_state(&harness, &thread_id).await,
+        WorkState::Stopped,
+        "close/load 不得丢弃已接受的 Stop"
+    );
+}
+
 /// P2 复审：Stop 落在尝试已 attach、启动尚未完成时，Stop 持久化先写 `stopped`；
 /// 若 `allow()` 清掉停止意图，随后的启动失败会把同一 thread 回收成 idle。
 ///
