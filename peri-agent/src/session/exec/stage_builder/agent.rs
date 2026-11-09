@@ -43,7 +43,7 @@ pub(crate) fn build_agent(
     task_manager: Arc<TaskManager>,
     on_bg_complete: Option<OnBgCompleteFn>,
     cached_llm: Option<&CachedLlmInstances>,
-) -> (AcpAgentOutput, Option<CachedLlmInstances>) {
+) -> Result<(AcpAgentOutput, Option<CachedLlmInstances>), super::StageBuildError> {
     // FrozenContext 中的空字符串是“冻结缺席”，仍须投影为 Some("")，
     // 防止 AgentsMd/Skills middleware 在 before_agent 阶段重读晚到文件。
     let frozen = frozen_session.v2_frozen();
@@ -140,7 +140,7 @@ pub(crate) fn build_agent(
                 system_prompt_for_sub,
             },
         ),
-    );
+    )?;
 
     // bridge 与 StageContext 必须共享同一条 middleware chain：before_agent
     // 填充的 session-local cache 由下一个 ModelRequest 在同步构造阶段读取。
@@ -190,7 +190,7 @@ pub(crate) fn build_agent(
         subagent_mw,
     };
 
-    (
+    Ok((
         AcpAgentOutput {
             components,
             todo_rx,
@@ -198,7 +198,7 @@ pub(crate) fn build_agent(
             bg_event_tx,
         },
         new_cache,
-    )
+    ))
 }
 
 /// 单次链装配的资源投影；不承担新的 session 所有权。

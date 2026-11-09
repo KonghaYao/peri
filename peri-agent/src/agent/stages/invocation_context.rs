@@ -32,6 +32,7 @@ use crate::agent::events_v2::{EventBus, RenderEvent};
 use crate::error::{AgentError, AgentResult};
 use crate::messages::{BaseMessage, MessageId};
 use crate::middleware::MiddlewareChain;
+use crate::session::queue::ProducerQueue;
 use crate::session::turn::TurnId;
 use crate::session::{MessageQueue, QueuedMessage};
 use crate::tools::{ContextUsage, InvocationOrigin, ToolCallId, ToolInvocationResolver};
@@ -102,8 +103,8 @@ impl ExecutionEntryOrigin {
 
 /// 执行期会话队列的受控写入端口。
 ///
-/// 只提供 canonical 投递与会话队列引用（供 middleware `QueueState` 窄接口复用）；
-/// 不暴露 drain、替换或清空能力。唤醒语义由消息自身策略决定。
+/// 只提供 canonical 投递与会话队列的**生产者面**（供 middleware `QueueState`
+/// 窄接口复用）；不暴露 owner、drain、替换或清空能力。唤醒语义由消息自身策略决定。
 #[derive(Clone)]
 pub(crate) struct InvocationQueuePort {
     queue: MessageQueue,
@@ -115,7 +116,12 @@ impl InvocationQueuePort {
         crate::session::queue::enqueue_detached(self.queue.producer(), message);
     }
 
-    /// 会话队列引用（`QueueState::v2_queue` 的事实源）。
+    /// 会话队列的生产者面（`QueueState::v2_producer` 的事实源）；不交出 owner。
+    pub(crate) fn producer(&self) -> ProducerQueue<'_> {
+        self.queue.producer()
+    }
+
+    /// 会话队列引用（仅 crate 内执行面克隆用；不得进入 hook 能力 trait）。
     pub(crate) fn queue(&self) -> &MessageQueue {
         &self.queue
     }

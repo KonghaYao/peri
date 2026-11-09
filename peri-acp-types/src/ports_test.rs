@@ -76,7 +76,8 @@ fn test_mcp_pool_port_downcast_restores_concrete() {
     let concrete = MockMcpPool::new();
     let port: Arc<dyn McpPoolPort> = Arc::clone(&concrete) as Arc<dyn McpPoolPort>;
 
-    let restored = match Arc::clone(&port).downcast_arc::<MockMcpPool>() {
+    // SAFETY: mock 的 as_any 返回 self。
+    let restored = match unsafe { Arc::clone(&port).downcast_arc::<MockMcpPool>() } {
         Ok(pool) => pool,
         Err(_) => panic!("downcast 必须还原具体类型 MockMcpPool"),
     };
@@ -105,12 +106,56 @@ fn test_mcp_pool_port_downcast_restores_concrete() {
     }
 
     let wrong: Arc<dyn McpPoolPort> = Arc::new(WrongType);
-    let err = Arc::clone(&wrong)
-        .downcast_arc::<MockMcpPool>()
-        .unwrap_err();
+    // SAFETY: WrongType 的 as_any 返回 self（类型不符走 Err 分支）。
+    let err = unsafe { Arc::clone(&wrong).downcast_arc::<MockMcpPool>() }.unwrap_err();
     assert!(
         Arc::ptr_eq(&wrong, &err),
         "类型不符必须原样返回原 Arc（Err 分支不吞引用）"
+    );
+}
+
+/// 包装实现把 `as_any` 指向内字段时，`downcast_arc` 必须拒绝而非按外层指针 cast。
+///
+/// 报告中的前提不成立：`as_any` 自报的 TypeId 可以匹配，但数据地址与外层
+/// trait object 不同（内字段偏移）。地址校验必须让这条路径返回 `Err`。
+#[test]
+fn test_mcp_pool_downcast_rejects_wrapper_returning_inner_any() {
+    #[repr(C)]
+    struct Wrapper {
+        // 保证 inner 不在 offset 0（复现「地址相差」的前提）。
+        _prefix: u64,
+        inner: MockMcpPool,
+    }
+
+    #[async_trait::async_trait]
+    impl McpPoolPort for Wrapper {
+        fn as_any(&self) -> &dyn Any {
+            // 故意违反契约：返回内字段的 Any（TypeId 与外层对象不同）。
+            &self.inner
+        }
+
+        async fn shutdown(&self) -> McpPoolShutdownReport {
+            self.inner.shutdown().await
+        }
+
+        fn snapshot(&self) -> serde_json::Value {
+            self.inner.snapshot()
+        }
+    }
+
+    let wrapper: Arc<dyn McpPoolPort> = Arc::new(Wrapper {
+        _prefix: 0,
+        inner: MockMcpPool {
+            shutdown_calls: std::sync::atomic::AtomicUsize::new(0),
+        },
+    });
+
+    // SAFETY: 本测试故意违反 as_any 契约以激活实现层的地址校验；校验命中时
+    // 不会按外层指针重建 Arc。契约违规本身仍是调用方的错误，不能模仿。
+    let err = unsafe { Arc::clone(&wrapper).downcast_arc::<MockMcpPool>() }.unwrap_err();
+    assert!(
+        Arc::ptr_eq(&wrapper, &err),
+        "内字段 Any 必须被拒绝并原样返回原 Arc（不得按外层指针 cast）"
     );
 }
 
@@ -137,7 +182,8 @@ fn test_tool_search_port_downcast_restores_concrete() {
     let concrete = Arc::new(MockToolSearch);
     let port: Arc<dyn ToolSearchPort> = Arc::clone(&concrete) as Arc<dyn ToolSearchPort>;
 
-    let restored = match Arc::clone(&port).downcast_arc::<MockToolSearch>() {
+    // SAFETY: mock 的 as_any 返回 self。
+    let restored = match unsafe { Arc::clone(&port).downcast_arc::<MockToolSearch>() } {
         Ok(index) => index,
         Err(_) => panic!("downcast 必须还原具体类型 MockToolSearch"),
     };
@@ -155,9 +201,8 @@ fn test_tool_search_port_downcast_restores_concrete() {
     }
 
     let wrong: Arc<dyn ToolSearchPort> = Arc::new(WrongType);
-    let err = Arc::clone(&wrong)
-        .downcast_arc::<MockToolSearch>()
-        .unwrap_err();
+    // SAFETY: WrongType 的 as_any 返回 self（类型不符走 Err 分支）。
+    let err = unsafe { Arc::clone(&wrong).downcast_arc::<MockToolSearch>() }.unwrap_err();
     assert!(
         Arc::ptr_eq(&wrong, &err),
         "类型不符必须原样返回原 Arc（Err 分支不吞引用）"

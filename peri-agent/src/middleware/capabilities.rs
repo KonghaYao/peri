@@ -9,8 +9,8 @@ use crate::{
     error::AgentResult,
     messages::{BaseMessage, MessageId},
     session::{
-        tool_catalog::StartupToolUpdate, MessageKind, MessagePolicy, MessageQueue, MessageSource,
-        QueuedMessage,
+        queue::ProducerQueue, tool_catalog::StartupToolUpdate, MessageKind, MessagePolicy,
+        MessageSource, QueuedMessage,
     },
 };
 
@@ -25,7 +25,7 @@ use crate::{
 /// ```compile_fail
 /// use peri_agent::middleware::capabilities::StateView;
 /// fn cannot_mutate_queue(state: &dyn StateView) {
-///     state.v2_queue().drain_all();
+///     state.v2_producer().drain_all();
 /// }
 /// ```
 pub trait StateView: Send + Sync {
@@ -69,9 +69,27 @@ pub trait MessageReplace: Send + Sync {
     fn replace_message(&mut self, message: BaseMessage) -> bool;
 }
 
-/// 显式队列能力；保留原消息类型的唤醒语义。
+/// 显式队列能力：只暴露生产者面（入队与只读查询），不交出队列 owner。
+///
+/// Hook 不得取得完整 [`MessageQueue`](crate::session::MessageQueue)：
+/// `drain_all` / `take_owner` 属于 Receive 生命周期所有权。需要读取队列的
+/// middleware 使用生产者面的只读查询（`query` / `snapshot`）。
+///
+/// ```compile_fail,E0599
+/// use peri_agent::middleware::capabilities::QueueState;
+/// fn cannot_drain(state: &dyn QueueState) {
+///     state.v2_producer().drain_all();
+/// }
+/// ```
+/// ```compile_fail,E0599
+/// use peri_agent::middleware::capabilities::QueueState;
+/// fn cannot_own(state: &dyn QueueState) {
+///     state.v2_producer().owner();
+/// }
+/// ```
 pub trait QueueState: Send + Sync {
-    fn v2_queue(&self) -> &MessageQueue;
+    /// 会话级 mailbox 的生产者面（与 Receive 消费的是同一实例）。
+    fn v2_producer(&self) -> ProducerQueue<'_>;
     fn enqueue_v2_message(&self, msg: QueuedMessage);
 }
 
@@ -204,7 +222,7 @@ pub trait AfterToolsBatchState: StateView + HookOutputState {
 /// ```compile_fail
 /// use peri_agent::middleware::capabilities::HookOutputState;
 /// fn cannot_drain_queue(state: &dyn HookOutputState) {
-///     state.v2_queue().drain_all();
+///     state.v2_producer().drain_all();
 /// }
 /// ```
 pub trait HookOutputState: Send + Sync {
@@ -274,7 +292,7 @@ pub trait BeforeModelState: StateView + MessageAppend + QueueState {}
 /// ```compile_fail
 /// use peri_agent::middleware::capabilities::StartupState;
 /// fn cannot_drain_queue(state: &mut dyn StartupState) {
-///     state.v2_queue().drain_all();
+///     state.v2_producer().drain_all();
 /// }
 /// ```
 pub trait StartupState: Send + Sync {
@@ -326,8 +344,8 @@ impl<T: MiddlewareState + ?Sized> MessageReplace for T {
 }
 
 impl<T: MiddlewareState + ?Sized> QueueState for T {
-    fn v2_queue(&self) -> &MessageQueue {
-        MiddlewareState::v2_queue(self)
+    fn v2_producer(&self) -> ProducerQueue<'_> {
+        MiddlewareState::v2_queue(self).producer()
     }
     fn enqueue_v2_message(&self, msg: QueuedMessage) {
         MiddlewareState::enqueue_v2_message(self, msg)

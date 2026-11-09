@@ -111,6 +111,21 @@ pub fn production_blueprint() -> Vec<ChainSlot> {
     ]
 }
 
+/// 装配失败：注入端口不是装配实现要求的具体类型。
+///
+/// 端口存在但无法还原时必须显式失败——静默替换为空池/默认索引会让装配产物
+/// 与注入实例分离（MCP 工具、检索索引不生效）且不可观察。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AssemblyError {
+    #[error("assembly port `{port}` is not the required implementation `{expected}`")]
+    PortMismatch {
+        /// 端口名（`McpPoolPort` / `ToolSearchPort` / `AgentCatalogPort`）。
+        port: &'static str,
+        /// 装配实现要求的具体类型名。
+        expected: &'static str,
+    },
+}
+
 /// 链装配器：由中间件层提供实现。
 ///
 /// 当前唯一实现为 `peri-middlewares::assembly::ProductionChainAssembler`
@@ -122,7 +137,11 @@ pub trait MiddlewareChainAssembler: Send + Sync {
     /// 装配产物（由实现方定义）
     type Output;
     /// 按生产链序构建中间件链
-    fn assemble(&self, blueprint: &[ChainSlot], ctx: &Self::Context) -> Self::Output;
+    fn assemble(
+        &self,
+        blueprint: &[ChainSlot],
+        ctx: &Self::Context,
+    ) -> Result<Self::Output, AssemblyError>;
 }
 
 /// session 初始化装配入口：按生产链序构建中间件链（唯一触发点，ARC-MIDDLEWARE-001）。
@@ -133,7 +152,7 @@ pub trait MiddlewareChainAssembler: Send + Sync {
 pub fn build_middleware_chain<A: MiddlewareChainAssembler>(
     assembler: &A,
     ctx: &A::Context,
-) -> A::Output {
+) -> Result<A::Output, AssemblyError> {
     assembler.assemble(&production_blueprint(), ctx)
 }
 
@@ -195,12 +214,15 @@ impl InvocationRuleChain {
 ///
 /// `Context` / `Output` 固定为生产装配类型：调用方无法用它装配轮次链或
 /// 拿到轮次 `ChainAssembly`。
-pub fn build_invocation_rule_chain<A>(assembler: &A, ctx: &AssemblyContext) -> InvocationRuleChain
+pub fn build_invocation_rule_chain<A>(
+    assembler: &A,
+    ctx: &AssemblyContext,
+) -> Result<InvocationRuleChain, AssemblyError>
 where
     A: MiddlewareChainAssembler<Context = AssemblyContext, Output = ChainAssembly>,
 {
-    let ChainAssembly { chain, .. } = assembler.assemble(&invocation_rule_blueprint(), ctx);
-    InvocationRuleChain::from_derived_blueprint(chain)
+    let ChainAssembly { chain, .. } = assembler.assemble(&invocation_rule_blueprint(), ctx)?;
+    Ok(InvocationRuleChain::from_derived_blueprint(chain))
 }
 
 // ── 装配上下文（L5：自 peri-middlewares/src/assembly.rs 迁入）────────────────
@@ -251,6 +273,9 @@ pub type SystemPromptBuilder = Arc<dyn Fn(Option<&AgentOverrides>, &str) -> Stri
 /// Agent 声明边）；stage 装配（Agent 层）只经本端口调用，不触碰具体实现。
 pub trait SubAgentMiddlewarePort: Send + Sync {
     /// 还原具体实现（装配方 downcast 用）。
+    ///
+    /// 安全契约：实现必须返回 `self`（同一对象、同一地址）；返回内字段或其他
+    /// 对象的 `Any` 会破坏 `downcast_arc` 的安全前提。
     fn as_any(&self) -> &dyn Any;
     /// 注入父 agent 事件侧 AgentId（主 v2 session 创建后调用）。
     fn set_parent_agent_id(&self, id: AgentId);
@@ -260,21 +285,37 @@ pub trait SubAgentMiddlewarePort: Send + Sync {
 
 impl dyn SubAgentMiddlewarePort {
     /// 将 `Arc<dyn SubAgentMiddlewarePort>` 还原为具体实现 `Arc<T>`。
-    pub fn downcast_arc<T: SubAgentMiddlewarePort + 'static>(
+    ///
+    /// # Safety
+    ///
+    /// 所有 `SubAgentMiddlewarePort` 实现必须让 [`Self::as_any`] 返回 `self`；
+    /// 返回内字段或其他对象的 `Any` 会以错误布局重建 `Arc<T>`（UB）。本函数的
+    /// 数据指针校验只能拦截常见包装器。
+    ///
+    /// ```compile_fail,E0133
+    /// use std::sync::Arc;
+    /// use peri_agent::session::factory::SubAgentMiddlewarePort;
+    /// fn safe_call<T: SubAgentMiddlewarePort + 'static>(
+    ///     port: Arc<dyn SubAgentMiddlewarePort>,
+    /// ) {
+    ///     let _ = port.downcast_arc::<T>();
+    /// }
+    /// ```
+    pub unsafe fn downcast_arc<T: SubAgentMiddlewarePort + 'static>(
         self: Arc<Self>,
     ) -> Result<Arc<T>, Arc<Self>> {
         let ptr = Arc::into_raw(self);
-        unsafe {
-            // 经 `as_any()` 取具体类型的 TypeId：直接对 trait object 调
-            // `type_id()` 会命中 `Any` 的 blanket impl，返回
-            // `TypeId::of::<dyn SubAgentMiddlewarePort>()`（trait object
-            // 自身），恒不等于 `TypeId::of::<T>()` → downcast 恒失败
-            // （同构 2026-08-06-e2e-workflow-not-completing 遗留项）。
-            if (*ptr).as_any().type_id() == std::any::TypeId::of::<T>() {
-                Ok(Arc::from_raw(ptr as *const T))
-            } else {
-                Err(Arc::from_raw(ptr))
-            }
+        // 必须经 `as_any()` 取 TypeId，不能对 trait object 直接取（会得到自身）。
+        // SAFETY: 由调用方保证 as_any 契约。
+        let any = unsafe { (*ptr).as_any() };
+        if std::ptr::addr_eq(any as *const dyn Any, ptr as *const ())
+            && any.type_id() == std::any::TypeId::of::<T>()
+        {
+            // SAFETY: 地址与 TypeId 均匹配 ⇒ 分配就是 T（调用方契约）。
+            unsafe { Ok(Arc::from_raw(ptr as *const T)) }
+        } else {
+            // SAFETY: 指针来自上面的 Arc::into_raw，未发生 cast。
+            unsafe { Err(Arc::from_raw(ptr)) }
         }
     }
 }

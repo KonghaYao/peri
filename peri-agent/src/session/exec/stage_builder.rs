@@ -297,6 +297,8 @@ pub struct V2AgentOutput {
 pub enum StageBuildError {
     #[error("session tool catalog is invalid: {0}")]
     ToolCatalog(#[from] crate::session::tool_catalog::CatalogRefreshError),
+    #[error("middleware chain assembly failed: {0}")]
+    Assembly(#[from] crate::session::factory::AssemblyError),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -396,7 +398,7 @@ pub fn build_stage_context(
         task_manager.clone(),
         on_bg_complete.clone(),
         cached_llm,
-    );
+    )?;
 
     // 直接消费 AgentComponents
     let AgentComponents {

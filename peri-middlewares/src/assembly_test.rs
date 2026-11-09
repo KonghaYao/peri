@@ -262,7 +262,9 @@ fn base_context() -> AssemblyContext {
     let on_bg_complete: Option<OnBgCompleteFn> = None;
 
     AssemblyContext {
-        agent_catalog: Arc::new(crate::host_ports::NoopAgentCatalog),
+        // 生产装配面同款端口（未绑 registry ⇒ 空目录）；池存在时 fail-closed
+        // 校验要求它是具体实现。
+        agent_catalog: Arc::new(crate::host_ports::AgentCatalogProvider::new()),
         cwd: "/tmp/contract-test".to_string(),
         cancel: AgentCancellationToken::new(),
         broker: Arc::new(FakeBroker),
@@ -313,7 +315,7 @@ fn base_context() -> AssemblyContext {
 
 /// 装配并返回链上中间件名称序列。
 fn assemble_names(ctx: &AssemblyContext) -> Vec<String> {
-    let out = build_middleware_chain(&ProductionChainAssembler, ctx);
+    let out = build_middleware_chain(&ProductionChainAssembler, ctx).expect("assembly");
     out.chain.names().into_iter().map(String::from).collect()
 }
 
@@ -436,7 +438,7 @@ fn make_connected_handle(server: &str, tools: Vec<rmcp::model::Tool>) -> Arc<Mcp
 
 /// 装配并返回链上中间件 collect_tools 的工具名集合。
 fn assemble_tool_names(ctx: &AssemblyContext) -> Vec<String> {
-    let out = build_middleware_chain(&ProductionChainAssembler, ctx);
+    let out = build_middleware_chain(&ProductionChainAssembler, ctx).expect("assembly");
     out.chain
         .collect_tools(&ctx.cwd)
         .into_iter()
@@ -596,7 +598,7 @@ mod workflow;
 #[test]
 fn agent_default_run_in_background_reaches_chain_tool_schema() {
     fn agent_tool_default(ctx: &AssemblyContext) -> serde_json::Value {
-        let out = build_middleware_chain(&ProductionChainAssembler, ctx);
+        let out = build_middleware_chain(&ProductionChainAssembler, ctx).expect("assembly");
         let tools = out.chain.collect_tools(&ctx.cwd);
         let agent = tools
             .iter()
@@ -610,4 +612,103 @@ fn agent_default_run_in_background_reaches_chain_tool_schema() {
 
     ctx.agent_default_run_in_background = true;
     assert_eq!(agent_tool_default(&ctx), serde_json::json!(true));
+}
+
+// ─── 端口不匹配：fail-closed（不造空池/默认索引） ─────────────────────────────
+
+/// 非本 crate 的池实现：`as_any` 合法返回 self，但具体类型不是 `McpClientPool`。
+struct ForeignPool;
+
+#[async_trait]
+impl peri_acp_types::ports::McpPoolPort for ForeignPool {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
+        peri_acp_types::ports::McpPoolShutdownReport::Complete {
+            settled_services: 0,
+            failed_services: 0,
+        }
+    }
+
+    fn snapshot(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+}
+
+struct ForeignToolSearch;
+
+impl peri_acp_types::ports::ToolSearchPort for ForeignToolSearch {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+fn assert_port_mismatch(ctx: &AssemblyContext, port: &'static str, expected: &'static str) {
+    let error = match build_middleware_chain(&ProductionChainAssembler, ctx) {
+        Ok(_) => panic!("端口存在但类型不符必须显式失败，不能静默替换为降级实例"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        peri_agent::session::factory::AssemblyError::PortMismatch { port, expected },
+        "错误必须指出不匹配的端口与期望实现"
+    );
+}
+
+#[test]
+fn mcp_pool_port_mismatch_fails_assembly_instead_of_empty_pool() {
+    let mut ctx = base_context();
+    ctx.mcp_pool = Some(Arc::new(ForeignPool));
+    assert_port_mismatch(&ctx, "McpPoolPort", "McpClientPool");
+}
+
+#[test]
+fn tool_search_port_mismatch_fails_assembly_instead_of_default_index() {
+    let mut ctx = base_context();
+    ctx.tool_search_index = Arc::new(ForeignToolSearch);
+    assert_port_mismatch(&ctx, "ToolSearchPort", "ToolSearchIndex");
+}
+
+/// 池是真实实现、目录端口是外来实现：目录会静默为空，必须失败而不是继续装配。
+#[test]
+fn agent_catalog_port_mismatch_fails_assembly_when_pool_is_present() {
+    let mut ctx = base_context();
+    ctx.mcp_pool = Some(Arc::new(McpClientPool::new_pending()));
+    // 测试用外来目录端口：有池时目录必须可绑定，不能静默为空。
+    ctx.agent_catalog = Arc::new(crate::host_ports::NoopAgentCatalog);
+    assert_port_mismatch(&ctx, "AgentCatalogPort", "AgentCatalogProvider");
+}
+
+/// 无 MCP 是合法装配路径（print / 未声明 MCP）：不得误报端口不匹配。
+#[test]
+fn no_mcp_pool_is_a_legal_assembly_path() {
+    let ctx = base_context();
+    assert!(ctx.mcp_pool.is_none());
+    build_middleware_chain(&ProductionChainAssembler, &ctx).expect("无 MCP 必须可装配");
+}
+
+/// 生产注入的具体实例必须被原样还原（装配产物与注入共享同一 `Arc`）。
+#[test]
+fn concrete_ports_bind_the_injected_instances() {
+    let mut ctx = base_context();
+    let pool = Arc::new(McpClientPool::new_pending());
+    let index = Arc::new(ToolSearchIndex::new());
+    ctx.mcp_pool = Some(Arc::clone(&pool) as Arc<dyn peri_acp_types::ports::McpPoolPort>);
+    ctx.tool_search_index = Arc::clone(&index) as Arc<dyn peri_acp_types::ports::ToolSearchPort>;
+
+    let resolved = crate::assembly::preparation::resolve_ports(&ctx).expect("生产端口必须可还原");
+    assert!(
+        Arc::ptr_eq(resolved.mcp_pool_concrete.as_ref().unwrap(), &pool),
+        "注入池与装配产物必须是同一实例"
+    );
+    assert!(
+        Arc::ptr_eq(&resolved.tool_search_index_concrete, &index),
+        "注入索引与装配产物必须是同一实例"
+    );
+    assert!(
+        resolved.mcp_agent_registry.is_some(),
+        "有池时必须构造 registry"
+    );
 }

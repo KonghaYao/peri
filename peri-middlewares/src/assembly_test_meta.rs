@@ -116,7 +116,7 @@ fn builtin_capability_closure_matrix_covers_all_faces() {
         ctx.meta_harness_disabled = disabled.clone();
 
         // 面①/②：链工具集合里不得残留该实例的 bridge（direct 与 deferred 都不行）。
-        let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+        let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
         let collected: Vec<(String, bool)> = out
             .chain
             .collect_tools(&ctx.cwd)
@@ -160,11 +160,13 @@ fn builtin_capability_closure_matrix_covers_all_faces() {
             .collect();
 
         // 面③：subagent parent_tools。
-        let subagent = out
-            .subagent_mw
-            .expect("矩阵需要 SubAgentMiddleware")
-            .downcast_arc::<SubAgentMiddleware>()
-            .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
+        // SAFETY: SubAgentMiddleware 的 as_any 返回 self。
+        let subagent = unsafe {
+            out.subagent_mw
+                .expect("矩阵需要 SubAgentMiddleware")
+                .downcast_arc::<SubAgentMiddleware>()
+        }
+        .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
         let parent_tool = subagent.build_tool("/tmp/contract-test");
         let parent_names: Vec<&str> = parent_tool.parent_tools.iter().map(|t| t.name()).collect();
         for tool in closed_tools {
@@ -253,7 +255,7 @@ fn meta_harness_disables_subagent_middleware_fully() {
     let mut ctx = base_context();
     ctx.meta_harness_disabled
         .insert("SubAgentMiddleware".to_string());
-    let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+    let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
 
     assert!(
         out.subagent_mw.is_none(),
@@ -392,7 +394,7 @@ fn meta_harness_ask_user_tool_follows_hitl_disabled() {
     );
 
     // 宿主级 shared_tools 不再注册任何工具（生产路径写入点归零）
-    build_middleware_chain(&ProductionChainAssembler, &ctx2);
+    build_middleware_chain(&ProductionChainAssembler, &ctx2).expect("assembly");
     assert!(
         !ctx2.shared_tools.read().contains_key("AskUserQuestion"),
         "shared_tools 不应再注册 AskUserQuestion（移入链 collect_tools）"
@@ -419,12 +421,14 @@ fn meta_harness_disabled_parent_tools_filtered() {
         ctx.mcp_pool = Some(pool_with_builtin_instances());
         ctx.meta_harness_disabled
             .insert(instance.policy_key.to_string());
-        let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
-        let subagent = out
-            .subagent_mw
-            .expect("parent_tools 过滤测试需要 SubAgentMiddleware")
-            .downcast_arc::<SubAgentMiddleware>()
-            .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
+        let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
+        // SAFETY: SubAgentMiddleware 的 as_any 返回 self。
+        let subagent = unsafe {
+            out.subagent_mw
+                .expect("parent_tools 过滤测试需要 SubAgentMiddleware")
+                .downcast_arc::<SubAgentMiddleware>()
+        }
+        .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
         let tool = subagent.build_tool("/tmp/contract-test");
         let parent_names: Vec<&str> = tool.parent_tools.iter().map(|t| t.name()).collect();
         for declaration in instance.tools {
@@ -443,12 +447,14 @@ fn meta_harness_disabled_parent_tools_filtered() {
     // 这条链上没有 ToolSearch 可发现，注入即模型看不见的注册项。
     let mut ctx = base_context();
     ctx.mcp_pool = Some(pool_with_builtin_instances());
-    let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
-    let subagent = out
-        .subagent_mw
-        .expect("parent_tools 断言需要 SubAgentMiddleware")
-        .downcast_arc::<SubAgentMiddleware>()
-        .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
+    let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
+    // SAFETY: SubAgentMiddleware 的 as_any 返回 self。
+    let subagent = unsafe {
+        out.subagent_mw
+            .expect("parent_tools 断言需要 SubAgentMiddleware")
+            .downcast_arc::<SubAgentMiddleware>()
+    }
+    .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
     let tool = subagent.build_tool("/tmp/contract-test");
     let declared: Vec<(&str, bool)> = peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
         .iter()
@@ -486,12 +492,16 @@ fn meta_harness_disabled_parent_tools_filtered() {
     closed_ctx
         .meta_harness_disabled
         .insert("WebMiddleware".to_string());
-    let closed_out = build_middleware_chain(&ProductionChainAssembler, &closed_ctx);
-    let closed_subagent = closed_out
-        .subagent_mw
-        .expect("parent_tools 关闭断言需要 SubAgentMiddleware")
-        .downcast_arc::<SubAgentMiddleware>()
-        .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
+    let closed_out =
+        build_middleware_chain(&ProductionChainAssembler, &closed_ctx).expect("assembly");
+    // SAFETY: SubAgentMiddleware 的 as_any 返回 self。
+    let closed_subagent = unsafe {
+        closed_out
+            .subagent_mw
+            .expect("parent_tools 关闭断言需要 SubAgentMiddleware")
+            .downcast_arc::<SubAgentMiddleware>()
+    }
+    .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
     let closed_tool = closed_subagent.build_tool("/tmp/contract-test");
     let closed_names: Vec<&str> = closed_tool.parent_tools.iter().map(|t| t.name()).collect();
     let web = peri_acp_types::builtin_mcp::find("web").expect("web 实例有声明");
@@ -510,7 +520,7 @@ fn meta_harness_disabled_parent_tools_filtered() {
     let mut ctx = base_context();
     ctx.meta_harness_disabled
         .insert("SubAgentMiddleware".to_string());
-    let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+    let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
     assert!(
         out.subagent_mw.is_none(),
         "SubAgentMiddleware 关闭后 parent_tools 不应注入（槽位联动置空）"
@@ -649,7 +659,8 @@ async fn assembled_discover_agents(ctx: &crate::assembly::AssemblyContext) -> Ve
     let out = peri_agent::session::factory::build_middleware_chain(
         &crate::assembly::ProductionChainAssembler,
         ctx,
-    );
+    )
+    .expect("assembly");
     let tools = out.chain.collect_tools(&ctx.cwd);
     let tool = tools
         .into_iter()
