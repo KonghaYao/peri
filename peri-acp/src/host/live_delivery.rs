@@ -118,7 +118,8 @@ impl LiveStream {
     /// 候选失败时把候选期更新并回旧流：旧流身份与已发序号不变，事件按原顺序补发。
     /// 旧流处于直发时先切到排空状态，后续事件不得越过这些更新。
     fn absorb(&mut self, candidate: LiveStream) {
-        let absorbed = !candidate.buffer.is_empty();
+        // 只有缺口也算待排空：否则 `dropped` 永远不会推进序号，客户端把静默丢失当成连续。
+        let absorbed = !candidate.buffer.is_empty() || candidate.dropped > 0;
         self.dropped = self.dropped.saturating_add(candidate.dropped);
         for update in candidate.buffer {
             // 复用 `buffer` 的上限与缺口记账，合并后仍保持有界。

@@ -22,7 +22,7 @@ use super::ledger::LedgerLimits;
 use super::service_test::{call, reason, setup, window_of, Window};
 use super::state::HistoryClock;
 use super::*;
-use crate::host::live_delivery::{LiveDelivery, PublishOutcome};
+use crate::host::live_delivery::{LiveDelivery, PublishOutcome, MAX_BUFFERED_BYTES};
 
 fn request(key: u64) -> HistoryInitialRequest {
     HistoryInitialRequest {
@@ -488,6 +488,73 @@ async fn candidate_starts_before_backend_open_and_preserves_sequence() {
     assert_eq!(next["_meta"]["peri.delivery"]["eventSeq"], "4");
     assert_eq!(service.window_count(), 1);
     assert_eq!(service.opening_window_count(), 0);
+}
+
+/// 候选只有溢出缺口时，失败回收仍须让旧流排空：单条超大事件被自身字节上限挤出，
+/// 候选 buffer 为空但 dropped=1；若旧流保持直发，下一条序号会伪装连续。
+#[tokio::test]
+async fn overflow_only_candidate_failure_exposes_gap_on_old_stream() {
+    let (service, _clock, fake) = setup(snap_with(opaque_page()));
+    let live = Arc::new(LiveDelivery::new());
+    let first = service
+        .initial(request(1), context(&fake, &live))
+        .await
+        .expect("first initial");
+    live.resume_and_take("s1");
+    let first_stream = first.live_boundary.stream_id.clone();
+    assert_eq!(
+        publish(&live, "one")["_meta"]["peri.delivery"]["eventSeq"],
+        "1"
+    );
+
+    fake.set_open_result(Err(HistoryBackendError::BackendUnavailable));
+    let gate = fake.gate_next_open();
+    let task_service = service.clone();
+    let task_fake = fake.clone();
+    let task_live = live.clone();
+    let task = tokio::spawn(async move {
+        task_service
+            .initial(request(2), context(&task_fake, &task_live))
+            .await
+    });
+    fake.open_entered.notified().await;
+    assert!(live.has_candidate("s1"));
+
+    let huge = "x".repeat(MAX_BUFFERED_BYTES);
+    assert!(matches!(
+        live.publish(
+            "s1",
+            json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": huge },
+                },
+            })
+        ),
+        PublishOutcome::Overflow
+    ));
+    assert_eq!(live.candidate_buffered_len("s1"), 0, "候选缓冲为空");
+
+    gate.notify_one();
+    task.await
+        .expect("task")
+        .expect_err("backend failure must fail initial");
+    assert!(!live.has_candidate("s1"), "失败必须回收候选");
+    assert!(live.has_stream_with_id("s1", &first_stream));
+    assert!(
+        live.is_flushing("s1"),
+        "仅有缺口也必须进入排空，不能留在直发"
+    );
+
+    // server_loop 失败路径只 drain Flushing：空批也要先消费缺口。
+    assert!(live.drain_flushing("s1").is_empty());
+    let next = publish(&live, "two");
+    assert_eq!(next["_meta"]["peri.delivery"]["streamId"], first_stream);
+    assert_eq!(
+        next["_meta"]["peri.delivery"]["eventSeq"], "3",
+        "序号必须跳过被丢弃的那条，客户端才能检测缺口"
+    );
 }
 
 /// §8.3 timeout 注入点：短 initial 期限 + gated backend。

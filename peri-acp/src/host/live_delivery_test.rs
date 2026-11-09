@@ -267,6 +267,46 @@ fn candidate_keeps_old_stream_identity_and_buffers_independently() {
 }
 
 #[test]
+fn publish_overflow_only_abort_exposes_gap() {
+    let live = LiveDelivery::new();
+    let boundary = live.begin("s1");
+    live.resume_and_take("s1");
+    let PublishOutcome::Send(first) = live.publish("s1", text_payload("one")) else {
+        panic!("活动流直发");
+    };
+    assert_eq!(delivery(&first)["eventSeq"], "1");
+
+    let candidate = live.begin_candidate("s1");
+    // 单条事件自身超过字节上限：入缓冲后被同一上限立即挤出，候选 buffer 为空、dropped=1。
+    let huge = "x".repeat(MAX_BUFFERED_BYTES);
+    assert!(matches!(
+        live.publish("s1", text_payload(&huge)),
+        PublishOutcome::Overflow
+    ));
+    assert_eq!(live.candidate_buffered_len("s1"), 0, "候选缓冲为空");
+    assert_eq!(live.buffered_len("s1"), 0, "旧流缓冲未被改动");
+
+    assert!(live.abort_candidate("s1", &candidate.candidate_id));
+    assert!(
+        live.is_flushing("s1"),
+        "仅有缺口也必须切排空，否则 dropped 缺口永远不推进"
+    );
+    // initial 失败路径只排空 Flushing 流：空批也要先消费缺口。
+    assert!(live.drain_flushing("s1").is_empty());
+    assert!(!live.is_flushing("s1"), "空批确认后恢复直发");
+
+    let PublishOutcome::Send(next) = live.publish("s1", text_payload("two")) else {
+        panic!("排空确认后直发");
+    };
+    assert_eq!(delivery(&next)["streamId"], boundary.stream_id.as_str());
+    assert_eq!(
+        delivery(&next)["eventSeq"],
+        "3",
+        "序号必须跳过被丢弃的那条，客户端才能检测缺口"
+    );
+}
+
+#[test]
 fn commit_candidate_replaces_stream_and_flushes_candidate_buffer() {
     let live = LiveDelivery::new();
     let first = live.begin("s1");
