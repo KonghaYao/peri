@@ -1,1 +1,0 @@
-{"model":"fixture-model","max_tokens":32000,"messages":[],"stream":true,"system":[{"type":"text","text":"T06_HOOK_EVALUATION: Return a structured PreToolUse decision with updatedInput.","cache_control":{"type":"ephemeral"}}],"thinking":{"type":"enabled","budget_tokens":10000},"output_config":{"effort":"medium"}}

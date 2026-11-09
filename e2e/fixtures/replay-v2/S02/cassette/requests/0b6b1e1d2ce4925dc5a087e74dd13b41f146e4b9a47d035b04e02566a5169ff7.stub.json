@@ -1,0 +1,24 @@
+{
+  "v": 2,
+  "rawBytes": 99192,
+  "rawSha256": "79c6126e531b032f97cc10bf8c182a511048dee6ef6ebca0303bd6d7e4050a85",
+  "parts": [
+    "{\"model\":\"fixture-model\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"S02_STREAMED_WRITE\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<system-reminder version=\\\"1\\\" category=\\\"capability\\\" source=\\\"mcp\\\" kind=\\\"connection_summary\\\" severity=\\\"info\\\" delivery=\\\"configurable\\\" audiences=\\\"[&quot;model&quot;,&quot;tui&quot;,&quot;diagnostics&quot;]\\\" summary=\\\"&quot;MCP: 6 connected, 0 failed, 0 disabled&quot;\\\" metadata=\\\"{}\\\">MCP: 6 connected, 0 failed, 0 disabled\\n- artifact (connected, 1 tools)\\n- cron (connected, 5 tools)\\n- monitor (connected, 4 tools)\\n- web (connected, 2 tools)\\n- workflow (connected, 9 tools)\\n- workspace (connected, 7 tools)\\n\\n已直接注入的 system MCP 工具按原始名称调用；其余 MCP 工具经 tool search 发现，名称格式为 mcp__&lt;server&gt;__&lt;tool&gt;。</system-reminder>\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"s02-write\",\"name\":\"Write\",\"input\":{\"content\":\"STREAMED_ARGUMENTS_OK\\n中文🚀\\n\",\"file_path\":\"/tmp/peri-wire-e2e-i2N72K/work/split-参数.txt\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"id\":\"s02-write\",\"tool_use_id\":\"s02-write\",\"content\":[{\"type\":\"text\",\"text\":\"Wrote 2 lines split-参数.txt\\n[Execution status: completed]\"}],\"is_error\":false,\"cache_control\":{\"type\":\"ephemeral\"}}]}],\"stream\":true,\"system\":[{\"type\":\"text\",\"text\":",
+    {
+      "leaf": "sys.block0.main",
+      "as": "json-string"
+    },
+    ",\"cache_control\":{\"type\":\"ephemeral\"}},{\"type\":\"text\",\"text\":",
+    {
+      "recipe": "sys.block1.main.t07",
+      "as": "json-string"
+    },
+    "}],\"tools\":",
+    {
+      "recipe": "tools.anthropic.main",
+      "as": "raw"
+    },
+    "}"
+  ],
+  "canonicalSha256": "05dc14dc22a67335891b7dc5bcf62b154cdd122b44f0826b342d86f4e9879933"
+}

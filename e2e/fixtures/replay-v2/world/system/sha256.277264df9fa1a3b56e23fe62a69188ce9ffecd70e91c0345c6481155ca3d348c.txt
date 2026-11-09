@@ -1,0 +1,1 @@
+T06_HOOK_EVALUATION: Return a structured PreToolUse decision with updatedInput.

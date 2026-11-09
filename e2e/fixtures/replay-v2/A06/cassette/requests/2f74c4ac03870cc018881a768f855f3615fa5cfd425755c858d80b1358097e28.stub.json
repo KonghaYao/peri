@@ -1,0 +1,24 @@
+{
+  "v": 2,
+  "rawBytes": 100393,
+  "rawSha256": "122e9d9de4b83233536234bf5bdf8aff35307950691fa87cbcdb69bc10469a8c",
+  "parts": [
+    "{\"model\":\"fixture-model\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Execute A06.\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<system-reminder version=\\\"1\\\" category=\\\"capability\\\" source=\\\"mcp\\\" kind=\\\"connection_summary\\\" severity=\\\"info\\\" delivery=\\\"configurable\\\" audiences=\\\"[&quot;model&quot;,&quot;tui&quot;,&quot;diagnostics&quot;]\\\" summary=\\\"&quot;MCP: 6 connected, 0 failed, 0 disabled&quot;\\\" metadata=\\\"{}\\\">MCP: 6 connected, 0 failed, 0 disabled\\n- artifact (connected, 1 tools)\\n- cron (connected, 5 tools)\\n- monitor (connected, 4 tools)\\n- web (connected, 2 tools)\\n- workflow (connected, 9 tools)\\n- workspace (connected, 7 tools)\\n\\n已直接注入的 system MCP 工具按原始名称调用；其余 MCP 工具经 tool search 发现，名称格式为 mcp__&lt;server&gt;__&lt;tool&gt;。</system-reminder>\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"A06-initial-write\",\"name\":\"Write\",\"input\":{\"content\":\"A06_PARENT_INITIAL\\n\",\"file_path\":\"a06-shared.txt\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"id\":\"A06-initial-write\",\"tool_use_id\":\"A06-initial-write\",\"content\":[{\"type\":\"text\",\"text\":\"Wrote 1 line a06-shared.txt\\n[Execution status: completed]\"}],\"is_error\":false,\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"A06-spawn\",\"name\":\"Agent\",\"input\":{\"prompt\":\"A06_SHARED_FILE_CHILD\",\"run_in_background\":true,\"subagent_type\":\"replay-worker\"}},{\"type\":\"tool_use\",\"id\":\"A06-parent-write\",\"name\":\"Write\",\"input\":{\"content\":\"A06_PARENT_BEFORE_CHILD\\n\",\"file_path\":\"a06-shared.txt\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"id\":\"A06-spawn\",\"tool_use_id\":\"A06-spawn\",\"content\":[{\"type\":\"text\",\"text\":\"Background task bg-01a1b607-a65e-7a22-98ef-e14630864bfe started. You will be notified when it completes. You can continue with other tasks in the meantime.\\nchild_thread_id: 01a1b607-a65e-7a22-98ef-e13605c39faa (resume with Agent(resume_thread_id: 01a1b607-a65e-7a22-98ef-e13605c39faa))\\nWhile active, include a non-empty prompt to send supplemental instructions; omit prompt only when resuming a non-active thread.\"}],\"is_error\":false},{\"type\":\"tool_result\",\"id\":\"A06-parent-write\",\"tool_use_id\":\"A06-parent-write\",\"content\":[{\"type\":\"text\",\"text\":\"Wrote 1 line a06-shared.txt\\n[Execution status: completed]\"}],\"is_error\":false,\"cache_control\":{\"type\":\"ephemeral\"}}]}],\"stream\":true,\"system\":[{\"type\":\"text\",\"text\":",
+    {
+      "leaf": "sys.block0.main",
+      "as": "json-string"
+    },
+    ",\"cache_control\":{\"type\":\"ephemeral\"}},{\"type\":\"text\",\"text\":",
+    {
+      "recipe": "sys.block1.replay-worker.t06",
+      "as": "json-string"
+    },
+    "}],\"tools\":",
+    {
+      "recipe": "tools.anthropic.main",
+      "as": "raw"
+    },
+    "}"
+  ],
+  "canonicalSha256": "e10d40e32e0dbcbb25abf5f34774abf6dc94d96e47818aaa57211e4d0da845db"
+}

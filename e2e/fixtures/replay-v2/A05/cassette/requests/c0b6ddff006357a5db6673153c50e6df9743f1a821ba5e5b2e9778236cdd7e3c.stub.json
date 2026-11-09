@@ -1,0 +1,24 @@
+{
+  "v": 2,
+  "rawBytes": 64786,
+  "rawSha256": "af1991363d0ea5736fe54aeed20e934eb90bd9ddbc89038e083b7012a17be0ce",
+  "parts": [
+    "{\"model\":\"fixture-model\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"A05_RECOVER_CHILD_TASK\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"A05-failed-read\",\"name\":\"Read\",\"input\":{\"file_path\":\"a05-does-not-exist.txt\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"id\":\"A05-failed-read\",\"tool_use_id\":\"A05-failed-read\",\"content\":[{\"type\":\"text\",\"text\":\"MCP 服务器 \\\"workspace\\\" 工具 \\\"Read\\\" 调用失败: tool `Read` failed to execute; Error: File not found at a05-does-not-exist.txt\\nRecovery: File not found. Verify file_path or locate the file with Glob.\\n[Execution status: failed]\"}],\"is_error\":true,\"cache_control\":{\"type\":\"ephemeral\"}}]}],\"stream\":true,\"system\":[{\"type\":\"text\",\"text\":",
+    {
+      "leaf": "sys.block0.main",
+      "as": "json-string"
+    },
+    ",\"cache_control\":{\"type\":\"ephemeral\"}},{\"type\":\"text\",\"text\":",
+    {
+      "recipe": "sys.block1.subagent.t06",
+      "as": "json-string"
+    },
+    "}],\"tools\":",
+    {
+      "recipe": "tools.anthropic.sub",
+      "as": "raw"
+    },
+    "}"
+  ],
+  "canonicalSha256": "52083abed005ef8037f24d5f06a434085818388ba3130030594c97ac4a9ba317"
+}

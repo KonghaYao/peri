@@ -1,0 +1,24 @@
+{
+  "v": 2,
+  "rawBytes": 100011,
+  "rawSha256": "314591fd4742924eabc5839af0fb454f1f4949dbf91b8ba1e9b0d6200e62c791",
+  "parts": [
+    "{\"model\":\"fixture-model\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"RENDER_LONG_MARKDOWN\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<system-reminder version=\\\"1\\\" category=\\\"capability\\\" source=\\\"mcp\\\" kind=\\\"connection_summary\\\" severity=\\\"info\\\" delivery=\\\"configurable\\\" audiences=\\\"[&quot;model&quot;,&quot;tui&quot;,&quot;diagnostics&quot;]\\\" summary=\\\"&quot;MCP: 6 connected, 0 failed, 0 disabled&quot;\\\" metadata=\\\"{}\\\">MCP: 6 connected, 0 failed, 0 disabled\\n- artifact (connected, 1 tools)\\n- cron (connected, 5 tools)\\n- monitor (connected, 4 tools)\\n- web (connected, 2 tools)\\n- workflow (connected, 9 tools)\\n- workspace (connected, 7 tools)\\n\\n已直接注入的 system MCP 工具按原始名称调用；其余 MCP 工具经 tool search 发现，名称格式为 mcp__&lt;server&gt;__&lt;tool&gt;。</system-reminder>\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"# Layout case\\n\\n| Name | Value |\\n|---|---|\\n| Unicode | 中文 🚀 |\\n\\n```ts\\nconst stable = true;\\n```\\n\\nLine 1: preserved history\\nLine 2: preserved history\\nLine 3: preserved history\\nLine 4: preserved history\\nLine 5: preserved history\\nLine 6: preserved history\\nLine 7: preserved history\\nLine 8: preserved history\\nLine 9: preserved history\\nLine 10: preserved history\\nLine 11: preserved history\\nLine 12: preserved history\\nLine 13: preserved history\\nLine 14: preserved history\\nLine 15: preserved history\\nLine 16: preserved history\\nLine 17: preserved history\\nLine 18: preserved history\\nLine 19: preserved history\\nLine 20: preserved history\\nLine 21: preserved history\\nLine 22: preserved history\\nLine 23: preserved history\\nLine 24: preserved history\\nLine 25: preserved history\\nLine 26: preserved history\\nLine 27: preserved history\\nLine 28: preserved history\\nLine 29: preserved history\\nLine 30: preserved history\\nLine 31: preserved history\\nLine 32: preserved history\\nLine 33: preserved history\\nLine 34: preserved history\\nLine 35: preserved history\\nLAYOUT_REPLY_END\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"DRAFT_SURVIVES_RESIZE\",\"cache_control\":{\"type\":\"ephemeral\"}}]}],\"stream\":true,\"system\":[{\"type\":\"text\",\"text\":",
+    {
+      "leaf": "sys.block0.main",
+      "as": "json-string"
+    },
+    ",\"cache_control\":{\"type\":\"ephemeral\"}},{\"type\":\"text\",\"text\":",
+    {
+      "recipe": "sys.block1.main.t24",
+      "as": "json-string"
+    },
+    "}],\"tools\":",
+    {
+      "recipe": "tools.anthropic.main",
+      "as": "raw"
+    },
+    "}"
+  ],
+  "canonicalSha256": "56a78eabe0a9d7f8bb8eead5f4d54622a7525cb7f4896a13514790e606bb25fa"
+}

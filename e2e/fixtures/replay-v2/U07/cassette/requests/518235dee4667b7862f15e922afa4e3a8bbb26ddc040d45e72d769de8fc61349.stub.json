@@ -1,0 +1,24 @@
+{
+  "v": 2,
+  "rawBytes": 99330,
+  "rawSha256": "bcb229490945b6d9cba2c26659ec26a593055d956c96cfe4e9899059cc6e89de",
+  "parts": [
+    "{\"model\":\"fixture-model\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"RUN_SINGLE_CHOICE\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<system-reminder version=\\\"1\\\" category=\\\"capability\\\" source=\\\"mcp\\\" kind=\\\"connection_summary\\\" severity=\\\"info\\\" delivery=\\\"configurable\\\" audiences=\\\"[&quot;model&quot;,&quot;tui&quot;,&quot;diagnostics&quot;]\\\" summary=\\\"&quot;MCP: 6 connected, 0 failed, 0 disabled&quot;\\\" metadata=\\\"{}\\\">MCP: 6 connected, 0 failed, 0 disabled\\n- artifact (connected, 1 tools)\\n- cron (connected, 5 tools)\\n- monitor (connected, 4 tools)\\n- web (connected, 2 tools)\\n- workflow (connected, 9 tools)\\n- workspace (connected, 7 tools)\\n\\n已直接注入的 system MCP 工具按原始名称调用；其余 MCP 工具经 tool search 发现，名称格式为 mcp__&lt;server&gt;__&lt;tool&gt;。</system-reminder>\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"single-question\",\"name\":\"AskUserQuestion\",\"input\":{\"questions\":[{\"header\":\"SINGLE_TARGET\",\"question\":\"Choose SINGLE_TARGET\",\"multiSelect\":false,\"options\":[{\"label\":\"Alpha\",\"description\":\"First option\"},{\"label\":\"Beta\",\"description\":\"Second option\"},{\"label\":\"Gamma\",\"description\":\"Third option\"}]}]}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"id\":\"single-question\",\"tool_use_id\":\"single-question\",\"content\":[{\"type\":\"text\",\"text\":\"[问: SINGLE_TARGET]\\n回答: Beta\"}],\"is_error\":false,\"cache_control\":{\"type\":\"ephemeral\"}}]}],\"stream\":true,\"system\":[{\"type\":\"text\",\"text\":",
+    {
+      "leaf": "sys.block0.main",
+      "as": "json-string"
+    },
+    ",\"cache_control\":{\"type\":\"ephemeral\"}},{\"type\":\"text\",\"text\":",
+    {
+      "recipe": "sys.block1.main.t26",
+      "as": "json-string"
+    },
+    "}],\"tools\":",
+    {
+      "recipe": "tools.anthropic.main",
+      "as": "raw"
+    },
+    "}"
+  ],
+  "canonicalSha256": "96e6294599920b9e2c6d6ff43f46ef1a66a0f464400e00ac7aef49c5972e85f0"
+}

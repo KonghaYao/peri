@@ -1,0 +1,19 @@
+{
+  "v": 2,
+  "rawBytes": 99760,
+  "rawSha256": "6296e5adbb0c37c4a0de3f20db9a7b49cc662228445a4f1aea2b0d10d1ffd41d",
+  "parts": [
+    "{\"model\":\"fixture-model\",\"input\":[{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":",
+    {
+      "recipe": "sys.responses.main.t11",
+      "as": "json-string"
+    },
+    "}]},{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"S06_RESPONSES_WRITE\"}]},{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"<system-reminder version=\\\"1\\\" category=\\\"capability\\\" source=\\\"mcp\\\" kind=\\\"connection_summary\\\" severity=\\\"info\\\" delivery=\\\"configurable\\\" audiences=\\\"[&quot;model&quot;,&quot;tui&quot;,&quot;diagnostics&quot;]\\\" summary=\\\"&quot;MCP: 6 connected, 0 failed, 0 disabled&quot;\\\" metadata=\\\"{}\\\">MCP: 6 connected, 0 failed, 0 disabled\\n- artifact (connected, 1 tools)\\n- cron (connected, 5 tools)\\n- monitor (connected, 4 tools)\\n- web (connected, 2 tools)\\n- workflow (connected, 9 tools)\\n- workspace (connected, 7 tools)\\n\\n已直接注入的 system MCP 工具按原始名称调用；其余 MCP 工具经 tool search 发现，名称格式为 mcp__&lt;server&gt;__&lt;tool&gt;。</system-reminder>\"}]},{\"id\":\"s06-tool\",\"type\":\"function_call\",\"call_id\":\"s06-call\",\"name\":\"Write\",\"arguments\":\"{\\\"file_path\\\":\\\"/tmp/peri-wire-e2e-H7OJY8/work/responses.txt\\\",\\\"content\\\":\\\"RESPONSES_TOOL_EFFECT\\\\n\\\"}\",\"status\":\"completed\"},{\"type\":\"function_call_output\",\"call_id\":\"s06-call\",\"output\":[{\"type\":\"input_text\",\"text\":\"Wrote 1 line responses.txt\\n[Execution status: completed]\"}]}],\"stream\":true,\"store\":false,\"include\":[\"reasoning.encrypted_content\"],\"tools\":",
+    {
+      "recipe": "tools.responses.main",
+      "as": "raw"
+    },
+    ",\"tool_choice\":\"auto\",\"reasoning\":{\"effort\":\"medium\",\"summary\":\"auto\"},\"max_output_tokens\":32000}"
+  ],
+  "canonicalSha256": "dfaa134478f1309273fc4eb1262e806d3c767660b5bdf76e9a20de3d56b6b1aa"
+}

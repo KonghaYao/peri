@@ -1,0 +1,24 @@
+{
+  "v": 2,
+  "rawBytes": 64294,
+  "rawSha256": "b0a4089e4d40da6013a92aeaffae0186e9556c3dd956533d5a1f0ef1a206bf76",
+  "parts": [
+    "{\"model\":\"fixture-model\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"A01_CHILD_TASK\",\"cache_control\":{\"type\":\"ephemeral\"}}]}],\"stream\":true,\"system\":[{\"type\":\"text\",\"text\":",
+    {
+      "leaf": "sys.block0.main",
+      "as": "json-string"
+    },
+    ",\"cache_control\":{\"type\":\"ephemeral\"}},{\"type\":\"text\",\"text\":",
+    {
+      "recipe": "sys.block1.subagent.t01",
+      "as": "json-string"
+    },
+    "}],\"tools\":",
+    {
+      "recipe": "tools.anthropic.sub",
+      "as": "raw"
+    },
+    ",\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":10000},\"output_config\":{\"effort\":\"medium\"}}"
+  ],
+  "canonicalSha256": "d1c5da91fa2d5687868b149ed59b34c4b50c2aeba47c74ce09fb22dcd34f7747"
+}

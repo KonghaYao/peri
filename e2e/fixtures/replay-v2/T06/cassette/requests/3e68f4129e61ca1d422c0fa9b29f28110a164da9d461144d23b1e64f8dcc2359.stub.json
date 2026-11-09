@@ -1,0 +1,14 @@
+{
+  "v": 2,
+  "rawBytes": 313,
+  "rawSha256": "8735a5b4e5f5b94df72e72ee0a6254b9559d0ddbb8d1af4cd7aecabab46657a3",
+  "parts": [
+    "{\"model\":\"fixture-model\",\"max_tokens\":32000,\"messages\":[],\"stream\":true,\"system\":[{\"type\":\"text\",\"text\":",
+    {
+      "leaf": "sys.sha256.277264df9fa1a3b56e23fe62a69188ce9ffecd70e91c0345c6481155ca3d348c",
+      "as": "json-string"
+    },
+    ",\"cache_control\":{\"type\":\"ephemeral\"}}],\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":10000},\"output_config\":{\"effort\":\"medium\"}}"
+  ],
+  "canonicalSha256": "b756da422c70281d35f62e6e6ccef644a8bf243b63740342bb641c4fd4e35cfd"
+}

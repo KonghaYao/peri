@@ -1,0 +1,24 @@
+{
+  "v": 2,
+  "rawBytes": 64630,
+  "rawSha256": "4bbd8ce78cbc262cdd512f0d6871dd78e64eea676e6a32598d4ea0d7a86c972f",
+  "parts": [
+    "{\"model\":\"fixture-model\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"A02_IDENTICAL_CHILD_TASK\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"A02-write-left\",\"name\":\"Write\",\"input\":{\"content\":\"A02_LEFT_SIDE_EFFECT\\n\",\"file_path\":\"a02-left.txt\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"id\":\"A02-write-left\",\"tool_use_id\":\"A02-write-left\",\"content\":[{\"type\":\"text\",\"text\":\"Wrote 1 line a02-left.txt\\n[Execution status: completed]\"}],\"is_error\":false,\"cache_control\":{\"type\":\"ephemeral\"}}]}],\"stream\":true,\"system\":[{\"type\":\"text\",\"text\":",
+    {
+      "leaf": "sys.block0.main",
+      "as": "json-string"
+    },
+    ",\"cache_control\":{\"type\":\"ephemeral\"}},{\"type\":\"text\",\"text\":",
+    {
+      "recipe": "sys.block1.subagent.t02",
+      "as": "json-string"
+    },
+    "}],\"tools\":",
+    {
+      "recipe": "tools.anthropic.sub",
+      "as": "raw"
+    },
+    "}"
+  ],
+  "canonicalSha256": "d09b3feb9e5c931b4f4af22107a50e5f036fdea613cd36990d3bc81f31cac802"
+}

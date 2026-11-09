@@ -1,0 +1,24 @@
+{
+  "v": 2,
+  "rawBytes": 99733,
+  "rawSha256": "381f21119a2ffae6f7947cc7b1a2c2887ec13014d9ecaf8b9290aa3f4b006202",
+  "parts": [
+    "{\"model\":\"fixture-model\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"T04_BUSINESS_CASE\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<system-reminder version=\\\"1\\\" category=\\\"capability\\\" source=\\\"mcp\\\" kind=\\\"connection_summary\\\" severity=\\\"info\\\" delivery=\\\"configurable\\\" audiences=\\\"[&quot;model&quot;,&quot;tui&quot;,&quot;diagnostics&quot;]\\\" summary=\\\"&quot;MCP: 6 connected, 0 failed, 0 disabled&quot;\\\" metadata=\\\"{}\\\">MCP: 6 connected, 0 failed, 0 disabled\\n- artifact (connected, 1 tools)\\n- cron (connected, 5 tools)\\n- monitor (connected, 4 tools)\\n- web (connected, 2 tools)\\n- workflow (connected, 9 tools)\\n- workspace (connected, 7 tools)\\n\\n已直接注入的 system MCP 工具按原始名称调用；其余 MCP 工具经 tool search 发现，名称格式为 mcp__&lt;server&gt;__&lt;tool&gt;。</system-reminder>\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t04-missing\",\"name\":\"Read\",\"input\":{\"file_path\":\"/tmp/peri-wire-e2e-OHlVuH/work/missing.txt\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"id\":\"t04-missing\",\"tool_use_id\":\"t04-missing\",\"content\":[{\"type\":\"text\",\"text\":\"MCP 服务器 \\\"workspace\\\" 工具 \\\"Read\\\" 调用失败: tool `Read` failed to execute; Error: File not found at /tmp/peri-wire-e2e-OHlVuH/work/missing.txt\\nRecovery: File not found. Verify file_path or locate the file with Glob.\\n[Execution status: failed]\"}],\"is_error\":true,\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t04-repair\",\"name\":\"Write\",\"input\":{\"content\":\"T04_REPAIRED_CONTENT\\n\",\"file_path\":\"/tmp/peri-wire-e2e-OHlVuH/work/missing.txt\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"id\":\"t04-repair\",\"tool_use_id\":\"t04-repair\",\"content\":[{\"type\":\"text\",\"text\":\"Wrote 1 line missing.txt\\n[Execution status: completed]\"}],\"is_error\":false,\"cache_control\":{\"type\":\"ephemeral\"}}]}],\"stream\":true,\"system\":[{\"type\":\"text\",\"text\":",
+    {
+      "leaf": "sys.block0.main",
+      "as": "json-string"
+    },
+    ",\"cache_control\":{\"type\":\"ephemeral\"}},{\"type\":\"text\",\"text\":",
+    {
+      "recipe": "sys.block1.main.t15",
+      "as": "json-string"
+    },
+    "}],\"tools\":",
+    {
+      "recipe": "tools.anthropic.main",
+      "as": "raw"
+    },
+    "}"
+  ],
+  "canonicalSha256": "fe9794067ba4a95cf31defe8a0e3c6c72702f506f8e99cc95387d23cc9b1eb9e"
+}

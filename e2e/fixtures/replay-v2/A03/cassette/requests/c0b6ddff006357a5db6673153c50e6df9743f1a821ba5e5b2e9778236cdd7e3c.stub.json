@@ -1,0 +1,24 @@
+{
+  "v": 2,
+  "rawBytes": 64612,
+  "rawSha256": "fcf112ed22b6e179412354d81c2557956cf3434a9dabba7255b0e7a5e8dd765a",
+  "parts": [
+    "{\"model\":\"fixture-model\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"A03_BACKGROUND_CHILD\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"A03-write\",\"name\":\"Write\",\"input\":{\"content\":\"A03_BACKGROUND_FILE\\n\",\"file_path\":\"a03-child.txt\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"id\":\"A03-write\",\"tool_use_id\":\"A03-write\",\"content\":[{\"type\":\"text\",\"text\":\"Wrote 1 line a03-child.txt\\n[Execution status: completed]\"}],\"is_error\":false,\"cache_control\":{\"type\":\"ephemeral\"}}]}],\"stream\":true,\"system\":[{\"type\":\"text\",\"text\":",
+    {
+      "leaf": "sys.block0.main",
+      "as": "json-string"
+    },
+    ",\"cache_control\":{\"type\":\"ephemeral\"}},{\"type\":\"text\",\"text\":",
+    {
+      "recipe": "sys.block1.subagent.t04",
+      "as": "json-string"
+    },
+    "}],\"tools\":",
+    {
+      "recipe": "tools.anthropic.sub",
+      "as": "raw"
+    },
+    "}"
+  ],
+  "canonicalSha256": "7b97b1238e3169bbb3813c537c912ff5fa37f595d256d16c03ed2dd217f1175f"
+}

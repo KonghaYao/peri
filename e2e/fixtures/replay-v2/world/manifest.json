@@ -1,0 +1,940 @@
+{
+  "formatVersion": 2,
+  "kind": "world",
+  "generation": "world-12c4186a13a664ec",
+  "leaves": {
+    "sys.block0.main": {
+      "file": "system/block0.main.txt"
+    },
+    "sys.block1.main.prefix": {
+      "file": "system/block1.main.prefix.txt"
+    },
+    "sys.block1.main.t01.tail": {
+      "file": "system/block1.main.t01.tail.txt"
+    },
+    "sys.block1.main.t02.tail": {
+      "file": "system/block1.main.t02.tail.txt"
+    },
+    "sys.block1.main.t03.tail": {
+      "file": "system/block1.main.t03.tail.txt"
+    },
+    "sys.block1.main.t04.tail": {
+      "file": "system/block1.main.t04.tail.txt"
+    },
+    "sys.block1.main.t05.tail": {
+      "file": "system/block1.main.t05.tail.txt"
+    },
+    "sys.block1.main.t06.tail": {
+      "file": "system/block1.main.t06.tail.txt"
+    },
+    "sys.block1.main.t07.tail": {
+      "file": "system/block1.main.t07.tail.txt"
+    },
+    "sys.block1.main.t08.tail": {
+      "file": "system/block1.main.t08.tail.txt"
+    },
+    "sys.block1.main.t09.tail": {
+      "file": "system/block1.main.t09.tail.txt"
+    },
+    "sys.block1.main.t10.tail": {
+      "file": "system/block1.main.t10.tail.txt"
+    },
+    "sys.block1.main.t11.tail": {
+      "file": "system/block1.main.t11.tail.txt"
+    },
+    "sys.block1.main.t12.tail": {
+      "file": "system/block1.main.t12.tail.txt"
+    },
+    "sys.block1.main.t13.tail": {
+      "file": "system/block1.main.t13.tail.txt"
+    },
+    "sys.block1.main.t14.tail": {
+      "file": "system/block1.main.t14.tail.txt"
+    },
+    "sys.block1.main.t15.tail": {
+      "file": "system/block1.main.t15.tail.txt"
+    },
+    "sys.block1.main.t16.tail": {
+      "file": "system/block1.main.t16.tail.txt"
+    },
+    "sys.block1.main.t17.tail": {
+      "file": "system/block1.main.t17.tail.txt"
+    },
+    "sys.block1.main.t18.tail": {
+      "file": "system/block1.main.t18.tail.txt"
+    },
+    "sys.block1.main.t19.tail": {
+      "file": "system/block1.main.t19.tail.txt"
+    },
+    "sys.block1.main.t20.tail": {
+      "file": "system/block1.main.t20.tail.txt"
+    },
+    "sys.block1.main.t21.tail": {
+      "file": "system/block1.main.t21.tail.txt"
+    },
+    "sys.block1.main.t22.tail": {
+      "file": "system/block1.main.t22.tail.txt"
+    },
+    "sys.block1.main.t23.tail": {
+      "file": "system/block1.main.t23.tail.txt"
+    },
+    "sys.block1.main.t24.tail": {
+      "file": "system/block1.main.t24.tail.txt"
+    },
+    "sys.block1.main.t25.tail": {
+      "file": "system/block1.main.t25.tail.txt"
+    },
+    "sys.block1.main.t26.tail": {
+      "file": "system/block1.main.t26.tail.txt"
+    },
+    "sys.block1.main.t27.tail": {
+      "file": "system/block1.main.t27.tail.txt"
+    },
+    "sys.block1.main.t28.tail": {
+      "file": "system/block1.main.t28.tail.txt"
+    },
+    "sys.block1.replay-worker.prefix": {
+      "file": "system/block1.replay-worker.prefix.txt"
+    },
+    "sys.block1.replay-worker.t01.tail": {
+      "file": "system/block1.replay-worker.t01.tail.txt"
+    },
+    "sys.block1.replay-worker.t02.tail": {
+      "file": "system/block1.replay-worker.t02.tail.txt"
+    },
+    "sys.block1.replay-worker.t03.tail": {
+      "file": "system/block1.replay-worker.t03.tail.txt"
+    },
+    "sys.block1.replay-worker.t04.tail": {
+      "file": "system/block1.replay-worker.t04.tail.txt"
+    },
+    "sys.block1.replay-worker.t05.tail": {
+      "file": "system/block1.replay-worker.t05.tail.txt"
+    },
+    "sys.block1.replay-worker.t06.tail": {
+      "file": "system/block1.replay-worker.t06.tail.txt"
+    },
+    "sys.block1.subagent.prefix": {
+      "file": "system/block1.subagent.prefix.txt"
+    },
+    "sys.block1.subagent.t01.tail": {
+      "file": "system/block1.subagent.t01.tail.txt"
+    },
+    "sys.block1.subagent.t02.tail": {
+      "file": "system/block1.subagent.t02.tail.txt"
+    },
+    "sys.block1.subagent.t03.tail": {
+      "file": "system/block1.subagent.t03.tail.txt"
+    },
+    "sys.block1.subagent.t04.tail": {
+      "file": "system/block1.subagent.t04.tail.txt"
+    },
+    "sys.block1.subagent.t05.tail": {
+      "file": "system/block1.subagent.t05.tail.txt"
+    },
+    "sys.block1.subagent.t06.tail": {
+      "file": "system/block1.subagent.t06.tail.txt"
+    },
+    "sys.block1.subagent.t07.tail": {
+      "file": "system/block1.subagent.t07.tail.txt"
+    },
+    "sys.compact.summary": {
+      "file": "system/compact.summary.txt"
+    },
+    "sys.sha256.277264df9fa1a3b56e23fe62a69188ce9ffecd70e91c0345c6481155ca3d348c": {
+      "file": "system/sha256.277264df9fa1a3b56e23fe62a69188ce9ffecd70e91c0345c6481155ca3d348c.txt"
+    },
+    "sys.skills": {
+      "file": "system/skills.txt"
+    },
+    "tools.Agent.anthropic": {
+      "file": "tools/Agent.anthropic.json"
+    },
+    "tools.Agent.responses": {
+      "file": "tools/Agent.responses.json"
+    },
+    "tools.artifact.anthropic": {
+      "file": "tools/artifact.anthropic.json"
+    },
+    "tools.artifact.responses": {
+      "file": "tools/artifact.responses.json"
+    },
+    "tools.AskUserQuestion.anthropic": {
+      "file": "tools/AskUserQuestion.anthropic.json"
+    },
+    "tools.AskUserQuestion.responses": {
+      "file": "tools/AskUserQuestion.responses.json"
+    },
+    "tools.Bash.anthropic": {
+      "file": "tools/Bash.anthropic.json"
+    },
+    "tools.Bash.responses": {
+      "file": "tools/Bash.responses.json"
+    },
+    "tools.DiscoverSkillsTool.anthropic": {
+      "file": "tools/DiscoverSkillsTool.anthropic.json"
+    },
+    "tools.DiscoverSkillsTool.responses": {
+      "file": "tools/DiscoverSkillsTool.responses.json"
+    },
+    "tools.Edit.anthropic": {
+      "file": "tools/Edit.anthropic.json"
+    },
+    "tools.Edit.responses": {
+      "file": "tools/Edit.responses.json"
+    },
+    "tools.ExecuteExtraTool.anthropic.main": {
+      "file": "tools/ExecuteExtraTool.anthropic.main.json"
+    },
+    "tools.ExecuteExtraTool.anthropic.sub": {
+      "file": "tools/ExecuteExtraTool.anthropic.sub.json"
+    },
+    "tools.ExecuteExtraTool.responses": {
+      "file": "tools/ExecuteExtraTool.responses.json"
+    },
+    "tools.folder_operations.anthropic": {
+      "file": "tools/folder_operations.anthropic.json"
+    },
+    "tools.folder_operations.responses": {
+      "file": "tools/folder_operations.responses.json"
+    },
+    "tools.Glob.anthropic": {
+      "file": "tools/Glob.anthropic.json"
+    },
+    "tools.Glob.responses": {
+      "file": "tools/Glob.responses.json"
+    },
+    "tools.Grep.anthropic": {
+      "file": "tools/Grep.anthropic.json"
+    },
+    "tools.Grep.responses": {
+      "file": "tools/Grep.responses.json"
+    },
+    "tools.Read.anthropic": {
+      "file": "tools/Read.anthropic.json"
+    },
+    "tools.Read.responses": {
+      "file": "tools/Read.responses.json"
+    },
+    "tools.ReadContextArchive.anthropic": {
+      "file": "tools/ReadContextArchive.anthropic.json"
+    },
+    "tools.ReadContextArchive.responses": {
+      "file": "tools/ReadContextArchive.responses.json"
+    },
+    "tools.SearchExtraTools.anthropic.main": {
+      "file": "tools/SearchExtraTools.anthropic.main.json"
+    },
+    "tools.SearchExtraTools.anthropic.sub": {
+      "file": "tools/SearchExtraTools.anthropic.sub.json"
+    },
+    "tools.SearchExtraTools.responses": {
+      "file": "tools/SearchExtraTools.responses.json"
+    },
+    "tools.SkillTool.anthropic": {
+      "file": "tools/SkillTool.anthropic.json"
+    },
+    "tools.SkillTool.responses": {
+      "file": "tools/SkillTool.responses.json"
+    },
+    "tools.TodoWrite.anthropic": {
+      "file": "tools/TodoWrite.anthropic.json"
+    },
+    "tools.TodoWrite.responses": {
+      "file": "tools/TodoWrite.responses.json"
+    },
+    "tools.WebFetch.anthropic": {
+      "file": "tools/WebFetch.anthropic.json"
+    },
+    "tools.WebFetch.responses": {
+      "file": "tools/WebFetch.responses.json"
+    },
+    "tools.WebSearch.anthropic": {
+      "file": "tools/WebSearch.anthropic.json"
+    },
+    "tools.WebSearch.responses": {
+      "file": "tools/WebSearch.responses.json"
+    },
+    "tools.Write.anthropic": {
+      "file": "tools/Write.anthropic.json"
+    },
+    "tools.Write.responses": {
+      "file": "tools/Write.responses.json"
+    }
+  },
+  "recipes": {
+    "sys.block1.main.t01": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t01.tail"
+      }
+    ],
+    "sys.block1.main.t02": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t02.tail"
+      }
+    ],
+    "sys.block1.main.t03": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t03.tail"
+      }
+    ],
+    "sys.block1.main.t04": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t04.tail"
+      }
+    ],
+    "sys.block1.main.t05": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t05.tail"
+      }
+    ],
+    "sys.block1.main.t06": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t06.tail"
+      }
+    ],
+    "sys.block1.main.t07": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t07.tail"
+      }
+    ],
+    "sys.block1.main.t08": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t08.tail"
+      }
+    ],
+    "sys.block1.main.t09": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t09.tail"
+      }
+    ],
+    "sys.block1.main.t10": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t10.tail"
+      }
+    ],
+    "sys.block1.main.t11": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t11.tail"
+      }
+    ],
+    "sys.block1.main.t12": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t12.tail"
+      }
+    ],
+    "sys.block1.main.t13": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t13.tail"
+      }
+    ],
+    "sys.block1.main.t14": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t14.tail"
+      }
+    ],
+    "sys.block1.main.t15": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t15.tail"
+      }
+    ],
+    "sys.block1.main.t16": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t16.tail"
+      }
+    ],
+    "sys.block1.main.t17": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t17.tail"
+      }
+    ],
+    "sys.block1.main.t18": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t18.tail"
+      }
+    ],
+    "sys.block1.main.t19": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t19.tail"
+      }
+    ],
+    "sys.block1.main.t20": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t20.tail"
+      }
+    ],
+    "sys.block1.main.t21": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t21.tail"
+      }
+    ],
+    "sys.block1.main.t22": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t22.tail"
+      }
+    ],
+    "sys.block1.main.t23": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t23.tail"
+      }
+    ],
+    "sys.block1.main.t24": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t24.tail"
+      }
+    ],
+    "sys.block1.main.t25": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t25.tail"
+      }
+    ],
+    "sys.block1.main.t26": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t26.tail"
+      }
+    ],
+    "sys.block1.main.t27": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t27.tail"
+      }
+    ],
+    "sys.block1.main.t28": [
+      {
+        "leaf": "sys.block1.main.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.main.t28.tail"
+      }
+    ],
+    "sys.block1.replay-worker.t01": [
+      {
+        "leaf": "sys.block1.replay-worker.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.replay-worker.t01.tail"
+      }
+    ],
+    "sys.block1.replay-worker.t02": [
+      {
+        "leaf": "sys.block1.replay-worker.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.replay-worker.t02.tail"
+      }
+    ],
+    "sys.block1.replay-worker.t03": [
+      {
+        "leaf": "sys.block1.replay-worker.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.replay-worker.t03.tail"
+      }
+    ],
+    "sys.block1.replay-worker.t04": [
+      {
+        "leaf": "sys.block1.replay-worker.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.replay-worker.t04.tail"
+      }
+    ],
+    "sys.block1.replay-worker.t05": [
+      {
+        "leaf": "sys.block1.replay-worker.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.replay-worker.t05.tail"
+      }
+    ],
+    "sys.block1.replay-worker.t06": [
+      {
+        "leaf": "sys.block1.replay-worker.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.replay-worker.t06.tail"
+      }
+    ],
+    "sys.block1.subagent.t01": [
+      {
+        "leaf": "sys.block1.subagent.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.subagent.t01.tail"
+      }
+    ],
+    "sys.block1.subagent.t02": [
+      {
+        "leaf": "sys.block1.subagent.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.subagent.t02.tail"
+      }
+    ],
+    "sys.block1.subagent.t03": [
+      {
+        "leaf": "sys.block1.subagent.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.subagent.t03.tail"
+      }
+    ],
+    "sys.block1.subagent.t04": [
+      {
+        "leaf": "sys.block1.subagent.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.subagent.t04.tail"
+      }
+    ],
+    "sys.block1.subagent.t05": [
+      {
+        "leaf": "sys.block1.subagent.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.subagent.t05.tail"
+      }
+    ],
+    "sys.block1.subagent.t06": [
+      {
+        "leaf": "sys.block1.subagent.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.subagent.t06.tail"
+      }
+    ],
+    "sys.block1.subagent.t07": [
+      {
+        "leaf": "sys.block1.subagent.prefix"
+      },
+      {
+        "leaf": "sys.skills"
+      },
+      {
+        "leaf": "sys.block1.subagent.t07.tail"
+      }
+    ],
+    "sys.responses.main.t11": [
+      {
+        "leaf": "sys.block0.main"
+      },
+      "\n\n\n",
+      {
+        "recipe": "sys.block1.main.t11"
+      }
+    ],
+    "tools.anthropic.main": [
+      "[",
+      {
+        "leaf": "tools.Agent.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.AskUserQuestion.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.Bash.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.DiscoverSkillsTool.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.Edit.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.ExecuteExtraTool.anthropic.main"
+      },
+      ",",
+      {
+        "leaf": "tools.Glob.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.Grep.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.Read.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.ReadContextArchive.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.SearchExtraTools.anthropic.main"
+      },
+      ",",
+      {
+        "leaf": "tools.SkillTool.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.TodoWrite.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.WebFetch.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.WebSearch.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.Write.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.artifact.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.folder_operations.anthropic"
+      },
+      "]"
+    ],
+    "tools.anthropic.sub": [
+      "[",
+      {
+        "leaf": "tools.Bash.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.DiscoverSkillsTool.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.Edit.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.ExecuteExtraTool.anthropic.sub"
+      },
+      ",",
+      {
+        "leaf": "tools.Glob.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.Grep.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.Read.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.SearchExtraTools.anthropic.sub"
+      },
+      ",",
+      {
+        "leaf": "tools.SkillTool.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.TodoWrite.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.WebFetch.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.WebSearch.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.Write.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.artifact.anthropic"
+      },
+      ",",
+      {
+        "leaf": "tools.folder_operations.anthropic"
+      },
+      "]"
+    ],
+    "tools.responses.main": [
+      "[",
+      {
+        "leaf": "tools.Agent.responses"
+      },
+      ",",
+      {
+        "leaf": "tools.AskUserQuestion.responses"
+      },
+      ",",
+      {
+        "leaf": "tools.Bash.responses"
+      },
+      ",",
+      {
+        "leaf": "tools.DiscoverSkillsTool.responses"
+      },
+      ",",
+      {
+        "leaf": "tools.Edit.responses"
+      },
+      ",",
+      {
+        "leaf": "tools.ExecuteExtraTool.responses"
+      },
+      ",",
+      {
+        "leaf": "tools.Glob.responses"
+      },
+      ",",
+      {
+        "leaf": "tools.Grep.responses"
+      },
+      ",",
+      {
+        "leaf": "tools.Read.responses"
+      },
+      ",",
+      {
+        "leaf": "tools.ReadContextArchive.responses"
+      },
+      ",",
+      {
+        "leaf": "tools.SearchExtraTools.responses"
+      },
+      ",",
+      {
+        "leaf": "tools.SkillTool.responses"
+      },
+      ",",
+      {
+        "leaf": "tools.TodoWrite.responses"
+      },
+      ",",
+      {
+        "leaf": "tools.WebFetch.responses"
+      },
+      ",",
+      {
+        "leaf": "tools.WebSearch.responses"
+      },
+      ",",
+      {
+        "leaf": "tools.Write.responses"
+      },
+      ",",
+      {
+        "leaf": "tools.artifact.responses"
+      },
+      ",",
+      {
+        "leaf": "tools.folder_operations.responses"
+      },
+      "]"
+    ]
+  }
+}
