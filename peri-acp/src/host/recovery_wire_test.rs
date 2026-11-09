@@ -687,4 +687,9 @@ async fn review_pending_stop_survives_real_load_recovery() {
             .is_some_and(|state| state.cancel_token.is_none())
     })
     .await;
+    assert_eq!(
+        stored_work_state(&harness, &thread_id).await,
+        WorkState::Stopped,
+        "恢复 turn 的收尾不得把已落库的 stopped 改回 idle"
+    );
 }
