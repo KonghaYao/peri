@@ -345,13 +345,23 @@ Rust 单测与 E2E 分离：**E2E 命令在本文件维护**，不要写逐文�
 ```bash
 npm run e2e:replay:unit     # 本地录放代理与动态绑定契约
 npm run e2e:replay:check    # 录放 runner 与业务场景类型检查
+npm run e2e:replay:verify   # world seal + 30 cassette 全量校验
 npm run e2e:replay         # 持久 fixture，只重放；真实 PTY/ACP/Agent/工具
 npm run e2e:replay:record  # 显式更新本地合成模型 fixture，不能用于 CI
+npm run e2e:replay:world-check  # 高频 prompt 源是否已同步进 world
+npm run e2e:replay:world-sync   # 显式同步 skills/Agent/compact summary leaf
 npm run e2e:l0              # PR 冒烟
 npm run e2e:l1              # 合并前（panels + tool-cards + smoke）
 npm run e2e:release         # 发版全量（含首轮 flake 预算）
 npm run e2e:release:strict  # 发版且不容忍首轮 flake
 ```
+
+replay-v2 的 system prompt 与 tool schema 存放在共享 world 快照，高频段使用稳定 leaf
+（`sys.skills`、`sys.compact.summary`、`tools.Agent.*`）。修改 `13_skills.md`、Agent
+description 或 compact summary 后先运行 `e2e:replay:world-check`，再运行
+`e2e:replay:world-sync` 并审核 leaf diff；`world:sync` 只改映射 leaf 与 `world/seal.json`，
+不重写 cassette。world leaf 变化时 cassette 报告 `worldDrift`，加载器以当前 world 重建
+canonical；stub 与 world 仍分别由 cassette seal 与 world seal 覆盖。
 
 录放业务场景以 `e2e/fixtures/replay-v2/README.md` 的目录为准。默认 runner 不启动录制上游、
 不生成缺失 cassette、不回退在线模型；`CI` 环境拒绝 record 模式。fixture 包含哈希校验的

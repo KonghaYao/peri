@@ -37,6 +37,7 @@ try {
       console.log(JSON.stringify({
         passed: true, entries: cassette.entries.size, directory: cassette.directory,
         formatVersion: cassette.manifest.formatVersion, legacy: cassette.report?.legacy ?? [],
+        worldDrift: cassette.report?.worldDrift ?? [],
       }));
     } else {
       if (!values.run) throw new Error('--run 为必填参数');

@@ -15,6 +15,10 @@
     "e2e:replay:unit": "node --test llm-replay/*.test.mjs",
     "e2e:replay": "node scripts/run-replay-v2.mjs",
     "e2e:replay:record": "node scripts/run-replay-v2.mjs --record",
+    "e2e:replay:verify": "node scripts/verify-replay-fixtures.mjs",
+    "e2e:replay:world-sync": "node scripts/refresh-cassettes.mjs",
+    "e2e:replay:world-check": "node scripts/refresh-cassettes.mjs --check",
+    "e2e:replay:migrate-v2": "node scripts/migrate-replay-v2.mjs",
     "e2e:replay:smoke": "vitest run --config vitest.replay.config.ts",
     "llm:replay": "node llm-replay/cli.mjs",
     "e2e:replay:check": "tsc --noEmit --project tsconfig.replay.json"

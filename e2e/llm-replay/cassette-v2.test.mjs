@@ -1,11 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cp, mkdtemp, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { createCassetteWriter, loadCassette } from './cassette.mjs';
-import { canonicalBody, sha256 } from './matcher.mjs';
+import { canonicalBody, identityKey, sha256 } from './matcher.mjs';
 import { createRequestBindingAdapter } from './request-bindings.mjs';
 import { createWorldBuilder } from './world-store.mjs';
 
@@ -217,18 +216,71 @@ test('引用 world 的 v2 cassette 在共享 world 缺失时拒绝加载', async
   await assert.rejects(loadCassette(fixture.cassetteDir), { code: 'missing_world' });
 });
 
-test('v1 fixture 保持可读，并保留 segments 规则形状', async () => {
-  const directory = fileURLToPath(new URL('../fixtures/replay-v2/S06/cassette', import.meta.url));
-  const cassette = await loadCassette(directory);
+test('world leaf 更新后报告 worldDrift，并以当前 world 重建 canonical', async (t) => {
+  const builder = createWorldBuilder({ generation: 'drift-test' });
+  const fixture = await recordAll(t, { world: builder });
+  const worldDir = path.join(fixture.directory, 'world');
+  await builder.seal(worldDir);
+  const manifest = JSON.parse(await readFile(path.join(worldDir, 'manifest.json'), 'utf8'));
+  let leafId = null;
+  for (const [id, meta] of Object.entries(manifest.leaves)) {
+    if ((await readFile(path.join(worldDir, meta.file), 'utf8')) === 'skills catalog') { leafId = id; break; }
+  }
+  assert.ok(leafId, '未找到 skills leaf');
+  const file = path.join(worldDir, manifest.leaves[leafId].file);
+  await writeFile(file, 'skills catalog updated');
+  const seal = JSON.parse(await readFile(path.join(worldDir, 'seal.json'), 'utf8'));
+  seal.leaves[leafId] = sha256(await readFile(file));
+  await writeFile(path.join(worldDir, 'seal.json'), `${JSON.stringify(seal)}\n`);
+  const cassette = await loadCassette(fixture.cassetteDir);
+  assert.equal(cassette.report.worldDrift.length, 1);
+  assert.deepEqual(cassette.report.legacy, []);
+  const [entry] = cassette.entries.values();
+  assert.match(entry.request.canonicalBody, /skills catalog updated/u);
+});
+
+test('v1 cassette 保持可读，并保留 segments 规则形状', async (t) => {
+  const directory = await temporary(t);
+  const cassetteDir = path.join(directory, 'case', 'cassette');
+  await mkdir(path.join(cassetteDir, 'requests'), { recursive: true });
+  await mkdir(path.join(cassetteDir, 'responses'), { recursive: true });
+  const call = identity();
+  const id = sha256(identityKey(call));
+  const body = Buffer.from(JSON.stringify({ model: 'fixture', system: [{ type: 'text', text: 'literal /record/root tail' }], messages: [] }));
+  const response = Buffer.from('data: ok\n\n');
+  const requestFile = `requests/${id}.bin`;
+  const responseFile = `responses/${id}.bin`;
+  await writeFile(path.join(cassetteDir, requestFile), body);
+  await writeFile(path.join(cassetteDir, responseFile), response);
+  const manifest = {
+    formatVersion: 1,
+    kind: 'raw-http',
+    provenance: { source: 'test' },
+    entries: [{
+      identity: call,
+      requestRules: [{ path: '/system/0/text', mode: 'typed-template', segments: ['literal ', { kind: 'path', alias: 'work' }, ' tail'] }],
+      request: {
+        method: 'POST', target: 'https://fixture.test/v1/messages', headers: { 'content-type': 'application/json' },
+        canonicalBody: canonicalBody(body), file: requestFile, size: body.length, sha256: sha256(body),
+      },
+      response: {
+        file: responseFile, status: 200, headers: {},
+        chunks: [{ offset: 0, length: response.length, atMs: 0, sha256: sha256(response) }],
+        size: response.length, submittedBytes: response.length, sha256: sha256(response), terminal: { kind: 'complete', atMs: 1 },
+      },
+    }],
+  };
+  const manifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
+  await writeFile(path.join(cassetteDir, 'manifest.json'), manifestBytes);
+  await writeFile(path.join(cassetteDir, 'seal.json'), `${JSON.stringify({ formatVersion: 1, manifestSha256: sha256(manifestBytes) })}\n`);
+  const cassette = await loadCassette(cassetteDir);
   assert.equal(cassette.manifest.formatVersion, 1);
   assert.equal(cassette.report.formatVersion, 1);
-  assert.equal(cassette.entries.size, 2);
-  for (const entry of cassette.entries.values()) {
-    assert.equal(typeof entry.request.canonicalBody, 'string');
-    assert.match(entry.request.file, /^requests\/[0-9a-f]{64}\.bin$/u);
-    for (const rule of entry.requestRules) {
-      assert.equal(rule.mode, 'typed-template');
-      assert.ok(Array.isArray(rule.segments));
-    }
-  }
+  assert.equal(cassette.entries.size, 1);
+  const [entry] = cassette.entries.values();
+  assert.equal(typeof entry.request.canonicalBody, 'string');
+  assert.match(entry.request.file, /^requests\/[0-9a-f]{64}\.bin$/u);
+  assert.equal(entry.requestRules.length, 1);
+  assert.equal(entry.requestRules[0].mode, 'typed-template');
+  assert.ok(Array.isArray(entry.requestRules[0].segments));
 });

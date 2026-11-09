@@ -490,13 +490,19 @@ function validateStubHeader(stub) {
   }
 }
 
-function verifyRaw(stub, bytes) {
-  if (stub.rawBytes !== undefined && bytes.length !== stub.rawBytes) fail('corrupt_cassette', 'request body 长度不符', { rawSha256: stub.rawSha256 });
-  if (sha256(bytes) !== stub.rawSha256) fail('corrupt_cassette', 'request body 校验失败', { rawSha256: stub.rawSha256 });
+function verifyRaw(stub, bytes, { allowDrift = false } = {}) {
+  const lengthMismatch = stub.rawBytes !== undefined && bytes.length !== stub.rawBytes;
+  const hashMismatch = sha256(bytes) !== stub.rawSha256;
+  if (!lengthMismatch && !hashMismatch) return false;
+  // world:sync 只改 leaf + seal，stub 中的 raw/canonical hash 是录制值。
+  // stub 与 leaf 均由 seal 覆盖，因此渲染差异只能来自显式 world 变更；报告 drift 而不是失败。
+  if (allowDrift) return true;
+  if (lengthMismatch) fail('corrupt_cassette', 'request body 长度不符', { rawSha256: stub.rawSha256 });
+  fail('corrupt_cassette', 'request body 校验失败', { rawSha256: stub.rawSha256 });
 }
 
 /** 由 stub 重建 raw body；legacy part 必须由调用方提供受 seal 覆盖的读取器。 */
-export async function decodeRequestStub(stub, { world, readRaw } = {}) {
+export async function decodeRequestStub(stub, { world, readRaw, allowDrift = false } = {}) {
   validateStubHeader(stub);
   const rawParts = stub.parts.filter((part) => isPlainObject(part) && Object.hasOwn(part, 'raw'));
   if (rawParts.length) {
@@ -505,7 +511,7 @@ export async function decodeRequestStub(stub, { world, readRaw } = {}) {
     if (!readRaw) fail('invalid_request_stub', '缺少 legacy body 读取器');
     const bytes = await readRaw(rawParts[0].raw);
     verifyRaw(stub, bytes);
-    return { bytes, legacy: true, legacyFile: rawParts[0].raw };
+    return { bytes, legacy: true, legacyFile: rawParts[0].raw, drifted: false };
   }
   const chunks = stub.parts.map((part) => {
     if (typeof part === 'string') return Buffer.from(part, 'utf8');
@@ -515,8 +521,8 @@ export async function decodeRequestStub(stub, { world, readRaw } = {}) {
     return world.render(part);
   });
   const bytes = Buffer.concat(chunks);
-  verifyRaw(stub, bytes);
-  return { bytes, legacy: false };
+  const drifted = verifyRaw(stub, bytes, { allowDrift });
+  return { bytes, legacy: false, drifted };
 }
 
 const recordedKey = (kind, alias) => `${kind}:${alias}`;

@@ -238,6 +238,8 @@ test('stub 引用缺少 world 时失败，raw hash 与长度受到校验', async
     const world = await loadWorld(path.join(directory, 'world'));
     const broken = { ...stub, rawSha256: '0'.repeat(64) };
     await assert.rejects(decodeRequestStub(broken, { world }), { code: 'corrupt_cassette' });
+    const drifted = await decodeRequestStub(broken, { world, allowDrift: true });
+    assert.equal(drifted.drifted, true);
     const missing = { ...stub, parts: stub.parts.map((part) => part.leaf ? { ...part, leaf: 'sys.sha256.missing' } : part) };
     await assert.rejects(decodeRequestStub(missing, { world }), { code: 'unknown_world_leaf' });
     await assert.rejects(decodeRequestStub(stub, {}), { code: 'missing_world' });

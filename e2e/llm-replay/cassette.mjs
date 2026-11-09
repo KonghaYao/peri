@@ -244,6 +244,7 @@ async function loadCassetteV2(root, manifestBytes, seal, { world: suppliedWorld,
   }
   const entries = new Map();
   const legacy = [];
+  const worldDrift = [];
   let worldPromise;
   const resolveWorld = () => {
     if (!worldPromise) {
@@ -279,12 +280,13 @@ async function loadCassetteV2(root, manifestBytes, seal, { world: suppliedWorld,
       && !Array.isArray(part) && (part.leaf !== undefined || part.recipe !== undefined));
     let decoded;
     try {
-      decoded = await decodeRequestStub(stub, { world: needsWorld ? await resolveWorld() : undefined, readRaw });
+      decoded = await decodeRequestStub(stub, { world: needsWorld ? await resolveWorld() : undefined, readRaw, allowDrift: true });
     } catch (error) {
       if (error instanceof ReplayError) throw new ReplayError(error.code, error.message, { ...error.details, entry: id });
       throw error;
     }
     if (decoded.legacy) legacy.push({ entry: id, reason: stub.fallback ?? 'legacy_body' });
+    if (decoded.drifted) worldDrift.push({ entry: id });
     let expanded;
     try { expanded = expandTypedTemplateRules(entry.requestRules ?? [], decoded.bytes); }
     catch (error) {
@@ -298,7 +300,8 @@ async function loadCassetteV2(root, manifestBytes, seal, { world: suppliedWorld,
         throw error;
       }
     })();
-    if (typeof stub.canonicalSha256 !== 'string' || sha256(canonical) !== stub.canonicalSha256) {
+    // 世界漂移时 stub 中的 canonicalSha256 是录制值；以当前 world 重建的 canonical 作为期望。
+    if (!decoded.drifted && (typeof stub.canonicalSha256 !== 'string' || sha256(canonical) !== stub.canonicalSha256)) {
       throw new ReplayError('corrupt_cassette', 'cassette canonical body 校验失败', { entry: id });
     }
     try { await verifyResponseBody(root, entry); }
@@ -314,7 +317,7 @@ async function loadCassetteV2(root, manifestBytes, seal, { world: suppliedWorld,
     if (canonicalJson(entry.request.headers) === undefined) throw new ReplayError('corrupt_cassette', 'cassette 请求匹配信息缺失');
     entries.set(key, entry);
   }
-  return { directory: root, manifest, entries, report: { formatVersion: CASSETTE_FORMAT_VERSION, legacy } };
+  return { directory: root, manifest, entries, report: { formatVersion: CASSETTE_FORMAT_VERSION, legacy, worldDrift } };
 }
 
 export async function loadCassette(directory, options = {}) {
@@ -351,7 +354,7 @@ export async function loadCassette(directory, options = {}) {
     }
     entries.set(key, entry);
   }
-  return { directory: root, manifest, entries, report: { formatVersion: FORMAT_VERSION, legacy: [] } };
+  return { directory: root, manifest, entries, report: { formatVersion: FORMAT_VERSION, legacy: [], worldDrift: [] } };
 }
 
 export async function* readResponseChunks(cassette, entry) {

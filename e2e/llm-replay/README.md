@@ -14,6 +14,7 @@ npm ci
 npm run e2e:replay:unit
 npm run e2e:replay:check
 npx tsc --noEmit --project tsconfig.replay-v2.json
+npm run e2e:replay:verify
 npm run e2e:replay
 ```
 
@@ -29,7 +30,9 @@ v2 业务目录包含 30 个固定场景：S01–S06 流式与协议，T01–T06
 | --- | --- |
 | `proxy.mjs` | `startReplayProxy`；record/replay HTTP 服务及 runner API |
 | `run-state.mjs` | 每个 run 独立的身份映射、消费状态、门控及完成核验 |
-| `cassette.mjs` | 原始请求/响应字节、观察分块、时间、终结原因与完整性校验 |
+| `cassette.mjs` | 原始请求/响应字节、观察分块、时间、终结原因与完整性校验；v2 从 stub 与 world 重建 canonical body |
+| `world-store.mjs` | world leaf/recipe 内容寻址、seal、request stub 字节 splice、typed-template pattern 压缩与展开 |
+| `template-text.mjs` | typed-template 的绑定边界扫描；录制与加载共用同一套规则 |
 | `bindings.mjs` | 按 owner/type/alias/创建因果锚声明与绑定动态值 |
 | `request-bindings.mjs` | 生成并冻结精确字段模板、工作区/会话绑定和工具参数 portable 计划 |
 | `portable-sse.mjs` | 从原始录制派生工具参数可移植版本，保留来源哈希 |
@@ -49,7 +52,15 @@ v2 业务目录包含 30 个固定场景：S01–S06 流式与协议，T01–T06
 
 I01 验证相同输入的双会话反转请求与响应顺序后，各自恢复正确 TUI 历史；I02 在同一代理上并行运行同份录制的两个新 world，分别完成真实重试与 Write，并检查文件互不覆盖；I03 验证一会话取消及迟到取消信号不会终止另一会话或新的执行。身份匹配不会代替这些业务断言。
 
-`completeRun()` 同时核验未消费、额外、失败及在途请求。HTTP 终态与录制落盘/读取清理分别跟踪：已完成的 HTTP 请求可以触发真实重试，但 `pendingDurable` 或 `pendingCleanup` 未清零时不能完成 run。收到一段预期文本不等于用例通过。请求正文、工具定义、错误或终态变化都会使回放失败；提示词发生合理变化时应审核并重录，而非扩大忽略字段。
+`completeRun()` 同时核验未消费、额外、失败及在途请求。HTTP 终态与录制落盘/读取清理分别跟踪：已完成的 HTTP 请求可以触发真实重试，但 `pendingDurable` 或 `pendingCleanup` 未清零时不能完成 run。收到一段预期文本不等于用例通过。请求正文、工具定义、错误或终态变化都会使回放失败；提示词中的高频段（skills、Agent schema、compact system prompt）先走 `world:sync` 显式同步并审核 leaf diff，其余变化必须重录，而非扩大忽略字段。
+
+## world 快照
+
+cassette `formatVersion` 为 2 时，system prompt 与 tool schema 从请求正文抽到共享 `e2e/fixtures/replay-v2/world/`，请求只保留 stub（其余字节原样）。加载顺序为 cassette seal → manifest → stub hash → world seal → 每条请求 raw/canonical hash → response hash。
+
+高频段有稳定 leaf：`sys.skills`、`sys.compact.summary`、`tools.Agent.*`（description + `send_only`）。`npm run e2e:replay:world-sync` 只在源文件变化时改写这些 leaf 与 `world/seal.json`；`npm run e2e:replay:world-check` 用于确认是否需要显式同步。block1 拆成 prefix + skills + tail，tools 按工具对象拆 leaf，因此 skills 变化不会改写 99 个请求或 30 个 cassette seal。未映射段（如 T06 hook prompt）保留内容寻址 leaf 并在同步报告中列出。
+
+world leaf 变更后，stub 里的 `rawSha256`/`canonicalSha256` 仍是录制值；`loadCassette` 会报告 `report.worldDrift` 并以当前 world 重建 canonical，而不是判为损坏。完整性仍由 cassette seal（stub 文件）与 world seal（leaf 内容）覆盖；`world:check` 负责把“源文件已变化但未同步”变成显式失败。
 
 ## 流式与取消
 
