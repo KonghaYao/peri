@@ -75,6 +75,29 @@ fn clear_trace_removes_main_and_child_agent_sids() {
 }
 
 #[test]
+fn clear_trace_keeps_background_subagent_until_stop() {
+    let registry = TurnTraceRegistry::default();
+    registry.register("sess-main", "trace-1", Some("trace-1"));
+    registry.register("child-foreground", "trace-1", Some("trace-1"));
+    registry.register_outliving_turn("child-background", "trace-1", Some("trace-1"));
+
+    // 父 turn 结束时后台子 agent 仍在运行，登记不能一起清掉
+    registry.clear_trace("trace-1");
+
+    assert!(registry.resolve("sess-main").is_none());
+    assert!(registry.resolve("child-foreground").is_none());
+    let background = registry
+        .resolve("child-background")
+        .expect("background child must survive turn end");
+    assert_eq!(background.trace_id, "trace-1");
+    assert!(background.outlives_turn);
+
+    // 后台子 agent 自身 stop 后清理
+    registry.clear("child-background", "trace-1");
+    assert!(registry.resolve("child-background").is_none());
+}
+
+#[test]
 fn clear_trace_leaves_other_traces_registered() {
     let registry = TurnTraceRegistry::default();
     registry.register("sess-main", "trace-1", Some("trace-1"));

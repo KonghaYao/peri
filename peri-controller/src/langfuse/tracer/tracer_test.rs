@@ -1044,6 +1044,33 @@ async fn turn_lifecycle_registers_and_clears_active_trace_for_metrics() {
 }
 
 #[tokio::test]
+async fn background_subagent_metrics_survive_turn_end_until_stop() {
+    let (mut t, session) = make_tracer(1.0);
+    let trace_id = t.trace_id.clone();
+
+    t.on_turn_start("turn_background_subagent");
+    t.on_subagent_start("main", "child-bg", "coder", true);
+
+    let _flush = t.on_turn_end(TurnTelemetryOutcome::Completed);
+    let active = session
+        .turn_traces()
+        .resolve("child-bg")
+        .expect("后台子 agent 活过父 turn，其指标登记不能被 turn 结束清掉");
+    assert_eq!(active.trace_id, trace_id);
+    assert_eq!(
+        active.parent_observation_id.as_deref(),
+        Some(trace_id.as_str()),
+        "turn 结束后产生的指标仍归原 trace 根 span"
+    );
+
+    t.on_subagent_stop("main", "child-bg", "done", false);
+    assert!(
+        session.turn_traces().resolve("child-bg").is_none(),
+        "后台子 agent 结束后清理其指标归属"
+    );
+}
+
+#[tokio::test]
 async fn unsampled_turn_registers_without_parent_observation() {
     let (mut t, session) = make_tracer(0.0);
     let trace_id = t.trace_id.clone();

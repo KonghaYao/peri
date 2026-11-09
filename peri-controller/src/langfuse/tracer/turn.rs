@@ -104,8 +104,9 @@ impl LangfuseTracer {
     pub fn on_turn_end(&mut self, outcome: TurnTelemetryOutcome) -> tokio::task::JoinHandle<()> {
         use std::sync::Arc;
 
-        // 先清理本 turn 的活跃登记（含主 sid 与子 agent sid；compare-and-remove
-        // 按 trace 匹配，不误删后一 turn），之后发出的指标回退独立 root trace。
+        // 先清理本 turn 的活跃登记（主 sid 与前台子 agent sid；compare-and-remove
+        // 按 trace 匹配，不误删后一 turn；后台子 agent 跨 turn 存活，保留到自身
+        // stop），之后发出的指标回退独立 root trace。
         self.session.turn_traces().clear_trace(&self.trace_id);
 
         let fallback_status = GenerationFallbackStatus::for_outcome(&outcome);
