@@ -936,6 +936,7 @@ async fn prompt_without_frozen_snapshot_fails_closed() {
             continuation_armed: false,
             continuation_epoch: 0,
             work_intent_epoch: 0,
+            user_intent_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,
             recovery_settlement_pending: false,

@@ -21,11 +21,13 @@ use peri_acp_types::session_resources::{
 use peri_acp_types::thread::{ThreadId, ThreadMeta, WorkState};
 use peri_acp_types::workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery};
 use serde_json::json;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::provider::{LlmProvider, PeriConfig, ProviderConfig, ProviderModels};
+use crate::transport::stdio::StdioTransport;
 use crate::transport::AcpTransport;
 
 /// 只阻塞 `set_work_state(Stopped)`，其余方法逐项转发真实门面。
@@ -168,6 +170,24 @@ async fn build_config_with_owner(
     (Arc::new(cfg), owner)
 }
 
+/// 与生产 wrapper 同形，但保留 owner 在 config 内、使用短 shutdown 时限。
+async fn build_wrapper_config(
+    tmp: &tempfile::TempDir,
+    session_resources: Arc<dyn SessionResources>,
+    cooperative_grace: Duration,
+    abort_drain_guard: Duration,
+) -> (AcpServerConfig, Arc<dyn SessionResources>) {
+    let mut cfg = make_server_config(tmp, session_resources).await;
+    let (owner, spawner) = crate::host::task_scope::HostTaskOwner::with_policy_for_tests(
+        cooperative_grace,
+        abort_drain_guard,
+    );
+    cfg.host_task_owner = Some(owner);
+    cfg.host_task_spawner = spawner;
+    let resources = Arc::clone(&cfg.session_resources);
+    (cfg, resources)
+}
+
 /// 建一条已绑定会话（与生产创建路径同形），使 `set_work_state` 有真实行可写。
 async fn create_bound_session(cfg: &AcpServerConfig, cwd: &str, sid: &str) {
     let workspace = cfg
@@ -219,6 +239,7 @@ fn session_state(sid: &str, cwd: &str) -> SessionState {
         continuation_armed: false,
         continuation_epoch: 0,
         work_intent_epoch: 0,
+        user_intent_epoch: 0,
         continuation_in_flight: false,
         continuation_mq_steering_pending: false,
         recovery_settlement_pending: false,
@@ -537,4 +558,132 @@ async fn review_shutdown_preserves_pending_stop_intent() {
         );
     }
     drop(owner);
+}
+
+async fn write_json_line(stream: &mut DuplexStream, value: serde_json::Value) {
+    stream
+        .write_all(value.to_string().as_bytes())
+        .await
+        .unwrap();
+    stream.write_all(b"\n").await.unwrap();
+}
+
+async fn read_json_line(reader: &mut BufReader<DuplexStream>) -> serde_json::Value {
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+        .await
+        .expect("stdio 输出超时")
+        .unwrap();
+    serde_json::from_str(line.trim()).unwrap()
+}
+
+async fn send_stdio_request(
+    input: &mut DuplexStream,
+    output: &mut BufReader<DuplexStream>,
+    id: i64,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    write_json_line(
+        input,
+        json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
+    )
+    .await;
+    loop {
+        let value = read_json_line(output).await;
+        if value.get("id").and_then(serde_json::Value::as_i64) == Some(id) {
+            assert!(value.get("error").is_none(), "{method} 失败: {value}");
+            return value;
+        }
+    }
+}
+
+/// P1：正常 stdio EOF 走真实 wrapper。第一次 shutdown 因 Stop 持久化阻塞报
+/// `Incomplete` 后，wrapper 必须保留 context 重入 finish，而不是直接 Drop owner；
+/// 存储恢复后旧 Stop 仍落库，最终报告 Complete。
+#[tokio::test]
+async fn review_stdio_eof_preserves_pending_stop() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (_bridge, facade) =
+        peri_resources::sessions::open_store_and_facade_for_tests(tmp.path().join("threads.db"))
+            .await
+            .unwrap();
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let blocking = Arc::new(BlockingResources {
+        inner: Arc::new(facade),
+        started: Arc::clone(&started),
+        release: Arc::clone(&release),
+    });
+    let (cfg, resources) = build_wrapper_config(
+        &tmp,
+        Arc::clone(&blocking) as Arc<dyn SessionResources>,
+        Duration::from_millis(1),
+        Duration::from_millis(100),
+    )
+    .await;
+    let cwd = tmp.path().to_str().unwrap().to_string();
+
+    let (mut input, transport_read) = tokio::io::duplex(64 * 1024);
+    let (transport_write, output_read) = tokio::io::duplex(64 * 1024);
+    let transport = Arc::new(StdioTransport::from_reader_writer(
+        transport_read,
+        transport_write,
+    ));
+    let server = tokio::spawn(crate::host::run_acp_server(transport, cfg));
+    let mut output = BufReader::new(output_read);
+
+    send_stdio_request(
+        &mut input,
+        &mut output,
+        1,
+        "initialize",
+        json!({"protocolVersion": 1}),
+    )
+    .await;
+    let created = send_stdio_request(
+        &mut input,
+        &mut output,
+        2,
+        "session/new",
+        json!({"cwd": cwd}),
+    )
+    .await;
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_string();
+    resources
+        .set_work_state(&sid, WorkState::Working)
+        .await
+        .unwrap();
+
+    write_json_line(
+        &mut input,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": {"sessionId": sid},
+        }),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("Stop 持久化必须走到被阻塞的 set_work_state");
+
+    // stdin EOF：生产 wrapper 开始关闭；首轮 shutdown 会在短时限后报 Incomplete。
+    drop(input);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    release.notify_one();
+
+    let report = tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .expect("wrapper 必须在有界窗口内返回")
+        .expect("server task 不得 panic");
+    assert!(
+        report.is_complete(),
+        "存储恢复后 wrapper 必须让待持久化 Stop 完成: {report:?}"
+    );
+    assert_eq!(
+        resources.load_session_meta(&sid).await.unwrap().work_state,
+        WorkState::Stopped,
+        "stdio EOF 关闭不得丢弃已接受的 Stop"
+    );
 }

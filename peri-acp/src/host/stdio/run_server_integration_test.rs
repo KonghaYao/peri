@@ -334,7 +334,7 @@ async fn send_request_and_read_result(
 }
 
 /// 等待宿主在 stdin EOF 后优雅退出。
-async fn await_server_exit(server_task: tokio::task::JoinHandle<()>, input: DuplexStream) {
+async fn await_server_exit<T>(server_task: tokio::task::JoinHandle<T>, input: DuplexStream) {
     drop(input);
     tokio::time::timeout(std::time::Duration::from_secs(10), server_task)
         .await

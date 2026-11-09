@@ -362,6 +362,119 @@ async fn stale_stop_across_close_load_cannot_override_new_working() {
     assert!(result.is_ok(), "新轮次应正常完成: {result:?}");
 }
 
+/// P1：`QueuedUser` 是用户提交的真实工作意图，不是内部续跑。close/load 后
+/// 队列用户 prompt 准入时，旧生命周期的 Stop 不得覆盖它。
+#[tokio::test]
+async fn stale_stop_across_close_load_does_not_override_queued_user() {
+    let mut harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+
+    // 旧 Stop worker 固定在 work_intent 锁之前。
+    let stop_gate =
+        crate::host::prompt_dispatch::admission_gate::install(&format!("{thread_id}:stop-persist"));
+    let (targets, persist) = harness.capture_and_spawn_stop(&thread_id).await;
+    assert_eq!(targets.len(), 1);
+    tokio::time::timeout(WAIT_TIMEOUT, stop_gate.entered.notified())
+        .await
+        .expect("Stop worker 必须停在 work_intent 锁之前");
+
+    {
+        let mut states = harness.sessions.lock().await;
+        crate::host::requests::session_lifecycle::handle_close(
+            &json!({"sessionId": thread_id}),
+            &harness.cfg,
+            &mut states,
+        )
+        .await
+        .expect("session/close 必须成功");
+    }
+    harness.load_session(&thread_id).await;
+
+    // 新生命周期中的队列用户输入。
+    let mailbox =
+        crate::host::user_input::ensure_mailbox(&thread_id, &harness.cfg, &harness.transport)
+            .await
+            .expect("会话收件箱必须可建立");
+    mailbox
+        .enqueue(&peri_acp_types::session::EnqueueUserInputRequest {
+            session_id: thread_id.clone(),
+            generation: mailbox.generation().to_owned(),
+            command_id: "enqueue-after-reload".to_owned(),
+            input_id: "00000000-0000-0000-0000-000000000002".to_owned(),
+            content: peri_acp_types::messages::MessageContent::Text(
+                "queued after reload".to_owned(),
+            ),
+            original_draft: "queued after reload".to_owned(),
+        })
+        .await
+        .expect("队列输入必须入队");
+    let ticket = mailbox.reserve_run().expect("队列输入必须能预留一次执行");
+    let request_id = ticket.id.clone();
+    let run = crate::host::user_input::UserInputRun::new(ticket);
+
+    let prompt_gate = crate::host::prompt_dispatch::admission_gate::install(&format!(
+        "{thread_id}:epoch-advanced"
+    ));
+    let prompt = {
+        let sessions = Arc::clone(&harness.sessions);
+        let locks = Arc::clone(&harness.locks);
+        let transport = Arc::clone(&harness.transport);
+        let cfg = Arc::clone(&harness.cfg);
+        let sender = Arc::clone(&harness.sender);
+        let thread_id = thread_id.clone();
+        tokio::spawn(async move {
+            crate::host::prompt_dispatch::dispatch_prompt_turn_with_input(
+                json!({
+                    "sessionId": thread_id,
+                    "requestId": request_id,
+                    "message": {"role": "user", "content": []},
+                }),
+                PromptOrigin::QueuedUser,
+                None,
+                &sessions,
+                &locks,
+                &transport,
+                &cfg,
+                &sender,
+                Some(run),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(WAIT_TIMEOUT, prompt_gate.entered.notified())
+        .await
+        .expect("队列用户 prompt 必须停在 working 提交之后");
+
+    let (work_epoch, user_epoch) = {
+        let states = harness.sessions.lock().await;
+        (
+            states[&thread_id].work_intent_epoch,
+            states[&thread_id].user_intent_epoch,
+        )
+    };
+    assert_eq!(work_epoch, 1, "队列用户轮次推进工作代次");
+    assert_eq!(user_epoch, 1, "队列用户轮次必须推进用户意图水位");
+
+    // 放行旧 Stop：新生命周期已有用户队列意图，旧 Stop 必须跳过。
+    stop_gate.release.notify_one();
+    tokio::time::timeout(WAIT_TIMEOUT, persist)
+        .await
+        .expect("旧 Stop 持久化不得挂起")
+        .expect("旧 Stop 持久化任务不得 panic");
+    assert_eq!(
+        durable_work_state(&harness, &thread_id).await,
+        WorkState::Working,
+        "旧 Stop 不得覆盖队列用户轮次的 working"
+    );
+
+    prompt_gate.release.notify_one();
+    let _ = tokio::time::timeout(WAIT_TIMEOUT, prompt)
+        .await
+        .expect("队列用户 prompt 不得挂起")
+        .expect("队列用户 prompt 任务不得 panic");
+}
+
 /// P2 复审：真实用户 prompt 落在 `working` 已提交、代次尚未推进的窗口时，
 /// Stop 的锁外持久化会被代次守卫跳过。本轮随后启动失败，必须按显式停止落
 /// durable `stopped`，而不是把 Stop 当普通中断回收成 idle。

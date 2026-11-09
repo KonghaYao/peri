@@ -103,6 +103,12 @@ impl AcpHostHandle {
             }
         }
     }
+
+    /// 最近一次 shutdown 是否保留了退出上下文（`Incomplete` 或仍持清理 owner 的
+    /// 遥测 `Pending`）。保留时调用方可以再次 `shutdown`，由同一上下文继续 finish。
+    pub(crate) fn retains_shutdown_context(&self) -> bool {
+        self.retry.is_some()
+    }
 }
 
 /// 关闭报告是否仍持本地 owner、必须保留上下文重入（契约 §3.6）。

@@ -58,6 +58,7 @@ async fn test_fork_registers_session_and_copies_history() {
             continuation_armed: false,
             continuation_epoch: 0,
             work_intent_epoch: 0,
+            user_intent_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,
             recovery_settlement_pending: false,

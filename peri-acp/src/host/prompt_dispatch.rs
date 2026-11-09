@@ -70,6 +70,9 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     input_ticket: Option<super::user_input::UserInputRun>,
 ) -> Result<Value, AcpError> {
     let is_continuation = !matches!(origin, PromptOrigin::User);
+    // 队列输入（`QueuedUser`）由用户提交，只是执行时机不同；它和直接 prompt 一样
+    // 是真实的用户工作意图，必须推进用户水位。
+    let is_user_intent = matches!(origin, PromptOrigin::User | PromptOrigin::QueuedUser);
     // 恢复启动门发出的 continuation：只有它的早失败反馈给协调器。用户 prompt 或
     // 普通续跑失败不改变恢复准入。
     let recovery_origin = matches!(origin, PromptOrigin::Continuation { recovery: true, .. });
@@ -448,6 +451,11 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         let mut sessions = sessions.lock().await;
         if let Some(state) = sessions.get_mut(&prompt_session_id) {
             state.work_intent_epoch += 1;
+            // 自动恢复/内部续跑也会推进总代次，但不是用户发出的新意图；close/load
+            // 后的旧 Stop 只应被新生命周期中的用户 prompt 覆盖。
+            if is_user_intent {
+                state.user_intent_epoch += 1;
+            }
         }
     }
     drop(work_intent_guard);

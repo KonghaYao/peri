@@ -592,3 +592,99 @@ async fn settle_after_stop_keeps_stopped() {
         WorkState::Stopped
     );
 }
+
+/// P1：真实 `session/load` 的自动恢复会推进 `work_intent_epoch`，但这不是用户
+/// 新 prompt。旧 Stop 仍在 stop-persist 屏障后等待时，close → load → 自动恢复
+/// 推进 epoch 后再放行旧 Stop，必须仍落 `stopped`。
+#[tokio::test]
+async fn review_pending_stop_survives_real_load_recovery() {
+    let mut harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+    harness.spawn_continuation_scheduler();
+
+    // 旧生命周期的 Stop worker 固定在 work_intent 锁之前。
+    let stop_gate =
+        crate::host::prompt_dispatch::admission_gate::install(&format!("{thread_id}:stop-persist"));
+    let (targets, persist) = harness.capture_and_spawn_stop(&thread_id).await;
+    assert_eq!(targets.len(), 1);
+    let old_generation = targets[0]
+        .session_generation
+        .expect("live 会话必须捕获实例代次");
+    tokio::time::timeout(WAIT_TIMEOUT, stop_gate.entered.notified())
+        .await
+        .expect("Stop worker 必须停在 work_intent 锁之前");
+
+    // 真实 ServerLoop：close → load；load 触发自动恢复，恢复续跑推进 epoch 后
+    // 停在 epoch-advanced，确保旧 Stop 放行时看到的是恢复推进后的代次。
+    let epoch_gate = crate::host::prompt_dispatch::admission_gate::install(&format!(
+        "{thread_id}:epoch-advanced"
+    ));
+    push_request(
+        &harness,
+        1,
+        "session/close",
+        json!({"sessionId": thread_id.clone()}),
+    );
+    push_request(
+        &harness,
+        2,
+        "session/load",
+        json!({"sessionId": thread_id.clone()}),
+    );
+    run_server_loop(&harness).await;
+    let responses = harness.recorded.responses();
+    assert!(
+        responses
+            .iter()
+            .any(|(id, result)| *id == RequestId::Number(2) && result.is_ok()),
+        "load 必须成功返回：{responses:?}"
+    );
+    tokio::time::timeout(WAIT_TIMEOUT, epoch_gate.entered.notified())
+        .await
+        .expect("自动恢复必须推进 epoch 并停在 epoch-advanced");
+
+    let (new_generation, work_epoch, user_epoch) = {
+        let states = harness.sessions.lock().await;
+        let state = states.get(&thread_id).expect("load 必须发布新实例");
+        (
+            state.session_generation,
+            state.work_intent_epoch,
+            state.user_intent_epoch,
+        )
+    };
+    assert_ne!(
+        old_generation, new_generation,
+        "load 必须发布新的生命周期代次"
+    );
+    assert!(work_epoch > 0, "自动恢复续跑必须推进 work_intent_epoch");
+    assert_eq!(user_epoch, 0, "自动恢复不是用户 prompt，不得推进用户水位");
+
+    // 放行旧 Stop：自动恢复不是更新的用户意图，Stop 必须落库。
+    stop_gate.release.notify_one();
+    tokio::time::timeout(WAIT_TIMEOUT, persist)
+        .await
+        .expect("Stop 持久化不得挂起")
+        .expect("Stop 持久化任务不得 panic");
+    assert_eq!(
+        stored_work_state(&harness, &thread_id).await,
+        WorkState::Stopped,
+        "自动恢复推进 epoch 不得让旧 Stop 失效"
+    );
+
+    // 放行被测试固定的恢复续跑并等待其收尾，避免遗留任务影响其他用例。
+    epoch_gate.release.notify_one();
+    wait_for("恢复 turn 调用模型", || async {
+        harness._mock.matched()
+    })
+    .await;
+    wait_for("恢复 turn 收尾", || async {
+        harness
+            .sessions
+            .lock()
+            .await
+            .get(&thread_id)
+            .is_some_and(|state| state.cancel_token.is_none())
+    })
+    .await;
+}

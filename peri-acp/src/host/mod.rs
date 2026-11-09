@@ -242,6 +242,11 @@ pub(crate) struct SessionState {
     /// Stop 持久化在锁外异步执行，写入前比对捕获时的代次；不等即说明已有更新
     /// 的 turn 准入，旧停止意图不得覆盖它。
     pub(crate) work_intent_epoch: u64,
+    /// 仅内存的用户工作意图水位：只由用户 prompt 推进。
+    ///
+    /// 自动恢复/内部续跑也推进 `work_intent_epoch`，但不是用户发出的新意图；
+    /// close/load 后旧 Stop 只有遇到新生命周期内的用户 prompt 才失效。
+    pub(crate) user_intent_epoch: u64,
     pub(crate) continuation_in_flight: bool,
     pub(crate) continuation_mq_steering_pending: bool,
     /// 本轮属于冷 child 恢复结算：`finish_prompt_turn` 跳过独立的 `work_state`
@@ -288,6 +293,7 @@ impl SessionState {
             continuation_armed: false,
             continuation_epoch: 0,
             work_intent_epoch: 0,
+            user_intent_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,
             recovery_settlement_pending: false,
@@ -497,6 +503,32 @@ impl PromptGate {
 /// continuation scheduler 通过同一把锁串行化内部续跑）。
 pub(crate) type PromptLocks = Arc<tokio::sync::Mutex<HashMap<String, Arc<PromptGate>>>>;
 
+/// 正常部署关闭的等待窗口：已接受但受存储阻塞的 Stop 持久化仍可能留在
+/// `NotificationEffect` 中。保留 `AcpHostHandle` 的退出上下文并重入 `finish`，
+/// 给耐久任务完成机会；窗口有界，超时仍返回非 `Complete`，不会无限阻塞。
+const HOST_SHUTDOWN_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+const HOST_SHUTDOWN_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+async fn settle_host_shutdown(
+    mut handle: lifecycle::AcpHostHandle,
+) -> lifecycle::AcpHostShutdownReport {
+    let deadline = tokio::time::Instant::now() + HOST_SHUTDOWN_RETRY_WINDOW;
+    loop {
+        let report = handle.shutdown().await;
+        if report.is_complete() || !handle.retains_shutdown_context() {
+            return report;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!(
+                ?report,
+                "ACP host shutdown retry window expired; deployment not settled"
+            );
+            return report;
+        }
+        tokio::time::sleep(HOST_SHUTDOWN_RETRY_INTERVAL).await;
+    }
+}
+
 /// Main ACP server loop. Accepts any `AcpTransport` (mpsc for TUI, stdio for IDE).
 ///
 /// `session/prompt` is spawned into a background task so the loop stays
@@ -510,9 +542,8 @@ pub(crate) type PromptLocks = Arc<tokio::sync::Mutex<HashMap<String, Arc<PromptG
 pub async fn run_acp_server(
     transport: Arc<dyn crate::transport::AcpTransport>,
     cfg: AcpServerConfig,
-) {
-    let mut handle = spawn_acp_server(transport, cfg);
-    let _ = handle.shutdown().await;
+) -> lifecycle::AcpHostShutdownReport {
+    settle_host_shutdown(spawn_acp_server(transport, cfg)).await
 }
 
 /// stdio 宿主入口：注入**调用方持有的**共享 session 集合（批 3 §7 #10：
@@ -523,9 +554,8 @@ pub(crate) async fn run_acp_server_with_sessions(
     transport: Arc<dyn crate::transport::AcpTransport>,
     cfg: AcpServerConfig,
     sessions: SharedSessions,
-) {
-    let mut handle = lifecycle::spawn_with_sessions(transport, cfg, sessions);
-    let _ = handle.shutdown().await;
+) -> lifecycle::AcpHostShutdownReport {
+    settle_host_shutdown(lifecycle::spawn_with_sessions(transport, cfg, sessions)).await
 }
 
 async fn run_acp_server_inner(

@@ -121,8 +121,14 @@ pub async fn run_acp_stdio(input: StdioInput) -> anyhow::Result<()> {
     let sessions: super::SharedSessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let transport = StdioTransport::from_reader_writer(stdin, tokio::io::stdout());
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
-    super::run_acp_server_with_sessions(transport, cfg, sessions).await;
-    Ok(())
+    let report = super::run_acp_server_with_sessions(transport, cfg, sessions).await;
+    if report.is_complete() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "ACP host shutdown did not settle: {report:?}"
+        ))
+    }
 }
 
 /// 批 3 并入 `run_acp_stdio`（原 `host/stdio/init.rs::init_stdio_context`，已删）。

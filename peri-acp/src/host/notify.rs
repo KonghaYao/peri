@@ -34,9 +34,9 @@ pub(crate) struct IntentTarget {
     ///
     /// close/load 会发布新 `SessionState` 并把 `work_intent_epoch` 归零；只比 epoch
     /// 会让旧生命周期的 Stop 在新一轮写到相同 epoch 时误覆盖。实例代次用于识别
-    /// 生命周期重建：重建本身不使 Stop 失效，只有新实例已准入 turn（epoch 前进）
-    /// 才算更晚的工作意图。没有 live 实例的 cascade child 为 `None`（无从比较，
-    /// 照常写入）。
+    /// 生命周期重建：重建本身不使 Stop 失效，只有新实例中用户 prompt 推进过
+    /// `user_intent_epoch` 才算更晚的用户意图（自动恢复只推进 `work_intent_epoch`）。
+    /// 没有 live 实例的 cascade child 为 `None`（无从比较，照常写入）。
     pub(crate) session_generation: Option<u64>,
     pub(crate) epoch: u64,
 }
@@ -296,33 +296,45 @@ async fn gate_for(
         .clone()
 }
 
-/// 锁内复核 live 会话的生命周期代次与工作意图代次；无 live 会话返回 `None`
-/// （照常写入）。
-async fn live_work_intent(sessions: &SharedSessions, thread_id: &ThreadId) -> Option<(u64, u64)> {
+/// 锁内复核 live 会话的生命周期代次、工作意图代次与用户意图水位；无 live
+/// 会话返回 `None`（照常写入）。
+async fn live_work_intent(
+    sessions: &SharedSessions,
+    thread_id: &ThreadId,
+) -> Option<(u64, u64, u64)> {
     let sessions = sessions.lock().await;
     sessions
         .values()
         .find(|state| state.thread_id == *thread_id)
-        .map(|state| (state.session_generation, state.work_intent_epoch))
+        .map(|state| {
+            (
+                state.session_generation,
+                state.work_intent_epoch,
+                state.user_intent_epoch,
+            )
+        })
 }
 
-/// 捕获后目标是否已过期：同一生命周期内已有更新 turn 准入，或新生命周期已
-/// 准入过 turn。
+/// 捕获后目标是否已过期：同一生命周期内已有更新 turn 准入，或新生命周期的
+/// 用户 prompt 已推进意图水位。
 ///
-/// close/load 会发布新实例并把 `work_intent_epoch` 归零；重建生命周期本身不是
-/// 新的用户工作意图，已接受的 Stop 必须由新实例承接。只有新实例的 epoch 已经
-/// 前进（该生命周期内确有 turn 准入）时，才说明存在更晚的意图。同一生命周期内
-/// 仍按 epoch 比较；实例代次不能省，否则 close/load 后新旧 epoch 数值相同会
-/// 让旧 Stop 覆盖新轮次的 `working`（见 `stale_stop_across_close_load_*`）。
+/// close/load 会发布新实例并把两个 epoch 归零；重建生命周期本身不是新的用户
+/// 工作意图，已接受的 Stop 必须由新实例承接。真实 load 的自动恢复也会推进
+/// `work_intent_epoch`，所以跨生命周期只能看 `user_intent_epoch`：只有用户
+/// prompt 准入过新实例，才说明存在更晚的用户意图。同一生命周期内仍按
+/// `work_intent_epoch` 比较（覆盖所有 turn 准入）；实例代次不能省，否则
+/// close/load 后新旧 epoch 数值相同会让旧 Stop 覆盖新轮次的 `working`
+/// （见 `stale_stop_across_close_load_*`）。
 async fn intent_superseded(sessions: &SharedSessions, target: &IntentTarget) -> bool {
-    let Some((generation, epoch)) = live_work_intent(sessions, &target.thread_id).await else {
+    let Some((generation, epoch, user_epoch)) = live_work_intent(sessions, &target.thread_id).await
+    else {
         return false;
     };
     let generation_moved = target
         .session_generation
         .is_some_and(|captured| captured != generation);
     if generation_moved {
-        return epoch > 0;
+        return user_epoch > 0;
     }
     epoch != target.epoch
 }
