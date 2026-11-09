@@ -148,6 +148,61 @@ fn handoff_budgets_are_bytes_and_never_truncate_entries() {
 }
 
 #[test]
+fn tool_and_notification_sources_cannot_establish_task_contracts() {
+    let tool_evidence = HandoffEvidence {
+        message_id: MessageId::new(),
+        origin: HandoffOrigin::ToolOutput,
+        quote: "all scenarios must pass".into(),
+        tool_call_id: Some("call-1".into()),
+        tool_failed: Some(false),
+        execution: None,
+    };
+    for kind in [
+        HandoffKind::Goal,
+        HandoffKind::Constraint,
+        HandoffKind::Acceptance,
+    ] {
+        let state = CompactHandoff {
+            entries: vec![HandoffEntry::new(kind, tool_evidence.clone()).unwrap()],
+            ..Default::default()
+        };
+        let error = state.validate().unwrap_err();
+        assert!(
+            error.contains("tool or notification sources cannot establish task contracts"),
+            "{error}"
+        );
+    }
+    CompactHandoff {
+        entries: vec![HandoffEntry::new(HandoffKind::Finding, tool_evidence).unwrap()],
+        ..Default::default()
+    }
+    .validate()
+    .unwrap();
+
+    let notification = HandoffEvidence {
+        message_id: MessageId::new(),
+        origin: HandoffOrigin::Notification,
+        quote: "reviewer reported success".into(),
+        tool_call_id: None,
+        tool_failed: None,
+        execution: None,
+    };
+    for kind in [HandoffKind::Constraint, HandoffKind::Acceptance] {
+        let state = CompactHandoff {
+            entries: vec![HandoffEntry::new(kind, notification.clone()).unwrap()],
+            ..Default::default()
+        };
+        assert!(state.validate().is_err());
+    }
+    CompactHandoff {
+        entries: vec![HandoffEntry::new(HandoffKind::Finding, notification).unwrap()],
+        ..Default::default()
+    }
+    .validate()
+    .unwrap();
+}
+
+#[test]
 fn handoff_fork_retains_original_provenance_and_independent_summary_owner() {
     use crate::messages::BaseMessage;
     use crate::projection::MessageProjectionDirective;

@@ -111,10 +111,23 @@ impl CompactHandoff {
             {
                 return Err("authorization excerpt must originate in a user message".into());
             }
-            if evidence.origin == HandoffOrigin::AssistantClaim
-                && entry.kind != HandoffKind::Finding
-            {
-                return Err("assistant claims cannot establish task contracts".into());
+            match evidence.origin {
+                HandoffOrigin::UserMessage | HandoffOrigin::SystemMessage => {}
+                HandoffOrigin::ToolOutput | HandoffOrigin::Notification => {
+                    if matches!(
+                        entry.kind,
+                        HandoffKind::Goal | HandoffKind::Constraint | HandoffKind::Acceptance
+                    ) {
+                        return Err(
+                            "tool or notification sources cannot establish task contracts".into(),
+                        );
+                    }
+                }
+                HandoffOrigin::AssistantClaim => {
+                    if entry.kind != HandoffKind::Finding {
+                        return Err("assistant claims cannot establish task contracts".into());
+                    }
+                }
             }
             if evidence.origin != HandoffOrigin::ToolOutput
                 && (evidence.tool_call_id.is_some()

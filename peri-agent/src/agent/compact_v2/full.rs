@@ -225,12 +225,15 @@ pub(super) async fn full_compact_inner_with_protected(
     let summary = if has_history {
         let mut budget = SummaryBudget::resolve(llm, config)?;
         let handoff = handoff::HandoffInput::prepare(transcript, &visible)?;
-        let core_budget = (budget.initial_target_tokens() / 2).max(1);
+        let core_budget = budget.initial_target_tokens();
         let reserved = handoff.retained_tokens_estimate()?;
         if reserved > core_budget {
-            return Err(AgentError::CompactSummaryBudgetInvalid {
-                reason: "retained continuity exceeds half the summary target",
-            });
+            // The model may retire entries in this same delta. Rejecting here would
+            // poison a valid large state; finish() re-checks the post-merge core.
+            warn!(
+                reserved,
+                core_budget, "Full Compact retained continuity exceeds the preferred core budget"
+            );
         }
         // Copied excerpts consume context even though the model does not generate them.
         budget.target_tokens = budget
