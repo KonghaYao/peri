@@ -654,3 +654,129 @@ async fn background_cancel_during_handoff_after_acquire_rolls_back_claim() {
         "强制中止后的资源结算未确认，不得放行 owner"
     );
 }
+
+/// 显式 resume 前的真实持久状态：`Done + Stopped`，与旧 bug 留下的
+/// `Active + Stopped` 可区分。
+async fn stopped_fixture(
+    fail_work_state: bool,
+) -> (
+    Arc<ClaimResources>,
+    Arc<WorkStateGate>,
+    Arc<crate::agent::async_tasks::TaskManager>,
+) {
+    let work_gate = Arc::new(WorkStateGate {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+        fail: fail_work_state,
+        writes: AtomicUsize::new(0),
+    });
+    let mut store = ClaimResources::new();
+    Arc::get_mut(&mut store).unwrap().work_state_gate = Some(work_gate.clone());
+    let mut meta = ThreadMeta::new_at("/tmp/work", peri_time::now_wall());
+    meta.id = CHILD.into();
+    meta.agent_status = AgentStatus::Done;
+    meta.work_state = peri_acp_types::thread::WorkState::Stopped;
+    store.inner.create_resumable_thread(meta).await.unwrap();
+    (
+        store,
+        work_gate,
+        Arc::new(crate::agent::async_tasks::TaskManager::new()),
+    )
+}
+
+/// Working 写未完成前不得报告后台启动成功；成功返回时 Working 已落库。
+#[tokio::test]
+async fn resume_persists_working_before_reporting_background_success() {
+    let (store, work_gate, manager) = stopped_fixture(false).await;
+    let mut config = config(store.clone(), manager.clone());
+    // 模型挂起，避免后台 turn 在断言前收尾把 Working 改回终态。
+    config.llm = fixture_source(Arc::new(HangingModel), "fixture");
+    let resume = tokio::spawn(async move { SessionFactory::resume_subagent(None, config).await });
+    work_gate.entered.notified().await;
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!resume.is_finished(), "后台启动成功必须等待 Working 写完成");
+    assert_eq!(
+        store
+            .inner
+            .load_session_meta(&CHILD.into())
+            .await
+            .unwrap()
+            .work_state,
+        peri_acp_types::thread::WorkState::Stopped,
+        "写未放行前磁盘仍是认领前的 Stopped"
+    );
+    work_gate.release.add_permits(1);
+    resume.await.unwrap().unwrap();
+    assert_eq!(
+        store
+            .inner
+            .load_session_meta(&CHILD.into())
+            .await
+            .unwrap()
+            .work_state,
+        peri_acp_types::thread::WorkState::Working,
+        "成功返回时 Working 已提交"
+    );
+    assert_eq!(
+        work_gate.writes.load(Ordering::SeqCst),
+        1,
+        "resume 只写一次 Working，不再依赖 worker 补写"
+    );
+    assert_eq!(manager.active_count(), 1);
+}
+
+/// Working 写失败必须拒绝启动：返回错误、认领状态回滚、不留下可恢复的 Working。
+#[tokio::test]
+async fn resume_working_write_failure_rejects_background_start() {
+    let (store, work_gate, manager) = stopped_fixture(true).await;
+    let starts = Arc::new(AtomicUsize::new(0));
+    let mut config = config(store.clone(), manager.clone());
+    let observed = starts.clone();
+    config.on_subagent_start = Some(Arc::new(move |_, _, _| {
+        observed.fetch_add(1, Ordering::SeqCst);
+    }));
+    let resume = tokio::spawn(async move { SessionFactory::resume_subagent(None, config).await });
+    work_gate.entered.notified().await;
+    work_gate.release.add_permits(1);
+    let error = resume
+        .await
+        .unwrap()
+        .err()
+        .expect("Working 写失败不得报告后台启动成功");
+    assert!(
+        error.to_string().contains("resume work state write failed"),
+        "{error}"
+    );
+    let meta = store.inner.load_session_meta(&CHILD.into()).await.unwrap();
+    assert_eq!(
+        meta.agent_status,
+        AgentStatus::Done,
+        "认领补偿必须恢复到认领前的状态"
+    );
+    assert_eq!(
+        meta.work_state,
+        peri_acp_types::thread::WorkState::Stopped,
+        "失败不得留下 Working"
+    );
+    idle(&manager).await;
+    assert_eq!(manager.active_count(), 0);
+    assert_eq!(starts.load(Ordering::SeqCst), 0, "不得启动执行");
+}
+
+/// 用于阻挡后台 turn 立即收尾：只在运行时被丢弃时结束。
+#[derive(Clone)]
+struct HangingModel;
+
+impl HangingModel {
+    async fn respond(
+        &self,
+        _: peri_model::ModelRequest,
+        _: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        std::future::pending::<()>().await;
+        Vec::new()
+    }
+}
+crate::fixture_model_impl!(HangingModel);

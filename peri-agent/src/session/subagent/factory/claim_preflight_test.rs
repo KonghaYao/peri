@@ -10,6 +10,14 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
+/// 可控 gate：让 Working 写停在「已进入、尚未提交」，或按需失败。
+pub(super) struct WorkStateGate {
+    pub(super) entered: tokio::sync::Notify,
+    pub(super) release: tokio::sync::Semaphore,
+    pub(super) fail: bool,
+    pub(super) writes: AtomicUsize,
+}
+
 struct ClaimResources {
     inner: Arc<MockSessionResources>,
     read_error: Mutex<Option<SessionResourceError>>,
@@ -17,6 +25,7 @@ struct ClaimResources {
     claims: AtomicUsize,
     commit_before_error: bool,
     handoff_gate: Option<Arc<HandoffGate>>,
+    work_state_gate: Option<Arc<WorkStateGate>>,
     terminal_error: bool,
 }
 
@@ -29,6 +38,7 @@ impl ClaimResources {
             claims: AtomicUsize::new(0),
             commit_before_error: false,
             handoff_gate: None,
+            work_state_gate: None,
             terminal_error: false,
         })
     }
@@ -271,6 +281,20 @@ impl SessionResources for ClaimResources {
         id: &ThreadId,
         state: peri_acp_types::thread::WorkState,
     ) -> SessionResourceResult<()> {
+        if state == peri_acp_types::thread::WorkState::Working {
+            if let Some(gate) = &self.work_state_gate {
+                gate.writes.fetch_add(1, Ordering::SeqCst);
+                gate.entered.notify_one();
+                gate.release.acquire().await.unwrap().forget();
+                if gate.fail {
+                    return Err(SessionResourceError::new(
+                        SessionResourceErrorKind::Unavailable {
+                            detail: "work state offline".into(),
+                        },
+                    ));
+                }
+            }
+        }
         self.inner.set_work_state(id, state).await
     }
     async fn delete_session_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
