@@ -34,7 +34,10 @@ try {
     if (positionals.length !== 1 || !['record', 'replay', 'verify'].includes(command) || !values.cassette) throw new Error(usage);
     if (command === 'verify') {
       const cassette = await loadCassette(values.cassette);
-      console.log(JSON.stringify({ passed: true, entries: cassette.entries.size, directory: cassette.directory }));
+      console.log(JSON.stringify({
+        passed: true, entries: cassette.entries.size, directory: cassette.directory,
+        formatVersion: cassette.manifest.formatVersion, legacy: cassette.report?.legacy ?? [],
+      }));
     } else {
       if (!values.run) throw new Error('--run 为必填参数');
       const port = Number(values.port);

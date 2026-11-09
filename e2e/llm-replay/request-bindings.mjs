@@ -4,72 +4,13 @@ import { BindingError } from './binding-error.mjs';
 import { identityKey, parseStrictJson } from './matcher.mjs';
 import { loadCassette, readResponseChunks } from './cassette.mjs';
 import { derivePortableSse, inspectPortableTools } from './portable-sse.mjs';
+import { templateFor } from './template-text.mjs';
 
 const PROTECTED_KEYS = new Set(['signature', 'encrypted_content', 'provider_state', 'providerState', 'reasoning_content', 'thoughtSignature', 'thought_signature']);
 const PROTECTED_TYPES = new Set(['thinking', 'redacted_thinking', 'reasoning', 'redacted_reasoning', 'provider_state']);
 const referenceKey = ({ owner, kind, alias }) => JSON.stringify([owner, kind, alias]);
 const pointerToken = (text) => text.replace(/~/gu, '~0').replace(/\//gu, '~1');
 const fail = (code, message) => { throw new BindingError(code, message); };
-
-const ENV_LINE_LABELS = { date: "Today's date: ", platform: 'Platform: ', os_version: 'OS Version: ' };
-
-/** 只在系统环境段内、带固定标签且以换行结束的值可变；同一文本出现在用户消息或工具结果时不绑定。 */
-function environmentLine(text, offset, value, label) {
-  const after = text[offset + value.length];
-  return text.slice(Math.max(0, offset - label.length), offset) === label &&
-    (!after || after === '\n' || after === '\r') &&
-    text.lastIndexOf('<env>', offset) > text.lastIndexOf('</env>', offset) &&
-    text.indexOf('</env>', offset + value.length) !== -1;
-}
-
-function tokenBoundary(text, offset, binding, source, systemText) {
-  const value = binding[source];
-  const before = text[offset - 1] ?? '';
-  const after = text[offset + value.length] ?? '';
-  if (binding.kind === 'date') {
-    // 日期只有系统环境快照中的这个带标签字段可变；用户日期和工具结果仍严格匹配。
-    return systemText && environmentLine(text, offset, value, ENV_LINE_LABELS.date);
-  }
-  if (binding.kind === 'platform' || binding.kind === 'os_version') {
-    // 宿主平台与补丁版本随 CI 镜像升级变化，不是业务行为；只归一化这两行，其余系统提示严格匹配。
-    return systemText && environmentLine(text, offset, value, ENV_LINE_LABELS[binding.kind]);
-  }
-  if (binding.kind === 'path') {
-    if ((before && /[\p{L}\p{N}_./~+%\-]/u.test(before)) || (after && after !== '/' && /[\p{L}\p{N}_.~+%\-]/u.test(after))) return false;
-    if (after === '/') {
-      const suffix = text.slice(offset + value.length).match(/^[^\s"'`<>()[\]{},;]+/u)?.[0] ?? '';
-      if (path.normalize(value + suffix) !== value + suffix) return false;
-    }
-    return true;
-  }
-  // ID 必须是完整 token；bg-<uuid> 等派生身份需要单独 typed 声明。
-  return !(before && /[\p{L}\p{N}_-]/u.test(before)) && !(after && /[\p{L}\p{N}_-]/u.test(after));
-}
-
-function templateFor(text, bindings, source, systemText) {
-  const candidates = [];
-  for (const binding of bindings) {
-    const value = binding[source];
-    if (typeof value !== 'string') continue;
-    for (let at = text.indexOf(value); at !== -1; at = text.indexOf(value, at + value.length)) {
-      if (tokenBoundary(text, at, binding, source, systemText)) candidates.push({ at, end: at + value.length, binding });
-    }
-  }
-  candidates.sort((left, right) => left.at - right.at || right.end - left.end);
-  const segments = [];
-  let cursor = 0;
-  let found = false;
-  for (const candidate of candidates) {
-    if (candidate.at < cursor) continue;
-    if (candidate.at > cursor) segments.push(text.slice(cursor, candidate.at));
-    segments.push({ kind: candidate.binding.kind, alias: candidate.binding.alias });
-    cursor = candidate.end;
-    found = true;
-  }
-  if (!found) return null;
-  if (cursor < text.length) segments.push(text.slice(cursor));
-  return segments;
-}
 
 /** 录制时只从已绑定身份发现精确字段模板；重放时绝不重新推断可忽略字段。 */
 export function discoverBindingRules(body, { registry, owner = 'world', source = 'live', paths } = {}) {
@@ -81,7 +22,7 @@ export function discoverBindingRules(body, { registry, owner = 'world', source =
     if (typeof value === 'string') {
       if (allowed && !allowed.has(pointer)) return;
       const segments = templateFor(value, bindings, source, systemText);
-      if (segments) rules.push({ path: pointer, mode: 'typed-template', segments });
+      if (segments) rules.push({ path: pointer, mode: 'typed-template', segments, systemText });
     } else if (value && typeof value === 'object') {
       if (PROTECTED_TYPES.has(value.type) || PROTECTED_TYPES.has(value.kind)) return;
       for (const [key, child] of Object.entries(value)) {
