@@ -106,6 +106,8 @@ async fn skill_tool_without_registry_reports_stable_unavailable_message() {
         !message.contains("before_agent") && !message.contains("cache"),
         "不得泄露内部实现串: {message}"
     );
+    assert!(message.contains("does not end an active mode or waive user requirements"));
+    assert!(!message.contains("Continue without skills"));
 }
 
 /// 发现未收口 ⇒ 目录未就绪，不返回假空成功、也不误报 not found（L2）。
@@ -122,6 +124,7 @@ async fn skill_tool_reports_initializing_catalog() {
         "unexpected message: {message}"
     );
     assert!(!message.contains("not found"), "unexpected: {message}");
+    assert!(message.contains("Keep skill-dependent work blocked"));
 }
 
 /// 合法空目录（发现已收口、条目为空）：按 not-found 回答，不谎称未就绪。

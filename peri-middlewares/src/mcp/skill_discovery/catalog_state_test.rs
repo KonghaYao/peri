@@ -55,7 +55,9 @@ async fn assert_failed_catalog(registry: Arc<McpSkillRegistry>) {
         .invoke(serde_json::json!({}), ToolContext::new(&[], "."))
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("reconnect the provider"));
+    assert!(error
+        .to_string()
+        .contains("Reconnect the failed provider to reload the catalog"));
     assert!(!error.to_string().contains("initializing"));
     let skill = SkillTool::new(Some(registry));
     let error = skill
@@ -65,7 +67,9 @@ async fn assert_failed_catalog(registry: Arc<McpSkillRegistry>) {
         )
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("reconnect the provider"));
+    assert!(error
+        .to_string()
+        .contains("Reconnect the failed provider to reload the catalog"));
 }
 
 /// [回归测试] L2：成功空清单与读取失败必须有不同的模型可见结果。

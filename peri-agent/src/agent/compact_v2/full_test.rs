@@ -905,6 +905,9 @@ fn summary_instruction_lists_recovery_resources_before_current_state() {
     assert!(prompt.contains("carry forward recovery items the previous summary left unfinished"));
     assert!(prompt.contains("never merge or omit a recovery item"));
     assert!(prompt.contains("record the user's latest choice"));
+    assert!(prompt.contains("completing one work item does not end a session-wide mode"));
+    assert!(prompt.contains("Distinguish skill activation from body visibility"));
+    assert!(prompt.contains("Preserve an explicit user exit or override"));
 }
 
 #[test]
