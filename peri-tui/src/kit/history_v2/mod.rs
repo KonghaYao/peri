@@ -177,6 +177,15 @@ pub fn publish_initial(state: HistoryV2State) {
     crate::kit::acp_notifier::dispatch_local_events(replayed);
 }
 
+/// initial 失败时写回同一会话已发布的旧窗口；不重放、不发布视图。
+///
+/// 与 [`publish_initial`] 区分：恢复不是新首屏，暂存并入与视图重投影由调用方
+/// 按「状态 → 视图 → 尾部事件」顺序完成，避免把旧窗口误当成候选发布。
+pub(crate) fn restore_published(state: HistoryV2State) {
+    debug_assert_eq!(state.status, HistoryV2Status::Ready);
+    atoms::HISTORY_V2_STATE.set(state);
+}
+
 /// 唯一失败写入点：保留失败事实，状态永不进入 Ready。
 pub fn publish_failure(session_id: &str, failure: HistoryV2Failure) {
     crate::kit::history_v2::live::clear_pending(session_id);

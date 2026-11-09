@@ -1,11 +1,12 @@
 //! H5a 客户端测试：V2 initial 只接纳一次、不回退 V1 open；未协商时旧路径不变。
 
 use super::*;
+use crate::acp_client::AcpNotification;
 use crate::kit::atoms;
 use peri_acp::transport::{
     AcpTransport,
     mpsc::{MpscServerTransport, mpsc_transport_pair},
-    types::{IncomingMessage, RequestId},
+    types::{AcpError, IncomingMessage, RequestId},
 };
 use peri_acp_types::history_v2::{HISTORY_V2_VERSION, HistoryLimits};
 use serde_json::{Value, json};
@@ -408,4 +409,171 @@ async fn new_session_on_v2_connection_completes_without_legacy_window() {
 
     assert_eq!(new_session.await.unwrap().unwrap(), SESSION);
     client.close();
+}
+
+fn live_params(seq: u64, text: &str) -> Value {
+    json!({
+        "sessionId": SESSION,
+        "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": text},
+            "messageId": "m1",
+        },
+        "_meta": {
+            "peri.delivery": {
+                "streamId": "live-1",
+                "deliveryId": format!("live-1:{seq}"),
+                "eventSeq": seq.to_string(),
+            }
+        },
+    })
+}
+
+async fn wait_for_pending(session_id: &str, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while crate::kit::history_v2::live::pending_len(session_id) < expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("live updates must be buffered before the load error runs");
+}
+
+struct FailedInitialOutcome {
+    state: crate::kit::history_v2::HistoryV2State,
+    texts: Vec<String>,
+    pending_after: usize,
+}
+
+/// 真实客户端 + notifier：旧窗口已发布，initial 期间两条旧流更新先进入暂存，
+/// 随后 load 返回错误。返回失败收敛后的窗口状态与重放出的文本。
+async fn run_failed_initial_with_buffered_old_stream(
+    capable_atom: bool,
+    observe_local: bool,
+) -> FailedInitialOutcome {
+    atoms::HISTORY_V2_CAPABLE.set(capable_atom);
+    let previous = crate::kit::history_v2::initial::admit_load_response(
+        &initial_response_with_item(),
+        SESSION,
+        peri_acp_types::history_v2::DecimalU64::new(1),
+        &HistoryLimits::default(),
+    )
+    .expect("previous window admitted");
+    crate::kit::history_v2::publish_initial(previous.clone());
+
+    // LOCAL_EVENT_TX 是进程级 OnceLock：安装成功才做事件级断言，已被其他串行
+    // 用例占用时仍以窗口状态验证接纳结果。
+    let (local_tx, mut local_rx) = tokio::sync::mpsc::unbounded_channel();
+    let observe_local = observe_local && atoms::LOCAL_EVENT_TX.set(local_tx).is_ok();
+
+    let (transport, server) = mpsc_transport_pair();
+    let (client, notification_tx, notification_rx) = AcpTuiClient::new_interactive(transport);
+    install_v2(&client, true);
+    let (bridge_tx, _bridge_rx) = tokio::sync::mpsc::channel(8);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let notifier =
+        crate::kit::acp_notifier::spawn_kit_notifier(notification_rx, bridge_tx, shutdown.clone());
+
+    let loader = client.clone();
+    let load = tokio::spawn(async move { loader.load_session(SESSION, "/tmp", None).await });
+
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/load");
+    // 候选期间服务端暂停 live 并缓冲；客户端此时仍登记着 pending，通知先到。
+    notification_tx
+        .send(AcpNotification::SessionUpdate {
+            session_id: SESSION.into(),
+            params: live_params(1, "a"),
+        })
+        .await
+        .unwrap();
+    notification_tx
+        .send(AcpNotification::SessionUpdate {
+            session_id: SESSION.into(),
+            params: live_params(2, "b"),
+        })
+        .await
+        .unwrap();
+    wait_for_pending(SESSION, 2).await;
+
+    // initial 失败：服务端先发错误，再把候选期事件补回旧流。
+    server
+        .send_response(id, Err(AcpError::new(-32603, "initial failed")))
+        .await
+        .unwrap();
+    assert!(load.await.unwrap().is_err());
+
+    let state = crate::kit::history_v2::snapshot();
+    let pending_after = crate::kit::history_v2::live::pending_len(SESSION);
+    let mut texts = Vec::new();
+    if observe_local {
+        while let Ok(event) = local_rx.try_recv() {
+            if let crate::kit::acp_types::AcpEventData::TextChunk(chunk) = event.event {
+                texts.push(chunk.text);
+            }
+        }
+    }
+
+    notifier.abort();
+    shutdown.cancel();
+    client.close();
+    FailedInitialOutcome {
+        state,
+        texts,
+        pending_after,
+    }
+}
+
+fn assert_failed_initial_replayed(outcome: &FailedInitialOutcome) {
+    let state = &outcome.state;
+    assert!(state.is_ready(), "旧窗口必须保留: {state:?}");
+    assert_eq!(
+        state.window().map(|window| window.window_id.as_str()),
+        Some("w1")
+    );
+    let live = &state.window().unwrap().paging.live;
+    assert_eq!(
+        live.last_applied_seq,
+        Some(peri_acp_types::history_v2::DecimalU64::new(2)),
+        "补发更新必须按序并入旧窗口"
+    );
+    assert_eq!(live.gap, None, "连续补发不得被判为缺口");
+    assert!(!live.detached);
+    assert_eq!(outcome.pending_after, 0, "恢复后暂存必须清空");
+    assert!(
+        crate::kit::history_v2::live::take_pending(SESSION).is_empty(),
+        "恢复后后续事件才能直发"
+    );
+}
+
+/// P1：initial 失败前进入暂存的旧流补发，必须在错误分支按 seq 并入旧窗口并渲染。
+///
+/// 只清空暂存会让旧窗口静默缺尾部；下一次更大序号被接纳时才会暴露为 gap。
+/// 生产交互路径（V2 协商成功）在 load 起点会清空 V2 状态，旧窗口快照必须早于
+/// 会话边界，失败后才能恢复窗口并重放暂存。
+#[tokio::test]
+#[serial]
+async fn failed_initial_replays_buffered_old_stream_updates_in_order() {
+    let _guard = prepare();
+    atoms::init_atoms();
+    let outcome = run_failed_initial_with_buffered_old_stream(true, true).await;
+    assert_failed_initial_replayed(&outcome);
+    if !outcome.texts.is_empty() {
+        assert_eq!(
+            outcome.texts,
+            vec!["a", "b"],
+            "补发更新必须恰好一次、按序渲染"
+        );
+    }
+}
+
+/// 同一回归的保留窗口路径：会话边界未清空 V2 状态时（atom 未标记能力），旧窗口
+/// 在失败前一直可见；暂存仍必须并入而不是被 `clear_pending` 静默丢弃。
+#[tokio::test]
+#[serial]
+async fn failed_initial_with_retained_window_replays_pending_updates() {
+    let _guard = prepare();
+    atoms::init_atoms();
+    let outcome = run_failed_initial_with_buffered_old_stream(false, false).await;
+    assert_failed_initial_replayed(&outcome);
 }

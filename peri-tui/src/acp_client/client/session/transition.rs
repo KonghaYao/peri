@@ -10,22 +10,31 @@ use super::guards::{PreparingSessionGuard, SessionProjectionGuard};
 
 /// initial 失败时收敛投影。
 ///
-/// 同会话的旧窗口仍然有效：保留 load 起点已投影的会话边界，并把已发布状态重新
-/// 送入桥接视图（`notify_view` 只读状态，不修改交付身份）。跨会话失败不恢复旧
-/// 视图；没有可恢复窗口时退回空边界。
+/// 同会话的旧窗口仍然有效：先把它在 initial 期间暂存的旧流补发按 seq 并入窗口，
+/// 再把恢复后的状态重新送入桥接视图（`notify_view` 只读状态，不修改交付身份）。
+/// 暂存不并入就清空会让旧窗口静默缺尾部，下一次更大序号才暴露为 gap。跨会话失败
+/// 不恢复旧视图；没有可恢复窗口时丢弃暂存并退回空边界。
 fn settle_failed_initial_projection(
     projection: &mut SessionProjectionGuard<'_>,
     previous_v2: &crate::kit::history_v2::HistoryV2State,
     session_id: &str,
 ) -> bool {
     let restore = previous_v2.is_ready() && previous_v2.session_id.as_deref() == Some(session_id);
-    if projection.client.projection_mode == ClientProjectionMode::Interactive {
-        if restore {
+    if restore {
+        let mut restored = previous_v2.clone();
+        let events = crate::kit::acp_notifier::replay_pending_into(&mut restored);
+        // 恢复后的高水位必须写回 atom，失败后的实时事件才能继续按连续序号接纳。
+        crate::kit::history_v2::restore_published(restored.clone());
+        if projection.client.projection_mode == ClientProjectionMode::Interactive {
             // 明确恢复边界为同一目标会话；不递增 reset，桥接任务会先应用
             // load 起点的 reset，再按 active_session_id 接收这条重投影事件。
             crate::kit::atoms::ACTIVE_SESSION_ID.set(session_id.to_owned());
-            crate::kit::history_v2::consumer::notify_view(previous_v2);
-        } else {
+            crate::kit::history_v2::consumer::notify_view(&restored);
+            crate::kit::acp_notifier::dispatch_local_events(events);
+        }
+    } else {
+        crate::kit::history_v2::live::clear_pending(session_id);
+        if projection.client.projection_mode == ClientProjectionMode::Interactive {
             crate::kit::session_boundary::project_session_boundary(None);
             crate::kit::history_v2::consumer::reset_consumer_state();
         }
@@ -238,6 +247,9 @@ impl AcpTuiClient {
             )
             .map_err(|message| AcpError::new(-32603, message))?;
         let transition = self.lifecycle.arm_transition(start.generation);
+        // initial 是窗口替换的候选：候选发布前不撤销旧窗口状态/交付身份。快照必须在
+        // 会话边界之前——边界的 V2 清理会关闭并清空当前窗口，之后再取就无从恢复。
+        let previous_v2 = crate::kit::history_v2::snapshot();
         let mut projection = SessionProjectionGuard {
             client: self,
             committed: false,
@@ -275,7 +287,6 @@ impl AcpTuiClient {
         }
 
         // initial 是窗口替换的候选：在接纳并发布前不撤销旧窗口状态/交付身份。
-        let previous_v2 = crate::kit::history_v2::snapshot();
         let history_v2 = self.history_v2_active();
         let limits = self.history_v2_limits();
         if history_v2 {
@@ -327,18 +338,14 @@ impl AcpTuiClient {
         let loaded = match loaded {
             Ok(loaded) => loaded,
             Err(error) => {
-                if history_v2 {
-                    crate::kit::history_v2::live::clear_pending(session_id);
-                }
                 *self.restore_error.lock().unwrap() = Some(error.to_string());
                 self.lifecycle.fail_transition(start.generation);
                 transition.disarm();
-                if self.projection_mode == ClientProjectionMode::Interactive {
-                    if history_v2 {
-                        settle_failed_initial_projection(&mut projection, &previous_v2, session_id);
-                    } else {
-                        crate::kit::session_boundary::project_session_boundary(None);
-                    }
+                if history_v2 {
+                    // 失败前已进入暂存的旧流补发必须先并入旧窗口，不能直接清空。
+                    settle_failed_initial_projection(&mut projection, &previous_v2, session_id);
+                } else if self.projection_mode == ClientProjectionMode::Interactive {
+                    crate::kit::session_boundary::project_session_boundary(None);
                 }
                 return Err(error);
             }
@@ -353,7 +360,6 @@ impl AcpTuiClient {
             ) {
                 Ok(state) => state,
                 Err(error) => {
-                    crate::kit::history_v2::live::clear_pending(session_id);
                     let acp = AcpError::new(-32603, error.to_string()).with_data(json!({
                         "kind": "history_initial_invalid",
                         "reason": error.reason.to_string(),
@@ -361,9 +367,9 @@ impl AcpTuiClient {
                     *self.restore_error.lock().unwrap() = Some(acp.to_string());
                     self.lifecycle.fail_transition(start.generation);
                     transition.disarm();
-                    if self.projection_mode == ClientProjectionMode::Interactive {
-                        settle_failed_initial_projection(&mut projection, &previous_v2, session_id);
-                    }
+                    // 服务端已提交候选流；暂存里的新流事件会因 stream 不匹配被丢弃，
+                    // 但旧窗口若仍有效，仍允许同流暂存并回并恢复视图。
+                    settle_failed_initial_projection(&mut projection, &previous_v2, session_id);
                     // 旧窗口仍 Ready 时保留已发布状态与 live/delivery 身份；候选失败
                     // 不得覆盖它。没有旧窗口时才写入失败事实。
                     if !previous_v2.is_ready() {

@@ -161,9 +161,11 @@ fn duplicate_buffered_notification_renders_once() {
     );
 }
 
+/// 显式失效路径（旧窗口不可恢复）仍直接丢弃暂存；可恢复路径由
+/// `replay_pending_into` 在客户端失败分支按序并回旧窗口。
 #[test]
 #[serial]
-fn failed_initial_clears_the_buffer_without_replay() {
+fn invalidated_initial_still_drops_pending_without_replay() {
     let _guard = setup();
     let state = admitted();
     atoms::HISTORY_V2_STATE.set(state.clone());
@@ -172,7 +174,40 @@ fn failed_initial_clears_the_buffer_without_replay() {
     live::clear_pending("s1");
 
     assert!(replay_pending_initial(&state).is_empty());
+    assert!(live::take_pending("s1").is_empty());
+}
+
+/// 失败恢复：暂存按 seq 并入旧窗口后恰好渲染一次，高水位推进且无缺口。
+#[test]
+#[serial]
+fn replay_pending_into_restores_old_window_once_in_order() {
+    let _guard = setup();
+    let state = admitted();
+    atoms::HISTORY_V2_STATE.set(state.clone());
+    live::begin_pending("s1");
+    buffered(&state, 122, "b");
+    buffered(&state, 121, "a");
+
+    let mut restored = state.clone();
+    let events = replay_pending_into(&mut restored);
+    assert_eq!(texts(&events), vec!["a", "b"]);
+    let window = restored.window().unwrap();
+    assert_eq!(
+        window.paging.live.last_applied_seq,
+        Some(peri_acp_types::history_v2::DecimalU64::new(122))
+    );
+    assert_eq!(window.paging.live.gap, None);
+    assert!(!window.paging.live.detached);
     assert!(!live::is_pending("s1"));
+
+    assert!(
+        replay_pending_into(&mut restored).is_empty(),
+        "第二次恢复不得重复渲染"
+    );
+    assert_eq!(
+        restored.window().unwrap().paging.live.last_applied_seq,
+        Some(peri_acp_types::history_v2::DecimalU64::new(122))
+    );
 }
 
 #[test]

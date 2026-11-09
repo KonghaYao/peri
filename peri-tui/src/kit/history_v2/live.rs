@@ -14,7 +14,7 @@ use std::sync::{Mutex, MutexGuard};
 use peri_acp_types::history_v2::{DecimalU64, HistoryLiveBoundary};
 use serde_json::Value;
 
-use super::HistoryV2Window;
+use super::{HistoryV2State, HistoryV2Window};
 use crate::kit::atoms;
 
 /// 首屏暂存上限：条数与序列化字节数取先到者（设计 §6.4、§10.5）。
@@ -330,11 +330,52 @@ pub(crate) fn take_pending(session_id: &str) -> Vec<(DeliveryMeta, Value)> {
         .collect()
 }
 
-/// 丢弃该会话的暂存（load 失败/切换/关闭）。
+/// 丢弃该会话的暂存（切换/关闭/旧窗口不可恢复）。
 pub(crate) fn clear_pending(session_id: &str) {
     if let Some(store) = pending_lock().as_mut() {
         store.sessions.remove(session_id);
     }
+}
+
+/// initial 失败时把暂存按 seq 并入仍有效的旧窗口，返回被接纳的原始通知。
+///
+/// 服务端在 initial 失败后先发错误响应、再把候选期更新补回旧流；这些通知可能先
+/// 于错误分支被接纳门放进暂存。只有与旧窗口同 stream 且连续的更新才能并入；
+/// 缺口由 `accept_live_event` 显式记账，调用方据此重投影 gap/detached。
+/// 窗口不可用时暂存整体丢弃，由调用方使旧视图失效。
+pub(crate) fn take_pending_into(state: &mut HistoryV2State) -> Vec<(DeliveryMeta, Value)> {
+    let Some(session_id) = state.session_id.clone() else {
+        return Vec::new();
+    };
+    let Some(stream_id) = state
+        .window
+        .as_ref()
+        .and_then(|window| window.paging.live.stream_id.clone())
+    else {
+        take_pending(&session_id);
+        return Vec::new();
+    };
+    let Some(window) = state.window.as_mut() else {
+        return Vec::new();
+    };
+    take_pending(&session_id)
+        .into_iter()
+        .filter(|(meta, _)| meta.stream_id == stream_id)
+        .filter(|(meta, _)| {
+            matches!(
+                window.accept_live_event(&stream_id, meta.seq),
+                HistoryV2LiveAdmission::Accepted { .. }
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn pending_len(session_id: &str) -> usize {
+    pending_lock()
+        .as_ref()
+        .and_then(|store| store.sessions.get(session_id))
+        .map_or(0, |pending| pending.updates.len())
 }
 
 /// 进程级兜底：会话边界重置时清空所有暂存，避免跨会话泄漏。

@@ -367,6 +367,23 @@ async fn handle_session_update(
     }
 }
 
+/// initial 失败恢复旧窗口时，把暂存按 seq 并入该窗口并解码为 bridge 事件。
+///
+/// 与 [`replay_pending_initial`] 的区别：这里直接修改调用方持有的已发布旧窗口，
+/// 不读取也不发布 atom；调用方负责先把恢复后的状态送回视图，再发送返回的事件，
+/// 保持「视图先于尾部事件」的既有顺序。重复调用不会重复渲染（暂存已取走）。
+pub(crate) fn replay_pending_into(
+    state: &mut crate::kit::history_v2::HistoryV2State,
+) -> Vec<AcpEventWithEpoch> {
+    let Some(session_id) = state.session_id.clone() else {
+        return Vec::new();
+    };
+    crate::kit::history_v2::live::take_pending_into(state)
+        .into_iter()
+        .flat_map(|(_, params)| decode_live_update(&params, &session_id))
+        .collect()
+}
+
 /// initial 发布或 open 接纳后重放暂存的 live 更新。
 ///
 /// 只重放与当前窗口 `paging.live.streamId` 相同的 stream；每条先走与实时路径相同
