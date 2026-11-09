@@ -212,3 +212,97 @@ fn close_all_discards_every_stream() {
     assert!(!live.has_stream("s1"));
     assert!(!live.has_stream("s2"));
 }
+
+#[test]
+fn candidate_keeps_old_stream_identity_and_buffers_independently() {
+    let live = LiveDelivery::new();
+    let first = live.begin("s1");
+    live.resume_and_take("s1");
+    let PublishOutcome::Send(payload) = live.publish("s1", text_payload("one")) else {
+        panic!("活动流直发");
+    };
+    assert_eq!(delivery(&payload)["eventSeq"], "1");
+
+    let candidate = live.begin_candidate("s1");
+    assert!(live.has_candidate("s1"));
+    assert_eq!(
+        candidate.boundary.after_seq.get(),
+        1,
+        "候选沿用已发出的最后序号"
+    );
+    assert!(
+        live.has_stream_with_id("s1", &first.stream_id),
+        "候选未提交前旧流身份不变"
+    );
+    assert!(!live.is_paused("s1"), "旧流仍按原状态直发");
+
+    // 候选期间的事件进入候选缓冲，不推进旧流。
+    assert!(matches!(
+        live.publish("s1", text_payload("two")),
+        PublishOutcome::Buffered
+    ));
+    assert_eq!(live.candidate_buffered_len("s1"), 1);
+    assert_eq!(live.buffered_len("s1"), 0);
+
+    assert!(live.abort_candidate("s1", &candidate.candidate_id));
+    assert!(!live.has_candidate("s1"));
+    assert!(live.has_stream_with_id("s1", &first.stream_id));
+
+    // 旧流序号未被候选消耗：下一条仍是 2。
+    let PublishOutcome::Send(payload) = live.publish("s1", text_payload("three")) else {
+        panic!("活动流直发");
+    };
+    assert_eq!(delivery(&payload)["eventSeq"], "2");
+    assert_eq!(delivery(&payload)["streamId"], first.stream_id.as_str());
+}
+
+#[test]
+fn commit_candidate_replaces_stream_and_flushes_candidate_buffer() {
+    let live = LiveDelivery::new();
+    let first = live.begin("s1");
+    live.resume_and_take("s1");
+    assert!(matches!(
+        live.publish("s1", text_payload("one")),
+        PublishOutcome::Send(_)
+    ));
+
+    let candidate = live.begin_candidate("s1");
+    assert!(matches!(
+        live.publish("s1", text_payload("buffered")),
+        PublishOutcome::Buffered
+    ));
+    assert!(live.commit_candidate("s1", &candidate.candidate_id));
+    assert!(!live.has_candidate("s1"));
+    assert!(!live.has_stream_with_id("s1", &first.stream_id));
+    assert!(live.has_stream_with_id("s1", &candidate.boundary.stream_id));
+    assert!(live.is_paused("s1"), "提交后的候选等待 load 响应发送再恢复");
+
+    let pending = live.resume_and_take("s1");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        delivery(&pending[0])["streamId"],
+        candidate.boundary.stream_id.as_str()
+    );
+    assert_eq!(delivery(&pending[0])["eventSeq"], "2");
+
+    // 已提交的候选不能再提交/回收。
+    assert!(!live.commit_candidate("s1", &candidate.candidate_id));
+    assert!(!live.abort_candidate("s1", &candidate.candidate_id));
+}
+
+#[test]
+fn close_discards_candidate_and_old_stream() {
+    let live = LiveDelivery::new();
+    live.begin("s1");
+    let candidate = live.begin_candidate("s1");
+    live.close("s1");
+    assert!(!live.has_candidate("s1"));
+    assert!(!live.has_stream("s1"));
+    assert!(!live.commit_candidate("s1", &candidate.candidate_id));
+
+    let payload = text_payload("after-close");
+    let PublishOutcome::Send(sent) = live.publish("s1", payload.clone()) else {
+        panic!("关闭后必须透传");
+    };
+    assert_eq!(sent, payload);
+}

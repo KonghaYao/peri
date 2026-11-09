@@ -94,6 +94,7 @@ pub fn initial_request_value(
 pub fn admit_load_response(
     response: &Value,
     expected_session: &str,
+    expected_request_key: peri_acp_types::history_v2::DecimalU64,
     limits: &HistoryLimits,
 ) -> Result<HistoryV2State, InitialAdmissionError> {
     let meta = response
@@ -125,6 +126,14 @@ pub fn admit_load_response(
     initial.validate().map_err(|error| {
         InitialAdmissionError::new(InitialRejection::Invalid, error.to_string())
     })?;
+    // 首屏必须回显本次 session/load 的 requestKey；否则无法确认响应属于当前
+    // 候选，不能把另一请求的结果提交为 Stable。
+    if initial.request_key != expected_request_key {
+        return Err(InitialAdmissionError::new(
+            InitialRejection::Invalid,
+            "initial requestKey does not match the sent request",
+        ));
+    }
     validate_page(&initial.page, expected_session, limits)?;
 
     let page = &initial.page;
@@ -184,7 +193,13 @@ fn reject_mixed_fields(
     response: &Value,
     meta: &serde_json::Map<String, Value>,
 ) -> Result<(), InitialAdmissionError> {
-    for legacy in ["snapshotToken", "nextCursor"] {
+    for legacy in [
+        "snapshotToken",
+        "nextCursor",
+        "cursor",
+        "loadGeneration",
+        "history",
+    ] {
         if response.get(legacy).is_some() {
             return Err(InitialAdmissionError::new(
                 InitialRejection::MixedFields,
@@ -285,8 +300,6 @@ pub fn admit_open_response(
     paging.status = HistoryV2PagingStatus::Ready;
     paging.last_error = None;
     paging.last_request_key = Some(request_key);
-    paging.bodies.clear();
-    paging.retained_body_bytes = 0;
     paging.retention = HistoryV2Retention::for_limits(limits);
 
     Ok(HistoryV2State {

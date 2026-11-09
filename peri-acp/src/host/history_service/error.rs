@@ -141,6 +141,18 @@ impl ServiceFailure {
         )
     }
 
+    /// 在途读配额饱和（FIX-04）：准入已完成但未取得执行槽位。
+    ///
+    /// 该失败可立即用同一 requestKey 重试；服务端不会排队等待，避免接收循环被
+    /// 饱和的历史读取拖住。
+    pub(super) fn busy() -> Self {
+        Self::new(
+            HistoryErrorReason::CapacityExceeded,
+            HistoryRecovery::Retry,
+            "History read capacity is saturated; retry the request",
+        )
+    }
+
     pub(super) fn budget_exceeded() -> Self {
         Self::new(
             HistoryErrorReason::BudgetExceeded,

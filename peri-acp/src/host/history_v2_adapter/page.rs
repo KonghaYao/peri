@@ -1,9 +1,9 @@
 //! page/seek 的跨区组合与有界正文读取。
 
+use peri_acp_types::history_common::{HistorySource as WindowSource, HistoryWindowDirection};
 use peri_acp_types::history_v2::{
     HistoryBackendError, HistoryDirection, HistoryEntryAnchor, HistoryPageData, HistorySnapshotRef,
 };
-use peri_acp_types::history_window::{HistorySource as WindowSource, HistoryWindowDirection};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     HistoryWindowPagePlan, HistoryWindowReadIntent, HistoryWindowTailExpectation,
@@ -39,7 +39,7 @@ impl HistoryV2BackendAdapter {
             tail,
         );
         let own_rows = self.load_rows(thread_id, &plan).await?;
-        let own = self.own_view(thread_id, own_rows).await;
+        let own = self.own_view(thread_id, own_rows).await?;
         let own_oldest = own.oldest;
 
         // 只有 before 方向会在 own 头之后继续进入 inherited；after 方向 own 已是逻辑尾部。
@@ -64,7 +64,7 @@ impl HistoryV2BackendAdapter {
                             budget,
                         );
                         let rows = self.load_rows(thread_id, &plan).await?;
-                        let view = self.inherited_view(thread_id, &source, rows).await;
+                        let view = self.inherited_view(thread_id, &source, rows).await?;
                         Some((source, view))
                     }
                 }
@@ -145,7 +145,7 @@ impl HistoryV2BackendAdapter {
             None,
         );
         let rows = self.load_rows(thread_id, &plan).await?;
-        let view = self.inherited_view(thread_id, source, rows).await;
+        let view = self.inherited_view(thread_id, source, rows).await?;
         let view_before = view.before_anchor;
         let view_after = view.after_anchor;
         let view_newest = view.newest;
@@ -173,7 +173,7 @@ impl HistoryV2BackendAdapter {
                         )?),
                     };
                     let rows = self.load_rows(thread_id, &plan).await?;
-                    Some(self.own_view(thread_id, rows).await)
+                    Some(self.own_view(thread_id, rows).await?)
                 }
                 _ => None,
             }
@@ -242,7 +242,7 @@ impl HistoryV2BackendAdapter {
             tail,
         );
         let own_rows = self.load_rows(thread_id, &plan).await?;
-        let own = self.own_view(thread_id, own_rows).await;
+        let own = self.own_view(thread_id, own_rows).await?;
         let inherited_present = if own.before_more {
             false
         } else {
@@ -291,7 +291,7 @@ impl HistoryV2BackendAdapter {
             target_bytes(snapshot)?,
         );
         let rows = self.load_rows(thread_id, &plan).await?;
-        let view = self.inherited_view(thread_id, source, rows).await;
+        let view = self.inherited_view(thread_id, source, rows).await?;
         let before_cursor = view
             .before_anchor
             .map(|entry_id| encode_inherited_ref(source, entry_id));

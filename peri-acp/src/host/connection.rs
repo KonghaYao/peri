@@ -24,6 +24,10 @@ pub(crate) struct ConnectionContext {
     pub(crate) history_v2: std::sync::Arc<super::history_service::HistoryV2Service>,
     /// 本连接的实时投递注册表（按会话索引；连接关闭时整体清理）。
     pub(crate) live: std::sync::Arc<super::live_delivery::LiveDelivery>,
+    /// 测试专用历史后端注入点；生产连接恒为 `None`（`#[cfg(test)]`，不进入 API）。
+    #[cfg(test)]
+    pub(crate) history_v2_backend_override:
+        Option<std::sync::Arc<dyn peri_acp_types::history_v2::HistoryV2Backend>>,
     cancellation: tokio_util::sync::CancellationToken,
 }
 
@@ -38,6 +42,8 @@ impl ConnectionContext {
             acp_mcp: Default::default(),
             history_v2: std::sync::Arc::new(super::history_service::HistoryV2Service::system()),
             live: std::sync::Arc::new(super::live_delivery::LiveDelivery::new()),
+            #[cfg(test)]
+            history_v2_backend_override: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -137,8 +143,25 @@ impl ConnectionContext {
             acp_mcp: self.acp_mcp.clone(),
             history_v2: self.history_v2.clone(),
             live: self.live.clone(),
+            #[cfg(test)]
+            history_v2_backend_override: self.history_v2_backend_override.clone(),
             cancellation: self.cancellation.clone(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_history_v2_backend_override(
+        &mut self,
+        backend: std::sync::Arc<dyn peri_acp_types::history_v2::HistoryV2Backend>,
+    ) {
+        self.history_v2_backend_override = Some(backend);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn history_v2_backend_for_test(
+        &self,
+    ) -> Option<std::sync::Arc<dyn peri_acp_types::history_v2::HistoryV2Backend>> {
+        self.history_v2_backend_override.clone()
     }
 
     pub(crate) fn cancellation(&self) -> tokio_util::sync::CancellationToken {

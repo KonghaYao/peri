@@ -754,3 +754,7 @@ async fn register_session_with_workflow(
         },
     );
 }
+
+// History V2 的真实 SQLite / wire 夹具与其子模块。
+#[path = "history_v2_test_fixture.rs"]
+mod history_v2_test_fixture;

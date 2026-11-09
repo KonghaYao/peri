@@ -1,5 +1,6 @@
 //! H5c：V2 请求触发/结算与失败恢复（纯 reducer，不发行 RPC）。
 
+use peri_acp::transport::AcpTransport;
 use peri_acp_types::history_v2::{
     HISTORY_V2_VERSION, HistoryDirection, HistoryEntryAnchor, HistoryErrorReason, HistoryLimits,
     HistoryRecovery, HistoryWindowPage,
@@ -18,31 +19,38 @@ struct AtomGuard;
 
 impl Drop for AtomGuard {
     fn drop(&mut self) {
-        atoms::HISTORY_V2.set(false);
         atoms::HISTORY_V2_CAPABLE.set(false);
-        atoms::HISTORY_WINDOW_V1.set(false);
-        atoms::HISTORY_WINDOW_CAPABLE.set(false);
         atoms::HISTORY_V2_STATE.set(HistoryV2State::default());
+        *atoms::HISTORY_V2_TX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         reset_consumer_state();
     }
 }
 
-/// H5c 的触发测试共用一条队列；`OnceLock` 只能安装一次，接收端随模块存活到进程结束。
-static TEST_RX: std::sync::Mutex<
-    Option<tokio::sync::mpsc::UnboundedReceiver<HistoryV2ConsumerRequest>>,
-> = std::sync::Mutex::new(None);
+/// H5c 的触发测试共用一条队列；每个串行用例安装自己的出站调度通道。
+static TEST_RX: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<OutboundCommand>>> =
+    std::sync::Mutex::new(None);
 
 fn test_channel() {
-    if atoms::HISTORY_V2_TX.get().is_some() {
-        return;
-    }
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let _ = atoms::HISTORY_V2_TX.set(tx);
+    *atoms::HISTORY_V2_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tx);
     *TEST_RX.lock().unwrap() = Some(rx);
 }
 
-fn next_request() -> Option<HistoryV2ConsumerRequest> {
+fn next_request() -> Option<OutboundCommand> {
     TEST_RX.lock().unwrap().as_mut()?.try_recv().ok()
+}
+
+fn next_window_request() -> Option<HistoryV2ConsumerRequest> {
+    match next_request()? {
+        OutboundCommand::Request(request) => Some(request),
+        OutboundCommand::Body { .. } | OutboundCommand::Load { .. } => {
+            panic!("expected a window request")
+        }
+    }
 }
 
 fn drain_requests() {
@@ -106,7 +114,13 @@ fn initial_value() -> Value {
 }
 
 fn admitted() -> HistoryV2State {
-    admit_load_response(&initial_value(), "s1", &HistoryLimits::default()).expect("admitted")
+    admit_load_response(
+        &initial_value(),
+        "s1",
+        DecimalU64::new(1),
+        &HistoryLimits::default(),
+    )
+    .expect("admitted")
 }
 
 fn page(value: Value) -> HistoryWindowPage {
@@ -119,7 +133,6 @@ fn publish(state: &HistoryV2State) {
 
 fn atomics_guard() -> AtomGuard {
     atoms::init_atoms();
-    atoms::HISTORY_V2.set(true);
     atoms::HISTORY_V2_CAPABLE.set(true);
     atoms::HISTORY_V2_LIMITS.set(HistoryLimits::default());
     atoms::HISTORY_V2_STATE.set(HistoryV2State::default());
@@ -138,7 +151,7 @@ fn close_request_uses_window_identity_without_faking_closed_state() {
     publish(&state);
 
     assert!(request_close_current());
-    let close = next_request().expect("close request enqueued");
+    let close = next_window_request().expect("close request enqueued");
     let HistoryV2ConsumerRequest::Close {
         session_id,
         window_id,
@@ -183,7 +196,7 @@ fn new_session_open_latest_builds_first_window_and_page_is_usable() {
     atoms::HISTORY_V2_STATE.set(HistoryV2State::default());
 
     assert!(request_open_latest("s2"), "新会话必须请求首个窗口");
-    let open = next_request().expect("open request enqueued");
+    let open = next_window_request().expect("open request enqueued");
     let HistoryV2ConsumerRequest::Open {
         session_id,
         request_key,
@@ -230,11 +243,6 @@ fn open_latest_is_not_enqueued_without_active_v2() {
     test_channel();
     drain_requests();
 
-    atoms::HISTORY_V2.set(false);
-    assert!(!request_open_latest("s1"), "beta 关闭时不发 open");
-    assert!(next_request().is_none());
-
-    atoms::HISTORY_V2.set(true);
     atoms::HISTORY_V2_CAPABLE.set(false);
     assert!(!request_open_latest("s1"), "未协商时不发 open");
     assert!(next_request().is_none());
@@ -346,15 +354,30 @@ fn window_expiry_requires_reopen_and_reopen_enqueues_open() {
     publish(&state);
 
     assert!(request_reopen(false), "窗口失效后必须允许重新 open");
-    assert!(matches!(
-        next_request(),
-        Some(HistoryV2ConsumerRequest::Close { .. })
-    ));
-    let open = next_request().expect("open request enqueued");
-    assert!(matches!(open, HistoryV2ConsumerRequest::Open { .. }));
-    assert_eq!(open.params(&limits)["action"], json!("open"));
-    // 原在途 open 标志不允许重复入队。
-    assert!(!request_reopen(true));
+    let Some(HistoryV2ConsumerRequest::Open { request_key, .. }) = next_window_request() else {
+        panic!("重开必须先发送 Open");
+    };
+    assert!(next_request().is_none(), "新窗口被接纳前不得关闭旧窗口");
+
+    // 模拟消费者：Open 响应通过准入后才释放旧窗口身份。
+    release_open_for("s1", request_key);
+    let mut reopened_page = page_json(Some("before-9"), json!([item("e9", 9, "reopened")]));
+    reopened_page["windowId"] = json!("w2");
+    reopened_page["snapshotToken"] = json!("snapshot-2");
+    reopened_page["readTicket"] = json!("ticket-2");
+    let old = settle_open(&mut state, "s1", request_key, &page(reopened_page), &limits)
+        .expect("旧窗口必须在接纳后返回");
+    assert!(request_close_window(old));
+    let Some(HistoryV2ConsumerRequest::Close {
+        window_id,
+        snapshot_token,
+        ..
+    }) = next_window_request()
+    else {
+        panic!("接纳成功后必须关闭旧窗口");
+    };
+    assert_eq!(window_id, "w1");
+    assert_eq!(snapshot_token, "snapshot-1");
 }
 
 #[test]
@@ -432,7 +455,7 @@ fn discard_only_failure_keeps_page_and_clears_claim() {
 
 #[test]
 #[serial]
-fn request_keys_are_strictly_increasing_across_initial_and_pages() {
+fn seed_only_raises_the_allocator_high_watermark() {
     let _guard = atomics_guard();
     reset_request_key_for_test();
     let initial = next_request_key();
@@ -464,21 +487,15 @@ fn open_params_carry_no_window_identity() {
 
 #[test]
 #[serial]
-fn after_page_request_uses_after_cursor_and_v1_path_stays_disabled() {
+fn after_page_request_uses_after_cursor() {
     let _guard = atomics_guard();
-    atoms::HISTORY_WINDOW_V1.set(true);
-    atoms::HISTORY_WINDOW_CAPABLE.set(true);
     test_channel();
     drain_requests();
     let state = admitted();
     publish(&state);
 
-    assert!(
-        !crate::kit::history_page_consumer::window_path_enabled(),
-        "V2 激活时 V1 窗口队列必须关闭"
-    );
     assert!(request_newer_page_if_due());
-    let Some(HistoryV2ConsumerRequest::Page(request)) = next_request() else {
+    let Some(HistoryV2ConsumerRequest::Page(request)) = next_window_request() else {
         panic!("after 方向必须进入 V2 reducer 的页请求");
     };
     assert_eq!(request.direction, HistoryDirection::After);
@@ -516,7 +533,7 @@ fn gap_trigger_seeks_the_nearest_retained_entry() {
     publish(&state);
 
     assert!(request_gap_if_due());
-    let Some(HistoryV2ConsumerRequest::Seek(request)) = next_request() else {
+    let Some(HistoryV2ConsumerRequest::Seek(request)) = next_window_request() else {
         panic!("gap 必须由同一 reducer 以 seek 重建");
     };
     assert_eq!(request.anchor.entry_id, "s1:e2");
@@ -552,28 +569,34 @@ fn snapshot_invalidated_resets_claim_and_reopen_replaces_the_window() {
     publish(&state);
 
     assert!(request_reopen(false));
+    let Some(HistoryV2ConsumerRequest::Open { request_key, .. }) = next_window_request() else {
+        panic!("失效后必须允许重新 open");
+    };
+    assert!(next_request().is_none(), "Open 未被接纳前不得关闭旧窗口");
+    let mut reopened = page_json(Some("before-9"), json!([item("e9", 9, "reopened")]));
+    reopened["windowId"] = json!("w2");
+    reopened["snapshotToken"] = json!("snapshot-2");
+    reopened["readTicket"] = json!("ticket-2");
+    release_open_for("s1", request_key);
+    let old = settle_open(&mut state, "s1", request_key, &page(reopened), &limits)
+        .expect("接纳后返回旧窗口");
+    assert_eq!(old.window_id, "w1");
+    assert_eq!(old.snapshot_token, "snapshot-1");
+    assert!(request_close_window(old));
     let Some(HistoryV2ConsumerRequest::Close {
         session_id,
         window_id,
         snapshot_token,
         read_ticket,
         ..
-    }) = next_request()
+    }) = next_window_request()
     else {
-        panic!("重开必须先关闭旧窗口");
+        panic!("接纳成功后必须关闭旧窗口");
     };
     assert_eq!(session_id, "s1");
     assert_eq!(window_id, "w1");
     assert_eq!(snapshot_token, "snapshot-1");
     assert_eq!(read_ticket, "ticket-1");
-    let Some(HistoryV2ConsumerRequest::Open { request_key, .. }) = next_request() else {
-        panic!("失效后必须允许重新 open");
-    };
-    let mut reopened = page_json(Some("before-9"), json!([item("e9", 9, "reopened")]));
-    reopened["windowId"] = json!("w2");
-    reopened["snapshotToken"] = json!("snapshot-2");
-    reopened["readTicket"] = json!("ticket-2");
-    settle_open(&mut state, "s1", request_key, &page(reopened), &limits);
 
     let reopened = crate::kit::history_v2::snapshot();
     assert!(reopened.is_ready());
@@ -588,31 +611,46 @@ fn snapshot_invalidated_resets_claim_and_reopen_replaces_the_window() {
 
 #[test]
 #[serial]
-fn open_latest_enqueues_close_before_open_when_a_window_exists() {
+fn open_latest_sends_open_then_closes_old_window_only_after_admission() {
     let _guard = atomics_guard();
     test_channel();
     drain_requests();
-    publish(&admitted());
+    let limits = HistoryLimits::default();
+    let mut state = admitted();
+    publish(&state);
 
     assert!(request_open_latest("s1"));
+    let Some(HistoryV2ConsumerRequest::Open {
+        session_id,
+        request_key: open_key,
+        ..
+    }) = next_window_request()
+    else {
+        panic!("已有窗口时也必须先发送 Open");
+    };
+    assert_eq!(session_id, "s1");
+    assert!(next_request().is_none(), "新窗口接纳前不得关闭旧窗口");
+
+    release_open_for("s1", open_key);
+    let mut next_page = page_json(Some("before-2"), json!([item("e9", 9, "new")]));
+    next_page["windowId"] = json!("w2");
+    next_page["snapshotToken"] = json!("snapshot-2");
+    next_page["readTicket"] = json!("ticket-2");
+    let old = settle_open(&mut state, "s1", open_key, &page(next_page), &limits)
+        .expect("接纳成功后返回旧窗口");
+    assert!(request_close_window(old));
     let Some(HistoryV2ConsumerRequest::Close {
         session_id,
         window_id,
-        snapshot_token,
-        read_ticket,
+        request_key: close_key,
         ..
-    }) = next_request()
+    }) = next_window_request()
     else {
-        panic!("已有窗口时必须先入队 Close");
+        panic!("接纳成功后必须关闭旧窗口");
     };
     assert_eq!(session_id, "s1");
     assert_eq!(window_id, "w1");
-    assert_eq!(snapshot_token, "snapshot-1");
-    assert_eq!(read_ticket, "ticket-1");
-    let Some(HistoryV2ConsumerRequest::Open { session_id, .. }) = next_request() else {
-        panic!("Close 之后必须入队 Open");
-    };
-    assert_eq!(session_id, "s1");
+    assert!(close_key > open_key, "旧窗口的 Close key 必须晚于 Open key");
     assert!(next_request().is_none());
 }
 
@@ -624,7 +662,7 @@ fn open_latest_without_a_window_enqueues_only_open() {
     drain_requests();
 
     assert!(request_open_latest("s1"));
-    let Some(HistoryV2ConsumerRequest::Open { session_id, .. }) = next_request() else {
+    let Some(HistoryV2ConsumerRequest::Open { session_id, .. }) = next_window_request() else {
         panic!("没有窗口时只入队 Open");
     };
     assert_eq!(session_id, "s1");
@@ -729,7 +767,7 @@ fn late_open_failure_keeps_the_new_session_claim() {
     assert!(request_open_latest("s2"), "B 的 open 必须能发起");
     let Some(HistoryV2ConsumerRequest::Open {
         request_key: b_key, ..
-    }) = next_request()
+    }) = next_window_request()
     else {
         panic!("expected B open request");
     };
@@ -758,29 +796,320 @@ fn open_failure_releases_the_claim_so_the_next_open_can_start() {
     let mut state = admitted();
 
     assert!(request_open_latest("s1"));
-    let Some(HistoryV2ConsumerRequest::Open { request_key, .. }) = next_request() else {
+    let Some(HistoryV2ConsumerRequest::Open { request_key, .. }) = next_window_request() else {
         panic!("expected open request");
     };
     assert!(open_claim_is_some());
 
-    // 响应解析失败/校验失败：归还 claim，窗口标记可重试。
+    // 响应解析失败/校验失败：归还 claim；Open 失败一律回到重开态。
     settle_open_failure(&mut state, "s1", request_key, "invalid_page_shape");
     assert!(!open_claim_is_some(), "解析失败必须复位在途标记");
     assert!(matches!(
         state.window().expect("window").paging.status,
-        HistoryV2PagingStatus::Retryable { .. }
+        HistoryV2PagingStatus::ReopenRequired { .. }
     ));
+    assert!(next_request().is_none(), "Open 失败时不得关闭旧窗口");
 
     assert!(
         request_open_latest("s1"),
         "上一次 open 失败后必须能发起新的 open"
     );
-    // 已有旧窗口时先 best-effort Close，再进入新的 Open。
-    assert!(matches!(
-        next_request(),
-        Some(HistoryV2ConsumerRequest::Close { .. })
-    ));
-    let Some(HistoryV2ConsumerRequest::Open { .. }) = next_request() else {
+    let Some(HistoryV2ConsumerRequest::Open { .. }) = next_window_request() else {
         panic!("expected a new open request");
     };
+}
+// ---------------------------------------------------------------------------
+// 真实出站顺序：记录型 mock client。
+// ---------------------------------------------------------------------------
+
+fn wire_key(value: &Value) -> u64 {
+    value
+        .as_str()
+        .expect("DecimalU64 must serialize as a string")
+        .parse()
+        .expect("canonical decimal key")
+}
+
+fn initial_response_for(
+    session: &str,
+    window: &str,
+    before_cursor: &str,
+    request_key: &str,
+) -> Value {
+    let mut value = initial_value();
+    value["_meta"]["peri.history"]["requestKey"] = json!(request_key);
+    let page = &mut value["_meta"]["peri.history"]["page"];
+    page["sessionId"] = json!(session);
+    page["windowId"] = json!(window);
+    page["snapshotToken"] = json!(format!("snapshot-{window}"));
+    page["readTicket"] = json!(format!("ticket-{window}"));
+    page["beforeCursor"] = json!(before_cursor);
+    value
+}
+
+fn page_response_for(session: &str, window: &str, before_cursor: &str, items: Value) -> Value {
+    let mut value = page_json(Some(before_cursor), items);
+    value["sessionId"] = json!(session);
+    value["windowId"] = json!(window);
+    value["snapshotToken"] = json!(format!("snapshot-{window}"));
+    value["readTicket"] = json!(format!("ticket-{window}"));
+    value
+}
+
+async fn next_wire_request(
+    server: &peri_acp::transport::mpsc::MpscServerTransport,
+) -> (peri_acp::transport::types::RequestId, String, Value) {
+    use peri_acp::transport::types::IncomingMessage;
+    let message = tokio::time::timeout(std::time::Duration::from_secs(5), server.recv())
+        .await
+        .expect("expected a wire request")
+        .expect("transport must stay open");
+    match message {
+        IncomingMessage::Request { id, method, params } => (id, method, params),
+        other => panic!("expected request, got {other:?}"),
+    }
+}
+
+async fn respond_wire(
+    server: &peri_acp::transport::mpsc::MpscServerTransport,
+    id: peri_acp::transport::types::RequestId,
+    result: Value,
+) {
+    server.send_response(id, Ok(result)).await.unwrap();
+}
+
+/// 所有 V2 RPC 的线上 key 必须严格递增，且入队顺序 = 发送顺序。
+///
+/// 顺序：initial → Close(旧窗口) → page → body → open → Close(被替换窗口) → seek。
+/// body 若绕过队列，会在 page 响应前到达服务端；这里用超时断言它没有。
+#[tokio::test]
+#[serial]
+async fn wire_requests_follow_enqueue_order_across_all_v2_rpcs() {
+    let _guard = atomics_guard();
+    let limits = HistoryLimits::default();
+    reset_request_key_for_test();
+
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
+    let (client, _, _) = crate::acp_client::client::AcpTuiClient::new(transport);
+    client.install_history_v2_for_test(true, limits.clone());
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    *atoms::HISTORY_V2_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tx);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let consumer = spawn_history_v2_consumer(client.clone(), rx, shutdown.clone());
+
+    // 已发布的旧窗口：initial 成功前必须保持可用，成功后才会 Close。
+    publish(&admitted());
+
+    let loader = client.clone();
+    let load = tokio::spawn(async move { loader.load_session("s1", "/tmp", None).await });
+
+    let (id, method, params) = next_wire_request(&server).await;
+    assert_eq!(method, "session/load");
+    let initial_key = wire_key(&params["_meta"]["peri.history"]["requestKey"]);
+    assert_eq!(initial_key, 1, "initial 是第一个操作");
+    respond_wire(
+        &server,
+        id,
+        initial_response_for("s1", "w2", "before-1", "1"),
+    )
+    .await;
+    load.await.unwrap().unwrap();
+    let loaded_state = crate::kit::history_v2::snapshot();
+    assert!(loaded_state.is_ready());
+    assert_eq!(
+        loaded_state
+            .window()
+            .map(|window| window.window_id.as_str()),
+        Some("w2"),
+        "initial 成功后替换为候选窗口"
+    );
+    assert_eq!(loaded_state.delivery_id.as_deref(), Some("delivery-51"));
+
+    // initial 接纳成功后才关闭旧窗口，且 key 晚于 initial。
+    let (id, method, params) = next_wire_request(&server).await;
+    assert_eq!(method, peri_acp_types::history_v2::HISTORY_METHOD);
+    assert_eq!(params["action"], json!("close"));
+    let close_old_key = wire_key(&params["requestKey"]);
+    assert!(close_old_key > initial_key);
+    assert_eq!(params["windowId"], json!("w1"));
+    respond_wire(&server, id, json!({})).await;
+
+    // page 先入队，body 紧随其后；body 在 page 响应前不得上线。
+    assert!(request_older_page_if_due());
+    let state = crate::kit::history_v2::snapshot();
+    let window = state.window().expect("initial window");
+    let binding = crate::kit::history_detail_binding::HistoryV2BodyBinding {
+        session_id: "s1".into(),
+        window_id: window.window_id.clone(),
+        snapshot_token: window.snapshot_token.clone(),
+        read_ticket: window.read_ticket.clone(),
+        source: peri_acp_types::history_v2::HistorySource::Own,
+        entry_id: "s1:e2".into(),
+        sub_item_id: "s1:e2:0".into(),
+        body_ref: "body-1".into(),
+        representation: peri_acp_types::history_v2::HistoryRepresentation::DisplayText,
+        media_type: "text/plain; charset=utf-8".into(),
+    };
+    let body_receiver = match submit_body(&binding, 0, 128).expect("scheduler installed") {
+        crate::kit::history_v2::outbound::Submit::Queued(receiver) => receiver,
+        crate::kit::history_v2::outbound::Submit::Direct(_) => {
+            panic!("body must be queued, not sent directly")
+        }
+    };
+    assert!(request_open_latest("s1"));
+
+    let (id, method, params) = next_wire_request(&server).await;
+    assert_eq!(method, peri_acp_types::history_v2::HISTORY_METHOD);
+    assert_eq!(params["action"], json!("page"));
+    let page_key = wire_key(&params["requestKey"]);
+    assert!(page_key > close_old_key);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), server.recv())
+            .await
+            .is_err(),
+        "body/open 不得在 page 响应前越过队列"
+    );
+    respond_wire(
+        &server,
+        id,
+        page_response_for("s1", "w2", "before-2", json!([item("e0", 1, "older")])),
+    )
+    .await;
+
+    let (id, method, params) = next_wire_request(&server).await;
+    assert_eq!(method, peri_acp_types::history_v2::HISTORY_METHOD);
+    assert_eq!(params["action"], json!("body"));
+    let body_key = wire_key(&params["requestKey"]);
+    assert!(body_key > page_key, "body 必须排在 page 之后");
+    respond_wire(&server, id, json!({})).await;
+    assert!(body_receiver.await.unwrap().is_ok());
+
+    let (id, method, params) = next_wire_request(&server).await;
+    assert_eq!(method, peri_acp_types::history_v2::HISTORY_METHOD);
+    assert_eq!(params["action"], json!("open"));
+    let open_key = wire_key(&params["requestKey"]);
+    assert!(open_key > body_key);
+    respond_wire(
+        &server,
+        id,
+        page_response_for("s1", "w3", "before-3", json!([item("e9", 9, "open")])),
+    )
+    .await;
+
+    // Open 接纳成功后才为被替换窗口入队 Close。
+    let (id, method, params) = next_wire_request(&server).await;
+    assert_eq!(method, peri_acp_types::history_v2::HISTORY_METHOD);
+    assert_eq!(params["action"], json!("close"));
+    let close_replaced_key = wire_key(&params["requestKey"]);
+    assert!(close_replaced_key > open_key, "Close key 必须晚于 Open key");
+    assert_eq!(params["windowId"], json!("w2"));
+    respond_wire(&server, id, json!({})).await;
+
+    let anchor = HistoryEntryAnchor {
+        entry_id: "s1:e9".into(),
+        source: peri_acp_types::history_v2::HistorySource::Own,
+    };
+    assert!(request_seek_if_due(anchor));
+    let (id, method, params) = next_wire_request(&server).await;
+    assert_eq!(method, peri_acp_types::history_v2::HISTORY_METHOD);
+    assert_eq!(params["action"], json!("seek"));
+    let seek_key = wire_key(&params["requestKey"]);
+    assert!(seek_key > close_replaced_key);
+    respond_wire(
+        &server,
+        id,
+        page_response_for("s1", "w3", "before-3", json!([item("e9", 9, "open")])),
+    )
+    .await;
+
+    shutdown.cancel();
+    consumer.abort();
+    client.close();
+}
+
+/// reset/会话切换后，旧 session 的 Open 成功响应不得在空状态上重建窗口。
+#[tokio::test]
+#[serial]
+async fn late_open_success_after_reset_is_discarded() {
+    let _guard = atomics_guard();
+    reset_request_key_for_test();
+
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
+    let (client, _, _) = crate::acp_client::client::AcpTuiClient::new(transport);
+    client.install_history_v2_for_test(true, HistoryLimits::default());
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    *atoms::HISTORY_V2_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tx);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let consumer = spawn_history_v2_consumer(client.clone(), rx, shutdown.clone());
+
+    publish(&admitted());
+    assert!(request_reopen(true));
+    let (id, method, params) = next_wire_request(&server).await;
+    assert_eq!(method, peri_acp_types::history_v2::HISTORY_METHOD);
+    assert_eq!(params["action"], json!("open"));
+    assert_eq!(params["sessionId"], json!("s1"));
+
+    // 会话边界：清空窗口并作废在途认领。
+    crate::kit::history_v2::reset_state();
+    reset_consumer_state();
+
+    // 迟到的成功响应携带旧窗口页面；它没有仍然有效的 claim，必须被丢弃。
+    respond_wire(
+        &server,
+        id,
+        page_response_for("s1", "w1", "before-1", json!([item("e2", 5, "late")])),
+    )
+    .await;
+
+    // 用新的 s2 Open 作为“旧响应已处理”的屏障。
+    assert!(request_open_latest("s2"));
+    let (_, method, params) = next_wire_request(&server).await;
+    assert_eq!(method, peri_acp_types::history_v2::HISTORY_METHOD);
+    assert_eq!(params["action"], json!("open"));
+    assert_eq!(params["sessionId"], json!("s2"));
+    assert_eq!(
+        crate::kit::history_v2::snapshot(),
+        HistoryV2State::default(),
+        "旧会话的 Open 成功响应不得复活窗口"
+    );
+
+    shutdown.cancel();
+    consumer.abort();
+    client.close();
+}
+
+/// 调度器已关闭时，page/seek 已登记的在途与预留必须回滚。
+#[test]
+#[serial]
+fn page_and_seek_send_failure_roll_back_in_flight_state() {
+    let _guard = atomics_guard();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    drop(rx);
+    *atoms::HISTORY_V2_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tx);
+    publish(&admitted());
+
+    assert!(!request_older_page_if_due(), "队列关闭时不得报告已入队");
+    {
+        let state = crate::kit::history_v2::snapshot();
+        let paging = &state.window().expect("window").paging;
+        assert!(paging.in_flight.is_none(), "page 在途必须回滚");
+        assert_eq!(paging.reserved_bytes, 0, "page 预留必须回滚");
+    }
+
+    assert!(!request_seek_if_due(HistoryEntryAnchor {
+        entry_id: "s1:e2".into(),
+        source: peri_acp_types::history_v2::HistorySource::Own,
+    }));
+    {
+        let state = crate::kit::history_v2::snapshot();
+        let paging = &state.window().expect("window").paging;
+        assert!(paging.in_flight.is_none(), "seek 在途必须回滚");
+        assert_eq!(paging.reserved_bytes, 0, "seek 预留必须回滚");
+    }
 }

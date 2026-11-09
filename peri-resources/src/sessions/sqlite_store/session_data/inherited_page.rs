@@ -550,7 +550,7 @@ fn oversized_entry(entry: HistoryPageCandidate) -> InheritedHistoryEntry {
     }
 }
 
-fn verify_inherited_source(
+pub(super) fn verify_inherited_source(
     snapshot: &HistoryInheritedSnapshot,
     frozen_snapshot_id: &str,
     ancestor_thread_id: Option<&ThreadId>,

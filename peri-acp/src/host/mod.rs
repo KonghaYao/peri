@@ -286,6 +286,7 @@ impl SessionState {
             structure_version: 0,
             session_generation: next_session_generation(),
             history_window: Default::default(),
+            live_delivery: None,
             event_health: Default::default(),
             cancel_token: None,
             interaction_gate: Arc::new(tokio::sync::Mutex::new(())),

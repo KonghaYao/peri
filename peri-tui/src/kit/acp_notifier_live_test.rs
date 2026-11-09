@@ -12,7 +12,6 @@ struct LiveGuard;
 
 impl Drop for LiveGuard {
     fn drop(&mut self) {
-        atoms::HISTORY_V2.set(false);
         atoms::HISTORY_V2_CAPABLE.set(false);
         atoms::HISTORY_V2_STATE.set(HistoryV2State::default());
         live::clear_all_pending();
@@ -21,7 +20,6 @@ impl Drop for LiveGuard {
 
 fn setup() -> LiveGuard {
     atoms::init_atoms();
-    atoms::HISTORY_V2.set(true);
     atoms::HISTORY_V2_CAPABLE.set(true);
     live::clear_all_pending();
     LiveGuard
@@ -70,7 +68,13 @@ fn admitted() -> HistoryV2State {
             }
         }
     });
-    initial::admit_load_response(&response, "s1", &HistoryLimits::default()).expect("admitted")
+    initial::admit_load_response(
+        &response,
+        "s1",
+        peri_acp_types::history_v2::DecimalU64::new(1),
+        &HistoryLimits::default(),
+    )
+    .expect("admitted")
 }
 
 fn params(stream: &str, seq: u64, text: &str) -> Value {

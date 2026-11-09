@@ -195,6 +195,11 @@ mod session_shape_tests;
 #[path = "session_history_page_test.rs"]
 mod session_history_page_tests;
 
+// History V2 的完整回放与 frozen 读取夹具；与 V1 分页测试并存。
+#[cfg(test)]
+#[path = "session_history_replay_test.rs"]
+mod session_history_replay_tests;
+
 #[cfg(test)]
 #[path = "session_mq_test.rs"]
 mod session_mq_tests;

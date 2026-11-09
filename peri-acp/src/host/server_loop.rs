@@ -1,5 +1,7 @@
 //! Receive loop and request-class dispatch; long-running work stays host-owned.
 
+mod history;
+
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -9,9 +11,8 @@ use super::diagnostics::ResponseDiagnostics;
 use super::session_endpoint::register_session_endpoint;
 use super::{
     connection::ConnectionContext, dispatch_prompt_turn, extract_session_id, handle_notification,
-    handle_request_for_connection, history_page, history_service, history_v2_load, history_window,
-    mcp_apps, requests, send_session_info_update, task_scope, AcpServerConfig, PromptLocks,
-    SharedSessions,
+    handle_request_for_connection, history_page, history_v2_load, history_window, mcp_apps,
+    requests, send_session_info_update, task_scope, AcpServerConfig, PromptLocks, SharedSessions,
 };
 use crate::transport::types::{IncomingMessage, RequestId};
 
@@ -76,44 +77,8 @@ impl ServerLoop<'_> {
 
     /// `_peri/history` 分流：连接级协商与 own 适配器注入都在进入服务前完成。
     ///
-    /// 未协商时**不进入服务**，直接返回领域错误；协商后读取统一走
-    /// [`super::history_v2_adapter::HistoryV2BackendAdapter`]，未实现窗口读取的后端
-    /// 仍由适配器 fail-closed。
-    /// 请求在连接循环内就地 await：H2 的窗口/幂等账本是连接级短锁状态，就地处理
-    /// 保持同连接请求的接收顺序；后端读取只发生在服务锁之外。
-    async fn handle_history_request(&self, id: RequestId, params: Value) {
-        let diagnostics =
-            ResponseDiagnostics::new(id, peri_acp_types::history_v2::HISTORY_METHOD, &params);
-        let (facts, service) = {
-            let connection = self.connection.lock().await;
-            (connection.facts(), connection.history_v2.clone())
-        };
-        let result = if !facts.history_v2 {
-            Err(history_service::protocol_not_negotiated_error())
-        } else {
-            let backend: Arc<dyn peri_acp_types::history_v2::HistoryV2Backend> =
-                Arc::new(super::history_v2_adapter::HistoryV2BackendAdapter::new(
-                    Arc::clone(&self.cfg.session_resources),
-                    facts.caps.clone(),
-                ));
-            let limits = facts
-                .caps
-                .history_v2
-                .as_ref()
-                .map(|capability| capability.limits.clone())
-                .unwrap_or_default();
-            let request = history_service::HistoryServiceRequest::new(true, Some(backend), limits);
-            tokio::select! {
-                biased;
-                _ = self.connection_cancellation.cancelled() => Err(
-                    crate::transport::types::AcpError::new(-32800, "request cancelled"),
-                ),
-                result = service.handle(&params, request) => result,
-            }
-        };
-        let _ = diagnostics.send(self.transport.as_ref(), result).await;
-    }
-
+    /// V1 分页/窗口路由仍在本文档的 `dispatch_request` 内保持；V2 请求的执行与
+    /// 任务所有权见 [`history`]。
     async fn spawn_mcp_control(&self, id: RequestId, params: Value) {
         let diagnostics = ResponseDiagnostics::new(id, "peri/mcp/control", &params);
         let connection = self.connection.lock().await.facts();

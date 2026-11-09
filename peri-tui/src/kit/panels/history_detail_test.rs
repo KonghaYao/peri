@@ -49,6 +49,8 @@ fn v2_descriptor(total: u64) -> DetailDescriptor {
         entry_id: "s1:m1".into(),
         sub_item_id: "s1:m1:0".into(),
         body_ref: "body-1".into(),
+        representation: peri_acp_types::history_v2::HistoryRepresentation::DisplayText,
+        media_type: "text/plain".into(),
     })
 }
 

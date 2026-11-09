@@ -129,7 +129,7 @@ fn window_refs(page: &Value) -> (String, String, String) {
     )
 }
 
-async fn history_page_request(
+async fn history_v2_page_request(
     client: &crate::transport::mpsc::MpscClientTransport,
     session_id: &str,
     page: &Value,
@@ -352,9 +352,10 @@ async fn history_v2_end_to_end_initial_pages_seek_body_live_and_close() {
 
     // 3a. page before：沿 initial cursor 读取更早历史；opaque 条目可能落在首屏或该页。
     let before_cursor = page["beforeCursor"].as_str().unwrap().to_owned();
-    let older = history_page_request(&client, &sid, &page, "2", "before", Some(&before_cursor), 2)
-        .await
-        .expect("before 页必须成功");
+    let older =
+        history_v2_page_request(&client, &sid, &page, "2", "before", Some(&before_cursor), 2)
+            .await
+            .expect("before 页必须成功");
     let older_entries = older["items"].as_array().expect("before items");
     let older_ids: Vec<String> = older_entries
         .iter()
@@ -415,7 +416,7 @@ async fn history_v2_end_to_end_initial_pages_seek_body_live_and_close() {
         .as_str()
         .expect("before 页必须给出 afterCursor")
         .to_owned();
-    let newer = history_page_request(&client, &sid, &page, "3", "after", Some(&after_cursor), 5)
+    let newer = history_v2_page_request(&client, &sid, &page, "3", "after", Some(&after_cursor), 5)
         .await
         .expect("after 页必须成功");
     let newer_ids: Vec<String> = newer["items"]
@@ -542,7 +543,7 @@ async fn history_v2_end_to_end_initial_pages_seek_body_live_and_close() {
         .send_request("session/close", json!({ "sessionId": sid }))
         .await
         .expect("session/close 必须成功");
-    let page_error = history_page_request(
+    let page_error = history_v2_page_request(
         &client,
         &sid,
         &page,
@@ -575,12 +576,15 @@ async fn history_v2_end_to_end_repeated_loads_replace_window_without_capacity_er
     let tmp = tempfile::TempDir::new().unwrap();
     let fixture = PageFixture::new(&tmp).await;
     let sid = fixture.sid.clone();
+    // 让最新窗口带一个 opaque 子项，重复 load 后仍可在新窗口读取正文。
+    let opaque_id = append_opaque_assistant(&fixture, &"x".repeat(OPAQUE_TEXT_BYTES)).await;
     let (client, _server, task) = spawn_v2_e2e_loop(&fixture).await;
 
     negotiate_v2(&client).await;
 
     let mut previous_window = String::new();
     let mut first_page = Value::Null;
+    let mut last_page = Value::Null;
     for key in 1..=3 {
         let response = client
             .send_request(
@@ -601,16 +605,68 @@ async fn history_v2_end_to_end_repeated_loads_replace_window_without_capacity_er
         assert_ne!(window_id, "");
         previous_window = window_id;
         if key == 1 {
-            first_page = page;
+            first_page = page.clone();
         }
+        last_page = page;
     }
 
+    // 新窗口必须继续可用：page 与 body 都能基于最新窗口读取。
+    let newer = history_v2_page_request(
+        &client,
+        &sid,
+        &last_page,
+        "10",
+        "before",
+        last_page["beforeCursor"].as_str(),
+        2,
+    )
+    .await
+    .expect("最新窗口必须可翻页");
+    assert!(
+        newer["items"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
+        "最新窗口的页面不得为空：{newer}"
+    );
+    let opaque_entry = last_page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| {
+            entry["subItems"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["kind"] == "opaque"))
+        })
+        .expect("最新窗口必须包含 opaque 条目");
+    assert!(
+        opaque_entry["entryId"]
+            .as_str()
+            .is_some_and(|value| value.ends_with(&opaque_id.as_uuid().to_string())),
+        "opaque 条目必须保留稳定身份：{opaque_entry}"
+    );
+    let body_ref = opaque_entry["subItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["kind"] == "opaque")
+        .and_then(|item| item["body"]["bodyRef"].as_str())
+        .expect("opaque bodyRef")
+        .to_owned();
+    let body = history_body_request(&client, &sid, &last_page, "11", &body_ref, 0, 1024)
+        .await
+        .expect("最新窗口必须可读正文");
+    assert_eq!(body["bodyRef"], body_ref.as_str());
+    assert!(
+        body["data"].as_str().is_some_and(|data| !data.is_empty()),
+        "正文块不得为空：{body}"
+    );
+
     // 旧窗口被新 initial 替换后按 closed 身份处理，而不是容量错误。
-    let error = history_page_request(
+    let error = history_v2_page_request(
         &client,
         &sid,
         &first_page,
-        "10",
+        "12",
         "before",
         first_page["beforeCursor"].as_str(),
         2,
@@ -621,6 +677,14 @@ async fn history_v2_end_to_end_repeated_loads_replace_window_without_capacity_er
         e2e_error_data(&error).reason,
         HistoryErrorReason::WindowClosed,
         "旧窗口必须是 window_closed，不能是 capacity_exceeded：{error:?}"
+    );
+    let body_error = history_body_request(&client, &sid, &first_page, "13", &body_ref, 0, 1024)
+        .await
+        .expect_err("被替换的旧窗口不得继续读正文");
+    assert_eq!(
+        e2e_error_data(&body_error).reason,
+        HistoryErrorReason::WindowClosed,
+        "旧窗口 body 必须是 window_closed：{body_error:?}"
     );
 
     task.abort();

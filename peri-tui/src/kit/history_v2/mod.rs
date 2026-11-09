@@ -14,10 +14,10 @@
 //!
 //! ## 开关
 //!
-//! [`history_v2_beta_enabled`] 默认 **false**（`history-v2` 本地 beta）。本地开关
-//! 与连接协商结果必须同时为真才启用 V2（[`active`]）；否则旧 V1 / 标准路径逐字节
-//! 保持不变。V2 协商成功时客户端不再声明 `peri.historyWindowV1`，服务端也不回放
-//! V1 历史，因此 `load_session` 必须使用 initial 首屏而不是再发一次 open。
+//! TUI 始终请求 V2；启用与否只由连接协商结果决定（[`crate::kit::atoms::HISTORY_V2_CAPABLE`]）。
+//! 未协商到 V2 时启动显式失败，不回落到旧协议或标准全量回放。V2 协商成功时客户端
+//! 不再声明旧私有历史能力，服务端也不回放 V1 历史，因此 `load_session` 必须使用
+//! initial 首屏而不是再发一次 open。
 //!
 //! ## 可执行与可阅读
 //!
@@ -30,6 +30,7 @@ pub mod consumer;
 pub mod error;
 pub mod initial;
 pub mod live;
+pub mod outbound;
 pub mod paging;
 pub mod request;
 mod validate;
@@ -54,10 +55,6 @@ mod initial_test;
 #[cfg(test)]
 #[path = "paging_test.rs"]
 mod paging_test;
-
-#[cfg(test)]
-#[path = "body_test.rs"]
-mod body_test;
 
 /// TUI 本地 V2 beta 键；未配置 = 关闭。
 pub const HISTORY_V2_BETA: &str = peri_config::betas::HISTORY_V2;

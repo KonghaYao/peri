@@ -410,7 +410,9 @@ pub async fn run_kit_fullscreen(
         // 4b2c. HISTORY_V2 channel：H5c 的 open/page/seek/详情正文（V2 激活时唯一入口）。
         // 与 V1 窗口队列互斥：`window_path_enabled()` 在 V2 激活时返回 false。
         let (history_v2_tx, history_v2_rx) = mpsc::unbounded_channel();
-        let _ = atoms::HISTORY_V2_TX.set(history_v2_tx);
+        *atoms::HISTORY_V2_TX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(history_v2_tx);
         let _history_v2_consumer = crate::kit::history_v2::consumer::spawn_history_v2_consumer(
             client.clone(),
             history_v2_rx,

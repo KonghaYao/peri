@@ -509,10 +509,24 @@ pub static HISTORY_V2_LIMITS: AtomStatic<peri_acp_types::history_v2::HistoryLimi
 /// V2 唯一历史状态（initial 首屏准入；H5b 的页合并扩展同一结构）。
 pub static HISTORY_V2_STATE: AtomStatic<crate::kit::history_v2::HistoryV2State> =
     AtomStatic::new(crate::kit::history_v2::HistoryV2State::default);
-/// H5c：V2 页/seek/open 消费者队列。V2 激活时 V1 窗口队列不再收到请求。
-pub(crate) static HISTORY_V2_TX: OnceLock<
-    UnboundedSender<crate::kit::history_v2::consumer::HistoryV2ConsumerRequest>,
-> = OnceLock::new();
+/// H5c：V2 出站队列。所有 V2 RPC（initial/open/page/seek/body/close）共用。
+///
+/// 用可替换的 `Mutex<Option<_>>` 而不是 `OnceLock`：队列属于连接且允许在测试/
+/// 重建连接时安装新的调度器；requestKey 的入队顺序由 `history_v2::outbound` 的
+/// 临界区保证，不依赖本容器。
+pub(crate) type HistoryV2Sender =
+    UnboundedSender<crate::kit::history_v2::outbound::OutboundCommand>;
+
+pub(crate) static HISTORY_V2_TX: std::sync::Mutex<Option<HistoryV2Sender>> =
+    std::sync::Mutex::new(None);
+
+/// 当前连接的 V2 调度器发送端；未安装时为 `None`。
+pub(crate) fn history_v2_tx() -> Option<HistoryV2Sender> {
+    HISTORY_V2_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
 /// H5c：V2 requestKey 的本地单调解码器；initial 接纳时以服务端回显的键播种。
 pub(crate) static HISTORY_V2_NEXT_KEY: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);

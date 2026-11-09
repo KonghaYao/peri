@@ -5,8 +5,8 @@
 //! 避免把 inherited 位置误判为 own（反之亦然）。
 
 use base64::Engine as _;
+use peri_acp_types::history_common::{HistoryInheritedSnapshot, HistorySource as WindowSource};
 use peri_acp_types::history_v2::{HistoryInheritedSource, HistorySource as V2Source};
-use peri_acp_types::history_window::{HistoryInheritedSnapshot, HistorySource as WindowSource};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::thread::ThreadId;
 

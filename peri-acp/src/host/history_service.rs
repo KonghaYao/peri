@@ -15,11 +15,8 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use peri_acp_types::history_v2::{
-    DecimalU64, HistoryAnchor, HistoryBackendError, HistoryBodyChunk, HistoryBodyKind,
-    HistoryBodyRequest, HistoryCloseRequest, HistoryClosedKind, HistoryClosedResult,
-    HistoryDirection, HistoryLimits, HistoryOpenRequest, HistoryPageData, HistoryPageRequest,
-    HistoryRequest, HistorySeekRequest, HistorySnapshotRef, HistorySubItem, HistoryV2Backend,
-    HistoryWindowKind, HistoryWindowPage, HISTORY_V2_VERSION,
+    DecimalU64, HistoryDirection, HistoryLimits, HistoryPageData, HistorySnapshotRef,
+    HistorySubItem, HistoryV2Backend, HistoryWindowKind, HistoryWindowPage, HISTORY_V2_VERSION,
 };
 use serde_json::Value;
 
@@ -29,12 +26,13 @@ mod cursor;
 mod error;
 mod initial;
 mod ledger;
+mod operations;
 mod state;
 mod window;
 
 #[cfg(test)]
 #[path = "history_service/backend_test.rs"]
-mod backend_test;
+pub(crate) mod backend_test;
 #[cfg(test)]
 #[path = "history_service/body_test.rs"]
 mod body_test;
@@ -45,25 +43,34 @@ mod cancel_test;
 #[path = "history_service/cursor_test.rs"]
 mod cursor_test;
 #[cfg(test)]
+#[path = "history_service/initial_replacement_test.rs"]
+mod initial_replacement_test;
+#[cfg(test)]
 #[path = "history_service/initial_test.rs"]
 mod initial_test;
 #[cfg(test)]
 #[path = "history_service/service_test.rs"]
 mod service_test;
 
-use self::cursor::CursorError;
 pub(crate) use self::error::{
     backend_unavailable_error, initial_timeout_error, protocol_not_negotiated_error,
 };
-use self::error::{default_error, invalid_params, invalid_params_message, ServiceFailure};
+use self::error::{default_error, ServiceFailure};
 pub(crate) use self::initial::HistoryInitialContext;
 use self::ledger::{Admission, ExpiryReason, Ledger, LedgerLimits};
+pub(crate) use self::operations::{HistoryAdmission, HistoryExecution};
 use self::state::{HistoryClock, SystemClock, WindowAccess, WindowRegistry};
 
 /// `_peri/history` 入站参数上限（设计 §12.4）：在解码为领域请求之前按序列化字节判定。
 pub(super) const HISTORY_MAX_PARAMS_BYTES: usize = 64 * 1024;
 /// page/seek/body/close/open 的统一总期限（设计 §12.4）；生产路径不可关闭。
 pub(super) const HISTORY_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// initial 的独立总期限：与 `session/load` 的冷启动期限一致，不使用分页的 10 秒。
+pub(super) const HISTORY_INITIAL_TIMEOUT: Duration = Duration::from_secs(60);
+/// 同时执行的历史读（open/page/seek/body）上限；close 走快速路径不占配额。
+///
+/// 配额耗尽时接收循环**不等待**：立即把该 attempt 标记为可重试并返回 `capacity_exceeded`。
+pub(crate) const HISTORY_MAX_IN_FLIGHT: usize = 4;
 
 /// 路由层交给服务的连接事实与后端。
 pub(crate) struct HistoryServiceRequest {
@@ -196,6 +203,10 @@ pub(crate) struct HistoryV2Service {
     /// 每连接随机生成；只用于 cursor MAC，不落盘、不写日志。
     cursor_secret: [u8; 32],
     request_timeout: Duration,
+    /// initial 的独立总期限（冷启动允许比分页更久）。
+    initial_timeout: Duration,
+    /// 在途历史读配额（`HISTORY_MAX_IN_FLIGHT`）；只由连接层 `try_acquire` 使用。
+    in_flight: Arc<tokio::sync::Semaphore>,
 }
 
 impl HistoryV2Service {
@@ -205,6 +216,7 @@ impl HistoryV2Service {
             Arc::new(SystemClock::new()),
             LedgerLimits::default(),
             HISTORY_REQUEST_TIMEOUT,
+            HISTORY_INITIAL_TIMEOUT,
         )
     }
 
@@ -212,6 +224,7 @@ impl HistoryV2Service {
         clock: Arc<dyn HistoryClock>,
         limits: LedgerLimits,
         request_timeout: Duration,
+        initial_timeout: Duration,
     ) -> Self {
         Self {
             state: Mutex::new(ServiceState {
@@ -221,12 +234,29 @@ impl HistoryV2Service {
             clock,
             cursor_secret: new_cursor_secret(),
             request_timeout,
+            initial_timeout,
+            in_flight: Arc::new(tokio::sync::Semaphore::new(HISTORY_MAX_IN_FLIGHT)),
         }
     }
 
     #[cfg(test)]
     fn with_ledger_limits(clock: Arc<dyn HistoryClock>, limits: LedgerLimits) -> Self {
-        Self::with_options(clock, limits, HISTORY_REQUEST_TIMEOUT)
+        Self::with_options(
+            clock,
+            limits,
+            HISTORY_REQUEST_TIMEOUT,
+            HISTORY_INITIAL_TIMEOUT,
+        )
+    }
+
+    /// 测试构造：同时注入短的分页期限与 initial 期限。
+    #[cfg(test)]
+    fn with_ledger_limits_and_timeout(
+        clock: Arc<dyn HistoryClock>,
+        limits: LedgerLimits,
+        timeout: Duration,
+    ) -> Self {
+        Self::with_options(clock, limits, timeout, timeout)
     }
 
     /// 会话级拆除：移除本连接上该会话的全部窗口，并记录 closed 身份。
@@ -241,468 +271,25 @@ impl HistoryV2Service {
             .remove_session(session_id, now, true);
     }
 
-    /// 处理一个已分流的 `_peri/history` 请求。
+    /// 处理一个已分流的 `_peri/history` 请求（服务层测试入口）。
     ///
-    /// 顺序：入站字节上限 → 解码/校验 → 协商与后端 → 领域处理。整个处理受
-    /// `request_timeout` 总期限约束；超时 drop 内部 future 会触发取消守卫。
+    /// 生产连接循环拆成两步：接收循环内同步 [`Self::admit_request`]，随后在受配额与
+    /// 任务所有权约束的后台任务里 [`Self::execute`]。这里保留原子组合语义供测试使用。
+    #[cfg(test)]
     pub(crate) async fn handle(
         &self,
         params: &Value,
         options: HistoryServiceRequest,
     ) -> Result<Value, AcpError> {
-        if !params_within_limit(params) {
-            return Err(invalid_params_message(
-                "history request parameters exceed 64 KiB",
-            ));
-        }
-        match tokio::time::timeout(self.request_timeout, self.handle_inner(params, options)).await {
-            Ok(result) => result,
-            Err(_) => Err(self::error::timeout_error()),
+        match self.admit_request(params, options)? {
+            HistoryAdmission::Replay(value) => Ok(value),
+            HistoryAdmission::Execute(execution) => self.execute(*execution).await,
         }
     }
 
-    async fn handle_inner(
-        &self,
-        params: &Value,
-        options: HistoryServiceRequest,
-    ) -> Result<Value, AcpError> {
-        let request = HistoryRequest::decode(params).map_err(invalid_params)?;
-        request.validate(&options.limits).map_err(invalid_params)?;
-        if !options.negotiated {
-            return Err(protocol_not_negotiated_error());
-        }
-        let Some(backend) = options.backend else {
-            return Err(backend_unavailable_error());
-        };
-        let fingerprint = ledger::fingerprint(params);
-        match request {
-            HistoryRequest::Open(request) => {
-                self.open(request, fingerprint, backend, &options.limits)
-                    .await
-            }
-            HistoryRequest::Page(request) => {
-                self.page(request, fingerprint, backend, &options.limits)
-                    .await
-            }
-            HistoryRequest::Seek(request) => {
-                self.seek(request, fingerprint, backend, &options.limits)
-                    .await
-            }
-            HistoryRequest::Body(request) => {
-                self.body(request, fingerprint, backend, &options.limits)
-                    .await
-            }
-            HistoryRequest::Close(request) => self.close(request, fingerprint).await,
-        }
-    }
-
-    async fn open(
-        &self,
-        request: HistoryOpenRequest,
-        fingerprint: [u8; 32],
-        backend: Arc<dyn HistoryV2Backend>,
-        limits: &HistoryLimits,
-    ) -> Result<Value, AcpError> {
-        let key = request.request_key.get();
-        let attempt = match self.admit(key, fingerprint)? {
-            Admission::Replay(value) => return Ok(value),
-            Admission::Execute { attempt } => attempt,
-        };
-        let mut guard = self.attempt_guard(key, attempt, fingerprint);
-        let opened = match self
-            .begin_window(
-                backend.as_ref(),
-                &request.session_id,
-                &request.anchor,
-                request.before,
-                request.after,
-                request.target_bytes,
-                limits.max_windows_per_connection,
-            )
-            .await
-        {
-            Ok(opened) => opened,
-            Err(failure) => return self.fail_and(&mut guard, failure),
-        };
-        let page = build_page(&self.cursor_secret, &opened.access, opened.data);
-        if !self.issue_body_refs(&opened.access.window_id, &page) {
-            self.remove_window(&opened.access.window_id, false);
-            return self.fail_and(&mut guard, ServiceFailure::window_expired());
-        }
-        let value = match bounded_page(page, limits) {
-            Ok(value) => value,
-            Err(failure) => {
-                self.remove_window(&opened.access.window_id, false);
-                return self.fail_and(&mut guard, failure);
-            }
-        };
-        self.succeed(
-            &mut guard,
-            value.clone(),
-            Some(opened.access.window_id),
-            true,
-        );
-        Ok(value)
-    }
-
-    async fn page(
-        &self,
-        request: HistoryPageRequest,
-        fingerprint: [u8; 32],
-        backend: Arc<dyn HistoryV2Backend>,
-        limits: &HistoryLimits,
-    ) -> Result<Value, AcpError> {
-        let key = request.request_key.get();
-        let attempt = match self.admit(key, fingerprint)? {
-            Admission::Replay(value) => return Ok(value),
-            Admission::Execute { attempt } => attempt,
-        };
-        let mut guard = self.attempt_guard(key, attempt, fingerprint);
-        let now = self.clock.now();
-        let access = {
-            let mut state = self.state.lock();
-            resolve_access(
-                &mut state,
-                &request.session_id,
-                &request.window_id,
-                &request.snapshot_token,
-                &request.read_ticket,
-                now,
-            )
-        };
-        let access = match access {
-            Ok(access) => access,
-            Err(failure) => return self.fail_and(&mut guard, failure),
-        };
-        let raw_cursor = match &request.cursor {
-            Some(value) => match cursor::decode(&self.cursor_secret, &request.window_id, value) {
-                Ok(decoded) if decoded.direction == request.direction => decoded.raw,
-                Ok(_) | Err(CursorError::Invalid) => {
-                    return self.fail_and(&mut guard, ServiceFailure::invalid_cursor());
-                }
-                Err(CursorError::CrossWindow) => {
-                    return self.fail_and(&mut guard, ServiceFailure::cross_window_cursor());
-                }
-            },
-            None => {
-                let home = match request.direction {
-                    HistoryDirection::Before => access.before_home.clone(),
-                    HistoryDirection::After => access.after_home.clone(),
-                };
-                match home {
-                    Some(raw) => raw,
-                    None => {
-                        return self.fail_and(&mut guard, ServiceFailure::invalid_cursor());
-                    }
-                }
-            }
-        };
-        let data = match backend
-            .page(
-                &access.snapshot,
-                &raw_cursor,
-                request.direction,
-                request.limit,
-            )
-            .await
-        {
-            Ok(data) => data,
-            Err(error) => {
-                if error == HistoryBackendError::SnapshotInvalidated {
-                    self.remove_window(&request.window_id, false);
-                }
-                return self.fail_and(&mut guard, ServiceFailure::from_backend(error));
-            }
-        };
-        let now = self.clock.now();
-        let response = {
-            let mut state = self.state.lock();
-            let access = match resolve_access(
-                &mut state,
-                &request.session_id,
-                &request.window_id,
-                &request.snapshot_token,
-                &request.read_ticket,
-                now,
-            ) {
-                Ok(access) => access,
-                Err(failure) => {
-                    drop(state);
-                    return self.fail_and(&mut guard, failure);
-                }
-            };
-            if snapshot_changed(&access.snapshot, &data) {
-                state.windows.remove(&request.window_id, now, false);
-                drop(state);
-                return self.fail_and(&mut guard, ServiceFailure::snapshot_invalidated());
-            }
-            let page = build_page(&self.cursor_secret, &access, data);
-            if !state
-                .windows
-                .issue_body_refs(&request.window_id, page_body_refs(&page))
-            {
-                drop(state);
-                return self.fail_and(&mut guard, ServiceFailure::window_expired());
-            }
-            page
-        };
-        let value = match bounded_page(response, limits) {
-            Ok(value) => value,
-            Err(failure) => return self.fail_and(&mut guard, failure),
-        };
-        self.succeed(&mut guard, value.clone(), Some(request.window_id), true);
-        Ok(value)
-    }
-
-    async fn seek(
-        &self,
-        request: HistorySeekRequest,
-        fingerprint: [u8; 32],
-        backend: Arc<dyn HistoryV2Backend>,
-        limits: &HistoryLimits,
-    ) -> Result<Value, AcpError> {
-        let key = request.request_key.get();
-        let attempt = match self.admit(key, fingerprint)? {
-            Admission::Replay(value) => return Ok(value),
-            Admission::Execute { attempt } => attempt,
-        };
-        let mut guard = self.attempt_guard(key, attempt, fingerprint);
-        let HistoryAnchor::Entry(anchor) = request.anchor.clone() else {
-            return Err(invalid_params_message("seek anchor must be an entry"));
-        };
-        let now = self.clock.now();
-        let access = {
-            let mut state = self.state.lock();
-            resolve_access(
-                &mut state,
-                &request.session_id,
-                &request.window_id,
-                &request.snapshot_token,
-                &request.read_ticket,
-                now,
-            )
-        };
-        let access = match access {
-            Ok(access) => access,
-            Err(failure) => return self.fail_and(&mut guard, failure),
-        };
-        let data = match backend
-            .seek(&access.snapshot, &anchor, request.before, request.after)
-            .await
-        {
-            Ok(data) => data,
-            Err(error) => {
-                if error == HistoryBackendError::SnapshotInvalidated {
-                    self.remove_window(&request.window_id, false);
-                }
-                return self.fail_and(&mut guard, ServiceFailure::from_backend(error));
-            }
-        };
-        let now = self.clock.now();
-        let response = {
-            let mut state = self.state.lock();
-            let access = match resolve_access(
-                &mut state,
-                &request.session_id,
-                &request.window_id,
-                &request.snapshot_token,
-                &request.read_ticket,
-                now,
-            ) {
-                Ok(access) => access,
-                Err(failure) => {
-                    drop(state);
-                    return self.fail_and(&mut guard, failure);
-                }
-            };
-            if snapshot_changed(&access.snapshot, &data) {
-                state.windows.remove(&request.window_id, now, false);
-                drop(state);
-                return self.fail_and(&mut guard, ServiceFailure::snapshot_invalidated());
-            }
-            state.windows.set_homes(
-                &request.window_id,
-                data.before_cursor.clone(),
-                data.after_cursor.clone(),
-            );
-            let page = build_page(&self.cursor_secret, &access, data);
-            if !state
-                .windows
-                .issue_body_refs(&request.window_id, page_body_refs(&page))
-            {
-                drop(state);
-                return self.fail_and(&mut guard, ServiceFailure::window_expired());
-            }
-            page
-        };
-        let value = match bounded_page(response, limits) {
-            Ok(value) => value,
-            Err(failure) => return self.fail_and(&mut guard, failure),
-        };
-        self.succeed(&mut guard, value.clone(), Some(request.window_id), true);
-        Ok(value)
-    }
-
-    async fn body(
-        &self,
-        request: HistoryBodyRequest,
-        fingerprint: [u8; 32],
-        backend: Arc<dyn HistoryV2Backend>,
-        limits: &HistoryLimits,
-    ) -> Result<Value, AcpError> {
-        if request.max_bytes > u64::from(limits.max_body_chunk_bytes) {
-            return Err(invalid_params_message(
-                "maxBytes exceeds the negotiated body chunk limit",
-            ));
-        }
-        let key = request.request_key.get();
-        let attempt = match self.admit(key, fingerprint)? {
-            Admission::Replay(value) => return Ok(value),
-            Admission::Execute { attempt } => attempt,
-        };
-        let mut guard = self.attempt_guard(key, attempt, fingerprint);
-        let now = self.clock.now();
-        let access = {
-            let mut state = self.state.lock();
-            match resolve_access(
-                &mut state,
-                &request.session_id,
-                &request.window_id,
-                &request.snapshot_token,
-                &request.read_ticket,
-                now,
-            ) {
-                Ok(access)
-                    if state
-                        .windows
-                        .body_ref_issued(&request.window_id, &request.body_ref) =>
-                {
-                    Ok(access)
-                }
-                // bodyRef 不是 MAC cursor：只接受本窗口实际交付过的引用。
-                // 不在集合内与条目不存在返回同一错误，不泄露存在性。
-                Ok(_) => Err(ServiceFailure::from_backend(HistoryBackendError::NotFound)),
-                Err(failure) => Err(failure),
-            }
-        };
-        let access = match access {
-            Ok(access) => access,
-            Err(failure) => return self.fail_and(&mut guard, failure),
-        };
-        let slice = match backend
-            .body(
-                &access.snapshot,
-                &request.body_ref,
-                request.offset.get(),
-                request.max_bytes,
-            )
-            .await
-        {
-            Ok(slice) => slice,
-            Err(error) => {
-                if error == HistoryBackendError::SnapshotInvalidated {
-                    self.remove_window(&request.window_id, false);
-                }
-                return self.fail_and(&mut guard, ServiceFailure::from_backend(error));
-            }
-        };
-        let slice = match slice {
-            slice
-                if slice.body_ref == request.body_ref
-                    && slice.offset == request.offset
-                    && valid_body_shape(&slice) =>
-            {
-                slice
-            }
-            _ => {
-                return self.fail_and(&mut guard, ServiceFailure::source_unavailable());
-            }
-        };
-        let chunk = HistoryBodyChunk {
-            version: HISTORY_V2_VERSION,
-            kind: HistoryBodyKind::Body,
-            session_id: request.session_id.clone(),
-            window_id: request.window_id.clone(),
-            snapshot_token: request.snapshot_token.clone(),
-            body_ref: slice.body_ref,
-            content_version: slice.content_version,
-            representation: slice.representation,
-            encoding: slice.encoding,
-            offset: slice.offset,
-            data: slice.data,
-            next_offset: slice.next_offset,
-            complete: slice.complete,
-            total_bytes: slice.total_bytes,
-        };
-        if chunk.validate_shape().is_err() {
-            return self.fail_and(&mut guard, ServiceFailure::source_unavailable());
-        }
-        let value = serde_json::to_value(&chunk)
-            .map_err(|_| invalid_params_message("body chunk could not be serialized"))?;
-        let now = self.clock.now();
-        {
-            let mut state = self.state.lock();
-            if let Err(failure) = resolve_access(
-                &mut state,
-                &request.session_id,
-                &request.window_id,
-                &request.snapshot_token,
-                &request.read_ticket,
-                now,
-            ) {
-                drop(state);
-                return self.fail_and(&mut guard, failure);
-            }
-        }
-        let value = match bounded_value(value, limits) {
-            Ok(value) => value,
-            Err(failure) => return self.fail_and(&mut guard, failure),
-        };
-        self.succeed(&mut guard, value.clone(), Some(request.window_id), true);
-        Ok(value)
-    }
-
-    async fn close(
-        &self,
-        request: HistoryCloseRequest,
-        fingerprint: [u8; 32],
-    ) -> Result<Value, AcpError> {
-        let key = request.request_key.get();
-        let attempt = match self.admit(key, fingerprint)? {
-            Admission::Replay(value) => return Ok(value),
-            Admission::Execute { attempt } => attempt,
-        };
-        let mut guard = self.attempt_guard(key, attempt, fingerprint);
-        let now = self.clock.now();
-        {
-            let mut state = self.state.lock();
-            state.windows.prune(now);
-            if let Some(record) = state.windows.get(&request.window_id) {
-                if record.session_id != request.session_id {
-                    drop(state);
-                    return self.fail_and(&mut guard, ServiceFailure::permission_denied());
-                }
-                if record.snapshot_token != request.snapshot_token {
-                    drop(state);
-                    return self.fail_and(&mut guard, ServiceFailure::snapshot_invalidated());
-                }
-                if record.read_ticket != request.read_ticket {
-                    drop(state);
-                    return self.fail_and(&mut guard, ServiceFailure::ticket_invalid());
-                }
-                state.windows.remove(&request.window_id, now, true);
-            }
-            // 不存在或已关闭：幂等返回同形结果，不泄露其他主体窗口。
-        }
-        let result = HistoryClosedResult {
-            version: HISTORY_V2_VERSION,
-            kind: HistoryClosedKind::Closed,
-            window_id: request.window_id.clone(),
-        };
-        let value = serde_json::to_value(&result)
-            .map_err(|_| invalid_params_message("close result could not be serialized"))?;
-        self.succeed(&mut guard, value.clone(), Some(request.window_id), false);
-        Ok(value)
+    /// 尝试取得一个在途执行槽位；饱和时立即返回 `None`，由调用方拒绝本次 attempt。
+    pub(crate) fn try_acquire_in_flight(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        Arc::clone(&self.in_flight).try_acquire_owned().ok()
     }
 
     fn admit(&self, key: u64, fingerprint: [u8; 32]) -> Result<Admission, AcpError> {
@@ -742,26 +329,6 @@ impl HistoryV2Service {
         }
     }
 
-    fn succeed(
-        &self,
-        guard: &mut AttemptGuard<'_>,
-        response: Value,
-        window_id: Option<String>,
-        requires_window: bool,
-    ) {
-        let now = self.clock.now();
-        self.state.lock().ledger.finish_success(
-            guard.key,
-            guard.attempt,
-            guard.fingerprint,
-            response,
-            window_id,
-            requires_window,
-            now,
-        );
-        guard.disarm();
-    }
-
     fn fail_and<T>(
         &self,
         guard: &mut AttemptGuard<'_>,
@@ -797,18 +364,23 @@ impl HistoryV2Service {
     }
 
     #[cfg(test)]
-    pub(super) fn window_count(&self) -> usize {
+    pub(crate) fn window_count(&self) -> usize {
         self.state.lock().windows.count()
     }
 
     #[cfg(test)]
-    pub(super) fn opening_window_count(&self) -> usize {
+    pub(crate) fn opening_window_count(&self) -> usize {
         self.state.lock().windows.opening_count()
     }
 
     #[cfg(test)]
     pub(super) fn ledger_entry_count(&self) -> usize {
         self.state.lock().ledger.entry_count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn available_in_flight(&self) -> usize {
+        self.in_flight.available_permits()
     }
 }
 
@@ -850,6 +422,7 @@ fn resolve_access(
         snapshot,
         before_home: record.before_home.clone(),
         after_home: record.after_home.clone(),
+        cancel: record.cancel_handle(),
     };
     state.windows.touch(window_id, now);
     Ok(access)
@@ -866,6 +439,7 @@ fn window_access(state: &ServiceState, window_id: &str) -> Option<WindowAccess> 
         snapshot,
         before_home: record.before_home.clone(),
         after_home: record.after_home.clone(),
+        cancel: record.cancel_handle(),
     })
 }
 

@@ -136,6 +136,12 @@ pub(in crate::sessions) const HISTORY_WINDOW_OLDER_EXISTS_SQL: &str =
 pub(in crate::sessions) const HISTORY_WINDOW_NEWER_EXISTS_SQL: &str =
     "SELECT 1 FROM messages WHERE thread_id = ?1 AND rowid > ?2 AND rowid <= ?3 LIMIT 1";
 
+/// 条目元数据定位：主键 + 固定 tail，同时取出存储 role。长度仍由 blob 句柄给出，
+/// 不读取正文；这是 body 定位的独立入口，不受页预算影响。
+pub(in crate::sessions) const HISTORY_WINDOW_ENTRY_METADATA_SQL: &str = "SELECT rowid, role
+    FROM messages
+    WHERE thread_id = ?1 AND message_id = ?2 AND rowid <= ?3";
+
 /// 超大条目的行定位：只按主键（和固定 tail）取 `rowid`，总长度与请求区间都由
 /// `sqlite3_blob_bytes`/`sqlite3_blob_read` 给出，**不**用 `length(CAST(...))` 或
 /// `substr(CAST(...))` 物化整条正文。
@@ -482,7 +488,7 @@ pub(super) async fn read_window_candidates(
     Ok(candidates)
 }
 
-async fn read_content_length(
+pub(super) async fn read_content_length(
     connection: &mut SqliteConnection,
     rowid: i64,
 ) -> SessionResourceResult<u64> {
@@ -776,6 +782,13 @@ pub(in crate::sessions) const HISTORY_WINDOW_INHERITED_BODY_SQL: &str = "SELECT 
 pub(in crate::sessions) const HISTORY_WINDOW_INHERITED_CHUNK_SQL: &str =
     "SELECT length(CAST(je.value AS BLOB)),
             substr(CAST(je.value AS BLOB), ?3 + 1, ?4)
+    FROM threads t, json_each(t.inherited_context, '$.payloads') je
+    WHERE t.id = ?1 AND je.key = ?2";
+
+/// 非 canonical inherited 信封的条目长度（body 定位的独立回退入口）。
+/// 与 [`HISTORY_WINDOW_INHERITED_CHUNK_SQL`] 的 `length` 口径相同，但不取正文块。
+pub(in crate::sessions) const HISTORY_WINDOW_INHERITED_LENGTH_SQL: &str =
+    "SELECT length(CAST(je.value AS BLOB))
     FROM threads t, json_each(t.inherited_context, '$.payloads') je
     WHERE t.id = ?1 AND je.key = ?2";
 

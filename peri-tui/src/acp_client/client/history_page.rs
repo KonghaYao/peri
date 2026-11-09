@@ -19,6 +19,15 @@ use crate::kit::history_paging::{HistoryBodyRequest, WindowRequest};
 use super::AcpTuiClient;
 
 impl AcpTuiClient {
+    /// `session/load` 的唯一发送出口：由 V2 出站调度器串行调用，生命周期仍在
+    /// `session.rs` 中完成。
+    pub(crate) async fn send_session_load(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, AcpError> {
+        self.transport.send_request("session/load", params).await
+    }
+
     /// 拉取一页更早历史。返回原始响应体，由调用方（`history_page_consumer`）
     /// 按契约解码——本方法不猜测、不降级（解不开就丢弃整页）。
     pub(crate) async fn load_history_page(

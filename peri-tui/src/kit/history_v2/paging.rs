@@ -31,7 +31,6 @@ pub struct HistoryV2Retention {
     pub max_items: usize,
     pub max_bytes: usize,
     pub max_segments: usize,
-    pub max_body_bytes: usize,
 }
 
 impl Default for HistoryV2Retention {
@@ -40,7 +39,6 @@ impl Default for HistoryV2Retention {
             max_items: 200,
             max_bytes: 16 * 1024 * 1024,
             max_segments: 64,
-            max_body_bytes: 4 * 1024 * 1024,
         }
     }
 }
@@ -168,8 +166,6 @@ pub struct HistoryV2Paging {
     pub reserved_bytes: usize,
     pub home: Option<HistoryV2Home>,
     pub anchor: Option<HistoryV2AnchorState>,
-    pub bodies: BTreeMap<String, super::body::HistoryV2BodyState>,
-    pub retained_body_bytes: usize,
     pub live: HistoryV2LiveState,
     pub status: HistoryV2PagingStatus,
     pub last_error: Option<String>,
@@ -195,11 +191,6 @@ pub enum HistoryV2RequestRejection {
     InvalidAround,
     InvalidAnchor,
     ReusedRequestKey,
-    BodyUnavailable,
-    BodyComplete,
-    BodyInFlight,
-    InvalidBodyChunk,
-    BudgetExceeded,
 }
 
 /// 响应被丢弃的原因。`InvalidPage` 只携带字段级描述。
@@ -245,7 +236,6 @@ pub enum HistoryV2CancelOutcome {
     None,
     Page,
     Seek,
-    Body,
 }
 
 impl HistoryV2Window {
@@ -429,9 +419,8 @@ impl HistoryV2Window {
             return Err(HistoryV2RequestRejection::InvalidAround);
         }
 
-        // seek 改变导航代次：旧 page/body 响应此后一律按 key/epoch 丢弃。
+        // seek 改变导航代次：旧 page 响应此后一律按 key/epoch 丢弃。
         self.cancel_in_flight();
-        self.cancel_all_bodies();
         self.paging.view_epoch = self.paging.view_epoch.saturating_add(1);
         let reserved_bytes = self.paging.reservation_for(limits);
         let context = self.base_context(request_key);
@@ -531,7 +520,6 @@ impl HistoryV2Window {
             anchor,
             retained: true,
         });
-        self.clear_bodies();
         self.paging.status = HistoryV2PagingStatus::Ready;
         self.paging.last_error = None;
 
@@ -554,9 +542,6 @@ impl HistoryV2Window {
             };
             self.take_in_flight();
             return kind;
-        }
-        if self.cancel_body(request_key) {
-            return HistoryV2CancelOutcome::Body;
         }
         HistoryV2CancelOutcome::None
     }
@@ -582,9 +567,6 @@ impl HistoryV2Window {
             };
             self.take_in_flight();
             outcome = kind;
-        }
-        if self.fail_body(request_key, &reason) {
-            outcome = HistoryV2CancelOutcome::Body;
         }
         if outcome != HistoryV2CancelOutcome::None {
             self.paging.status = if reopen_required {
@@ -729,7 +711,6 @@ impl HistoryV2Window {
         self.sync_edge_cursors();
         self.refresh_retained_counts();
         self.recompute_coverage();
-        self.prune_bodies();
         self.refresh_anchor();
     }
 

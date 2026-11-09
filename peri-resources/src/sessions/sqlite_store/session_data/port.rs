@@ -497,6 +497,24 @@ impl SessionDataPort for SqliteSessionData {
         .await
     }
 
+    async fn read_history_entry_metadata(
+        &self,
+        id: &ThreadId,
+        source: peri_acp_types::history_common::HistorySource,
+        entry_id: MessageId,
+        committed_tail: Option<&peri_acp_types::history_common::HistoryCommittedTail>,
+        read_ticket: &peri_acp_types::history_common::HistoryReadTicket,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::HistoryEntryMetadata> {
+        self.read_history_entry_metadata_from_store(
+            id,
+            source,
+            entry_id,
+            committed_tail,
+            read_ticket,
+        )
+        .await
+    }
+
     async fn load_history_body_chunk(
         &self,
         id: &ThreadId,

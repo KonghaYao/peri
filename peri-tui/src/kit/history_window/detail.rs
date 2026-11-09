@@ -26,6 +26,10 @@ pub struct HistoryV2BodyBinding {
     pub entry_id: String,
     pub sub_item_id: String,
     pub body_ref: String,
+    /// 页面描述符声明的表示方式；正文块必须一致。
+    pub representation: peri_acp_types::history_v2::HistoryRepresentation,
+    /// 页面描述符声明的媒体类型；仅用于身份记录与展示校验。
+    pub media_type: String,
 }
 
 impl super::HistoryWindow {

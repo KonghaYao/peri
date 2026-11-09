@@ -43,8 +43,9 @@ pub mod history;
 
 pub mod history_window;
 pub use history_window::{
-    HistoryWindowEntry, HistoryWindowPagePlan, HistoryWindowReadIntent, HistoryWindowRows,
-    HistoryWindowTailExpectation, InheritedHistoryEntry, SessionHistoryWindowBounds,
+    HistoryEntryMetadata, HistoryWindowEntry, HistoryWindowPagePlan, HistoryWindowReadIntent,
+    HistoryWindowRows, HistoryWindowTailExpectation, InheritedHistoryEntry,
+    SessionHistoryWindowBounds,
 };
 
 mod metadata;
@@ -490,6 +491,29 @@ pub trait SessionResources: Send + Sync {
             committed_tail.clone(),
         );
         self.load_history_window_page(id, &plan).await
+    }
+
+    /// 按稳定条目身份读取元数据（canonical 长度 + own role），**不读取正文**。
+    ///
+    /// 这是正文定位的独立入口：结果不受页预算、页是否内联或 `descriptor` 分类影响。
+    /// 实现必须：
+    ///
+    /// - 只按 `(thread, source, entry id)` 定位单行，不做区间扫描；
+    /// - own 必须校验 `rowid <= committed_tail.position`；inherited 必须校验冻结快照身份；
+    /// - 长度使用存储层 O(1) 事实（SQLite `sqlite3_blob_bytes`），不得物化正文。
+    ///
+    /// 默认实现失败（`Unsupported`）：没有这条读取的后端不能靠页面重读猜正文存在性。
+    async fn read_history_entry_metadata(
+        &self,
+        _id: &ThreadId,
+        _source: HistorySource,
+        _entry_id: MessageId,
+        _committed_tail: Option<&HistoryCommittedTail>,
+        _read_ticket: &HistoryReadTicket,
+    ) -> SessionResourceResult<HistoryEntryMetadata> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
     }
 
     /// 有界读取超大条目的正文块（原始字节）。

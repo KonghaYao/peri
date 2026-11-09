@@ -328,6 +328,22 @@ pub(crate) trait SessionDataPort: Send + Sync {
         self.load_history_window_page(id, &plan).await
     }
 
+    /// 按稳定身份读取条目元数据（长度 + own role）；默认失败，不得退回整页重读。
+    async fn read_history_entry_metadata(
+        &self,
+        _id: &ThreadId,
+        _source: HistorySource,
+        _entry_id: MessageId,
+        _committed_tail: Option<&HistoryCommittedTail>,
+        _read_ticket: &HistoryReadTicket,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::HistoryEntryMetadata> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
+    }
+
     /// 有界正文分块；默认失败，不得退回完整历史读取。
     async fn load_history_body_chunk(
         &self,

@@ -4,9 +4,12 @@
 //! 所有方法都是同步短操作；调用方在持有 `ServiceState` 锁时**不得** await 后端。
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use peri_acp_types::history_v2::HistorySnapshotRef;
+use tokio_util::sync::CancellationToken;
 
 /// 窗口空闲期限：最后一次成功校验后 5 分钟。
 pub(super) const WINDOW_IDLE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -77,6 +80,40 @@ impl HistoryClock for SystemClock {
     }
 }
 
+/// 窗口在途读的取消句柄。
+///
+/// `closed` 区分「显式关闭/会话拆除」与「过期/取消清理」：两者都撤销后端读取，
+/// 但迟到结果分别映射为 `window_closed` 与 `window_expired`。
+#[derive(Clone)]
+pub(super) struct WindowCancel {
+    token: CancellationToken,
+    closed: Arc<AtomicBool>,
+}
+
+impl WindowCancel {
+    fn new() -> Self {
+        Self {
+            token: CancellationToken::new(),
+            closed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn cancel(&self, closed: bool) {
+        if closed {
+            self.closed.store(true, Ordering::SeqCst);
+        }
+        self.token.cancel();
+    }
+
+    pub(super) async fn cancelled(&self) {
+        self.token.cancelled().await;
+    }
+
+    pub(super) fn was_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+}
+
 /// 窗口记录；`Opening` 阶段没有快照（后端尚未返回）。
 pub(super) struct WindowRecord {
     pub(super) window_id: String,
@@ -89,6 +126,8 @@ pub(super) struct WindowRecord {
     pub(super) created_at: Duration,
     pub(super) last_used_at: Duration,
     pub(super) opening_started_at: Option<Duration>,
+    /// 本窗口的在途读取消信号：close/session close/过期/连接拆除时触发。
+    cancel: WindowCancel,
     /// 本窗口已交付的 opaque `bodyRef`；body 授权只看这里。
     issued_body_refs: IssuedBodyRefs,
 }
@@ -112,8 +151,13 @@ impl WindowRecord {
             created_at: now,
             last_used_at: now,
             opening_started_at: Some(now),
+            cancel: WindowCancel::new(),
             issued_body_refs: IssuedBodyRefs::default(),
         }
+    }
+
+    pub(super) fn cancel_handle(&self) -> WindowCancel {
+        self.cancel.clone()
     }
 
     fn is_expired(&self, now: Duration) -> bool {
@@ -135,6 +179,8 @@ pub(super) struct WindowAccess {
     pub(super) snapshot: HistorySnapshotRef,
     pub(super) before_home: Option<String>,
     pub(super) after_home: Option<String>,
+    /// 窗口关闭/移除时取消在途后端读取；迟到结果不得发布。
+    pub(super) cancel: WindowCancel,
 }
 
 struct ClosedWindow {
@@ -163,7 +209,9 @@ impl WindowRegistry {
             .map(|(id, _)| id.clone())
             .collect();
         for id in expired {
-            self.windows.remove(&id);
+            if let Some(record) = self.windows.remove(&id) {
+                record.cancel.cancel(false);
+            }
         }
         while self
             .closed
@@ -197,12 +245,38 @@ impl WindowRegistry {
     }
 
     /// 占位；容量按 `max` 限制。调用方先 `prune`。
-    pub(super) fn reserve(&mut self, record: WindowRecord, max: u32) -> Result<(), ()> {
-        if self.windows.len() >= max as usize {
+    ///
+    /// 替换预留（FIX-05）：同会话已有可用窗口且总数恰好达到 `max` 时，允许一个额外
+    /// 候选槽（总数上限 `max + 1`），用于「先准备、后提交」的窗口替换。候选未提交前
+    /// 旧窗口保持可读；提交或回收后计数回到 `max` 内。同一会话同时只允许一个
+    /// `Opening` 占位，避免并发初始装载累积候选。
+    pub(super) fn reserve(
+        &mut self,
+        record: WindowRecord,
+        max: u32,
+        allow_replacement: bool,
+    ) -> Result<(), ()> {
+        let same_session_opening = self.windows.values().any(|existing| {
+            existing.session_id == record.session_id && existing.snapshot.is_none()
+        });
+        if same_session_opening {
             return Err(());
         }
-        self.windows.insert(record.window_id.clone(), record);
-        Ok(())
+        if self.windows.len() < max as usize {
+            self.windows.insert(record.window_id.clone(), record);
+            return Ok(());
+        }
+        let replaces_same_session = allow_replacement
+            && self.windows.len() == max as usize
+            && self
+                .windows
+                .values()
+                .any(|existing| existing.session_id == record.session_id);
+        if replaces_same_session {
+            self.windows.insert(record.window_id.clone(), record);
+            return Ok(());
+        }
+        Err(())
     }
 
     /// 把 `Opening` 升级为 `Ready`；占位已被清理时返回 false。
@@ -279,10 +353,25 @@ impl WindowRegistry {
         now: Duration,
         record_closed: bool,
     ) -> usize {
+        self.remove_session_except(session_id, None, now, record_closed)
+    }
+
+    /// 关闭某会话除 `keep` 以外的全部窗口；用于 initial 提交时替换旧窗口。
+    ///
+    /// `keep` 是刚完成准备、尚未发布的候选窗口；只有提交成功后才调用。返回移除数量。
+    pub(super) fn remove_session_except(
+        &mut self,
+        session_id: &str,
+        keep: Option<&str>,
+        now: Duration,
+        record_closed: bool,
+    ) -> usize {
         let ids: Vec<String> = self
             .windows
             .iter()
-            .filter(|(_, record)| record.session_id == session_id)
+            .filter(|(id, record)| {
+                record.session_id == session_id && keep.is_none_or(|keep| *id != keep)
+            })
             .map(|(id, _)| id.clone())
             .collect();
         let removed = ids.len();
@@ -290,6 +379,22 @@ impl WindowRegistry {
             self.remove(&id, now, record_closed);
         }
         removed
+    }
+
+    /// 丢弃一个尚未发布的窗口（候选回收）：不记录 closed 身份，不影响其他窗口。
+    pub(super) fn discard(&mut self, window_id: &str) -> bool {
+        let Some(record) = self.windows.remove(window_id) else {
+            return false;
+        };
+        record.cancel.cancel(false);
+        true
+    }
+
+    /// 窗口的在途读取消信号；窗口已被移除时返回 `None`。
+    pub(super) fn cancel_handle(&self, window_id: &str) -> Option<WindowCancel> {
+        self.windows
+            .get(window_id)
+            .map(|record| record.cancel_handle())
     }
 
     /// 取消清理：只移除仍处于 `Opening` 的占位，已完成的窗口不受影响。
@@ -303,13 +408,20 @@ impl WindowRegistry {
         if record.snapshot.is_some() {
             return false;
         }
-        self.windows.remove(window_id);
+        if let Some(record) = self.windows.remove(window_id) {
+            record.cancel.cancel(false);
+        }
         true
     }
 
     /// 移除窗口；显式 close 记录身份，失效/过期不记录。
     pub(super) fn remove(&mut self, window_id: &str, now: Duration, record_closed: bool) {
-        if self.windows.remove(window_id).is_some() && record_closed {
+        let Some(record) = self.windows.remove(window_id) else {
+            return;
+        };
+        // 关闭/移除撤销该窗口的在途读；`record_closed` 决定迟到结果的领域原因。
+        record.cancel.cancel(record_closed);
+        if record_closed {
             self.closed.push_back(ClosedWindow {
                 window_id: window_id.to_owned(),
                 closed_at: now,

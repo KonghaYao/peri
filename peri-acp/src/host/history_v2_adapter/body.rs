@@ -5,10 +5,10 @@
 //! 失败，不静默截断后冒充完整正文。
 
 use base64::Engine as _;
+use peri_acp_types::history_common::{HistoryCommittedTail, HistorySource as WindowSource};
 use peri_acp_types::history_v2::{
     DecimalU64, HistoryBackendError, HistoryBodySlice, HistoryEncoding, HistoryRepresentation,
 };
-use peri_acp_types::history_window::{HistoryCommittedTail, HistorySource as WindowSource};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::store::deserialize_persisted_payload;
 use peri_acp_types::thread::ThreadId;

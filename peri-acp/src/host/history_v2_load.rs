@@ -30,9 +30,10 @@ pub(crate) struct LoadInitial {
 
 /// 解析 `session/load` 的 `_meta["peri.history"]`。
 ///
-/// - 没有 meta：V2 连接按设计显式拒绝；旧连接返回 `None`，保持 V1 行为。
-/// - 有 meta：未协商 V2 → `protocol_not_negotiated`；混入旧顶层私有字段 → `-32602`；
-///   `action` 不为 `initial`、未知字段、版本或预算不合法 → `-32602`。
+/// - 携带旧顶层私有字段：无论是否协商 V2 都在装配前 `-32602` 拒绝；
+/// - 没有 meta：V2 连接显式拒绝（initial 必填）；标准连接返回 `None`，走标准完整回放；
+/// - 有 meta：未协商 V2 → `protocol_not_negotiated`；`action` 不为 `initial`、未知字段、
+///   版本或预算不合法 → `-32602`。
 pub(crate) fn parse(
     params: &Value,
     facts: &ConnectionFacts,
@@ -41,6 +42,21 @@ pub(crate) fn parse(
         .get("_meta")
         .and_then(Value::as_object)
         .and_then(|meta| meta.get(HISTORY_META_KEY));
+    // 旧私有参数一律不再解释：即使标准连接也不能靠顶层 cursor/limit 触发旧分页。
+    if let Some(field) = LEGACY_PRIVATE_FIELDS
+        .iter()
+        .find(|field| params.get(**field).is_some())
+    {
+        let reason = if facts.history_v2 && raw.is_some() {
+            "history_initial_mixed_fields"
+        } else {
+            "history_legacy_fields_removed"
+        };
+        return Err(invalid_request(
+            reason,
+            format!("{field} is no longer supported on session/load"),
+        ));
+    }
     let Some(raw) = raw else {
         if facts.history_v2 {
             return Err(invalid_request(
@@ -53,14 +69,6 @@ pub(crate) fn parse(
     if !facts.history_v2 {
         // 未协商的连接不能靠一次 load 隐式切换到 V2；也不得把 initial 当作未知元数据忽略。
         return Err(protocol_not_negotiated_error());
-    }
-    for field in LEGACY_PRIVATE_FIELDS {
-        if params.get(field).is_some() {
-            return Err(invalid_request(
-                "history_initial_mixed_fields",
-                format!("{field} is mutually exclusive with _meta[\"peri.history\"]"),
-            ));
-        }
     }
     let limits = limits(facts);
     let request = HistoryInitialRequest::decode(raw).map_err(invalid_params)?;
@@ -85,4 +93,85 @@ fn invalid_params(error: peri_acp_types::history_v2::HistoryContractError) -> Ac
 
 fn invalid_request(reason: &'static str, message: impl Into<String>) -> AcpError {
     AcpError::new(-32602, message).with_data(json!({ "reason": reason }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use peri_acp_types::history_v2::{
+        HistoryLimits, HistoryServerCapability, HISTORY_CHANGED_NOTIFICATION, HISTORY_METHOD,
+    };
+    use peri_acp_types::PeriCaps;
+
+    fn v2_facts() -> ConnectionFacts {
+        ConnectionFacts {
+            history_v2: true,
+            mcp_control_v1: false,
+            caps: PeriCaps {
+                history_v2: Some(HistoryServerCapability {
+                    version: 2,
+                    selected_profile: "windowed".into(),
+                    method: HISTORY_METHOD.into(),
+                    notification: HISTORY_CHANGED_NOTIFICATION.into(),
+                    limits: HistoryLimits::default(),
+                }),
+                ..PeriCaps::default()
+            },
+            admission_caps: PeriCaps::default(),
+        }
+    }
+
+    fn initial_params() -> Value {
+        json!({
+            "sessionId": "s1",
+            "_meta": {
+                "peri.history": {
+                    "version": 2,
+                    "action": "initial",
+                    "requestKey": "1",
+                    "limit": 50,
+                    "targetBytes": 524_288,
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn legacy_top_level_fields_are_rejected_for_both_connection_kinds() {
+        for field in LEGACY_PRIVATE_FIELDS {
+            let mut params = initial_params();
+            params[field] = json!("legacy");
+            let error = parse(&params, &v2_facts()).unwrap_err();
+            assert_eq!(error.code, -32602, "{field}");
+            assert_eq!(
+                error.data.as_ref().and_then(|data| data["reason"].as_str()),
+                Some("history_initial_mixed_fields"),
+                "V2 连接混入旧字段: {field}"
+            );
+
+            let mut standard = json!({ "sessionId": "s1" });
+            standard[field] = json!("legacy");
+            let error = parse(&standard, &ConnectionFacts::unnegotiated()).unwrap_err();
+            assert_eq!(error.code, -32602, "{field}");
+            assert_eq!(
+                error.data.as_ref().and_then(|data| data["reason"].as_str()),
+                Some("history_legacy_fields_removed"),
+                "标准连接不得再解释旧字段: {field}"
+            );
+        }
+
+        let params = json!({ "sessionId": "s1" });
+        assert!(
+            parse(&params, &ConnectionFacts::unnegotiated())
+                .unwrap()
+                .is_none(),
+            "标准连接不带旧字段时仍走标准 load"
+        );
+    }
+
+    #[test]
+    fn unnegotiated_initial_is_rejected_before_assembly() {
+        let error = parse(&initial_params(), &ConnectionFacts::unnegotiated()).unwrap_err();
+        assert_eq!(error.code, -32000);
+    }
 }

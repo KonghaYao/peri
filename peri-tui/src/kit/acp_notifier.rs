@@ -425,11 +425,15 @@ fn decode_live_update(params: &Value, session_id: &str) -> Vec<AcpEventWithEpoch
     let mut events = Vec::new();
     if let Some((entry_id, position)) = session_update::decode_entry_marks(update) {
         events.push(AcpEventWithEpoch {
+            child_origin: None,
+            view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
             event: AcpEventData::ReplayEntryMarked { entry_id, position },
             active_session_id: session_id.to_string(),
         });
     }
     events.push(AcpEventWithEpoch {
+        child_origin: None,
+        view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
         event,
         active_session_id: session_id.to_string(),
     });
