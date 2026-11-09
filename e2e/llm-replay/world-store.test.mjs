@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, cp, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  canonicalRecordedBody, compactTypedTemplateRules, createWorldBuilder, decodeRequestStub,
-  encodeRequestStub, expandTypedTemplateRules, loadWorld, worldLeafFile,
+  canonicalRecordedBody, collectWorldRefs, compactTypedTemplateRules, createWorldBuilder, decodeRequestStub,
+  encodeRequestStub, expandTypedTemplateRules, loadWorld, requestCoreSha256, worldLeafFile,
 } from './world-store.mjs';
 import { createRequestBindingAdapter } from './request-bindings.mjs';
 import { canonicalBody, canonicalJson, sha256 } from './matcher.mjs';
@@ -23,6 +23,16 @@ async function sealedWorld(t, build = () => {}) {
   build(builder);
   await builder.seal(root);
   return { directory, root, builder };
+}
+
+async function rewriteWorldLeaf(source, target, leafId, content) {
+  await cp(source, target, { recursive: true });
+  const manifest = JSON.parse(await readFile(path.join(target, 'manifest.json'), 'utf8'));
+  await writeFile(path.join(target, manifest.leaves[leafId].file), content);
+  const seal = JSON.parse(await readFile(path.join(target, 'seal.json'), 'utf8'));
+  seal.leaves[leafId] = sha256(Buffer.from(content));
+  await writeFile(path.join(target, 'seal.json'), `${JSON.stringify(seal)}\n`);
+  return loadWorld(target);
 }
 
 const identity = { owner: 'root', execution: 'turn-1', call: 'reason:1', attempt: 1, purpose: 'reason' };
@@ -236,14 +246,56 @@ test('stub 引用缺少 world 时失败，raw hash 与长度受到校验', async
     const stub = encodeRequestStub(body, { world: builder });
     await builder.seal(path.join(directory, 'world'));
     const world = await loadWorld(path.join(directory, 'world'));
+    const worldRefs = collectWorldRefs(stub.parts, world);
     const broken = { ...stub, rawSha256: '0'.repeat(64) };
-    await assert.rejects(decodeRequestStub(broken, { world }), { code: 'corrupt_cassette' });
-    const drifted = await decodeRequestStub(broken, { world, allowDrift: true });
-    assert.equal(drifted.drifted, true);
+    await assert.rejects(decodeRequestStub(broken, { world, worldRefs }), { code: 'corrupt_cassette' });
+    // 只有哈希字段变化、leaf 内容未变时，drift 无法解释，仍按损坏处理。
+    await assert.rejects(decodeRequestStub(broken, { world, worldRefs }), (error) => error.code === 'corrupt_cassette');
     const missing = { ...stub, parts: stub.parts.map((part) => part.leaf ? { ...part, leaf: 'sys.sha256.missing' } : part) };
-    await assert.rejects(decodeRequestStub(missing, { world }), { code: 'unknown_world_leaf' });
+    await assert.rejects(decodeRequestStub(missing, { world, worldRefs }), { code: 'unknown_world_leaf' });
     await assert.rejects(decodeRequestStub(stub, {}), { code: 'missing_world' });
-    await assert.rejects(decodeRequestStub({ ...stub, rawBytes: 1 }, { world }), { code: 'corrupt_cassette' });
+    await assert.rejects(decodeRequestStub({ ...stub, rawBytes: 1 }, { world, worldRefs }), { code: 'corrupt_cassette' });
+    assert.equal(requestCoreSha256(stub), requestCoreSha256(JSON.parse(JSON.stringify(stub))));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('mapped leaf 变化可解释 drift，未映射 leaf 与结构变化必须失败', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'peri-world-drift-'));
+  try {
+    const builder = createWorldBuilder();
+    builder.addLeaf('sys.skills', 'SKILLS-A');
+    builder.addLeaf('sys.block0.main', 'BLOCK-STATIC');
+    const body = Buffer.from(JSON.stringify({
+      model: 'fixture-model', max_tokens: 32000,
+      system: [{ type: 'text', text: 'SKILLS-A' }, { type: 'text', text: 'BLOCK-STATIC' }],
+      messages: [],
+    }));
+    const slots = (field) => (field.path === '/system/0/text'
+      ? { leaf: 'sys.skills' }
+      : field.path === '/system/1/text' ? { leaf: 'sys.block0.main' } : null);
+    const stub = encodeRequestStub(body, { world: builder, slots });
+    await builder.seal(path.join(directory, 'world'));
+    const world = await loadWorld(path.join(directory, 'world'));
+    const worldRefs = collectWorldRefs(stub.parts, world);
+    assert.deepEqual(worldRefs.map((ref) => ref.id), ['sys.skills', 'sys.block0.main']);
+
+    // 只有 mapped leaf 允许变化。
+    const skillsWorld = await rewriteWorldLeaf(path.join(directory, 'world'), path.join(directory, 'skills-world'), 'sys.skills', 'SKILLS-B');
+    const drifted = await decodeRequestStub(stub, { world: skillsWorld, worldRefs });
+    assert.equal(drifted.drifted, true);
+    assert.deepEqual(drifted.driftLeaves, ['sys.skills']);
+    assert.match(drifted.bytes.toString('utf8'), /SKILLS-B/u);
+
+    // 未映射 leaf 变化必须失败。
+    const blockWorld = await rewriteWorldLeaf(path.join(directory, 'world'), path.join(directory, 'block-world'), 'sys.block0.main', 'BLOCK-TAMPER');
+    await assert.rejects(decodeRequestStub(stub, { world: blockWorld, worldRefs }),
+      (error) => error.code === 'world_drift_unmapped_leaf' && error.details.leaf === 'sys.block0.main');
+
+    // 录制的 leaf 序列与当前 recipe 结构不一致时失败。
+    const reordered = { ...stub, parts: [stub.parts[0], stub.parts[3], stub.parts[2], stub.parts[1], stub.parts[4]] };
+    await assert.rejects(decodeRequestStub(reordered, { world: skillsWorld, worldRefs }), { code: 'corrupt_cassette' });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { canonicalBody, canonicalJson, ReplayError, sha256 } from './matcher.mjs';
 import { createBindingRegistry } from './bindings.mjs';
 import { templateFor } from './template-text.mjs';
+import { isSyncedWorldLeaf } from './world-mapping.mjs';
 
 export const WORLD_FORMAT_VERSION = 2;
 export const CASSETTE_FORMAT_VERSION = 2;
@@ -173,6 +174,7 @@ export function createWorldBuilder({ generation } = {}) {
     },
     hasLeaf: (id) => leaves.has(id),
     leafBytes: (id) => leaves.get(id)?.bytes,
+    recipeParts: (id) => recipes.get(id),
     render: renderer.render,
     renderParts: renderer.renderParts,
     async seal(directory) {
@@ -287,6 +289,7 @@ export async function loadWorld(directory) {
     recipes: [...recipes.keys()],
     hasLeaf: (id) => leaves.has(id),
     leafBytes: (id) => leaves.get(id)?.bytes,
+    recipeParts: (id) => recipes.get(id),
     render: renderer.render,
     renderParts: renderer.renderParts,
   });
@@ -423,6 +426,48 @@ function collectWorldFields(root) {
 }
 
 /**
+ * 按渲染顺序展开 stub 引用的 world leaf，并记录录制时的内容哈希。
+ * 顺序与重复次数参与 drift 校验，防止 recipe 结构被改写后仍被当成内容漂移。
+ */
+function collectRefs(parts, world, stack, out) {
+  for (const part of parts) {
+    if (typeof part === 'string') continue;
+    if (!isPlainObject(part)) fail('invalid_request_stub', 'request stub part 必须是字面量或引用');
+    if (part.leaf !== undefined) {
+      const bytes = world.leafBytes(part.leaf);
+      if (!bytes) fail('unknown_world_leaf', '引用了不存在的 world leaf', { leaf: part.leaf });
+      out.push({ id: part.leaf, sha256: sha256(bytes) });
+      continue;
+    }
+    if (part.recipe !== undefined) {
+      if (stack.includes(part.recipe) || stack.length >= MAX_RECIPE_DEPTH) {
+        fail('world_recipe_cycle', 'world recipe 存在循环引用', { recipe: part.recipe });
+      }
+      const inner = world.recipeParts?.(part.recipe);
+      if (!inner) fail('unknown_world_recipe', '引用了不存在的 world recipe', { recipe: part.recipe });
+      collectRefs(inner, world, [...stack, part.recipe], out);
+      continue;
+    }
+    // legacy raw 文件由 cassette seal 单独覆盖，没有 world 引用。
+    if (part.raw === undefined) fail('invalid_request_stub', '未知 request stub part');
+  }
+}
+
+export function collectWorldRefs(parts, world) {
+  const hasRefs = parts.some((part) => isPlainObject(part) && (part.leaf !== undefined || part.recipe !== undefined));
+  if (!hasRefs) return [];
+  if (!world || typeof world.recipeParts !== 'function') fail('missing_world', 'request stub 引用了 world，但未提供 world');
+  const out = [];
+  collectRefs(parts, world, [], out);
+  return out;
+}
+
+/** 覆盖 stub 全部语义字段的摘要：字面量、哈希字段与引用结构任一处变化都会失配。 */
+export function requestCoreSha256(stub) {
+  return sha256(canonicalJson(JSON.parse(JSON.stringify(stub))));
+}
+
+/**
  * world 字段按原字节 splice 成 stub；无法稳定重建时整条请求退化为 legacy body。
  * 调用方必须保证 slots 返回的引用在目标 world 中可渲染。
  */
@@ -490,19 +535,63 @@ function validateStubHeader(stub) {
   }
 }
 
-function verifyRaw(stub, bytes, { allowDrift = false } = {}) {
-  const lengthMismatch = stub.rawBytes !== undefined && bytes.length !== stub.rawBytes;
-  const hashMismatch = sha256(bytes) !== stub.rawSha256;
-  if (!lengthMismatch && !hashMismatch) return false;
-  // world:sync 只改 leaf + seal，stub 中的 raw/canonical hash 是录制值。
-  // stub 与 leaf 均由 seal 覆盖，因此渲染差异只能来自显式 world 变更；报告 drift 而不是失败。
-  if (allowDrift) return true;
-  if (lengthMismatch) fail('corrupt_cassette', 'request body 长度不符', { rawSha256: stub.rawSha256 });
-  fail('corrupt_cassette', 'request body 校验失败', { rawSha256: stub.rawSha256 });
+function verifyRaw(stub, bytes) {
+  if (stub.rawBytes !== undefined && bytes.length !== stub.rawBytes) return 'length';
+  if (sha256(bytes) !== stub.rawSha256) return 'hash';
+  return null;
+}
+
+const HEX_SHA256 = /^[0-9a-f]{64}$/u;
+
+function recordedWorldRefs(worldRefs) {
+  if (!Array.isArray(worldRefs)) fail('corrupt_cassette', 'request stub 缺少录制的 world 引用快照');
+  const recorded = new Map();
+  for (const ref of worldRefs) {
+    if (!isPlainObject(ref) || Object.keys(ref).some((key) => !['id', 'sha256'].includes(key))) {
+      fail('corrupt_cassette', '录制的 world 引用快照无效');
+    }
+    validId(ref.id, 'leaf');
+    if (typeof ref.sha256 !== 'string' || !HEX_SHA256.test(ref.sha256)) {
+      fail('corrupt_cassette', '录制的 world leaf 哈希无效', { leaf: ref.id });
+    }
+    const existing = recorded.get(ref.id);
+    if (existing !== undefined && existing !== ref.sha256) {
+      fail('corrupt_cassette', '同一 world leaf 的录制哈希不一致', { leaf: ref.id });
+    }
+    recorded.set(ref.id, ref.sha256);
+  }
+  return recorded;
+}
+
+/**
+ * raw 哈希失配时只接受一种解释：stub 结构与字面量未变（由 requestCoreSha256 覆盖），
+ * 且所有内容变化的 leaf 都属于 world:sync 管理的集合。
+ */
+function explainWorldDrift(stub, { world, worldRefs, syncedLeaf, mismatch }) {
+  const recorded = recordedWorldRefs(worldRefs);
+  const current = collectWorldRefs(stub.parts, world);
+  if (current.length !== worldRefs.length || current.some((ref, index) => ref.id !== worldRefs[index].id)) {
+    fail('corrupt_cassette', 'world 渲染结构与录制不一致', {
+      expected: worldRefs.map((ref) => ref.id), actual: current.map((ref) => ref.id),
+    });
+  }
+  const changed = [];
+  for (const ref of current) {
+    if (recorded.get(ref.id) === ref.sha256) continue;
+    if (!syncedLeaf(ref.id)) {
+      fail('world_drift_unmapped_leaf', '未映射 world leaf 变化无法解释请求漂移', { leaf: ref.id });
+    }
+    changed.push(ref.id);
+  }
+  if (!changed.length) {
+    if (mismatch === 'length') fail('corrupt_cassette', 'request body 长度不符', { rawSha256: stub.rawSha256 });
+    fail('corrupt_cassette', 'request body 校验失败', { rawSha256: stub.rawSha256 });
+  }
+  return [...new Set(changed)];
 }
 
 /** 由 stub 重建 raw body；legacy part 必须由调用方提供受 seal 覆盖的读取器。 */
-export async function decodeRequestStub(stub, { world, readRaw, allowDrift = false } = {}) {
+export async function decodeRequestStub(stub, { world, readRaw, worldRefs, syncedLeaf = isSyncedWorldLeaf } = {}) {
   validateStubHeader(stub);
   const rawParts = stub.parts.filter((part) => isPlainObject(part) && Object.hasOwn(part, 'raw'));
   if (rawParts.length) {
@@ -510,8 +599,10 @@ export async function decodeRequestStub(stub, { world, readRaw, allowDrift = fal
     if (typeof rawParts[0].raw !== 'string' || !rawParts[0].raw) fail('invalid_request_stub', 'legacy part 必须指向文件');
     if (!readRaw) fail('invalid_request_stub', '缺少 legacy body 读取器');
     const bytes = await readRaw(rawParts[0].raw);
-    verifyRaw(stub, bytes);
-    return { bytes, legacy: true, legacyFile: rawParts[0].raw, drifted: false };
+    const mismatch = verifyRaw(stub, bytes);
+    if (mismatch === 'length') fail('corrupt_cassette', 'request body 长度不符', { rawSha256: stub.rawSha256 });
+    if (mismatch) fail('corrupt_cassette', 'request body 校验失败', { rawSha256: stub.rawSha256 });
+    return { bytes, legacy: true, legacyFile: rawParts[0].raw, drifted: false, driftLeaves: [] };
   }
   const chunks = stub.parts.map((part) => {
     if (typeof part === 'string') return Buffer.from(part, 'utf8');
@@ -521,8 +612,10 @@ export async function decodeRequestStub(stub, { world, readRaw, allowDrift = fal
     return world.render(part);
   });
   const bytes = Buffer.concat(chunks);
-  const drifted = verifyRaw(stub, bytes, { allowDrift });
-  return { bytes, legacy: false, drifted };
+  const mismatch = verifyRaw(stub, bytes);
+  if (!mismatch) return { bytes, legacy: false, drifted: false, driftLeaves: [] };
+  const driftLeaves = explainWorldDrift(stub, { world, worldRefs, syncedLeaf, mismatch });
+  return { bytes, legacy: false, drifted: true, driftLeaves };
 }
 
 const recordedKey = (kind, alias) => `${kind}:${alias}`;

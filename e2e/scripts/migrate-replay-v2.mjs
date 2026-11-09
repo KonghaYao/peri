@@ -22,9 +22,9 @@ const { loadCassette } = await load('e2e/llm-replay/cassette.mjs');
 const { createBindingRegistry } = await load('e2e/llm-replay/bindings.mjs');
 const { identityKey, sha256 } = await load('e2e/llm-replay/matcher.mjs');
 const {
-  CASSETTE_FORMAT_VERSION, canonicalRecordedBody, compactTypedTemplateRules,
+  CASSETTE_FORMAT_VERSION, canonicalRecordedBody, collectWorldRefs, compactTypedTemplateRules,
   createWorldBuilder, encodeRequestStub, expandTypedTemplateRules, loadWorld,
-  parseRequestSpans, serializeRequestStub,
+  parseRequestSpans, requestCoreSha256, serializeRequestStub,
 } = await load('e2e/llm-replay/world-store.mjs');
 
 const { values } = parseArgs({
@@ -60,11 +60,43 @@ for (const entry of await readdir(fixtures, { withFileTypes: true })) {
 }
 ids.sort();
 
-// 已是 v2：直接跳过，保证生成器可重复运行。
+/**
+ * 为已迁移的 v2 cassette 补齐 seal.requestMeta：把 stub 语义摘要与录制时 leaf 哈希
+ * 锚定到 seal，重封 stub 文件本身不再能让字面量或哈希字段的变化通过校验。
+ * 幂等：全部 seal 已一致时不写文件。
+ */
+async function upgradeV2RequestMeta() {
+  const world = await loadWorld(worldDir);
+  let upgraded = 0;
+  for (const id of ids) {
+    const directory = path.join(fixtures, id, 'cassette');
+    const sealPath = path.join(directory, 'seal.json');
+    const seal = JSON.parse(await readFile(sealPath, 'utf8'));
+    if (seal.formatVersion !== CASSETTE_FORMAT_VERSION) continue;
+    const manifest = JSON.parse(await readFile(path.join(directory, 'manifest.json'), 'utf8'));
+    const requestMeta = {};
+    for (const entry of manifest.entries) {
+      const stub = JSON.parse(await readFile(path.join(directory, entry.request.stub), 'utf8'));
+      requestMeta[entry.request.stub] = {
+        requestCoreSha256: requestCoreSha256(stub),
+        worldRefs: collectWorldRefs(stub.parts, world),
+      };
+    }
+    const sorted = Object.fromEntries(Object.entries(requestMeta).sort(([left], [right]) => left.localeCompare(right)));
+    if (sameJson(seal.requestMeta, sorted)) continue;
+    await writeFile(sealPath, `${JSON.stringify({ ...seal, requestMeta: sorted })}\n`, { mode: 0o600 });
+    upgraded += 1;
+    await loadCassette(directory);
+  }
+  return upgraded;
+}
+
+// 已是 v2：补齐/核对 seal.requestMeta 后跳过，保证生成器可重复运行。
 if (await exists(path.join(worldDir, 'manifest.json'))) {
   const existing = JSON.parse(await readFile(path.join(worldDir, 'manifest.json'), 'utf8'));
   if (existing.formatVersion === CASSETTE_FORMAT_VERSION) {
-    console.log(JSON.stringify({ skipped: true, reason: 'already-v2' }));
+    const upgraded = await upgradeV2RequestMeta();
+    console.log(JSON.stringify({ skipped: upgraded === 0, reason: 'already-v2', upgradedSeals: upgraded }));
     process.exit(0);
   }
 }
@@ -344,6 +376,7 @@ try {
       await mkdir(path.join(output, 'responses'), { recursive: true });
       const manifestEntries = [];
       const sealedFiles = {};
+      const requestMeta = {};
       for (const request of requests.filter((item) => item.cassette === cassette)) {
         const id = sha256(identityKey(request.entry.identity));
         const stubFile = `requests/${id}.stub.json`;
@@ -352,6 +385,10 @@ try {
         const stubBytes = serializeRequestStub(request.stub);
         await writeFile(path.join(output, stubFile), stubBytes, { mode: 0o600 });
         sealedFiles[stubFile] = sha256(stubBytes);
+        requestMeta[stubFile] = {
+          requestCoreSha256: requestCoreSha256(request.stub),
+          worldRefs: collectWorldRefs(request.stub.parts, builder),
+        };
         await writeFile(path.join(output, responseFile), await readFile(path.join(cassette.directory, request.entry.response.file)), { mode: 0o600 });
         manifestEntries.push({
           identity: request.entry.identity,
@@ -377,6 +414,7 @@ try {
         formatVersion: CASSETTE_FORMAT_VERSION,
         manifestSha256: sha256(manifestBytes),
         files: Object.fromEntries(Object.entries(sealedFiles).sort(([left], [right]) => left.localeCompare(right))),
+        requestMeta: Object.fromEntries(Object.entries(requestMeta).sort(([left], [right]) => left.localeCompare(right))),
       };
       await writeFile(path.join(output, 'seal.json'), `${JSON.stringify(seal)}\n`, { mode: 0o600 });
       stagedCassettes.set(cassette.id, output);

@@ -4,8 +4,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { canonicalBody, canonicalJson, identityKey, ReplayError, sha256 } from './matcher.mjs';
 import {
-  CASSETTE_FORMAT_VERSION, canonicalRecordedBody, compactTypedTemplateRules, decodeRequestStub,
-  encodeRequestStub, expandTypedTemplateRules, loadWorld, serializeRequestStub,
+  CASSETTE_FORMAT_VERSION, canonicalRecordedBody, collectWorldRefs, compactTypedTemplateRules, decodeRequestStub,
+  encodeRequestStub, expandTypedTemplateRules, loadWorld, requestCoreSha256, serializeRequestStub,
 } from './world-store.mjs';
 
 const FORMAT_VERSION = 1;
@@ -23,7 +23,7 @@ async function hashFile(file) {
   return { sha256: hash.digest('hex'), size };
 }
 
-export async function createCassetteWriter(directory, { provenance = {}, maxResponseBytes = 64 * 1024 * 1024, world } = {}) {
+export async function createCassetteWriter(directory, { provenance = {}, maxResponseBytes = 64 * 1024 * 1024, world, slots } = {}) {
   const destination = path.resolve(directory);
   await mkdir(path.dirname(destination), { recursive: true });
   try { await lstat(destination); throw new ReplayError('cassette_exists', '目标 cassette 已存在，禁止覆盖'); }
@@ -36,6 +36,7 @@ export async function createCassetteWriter(directory, { provenance = {}, maxResp
   const pending = new Set();
   const failures = [];
   const sealedFiles = new Map();
+  const requestMeta = new Map();
   let sealed = false;
   let sealing = false;
 
@@ -56,7 +57,7 @@ export async function createCassetteWriter(directory, { provenance = {}, maxResp
       try {
         rules = compactTypedTemplateRules(requestRules, { bindings, owner, bodyBytes: request.body });
         const canonical = request.canonicalBody ?? canonicalBody(request.body, { bindings, owner, rules: requestRules });
-        const encoded = encodeRequestStub(request.body, { world });
+        const encoded = encodeRequestStub(request.body, { world, slots });
         const stub = { ...encoded, canonicalSha256: sha256(canonical) };
         delete stub.legacy;
         delete stub.reason;
@@ -70,6 +71,10 @@ export async function createCassetteWriter(directory, { provenance = {}, maxResp
         const stubBytes = serializeRequestStub(stub);
         await writeDurable(path.join(staging, stubFile), stubBytes);
         sealedFiles.set(stubFile, sha256(stubBytes));
+        requestMeta.set(stubFile, {
+          requestCoreSha256: requestCoreSha256(stub),
+          worldRefs: collectWorldRefs(stub.parts, world),
+        });
         handle = await open(path.join(staging, responseFile), 'wx', 0o600);
       } catch (error) { pending.delete(key); failures.push(String(error)); throw error; }
       const chunks = [];
@@ -140,6 +145,7 @@ export async function createCassetteWriter(directory, { provenance = {}, maxResp
         formatVersion: CASSETTE_FORMAT_VERSION,
         manifestSha256: sha256(bytes),
         files: Object.fromEntries([...sealedFiles.entries()].sort(([left], [right]) => left.localeCompare(right))),
+        requestMeta: Object.fromEntries([...requestMeta.entries()].sort(([left], [right]) => left.localeCompare(right))),
       };
       await writeDurable(path.join(staging, 'seal.json'), `${JSON.stringify(seal)}\n`);
       const dir = await open(staging, 'r');
@@ -242,6 +248,14 @@ async function loadCassetteV2(root, manifestBytes, seal, { world: suppliedWorld,
       || !Array.isArray(manifest.entries) || !manifest.entries.length) {
     throw new ReplayError('corrupt_cassette', '不支持或为空的 cassette');
   }
+  if (!seal.requestMeta || typeof seal.requestMeta !== 'object' || Array.isArray(seal.requestMeta)) {
+    throw new ReplayError('corrupt_cassette', 'cassette seal 缺少 request 完整性元数据');
+  }
+  const metaFiles = new Set(Object.keys(seal.requestMeta));
+  const stubFiles = new Set(manifest.entries.map((entry) => entry.request?.stub));
+  if (metaFiles.size !== stubFiles.size || [...stubFiles].some((file) => !metaFiles.has(file))) {
+    throw new ReplayError('corrupt_cassette', 'cassette request 元数据未覆盖全部 stub');
+  }
   const entries = new Map();
   const legacy = [];
   const worldDrift = [];
@@ -276,17 +290,29 @@ async function loadCassetteV2(root, manifestBytes, seal, { world: suppliedWorld,
     let stub;
     try { stub = JSON.parse(stubBytes.toString('utf8')); }
     catch { throw new ReplayError('invalid_request_stub', 'request stub 不是合法 JSON', { entry: id }); }
+    const meta = seal.requestMeta[entry.request.stub];
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)
+        || typeof meta.requestCoreSha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(meta.requestCoreSha256)
+        || !Array.isArray(meta.worldRefs)) {
+      throw new ReplayError('corrupt_cassette', 'cassette request 完整性元数据无效', { entry: id });
+    }
+    // stub 自身的哈希字段不能作为漂移依据：core 摘要锚定在 seal 中，重封 stub 文件不会同步它。
+    if (requestCoreSha256(stub) !== meta.requestCoreSha256) {
+      throw new ReplayError('corrupt_cassette', 'request stub core 校验失败', { entry: id });
+    }
     const needsWorld = Array.isArray(stub?.parts) && stub.parts.some((part) => part && typeof part === 'object'
       && !Array.isArray(part) && (part.leaf !== undefined || part.recipe !== undefined));
     let decoded;
     try {
-      decoded = await decodeRequestStub(stub, { world: needsWorld ? await resolveWorld() : undefined, readRaw, allowDrift: true });
+      decoded = await decodeRequestStub(stub, {
+        world: needsWorld ? await resolveWorld() : undefined, readRaw, worldRefs: meta.worldRefs,
+      });
     } catch (error) {
       if (error instanceof ReplayError) throw new ReplayError(error.code, error.message, { ...error.details, entry: id });
       throw error;
     }
     if (decoded.legacy) legacy.push({ entry: id, reason: stub.fallback ?? 'legacy_body' });
-    if (decoded.drifted) worldDrift.push({ entry: id });
+    if (decoded.drifted) worldDrift.push({ entry: id, leaves: decoded.driftLeaves });
     let expanded;
     try { expanded = expandTypedTemplateRules(entry.requestRules ?? [], decoded.bytes); }
     catch (error) {

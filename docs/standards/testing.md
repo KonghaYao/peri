@@ -360,8 +360,11 @@ replay-v2 的 system prompt 与 tool schema 存放在共享 world 快照，高�
 （`sys.skills`、`sys.compact.summary`、`tools.Agent.*`）。修改 `13_skills.md`、Agent
 description 或 compact summary 后先运行 `e2e:replay:world-check`，再运行
 `e2e:replay:world-sync` 并审核 leaf diff；`world:sync` 只改映射 leaf 与 `world/seal.json`，
-不重写 cassette。world leaf 变化时 cassette 报告 `worldDrift`，加载器以当前 world 重建
-canonical；stub 与 world 仍分别由 cassette seal 与 world seal 覆盖。
+不重写 cassette。world leaf 变化时 cassette 报告 `worldDrift`，但仅限映射 leaf：seal 中的
+`requestMeta` 固定 stub 语义摘要与录制时 leaf 哈希，stub 字面量/哈希变化、未映射 leaf
+变化或引用结构变化都会失败。`e2e:replay:verify` 在 legacy 或 worldDrift 非空时非零退出，
+`cli.mjs verify` 同样；CI 与 pre-commit 均执行 verify + world-check。映射 leaf 变化后本地
+`e2e:replay` 仍可运行，但合入前必须重录受影响 cassette 或显式刷新录制哈希，使 verify 归零。
 
 录放业务场景以 `e2e/fixtures/replay-v2/README.md` 的目录为准。默认 runner 不启动录制上游、
 不生成缺失 cassette、不回退在线模型；`CI` 环境拒绝 record 模式。fixture 包含哈希校验的

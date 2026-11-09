@@ -35,7 +35,7 @@ for (const id of ids) {
 }
 
 const report = {
-  passed: legacy === 0 && formatVersions.size === 1 && formatVersions.has(2),
+  passed: legacy === 0 && worldDrift === 0 && formatVersions.size === 1 && formatVersions.has(2),
   cassettes: cassettes.length,
   entries,
   legacy,

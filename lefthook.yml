@@ -39,6 +39,18 @@ pre-commit:
     layer-imports:
       run: bash scripts/check-layer-imports.sh
 
+    # replay fixture 完整性门禁：verify 拒绝 legacy / worldDrift（未映射 leaf 或
+    # stub 字面量/哈希变化），world-check 拒绝源码已变但 world 未同步。
+    replay-fixtures:
+      glob: "{e2e/**,peri-acp/prompts/**,peri-agent/src/agent/compact_v2/**,peri-middlewares/src/subagent/tool/**}"
+      run: |
+        if [ ! -d e2e/node_modules ]; then
+          echo "[replay] e2e/node_modules 缺失；先运行 (cd e2e && npm ci)" >&2
+          exit 1
+        fi
+        npm --prefix e2e run e2e:replay:verify
+        npm --prefix e2e run e2e:replay:world-check
+
     # doc-tests 不在 pre-commit 中运行——cargo check/clippy 不编译 doc test，
     # 显式验证用: ./scripts/cargo-rmcp-patched.sh test --locked --workspace --doc
 

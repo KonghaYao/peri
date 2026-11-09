@@ -271,6 +271,14 @@ jobs:
               working-directory: e2e
               run: npm run e2e:replay:unit
 
+            - name: Verify replay fixtures (world seal + 30 cassettes)
+              working-directory: e2e
+              run: npm run e2e:replay:verify
+
+            - name: Check world sync status
+              working-directory: e2e
+              run: npm run e2e:replay:world-check
+
             - name: Run offline replay (30 scenarios)
               working-directory: e2e
               run: npm run e2e:replay

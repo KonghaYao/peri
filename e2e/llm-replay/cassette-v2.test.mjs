@@ -1,12 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { cp, mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createCassetteWriter, loadCassette } from './cassette.mjs';
-import { canonicalBody, identityKey, sha256 } from './matcher.mjs';
+import { canonicalBody, canonicalJson, identityKey, sha256 } from './matcher.mjs';
 import { createRequestBindingAdapter } from './request-bindings.mjs';
 import { createWorldBuilder } from './world-store.mjs';
+
+const cli = fileURLToPath(new URL('./cli.mjs', import.meta.url));
+const execute = promisify(execFile);
 
 async function temporary(t, prefix = 'peri-cassette-v2-') {
   const directory = await mkdtemp(path.join(os.tmpdir(), prefix));
@@ -60,6 +66,57 @@ async function recordAll(t, { bodies = [anthropicBody()], world, suffix = '' } =
   }
   await writer.seal();
   return { directory, cassetteDir, writer, rulesByEntry };
+}
+
+function mappedBody() {
+  return Buffer.from(JSON.stringify({
+    model: 'fixture-model', max_tokens: 32000, stream: true,
+    system: [{ type: 'text', text: 'STABLE SKILLS' }, { type: 'text', text: 'STATIC BLOCK' }],
+    messages: [{ role: 'user', content: 'same question' }],
+  }));
+}
+
+const mappedSlots = (field) => (field.path === '/system/0/text'
+  ? { leaf: 'sys.skills' }
+  : field.path === '/system/1/text' ? { leaf: 'sys.block0.main' } : null);
+
+async function recordMapped(t) {
+  const directory = await temporary(t);
+  const cassetteDir = path.join(directory, 'case', 'cassette');
+  const builder = createWorldBuilder({ generation: 'mapped' });
+  builder.addLeaf('sys.skills', 'STABLE SKILLS');
+  builder.addLeaf('sys.block0.main', 'STATIC BLOCK');
+  const body = mappedBody();
+  const writer = await createCassetteWriter(cassetteDir, { world: builder, slots: mappedSlots, provenance: { source: 'test' } });
+  const capture = await writer.begin(identity(), {
+    method: 'POST', target: 'https://fixture.test/v1/messages',
+    headers: { 'content-type': 'application/json' }, body,
+  }, []);
+  capture.setHeaders(200, {}, 0);
+  const response = Buffer.from('data: answer\n\n');
+  await capture.append(response, 0);
+  capture.setSubmittedBytes(response.length);
+  await capture.finish('complete', 1);
+  await writer.seal();
+  const worldDir = path.join(directory, 'world');
+  await builder.seal(worldDir);
+  return { directory, cassetteDir, worldDir };
+}
+
+async function rewriteWorldLeaf(worldDir, leafId, content) {
+  const manifest = JSON.parse(await readFile(path.join(worldDir, 'manifest.json'), 'utf8'));
+  await writeFile(path.join(worldDir, manifest.leaves[leafId].file), content);
+  const seal = JSON.parse(await readFile(path.join(worldDir, 'seal.json'), 'utf8'));
+  seal.leaves[leafId] = sha256(Buffer.from(content));
+  await writeFile(path.join(worldDir, 'seal.json'), `${JSON.stringify(seal)}\n`);
+}
+
+/** 模拟“只重封 stub 文件”的篡改：更新 seal.files，不同步 requestMeta。 */
+async function resealStubFile(cassetteDir, stubFile) {
+  const sealPath = path.join(cassetteDir, 'seal.json');
+  const seal = JSON.parse(await readFile(sealPath, 'utf8'));
+  seal.files[stubFile] = sha256(await readFile(path.join(cassetteDir, stubFile)));
+  await writeFile(sealPath, `${JSON.stringify(seal)}\n`);
 }
 
 test('v2 writer/loader 保留内存形状：canonicalBody 由 stub 重建，rules 展开为 segments', async (t) => {
@@ -177,20 +234,47 @@ test('v2 seal 覆盖 stub 与 manifest：篡改、删除、互换、响应漂移
   });
 });
 
-test('v2 stub canonicalSha 被改写且 seal 自洽时仍由重建结果拒绝', async (t) => {
-  const fixture = await recordAll(t);
+test('v2 stub 字面量与哈希字段改动即使重封文件也被 seal 中的 core 摘要拒绝', async (t) => {
+  const fixture = await recordMapped(t);
   const cassette = await loadCassette(fixture.cassetteDir);
   const [entry] = cassette.entries.values();
   const stubPath = path.join(fixture.cassetteDir, entry.request.stub);
-  const stub = JSON.parse(await readFile(stubPath, 'utf8'));
-  stub.canonicalSha256 = '0'.repeat(64);
-  const bytes = Buffer.from(`${JSON.stringify(stub, null, 2)}\n`);
-  await writeFile(stubPath, bytes);
-  const sealPath = path.join(fixture.cassetteDir, 'seal.json');
-  const seal = JSON.parse(await readFile(sealPath, 'utf8'));
-  seal.files[entry.request.stub] = sha256(bytes);
-  await writeFile(sealPath, `${JSON.stringify(seal)}\n`);
-  await assert.rejects(loadCassette(fixture.cassetteDir), (error) => error.code === 'corrupt_cassette' && /canonical/u.test(error.message));
+  const original = await readFile(stubPath, 'utf8');
+
+  await t.test('max_tokens 字面量', async () => {
+    const stub = JSON.parse(original);
+    const index = stub.parts.findIndex((part) => typeof part === 'string' && part.includes('"max_tokens":32000'));
+    assert.ok(index >= 0);
+    stub.parts[index] = stub.parts[index].replace('"max_tokens":32000', '"max_tokens":32001');
+    await writeFile(stubPath, `${JSON.stringify(stub, null, 2)}\n`);
+    await resealStubFile(fixture.cassetteDir, entry.request.stub);
+    await assert.rejects(loadCassette(fixture.cassetteDir),
+      (error) => error.code === 'corrupt_cassette' && /request stub core/u.test(error.message));
+  });
+
+  await t.test('raw/canonical 哈希置零', async () => {
+    const stub = JSON.parse(original);
+    stub.rawSha256 = '0'.repeat(64);
+    stub.canonicalSha256 = '0'.repeat(64);
+    await writeFile(stubPath, `${JSON.stringify(stub, null, 2)}\n`);
+    await resealStubFile(fixture.cassetteDir, entry.request.stub);
+    await assert.rejects(loadCassette(fixture.cassetteDir),
+      (error) => error.code === 'corrupt_cassette' && /request stub core/u.test(error.message));
+  });
+
+  await t.test('同步 core 摘要后仍由 canonical 重建拒绝', async () => {
+    const stub = JSON.parse(original);
+    stub.canonicalSha256 = '0'.repeat(64);
+    const stubBytes = Buffer.from(`${JSON.stringify(stub, null, 2)}\n`);
+    await writeFile(stubPath, stubBytes);
+    const sealPath = path.join(fixture.cassetteDir, 'seal.json');
+    const seal = JSON.parse(await readFile(sealPath, 'utf8'));
+    seal.files[entry.request.stub] = sha256(stubBytes);
+    seal.requestMeta[entry.request.stub].requestCoreSha256 = sha256(canonicalJson(stub));
+    await writeFile(sealPath, `${JSON.stringify(seal)}\n`);
+    await assert.rejects(loadCassette(fixture.cassetteDir),
+      (error) => error.code === 'corrupt_cassette' && /canonical/u.test(error.message));
+  });
 });
 
 test('unsafe number 走 legacy.bin，load 时报告并保持 canonical body', async (t) => {
@@ -216,27 +300,44 @@ test('引用 world 的 v2 cassette 在共享 world 缺失时拒绝加载', async
   await assert.rejects(loadCassette(fixture.cassetteDir), { code: 'missing_world' });
 });
 
-test('world leaf 更新后报告 worldDrift，并以当前 world 重建 canonical', async (t) => {
-  const builder = createWorldBuilder({ generation: 'drift-test' });
-  const fixture = await recordAll(t, { world: builder });
-  const worldDir = path.join(fixture.directory, 'world');
-  await builder.seal(worldDir);
-  const manifest = JSON.parse(await readFile(path.join(worldDir, 'manifest.json'), 'utf8'));
-  let leafId = null;
-  for (const [id, meta] of Object.entries(manifest.leaves)) {
-    if ((await readFile(path.join(worldDir, meta.file), 'utf8')) === 'skills catalog') { leafId = id; break; }
-  }
-  assert.ok(leafId, '未找到 skills leaf');
-  const file = path.join(worldDir, manifest.leaves[leafId].file);
-  await writeFile(file, 'skills catalog updated');
-  const seal = JSON.parse(await readFile(path.join(worldDir, 'seal.json'), 'utf8'));
-  seal.leaves[leafId] = sha256(await readFile(file));
-  await writeFile(path.join(worldDir, 'seal.json'), `${JSON.stringify(seal)}\n`);
-  const cassette = await loadCassette(fixture.cassetteDir);
-  assert.equal(cassette.report.worldDrift.length, 1);
-  assert.deepEqual(cassette.report.legacy, []);
-  const [entry] = cassette.entries.values();
-  assert.match(entry.request.canonicalBody, /skills catalog updated/u);
+test('mapped leaf 更新报告 worldDrift，未映射 leaf 变化与 legacy 都拒绝', async (t) => {
+  const fixture = await recordMapped(t);
+  const clean = await loadCassette(fixture.cassetteDir);
+  assert.equal(clean.report.worldDrift.length, 0);
+  assert.ok(clean.manifest.entries.length);
+  const seal = JSON.parse(await readFile(path.join(fixture.cassetteDir, 'seal.json'), 'utf8'));
+  const [entry] = clean.entries.values();
+  assert.deepEqual(seal.requestMeta[entry.request.stub].worldRefs.map((ref) => ref.id), ['sys.skills', 'sys.block0.main']);
+
+  await rewriteWorldLeaf(fixture.worldDir, 'sys.skills', 'STABLE SKILLS updated');
+  const drifted = await loadCassette(fixture.cassetteDir);
+  assert.equal(drifted.report.worldDrift.length, 1);
+  assert.deepEqual(drifted.report.worldDrift[0].leaves, ['sys.skills']);
+  const [driftedEntry] = drifted.entries.values();
+  assert.match(driftedEntry.request.canonicalBody, /STABLE SKILLS updated/u);
+
+  // 漂移必须让 CLI verify 非零退出。
+  const verify = await execute(process.execPath, [cli, 'verify', '--cassette', fixture.cassetteDir])
+    .then(() => null, (error) => error);
+  assert.ok(verify, 'worldDrift 非空时 verify 必须失败');
+  assert.equal(verify.code, 1);
+  assert.equal(JSON.parse(verify.stdout).passed, false);
+
+  // 未映射 leaf 的变化不能被 drift 解释。
+  await rewriteWorldLeaf(fixture.worldDir, 'sys.block0.main', 'STATIC BLOCK tampered');
+  await assert.rejects(loadCassette(fixture.cassetteDir),
+    (error) => error.code === 'world_drift_unmapped_leaf' && error.details.leaf === 'sys.block0.main');
+});
+
+test('legacy v2 cassette 让 CLI verify 非零退出', async (t) => {
+  const fixture = await recordAll(t, { bodies: [Buffer.from('{"model":"fixture","n":9007199254740993}')] });
+  const verify = await execute(process.execPath, [cli, 'verify', '--cassette', fixture.cassetteDir])
+    .then(() => null, (error) => error);
+  assert.ok(verify, 'legacy 非空时 verify 必须失败');
+  assert.equal(verify.code, 1);
+  const report = JSON.parse(verify.stdout);
+  assert.equal(report.passed, false);
+  assert.equal(report.legacy.length, 1);
 });
 
 test('v1 cassette 保持可读，并保留 segments 规则形状', async (t) => {

@@ -6,13 +6,14 @@
  * 其余 leaf 与 manifest 原样保留。源未变化时不写任何文件（幂等）。
  * 未映射（内容寻址）leaf 会在报告中列出，提醒审核而非静默忽略。
  */
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import {
   SOURCE_FILES, STABLE_LEAVES, agentDescriptionLeafIds, agentSchemaOf, expectedSendOnly,
 } from './replay-world-sources.mjs';
+import { replaceWorldDirectory } from './world-sync-swap.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../..');
@@ -114,17 +115,8 @@ try {
   };
   await writeFile(path.join(staged, 'seal.json'), `${JSON.stringify(seal)}\n`, { mode: 0o600 });
   await loadWorld(staged);
-  const previous = path.join(stagingBase, 'previous');
-  let moved = false;
-  try {
-    await rename(worldDir, previous);
-    moved = true;
-    await rename(staged, worldDir);
-  } catch (error) {
-    if (moved) await rename(previous, worldDir).catch(() => {});
-    throw error;
-  }
-  await loadWorld(worldDir);
+  const swap = await replaceWorldDirectory(worldDir, staged, { validate: (dir) => loadWorld(dir) });
+  if (!swap.removed) console.error(`world 已替换，但旧目录清理失败：${swap.previous}`);
 } finally {
   await rm(stagingBase, { recursive: true, force: true });
 }

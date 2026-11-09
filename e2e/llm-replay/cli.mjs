@@ -34,11 +34,14 @@ try {
     if (positionals.length !== 1 || !['record', 'replay', 'verify'].includes(command) || !values.cassette) throw new Error(usage);
     if (command === 'verify') {
       const cassette = await loadCassette(values.cassette);
+      const legacy = cassette.report?.legacy ?? [];
+      const worldDrift = cassette.report?.worldDrift ?? [];
+      const passed = legacy.length === 0 && worldDrift.length === 0;
       console.log(JSON.stringify({
-        passed: true, entries: cassette.entries.size, directory: cassette.directory,
-        formatVersion: cassette.manifest.formatVersion, legacy: cassette.report?.legacy ?? [],
-        worldDrift: cassette.report?.worldDrift ?? [],
+        passed, entries: cassette.entries.size, directory: cassette.directory,
+        formatVersion: cassette.manifest.formatVersion, legacy, worldDrift,
       }));
+      if (!passed) process.exitCode = 1;
     } else {
       if (!values.run) throw new Error('--run 为必填参数');
       const port = Number(values.port);

@@ -47,16 +47,16 @@ cassette `formatVersion` 为 2 时，请求正文不再各存一份完整 system
 - `world/system/block0.main.txt`、`world/system/block1.*.prefix.txt` / `*.tail.txt`、`world/tools/*.json` 由录制内容按字节拆分；
 - 其余无法映射的 system 段（如 T06 hook prompt）走内容寻址 leaf，`world:sync` 会列出这些未映射 leaf。
 
-请求 stub 只保留 messages/参数等 per-request 字节与 leaf/recipe 引用；`rawSha256`、`canonicalSha256` 与 response 哈希仍逐条校验，`requestRules` 的 typed-template pattern 在加载时按录制边界重新展开。world leaf 变化后，stub 中的录制哈希会以 `report.worldDrift` 报告，加载器改用当前 world 重建 canonical；篡改仍由 cassette seal 与 world seal 拦截。
+请求 stub 只保留 messages/参数等 per-request 字节与 leaf/recipe 引用；`rawSha256`、`canonicalSha256` 与 response 哈希仍逐条校验，`requestRules` 的 typed-template pattern 在加载时按录制边界重新展开。cassette seal 的 `requestMeta` 保存每个 stub 的语义摘要与录制时 leaf 哈希序列；只有 stub 未变且变化的 leaf 全部属于 `world:sync` 映射时，加载器才报告 `report.worldDrift`。未映射 leaf（block0/block1/tail、T06 hook prompt 等）变化、stub 字面量/哈希字段变化都会让 verify 非零退出。
 
 高频 prompt 变更流程：
 
 1. `npm --prefix e2e run e2e:replay:world-check` 查看是否有 stale leaf。
 2. `npm --prefix e2e run e2e:replay:world-sync` 写入映射 leaf 与 `world/seal.json`。
 3. 审核 `git diff --stat`：`13_skills.md` 变化应只出现 2 个文件（skills leaf + seal）；Agent description/`send_only` 为 2 个 Agent leaf + seal；compact summary 为 1 个 leaf + seal。
-4. `npm --prefix e2e run e2e:replay:verify` 重新校验 30 cassettes / world seal。
+4. `npm --prefix e2e run e2e:replay:verify` 重新校验 30 cassettes / world seal；映射 leaf 变化会产生 worldDrift，verify 会非零退出，提交前需重录受影响 cassette（或显式重写录制哈希），本地 `e2e:replay` 不受影响。
 
-限制：单条消息（如 U06 compact 用户指令）变化仍落在对应 stub + cassette seal（2 文件）；`summary_user_prompt.md` 不在 world 映射内，变化需要重录或显式编辑 stub。`world:sync` 只同步上述源文件，未映射的 prompt 内容变化仍需重录。
+限制：单条消息（如 U06 compact 用户指令）和 `summary_user_prompt.md` 不在 world 映射内，变化必须重录；只改 stub 字面量会被 `requestCoreSha256` 拒绝。`world:sync` 只同步上述源文件，未映射的 prompt 内容变化仍需重录。
 
 ## 证据与范围
 

@@ -1,21 +1,17 @@
 /**
- * world 快照与当前源码之间的显式映射。迁移与 world:sync 共用同一份定义，
- * 避免“哪个 leaf 对应哪个源文件”出现两套口径。
+ * world 快照与当前源码之间的显式映射。迁移、world:sync 与 drift 校验共用同一份定义，
+ * 避免“哪个 leaf 可以变化”出现两套口径。
  */
+import { AGENT_LEAF_PREFIX, STABLE_LEAVES } from '../llm-replay/world-mapping.mjs';
+
+export { AGENT_LEAF_PREFIX, STABLE_LEAVES };
+
 export const SOURCE_FILES = Object.freeze({
   skills: 'peri-acp/prompts/sections/13_skills.md',
   agentDescription: 'peri-middlewares/src/subagent/tool/descriptions/agent.md',
   agentSchema: 'peri-middlewares/src/subagent/tool/define.rs',
   compactSummary: 'peri-agent/src/agent/compact_v2/descriptions/summary_system_prompt.md',
 });
-
-export const STABLE_LEAVES = Object.freeze({
-  skills: 'sys.skills',
-  compactSummary: 'sys.compact.summary',
-  block0: 'sys.block0.main',
-});
-
-export const AGENT_LEAF_PREFIX = 'tools.Agent.';
 
 /** Agent 工具 description 的稳定来源；其他 tool 文本仍是录制内容，不做源码同步。 */
 export function agentDescriptionLeafIds(world) {
