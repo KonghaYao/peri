@@ -24,11 +24,11 @@ async fn failed_inputs_and_passive_arrivals_do_not_restart_execution() {
             .await
             .expect("test MQ watermark"),
     );
-    assert!(!activation.can_activate(&queue).await);
+    assert!(!activation.can_activate(&queue).await.unwrap());
     enqueue(&queue, MessageKind::Info).await;
-    assert!(!activation.can_activate(&queue).await);
+    assert!(!activation.can_activate(&queue).await.unwrap());
     enqueue(&queue, MessageKind::Defer).await;
-    assert!(activation.can_activate(&queue).await);
+    assert!(activation.can_activate(&queue).await.unwrap());
 }
 
 #[tokio::test]
@@ -43,7 +43,7 @@ async fn required_arrival_during_failed_attempt_remains_eligible() {
         .expect("test MQ watermark");
     enqueue(&queue, MessageKind::Defer).await;
     activation.record_failed_attempt(watermark);
-    assert!(activation.can_activate(&queue).await);
+    assert!(activation.can_activate(&queue).await.unwrap());
 }
 
 #[tokio::test]
@@ -59,9 +59,9 @@ async fn explicit_stop_survives_failure_and_fresh_required_work() {
     activation.suppress();
     activation.record_failed_attempt(watermark);
     enqueue(&queue, MessageKind::Defer).await;
-    assert!(!activation.can_activate(&queue).await);
+    assert!(!activation.can_activate(&queue).await.unwrap());
     activation.allow();
-    assert!(activation.can_activate(&queue).await);
+    assert!(activation.can_activate(&queue).await.unwrap());
 }
 
 #[test]
@@ -110,7 +110,7 @@ async fn requeued_failed_input_preserves_its_admission_boundary() {
             .expect("test MQ watermark"),
         watermark
     );
-    assert!(!activation.can_activate(&queue).await);
+    assert!(!activation.can_activate(&queue).await.unwrap());
 }
 
 // ─── 后台结果：失败水位、Stop 与显式继续（T05/T12）──────────────────────────────

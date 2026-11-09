@@ -92,6 +92,11 @@ impl ActivationHarness {
         .unwrap();
     }
 
+    /// 夹具 SQLite 文件：用于注入真实的瞬时存储故障。
+    fn db_path(&self) -> std::path::PathBuf {
+        self._directory.path().join("threads.db")
+    }
+
     fn complete_child(&self, task_id: &str) {
         self.complete_task(task_id, BgTaskKind::Agent, true);
     }
@@ -476,6 +481,92 @@ async fn cancellation_allows_one_child_continuation_but_never_restarts_cancelled
         .has_pending_defer(&MessageSource::SubAgentComplete)
         .await
         .expect("test MQ defer"));
+    harness
+        .cfg
+        .session_manager
+        .pre_close_session(&harness.session_id);
+}
+
+/// 一次查询错误不能耗尽唯一唤醒：listener 必须重查并最终处理 Workflow 提醒。
+#[tokio::test]
+#[serial]
+async fn activation_query_error_is_retried_until_the_reminder_is_processed() {
+    use sqlx::Connection as _;
+
+    let mut harness = ActivationHarness::new().await;
+    let queue = harness
+        .cfg
+        .session_manager
+        .v2_queue_for(&harness.session_id)
+        .unwrap();
+    harness
+        .cfg
+        .session_manager
+        .get_session(&harness.session_id)
+        .unwrap()
+        .activation
+        .allow();
+    queue
+        .push_async(QueuedMessage::defer(
+            MessageSource::WorkflowComplete,
+            BaseMessage::human("workflow finished"),
+        ))
+        .await;
+
+    // 先让 listener 消费唤醒，再停在 sessions 锁上：故障发生在查询之前，且不是新唤醒。
+    let sessions = harness.sessions.clone();
+    let held = sessions.lock().await;
+    harness.listen();
+    tokio::task::yield_now().await;
+
+    let db_path = harness.db_path();
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(&db_path),
+    )
+    .await
+    .unwrap();
+    sqlx::query("ALTER TABLE thread_mq RENAME TO thread_mq_offline")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    drop(connection);
+    drop(held);
+
+    // 故障窗口内不得把错误当成「没有工作」而发出 continuation。
+    tokio::time::sleep(Duration::from_millis(160)).await;
+    assert!(
+        harness.receiver.as_mut().unwrap().try_recv().is_err(),
+        "存储不可用时不得发出 continuation"
+    );
+
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(&db_path),
+    )
+    .await
+    .unwrap();
+    sqlx::query("ALTER TABLE thread_mq_offline RENAME TO thread_mq")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let request = tokio::time::timeout(
+        Duration::from_secs(5),
+        harness.receiver.as_mut().unwrap().recv(),
+    )
+    .await
+    .expect("listener 必须在故障恢复后重查")
+    .unwrap();
+    assert!(request.mq_steering, "Workflow 提醒必须作为 MQ 工作被处理");
+    assert_eq!(
+        queue
+            .query(peri_acp_types::session::MqFilter::default())
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "调度只产生 continuation，提醒仍留给 turn 消费"
+    );
     harness
         .cfg
         .session_manager

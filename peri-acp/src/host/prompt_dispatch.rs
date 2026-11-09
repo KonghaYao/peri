@@ -582,7 +582,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             super::activation::PendingState::from_state(state)
         })
     };
-    let continuation_request = match (
+    let continuation = match (
         pending_state,
         cfg.session_manager.get_session(&prompt_session_id),
     ) {
@@ -591,21 +591,34 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             let activation = Arc::clone(&runtime.activation);
             let mailbox = Arc::clone(&runtime.async_result_mailbox);
             drop(runtime);
-            super::activation::pending_request(
+            let pending = super::activation::pending_request(
                 &prompt_session_id,
                 &state,
                 &queue,
                 &activation,
                 &mailbox,
             )
-            .await
+            .await;
+            Some((pending, queue))
         }
         _ => None,
     };
-    if let Some(request) = continuation_request {
-        if cont_tx.send(request).is_err() {
-            tracing::error!(session_id = %prompt_session_id, "continuation scheduling failed: channel closed");
+    match continuation {
+        Some((super::activation::PendingRequest::Ready(request), _)) => {
+            if cont_tx.send(request).is_err() {
+                tracing::error!(session_id = %prompt_session_id, "continuation scheduling failed: channel closed");
+            }
         }
+        Some((super::activation::PendingRequest::Retry(error), queue)) => {
+            // 本轮收尾后的查询失败同样不能消耗唤醒：把重查交还 listener。
+            tracing::warn!(
+                session_id = %prompt_session_id,
+                %error,
+                "continuation pending check failed; requesting listener recheck"
+            );
+            queue.request_recheck();
+        }
+        Some((super::activation::PendingRequest::Idle, _)) | None => {}
     }
     result
 }

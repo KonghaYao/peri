@@ -10,6 +10,10 @@ use crate::session::executor::ContinuationRequest;
 use crate::session::SessionActivation;
 use crate::transport::types::AcpError;
 
+/// 查询失败后的重查退避：有界、可观察，不忙等。
+const ACTIVATION_RETRY_INITIAL: std::time::Duration = std::time::Duration::from_millis(50);
+const ACTIVATION_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// 调度准入只需要这几个布尔事实；复制后必须释放 sessions 锁，再查询 MQ。
 pub(super) struct PendingState {
     pub closing: bool,
@@ -29,39 +33,59 @@ impl PendingState {
     }
 }
 
+/// 激活检查的结论：`Retry` 表示存储暂时无法回答，唤醒没有被判定为「无工作」。
+pub(super) enum PendingRequest {
+    Ready(ContinuationRequest),
+    Idle,
+    Retry(String),
+}
+
 pub(super) async fn pending_request(
     session_id: &str,
     state: &PendingState,
     queue: &MessageQueue,
     activation: &SessionActivation,
     mailbox: &AsyncResultMailbox,
-) -> Option<ContinuationRequest> {
+) -> PendingRequest {
     if state.closing || state.cancel_active || state.continuation_in_flight {
-        return None;
+        return PendingRequest::Idle;
     }
-    let (mq_steering, pending_result) = if activation.can_activate(queue).await {
-        (true, false)
-    } else if state.continuation_armed
-        && queue
-            .has_pending_defer(&MessageSource::SubAgentComplete)
-            .await
-            .unwrap_or(false)
-    {
-        (false, false)
-    } else if activation.can_activate_result(mailbox) {
+    let activation_decision = match activation.can_activate(queue).await {
+        Ok(true) => Some(true),
+        Ok(false) if state.continuation_armed => {
+            match queue
+                .has_pending_defer(&MessageSource::SubAgentComplete)
+                .await
+            {
+                Ok(true) => Some(false),
+                Ok(false) => None,
+                Err(error) => return PendingRequest::Retry(error.to_string()),
+            }
+        }
+        Ok(false) => None,
+        Err(error) => return PendingRequest::Retry(error.to_string()),
+    };
+    if let Some(mq_steering) = activation_decision {
+        return PendingRequest::Ready(ContinuationRequest {
+            session_id: session_id.to_owned(),
+            kind: BgTaskKind::Agent,
+            mq_steering,
+            pending_result: false,
+            recovery: false,
+        });
+    }
+    if activation.can_activate_result(mailbox) {
         // 通知已出队并写入历史，但主模型尚未处理：即使队列没有新工作，也构成
         // 一次允许的自动尝试。Blocked / Suspended 不在候选内。
-        (false, true)
-    } else {
-        return None;
-    };
-    Some(ContinuationRequest {
-        session_id: session_id.to_owned(),
-        kind: BgTaskKind::Agent,
-        mq_steering,
-        pending_result,
-        recovery: false,
-    })
+        return PendingRequest::Ready(ContinuationRequest {
+            session_id: session_id.to_owned(),
+            kind: BgTaskKind::Agent,
+            mq_steering: false,
+            pending_result: true,
+            recovery: false,
+        });
+    }
+    PendingRequest::Idle
 }
 
 pub(super) fn ensure_listener(
@@ -94,6 +118,7 @@ pub(super) fn ensure_listener(
         task_scope::HostTaskOwnerKind::Session,
         task_scope::HostTaskKind::SessionActivation,
         async move {
+            let mut retry_delay = ACTIVATION_RETRY_INITIAL;
             loop {
                 if cancellation.is_cancelled() || shutdown.is_cancelled() {
                     return;
@@ -118,18 +143,43 @@ pub(super) fn ensure_listener(
                     }
                     PendingState::from_state(state)
                 };
-                let request = pending_request(
+                match pending_request(
                     &session_id,
                     &pending,
                     &queue,
                     &listener_activation,
                     &mailbox,
                 )
-                .await;
-                if let Some(request) = request {
-                    if sender.send(request).is_err() {
-                        tracing::error!(%session_id, "session activation channel closed");
-                        return;
+                .await
+                {
+                    PendingRequest::Ready(request) => {
+                        retry_delay = ACTIVATION_RETRY_INITIAL;
+                        if sender.send(request).is_err() {
+                            tracing::error!(%session_id, "session activation channel closed");
+                            return;
+                        }
+                    }
+                    PendingRequest::Idle => retry_delay = ACTIVATION_RETRY_INITIAL,
+                    PendingRequest::Retry(error) => {
+                        // 查询失败不是「没有工作」：保留重查责任，指数退避且封顶，
+                        // 不忙等也不把已消费的唤醒丢掉。
+                        tracing::warn!(
+                            %session_id,
+                            %error,
+                            retry_after_ms = retry_delay.as_millis(),
+                            "session activation query failed; retrying"
+                        );
+                        let stopped = tokio::select! {
+                            biased;
+                            _ = cancellation.cancelled() => true,
+                            _ = shutdown.cancelled() => true,
+                            _ = tokio::time::sleep(retry_delay) => false,
+                        };
+                        if stopped {
+                            return;
+                        }
+                        retry_delay = (retry_delay * 2).min(ACTIVATION_RETRY_MAX);
+                        continue;
                     }
                 }
                 tokio::select! {
@@ -156,17 +206,30 @@ pub(super) fn ensure_listener(
     Ok(())
 }
 
+/// 测试面便捷断言；生产路径使用可区分查询错误的 [`mq_allowed_checked`]。
+#[cfg(test)]
 pub(super) async fn mq_allowed(cfg: &AcpServerConfig, session_id: &str) -> bool {
+    mq_allowed_checked(cfg, session_id).await.unwrap_or(false)
+}
+
+/// MQ 唤醒门禁的可失败形态：`Err` 表示无法判断，调用方必须保留重查责任。
+pub(super) async fn mq_allowed_checked(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+) -> Result<bool, String> {
     let Some(runtime) = cfg.session_manager.get_session(session_id) else {
-        return false;
+        return Ok(false);
     };
     if runtime.cancel_token.is_cancelled() {
-        return false;
+        return Ok(false);
     }
     let activation = Arc::clone(&runtime.activation);
     let queue = runtime.v2_message_queue.clone();
     drop(runtime);
-    activation.can_activate(&queue).await
+    activation
+        .can_activate(&queue)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// mq steering 的放行判定：正常激活之外，Host 注入且仍在队列里的恢复提醒也必须
@@ -174,21 +237,31 @@ pub(super) async fn mq_allowed(cfg: &AcpServerConfig, session_id: &str) -> bool 
 /// 尝试会把刚注入的提醒误算成已处理。提醒仍在队列是队列事实，epoch 与 Stop 判定
 /// 不变，因此这里只补回「已进入但尚未接管」的提醒，不放宽 superseded 保护。
 pub(super) async fn mq_steering_allowed(cfg: &AcpServerConfig, session_id: &str) -> bool {
-    if mq_allowed(cfg, session_id).await {
-        return true;
+    mq_steering_allowed_checked(cfg, session_id)
+        .await
+        .unwrap_or(false)
+}
+
+/// [`mq_steering_allowed`] 的可失败形态：查询错误不等于明确拒绝。
+pub(super) async fn mq_steering_allowed_checked(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+) -> Result<bool, String> {
+    if mq_allowed_checked(cfg, session_id).await? {
+        return Ok(true);
     }
     let Some(runtime) = cfg.session_manager.get_session(session_id) else {
-        return false;
+        return Ok(false);
     };
     if runtime.cancel_token.is_cancelled() || !runtime.activation.is_allowed() {
-        return false;
+        return Ok(false);
     }
     let queue = runtime.v2_message_queue.clone();
     drop(runtime);
     queue
         .has_pending_defer(&MessageSource::SessionRecovery)
         .await
-        .unwrap_or(false)
+        .map_err(|error| error.to_string())
 }
 
 /// Ready 结果是否仍允许自动尝试（Stop 抑制与失败水位在 owner 内统一判定）。
