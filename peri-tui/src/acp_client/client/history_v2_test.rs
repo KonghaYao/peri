@@ -22,6 +22,9 @@ impl Drop for HistoryAtomsGuard {
     fn drop(&mut self) {
         atoms::HISTORY_V2_CAPABLE.set(false);
         atoms::HISTORY_V2_LIMITS.set(HistoryLimits::default());
+        *atoms::HISTORY_V2_TX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         crate::kit::history_v2::reset_state();
     }
 }
@@ -249,9 +252,12 @@ async fn failed_initial_keeps_the_previous_window_and_delivery_identity() {
     let (id, method, _) = next_request(&server).await;
     assert_eq!(method, "session/load");
     respond_ok(&server, id).await;
-    let (id, method, _) = next_request(&server).await;
-    assert_eq!(method, "session/close", "候选会话仍需回收");
-    respond_ok(&server, id).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), server.recv())
+            .await
+            .is_err(),
+        "同会话旧窗口仍在服务端使用中，失败不得关闭会话"
+    );
 
     assert!(load.await.unwrap().is_err());
     let state = crate::kit::history_v2::snapshot();
@@ -271,6 +277,8 @@ async fn failed_initial_keeps_the_previous_window_and_delivery_identity() {
 fn initial_response_with_item() -> Value {
     let mut response = initial_response(true);
     let page = &mut response["_meta"]["peri.history"]["page"];
+    page["beforeCursor"] = json!("before-1");
+    page["afterCursor"] = json!("after-1");
     page["items"] = json!([{
         "entryId": "e1",
         "source": {"kind": "own"},
@@ -317,9 +325,12 @@ async fn failed_initial_reprojects_the_previous_same_session_view() {
     let (id, method, _) = next_request(&server).await;
     assert_eq!(method, "session/load");
     respond_ok(&server, id).await;
-    let (id, method, _) = next_request(&server).await;
-    assert_eq!(method, "session/close");
-    respond_ok(&server, id).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), server.recv())
+            .await
+            .is_err(),
+        "恢复旧窗口时不得关闭仍在使用的会话"
+    );
 
     assert!(load.await.unwrap().is_err());
     assert_eq!(
@@ -576,4 +587,410 @@ async fn failed_initial_with_retained_window_replays_pending_updates() {
     atoms::init_atoms();
     let outcome = run_failed_initial_with_buffered_old_stream(false, false).await;
     assert_failed_initial_replayed(&outcome);
+}
+
+// ── 生产接线回归：真实 pump + notifier + V2 出站 FIFO ──
+
+struct LiveHarness {
+    client: AcpTuiClient,
+    server: MpscServerTransport,
+    bridge_rx: tokio::sync::mpsc::Receiver<crate::kit::acp_types::AcpEventWithEpoch>,
+    local_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<crate::kit::acp_types::AcpEventWithEpoch>>,
+    shutdown: tokio_util::sync::CancellationToken,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for LiveHarness {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+        for task in self.tasks.drain(..) {
+            task.abort();
+        }
+        self.client.close();
+    }
+}
+
+/// 真实交互路径：transport pump 负责 `route_ordinary`，notifier 消费通知，
+/// V2 出站调度器按 FIFO 发送 load/close/page/body。`HISTORY_V2_CAPABLE` 必须
+/// 同时置位，否则会话边界会跳过生产 V2 清理分支，测试就只剩本地回填。
+async fn live_harness() -> LiveHarness {
+    atoms::init_atoms();
+    atoms::HISTORY_V2_CAPABLE.set(true);
+    let (transport, server) = mpsc_transport_pair();
+    let (client, notification_tx, notification_rx) = AcpTuiClient::new_interactive(transport);
+    install_v2(&client, true);
+    client.spawn_pump(notification_tx);
+
+    let (history_tx, history_rx) = tokio::sync::mpsc::unbounded_channel();
+    *atoms::HISTORY_V2_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(history_tx);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let consumer = crate::kit::history_v2::consumer::spawn_history_v2_consumer(
+        client.clone(),
+        history_rx,
+        shutdown.clone(),
+    );
+
+    let (bridge_tx, bridge_rx) = tokio::sync::mpsc::channel(64);
+    let notifier =
+        crate::kit::acp_notifier::spawn_kit_notifier(notification_rx, bridge_tx, shutdown.clone());
+
+    // LOCAL_EVENT_TX 是进程级 OnceLock：其他串行用例可能已占用。安装成功才断言
+    // 恢复重放的可见顺序；未安装时仍校验窗口高水位与实时通知。
+    let (local_tx, local_rx) = tokio::sync::mpsc::unbounded_channel();
+    let local_rx = match atoms::LOCAL_EVENT_TX.set(local_tx) {
+        Ok(()) => Some(local_rx),
+        Err(_) => None,
+    };
+
+    LiveHarness {
+        client,
+        server,
+        bridge_rx,
+        local_rx,
+        shutdown,
+        tasks: vec![consumer, notifier],
+    }
+}
+
+fn old_window() -> crate::kit::history_v2::HistoryV2State {
+    crate::kit::history_v2::initial::admit_load_response(
+        &initial_response_with_item(),
+        SESSION,
+        peri_acp_types::history_v2::DecimalU64::new(1),
+        &HistoryLimits::default(),
+    )
+    .expect("previous window admitted")
+}
+
+async fn wait_for_applied_seq(session_id: &str, expected: u64) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let state = crate::kit::history_v2::snapshot();
+            let applied = state
+                .window()
+                .and_then(|window| window.paging.live.last_applied_seq)
+                .map(peri_acp_types::history_v2::DecimalU64::get);
+            if state.session_id.as_deref() == Some(session_id) && applied == Some(expected) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("state must reach the expected live sequence");
+}
+
+fn text_of(event: &crate::kit::acp_types::AcpEventWithEpoch) -> Option<String> {
+    match &event.event {
+        crate::kit::acp_types::AcpEventData::TextChunk(chunk) => Some(chunk.text.clone()),
+        _ => None,
+    }
+}
+
+async fn next_bridge_text(
+    rx: &mut tokio::sync::mpsc::Receiver<crate::kit::acp_types::AcpEventWithEpoch>,
+) -> String {
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("notifier must deliver the live update")
+            .expect("bridge channel open");
+        if let Some(text) = text_of(&event) {
+            return text;
+        }
+    }
+}
+
+fn page_with_old_identity() -> Value {
+    let mut page = initial_response_with_item()["_meta"]["peri.history"]["page"].clone();
+    page["beforeCursor"] = json!("before-2");
+    page["items"] = json!([{
+        "entryId": "e0",
+        "source": {"kind": "own"},
+        "contentVersion": "1",
+        "durability": {"state": "sealed", "origin": "live", "finalItemSeq": "0"},
+        "order": {"region": "own", "ordinal": "0"},
+        "subItems": [{
+            "kind": "text",
+            "subItemId": "e0:0",
+            "role": "assistant",
+            "text": "older",
+        }],
+    }]);
+    page
+}
+
+/// P1：initial 失败不得提前关闭旧窗口；失败后 route/pump 必须继续投递旧流通知。
+///
+/// 生产 FIFO 下，边界若先发 Close，服务端票据在 initial 之前就失效；错误返回后
+/// 补发的旧流更新也会因路由停在 `NoSession` 被 pump 丢弃。这里用真实 pump、
+/// notifier 与出站调度器覆盖失败前、错误返回后与恢复后的 page/body。
+#[tokio::test]
+#[serial]
+async fn failed_initial_keeps_old_ticket_and_restores_notification_route() {
+    let _guard = prepare();
+    let mut harness = live_harness().await;
+    let previous = old_window();
+    crate::kit::history_v2::publish_initial(previous.clone());
+
+    let loader = harness.client.clone();
+    let load = tokio::spawn(async move { loader.load_session(SESSION, "/tmp", None).await });
+    let (id, method, _) = next_request(&harness.server).await;
+    assert_eq!(method, "session/load");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), harness.server.recv())
+            .await
+            .is_err(),
+        "候选 initial 之前不得发送旧窗口 Close"
+    );
+
+    // 失败前：旧流更新进入暂存，不越过高水位直接渲染。
+    harness
+        .server
+        .send_notification("session/update", live_params(1, "a"))
+        .await
+        .unwrap();
+    wait_for_pending(SESSION, 1).await;
+
+    harness
+        .server
+        .send_response(id, Err(AcpError::new(-32603, "initial failed")))
+        .await
+        .unwrap();
+    assert!(load.await.unwrap().is_err());
+
+    assert_eq!(
+        harness.client.lifecycle.current_session_id().as_deref(),
+        Some(SESSION),
+        "失败后通知路由必须交还旧会话"
+    );
+    wait_for_applied_seq(SESSION, 1).await;
+    assert_eq!(
+        crate::kit::history_v2::live::pending_len(SESSION),
+        0,
+        "恢复后暂存必须清空"
+    );
+
+    // 错误返回后：真实 pump 必须放行旧流补发/实时通知，且每条只渲染一次。
+    harness
+        .server
+        .send_notification("session/update", live_params(2, "b"))
+        .await
+        .unwrap();
+    harness
+        .server
+        .send_notification("session/update", live_params(3, "c"))
+        .await
+        .unwrap();
+    wait_for_applied_seq(SESSION, 3).await;
+    let first = next_bridge_text(&mut harness.bridge_rx).await;
+    let second = next_bridge_text(&mut harness.bridge_rx).await;
+    assert_eq!(
+        (first.as_str(), second.as_str()),
+        ("b", "c"),
+        "恢复后实时通知必须按 seq 顺序渲染"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), harness.bridge_rx.recv())
+            .await
+            .is_err(),
+        "每条通知只能渲染一次"
+    );
+
+    // 旧 window/readTicket 仍然有效：page 与 body 都使用恢复窗口的原身份上线。
+    assert!(crate::kit::history_v2::consumer::request_older_page_if_due());
+    let (id, method, params) = next_request(&harness.server).await;
+    assert_eq!(method, peri_acp_types::history_v2::HISTORY_METHOD);
+    assert_eq!(params["action"], json!("page"));
+    assert_eq!(params["windowId"], json!("w1"));
+    assert_eq!(params["snapshotToken"], json!("snapshot-1"));
+    assert_eq!(params["readTicket"], json!("ticket-1"));
+    harness
+        .server
+        .send_response(id, Ok(page_with_old_identity()))
+        .await
+        .unwrap();
+
+    let binding = crate::kit::history_detail_binding::HistoryV2BodyBinding {
+        session_id: SESSION.into(),
+        window_id: "w1".into(),
+        snapshot_token: "snapshot-1".into(),
+        read_ticket: "ticket-1".into(),
+        source: peri_acp_types::history_v2::HistorySource::Own,
+        entry_id: "e1".into(),
+        sub_item_id: "e1:0".into(),
+        body_ref: "body-1".into(),
+        representation: peri_acp_types::history_v2::HistoryRepresentation::DisplayText,
+        media_type: "text/plain; charset=utf-8".into(),
+    };
+    let body_receiver =
+        match crate::kit::history_v2::consumer::submit_body(&binding, 0, 128).unwrap() {
+            crate::kit::history_v2::outbound::Submit::Queued(receiver) => receiver,
+            crate::kit::history_v2::outbound::Submit::Direct(_) => {
+                panic!("body must go through the production FIFO")
+            }
+        };
+    let (id, method, params) = next_request(&harness.server).await;
+    assert_eq!(method, peri_acp_types::history_v2::HISTORY_METHOD);
+    assert_eq!(params["action"], json!("body"));
+    assert_eq!(params["readTicket"], json!("ticket-1"));
+    harness
+        .server
+        .send_response(id, Ok(json!({"ok": true})))
+        .await
+        .unwrap();
+    assert!(body_receiver.await.unwrap().is_ok());
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), harness.server.recv())
+            .await
+            .is_err(),
+        "失败路径不得关闭旧窗口"
+    );
+}
+
+/// P1：恢复窗口内到达的旧流通知不能丢、不能重复。
+///
+/// 错误响应后立刻补发的更新可能与恢复并发：它们要么在暂存锁内等待后按 seq 并入，
+/// 要么在恢复完成、高水位发布后直接接纳；两种路径都必须恰好接纳一次。
+#[tokio::test]
+#[serial]
+async fn failed_initial_accepts_events_racing_with_recovery_once() {
+    let _guard = prepare();
+    let mut harness = live_harness().await;
+    crate::kit::history_v2::publish_initial(old_window());
+
+    let loader = harness.client.clone();
+    let load = tokio::spawn(async move { loader.load_session(SESSION, "/tmp", None).await });
+    let (id, method, _) = next_request(&harness.server).await;
+    assert_eq!(method, "session/load");
+    harness
+        .server
+        .send_notification("session/update", live_params(1, "a"))
+        .await
+        .unwrap();
+    wait_for_pending(SESSION, 1).await;
+
+    // 先入 wire 的错误响应，再立刻补发恢复期更新；pump 与 load 任务并发推进。
+    harness
+        .server
+        .send_response(id, Err(AcpError::new(-32603, "initial failed")))
+        .await
+        .unwrap();
+    harness
+        .server
+        .send_notification("session/update", live_params(2, "b"))
+        .await
+        .unwrap();
+    harness
+        .server
+        .send_notification("session/update", live_params(3, "c"))
+        .await
+        .unwrap();
+    assert!(load.await.unwrap().is_err());
+
+    wait_for_applied_seq(SESSION, 3).await;
+    let state = crate::kit::history_v2::snapshot();
+    let live = &state.window().expect("restored window").paging.live;
+    assert_eq!(live.gap, None, "连续恢复不得被判为缺口");
+    assert!(!live.detached, "恢复窗口不得进入 detached");
+    assert_eq!(crate::kit::history_v2::live::pending_len(SESSION), 0);
+
+    let mut local_texts = Vec::new();
+    let observes_replay = harness.local_rx.is_some();
+    if let Some(local_rx) = harness.local_rx.as_mut() {
+        while let Ok(event) = local_rx.try_recv() {
+            if let Some(text) = text_of(&event) {
+                local_texts.push(text);
+            }
+        }
+    }
+    // 若 LOCAL_EVENT_TX 已被其他串行用例占用，恢复重放不可观察；此时以窗口
+    // 高水位与本通道内不重复作为验收依据，仍在可观察通道上断言顺序。
+    let mut bridge_texts = Vec::new();
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(200), harness.bridge_rx.recv()).await
+    {
+        if let Some(text) = text_of(&event) {
+            bridge_texts.push(text);
+        }
+    }
+    let mut observed = local_texts.clone();
+    observed.extend(bridge_texts.iter().cloned());
+    let mut unique = observed.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        observed.len(),
+        "恢复窗口内每条更新必须恰好接纳一次"
+    );
+    assert!(
+        unique
+            .iter()
+            .all(|text| ["a", "b", "c"].contains(&text.as_str())),
+        "恢复窗口只允许这三条更新: {observed:?}"
+    );
+    if observes_replay {
+        assert_eq!(unique, vec!["a", "b", "c"], "恢复重放不得丢失任何一条");
+    }
+    for channel in [&local_texts[..], &bridge_texts[..]] {
+        assert!(
+            channel.windows(2).all(|pair| pair[0] < pair[1]),
+            "同一投递通道内必须按 seq 顺序渲染: {observed:?}"
+        );
+    }
+}
+
+/// 候选成功路径：旧窗口的 Close 只能在 initial 接纳且发布之后入队。
+#[tokio::test]
+#[serial]
+async fn successful_initial_closes_old_window_after_publication() {
+    let _guard = prepare();
+    let harness = live_harness().await;
+    crate::kit::history_v2::publish_initial(old_window());
+
+    let loader = harness.client.clone();
+    let load = tokio::spawn(async move { loader.load_session(SESSION, "/tmp", None).await });
+    let (id, method, params) = next_request(&harness.server).await;
+    assert_eq!(method, "session/load");
+    let load_key = params["_meta"]["peri.history"]["requestKey"].clone();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), harness.server.recv())
+            .await
+            .is_err(),
+        "候选发布前不得发送 Close"
+    );
+
+    let mut response = initial_response(true);
+    response["_meta"]["peri.history"]["requestKey"] = load_key;
+    let page = &mut response["_meta"]["peri.history"]["page"];
+    page["windowId"] = json!("w2");
+    page["snapshotToken"] = json!("snapshot-2");
+    page["readTicket"] = json!("ticket-2");
+    harness
+        .server
+        .send_response(id, Ok(response))
+        .await
+        .unwrap();
+    assert_eq!(load.await.unwrap().unwrap(), SESSION);
+    assert_eq!(
+        crate::kit::history_v2::snapshot()
+            .window()
+            .map(|window| window.window_id.as_str()),
+        Some("w2")
+    );
+
+    let (id, method, params) = next_request(&harness.server).await;
+    assert_eq!(method, peri_acp_types::history_v2::HISTORY_METHOD);
+    assert_eq!(params["action"], json!("close"));
+    assert_eq!(params["windowId"], json!("w1"));
+    harness
+        .server
+        .send_response(id, Ok(json!({})))
+        .await
+        .unwrap();
 }

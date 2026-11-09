@@ -292,6 +292,32 @@ fn test_no_session_does_not_restore_bootstrap_wildcard() {
     ));
 }
 
+/// initial 失败但旧窗口仍有效：路由必须回到旧会话，后续旧流补发才不会被 pump 丢弃。
+#[test]
+fn failed_load_restoring_route_keeps_old_stream_forwarded() {
+    let lifecycle = InteractionLifecycle::new();
+    lifecycle.force_stable("old", false);
+    let start = lifecycle
+        .begin_transition(TransitionKind::Load, Some("old".into()))
+        .unwrap();
+    lifecycle.fail_transition_restoring_route(start.generation, "old");
+    assert_eq!(lifecycle.current_session_id().as_deref(), Some("old"));
+    assert!(matches!(
+        lifecycle.route_ordinary("old".into(), AcpNotification::Other { msg: "old".into() }),
+        OrdinaryDecision::Forward(_)
+    ));
+    assert!(matches!(
+        lifecycle.route_ordinary(
+            "other".into(),
+            AcpNotification::Other {
+                msg: "other".into()
+            }
+        ),
+        OrdinaryDecision::Drop
+    ));
+    assert!(lifecycle.take_buffered_batch().is_none());
+}
+
 #[test]
 fn test_delete_noncurrent_preserves_active_pending_generation() {
     let (lifecycle, _lease) = started();

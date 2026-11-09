@@ -171,6 +171,8 @@ pub(crate) fn gate_session_update(session_id: &str, tag: Option<&str>, params: &
     let Some(meta) = DeliveryMeta::parse(params) else {
         return LiveGate::Render;
     };
+    // 登记暂存与接纳在同一临界区：候选快照/恢复不会落在两者之间。
+    let _admission = admission_lock();
     if push_pending(session_id, &meta, params) {
         tracing::debug!(
             session_id = %session_id,
@@ -246,19 +248,45 @@ struct PendingStore {
 
 static PENDING: Mutex<Option<PendingStore>> = Mutex::new(None);
 
+/// 接纳与「登记暂存 + 快照」的同一临界区。
+///
+/// 没有它，`push_pending` 返回 false 与 `admit_live_delivery` 写入 atom 之间
+/// 可以插入一次边界快照：该事件既不在快照里，也不在暂存里。
+static ADMISSION: Mutex<()> = Mutex::new(());
+
+fn admission_lock() -> MutexGuard<'static, ()> {
+    ADMISSION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn pending_lock() -> MutexGuard<'static, Option<PendingStore>> {
     PENDING
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// 发 load 请求前登记：该会话进入「initial 未发布」阶段。
-pub(crate) fn begin_pending(session_id: &str) {
-    let mut guard = pending_lock();
-    guard
+fn insert_pending(session_id: &str) {
+    pending_lock()
         .get_or_insert_with(PendingStore::default)
         .sessions
         .insert(session_id.to_owned(), PendingSession::default());
+}
+
+/// 发 load 请求前登记：该会话进入「initial 未发布」阶段。
+pub(crate) fn begin_pending(session_id: &str) {
+    let _admission = admission_lock();
+    insert_pending(session_id);
+}
+
+/// 登记暂存并在同一临界区取旧窗口快照。
+///
+/// 候选 load 在边界前调用：接纳门此后要么把更新放进暂存，要么让快照看见它，
+/// 不会出现「已接纳但快照早于它」的丢失窗口。
+pub(crate) fn begin_pending_snapshot(session_id: &str) -> HistoryV2State {
+    let _admission = admission_lock();
+    insert_pending(session_id);
+    atoms::HISTORY_V2_STATE.state().read().clone()
 }
 
 /// 该会话当前是否仍在等待 initial 发布。
@@ -305,6 +333,7 @@ fn push_pending(session_id: &str, meta: &DeliveryMeta, params: &Value) -> bool {
 }
 
 /// initial 发布后取走该会话的暂存（按 seq 稳定排序）。
+#[cfg(test)]
 pub(crate) fn take_pending(session_id: &str) -> Vec<(DeliveryMeta, Value)> {
     let mut guard = pending_lock();
     let Some(store) = guard.as_mut() else {
@@ -337,28 +366,91 @@ pub(crate) fn clear_pending(session_id: &str) {
     }
 }
 
-/// initial 失败时把暂存按 seq 并入仍有效的旧窗口，返回被接纳的原始通知。
+/// 只保留该会话的暂存；候选边界用它清掉其他会话的残留而不丢本会话恢复数据。
+pub(crate) fn retain_pending_only(session_id: &str) {
+    if let Some(store) = pending_lock().as_mut() {
+        store.sessions.retain(|id, _| id == session_id);
+    }
+}
+
+/// 一次暂存恢复的独占权。
+///
+/// 持有期间保留会话登记并握住暂存锁：`gate_session_update` 的新更新只能等待，
+/// 不会在「取走暂存」与「发布恢复后高水位」之间被直接接纳。恢复路径必须在
+/// 状态发布与视图/重放派发完成后再 [`Self::finish`]。
+pub(crate) struct PendingReplay {
+    store: MutexGuard<'static, Option<PendingStore>>,
+    session_id: String,
+}
+
+impl PendingReplay {
+    /// 取走当前暂存（按 seq 稳定排序）；会话仍保持登记。
+    pub(crate) fn drain(&mut self) -> Vec<(DeliveryMeta, Value)> {
+        let Some(store) = self.store.as_mut() else {
+            return Vec::new();
+        };
+        let Some(pending) = store.sessions.get_mut(&self.session_id) else {
+            return Vec::new();
+        };
+        if pending.dropped {
+            tracing::warn!(
+                session_id = %self.session_id,
+                "history v2: initial pending buffer overflowed; replay starts at a gap"
+            );
+            pending.dropped = false;
+        }
+        pending.bytes = 0;
+        let mut updates: Vec<PendingUpdate> = pending.updates.drain(..).collect();
+        updates.sort_by_key(|update| update.meta.seq.get());
+        updates
+            .into_iter()
+            .map(|update| (update.meta, update.params))
+            .collect()
+    }
+
+    /// 结束恢复：移除登记并释放暂存锁。
+    pub(crate) fn finish(mut self) {
+        if let Some(store) = self.store.as_mut() {
+            store.sessions.remove(&self.session_id);
+        }
+    }
+}
+
+/// 开始一次暂存恢复；会话没有登记暂存时返回 `None`（无需线性化）。
+pub(crate) fn begin_pending_replay(session_id: &str) -> Option<PendingReplay> {
+    let store = pending_lock();
+    if !store
+        .as_ref()
+        .is_some_and(|store| store.sessions.contains_key(session_id))
+    {
+        return None;
+    }
+    Some(PendingReplay {
+        store,
+        session_id: session_id.to_owned(),
+    })
+}
+
+/// 把暂存按 seq 并入仍有效的旧窗口，返回被接纳的原始通知。
 ///
 /// 服务端在 initial 失败后先发错误响应、再把候选期更新补回旧流；这些通知可能先
 /// 于错误分支被接纳门放进暂存。只有与旧窗口同 stream 且连续的更新才能并入；
 /// 缺口由 `accept_live_event` 显式记账，调用方据此重投影 gap/detached。
-/// 窗口不可用时暂存整体丢弃，由调用方使旧视图失效。
-pub(crate) fn take_pending_into(state: &mut HistoryV2State) -> Vec<(DeliveryMeta, Value)> {
-    let Some(session_id) = state.session_id.clone() else {
-        return Vec::new();
-    };
+pub(crate) fn merge_pending_updates(
+    state: &mut HistoryV2State,
+    updates: Vec<(DeliveryMeta, Value)>,
+) -> Vec<(DeliveryMeta, Value)> {
     let Some(stream_id) = state
         .window
         .as_ref()
         .and_then(|window| window.paging.live.stream_id.clone())
     else {
-        take_pending(&session_id);
         return Vec::new();
     };
     let Some(window) = state.window.as_mut() else {
         return Vec::new();
     };
-    take_pending(&session_id)
+    updates
         .into_iter()
         .filter(|(meta, _)| meta.stream_id == stream_id)
         .filter(|(meta, _)| {

@@ -372,16 +372,39 @@ async fn handle_session_update(
 /// 与 [`replay_pending_initial`] 的区别：这里直接修改调用方持有的已发布旧窗口，
 /// 不读取也不发布 atom；调用方负责先把恢复后的状态送回视图，再发送返回的事件，
 /// 保持「视图先于尾部事件」的既有顺序。重复调用不会重复渲染（暂存已取走）。
+#[cfg(test)]
 pub(crate) fn replay_pending_into(
     state: &mut crate::kit::history_v2::HistoryV2State,
 ) -> Vec<AcpEventWithEpoch> {
+    let (events, replay) = replay_pending_into_guarded(state);
+    if let Some(replay) = replay {
+        replay.finish();
+    }
+    events
+}
+
+/// 与 [`replay_pending_into`] 相同，但把暂存槽的独占权交还调用方。
+///
+/// 调用方必须在恢复状态发布、视图与返回事件派发完成后再 `finish`，否则新通知
+/// 会在「取走暂存」与「发布恢复后高水位」之间被直接接纳，造成丢更新或乱序。
+pub(crate) fn replay_pending_into_guarded(
+    state: &mut crate::kit::history_v2::HistoryV2State,
+) -> (
+    Vec<AcpEventWithEpoch>,
+    Option<crate::kit::history_v2::live::PendingReplay>,
+) {
     let Some(session_id) = state.session_id.clone() else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
-    crate::kit::history_v2::live::take_pending_into(state)
+    let Some(mut replay) = crate::kit::history_v2::live::begin_pending_replay(&session_id) else {
+        return (Vec::new(), None);
+    };
+    let accepted = crate::kit::history_v2::live::merge_pending_updates(state, replay.drain());
+    let events = accepted
         .into_iter()
         .flat_map(|(_, params)| decode_live_update(&params, &session_id))
-        .collect()
+        .collect();
+    (events, Some(replay))
 }
 
 /// initial 发布或 open 接纳后重放暂存的 live 更新。
@@ -402,8 +425,12 @@ pub(crate) fn replay_pending_initial(
     else {
         return Vec::new();
     };
+    // 恢复期间握住暂存槽：新事件不能绕过暂存直接写入旧高水位。
+    let Some(mut replay) = crate::kit::history_v2::live::begin_pending_replay(session_id) else {
+        return Vec::new();
+    };
     let mut events = Vec::new();
-    for (meta, params) in crate::kit::history_v2::live::take_pending(session_id) {
+    for (meta, params) in replay.drain() {
         if meta.stream_id != stream_id {
             debug!(
                 session_id = %session_id,
@@ -427,6 +454,7 @@ pub(crate) fn replay_pending_initial(
             }
         }
     }
+    replay.finish();
     events
 }
 

@@ -12,8 +12,9 @@ use super::guards::{PreparingSessionGuard, SessionProjectionGuard};
 ///
 /// 同会话的旧窗口仍然有效：先把它在 initial 期间暂存的旧流补发按 seq 并入窗口，
 /// 再把恢复后的状态重新送入桥接视图（`notify_view` 只读状态，不修改交付身份）。
-/// 暂存不并入就清空会让旧窗口静默缺尾部，下一次更大序号才暴露为 gap。跨会话失败
-/// 不恢复旧视图；没有可恢复窗口时丢弃暂存并退回空边界。
+/// 恢复期间继续持有暂存槽：新通知只能在状态发布与重放派发完成后按恢复后的高水位
+/// 接纳，不能越过缓存先渲染。跨会话失败不恢复旧视图；没有可恢复窗口时丢弃暂存
+/// 并退回空边界。
 fn settle_failed_initial_projection(
     projection: &mut SessionProjectionGuard<'_>,
     previous_v2: &crate::kit::history_v2::HistoryV2State,
@@ -22,7 +23,7 @@ fn settle_failed_initial_projection(
     let restore = previous_v2.is_ready() && previous_v2.session_id.as_deref() == Some(session_id);
     if restore {
         let mut restored = previous_v2.clone();
-        let events = crate::kit::acp_notifier::replay_pending_into(&mut restored);
+        let (events, replay) = crate::kit::acp_notifier::replay_pending_into_guarded(&mut restored);
         // 恢复后的高水位必须写回 atom，失败后的实时事件才能继续按连续序号接纳。
         crate::kit::history_v2::restore_published(restored.clone());
         if projection.client.projection_mode == ClientProjectionMode::Interactive {
@@ -31,6 +32,10 @@ fn settle_failed_initial_projection(
             crate::kit::atoms::ACTIVE_SESSION_ID.set(session_id.to_owned());
             crate::kit::history_v2::consumer::notify_view(&restored);
             crate::kit::acp_notifier::dispatch_local_events(events);
+        }
+        // 状态、视图与缓存重放都已完成：释放暂存槽，后续通知按新水位直发。
+        if let Some(replay) = replay {
+            replay.finish();
         }
     } else {
         crate::kit::history_v2::live::clear_pending(session_id);
@@ -44,6 +49,19 @@ fn settle_failed_initial_projection(
 }
 
 impl AcpTuiClient {
+    /// initial 失败的统一收敛：可恢复旧窗口时把通知路由交还旧会话。
+    ///
+    /// 路由必须先于恢复视图/暂存重放生效：服务端错误响应之后会立刻把候选期更新
+    /// 补回旧流，pump 需要按旧会话身份继续放行这些通知。
+    fn fail_initial_transition(&self, generation: u64, session_id: &str, restore_route: bool) {
+        if restore_route {
+            self.lifecycle
+                .fail_transition_restoring_route(generation, session_id);
+        } else {
+            self.lifecycle.fail_transition(generation);
+        }
+    }
+
     /// Create a new agent session.
     ///
     /// Closes the previous session (if any) to release its history, AgentPool,
@@ -247,16 +265,36 @@ impl AcpTuiClient {
             )
             .map_err(|message| AcpError::new(-32603, message))?;
         let transition = self.lifecycle.arm_transition(start.generation);
-        // initial 是窗口替换的候选：候选发布前不撤销旧窗口状态/交付身份。快照必须在
-        // 会话边界之前——边界的 V2 清理会关闭并清空当前窗口，之后再取就无从恢复。
-        let previous_v2 = crate::kit::history_v2::snapshot();
+        // initial 是窗口替换的候选：候选成功前不撤销旧窗口，也不关闭它的服务端
+        // 票据（否则失败后快照虽在，page/body 仍会 `window_closed`）。同会话且已有
+        // 可恢复窗口时，暂存登记与快照在同一接纳临界区完成：旧流更新要么已落在
+        // 快照里，要么进入暂存等待失败恢复。
+        let history_v2 = self.history_v2_active();
+        let previous = crate::kit::history_v2::snapshot();
+        let mut retain_previous =
+            history_v2 && previous.is_ready() && previous.session_id.as_deref() == Some(session_id);
+        let previous_v2 = if retain_previous {
+            let current = crate::kit::history_v2::live::begin_pending_snapshot(session_id);
+            // 临界区内复核：快照与暂存登记必须对应同一个可恢复窗口。
+            retain_previous =
+                current.is_ready() && current.session_id.as_deref() == Some(session_id);
+            current
+        } else {
+            previous
+        };
         let mut projection = SessionProjectionGuard {
             client: self,
             committed: false,
             retain_projection: false,
         };
         if self.projection_mode == ClientProjectionMode::Interactive {
-            crate::kit::session_boundary::project_session_boundary(Some(session_id));
+            if retain_previous {
+                crate::kit::session_boundary::project_session_boundary_retaining_history(Some(
+                    session_id,
+                ));
+            } else {
+                crate::kit::session_boundary::project_session_boundary(Some(session_id));
+            }
         }
         self.settle_claims_owned(start.claims).await;
         let close_target = self
@@ -287,9 +325,8 @@ impl AcpTuiClient {
         }
 
         // initial 是窗口替换的候选：在接纳并发布前不撤销旧窗口状态/交付身份。
-        let history_v2 = self.history_v2_active();
         let limits = self.history_v2_limits();
-        if history_v2 {
+        if history_v2 && !retain_previous {
             // F2b：load 响应可能晚于服务端 flush 的 live 通知到达；先登记暂存。
             crate::kit::history_v2::live::begin_pending(session_id);
         }
@@ -339,7 +376,7 @@ impl AcpTuiClient {
             Ok(loaded) => loaded,
             Err(error) => {
                 *self.restore_error.lock().unwrap() = Some(error.to_string());
-                self.lifecycle.fail_transition(start.generation);
+                self.fail_initial_transition(start.generation, session_id, retain_previous);
                 transition.disarm();
                 if history_v2 {
                     // 失败前已进入暂存的旧流补发必须先并入旧窗口，不能直接清空。
@@ -365,7 +402,7 @@ impl AcpTuiClient {
                         "reason": error.reason.to_string(),
                     }));
                     *self.restore_error.lock().unwrap() = Some(acp.to_string());
-                    self.lifecycle.fail_transition(start.generation);
+                    self.fail_initial_transition(start.generation, session_id, retain_previous);
                     transition.disarm();
                     // 服务端已提交候选流；暂存里的新流事件会因 stream 不匹配被丢弃，
                     // 但旧窗口若仍有效，仍允许同流暂存并回并恢复视图。
@@ -376,11 +413,15 @@ impl AcpTuiClient {
                         // 失败状态必须在边界清理之后写入，否则会被会话边界重置覆盖。
                         crate::kit::history_v2::publish_failure(session_id, error.into_failure());
                     }
-                    // 服务端已装配会话但客户端不发布；尽力回收，避免孤儿会话。
-                    let _ = self
-                        .transport
-                        .send_request("session/close", json!({"sessionId": session_id}))
-                        .await;
+                    // 服务端已装配会话但客户端不发布；新建/跨会话目标尽力回收，
+                    // 避免孤儿会话。同会话重载不能关闭仍在使用的旧会话：那会连同
+                    // 刚恢复的窗口与 readTicket 一起失效。
+                    if !retain_previous {
+                        let _ = self
+                            .transport
+                            .send_request("session/close", json!({"sessionId": session_id}))
+                            .await;
+                    }
                     return Err(acp);
                 }
             };

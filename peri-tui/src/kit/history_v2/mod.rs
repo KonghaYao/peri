@@ -205,6 +205,15 @@ pub fn reset_state() {
     atoms::HISTORY_V2_STATE.set(HistoryV2State::default());
 }
 
+/// 候选 `session/load` 的边界复位：清空本地窗口，但保留该会话的暂存登记。
+///
+/// 候选失败时旧窗口靠快照恢复；边界与失败之间到达的旧流更新必须仍在暂存里，
+/// 否则它们既不在快照高水位内、也不会被服务端重发。
+pub(crate) fn reset_state_preserving_pending(session_id: &str) {
+    live::retain_pending_only(session_id);
+    atoms::HISTORY_V2_STATE.set(HistoryV2State::default());
+}
+
 /// rewind 专用复位：只作废窗口与投影，保留连接级投递事实。
 ///
 /// open 响应不携带投递边界，若连同 `liveBoundary` 一起清空，新窗口无法重建
