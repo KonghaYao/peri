@@ -40,8 +40,8 @@ pub use mq::{
 #[doc(hidden)]
 pub use mq_memory::InMemoryMqStore;
 pub use queue::{
-    MessageKind, MessageQueue, MessageSource, ProducerQueue, QueueOwner, QueuedMessage,
-    QueuedPayload, ReceivePermit,
+    MessageKind, MessageQueue, MessageSource, ProducerQueue, QueueClosed, QueueOwner,
+    QueuedMessage, QueuedPayload, ReceivePermit,
 };
 pub use queue_policy::{
     ExecutionBinding, MessageActivation, MessageDisposition, MessagePolicy, MessageRequirement,

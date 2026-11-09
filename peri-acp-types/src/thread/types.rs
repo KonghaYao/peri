@@ -247,7 +247,7 @@ pub struct ThreadMeta {
     /// 快照截止消息 ID
     #[serde(default)]
     pub snapshot_at_message_id: Option<String>,
-    /// true = 子 agent，不显示在主列表
+    /// 会话列表隐藏开关；子 Agent 默认 true，根会话与 fork 默认 false
     #[serde(default)]
     pub hidden: bool,
     /// 取消策略（强类型，旧 JSON 缺失时默认 Cascade）

@@ -27,6 +27,26 @@ pub(crate) async fn flush_session_history(
     Ok(())
 }
 
+/// 终态停驻：注销订阅广播收件人，binding、owner 与 queue 保留供 resume 复用。
+///
+/// `HandedOff` 仍可能由交接 wrapper 消费，不在该阶段注销；resume 装配会经
+/// `bind_agent_session` 重新注册。
+pub(super) fn park_child_inbox(
+    session: &crate::session::Session,
+    child_thread_id: &str,
+    outcome: &super::types::ChildRunOutcome,
+) {
+    if matches!(outcome, super::types::ChildRunOutcome::HandedOff { .. }) {
+        return;
+    }
+    if let Some(pool) = session
+        .subagent_host()
+        .and_then(|host| host.mcp_pool.clone())
+    {
+        pool.park_agent_session(child_thread_id);
+    }
+}
+
 pub(super) async fn drain_subagent_events(
     event_bus: Arc<EventBus>,
     forwarder: tokio_util::task::AbortOnDropHandle<Option<crate::agent::events_v2::ObserveEvent>>,

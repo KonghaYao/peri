@@ -463,7 +463,7 @@ pub trait ThreadStore: Send + Sync {
         anyhow::bail!("unsupported frozen snapshot persistence")
     }
 
-    /// 列举所有 thread 元数据，按 updated_at 降序（不含 hidden 的子 agent）
+    /// 列举所有 thread 元数据，按 updated_at 降序（不含 hidden 的 thread）
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>>;
 
     /// 列举指定工作目录下可展示的非空 thread，不计算消息内容总大小。

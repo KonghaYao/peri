@@ -123,7 +123,7 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
-| 会话注册表/API | session/mod.rs | `AcpSession` / `SessionManager` 持有唯一 live session 注册表；`compact_exposure` 有界账本在普通 prompt 间复用，经 `host/prompt.rs` 的 SessionContext 与 stage bridge 注入新执行，冷创建为空；host EOF 经 `take_for_close` 把实际记录移交退出 context，`close_resources` 返回可重试结果；公开 `close_session` 保留原 request 关闭 API |
+| 会话注册表/API | session/mod.rs | `AcpSession` / `SessionManager` 持有唯一 live session 注册表；`compact_exposure` 有界账本在普通 prompt 间复用，经 `host/prompt.rs` 的 SessionContext 与 stage bridge 注入新执行，冷创建为空；host EOF 经 `take_for_close` 把实际记录移交退出 context，`close_resources` 先经 `close_child_resources` 结算 dormant child 再关闭会话任务 scope，并返回可重试结果；公开 `close_session` 保留原 request 关闭 API |
 | 会话装配 / frozen 数据构建 | session/construction.rs + session/frozen.rs + host/prepared.rs | `build_session` / `build_command_registry`；生产入口 `PreparedSessionInputs::build_frozen_after_activation` → `build_frozen_data_with_deployment_closure` 从会话创建时的配置构造冻结 prompt（`build_frozen_data` 为内部入口）；持久化快照仍在 frozen_snapshot.rs |
 | Session 访问与 bridge 装配 | session/access.rs + session/bridges.rs | `SessionAccessPort`、`v2_queue_for` / `session_inbox_for`；`bind_cron_continuation` |
 | 执行编排（re-export 桥） | session/executor.rs | 仅 re-export `peri_agent::session::exec::executor`（run_session_loop、is_keepgoing、FrozenSessionData、ContinuationRequest 等） |

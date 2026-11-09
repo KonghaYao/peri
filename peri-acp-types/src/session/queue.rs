@@ -20,7 +20,7 @@ use crate::thread::ThreadId;
 use anyhow::Result;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -280,6 +280,24 @@ impl QueuedMessage {
 
 // ─── MessageQueue ────────────────────────────────────────────────────────────
 
+/// 关闭结算开始后拒绝入队；携带 thread 便于调用方诊断。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueClosed {
+    pub thread_id: String,
+}
+
+impl std::fmt::Display for QueueClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "message queue for thread {} is closed to new enqueues",
+            self.thread_id
+        )
+    }
+}
+
+impl std::error::Error for QueueClosed {}
+
 /// 会话级持久收件箱门面（绑定一个 thread）。
 ///
 /// 待发事实（有哪些消息、顺序、策略、移交与取消）全部由 [`ThreadMqStore`] 回答；
@@ -299,8 +317,13 @@ struct Mailbox {
     wake: tokio::sync::Notify,
     wake_version: tokio::sync::watch::Sender<u64>,
     send_selection: Mutex<Vec<MessageId>>,
-    /// 已受理但尚未提交的分离入队数量（同步 hook 桥，见 [`MessageQueue::begin_detached_enqueue`]）。
+    /// 已受理但尚未提交的入队数量（同步 hook 桥与直接入队共用）。
     pending_enqueues: AtomicUsize,
+    /// 入队闸门：关闭结算开始后拒绝新入队；clone 共享。
+    ///
+    /// 只存在于本门面，不写入存储：同一 thread 的新 [`bind`](MessageQueue::bind)
+    /// （新 owner / resume）是新的开放门面。
+    admission_closed: AtomicBool,
     pending_drained: tokio::sync::Notify,
     /// 仅测试：记录被 `suppress_sync` 处置的消息，供旧断言读取。
     #[cfg(feature = "test-support")]
@@ -314,7 +337,7 @@ pub struct DetachedEnqueue {
 
 impl Drop for DetachedEnqueue {
     fn drop(&mut self) {
-        if self.inner.pending_enqueues.fetch_sub(1, Ordering::AcqRel) == 1 {
+        if self.inner.pending_enqueues.fetch_sub(1, Ordering::SeqCst) == 1 {
             self.inner.pending_drained.notify_waiters();
         }
     }
@@ -359,6 +382,7 @@ impl MessageQueue {
                 wake_version: tokio::sync::watch::channel(0).0,
                 send_selection: Mutex::new(Vec::new()),
                 pending_enqueues: AtomicUsize::new(0),
+                admission_closed: AtomicBool::new(false),
                 pending_drained: tokio::sync::Notify::new(),
                 #[cfg(feature = "test-support")]
                 suppressed: Mutex::new(Vec::new()),
@@ -377,10 +401,46 @@ impl MessageQueue {
     /// 调用方在下一次 [`Self::await_pending_enqueues`] 之前不得据此断定收件箱为空。
     /// 返回的 guard 在写入结束（成功或失败）时 Drop，才把入队计为已完成。
     pub fn begin_detached_enqueue(&self) -> DetachedEnqueue {
-        self.inner.pending_enqueues.fetch_add(1, Ordering::AcqRel);
+        self.inner.pending_enqueues.fetch_add(1, Ordering::SeqCst);
         DetachedEnqueue {
             inner: Arc::clone(&self.inner),
         }
+    }
+
+    /// 关闭入队准入；幂等。
+    ///
+    /// 关闭结算在读取 MQ 快照前调用，随后 [`Self::await_pending_enqueues`] 等到
+    /// 已通过闸门的写入结束，结算看到的行集合才稳定。结算自身的存储写入
+    /// （`settle_retained_mq`）直接经资源门面，不经过本闸门。
+    pub fn close_admission(&self) {
+        self.inner.admission_closed.store(true, Ordering::SeqCst);
+    }
+
+    /// 入队闸门是否已关闭（clone 共享）。
+    pub fn is_admission_closed(&self) -> bool {
+        self.inner.admission_closed.load(Ordering::SeqCst)
+    }
+
+    /// 为一次外部入队登记在途凭证，并检查关闭闸门。
+    ///
+    /// 先登记计数再读闸门：close 先关闸、再等计数归零，因此不会漏掉
+    /// 「已通过检查但尚未提交」的写入。被拒绝的调用不写存储，返回
+    /// [`QueueClosed`]。
+    fn admit_enqueue(&self, message: &QueuedMessage) -> Result<DetachedEnqueue> {
+        let pending = self.begin_detached_enqueue();
+        if self.is_admission_closed() {
+            tracing::warn!(
+                thread_id = %self.inner.thread_id,
+                kind = ?message.kind,
+                source = ?message.source,
+                requirement = ?message.policy.requirement,
+                "message queue admission is closed; enqueue rejected"
+            );
+            return Err(anyhow::Error::new(QueueClosed {
+                thread_id: self.inner.thread_id.to_string(),
+            }));
+        }
+        Ok(pending)
     }
 
     /// 等待所有已受理的分离入队提交完成。
@@ -392,7 +452,7 @@ impl MessageQueue {
             let notified = self.inner.pending_drained.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if self.inner.pending_enqueues.load(Ordering::Acquire) == 0 {
+            if self.inner.pending_enqueues.load(Ordering::SeqCst) == 0 {
                 return;
             }
             notified.await;
@@ -404,9 +464,11 @@ impl MessageQueue {
     /// 入队一条消息并返回接纳结论；只有可唤醒策略（非 Passive）才发布唤醒。
     ///
     /// 调用方需要稳定 id 时用返回的 `outcome.entry.id`：未固定的 `SystemReminder`
-    /// `delivery_id` 在本次入队时生成，重试必须复用它。
+    /// `delivery_id` 在本次入队时生成，重试必须复用它。关闭结算开始后返回
+    /// [`QueueClosed`]，不写存储。
     pub async fn enqueue(&self, message: QueuedMessage) -> Result<MqEnqueueOutcome> {
         let notifies = message.policy.notifies_execution();
+        let _pending = self.admit_enqueue(&message)?;
         let outcome = self
             .inner
             .store
@@ -444,6 +506,8 @@ impl MessageQueue {
     }
 
     /// 批量入队（逐条提交）；任一失败立即返回，调用方按稳定 ID 重查已提交的部分。
+    ///
+    /// 关闭结算开始后拒绝后续条目，已提交前缀保持持久事实。
     pub async fn enqueue_batch(
         &self,
         messages: Vec<QueuedMessage>,
@@ -452,6 +516,7 @@ impl MessageQueue {
         let mut wake = false;
         for message in messages {
             let notifies = message.policy.notifies_execution();
+            let _pending = self.admit_enqueue(&message)?;
             let outcome = self
                 .inner
                 .store

@@ -615,10 +615,15 @@ pub(super) async fn spawn_background_subagent(
         } else {
             Ok(())
         };
+        let parked_inbox = permit_result.is_ok() && !explicit_close;
         if permit_result.is_ok() {
             if let Some(guard) = &mut resumed_mailbox {
                 guard.0 = None;
             }
+        }
+        // 先注销再释放执行准入，避免 resume 重新注册后被本次停驻覆盖。
+        if parked_inbox {
+            super::lifecycle::park_child_inbox(&session, &child_thread_id_for_task, &outcome);
         }
         if let Some(permit) = permit {
             permit.finish(permit_result);

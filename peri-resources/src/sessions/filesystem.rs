@@ -279,7 +279,7 @@ impl ThreadStore for FilesystemThreadStore {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>> {
         let mut metas = self.read_index().await?;
-        // 排除 hidden 的子 agent
+        // 排除 hidden 的 thread（子 Agent 默认隐藏）
         metas.retain(|m| !m.hidden);
         metas.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         // 计算 content_size（从 messages.jsonl 文件大小）

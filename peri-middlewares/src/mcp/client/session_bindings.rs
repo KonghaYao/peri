@@ -135,8 +135,23 @@ impl SessionBindings {
         }
     }
 
+    /// 终态停驻：只翻 Agent binding 的注册位，保留 owner／queue 供 resume 复用。
+    ///
+    /// 根会话与其他 binding 不参与；resume 装配经 [`Self::bind_agent`] 重新注册。
+    pub(crate) fn park_agent(&mut self, session: &str) {
+        if let Some(binding) = self.current.get_mut(session) {
+            if binding.kind == Some(BindingKind::Agent) {
+                binding.registered = false;
+            }
+        }
+    }
+
     /// 已确认任务与消息结清后的子会话释放。
     pub(crate) fn release(&mut self, session: &str) {
         self.current.remove(session);
     }
 }
+
+#[cfg(test)]
+#[path = "session_bindings_test.rs"]
+mod tests;

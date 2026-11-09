@@ -303,6 +303,7 @@ SQL 形态为同一 `BEGIN ... COMMIT` 内的受控 `INSERT messages ...` 与 `D
 - 取回响应丢失后，服务端没有被删除原稿或旧裁决。客户端在操作确认前保留其已有原稿，不能要求服务端恢复不存在的回执。
 - 用户 Stop 与取消一条待发消息不同：Stop 走已有执行控制，保留 MQ；后到结果不能解除 Stop。Stop 等运行意图的跨重启持久恢复在后续 durable 主题中设计。
 - 停驻 child 关闭时，生命周期 owner 使用非模型结算 permit，经同一 Receive 原子移交。终态沿原 delivery ID 写入 child 历史，其他未处理输入沿既有 `child_retained_input_unprocessed` 规则处置；失败保留 MQ 并返回 Incomplete，不能直接清空 MQ 或误报 Closed。
+- 关闭结算开始前，生命周期 owner 先关闭该 thread 的入队闸门，并等待已通过闸门的写入结束；此后 `enqueue`/`enqueue_batch` 返回明确的关闭错误，不写 MQ。闸门是进程内门面状态（clone 共享），不落存储、不改变既有行；同一 thread 的新绑定（resume / 新 owner）重新开放。关闭结算自身的提醒写入与删除经 `settle_retained_mq`，不经过闸门，不能被自身拒绝。
 - thread 删除及 rewind 按现有作用域与生命周期规则清理。需要删除 MQ 时必须经内部类型化 Store 操作，并与关联历史变化统一协调；不能另开业务 SQL 入口。
 - 显式删除的历史不通过 MQ 留档恢复，也不承诺对已被明确删除的所有旧 ID 永久去重。
 
@@ -356,6 +357,7 @@ UI 隐藏、UI 已展示、MQ 行已删除，都不是有效模型响应已处�
 | 进入时遗留 Active | 非根、非 working、非活实例、close 已结清的 `idle`/`stopped` child 收敛为 `Error`/`Cancelled`，不续跑、不注入提醒。 |
 | 原投递关系 | 配置回调优先、嵌套子 Agent、同根 resume 和失败重试均保持现有目标，不回退 root；恢复读取 `threads.config.completion_target` 指定的实际收件人，目标缺失或跨根时明确失败。 |
 | 停驻 child 关闭 | 不调用模型；终态与未处理输入按原规则结算；事务失败不丢 MQ、不误报 Closed。 |
+| 关闭结算迟到入队 | 关闸后 `enqueue`/`enqueue_batch` 明确拒绝且不写行；已在途写入先结束；关闭前接纳的行按结算规则处理，结束后不留下无人消费的 MQ 行。 |
 | 重复通知 | 稳定 ID 不重复写入历史、不制造新的工作；冲突身份显式报错。 |
 | 取消与 Receive 竞争 | 只有一个结果成立；不能删掉未入历史消息后报告已发送。 |
 | Receive 提交前进程退出 | 重新打开真实 SQLite 文件后，MQ 行存在且对应历史不存在。 |
