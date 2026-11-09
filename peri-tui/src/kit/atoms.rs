@@ -725,9 +725,28 @@ pub static BRIDGE_RESET_COUNTER: AtomStatic<u64> = AtomStatic::new(|| 0);
 /// 2026-08-08-e2e-compact-command-screenshot-too-early）。None = 无待重建提示。
 pub static PENDING_COMPACT_NOTE: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 
-/// TUI 内部事件通道——input_area 本地提交通过此 channel 发送 LocalUserBubble
-/// 到 acp_bridge，统一走 dispatch_and_notify 路径写入 VIEW_MODELS atom。
-pub static LOCAL_EVENT_TX: OnceLock<UnboundedSender<AcpEventWithEpoch>> = OnceLock::new();
+/// TUI 内部事件通道——本地提交、V2 视图/恢复重放与 notifier 实时通知共用这一条
+/// FIFO，由单一 forwarder 串行写入 bridge；入队顺序即渲染顺序。
+///
+/// 用可替换的 `Mutex<Option<_>>` 而不是 `OnceLock`：队列属于连接，测试需要按用例
+/// 安装自己的接收端（与 `HISTORY_V2_TX` 同一约定）。
+pub static LOCAL_EVENT_TX: std::sync::Mutex<Option<UnboundedSender<AcpEventWithEpoch>>> =
+    std::sync::Mutex::new(None);
+
+/// 当前连接的事件队列发送端；未安装时为 `None`。
+pub(crate) fn local_event_tx() -> Option<UnboundedSender<AcpEventWithEpoch>> {
+    LOCAL_EVENT_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// 安装当前连接的事件队列（替换旧值；旧队列的消费端随之关闭）。
+pub(crate) fn install_local_event_tx(tx: UnboundedSender<AcpEventWithEpoch>) {
+    *LOCAL_EVENT_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tx);
+}
 
 /// Spinner token 计数——由 acp_bridge 在收到 TokenUsage 事件时写入（input+output），
 /// MessageArea 的 build_footer_lines 读取后作为参数传入 `render_to_lines(..., token_count)`，

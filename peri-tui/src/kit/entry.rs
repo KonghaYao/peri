@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::app::service_registry::ProcessResourceMonitor;
 use crate::kit::acp_bridge::spawn_acp_bridge;
-use crate::kit::acp_notifier::spawn_kit_notifier_with_client;
+use crate::kit::acp_notifier::{BridgeSink, spawn_kit_notifier_with_client};
 use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::app_shell::AppShell;
 use crate::kit::ask_user_action::{AskUserResponseAction, spawn_ask_user_consumer};
@@ -423,18 +423,18 @@ pub async fn run_kit_fullscreen(
         let (cancel_tx, cancel_rx) = mpsc::unbounded_channel::<()>();
         let _ = atoms::CANCEL_TX.set(cancel_tx);
 
-        // 4c. bridge channel：notifier → acp_bridge
+        // 4c. bridge channel：唯一 forwarder → acp_bridge
         let (bridge_tx, bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
-        // LOCAL_EVENT_TX：input_area 本地提交 → acp_bridge
+        // LOCAL_EVENT_TX：本地提交、V2 视图/恢复重放与 notifier 实时通知的唯一有序
+        // 入口。notifier 也写入这条 FIFO，恢复重放未转发完时实时通知不会越序到达
+        // bridge；有界背压只作用在 forwarder 与 bridge 之间。
         let (local_event_tx, mut local_event_rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
-        let _ = atoms::LOCAL_EVENT_TX.set(local_event_tx);
-        // Mini bridge task：转发 local event 到 bridge channel。local event 由
-        // 用户输入节奏驱动、单任务串行产生，故保留无界入口；写入 bridge 的
-        // 边界仍受 BRIDGE_QUEUE_CAPACITY 约束。
-        let bridge_tx_clone = bridge_tx.clone();
+        atoms::install_local_event_tx(local_event_tx.clone());
+        // Mini bridge task：把本地 FIFO 串行送入 bridge。local event 由用户输入节奏
+        // 驱动，入口保持无界；写入 bridge 的边界仍受 BRIDGE_QUEUE_CAPACITY 约束。
         tokio::spawn(async move {
             while let Some(ev) = local_event_rx.recv().await {
-                if bridge_tx_clone.send(ev).await.is_err() {
+                if bridge_tx.send(ev).await.is_err() {
                     break;
                 }
             }
@@ -443,7 +443,7 @@ pub async fn run_kit_fullscreen(
         // 4d. 启动三链路（render_bridge 已删除）
         let _notifier_handle = spawn_kit_notifier_with_client(
             notification_rx,
-            bridge_tx,
+            BridgeSink::ordered(local_event_tx),
             shutdown.clone(),
             client.clone(),
         );

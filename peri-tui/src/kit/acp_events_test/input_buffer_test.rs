@@ -70,20 +70,17 @@ fn test_drain_input_buffer_no_submit_tx_safe() {
 
 /// Slice 3 D4：drain 时**每条**排队文本先 `send_local_user_bubble`（本地气泡恰
 /// 出现一次，镜像非 loading 路径）再提交 AgentText——不依赖服务端回显。
-/// LOCAL_EVENT_TX 与 SUBMIT_TX 同为全局 OnceLock：本测试安装成功时（serial
-/// 首个）可观察两通道，验证 FIFO 顺序与气泡唯一性；已被占用时只断言
-/// buffer 清空（核心效应）。
+/// LOCAL_EVENT_TX 是可替换的进程级队列：本用例安装自己的接收端，验证 FIFO
+/// 顺序与气泡唯一性。
 #[test]
 #[serial]
 fn test_drain_input_buffer_sends_local_user_bubble_once() {
     crate::kit::atoms::init_atoms();
     INPUT_BUFFER.state().write().clear();
-    // 安装可观察 channel；OnceLock 已占用则返回 None（跳过通道级断言）。
+    // 安装本用例的可观察 channel。
     let (tx, rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
-    let local_rx = match LOCAL_EVENT_TX.set(tx) {
-        Ok(()) => Some(rx),
-        Err(_) => None,
-    };
+    crate::kit::atoms::install_local_event_tx(tx);
+    let local_rx = Some(rx);
     let mut submit_rx = ensure_submit_tx_observable();
 
     // 入队两条

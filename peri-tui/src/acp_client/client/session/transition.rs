@@ -13,8 +13,9 @@ use super::guards::{PreparingSessionGuard, SessionProjectionGuard};
 /// 同会话的旧窗口仍然有效：先把它在 initial 期间暂存的旧流补发按 seq 并入窗口，
 /// 再把恢复后的状态重新送入桥接视图（`notify_view` 只读状态，不修改交付身份）。
 /// 恢复期间继续持有暂存槽：新通知只能在状态发布与重放派发完成后按恢复后的高水位
-/// 接纳，不能越过缓存先渲染。跨会话失败不恢复旧视图；没有可恢复窗口时丢弃暂存
-/// 并退回空边界。
+/// 接纳，不能越过缓存先渲染。视图、重放与之后的实时通知共用 `LOCAL_EVENT_TX`
+/// 这一条 FIFO，由唯一 forwarder 串行写入 bridge，因此暂存槽必须在重放入队之后
+/// 才释放。跨会话失败不恢复旧视图；没有可恢复窗口时丢弃暂存并退回空边界。
 fn settle_failed_initial_projection(
     projection: &mut SessionProjectionGuard<'_>,
     previous_v2: &crate::kit::history_v2::HistoryV2State,
@@ -33,7 +34,8 @@ fn settle_failed_initial_projection(
             crate::kit::history_v2::consumer::notify_view(&restored);
             crate::kit::acp_notifier::dispatch_local_events(events);
         }
-        // 状态、视图与缓存重放都已完成：释放暂存槽，后续通知按新水位直发。
+        // 状态、视图与缓存重放都已入队：释放暂存槽，后续通知按新水位进入同一
+        // FIFO 的尾部，不会越序插到重放事件之前。
         if let Some(replay) = replay {
             replay.finish();
         }

@@ -1,9 +1,9 @@
 //! Reverse-request wire parsing and atomic owner/payload envelopes.
 
+use crate::kit::acp_notifier::BridgeSink;
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch, PendingInteraction};
 use peri_acp_types::event_data::{AskUser, HitlPending, Question, QuestionOption};
 use serde_json::Value;
-use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 /// 处理 Elicitation 通知：原子封装 RequestId + AskUser 后推入 bridge。
@@ -11,7 +11,7 @@ pub(super) async fn handle_elicitation(
     owner: crate::acp_client::InteractionOwner,
     request_id_json: String,
     params: &Value,
-    bridge_tx: &mpsc::Sender<AcpEventWithEpoch>,
+    sink: &BridgeSink,
 ) -> bool {
     // 从 params 中提取 session_id
     let session_id = params
@@ -36,9 +36,9 @@ pub(super) async fn handle_elicitation(
 
     info!("kit ACP notifier: forwarding Elicitation as AskUser event");
 
-    bridge_tx.send(wrapped).await.map_or_else(
+    sink.send(wrapped).await.map_or_else(
         |e| {
-            warn!(error = %e, "kit ACP notifier: bridge_tx closed, rejecting AskUser");
+            warn!(error = %e, "kit ACP notifier: bridge closed, rejecting AskUser");
             false
         },
         |_| true,
@@ -56,7 +56,7 @@ pub(super) async fn handle_request_permission(
     owner: crate::acp_client::InteractionOwner,
     request_id_json: String,
     params: &Value,
-    bridge_tx: &mpsc::Sender<AcpEventWithEpoch>,
+    sink: &BridgeSink,
 ) -> bool {
     let session_id = params
         .get("sessionId")
@@ -93,9 +93,9 @@ pub(super) async fn handle_request_permission(
 
     info!("kit ACP notifier: forwarding RequestPermission as HitlPending event");
 
-    bridge_tx.send(wrapped).await.map_or_else(
+    sink.send(wrapped).await.map_or_else(
         |e| {
-            warn!(error = %e, "kit ACP notifier: bridge_tx closed, rejecting HitlPending");
+            warn!(error = %e, "kit ACP notifier: bridge closed, rejecting HitlPending");
             false
         },
         |_| true,

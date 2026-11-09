@@ -255,7 +255,7 @@ async fn handle_request(
                 );
                 return;
             }
-            if let Some(tx) = atoms::LOCAL_EVENT_TX.get() {
+            if let Some(tx) = atoms::local_event_tx() {
                 let _ = tx.send(AcpEventWithEpoch {
                     child_origin: None,
                     view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),

@@ -171,8 +171,11 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
         let (bridge_tx, mut bridge_rx) =
             mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
         let shutdown = CancellationToken::new();
-        let notifier =
-            crate::kit::acp_notifier::spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
+        let notifier = crate::kit::acp_notifier::spawn_kit_notifier(
+            notif_rx,
+            crate::kit::acp_notifier::BridgeSink::direct(bridge_tx),
+            shutdown.clone(),
+        );
         // 本 fixture 演的是标准客户端（不协商分页）：回放不带条目位置戳。
         let generation = peri_acp::dispatch::LoadGeneration::from_client("tui-bridge-test");
         replay_persisted_session_history(

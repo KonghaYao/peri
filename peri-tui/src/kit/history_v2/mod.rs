@@ -172,9 +172,13 @@ pub fn publish_initial(state: HistoryV2State) {
     atoms::HISTORY_V2_STATE.set(state.clone());
     consumer::notify_view(&state);
     // F2b：首屏先就绪，再按 eventSeq 重放 initial 前暂存的 live 更新。视图事件与
-    // 重放事件都经 LOCAL_EVENT_TX，同一发送者的顺序保证「先首屏、后尾部」。
-    let replayed = crate::kit::acp_notifier::replay_pending_initial(&state);
+    // 重放事件都经 LOCAL_EVENT_TX，同一发送者的顺序保证「先首屏、后尾部」；
+    // 暂存槽只有在重放全部入队后才释放，后续实时通知才会排在其后。
+    let (replayed, replay) = crate::kit::acp_notifier::replay_pending_initial_guarded(&state);
     crate::kit::acp_notifier::dispatch_local_events(replayed);
+    if let Some(replay) = replay {
+        replay.finish();
+    }
 }
 
 /// initial 失败时写回同一会话已发布的旧窗口；不重放、不发布视图。

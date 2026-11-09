@@ -3,7 +3,7 @@ use ratatui_kit::prelude::State;
 use crate::components::textarea::TextAreaState;
 use crate::i18n;
 use crate::kit::acp_types::AcpEventWithEpoch;
-use crate::kit::atoms::{ACP_STATE, INPUT_BUFFER, LOCAL_EVENT_TX, SUBMIT_TX, WIZARD_ACTIVE};
+use crate::kit::atoms::{ACP_STATE, INPUT_BUFFER, SUBMIT_TX, WIZARD_ACTIVE, local_event_tx};
 use crate::kit::input_history::{push_history, reset_history_cursor};
 use crate::kit::panel_registry::open_panel;
 use crate::kit::submit_request::{SessionControlRequest, SubmitRequest, parse_submit_request};
@@ -188,7 +188,7 @@ pub(crate) fn send_local_user_bubble(
     attachments: &[crate::kit::atoms::PendingAttachment],
 ) {
     use crate::kit::acp_types::AcpEventData;
-    if let Some(tx) = LOCAL_EVENT_TX.get() {
+    if let Some(tx) = local_event_tx() {
         let _ = tx.send(AcpEventWithEpoch {
             child_origin: None,
             view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),

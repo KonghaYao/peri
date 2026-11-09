@@ -49,34 +49,66 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+/// notifier 的 bridge 出口。
+///
+/// 生产使用 [`BridgeSink::ordered`]：恢复视图、旧流重放与实时通知都先进入同一条
+/// `LOCAL_EVENT_TX` FIFO，再由唯一 forwarder 串行写入有界 bridge；入队顺序即渲染
+/// 顺序，实时通知不会越过尚未转发完的重放事件。测试可直接接 bridge channel，
+/// 只验证解码语义。
+#[derive(Clone)]
+pub enum BridgeSink {
+    Ordered(mpsc::UnboundedSender<AcpEventWithEpoch>),
+    Direct(mpsc::Sender<AcpEventWithEpoch>),
+}
+
+impl BridgeSink {
+    /// 生产入口：与 `LOCAL_EVENT_TX` 共用同一条本地队列。
+    pub fn ordered(tx: mpsc::UnboundedSender<AcpEventWithEpoch>) -> Self {
+        Self::Ordered(tx)
+    }
+
+    /// 直接写入 bridge（测试或没有本地队列的场景）。
+    pub fn direct(tx: mpsc::Sender<AcpEventWithEpoch>) -> Self {
+        Self::Direct(tx)
+    }
+
+    /// 送入 bridge 入口；`Err` 表示消费端已关闭（交互需要据此拒绝）。
+    async fn send(&self, event: AcpEventWithEpoch) -> Result<(), String> {
+        match self {
+            Self::Ordered(tx) => tx.send(event).map_err(|error| error.to_string()),
+            Self::Direct(tx) => tx.send(event).await.map_err(|error| error.to_string()),
+        }
+    }
+}
+
 /// 启动 kit ACP notifier 后台任务。
 ///
 /// 从 `notification_rx` 读取 `AcpNotification`，把可识别的流式事件转换为
-/// `AcpEventData` 推入 `bridge_tx`，由 `spawn_acp_bridge` 消费并写入 Atom。
+/// `AcpEventData` 推入 `sink`，由 `spawn_acp_bridge` 消费并写入 Atom。
 ///
 /// 通道关闭（transport 断开）或 shutdown 触发时干净退出。
 pub fn spawn_kit_notifier(
     notification_rx: mpsc::Receiver<AcpNotification>,
-    bridge_tx: mpsc::Sender<AcpEventWithEpoch>,
+    sink: BridgeSink,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    spawn_kit_notifier_inner(notification_rx, bridge_tx, shutdown, None)
+    spawn_kit_notifier_inner(notification_rx, sink, shutdown, None)
 }
 
 /// Interactive notifier variant. A registered reverse interaction that cannot
 /// enter the bridge is claimed and cancelled instead of remaining orphaned.
 pub fn spawn_kit_notifier_with_client(
     notification_rx: mpsc::Receiver<AcpNotification>,
-    bridge_tx: mpsc::Sender<AcpEventWithEpoch>,
+    sink: BridgeSink,
     shutdown: CancellationToken,
     client: AcpTuiClient,
 ) -> tokio::task::JoinHandle<()> {
-    spawn_kit_notifier_inner(notification_rx, bridge_tx, shutdown, Some(client))
+    spawn_kit_notifier_inner(notification_rx, sink, shutdown, Some(client))
 }
 
 fn spawn_kit_notifier_inner(
     mut notification_rx: mpsc::Receiver<AcpNotification>,
-    bridge_tx: mpsc::Sender<AcpEventWithEpoch>,
+    sink: BridgeSink,
     shutdown: CancellationToken,
     client: Option<AcpTuiClient>,
 ) -> tokio::task::JoinHandle<()> {
@@ -90,7 +122,7 @@ fn spawn_kit_notifier_inner(
                 n = notification_rx.recv() => {
                     match n {
                         Some(notif) => {
-                            if let Some(owner) = forward_notification(&bridge_tx, notif).await
+                            if let Some(owner) = forward_notification(&sink, notif).await
                                 && let Some(client) = &client
                             {
                                 client.reject_interaction(&owner).await;
@@ -125,10 +157,7 @@ fn spawn_kit_notifier_inner(
 ///
 /// 设计决策：session/update 是流式主通道（agent_message_chunk / tool_call 等），
 /// AgentDone 保留已有 requestId，AgentEvent 通过 `convert_agent_event` 转换。
-async fn forward_notification(
-    bridge_tx: &mpsc::Sender<AcpEventWithEpoch>,
-    n: AcpNotification,
-) -> Option<InteractionOwner> {
+async fn forward_notification(sink: &BridgeSink, n: AcpNotification) -> Option<InteractionOwner> {
     let (child_origin, view_epoch, n) = match n {
         AcpNotification::ChildEvent {
             origin,
@@ -169,22 +198,22 @@ async fn forward_notification(
                     event: AcpEventData::ReplayEntryMarked { entry_id, position },
                     active_session_id: session_id.clone(),
                 };
-                if let Err(e) = bridge_tx.send(mark).await {
-                    warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping entry mark");
+                if let Err(e) = sink.send(mark).await {
+                    warn!(error = %e, "kit ACP notifier: bridge closed, dropping entry mark");
                 }
             }
             let wrapped = wrap_with_session(decoded, session_id);
-            if let Err(e) = bridge_tx.send(wrapped).await {
-                warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping event");
+            if let Err(e) = sink.send(wrapped).await {
+                warn!(error = %e, "kit ACP notifier: bridge closed, dropping event");
             }
         }
         // kit notifier: extract AvailableCommandsUpdate / plan / streaming
         // from SessionUpdate.
         AcpNotification::SessionUpdate { session_id, params } => {
-            if let Some(decoded) = handle_session_update(params, bridge_tx, &session_id).await {
+            if let Some(decoded) = handle_session_update(params, sink, &session_id).await {
                 let wrapped = wrap_with_session(decoded, session_id);
-                if let Err(e) = bridge_tx.send(wrapped).await {
-                    warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping session/update streaming event");
+                if let Err(e) = sink.send(wrapped).await {
+                    warn!(error = %e, "kit ACP notifier: bridge closed, dropping session/update streaming event");
                 }
             }
         }
@@ -206,8 +235,8 @@ async fn forward_notification(
                 AcpEventData::TurnDone
             };
             let wrapped = wrap_with_session(decoded, session_id);
-            if let Err(e) = bridge_tx.send(wrapped).await {
-                warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping agent done");
+            if let Err(e) = sink.send(wrapped).await {
+                warn!(error = %e, "kit ACP notifier: bridge closed, dropping agent done");
             }
         }
         AcpNotification::Elicitation {
@@ -216,7 +245,7 @@ async fn forward_notification(
             params,
         } => {
             let rejected_owner = owner.clone();
-            if !handle_elicitation(owner, request_id_json, &params, bridge_tx).await {
+            if !handle_elicitation(owner, request_id_json, &params, sink).await {
                 return Some(rejected_owner);
             }
         }
@@ -226,8 +255,8 @@ async fn forward_notification(
         AcpNotification::AgentEvent { session_id, event } => {
             if let Some(decoded) = convert_agent_event(event) {
                 let wrapped = wrap_with_session(decoded, session_id);
-                if let Err(e) = bridge_tx.send(wrapped).await {
-                    warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping AgentEvent");
+                if let Err(e) = sink.send(wrapped).await {
+                    warn!(error = %e, "kit ACP notifier: bridge closed, dropping AgentEvent");
                 }
             }
         }
@@ -242,8 +271,8 @@ async fn forward_notification(
             use peri_acp_types::event_data::Prediction;
             let decoded = AcpEventData::Prediction(Prediction { text, actions });
             let wrapped = wrap_with_session(decoded, session_id);
-            if let Err(e) = bridge_tx.send(wrapped).await {
-                warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping prediction");
+            if let Err(e) = sink.send(wrapped).await {
+                warn!(error = %e, "kit ACP notifier: bridge closed, dropping prediction");
             }
         }
         AcpNotification::RequestPermission {
@@ -252,7 +281,7 @@ async fn forward_notification(
             params,
         } => {
             let rejected_owner = owner.clone();
-            if !handle_request_permission(owner, request_id_json, &params, bridge_tx).await {
+            if !handle_request_permission(owner, request_id_json, &params, sink).await {
                 return Some(rejected_owner);
             }
         }
@@ -261,7 +290,7 @@ async fn forward_notification(
                 AcpEventData::InteractionTerminal { owner, outcome },
                 String::new(),
             );
-            if let Err(error) = bridge_tx.send(wrapped).await {
+            if let Err(error) = sink.send(wrapped).await {
                 warn!(error = %error, "kit ACP notifier: bridge closed, dropping interaction terminal");
             }
         }
@@ -270,8 +299,8 @@ async fn forward_notification(
                 Some(info) => {
                     let wrapped =
                         wrap_with_session(AcpEventData::HistoryCommitted(info), session_id);
-                    if let Err(e) = bridge_tx.send(wrapped).await {
-                        warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping history commit");
+                    if let Err(e) = sink.send(wrapped).await {
+                        warn!(error = %e, "kit ACP notifier: bridge closed, dropping history commit");
                     }
                 }
                 None => {
@@ -313,7 +342,7 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
 /// Decoding is pure; commands, plan, and spinner publication stay synchronous here.
 async fn handle_session_update(
     params: Value,
-    bridge_tx: &mpsc::Sender<AcpEventWithEpoch>,
+    sink: &BridgeSink,
     session_id: &str,
 ) -> Option<AcpEventData> {
     let update = params.get("update")?;
@@ -358,8 +387,8 @@ async fn handle_session_update(
                     event: AcpEventData::ReplayEntryMarked { entry_id, position },
                     active_session_id: session_id.to_string(),
                 };
-                if let Err(e) = bridge_tx.send(mark).await {
-                    warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping entry mark");
+                if let Err(e) = sink.send(mark).await {
+                    warn!(error = %e, "kit ACP notifier: bridge closed, dropping entry mark");
                 }
             }
             decoded.event
@@ -407,27 +436,45 @@ pub(crate) fn replay_pending_into_guarded(
     (events, Some(replay))
 }
 
-/// initial 发布或 open 接纳后重放暂存的 live 更新。
+/// 测试辅助：重放暂存并立即释放暂存槽（生产路径见
+/// [`replay_pending_initial_guarded`]）。
 ///
 /// 只重放与当前窗口 `paging.live.streamId` 相同的 stream；每条先走与实时路径相同
-/// 的接纳门，只有连续的 `Accepted` 才解码为 bridge 事件。返回的事件仍由调用方按
-/// 顺序发送（`publish_initial` 经 `LOCAL_EVENT_TX` 与视图发布同序）。
+/// 的接纳门，只有连续的 `Accepted` 才解码为 bridge 事件。
+#[cfg(test)]
 pub(crate) fn replay_pending_initial(
     state: &crate::kit::history_v2::HistoryV2State,
 ) -> Vec<AcpEventWithEpoch> {
+    let (events, replay) = replay_pending_initial_guarded(state);
+    if let Some(replay) = replay {
+        replay.finish();
+    }
+    events
+}
+
+/// 与 [`replay_pending_initial`] 相同，但把暂存槽的独占权交还调用方。
+///
+/// 调用方必须先 dispatch（写入 `LOCAL_EVENT_TX`）再 `finish`：实时通知与重放共享
+/// 同一条 FIFO，只有重放先入队、后释放暂存槽，后续被接纳的实时通知才不会越序。
+pub(crate) fn replay_pending_initial_guarded(
+    state: &crate::kit::history_v2::HistoryV2State,
+) -> (
+    Vec<AcpEventWithEpoch>,
+    Option<crate::kit::history_v2::live::PendingReplay>,
+) {
     let Some(session_id) = state.session_id.as_deref() else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     let Some(stream_id) = state
         .window
         .as_ref()
         .and_then(|window| window.paging.live.stream_id.as_deref())
     else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     // 恢复期间握住暂存槽：新事件不能绕过暂存直接写入旧高水位。
     let Some(mut replay) = crate::kit::history_v2::live::begin_pending_replay(session_id) else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     let mut events = Vec::new();
     for (meta, params) in replay.drain() {
@@ -454,8 +501,7 @@ pub(crate) fn replay_pending_initial(
             }
         }
     }
-    replay.finish();
-    events
+    (events, Some(replay))
 }
 
 /// 与实时 notifier 同一套解码：条目位置标记先于内容事件。
@@ -485,21 +531,21 @@ fn decode_live_update(params: &Value, session_id: &str) -> Vec<AcpEventWithEpoch
     events
 }
 
-/// 把重放事件按顺序送入 bridge（与 `HistoryV2ViewChanged` 共用 LOCAL_EVENT_TX）。
+/// 把重放事件按顺序送入唯一的事件 FIFO（与 `HistoryV2ViewChanged`、实时通知共用）。
 pub(crate) fn dispatch_local_events(events: Vec<AcpEventWithEpoch>) {
     if events.is_empty() {
         return;
     }
-    let Some(tx) = crate::kit::atoms::LOCAL_EVENT_TX.get() else {
+    let Some(tx) = crate::kit::atoms::local_event_tx() else {
         debug!(
             count = events.len(),
-            "history v2: LOCAL_EVENT_TX unavailable; replayed live updates dropped"
+            "history v2: local event queue unavailable; replayed live updates dropped"
         );
         return;
     };
     for event in events {
         if tx.send(event).is_err() {
-            debug!("history v2: LOCAL_EVENT_TX closed; stopping replay");
+            debug!("history v2: local event queue closed; stopping replay");
             break;
         }
     }
@@ -538,7 +584,7 @@ mod execution_done_test {
         let (tx, mut rx) =
             mpsc::channel::<AcpEventWithEpoch>(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
         forward_notification(
-            &tx,
+            &BridgeSink::direct(tx),
             AcpNotification::AgentDone {
                 session_id: "s1".into(),
                 stop_reason: "end_turn".into(),

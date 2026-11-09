@@ -320,7 +320,7 @@ fn open_claim_is_some() -> bool {
 pub(crate) fn notify_view(state: &HistoryV2State) {
     #[cfg(test)]
     NOTIFY_COUNT.fetch_add(1, Ordering::Relaxed);
-    let Some(tx) = atoms::LOCAL_EVENT_TX.get() else {
+    let Some(tx) = atoms::local_event_tx() else {
         return;
     };
     let _ = tx.send(AcpEventWithEpoch {
@@ -1069,10 +1069,15 @@ async fn handle_window_request(
             }
             if replay_pending {
                 // open 接纳后与 initial 同样的顺序保证：视图事件先入队，随后按
-                // seq 重放 open 完成前暂存的 live 更新（见 `reset_for_rewind`）。
+                // seq 重放 open 完成前暂存的 live 更新；重放入队后才释放暂存槽，
+                // 之后被接纳的实时通知排在同一 FIFO 的尾部。
                 let state = atoms::HISTORY_V2_STATE.state().read().clone();
-                let replayed = crate::kit::acp_notifier::replay_pending_initial(&state);
+                let (replayed, replay) =
+                    crate::kit::acp_notifier::replay_pending_initial_guarded(&state);
                 crate::kit::acp_notifier::dispatch_local_events(replayed);
+                if let Some(replay) = replay {
+                    replay.finish();
+                }
             }
             close_target
         }

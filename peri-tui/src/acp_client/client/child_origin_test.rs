@@ -17,7 +17,11 @@ async fn child_origin_survives_wire_pump_and_notifier_queues() {
     client.spawn_pump(tx);
     let (bridge_tx, mut bridge_rx) = tokio::sync::mpsc::channel(4);
     let shutdown = tokio_util::sync::CancellationToken::new();
-    let notifier = crate::kit::acp_notifier::spawn_kit_notifier(rx, bridge_tx, shutdown.clone());
+    let notifier = crate::kit::acp_notifier::spawn_kit_notifier(
+        rx,
+        crate::kit::acp_notifier::BridgeSink::direct(bridge_tx),
+        shutdown.clone(),
+    );
     let execution = ExecutionBinding {
         turn_id: TurnId::new(),
         attempt_id: AttemptId::new(),

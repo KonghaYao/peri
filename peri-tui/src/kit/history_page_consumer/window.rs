@@ -688,7 +688,7 @@ fn emit_window_degraded(session_id: &str, reason: &str) {
     if session_id.is_empty() {
         return;
     }
-    let Some(tx) = atoms::LOCAL_EVENT_TX.get() else {
+    let Some(tx) = atoms::local_event_tx() else {
         return;
     };
     let _ = tx.send(AcpEventWithEpoch {
@@ -819,7 +819,7 @@ pub fn spawn_history_window_consumer(
                     };
                     match settle_window_response(&in_flight, &decoded) {
                         WindowSettlement::Accepted(_) | WindowSettlement::AcceptedEmpty => {
-                            if let Some(tx) = atoms::LOCAL_EVENT_TX.get() {
+                            if let Some(tx) = atoms::local_event_tx() {
                                 let _ = tx.send(AcpEventWithEpoch {
                                     child_origin: None,
                                     view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
