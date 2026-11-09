@@ -40,7 +40,8 @@ pre-commit:
       run: bash scripts/check-layer-imports.sh
 
     # replay fixture 完整性门禁：verify 拒绝 legacy / worldDrift（未映射 leaf 或
-    # stub 字面量/哈希变化），world-check 拒绝源码已变但 world 未同步。
+    # stub 字面量/哈希变化），world-check 拒绝源码未同步及 cassette 录制 worldRefs
+    # 与当前 world 的未映射/缺失 leaf 不一致。
     replay-fixtures:
       glob: "{e2e/**,peri-acp/prompts/**,peri-agent/src/agent/compact_v2/**,peri-middlewares/src/subagent/tool/**}"
       run: |

@@ -5,6 +5,9 @@
  * 只更新受源码映射的 leaf（skills、compact summary、Agent description/send_only）和 seal；
  * 其余 leaf 与 manifest 原样保留。源未变化时不写任何文件（幂等）。
  * 未映射（内容寻址）leaf 会在报告中列出，提醒审核而非静默忽略。
+ *
+ * --check 除源文件映射外，还与各 cassette seal 的录制 worldRefs 交叉校验：
+ * world seal 只能证明快照自洽，手工重封无法解释未映射 leaf 的变化。
  */
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -13,6 +16,7 @@ import { parseArgs } from 'node:util';
 import {
   SOURCE_FILES, STABLE_LEAVES, agentDescriptionLeafIds, agentSchemaOf, expectedSendOnly,
 } from './replay-world-sources.mjs';
+import { compareRecordedWorldRefs, readRecordedWorldRefs } from './replay-world-recorded.mjs';
 import { replaceWorldDirectory } from './world-sync-swap.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -86,8 +90,19 @@ const report = {
 };
 
 if (values.check) {
-  console.log(JSON.stringify({ ...report, stale: changed.length > 0 }, null, 2));
-  process.exit(changed.length ? 1 : 0);
+  const recorded = compareRecordedWorldRefs(world, await readRecordedWorldRefs(path.dirname(worldDir)));
+  const staleReasons = [];
+  if (changed.length) staleReasons.push('source_not_synced');
+  if (recorded.unmappedDrift.length) staleReasons.push('cassette_unmapped_drift');
+  if (recorded.missingLeaves.length) staleReasons.push('cassette_missing_leaf');
+  const stale = staleReasons.length > 0;
+  console.log(JSON.stringify({
+    ...report,
+    recorded: { ...recorded, requiresRerecord: recorded.mappedDrift.length > 0 },
+    staleReasons,
+    stale,
+  }, null, 2));
+  process.exit(stale ? 1 : 0);
 }
 if (!changed.length) {
   console.log(JSON.stringify({ ...report, written: 0 }, null, 2));

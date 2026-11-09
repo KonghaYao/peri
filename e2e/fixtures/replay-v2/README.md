@@ -51,10 +51,10 @@ cassette `formatVersion` 为 2 时，请求正文不再各存一份完整 system
 
 高频 prompt 变更流程：
 
-1. `npm --prefix e2e run e2e:replay:world-check` 查看是否有 stale leaf。
+1. `npm --prefix e2e run e2e:replay:world-check` 查看是否有 stale leaf；它同时用 cassette seal 的录制 `worldRefs` 交叉校验当前 world，未映射或缺失 leaf 不一致会直接失败。
 2. `npm --prefix e2e run e2e:replay:world-sync` 写入映射 leaf 与 `world/seal.json`。
 3. 审核 `git diff --stat`：`13_skills.md` 变化应只出现 2 个文件（skills leaf + seal）；Agent description/`send_only` 为 2 个 Agent leaf + seal；compact summary 为 1 个 leaf + seal。
-4. `npm --prefix e2e run e2e:replay:verify` 重新校验 30 cassettes / world seal；映射 leaf 变化会产生 worldDrift，verify 会非零退出，提交前需重录受影响 cassette（或显式重写录制哈希），本地 `e2e:replay` 不受影响。
+4. `npm --prefix e2e run e2e:replay:verify` 重新校验 30 cassettes / world seal；映射 leaf 变化会产生 worldDrift，verify 会非零退出，提交前需重录受影响 cassette（或显式重写录制哈希），本地 `e2e:replay` 不受影响。`world:check` 把映射 leaf 差异列为 `recorded.mappedDrift`（`requiresRerecord: true`），只有未映射/缺失 leaf 不一致才判 stale。
 
 限制：单条消息（如 U06 compact 用户指令）和 `summary_user_prompt.md` 不在 world 映射内，变化必须重录；只改 stub 字面量会被 `requestCoreSha256` 拒绝。`world:sync` 只同步上述源文件，未映射的 prompt 内容变化仍需重录。
 

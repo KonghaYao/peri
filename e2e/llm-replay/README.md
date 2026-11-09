@@ -60,6 +60,8 @@ cassette `formatVersion` 为 2 时，system prompt 与 tool schema 从请求正�
 
 高频段有稳定 leaf：`sys.skills`、`sys.compact.summary`、`tools.Agent.*`（description + `send_only`）。`npm run e2e:replay:world-sync` 只在源文件变化时改写这些 leaf 与 `world/seal.json`；`npm run e2e:replay:world-check` 用于确认是否需要显式同步。block1 拆成 prefix + skills + tail，tools 按工具对象拆 leaf，因此 skills 变化不会改写 99 个请求或 30 个 cassette seal。未映射段（如 T06 hook prompt）保留内容寻址 leaf 并在同步报告中列出。
 
+`world:check` 还会用各 cassette seal 的 `requestMeta[*].worldRefs` 与当前 world leaf 交叉校验，避免手工重封 world seal 掩盖变化：未映射或缺失 leaf 不一致时 `stale=true` 并退出 1；映射 leaf 的差异列为 `recorded.mappedDrift` 并标记 `requiresRerecord`，不判为损坏，仍由 verify 要求重录。
+
 world leaf 变更后，stub 里的 `rawSha256`/`canonicalSha256` 仍是录制值。cassette seal 的 `requestMeta` 保存每个 stub 的语义摘要（`requestCoreSha256`）与录制时的 leaf 哈希序列（`worldRefs`）。仅当 stub 字面量、哈希字段与引用结构未变，且所有变化的 leaf 都属于 `world:sync` 映射（`sys.skills`、`sys.compact.summary`、`tools.Agent.*`）时，`loadCassette` 才报告 `report.worldDrift` 并用当前 world 重建 canonical；未映射 leaf 变化、引用结构变化或 stub 内容变化直接失败。`e2e:replay:verify` 在 legacy 或 worldDrift 非空时非零退出，`cli.mjs verify` 同样；CI 与 lefthook 都执行 verify + world-check。
 
 ## 流式与取消
