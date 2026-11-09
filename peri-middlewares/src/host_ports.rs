@@ -574,6 +574,18 @@ impl peri_acp_types::ports::AgentCatalogPort for AgentCatalogProvider {
     }
 }
 
+/// `bind_agent_catalog_from_pool` 的显式失败原因。
+///
+/// 端口类型不符是装配错误（不会生成任何降级实例）；调用方必须向上返回，
+/// 不能按「面未装配」静默跳过。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AgentCatalogBindingError {
+    #[error("injected MCP pool is not the middleware `McpClientPool` implementation")]
+    McpPoolMismatch,
+    #[error("injected agent catalog is not the middleware `AgentCatalogProvider` implementation")]
+    AgentCatalogMismatch,
+}
+
 /// 会话创建期的**定点绑定**：把池还原成 registry 并绑到目录端口上（W5 / P0）。
 ///
 /// 存在理由是渲染与装配的时序差：冻结 system prompt 的 `{{available_agents}}`
@@ -589,36 +601,40 @@ impl peri_acp_types::ports::AgentCatalogPort for AgentCatalogProvider {
 /// 看到目录。ACP 侧仍只持 `Arc<dyn AgentCatalogPort>`，不感知 registry 类型
 /// （§0 依赖方向）。
 ///
-/// 返回 `false` 仅表示本函数不适用：池或端口不是本 crate 的具体实现（两条早退各
-/// 留一条可区分原因的 `debug` 记录）。此处**不回落** `McpClientPool::new_pending()`
-/// 等装配降级实例——那是装配路径的兜底，不是本函数的职责；调用方按「面未装配 ⇒
-/// 空目录」的既有语义静默跳过（X4/J5：不回落磁盘）。
+/// 端口存在但类型不符 ⇒ `Err`（fail-closed）。此处**不回落**
+/// `McpClientPool::new_pending()` 等装配降级实例，也不把不匹配当作「面未装配」
+/// 静默跳过；合法的无 MCP 装配由调用方在 `mcp_pool = None` 时直接跳过本函数。
 pub fn bind_agent_catalog_from_pool(
     agent_catalog: &Arc<dyn peri_acp_types::ports::AgentCatalogPort>,
     pool: &Arc<dyn peri_acp_types::ports::McpPoolPort>,
     session_id: &str,
     disabled_middlewares: &std::collections::HashSet<String>,
-) -> bool {
-    let Ok(pool) = Arc::clone(pool).downcast_arc::<crate::mcp::McpClientPool>() else {
-        tracing::debug!(
-            session_id,
-            "冻结目录定点绑定不适用：pool 不是本 crate 的 McpClientPool 实现"
-        );
-        return false;
-    };
-    let Ok(port) = Arc::clone(agent_catalog).downcast_arc::<AgentCatalogProvider>() else {
-        tracing::debug!(
-            session_id,
-            "冻结目录定点绑定不适用：目录端口不是本 crate 的 AgentCatalogProvider 实现"
-        );
-        return false;
-    };
+) -> Result<(), AgentCatalogBindingError> {
+    // SAFETY: 生产池是本 crate 的 McpClientPool（as_any 返回 self）；
+    // downcast 内的数据指针校验会拒绝返回内字段 Any 的实现。
+    let pool =
+        unsafe { Arc::clone(pool).downcast_arc::<crate::mcp::McpClientPool>() }.map_err(|_| {
+            tracing::debug!(
+                session_id,
+                "冻结目录定点绑定失败：pool 不是本 crate 的 McpClientPool 实现"
+            );
+            AgentCatalogBindingError::McpPoolMismatch
+        })?;
+    // SAFETY: 生产目录端口是 AgentCatalogProvider（as_any 返回 self）。
+    let port = unsafe { Arc::clone(agent_catalog).downcast_arc::<AgentCatalogProvider>() }
+        .map_err(|_| {
+            tracing::debug!(
+                session_id,
+                "冻结目录定点绑定失败：目录端口不是本 crate 的 AgentCatalogProvider 实现"
+            );
+            AgentCatalogBindingError::AgentCatalogMismatch
+        })?;
     port.bind(Arc::new(crate::mcp::McpAgentRegistry::for_session(
         pool,
         session_id,
         disabled_middlewares,
     )));
-    true
+    Ok(())
 }
 
 #[cfg(test)]

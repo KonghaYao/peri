@@ -375,8 +375,8 @@ impl hook_state::StateView for InvocationState<'_> {
 }
 
 impl hook_state::QueueState for InvocationState<'_> {
-    fn v2_queue(&self) -> &crate::session::MessageQueue {
-        self.context.queue().queue()
+    fn v2_producer(&self) -> crate::session::queue::ProducerQueue<'_> {
+        self.context.queue().producer()
     }
 
     fn enqueue_v2_message(&self, msg: crate::session::QueuedMessage) {

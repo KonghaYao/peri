@@ -345,7 +345,8 @@ async fn session_new_assembled_facade_runs_app_callback_end_to_end() {
     let Some(port) = environment.cfg.mcp_pool.clone() else {
         panic!("会话装配必须构造 MCP 池");
     };
-    let Ok(pool) = port.downcast_arc::<peri_middlewares::mcp::McpClientPool>() else {
+    // SAFETY: 会话装配注入本 crate 的 McpClientPool（as_any 返回 self）。
+    let Ok(pool) = (unsafe { port.downcast_arc::<peri_middlewares::mcp::McpClientPool>() }) else {
         panic!("池实现为 McpClientPool");
     };
     let (calls, tools, peer) = install_assembly_peer(&pool).await;
@@ -542,12 +543,12 @@ impl peri_agent::session::factory::MiddlewareChainAssembler for TaskManagerProbe
         &self,
         _blueprint: &[peri_agent::session::factory::ChainSlot],
         ctx: &Self::Context,
-    ) -> Self::Output {
+    ) -> Result<Self::Output, peri_agent::session::factory::AssemblyError> {
         *self.captured.lock().unwrap() = Some(Arc::clone(&ctx.task_manager));
-        peri_agent::session::factory::ChainAssembly {
+        Ok(peri_agent::session::factory::ChainAssembly {
             chain: peri_agent::middleware::chain::MiddlewareChain::new(),
             subagent_mw: None,
-        }
+        })
     }
 }
 
@@ -592,7 +593,8 @@ async fn idle_rules_consume_the_session_task_manager_and_fail_closed_on_type_mis
         false,
         &cfg.session_resources,
         &session_manager,
-    );
+    )
+    .expect("规则链装配必须成功（端口均为生产实现）");
     let concrete = {
         let manager = Arc::clone(&session_manager);
         let any: Arc<dyn std::any::Any + Send + Sync> =
@@ -623,7 +625,8 @@ async fn idle_rules_consume_the_session_task_manager_and_fail_closed_on_type_mis
         false,
         &cfg.session_resources,
         &foreign,
-    );
+    )
+    .expect("规则链装配必须成功（端口均为生产实现）");
     let fallback = probe.captured();
     assert!(
         peri_acp_types::tasks::TaskManager::spawn_owned(&*fallback, Box::pin(async {})).is_err(),

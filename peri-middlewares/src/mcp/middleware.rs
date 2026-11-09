@@ -544,7 +544,7 @@ impl McpMiddleware {
         if changes.is_empty() {
             return;
         }
-        let queue = state.v2_queue();
+        let producer = state.v2_producer();
         let mut texts = Vec::with_capacity(changes.len() + 1);
         if !self.hint_sent.swap(true, Ordering::SeqCst) {
             texts.push(format!("MCP 连接状态变化：{MCP_TOOL_USAGE_HINT}"));
@@ -573,7 +573,7 @@ impl McpMiddleware {
                     metadata: json!({}),
                 })
                 .expect("MCP status reminder mapping must be valid");
-            if let Err(error) = queue
+            if let Err(error) = producer
                 .enqueue(QueuedMessage::system_reminder(
                     MessageKind::Info,
                     QueueMessageSource::SystemInjected,

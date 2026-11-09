@@ -268,13 +268,15 @@ async fn cron_tool(
     name: &str,
     args: Value,
 ) -> String {
-    let pool = env
-        .cfg
-        .mcp_pool
-        .clone()
-        .unwrap()
-        .downcast_arc::<McpClientPool>()
-        .unwrap_or_else(|_| panic!("MCP pool"));
+    // SAFETY: 会话装配注入本 crate 的 McpClientPool（as_any 返回 self）。
+    let pool = unsafe {
+        env.cfg
+            .mcp_pool
+            .clone()
+            .unwrap()
+            .downcast_arc::<McpClientPool>()
+    }
+    .unwrap_or_else(|_| panic!("MCP pool"));
     let client = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Some(client) = pool.get_client("cron") {

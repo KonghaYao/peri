@@ -68,7 +68,7 @@ pub(crate) fn build_idle_invocation_rules<A>(
     agent_default_run_in_background: bool,
     session_resources: &Arc<dyn SessionResources>,
     session_task_manager: &Arc<dyn peri_acp_types::tasks::TaskManager>,
-) -> InvocationRuleChain
+) -> Result<InvocationRuleChain, peri_agent::session::factory::AssemblyError>
 where
     A: MiddlewareChainAssembler<Context = AssemblyContext, Output = ChainAssembly>,
 {

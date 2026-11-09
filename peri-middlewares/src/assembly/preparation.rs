@@ -6,6 +6,7 @@ use crate::{
     tool_search::ToolSearchIndex,
 };
 use peri_acp_types::mcp_skills::McpSkillRegistry;
+use peri_agent::session::factory::AssemblyError;
 use peri_agent::tools::BaseTool;
 use std::sync::Arc;
 
@@ -16,7 +17,7 @@ pub(super) struct ResolvedPorts {
     pub(super) auto_classifier: Option<Arc<dyn AutoClassifier>>,
 }
 
-pub(super) fn resolve_ports(ctx: &AssemblyContext) -> ResolvedPorts {
+pub(super) fn resolve_ports(ctx: &AssemblyContext) -> Result<ResolvedPorts, AssemblyError> {
     let AssemblyContext {
         mcp_pool,
         tool_search_index,
@@ -24,16 +25,24 @@ pub(super) fn resolve_ports(ctx: &AssemblyContext) -> ResolvedPorts {
         ..
     } = ctx;
     // L5：middlewares 具体类型经 peri-acp-types 端口接入，此处 downcast
-    // 还原（端口实现方为本 crate，生产路径必成功；失败回退与原上层
-    // 回退逻辑一致——临时实例 / None 降级）。
+    // 还原（端口实现方为本 crate）。端口存在但类型不符 ⇒ 显式错误，
+    // 不构造空池/默认索引替代注入实例（否则装配产物与连接池/索引分离）。
 
-    // MCP 连接池：端口 → Arc<McpClientPool>。downcast 失败按未注入处理
-    //（不注册 MCP 中间件/工具）。
-    let mcp_pool_concrete: Option<Arc<McpClientPool>> = mcp_pool.as_ref().map(|p| {
-        Arc::clone(p)
-            .downcast_arc::<McpClientPool>()
-            .unwrap_or_else(|_| Arc::new(McpClientPool::new_pending()))
-    });
+    // MCP 连接池：端口 → Arc<McpClientPool>。None = 合法的无 MCP 装配
+    //（print / 未声明 MCP）；Some 但类型不符 = 装配错误。
+    let mcp_pool_concrete: Option<Arc<McpClientPool>> = match mcp_pool {
+        None => None,
+        Some(port) => Some(
+            // SAFETY: 生产装配注入本 crate 的 McpClientPool（as_any 返回 self）；
+            // downcast 内的数据指针校验会拒绝返回内字段 Any 的实现。
+            unsafe { Arc::clone(port).downcast_arc::<McpClientPool>() }.map_err(|_| {
+                AssemblyError::PortMismatch {
+                    port: "McpPoolPort",
+                    expected: "McpClientPool",
+                }
+            })?,
+        ),
+    };
     // W5：Agent registry（会话可见性过滤 + 链槽关闭位）经**唯一构造入口**
     // `McpAgentRegistry::for_session` 成型——关闭位在入口内由同一份
     // `meta_harness_disabled` 派生（`SubAgentMiddleware`，与 A24 关闭集同源），
@@ -47,32 +56,44 @@ pub(super) fn resolve_ports(ctx: &AssemblyContext) -> ResolvedPorts {
     });
     // 候选目录端口绑定（W5）：ACP 只持 `Arc<dyn AgentCatalogPort>`，具体实现的
     // 绑定在装配点单次完成——registry 与 SubAgent 消费面是**同一份**（`Arc::ptr_eq`
-    // 可观察），不再有第二个来源或第二个缓存。
-    if let (Some(registry), Some(port)) = (
-        mcp_agent_registry.as_ref(),
-        Arc::clone(&ctx.agent_catalog)
-            .downcast_arc::<crate::host_ports::AgentCatalogProvider>()
-            .ok(),
-    ) {
+    // 可观察），不再有第二个来源或第二个缓存。存在 registry 时端口必须可绑定，
+    // 否则目录会静默为空。
+    if let Some(registry) = mcp_agent_registry.as_ref() {
+        let port =
+            // SAFETY: 生产装配注入本 crate 的 AgentCatalogProvider（as_any 返回 self）。
+            unsafe {
+                Arc::clone(&ctx.agent_catalog)
+                    .downcast_arc::<crate::host_ports::AgentCatalogProvider>()
+            }
+            .map_err(|_| AssemblyError::PortMismatch {
+                port: "AgentCatalogPort",
+                expected: "AgentCatalogProvider",
+            })?;
         port.bind(Arc::clone(registry));
     }
 
-    // 工具搜索索引：端口 → Arc<ToolSearchIndex>（失败回退默认实例）。
-    let tool_search_index_concrete: Arc<ToolSearchIndex> = Arc::clone(tool_search_index)
-        .downcast_arc::<ToolSearchIndex>()
-        .unwrap_or_else(|_| Arc::new(ToolSearchIndex::default()));
+    // 工具搜索索引：端口 → Arc<ToolSearchIndex>（类型不符 ⇒ 显式错误，
+    // 不再构造默认索引：注入的索引与装配产物必须是同一实例）。
+    let tool_search_index_concrete: Arc<ToolSearchIndex> =
+        // SAFETY: 生产装配注入本 crate 的 ToolSearchIndex（as_any 返回 self）。
+        unsafe { Arc::clone(tool_search_index).downcast_arc::<ToolSearchIndex>() }.map_err(
+            |_| AssemblyError::PortMismatch {
+                port: "ToolSearchPort",
+                expected: "ToolSearchIndex",
+            },
+        )?;
 
     // HITL middleware — reuse auto_classifier model from cache when available
     let auto_classifier: Option<Arc<dyn AutoClassifier>> = Some(Arc::new(LlmAutoClassifier::new(
         auto_classifier_model.clone(),
     )));
 
-    ResolvedPorts {
+    Ok(ResolvedPorts {
         mcp_pool_concrete,
         mcp_agent_registry,
         tool_search_index_concrete,
         auto_classifier,
-    }
+    })
 }
 
 pub(super) fn build_parent_tools(

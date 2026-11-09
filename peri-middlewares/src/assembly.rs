@@ -115,7 +115,11 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
     /// 本实现只负责逐槽位构造实例，条件注册（MCP/Workflow/Goal）
     /// 与 Hook 组展开按上下文判断，行为与迁移前
     /// `peri-acp/src/agent/builder.rs` 完全一致。
-    fn assemble(&self, blueprint: &[ChainSlot], ctx: &Self::Context) -> Self::Output {
+    fn assemble(
+        &self,
+        blueprint: &[ChainSlot],
+        ctx: &Self::Context,
+    ) -> Result<Self::Output, peri_agent::session::factory::AssemblyError> {
         let AssemblyContext {
             cwd: _,
             cancel,
@@ -149,7 +153,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             mcp_agent_registry,
             tool_search_index_concrete,
             auto_classifier,
-        } = preparation::resolve_ports(ctx);
+        } = preparation::resolve_ports(ctx)?;
 
         // AskUser 工具（2026-08-15 拆分后）由链上 HumanInTheLoopMiddleware
         // 的 collect_tools 提供；宿主级 shared_tools 不再注册任何工具。
@@ -372,11 +376,11 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             }
         }
 
-        ChainAssembly {
+        Ok(ChainAssembly {
             chain,
             // MetaHarness：SubAgentMiddleware 关闭 → 槽位联动置空（禁止半开状态）。
             subagent_mw: subagent.map(|mw| Arc::new(mw) as Arc<dyn SubAgentMiddlewarePort>),
-        }
+        })
     }
 }
 
