@@ -1,6 +1,6 @@
 # P1：history v2 rewind 后实时流拒收与历史投影身份缺失
 
-**状态**：已确认，待修复。
+**状态**：已修复并验证（PR #270，head `ab91c70f4`）。
 **优先级**：P1。
 **类型**：回归（实时输出丢失、同文消息误删）。
 **创建日期**：2026-11-03。
@@ -83,3 +83,7 @@
 `rewind_backfill_is_replaced_by_the_opened_window`、
 `historical_user_bubble_carries_message_id_and_keeps_same_text_live_tail`、
 `historical_tool_card_uses_bare_tool_call_id_and_dedupes_live_card`。
+
+head `ab91c70f4` 复核：`rewind` 目标用例 44 passed；上述四个用例定向运行全部通过；
+`tool_call_and_result_share_invocation_key_across_entries` 通过。PR CI（macOS / Ubuntu /
+Windows Build、E2E replay）在该 head 全部 pass。
