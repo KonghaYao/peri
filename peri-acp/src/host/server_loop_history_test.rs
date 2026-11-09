@@ -60,6 +60,13 @@ async fn spawn_loop_with_backend(
         let locks = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let (cont_tx, _cont_rx) = tokio::sync::mpsc::unbounded_channel();
         let cont_tx = Arc::new(cont_tx);
+        let recovery = crate::host::recovery::HostSessionRecovery::new(
+            Arc::clone(&cfg.session_resources),
+            cfg.session_manager.clone(),
+            sessions.clone(),
+            Arc::clone(&cfg),
+            Arc::clone(&cont_tx),
+        );
         crate::host::server_loop::ServerLoop {
             transport: &server,
             cfg: &cfg,
@@ -68,6 +75,7 @@ async fn spawn_loop_with_backend(
             cont_tx: &cont_tx,
             connection: &connection,
             connection_cancellation: &cancellation,
+            recovery: &recovery,
         }
         .run()
         .await;

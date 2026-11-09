@@ -893,7 +893,7 @@ async fn wire_requests_follow_enqueue_order_across_all_v2_rpcs() {
 
     let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = crate::acp_client::client::AcpTuiClient::new(transport);
-    client.install_history_v2_for_test(true, limits.clone());
+    client.install_history_v2_for_test(true, true, limits.clone());
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     *atoms::HISTORY_V2_TX
         .lock()
@@ -1040,7 +1040,7 @@ async fn late_open_success_after_reset_is_discarded() {
 
     let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = crate::acp_client::client::AcpTuiClient::new(transport);
-    client.install_history_v2_for_test(true, HistoryLimits::default());
+    client.install_history_v2_for_test(true, true, HistoryLimits::default());
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     *atoms::HISTORY_V2_TX
         .lock()

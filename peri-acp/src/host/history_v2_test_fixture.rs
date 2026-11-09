@@ -92,6 +92,13 @@ async fn spawn_loop_with_transport(
         }
         let connection = Arc::new(tokio::sync::Mutex::new(context));
         let cancellation = CancellationToken::new();
+        let recovery = crate::host::recovery::HostSessionRecovery::new(
+            Arc::clone(&cfg.session_resources),
+            cfg.session_manager.clone(),
+            sessions.clone(),
+            Arc::clone(&cfg),
+            Arc::clone(&cont_tx),
+        );
         crate::host::server_loop::ServerLoop {
             transport: &server,
             cfg: &cfg,
@@ -100,6 +107,7 @@ async fn spawn_loop_with_transport(
             cont_tx: &cont_tx,
             connection: &connection,
             connection_cancellation: &cancellation,
+            recovery: &recovery,
         }
         .run()
         .await;

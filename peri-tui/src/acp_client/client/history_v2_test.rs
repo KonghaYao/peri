@@ -3,6 +3,7 @@
 use super::*;
 use crate::kit::atoms;
 use peri_acp::transport::{
+    AcpTransport,
     mpsc::{MpscServerTransport, mpsc_transport_pair},
     types::{IncomingMessage, RequestId},
 };
@@ -32,7 +33,7 @@ fn prepare() -> HistoryAtomsGuard {
 
 /// V2 状态由连接协商事实决定；不触碰进程级 atom，避免并行用例串线。
 fn install_v2(client: &AcpTuiClient, capable: bool) {
-    client.install_history_v2_for_test(capable, HistoryLimits::default());
+    client.install_history_v2_for_test(true, capable, HistoryLimits::default());
 }
 
 async fn next_request(server: &MpscServerTransport) -> (RequestId, String, Value) {

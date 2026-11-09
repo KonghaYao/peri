@@ -16,7 +16,7 @@ pub(crate) fn install_history_v2(client: &AcpTuiClient) {
     *crate::kit::atoms::HISTORY_V2_TX
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-    client.install_history_v2_for_test(true, HistoryLimits::default());
+    client.install_history_v2_for_test(true, true, HistoryLimits::default());
 }
 
 /// Minimal valid `_peri/history` initial response for `session_id`.

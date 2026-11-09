@@ -4,6 +4,7 @@ use serde_json::json;
 
 use super::*;
 use crate::messages::MessageId;
+use crate::thread::ThreadId;
 
 fn thread() -> ThreadId {
     "session-a".to_owned()

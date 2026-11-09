@@ -374,9 +374,8 @@ fn full_flow_pages_seeks_reads_body_and_survives_window_expiry() {
         let handle = atoms::HISTORY_DETAIL.state();
         let mut guard = handle.write();
         let detail = guard.as_mut().expect("detail open");
-        let generation = detail.attempt_generation();
         detail
-            .apply_v2_chunk(&chunk, 256 * 1024, generation)
+            .apply_v2_chunk(&chunk, 256 * 1024)
             .expect("body chunk accepted");
         assert_eq!(detail.loaded_text().expect("utf8"), "{\"ok\":true}");
     }
@@ -462,9 +461,8 @@ fn opaque_placeholder_opens_detail_and_loads_v2_chunk() {
     let handle = atoms::HISTORY_DETAIL.state();
     let mut guard = handle.write();
     let detail = guard.as_mut().expect("detail open");
-    let generation = detail.attempt_generation();
     detail
-        .apply_v2_chunk(&chunk, 256 * 1024, generation)
+        .apply_v2_chunk(&chunk, 256 * 1024)
         .expect("v2 chunk accepted");
     let text = detail.loaded_text().expect("utf8");
     assert_eq!(
@@ -1051,6 +1049,7 @@ fn historical_tool_card_uses_bare_tool_call_id_and_dedupes_live_card() {
             &input_summary,
             &json!({"path": "/tmp/a"}),
             None,
+            false,
         ));
 
     let reopened = page(

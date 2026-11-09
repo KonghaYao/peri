@@ -42,18 +42,30 @@ pub(crate) fn parse(
         .get("_meta")
         .and_then(Value::as_object)
         .and_then(|meta| meta.get(HISTORY_META_KEY));
-    // 旧私有参数一律不再解释：即使标准连接也不能靠顶层 cursor/limit 触发旧分页。
+    // 旧私有参数：V2 连接在装配前 fail-closed；V1/标准连接交给 V1 分类器，
+    // 由各连接协商到的能力给出既有错误码（两套协议共存，规则只维护一份）。
     if let Some(field) = LEGACY_PRIVATE_FIELDS
         .iter()
         .find(|field| params.get(**field).is_some())
     {
-        let reason = if facts.history_v2 && raw.is_some() {
-            "history_initial_mixed_fields"
-        } else {
-            "history_legacy_fields_removed"
+        if raw.is_some() {
+            return Err(invalid_request(
+                "history_initial_mixed_fields",
+                format!("{field} is no longer supported on session/load"),
+            ));
+        }
+        let handled_by_v1 = match *field {
+            "history" => facts.history_window_v1,
+            "cursor" | "limit" => facts.history_pagination,
+            // 初始 load 的代次字段是 V1/标准连接的既有形状，V2 连接不再接受。
+            "loadGeneration" => !facts.history_v2,
+            _ => false,
         };
+        if !facts.history_v2 || handled_by_v1 {
+            return Ok(None);
+        }
         return Err(invalid_request(
-            reason,
+            "history_legacy_fields_removed",
             format!("{field} is no longer supported on session/load"),
         ));
     }
@@ -105,6 +117,9 @@ mod tests {
 
     fn v2_facts() -> ConnectionFacts {
         ConnectionFacts {
+            connection_id: "test-connection".into(),
+            history_pagination: false,
+            history_window_v1: false,
             history_v2: true,
             mcp_control_v1: false,
             caps: PeriCaps {
@@ -137,7 +152,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_top_level_fields_are_rejected_for_both_connection_kinds() {
+    fn legacy_top_level_fields_are_rejected_on_v2_and_deferred_for_v1() {
         for field in LEGACY_PRIVATE_FIELDS {
             let mut params = initial_params();
             params[field] = json!("legacy");
@@ -149,14 +164,14 @@ mod tests {
                 "V2 连接混入旧字段: {field}"
             );
 
+            // 标准连接由 V1 分类器按当前连接协商结果裁决（两套协议共存）。
             let mut standard = json!({ "sessionId": "s1" });
             standard[field] = json!("legacy");
-            let error = parse(&standard, &ConnectionFacts::unnegotiated()).unwrap_err();
-            assert_eq!(error.code, -32602, "{field}");
-            assert_eq!(
-                error.data.as_ref().and_then(|data| data["reason"].as_str()),
-                Some("history_legacy_fields_removed"),
-                "标准连接不得再解释旧字段: {field}"
+            assert!(
+                parse(&standard, &ConnectionFacts::unnegotiated())
+                    .unwrap()
+                    .is_none(),
+                "标准连接的旧字段交给 V1 路由: {field}"
             );
         }
 

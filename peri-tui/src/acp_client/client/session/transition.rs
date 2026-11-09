@@ -8,6 +8,32 @@ use crate::acp_client::interaction_lifecycle::{TransitionKind, TransitionOperati
 
 use super::guards::{PreparingSessionGuard, SessionProjectionGuard};
 
+/// initial 失败时收敛投影。
+///
+/// 同会话的旧窗口仍然有效：保留 load 起点已投影的会话边界，并把已发布状态重新
+/// 送入桥接视图（`notify_view` 只读状态，不修改交付身份）。跨会话失败不恢复旧
+/// 视图；没有可恢复窗口时退回空边界。
+fn settle_failed_initial_projection(
+    projection: &mut SessionProjectionGuard<'_>,
+    previous_v2: &crate::kit::history_v2::HistoryV2State,
+    session_id: &str,
+) -> bool {
+    let restore = previous_v2.is_ready() && previous_v2.session_id.as_deref() == Some(session_id);
+    if projection.client.projection_mode == ClientProjectionMode::Interactive {
+        if restore {
+            // 明确恢复边界为同一目标会话；不递增 reset，桥接任务会先应用
+            // load 起点的 reset，再按 active_session_id 接收这条重投影事件。
+            crate::kit::atoms::ACTIVE_SESSION_ID.set(session_id.to_owned());
+            crate::kit::history_v2::consumer::notify_view(previous_v2);
+        } else {
+            crate::kit::session_boundary::project_session_boundary(None);
+            crate::kit::history_v2::consumer::reset_consumer_state();
+        }
+    }
+    projection.retain_projection |= restore;
+    restore
+}
+
 impl AcpTuiClient {
     /// Create a new agent session.
     ///
@@ -48,6 +74,7 @@ impl AcpTuiClient {
         let mut projection = SessionProjectionGuard {
             client: self,
             committed: false,
+            retain_projection: false,
         };
         if self.projection_mode == ClientProjectionMode::Interactive {
             crate::kit::session_boundary::project_session_boundary(None);
@@ -214,6 +241,7 @@ impl AcpTuiClient {
         let mut projection = SessionProjectionGuard {
             client: self,
             committed: false,
+            retain_projection: false,
         };
         if self.projection_mode == ClientProjectionMode::Interactive {
             crate::kit::session_boundary::project_session_boundary(Some(session_id));
@@ -246,7 +274,27 @@ impl AcpTuiClient {
             self.clear_pending_close();
         }
 
-        let params = json!({ "sessionId": session_id, "cwd": effective_cwd, "model": model });
+        // initial 是窗口替换的候选：在接纳并发布前不撤销旧窗口状态/交付身份。
+        let previous_v2 = crate::kit::history_v2::snapshot();
+        let history_v2 = self.history_v2_active();
+        let limits = self.history_v2_limits();
+        let request_key = history_v2.then(crate::kit::history_v2::consumer::next_request_key);
+        let params = match request_key {
+            Some(request_key) => json!({
+                "sessionId": session_id,
+                "cwd": effective_cwd,
+                "model": model,
+                "_meta": {
+                    peri_acp_types::history_v2::HISTORY_META_KEY:
+                        crate::kit::history_v2::initial::initial_request_value(&limits, request_key),
+                },
+            }),
+            None => json!({ "sessionId": session_id, "cwd": effective_cwd, "model": model }),
+        };
+        if history_v2 {
+            // F2b：load 响应可能晚于服务端 flush 的 live 通知到达；先登记暂存。
+            crate::kit::history_v2::live::begin_pending(session_id);
+        }
         let loaded = match self
             .transport
             .send_request("session/load", params.clone())
@@ -254,47 +302,141 @@ impl AcpTuiClient {
         {
             Ok(loaded) => loaded,
             Err(error) => {
+                if history_v2 {
+                    crate::kit::history_v2::live::clear_pending(session_id);
+                }
                 *self.restore_error.lock().unwrap() = Some(error.to_string());
                 self.lifecycle.fail_transition(start.generation);
                 transition.disarm();
                 if self.projection_mode == ClientProjectionMode::Interactive {
-                    crate::kit::session_boundary::project_session_boundary(None);
+                    if history_v2 {
+                        settle_failed_initial_projection(&mut projection, &previous_v2, session_id);
+                    } else {
+                        crate::kit::session_boundary::project_session_boundary(None);
+                    }
                 }
                 return Err(error);
             }
         };
-        // 本次浏览身份（REQ §5.2 `nextCursor` / `snapshotToken`）：只有协商过分页能力的
-        // 连接才有这两个字段，未协商时两者都是 None，触发侧因此永不请求历史页。
-        // 响应解码失败不改变 load 的成败——浏览能力降级，会话本身已经装配成功。
-        let (snapshot_token, next_cursor) =
-            crate::kit::history_paging::decode_session_cursor(&loaded);
-        // 恢复结果是成功响应的一部分：解码失败只降级提示，不影响会话可用性。
-        let recovery = crate::acp_client::client::recovery_view::decode(&loaded);
-        crate::kit::history_paging::note_initial_cursor(session_id, snapshot_token, next_cursor);
-        self.lifecycle
-            .commit_stable(start.generation, session_id.to_string());
-        if self.projection_mode == ClientProjectionMode::Interactive {
-            // 进入会话先展示已保存占用；缺失字段由解码侧落成未知，不沿用上一会话。
-            crate::kit::context_usage::establish_session_usage(
-                crate::kit::context_usage::from_load_response(&loaded),
+        if let Some(request_key) = request_key {
+            // V2 连接的首屏只来自 initial：不调用 V1 游标解码、不回放、不再发 window open。
+            let admitted = match crate::kit::history_v2::initial::admit_load_response(
+                &loaded,
+                session_id,
+                request_key,
+                &limits,
+            ) {
+                Ok(state) => state,
+                Err(error) => {
+                    crate::kit::history_v2::live::clear_pending(session_id);
+                    let acp = AcpError::new(-32603, error.to_string()).with_data(json!({
+                        "kind": "history_initial_invalid",
+                        "reason": error.reason.to_string(),
+                    }));
+                    *self.restore_error.lock().unwrap() = Some(acp.to_string());
+                    self.lifecycle.fail_transition(start.generation);
+                    transition.disarm();
+                    if self.projection_mode == ClientProjectionMode::Interactive {
+                        settle_failed_initial_projection(&mut projection, &previous_v2, session_id);
+                    }
+                    // 旧窗口仍 Ready 时保留已发布状态与 live/delivery 身份；候选失败
+                    // 不得覆盖它。没有旧窗口时才写入失败事实。
+                    if !previous_v2.is_ready() {
+                        // 失败状态必须在边界清理之后写入，否则会被会话边界重置覆盖。
+                        crate::kit::history_v2::publish_failure(session_id, error.into_failure());
+                    }
+                    // 服务端已装配会话但客户端不发布；尽力回收，避免孤儿会话。
+                    let _ = self
+                        .transport
+                        .send_request("session/close", json!({"sessionId": session_id}))
+                        .await;
+                    return Err(acp);
+                }
+            };
+            let execution_ready = admitted.execution_ready;
+            self.lifecycle
+                .commit_stable(start.generation, session_id.to_string());
+            // F2b：initial 一旦通过原子校验就立即发布首屏（含 initial 前暂存的 live
+            // 重放），不等待 user-input 运行时初始化；后者失败只关闭执行事实，不回滚
+            // 已经拿到的历史页。
+            let restore = admitted.clone();
+            let next_identity =
+                crate::kit::history_v2::consumer::HistoryV2WindowIdentity::from_state(&restore);
+            // 候选项已经通过全部校验：此刻才提交替换，清掉旧导航代次/在途 open，
+            // 并发布新首屏。
+            crate::kit::history_v2::consumer::reset_consumer_state();
+            crate::kit::history_v2::publish_initial(admitted);
+            // 新首屏发布后，旧窗口身份才进入关闭队列；Close 幂等。
+            if let Some(previous) =
+                crate::kit::history_v2::consumer::HistoryV2WindowIdentity::from_state(&previous_v2)
+                && Some(&previous) != next_identity.as_ref()
+            {
+                let _ = crate::kit::history_v2::consumer::request_close_window(previous);
+            }
+            if let Err(error) = self
+                .finish_session_initialization(start.generation, session_id)
+                .await
+            {
+                crate::kit::history_v2::live::clear_pending(session_id);
+                let mut restored = restore;
+                restored.execution_ready = false;
+                if let Some(window) = restored.window.as_mut() {
+                    window.paging.live.detached = true;
+                    window.paging.status =
+                        crate::kit::history_v2::paging::HistoryV2PagingStatus::ReopenRequired {
+                            reason: "session initialization failed".into(),
+                        };
+                }
+                crate::kit::history_v2::publish_initial(restored);
+                return Err(error);
+            }
+            // `executionReady=false` 只关闭可执行态；历史仍由 V2 状态模型持有。
+            *self.restore_error.lock().unwrap() = if execution_ready {
+                None
+            } else {
+                Some(
+                    "session history is readable, but execution is not ready; retry after the session settles"
+                        .into(),
+                )
+            };
+        } else {
+            // 本次浏览身份（REQ §5.2 `nextCursor` / `snapshotToken`）：只有协商过分页能力的
+            // 连接才有这两个字段，未协商时两者都是 None，触发侧因此永不请求历史页。
+            // 响应解码失败不改变 load 的成败——浏览能力降级，会话本身已经装配成功。
+            let (snapshot_token, next_cursor) =
+                crate::kit::history_paging::decode_session_cursor(&loaded);
+            // 恢复结果是成功响应的一部分：解码失败只降级提示，不影响会话可用性。
+            let recovery = crate::acp_client::client::recovery_view::decode(&loaded);
+            crate::kit::history_paging::note_initial_cursor(
+                session_id,
+                snapshot_token,
+                next_cursor,
             );
+            self.lifecycle
+                .commit_stable(start.generation, session_id.to_string());
+            if self.projection_mode == ClientProjectionMode::Interactive {
+                // 进入会话先展示已保存占用；缺失字段由解码侧落成未知，不沿用上一会话。
+                crate::kit::context_usage::establish_session_usage(
+                    crate::kit::context_usage::from_load_response(&loaded),
+                );
+            }
+            self.finish_session_initialization(start.generation, session_id)
+                .await?;
+            if let Some(view) = recovery.as_ref() {
+                crate::acp_client::client::recovery_view::present(session_id, view);
+            }
+            self.flush_buffered();
+            // S5.4：协商过窗口能力且开关开启时，额外建立 V1 窗口（默认关闭时无行为）。
+            //
+            // 必须在初始化成功之后：服务端对声明 `peri.historyWindowV1` 的连接不再回放历史，
+            // 首屏由这次 open 提供；初始化失败会关闭会话，此时 open 没有可交付的首屏。
+            crate::kit::history_page_consumer::enqueue_window_open(
+                session_id,
+                crate::kit::history_paging::WindowDirection::Before,
+            );
+            *self.restore_error.lock().unwrap() = None;
         }
-        self.finish_session_initialization(start.generation, session_id)
-            .await?;
-        if let Some(view) = recovery.as_ref() {
-            crate::acp_client::client::recovery_view::present(session_id, view);
-        }
-        self.flush_buffered();
-        // S5.4：协商过窗口能力且开关开启时，额外建立 V1 窗口（默认关闭时无行为）。
-        //
-        // 必须在初始化成功之后：服务端对声明 `peri.historyWindowV1` 的连接不再回放历史，
-        // 首屏由这次 open 提供；初始化失败会关闭会话，此时 open 没有可交付的首屏。
-        crate::kit::history_page_consumer::enqueue_window_open(
-            session_id,
-            crate::kit::history_paging::WindowDirection::Before,
-        );
         self.project_execution_cwd(Some(effective_cwd));
-        *self.restore_error.lock().unwrap() = None;
         {
             let mut target = self.startup_restore_target.lock().unwrap();
             if target.as_deref() == Some(session_id) {
