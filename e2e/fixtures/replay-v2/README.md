@@ -37,6 +37,27 @@
 | U08 | AskUser 多题多选 | 多选集合与题目顺序保持 |
 | U09 | 审批拒绝后明确允许 | 拒绝零副作用、下一轮批准恰好执行一次 |
 
+## world 快照与同步
+
+cassette `formatVersion` 为 2 时，请求正文不再各存一份完整 system prompt。共享快照位于 `world/`：
+
+- `world/system/skills.txt` 对应 `peri-acp/prompts/sections/13_skills.md`，稳定 leaf 为 `sys.skills`；
+- `world/system/compact.summary.txt` 对应 compact summary system prompt；
+- `world/tools/Agent.*.json` 保存 Agent tool schema（description 与 `send_only`）；
+- `world/system/block0.main.txt`、`world/system/block1.*.prefix.txt` / `*.tail.txt`、`world/tools/*.json` 由录制内容按字节拆分；
+- 其余无法映射的 system 段（如 T06 hook prompt）走内容寻址 leaf，`world:sync` 会列出这些未映射 leaf。
+
+请求 stub 只保留 messages/参数等 per-request 字节与 leaf/recipe 引用；`rawSha256`、`canonicalSha256` 与 response 哈希仍逐条校验，`requestRules` 的 typed-template pattern 在加载时按录制边界重新展开。world leaf 变化后，stub 中的录制哈希会以 `report.worldDrift` 报告，加载器改用当前 world 重建 canonical；篡改仍由 cassette seal 与 world seal 拦截。
+
+高频 prompt 变更流程：
+
+1. `npm --prefix e2e run e2e:replay:world-check` 查看是否有 stale leaf。
+2. `npm --prefix e2e run e2e:replay:world-sync` 写入映射 leaf 与 `world/seal.json`。
+3. 审核 `git diff --stat`：`13_skills.md` 变化应只出现 2 个文件（skills leaf + seal）；Agent description/`send_only` 为 2 个 Agent leaf + seal；compact summary 为 1 个 leaf + seal。
+4. `npm --prefix e2e run e2e:replay:verify` 重新校验 30 cassettes / world seal。
+
+限制：单条消息（如 U06 compact 用户指令）变化仍落在对应 stub + cassette seal（2 文件）；`summary_user_prompt.md` 不在 world 映射内，变化需要重录或显式编辑 stub。`world:sync` 只同步上述源文件，未映射的 prompt 内容变化仍需重录。
+
 ## 证据与范围
 
 - 每个场景有独立 seed、cassette 和场景清单；初始化通过真实 ACP 创建新会话，重放使用新的临时目录。不会修改数据库表结构或直接伪造历史行。
