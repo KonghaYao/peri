@@ -134,6 +134,9 @@ pub enum ArchiveError {
 pub fn validate_projection_metadata(
     directive: &MessageProjectionDirective,
 ) -> Result<(), ArchiveError> {
+    if let Some(handoff) = &directive.compact_handoff {
+        handoff.validate().map_err(ArchiveError::InvalidRequest)?;
+    }
     let bytes = serde_json::to_vec(directive).map_err(|_| ArchiveError::ContentMismatch)?;
     if bytes.len() > ARCHIVE_MAX_METADATA_BYTES {
         return Err(ArchiveError::Unsupported);

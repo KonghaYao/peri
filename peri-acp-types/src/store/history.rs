@@ -424,7 +424,10 @@ fn remap_projection_references(
         if projection.archive_catalog.is_some()
             || projection.archive_group.is_some()
             || !projection.archive_roots.is_empty()
+            || projection.compact_handoff.is_some()
         {
+            // Handoff excerpts retain original source identities across forks. Unlike
+            // projection references, they are historical provenance, not read authority.
             validate_projection_metadata(projection).map_err(|_| HistoryError::InvalidArchive {
                 id: target_message_id,
             })?;

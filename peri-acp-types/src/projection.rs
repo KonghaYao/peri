@@ -91,6 +91,9 @@ pub struct ProjectionActionEntry {
 pub struct MessageProjectionDirective {
     #[serde(default = "default_format_version")]
     pub format_version: u32,
+    /// Engine-owned continuity state; its prose rendering alone is not trusted input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_handoff: Option<crate::compact_handoff::CompactHandoff>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive_catalog: Option<ArchiveCatalog>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,6 +135,7 @@ impl Default for MessageProjectionDirective {
     fn default() -> Self {
         Self {
             format_version: 1,
+            compact_handoff: None,
             policy_version: 0,
             entries: Vec::new(),
             superseded_by: None,

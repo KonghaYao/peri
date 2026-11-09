@@ -9,6 +9,8 @@ use peri_model::{ContentBlock, ModelMessage, ModelResponse, StopReason};
 use crate::error::{AgentError, AgentResult};
 pub use peri_acp_types::error::SummaryRecoveryReason;
 
+pub(super) const SUMMARY_PREFIX: &str = "This session continues from a previous conversation. Below is a summary of the prior dialogue.";
+
 /// 一次摘要生成响应相对「可提交摘要」的分类。
 #[derive(Debug)]
 pub(super) enum SummaryStep {
@@ -128,8 +130,6 @@ impl Extracted {
 }
 
 fn format_summary(mut text: String) -> Option<String> {
-    let prefix = "This session continues from a previous conversation. Below is a summary of the prior dialogue.";
-
     text = text.trim().to_string();
     while text.contains("\n\n\n") {
         text = text.replace("\n\n\n", "\n\n");
@@ -138,7 +138,7 @@ fn format_summary(mut text: String) -> Option<String> {
     if text.is_empty() {
         None
     } else {
-        Some(format!("{}\n\n{}", prefix, text))
+        Some(format!("{}\n\n{}", SUMMARY_PREFIX, text))
     }
 }
 

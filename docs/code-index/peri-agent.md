@@ -122,6 +122,7 @@ Full 摘要不改变模型思考配置和单次输出上限。未完成的摘要
 | Smart 旧入口 | `compact_v2/smart.rs` + `mod.rs` | 显式旧配置仍由策略分支消费；生产复用同一 `plan_micro_with_facts` 与原子提交，缺少运行期事实不新压缩 |
 | Full 执行 | compact_v2/full.rs | `full_compact_inner` 从已提交投影视图生成结构化摘要，排除 own reminder 等旧历史；清渲染动作但保留旧目录/组链接，范围根合并后与新摘要同事务提交，原引用不依赖摘要正文；同一批里给每条被归档条目写下取代关系（`MessageFlags::superseded_by` = 本次追加的摘要 id，供 rewind 精确判定排除是否仍有依据）；摘要 user prompt 的 `Recovery resources`（优先级 2）登记实际激活、正文已归档的 skill 与契约偏离，`CONTINUATION_HINT` 要求在任何其他工具调用前先用 `SkillTool` 重载，旧标记经 `is_continuation_hint` 继续按 `compact_summary` 识别；不从计算实例本机回读 Read/Skill 路径；回归 `full_report_test.rs` / `full_test.rs` / `full_protected_result_test.rs` / `full_continuation_test.rs`（摘要截断续写、失败保全及远端内容来源） |
 | 摘要响应分类 | compact_v2/summary.rs | `classify_summary_step(response, accumulated)` 只读一次响应与已回填正文，返回 `SummaryStep::{Complete,Draft,Empty}`；不调用模型、不写 transcript、不修改输入；纯函数回归 `summary_test.rs` |
+| Full 长程连续性 | `compact_v2/handoff.rs` + `peri-acp-types/src/compact_handoff.rs` | `HandoffInput::{prepare,finish}` 构造来源索引并校验 / 合并 delta，`CompactHandoff` 存于现有摘要 projection JSON；旧条目遗漏不删除，替换要求原文证据，工具执行状态取 typed facts；预算超限或无效引用不提交。Full 原子归档保留旧状态，`store/history_projection.rs` 的 rewind 不清除仍有效的状态；fork 保留历史证据身份而非授予读取权限。回归 `handoff_test.rs` / `full_handoff_test.rs`；ARC-COMPACT-001 |
 | 配置 re-export | compact_v2/config.rs | `CompactConfig`（事实源 peri-acp-types）、`CONTINUATION_HINT` |
 | 摘要 prompt 模板 | compact_v2/descriptions/ | summary_system_prompt.md / summary_user_prompt.md |
 

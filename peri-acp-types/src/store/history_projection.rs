@@ -15,7 +15,15 @@ pub fn rewind_projection_updates(
     clear_excluded: &[MessageId],
 ) -> Vec<(MessageId, MessageFlags)> {
     let ids: HashSet<_> = retained.iter().map(|(id, _, _)| *id).collect();
-    let clear: HashSet<_> = clear_excluded.iter().copied().collect();
+    let mut clear: HashSet<_> = clear_excluded.iter().copied().collect();
+    // Reconcile against the retained canonical prefix, even when the caller's hot
+    // view no longer contains archived rows. A removed summary cannot cover them.
+    clear.extend(retained.iter().filter_map(|(id, flags, _)| {
+        flags
+            .superseded_by()
+            .is_some_and(|summary| !ids.contains(&summary))
+            .then_some(*id)
+    }));
     let by_id: HashMap<_, _> = retained.iter().map(|(id, flags, _)| (*id, flags)).collect();
     let omission_groups: HashSet<_> = retained
         .iter()
@@ -128,6 +136,7 @@ pub fn rewind_projection_updates(
                 && projection.archive_catalog.is_none()
                 && projection.archive_group.is_none()
                 && projection.archive_roots.is_empty()
+                && projection.compact_handoff.is_none()
             {
                 flags.projection = None;
             }

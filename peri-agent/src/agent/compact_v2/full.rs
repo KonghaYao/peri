@@ -43,6 +43,9 @@ const SUMMARY_USER_PROMPT: &str = include_str!("descriptions/summary_user_prompt
 #[path = "summary.rs"]
 mod summary;
 
+#[path = "handoff.rs"]
+mod handoff;
+
 /// 摘要恢复提示：从已有正文末尾续写，只输出缺失部分。
 const SUMMARY_RECOVERY_PROMPT: &str = "Your summary was cut off. Continue exactly from the end of your previous text, \
 including any unfinished word or tag. Output only the missing remainder; do not restart, repeat earlier sections, or add \
@@ -167,6 +170,9 @@ pub(super) async fn full_compact_inner_with_protected(
                         policy_version: PROJECTION_POLICY_VERSION,
                         entries: Vec::new(),
                         superseded_by: Some(summary_id),
+                        compact_handoff: transcript
+                            .projection_ref(entry.id())
+                            .and_then(|old| old.compact_handoff.clone()),
                         archive_catalog: transcript
                             .projection_ref(entry.id())
                             .and_then(|old| old.archive_catalog.clone()),
@@ -215,20 +221,53 @@ pub(super) async fn full_compact_inner_with_protected(
             deferral: None,
         });
     }
+    let mut compact_handoff = None;
     let summary = if has_history {
-        let budget = SummaryBudget::resolve(llm, config)?;
+        let mut budget = SummaryBudget::resolve(llm, config)?;
+        let handoff = handoff::HandoffInput::prepare(transcript, &visible)?;
+        let core_budget = (budget.initial_target_tokens() / 2).max(1);
+        let reserved = handoff.retained_tokens_estimate()?;
+        if reserved > core_budget {
+            return Err(AgentError::CompactSummaryBudgetInvalid {
+                reason: "retained continuity exceeds half the summary target",
+            });
+        }
+        // Copied excerpts consume context even though the model does not generate them.
+        budget.target_tokens = budget
+            .target_tokens
+            .saturating_sub(reserved.saturating_mul(2))
+            .max(1);
         // 保留历史的角色、工具配对和完整正文；摘要指令只追加到派生请求，
         // 不回写原 transcript，也不提供可执行工具。
         let mut messages = vec![ModelMessage::system_text(SUMMARY_SYSTEM_PROMPT)];
         messages.extend(AgentModelBridge::convert_messages(&visible)?);
         let conversation = RecoveryConversation::default();
-        complete_summary(llm, messages, &visible, budget, conversation).await?
+        let source_index = format!(
+            "{}\nThe final retained core (existing entries plus additions minus evidenced retirements) must fit approximately {core_budget} tokens using chars/4, including provenance. Keep quotes focused; never retire applicable requirements for budget pressure.",
+            handoff.prompt()
+        );
+        let generated =
+            complete_summary(llm, messages, &visible, budget, conversation, &source_index).await?;
+        let output = handoff.finish(generated, core_budget)?;
+        info!(
+            summary_id = %summary_id.as_uuid(),
+            retained_entries = output.state.entries.len(),
+            added_entries = output.added,
+            retired_entries = output.retired,
+            delta_present = output.delta_present,
+            "Full Compact continuity validated"
+        );
+        if !output.delta_present {
+            warn!("Full Compact omitted continuity delta; existing entries retained, new semantic coverage unknown");
+        }
+        compact_handoff = Some(output.state);
+        output.summary
     } else {
         // 全 System / 空历史仍保持命令输出 Human-first 的既有契约。
         "No conversation history to compact.".to_owned()
     };
 
-    if !archive_roots.is_empty() {
+    if !archive_roots.is_empty() || compact_handoff.is_some() {
         flag_updates.push((
             summary_id,
             MessageFlags {
@@ -236,6 +275,7 @@ pub(super) async fn full_compact_inner_with_protected(
                     policy_version: PROJECTION_POLICY_VERSION,
                     archive_roots,
                     archive_receipt_budget_tokens,
+                    compact_handoff,
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -473,6 +513,7 @@ async fn complete_summary(
     visible: &[BaseMessage],
     budget: SummaryBudget,
     mut conversation: RecoveryConversation,
+    source_index: &str,
 ) -> AgentResult<String> {
     // 历史长度沿用 Reason 侧的同一 chars/4 估算；恢复片段与提示逐次计入。
     let history_tokens = crate::agent::token::estimate_request_tokens(visible, &[]);
@@ -498,11 +539,17 @@ async fn complete_summary(
         }
         let is_final_request = request_index + 1 == budget.max_requests;
         if request_index == 0 {
-            conversation.push_prompt(&summary_instruction(budget.initial_target_tokens()));
+            conversation.push_prompt(&format!(
+                "{}{}",
+                summary_instruction(budget.initial_target_tokens()),
+                source_index
+            ));
         } else if conversation.chunks.is_empty() {
             // 从未取得可用正文：只允许一次重新生成，目标减半，不注入空 assistant。
-            conversation.replace_prompt(&regeneration_instruction(
-                budget.regeneration_target_tokens(),
+            conversation.replace_prompt(&format!(
+                "{}{}",
+                regeneration_instruction(budget.regeneration_target_tokens()),
+                source_index
             ));
         } else if is_final_request {
             conversation.push_prompt(SUMMARY_FINAL_PROMPT);
@@ -673,3 +720,7 @@ mod report_tests;
 #[cfg(test)]
 #[path = "full_continuation_test.rs"]
 mod continuation_tests;
+
+#[cfg(test)]
+#[path = "full_handoff_test.rs"]
+mod handoff_tests;
