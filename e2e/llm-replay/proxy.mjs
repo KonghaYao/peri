@@ -135,7 +135,7 @@ async function forwardChunk(run, call, response, bytes, signal, tap, finishAtByt
 export async function startReplayProxy({
   mode, cassetteDir, upstreams = [], host = '127.0.0.1', port = 0,
   timing = 'fast', maxRequestBytes = 16 * 1024 * 1024,
-  maxResponseBytes = 64 * 1024 * 1024, requestTimeoutMs = 30000, provenance = {},
+  maxResponseBytes = 64 * 1024 * 1024, requestTimeoutMs = 30000, provenance = {}, world, worldDir,
 } = {}) {
   if (!['record', 'replay'].includes(mode)) throw new ReplayError('invalid_mode', 'mode 只能为 record 或 replay');
   if (!cassetteDir) throw new ReplayError('invalid_directory', '必须指定 cassetteDir');
@@ -147,8 +147,8 @@ export async function startReplayProxy({
     const transport = new URL(logicalTarget(mapping.transportOrigin));
     if (logical.origin !== mapping.logicalOrigin || transport.origin !== mapping.transportOrigin) throw new ReplayError('invalid_mapping', '上游映射仅允许 origin');
   }
-  const writer = mode === 'record' ? await createCassetteWriter(cassetteDir, { provenance, maxResponseBytes }) : null;
-  const cassette = mode === 'replay' ? await loadCassette(cassetteDir) : null;
+  const writer = mode === 'record' ? await createCassetteWriter(cassetteDir, { provenance, maxResponseBytes, world }) : null;
+  const cassette = mode === 'replay' ? await loadCassette(cassetteDir, { worldDir }) : null;
   const runs = new Map();
   const globalErrors = [];
   const active = new Set();
@@ -212,7 +212,7 @@ export async function startReplayProxy({
       };
       if (mode === 'record') {
         input.canonicalBody = canonicalBody(body, normalization);
-        capture = await writer.begin(identityOf(context), input, rules);
+        capture = await writer.begin(identityOf(context), input, rules, { bindings: normalization.bindings, owner: normalization.owner });
         capturePending = true;
         run.pendingDurable++;
         await record(input, request.headers, response, run, call, capture, controller.signal, elapsed, () => clientAborted);
