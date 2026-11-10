@@ -303,10 +303,23 @@ jobs:
                   PERI_SOURCE_ROOT: ${{ github.workspace }}
               run: npm --prefix peri-e2e run e2e:replay:world-check
 
+            # 场景被 skip 时 Vitest 仍以 0 退出：回放前后各核对一次 catalog，
+            # 并清空旧报告，避免历史结果满足门禁。
+            - name: Check replay catalog
+              working-directory: peri-e2e
+              run: |
+                  rm -rf results/replay-v2/ci
+                  node scripts/check-replay-catalog.mjs
+
             - name: Run offline replay (30 scenarios)
               env:
                   PERI_BINARY: ${{ github.workspace }}/target/debug/peri
+                  PERI_E2E_REPLAY_RESULTS: ${{ github.workspace }}/peri-e2e/results/replay-v2/ci
               run: npm --prefix peri-e2e run e2e:replay
+
+            - name: Check replay results catalog
+              working-directory: peri-e2e
+              run: node scripts/check-replay-catalog.mjs --results results/replay-v2/ci
 
             - name: Upload replay evidence on failure
               if: failure()
