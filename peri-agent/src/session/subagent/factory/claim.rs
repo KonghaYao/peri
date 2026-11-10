@@ -8,7 +8,6 @@
 //! 认领的状态写入与「恢复到认领前」由资源侧持有（`ChildResumeClaim`），调用方只提交
 //! 领域结果：开始运行 / 移交后台 / 准备失败 / 终止。
 
-use std::future::Future;
 use std::sync::Arc;
 
 use tokio::sync::oneshot;
@@ -16,7 +15,7 @@ use tokio::task::JoinHandle;
 
 use crate::tools::{EffectiveToolError, EffectiveToolErrorCode};
 use peri_acp_types::session_resources::{
-    SessionMetaPatch, SessionResourceErrorKind, SessionResourceResult, SessionResources,
+    SessionMetaPatch, SessionResourceErrorKind, SessionResources,
 };
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
 
@@ -42,9 +41,6 @@ pub(in crate::session::subagent) struct ResumeClaim {
     /// worker 的写入不能被调用方取消：只 detach（不 abort）。
     worker: JoinHandle<Result<(), String>>,
     running: Option<Arc<crate::session::Session>>,
-    /// 认领前的工作意图：后台放行后 confirm 失败时，调用方据此恢复被提前写入的
-    /// `working`，避免留下「终态 + working」被下一次恢复误判为待继续。
-    previous_work_state: Option<peri_acp_types::thread::WorkState>,
 }
 
 pub(in crate::session::subagent) struct BackgroundHandoff(oneshot::Sender<()>);
@@ -76,16 +72,14 @@ impl ResumeClaim {
             result
         });
         // 先于第一个 await 建立：调用方在 active 写期间消失也留下明确决定。
-        let mut claim = Self {
+        let claim = Self {
             decision: Some(decision_tx),
             worker,
             running: None,
-            previous_work_state: None,
         };
         let meta = meta_rx.await.map_err(|error| {
             format!("resume_subagent: status claim worker ended before reporting: {error}")
         })??;
-        claim.previous_work_state = Some(meta.work_state);
         Ok((meta, claim))
     }
 
@@ -110,13 +104,6 @@ impl ResumeClaim {
         session: Arc<crate::session::Session>,
     ) {
         self.running = Some(session);
-    }
-
-    /// 认领前的工作意图（`acquire` 成功后总是已知）。
-    pub(in crate::session::subagent) fn previous_work_state(
-        &self,
-    ) -> Option<peri_acp_types::thread::WorkState> {
-        self.previous_work_state
     }
 
     /// 同步 Stop 已运行 hook：把领域终态交给 worker，由它先结清认领再写入。
@@ -218,8 +205,6 @@ async fn own_claim(
         }
     };
     // 调用方已消失时发送失败，但认领证据已落库：下面的决定分支会给出补偿。
-    // 工作意图要在移交前记住：调用方可能已提交 Working 后消失，补偿必须能恢复它。
-    let previous_work_state = meta.work_state;
     let _ = meta_tx.send(Ok(meta));
     match decision.await {
         Ok(ClaimDecision::HandOff { ready, accepted }) => {
@@ -236,12 +221,12 @@ async fn own_claim(
             if !accepted {
                 // 调用方消失后仍由本 worker 收尾：后台未放行，Working 写可能已提交，
                 // 只回滚 agent_status 会留下「终态 + working」，下一次进入会误判待继续。
-                // 两段补偿独立尝试：状态回滚失败不得跳过工作意图恢复。
-                rollback_handoff(
-                    handle.mark_failed(),
-                    store.set_work_state(&thread_id, previous_work_state),
-                )
-                .await?;
+                // 状态与工作意图的恢复统一由认领 handle 在同一门禁内提交：记录已被
+                // 新任务改写时 handle 放弃补偿，调用方不再独立写工作意图。
+                handle
+                    .mark_failed()
+                    .await
+                    .map_err(|error| format!("resume hand-off rollback failed: {error}"))?;
             }
         }
         Ok(ClaimDecision::Finish { status }) => {
@@ -306,27 +291,6 @@ async fn own_claim(
         owner.confirm_stopped();
     }
     Ok(())
-}
-
-/// 两段补偿独立尝试：状态回滚失败不得跳过工作意图恢复，双失败时合并两份上下文。
-async fn rollback_handoff(
-    status_rollback: impl Future<Output = SessionResourceResult<()>>,
-    work_state_rollback: impl Future<Output = SessionResourceResult<()>>,
-) -> Result<(), String> {
-    let status_error = status_rollback.await.err();
-    let work_state_error = work_state_rollback.await.err();
-    let mut failures = Vec::new();
-    if let Some(error) = status_error {
-        failures.push(format!("resume hand-off rollback failed: {error}"));
-    }
-    if let Some(error) = work_state_error {
-        failures.push(format!("resume work state rollback failed: {error}"));
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures.join("; "))
-    }
 }
 
 async fn validate_thread(

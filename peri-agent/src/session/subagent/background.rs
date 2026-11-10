@@ -730,9 +730,6 @@ pub(super) async fn spawn_background_subagent(
         ticket: Some(ticket),
         runtime_cleanup: cleanup_runtime.map(|cleanup| (child_thread_id.clone(), cleanup)),
     };
-    let previous_work_state = resume_claim
-        .as_ref()
-        .and_then(|claim| claim.previous_work_state());
     let handoff = match resume_claim {
         Some(claim) => Some(claim.release().await?),
         None => None,
@@ -769,24 +766,8 @@ pub(super) async fn spawn_background_subagent(
             None => Ok(()),
         });
     if let Err(error) = confirmation {
-        // 认领 worker 会在调用方消失时同时补偿状态与工作意图；这里仍同步恢复一次，
-        // 让本次返回前保持一致的「认领前」状态，不依赖 worker 的异步时序。
-        if let (Some(previous), Some(resources)) =
-            (previous_work_state, work_state_resources.as_deref())
-        {
-            if let Err(restore) = resources
-                .set_work_state(&ThreadId::from(child_thread_id.clone()), previous)
-                .await
-            {
-                tracing::error!(
-                    thread_id = %child_thread_id,
-                    %error,
-                    %restore,
-                    "resume work state restore failed after start rejection"
-                );
-                return Err(format!("{error}; resume work state restore failed: {restore}").into());
-            }
-        }
+        // 补偿只有认领 handle 一个所有者：drop handoff 后 worker 在同一门禁内
+        // 恢复状态与工作意图；这里再写一次会与新任务竞争并可能覆盖其 Working。
         return Err(error.into());
     }
     registration.ticket = None;

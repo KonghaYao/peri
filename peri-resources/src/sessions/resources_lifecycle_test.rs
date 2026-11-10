@@ -1,5 +1,96 @@
 use super::*;
 
+/// close/delete 成功路径必须回收 mutation gate 的 pending 条目与屏障。
+#[tokio::test]
+async fn closed_deleted_sessions_release_mutation_gate_entries() {
+    let fixture = Fixture::new().await;
+    assert!(fixture.facade.gate.pending_write_refs().is_empty());
+    let mut witnesses = Vec::new();
+    for index in 0..300 {
+        let id = format!("retention-{index}");
+        fixture.create(&id).await;
+        let witness = fixture
+            .facade
+            .gate
+            .pending_write_refs()
+            .into_iter()
+            .find(|(root, _, _)| root == &id)
+            .expect("creating a session must register a pending write scope");
+        witnesses.push(witness.1);
+        fixture.facade.mark_session_closing(&id).await.unwrap();
+        fixture.facade.finish_close(&id).await.unwrap();
+        fixture.facade.delete_session_tree(&id).await.unwrap();
+        assert_eq!(fixture.count_threads(&id).await, 0);
+    }
+    let entries = fixture.facade.gate.pending_write_refs();
+    assert!(
+        entries.is_empty(),
+        "closed and deleted roots must not remain pinned by the mutation gate: {} entries",
+        entries.len()
+    );
+    assert!(
+        witnesses.iter().all(|weak| weak.upgrade().is_none()),
+        "barriers must be released with the pending entry"
+    );
+    fixture.shutdown().await.unwrap();
+}
+
+/// 未知结果不得回收：恢复流程仍需要该条目。
+#[tokio::test]
+async fn uncertain_pending_entries_are_not_released() {
+    let fixture = Fixture::new().await;
+    fixture.create("s-uncertain-root").await;
+    let root = "s-uncertain-root".to_owned();
+    fixture.facade.gate.mark_pending_uncertain(&root);
+    fixture.facade.gate.release_pending_for(&root);
+    let entries = fixture.facade.gate.pending_write_refs();
+    assert_eq!(entries.len(), 1);
+    assert!(
+        entries[0].2,
+        "uncertain state must be preserved for recovery"
+    );
+}
+
+/// 仍有在飞写入（持有 Arc）时不得回收；释放后才允许移除。
+#[tokio::test]
+async fn pending_entries_in_use_are_not_released() {
+    let fixture = Fixture::new().await;
+    fixture.create("s-in-use-root").await;
+    let root = "s-in-use-root".to_owned();
+    let scope = fixture.facade.gate.admit(&root).await.unwrap();
+    fixture.facade.gate.release_pending_for(&root);
+    assert_eq!(
+        fixture.facade.gate.pending_write_refs().len(),
+        1,
+        "an active write scope must keep the entry alive"
+    );
+    scope.settle(&Ok::<(), SessionResourceError>(()));
+    fixture.facade.gate.release_pending_for(&root);
+    assert!(
+        fixture.facade.gate.pending_write_refs().is_empty(),
+        "the entry is reclaimable once the write scope is gone"
+    );
+    fixture.shutdown().await.unwrap();
+}
+
+/// `uncertain=true` 的 root 即使 close/delete 成功也不得被静默清空。
+#[tokio::test]
+async fn uncertain_pending_entry_survives_delete_path() {
+    let fixture = Fixture::new().await;
+    fixture.create("s-uncertain-delete").await;
+    let root = "s-uncertain-delete".to_owned();
+    fixture.facade.gate.mark_pending_uncertain(&root);
+    // 不确定状态下 mutation 会在写入前被拒绝，不得借此清掉证据。
+    let error = fixture.facade.delete_session_tree(&root).await.unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        SessionResourceErrorKind::PersistenceUncertain { .. }
+    ));
+    let entries = fixture.facade.gate.pending_write_refs();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].2);
+}
+
 #[tokio::test]
 async fn test_delete_cascades_canonical_data_and_allows_identity_reuse() {
     let fixture = Fixture::new().await;

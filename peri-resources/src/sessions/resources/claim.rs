@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use peri_acp_types::session_resources::{
     ChildResumeClaim, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
-use peri_acp_types::thread::{AgentStatus, ThreadId};
+use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
 
 use super::gate::MutationGate;
 use crate::sessions::data::ChildResumeRecord;
@@ -31,15 +31,26 @@ pub(super) struct ChildResumeClaimHandle {
     gate: MutationGate,
     child: ThreadId,
     previous: ChildResumeRecord,
+    previous_work_state: WorkState,
+    /// 本次认领的进程内世代；新认领会覆盖它，旧 handle 随之失去补偿资格。
+    claim_nonce: u64,
     phase: Mutex<ClaimPhase>,
 }
 
 impl ChildResumeClaimHandle {
-    pub(super) fn new(gate: MutationGate, child: ThreadId, previous: ChildResumeRecord) -> Self {
+    pub(super) fn new(
+        gate: MutationGate,
+        child: ThreadId,
+        previous: ChildResumeRecord,
+        previous_work_state: WorkState,
+        claim_nonce: u64,
+    ) -> Self {
         Self {
             gate,
             child,
             previous,
+            previous_work_state,
+            claim_nonce,
             phase: Mutex::new(ClaimPhase::Preparing),
         }
     }
@@ -121,19 +132,74 @@ impl ChildResumeClaim for ChildResumeClaimHandle {
 }
 
 impl ChildResumeClaimHandle {
-    /// 收尾：恢复到认领前的记录，不留 active 残留。
+    /// 收尾：恢复到认领前的状态与工作意图，不留 active 残留。
     ///
     /// 后台尚未启动时可补偿移交准备失败；终止声明不能覆盖后台执行持有的终态。
+    /// 归属校验与两列恢复在同一写侧门禁内完成，新任务无法插入到状态回滚与工作意图
+    /// 回滚之间。校验用进程内认领世代，而不是当前记录值——新 run 的正常状态与旧认领
+    /// 的中间态完全相同，按值判断会把新 run 误认为自己的记录。
     async fn settle(&self, preparation_failed: bool) -> SessionResourceResult<()> {
         {
             let mut phase = self.phase()?;
             match *phase {
                 ClaimPhase::Preparing | ClaimPhase::Running => *phase = ClaimPhase::Settled,
-                ClaimPhase::Settled => {}
+                // 重复补偿是 no-op：迟到的旧补偿不能再次写回认领前的值，
+                // 否则会覆盖新任务已经提交的 Active + Working。
+                ClaimPhase::Settled => return Ok(()),
                 ClaimPhase::HandedOff if preparation_failed => *phase = ClaimPhase::Settled,
                 ClaimPhase::HandedOff => return Err(Self::handed_off()),
             }
         }
-        self.write(&self.previous.clone()).await
+        self.gate
+            .with_exclusive(&self.child, || async {
+                if !self.gate.claim_is_current(&self.child, self.claim_nonce) {
+                    tracing::warn!(
+                        thread_id = %self.child,
+                        claim_nonce = self.claim_nonce,
+                        "resume claim rollback skipped: a newer claim owns this child"
+                    );
+                    return Ok(());
+                }
+                let current = self
+                    .gate
+                    .data()
+                    .load_child_resume_record(&self.child)
+                    .await?;
+                let current_work_state = self.gate.data().load_meta(&self.child).await?.work_state;
+                let claimed = ChildResumeRecord {
+                    status: AgentStatus::Active,
+                    claimed: true,
+                };
+                let owns_record = current == claimed
+                    && (current_work_state == WorkState::Working
+                        || current_work_state == self.previous_work_state);
+                if !owns_record {
+                    // 新任务已改写其中一列：放弃而不是部分恢复，避免把新运行
+                    // 的信息覆盖成认领前的值。
+                    tracing::warn!(
+                        thread_id = %self.child,
+                        expected_status = ?claimed.status,
+                        expected_work_state = ?WorkState::Working,
+                        previous_work_state = ?self.previous_work_state,
+                        current_status = ?current.status,
+                        current_claimed = current.claimed,
+                        current_work_state = ?current_work_state,
+                        "resume claim rollback skipped: record no longer belongs to this claim"
+                    );
+                    return Ok(());
+                }
+                self.gate
+                    .data()
+                    .store_child_resume_record(&self.child, &self.previous)
+                    .await?;
+                if current_work_state != self.previous_work_state {
+                    self.gate
+                        .data()
+                        .set_work_state(&self.child, self.previous_work_state)
+                        .await?;
+                }
+                Ok(())
+            })
+            .await
     }
 }

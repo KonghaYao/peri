@@ -457,12 +457,12 @@ impl SessionResources for MockSessionResources {
         _root: &ThreadId,
     ) -> SessionResourceResult<Box<dyn ChildResumeClaim>> {
         self.ensure_writable()?;
-        // 与资源实现同构：门禁内「读状态 + 写 active」，已有 active 时拒绝并发认领。
-        let previous = self
+        // 与资源实现同构：门禁内「读状态 + 读工作意图 + 写 active」，已有 active 时拒绝并发认领。
+        let (previous, previous_work_state) = self
             .region(child)
             .and_then(|region| region.meta)
-            .ok_or_else(|| SessionResourceError::new(SessionResourceErrorKind::NotFound))?
-            .agent_status;
+            .map(|meta| (meta.agent_status, meta.work_state))
+            .ok_or_else(|| SessionResourceError::new(SessionResourceErrorKind::NotFound))?;
         if previous.is_active() {
             return Err(SessionResourceError::new(
                 SessionResourceErrorKind::InvalidInput {
@@ -471,6 +471,13 @@ impl SessionResources for MockSessionResources {
             ));
         }
         self.write_status(child, AgentStatus::Active);
+        let claim_nonce = {
+            let mut ledger = self.claim_ledger.lock().unwrap();
+            ledger.next += 1;
+            let nonce = ledger.next;
+            ledger.current.insert(child.clone(), nonce);
+            nonce
+        };
         // 阶段门在写入之后：用例据此断言「已提交的写入不会被调用方 drop 撤销」。
         Self::wait_gate(&self.active_write_gate).await;
         self.claimed.store(true, Ordering::SeqCst);
@@ -479,8 +486,12 @@ impl SessionResources for MockSessionResources {
             regions: Arc::clone(&self.regions),
             statuses: Arc::clone(&self.statuses),
             status_changed: Arc::clone(&self.status_changed),
+            claim_ledger: Arc::clone(&self.claim_ledger),
+            claim_nonce,
             child: child.clone(),
             previous,
+            previous_work_state,
+            settled: AtomicBool::new(false),
         }))
     }
 

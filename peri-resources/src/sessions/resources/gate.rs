@@ -28,6 +28,17 @@ struct PendingWrites {
     uncertain: AtomicBool,
 }
 
+/// 进程内认领世代：区分「本次认领」与后续新认领。
+///
+/// 持久记录无法表达归属：新 run 的正常中间态 `Active + claimed + Working` 与旧认领
+/// 写入的值完全相同。世代只在同一门面实例内有效，跨进程/远端写入不适用（见 issue
+/// 已知限制），也不替代存储层自身的原子性。
+#[derive(Default)]
+pub(super) struct ClaimLedger {
+    next: u64,
+    current: HashMap<ThreadId, u64>,
+}
+
 pub(super) struct WriteScope {
     pending: Arc<PendingWrites>,
     _concurrent: Option<OwnedRwLockReadGuard<()>>,
@@ -59,6 +70,7 @@ pub(super) struct MutationGate {
     lifecycle: Lifecycle,
     home: SessionDataHome,
     pending: Arc<Mutex<HashMap<ThreadId, Arc<PendingWrites>>>>,
+    claims: Arc<Mutex<ClaimLedger>>,
 }
 
 impl MutationGate {
@@ -74,7 +86,28 @@ impl MutationGate {
             lifecycle,
             home,
             pending: Arc::default(),
+            claims: Arc::default(),
         }
+    }
+
+    /// 分配本次认领的世代并立即生效：后续认领覆盖它，旧 handle 随即失去归属。
+    pub(super) fn issue_claim(&self, child: &ThreadId) -> u64 {
+        let mut ledger = self.claims.lock().expect("claim ledger lock poisoned");
+        ledger.next += 1;
+        let generation = ledger.next;
+        ledger.current.insert(child.clone(), generation);
+        generation
+    }
+
+    /// 校验认领仍属于 `generation`；新认领一旦分配，旧世代立即失效。
+    pub(super) fn claim_is_current(&self, child: &ThreadId, generation: u64) -> bool {
+        self.claims
+            .lock()
+            .expect("claim ledger lock poisoned")
+            .current
+            .get(child)
+            .copied()
+            == Some(generation)
     }
 
     pub(super) fn data(&self) -> &Arc<dyn SessionDataPort> {
@@ -127,6 +160,47 @@ impl MutationGate {
             .entry(root.clone())
             .or_default()
             .clone()
+    }
+
+    /// close/delete 成功后回收 root 的 pending 状态。
+    ///
+    /// 回收与 `pending_for` 在同一 map 锁内串行化；只有 map 独占该条目
+    /// （没有在飞 `WriteScope`）且没有未知结果时才移除，避免回收仍在使用的屏障
+    /// 或丢弃需要恢复的证据。
+    pub(super) fn release_pending_for(&self, root: &ThreadId) {
+        let mut pending = self.pending.lock().expect("pending writes lock poisoned");
+        let removable = pending.get(root).is_some_and(|entry| {
+            !entry.uncertain.load(Ordering::Acquire) && Arc::strong_count(entry) == 1
+        });
+        if removable {
+            pending.remove(root);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_write_refs(&self) -> Vec<(ThreadId, std::sync::Weak<RwLock<()>>, bool)> {
+        self.pending
+            .lock()
+            .expect("pending writes lock poisoned")
+            .iter()
+            .map(|(id, pending)| {
+                (
+                    id.clone(),
+                    Arc::downgrade(&pending.barrier),
+                    pending.uncertain.load(Ordering::Acquire),
+                )
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(super) fn mark_pending_uncertain(&self, root: &ThreadId) {
+        let mut pending = self.pending.lock().expect("pending writes lock poisoned");
+        pending
+            .entry(root.clone())
+            .or_default()
+            .uncertain
+            .store(true, Ordering::Release);
     }
 
     fn check_pending(pending: &PendingWrites, root: &ThreadId) -> SessionResourceResult<()> {
@@ -271,7 +345,11 @@ impl MutationGate {
             settled: false,
         };
         let result = self.data.finish_close(id).await;
+        let finished = result.is_ok();
         scope.settle(&result);
+        if finished && root == *id {
+            self.release_pending_for(&root);
+        }
         result
     }
 

@@ -419,10 +419,24 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             }
             return Ok(serde_json::Value::Null);
         }
+        // 查询期间可能已过去数轮重查预算；最终准入必须复核代际与取消事实，
+        // 否则查询之后到达的 Stop/新 prompt 仍会放行一次模型调用。
+        #[cfg(test)]
+        admission_gate::wait(&format!("{prompt_session_id}:before_final_admission")).await;
         let dispatchable = {
             let mut sessions = sessions.lock().await;
             sessions.get_mut(&prompt_session_id).is_some_and(|state| {
                 if state.closing || state.close_in_flight > 0 {
+                    return false;
+                }
+                if !continuation::continuation_still_valid(state, epoch) {
+                    return false;
+                }
+                if state
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(|token| token.is_cancelled())
+                {
                     return false;
                 }
                 state.continuation_in_flight = true;
@@ -441,6 +455,51 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         }
         #[cfg(test)]
         admission_gate::wait(&format!("{prompt_session_id}:committed")).await;
+    }
+
+    // 用户 prompt 的令牌在准入段发布，之后仍要经过工作区校验与排队等待。
+    // 这段时间到达的 Stop/关闭必须在这里止损，否则会先提交工作意图再发起模型调用。
+    if continuation_epoch.is_none() {
+        let admission = {
+            let sessions = sessions.lock().await;
+            sessions.get(&prompt_session_id).map(|state| {
+                if state.closing || state.close_in_flight > 0 {
+                    Err(AcpError::new(-32010, "Session is closing"))
+                } else if state
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(|token| token.is_cancelled())
+                {
+                    Ok(false)
+                } else {
+                    Ok(true)
+                }
+            })
+        };
+        match admission {
+            None => return Err(AcpError::new(-32602, "session not found")),
+            Some(Err(error)) => {
+                rollback_turn_admission(
+                    sessions,
+                    &prompt_session_id,
+                    is_continuation,
+                    admitted_cancel.as_ref(),
+                )
+                .await;
+                return Err(error);
+            }
+            Some(Ok(false)) => {
+                rollback_turn_admission(
+                    sessions,
+                    &prompt_session_id,
+                    is_continuation,
+                    admitted_cancel.as_ref(),
+                )
+                .await;
+                return Ok(serde_json::Value::Null);
+            }
+            Some(Ok(true)) => {}
+        }
     }
 
     // 准入已通过、执行尚未开始：先提交 durable 工作意图。进程若在这一刻退出，
