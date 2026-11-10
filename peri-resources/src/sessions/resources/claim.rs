@@ -141,10 +141,8 @@ impl ChildResumeClaim for ChildResumeClaimHandle {
 enum SettleOutcome {
     /// 世代或认领记录已不属于本次认领：没有写入。
     NotOwned,
-    /// 恢复（或无需恢复）已完成；`terminal` 是随后终态写入的结果。
-    Settled {
-        terminal: Option<SessionResourceResult<()>>,
-    },
+    /// 恢复与终态写入均已完成。
+    Settled,
 }
 
 impl ChildResumeClaimHandle {
@@ -250,22 +248,21 @@ impl ChildResumeClaimHandle {
                         Err(error) => return Err(error),
                     }
                 }
-                let terminal = match terminal {
-                    Some(status) => Some(
-                        self.gate
-                            .data()
-                            .store_child_resume_record(
-                                &self.child,
-                                &ChildResumeRecord {
-                                    status,
-                                    claimed: false,
-                                },
-                            )
-                            .await,
-                    ),
-                    None => None,
-                };
-                Ok(SettleOutcome::Settled { terminal })
+                if let Some(status) = terminal {
+                    // 终态写入失败必须从闭包返回 Err：Unknown 由门禁提升不确定屏障，
+                    // 且本次认领不得被标记为已结算或回收。
+                    self.gate
+                        .data()
+                        .store_child_resume_record(
+                            &self.child,
+                            &ChildResumeRecord {
+                                status,
+                                claimed: false,
+                            },
+                        )
+                        .await?;
+                }
+                Ok(SettleOutcome::Settled)
             })
             .await;
         {
@@ -281,10 +278,7 @@ impl ChildResumeClaimHandle {
         }
         match outcome {
             Ok(SettleOutcome::NotOwned) => Ok(false),
-            Ok(SettleOutcome::Settled { terminal }) => match terminal {
-                Some(result) => result.map(|()| true),
-                None => Ok(true),
-            },
+            Ok(SettleOutcome::Settled) => Ok(true),
             Err(error) => Err(error),
         }
     }
