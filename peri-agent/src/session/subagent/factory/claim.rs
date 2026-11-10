@@ -217,6 +217,8 @@ async fn own_claim(
         }
     };
     // 调用方已消失时发送失败，但认领证据已落库：下面的决定分支会给出补偿。
+    // 工作意图要在移交前记住：调用方可能已提交 Working 后消失，补偿必须能恢复它。
+    let previous_work_state = meta.work_state;
     let _ = meta_tx.send(Ok(meta));
     match decision.await {
         Ok(ClaimDecision::HandOff { ready, accepted }) => {
@@ -231,10 +233,16 @@ async fn own_claim(
                 }
             };
             if !accepted {
+                // 调用方消失后仍由本 worker 收尾：后台未放行，Working 写可能已提交，
+                // 只回滚 agent_status 会留下「终态 + working」，下一次进入会误判待继续。
                 handle
                     .mark_failed()
                     .await
                     .map_err(|error| format!("resume hand-off rollback failed: {error}"))?;
+                store
+                    .set_work_state(&thread_id, previous_work_state)
+                    .await
+                    .map_err(|error| format!("resume work state rollback failed: {error}"))?;
             }
         }
         Ok(ClaimDecision::Finish { status }) => {

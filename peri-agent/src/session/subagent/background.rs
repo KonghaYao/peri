@@ -769,8 +769,8 @@ pub(super) async fn spawn_background_subagent(
             None => Ok(()),
         });
     if let Err(error) = confirmation {
-        // 认领 worker 会按未接收把状态补偿回原值；提前写入的 `working` 也要恢复，
-        // 否则「终态 + working」会让下一次进入把已停止的 child 当成待继续。
+        // 认领 worker 会在调用方消失时同时补偿状态与工作意图；这里仍同步恢复一次，
+        // 让本次返回前保持一致的「认领前」状态，不依赖 worker 的异步时序。
         if let (Some(previous), Some(resources)) =
             (previous_work_state, work_state_resources.as_deref())
         {

@@ -669,6 +669,9 @@ async fn stopped_fixture(
         release: tokio::sync::Semaphore::new(0),
         fail: fail_work_state,
         writes: AtomicUsize::new(0),
+        pause_after_commit: std::sync::atomic::AtomicBool::new(false),
+        committed: tokio::sync::Notify::new(),
+        post_release: tokio::sync::Semaphore::new(0),
     });
     let mut store = ClaimResources::new();
     Arc::get_mut(&mut store).unwrap().work_state_gate = Some(work_gate.clone());
@@ -763,6 +766,59 @@ async fn resume_working_write_failure_rejects_background_start() {
     idle(&manager).await;
     assert_eq!(manager.active_count(), 0);
     assert_eq!(starts.load(Ordering::SeqCst), 0, "不得启动执行");
+}
+
+/// [回归] Working 已提交、调用在返回前被取消：认领 worker 必须同时恢复工作意图，
+/// 不能留下 `Done + Working` 让下一次进入把已停止的 child 当成待继续。
+#[tokio::test]
+async fn cancel_after_working_commit_restores_work_state() {
+    let (store, work_gate, manager) = stopped_fixture(false).await;
+    work_gate
+        .pause_after_commit
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let starts = Arc::new(AtomicUsize::new(0));
+    let mut config = config(store.clone(), manager.clone());
+    let observed = starts.clone();
+    config.on_subagent_start = Some(Arc::new(move |_, _, _| {
+        observed.fetch_add(1, Ordering::SeqCst);
+    }));
+    // 后台 turn 若被错误放行会挂起，不自行收尾掩盖残留。
+    config.llm = fixture_source(Arc::new(HangingModel), "fixture");
+    let resume = tokio::spawn(async move { SessionFactory::resume_subagent(None, config).await });
+    work_gate.entered.notified().await;
+    work_gate.release.add_permits(1);
+    work_gate.committed.notified().await;
+    assert_eq!(
+        store
+            .inner
+            .load_session_meta(&CHILD.into())
+            .await
+            .unwrap()
+            .work_state,
+        peri_acp_types::thread::WorkState::Working,
+        "前置条件：Working 已提交"
+    );
+    resume.abort();
+    assert!(resume.await.err().unwrap().is_cancelled());
+    idle(&manager).await;
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let meta = store.inner.load_session_meta(&CHILD.into()).await.unwrap();
+            if meta.agent_status == AgentStatus::Done
+                && meta.work_state == peri_acp_types::thread::WorkState::Stopped
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    if settled.is_err() {
+        let meta = store.inner.load_session_meta(&CHILD.into()).await.unwrap();
+        panic!("取消补偿必须恢复工作意图，实际状态为 {meta:?}");
+    }
+    assert_eq!(starts.load(Ordering::SeqCst), 0, "后台不得启动执行");
+    assert_eq!(manager.active_count(), 0);
 }
 
 /// 用于阻挡后台 turn 立即收尾：只在运行时被丢弃时结束。

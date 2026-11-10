@@ -505,6 +505,31 @@ async fn remote_acceptance_promotes_idle_without_unlocking_stopped() {
     );
 }
 
+/// 终态 thread 的迟到接纳不得重新授予续跑意图。
+#[tokio::test]
+async fn remote_acceptance_does_not_promote_terminal_thread() {
+    use peri_acp_types::thread::WorkState;
+
+    let fixture = fixture().await;
+    let thread = thread("mq-thread");
+    sqlx::query("UPDATE threads SET agent_status = 'error' WHERE id = ?1")
+        .bind(thread.as_str())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+
+    fixture
+        .data
+        .mq_enqueue(&thread, input(MessageId::new(), "late wake"))
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.data.load_meta(&thread).await.unwrap().work_state,
+        WorkState::Idle,
+        "终态 thread 不因消息接纳变成待续跑"
+    );
+}
+
 /// 已移交历史的消息重复接纳不能重新授予执行资格。
 #[tokio::test]
 async fn remote_reaccepting_handed_off_message_keeps_idle() {
