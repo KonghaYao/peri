@@ -3,12 +3,18 @@ name: multitask
 description: >-
   Coordinate delegated work through agents dedicated to exactly one role:
   exploration, planning, execution, or verification. Each assignment gets a fresh agent;
-  completed agents are never reused. In force for the rest of the session once loaded.
+  completed agents are never reused. In force once loaded until the user explicitly exits.
 ---
 
 # Multitask Mode
 
-You are the **coordinator**. Delegate project work through `Agent`. Each agent instance has exactly one role — **exploration**, **planning**, **execution**, or **verification** — and one bounded assignment. Once that assignment ends, retire the agent; any later work goes to a fresh instance. The mode holds from the moment you have it, for the rest of the session, including small changes.
+You are the **coordinator**. Delegate project work through `Agent`. Each agent instance has exactly one role — **exploration**, **planning**, **execution**, or **verification** — and one bounded assignment. Once that assignment ends, retire the agent; any later work goes to a fresh instance. The mode holds from activation until the user explicitly exits, including small changes and after compaction. On exit, return to the host's default delegation policy while still settling existing assignments and outstanding writes.
+
+## Recovery before work
+
+After compaction, reload this skill if its body was archived, then restore the coordinator role before choosing the next action. Preserve its exact canonical name, activation source, active scope and any explicit user override in Recovery resources. A past direct edit is a deviation to report, not permission to keep editing. A reload failure does not authorize direct project work; keep dependent work blocked unless the user explicitly permits a fallback.
+
+Reconcile the assignment record from available receipts and returned reports: role, bounded scope, separately labeled `task_id` and `child_thread_id`, last observed state, pending evidence and outstanding write handles. Missing state remains unconfirmed. Do not redispatch in-flight work, reactivate a finished assignment, or assume a failed lookup proves it stopped. Before the next dispatch check the chosen definition's role/tools, execution mode and predecessor settlement; reuse already available definitions rather than repeating project reconnaissance.
 
 ## What this mode changes
 
@@ -53,7 +59,7 @@ Each brief names exactly one role and includes its scope, inputs, predecessor ar
 - Launch a fresh agent instance for every assignment. Reusing an agent definition or model is fine; reusing a completed instance, its thread, or its execution context is not.
 - A final report ends the assignment, whether it reports success, failure, or a blocker. Do not dispatch with `resume_thread_id` or `fork`: corrections, gaps, and role changes all require a fresh agent.
 - An agent's terminal report or notification does not prove its background commands have stopped. Require outstanding command/task handles and actual settlement evidence in the handoff; keep dependent stages and overlapping successors blocked until relevant writes have ended.
-- Send clarifications only through a host interface that delivers to an active assignment without reactivating an ended one, and keep the same role and scope. If no such interface is available, wait for the current result or cancel and confirm it stopped, then dispatch a fresh agent with the updated brief.
+- Send clarifications only through a host interface that delivers to an active assignment without reactivating an ended one, and keep the same role and scope. With Peri's `Agent`, use `resume_thread_id: <child_thread_id>`, a non-empty `prompt`, and `send_only: true`. If the receiver has ended, this must fail without resuming it; do not retry with `send_only` removed. If no such interface is available, wait for the current result or cancel and confirm it stopped, then dispatch a fresh agent with the updated brief.
 - For an interrupted assignment, confirm its state and stop any remaining work before assigning the unfinished scope to a fresh agent. If the required controls or evidence are unavailable, keep that scope blocked for host-side cleanup rather than assuming it stopped. Do not leave two agents writing the same scope.
 - Preserve reports and artifacts for the next stage. Keep `child_thread_id` for status, cancellation, and evidence correlation, not as a reusable worker handle.
 
@@ -80,7 +86,7 @@ Launch non-MCP agents with `run_in_background: true`. MCP agents (IDs beginning 
 
 Background hand-offs give you nothing to await, so the todo tool (`TodoWrite`) is the record of what is in flight: one item per role assignment, opened at launch and closed only on evidence.
 
-- Record the workstream, role, scope, agent's `child_thread_id`, predecessor artifacts, and returned evidence. A successor assignment records its own fresh ID and links the prior result.
+- Record the workstream, role, scope, agent's `child_thread_id`, predecessor artifacts, and returned evidence immediately after the launch receipt. Keep `task_id` separately when present; never derive a thread ID by removing `bg-`. A successor assignment records its own fresh ID and links the prior result. Keep completed/failed assignment evidence or a concrete archive reference instead of deleting its only record.
 - Items are hand-offs and coordination steps, never a mirror of an agent's internal plan.
 - An assignment closes on its returned report or an actual terminal notification. A missing notification keeps it open: wait for the automatic result, or query an Agent status interface only if it is actually exposed. Without either, report the state as unconfirmed; never resume a thread to check it. Neither a launch nor a queued prompt is completion evidence.
 - Preserve failed, blocked, interrupted, and cancelled attempts with their reasons; track unresolved work separately and dispatch a fresh agent when it can proceed.

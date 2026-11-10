@@ -163,9 +163,6 @@ claude-blog
 claude-blog-cn
 
 *.py
-!e2e/helpers/llm-replay-pty.py
-e2e/fixtures/replay-v2/.record-*/
-e2e/fixtures/replay-v2/.lock-*/
 !scripts/test-i386.py
 !scripts/test-loongarch64.py
 !scripts/test-install-beta.py
@@ -239,7 +236,6 @@ settings.json
 skills-lock.json
 .agents
 !.peri/theme/
-e2e/results
 __pycache__
 .codex
 dsh-tui

@@ -132,6 +132,11 @@ impl BaseTool for SubAgentTool {
                     "type": "string",
                     "description": "目标 subagent 的 child_thread_id（UUID，即回执/通知中 `child_thread_id: ...` 标注的值）；不填即新建。它不是 task id：后台 task id 形如 `bg-<uuid>`，去掉 `bg-` 前缀后的 UUID 仍不是线程身份（形态合法但查无此线程，会以 thread not found 拒绝）。非 UUID 的非空值（例如后台 task_id `bg-...`）一样被明确拒绝，而不是忽略后新建。active 后台执行：将非空 prompt 作为 Defer 入队并立即返回 action: send / status: queued，不中断、不恢复，在后续 Receive 驱动推理，run_in_background 被忽略。非 active：从磁盘恢复，prompt 可省略以隐式继续；恢复模式由 run_in_background 决定，强制后台会话中恒为后台（显式 false 被忽略）。两种行为均优先于 subagent_type / fork。active 但当前会话没有可投递运行实例时明确报错"
                 },
+                "send_only": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, only queue a non-empty prompt to the live background sub-agent identified by resume_thread_id. If it has no live receiver, fail without loading or resuming a persisted thread."
+                },
                 "description": {
                     "type": "string",
                     "description": "可选的客户端 UI 显示摘要，仅在省略 prompt 时作为 fallback；不参与执行语义或服务端日志"
@@ -189,6 +194,7 @@ impl BaseTool for SubAgentTool {
         use peri_agent::tools::{ToolExecutionEvidence, ToolExecutionStatus, ToolOutput};
         let InvocationArgs {
             resume_thread_id,
+            send_only,
             prompt,
             subagent_type,
             model,
@@ -197,6 +203,14 @@ impl BaseTool for SubAgentTool {
             is_fork,
         } = InvocationArgs::parse(&input)?;
         let cwd = self.validate_cwd(cwd.as_deref()).await?;
+        if send_only {
+            let thread_id = resume_thread_id.expect("send_only parsing requires resume_thread_id");
+            let prompt = prompt.expect("send_only parsing requires a non-empty prompt");
+            return self
+                .send_only(&thread_id, &prompt)
+                .await
+                .map(ToolOutput::from_legacy);
+        }
 
         // 父侧模型 tool-call ID 传给子 agent 配置（配置层仍是字符串形状）。
         let parent_tool_call_id = ctx

@@ -65,7 +65,7 @@ def git(*args, check=True):
 
 head = git("rev-parse", "HEAD").decode().strip()
 branch = git("rev-parse", "--abbrev-ref", "HEAD").decode().strip()
-# 指纹只覆盖 Rust 验证的输入：子模块（peri-cool 文档站、e2e 等）不属于 cargo
+# 指纹只覆盖 Rust 验证的输入：子模块（peri-cool 文档站等）不属于 cargo
 # workspace，其 gitlink 提交与工作树由并发的其他会话改动，若计入会让回执在无关
 # 噪声下反复被判 stale。子模块状态单独记录，仅作说明、不参与比对。
 diff = git("diff", "HEAD", "--ignore-submodules=all")
@@ -271,7 +271,7 @@ receipt = {
     "seconds_total": int(os.environ["VT_TOTAL_SECS"]),
     "verdict": os.environ["VT_VERDICT"],
     "steps": steps,
-    "not_run": ["cargo test --workspace（留在 CI）", "e2e/（见 docs/standards/testing.md）"],
+    "not_run": ["cargo test --workspace（留在 CI）", "E2E（KonghaYao/peri-e2e 固定 commit；见 docs/standards/testing.md）"],
     "logs": {
         "check": os.environ["VT_CHECK_OUT"],
         "clippy": os.environ["VT_CLIPPY_OUT"],

@@ -26,7 +26,7 @@
 #   a. 构建输入变更 → 输出 --workspace：根 Cargo.toml / Cargo.lock（依赖图可能整体变化），
 #      以及 patches/、.cargo/（前者由 scripts/cargo-rmcp-patched.sh 注入依赖源码，后者改
 #      rustflags）。它们不进 crate 映射，但会改变整体构建结果，按 crate 收窄不安全
-#   b. 不属于任何 workspace member 的文件（docs/、scripts/、e2e/、side-projects/* 等；
+#   b. 不属于任何 workspace member 的文件（docs/、scripts/、side-projects/* 等；
 #      side-projects 各自声明 [workspace]，是独立工作区）→ 不产生参数
 #   c. 全部输入无 crate 命中 → 无参数输出（调用方据此跳过 cargo）
 #
