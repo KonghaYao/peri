@@ -126,6 +126,23 @@ pub(crate) fn continuation_still_valid(state: &SessionState, epoch: u64) -> bool
     state.continuation_epoch == epoch
 }
 
+/// 一次续跑资格查询失败后，把被 take 消耗的 armed 还给同一代际。
+///
+/// 查询失败不等于「没有可续跑的工作」：若直接放弃，已消费的一次性资格会丢失，
+/// listener 重查时只能看到 `armed=false`，结果滞留到下一次用户输入。恢复前必须
+/// 确认代际未变（新 prompt / 再次 Stop 已使其失效）且会话未关闭、没有续跑在飞。
+pub(crate) fn restore_continuation_armed(state: &mut SessionState, epoch: u64) -> bool {
+    if !continuation_still_valid(state, epoch)
+        || state.closing
+        || state.close_in_flight > 0
+        || state.continuation_in_flight
+    {
+        return false;
+    }
+    state.continuation_armed = true;
+    true
+}
+
 /// 续跑是否真正可 dispatch：代际未变 **且** 队列中仍有待消费的
 /// SubAgentComplete Defer。两者缺一即跳过空跑——
 /// - 代际变化：用户新 prompt 已排队/已执行（Defer 由新 prompt 消费）；
