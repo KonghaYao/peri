@@ -8,6 +8,7 @@
 //! 认领的状态写入与「恢复到认领前」由资源侧持有（`ChildResumeClaim`），调用方只提交
 //! 领域结果：开始运行 / 移交后台 / 准备失败 / 终止。
 
+use std::future::Future;
 use std::sync::Arc;
 
 use tokio::sync::oneshot;
@@ -15,7 +16,7 @@ use tokio::task::JoinHandle;
 
 use crate::tools::{EffectiveToolError, EffectiveToolErrorCode};
 use peri_acp_types::session_resources::{
-    SessionMetaPatch, SessionResourceErrorKind, SessionResources,
+    SessionMetaPatch, SessionResourceErrorKind, SessionResourceResult, SessionResources,
 };
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
 
@@ -217,6 +218,8 @@ async fn own_claim(
         }
     };
     // 调用方已消失时发送失败，但认领证据已落库：下面的决定分支会给出补偿。
+    // 工作意图要在移交前记住：调用方可能已提交 Working 后消失，补偿必须能恢复它。
+    let previous_work_state = meta.work_state;
     let _ = meta_tx.send(Ok(meta));
     match decision.await {
         Ok(ClaimDecision::HandOff { ready, accepted }) => {
@@ -231,10 +234,14 @@ async fn own_claim(
                 }
             };
             if !accepted {
-                handle
-                    .mark_failed()
-                    .await
-                    .map_err(|error| format!("resume hand-off rollback failed: {error}"))?;
+                // 调用方消失后仍由本 worker 收尾：后台未放行，Working 写可能已提交，
+                // 只回滚 agent_status 会留下「终态 + working」，下一次进入会误判待继续。
+                // 两段补偿独立尝试：状态回滚失败不得跳过工作意图恢复。
+                rollback_handoff(
+                    handle.mark_failed(),
+                    store.set_work_state(&thread_id, previous_work_state),
+                )
+                .await?;
             }
         }
         Ok(ClaimDecision::Finish { status }) => {
@@ -299,6 +306,27 @@ async fn own_claim(
         owner.confirm_stopped();
     }
     Ok(())
+}
+
+/// 两段补偿独立尝试：状态回滚失败不得跳过工作意图恢复，双失败时合并两份上下文。
+async fn rollback_handoff(
+    status_rollback: impl Future<Output = SessionResourceResult<()>>,
+    work_state_rollback: impl Future<Output = SessionResourceResult<()>>,
+) -> Result<(), String> {
+    let status_error = status_rollback.await.err();
+    let work_state_error = work_state_rollback.await.err();
+    let mut failures = Vec::new();
+    if let Some(error) = status_error {
+        failures.push(format!("resume hand-off rollback failed: {error}"));
+    }
+    if let Some(error) = work_state_error {
+        failures.push(format!("resume work state rollback failed: {error}"));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 async fn validate_thread(

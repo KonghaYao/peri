@@ -286,6 +286,41 @@ async fn duplicate_mq_acceptance_still_maintains_work_state() {
     );
 }
 
+/// 终态 thread 的迟到 `EnsureProcessing` 接纳不得重新授予续跑意图。
+#[tokio::test]
+async fn mq_acceptance_does_not_promote_terminal_thread() {
+    use peri_acp_types::session_resources::SessionMetaPatch;
+    use peri_acp_types::thread::AgentStatus;
+
+    let fixture = Fixture::new().await;
+    fixture.create("mq-terminal").await;
+    let thread: ThreadId = "mq-terminal".to_owned();
+    fixture
+        .facade
+        .update_session_meta(
+            &thread,
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Error),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    fixture
+        .facade
+        .mq_enqueue(&thread, input(MessageId::new(), "late wake"))
+        .await
+        .unwrap();
+    let meta = fixture.facade.load_session_meta(&thread).await.unwrap();
+    assert_eq!(meta.agent_status, AgentStatus::Error);
+    assert_eq!(
+        meta.work_state,
+        WorkState::Idle,
+        "终态 thread 不因消息接纳变成待续跑"
+    );
+}
+
 /// 已移交历史的消息不再要求继续处理：重复接纳不能把它重新提升为 `working`。
 #[tokio::test]
 async fn reaccepting_handed_off_message_keeps_idle_work_state() {

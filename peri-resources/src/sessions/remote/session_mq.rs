@@ -45,12 +45,13 @@ use super::session_data::{invalid_input, not_found, RemoteSessionData};
 use super::sql::{int_at, text_at, StatementSpec};
 
 /// 接纳确认后的工作意图提升：只把 `idle` 提升为 `working`，且仅当该消息仍以
-/// 本次接纳的稳定行存在（并发移交/替换后不再提升）。
+/// 本次接纳的稳定行存在（并发移交/替换后不再提升），同时 thread 仍 `active`
+/// （终态 thread 的迟到消息不能再授予续跑意图）。
 ///
 /// 是否属于「同一条消息」由调用方用 `same_payload` 判定；SQL 只做并发守卫，
 /// 不用 payload 文本比较（重序列化后的文本可能不同）。
 const PROMOTE_WORK_INTENT_SQL: &str = "UPDATE threads SET work_state = 'working'
-    WHERE id = ?1 AND work_state = 'idle'
+    WHERE id = ?1 AND work_state = 'idle' AND agent_status = 'active'
       AND EXISTS (
         SELECT 1 FROM thread_mq
         WHERE thread_id = ?1 AND id = ?2 AND enqueued_at = ?3

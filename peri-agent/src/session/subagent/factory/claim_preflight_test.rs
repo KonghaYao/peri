@@ -10,12 +10,16 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-/// 可控 gate：让 Working 写停在「已进入、尚未提交」，或按需失败。
+/// 可控 gate：让 Working 写停在「已进入、尚未提交」，或按需失败；
+/// `pause_after_commit` 额外停在「已提交、调用尚未返回」的取消窗口。
 pub(super) struct WorkStateGate {
     pub(super) entered: tokio::sync::Notify,
     pub(super) release: tokio::sync::Semaphore,
     pub(super) fail: bool,
     pub(super) writes: AtomicUsize,
+    pub(super) pause_after_commit: std::sync::atomic::AtomicBool,
+    pub(super) committed: tokio::sync::Notify,
+    pub(super) post_release: tokio::sync::Semaphore,
 }
 
 struct ClaimResources {
@@ -281,7 +285,9 @@ impl SessionResources for ClaimResources {
         id: &ThreadId,
         state: peri_acp_types::thread::WorkState,
     ) -> SessionResourceResult<()> {
-        if state == peri_acp_types::thread::WorkState::Working {
+        use peri_acp_types::thread::WorkState;
+        let gated = state == WorkState::Working;
+        if gated {
             if let Some(gate) = &self.work_state_gate {
                 gate.writes.fetch_add(1, Ordering::SeqCst);
                 gate.entered.notify_one();
@@ -295,7 +301,17 @@ impl SessionResources for ClaimResources {
                 }
             }
         }
-        self.inner.set_work_state(id, state).await
+        let written = self.inner.set_work_state(id, state).await;
+        // 「已提交、调用尚未返回」：调用方可以被取消，但写入已经落地。
+        if gated {
+            if let Some(gate) = &self.work_state_gate {
+                if gate.pause_after_commit.load(Ordering::SeqCst) {
+                    gate.committed.notify_one();
+                    gate.post_release.acquire().await.unwrap().forget();
+                }
+            }
+        }
+        written
     }
     async fn delete_session_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.inner.delete_session_tree(id).await
@@ -558,4 +574,56 @@ async fn committed_claim_with_unknown_ack_stays_unknown_and_active() {
         .agent_status
         .is_active());
     assert!(!manager.is_execution_idle());
+}
+
+/// 状态回滚失败不得短路工作意图恢复。
+#[tokio::test]
+async fn handoff_rollback_restores_work_state_after_status_failure() {
+    let status_error = SessionResourceError::new(SessionResourceErrorKind::Unavailable {
+        detail: "status offline".into(),
+    });
+    let restored = AtomicUsize::new(0);
+    let error = rollback_handoff(async { Err(status_error) }, async {
+        restored.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(
+        restored.load(Ordering::SeqCst),
+        1,
+        "状态回滚失败后仍必须恢复工作意图"
+    );
+    assert!(
+        error.starts_with("resume hand-off rollback failed: "),
+        "{error}"
+    );
+    assert!(
+        !error.contains("resume work state rollback failed"),
+        "{error}"
+    );
+}
+
+/// 两段补偿都失败时合并报告，保留各自的上下文。
+#[tokio::test]
+async fn handoff_rollback_reports_both_failures() {
+    let status_error = SessionResourceError::new(SessionResourceErrorKind::Unavailable {
+        detail: "status offline".into(),
+    });
+    let work_state_error = SessionResourceError::new(SessionResourceErrorKind::Unavailable {
+        detail: "work state offline".into(),
+    });
+    let error = rollback_handoff(async { Err(status_error) }, async { Err(work_state_error) })
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("resume hand-off rollback failed: "),
+        "{error}"
+    );
+    assert!(
+        error.contains("resume work state rollback failed: "),
+        "{error}"
+    );
+    assert!(error.contains("status offline"), "{error}");
+    assert!(error.contains("work state offline"), "{error}");
 }

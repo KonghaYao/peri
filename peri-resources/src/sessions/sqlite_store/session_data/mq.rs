@@ -229,6 +229,9 @@ impl SqliteSessionData {
 
     /// 接纳维护目标工作意图：只有 `EnsureProcessing` 授予执行资格，且只把 `idle`
     /// 提升为 `working`——`stopped` 不被被动回调解除（设计 §5.2）。
+    ///
+    /// 终态 thread 不参与提升：它的 `working` 只是旧执行残留，迟到的接纳不能再把它
+    /// 变成「待续跑」；显式 resume 走认领写入，不经过这里。
     async fn maintain_work_intent_on_accept(
         &self,
         connection: &mut SqliteConnection,
@@ -239,7 +242,8 @@ impl SqliteSessionData {
             return Ok(());
         }
         sqlx::query(
-            "UPDATE threads SET work_state = 'working' WHERE id = ?1 AND work_state = 'idle'",
+            "UPDATE threads SET work_state = 'working'
+             WHERE id = ?1 AND work_state = 'idle' AND agent_status = 'active'",
         )
         .bind(thread_id.as_str())
         .execute(&mut *connection)
@@ -633,6 +637,9 @@ impl SqliteSessionData {
         let message_id = input.id.as_uuid().to_string();
         let current = stored_agent_status(&mut tx, child).await?;
         if current.is_terminal() && settlement_landed(&mut tx, target, &message_id).await? {
+            // 结算已落地，但这条 child 可能是经只写 `agent_status` 的旧路径收尾的：
+            // 收敛残留的 `working`，幂等重放不会把它留成待续跑。
+            converge_terminal_work_state(&mut tx, child, current).await?;
             tx.commit()
                 .await
                 .map_err(|_| commit_failure(Some(child.clone())))?;
@@ -688,8 +695,8 @@ impl SqliteSessionData {
             }
             fact
         };
-        // 只有本次仍能把 child 从 `active` 写成终态时才继续；已终态的结算不写任何行。
-        // 提升在终态之前，且只认目标 MQ 里仍存在的本次结果行（设计 §5.3）。
+        // 只有本次仍能把 child 从 `active` 写成终态时才继续；已终态的结算只收敛残留
+        // 工作意图。提升在终态之前，且只认目标 MQ 里仍存在的本次结果行（设计 §5.3）。
         if !current.is_terminal() {
             if ensures_processing && target != child {
                 sqlx::query(PROMOTE_RECEIVER_ON_TERMINAL_SQL)
@@ -713,6 +720,9 @@ impl SqliteSessionData {
                 // 状态不可解释；不能把未写入报告成成功。
                 return Err(conflict("child terminal settlement lost its active row"));
             }
+        } else {
+            // 终态先提交、工作意图后到：收敛残留的 `working`，不覆盖终态也不新增结果行。
+            converge_terminal_work_state(&mut tx, child, current).await?;
         }
         tx.commit()
             .await
@@ -722,8 +732,8 @@ impl SqliteSessionData {
 
     /// 无结果终态：`BEGIN IMMEDIATE` 内一次条件更新 `agent_status` 与 `work_state`。
     ///
-    /// 条件 `agent_status = 'active'` 保证同一 child 的终态只写一次；已终态时按同一
-    /// 快照读回既有终态并返回 no-op，不覆盖它。两步独立写入会留下 `Done + working`
+    /// 条件 `agent_status = 'active'` 保证同一 child 的终态只写一次；已终态时收敛残留的
+    /// `working` 并返回既有终态，不覆盖它。两步独立写入会留下 `Done + working`
     /// 或半完成终态，因此这里与 [`Self::finalize_child_terminal_mq`] 共用事务形状。
     pub(super) async fn settle_terminal_without_result_rows(
         &self,
@@ -741,6 +751,7 @@ impl SqliteSessionData {
         self.require_session(&mut tx, child).await?;
         let current = stored_agent_status(&mut tx, child).await?;
         if current.is_terminal() {
+            converge_terminal_work_state(&mut tx, child, current).await?;
             tx.commit()
                 .await
                 .map_err(|_| commit_failure(Some(child.clone())))?;
@@ -928,4 +939,21 @@ fn settled_without_write(input: MqInput) -> MqEnqueueOutcome {
             original_draft: input.original_draft,
         },
     }
+}
+
+/// 终态已提交时收敛残留的 `working`：同一事务内只改工作意图，不改写终态、不写 MQ。
+///
+/// 只动 `working`：`stopped` 是显式停止意图，`idle` 已是目标值。
+async fn converge_terminal_work_state(
+    connection: &mut SqliteConnection,
+    child: &ThreadId,
+    status: peri_acp_types::thread::AgentStatus,
+) -> SessionResourceResult<()> {
+    sqlx::query("UPDATE threads SET work_state = ?1 WHERE id = ?2 AND work_state = 'working'")
+        .bind(peri_acp_types::thread::WorkState::after_agent_terminal(status).as_str())
+        .bind(child.as_str())
+        .execute(&mut *connection)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
+    Ok(())
 }

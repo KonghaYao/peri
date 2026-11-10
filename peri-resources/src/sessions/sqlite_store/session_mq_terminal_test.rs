@@ -172,3 +172,79 @@ async fn finalize_conflicts_when_the_result_id_is_pending_in_another_thread() {
     assert_eq!(mq_count(&fixture, &target).await, 0);
     assert_eq!(mq_count(&fixture, &foreign).await, 1);
 }
+
+/// 终态 + 残留 `working`：迟到结算只收敛工作意图，不覆盖终态、不新增结果行。
+#[tokio::test]
+async fn late_finalize_converges_terminal_child_residual_working() {
+    use peri_acp_types::thread::{AgentStatus, WorkState};
+
+    for (stored, expected) in [
+        (AgentStatus::Done, WorkState::Idle),
+        (AgentStatus::Error, WorkState::Idle),
+        (AgentStatus::Cancelled, WorkState::Stopped),
+    ] {
+        let fixture = Fixture::new().await;
+        let child = fixture.thread("child").await;
+        let target = fixture.thread("parent").await;
+        // 模拟旧路径只写 agent_status、留下 working 的终态。
+        sqlx::query("UPDATE threads SET agent_status = ?1, work_state = 'working' WHERE id = ?2")
+            .bind(stored.as_str())
+            .bind(child.as_str())
+            .execute(&fixture.store.database.pool)
+            .await
+            .unwrap();
+
+        let outcome = fixture
+            .data
+            .finalize_child_terminal(
+                &child,
+                AgentStatus::Done,
+                WorkState::Idle,
+                &target,
+                terminal_input(MessageId::new(), "late result"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.disposition, MqEnqueueDisposition::Existing);
+        assert_eq!(
+            terminal_facts(&fixture, &child).await,
+            (
+                stored.as_str().to_owned(),
+                Some(expected.as_str().to_owned())
+            ),
+            "{stored:?}: 终态保持不变，工作意图收敛到派生值"
+        );
+        assert_eq!(mq_count(&fixture, &target).await, 0, "不得新增结果行");
+        assert_eq!(history_len(&fixture, &target).await, 0, "不得写历史");
+    }
+}
+
+/// 无结果终态的重复结算同样收敛残留 `working`，不改写已提交终态。
+#[tokio::test]
+async fn late_settle_without_result_converges_terminal_child_residual_working() {
+    use peri_acp_types::session_resources::TerminalSettlementOutcome;
+    use peri_acp_types::thread::{AgentStatus, WorkState};
+
+    let fixture = Fixture::new().await;
+    let child = fixture.thread("child").await;
+    sqlx::query("UPDATE threads SET agent_status = 'error', work_state = 'working' WHERE id = ?1")
+        .bind(child.as_str())
+        .execute(&fixture.store.database.pool)
+        .await
+        .unwrap();
+
+    let outcome = fixture
+        .data
+        .settle_terminal_without_result(&child, AgentStatus::Done, WorkState::Idle)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        TerminalSettlementOutcome::AlreadyTerminal(AgentStatus::Error)
+    );
+    assert_eq!(
+        terminal_facts(&fixture, &child).await,
+        ("error".to_owned(), Some("idle".to_owned())),
+        "已提交终态不被覆盖，working 收敛为 idle"
+    );
+}
