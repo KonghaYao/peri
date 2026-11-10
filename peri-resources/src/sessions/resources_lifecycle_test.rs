@@ -49,6 +49,11 @@ async fn uncertain_pending_entries_are_not_released() {
         entries[0].2,
         "uncertain state must be preserved for recovery"
     );
+    // 未决持久化必须阻止正常收尾，而不是静默丢弃证据。
+    assert!(
+        fixture.shutdown().await.is_err(),
+        "an uncertain pending root must block clean shutdown"
+    );
 }
 
 /// 仍有在飞写入（持有 Arc）时不得回收；释放后才允许移除。
@@ -89,6 +94,10 @@ async fn uncertain_pending_entry_survives_delete_path() {
     let entries = fixture.facade.gate.pending_write_refs();
     assert_eq!(entries.len(), 1);
     assert!(entries[0].2);
+    assert!(
+        fixture.shutdown().await.is_err(),
+        "an uncertain pending root must block clean shutdown"
+    );
 }
 
 #[tokio::test]

@@ -9,6 +9,8 @@
 
 ## 确认证据
 
+以下行号均指修复前基线 `4ba78d7e`；修复后的位置按函数/块名描述。
+
 - 探针 `review_stop_after_eligibility_queries_blocks_model_execution`
   （`peri-acp`，`host::requests::tests::activation_tests::admission_activation_tests`）
   失败：`left: 1, right: 0`，断言信息

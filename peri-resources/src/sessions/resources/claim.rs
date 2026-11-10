@@ -16,6 +16,7 @@ use super::gate::MutationGate;
 use crate::sessions::data::ChildResumeRecord;
 
 /// 一次认领所处的阶段。
+#[derive(Clone, Copy)]
 enum ClaimPhase {
     /// 认领已写入 active，准备阶段尚未结束。
     Preparing,
@@ -139,18 +140,20 @@ impl ChildResumeClaimHandle {
     /// 回滚之间。校验用进程内认领世代，而不是当前记录值——新 run 的正常状态与旧认领
     /// 的中间态完全相同，按值判断会把新 run 误认为自己的记录。
     async fn settle(&self, preparation_failed: bool) -> SessionResourceResult<()> {
-        {
+        // 写入成功后才置 Settled：失败时保留原阶段，允许后续调用重试。
+        let previous_phase = {
             let mut phase = self.phase()?;
             match *phase {
-                ClaimPhase::Preparing | ClaimPhase::Running => *phase = ClaimPhase::Settled,
+                ClaimPhase::Preparing | ClaimPhase::Running => *phase,
                 // 重复补偿是 no-op：迟到的旧补偿不能再次写回认领前的值，
                 // 否则会覆盖新任务已经提交的 Active + Working。
                 ClaimPhase::Settled => return Ok(()),
-                ClaimPhase::HandedOff if preparation_failed => *phase = ClaimPhase::Settled,
+                ClaimPhase::HandedOff if preparation_failed => *phase,
                 ClaimPhase::HandedOff => return Err(Self::handed_off()),
             }
-        }
-        self.gate
+        };
+        let result = self
+            .gate
             .with_exclusive(&self.child, || async {
                 if !self.gate.claim_is_current(&self.child, self.claim_nonce) {
                     tracing::warn!(
@@ -200,6 +203,14 @@ impl ChildResumeClaimHandle {
                 }
                 Ok(())
             })
-            .await
+            .await;
+        {
+            let mut phase = self.phase()?;
+            match &result {
+                Ok(()) => *phase = ClaimPhase::Settled,
+                Err(_) => *phase = previous_phase,
+            }
+        }
+        result
     }
 }

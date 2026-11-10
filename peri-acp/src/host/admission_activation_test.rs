@@ -399,7 +399,9 @@ async fn continuation_after_eligibility_queries_still_dispatches() {
         },
         Some(0),
     );
-    gate.entered.notified().await;
+    tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
+        .await
+        .expect("continuation must reach the final admission gate");
     gate.release.notify_one();
     let result = tokio::time::timeout(Duration::from_secs(15), continuation)
         .await
