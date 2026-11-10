@@ -142,7 +142,7 @@ impl ChildResumeClaimHandle {
     async fn settle(&self, preparation_failed: bool) -> SessionResourceResult<()> {
         // 写入成功后才置 Settled：失败时保留原阶段，允许后续调用重试。
         let previous_phase = {
-            let mut phase = self.phase()?;
+            let phase = self.phase()?;
             match *phase {
                 ClaimPhase::Preparing | ClaimPhase::Running => *phase,
                 // 重复补偿是 no-op：迟到的旧补偿不能再次写回认领前的值，
