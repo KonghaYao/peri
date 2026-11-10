@@ -575,3 +575,55 @@ async fn committed_claim_with_unknown_ack_stays_unknown_and_active() {
         .is_active());
     assert!(!manager.is_execution_idle());
 }
+
+/// 状态回滚失败不得短路工作意图恢复。
+#[tokio::test]
+async fn handoff_rollback_restores_work_state_after_status_failure() {
+    let status_error = SessionResourceError::new(SessionResourceErrorKind::Unavailable {
+        detail: "status offline".into(),
+    });
+    let restored = AtomicUsize::new(0);
+    let error = rollback_handoff(async { Err(status_error) }, async {
+        restored.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(
+        restored.load(Ordering::SeqCst),
+        1,
+        "状态回滚失败后仍必须恢复工作意图"
+    );
+    assert!(
+        error.starts_with("resume hand-off rollback failed: "),
+        "{error}"
+    );
+    assert!(
+        !error.contains("resume work state rollback failed"),
+        "{error}"
+    );
+}
+
+/// 两段补偿都失败时合并报告，保留各自的上下文。
+#[tokio::test]
+async fn handoff_rollback_reports_both_failures() {
+    let status_error = SessionResourceError::new(SessionResourceErrorKind::Unavailable {
+        detail: "status offline".into(),
+    });
+    let work_state_error = SessionResourceError::new(SessionResourceErrorKind::Unavailable {
+        detail: "work state offline".into(),
+    });
+    let error = rollback_handoff(async { Err(status_error) }, async { Err(work_state_error) })
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("resume hand-off rollback failed: "),
+        "{error}"
+    );
+    assert!(
+        error.contains("resume work state rollback failed: "),
+        "{error}"
+    );
+    assert!(error.contains("status offline"), "{error}");
+    assert!(error.contains("work state offline"), "{error}");
+}
