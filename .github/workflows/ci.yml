@@ -219,7 +219,8 @@ jobs:
 
     # 离线录放业务回归：真实 Peri/ACP/工具/TUI，模型上游由持久 cassette 回放，
     # 不访问线上模型。仅在 Linux 跑（PTY 与 @xterm/headless 的验收环境）。
-    # tui-tester 子模块是公开仓库；checkout 不递归拉取，避免依赖 SSH deploy key。
+    # 套件本体在公开仓 KonghaYao/peri-e2e，由 .github/peri-e2e.rev 固定到 40 位 commit；
+    # 升级套件 = 更新 pin，本 job 不跟随该仓分支漂移。
     # 固定 24.04：fixture 录制基线为 Ubuntu 24.04；系统提示只绑定 OS 版本行，不随镜像迁移漂移。
     e2e-replay:
         name: E2E replay (Linux)
@@ -233,10 +234,24 @@ jobs:
               with:
                   persist-credentials: false
 
-            - name: Initialize e2e submodule over HTTPS
+            - name: Resolve peri-e2e revision
+              id: e2e
               run: |
-                  git config --global url."https://github.com/".insteadOf "git@github.com:"
-                  git submodule update --init e2e/tui-tester
+                  rev="$(cat .github/peri-e2e.rev)"
+                  rev="${rev//[$'\r\n ']/}"
+                  if [[ ! "$rev" =~ ^[0-9a-f]{40}$ ]]; then
+                      echo "invalid peri-e2e pin: '$rev'（.github/peri-e2e.rev 须为 40 位小写 commit SHA）" >&2
+                      exit 1
+                  fi
+                  echo "sha=$rev" >> "$GITHUB_OUTPUT"
+
+            - name: Checkout peri-e2e at pinned revision
+              uses: actions/checkout@v7
+              with:
+                  repository: KonghaYao/peri-e2e
+                  ref: ${{ steps.e2e.outputs.sha }}
+                  path: peri-e2e
+                  persist-credentials: false
 
             - name: Install Rust toolchain
               uses: dtolnay/rust-toolchain@master
@@ -257,32 +272,47 @@ jobs:
               with:
                   node-version: 24
                   cache: npm
-                  cache-dependency-path: e2e/package-lock.json
+                  cache-dependency-path: peri-e2e/package-lock.json
 
-            - name: Install e2e dependencies
-              working-directory: e2e
-              run: npm ci
+            - name: Install peri-e2e dependencies
+              run: npm ci --prefix peri-e2e
 
             - name: Type-check replay harness
-              working-directory: e2e
-              run: npm run e2e:replay:check
+              run: npm --prefix peri-e2e run e2e:replay:check
 
             - name: Run replay unit tests
-              working-directory: e2e
-              run: npm run e2e:replay:unit
+              env:
+                  PERI_SOURCE_ROOT: ${{ github.workspace }}
+              run: npm --prefix peri-e2e run e2e:replay:unit
+
+            - name: Verify replay fixtures
+              run: npm --prefix peri-e2e run e2e:replay:verify
+
+            # world seal 对应本 Peri 检出：未映射 leaf 变动但未 bump pin 时在此失败。
+            - name: Check world snapshot against this checkout
+              env:
+                  PERI_SOURCE_ROOT: ${{ github.workspace }}
+              run: npm --prefix peri-e2e run e2e:replay:world-check
 
             - name: Run offline replay (30 scenarios)
-              working-directory: e2e
-              run: npm run e2e:replay
+              env:
+                  PERI_BINARY: ${{ github.workspace }}/target/debug/peri
+              run: npm --prefix peri-e2e run e2e:replay
 
             - name: Upload replay evidence on failure
               if: failure()
               uses: actions/upload-artifact@v4
               with:
                   name: e2e-replay-results
-                  path: e2e/results/replay-v2
+                  path: peri-e2e/results/replay-v2
                   retention-days: 7
                   if-no-files-found: ignore
+
+            - name: Print pinned peri-e2e revision
+              if: always()
+              run: |
+                  printf 'peri-e2e pin: %s\n' "${{ steps.e2e.outputs.sha }}"
+                  printf 'peri-e2e HEAD: %s\n' "$(git -C peri-e2e rev-parse HEAD)"
 
     # 汇总检查：只要本 job 运行就给出确定的结论 —— 区分「文档按策略跳过」与
     # 「代码测试失败 / 取消 / 意外跳过」，避免后者被读成通过。

@@ -336,45 +336,46 @@ cargo test -p <crate> --test <target> -- --test-threads=1
 lefthook run pre-commit    # fmt + check + clippy（改动命中 crate）+ layer-imports
 ```
 
-### 8.2 Peri TUI E2E（分层门禁）
+### 8.2 Peri TUI E2E（外部仓 + 固定 commit）
 
-Rust 单测与 E2E 分离：**E2E 命令在本文件维护**，不要写逐文件手跑清单或 `npm run e2e -- --all`。
+Rust 单测与 E2E 分离：E2E 套件与 fixture 在公开仓 `KonghaYao/peri-e2e`，Peri 只用
+`.github/peri-e2e.rev` 固定其 40 位 commit；CI 校验 pin 格式后 checkout 该 commit 运行。
+新增或修改 E2E 命令时改新仓 README/scripts，并同步本节；不要写逐文件手跑清单。
 
-在 `e2e/` 目录：
+首次使用把新仓 checkout 到 Peri 同级目录（CI 为 `$GITHUB_WORKSPACE/peri-e2e`）：
 
 ```bash
-npm run e2e:replay:unit     # 本地录放代理与动态绑定契约
-npm run e2e:replay:check    # 录放 runner 与业务场景类型检查
-npm run e2e:replay         # 持久 fixture，只重放；真实 PTY/ACP/Agent/工具
-npm run e2e:replay:record  # 显式更新本地合成模型 fixture，不能用于 CI
-npm run e2e:l0              # PR 冒烟
-npm run e2e:l1              # 合并前（panels + tool-cards + smoke）
-npm run e2e:release         # 发版全量（含首轮 flake 预算）
-npm run e2e:release:strict  # 发版且不容忍首轮 flake
+git clone https://github.com/KonghaYao/peri-e2e ../peri-e2e
+git -C ../peri-e2e checkout "$(cat .github/peri-e2e.rev)"
+npm ci --prefix ../peri-e2e
 ```
 
-录放业务场景以 `e2e/fixtures/replay-v2/README.md` 的目录为准。默认 runner 不启动录制上游、
-不生成缺失 cassette、不回退在线模型；`CI` 环境拒绝 record 模式。fixture 包含哈希校验的
-配置/工作文件 seed、封存的原始模型 HTTP cassette、显式动态绑定和完整工具参数派生计划。
-每次运行复制 seed 到新目录，再通过真实 ACP 离线新建会话；这段 preparation 单独计时。
-seed 不保存会话数据库，不通过改数据库中的 cwd 实现迁移。历史恢复场景必须在 case 内跨真实进程完成。
+```bash
+npm --prefix ../peri-e2e run e2e:replay:check      # 录放 runner 与业务场景类型检查
+npm --prefix ../peri-e2e run e2e:replay:unit       # 录放代理与动态绑定契约
+npm --prefix ../peri-e2e run e2e:replay:verify     # fixture 完整性（cassette/stub/seal）
+PERI_SOURCE_ROOT="$PWD" npm --prefix ../peri-e2e run e2e:replay:world-check
+PERI_BINARY="$PWD/target/debug/peri" npm --prefix ../peri-e2e run e2e:replay
+npm --prefix ../peri-e2e run e2e:replay:record     # 显式重录，仅本地；CI 拒绝 record 模式
+```
 
-`configure` 只生成录制 seed；默认配置源、`configure.toString()`、可选 `configVersion` 的签名变化
-要求显式重录。配置函数的闭包值或外部输入变化必须同步修改 `configVersion`。
-不得在 replay 自动补签名或更新预期。record 通过后删除录制的 HOME/work，防止新目录重放意外依赖旧世界。
-每场景在 `e2e/results/replay-v2/<invocation>/<id>/` 保存结构化报告、原始 PTY 输出、可见屏幕、
-真实请求和最终工作文件；报告区分 preparation、proxy 启动、驱动、收尾和总时延。
-屏幕断言与文件/ACP 终态联合验收，不使用在线 LLM judge。
+`PERI_BINARY` 是已构建 `peri` 的绝对路径；`PERI_SOURCE_ROOT` 指向 Peri 检出，world-check 用它
+核对 world seal 与当前提示词/工具来源。默认 runner 不启动录制上游、不生成缺失 cassette、不回退
+在线模型。fixture 的 seed/configure 约束、每场景报告与终态断言以新仓 README 为准，报告落在新仓
+`results/replay-v2/`。
 
-单文件调试：`npm run e2e -- --file tests/<path>.test.ts --serial --retry 0`
+升级契约：改 world 映射 leaf（skills、Agent description/schema、compact summary）时，在
+`peri-e2e` 运行 `e2e:replay:world-sync` 并提交，再 bump `.github/peri-e2e.rev`；改未映射 leaf
+（如 `block1.prefix`、单条消息）须重录受影响场景或受控 re-anchor，`verify` 归零后再 bump pin。
+不得为过门禁修改 fixture 而不更新 pin。
 
 自主委派评测需要真实模型，默认跳过：
-`PERI_E2E_AUTONOMY=1 npm run e2e -- --file tests/subagent/autonomous-delegation.test.ts --serial --retry 0`。
+`PERI_E2E_AUTONOMY=1 npm --prefix ../peri-e2e run e2e -- --file tests/subagent/autonomous-delegation.test.ts --serial --retry 0`。
 默认要求至少 1 次有效委派；`PERI_E2E_AUTONOMY_MIN_DELEGATIONS=0` 只记录指标、不要求委派。
 
 ### 8.3 Submodule 与独立项目
 
-- `.gitmodules` 当前声明 `peri-cool/` 与 `e2e/tui-tester/`；它们不是根 Cargo workspace crate。先初始化 submodule，再进入其目录读取 manifest/README 并运行本地命令。
+- `.gitmodules` 当前只声明 `peri-cool/`；它不是根 Cargo workspace crate。先初始化 submodule，再进入其目录读取 manifest/README 并运行本地命令。E2E 套件已迁至 `KonghaYao/peri-e2e`，不再以 submodule 形式存在。
 - `side-projects/` 下项目有各自的 `Cargo.toml` 或 `package.json`，不由 `cargo test --workspace` 覆盖。只在任务涉及对应项目时进入目录，按其 manifest scripts 或 README 执行。
 - 仓库顶层出现目录不等于属于根 workspace。`peri-theme/` 虽未写入根 `Cargo.toml` 的显式 members 列表，但当前 `cargo metadata` 将其识别为 workspace package，因此使用 `cargo test -p peri-theme`；分类以命令输出为准。
 - `acp-hub/` 与 `agm/` 当前工作树中不存在 manifest；不得保留或执行旧测试矩阵命令，也不得从历史 issue 猜测迁移位置。仅在当前代码重新出现 manifest 后，按其实际归属补回命令。

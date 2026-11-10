@@ -1,3 +1,2 @@
 patches/*.patch whitespace=-blank-at-eol
 patches/emscripten/*.patch whitespace=-blank-at-eol
-e2e/fixtures/replay-v2/**/*.bin binary

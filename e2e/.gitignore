@@ -1,7 +1,0 @@
-node_modules/
-dist/
-recordings/
-*.ansi
-index.jsonl
-report.html
-.env

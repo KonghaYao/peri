@@ -26,7 +26,7 @@ git show <删除提交>^:spec/issues/2026-09-17-p0-workspace-validation-blocks-i
 | Model provider 与 prompt cache | `docs/code-index/peri-model.md`、`docs/design/model-adapters.md`、`docs/design/system-prompt.md` | `spec/archive-issues/llm-provider/` |
 | TUI 渲染、输入、面板、交互 | `peri-tui/CLAUDE.md`、`docs/code-index/peri-tui.md`、`docs/design/tui-acp-data-flow.md`、`docs/design/user-input-queue.md` | `spec/archive-issues/tui-*/` |
 | Langfuse | `docs/reference/langfuse-data-integrity.md`、`docs/code-index/peri-controller.md`、`docs/code-index/langfuse-client.md` | `spec/archive-issues/langfuse/` |
-| 测试、CI 与跨平台证据 | `docs/standards/testing.md`、`e2e/CLAUDE.md` | `spec/archive-issues/code-quality/`、`spec/reviews/` |
+| 测试、CI 与跨平台证据 | `docs/standards/testing.md`、`KonghaYao/peri-e2e` | `spec/archive-issues/code-quality/`、`spec/reviews/` |
 
 ## 在 Git 中查完整记录
 
