@@ -229,3 +229,51 @@ async fn settle_work_state_does_not_lift_stopped() {
         WorkState::Stopped
     );
 }
+
+/// 默认 idle 结算（mock / 其他 adapter 的兜底）只把 `working` 收敛为 `idle`。
+///
+/// 两个真实 adapter 都覆盖了该方法；这里直接调用默认实现，锁定不覆盖显式停止
+/// 的条件写语义。
+#[tokio::test]
+async fn default_settle_work_state_only_rewrites_working() {
+    let fixture = Fixture::new().await;
+    fixture.create("default-settle").await;
+    let id = ThreadId::from("default-settle".to_owned());
+    let port = fixture.facade.gate.data().clone();
+
+    for state in [WorkState::Stopped, WorkState::Idle] {
+        port.set_work_state(&id, state).await.unwrap();
+        assert!(
+            !crate::sessions::data::settle_work_state_after_turn_default(port.as_ref(), &id)
+                .await
+                .unwrap(),
+            "只有 working 才允许默认收尾写入"
+        );
+        assert_eq!(
+            fixture
+                .facade
+                .load_session_meta(&id)
+                .await
+                .unwrap()
+                .work_state,
+            state
+        );
+    }
+
+    port.set_work_state(&id, WorkState::Working).await.unwrap();
+    assert!(
+        crate::sessions::data::settle_work_state_after_turn_default(port.as_ref(), &id)
+            .await
+            .unwrap(),
+        "working 必须收敛为 idle"
+    );
+    assert_eq!(
+        fixture
+            .facade
+            .load_session_meta(&id)
+            .await
+            .unwrap()
+            .work_state,
+        WorkState::Idle
+    );
+}

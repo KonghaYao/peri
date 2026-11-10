@@ -53,6 +53,16 @@ impl ChildResumeClaim for GatedClaim {
         }
         self.inner.mark_terminated().await
     }
+    async fn finish_with_status(&self, status: AgentStatus) -> SessionResourceResult<bool> {
+        if self.handed_off.load(Ordering::SeqCst) {
+            return Err(SessionResourceError::new(
+                SessionResourceErrorKind::InvalidInput {
+                    detail: "child resume claim was handed off to background execution".into(),
+                },
+            ));
+        }
+        self.inner.finish_with_status(status).await
+    }
 }
 
 struct EmptyChain;

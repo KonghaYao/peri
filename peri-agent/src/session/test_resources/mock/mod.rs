@@ -513,24 +513,28 @@ impl ChildResumeClaim for MockResumeClaim {
     }
 
     async fn mark_failed(&self) -> SessionResourceResult<()> {
-        self.settle();
+        self.settle(None);
         Ok(())
     }
 
     async fn mark_terminated(&self) -> SessionResourceResult<()> {
-        self.settle();
+        self.settle(None);
         Ok(())
+    }
+
+    async fn finish_with_status(&self, status: AgentStatus) -> SessionResourceResult<bool> {
+        Ok(self.settle(Some(status)))
     }
 }
 
 impl MockResumeClaim {
-    /// 恢复到认领前的状态：终态写入由调用方在结清之后单独提交。
+    /// 恢复到认领前的状态；请求终态时在同一把锁内提交，返回是否仍归本次认领所有。
     ///
     /// 与资源实现同构：先校验世代仍属于本次认领，再检查状态列未被第三方改写，
     /// 两列在同一把锁内恢复；重复结清是 no-op。
-    fn settle(&self) {
+    fn settle(&self, terminal: Option<AgentStatus>) -> bool {
         if self.settled.swap(true, Ordering::SeqCst) {
-            return;
+            return false;
         }
         let owns_generation = self
             .claim_ledger
@@ -546,20 +550,18 @@ impl MockResumeClaim {
                 claim_nonce = self.claim_nonce,
                 "mock resume claim rollback skipped: a newer claim owns this child"
             );
-            return;
+            return false;
         }
+        let mut restored = None;
         {
             let mut regions = self.regions.lock().unwrap();
             let Some(region) = regions.get_mut(&self.child) else {
-                return;
+                return false;
             };
             let Some(meta) = region.meta.as_mut() else {
-                return;
+                return false;
             };
-            let owns_record = meta.agent_status == AgentStatus::Active
-                && (meta.work_state == WorkState::Working
-                    || meta.work_state == self.previous_work_state);
-            if !owns_record {
+            if meta.agent_status != AgentStatus::Active {
                 tracing::warn!(
                     thread_id = %self.child,
                     status = ?meta.agent_status,
@@ -568,18 +570,36 @@ impl MockResumeClaim {
                     previous_work_state = ?self.previous_work_state,
                     "mock resume claim rollback skipped: record no longer belongs to this claim"
                 );
-                return;
+                return false;
             }
-            // 两列在同一锁内恢复：新任务无法插入到状态与工作意图之间。
-            meta.agent_status = self.previous;
-            meta.work_state = self.previous_work_state;
+            // 工作意图可能已被本次运行写成终态：只跳过这一列的回滚，终态仍由本次
+            // 认领提交。
+            if meta.work_state == WorkState::Working || meta.work_state == self.previous_work_state
+            {
+                meta.work_state = self.previous_work_state;
+                meta.agent_status = self.previous;
+                restored = Some(self.previous);
+            }
+            if let Some(status) = terminal {
+                meta.agent_status = status;
+            }
         }
-        self.statuses
-            .lock()
-            .unwrap()
-            .push((self.child.clone(), self.previous));
+        {
+            let mut statuses = self.statuses.lock().unwrap();
+            // 与门面写入同构：只记录真实状态转换。终态与恢复值相同时，两次写入
+            // 只产生一个序列项。
+            if let Some(previous) = restored {
+                statuses.push((self.child.clone(), previous));
+            }
+            if let Some(status) = terminal {
+                if restored != Some(status) {
+                    statuses.push((self.child.clone(), status));
+                }
+            }
+        }
         self.status_changed.notify_waiters();
         self.claimed.store(false, Ordering::SeqCst);
+        true
     }
 }
 

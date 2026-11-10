@@ -14,9 +14,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::tools::{EffectiveToolError, EffectiveToolErrorCode};
-use peri_acp_types::session_resources::{
-    SessionMetaPatch, SessionResourceErrorKind, SessionResources,
-};
+use peri_acp_types::session_resources::{SessionResourceErrorKind, SessionResources};
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
 
 /// 调用方提交给认领 worker 的领域结果。
@@ -230,21 +228,19 @@ async fn own_claim(
             }
         }
         Ok(ClaimDecision::Finish { status }) => {
-            // 顺序不可反——结清会把记录写回认领前的值，先写终态会被它覆盖。
-            handle
-                .mark_terminated()
-                .await
-                .map_err(|error| format!("resume claim settle failed: {error}"))?;
-            store
-                .update_session_meta(
-                    &thread_id,
-                    &SessionMetaPatch {
-                        status: Some(status),
-                        ..Default::default()
-                    },
-                )
+            // 终态与「恢复到认领前」必须由同一个归属校验提交：分开写时，新认领
+            // 可以插在结清与终态之间，旧终态会覆盖新认领的 Active。
+            let applied = handle
+                .finish_with_status(status)
                 .await
                 .map_err(|error| format!("resume terminal status write failed: {error}"))?;
+            if !applied {
+                tracing::warn!(
+                    %thread_id,
+                    ?status,
+                    "resume terminal status write skipped: claim no longer owns this child"
+                );
+            }
         }
         Ok(ClaimDecision::Release) => {
             // 不写记录：认领事实由 finalize 写入的终态解除；提前写回 previous
@@ -262,20 +258,16 @@ async fn own_claim(
                 }
             };
             if finalize {
-                handle
-                    .mark_terminated()
+                let applied = handle
+                    .finish_with_status(AgentStatus::Cancelled)
                     .await
                     .map_err(|error| error.to_string())?;
-                store
-                    .update_session_meta(
-                        &thread_id,
-                        &SessionMetaPatch {
-                            status: Some(AgentStatus::Cancelled),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?;
+                if !applied {
+                    tracing::warn!(
+                        %thread_id,
+                        "resume cancellation status write skipped: claim no longer owns this child"
+                    );
+                }
             }
             close_result?;
         }

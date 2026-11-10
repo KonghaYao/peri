@@ -71,6 +71,9 @@ impl ChildResumeClaim for ReplayClaim {
     async fn mark_terminated(&self) -> SessionResourceResult<()> {
         self.0.inner.mark_terminated().await
     }
+    async fn finish_with_status(&self, status: AgentStatus) -> SessionResourceResult<bool> {
+        self.0.inner.finish_with_status(status).await
+    }
 }
 
 struct ClaimResources {
@@ -645,4 +648,74 @@ async fn committed_claim_with_unknown_ack_stays_unknown_and_active() {
         .agent_status
         .is_active());
     assert!(!manager.is_execution_idle());
+}
+
+async fn resumable_child(store: &ClaimResources) {
+    let mut meta = ThreadMeta::new_at("/tmp/work", peri_time::now_wall());
+    meta.id = CHILD.into();
+    meta.agent_status = AgentStatus::Done;
+    meta.work_state = peri_acp_types::thread::WorkState::Stopped;
+    store.inner.create_resumable_thread(meta).await.unwrap();
+}
+
+/// 正常 Finish：终态由认领在归属校验内提交，并恢复认领前的工作意图。
+#[tokio::test]
+async fn finish_writes_terminal_status_for_owned_claim() {
+    use peri_acp_types::thread::WorkState;
+    let store = ClaimResources::new();
+    resumable_child(&store).await;
+    let (_, claim) = ResumeClaim::acquire(store.clone(), CHILD.into(), CHILD.into(), None)
+        .await
+        .unwrap();
+    store
+        .inner
+        .set_work_state(&CHILD.into(), WorkState::Working)
+        .await
+        .unwrap();
+
+    claim.finish(AgentStatus::Error).await.unwrap();
+    let meta = store.inner.load_session_meta(&CHILD.into()).await.unwrap();
+    assert_eq!(meta.agent_status, AgentStatus::Error);
+    assert_eq!(meta.work_state, WorkState::Stopped);
+}
+
+/// [回归] 旧认领结清后新 run 认领成功；迟到的 Finish 终态不得覆盖新的 Active。
+///
+/// 复现原缺陷窗口：旧认领的结清已提交、终态尚未写入时，新 run 完成认领；
+/// 旧认领随后提交终态会把新认领的 `Active` 覆盖掉。
+#[tokio::test]
+async fn stale_claim_finish_does_not_override_new_claim() {
+    let store = ClaimResources::new();
+    resumable_child(&store).await;
+    let (_, old) = ResumeClaim::acquire(store.clone(), CHILD.into(), CHILD.into(), None)
+        .await
+        .unwrap();
+    store.last_claim().mark_terminated().await.unwrap();
+    let new_claim = store
+        .claim_child_resume(&CHILD.into(), &CHILD.into())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .inner
+            .load_session_meta(&CHILD.into())
+            .await
+            .unwrap()
+            .agent_status,
+        AgentStatus::Active
+    );
+
+    old.finish(AgentStatus::Cancelled).await.unwrap();
+
+    assert_eq!(
+        store
+            .inner
+            .load_session_meta(&CHILD.into())
+            .await
+            .unwrap()
+            .agent_status,
+        AgentStatus::Active,
+        "旧认领的迟到终态不得覆盖新认领"
+    );
+    drop(new_claim);
 }

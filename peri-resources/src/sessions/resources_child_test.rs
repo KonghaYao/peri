@@ -735,3 +735,115 @@ async fn deleting_a_child_reclaims_its_claim_generation() {
     assert!(!fixture.facade.gate.claim_is_tracked(&child_id));
     drop(claim);
 }
+
+/// 正常 Finish：终态与「恢复到认领前」在同一归属校验内提交。
+#[tokio::test]
+async fn finish_with_status_writes_terminal_status_for_owned_claim() {
+    use peri_acp_types::thread::WorkState;
+    let fixture = Fixture::new().await;
+    fixture.create("s-finish-root").await;
+    let child = fixture.child("s-finish-child", "s-finish-root").await;
+    let child_id = child.target.thread_id;
+    let root_id = child.root_id;
+    fixture
+        .facade
+        .update_session_meta(
+            &child_id,
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    fixture
+        .facade
+        .set_work_state(&child_id, WorkState::Stopped)
+        .await
+        .unwrap();
+
+    let claim = fixture
+        .facade
+        .claim_child_resume(&child_id, &root_id)
+        .await
+        .unwrap();
+    fixture
+        .facade
+        .set_work_state(&child_id, WorkState::Working)
+        .await
+        .unwrap();
+
+    assert!(
+        claim.finish_with_status(AgentStatus::Error).await.unwrap(),
+        "仍有归属时必须写入终态"
+    );
+    let meta = fixture.facade.load_session_meta(&child_id).await.unwrap();
+    assert_eq!(meta.agent_status, AgentStatus::Error);
+    assert_eq!(
+        meta.work_state,
+        WorkState::Stopped,
+        "终态写入仍须恢复认领前的工作意图"
+    );
+}
+
+/// [回归] 旧认领结清后新认领接管；迟到的终态写入不得覆盖新认领的 `Active`。
+#[tokio::test]
+async fn stale_claim_finish_with_status_does_not_override_new_claim() {
+    let fixture = Fixture::new().await;
+    fixture.create("s-stale-finish-root").await;
+    let child = fixture
+        .child("s-stale-finish-child", "s-stale-finish-root")
+        .await;
+    let child_id = child.target.thread_id;
+    let root_id = child.root_id;
+    fixture
+        .facade
+        .update_session_meta(
+            &child_id,
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let old = fixture
+        .facade
+        .claim_child_resume(&child_id, &root_id)
+        .await
+        .unwrap();
+    // 复现原缺陷窗口：旧认领的结清已提交、终态尚未写入时，新 run 认领成功。
+    old.mark_terminated().await.unwrap();
+    let new = fixture
+        .facade
+        .claim_child_resume(&child_id, &root_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .facade
+            .load_session_meta(&child_id)
+            .await
+            .unwrap()
+            .agent_status,
+        AgentStatus::Active
+    );
+
+    assert!(
+        !old.finish_with_status(AgentStatus::Cancelled)
+            .await
+            .unwrap(),
+        "归属丢失后不得再写终态"
+    );
+    let record = fixture
+        .facade
+        .gate
+        .data()
+        .load_child_resume_record(&child_id)
+        .await
+        .unwrap();
+    assert_eq!(record.status, AgentStatus::Active);
+    assert!(record.claimed);
+    new.mark_failed().await.unwrap();
+}

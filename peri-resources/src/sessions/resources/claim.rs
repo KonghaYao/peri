@@ -125,35 +125,54 @@ impl ChildResumeClaim for ChildResumeClaimHandle {
     }
 
     async fn mark_failed(&self) -> SessionResourceResult<()> {
-        self.settle(true).await
+        self.settle(true, None).await.map(|_| ())
     }
 
     async fn mark_terminated(&self) -> SessionResourceResult<()> {
-        self.settle(false).await
+        self.settle(false, None).await.map(|_| ())
+    }
+
+    async fn finish_with_status(&self, status: AgentStatus) -> SessionResourceResult<bool> {
+        self.settle(false, Some(status)).await
     }
 }
 
+/// 写侧门禁内一次收尾的结果。
+enum SettleOutcome {
+    /// 世代或认领记录已不属于本次认领：没有写入。
+    NotOwned,
+    /// 恢复（或无需恢复）已完成；`terminal` 是随后终态写入的结果。
+    Settled {
+        terminal: Option<SessionResourceResult<()>>,
+    },
+}
+
 impl ChildResumeClaimHandle {
-    /// 收尾：恢复到认领前的状态与工作意图，不留 active 残留。
+    /// 收尾：恢复到认领前的状态与工作意图，不留 active 残留；请求终态时在同一
+    /// 归属校验内追加唯一一次终态写入。
     ///
     /// 后台尚未启动时可补偿移交准备失败；终止声明不能覆盖后台执行持有的终态。
-    /// 归属校验与两列恢复在同一写侧门禁内完成，新任务无法插入到状态回滚与工作意图
-    /// 回滚之间。校验用进程内认领世代，而不是当前记录值——新 run 的正常状态与旧认领
-    /// 的中间态完全相同，按值判断会把新 run 误认为自己的记录。
-    async fn settle(&self, preparation_failed: bool) -> SessionResourceResult<()> {
+    /// 归属校验、两列恢复与终态写入在同一写侧门禁内完成，新任务无法插入到
+    /// 「恢复」与「终态写入」之间。校验用进程内认领世代，而不是当前记录值——新 run
+    /// 的正常状态与旧认领的中间态完全相同，按值判断会把新 run 误认为自己的记录。
+    async fn settle(
+        &self,
+        preparation_failed: bool,
+        terminal: Option<AgentStatus>,
+    ) -> SessionResourceResult<bool> {
         // 写入成功后才置 Settled：失败时保留原阶段，允许后续调用重试。
         let previous_phase = {
             let phase = self.phase()?;
             match *phase {
                 ClaimPhase::Preparing | ClaimPhase::Running => *phase,
-                // 重复补偿是 no-op：迟到的旧补偿不能再次写回认领前的值，
+                // 重复结清是 no-op：迟到的旧结清不能再次写回认领前的值，
                 // 否则会覆盖新任务已经提交的 Active + Working。
-                ClaimPhase::Settled => return Ok(()),
-                ClaimPhase::HandedOff if preparation_failed => *phase,
+                ClaimPhase::Settled => return Ok(false),
+                ClaimPhase::HandedOff if preparation_failed && terminal.is_none() => *phase,
                 ClaimPhase::HandedOff => return Err(Self::handed_off()),
             }
         };
-        let result = self
+        let outcome = self
             .gate
             .with_exclusive(&self.child, || async {
                 if !self.gate.claim_is_current(&self.child, self.claim_nonce) {
@@ -162,7 +181,7 @@ impl ChildResumeClaimHandle {
                         claim_nonce = self.claim_nonce,
                         "resume claim rollback skipped: a newer claim owns this child"
                     );
-                    return Ok(());
+                    return Ok(SettleOutcome::NotOwned);
                 }
                 let current = self
                     .gate
@@ -174,79 +193,100 @@ impl ChildResumeClaimHandle {
                     status: AgentStatus::Active,
                     claimed: true,
                 };
-                let owns_record = current == claimed
-                    && (current_work_state == WorkState::Working
-                        || current_work_state == self.previous_work_state);
-                if !owns_record {
-                    // 新任务已改写其中一列：放弃而不是部分恢复，避免把新运行
-                    // 的信息覆盖成认领前的值。
+                if current != claimed {
+                    // 状态列已被第三方改写：恢复与终态都不再属于本次认领。
                     tracing::warn!(
                         thread_id = %self.child,
                         expected_status = ?claimed.status,
-                        expected_work_state = ?WorkState::Working,
-                        previous_work_state = ?self.previous_work_state,
                         current_status = ?current.status,
                         current_claimed = current.claimed,
-                        current_work_state = ?current_work_state,
                         "resume claim rollback skipped: record no longer belongs to this claim"
                     );
-                    return Ok(());
+                    return Ok(SettleOutcome::NotOwned);
                 }
-                match self
-                    .gate
-                    .data()
-                    .store_child_resume_record(&self.child, &self.previous)
-                    .await
+                // 工作意图可能已被本次运行写成终态（run_sync 在提交终态前先写
+                // work_state）：此时只跳过这一列的回滚，终态仍由本次认领提交。
+                if current_work_state == WorkState::Working
+                    || current_work_state == self.previous_work_state
                 {
-                    Ok(()) => {
-                        if current_work_state != self.previous_work_state {
-                            self.gate
-                                .data()
-                                .set_work_state(&self.child, self.previous_work_state)
-                                .await?;
-                        }
-                        Ok(())
-                    }
-                    // 记录回滚已知未生效时仍要撤回工作意图：worker 不会重试，留下
-                    // `Active + Working` 会被下一次进入当成可恢复工作。归属校验已在
-                    // 上方完成，这里只补工作意图列。
-                    Err(error) if error.effect() != MutationOutcome::Unknown => {
-                        if current_work_state != self.previous_work_state {
-                            if let Err(work_error) = self
-                                .gate
-                                .data()
-                                .set_work_state(&self.child, self.previous_work_state)
-                                .await
-                            {
-                                tracing::error!(
-                                    thread_id = %self.child,
-                                    %work_error,
-                                    "resume claim work-state restoration failed"
-                                );
-                                if work_error.effect() == MutationOutcome::Unknown {
-                                    return Err(work_error);
-                                }
+                    match self
+                        .gate
+                        .data()
+                        .store_child_resume_record(&self.child, &self.previous)
+                        .await
+                    {
+                        Ok(()) => {
+                            if current_work_state != self.previous_work_state {
+                                self.gate
+                                    .data()
+                                    .set_work_state(&self.child, self.previous_work_state)
+                                    .await?;
                             }
                         }
-                        Err(error)
+                        // 记录回滚已知未生效时仍要撤回工作意图：worker 不会重试，留下
+                        // `Active + Working` 会被下一次进入当成可恢复工作。归属校验已在
+                        // 上方完成，这里只补工作意图列。
+                        Err(error) if error.effect() != MutationOutcome::Unknown => {
+                            if current_work_state != self.previous_work_state {
+                                if let Err(work_error) = self
+                                    .gate
+                                    .data()
+                                    .set_work_state(&self.child, self.previous_work_state)
+                                    .await
+                                {
+                                    tracing::error!(
+                                        thread_id = %self.child,
+                                        %work_error,
+                                        "resume claim work-state restoration failed"
+                                    );
+                                    if work_error.effect() == MutationOutcome::Unknown {
+                                        return Err(work_error);
+                                    }
+                                }
+                            }
+                            return Err(error);
+                        }
+                        // 未知结果保持不确定屏障：追加写入会让「记录是否已回滚」不可判定。
+                        Err(error) => return Err(error),
                     }
-                    // 未知结果保持不确定屏障：追加写入会让「记录是否已回滚」不可判定。
-                    Err(error) => Err(error),
                 }
+                let terminal = match terminal {
+                    Some(status) => Some(
+                        self.gate
+                            .data()
+                            .store_child_resume_record(
+                                &self.child,
+                                &ChildResumeRecord {
+                                    status,
+                                    claimed: false,
+                                },
+                            )
+                            .await,
+                    ),
+                    None => None,
+                };
+                Ok(SettleOutcome::Settled { terminal })
             })
             .await;
         {
             let mut phase = self.phase()?;
-            match &result {
-                Ok(()) => *phase = ClaimPhase::Settled,
+            match &outcome {
+                Ok(_) => *phase = ClaimPhase::Settled,
                 Err(_) => *phase = previous_phase,
             }
         }
-        if result.is_ok() {
+        if outcome.is_ok() {
             // 成功/放弃补偿后不再需要守卫；按世代回收，不会移除新认领的条目。
             self.gate.release_claim(&self.child, self.claim_nonce);
         }
-        result
+        match outcome {
+            Ok(SettleOutcome::NotOwned) => Ok(false),
+            Ok(SettleOutcome::Settled { terminal }) => match terminal {
+                Some(result) => result.map(|()| true),
+                None => Ok(true),
+            },
+            Err(error) => Err(error),
+        }
     }
 }
 
