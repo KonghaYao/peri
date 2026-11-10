@@ -8,7 +8,8 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use peri_acp_types::session_resources::{
-    ChildResumeClaim, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
+    ChildResumeClaim, MutationOutcome, SessionResourceError, SessionResourceErrorKind,
+    SessionResourceResult,
 };
 use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
 
@@ -191,17 +192,47 @@ impl ChildResumeClaimHandle {
                     );
                     return Ok(());
                 }
-                self.gate
+                match self
+                    .gate
                     .data()
                     .store_child_resume_record(&self.child, &self.previous)
-                    .await?;
-                if current_work_state != self.previous_work_state {
-                    self.gate
-                        .data()
-                        .set_work_state(&self.child, self.previous_work_state)
-                        .await?;
+                    .await
+                {
+                    Ok(()) => {
+                        if current_work_state != self.previous_work_state {
+                            self.gate
+                                .data()
+                                .set_work_state(&self.child, self.previous_work_state)
+                                .await?;
+                        }
+                        Ok(())
+                    }
+                    // 记录回滚已知未生效时仍要撤回工作意图：worker 不会重试，留下
+                    // `Active + Working` 会被下一次进入当成可恢复工作。归属校验已在
+                    // 上方完成，这里只补工作意图列。
+                    Err(error) if error.effect() != MutationOutcome::Unknown => {
+                        if current_work_state != self.previous_work_state {
+                            if let Err(work_error) = self
+                                .gate
+                                .data()
+                                .set_work_state(&self.child, self.previous_work_state)
+                                .await
+                            {
+                                tracing::error!(
+                                    thread_id = %self.child,
+                                    %work_error,
+                                    "resume claim work-state restoration failed"
+                                );
+                                if work_error.effect() == MutationOutcome::Unknown {
+                                    return Err(work_error);
+                                }
+                            }
+                        }
+                        Err(error)
+                    }
+                    // 未知结果保持不确定屏障：追加写入会让「记录是否已回滚」不可判定。
+                    Err(error) => Err(error),
                 }
-                Ok(())
             })
             .await;
         {
@@ -211,6 +242,17 @@ impl ChildResumeClaimHandle {
                 Err(_) => *phase = previous_phase,
             }
         }
+        if result.is_ok() {
+            // 成功/放弃补偿后不再需要守卫；按世代回收，不会移除新认领的条目。
+            self.gate.release_claim(&self.child, self.claim_nonce);
+        }
         result
+    }
+}
+
+impl Drop for ChildResumeClaimHandle {
+    fn drop(&mut self) {
+        // handle 离开作用域后不可能再补偿，条目不再需要守卫；世代匹配保证不碰新认领。
+        self.gate.release_claim(&self.child, self.claim_nonce);
     }
 }

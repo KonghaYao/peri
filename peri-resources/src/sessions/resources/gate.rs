@@ -110,6 +110,49 @@ impl MutationGate {
             == Some(generation)
     }
 
+    /// 回收已完成的认领世代；只有条目仍属于 `generation` 时移除，新认领不受影响。
+    ///
+    /// 也由 handle 的 `Drop` 调用，因此中毒时静默跳过，避免析构期间再次 panic。
+    pub(super) fn release_claim(&self, child: &ThreadId, generation: u64) {
+        let Ok(mut ledger) = self.claims.lock() else {
+            return;
+        };
+        if ledger.current.get(child).copied() == Some(generation) {
+            ledger.current.remove(child);
+        }
+    }
+
+    /// 删除会话树后丢弃随树消失的认领世代。
+    ///
+    /// 删除与认领在同一写屏障上互斥，成功删除后这些 thread 不可能再有有效认领。
+    pub(super) fn release_claims(&self, children: &[ThreadId]) {
+        if children.is_empty() {
+            return;
+        }
+        let mut ledger = self.claims.lock().expect("claim ledger lock poisoned");
+        for child in children {
+            ledger.current.remove(child);
+        }
+    }
+
+    pub(super) fn has_claims(&self) -> bool {
+        !self
+            .claims
+            .lock()
+            .expect("claim ledger lock poisoned")
+            .current
+            .is_empty()
+    }
+
+    #[cfg(test)]
+    pub(super) fn claim_is_tracked(&self, child: &ThreadId) -> bool {
+        self.claims
+            .lock()
+            .expect("claim ledger lock poisoned")
+            .current
+            .contains_key(child)
+    }
+
     pub(super) fn data(&self) -> &Arc<dyn SessionDataPort> {
         &self.data
     }

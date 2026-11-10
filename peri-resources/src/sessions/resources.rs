@@ -762,12 +762,28 @@ impl SessionResources for SessionResourcesImpl {
     async fn delete_session_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
         // root 在删除前解析：删除整棵树后无法再从存储确认归属。
         let root = self.gate.data().session_root(id).await?;
+        // 子树身份也必须在删除前取得：删除后无法再知道哪些认领世代随行消失。
+        // 没有认领登记时跳过这次读取；读取失败只放弃回收，不影响删除本身。
+        let claim_targets: Vec<ThreadId> = if self.gate.has_claims() {
+            match self.gate.data().list_session_tree(id).await {
+                Ok(tree) => tree.into_iter().map(|meta| meta.id).collect(),
+                Err(error) => {
+                    tracing::warn!(%error, %id, "session tree claim cleanup skipped");
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
         let result = self
             .gate
             .with_mutation(id, || self.gate.data().delete_tree(id))
             .await;
-        if result.is_ok() && root == *id {
-            self.gate.release_pending_for(&root);
+        if result.is_ok() {
+            self.gate.release_claims(&claim_targets);
+            if root == *id {
+                self.gate.release_pending_for(&root);
+            }
         }
         result
     }
