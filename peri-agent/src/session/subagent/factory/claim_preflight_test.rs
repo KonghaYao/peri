@@ -22,6 +22,60 @@ pub(super) struct WorkStateGate {
     pub(super) post_release: tokio::sync::Semaphore,
 }
 
+/// 延迟旧认领的结清：让「旧补偿到达」停在新 run 已经进入 `Active + Working` 之后。
+///
+/// 新实现把状态与工作意图的恢复合并到一次结算里，原先「状态已回滚、工作意图回滚
+/// 被延迟」的窗口不再存在；把结清整体卡在入口，复现同一个归属歧义：迟到的旧补偿
+/// 看到的新 run 状态与自己的中间态完全相同。
+pub(super) struct WorkRollbackGate {
+    pub(super) entered: tokio::sync::Notify,
+    pub(super) release: tokio::sync::Semaphore,
+    pub(super) committed: tokio::sync::Notify,
+}
+
+impl Default for WorkRollbackGate {
+    fn default() -> Self {
+        Self {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+            committed: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+/// 测试观察：保留认领 handle，允许用例在新一轮运行开始后重放迟到的补偿。
+#[derive(Clone)]
+pub(super) struct ReplayClaim(Arc<ReplayClaimInner>);
+
+struct ReplayClaimInner {
+    inner: Box<dyn ChildResumeClaim>,
+    rollback_gate: Option<Arc<WorkRollbackGate>>,
+}
+
+#[async_trait::async_trait]
+impl ChildResumeClaim for ReplayClaim {
+    async fn mark_running(&self) -> SessionResourceResult<()> {
+        self.0.inner.mark_running().await
+    }
+    async fn hand_off_to_background(&self) -> SessionResourceResult<()> {
+        self.0.inner.hand_off_to_background().await
+    }
+    async fn mark_failed(&self) -> SessionResourceResult<()> {
+        if let Some(gate) = &self.0.rollback_gate {
+            gate.entered.notify_one();
+            gate.release.acquire().await.unwrap().forget();
+            gate.committed.notify_one();
+        }
+        self.0.inner.mark_failed().await
+    }
+    async fn mark_terminated(&self) -> SessionResourceResult<()> {
+        self.0.inner.mark_terminated().await
+    }
+    async fn finish_with_status(&self, status: AgentStatus) -> SessionResourceResult<bool> {
+        self.0.inner.finish_with_status(status).await
+    }
+}
+
 struct ClaimResources {
     inner: Arc<MockSessionResources>,
     read_error: Mutex<Option<SessionResourceError>>,
@@ -30,6 +84,8 @@ struct ClaimResources {
     commit_before_error: bool,
     handoff_gate: Option<Arc<HandoffGate>>,
     work_state_gate: Option<Arc<WorkStateGate>>,
+    rollback_gate: Option<Arc<WorkRollbackGate>>,
+    replays: Mutex<Vec<ReplayClaim>>,
     terminal_error: bool,
 }
 
@@ -43,8 +99,20 @@ impl ClaimResources {
             commit_before_error: false,
             handoff_gate: None,
             work_state_gate: None,
+            rollback_gate: None,
+            replays: Mutex::new(Vec::new()),
             terminal_error: false,
         })
+    }
+
+    /// 最近一次认领的 handle（测试用它重放迟到的补偿）。
+    pub(super) fn last_claim(&self) -> ReplayClaim {
+        self.replays
+            .lock()
+            .unwrap()
+            .last()
+            .expect("no resume claim recorded")
+            .clone()
     }
 }
 
@@ -70,14 +138,20 @@ impl SessionResources for ClaimResources {
             return Err(error);
         }
         let inner = self.inner.claim_child_resume(child, root).await?;
-        Ok(match &self.handoff_gate {
+        let inner: Box<dyn ChildResumeClaim> = match &self.handoff_gate {
             Some(gate) => Box::new(GatedClaim {
                 inner,
                 gate: gate.clone(),
                 handed_off: std::sync::atomic::AtomicBool::new(false),
             }),
             None => inner,
-        })
+        };
+        let replay = ReplayClaim(Arc::new(ReplayClaimInner {
+            inner,
+            rollback_gate: self.rollback_gate.clone(),
+        }));
+        self.replays.lock().unwrap().push(replay.clone());
+        Ok(Box::new(replay))
     }
     async fn inspect_availability(
         &self,
@@ -576,54 +650,72 @@ async fn committed_claim_with_unknown_ack_stays_unknown_and_active() {
     assert!(!manager.is_execution_idle());
 }
 
-/// 状态回滚失败不得短路工作意图恢复。
-#[tokio::test]
-async fn handoff_rollback_restores_work_state_after_status_failure() {
-    let status_error = SessionResourceError::new(SessionResourceErrorKind::Unavailable {
-        detail: "status offline".into(),
-    });
-    let restored = AtomicUsize::new(0);
-    let error = rollback_handoff(async { Err(status_error) }, async {
-        restored.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    })
-    .await
-    .unwrap_err();
-    assert_eq!(
-        restored.load(Ordering::SeqCst),
-        1,
-        "状态回滚失败后仍必须恢复工作意图"
-    );
-    assert!(
-        error.starts_with("resume hand-off rollback failed: "),
-        "{error}"
-    );
-    assert!(
-        !error.contains("resume work state rollback failed"),
-        "{error}"
-    );
+async fn resumable_child(store: &ClaimResources) {
+    let mut meta = ThreadMeta::new_at("/tmp/work", peri_time::now_wall());
+    meta.id = CHILD.into();
+    meta.agent_status = AgentStatus::Done;
+    meta.work_state = peri_acp_types::thread::WorkState::Stopped;
+    store.inner.create_resumable_thread(meta).await.unwrap();
 }
 
-/// 两段补偿都失败时合并报告，保留各自的上下文。
+/// 正常 Finish：终态由认领在归属校验内提交，并恢复认领前的工作意图。
 #[tokio::test]
-async fn handoff_rollback_reports_both_failures() {
-    let status_error = SessionResourceError::new(SessionResourceErrorKind::Unavailable {
-        detail: "status offline".into(),
-    });
-    let work_state_error = SessionResourceError::new(SessionResourceErrorKind::Unavailable {
-        detail: "work state offline".into(),
-    });
-    let error = rollback_handoff(async { Err(status_error) }, async { Err(work_state_error) })
+async fn finish_writes_terminal_status_for_owned_claim() {
+    use peri_acp_types::thread::WorkState;
+    let store = ClaimResources::new();
+    resumable_child(&store).await;
+    let (_, claim) = ResumeClaim::acquire(store.clone(), CHILD.into(), CHILD.into(), None)
         .await
-        .unwrap_err();
-    assert!(
-        error.contains("resume hand-off rollback failed: "),
-        "{error}"
+        .unwrap();
+    store
+        .inner
+        .set_work_state(&CHILD.into(), WorkState::Working)
+        .await
+        .unwrap();
+
+    claim.finish(AgentStatus::Error).await.unwrap();
+    let meta = store.inner.load_session_meta(&CHILD.into()).await.unwrap();
+    assert_eq!(meta.agent_status, AgentStatus::Error);
+    assert_eq!(meta.work_state, WorkState::Stopped);
+}
+
+/// [回归] 旧认领结清后新 run 认领成功；迟到的 Finish 终态不得覆盖新的 Active。
+///
+/// 复现原缺陷窗口：旧认领的结清已提交、终态尚未写入时，新 run 完成认领；
+/// 旧认领随后提交终态会把新认领的 `Active` 覆盖掉。
+#[tokio::test]
+async fn stale_claim_finish_does_not_override_new_claim() {
+    let store = ClaimResources::new();
+    resumable_child(&store).await;
+    let (_, old) = ResumeClaim::acquire(store.clone(), CHILD.into(), CHILD.into(), None)
+        .await
+        .unwrap();
+    store.last_claim().mark_terminated().await.unwrap();
+    let new_claim = store
+        .claim_child_resume(&CHILD.into(), &CHILD.into())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .inner
+            .load_session_meta(&CHILD.into())
+            .await
+            .unwrap()
+            .agent_status,
+        AgentStatus::Active
     );
-    assert!(
-        error.contains("resume work state rollback failed: "),
-        "{error}"
+
+    old.finish(AgentStatus::Cancelled).await.unwrap();
+
+    assert_eq!(
+        store
+            .inner
+            .load_session_meta(&CHILD.into())
+            .await
+            .unwrap()
+            .agent_status,
+        AgentStatus::Active,
+        "旧认领的迟到终态不得覆盖新认领"
     );
-    assert!(error.contains("status offline"), "{error}");
-    assert!(error.contains("work state offline"), "{error}");
+    drop(new_claim);
 }

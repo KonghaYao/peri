@@ -574,11 +574,11 @@ pub(crate) trait SessionDataPort: Send + Sync {
 
     /// 收尾收敛到 `idle`：没有待处理的 `EnsureProcessing` 条目才写，`stopped` 不解除。
     ///
-    /// 默认实现退回单列写入（无条件 `idle`）：只有具备事务能力的后端才能在
-    /// 同一次提交里判定待处理消息并写工作意图。
+    /// 默认实现只有单列读写能力（用于 mock / 其他 adapter）：先读后写，只把
+    /// `working` 收敛为 `idle`，其余状态返回 `false` 且不写入。具备事务能力的
+    /// 后端应在同一次提交里判定待处理消息，见 SQLite 实现。
     async fn settle_work_state_after_turn(&self, id: &ThreadId) -> SessionResourceResult<bool> {
-        self.set_work_state(id, WorkState::Idle).await?;
-        Ok(true)
+        settle_work_state_after_turn_default(self, id).await
     }
 
     /// 只写上下文占用快照这一列；`None` 写 NULL（未知，不是零占用）。
@@ -725,6 +725,21 @@ pub(crate) trait SessionDataPort: Send + Sync {
 
     /// 关闭数据端口：返回后不再接受新写入。
     async fn close(&self) -> SessionResourceResult<()>;
+}
+
+/// 默认收尾的条件写：只有 `working` 才收敛为 `idle`，返回是否真的写入。
+///
+/// 读后写在本机 SQLite 之外没有事务保证；默认实现只服务于不具备原子判定的
+/// adapter，语义仍是「不覆盖显式停止」，并如实返回是否写入。
+pub(super) async fn settle_work_state_after_turn_default(
+    port: &(impl SessionDataPort + ?Sized),
+    id: &ThreadId,
+) -> SessionResourceResult<bool> {
+    if port.load_meta(id).await?.work_state != WorkState::Working {
+        return Ok(false);
+    }
+    port.set_work_state(id, WorkState::Idle).await?;
+    Ok(true)
 }
 
 // ─── child 快照的输入一致性：唯一一条规则 ─────────────────────────────────────

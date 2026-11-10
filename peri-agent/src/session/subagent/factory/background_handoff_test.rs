@@ -53,6 +53,16 @@ impl ChildResumeClaim for GatedClaim {
         }
         self.inner.mark_terminated().await
     }
+    async fn finish_with_status(&self, status: AgentStatus) -> SessionResourceResult<bool> {
+        if self.handed_off.load(Ordering::SeqCst) {
+            return Err(SessionResourceError::new(
+                SessionResourceErrorKind::InvalidInput {
+                    detail: "child resume claim was handed off to background execution".into(),
+                },
+            ));
+        }
+        self.inner.finish_with_status(status).await
+    }
 }
 
 struct EmptyChain;
@@ -820,6 +830,111 @@ async fn cancel_after_working_commit_restores_work_state() {
     assert_eq!(starts.load(Ordering::SeqCst), 0, "后台不得启动执行");
     assert_eq!(manager.active_count(), 0);
 }
+
+/// [回归] 旧认领的迟到补偿不得覆盖新 resume 的 `Active + Working`。
+///
+/// 旧补偿被延迟到新 run 已经进入 `Active + claimed + Working` 之后才结清。这个状态
+/// 与旧认领写入的中间态完全相同，按记录值判断归属会把新 run 误认为自己的记录，
+/// 从而回滚成 `Done + Stopped`；归属只能由进程内认领世代区分。
+#[tokio::test]
+async fn stale_resume_rollback_preserves_new_working_run() {
+    use peri_acp_types::thread::WorkState;
+    let (mut store, work_gate, manager) = stopped_fixture(false).await;
+    let rollback_gate = Arc::new(WorkRollbackGate::default());
+    Arc::get_mut(&mut store).unwrap().rollback_gate = Some(rollback_gate.clone());
+
+    // 旧认领：旧 run 已工作并写入终态（状态部分已结清），工作意图回滚仍被延迟。
+    let old = store
+        .claim_child_resume(&CHILD.into(), &CHILD.into())
+        .await
+        .unwrap();
+    old.hand_off_to_background().await.unwrap();
+    store
+        .inner
+        .set_work_state(&CHILD.into(), WorkState::Working)
+        .await
+        .unwrap();
+    store
+        .update_session_meta(
+            &CHILD.into(),
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let stale = store.last_claim();
+    let stale_settle = tokio::spawn(async move { stale.mark_failed().await });
+    rollback_gate.entered.notified().await;
+
+    // 旧记录已是非 active：新 run 正常认领并进入模型。
+    work_gate.release.add_permits(1);
+    let requests = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let mut new_config = config(store.clone(), manager.clone());
+    new_config.llm = fixture_source(
+        Arc::new(ObservedHangingModel {
+            requests: requests.clone(),
+            started: started.clone(),
+        }),
+        "fixture",
+    );
+    let new_resume = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        SessionFactory::resume_subagent(None, new_config),
+    )
+    .await
+    .unwrap()
+    .expect("new resume should be accepted after the old run reached a terminal state");
+    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+        .await
+        .unwrap();
+    let before = store.inner.load_session_meta(&CHILD.into()).await.unwrap();
+    assert_eq!(before.agent_status, AgentStatus::Active);
+    assert_eq!(before.work_state, WorkState::Working);
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        1,
+        "new run reached its model"
+    );
+    assert_eq!(manager.active_count(), 1);
+
+    // 释放迟到的旧补偿：归属校验必须看到新认领世代并放弃回滚。
+    rollback_gate.release.add_permits(1);
+    stale_settle.await.unwrap().unwrap();
+    let after = store.inner.load_session_meta(&CHILD.into()).await.unwrap();
+    assert_eq!(after.agent_status, AgentStatus::Active);
+    assert_eq!(
+        after.work_state,
+        WorkState::Working,
+        "a stale rollback must not persist Stopped while a newer accepted run is executing"
+    );
+    new_resume.cancel_token.cancel();
+    manager.cancel_all();
+    rollback_gate.release.add_permits(10);
+}
+
+/// 记录请求数并在第一次请求上挂起的模型：断言新 run 已真正进入执行。
+#[derive(Clone)]
+struct ObservedHangingModel {
+    requests: Arc<AtomicUsize>,
+    started: Arc<tokio::sync::Notify>,
+}
+
+impl ObservedHangingModel {
+    async fn respond(
+        &self,
+        _: peri_model::ModelRequest,
+        _: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        self.started.notify_one();
+        std::future::pending::<()>().await;
+        Vec::new()
+    }
+}
+crate::fixture_model_impl!(ObservedHangingModel);
 
 /// 用于阻挡后台 turn 立即收尾：只在运行时被丢弃时结束。
 #[derive(Clone)]

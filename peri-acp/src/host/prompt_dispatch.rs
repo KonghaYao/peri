@@ -419,10 +419,24 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             }
             return Ok(serde_json::Value::Null);
         }
+        // 查询期间可能已过去数轮重查预算；最终准入必须复核代际与取消事实，
+        // 否则查询之后到达的 Stop/新 prompt 仍会放行一次模型调用。
+        #[cfg(test)]
+        admission_gate::wait(&format!("{prompt_session_id}:before_final_admission")).await;
         let dispatchable = {
             let mut sessions = sessions.lock().await;
             sessions.get_mut(&prompt_session_id).is_some_and(|state| {
                 if state.closing || state.close_in_flight > 0 {
+                    return false;
+                }
+                if !continuation::continuation_still_valid(state, epoch) {
+                    return false;
+                }
+                if state
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(|token| token.is_cancelled())
+                {
                     return false;
                 }
                 state.continuation_in_flight = true;
@@ -442,6 +456,54 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         #[cfg(test)]
         admission_gate::wait(&format!("{prompt_session_id}:committed")).await;
     }
+
+    // 用户 prompt 的令牌在准入段发布，之后仍要经过工作区校验与排队等待。
+    // 这段时间到达的 Stop/关闭必须在这里止损，否则会先提交工作意图再发起模型调用。
+    if continuation_epoch.is_none() {
+        let admission = {
+            let sessions = sessions.lock().await;
+            sessions.get(&prompt_session_id).map(|state| {
+                if state.closing || state.close_in_flight > 0 {
+                    Err(AcpError::new(-32010, "Session is closing"))
+                } else if state
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(|token| token.is_cancelled())
+                {
+                    Ok(false)
+                } else {
+                    Ok(true)
+                }
+            })
+        };
+        match admission {
+            None => return Err(AcpError::new(-32602, "session not found")),
+            Some(Err(error)) => {
+                rollback_turn_admission(
+                    sessions,
+                    &prompt_session_id,
+                    is_continuation,
+                    admitted_cancel.as_ref(),
+                )
+                .await;
+                return Err(error);
+            }
+            Some(Ok(false)) => {
+                rollback_turn_admission(
+                    sessions,
+                    &prompt_session_id,
+                    is_continuation,
+                    admitted_cancel.as_ref(),
+                )
+                .await;
+                return Ok(serde_json::Value::Null);
+            }
+            Some(Ok(true)) => {}
+        }
+    }
+
+    #[cfg(test)]
+    admission_gate::wait(&format!("{prompt_session_id}:before_work_intent")).await;
 
     // 准入已通过、执行尚未开始：先提交 durable 工作意图。进程若在这一刻退出，
     // 下次进入仍能看出这一轮需要继续；提交失败必须拒绝本轮，不能在没有续跑意图
@@ -518,6 +580,35 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         );
         return Err(work_intent_error(Some(&thread_id), error.to_string()));
     }
+    #[cfg(test)]
+    admission_gate::wait(&format!("{prompt_session_id}:after_work_intent")).await;
+    // Stop 可能在上面的准入复查之后、本次写入之前落库：直接进入执行会把 `stopped`
+    // 覆盖成 `working`，让已停止的 thread 仍被当作可恢复工作。用户 prompt 与队列输入
+    // 在这里按提交后的取消事实撤回；续跑的取消由执行器反映为取消轮次，不提前返回。
+    if continuation_epoch.is_none() {
+        let post_commit = post_commit_cancellation(sessions, &prompt_session_id).await;
+        if !matches!(post_commit, PostCommitCancellation::Open) {
+            rollback_turn_admission(
+                sessions,
+                &prompt_session_id,
+                is_continuation,
+                admitted_cancel.as_ref(),
+            )
+            .await;
+            super::recovery::abort_recovery_launch(cfg, &prompt_session_id);
+            if recovery_origin {
+                mark_recovery_launch_failed(cfg, &prompt_session_id);
+            }
+            withdraw_unstarted_work_intent(
+                cfg,
+                &prompt_session_id,
+                &thread,
+                matches!(post_commit, PostCommitCancellation::Stop),
+            )
+            .await;
+            return Ok(serde_json::Value::Null);
+        }
+    }
 
     // 冷 child 恢复的本轮把终态、工作意图与结果消息交给一次原子结算（§5.3）：
     // 在 run_prompt 前标记，finish_prompt_turn 据此跳过独立的 work_state 写入。
@@ -567,6 +658,13 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     // `run_prompt` 在 attach 前失败时返回 `Ok(Null)`：本轮从未移交执行器，成功空操作
     // 同样要撤销本次准入发布的令牌，否则 close 会把空轮次误判为在飞（#196 P2 复审）。
     if matches!(&result, Ok(Value::Null)) {
+        // queued input 的 ticket 被 Stop 撤销时 attachment 返回 `Null`：停止意图已经
+        // 落库，但本轮此前提交的 `working` 还留着，会让 thread 被当作可恢复工作。
+        // 取消事实必须在回滚准入清除令牌之前读取。
+        let stopped = matches!(
+            post_commit_cancellation(sessions, &prompt_session_id).await,
+            PostCommitCancellation::Stop
+        );
         rollback_turn_admission(
             sessions,
             &prompt_session_id,
@@ -574,6 +672,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             admitted_cancel.as_ref(),
         )
         .await;
+        withdraw_unstarted_work_intent(cfg, &prompt_session_id, &thread, stopped).await;
     }
 
     // Prediction remains admitted before pool restoration and while the prompt lock is held.
@@ -773,6 +872,67 @@ fn abort_continuation_query_error(
         mark_recovery_launch_failed(cfg, session_id);
     }
     Value::Null
+}
+
+/// `working` 提交后、模型调用前的最终取消事实。
+enum PostCommitCancellation {
+    /// 没有取消事实，可以进入执行器。
+    Open,
+    /// Stop 已生效：durable 工作意图必须回到 `stopped`。
+    Stop,
+    /// 会话关闭/失效：本轮从未开始，只撤回本次写入的 `working`。
+    Aborted,
+}
+
+/// 读取提交工作意图之后的取消事实；会话已移除按失效处理。
+async fn post_commit_cancellation(
+    sessions: &SharedSessions,
+    session_id: &str,
+) -> PostCommitCancellation {
+    let sessions = sessions.lock().await;
+    match sessions.get(session_id) {
+        Some(state) if state.closing || state.close_in_flight > 0 => {
+            PostCommitCancellation::Aborted
+        }
+        Some(state)
+            if state
+                .cancel_token
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled()) =>
+        {
+            PostCommitCancellation::Stop
+        }
+        Some(_) => PostCommitCancellation::Open,
+        None => PostCommitCancellation::Aborted,
+    }
+}
+
+/// 撤回本轮已提交但从未执行的工作意图。
+///
+/// Stop 已生效时回到 `stopped`；其他取消只把仍为 `working` 的状态结算为 `idle`，
+/// 不覆盖并发 Stop 已落库的 `stopped`。
+async fn withdraw_unstarted_work_intent(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+    thread: &ThreadId,
+    stopped: bool,
+) {
+    let resources = cfg.session_manager.session_resources();
+    let result = if stopped {
+        set_work_state_with_retry(resources, thread, WorkState::Stopped).await
+    } else {
+        settle_work_state_with_retry(resources, thread)
+            .await
+            .map(|_| ())
+    };
+    if let Err(error) = result {
+        tracing::error!(
+            session_id,
+            thread_id = %thread,
+            %error,
+            "work state withdrawal before prompt failed"
+        );
+    }
 }
 
 /// 回滚本轮在准入段发布的内存标记。

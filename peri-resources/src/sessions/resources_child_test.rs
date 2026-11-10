@@ -1,5 +1,199 @@
 use super::*;
 
+/// 旧补偿延迟到新任务 `Active + Working` 之后到达时，不得覆盖新任务的工作意图。
+///
+/// 新任务的正常中间态与旧认领写入的值完全相同，按记录值判断归属会把新任务回滚成
+/// `Done + Stopped`；归属由进程内认领世代区分。
+#[tokio::test]
+async fn late_resume_rollback_preserves_new_working() {
+    use peri_acp_types::thread::WorkState;
+    let fixture = Fixture::new().await;
+    fixture.create("s-late-rollback-root").await;
+    let child = fixture
+        .child("s-late-rollback-child", "s-late-rollback-root")
+        .await;
+    let child_id = child.target.thread_id;
+    let root_id = child.root_id;
+    fixture
+        .facade
+        .update_session_meta(
+            &child_id,
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    fixture
+        .facade
+        .set_work_state(&child_id, WorkState::Stopped)
+        .await
+        .unwrap();
+
+    // 旧认领：旧 run 已工作并写入终态，工作意图回滚尚未执行。
+    let old = fixture
+        .facade
+        .claim_child_resume(&child_id, &root_id)
+        .await
+        .unwrap();
+    old.hand_off_to_background().await.unwrap();
+    fixture
+        .facade
+        .set_work_state(&child_id, WorkState::Working)
+        .await
+        .unwrap();
+    fixture
+        .facade
+        .update_session_meta(
+            &child_id,
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // 新任务在旧补偿到达前完成认领并提交 Working。
+    let new = fixture
+        .facade
+        .claim_child_resume(&child_id, &root_id)
+        .await
+        .unwrap();
+    new.hand_off_to_background().await.unwrap();
+    fixture
+        .facade
+        .set_work_state(&child_id, WorkState::Working)
+        .await
+        .unwrap();
+    let before = fixture.facade.load_session_meta(&child_id).await.unwrap();
+    assert_eq!(before.agent_status, AgentStatus::Active);
+    assert_eq!(before.work_state, WorkState::Working);
+
+    // 迟到的旧补偿：当前值看起来与自己的中间态一致，但世代已被新认领覆盖。
+    old.mark_failed().await.unwrap();
+
+    let after = fixture.facade.load_session_meta(&child_id).await.unwrap();
+    assert_eq!(after.agent_status, AgentStatus::Active);
+    assert_eq!(
+        after.work_state,
+        WorkState::Working,
+        "a stale resume rollback must not clear the newer run's durable working intent"
+    );
+}
+
+/// 状态列已被改写时，不得只回滚工作意图列。
+#[tokio::test]
+async fn rollback_skips_both_columns_when_status_changed() {
+    use peri_acp_types::thread::WorkState;
+    let fixture = Fixture::new().await;
+    fixture.create("s-partial-rollback-root").await;
+    let child = fixture
+        .child("s-partial-rollback-child", "s-partial-rollback-root")
+        .await;
+    let child_id = child.target.thread_id;
+    let root_id = child.root_id;
+    fixture
+        .facade
+        .update_session_meta(
+            &child_id,
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    fixture
+        .facade
+        .set_work_state(&child_id, WorkState::Stopped)
+        .await
+        .unwrap();
+
+    let claim = fixture
+        .facade
+        .claim_child_resume(&child_id, &root_id)
+        .await
+        .unwrap();
+    claim.hand_off_to_background().await.unwrap();
+    fixture
+        .facade
+        .set_work_state(&child_id, WorkState::Working)
+        .await
+        .unwrap();
+    // 新任务只改写了状态列。
+    fixture
+        .facade
+        .update_session_meta(
+            &child_id,
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    claim.mark_failed().await.unwrap();
+    let after = fixture.facade.load_session_meta(&child_id).await.unwrap();
+    assert_eq!(after.agent_status, AgentStatus::Done);
+    assert_eq!(
+        after.work_state,
+        WorkState::Working,
+        "compensation must not restore only the work-state column"
+    );
+}
+
+/// 工作意图列已被改写时，不得只回滚状态列。
+#[tokio::test]
+async fn rollback_skips_both_columns_when_work_state_changed() {
+    use peri_acp_types::thread::WorkState;
+    let fixture = Fixture::new().await;
+    fixture.create("s-partial-work-root").await;
+    let child = fixture
+        .child("s-partial-work-child", "s-partial-work-root")
+        .await;
+    let child_id = child.target.thread_id;
+    let root_id = child.root_id;
+    fixture
+        .facade
+        .update_session_meta(
+            &child_id,
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    fixture
+        .facade
+        .set_work_state(&child_id, WorkState::Stopped)
+        .await
+        .unwrap();
+
+    let claim = fixture
+        .facade
+        .claim_child_resume(&child_id, &root_id)
+        .await
+        .unwrap();
+    claim.hand_off_to_background().await.unwrap();
+    // 新任务只改写了工作意图列。
+    fixture
+        .facade
+        .set_work_state(&child_id, WorkState::Idle)
+        .await
+        .unwrap();
+    claim.mark_failed().await.unwrap();
+    let after = fixture.facade.load_session_meta(&child_id).await.unwrap();
+    assert_eq!(
+        after.agent_status,
+        AgentStatus::Active,
+        "compensation must not restore only the status column"
+    );
+    assert_eq!(after.work_state, WorkState::Idle);
+}
+
 #[tokio::test]
 async fn test_save_child_preserves_parent_snapshot_and_tree() {
     let fixture = Fixture::new().await;
@@ -267,4 +461,389 @@ async fn test_background_handoff_preparation_failure_restores_previous_claim_rec
         .claim_child_resume(&child_id, &"s-handoff-root".to_owned())
         .await
         .unwrap();
+}
+
+/// 记录回滚已知未生效时，仍要在同一归属校验下恢复工作意图：worker 不会重试，
+/// 留下 `Active + Working` 会被下一次进入当成可恢复工作。
+#[tokio::test]
+async fn claim_rollback_known_failure_still_restores_work_state() {
+    use peri_acp_types::session_resources::MutationOutcome;
+    use peri_acp_types::thread::WorkState;
+    let fixture = Fixture::new().await;
+    fixture.create("s-rollback-fail-root").await;
+    let child = fixture
+        .child("s-rollback-fail-child", "s-rollback-fail-root")
+        .await;
+    let child_id = child.target.thread_id;
+    let root_id = child.root_id;
+    fixture
+        .facade
+        .update_session_meta(
+            &child_id,
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    fixture
+        .facade
+        .set_work_state(&child_id, WorkState::Stopped)
+        .await
+        .unwrap();
+
+    let claim = fixture
+        .facade
+        .claim_child_resume(&child_id, &root_id)
+        .await
+        .unwrap();
+    fixture
+        .facade
+        .set_work_state(&child_id, WorkState::Working)
+        .await
+        .unwrap();
+    // 只拒绝回滚写入的终态：认领写入 `active` 已成功，故障只覆盖本次补偿。
+    sqlx::raw_sql(
+        "CREATE TRIGGER reject_record_rollback BEFORE UPDATE OF agent_status ON threads
+         WHEN NEW.agent_status = 'done'
+         BEGIN SELECT RAISE(ABORT, 'record rollback blocked'); END;",
+    )
+    .execute(fixture.facade.local_pool())
+    .await
+    .unwrap();
+
+    let error = claim.mark_failed().await.unwrap_err();
+    assert_eq!(error.effect(), MutationOutcome::NotApplied);
+    assert_eq!(
+        fixture
+            .facade
+            .load_session_meta(&child_id)
+            .await
+            .unwrap()
+            .work_state,
+        WorkState::Stopped,
+        "记录回滚确定失败时仍须撤回 working"
+    );
+    let record = fixture
+        .facade
+        .gate
+        .data()
+        .load_child_resume_record(&child_id)
+        .await
+        .unwrap();
+    assert_eq!(record.status, AgentStatus::Active);
+    assert!(record.claimed);
+
+    // 已知失败允许重试：故障移除后同一 handle 能完成整次补偿。
+    sqlx::raw_sql("DROP TRIGGER reject_record_rollback")
+        .execute(fixture.facade.local_pool())
+        .await
+        .unwrap();
+    claim.mark_failed().await.unwrap();
+    let record = fixture
+        .facade
+        .gate
+        .data()
+        .load_child_resume_record(&child_id)
+        .await
+        .unwrap();
+    assert_eq!(record.status, AgentStatus::Done);
+    assert!(!record.claimed);
+}
+
+/// 记录回滚结果未知时不追加任何写入：working 与不确定屏障都必须保留。
+#[tokio::test]
+async fn claim_rollback_unknown_outcome_keeps_working_and_barrier() {
+    use peri_acp_types::thread::WorkState;
+    let fixture = Fixture::new().await;
+    fixture.create("s-rollback-unknown-root").await;
+    let child = fixture
+        .child("s-rollback-unknown-child", "s-rollback-unknown-root")
+        .await;
+    let child_id = child.target.thread_id;
+    let root_id = child.root_id;
+    fixture
+        .facade
+        .update_session_meta(
+            &child_id,
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    fixture
+        .facade
+        .set_work_state(&child_id, WorkState::Stopped)
+        .await
+        .unwrap();
+
+    let claim = fixture
+        .facade
+        .claim_child_resume(&child_id, &root_id)
+        .await
+        .unwrap();
+    fixture
+        .facade
+        .set_work_state(&child_id, WorkState::Working)
+        .await
+        .unwrap();
+    // 延迟外键在 COMMIT 阶段失败：回滚是否落盘无法证明，效果必须是 Unknown。
+    sqlx::raw_sql(
+        "CREATE TABLE rollback_guard (
+             id TEXT PRIMARY KEY,
+             thread_id TEXT REFERENCES threads(id) DEFERRABLE INITIALLY DEFERRED
+         )",
+    )
+    .execute(fixture.facade.local_pool())
+    .await
+    .unwrap();
+    sqlx::raw_sql(
+        "CREATE TRIGGER reject_record_rollback AFTER UPDATE OF agent_status ON threads
+         WHEN NEW.agent_status = 'done'
+         BEGIN
+             INSERT INTO rollback_guard (id, thread_id)
+             VALUES ('rollback', 'missing-thread');
+         END;",
+    )
+    .execute(fixture.facade.local_pool())
+    .await
+    .unwrap();
+
+    let error = claim.mark_failed().await.unwrap_err();
+    assert!(error.is_persistence_uncertain(), "{error:?}");
+    assert_eq!(
+        fixture
+            .facade
+            .load_session_meta(&child_id)
+            .await
+            .unwrap()
+            .work_state,
+        WorkState::Working,
+        "未知结果不得追加写入工作意图"
+    );
+    let blocked = fixture
+        .facade
+        .set_work_state(&child_id, WorkState::Stopped)
+        .await
+        .unwrap_err();
+    assert!(
+        blocked.is_persistence_uncertain(),
+        "未知结果必须保留不确定屏障"
+    );
+    assert!(
+        fixture.facade.gate.claim_is_tracked(&child_id),
+        "失败且未结算的认领必须保留世代"
+    );
+}
+
+/// 结算回收认领世代；迟到结算不得移除新认领的世代，新认领仍能正常建立。
+#[tokio::test]
+async fn settled_claim_releases_ledger_without_dropping_newer_generation() {
+    let fixture = Fixture::new().await;
+    fixture.create("s-ledger-root").await;
+    let child = fixture.child("s-ledger-child", "s-ledger-root").await;
+    let child_id = child.target.thread_id;
+    let root_id = child.root_id;
+    fixture
+        .facade
+        .update_session_meta(
+            &child_id,
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let first = fixture
+        .facade
+        .claim_child_resume(&child_id, &root_id)
+        .await
+        .unwrap();
+    assert!(fixture.facade.gate.claim_is_tracked(&child_id));
+    first.mark_failed().await.unwrap();
+    assert!(
+        !fixture.facade.gate.claim_is_tracked(&child_id),
+        "结算后必须回收认领世代"
+    );
+
+    // 新认领覆盖世代后，旧 handle 的迟到结算不得移除新条目。
+    let old = fixture
+        .facade
+        .claim_child_resume(&child_id, &root_id)
+        .await
+        .unwrap();
+    old.hand_off_to_background().await.unwrap();
+    fixture
+        .facade
+        .update_session_meta(
+            &child_id,
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let new = fixture
+        .facade
+        .claim_child_resume(&child_id, &root_id)
+        .await
+        .unwrap();
+    old.mark_failed().await.unwrap();
+    assert!(
+        fixture.facade.gate.claim_is_tracked(&child_id),
+        "旧 handle 不得移除新认领的世代"
+    );
+    new.mark_failed().await.unwrap();
+    assert!(!fixture.facade.gate.claim_is_tracked(&child_id));
+}
+
+/// 删除会话子树后，随树消失的认领世代一并回收。
+#[tokio::test]
+async fn deleting_a_child_reclaims_its_claim_generation() {
+    let fixture = Fixture::new().await;
+    fixture.create("s-delete-claim-root").await;
+    let child = fixture
+        .child("s-delete-claim-child", "s-delete-claim-root")
+        .await;
+    let child_id = child.target.thread_id;
+    let root_id = child.root_id;
+    fixture
+        .facade
+        .update_session_meta(
+            &child_id,
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let claim = fixture
+        .facade
+        .claim_child_resume(&child_id, &root_id)
+        .await
+        .unwrap();
+    assert!(fixture.facade.gate.claim_is_tracked(&child_id));
+
+    fixture.facade.delete_session_tree(&child_id).await.unwrap();
+    assert!(!fixture.facade.gate.claim_is_tracked(&child_id));
+    drop(claim);
+}
+
+/// 正常 Finish：终态与「恢复到认领前」在同一归属校验内提交。
+#[tokio::test]
+async fn finish_with_status_writes_terminal_status_for_owned_claim() {
+    use peri_acp_types::thread::WorkState;
+    let fixture = Fixture::new().await;
+    fixture.create("s-finish-root").await;
+    let child = fixture.child("s-finish-child", "s-finish-root").await;
+    let child_id = child.target.thread_id;
+    let root_id = child.root_id;
+    fixture
+        .facade
+        .update_session_meta(
+            &child_id,
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    fixture
+        .facade
+        .set_work_state(&child_id, WorkState::Stopped)
+        .await
+        .unwrap();
+
+    let claim = fixture
+        .facade
+        .claim_child_resume(&child_id, &root_id)
+        .await
+        .unwrap();
+    fixture
+        .facade
+        .set_work_state(&child_id, WorkState::Working)
+        .await
+        .unwrap();
+
+    assert!(
+        claim.finish_with_status(AgentStatus::Error).await.unwrap(),
+        "仍有归属时必须写入终态"
+    );
+    let meta = fixture.facade.load_session_meta(&child_id).await.unwrap();
+    assert_eq!(meta.agent_status, AgentStatus::Error);
+    assert_eq!(
+        meta.work_state,
+        WorkState::Stopped,
+        "终态写入仍须恢复认领前的工作意图"
+    );
+}
+
+/// [回归] 旧认领结清后新认领接管；迟到的终态写入不得覆盖新认领的 `Active`。
+#[tokio::test]
+async fn stale_claim_finish_with_status_does_not_override_new_claim() {
+    let fixture = Fixture::new().await;
+    fixture.create("s-stale-finish-root").await;
+    let child = fixture
+        .child("s-stale-finish-child", "s-stale-finish-root")
+        .await;
+    let child_id = child.target.thread_id;
+    let root_id = child.root_id;
+    fixture
+        .facade
+        .update_session_meta(
+            &child_id,
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let old = fixture
+        .facade
+        .claim_child_resume(&child_id, &root_id)
+        .await
+        .unwrap();
+    // 复现原缺陷窗口：旧认领的结清已提交、终态尚未写入时，新 run 认领成功。
+    old.mark_terminated().await.unwrap();
+    let new = fixture
+        .facade
+        .claim_child_resume(&child_id, &root_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .facade
+            .load_session_meta(&child_id)
+            .await
+            .unwrap()
+            .agent_status,
+        AgentStatus::Active
+    );
+
+    assert!(
+        !old.finish_with_status(AgentStatus::Cancelled)
+            .await
+            .unwrap(),
+        "归属丢失后不得再写终态"
+    );
+    let record = fixture
+        .facade
+        .gate
+        .data()
+        .load_child_resume_record(&child_id)
+        .await
+        .unwrap();
+    assert_eq!(record.status, AgentStatus::Active);
+    assert!(record.claimed);
+    new.mark_failed().await.unwrap();
 }

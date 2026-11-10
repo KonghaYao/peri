@@ -114,6 +114,16 @@ fn child_meta(id: &ThreadId, meta: &NewSessionMeta, hidden: bool) -> ThreadMeta 
     thread
 }
 
+/// 进程内认领世代：区分「本次认领」与后续新认领。
+///
+/// 与资源实现同构：持久状态无法表达归属，新 run 的 `Active + Working` 与旧认领
+/// 的中间态完全相同，只能靠世代判断旧补偿是否还有资格。
+#[derive(Default)]
+struct ClaimLedger {
+    next: u64,
+    current: HashMap<ThreadId, u64>,
+}
+
 pub(crate) struct MockSessionResources {
     /// 每个会话 id 的独立数据区：测试替身也按会话隔离（不同 thread 不串扰）。
     ///
@@ -146,6 +156,8 @@ pub(crate) struct MockSessionResources {
     /// 阶段门（[`ResumeLoadGate`]）只在**认领后**的快照读取生效：resume 的第一次读取是
     /// 认领前的绑定分类，认领后才是 history 装载——用例的门语义按后者定义。
     claimed: Arc<AtomicBool>,
+    /// 进程内认领世代：新认领覆盖旧值，旧 handle 随即失去补偿资格。
+    claim_ledger: Arc<Mutex<ClaimLedger>>,
     /// 快照读取故障注入：在第 N 次 `load_session_snapshot`（1-based）返回 Err，0 = 关闭。
     ///
     /// resume 路径有两次快照读取（认领前的绑定分类、认领后的 history 装载），用例据此
@@ -204,6 +216,7 @@ impl MockSessionResources {
             reminder_append_gate: Mutex::new(None),
             archive_probe_gate: Mutex::new(None),
             claimed: Arc::new(AtomicBool::new(false)),
+            claim_ledger: Arc::default(),
             fail_snapshot_at: AtomicUsize::new(0),
             snapshot_reads: AtomicUsize::new(0),
             history_read_only: AtomicBool::new(false),
@@ -367,15 +380,7 @@ impl MockSessionResources {
 
     /// durable 工作意图写入：只改 meta 的那一列，不进入状态序列。
     fn write_work_state(&self, id: &ThreadId, state: WorkState) {
-        self.with_region(id, |region| {
-            let mut meta = region
-                .meta
-                .clone()
-                .unwrap_or_else(|| ThreadMeta::new_at("/test", peri_time::now_wall()));
-            meta.id = id.clone();
-            meta.work_state = state;
-            region.meta = Some(meta);
-        });
+        write_work_state_shared(&self.regions, id, state);
     }
 
     /// 上下文占用快照写入：只改 meta 的那一列。
@@ -455,18 +460,39 @@ fn write_status_shared(
     status_changed.notify_waiters();
 }
 
+fn write_work_state_shared(
+    regions: &Mutex<HashMap<ThreadId, Region>>,
+    id: &ThreadId,
+    state: WorkState,
+) {
+    let mut regions = regions.lock().unwrap();
+    let region = regions.entry(id.clone()).or_default();
+    let mut meta = region
+        .meta
+        .clone()
+        .unwrap_or_else(|| ThreadMeta::new_at("/test", peri_time::now_wall()));
+    meta.id = id.clone();
+    meta.work_state = state;
+    region.meta = Some(meta);
+}
+
 fn status_name(status: AgentStatus) -> &'static str {
     status.as_str()
 }
 
-/// `claim_child_resume` 返回的认领：语义与资源实现一致——结清时恢复到认领前的状态。
+/// `claim_child_resume` 返回的认领：语义与资源实现一致——结清时恢复到认领前的
+/// 状态与工作意图，且记录已被新任务改写时放弃补偿。
 struct MockResumeClaim {
     claimed: Arc<AtomicBool>,
     regions: Arc<Mutex<HashMap<ThreadId, Region>>>,
     statuses: Arc<Mutex<Vec<(ThreadId, AgentStatus)>>>,
     status_changed: Arc<tokio::sync::Notify>,
+    claim_ledger: Arc<Mutex<ClaimLedger>>,
+    claim_nonce: u64,
     child: ThreadId,
     previous: AgentStatus,
+    previous_work_state: WorkState,
+    settled: AtomicBool,
 }
 
 #[async_trait]
@@ -487,27 +513,93 @@ impl ChildResumeClaim for MockResumeClaim {
     }
 
     async fn mark_failed(&self) -> SessionResourceResult<()> {
-        self.settle();
+        self.settle(None);
         Ok(())
     }
 
     async fn mark_terminated(&self) -> SessionResourceResult<()> {
-        self.settle();
+        self.settle(None);
         Ok(())
+    }
+
+    async fn finish_with_status(&self, status: AgentStatus) -> SessionResourceResult<bool> {
+        Ok(self.settle(Some(status)))
     }
 }
 
 impl MockResumeClaim {
-    /// 恢复到认领前的状态：终态写入由调用方在结清之后单独提交。
-    fn settle(&self) {
+    /// 恢复到认领前的状态；请求终态时在同一把锁内提交，返回是否仍归本次认领所有。
+    ///
+    /// 与资源实现同构：先校验世代仍属于本次认领，再检查状态列未被第三方改写，
+    /// 两列在同一把锁内恢复；重复结清是 no-op。
+    fn settle(&self, terminal: Option<AgentStatus>) -> bool {
+        if self.settled.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        let owns_generation = self
+            .claim_ledger
+            .lock()
+            .unwrap()
+            .current
+            .get(&self.child)
+            .copied()
+            == Some(self.claim_nonce);
+        if !owns_generation {
+            tracing::warn!(
+                thread_id = %self.child,
+                claim_nonce = self.claim_nonce,
+                "mock resume claim rollback skipped: a newer claim owns this child"
+            );
+            return false;
+        }
+        let mut restored = None;
+        {
+            let mut regions = self.regions.lock().unwrap();
+            let Some(region) = regions.get_mut(&self.child) else {
+                return false;
+            };
+            let Some(meta) = region.meta.as_mut() else {
+                return false;
+            };
+            if meta.agent_status != AgentStatus::Active {
+                tracing::warn!(
+                    thread_id = %self.child,
+                    status = ?meta.agent_status,
+                    work_state = ?meta.work_state,
+                    previous_status = ?self.previous,
+                    previous_work_state = ?self.previous_work_state,
+                    "mock resume claim rollback skipped: record no longer belongs to this claim"
+                );
+                return false;
+            }
+            // 工作意图可能已被本次运行写成终态：只跳过这一列的回滚，终态仍由本次
+            // 认领提交。
+            if meta.work_state == WorkState::Working || meta.work_state == self.previous_work_state
+            {
+                meta.work_state = self.previous_work_state;
+                meta.agent_status = self.previous;
+                restored = Some(self.previous);
+            }
+            if let Some(status) = terminal {
+                meta.agent_status = status;
+            }
+        }
+        {
+            let mut statuses = self.statuses.lock().unwrap();
+            // 与门面写入同构：只记录真实状态转换。终态与恢复值相同时，两次写入
+            // 只产生一个序列项。
+            if let Some(previous) = restored {
+                statuses.push((self.child.clone(), previous));
+            }
+            if let Some(status) = terminal {
+                if restored != Some(status) {
+                    statuses.push((self.child.clone(), status));
+                }
+            }
+        }
+        self.status_changed.notify_waiters();
         self.claimed.store(false, Ordering::SeqCst);
-        write_status_shared(
-            &self.regions,
-            &self.statuses,
-            &self.status_changed,
-            &self.child,
-            self.previous,
-        );
+        true
     }
 }
 

@@ -91,6 +91,12 @@ pub trait ChildResumeClaim: Send + Sync {
     async fn mark_failed(&self) -> SessionResourceResult<()>;
     /// 认领终止（取消/宿主退出）：恢复到认领前的状态。
     async fn mark_terminated(&self) -> SessionResourceResult<()>;
+
+    /// 认领终止并提交领域终态，返回本次是否仍拥有该 child 的写入权。
+    ///
+    /// 实现必须把「恢复到认领前」与终态写入放在同一个归属校验内完成：返回
+    /// `Ok(false)` 表示新认领已接管该 child，调用方不得再写终态。
+    async fn finish_with_status(&self, status: AgentStatus) -> SessionResourceResult<bool>;
 }
 
 /// 会话资源门面：业务侧唯一的会话行为入口。
