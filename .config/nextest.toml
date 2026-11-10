@@ -16,9 +16,9 @@ nextest-version = "0.9.85"
 
 [profile.default]
 # 原有 E2E 跳过条件按 package + test 精确迁移，不用裸 `test(...)`：裸匹配会连带
-# 排除其他包里同名的测试。这些用例需要真实 SDK / 外部环境，在 CI 中不执行
-# （范围与迁移前 `cargo test -- --skip ...` 一致）。
-default-filter = "not (package(=peri-acp) & test(host::execution_admission_jsonl) | package(=peri-acp) & test(host::scheduled_admission) | package(=peri-tui) & test(sdk_execution::tests::real_sdk) | package(=peri-middlewares) & test(subagent::tool) | package(=peri-middlewares) & test(mcp::workspace_recovery_tests) | package(=peri-middlewares) & test(mcp::workspace_builtin_tests::bridge_accepts_workspace_owned_task_handle) | package(=peri-middlewares) & test(mcp::tool_bridge::tests::builtin_tool_call_surfaces_timeout_error_after_bridge_deadline))"
+# 排除其他包里同名的测试。这些用例按既有范围保留：真实 SDK、外部进程或进程级时序假设。
+# `subagent::tool` 全部使用本地 mock 模型与临时 SQLite，不属于外部依赖，不在此列。
+default-filter = "not (package(=peri-acp) & test(host::execution_admission_jsonl) | package(=peri-acp) & test(host::scheduled_admission) | package(=peri-tui) & test(sdk_execution::tests::real_sdk) | package(=peri-middlewares) & test(mcp::workspace_recovery_tests) | package(=peri-middlewares) & test(mcp::workspace_builtin_tests::bridge_accepts_workspace_owned_task_handle) | package(=peri-middlewares) & test(mcp::tool_bridge::tests::builtin_tool_call_surfaces_timeout_error_after_bridge_deadline))"
 
 # 互斥组：把串行额度收窄到「迁移前靠 --test-threads=1 隐式串行」的那些测试，
 # 而不是整个测试运行。其余测试按正常的 num-cpus 额度并行。

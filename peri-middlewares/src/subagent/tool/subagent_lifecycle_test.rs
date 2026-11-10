@@ -5,6 +5,9 @@
 //! 红阶段：现行 `fire_subagent_lifecycle_hooks_static` 只按事件过滤，
 //! matcher/if/once 都被忽略，以下用例会失败。
 
+// 夹具用 POSIX shell（touch/echo）与 /tmp；Windows 的 hook shell 是 PowerShell。
+#![cfg(unix)]
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 

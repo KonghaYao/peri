@@ -48,7 +48,8 @@ workflow=".github/workflows/ci.yml"
 # 执行范围的事实源：与 ci.yml 各测试步骤的 `-E` 一一对应。改任一侧都会让
 # `--check` 失败，因此两边必须同时更新。
 #
-# 第一个步骤是「workspace 减去下面 10 个包」，其余步骤只挑具名目标；
+# 第一个步骤是「workspace 减去下面 10 个包」，其余步骤按包执行全部目标；
+# Compact 四套对抗额外用 binary 具名，保证逐套命中非零用例。
 # 两者合起来构成全部执行范围。
 workspace_excluded=(
     peri-acp
@@ -63,22 +64,18 @@ workspace_excluded=(
     peri-mcp-workspace
 )
 
-# 其余步骤显式执行的目标，形如 `<package>:<target-kind>:<target-name>`；
-# kind 或 name 为 `*` 表示该 package 的全部测试目标。
+# 其余步骤的执行范围，形如 `<package>:<target-kind>:<target-name>`；
+# kind 或 name 为 `*` 表示该 package 的全部测试目标。Compact 四套对抗
+# 继续保持具名，以便要求各自真实执行。
 step_includes=(
-    'peri-acp:lib:*'
-    'peri-agent:lib:*'
-    'peri-agent:test:middleware_tests'
-    'peri-agent:test:compact_followup_behavior_test'
-    'peri-agent:test:compact_failure_adversarial_test'
+    'peri-acp:*:*'
+    'peri-agent:*:*'
     'peri-agent:test:compact_pressure_adversarial_test'
     'peri-agent:test:compact_session_adversarial_test'
     'peri-agent:test:compact_session_manual_adversarial_test'
     'peri-agent:test:compact_authority_projection_test'
-    'peri-tui:lib:*'
-    'peri-tui:bin:*'
-    'peri-tui:test:meta_session_cli'
-    'peri-middlewares:lib:*'
+    'peri-tui:*:*'
+    'peri-middlewares:*:*'
     'peri-mcp-common:*:*'
     'peri-mcp-web:*:*'
     'peri-mcp-artifact:*:*'
@@ -91,7 +88,6 @@ step_includes=(
 # nextest 不支持 doctest，因此单独一个入口，与原 `cargo test` 的范围保持一致。
 doctest_excluded=(
     peri-acp
-    peri-agent
     peri-tui
     peri-middlewares
 )
@@ -110,6 +106,28 @@ required_suites=(
     'peri-acp:lib:*'
     'peri-tui:test:meta_session_cli'
     'peri-middlewares:lib:*'
+    # 以下目标是本地 mock / 临时 SQLite / 真实进程回归，不依赖外部模型 SDK。
+    # 单列后，CI 过滤器一旦漏掉某个目标会先在这里失败。
+    'peri-acp:test:compact_command_contract_test'
+    'peri-acp:test:concurrent_bg_agent_test'
+    'peri-acp:test:integration_test'
+    'peri-acp:test:prompt_cache_boundary'
+    'peri-agent:test:micro_compact_wire_test'
+    'peri-agent:test:projection_allocation_test'
+    'peri-agent:test:responses_terminal_test'
+    'peri-agent:test:stream_interruption_logs_test'
+    'peri-agent:test:stream_interruption_test'
+    'peri-middlewares:test:canonical_tool_invocation_contract'
+    'peri-middlewares:test:hook_output_diagnostic_contract'
+    'peri-middlewares:test:mcp_host_policy_contract'
+    'peri-middlewares:test:mcp_isolation_contract'
+    'peri-middlewares:test:subagent_mcp_visibility'
+    'peri-middlewares:test:workspace_tool_registration'
+    'peri-tui:test:cli_session_args'
+    'peri-tui:test:print_background_exit'
+    'peri-tui:test:print_bare'
+    'peri-tui:test:print_exit'
+    'peri-tui:test:session_recovery_process'
 )
 
 # metadata 经临时文件传给 Python，不作为命令行参数：本仓库的 workspace 已让
