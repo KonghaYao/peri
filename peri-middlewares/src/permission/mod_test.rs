@@ -120,6 +120,15 @@ fn test_default_requires_approval() {
     assert!(default_requires_approval("delete_something"));
     assert!(default_requires_approval("rm_rf"));
     assert!(default_requires_approval("Agent"));
+    // Workflow 启动：后台子链无 HITL，等价委派执行权（与 Agent 同规则）
+    assert!(default_requires_approval("Workflow"));
+    assert!(default_requires_approval("mcp__workflow__Workflow"));
+    // 查询/终止/回填类 workflow 工具不拦截
+    assert!(!default_requires_approval("mcp__workflow__WorkflowStatus"));
+    assert!(!default_requires_approval("mcp__workflow__WorkflowKill"));
+    assert!(!default_requires_approval(
+        "mcp__workflow__WorkflowAgentClaim"
+    ));
     // MCP 工具需审批
     assert!(default_requires_approval("mcp__filesystem__read_file"));
     assert!(default_requires_approval("mcp__filesystem__write_file"));
@@ -548,14 +557,14 @@ fn sensitive_entries_match_default_requires_approval() {
     }
 }
 
-/// 条目集合与判定分支数一致（精确 9 项 + 前缀 3 项 = 12 项；
+/// 条目集合与判定分支数一致（精确 10 项 + 前缀 3 项 = 13 项；
 /// 变更 `default_requires_approval` 分支时必须同步条目清单）。
 #[test]
 fn sensitive_entries_cover_all_requires_approval_branches() {
     let entries = sensitive_tool_entries();
     assert_eq!(
         entries.len(),
-        12,
+        13,
         "条目清单应覆盖 default_requires_approval 全部分支"
     );
     // 前缀条目恰好 3 项（delete_ / rm_ / mcp__）
@@ -920,85 +929,5 @@ fn workspace_sensitive_entries_use_model_names() {
     assert!(!is_edit_tool(registry_effective_name("workspace", "Bash")));
 }
 
-/// §8 第 17 行（F9）：模型可见 Markdown 的显示名从声明表解析 effective name。
-///
-/// 断言的是**渲染输出**：`cron_register` 迁移为 builtin 实例后已不存在裸名工具，
-/// 渲染文本里出现裸名条目即点名一个不存在的工具。期望值从注册表
-/// （`peri_acp_types::builtin_mcp`）派生而非复用生产查表助手——复用助手会让
-/// 「助手退回裸名」这种回归与断言同向变化而无法失败。
-#[test]
-fn cron_sensitive_markdown_uses_registry_effective_name() {
-    let rendered = format_sensitive_tools();
-    let lines: Vec<&str> = rendered.lines().collect();
-    assert_eq!(lines.len(), 12, "敏感工具完整列表应逐项渲染");
-
-    let cron = peri_acp_types::builtin_mcp::find("cron").expect("cron 实例应有声明");
-    let register = cron
-        .tools
-        .iter()
-        .find(|tool| tool.original_name == "cron_register")
-        .expect("cron 实例应声明 cron_register");
-    let cron_line = format!(
-        "- `{}` — scheduled task registration (can trigger arbitrary prompts later, equivalent to delegated execution rights)",
-        register.effective_name
-    );
-    assert!(
-        lines.contains(&cron_line.as_str()),
-        "cron 条目显示名必须是注册表解析出的 effective name，实际渲染：\n{rendered}"
-    );
-
-    let monitor = peri_acp_types::builtin_mcp::find("monitor").expect("monitor 实例应有声明");
-    let start = monitor
-        .tools
-        .iter()
-        .find(|tool| tool.original_name == "monitor_start")
-        .expect("monitor 实例应声明 monitor_start");
-    assert_eq!(
-        *lines.last().expect("敏感工具列表非空"),
-        format!(
-            "- `{}` — monitor command execution (starts a shell command and watches its output)",
-            start.effective_name
-        ),
-        "末项显示名必须是注册表解析出的 effective name，实际渲染：\n{rendered}"
-    );
-
-    // 已失效裸名不得作为条目名出现；effective name 内部含 `cron_register` 子串，
-    // 故按「行首条目名」判定而非整串包含。
-    assert!(
-        !lines
-            .iter()
-            .any(|line| line.starts_with("- `cron_register")),
-        "渲染输出不得残留已失效的裸名条目：\n{rendered}"
-    );
-
-    // 未进敏感清单的 builtin 实例（artifact）不得因改名被误加进来
-    for instance in ["artifact"] {
-        let declared = peri_acp_types::builtin_mcp::find(instance).expect("实例应有声明");
-        for tool in declared.tools {
-            assert!(
-                !lines
-                    .iter()
-                    .any(|line| line.starts_with(&format!("- `{}`", tool.effective_name))),
-                "`{}` 不应在敏感清单（判定同源，A19）",
-                tool.effective_name
-            );
-        }
-    }
-}
-
-#[test]
-fn deployment_closed_builtin_is_omitted_from_prompt_without_weakening_approval() {
-    let disabled = std::collections::HashSet::from([
-        "CronMiddleware".to_owned(),
-        "MonitorMiddleware".to_owned(),
-        "WorkspaceMiddleware".to_owned(),
-    ]);
-    let visible = format_sensitive_tools_for_disabled(&disabled);
-    assert!(!visible.contains("mcp__cron__cron_register"));
-    assert!(!visible.contains("mcp__monitor__monitor_start"));
-    assert!(!visible.lines().any(|line| line.starts_with("- `Bash`")));
-    assert!(visible.lines().any(|line| line.starts_with("- `WebFetch`")));
-    assert!(default_requires_approval("cron_register"));
-    assert!(default_requires_approval("monitor_start"));
-    assert_eq!(format_sensitive_tools().lines().count(), 12);
-}
+#[path = "mod_workflow_test.rs"]
+mod workflow;
