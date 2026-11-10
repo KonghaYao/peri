@@ -581,6 +581,69 @@ async fn stale_active_stopped_child_settles_cancelled() {
     assert!(!harness._mock.matched());
 }
 
+/// 12b. 模拟重启：resume 成功留下的 `Active + Working` 会被恢复流程接纳；
+/// 同一排队事实上的 `Stopped` 仍不自动恢复。
+#[tokio::test]
+async fn restart_admits_working_child_with_pending_prompt_but_not_stopped() {
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-working", &root).await;
+    harness.add_child(&root, "child-stopped", &root).await;
+    for child in ["child-working", "child-stopped"] {
+        harness
+            .queue(child)
+            .push_async(peri_acp_types::session::QueuedMessage::defer(
+                MessageSource::SubAgentComplete,
+                peri_acp_types::messages::BaseMessage::human("pending prompt"),
+            ))
+            .await;
+    }
+    harness
+        .cfg
+        .session_resources
+        .set_work_state(&"child-working".to_owned(), WorkState::Working)
+        .await
+        .unwrap();
+    harness
+        .cfg
+        .session_resources
+        .set_work_state(&"child-stopped".to_owned(), WorkState::Stopped)
+        .await
+        .unwrap();
+    let recovery = harness.recovery();
+
+    let report = recovery.enter(&root).await.expect("恢复准备必须成功");
+    assert_eq!(
+        report.recovered,
+        vec!["child-working".to_owned()],
+        "只有持久工作意图为 working 的 child 被接纳"
+    );
+    assert!(
+        !report
+            .recovered
+            .iter()
+            .any(|thread| thread == "child-stopped"),
+        "Stopped child 不得自动恢复: {report:?}"
+    );
+    // 遗留 Active 由收敛器结算为 Cancelled，但工作意图保持 Stopped：下一次进入
+    // 仍不会自动恢复。
+    let stopped = settled_meta(&harness, "child-stopped").await;
+    assert_eq!(stopped.agent_status, AgentStatus::Cancelled);
+    assert_eq!(stopped.work_state, WorkState::Stopped);
+    assert_eq!(
+        entries(&harness, "child-working").await.len(),
+        2,
+        "原 prompt 保留，另注入一条本 thread 的恢复提醒"
+    );
+    assert_eq!(
+        entries(&harness, "child-stopped").await.len(),
+        1,
+        "Stopped child 只保留原 prompt，不注入恢复提醒"
+    );
+    assert!(harness.recovery_rows("child-stopped").await.is_empty());
+    assert!(!harness._mock.matched(), "准备阶段不得调用模型");
+}
+
 /// 13. 本进程活实例（turn 在途）不被收敛。
 #[tokio::test]
 async fn live_child_instance_is_not_converged() {

@@ -251,30 +251,81 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                 ..
             }
         );
-        // MQ 激活查询不能持有 sessions 锁。
-        let (cancelled, user_stopped, has_subagent, has_mq, has_ready_result) =
+        // MQ 激活查询不能持有 sessions 锁。查询错误不能折叠成「没有工作」：
+        // 二次检查只取决策需要的事实，Err 时在预算内重查，耗尽后交还 listener。
+        let queue = cfg
+            .session_manager
+            .get_session(&prompt_session_id)
+            .map(|session| session.v2_message_queue.clone());
+        let subagent_complete = peri_acp_types::session::MessageSource::SubAgentComplete;
+        // 同一轮二次检查共享一个预算：多项查询的等待时间不能叠加放大。
+        let recheck_deadline =
+            tokio::time::Instant::now() + super::activation::DISPATCH_RECHECK_BUDGET;
+        let has_subagent = if !mq_steering && !pending_result {
+            match queue.as_ref() {
+                Some(queue) => match super::activation::checked_dispatch_query(
+                    &prompt_session_id,
+                    "subagent_defer",
+                    recheck_deadline,
+                    || queue.has_pending_defer(&subagent_complete),
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Ok(abort_continuation_query_error(
+                            cfg,
+                            &prompt_session_id,
+                            "subagent_defer",
+                            &error,
+                            recovery_origin,
+                        ));
+                    }
+                },
+                None => false,
+            }
+        } else {
+            false
+        };
+        let has_mq = if mq_steering {
+            match queue.as_ref() {
+                Some(queue) => match super::activation::checked_dispatch_query(
+                    &prompt_session_id,
+                    "mq_continuation",
+                    recheck_deadline,
+                    || queue.needs_mq_continuation(),
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Ok(abort_continuation_query_error(
+                            cfg,
+                            &prompt_session_id,
+                            "mq_continuation",
+                            &error,
+                            recovery_origin,
+                        ));
+                    }
+                },
+                None => false,
+            }
+        } else {
+            false
+        };
+
+        // 重查可能占用至预算上限：取消、Stop 与 Ready 结果按重查后的事实判定，
+        // 避免把重查窗口内的新事实当成旧快照。
+        let (cancelled, user_stopped, has_ready_result) =
             match cfg.session_manager.get_session(&prompt_session_id) {
-                Some(session) => {
-                    let cancelled = session.cancel_token.is_cancelled();
-                    let user_stopped = session.activation.user_stopped();
-                    let queue = session.v2_message_queue.clone();
-                    let has_ready_result = session.async_result_mailbox.has_ready();
-                    drop(session);
-                    (
-                        cancelled,
-                        user_stopped,
-                        queue
-                            .has_pending_defer(
-                                &peri_acp_types::session::MessageSource::SubAgentComplete,
-                            )
-                            .await
-                            .unwrap_or(false),
-                        queue.needs_mq_continuation().await.unwrap_or(false),
-                        has_ready_result,
-                    )
-                }
-                None => (true, false, false, false, false),
+                Some(session) => (
+                    session.cancel_token.is_cancelled(),
+                    session.activation.user_stopped(),
+                    session.async_result_mailbox.has_ready(),
+                ),
+                None => (true, false, false),
             };
+
         // 定时调度是已批准的调度，不受上次失败的水位影响；但它是被动回调，
         // 不能解除用户显式 Stop（设计 §2.1/§5.2）。否则准入会写 working 覆盖 stopped。
         if matches!(origin, PromptOrigin::Scheduled) && user_stopped {
@@ -301,7 +352,30 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                 )
             })
         };
-        let mq_allowed = super::activation::mq_steering_allowed(cfg, &prompt_session_id).await;
+        let mq_allowed = if continuation_mq_steering {
+            match super::activation::checked_dispatch_query(
+                &prompt_session_id,
+                "mq_steering_allowed",
+                recheck_deadline,
+                || super::activation::mq_steering_allowed_checked(cfg, &prompt_session_id),
+            )
+            .await
+            {
+                Ok(allowed) => allowed,
+                Err(error) => {
+                    return Ok(abort_continuation_query_error(
+                        cfg,
+                        &prompt_session_id,
+                        "mq_steering_allowed",
+                        &error,
+                        recovery_origin,
+                    ));
+                }
+            }
+        } else {
+            // 非 mq steering 不消费该判定，也不应因无关查询失败而中止。
+            true
+        };
         if !base_dispatchable
             || (continuation_mq_steering && !mq_allowed)
             || (pending_result && !super::activation::result_allowed(cfg, &prompt_session_id).await)
@@ -582,7 +656,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             super::activation::PendingState::from_state(state)
         })
     };
-    let continuation_request = match (
+    let continuation = match (
         pending_state,
         cfg.session_manager.get_session(&prompt_session_id),
     ) {
@@ -591,21 +665,34 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             let activation = Arc::clone(&runtime.activation);
             let mailbox = Arc::clone(&runtime.async_result_mailbox);
             drop(runtime);
-            super::activation::pending_request(
+            let pending = super::activation::pending_request(
                 &prompt_session_id,
                 &state,
                 &queue,
                 &activation,
                 &mailbox,
             )
-            .await
+            .await;
+            Some((pending, queue))
         }
         _ => None,
     };
-    if let Some(request) = continuation_request {
-        if cont_tx.send(request).is_err() {
-            tracing::error!(session_id = %prompt_session_id, "continuation scheduling failed: channel closed");
+    match continuation {
+        Some((super::activation::PendingRequest::Ready(request), _)) => {
+            if cont_tx.send(request).is_err() {
+                tracing::error!(session_id = %prompt_session_id, "continuation scheduling failed: channel closed");
+            }
         }
+        Some((super::activation::PendingRequest::Retry(error), queue)) => {
+            // 本轮收尾后的查询失败同样不能消耗唤醒：把重查交还 listener。
+            tracing::warn!(
+                session_id = %prompt_session_id,
+                %error,
+                "continuation pending check failed; requesting listener recheck"
+            );
+            queue.request_recheck();
+        }
+        Some((super::activation::PendingRequest::Idle, _)) | None => {}
     }
     result
 }
@@ -629,6 +716,33 @@ fn mark_recovery_launch_failed(cfg: &AcpServerConfig, session_id: &str) {
     if let Some(runtime) = cfg.session_manager.get_session(session_id) {
         runtime.mark_recovery_launch_failed();
     }
+}
+
+/// 二次资格查询在预算内仍无法回答：保留重查责任后放弃本轮。
+///
+/// 查询错误不等于「没有工作」；一次瞬时存储故障不能消耗掉已消费的唤醒。
+/// 返回 `Null` 与既有 superseded 跳过路径一致，区别是 listener 会被重新唤醒。
+fn abort_continuation_query_error(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+    query: &'static str,
+    error: &str,
+    recovery_origin: bool,
+) -> Value {
+    tracing::warn!(
+        session_id = %session_id,
+        query,
+        %error,
+        retry_budget_ms = super::activation::DISPATCH_RECHECK_BUDGET.as_millis() as u64,
+        "continuation eligibility query failed; requesting listener recheck"
+    );
+    if let Some(queue) = cfg.session_manager.v2_queue_for(session_id) {
+        queue.request_recheck();
+    }
+    if recovery_origin {
+        mark_recovery_launch_failed(cfg, session_id);
+    }
+    Value::Null
 }
 
 /// 回滚本轮在准入段发布的内存标记。

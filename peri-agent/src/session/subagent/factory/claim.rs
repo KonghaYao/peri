@@ -41,6 +41,9 @@ pub(in crate::session::subagent) struct ResumeClaim {
     /// worker 的写入不能被调用方取消：只 detach（不 abort）。
     worker: JoinHandle<Result<(), String>>,
     running: Option<Arc<crate::session::Session>>,
+    /// 认领前的工作意图：后台放行后 confirm 失败时，调用方据此恢复被提前写入的
+    /// `working`，避免留下「终态 + working」被下一次恢复误判为待继续。
+    previous_work_state: Option<peri_acp_types::thread::WorkState>,
 }
 
 pub(in crate::session::subagent) struct BackgroundHandoff(oneshot::Sender<()>);
@@ -72,14 +75,16 @@ impl ResumeClaim {
             result
         });
         // 先于第一个 await 建立：调用方在 active 写期间消失也留下明确决定。
-        let claim = Self {
+        let mut claim = Self {
             decision: Some(decision_tx),
             worker,
             running: None,
+            previous_work_state: None,
         };
         let meta = meta_rx.await.map_err(|error| {
             format!("resume_subagent: status claim worker ended before reporting: {error}")
         })??;
+        claim.previous_work_state = Some(meta.work_state);
         Ok((meta, claim))
     }
 
@@ -104,6 +109,13 @@ impl ResumeClaim {
         session: Arc<crate::session::Session>,
     ) {
         self.running = Some(session);
+    }
+
+    /// 认领前的工作意图（`acquire` 成功后总是已知）。
+    pub(in crate::session::subagent) fn previous_work_state(
+        &self,
+    ) -> Option<peri_acp_types::thread::WorkState> {
+        self.previous_work_state
     }
 
     /// 同步 Stop 已运行 hook：把领域终态交给 worker，由它先结清认领再写入。

@@ -15,8 +15,8 @@ use peri_acp_types::history_window::{
 };
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session::{
-    MqCancelOutcome, MqEnqueueOutcome, MqEntry, MqFilter, MqInput, MqReceiveOutcome,
-    MqReceiveSelection,
+    MqCancelOutcome, MqEnqueueOutcome, MqEntry, MqFilter, MqHeader, MqInput, MqReceiveOutcome,
+    MqReceiveSelection, MqWatermark,
 };
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes,
@@ -624,6 +624,42 @@ pub(crate) trait SessionDataPort: Send + Sync {
         _filter: MqFilter,
     ) -> SessionResourceResult<Vec<MqEntry>> {
         Err(super::failure::unsupported())
+    }
+
+    /// 控制面投影：默认退回完整查询；SQLite adapter 覆盖为只读列投影。
+    async fn mq_headers(
+        &self,
+        thread_id: &ThreadId,
+        filter: MqFilter,
+    ) -> SessionResourceResult<Vec<MqHeader>> {
+        Ok(self
+            .mq_query(thread_id, filter)
+            .await?
+            .into_iter()
+            .map(|entry| entry.header())
+            .collect())
+    }
+
+    async fn mq_count(&self, thread_id: &ThreadId) -> SessionResourceResult<usize> {
+        Ok(self.mq_query(thread_id, MqFilter::default()).await?.len())
+    }
+
+    async fn mq_exists(&self, thread_id: &ThreadId) -> SessionResourceResult<bool> {
+        Ok(!self
+            .mq_query(thread_id, MqFilter::default())
+            .await?
+            .is_empty())
+    }
+
+    async fn mq_watermark(
+        &self,
+        thread_id: &ThreadId,
+    ) -> SessionResourceResult<Option<MqWatermark>> {
+        Ok(self
+            .mq_query(thread_id, MqFilter::default())
+            .await?
+            .last()
+            .map(MqEntry::watermark))
     }
 
     async fn mq_cancel(

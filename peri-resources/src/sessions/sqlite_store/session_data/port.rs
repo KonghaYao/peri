@@ -1083,6 +1083,29 @@ impl SessionDataPort for SqliteSessionData {
         self.query_mq(thread_id, filter).await
     }
 
+    async fn mq_headers(
+        &self,
+        thread_id: &ThreadId,
+        filter: MqFilter,
+    ) -> SessionResourceResult<Vec<peri_acp_types::session::MqHeader>> {
+        self.query_mq_headers(thread_id, filter).await
+    }
+
+    async fn mq_count(&self, thread_id: &ThreadId) -> SessionResourceResult<usize> {
+        self.count_mq(thread_id).await
+    }
+
+    async fn mq_exists(&self, thread_id: &ThreadId) -> SessionResourceResult<bool> {
+        self.exists_mq(thread_id).await
+    }
+
+    async fn mq_watermark(
+        &self,
+        thread_id: &ThreadId,
+    ) -> SessionResourceResult<Option<peri_acp_types::session::MqWatermark>> {
+        self.watermark_mq(thread_id).await
+    }
+
     async fn mq_cancel(
         &self,
         thread_id: &ThreadId,

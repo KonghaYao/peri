@@ -788,6 +788,29 @@ impl SessionResources for SessionResourcesImpl {
         self.gate.data().mq_query(thread_id, filter).await
     }
 
+    async fn mq_headers(
+        &self,
+        thread_id: &ThreadId,
+        filter: MqFilter,
+    ) -> SessionResourceResult<Vec<peri_acp_types::session::MqHeader>> {
+        self.gate.data().mq_headers(thread_id, filter).await
+    }
+
+    async fn mq_count(&self, thread_id: &ThreadId) -> SessionResourceResult<usize> {
+        self.gate.data().mq_count(thread_id).await
+    }
+
+    async fn mq_exists(&self, thread_id: &ThreadId) -> SessionResourceResult<bool> {
+        self.gate.data().mq_exists(thread_id).await
+    }
+
+    async fn mq_watermark(
+        &self,
+        thread_id: &ThreadId,
+    ) -> SessionResourceResult<Option<peri_acp_types::session::MqWatermark>> {
+        self.gate.data().mq_watermark(thread_id).await
+    }
+
     async fn mq_cancel(
         &self,
         thread_id: &ThreadId,

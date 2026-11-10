@@ -9,6 +9,56 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// 最小 tracing 捕获（与 `host/diagnostics_test.rs` 同形）：断言重查 warn 可观察。
+#[derive(Clone, Default)]
+struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl LogBuffer {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+
+    fn warn_subscriber(&self) -> impl tracing::Subscriber + Send + Sync {
+        let buffer = self.clone();
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || buffer.clone())
+            .finish()
+    }
+}
+
+/// 注入真实 SQLite 瞬时故障：查询期间模板表不存在。
+async fn rename_mq_table(path: &std::path::Path, from: &str, to: &str) {
+    use sqlx::Connection as _;
+
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(path),
+    )
+    .await
+    .unwrap();
+    // 表名来自本文件常量，非外部输入。
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE {from} RENAME TO {to}"
+    )))
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+}
+
 struct ActivationHarness {
     recorded: Arc<MockTransport>,
     cfg: Arc<AcpServerConfig>,
@@ -90,6 +140,11 @@ impl ActivationHarness {
             &self.sender,
         )
         .unwrap();
+    }
+
+    /// 夹具 SQLite 文件：用于注入真实的瞬时存储故障。
+    fn db_path(&self) -> std::path::PathBuf {
+        self._directory.path().join("threads.db")
     }
 
     fn complete_child(&self, task_id: &str) {
@@ -476,6 +531,296 @@ async fn cancellation_allows_one_child_continuation_but_never_restarts_cancelled
         .has_pending_defer(&MessageSource::SubAgentComplete)
         .await
         .expect("test MQ defer"));
+    harness
+        .cfg
+        .session_manager
+        .pre_close_session(&harness.session_id);
+}
+
+/// 一次查询错误不能耗尽唯一唤醒：listener 必须重查并最终处理 Workflow 提醒。
+#[tokio::test]
+#[serial]
+async fn activation_query_error_is_retried_until_the_reminder_is_processed() {
+    use sqlx::Connection as _;
+
+    let mut harness = ActivationHarness::new().await;
+    let queue = harness
+        .cfg
+        .session_manager
+        .v2_queue_for(&harness.session_id)
+        .unwrap();
+    harness
+        .cfg
+        .session_manager
+        .get_session(&harness.session_id)
+        .unwrap()
+        .activation
+        .allow();
+    queue
+        .push_async(QueuedMessage::defer(
+            MessageSource::WorkflowComplete,
+            BaseMessage::human("workflow finished"),
+        ))
+        .await;
+
+    // 先让 listener 消费唤醒，再停在 sessions 锁上：故障发生在查询之前，且不是新唤醒。
+    let sessions = harness.sessions.clone();
+    let held = sessions.lock().await;
+    harness.listen();
+    tokio::task::yield_now().await;
+
+    let db_path = harness.db_path();
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(&db_path),
+    )
+    .await
+    .unwrap();
+    sqlx::query("ALTER TABLE thread_mq RENAME TO thread_mq_offline")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    drop(connection);
+    drop(held);
+
+    // 故障窗口内不得把错误当成「没有工作」而发出 continuation。
+    tokio::time::sleep(Duration::from_millis(160)).await;
+    assert!(
+        harness.receiver.as_mut().unwrap().try_recv().is_err(),
+        "存储不可用时不得发出 continuation"
+    );
+
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(&db_path),
+    )
+    .await
+    .unwrap();
+    sqlx::query("ALTER TABLE thread_mq_offline RENAME TO thread_mq")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let request = tokio::time::timeout(
+        Duration::from_secs(5),
+        harness.receiver.as_mut().unwrap().recv(),
+    )
+    .await
+    .expect("listener 必须在故障恢复后重查")
+    .unwrap();
+    assert!(request.mq_steering, "Workflow 提醒必须作为 MQ 工作被处理");
+    assert_eq!(
+        queue
+            .query(peri_acp_types::session::MqFilter::default())
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "调度只产生 continuation，提醒仍留给 turn 消费"
+    );
+    harness
+        .cfg
+        .session_manager
+        .pre_close_session(&harness.session_id);
+}
+
+/// dispatch 二次资格检查遇到瞬时查询错误：预算内重查恢复后同一轮处理提醒，
+/// 不把已消费的唤醒当作「无工作」。
+#[tokio::test]
+#[serial]
+async fn dispatch_query_error_is_retried_within_budget_and_reminder_is_processed() {
+    let harness = ActivationHarness::new().await;
+    let queue = harness
+        .cfg
+        .session_manager
+        .v2_queue_for(&harness.session_id)
+        .unwrap();
+    harness
+        .cfg
+        .session_manager
+        .get_session(&harness.session_id)
+        .unwrap()
+        .activation
+        .allow();
+    queue
+        .push_async(QueuedMessage::defer(
+            MessageSource::WorkflowComplete,
+            BaseMessage::human("workflow finished"),
+        ))
+        .await;
+    let epoch = harness
+        .sessions
+        .lock()
+        .await
+        .get(&harness.session_id)
+        .unwrap()
+        .continuation_epoch;
+
+    // 停在准入闸门：此前的调度查询已经成功，故障只落在 dispatch 的二次检查上。
+    let gate = crate::host::prompt_dispatch::admission_gate::install(&format!(
+        "{}:admitted",
+        harness.session_id
+    ));
+    let logs = LogBuffer::default();
+    let _subscriber = tracing::subscriber::set_default(logs.warn_subscriber());
+    let params = json!({
+        "sessionId": harness.session_id,
+        "message": {"role": "user", "content": []},
+    });
+    let dispatch = crate::host::dispatch_prompt_turn(
+        params,
+        crate::host::PromptOrigin::Continuation {
+            mq_steering: true,
+            pending_result: false,
+            recovery: false,
+        },
+        Some(epoch),
+        &harness.sessions,
+        &harness.locks,
+        &harness.transport,
+        &harness.cfg,
+        &harness.sender,
+    );
+    let db_path = harness.db_path();
+    let logs_for_fault = logs.clone();
+    let fault = async {
+        gate.entered.notified().await;
+        rename_mq_table(&db_path, "thread_mq", "thread_mq_offline").await;
+        gate.release.notify_one();
+        // 等 dispatch 至少失败一次并进入退避后再恢复存储，不依赖固定睡眠竞态。
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if logs_for_fault
+                    .text()
+                    .contains("continuation dispatch query failed")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dispatch 必须进入查询重查");
+        rename_mq_table(&db_path, "thread_mq_offline", "thread_mq").await;
+    };
+    let (response, ()) = tokio::join!(dispatch, fault);
+    let response = response.unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    assert!(queue.is_empty().await.expect("test MQ len"));
+    let logs = logs.text();
+    assert!(
+        logs.contains("retry_after_ms"),
+        "缺少重查退避的可观察 warn：{logs}"
+    );
+    assert!(
+        logs.contains("store is unavailable"),
+        "缺少失败原因：{logs}"
+    );
+    harness
+        .cfg
+        .session_manager
+        .pre_close_session(&harness.session_id);
+}
+
+/// 重查预算耗尽：本轮不得静默当作「无工作」完成，必须唤醒 listener 重查，
+/// 且提醒仍留在 MQ 等待处理。
+#[tokio::test]
+#[serial]
+async fn dispatch_query_error_after_budget_requests_listener_recheck() {
+    let harness = ActivationHarness::new().await;
+    let queue = harness
+        .cfg
+        .session_manager
+        .v2_queue_for(&harness.session_id)
+        .unwrap();
+    harness
+        .cfg
+        .session_manager
+        .get_session(&harness.session_id)
+        .unwrap()
+        .activation
+        .allow();
+    queue
+        .push_async(QueuedMessage::defer(
+            MessageSource::WorkflowComplete,
+            BaseMessage::human("workflow finished"),
+        ))
+        .await;
+    let epoch = harness
+        .sessions
+        .lock()
+        .await
+        .get(&harness.session_id)
+        .unwrap()
+        .continuation_epoch;
+    let mut wake = queue.subscribe_wake();
+    wake.borrow_and_update();
+
+    let gate = crate::host::prompt_dispatch::admission_gate::install(&format!(
+        "{}:admitted",
+        harness.session_id
+    ));
+    let logs = LogBuffer::default();
+    let _subscriber = tracing::subscriber::set_default(logs.warn_subscriber());
+    let params = json!({
+        "sessionId": harness.session_id,
+        "message": {"role": "user", "content": []},
+    });
+    let dispatch = crate::host::dispatch_prompt_turn(
+        params,
+        crate::host::PromptOrigin::Continuation {
+            mq_steering: true,
+            pending_result: false,
+            recovery: false,
+        },
+        Some(epoch),
+        &harness.sessions,
+        &harness.locks,
+        &harness.transport,
+        &harness.cfg,
+        &harness.sender,
+    );
+    let db_path = harness.db_path();
+    let logs_for_fault = logs.clone();
+    let fault = async {
+        gate.entered.notified().await;
+        rename_mq_table(&db_path, "thread_mq", "thread_mq_offline").await;
+        gate.release.notify_one();
+        // 故障保持到 dispatch 用完重查预算并交还 listener，避免与恢复竞态。
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if logs_for_fault
+                    .text()
+                    .contains("requesting listener recheck")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dispatch 必须耗尽预算并请求重查");
+        rename_mq_table(&db_path, "thread_mq_offline", "thread_mq").await;
+    };
+    let (response, ()) = tokio::join!(dispatch, fault);
+    assert!(response.unwrap().is_null(), "查询失败不得当作空工作完成");
+    let logs = logs.text();
+    assert!(
+        logs.contains("retry_after_ms") && logs.contains("requesting listener recheck"),
+        "预算耗尽必须留下可观察 warn：{logs}"
+    );
+    assert!(
+        wake.has_changed().expect("test wake receiver"),
+        "必须请求 listener 重查"
+    );
+    assert_eq!(
+        queue
+            .query(peri_acp_types::session::MqFilter::default())
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "提醒必须留在 MQ 等待重查"
+    );
     harness
         .cfg
         .session_manager

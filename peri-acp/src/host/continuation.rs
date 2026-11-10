@@ -419,13 +419,32 @@ pub(crate) async fn run_continuation_scheduler(
             continue;
         }
         let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(&cfg);
-        if (req.mq_steering
-            && !super::activation::mq_steering_allowed(local, &req.session_id).await)
-            || (req.pending_result
-                && !super::activation::result_allowed(local, &req.session_id).await)
-        {
-            mark_recovery_launch_failed(&cfg, &req);
-            continue;
+        if req.mq_steering || req.pending_result {
+            let mq_allowed = if req.mq_steering {
+                match super::activation::mq_steering_allowed_checked(local, &req.session_id).await {
+                    Ok(allowed) => allowed,
+                    Err(error) => {
+                        // 无法判断时不能把请求当作已失效丢弃：把重查交还 listener。
+                        warn!(
+                            session_id = %req.session_id,
+                            %error,
+                            "continuation eligibility check failed; requesting listener recheck"
+                        );
+                        if let Some(queue) = local.session_manager.v2_queue_for(&req.session_id) {
+                            queue.request_recheck();
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                true
+            };
+            let result_allowed = !req.pending_result
+                || super::activation::result_allowed(local, &req.session_id).await;
+            if !mq_allowed || !result_allowed {
+                mark_recovery_launch_failed(&cfg, &req);
+                continue;
+            }
         }
         let epoch = {
             let mut sessions = sessions.lock().await;
