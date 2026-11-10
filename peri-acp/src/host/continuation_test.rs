@@ -17,8 +17,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     cancel_arms_continuation, cancel_should_schedule_continuation, continuation_dispatchable,
-    continuation_still_valid, recv_until_shutdown, take_continuation_for_request,
-    take_continuation_if_armed, SessionState,
+    continuation_still_valid, recv_until_shutdown, restore_continuation_armed,
+    take_continuation_for_request, take_continuation_if_armed, SessionState,
 };
 use crate::session::executor::ContinuationRequest;
 
@@ -203,6 +203,68 @@ fn test_stale_epoch_never_valid() {
     let state = make_session_state(false, 7);
     assert!(!continuation_still_valid(&state, 6));
     assert!(continuation_still_valid(&state, 7));
+}
+
+/// 查询失败恢复资格：同代际、未关闭、无续跑在飞时置回 armed。
+#[test]
+fn test_restore_armed_only_within_same_generation() {
+    let mut state = make_session_state(false, 7);
+    assert!(restore_continuation_armed(&mut state, 7));
+    assert!(state.continuation_armed, "同代际必须恢复一次性资格");
+
+    let mut stale = make_session_state(false, 7);
+    assert!(!restore_continuation_armed(&mut stale, 6));
+    assert!(!stale.continuation_armed, "旧代际不得恢复资格");
+}
+
+/// 关闭中或已有续跑在飞时，失败查询不能重新制造一次并发续跑资格。
+#[test]
+fn test_restore_armed_skips_closing_and_in_flight() {
+    let mut closing = make_session_state(false, 7);
+    closing.closing = true;
+    assert!(!restore_continuation_armed(&mut closing, 7));
+    assert!(!closing.continuation_armed);
+
+    let mut closing_in_flight = make_session_state(false, 7);
+    closing_in_flight.close_in_flight = 1;
+    assert!(!restore_continuation_armed(&mut closing_in_flight, 7));
+
+    let mut running = make_session_state(false, 7);
+    running.continuation_in_flight = true;
+    assert!(!restore_continuation_armed(&mut running, 7));
+    assert!(!running.continuation_armed);
+}
+
+/// 恢复后的资格属于当前代际：新 prompt / 再次 Stop 递增 epoch 后不得复活旧请求。
+#[test]
+fn test_restored_armed_does_not_survive_new_generation() {
+    let mut state = make_session_state(false, 3);
+    assert!(restore_continuation_armed(&mut state, 3));
+
+    // 用户新 prompt：清除 armed 并递增代际（dispatch_prompt_turn 的既有行为）。
+    state.continuation_armed = false;
+    state.continuation_epoch += 1;
+    assert!(!continuation_still_valid(&state, 3));
+    assert!(!continuation_dispatchable(
+        &state, 3, true, false, false, false, false
+    ));
+    assert_eq!(
+        take_continuation_if_armed(&mut state, BgTaskKind::Agent),
+        None,
+        "新 prompt 后旧代际不得再 take 出资格"
+    );
+
+    // 再次 Stop：同样递增代际；即使重新 arm，也只能属于新代际。
+    let mut stopped = make_session_state(false, 3);
+    assert!(restore_continuation_armed(&mut stopped, 3));
+    stopped.continuation_epoch += 1;
+    stopped.continuation_armed = true;
+    assert!(!continuation_still_valid(&stopped, 3));
+    assert_eq!(
+        take_continuation_if_armed(&mut stopped, BgTaskKind::Agent),
+        Some(4),
+        "再次 Stop 的资格只属于新代际"
+    );
 }
 
 /// 取消正在执行的 continuation 不置位 armed（防自动链式续跑）。

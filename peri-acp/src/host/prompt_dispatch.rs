@@ -258,6 +258,16 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             .get_session(&prompt_session_id)
             .map(|session| session.v2_message_queue.clone());
         let subagent_complete = peri_acp_types::session::MessageSource::SubAgentComplete;
+        // 只有非 mq、非 pending_result 的 continuation 消费一次性 armed；
+        // Scheduled 走同一查询分支但从未 take，不能借失败恢复出资格。
+        let armed_continuation = matches!(
+            origin,
+            PromptOrigin::Continuation {
+                mq_steering: false,
+                pending_result: false,
+                ..
+            }
+        );
         // 同一轮二次检查共享一个预算：多项查询的等待时间不能叠加放大。
         let recheck_deadline =
             tokio::time::Instant::now() + super::activation::DISPATCH_RECHECK_BUDGET;
@@ -273,6 +283,26 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                 {
                     Ok(value) => value,
                     Err(error) => {
+                        // scheduler 的 take 已消费一次性 armed。查询无法回答不等于
+                        // Defer 不存在；先把资格还给同一代际，再唤醒 listener，
+                        // 避免 listener 先醒后睡把结果留到下一次用户输入。
+                        if armed_continuation {
+                            if let Some(epoch) = continuation_epoch {
+                                let mut guard = sessions.lock().await;
+                                let restored =
+                                    guard.get_mut(&prompt_session_id).is_some_and(|state| {
+                                        continuation::restore_continuation_armed(state, epoch)
+                                    });
+                                drop(guard);
+                                tracing::warn!(
+                                    session_id = %prompt_session_id,
+                                    epoch,
+                                    query = "subagent_defer",
+                                    restored,
+                                    "continuation armed restore after dispatch query failure"
+                                );
+                            }
+                        }
                         return Ok(abort_continuation_query_error(
                             cfg,
                             &prompt_session_id,

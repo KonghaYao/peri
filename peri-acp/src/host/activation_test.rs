@@ -827,6 +827,202 @@ async fn dispatch_query_error_after_budget_requests_listener_recheck() {
         .pre_close_session(&harness.session_id);
 }
 
+/// P1 回归：取消后的唯一一次 armed 续跑，若 dispatch 二次查询耗尽预算，
+/// 必须把资格还给 listener；不能等用户下一次输入才消费滞留的 Defer。
+#[tokio::test]
+#[serial]
+async fn armed_continuation_query_failure_restores_eligibility_for_listener() {
+    let mut harness = ActivationHarness::new().await;
+    let queue = harness
+        .cfg
+        .session_manager
+        .v2_queue_for(&harness.session_id)
+        .unwrap();
+    harness
+        .cfg
+        .session_manager
+        .get_session(&harness.session_id)
+        .unwrap()
+        .activation
+        .allow();
+    // 用户取消前台 prompt：epoch++、suppress、arm（与 Stop 同路径）。
+    {
+        let mut sessions = harness.sessions.lock().await;
+        sessions.get_mut(&harness.session_id).unwrap().cancel_token =
+            Some(CancellationToken::new());
+        let _ = crate::host::notify::handle_notification(
+            "session/cancel",
+            &json!({"sessionId": harness.session_id}),
+            &mut sessions,
+            &harness.cfg,
+        )
+        .await;
+        sessions.get_mut(&harness.session_id).unwrap().cancel_token = None;
+    }
+    harness.complete_child("armed-child");
+    harness.listen();
+    let first = tokio::time::timeout(
+        Duration::from_secs(2),
+        harness.receiver.as_mut().unwrap().recv(),
+    )
+    .await
+    .expect("listener 必须发出 armed 续跑请求")
+    .expect("continuation channel");
+    assert!(!first.mq_steering, "armed 路径不得走 mq steering");
+    assert!(!first.pending_result);
+    let epoch = {
+        let mut sessions = harness.sessions.lock().await;
+        crate::host::continuation::take_continuation_for_request(
+            sessions.get_mut(&harness.session_id).unwrap(),
+            &first,
+        )
+        .expect("armed 请求必须消费一次性资格")
+    };
+
+    let gate = crate::host::prompt_dispatch::admission_gate::install(&format!(
+        "{}:admitted",
+        harness.session_id
+    ));
+    let logs = LogBuffer::default();
+    let _subscriber = tracing::subscriber::set_default(logs.warn_subscriber());
+    let params = json!({
+        "sessionId": harness.session_id,
+        "message": {"role": "user", "content": []},
+    });
+    let origin = crate::host::PromptOrigin::Continuation {
+        mq_steering: false,
+        pending_result: false,
+        recovery: false,
+    };
+    let dispatch = crate::host::dispatch_prompt_turn(
+        params.clone(),
+        origin,
+        Some(epoch),
+        &harness.sessions,
+        &harness.locks,
+        &harness.transport,
+        &harness.cfg,
+        &harness.sender,
+    );
+    let db_path = harness.db_path();
+    let logs_for_fault = logs.clone();
+    let fault = async {
+        gate.entered.notified().await;
+        rename_mq_table(&db_path, "thread_mq", "thread_mq_offline").await;
+        gate.release.notify_one();
+        // 恢复 armed 的 warn 发生在 request_recheck 之前：见到它即可恢复存储。
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if logs_for_fault.text().contains("restored=true") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("查询失败必须恢复 armed 资格");
+        rename_mq_table(&db_path, "thread_mq_offline", "thread_mq").await;
+    };
+    let (response, ()) = tokio::join!(dispatch, fault);
+    assert!(response.unwrap().is_null(), "查询失败不得当作空工作完成");
+    let logs = logs.text();
+    assert!(
+        logs.contains("restored=true") && logs.contains("requesting listener recheck"),
+        "预算耗尽必须恢复 armed 并请求 listener 重查：{logs}"
+    );
+
+    // 无需用户输入：listener 重查同一 Defer，必须再次发出 armed 请求。
+    let second = tokio::time::timeout(
+        Duration::from_secs(2),
+        harness.receiver.as_mut().unwrap().recv(),
+    )
+    .await
+    .expect("恢复资格后 listener 必须自动重查")
+    .expect("continuation channel");
+    assert!(!second.mq_steering);
+    assert!(!second.pending_result);
+    let retaken = {
+        let mut sessions = harness.sessions.lock().await;
+        crate::host::continuation::take_continuation_for_request(
+            sessions.get_mut(&harness.session_id).unwrap(),
+            &second,
+        )
+    };
+    assert_eq!(retaken, Some(epoch), "重查必须拿回同一代际的资格");
+
+    let response = crate::host::dispatch_prompt_turn(
+        params,
+        origin,
+        retaken,
+        &harness.sessions,
+        &harness.locks,
+        &harness.transport,
+        &harness.cfg,
+        &harness.sender,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    assert!(
+        queue.is_empty().await.expect("test MQ len"),
+        "续跑必须消费滞留的子任务结果"
+    );
+    harness
+        .cfg
+        .session_manager
+        .pre_close_session(&harness.session_id);
+}
+
+/// 恢复的 armed 资格属于当前代际：用户新 prompt 后 listener 不得再发旧代际请求。
+#[tokio::test]
+#[serial]
+async fn restored_armed_is_not_reactivated_after_new_prompt() {
+    let mut harness = ActivationHarness::new().await;
+    let queue = harness
+        .cfg
+        .session_manager
+        .v2_queue_for(&harness.session_id)
+        .unwrap();
+    harness
+        .cfg
+        .session_manager
+        .get_session(&harness.session_id)
+        .unwrap()
+        .activation
+        .suppress();
+    {
+        let mut sessions = harness.sessions.lock().await;
+        let state = sessions.get_mut(&harness.session_id).unwrap();
+        state.continuation_epoch = 3;
+        assert!(crate::host::continuation::restore_continuation_armed(
+            state, 3
+        ));
+        // 用户新 prompt：清除 armed 并递增代际。
+        state.continuation_armed = false;
+        state.continuation_epoch += 1;
+    }
+    harness.complete_child("stale-generation-child");
+    harness.listen();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        harness.receiver.as_mut().unwrap().try_recv().is_err(),
+        "新 prompt 后不得复活旧代际的 armed 请求"
+    );
+    assert_eq!(
+        queue
+            .query(peri_acp_types::session::MqFilter::default())
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "Defer 留在 MQ 等新 prompt 消费"
+    );
+    harness
+        .cfg
+        .session_manager
+        .pre_close_session(&harness.session_id);
+}
+
 #[tokio::test]
 #[serial]
 async fn closing_session_does_not_activate_late_work() {
