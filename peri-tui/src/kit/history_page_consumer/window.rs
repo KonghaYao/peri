@@ -180,6 +180,9 @@ pub struct WindowPagingState {
     pub after_cursor: Option<String>,
     pub in_flight: Option<WindowInFlight>,
     pub pending_merge: Option<WindowInFlight>,
+    /// 最近一次被消费端接纳并交给桥接的请求。桥接随后拒绝该页时仍需
+    /// 定位到同一请求（Degraded/重试），但不得命中更早窗口的请求。
+    pub last_settled_request_id: Option<String>,
     pub reserved_bytes: usize,
     pub status: WindowPagingStatus,
     pub last_error: Option<String>,
@@ -219,6 +222,11 @@ pub enum WindowClaimRejection {
     Degraded {
         reason: String,
     },
+    /// 请求属于已经离开的窗口；入队后会话又切换时不得再占用新窗口的在途槽位。
+    SessionMismatch {
+        requested: String,
+        current: String,
+    },
     InFlight,
     PendingMerge,
     ReservationBudget {
@@ -242,7 +250,14 @@ pub fn window_path_enabled() -> bool {
 }
 
 pub fn reset_window_paging_state() {
-    *atoms::HISTORY_WINDOW_PAGING.state().write() = WindowPagingState::default();
+    let handle = atoms::HISTORY_WINDOW_PAGING.state();
+    let mut state = handle.write();
+    // 请求序号跨会话边界继续单调：旧响应与新请求若复用同一个 `window-N`，
+    // 结算层无法只凭 id 区分两者，迟到的旧响应会清掉当前请求的在途槽位。
+    let next_request_seq = state.next_request_seq;
+    *state = WindowPagingState::default();
+    state.next_request_seq = next_request_seq;
+    drop(state);
     atoms::HISTORY_WINDOW_GENERATION.set(0);
 }
 
@@ -402,6 +417,12 @@ pub fn claim_window_request(request: &WindowConsumerRequest) -> WindowClaim {
     }
     let handle = atoms::HISTORY_WINDOW_PAGING.state();
     let mut state = handle.write();
+    if request.session_id() != state.session_id.as_str() {
+        return WindowClaim::Rejected(WindowClaimRejection::SessionMismatch {
+            requested: request.session_id().to_string(),
+            current: state.session_id.clone(),
+        });
+    }
     let is_open = matches!(request, WindowConsumerRequest::Open { .. });
     if let WindowPagingStatus::Degraded { reason, .. } = &state.status
         && !is_open
@@ -505,19 +526,33 @@ pub fn settle_window_response(
     if current.context.request_id != in_flight.context.request_id {
         return WindowSettlement::Unmatched;
     }
-    let generation = WindowGeneration {
-        session_id: current.context.identity.session_id.clone(),
-        session_generation: current.context.identity.session_generation.clone(),
-        structure_version: current.context.identity.structure_version,
-        snapshot_token: current.context.identity.snapshot_token.clone(),
-        window_generation: current.context.window_generation,
-        request_id: current.context.request_id.clone(),
-    };
+    // 当前窗口身份是权威：会话边界之后迟到的响应即使仍能匹配请求槽位，
+    // 也不得进入 `pending_merge`，更不能把旧会话的 open 身份写进新窗口。
+    let window_session_id = state.session_id.clone();
+    if current.context.session_id != window_session_id
+        || in_flight.context.session_id != window_session_id
+    {
+        state.in_flight = None;
+        state.reserved_bytes = state
+            .reserved_bytes
+            .saturating_sub(current.reservation.bytes);
+        return WindowSettlement::Stale;
+    }
     let is_open = matches!(current.kind, WindowInFlightKind::Open { .. });
     let identity_ok = if is_open {
-        response.session_id == current.context.session_id
+        response.session_id == window_session_id
     } else {
-        generation.accepts(response, state.window_generation)
+        state.identity.as_ref().is_some_and(|identity| {
+            WindowGeneration {
+                session_id: identity.session_id.clone(),
+                session_generation: identity.session_generation.clone(),
+                structure_version: identity.structure_version,
+                snapshot_token: identity.snapshot_token.clone(),
+                window_generation: current.context.window_generation,
+                request_id: current.context.request_id.clone(),
+            }
+            .accepts(response, state.window_generation)
+        })
     };
     if !identity_ok {
         state.in_flight = None;
@@ -602,12 +637,14 @@ pub fn settle_window_response(
         state.window_generation = state.window_generation.saturating_add(1);
     }
     if response.items.is_empty() {
+        state.last_settled_request_id = Some(current.context.request_id.clone());
         state.reserved_bytes = state
             .reserved_bytes
             .saturating_sub(current.reservation.bytes);
         return WindowSettlement::AcceptedEmpty;
     }
     state.pending_merge = Some(current.clone());
+    state.last_settled_request_id = Some(current.context.request_id.clone());
     WindowSettlement::Accepted(Box::new(current))
 }
 
@@ -642,26 +679,59 @@ pub fn finish_window_merge(request_id: &str) -> usize {
     pending.reservation.bytes
 }
 
+/// 释放某个请求占用的预留；返回是否命中当前窗口的在途/待合并槽位。
+fn release_window_request(state: &mut WindowPagingState, request_id: &str) -> Option<usize> {
+    let in_flight = state
+        .in_flight
+        .clone()
+        .filter(|in_flight| in_flight.context.request_id == request_id);
+    let pending = state
+        .pending_merge
+        .clone()
+        .filter(|pending| pending.context.request_id == request_id);
+    if in_flight.is_none() && pending.is_none() {
+        return None;
+    }
+    let released = in_flight
+        .iter()
+        .chain(pending.iter())
+        .map(|request| request.reservation.bytes)
+        .sum();
+    if in_flight.is_some() {
+        state.in_flight = None;
+    }
+    if pending.is_some() {
+        state.pending_merge = None;
+    }
+    state.reserved_bytes = state.reserved_bytes.saturating_sub(released);
+    Some(released)
+}
+
+/// 桥接丢弃了某请求的页事件（例如会话已切换）：事件不会再进入合并路径，
+/// 必须归还预留，否则当前窗口的 open 会一直被 `PendingMerge` 拒绝。
+pub(crate) fn abandon_window_request(request_id: &str) -> usize {
+    let handle = atoms::HISTORY_WINDOW_PAGING.state();
+    let mut state = handle.write();
+    release_window_request(&mut state, request_id).unwrap_or(0)
+}
+
 /// 请求失败/桥接拒绝：归还预留；失效错误进入 Degraded 并安排 open 重试。
 pub fn fail_window_request(request_id: &str, message: impl Into<String>, invalidates: bool) {
     let message = message.into();
     let handle = atoms::HISTORY_WINDOW_PAGING.state();
     let mut state = handle.write();
-    let session_id = state.session_id.clone();
-    let mut released = 0usize;
-    if let Some(in_flight) = state.in_flight.clone()
-        && in_flight.context.request_id == request_id
-    {
-        released = released.saturating_add(in_flight.reservation.bytes);
-        state.in_flight = None;
+    // 只结算仍属于当前窗口的请求：会话切换后旧 RPC 的失败/超时不得把
+    // 新窗口置为 Degraded，也不得改写它的 `last_error`。已结算并交给桥接的
+    // 最近一个请求仍算命中——桥接可能随后拒绝该页并要求 open 重试。
+    let released = release_window_request(&mut state, request_id);
+    let settled_here = state.last_settled_request_id.as_deref() == Some(request_id);
+    if released.is_none() && !settled_here {
+        debug!(
+            request_id,
+            "history_window_consumer: failure does not match any live request"
+        );
+        return;
     }
-    if let Some(pending) = state.pending_merge.clone()
-        && pending.context.request_id == request_id
-    {
-        released = released.saturating_add(pending.reservation.bytes);
-        state.pending_merge = None;
-    }
-    state.reserved_bytes = state.reserved_bytes.saturating_sub(released);
     state.last_error = Some(message.clone());
     if invalidates {
         let attempts = match &state.status {
@@ -675,6 +745,7 @@ pub fn fail_window_request(request_id: &str, message: impl Into<String>, invalid
         };
     }
     let reason = state.last_error.clone().unwrap_or_default();
+    let session_id = state.session_id.clone();
     drop(state);
     if invalidates {
         emit_window_degraded(&session_id, &reason);

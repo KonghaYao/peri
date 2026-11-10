@@ -265,7 +265,7 @@ fn stale_response_from_another_session_never_restores_window_state() {
         WindowClaim::Granted(in_flight) => in_flight,
         other => panic!("expected old open grant, got {other:?}"),
     };
-    // 会话边界同步清空后，新会话的首个 open 也占用同一个请求序号起点。
+    // 会话边界同步清空后，新会话的 open 使用新的请求序号。
     reset_window_paging_state();
     {
         let handle = atoms::HISTORY_WINDOW_PAGING.state();
@@ -278,11 +278,11 @@ fn stale_response_from_another_session_never_restores_window_state() {
         "new session open must be in flight"
     );
 
-    // 旧会话 s1 的响应迟到：请求序号相同，但 session 身份不同。
+    // 旧会话 s1 的响应迟到：请求序号不再复用，既不匹配新请求，也不得清掉新槽位。
     let stale = page_response("snap-old", 1);
     assert_eq!(
         settle_window_response(&old_in_flight, &stale),
-        WindowSettlement::Stale
+        WindowSettlement::Unmatched
     );
     let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
     assert_eq!(state.session_id, "s2");
@@ -290,6 +290,8 @@ fn stale_response_from_another_session_never_restores_window_state() {
     assert!(state.read_ticket.is_none());
     assert!(state.before_cursor.is_none());
     assert!(state.after_cursor.is_none());
+    assert!(state.in_flight.is_some(), "new session open must survive");
+    assert!(state.reserved_bytes > 0);
 }
 
 #[test]
@@ -626,4 +628,214 @@ fn open_request_skips_prior_snapshot_validation() {
     );
     let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
     assert_eq!(state.identity.unwrap().snapshot_token, "new-snap");
+}
+
+fn session_response(session: &str, snapshot: &str, items: usize) -> WindowPageResponse {
+    let mut response = page_response(snapshot, items);
+    response.session_id = session.into();
+    response.identity = WindowIdentity::new(session, "gen-1", 7, snapshot);
+    response
+}
+
+fn switch_window_session(session_id: &str) {
+    reset_window_paging_state();
+    let handle = atoms::HISTORY_WINDOW_PAGING.state();
+    let mut state = handle.write();
+    state.session_id = session_id.to_string();
+}
+
+fn granted(request: &WindowConsumerRequest) -> WindowInFlight {
+    match claim_window_request(request) {
+        WindowClaim::Granted(in_flight) => in_flight,
+        other => panic!("expected grant, got {other:?}"),
+    }
+}
+
+fn open_request_id(request: &WindowConsumerRequest) -> String {
+    match request {
+        WindowConsumerRequest::Open { request_id, .. } => request_id.clone(),
+        other => panic!("expected open request, got {other:?}"),
+    }
+}
+
+/// 会话边界后仍在队列里的旧 open 不得占用新窗口的在途槽位。
+#[test]
+#[serial]
+fn queued_open_from_previous_window_is_rejected_after_session_switch() {
+    let _guard = reset_atoms();
+    let handle = atoms::HISTORY_WINDOW_PAGING.state();
+    handle.write().session_id = "s2".into();
+    let stale_open = build_window_open_request(WindowDirection::Before);
+    switch_window_session("s3");
+
+    assert_eq!(
+        claim_window_request(&stale_open),
+        WindowClaim::Rejected(WindowClaimRejection::SessionMismatch {
+            requested: "s2".into(),
+            current: "s3".into(),
+        })
+    );
+    let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
+    assert!(state.in_flight.is_none());
+    assert_eq!(state.reserved_bytes, 0);
+}
+
+/// A open 在途 → B open → C open：B 的非空回包不得进入 C 的 `pending_merge`，
+/// 也不得清掉 C 自己的在途槽位或写入 B 的身份。
+#[test]
+#[serial]
+fn late_open_response_from_previous_window_never_merges_into_current_window() {
+    let _guard = reset_atoms();
+    let in_flight_a = granted(&build_window_open_request(WindowDirection::Before));
+
+    switch_window_session("s2");
+    let in_flight_b = granted(&build_window_open_request(WindowDirection::Before));
+
+    switch_window_session("s3");
+    let in_flight_c = granted(&build_window_open_request(WindowDirection::Before));
+
+    // A 与 B 的响应都在会话切走后到达；两者都不能命中 C 的在途槽位。
+    assert_eq!(
+        settle_window_response(&in_flight_a, &session_response("s1", "snap-a", 1)),
+        WindowSettlement::Unmatched
+    );
+    assert_eq!(
+        settle_window_response(&in_flight_b, &session_response("s2", "snap-b", 1)),
+        WindowSettlement::Unmatched
+    );
+    let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
+    assert_eq!(state.session_id, "s3");
+    assert!(state.pending_merge.is_none());
+    assert!(state.identity.is_none());
+    assert_eq!(
+        state
+            .in_flight
+            .as_ref()
+            .map(|in_flight| { in_flight.context.request_id.as_str() }),
+        Some(in_flight_c.context.request_id.as_str())
+    );
+    assert_eq!(state.reserved_bytes, in_flight_c.reservation.bytes);
+
+    // C 自己的响应仍正常结算，并成为唯一的 pending_merge。
+    assert!(matches!(
+        settle_window_response(&in_flight_c, &session_response("s3", "snap-c", 1)),
+        WindowSettlement::Accepted(_)
+    ));
+    let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
+    assert_eq!(
+        state
+            .pending_merge
+            .as_ref()
+            .map(|pending| pending.context.session_id.as_str()),
+        Some("s3")
+    );
+    assert_eq!(state.identity.unwrap().snapshot_token, "snap-c");
+}
+
+/// 当前窗口身份是结算权威：在途槽位若残留旧窗口上下文（防线性场景），
+/// 迟到响应必须判定 Stale 并释放槽位，不得以旧会话身份进入 `pending_merge`。
+#[test]
+#[serial]
+fn settle_treats_in_flight_from_another_window_as_stale() {
+    let _guard = reset_atoms();
+    let in_flight = granted(&build_window_open_request(WindowDirection::Before));
+    {
+        let handle = atoms::HISTORY_WINDOW_PAGING.state();
+        let mut state = handle.write();
+        state.session_id = "s2".into();
+        state.identity = None;
+    }
+
+    assert_eq!(
+        settle_window_response(&in_flight, &session_response("s1", "snap-old", 1)),
+        WindowSettlement::Stale
+    );
+    let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
+    assert!(state.in_flight.is_none());
+    assert!(state.pending_merge.is_none());
+    assert!(state.identity.is_none());
+    assert_eq!(state.reserved_bytes, 0);
+    assert_eq!(state.session_id, "s2");
+}
+
+/// seek 结算同样以当前窗口代次为权威：代次推进后的旧 seek 响应不得合并。
+#[test]
+#[serial]
+fn seek_settlement_uses_current_window_generation() {
+    let _guard = reset_atoms();
+    let seek = build_window_seek_request(
+        crate::kit::history_window::PersistentEntryKey::own("s1:m1"),
+        10,
+        10,
+    )
+    .expect("seek request");
+    let in_flight = granted(&seek);
+    note_window_generation(in_flight.context.window_generation + 1);
+
+    assert_eq!(
+        settle_window_response(&in_flight, &session_response("s1", "snap-1", 1)),
+        WindowSettlement::Stale
+    );
+    let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
+    assert!(state.in_flight.is_none());
+    assert!(state.pending_merge.is_none());
+    assert_eq!(state.reserved_bytes, 0);
+}
+
+/// 请求序号跨会话边界继续单调，旧响应与新请求不会共享同一个 id。
+#[test]
+#[serial]
+fn request_ids_are_not_reused_across_session_resets() {
+    let _guard = reset_atoms();
+    let first = build_window_open_request(WindowDirection::Before);
+    switch_window_session("s2");
+    let second = build_window_open_request(WindowDirection::Before);
+    assert_ne!(open_request_id(&first), open_request_id(&second));
+}
+
+/// 旧请求的失败/超时不得把新窗口置为 Degraded，也不得改写其错误状态。
+#[test]
+#[serial]
+fn failure_for_unknown_request_does_not_touch_current_window() {
+    let _guard = reset_atoms();
+    let request = page_request();
+    let in_flight = granted(&request);
+    fail_window_request("window-retired", "late timeout", true);
+
+    let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
+    assert!(!state.is_degraded());
+    assert!(state.last_error.is_none());
+    assert_eq!(
+        state
+            .in_flight
+            .as_ref()
+            .map(|current| current.context.request_id.as_str()),
+        Some(in_flight.context.request_id.as_str())
+    );
+    assert_eq!(state.reserved_bytes, in_flight.reservation.bytes);
+
+    // 命中当前请求的失效错误仍应进入 Degraded。
+    fail_window_request(&in_flight.context.request_id, "bad cursor", true);
+    assert!(atoms::HISTORY_WINDOW_PAGING.state().read().is_degraded());
+}
+
+/// 桥接丢弃页事件时必须归还该请求的预留（含 `pending_merge`）。
+#[test]
+#[serial]
+fn abandoned_page_request_releases_pending_merge_reservation() {
+    let _guard = reset_atoms();
+    let in_flight = granted(&build_window_open_request(WindowDirection::Before));
+    assert!(matches!(
+        settle_window_response(&in_flight, &session_response("s1", "snap-1", 1)),
+        WindowSettlement::Accepted(_)
+    ));
+    let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
+    assert!(state.pending_merge.is_some());
+    assert!(state.reserved_bytes > 0);
+
+    assert!(abandon_window_request(&in_flight.context.request_id) > 0);
+    let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
+    assert!(state.pending_merge.is_none());
+    assert!(state.in_flight.is_none());
+    assert_eq!(state.reserved_bytes, 0);
 }

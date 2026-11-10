@@ -804,6 +804,18 @@ fn same_identity_open_keeps_page_text_around_adopted_tool_card() {
 #[serial]
 fn reopen_with_inconsistent_ledger_degrades_without_mutation() {
     let (mut state, _guard) = state_with_window();
+    // 生产路径上 consumer 先结算在途请求，桥接随后才拒绝这一页。
+    let request = crate::kit::history_page_consumer::WindowConsumerRequest::Open {
+        request_id: "r-open-broken".into(),
+        session_id: "s1".into(),
+        direction: crate::kit::history_paging::WindowDirection::Before,
+        limit: 20,
+        byte_budget: 1024,
+    };
+    assert!(matches!(
+        crate::kit::history_page_consumer::claim_window_request(&request),
+        crate::kit::history_page_consumer::WindowClaim::Granted(_)
+    ));
     let identity_before = state.window.identity().cloned().expect("identity");
     let generation_before = state.window.generation();
     // 账本区间远超 committed：不得猜测性删除。
