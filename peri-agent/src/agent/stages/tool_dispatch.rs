@@ -21,7 +21,6 @@ mod execution;
 
 use super::middleware_runner::run_after_tools_batch;
 use super::{ExecutionEntryOrigin, InvocationContext, StageContext};
-use crate::agent::compact_v2::projection::ProviderProtocol;
 use crate::agent::events_v2::RenderEvent;
 use crate::agent::react::{Reasoning, ToolCall, ToolResult};
 use crate::error::{AgentError, AgentResult};
@@ -240,15 +239,11 @@ pub async fn dispatch_tools(
 
     // 阶段 B：完整交换由 writer 原子落库，确认后才发布 canonical；大图片批次
     // 不再先深拷贝到 16 MiB 普通 Append 积压，也不把半个交换暴露给恢复路径。
-    let allow_tool_images = matches!(
-        ctx.runtime.llm.provider_capabilities().protocol,
-        ProviderProtocol::Anthropic | ProviderProtocol::OpenAiResponses
-    );
     let mut exchange =
         Vec::with_capacity(1 + collect_outcome.results.len() + resolution_errors.len());
     exchange.push(ai_msg);
     for settled in &mut collect_outcome.results {
-        exchange.push(settled_tool_message(settled, allow_tool_images));
+        exchange.push(settled_tool_message(settled));
         // canonical 已取得所需媒体；Act 后续只用文本结果，不跨落库等待保留 raw 副本。
         settled.outcome = crate::tools::ToolOutcome::Unreported;
     }
@@ -364,3 +359,7 @@ async fn handle_consecutive_failures(ctx: &StageContext, results: &[SettledInvoc
 #[cfg(test)]
 #[path = "tool_dispatch_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tool_image_dispatch_test.rs"]
+mod image_tests;

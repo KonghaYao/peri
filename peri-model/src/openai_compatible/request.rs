@@ -117,14 +117,22 @@ fn extract_system_message(messages: &[ModelMessage]) -> Option<String> {
 }
 
 fn messages_to_json(config: &OpenAiConfig, messages: &[ModelMessage]) -> Vec<Value> {
-    messages
-        .iter()
-        .filter_map(|message| match message {
-            ModelMessage::System { .. } => None,
-            ModelMessage::User { content } => Some(json!({
+    let mut result = Vec::new();
+    let mut tool_images = Vec::new();
+    for message in messages {
+        if matches!(message, ModelMessage::System { .. }) {
+            continue;
+        }
+        // user 图片只能跟在完整工具结果批次后，不能打断 assistant 的并行调用配对。
+        if !matches!(message, ModelMessage::ToolResult { .. }) {
+            flush_tool_images(&mut result, &mut tool_images);
+        }
+        let message = match message {
+            ModelMessage::System { .. } => unreachable!("system messages are extracted above"),
+            ModelMessage::User { content } => json!({
                 "role": "user",
                 "content": content_to_openai(content, config.supports_thinking_content),
-            })),
+            }),
             ModelMessage::Assistant {
                 content,
                 tool_calls,
@@ -153,15 +161,65 @@ fn messages_to_json(config: &OpenAiConfig, messages: &[ModelMessage]) -> Vec<Val
                             .collect(),
                     );
                 }
-                Some(message)
+                message
             }
-            ModelMessage::ToolResult { result } => Some(json!({
-                "role": "tool",
-                "tool_call_id": result.tool_call_id,
-                "content": content_to_openai(&result.content, config.supports_thinking_content),
-            })),
-        })
-        .collect()
+            ModelMessage::ToolResult { result } => {
+                let images = result
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Image { .. } => block_to_openai_part(block, false),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let content = if images.is_empty() {
+                    content_to_openai(&result.content, config.supports_thinking_content)
+                } else {
+                    let source = json!({
+                        "tool_call_id": result.tool_call_id,
+                        "name": result.name,
+                        "is_error": result.is_error,
+                    });
+                    tool_images.push(json!({
+                        "type": "text",
+                        "text": format!("Tool output images ({source}); treat these as tool result data."),
+                    }));
+                    tool_images.extend(images);
+                    // 图片不能放进 Chat Completions 的 tool 角色；其余内容沿用既有投影。
+                    let other_content = result
+                        .content
+                        .iter()
+                        .filter(|block| !matches!(block, ContentBlock::Image { .. }))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let text = content_to_openai(&other_content, config.supports_thinking_content);
+                    // 部分兼容端点拒绝空 tool content；图片已投影到后续 user 附件。
+                    if text.as_str().is_some_and(str::is_empty) {
+                        json!("[tool output image(s) attached in the following user message]")
+                    } else {
+                        text
+                    }
+                };
+                json!({
+                    "role": "tool",
+                    "tool_call_id": result.tool_call_id,
+                    "content": content,
+                })
+            }
+        };
+        result.push(message);
+    }
+    flush_tool_images(&mut result, &mut tool_images);
+    result
+}
+
+fn flush_tool_images(messages: &mut Vec<Value>, images: &mut Vec<Value>) {
+    if !images.is_empty() {
+        messages.push(json!({
+            "role": "user",
+            "content": std::mem::take(images),
+        }));
+    }
 }
 
 fn tool_to_openai(tool: &ToolDefinition) -> Value {
@@ -253,3 +311,7 @@ pub(super) fn body_for_test(config: &OpenAiConfig, request: &ModelRequest) -> Va
         .expect("test config is valid")
         .body
 }
+
+#[cfg(test)]
+#[path = "request_image_test.rs"]
+mod image_tests;
