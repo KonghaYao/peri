@@ -201,20 +201,10 @@ fn model_media_blocks(outcome: &ToolOutcome) -> Vec<ContentBlock> {
         .collect()
 }
 
-/// 生成模型可见的工具结果消息；有图片且协议允许时用 Blocks 携带文本 + 图片。
-///
-/// OpenAI Chat Completions 的 `tool` 角色不接受图片 part，因此只有 Anthropic
-/// 与 Responses 保留图片块；其他协议只保留文本投影中的 `[image: mime]`。
-pub(super) fn settled_tool_message(
-    settled: &SettledInvocation,
-    allow_tool_images: bool,
-) -> BaseMessage {
+/// 工具结果的 canonical 消息保留图片；具体 wire 位置由 provider adapter 决定。
+pub(super) fn settled_tool_message(settled: &SettledInvocation) -> BaseMessage {
     let result = &settled.result;
-    let media = if allow_tool_images {
-        model_media_blocks(&settled.outcome)
-    } else {
-        Vec::new()
-    };
+    let media = model_media_blocks(&settled.outcome);
     let content = if media.is_empty() {
         MessageContent::text(result.output.clone())
     } else {

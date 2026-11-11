@@ -5,8 +5,8 @@ use url::Url;
 
 use crate::{
     prompt_cache::{combine_system_prompt_with_dynamic, SYSTEM_PROMPT_DYNAMIC_BOUNDARY},
-    ContentBlock, JsonObject, ModelMessage, ModelRequest, ModelRuntimeConfig, RetryConfig,
-    ToolCall, ToolDefinition, ToolResult,
+    ContentBlock, ImageSource, JsonObject, MediaType, ModelMessage, ModelRequest,
+    ModelRuntimeConfig, RetryConfig, ToolCall, ToolDefinition, ToolResult,
 };
 
 use super::{request::body_for_test, AnthropicConfig, AnthropicModel};
@@ -916,4 +916,43 @@ fn output_token_limit_matches_the_resolved_wire_budget() {
         json!({ "type": "enabled", "budget_tokens": 1_024 })
     );
     assert_eq!(body["output_config"], json!({ "effort": "high" }));
+}
+
+/// [回归测试] Anthropic 工具图片保持在 `tool_result.content` 原生位置。
+#[test]
+fn tool_images_stay_native_inside_tool_result() {
+    let request = ModelRequest::new(vec![
+        ModelMessage::assistant(
+            vec![],
+            vec![ToolCall::new("call-image", "Read", JsonObject::default())],
+        ),
+        ModelMessage::tool_result(ToolResult {
+            id: None,
+            tool_call_id: "call-image".into(),
+            name: "Read".into(),
+            content: vec![
+                ContentBlock::text("Image read"),
+                ContentBlock::Image {
+                    source: ImageSource::Base64 {
+                        media_type: MediaType::new("image/png"),
+                        data: "AQID".into(),
+                    },
+                },
+            ],
+            is_error: false,
+        }),
+    ]);
+
+    let body = body_for_test(&config(), &request);
+    let blocks = body["messages"][1]["content"]
+        .as_array()
+        .expect("content array");
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["type"], "tool_result");
+    let content = blocks[0]["content"].as_array().expect("tool content array");
+    assert_eq!(content[0], json!({ "type": "text", "text": "Image read" }));
+    assert_eq!(content[1]["type"], "image");
+    assert_eq!(content[1]["source"]["type"], "base64");
+    assert_eq!(content[1]["source"]["media_type"], "image/png");
+    assert_eq!(content[1]["source"]["data"], "AQID");
 }

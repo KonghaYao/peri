@@ -71,7 +71,7 @@ Emscripten 路径：`src/transport/http.rs` 复用 reqwest native/Hyper HTTP/SSE
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 配置/模型/流入口 | openai_compatible/mod.rs | `OpenAiConfig`；`OpenAiModel`；`impl Model` |
-| 请求构建 | openai_compatible/request.rs | `BuiltOpenAiRequest`；`extract_system_message`；`messages_to_json` |
+| 请求构建 | openai_compatible/request.rs | `BuiltOpenAiRequest`；`extract_system_message`；`messages_to_json`；工具图片在连续 tool 结果批次后投影为带调用身份的 user 附件，图片不进入 tool 角色；回归 `request_image_test.rs` |
 | 流解码 | openai_compatible/stream.rs | `decoders`；`decode_event`；`complete_stream` |
 
 ### runtime/（传输无关运行时）
