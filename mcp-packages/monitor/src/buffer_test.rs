@@ -132,8 +132,28 @@ fn ring_buffer_evicts_oldest_and_reports_gap() {
     assert_eq!(page.events[1].dropped, 1);
 }
 
+fn assert_read_matches_linear_oracle(buffer: &EventBuffer, after_seq: Option<u64>) {
+    let expected_events = buffer
+        .events
+        .iter()
+        .filter(|event| after_seq.is_none_or(|after| event.seq > after))
+        .cloned()
+        .collect::<Vec<_>>();
+    let current_max = buffer.events.back().unwrap().seq;
+    let expected_next_seq = expected_events
+        .last()
+        .map(|event| event.seq)
+        .unwrap_or_else(|| after_seq.unwrap_or(0).min(current_max));
+
+    let page = buffer.read(after_seq, MAX_READ_EVENTS, MAX_READ_BYTES);
+    assert_eq!(page.events, expected_events, "cursor: {after_seq:?}");
+    assert_eq!(page.next_seq, expected_next_seq, "cursor: {after_seq:?}");
+    assert!(!page.truncated, "cursor: {after_seq:?}");
+    assert_eq!(page.dropped, buffer.dropped(), "cursor: {after_seq:?}");
+}
+
 #[test]
-fn read_cursor_finds_events_across_wrapped_ring_and_evicted_gap() {
+fn read_cursor_matches_linear_oracle_across_wrapped_ring() {
     let mut buffer = EventBuffer::new(4, MIN_TASK_BYTES);
     for index in 0..32 {
         buffer.push(captured(&format!("line-{index}")));
@@ -142,38 +162,49 @@ fn read_cursor_finds_events_across_wrapped_ring_and_evicted_gap() {
         }
     }
     assert!(!buffer.events.as_slices().1.is_empty());
-    let first_seq = buffer.events.front().unwrap().seq;
-    let last_seq = buffer.last_assigned_seq();
+    assert!(buffer.dropped() > 0);
+    assert_eq!(buffer.len(), 4);
 
-    let from_evicted = buffer.read(Some(1), 2, MAX_READ_BYTES);
+    assert_read_matches_linear_oracle(&buffer, None);
+    let last_seq = buffer.events.back().unwrap().seq;
+    for after_seq in 0..=last_seq
+        .checked_add(1)
+        .expect("ordinary fixture must not overflow")
+    {
+        assert_read_matches_linear_oracle(&buffer, Some(after_seq));
+    }
+    assert_read_matches_linear_oracle(&buffer, Some(u64::MAX));
+
+    let near_max_sequences = [u64::MAX - 4, u64::MAX - 3, u64::MAX - 2, u64::MAX - 1];
+    for (event, seq) in buffer.events.iter_mut().zip(near_max_sequences) {
+        event.seq = seq;
+    }
+    buffer.next_seq = u64::MAX;
+
+    assert!(!buffer.events.as_slices().1.is_empty());
     assert_eq!(
-        from_evicted
+        buffer
             .events
             .iter()
             .map(|event| event.seq)
             .collect::<Vec<_>>(),
-        vec![first_seq, first_seq + 1]
+        near_max_sequences
     );
-    assert!(from_evicted.truncated);
-    assert_eq!(from_evicted.next_seq, first_seq + 1);
-
-    let from_middle = buffer.read(Some(first_seq + 1), 4, MAX_READ_BYTES);
-    assert_eq!(
-        from_middle
-            .events
-            .iter()
-            .map(|event| event.seq)
-            .collect::<Vec<_>>(),
-        vec![first_seq + 2, last_seq]
-    );
-    assert!(!from_middle.truncated);
-
-    let at_end = buffer.read(Some(last_seq), 4, MAX_READ_BYTES);
-    assert!(at_end.events.is_empty());
-    assert_eq!(at_end.next_seq, last_seq);
-    let beyond_end = buffer.read(Some(u64::MAX), 4, MAX_READ_BYTES);
-    assert!(beyond_end.events.is_empty());
-    assert_eq!(beyond_end.next_seq, last_seq);
+    assert_read_matches_linear_oracle(&buffer, None);
+    let mut near_max_cursors = vec![
+        0,
+        u64::MAX - 5,
+        u64::MAX - 4,
+        u64::MAX - 3,
+        u64::MAX - 2,
+        u64::MAX - 1,
+        u64::MAX,
+    ];
+    near_max_cursors.sort_unstable();
+    near_max_cursors.dedup();
+    for after_seq in near_max_cursors {
+        assert_read_matches_linear_oracle(&buffer, Some(after_seq));
+    }
 }
 
 #[test]
