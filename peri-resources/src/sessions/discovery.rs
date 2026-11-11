@@ -96,6 +96,17 @@ async fn bounded_output(reader: impl AsyncRead + Unpin) -> Result<Vec<u8>> {
     Ok(data)
 }
 
+fn git_failure(operation: &str, output: &std::process::Output) -> WorkspaceError {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim_end_matches(&['\r', '\n'][..]);
+    let message = if stderr.is_empty() {
+        format!("{operation} ({})", output.status)
+    } else {
+        format!("{operation} ({}): {stderr}", output.status)
+    };
+    WorkspaceError::DiscoveryError(message)
+}
+
 /// 一次 Git 子进程启动的尝试次数。
 ///
 /// `Command::spawn` 失败意味着没有子进程被启动，重试不改变语义；而负载下的启动
@@ -205,7 +216,7 @@ async fn git_paths(
         WorkspaceError::DiscoveryError("Git became unavailable during discovery".into())
     })?;
     if !output.status.success() {
-        return Err(WorkspaceError::DiscoveryError("Git location discovery failed".into()).into());
+        return Err(git_failure("Git location discovery failed", &output).into());
     }
     let text = String::from_utf8(output.stdout).context("Git path is not UTF-8")?;
     let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
@@ -410,9 +421,7 @@ async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Obser
     let git_answered = inside.is_some();
     if let Some(output) = &inside {
         if !output.status.success() && !is_not_a_repository(&output.stderr) {
-            return Err(
-                WorkspaceError::DiscoveryError("Git rejected repository discovery".into()).into(),
-            );
+            return Err(git_failure("Git rejected repository discovery", output).into());
         }
     }
     // Missing Git is a directory-only execution mode, not evidence that the path
@@ -470,16 +479,18 @@ async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Obser
             .map(git_command_path)
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
-        if !worktrees.status.success()
-            || !listed_worktree_paths(&worktrees.stdout, separator)
-                .into_iter()
-                .any(|path| {
-                    std::str::from_utf8(path).ok().is_some_and(|path| {
-                        accepted
-                            .iter()
-                            .any(|expected| Path::new(path) == expected.as_path())
-                    })
+        if !worktrees.status.success() {
+            return Err(git_failure("Git worktree listing failed", &worktrees).into());
+        }
+        if !listed_worktree_paths(&worktrees.stdout, separator)
+            .into_iter()
+            .any(|path| {
+                std::str::from_utf8(path).ok().is_some_and(|path| {
+                    accepted
+                        .iter()
+                        .any(|expected| Path::new(path) == expected.as_path())
                 })
+            })
         {
             return Err(WorkspaceError::DiscoveryError(
                 "Git worktree membership is inconsistent".into(),

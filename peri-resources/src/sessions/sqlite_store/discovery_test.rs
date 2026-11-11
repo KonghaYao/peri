@@ -155,7 +155,8 @@ async fn test_worktree_git_rejection_is_not_directory_mode() {
         .unwrap_err();
     assert!(matches!(
         error.downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::DiscoveryError(message)) if message == "Git rejected repository discovery"
+        Some(WorkspaceError::DiscoveryError(message))
+            if message == "Git rejected repository discovery (exit status: 128): fatal: detected dubious ownership"
     ));
 }
 
@@ -291,6 +292,34 @@ async fn test_worktree_git_missing_mid_discovery_is_not_directory_mode() {
     assert!(matches!(
         error.downcast_ref::<WorkspaceError>(),
         Some(WorkspaceError::DiscoveryError(message)) if message == "Git became unavailable during discovery"
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_worktree_location_failure_preserves_git_diagnostic() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let program = directory.path().join("git");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\nprintf 'fatal: location metadata is unreadable' >&2\nexit 128\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let error = git_paths(
+        program.as_os_str(),
+        directory.path(),
+        &["rev-parse", "--show-toplevel"],
+        1,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<WorkspaceError>(),
+        Some(WorkspaceError::DiscoveryError(message))
+            if message == "Git location discovery failed (exit status: 128): fatal: location metadata is unreadable"
     ));
 }
 
@@ -842,7 +871,8 @@ async fn test_worktree_listing_failure_is_not_retried_as_legacy_git() {
         .unwrap_err();
     assert!(matches!(
         error.downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::DiscoveryError(message)) if message == "Git worktree membership is inconsistent"
+        Some(WorkspaceError::DiscoveryError(message))
+            if message == "Git worktree listing failed (exit status: 128): fatal: could not read worktrees"
     ));
     let invoked = std::fs::read_to_string(&log).unwrap();
     assert_eq!(
