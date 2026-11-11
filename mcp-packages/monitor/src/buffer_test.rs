@@ -133,6 +133,50 @@ fn ring_buffer_evicts_oldest_and_reports_gap() {
 }
 
 #[test]
+fn read_cursor_finds_events_across_wrapped_ring_and_evicted_gap() {
+    let mut buffer = EventBuffer::new(4, MIN_TASK_BYTES);
+    for index in 0..32 {
+        buffer.push(captured(&format!("line-{index}")));
+        if !buffer.events.as_slices().1.is_empty() {
+            break;
+        }
+    }
+    assert!(!buffer.events.as_slices().1.is_empty());
+    let first_seq = buffer.events.front().unwrap().seq;
+    let last_seq = buffer.last_assigned_seq();
+
+    let from_evicted = buffer.read(Some(1), 2, MAX_READ_BYTES);
+    assert_eq!(
+        from_evicted
+            .events
+            .iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>(),
+        vec![first_seq, first_seq + 1]
+    );
+    assert!(from_evicted.truncated);
+    assert_eq!(from_evicted.next_seq, first_seq + 1);
+
+    let from_middle = buffer.read(Some(first_seq + 1), 4, MAX_READ_BYTES);
+    assert_eq!(
+        from_middle
+            .events
+            .iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>(),
+        vec![first_seq + 2, last_seq]
+    );
+    assert!(!from_middle.truncated);
+
+    let at_end = buffer.read(Some(last_seq), 4, MAX_READ_BYTES);
+    assert!(at_end.events.is_empty());
+    assert_eq!(at_end.next_seq, last_seq);
+    let beyond_end = buffer.read(Some(u64::MAX), 4, MAX_READ_BYTES);
+    assert!(beyond_end.events.is_empty());
+    assert_eq!(beyond_end.next_seq, last_seq);
+}
+
+#[test]
 fn event_text_is_capped_and_flagged_as_truncated() {
     let mut buffer = EventBuffer::new(10, 64 * 1024);
     let long = "x".repeat(MAX_EVENT_BYTES + 10);

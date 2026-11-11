@@ -195,12 +195,13 @@ impl EventBuffer {
         let mut events = Vec::new();
         let mut used = 0usize;
         let mut truncated = false;
+        let start = after_seq.map_or(0, |after| {
+            let (front, back) = self.events.as_slices();
+            front.partition_point(|event| event.seq <= after)
+                + back.partition_point(|event| event.seq <= after)
+        });
 
-        for event in self
-            .events
-            .iter()
-            .filter(|event| after_seq.is_none_or(|after| event.seq > after))
-        {
+        for event in self.events.iter().skip(start) {
             if events.len() == limit {
                 truncated = true;
                 break;
