@@ -77,6 +77,10 @@ fn test_tool_images_follow_the_complete_parallel_result_batch() {
     }
     assert_eq!(messages[1]["content"], "first");
     assert_eq!(messages[2]["content"], "text only");
+    assert_eq!(
+        messages[3]["content"], "[tool output image(s) attached in the following user message]",
+        "image-only 工具结果不能留下空 tool content"
+    );
     let attachments = messages[4]["content"].as_array().unwrap();
     assert_eq!(attachments.len(), 5);
     assert!(attachments[0]["text"]
@@ -146,7 +150,10 @@ fn test_error_image_is_preserved_as_tool_evidence() {
         calls(&["failed"]),
         result("failed", vec![image("AQID")], true),
     ]);
-    assert_eq!(request["messages"][1]["content"], "");
+    assert_eq!(
+        request["messages"][1]["content"],
+        "[tool output image(s) attached in the following user message]"
+    );
     assert_eq!(
         request["messages"][2]["content"][1]["image_url"]["url"],
         "data:image/png;base64,AQID"

@@ -78,7 +78,8 @@
 - OpenAI-compatible 请求适配层：tool 角色只发送文本；把工具图片投影为紧随
   **完整**并行工具结果批次之后的 `user` 附件，附件文本携带 `tool_call_id`、
   `name`、`is_error`。该 user 消息只存在于 wire 投影，不写入用户历史，也不能插
-  在并行工具结果之间。
+  在并行工具结果之间。image-only 工具结果的 tool `content` 使用占位提示文本，
+  避免严格兼容端点拒绝空 content。
 - 明确不做：不新增视觉能力门禁；不修改数据库 schema；不改 Read 工具参数与既有
   图片大小上限；不修改 `OpenAiAdapter`（见未覆盖项）。
 - 已接受风险：不声明视觉能力的文本兼容端点可能对 `image_url` 返回 400。这是用户

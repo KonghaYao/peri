@@ -192,7 +192,13 @@ fn messages_to_json(config: &OpenAiConfig, messages: &[ModelMessage]) -> Vec<Val
                         .filter(|block| !matches!(block, ContentBlock::Image { .. }))
                         .cloned()
                         .collect::<Vec<_>>();
-                    content_to_openai(&other_content, config.supports_thinking_content)
+                    let text = content_to_openai(&other_content, config.supports_thinking_content);
+                    // 部分兼容端点拒绝空 tool content；图片已投影到后续 user 附件。
+                    if text.as_str().is_some_and(str::is_empty) {
+                        json!("[tool output image(s) attached in the following user message]")
+                    } else {
+                        text
+                    }
                 };
                 json!({
                     "role": "tool",
