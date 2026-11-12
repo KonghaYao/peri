@@ -340,6 +340,52 @@ async fn remote_finalize_maintains_receiver_work_intent() {
     assert_eq!(work_state(&fixture, &target).await, WorkState::Stopped);
 }
 
+/// 目标已终态：结果行就绪、child 仍 `active` 也不得把 target 从终态 + `idle` 提升为
+/// `working`。结果本身仍按 MQ 规则接纳，改变的只有接收方工作意图。
+#[tokio::test]
+async fn remote_finalize_does_not_promote_a_terminal_receiver() {
+    for terminal in [
+        AgentStatus::Error,
+        AgentStatus::Done,
+        AgentStatus::Cancelled,
+    ] {
+        let fixture = fixture().await;
+        let child = thread("other-thread");
+        let target = thread("mq-thread");
+        // 终态 target 的 `work_state` 是派生值；旧路径可能停在 `idle`。
+        sqlx::query("UPDATE threads SET agent_status = ?1, work_state = 'idle' WHERE id = ?2")
+            .bind(terminal.as_str())
+            .bind(target.as_str())
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+
+        let outcome = fixture
+            .data
+            .finalize_child_terminal(
+                &child,
+                AgentStatus::Done,
+                WorkState::Idle,
+                &target,
+                terminal_input(MessageId::new(), "result to terminal parent"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.disposition, MqEnqueueDisposition::Inserted);
+        assert_eq!(
+            terminal_facts(&fixture, &target).await,
+            (terminal.as_str().to_owned(), "idle".to_owned()),
+            "{terminal:?}: 终态 target 的 agent_status 与 work_state 都不得改变"
+        );
+        assert_eq!(
+            terminal_facts(&fixture, &child).await,
+            ("done".to_owned(), "idle".to_owned()),
+            "{terminal:?}: child 仍按本次结算写入终态"
+        );
+        assert_eq!(mq_rows(&fixture, &target).await, 1, "结果仍要落在目标 MQ");
+    }
+}
+
 /// 终态只写一次：同一 child 先 Done 再 Error（不同结果 ID）。后到的结算既不能覆盖终态，
 /// 也不能再投递一条结果；结果未落地时按批后读取归类为冲突。
 #[tokio::test]
