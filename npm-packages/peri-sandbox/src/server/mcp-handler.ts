@@ -11,11 +11,11 @@ const taskMethods = ['tasks/get', 'tasks/update', 'tasks/cancel'] as const;
 /**
  * Keeps the SDK's 2026 identity stamp off custom-method results.
  *
- * rmcp 3.5.1 parses custom-method results with an untagged `ServerResult`
- * whose `CallToolResult` variant matches any object carrying `_meta`. The
+ * rmcp parses custom-method results with an untagged `ServerResult`
+ * whose variants match on payload shape. The
  * encode seam stamps `io.modelcontextprotocol/serverInfo` into every result
- * `_meta`, so a payload such as `skills/list` would deserialize as a bogus
- * `CallToolResult` on the host. Spec-defined results keep the stamp; their
+ * `_meta`, so a custom payload such as `skills/list` can deserialize as a
+ * bogus typed result on the host. Spec-defined results keep the stamp; their
  * typed host parsers accept `_meta`, and `server/discover` uses it to carry
  * the mirrored identity.
  */

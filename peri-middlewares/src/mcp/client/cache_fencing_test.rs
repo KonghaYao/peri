@@ -22,6 +22,21 @@ impl DelayedProvider {
 }
 
 impl ServerHandler for DelayedProvider {
+    /// rmcp 3.9.0 按 server 声明的 skills 扩展门控 `skills/list` / `skills/get`，
+    /// 未声明时请求在进入 handler 前就回 `-32601`。
+    fn get_info(&self) -> rmcp::model::ServerConfig {
+        let mut capabilities = rmcp::model::ServerCapabilities::builder()
+            .enable_resources()
+            .build();
+        let mut extensions = rmcp::model::ExtensionCapabilities::new();
+        extensions.insert(
+            peri_acp_types::skills::SKILLS_EXTENSION_ID.to_string(),
+            rmcp::model::JsonObject::new(),
+        );
+        capabilities.extensions = Some(extensions);
+        rmcp::model::ServerConfig::new(capabilities)
+    }
+
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
@@ -47,6 +62,23 @@ impl ServerHandler for DelayedProvider {
             "skills": [{"uri": "skill://old/SKILL.md", "frontmatter": {"name": "old", "description": "old generation"}}],
             "ttlMs": 60000, "cacheScope": "public"
         })))
+    }
+
+    /// rmcp 3.9.0 起 `skills/list` 是类型化请求，mock 必须同样可阻塞应答。
+    async fn list_skills(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::ListSkillsResult, rmcp::ErrorData> {
+        self.respond().await;
+        let skill = rmcp::model::Skill::new(
+            "skill://old/SKILL.md",
+            rmcp::model::SkillFrontmatter::new("old", "old generation"),
+            rmcp::model::SkillResources::Files(Vec::new()),
+        );
+        Ok(rmcp::model::ListSkillsResult::with_all_items(vec![skill])
+            .with_ttl_ms(60000)
+            .with_cache_scope(rmcp::model::CacheScope::Public))
     }
 }
 

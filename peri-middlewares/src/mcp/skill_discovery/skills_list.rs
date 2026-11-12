@@ -55,8 +55,8 @@ struct SkillResourceDto {
 /// 是该技能当前条目快照。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SkillGetResponse {
-    skill: SkillListEntryDto,
+pub(super) struct SkillGetResponse {
+    pub(super) skill: SkillListEntryDto,
 }
 
 /// 解析后的技能条目（frontmatter 原样保留——逐字段全量比对用；name/
@@ -288,6 +288,22 @@ async fn fetch_skill_list_page_checked(
     fetch_skill_list_page_inner(peer, server, params).await
 }
 
+/// 把 skills 调用的 `ServerResult` 归一化成可解析的 JSON 载荷。
+///
+/// `ServerResult` 是 untagged 联合，变体按 payload 形状判别而非按方法名：3.9.0 起
+/// 只有完整条目（`resources` 含 `size`）命中 `ListSkillsResult` / `GetSkillResult`，
+/// mcp-use 这类省略字段的响应仍落到 `CustomResult`，两条路径必须都能解析。其余变体
+/// 不承载 skills 载荷，返回 `None` 让调用方报告非预期响应，避免把畸形结果归一化成
+/// 空技能目录。
+pub(super) fn skill_result_payload(result: &ServerResult) -> Option<serde_json::Value> {
+    match result {
+        ServerResult::CustomResult(custom) => Some(custom.0.clone()),
+        ServerResult::ListSkillsResult(list) => serde_json::to_value(list).ok(),
+        ServerResult::GetSkillResult(get) => serde_json::to_value(get).ok(),
+        _ => None,
+    }
+}
+
 /// 单页读取（供 checked 与 best-effort 两条路径共用）。
 async fn fetch_skill_list_page_inner(
     peer: &Peer<RoleClient>,
@@ -297,14 +313,16 @@ async fn fetch_skill_list_page_inner(
     let request = ClientRequest::CustomRequest(CustomRequest::new("skills/list", params));
     let response = peri_time::timeout(SKILLS_LIST_TIMEOUT, peer.send_request(request)).await;
     match response {
-        Ok(Ok(ServerResult::CustomResult(custom))) => custom.result_as().map_err(|err| {
-            tracing::warn!(server, error = %err, "MCP skill 发现：skills/list 响应解析失败");
-            format!("skills/list 响应解析失败: {err}")
-        }),
-        Ok(Ok(_)) => {
-            tracing::warn!(server, "MCP skill 发现：skills/list 返回非预期响应类型");
-            Err("skills/list 返回非预期响应类型".to_string())
-        }
+        Ok(Ok(result)) => match skill_result_payload(&result) {
+            Some(payload) => serde_json::from_value(payload).map_err(|err| {
+                tracing::warn!(server, error = %err, "MCP skill 发现：skills/list 响应解析失败");
+                format!("skills/list 响应解析失败: {err}")
+            }),
+            None => {
+                tracing::warn!(server, "MCP skill 发现：skills/list 返回非预期响应类型");
+                Err("skills/list 返回非预期响应类型".to_string())
+            }
+        },
         Ok(Err(err)) => {
             tracing::warn!(server, error = %err, "MCP skill 发现：skills/list 调用失败");
             Err(format!("skills/list 调用失败: {err}"))
@@ -521,17 +539,19 @@ async fn fetch_skill_entry(peer: &Peer<RoleClient>, uri: &str) -> Option<SkillLi
     let request = ClientRequest::CustomRequest(CustomRequest::new("skills/get", Some(params)));
     let response = peri_time::timeout(SKILLS_LIST_TIMEOUT, peer.send_request(request)).await;
     let parsed: SkillGetResponse = match response {
-        Ok(Ok(ServerResult::CustomResult(custom))) => match custom.result_as() {
-            Ok(parsed) => parsed,
-            Err(err) => {
-                tracing::warn!(%uri, error = %err, "MCP skill skills/get 响应解析失败");
+        Ok(Ok(result)) => match skill_result_payload(&result) {
+            Some(payload) => match serde_json::from_value(payload) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    tracing::warn!(%uri, error = %err, "MCP skill skills/get 响应解析失败");
+                    return None;
+                }
+            },
+            None => {
+                tracing::warn!(%uri, "MCP skill skills/get 返回非预期响应类型");
                 return None;
             }
         },
-        Ok(Ok(_)) => {
-            tracing::warn!(%uri, "MCP skill skills/get 返回非预期响应类型");
-            return None;
-        }
         Ok(Err(err)) => {
             tracing::warn!(%uri, error = %err, "MCP skill skills/get 调用失败");
             return None;

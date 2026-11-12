@@ -92,7 +92,7 @@ pub(crate) enum BuiltinSpawnError {
 pub(crate) enum BuiltinServerExit {
     /// 已完成握手并收敛（正常路径：client 关闭 → 输入流 EOF → `QuitReason::Closed`）。
     ///
-    /// rmcp 3.5.1 的 `server/discover` 是 bootstrap 探测：discover 后 server 仍等待
+    /// rmcp 的 `server/discover` 是 bootstrap 探测：discover 后 server 仍等待
     /// `initialize` 或首个非 discover 请求。Auto 生命周期只做 discover 就关闭时，
     /// server 以 `ConnectionClosed` 退出；此时客户端握手已完成，仍归入正常关闭。
     Quit(QuitReason),
@@ -392,7 +392,7 @@ impl BuiltinTransport {
 
 /// 记录 server 侧是否读到过入站字节。
 ///
-/// rmcp 3.5.1 把 `server/discover` 当作 bootstrap 探测，discover 后仍等待
+/// rmcp 把 `server/discover` 当作 bootstrap 探测，discover 后仍等待
 /// `initialize` 或首个非 discover 请求。Auto 握手只完成 discover 就关闭时，
 /// `serve_server` 以 `ConnectionClosed` 退出；但此时客户端已握手，不能报成
 /// `NotStarted`。用「是否读过入站字节」区分未握手的直接丢弃，避免匹配错误文本。
@@ -465,7 +465,7 @@ where
                 Ok(reason) => BuiltinServerExit::Quit(reason),
                 Err(error) => BuiltinServerExit::TaskFailed(error.to_string()),
             },
-            // 3.5.1 的 discover bootstrap 只应答探测、不进入服务循环；客户端在
+            // discover bootstrap 只应答探测、不进入服务循环；客户端在
             // discover 后关闭时，把已完成握手的链路归入正常关闭。
             Err(ServerInitializeError::ConnectionClosed(_))
                 if saw_inbound.load(Ordering::Relaxed) =>

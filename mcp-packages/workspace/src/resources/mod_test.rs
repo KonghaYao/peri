@@ -188,16 +188,15 @@ fn scan_read_replacement_does_not_leak() {
         );
         // 整个技能仍在（入口未受影响），但其 manifest 已不含逃逸项。
         let entry = provider
-            .skills_get("skill://project/alpha/SKILL.md")
+            .get_skill("skill://project/alpha/SKILL.md")
             .expect("技能仍可读");
-        let uris: Vec<&str> = entry
-            .skill
-            .resources
-            .as_ref()
-            .expect("manifest")
-            .iter()
-            .map(|resource| resource.uri.as_str())
-            .collect();
+        let uris: Vec<&str> = match &entry.skill.resources {
+            rmcp::model::SkillResources::Files(files) => {
+                files.iter().map(|resource| resource.uri.as_str()).collect()
+            }
+            rmcp::model::SkillResources::Dynamic => panic!("静态技能必须是完整 manifest"),
+            other => panic!("静态技能必须是完整 manifest，实际：{other:?}"),
+        };
         assert!(!uris.contains(&"skill://project/alpha/sub/data.txt"));
     }
 }
@@ -336,11 +335,15 @@ fn skills_endpoints_delegate_to_catalog() {
             budget: ResourceBudget::default(),
         },
     );
-    let list = provider.skills_list(None).expect("skills/list");
+    let list = provider.list_skills(None).expect("skills/list");
     assert_eq!(list.skills.len(), 1);
+    let rmcp::model::SkillResources::Files(files) = &list.skills[0].resources else {
+        panic!("静态技能必须是完整 manifest");
+    };
+    assert!(files.iter().all(|file| file.size > 0), "类型化结果必须带 size");
     let get = provider
-        .skills_get("skill://project/alpha/SKILL.md")
+        .get_skill("skill://project/alpha/SKILL.md")
         .expect("skills/get");
     assert_eq!(get.skill.uri, "skill://project/alpha/SKILL.md");
-    assert!(provider.skills_list(Some("c1".into())).is_err());
+    assert!(provider.list_skills(Some("c1".into())).is_err());
 }

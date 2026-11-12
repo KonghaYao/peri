@@ -19,9 +19,10 @@ use peri_acp_types::builtin_mcp::find;
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResponse, CancelTaskParams, CustomRequest, CustomResult,
-        ErrorCode, GetTaskParams, GetTaskResult, ListResourceTemplatesResult, ListResourcesResult,
-        ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
-        ServerConfig, SubscriptionFilter, UpdateTaskParams,
+        ErrorCode, GetSkillRequestMethod, GetSkillRequestParams, GetSkillResult, GetTaskParams,
+        GetTaskResult, ListResourceTemplatesResult, ListResourcesResult, ListSkillsRequestMethod,
+        ListSkillsResult, ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams,
+        ReadResourceResponse, ServerConfig, SubscriptionFilter, UpdateTaskParams,
     },
     service::{RequestContext, RoleServer, SubscriptionContext},
     ErrorData as McpError, ServerHandler,
@@ -154,7 +155,7 @@ impl ServerHandler for BuiltinServerHandler {
         }
     }
 
-    /// custom request 转发（W1：`skills/list|get` 到 workspace handler）。
+    /// custom request 转发（`workspace/*` 等 MCPP 方法到 workspace handler）。
     ///
     /// 未覆盖的 method 与未声明 custom 面的实例都落到 trait 的默认语义
     /// （`-32601`）；本枚举不解释 method 语义、不缓存响应。
@@ -228,6 +229,30 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Workspace(server) => server.cancel_task(request, context).await,
             Self::Monitor(server) => server.cancel_task(request, context).await,
             _ => Err(McpError::invalid_params("unknown task", None)),
+        }
+    }
+
+    /// `skills/list` 转发：rmcp 3.9.0 起是类型化请求，不再经 `on_custom_request`。
+    async fn list_skills(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListSkillsResult, McpError> {
+        match self {
+            Self::Workspace(server) => server.list_skills(request, context).await,
+            _ => Err(McpError::method_not_found::<ListSkillsRequestMethod>()),
+        }
+    }
+
+    /// `skills/get` 转发（与 `skills/list` 同一 workspace provider）。
+    async fn get_skill(
+        &self,
+        request: GetSkillRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<GetSkillResult, McpError> {
+        match self {
+            Self::Workspace(server) => server.get_skill(request, context).await,
+            _ => Err(McpError::method_not_found::<GetSkillRequestMethod>()),
         }
     }
 }

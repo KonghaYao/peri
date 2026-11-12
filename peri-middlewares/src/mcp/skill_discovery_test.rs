@@ -5,8 +5,11 @@
 use super::*;
 use crate::mcp::client::{McpClientHandle, OAuthStatus};
 use crate::mcp::skill_discovery::skills_list::collect_entries;
+use crate::mcp::skill_discovery::skills_list::skill_result_payload;
+use crate::mcp::skill_discovery::skills_list::SkillGetResponse;
 use crate::mcp::ClientStatus;
 use peri_acp_types::mcp_skills::ServerDiscoveryState;
+use rmcp::model::ServerResult;
 use std::sync::Arc;
 
 fn resource(uri: &str) -> Resource {
@@ -380,6 +383,83 @@ fn skill_list_response_parses_pagination_and_defaults() {
     assert!(e0.resources.is_none(), "省略 resources → None");
     let e1 = entry_from_dto(parsed.skills[1].clone()).unwrap();
     assert_eq!(e1.resources.as_ref().unwrap().len(), 1);
+}
+
+/// [回归测试] 只带 `_meta` 的 result 不得被解析成工具结果。
+///
+/// rmcp 3.5.1 把 `_meta` 当 `CallToolResult` 的已知字段，导致 mcp-use 的
+/// `skills/list` 响应在 untagged `ServerResult` 中先命中 `CallToolResult`；
+/// 3.9.0 修复后仍须保证该响应不会被当成携带空技能目录的结果。
+#[test]
+fn skills_list_meta_only_result_is_not_a_tool_result() {
+    let json = serde_json::json!({
+        "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "mcp-use", "version": "2.12.4"}},
+        "resultType": "complete"
+    });
+    let parsed: ServerResult = serde_json::from_value(json).unwrap();
+    assert!(!matches!(parsed, ServerResult::CallToolResult(_)));
+    // 该响应不携带 skills 载荷：归一化必须失败，而不是冒充空目录。
+    assert!(skill_result_payload(&parsed).is_none());
+}
+
+/// [回归测试] 完整 skills + 带 `size` 的 resources 命中 3.9.0 的
+/// `ListSkillsResult`，归一化后仍按 `SkillListResponse` 解析（`size` 被忽略）。
+#[test]
+fn skills_list_typed_result_with_sizes_normalizes() {
+    let json = serde_json::json!({
+        "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "mcp-use"}},
+        "skills": [{
+            "uri": "skill://a/SKILL.md",
+            "frontmatter": {"name": "a", "description": "A"},
+            "resources": [{"uri": "skill://a/SKILL.md", "digest": "sha256:abcd", "size": 42}]
+        }]
+    });
+    let parsed: ServerResult = serde_json::from_value(json).unwrap();
+    assert!(matches!(parsed, ServerResult::ListSkillsResult(_)));
+    let payload = skill_result_payload(&parsed).expect("typed payload");
+    let response: SkillListResponse = serde_json::from_value(payload).unwrap();
+    assert_eq!(response.skills.len(), 1);
+    let entry = entry_from_dto(response.skills[0].clone()).unwrap();
+    assert_eq!(
+        entry.resources.unwrap()[0].digest,
+        "sha256:abcd",
+        "size 不在领域模型内，digest 必须保留"
+    );
+}
+
+/// [回归测试] 省略 `resources`（mcp-use 实际形状）落到 `CustomResult`，
+/// 归一化后仍可解析；与类型化分支共用同一领域响应。
+#[test]
+fn skills_list_custom_result_without_resources_normalizes() {
+    let json = serde_json::json!({
+        "skills": [{"uri": "skill://a/SKILL.md", "frontmatter": {"name": "a", "description": "A"}}]
+    });
+    let parsed: ServerResult = serde_json::from_value(json).unwrap();
+    assert!(matches!(parsed, ServerResult::CustomResult(_)));
+    let payload = skill_result_payload(&parsed).expect("custom payload");
+    let response: SkillListResponse = serde_json::from_value(payload).unwrap();
+    assert_eq!(response.skills.len(), 1);
+    let entry = entry_from_dto(response.skills[0].clone()).unwrap();
+    assert!(entry.resources.is_none());
+}
+
+/// [回归测试] `skills/get` 的完整条目命中 `GetSkillResult`，归一化后按
+/// `SkillGetResponse` 解析（与 list 条目同构）。
+#[test]
+fn skills_get_typed_result_normalizes() {
+    let json = serde_json::json!({
+        "skill": {
+            "uri": "skill://a/SKILL.md",
+            "frontmatter": {"name": "a", "description": "A"},
+            "resources": [{"uri": "skill://a/SKILL.md", "digest": "sha256:abcd", "size": 42}]
+        }
+    });
+    let parsed: ServerResult = serde_json::from_value(json).unwrap();
+    assert!(matches!(parsed, ServerResult::GetSkillResult(_)));
+    let payload = skill_result_payload(&parsed).expect("typed payload");
+    let response: SkillGetResponse = serde_json::from_value(payload).unwrap();
+    let entry = entry_from_dto(response.skill).unwrap();
+    assert_eq!(entry.uri, "skill://a/SKILL.md");
 }
 
 // ─── entry_to_metadata（W2：发现期只做结构校验，不读正文）─────────────────

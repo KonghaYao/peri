@@ -1,8 +1,8 @@
 diff --git a/src/handler/server.rs b/src/handler/server.rs
-index 4abe9cc..fc3fd81 100644
+index 94257ee..b145f9f 100644
 --- a/src/handler/server.rs
 +++ b/src/handler/server.rs
-@@ -149,6 +149,15 @@ impl<H: ServerHandler> Service<RoleServer> for H {
+@@ -178,6 +178,15 @@ impl<H: ServerHandler> Service<RoleServer> for H {
                      Err(McpError::method_not_found::<SubscriptionsListenRequestMethod>())
                  } else {
                      let requested = request.params.notifications;
@@ -18,7 +18,7 @@ index 4abe9cc..fc3fd81 100644
                      let Some(candidate) = self.accepted_subscription_filter(&requested) else {
                          return Err(
                              McpError::method_not_found::<SubscriptionsListenRequestMethod>(),
-@@ -158,6 +167,14 @@ impl<H: ServerHandler> Service<RoleServer> for H {
+@@ -187,6 +196,14 @@ impl<H: ServerHandler> Service<RoleServer> for H {
                      let advertised = requested.supported_by(&server_info.capabilities);
                      let handler_accepted = requested.intersection(&candidate);
                      let accepted = handler_accepted.intersection(&advertised);
@@ -34,18 +34,10 @@ index 4abe9cc..fc3fd81 100644
                          tracing::debug!(
                              requested_resource_count = requested
 diff --git a/src/model.rs b/src/model.rs
-index 275d86d..bf99743 100644
+index 5a493d4..239a838 100644
 --- a/src/model.rs
 +++ b/src/model.rs
-@@ -325,6 +325,7 @@ impl NumberOrString {
-         }
-     }
- 
-+    #[cfg_attr(not(feature = "client"), allow(dead_code))]
-     pub(crate) fn matches_response_id(&self, response_id: &Self) -> bool {
-         self == response_id
-             || matches!(
-@@ -2089,6 +2090,10 @@ pub struct SubscriptionFilter {
+@@ -2254,6 +2254,10 @@ pub struct SubscriptionFilter {
      #[serde(default, skip_serializing_if = "Option::is_none")]
      #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
      pub resource_subscriptions: Option<Vec<String>>,
@@ -56,7 +48,7 @@ index 275d86d..bf99743 100644
  }
  
  impl SubscriptionFilter {
-@@ -2117,6 +2122,19 @@ impl SubscriptionFilter {
+@@ -2282,6 +2286,19 @@ impl SubscriptionFilter {
                  })
              })
              .filter(|uris: &Vec<String>| !uris.is_empty());
@@ -76,7 +68,7 @@ index 275d86d..bf99743 100644
          Self {
              tools_list_changed: (self.tools_list_changed == Some(true)
                  && other.tools_list_changed == Some(true))
-@@ -2128,6 +2146,7 @@ impl SubscriptionFilter {
+@@ -2293,6 +2310,7 @@ impl SubscriptionFilter {
                  && other.resources_list_changed == Some(true))
              .then_some(true),
              resource_subscriptions,
@@ -84,7 +76,7 @@ index 275d86d..bf99743 100644
          }
      }
  
-@@ -2148,7 +2167,15 @@ impl SubscriptionFilter {
+@@ -2313,7 +2331,15 @@ impl SubscriptionFilter {
                      .is_some_and(|requested| requested.contains(uri))
              })
          });
@@ -101,7 +93,7 @@ index 275d86d..bf99743 100644
      }
  
      /// Return the requested notification types advertised by server capabilities.
-@@ -2178,6 +2205,10 @@ impl SubscriptionFilter {
+@@ -2343,6 +2369,10 @@ impl SubscriptionFilter {
                  .is_some_and(|resources| resources.subscribe == Some(true))
                  .then(|| self.resource_subscriptions.clone())
                  .flatten(),
@@ -112,7 +104,7 @@ index 275d86d..bf99743 100644
          }
      }
  }
-@@ -2226,6 +2257,18 @@ impl SubscriptionFilterBuilder {
+@@ -2391,6 +2421,18 @@ impl SubscriptionFilterBuilder {
          self
      }
  
@@ -132,18 +124,10 @@ index 275d86d..bf99743 100644
      pub fn build(self) -> SubscriptionFilter {
          self.filter
 diff --git a/src/service.rs b/src/service.rs
-index 8fcf9b4..2cd7771 100644
+index b24236c..daca895 100644
 --- a/src/service.rs
 +++ b/src/service.rs
-@@ -1035,6 +1035,7 @@ impl<R: ServiceRole> Peer<R> {
-         *self.info.write().expect("peer info lock poisoned") = Some(Arc::new(info));
-     }
- 
-+    #[cfg_attr(not(feature = "client"), allow(dead_code))]
-     pub(crate) fn set_client_request_metadata(&self, metadata: ClientRequestMetadata) {
-         let result = self.client_request_metadata.set(metadata);
-         debug_assert!(result.is_ok(), "client request metadata set more than once");
-@@ -1460,7 +1461,18 @@ where
+@@ -1465,7 +1465,18 @@ where
                  }
              };
  
@@ -163,7 +147,7 @@ index 8fcf9b4..2cd7771 100644
              match evt {
                  Event::SendTaskResult(SendTaskResult::Request { id, result }) => {
                      if let Err(e) = result
-@@ -1606,7 +1618,7 @@ where
+@@ -1618,7 +1629,7 @@ where
                                  .await;
                              let response = match result {
                                  Ok(result) => {
@@ -173,10 +157,10 @@ index 8fcf9b4..2cd7771 100644
                                  }
                                  Err(error) => {
 diff --git a/src/service/client.rs b/src/service/client.rs
-index 5dad655..89b4e4d 100644
+index 21d68be..b40e43a 100644
 --- a/src/service/client.rs
 +++ b/src/service/client.rs
-@@ -571,11 +571,15 @@ impl Subscription {
+@@ -636,11 +636,15 @@ impl Subscription {
                  .resource_subscriptions
                  .as_ref()
                  .is_some_and(|uris| uris.contains(&update.params.uri)),
@@ -194,7 +178,7 @@ index 5dad655..89b4e4d 100644
          }
      }
 diff --git a/src/service/server.rs b/src/service/server.rs
-index 8cb707d..a22a896 100644
+index 4e62de6..71380c8 100644
 --- a/src/service/server.rs
 +++ b/src/service/server.rs
 @@ -22,7 +22,7 @@ use crate::{
@@ -206,7 +190,7 @@ index 8cb707d..a22a896 100644
      },
      transport::DynamicTransportError,
  };
-@@ -236,15 +236,17 @@ impl SubscriptionSink {
+@@ -228,15 +228,17 @@ impl SubscriptionSink {
                      "notifications/message",
                  ));
              }
@@ -233,7 +217,7 @@ index 8cb707d..a22a896 100644
              }
              ServerNotification::CustomNotification(_) => {
                  return Err(SubscriptionSendError::UnsupportedNotification(
-@@ -319,6 +321,17 @@ impl SubscriptionSink {
+@@ -311,6 +313,17 @@ impl SubscriptionSink {
          ))
          .await
      }
@@ -251,23 +235,11 @@ index 8cb707d..a22a896 100644
  }
  
  /// Context for one established server-side notification subscription.
-diff --git a/src/transport.rs b/src/transport.rs
-index fdedc9c..ee27950 100644
---- a/src/transport.rs
-+++ b/src/transport.rs
-@@ -272,6 +272,7 @@ impl DynamicTransportError {
-         }
-     }
- 
-+    #[cfg_attr(not(feature = "client"), allow(dead_code))]
-     pub(crate) fn is_authorization_required(&self) -> bool {
-         let mut error = Some(self.error.as_ref() as &(dyn std::error::Error + 'static));
-         while let Some(current) = error {
 diff --git a/tests/test_message_schema/client_json_rpc_message_schema.json b/tests/test_message_schema/client_json_rpc_message_schema.json
-index 760d9e1..abe6378 100644
+index 5772b09..75489fe 100644
 --- a/tests/test_message_schema/client_json_rpc_message_schema.json
 +++ b/tests/test_message_schema/client_json_rpc_message_schema.json
-@@ -2218,6 +2218,13 @@
+@@ -2347,6 +2347,13 @@
          "resourcesListChanged": {
            "type": "boolean"
          },
@@ -282,10 +254,10 @@ index 760d9e1..abe6378 100644
            "type": "boolean"
          }
 diff --git a/tests/test_message_schema/server_json_rpc_message_schema.json b/tests/test_message_schema/server_json_rpc_message_schema.json
-index cebb3ed..4aa6edd 100644
+index bc4fef0..5364c15 100644
 --- a/tests/test_message_schema/server_json_rpc_message_schema.json
 +++ b/tests/test_message_schema/server_json_rpc_message_schema.json
-@@ -3410,6 +3410,13 @@
+@@ -3617,6 +3617,13 @@
          "resourcesListChanged": {
            "type": "boolean"
          },

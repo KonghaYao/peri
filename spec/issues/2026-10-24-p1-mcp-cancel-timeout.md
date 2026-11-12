@@ -18,7 +18,7 @@
 3. `handle_cancel_bg_task` 只从 `cfg.session_manager` 取 `task_manager`，随后 `cancel_async(task_id).await`：`peri-acp/src/host/requests/session_tasks.rs:25-44`。
 4. 外部任务分支 await 注册时保存的 cancel 闭包：`peri-agent/src/agent/async_tasks/manager.rs:662-669`（该闭包本身没有期限）。
 5. MCP 外部任务闭包调用 `peer.cancel_task(params).await`：`peri-middlewares/src/mcp/client/subscription_task_binding.rs:197-201`。
-6. rmcp 3.5.1 的 `cancel_task` 走 `send_request`（`PeerRequestOptions::no_options()`，timeout=None）：`rmcp-3.5.1/src/service/client.rs:1432-1442`（补丁后源码）；同一版本提供 `PeerRequestOptions::with_timeout`：`rmcp-3.5.1/src/service.rs:786-790`。
+6. rmcp 3.9.0 的 `cancel_task` 仍走 `PeerRequestOptions::no_options()`（timeout=None）的请求路径，只有 future 被放弃时才发 `notifications/cancelled`：`rmcp-3.9.0/src/service/client.rs:1528-1538`（补丁后源码）；同一版本提供 `PeerRequestOptions::with_timeout`：`rmcp-3.9.0/src/service.rs:785-790`。
 7. `cancel_session_external_tasks` 的 20 秒 deadline 在逐任务 `cancel_async().await` 全部结束后才建立：`peri-middlewares/src/mcp/client/subscription_tasks.rs:34-46`。取消 RPC 本身没有期限，deadline 覆盖不到它。
 8. `session/close` 通过 `pool.cancel_session_external_tasks(session_id).await` 执行取消：`peri-acp/src/host/requests/session_close.rs:112-118`；该调用处于上述全锁派发路径内。
 

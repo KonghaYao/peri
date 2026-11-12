@@ -18,7 +18,8 @@
 //!
 //! **W1 resource surface（2026-09-29）**：经 [`Self::with_resources`] 装配时，handler
 //! 合并 `resources` provider 的公开批（skills / agents / instructions）与
-//! `skills/list|get` custom requests；未装配时这些方法分别表现为
+//! `skills/list|get` 请求（rmcp 3.9.0 起为类型化 `ClientRequest` 变体，经
+//! `list_skills` / `get_skill` 提供）；未装配时这些方法分别表现为
 //! 「未知资源」（`-32602`）与「方法不支持」（`-32601`）——**不**把缺输入伪装成
 //! 「技能不存在且已 ready」。生产装配点（`peri-middlewares` dispatch 的 `workspace`
 //! arm）自 W4a（2026-09-29）起对**会话装配**调用 `with_resources`，当前只装载
@@ -34,12 +35,14 @@ use peri_agent::tools::{BaseTool, ToolContext, ToolExecutionStatus};
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResponse, CancelTaskParams, CreateTaskResult, CustomRequest,
-        CustomResult, ErrorCode, ExtensionCapabilities, GetMeta, GetTaskParams, GetTaskResult,
-        Implementation, JsonObject, ListResourceTemplatesResult, ListResourcesResult,
-        ListToolsResult, MetaObject, PaginatedRequestParams, ReadResourceRequestParams,
-        ReadResourceResponse, RequestId, Resource, ResourceContents, ResourceTemplate,
-        ResourceUpdatedNotification, ResourceUpdatedNotificationParam, ServerCapabilities,
-        ServerConfig, ServerNotification, SubscriptionFilter, UpdateTaskParams, TASKS_EXTENSION_ID,
+        CustomResult, ErrorCode, ExtensionCapabilities, GetMeta, GetSkillRequestMethod,
+        GetSkillRequestParams, GetSkillResult, GetTaskParams, GetTaskResult, Implementation,
+        JsonObject, ListResourceTemplatesResult, ListResourcesResult, ListSkillsRequestMethod,
+        ListSkillsResult, ListToolsResult, MetaObject, PaginatedRequestParams,
+        ReadResourceRequestParams, ReadResourceResponse, RequestId, Resource, ResourceContents,
+        ResourceTemplate, ResourceUpdatedNotification, ResourceUpdatedNotificationParam,
+        ServerCapabilities, ServerConfig, ServerNotification, SubscriptionFilter, UpdateTaskParams,
+        TASKS_EXTENSION_ID,
     },
     service::{RequestContext, RoleServer, SubscriptionContext, SubscriptionSink},
     ErrorData as McpError, ServerHandler,
@@ -426,7 +429,7 @@ impl ServerHandler for WorkspaceMcpServer {
     ///
     /// **W4b（plan §5.1）：技能能力位与资源面同生共死。** 资源 provider 装配时在
     /// 本地组合 `resources` + SEP-2640 skills extension（`skills/list` / `skills/get`
-    /// custom requests 由同一 provider 提供）；未装配 provider 的实例（`with_resources`
+    /// 由同一 provider 经类型化 handler 提供）；未装配 provider 的实例（`with_resources`
     /// 未被调用，例如顶层三路径 / 未接线测试）**不声明**该扩展——「声明即实现」，
     /// 客户端不会对未支持的方法盲调，也不会把「未支持」误认成「空技能集」
     /// （`peri-acp-types::skills::SKILLS_EXTENSION_ID` 是两侧共用的键）。
@@ -550,9 +553,9 @@ impl ServerHandler for WorkspaceMcpServer {
         ))
     }
 
-    /// `skills/list` / `skills/get`（MCPP custom requests；未装配 → `-32601`）。
+    /// `workspace/*` 与输出持久化等 MCPP custom requests（未覆盖 → `-32601`）。
     ///
-    /// 未知 method 与未装配都按 method_not_found 收口：这是「该实例不提供该方法」
+    /// 未知 method 一律按 method_not_found 收口：这是「该实例不提供该方法」
     /// 的诚实表达，与「技能不存在」（`-32602`）区分。
     async fn on_custom_request(
         &self,
@@ -613,51 +616,49 @@ impl ServerHandler for WorkspaceMcpServer {
                 result = crate::file_observation::read_mention(&self.cwd, request) => result,
             };
         }
-        let supported = matches!(method.as_str(), "skills/list" | "skills/get");
-        let provider = if supported {
-            self.resource_provider()
-        } else {
-            None
-        };
-        let Some(provider) = provider else {
-            return Err(McpError::new(ErrorCode::METHOD_NOT_FOUND, method, None));
-        };
+        // 其余 custom method 一律不提供服务：与「技能不存在」(`-32602`) 区分。
+        Err(McpError::new(ErrorCode::METHOD_NOT_FOUND, method, None))
+    }
 
-        match method.as_str() {
-            "skills/list" => {
-                let cursor = request
-                    .params
-                    .as_ref()
-                    .and_then(|params| params.get("cursor"))
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string);
-                let response = tokio::task::spawn_blocking(move || provider.skills_list(cursor))
-                    .await
+    /// SEP-2640 `skills/list`：rmcp 3.9.0 起是类型化请求，不再经 `on_custom_request`。
+    async fn list_skills(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListSkillsResult, McpError> {
+        let Some(provider) = self.resource_provider() else {
+            return Err(McpError::method_not_found::<ListSkillsRequestMethod>());
+        };
+        // 首期不分页：provider 对非空 cursor 报 `InvalidUri`，透传即拒绝。
+        let cursor = request.and_then(|params| params.cursor);
+        tokio::select! {
+            biased;
+            _ = context.ct.cancelled() => Err(McpError::internal_error("skills/list cancelled", None)),
+            result = tokio::task::spawn_blocking(move || provider.list_skills(cursor)) => {
+                result
                     .map_err(|_| McpError::internal_error("skill scan failed", None))?
-                    .map_err(map_skills_error)?;
-                let value = serde_json::to_value(&response).map_err(|_| {
-                    McpError::internal_error("skill response encoding failed", None)
-                })?;
-                Ok(CustomResult::new(value))
+                    .map_err(map_skills_error)
             }
-            _ => {
-                let uri = request
-                    .params
-                    .as_ref()
-                    .and_then(|params| params.get("uri"))
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string)
-                    .ok_or_else(|| {
-                        McpError::invalid_params("skills/get requires a uri parameter", None)
-                    })?;
-                let response = tokio::task::spawn_blocking(move || provider.skills_get(&uri))
-                    .await
+        }
+    }
+
+    /// SEP-2640 `skills/get`：URI 非法/未知 → `-32602`（MCPP 约定）。
+    async fn get_skill(
+        &self,
+        request: GetSkillRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<GetSkillResult, McpError> {
+        let Some(provider) = self.resource_provider() else {
+            return Err(McpError::method_not_found::<GetSkillRequestMethod>());
+        };
+        let uri = request.uri;
+        tokio::select! {
+            biased;
+            _ = context.ct.cancelled() => Err(McpError::internal_error("skills/get cancelled", None)),
+            result = tokio::task::spawn_blocking(move || provider.get_skill(&uri)) => {
+                result
                     .map_err(|_| McpError::internal_error("skill scan failed", None))?
-                    .map_err(map_skills_error)?;
-                let value = serde_json::to_value(&response).map_err(|_| {
-                    McpError::internal_error("skill response encoding failed", None)
-                })?;
-                Ok(CustomResult::new(value))
+                    .map_err(map_skills_error)
             }
         }
     }
