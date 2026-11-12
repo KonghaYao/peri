@@ -318,90 +318,6 @@ fn logical_sequence(pages: &[Vec<Value>]) -> Vec<u64> {
     positions
 }
 
-/// [回归测试] 预存的无环境/view-only state 不归本次 setup，cold load 才取得发布清理权。
-#[tokio::test]
-async fn session_switch_preexisting_state_is_not_owned_by_setup_publication() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let fixture = PageFixture::new(&tmp).await;
-    let connection = crate::host::connection::ConnectionContext::new(false);
-    let reservation = connection
-        .reserve_session_setup_for("session/load", &json!({ "sessionId": fixture.sid }))
-        .unwrap()
-        .expect("load 应取得 reservation");
-    let existing = crate::host::connection::SessionSetupPublication::capture(
-        "session/load",
-        &json!({ "sessionId": fixture.sid }),
-        &fixture.sessions,
-        Some(&reservation),
-    )
-    .await;
-    assert!(
-        existing.is_none(),
-        "已存在 state 即使 environment=None 也不得归本请求清理"
-    );
-    let empty = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let cold_id = "cold-publication";
-    let cold = crate::host::connection::SessionSetupPublication::capture(
-        "session/load",
-        &json!({ "sessionId": cold_id }),
-        &empty,
-        Some(&reservation),
-    )
-    .await
-    .expect("真正 cold load 必须保留半发布清理权");
-    let cwd = tmp.path().to_str().unwrap().to_owned();
-    empty.lock().await.insert(
-        cold_id.to_owned(),
-        SessionState::view_only(cold_id.to_owned(), cold_id.to_owned(), cwd.clone()),
-    );
-    fixture
-        .cfg
-        .session_manager
-        .ensure_session_with_task_manager(cold_id, &cwd, None);
-    cold.rollback(&fixture.cfg, &empty).await;
-    assert!(
-        !empty.lock().await.contains_key(cold_id),
-        "本请求发布的 cold state 必须清掉"
-    );
-    assert!(
-        fixture.cfg.session_manager.get_session(cold_id).is_none(),
-        "本请求发布的 cold manager 必须清掉"
-    );
-    assert!(
-        fixture.sessions.lock().await.contains_key(&fixture.sid),
-        "预存 state 不得受 cold rollback 影响"
-    );
-
-    let vanished_id = "vanished-publication";
-    let vanished = crate::host::connection::SessionSetupPublication::capture(
-        "session/load",
-        &json!({ "sessionId": vanished_id }),
-        &empty,
-        Some(&reservation),
-    )
-    .await
-    .expect("空 map 应取得 publication ownership");
-    fixture
-        .cfg
-        .session_manager
-        .ensure_session_with_task_manager(vanished_id, &cwd, None);
-    vanished.rollback(&fixture.cfg, &empty).await;
-    assert!(
-        fixture
-            .cfg
-            .session_manager
-            .get_session(vanished_id)
-            .is_some(),
-        "state 已消失时不得关闭不属于本请求的 manager"
-    );
-    fixture
-        .cfg
-        .session_manager
-        .close_session(vanished_id)
-        .await
-        .unwrap();
-}
-
 struct ResponseFailingTransport {
     incoming:
         std::sync::Mutex<std::collections::VecDeque<crate::transport::types::IncomingMessage>>,
@@ -433,9 +349,10 @@ impl AcpTransport for ResponseFailingTransport {
     }
 }
 
-/// [回归测试] setup 响应未发送时不得提交连接绑定，下一 setup 可重新取得 reservation。
+/// [回归测试] 自定义 transport 写响应失败只验证 reservation 回滚；生产 transport
+/// 会按 ARC-TRANSPORT-001 进入 terminal，并由 host shutdown 排空会话资源。
 #[tokio::test]
-async fn session_switch_response_write_failure_rolls_back_reservation() {
+async fn session_switch_response_write_failure_only_rolls_back_reservation() {
     let tmp = tempfile::TempDir::new().unwrap();
     let fixture = PageFixture::new(&tmp).await;
     let transport: Arc<dyn AcpTransport> = Arc::new(ResponseFailingTransport {

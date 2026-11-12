@@ -10,10 +10,9 @@ use tokio_util::sync::CancellationToken;
 use super::diagnostics::ResponseDiagnostics;
 use super::session_endpoint::register_session_endpoint;
 use super::{
-    connection::{ConnectionContext, SessionSetupPublication},
-    dispatch_prompt_turn, extract_session_id, handle_request_for_connection, history_page,
-    history_window, mcp_apps, requests, send_session_info_update, task_scope, AcpServerConfig,
-    PromptLocks, SharedSessions,
+    connection::ConnectionContext, dispatch_prompt_turn, extract_session_id,
+    handle_request_for_connection, history_page, history_window, mcp_apps, requests,
+    send_session_info_update, task_scope, AcpServerConfig, PromptLocks, SharedSessions,
 };
 use crate::transport::types::{IncomingMessage, RequestId};
 
@@ -552,9 +551,7 @@ impl ServerLoop<'_> {
         // 历史分页：模式在进入生命周期路由**之前**解析（REQ §5.1）。带 cursor 的 load 是
         // 只读浏览——不取执行生命周期锁、不装配、不广播；非法参数与未协商能力都在这里
         // 明确拒绝，绝不降级成初始 load。
-        let load_initial_cursor = if method == "session/load" {
-            // 分页/窗口准入按**当前连接**的协商结果（REQ §5.3）：`caps()` 对从未
-            // `initialize` 的连接是兜底能力集，不能用来放行分页或窗口语义。
+        if method == "session/load" {
             let caps = connection_facts.caps.clone();
             match history_page::classify(
                 &params,
@@ -588,17 +585,13 @@ impl ServerLoop<'_> {
                     let _ = diagnostics.send(transport.as_ref(), result).await;
                     return;
                 }
-                Ok(history_page::SessionLoadMode::InitialLoad) => {
-                    connection_facts.history_pagination
-                }
+                Ok(history_page::SessionLoadMode::InitialLoad) => {}
                 Err(error) => {
                     let _ = diagnostics.send(transport.as_ref(), Err(error)).await;
                     return;
                 }
             }
-        } else {
-            false
-        };
+        }
         // 只读历史已经返回；setup gate 必须早于声明校验和环境装配。
         let mut setup_reservation = match connection
             .lock()
@@ -717,13 +710,6 @@ impl ServerLoop<'_> {
         } else {
             None
         };
-        let mut setup_publication = SessionSetupPublication::capture(
-            &method,
-            &params,
-            sessions,
-            setup_reservation.as_ref(),
-        )
-        .await;
         let mut result = if requests::session_io::handles(&method) {
             let prepared = {
                 let sessions = sessions.lock().await;
@@ -767,25 +753,6 @@ impl ServerLoop<'_> {
             .await
         };
         drop(lifecycle_lock);
-        // 初始 load 的分页身份：只对协商了分页能力的当前连接附加（REQ §5.3）。
-        // 放在执行锁之外：这是初始 load 路径上的有界读取，不必占着生命周期锁。
-        if load_initial_cursor && result.is_ok() {
-            let session_id = extract_session_id(&params, "").to_string();
-            let failure = match result.as_mut() {
-                Ok(response) if !session_id.is_empty() => {
-                    history_page::attach_initial_cursor(cfg, sessions, &session_id, response)
-                        .await
-                        .err()
-                }
-                _ => None,
-            };
-            if let Some(error) = failure {
-                if let Some(publication) = setup_publication.take() {
-                    publication.rollback(cfg, sessions).await;
-                }
-                result = Err(error);
-            }
-        }
         // 进入会话时的恢复（设计 §3/§4）：装配成功后、响应发出前完成准备。
         // 生命周期锁已在上面释放；准备阶段只读范围并接纳提醒，不启动执行。
         // 装配成功 + 恢复准备失败 = 部分成功：历史保留、响应 Ok，结果放 `_meta`。

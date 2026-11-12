@@ -70,7 +70,16 @@ workspace 资源输入从本次选中 `ConfigSource` 的资源投影取关闭位
 声明校验和环境装配之前取得同步 reservation，setup 成功响应发送后提交当前 ID；匹配 ID 的
 close/delete 成功响应发送后释放。拒绝使用 `-32010` 与稳定 `data.reason`。通知分发已按职责移到
 `host/server_loop/notification.rs`。进入会话恢复仅在 partition 含 working child 时由
-`host/recovery/coordinator.rs` 读取整棵 session tree；内部 child 装配不经过 wire gate。
+`host/recovery/coordinator.rs` 读取整棵 session tree；内部 child 装配不经过 wire gate。外部集成
+必须在切换前自行 `session/close`/`delete` 当前会话；Peri 不自动回收旧会话，未按约定关闭的
+资源驻留或泄露由客户端承担，边界见 `docs/design/peri-acp-protocol.md` §2.1。
+Cold restore publication 的唯一权威在 `host/requests/session_restore/load_shared.rs`：
+`prepare_shared` 返回 `RestorePublication(session_id, session_generation)`；load 在同一 handler 内完成
+replay、响应与 initial cursor，失败按 generation 标记 closing 并排空；fork 在 target 创建前清理
+request-owned cold source，preexisting source 不受影响。`rollback_restore_publication` 仅在 manager 与
+environment 都确认 drain 后删除 state；Incomplete 保留 owner，返回
+`session_cleanup_incomplete + sessionId`，由显式 close 重试。响应 write failure 仍归 transport terminal
+与 host shutdown，不在 restore 层复制第二套清理。
 
 ACP 出站错误诊断统一位于 `src/host/diagnostics.rs`：`ServerLoop` 的普通请求、prompt、MCP Apps、MCP over ACP、准入拒绝及生命周期锁失败均经 `ResponseDiagnostics::send` 记录方法、RPC ID、可用会话 ID、错误码与错误消息，再原样发送响应；内部错误为 ERROR，其余拒绝为 WARN，正常取消为 DEBUG。`notify.rs` 的会话信息、配置项和命令列表通知共用 `send_session_update` 记录投递失败，不记录请求参数、响应数据或通知内容。针对性回归：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- host::diagnostics`。
 

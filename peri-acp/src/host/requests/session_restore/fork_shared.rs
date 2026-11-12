@@ -32,50 +32,73 @@ pub(crate) async fn handle_fork_shared(
         .and_then(|v| v.as_str())
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?
         .to_owned();
-    // 与 load/resume 共用：短锁判断 + 锁外 preflight/DB + 短锁复核发布。
-    super::load_shared::prepare_shared(params, cfg, sessions).await?;
-    let workspace = crate::host::workspace::reassert_expected(
-        cfg,
-        &source_id,
-        params.get("cwd").and_then(Value::as_str),
-    )
-    .await?;
-    let (execution_active, frozen_missing) = {
-        let states = sessions.lock().await;
-        let source = states
-            .get(&source_id)
-            .ok_or_else(|| AcpError::new(-32602, "Load the source session before forking"))?;
-        (source.cancel_token.is_some(), source.frozen.is_none())
+    // 与 load/resume 共用准备；只有本请求 cold 发布 source 时才取得清理权。
+    let super::load_shared::PreparedShared {
+        publication: source_publication,
+        ..
+    } = super::load_shared::prepare_shared(params, cfg, sessions).await?;
+    let source_setup: Result<_, AcpError> = async {
+        let workspace = crate::host::workspace::reassert_expected(
+            cfg,
+            &source_id,
+            params.get("cwd").and_then(Value::as_str),
+        )
+        .await?;
+        let (execution_active, frozen_missing) = {
+            let states = sessions.lock().await;
+            let source = states
+                .get(&source_id)
+                .ok_or_else(|| AcpError::new(-32602, "Load the source session before forking"))?;
+            (source.cancel_token.is_some(), source.frozen.is_none())
+        };
+        if execution_active
+            || cfg
+                .session_manager
+                .get_session(&source_id)
+                .is_some_and(|s| !s.active_agents.is_empty() || !s.task_manager.is_execution_idle())
+        {
+            return Err(AcpError::new(
+                -32010,
+                "Cannot fork while source execution is active",
+            ));
+        }
+        if frozen_missing {
+            return Err(AcpError::new(-32603, "Source frozen snapshot is missing"));
+        }
+        let cwd_owned = workspace
+            .cwd
+            .to_str()
+            .ok_or_else(|| AcpError::new(-32602, "Execution directory is not UTF-8"))?
+            .to_owned();
+        let fork_source = dispatch::load_fork_source(&cfg.session_resources, &source_id)
+            .await
+            .map_err(fork_source_error)?;
+        let mut prepared =
+            PreparedSessionInputs::prepare_fork(cfg, &cwd_owned, fork_source.frozen.as_str())?;
+        prepared.session_mcp_servers = session_mcp_servers(params)?;
+        let frozen_data = prepared
+            .frozen
+            .clone()
+            .ok_or_else(|| AcpError::new(-32603, "Fork frozen snapshot is missing"))?;
+        Ok((workspace, cwd_owned, fork_source, prepared, frozen_data))
+    }
+    .await;
+    let (workspace, cwd_owned, fork_source, prepared, frozen_data) = match source_setup {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return Err(super::load_shared::rollback_after_restore_error(
+                cfg,
+                sessions,
+                source_publication.as_ref(),
+                error,
+            )
+            .await)
+        }
     };
-    if execution_active
-        || cfg
-            .session_manager
-            .get_session(&source_id)
-            .is_some_and(|s| !s.active_agents.is_empty() || !s.task_manager.is_execution_idle())
-    {
-        return Err(AcpError::new(
-            -32010,
-            "Cannot fork while source execution is active",
-        ));
+    if let Some(publication) = source_publication.as_ref() {
+        super::load_shared::rollback_restore_publication(cfg, sessions, publication).await?;
     }
-    if frozen_missing {
-        return Err(AcpError::new(-32603, "Source frozen snapshot is missing"));
-    }
-    let cwd_owned = workspace
-        .cwd
-        .to_str()
-        .ok_or_else(|| AcpError::new(-32602, "Execution directory is not UTF-8"))?
-        .to_owned();
     let cwd = cwd_owned.as_str();
-    let fork_source = dispatch::load_fork_source(&cfg.session_resources, &source_id)
-        .await
-        .map_err(fork_source_error)?;
-    let mut prepared = PreparedSessionInputs::prepare_fork(cfg, cwd, fork_source.frozen.as_str())?;
-    prepared.session_mcp_servers = session_mcp_servers(params)?;
-    let frozen_data = prepared
-        .frozen
-        .clone()
-        .ok_or_else(|| AcpError::new(-32603, "Fork frozen snapshot is missing"))?;
     let (new_thread_id, published_payloads) = dispatch::fork_bound_session(
         &cfg.session_resources,
         &fork_source,

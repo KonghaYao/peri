@@ -44,6 +44,7 @@
 4. 只有匹配当前 ID 的 `session/close` / `session/delete` 成功响应发送后才释放连接绑定；关闭失败继续阻止切换。
 5. cursor/history/window/child history 是只读浏览，不建立或改变当前会话，不要求关闭。
 6. 内部 recovery child 不经过 wire setup gate，不占用或改写连接的当前会话身份。
+7. 责任边界：外部集成必须在切换前调用 Peri 的 `session/close`（或 `session/delete`）并等待成功响应；Peri 负责在未关闭时拒绝新的 setup，不自动关闭、LRU 淘汰或池化旧会话。未按该约定使用导致的旧会话资源驻留或泄露不由 Peri 承担。
 
 ## 修复方案
 
@@ -56,6 +57,7 @@
   6. `HostSessionRecovery::prepare` 仅在存在 `working` child 时读取 `list_session_tree`。
   7. 同步 ACP 协议设计、架构契约与 code index，明确 close-before-switch。
 - 明确不做：不自动关闭或 LRU 淘汰旧会话；不共享通用 MCP pool；不增加固定会话上限；不修改数据库 schema/索引；不处理 OOM 后重启或 relay 恢复；本轮不改 `list_session_tree` SQL。
+- 外部验证依赖：`KonghaYao/peri-e2e` 的 `helpers/llm-replay-tui.ts::prepareReplaySessions` 仍在同一连接上连续 `session/new`；需改为每次创建后立即 close（或每个会话使用独立连接），并更新 `.github/peri-e2e.rev`，否则 E2E replay 会按新契约正确拒绝第二个会话。
 - 回归测试：
   - `peri-acp/src/host/connection_test.rs`：reservation、不同目标拒绝、同 ID复用、失败回滚、旧 generation 不覆盖新状态、close 匹配释放。
   - `peri-acp/src/host/requests_close_failure_test.rs` 或独立 server-loop 测试：关闭失败仍拒绝切换，关闭成功后放行，setup 响应失败不提交。
@@ -77,14 +79,16 @@
 ## 验证记录
 
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- host::requests::tests::workspace_cases`（修复前基线）→ 15 passed，0 failed；存在 1 条 macOS linker compact-unwind warning。
-- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- session_switch` → 10 passed，0 failed；覆盖状态机、预存 state ownership、真实 close 失败/成功、history bypass 与响应发送失败回滚。
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- session_switch` → 10 passed，0 failed；覆盖状态机、真实 close 失败/成功、history bypass 与响应 write failure 的 reservation 回滚边界。
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- recovery_wire` → 1 passed，0 failed；过滤词已从修复前 0 tests 假绿变为非零。
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- close_failure` → 10 passed，0 failed。
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- recovery_child` → 20 passed，0 failed，1 ignored（既有产品裁决用例）。
-- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- connection` → 38 passed，0 failed；旧 fork wire 用例已同步为先成功 close 当前会话再 fork。
-- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- history_page_wire` → 75 passed，0 failed，1 ignored（既有 16 MiB 显式性能夹具）。
-- 主验证发现 `cleanup_unpublished_restore` 的两层 re-export 原受 `#[cfg(test)]` 限制，lib test 因此未覆盖 production 可见性；已改为 production `pub(crate)` re-export，仍复用 `load_shared.rs` 的唯一实现。
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- connection` → 40 passed，0 failed；旧 fork wire 用例已同步为先成功 close 当前会话再 fork。
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- history_page_wire` → 79 passed，0 failed，1 ignored（既有 16 MiB 显式性能夹具）。
+- CodeRabbit 后续 review 的四项 restore ownership finding 已收口：cold replay 失败清理、generation 精确回滚、Incomplete 保留 retry owner、fork cold source 成功/失败清理且 preexisting source 保留。authority 已下沉到 `load_shared::prepare_shared/rollback_restore_publication`，server loop 不再维护第二份 publication。响应 write failure 按既有 transport terminal + host shutdown 契约不复制清理。
+- `cold_replay_failure`、`restore_publication`、`restore_cleanup_incomplete`、`fork_cold_source`、`fork_preexisting_source`、`fork_wire_uses_the_shared_preparation_path` 六个过滤词各命中 1 条并通过；Incomplete 用例同时验证 typed `reason/sessionId`、reload 拒绝与显式 close 重试。
 - `bash ./scripts/check-changed.sh` → exit 0；实际执行 `cargo check --locked -p peri-acp -p peri-tui -p peri-wasm`。
-- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib` → 1255 passed，0 failed，2 ignored。
-- `cargo fmt --all -- --check` → exit 0；`git diff --check` → exit 0。修改 Rust 文件均 ≤1000 行，`server_loop.rs` 为 988 行。
+- `./scripts/cargo-rmcp-patched.sh clippy --locked -p peri-acp --all-targets -- -D warnings` → exit 0。
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib` → 1260 passed，0 failed，2 ignored。
+- `cargo fmt --all -- --check` → exit 0；`git diff --check` → exit 0。修改 Rust 文件均 ≤1000 行，`server_loop.rs` 为 955 行。
 - 权威文档分层复核：稳定不变量在 `ARC-ACP-SESSION-SWITCH-001`，wire 语义在 `docs/design/peri-acp-protocol.md`，代码落点在 `docs/code-index/peri-acp.md`，本文件只保留在办验收。

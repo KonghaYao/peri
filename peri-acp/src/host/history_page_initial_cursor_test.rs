@@ -149,6 +149,44 @@ async fn a_failed_initial_replay_fails_the_load_instead_of_answering_a_cursor() 
     task.abort();
 }
 
+/// [回归测试] cold load 已发布环境后若 replay 失败，request-owned state 与 manager 都必须清除。
+#[tokio::test]
+#[serial]
+async fn cold_replay_failure_does_not_leave_state_or_manager() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fixture = PageFixture::new(&tmp).await;
+    let sid = fixture.sid.clone();
+    let sessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
+    let failing: Arc<dyn AcpTransport> = Arc::new(NotificationFailingTransport { inner: server });
+    let (client, sessions, task) = spawn_loop_with_transport(
+        Arc::clone(&fixture.cfg),
+        sessions,
+        Some(pagination_caps()),
+        client,
+        failing,
+    )
+    .await;
+    let error = client
+        .send_request("session/load", json!({ "sessionId": sid }))
+        .await
+        .expect_err("cold replay 投递失败必须使 load 失败");
+    assert!(error.message.contains("history replay failed"), "{error:?}");
+    assert!(
+        !sessions.lock().await.contains_key(&fixture.sid),
+        "失败 cold load 不得残留 SessionState"
+    );
+    assert!(
+        fixture
+            .cfg
+            .session_manager
+            .get_session(&fixture.sid)
+            .is_none(),
+        "失败 cold load 不得残留 SessionManager 记录"
+    );
+    task.abort();
+}
+
 /// 合并契约（wire 级，REQ-H01-3 / A20）：协商分页的连接做初始 load 时，首屏每一条有效条目
 /// 都带上与历史页**同一把尺子**的身份与位置，页覆盖的只是更早的那一段——客户端才能把稀疏
 /// 首屏与后续页拼成一段不间断的历史。

@@ -31,7 +31,10 @@ mod fork_shared;
 #[path = "session_restore/load_shared.rs"]
 mod load_shared;
 pub(crate) use fork_shared::handle_fork_shared;
-pub(crate) use load_shared::cleanup_unpublished_restore;
+#[cfg(test)]
+pub(crate) use load_shared::{
+    cleanup_unpublished_restore, rollback_restore_publication, RestorePublication,
+};
 pub(crate) use load_shared::{handle_load_shared, handle_resume_shared};
 
 /// 冷 child 恢复的会话装配：与 `session/load` 同一条路径（含可用性、绑定、frozen

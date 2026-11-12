@@ -3,7 +3,6 @@ use std::sync::Arc;
 use peri_acp_types::PeriCaps;
 use serde_json::{json, Value};
 
-use super::{AcpServerConfig, SharedSessions};
 use crate::transport::types::AcpError;
 
 pub(crate) const SESSION_SWITCH_REQUIRED_REASON: &str = "session_switch_requires_close";
@@ -60,6 +59,7 @@ pub(crate) struct SessionSetupReservation {
 }
 
 impl SessionSetupReservation {
+    #[cfg(test)]
     pub(crate) fn commits_new_binding(&self) -> bool {
         self.kind == SessionSetupReservationKind::Preparing
     }
@@ -90,47 +90,6 @@ impl Drop for SessionSetupReservation {
             state.generation = state.generation.wrapping_add(1);
             state.phase = SessionSwitchPhase::Vacant;
         }
-    }
-}
-
-/// setup handler 已成功、响应后处理尚未完成时的发布前事实。
-pub(crate) struct SessionSetupPublication {
-    session_id: String,
-}
-
-impl SessionSetupPublication {
-    pub(crate) async fn capture(
-        method: &str,
-        params: &Value,
-        sessions: &SharedSessions,
-        reservation: Option<&SessionSetupReservation>,
-    ) -> Option<Self> {
-        if method != "session/load"
-            || !reservation.is_some_and(SessionSetupReservation::commits_new_binding)
-        {
-            return None;
-        }
-        let session_id = params.get("sessionId")?.as_str()?.to_owned();
-        let states = sessions.lock().await;
-        if states.contains_key(&session_id) {
-            return None;
-        }
-        Some(Self { session_id })
-    }
-
-    /// 普通 error response 没有 terminal shutdown 兜底，必须撤销本次新发布的环境。
-    pub(crate) async fn rollback(self, cfg: &AcpServerConfig, sessions: &SharedSessions) {
-        let published = sessions.lock().await.remove(&self.session_id);
-        let Some(published) = published else {
-            return;
-        };
-        let environment = published.environment;
-        super::requests::session_lifecycle::cleanup_unpublished_restore(
-            cfg,
-            &self.session_id,
-            environment,
-        )
-        .await;
     }
 }
 
@@ -299,7 +258,7 @@ impl ConnectionContext {
                 | SessionSetupRequest::RestoresSession(None | Some(_)) => {
                     return Err(session_switch_error(
                         SESSION_SWITCH_REQUIRED_REASON,
-                        "Close the current session before switching sessions",
+                        "Close the current session with session/close before switching sessions",
                     ));
                 }
             },
