@@ -128,6 +128,54 @@ async fn finalize_target_equals_child_does_not_promote_receiver() {
     );
 }
 
+/// 目标已终态：结果行就绪、child 仍 `active` 也不得把 target 从终态 + `idle` 提升为
+/// `working`。结果本身仍按 MQ 规则接纳，改变的只有接收方工作意图。
+#[tokio::test]
+async fn finalize_does_not_promote_a_terminal_receiver() {
+    use peri_acp_types::thread::{AgentStatus, WorkState};
+
+    for terminal in [
+        AgentStatus::Error,
+        AgentStatus::Done,
+        AgentStatus::Cancelled,
+    ] {
+        let fixture = Fixture::new().await;
+        let child = fixture.thread("child").await;
+        let target = fixture.thread("parent").await;
+        // 终态 target 的 `work_state` 是派生值；旧路径可能停在 `idle`。
+        sqlx::query("UPDATE threads SET agent_status = ?1, work_state = 'idle' WHERE id = ?2")
+            .bind(terminal.as_str())
+            .bind(target.as_str())
+            .execute(&fixture.store.database.pool)
+            .await
+            .unwrap();
+
+        let outcome = fixture
+            .data
+            .finalize_child_terminal(
+                &child,
+                AgentStatus::Done,
+                WorkState::Idle,
+                &target,
+                terminal_input(MessageId::new(), "result to terminal parent"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.disposition, MqEnqueueDisposition::Inserted);
+        assert_eq!(
+            terminal_facts(&fixture, &target).await,
+            (terminal.as_str().to_owned(), Some("idle".to_owned())),
+            "{terminal:?}: 终态 target 的 agent_status 与 work_state 都不得改变"
+        );
+        assert_eq!(
+            terminal_facts(&fixture, &child).await,
+            ("done".to_owned(), Some("idle".to_owned())),
+            "{terminal:?}: child 仍按本次结算写入终态"
+        );
+        assert_eq!(mq_count(&fixture, &target).await, 1, "结果仍要落在目标 MQ");
+    }
+}
+
 /// 结果 ID 已在别的 thread 的 MQ：整次结算冲突回滚，终态不得越过守卫提交。
 #[tokio::test]
 async fn finalize_conflicts_when_the_result_id_is_pending_in_another_thread() {

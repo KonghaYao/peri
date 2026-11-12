@@ -129,11 +129,12 @@ const INSERT_TERMINAL_RESULT_MQ_SQL: &str = "INSERT INTO thread_mq
       AND EXISTS (SELECT 1 FROM threads WHERE id = ?1)
       AND EXISTS (SELECT 1 FROM threads WHERE id = ?9 AND agent_status = 'active')";
 
-/// 结算批内的接收方提升：只认本次结果在目标 MQ 里的待发行，且 child 仍 `active`。
+/// 结算批内的接收方提升：只认本次结果在目标 MQ 里的待发行，且 target 与 child 都仍
+/// `active`。终态 target 的 `work_state` 是派生值，提升会把它改回 `working`。
 ///
 /// 结果投递回 child 自己时由调用方跳过，避免把刚写的终态重新提升为 `working`。
 const PROMOTE_RECEIVER_ON_TERMINAL_SQL: &str = "UPDATE threads SET work_state = 'working'
-    WHERE id = ?1 AND work_state = 'idle'
+    WHERE id = ?1 AND work_state = 'idle' AND agent_status = 'active'
       AND EXISTS (SELECT 1 FROM thread_mq WHERE thread_id = ?1 AND id = ?2)
       AND EXISTS (SELECT 1 FROM threads WHERE id = ?3 AND agent_status = 'active')";
 

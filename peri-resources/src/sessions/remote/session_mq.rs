@@ -105,9 +105,10 @@ const INSERT_TERMINAL_RESULT_SQL: &str = "INSERT INTO thread_mq
 
 /// 结算批内的接收方提升：`Inserted` 与 `Existing` 都以「目标 MQ 里仍有这条待发结果」
 /// 为事实；已移交历史的结果没有 MQ 行，不能把刚写的 child 终态重新提升为 `working`。
-/// 同时要求 child 仍 `active`：后到的结算既不覆盖终态，也不重复改变接收方意图。
+/// 同时要求 target 与 child 都仍 `active`：终态 target 的 `work_state` 是派生值，
+/// 后到的结算既不覆盖终态，也不改变接收方的意图。
 const PROMOTE_RECEIVER_WORK_INTENT_SQL: &str = "UPDATE threads SET work_state = 'working'
-    WHERE id = ?1 AND work_state = 'idle'
+    WHERE id = ?1 AND work_state = 'idle' AND agent_status = 'active'
       AND EXISTS (SELECT 1 FROM thread_mq WHERE thread_id = ?1 AND id = ?2)
       AND EXISTS (SELECT 1 FROM threads WHERE id = ?3 AND agent_status = 'active')";
 
