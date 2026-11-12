@@ -50,14 +50,14 @@ SHA-256 映射；父子关系共用 span ID 映射。类型以观测字段及 na
 | 类型 | 名称示例 | 必填字段 | 可选字段 | 设计要点 |
 |------|----------|----------|----------|----------|
 | TRACE | `turn <uuid>` | id、start_time、session_id | input、output、metadata、tags | 每个 turn 一条 |
-| GENERATION | `step-N` | id(`gen_*`)、input、output、model、usage_details、parent | metadata（retry/request_id） | **input 必须为完整请求体**（messages+tools 或 raw body）；parent = 该 agent 活跃 stage span |
-| SPAN(stage) | `stage-receive/reason/act/compact/end` | id(`span_*`)、parent | input | 仅 receive 阶段 input 携带 MQ 计数；其余阶段无 input 为**设计行为**，非缺陷 |
+| GENERATION | `step-N` | id(`gen_*`)、input、output、model、usage_details、parent | metadata（retry/request_id/completion_start_source/first_reasoning_ms/first_visible_text_ms）、completion_start_time | **input 必须为完整请求体**（messages+tools 或 raw body）；parent = 该 agent 活跃 stage span。completion_start_time 只取首个 reasoning 分片（metadata source=`reasoning_chunk`）；无 reasoning 时保持 null 且 source=`unavailable`；首个可见文本无独立事件，`first_visible_text_ms` 恒为 null（不可测量，不代表 0） |
+| SPAN(stage) | `stage-receive/reason/act/compact/end` | id(`span_*`)、parent | input | 仅 receive 阶段 input 携带 MQ 计数与 `queue_wait_ms`（Receive 起点 − 本批最早 `enqueued_at`；无可用时间时为 null）；其余阶段无 input 为**设计行为**，非缺陷 |
 | SPAN(turn) | `turn <uuid>` | id、parent | input | turn 根 span |
 | SPAN(tool-batch) | `batch_*` | id、input（批量摘要）、output | — | 工具批处理聚合 |
 | SPAN(workflow) | `workflow-<id>` | id(`span_*`)、input（`{"plan": ...}`）、output | — | Act 阶段 Workflow 子 span，input 含 plan |
 | SPAN(compact) | `compact` / `micro-compact` | id(`span_*`)、input、output | metadata | **name 即类型**：Micro 策略记录 `micro-compact`，Full/Smart/Skip 记录 `compact`；input=执行前状态（strategy/trigger/estimated_tokens_before/cache_hit_rate_before），output=执行结果（summary/files_count/skills_count/micro_cleared/duration_ms/estimated_tokens_saved/estimated_tokens_after/full_escalation_reason/outcome）；失败时 output=`{"error_class":"compact_failure","message":...}` |
-| TOOL | 工具名（Bash/Read/Edit…） | id(`obs_*`)、input（工具入参）、output | level | 失败时 output 为 `{"error_class": "tool_failure"}` |
-| AGENT | `agent-run` / `subagent-*` | id、output、input | — | input = on_turn_start 的对话输入 |
+| TOOL | 工具名（Bash/Read/Edit…） | id(`obs_*`)、input（工具入参）、output | level、metadata（`tool_call_id`） | 失败时 output 为 `{"error_class": "tool_failure"}`；`tool_call_id` 与同批 Generation `tool_calls[].id` 对齐 |
+| AGENT | `agent-run` / `subagent-*` | id、output、input | metadata（`child_thread_id` 等） | input = on_turn_start 的对话输入；subagent AGENT obs 以 `child_thread_id` 关联子会话 |
 | EVENT | `cache-hit-rate-low` | id、input（告警指标）、level | output | 告警类；指标事件（`tool.error` / `mcp.error` 等）同属 EVENT，来源见 `peri-controller/src/langfuse/metric_sink.rs`。归属：指标事件挂到该会话活跃 turn 的 trace 根 span 下（父观测 = trace id 映射的根 span，不再制造第二个 root observation）；子 agent 的 thread id 在 `on_subagent_start` 登记，其指标归同一 trace；前台子 agent 随 turn 结束清理，**后台子 agent 活过父 turn**，登记保留到自身 `on_subagent_stop`，避免 turn 结束后仍在产生的指标分裂成独立 root trace；未采样 turn 仍有登记，其指标共享该 turn trace 但无父观测；仅无活跃登记（turn 未开始 / 前台 turn 已结束 / 无 `sid`）才回退独立 root trace，事件不丢（`turn_traces.rs` 注册表，turn 开始登记、结束按 trace 清理，`clear_trace` 保留跨 turn 存活的后台登记） |
 
 ### 字段来源规则（OTLP attribute 映射）

@@ -180,15 +180,20 @@ impl UnifiedLangfuseEvent {
                 prompt,
                 defer,
                 info,
+                oldest_enqueued_at,
                 ..
             } => Some(UnifiedLangfuseEvent::MessageQueueDrained {
                 agent_id: agent_id.to_string(),
                 prompt,
                 defer,
                 info,
+                oldest_enqueued_at,
             }),
-            ObserveEvent::AiReasoningChunk { text, .. } => {
-                Some(UnifiedLangfuseEvent::AiReasoningChunk { text })
+            ObserveEvent::AiReasoningChunk { agent_id, text, .. } => {
+                Some(UnifiedLangfuseEvent::AiReasoningChunk {
+                    agent_id: agent_id.to_string(),
+                    text,
+                })
             }
             ObserveEvent::TurnError { reason, .. } => {
                 Some(UnifiedLangfuseEvent::TurnError { reason })

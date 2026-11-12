@@ -219,6 +219,9 @@ impl LangfuseTracer {
                     level,
                     version: Some(VERSION.to_string()),
                     session_id: Some(self.session_id.clone()),
+                    metadata: Some(serde_json::json!({
+                        "tool_call_id": tool.tool_call_id,
+                    })),
                     ..Default::default()
                 };
                 let tool_event = IngestionEvent::ObservationCreate {

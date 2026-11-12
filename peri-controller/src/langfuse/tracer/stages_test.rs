@@ -40,16 +40,37 @@ fn test_on_mq_drained_writes_to_receive() {
     let mut s = StageSpans::new();
     let (_h, _replaced) =
         s.on_stage_start("main", Stage::Receive, "turn_1", "trace_1", "agent_obs");
-    s.on_mq_drained("main", 2, 1, 0);
-    assert_eq!(s.mq_counts("main"), Some((2, 1, 0)));
+    s.on_mq_drained(
+        "main",
+        MqDrainedStats {
+            prompt: 2,
+            defer: 1,
+            info: 0,
+            oldest_enqueued_at: Some("2026-07-14T10:00:00.000000Z".to_string()),
+        },
+    );
+    let stats = s.mq_stats("main").expect("Receive 阶段应记录排空统计");
+    assert_eq!((stats.prompt, stats.defer, stats.info), (2, 1, 0));
+    assert_eq!(
+        stats.oldest_enqueued_at.as_deref(),
+        Some("2026-07-14T10:00:00.000000Z")
+    );
 }
 
 #[test]
 fn test_on_mq_drained_outside_receive_no_op() {
     let mut s = StageSpans::new();
     let (_h, _replaced) = s.on_stage_start("main", Stage::Reason, "turn_1", "trace_1", "agent_obs");
-    s.on_mq_drained("main", 2, 1, 0);
-    assert_eq!(s.mq_counts("main"), None);
+    s.on_mq_drained(
+        "main",
+        MqDrainedStats {
+            prompt: 2,
+            defer: 1,
+            info: 0,
+            oldest_enqueued_at: None,
+        },
+    );
+    assert!(s.mq_stats("main").is_none());
 }
 
 #[test]

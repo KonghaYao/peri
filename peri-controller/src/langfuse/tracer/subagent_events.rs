@@ -262,6 +262,8 @@ impl LangfuseTracer {
             "is_synthetic": false,
             "was_sampled": true,
             "turn_id": self.trace_id.clone(),
+            // 子 Agent 的 thread 身份，用于跨 trace 关联该子会话产生的观测
+            "child_thread_id": closed.agent_id,
         });
         if let Some(reason) = &closed.incomplete_reason {
             metadata["incomplete_reason"] = serde_json::json!(format!("{:?}", reason));

@@ -244,11 +244,12 @@ impl LangfuseBridge {
                 prompt,
                 defer,
                 info,
+                oldest_enqueued_at,
             } => {
-                t.on_mq_drained(agent_id, *prompt, *defer, *info);
+                t.on_mq_drained(agent_id, *prompt, *defer, *info, oldest_enqueued_at.clone());
             }
-            UnifiedLangfuseEvent::AiReasoningChunk { text } => {
-                t.on_ai_reasoning_chunk(text);
+            UnifiedLangfuseEvent::AiReasoningChunk { agent_id, text } => {
+                t.on_ai_reasoning_chunk(agent_id, text);
             }
             UnifiedLangfuseEvent::TurnError { reason } => {
                 t.on_turn_error(*reason);

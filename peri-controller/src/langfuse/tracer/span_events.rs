@@ -152,18 +152,28 @@ impl LangfuseTracer {
         // 在 on_stage_end 清空 active 前捕获 Receive 阶段的 mq_counts，
         // 否则 span body 构造时 active 已为 None，排空计数全部丢失。
         let receive_input = if handle.stage == Stage::Receive {
-            self.stages
-                .mq_counts(agent_id)
-                .map(|(prompt, defer, info)| {
-                    serde_json::json!({
-                        "messages_drained": {
-                            "prompt": prompt,
-                            "defer": defer,
-                            "info": info,
-                            "total": prompt + defer + info,
-                        }
-                    })
+            self.stages.mq_stats(agent_id).map(|stats| {
+                // 排队等待 = Receive 起点 - 本批最早入队时间；无可用时间时显式 null，不补零。
+                let queue_wait_ms = stats.oldest_enqueued_at.as_deref().and_then(|enqueued| {
+                    let enqueued = chrono::DateTime::parse_from_rfc3339(enqueued).ok()?;
+                    let received = chrono::DateTime::parse_from_rfc3339(&handle.start_time).ok()?;
+                    Some(
+                        received
+                            .signed_duration_since(enqueued)
+                            .num_milliseconds()
+                            .max(0) as u64,
+                    )
+                });
+                serde_json::json!({
+                    "messages_drained": {
+                        "prompt": stats.prompt,
+                        "defer": stats.defer,
+                        "info": stats.info,
+                        "total": stats.prompt + stats.defer + stats.info,
+                    },
+                    "queue_wait_ms": queue_wait_ms,
                 })
+            })
         } else {
             None
         };
@@ -257,11 +267,26 @@ impl LangfuseTracer {
     }
 
     /// 消息队列排空（Receive 阶段）
-    pub fn on_mq_drained(&mut self, agent_id: &str, prompt: usize, defer: usize, info: usize) {
+    pub fn on_mq_drained(
+        &mut self,
+        agent_id: &str,
+        prompt: usize,
+        defer: usize,
+        info: usize,
+        oldest_enqueued_at: Option<String>,
+    ) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        self.stages.on_mq_drained(agent_id, prompt, defer, info);
+        self.stages.on_mq_drained(
+            agent_id,
+            super::stages::MqDrainedStats {
+                prompt,
+                defer,
+                info,
+                oldest_enqueued_at,
+            },
+        );
     }
 
     /// Workflow 开始（Act 阶段）

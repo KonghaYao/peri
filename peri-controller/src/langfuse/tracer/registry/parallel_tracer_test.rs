@@ -194,6 +194,11 @@ async fn test_parallel_two_subagents_interleaved() {
         Some(true),
         "AGENT obs create metadata 应标记 was_sampled=true"
     );
+    assert_eq!(
+        meta_a.get("child_thread_id").and_then(|v| v.as_str()),
+        Some("child_a"),
+        "AGENT obs create metadata 应携带子 Agent 的 thread 身份"
+    );
 
     // update 携带 input + output(text = Stop result) + metadata 无 incomplete_reason
     let update_a = events
