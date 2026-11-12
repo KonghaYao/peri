@@ -7,10 +7,20 @@ use crate::kit::retained_bytes::{SeenAllocations, retained_unit_bytes};
 pub(super) fn enforce(state: &mut BridgeState) {
     let mut budget = DisplayBudget::default();
     let mut changed = state.current_turn.bound_system_notes(&mut budget);
+    // 关闭窗口时 legacy 分页区间仍占用槽位：区间内的单元属于页面条目，不能单独淘汰。
+    let legacy_ranges = (!state.window.is_enabled())
+        .then(crate::kit::history_paging::legacy_slot_ranges)
+        .unwrap_or_default();
+    let in_legacy_span = |slot: usize| {
+        legacy_ranges
+            .iter()
+            .any(|(start, len)| slot >= *start && slot < start.saturating_add(*len))
+    };
     let mut remove = Vec::new();
     for (slot, unit) in state.committed.iter().enumerate().rev() {
         if !is_disposable(unit)
             || !state.window.display_slot_available(slot)
+            || in_legacy_span(slot)
             || matches!(unit, TuiRenderUnit::TuiAskUserBlock(block) if block.pending)
         {
             continue;

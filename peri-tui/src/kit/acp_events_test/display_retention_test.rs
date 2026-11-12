@@ -228,6 +228,46 @@ fn test_display_retention_disabled_window_keeps_legacy_paging_spans() {
 
 #[test]
 #[serial]
+fn test_display_retention_disabled_window_keeps_units_inside_legacy_spans() {
+    use crate::kit::history_paging::{PageEntry, merge_page, with_spans};
+    use crate::kit::tui_render_unit::{TuiNoteLevel, TuiSystemNote};
+
+    crate::kit::history_paging::reset_browsing_state();
+    let mut state = make_fold_test_state();
+    state.active_session_id = "retention-legacy-span".into();
+    state.window = HistoryWindow::new(HistoryWindowConfig::default());
+    assert!(!state.window.is_enabled());
+    let unit = TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+        text: "page-note".into(),
+        level: TuiNoteLevel::Info,
+        content_hash: 0,
+    });
+    let page = PageEntry {
+        entry_id: "legacy:page".into(),
+        position: 1000,
+        units: vec![unit.clone(), unit],
+    };
+    with_spans(|spans| {
+        merge_page(&mut state.committed, spans, &[page]);
+    });
+    assert_eq!(state.committed.len(), 2);
+    for index in 0..MAX_ENTRIES + 64 {
+        note(&mut state, format!("outside-{index}"));
+        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    }
+    assert_eq!(
+        crate::kit::history_paging::legacy_slot_ranges(),
+        vec![(0, 2)],
+        "多单元页面条目的区间不得被单点淘汰截断"
+    );
+    assert_eq!(state.committed.len(), 2 + MAX_ENTRIES);
+    assert!(
+        matches!(&state.committed[0], TuiRenderUnit::TuiSystemNote(note) if note.text == "page-note")
+    );
+}
+
+#[test]
+#[serial]
 fn test_display_retention_keeps_latest_oversized_notice_readable_and_bounds_older_records() {
     let mut state = state();
     for index in 0..3 {
