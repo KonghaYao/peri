@@ -281,6 +281,7 @@ pub static PROGRAM_STATUS: AtomStatic<crate::kit::program_status::ProgramStatus>
 /// value 为手动 fold 目标。存在即视为 `user_modified=true`：折叠 pass
 /// （`acp_events/render.rs::apply_fold_pass`）必须跳过这些 entry 的自动策略，
 /// 并在每次快照重建后复写 fold（流式重建后手动选择依然生效）。
+/// 生产写入经 `fold_overrides::insert` 按条数与键字节预算保留最近操作；
 /// session 复位（push_view_models_for_reset）时清空。
 pub static FOLD_OVERRIDES: AtomStatic<HashMap<FoldKey, FoldState>> = AtomStatic::new(HashMap::new);
 /// [Slice 2 §3.4 焦点单一事实源] 消息区 entry 导航焦点——一次写入即完整表达

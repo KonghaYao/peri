@@ -1,6 +1,7 @@
 //! Canonical state and lifecycle for one streaming turn.
 
 mod archive;
+mod notes;
 mod preview;
 mod projection;
 mod streaming;

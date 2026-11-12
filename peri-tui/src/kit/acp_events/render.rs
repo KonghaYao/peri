@@ -25,6 +25,7 @@ use std::sync::Mutex;
 /// 4. `group_successful_tools`（§7：相邻成功工具压成 `TuiCollapsedGroup`）。
 pub(crate) fn push_view_models(state: &mut BridgeState) {
     super::subagent_preview::enforce(state);
+    super::display_retention::enforce(state);
     state
         .window
         .ack_release_epoch(crate::kit::atoms::RENDER_ACHIEVED_EPOCH.get());
@@ -866,7 +867,7 @@ pub fn push_view_models_for_reset() {
     });
     // [Slice 2] session 复位时清空折叠覆盖表——tool_id/message_id/agent_id/
     // reminder_id 跨 session 不保证唯一，残留覆盖会错误作用于新会话的同名 entry。
-    FOLD_OVERRIDES.state().write().clear();
+    crate::kit::fold_overrides::clear();
     // [S2 §3.4] 焦点单一事实源同源清空（跨 session 身份不唯一——slot 与 key
     // 都依赖旧会话索引/身份，残留会让新会话焦点/免疫错误指向）。
     *crate::kit::atoms::FOCUSED_ENTRY.state().write() = None;

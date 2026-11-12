@@ -105,10 +105,14 @@ impl DisplayLedger {
     /// `[start, start + len)` 是否已被其他区间占用。
     pub fn overlaps(&self, start: usize, len: usize) -> bool {
         let end = start.saturating_add(len);
-        self.slots.iter().any(|(other_start, (_, other_len))| {
-            let other_end = other_start.saturating_add(*other_len);
-            *other_start < end && start < other_end
-        })
+        // Registered ranges never overlap; only the last start before `end`
+        // can overlap. Display expiry probes this for every disposable record.
+        self.slots
+            .range(..end)
+            .next_back()
+            .is_some_and(|(other_start, (_, other_len))| {
+                start < other_start.saturating_add(*other_len)
+            })
     }
 
     pub fn range_for(&self, key: &PersistentEntryKey) -> Option<(usize, usize)> {

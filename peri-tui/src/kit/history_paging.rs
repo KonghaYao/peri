@@ -344,6 +344,17 @@ impl HistorySpans {
         );
     }
 
+    /// 关闭窗口的展示淘汰移除一个槽位后，左移 legacy 区间索引。
+    ///
+    /// 调用方只移除未被任何区间覆盖的槽位，因此这里只需移动而不是收缩区间。
+    fn remove_slot(&mut self, slot: usize) {
+        for span in self.spans.values_mut() {
+            if span.slot > slot {
+                span.slot -= 1;
+            }
+        }
+    }
+
     /// 已登记区间的槽位区间（升序）——按来源限定的只读遍历用（例如未配对工具
     /// 终点只允许配对到历史来源的卡片，不碰实时 turn 落进 `committed` 的卡片）。
     pub(crate) fn slots(&self) -> Vec<(usize, usize)> {
@@ -617,6 +628,16 @@ pub(crate) fn with_spans<R>(f: impl FnOnce(&mut HistorySpans) -> R) -> R {
 pub(crate) fn sync_spans_from_window(window: &HistoryWindow) {
     let derived = HistorySpans::from_resident_window(window);
     with_spans(|spans| *spans = derived);
+}
+
+/// 关闭窗口时淘汰一个展示槽位后，就地左移 legacy 区间索引。
+pub(crate) fn shift_spans_after_slot_removal(slot: usize) {
+    with_spans(|spans| spans.remove_slot(slot));
+}
+
+/// 关闭窗口时 legacy 分页区间占用的槽位区间（升序）。
+pub(crate) fn legacy_slot_ranges() -> Vec<(usize, usize)> {
+    with_spans(|spans| spans.slots())
 }
 
 /// 视口是否已经贴到**向前边界**（已载入窗口的最早一行）——REQ-C01-1 的触发判据。

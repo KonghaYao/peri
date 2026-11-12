@@ -27,6 +27,8 @@ mod bg_task_live_test;
 mod command_feedback_test;
 #[path = "acp_events_test/diff_grouping_test.rs"]
 mod diff_grouping_test;
+#[path = "acp_events_test/display_retention_test.rs"]
+mod display_retention_test;
 #[path = "acp_events_test/fold_test.rs"]
 mod fold_test;
 #[path = "acp_events_test/group_incremental_test.rs"]
