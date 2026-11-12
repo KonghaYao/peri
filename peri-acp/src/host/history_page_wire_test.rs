@@ -318,6 +318,242 @@ fn logical_sequence(pages: &[Vec<Value>]) -> Vec<u64> {
     positions
 }
 
+struct ResponseFailingTransport {
+    incoming:
+        std::sync::Mutex<std::collections::VecDeque<crate::transport::types::IncomingMessage>>,
+}
+
+#[async_trait::async_trait]
+impl AcpTransport for ResponseFailingTransport {
+    async fn send_request(&self, _method: &str, _params: Value) -> Result<Value, AcpError> {
+        Err(AcpError::new(
+            -32603,
+            "test transport has no client requests",
+        ))
+    }
+
+    async fn send_notification(&self, _method: &str, _params: Value) -> Result<(), AcpError> {
+        Ok(())
+    }
+
+    async fn recv(&self) -> Option<crate::transport::types::IncomingMessage> {
+        self.incoming.lock().unwrap().pop_front()
+    }
+
+    async fn send_response(
+        &self,
+        _id: crate::transport::types::RequestId,
+        _result: Result<Value, AcpError>,
+    ) -> Result<(), AcpError> {
+        Err(AcpError::new(-32603, "response write failed (injected)"))
+    }
+}
+
+/// [回归测试] 自定义 transport 写响应失败只验证 reservation 回滚；生产 transport
+/// 会按 ARC-TRANSPORT-001 进入 terminal，并由 host shutdown 排空会话资源。
+#[tokio::test]
+async fn session_switch_response_write_failure_only_rolls_back_reservation() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fixture = PageFixture::new(&tmp).await;
+    let transport: Arc<dyn AcpTransport> = Arc::new(ResponseFailingTransport {
+        incoming: std::sync::Mutex::new(std::collections::VecDeque::from([
+            crate::transport::types::IncomingMessage::Request {
+                id: crate::transport::types::RequestId::Number(1),
+                method: "session/load".to_owned(),
+                params: json!({ "sessionId": fixture.sid }),
+            },
+        ])),
+    });
+    let locks = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let (cont_tx, _cont_rx) = tokio::sync::mpsc::unbounded_channel();
+    let cont_tx = Arc::new(cont_tx);
+    let connection = Arc::new(tokio::sync::Mutex::new(
+        crate::host::connection::ConnectionContext::new(false),
+    ));
+    let cancellation = CancellationToken::new();
+    let recovery = recovery_for(&fixture.cfg, &fixture.sessions, &cont_tx);
+    crate::host::server_loop::ServerLoop {
+        transport: &transport,
+        cfg: &fixture.cfg,
+        sessions: &fixture.sessions,
+        prompt_locks: &locks,
+        cont_tx: &cont_tx,
+        connection: &connection,
+        connection_cancellation: &cancellation,
+        recovery: &recovery,
+    }
+    .run()
+    .await;
+    let next = connection
+        .lock()
+        .await
+        .reserve_session_setup_for("session/load", &json!({ "sessionId": "B" }));
+    assert!(
+        next.is_ok(),
+        "发送失败后的 RAII drop 必须释放 reservation：{next:?}"
+    );
+}
+
+/// [回归测试] 当前连接绑定 A 后，B 的 cursor/window/body/child 只读浏览不经过 setup gate。
+#[tokio::test]
+async fn session_switch_history_read_only_bypasses_setup_gate() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fixture = PageFixture::new(&tmp).await;
+    let recorder: Arc<dyn AcpTransport> = Arc::new(MockTransport::default());
+    let other = {
+        let mut states = fixture.sessions.lock().await;
+        handle_request(
+            "session/new",
+            &json!({ "cwd": tmp.path().to_str().unwrap() }),
+            &fixture.cfg,
+            &mut states,
+            &recorder,
+        )
+        .await
+        .expect("B fixture 必须创建")["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let other_payloads = vec![
+        PersistedPayload::Message(BaseMessage::human("B 第一轮")),
+        PersistedPayload::Message(BaseMessage::ai("B 回答")),
+        PersistedPayload::Message(BaseMessage::human("B 第二轮")),
+    ];
+    fixture
+        .cfg
+        .session_resources
+        .append_history(&other, &other_payloads)
+        .await
+        .unwrap();
+    fixture
+        .sessions
+        .lock()
+        .await
+        .get_mut(&other)
+        .expect("B state 必须已发布")
+        .history_payloads
+        .extend(other_payloads);
+    let ids: Vec<MessageId> = fixture
+        .cfg
+        .session_resources
+        .load_session_snapshot(&other)
+        .await
+        .unwrap()
+        .payloads
+        .iter()
+        .map(PersistedPayload::id)
+        .take(2)
+        .collect();
+    fixture
+        .cfg
+        .session_resources
+        .apply_compaction(
+            &other,
+            &CompactionChange {
+                flag_updates: ids
+                    .into_iter()
+                    .map(|id| {
+                        (
+                            id,
+                            MessageFlags {
+                                excluded: true,
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect(),
+                appended_messages: vec![BaseMessage::ai("other summary")],
+            },
+        )
+        .await
+        .unwrap();
+    let mut initial = json!({ "sessionId": other });
+    history_page::attach_initial_cursor(&fixture.cfg, &fixture.sessions, &other, &mut initial)
+        .await
+        .unwrap();
+    let cursor = initial["nextCursor"]
+        .as_str()
+        .expect("B 必须有 archived cursor")
+        .to_owned();
+    let caps = PeriCaps {
+        history_pagination: true,
+        history_window_v1: true,
+        replay: true,
+        ..Default::default()
+    };
+    let (client, _sessions, task) = spawn_loop(
+        Arc::clone(&fixture.cfg),
+        Arc::clone(&fixture.sessions),
+        Some(caps),
+    )
+    .await;
+    client
+        .send_request("session/load", json!({ "sessionId": fixture.sid }))
+        .await
+        .expect("A setup 必须成功");
+    let page = client
+        .send_request(
+            "session/load",
+            json!({ "sessionId": other, "cursor": cursor, "limit": 1 }),
+        )
+        .await
+        .expect("B cursor 浏览不得被 A 绑定阻断");
+    assert!(!page["items"].as_array().unwrap().is_empty());
+    let opened = client
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId": other,
+                "history": { "kind": "open", "direction": "before", "limit": 10 },
+            }),
+        )
+        .await
+        .expect("B window 浏览不得被 A 绑定阻断");
+    let first = &opened["items"][0];
+    let body_error = client
+        .send_request(
+            "session/history/body",
+            json!({
+                "sessionId": other,
+                "entryId": first["entryId"],
+                "source": first["source"],
+                "snapshotToken": opened["snapshotToken"],
+                "readTicket": opened["readTicket"],
+                "offset": 0,
+                "maxBytes": 64,
+            }),
+        )
+        .await
+        .expect_err("普通条目没有 oversize body descriptor");
+    assert_ne!(
+        body_error
+            .data
+            .as_ref()
+            .and_then(|data| data["reason"].as_str()),
+        Some(crate::host::connection::SESSION_SWITCH_REQUIRED_REASON)
+    );
+    let child_error = client
+        .send_request(
+            "session/history/child",
+            json!({
+                "parentSessionId": other,
+                "childThreadId": "missing-child",
+                "history": { "kind": "open", "direction": "before" },
+            }),
+        )
+        .await
+        .expect_err("不存在的 child 应由 child history 自身拒绝");
+    assert_ne!(
+        child_error
+            .data
+            .as_ref()
+            .and_then(|data| data["reason"].as_str()),
+        Some(crate::host::connection::SESSION_SWITCH_REQUIRED_REASON)
+    );
+    task.abort();
+}
+
 /// 非阻塞取走客户端队列里**已经入队**的全部通知。
 ///
 /// 服务端把通知与响应写进同一个无界通道、由同一个 pump 顺序转发，因此 `session/load` 的响应

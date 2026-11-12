@@ -1,12 +1,26 @@
 //! New-session and load transitions under the operation gate.
 
 use peri_acp::transport::{AcpTransport, types::AcpError};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::acp_client::client::{AcpTuiClient, ClientProjectionMode, SessionLoadReservation};
 use crate::acp_client::interaction_lifecycle::{TransitionKind, TransitionOperation};
 
 use super::guards::{PreparingSessionGuard, SessionProjectionGuard};
+
+/// 冷 load 清理未完成时服务端已把连接绑定到该 owner，客户端必须显式 close。
+fn cleanup_incomplete_owner(error: &AcpError) -> Option<&str> {
+    if error.code != -32010 {
+        return None;
+    }
+    let data: &Value = error.data.as_ref()?;
+    if data.get("reason").and_then(Value::as_str) != Some("session_cleanup_incomplete") {
+        return None;
+    }
+    data.get("sessionId")
+        .and_then(Value::as_str)
+        .filter(|session_id| !session_id.is_empty())
+}
 
 impl AcpTuiClient {
     /// Create a new agent session.
@@ -209,10 +223,11 @@ impl AcpTuiClient {
             crate::kit::session_boundary::project_session_boundary(Some(session_id));
         }
         self.settle_claims_owned(start.claims).await;
+        // cleanup-incomplete owner 即使与本次目标同 ID 也必须先关闭：服务端仍把
+        // 连接绑在 closing 会话上，直接重载只会再次收到 session_switch_requires_close。
         let close_target = self
             .pending_close_target()
-            .or(start.from)
-            .filter(|candidate| *candidate != session_id);
+            .or_else(|| start.from.filter(|candidate| *candidate != session_id));
         if let Some(ref old_sid) = close_target {
             if let Err(error) = self.close_previous_session(old_sid).await {
                 self.lifecycle.fail_transition(start.generation);
@@ -244,6 +259,11 @@ impl AcpTuiClient {
         {
             Ok(loaded) => loaded,
             Err(error) => {
+                // cleanup-incomplete 已把连接绑定到该会话；下一次建立/切换先关闭它，
+                // 否则服务端会以 session_switch_requires_close 永久拒绝。
+                if let Some(owner) = cleanup_incomplete_owner(&error) {
+                    self.remember_close_failure(owner, None, &error);
+                }
                 *self.restore_error.lock().unwrap() = Some(error.to_string());
                 self.lifecycle.fail_transition(start.generation);
                 transition.disarm();

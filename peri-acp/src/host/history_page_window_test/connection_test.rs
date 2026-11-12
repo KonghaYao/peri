@@ -484,18 +484,112 @@ async fn fork_wire_uses_the_shared_preparation_path() {
     let provider = LlmProvider::from_config(&config).unwrap();
     let cfg = Arc::new(make_server_config(config, provider, &tmp).await);
     let sessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let (client, _sessions, task) =
+    let (client, observed, task) =
         spawn_loop(Arc::clone(&cfg), sessions, Some(window_caps())).await;
     let created = client
         .send_request("session/new", json!({ "cwd": tmp.path() }))
         .await
         .expect("create a fork source with frozen data");
     let source = created["sessionId"].as_str().expect("source id").to_owned();
+    client
+        .send_request("session/close", json!({ "sessionId": source }))
+        .await
+        .expect("close the current source before switching to the fork");
     let forked = client
         .send_request("session/fork", json!({ "sessionId": source }))
         .await
         .expect("fork through the shared path");
     let target = forked["sessionId"].as_str().expect("fork target id");
     assert_ne!(target, source);
+    assert!(
+        !observed.lock().await.contains_key(&source),
+        "fork cold source 必须在 target 成功前完成清理"
+    );
+    assert!(
+        cfg.session_manager.get_session(&source).is_none(),
+        "fork cold source manager 不得残留"
+    );
+    task.abort();
+}
+
+/// [回归测试] fork 前置失败也必须清理本请求 cold 发布的 source。
+#[tokio::test]
+#[serial]
+async fn fork_cold_source_failure_does_not_leave_source_environment() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "unused-test-key",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let cfg = Arc::new(make_server_config(config, provider, &tmp).await);
+    let sessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let (client, observed, task) =
+        spawn_loop(Arc::clone(&cfg), Arc::clone(&sessions), Some(window_caps())).await;
+    let created = client
+        .send_request("session/new", json!({ "cwd": tmp.path() }))
+        .await
+        .unwrap();
+    let source = created["sessionId"].as_str().unwrap().to_owned();
+    client
+        .send_request("session/close", json!({ "sessionId": source }))
+        .await
+        .unwrap();
+    let transport: Arc<dyn AcpTransport> = Arc::new(MockTransport::default());
+    let error = crate::host::requests::session_lifecycle::handle_fork_shared(
+        &json!({ "sessionId": source, "mcpServers": "invalid" }),
+        &cfg,
+        &sessions,
+        &transport,
+    )
+    .await
+    .expect_err("invalid fork declaration 必须失败");
+    assert_eq!(error.code, -32602, "{error:?}");
+    assert!(!observed.lock().await.contains_key(&source));
+    assert!(cfg.session_manager.get_session(&source).is_none());
+    task.abort();
+}
+
+/// [回归测试] preexisting source 不属于 fork 请求，不得被 source cleanup 关闭。
+#[tokio::test]
+#[serial]
+async fn fork_preexisting_source_remains_live() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "unused-test-key",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let cfg = Arc::new(make_server_config(config, provider, &tmp).await);
+    let sessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let (client, observed, task) =
+        spawn_loop(Arc::clone(&cfg), Arc::clone(&sessions), Some(window_caps())).await;
+    let created = client
+        .send_request("session/new", json!({ "cwd": tmp.path() }))
+        .await
+        .unwrap();
+    let source = created["sessionId"].as_str().unwrap().to_owned();
+    let transport: Arc<dyn AcpTransport> = Arc::new(MockTransport::default());
+    let forked = crate::host::requests::session_lifecycle::handle_fork_shared(
+        &json!({ "sessionId": source }),
+        &cfg,
+        &sessions,
+        &transport,
+    )
+    .await
+    .expect("preexisting source fork 必须成功");
+    assert!(forked["sessionId"].is_string());
+    assert!(
+        observed.lock().await.contains_key(&source),
+        "preexisting source state 必须保留"
+    );
+    assert!(
+        cfg.session_manager.get_session(&source).is_some(),
+        "preexisting source manager 必须保留"
+    );
     task.abort();
 }

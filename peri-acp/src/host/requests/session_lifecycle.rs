@@ -28,11 +28,14 @@ use crate::{dispatch, transport::types::AcpError};
 pub(crate) mod restore;
 #[path = "session_apps_capability.rs"]
 mod session_apps_capability;
-#[cfg(test)]
-pub(crate) use restore::cleanup_unpublished_restore;
 pub(crate) use restore::{
     assemble_for_recovery, handle_context, handle_fork_shared, handle_load, handle_load_shared,
     handle_metadata, handle_resume, handle_resume_shared,
+};
+#[cfg(test)]
+pub(crate) use restore::{
+    cleanup_unpublished_restore, publication_test_hook, rollback_restore_publication,
+    RestorePublication,
 };
 use restore::{identity_response, prepare_existing, response_identity};
 use session_apps_capability::apps_capability;

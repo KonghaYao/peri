@@ -100,6 +100,40 @@ impl AcpTransport for NotificationFailingTransport {
     }
 }
 
+struct WireRetryShutdownPool {
+    settled: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl peri_acp_types::ports::McpPoolPort for WireRetryShutdownPool {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn verify_shared_environment_close(&self, _session_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
+        if self.settled.load(std::sync::atomic::Ordering::Acquire) {
+            peri_acp_types::ports::McpPoolShutdownReport::Complete {
+                settled_services: 1,
+                failed_services: 0,
+            }
+        } else {
+            peri_acp_types::ports::McpPoolShutdownReport::Incomplete {
+                settled_services: 0,
+                unfinished_services: 1,
+                failed_services: 0,
+            }
+        }
+    }
+
+    fn snapshot(&self) -> Value {
+        json!({})
+    }
+}
+
 /// A22（服务端半边）：某一条初始回放投递失败 → 本次 load 以错误结束，且**不给出**任何
 /// 分页身份（失败代次没有成功 cursor）。
 ///
@@ -146,6 +180,128 @@ async fn a_failed_initial_replay_fails_the_load_instead_of_answering_a_cursor() 
         .expect("失败的 load 不得删除已发布的会话状态");
     assert!(!state.closing, "回放失败不是会话关闭");
     drop(states);
+    task.abort();
+}
+
+/// [回归测试] cold load 已发布环境后若 replay 失败，request-owned state 与 manager 都必须清除。
+#[tokio::test]
+#[serial]
+async fn cold_replay_failure_does_not_leave_state_or_manager() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fixture = PageFixture::new(&tmp).await;
+    let sid = fixture.sid.clone();
+    let sessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
+    let failing: Arc<dyn AcpTransport> = Arc::new(NotificationFailingTransport { inner: server });
+    let (client, sessions, task) = spawn_loop_with_transport(
+        Arc::clone(&fixture.cfg),
+        sessions,
+        Some(pagination_caps()),
+        client,
+        failing,
+    )
+    .await;
+    let error = client
+        .send_request("session/load", json!({ "sessionId": sid }))
+        .await
+        .expect_err("cold replay 投递失败必须使 load 失败");
+    assert!(error.message.contains("history replay failed"), "{error:?}");
+    assert!(
+        !sessions.lock().await.contains_key(&fixture.sid),
+        "失败 cold load 不得残留 SessionState"
+    );
+    assert!(
+        fixture
+            .cfg
+            .session_manager
+            .get_session(&fixture.sid)
+            .is_none(),
+        "失败 cold load 不得残留 SessionManager 记录"
+    );
+    task.abort();
+}
+
+/// [回归测试] cleanup-incomplete 成功响应把连接绑定到 owner；close 重试后才允许新 setup。
+#[tokio::test]
+#[serial]
+async fn session_switch_cleanup_incomplete_owner_blocks_switch_until_close() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "unused-test-key",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let mut raw_cfg = make_server_config(config, provider, &tmp).await;
+    let cwd = tmp.path().canonicalize().unwrap();
+    raw_cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
+        startup_cwd: cwd.to_string_lossy().into_owned(),
+        bare: true,
+        drive_cron_tick: false,
+        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        capabilities: Default::default(),
+    });
+    let cfg = Arc::new(raw_cfg);
+    let mut persisted = HashMap::new();
+    let sid = register_session_with_history(&mut persisted, cwd.to_str().unwrap(), &cfg).await;
+    drop(persisted);
+    let sessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let pool = Arc::new(WireRetryShutdownPool {
+        settled: std::sync::atomic::AtomicBool::new(false),
+    });
+    let pool_for_hook = pool.clone();
+    crate::host::requests::session_lifecycle::publication_test_hook::install(&sid, move |state| {
+        let environment = state.environment.as_mut().expect("cold load environment");
+        Arc::get_mut(environment)
+            .expect("publication environment 应只有 state owner")
+            .cfg
+            .mcp_pool = Some(pool_for_hook);
+    });
+    let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
+    let failing: Arc<dyn AcpTransport> = Arc::new(NotificationFailingTransport { inner: server });
+    let (client, sessions, task) = spawn_loop_with_transport(
+        Arc::clone(&cfg),
+        sessions,
+        Some(pagination_caps()),
+        client,
+        failing,
+    )
+    .await;
+
+    let cleanup = client
+        .send_request("session/load", json!({ "sessionId": sid }))
+        .await
+        .expect_err("replay + incomplete shutdown 必须返回 cleanup error");
+    assert_eq!(cleanup.code, -32010, "{cleanup:?}");
+    assert_eq!(
+        cleanup.data.as_ref().unwrap()["reason"],
+        "session_cleanup_incomplete"
+    );
+    assert_eq!(cleanup.data.as_ref().unwrap()["sessionId"], sid);
+
+    let blocked = client
+        .send_request("session/new", json!({ "cwd": cwd }))
+        .await
+        .expect_err("cleanup owner 未关闭时不得 setup B");
+    assert_eq!(blocked.code, -32010, "{blocked:?}");
+    assert_eq!(
+        blocked.data.as_ref().unwrap()["reason"],
+        crate::host::connection::SESSION_SWITCH_REQUIRED_REASON
+    );
+
+    pool.settled
+        .store(true, std::sync::atomic::Ordering::Release);
+    client
+        .send_request("session/close", json!({ "sessionId": sid }))
+        .await
+        .expect("显式 close(A) 必须重试收口并释放 gate");
+    let next = client
+        .send_request("session/new", json!({ "cwd": cwd }))
+        .await
+        .expect("close(A) 成功后必须允许 setup B");
+    assert!(next["sessionId"].is_string());
+    assert!(!sessions.lock().await.contains_key(&sid));
     task.abort();
 }
 

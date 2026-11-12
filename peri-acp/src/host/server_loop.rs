@@ -1,5 +1,7 @@
 //! Receive loop and request-class dispatch; long-running work stays host-owned.
 
+mod notification;
+
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -8,11 +10,25 @@ use tokio_util::sync::CancellationToken;
 use super::diagnostics::ResponseDiagnostics;
 use super::session_endpoint::register_session_endpoint;
 use super::{
-    connection::ConnectionContext, dispatch_prompt_turn, extract_session_id, handle_notification,
+    connection::ConnectionContext, dispatch_prompt_turn, extract_session_id,
     handle_request_for_connection, history_page, history_window, mcp_apps, requests,
     send_session_info_update, task_scope, AcpServerConfig, PromptLocks, SharedSessions,
 };
-use crate::transport::types::{IncomingMessage, RequestId};
+use crate::transport::types::{AcpError, IncomingMessage, RequestId};
+
+fn cleanup_incomplete_session_id(result: &Result<Value, AcpError>) -> Option<&str> {
+    let error = result.as_ref().err()?;
+    if error.code != -32010 {
+        return None;
+    }
+    let data = error.data.as_ref()?;
+    if data.get("reason").and_then(Value::as_str) != Some("session_cleanup_incomplete") {
+        return None;
+    }
+    data.get("sessionId")
+        .and_then(Value::as_str)
+        .filter(|session_id| !session_id.is_empty())
+}
 
 pub(super) struct ServerLoop<'a> {
     pub(super) transport: &'a Arc<dyn crate::transport::AcpTransport>,
@@ -549,9 +565,7 @@ impl ServerLoop<'_> {
         // 历史分页：模式在进入生命周期路由**之前**解析（REQ §5.1）。带 cursor 的 load 是
         // 只读浏览——不取执行生命周期锁、不装配、不广播；非法参数与未协商能力都在这里
         // 明确拒绝，绝不降级成初始 load。
-        let load_initial_cursor = if method == "session/load" {
-            // 分页/窗口准入按**当前连接**的协商结果（REQ §5.3）：`caps()` 对从未
-            // `initialize` 的连接是兜底能力集，不能用来放行分页或窗口语义。
+        if method == "session/load" {
             let caps = connection_facts.caps.clone();
             match history_page::classify(
                 &params,
@@ -585,16 +599,24 @@ impl ServerLoop<'_> {
                     let _ = diagnostics.send(transport.as_ref(), result).await;
                     return;
                 }
-                Ok(history_page::SessionLoadMode::InitialLoad) => {
-                    connection_facts.history_pagination
-                }
+                Ok(history_page::SessionLoadMode::InitialLoad) => {}
                 Err(error) => {
                     let _ = diagnostics.send(transport.as_ref(), Err(error)).await;
                     return;
                 }
             }
-        } else {
-            false
+        }
+        // 只读历史已经返回；setup gate 必须早于声明校验和环境装配。
+        let mut setup_reservation = match connection
+            .lock()
+            .await
+            .reserve_session_setup_for(&method, &params)
+        {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                let _ = diagnostics.send(transport.as_ref(), Err(error)).await;
+                return;
+            }
         };
         if matches!(
             method.as_str(),
@@ -745,22 +767,6 @@ impl ServerLoop<'_> {
             .await
         };
         drop(lifecycle_lock);
-        // 初始 load 的分页身份：只对协商了分页能力的当前连接附加（REQ §5.3）。
-        // 放在执行锁之外：这是初始 load 路径上的有界读取，不必占着生命周期锁。
-        if load_initial_cursor && result.is_ok() {
-            let session_id = extract_session_id(&params, "").to_string();
-            let failure = match result.as_mut() {
-                Ok(response) if !session_id.is_empty() => {
-                    history_page::attach_initial_cursor(cfg, sessions, &session_id, response)
-                        .await
-                        .err()
-                }
-                _ => None,
-            };
-            if let Some(error) = failure {
-                result = Err(error);
-            }
-        }
         // 进入会话时的恢复（设计 §3/§4）：装配成功后、响应发出前完成准备。
         // 生命周期锁已在上面释放；准备阶段只读范围并接纳提醒，不启动执行。
         // 装配成功 + 恢复准备失败 = 部分成功：历史保留、响应 Ok，结果放 `_meta`。
@@ -901,7 +907,29 @@ impl ServerLoop<'_> {
                 .await;
             }
         }
+        let response_succeeded = result.is_ok();
+        let cleanup_incomplete_session_id =
+            cleanup_incomplete_session_id(&result).map(str::to_owned);
         let response_sent = diagnostics.send(transport.as_ref(), result).await.is_ok();
+        if response_sent {
+            if response_succeeded {
+                if let (Some(reservation), Some(session_id)) =
+                    (setup_reservation.take(), setup_session_id.as_deref())
+                {
+                    reservation.commit(session_id);
+                }
+                if let Some(session_id) = closed_session_id.as_deref() {
+                    connection.lock().await.release_current_session(session_id);
+                }
+            } else if let (Some(reservation), Some(session_id)) = (
+                setup_reservation.take(),
+                cleanup_incomplete_session_id.as_deref(),
+            ) {
+                // Cleanup owner 是唯一错误响应绑定例外：客户端必须显式 close 它，
+                // 不能在未排空 A 时让同一连接继续 setup B。
+                reservation.commit(session_id);
+            }
+        }
         // 恢复的启动门：响应已发出才放行执行；发送失败则丢弃本次启动资格。
         match (response_sent, recovery_report.take()) {
             (true, Some(entered)) => self.recovery.launch(&entered.report).await,
@@ -948,72 +976,5 @@ impl ServerLoop<'_> {
                 );
             }
         }
-    }
-
-    async fn dispatch_notification(&self, method: String, params: Value) {
-        let cfg = self.cfg;
-        let sessions = self.sessions;
-        let cont_tx = self.cont_tx;
-        if method == "mcp/message" {
-            // client 宿主的 MCP server 反向下发的通知：按 serverId 路由到承载
-            // 会话的服务。就地 await（不 spawn）以保住与后续请求的相对次序，但只
-            // 在短锁内定位承载者——投递等待由对端决定，不得占着会话锁。
-            let routed = {
-                let registry = self.connection.lock().await.acp_mcp.clone();
-                let sessions = sessions.lock().await;
-                requests::acp_mcp::route_inbound(&registry, &sessions, &params)
-            };
-            match routed {
-                Ok((port, inbound)) => {
-                    if let Err(error) = port.notify(inbound).await {
-                        tracing::warn!(
-                            method,
-                            code = error.code,
-                            error = %error.message,
-                            "MCP over ACP 通知未能投递"
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        method,
-                        code = error.code,
-                        error = %error.message,
-                        "MCP over ACP 通知未能路由"
-                    );
-                }
-            }
-            return;
-        }
-        // `session/cancel` 是**轮次级**取消：只中断本轮的模型执行，**不触碰
-        // Apps 域**（设计 §2 / §4：App record 与已 dispatch 的调用不受 turn
-        // 取消影响）。会话级拆除走 `session/close`（见 `dispatch_request` 的
-        // `closed_session_id` 分支，那里才调用 `close_session`）。
-        // session/cancel 可能需要在锁外补发 continuation 请求
-        // （race 兜底：bg 结果已 route 为 Defer，但通知可能在 cancel
-        // 置位前被 scheduler 跳过）。unbounded send 虽不阻塞，仍统一
-        // 在释放 sessions 锁后发送，避免 notify 路径持锁触碰 scheduler。
-        let outcome = {
-            let mut sessions = sessions.lock().await;
-            handle_notification(&method, &params, &mut sessions, cfg).await
-        };
-        if let Some(req) = outcome.continuation {
-            if cont_tx.send(req).is_err() {
-                tracing::warn!(
-                    method,
-                    session_id = extract_session_id(&params, ""),
-                    "ACP continuation scheduling failed: channel closed"
-                );
-            }
-        }
-        // 用户 Stop 与模型配置变化的锁外持久化：停止意图先落库；占用快照失效写
-        // NULL。失败只记 error，不阻断取消/配置更新本身（设计 §5.4 / §2.2）。
-        super::notify::persist_notification_effects(
-            &method,
-            cfg,
-            outcome.stop_targets,
-            outcome.context_usage_invalidations,
-        )
-        .await;
     }
 }

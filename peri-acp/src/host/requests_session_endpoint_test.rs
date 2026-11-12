@@ -361,7 +361,7 @@ async fn session_fork_registers_connection_endpoint_and_scheduled_approval_is_de
     let sessions: crate::host::SharedSessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let mut cfg = fixture.cfg;
     // 运行期丢失：清空会话表后由真实 server loop 先 `session/load` 恢复源会话，
-    // 再 `session/fork` 派生新会话（fork 要求源会话已在运行期加载）。
+    // 成功 close 释放连接绑定后，再 `session/fork` 派生新会话。
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd: fixture.cwd.to_string_lossy().into_owned(),
         bare: true,
@@ -383,6 +383,11 @@ async fn session_fork_registers_connection_endpoint_and_scheduled_approval_is_de
         ),
         (
             RequestId::Number(3),
+            "session/close",
+            json!({"sessionId": source_id}),
+        ),
+        (
+            RequestId::Number(4),
             "session/fork",
             json!({"sessionId": source_id}),
         ),
@@ -414,8 +419,11 @@ async fn session_fork_registers_connection_endpoint_and_scheduled_approval_is_de
     transport
         .response(2)
         .unwrap_or_else(|error| panic!("session/load 必须返回结果（真实 server loop）：{error}"));
-    let forked = transport
+    transport
         .response(3)
+        .unwrap_or_else(|error| panic!("session/close 必须先成功释放连接绑定：{error}"));
+    let forked = transport
+        .response(4)
         .unwrap_or_else(|error| panic!("session/fork 必须返回结果（真实 server loop）：{error}"));
     let forked_id = forked["sessionId"]
         .as_str()

@@ -147,20 +147,26 @@ impl HostSessionRecovery {
     ) -> Result<EnteredRecovery, RecoveryError> {
         let mut partition = scope::partition(scope);
         let root = partition.root_thread_id.clone();
-        let tree = self
-            .resources
-            .list_session_tree(&root)
-            .await
-            .map_err(RecoveryError::from)?;
-        // 范围仍来自历史父链；任务提醒与运行登记使用当前结果接收关系。
-        for child in &mut partition.children {
-            child.parent_thread_id = tree
-                .iter()
-                .find(|meta| meta.id == child.thread_id)
-                .and_then(|meta| {
-                    peri_acp_types::thread::completion_target(meta.config.as_deref()).ok()
-                })
-                .filter(|target| tree.iter().any(|meta| meta.id == *target));
+        // 只有 working child 需要从整树解析实际 completion target；root-only/idle
+        // 进入不为一个空 child partition 支付整树查询。
+        if !partition.children.is_empty() {
+            #[cfg(test)]
+            tree_query_probe::record(&root);
+            let tree = self
+                .resources
+                .list_session_tree(&root)
+                .await
+                .map_err(RecoveryError::from)?;
+            // 范围仍来自历史父链；任务提醒与运行登记使用当前结果接收关系。
+            for child in &mut partition.children {
+                child.parent_thread_id = tree
+                    .iter()
+                    .find(|meta| meta.id == child.thread_id)
+                    .and_then(|meta| {
+                        peri_acp_types::thread::completion_target(meta.config.as_deref()).ok()
+                    })
+                    .filter(|target| tree.iter().any(|meta| meta.id == *target));
+            }
         }
         let entered_is_root = root == *entered;
         let mut report = RecoveryReport {
@@ -445,6 +451,16 @@ impl HostSessionRecovery {
     }
 
     #[cfg(test)]
+    pub(crate) fn install_tree_query_probe(root: &ThreadId) {
+        tree_query_probe::install(root);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_tree_query_count(root: &ThreadId) -> usize {
+        tree_query_probe::take(root)
+    }
+
+    #[cfg(test)]
     pub(crate) fn in_flight_gate(&self, root: &ThreadId) -> Option<Arc<Mutex<()>>> {
         self.in_flight.lock().get(root).cloned()
     }
@@ -497,6 +513,32 @@ impl HostSessionRecovery {
         drop(guard);
         self.release_gate(&root, &gate);
         prepared
+    }
+}
+
+/// 仅测试：记录目标 root 的整树查询，验证空 child partition 不触碰存储树。
+#[cfg(test)]
+pub(crate) mod tree_query_probe {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+
+    use peri_acp_types::thread::ThreadId;
+
+    static COUNTS: LazyLock<Mutex<HashMap<ThreadId, usize>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) fn install(root: &ThreadId) {
+        COUNTS.lock().unwrap().insert(root.clone(), 0);
+    }
+
+    pub(super) fn record(root: &ThreadId) {
+        if let Some(count) = COUNTS.lock().unwrap().get_mut(root) {
+            *count += 1;
+        }
+    }
+
+    pub(crate) fn take(root: &ThreadId) -> usize {
+        COUNTS.lock().unwrap().remove(root).unwrap_or(0)
     }
 }
 

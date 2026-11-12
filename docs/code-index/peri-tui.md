@@ -47,7 +47,7 @@ Live 工具卡归属：`kit/acp_events/live_tool_links.rs` 按 `active_session_i
 
 嵌入式 TUI 与 print 由 `src/launch.rs`、`src/cli_print.rs` 创建普通 ACP host/client pump，
 不启动 Bun SDK sidecar，不依赖持久 execution registry 或 reverse admission。
-history 加载保留原 session load、事件重放和 load reservation；不恢复旧执行。`session/load` 响应中的 `_meta["peri.recovery"]` 只投影为通知（`acp_client/client/recovery_view.rs`）；恢复不是完全成功时保留目标会话与历史，不写粘滞 `restore_error`。启动 `-r` 失败保留目标，下一次 `ensure_session` 先重试同一会话；`/clear` 或交互式切换清除该意图。服务端 `-32017` 是确定性拒绝，原稿恢复为待发且不自动重试。
+history 加载保留原 session load、事件重放和 load reservation；不恢复旧执行。`session/load` 响应中的 `_meta["peri.recovery"]` 只投影为通知（`acp_client/client/recovery_view.rs`）；恢复不是完全成功时保留目标会话与历史，不写粘滞 `restore_error`。启动 `-r` 失败保留目标，下一次 `ensure_session` 先重试同一会话；`/clear` 或交互式切换清除该意图。服务端 `-32017` 是确定性拒绝，原稿恢复为待发且不自动重试。`session/load` 返回 `session_cleanup_incomplete` 时，连接已被服务端绑定到该 owner；`acp_client/client/session/transition.rs` 记录同一 `sessionId` 为待关闭目标，下一次建立/切换（含同 ID 重载）先 `session/close` 再继续，回归 `cleanup_incomplete_load_remembers_owner_for_next_switch` 与 `cleanup_incomplete_same_id_retry_closes_owner_first`。
 
 当前进程输入撤回入口 `src/kit/steer_state.rs` 以原 snapshot 与 pending command 共同校验：
 Queued 与未 claim 的 Dispatching 可以请求权威 withdraw receipt；Claimed 不可以。

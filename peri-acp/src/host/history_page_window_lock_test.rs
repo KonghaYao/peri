@@ -4,7 +4,10 @@
 //! `try_lock` 成功，证明 load 没有持有全局 sessions 锁。
 
 use super::*;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use peri_acp_types::session_resources::{
     BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot, CloseSettlement, ForkSnapshot,
@@ -16,6 +19,40 @@ use peri_acp_types::session_resources::{
 use peri_acp_types::thread::{ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery};
 use tokio::sync::Notify;
+
+struct RetryShutdownPool {
+    settled: AtomicBool,
+}
+
+#[async_trait]
+impl peri_acp_types::ports::McpPoolPort for RetryShutdownPool {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn verify_shared_environment_close(&self, _session_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
+        if self.settled.load(Ordering::Acquire) {
+            peri_acp_types::ports::McpPoolShutdownReport::Complete {
+                settled_services: 1,
+                failed_services: 0,
+            }
+        } else {
+            peri_acp_types::ports::McpPoolShutdownReport::Incomplete {
+                settled_services: 0,
+                unfinished_services: 1,
+                failed_services: 0,
+            }
+        }
+    }
+
+    fn snapshot(&self) -> Value {
+        json!({})
+    }
+}
 
 struct BlockingResources {
     started: Arc<Notify>,
@@ -374,4 +411,150 @@ async fn unpublished_restore_cleanup_removes_manager_registration() {
         fixture.cfg.session_manager.get_session(&sid).is_none(),
         "unpublished restore cleanup must remove the manager registration"
     );
+}
+
+/// [回归测试] 旧 publication generation 不得删除或关闭后来替换的新 state。
+#[tokio::test]
+async fn restore_publication_generation_mismatch_keeps_new_state() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fixture = PageFixture::new(&tmp).await;
+    let sid = fixture.sid.clone();
+    let (cwd, old_generation) = {
+        let states = fixture.sessions.lock().await;
+        let state = states.get(&sid).unwrap();
+        (state.cwd.clone(), state.session_generation)
+    };
+    fixture
+        .cfg
+        .session_manager
+        .ensure_session_with_task_manager(&sid, &cwd, None);
+    {
+        let mut states = fixture.sessions.lock().await;
+        states.get_mut(&sid).unwrap().session_generation = crate::host::next_session_generation();
+    }
+    let publication = crate::host::requests::session_lifecycle::RestorePublication {
+        session_id: sid.clone(),
+        session_generation: old_generation,
+    };
+    crate::host::requests::session_lifecycle::rollback_restore_publication(
+        &fixture.cfg,
+        &fixture.sessions,
+        &publication,
+    )
+    .await
+    .expect("stale publication 应为无操作");
+    let states = fixture.sessions.lock().await;
+    let state = states.get(&sid).expect("新 generation 必须保留");
+    assert!(!state.closing, "旧 rollback 不得关闭新 state");
+    drop(states);
+    assert!(
+        fixture.cfg.session_manager.get_session(&sid).is_some(),
+        "旧 rollback 不得关闭新 manager"
+    );
+    fixture
+        .cfg
+        .session_manager
+        .close_session(&sid)
+        .await
+        .unwrap();
+}
+
+/// [回归测试] shutdown 未确认时保留同一 owner 并拒绝 reload；显式 close 可重试收口。
+#[tokio::test]
+#[serial]
+async fn restore_cleanup_incomplete_retains_owner_until_explicit_close() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "unused-test-key",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let mut raw_cfg = make_server_config(config, provider, &tmp).await;
+    let cwd = tmp.path().canonicalize().unwrap();
+    raw_cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
+        startup_cwd: cwd.to_string_lossy().into_owned(),
+        bare: true,
+        drive_cron_tick: false,
+        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        capabilities: Default::default(),
+    });
+    let cfg = Arc::new(raw_cfg);
+    let mut state_map = HashMap::new();
+    let sid = register_session_with_history(&mut state_map, cwd.to_str().unwrap(), &cfg).await;
+    let sessions = Arc::new(tokio::sync::Mutex::new(state_map));
+    let mut environment =
+        crate::host::workspace::SessionEnvironment::assemble(&cfg, cwd.to_str().unwrap(), &sid)
+            .await
+            .unwrap()
+            .expect("fixture 应装配 environment");
+    let pool = Arc::new(RetryShutdownPool {
+        settled: AtomicBool::new(false),
+    });
+    Arc::get_mut(&mut environment).unwrap().cfg.mcp_pool = Some(pool.clone());
+    let generation = {
+        let mut states = sessions.lock().await;
+        let state = states.get_mut(&sid).unwrap();
+        state.environment = Some(environment.clone());
+        state.session_generation
+    };
+    cfg.session_manager.ensure_session_with_task_manager(
+        &sid,
+        cwd.to_str().unwrap(),
+        Some(environment.task_manager()),
+    );
+    let publication = crate::host::requests::session_lifecycle::RestorePublication {
+        session_id: sid.clone(),
+        session_generation: generation,
+    };
+    let error = crate::host::requests::session_lifecycle::rollback_restore_publication(
+        &cfg,
+        &sessions,
+        &publication,
+    )
+    .await
+    .expect_err("未确认 shutdown 必须显式失败");
+    assert_eq!(error.code, -32010, "{error:?}");
+    assert_eq!(
+        error.data.as_ref().unwrap()["reason"],
+        "session_cleanup_incomplete"
+    );
+    assert_eq!(error.data.as_ref().unwrap()["sessionId"], sid);
+    {
+        let states = sessions.lock().await;
+        let state = states.get(&sid).expect("incomplete 必须保留 retry owner");
+        assert!(state.closing, "incomplete state 必须拒绝再次 load");
+        assert!(
+            state
+                .environment
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &environment)),
+            "必须保留同一 environment owner"
+        );
+    }
+    let transport: Arc<dyn AcpTransport> = Arc::new(MockTransport::default());
+    let reload = crate::host::requests::session_lifecycle::handle_load_shared(
+        &json!({ "sessionId": sid }),
+        &cfg,
+        &sessions,
+        &transport,
+        crate::host::connection::ConnectionFacts::unnegotiated(),
+    )
+    .await
+    .expect_err("pending cleanup 不得再次 load");
+    assert_eq!(reload.code, -32010, "{reload:?}");
+
+    pool.settled.store(true, Ordering::Release);
+    let mut states = sessions.lock().await;
+    handle_request(
+        "session/close",
+        &json!({ "sessionId": sid }),
+        &cfg,
+        &mut states,
+        &transport,
+    )
+    .await
+    .expect("显式 close 必须重试并完成 cleanup");
+    assert!(!states.contains_key(&sid));
 }

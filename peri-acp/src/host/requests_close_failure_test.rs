@@ -308,9 +308,35 @@ impl CloseHarness {
     }
 
     async fn close(&self) -> Result<Value, AcpError> {
+        self.close_session(&self.sid).await
+    }
+
+    async fn close_session(&self, session_id: &str) -> Result<Value, AcpError> {
         self.client
-            .send_request("session/close", json!({ "sessionId": self.sid }))
+            .send_request("session/close", json!({ "sessionId": session_id }))
             .await
+    }
+
+    async fn load(&self, session_id: &str) -> Result<Value, AcpError> {
+        self.client
+            .send_request("session/load", json!({ "sessionId": session_id }))
+            .await
+    }
+
+    async fn create_other_session(&self) -> String {
+        let cwd = self._directory.path().to_str().unwrap();
+        let recorder: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+        let mut states = self.sessions.lock().await;
+        let response = handle_request(
+            "session/new",
+            &json!({ "cwd": cwd }),
+            &self.cfg,
+            &mut states,
+            &recorder,
+        )
+        .await
+        .expect("第二会话 fixture 必须建立");
+        response["sessionId"].as_str().unwrap().to_owned()
     }
 
     async fn prompt(&self) -> Result<Value, AcpError> {
@@ -428,6 +454,77 @@ async fn close_intent_write_refusal_keeps_session_open_and_promptable() {
 
     harness.assert_still_open().await;
     harness.assert_prompt_succeeds().await;
+}
+
+/// [回归测试] close 失败不得释放连接绑定，B 仍须以稳定切换错误拒绝。
+#[tokio::test]
+async fn session_switch_close_failure_still_rejects_other_session() {
+    let harness = CloseHarness::new(CloseFault::ReadMeta).await;
+    let other = harness.create_other_session().await;
+    harness.load(&harness.sid).await.expect("A load 必须成功");
+    harness.arm();
+    harness.close().await.expect_err("注入的 close 必须失败");
+    let error = harness
+        .load(&other)
+        .await
+        .expect_err("close 失败后 B 必须继续被拒绝");
+    assert_eq!(error.code, -32010, "{error:?}");
+    assert_eq!(
+        error.data.as_ref().unwrap()["reason"],
+        crate::host::connection::SESSION_SWITCH_REQUIRED_REASON,
+        "客户端按稳定 reason 引导先 close：{error:?}"
+    );
+}
+
+/// [回归测试] close 其他 ID 不释放 A；只有 A 成功响应发送后，新会话才可 setup。
+#[tokio::test]
+async fn session_switch_matching_close_success_allows_next_session() {
+    let harness = CloseHarness::new(CloseFault::None).await;
+    let other = harness.create_other_session().await;
+    let next = harness.create_other_session().await;
+    harness.load(&harness.sid).await.expect("A load 必须成功");
+    harness
+        .close_session(&other)
+        .await
+        .expect("关闭非当前 B 本身可以成功");
+    let error = harness
+        .load(&next)
+        .await
+        .expect_err("关闭其他 ID 不得释放 A 的绑定");
+    assert_eq!(
+        error.data.as_ref().unwrap()["reason"],
+        crate::host::connection::SESSION_SWITCH_REQUIRED_REASON
+    );
+    harness.close().await.expect("A close 必须成功");
+    harness
+        .load(&next)
+        .await
+        .expect("A 成功 close 后 C 必须放行");
+}
+
+/// [回归测试] 当前连接绑定 A 后，session/new 同样在装配前被拒绝；close 成功后才放行。
+#[tokio::test]
+async fn session_switch_new_session_rejected_until_current_close() {
+    let harness = CloseHarness::new(CloseFault::None).await;
+    harness.load(&harness.sid).await.expect("A load 必须成功");
+    let cwd = harness._directory.path().to_str().unwrap();
+    let error = harness
+        .client
+        .send_request("session/new", json!({ "cwd": cwd }))
+        .await
+        .expect_err("未关闭 A 时 session/new 必须拒绝");
+    assert_eq!(error.code, -32010, "{error:?}");
+    assert_eq!(
+        error.data.as_ref().unwrap()["reason"],
+        crate::host::connection::SESSION_SWITCH_REQUIRED_REASON,
+        "session/new 与 session/load 必须使用同一稳定 reason：{error:?}"
+    );
+    harness.close().await.expect("A close 必须成功");
+    harness
+        .client
+        .send_request("session/new", json!({ "cwd": cwd }))
+        .await
+        .expect("A 成功 close 后 session/new 必须放行");
 }
 
 /// 成功路径不回归：关闭成功即移除内存会话，后续 prompt 被拒（session not found）。
