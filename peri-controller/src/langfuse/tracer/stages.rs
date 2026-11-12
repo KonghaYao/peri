@@ -45,9 +45,18 @@ pub(crate) struct WorkflowEndRecord {
     pub tool_calls: usize,
 }
 
+#[derive(Clone)]
+pub(crate) struct MqDrainedStats {
+    pub prompt: usize,
+    pub defer: usize,
+    pub info: usize,
+    /// 本批最早入队时间；None 表示没有可用值，排队等待必须保持 null。
+    pub oldest_enqueued_at: Option<String>,
+}
+
 struct ActiveStage {
     handle: StageHandle,
-    mq_counts: Option<(usize, usize, usize)>,
+    mq_stats: Option<MqDrainedStats>,
 }
 
 pub(crate) struct StageSpans {
@@ -91,13 +100,18 @@ impl StageSpans {
             trace_id: trace_id.to_string(),
             parent_observation_id: parent_observation_id.to_string(),
         };
-        let mq_counts = if stage == Stage::Receive {
-            Some((0, 0, 0))
+        let mq_stats = if stage == Stage::Receive {
+            Some(MqDrainedStats {
+                prompt: 0,
+                defer: 0,
+                info: 0,
+                oldest_enqueued_at: None,
+            })
         } else {
             None
         };
         self.active
-            .insert(agent_id.to_string(), ActiveStage { handle, mq_counts });
+            .insert(agent_id.to_string(), ActiveStage { handle, mq_stats });
         (
             StageHandle {
                 span_id,
@@ -159,22 +173,16 @@ impl StageSpans {
         self.active.get(agent_id).map(|a| &a.handle)
     }
 
-    pub(crate) fn on_mq_drained(
-        &mut self,
-        agent_id: &str,
-        prompt: usize,
-        defer: usize,
-        info: usize,
-    ) {
+    pub(crate) fn on_mq_drained(&mut self, agent_id: &str, stats: MqDrainedStats) {
         if let Some(a) = self.active.get_mut(agent_id) {
             if a.handle.stage == Stage::Receive {
-                a.mq_counts = Some((prompt, defer, info));
+                a.mq_stats = Some(stats);
             }
         }
     }
 
-    pub(crate) fn mq_counts(&self, agent_id: &str) -> Option<(usize, usize, usize)> {
-        self.active.get(agent_id).and_then(|a| a.mq_counts)
+    pub(crate) fn mq_stats(&self, agent_id: &str) -> Option<MqDrainedStats> {
+        self.active.get(agent_id).and_then(|a| a.mq_stats.clone())
     }
 
     pub(crate) fn on_workflow_start(

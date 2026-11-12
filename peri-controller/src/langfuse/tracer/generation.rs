@@ -19,6 +19,8 @@ use super::input_snapshot::GenerationInput;
 pub(crate) struct GenerationCached {
     pub gen_id: String,
     pub start_time: String,
+    /// 首个推理分片时间；只有 provider 实际产生 reasoning 事件时才存在。
+    pub completion_start_time: Option<String>,
     /// 初始 fallback（messages/tools）或请求体到达后替换成的实际请求来源。
     pub input: GenerationInput,
 }
@@ -38,6 +40,8 @@ pub(crate) struct GenerationStart {
 pub(crate) struct GenerationEnd {
     pub gen_id: String,
     pub start_time: String,
+    /// 首个推理分片时间；None 表示本次调用未观测到 reasoning。
+    pub completion_start_time: Option<String>,
     pub input: GenerationInput,
     pub retry_metadata: Option<serde_json::Value>,
 }
@@ -55,6 +59,8 @@ pub(crate) struct AbandonedGeneration {
     pub step: usize,
     pub gen_id: String,
     pub start_time: String,
+    /// 首个推理分片时间；兜底关闭时仍须保留，不能因走 fallback 丢失。
+    pub completion_start_time: Option<String>,
     pub input: GenerationInput,
     pub retry_metadata: Option<serde_json::Value>,
     pub terminal: Option<PendingTerminalState>,
@@ -71,6 +77,8 @@ pub(crate) struct GenerationTracker {
     retry_attempts: HashMap<(String, usize), Vec<RetryAttempt>>,
     /// 已收到 LlmCallEnd、但归属尚不可解析的完整终态。
     pending_terminal: HashMap<(String, usize), PendingTerminalState>,
+    /// 每个 agent 当前活跃的 step：reasoning 分片只带 agent_id，需按此路由到自己的 generation。
+    active_step_by_agent: HashMap<String, usize>,
 }
 
 impl GenerationTracker {
@@ -80,6 +88,7 @@ impl GenerationTracker {
             active_step: None,
             retry_attempts: HashMap::new(),
             pending_terminal: HashMap::new(),
+            active_step_by_agent: HashMap::new(),
         }
     }
 
@@ -95,12 +104,27 @@ impl GenerationTracker {
         let cached = GenerationCached {
             gen_id: gen_id.clone(),
             start_time: start_time.clone(),
+            completion_start_time: None,
             input,
         };
         self.generation_data
             .insert((agent_id.to_string(), step), cached);
+        self.active_step_by_agent.insert(agent_id.to_string(), step);
         self.active_step = Some(step);
         GenerationStart { gen_id, start_time }
+    }
+
+    /// 记录首个推理分片时间（同一次 generation 只取最先到达的一次）。
+    ///
+    /// 按 agent 的活跃 step 精确路由，不按时间邻近猜测归属；该 agent 当前无活跃
+    /// generation 时丢弃（例如分片晚于 LlmCallEnd 到达）。
+    pub(crate) fn mark_completion_start(&mut self, agent_id: &str, at: String) {
+        let Some(step) = self.active_step_by_agent.get(agent_id).copied() else {
+            return;
+        };
+        if let Some(cached) = self.generation_data.get_mut(&(agent_id.to_string(), step)) {
+            cached.completion_start_time.get_or_insert(at);
+        }
     }
 
     /// 请求体到达：用实际请求来源替换 fallback，旧来源立即释放（ticket Drop 置取消位，
@@ -153,6 +177,9 @@ impl GenerationTracker {
 
     pub(crate) fn on_llm_end(&mut self, agent_id: &str, step: usize) -> Option<GenerationEnd> {
         let cached = self.generation_data.remove(&(agent_id.to_string(), step))?;
+        if self.active_step_by_agent.get(agent_id) == Some(&step) {
+            self.active_step_by_agent.remove(agent_id);
+        }
         self.active_step = None;
 
         let retries = self.retry_attempts.remove(&(agent_id.to_string(), step));
@@ -162,11 +189,13 @@ impl GenerationTracker {
 
         let gen_id = cached.gen_id.clone();
         let start_time = cached.start_time.clone();
+        let completion_start_time = cached.completion_start_time;
         let input = cached.input;
 
         Some(GenerationEnd {
             gen_id,
             start_time,
+            completion_start_time,
             input,
             retry_metadata,
         })
@@ -174,6 +203,7 @@ impl GenerationTracker {
 
     pub(crate) fn take_all_active(&mut self) -> Vec<AbandonedGeneration> {
         self.active_step = None;
+        self.active_step_by_agent.clear();
         self.generation_data
             .drain()
             .map(|((agent_id, step), cached)| {
@@ -184,6 +214,7 @@ impl GenerationTracker {
                     .map(|retries| build_retry_metadata(&retries));
                 let gen_id = cached.gen_id.clone();
                 let start_time = cached.start_time.clone();
+                let completion_start_time = cached.completion_start_time;
                 let input = cached.input;
                 let terminal = self.pending_terminal.remove(&(agent_id.clone(), step));
                 AbandonedGeneration {
@@ -191,6 +222,7 @@ impl GenerationTracker {
                     step,
                     gen_id,
                     start_time,
+                    completion_start_time,
                     input,
                     retry_metadata,
                     terminal,

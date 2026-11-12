@@ -202,3 +202,56 @@ fn test_bridge_like_process_observe_start_stop() {
     assert_eq!(bridge.active_subagent_count(), 0);
     assert_eq!(bridge.subagent_event_counts(), (1, 1));
 }
+
+/// v2 观测字段映射：reasoning 分片保留来源 agent，Receive 排空保留最早入队时间。
+#[test]
+fn test_from_observe_event_reasoning_and_queue_wait_fields() {
+    use peri_acp_types::identity::AgentId;
+    use peri_agent::session::turn::TurnId;
+
+    let agent = AgentId::new();
+    let turn_id = TurnId::new();
+
+    match UnifiedLangfuseEvent::from_observe_event(ObserveEvent::AiReasoningChunk {
+        turn_id,
+        agent_id: agent,
+        text: "thinking".to_string(),
+        source_agent_id: None,
+    }) {
+        Some(UnifiedLangfuseEvent::AiReasoningChunk { agent_id, text }) => {
+            assert_eq!(
+                agent_id,
+                agent.to_string(),
+                "reasoning 分片须保留 agent 身份"
+            );
+            assert_eq!(text, "thinking");
+        }
+        other => panic!("应为 AiReasoningChunk，实际 {:?}", other),
+    }
+
+    match UnifiedLangfuseEvent::from_observe_event(ObserveEvent::MessageQueueDrained {
+        turn_id,
+        agent_id: agent,
+        prompt: 1,
+        defer: 2,
+        info: 3,
+        oldest_enqueued_at: Some("2026-07-14T10:00:00.000000Z".to_string()),
+    }) {
+        Some(UnifiedLangfuseEvent::MessageQueueDrained {
+            oldest_enqueued_at,
+            prompt,
+            defer,
+            info,
+            ..
+        }) => {
+            assert_eq!(prompt, 1);
+            assert_eq!(defer, 2);
+            assert_eq!(info, 3);
+            assert_eq!(
+                oldest_enqueued_at.as_deref(),
+                Some("2026-07-14T10:00:00.000000Z")
+            );
+        }
+        other => panic!("应为 MessageQueueDrained，实际 {:?}", other),
+    }
+}

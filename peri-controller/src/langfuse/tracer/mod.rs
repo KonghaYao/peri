@@ -142,14 +142,17 @@ impl LangfuseTracer {
     // ── 其他 langfuse v2 事件 ───────────────────────────────────────────────
 
     /// AI 推理内容 chunk
-    pub fn on_ai_reasoning_chunk(&mut self, _text: &str) {
+    pub fn on_ai_reasoning_chunk(&mut self, agent_id: &str, text: &str) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
+        // 首个分片即该 generation 的 completion 起点；同一 generation 只记第一次。
+        self.generation
+            .mark_completion_start(agent_id, now_rfc3339());
         tracing::debug!(
             target: "langfuse::tracer",
             trace_id = %self.trace_id,
-            text_len = _text.len(),
+            text_len = text.len(),
             "ai_reasoning_chunk"
         );
     }

@@ -92,6 +92,10 @@ impl LangfuseTracer {
             let terminal = abandoned.terminal.as_ref();
             let lifecycle_incomplete = terminal.is_none();
             let input = abandoned.input;
+            let first_reasoning_ms = abandoned
+                .completion_start_time
+                .as_deref()
+                .and_then(|at| super::llm_events::elapsed_ms(&abandoned.start_time, at));
             let mut metadata = abandoned
                 .retry_metadata
                 .unwrap_or_else(|| serde_json::json!({}));
@@ -124,6 +128,20 @@ impl LangfuseTracer {
                     "ownership_unresolved".to_string(),
                     serde_json::json!(ownership_unresolved),
                 );
+                // 兜底路径与正常结束保持同一 completion 语义：只有 reasoning 能证明起点，
+                // 可见文本无事件可测，显式 null。
+                object.insert(
+                    "completion_start_source".to_string(),
+                    serde_json::json!(if first_reasoning_ms.is_some() {
+                        "reasoning_chunk"
+                    } else {
+                        "unavailable"
+                    }),
+                );
+                if let Some(ms) = first_reasoning_ms {
+                    object.insert("first_reasoning_ms".to_string(), serde_json::json!(ms));
+                }
+                object.insert("first_visible_text_ms".to_string(), serde_json::Value::Null);
                 if ownership_unresolved {
                     object.insert(
                         "original_agent_id".to_string(),
@@ -170,6 +188,7 @@ impl LangfuseTracer {
                 name: Some(format!("step-{}", abandoned.step)),
                 start_time: Some(abandoned.start_time),
                 end_time: Some(end_time.clone()),
+                completion_start_time: abandoned.completion_start_time,
                 input: None,
                 output,
                 metadata: Some(metadata),

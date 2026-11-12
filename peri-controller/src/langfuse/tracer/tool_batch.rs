@@ -19,6 +19,8 @@ pub(crate) struct PendingTool {
 /// 已完成工具记录（供 flush 时一并发出 SpanCreate）
 #[derive(Debug, Clone)]
 pub(crate) struct CompletedTool {
+    /// LLM 响应中的工具调用 id，用于把 TOOL observation 与 Generation 的 tool_calls 对齐
+    pub tool_call_id: String,
     pub name: String,
     pub input: serde_json::Value,
     pub output: String,
@@ -130,6 +132,7 @@ impl ToolBatch {
         let now = peri_time::now_utc_rfc3339();
         self.batch_end_time = Some(now.clone());
         self.completed_tools.push(CompletedTool {
+            tool_call_id: tool_call_id.to_string(),
             name: pt.name,
             input: pt.input,
             output: output.to_string(),

@@ -31,6 +31,10 @@ fn test_on_tool_end_returns_completed_tool() {
         .on_tool_end("call_1", "file contents", false)
         .expect("should return Some");
     assert_eq!(completed.name, "Read");
+    assert_eq!(
+        completed.tool_call_id, "call_1",
+        "CompletedTool 应保留 LLM 工具调用 id"
+    );
     assert!(completed.span_id.starts_with("obs_"));
     assert_eq!(completed.output, "file contents");
     assert!(!completed.is_error);

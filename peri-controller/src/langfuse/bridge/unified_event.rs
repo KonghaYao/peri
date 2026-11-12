@@ -110,9 +110,11 @@ pub enum UnifiedLangfuseEvent {
         prompt: usize,
         defer: usize,
         info: usize,
+        /// 本批最早入队时间；None 表示本批没有可用的入队时间。
+        oldest_enqueued_at: Option<String>,
     },
     /// AI 推理内容块（v2 only）
-    AiReasoningChunk { text: String },
+    AiReasoningChunk { agent_id: String, text: String },
     /// Turn 错误（v2 only）：仅传递稳定的分类，绝不进入原始错误正文。
     TurnError { reason: TurnErrorReason },
     /// 会话开始（v1 only）

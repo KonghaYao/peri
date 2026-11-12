@@ -249,6 +249,7 @@ async fn test_unresolved_llm_parent_is_preserved_until_turn_end_fallback() {
     // 追踪器只搬运不透明来源；这里直接登记一个"已 start 但归属不可解析"的 generation。
     t.generation
         .on_llm_start("unregistered-child", 0, GenerationInput::Rejected);
+    t.on_ai_reasoning_chunk("unregistered-child", "think");
 
     t.on_llm_end(
         "unregistered-child",
@@ -305,6 +306,14 @@ async fn test_unresolved_llm_parent_is_preserved_until_turn_end_fallback() {
             .and_then(|metadata| metadata.get("incomplete")),
         Some(&serde_json::json!(false))
     );
+    assert!(
+        generation.completion_start_time.is_some(),
+        "兜底路径不得丢失首个 reasoning 建立起的 completion 起点"
+    );
+    let meta = generation.metadata.as_ref().expect("应携带 metadata");
+    assert_eq!(meta["completion_start_source"], "reasoning_chunk");
+    assert!(meta["first_reasoning_ms"].as_u64().is_some());
+    assert_eq!(meta["first_visible_text_ms"], serde_json::Value::Null);
 }
 
 #[tokio::test]
@@ -486,6 +495,80 @@ async fn test_llm_generation_emits_events() {
                 == Some(&serde_json::json!(true)))
     });
     assert!(rejected, "冻结被拒必须显式标记 input_snapshot_rejected");
+}
+
+/// 首个 reasoning 分片即 completion 起点；可见文本没有事件，必须显式标 unavailable。
+#[tokio::test]
+async fn test_llm_generation_completion_start_from_reasoning() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+    t.on_llm_start("main", 0, &[], &[]);
+    t.on_ai_reasoning_chunk("main", "think");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    t.on_llm_end("main", 0, "gpt-4", "openai", "answer", None, None);
+    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
+
+    let gen = events
+        .iter()
+        .find_map(|e| {
+            if let langfuse_client::IngestionEvent::GenerationCreate { body, .. } = e {
+                Some(body)
+            } else {
+                None
+            }
+        })
+        .expect("应有 GenerationCreate 事件");
+    assert!(
+        gen.completion_start_time.is_some(),
+        "首个 reasoning 分片应写入 completion_start_time"
+    );
+    let meta = gen.metadata.as_ref().expect("generation 应有 metadata");
+    assert_eq!(meta["completion_start_source"], "reasoning_chunk");
+    assert!(
+        meta["first_reasoning_ms"].as_u64().is_some(),
+        "first_reasoning_ms 应为毫秒数"
+    );
+    assert_eq!(
+        meta["first_visible_text_ms"],
+        serde_json::Value::Null,
+        "首个可见文本无法测量，必须显式 null"
+    );
+}
+
+/// 无 reasoning 分片时 completion_start_time 保持 null，来源标 unavailable。
+#[tokio::test]
+async fn test_llm_generation_completion_start_unavailable_without_reasoning() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+    t.on_llm_start("main", 0, &[], &[]);
+    t.on_llm_end("main", 0, "gpt-4", "openai", "answer", None, None);
+    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
+
+    let gen = events
+        .iter()
+        .find_map(|e| {
+            if let langfuse_client::IngestionEvent::GenerationCreate { body, .. } = e {
+                Some(body)
+            } else {
+                None
+            }
+        })
+        .expect("应有 GenerationCreate 事件");
+    assert!(
+        gen.completion_start_time.is_none(),
+        "没有 reasoning 事件时不得伪造 completion 起点"
+    );
+    let meta = gen.metadata.as_ref().expect("generation 应有 metadata");
+    assert_eq!(meta["completion_start_source"], "unavailable");
+    assert!(
+        meta.get("first_reasoning_ms").is_none(),
+        "不可用时不应写入毫秒值"
+    );
+    assert_eq!(meta["first_visible_text_ms"], serde_json::Value::Null);
 }
 
 #[tokio::test]
@@ -828,7 +911,13 @@ fn test_receive_stage_span_includes_mq_counts_in_input() {
     t.on_stage_start(Stage::Receive, "turn_mq");
 
     // 2. 模拟 MQ 排空：1 条 prompt + 2 条 defer + 0 条 info = 共 3 条
-    t.on_mq_drained("main", 1, 2, 0);
+    t.on_mq_drained(
+        "main",
+        1,
+        2,
+        0,
+        Some("2020-01-01T00:00:00.000000Z".to_string()),
+    );
 
     // 3. 确保 stage 持续 ≥ 2ms，避免 duration_ms==0 导致 span 被条件跳过
     std::thread::sleep(std::time::Duration::from_millis(2));
@@ -879,6 +968,57 @@ fn test_receive_stage_span_includes_mq_counts_in_input() {
     assert_eq!(mq["defer"], serde_json::json!(2), "defer 计数应为 2");
     assert_eq!(mq["info"], serde_json::json!(0), "info 计数应为 0");
     assert_eq!(mq["total"], serde_json::json!(3), "total 应为 1+2+0 = 3");
+
+    // 排队等待以 Receive 起点减去最早入队时间；两端都在 span 上，可复算。
+    let enqueued = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00.000000Z")
+        .expect("fixture 时间应可解析");
+    let started = chrono::DateTime::parse_from_rfc3339(
+        span.start_time.as_deref().expect("span start_time 应存在"),
+    )
+    .expect("span start_time 应可解析");
+    let expected_ms = started
+        .signed_duration_since(enqueued)
+        .num_milliseconds()
+        .max(0) as u64;
+    assert_eq!(
+        input["queue_wait_ms"],
+        serde_json::json!(expected_ms),
+        "queue_wait_ms 应等于 Receive 起点与最早入队时间的差"
+    );
+}
+
+/// 没有可用入队时间时，queue_wait_ms 必须是 null（保持未知），不能补零。
+#[test]
+fn test_receive_stage_queue_wait_is_null_without_enqueued_at() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_mq_null");
+    t.on_stage_start(Stage::Receive, "turn_mq_null");
+    t.on_mq_drained("main", 1, 0, 0, None);
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let handle = t
+        .stages
+        .active_handle("main")
+        .expect("Receive stage 应为 active")
+        .clone();
+    t.on_stage_end("main", &handle, StageStatus::Done);
+
+    let events = session.events_snapshot();
+    let span = events
+        .iter()
+        .find_map(|e| {
+            if let IngestionEvent::SpanCreate { body, .. } = e {
+                (body.name.as_deref() == Some("stage-receive")).then_some(body)
+            } else {
+                None
+            }
+        })
+        .expect("应有 stage-receive SpanCreate");
+    let input = span.input.as_ref().expect("Receive span input 应存在");
+    assert_eq!(
+        input.get("queue_wait_ms"),
+        Some(&serde_json::Value::Null),
+        "无入队时间时 queue_wait_ms 应为 null"
+    );
 }
 
 /// 非 Receive 阶段的 span input 应保持 None，不应误填充。
@@ -968,6 +1108,14 @@ async fn test_tool_observation_carries_input_and_output() {
         obs.output,
         Some(serde_json::json!("file content: hello")),
         "TOOL observation 应携带工具执行结果"
+    );
+    assert_eq!(
+        obs.metadata
+            .as_ref()
+            .and_then(|meta| meta.get("tool_call_id"))
+            .and_then(|id| id.as_str()),
+        Some("tc_read"),
+        "TOOL observation metadata 应携带 tool_call_id，用于与 Generation tool_calls 对齐"
     );
 }
 

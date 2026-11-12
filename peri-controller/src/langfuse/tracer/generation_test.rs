@@ -256,8 +256,14 @@ async fn abandoned_generation_hands_out_source_and_retry_metadata_once() {
     let frozen = freeze(&messages, &tools);
     tracker.on_llm_start("child", 3, frozen.input);
     tracker.on_llm_retrying("child", 3, 1, 2, 20, "private provider body");
+    tracker.mark_completion_start("child", "2026-07-14T10:00:01Z".to_string());
     let abandoned = tracker.take_all_active();
     assert_eq!(abandoned.len(), 1);
+    assert_eq!(
+        abandoned[0].completion_start_time.as_deref(),
+        Some("2026-07-14T10:00:01Z"),
+        "放弃的 generation 仍应保留 completion 起点"
+    );
     assert!(
         matches!(&abandoned[0].input, GenerationInput::Frozen(_)),
         "放弃的 generation 必须交出已冻结来源"
@@ -267,4 +273,41 @@ async fn abandoned_generation_hands_out_source_and_retry_metadata_once() {
         1
     );
     assert!(tracker.take_all_active().is_empty());
+}
+
+#[test]
+fn test_first_reasoning_marks_only_own_generation() {
+    let mut tracker = GenerationTracker::new();
+    tracker.on_llm_start("agent_a", 0, opaque_input());
+    tracker.on_llm_start("agent_b", 0, opaque_input());
+
+    tracker.mark_completion_start("agent_b", "2026-07-14T10:00:01Z".to_string());
+    tracker.mark_completion_start("agent_b", "2026-07-14T10:00:02Z".to_string());
+
+    let end_b = tracker.on_llm_end("agent_b", 0).expect("B 应存在");
+    assert_eq!(
+        end_b.completion_start_time.as_deref(),
+        Some("2026-07-14T10:00:01Z"),
+        "只记录首个 reasoning 分片时间"
+    );
+
+    let end_a = tracker.on_llm_end("agent_a", 0).expect("A 应存在");
+    assert!(
+        end_a.completion_start_time.is_none(),
+        "A 未产生 reasoning，不能复用 B 的时间"
+    );
+}
+
+#[test]
+fn test_reasoning_without_active_generation_is_ignored() {
+    let mut tracker = GenerationTracker::new();
+    tracker.mark_completion_start("agent_a", "2026-07-14T10:00:01Z".to_string());
+    assert!(
+        tracker.on_llm_end("agent_a", 0).is_none(),
+        "无活跃 generation 时不得创建状态"
+    );
+
+    tracker.on_llm_start("agent_a", 0, opaque_input());
+    let end = tracker.on_llm_end("agent_a", 0).expect("应存在");
+    assert!(end.completion_start_time.is_none());
 }

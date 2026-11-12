@@ -283,6 +283,26 @@ impl LangfuseTracer {
                 obj.insert("request_id".to_string(), serde_json::json!(req_id));
             }
         }
+        // completion_start_time 只由首个 reasoning 分片证明；可见文本没有独立观测事件，
+        // 不能借用该边界推算，故显式写 null（不可测量），避免被读成 0。
+        let first_reasoning_ms = gen_end
+            .completion_start_time
+            .as_deref()
+            .and_then(|at| elapsed_ms(&gen_end.start_time, at));
+        if let Some(obj) = meta.as_object_mut() {
+            obj.insert(
+                "completion_start_source".to_string(),
+                serde_json::json!(if first_reasoning_ms.is_some() {
+                    "reasoning_chunk"
+                } else {
+                    "unavailable"
+                }),
+            );
+            if let Some(ms) = first_reasoning_ms {
+                obj.insert("first_reasoning_ms".to_string(), serde_json::json!(ms));
+            }
+            obj.insert("first_visible_text_ms".to_string(), serde_json::Value::Null);
+        }
 
         let (level, status_message, generation_output) = if output.starts_with("ERROR: ") {
             (
@@ -311,7 +331,7 @@ impl LangfuseTracer {
             parent_observation_id: Some(parent_id),
             version: Some(VERSION.to_string()),
             environment: None,
-            completion_start_time: None,
+            completion_start_time: gen_end.completion_start_time,
             model: Some(model.to_string()),
             model_parameters: None,
             usage_details,
@@ -438,4 +458,11 @@ fn parse_output(output: &str) -> serde_json::Value {
     }
     // fallback: 将纯文本包装为 {text: ...}
     serde_json::json!({"text": output})
+}
+
+/// 两 RFC3339 时间差（毫秒，负差按 0）；任一不可解析时返回 None。
+pub(super) fn elapsed_ms(start: &str, end: &str) -> Option<u64> {
+    let start = chrono::DateTime::parse_from_rfc3339(start).ok()?;
+    let end = chrono::DateTime::parse_from_rfc3339(end).ok()?;
+    Some(end.signed_duration_since(start).num_milliseconds().max(0) as u64)
 }

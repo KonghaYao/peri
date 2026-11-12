@@ -476,6 +476,11 @@ pub enum ObserveEvent {
         prompt: usize,
         defer: usize,
         info: usize,
+        /// 本批消费消息中最小的 `enqueued_at`（RFC3339）；无可用值时保持 None。
+        ///
+        /// 排队等待由消费侧用 Receive 起点减去该时间得到，不在事件里预计算。
+        #[serde(default)]
+        oldest_enqueued_at: Option<String>,
     },
 }
 
