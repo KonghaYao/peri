@@ -111,8 +111,7 @@ fn session_switch_rejects_a_to_b_and_allows_same_id_reuse() {
     first.commit("A");
     let error = connection
         .reserve_session_setup(SessionSetupRequest::RestoresSession(Some("B")))
-        .err()
-        .expect("未关闭 A 时 B 必须拒绝");
+        .expect_err("未关闭 A 时 B 必须拒绝");
     assert_session_switch_reason(&error, SESSION_SWITCH_REQUIRED_REASON);
     let reuse = connection
         .reserve_session_setup(SessionSetupRequest::RestoresSession(Some("A")))
@@ -146,8 +145,7 @@ fn session_switch_concurrent_setup_has_one_reservation() {
         .expect("首个 setup 应取得 reservation");
     let error = connection
         .reserve_session_setup(SessionSetupRequest::RestoresSession(Some("B")))
-        .err()
-        .expect("并发 setup 必须拒绝");
+        .expect_err("并发 setup 必须拒绝");
     assert_session_switch_reason(&error, SESSION_SETUP_IN_PROGRESS_REASON);
     drop(first);
 }
