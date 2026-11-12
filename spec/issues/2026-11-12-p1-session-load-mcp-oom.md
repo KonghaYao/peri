@@ -57,7 +57,7 @@
   6. `HostSessionRecovery::prepare` 仅在存在 `working` child 时读取 `list_session_tree`。
   7. 同步 ACP 协议设计、架构契约与 code index，明确 close-before-switch。
 - 明确不做：不自动关闭或 LRU 淘汰旧会话；不共享通用 MCP pool；不增加固定会话上限；不修改数据库 schema/索引；不处理 OOM 后重启或 relay 恢复；本轮不改 `list_session_tree` SQL。
-- 外部验证依赖：`KonghaYao/peri-e2e` 的 `helpers/llm-replay-tui.ts::prepareReplaySessions` 仍在同一连接上连续 `session/new`；需改为每次创建后立即 close（或每个会话使用独立连接），并更新 `.github/peri-e2e.rev`，否则 E2E replay 会按新契约正确拒绝第二个会话。
+- 外部验证适配：`KonghaYao/peri-e2e#4` 已把 replay session 预备改为逐个 `new → close`，并让 I01/I03/H07 并发会话各用独立 stdio ACP connection；本仓 `.github/peri-e2e.rev` 固定到 `acd7f33c259d8f9503e2c38d82cd15f4a96cef5d`。
 - 回归测试：
   - `peri-acp/src/host/connection_test.rs`：reservation、不同目标拒绝、同 ID复用、失败回滚、旧 generation 不覆盖新状态、close 匹配释放。
   - `peri-acp/src/host/requests_close_failure_test.rs` 或独立 server-loop 测试：关闭失败仍拒绝切换，关闭成功后放行，setup 响应失败不提交。
