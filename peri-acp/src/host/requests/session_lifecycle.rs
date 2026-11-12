@@ -28,7 +28,6 @@ use crate::{dispatch, transport::types::AcpError};
 pub(crate) mod restore;
 #[path = "session_apps_capability.rs"]
 mod session_apps_capability;
-#[cfg(test)]
 pub(crate) use restore::cleanup_unpublished_restore;
 pub(crate) use restore::{
     assemble_for_recovery, handle_context, handle_fork_shared, handle_load, handle_load_shared,

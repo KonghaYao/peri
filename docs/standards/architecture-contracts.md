@@ -87,6 +87,12 @@
 - **Rule**：普通 thread load 必须在 producer 的同步入队边界取得引用计数 reservation，并持有到 `session/load` 提交或请求被丢弃；`ensure_session` 与所有 prompt 入口在选择 Stable session / 打开 prompt lease 前等待 reservation 清零。等待不得持有 lifecycle operation gate；Stable 决策或 `open_prompt` 必须在 reservation mutex 下线性化。send failure 不得把 guard 暴露给调用方，shutdown 必须能取消 in-flight load 并释放 reservation。compact replay 必须先 reserve load，再 drain buffered input，禁止依赖异步 consumer 调度顺序。
 - **Verify**：`cargo test -p peri-tui --lib load_reservation`、`cargo test -p peri-tui --lib test_failed_load_dispatch_releases_reservation`、`cargo test -p peri-tui --lib test_shutdown_cancels_inflight_load_and_releases_reservation`、`cargo test -p peri-tui --lib test_compact_turndone_reload`；人工检查 `ThreadLoadDispatcher::send`、`AcpTuiClient::open_prompt_after_session_loads` 与 consumer drop/cancel 分支。
 
+### ARC-ACP-SESSION-SWITCH-001
+
+- **Scope**：ACP connection、会话 setup/close/delete 与进入会话 recovery。
+- **Rule**：同一 ACP 连接默认表达会话切换关系，至多绑定一个由客户端 setup 的当前会话。`session/new|fork` 在已有当前会话时拒绝；`session/load|resume` 仅允许同 ID 复用，切换不同 ID 必须先成功 `session/close` 或 `session/delete` 当前 ID。setup 在只读 history 分流之后、声明校验与环境装配之前取得连接级同步 reservation；Vacant 只能有一个 Preparing，同 ID 复用不进入 Preparing，锁不得跨 await。setup 错误、取消、普通响应后处理错误与响应发送失败均不提交绑定；普通错误须撤销本请求半发布环境，发送失败由 transport terminal shutdown 收口。只有 setup 成功响应发送后提交当前 ID，只有匹配当前 ID 的 close/delete 成功响应发送后释放；关闭失败、发送失败或关闭其他 ID 均保留绑定。切换拒绝固定使用 `-32010` 与 `data.reason = "session_switch_requires_close"`，并发 setup 使用 `data.reason = "session_setup_in_progress"`。cursor/history window/body/child history 是只读浏览，不建立或改变绑定；内部 recovery child 不经过 wire gate。恢复 partition 只有存在 working child 时才读取 session tree。
+- **Verify**：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- session_switch`、`./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- connection`、`./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- recovery_wire`、`./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- history_page_wire` 与 `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- close_failure`；过滤结果必须命中非零目标用例。
+
 ### ARC-EVENT-001
 
 - **Scope**：v2 事件（`peri-acp-types/src/event_v2.rs`）、v1 `ExecutorEvent` 协议化载体、ACP 映射、TUI 通知。

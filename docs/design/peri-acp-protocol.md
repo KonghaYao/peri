@@ -35,6 +35,15 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 | `session/list` | `{ cwd? }` | `{ sessions: SessionInfo[] }` | 列出会话（可按 cwd 过滤） |
 | `session/rename` | `{ sessionId, title }` | `{ sessionId, title }` | 重命名会话并持久化标题 |
 
+同一 ACP 连接默认表示客户端的会话切换关系，并且至多绑定一个 setup 会话。连接已有当前
+会话时，`session/new|fork` 与指向不同 ID 的 `session/load|resume` 返回 `-32010`、
+`data.reason="session_switch_requires_close"`；客户端必须先成功 `session/close` 或
+`session/delete` 当前 ID。同 ID load/resume 保持允许并复用现有环境。并发 setup 在首个请求
+Preparing 时返回 `-32010`、`data.reason="session_setup_in_progress"`。绑定只在 setup 成功响应
+发送后提交，且只在匹配当前 ID 的 close/delete 成功响应发送后释放；处理失败或响应发送失败
+不改变绑定。带 cursor/history 的 `session/load`、`session/history/body` 与 child history 是
+只读浏览，不建立或切换连接绑定；恢复协调内部装配 child 也不经过该 wire gate。
+
 会话级 `mcpServers` 条目可通过 `_meta["peri.subscriptions"]` 声明 `subscriptions/listen`，
 形状与 `.mcp.json` 的 `subscriptions` 相同；HTTP 与 stdio 生效，非法值返回 `-32602`，
 `type: "acp"` 暂不支持。

@@ -1,5 +1,7 @@
 //! Receive loop and request-class dispatch; long-running work stays host-owned.
 
+mod notification;
+
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -8,9 +10,10 @@ use tokio_util::sync::CancellationToken;
 use super::diagnostics::ResponseDiagnostics;
 use super::session_endpoint::register_session_endpoint;
 use super::{
-    connection::ConnectionContext, dispatch_prompt_turn, extract_session_id, handle_notification,
-    handle_request_for_connection, history_page, history_window, mcp_apps, requests,
-    send_session_info_update, task_scope, AcpServerConfig, PromptLocks, SharedSessions,
+    connection::{ConnectionContext, SessionSetupPublication},
+    dispatch_prompt_turn, extract_session_id, handle_request_for_connection, history_page,
+    history_window, mcp_apps, requests, send_session_info_update, task_scope, AcpServerConfig,
+    PromptLocks, SharedSessions,
 };
 use crate::transport::types::{IncomingMessage, RequestId};
 
@@ -596,6 +599,18 @@ impl ServerLoop<'_> {
         } else {
             false
         };
+        // 只读历史已经返回；setup gate 必须早于声明校验和环境装配。
+        let mut setup_reservation = match connection
+            .lock()
+            .await
+            .reserve_session_setup_for(&method, &params)
+        {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                let _ = diagnostics.send(transport.as_ref(), Err(error)).await;
+                return;
+            }
+        };
         if matches!(
             method.as_str(),
             "session/new" | "session/fork" | "session/load" | "session/resume"
@@ -702,6 +717,13 @@ impl ServerLoop<'_> {
         } else {
             None
         };
+        let mut setup_publication = SessionSetupPublication::capture(
+            &method,
+            &params,
+            sessions,
+            setup_reservation.as_ref(),
+        )
+        .await;
         let mut result = if requests::session_io::handles(&method) {
             let prepared = {
                 let sessions = sessions.lock().await;
@@ -758,6 +780,9 @@ impl ServerLoop<'_> {
                 _ => None,
             };
             if let Some(error) = failure {
+                if let Some(publication) = setup_publication.take() {
+                    publication.rollback(cfg, sessions).await;
+                }
                 result = Err(error);
             }
         }
@@ -901,7 +926,18 @@ impl ServerLoop<'_> {
                 .await;
             }
         }
+        let response_succeeded = result.is_ok();
         let response_sent = diagnostics.send(transport.as_ref(), result).await.is_ok();
+        if response_sent && response_succeeded {
+            if let (Some(reservation), Some(session_id)) =
+                (setup_reservation.take(), setup_session_id.as_deref())
+            {
+                reservation.commit(session_id);
+            }
+            if let Some(session_id) = closed_session_id.as_deref() {
+                connection.lock().await.release_current_session(session_id);
+            }
+        }
         // 恢复的启动门：响应已发出才放行执行；发送失败则丢弃本次启动资格。
         match (response_sent, recovery_report.take()) {
             (true, Some(entered)) => self.recovery.launch(&entered.report).await,
@@ -948,72 +984,5 @@ impl ServerLoop<'_> {
                 );
             }
         }
-    }
-
-    async fn dispatch_notification(&self, method: String, params: Value) {
-        let cfg = self.cfg;
-        let sessions = self.sessions;
-        let cont_tx = self.cont_tx;
-        if method == "mcp/message" {
-            // client 宿主的 MCP server 反向下发的通知：按 serverId 路由到承载
-            // 会话的服务。就地 await（不 spawn）以保住与后续请求的相对次序，但只
-            // 在短锁内定位承载者——投递等待由对端决定，不得占着会话锁。
-            let routed = {
-                let registry = self.connection.lock().await.acp_mcp.clone();
-                let sessions = sessions.lock().await;
-                requests::acp_mcp::route_inbound(&registry, &sessions, &params)
-            };
-            match routed {
-                Ok((port, inbound)) => {
-                    if let Err(error) = port.notify(inbound).await {
-                        tracing::warn!(
-                            method,
-                            code = error.code,
-                            error = %error.message,
-                            "MCP over ACP 通知未能投递"
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        method,
-                        code = error.code,
-                        error = %error.message,
-                        "MCP over ACP 通知未能路由"
-                    );
-                }
-            }
-            return;
-        }
-        // `session/cancel` 是**轮次级**取消：只中断本轮的模型执行，**不触碰
-        // Apps 域**（设计 §2 / §4：App record 与已 dispatch 的调用不受 turn
-        // 取消影响）。会话级拆除走 `session/close`（见 `dispatch_request` 的
-        // `closed_session_id` 分支，那里才调用 `close_session`）。
-        // session/cancel 可能需要在锁外补发 continuation 请求
-        // （race 兜底：bg 结果已 route 为 Defer，但通知可能在 cancel
-        // 置位前被 scheduler 跳过）。unbounded send 虽不阻塞，仍统一
-        // 在释放 sessions 锁后发送，避免 notify 路径持锁触碰 scheduler。
-        let outcome = {
-            let mut sessions = sessions.lock().await;
-            handle_notification(&method, &params, &mut sessions, cfg).await
-        };
-        if let Some(req) = outcome.continuation {
-            if cont_tx.send(req).is_err() {
-                tracing::warn!(
-                    method,
-                    session_id = extract_session_id(&params, ""),
-                    "ACP continuation scheduling failed: channel closed"
-                );
-            }
-        }
-        // 用户 Stop 与模型配置变化的锁外持久化：停止意图先落库；占用快照失效写
-        // NULL。失败只记 error，不阻断取消/配置更新本身（设计 §5.4 / §2.2）。
-        super::notify::persist_notification_effects(
-            &method,
-            cfg,
-            outcome.stop_targets,
-            outcome.context_usage_invalidations,
-        )
-        .await;
     }
 }

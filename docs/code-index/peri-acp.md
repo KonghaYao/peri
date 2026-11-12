@@ -1,6 +1,6 @@
 # peri-acp 代码索引
 
-更新：2026-11-04
+更新：2026-11-12
 
 子会话只读历史入口是 `session/history/child` 与 `session/history/child/body`，实现见 `host/history_window/{child,child_display}.rs`。父会话只可读取 canonical 父链可达的后代 own 历史（最多 64 跳、检测环），不装载 child runtime；每个父会话只保留一个子历史 scope。分页与正文同时校验父结构代次、child 身份、固定尾部、snapshot、read ticket 与受众；正文投影为有界 `display_text`，不向客户端暴露 ProviderState、签名或未知内部字段。未知格式显式失败，随机正文偏移需从头扫描。回归见 `host/child_history_test.rs`、`child_display_test.rs`。
 
@@ -64,6 +64,13 @@ workspace 资源输入从本次选中 `ConfigSource` 的资源投影取关闭位
 
 ## 速查表
 
+
+连接级会话切换门位于 `host/connection.rs` 的 `ConnectionContext::reserve_session_setup_for` 与
+`SessionSetupReservation`：`server_loop.rs::dispatch_request` 在 history 只读分类返回之后、MCP
+声明校验和环境装配之前取得同步 reservation，setup 成功响应发送后提交当前 ID；匹配 ID 的
+close/delete 成功响应发送后释放。拒绝使用 `-32010` 与稳定 `data.reason`。通知分发已按职责移到
+`host/server_loop/notification.rs`。进入会话恢复仅在 partition 含 working child 时由
+`host/recovery/coordinator.rs` 读取整棵 session tree；内部 child 装配不经过 wire gate。
 
 ACP 出站错误诊断统一位于 `src/host/diagnostics.rs`：`ServerLoop` 的普通请求、prompt、MCP Apps、MCP over ACP、准入拒绝及生命周期锁失败均经 `ResponseDiagnostics::send` 记录方法、RPC ID、可用会话 ID、错误码与错误消息，再原样发送响应；内部错误为 ERROR，其余拒绝为 WARN，正常取消为 DEBUG。`notify.rs` 的会话信息、配置项和命令列表通知共用 `send_session_update` 记录投递失败，不记录请求参数、响应数据或通知内容。针对性回归：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- host::diagnostics`。
 
@@ -221,7 +228,7 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 | Host 任务所有权 | host/task_scope.rs | `HostTaskOwner` / `HostTaskSpawner`；生产 timeout driver + 测试 controlled phase driver |
 | 装配 | `host/assemble.rs` | `assemble_server_config`；`build_legacy_frozen_data` 按保存目录准备配置与插件输入；新建 MCP pool 在初始化前绑定 `ConfigSource` snapshot，host Langfuse 消费同快照的 observability；观测成功时安装指标出口，未配置时不安装、指标不落盘 |
 | stage 构建 | host/stage_builder.rs | `build_stage_context`：消费单一 `FrozenSessionData`，派生 frozen language/MetaHarness/date 与 Agent 装配输入，禁止从当轮 config 建第二事实源；frozen 中的项目指令正文来自 P4 内容准入期经 builtin `workspace` 实例读取的 `peri-instruction://workspace/{main|local}` 资源（`AgentsMdMiddleware` 为纯 adapter、不读盘） |
-| workflow 宿主面 | host/workflow_agent.rs + host/workflow_consumer.rs + host/requests/workflow.rs | 本地运行时路径（`create_session_workflow_chain` :235 经 `WorkflowAgentFactory` 端口装配 executor/runtime 链、`WorkflowTaskConsumer` 就绪屏障 + 订阅 `workflow://tasks`、`workflow_face_closed` 关闭集特例、`AcpServerConfig::workflow_middleware_factory`）按 `not(emscripten)` 门控：wasm 产物不打包本地 workflow 运行时，该目标不建链、不绑定；ACP 四 handler（`host/requests/workflow.rs`）经**会话池协议面**调用实例 `Workflow`/`WorkflowStatus`/`WorkflowKill`，不随目标门控（远端通路保留） |
+| workflow 宿主面 | host/workflow_agent.rs + host/workflow_consumer.rs + host/requests/workflow.rs | 本地运行时路径（`create_session_workflow_chain` 经 `WorkflowAgentFactory` 端口装配 executor/runtime 链、`WorkflowTaskConsumer` 就绪屏障 + 订阅 `workflow://tasks`、`workflow_face_closed` 关闭集特例、`AcpServerConfig::workflow_middleware_factory`）按 `not(emscripten)` 门控：wasm 产物不打包本地 workflow 运行时，该目标不建链、不绑定；ACP 四 handler（`host/requests/workflow.rs`）经**会话池协议面**调用实例 `Workflow`/`WorkflowStatus`/`WorkflowKill`，不随目标门控（远端通路保留） |
 | stdio 部署 | host/stdio/ | `run_acp_stdio`（`StdioInput` → `assemble_stdio_config` → `run_acp_server_with_sessions`，业务处理走统一宿主）；集成测试 `run_server_integration_test.rs`（initialize → session/new → 通知 wire 链路） |
 
 ### src/agent/（装配面薄壳）

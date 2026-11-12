@@ -31,7 +31,6 @@ mod fork_shared;
 #[path = "session_restore/load_shared.rs"]
 mod load_shared;
 pub(crate) use fork_shared::handle_fork_shared;
-#[cfg(test)]
 pub(crate) use load_shared::cleanup_unpublished_restore;
 pub(crate) use load_shared::{handle_load_shared, handle_resume_shared};
 

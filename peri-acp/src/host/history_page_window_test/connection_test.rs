@@ -491,6 +491,10 @@ async fn fork_wire_uses_the_shared_preparation_path() {
         .await
         .expect("create a fork source with frozen data");
     let source = created["sessionId"].as_str().expect("source id").to_owned();
+    client
+        .send_request("session/close", json!({ "sessionId": source }))
+        .await
+        .expect("close the current source before switching to the fork");
     let forked = client
         .send_request("session/fork", json!({ "sessionId": source }))
         .await

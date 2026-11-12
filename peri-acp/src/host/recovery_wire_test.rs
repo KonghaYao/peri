@@ -259,6 +259,27 @@ async fn idle_load_has_no_recovery_meta() {
     );
 }
 
+/// [回归测试] root-only working partition 不需要 child completion target，不得读取整树。
+#[tokio::test]
+async fn recovery_wire_root_only_load_skips_session_tree_query() {
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.set_working(&root).await;
+    crate::host::recovery::HostSessionRecovery::install_tree_query_probe(&root);
+    push_request(&harness, 2, "session/load", json!({"sessionId": root}));
+    run_server_loop(&harness).await;
+    let response = response_for(&harness, 2, "root-only load");
+    assert_eq!(
+        response["_meta"]["peri.recovery"]["recovered"],
+        json!([root])
+    );
+    assert_eq!(
+        crate::host::recovery::HostSessionRecovery::take_tree_query_count(&harness.thread_id,),
+        0,
+        "没有 working child 时不得调用 list_session_tree"
+    );
+}
+
 /// 8d. working load：status ok，recovered 列表给出实际注入提醒的 thread。
 #[tokio::test]
 async fn working_load_meta_reports_recovered_threads() {

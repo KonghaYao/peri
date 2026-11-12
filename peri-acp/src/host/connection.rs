@@ -1,4 +1,142 @@
+use std::sync::Arc;
+
 use peri_acp_types::PeriCaps;
+use serde_json::{json, Value};
+
+use super::{AcpServerConfig, SharedSessions};
+use crate::transport::types::AcpError;
+
+pub(crate) const SESSION_SWITCH_REQUIRED_REASON: &str = "session_switch_requires_close";
+pub(crate) const SESSION_SETUP_IN_PROGRESS_REASON: &str = "session_setup_in_progress";
+
+/// 会话 setup 对连接绑定的影响。
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SessionSetupRequest<'a> {
+    /// `session/new|fork` 会建立新身份，只能从空连接开始。
+    CreatesSession,
+    /// `session/load|resume` 复用请求里的身份；缺失 ID 仍先占 setup reservation，
+    /// 后续声明校验会返回原有的 invalid params。
+    RestoresSession(Option<&'a str>),
+}
+
+#[derive(Debug)]
+enum SessionSwitchPhase {
+    Vacant,
+    Preparing,
+    Current(String),
+    Closed,
+}
+
+#[derive(Debug)]
+struct SessionSwitchState {
+    generation: u64,
+    phase: SessionSwitchPhase,
+}
+
+impl Default for SessionSwitchState {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            phase: SessionSwitchPhase::Vacant,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionSetupReservationKind {
+    Preparing,
+    Reuse,
+}
+
+/// setup 准入票据：失败、取消或任意 early return 都由 Drop 回滚本代 Preparing。
+///
+/// guard 不持有 mutex；generation 使旧请求不能覆盖之后的 close/setup 状态。
+#[derive(Debug)]
+pub(crate) struct SessionSetupReservation {
+    state: Arc<parking_lot::Mutex<SessionSwitchState>>,
+    generation: u64,
+    kind: SessionSetupReservationKind,
+    finished: bool,
+}
+
+impl SessionSetupReservation {
+    pub(crate) fn commits_new_binding(&self) -> bool {
+        self.kind == SessionSetupReservationKind::Preparing
+    }
+
+    /// 只有 setup 成功响应已经发送后调用。
+    pub(crate) fn commit(mut self, session_id: &str) {
+        if self.kind == SessionSetupReservationKind::Preparing {
+            let mut state = self.state.lock();
+            if state.generation == self.generation
+                && matches!(state.phase, SessionSwitchPhase::Preparing)
+            {
+                state.phase = SessionSwitchPhase::Current(session_id.to_owned());
+            }
+        }
+        self.finished = true;
+    }
+}
+
+impl Drop for SessionSetupReservation {
+    fn drop(&mut self) {
+        if self.finished || self.kind != SessionSetupReservationKind::Preparing {
+            return;
+        }
+        let mut state = self.state.lock();
+        if state.generation == self.generation
+            && matches!(state.phase, SessionSwitchPhase::Preparing)
+        {
+            state.generation = state.generation.wrapping_add(1);
+            state.phase = SessionSwitchPhase::Vacant;
+        }
+    }
+}
+
+/// setup handler 已成功、响应后处理尚未完成时的发布前事实。
+pub(crate) struct SessionSetupPublication {
+    session_id: String,
+}
+
+impl SessionSetupPublication {
+    pub(crate) async fn capture(
+        method: &str,
+        params: &Value,
+        sessions: &SharedSessions,
+        reservation: Option<&SessionSetupReservation>,
+    ) -> Option<Self> {
+        if method != "session/load"
+            || !reservation.is_some_and(SessionSetupReservation::commits_new_binding)
+        {
+            return None;
+        }
+        let session_id = params.get("sessionId")?.as_str()?.to_owned();
+        let states = sessions.lock().await;
+        if states.contains_key(&session_id) {
+            return None;
+        }
+        Some(Self { session_id })
+    }
+
+    /// 普通 error response 没有 terminal shutdown 兜底，必须撤销本次新发布的环境。
+    pub(crate) async fn rollback(self, cfg: &AcpServerConfig, sessions: &SharedSessions) {
+        let published = sessions.lock().await.remove(&self.session_id);
+        let Some(published) = published else {
+            return;
+        };
+        let environment = published.environment;
+        super::requests::session_lifecycle::cleanup_unpublished_restore(
+            cfg,
+            &self.session_id,
+            environment,
+        )
+        .await;
+    }
+}
+
+fn session_switch_error(reason: &'static str, message: &'static str) -> AcpError {
+    AcpError::new(-32010, message).with_data(json!({ "reason": reason }))
+}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,7 +157,8 @@ pub(crate) struct ConnectionContext {
     /// 「**当前连接**声明了什么」。需要按连接分流的判定（历史分页等）读这里。
     negotiated_caps: Option<PeriCaps>,
     apps_enabled: bool,
-    pub(crate) acp_mcp: std::sync::Arc<peri_acp_types::acp_mcp::AcpMcpRegistry>,
+    session_switch: Arc<parking_lot::Mutex<SessionSwitchState>>,
+    pub(crate) acp_mcp: Arc<peri_acp_types::acp_mcp::AcpMcpRegistry>,
     cancellation: tokio_util::sync::CancellationToken,
 }
 
@@ -31,6 +170,7 @@ impl ConnectionContext {
             initialized: false,
             negotiated_caps: None,
             apps_enabled,
+            session_switch: Default::default(),
             acp_mcp: Default::default(),
             cancellation: tokio_util::sync::CancellationToken::new(),
         }
@@ -115,8 +255,83 @@ impl ConnectionContext {
             initialized: self.initialized,
             negotiated_caps: self.negotiated_caps.clone(),
             apps_enabled: self.apps_enabled,
+            session_switch: Arc::clone(&self.session_switch),
             acp_mcp: self.acp_mcp.clone(),
             cancellation: self.cancellation.clone(),
+        }
+    }
+
+    pub(crate) fn reserve_session_setup_for(
+        &self,
+        method: &str,
+        params: &Value,
+    ) -> Result<Option<SessionSetupReservation>, AcpError> {
+        let request = match method {
+            "session/new" | "session/fork" => SessionSetupRequest::CreatesSession,
+            "session/load" | "session/resume" => SessionSetupRequest::RestoresSession(
+                params.get("sessionId").and_then(Value::as_str),
+            ),
+            _ => return Ok(None),
+        };
+        self.reserve_session_setup(request).map(Some)
+    }
+
+    pub(crate) fn reserve_session_setup(
+        &self,
+        request: SessionSetupRequest<'_>,
+    ) -> Result<SessionSetupReservation, AcpError> {
+        let mut state = self.session_switch.lock();
+        let kind = match &state.phase {
+            SessionSwitchPhase::Closed => {
+                return Err(AcpError::new(-32800, "request cancelled"));
+            }
+            SessionSwitchPhase::Preparing => {
+                return Err(session_switch_error(
+                    SESSION_SETUP_IN_PROGRESS_REASON,
+                    "Another session setup is in progress",
+                ));
+            }
+            SessionSwitchPhase::Current(current) => match request {
+                SessionSetupRequest::RestoresSession(Some(requested)) if requested == current => {
+                    SessionSetupReservationKind::Reuse
+                }
+                SessionSetupRequest::CreatesSession
+                | SessionSetupRequest::RestoresSession(None | Some(_)) => {
+                    return Err(session_switch_error(
+                        SESSION_SWITCH_REQUIRED_REASON,
+                        "Close the current session before switching sessions",
+                    ));
+                }
+            },
+            SessionSwitchPhase::Vacant => {
+                state.generation = state.generation.wrapping_add(1);
+                state.phase = SessionSwitchPhase::Preparing;
+                SessionSetupReservationKind::Preparing
+            }
+        };
+        Ok(SessionSetupReservation {
+            state: Arc::clone(&self.session_switch),
+            generation: state.generation,
+            kind,
+            finished: false,
+        })
+    }
+
+    /// 成功响应已发送的 close/delete 只释放它实际关闭的当前会话。
+    pub(crate) fn release_current_session(&self, session_id: &str) {
+        let mut state = self.session_switch.lock();
+        if matches!(&state.phase, SessionSwitchPhase::Current(current) if current == session_id) {
+            state.generation = state.generation.wrapping_add(1);
+            state.phase = SessionSwitchPhase::Vacant;
+        }
+    }
+
+    #[cfg(test)]
+    fn current_session_id(&self) -> Option<String> {
+        let state = self.session_switch.lock();
+        match &state.phase {
+            SessionSwitchPhase::Current(session_id) => Some(session_id.clone()),
+            _ => None,
         }
     }
 
@@ -126,6 +341,10 @@ impl ConnectionContext {
 
     pub(crate) fn begin_close(&mut self) {
         self.lifecycle = ConnectionLifecycle::Closing;
+        let mut state = self.session_switch.lock();
+        state.generation = state.generation.wrapping_add(1);
+        state.phase = SessionSwitchPhase::Closed;
+        drop(state);
         self.cancellation.cancel();
     }
 
