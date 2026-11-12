@@ -461,7 +461,7 @@ fn parse_output(output: &str) -> serde_json::Value {
 }
 
 /// 两 RFC3339 时间差（毫秒，负差按 0）；任一不可解析时返回 None。
-fn elapsed_ms(start: &str, end: &str) -> Option<u64> {
+pub(super) fn elapsed_ms(start: &str, end: &str) -> Option<u64> {
     let start = chrono::DateTime::parse_from_rfc3339(start).ok()?;
     let end = chrono::DateTime::parse_from_rfc3339(end).ok()?;
     Some(end.signed_duration_since(start).num_milliseconds().max(0) as u64)

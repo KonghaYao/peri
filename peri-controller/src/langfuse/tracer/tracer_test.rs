@@ -249,6 +249,7 @@ async fn test_unresolved_llm_parent_is_preserved_until_turn_end_fallback() {
     // 追踪器只搬运不透明来源；这里直接登记一个"已 start 但归属不可解析"的 generation。
     t.generation
         .on_llm_start("unregistered-child", 0, GenerationInput::Rejected);
+    t.on_ai_reasoning_chunk("unregistered-child", "think");
 
     t.on_llm_end(
         "unregistered-child",
@@ -305,6 +306,14 @@ async fn test_unresolved_llm_parent_is_preserved_until_turn_end_fallback() {
             .and_then(|metadata| metadata.get("incomplete")),
         Some(&serde_json::json!(false))
     );
+    assert!(
+        generation.completion_start_time.is_some(),
+        "兜底路径不得丢失首个 reasoning 建立起的 completion 起点"
+    );
+    let meta = generation.metadata.as_ref().expect("应携带 metadata");
+    assert_eq!(meta["completion_start_source"], "reasoning_chunk");
+    assert!(meta["first_reasoning_ms"].as_u64().is_some());
+    assert_eq!(meta["first_visible_text_ms"], serde_json::Value::Null);
 }
 
 #[tokio::test]

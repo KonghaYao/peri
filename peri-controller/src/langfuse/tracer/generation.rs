@@ -59,6 +59,8 @@ pub(crate) struct AbandonedGeneration {
     pub step: usize,
     pub gen_id: String,
     pub start_time: String,
+    /// 首个推理分片时间；兜底关闭时仍须保留，不能因走 fallback 丢失。
+    pub completion_start_time: Option<String>,
     pub input: GenerationInput,
     pub retry_metadata: Option<serde_json::Value>,
     pub terminal: Option<PendingTerminalState>,
@@ -212,6 +214,7 @@ impl GenerationTracker {
                     .map(|retries| build_retry_metadata(&retries));
                 let gen_id = cached.gen_id.clone();
                 let start_time = cached.start_time.clone();
+                let completion_start_time = cached.completion_start_time;
                 let input = cached.input;
                 let terminal = self.pending_terminal.remove(&(agent_id.clone(), step));
                 AbandonedGeneration {
@@ -219,6 +222,7 @@ impl GenerationTracker {
                     step,
                     gen_id,
                     start_time,
+                    completion_start_time,
                     input,
                     retry_metadata,
                     terminal,

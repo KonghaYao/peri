@@ -256,8 +256,14 @@ async fn abandoned_generation_hands_out_source_and_retry_metadata_once() {
     let frozen = freeze(&messages, &tools);
     tracker.on_llm_start("child", 3, frozen.input);
     tracker.on_llm_retrying("child", 3, 1, 2, 20, "private provider body");
+    tracker.mark_completion_start("child", "2026-07-14T10:00:01Z".to_string());
     let abandoned = tracker.take_all_active();
     assert_eq!(abandoned.len(), 1);
+    assert_eq!(
+        abandoned[0].completion_start_time.as_deref(),
+        Some("2026-07-14T10:00:01Z"),
+        "放弃的 generation 仍应保留 completion 起点"
+    );
     assert!(
         matches!(&abandoned[0].input, GenerationInput::Frozen(_)),
         "放弃的 generation 必须交出已冻结来源"
