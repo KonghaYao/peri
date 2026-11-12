@@ -53,20 +53,25 @@ pub(crate) fn skill_registry_unwired_message(name: &str) -> String {
 /// （L2：不再暴露 `before_agent may not have run` 之类的装配细节）。
 pub(crate) fn skill_catalog_unavailable_message() -> String {
     "The skill catalog is not available in this session (no skill provider is connected), \
-     so skills cannot be discovered or loaded. Continue without skills, or start the session \
-     with a Workspace connection that serves skills."
+     so skills cannot be discovered or loaded. Restore a Workspace connection that serves skills. \
+     This failure does not end an active mode or waive user requirements. Keep skill-dependent \
+     work blocked unless an applicable explicit user instruction permits a fallback; unrelated \
+     permitted work may continue."
         .to_string()
 }
 
 /// 技能目录尚未就绪（发现任务未收口）：**不**把空投影当空目录（L2）。
 pub(crate) fn skill_catalog_initializing_message() -> String {
     "The skill catalog is still initializing for this session (skill discovery is in \
-     progress), so the catalog is not ready yet. Retry later, or continue without skills."
+     progress), so the catalog is not ready yet. Retry after discovery completes. This failure \
+     does not end an active mode or waive user requirements. Keep skill-dependent work blocked \
+     unless an applicable explicit user instruction permits a fallback; unrelated permitted \
+     work may continue."
         .to_string()
 }
 
 pub(crate) fn skill_catalog_failed_message() -> String {
-    "Some skill providers could not be read; the catalog may be incomplete. Use available skills, continue without skills, or reconnect the provider to reload the catalog.".to_string()
+    "Some skill providers could not be read; the catalog may be incomplete. Reconnect the failed provider to reload the catalog; available skills remain usable. This failure does not end an active mode or waive user requirements. Keep work dependent on a missing skill blocked unless an applicable explicit user instruction permits a fallback; unrelated permitted work may continue.".to_string()
 }
 
 /// 名称未命中（含别名/全名/裸名全部形态）。

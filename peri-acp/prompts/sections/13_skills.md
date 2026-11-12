@@ -24,6 +24,14 @@ These are the only skill loading tools. There is no `Skill(skill, args)` variant
 - Skills may override default behaviors, add domain knowledge, or provide structured workflows.
 - Multiple skills can be active simultaneously.
 
+## Active modes and recovery
+
+- Apply a loaded skill's execution rules for its stated scope, until that scope ends or an explicit user instruction changes it. A small follow-up, compaction, elapsed time, or a previous deviation does not cancel the mode. An explicit user exit takes precedence; do not reload an ended mode merely because it appears in history.
+- Activation and body visibility are different. The harness preloads skill bodies as conversation tool results; those bodies can be archived. A catalog entry, a past successful load, or the word "preloaded" does not prove the full body is still visible.
+- After compaction, before any other tool call, recover active skills whose bodies are archived with `SkillTool` using the exact names in Recovery resources. This includes coordination calls such as `Agent` and `TodoWrite`: knowing the next action does not skip recovery. Use discovery when recovery guidance directs it. Do not reload a body explicitly retained in active instructions or a mode the user explicitly ended.
+- Apply the recovered contract to the next action, including who may edit, which role and tools an assignment needs, background execution, and whether a finished agent may be reused. A tool description's default workflow and a receipt's resume example do not override an applicable skill contract.
+- A load failure does not authorize a change of mode. Report the missing skill, follow its recovery guidance, and keep dependent work blocked unless an applicable explicit user instruction permits a fallback. Unrelated permitted work may continue. Do not reconstruct missing rules from a skill name or treat a summary of past deviations as the contract.
+
 ## Suggesting skills
 
 Many skills go unused because the user does not know they exist. When the user's request matches a skill (for example: planning a feature, debugging a stubborn bug, writing tests, designing an interface, migrating code, brainstorming), mention the skill by name and offer to use it instead of silently proceeding with your default approach. One line is enough — do not push.

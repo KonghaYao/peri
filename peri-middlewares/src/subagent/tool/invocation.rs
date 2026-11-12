@@ -4,6 +4,7 @@ use peri_agent::tools::{EffectiveToolError, EffectiveToolErrorCode};
 
 pub(super) struct InvocationArgs {
     pub(super) resume_thread_id: Option<String>,
+    pub(super) send_only: bool,
     pub(super) prompt: Option<String>,
     pub(super) subagent_type: Option<String>,
     pub(super) model: Option<String>,
@@ -63,6 +64,36 @@ impl InvocationArgs {
             .get("prompt")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let send_only = match input.get("send_only") {
+            None => false,
+            Some(serde_json::Value::Bool(value)) => *value,
+            Some(_) => {
+                return Err(EffectiveToolError::new(
+                    EffectiveToolErrorCode::InvalidInput,
+                    "send_only must be a boolean",
+                )
+                .into());
+            }
+        };
+        if send_only {
+            if resume_thread_id.is_none() {
+                return Err(EffectiveToolError::new(
+                    EffectiveToolErrorCode::InvalidInput,
+                    "send_only requires a valid resume_thread_id",
+                )
+                .into());
+            }
+            if prompt
+                .as_deref()
+                .is_none_or(|prompt| prompt.trim().is_empty())
+            {
+                return Err(EffectiveToolError::new(
+                    EffectiveToolErrorCode::InvalidInput,
+                    "send_only requires a non-empty prompt",
+                )
+                .into());
+            }
+        }
         let subagent_type = input
             .get("subagent_type")
             .and_then(|v| v.as_str())
@@ -85,6 +116,7 @@ impl InvocationArgs {
 
         Ok(Self {
             resume_thread_id,
+            send_only,
             prompt,
             subagent_type,
             model,

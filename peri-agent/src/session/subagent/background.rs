@@ -178,6 +178,9 @@ pub(super) async fn spawn_background_subagent(
         ticket: Arc::clone(&registration_slot),
         armed: true,
     };
+    // 后台任务 future 持有 `session_resources`；放行前的 Working 写入与失败恢复
+    // 需要同一句柄，先克隆一份留在本函数。
+    let work_state_resources = session_resources.clone();
     let execution = async move {
         let mut unstarted_registration = unstarted_registration;
         let mut cleanup_guard = cleanup_guard;
@@ -215,20 +218,23 @@ pub(super) async fn spawn_background_subagent(
         }
         unstarted_registration.armed = false;
         // 执行已获准开跑：先提交续跑意图再进入 loop，进程若在此刻退出，下次进入仍
-        // 能看出这个 child 需要继续。辅助写失败不阻断执行。
-        if let Some(resources) = session_resources.as_deref() {
-            if let Err(error) = resources
-                .set_work_state(
-                    &ThreadId::from(child_thread_id_for_task.clone()),
-                    WorkState::Working,
-                )
-                .await
-            {
-                tracing::warn!(
-                    thread_id = %child_thread_id_for_task,
-                    %error,
-                    "subagent work state write failed"
-                );
+        // 能看出这个 child 需要继续。resume 已在放行前写过 Working（失败即拒绝启动），
+        // 这里只给其余后台启动补写；辅助写失败不阻断执行。
+        if !resuming {
+            if let Some(resources) = session_resources.as_deref() {
+                if let Err(error) = resources
+                    .set_work_state(
+                        &ThreadId::from(child_thread_id_for_task.clone()),
+                        WorkState::Working,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        thread_id = %child_thread_id_for_task,
+                        %error,
+                        "subagent work state write failed"
+                    );
+                }
             }
         }
         let started_at = peri_time::monotonic_now();
@@ -728,16 +734,42 @@ pub(super) async fn spawn_background_subagent(
         Some(claim) => Some(claim.release().await?),
         None => None,
     };
+    // 显式 resume 的认领只写 Active，不会解除之前的 Stopped。Working 必须在本函数
+    // 报告成功前落库：否则进程在 worker 补写前退出会留下 Active + Stopped，冷恢复
+    // 按设计跳过它，已接纳的 prompt 不再推进。写失败时 drop handoff 让认领 worker
+    // 按未接收补偿回原状态，后台任务也不放行。
+    if resuming {
+        let resources = work_state_resources
+            .as_deref()
+            .ok_or("resume background start requires session resources")?;
+        if let Err(error) = resources
+            .set_work_state(&ThreadId::from(child_thread_id.clone()), WorkState::Working)
+            .await
+        {
+            tracing::error!(
+                thread_id = %child_thread_id,
+                %error,
+                "resume work state write failed; background start rejected"
+            );
+            return Err(format!("resume work state write failed: {error}").into());
+        }
+    }
     // 注册成功：先注册运行时（active_agents，与任务内 guard 的 deregister 配对），
     // 再放行包装任务继续执行。
     runtime_started.store(true, Ordering::Release);
     if let Some(register) = &register_runtime {
         register(child_thread_id.clone(), cancel_token, "independent".into());
     }
-    confirm_background_start(&startup_alive, reg_tx, confirmed_tx, || match handoff {
-        Some(handoff) => handoff.accept(),
-        None => Ok(()),
-    })?;
+    let confirmation =
+        confirm_background_start(&startup_alive, reg_tx, confirmed_tx, || match handoff {
+            Some(handoff) => handoff.accept(),
+            None => Ok(()),
+        });
+    if let Err(error) = confirmation {
+        // 补偿只有认领 handle 一个所有者：drop handoff 后 worker 在同一门禁内
+        // 恢复状态与工作意图；这里再写一次会与新任务竞争并可能覆盖其 Working。
+        return Err(error.into());
+    }
     registration.ticket = None;
     registration.runtime_cleanup = None;
 

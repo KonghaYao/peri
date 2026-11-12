@@ -75,16 +75,19 @@ impl SessionActivation {
             .fetch_max(watermark, Ordering::AcqRel);
     }
 
-    pub(crate) async fn can_activate(&self, queue: &MessageQueue) -> bool {
+    /// 是否允许自动激活。
+    ///
+    /// 查询失败不能折叠成「没有工作」：那会消耗一次已经消费的唤醒。调用方必须保留
+    /// 重查责任（listener 有界重试），错误本身作为可观察诊断返回。
+    pub(crate) async fn can_activate(&self, queue: &MessageQueue) -> Result<bool, anyhow::Error> {
         if !self.is_allowed() {
-            return false;
+            return Ok(false);
         }
         let watermark = self.failed_input_watermark.lock().clone();
-        self.is_allowed()
-            && queue
-                .has_ensure_processing_after(&watermark)
-                .await
-                .unwrap_or(false)
+        if !self.is_allowed() {
+            return Ok(false);
+        }
+        queue.has_ensure_processing_after(&watermark).await
     }
 
     /// Ready 结果是否构成新的、允许自动尝试的工作来源。

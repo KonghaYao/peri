@@ -175,6 +175,9 @@ struct ResultRecord {
     /// 规范提醒是否已经成功写入（或确认已存在）。挂起恢复时据此区分
     /// “仍由队列负责”和“可进入下一次请求”。
     canonical_committed: bool,
+    /// monitor ALERT 的重投幂等由 MQ 历史（`AlreadyHandedOff`）保证，
+    /// 覆盖后无需保留回执，否则长驻 monitor 会话的 `covered` 会单调增长。
+    retires_on_cover: bool,
     attempt_id: Option<String>,
     request_id: Option<String>,
     diagnostic: Option<AsyncResultDiagnostic>,
@@ -285,6 +288,7 @@ impl AsyncResultMailbox {
                 admission_seq,
                 state: AsyncResultState::Queued,
                 canonical_committed: false,
+                retires_on_cover: retires_on_cover(&source, reminder),
                 attempt_id: None,
                 request_id: None,
                 diagnostic: None,
@@ -403,6 +407,7 @@ impl AsyncResultMailbox {
                 admission_seq,
                 state: rebuilt_state,
                 canonical_committed: true,
+                retires_on_cover: retires_on_cover(&source, reminder),
                 attempt_id: None,
                 request_id: None,
                 diagnostic: None,
@@ -580,7 +585,9 @@ impl AsyncResultMailbox {
                 continue;
             };
             state.order.retain(|existing| existing != id);
-            state.covered.insert(*id, record.fingerprint);
+            if !record.retires_on_cover {
+                state.covered.insert(*id, record.fingerprint);
+            }
             covered += 1;
         }
         if covered > 0 {
@@ -766,6 +773,15 @@ fn reminder_fingerprint(reminder: &TrustedSystemReminder, source: &MessageSource
         .unwrap_or_else(|_| reminder.as_reminder().body.as_bytes().to_vec());
     let digest = Sha256::digest(encoded);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// monitor ALERT 覆盖后不保留指纹回执：它的投递身份由 MQ 历史保证幂等，
+/// 且长驻 monitor 会话会持续产生新身份。仅识别结构化的来源与类型，不做文本匹配。
+fn retires_on_cover(source: &MessageSource, reminder: &TrustedSystemReminder) -> bool {
+    let reminder = reminder.as_reminder();
+    source == &MessageSource::McpNotification
+        && reminder.source.0 == "monitor"
+        && reminder.kind == "alert_matched"
 }
 
 fn task_identity(reminder: &TrustedSystemReminder) -> (String, Option<String>) {

@@ -19,7 +19,7 @@ use peri_acp_types::recovery::{
 };
 use peri_acp_types::session::MessageQueue;
 use peri_acp_types::session_resources::SessionResources;
-use peri_acp_types::thread::{ThreadId, WorkState};
+use peri_acp_types::thread::{ThreadId, ThreadMeta, WorkState};
 use tokio::sync::Mutex;
 
 use super::super::{AcpServerConfig, SharedSessions};
@@ -87,6 +87,17 @@ enum ThreadOutcome {
 pub(crate) struct EnteredRecovery {
     pub(crate) report: RecoveryReport,
     admissions: Vec<(ThreadId, AdmittedRecovery)>,
+}
+
+/// 恢复准入使用的工作意图：终态 thread 的 `working` 只是旧执行没写收尾，不是待继续。
+///
+/// 终态由领域结果提交（`Done`/`Cancelled`/`Error`），恢复只续跑仍 `Active` 的崩溃执行。
+fn effective_work_state(meta: &ThreadMeta) -> WorkState {
+    if meta.agent_status.is_terminal() {
+        WorkState::Idle
+    } else {
+        meta.work_state
+    }
 }
 
 impl HostSessionRecovery {
@@ -233,7 +244,7 @@ impl HostSessionRecovery {
                 }));
             }
         };
-        if meta.work_state != WorkState::Working {
+        if effective_work_state(&meta) != WorkState::Working {
             return Ok(ThreadOutcome::Skipped(RecoverySkipReason::Idle));
         }
 
@@ -279,7 +290,7 @@ impl HostSessionRecovery {
                 return ThreadOutcome::Skipped(RecoverySkipReason::AssemblyFailed);
             }
         };
-        match meta.work_state {
+        match effective_work_state(&meta) {
             WorkState::Working => {}
             WorkState::Idle => return ThreadOutcome::Skipped(RecoverySkipReason::Idle),
             WorkState::Stopped => return ThreadOutcome::Skipped(RecoverySkipReason::Stopped),
@@ -309,7 +320,7 @@ impl HostSessionRecovery {
                 return ThreadOutcome::Skipped(RecoverySkipReason::AssemblyFailed);
             }
         };
-        match current.work_state {
+        match effective_work_state(&current) {
             WorkState::Working => {}
             WorkState::Idle => return ThreadOutcome::Skipped(RecoverySkipReason::Idle),
             WorkState::Stopped => return ThreadOutcome::Skipped(RecoverySkipReason::Stopped),

@@ -8,7 +8,7 @@
 //! 自己保证（见 `docs/design/thread-mq.md` §5.4）。
 
 use peri_acp_types::session::{
-    MqEntry, MqFilter, MqReceiveItemOutcome, MqReceiveStatus, MqWatermark,
+    MqEntry, MqFilter, MqHeader, MqReceiveItemOutcome, MqReceiveStatus, MqWatermark,
 };
 use peri_acp_types::session_resources::SessionResourceResult;
 use peri_acp_types::store::{deserialize_persisted_payload, serialize_persisted_payload};
@@ -130,6 +130,37 @@ pub(in crate::sessions) struct RawMqRow<'a> {
     pub policy_json: &'a str,
     pub payload_json: &'a str,
     pub original_draft: Option<&'a str>,
+}
+
+/// 控制面行的文本形态：没有正文列。
+pub(in crate::sessions) struct RawMqHeader<'a> {
+    pub id: &'a str,
+    pub enqueued_at: &'a str,
+    pub kind: &'a str,
+    pub source: &'a str,
+    pub policy_json: &'a str,
+}
+
+/// 文本行 → 控制面事实；不接触 `payload_json`。
+pub(in crate::sessions) fn decode_header(row: RawMqHeader<'_>) -> SessionResourceResult<MqHeader> {
+    let kind = serde_json::from_value(serde_json::Value::String(row.kind.to_owned()))
+        .map_err(|_| corrupt("MQ row has an unknown message kind"))?;
+    let source = serde_json::from_value(serde_json::Value::String(row.source.to_owned()))
+        .map_err(|_| corrupt("MQ row has an unknown message source"))?;
+    let policy = serde_json::from_str(row.policy_json)
+        .map_err(|_| corrupt("MQ row has an unreadable message policy"))?;
+    let id = row
+        .id
+        .parse::<uuid::Uuid>()
+        .map(peri_acp_types::messages::MessageId::from)
+        .map_err(|_| corrupt("MQ row has an invalid message id"))?;
+    Ok(MqHeader {
+        id,
+        enqueued_at: row.enqueued_at.to_owned(),
+        kind,
+        source,
+        policy,
+    })
 }
 
 /// 文本行 → 领域事实。任何一块解释不了都按损坏失败关闭：MQ 是待发事实的唯一来源，

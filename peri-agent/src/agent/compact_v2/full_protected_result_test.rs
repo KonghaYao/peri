@@ -324,6 +324,51 @@ async fn async_result_full_compact_archives_covered_result() {
         .any(|message| message.content().contains(marker)));
 }
 
+/// monitor ALERT 覆盖后既不受保护，也不留下永久回执；Full Compact 释放正文引用。
+#[tokio::test]
+async fn monitor_alert_full_compact_releases_covered_reminder_without_receipt() {
+    use peri_acp_types::monitor::{monitor_alert_delivery_id, monitor_alert_reminder};
+    use peri_acp_types::session::MessageSource;
+
+    let monitor_id = "monitor-T04-full";
+    let id = monitor_alert_delivery_id(monitor_id, 1);
+    let reminder = monitor_alert_reminder(monitor_id, Some("webots"), 1, Some(1)).unwrap();
+    let mailbox = crate::session::async_result_mailbox::AsyncResultMailbox::new("s", "t");
+    mailbox
+        .mark_canonical_ready(id, &reminder, MessageSource::McpNotification, None)
+        .unwrap();
+    let receipt = mailbox
+        .capture_request("attempt-monitor", "request-monitor", &[id])
+        .expect("请求必须绑定 receipt");
+    assert_eq!(mailbox.cover_after_commit(&receipt, None).unwrap(), 1);
+    assert!(mailbox.protected_snapshot().is_empty());
+    assert!(
+        mailbox.covered_is_empty(),
+        "covered monitor alerts must not leave a permanent receipt"
+    );
+
+    let (dir, mut transcript) = protected_history(&reminder, id).await;
+    let result = full_compact_inner_with_protected(
+        &mut transcript,
+        Some(&FullLifecycleModel),
+        &CompactConfig::default(),
+        dir.path().to_str().unwrap(),
+        &mailbox.protected_snapshot(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.affected_count, 3);
+    assert!(
+        transcript.get(id).is_none(),
+        "Full must release the covered monitor reminder body"
+    );
+    assert!(
+        mailbox.covered_is_empty(),
+        "Full Compact must not revive a covered receipt"
+    );
+}
+
 /// [T13] 只剩 System 与受保护结果：明确 no-op，不调用摘要模型、不反复 Full。
 #[tokio::test]
 async fn async_result_full_compact_noop_when_only_protected_facts_remain() {

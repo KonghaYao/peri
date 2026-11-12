@@ -646,6 +646,16 @@ fn spawn_acp_bridge_inner(
                                 &epoch_event.active_session_id,
                                 just_reset,
                             ) {
+                                if let AcpEventData::HistoryWindowPageLoaded { context, .. } =
+                                    &epoch_event.event
+                                {
+                                    // 页事件被会话过滤丢弃后不会再进入合并/结算路径，
+                                    // 必须归还 consumer 预留；否则当前窗口的 open 会
+                                    // 一直被 PendingMerge 拒绝。
+                                    crate::kit::history_page_consumer::abandon_window_request(
+                                        &context.request_id,
+                                    );
+                                }
                                 tracing::debug!(
                                     event_sid = %epoch_event.active_session_id,
                                     state_sid = %state.active_session_id,

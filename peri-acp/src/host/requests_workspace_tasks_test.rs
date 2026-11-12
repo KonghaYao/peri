@@ -137,18 +137,20 @@ async fn session_local_workspace_tasks_reach_acp_snapshot_and_live_events() {
     .await
     .unwrap();
     let id = created["sessionId"].as_str().unwrap();
-    let pool = sessions[id]
-        .environment
-        .as_ref()
-        .unwrap()
-        .cfg
-        .mcp_pool
-        .as_ref()
-        .unwrap()
-        .clone()
-        .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
-        .ok()
-        .unwrap();
+    let pool = unsafe {
+        sessions[id]
+            .environment
+            .as_ref()
+            .unwrap()
+            .cfg
+            .mcp_pool
+            .as_ref()
+            .unwrap()
+            .clone()
+            .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
+    }
+    .ok()
+    .unwrap();
     let initial_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
         if transport

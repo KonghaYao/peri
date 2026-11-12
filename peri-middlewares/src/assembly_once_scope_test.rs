@@ -83,19 +83,22 @@ async fn once_scope_is_per_assembled_chain_not_session() {
 
     // 两次"prompt"：生产路径每轮 prompt 调 `build_agent` → `assemble` 一次。
     for prompt in 0..2 {
-        let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+        let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
         assert!(
             out.chain.names().contains(&"SubAgentMiddleware"),
             "第 {prompt} 轮装配链上必须有 SubAgentMiddleware"
         );
 
         // 子 agent 生命周期路径：链上的 SubAgentMiddleware → build_tool（= collect_tools）。
-        let subagent_mw = Arc::clone(
-            out.subagent_mw
-                .as_ref()
-                .expect("非空 hook_groups 必须装配 SubAgentMiddleware"),
-        )
-        .downcast_arc::<SubAgentMiddleware>()
+        // SAFETY: SubAgentMiddleware 的 as_any 返回 self。
+        let subagent_mw = unsafe {
+            Arc::clone(
+                out.subagent_mw
+                    .as_ref()
+                    .expect("非空 hook_groups 必须装配 SubAgentMiddleware"),
+            )
+            .downcast_arc::<SubAgentMiddleware>()
+        }
         .ok()
         .expect("链上的具体 SubAgentMiddleware");
         let tool = subagent_mw.build_tool(&ctx.cwd);
@@ -180,11 +183,14 @@ async fn once_scope_is_stable_within_one_assembled_chain() {
         &subagent_log,
     )]];
 
-    let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
-    let subagent_mw = Arc::clone(out.subagent_mw.as_ref().expect("SubAgentMiddleware"))
-        .downcast_arc::<SubAgentMiddleware>()
-        .ok()
-        .expect("链上的具体 SubAgentMiddleware");
+    let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
+    // SAFETY: SubAgentMiddleware 的 as_any 返回 self。
+    let subagent_mw = unsafe {
+        Arc::clone(out.subagent_mw.as_ref().expect("SubAgentMiddleware"))
+            .downcast_arc::<SubAgentMiddleware>()
+    }
+    .ok()
+    .expect("链上的具体 SubAgentMiddleware");
     let tool = subagent_mw.build_tool(&ctx.cwd);
 
     // 同一次装配内两次 spawn（各取一组闭包）只允许触发一次。

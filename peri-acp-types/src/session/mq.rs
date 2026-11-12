@@ -60,6 +60,71 @@ impl MqEntry {
             id: self.id,
         }
     }
+
+    /// 控制面判定所需的轻量投影：策略与来源可见，正文不复制。
+    pub fn header(&self) -> MqHeader {
+        MqHeader {
+            id: self.id,
+            enqueued_at: self.enqueued_at.clone(),
+            kind: self.kind,
+            source: self.source.clone(),
+            policy: self.policy.clone(),
+        }
+    }
+}
+
+/// MQ 控制面事实：不含 `payload`，用于存在性/策略/水位判定。
+///
+/// 布尔与计数查询不应该为了读策略而解码 64 KiB 正文；adapter 应只投影这些列。
+#[derive(Debug, Clone)]
+pub struct MqHeader {
+    pub id: MessageId,
+    pub enqueued_at: String,
+    pub kind: MessageKind,
+    pub source: MessageSource,
+    pub policy: MessagePolicy,
+}
+
+impl MqHeader {
+    /// 本行的消费顺序键。
+    pub fn watermark(&self) -> MqWatermark {
+        MqWatermark {
+            enqueued_at: self.enqueued_at.clone(),
+            id: self.id,
+        }
+    }
+}
+
+/// 与 [`MqFilter`] 相同的投影过滤，只是作用于 header。
+///
+/// 输入必须已按 `(enqueued_at, id)` 升序；语义与 `mq_query` 的过滤保持一致。
+pub fn filter_headers(
+    headers: impl IntoIterator<Item = MqHeader>,
+    filter: &MqFilter,
+) -> Vec<MqHeader> {
+    let limit = filter.limit.unwrap_or(usize::MAX);
+    let mut selected = Vec::new();
+    for header in headers {
+        if filter.user_input_only && header.source != MessageSource::UserInput {
+            continue;
+        }
+        if !filter.sources.is_empty() && !filter.sources.contains(&header.source) {
+            continue;
+        }
+        if !filter.kinds.is_empty() && !filter.kinds.contains(&header.kind) {
+            continue;
+        }
+        if let Some(after) = &filter.after {
+            if header.watermark() <= *after {
+                continue;
+            }
+        }
+        selected.push(header);
+        if selected.len() >= limit {
+            break;
+        }
+    }
+    selected
 }
 
 /// 消费顺序键：先 `enqueued_at`，时间相同再按消息 ID 稳定排序。
@@ -326,6 +391,47 @@ pub trait ThreadMqStore: Send + Sync {
         filter: MqFilter,
     ) -> SessionResourceResult<Vec<MqEntry>>;
 
+    /// 只读控制面投影：与 [`Self::mq_query`] 同过滤语义，但不要求 adapter 解码正文。
+    ///
+    /// 默认实现退回完整查询；具备列投影能力的 adapter 必须覆盖。
+    async fn mq_headers(
+        &self,
+        thread_id: &ThreadId,
+        filter: MqFilter,
+    ) -> SessionResourceResult<Vec<MqHeader>> {
+        Ok(self
+            .mq_query(thread_id, filter)
+            .await?
+            .into_iter()
+            .map(|entry| entry.header())
+            .collect())
+    }
+
+    /// 本 thread 的 MQ 行数；默认退回完整查询。
+    async fn mq_count(&self, thread_id: &ThreadId) -> SessionResourceResult<usize> {
+        Ok(self.mq_query(thread_id, MqFilter::default()).await?.len())
+    }
+
+    /// 本 thread 是否至少有一条 MQ 行；默认退回完整查询。
+    async fn mq_exists(&self, thread_id: &ThreadId) -> SessionResourceResult<bool> {
+        Ok(!self
+            .mq_query(thread_id, MqFilter::default())
+            .await?
+            .is_empty())
+    }
+
+    /// 本 thread 的最大 `(enqueued_at, id)`；默认退回完整查询。
+    async fn mq_watermark(
+        &self,
+        thread_id: &ThreadId,
+    ) -> SessionResourceResult<Option<MqWatermark>> {
+        Ok(self
+            .mq_query(thread_id, MqFilter::default())
+            .await?
+            .last()
+            .map(MqEntry::watermark))
+    }
+
     async fn mq_cancel(
         &self,
         thread_id: &ThreadId,
@@ -397,6 +503,29 @@ impl ThreadMqStore for SessionResourcesMqStore {
         filter: MqFilter,
     ) -> SessionResourceResult<Vec<MqEntry>> {
         self.resources.mq_query(thread_id, filter).await
+    }
+
+    async fn mq_headers(
+        &self,
+        thread_id: &ThreadId,
+        filter: MqFilter,
+    ) -> SessionResourceResult<Vec<MqHeader>> {
+        self.resources.mq_headers(thread_id, filter).await
+    }
+
+    async fn mq_count(&self, thread_id: &ThreadId) -> SessionResourceResult<usize> {
+        self.resources.mq_count(thread_id).await
+    }
+
+    async fn mq_exists(&self, thread_id: &ThreadId) -> SessionResourceResult<bool> {
+        self.resources.mq_exists(thread_id).await
+    }
+
+    async fn mq_watermark(
+        &self,
+        thread_id: &ThreadId,
+    ) -> SessionResourceResult<Option<MqWatermark>> {
+        self.resources.mq_watermark(thread_id).await
     }
 
     async fn mq_cancel(

@@ -391,7 +391,7 @@ pub(crate) fn candidate_list(candidates: &[SkillMetadata]) -> String {
 ///   [`crate::skills::annotate_mcp_content`] 标注后直接返回（决策 D，
 ///   与预载注入内容同源）；内容缺失时回退 `Done + Info` 反馈。
 ///
-/// 待 E2E 场景（e2e/ 现无 MCP skill fixture，不新建基础设施）：skill://
+/// 待 E2E 场景（peri-e2e 仓现无 MCP skill fixture，不新建基础设施）：skill://
 /// server → 会话建立（无消息）→ 面板 `/demo:hello` → 触发 → 管线内出现
 /// `SkillTool(demo:hello)` ToolResult → Agent 回引用工具通路文案。
 #[derive(Clone)]

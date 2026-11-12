@@ -473,7 +473,7 @@ async fn test_settle_results_mixed_ready_settled() {
     assert!(outcome.results[0].result.is_error, "rejected 应是错误");
     assert!(!outcome.results[1].result.is_error, "ready 工具应成功");
     assert_eq!(outcome.results[1].result.output, "Image read");
-    let message = settled_tool_message(&outcome.results[1], true);
+    let message = settled_tool_message(&outcome.results[1]);
     assert!(
         message
             .content_blocks()
@@ -835,7 +835,7 @@ fn raw_image_content_is_projected_into_model_tool_message() {
         result: ToolResult::success("call-1", "Read", "Image read\n[image: image/png]"),
         outcome: output.outcome.clone(),
     };
-    let message = settled_tool_message(&settled, true);
+    let message = settled_tool_message(&settled);
     let blocks = message.content_blocks();
     assert!(
         blocks
@@ -848,13 +848,6 @@ fn raw_image_content_is_projected_into_model_tool_message() {
             .iter()
             .any(|block| matches!(block, crate::messages::ContentBlock::Image { .. })),
         "图片块必须进入模型工具消息"
-    );
-
-    // OpenAI Chat Completions 的 tool 角色不接受图片 part：降级为文本占位。
-    let text_only = settled_tool_message(&settled, false);
-    assert!(
-        matches!(text_only.message_content(), MessageContent::Text(_)),
-        "协议不支持工具图片时必须保持纯文本消息"
     );
 }
 
@@ -877,7 +870,7 @@ fn unsupported_or_empty_tool_images_are_dropped_without_losing_text() {
             result: ToolResult::success("call-3", "Read", "Image read"),
             outcome,
         };
-        let message = settled_tool_message(&settled, true);
+        let message = settled_tool_message(&settled);
         assert!(
             matches!(message.message_content(), MessageContent::Text(text) if text == "Image read"),
             "丢弃图片后必须保留文本投影"
@@ -908,7 +901,7 @@ fn text_only_tool_results_keep_the_legacy_text_message_shape() {
         ToolCall::new("call-2", "Read", serde_json::json!({})),
         ToolResult::success("call-2", "Read", "plain text"),
     );
-    let message = settled_tool_message(&settled, true);
+    let message = settled_tool_message(&settled);
     assert!(
         matches!(message.message_content(), MessageContent::Text(text) if text == "plain text"),
         "无图片时不得改变既有文本消息形状"

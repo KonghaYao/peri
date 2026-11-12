@@ -39,6 +39,66 @@ fn preflight_rejected(
 }
 
 impl super::SubAgentTool {
+    /// Try the live TaskManager receiver once. Registry lookup and inbox enqueue
+    /// are the authority; callers must not infer liveness from persisted thread state.
+    pub(super) async fn send_live_message(
+        &self,
+        thread_id: &str,
+        prompt: Option<&str>,
+    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let host = self.host();
+        let Some(manager) = &host.task_manager else {
+            return Ok(None);
+        };
+        let receipt = manager
+            .send_subagent_message(thread_id, prompt)
+            .await
+            .map_err(|error| {
+                use peri_agent::agent::async_tasks::SubagentMessageError;
+                let code = match &error {
+                    SubagentMessageError::EmptyPrompt
+                    | SubagentMessageError::TooLarge
+                    | SubagentMessageError::InvalidEnvelope(_) => {
+                        EffectiveToolErrorCode::InvalidInput
+                    }
+                    SubagentMessageError::Closed
+                    | SubagentMessageError::Full
+                    | SubagentMessageError::Store(_) => EffectiveToolErrorCode::ApplicationFailed,
+                };
+                preflight_rejected(thread_id, "live_message", code, error.to_string())
+            })?;
+        Ok(receipt.map(|receipt| {
+            format!(
+                "action: send\nstatus: queued\nchild_thread_id: {thread_id}\ntask_id: {}\n\
+                 Supplemental prompt queued as Defer for the active background sub-agent. \
+                 No execution was started or resumed. This does not interrupt the current \
+                 model/tool call; it drives a subsequent model call at Receive. Queued does not mean read: \
+                 the agent may finish before the model sees this message.",
+                receipt.task_id,
+            )
+        }))
+    }
+
+    /// Strict live-only mode: no persisted state lookup or resume fallback.
+    pub(super) async fn send_only(
+        &self,
+        thread_id: &str,
+        prompt: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        self.send_live_message(thread_id, Some(prompt))
+            .await?
+            .ok_or_else(|| {
+                preflight_rejected(
+                    thread_id,
+                    "send_only_no_receiver",
+                    EffectiveToolErrorCode::ApplicationFailed,
+                    format!(
+                        "send_only: no live background receiver for thread {thread_id}; no message was queued, and no execution was started or resumed"
+                    ),
+                )
+            })
+    }
+
     /// 向本会话 active 后台 subagent 发 Defer，或恢复非 active thread。
     ///
     /// 前置校验（define.rs 已做）：有效 resume_thread_id 优先于 fork / subagent_type，
@@ -61,38 +121,13 @@ impl super::SubAgentTool {
         approval_owner: Option<peri_agent::interaction::TrustedInteractionOwner>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let host = self.host();
-        // Live 执行是 active 的事实源。投递只做同步查找和入队，不能跨 load_meta
-        // await 后再解析同一 thread，以免把消息投给期间恢复的新执行。
-        if let Some(manager) = &host.task_manager {
-            let receipt = manager
-                .send_subagent_message(&thread_id, prompt.as_deref())
-                .await
-                .map_err(|error| {
-                    use peri_agent::agent::async_tasks::SubagentMessageError;
-                    let code = match &error {
-                        SubagentMessageError::EmptyPrompt
-                        | SubagentMessageError::TooLarge
-                        | SubagentMessageError::InvalidEnvelope(_) => {
-                            EffectiveToolErrorCode::InvalidInput
-                        }
-                        SubagentMessageError::Closed
-                        | SubagentMessageError::Full
-                        | SubagentMessageError::Store(_) => {
-                            EffectiveToolErrorCode::ApplicationFailed
-                        }
-                    };
-                    preflight_rejected(&thread_id, "live_message", code, error.to_string())
-                })?;
-            if let Some(receipt) = receipt {
-                return Ok(format!(
-                    "action: send\nstatus: queued\nchild_thread_id: {thread_id}\ntask_id: {}\n\
-                     Supplemental prompt queued as Defer for the active background sub-agent. \
-                     No execution was started or resumed. This does not interrupt the current \
-                     model/tool call; it drives a subsequent model call at Receive. Queued does not mean read: \
-                     the agent may finish before the model sees this message.",
-                    receipt.task_id,
-                ));
-            }
+        // 查找并入队必须由同一个 live inbox 操作完成，避免 active 状态检查后结束的竞态。
+        // ordinary resume 在没有 live receiver 时仍保留磁盘恢复语义。
+        if let Some(receipt) = self
+            .send_live_message(&thread_id, prompt.as_deref())
+            .await?
+        {
+            return Ok(receipt);
         }
         // 无 live receiver 时才进入磁盘恢复路径。
         let session_resources = host.session_resources.clone().ok_or_else(|| preflight_rejected(

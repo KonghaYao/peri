@@ -35,6 +35,69 @@ fn mailbox() -> AsyncResultMailbox {
     AsyncResultMailbox::new("session-1", "thread-1")
 }
 
+/// 长驻 monitor 会话：ALERT 被覆盖后不得留下逐条增长的指纹回执。
+#[test]
+fn monitor_alert_coverage_does_not_retain_receipts() {
+    use peri_acp_types::monitor::{monitor_alert_delivery_id, monitor_alert_reminder};
+
+    let mailbox = mailbox();
+    for hits in 1..=1_000_u64 {
+        let id = monitor_alert_delivery_id("monitor-long-lived", hits);
+        let reminder =
+            monitor_alert_reminder("monitor-long-lived", Some("webots"), hits, Some(hits)).unwrap();
+        assert_eq!(reminder.as_reminder().kind, "alert_matched");
+        mailbox
+            .mark_canonical_ready(id, &reminder, MessageSource::McpNotification, None)
+            .unwrap();
+        let receipt = mailbox
+            .capture_request("attempt", "request", &[id])
+            .unwrap();
+        assert_eq!(mailbox.cover_after_commit(&receipt, None).unwrap(), 1);
+        assert_eq!(mailbox.pending_count(), 0);
+        assert!(mailbox.protected_snapshot().is_empty());
+    }
+    assert!(
+        mailbox.covered_is_empty(),
+        "monitor alerts must not accumulate covered receipts"
+    );
+}
+
+/// 非 monitor 终态结果仍保留回执：同 ID 重投幂等、冲突检测不变。
+#[test]
+fn non_monitor_results_keep_covered_receipts() {
+    let mailbox = mailbox();
+    let id = MessageId::new();
+    let terminal = reminder("shell-covered", "done");
+    mailbox
+        .accept(id, &terminal, MessageSource::ShellComplete)
+        .unwrap();
+    mailbox
+        .mark_canonical_ready(id, &terminal, MessageSource::ShellComplete, None)
+        .unwrap();
+    let receipt = mailbox
+        .capture_request("attempt", "request", &[id])
+        .unwrap();
+    assert_eq!(mailbox.cover_after_commit(&receipt, None).unwrap(), 1);
+    assert!(
+        !mailbox.covered_is_empty(),
+        "non-monitor terminal results still retain their covered receipt"
+    );
+    assert_eq!(
+        mailbox.accept(id, &terminal, MessageSource::ShellComplete),
+        Ok(AcceptOutcome::Duplicate)
+    );
+    assert!(
+        mailbox
+            .accept(
+                id,
+                &reminder("shell-covered", "different body"),
+                MessageSource::ShellComplete
+            )
+            .is_err(),
+        "covered receipts still reject conflicting content"
+    );
+}
+
 #[test]
 fn async_result_accept_is_idempotent_and_rejects_conflicting_content() {
     let mailbox = mailbox();

@@ -58,6 +58,7 @@ graph TB
 
 - **BaseMessage**：统一消息类型。`content` 为 `MessageContent`（纯文本、ContentBlock 列表、Provider 原生格式）。`content_blocks()` 懒解析，Provider 按需选择最优格式。
 - **ContentBlock**：八种变体——Text、Image、Document、ToolUse、ToolResult、Reasoning、ProviderState、Unknown。Transcript 存储完整 ContentBlock。
+- **工具图片**：通过格式与大小准入的图片保留在原工具结果的 canonical 内容中，不按当前 provider 协议删除。Anthropic / Responses 使用原生工具结果图片；Chat Completions 在请求适配边界保留文本工具结果，并在连续工具结果批次之后追加带调用身份的图片 user 消息。该消息只存在于 wire 投影，不写入用户历史，也不能插在并行工具结果之间。序列化恢复与 provider 切换复用 canonical 图片。
 - **只追加规则**：
   - ✅ Reason 产出的 AI 消息、Act 产出的 ToolResult → 尾部追加
   - ✅ Info 类型消息（含 SystemReminder）经 MessageQueue 中转后尾部追加

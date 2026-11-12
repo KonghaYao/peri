@@ -47,6 +47,74 @@ fn make_context() -> StageContext {
     StageContext::new(turn, session.transcript(), session.queue().clone())
 }
 
+/// monitor ALERT 被覆盖后不保留 mailbox 回执；同 ID 重投仍由 MQ 历史拒绝。
+#[tokio::test]
+async fn monitor_alert_consumption_does_not_retain_covered_receipt() {
+    use peri_acp_types::monitor::{monitor_alert_delivery_id, monitor_alert_reminder};
+    let mut context = make_context();
+    let id = monitor_alert_delivery_id("monitor-webots", 1);
+    let alert = monitor_alert_reminder("monitor-webots", Some("webots"), 1, Some(1)).unwrap();
+    assert_eq!(alert.as_reminder().kind, "alert_matched");
+    context
+        .session
+        .queue
+        .enqueue(QueuedMessage::system_reminder_with_delivery_id(
+            MessageKind::Defer,
+            MessageSource::McpNotification,
+            alert.clone(),
+            id,
+        ))
+        .await
+        .unwrap();
+    let output = run_receive(ReceiveInput {
+        context: context.clone(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(output.consumed_count, 1);
+    let mailbox = &context.session.async_result_mailbox;
+    assert_eq!(mailbox.pending_count(), 1);
+    let receipt = mailbox
+        .capture_request("attempt", "request", &[id])
+        .unwrap();
+    assert_eq!(mailbox.cover_after_commit(&receipt, None).unwrap(), 1);
+    assert_eq!(mailbox.pending_count(), 0);
+    assert!(
+        mailbox.covered_is_empty(),
+        "a covered monitor alert must not leave a permanent receipt"
+    );
+
+    // 重投幂等由 MQ 历史保证：清空 mailbox 热态后同一身份仍是 AlreadyHandedOff。
+    context.session.async_result_mailbox =
+        Arc::new(crate::session::async_result_mailbox::AsyncResultMailbox::default());
+    let replay = context
+        .session
+        .queue
+        .enqueue(QueuedMessage::system_reminder_with_delivery_id(
+            MessageKind::Defer,
+            MessageSource::McpNotification,
+            alert,
+            id,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        replay.disposition,
+        peri_acp_types::session::MqEnqueueDisposition::AlreadyHandedOff
+    );
+    assert_eq!(
+        run_receive(ReceiveInput {
+            context: context.clone()
+        })
+        .await
+        .unwrap()
+        .consumed_count,
+        0
+    );
+    assert_eq!(context.session.async_result_mailbox.pending_count(), 0);
+    assert!(context.session.async_result_mailbox.covered_is_empty());
+}
+
 /// 排空本轮发射的 `SystemReminder` 事件并计数（交付去重的可观察出口）。
 fn drain_system_reminder_events(handles: &mut EventHandles) -> usize {
     let mut count = 0;

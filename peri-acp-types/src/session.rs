@@ -32,7 +32,7 @@ pub use inbox::{InboxHandle, SessionInbox};
 #[cfg(feature = "test-support")]
 pub use mq::ReceiveGate;
 pub use mq::{
-    MqCancelOutcome, MqEnqueueDisposition, MqEnqueueOutcome, MqEntry, MqFilter, MqInput,
+    MqCancelOutcome, MqEnqueueDisposition, MqEnqueueOutcome, MqEntry, MqFilter, MqHeader, MqInput,
     MqReceiveDisposition, MqReceiveItem, MqReceiveItemOutcome, MqReceiveOutcome, MqReceivePurpose,
     MqReceiveSelection, MqReceiveStatus, MqSendItemOutcome, MqSendOutcome, MqSendStatus,
     MqWatermark, RetainedReminder, SessionResourcesMqStore, ThreadMqStore,

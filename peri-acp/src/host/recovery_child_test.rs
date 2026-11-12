@@ -57,6 +57,22 @@ pub(super) async fn settled_meta(
         .unwrap()
 }
 
+/// 直接写 `agent_status`：模拟「终态已提交、工作意图仍是 working」的残留。
+async fn set_agent_status(harness: &RecoveryHarness, thread: &str, status: AgentStatus) {
+    harness
+        .cfg
+        .session_resources
+        .update_session_meta(
+            &thread.to_owned(),
+            &peri_acp_types::session_resources::SessionMetaPatch {
+                status: Some(status),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
 async fn set_cwd(db_path: &std::path::Path, thread: &str, cwd: &str) {
     use sqlx::Connection as _;
     let mut connection = sqlx::SqliteConnection::connect_with(
@@ -83,6 +99,71 @@ pub(super) fn delivery(
         seed,
         task: None,
     }
+}
+
+/// 1c. 终态 child 残留 `working`：不冷恢复、不注提醒、不调用模型。
+///
+/// 终态由领域结果提交；残留的 `working` 只表示旧执行没写收尾，不是待继续。
+#[tokio::test]
+async fn terminal_child_with_residual_working_is_not_recovered() {
+    for status in [
+        AgentStatus::Done,
+        AgentStatus::Cancelled,
+        AgentStatus::Error,
+    ] {
+        let mut harness = RecoveryHarness::new().await;
+        let root = harness.thread_id.clone();
+        harness.add_child(&root, "child-b", &root).await;
+        harness.set_working("child-b").await;
+        set_agent_status(&harness, "child-b", status).await;
+        harness.spawn_continuation_scheduler();
+        let recovery = harness.recovery();
+
+        let report = recovery.enter(&root).await.expect("恢复准备必须成功");
+        assert!(
+            report.recovered.is_empty(),
+            "{status:?}: 终态 child 不得被恢复：{report:?}"
+        );
+        assert!(
+            report
+                .skipped
+                .contains(&peri_acp_types::recovery::RecoverySkip {
+                    thread_id: "child-b".to_owned(),
+                    reason: RecoverySkipReason::Idle,
+                }),
+            "{status:?}: 终态按空闲跳过：{report:?}"
+        );
+        assert!(
+            harness.recovery_rows("child-b").await.is_empty(),
+            "{status:?}: 终态 child 不得收到恢复提醒"
+        );
+
+        recovery.launch(&report).await;
+        assert!(
+            !harness._mock.matched(),
+            "{status:?}: 终态 child 不得调用模型"
+        );
+    }
+}
+
+/// 1d. 终态根残留 `working`：同样不续跑、不注入提醒。
+#[tokio::test]
+async fn terminal_root_with_residual_working_is_not_recovered() {
+    let mut harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.set_working(&root).await;
+    set_agent_status(&harness, &root, AgentStatus::Error).await;
+    harness.spawn_continuation_scheduler();
+    let recovery = harness.recovery();
+
+    let report = recovery.enter(&root).await.expect("恢复准备必须成功");
+    assert!(report.recovered.is_empty(), "终态根不得被恢复：{report:?}");
+    assert!(
+        harness.recovery_rows(&root).await.is_empty(),
+        "终态根不得收到恢复提醒"
+    );
+    recovery.launch(&report).await;
+    assert!(!harness._mock.matched(), "终态根不得调用模型");
 }
 
 /// 1. 根 `idle` + child `working`：只跑 child 一个 turn，父 MQ 收到带
@@ -581,6 +662,69 @@ async fn stale_active_stopped_child_settles_cancelled() {
     assert!(!harness._mock.matched());
 }
 
+/// 12b. 模拟重启：resume 成功留下的 `Active + Working` 会被恢复流程接纳；
+/// 同一排队事实上的 `Stopped` 仍不自动恢复。
+#[tokio::test]
+async fn restart_admits_working_child_with_pending_prompt_but_not_stopped() {
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-working", &root).await;
+    harness.add_child(&root, "child-stopped", &root).await;
+    for child in ["child-working", "child-stopped"] {
+        harness
+            .queue(child)
+            .push_async(peri_acp_types::session::QueuedMessage::defer(
+                MessageSource::SubAgentComplete,
+                peri_acp_types::messages::BaseMessage::human("pending prompt"),
+            ))
+            .await;
+    }
+    harness
+        .cfg
+        .session_resources
+        .set_work_state(&"child-working".to_owned(), WorkState::Working)
+        .await
+        .unwrap();
+    harness
+        .cfg
+        .session_resources
+        .set_work_state(&"child-stopped".to_owned(), WorkState::Stopped)
+        .await
+        .unwrap();
+    let recovery = harness.recovery();
+
+    let report = recovery.enter(&root).await.expect("恢复准备必须成功");
+    assert_eq!(
+        report.recovered,
+        vec!["child-working".to_owned()],
+        "只有持久工作意图为 working 的 child 被接纳"
+    );
+    assert!(
+        !report
+            .recovered
+            .iter()
+            .any(|thread| thread == "child-stopped"),
+        "Stopped child 不得自动恢复: {report:?}"
+    );
+    // 遗留 Active 由收敛器结算为 Cancelled，但工作意图保持 Stopped：下一次进入
+    // 仍不会自动恢复。
+    let stopped = settled_meta(&harness, "child-stopped").await;
+    assert_eq!(stopped.agent_status, AgentStatus::Cancelled);
+    assert_eq!(stopped.work_state, WorkState::Stopped);
+    assert_eq!(
+        entries(&harness, "child-working").await.len(),
+        2,
+        "原 prompt 保留，另注入一条本 thread 的恢复提醒"
+    );
+    assert_eq!(
+        entries(&harness, "child-stopped").await.len(),
+        1,
+        "Stopped child 只保留原 prompt，不注入恢复提醒"
+    );
+    assert!(harness.recovery_rows("child-stopped").await.is_empty());
+    assert!(!harness._mock.matched(), "准备阶段不得调用模型");
+}
+
 /// 13. 本进程活实例（turn 在途）不被收敛。
 #[tokio::test]
 async fn live_child_instance_is_not_converged() {
@@ -744,4 +888,43 @@ async fn second_recovery_settlement_uses_a_new_delivery_identity() {
     let settled = settled_meta(&harness, "child-b").await;
     assert_eq!(settled.agent_status, AgentStatus::Error);
     assert_eq!(settled.work_state, WorkState::Idle);
+}
+
+/// close 成功后的 child 不得再被恢复。
+///
+/// 当前 close 只结清 close intent、不写终态（`lifecycle.rs:6-28`），
+/// `Active + Working` 仍会被下一次进入续跑。是否让 close 写终态需要产品裁决，
+/// 见 `spec/issues/2026-11-10-p1-terminal-child-recovery.md`。
+#[ignore = "close 不写终态，需产品裁决"]
+#[tokio::test]
+async fn closed_child_is_not_recovered() {
+    use peri_acp_types::session_resources::CloseSettlement;
+
+    let mut harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-b", &root).await;
+    harness.set_working("child-b").await;
+    let resources = Arc::clone(&harness.cfg.session_resources);
+    let child = ThreadId::from("child-b");
+    resources.mark_session_closing(&child).await.unwrap();
+    resources.finish_close(&child).await.unwrap();
+    assert_eq!(
+        resources.close_settlement(&child).await.unwrap(),
+        CloseSettlement::Finished,
+        "close 必须已结清"
+    );
+    harness.spawn_continuation_scheduler();
+    let recovery = harness.recovery();
+
+    let report = recovery.enter(&root).await.unwrap();
+    assert!(
+        report.recovered.is_empty(),
+        "已关闭的 child 不得被恢复：{report:?}"
+    );
+    assert!(
+        harness.recovery_rows("child-b").await.is_empty(),
+        "已关闭的 child 不得收到恢复提醒"
+    );
+    recovery.launch(&report).await;
+    assert!(!harness._mock.matched(), "已关闭的 child 不得调用模型");
 }

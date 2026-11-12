@@ -150,19 +150,24 @@ jobs:
                   | package(=peri-mcp-common) | package(=peri-mcp-web) | package(=peri-mcp-artifact)
                   | package(=peri-mcp-cron) | package(=peri-mcp-monitor) | package(=peri-mcp-workspace))'
 
+            # 执行全部 ACP 测试目标（lib + 4 个本地集成目标）。
+            # 依赖真实 SDK / 外部进程的用例仍由 .config/nextest.toml default-filter 精确排除。
             - name: Run ACP tests (excluding SDK E2E)
               shell: bash
               run: >-
                   ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
-                  -E 'package(=peri-acp) & kind(lib)'
+                  -E 'package(=peri-acp)'
 
-            - name: Run Agent tests (excluding execution E2E)
+            # Agent 全部测试目标一起执行（lib + 5 个本地集成目标）。
+            # Compact 四套对抗单独下一步，用 --no-tests=fail 逐套确认命中非零用例。
+            - name: Run Agent tests (all local targets, excluding Compact adversarial suites)
               shell: bash
               run: >-
                   ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
-                  -E 'package(=peri-agent) & (kind(lib)
-                  | binary(=middleware_tests) | binary(=compact_followup_behavior_test)
-                  | binary(=compact_failure_adversarial_test))'
+                  -E 'package(=peri-agent) & not (binary(=compact_pressure_adversarial_test)
+                  | binary(=compact_session_adversarial_test)
+                  | binary(=compact_session_manual_adversarial_test)
+                  | binary(=compact_authority_projection_test))'
 
             # ARC-COMPACT-001 Verify：Compact 四套对抗套件必须真实执行且命中非零用例
             # （--no-tests=fail 保证每套都命中，而不是靠总数）。
@@ -175,20 +180,22 @@ jobs:
                   | binary(=compact_session_manual_adversarial_test)
                   | binary(=compact_authority_projection_test))'
 
+            # 执行全部 TUI 测试目标（lib/bin + 5 个本地进程回归）。
+            # 真实 SDK 用例仍由 default-filter 精确排除。
             - name: Run TUI tests (excluding SDK E2E)
               shell: bash
               run: >-
                   ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
-                  -E 'package(=peri-tui) & (kind(lib) | kind(bin) | binary(=meta_session_cli))'
+                  -E 'package(=peri-tui)'
 
-            # 需要串行的测试不再依靠「整步 --test-threads=1」，而是 .config/nextest.toml 的
-            # serial-process-state 互斥组（max-threads = 1）：串行只施加在这些测试上，
-            # 组之外的用例维持正常并行额度，串行范围也不再随步骤划分漂移。
-            - name: Run middleware unit tests (serial, excluding E2E)
+            # lib 用例仍由 nextest 的 serial-process-state 组串行；6 个本地集成目标
+            # （工具调用契约、hook 输出、MCP 策略/隔离、workspace 注册、subagent 可见性）
+            # 与 lib 在同一步执行。
+            - name: Run middleware tests (lib serial + local integration)
               shell: bash
               run: >-
                   ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
-                  -E 'package(=peri-middlewares) & kind(lib)'
+                  -E 'package(=peri-middlewares)'
 
             # 6 个 MCP 能力包的全部 target 同属 serial-process-state 互斥组。
             - name: Run MCP capability tests (serial)
@@ -199,14 +206,16 @@ jobs:
                   | package(=peri-mcp-cron) | package(=peri-mcp-monitor) | package(=peri-mcp-workspace)'
 
             # doctest 独立入口：nextest 不支持 doctest（stable Rust 限制），
-            # 范围与原 `cargo test` 一致 —— workspace 去掉 4 个改用显式 target 选择的包。
+            # 范围是 workspace 去掉 3 个改用显式 target 选择的包。
+            # peri-agent 的 14 个 compile_fail（capabilities.rs）是负向能力契约，
+            # 普通构建无法替代；失败必须命中预期的 E0599，不能只是任意语法错。
             # 这是唯一一个 package 根集合与上面不同的步骤，属于保留原有 doctest 范围的
             # 有意选择；其编译输出单独归到本步骤，不参与「后续测试重复编译」口径。
-            - name: Run doctests (excluding ACP, Agent, TUI and middleware)
+            - name: Run doctests (excluding ACP, TUI and middleware)
               shell: bash
               run: >-
                   ./scripts/cargo-rmcp-patched.sh test --doc --locked --workspace
-                  --exclude peri-acp --exclude peri-agent --exclude peri-tui --exclude peri-middlewares
+                  --exclude peri-acp --exclude peri-tui --exclude peri-middlewares
 
             - name: Clippy
               shell: bash
@@ -219,7 +228,8 @@ jobs:
 
     # 离线录放业务回归：真实 Peri/ACP/工具/TUI，模型上游由持久 cassette 回放，
     # 不访问线上模型。仅在 Linux 跑（PTY 与 @xterm/headless 的验收环境）。
-    # tui-tester 子模块是公开仓库；checkout 不递归拉取，避免依赖 SSH deploy key。
+    # 套件本体在公开仓 KonghaYao/peri-e2e，由 .github/peri-e2e.rev 固定到 40 位 commit；
+    # 升级套件 = 更新 pin，本 job 不跟随该仓分支漂移。
     # 固定 24.04：fixture 录制基线为 Ubuntu 24.04；系统提示只绑定 OS 版本行，不随镜像迁移漂移。
     e2e-replay:
         name: E2E replay (Linux)
@@ -233,10 +243,24 @@ jobs:
               with:
                   persist-credentials: false
 
-            - name: Initialize e2e submodule over HTTPS
+            - name: Resolve peri-e2e revision
+              id: e2e
               run: |
-                  git config --global url."https://github.com/".insteadOf "git@github.com:"
-                  git submodule update --init e2e/tui-tester
+                  rev="$(cat .github/peri-e2e.rev)"
+                  rev="${rev//[$'\r\n ']/}"
+                  if [[ ! "$rev" =~ ^[0-9a-f]{40}$ ]]; then
+                      echo "invalid peri-e2e pin: '$rev'（.github/peri-e2e.rev 须为 40 位小写 commit SHA）" >&2
+                      exit 1
+                  fi
+                  echo "sha=$rev" >> "$GITHUB_OUTPUT"
+
+            - name: Checkout peri-e2e at pinned revision
+              uses: actions/checkout@v7
+              with:
+                  repository: KonghaYao/peri-e2e
+                  ref: ${{ steps.e2e.outputs.sha }}
+                  path: peri-e2e
+                  persist-credentials: false
 
             - name: Install Rust toolchain
               uses: dtolnay/rust-toolchain@master
@@ -257,32 +281,60 @@ jobs:
               with:
                   node-version: 24
                   cache: npm
-                  cache-dependency-path: e2e/package-lock.json
+                  cache-dependency-path: peri-e2e/package-lock.json
 
-            - name: Install e2e dependencies
-              working-directory: e2e
-              run: npm ci
+            - name: Install peri-e2e dependencies
+              run: npm ci --prefix peri-e2e
 
             - name: Type-check replay harness
-              working-directory: e2e
-              run: npm run e2e:replay:check
+              run: npm --prefix peri-e2e run e2e:replay:check
 
             - name: Run replay unit tests
-              working-directory: e2e
-              run: npm run e2e:replay:unit
+              env:
+                  PERI_SOURCE_ROOT: ${{ github.workspace }}
+              run: npm --prefix peri-e2e run e2e:replay:unit
+
+            - name: Verify replay fixtures
+              run: npm --prefix peri-e2e run e2e:replay:verify
+
+            # world seal 对应本 Peri 检出：未映射 leaf 变动但未 bump pin 时在此失败。
+            - name: Check world snapshot against this checkout
+              env:
+                  PERI_SOURCE_ROOT: ${{ github.workspace }}
+              run: npm --prefix peri-e2e run e2e:replay:world-check
+
+            # 场景被 skip 时 Vitest 仍以 0 退出：回放前后各核对一次 catalog，
+            # 并清空旧报告，避免历史结果满足门禁。
+            - name: Check replay catalog
+              working-directory: peri-e2e
+              run: |
+                  rm -rf results/replay-v2/ci
+                  node scripts/check-replay-catalog.mjs
 
             - name: Run offline replay (30 scenarios)
-              working-directory: e2e
-              run: npm run e2e:replay
+              env:
+                  PERI_BINARY: ${{ github.workspace }}/target/debug/peri
+                  PERI_E2E_REPLAY_RESULTS: ${{ github.workspace }}/peri-e2e/results/replay-v2/ci
+              run: npm --prefix peri-e2e run e2e:replay
+
+            - name: Check replay results catalog
+              working-directory: peri-e2e
+              run: node scripts/check-replay-catalog.mjs --results results/replay-v2/ci
 
             - name: Upload replay evidence on failure
               if: failure()
               uses: actions/upload-artifact@v4
               with:
                   name: e2e-replay-results
-                  path: e2e/results/replay-v2
+                  path: peri-e2e/results/replay-v2
                   retention-days: 7
                   if-no-files-found: ignore
+
+            - name: Print pinned peri-e2e revision
+              if: always()
+              run: |
+                  printf 'peri-e2e pin: %s\n' "${{ steps.e2e.outputs.sha }}"
+                  printf 'peri-e2e HEAD: %s\n' "$(git -C peri-e2e rev-parse HEAD)"
 
     # 汇总检查：只要本 job 运行就给出确定的结论 —— 区分「文档按策略跳过」与
     # 「代码测试失败 / 取消 / 意外跳过」，避免后者被读成通过。

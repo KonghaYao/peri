@@ -251,30 +251,111 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                 ..
             }
         );
-        // MQ 激活查询不能持有 sessions 锁。
-        let (cancelled, user_stopped, has_subagent, has_mq, has_ready_result) =
+        // MQ 激活查询不能持有 sessions 锁。查询错误不能折叠成「没有工作」：
+        // 二次检查只取决策需要的事实，Err 时在预算内重查，耗尽后交还 listener。
+        let queue = cfg
+            .session_manager
+            .get_session(&prompt_session_id)
+            .map(|session| session.v2_message_queue.clone());
+        let subagent_complete = peri_acp_types::session::MessageSource::SubAgentComplete;
+        // 只有非 mq、非 pending_result 的 continuation 消费一次性 armed；
+        // Scheduled 走同一查询分支但从未 take，不能借失败恢复出资格。
+        let armed_continuation = matches!(
+            origin,
+            PromptOrigin::Continuation {
+                mq_steering: false,
+                pending_result: false,
+                ..
+            }
+        );
+        // 同一轮二次检查共享一个预算：多项查询的等待时间不能叠加放大。
+        let recheck_deadline =
+            tokio::time::Instant::now() + super::activation::DISPATCH_RECHECK_BUDGET;
+        let has_subagent = if !mq_steering && !pending_result {
+            match queue.as_ref() {
+                Some(queue) => match super::activation::checked_dispatch_query(
+                    &prompt_session_id,
+                    "subagent_defer",
+                    recheck_deadline,
+                    || queue.has_pending_defer(&subagent_complete),
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        // scheduler 的 take 已消费一次性 armed。查询无法回答不等于
+                        // Defer 不存在；先把资格还给同一代际，再唤醒 listener，
+                        // 避免 listener 先醒后睡把结果留到下一次用户输入。
+                        if armed_continuation {
+                            if let Some(epoch) = continuation_epoch {
+                                let mut guard = sessions.lock().await;
+                                let restored =
+                                    guard.get_mut(&prompt_session_id).is_some_and(|state| {
+                                        continuation::restore_continuation_armed(state, epoch)
+                                    });
+                                drop(guard);
+                                tracing::warn!(
+                                    session_id = %prompt_session_id,
+                                    epoch,
+                                    query = "subagent_defer",
+                                    restored,
+                                    "continuation armed restore after dispatch query failure"
+                                );
+                            }
+                        }
+                        return Ok(abort_continuation_query_error(
+                            cfg,
+                            &prompt_session_id,
+                            "subagent_defer",
+                            &error,
+                            recovery_origin,
+                        ));
+                    }
+                },
+                None => false,
+            }
+        } else {
+            false
+        };
+        let has_mq = if mq_steering {
+            match queue.as_ref() {
+                Some(queue) => match super::activation::checked_dispatch_query(
+                    &prompt_session_id,
+                    "mq_continuation",
+                    recheck_deadline,
+                    || queue.needs_mq_continuation(),
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Ok(abort_continuation_query_error(
+                            cfg,
+                            &prompt_session_id,
+                            "mq_continuation",
+                            &error,
+                            recovery_origin,
+                        ));
+                    }
+                },
+                None => false,
+            }
+        } else {
+            false
+        };
+
+        // 重查可能占用至预算上限：取消、Stop 与 Ready 结果按重查后的事实判定，
+        // 避免把重查窗口内的新事实当成旧快照。
+        let (cancelled, user_stopped, has_ready_result) =
             match cfg.session_manager.get_session(&prompt_session_id) {
-                Some(session) => {
-                    let cancelled = session.cancel_token.is_cancelled();
-                    let user_stopped = session.activation.user_stopped();
-                    let queue = session.v2_message_queue.clone();
-                    let has_ready_result = session.async_result_mailbox.has_ready();
-                    drop(session);
-                    (
-                        cancelled,
-                        user_stopped,
-                        queue
-                            .has_pending_defer(
-                                &peri_acp_types::session::MessageSource::SubAgentComplete,
-                            )
-                            .await
-                            .unwrap_or(false),
-                        queue.needs_mq_continuation().await.unwrap_or(false),
-                        has_ready_result,
-                    )
-                }
-                None => (true, false, false, false, false),
+                Some(session) => (
+                    session.cancel_token.is_cancelled(),
+                    session.activation.user_stopped(),
+                    session.async_result_mailbox.has_ready(),
+                ),
+                None => (true, false, false),
             };
+
         // 定时调度是已批准的调度，不受上次失败的水位影响；但它是被动回调，
         // 不能解除用户显式 Stop（设计 §2.1/§5.2）。否则准入会写 working 覆盖 stopped。
         if matches!(origin, PromptOrigin::Scheduled) && user_stopped {
@@ -301,7 +382,30 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                 )
             })
         };
-        let mq_allowed = super::activation::mq_steering_allowed(cfg, &prompt_session_id).await;
+        let mq_allowed = if continuation_mq_steering {
+            match super::activation::checked_dispatch_query(
+                &prompt_session_id,
+                "mq_steering_allowed",
+                recheck_deadline,
+                || super::activation::mq_steering_allowed_checked(cfg, &prompt_session_id),
+            )
+            .await
+            {
+                Ok(allowed) => allowed,
+                Err(error) => {
+                    return Ok(abort_continuation_query_error(
+                        cfg,
+                        &prompt_session_id,
+                        "mq_steering_allowed",
+                        &error,
+                        recovery_origin,
+                    ));
+                }
+            }
+        } else {
+            // 非 mq steering 不消费该判定，也不应因无关查询失败而中止。
+            true
+        };
         if !base_dispatchable
             || (continuation_mq_steering && !mq_allowed)
             || (pending_result && !super::activation::result_allowed(cfg, &prompt_session_id).await)
@@ -315,10 +419,24 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             }
             return Ok(serde_json::Value::Null);
         }
+        // 查询期间可能已过去数轮重查预算；最终准入必须复核代际与取消事实，
+        // 否则查询之后到达的 Stop/新 prompt 仍会放行一次模型调用。
+        #[cfg(test)]
+        admission_gate::wait(&format!("{prompt_session_id}:before_final_admission")).await;
         let dispatchable = {
             let mut sessions = sessions.lock().await;
             sessions.get_mut(&prompt_session_id).is_some_and(|state| {
                 if state.closing || state.close_in_flight > 0 {
+                    return false;
+                }
+                if !continuation::continuation_still_valid(state, epoch) {
+                    return false;
+                }
+                if state
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(|token| token.is_cancelled())
+                {
                     return false;
                 }
                 state.continuation_in_flight = true;
@@ -338,6 +456,54 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         #[cfg(test)]
         admission_gate::wait(&format!("{prompt_session_id}:committed")).await;
     }
+
+    // 用户 prompt 的令牌在准入段发布，之后仍要经过工作区校验与排队等待。
+    // 这段时间到达的 Stop/关闭必须在这里止损，否则会先提交工作意图再发起模型调用。
+    if continuation_epoch.is_none() {
+        let admission = {
+            let sessions = sessions.lock().await;
+            sessions.get(&prompt_session_id).map(|state| {
+                if state.closing || state.close_in_flight > 0 {
+                    Err(AcpError::new(-32010, "Session is closing"))
+                } else if state
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(|token| token.is_cancelled())
+                {
+                    Ok(false)
+                } else {
+                    Ok(true)
+                }
+            })
+        };
+        match admission {
+            None => return Err(AcpError::new(-32602, "session not found")),
+            Some(Err(error)) => {
+                rollback_turn_admission(
+                    sessions,
+                    &prompt_session_id,
+                    is_continuation,
+                    admitted_cancel.as_ref(),
+                )
+                .await;
+                return Err(error);
+            }
+            Some(Ok(false)) => {
+                rollback_turn_admission(
+                    sessions,
+                    &prompt_session_id,
+                    is_continuation,
+                    admitted_cancel.as_ref(),
+                )
+                .await;
+                return Ok(serde_json::Value::Null);
+            }
+            Some(Ok(true)) => {}
+        }
+    }
+
+    #[cfg(test)]
+    admission_gate::wait(&format!("{prompt_session_id}:before_work_intent")).await;
 
     // 准入已通过、执行尚未开始：先提交 durable 工作意图。进程若在这一刻退出，
     // 下次进入仍能看出这一轮需要继续；提交失败必须拒绝本轮，不能在没有续跑意图
@@ -414,6 +580,35 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         );
         return Err(work_intent_error(Some(&thread_id), error.to_string()));
     }
+    #[cfg(test)]
+    admission_gate::wait(&format!("{prompt_session_id}:after_work_intent")).await;
+    // Stop 可能在上面的准入复查之后、本次写入之前落库：直接进入执行会把 `stopped`
+    // 覆盖成 `working`，让已停止的 thread 仍被当作可恢复工作。用户 prompt 与队列输入
+    // 在这里按提交后的取消事实撤回；续跑的取消由执行器反映为取消轮次，不提前返回。
+    if continuation_epoch.is_none() {
+        let post_commit = post_commit_cancellation(sessions, &prompt_session_id).await;
+        if !matches!(post_commit, PostCommitCancellation::Open) {
+            rollback_turn_admission(
+                sessions,
+                &prompt_session_id,
+                is_continuation,
+                admitted_cancel.as_ref(),
+            )
+            .await;
+            super::recovery::abort_recovery_launch(cfg, &prompt_session_id);
+            if recovery_origin {
+                mark_recovery_launch_failed(cfg, &prompt_session_id);
+            }
+            withdraw_unstarted_work_intent(
+                cfg,
+                &prompt_session_id,
+                &thread,
+                matches!(post_commit, PostCommitCancellation::Stop),
+            )
+            .await;
+            return Ok(serde_json::Value::Null);
+        }
+    }
 
     // 冷 child 恢复的本轮把终态、工作意图与结果消息交给一次原子结算（§5.3）：
     // 在 run_prompt 前标记，finish_prompt_turn 据此跳过独立的 work_state 写入。
@@ -463,6 +658,13 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     // `run_prompt` 在 attach 前失败时返回 `Ok(Null)`：本轮从未移交执行器，成功空操作
     // 同样要撤销本次准入发布的令牌，否则 close 会把空轮次误判为在飞（#196 P2 复审）。
     if matches!(&result, Ok(Value::Null)) {
+        // queued input 的 ticket 被 Stop 撤销时 attachment 返回 `Null`：停止意图已经
+        // 落库，但本轮此前提交的 `working` 还留着，会让 thread 被当作可恢复工作。
+        // 取消事实必须在回滚准入清除令牌之前读取。
+        let stopped = matches!(
+            post_commit_cancellation(sessions, &prompt_session_id).await,
+            PostCommitCancellation::Stop
+        );
         rollback_turn_admission(
             sessions,
             &prompt_session_id,
@@ -470,6 +672,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             admitted_cancel.as_ref(),
         )
         .await;
+        withdraw_unstarted_work_intent(cfg, &prompt_session_id, &thread, stopped).await;
     }
 
     // Prediction remains admitted before pool restoration and while the prompt lock is held.
@@ -582,7 +785,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             super::activation::PendingState::from_state(state)
         })
     };
-    let continuation_request = match (
+    let continuation = match (
         pending_state,
         cfg.session_manager.get_session(&prompt_session_id),
     ) {
@@ -591,21 +794,34 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             let activation = Arc::clone(&runtime.activation);
             let mailbox = Arc::clone(&runtime.async_result_mailbox);
             drop(runtime);
-            super::activation::pending_request(
+            let pending = super::activation::pending_request(
                 &prompt_session_id,
                 &state,
                 &queue,
                 &activation,
                 &mailbox,
             )
-            .await
+            .await;
+            Some((pending, queue))
         }
         _ => None,
     };
-    if let Some(request) = continuation_request {
-        if cont_tx.send(request).is_err() {
-            tracing::error!(session_id = %prompt_session_id, "continuation scheduling failed: channel closed");
+    match continuation {
+        Some((super::activation::PendingRequest::Ready(request), _)) => {
+            if cont_tx.send(request).is_err() {
+                tracing::error!(session_id = %prompt_session_id, "continuation scheduling failed: channel closed");
+            }
         }
+        Some((super::activation::PendingRequest::Retry(error), queue)) => {
+            // 本轮收尾后的查询失败同样不能消耗唤醒：把重查交还 listener。
+            tracing::warn!(
+                session_id = %prompt_session_id,
+                %error,
+                "continuation pending check failed; requesting listener recheck"
+            );
+            queue.request_recheck();
+        }
+        Some((super::activation::PendingRequest::Idle, _)) | None => {}
     }
     result
 }
@@ -628,6 +844,94 @@ fn work_intent_error(thread_id: Option<&str>, detail: String) -> AcpError {
 fn mark_recovery_launch_failed(cfg: &AcpServerConfig, session_id: &str) {
     if let Some(runtime) = cfg.session_manager.get_session(session_id) {
         runtime.mark_recovery_launch_failed();
+    }
+}
+
+/// 二次资格查询在预算内仍无法回答：保留重查责任后放弃本轮。
+///
+/// 查询错误不等于「没有工作」；一次瞬时存储故障不能消耗掉已消费的唤醒。
+/// 返回 `Null` 与既有 superseded 跳过路径一致，区别是 listener 会被重新唤醒。
+fn abort_continuation_query_error(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+    query: &'static str,
+    error: &str,
+    recovery_origin: bool,
+) -> Value {
+    tracing::warn!(
+        session_id = %session_id,
+        query,
+        %error,
+        retry_budget_ms = super::activation::DISPATCH_RECHECK_BUDGET.as_millis() as u64,
+        "continuation eligibility query failed; requesting listener recheck"
+    );
+    if let Some(queue) = cfg.session_manager.v2_queue_for(session_id) {
+        queue.request_recheck();
+    }
+    if recovery_origin {
+        mark_recovery_launch_failed(cfg, session_id);
+    }
+    Value::Null
+}
+
+/// `working` 提交后、模型调用前的最终取消事实。
+enum PostCommitCancellation {
+    /// 没有取消事实，可以进入执行器。
+    Open,
+    /// Stop 已生效：durable 工作意图必须回到 `stopped`。
+    Stop,
+    /// 会话关闭/失效：本轮从未开始，只撤回本次写入的 `working`。
+    Aborted,
+}
+
+/// 读取提交工作意图之后的取消事实；会话已移除按失效处理。
+async fn post_commit_cancellation(
+    sessions: &SharedSessions,
+    session_id: &str,
+) -> PostCommitCancellation {
+    let sessions = sessions.lock().await;
+    match sessions.get(session_id) {
+        Some(state) if state.closing || state.close_in_flight > 0 => {
+            PostCommitCancellation::Aborted
+        }
+        Some(state)
+            if state
+                .cancel_token
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled()) =>
+        {
+            PostCommitCancellation::Stop
+        }
+        Some(_) => PostCommitCancellation::Open,
+        None => PostCommitCancellation::Aborted,
+    }
+}
+
+/// 撤回本轮已提交但从未执行的工作意图。
+///
+/// Stop 已生效时回到 `stopped`；其他取消只把仍为 `working` 的状态结算为 `idle`，
+/// 不覆盖并发 Stop 已落库的 `stopped`。
+async fn withdraw_unstarted_work_intent(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+    thread: &ThreadId,
+    stopped: bool,
+) {
+    let resources = cfg.session_manager.session_resources();
+    let result = if stopped {
+        set_work_state_with_retry(resources, thread, WorkState::Stopped).await
+    } else {
+        settle_work_state_with_retry(resources, thread)
+            .await
+            .map(|_| ())
+    };
+    if let Err(error) = result {
+        tracing::error!(
+            session_id,
+            thread_id = %thread,
+            %error,
+            "work state withdrawal before prompt failed"
+        );
     }
 }
 

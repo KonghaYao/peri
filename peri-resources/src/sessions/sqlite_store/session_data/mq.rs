@@ -8,18 +8,17 @@
 //! 条件插入再挡一次与 Receive 的并发。
 
 use super::*;
-use crate::sessions::failure::conflict;
+use crate::sessions::failure::{conflict, corrupt};
 use crate::sessions::mq_rows::{
-    decode_entry, enqueued_at_now, filter_entries, is_same_watermark, item_outcome, kind_token,
+    decode_entry, decode_header, enqueued_at_now, is_same_watermark, item_outcome, kind_token,
     payload_json, policy_ensures_processing, policy_json, same_payload, source_token, title_of,
-    RawMqRow, DELETE_THREAD_MQ_ROW_SQL, INSERT_MESSAGE_SQL, INSERT_THREAD_MQ_SQL,
+    RawMqHeader, RawMqRow, DELETE_THREAD_MQ_ROW_SQL, INSERT_MESSAGE_SQL, INSERT_THREAD_MQ_SQL,
     SELECT_MESSAGE_ROW_SQL, SELECT_THREAD_MQ_BY_ID_SQL, SELECT_THREAD_MQ_POLICIES_SQL,
-    SELECT_THREAD_MQ_SQL,
 };
 use peri_acp_types::session::{
     MessageSource, MqCancelOutcome, MqEnqueueDisposition, MqEnqueueOutcome, MqEntry, MqFilter,
-    MqInput, MqReceiveDisposition, MqReceiveItem, MqReceiveItemOutcome, MqReceiveOutcome,
-    MqReceiveSelection, MqReceiveStatus,
+    MqHeader, MqInput, MqReceiveDisposition, MqReceiveItem, MqReceiveItemOutcome, MqReceiveOutcome,
+    MqReceiveSelection, MqReceiveStatus, MqWatermark,
 };
 /// 单行读取的列（`thread_id` 在最前，用于跨 thread 判定）。
 type MqRow = (
@@ -43,6 +42,56 @@ type MqListRow = (
     String,
     Option<String>,
 );
+
+/// 控制面读取的列：没有 `payload_json`。
+type MqHeaderRow = (String, String, String, String, String);
+
+/// 把 `MqFilter` 翻译成 SQL：过滤与上限都在数据库侧完成，正文查询不会先取全表。
+///
+/// 顺序键与 [`MqWatermark`] 一致：`(enqueued_at, id)` 字典序对固定格式时间与
+/// 小写 UUID 就等于消费顺序。
+fn filtered_mq_select(
+    columns: &str,
+    filter: &MqFilter,
+) -> SessionResourceResult<(String, Vec<String>)> {
+    let mut sql = format!("SELECT {columns} FROM thread_mq WHERE thread_id = ?1");
+    let mut binds: Vec<String> = Vec::new();
+    if let Some(after) = &filter.after {
+        sql.push_str(" AND (enqueued_at > ?2 OR (enqueued_at = ?2 AND id > ?3))");
+        binds.push(after.enqueued_at.clone());
+        binds.push(after.id.as_uuid().to_string());
+    }
+    if filter.user_input_only {
+        let placeholder = binds.len() + 2;
+        sql.push_str(&format!(" AND source = ?{placeholder}"));
+        binds.push(source_token(&MessageSource::UserInput)?);
+    }
+    if !filter.sources.is_empty() {
+        let placeholders = (0..filter.sources.len())
+            .map(|offset| format!("?{}", binds.len() + offset + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(&format!(" AND source IN ({placeholders})"));
+        for source in &filter.sources {
+            binds.push(source_token(source)?);
+        }
+    }
+    if !filter.kinds.is_empty() {
+        let placeholders = (0..filter.kinds.len())
+            .map(|offset| format!("?{}", binds.len() + offset + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(&format!(" AND kind IN ({placeholders})"));
+        for kind in &filter.kinds {
+            binds.push(kind_token(*kind)?);
+        }
+    }
+    sql.push_str(" ORDER BY enqueued_at, id");
+    if let Some(limit) = filter.limit {
+        sql.push_str(&format!(" LIMIT {limit}"));
+    }
+    Ok((sql, binds))
+}
 
 fn entry_of(row: &MqRow) -> SessionResourceResult<MqEntry> {
     decode_entry(RawMqRow {
@@ -180,6 +229,9 @@ impl SqliteSessionData {
 
     /// 接纳维护目标工作意图：只有 `EnsureProcessing` 授予执行资格，且只把 `idle`
     /// 提升为 `working`——`stopped` 不被被动回调解除（设计 §5.2）。
+    ///
+    /// 终态 thread 不参与提升：它的 `working` 只是旧执行残留，迟到的接纳不能再把它
+    /// 变成「待续跑」；显式 resume 走认领写入，不经过这里。
     async fn maintain_work_intent_on_accept(
         &self,
         connection: &mut SqliteConnection,
@@ -190,7 +242,8 @@ impl SqliteSessionData {
             return Ok(());
         }
         sqlx::query(
-            "UPDATE threads SET work_state = 'working' WHERE id = ?1 AND work_state = 'idle'",
+            "UPDATE threads SET work_state = 'working'
+             WHERE id = ?1 AND work_state = 'idle' AND agent_status = 'active'",
         )
         .bind(thread_id.as_str())
         .execute(&mut *connection)
@@ -286,16 +339,94 @@ impl SqliteSessionData {
         thread_id: &ThreadId,
         filter: MqFilter,
     ) -> SessionResourceResult<Vec<MqEntry>> {
-        let rows: Vec<MqListRow> = sqlx::query_as(SELECT_THREAD_MQ_SQL)
-            .bind(thread_id.as_str())
+        let (sql, binds) = filtered_mq_select(
+            "id, enqueued_at, kind, source, policy_json, payload_json, original_draft",
+            &filter,
+        )?;
+        let mut query = sqlx::query_as::<_, MqListRow>(sqlx::AssertSqlSafe(sql));
+        query = query.bind(thread_id.as_str());
+        for bind in binds {
+            query = query.bind(bind);
+        }
+        let rows = query
             .fetch_all(&self.database.pool)
             .await
             .map_err(|error| map_sqlx(&error))?;
-        let entries = rows
-            .iter()
-            .map(listed_entry_of)
-            .collect::<SessionResourceResult<Vec<_>>>()?;
-        Ok(filter_entries(entries, &filter))
+        rows.iter().map(listed_entry_of).collect()
+    }
+
+    /// 控制面投影：只读 id/时间/来源/策略列，不接触正文。
+    pub(super) async fn query_mq_headers(
+        &self,
+        thread_id: &ThreadId,
+        filter: MqFilter,
+    ) -> SessionResourceResult<Vec<MqHeader>> {
+        let (sql, binds) =
+            filtered_mq_select("id, enqueued_at, kind, source, policy_json", &filter)?;
+        let mut query = sqlx::query_as::<_, MqHeaderRow>(sqlx::AssertSqlSafe(sql));
+        query = query.bind(thread_id.as_str());
+        for bind in binds {
+            query = query.bind(bind);
+        }
+        let rows = query
+            .fetch_all(&self.database.pool)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        rows.iter()
+            .map(|row| {
+                decode_header(RawMqHeader {
+                    id: &row.0,
+                    enqueued_at: &row.1,
+                    kind: &row.2,
+                    source: &row.3,
+                    policy_json: &row.4,
+                })
+            })
+            .collect()
+    }
+
+    /// 行数：`COUNT(*)` 不读正文。
+    pub(super) async fn count_mq(&self, thread_id: &ThreadId) -> SessionResourceResult<usize> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM thread_mq WHERE thread_id = ?1")
+            .bind(thread_id.as_str())
+            .fetch_one(&self.database.pool)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        usize::try_from(count).map_err(|_| corrupt("thread MQ count is not representable"))
+    }
+
+    /// 存在性：SQL `EXISTS`，不读正文也不计数。
+    pub(super) async fn exists_mq(&self, thread_id: &ThreadId) -> SessionResourceResult<bool> {
+        let exists: i64 =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM thread_mq WHERE thread_id = ?1)")
+                .bind(thread_id.as_str())
+                .fetch_one(&self.database.pool)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+        Ok(exists != 0)
+    }
+
+    /// 最大水位：只读 `(enqueued_at, id)` 两列并取一条。
+    pub(super) async fn watermark_mq(
+        &self,
+        thread_id: &ThreadId,
+    ) -> SessionResourceResult<Option<MqWatermark>> {
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT enqueued_at, id FROM thread_mq WHERE thread_id = ?1
+             ORDER BY enqueued_at DESC, id DESC LIMIT 1",
+        )
+        .bind(thread_id.as_str())
+        .fetch_optional(&self.database.pool)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
+        row.map(|(enqueued_at, id)| {
+            let id = id
+                .parse::<uuid::Uuid>()
+                .map(peri_acp_types::messages::MessageId::from)
+                .map_err(|_| corrupt("MQ row has an invalid message id"))?;
+            Ok(MqWatermark { enqueued_at, id })
+        })
+        .transpose()
     }
 
     pub(super) async fn cancel_mq(
@@ -506,6 +637,9 @@ impl SqliteSessionData {
         let message_id = input.id.as_uuid().to_string();
         let current = stored_agent_status(&mut tx, child).await?;
         if current.is_terminal() && settlement_landed(&mut tx, target, &message_id).await? {
+            // 结算已落地，但这条 child 可能是经只写 `agent_status` 的旧路径收尾的：
+            // 收敛残留的 `working`，幂等重放不会把它留成待续跑。
+            converge_terminal_work_state(&mut tx, child, current).await?;
             tx.commit()
                 .await
                 .map_err(|_| commit_failure(Some(child.clone())))?;
@@ -561,8 +695,8 @@ impl SqliteSessionData {
             }
             fact
         };
-        // 只有本次仍能把 child 从 `active` 写成终态时才继续；已终态的结算不写任何行。
-        // 提升在终态之前，且只认目标 MQ 里仍存在的本次结果行（设计 §5.3）。
+        // 只有本次仍能把 child 从 `active` 写成终态时才继续；已终态的结算只收敛残留
+        // 工作意图。提升在终态之前，且只认目标 MQ 里仍存在的本次结果行（设计 §5.3）。
         if !current.is_terminal() {
             if ensures_processing && target != child {
                 sqlx::query(PROMOTE_RECEIVER_ON_TERMINAL_SQL)
@@ -586,6 +720,9 @@ impl SqliteSessionData {
                 // 状态不可解释；不能把未写入报告成成功。
                 return Err(conflict("child terminal settlement lost its active row"));
             }
+        } else {
+            // 终态先提交、工作意图后到：收敛残留的 `working`，不覆盖终态也不新增结果行。
+            converge_terminal_work_state(&mut tx, child, current).await?;
         }
         tx.commit()
             .await
@@ -595,8 +732,8 @@ impl SqliteSessionData {
 
     /// 无结果终态：`BEGIN IMMEDIATE` 内一次条件更新 `agent_status` 与 `work_state`。
     ///
-    /// 条件 `agent_status = 'active'` 保证同一 child 的终态只写一次；已终态时按同一
-    /// 快照读回既有终态并返回 no-op，不覆盖它。两步独立写入会留下 `Done + working`
+    /// 条件 `agent_status = 'active'` 保证同一 child 的终态只写一次；已终态时收敛残留的
+    /// `working` 并返回既有终态，不覆盖它。两步独立写入会留下 `Done + working`
     /// 或半完成终态，因此这里与 [`Self::finalize_child_terminal_mq`] 共用事务形状。
     pub(super) async fn settle_terminal_without_result_rows(
         &self,
@@ -614,6 +751,7 @@ impl SqliteSessionData {
         self.require_session(&mut tx, child).await?;
         let current = stored_agent_status(&mut tx, child).await?;
         if current.is_terminal() {
+            converge_terminal_work_state(&mut tx, child, current).await?;
             tx.commit()
                 .await
                 .map_err(|_| commit_failure(Some(child.clone())))?;
@@ -801,4 +939,21 @@ fn settled_without_write(input: MqInput) -> MqEnqueueOutcome {
             original_draft: input.original_draft,
         },
     }
+}
+
+/// 终态已提交时收敛残留的 `working`：同一事务内只改工作意图，不改写终态、不写 MQ。
+///
+/// 只动 `working`：`stopped` 是显式停止意图，`idle` 已是目标值。
+async fn converge_terminal_work_state(
+    connection: &mut SqliteConnection,
+    child: &ThreadId,
+    status: peri_acp_types::thread::AgentStatus,
+) -> SessionResourceResult<()> {
+    sqlx::query("UPDATE threads SET work_state = ?1 WHERE id = ?2 AND work_state = 'working'")
+        .bind(peri_acp_types::thread::WorkState::after_agent_terminal(status).as_str())
+        .bind(child.as_str())
+        .execute(&mut *connection)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
+    Ok(())
 }

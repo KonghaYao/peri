@@ -9,23 +9,23 @@ use crate::{
     error::AgentResult,
     messages::{BaseMessage, MessageId},
     session::{
-        tool_catalog::StartupToolUpdate, MessageKind, MessagePolicy, MessageQueue, MessageSource,
-        QueuedMessage,
+        queue::ProducerQueue, tool_catalog::StartupToolUpdate, MessageKind, MessagePolicy,
+        MessageSource, QueuedMessage,
     },
 };
 
 /// 只读消息与 turn 元数据，不暴露队列或工具目录。
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use peri_agent::middleware::capabilities::StateView;
 /// fn cannot_mutate_catalog(state: &dyn StateView) {
 ///     state.local_tools().unwrap().write().clear();
 /// }
 /// ```
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use peri_agent::middleware::capabilities::StateView;
 /// fn cannot_mutate_queue(state: &dyn StateView) {
-///     state.v2_queue().drain_all();
+///     state.v2_producer().drain_all();
 /// }
 /// ```
 pub trait StateView: Send + Sync {
@@ -69,9 +69,27 @@ pub trait MessageReplace: Send + Sync {
     fn replace_message(&mut self, message: BaseMessage) -> bool;
 }
 
-/// 显式队列能力；保留原消息类型的唤醒语义。
+/// 显式队列能力：只暴露生产者面（入队与只读查询），不交出队列 owner。
+///
+/// Hook 不得取得完整 [`MessageQueue`](crate::session::MessageQueue)：
+/// `drain_all` / `take_owner` 属于 Receive 生命周期所有权。需要读取队列的
+/// middleware 使用生产者面的只读查询（`query` / `snapshot`）。
+///
+/// ```compile_fail,E0599
+/// use peri_agent::middleware::capabilities::QueueState;
+/// fn cannot_drain(state: &dyn QueueState) {
+///     state.v2_producer().drain_all();
+/// }
+/// ```
+/// ```compile_fail,E0599
+/// use peri_agent::middleware::capabilities::QueueState;
+/// fn cannot_own(state: &dyn QueueState) {
+///     state.v2_producer().owner();
+/// }
+/// ```
 pub trait QueueState: Send + Sync {
-    fn v2_queue(&self) -> &MessageQueue;
+    /// 会话级 mailbox 的生产者面（与 Receive 消费的是同一实例）。
+    fn v2_producer(&self) -> ProducerQueue<'_>;
     fn enqueue_v2_message(&self, msg: QueuedMessage);
 }
 
@@ -98,7 +116,7 @@ pub trait InputBatchState: Send + Sync {
 /// 才具备该能力。方法名与 `MessageAppend::add_message` 不同，避免同一类型同时
 /// 具备两种能力时的解析歧义。
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use peri_agent::middleware::capabilities::AfterToolState;
 /// fn cannot_append_input(state: &mut dyn AfterToolState, message: peri_agent::messages::BaseMessage) {
 ///     state.append_input_message(message);
@@ -123,13 +141,13 @@ pub trait BeforeAgentState:
 
 /// 工具审批仅观察状态，工具参数修改通过 ToolCall 返回值表达。
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use peri_agent::{messages::BaseMessage, middleware::capabilities::BeforeToolState};
 /// fn cannot_edit_input(state: &mut dyn BeforeToolState, message: BaseMessage) {
 ///     state.replace_message(message);
 /// }
 /// ```
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use peri_agent::middleware::capabilities::BeforeToolState;
 /// fn cannot_change_turn(state: &mut dyn BeforeToolState) {
 ///     state.set_current_step(99);
@@ -152,7 +170,7 @@ pub struct BoundToolOrigin {
 
 /// 工具完成：观察状态并调度队列通知，不修改 transcript。
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use peri_agent::{messages::BaseMessage, middleware::capabilities::AfterToolState};
 /// fn cannot_append_history(state: &mut dyn AfterToolState, message: BaseMessage) {
 ///     state.add_message(message);
@@ -163,13 +181,13 @@ pub trait AfterToolState: StateView + QueueState + HookOutputState {}
 /// 批次完成（工具结果已提交）后的窄反馈能力：只回注有界反馈 / 显式停止意图，
 /// 由 Receive 唯一消费；不提供 transcript 追加、消息替换或目录写访问。
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use peri_agent::{messages::BaseMessage, middleware::capabilities::AfterToolsBatchState};
 /// fn cannot_append_history(state: &mut dyn AfterToolsBatchState, message: BaseMessage) {
 ///     state.add_message(message);
 /// }
 /// ```
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use peri_agent::middleware::capabilities::AfterToolsBatchState;
 /// fn cannot_edit_cached_input(state: &mut dyn AfterToolsBatchState, message: peri_agent::messages::BaseMessage) {
 ///     state.replace_message(message);
@@ -195,16 +213,16 @@ pub trait AfterToolsBatchState: StateView + HookOutputState {
 /// 三种字段各有确定受众：`additionalContext` → 模型；`systemMessage` → 客户端；
 /// `initialUserMessage` → SessionStart 受控准入。投递偏好不决定任务是否执行。
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use peri_agent::middleware::capabilities::HookOutputState;
 /// fn cannot_append_history(state: &dyn HookOutputState, message: peri_agent::messages::BaseMessage) {
 ///     state.add_message(message);
 /// }
 /// ```
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use peri_agent::middleware::capabilities::HookOutputState;
 /// fn cannot_drain_queue(state: &dyn HookOutputState) {
-///     state.v2_queue().drain_all();
+///     state.v2_producer().drain_all();
 /// }
 /// ```
 pub trait HookOutputState: Send + Sync {
@@ -230,7 +248,7 @@ pub trait HookOutputState: Send + Sync {
 
 /// Agent 结束：观察结果并经队列投递 goal/stop/todo 反馈。
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use peri_agent::{messages::BaseMessage, middleware::capabilities::AfterAgentState};
 /// fn cannot_edit_history(state: &mut dyn AfterAgentState, message: BaseMessage) {
 ///     state.replace_message(message);
@@ -251,7 +269,7 @@ impl<T: MiddlewareState + ?Sized> BackgroundActivity for T {
 
 /// 模型调用前：可追加消息和投递状态通知，不提供输入替换或目录写访问。
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use peri_agent::{messages::BaseMessage, middleware::capabilities::BeforeModelState};
 /// fn cannot_edit_cached_input(state: &mut dyn BeforeModelState, message: BaseMessage) {
 ///     state.replace_message(message);
@@ -265,16 +283,16 @@ pub trait BeforeModelState: StateView + MessageAppend + QueueState {}
 /// 候选经本状态传递，失败或取消时由调用方直接丢弃 state，不需要 middleware
 /// 内部的 commit/discard 状态协议。
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use peri_agent::{messages::BaseMessage, middleware::capabilities::StartupState};
 /// fn cannot_append_history(state: &mut dyn StartupState, message: BaseMessage) {
 ///     state.add_message(message);
 /// }
 /// ```
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use peri_agent::middleware::capabilities::StartupState;
 /// fn cannot_drain_queue(state: &mut dyn StartupState) {
-///     state.v2_queue().drain_all();
+///     state.v2_producer().drain_all();
 /// }
 /// ```
 pub trait StartupState: Send + Sync {
@@ -326,8 +344,8 @@ impl<T: MiddlewareState + ?Sized> MessageReplace for T {
 }
 
 impl<T: MiddlewareState + ?Sized> QueueState for T {
-    fn v2_queue(&self) -> &MessageQueue {
-        MiddlewareState::v2_queue(self)
+    fn v2_producer(&self) -> ProducerQueue<'_> {
+        MiddlewareState::v2_queue(self).producer()
     }
     fn enqueue_v2_message(&self, msg: QueuedMessage) {
         MiddlewareState::enqueue_v2_message(self, msg)

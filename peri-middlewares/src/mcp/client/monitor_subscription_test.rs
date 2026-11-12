@@ -229,6 +229,18 @@ async fn wait_settled_external(manager: &Arc<dyn TaskManager>) {
     }
 }
 
+/// Wait until the owner no longer registers the finished subscription.
+async fn wait_host_registration_release(owner: &McpTaskOwner) {
+    let deadline = tokio::time::Instant::now() + OBSERVE_TIMEOUT;
+    while owner.active_count() > 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the finished task subscription must release its owner registration"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn wait_for_reminder(queue: &MessageQueue) -> Vec<QueuedMessage> {
     let deadline = tokio::time::Instant::now() + OBSERVE_TIMEOUT;
     loop {
@@ -681,6 +693,63 @@ async fn deadline_monitor_terminal_state_wakes_the_owner() {
     assert!(body.contains(&monitor_id), "{body}");
     assert!(body.contains("finished with status Failed"), "{body}");
     assert!(!body.contains("time(s)"), "no alert was configured: {body}");
+
+    shutdown_link(link, pool, owner).await;
+}
+
+/// 重复完成 / 取消 monitor 任务后，宿主登记必须回到基线，终态提醒不重复。
+#[tokio::test]
+async fn completed_and_cancelled_monitor_rounds_release_host_registrations() {
+    let link = connect_monitor().await;
+    let (owner, spawner) = McpTaskOwner::new();
+    let pool = pool_with_monitor(&link, spawner);
+    let (queue, manager) = register_bridge_session(&pool, "session-a");
+
+    for round in 0..4 {
+        let completed = round % 2 == 0;
+        let command = if completed { "echo done" } else { "sleep 30" };
+        let receipt = start_monitor_via_bridge(
+            &pool,
+            &link,
+            "session-a",
+            json!({ "command": command, "label": format!("retention-{round}") }),
+        )
+        .await;
+        let monitor_id = receipt_field(&receipt, "monitor_id");
+
+        if !completed {
+            let stopped: serde_json::Value = serde_json::from_str(
+                &invoke_monitor_via_bridge(
+                    &pool,
+                    &link,
+                    "session-a",
+                    "monitor_stop",
+                    json!({ "task_id": monitor_id, "reason": "retention probe" }),
+                )
+                .await,
+            )
+            .expect("stop JSON");
+            assert!(stopped["cleanup"].is_object(), "{stopped}");
+        }
+
+        wait_monitor_terminal(&link.peer(), "session-a", &monitor_id).await;
+        wait_settled_external(&manager).await;
+        wait_host_registration_release(&owner).await;
+        assert_eq!(
+            owner.active_count(),
+            0,
+            "round {round} must return to the host baseline"
+        );
+
+        let messages = drain(&queue);
+        assert_eq!(
+            messages.len(),
+            1,
+            "round {round} must deliver exactly one terminal reminder: {messages:?}"
+        );
+        let body = reminder_body(&messages[0]);
+        assert!(body.contains(&monitor_id), "{body}");
+    }
 
     shutdown_link(link, pool, owner).await;
 }

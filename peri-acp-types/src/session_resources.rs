@@ -31,8 +31,8 @@ use crate::history_window::{
 };
 use crate::messages::MessageId;
 use crate::session::{
-    MqCancelOutcome, MqEnqueueOutcome, MqEntry, MqFilter, MqInput, MqReceiveOutcome,
-    MqReceiveSelection,
+    MqCancelOutcome, MqEnqueueOutcome, MqEntry, MqFilter, MqHeader, MqInput, MqReceiveOutcome,
+    MqReceiveSelection, MqWatermark,
 };
 use crate::store::{CompactionChange, MessageFlags, PersistedPayload};
 use crate::system_reminder::TrustedSystemReminder;
@@ -92,6 +92,12 @@ pub trait ChildResumeClaim: Send + Sync {
     async fn mark_failed(&self) -> SessionResourceResult<()>;
     /// 认领终止（取消/宿主退出）：恢复到认领前的状态。
     async fn mark_terminated(&self) -> SessionResourceResult<()>;
+
+    /// 认领终止并提交领域终态，返回本次是否仍拥有该 child 的写入权。
+    ///
+    /// 实现必须把「恢复到认领前」与终态写入放在同一个归属校验内完成：返回
+    /// `Ok(false)` 表示新认领已接管该 child，调用方不得再写终态。
+    async fn finish_with_status(&self, status: AgentStatus) -> SessionResourceResult<bool>;
 }
 
 /// 会话资源门面：业务侧唯一的会话行为入口。
@@ -894,6 +900,48 @@ pub trait SessionResources: Send + Sync {
         Err(SessionResourceError::new(
             SessionResourceErrorKind::Unsupported,
         ))
+    }
+
+    /// MQ 控制面投影：与 [`Self::mq_query`] 同过滤语义，但不解码正文。
+    ///
+    /// 默认实现退回完整查询；具备列投影能力的后端应覆盖，避免布尔/策略判定
+    /// 被正文大小放大。
+    async fn mq_headers(
+        &self,
+        thread_id: &ThreadId,
+        filter: MqFilter,
+    ) -> SessionResourceResult<Vec<MqHeader>> {
+        Ok(self
+            .mq_query(thread_id, filter)
+            .await?
+            .into_iter()
+            .map(|entry| entry.header())
+            .collect())
+    }
+
+    /// 本 thread 的 MQ 行数。默认退回完整查询。
+    async fn mq_count(&self, thread_id: &ThreadId) -> SessionResourceResult<usize> {
+        Ok(self.mq_query(thread_id, MqFilter::default()).await?.len())
+    }
+
+    /// 本 thread 是否至少有一条 MQ 行。默认退回完整查询。
+    async fn mq_exists(&self, thread_id: &ThreadId) -> SessionResourceResult<bool> {
+        Ok(!self
+            .mq_query(thread_id, MqFilter::default())
+            .await?
+            .is_empty())
+    }
+
+    /// 本 thread 的最大 `(enqueued_at, id)`。默认退回完整查询。
+    async fn mq_watermark(
+        &self,
+        thread_id: &ThreadId,
+    ) -> SessionResourceResult<Option<MqWatermark>> {
+        Ok(self
+            .mq_query(thread_id, MqFilter::default())
+            .await?
+            .last()
+            .map(MqEntry::watermark))
     }
 
     /// 取消一条仍在 MQ 的用户输入，并返回整行原稿。

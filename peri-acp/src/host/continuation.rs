@@ -126,6 +126,23 @@ pub(crate) fn continuation_still_valid(state: &SessionState, epoch: u64) -> bool
     state.continuation_epoch == epoch
 }
 
+/// 一次续跑资格查询失败后，把被 take 消耗的 armed 还给同一代际。
+///
+/// 查询失败不等于「没有可续跑的工作」：若直接放弃，已消费的一次性资格会丢失，
+/// listener 重查时只能看到 `armed=false`，结果滞留到下一次用户输入。恢复前必须
+/// 确认代际未变（新 prompt / 再次 Stop 已使其失效）且会话未关闭、没有续跑在飞。
+pub(crate) fn restore_continuation_armed(state: &mut SessionState, epoch: u64) -> bool {
+    if !continuation_still_valid(state, epoch)
+        || state.closing
+        || state.close_in_flight > 0
+        || state.continuation_in_flight
+    {
+        return false;
+    }
+    state.continuation_armed = true;
+    true
+}
+
 /// 续跑是否真正可 dispatch：代际未变 **且** 队列中仍有待消费的
 /// SubAgentComplete Defer。两者缺一即跳过空跑——
 /// - 代际变化：用户新 prompt 已排队/已执行（Defer 由新 prompt 消费）；
@@ -419,13 +436,32 @@ pub(crate) async fn run_continuation_scheduler(
             continue;
         }
         let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(&cfg);
-        if (req.mq_steering
-            && !super::activation::mq_steering_allowed(local, &req.session_id).await)
-            || (req.pending_result
-                && !super::activation::result_allowed(local, &req.session_id).await)
-        {
-            mark_recovery_launch_failed(&cfg, &req);
-            continue;
+        if req.mq_steering || req.pending_result {
+            let mq_allowed = if req.mq_steering {
+                match super::activation::mq_steering_allowed_checked(local, &req.session_id).await {
+                    Ok(allowed) => allowed,
+                    Err(error) => {
+                        // 无法判断时不能把请求当作已失效丢弃：把重查交还 listener。
+                        warn!(
+                            session_id = %req.session_id,
+                            %error,
+                            "continuation eligibility check failed; requesting listener recheck"
+                        );
+                        if let Some(queue) = local.session_manager.v2_queue_for(&req.session_id) {
+                            queue.request_recheck();
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                true
+            };
+            let result_allowed = !req.pending_result
+                || super::activation::result_allowed(local, &req.session_id).await;
+            if !mq_allowed || !result_allowed {
+                mark_recovery_launch_failed(&cfg, &req);
+                continue;
+            }
         }
         let epoch = {
             let mut sessions = sessions.lock().await;

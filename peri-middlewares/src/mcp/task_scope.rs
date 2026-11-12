@@ -62,7 +62,6 @@ enum OwnerPhase {
 enum TaskPhase {
     Running,
     Stopping,
-    Finished,
 }
 
 struct Completion {
@@ -143,18 +142,30 @@ struct CompletionGuard {
 
 impl Drop for CompletionGuard {
     fn drop(&mut self) {
-        self.completion.finish();
-        if let Some(inner) = self.inner.upgrade() {
+        // Detach this generation before publishing completion: a waiter that
+        // observes "done" must not still find the generation registered. The
+        // record (and its abort handle) is dropped after the state lock.
+        let removed = self.inner.upgrade().and_then(|inner| {
             let mut state = inner.state.lock().expect("MCP task state poisoned");
-            if let Some(records) = state.records.get_mut(&self.key) {
-                if let Some(record) = records
-                    .iter_mut()
-                    .find(|record| record.generation == self.generation)
+            let mut removed = None;
+            let empty = if let Some(records) = state.records.get_mut(&self.key) {
+                if let Some(index) = records
+                    .iter()
+                    .position(|record| record.generation == self.generation)
                 {
-                    record.phase = TaskPhase::Finished;
+                    removed = Some(records.swap_remove(index));
                 }
+                records.is_empty()
+            } else {
+                false
+            };
+            if empty {
+                state.records.remove(&self.key);
             }
-        }
+            removed
+        });
+        drop(removed);
+        self.completion.finish();
     }
 }
 
@@ -212,9 +223,8 @@ impl McpTaskOwner {
                     .expect("MCP task state poisoned")
                     .records
                     .values()
-                    .flatten()
-                    .filter(|record| record.phase != TaskPhase::Finished)
-                    .count()
+                    .map(Vec::len)
+                    .sum()
             })
             .unwrap_or_default()
     }
@@ -263,12 +273,9 @@ impl McpTaskSpawner {
         if state.phase != OwnerPhase::Open {
             return Err(TaskAdmissionError::OwnerClosed);
         }
-        compact_finished(&mut state, &key);
-        if state.records.get(&key).is_some_and(|records| {
-            records
-                .iter()
-                .any(|record| record.phase != TaskPhase::Finished)
-        }) {
+        // Completed generations are deregistered by their guard, so any record
+        // still under this key represents an in-flight task.
+        if state.records.contains_key(&key) {
             return Err(TaskAdmissionError::DuplicateKey);
         }
         let generation = state.next_generation;
@@ -307,7 +314,6 @@ impl McpTaskSpawner {
             };
             records
                 .iter_mut()
-                .filter(|record| record.phase != TaskPhase::Finished)
                 .map(|record| {
                     record.phase = TaskPhase::Stopping;
                     (record.abort.clone(), record.completion.clone())
@@ -320,8 +326,9 @@ impl McpTaskSpawner {
         for (_, completion) in controls {
             completion.wait().await;
         }
-        let mut state = inner.state.lock().expect("MCP task state poisoned");
-        compact_finished(&mut state, key);
+        // The guard detaches each generation before finishing its completion, so
+        // no key-wide removal is needed here. Deleting the key after waiting
+        // would also race a same-key generation spawned in the meantime.
     }
 
     /// 停止某实例的全部宿主面资源订阅（实例移除 / 重连路径调用）。
@@ -371,15 +378,6 @@ impl McpTaskSpawner {
     }
 }
 
-fn compact_finished(state: &mut McpTaskState, key: &McpTaskKey) {
-    if let Some(records) = state.records.get_mut(key) {
-        records.retain(|record| record.phase != TaskPhase::Finished);
-        if records.is_empty() {
-            state.records.remove(key);
-        }
-    }
-}
-
 fn abort_all(inner: &McpTaskInner) {
     let aborts: Vec<_> = inner
         .state
@@ -388,7 +386,7 @@ fn abort_all(inner: &McpTaskInner) {
         .records
         .values_mut()
         .flatten()
-        .filter(|record| record.phase != TaskPhase::Finished)
+        .filter(|record| record.phase == TaskPhase::Running)
         .map(|record| {
             record.phase = TaskPhase::Stopping;
             record.abort.clone()

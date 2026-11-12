@@ -166,7 +166,7 @@ fn chain_collection_parity_with_build_collected_sections() {
 
     for (name, overrides, language, disabled) in cases {
         let ctx = make_parity_context(disabled, overrides.clone(), language.clone());
-        let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+        let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
         let mut chain_sections: Vec<(String, u16, u16, String)> = out
             .chain
             .collect_prompt_sections()

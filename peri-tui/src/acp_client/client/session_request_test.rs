@@ -94,8 +94,8 @@ async fn window_open_is_enqueued_only_after_session_initialization_succeeds() {
     assert_eq!(load.await.unwrap().unwrap(), WINDOW_SESSION);
     assert_eq!(
         window_state(),
-        (WINDOW_SESSION.to_owned(), 1),
-        "初始化成功后恰好 enqueue 一次 open（重置状态并推进请求序号）"
+        (WINDOW_SESSION.to_owned(), WINDOW_SENTINEL_SEQ + 1),
+        "初始化成功后恰好 enqueue 一次 open（重置状态且请求序号跨会话边界继续单调）"
     );
     client.close();
 }
@@ -173,8 +173,8 @@ async fn new_session_enqueues_window_open_after_initialization_succeeds() {
     assert_eq!(create.await.unwrap().unwrap(), WINDOW_SESSION);
     assert_eq!(
         window_state(),
-        (WINDOW_SESSION.to_owned(), 1),
-        "新建会话初始化成功后恰好 enqueue 一次 open"
+        (WINDOW_SESSION.to_owned(), WINDOW_SENTINEL_SEQ + 1),
+        "新建会话初始化成功后恰好 enqueue 一次 open（请求序号继续单调）"
     );
     client.close();
 }

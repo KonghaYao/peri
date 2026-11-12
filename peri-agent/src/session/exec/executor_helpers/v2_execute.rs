@@ -17,7 +17,7 @@ use peri_acp_types::{
     tasks::{BgTaskKind, TaskManager},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::agent::{
     async_tasks::TaskManager as AgentTaskManager,
@@ -580,21 +580,34 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         LoopResult::Completed | LoopResult::HookStopped { .. }
     ) {
         let queue = v2_out.session.queue();
-        if queue.has_ensure_processing().await.unwrap_or(false) {
-            if let Some(ref tx) = req.continuation_notify {
-                let _ = tx.send(crate::session::exec::executor::ContinuationRequest {
-                    session_id: req.session_id.clone(),
-                    kind: BgTaskKind::Agent,
-                    mq_steering: true,
-                    pending_result: false,
-                    recovery: false,
-                });
-                let queue_len = queue.len().await.unwrap_or(0);
-                tracing::debug!(
+        match queue.has_ensure_processing().await {
+            Ok(true) => {
+                if let Some(ref tx) = req.continuation_notify {
+                    let _ = tx.send(crate::session::exec::executor::ContinuationRequest {
+                        session_id: req.session_id.clone(),
+                        kind: BgTaskKind::Agent,
+                        mq_steering: true,
+                        pending_result: false,
+                        recovery: false,
+                    });
+                    let queue_len = queue.len().await.unwrap_or(0);
+                    tracing::debug!(
+                        session_id = %req.session_id,
+                        queue_len,
+                        "[v2] MQ steering continuation notified after run_react_loop"
+                    );
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                // 查询失败不能当作「没有待处理工作」：交还 listener 重查，
+                // 否则本轮结束前投递的 MQ 提醒会一直搁置到下一次入队。
+                warn!(
                     session_id = %req.session_id,
-                    queue_len,
-                    "[v2] MQ steering continuation notified after run_react_loop"
+                    %error,
+                    "[v2] MQ steering check failed; requesting listener recheck"
                 );
+                queue.request_recheck();
             }
         }
     }

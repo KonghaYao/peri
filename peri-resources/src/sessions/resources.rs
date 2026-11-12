@@ -666,14 +666,16 @@ impl SessionResources for SessionResourcesImpl {
                 "child session does not belong to the claimed root",
             ));
         }
-        // 认领在写侧门禁内完成「读状态 + 写 active」：并发认领里只有一个能看到非 active。
-        let previous = self
+        // 认领在写侧门禁内完成「读状态 + 读工作意图 + 分配世代 + 写 active」：并发
+        // 认领里只有一个能看到非 active；工作意图与状态在补偿时也要一起恢复。
+        let (previous, previous_work_state, claim_nonce) = self
             .gate
             .with_exclusive(root, || async {
                 let previous = self.gate.data().load_child_resume_record(child).await?;
                 if previous.status.is_active() {
                     return Err(invalid_input("child session is still active"));
                 }
+                let previous_work_state = self.gate.data().load_meta(child).await?.work_state;
                 self.gate
                     .data()
                     .store_child_resume_record(
@@ -684,13 +686,17 @@ impl SessionResources for SessionResourcesImpl {
                         },
                     )
                     .await?;
-                Ok(previous)
+                // 写入成功后才登记世代：失败的认领不会让旧 handle 失去补偿资格。
+                let claim_nonce = self.gate.issue_claim(child);
+                Ok((previous, previous_work_state, claim_nonce))
             })
             .await?;
         Ok(Box::new(ChildResumeClaimHandle::new(
             self.gate.clone(),
             child.clone(),
             previous,
+            previous_work_state,
+            claim_nonce,
         )))
     }
 
@@ -772,9 +778,32 @@ impl SessionResources for SessionResourcesImpl {
             .await
     }
     async fn delete_session_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
-        self.gate
+        // root 在删除前解析：删除整棵树后无法再从存储确认归属。
+        let root = self.gate.data().session_root(id).await?;
+        // 子树身份也必须在删除前取得：删除后无法再知道哪些认领世代随行消失。
+        // 没有认领登记时跳过这次读取；读取失败只放弃回收，不影响删除本身。
+        let claim_targets: Vec<ThreadId> = if self.gate.has_claims() {
+            match self.gate.data().list_session_tree(id).await {
+                Ok(tree) => tree.into_iter().map(|meta| meta.id).collect(),
+                Err(error) => {
+                    tracing::warn!(%error, %id, "session tree claim cleanup skipped");
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let result = self
+            .gate
             .with_mutation(id, || self.gate.data().delete_tree(id))
-            .await
+            .await;
+        if result.is_ok() {
+            self.gate.release_claims(&claim_targets);
+            if root == *id {
+                self.gate.release_pending_for(&root);
+            }
+        }
+        result
     }
     async fn recover_session_persistence(
         &self,
@@ -804,6 +833,29 @@ impl SessionResources for SessionResourcesImpl {
     ) -> SessionResourceResult<Vec<MqEntry>> {
         // 只读投影：不经过 mutation 门禁，也不建立写屏障。
         self.gate.data().mq_query(thread_id, filter).await
+    }
+
+    async fn mq_headers(
+        &self,
+        thread_id: &ThreadId,
+        filter: MqFilter,
+    ) -> SessionResourceResult<Vec<peri_acp_types::session::MqHeader>> {
+        self.gate.data().mq_headers(thread_id, filter).await
+    }
+
+    async fn mq_count(&self, thread_id: &ThreadId) -> SessionResourceResult<usize> {
+        self.gate.data().mq_count(thread_id).await
+    }
+
+    async fn mq_exists(&self, thread_id: &ThreadId) -> SessionResourceResult<bool> {
+        self.gate.data().mq_exists(thread_id).await
+    }
+
+    async fn mq_watermark(
+        &self,
+        thread_id: &ThreadId,
+    ) -> SessionResourceResult<Option<peri_acp_types::session::MqWatermark>> {
+        self.gate.data().mq_watermark(thread_id).await
     }
 
     async fn mq_cancel(

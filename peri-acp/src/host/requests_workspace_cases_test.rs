@@ -308,13 +308,15 @@ async fn worktree_new_resources_use_the_target_directory() {
         environment.cfg.session_manager.get_session(id).unwrap().cwd,
         state.cwd
     );
-    let pool = environment
-        .cfg
-        .mcp_pool
-        .clone()
-        .expect("bare 会话仍提供 builtin workspace")
-        .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
-        .unwrap_or_else(|_| panic!("workspace MCP pool"));
+    let pool = unsafe {
+        environment
+            .cfg
+            .mcp_pool
+            .clone()
+            .expect("bare 会话仍提供 builtin workspace")
+            .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
+    }
+    .unwrap_or_else(|_| panic!("workspace MCP pool"));
     let workspace = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if let Some(client) = pool.get_client("workspace") {

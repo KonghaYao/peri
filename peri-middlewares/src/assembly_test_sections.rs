@@ -23,7 +23,7 @@ fn c2_chain_collection_matches_static_declaration() {
     ctx.agent_overrides = Some(overrides.clone());
     ctx.language = Some("zh-CN".to_string());
 
-    let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+    let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
     let collected = out.chain.collect_prompt_sections();
 
     let expected = DefaultSystemPromptMiddleware::sections(Some(&overrides))
@@ -67,7 +67,7 @@ fn c2_disable_holders_removes_sections_from_chain() {
         .insert("DefaultSystemPromptMiddleware".to_string());
     ctx.meta_harness_disabled
         .insert("LangMiddleware".to_string());
-    let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+    let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
 
     let names: Vec<&str> = out.chain.names();
     assert!(
@@ -107,6 +107,7 @@ fn meta_harness_disabling_gated_holder_removes_section_and_tools() {
     // 基线：默认装配下四段全部收集
     let baseline_ctx = base_context();
     let baseline_ids: Vec<&str> = build_middleware_chain(&ProductionChainAssembler, &baseline_ctx)
+        .expect("assembly")
         .chain
         .collect_prompt_sections()
         .iter()
@@ -144,7 +145,7 @@ fn meta_harness_disabling_gated_holder_removes_section_and_tools() {
     for (mw, section_id, gone_tools) in cases {
         let mut ctx = base_context();
         ctx.meta_harness_disabled.insert(mw.to_string());
-        let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+        let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
         let collected_ids: Vec<&str> = out
             .chain
             .collect_prompt_sections()
@@ -179,7 +180,7 @@ fn chain_collected_gated_sections_match_projection() {
 
     // 默认装配：持有者全部在链 → 投影包含全部三个 gated 段
     let ctx = base_context();
-    let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+    let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
     let names: HashSet<&str> = out.chain.names().into_iter().collect();
     let projected = project_enabled_sections(&names);
     for id in ["10_hitl", "11_subagent", "13_skills"] {
@@ -192,7 +193,7 @@ fn chain_collected_gated_sections_match_projection() {
     let mut ctx = base_context();
     ctx.meta_harness_disabled
         .insert("SubAgentMiddleware".to_string());
-    let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+    let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
     let names: HashSet<&str> = out.chain.names().into_iter().collect();
     let projected = project_enabled_sections(&names);
     assert!(
@@ -261,7 +262,11 @@ async fn test_stage_completion_reminders_share_assembled_task_manager() {
     impl MiddlewareChainAssembler for CaptureAssembler {
         type Context = AssemblyContext;
         type Output = ChainAssembly;
-        fn assemble(&self, _: &[ChainSlot], ctx: &AssemblyContext) -> ChainAssembly {
+        fn assemble(
+            &self,
+            _: &[ChainSlot],
+            ctx: &AssemblyContext,
+        ) -> Result<ChainAssembly, peri_agent::session::factory::AssemblyError> {
             *self.0.lock() = Some(ctx.task_manager.clone());
             // 仅保留目标槽位，避免其他中间件读取用户配置或建立外部连接。
             // v4-part-4 W3-C1（前提变更）：原列表含 `ChainSlot::Terminal`——壳工具不再是

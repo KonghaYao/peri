@@ -2,8 +2,8 @@
 //!
 //! 正例走**真实线路夹具**（`AgentFaceFixture`：生产 handler + 生产池句柄），断言
 //! 绑定后端口目录非空——即会话创建期的冻结渲染确实能拿到候选；同时钉住关闭集
-//! 派生的本地面关闭位（与 turn 级 bind 同形）。反例只钉「不适用 ⇒ false 且不
-//! panic」，不需要线路。
+//! 派生的本地面关闭位（与 turn 级 bind 同形）。反例钉「端口类型不符 ⇒ 显式 Err
+//! 且不产生降级实例」，不需要线路。
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -40,10 +40,8 @@ async fn bind_agent_catalog_from_pool_exposes_catalog_and_honours_closure() {
     let pool: Arc<dyn McpPoolPort> = fixture.pool.clone();
 
     let open_port: Arc<dyn AgentCatalogPort> = Arc::new(AgentCatalogProvider::new());
-    assert!(
-        bind_agent_catalog_from_pool(&open_port, &pool, SESSION, &HashSet::new()),
-        "池与端口都是本 crate 实现 ⇒ 绑定必须成立"
-    );
+    bind_agent_catalog_from_pool(&open_port, &pool, SESSION, &HashSet::new())
+        .expect("池与端口都是本 crate 实现 ⇒ 绑定必须成立");
     let ids: Vec<String> = open_port.catalog(false).into_iter().map(|e| e.id).collect();
     assert_eq!(
         ids,
@@ -55,17 +53,15 @@ async fn bind_agent_catalog_from_pool_exposes_catalog_and_honours_closure() {
     let closed_port: Arc<dyn AgentCatalogPort> = Arc::new(AgentCatalogProvider::new());
     let mut disabled = HashSet::new();
     disabled.insert(crate::assembly::SUB_AGENT_FACE_CLOSED_KEY.to_string());
-    assert!(
-        bind_agent_catalog_from_pool(&closed_port, &pool, SESSION, &disabled),
-        "关闭集不影响绑定成立与否，只决定本地面开关"
-    );
+    bind_agent_catalog_from_pool(&closed_port, &pool, SESSION, &disabled)
+        .expect("关闭集不影响绑定成立与否，只决定本地面开关");
     assert!(
         closed_port.catalog(false).is_empty(),
         "关闭集命中 ⇒ 本地面关闭 ⇒ 空目录（X4/J5：不得回落磁盘）"
     );
 }
 
-/// 反例：端口不是本 crate 实现 ⇒ 返回 `false` 且不 panic（不回落降级实例）。
+/// 反例：端口不是本 crate 实现 ⇒ 显式 `Err` 且不 panic（不回落降级实例）。
 ///
 /// 池用真实 `McpClientPool`（`new_pending` 即可，downcast 成功），确保拒绝来自
 /// **端口**分支而不是池分支。
@@ -73,13 +69,46 @@ async fn bind_agent_catalog_from_pool_exposes_catalog_and_honours_closure() {
 fn bind_agent_catalog_from_pool_rejects_foreign_port() {
     let pool: Arc<dyn McpPoolPort> = Arc::new(crate::mcp::McpClientPool::new_pending());
     let foreign: Arc<dyn AgentCatalogPort> = Arc::new(NoopAgentCatalog);
-    assert!(
-        !bind_agent_catalog_from_pool(&foreign, &pool, "foreign-port-session", &HashSet::new()),
-        "端口非 `AgentCatalogProvider` ⇒ 不适用，返回 false"
+    assert_eq!(
+        bind_agent_catalog_from_pool(&foreign, &pool, "foreign-port-session", &HashSet::new()),
+        Err(super::AgentCatalogBindingError::AgentCatalogMismatch),
+        "端口非 `AgentCatalogProvider` ⇒ fail-closed 返回显式错误"
     );
     assert!(
         foreign.catalog(true).is_empty(),
-        "不适用路径不得产生任何目录内容"
+        "失败路径不得产生任何目录内容"
+    );
+}
+
+/// 反例：池不是本 crate 实现 ⇒ 显式 `Err`（池分支），不进入端口绑定。
+#[tokio::test]
+async fn bind_agent_catalog_from_pool_rejects_foreign_pool() {
+    struct ForeignPool;
+
+    #[async_trait::async_trait]
+    impl McpPoolPort for ForeignPool {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
+            peri_acp_types::ports::McpPoolShutdownReport::Complete {
+                settled_services: 0,
+                failed_services: 0,
+            }
+        }
+
+        fn snapshot(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+    }
+
+    let pool: Arc<dyn McpPoolPort> = Arc::new(ForeignPool);
+    let port: Arc<dyn AgentCatalogPort> = Arc::new(AgentCatalogProvider::new());
+    assert_eq!(
+        bind_agent_catalog_from_pool(&port, &pool, "foreign-pool-session", &HashSet::new()),
+        Err(super::AgentCatalogBindingError::McpPoolMismatch),
+        "池非 `McpClientPool` ⇒ fail-closed 返回显式错误"
     );
 }
 
