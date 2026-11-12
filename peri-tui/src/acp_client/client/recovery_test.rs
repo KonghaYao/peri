@@ -263,6 +263,43 @@ async fn close_incomplete_is_replayed_before_establishing_next_session() {
     assert_eq!(client.current_session_id().as_deref(), Some("second"));
 }
 
+/// 冷 load 清理未完成：服务端把连接绑定到 owner；客户端必须记住它，下一次切换先
+/// close(owner)，否则会被 `session_switch_requires_close` 永久拒绝。
+#[tokio::test]
+#[serial_test::serial]
+async fn cleanup_incomplete_load_remembers_owner_for_next_switch() {
+    let _guard = UiAtomsGuard::capture();
+    let (client, server) = interactive_client();
+    let cleanup = AcpError::new(-32010, "Session cleanup incomplete").with_data(json!({
+        "reason": "session_cleanup_incomplete",
+        "sessionId": TARGET,
+    }));
+    let (load, _) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            client.load_session(TARGET, "/startup", None),
+            reach_load(&server, Err(cleanup))
+        )
+    })
+    .await
+    .expect("cleanup-incomplete load must return");
+    assert_eq!(load.unwrap_err().code, -32010);
+
+    let switcher = client.clone();
+    let next = tokio::spawn(async move { switcher.new_session("/w", None).await });
+    let (id, method, params) = next_request(&server).await;
+    assert_eq!(method, "session/close");
+    assert_eq!(params["sessionId"], TARGET, "必须先关闭 cleanup owner");
+    server.send_response(id, Ok(json!({}))).await.unwrap();
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/new");
+    server
+        .send_response(id, Ok(json!({ "sessionId": "after-cleanup" })))
+        .await
+        .unwrap();
+    assert_eq!(next.await.unwrap().unwrap(), "after-cleanup");
+    assert!(client.check_restore_error().is_ok());
+}
+
 /// 关闭旧会话持续 incomplete：失败后必须保留旧身份，下一次建立会话先重放同一
 /// 关闭——不得绕过关闭直接 `session/new`（服务端旧会话可能仍在 Closing），也不得
 /// 写入粘滞 `restore_error`（那会让后续每次发送/建立都被同一条陈旧错误拦截）。

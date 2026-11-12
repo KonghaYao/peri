@@ -1,12 +1,26 @@
 //! New-session and load transitions under the operation gate.
 
 use peri_acp::transport::{AcpTransport, types::AcpError};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::acp_client::client::{AcpTuiClient, ClientProjectionMode, SessionLoadReservation};
 use crate::acp_client::interaction_lifecycle::{TransitionKind, TransitionOperation};
 
 use super::guards::{PreparingSessionGuard, SessionProjectionGuard};
+
+/// 冷 load 清理未完成时服务端已把连接绑定到该 owner，客户端必须显式 close。
+fn cleanup_incomplete_owner(error: &AcpError) -> Option<&str> {
+    if error.code != -32010 {
+        return None;
+    }
+    let data: &Value = error.data.as_ref()?;
+    if data.get("reason").and_then(Value::as_str) != Some("session_cleanup_incomplete") {
+        return None;
+    }
+    data.get("sessionId")
+        .and_then(Value::as_str)
+        .filter(|session_id| !session_id.is_empty())
+}
 
 impl AcpTuiClient {
     /// Create a new agent session.
@@ -244,6 +258,11 @@ impl AcpTuiClient {
         {
             Ok(loaded) => loaded,
             Err(error) => {
+                // cleanup-incomplete 已把连接绑定到该会话；下一次建立/切换先关闭它，
+                // 否则服务端会以 session_switch_requires_close 永久拒绝。
+                if let Some(owner) = cleanup_incomplete_owner(&error) {
+                    self.remember_close_failure(owner, None, &error);
+                }
                 *self.restore_error.lock().unwrap() = Some(error.to_string());
                 self.lifecycle.fail_transition(start.generation);
                 transition.disarm();

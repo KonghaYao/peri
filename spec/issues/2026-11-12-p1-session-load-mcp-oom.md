@@ -81,7 +81,7 @@
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- host::requests::tests::workspace_cases`（修复前基线）→ 15 passed，0 failed；存在 1 条 macOS linker compact-unwind warning。
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- session_switch` → 11 passed，0 failed；覆盖状态机、真实 close 失败/成功、history bypass、响应 write failure 的 reservation 回滚，以及 cleanup-incomplete owner 的绑定/释放。
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- recovery_wire` → 1 passed，0 failed；过滤词已从修复前 0 tests 假绿变为非零。
-- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- close_failure` → 10 passed，0 failed。
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- close_failure` → 11 passed，0 failed。
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- recovery_child` → 20 passed，0 failed，1 ignored（既有产品裁决用例）。
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- connection` → 40 passed，0 failed；旧 fork wire 用例已同步为先成功 close 当前会话再 fork。
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- history_page_wire` → 79 passed，0 failed，1 ignored（既有 16 MiB 显式性能夹具）。
@@ -91,5 +91,6 @@
 - `bash ./scripts/check-changed.sh` → exit 0；实际执行 `cargo check --locked -p peri-acp -p peri-tui -p peri-wasm`。
 - `./scripts/cargo-rmcp-patched.sh clippy --locked -p peri-acp --all-targets -- -D warnings` → exit 0。
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib` → 1261 passed，0 failed，2 ignored。
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib` → 2701 passed，0 failed，9 ignored；新增 `cleanup_incomplete_load_remembers_owner_for_next_switch` 覆盖 TUI 记录 cleanup owner 并在下一次切换先 close 的 wire 顺序。
 - `cargo fmt --all -- --check` → exit 0；`git diff --check` → exit 0。修改 Rust 文件均 ≤1000 行，`server_loop.rs` 为 980 行。
 - 权威文档分层复核：稳定不变量在 `ARC-ACP-SESSION-SWITCH-001`，wire 语义在 `docs/design/peri-acp-protocol.md`，代码落点在 `docs/code-index/peri-acp.md`，本文件只保留在办验收。
