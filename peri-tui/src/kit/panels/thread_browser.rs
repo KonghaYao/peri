@@ -33,6 +33,10 @@ use std::time::Duration;
 
 #[path = "thread_browser/history_preview.rs"]
 mod history_preview;
+#[path = "thread_browser/selection.rs"]
+mod selection;
+
+use selection::{keep_selection_visible, sync_refreshed_selection, visible_target};
 
 #[component]
 pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -114,7 +118,14 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 选中项是 thread 身份，不是行下标：后台每 2 秒重排一次列表（`updated_at`
     // 变化会把刚聊过的会话提到首行），按下标跟随会把用户已经挪到某行的光标
     // 悄悄换到另一条会话上，Enter 于是加载了不该加载的 thread。
-    let selected_index = resolve_selection(selected_id.read().as_deref(), &threads, *cursor.read());
+    let selected_index = sync_refreshed_selection(
+        &mut sv.write_no_update(),
+        selected_id.read().as_deref(),
+        &threads,
+        *cursor.read(),
+        *last_viewport.read(),
+        viewport_rows,
+    );
     if *cursor.read() != selected_index {
         *cursor.write_no_update() = selected_index;
     }
@@ -127,12 +138,6 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
     if *last_viewport.read() != viewport_rows {
         *last_viewport.write_no_update() = viewport_rows;
-        keep_selection_visible(
-            &mut sv.write_no_update(),
-            selected_index,
-            item_count,
-            viewport_rows,
-        );
     }
     let scroll_start = sv
         .read()
@@ -277,7 +282,10 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         *sv.write() = ScrollViewState::default();
                     }
                     KeyCode::Char('a') => {
-                        if let Some(sid) = selected_id.read().clone()
+                        // 归档目标必须是当前列表的成员：空刷新帧保留的身份在面板里
+                        // 没有对应的行，不能对一条用户看不见的会话发起归档。
+                        let target = visible_target(selected_id.read().as_deref(), &event_threads);
+                        if let Some(sid) = target
                             && let Some(client) = ACP_CLIENT_HANDLE.get()
                         {
                             let client = client.clone();
@@ -343,10 +351,8 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     KeyCode::Enter => {
                         // 只加载当前列表里真实存在的身份：列表刷新期间的旧身份
                         // 不能变成一次「看不见的目标」的会话切换。
-                        if let Some(id) = selected_id
-                            .read()
-                            .clone()
-                            .filter(|id| event_threads.iter().any(|thread| &thread.id == id))
+                        if let Some(id) =
+                            visible_target(selected_id.read().as_deref(), &event_threads)
                         {
                             if let Some(tx) = THREAD_LOAD_TX.get() {
                                 let _ = tx.send(id);
@@ -832,28 +838,6 @@ fn adopt_selection(
         return selected_id.map(str::to_owned);
     }
     threads.get(index).map(|thread| thread.id.clone())
-}
-
-fn keep_selection_visible(
-    state: &mut ScrollViewState,
-    selected: usize,
-    count: usize,
-    viewport: usize,
-) {
-    if count == 0 || viewport == 0 {
-        return;
-    }
-    let max_start = count.saturating_sub(viewport);
-    let mut start = state.offset().y as usize;
-    if selected < start {
-        start = selected;
-    } else if selected >= start.saturating_add(viewport) {
-        start = selected.saturating_add(1).saturating_sub(viewport);
-    }
-    state.set_offset(ratatui_kit::ratatui::layout::Position::new(
-        0,
-        start.min(max_start) as u16,
-    ));
 }
 
 fn path_tail(path: &str, width: usize) -> String {

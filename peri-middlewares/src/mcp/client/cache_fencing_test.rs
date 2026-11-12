@@ -9,6 +9,10 @@ use tokio::sync::Notify;
 
 use super::super::{output_store::tests::Wire, AcpConnectionDeclaration, McpClientPool};
 
+/// 与 `read_resource` 返回的正文一致：rmcp 3.9.0 校验 manifest 必须包含自身
+/// `SKILL.md`，activation 也按该内容校验 digest。
+const OLD_SKILL_MD: &str = "---\nname: old\ndescription: old generation\n---\n\nold";
+
 struct DelayedProvider {
     entered: Arc<Notify>,
     release: Arc<Notify>,
@@ -45,7 +49,7 @@ impl ServerHandler for DelayedProvider {
         self.respond().await;
         Ok(ReadResourceResponse::Complete(
             serde_json::from_value(serde_json::json!({
-                    "contents": [{"uri": request.uri, "text": "---\nname: old\ndescription: old generation\n---\n\nold"}],
+                    "contents": [{"uri": request.uri, "text": OLD_SKILL_MD}],
                 "ttlMs": 60000, "cacheScope": "public"
             }))
             .unwrap(),
@@ -74,7 +78,10 @@ impl ServerHandler for DelayedProvider {
         let skill = rmcp::model::Skill::new(
             "skill://old/SKILL.md",
             rmcp::model::SkillFrontmatter::new("old", "old generation"),
-            rmcp::model::SkillResources::Files(Vec::new()),
+            rmcp::model::SkillResources::Files(vec![rmcp::model::SkillResource::from_bytes(
+                "skill://old/SKILL.md",
+                OLD_SKILL_MD.as_bytes(),
+            )]),
         );
         Ok(rmcp::model::ListSkillsResult::with_all_items(vec![skill])
             .with_ttl_ms(60000)
@@ -241,6 +248,31 @@ async fn scoped_skill_and_legacy_cache_rejects_old_tickets_and_keeps_same_genera
         .await
         .is_none());
     pool.clients.write().clear();
+    wire.close().await;
+}
+
+/// [回归测试] 延迟 provider 的 `skills/list` 必须返回含自身 `SKILL.md` 的
+/// 完整 manifest，否则 rmcp 3.9.0 在进入 fencing 逻辑前就拒绝整页。
+#[tokio::test]
+async fn delayed_provider_lists_a_valid_typed_skill_manifest() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let wire = Wire::connect(DelayedProvider {
+        entered: entered.clone(),
+        release: release.clone(),
+    })
+    .await;
+    let peer = wire.client.peer().clone();
+    let request = tokio::spawn(async move { peer.list_skills(None).await });
+    entered.notified().await;
+    release.notify_one();
+    let result = request.await.unwrap().expect("typed skills/list");
+    let skill = result.skills.first().expect("一条技能");
+    skill.validate().expect("manifest 必须包含 SKILL.md");
+    let rmcp::model::SkillResources::Files(files) = &skill.resources else {
+        panic!("静态技能必须是完整 manifest");
+    };
+    assert!(files.iter().any(|file| file.uri == "skill://old/SKILL.md"));
     wire.close().await;
 }
 

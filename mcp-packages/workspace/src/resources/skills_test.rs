@@ -308,18 +308,16 @@ fn locate_reports_missing_scope_and_missing_skill_distinctly() {
 }
 
 #[test]
-fn skills_list_response_shape_and_errors() {
+fn scan_catalog_for_list_shape_and_errors() {
     let base = tempdir();
     let dir = skill_dir(base.path(), "alpha", "alpha");
     write(&dir.join("extra.txt"), b"x");
     let input = input(vec![root(base.path(), ResourceScope::Project)]);
     let budget = ResourceBudget::default();
 
-    let response = super::skills_list_response(&input, &budget, None).expect("list 成功");
-    assert_eq!(response.skills.len(), 1);
-    assert!(response.next_cursor.is_none(), "首期不分页");
-    assert!(response.ttl_ms.is_none() && response.cache_scope.is_none());
-    let entry = &response.skills[0];
+    let catalog = super::scan_catalog_for_list(&input, &budget, None).expect("list 成功");
+    assert_eq!(catalog.len(), 1);
+    let entry = catalog[0].entry().expect("条目");
     assert_eq!(entry.uri, "skill://project/alpha/SKILL.md");
     assert_eq!(
         entry.frontmatter.get("name"),
@@ -328,7 +326,7 @@ fn skills_list_response_shape_and_errors() {
     assert_eq!(entry.resources.as_ref().expect("manifest").len(), 2);
 
     assert_eq!(
-        super::skills_list_response(&input, &budget, Some("cursor".to_string())).unwrap_err(),
+        super::scan_catalog_for_list(&input, &budget, Some("cursor".to_string())).unwrap_err(),
         ResourceError::InvalidUri,
         "首期不分页：非空 cursor 必须拒绝（不得伪装分页）"
     );

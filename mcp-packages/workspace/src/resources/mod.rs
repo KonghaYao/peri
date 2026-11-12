@@ -486,16 +486,17 @@ impl WorkspaceResourceProvider {
         &self,
         cursor: Option<String>,
     ) -> Result<rmcp::model::ListSkillsResult, ResourceError> {
-        let page = skills::skills_list_response(&self.input, &self.budget(), cursor)?;
-        let skills = page
-            .skills
-            .into_iter()
-            .map(|entry| typed_skill(&self.input, &self.budget(), entry))
+        let catalog = skills::scan_catalog_for_list(&self.input, &self.budget(), cursor)?;
+        // 直接消费本次扫描的 manifest：按 URI 回查 `locate` 会对每条技能重扫
+        // 匹配根，且扫描间删除技能会让整页失败。
+        let skills = catalog
+            .iter()
+            .map(typed_skill_from_record)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rmcp::model::ListSkillsResult::with_all_items(skills))
     }
 
-    /// 类型化 `skills/get`：与 `skills/list` 同构，复用同一转换。
+    /// 类型化 `skills/get`：按 URI 回查扫描记录补齐 `size`（条目 DTO 只带 digest）。
     pub fn get_skill(&self, uri: &str) -> Result<rmcp::model::GetSkillResult, ResourceError> {
         let page = skills::skills_get_response(&self.input, &self.budget(), uri)?;
         let skill = typed_skill(&self.input, &self.budget(), page.skill)?;
@@ -503,7 +504,56 @@ impl WorkspaceResourceProvider {
     }
 }
 
-/// 条目 → 类型化技能：按 URI 回查扫描记录补齐 `size`（条目 DTO 只带 digest）。
+/// 扫描记录 → 类型化技能：`size` 直接取同一次扫描的 manifest，不再回查磁盘。
+fn typed_skill_from_record(
+    record: &skills::SkillRecord,
+) -> Result<rmcp::model::Skill, ResourceError> {
+    let uri = record.uri().ok_or(ResourceError::InvalidUri)?;
+    let resources = record
+        .files
+        .iter()
+        .map(|file| {
+            Some(rmcp::model::SkillResource::new(
+                skill_uri(
+                    record.scope,
+                    record.plugin_name.as_deref(),
+                    &record.name,
+                    &file.relative_path,
+                )?,
+                file.digest.clone(),
+                file.size,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or(ResourceError::InvalidUri)?;
+    // name/description 取 frontmatter 原始值：`record.description` 已被摘要 trim，
+    // 带前导空白的引号标量会与 `skills/get` 和正文不一致，激活的 trim_end-only
+    // 比对会因此误拒。
+    let name = record
+        .frontmatter
+        .get("name")
+        .and_then(|value| value.as_str());
+    let description = record
+        .frontmatter
+        .get("description")
+        .and_then(|value| value.as_str());
+    let (Some(name), Some(description)) = (name, description) else {
+        return Err(ResourceError::InvalidUri);
+    };
+    let mut frontmatter = rmcp::model::SkillFrontmatter::new(name, description);
+    for (key, value) in &record.frontmatter {
+        if key != "name" && key != "description" {
+            frontmatter = frontmatter.with_field(key.clone(), value.clone());
+        }
+    }
+    Ok(rmcp::model::Skill::new(
+        uri,
+        frontmatter,
+        rmcp::model::SkillResources::Files(resources),
+    ))
+}
+
+/// 条目 → 类型化技能（`skills/get` 专用）：按 URI 回查扫描记录补齐 `size`。
 fn typed_skill(
     input: &WorkspaceResourcesInput,
     budget: &ResourceBudget,
@@ -537,7 +587,10 @@ fn typed_skill(
         .collect::<Option<Vec<_>>>()
         .ok_or(ResourceError::InvalidUri)?;
     let name = entry.frontmatter.get("name").and_then(|v| v.as_str());
-    let description = entry.frontmatter.get("description").and_then(|v| v.as_str());
+    let description = entry
+        .frontmatter
+        .get("description")
+        .and_then(|v| v.as_str());
     let (Some(name), Some(description)) = (name, description) else {
         return Err(ResourceError::InvalidUri);
     };

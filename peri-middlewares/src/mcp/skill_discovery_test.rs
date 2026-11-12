@@ -427,6 +427,43 @@ fn skills_list_typed_result_with_sizes_normalizes() {
     );
 }
 
+/// [回归测试] 动态技能的 `resources` 在类型化结果中是字符串 `"dynamic"`：
+/// 归一化后按缺省 resources 解析，同页静态技能不得因整页解析失败而丢失。
+#[test]
+fn skills_list_typed_result_with_dynamic_skill_keeps_static_siblings() {
+    let json = serde_json::json!({
+        "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "mcp-use"}},
+        "skills": [
+            {
+                "uri": "skill://static/SKILL.md",
+                "frontmatter": {"name": "static", "description": "S"},
+                "resources": [{"uri": "skill://static/SKILL.md", "digest": "sha256:abcd", "size": 42}]
+            },
+            {
+                "uri": "skill://dynamic/SKILL.md",
+                "frontmatter": {"name": "dynamic", "description": "D"},
+                "resources": "dynamic"
+            }
+        ]
+    });
+    let parsed: ServerResult = serde_json::from_value(json).unwrap();
+    assert!(matches!(parsed, ServerResult::ListSkillsResult(_)));
+    let payload = skill_result_payload(&parsed).expect("typed payload");
+    let response: SkillListResponse =
+        serde_json::from_value(payload).expect("含动态技能的整页仍可解析");
+    assert_eq!(response.skills.len(), 2);
+    let static_entry = entry_from_dto(response.skills[0].clone()).unwrap();
+    assert_eq!(
+        static_entry.resources.expect("静态技能 manifest")[0].digest,
+        "sha256:abcd"
+    );
+    let dynamic_entry = entry_from_dto(response.skills[1].clone()).unwrap();
+    assert!(
+        dynamic_entry.resources.is_none(),
+        "动态技能无 digest：归一化为缺省 resources（保守激活）"
+    );
+}
+
 /// [回归测试] 省略 `resources`（mcp-use 实际形状）落到 `CustomResult`，
 /// 归一化后仍可解析；与类型化分支共用同一领域响应。
 #[test]
@@ -460,6 +497,28 @@ fn skills_get_typed_result_normalizes() {
     let response: SkillGetResponse = serde_json::from_value(payload).unwrap();
     let entry = entry_from_dto(response.skill).unwrap();
     assert_eq!(entry.uri, "skill://a/SKILL.md");
+}
+
+/// [回归测试] `skills/get` 的动态技能同样把字符串 `"dynamic"` 归一化为缺省
+/// resources；DTO 本身仍拒绝任意字符串。
+#[test]
+fn skills_get_typed_result_with_dynamic_resources_normalizes() {
+    let json = serde_json::json!({
+        "skill": {
+            "uri": "skill://a/SKILL.md",
+            "frontmatter": {"name": "a", "description": "A"},
+            "resources": "dynamic"
+        }
+    });
+    let parsed: ServerResult = serde_json::from_value(json).unwrap();
+    assert!(matches!(parsed, ServerResult::GetSkillResult(_)));
+    let payload = skill_result_payload(&parsed).expect("typed payload");
+    let response: SkillGetResponse = serde_json::from_value(payload).unwrap();
+    let entry = entry_from_dto(response.skill).unwrap();
+    assert!(
+        entry.resources.is_none(),
+        "动态技能按缺省 resources 保守激活"
+    );
 }
 
 // ─── entry_to_metadata（W2：发现期只做结构校验，不读正文）─────────────────

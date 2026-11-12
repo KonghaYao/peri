@@ -292,15 +292,46 @@ async fn fetch_skill_list_page_checked(
 ///
 /// `ServerResult` 是 untagged 联合，变体按 payload 形状判别而非按方法名：3.9.0 起
 /// 只有完整条目（`resources` 含 `size`）命中 `ListSkillsResult` / `GetSkillResult`，
-/// mcp-use 这类省略字段的响应仍落到 `CustomResult`，两条路径必须都能解析。其余变体
+/// mcp-use 这类省略字段的响应仍落到 `CustomResult`，两条路径必须都能解析。类型化
+/// 结果的动态技能 `resources` 序列化为字符串 `"dynamic"`，这里降级为缺省
+/// `resources`（无 digest → 保守激活），避免整页因单条动态技能解析失败。其余变体
 /// 不承载 skills 载荷，返回 `None` 让调用方报告非预期响应，避免把畸形结果归一化成
 /// 空技能目录。
 pub(super) fn skill_result_payload(result: &ServerResult) -> Option<serde_json::Value> {
     match result {
         ServerResult::CustomResult(custom) => Some(custom.0.clone()),
-        ServerResult::ListSkillsResult(list) => serde_json::to_value(list).ok(),
-        ServerResult::GetSkillResult(get) => serde_json::to_value(get).ok(),
+        ServerResult::ListSkillsResult(list) => {
+            let mut payload = serde_json::to_value(list).ok()?;
+            if let Some(entries) = payload
+                .get_mut("skills")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for entry in entries {
+                    omit_dynamic_resources(entry);
+                }
+            }
+            Some(payload)
+        }
+        ServerResult::GetSkillResult(get) => {
+            let mut payload = serde_json::to_value(get).ok()?;
+            if let Some(entry) = payload.get_mut("skill") {
+                omit_dynamic_resources(entry);
+            }
+            Some(payload)
+        }
         _ => None,
+    }
+}
+
+/// `SkillResources::Dynamic` 的 wire 形状是字符串 `"dynamic"`，而领域 DTO 用
+/// `resources` 缺省表达同一语义。类型化结果在 rmcp 反序列化时已校验该标记，
+/// 这里只做形状降级，不放宽 DTO 接受任意字符串。
+fn omit_dynamic_resources(entry: &mut serde_json::Value) {
+    if entry.get("resources").and_then(serde_json::Value::as_str) != Some("dynamic") {
+        return;
+    }
+    if let Some(object) = entry.as_object_mut() {
+        object.remove("resources");
     }
 }
 
