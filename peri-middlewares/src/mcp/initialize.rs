@@ -9,7 +9,7 @@ use super::{
     auth_store::static_credential_key,
     builtin::runtime::BUILTIN_CONVERGE_TIMEOUT,
     client::{
-        build_http_transport, serve_client_auto, setup_subscription, ClientStatus,
+        build_http_transport, serve_client_auto_for_server, setup_subscription, ClientStatus,
         DiscoveryEvidence, McpClientHandle, McpClientPool, McpInitStatus, OAuthStatus,
         SystemMcpManifest, HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT, STDIO_CONNECT_TIMEOUT,
     },
@@ -533,7 +533,7 @@ impl McpClientPool {
 
             let connect_result = match transport_config {
                 // builtin 分支：同进程链路（duplex + 真实 `rmcp::serve_server`）。它与 stdio
-                // 分支走**同一条**处理链（同参的 `serve_client_auto` → 发现 → 句柄 → 提交），
+                // 分支走**同一条**处理链（同参的 `serve_client_auto_for_server` → 发现 → 句柄 → 提交），
                 // 不为 builtin 另起一套 spawn / readiness / 面板语义。
                 TransportConfig::Builtin { ref instance } => {
                     // 实例解析与上下文读取都在 pool 方法内统一收口：未注册 / 上下文缺失 /
@@ -558,7 +558,7 @@ impl McpClientPool {
                     if let Some(previous) = pool.register_builtin_task(name.clone(), supervisor) {
                         let _ = previous.close(BUILTIN_CONVERGE_TIMEOUT).await;
                     }
-                    let connected = serve_client_auto(io, &pool.capability_profile, timeout).await;
+                    let connected = serve_client_auto_for_server(io, &pool, name, timeout).await;
                     // 握手失败 / 超时：本实例的 server task 当场收口（不含糊到 pool 关闭）；
                     // 成功则由重连 / 关闭 / 移除时的有界关闭负责。
                     if !matches!(connected, Ok(Ok(_))) {
@@ -589,7 +589,7 @@ impl McpClientPool {
                     #[cfg(not(target_os = "emscripten"))]
                     true => match pool.spawn_stdio_transport(name, command, args, env, cwd) {
                         Ok(transport) => {
-                            serve_client_auto(transport, &pool.capability_profile, timeout).await
+                            serve_client_auto_for_server(transport, &pool, name, timeout).await
                         }
                         Err(e) => {
                             let err_str = e.to_string();
@@ -648,9 +648,10 @@ impl McpClientPool {
                         pool.spawn_oauth_flow(name);
                         continue;
                     } else {
-                        serve_client_auto(
+                        serve_client_auto_for_server(
                             build_http_transport(url, headers),
-                            &pool.capability_profile,
+                            &pool,
+                            name,
                             timeout,
                         )
                         .await

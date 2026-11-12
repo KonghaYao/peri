@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use peri_acp_types::workspace_resources::{
     digest_bytes, is_valid_uri_segment, skill_uri, ResourceScope, SkillEntry, SkillGetResponse,
-    SkillResourceRef, SkillsListResponse, SKILL_ENTRY_FILE,
+    SkillResourceRef, SKILL_ENTRY_FILE,
 };
 use serde_json::{Map, Value};
 
@@ -296,6 +296,19 @@ pub(crate) fn scan_catalog(
     catalog
 }
 
+/// `skills/list` 的扫描入口：首期不分页（非空 cursor 按非法参数拒绝），
+/// 返回一次扫描的完整记录批供类型化结果直接消费。
+pub(crate) fn scan_catalog_for_list(
+    input: &WorkspaceResourcesInput,
+    budget: &ResourceBudget,
+    cursor: Option<String>,
+) -> Result<Vec<SkillRecord>, ResourceError> {
+    if cursor.is_some() {
+        return Err(ResourceError::InvalidUri);
+    }
+    Ok(scan_catalog(input, budget))
+}
+
 /// 按 URI 定位技能：在 scope（+plugin）匹配的输入根中扫描，取首个 `name` 匹配项
 /// （同一根内先到先得；不做跨根去重——shadow 项可读，见模块头）。
 pub(crate) fn locate(
@@ -338,28 +351,6 @@ pub(crate) fn locate(
         // 但内部保留区分（InvalidUri 表示 URI 指向不存在的来源面）。
         Err(ResourceError::InvalidUri)
     }
-}
-
-/// `skills/list` 入口（首期不分页：非空 cursor 按非法参数拒绝）。
-pub(crate) fn skills_list_response(
-    input: &WorkspaceResourcesInput,
-    budget: &ResourceBudget,
-    cursor: Option<String>,
-) -> Result<SkillsListResponse, ResourceError> {
-    if cursor.is_some() {
-        return Err(ResourceError::InvalidUri);
-    }
-    let catalog = scan_catalog(input, budget);
-    let skills = catalog
-        .iter()
-        .filter_map(SkillRecord::entry)
-        .collect::<Vec<_>>();
-    Ok(SkillsListResponse {
-        skills,
-        next_cursor: None,
-        ttl_ms: None,
-        cache_scope: None,
-    })
 }
 
 /// `skills/get` 入口：按 URI 返回当前条目快照（不依赖 list 的枚举批）。

@@ -400,6 +400,17 @@ flowchart LR
 
 > 表中 SEP = Spec Extension Proposal（规范扩展提案）编号；WG = Working Group（工作组）。
 
+**宿主展示策略（Peri）**：自定义通知（未知 method）经 `ClientHandler` 汇入部署级缓冲，
+在 `before_model` 与连接状态变化同点位投递为 `Diagnostic` / `custom_notification` 的
+canonical `Info` 提醒，受众仅 `Tui` / `Diagnostics`（不进模型上下文、不唤醒）；同类按
+`(server, method)` 合并，单条 payload 截断 2 KiB，缓冲上限 32 条。ACP 会话级连接的通知
+不进入部署级提醒缓冲，仅记 `tracing::debug!`（生产路径 `serve_client_auto` 不装配 tap）；
+`acp_owners` 作为防御层跳过。
+`subscriptions/listen` 流不承载自定义 / 日志通知（rmcp `SubscriptionSink` 拒绝）。
+`notifications/message` 仅在请求 `_meta` 携带 `io.modelcontextprotocol/logLevel` 时处理，
+否则 debug 后忽略；Peri 不主动声明该键，且当前门控按 server 粘性保存（不随请求结束
+清除、重连不清理），因此生产路径实际恒被忽略。
+
 ### 5.5 实现要点与协议版本注意
 
 - **必须按 client 协商的协议版本分支**：`subscriptions/listen`（2026-07-28）与 `resources/subscribe` + 直接 list_changed（2025-11-25）互不通用。rmcp `ProtocolVersion::LATEST` 为 2026-07-28，连接旧 server 时协商回退，实现时以协商结果为准。

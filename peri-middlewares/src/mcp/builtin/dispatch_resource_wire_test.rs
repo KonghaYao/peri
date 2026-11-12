@@ -95,7 +95,7 @@ async fn w1_workspace_resource_surface_forwards_through_dispatch() {
         templates.resource_templates
     );
 
-    // skills/list：custom 面的默认语义是 -32601 ⇒ 正常响应即证明转发；条目形状按契约锁定。
+    // skills/list：rmcp 3.9.0 起是类型化请求，默认实现是 -32601 ⇒ 正常响应即证明转发。
     let result = peer
         .send_request(ClientRequest::CustomRequest(CustomRequest::new(
             "skills/list",
@@ -104,8 +104,8 @@ async fn w1_workspace_resource_surface_forwards_through_dispatch() {
         .await
         .expect("skills/list 必须经 dispatch 成功");
     let value = match result {
-        ServerResult::CustomResult(custom) => custom.0,
-        other => panic!("期望 CustomResult，实际：{other:?}"),
+        ServerResult::ListSkillsResult(list) => serde_json::to_value(list).expect("序列化"),
+        other => panic!("期望 ListSkillsResult，实际：{other:?}"),
     };
     assert_eq!(
         value["skills"][0]["uri"].as_str(),

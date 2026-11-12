@@ -2,8 +2,7 @@
 //!
 //! 职责：把宿主输入的资源根（本地三根 / 插件根 / builtin 关闭位）与工作区
 //! 绑定文档（项目指令、`.peri/meta` 段落覆盖）扫描为只读资源面，经
-//! `resources/list|read|templates/list` 与 MCPP 的 `skills/list|get` custom
-//! requests 暴露。
+//! `resources/list|read|templates/list` 与 SEP-2640 的 `skills/list|get` 暴露。
 //!
 //! 边界（与 plan §5.1/§8.1 W1 一致）：
 //! - server 侧只做已授权文件/嵌入资产的解析、manifest 与只读提供；不持模型
@@ -27,9 +26,8 @@ use std::path::PathBuf;
 
 use peri_acp_types::workspace_resources::{
     meta_uri, parse_agent_uri, parse_instruction_uri, parse_meta_uri, parse_skill_uri, skill_uri,
-    ResourceScope, SkillGetResponse, SkillsListResponse, INSTRUCTION_INDEX_URI,
-    INSTRUCTION_LOCAL_URI, INSTRUCTION_MAIN_URI, META_KEY_DIGEST, META_KEY_PLUGIN, META_KEY_SCOPE,
-    MIME_JSON, MIME_MARKDOWN, SKILL_ENTRY_FILE,
+    ResourceScope, INSTRUCTION_INDEX_URI, INSTRUCTION_LOCAL_URI, INSTRUCTION_MAIN_URI,
+    META_KEY_DIGEST, META_KEY_PLUGIN, META_KEY_SCOPE, MIME_JSON, MIME_MARKDOWN, SKILL_ENTRY_FILE,
 };
 use rmcp::model::{MetaObject, Resource, ResourceTemplate};
 use thiserror::Error;
@@ -482,15 +480,131 @@ impl WorkspaceResourceProvider {
         })
     }
 
-    /// `skills/list`（非空 cursor 按非法参数拒绝——首期不分页）。
-    pub fn skills_list(&self, cursor: Option<String>) -> Result<SkillsListResponse, ResourceError> {
-        skills::skills_list_response(&self.input, &self.budget(), cursor)
+    /// 类型化 `skills/list`：rmcp 3.9.0 把该请求升为一等 `ClientRequest` 变体，
+    /// 结果要求 `resources[].size`；schema 校验所需的字节数只有扫描批持有。
+    pub fn list_skills(
+        &self,
+        cursor: Option<String>,
+    ) -> Result<rmcp::model::ListSkillsResult, ResourceError> {
+        let catalog = skills::scan_catalog_for_list(&self.input, &self.budget(), cursor)?;
+        // 直接消费本次扫描的 manifest：按 URI 回查 `locate` 会对每条技能重扫
+        // 匹配根，且扫描间删除技能会让整页失败。
+        let skills = catalog
+            .iter()
+            .map(typed_skill_from_record)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rmcp::model::ListSkillsResult::with_all_items(skills))
     }
 
-    /// `skills/get`（按 URI 直读当前条目快照；URI 非法/未知 → `InvalidUri`）。
-    pub fn skills_get(&self, uri: &str) -> Result<SkillGetResponse, ResourceError> {
-        skills::skills_get_response(&self.input, &self.budget(), uri)
+    /// 类型化 `skills/get`：按 URI 回查扫描记录补齐 `size`（条目 DTO 只带 digest）。
+    pub fn get_skill(&self, uri: &str) -> Result<rmcp::model::GetSkillResult, ResourceError> {
+        let page = skills::skills_get_response(&self.input, &self.budget(), uri)?;
+        let skill = typed_skill(&self.input, &self.budget(), page.skill)?;
+        Ok(rmcp::model::GetSkillResult::new(skill))
     }
+}
+
+/// 扫描记录 → 类型化技能：`size` 直接取同一次扫描的 manifest，不再回查磁盘。
+fn typed_skill_from_record(
+    record: &skills::SkillRecord,
+) -> Result<rmcp::model::Skill, ResourceError> {
+    let uri = record.uri().ok_or(ResourceError::InvalidUri)?;
+    let resources = record
+        .files
+        .iter()
+        .map(|file| {
+            Some(rmcp::model::SkillResource::new(
+                skill_uri(
+                    record.scope,
+                    record.plugin_name.as_deref(),
+                    &record.name,
+                    &file.relative_path,
+                )?,
+                file.digest.clone(),
+                file.size,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or(ResourceError::InvalidUri)?;
+    // name/description 取 frontmatter 原始值：`record.description` 已被摘要 trim，
+    // 带前导空白的引号标量会与 `skills/get` 和正文不一致，激活的 trim_end-only
+    // 比对会因此误拒。
+    let name = record
+        .frontmatter
+        .get("name")
+        .and_then(|value| value.as_str());
+    let description = record
+        .frontmatter
+        .get("description")
+        .and_then(|value| value.as_str());
+    let (Some(name), Some(description)) = (name, description) else {
+        return Err(ResourceError::InvalidUri);
+    };
+    let mut frontmatter = rmcp::model::SkillFrontmatter::new(name, description);
+    for (key, value) in &record.frontmatter {
+        if key != "name" && key != "description" {
+            frontmatter = frontmatter.with_field(key.clone(), value.clone());
+        }
+    }
+    Ok(rmcp::model::Skill::new(
+        uri,
+        frontmatter,
+        rmcp::model::SkillResources::Files(resources),
+    ))
+}
+
+/// 条目 → 类型化技能（`skills/get` 专用）：按 URI 回查扫描记录补齐 `size`。
+fn typed_skill(
+    input: &WorkspaceResourcesInput,
+    budget: &ResourceBudget,
+    entry: peri_acp_types::workspace_resources::SkillEntry,
+) -> Result<rmcp::model::Skill, ResourceError> {
+    let uri = entry.uri.clone();
+    let parsed = peri_acp_types::workspace_resources::parse_skill_uri(&uri)
+        .ok_or(ResourceError::InvalidUri)?;
+    let record = skills::locate(
+        input,
+        budget,
+        parsed.scope,
+        parsed.plugin_name.as_deref(),
+        &parsed.name,
+    )?;
+    let resources = record
+        .files
+        .iter()
+        .map(|file| {
+            Some(rmcp::model::SkillResource::new(
+                skill_uri(
+                    record.scope,
+                    record.plugin_name.as_deref(),
+                    &record.name,
+                    &file.relative_path,
+                )?,
+                file.digest.clone(),
+                file.size,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or(ResourceError::InvalidUri)?;
+    let name = entry.frontmatter.get("name").and_then(|v| v.as_str());
+    let description = entry
+        .frontmatter
+        .get("description")
+        .and_then(|v| v.as_str());
+    let (Some(name), Some(description)) = (name, description) else {
+        return Err(ResourceError::InvalidUri);
+    };
+    let mut frontmatter = rmcp::model::SkillFrontmatter::new(name, description);
+    for (key, value) in &entry.frontmatter {
+        if key != "name" && key != "description" {
+            frontmatter = frontmatter.with_field(key.clone(), value.clone());
+        }
+    }
+    Ok(rmcp::model::Skill::new(
+        uri,
+        frontmatter,
+        rmcp::model::SkillResources::Files(resources),
+    ))
 }
 
 /// `_meta` 私有 metadata（`io.peri/` 命名空间；不含主机绝对路径）。

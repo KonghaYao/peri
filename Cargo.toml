@@ -122,8 +122,8 @@ peri-mcp-cron = { path = "mcp-packages/cron" }
 peri-mcp-monitor = { path = "mcp-packages/monitor" }
 peri-mcp-workspace = { path = "mcp-packages/workspace" }
 peri-mcp-workflow = { path = "mcp-packages/workflow" }
-# Apply patches/rmcp-3.5.1-task-subscriptions.patch via scripts/cargo-rmcp-patched.sh.
-rmcp = "=3.5.1"
+# Apply patches/rmcp-3.9.0-task-subscriptions.patch via scripts/cargo-rmcp-patched.sh.
+rmcp = "=3.9.0"
 
 # --- Build ---
 tempfile = "3"

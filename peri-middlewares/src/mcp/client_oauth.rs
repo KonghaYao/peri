@@ -4,8 +4,8 @@ use super::{
     auth_store::static_credential_key,
     client::{
         build_authed_transport, ClientStatus, McpClientHandle, McpClientPool, McpPoolError,
-        McpServiceWrapper, OAuthStartDisposition, OAuthStatus, HTTP_CONNECT_TIMEOUT,
-        SHUTDOWN_TIMEOUT,
+        McpServiceWrapper, NotificationTap, OAuthStartDisposition, OAuthStatus, PeriClientHandler,
+        HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT,
     },
     initialize::{
         commit_discovery_failure, commit_discovery_success, downgrade_resource_listing,
@@ -229,7 +229,10 @@ impl McpClientPool {
             let result = peri_time::timeout(
                 HTTP_CONNECT_TIMEOUT,
                 rmcp::service::serve_client(
-                    super::client::mcpp_client_info_for_profile(&self.capability_profile),
+                    PeriClientHandler::new(
+                        super::client::mcpp_client_info_for_profile(&self.capability_profile),
+                        Some(Arc::new(NotificationTap::new(self, server_name))),
+                    ),
                     build_authed_transport(&url, &headers, auth_manager),
                 ),
             )

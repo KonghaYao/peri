@@ -7,7 +7,7 @@
 若锁文件已偏离补丁配置，保留 `dev.sh` 的 `--locked`，通过补丁脚本定向修复，而不是直接运行 `cargo update` 或删除锁文件：
 
 ```bash
-./scripts/cargo-rmcp-patched.sh update --offline -p rmcp --precise 3.5.1
+./scripts/cargo-rmcp-patched.sh update --offline -p rmcp --precise 3.9.0
 ./scripts/cargo-rmcp-patched.sh update --offline -p tokio --precise 1.53.1
 ./scripts/cargo-rmcp-patched.sh update --offline -p mio --precise 1.2.3
 python3 scripts/test-cargo-patches.py
@@ -17,11 +17,11 @@ python3 scripts/test-cargo-patches.py
 
 `--offline` 要求依赖索引与 Git 源码已缓存；首次拉取缺失依赖时可省略它。回归测试在仓库目录和外部工作目录分别对本机与 `wasm32-unknown-emscripten` 执行真实的 `metadata --locked --offline`，核对补丁版本、来源、实际解析图及锁文件未变更；运行环境需要 Python 3.9+、Rust 与两个平台的依赖缓存。
 
-仓库使用 `rmcp 3.5.1`，并通过 [补丁](rmcp-3.5.1-task-subscriptions.patch)补齐 Tasks 扩展的 `taskIds` 订阅和 `notifications/tasks`。补丁不依赖 GitHub fork，也不提交第三方源码。
+仓库使用 `rmcp 3.9.0`，并通过 [补丁](rmcp-3.9.0-task-subscriptions.patch)补齐 Tasks 扩展的 `taskIds` 订阅和 `notifications/tasks`。补丁不依赖 GitHub fork，也不提交第三方源码。
 
 同一补丁还限制 generic service loop 的成功 response 日志：`CustomResult` 可能承载凭据，且 response 事件没有 method 关联，故收发 TRACE 仅记录请求 ID 与方向，handler DEBUG 仅记录请求 ID。请求、通知、JSON-RPC 错误与传输错误仍保留完整诊断；业务 `Err` 被成功 `CustomResult` 包装时，由 credentials handler 自己记录类型化错误。此调整不修改 MCP wire、不隐藏错误内容、不绕过 credentials MCP。回归位于 `mcp-packages/credentials` 的模型认证测试，覆盖 DEBUG/TRACE 下合成成功 token 不落日志和错误诊断保留。
 
-补丁为 `matches_response_id`、`set_client_request_metadata`、`is_authorization_required` 加 `cfg_attr(not(feature = "client"), allow(dead_code))`：三者只在 `client` feature 下被调用，而 path 覆盖的依赖不享受 Cargo 对 registry 依赖的 lint cap，未启用该 feature 时会暴露 dead_code 告警。
+补丁曾为 `matches_response_id`、`set_client_request_metadata`、`is_authorization_required` 加 `cfg_attr(not(feature = "client"), allow(dead_code))`：三者只在 `client` feature 下被调用，而 path 覆盖的依赖不享受 Cargo 对 registry 依赖的 lint cap，未启用该 feature 时会暴露 dead_code 告警。上游 3.6.0 已改用 `#[cfg(feature = "client")]` 门控这三个函数，补丁不再包含该变通。
 
 从新 checkout 构建时，用仓库脚本代替直接调用 Cargo：
 

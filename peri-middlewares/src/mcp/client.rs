@@ -9,6 +9,7 @@ mod instance_face;
 mod lifecycle;
 mod monitor_alert;
 mod monitor_identity;
+mod notification_tap;
 mod oauth;
 pub(crate) mod output_store;
 #[cfg(not(target_os = "emscripten"))]
@@ -59,6 +60,9 @@ use std::{
 
 pub(crate) use cache::cache_scope_allows_persistence;
 pub(crate) use cache::ConnectionResourceCache;
+pub(crate) use notification_tap::{
+    pending_notification_reminder, NotificationTap, PendingMcpNotification,
+};
 pub use oauth::OAuthStartDisposition;
 pub(crate) use readiness::{
     DiscoveryEvidence, NegotiatedSystemMcp, SystemMcpManifest, SystemReadinessError,
@@ -67,6 +71,7 @@ pub(crate) use readiness::{
 pub(crate) use service::ControlledMcpService;
 pub(crate) use service::{
     mcpp_client_info_for_profile, peer_declares_skills, McpServiceOwner, McpServiceWrapper,
+    PeriClientHandler,
 };
 #[cfg(test)]
 pub(crate) use status::status_change_text;
@@ -75,7 +80,9 @@ use status::{mcp_error_summary, mcp_status_label};
 #[cfg(test)]
 pub(crate) use subscription::build_subscription_filter;
 pub(crate) use subscription::setup_subscription;
-pub(crate) use transport::{build_authed_transport, build_http_transport, serve_client_auto};
+pub(crate) use transport::{
+    build_authed_transport, build_http_transport, serve_client_auto, serve_client_auto_for_server,
+};
 pub(crate) use types::{AcpConnectionIdentity, McpConnectionKey};
 pub use types::{
     ClientStatus, McpClientHandle, McpInitStatus, McpPoolError, OAuthStatus, ServerInfo,
@@ -154,6 +161,14 @@ pub struct McpClientPool {
     /// 运行中状态变化的待注入文本缓冲（McpMiddleware::before_model drain 后
     /// 以 Info 消息推送进模型上下文；全局缓冲，任一会话消费一次即清空）。
     pub(crate) pending_changes: parking_lot::Mutex<Vec<String>>,
+    /// MCP 自定义通知的待注入缓冲（与 `pending_changes` 同点位 drain；
+    /// 全局缓冲，任一会话消费一次即清空）。
+    pub(crate) pending_notifications: parking_lot::Mutex<Vec<PendingMcpNotification>>,
+    /// `notifications/message` 门控：各 server 在请求 `_meta` 中声明过的 logLevel。
+    ///
+    /// Peri 不主动声明该键；仅当调用方已声明时 `notifications/message` 才有可见出口。
+    #[allow(deprecated)]
+    pub(crate) declared_log_levels: parking_lot::RwLock<HashMap<String, rmcp::model::LoggingLevel>>,
     /// 状态变化通知回调（装配时注入；发布 system-notification 给 TUI 通知面）。
     notifier: parking_lot::RwLock<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
     /// OAuth 流程事件回调（装配时注入；`AuthorizationNeeded` 需把
@@ -307,6 +322,8 @@ impl McpClientPool {
             initialized: std::sync::atomic::AtomicBool::new(false),
             system_settled: std::sync::atomic::AtomicBool::new(false),
             pending_changes: parking_lot::Mutex::new(Vec::new()),
+            pending_notifications: parking_lot::Mutex::new(Vec::new()),
+            declared_log_levels: parking_lot::RwLock::new(HashMap::new()),
             notifier: parking_lot::RwLock::new(None),
             oauth_event_callback: parking_lot::RwLock::new(None),
             pending_oauth_callbacks: parking_lot::Mutex::new(HashMap::new()),

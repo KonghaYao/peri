@@ -345,6 +345,10 @@ impl BaseTool for McpToolBridge {
             request.meta = Some(owner);
         }
         request.meta = Some(super::invocation::request_meta(&ctx, request.meta)?);
+        // 请求 `_meta` 若已声明 logLevel，记录池侧门控；Peri 不主动写该键。
+        if let Some(level) = request.meta.as_ref().and_then(|meta| meta.log_level()) {
+            pool.declare_log_level(&self.server_name, level);
+        }
 
         // Workspace tools retain their own deadlines (Bash promotes at <=120s).
         // Source identity, not a spoofable server name, grants this behavior.

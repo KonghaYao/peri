@@ -58,6 +58,122 @@ fn selection_visibility_clamps_to_resized_viewport() {
     assert_eq!(state.offset().y, 15);
 }
 
+// ── 选中身份跨列表重排的稳定性（U02）──────────────────────────────────
+//
+// 后台快照每 2 秒重排一次列表：刚聊过的会话 `updated_at` 更新，会顶到首行。
+// 选中项因此必须跟着 thread 身份走；按下标跟随会让 Enter 加载另一条会话。
+
+/// 重排后身份仍在列表里：行下标跟着身份走，而不是停在原行号。
+#[test]
+fn selection_follows_identity_across_reorder() {
+    let reordered = vec![thread("b"), thread("a")];
+    assert_eq!(resolve_selection(Some("a"), &reordered, 0), 1);
+    assert_eq!(
+        adopt_selection(Some("a"), &reordered, 1).as_deref(),
+        Some("a")
+    );
+}
+
+/// 列表暂时为空（刷新失败 / 首次加载）：不得丢掉身份，否则下一帧首行冒充用户选择。
+#[test]
+fn empty_list_keeps_selected_identity() {
+    let empty: Vec<ThreadSummary> = Vec::new();
+    assert_eq!(resolve_selection(Some("a"), &empty, 0), 0);
+    assert_eq!(
+        adopt_selection(Some("a"), &empty, 0).as_deref(),
+        Some("a"),
+        "空列表帧必须保留原选中身份"
+    );
+    // 空帧之后列表重新带回原顺序，身份仍是被选中的那一条。
+    let restored = vec![thread("a"), thread("b")];
+    assert_eq!(resolve_selection(Some("a"), &restored, 0), 0);
+}
+
+/// 刷新重排把选中行挪出视口：视口必须跟过去，否则高亮不可见但 Enter 仍能加载。
+#[test]
+fn reorder_keeps_selected_row_inside_viewport() {
+    let viewport = 5;
+    let original: Vec<ThreadSummary> = (0..20).map(|index| thread(&format!("t{index}"))).collect();
+    let mut state = ScrollViewState::default();
+    let mut cursor =
+        sync_refreshed_selection(&mut state, Some("t0"), &original, 0, viewport, viewport);
+    assert_eq!(cursor, 0);
+    assert_eq!(state.offset().y, 0, "首帧无需滚动");
+
+    // 后台刷新：t0 被其它会话的 updated_at 顶到末行。
+    let mut reordered = original;
+    let entry = reordered.remove(0);
+    reordered.push(entry);
+    cursor = sync_refreshed_selection(
+        &mut state,
+        Some("t0"),
+        &reordered,
+        cursor,
+        viewport,
+        viewport,
+    );
+
+    assert_eq!(cursor, 19, "光标跟随身份换到新行");
+    assert_eq!(state.offset().y, 15, "视口滚到选中行可见");
+    assert!(
+        (state.offset().y as usize..state.offset().y as usize + viewport).contains(&cursor),
+        "选中行必须落在视口内"
+    );
+
+    // 手动滚动没有换行 / 视口变化，刷新帧不得把视口拉回。
+    state.set_offset(ratatui_kit::ratatui::layout::Position::new(0, 0));
+    let cursor = sync_refreshed_selection(
+        &mut state,
+        Some("t0"),
+        &reordered,
+        cursor,
+        viewport,
+        viewport,
+    );
+    assert_eq!(state.offset().y, 0, "手动滚动不被刷新覆盖");
+    assert_eq!(cursor, 19, "选中的身份不变");
+}
+
+/// 身份确实离开当前视图（归档 / 删除 / 换 scope）才回落到光标行。
+#[test]
+fn vanished_identity_adopts_cursor_row() {
+    let refreshed = vec![thread("b"), thread("c")];
+    assert_eq!(resolve_selection(Some("a"), &refreshed, 1), 1);
+    assert_eq!(
+        adopt_selection(Some("a"), &refreshed, 1).as_deref(),
+        Some("c"),
+        "身份消失时回落到光标行"
+    );
+}
+
+/// 空刷新帧保留的身份不在列表里：`a` 与 Enter 共用成员校验，不能归档不可见会话。
+#[test]
+fn archive_requires_visible_list_member() {
+    let empty: Vec<ThreadSummary> = Vec::new();
+    assert_eq!(
+        visible_target(Some("a"), &empty),
+        None,
+        "空列表没有归档目标"
+    );
+
+    let refreshed = vec![thread("b"), thread("c")];
+    assert_eq!(
+        visible_target(Some("a"), &refreshed),
+        None,
+        "身份已离开当前列表，按 a 必须是 no-op"
+    );
+    assert_eq!(visible_target(Some("b"), &refreshed).as_deref(), Some("b"));
+    assert_eq!(visible_target(None, &refreshed), None);
+}
+
+/// 没有身份（首次打开面板）时按光标行回填。
+#[test]
+fn missing_identity_seeds_from_cursor_row() {
+    let threads = vec![thread("a"), thread("b")];
+    assert_eq!(adopt_selection(None, &threads, 1).as_deref(), Some("b"));
+    assert_eq!(adopt_selection(None, &[], 0), None);
+}
+
 // ── 会话动作回写的视图身份（归档 `a` / 删除 `d`+Enter）──────────────────
 
 /// 面板状态相关 atom 的保存/恢复——全局 atom 是进程级的，断言 panic 也不得污染其它用例。
