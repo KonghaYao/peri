@@ -398,6 +398,56 @@ fn test_before_model_pushes_info_messages() {
     }
 }
 
+/// before_model：自定义通知以 Diagnostic / Info、仅 TUI + 诊断受众投递；
+/// 没有连接状态变化时也必须 drain（不与 `pending_changes` 的早退耦合）。
+#[test]
+fn test_before_model_pushes_custom_notification_info_reminder() {
+    let (_mcp_owner, pool) = owned_discovery_pool();
+    let mw = McpMiddleware::new(Arc::clone(&pool));
+    let mut state = TestMiddlewareState::new();
+
+    pool.record_custom_notification(
+        "showcase",
+        "demo/task-status",
+        Some(&serde_json::json!({"runId": "run-1", "status": "started"})),
+    );
+
+    futures::executor::block_on(mw.push_status_changes(&mut state));
+    let drained = state.queue.drain_all_sync();
+    assert_eq!(drained.len(), 1, "无连接状态变化时通知仍须投递");
+    let message = &drained[0];
+    assert_eq!(message.kind, MessageKind::Info, "Info 不唤醒会话");
+    assert!(!message.kind.wakes_up());
+    assert!(matches!(
+        message.source,
+        peri_agent::session::MessageSource::SystemInjected
+    ));
+    let reminder = match &message.payload {
+        peri_agent::session::QueuedPayload::SystemReminder(reminder) => reminder.as_reminder(),
+        other => panic!("expected canonical reminder, got {other:?}"),
+    };
+    assert_eq!(reminder.category, ReminderCategory::Diagnostic);
+    assert_eq!(reminder.source.0, "mcp");
+    assert_eq!(reminder.kind, "custom_notification");
+    assert_eq!(reminder.severity, ReminderSeverity::Info);
+    assert_eq!(reminder.delivery, ReminderDelivery::Configurable);
+    assert!(reminder.audiences.contains(ReminderAudience::Tui));
+    assert!(reminder.audiences.contains(ReminderAudience::Diagnostics));
+    assert!(
+        !reminder.audiences.contains(ReminderAudience::Model),
+        "server 自由文本不得进入模型上下文"
+    );
+    assert_eq!(reminder.metadata["server"], "showcase");
+    assert_eq!(reminder.metadata["method"], "demo/task-status");
+    assert!(reminder.body.contains("run-1"));
+
+    futures::executor::block_on(mw.push_status_changes(&mut state));
+    assert!(
+        state.queue.drain_all_sync().is_empty(),
+        "缓冲恰好 drain 一次"
+    );
+}
+
 /// 同一会话实例：tool search 提示仅首条附带
 #[test]
 fn test_tool_search_hint_once_per_instance() {
@@ -471,9 +521,12 @@ fn insert_skill_handle(
         }
     });
     let running = rmcp::service::serve_directly::<rmcp::RoleClient, _, _, _, _>(
-        rmcp::model::InitializeRequestParams::new(
-            rmcp::model::ClientCapabilities::default(),
-            rmcp::model::Implementation::from_build_env(),
+        crate::mcp::client::PeriClientHandler::new(
+            rmcp::model::InitializeRequestParams::new(
+                rmcp::model::ClientCapabilities::default(),
+                rmcp::model::Implementation::from_build_env(),
+            ),
+            None,
         ),
         client_io,
         None::<rmcp::model::ServerPeerInfo>,

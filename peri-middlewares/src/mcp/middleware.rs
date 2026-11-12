@@ -25,7 +25,10 @@ use serde_json::json;
 
 use super::{
     admission::{McpAdmissionPreparation, MCP_MIDDLEWARE_NAME},
-    client::{ClientStatus, McpClientPool, SystemMcpManifest, SystemReadinessError},
+    client::{
+        pending_notification_reminder, ClientStatus, McpClientPool, SystemMcpManifest,
+        SystemReadinessError,
+    },
     discover_tool::DiscoverMCPTool,
     resource_tool::McpResourceTool,
     system_tools::prepare_system_tools,
@@ -536,43 +539,68 @@ impl McpMiddleware {
         ))
     }
 
-    /// 状态变化以 canonical Info reminder 注入模型上下文。
+    /// 状态变化以 canonical Info reminder 注入模型上下文；自定义通知在同一点位
+    /// 以仅 TUI/诊断受众的 Info reminder 投递。
     ///
     /// 首条推送附 tool search 提示（每个会话恰好一次），后续只推送变化行。
     async fn push_status_changes(&self, state: &mut dyn hook_state::QueueState) {
         let changes = self.pool.drain_pending_changes();
-        if changes.is_empty() {
+        if !changes.is_empty() {
+            let producer = state.v2_producer();
+            let mut texts = Vec::with_capacity(changes.len() + 1);
+            if !self.hint_sent.swap(true, Ordering::SeqCst) {
+                texts.push(format!("MCP 连接状态变化：{MCP_TOOL_USAGE_HINT}"));
+            }
+            texts.extend(changes);
+            for text in texts {
+                let reminder = TrustedSystemReminderFactory::for_producer()
+                    .construct(SystemReminder {
+                        version: SYSTEM_REMINDER_VERSION,
+                        category: ReminderCategory::Lifecycle,
+                        source: ReminderSource("mcp".into()),
+                        kind: "connection_status_changed".into(),
+                        severity: if text.contains("failed") {
+                            ReminderSeverity::Warning
+                        } else {
+                            ReminderSeverity::Info
+                        },
+                        delivery: ReminderDelivery::Configurable,
+                        audiences: ReminderAudiences(vec![
+                            ReminderAudience::Model,
+                            ReminderAudience::Tui,
+                            ReminderAudience::Diagnostics,
+                        ]),
+                        summary: Some(text.clone()),
+                        body: text,
+                        metadata: json!({}),
+                    })
+                    .expect("MCP status reminder mapping must be valid");
+                if let Err(error) = producer
+                    .enqueue(QueuedMessage::system_reminder(
+                        MessageKind::Info,
+                        QueueMessageSource::SystemInjected,
+                        reminder,
+                    ))
+                    .await
+                {
+                    tracing::warn!(%error, "MCP status change enqueue failed");
+                }
+            }
+        }
+        self.push_custom_notifications(state).await;
+    }
+
+    /// 自定义通知 → canonical Info reminder（`Diagnostic` / `custom_notification`）。
+    ///
+    /// 受众不含 `Model`：server 自由文本不进入模型上下文；`Info` 不唤醒会话。
+    async fn push_custom_notifications(&self, state: &mut dyn hook_state::QueueState) {
+        let notifications = self.pool.drain_pending_notifications();
+        if notifications.is_empty() {
             return;
         }
         let producer = state.v2_producer();
-        let mut texts = Vec::with_capacity(changes.len() + 1);
-        if !self.hint_sent.swap(true, Ordering::SeqCst) {
-            texts.push(format!("MCP 连接状态变化：{MCP_TOOL_USAGE_HINT}"));
-        }
-        texts.extend(changes);
-        for text in texts {
-            let reminder = TrustedSystemReminderFactory::for_producer()
-                .construct(SystemReminder {
-                    version: SYSTEM_REMINDER_VERSION,
-                    category: ReminderCategory::Lifecycle,
-                    source: ReminderSource("mcp".into()),
-                    kind: "connection_status_changed".into(),
-                    severity: if text.contains("failed") {
-                        ReminderSeverity::Warning
-                    } else {
-                        ReminderSeverity::Info
-                    },
-                    delivery: ReminderDelivery::Configurable,
-                    audiences: ReminderAudiences(vec![
-                        ReminderAudience::Model,
-                        ReminderAudience::Tui,
-                        ReminderAudience::Diagnostics,
-                    ]),
-                    summary: Some(text.clone()),
-                    body: text,
-                    metadata: json!({}),
-                })
-                .expect("MCP status reminder mapping must be valid");
+        for notification in notifications {
+            let reminder = pending_notification_reminder(&notification);
             if let Err(error) = producer
                 .enqueue(QueuedMessage::system_reminder(
                     MessageKind::Info,
@@ -581,7 +609,7 @@ impl McpMiddleware {
                 ))
                 .await
             {
-                tracing::warn!(%error, "MCP status change enqueue failed");
+                tracing::warn!(%error, "MCP custom notification enqueue failed");
             }
         }
     }

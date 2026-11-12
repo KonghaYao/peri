@@ -14,10 +14,10 @@ use peri_acp_types::mcp::{McpNotificationMessageKind, MCP_MESSAGE_KIND_META_KEY}
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::ports::McpPoolPort;
 use peri_acp_types::session::{
-    MessageKind, MessageQueue, MessageSource, QueuedMessage, SessionInbox,
+    MessageKind, MessageQueue, MessageSource, QueuedMessage, QueuedPayload, SessionInbox,
 };
 use peri_acp_types::system_reminder::{
-    ReminderAudience, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderAudience, ReminderCategory, ReminderDelivery, ReminderSeverity, SYSTEM_REMINDER_VERSION,
 };
 use rmcp::model::NotificationMetaObject;
 use std::sync::Arc;
@@ -40,7 +40,47 @@ async fn server_notification_kind_controls_resource_update_wake() {
             inbox.queue_for_test().has_wake_up_sync(),
             expected == MessageKind::Defer
         );
-        assert_eq!(inbox.queue_for_test().drain_all_sync()[0].kind, expected);
+        let drained = inbox.queue_for_test().drain_all_sync();
+        assert_eq!(drained.len(), 1, "一次资源更新恰注入一条提醒");
+        let message = &drained[0];
+        assert_eq!(message.kind, expected);
+        assert_eq!(message.source, MessageSource::McpNotification);
+        let reminder = match &message.payload {
+            QueuedPayload::SystemReminder(reminder) => reminder.as_reminder(),
+            other => panic!("期望 canonical reminder，实际 {other:?}"),
+        };
+        assert_eq!(reminder.version, SYSTEM_REMINDER_VERSION);
+        assert_eq!(
+            reminder.category,
+            ReminderCategory::ExternalEvent,
+            "非 git 资源更新必须走通用 ExternalEvent 提醒"
+        );
+        assert_eq!(reminder.source.0, "mcp");
+        assert_eq!(reminder.kind, "subscription_resource_updated");
+        assert_eq!(reminder.severity, ReminderSeverity::Info);
+        assert_eq!(reminder.delivery, ReminderDelivery::Required);
+        assert_eq!(reminder.audiences.0.len(), 3, "受众不得漂移");
+        assert!(reminder.audiences.contains(ReminderAudience::Model));
+        assert!(reminder.audiences.contains(ReminderAudience::Tui));
+        assert!(reminder.audiences.contains(ReminderAudience::Automation));
+        assert_eq!(
+            reminder.summary.as_deref(),
+            Some("MCP 订阅资源已更新"),
+            "summary 逐字不回归"
+        );
+        assert_eq!(
+            reminder.metadata,
+            serde_json::json!({
+                "server": "server",
+                "uri": "resource://x",
+                "subscription_id": "subscription",
+            })
+        );
+        assert_eq!(
+            reminder.body,
+            "MCP 资源已更新：server=server, uri=resource://x, subscription_id=subscription。请查看并处理。",
+            "正文逐字不回归"
+        );
     }
     assert_eq!(notification_message_kind("server", None), None);
     let mut invalid = NotificationMetaObject::new();

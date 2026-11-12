@@ -583,6 +583,31 @@ async fn t7b_read_failure_falls_back_to_generic_reminder() {
     };
     assert_eq!(reminder.kind, "subscription_resource_updated");
     assert_eq!(reminder.source.0, "mcp");
+    assert_eq!(
+        reminder.category,
+        ReminderCategory::ExternalEvent,
+        "通用订阅提醒类别不得漂移"
+    );
+    assert_eq!(reminder.severity, ReminderSeverity::Info);
+    assert_eq!(reminder.delivery, ReminderDelivery::Required);
+    assert!(reminder.audiences.contains(ReminderAudience::Model));
+    assert!(reminder.audiences.contains(ReminderAudience::Tui));
+    assert!(reminder.audiences.contains(ReminderAudience::Automation));
+    assert_eq!(
+        reminder.summary.as_deref(),
+        Some("MCP 订阅资源已更新"),
+        "summary 逐字不回归"
+    );
+    assert_eq!(reminder.metadata["server"], "workspace");
+    assert_eq!(reminder.metadata["uri"], SPIKE_URI);
+    assert!(
+        reminder.metadata["subscription_id"].is_string(),
+        "subscription_id 必须随通知透传: {:?}",
+        reminder.metadata
+    );
+    assert!(reminder.body.contains("server=workspace"));
+    assert!(reminder.body.contains(SPIKE_URI));
+    assert!(reminder.body.contains("subscription_id="));
     assert!(
         message.kind.wakes_up(),
         "通用订阅提醒必须可唤醒会话（与 git_watch 的 Info 区分）"

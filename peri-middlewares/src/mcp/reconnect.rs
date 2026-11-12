@@ -5,9 +5,9 @@ use super::{
     auth_store::static_credential_key,
     builtin::runtime::BUILTIN_CONVERGE_TIMEOUT,
     client::{
-        build_authed_transport, build_http_transport, serve_client_auto, setup_subscription,
-        ClientStatus, McpClientHandle, McpClientPool, McpPoolError, OAuthStartDisposition,
-        OAuthStatus, SHUTDOWN_TIMEOUT,
+        build_authed_transport, build_http_transport, serve_client_auto_for_server,
+        setup_subscription, ClientStatus, McpClientHandle, McpClientPool, McpPoolError,
+        OAuthStartDisposition, OAuthStatus, SHUTDOWN_TIMEOUT,
     },
     initialize::{
         commit_discovery_failure, commit_discovery_success, connect_timeout,
@@ -158,7 +158,7 @@ impl McpClientPool {
                 {
                     let _ = previous.close(BUILTIN_CONVERGE_TIMEOUT).await;
                 }
-                let connected = serve_client_auto(io, &self.capability_profile, timeout).await;
+                let connected = serve_client_auto_for_server(io, self, server_name, timeout).await;
                 // 握手失败 / 超时：新链路当场收口，不留 orphan。
                 if !matches!(connected, Ok(Ok(_))) {
                     self.close_builtin_task(server_name).await;
@@ -184,7 +184,7 @@ impl McpClientPool {
                             reason: "MCP execution directory is not initialized".into(),
                         })?;
                 match self.spawn_stdio_transport(server_name, command, args, env, cwd) {
-                    Ok(t) => serve_client_auto(t, &self.capability_profile, timeout).await,
+                    Ok(t) => serve_client_auto_for_server(t, self, server_name, timeout).await,
                     Err(e) => {
                         McpClientPool::insert_failed(self, server_name, format!("stdio 失败: {e}"));
                         commit_discovery_failure(self, server_name, false);
@@ -277,17 +277,19 @@ impl McpClientPool {
                         Ok(()) => {
                             used_oauth = true;
                             if let Some(am) = mgr.get_authorization_manager(server_name) {
-                                serve_client_auto(
+                                serve_client_auto_for_server(
                                     build_authed_transport(url, headers, am),
-                                    &self.capability_profile,
+                                    self,
+                                    server_name,
                                     timeout,
                                 )
                                 .await
                             } else {
                                 if oauth.is_none() {
-                                    serve_client_auto(
+                                    serve_client_auto_for_server(
                                         build_http_transport(url, headers),
-                                        &self.capability_profile,
+                                        self,
+                                        server_name,
                                         timeout,
                                     )
                                     .await
@@ -315,9 +317,10 @@ impl McpClientPool {
                             }
                             if oauth.is_none() {
                                 tracing::warn!(server = %server_name, error = %e, "OAuth 恢复失败，尝试裸连接");
-                                serve_client_auto(
+                                serve_client_auto_for_server(
                                     build_http_transport(url, headers),
-                                    &self.capability_profile,
+                                    self,
+                                    server_name,
                                     timeout,
                                 )
                                 .await
@@ -333,9 +336,10 @@ impl McpClientPool {
                         }
                     }
                 } else {
-                    serve_client_auto(
+                    serve_client_auto_for_server(
                         build_http_transport(url, headers),
-                        &self.capability_profile,
+                        self,
+                        server_name,
                         timeout,
                     )
                     .await

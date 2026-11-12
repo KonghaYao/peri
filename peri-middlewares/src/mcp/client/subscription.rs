@@ -244,8 +244,15 @@ impl McpClientPool {
                         // prompts，无需磁盘失效。
                         retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
                     }
-                    Ok(Some(_)) => {
-                        // 其余通知（Cancelled/Progress/Logging/Task/Custom 等）无需处理
+                    Ok(Some(notification)) => {
+                        // listen 流只承载 filter 内类别：Logging / Custom 在 server 侧被
+                        // `SubscriptionSink` 拒绝，client 侧收到即判越界并中断订阅，不会
+                        // 到达这里；本分支只兜底 ack 内的其余变体。
+                        tracing::debug!(
+                            server = %task_server,
+                            notification = ?notification,
+                            "MCP 订阅流通知无需额外处理"
+                        );
                         retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
                     }
                     Ok(None) => {

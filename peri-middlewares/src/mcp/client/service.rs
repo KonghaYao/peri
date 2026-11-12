@@ -1,10 +1,21 @@
 //! rmcp service 适配与连接能力声明。
 
-use rmcp::{
-    model::{ClientCapabilities, Implementation, InitializeRequestParams, TASKS_EXTENSION_ID},
-    service::{Peer, QuitReason, RoleClient, RunningService},
-};
+use std::future::Future;
 use std::sync::Arc;
+
+// Logging 类型按 SEP-2577 已废弃，但门控回调仍需保留。
+#[allow(deprecated)]
+use rmcp::{
+    model::{
+        CancelledNotificationParam, ClientCapabilities, CustomNotification, Implementation,
+        InitializeRequestParams, LoggingMessageNotificationParam, ProgressNotificationParam,
+        TaskStatusNotificationParams, TASKS_EXTENSION_ID,
+    },
+    service::{MaybeSendFuture, NotificationContext, Peer, QuitReason, RoleClient, RunningService},
+    ClientHandler,
+};
+
+use super::NotificationTap;
 
 /// Shared with the session pool until the original protocol worker has joined.
 pub(crate) struct McpServiceOwner {
@@ -60,9 +71,97 @@ impl Drop for McpServiceOwner {
     }
 }
 
+/// rmcp client handler：除连接能力声明外，把非订阅通知汇入 [`NotificationTap`]。
+///
+/// 回调运行在连接内串行的 service loop 上：tap 只做同步入缓冲，任何 await 都会
+/// 阻塞该连接的全部请求。未装配 tap（ACP 声明 / 测试直连）时仅留 debug。
+pub(crate) struct PeriClientHandler {
+    info: InitializeRequestParams,
+    tap: Option<Arc<NotificationTap>>,
+}
+
+impl PeriClientHandler {
+    pub(crate) fn new(info: InitializeRequestParams, tap: Option<Arc<NotificationTap>>) -> Self {
+        Self { info, tap }
+    }
+}
+
+impl ClientHandler for PeriClientHandler {
+    fn get_info(&self) -> InitializeRequestParams {
+        self.info.clone()
+    }
+
+    fn on_cancelled(
+        &self,
+        params: CancelledNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + MaybeSendFuture + '_ {
+        tracing::debug!(
+            request_id = ?params.request_id,
+            reason = ?params.reason,
+            "MCP 取消通知（不进入缓冲）"
+        );
+        std::future::ready(())
+    }
+
+    fn on_progress(
+        &self,
+        params: ProgressNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + MaybeSendFuture + '_ {
+        tracing::trace!(
+            progress = ?params.progress,
+            total = ?params.total,
+            "MCP 进度通知（不进入缓冲）"
+        );
+        std::future::ready(())
+    }
+
+    fn on_task_status(
+        &self,
+        params: TaskStatusNotificationParams,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + MaybeSendFuture + '_ {
+        tracing::debug!(task = ?params.task, "MCP 任务状态通知（不进入缓冲）");
+        std::future::ready(())
+    }
+
+    #[allow(deprecated)]
+    fn on_logging_message(
+        &self,
+        params: LoggingMessageNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + MaybeSendFuture + '_ {
+        match &self.tap {
+            Some(tap) => tap.on_logging_message(params),
+            None => tracing::debug!(
+                level = ?params.level,
+                logger = ?params.logger,
+                "MCP 日志通知丢弃：连接未装配通知 sink"
+            ),
+        }
+        std::future::ready(())
+    }
+
+    fn on_custom_notification(
+        &self,
+        notification: CustomNotification,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + MaybeSendFuture + '_ {
+        match &self.tap {
+            Some(tap) => tap.on_custom_notification(notification),
+            None => tracing::debug!(
+                method = %notification.method,
+                "MCP 自定义通知丢弃：连接未装配通知 sink"
+            ),
+        }
+        std::future::ready(())
+    }
+}
+
 /// Wrapper for RunningService and its close lifecycle
 pub(crate) enum McpServiceWrapper {
-    Default(RunningService<RoleClient, InitializeRequestParams>),
+    Default(RunningService<RoleClient, PeriClientHandler>),
     Closing(tokio::task::JoinHandle<Result<QuitReason, tokio::task::JoinError>>),
     Closed,
     Shared(McpServiceHandle),

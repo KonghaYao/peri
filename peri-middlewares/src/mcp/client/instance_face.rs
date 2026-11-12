@@ -380,7 +380,13 @@ async fn forward_instance_resource_updates(
                         Err(mpsc::error::TrySendError::Closed(_)) => break,
                     }
                 }
-                Ok(Some(_)) => {}
+                Ok(Some(notification)) => {
+                    tracing::debug!(
+                        uri = %uri,
+                        notification = ?notification,
+                        "MCP 实例订阅流通知非 resources/updated，忽略"
+                    );
+                }
                 Ok(None) => break,
                 Err(_) => break,
             },

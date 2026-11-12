@@ -174,7 +174,7 @@ impl ServerHandler for Source {
 }
 
 pub(crate) struct Wire {
-    pub(crate) client: RunningService<RoleClient, rmcp::model::InitializeRequestParams>,
+    pub(crate) client: RunningService<RoleClient, crate::mcp::client::PeriClientHandler>,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -192,8 +192,11 @@ impl Wire {
         });
         let client = tokio::time::timeout(
             Duration::from_secs(2),
-            crate::mcp::client::mcpp_client_info_for_profile(
-                &crate::mcp::apps::McpCapabilityProfile::disabled(),
+            crate::mcp::client::PeriClientHandler::new(
+                crate::mcp::client::mcpp_client_info_for_profile(
+                    &crate::mcp::apps::McpCapabilityProfile::disabled(),
+                ),
+                None,
             )
             .serve(client_io),
         )
