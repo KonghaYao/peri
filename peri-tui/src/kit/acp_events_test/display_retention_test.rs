@@ -206,6 +206,28 @@ fn test_display_retention_shifts_canonical_ranges_and_preserves_releasable_histo
 
 #[test]
 #[serial]
+fn test_display_retention_disabled_window_keeps_legacy_paging_spans() {
+    crate::kit::history_paging::reset_browsing_state();
+    let mut state = make_fold_test_state();
+    state.active_session_id = "retention-legacy".into();
+    state.window = HistoryWindow::new(HistoryWindowConfig::default());
+    assert!(!state.window.is_enabled());
+    // 关闭窗口时 legacy 分页仍以 HISTORY_SPANS 判重、定插入点。
+    crate::kit::history_paging::mark_own_entry("legacy:own", 1000);
+    crate::kit::history_paging::note_own_entry_unit(400);
+    crate::kit::history_paging::close_own_entry();
+    for index in 0..MAX_ENTRIES + 64 {
+        note(&mut state, format!("legacy-note-{index}"));
+        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    }
+    assert!(
+        crate::kit::history_paging::with_spans(|spans| spans.contains("legacy:own")),
+        "关闭窗口时展示淘汰不得以空驻留索引覆盖 legacy 分页区间"
+    );
+}
+
+#[test]
+#[serial]
 fn test_display_retention_keeps_latest_oversized_notice_readable_and_bounds_older_records() {
     let mut state = state();
     for index in 0..3 {

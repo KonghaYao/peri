@@ -34,7 +34,8 @@ Live 工具卡归属：`kit/acp_events/live_tool_links.rs` 按 `active_session_i
 本地提示、live reminder 与已完成交互由 `kit/acp_events/display_retention.rs` 回收，
 与 `CurrentTurn` 中的已落段/待落提示共享 `kit/display_retention.rs` 的 256 项、1 MiB 预算。
 最新一条允许单独超额，未完成交互不淘汰；有持久展示槽位的历史页内容仍走窗口释放。
-移除时同步移动展示账本并失效投影，live seal 归属逻辑位于 `acp_events/live_seal.rs`。
+移除时同步移动展示账本并失效投影，live seal 归属逻辑位于 `acp_events/live_seal.rs`；
+关闭 `history-window-v1` 时改为就地左移 `history_paging` 的 legacy 区间索引，不以空驻留索引覆盖。
 手动折叠偏好经 `kit/fold_overrides.rs` 保留最近操作，限制为 1024 项及 256 KiB 键目录
 （含顺序目录的副本），会话重置同时释放覆盖表和顺序目录。
 回归入口：`acp_events_test::display_retention_test`、`fold_overrides::tests`。

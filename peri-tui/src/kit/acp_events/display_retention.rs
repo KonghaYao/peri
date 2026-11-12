@@ -19,17 +19,25 @@ pub(super) fn enforce(state: &mut BridgeState) {
             remove.push(slot);
         }
     }
+    let mut committed_changed = false;
     for slot in remove {
         // Durable page records keep their source identity and normal release path.
         if state.window.remove_unmapped_display_slot(slot) {
             state.committed.remove(slot);
+            committed_changed = true;
+            if !state.window.is_enabled() {
+                // 关闭窗口时没有驻留索引可重新派生，只能就地左移 legacy 分页区间。
+                crate::kit::history_paging::shift_spans_after_slot_removal(slot);
+            }
             changed = true;
         }
     }
     if changed {
         state.folded_history.invalidate();
         super::render::invalidate_structural_caches();
-        crate::kit::history_paging::sync_spans_from_window(&state.window);
+        if committed_changed && state.window.is_enabled() {
+            crate::kit::history_paging::sync_spans_from_window(&state.window);
+        }
         crate::kit::atoms::FOCUSED_ENTRY.set(None);
         let epoch = crate::kit::atoms::STRUCTURAL_EPOCH.get().saturating_add(1);
         crate::kit::atoms::STRUCTURAL_EPOCH.set(epoch);
