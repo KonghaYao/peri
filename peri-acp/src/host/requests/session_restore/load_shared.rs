@@ -56,6 +56,7 @@ pub(crate) async fn handle_load_shared(
                     transport,
                     &connection,
                     &generation,
+                    history,
                     kind,
                     &error,
                 )
@@ -221,7 +222,7 @@ async fn execution_facts(
     }
     Ok((
         format!("runtime-{}", state.session_generation),
-        state.context_ownership == ContextOwnership::Resident,
+        !state.is_view_only() && state.context_ownership == ContextOwnership::Resident,
     ))
 }
 
@@ -682,6 +683,7 @@ async fn serve_view_only_load(
     transport: &Arc<dyn crate::transport::AcpTransport>,
     connection: &ConnectionFacts,
     generation: &LoadGeneration,
+    history: Option<LoadInitial>,
     kind: &'static str,
     error: &AcpError,
 ) -> Result<Value, AcpError> {
@@ -695,7 +697,7 @@ async fn serve_view_only_load(
         transport,
         connection,
         generation,
-        connection.history_window_v1,
+        connection.history_window_v1 || history.is_some(),
     )
     .await
     {
@@ -716,6 +718,20 @@ async fn serve_view_only_load(
     )
     .await?;
     response["_meta"]["peri.recovery"] = view_only_recovery_view(&thread, failure)?;
+    if let Some(initial) = history {
+        // 历史可读与执行可用是独立事实：只读进入也遵守已协商的 initial 契约。
+        attach_history_initial(
+            cfg,
+            sessions,
+            &session_id,
+            connection,
+            initial,
+            &mut response,
+        )
+        .await?;
+    } else {
+        crate::host::live_delivery::detach_session(sessions, &session_id).await;
+    }
     Ok(response)
 }
 

@@ -239,8 +239,6 @@ impl AcpTuiClient {
         reservation: Option<&SessionLoadReservation>,
         operation: TransitionOperation,
     ) -> Result<String, AcpError> {
-        *self.restore_error.lock().unwrap() =
-            Some("session restore has not completed; retry or create a new session".into());
         let effective_cwd = if self.supports_session_workspace() {
             match self.session_context(Some(session_id), None).await {
                 Ok(context) => context
@@ -249,15 +247,11 @@ impl AcpTuiClient {
                     .into_os_string()
                     .into_string()
                     .map_err(|_| AcpError::new(-32603, "session cwd is not valid UTF-8"))?,
-                Err(error) => {
-                    *self.restore_error.lock().unwrap() = Some(error.to_string());
-                    return Err(error);
-                }
+                Err(error) => return Err(error),
             }
         } else {
             cwd.to_string()
         };
-        self.project_execution_cwd(None);
         let start = self
             .claim_and_begin_transition(
                 reservation,
@@ -267,6 +261,10 @@ impl AcpTuiClient {
             )
             .map_err(|message| AcpError::new(-32603, message))?;
         let transition = self.lifecycle.arm_transition(start.generation);
+        self.project_execution_cwd(None);
+        // 目标预检失败时旧会话尚未切换，不能用目标错误污染原会话的执行准入。
+        *self.restore_error.lock().unwrap() =
+            Some("session restore has not completed; retry or create a new session".into());
         // initial 是窗口替换的候选：候选成功前不撤销旧窗口，也不关闭它的服务端
         // 票据（否则失败后快照虽在，page/body 仍会 `window_closed`）。同会话且已有
         // 可恢复窗口时，暂存登记与快照在同一接纳临界区完成：旧流更新要么已落在
@@ -389,6 +387,7 @@ impl AcpTuiClient {
                 return Err(error);
             }
         };
+        let mut execution_ready = true;
         if let Some(request_key) = request_key {
             // V2 连接的首屏只来自 initial：不调用 V1 游标解码、不回放、不再发 window open。
             let admitted = match crate::kit::history_v2::initial::admit_load_response(
@@ -427,7 +426,7 @@ impl AcpTuiClient {
                     return Err(acp);
                 }
             };
-            let execution_ready = admitted.execution_ready;
+            execution_ready = admitted.execution_ready;
             self.lifecycle
                 .commit_stable(start.generation, session_id.to_string());
             // F2b：initial 一旦通过原子校验就立即发布首屏（含 initial 前暂存的 live
@@ -499,7 +498,6 @@ impl AcpTuiClient {
             if let Some(view) = recovery.as_ref() {
                 crate::acp_client::client::recovery_view::present(session_id, view);
             }
-            self.flush_buffered();
             // S5.4：协商过窗口能力且开关开启时，额外建立 V1 窗口（默认关闭时无行为）。
             //
             // 必须在初始化成功之后：服务端对声明 `peri.historyWindowV1` 的连接不再回放历史，
@@ -510,7 +508,14 @@ impl AcpTuiClient {
             );
             *self.restore_error.lock().unwrap() = None;
         }
-        self.project_execution_cwd(Some(effective_cwd));
+        // commit_stable 对两种 load 都开启通知缓冲；完成初始化后必须统一排空。
+        self.flush_buffered();
+        let execution_cwd = loaded
+            .pointer("/_meta/peri.sessionWorkspaceV1/workspace/cwd")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(&effective_cwd)
+            .to_owned();
+        self.project_execution_cwd(execution_ready.then_some(execution_cwd));
         {
             let mut target = self.startup_restore_target.lock().unwrap();
             if target.as_deref() == Some(session_id) {

@@ -948,7 +948,7 @@ bg-task-notify-failed = [✗] { $name } 失败 ({ $duration }s)
 thread-switch-confirm-title = 切换 thread 确认
 thread-switch-bg-tasks-message = 当前 thread 有 { $count } 个后台任务仍在运行
 thread-switch-task-counts =   { $shell } shell  { $agent } agent  { $workflow } workflow
-thread-switch-bg-note = 切换后这些任务继续在后台执行，但当前视图不再显示其状态。
+thread-switch-bg-note = 切换会先关闭当前会话并停止可取消的任务；需要交接的独立任务可能阻止切换。已保存的历史会保留。
 
 # ---- System Reminders (P0) ----
 reminder-cron-task = Cron 任务

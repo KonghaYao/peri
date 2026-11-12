@@ -70,7 +70,7 @@ fn project_session_boundary_inner(target_session_id: Option<&str>, retire_histor
     panel_registry::close_panel(PanelKind::AskUser);
 
     let popup = *atoms::POPUP_KIND.state().read();
-    let reject_confirm = atoms::CONFIRM_PAYLOAD
+    let session_confirm = atoms::CONFIRM_PAYLOAD
         .state()
         .read()
         .as_ref()
@@ -78,16 +78,17 @@ fn project_session_boundary_inner(target_session_id: Option<&str>, retire_histor
             matches!(
                 payload.pending_action,
                 atoms::ConfirmAction::RejectAskUser { .. }
+                    | atoms::ConfirmAction::ThreadSwitch { .. }
             )
         });
     if matches!(
         popup,
         Some(atoms::PopupKind::Hitl | atoms::PopupKind::AskUser | atoms::PopupKind::OAuth)
-    ) || (popup == Some(atoms::PopupKind::Confirm) && reject_confirm)
+    ) || (popup == Some(atoms::PopupKind::Confirm) && session_confirm)
     {
         *atoms::POPUP_KIND.state().write() = None;
     }
-    if reject_confirm {
+    if session_confirm {
         *atoms::CONFIRM_PAYLOAD.state().write() = None;
     }
 

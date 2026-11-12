@@ -89,13 +89,14 @@ fn confirm(rendered: Option<&RenderedConfirm>) -> EventResult {
     };
     match outcome {
         ConfirmOutcome::Execute(action) => {
+            // 先关闭当前确认，再入队；消费者可能立即发布下一次确认。
+            *CONFIRM_PAYLOAD.state().write() = None;
+            close_popup();
             execute_confirm_action(&action, |action| {
                 if let Some(tx) = ASK_USER_RESPONSE_TX.get() {
                     let _ = tx.send(action);
                 }
             });
-            *CONFIRM_PAYLOAD.state().write() = None;
-            close_popup();
         }
         // 不执行、不关闭：下一帧渲染新 payload，用户可对新内容再确认。
         ConfirmOutcome::Superseded => notify_superseded(),
@@ -228,9 +229,12 @@ pub(crate) fn execute_confirm_action(
     mut send_ask_user: impl FnMut(AskUserResponseAction),
 ) {
     match action {
-        ConfirmAction::ThreadSwitch(target_id) => {
+        ConfirmAction::ThreadSwitch {
+            target_id,
+            source_identity,
+        } => {
             if let Some(tx) = atoms::THREAD_LOAD_TX.get() {
-                let _ = tx.send(target_id.clone());
+                let _ = tx.send_confirmed(target_id.clone(), source_identity.clone());
             }
         }
         ConfirmAction::RejectAskUser {

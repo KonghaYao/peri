@@ -392,7 +392,7 @@ async fn dirty_reset_rpc_stays_removed_and_does_not_change_session_facts() {
 
 #[tokio::test]
 #[serial]
-async fn read_only_store_keeps_history_readable_but_rejects_load_and_close_mutations() {
+async fn read_only_store_closes_views_without_mutating_history() {
     let mut fixture = Fixture::new().await;
     let id = fixture.id.clone();
     fixture.close(&id).await;
@@ -422,12 +422,7 @@ async fn read_only_store_keeps_history_readable_but_rejects_load_and_close_mutat
     .await
     .unwrap();
     assert_eq!(history["payloads"].as_array().unwrap().len(), 1);
-    for method in [
-        "session/load",
-        "session/resume",
-        "session/close",
-        "session/delete",
-    ] {
+    for method in ["session/load", "session/resume", "session/delete"] {
         assert!(handle_request(
             method,
             &json!({"sessionId":id}),
@@ -437,6 +432,18 @@ async fn read_only_store_keeps_history_readable_but_rejects_load_and_close_mutat
         )
         .await
         .is_err());
+        assert!(sessions.is_empty());
+    }
+    for _ in 0..2 {
+        handle_request(
+            "session/close",
+            &json!({"sessionId":id}),
+            &readonly,
+            &mut sessions,
+            &fixture.transport,
+        )
+        .await
+        .unwrap();
         assert!(sessions.is_empty());
     }
     assert!(!fixture

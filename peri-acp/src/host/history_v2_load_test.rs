@@ -64,6 +64,232 @@ fn error_data(error: &crate::transport::types::AcpError) -> HistoryErrorData {
     .unwrap_or_else(|cause| panic!("错误 data 必须是 HistoryErrorData：{cause}; {error:?}"))
 }
 
+/// 关闭宿主并重开同一 SQLite 后，只读进入仍须交付 V2 首屏和分页票据。
+#[tokio::test]
+#[serial]
+async fn session_load_v2_reopened_read_only_store_keeps_history_readable() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fixture = PageFixture::new(&tmp).await;
+    let sid = fixture.sid.clone();
+    let expected_ids = fixture.own_ids().await;
+    let config = fixture.cfg.peri_config.read().clone();
+    fixture
+        .cfg
+        .session_resources
+        .drain_persistence(&sid)
+        .await
+        .unwrap();
+    drop(fixture);
+    let resources = Arc::new(
+        peri_resources::sessions::SessionResourcesImpl::open_existing_read_only(
+            tmp.path().join("threads.db"),
+        )
+        .await
+        .unwrap(),
+    );
+    let cfg = Arc::new(
+        build_server_config(
+            config.clone(),
+            LlmProvider::from_config(&config).unwrap(),
+            &tmp,
+            resources,
+        )
+        .await,
+    );
+    let sessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let (client, _, task) = spawn_loop(cfg, sessions, Some(history_v2_caps())).await;
+    for request_key in ["1", "3"] {
+        let response = client
+            .send_request(
+                "session/load",
+                load_params(&sid, initial_meta_with_limit(request_key, 2, 524_288)),
+            )
+            .await
+            .unwrap();
+        let initial = &response["_meta"]["peri.history"];
+        assert_eq!(
+            initial["kind"], "initial",
+            "只读历史不得丢失 V2 首屏：{response}"
+        );
+        assert_eq!(initial["executionReady"], false);
+        assert_eq!(response["_meta"]["peri.recovery"]["executionBlocked"], true);
+        assert!(response["_meta"].get("periLoadGeneration").is_none());
+        let page = &initial["page"];
+        assert_eq!(page["sessionId"], sid);
+        assert_eq!(page["items"].as_array().unwrap().len(), 2);
+        let next_key = if request_key == "1" { "2" } else { "4" };
+        let older = client
+            .send_request(
+                "_peri/history",
+                json!({
+                    "version": 2, "action": "page", "sessionId": sid, "requestKey": next_key,
+                    "windowId": page["windowId"], "snapshotToken": page["snapshotToken"],
+                    "readTicket": page["readTicket"], "direction": "before",
+                    "cursor": page["beforeCursor"], "limit": 2,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            older["items"][0]["entryId"],
+            format!("{sid}:{}", expected_ids[0].as_uuid())
+        );
+        let notifications = s9c_drain_notifications(&client).await;
+        assert!(
+            !notifications.iter().any(|(method, params)| {
+                method == "session/update"
+                    && matches!(
+                        params["update"]["sessionUpdate"].as_str(),
+                        Some("agent_message_chunk" | "user_message_chunk" | "agent_thought_chunk")
+                    )
+            }),
+            "V2 只读加载不得回退 V1 全量回放"
+        );
+    }
+    let error = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": sid, "prompt": [{"type": "text", "text": "continue"}],
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, -32017, "只读历史不得开启执行");
+    for _ in 0..2 {
+        client
+            .send_request("session/close", json!({"sessionId": sid}))
+            .await
+            .unwrap();
+    }
+    client
+        .send_request("session/delete", json!({"sessionId": sid}))
+        .await
+        .unwrap_err();
+    let reopened = client
+        .send_request(
+            "session/load",
+            load_params(&sid, initial_meta("5", 524_288)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened["_meta"]["peri.history"]["page"]["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3,
+        "离开只读历史后重进，消息仍完整保留"
+    );
+    client.close();
+    task.await.unwrap();
+}
+
+/// 同一真实数据库跨进程退出/重启：正常续聊入口与目录失效后的历史阅读。
+#[test]
+fn session_load_v2_process_restart_preserves_history() {
+    const ROOT: &str = "PERI_HISTORY_RESTART_TEST_ROOT";
+    const PHASE: &str = "PERI_HISTORY_RESTART_TEST_PHASE";
+    if let Some(root) = std::env::var_os(ROOT) {
+        let root = std::path::PathBuf::from(root);
+        let phase = std::env::var(PHASE).unwrap();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let config = make_peri_config_with_provider(make_provider_config(
+                "a",
+                "openai",
+                "unused-test-key",
+                "gpt-4o",
+            ));
+            let resources =
+                peri_agent::resources::open_session_resources_with(Some(root.join("threads.db")))
+                    .await
+                    .unwrap();
+            let cfg = Arc::new(
+                build_server_config(
+                    config.clone(),
+                    LlmProvider::from_config(&config).unwrap(),
+                    &tmp,
+                    resources,
+                )
+                .await,
+            );
+            let sid = "rewind-test-session";
+            if phase == "seed" {
+                let mut sessions = HashMap::new();
+                register_session_with_history(
+                    &mut sessions,
+                    root.join("saved").to_str().unwrap(),
+                    &cfg,
+                )
+                .await;
+                cfg.session_resources
+                    .drain_persistence(&sid.to_owned())
+                    .await
+                    .unwrap();
+                return;
+            }
+            let sessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+            let (client, _, task) = spawn_loop(cfg, sessions, Some(history_v2_caps())).await;
+            let context = client
+                .send_request("peri/session_context", json!({"sessionId": sid}))
+                .await;
+            assert_eq!(
+                context.unwrap()["workspace"]["cwd"],
+                root.join("saved").to_str().unwrap()
+            );
+            let response = client
+                .send_request("session/load", load_params(sid, initial_meta("1", 524_288)))
+                .await
+                .unwrap();
+            let initial = &response["_meta"]["peri.history"];
+            assert_eq!(initial["kind"], "initial", "重启后必须有首屏：{response}");
+            assert_eq!(initial["executionReady"], phase == "restore");
+            assert_eq!(initial["page"]["items"].as_array().unwrap().len(), 3);
+            assert!(initial["page"].to_string().contains("第一轮用户问题"));
+            assert!(initial["page"].to_string().contains("第二轮用户问题"));
+            client
+                .send_request("session/close", json!({"sessionId": sid}))
+                .await
+                .unwrap();
+            client.close();
+            task.await.unwrap();
+        });
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    // [Why] 服务端投影 canonical cwd；macOS 的 /var 是 /private/var 的符号链接，
+    // 子进程必须收到同一形式，否则断言比较的是同一目录的两个字符串。
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir(root.join("saved")).unwrap();
+    std::fs::create_dir(root.join("home")).unwrap();
+    let module = module_path!().split_once("::").unwrap().1;
+    let test_name = format!("{module}::session_load_v2_process_restart_preserves_history");
+    for phase in ["seed", "restore", "missing-directory"] {
+        if phase == "missing-directory" {
+            std::fs::remove_dir_all(root.join("saved")).unwrap();
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test_name, "--nocapture"])
+            .env(ROOT, &root)
+            .env(PHASE, phase)
+            .env("HOME", root.join("home"))
+            .env("PERI_MACHINE_ID", "00000000-0000-4000-8000-000000000270")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{phase} 子进程失败：\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "子进程必须实际执行目标测试"
+        );
+    }
+}
+
 async fn v2_fixture(
     tmp: &tempfile::TempDir,
 ) -> (

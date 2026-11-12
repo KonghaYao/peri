@@ -950,7 +950,7 @@ bg-task-notify-failed = [✗] { $name } failed ({ $duration }s)
 thread-switch-confirm-title = Switch Thread Confirmation
 thread-switch-bg-tasks-message = Current thread has { $count } background tasks still running
 thread-switch-task-counts =   { $shell } shell  { $agent } agent  { $workflow } workflow
-thread-switch-bg-note = These tasks continue running after switch, but will not be visible in the current view.
+thread-switch-bg-note = Switching first closes this session and stops cancellable tasks. Independent tasks that require handoff may block the switch. Saved history is retained.
 
 # ---- System Reminders (P0) ----
 reminder-cron-task = Cron Task
