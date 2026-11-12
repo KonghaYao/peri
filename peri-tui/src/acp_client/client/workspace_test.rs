@@ -1,4 +1,5 @@
 use super::*;
+use crate::acp_client::AdmissionGuard;
 use peri_acp::transport::{
     AcpTransport,
     mpsc::{MpscServerTransport, mpsc_transport_pair},
@@ -121,12 +122,20 @@ async fn resume_uses_saved_execution_directory_and_commits_it_after_load() {
 }
 
 #[tokio::test]
-async fn unavailable_binding_preserves_old_session_but_blocks_queued_prompt() {
+async fn unavailable_binding_preserves_old_session_and_cancels_waiting_cohort() {
     let (client, server) = client();
     client.lifecycle.force_stable("old", false);
     client.project_execution_cwd(Some("/main".into()));
+    let reservation = client.reserve_session_load();
+    let snapshot = client.session_admission_snapshot();
+    let admission = AdmissionGuard::new(snapshot.switch_seq, false)
+        .with_operation(snapshot.unclaimed_load.unwrap());
     let loader = client.clone();
-    let load = tokio::spawn(async move { loader.load_session("target", "/main", None).await });
+    let load = tokio::spawn(async move {
+        loader
+            .load_reserved_session(&reservation, "target", "/main", None)
+            .await
+    });
     let (id, _) = request(&server, "peri/session_context").await;
     server
         .send_response(id, Err(AcpError::new(-32001, "workspace unavailable")))
@@ -141,33 +150,29 @@ async fn unavailable_binding_preserves_old_session_but_blocks_queued_prompt() {
     );
     assert_eq!(client.current_session_id().as_deref(), Some("old"));
     assert_eq!(client.current_execution_cwd().as_deref(), Some("/main"));
-    assert!(
-        client
-            .ensure_session("/main", None)
+    let mut admitted = Some(("unexpected".to_owned(), 0));
+    client
+        .resolve_session_admission("/main", admission, |identity| admitted = identity.cloned())
+        .await
+        .unwrap();
+    assert!(admitted.is_none(), "等待目标切换的输入不能改投旧会话");
+    assert_eq!(client.ensure_session("/main", None).await.unwrap(), "old");
+    let sender = client.clone();
+    let prompt = tokio::spawn(async move {
+        sender
+            .prompt(
+                &peri_acp_types::messages::MessageContent::text("new input"),
+                None,
+            )
             .await
-            .unwrap_err()
-            .to_string()
-            .contains("workspace unavailable")
-    );
-    let error = client
-        .prompt(
-            &peri_acp_types::messages::MessageContent::text("do work"),
-            None,
-        )
+    });
+    let (id, params) = request(&server, "session/prompt").await;
+    assert_eq!(params["sessionId"], "old", "用户之后的新输入仍可继续原会话");
+    server
+        .send_response(id, Ok(json!({"stopReason": "end_turn"})))
         .await
-        .unwrap_err();
-    assert!(error.to_string().contains("workspace unavailable"));
-    let error = client
-        .dispatch_user_inputs(&peri_acp_types::session::DispatchUserInputsRequest {
-            session_id: "old".into(),
-            generation: "g".into(),
-            command_id: "dispatch".into(),
-            input_ids: vec!["input".into()],
-        })
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, -32602);
-    assert!(error.to_string().contains("workspace unavailable"));
+        .unwrap();
+    prompt.await.unwrap().unwrap();
 }
 
 #[tokio::test]

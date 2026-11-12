@@ -241,6 +241,39 @@ impl InteractionLifecycle {
         drain_pending(&mut state, ClaimCause::LifecycleDrain, |_| true)
     }
 
+    /// initial 失败但旧窗口仍有效：回收本次切换的排队认领，并把路由交还旧会话。
+    ///
+    /// 服务端失败路径会先把候选期更新补回旧流；路由若停在 `NoSession`，pump 会
+    /// 把这些真实通知直接丢弃，恢复的窗口只剩下快照。旧会话的实时/补发通知必须
+    /// 继续进入 notifier，由已恢复的窗口按 seq 接纳。
+    pub(crate) fn fail_transition_restoring_route(
+        &self,
+        generation: u64,
+        session_id: &str,
+    ) -> Vec<ClaimedInteraction> {
+        let mut state = self.state.lock().unwrap();
+        if state.route.generation() != generation {
+            return Vec::new();
+        }
+        let operation = match &state.route {
+            SessionRoute::Transitioning { operation, .. } => Some(*operation),
+            SessionRoute::Stable { operation, .. } => *operation,
+            _ => None,
+        };
+        state.route = SessionRoute::Stable {
+            session_id: session_id.to_owned(),
+            generation,
+            operation,
+            accepting_reverse: false,
+            prompt_epoch: 0,
+        };
+        state.active_prompt = None;
+        state.new_buffer.clear();
+        state.new_flush_pending = false;
+        state.warned_buffer_full = false;
+        drain_pending(&mut state, ClaimCause::LifecycleDrain, |_| true)
+    }
+
     pub fn mark_deleted(&self, session_id: &str) {
         let mut state = self.state.lock().unwrap();
         state.deleted_session_ids.insert(session_id.to_string());

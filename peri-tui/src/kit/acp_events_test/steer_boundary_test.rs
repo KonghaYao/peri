@@ -111,8 +111,11 @@ fn spawn_wiring() -> (
     let (bridge_tx, bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let (observed_tx, observed_rx) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
-    let notifier =
-        crate::kit::acp_notifier::spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
+    let notifier = crate::kit::acp_notifier::spawn_kit_notifier(
+        notif_rx,
+        crate::kit::acp_notifier::BridgeSink::direct(bridge_tx),
+        shutdown.clone(),
+    );
     let bridge = crate::kit::acp_bridge::spawn_acp_bridge_observed_with_client(
         bridge_rx,
         shutdown.clone(),

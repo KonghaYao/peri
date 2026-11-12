@@ -31,11 +31,11 @@ use peri_acp_types::session::{
 use peri_acp_types::session_resources::{
     AccessMode, ActiveSessionSnapshot, BindingRecheck, BindingState, ChildResumeClaim,
     ChildSnapshot, CloseSettlement, DataCapabilities, ExecutionAvailability, ForkSnapshot,
-    FrozenSnapshotBytes, FrozenState, HistoryWindowPagePlan, HistoryWindowRows, NewSession,
-    NewSessionDraft, PersistenceRecovery, RewindBoundary, RewindCandidate, RewindOutcome,
-    SessionAvailability, SessionHistoryWindowBounds, SessionInitialization, SessionMetaPatch,
-    SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionResources,
-    SessionSnapshot, TerminalSettlementOutcome,
+    FrozenSnapshotBytes, FrozenState, HistoryEntryMetadata, HistoryWindowPagePlan,
+    HistoryWindowRows, NewSession, NewSessionDraft, PersistenceRecovery, RewindBoundary,
+    RewindCandidate, RewindOutcome, SessionAvailability, SessionHistoryWindowBounds,
+    SessionInitialization, SessionMetaPatch, SessionResourceError, SessionResourceErrorKind,
+    SessionResourceResult, SessionResources, SessionSnapshot, TerminalSettlementOutcome,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta, WorkState};
@@ -322,6 +322,10 @@ impl SessionResources for SessionResourcesImpl {
         self.gate.data().supports_history_window()
     }
 
+    fn supports_history_v2(&self) -> bool {
+        self.gate.data().supports_history_v2()
+    }
+
     async fn load_session_binding(&self, id: &ThreadId) -> SessionResourceResult<BindingState> {
         let state = self.gate.data().load_binding(id).await?;
         self.classify_binding(id, state).await
@@ -416,6 +420,20 @@ impl SessionResources for SessionResourcesImpl {
                 byte_budget,
                 committed_tail,
             )
+            .await
+    }
+
+    async fn read_history_entry_metadata(
+        &self,
+        id: &ThreadId,
+        source: HistorySource,
+        entry_id: MessageId,
+        committed_tail: Option<&HistoryCommittedTail>,
+        read_ticket: &HistoryReadTicket,
+    ) -> SessionResourceResult<HistoryEntryMetadata> {
+        self.gate
+            .data()
+            .read_history_entry_metadata(id, source, entry_id, committed_tail, read_ticket)
             .await
     }
 

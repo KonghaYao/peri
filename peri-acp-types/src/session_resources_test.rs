@@ -443,3 +443,11 @@ async fn unimplemented_atomic_settlements_fail_before_any_write() {
         assert_eq!(error.effect(), MutationOutcome::NotApplied);
     }
 }
+
+/// 能力协商必须 fail-closed：没有实现读取的后端不得声明 History V2 / V1 能力。
+#[test]
+fn unsupported_backend_does_not_claim_history_capabilities() {
+    let resources = SegmentlessResources;
+    assert!(!resources.supports_history_v2());
+    assert!(!resources.supports_history_window());
+}

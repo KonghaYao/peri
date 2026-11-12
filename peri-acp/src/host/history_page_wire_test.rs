@@ -35,8 +35,9 @@ mod rejection_tests;
 mod rewind_tests;
 
 /// 能力门控与私有字段：连接级协商（initialize 请求 / 直接写入）决定回放与分页语义。
+/// 模块名参与 `cargo test` 过滤（`history_page_caps`）。
 #[path = "history_page_caps_test.rs"]
-mod caps_tests;
+mod history_page_caps;
 
 /// `peri.historyWindowV1`：open/page/seek、二次校验、fixed tail、descriptor 与分块。
 #[path = "history_page_window_test.rs"]

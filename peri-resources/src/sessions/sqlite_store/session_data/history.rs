@@ -110,8 +110,9 @@ pub(in crate::sessions) const HISTORY_WINDOW_TAIL_CHECK_SQL: &str =
 
 /// before 方向候选：`rowid <= tail`，并按锚点身份定位；`?4` 为 1 时包含锚点自身
 /// （seek/open(entry)），为 0 时严格更早（游标翻页）。最多 `limit + 1` 行，不取正文；
-/// 长度由 blob 句柄逐行给出（理由见 [`HISTORY_PAGE_ROWS_SQL`]）。
-pub(in crate::sessions) const HISTORY_WINDOW_BEFORE_SQL: &str = "SELECT message_id, rowid
+/// `role` 随行返回，供 History V2 在不读正文时判定 oversize 可见性。长度由 blob 句柄
+/// 逐行给出（理由见 [`HISTORY_PAGE_ROWS_SQL`]）。
+pub(in crate::sessions) const HISTORY_WINDOW_BEFORE_SQL: &str = "SELECT message_id, rowid, role
     FROM messages
     WHERE thread_id = ?1 AND rowid <= ?2
       AND (?3 IS NULL OR rowid < ?3 OR (?4 <> 0 AND rowid = ?3))
@@ -119,8 +120,8 @@ pub(in crate::sessions) const HISTORY_WINDOW_BEFORE_SQL: &str = "SELECT message_
 
 /// after 方向候选：`anchor < rowid <= tail`，升序，最多 `limit + 1` 行，不取正文；
 /// 长度由 blob 句柄逐行给出；`?4` 为 1 时包含锚点自身（`open(entry, after)` 且
-/// before 半段不存在），保证锚点恰好返回一次。
-pub(in crate::sessions) const HISTORY_WINDOW_AFTER_SQL: &str = "SELECT message_id, rowid
+/// before 半段不存在），保证锚点恰好返回一次。`role` 口径同 before。
+pub(in crate::sessions) const HISTORY_WINDOW_AFTER_SQL: &str = "SELECT message_id, rowid, role
     FROM messages
     WHERE thread_id = ?1 AND rowid <= ?2
       AND (rowid > ?3 OR (?4 <> 0 AND rowid = ?3))
@@ -134,6 +135,12 @@ pub(in crate::sessions) const HISTORY_WINDOW_OLDER_EXISTS_SQL: &str =
 /// 更晚方向是否还有可读行（严格晚于给定 rowid，且不越过 fixed tail）。
 pub(in crate::sessions) const HISTORY_WINDOW_NEWER_EXISTS_SQL: &str =
     "SELECT 1 FROM messages WHERE thread_id = ?1 AND rowid > ?2 AND rowid <= ?3 LIMIT 1";
+
+/// 条目元数据定位：主键 + 固定 tail，同时取出存储 role。长度仍由 blob 句柄给出，
+/// 不读取正文；这是 body 定位的独立入口，不受页预算影响。
+pub(in crate::sessions) const HISTORY_WINDOW_ENTRY_METADATA_SQL: &str = "SELECT rowid, role
+    FROM messages
+    WHERE thread_id = ?1 AND message_id = ?2 AND rowid <= ?3";
 
 /// 超大条目的行定位：只按主键（和固定 tail）取 `rowid`，总长度与请求区间都由
 /// `sqlite3_blob_bytes`/`sqlite3_blob_read` 给出，**不**用 `length(CAST(...))` 或
@@ -458,7 +465,30 @@ pub(super) async fn read_content_lengths(
     Ok(measured)
 }
 
-async fn read_content_length(
+/// 窗口候选：除长度外保留 `messages.role`，不读正文。
+///
+/// 与 [`read_content_lengths`] 同一份 blob 长度读取；`role` 只是可见性粗分类，
+/// 不参与身份或排序。
+pub(super) async fn read_window_candidates(
+    connection: &mut SqliteConnection,
+    rows: Vec<(String, i64, String)>,
+) -> SessionResourceResult<Vec<HistoryPageCandidate>> {
+    let mut candidates = Vec::with_capacity(rows.len());
+    for (message_id, rowid, role) in rows {
+        let total = read_content_length(connection, rowid).await?;
+        let encoded_bytes = i64::try_from(total)
+            .map_err(|_| corrupt("history entry length exceeds the supported range"))?;
+        candidates.push(HistoryPageCandidate::new_with_role(
+            &message_id,
+            rowid,
+            encoded_bytes,
+            HistoryEntryRole::from_stored(&role),
+        )?);
+    }
+    Ok(candidates)
+}
+
+pub(super) async fn read_content_length(
     connection: &mut SqliteConnection,
     rowid: i64,
 ) -> SessionResourceResult<u64> {
@@ -752,6 +782,13 @@ pub(in crate::sessions) const HISTORY_WINDOW_INHERITED_BODY_SQL: &str = "SELECT 
 pub(in crate::sessions) const HISTORY_WINDOW_INHERITED_CHUNK_SQL: &str =
     "SELECT length(CAST(je.value AS BLOB)),
             substr(CAST(je.value AS BLOB), ?3 + 1, ?4)
+    FROM threads t, json_each(t.inherited_context, '$.payloads') je
+    WHERE t.id = ?1 AND je.key = ?2";
+
+/// 非 canonical inherited 信封的条目长度（body 定位的独立回退入口）。
+/// 与 [`HISTORY_WINDOW_INHERITED_CHUNK_SQL`] 的 `length` 口径相同，但不取正文块。
+pub(in crate::sessions) const HISTORY_WINDOW_INHERITED_LENGTH_SQL: &str =
+    "SELECT length(CAST(je.value AS BLOB))
     FROM threads t, json_each(t.inherited_context, '$.payloads') je
     WHERE t.id = ?1 AND je.key = ?2";
 

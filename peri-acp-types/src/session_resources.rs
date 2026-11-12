@@ -43,8 +43,9 @@ pub mod history;
 
 pub mod history_window;
 pub use history_window::{
-    HistoryWindowEntry, HistoryWindowPagePlan, HistoryWindowReadIntent, HistoryWindowRows,
-    HistoryWindowTailExpectation, InheritedHistoryEntry, SessionHistoryWindowBounds,
+    HistoryEntryMetadata, HistoryWindowEntry, HistoryWindowPagePlan, HistoryWindowReadIntent,
+    HistoryWindowRows, HistoryWindowTailExpectation, InheritedHistoryEntry,
+    SessionHistoryWindowBounds,
 };
 
 mod metadata;
@@ -286,10 +287,15 @@ pub trait SessionResources: Send + Sync {
     }
 
     /// 后端是否实现 `peri.historyWindowV1` 的边界/页/正文读取端口。
-    ///
     /// 协商必须反映**端到端**可用：客户端声明不能把未实现的后端变成可用。默认 false；
     /// 覆写了窗口读取端口的后端必须同时覆写本方法。
     fn supports_history_window(&self) -> bool {
+        false
+    }
+
+    /// 后端是否实现 History V2 的 initial 与 `_peri/history` 读取端口。
+    /// 默认 false（fail-closed）；读取统一走窗口端口，未覆写时 V2 initialize 显式失败。
+    fn supports_history_v2(&self) -> bool {
         false
     }
 
@@ -373,11 +379,9 @@ pub trait SessionResources: Send + Sync {
 
     /// 有界读取**一段 canonical 完整历史**（向前方向）：未协商 `peri.historyPagination` 的
     /// 标准客户端完整回放的读取入口（需求 §5.3）。
-    ///
     /// 与 [`Self::load_history_page`]（向「更早」翻页、读归档区）是两条读取，方向与过滤规则
     /// 都不同：这条读的是**完整历史**（继承区 + 全部自有行，含 Full 归档原文），核心不必
     /// 重新持有整份历史，出口按段流式投影。
-    ///
     /// - `cursor = None`：本次回放的**首段**。返回**全部继承区 payload**（来自单行
     ///   `inherited_context` 快照；继承区在本切片不分页）加上自有行中 `rowid` 最小的若干行；
     ///   同一次读取里把 `tail` 定为该线程自有行当前最大 `rowid`，作为本次回放的固定上界。
@@ -402,7 +406,6 @@ pub trait SessionResources: Send + Sync {
     ///   `tail` 与首段返回的行同出于一次一致读取；此后各段只按 `rowid` 区间读取，**不**校验
     ///   行集合仍与首段同源（见上面的 rowid 复用边界）。
     /// - `next_cursor = None` **只**表示「没有更多自有行了」（已到 `tail`，或本来就没有行）。
-    ///
     /// 默认实现失败（`Unsupported`）：空段在契约里是「回放结束」的合法含义，没实现这条读取
     /// 的后端不能拿它冒充——调用方据此**显式**回退到 [`Self::load_session_history`] 的全量
     /// 读取，或让本次读取失败，两条路都要看得见。
@@ -494,6 +497,29 @@ pub trait SessionResources: Send + Sync {
             committed_tail.clone(),
         );
         self.load_history_window_page(id, &plan).await
+    }
+
+    /// 按稳定条目身份读取元数据（canonical 长度 + own role），**不读取正文**。
+    ///
+    /// 这是正文定位的独立入口：结果不受页预算、页是否内联或 `descriptor` 分类影响。
+    /// 实现必须：
+    ///
+    /// - 只按 `(thread, source, entry id)` 定位单行，不做区间扫描；
+    /// - own 必须校验 `rowid <= committed_tail.position`；inherited 必须校验冻结快照身份；
+    /// - 长度使用存储层 O(1) 事实（SQLite `sqlite3_blob_bytes`），不得物化正文。
+    ///
+    /// 默认实现失败（`Unsupported`）：没有这条读取的后端不能靠页面重读猜正文存在性。
+    async fn read_history_entry_metadata(
+        &self,
+        _id: &ThreadId,
+        _source: HistorySource,
+        _entry_id: MessageId,
+        _committed_tail: Option<&HistoryCommittedTail>,
+        _read_ticket: &HistoryReadTicket,
+    ) -> SessionResourceResult<HistoryEntryMetadata> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
     }
 
     /// 有界读取超大条目的正文块（原始字节）。

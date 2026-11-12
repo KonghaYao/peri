@@ -658,3 +658,46 @@ async fn clear_after_startup_failure_creates_new_session() {
     let ensured = client.ensure_session("/w", None).await.unwrap();
     assert_eq!(ensured, "fresh");
 }
+
+/// 历史目标预检失败时，用户仍能在原会话继续输入。
+#[tokio::test]
+#[serial_test::serial]
+async fn failed_history_preflight_keeps_current_session_usable() {
+    let _guard = UiAtomsGuard::capture();
+    let (client, server) = interactive_client();
+    let opener = client.clone();
+    let first = tokio::spawn(async move { opener.new_session("/current", None).await });
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/new");
+    server
+        .send_response(id, Ok(json!({"sessionId": "current"})))
+        .await
+        .unwrap();
+    assert_eq!(first.await.unwrap().unwrap(), "current");
+    let before = client.stable_session_identity();
+    let switcher = client.clone();
+    let load = tokio::spawn(async move {
+        switcher
+            .load_session("deleted-target", "/current", None)
+            .await
+    });
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "peri/session_context");
+    server
+        .send_response(id, Err(AcpError::new(-32602, "session not found")))
+        .await
+        .unwrap();
+    assert_eq!(
+        load.await.unwrap().unwrap_err().message,
+        "session not found"
+    );
+    assert_eq!(client.stable_session_identity(), before);
+    assert_eq!(client.current_execution_cwd().as_deref(), Some("/current"));
+    assert_eq!(atoms::ACTIVE_SESSION_ID.state().read().as_str(), "current");
+    assert_eq!(
+        client.ensure_session("/current", None).await.unwrap(),
+        "current"
+    );
+    assert_no_request(&server, Duration::from_millis(100)).await;
+    client.close();
+}

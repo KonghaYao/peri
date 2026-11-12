@@ -246,7 +246,10 @@ pub enum WindowSettlement {
 }
 
 pub fn window_path_enabled() -> bool {
-    atoms::HISTORY_WINDOW_V1.get() && atoms::HISTORY_WINDOW_CAPABLE.get()
+    // V2 激活时窗口状态只属于 V2 reducer；V1 窗口队列不得再收到任何请求。
+    atoms::HISTORY_WINDOW_V1.get()
+        && atoms::HISTORY_WINDOW_CAPABLE.get()
+        && !crate::kit::history_v2::consumer::v2_path_active()
 }
 
 pub fn reset_window_paging_state() {
@@ -756,7 +759,7 @@ fn emit_window_degraded(session_id: &str, reason: &str) {
     if session_id.is_empty() {
         return;
     }
-    let Some(tx) = atoms::LOCAL_EVENT_TX.get() else {
+    let Some(tx) = atoms::local_event_tx() else {
         return;
     };
     let _ = tx.send(AcpEventWithEpoch {
@@ -887,7 +890,7 @@ pub fn spawn_history_window_consumer(
                     };
                     match settle_window_response(&in_flight, &decoded) {
                         WindowSettlement::Accepted(_) | WindowSettlement::AcceptedEmpty => {
-                            if let Some(tx) = atoms::LOCAL_EVENT_TX.get() {
+                            if let Some(tx) = atoms::local_event_tx() {
                                 let _ = tx.send(AcpEventWithEpoch {
                                     child_origin: None,
                                     view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),

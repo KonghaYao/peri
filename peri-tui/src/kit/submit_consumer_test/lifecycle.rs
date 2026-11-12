@@ -62,10 +62,9 @@ async fn test_cancel_consumer_failure_does_not_claim_execution_stopped() {
 #[serial]
 fn test_clear_loading_state_emits_loading_reset_event() {
     crate::kit::atoms::init_atoms();
-    // LOCAL_EVENT_TX 是全局 OnceLock——set 已占用（已被其他测试/运行时 set）
-    // 时仅验证直接写兜底，跳过事件断言（std OnceLock::set 返回 Result，不 panic）。
+    // LOCAL_EVENT_TX 是可替换的进程级队列：本用例安装自己的接收端做事件断言。
     let (tx, mut rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
-    let owns_tx = LOCAL_EVENT_TX.set(tx).is_ok();
+    crate::kit::atoms::install_local_event_tx(tx);
 
     {
         let ref_guard = ACP_STATE.state();
@@ -78,16 +77,14 @@ fn test_clear_loading_state_emits_loading_reset_event() {
         !ACP_STATE.state().read().is_loading,
         "clear_loading_state 应直接复位 ACP_STATE.is_loading"
     );
-    if owns_tx {
-        let ev = rx.try_recv().ok();
-        assert!(
-            matches!(
-                ev.as_ref().map(|e| &e.event),
-                Some(AcpEventData::LocalLoadingReset)
-            ),
-            "clear_loading_state 应注入 LocalLoadingReset 事件，实际 {ev:?}"
-        );
-    }
+    let ev = rx.try_recv().ok();
+    assert!(
+        matches!(
+            ev.as_ref().map(|e| &e.event),
+            Some(AcpEventData::LocalLoadingReset)
+        ),
+        "clear_loading_state 应注入 LocalLoadingReset 事件，实际 {ev:?}"
+    );
 }
 
 /// 编译期断言：UnboundedSender<SubmitRequest> 与 atoms::SUBMIT_TX 类型契约一致。

@@ -18,9 +18,9 @@ use crate::sessions::data::ChildResumeRecord;
 use crate::sessions::data::SessionDataPort;
 use async_trait::async_trait;
 use peri_acp_types::history_page::{
-    message_id_of, resolve_browsing_range, HistoryCursor, HistoryCursorError, HistoryForwardCursor,
-    HistoryPage, HistoryPageBounds, HistoryPageCandidate, HistoryPagePlan, HistoryPageRow,
-    HistorySegment, HistorySegmentPlan,
+    message_id_of, resolve_browsing_range, HistoryCursor, HistoryCursorError, HistoryEntryRole,
+    HistoryForwardCursor, HistoryPage, HistoryPageBounds, HistoryPageCandidate, HistoryPagePlan,
+    HistoryPageRow, HistorySegment, HistorySegmentPlan,
 };
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session::{
@@ -65,6 +65,8 @@ mod inherited_blob;
 mod inherited_facts;
 #[path = "session_data/inherited_page.rs"]
 mod inherited_page;
+#[path = "session_data/inherited_read.rs"]
+mod inherited_read;
 #[path = "session_data/interrupted.rs"]
 mod interrupted;
 #[path = "session_data/lifecycle.rs"]

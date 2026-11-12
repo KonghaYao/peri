@@ -65,6 +65,7 @@ tokio-util.workspace = true
 dirs.workspace = true
 url.workspace = true
 sha2.workspace = true
+base64 = { version = "0.23.1", features = ["alloc"] }
 
 [dev-dependencies]
 futures.workspace = true

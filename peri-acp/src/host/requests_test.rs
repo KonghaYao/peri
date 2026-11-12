@@ -372,6 +372,7 @@ async fn register_session_with_history(
             structure_version: 0,
             session_generation: crate::host::next_session_generation(),
             history_window: Default::default(),
+            live_delivery: None,
             event_health: Default::default(),
             cancel_token: None,
             interaction_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -734,6 +735,7 @@ async fn register_session_with_workflow(
             structure_version: 0,
             session_generation: crate::host::next_session_generation(),
             history_window: Default::default(),
+            live_delivery: None,
             event_health: Default::default(),
             cancel_token: None,
             interaction_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -752,3 +754,7 @@ async fn register_session_with_workflow(
         },
     );
 }
+
+// History V2 的真实 SQLite / wire 夹具与其子模块。
+#[path = "history_v2_test_fixture.rs"]
+mod history_v2_test_fixture;

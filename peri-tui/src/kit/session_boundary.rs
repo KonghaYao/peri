@@ -9,6 +9,19 @@ use crate::kit::{acp_events, atoms, input_history, panel_registry};
 /// This is deliberately synchronous: the lifecycle operation gate is held by
 /// the caller across this complete projection.
 pub fn project_session_boundary(target_session_id: Option<&str>) {
+    project_session_boundary_inner(target_session_id, true);
+}
+
+/// 候选 `session/load` 的边界：本地状态照常清空，但不关闭当前 V2 窗口。
+///
+/// initial 只是窗口替换的候选；旧窗口的服务端票据必须活到候选发布成功。失败后
+/// 恢复快照时若票据已被关闭，page/body 只会得到 `window_closed`。暂存登记跨越
+/// 边界保留，恢复时才能把候选期的旧流更新按 seq 并回同一窗口。
+pub(crate) fn project_session_boundary_retaining_history(target_session_id: Option<&str>) {
+    project_session_boundary_inner(target_session_id, false);
+}
+
+fn project_session_boundary_inner(target_session_id: Option<&str>, retire_history: bool) {
     let previous_session_id = atoms::ACTIVE_SESSION_ID.state().read().clone();
     atoms::ACTIVE_SESSION_ID.set(target_session_id.unwrap_or_default().to_string());
     // 每次会话边界都从「未标记只读」开始：标记由准入方（`session/load` 响应）在本次
@@ -22,6 +35,20 @@ pub fn project_session_boundary(target_session_id: Option<&str>) {
     // 在途的页响应因此在消费侧与桥接侧都被判为过期（REQ-C01-5、A11）。
     crate::kit::history_paging::reset_browsing_state();
     crate::kit::history_page_consumer::reset_window_paging_state();
+    // 只有本连接协商过 V2 才存在 V2 首屏状态；V1/标准连接不触碰它。
+    if atoms::HISTORY_V2_CAPABLE.get() {
+        if retire_history {
+            // best-effort：请求关闭旧窗口后再丢身份；关闭失败不阻塞会话边界。
+            let _ = crate::kit::history_v2::consumer::request_close_current();
+            crate::kit::history_v2::reset_state();
+        } else {
+            // 候选 initial 可能失败：不发 close，也保留该会话的暂存登记。
+            crate::kit::history_v2::reset_state_preserving_pending(
+                target_session_id.unwrap_or_default(),
+            );
+        }
+        crate::kit::history_v2::consumer::reset_consumer_state();
+    }
     crate::kit::history_window::clear_window_viewport();
     atoms::FOCUSED_ENTRY.set(None);
     atoms::HISTORY_DETAIL.set(None);
@@ -43,7 +70,7 @@ pub fn project_session_boundary(target_session_id: Option<&str>) {
     panel_registry::close_panel(PanelKind::AskUser);
 
     let popup = *atoms::POPUP_KIND.state().read();
-    let reject_confirm = atoms::CONFIRM_PAYLOAD
+    let session_confirm = atoms::CONFIRM_PAYLOAD
         .state()
         .read()
         .as_ref()
@@ -51,16 +78,17 @@ pub fn project_session_boundary(target_session_id: Option<&str>) {
             matches!(
                 payload.pending_action,
                 atoms::ConfirmAction::RejectAskUser { .. }
+                    | atoms::ConfirmAction::ThreadSwitch { .. }
             )
         });
     if matches!(
         popup,
         Some(atoms::PopupKind::Hitl | atoms::PopupKind::AskUser | atoms::PopupKind::OAuth)
-    ) || (popup == Some(atoms::PopupKind::Confirm) && reject_confirm)
+    ) || (popup == Some(atoms::PopupKind::Confirm) && session_confirm)
     {
         *atoms::POPUP_KIND.state().write() = None;
     }
-    if reject_confirm {
+    if session_confirm {
         *atoms::CONFIRM_PAYLOAD.state().write() = None;
     }
 

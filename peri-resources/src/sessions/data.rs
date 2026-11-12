@@ -180,6 +180,14 @@ pub(crate) trait SessionDataPort: Send + Sync {
         false
     }
 
+    /// 后端是否实现 History V2 读取端口；默认 false。
+    ///
+    /// 本地 SQLite 复用窗口读取端口（`load_history_window_page` /
+    /// `load_history_body_chunk`）并覆写为 true；远端/其他实现保持 fail-closed。
+    fn supports_history_v2(&self) -> bool {
+        false
+    }
+
     /// 轻量绑定分类（不加载历史）：记录事实三种——绑定与本机登记一致、绑定指向的登记
     /// 已不存在（含子会话没有绑定行）、无绑定行。`LegacyConfirmed` 由门面按本机来源
     /// 证据联合判定，不在这里冒充。
@@ -318,6 +326,22 @@ pub(crate) trait SessionDataPort: Send + Sync {
             committed_tail.clone(),
         );
         self.load_history_window_page(id, &plan).await
+    }
+
+    /// 按稳定身份读取条目元数据（长度 + own role）；默认失败，不得退回整页重读。
+    async fn read_history_entry_metadata(
+        &self,
+        _id: &ThreadId,
+        _source: HistorySource,
+        _entry_id: MessageId,
+        _committed_tail: Option<&HistoryCommittedTail>,
+        _read_ticket: &HistoryReadTicket,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::HistoryEntryMetadata> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
     }
 
     /// 有界正文分块；默认失败，不得退回完整历史读取。

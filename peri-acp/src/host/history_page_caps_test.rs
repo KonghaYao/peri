@@ -540,3 +540,80 @@ async fn s9c_verification_a_never_initialized_in_process_connection_keeps_the_re
         "未协商分页的进程内路径仍走完整 canonical 回放"
     );
 }
+
+/// History V2 的 wire 级门控（设计 §4.7/§4.8、§14.1）：
+///
+/// 1. 本地 SQLite 已兑现 V2 读取端口 → `initialize` 成功并回显 `peri.history`
+///    （`version=2` / `selectedProfile=windowed`）；
+/// 2. 新连接只声明旧能力仍成功，并回显 `peri.historyWindowV1=true`
+///    ——证明旧 V1 路径没有被 V2 协商破坏。
+#[tokio::test]
+#[serial]
+async fn history_v2_initialize_negotiates_on_local_sqlite_and_legacy_still_works() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fixture = PageFixture::new(&tmp).await;
+    let cfg = Arc::clone(&fixture.cfg);
+    let (client, _sessions, task) =
+        spawn_loop(Arc::clone(&cfg), Arc::clone(&fixture.sessions), None).await;
+
+    let reply = client
+        .send_request(
+            "initialize",
+            json!({
+                "protocolVersion": 1,
+                "clientCapabilities": {
+                    "_meta": {
+                        "peri.history": {
+                            "versions": [2],
+                            "requestedProfile": "windowed",
+                        },
+                    },
+                },
+            }),
+        )
+        .await
+        .expect("本地 SQLite 已声明 V2 能力，initialize 必须成功");
+    task.abort();
+    let meta = &reply["agentCapabilities"]["_meta"];
+    assert_eq!(meta["peri.history"]["version"], 2, "{reply}");
+    assert_eq!(
+        meta["peri.history"]["selectedProfile"], "windowed",
+        "{reply}"
+    );
+    assert_eq!(
+        meta["peri.historyWindowV1"],
+        Value::Bool(false),
+        "V2 协商不隐含旧窗口能力: {reply}"
+    );
+
+    let (client, _sessions, task) =
+        spawn_loop(Arc::clone(&cfg), Arc::clone(&fixture.sessions), None).await;
+    let reply = client
+        .send_request(
+            "initialize",
+            json!({
+                "protocolVersion": 1,
+                "clientCapabilities": {
+                    "_meta": {
+                        "peri.replay": true,
+                        "peri.historyWindowV1": true,
+                    },
+                },
+            }),
+        )
+        .await
+        .expect("legacy-only initialize 必须继续成功（旧 V1 路径不变）");
+    task.abort();
+
+    assert_eq!(
+        reply["agentCapabilities"]["_meta"]["peri.historyWindowV1"],
+        Value::Bool(true),
+        "SQLite 后端声明窗口能力时仍按旧规则回显: {reply}"
+    );
+    assert!(
+        reply["agentCapabilities"]["_meta"]
+            .get("peri.history")
+            .is_none(),
+        "未成功协商 V2 时不得提前宣告 peri.history: {reply}"
+    );
+}

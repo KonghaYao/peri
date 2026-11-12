@@ -499,6 +499,42 @@ pub(crate) static HISTORY_PAGING: AtomStatic<crate::kit::history_paging::History
 pub static HISTORY_WINDOW_V1: AtomStatic<bool> = AtomStatic::new(|| false);
 /// 当前连接是否协商 `peri.historyWindowV1`（initialize 响应写入；未回显一律 fail-closed）。
 pub static HISTORY_WINDOW_CAPABLE: AtomStatic<bool> = AtomStatic::new(|| false);
+/// H5a 本地 V2 beta（`history-v2`，默认关闭）；启动时由配置写入。
+pub static HISTORY_V2: AtomStatic<bool> = AtomStatic::new(|| false);
+/// 当前连接是否由服务端选择 History V2（initialize 回显；未回显一律 false）。
+pub static HISTORY_V2_CAPABLE: AtomStatic<bool> = AtomStatic::new(|| false);
+/// 协商后的 V2 预算；未协商时保留协议默认值。
+pub static HISTORY_V2_LIMITS: AtomStatic<peri_acp_types::history_v2::HistoryLimits> =
+    AtomStatic::new(peri_acp_types::history_v2::HistoryLimits::default);
+/// V2 唯一历史状态（initial 首屏准入；H5b 的页合并扩展同一结构）。
+pub static HISTORY_V2_STATE: AtomStatic<crate::kit::history_v2::HistoryV2State> =
+    AtomStatic::new(crate::kit::history_v2::HistoryV2State::default);
+/// H5c：V2 出站队列。所有 V2 RPC（initial/open/page/seek/body/close）共用。
+///
+/// 用可替换的 `Mutex<Option<_>>` 而不是 `OnceLock`：队列属于连接且允许在测试/
+/// 重建连接时安装新的调度器；requestKey 的入队顺序由 `history_v2::outbound` 的
+/// 临界区保证，不依赖本容器。
+pub(crate) type HistoryV2Sender =
+    UnboundedSender<crate::kit::history_v2::outbound::OutboundCommand>;
+
+pub(crate) static HISTORY_V2_TX: std::sync::Mutex<Option<HistoryV2Sender>> =
+    std::sync::Mutex::new(None);
+
+/// 当前连接的 V2 调度器发送端；未安装时为 `None`。
+pub(crate) fn history_v2_tx() -> Option<HistoryV2Sender> {
+    HISTORY_V2_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+/// H5c：V2 requestKey 的本地单调解码器；initial 接纳时以服务端回显的键播种。
+pub(crate) static HISTORY_V2_NEXT_KEY: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+/// H5c：`committed` 前缀里由 V2 窗口投影出的展示单元数。V2 更新只替换这段前缀，
+/// 其后是 live 事件追加的内容；桥接 reset 时归零。
+pub static HISTORY_V2_PREFIX_LEN: AtomStatic<usize> = AtomStatic::new(|| 0);
+/// H5c：上次投影的导航代次。代次变化（seek/reopen）时连同 live 尾部一起重建。
+pub static HISTORY_V2_VIEW_EPOCH: AtomStatic<u64> = AtomStatic::new(|| 0);
 /// 桥接窗口当前代次；consumer 用它给页请求盖代次。
 pub static HISTORY_WINDOW_GENERATION: AtomStatic<u64> = AtomStatic::new(|| 0);
 /// S5.4 consumer 侧窗口请求/在途/待合并状态。
@@ -689,9 +725,28 @@ pub static BRIDGE_RESET_COUNTER: AtomStatic<u64> = AtomStatic::new(|| 0);
 /// 2026-08-08-e2e-compact-command-screenshot-too-early）。None = 无待重建提示。
 pub static PENDING_COMPACT_NOTE: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 
-/// TUI 内部事件通道——input_area 本地提交通过此 channel 发送 LocalUserBubble
-/// 到 acp_bridge，统一走 dispatch_and_notify 路径写入 VIEW_MODELS atom。
-pub static LOCAL_EVENT_TX: OnceLock<UnboundedSender<AcpEventWithEpoch>> = OnceLock::new();
+/// TUI 内部事件通道——本地提交、V2 视图/恢复重放与 notifier 实时通知共用这一条
+/// FIFO，由单一 forwarder 串行写入 bridge；入队顺序即渲染顺序。
+///
+/// 用可替换的 `Mutex<Option<_>>` 而不是 `OnceLock`：队列属于连接，测试需要按用例
+/// 安装自己的接收端（与 `HISTORY_V2_TX` 同一约定）。
+pub static LOCAL_EVENT_TX: std::sync::Mutex<Option<UnboundedSender<AcpEventWithEpoch>>> =
+    std::sync::Mutex::new(None);
+
+/// 当前连接的事件队列发送端；未安装时为 `None`。
+pub(crate) fn local_event_tx() -> Option<UnboundedSender<AcpEventWithEpoch>> {
+    LOCAL_EVENT_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// 安装当前连接的事件队列（替换旧值；旧队列的消费端随之关闭）。
+pub(crate) fn install_local_event_tx(tx: UnboundedSender<AcpEventWithEpoch>) {
+    *LOCAL_EVENT_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tx);
+}
 
 /// Spinner token 计数——由 acp_bridge 在收到 TokenUsage 事件时写入（input+output），
 /// MessageArea 的 build_footer_lines 读取后作为参数传入 `render_to_lines(..., token_count)`，
@@ -893,57 +948,8 @@ pub static NOTIFICATION: AtomStatic<Option<Notification>> = AtomStatic::new(|| N
 
 // ── Confirm Popup 相关 State ─────────────────────────────────────────────────
 
-/// 确认弹窗要执行的操作
-#[derive(Debug, Clone)]
-pub enum ConfirmAction {
-    /// 切换到指定 thread_id
-    ThreadSwitch(String),
-    /// 用户确认拒绝回答 AskUser 提问
-    RejectAskUser {
-        owner: crate::acp_client::InteractionOwner,
-        request_id_json: String,
-    },
-}
-
-/// 确认弹窗的 payload
-#[derive(Debug, Clone)]
-pub struct ConfirmPayload {
-    /// 进程内单调递增的版本——payload 的业务身份，由 [`ConfirmPayload::new`] 分配。
-    pub version: u64,
-    pub title: String,
-    pub message: String,
-    pub details: Vec<String>,
-    pub pending_action: ConfirmAction,
-}
-
-/// payload 版本计数器（进程内单调递增）。
-static CONFIRM_PAYLOAD_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-impl ConfirmPayload {
-    /// 构造确认 payload——版本由本函数分配，发布点不得自带版本号。
-    ///
-    /// [Why] 弹窗渲染的是某一帧读到的 payload，确认键却在按下的瞬间重新读取全局
-    /// payload；两者之间 payload 可能被其它发布点替换。版本随 payload 一起发布，
-    /// 弹窗据此拒绝执行「用户没看到的动作」。
-    pub fn new(
-        title: String,
-        message: String,
-        details: Vec<String>,
-        pending_action: ConfirmAction,
-    ) -> Self {
-        let version =
-            CONFIRM_PAYLOAD_VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        Self {
-            version,
-            title,
-            message,
-            details,
-            pending_action,
-        }
-    }
-}
-
-pub static CONFIRM_PAYLOAD: AtomStatic<Option<ConfirmPayload>> = AtomStatic::new(|| None);
+mod confirm;
+pub use confirm::{CONFIRM_PAYLOAD, ConfirmAction, ConfirmPayload};
 
 // ── Download Progress Popup 相关 ────────────────────────────────────────────
 

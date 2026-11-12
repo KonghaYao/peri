@@ -323,7 +323,8 @@ async fn test_handle_request_injects_page_and_advances_cursor() {
     crate::kit::atoms::init_atoms();
     history_paging::reset_browsing_state();
     let (local_tx, mut local_rx) = tokio::sync::mpsc::unbounded_channel();
-    let owns_local_tx = atoms::LOCAL_EVENT_TX.set(local_tx).is_ok();
+    atoms::install_local_event_tx(local_tx);
+    let owns_local_tx = true;
 
     history_paging::note_initial_cursor("s1", Some("tok".to_string()), Some("c1".to_string()));
     let current = request("c1");

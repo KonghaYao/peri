@@ -1,4 +1,5 @@
 use crate::command::command_route::UiCommandSpec;
+use crate::history_v2::HistoryServerCapability;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -79,6 +80,13 @@ pub struct PeriCaps {
     /// 门控按**当前连接**的协商结果判定。
     #[serde(default)]
     pub history_window_v1: bool,
+    /// `peri.history`：History V2（windowed profile）的服务端回显。
+    ///
+    /// 客户端声明只在 `initialize` 的 `_meta` 中出现（由 `session_caps` 协商，
+    /// 本结构不解析）；Some 表示服务端已确认 V2 可用并写入
+    /// `agentCapabilities._meta["peri.history"]`。默认 None = 不宣告。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_v2: Option<HistoryServerCapability>,
     /// ACP MCP register/restart/stop control, negotiated on the current connection.
     #[serde(default)]
     pub mcp_control_v1: bool,
@@ -114,6 +122,8 @@ impl PeriCaps {
             session_workspace_v1: meta_bool(meta, "peri.sessionWorkspaceV1"),
             history_pagination: meta_bool(meta, "peri.historyPagination"),
             history_window_v1: meta_bool(meta, "peri.historyWindowV1"),
+            // V2 需要服务端能力门与显式错误，不能由 infallible 的展示解析代劳。
+            history_v2: None,
             mcp_control_v1: meta_bool(meta, "peri.mcpControlV1"),
             ui_commands: Self::meta_ui_commands(meta),
         }
@@ -189,6 +199,12 @@ impl PeriCaps {
             "peri.historyWindowV1".into(),
             Value::Bool(self.history_window_v1),
         );
+        if let Some(history_v2) = &self.history_v2 {
+            let server_meta = history_v2
+                .to_meta()
+                .expect("HistoryServerCapability 序列化不应失败");
+            m.extend(server_meta);
+        }
         m.insert("peri.mcpControlV1".into(), Value::Bool(self.mcp_control_v1));
         m.insert(
             "peri.uiCommands".into(),
@@ -217,6 +233,7 @@ impl PeriCaps {
             session_workspace_v1: true,
             history_pagination: true,
             history_window_v1: true,
+            history_v2: None,
             mcp_control_v1: true,
             ui_commands: default_ui_commands(),
         }

@@ -15,7 +15,11 @@ async fn cancel_streaming_output(chunk_kinds: &[&str]) {
     client.spawn_pump(notifications);
     let shutdown = CancellationToken::new();
     let (bridge_tx, mut bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
-    let notifier = spawn_kit_notifier(notification_rx, bridge_tx, shutdown.clone());
+    let notifier = spawn_kit_notifier(
+        notification_rx,
+        crate::kit::acp_notifier::BridgeSink::direct(bridge_tx),
+        shutdown.clone(),
+    );
     let mut state = scheduler_state();
 
     server

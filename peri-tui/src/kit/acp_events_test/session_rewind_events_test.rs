@@ -397,3 +397,80 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
         }
     }
 }
+
+/// 回退必须作废旧 V2 窗口与投影前缀：否则旧窗口的页响应会在回退后重新
+/// 覆盖已删除的历史，旧前缀长度还可能吞掉回退后新增的消息。
+#[test]
+#[serial]
+fn test_rewind_completed_invalidates_v2_window() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    crate::kit::atoms::HISTORY_V2_STATE.set(crate::kit::history_v2::HistoryV2State {
+        status: crate::kit::history_v2::HistoryV2Status::Ready,
+        session_id: Some("s-rewind".to_owned()),
+        execution_ready: true,
+        live_boundary: Some(peri_acp_types::history_v2::HistoryLiveBoundary {
+            stream_id: "live-rewind".to_owned(),
+            after_seq: peri_acp_types::history_v2::DecimalU64::new(40),
+        }),
+        ..Default::default()
+    });
+    crate::kit::atoms::HISTORY_V2_PREFIX_LEN.set(3);
+    crate::kit::atoms::ACTIVE_SESSION_ID.set("s-rewind".to_owned());
+
+    let mut state = BridgeState {
+        child_runs: Default::default(),
+        window: Default::default(),
+        variant: 1,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::PromptRunning,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        todo_baseline_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+        pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
+    };
+    let messages_json = serde_json::json!([
+        {"role": "user", "id": "msg-1", "content": "回退后的消息"},
+    ])
+    .to_string();
+
+    dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
+
+    let rewound = crate::kit::history_v2::snapshot();
+    assert!(!rewound.is_ready(), "rewind 后旧 V2 窗口必须作废");
+    assert!(rewound.window.is_none(), "旧窗口必须清空");
+    assert_eq!(
+        rewound.session_id.as_deref(),
+        Some("s-rewind"),
+        "rewind 不得清空会话身份"
+    );
+    assert!(rewound.execution_ready, "rewind 不得清空执行事实");
+    assert_eq!(
+        rewound
+            .live_boundary
+            .as_ref()
+            .map(|boundary| boundary.after_seq.get()),
+        Some(40),
+        "rewind 不得清空已接纳的实时投递边界"
+    );
+    assert_eq!(
+        crate::kit::atoms::HISTORY_V2_PREFIX_LEN.get(),
+        1,
+        "rewind 回填内容是窗口前缀，等待新 open 整体替换"
+    );
+    crate::kit::history_v2::live::clear_all_pending();
+}

@@ -375,9 +375,10 @@ impl SessionDataPort for SqliteSessionData {
             .map_err(|error| map_sqlx(&error))?;
         frozen_state_on(&mut connection, id).await
     }
-
     fn supports_history_window(&self) -> bool {
-        // 本机 SQLite 覆写了 bounds/page/body 全部窗口读取端口。
+        true
+    }
+    fn supports_history_v2(&self) -> bool {
         true
     }
 
@@ -492,6 +493,24 @@ impl SessionDataPort for SqliteSessionData {
             after_limit,
             byte_budget,
             committed_tail,
+        )
+        .await
+    }
+
+    async fn read_history_entry_metadata(
+        &self,
+        id: &ThreadId,
+        source: peri_acp_types::history_common::HistorySource,
+        entry_id: MessageId,
+        committed_tail: Option<&peri_acp_types::history_common::HistoryCommittedTail>,
+        read_ticket: &peri_acp_types::history_common::HistoryReadTicket,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::HistoryEntryMetadata> {
+        self.read_history_entry_metadata_from_store(
+            id,
+            source,
+            entry_id,
+            committed_tail,
+            read_ticket,
         )
         .await
     }

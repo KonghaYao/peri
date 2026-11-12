@@ -4,6 +4,24 @@ use super::*;
 
 #[test]
 #[serial]
+fn session_boundary_discards_previous_thread_switch_confirmation() {
+    atoms::CONFIRM_PAYLOAD.set(Some(atoms::ConfirmPayload::new(
+        "switch".into(),
+        "running tasks".into(),
+        vec![],
+        atoms::ConfirmAction::ThreadSwitch {
+            target_id: "old-target".into(),
+            source_identity: Some(("old".into(), 1)),
+        },
+    )));
+    atoms::POPUP_KIND.set(Some(atoms::PopupKind::Confirm));
+    project_session_boundary(Some("another-session"));
+    assert!(atoms::CONFIRM_PAYLOAD.state().read().is_none());
+    assert!(atoms::POPUP_KIND.state().read().is_none());
+}
+
+#[test]
+#[serial]
 fn test_session_boundary_clears_both_interaction_surfaces() {
     let old_active = atoms::ACTIVE_SESSION_ID.state().read().clone();
     let old_hitl = atoms::HITL_PENDING.state().read().clone();

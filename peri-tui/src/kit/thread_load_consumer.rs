@@ -32,6 +32,7 @@ use crate::kit::atoms;
 pub struct ThreadLoadRequest {
     thread_id: String,
     reservation: SessionLoadReservation,
+    confirmed_source: Option<(String, u64)>,
 }
 
 /// Synchronous producer boundary shared by the thread browser and the confirm
@@ -52,9 +53,26 @@ impl ThreadLoadDispatcher {
     }
 
     pub fn send(&self, thread_id: String) -> Result<(), ThreadLoadDispatchError> {
+        self.send_inner(thread_id, None)
+    }
+
+    pub(crate) fn send_confirmed(
+        &self,
+        thread_id: String,
+        source_identity: Option<(String, u64)>,
+    ) -> Result<(), ThreadLoadDispatchError> {
+        self.send_inner(thread_id, source_identity)
+    }
+
+    fn send_inner(
+        &self,
+        thread_id: String,
+        confirmed_source: Option<(String, u64)>,
+    ) -> Result<(), ThreadLoadDispatchError> {
         let request = ThreadLoadRequest {
             thread_id,
             reservation: self.client.reserve_session_load(),
+            confirmed_source,
         };
         self.tx.send(request).map_err(|_| ThreadLoadDispatchError)
     }
@@ -87,7 +105,10 @@ pub fn spawn_thread_load_consumer(
                             let has_bg_tasks = {
                                 let state = atoms::BG_TASKS.state();
                                 let bg_tasks = state.read();
-                                if !bg_tasks.is_empty() {
+                                // 确认只属于这次请求的来源会话；排队期间切过会话则重新确认。
+                                let confirmed = request.confirmed_source.is_some()
+                                    && request.confirmed_source == acp_client.stable_session_identity();
+                                if !bg_tasks.is_empty() && !confirmed {
                                     let shell_c = bg_tasks.iter().filter(|t| t.kind == "shell").count();
                                     let agent_c = bg_tasks.iter().filter(|t| t.kind == "agent").count();
                                     let wf_c = bg_tasks.iter().filter(|t| t.kind == "workflow").count();
@@ -113,7 +134,10 @@ pub fn spawn_thread_load_consumer(
                                                 ),
                                                 i18n::tr("thread-switch-bg-note"),
                                             ],
-                                            atoms::ConfirmAction::ThreadSwitch(thread_id.clone()),
+                                            atoms::ConfirmAction::ThreadSwitch {
+                                                target_id: thread_id.clone(),
+                                                source_identity: acp_client.stable_session_identity(),
+                                            },
                                         ));
                                     *atoms::POPUP_KIND.state().write() = Some(atoms::PopupKind::Confirm);
                                     true

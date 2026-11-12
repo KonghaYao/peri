@@ -356,6 +356,7 @@ impl ReplayFixture {
             connection_id: "unnegotiated-test".into(),
             history_pagination,
             history_window_v1: false,
+            history_v2: false,
             mcp_control_v1: false,
             caps: self.connection_caps.clone(),
             admission_caps: PeriCaps::default(),

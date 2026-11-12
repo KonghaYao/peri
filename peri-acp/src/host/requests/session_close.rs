@@ -23,6 +23,26 @@ pub(in crate::host::requests) async fn close_session(
         Err(error) => return Err(resource_error(error)),
         Ok(_) => {}
     }
+    // 只看历史没有执行资源/持久关闭意图。离开它只回收本进程视图，不能向只读库
+    // 写 closing，也不能把原本不可执行的会话标为关闭中的工作。delete 仍走写权限门。
+    let view_only = sessions
+        .get(session_id)
+        .is_some_and(SessionState::is_view_only);
+    let closed_read_only = !sessions.contains_key(session_id)
+        && resources
+            .inspect_availability(None)
+            .await
+            .map_err(resource_error)?
+            .access
+            == peri_acp_types::session_resources::AccessMode::ReadOnly;
+    if !delete && (view_only || closed_read_only) {
+        cfg.session_manager
+            .close_session(session_id)
+            .await
+            .map_err(workspace_error)?;
+        sessions.remove(session_id);
+        return Ok(());
+    }
     if sessions.get(session_id).is_some_and(|state| state.closing)
         && !delete
         && resources

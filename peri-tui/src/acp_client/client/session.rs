@@ -20,6 +20,14 @@ use tokio::sync::mpsc;
 #[path = "recovery_test.rs"]
 mod recovery_tests;
 
+#[cfg(test)]
+#[path = "history_v2_test.rs"]
+mod history_v2_tests;
+
+#[cfg(test)]
+#[path = "history_v2_session_test.rs"]
+mod history_v2_session_tests;
+
 impl AcpTuiClient {
     /// Check whether a session has been created.
     pub fn has_session(&self) -> bool {

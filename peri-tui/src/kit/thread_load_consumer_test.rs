@@ -18,6 +18,159 @@ fn clear_thread_load_isolation_atoms() {
     *crate::kit::atoms::CONFIRM_PAYLOAD.state().write() = None;
 }
 
+async fn create_current_session(client: &AcpTuiClient, server: &MpscServerTransport) {
+    let opener = client.clone();
+    let opened = tokio::spawn(async move { opener.new_session("/tmp", None).await });
+    let message = tokio::time::timeout(Duration::from_secs(5), server.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let IncomingMessage::Request { id, method, .. } = message else {
+        panic!("expected session/new")
+    };
+    assert_eq!(method, "session/new");
+    server
+        .send_response(id, Ok(serde_json::json!({"sessionId": "current"})))
+        .await
+        .unwrap();
+    assert_eq!(opened.await.unwrap().unwrap(), "current");
+}
+
+fn running_task() -> atoms::BgTaskEntry {
+    atoms::BgTaskEntry {
+        task_id: "running-shell".into(),
+        kind: "shell".into(),
+        summary: "long command".into(),
+        started_at: String::new(),
+        pid: None,
+        revision: None,
+        status: None,
+    }
+}
+
+async fn wait_for_switch_confirmation() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while atoms::CONFIRM_PAYLOAD.state().read().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("后台任务切换应请求确认");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_confirmed_history_switch_loads_once_with_running_tasks() {
+    clear_thread_load_isolation_atoms();
+    let (client, server) = make_client_without_pump();
+    create_current_session(&client, &server).await;
+    atoms::BG_TASKS.set(vec![running_task()]);
+    let (tx, rx) = mpsc::unbounded_channel();
+    let dispatcher = ThreadLoadDispatcher::new(tx, client.clone());
+    let shutdown = CancellationToken::new();
+    let consumer = spawn_thread_load_consumer(client.clone(), rx, "/tmp".into(), shutdown.clone());
+    dispatcher.send("target".into()).unwrap();
+    wait_for_switch_confirmation().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), server.recv())
+            .await
+            .is_err(),
+        "未确认不得关闭原会话"
+    );
+    let action = atoms::CONFIRM_PAYLOAD
+        .state()
+        .read()
+        .as_ref()
+        .unwrap()
+        .pending_action
+        .clone();
+    let atoms::ConfirmAction::ThreadSwitch {
+        target_id,
+        source_identity,
+    } = action
+    else {
+        panic!("expected thread switch")
+    };
+    atoms::CONFIRM_PAYLOAD.set(None);
+    dispatcher
+        .send_confirmed(target_id, source_identity)
+        .unwrap();
+    let request = recv_session_load(&server, Duration::from_secs(5)).await;
+    let IncomingMessage::Request { id, params, .. } = request else {
+        panic!("expected session/load")
+    };
+    assert_eq!(params["sessionId"], "target");
+    server
+        .send_response(id, Ok(serde_json::json!({})))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.pending_session_load_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(client.current_session_id().as_deref(), Some("target"));
+    assert!(
+        atoms::CONFIRM_PAYLOAD.state().read().is_none(),
+        "确认后不得再次弹相同确认"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), server.recv())
+            .await
+            .is_err()
+    );
+    shutdown.cancel();
+    consumer.await.unwrap();
+    client.close();
+    clear_thread_load_isolation_atoms();
+}
+
+#[tokio::test]
+#[serial]
+async fn test_confirmation_for_previous_session_does_not_authorize_new_session() {
+    clear_thread_load_isolation_atoms();
+    let (client, server) = make_client_without_pump();
+    create_current_session(&client, &server).await;
+    let (tx, rx) = mpsc::unbounded_channel();
+    let dispatcher = ThreadLoadDispatcher::new(tx, client.clone());
+    let seen_source = client.stable_session_identity();
+    let switcher = client.clone();
+    let switched =
+        tokio::spawn(async move { switcher.load_session("another-session", "/tmp", None).await });
+    let request = recv_session_load(&server, Duration::from_secs(5)).await;
+    let IncomingMessage::Request { id, .. } = request else {
+        panic!("expected session/load")
+    };
+    server
+        .send_response(id, Ok(serde_json::json!({})))
+        .await
+        .unwrap();
+    switched.await.unwrap().unwrap();
+    // 旧弹窗被点击时已经是新会话：不能把点击时的身份当作用户已确认的来源。
+    dispatcher
+        .send_confirmed("target".into(), seen_source)
+        .unwrap();
+    atoms::BG_TASKS.set(vec![running_task()]);
+    let shutdown = CancellationToken::new();
+    let consumer = spawn_thread_load_consumer(client.clone(), rx, "/tmp".into(), shutdown.clone());
+    wait_for_switch_confirmation().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), server.recv())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        client.current_session_id().as_deref(),
+        Some("another-session")
+    );
+    shutdown.cancel();
+    consumer.await.unwrap();
+    client.close();
+    clear_thread_load_isolation_atoms();
+}
+
 fn session_boundary_reset_observed() -> bool {
     crate::kit::atoms::POPUP_KIND.state().read().is_none()
         && crate::kit::atoms::HITL_PENDING.state().read().is_none()

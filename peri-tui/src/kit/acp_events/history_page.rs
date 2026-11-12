@@ -711,7 +711,7 @@ pub(super) fn maybe_request_tool_result(unit: &TuiRenderUnit) -> Option<ToolResu
                 )
             }
         };
-        let Some(tx) = atoms::LOCAL_EVENT_TX.get() else {
+        let Some(tx) = atoms::local_event_tx() else {
             release_in_flight(&task_source.tool_id, request_id);
             notify_tool_result_failure("历史结果补读失败：本地桥接通道不可用");
             return;
