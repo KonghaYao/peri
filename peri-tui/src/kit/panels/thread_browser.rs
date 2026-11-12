@@ -111,15 +111,17 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // fixed; the remaining rows belong to this single list viewport.
     let viewport_rows = panel_area.height.saturating_sub(7).max(1) as usize;
     let preview_viewport_rows = panel_area.height.saturating_sub(5).max(1) as usize;
-    let selected_index = selected_id
-        .read()
-        .as_ref()
-        .and_then(|id| threads.iter().position(|thread| &thread.id == id))
-        .unwrap_or_else(|| (*cursor.read()).min(item_count.saturating_sub(1)));
+    // 选中项是 thread 身份，不是行下标：后台每 2 秒重排一次列表（`updated_at`
+    // 变化会把刚聊过的会话提到首行），按下标跟随会把用户已经挪到某行的光标
+    // 悄悄换到另一条会话上，Enter 于是加载了不该加载的 thread。
+    let selected_index = resolve_selection(selected_id.read().as_deref(), &threads, *cursor.read());
     if *cursor.read() != selected_index {
         *cursor.write_no_update() = selected_index;
     }
-    let selected_id_now = threads.get(selected_index).map(|thread| thread.id.clone());
+    // 身份仍在列表里就绝不重写（否则下一次重排又以上一次的行号为准）。
+    // 刷新失败会让列表短暂为空，那一帧同样必须保留身份，否则下一帧会拿光标行
+    // 当作用户选择——B 刚聊完、`updated_at` 更新时首行就是 B。
+    let selected_id_now = adopt_selection(selected_id.read().as_deref(), &threads, selected_index);
     if *selected_id.read() != selected_id_now {
         *selected_id.write_no_update() = selected_id_now;
     }
@@ -339,7 +341,13 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     }
                     KeyCode::Enter => {
-                        if let Some(id) = selected_id.read().clone() {
+                        // 只加载当前列表里真实存在的身份：列表刷新期间的旧身份
+                        // 不能变成一次「看不见的目标」的会话切换。
+                        if let Some(id) = selected_id
+                            .read()
+                            .clone()
+                            .filter(|id| event_threads.iter().any(|thread| &thread.id == id))
+                        {
                             if let Some(tx) = THREAD_LOAD_TX.get() {
                                 let _ = tx.send(id);
                             }
@@ -796,6 +804,34 @@ fn set_selection(
     let index = index.min(threads.len().saturating_sub(1));
     *cursor.write() = index;
     *selected_id.write() = threads.get(index).map(|thread| thread.id.clone());
+}
+
+/// 由选中身份求行下标；身份不在当前列表里才退回光标行。
+///
+/// 列表由后台快照周期性重排（`updated_at` 变化会把刚聊过的会话提到前面），
+/// 因此「行号」不是用户意图的载体：身份还在就必须跟着身份走，否则重排一次
+/// 就会把 Enter 的目标换成另一条会话。
+fn resolve_selection(selected_id: Option<&str>, threads: &[ThreadSummary], cursor: usize) -> usize {
+    let by_identity = selected_id.and_then(|id| threads.iter().position(|thread| thread.id == id));
+    by_identity.unwrap_or_else(|| cursor.min(threads.len().saturating_sub(1)))
+}
+
+/// 身份回填：只有「列表非空且身份确实不在其中」才改用光标行。
+///
+/// 空列表（首次加载、刷新失败）不得清掉身份——那一刻光标行没有任何会话可指，
+/// 清掉后下一帧的「首行」就冒充了用户选择。
+fn adopt_selection(
+    selected_id: Option<&str>,
+    threads: &[ThreadSummary],
+    index: usize,
+) -> Option<String> {
+    if threads.is_empty() {
+        return selected_id.map(str::to_owned);
+    }
+    if selected_id.is_some_and(|id| threads.iter().any(|thread| thread.id == id)) {
+        return selected_id.map(str::to_owned);
+    }
+    threads.get(index).map(|thread| thread.id.clone())
 }
 
 fn keep_selection_visible(

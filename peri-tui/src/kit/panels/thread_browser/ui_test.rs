@@ -58,6 +58,57 @@ fn selection_visibility_clamps_to_resized_viewport() {
     assert_eq!(state.offset().y, 15);
 }
 
+// ── 选中身份跨列表重排的稳定性（U02）──────────────────────────────────
+//
+// 后台快照每 2 秒重排一次列表：刚聊过的会话 `updated_at` 更新，会顶到首行。
+// 选中项因此必须跟着 thread 身份走；按下标跟随会让 Enter 加载另一条会话。
+
+/// 重排后身份仍在列表里：行下标跟着身份走，而不是停在原行号。
+#[test]
+fn selection_follows_identity_across_reorder() {
+    let reordered = vec![thread("b"), thread("a")];
+    assert_eq!(resolve_selection(Some("a"), &reordered, 0), 1);
+    assert_eq!(
+        adopt_selection(Some("a"), &reordered, 1).as_deref(),
+        Some("a")
+    );
+}
+
+/// 列表暂时为空（刷新失败 / 首次加载）：不得丢掉身份，否则下一帧首行冒充用户选择。
+#[test]
+fn empty_list_keeps_selected_identity() {
+    let empty: Vec<ThreadSummary> = Vec::new();
+    assert_eq!(resolve_selection(Some("a"), &empty, 0), 0);
+    assert_eq!(
+        adopt_selection(Some("a"), &empty, 0).as_deref(),
+        Some("a"),
+        "空列表帧必须保留原选中身份"
+    );
+    // 空帧之后列表重新带回原顺序，身份仍是被选中的那一条。
+    let restored = vec![thread("a"), thread("b")];
+    assert_eq!(resolve_selection(Some("a"), &restored, 0), 0);
+}
+
+/// 身份确实离开当前视图（归档 / 删除 / 换 scope）才回落到光标行。
+#[test]
+fn vanished_identity_adopts_cursor_row() {
+    let refreshed = vec![thread("b"), thread("c")];
+    assert_eq!(resolve_selection(Some("a"), &refreshed, 1), 1);
+    assert_eq!(
+        adopt_selection(Some("a"), &refreshed, 1).as_deref(),
+        Some("c"),
+        "身份消失时回落到光标行"
+    );
+}
+
+/// 没有身份（首次打开面板）时按光标行回填。
+#[test]
+fn missing_identity_seeds_from_cursor_row() {
+    let threads = vec![thread("a"), thread("b")];
+    assert_eq!(adopt_selection(None, &threads, 1).as_deref(), Some("b"));
+    assert_eq!(adopt_selection(None, &[], 0), None);
+}
+
 // ── 会话动作回写的视图身份（归档 `a` / 删除 `d`+Enter）──────────────────
 
 /// 面板状态相关 atom 的保存/恢复——全局 atom 是进程级的，断言 panic 也不得污染其它用例。
