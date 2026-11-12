@@ -31,6 +31,14 @@ Live 工具卡归属：`kit/acp_events/live_tool_links.rs` 按 `active_session_i
 
 ## 架构速览
 
+本地提示、live reminder 与已完成交互由 `kit/acp_events/display_retention.rs` 回收，
+与 `CurrentTurn` 中的已落段/待落提示共享 `kit/display_retention.rs` 的 256 项、1 MiB 预算。
+最新一条允许单独超额，未完成交互不淘汰；有持久展示槽位的历史页内容仍走窗口释放。
+移除时同步移动展示账本并失效投影，live seal 归属逻辑位于 `acp_events/live_seal.rs`。
+手动折叠偏好经 `kit/fold_overrides.rs` 保留最近操作，限制为 1024 项及 256 KiB 键目录
+（含顺序目录的副本），会话重置同时释放覆盖表和顺序目录。
+回归入口：`acp_events_test::display_retention_test`、`fold_overrides::tests`。
+
 内部续跑与定时审批通过 `ExecutionStarted` 建立真实 execution 身份及 HITL 许可；`acp_client/interaction_lifecycle/prompt.rs` 对 managed 输入与 external execution 共用代际、重复和终态归属规则，但仅 managed 输入的 Stop 携带 mailbox 票据身份。`kit/acp_notifier.rs` 保留终态 request ID；bridge 不让陈旧结束或迟到提交失败清除新执行。`kit/acp_events/mod.rs::SubmittedInputRollback` 将 composer 回滚文本绑定提交请求，`turn.rs` 只允许所属请求取消回滚，internal execution 开始不重绑它。日常提交失败只发布原会话/请求所属事件，不直接写全局 loading。定向入口 `acp_client::client::pump::user_input_run_tests` 与 `kit::acp_events::acp_events_test`。
 
 错误预览在 `src/kit/message_area/render/error.rs` 按显示列宽与 grapheme 折行，有界读取并最多保留三行；超出显示省略号，完整 VM 原文不修改。系统错误、工具错误与子任务错误的 ×/x 点击热区复用 `message_area/{hits,handlers}.rs` 的复制链，按 slot/hash 校验身份后复制完整错误原文（不从三行预览重建）。工具折叠态仍为单行，展开态含标题最多三行；子任务原因预览最多三行。复制反馈沿用既有字符计数提示，弹窗遮挡与陈旧点击不复制。

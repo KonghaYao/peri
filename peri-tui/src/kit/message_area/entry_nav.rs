@@ -1,7 +1,5 @@
 use super::scroll::GesturePending;
-use crate::kit::atoms::{
-    FOCUSED_ENTRY, FOLD_OVERRIDES, FocusedEntry, SELECTED_SUBAGENT_ID, ViewModelsSnapshot,
-};
+use crate::kit::atoms::{FOCUSED_ENTRY, FocusedEntry, SELECTED_SUBAGENT_ID, ViewModelsSnapshot};
 use crate::kit::tui_render_unit::{
     FoldKey, FoldState, InteractionKind, TuiAskUserBlock, TuiRenderUnit,
 };
@@ -301,7 +299,7 @@ pub(super) fn apply_fold_toggle(
     };
     // 持久覆盖表：快照重建（push_view_models）后由折叠 pass 恢复，
     // 手动选择跨流式/跨 turn 保持（spec §7）。
-    FOLD_OVERRIDES.state().write().insert(fold_key, next);
+    crate::kit::fold_overrides::insert(fold_key, next);
     // 应用到当帧快照（COW set + 重算 hash）
     let mut updated = snapshot.items[idx].clone();
     apply_fold_override(&mut updated, next);

@@ -311,6 +311,16 @@ pub fn retained_ask_user_bytes(block: &TuiAskUserBlock) -> usize {
         + block.options.iter().map(String::capacity).sum::<usize>()
         + block.result.as_ref().map_or(0, String::capacity)
         + block.request_id.as_ref().map_or(0, String::capacity)
+        + retained_vec_bytes(&block.question_ids)
+        + block
+            .question_ids
+            .iter()
+            .map(String::capacity)
+            .sum::<usize>()
+        + block
+            .owner
+            .as_ref()
+            .map_or(0, |owner| owner.session_id.capacity())
 }
 
 pub fn retained_collapsed_group_bytes(

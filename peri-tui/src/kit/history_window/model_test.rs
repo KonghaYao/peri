@@ -2,6 +2,24 @@ use super::test_support::*;
 use super::*;
 
 #[test]
+fn display_overlap_respects_adjacent_ranges_and_gaps() {
+    let mut window = enabled_window(WindowLimits::default());
+    assert!(window.mark_existing_display_slot(PersistentEntryKey::own("a"), 2, 2));
+    assert!(window.mark_existing_display_slot(PersistentEntryKey::own("b"), 6, 2));
+    for slot in [0, 1, 4, 5, 8, 9] {
+        assert!(window.display_slot_available(slot), "空隙不属于历史条目");
+    }
+    for slot in [2, 3, 6, 7] {
+        assert!(
+            !window.display_slot_available(slot),
+            "持久历史单元不能按提示淘汰"
+        );
+    }
+    assert!(window.display.overlaps(3, 4));
+    assert!(!window.display.overlaps(4, 2));
+}
+
+#[test]
 fn disposable_preview_removal_preserves_canonical_display_ranges() {
     let mut window = enabled_window(WindowLimits::default());
     let first = PersistentEntryKey::own("s1:first");
