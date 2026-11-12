@@ -79,16 +79,17 @@
 ## 验证记录
 
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- host::requests::tests::workspace_cases`（修复前基线）→ 15 passed，0 failed；存在 1 条 macOS linker compact-unwind warning。
-- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- session_switch` → 10 passed，0 failed；覆盖状态机、真实 close 失败/成功、history bypass 与响应 write failure 的 reservation 回滚边界。
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- session_switch` → 11 passed，0 failed；覆盖状态机、真实 close 失败/成功、history bypass、响应 write failure 的 reservation 回滚，以及 cleanup-incomplete owner 的绑定/释放。
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- recovery_wire` → 1 passed，0 failed；过滤词已从修复前 0 tests 假绿变为非零。
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- close_failure` → 10 passed，0 failed。
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- recovery_child` → 20 passed，0 failed，1 ignored（既有产品裁决用例）。
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- connection` → 40 passed，0 failed；旧 fork wire 用例已同步为先成功 close 当前会话再 fork。
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- history_page_wire` → 79 passed，0 failed，1 ignored（既有 16 MiB 显式性能夹具）。
 - CodeRabbit 后续 review 的四项 restore ownership finding 已收口：cold replay 失败清理、generation 精确回滚、Incomplete 保留 retry owner、fork cold source 成功/失败清理且 preexisting source 保留。authority 已下沉到 `load_shared::prepare_shared/rollback_restore_publication`，server loop 不再维护第二份 publication。响应 write failure 按既有 transport terminal + host shutdown 契约不复制清理。
+- CodeRabbit comment 4546489261 指出的 cleanup owner gate 缺口已修复：`session_cleanup_incomplete` 错误响应成功发送后绑定其 `sessionId`，真实 wire 用例 `session_switch_cleanup_incomplete_owner_blocks_switch_until_close` 验证 B 被拒、close(A) 成功后 B 放行；错误响应发送失败仍由 reservation Drop + terminal shutdown 收口。
 - `cold_replay_failure`、`restore_publication`、`restore_cleanup_incomplete`、`fork_cold_source`、`fork_preexisting_source`、`fork_wire_uses_the_shared_preparation_path` 六个过滤词各命中 1 条并通过；Incomplete 用例同时验证 typed `reason/sessionId`、reload 拒绝与显式 close 重试。
 - `bash ./scripts/check-changed.sh` → exit 0；实际执行 `cargo check --locked -p peri-acp -p peri-tui -p peri-wasm`。
 - `./scripts/cargo-rmcp-patched.sh clippy --locked -p peri-acp --all-targets -- -D warnings` → exit 0。
-- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib` → 1260 passed，0 failed，2 ignored。
-- `cargo fmt --all -- --check` → exit 0；`git diff --check` → exit 0。修改 Rust 文件均 ≤1000 行，`server_loop.rs` 为 955 行。
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib` → 1261 passed，0 failed，2 ignored。
+- `cargo fmt --all -- --check` → exit 0；`git diff --check` → exit 0。修改 Rust 文件均 ≤1000 行，`server_loop.rs` 为 980 行。
 - 权威文档分层复核：稳定不变量在 `ARC-ACP-SESSION-SWITCH-001`，wire 语义在 `docs/design/peri-acp-protocol.md`，代码落点在 `docs/code-index/peri-acp.md`，本文件只保留在办验收。

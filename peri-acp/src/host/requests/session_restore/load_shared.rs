@@ -126,6 +126,36 @@ async fn saved_context_usage(
     }))
 }
 
+/// 仅测试：在 cold publication 发布后、handler 后处理前注入一次状态变更。
+#[cfg(test)]
+pub(crate) mod publication_test_hook {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+
+    use crate::host::{SessionState, SharedSessions};
+
+    type Hook = Box<dyn FnOnce(&mut SessionState) + Send>;
+    static HOOKS: LazyLock<Mutex<HashMap<String, Hook>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) fn install(session_id: &str, hook: impl FnOnce(&mut SessionState) + Send + 'static) {
+        HOOKS
+            .lock()
+            .unwrap()
+            .insert(session_id.to_owned(), Box::new(hook));
+    }
+
+    pub(super) async fn apply(session_id: &str, sessions: &SharedSessions) {
+        let hook = HOOKS.lock().unwrap().remove(session_id);
+        if let Some(hook) = hook {
+            let mut states = sessions.lock().await;
+            if let Some(state) = states.get_mut(session_id) {
+                hook(state);
+            }
+        }
+    }
+}
+
 /// 冷恢复发布的唯一身份；只有同一 generation 仍占据 map 时才有清理权。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RestorePublication {
@@ -165,6 +195,10 @@ pub(super) async fn prepare_shared(
         let (prepared, publication) = prepare_cold_shared(params, cfg, sessions).await?;
         (prepared, Some(publication))
     };
+    #[cfg(test)]
+    if publication.is_some() {
+        publication_test_hook::apply(&prepared.id, sessions).await;
+    }
     Ok(PreparedShared {
         prepared,
         publication,

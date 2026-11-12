@@ -34,7 +34,8 @@ pub(crate) use restore::{
 };
 #[cfg(test)]
 pub(crate) use restore::{
-    cleanup_unpublished_restore, rollback_restore_publication, RestorePublication,
+    cleanup_unpublished_restore, publication_test_hook, rollback_restore_publication,
+    RestorePublication,
 };
 use restore::{identity_response, prepare_existing, response_identity};
 use session_apps_capability::apps_capability;

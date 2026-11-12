@@ -78,8 +78,10 @@ Cold restore publication 的唯一权威在 `host/requests/session_restore/load_
 replay、响应与 initial cursor，失败按 generation 标记 closing 并排空；fork 在 target 创建前清理
 request-owned cold source，preexisting source 不受影响。`rollback_restore_publication` 仅在 manager 与
 environment 都确认 drain 后删除 state；Incomplete 保留 owner，返回
-`session_cleanup_incomplete + sessionId`，由显式 close 重试。响应 write failure 仍归 transport terminal
-与 host shutdown，不在 restore 层复制第二套清理。
+`session_cleanup_incomplete + sessionId`，由显式 close 重试。该错误响应成功发送后，
+`server_loop.rs::cleanup_incomplete_session_id` 把 Preparing reservation 提交为 cleanup owner，阻止同
+连接 setup 其他 ID；close owner 成功响应沿既有 `release_current_session` 释放。错误响应发送失败
+不提交，仍归 transport terminal 与 host shutdown；restore 层不复制第二套响应写失败清理。
 
 ACP 出站错误诊断统一位于 `src/host/diagnostics.rs`：`ServerLoop` 的普通请求、prompt、MCP Apps、MCP over ACP、准入拒绝及生命周期锁失败均经 `ResponseDiagnostics::send` 记录方法、RPC ID、可用会话 ID、错误码与错误消息，再原样发送响应；内部错误为 ERROR，其余拒绝为 WARN，正常取消为 DEBUG。`notify.rs` 的会话信息、配置项和命令列表通知共用 `send_session_update` 记录投递失败，不记录请求参数、响应数据或通知内容。针对性回归：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- host::diagnostics`。
 

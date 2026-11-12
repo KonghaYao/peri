@@ -39,9 +39,12 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 会话时，`session/new|fork` 与指向不同 ID 的 `session/load|resume` 返回 `-32010`、
 `data.reason="session_switch_requires_close"`；客户端必须先成功 `session/close` 或
 `session/delete` 当前 ID。同 ID load/resume 保持允许并复用现有环境。并发 setup 在首个请求
-Preparing 时返回 `-32010`、`data.reason="session_setup_in_progress"`。绑定只在 setup 成功响应
-发送后提交，且只在匹配当前 ID 的 close/delete 成功响应发送后释放；处理失败或响应发送失败
-不改变绑定。带 cursor/history 的 `session/load`、`session/history/body` 与 child history 是
+Preparing 时返回 `-32010`、`data.reason="session_setup_in_progress"`。正常绑定只在 setup 成功
+响应发送后提交，且只在匹配当前 ID 的 close/delete 成功响应发送后释放。唯一错误响应例外是
+`-32010` + `data.reason="session_cleanup_incomplete"` + `sessionId`：响应发送成功后，连接绑定到该
+cleanup owner，其他 ID setup 继续返回 `session_switch_requires_close`；客户端须成功
+`session/close(owner)` 才释放。错误响应发送失败不绑定，仍由 transport terminal shutdown 收口。
+带 cursor/history 的 `session/load`、`session/history/body` 与 child history 是
 只读浏览，不建立或切换连接绑定；恢复协调内部装配 child 也不经过该 wire gate。
 
 Cold load 与 fork 临时装配 source 时，Host 以 `(sessionId, sessionGeneration)` 记录本请求实际

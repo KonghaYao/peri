@@ -33,7 +33,8 @@ mod load_shared;
 pub(crate) use fork_shared::handle_fork_shared;
 #[cfg(test)]
 pub(crate) use load_shared::{
-    cleanup_unpublished_restore, rollback_restore_publication, RestorePublication,
+    cleanup_unpublished_restore, publication_test_hook, rollback_restore_publication,
+    RestorePublication,
 };
 pub(crate) use load_shared::{handle_load_shared, handle_resume_shared};
 

@@ -14,7 +14,21 @@ use super::{
     handle_request_for_connection, history_page, history_window, mcp_apps, requests,
     send_session_info_update, task_scope, AcpServerConfig, PromptLocks, SharedSessions,
 };
-use crate::transport::types::{IncomingMessage, RequestId};
+use crate::transport::types::{AcpError, IncomingMessage, RequestId};
+
+fn cleanup_incomplete_session_id(result: &Result<Value, AcpError>) -> Option<&str> {
+    let error = result.as_ref().err()?;
+    if error.code != -32010 {
+        return None;
+    }
+    let data = error.data.as_ref()?;
+    if data.get("reason").and_then(Value::as_str) != Some("session_cleanup_incomplete") {
+        return None;
+    }
+    data.get("sessionId")
+        .and_then(Value::as_str)
+        .filter(|session_id| !session_id.is_empty())
+}
 
 pub(super) struct ServerLoop<'a> {
     pub(super) transport: &'a Arc<dyn crate::transport::AcpTransport>,
@@ -894,15 +908,26 @@ impl ServerLoop<'_> {
             }
         }
         let response_succeeded = result.is_ok();
+        let cleanup_incomplete_session_id =
+            cleanup_incomplete_session_id(&result).map(str::to_owned);
         let response_sent = diagnostics.send(transport.as_ref(), result).await.is_ok();
-        if response_sent && response_succeeded {
-            if let (Some(reservation), Some(session_id)) =
-                (setup_reservation.take(), setup_session_id.as_deref())
-            {
+        if response_sent {
+            if response_succeeded {
+                if let (Some(reservation), Some(session_id)) =
+                    (setup_reservation.take(), setup_session_id.as_deref())
+                {
+                    reservation.commit(session_id);
+                }
+                if let Some(session_id) = closed_session_id.as_deref() {
+                    connection.lock().await.release_current_session(session_id);
+                }
+            } else if let (Some(reservation), Some(session_id)) = (
+                setup_reservation.take(),
+                cleanup_incomplete_session_id.as_deref(),
+            ) {
+                // Cleanup owner 是唯一错误响应绑定例外：客户端必须显式 close 它，
+                // 不能在未排空 A 时让同一连接继续 setup B。
                 reservation.commit(session_id);
-            }
-            if let Some(session_id) = closed_session_id.as_deref() {
-                connection.lock().await.release_current_session(session_id);
             }
         }
         // 恢复的启动门：响应已发出才放行执行；发送失败则丢弃本次启动资格。
