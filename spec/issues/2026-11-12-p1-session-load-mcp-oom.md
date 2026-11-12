@@ -91,6 +91,6 @@
 - `bash ./scripts/check-changed.sh` → exit 0；实际执行 `cargo check --locked -p peri-acp -p peri-tui -p peri-wasm`。
 - `./scripts/cargo-rmcp-patched.sh clippy --locked -p peri-acp --all-targets -- -D warnings` → exit 0。
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib` → 1261 passed，0 failed，2 ignored。
-- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib` → 2701 passed，0 failed，9 ignored；新增 `cleanup_incomplete_load_remembers_owner_for_next_switch` 覆盖 TUI 记录 cleanup owner 并在下一次切换先 close 的 wire 顺序。
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib` → 2702 passed，0 failed，9 ignored；新增 `cleanup_incomplete_load_remembers_owner_for_next_switch` 与 `cleanup_incomplete_same_id_retry_closes_owner_first` 覆盖 TUI 记录 cleanup owner、下一次切换/同 ID 重试先 close 的 wire 顺序。
 - `cargo fmt --all -- --check` → exit 0；`git diff --check` → exit 0。修改 Rust 文件均 ≤1000 行，`server_loop.rs` 为 980 行。
 - 权威文档分层复核：稳定不变量在 `ARC-ACP-SESSION-SWITCH-001`，wire 语义在 `docs/design/peri-acp-protocol.md`，代码落点在 `docs/code-index/peri-acp.md`，本文件只保留在办验收。

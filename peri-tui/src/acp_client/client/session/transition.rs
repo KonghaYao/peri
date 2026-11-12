@@ -223,10 +223,11 @@ impl AcpTuiClient {
             crate::kit::session_boundary::project_session_boundary(Some(session_id));
         }
         self.settle_claims_owned(start.claims).await;
+        // cleanup-incomplete owner 即使与本次目标同 ID 也必须先关闭：服务端仍把
+        // 连接绑在 closing 会话上，直接重载只会再次收到 session_switch_requires_close。
         let close_target = self
             .pending_close_target()
-            .or(start.from)
-            .filter(|candidate| *candidate != session_id);
+            .or_else(|| start.from.filter(|candidate| *candidate != session_id));
         if let Some(ref old_sid) = close_target {
             if let Err(error) = self.close_previous_session(old_sid).await {
                 self.lifecycle.fail_transition(start.generation);
