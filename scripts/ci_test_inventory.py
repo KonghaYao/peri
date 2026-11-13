@@ -4,8 +4,8 @@
 由 scripts/ci-test-inventory.sh 调用：读取 cargo metadata（--no-deps）与 ci.yml，
 按 nextest 过滤器表达式的真实选择结果判定每个测试目标是否执行。
 
-只支持 package/binary/kind 的 `=值` 精确匹配。出现其他谓词或匹配器直接报错，
-避免清单静默忽略会收窄执行范围的语义。
+只支持 package/binary/kind 的 `=值` 精确匹配，以及 nextest 的 not/!、&/and/-、
+|/or/+ 与括号。出现其他谓词或匹配器直接报错，避免清单静默忽略会收窄执行范围的语义。
 """
 
 from __future__ import annotations
@@ -62,10 +62,19 @@ def tokenize(expression: str) -> list[Token]:
         if char.isspace():
             index += 1
             continue
-        if char in "()&|=":
+        if char in "()&|=!+":
             tokens.append(Token(char, char, index))
             index += 1
             continue
+        if char == "-":
+            previous = expression[index - 1] if index > 0 else ""
+            following = expression[index + 1] if index + 1 < len(expression) else ""
+            if (not previous or previous.isspace() or previous in "()") and (
+                not following or following.isspace() or following in "()"
+            ):
+                tokens.append(Token("-", "-", index))
+                index += 1
+                continue
         if char in "~#":
             tokens.append(Token(char, char, index))
             index += 1
@@ -135,19 +144,25 @@ class _Parser:
 
     def _parse_or(self):
         node = self._parse_and()
-        while self._accept("|", "or"):
+        while self._accept("|", "or") or self._accept("+", ""):
             node = ("or", node, self._parse_and())
         return node
 
     def _parse_and(self):
         node = self._parse_not()
-        while self._accept("&", "and"):
-            node = ("and", node, self._parse_not())
-        return node
+        while True:
+            if self._accept("&", "and"):
+                node = ("and", node, self._parse_not())
+            elif self._accept("-", ""):
+                node = ("and", node, ("not", self._parse_not()))
+            else:
+                return node
 
     def _parse_not(self):
         token = self._peek()
-        if token is not None and token.kind == "word" and token.value == "not":
+        if token is not None and (
+            token.kind == "!" or (token.kind == "word" and token.value == "not")
+        ):
             self.index += 1
             return ("not", self._parse_not())
         return self._parse_primary()

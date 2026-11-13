@@ -120,15 +120,20 @@ class InventoryEvaluationTests(unittest.TestCase):
         self.assertEqual(self.selected("kind(=test)"), test_targets)
 
     def test_negation_and_boolean_precedence(self):
+        libs_without_acp = {
+            "peri-agent:lib:peri_agent",
+            "peri-tui:lib:peri_tui",
+            "peri-middlewares:lib:peri_middlewares",
+            "peri-mcp-common:lib:peri_mcp_common",
+            "peri-model:lib:peri_model",
+        }
         self.assertEqual(
             self.selected("not package(=peri-acp) & kind(=lib)"),
-            {
-                "peri-agent:lib:peri_agent",
-                "peri-tui:lib:peri_tui",
-                "peri-middlewares:lib:peri_middlewares",
-                "peri-mcp-common:lib:peri_mcp_common",
-                "peri-model:lib:peri_model",
-            },
+            libs_without_acp,
+        )
+        self.assertEqual(
+            self.selected("!package(=peri-acp) & kind(=lib)"),
+            libs_without_acp,
         )
         self.assertEqual(
             self.selected("package(=peri-acp) | package(=peri-agent) & kind(=lib)"),
@@ -139,6 +144,15 @@ class InventoryEvaluationTests(unittest.TestCase):
                 "peri-agent:lib:peri_agent",
             },
         )
+        self.assertEqual(
+            self.selected("package(=peri-acp) + kind(=bin)"),
+            {
+                "peri-acp:lib:peri_acp",
+                "peri-acp:test:integration_test",
+                "peri-acp:test:prompt_cache_boundary",
+                "peri-tui:bin:peri",
+            },
+        )
         selected = self.selected(
             "package(=peri-agent) and (kind(=test) or kind(=bin))"
         )
@@ -146,6 +160,18 @@ class InventoryEvaluationTests(unittest.TestCase):
             selected,
             {f"peri-agent:test:{compact}" for compact in COMPACTS}
             | {"peri-agent:test:middleware_tests"},
+        )
+        self.assertEqual(
+            self.selected(
+                "package(=peri-agent) - binary(=compact_pressure_adversarial_test)"
+            ),
+            {
+                "peri-agent:lib:peri_agent",
+                "peri-agent:test:compact_session_adversarial_test",
+                "peri-agent:test:compact_session_manual_adversarial_test",
+                "peri-agent:test:compact_authority_projection_test",
+                "peri-agent:test:middleware_tests",
+            },
         )
 
     def test_narrowed_filter_is_rejected(self):
