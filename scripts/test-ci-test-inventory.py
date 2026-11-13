@@ -366,13 +366,15 @@ class FilterExpressionTests(unittest.TestCase):
             ],
         )
 
-    def test_attached_filter_arguments_are_rejected(self):
-        # nextest 接受 -E'...'，但清单只按「-E 空白 '...'」读取；必须显式失败，
-        # 否则附加在合法命令后的 attached 过滤器会被静默忽略。
+    def test_attached_or_concatenated_filter_arguments_are_rejected(self):
+        # nextest 接受 -E'...' 与 shell 相邻引号拼接；清单只按「-E 空白 '...'」读取，
+        # 必须显式失败，否则附加/拼接的过滤器会被静默忽略或截断。
         for workflow in (
             "run: nextest run -E'package(=peri-acp)'",
             "run: nextest run -E 'package(=peri-acp)' -E'package(=peri-agent)'",
             "run: nextest run -E=package(=peri-acp)",
+            "run: nextest run -E 'package(=peri-acp)'' | package(=peri-agent)'",
+            "run: nextest run -E 'package(=peri-acp)'\" | package(=peri-agent)\"",
         ):
             with self.subTest(workflow=workflow):
                 with self.assertRaises(ci.FilterSyntaxError):

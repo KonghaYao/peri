@@ -280,11 +280,11 @@ def extract_expressions(workflow_text: str) -> list[str]:
                 "过滤器参数必须写成 -E '...'：-E 与表达式之间要有空白，"
                 f"不支持 {match.group(0)!r} 后直接拼接表达式"
             )
-        argument = re.match(r"\s+'([^']*)'", rest)
+        argument = re.match(r"\s+'([^']*)'(?=\s|$)", rest)
         if argument is None:
             raise FilterSyntaxError(
-                "每次测试的过滤器必须写作 -E '...'（单引号）；"
-                "清单无法读取双引号或其他形式"
+                "每次测试的过滤器必须写作 -E '...'（单引号，且闭合引号后必须是空白或行尾）；"
+                "清单无法读取双引号、相邻引号拼接或其他形式"
             )
         expressions.append(argument.group(1))
     return expressions
