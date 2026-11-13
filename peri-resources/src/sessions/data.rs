@@ -525,6 +525,18 @@ pub(crate) trait SessionDataPort: Send + Sync {
         record: &ChildResumeRecord,
     ) -> SessionResourceResult<()>;
 
+    /// 认领收尾：恢复认领前的状态，可在同一事务内恢复工作意图并追加唯一一次终态。
+    ///
+    /// 状态、工作意图与终态必须整体生效或整体不生效。失败后记录仍保持认领态，
+    /// 同一 handle 才能继续承担重试责任；不得先提交其中一列再报告失败。
+    async fn settle_child_resume(
+        &self,
+        child: &ThreadId,
+        previous: &ChildResumeRecord,
+        work_state: Option<WorkState>,
+        terminal: Option<peri_acp_types::thread::AgentStatus>,
+    ) -> SessionResourceResult<()>;
+
     /// 应用一次 compaction 变更：flags、摘要追加、派生计数与缓存视图全部生效或全不生效。
     async fn apply_compaction(
         &self,

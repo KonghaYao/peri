@@ -934,6 +934,45 @@ impl SessionDataPort for SqliteSessionData {
         Ok(())
     }
 
+    async fn settle_child_resume(
+        &self,
+        child: &ThreadId,
+        previous: &ChildResumeRecord,
+        work_state: Option<WorkState>,
+        terminal: Option<AgentStatus>,
+    ) -> SessionResourceResult<()> {
+        self.writable()?;
+        let now = peri_time::now_utc_rfc3339();
+        let status = terminal.unwrap_or(previous.status);
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|e| map_sqlx(&e))?;
+        self.require_session(&mut tx, child).await?;
+        // 两列必须在同一条语句里落地：分开提交会留下「状态已回滚、工作意图未回滚」
+        // 的中间态，之后的补偿会因状态不再属于本次认领而失去重试责任。
+        let updated = sqlx::query(
+            "UPDATE threads SET agent_status = ?1, updated_at = ?2,
+             work_state = COALESCE(?3, work_state) WHERE id = ?4",
+        )
+        .bind(status.as_str())
+        .bind(&now)
+        .bind(work_state.map(|state| state.as_str()))
+        .bind(child.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
+        if updated.rows_affected() != 1 {
+            return Err(not_found());
+        }
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(child.clone())))?;
+        Ok(())
+    }
+
     async fn apply_compaction(
         &self,
         id: &ThreadId,

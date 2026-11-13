@@ -463,10 +463,11 @@ async fn test_background_handoff_preparation_failure_restores_previous_claim_rec
         .unwrap();
 }
 
-/// 记录回滚已知未生效时，仍要在同一归属校验下恢复工作意图：worker 不会重试，
-/// 留下 `Active + Working` 会被下一次进入当成可恢复工作。
+/// [回归] 补偿写入失败必须保留认领：状态与工作意图原子落库，同一 handle 恢复后
+/// 仍能完成补偿。旧实现在状态回滚已提交、工作意图写入失败后把重试判成 NotOwned，
+/// 留下 `Cancelled + Working` 并释放认领。
 #[tokio::test]
-async fn claim_rollback_known_failure_still_restores_work_state() {
+async fn claim_rollback_failure_keeps_claim_for_same_handle_retry() {
     use peri_acp_types::session_resources::MutationOutcome;
     use peri_acp_types::thread::WorkState;
     let fixture = Fixture::new().await;
@@ -481,7 +482,7 @@ async fn claim_rollback_known_failure_still_restores_work_state() {
         .update_session_meta(
             &child_id,
             &SessionMetaPatch {
-                status: Some(AgentStatus::Done),
+                status: Some(AgentStatus::Cancelled),
                 ..Default::default()
             },
         )
@@ -503,11 +504,11 @@ async fn claim_rollback_known_failure_still_restores_work_state() {
         .set_work_state(&child_id, WorkState::Working)
         .await
         .unwrap();
-    // 只拒绝回滚写入的终态：认领写入 `active` 已成功，故障只覆盖本次补偿。
+    // 只拒绝工作意图写回：状态列与工作意图必须同生共死，不能先提交状态。
     sqlx::raw_sql(
-        "CREATE TRIGGER reject_record_rollback BEFORE UPDATE OF agent_status ON threads
-         WHEN NEW.agent_status = 'done'
-         BEGIN SELECT RAISE(ABORT, 'record rollback blocked'); END;",
+        "CREATE TRIGGER reject_work_state_rollback BEFORE UPDATE OF work_state ON threads
+         WHEN NEW.work_state = 'stopped'
+         BEGIN SELECT RAISE(ABORT, 'work state rollback blocked'); END;",
     )
     .execute(fixture.facade.local_pool())
     .await
@@ -515,15 +516,9 @@ async fn claim_rollback_known_failure_still_restores_work_state() {
 
     let error = claim.mark_failed().await.unwrap_err();
     assert_eq!(error.effect(), MutationOutcome::NotApplied);
-    assert_eq!(
-        fixture
-            .facade
-            .load_session_meta(&child_id)
-            .await
-            .unwrap()
-            .work_state,
-        WorkState::Stopped,
-        "记录回滚确定失败时仍须撤回 working"
+    assert!(
+        fixture.facade.gate.claim_is_tracked(&child_id),
+        "失败且未结算的认领必须保留世代"
     );
     let record = fixture
         .facade
@@ -533,10 +528,20 @@ async fn claim_rollback_known_failure_still_restores_work_state() {
         .await
         .unwrap();
     assert_eq!(record.status, AgentStatus::Active);
-    assert!(record.claimed);
+    assert!(record.claimed, "失败后必须保留认领态供同一 handle 重试");
+    assert_eq!(
+        fixture
+            .facade
+            .load_session_meta(&child_id)
+            .await
+            .unwrap()
+            .work_state,
+        WorkState::Working,
+        "失败不得留下已回滚的状态列"
+    );
 
-    // 已知失败允许重试：故障移除后同一 handle 能完成整次补偿。
-    sqlx::raw_sql("DROP TRIGGER reject_record_rollback")
+    // 故障移除后同一 handle 完成整次补偿；旧实现会在这里因 NotOwned 而静默失败。
+    sqlx::raw_sql("DROP TRIGGER reject_work_state_rollback")
         .execute(fixture.facade.local_pool())
         .await
         .unwrap();
@@ -548,8 +553,118 @@ async fn claim_rollback_known_failure_still_restores_work_state() {
         .load_child_resume_record(&child_id)
         .await
         .unwrap();
+    assert_eq!(record.status, AgentStatus::Cancelled);
+    assert!(!record.claimed);
+    assert_eq!(
+        fixture
+            .facade
+            .load_session_meta(&child_id)
+            .await
+            .unwrap()
+            .work_state,
+        WorkState::Stopped
+    );
+}
+
+/// [回归] 终态写入失败同样不能丢掉重试责任：恢复与终态在同一提交里完成。
+#[tokio::test]
+async fn terminal_write_failure_keeps_claim_for_same_handle_retry() {
+    use peri_acp_types::session_resources::MutationOutcome;
+    use peri_acp_types::thread::WorkState;
+    let fixture = Fixture::new().await;
+    fixture.create("s-terminal-fail-root").await;
+    let child = fixture
+        .child("s-terminal-fail-child", "s-terminal-fail-root")
+        .await;
+    let child_id = child.target.thread_id;
+    let root_id = child.root_id;
+    fixture
+        .facade
+        .update_session_meta(
+            &child_id,
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Cancelled),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    fixture
+        .facade
+        .set_work_state(&child_id, WorkState::Stopped)
+        .await
+        .unwrap();
+
+    let claim = fixture
+        .facade
+        .claim_child_resume(&child_id, &root_id)
+        .await
+        .unwrap();
+    fixture
+        .facade
+        .set_work_state(&child_id, WorkState::Working)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE TRIGGER reject_terminal_write BEFORE UPDATE OF agent_status ON threads
+         WHEN NEW.agent_status = 'done'
+         BEGIN SELECT RAISE(ABORT, 'terminal write blocked'); END;",
+    )
+    .execute(fixture.facade.local_pool())
+    .await
+    .unwrap();
+
+    let error = claim
+        .finish_with_status(AgentStatus::Done)
+        .await
+        .unwrap_err();
+    assert_eq!(error.effect(), MutationOutcome::NotApplied);
+    let record = fixture
+        .facade
+        .gate
+        .data()
+        .load_child_resume_record(&child_id)
+        .await
+        .unwrap();
+    assert_eq!(record.status, AgentStatus::Active);
+    assert!(record.claimed, "终态未写入时认领仍属于本次 handle");
+    assert_eq!(
+        fixture
+            .facade
+            .load_session_meta(&child_id)
+            .await
+            .unwrap()
+            .work_state,
+        WorkState::Working,
+        "终态失败不得留下已回滚的工作意图"
+    );
+
+    sqlx::raw_sql("DROP TRIGGER reject_terminal_write")
+        .execute(fixture.facade.local_pool())
+        .await
+        .unwrap();
+    assert!(
+        claim.finish_with_status(AgentStatus::Done).await.unwrap(),
+        "故障移除后同一 handle 必须能补写终态"
+    );
+    let record = fixture
+        .facade
+        .gate
+        .data()
+        .load_child_resume_record(&child_id)
+        .await
+        .unwrap();
     assert_eq!(record.status, AgentStatus::Done);
     assert!(!record.claimed);
+    assert_eq!(
+        fixture
+            .facade
+            .load_session_meta(&child_id)
+            .await
+            .unwrap()
+            .work_state,
+        WorkState::Stopped
+    );
 }
 
 /// 记录回滚结果未知时不追加任何写入：working 与不确定屏障都必须保留。
@@ -813,7 +928,7 @@ async fn stale_claim_finish_with_status_does_not_override_new_claim() {
         .claim_child_resume(&child_id, &root_id)
         .await
         .unwrap();
-    // 复现原缺陷窗口：旧认领的结清已提交、终态尚未写入时，新 run 认领成功。
+    // 旧认领结清后新 run 重新认领；旧 handle 之后才到的终态写入必须被拒绝。
     old.mark_terminated().await.unwrap();
     let new = fixture
         .facade
