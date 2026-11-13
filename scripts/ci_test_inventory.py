@@ -265,10 +265,15 @@ def load_targets(metadata: dict) -> list[Target]:
 def extract_expressions(workflow_text: str) -> list[str]:
     """提取 ci.yml 中的 `-E '...'`，并拒绝清单无法可靠读取的写法。"""
 
-    expressions = re.findall(r"-E\s+'([^']*)'", workflow_text)
-    if re.search(r"--filterset(?:\s|=)", workflow_text):
+    # 注释行里的示例不应被当成真实过滤器；行内注释仍按 YAML 内容处理。
+    text = "\n".join(
+        "" if line.lstrip().startswith("#") else line
+        for line in workflow_text.splitlines()
+    )
+    expressions = re.findall(r"-E\s+'([^']*)'", text)
+    if re.search(r"--filterset(?:\s|=)", text):
         raise FilterSyntaxError("清单只解析 `-E '...'`，请把 --filterset 改为 -E")
-    flag_count = len(re.findall(r"(?:^|\s)(?:-E|--filterset)(?=\s)", workflow_text))
+    flag_count = len(re.findall(r"(?:^|\s)(?:-E|--filterset)(?=\s)", text))
     if flag_count != len(expressions):
         raise FilterSyntaxError(
             "每次测试的过滤器必须写作 -E '...'（单引号）；"

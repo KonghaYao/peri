@@ -297,6 +297,13 @@ class InventoryEvaluationTests(unittest.TestCase):
             result.errors,
         )
 
+    def test_doctest_exclusions_must_match_manifest(self):
+        result = self.evaluate(self.normal_text.replace("--exclude peri-tui", ""))
+        self.assertTrue(
+            any("doctest 排除包与 doctest_excluded 不一致" in error for error in result.errors),
+            result.errors,
+        )
+
 
 class FilterExpressionTests(unittest.TestCase):
     @classmethod
@@ -339,6 +346,13 @@ class FilterExpressionTests(unittest.TestCase):
             ci.extract_expressions("run: nextest run --filterset 'package(=peri-acp)'")
         self.assertEqual(
             ci.extract_expressions("run: nextest run -E 'package(=peri-acp)'"),
+            ["package(=peri-acp)"],
+        )
+        self.assertEqual(
+            ci.extract_expressions(
+                "# -E 'package(=commented)'\n"
+                "run: nextest run -E 'package(=peri-acp)'"
+            ),
             ["package(=peri-acp)"],
         )
 
