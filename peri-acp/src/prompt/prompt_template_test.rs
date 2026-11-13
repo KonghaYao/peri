@@ -225,9 +225,6 @@ fn synthetic_agent_registry(
 fn format_available_agents_bounds_descriptions_to_one_line() {
     struct DescriptionPort(peri_acp_types::agents::AgentCatalogEntry);
     impl peri_acp_types::ports::AgentCatalogPort for DescriptionPort {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
         fn catalog(
             &self,
             _include_builtin: bool,
@@ -939,9 +936,6 @@ fn unbound_catalog_still_replaces_the_placeholder_without_leaking_it() {
 fn format_available_agents_bounds_ids_and_rejects_injection_shapes() {
     struct HostileCatalogPort(Vec<peri_acp_types::agents::AgentCatalogEntry>);
     impl peri_acp_types::ports::AgentCatalogPort for HostileCatalogPort {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
         fn catalog(
             &self,
             _include_builtin: bool,

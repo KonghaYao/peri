@@ -492,10 +492,6 @@ pub fn infer_agent_capability(
 // L5：SubAgent 中间件端口实现（stage 装配经端口注入主 agent 身份，
 // 不直接引用本类型；见 peri_agent::session::factory::SubAgentMiddlewarePort）。
 impl peri_agent::session::factory::SubAgentMiddlewarePort for SubAgentMiddleware {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn set_parent_agent_id(&self, id: peri_acp_types::identity::AgentId) {
         SubAgentMiddleware::set_parent_agent_id(self, id);
     }

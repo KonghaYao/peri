@@ -73,8 +73,7 @@ fn workspace_bash_schema(
     environment: Option<&Arc<crate::host::workspace::SessionEnvironment>>,
 ) -> Option<serde_json::Value> {
     let pool = environment?.cfg.mcp_pool.as_ref()?;
-    let pool = pool
-        .as_any()
+    let pool = (pool.as_ref() as &dyn std::any::Any)
         .downcast_ref::<peri_middlewares::mcp::McpClientPool>()?;
     let handle = pool.get_client("workspace")?;
     let tool = handle

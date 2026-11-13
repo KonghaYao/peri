@@ -152,10 +152,6 @@ impl EventSubscriber for NoopSubscriber {
 struct NoopSkills;
 
 impl AgentCatalogPort for NoopSkills {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn catalog(&self, _include_builtin: bool) -> Vec<peri_acp_types::agents::AgentCatalogEntry> {
         Vec::new()
     }
@@ -163,11 +159,7 @@ impl AgentCatalogPort for NoopSkills {
 
 struct NoopToolSearch;
 
-impl ToolSearchPort for NoopToolSearch {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
+impl ToolSearchPort for NoopToolSearch {}
 
 /// 占位 stage 装配桥（短路路径不调用；满足 TurnInput 类型——被调用即测试失败）。
 fn noop_stage_build() -> StageBuildFn {

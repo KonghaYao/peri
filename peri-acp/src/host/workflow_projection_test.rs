@@ -21,9 +21,6 @@ struct WirePool {
 }
 #[async_trait::async_trait]
 impl McpPoolPort for WirePool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     fn snapshot(&self) -> serde_json::Value {
         json!({})
     }

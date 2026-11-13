@@ -106,10 +106,6 @@ struct WireRetryShutdownPool {
 
 #[async_trait::async_trait]
 impl peri_acp_types::ports::McpPoolPort for WireRetryShutdownPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn verify_shared_environment_close(&self, _session_id: &str) -> Result<(), String> {
         Ok(())
     }

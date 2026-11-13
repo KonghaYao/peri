@@ -271,12 +271,8 @@ pub type SystemPromptBuilder = Arc<dyn Fn(Option<&AgentOverrides>, &str) -> Stri
 ///
 /// 实现方为 `peri-middlewares::subagent::SubAgentMiddleware`（middlewares →
 /// Agent 声明边）；stage 装配（Agent 层）只经本端口调用，不触碰具体实现。
-pub trait SubAgentMiddlewarePort: Send + Sync {
-    /// 还原具体实现（装配方 downcast 用）。
-    ///
-    /// 安全契约：实现必须返回 `self`（同一对象、同一地址）；返回内字段或其他
-    /// 对象的 `Any` 会破坏 `downcast_arc` 的安全前提。
-    fn as_any(&self) -> &dyn Any;
+/// `Any` supertrait 让装配方按对象自身类型安全还原，实现方不提供 `as_any`。
+pub trait SubAgentMiddlewarePort: Any + Send + Sync {
     /// 注入父 agent 事件侧 AgentId（主 v2 session 创建后调用）。
     fn set_parent_agent_id(&self, id: AgentId);
     /// 注入父 v2 session（L3，主 session 创建后调用）。
@@ -284,38 +280,19 @@ pub trait SubAgentMiddlewarePort: Send + Sync {
 }
 
 impl dyn SubAgentMiddlewarePort {
-    /// 将 `Arc<dyn SubAgentMiddlewarePort>` 还原为具体实现 `Arc<T>`。
+    /// 将 `Arc<dyn SubAgentMiddlewarePort>` 还原为具体实现 `Arc<T>`
+    /// （类型不符返回原 `Arc`）。
     ///
-    /// # Safety
-    ///
-    /// 所有 `SubAgentMiddlewarePort` 实现必须让 [`Self::as_any`] 返回 `self`；
-    /// 返回内字段或其他对象的 `Any` 会以错误布局重建 `Arc<T>`（UB）。本函数的
-    /// 数据指针校验只能拦截常见包装器。
-    ///
-    /// ```compile_fail,E0133
-    /// use std::sync::Arc;
-    /// use peri_agent::session::factory::SubAgentMiddlewarePort;
-    /// fn safe_call<T: SubAgentMiddlewarePort + 'static>(
-    ///     port: Arc<dyn SubAgentMiddlewarePort>,
-    /// ) {
-    ///     let _ = port.downcast_arc::<T>();
-    /// }
-    /// ```
-    pub unsafe fn downcast_arc<T: SubAgentMiddlewarePort + 'static>(
+    /// 还原依据是对象自身 vtable 的真实 `TypeId`；包装实现只会还原为包装类型
+    /// 自身，不会把外层分配按内字段类型重建。
+    pub fn downcast_arc<T: SubAgentMiddlewarePort + 'static>(
         self: Arc<Self>,
     ) -> Result<Arc<T>, Arc<Self>> {
-        let ptr = Arc::into_raw(self);
-        // 必须经 `as_any()` 取 TypeId，不能对 trait object 直接取（会得到自身）。
-        // SAFETY: 由调用方保证 as_any 契约。
-        let any = unsafe { (*ptr).as_any() };
-        if std::ptr::addr_eq(any as *const dyn Any, ptr as *const ())
-            && any.type_id() == std::any::TypeId::of::<T>()
-        {
-            // SAFETY: 地址与 TypeId 均匹配 ⇒ 分配就是 T（调用方契约）。
-            unsafe { Ok(Arc::from_raw(ptr as *const T)) }
-        } else {
-            // SAFETY: 指针来自上面的 Arc::into_raw，未发生 cast。
-            unsafe { Err(Arc::from_raw(ptr)) }
+        // 用 clone 探测类型；失败时返回原 Arc，保持既有 Err 语义。
+        let probe = Arc::clone(&self) as Arc<dyn Any + Send + Sync>;
+        match probe.downcast::<T>() {
+            Ok(concrete) => Ok(concrete),
+            Err(_) => Err(self),
         }
     }
 }
@@ -327,7 +304,8 @@ impl dyn SubAgentMiddlewarePort {
 /// 仅含中间件构造所需的依赖；middlewares 具体类型经
 /// `peri-acp-types` 端口（`McpPoolPort` / `ToolSearchPort` /
 /// `WorkflowMiddlewarePort` / `CronSchedulerPort`）接入，
-/// 装配实现方（`ProductionChainAssembler`）内部 downcast 还原。
+/// 装配实现方（`ProductionChainAssembler`）经 `Any` supertrait 的真实
+/// `TypeId` 安全还原具体类型。
 #[allow(clippy::type_complexity)]
 pub struct AssemblyContext {
     // ── 会话级 ──

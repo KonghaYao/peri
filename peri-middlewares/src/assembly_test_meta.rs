@@ -160,13 +160,11 @@ fn builtin_capability_closure_matrix_covers_all_faces() {
             .collect();
 
         // 面③：subagent parent_tools。
-        // SAFETY: SubAgentMiddleware 的 as_any 返回 self。
-        let subagent = unsafe {
-            out.subagent_mw
-                .expect("矩阵需要 SubAgentMiddleware")
-                .downcast_arc::<SubAgentMiddleware>()
-        }
-        .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
+        let subagent = out
+            .subagent_mw
+            .expect("矩阵需要 SubAgentMiddleware")
+            .downcast_arc::<SubAgentMiddleware>()
+            .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
         let parent_tool = subagent.build_tool("/tmp/contract-test");
         let parent_names: Vec<&str> = parent_tool.parent_tools.iter().map(|t| t.name()).collect();
         for tool in closed_tools {
@@ -422,13 +420,11 @@ fn meta_harness_disabled_parent_tools_filtered() {
         ctx.meta_harness_disabled
             .insert(instance.policy_key.to_string());
         let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
-        // SAFETY: SubAgentMiddleware 的 as_any 返回 self。
-        let subagent = unsafe {
-            out.subagent_mw
-                .expect("parent_tools 过滤测试需要 SubAgentMiddleware")
-                .downcast_arc::<SubAgentMiddleware>()
-        }
-        .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
+        let subagent = out
+            .subagent_mw
+            .expect("parent_tools 过滤测试需要 SubAgentMiddleware")
+            .downcast_arc::<SubAgentMiddleware>()
+            .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
         let tool = subagent.build_tool("/tmp/contract-test");
         let parent_names: Vec<&str> = tool.parent_tools.iter().map(|t| t.name()).collect();
         for declaration in instance.tools {
@@ -448,13 +444,12 @@ fn meta_harness_disabled_parent_tools_filtered() {
     let mut ctx = base_context();
     ctx.mcp_pool = Some(pool_with_builtin_instances());
     let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
-    // SAFETY: SubAgentMiddleware 的 as_any 返回 self。
-    let subagent = unsafe {
-        out.subagent_mw
-            .expect("parent_tools 断言需要 SubAgentMiddleware")
-            .downcast_arc::<SubAgentMiddleware>()
-    }
-    .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
+    // 还原依据是对象自身 TypeId；offset 0 包装器不会被误认。
+    let subagent = out
+        .subagent_mw
+        .expect("parent_tools 断言需要 SubAgentMiddleware")
+        .downcast_arc::<SubAgentMiddleware>()
+        .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
     let tool = subagent.build_tool("/tmp/contract-test");
     let declared: Vec<(&str, bool)> = peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
         .iter()
@@ -494,14 +489,11 @@ fn meta_harness_disabled_parent_tools_filtered() {
         .insert("WebMiddleware".to_string());
     let closed_out =
         build_middleware_chain(&ProductionChainAssembler, &closed_ctx).expect("assembly");
-    // SAFETY: SubAgentMiddleware 的 as_any 返回 self。
-    let closed_subagent = unsafe {
-        closed_out
-            .subagent_mw
-            .expect("parent_tools 关闭断言需要 SubAgentMiddleware")
-            .downcast_arc::<SubAgentMiddleware>()
-    }
-    .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
+    let closed_subagent = closed_out
+        .subagent_mw
+        .expect("parent_tools 关闭断言需要 SubAgentMiddleware")
+        .downcast_arc::<SubAgentMiddleware>()
+        .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
     let closed_tool = closed_subagent.build_tool("/tmp/contract-test");
     let closed_names: Vec<&str> = closed_tool.parent_tools.iter().map(|t| t.name()).collect();
     let web = peri_acp_types::builtin_mcp::find("web").expect("web 实例有声明");
@@ -765,4 +757,51 @@ async fn mcp_slot_derives_discover_agent_face_from_sub_agent_closed_key() {
         assembled_discover_agents(&closed_ctx).await.is_empty(),
         "关闭键命中：DiscoverMCP 不得列出任何本地 agent"
     );
+}
+
+// ─── SubAgentMiddlewarePort：offset 0 包装器只能还原为自身类型 ──────────────
+
+struct FakeSubAgentPort;
+
+impl peri_agent::session::factory::SubAgentMiddlewarePort for FakeSubAgentPort {
+    fn set_parent_agent_id(&self, _id: peri_acp_types::identity::AgentId) {}
+
+    fn set_parent_session(&self, _session: Arc<peri_agent::session::Session>) {}
+}
+
+#[repr(C)]
+struct OffsetZeroSubAgent {
+    inner: FakeSubAgentPort,
+    tail: [u8; 1024],
+}
+
+impl peri_agent::session::factory::SubAgentMiddlewarePort for OffsetZeroSubAgent {
+    fn set_parent_agent_id(&self, id: peri_acp_types::identity::AgentId) {
+        self.inner.set_parent_agent_id(id);
+    }
+
+    fn set_parent_session(&self, session: Arc<peri_agent::session::Session>) {
+        self.inner.set_parent_session(session);
+    }
+}
+
+#[test]
+fn subagent_middleware_port_offset_zero_wrapper_is_not_inner_type() {
+    let wrapper = Arc::new(OffsetZeroSubAgent {
+        inner: FakeSubAgentPort,
+        tail: [0; 1024],
+    });
+    let port: Arc<dyn peri_agent::session::factory::SubAgentMiddlewarePort> =
+        Arc::clone(&wrapper) as Arc<dyn peri_agent::session::factory::SubAgentMiddlewarePort>;
+
+    let err = Arc::clone(&port)
+        .downcast_arc::<FakeSubAgentPort>()
+        .err()
+        .unwrap_or_else(|| panic!("offset 0 包装器不得被还原为内字段类型"));
+    assert!(Arc::ptr_eq(&port, &err));
+
+    let restored = port
+        .downcast_arc::<OffsetZeroSubAgent>()
+        .unwrap_or_else(|_| panic!("包装器应还原为自身类型"));
+    assert!(Arc::ptr_eq(&wrapper, &restored));
 }

@@ -98,3 +98,48 @@ fn firing_identity_is_stable_per_firing_and_new_per_trigger() {
         "身份由来源 + 业务事件键派生，不按正文去重"
     );
 }
+
+// ── CronSchedulerPort downcast ─────────────────────────────────────────────
+
+struct FakeScheduler;
+
+impl CronSchedulerPort for FakeScheduler {}
+
+#[test]
+fn cron_scheduler_port_downcast_restores_concrete() {
+    let concrete = Arc::new(FakeScheduler);
+    let port: Arc<dyn CronSchedulerPort> = Arc::clone(&concrete) as Arc<dyn CronSchedulerPort>;
+    let restored = Arc::clone(&port)
+        .downcast_arc::<FakeScheduler>()
+        .unwrap_or_else(|_| panic!("downcast 必须还原具体类型 FakeScheduler"));
+    assert!(Arc::ptr_eq(&concrete, &restored));
+}
+
+/// offset 0 包装器只能还原为自身类型（历史 safe fn 仅比较自报 TypeId 的反例）。
+#[test]
+fn cron_scheduler_port_offset_zero_wrapper_is_not_inner_type() {
+    #[repr(C)]
+    struct OffsetZeroWrapper {
+        inner: FakeScheduler,
+        tail: [u8; 1024],
+    }
+
+    impl CronSchedulerPort for OffsetZeroWrapper {}
+
+    let wrapper = Arc::new(OffsetZeroWrapper {
+        inner: FakeScheduler,
+        tail: [0; 1024],
+    });
+    let port: Arc<dyn CronSchedulerPort> = Arc::clone(&wrapper) as Arc<dyn CronSchedulerPort>;
+
+    let err = Arc::clone(&port)
+        .downcast_arc::<FakeScheduler>()
+        .err()
+        .unwrap_or_else(|| panic!("offset 0 包装器不得被还原为内字段类型"));
+    assert!(Arc::ptr_eq(&port, &err));
+
+    let restored = port
+        .downcast_arc::<OffsetZeroWrapper>()
+        .unwrap_or_else(|_| panic!("包装器应还原为自身类型"));
+    assert!(Arc::ptr_eq(&wrapper, &restored));
+}

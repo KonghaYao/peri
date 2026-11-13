@@ -158,12 +158,9 @@ impl AssembledHostFixture {
             .mcp_task_owner
             .take()
             .expect("装配必须留下 MCP task owner");
-        // SAFETY: 装配注入本 crate 的 McpClientPool（as_any 返回 self）。
-        let pool = unsafe {
-            Arc::clone(&cfg.mcp_pool.clone().expect("装配必须构造 MCP pool"))
-                .downcast_arc::<McpClientPool>()
-        }
-        .unwrap_or_else(|_| panic!("装配的 MCP pool 必须是 McpClientPool"));
+        let pool = Arc::clone(&cfg.mcp_pool.clone().expect("装配必须构造 MCP pool"))
+            .downcast_arc::<McpClientPool>()
+            .unwrap_or_else(|_| panic!("装配的 MCP pool 必须是 McpClientPool"));
         // assemble.rs already owns and starts Initialize. Starting a second
         // run_initialize on this pool races the per-server operation gates and
         // lets each initializer count only its own subset of the connections.

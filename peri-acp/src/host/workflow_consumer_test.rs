@@ -13,7 +13,6 @@
 
 #![cfg(not(target_os = "emscripten"))]
 
-use std::any::Any;
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -61,10 +60,6 @@ impl StubPool {
 
 #[async_trait]
 impl McpPoolPort for StubPool {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     async fn shutdown(&self) -> McpPoolShutdownReport {
         McpPoolShutdownReport::Complete {
             settled_services: 0,
@@ -352,10 +347,6 @@ struct RuntimeWiredPool {
 
 #[async_trait]
 impl McpPoolPort for RuntimeWiredPool {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     async fn shutdown(&self) -> McpPoolShutdownReport {
         McpPoolShutdownReport::Complete {
             settled_services: 0,

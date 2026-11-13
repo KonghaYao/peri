@@ -92,8 +92,7 @@ fn workspace_client_state(
     let Some(pool) = environment.cfg.mcp_pool.as_ref() else {
         return "无 MCP 池".to_owned();
     };
-    let Some(pool) = pool
-        .as_any()
+    let Some(pool) = (pool.as_ref() as &dyn std::any::Any)
         .downcast_ref::<peri_middlewares::mcp::McpClientPool>()
     else {
         return "池不是生产 McpClientPool".to_owned();
@@ -180,8 +179,7 @@ async fn new_session_meta_override_flows_through_builtin_workspace_resources() {
         .mcp_pool
         .as_ref()
         .expect("会话必须有 MCP 池");
-    let pool = pool
-        .as_any()
+    let pool = (pool.as_ref() as &dyn std::any::Any)
         .downcast_ref::<peri_middlewares::mcp::McpClientPool>()
         .expect("会话池是生产 McpClientPool");
     let uris: Vec<String> = pool

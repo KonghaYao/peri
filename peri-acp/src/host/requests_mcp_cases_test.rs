@@ -458,10 +458,6 @@ struct CatalogPool {
 
 #[async_trait]
 impl peri_acp_types::ports::McpPoolPort for CatalogPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
         peri_acp_types::ports::McpPoolShutdownReport::Complete {
             settled_services: 0,

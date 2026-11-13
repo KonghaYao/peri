@@ -8,9 +8,6 @@ struct UnavailableClosePool {
 
 #[async_trait::async_trait]
 impl McpPoolPort for UnavailableClosePool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     async fn shutdown(&self) -> McpPoolShutdownReport {
         panic!("shared pool cannot be closed by child")
     }

@@ -616,15 +616,11 @@ fn agent_default_run_in_background_reaches_chain_tool_schema() {
 
 // ─── 端口不匹配：fail-closed（不造空池/默认索引） ─────────────────────────────
 
-/// 非本 crate 的池实现：`as_any` 合法返回 self，但具体类型不是 `McpClientPool`。
+/// 非本 crate 的池实现：类型不是 `McpClientPool`，装配必须 fail-closed。
 struct ForeignPool;
 
 #[async_trait]
 impl peri_acp_types::ports::McpPoolPort for ForeignPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
         peri_acp_types::ports::McpPoolShutdownReport::Complete {
             settled_services: 0,
@@ -639,11 +635,7 @@ impl peri_acp_types::ports::McpPoolPort for ForeignPool {
 
 struct ForeignToolSearch;
 
-impl peri_acp_types::ports::ToolSearchPort for ForeignToolSearch {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
+impl peri_acp_types::ports::ToolSearchPort for ForeignToolSearch {}
 
 fn assert_port_mismatch(ctx: &AssemblyContext, port: &'static str, expected: &'static str) {
     let error = match build_middleware_chain(&ProductionChainAssembler, ctx) {
@@ -678,6 +670,90 @@ fn agent_catalog_port_mismatch_fails_assembly_when_pool_is_present() {
     ctx.mcp_pool = Some(Arc::new(McpClientPool::new_pending()));
     // 测试用外来目录端口：有池时目录必须可绑定，不能静默为空。
     ctx.agent_catalog = Arc::new(crate::host_ports::NoopAgentCatalog);
+    assert_port_mismatch(&ctx, "AgentCatalogPort", "AgentCatalogProvider");
+}
+
+// ─── offset 0 包装器：safe 装配入口不得把外层分配按内字段类型重建 ───────────
+
+/// `#[repr(C)]` 让内字段落在 offset 0，外层 trait object 数据地址与内字段相同；
+/// 旧实现会据此把 `ArcInner<Wrapper>` 当成 `ArcInner<McpClientPool>` 重建。
+#[repr(C)]
+struct OffsetZeroPool {
+    inner: McpClientPool,
+    tail: [u8; 1024],
+}
+
+#[async_trait]
+impl peri_acp_types::ports::McpPoolPort for OffsetZeroPool {
+    async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
+        self.inner.shutdown().await
+    }
+
+    fn snapshot(&self) -> serde_json::Value {
+        peri_acp_types::ports::McpPoolPort::snapshot(&self.inner)
+    }
+}
+
+#[test]
+fn offset_zero_mcp_pool_wrapper_fails_assembly_instead_of_wrong_downcast() {
+    let mut ctx = base_context();
+    let wrapper = Arc::new(OffsetZeroPool {
+        inner: McpClientPool::new_pending(),
+        tail: [0; 1024],
+    });
+    assert!(
+        std::mem::size_of::<OffsetZeroPool>() > std::mem::size_of::<McpClientPool>(),
+        "布局必须不同，才能覆盖「外层分配按内字段类型重建」的风险"
+    );
+    ctx.mcp_pool = Some(wrapper as Arc<dyn peri_acp_types::ports::McpPoolPort>);
+    assert_port_mismatch(&ctx, "McpPoolPort", "McpClientPool");
+}
+
+#[repr(C)]
+struct OffsetZeroToolSearch {
+    inner: ToolSearchIndex,
+    tail: [u8; 1024],
+}
+
+impl peri_acp_types::ports::ToolSearchPort for OffsetZeroToolSearch {}
+
+#[test]
+fn offset_zero_tool_search_wrapper_fails_assembly_instead_of_default_index() {
+    let mut ctx = base_context();
+    let wrapper = Arc::new(OffsetZeroToolSearch {
+        inner: ToolSearchIndex::new(),
+        tail: [0; 1024],
+    });
+    assert!(std::mem::size_of::<OffsetZeroToolSearch>() > std::mem::size_of::<ToolSearchIndex>());
+    ctx.tool_search_index = wrapper as Arc<dyn peri_acp_types::ports::ToolSearchPort>;
+    assert_port_mismatch(&ctx, "ToolSearchPort", "ToolSearchIndex");
+}
+
+#[repr(C)]
+struct OffsetZeroAgentCatalog {
+    inner: crate::host_ports::AgentCatalogProvider,
+    tail: [u8; 1024],
+}
+
+impl peri_acp_types::ports::AgentCatalogPort for OffsetZeroAgentCatalog {
+    fn catalog(&self, include_builtin: bool) -> Vec<peri_acp_types::agents::AgentCatalogEntry> {
+        peri_acp_types::ports::AgentCatalogPort::catalog(&self.inner, include_builtin)
+    }
+}
+
+#[test]
+fn offset_zero_agent_catalog_wrapper_fails_assembly_when_pool_is_present() {
+    let mut ctx = base_context();
+    ctx.mcp_pool = Some(Arc::new(McpClientPool::new_pending()));
+    let wrapper = Arc::new(OffsetZeroAgentCatalog {
+        inner: crate::host_ports::AgentCatalogProvider::new(),
+        tail: [0; 1024],
+    });
+    assert!(
+        std::mem::size_of::<OffsetZeroAgentCatalog>()
+            > std::mem::size_of::<crate::host_ports::AgentCatalogProvider>()
+    );
+    ctx.agent_catalog = wrapper as Arc<dyn peri_acp_types::ports::AgentCatalogPort>;
     assert_port_mismatch(&ctx, "AgentCatalogPort", "AgentCatalogProvider");
 }
 

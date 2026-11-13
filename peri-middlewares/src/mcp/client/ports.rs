@@ -46,9 +46,6 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         self.session_bindings.write().release(session_id);
         Ok(())
     }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
 
     async fn rewind_files(
         &self,
@@ -402,9 +399,5 @@ impl McpSubscriptionPort for McpClientPool {
 
     fn unregister_inbox(&self, session_id: &str) {
         self.session_bindings.write().unregister(session_id);
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }

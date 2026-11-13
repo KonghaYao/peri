@@ -345,8 +345,7 @@ async fn session_new_assembled_facade_runs_app_callback_end_to_end() {
     let Some(port) = environment.cfg.mcp_pool.clone() else {
         panic!("会话装配必须构造 MCP 池");
     };
-    // SAFETY: 会话装配注入本 crate 的 McpClientPool（as_any 返回 self）。
-    let Ok(pool) = (unsafe { port.downcast_arc::<peri_middlewares::mcp::McpClientPool>() }) else {
+    let Ok(pool) = port.downcast_arc::<peri_middlewares::mcp::McpClientPool>() else {
         panic!("池实现为 McpClientPool");
     };
     let (calls, tools, peer) = install_assembly_peer(&pool).await;

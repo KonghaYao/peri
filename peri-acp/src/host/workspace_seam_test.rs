@@ -220,10 +220,6 @@ struct WorkflowSetupPool {
 
 #[async_trait::async_trait]
 impl peri_acp_types::ports::McpPoolPort for WorkflowSetupPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn has_instance(&self, _instance: &str) -> bool {
         self.present
     }
@@ -324,10 +320,6 @@ struct SkillCatalogOnlySystemPool {
 
 #[async_trait::async_trait]
 impl peri_acp_types::ports::McpPoolPort for SkillCatalogOnlySystemPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn snapshot(&self) -> serde_json::Value {
         serde_json::json!({
             "initPhase": "initializing",

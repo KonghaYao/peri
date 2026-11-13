@@ -305,10 +305,6 @@ impl FakeWorkflowPool {
 
 #[async_trait::async_trait]
 impl McpPoolPort for FakeWorkflowPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn shutdown(&self) -> McpPoolShutdownReport {
         McpPoolShutdownReport::Complete {
             settled_services: 0,
