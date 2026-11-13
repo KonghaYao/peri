@@ -163,6 +163,8 @@ claude-blog
 claude-blog-cn
 
 *.py
+!scripts/ci_test_inventory.py
+!scripts/test-ci-test-inventory.py
 !scripts/test-i386.py
 !scripts/test-loongarch64.py
 !scripts/test-install-beta.py
