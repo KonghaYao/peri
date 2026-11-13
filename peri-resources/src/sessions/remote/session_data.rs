@@ -58,7 +58,7 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::TrustedSystemReminder;
-use peri_acp_types::thread::{ThreadId, ThreadMeta, WorkState};
+use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta, WorkState};
 use peri_acp_types::workspace::{
     ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding,
 };
@@ -522,6 +522,17 @@ impl SessionDataPort for RemoteSessionData {
         record: &ChildResumeRecord,
     ) -> SessionResourceResult<()> {
         self.write_child_resume(child, record).await
+    }
+
+    async fn settle_child_resume(
+        &self,
+        child: &ThreadId,
+        previous: &ChildResumeRecord,
+        work_state: Option<WorkState>,
+        terminal: Option<AgentStatus>,
+    ) -> SessionResourceResult<()> {
+        self.settle_child_resume_atomic(child, previous, work_state, terminal)
+            .await
     }
 
     async fn apply_compaction(

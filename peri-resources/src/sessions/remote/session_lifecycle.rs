@@ -21,7 +21,7 @@ use std::str::FromStr;
 use peri_acp_types::session_resources::{
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
-use peri_acp_types::thread::{AgentStatus, ThreadId};
+use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
 use turso_serverless::Value;
 
 use super::mutation::incomplete_reply;
@@ -341,6 +341,42 @@ impl RemoteSessionData {
         )
         .await
         .map(|_| ())
+    }
+
+    /// 认领收尾：恢复认领前状态（可选恢复工作意图），可在同批追加唯一一次终态。
+    ///
+    /// 状态与工作意图的更新必须同批提交；任何一步失败都不得留下已回滚的状态，
+    /// 否则后续补偿会因状态不再属于本次认领而无法重试。
+    pub(super) async fn settle_child_resume_atomic(
+        &self,
+        child: &ThreadId,
+        previous: &ChildResumeRecord,
+        work_state: Option<WorkState>,
+        terminal: Option<AgentStatus>,
+    ) -> SessionResourceResult<()> {
+        let status = terminal.unwrap_or(previous.status);
+        let mut effects = vec![
+            guard_session_statement(child),
+            StatementSpec::new(
+                UPDATE_AGENT_STATUS_SQL,
+                vec![
+                    Value::Text(status.as_str().to_owned()),
+                    Value::Text(timestamp()),
+                    Value::Text(child.as_str().to_owned()),
+                ],
+            ),
+        ];
+        let mut inputs = vec![
+            format!("child:{}", child.as_str()),
+            format!("status:{}", status.as_str()),
+        ];
+        if let Some(state) = work_state {
+            inputs.push(format!("work_state:{}", state.as_str()));
+            effects.push(session_sql::work_state_statement(child.as_str(), state));
+        }
+        self.commit_effects("settle_child_resume", &inputs, effects, child)
+            .await
+            .map(|_| ())
     }
 }
 

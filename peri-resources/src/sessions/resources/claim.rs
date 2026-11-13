@@ -8,8 +8,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use peri_acp_types::session_resources::{
-    ChildResumeClaim, MutationOutcome, SessionResourceError, SessionResourceErrorKind,
-    SessionResourceResult,
+    ChildResumeClaim, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
 use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
 
@@ -150,8 +149,8 @@ impl ChildResumeClaimHandle {
     /// 归属校验内追加唯一一次终态写入。
     ///
     /// 后台尚未启动时可补偿移交准备失败；终止声明不能覆盖后台执行持有的终态。
-    /// 归属校验、两列恢复与终态写入在同一写侧门禁内完成，新任务无法插入到
-    /// 「恢复」与「终态写入」之间。校验用进程内认领世代，而不是当前记录值——新 run
+    /// 归属校验、两列恢复与终态写入在同一写侧门禁与同一次提交内完成，新任务无法
+    /// 插入到「恢复」与「终态写入」之间。校验用进程内认领世代，而不是当前记录值——新 run
     /// 的正常状态与旧认领的中间态完全相同，按值判断会把新 run 误认为自己的记录。
     async fn settle(
         &self,
@@ -207,48 +206,15 @@ impl ChildResumeClaimHandle {
                 if current_work_state == WorkState::Working
                     || current_work_state == self.previous_work_state
                 {
-                    match self
-                        .gate
+                    let work_state = (current_work_state != self.previous_work_state)
+                        .then_some(self.previous_work_state);
+                    // 恢复与终态在同一次提交里完成：只写好其中一项就失败会留下不再
+                    // 属于本次认领的记录，后续补偿会被当成他人写入而失去重试责任。
+                    self.gate
                         .data()
-                        .store_child_resume_record(&self.child, &self.previous)
-                        .await
-                    {
-                        Ok(()) => {
-                            if current_work_state != self.previous_work_state {
-                                self.gate
-                                    .data()
-                                    .set_work_state(&self.child, self.previous_work_state)
-                                    .await?;
-                            }
-                        }
-                        // 记录回滚已知未生效时仍要撤回工作意图：worker 不会重试，留下
-                        // `Active + Working` 会被下一次进入当成可恢复工作。归属校验已在
-                        // 上方完成，这里只补工作意图列。
-                        Err(error) if error.effect() != MutationOutcome::Unknown => {
-                            if current_work_state != self.previous_work_state {
-                                if let Err(work_error) = self
-                                    .gate
-                                    .data()
-                                    .set_work_state(&self.child, self.previous_work_state)
-                                    .await
-                                {
-                                    tracing::error!(
-                                        thread_id = %self.child,
-                                        %work_error,
-                                        "resume claim work-state restoration failed"
-                                    );
-                                    if work_error.effect() == MutationOutcome::Unknown {
-                                        return Err(work_error);
-                                    }
-                                }
-                            }
-                            return Err(error);
-                        }
-                        // 未知结果保持不确定屏障：追加写入会让「记录是否已回滚」不可判定。
-                        Err(error) => return Err(error),
-                    }
-                }
-                if let Some(status) = terminal {
+                        .settle_child_resume(&self.child, &self.previous, work_state, terminal)
+                        .await?;
+                } else if let Some(status) = terminal {
                     // 终态写入失败必须从闭包返回 Err：Unknown 由门禁提升不确定屏障，
                     // 且本次认领不得被标记为已结算或回收。
                     self.gate
