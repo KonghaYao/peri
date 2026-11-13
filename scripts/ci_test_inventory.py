@@ -270,15 +270,23 @@ def extract_expressions(workflow_text: str) -> list[str]:
         "" if line.lstrip().startswith("#") else line
         for line in workflow_text.splitlines()
     )
-    expressions = re.findall(r"-E\s+'([^']*)'", text)
-    if re.search(r"--filterset(?:\s|=)", text):
-        raise FilterSyntaxError("清单只解析 `-E '...'`，请把 --filterset 改为 -E")
-    flag_count = len(re.findall(r"(?:^|\s)(?:-E|--filterset)(?=\s)", text))
-    if flag_count != len(expressions):
-        raise FilterSyntaxError(
-            "每次测试的过滤器必须写作 -E '...'（单引号）；"
-            "清单无法读取 --filterset 或双引号形式"
-        )
+    expressions: list[str] = []
+    for match in re.finditer(r"(?<![\w-])(-E|--filterset)", text):
+        if match.group(1) == "--filterset":
+            raise FilterSyntaxError("清单只解析 `-E '...'`，请把 --filterset 改为 -E")
+        rest = text[match.end():]
+        if not rest or not rest[0].isspace():
+            raise FilterSyntaxError(
+                "过滤器参数必须写成 -E '...'：-E 与表达式之间要有空白，"
+                f"不支持 {match.group(0)!r} 后直接拼接表达式"
+            )
+        argument = re.match(r"\s+'([^']*)'", rest)
+        if argument is None:
+            raise FilterSyntaxError(
+                "每次测试的过滤器必须写作 -E '...'（单引号）；"
+                "清单无法读取双引号或其他形式"
+            )
+        expressions.append(argument.group(1))
     return expressions
 
 

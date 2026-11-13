@@ -355,6 +355,28 @@ class FilterExpressionTests(unittest.TestCase):
             ),
             ["package(=peri-acp)"],
         )
+        self.assertEqual(
+            ci.extract_expressions(
+                "run: nextest run -E 'package(=peri-agent) & binary(=one)' "
+                "-E 'package(=peri-agent) & binary(=two)'"
+            ),
+            [
+                "package(=peri-agent) & binary(=one)",
+                "package(=peri-agent) & binary(=two)",
+            ],
+        )
+
+    def test_attached_filter_arguments_are_rejected(self):
+        # nextest 接受 -E'...'，但清单只按「-E 空白 '...'」读取；必须显式失败，
+        # 否则附加在合法命令后的 attached 过滤器会被静默忽略。
+        for workflow in (
+            "run: nextest run -E'package(=peri-acp)'",
+            "run: nextest run -E 'package(=peri-acp)' -E'package(=peri-agent)'",
+            "run: nextest run -E=package(=peri-acp)",
+        ):
+            with self.subTest(workflow=workflow):
+                with self.assertRaises(ci.FilterSyntaxError):
+                    ci.extract_expressions(workflow)
 
     def test_metadata_loader_skips_non_test_targets(self):
         idents = {target.ident for target in ci.load_targets(self.metadata)}
