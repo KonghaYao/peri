@@ -81,9 +81,14 @@ jobs:
                   targets: ${{ matrix.target }}
                   components: clippy
 
-            # 覆盖清单核对：枚举 workspace 的测试目标并检查必跑套件仍在执行范围内，
-            # 在昂贵的构建之前失败。只读 manifest（cargo metadata --no-deps），
-            # 不解析依赖、不联网、不编译。
+            # 覆盖清单核对：先跑解析器单测（fixture 驱动，不需要 cargo），再枚举
+            # workspace 的测试目标并检查必跑套件仍在执行范围内，在昂贵的构建之前
+            # 失败。清单只读 manifest（cargo metadata --no-deps），不解析依赖、
+            # 不联网、不编译。
+            - name: Test CI test inventory parser
+              if: runner.os == 'Linux'
+              run: python3 scripts/test-ci-test-inventory.py
+
             - name: Verify test inventory
               if: runner.os == 'Linux'
               run: bash scripts/ci-test-inventory.sh --check
@@ -159,7 +164,7 @@ jobs:
                   -E 'package(=peri-acp)'
 
             # Agent 全部测试目标一起执行（lib + 5 个本地集成目标）。
-            # Compact 四套对抗单独下一步，用 --no-tests=fail 逐套确认命中非零用例。
+            # Compact 四套对抗由下面四个步骤逐 binary 单独调用 nextest 确认非零。
             - name: Run Agent tests (all local targets, excluding Compact adversarial suites)
               shell: bash
               run: >-
@@ -169,16 +174,32 @@ jobs:
                   | binary(=compact_session_manual_adversarial_test)
                   | binary(=compact_authority_projection_test))'
 
-            # ARC-COMPACT-001 Verify：Compact 四套对抗套件必须真实执行且命中非零用例
-            # （--no-tests=fail 保证每套都命中，而不是靠总数）。
-            - name: Run Compact adversarial suites (ARC-COMPACT-001)
+            # ARC-COMPACT-001 Verify：Compact 四套对抗套件必须真实执行且各自命中
+            # 非零用例。逐 binary 单独调用 nextest：合并成 union 时 --no-tests=fail
+            # 只约束合并结果，其中一套为空仍会静默通过。
+            - name: Run Compact adversarial suite (compact_pressure_adversarial_test)
               shell: bash
               run: >-
                   ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
-                  -E 'package(=peri-agent) & (binary(=compact_pressure_adversarial_test)
-                  | binary(=compact_session_adversarial_test)
-                  | binary(=compact_session_manual_adversarial_test)
-                  | binary(=compact_authority_projection_test))'
+                  -E 'package(=peri-agent) & binary(=compact_pressure_adversarial_test)'
+
+            - name: Run Compact adversarial suite (compact_session_adversarial_test)
+              shell: bash
+              run: >-
+                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  -E 'package(=peri-agent) & binary(=compact_session_adversarial_test)'
+
+            - name: Run Compact adversarial suite (compact_session_manual_adversarial_test)
+              shell: bash
+              run: >-
+                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  -E 'package(=peri-agent) & binary(=compact_session_manual_adversarial_test)'
+
+            - name: Run Compact adversarial suite (compact_authority_projection_test)
+              shell: bash
+              run: >-
+                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  -E 'package(=peri-agent) & binary(=compact_authority_projection_test)'
 
             # 执行全部 TUI 测试目标（lib/bin + 5 个本地进程回归）。
             # 真实 SDK 用例仍由 default-filter 精确排除。
