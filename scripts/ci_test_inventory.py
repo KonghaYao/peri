@@ -194,6 +194,12 @@ class _Parser:
             raise FilterSyntaxError(f"{predicate}(...) 未闭合 @{token.pos}: {self.expression!r}")
         if matcher.kind == ")":
             raise FilterSyntaxError(f"{predicate}(...) 缺少匹配器：只支持 {predicate}(=值)")
+        if matcher.kind == "word" and predicate == "kind":
+            # nextest 对 kind() 的默认匹配策略就是等值匹配，kind(lib) 等价于 kind(=lib)。
+            closing = self._take()
+            if closing is None or closing.kind != ")":
+                raise FilterSyntaxError(f"{predicate}(...) 未闭合 @{token.pos}: {self.expression!r}")
+            return ("pred", predicate, matcher.value, token.pos)
         if matcher.kind != "=":
             raise FilterSyntaxError(
                 f"不支持的匹配器 {matcher.value!r} @{matcher.pos}：只支持 {predicate}(=值)"

@@ -8,10 +8,11 @@
 #   2. `--check` 守住必跑套件：CI 依赖的测试二进制一旦被改名/删除，这里先失败，
 #      而不是等某个步骤静默命中零例；
 #   3. `--check` 守住清单与 ci.yml 的一致性：解析每个 `-E` 过滤器表达式
-#      （package/binary/kind、not、and/or、括号），按真实选择结果判定 executed；
-#      只抽取名字集合会把 `package(=peri-acp) & kind(=lib)` 误当成执行了全部
-#      ACP 目标，正是这里要避免的。语义解析与核对在 scripts/ci_test_inventory.py，
-#      其单测见 scripts/test-ci-test-inventory.py（fixture 驱动，不需要 cargo）。
+#      （package/binary/kind、not/!、and/&/-、or/|/+、括号），按真实选择结果判定
+#      executed；只抽取名字集合会把 `package(=peri-acp) & kind(=lib)` 误当成执行了
+#      全部 ACP 目标，正是这里要避免的。语义解析与核对在
+#      scripts/ci_test_inventory.py，其单测见 scripts/test-ci-test-inventory.py
+#      （fixture 驱动，不需要 cargo）。
 #
 # 用 `cargo metadata --no-deps`：只读 manifest，不解析依赖，因此不需要 patch 配置、
 # 不触发网络、也不编译。

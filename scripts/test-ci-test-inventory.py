@@ -101,6 +101,7 @@ class InventoryEvaluationTests(unittest.TestCase):
 
     def test_kind_predicate_selects_only_matching_targets(self):
         self.assertEqual(self.selected("kind(=bin)"), {"peri-tui:bin:peri"})
+        self.assertEqual(self.selected("kind(bin)"), {"peri-tui:bin:peri"})
         self.assertEqual(
             self.selected("package(=peri-acp) & kind(=lib)"),
             {"peri-acp:lib:peri_acp"},
