@@ -15,9 +15,6 @@ struct BlockingPool {
 }
 #[async_trait]
 impl McpPoolPort for BlockingPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     fn snapshot(&self) -> Value {
         json!({})
     }

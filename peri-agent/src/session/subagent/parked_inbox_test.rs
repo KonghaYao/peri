@@ -8,7 +8,6 @@ use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::tasks::{
     BgTaskKind, BgTaskRegistration, OnBgCompleteFn, TaskManager as TaskManagerPort,
 };
-use std::any::Any;
 use std::time::Duration;
 
 /// 记录 bind/park 事件；park 后从注册集合移除，模拟真实 broadcast 收件人。
@@ -48,10 +47,6 @@ impl McpPoolPort for RecordingPool {
     fn park_agent_session(&self, session_id: &str) {
         self.events.lock().push(("park", session_id.to_owned()));
         self.registered.lock().remove(session_id);
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     async fn shutdown(&self) -> McpPoolShutdownReport {

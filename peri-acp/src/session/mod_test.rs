@@ -198,10 +198,6 @@ impl peri_acp_types::mcp::McpSubscriptionPort for FakeMcpSubscriptionPort {
             .unwrap()
             .push(session_id.to_string());
     }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
 }
 
 /// 同 make_session_manager，仅 MCP 订阅端口参数按需注入（mcp_subscription_for 测试用）。

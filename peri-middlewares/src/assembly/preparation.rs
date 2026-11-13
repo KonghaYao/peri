@@ -33,14 +33,13 @@ pub(super) fn resolve_ports(ctx: &AssemblyContext) -> Result<ResolvedPorts, Asse
     let mcp_pool_concrete: Option<Arc<McpClientPool>> = match mcp_pool {
         None => None,
         Some(port) => Some(
-            // SAFETY: 生产装配注入本 crate 的 McpClientPool（as_any 返回 self）；
-            // downcast 内的数据指针校验会拒绝返回内字段 Any 的实现。
-            unsafe { Arc::clone(port).downcast_arc::<McpClientPool>() }.map_err(|_| {
-                AssemblyError::PortMismatch {
+            // 对象自身 vtable 的 TypeId 决定还原；包装器不会被误认成 McpClientPool。
+            Arc::clone(port)
+                .downcast_arc::<McpClientPool>()
+                .map_err(|_| AssemblyError::PortMismatch {
                     port: "McpPoolPort",
                     expected: "McpClientPool",
-                }
-            })?,
+                })?,
         ),
     };
     // W5：Agent registry（会话可见性过滤 + 链槽关闭位）经**唯一构造入口**
@@ -59,12 +58,8 @@ pub(super) fn resolve_ports(ctx: &AssemblyContext) -> Result<ResolvedPorts, Asse
     // 可观察），不再有第二个来源或第二个缓存。存在 registry 时端口必须可绑定，
     // 否则目录会静默为空。
     if let Some(registry) = mcp_agent_registry.as_ref() {
-        let port =
-            // SAFETY: 生产装配注入本 crate 的 AgentCatalogProvider（as_any 返回 self）。
-            unsafe {
-                Arc::clone(&ctx.agent_catalog)
-                    .downcast_arc::<crate::host_ports::AgentCatalogProvider>()
-            }
+        let port = Arc::clone(&ctx.agent_catalog)
+            .downcast_arc::<crate::host_ports::AgentCatalogProvider>()
             .map_err(|_| AssemblyError::PortMismatch {
                 port: "AgentCatalogPort",
                 expected: "AgentCatalogProvider",
@@ -74,14 +69,12 @@ pub(super) fn resolve_ports(ctx: &AssemblyContext) -> Result<ResolvedPorts, Asse
 
     // 工具搜索索引：端口 → Arc<ToolSearchIndex>（类型不符 ⇒ 显式错误，
     // 不再构造默认索引：注入的索引与装配产物必须是同一实例）。
-    let tool_search_index_concrete: Arc<ToolSearchIndex> =
-        // SAFETY: 生产装配注入本 crate 的 ToolSearchIndex（as_any 返回 self）。
-        unsafe { Arc::clone(tool_search_index).downcast_arc::<ToolSearchIndex>() }.map_err(
-            |_| AssemblyError::PortMismatch {
-                port: "ToolSearchPort",
-                expected: "ToolSearchIndex",
-            },
-        )?;
+    let tool_search_index_concrete: Arc<ToolSearchIndex> = Arc::clone(tool_search_index)
+        .downcast_arc::<ToolSearchIndex>()
+        .map_err(|_| AssemblyError::PortMismatch {
+            port: "ToolSearchPort",
+            expected: "ToolSearchIndex",
+        })?;
 
     // HITL middleware — reuse auto_classifier model from cache when available
     let auto_classifier: Option<Arc<dyn AutoClassifier>> = Some(Arc::new(LlmAutoClassifier::new(

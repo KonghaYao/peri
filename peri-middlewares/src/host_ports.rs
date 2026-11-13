@@ -555,10 +555,6 @@ impl AgentCatalogProvider {
 }
 
 impl peri_acp_types::ports::AgentCatalogPort for AgentCatalogProvider {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn catalog(&self, include_builtin: bool) -> Vec<peri_acp_types::agents::AgentCatalogEntry> {
         self.registry
             .read()
@@ -610,18 +606,18 @@ pub fn bind_agent_catalog_from_pool(
     session_id: &str,
     disabled_middlewares: &std::collections::HashSet<String>,
 ) -> Result<(), AgentCatalogBindingError> {
-    // SAFETY: 生产池是本 crate 的 McpClientPool（as_any 返回 self）；
-    // downcast 内的数据指针校验会拒绝返回内字段 Any 的实现。
-    let pool =
-        unsafe { Arc::clone(pool).downcast_arc::<crate::mcp::McpClientPool>() }.map_err(|_| {
+    // 对象自身 vtable 的 TypeId 决定还原；包装器不会被误认成 McpClientPool。
+    let pool = Arc::clone(pool)
+        .downcast_arc::<crate::mcp::McpClientPool>()
+        .map_err(|_| {
             tracing::debug!(
                 session_id,
                 "冻结目录定点绑定失败：pool 不是本 crate 的 McpClientPool 实现"
             );
             AgentCatalogBindingError::McpPoolMismatch
         })?;
-    // SAFETY: 生产目录端口是 AgentCatalogProvider（as_any 返回 self）。
-    let port = unsafe { Arc::clone(agent_catalog).downcast_arc::<AgentCatalogProvider>() }
+    let port = Arc::clone(agent_catalog)
+        .downcast_arc::<AgentCatalogProvider>()
         .map_err(|_| {
             tracing::debug!(
                 session_id,
@@ -644,10 +640,6 @@ pub struct NoopAgentCatalog;
 
 #[cfg(test)]
 impl peri_acp_types::ports::AgentCatalogPort for NoopAgentCatalog {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn catalog(&self, _include_builtin: bool) -> Vec<peri_acp_types::agents::AgentCatalogEntry> {
         Vec::new()
     }

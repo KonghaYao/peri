@@ -36,7 +36,7 @@ snapshot；`initialize.rs` 的普通/bare 路径消费冻结输入，middleware 
 
 - 数据流：`SessionContext/config → Agent 层 session 工厂（build_middleware_chain 唯一触发点 + production_blueprint 链序蓝本）→ assembly.rs 按槽位调用 assembly/ 私有构造模块 → MiddlewareChain → prompt_contribution + collect_tools → Agent stage`
 - 链序事实源：`peri-agent/src/session/factory.rs` 的 `production_blueprint()`（`ChainSlot` 枚举，槽位顺序 = 行为契约）；链装配实现 `peri-middlewares/src/assembly.rs` 的 `ProductionChainAssembler::assemble`（按蓝本逐槽位构造，disabled 条件在根判断，复杂构造与 Hook 组展开委托私有模块）
-- 稳定不变量：链顺序只可在蓝本与装配实现中判断/修改（ARC-MIDDLEWARE-001）；`BaseTool::is_direct()` 是工具可见性事实源（ARC-TOOLS-001）；frozen 数据会话内不可漂移（ARC-FROZEN-001）；装配输入经 `peri-acp-types` 端口（McpPoolPort / ToolSearchPort / CronSchedulerPort 等）注入，装配时 downcast 还原具体实例；builtin 实例（`web`/`artifact`/`cron`/`monitor`/`workspace`/`workflow`）不是 middleware 也不是链槽位，而是 Mcp 槽位客户端侧的六个同进程 server，关闭走 `BUILTIN_INSTANCE_POLICY_KEYS`（ARC-CAPABILITY-CLOSURE-001；workflow 为唯一物理关闭特例：命中即不 spawn——`src/mcp/initialize.rs` 移除池条目 + 会话装配层跳过实例与消费者）
+- 稳定不变量：链顺序只可在蓝本与装配实现中判断/修改（ARC-MIDDLEWARE-001）；`BaseTool::is_direct()` 是工具可见性事实源（ARC-TOOLS-001）；frozen 数据会话内不可漂移（ARC-FROZEN-001）；装配输入经 `peri-acp-types` 端口（McpPoolPort / ToolSearchPort / CronSchedulerPort 等）注入，装配时经 `Any` supertrait + `Arc::downcast` 按对象自身 `TypeId` 安全还原具体实例（无 `as_any`、无 unsafe；包装器 fail-closed 为 `PortMismatch`）；builtin 实例（`web`/`artifact`/`cron`/`monitor`/`workspace`/`workflow`）不是 middleware 也不是链槽位，而是 Mcp 槽位客户端侧的六个同进程 server，关闭走 `BUILTIN_INSTANCE_POLICY_KEYS`（ARC-CAPABILITY-CLOSURE-001；workflow 为唯一物理关闭特例：命中即不 spawn——`src/mcp/initialize.rs` 移除池条目 + 会话装配层跳过实例与消费者）
 - 自动 compact 属 `peri-agent` 执行阶段，不在本 crate 路由范围（见 `docs/code-index/peri-agent.md`）
 
 ## 速查表
@@ -180,7 +180,7 @@ Builtin Workspace Bash 提醒只带退出信息与输出文件引用；提醒 me
 | 功能 | 入口/关键点 |
 | --- | --- |
 | 装配实现 | 根 `ProductionChainAssembler::assemble` 唯一遍历蓝本并保留完整 disabled guards；`AssemblyContext`/`ChainAssembly`/`OnBgCompleteFn`/`SystemPromptBuilder` 仍 re-export 自 `peri-agent::session::factory` |
-| 端口与继承工具准备 | `assembly/preparation.rs`：`ResolvedPorts`/`resolve_ports`/`build_parent_tools`；还原具体池与 broker，返回句柄由原 assemble 作用域继续持有，disabled 工具不进入父工具集 |
+| 端口与继承工具准备 | `assembly/preparation.rs`：`ResolvedPorts`/`resolve_ports`/`build_parent_tools`；按对象自身 `TypeId` 安全还原具体池与 broker（`PortMismatch` fail-closed，无 unsafe），返回句柄由原 assemble 作用域继续持有，disabled 工具不进入父工具集 |
 | 冻结 prompt / skills | `assembly/prompt.rs`：`add_agents_md`/`add_skills`/`add_skill_preload`；仅在相应启用槽位调用，使用冻结数据和 session 注册表 |
 | Hook 组展开 | `assembly/hooks.rs::add_hooks`；保留组序、空组跳过及按槽位展开行为 |
 | MCP 构造副作用 | `assembly/mcp.rs::add_mcp`；checked projection lease 绑定原 MCP pool，先继承同一 builtin 上下文再刷新可见 handles；关闭实例与宿主技能面策略不因动态投影丢失。lease 复用/绑定、ensure_discovery、notifier 注入按原顺序，仅从启用 Mcp 槽位调用 |

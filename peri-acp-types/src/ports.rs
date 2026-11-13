@@ -6,12 +6,12 @@
 //! upcast 为端口注入，ACP 侧只持端口接口（`docs/top-level.md` §0 依赖方向）。
 //!
 //! 具体实现位于 `peri-middlewares`（端口 impl 归实现方）。
-//! `downcast_arc` 为还原点：middlewares 装配面（`assembly.rs:127-152`）与
-//! 装配面宿主（`host/workflow_agent.rs` / `host/stage_builder.rs`）经 `as_any`
-//! 还原具体类型调用业务方法（与 `TaskManager` downcast 先例一致）。该还原是
-//! `unsafe`：`as_any` 必须返回 `self`，契约写在每个 `downcast_arc` 的 `# Safety`。
+//! `downcast_arc` 为还原点：middlewares 装配面与装配面宿主经 `Any` supertrait
+//! 与 `Arc::downcast` 按对象自身 vtable 的 `TypeId` 安全还原具体类型（与
+//! `TaskManager` downcast 先例一致）；无 `as_any`、无 `unsafe`。包装实现只会
+//! 被还原为包装类型自身，装配面按 `PortMismatch` fail-closed。
 
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -254,7 +254,7 @@ impl Default for PeripheralTasks {
 /// 分支同构：目录与 OAuth 类返回错误、清理与跳过类空操作；生产装配只注入
 /// `McpClientPool`，路径不变。
 #[async_trait::async_trait]
-pub trait McpPoolPort: Send + Sync {
+pub trait McpPoolPort: Any + Send + Sync {
     /// Control a server in this pool after the host has admitted the session request.
     async fn control_mcp(
         self: Arc<Self>,
@@ -273,12 +273,6 @@ pub trait McpPoolPort: Send + Sync {
     fn cancel_oauth_flow(&self, _flow_id: &str) -> Result<bool, String> {
         Err("MCP OAuth flow unavailable".into())
     }
-
-    /// 还原具体实现（downcast 还原点，供 middlewares 装配面与装配面宿主使用）。
-    ///
-    /// 安全契约：实现必须返回 `self`（同一对象、同一地址）；返回内字段或其他
-    /// 对象的 `Any` 会破坏 `downcast_arc` 的安全前提。
-    fn as_any(&self) -> &dyn Any;
 
     fn bind_agent_session(
         &self,
@@ -565,39 +559,14 @@ pub trait McpPoolPort: Send + Sync {
 impl dyn McpPoolPort {
     /// 将 `Arc<dyn McpPoolPort>` 还原为具体实现 `Arc<T>`（类型不符返回原 `Arc`）。
     ///
-    /// # Safety
-    ///
-    /// `T` 对应的所有 `McpPoolPort` 实现（含包装/观测实现）必须让 [`Self::as_any`]
-    /// 返回 `self`，即 `as_any()` 的地址与外层 trait object 相同。返回内字段或
-    /// 其他对象的 `Any` 时，按外层指针重建 `Arc<T>` 会以错误布局析构（UB）。
-    ///
-    /// 本函数会先比较 `as_any()` 与 trait object 的数据指针，不一致即返回
-    /// `Err`；该校验拦截常见包装器，但不能替代实现方履行契约。
-    ///
-    /// ```compile_fail,E0133
-    /// use std::sync::Arc;
-    /// use peri_acp_types::ports::McpPoolPort;
-    /// fn safe_call<T: McpPoolPort + 'static>(port: Arc<dyn McpPoolPort>) {
-    ///     let _ = port.downcast_arc::<T>();
-    /// }
-    /// ```
-    pub unsafe fn downcast_arc<T: McpPoolPort + 'static>(
-        self: Arc<Self>,
-    ) -> Result<Arc<T>, Arc<Self>> {
-        let ptr = Arc::into_raw(self);
-        // 必须经 `as_any()` 取 TypeId：直接对 trait object 调 `type_id()` 会命中
-        // `Any` blanket impl，返回 `dyn McpPoolPort` 自身 → downcast 恒失败。
-        // SAFETY: 由调用方保证 as_any 契约；本借用不延长 ptr 的生命周期。
-        let any = unsafe { (*ptr).as_any() };
-        // 防御包装实现：as_any 指向内字段时地址不同，拒绝而不是按外层指针 cast。
-        if std::ptr::addr_eq(any as *const dyn Any, ptr as *const ())
-            && any.type_id() == TypeId::of::<T>()
-        {
-            // SAFETY: 地址与 TypeId 均匹配 ⇒ 分配就是 T（调用方契约）。
-            unsafe { Ok(Arc::from_raw(ptr as *const T)) }
-        } else {
-            // SAFETY: 指针来自上面的 Arc::into_raw，未发生 cast。
-            unsafe { Err(Arc::from_raw(ptr)) }
+    /// 还原依据是对象自身 vtable 的真实 `TypeId`：包装实现只能还原为包装类型
+    /// 自身，不会把外层分配按内字段类型重建。
+    pub fn downcast_arc<T: McpPoolPort + 'static>(self: Arc<Self>) -> Result<Arc<T>, Arc<Self>> {
+        // 用 clone 探测类型；失败时返回原 Arc，保持既有 Err 语义。
+        let probe = Arc::clone(&self) as Arc<dyn Any + Send + Sync>;
+        match probe.downcast::<T>() {
+            Ok(concrete) => Ok(concrete),
+            Err(_) => Err(self),
         }
     }
 }
@@ -655,45 +624,41 @@ pub trait AcpMcpServerPort: Send + Sync {
 }
 
 /// 工具检索索引端口（`peri-middlewares::tool_search::ToolSearchIndex` 实现）。
-pub trait ToolSearchPort: Send + Sync {
-    /// 还原具体实现（downcast 还原点，供 middlewares 装配面与装配面宿主使用）。
-    ///
-    /// 安全契约：实现必须返回 `self`（同一对象、同一地址）；返回内字段或其他
-    /// 对象的 `Any` 会破坏 `downcast_arc` 的安全前提。
-    fn as_any(&self) -> &dyn Any;
-}
+///
+/// `Any` supertrait 让装配面按对象自身类型安全还原；实现方不需要、也不能
+/// 提供 `as_any`。包装实现只会被还原为包装类型自身，装配按 `PortMismatch`
+/// fail-closed。
+pub trait ToolSearchPort: Any + Send + Sync {}
 
 impl dyn ToolSearchPort {
     /// 将 `Arc<dyn ToolSearchPort>` 还原为具体实现 `Arc<T>`（类型不符返回原 `Arc`）。
     ///
-    /// # Safety
-    ///
-    /// 所有 `ToolSearchPort` 实现必须让 [`Self::as_any`] 返回 `self`；返回内字段
-    /// 或其他对象的 `Any` 会以错误布局重建 `Arc<T>`（UB）。本函数的数据指针
-    /// 校验只能拦截常见包装器。
-    ///
-    /// ```compile_fail,E0133
+    /// ```
     /// use std::sync::Arc;
     /// use peri_acp_types::ports::ToolSearchPort;
-    /// fn safe_call<T: ToolSearchPort + 'static>(port: Arc<dyn ToolSearchPort>) {
-    ///     let _ = port.downcast_arc::<T>();
+    ///
+    /// struct Inner;
+    /// impl ToolSearchPort for Inner {}
+    ///
+    /// #[repr(C)]
+    /// struct Wrapper {
+    ///     inner: Inner,
+    ///     tail: [u8; 64],
     /// }
+    /// impl ToolSearchPort for Wrapper {}
+    ///
+    /// let wrapper = Arc::new(Wrapper { inner: Inner, tail: [0; 64] });
+    /// let port: Arc<dyn ToolSearchPort> = Arc::clone(&wrapper) as Arc<dyn ToolSearchPort>;
+    /// // offset 0 的包装器不会被误认成内字段类型。
+    /// assert!(Arc::clone(&port).downcast_arc::<Inner>().is_err());
+    /// assert!(port.downcast_arc::<Wrapper>().is_ok());
     /// ```
-    pub unsafe fn downcast_arc<T: ToolSearchPort + 'static>(
-        self: Arc<Self>,
-    ) -> Result<Arc<T>, Arc<Self>> {
-        let ptr = Arc::into_raw(self);
-        // 同 `McpPoolPort`：TypeId 必须取自 `as_any()`。
-        // SAFETY: 由调用方保证 as_any 契约。
-        let any = unsafe { (*ptr).as_any() };
-        if std::ptr::addr_eq(any as *const dyn Any, ptr as *const ())
-            && any.type_id() == TypeId::of::<T>()
-        {
-            // SAFETY: 地址与 TypeId 均匹配 ⇒ 分配就是 T（调用方契约）。
-            unsafe { Ok(Arc::from_raw(ptr as *const T)) }
-        } else {
-            // SAFETY: 指针来自上面的 Arc::into_raw，未发生 cast。
-            unsafe { Err(Arc::from_raw(ptr)) }
+    pub fn downcast_arc<T: ToolSearchPort + 'static>(self: Arc<Self>) -> Result<Arc<T>, Arc<Self>> {
+        // 用 clone 探测类型；失败时返回原 Arc，保持既有 Err 语义。
+        let probe = Arc::clone(&self) as Arc<dyn Any + Send + Sync>;
+        match probe.downcast::<T>() {
+            Ok(concrete) => Ok(concrete),
+            Err(_) => Err(self),
         }
     }
 }
@@ -706,10 +671,7 @@ impl dyn ToolSearchPort {
 /// W5 把本端口从「本地扫盘（`scan_agents_detailed`）」改为「registry 投影」，
 /// 端口实现留在 `peri-middlewares`（`host_ports::AgentCatalogProvider`），
 /// ACP 侧不直调业务 crate（§0 依赖方向）。
-pub trait AgentCatalogPort: Send + Sync {
-    /// 还原具体实现（downcast 还原点，供 middlewares 装配面绑定会话级 registry）。
-    fn as_any(&self) -> &dyn std::any::Any;
-
+pub trait AgentCatalogPort: Any + Send + Sync {
     /// 本地来源候选（E13 优先级去重）。
     ///
     /// `include_builtin=false`（父会话冻结的 built-in policy 关闭）时返回的列表
@@ -720,33 +682,16 @@ pub trait AgentCatalogPort: Send + Sync {
 impl dyn AgentCatalogPort {
     /// 将 `Arc<dyn AgentCatalogPort>` 还原为具体实现 `Arc<T>`（类型不符返回原 `Arc`）。
     ///
-    /// # Safety
-    ///
-    /// 所有 `AgentCatalogPort` 实现必须让 [`Self::as_any`] 返回 `self`；返回内字段
-    /// 或其他对象的 `Any` 会以错误布局重建 `Arc<T>`（UB）。本函数的数据指针
-    /// 校验只能拦截常见包装器。
-    ///
-    /// ```compile_fail,E0133
-    /// use std::sync::Arc;
-    /// use peri_acp_types::ports::AgentCatalogPort;
-    /// fn safe_call<T: AgentCatalogPort + 'static>(port: Arc<dyn AgentCatalogPort>) {
-    ///     let _ = port.downcast_arc::<T>();
-    /// }
-    /// ```
-    pub unsafe fn downcast_arc<T: AgentCatalogPort + 'static>(
+    /// 还原依据是对象自身 vtable 的真实 `TypeId`；包装实现只能还原为包装类型
+    /// 自身，不会把外层分配按内字段类型重建。
+    pub fn downcast_arc<T: AgentCatalogPort + 'static>(
         self: Arc<Self>,
     ) -> Result<Arc<T>, Arc<Self>> {
-        let ptr = Arc::into_raw(self);
-        // SAFETY: 由调用方保证 as_any 契约。
-        let any = unsafe { (*ptr).as_any() };
-        if std::ptr::addr_eq(any as *const dyn Any, ptr as *const ())
-            && any.type_id() == TypeId::of::<T>()
-        {
-            // SAFETY: 地址与 TypeId 均匹配 ⇒ 分配就是 T（调用方契约）。
-            unsafe { Ok(Arc::from_raw(ptr as *const T)) }
-        } else {
-            // SAFETY: 指针来自上面的 Arc::into_raw，未发生 cast。
-            unsafe { Err(Arc::from_raw(ptr)) }
+        // 用 clone 探测类型；失败时返回原 Arc，保持既有 Err 语义。
+        let probe = Arc::clone(&self) as Arc<dyn Any + Send + Sync>;
+        match probe.downcast::<T>() {
+            Ok(concrete) => Ok(concrete),
+            Err(_) => Err(self),
         }
     }
 }

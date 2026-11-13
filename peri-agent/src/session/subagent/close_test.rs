@@ -22,9 +22,6 @@ struct UnavailablePool;
 
 #[async_trait::async_trait]
 impl McpPoolPort for UnavailablePool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     async fn shutdown(&self) -> McpPoolShutdownReport {
         panic!("child close must not shutdown shared pool")
     }
@@ -41,9 +38,6 @@ struct GatedPool {
 
 #[async_trait::async_trait]
 impl McpPoolPort for GatedPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     async fn shutdown(&self) -> McpPoolShutdownReport {
         panic!("child close must not shutdown shared pool")
     }

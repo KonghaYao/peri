@@ -49,31 +49,26 @@ impl From<McpNotificationMessageKind> for crate::session::MessageKind {
 }
 
 /// MCP subscriptions 通知 → 会话 inbox 的桥接端口
-pub trait McpSubscriptionPort: Send + Sync {
+pub trait McpSubscriptionPort: Any + Send + Sync {
     /// 注册一个会话的 inbox（session 创建 / 首次启动 bridge 时调用，幂等）。
     fn register_inbox(&self, session_id: &str, handle: InboxHandle);
 
     /// 注销会话的 inbox（close_session 时调用）。
     fn unregister_inbox(&self, session_id: &str);
-
-    /// 还原具体实现（downcast 还原点，供装配面与宿主使用）。
-    fn as_any(&self) -> &dyn Any;
 }
 
 impl dyn McpSubscriptionPort {
     /// 将 `Arc<dyn McpSubscriptionPort>` 还原为具体实现 `Arc<T>`
-    /// （类型不符返回原 `Arc`；注意经 `as_any()` 取 TypeId，
-    /// 见 `CronSchedulerPort::downcast_arc` 的踩坑注释）。
+    /// （类型不符返回原 `Arc`；还原依据是对象自身 vtable 的真实 `TypeId`，
+    /// 与 [`crate::cron::CronSchedulerPort::downcast_arc`] 同一实现）。
     pub fn downcast_arc<T: McpSubscriptionPort + 'static>(
         self: Arc<Self>,
     ) -> Result<Arc<T>, Arc<Self>> {
-        let ptr = Arc::into_raw(self);
-        unsafe {
-            if (*ptr).as_any().type_id() == std::any::TypeId::of::<T>() {
-                Ok(Arc::from_raw(ptr as *const T))
-            } else {
-                Err(Arc::from_raw(ptr))
-            }
+        // 用 clone 探测类型；失败时返回原 Arc，保持既有 Err 语义。
+        let probe = Arc::clone(&self) as Arc<dyn Any + Send + Sync>;
+        match probe.downcast::<T>() {
+            Ok(concrete) => Ok(concrete),
+            Err(_) => Err(self),
         }
     }
 }

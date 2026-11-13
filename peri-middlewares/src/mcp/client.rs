@@ -53,7 +53,6 @@ use peri_acp_types::{
 use readiness::SystemReadinessTracker;
 use rmcp::model::{Resource, ResourceContents, Tool};
 use std::{
-    any::Any,
     collections::{HashMap, HashSet},
     sync::Arc,
 };

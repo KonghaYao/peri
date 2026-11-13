@@ -19,10 +19,6 @@ impl WatchRecordingPool {
 
 #[async_trait::async_trait]
 impl peri_acp_types::ports::McpPoolPort for WatchRecordingPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
         peri_acp_types::ports::McpPoolShutdownReport::Complete {
             settled_services: 0,
@@ -137,20 +133,18 @@ async fn session_local_workspace_tasks_reach_acp_snapshot_and_live_events() {
     .await
     .unwrap();
     let id = created["sessionId"].as_str().unwrap();
-    let pool = unsafe {
-        sessions[id]
-            .environment
-            .as_ref()
-            .unwrap()
-            .cfg
-            .mcp_pool
-            .as_ref()
-            .unwrap()
-            .clone()
-            .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
-    }
-    .ok()
-    .unwrap();
+    let pool = sessions[id]
+        .environment
+        .as_ref()
+        .unwrap()
+        .cfg
+        .mcp_pool
+        .as_ref()
+        .unwrap()
+        .clone()
+        .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
+        .ok()
+        .unwrap();
     let initial_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
         if transport

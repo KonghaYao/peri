@@ -125,8 +125,7 @@ fn workspace_resource_uris(sessions: &HashMap<String, SessionState>, id: &str) -
     let Some(pool) = environment.cfg.mcp_pool.as_ref() else {
         return vec!["无 MCP 池".to_owned()];
     };
-    let Some(pool) = pool
-        .as_any()
+    let Some(pool) = (pool.as_ref() as &dyn std::any::Any)
         .downcast_ref::<peri_middlewares::mcp::McpClientPool>()
     else {
         return vec!["池不是生产 McpClientPool".to_owned()];
@@ -654,8 +653,7 @@ fn workspace_resource_description(
 ) -> Option<String> {
     let environment = sessions[id].environment.as_ref()?;
     let pool = environment.cfg.mcp_pool.as_ref()?;
-    let pool = pool
-        .as_any()
+    let pool = (pool.as_ref() as &dyn std::any::Any)
         .downcast_ref::<peri_middlewares::mcp::McpClientPool>()?;
     pool.get_resources("workspace")
         .iter()

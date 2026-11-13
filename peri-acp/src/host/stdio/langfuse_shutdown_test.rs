@@ -114,9 +114,6 @@ struct RecoverablePool {
 
 #[async_trait::async_trait]
 impl peri_acp_types::ports::McpPoolPort for RecoverablePool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
         if self.complete.load(Ordering::SeqCst) {
             peri_acp_types::ports::McpPoolShutdownReport::Complete {

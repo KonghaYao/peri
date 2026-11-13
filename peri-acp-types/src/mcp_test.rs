@@ -1,11 +1,10 @@
 //! mcp.rs 契约测试：McpSubscriptionPort::downcast_arc 还原 + subscriptions 配置 serde。
 //!
 //! downcast 回归背景（同构 issue 2026-08-07-cron-tool-task-never-triggers，
-//! 见 mcp-packages/cron/src/mod_test.rs）：直接对 trait object 调 `type_id()`
-//! 会解析到 trait object 自身（恒不等于具体类型）→ downcast 恒失败；必须经
-//! `as_any()` 取具体类型 TypeId。
+//! 见 mcp-packages/cron/src/mod_test.rs）：还原必须依据对象自身 vtable 的
+//! `TypeId`（`Any` supertrait + `Arc::downcast`），不能由实现方自报类型。
 
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use crate::mcp::McpSubscriptionPort;
 use crate::plugin::{McpServerConfig, McpSubscriptionsConfig};
@@ -31,10 +30,6 @@ impl McpSubscriptionPort for FakeSubscriptionPort {
             .unwrap()
             .push(session_id.to_string());
     }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 /// 另一个具体实现（downcast 失败路径用：类型不匹配时须返回原 Arc 而非 panic）。
@@ -44,10 +39,6 @@ impl McpSubscriptionPort for FakeOtherPort {
     fn register_inbox(&self, _session_id: &str, _handle: InboxHandle) {}
 
     fn unregister_inbox(&self, _session_id: &str) {}
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 // ── downcast_arc ─────────────────────────────────────────────────────────────
@@ -79,6 +70,43 @@ fn test_mcp_subscription_port_downcast_wrong_type_returns_original() {
         Err(p) => p,
     };
     assert!(Arc::ptr_eq(&port, &err), "失败分支必须返回原 Arc");
+}
+
+/// offset 0 包装器只能还原为自身类型，不能还原为内字段类型。
+#[test]
+fn test_mcp_subscription_port_offset_zero_wrapper_is_not_inner_type() {
+    #[repr(C)]
+    struct OffsetZeroWrapper {
+        inner: FakeSubscriptionPort,
+        tail: [u8; 1024],
+    }
+
+    impl McpSubscriptionPort for OffsetZeroWrapper {
+        fn register_inbox(&self, session_id: &str, handle: InboxHandle) {
+            self.inner.register_inbox(session_id, handle);
+        }
+
+        fn unregister_inbox(&self, session_id: &str) {
+            self.inner.unregister_inbox(session_id);
+        }
+    }
+
+    let wrapper = Arc::new(OffsetZeroWrapper {
+        inner: FakeSubscriptionPort::default(),
+        tail: [0; 1024],
+    });
+    let port: Arc<dyn McpSubscriptionPort> = Arc::clone(&wrapper) as Arc<dyn McpSubscriptionPort>;
+
+    let err = Arc::clone(&port)
+        .downcast_arc::<FakeSubscriptionPort>()
+        .err()
+        .unwrap_or_else(|| panic!("offset 0 包装器不得被还原为内字段类型"));
+    assert!(Arc::ptr_eq(&port, &err));
+
+    let restored = port
+        .downcast_arc::<OffsetZeroWrapper>()
+        .unwrap_or_else(|_| panic!("包装器应还原为自身类型"));
+    assert!(Arc::ptr_eq(&wrapper, &restored));
 }
 
 // ── subscriptions 配置 serde ─────────────────────────────────────────────────

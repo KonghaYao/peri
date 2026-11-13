@@ -87,10 +87,6 @@ async fn bind_agent_catalog_from_pool_rejects_foreign_pool() {
 
     #[async_trait::async_trait]
     impl McpPoolPort for ForeignPool {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-
         async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
             peri_acp_types::ports::McpPoolShutdownReport::Complete {
                 settled_services: 0,
@@ -109,6 +105,71 @@ async fn bind_agent_catalog_from_pool_rejects_foreign_pool() {
         bind_agent_catalog_from_pool(&port, &pool, "foreign-pool-session", &HashSet::new()),
         Err(super::AgentCatalogBindingError::McpPoolMismatch),
         "池非 `McpClientPool` ⇒ fail-closed 返回显式错误"
+    );
+}
+
+// ─── offset 0 包装器：类型还原不得依赖地址 ─────────────────────────────────
+
+#[repr(C)]
+struct OffsetZeroPool {
+    inner: crate::mcp::McpClientPool,
+    tail: [u8; 1024],
+}
+
+#[async_trait::async_trait]
+impl McpPoolPort for OffsetZeroPool {
+    async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
+        self.inner.shutdown().await
+    }
+
+    fn snapshot(&self) -> serde_json::Value {
+        McpPoolPort::snapshot(&self.inner)
+    }
+}
+
+#[test]
+fn bind_agent_catalog_from_pool_rejects_offset_zero_pool_wrapper() {
+    let wrapper = Arc::new(OffsetZeroPool {
+        inner: crate::mcp::McpClientPool::new_pending(),
+        tail: [0; 1024],
+    });
+    let pool: Arc<dyn McpPoolPort> = wrapper;
+    let port: Arc<dyn AgentCatalogPort> = Arc::new(AgentCatalogProvider::new());
+    assert_eq!(
+        bind_agent_catalog_from_pool(&port, &pool, "offset-zero-pool-session", &HashSet::new()),
+        Err(super::AgentCatalogBindingError::McpPoolMismatch),
+        "offset 0 包装器不得被当成 McpClientPool"
+    );
+}
+
+#[repr(C)]
+struct OffsetZeroCatalog {
+    inner: AgentCatalogProvider,
+    tail: [u8; 1024],
+}
+
+impl AgentCatalogPort for OffsetZeroCatalog {
+    fn catalog(&self, include_builtin: bool) -> Vec<peri_acp_types::agents::AgentCatalogEntry> {
+        AgentCatalogPort::catalog(&self.inner, include_builtin)
+    }
+}
+
+#[test]
+fn bind_agent_catalog_from_pool_rejects_offset_zero_catalog_wrapper() {
+    let pool: Arc<dyn McpPoolPort> = Arc::new(crate::mcp::McpClientPool::new_pending());
+    let catalog: Arc<dyn AgentCatalogPort> = Arc::new(OffsetZeroCatalog {
+        inner: AgentCatalogProvider::new(),
+        tail: [0; 1024],
+    });
+    assert_eq!(
+        bind_agent_catalog_from_pool(
+            &catalog,
+            &pool,
+            "offset-zero-catalog-session",
+            &HashSet::new()
+        ),
+        Err(super::AgentCatalogBindingError::AgentCatalogMismatch),
+        "offset 0 包装器不得被当成 AgentCatalogProvider"
     );
 }
 

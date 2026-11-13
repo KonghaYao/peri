@@ -473,11 +473,9 @@ impl SessionEnvironment {
                 .mcp_pool
                 .as_ref()
                 .and_then(|port| {
-                    // SAFETY: 会话装配注入本 crate 的 McpClientPool（as_any 返回 self）。
-                    unsafe {
-                        Arc::clone(port).downcast_arc::<peri_middlewares::mcp::McpClientPool>()
-                    }
-                    .ok()
+                    Arc::clone(port)
+                        .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
+                        .ok()
                 })
                 .ok_or_else(|| {
                     AcpError::new(
@@ -556,11 +554,9 @@ impl SessionEnvironment {
                 .mcp_pool
                 .as_ref()
                 .and_then(|port| {
-                    // SAFETY: 会话装配注入本 crate 的 McpClientPool（as_any 返回 self）。
-                    unsafe {
-                        Arc::clone(port).downcast_arc::<peri_middlewares::mcp::McpClientPool>()
-                    }
-                    .ok()
+                    Arc::clone(port)
+                        .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
+                        .ok()
                 })
                 .ok_or_else(|| {
                     AcpError::new(

@@ -696,9 +696,6 @@ fn empty_section_diagnostics_distinguish_optional_from_required() {
     // 空段一律不渲染：只留非空段与 boundary token。
     struct NoAgents;
     impl peri_acp_types::ports::AgentCatalogPort for NoAgents {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
         fn catalog(
             &self,
             _include_builtin: bool,

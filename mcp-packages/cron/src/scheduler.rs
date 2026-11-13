@@ -238,11 +238,7 @@ impl CronScheduler {
 // 经 `downcast_arc` 还原取 `.0`。
 pub struct CronSchedulerPortHandle(pub std::sync::Arc<parking_lot::Mutex<CronScheduler>>);
 
-impl peri_acp_types::cron::CronSchedulerPort for CronSchedulerPortHandle {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
+impl peri_acp_types::cron::CronSchedulerPort for CronSchedulerPortHandle {}
 
 #[cfg(test)]
 #[path = "mod_test.rs"]
