@@ -643,14 +643,8 @@ impl BackgroundTaskRegistry {
                 .filter(|t| is_active_status(&t.status) && t.kind == kind)
                 .count();
             if current >= limit {
-                let kind_str = match kind {
-                    BgTaskKind::Shell => "shell",
-                    BgTaskKind::Agent => "agent",
-                    BgTaskKind::Workflow => "workflow",
-                    BgTaskKind::Mcp => "mcp",
-                };
                 return Err(BackgroundRegistryError::KindConcurrentLimit {
-                    kind: kind_str.to_string(),
+                    kind: kind.as_str().to_string(),
                     current,
                     limit,
                 });

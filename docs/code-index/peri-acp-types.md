@@ -16,6 +16,7 @@ typed schema、默认值、领域合并、scope/revision/explain/update 归
 
 - 定位：契约类型层（type contract layer between layers）——被 peri-agent、peri-acp、peri-middlewares、peri-runtime、peri-tui、peri-workflow、peri-controller、peri-resources 共同依赖（各 Cargo.toml 均声明 `peri-acp-types`）；定义共享类型/枚举/trait；session 契约还包含共享队列、inbox 唤醒、cron task owner 与 cancel 判定，执行编排由 Agent 层负责
 - 事实源矩阵（本层定义、他层 re-export 或消费）：`identity`（AgentId/EventEnvelope/CancelRequest）、`event_v2`（三层事件 + `*_event_to_executor`）、`compact`（CompactConfig/CompactOutcome）、`history_window`（open/page/seek 请求、双向游标、读取票据、body 分块与错误码）、`tools`（BaseTool）、`session`（TurnId/MessageQueue/AgentRuntime）、`messages`（BaseMessage/MessageContent）
+- 后台任务 kind 映射：`tasks.rs` 的 `BgTaskKind::{as_str,task_agent_name,reminder_source,completion_source,rank,cancel_channel}` 是唯一映射点；`MessageSource::is_background_completion` 供 Receive 判定后台终态，两者集合由 `tasks_test.rs` 交叉锁定（含 wire 字面量与全变体覆盖）
 - 消费方式：peri-agent 大量 re-export（`src/agent/events_v2.rs`、`src/tools/mod.rs`、`src/agent/compact_v2/config.rs`、`src/session/turn.rs`、`src/messages/mod.rs`、`src/error.rs`）；peri-acp 消费事件映射与 cancel（`src/event/mod.rs`、`src/host/prompt_handle.rs`）；controller/runtime 直连 identity（`peri-controller/src/controller.rs`、`peri-runtime/src/runtime.rs`）
 - 稳定不变量：身份三元组 + epoch/attempt 不可复用（防迟到消息命中新实例）；`SessionSeq` 单调且**不实现 Default**（缺失必须显式 `Option`）；v2 事件强制携带 `turn_id` + `agent_id`；v1 `ExecutorEvent` 仅作协议序列化面载体，发射统一 v2（ARC-EVENT-001）
 

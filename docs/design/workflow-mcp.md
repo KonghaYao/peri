@@ -14,14 +14,14 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 
 1. workflow 以 **builtin MCP 实例**（`workflow`，per-session 池内、同进程 `rmcp::serve_server`）接入；工具、资源、订阅、关闭全部走标准 MCP 面。
 2. agent 回调改为 **MCPP Channel 语义**：agent 任务作为 outbound 资源（event-log）发布，宿主消费者发现并执行，经 inbound 工具回填结果。不新增私有 JSON-RPC method 或 vendor capability。
-3. 删除 `ChainSlot::Workflow`、`WorkflowMiddlewarePort`、`WorkflowMiddlewareAdaptor`、`SessionState.workflow_middleware` 与 `peri-resources/src/workflow.rs` 门面。旧槽位、端口与旧 middleware 目录已删除；`peri-resources/src/workflow.rs` 门面仍保留（残留目标，见 §7）。
+3. 删除 `ChainSlot::Workflow`、`WorkflowMiddlewarePort`、`WorkflowMiddlewareAdaptor`、`SessionState.workflow_middleware` 与 `peri-resources/src/workflow.rs` 门面。旧槽位、端口、旧 middleware 目录与 Resources 门面均已删除；workflow 接入归 builtin MCP 实例。
 4. 用户可见配置语义保持兼容：MetaHarness 关闭键 `"WorkflowMiddleware"` 沿用（从中间件表迁到 builtin 实例关闭表）；ACP 方法名（`workflow/*`）与 TUI 交互不变。
 
 ### 2.2 非目标
 
 1. 不让 Node 引擎进程直接实现标准 MCP server（外部 stdio 直连）——内置实例已覆盖目标；引擎独立分发留待将来在同一语义上升级。
 2. 不迁移 journal 落盘位置（`.claude/workflow-runs/` 保持现状）；归属另行裁决。
-3. 不改 ACP 方法名、TUI 面板与 `BgTaskKind::Workflow`；不改 `peri-acp-types/src/workflow.rs` 契约类型。
+3. 不改 ACP 方法名、TUI 面板、`BgTaskKind` 变体与 wire 值；不改 `peri-acp-types/src/workflow.rs` 契约类型。
 4. 不做跨进程任务恢复与旧执行恢复：任务表为运行期状态，恢复语义仍由 journal + `resume` 承担（遵循「不恢复旧 Agent 执行」）。
 5. 不做 workflow 的跨实例/远程分发。
 
@@ -187,7 +187,6 @@ published ──► executing ──► completed | failed | cancelled
 ## 7. 待裁决记录
 
 - journal 落盘归属（工作区工具环境 vs Session Store）：保持现状（`.claude/workflow-runs/`），独立裁决；原裁决 issue 已归档，可经 Git 历史检索。
-- `peri-resources/src/workflow.rs` 门面删除：未落地残留目标；`peri-resources` 仍依赖 workflow，删除需独立裁决。
 - Node 引擎独立分发为外部 MCP server：本设计在同语义上保留升级路径（`agent/task`/`agent/result` ↔ 标准资源/工具），不在本范围实施。
 
 ## 8. MCP 数据边界契约

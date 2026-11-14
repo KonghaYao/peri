@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use peri_acp_types::tasks::{
     BgRegistryEvent, BgShellHandle, BgTaskKind, BgTaskRegistration, ExternalTaskRegistration,
-    TaskChange, TaskRegistrationTicket, TaskSnapshot,
+    TaskCancelChannel, TaskChange, TaskRegistrationTicket, TaskSnapshot,
 };
 use sha2::{Digest, Sha256};
 
@@ -239,8 +239,8 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
     }
 
     fn register(&self, request: BgTaskRegistration) -> Result<TaskRegistrationTicket, String> {
-        let cancel_handle = match request.kind {
-            BgTaskKind::Shell => match request.kill {
+        let cancel_handle = match request.kind.cancel_channel() {
+            TaskCancelChannel::Process => match request.kill {
                 Some(kill) => BgCancelHandle::Kill(Some(kill)),
                 None => request
                     .pid
@@ -257,19 +257,14 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
                             .to_string()
                     })?,
             },
-            BgTaskKind::Workflow => BgCancelHandle::Kill(request.kill),
-            BgTaskKind::Agent => BgCancelHandle::Kill(request.kill),
-            BgTaskKind::Mcp => return Err("MCP tasks must use register_external".into()),
+            TaskCancelChannel::Closure => BgCancelHandle::Kill(request.kill),
+            TaskCancelChannel::External => {
+                return Err("MCP tasks must use register_external".into())
+            }
         };
         let task = BackgroundTask {
             id: request.task_id,
-            agent_name: match request.kind {
-                BgTaskKind::Shell => "bg-shell",
-                BgTaskKind::Agent => "agent",
-                BgTaskKind::Workflow => "workflow",
-                BgTaskKind::Mcp => "mcp",
-            }
-            .to_string(),
+            agent_name: request.kind.task_agent_name().to_string(),
             prompt_summary: request.summary,
             status: BackgroundTaskStatus::Running,
             started_at: peri_time::monotonic_now(),

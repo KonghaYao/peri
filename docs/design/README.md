@@ -63,7 +63,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | 存储 v2：Machine → Workspace → Session | [storage-v2-machine-workspace-session.md](storage-v2-machine-workspace-session.md) | schema 版本以代码索引为准，Git 使用 worktree 根、非 Git 使用启动 cwd；真实远端验收待执行 |
 | Command 系统 | [command-system.md](command-system.md) | 命令协议与执行边界以代码和契约测试为准 |
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | transcript 展示、组合器与工作台布局的现行约束 |
-| Workflow as MCP | [workflow-mcp.md](workflow-mcp.md) | builtin 实例、任务资源与回填信道已落地；`peri-resources` 门面残留目标 |
+| Workflow as MCP | [workflow-mcp.md](workflow-mcp.md) | builtin 实例、任务资源与回填信道已落地；`peri-resources` 门面已删除 |
 | MonitorMCP | [monitor-mcp.md](monitor-mcp.md) | v1 command source、标准 MCP Tasks 与 alert 提醒已实现（运行中命中与任务终态都会唤醒，终态合并未报告命中）；实现入口见 [MCP packages 索引](../code-index/mcp-packages.md)，poll/file/WS source 不在范围 |
 | Serverless 执行环境身份 | [serverless-execution-identity.md](serverless-execution-identity.md) | Emscripten/Node/Bun/workerd 宿主可用；Cloudflare 托管部署与跨实例接管未验收 |
 | TUI 面板架构 | [tui-panel-architecture.md](tui-panel-architecture.md) | [TUI 面板架构重构](../../spec/issues/2026-10-15-tui-architecture-refactor.md)；面板外壳、共享视口、事件入口、操作作用域与完成门、快照发布单点、确认版本守卫已落地；未完成项见该 issue |

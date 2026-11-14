@@ -12,9 +12,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use peri_acp_types::plugin::ConfigSource;
 use peri_acp_types::ports::McpPoolPort;
-use peri_acp_types::workflow::{AgentRunParams, AgentRunResult, Usage};
+use peri_acp_types::workflow::{AgentExecutor, AgentRunParams, AgentRunResult, Usage};
 use peri_mcp_workflow::{WorkflowInstanceInput, WorkflowMcpServer, WorkflowRuntime};
-use peri_resources::workflow::runner::AgentExecutor;
 use serde_json::{json, Value};
 
 use crate::mcp::apps::McpCapabilityProfile;

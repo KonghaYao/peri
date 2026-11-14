@@ -414,22 +414,12 @@ fn normalized_pending_tasks(tasks: &[PendingHandoffTask]) -> Vec<PendingHandoffT
     normalized.sort_by(|a, b| {
         a.task_id
             .cmp(&b.task_id)
-            .then_with(|| kind_rank(a.kind).cmp(&kind_rank(b.kind)))
+            .then_with(|| a.kind.rank().cmp(&b.kind.rank()))
             .then_with(|| a.owner_session_id.cmp(&b.owner_session_id))
             .then_with(|| a.owner_identity.cmp(&b.owner_identity))
     });
     normalized.dedup();
     normalized
-}
-
-/// Total order over task kinds for normalization (declaration order of the contract enum).
-fn kind_rank(kind: BgTaskKind) -> u8 {
-    match kind {
-        BgTaskKind::Shell => 0,
-        BgTaskKind::Agent => 1,
-        BgTaskKind::Workflow => 2,
-        BgTaskKind::Mcp => 3,
-    }
 }
 
 /// Canonical bytes of the reminder for identity derivation.

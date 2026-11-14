@@ -140,12 +140,7 @@ fn publication_callback(resolve: DeliveryResolver) -> OnBgCompleteFn {
             },
         );
         drop(state);
-        let source = match kind {
-            BgTaskKind::Agent => peri_acp_types::session::MessageSource::SubAgentComplete,
-            BgTaskKind::Shell => peri_acp_types::session::MessageSource::ShellComplete,
-            BgTaskKind::Workflow => peri_acp_types::session::MessageSource::WorkflowComplete,
-            BgTaskKind::Mcp => peri_acp_types::session::MessageSource::McpNotification,
-        };
+        let source = kind.completion_source();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             resolve()?.accept(delivery_id, &reminder, source)
         }))

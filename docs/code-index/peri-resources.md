@@ -12,7 +12,7 @@
 - 时间入口：生产路径经 `peri-time` 读取 UTC 墙钟、单调时钟并执行 sleep/timeout。`src/sessions/remote/connection.rs` 保留远端请求超时的 `Exceeded` 分类；`src/sessions/resources/deployment.rs` 与 `resources.rs` 保留关闭结清超时分类；`src/sessions/sqlite_store/connection.rs` 用单调时钟限制 schema 开库锁等待。持久字段继续使用既有 RFC 3339 形状，`ThreadMeta` 的 Chrono 类型在本 crate 边界由 `SystemTime` 转换。
 
 - 定位：外部系统数据访问通道（§0），以 context 形式提供给 Agent / Middleware / Controller
-- 结构：`config`（配置文件）、`sessions`（共用规则及 SQLite/Turso adapter）、`workflow`（Native workflow 资源实现门面）、`context`（`Resources` 唯一实例化入口，`context/sqlite.rs` 只在 Native 编译）
+- 结构：`config`（配置文件）、`sessions`（共用规则及 SQLite/Turso adapter）、`context`（`Resources` 唯一实例化入口，`context/sqlite.rs` 只在 Native 编译）
 - 稳定不变量：`ThreadStore` trait /`ThreadMeta`/`BaseMessage`/`MessageFlags` 事实源在 `peri-acp-types`（sessions/mod.rs 注释）；本 crate 只实现、不解释业务语义
 
 ## 速查表
@@ -68,7 +68,6 @@
 | 改失败分类映射 | `src/sessions/failure.rs` + `sqlite_store/failure.rs` | 共用 `read_failure`/`write_failure`/`execution_failure`/`binding_relation_failure`/`not_found`/`read_only_store`；SQLite 专属 `map_sqlx` | 数据面、执行面与门面共用领域失败分类；SQLx 错误只在 Native SQLite adapter 映射，不进入 WASM 编译闭包 |
 | 改 SQLite 库的所有权/连接 | `src/sessions/sqlite_store/database.rs` + `connection.rs` | `SqliteSessionDatabase`（pool / read_only / db_path）；`open`、`open_existing_read_only`、`close`、`require_writable`、`probe_load_meta_shape`、`default_database_path`；`lock_schema_open` | 数据面与环境观测共享同一 `Arc<SqliteSessionDatabase>`，不重建 pool 或库文件；连接所有权不代表会话执行权，无 execution lease registry。`SqliteThreadStore` 仍是消费侧迁移桥。 |
 | 改全局配置路径 | `src/config/mod.rs` | `peri_dir`（`~/.peri`）；`settings_path`（`~/.peri/settings.json`） | 仅路径入口，配置读取语义之外的逻辑不迁入本 crate |
-| 引用 Workflow 能力 | `src/workflow.rs` | 门面：`pub use peri_workflow::{error, journal, progress, protocol, registry, rpc, runner, tool}` | 同上；消费方（Middleware 等）不直接依赖 peri-workflow |
 
 ## 子系统
 
@@ -87,7 +86,6 @@
 | 测试文件存储 | src/sessions/filesystem.rs | `FilesystemThreadStore` |
 | SQLite 行写入原语 | src/sessions/sqlite_store/session_rows.rs + canonical.rs | `ThreadRowInsert`/`insert_thread_row`/`insert_binding_row`；共用列形状与 env 插入规则，child 从父 env 继承 |
 | 会话存储 re-export / 只读入口 | src/sessions/mod.rs | `SqliteThreadStore`/`FilesystemThreadStore`/`SessionResourcesImpl`；`open_session_resources_read_only`（crate 内）；`default_database_path`（读写共用的纯路径解析） |
-| Workflow 门面 | src/workflow.rs | 全量 re-export peri_workflow 模块 |
 | SQLite frozen 快照测试 | src/sessions/sqlite_store/frozen_snapshot_test.rs | `tests::frozen_snapshot_tests`；write-once roundtrip 与并发 backfill CAS；按 `cargo test -p peri-resources --lib -- frozen_snapshot` 验证 |
 | 有界读取性能证据（全部 `#[ignore]`） | src/sessions/sqlite_store/session_history_perf_test.rs | `history_perf_restore_and_paging_evidence`、`history_perf_excluded_bodies_are_never_decoded`、`history_perf_oversize_page_carries_one_body`、`history_perf_byte_budget_bounds_page_length`；夹具经门面建会话后直接写同一张 `messages` 表（归档行 `excluded=1`、有效行 `excluded=0`），计划取自生产语句常量而非重抄 SQL；canonical 索引 `idx_messages_active (thread_id, excluded)` 让有效范围读取（payloads/flags/positions）按两列定位而非逐行过滤；按 `cargo test -p peri-resources --lib -- history_perf_tests --ignored --nocapture` 运行（默认跑 10k/100k/1M） |
 | 历史窗口有界读取（默认关闭） | src/sessions/sqlite_store/session_data/history_window.rs + session_data/{history,inherited_blob,inherited_facts,inherited_page}.rs + session_data/port.rs + data.rs + resources.rs + remote/session_data.rs | `read_history_window_bounds`；`HistoryWindowPagePlan`；`load_history_body_chunk`；`seek_history_window`；`read_inherited_summary_cached`/`read_inherited_layout_cached`；`inherited_snapshot_id`；`InheritedSummary`/`InheritedLayout`/`BlobReader`；v15 起派生索引表已退役：写路径只落列文本，读取直接从 `threads.inherited_context` 扫描并校验身份/字节数；SQLite 阶段一只取候选行身份 + `rowid`，长度由 `content` blob 的 `sqlite3_blob_bytes` 逐行给出（不在 SQL 里 `length(CAST(...))`）；own chunk 经 blob 句柄增量读取，不执行 `substr(CAST(...))`；canonical inherited 分页按 `InheritedLayout` 的数组下标与原始 span 计算解码逻辑长度并只取预算内正文，非 canonical 信封才回退 `json_each`/`length(CAST(...))`/`substr`；summary 与 layout 共用 `walk_payload_spans`，bounds 只读首尾身份；布局/摘要按 `(thread, 列总字节数)` 进容量 16 的 LRU 缓存并复用解码检查点；bounds 从最新 `superseded_by` 重建 checkpoint，tail 固定 snapshot，bounds SQL 不引用 `threads.inherited_context`（冻结前缀由增量 blob 扫描给出），避免物化大字段；inherited 从 `threads.inherited_context` 读冻结前缀，`ancestor_thread_id` 取 `threads.parent_thread_id`（旧数据 None），snapshotId 由子会话/字节数/条数/祖先/首尾 id 做 SHA-256 派生；恢复准入走 `load_frozen_state` 单列读取（Present/LegacyAbsent/NotFound 三态，不经过 `load_active_snapshot`），`supports_history_window` 由后端声明读取能力并参与 initialize 协商；remote/emscripten 未覆写端口时走 trait 默认 `Unsupported`，不返回空页；回归 `session_history_window_test`、`session_history_inherited_test`、`inherited_facts_tests`、`history_window_incremental_tests` 与 `history_window_layout_tests`（16 MiB 分配断言为 `#[ignore]`，测量覆盖 bounds 查询本身，见用例文档） |
@@ -101,4 +99,4 @@
 
 - 消费方：`peri-tui/src/app/mod.rs` 与 `peri-tui/src/cli_print.rs`（`Resources::open_with`，默认或显式路径失败均直接传播）；`peri-controller/src/controller.rs`（`Resources::open()` 后调用）；`peri-middlewares/src/`（plugin/loader.rs、assembly.rs）
 - 契约类型：`ThreadStore` trait /`ThreadMeta`/`BaseMessage`/`MessageFlags` 事实源在 `peri-acp-types/src/store/mod.rs`（sessions/mod.rs 明确「接口契约归 peri-acp-types」）
-- 门面依赖：Cargo.toml 仅保留 `peri-workflow` 等实际 Resources 实现
+- 依赖边界：不依赖 workflow（门面已删除，接入归 builtin MCP 实例）；`peri-process`/`sqlx` 为 sessions 原生实现所需

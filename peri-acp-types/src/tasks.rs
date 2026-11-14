@@ -10,6 +10,7 @@ use std::{future::Future, pin::Pin};
 use serde::{Deserialize, Serialize};
 
 use crate::event::BackgroundTaskResult;
+use crate::session::MessageSource;
 
 /// Runtime evidence owned by a task producer, never reconstructed from a task ID.
 /// Implementations live with the task registry; adapters only retain the ticket.
@@ -70,6 +71,78 @@ pub enum BgTaskKind {
     Agent,
     Workflow,
     Mcp,
+}
+
+/// 取消通道的契约分类；执行侧按通道分发，不再按 kind 重排分支。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskCancelChannel {
+    /// 进程句柄：pid 交给执行环境换取取消回调。
+    Process,
+    /// 生产方提供的 kill 闭包。
+    Closure,
+    /// 外部 owner 承担的异步取消。
+    External,
+}
+
+impl BgTaskKind {
+    /// 稳定标签（并发上限错误、诊断与持久化投影使用）。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Shell => "shell",
+            Self::Agent => "agent",
+            Self::Workflow => "workflow",
+            Self::Mcp => "mcp",
+        }
+    }
+
+    /// 注册簿记中的历史展示名；`Shell` 保持 legacy `bg-shell`，不改既存投影。
+    pub const fn task_agent_name(self) -> &'static str {
+        match self {
+            Self::Shell => "bg-shell",
+            Self::Agent => "agent",
+            Self::Workflow => "workflow",
+            Self::Mcp => "mcp",
+        }
+    }
+
+    /// 提醒来源标签；完成通知与失败降级共用同一映射。
+    pub const fn reminder_source(self) -> &'static str {
+        match self {
+            Self::Shell => "shell",
+            Self::Agent => "subagent",
+            Self::Workflow => "workflow",
+            Self::Mcp => "mcp",
+        }
+    }
+
+    /// 完成消息来源；与 [`MessageSource::is_background_completion`] 的集合一致。
+    pub const fn completion_source(self) -> MessageSource {
+        match self {
+            Self::Shell => MessageSource::ShellComplete,
+            Self::Agent => MessageSource::SubAgentComplete,
+            Self::Workflow => MessageSource::WorkflowComplete,
+            Self::Mcp => MessageSource::McpNotification,
+        }
+    }
+
+    /// 归一化排序值（契约声明顺序）；canonical handoff 身份依赖该顺序。
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Shell => 0,
+            Self::Agent => 1,
+            Self::Workflow => 2,
+            Self::Mcp => 3,
+        }
+    }
+
+    /// 取消通道分类。
+    pub const fn cancel_channel(self) -> TaskCancelChannel {
+        match self {
+            Self::Shell => TaskCancelChannel::Process,
+            Self::Agent | Self::Workflow => TaskCancelChannel::Closure,
+            Self::Mcp => TaskCancelChannel::External,
+        }
+    }
 }
 
 /// 后台任务注册表事件（registry → executor 事件推送通道）
@@ -209,7 +282,8 @@ pub struct BgTaskRegistration {
     pub summary: String,
     /// OS 进程 PID（bg shell 有效；None = 无进程句柄）。
     pub pid: Option<u32>,
-    /// kill 闭包（Workflow 类任务的取消转发；None = kill 通道不可用）。
+    /// kill 闭包（`TaskCancelChannel::Closure` 类任务的取消转发；None = kill
+    /// 通道不可用，任务保留到自然完成）。
     pub kill: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
 
@@ -555,37 +629,5 @@ impl TaskManager for NoopTaskManager {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::TaskRecord;
-
-    /// `child_thread_id` 是可选增量字段：旧 JSON（无该键）继续可反序列化，
-    /// `None` 时不序列化该键，`Some` 时 roundtrip 保真。
-    #[test]
-    fn task_record_child_thread_id_is_backward_compatible() {
-        let legacy = serde_json::json!({
-            "task_id": "bg-01a1407d-c445-7ac3-a7ab-db7f4535cb10",
-            "kind": "agent",
-            "summary": "identity",
-            "started_at": "2026-10-16T00:00:00Z",
-            "status": "running",
-            "duration_ms": 0,
-            "output_preview": null,
-        });
-        let record: TaskRecord = serde_json::from_value(legacy).unwrap();
-        assert!(record.child_thread_id.is_none());
-        assert!(serde_json::to_value(&record)
-            .unwrap()
-            .get("child_thread_id")
-            .is_none());
-
-        let mut record = record;
-        record.child_thread_id = Some("01a1407d-c445-7ac3-a7ab-db6d6e66266c".into());
-        let value = serde_json::to_value(&record).unwrap();
-        assert_eq!(
-            value["child_thread_id"],
-            "01a1407d-c445-7ac3-a7ab-db6d6e66266c"
-        );
-        let back: TaskRecord = serde_json::from_value(value).unwrap();
-        assert_eq!(back.child_thread_id, record.child_thread_id);
-    }
-}
+#[path = "tasks_test.rs"]
+mod tests;
