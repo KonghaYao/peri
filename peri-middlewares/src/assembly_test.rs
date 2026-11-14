@@ -13,6 +13,7 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use async_trait::async_trait;
 use futures::{stream, TryStreamExt};
 use parking_lot::RwLock;
+use peri_acp_types::workflow::{AgentExecutor, AgentRunParams, AgentRunResult};
 use peri_agent::agent::workflow::WorkflowAgentContext;
 use peri_agent::session::subagent::SubagentLlmSource;
 use peri_agent::{
@@ -35,8 +36,6 @@ use peri_model::{
     Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult, ModelStream,
     ModelStreamEvent, StopReason,
 };
-use peri_resources::workflow::protocol::{AgentRunParams, AgentRunResult};
-use peri_resources::workflow::runner::AgentExecutor;
 
 use crate::{
     assembly::{

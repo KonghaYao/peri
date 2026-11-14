@@ -292,13 +292,7 @@ async fn process_entry(
     status: MqReceiveStatus,
 ) {
     let message = QueuedMessage::from_mq_entry(entry.clone());
-    let terminal_result = matches!(
-        entry.source,
-        MessageSource::ShellComplete
-            | MessageSource::SubAgentComplete
-            | MessageSource::WorkflowComplete
-            | MessageSource::McpNotification
-    );
+    let terminal_result = entry.source.is_background_completion();
     let delivery_id = message.delivery_id;
     let payload_id = payload_id(&entry.payload);
 

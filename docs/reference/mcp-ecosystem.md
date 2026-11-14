@@ -275,7 +275,7 @@ peri 侧现状：资源读取已由 `McpResourceTool`（`mcp_read_resource`，`p
 配套关系的几条细则：
 
 - **可发现性**：写工具的 `description` 显式声明其对应的资源 URI。读 URI ↔ 写工具的对应关系是**约定而非机制**——server 负责文档化，client 按约定引导 agent。
-- **命名区分（peri 内部）**：`peri-resources`（内部数据访问层，**可读写**：config / sessions / workflow）≠ MCP resources（协议，**只读**）。两者是「内部访问通道」与「对外只读视图」的关系，同名不同义；文档与代码注释须明确所指。
+- **命名区分（peri 内部）**：`peri-resources`（内部数据访问层，**可读写**：config / sessions）≠ MCP resources（协议，**只读**）。两者是「内部访问通道」与「对外只读视图」的关系，同名不同义；文档与代码注释须明确所指。
 - **边界映射**：peri 内部数据若对外暴露，映射为「只读资源 + 写工具」两半；内部写路径需预留事件出口，才能在订阅存在时触发 updated 通知。
 - **不引入自定义写方法**：`resources/write` 一类扩展方法破坏互操作（其他 client 不认），不进入对外契约；仅可在内部实现中预留。
 

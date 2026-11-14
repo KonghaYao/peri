@@ -94,6 +94,19 @@ pub enum MessageSource {
     SessionRecovery,
 }
 
+impl MessageSource {
+    /// 四条后台终态来源；Receive 据此识别 canonical 后台完成，不按 task kind 判定。
+    pub const fn is_background_completion(&self) -> bool {
+        matches!(
+            self,
+            Self::SubAgentComplete
+                | Self::ShellComplete
+                | Self::WorkflowComplete
+                | Self::McpNotification
+        )
+    }
+}
+
 // ─── QueuedMessage ───────────────────────────────────────────────────────────
 
 /// Queue payload. Scheduling (`MessageKind`) is deliberately orthogonal to content semantics.

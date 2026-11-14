@@ -297,7 +297,7 @@ Git postcondition 只比较 Workflow 前后发生变化的路径，已有且未�
 
 ## 10. CLI 与 artifact 分发
 
-- **CLI**：`peri workflow <子命令>` 在配置与会话初始化之前分发（`peri-tui/src/cli_workflow.rs` → `peri_acp::workflow_cli::run` → `peri-workflow/src/cli.rs`），子命令经白名单校验后使用同一份已校验 artifact 运行。
+- **CLI**：`peri workflow <子命令>` 在配置与会话初始化之前分发（`peri-tui/src/cli_workflow.rs` → `peri_workflow::cli::run`，不经 ACP），子命令经白名单校验后使用同一份已校验 artifact 运行。
 - **artifact 解析**（`runner/artifact.rs`）：显式注入目录（`PERI_WORKFLOW_ARTIFACT_DIR`）→ 本机缓存 `~/.peri/workflow/<version>/<内容身份>/` → 随包 sidecar（可执行文件旁 `peri-resources/workflow/<内容身份>/`）。校验包身份（name/version/main/协议/buildId）、入口不越界与入口 SHA-256；本地来源均不可用时默认离线 fail closed。
 - **网络获取**：仅显式 `PERI_WORKFLOW_ALLOW_NPX_FALLBACK=1` 允许一次固定版本 registry 获取，获取内容仍须通过同一身份与摘要校验；不存在直接执行网络内容的路径。
 - **红线**：Rust 侧零 JS 嵌入（`ARC-WORKFLOW-DIST-001`，[architecture-contracts.md](../standards/architecture-contracts.md)）；分发缺口不得以嵌入 JS 产物解决，表述以 [workflow-mcp.md](workflow-mcp.md) §2.3 为准。

@@ -35,12 +35,7 @@ pub(crate) fn background_result_reminder(
     result: &BackgroundTaskResult,
     kind: BgTaskKind,
 ) -> TrustedSystemReminder {
-    let reminder_source = match kind {
-        BgTaskKind::Agent => "subagent",
-        BgTaskKind::Shell => "shell",
-        BgTaskKind::Workflow => "workflow",
-        BgTaskKind::Mcp => "mcp",
-    };
+    let reminder_source = kind.reminder_source();
     try_trusted_reminder(
         ReminderCategory::Task,
         reminder_source,
@@ -124,12 +119,7 @@ impl AsyncRouter {
         result: &BackgroundTaskResult,
         kind: BgTaskKind,
     ) -> QueuedMessage {
-        let source = match kind {
-            BgTaskKind::Agent => MessageSource::SubAgentComplete,
-            BgTaskKind::Shell => MessageSource::ShellComplete,
-            BgTaskKind::Workflow => MessageSource::WorkflowComplete,
-            BgTaskKind::Mcp => MessageSource::McpNotification,
-        };
+        let source = kind.completion_source();
         QueuedMessage::system_reminder_with_delivery_id(
             MessageKind::Defer,
             source,
