@@ -311,9 +311,12 @@ fn misplaced_capabilities_and_legacy_overrides_are_typed_errors() {
         "--workspace",
         workspace_arg(dir.path()),
     ]))
-    .unwrap_err()
-    .to_string();
-    assert!(error.contains("not a Peri capability selector"), "{error}");
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("not a Peri capability selector"),
+        "{message}"
+    );
 
     write_mcp_file(dir.path(), r#"{"mcpServers":{"web":{"command":"npx"}}}"#);
     let error = resolve_options(parse(&[
@@ -321,9 +324,12 @@ fn misplaced_capabilities_and_legacy_overrides_are_typed_errors() {
         "--workspace",
         workspace_arg(dir.path()),
     ]))
-    .unwrap_err()
-    .to_string();
-    assert!(error.contains("must not declare command/url"), "{error}");
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("must not declare command/url"),
+        "{message}"
+    );
 
     write_mcp_file(
         dir.path(),
@@ -334,10 +340,10 @@ fn misplaced_capabilities_and_legacy_overrides_are_typed_errors() {
         "--workspace",
         workspace_arg(dir.path()),
     ]))
-    .unwrap_err()
-    .to_string();
+    .unwrap_err();
+    let message = format!("{error:#}");
     assert!(
-        error.contains("unknown legacy meta_harness policy key"),
-        "{error}"
+        message.contains("unknown legacy meta_harness policy key"),
+        "{message}"
     );
 }

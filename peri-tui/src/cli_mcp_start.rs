@@ -177,7 +177,7 @@ fn read_mcp_capability_file(workspace: &Path) -> Result<Option<McpCapabilityFile
     let document: serde_json::Value = serde_json::from_str(&raw)
         .with_context(|| format!("invalid JSON in MCP config {}", path.display()))?;
     let file = parse_mcp_file_capabilities(&document)
-        .map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))?;
+        .with_context(|| format!("invalid MCP capability config {}", path.display()))?;
     Ok(Some(file))
 }
 
