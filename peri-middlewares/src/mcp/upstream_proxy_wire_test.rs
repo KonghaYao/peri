@@ -678,6 +678,15 @@ async fn connect_auto_upstream(proxy: &UpstreamProxy, mock: MockUpstream) -> Ups
 }
 
 async fn connect_legacy_upstream(proxy: &UpstreamProxy, mock: MockUpstream) -> Upstream {
+    let upstream = handshake_legacy_upstream(proxy, mock).await;
+    proxy
+        .attach(upstream.generation, upstream.peer())
+        .expect("attach legacy upstream");
+    upstream
+}
+
+/// 完成 legacy 握手但不 attach，供代次切换顺序测试控制装配时机。
+async fn handshake_legacy_upstream(proxy: &UpstreamProxy, mock: MockUpstream) -> Upstream {
     let (server_io, client_io) = pair();
     let server_task = tokio::spawn(async move { rmcp::serve_server(mock, server_io).await });
     let (generation, handler) = proxy.new_connection();
@@ -688,13 +697,20 @@ async fn connect_legacy_upstream(proxy: &UpstreamProxy, mock: MockUpstream) -> U
         .await
         .expect("server task joins")
         .expect("mock upstream serves");
-    proxy
-        .attach(generation, client.peer().clone())
-        .expect("attach legacy upstream");
     Upstream {
         server,
         generation,
         _client: Some(client),
+    }
+}
+
+impl Upstream {
+    fn peer(&self) -> Peer<RoleClient> {
+        self._client
+            .as_ref()
+            .expect("legacy client retained")
+            .peer()
+            .clone()
     }
 }
 

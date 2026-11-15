@@ -331,6 +331,107 @@ async fn stale_subscription_operations_do_not_reset_current_generation() {
     stop_server(second_upstream.server).await;
 }
 
+#[tokio::test]
+async fn old_generation_loss_after_attach_keeps_replacement_health_and_registry() {
+    let proxy = UpstreamProxy::new("workspace");
+    let first_upstream = connect_legacy_upstream(&proxy, MockUpstream::new()).await;
+    let old_generation = first_upstream.generation;
+    assert!(proxy
+        .inner
+        .acquire_subscription(old_generation, URI)
+        .expect("old generation subscribe"));
+
+    let second_upstream = connect_legacy_upstream(&proxy, MockUpstream::new()).await;
+    let current = second_upstream.generation;
+    assert!(proxy.is_ready());
+    assert!(proxy
+        .inner
+        .acquire_subscription(current, URI)
+        .expect("replacement first subscribe"));
+
+    proxy.mark_lost(old_generation, UpstreamLossReason::TransportClosed);
+    assert!(proxy.is_ready(), "旧代次的丢失事件不得降级新连接");
+    assert!(
+        !proxy
+            .inner
+            .acquire_subscription(current, URI)
+            .expect("replacement second subscribe"),
+        "旧代次的丢失事件不得清空新代次的订阅计数"
+    );
+
+    stop_server(first_upstream.server).await;
+    stop_server(second_upstream.server).await;
+}
+
+#[tokio::test]
+async fn old_generation_loss_before_attach_leaves_replacement_ready() {
+    let proxy = UpstreamProxy::new("workspace");
+    let first_upstream = connect_legacy_upstream(&proxy, MockUpstream::new()).await;
+    let old_generation = first_upstream.generation;
+    let replacement = handshake_legacy_upstream(&proxy, MockUpstream::new()).await;
+
+    proxy.mark_lost(old_generation, UpstreamLossReason::TransportClosed);
+    assert!(matches!(proxy.health(), CapabilityHealth::Degraded { .. }));
+    proxy
+        .attach(replacement.generation, replacement.peer())
+        .expect("replacement attaches after old loss");
+    assert!(proxy.is_ready());
+
+    assert!(proxy
+        .inner
+        .acquire_subscription(old_generation, URI)
+        .is_err());
+    assert!(proxy
+        .inner
+        .acquire_subscription(replacement.generation, URI)
+        .expect("replacement subscribe"));
+
+    stop_server(first_upstream.server).await;
+    stop_server(replacement.server).await;
+}
+
+#[tokio::test]
+async fn overlapping_attach_and_old_loss_keep_replacement_ready() {
+    let proxy = UpstreamProxy::new("workspace");
+    let first_upstream = connect_legacy_upstream(&proxy, MockUpstream::new()).await;
+    let old_generation = first_upstream.generation;
+    let replacement = handshake_legacy_upstream(&proxy, MockUpstream::new()).await;
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let attach = tokio::spawn({
+        let proxy = proxy.clone();
+        let barrier = Arc::clone(&barrier);
+        let generation = replacement.generation;
+        let peer = replacement.peer();
+        async move {
+            barrier.wait().await;
+            proxy.attach(generation, peer)
+        }
+    });
+    let lost = tokio::spawn({
+        let proxy = proxy.clone();
+        let barrier = Arc::clone(&barrier);
+        async move {
+            barrier.wait().await;
+            proxy.mark_lost(old_generation, UpstreamLossReason::TransportClosed);
+        }
+    });
+
+    attach.await.expect("attach join").expect("attach succeeds");
+    lost.await.expect("lost join");
+    assert!(proxy.is_ready(), "并发切换后新代次必须保持 Ready");
+    assert!(
+        proxy
+            .inner
+            .acquire_subscription(replacement.generation, URI)
+            .is_ok(),
+        "并发切换后注册表必须属于新代次"
+    );
+
+    stop_server(first_upstream.server).await;
+    stop_server(replacement.server).await;
+}
+
 #[test]
 fn old_generation_progress_cleanup_preserves_current_mapping() {
     let proxy = UpstreamProxy::new("workspace");
