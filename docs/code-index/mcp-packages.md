@@ -1,5 +1,7 @@
 # MCP package 代码索引
 
+更新：2026-11-16
+
 Builtin MCP 的工具与 server handler 由独立 crate 持有；配置来源 I/O 由独立 `peri-mcp-config` 数据面持有，session MCP 实例注册、配置投影、transport、宿主 context、policy 与生命周期仍由 `peri-middlewares` 装配。每个 crate 的依赖方向面向 `peri-mcp-common`、`peri-agent` / `peri-acp-types` / `peri-resources` 等稳定能力接口，不依赖 `peri-middlewares`。
 
 Workspace 后台任务的资源结算以 `workspace/src/shell_tasks.rs` 为准：owner 在进程退出、管道回收和终态通知完成后结算；会话释放只取消 TaskManager 已知 external task 并等待 settled。Workspace 自身没有 scope close barrier、旧 owner 扫描、连接重建或跨进程恢复；generic 模式无 owner，不参与 session 隔离。宿主恢复时按 owner 调用 `shell_task_list` 重新发现仍存活的 Shell 并建立当前订阅（见 [peri-middlewares](peri-middlewares.md) 的 `client/workspace_watch.rs`），这不是 Workspace 进程的自我恢复。
