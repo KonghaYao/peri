@@ -17,30 +17,30 @@
 //! - 用户显式写了 `subscriptions`（含空配置）⇒ **优先于默认注入**，空配置经
 //!   `initialize` / `reconnect` 的 `!is_empty()` 过滤后退化为「不订阅」。
 
+use peri_acp_types::builtin_mcp::capability;
 use peri_acp_types::plugin::McpSubscriptionsConfig;
-use peri_mcp_workspace::GIT_REF_RESOURCE_URI;
 
-/// 带默认订阅的 builtin 实例名（注册表 `name`；本文件是唯一持有该字面量的地方）。
-const WORKSPACE_INSTANCE: &str = "workspace";
-
-/// `workspace` 实例的默认订阅配置：只订阅 git ref 资源。
-pub(crate) fn workspace_default_subscriptions() -> McpSubscriptionsConfig {
-    McpSubscriptionsConfig {
-        resources: vec![GIT_REF_RESOURCE_URI.to_string()],
+/// 实例名 → 默认订阅；无默认订阅的实例返回 `None`（不建立订阅）。
+///
+/// 订阅清单的唯一声明源是能力表的 `CapabilityResourceSurface::default_subscriptions`；
+/// 本函数只把声明投影成 typed 配置，不再持有实例名字面量。
+pub(crate) fn default_subscriptions_for(instance: &str) -> Option<McpSubscriptionsConfig> {
+    let subscriptions = capability(instance)?.resources.default_subscriptions;
+    if subscriptions.is_empty() {
+        return None;
+    }
+    Some(McpSubscriptionsConfig {
+        resources: subscriptions.iter().map(|uri| (*uri).to_string()).collect(),
         tools_list_changed: false,
         prompts_list_changed: false,
         resources_list_changed: false,
-    }
-}
-
-/// 实例名 → 默认订阅；无默认订阅的实例返回 `None`（不建立订阅）。
-pub(crate) fn default_subscriptions_for(instance: &str) -> Option<McpSubscriptionsConfig> {
-    (instance == WORKSPACE_INSTANCE).then(workspace_default_subscriptions)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use peri_mcp_workspace::GIT_REF_RESOURCE_URI;
 
     #[test]
     fn only_workspace_has_default_subscriptions() {

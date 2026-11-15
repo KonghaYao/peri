@@ -408,7 +408,7 @@ fn effective_name_of(instance: &str, original: &str) -> &'static str {
         .iter()
         .find(|tool| tool.original_name == original)
         .unwrap_or_else(|| panic!("声明表应含 `{instance}` 的原始工具名 `{original}`"))
-        .effective_name
+        .legacy_name
 }
 
 fn list(names: &[&str]) -> ToolsValue {
@@ -427,7 +427,7 @@ fn explorer_disallow_matches_workspace_effective_name() {
         .expect("workspace 实例应有声明")
         .tools
         .iter()
-        .map(|tool| make_tool(tool.effective_name))
+        .map(|tool| make_tool(tool.legacy_name))
         .collect();
     parent.push(make_tool(effective_name_of("cron", "cron_register")));
     parent.push(make_tool("TodoWrite"));
@@ -482,7 +482,7 @@ fn coder_allowlist_matches_workspace_effective_name() {
         .expect("workspace 实例应有声明")
         .tools
         .iter()
-        .map(|tool| make_tool(tool.effective_name))
+        .map(|tool| make_tool(tool.legacy_name))
         .collect();
     parent.push(make_tool("TodoWrite"));
     parent.push(make_tool(effective_name_of("cron", "cron_list")));

@@ -634,7 +634,7 @@ fn registry_effective_name(instance: &str, original: &str) -> &'static str {
         .iter()
         .find(|tool| tool.original_name == original)
         .unwrap_or_else(|| panic!("声明表应含 `{instance}` 的原始工具名 `{original}`"))
-        .effective_name
+        .legacy_name
 }
 
 /// IF-D6 判定型归一的等价性：对声明表逐项，effective name 的判定**等于**原始名。
@@ -651,7 +651,7 @@ fn builtin_effective_names_match_original_name_policy() {
     assert_eq!(tools.len(), expected, "声明表遍历必须覆盖注册表全部行");
 
     for tool in tools {
-        let (effective, original) = (tool.effective_name, tool.original_name);
+        let (effective, original) = (tool.legacy_name, tool.original_name);
         assert_eq!(
             original_tool_name_of_effective(effective),
             Some(original),
@@ -684,7 +684,7 @@ fn builtin_effective_names_match_original_name_policy() {
             .iter()
             .find(|tool| tool.original_name == original)
             .unwrap_or_else(|| panic!("声明表应含 `{instance}` 的原始工具名 `{original}`"));
-        for name in [original, tool.effective_name] {
+        for name in [original, tool.legacy_name] {
             assert_eq!(
                 default_requires_approval(name),
                 requires_approval,
@@ -775,7 +775,7 @@ fn unknown_mcp_prefix_remains_conservative() {
 /// ② 预留但未实现的实例名不进归一表 ⇒ 其 effective name 仍是未知 MCP 工具，保守敏感。
 #[test]
 fn builtin_reserved_name_is_not_parity_hijackable() {
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         assert!(
             is_reserved_instance_name(instance.name),
             "归一表只允许以保留实例名为键（保留名由加载期 typed error 保护，A3）：{}",
@@ -834,9 +834,9 @@ fn sensitive_entries_use_model_names_and_parity_description() {
         assert!(
             entries
                 .iter()
-                .any(|entry| entry.name == tool.effective_name && !entry.prefix_match),
+                .any(|entry| entry.name == tool.legacy_name && !entry.prefix_match),
             "`{}` 应以 effective name 的精确条目出现",
-            tool.effective_name
+            tool.legacy_name
         );
     }
 
@@ -844,9 +844,9 @@ fn sensitive_entries_use_model_names_and_parity_description() {
     let artifact = peri_acp_types::builtin_mcp::find("artifact").expect("artifact 实例应有声明");
     for tool in artifact.tools {
         assert!(
-            !names.contains(&tool.effective_name),
+            !names.contains(&tool.legacy_name),
             "`{}` 不应在敏感清单（artifact 不审批）",
-            tool.effective_name
+            tool.legacy_name
         );
     }
 

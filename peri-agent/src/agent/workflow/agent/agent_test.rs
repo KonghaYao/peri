@@ -18,21 +18,21 @@ fn agent_type_tool_matching_is_case_insensitive() {
 /// 必须仍匹配同一能力；否则允许列表丢工具、禁止列表放行写入和 shell。
 #[test]
 fn workflow_tool_policy_matches_builtin_names_in_both_directions() {
-    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
         for tool in instance.tools {
             assert!(
-                tool_name_in(&[tool.original_name.into()], tool.effective_name),
+                tool_name_in(&[tool.original_name.into()], tool.legacy_name),
                 "旧声明必须覆盖 MCP 工具：{}",
-                tool.effective_name
+                tool.legacy_name
             );
             assert!(
-                tool_name_in(&[tool.effective_name.into()], tool.original_name),
+                tool_name_in(&[tool.legacy_name.into()], tool.original_name),
                 "MCP 声明必须覆盖原始工具：{}",
                 tool.original_name
             );
             assert!(tool_name_in(
                 &[tool.original_name.to_lowercase()],
-                tool.effective_name
+                tool.legacy_name
             ));
         }
     }

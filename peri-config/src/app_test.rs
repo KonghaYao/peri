@@ -673,11 +673,11 @@ fn builtin_instance_policy_keys_are_known_keys() {
         BUILTIN_INSTANCE_POLICY_KEYS.len(),
         "策略键全部保留"
     );
-    for key in BUILTIN_INSTANCE_POLICY_KEYS {
+    for key in BUILTIN_INSTANCE_POLICY_KEYS.iter() {
         assert_eq!(map.get(*key), Some(&false), "{key} 是已知键，必须保留");
     }
     // 两表分离（A7）：策略键不再属于链槽位名表，但仍是合法配置键。
-    for key in BUILTIN_INSTANCE_POLICY_KEYS {
+    for key in BUILTIN_INSTANCE_POLICY_KEYS.iter() {
         assert!(!MIDDLEWARE_NAMES.contains(key), "{key} 不应在链槽位名表内");
     }
 }

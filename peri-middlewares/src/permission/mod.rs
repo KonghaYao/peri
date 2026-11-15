@@ -148,19 +148,15 @@ pub struct SensitiveToolEntry {
 
 /// builtin 工具的模型面名字查表。
 ///
-/// 名字字面量只在 `peri_acp_types::builtin_mcp` 声明一份（A4/IF-D6：禁止在消费点
-/// 硬编码 effective name 字面量或自建第二张反查表）。声明表由 `mcp::builtin::tests`
+/// 迁移期使用能力表声明的 `legacy_name`（模型在 v4 六实例路径实际看到的名字）；
+/// P4 切换单出口后改为 `model_tool_name_of`。名字字面量只在
+/// `peri_acp_types::builtin_mcp::v5` 声明一份（A4/IF-D6：禁止在消费点硬编码
+/// effective name 字面量或自建第二张反查表）。声明表由 `mcp::builtin::tests`
 /// 与 `builtin_mcp_test.rs` 锁定，因此这里的查表失败只可能是改坏了声明表。
 fn builtin_tool_effective_name(instance: &str, original_name: &str) -> &'static str {
-    peri_acp_types::builtin_mcp::find(instance)
-        .and_then(|declared| {
-            declared
-                .tools
-                .iter()
-                .find(|tool| tool.original_name == original_name)
-        })
-        .map(|tool| tool.effective_name)
-        .expect("builtin 声明表必须声明该 (实例, 原始工具名)：见 peri-acp-types/src/builtin_mcp.rs")
+    peri_acp_types::builtin_mcp::legacy_display_name_of(instance, original_name).expect(
+        "builtin 声明表必须声明该 (实例, 原始工具名)：见 peri-acp-types/src/builtin_mcp/v5.rs",
+    )
 }
 
 /// 敏感工具规则清单（10_hitl 段落内容来源）。
@@ -254,14 +250,16 @@ pub fn format_sensitive_tools_for_disabled(disabled: &std::collections::HashSet<
     sensitive_tool_entries()
         .iter()
         .filter(|entry| {
-            !peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
+            !peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
                 .iter()
-                .any(|instance| {
-                    disabled.contains(instance.policy_key)
-                        && instance
+                .any(|capability| {
+                    let closed = disabled.contains(capability.name)
+                        || disabled.contains(capability.legacy_policy_key);
+                    closed
+                        && capability
                             .tools
                             .iter()
-                            .any(|tool| tool.effective_name == entry.name)
+                            .any(|tool| tool.legacy_name == entry.name)
                 })
         })
         .map(|e| {

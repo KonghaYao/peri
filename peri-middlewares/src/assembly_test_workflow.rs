@@ -43,7 +43,7 @@ fn workflow_build_tools_filters_disabled() {
     for (name, direct) in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
         .iter()
         .flat_map(|instance| instance.tools.iter())
-        .map(|declaration| (declaration.effective_name, declaration.direct))
+        .map(|declaration| (declaration.legacy_name, declaration.direct))
     {
         let entry = all.iter().find(|tool| tool.name() == name);
         if direct {
@@ -75,9 +75,9 @@ fn workflow_build_tools_filters_disabled() {
         .expect("workspace 必须是已实现实例（W3-A 冻结注册表）");
     for declaration in workspace.tools {
         assert!(
-            all_names.contains(&declaration.effective_name),
+            all_names.contains(&declaration.legacy_name),
             "全开时 workflow 工具 {} 应存在: {all_names:?}",
-            declaration.effective_name
+            declaration.legacy_name
         );
     }
 
@@ -103,9 +103,9 @@ fn workflow_build_tools_filters_disabled() {
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         for declaration in workspace.tools {
             assert!(
-                !names.contains(&declaration.effective_name),
+                !names.contains(&declaration.legacy_name),
                 "workflow disabled WorkspaceMiddleware 后 {} 仍存在: {names:?}",
-                declaration.effective_name
+                declaration.legacy_name
             );
         }
         assert!(
@@ -138,7 +138,7 @@ fn workflow_build_tools_filters_disabled() {
     let all_keys: std::collections::HashSet<String> =
         peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
             .iter()
-            .map(|instance| instance.policy_key.to_string())
+            .map(|instance| instance.legacy_policy_key.to_string())
             .collect();
     let tools = pool_factory.build_tools("/tmp/contract-test", &all_keys, None, None);
     assert!(
@@ -248,18 +248,18 @@ async fn workflow_shell_tool_face_is_the_workspace_bridge() {
         .expect("workspace 必须声明 Bash");
     let shell = with_pool
         .iter()
-        .find(|tool| tool.name() == declared.effective_name)
+        .find(|tool| tool.name() == declared.legacy_name)
         .unwrap_or_else(|| {
             panic!(
                 "带池侧 workflow 面应含 {}: {:?}",
-                declared.effective_name,
+                declared.legacy_name,
                 with_pool.iter().map(|t| t.name()).collect::<Vec<_>>()
             )
         });
     assert!(
         shell.is_direct(),
         "{} 的直连性必须等于注册表声明（AW3-03）",
-        declared.effective_name
+        declared.legacy_name
     );
     assert_eq!(
         with_pool

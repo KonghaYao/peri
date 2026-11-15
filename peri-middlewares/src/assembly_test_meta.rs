@@ -69,7 +69,7 @@ fn builtin_capability_closure_matrix_covers_all_faces() {
     let all_builtin: Vec<&'static str> = peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
         .iter()
         .flat_map(|instance| instance.tools.iter())
-        .map(|declaration| declaration.effective_name)
+        .map(|declaration| declaration.legacy_name)
         .collect();
     let all_declarations: Vec<_> = peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
         .iter()
@@ -79,18 +79,18 @@ fn builtin_capability_closure_matrix_covers_all_faces() {
     // (关闭的实例名列表, 进入 disabled 的策略键列表)
     let both_keys: Vec<&str> = peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
         .iter()
-        .map(|instance| instance.policy_key)
+        .map(|instance| instance.legacy_policy_key)
         .collect();
     let cases: Vec<(Vec<&'static str>, Vec<&str>)> = {
         let mut cases = Vec::new();
-        for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+        for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
             cases.push((
                 instance
                     .tools
                     .iter()
-                    .map(|declaration| declaration.effective_name)
+                    .map(|declaration| declaration.legacy_name)
                     .collect::<Vec<_>>(),
-                vec![instance.policy_key],
+                vec![instance.legacy_policy_key],
             ));
         }
         cases.push((all_builtin.clone(), both_keys.clone()));
@@ -101,7 +101,7 @@ fn builtin_capability_closure_matrix_covers_all_faces() {
     let declared_direct = |tool: &str| -> bool {
         all_declarations
             .iter()
-            .find(|declaration| declaration.effective_name == tool)
+            .find(|declaration| declaration.legacy_name == tool)
             .unwrap_or_else(|| panic!("声明表应含 builtin 工具 {tool}"))
             .direct
     };
@@ -315,29 +315,29 @@ fn meta_harness_disabled_tools_removed_from_chain() {
         ctx.mcp_pool = Some(pool_with_builtin_instances());
         assemble_tool_names(&ctx)
     };
-    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
         for declaration in instance.tools {
             assert!(
-                open_names.iter().any(|n| n == declaration.effective_name),
+                open_names.iter().any(|n| n == declaration.legacy_name),
                 "全开时 builtin 工具 {} 必须在链上: {open_names:?}",
-                declaration.effective_name
+                declaration.legacy_name
             );
         }
     }
 
     // builtin 实例关闭：关闭键按注册表 policy_key 命中，工具面同时归零。
-    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
         let mut ctx = base_context();
         ctx.mcp_pool = Some(pool_with_builtin_instances());
         ctx.meta_harness_disabled
-            .insert(instance.policy_key.to_string());
+            .insert(instance.legacy_policy_key.to_string());
         let tool_names = assemble_tool_names(&ctx);
         for declaration in instance.tools {
             assert!(
-                !tool_names.iter().any(|n| n == declaration.effective_name),
+                !tool_names.iter().any(|n| n == declaration.legacy_name),
                 "disabled {} 后 builtin 工具 {} 仍可见: {tool_names:?}",
-                instance.policy_key,
-                declaration.effective_name
+                instance.legacy_policy_key,
+                declaration.legacy_name
             );
         }
         // 另一实例不受影响（存活证据取任一个未关闭实例的工具）。
@@ -345,13 +345,13 @@ fn meta_harness_disabled_tools_removed_from_chain() {
             .iter()
             .filter(|other| other.name != instance.name)
             .flat_map(|other| other.tools.iter())
-            .map(|tool| tool.effective_name)
+            .map(|tool| tool.legacy_name)
             .next()
             .expect("注册表内至少两个实例（关闭语义的对照面）");
         assert!(
             tool_names.iter().any(|n| n == survivor),
             "关闭 {} 不得影响 {survivor}: {tool_names:?}",
-            instance.policy_key
+            instance.legacy_policy_key
         );
     }
 }
@@ -413,12 +413,12 @@ fn meta_harness_ask_user_tool_follows_hitl_disabled() {
 fn meta_harness_disabled_parent_tools_filtered() {
     use crate::subagent::SubAgentMiddleware;
 
-    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
         let mut ctx = base_context();
         // 需要 builtin pool：否则 parent_tools 的 builtin 面为空，断言成空转。
         ctx.mcp_pool = Some(pool_with_builtin_instances());
         ctx.meta_harness_disabled
-            .insert(instance.policy_key.to_string());
+            .insert(instance.legacy_policy_key.to_string());
         let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
         let subagent = out
             .subagent_mw
@@ -429,10 +429,10 @@ fn meta_harness_disabled_parent_tools_filtered() {
         let parent_names: Vec<&str> = tool.parent_tools.iter().map(|t| t.name()).collect();
         for declaration in instance.tools {
             assert!(
-                !parent_names.contains(&declaration.effective_name),
+                !parent_names.contains(&declaration.legacy_name),
                 "disabled {} 后 parent_tools 仍含 {}: {parent_names:?}",
-                instance.policy_key,
-                declaration.effective_name
+                instance.legacy_policy_key,
+                declaration.legacy_name
             );
         }
     }
@@ -454,7 +454,7 @@ fn meta_harness_disabled_parent_tools_filtered() {
     let declared: Vec<(&str, bool)> = peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
         .iter()
         .flat_map(|instance| instance.tools.iter())
-        .map(|declaration| (declaration.effective_name, declaration.direct))
+        .map(|declaration| (declaration.legacy_name, declaration.direct))
         .collect();
     let parent_names: Vec<&str> = tool.parent_tools.iter().map(|t| t.name()).collect();
     for (name, direct) in &declared {
@@ -500,7 +500,7 @@ fn meta_harness_disabled_parent_tools_filtered() {
     assert!(
         !web.tools
             .iter()
-            .any(|tool| closed_names.contains(&tool.effective_name)),
+            .any(|tool| closed_names.contains(&tool.legacy_name)),
         "关闭 WebMiddleware 后 parent_tools 不得含 web 实例工具: {closed_names:?}"
     );
     assert!(
@@ -541,7 +541,7 @@ fn middleware_names_match_production_blueprint() {
     let policy_keys: std::collections::HashSet<&str> =
         peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
             .iter()
-            .map(|instance| instance.policy_key)
+            .map(|instance| instance.legacy_policy_key)
             .collect();
     let const_names: std::collections::HashSet<&str> = MIDDLEWARE_NAMES.iter().copied().collect();
 

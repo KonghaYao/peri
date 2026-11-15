@@ -98,7 +98,7 @@ fn builtin_default_layer_inserts_complete_entries() {
         "零用户配置时应恰有两个 builtin 条目，实际 keys: {:?}",
         merged.mcp_servers.keys().collect::<Vec<_>>()
     );
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let entry = merged
             .mcp_servers
             .get(instance.name)
@@ -169,7 +169,7 @@ fn empty_user_entry_still_becomes_system_direct_instance() {
     // `{"cron": {}}` 与 `{"web": {}}` 走同一条「规则 2：存在且无
     // command/url」分支，差别只在 direct 集合（cron 为空集，零工具提升）。夹具按名字
     // 逐一构造，因此每个实例都必须各自证明一次。
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let name = instance.name;
         let (_dir, cwd, claude_home, global_path) =
             project_with_servers(&format!(r#"{{"{name}":{{}}}}"#));
@@ -222,7 +222,7 @@ fn workspace_default_subscription_is_injected_by_overlay() {
         crate::mcp::builtin::default_subscriptions_for("workspace"),
         "workspace 必须带默认订阅（git ref 资源）"
     );
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         if instance.name == "workspace" {
             continue;
         }
@@ -370,7 +370,7 @@ fn every_reserved_instance_is_implemented_and_injected_with_builtin_identity() {
         "保留名逐项已实现 ⇒ 产物键集必须恰等于保留名表（不多不少）: {:?}",
         merged.mcp_servers.keys().collect::<Vec<_>>()
     );
-    for name in BUILTIN_RESERVED_INSTANCE_NAMES {
+    for name in BUILTIN_RESERVED_INSTANCE_NAMES.iter() {
         assert!(
             peri_acp_types::builtin_mcp::find(name).is_some(),
             "{name} 必须已在注册表内（wave 3 后不存在「预留但未实现」的名字）"
@@ -605,6 +605,21 @@ fn reserved_name_takeover_is_rejected_even_when_injection_is_off() {
 }
 
 #[test]
+fn v5_single_exit_name_cannot_be_taken_over() {
+    // `peri` 是 v5 单出口保留名；兼容期也不允许用户条目用 command/url 冒充。
+    let (_dir, cwd, claude_home, global_path) =
+        project_with_servers(r#"{"peri":{"command":"fake-command"}}"#);
+    let error = load(
+        &cwd,
+        &claude_home,
+        &global_path,
+        &BuiltinInjectionPolicy::all(),
+    )
+    .expect_err("peri 不得被用户 command 接管");
+    assert_reserved_takeover(error, "peri");
+}
+
+#[test]
 fn non_reserved_instance_with_command_is_untouched() {
     // 非保留名照旧：overlay 不触碰（也不因它存在而失败）。
     let (_dir, cwd, claude_home, global_path) =
@@ -638,7 +653,7 @@ fn builtin_only_entry_written(raw: &str) -> Option<String> {
         .get("mcpServers")
         .or_else(|| value.get("config")?.get("mcpServers"))?
         .as_object()?;
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let Some(entry) = servers.get(instance.name) else {
             continue;
         };
@@ -752,7 +767,7 @@ fn system_mcp_tools_equals_declared_direct_set_for_every_instance() {
         &BuiltinInjectionPolicy::all(),
     )
     .unwrap();
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let tools = merged.mcp_servers[instance.name]
             .system_mcp_tools
             .clone()
@@ -942,7 +957,7 @@ fn builtin_injection_does_not_change_existing_hash_dedup_result() {
         non_builtin_keys(&not_injected),
         "builtin 注入不得改变既有 server 的去重结果"
     );
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         assert!(
             injected.mcp_servers.contains_key(instance.name)
                 && !not_injected.mcp_servers.contains_key(instance.name),

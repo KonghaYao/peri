@@ -144,18 +144,18 @@ fn builtin_tools_are_collected_with_declared_direct() {
             .find(|tool| tool.name() == name)
             .map(|tool| tool.is_direct())
     };
-    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
         for declaration in instance.tools {
             assert_eq!(
-                direct_of(declaration.effective_name),
+                direct_of(declaration.legacy_name),
                 Some(declaration.direct),
                 "{} 的 direct 必须等于注册表声明（IF-D13）",
-                declaration.effective_name
+                declaration.legacy_name
             );
             assert_eq!(
                 tools
                     .iter()
-                    .find(|tool| tool.name() == declaration.effective_name)
+                    .find(|tool| tool.name() == declaration.legacy_name)
                     .unwrap()
                     .visible_to_model(),
                 declaration.model_visible,

@@ -2,6 +2,10 @@
 //!
 //! Dispatched before Peri configuration or Agent startup, so the standalone
 //! service consumes no Peri config and needs no sibling worker binary.
+//!
+//! Migration-period syntax: one legacy instance per process. The v5 target
+//! (`peri mcp-start peri --capability ...`) and its config entry are P3; this
+//! file only resolves the valid instance set from the capability registry.
 
 use std::ffi::OsString;
 use std::path::PathBuf;

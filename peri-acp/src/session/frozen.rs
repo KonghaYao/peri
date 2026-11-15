@@ -291,9 +291,9 @@ pub(crate) fn build_collected_sections_with_capabilities(
 /// - middleware + false → `disabled_middlewares`；
 /// - middleware + true → 不放入 disabled（显式恢复）。
 ///
-/// **v4-part-2（A7）**：`false` 键的判定面是「链槽位名 ∪ builtin 实例策略键」两表并集
-/// （`MIDDLEWARE_NAMES` 只含链槽位名，`WebMiddleware` / `ArtifactMiddleware` 迁到
-/// `BUILTIN_INSTANCE_POLICY_KEYS`）。只读其中一张表会让 `"WebMiddleware": false`
+/// **v4-part-2（A7）**：`false` 键的判定面是「链槽位名 ∪ builtin 能力旧键」两表并集
+/// （`MIDDLEWARE_NAMES` 只含链槽位名，builtin 旧键由能力表 `legacy_policy_key` 派生）。
+/// 只读其中一张表会让 `"WebMiddleware": false`
 /// 退化为「键存在但无效果」——`disabled_middlewares` 既被链装配消费（关闭槽位），
 /// 也被 builtin 关闭集消费（`closed_instances`，IF-D10），漏项即能力闭合退化
 /// （ARC-CAPABILITY-CLOSURE-001）。

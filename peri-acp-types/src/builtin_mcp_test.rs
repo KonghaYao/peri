@@ -1,17 +1,18 @@
 //! `builtin_mcp.rs`（builtin 注册表纯数据）的契约测试。
 //!
 //! 边界：本文件只断言**数据形态**（唯一性 / 非空 / 名字合法 / 保留名覆盖 /
-//! policy_key 唯一 / 冻结字面量与直连声明 / 归一查表命中与未命中 / 用户无法从
-//! wire 构造 `ConfigSource::Builtin`）。
+//! 迁移期旧键唯一 / 冻结字面量与直连声明 / 归一查表命中与未命中 / 用户无法从
+//! wire 构造 `ConfigSource::Builtin`）。`BUILTIN_MCP_INSTANCES` 是由能力表派生的
+//! v4 兼容视图，测试锁定该投影而不锁定第二份权威。
 //! 「字面量 == `effective_tool_name()` 输出」与「`direct` 集合 == `system_mcp_tools`
 //! 集合」两条**计算侧**一致性断言归 `cargo test -p peri-middlewares --lib --
-//! mcp::builtin::tests`（规则一份实现、字面量一份声明）。
+//! mcp::builtin::tests`（规则一份实现、声明表一份）。
 
 use std::collections::HashSet;
 
 use crate::builtin_mcp::{
-    effective_name_of, find, is_reserved_instance_name, original_tool_name_of_effective,
-    BUILTIN_MCP_INSTANCES, BUILTIN_RESERVED_INSTANCE_NAMES,
+    find, is_reserved_instance_name, legacy_display_name_of, model_tool_name_of,
+    original_tool_name_of_effective, BUILTIN_MCP_INSTANCES, BUILTIN_RESERVED_INSTANCE_NAMES,
 };
 use crate::plugin::{ConfigSource, McpServerConfig};
 
@@ -46,7 +47,7 @@ fn instances_are_non_empty_and_unique() {
     assert!(!BUILTIN_MCP_INSTANCES.is_empty(), "已实现实例表不得为空");
     let mut names = HashSet::new();
     let mut identities = HashSet::new();
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         assert!(names.insert(instance.name), "实例名重复: {}", instance.name);
         assert!(
             identities.insert(instance.instance),
@@ -63,9 +64,10 @@ fn instances_are_non_empty_and_unique() {
 
 #[test]
 fn tools_are_non_empty_and_unique_per_instance() {
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let mut originals = HashSet::new();
-        let mut effectives = HashSet::new();
+        let mut model_names = HashSet::new();
+        let mut legacy_names = HashSet::new();
         for tool in instance.tools {
             assert!(
                 originals.insert(tool.original_name),
@@ -74,10 +76,16 @@ fn tools_are_non_empty_and_unique_per_instance() {
                 tool.original_name
             );
             assert!(
-                effectives.insert(tool.effective_name),
-                "实例 {} 的 effective name 重复: {}",
+                model_names.insert(tool.model_name),
+                "实例 {} 的 v5 模型面名字重复: {}",
                 instance.name,
-                tool.effective_name
+                tool.model_name
+            );
+            assert!(
+                legacy_names.insert(tool.legacy_name),
+                "实例 {} 的迁移期旧名重复: {}",
+                instance.name,
+                tool.legacy_name
             );
         }
         // 声明模板按实例收口（A4）：wave 1 的 web / artifact 必须携带模板（A9），
@@ -138,7 +146,7 @@ fn tools_are_non_empty_and_unique_per_instance() {
 
 #[test]
 fn names_and_identities_are_legal_components() {
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         assert!(
             is_legal_component(instance.name),
             "非法实例名: {}",
@@ -150,9 +158,9 @@ fn names_and_identities_are_legal_components() {
             instance.instance
         );
         assert!(
-            is_legal_component(instance.policy_key),
+            is_legal_component(instance.legacy_policy_key),
             "非法关闭键: {}",
-            instance.policy_key
+            instance.legacy_policy_key
         );
         for tool in instance.tools {
             assert!(
@@ -161,9 +169,14 @@ fn names_and_identities_are_legal_components() {
                 tool.original_name
             );
             assert!(
-                is_legal_component(tool.effective_name),
-                "非法 effective name: {}",
-                tool.effective_name
+                is_legal_component(tool.model_name),
+                "非法 v5 模型面名字: {}",
+                tool.model_name
+            );
+            assert!(
+                is_legal_component(tool.legacy_name),
+                "非法迁移期旧名: {}",
+                tool.legacy_name
             );
         }
     }
@@ -172,7 +185,7 @@ fn names_and_identities_are_legal_components() {
 #[test]
 fn instance_identity_equals_server_name() {
     // 本批次身份三等价：配置 key == server name == TransportConfig::Builtin.instance。
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         assert_eq!(
             instance.instance, instance.name,
             "实例身份与 server name 必须一致（当前两者同值）"
@@ -182,7 +195,7 @@ fn instance_identity_equals_server_name() {
 
 #[test]
 fn reserved_names_superset_of_implemented_instances() {
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         assert!(
             is_reserved_instance_name(instance.name),
             "已实现实例 {} 必须在保留名表内",
@@ -222,19 +235,18 @@ fn task_owner_scoping_is_a_registry_field() {
 }
 
 #[test]
-fn policy_keys_are_unique_and_frozen() {
+fn legacy_policy_keys_are_unique_and_frozen_for_migration() {
     let keys: HashSet<&str> = BUILTIN_MCP_INSTANCES
         .iter()
-        .map(|instance| instance.policy_key)
+        .map(|instance| instance.legacy_policy_key)
         .collect();
     assert_eq!(
         keys.len(),
         BUILTIN_MCP_INSTANCES.len(),
-        "关闭键必须逐实例唯一"
+        "旧关闭键必须逐能力唯一"
     );
-    // 冻结期望与 `BUILTIN_INSTANCE_POLICY_KEYS` 同步（该常量自行断言与声明表相等）：
-    // `"WorkflowMiddleware"` 是 workflow builtin 实例（P1）的关闭键，双轨期与旧链
-    // 槽位同名；旧链已删除，见 `docs/design/workflow-mcp.md`。
+    // 兼容期契约：旧键集合冻结，运行时经 `capability_of_switch` 映射到能力。
+    // `"WorkflowMiddleware"` 沿用旧链槽位名，旧链已删除，见 `docs/design/workflow-mcp.md`。
     let expected: HashSet<&str> = [
         "WebMiddleware",
         "ArtifactMiddleware",
@@ -247,7 +259,7 @@ fn policy_keys_are_unique_and_frozen() {
     .collect();
     assert_eq!(
         keys, expected,
-        "关闭键集合必须与 BUILTIN_INSTANCE_POLICY_KEYS 的冻结内容相等"
+        "旧关闭键集合必须保持迁移期兼容；v5 权威是能力表"
     );
 }
 
@@ -368,39 +380,91 @@ fn original_tool_name_of_effective_misses_unknown_and_external() {
 }
 
 /// 正方向查询（`original_tool_name_of_effective` 的逆）：全部声明项按原始名命中
-/// 冻结的 effective name，且两查表互逆。
+/// 迁移期旧名，且两查表互逆。
 #[test]
-fn effective_name_of_hits_frozen_literals_and_is_inverse_of_original_lookup() {
-    for instance in BUILTIN_MCP_INSTANCES {
+fn legacy_display_name_of_hits_frozen_literals_and_is_inverse_of_original_lookup() {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         for tool in instance.tools {
             assert_eq!(
-                effective_name_of(instance.instance, tool.original_name),
-                Some(tool.effective_name),
-                "实例 {} 的工具 {} 必须按原始名查到冻结的 effective name",
+                legacy_display_name_of(instance.instance, tool.original_name),
+                Some(tool.legacy_name),
+                "实例 {} 的工具 {} 必须按原始名查到迁移期旧名",
                 instance.name,
                 tool.original_name
             );
-            let original = original_tool_name_of_effective(tool.effective_name)
-                .expect("effective name 必须可反查原始名");
+            let original = original_tool_name_of_effective(tool.legacy_name)
+                .expect("迁移期旧名必须可反查原始名");
             assert_eq!(
-                effective_name_of(instance.instance, original),
-                Some(tool.effective_name),
+                legacy_display_name_of(instance.instance, original),
+                Some(tool.legacy_name),
                 "两查表必须互逆：{original} → {}",
-                tool.effective_name
+                tool.legacy_name
             );
         }
     }
     // 逐字写死两处哨兵：表驱动断言在同一次改错（改字面量又改期望）下会自洽通过。
-    assert_eq!(effective_name_of("workspace", "Read"), Some("Read"));
-    assert_eq!(effective_name_of("web", "WebFetch"), Some("WebFetch"));
+    assert_eq!(legacy_display_name_of("workspace", "Read"), Some("Read"));
+    assert_eq!(legacy_display_name_of("web", "WebFetch"), Some("WebFetch"));
+    assert_eq!(
+        legacy_display_name_of("cron", "cron_register"),
+        Some("mcp__cron__cron_register")
+    );
 }
 
 #[test]
-fn effective_name_of_misses_unknown_instance_and_unknown_tool() {
+fn model_tool_name_of_uses_single_exit_naming() {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
+        for tool in instance.tools {
+            let expected = if tool.direct {
+                tool.original_name.to_owned()
+            } else {
+                format!("mcp__peri__{}", tool.original_name)
+            };
+            assert_eq!(
+                model_tool_name_of(instance.name, tool.original_name),
+                Some(expected.as_str()),
+                "实例 {} 的工具 {} 的 v5 模型面名字必须由能力表派生",
+                instance.name,
+                tool.original_name
+            );
+        }
+    }
+    assert_eq!(model_tool_name_of("workspace", "Read"), Some("Read"));
+    assert_eq!(
+        model_tool_name_of("cron", "cron_register"),
+        Some("mcp__peri__cron_register")
+    );
+}
+
+#[test]
+fn v5_model_names_are_display_normalized_but_not_executable() {
+    // 旧归一入口同时识别 v5 模型面名（历史事件 / 新展示），但执行路由仍只接受
+    // v5 名字；旧 deferred 名在 `resolve_model_tool` 中显式拒绝。
+    assert_eq!(
+        original_tool_name_of_effective("mcp__peri__cron_register"),
+        Some("cron_register")
+    );
+    assert_eq!(
+        original_tool_name_of_effective("mcp__peri__Read"),
+        None,
+        "direct 工具不属于 mcp__ 命名空间"
+    );
+    assert_eq!(
+        crate::builtin_mcp::v5::resolve_model_tool("mcp__cron__cron_register"),
+        Err(
+            crate::builtin_mcp::v5::CapabilityNameError::LegacyNameNotExecutable {
+                name: "mcp__cron__cron_register".to_owned()
+            }
+        )
+    );
+}
+
+#[test]
+fn legacy_display_name_of_misses_unknown_instance_and_unknown_tool() {
     // 未登记实例：未知 / 大小写不同 / 空串一律 None ⇒ 消费点走不含工具名的兜底。
     for instance in ["", "Workspace", "workspace2", "mcp__workspace__"] {
         assert_eq!(
-            effective_name_of(instance, "Read"),
+            legacy_display_name_of(instance, "Read"),
             None,
             "未登记实例 {instance} 不得命中"
         );
@@ -408,13 +472,13 @@ fn effective_name_of_misses_unknown_instance_and_unknown_tool() {
     // 已登记实例但无此原始名（纯查表 + 区分大小写，不做 `mcp__` 反拆）。
     for tool in ["", "read", "READ", "ReadFile", "Read::extra"] {
         assert_eq!(
-            effective_name_of("workspace", tool),
+            legacy_display_name_of("workspace", tool),
             None,
             "workspace 无原始名 {tool} ⇒ None"
         );
     }
     // 跨实例不得串名：`artifact` 不在 web 实例内。
-    assert_eq!(effective_name_of("web", "artifact"), None);
+    assert_eq!(legacy_display_name_of("web", "artifact"), None);
 }
 
 #[test]
@@ -424,7 +488,7 @@ fn wave1_tools_are_all_declared_direct() {
     // 一律 `direct: false`（A4：主链 deferred，不进入首个请求的直连参数）；
     // wave 3 的 7 个 workspace 工具迁移前已在首个请求的直连工具表内，全 `direct: true`
     // （AW3-03：成员集合零变化）。
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         for tool in instance.tools {
             match instance.name {
                 "web" | "artifact" => assert!(
@@ -482,7 +546,7 @@ fn builtin_source_cannot_be_forged_from_wire() {
 
 #[test]
 fn completion_and_consumer_commands_never_enter_model_tool_catalog() {
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         for tool in instance.tools {
             if matches!(
                 tool.original_name,

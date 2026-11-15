@@ -75,7 +75,7 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 `peri-acp-types/src/builtin_mcp.rs` 声明：
 
 - `WORKFLOW_TOOLS`：`Workflow` / `WorkflowStatus` / `WorkflowKill`（模型面，`direct: false`），以及 `WorkflowAgentResult` / `WorkflowAgentClaim` / `WorkflowConsumerReady` / `WorkflowCompletionAck` / `WorkflowClose` / `WorkflowTaskObserved`（host-only，`model_visible: false`）。
-- `BUILTIN_MCP_INSTANCES` 条目：`name = "workflow"`、`policy_key = "WorkflowMiddleware"`（沿用旧槽位键，用户配置兼容）。
+- `BUILTIN_MCP_INSTANCES` 派生视图：`name = "workflow"`、`legacy_policy_key = "WorkflowMiddleware"`（由能力表派生，沿用旧槽位键，用户配置兼容）。
 - `BUILTIN_RESERVED_INSTANCE_NAMES` 包含 `"workflow"`。
 - `BuiltinMcpTool::model_visible` 区分模型可见面与 host-only 工具；其余实例默认 `true`。
 

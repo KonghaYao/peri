@@ -45,7 +45,8 @@ pub(crate) fn default_subscriptions_for(
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use peri_acp_types::builtin_mcp::{
-    find, is_reserved_instance_name, BuiltinMcpInstance, BUILTIN_MCP_INSTANCES,
+    capability_of_switch, find, is_reserved_server_name, BuiltinMcpInstance, BUILTIN_MCP_INSTANCES,
+    BUILTIN_V5_CAPABILITIES,
 };
 use peri_acp_types::plugin::{ConfigSource, McpServerConfig};
 use thiserror::Error;
@@ -158,15 +159,31 @@ pub(crate) fn is_declared_model_hidden(server_name: &str, original_tool: &str) -
     })
 }
 
-/// IF-D10 的唯一判定入口：`policy_key ∈ disabled_middlewares` 的实例进入关闭集。
+/// IF-D10 的唯一判定入口：能力开关（v5 能力名或迁移期旧键）命中即关闭对应能力。
 ///
-/// 下游四个过滤面（direct 注入 / deferred bridge / parent_tools / workflow agent
-/// 工具面）都只调用它，不得各自硬编码实例名或 `mcp__web__` 前缀。
+/// `disabled_middlewares` 同时承载链槽位键与其他 middleware 键；本函数只接受能
+/// 映射到 builtin 能力的键（`capability_of_switch`），其余键静默跳过。旧键不是
+/// 第二套开关：两者都经同一能力表映射，输出仍是 v4 实例名供迁移期面消费。
 pub(crate) fn closed_instances(disabled_middlewares: &HashSet<String>) -> BTreeSet<String> {
-    BUILTIN_MCP_INSTANCES
+    closed_capabilities(disabled_middlewares)
+        .into_iter()
+        .filter_map(|capability_name| {
+            BUILTIN_V5_CAPABILITIES
+                .iter()
+                .find(|capability| capability.name == capability_name)
+                .map(|capability| capability.legacy_instance.to_string())
+        })
+        .collect()
+}
+
+/// 关闭集的能力身份（v5 名字）；供 router / readiness 等后续消费方使用。
+pub(crate) fn closed_capabilities(
+    disabled_middlewares: &HashSet<String>,
+) -> BTreeSet<&'static str> {
+    disabled_middlewares
         .iter()
-        .filter(|instance| disabled_middlewares.contains(instance.policy_key))
-        .map(|instance| instance.name.to_string())
+        .filter_map(|key| capability_of_switch(key).ok())
+        .map(|capability| capability.name)
         .collect()
 }
 
@@ -276,7 +293,8 @@ pub(crate) fn apply_builtin_overlay(
         return Err(err);
     }
     // 规则 1 / 2：只处理策略启用且**已实现**的实例。
-    for instance in BUILTIN_MCP_INSTANCES {
+    // 兼容期：逐能力写回 v4 六实例条目；M4 切换单出口后本循环删除。
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         if instance.name == "workspace" {
             if let Some(entry) = servers.get_mut("workspace") {
                 if entry.url.is_some() {
@@ -323,7 +341,7 @@ fn reserved_name_takeover(
     let mut names: Vec<&String> = servers
         .iter()
         .filter(|(name, config)| {
-            is_reserved_instance_name(name)
+            is_reserved_server_name(name)
                 && (config.command.is_some()
                     || (config.url.is_some() && name.as_str() != "workspace"))
         })

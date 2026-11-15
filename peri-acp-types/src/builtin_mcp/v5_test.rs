@@ -19,11 +19,13 @@ fn all_tools() -> Vec<(&'static BuiltinCapability, &'static CapabilityTool)> {
 const fn test_tool(
     original_name: &'static str,
     model_name: &'static str,
+    legacy_name: &'static str,
     direct: bool,
 ) -> CapabilityTool {
     CapabilityTool {
         original_name,
         model_name,
+        legacy_name,
         direct,
         model_visible: true,
         prompt_declaration: None,
@@ -37,28 +39,91 @@ const fn test_capability(
     legacy_instance: &'static str,
     tools: &'static [CapabilityTool],
 ) -> BuiltinCapability {
+    test_capability_with_key(name, legacy_instance, "TestMiddleware", tools)
+}
+
+const fn test_capability_with_key(
+    name: &'static str,
+    legacy_instance: &'static str,
+    legacy_policy_key: &'static str,
+    tools: &'static [CapabilityTool],
+) -> BuiltinCapability {
+    test_capability_full(
+        name,
+        legacy_instance,
+        legacy_policy_key,
+        &[],
+        tools,
+        NO_RESOURCES,
+    )
+}
+
+const fn test_capability_full(
+    name: &'static str,
+    legacy_instance: &'static str,
+    legacy_policy_key: &'static str,
+    dependencies: &'static [&'static str],
+    tools: &'static [CapabilityTool],
+    resources: CapabilityResourceSurface,
+) -> BuiltinCapability {
     BuiltinCapability {
         name,
         legacy_instance,
-        legacy_policy_key: "TestMiddleware",
+        legacy_policy_key,
+        dependencies,
         tools,
-        resources: NO_RESOURCES,
+        resources,
         host_injection: NO_HOST_INJECTION,
         execution: in_process("test://capability"),
         state: NO_STATE,
     }
 }
 
-const TOOL_A_DIRECT: &[CapabilityTool] = &[test_tool("ToolA", "ToolA", true)];
-const TOOL_B_DIRECT: &[CapabilityTool] = &[test_tool("ToolB", "ToolB", true)];
-const TOOL_A_DEFERRED: &[CapabilityTool] = &[test_tool("ToolA", "mcp__peri__ToolA", false)];
-const TOOL_BAD_MODEL: &[CapabilityTool] = &[test_tool("ToolA", "Wrong", true)];
-const TOOL_EMPTY_NAME: &[CapabilityTool] = &[test_tool("", "", true)];
-const TOOL_RESERVED_ONLY: &[CapabilityTool] =
-    &[test_tool("mcp__peri__Solo", "mcp__peri__Solo", true)];
-const TOOL_RESERVED_DIRECT: &[CapabilityTool] =
-    &[test_tool("mcp__peri__Shared", "mcp__peri__Shared", true)];
-const TOOL_SHARED_DEFERRED: &[CapabilityTool] = &[test_tool("Shared", "mcp__peri__Shared", false)];
+const fn test_capability_with_resources(
+    name: &'static str,
+    legacy_instance: &'static str,
+    legacy_policy_key: &'static str,
+    tools: &'static [CapabilityTool],
+    resources: CapabilityResourceSurface,
+) -> BuiltinCapability {
+    test_capability_full(
+        name,
+        legacy_instance,
+        legacy_policy_key,
+        &[],
+        tools,
+        resources,
+    )
+}
+
+const TOOL_A_DIRECT: &[CapabilityTool] = &[test_tool("ToolA", "ToolA", "ToolA", true)];
+const TOOL_B_DIRECT: &[CapabilityTool] = &[test_tool("ToolB", "ToolB", "ToolB", true)];
+const TOOL_A_DEFERRED: &[CapabilityTool] = &[test_tool(
+    "ToolA",
+    "mcp__peri__ToolA",
+    "mcp__a__ToolA",
+    false,
+)];
+const TOOL_BAD_MODEL: &[CapabilityTool] = &[test_tool("ToolA", "Wrong", "ToolA", true)];
+const TOOL_EMPTY_NAME: &[CapabilityTool] = &[test_tool("", "", "", true)];
+const TOOL_RESERVED_ONLY: &[CapabilityTool] = &[test_tool(
+    "mcp__peri__Solo",
+    "mcp__peri__Solo",
+    "mcp__peri__Solo",
+    true,
+)];
+const TOOL_RESERVED_DIRECT: &[CapabilityTool] = &[test_tool(
+    "mcp__peri__Shared",
+    "mcp__peri__Shared",
+    "mcp__peri__Shared",
+    true,
+)];
+const TOOL_SHARED_DEFERRED: &[CapabilityTool] = &[test_tool(
+    "Shared",
+    "mcp__peri__Shared",
+    "mcp__b__Shared",
+    false,
+)];
 
 #[test]
 fn capability_table_is_frozen_and_matches_v5_names() {
@@ -70,7 +135,6 @@ fn capability_table_is_frozen_and_matches_v5_names() {
         .iter()
         .map(|capability| capability.name)
         .collect();
-    assert_eq!(names, BUILTIN_V5_CAPABILITY_NAMES);
     assert_eq!(
         names.iter().copied().collect::<HashSet<_>>().len(),
         names.len(),
@@ -89,60 +153,31 @@ fn capability_table_is_frozen_and_matches_v5_names() {
     );
 }
 
+/// 迁移期 v4 视图必须只是能力表的投影：不允许另存工具、开关键或任务归属。
 #[test]
-fn v5_tool_sets_match_v4_declarations() {
-    for capability in BUILTIN_V5_CAPABILITIES {
-        let legacy = crate::builtin_mcp::find(capability.legacy_instance)
-            .unwrap_or_else(|| panic!("能力 {} 的旧实例必须存在", capability.legacy_instance));
-        assert_eq!(capability.name, legacy.name);
-        assert_eq!(capability.legacy_policy_key, legacy.policy_key);
+fn v4_compat_view_is_derived_from_capability_table() {
+    let instances = &*crate::builtin_mcp::BUILTIN_MCP_INSTANCES;
+    assert_eq!(instances.len(), BUILTIN_V5_CAPABILITIES.len());
+    for (view, capability) in instances.iter().zip(BUILTIN_V5_CAPABILITIES) {
+        assert_eq!(view.name, capability.name);
+        assert_eq!(view.instance, capability.legacy_instance);
+        assert_eq!(view.legacy_policy_key, capability.legacy_policy_key);
         assert_eq!(
-            capability.host_injection.task_owner_scoped, legacy.task_owner_scoped,
-            "能力 {} 的 task owner 作用域必须与 v4 一致",
+            view.task_owner_scoped, capability.host_injection.task_owner_scoped,
+            "能力 {} 的 task owner 作用域漂移",
             capability.name
         );
-        assert_eq!(
-            capability.tools.len(),
-            legacy.tools.len(),
-            "能力 {} 的工具数必须与 v4 一致",
-            capability.name
-        );
-        for (new, old) in capability.tools.iter().zip(legacy.tools) {
-            assert_eq!(new.original_name, old.original_name);
-            assert_eq!(
-                new.direct, old.direct,
-                "{} direct 声明漂移",
-                new.original_name
-            );
-            assert_eq!(
-                new.model_visible, old.model_visible,
-                "{} model_visible 声明漂移",
-                new.original_name
-            );
-            assert_eq!(
-                new.prompt_declaration, old.prompt_declaration,
-                "{} prompt 声明漂移",
-                new.original_name
-            );
-            assert_eq!(
-                new.context_retention, old.context_retention,
-                "{} context_retention 声明漂移",
-                new.original_name
-            );
-            assert_eq!(
-                new.completes_on_response, old.completes_on_response,
-                "{} completes_on_response 声明漂移",
-                new.original_name
-            );
-            assert_eq!(
-                legacy_effective_name_for(capability.legacy_instance, new.original_name)
-                    .expect("旧名映射必须存在"),
-                old.effective_name,
-                "{} 旧 effective name 漂移",
-                new.original_name
-            );
-        }
+        assert_eq!(view.tools, capability.tools, "工具表不得复制");
     }
+    let reserved: Vec<&str> = crate::builtin_mcp::BUILTIN_RESERVED_INSTANCE_NAMES
+        .iter()
+        .copied()
+        .collect();
+    let derived: Vec<&str> = BUILTIN_V5_CAPABILITIES
+        .iter()
+        .map(|capability| capability.legacy_instance)
+        .collect();
+    assert_eq!(reserved, derived, "保留实例名必须由能力表派生");
 }
 
 #[test]
@@ -203,8 +238,8 @@ fn registry_validation_accepts_frozen_table() {
 #[test]
 fn validation_rejects_duplicate_capability_name() {
     const CAPABILITIES: &[BuiltinCapability] = &[
-        test_capability("same", "a", TOOL_A_DIRECT),
-        test_capability("same", "b", TOOL_B_DIRECT),
+        test_capability_with_key("same", "a", "PolicyA", TOOL_A_DIRECT),
+        test_capability_with_key("same", "b", "PolicyB", TOOL_B_DIRECT),
     ];
     assert_eq!(
         validate_capabilities(CAPABILITIES),
@@ -217,8 +252,8 @@ fn validation_rejects_duplicate_capability_name() {
 #[test]
 fn validation_rejects_duplicate_legacy_instance() {
     const CAPABILITIES: &[BuiltinCapability] = &[
-        test_capability("a", "shared", TOOL_A_DIRECT),
-        test_capability("b", "shared", TOOL_B_DIRECT),
+        test_capability_with_key("a", "shared", "PolicyA", TOOL_A_DIRECT),
+        test_capability_with_key("b", "shared", "PolicyB", TOOL_B_DIRECT),
     ];
     assert_eq!(
         validate_capabilities(CAPABILITIES),
@@ -233,8 +268,8 @@ fn validation_rejects_duplicate_legacy_instance() {
 #[test]
 fn validation_rejects_duplicate_original_tool_name() {
     const CAPABILITIES: &[BuiltinCapability] = &[
-        test_capability("a", "a", TOOL_A_DEFERRED),
-        test_capability("b", "b", TOOL_A_DIRECT),
+        test_capability_with_key("a", "a", "PolicyA", TOOL_A_DEFERRED),
+        test_capability_with_key("b", "b", "PolicyB", TOOL_A_DIRECT),
     ];
     assert_eq!(
         validate_capabilities(CAPABILITIES),
@@ -250,8 +285,8 @@ fn validation_rejects_duplicate_original_tool_name() {
 fn validation_rejects_duplicate_model_tool_name() {
     // direct 工具占用 `mcp__peri__*` 原名，与 deferred 模型面冲突。
     const CAPABILITIES: &[BuiltinCapability] = &[
-        test_capability("a", "a", TOOL_RESERVED_DIRECT),
-        test_capability("b", "b", TOOL_SHARED_DEFERRED),
+        test_capability_with_key("a", "a", "PolicyA", TOOL_RESERVED_DIRECT),
+        test_capability_with_key("b", "b", "PolicyB", TOOL_SHARED_DEFERRED),
     ];
     assert_eq!(
         validate_capabilities(CAPABILITIES),
@@ -341,15 +376,14 @@ fn user_defined_peri_and_migration_names_are_reserved() {
 #[test]
 fn legacy_names_normalize_to_v5_model_names() {
     for capability in BUILTIN_V5_CAPABILITIES {
-        let legacy = crate::builtin_mcp::find(capability.legacy_instance).expect("旧实例");
-        for (tool, old_tool) in capability.tools.iter().zip(legacy.tools) {
-            let legacy_name = old_tool.effective_name;
+        for tool in capability.tools {
+            let legacy_name = tool.legacy_name;
             let normalized =
                 resolve_display_tool_name(legacy_name).expect("旧名必须可归一到展示名");
             assert_eq!(normalized.capability, capability.name);
             assert_eq!(normalized.original_name, tool.original_name);
             assert_eq!(normalized.model_name, tool.model_name);
-            assert_eq!(normalized.legacy_effective_name, legacy_name);
+            assert_eq!(normalized.legacy_name, legacy_name);
             assert_eq!(
                 normalized.source,
                 if tool.direct {
@@ -366,7 +400,7 @@ fn legacy_names_normalize_to_v5_model_names() {
             let current = resolve_display_tool_name(tool.model_name).expect("新名必须可归一");
             assert_eq!(current.capability, capability.name);
             assert_eq!(current.original_name, tool.original_name);
-            assert_eq!(current.legacy_effective_name, legacy_name);
+            assert_eq!(current.legacy_name, legacy_name);
             assert_eq!(
                 current.source,
                 if tool.direct {
@@ -640,4 +674,283 @@ fn host_only_and_completion_tools_stay_non_direct() {
             assert!(!tool.direct, "{} 必须 deferred", tool.original_name);
         }
     }
+}
+
+#[test]
+fn switch_mapping_is_capability_first_and_deterministic() {
+    for capability in BUILTIN_V5_CAPABILITIES {
+        let by_name = capability_of_switch(capability.name).expect("能力名必须可作为开关");
+        let by_legacy =
+            capability_of_switch(capability.legacy_policy_key).expect("旧键必须确定性映射");
+        assert_eq!(by_name.name, capability.name);
+        assert_eq!(by_legacy.name, capability.name, "旧键不得映射到第二个能力");
+        assert_eq!(
+            capability_of_legacy_policy_key(capability.legacy_policy_key)
+                .expect("旧键映射 API 必须命中")
+                .name,
+            capability.name
+        );
+    }
+    assert_eq!(
+        capability_of_switch("WebMiddleware").map(|capability| capability.name),
+        Ok("web")
+    );
+    assert_eq!(
+        capability_of_switch("web").map(|capability| capability.name),
+        Ok("web")
+    );
+    assert_eq!(
+        capability_of_switch("nope"),
+        Err(CapabilityNameError::UnknownSwitch {
+            key: "nope".to_owned()
+        })
+    );
+    assert_eq!(
+        capability_of_legacy_policy_key("nope"),
+        Err(CapabilityNameError::UnknownPolicyKey {
+            key: "nope".to_owned()
+        })
+    );
+    let declared: HashSet<&str> = legacy_policy_keys().collect();
+    assert_eq!(declared.len(), BUILTIN_V5_CAPABILITIES.len());
+}
+
+#[test]
+fn resource_ownership_is_unique() {
+    assert_eq!(
+        capability_of_resource_uri("workspace://git/ref").map(|capability| capability.name),
+        Ok("workspace")
+    );
+    assert_eq!(
+        capability_of_resource_uri("skill://user/x/SKILL.md").map(|capability| capability.name),
+        Ok("workspace")
+    );
+    assert_eq!(
+        capability_of_resource_uri("cron://jobs").map(|capability| capability.name),
+        Ok("cron")
+    );
+    assert_eq!(
+        capability_of_resource_uri("workflow://runs/abc").map(|capability| capability.name),
+        Ok("workflow")
+    );
+    assert_eq!(
+        capability_of_resource_uri("unknown://x"),
+        Err(CapabilityNameError::UnknownResourceUri {
+            uri: "unknown://x".to_owned()
+        })
+    );
+}
+
+#[test]
+fn validation_rejects_duplicate_legacy_policy_key() {
+    const CAPABILITIES: &[BuiltinCapability] = &[
+        test_capability_with_key("a", "a", "SharedMiddleware", TOOL_A_DIRECT),
+        test_capability_with_key("b", "b", "SharedMiddleware", TOOL_B_DIRECT),
+    ];
+    assert_eq!(
+        validate_capabilities(CAPABILITIES),
+        Err(CapabilityRegistryError::DuplicateLegacyPolicyKey {
+            key: "SharedMiddleware".to_owned(),
+            first: "a".to_owned(),
+            second: "b".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn validation_rejects_policy_key_that_shadows_capability_name() {
+    const CAPABILITIES: &[BuiltinCapability] = &[
+        test_capability_with_key("a", "a", "b", TOOL_A_DIRECT),
+        test_capability_with_key("b", "b", "PolicyB", TOOL_B_DIRECT),
+    ];
+    assert_eq!(
+        validate_capabilities(CAPABILITIES),
+        Err(CapabilityRegistryError::DuplicateLegacyPolicyKey {
+            key: "b".to_owned(),
+            first: "capability name".to_owned(),
+            second: "a".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn validation_rejects_invalid_legacy_names_and_reserved_peri() {
+    const BAD_LEGACY: &[CapabilityTool] = &[test_tool("ToolA", "mcp__peri__ToolA", "wrong", false)];
+    assert_eq!(
+        validate_capabilities(&[test_capability_full(
+            "a",
+            "a",
+            "PolicyA",
+            &[],
+            BAD_LEGACY,
+            NO_RESOURCES,
+        )]),
+        Err(CapabilityRegistryError::InvalidLegacyToolName {
+            capability: "a".to_owned(),
+            original_name: "ToolA".to_owned(),
+            legacy_name: "wrong".to_owned(),
+            expected: "mcp__a__ToolA".to_owned(),
+        })
+    );
+    assert_eq!(
+        validate_capabilities(&[test_capability("peri", "peri", TOOL_A_DIRECT)]),
+        Err(CapabilityRegistryError::ReservedCapabilityName {
+            capability: "peri".to_owned()
+        })
+    );
+    assert_eq!(
+        validate_capabilities(&[test_capability_with_key("a", "", "PolicyA", TOOL_A_DIRECT)]),
+        Err(CapabilityRegistryError::EmptyLegacyInstance {
+            capability: "a".to_owned()
+        })
+    );
+    assert_eq!(
+        validate_capabilities(&[test_capability_with_key("a", "a", "", TOOL_A_DIRECT)]),
+        Err(CapabilityRegistryError::EmptyLegacyPolicyKey {
+            capability: "a".to_owned()
+        })
+    );
+}
+
+const RES_A: CapabilityResourceSurface = CapabilityResourceSurface {
+    uri_prefixes: &["a://"],
+    static_resources: &["a://root"],
+    resource_templates: &["a://item/{id}"],
+    default_subscriptions: &[],
+};
+const RES_B: CapabilityResourceSurface = CapabilityResourceSurface {
+    uri_prefixes: &["b://"],
+    static_resources: &["b://root"],
+    resource_templates: &[],
+    default_subscriptions: &[],
+};
+const RES_DUPLICATE_PREFIX: CapabilityResourceSurface = CapabilityResourceSurface {
+    uri_prefixes: &["a://"],
+    static_resources: &[],
+    resource_templates: &[],
+    default_subscriptions: &[],
+};
+const RES_OVERLAP: CapabilityResourceSurface = CapabilityResourceSurface {
+    uri_prefixes: &["a://nested"],
+    static_resources: &["a://nested/root"],
+    resource_templates: &[],
+    default_subscriptions: &[],
+};
+const RES_NOT_OWNED: CapabilityResourceSurface = CapabilityResourceSurface {
+    uri_prefixes: &["a://"],
+    static_resources: &["b://escape"],
+    resource_templates: &[],
+    default_subscriptions: &[],
+};
+
+#[test]
+fn validation_rejects_resource_conflicts() {
+    assert_eq!(
+        validate_capabilities(&[
+            test_capability_with_resources("a", "a", "PolicyA", TOOL_A_DIRECT, RES_A),
+            test_capability_with_resources(
+                "b",
+                "b",
+                "PolicyB",
+                TOOL_B_DIRECT,
+                RES_DUPLICATE_PREFIX
+            ),
+        ]),
+        Err(CapabilityRegistryError::DuplicateResourceUriPrefix {
+            prefix: "a://".to_owned(),
+            first: "a".to_owned(),
+            second: "b".to_owned(),
+        })
+    );
+    assert_eq!(
+        validate_capabilities(&[
+            test_capability_with_resources("a", "a", "PolicyA", TOOL_A_DIRECT, RES_A),
+            test_capability_with_resources("b", "b", "PolicyB", TOOL_B_DIRECT, RES_OVERLAP),
+        ]),
+        Err(CapabilityRegistryError::OverlappingResourceUriPrefix {
+            first: "a://".to_owned(),
+            second: "a://nested".to_owned(),
+        })
+    );
+    assert_eq!(
+        validate_capabilities(&[test_capability_with_resources(
+            "a",
+            "a",
+            "PolicyA",
+            TOOL_A_DIRECT,
+            RES_NOT_OWNED
+        )]),
+        Err(CapabilityRegistryError::ResourceNotOwned {
+            capability: "a".to_owned(),
+            uri: "b://escape".to_owned(),
+        })
+    );
+    validate_capabilities(&[
+        test_capability_with_resources("a", "a", "PolicyA", TOOL_A_DIRECT, RES_A),
+        test_capability_with_resources("b", "b", "PolicyB", TOOL_B_DIRECT, RES_B),
+    ])
+    .expect("不冲突的资源面必须通过");
+}
+
+#[test]
+fn validation_rejects_invalid_dependencies() {
+    assert_eq!(
+        validate_capabilities(&[test_capability_full(
+            "a",
+            "a",
+            "PolicyA",
+            &["missing"],
+            TOOL_A_DIRECT,
+            NO_RESOURCES
+        )]),
+        Err(CapabilityRegistryError::InvalidDependency {
+            capability: "a".to_owned(),
+            dependency: "missing".to_owned()
+        })
+    );
+    assert_eq!(
+        validate_capabilities(&[test_capability_full(
+            "a",
+            "a",
+            "PolicyA",
+            &["a"],
+            TOOL_A_DIRECT,
+            NO_RESOURCES
+        )]),
+        Err(CapabilityRegistryError::InvalidDependency {
+            capability: "a".to_owned(),
+            dependency: "a".to_owned()
+        })
+    );
+    assert_eq!(
+        validate_capabilities(&[
+            test_capability_full(
+                "a",
+                "a",
+                "PolicyA",
+                &["b", "b"],
+                TOOL_A_DIRECT,
+                NO_RESOURCES
+            ),
+            test_capability_full("b", "b", "PolicyB", &[], TOOL_B_DIRECT, NO_RESOURCES),
+        ]),
+        Err(CapabilityRegistryError::DuplicateDependency {
+            capability: "a".to_owned(),
+            dependency: "b".to_owned()
+        })
+    );
+    assert_eq!(
+        validate_capabilities(&[
+            test_capability_full("a", "a", "PolicyA", &["b"], TOOL_A_DIRECT, NO_RESOURCES),
+            test_capability_full("b", "b", "PolicyB", &["a"], TOOL_B_DIRECT, NO_RESOURCES),
+        ]),
+        Err(CapabilityRegistryError::DependencyCycle {
+            capability: "a".to_owned()
+        })
+    );
+    validate_capabilities(&[
+        test_capability_full("a", "a", "PolicyA", &["b"], TOOL_A_DIRECT, NO_RESOURCES),
+        test_capability_full("b", "b", "PolicyB", &[], TOOL_B_DIRECT, NO_RESOURCES),
+    ])
+    .expect("无环依赖必须通过");
 }

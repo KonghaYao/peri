@@ -1,5 +1,9 @@
 //! In-process standalone handler construction for `peri mcp-start`.
 //!
+//! Migration-period only: the CLI accepts one legacy instance name. The valid
+//! set is derived from the capability registry; the v5 single-exit entry
+//! (`peri mcp-start peri --capability ...`) is P3 and not wired here.
+//!
 //! Construction goes through [`super::dispatch::builtin_server_handler_with_env`], so
 //! the standalone entry serves exactly the handlers the ACP host assembles. The
 //! `workspace` arm is the exception: one server is built up front and cloned per
