@@ -13,6 +13,9 @@ path = "src/lib.rs"
 name = "peri"
 path = "src/main.rs"
 
+[features]
+test-support = ["peri-acp/test-support"]
+
 [dev-dependencies]
 ratatui-kit = { version = "0.12.0", features = ["test-util"] }
 tokio = { workspace = true, features = ["test-util"] }

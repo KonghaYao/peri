@@ -339,7 +339,7 @@ pub fn build_stage_context(
     // 有界等待：从本会话首次出现未结算任务起算，超过 HANDOFF_MAX_WAIT 后
     // 不再无限等待，改由 loop 退出路径写可观测交接（§7.3）。
     let bounded_wait = crate::agent::async_tasks::handoff::BoundedWait::new(
-        crate::agent::async_tasks::handoff::HANDOFF_MAX_WAIT,
+        crate::agent::async_tasks::handoff::handoff_max_wait(),
     );
     let idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>> = {
         let manager = task_manager.clone();

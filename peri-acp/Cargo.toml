@@ -9,6 +9,9 @@ description = "ACP Agent service layer — Session management, Agent constructio
 name = "peri_acp"
 path = "src/lib.rs"
 
+[features]
+test-support = ["peri-agent/test-support"]
+
 [dependencies]
 peri-time = { path = "../peri-time" }
 peri-acp-types = { path = "../peri-acp-types" }

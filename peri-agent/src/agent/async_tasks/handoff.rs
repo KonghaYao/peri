@@ -29,6 +29,21 @@ use crate::session::transcript::MessageTranscript;
 /// bounded external MCP call deadline).
 pub(crate) const HANDOFF_MAX_WAIT: Duration = Duration::from_secs(120);
 
+/// Effective bounded-wait window.
+///
+/// Production always uses [`HANDOFF_MAX_WAIT`]. The `test-support` feature adds
+/// an environment override so an end-to-end test can exercise the bound without
+/// waiting two minutes; the feature is never enabled by a production build.
+pub(crate) fn handoff_max_wait() -> Duration {
+    #[cfg(feature = "test-support")]
+    if let Ok(raw) = std::env::var("PERI_TEST_HANDOFF_MAX_WAIT_MS") {
+        if let Ok(ms) = raw.parse::<u64>() {
+            return Duration::from_millis(ms);
+        }
+    }
+    HANDOFF_MAX_WAIT
+}
+
 /// Canonical reminder kind for the bounded-wait handoff.
 const HANDOFF_REMINDER_KIND: &str = "pending_handoff";
 
@@ -55,7 +70,7 @@ impl ChildSettlementWindow {
         *self
             .deadline
             .lock()
-            .get_or_insert_with(|| Instant::now() + HANDOFF_MAX_WAIT)
+            .get_or_insert_with(|| Instant::now() + handoff_max_wait())
     }
 
     pub fn deadline(&self) -> Option<Instant> {

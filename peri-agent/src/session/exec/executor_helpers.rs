@@ -95,7 +95,7 @@ pub(crate) fn pending_task_count(
     manager: Option<&std::sync::Arc<dyn peri_acp_types::tasks::TaskManager>>,
 ) -> u32 {
     manager
-        .map(|manager| manager.active_count() as u32)
+        .map(|manager| manager.active_count_including_children() as u32)
         .unwrap_or(0)
 }
 

@@ -238,6 +238,10 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
         self.active_count()
     }
 
+    fn active_count_including_children(&self) -> usize {
+        self.active_count_including_children()
+    }
+
     fn register(&self, request: BgTaskRegistration) -> Result<TaskRegistrationTicket, String> {
         let cancel_handle = match request.kind.cancel_channel() {
             TaskCancelChannel::Process => match request.kill {
@@ -754,6 +758,19 @@ impl TaskManager {
 
     pub fn active_count(&self) -> usize {
         self.registry.active_count()
+    }
+
+    /// 当前活跃任务数，含 child-owned 子会话的递归汇总。
+    ///
+    /// 子会话任务由各自的 owner 管理器持有；父会话不汇总会把「子 shell 仍在跑」
+    /// 投影成已完成。树形登记（每个 owner 只挂在直接父会话）保证不重复计数。
+    pub fn active_count_including_children(&self) -> usize {
+        self.active_count()
+            + self
+                .child_owners()
+                .into_iter()
+                .map(|owner| owner.manager.active_count_including_children())
+                .sum::<usize>()
     }
 
     pub fn count_by_kind(&self, kind: BgTaskKind) -> usize {

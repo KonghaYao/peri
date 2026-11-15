@@ -455,6 +455,14 @@ pub trait TaskManager: std::any::Any + Send + Sync {
     /// 当前活跃任务数（/bg 并发限制预检）。
     fn active_count(&self) -> usize;
 
+    /// 当前活跃任务数，含 child-owned 子会话（递归）。
+    ///
+    /// 默认只看本管理器；聚合实现覆盖它以汇总子会话，避免父 turn 把
+    /// 「子会话仍有未结算任务」误判为已结算。
+    fn active_count_including_children(&self) -> usize {
+        self.active_count()
+    }
+
     /// 按类型注册任务（Shell / Workflow 有 kind 独立并发上限；Agent 类不限额；
     /// middleware 发起面调用，错误语义经 String 表达——并发上限 / 注册失败）。
     fn register(&self, request: BgTaskRegistration) -> Result<TaskRegistrationTicket, String>;

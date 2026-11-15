@@ -218,6 +218,7 @@ pub async fn run_print(
     let mut deployment = AcpDeployment::new(acp_client.clone(), host);
     let mut output = PrintOutput::new(fmt);
     let mut stop_reason = None;
+    let mut pending_tasks: u32 = 0;
     let operation = async {
         // ── ephemeral session：new → prompt（流式收集事件）→ close ──
         let session_id = acp_client.new_session(&cwd, None).await?;
@@ -233,6 +234,15 @@ pub async fn run_print(
                     biased;
                     res = &mut prompt_fut => {
                         let response = res.map_err(|e| anyhow::anyhow!("session/prompt 失败: {e}"))?;
+                        // test-support 诊断：把 ACP 终态（含 `_meta`）留给端到端测试断言。
+                        // 生产构建不含本分支。
+                        #[cfg(feature = "test-support")]
+                        if std::env::var_os("PERI_TEST_PRINT_DIAG").is_some()
+                            && let Ok(value) = serde_json::to_value(&response)
+                        {
+                            eprintln!("PERI_TEST_PRINT_RESPONSE {value}");
+                        }
+                        pending_tasks = pending_tasks_from_meta(response.meta.as_ref());
                         stop_reason = Some(response.stop_reason);
                         break;
                     }
@@ -246,10 +256,17 @@ pub async fn run_print(
         }
 
         // 关闭 ephemeral session（释放 host 侧 history/frozen/agent_pool）
-        acp_client
+        let close_result = acp_client
             .send_raw_request("session/close", json!({ "sessionId": session_id }))
-            .await
-            .map_err(|_| anyhow::anyhow!("ACP session cleanup failed"))?;
+            .await;
+        #[cfg(feature = "test-support")]
+        if std::env::var_os("PERI_TEST_PRINT_DIAG").is_some() {
+            match &close_result {
+                Ok(_) => eprintln!("PERI_TEST_SESSION_CLOSE ok"),
+                Err(error) => eprintln!("PERI_TEST_SESSION_CLOSE error={error}"),
+            }
+        }
+        close_result.map_err(|_| anyhow::anyhow!("ACP session cleanup failed"))?;
         Ok(())
     };
     let cleanup_result = deployment.run(operation).await;
@@ -259,9 +276,9 @@ pub async fn run_print(
     if let Some(stop_reason) = stop_reason {
         // result 只在 deployment 已结束后发出；任务终态与清理失败分别表达。
         let cleanup_error = cleanup_result.as_ref().err().map(|_| "ACP cleanup failed");
-        output.output_final(stop_reason, cleanup_error);
+        output.output_final(stop_reason, pending_tasks, cleanup_error);
         cleanup_result?;
-        require_completed(stop_reason)
+        require_completed(stop_reason, pending_tasks)
     } else {
         cleanup_result?;
         anyhow::bail!("session/prompt ended without a terminal response")
@@ -288,7 +305,20 @@ fn unimplemented_print_flags(
     .collect()
 }
 
-fn require_completed(stop_reason: StopReason) -> Result<()> {
+/// 从 ACP 终态 `_meta.peri.pendingTasks` 读取未结算任务数（对象嵌套，
+/// 不是点号 key）；缺失或非法值按 0 处理，与 host 只在 pending>0 时写 meta 一致。
+fn pending_tasks_from_meta(meta: Option<&serde_json::Map<String, Value>>) -> u32 {
+    meta.and_then(|m| m.get("peri"))
+        .and_then(|peri| peri.get("pendingTasks"))
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0)
+}
+
+fn require_completed(stop_reason: StopReason, pending_tasks: u32) -> Result<()> {
+    if pending_tasks > 0 {
+        anyhow::bail!("session/prompt incomplete: pendingTasks={pending_tasks}")
+    }
     if stop_reason == StopReason::EndTurn {
         Ok(())
     } else {
@@ -541,24 +571,45 @@ impl PrintOutput {
         }
     }
 
-    fn output_final(&self, stop_reason: StopReason, cleanup_error: Option<&str>) {
+    fn output_final(
+        &self,
+        stop_reason: StopReason,
+        pending_tasks: u32,
+        cleanup_error: Option<&str>,
+    ) {
         match self.fmt {
             OutputFormat::Text => println!("{}", self.text_buffer),
             OutputFormat::Json => println!(
                 "{}",
-                serde_json::to_string_pretty(&self.result(stop_reason, cleanup_error)).unwrap()
+                serde_json::to_string_pretty(&self.result(
+                    stop_reason,
+                    pending_tasks,
+                    cleanup_error
+                ))
+                .unwrap()
             ),
-            OutputFormat::StreamJson => println!("{}", self.result(stop_reason, cleanup_error)),
+            OutputFormat::StreamJson => {
+                println!("{}", self.result(stop_reason, pending_tasks, cleanup_error))
+            }
         }
     }
 
-    fn result(&self, stop_reason: StopReason, cleanup_error: Option<&str>) -> Value {
-        let completed = stop_reason == StopReason::EndTurn;
+    fn result(
+        &self,
+        stop_reason: StopReason,
+        pending_tasks: u32,
+        cleanup_error: Option<&str>,
+    ) -> Value {
+        // `EndTurn` 只表示本轮 loop 退出；未结算后台任务与清理失败都意味着
+        // 调用方拿不到完整结果，不能投影为成功。
+        let completed =
+            stop_reason == StopReason::EndTurn && pending_tasks == 0 && cleanup_error.is_none();
         let mut result = json!({
             "type": "result",
             "stop_reason": stop_reason,
             "status": if completed { "completed" } else { "incomplete" },
-            "is_error": !completed || cleanup_error.is_some(),
+            "is_error": !completed,
+            "pending_tasks": pending_tasks,
         });
         match self.fmt {
             OutputFormat::StreamJson => {
@@ -628,7 +679,7 @@ mod tests {
                 drop(sender);
                 drain.await;
             }
-            let result = output.result(StopReason::EndTurn, None);
+            let result = output.result(StopReason::EndTurn, 0, None);
             if fmt == OutputFormat::Json {
                 assert_eq!(result["content"], "tail");
             } else {
@@ -650,24 +701,48 @@ mod tests {
         ] {
             for fmt in [OutputFormat::Json, OutputFormat::StreamJson] {
                 let output = PrintOutput::new(fmt);
-                let result = output.result(stop_reason, None);
+                let result = output.result(stop_reason, 0, None);
                 assert_eq!(result["stop_reason"], json!(stop_reason));
                 assert_eq!(result["status"], "incomplete");
                 assert_eq!(result["is_error"], true);
-                assert!(require_completed(stop_reason).is_err());
+                assert!(require_completed(stop_reason, 0).is_err());
             }
         }
     }
 
     #[test]
+    fn test_print_result_treats_pending_tasks_as_incomplete() {
+        for fmt in [OutputFormat::Json, OutputFormat::StreamJson] {
+            let output = PrintOutput::new(fmt);
+            let result = output.result(StopReason::EndTurn, 1, None);
+            assert_eq!(result["stop_reason"], "end_turn");
+            assert_eq!(result["status"], "incomplete");
+            assert_eq!(result["is_error"], true);
+            assert_eq!(result["pending_tasks"], 1);
+            assert!(require_completed(StopReason::EndTurn, 1).is_err());
+        }
+    }
+
+    #[test]
+    fn test_pending_tasks_from_meta_reads_nested_object() {
+        let meta: serde_json::Map<String, Value> =
+            serde_json::from_value(json!({"peri": {"pendingTasks": 3}})).unwrap();
+        assert_eq!(pending_tasks_from_meta(Some(&meta)), 3);
+        let flat: serde_json::Map<String, Value> =
+            serde_json::from_value(json!({"peri.pendingTasks": 3})).unwrap();
+        assert_eq!(pending_tasks_from_meta(Some(&flat)), 0);
+        assert_eq!(pending_tasks_from_meta(None), 0);
+    }
+
+    #[test]
     fn test_print_result_distinguishes_completed_task_from_cleanup_failure() {
         let output = PrintOutput::new(OutputFormat::Json);
-        let result = output.result(StopReason::EndTurn, Some("ACP cleanup failed"));
+        let result = output.result(StopReason::EndTurn, 0, Some("ACP cleanup failed"));
         assert_eq!(result["stop_reason"], "end_turn");
-        assert_eq!(result["status"], "completed");
+        assert_eq!(result["status"], "incomplete");
         assert_eq!(result["is_error"], true);
         assert_eq!(result["cleanup_error"], "ACP cleanup failed");
-        assert!(require_completed(StopReason::EndTurn).is_ok());
+        assert!(require_completed(StopReason::EndTurn, 0).is_ok());
     }
 
     #[test]
