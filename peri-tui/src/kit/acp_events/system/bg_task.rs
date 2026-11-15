@@ -13,11 +13,12 @@ use crate::kit::atoms::{
 };
 use crate::kit::bg_task_identity::{
     METADATA_TEXT_BYTES, RECENT_METADATA_BYTES, RECENT_METADATA_ENTRIES, bounded_label,
-    protected_task_ids, prune_metadata, upsert_identity_from_started,
+    link_row_to_agent, protected_task_ids, prune_metadata, upsert_identity_from_started,
 };
 use crate::kit::bg_task_live::{
-    mark_task_cancelled, mark_task_completed, seed_live_from_running_snapshot,
-    seed_live_from_started, seed_live_from_terminal_snapshot, seed_unobserved_snapshot,
+    attach_pending_live_detail, mark_task_cancelled, mark_task_completed,
+    oldest_pending_live_owner, seed_live_from_running_snapshot, seed_live_from_started,
+    seed_live_from_terminal_snapshot, seed_unobserved_snapshot,
 };
 use crate::kit::bg_task_status::BgTaskStatus;
 use crate::kit::program_status::{self, ProgramStatus};
@@ -86,6 +87,12 @@ pub(crate) fn apply_bg_task_snapshot(
         .collect();
     if live_source {
         BG_DISPLAY.state().write().clone_from(&entries);
+        for entry in &entries {
+            if entry.is_active && entry.agent_type == AGENT_KIND && entry.linked_agent_id.is_none()
+            {
+                bind_pending_live_owner(&entry.id);
+            }
+        }
     }
     for t in &tasks {
         upsert_identity_from_started(&t.task_id, &t.kind, &t.summary, t.pid);
@@ -294,6 +301,16 @@ fn accept_bg_task_delta(revision: Option<u64>) -> bool {
     true
 }
 
+/// `SubagentStarted` 先到、任务行后到时，把 child 的占位 live owner 交给新行。
+fn bind_pending_live_owner(task_id: &str) {
+    let Some((agent_id, agent_name)) = oldest_pending_live_owner() else {
+        return;
+    };
+    if link_row_to_agent(task_id, &agent_id, &agent_name) {
+        attach_pending_live_detail(task_id, &agent_id);
+    }
+}
+
 pub(crate) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEntry) {
     if !accept_bg_task_delta(entry.revision) {
         return;
@@ -340,6 +357,9 @@ pub(crate) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEnt
         display.push(display_entry);
     }
     drop(display);
+    if is_agent_task(entry) {
+        bind_pending_live_owner(&entry.task_id);
+    }
     prune_metadata();
 }
 

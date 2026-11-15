@@ -897,3 +897,139 @@ fn test_turn_boundary_archives_parent_and_routes_late_background_events() {
     BG_TASK_IDENTITY.state().write().clear();
     crate::kit::atoms::BG_AGENT_IDS.state().write().clear();
 }
+
+/// [回归 M2 / CodeRabbit] `SubagentStarted` 先于 `BgTaskStarted`：任务行缺失期间
+/// 的 child 预览由占位 owner 承接，行到达后绑定并接管后续文本/终态；turn reset
+/// 不得吞掉迟到内容，父 `CurrentTurn` 仍保持为空。
+#[test]
+#[serial]
+fn test_background_child_started_before_task_row_keeps_late_preview() {
+    use crate::kit::atoms::{BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_IDENTITY, BG_TASKS};
+    use crate::kit::stream_data::TuiTextChunk;
+
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    BG_TASKS.state().write().clear();
+    BG_DISPLAY.state().write().clear();
+    BG_LIVE_DETAIL.state().write().clear();
+    BG_TASK_IDENTITY.state().write().clear();
+    crate::kit::atoms::BG_AGENT_IDS.state().write().clear();
+    crate::kit::atoms::BG_TASK_REVISION.set(None);
+    let mut state = make_state(SessionPhase::PromptRunning, 0);
+    let child_text = |text: &str, message_id: &str| {
+        AcpEventData::TextChunk(TuiTextChunk {
+            text: text.into(),
+            message_id: Some(message_id.into()),
+            agent_id: Some("bg-early".into()),
+        })
+    };
+
+    // 1) 后台 child 先启动；此时还没有任何任务行。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "bg-early".into(),
+            agent_name: "coder".into(),
+            is_background: true,
+            parent_tool_call_id: None,
+        },
+    );
+
+    // 2) 父 turn 在任务行到达前结束：父正文归档，CurrentTurn 清空。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "parent".into(),
+            message_id: Some("parent-msg".into()),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    assert!(
+        state.current_turn.is_empty(),
+        "turn 边界必须清空父 CurrentTurn（后台 child 不阻塞归档）"
+    );
+
+    // 3) 任务行之前到达的 child 预览不能丢。
+    dispatch_and_notify(&mut state, &child_text("early", "child-msg"));
+
+    // 4) 任务行迟到：占位 owner 绑定到真实 task 并接管预览。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+            task_id: "task-late".into(),
+            kind: "agent".into(),
+            summary: "worker".into(),
+            started_at: String::new(),
+            pid: None,
+            revision: None,
+            status: Some("running".into()),
+        }),
+    );
+
+    // 5) 绑定后的迟到文本与终态。
+    dispatch_and_notify(&mut state, &child_text("-late", "child-msg"));
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "bg-early".into(),
+            result: "done".into(),
+            is_error: false,
+        },
+    );
+
+    assert!(
+        state.current_turn.is_empty(),
+        "迟到 child 事件不得重新占用父 CurrentTurn"
+    );
+    assert!(
+        !state.committed.iter().any(|unit| matches!(
+            unit,
+            TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.text.contains("early")
+        )),
+        "child 正文不得进入主回复"
+    );
+
+    let live_store = BG_LIVE_DETAIL.state();
+    let live = live_store.read();
+    assert!(
+        !live.contains_key("bg-early"),
+        "绑定后占位 owner 必须移交给真实 task"
+    );
+    let detail = live.get("task-late").expect("bound live detail");
+    let live_texts: Vec<String> = detail
+        .nested_units
+        .iter()
+        .filter_map(|vm| match vm {
+            TuiRenderUnit::TuiAssistantBubble(bubble) => Some(bubble.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        live_texts,
+        vec!["early-late".to_string()],
+        "任务行到达前后的 child 预览都要保留"
+    );
+    assert_eq!(detail.status, crate::kit::atoms::BgLiveStatus::Succeeded);
+    assert_eq!(detail.subagent_result.as_deref(), Some("done"));
+    drop(live);
+
+    let display = BG_DISPLAY.state();
+    let task = display
+        .read()
+        .iter()
+        .find(|row| row.id == "task-late")
+        .cloned()
+        .expect("task row");
+    assert_eq!(
+        task.linked_agent_id.as_deref(),
+        Some("bg-early"),
+        "迟到的任务行必须认领对应 child"
+    );
+
+    BG_TASKS.state().write().clear();
+    BG_DISPLAY.state().write().clear();
+    BG_LIVE_DETAIL.state().write().clear();
+    BG_TASK_IDENTITY.state().write().clear();
+    crate::kit::atoms::BG_AGENT_IDS.state().write().clear();
+}

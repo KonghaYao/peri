@@ -814,6 +814,8 @@ pub struct BgLiveDetail {
     /// The display preview is incomplete; canonical/task results are unaffected.
     pub preview_omitted: bool,
     pub(crate) preview_updated: u64,
+    /// 非零表示这是等任务行的占位 owner，数值为创建顺序；绑定任务行后归零。
+    pub(crate) pending_order: u64,
     pub nested_units: im::Vector<crate::kit::tui_render_unit::TuiRenderUnit>,
     pub(crate) tool_cards: Vec<crate::kit::acp_types::ToolCardAccumulator>,
     pub(crate) subagent_result: Option<String>,
@@ -836,6 +838,7 @@ impl Default for BgLiveDetail {
             cancel_reason: None,
             preview_omitted: false,
             preview_updated: 0,
+            pending_order: 0,
             nested_units: im::Vector::new(),
             tool_cards: Vec::new(),
             subagent_result: None,

@@ -3,7 +3,9 @@
 use super::*;
 use crate::kit::atoms::{BG_AGENT_IDS, BG_TASKS};
 use crate::kit::bg_task_identity::{bind_linked_agent_on_subagent_started, task_id_for_agent_id};
-use crate::kit::bg_task_live::{handle_bg_subagent_stopped, init_agent_live_detail};
+use crate::kit::bg_task_live::{
+    handle_bg_subagent_stopped, init_agent_live_detail, init_pending_agent_live_detail,
+};
 
 pub(super) fn handle_subagent_started(
     state: &mut BridgeState,
@@ -40,6 +42,10 @@ pub(super) fn handle_subagent_started(
             bind_linked_agent_on_subagent_started(agent_id, agent_name, instance_id.as_deref())
         {
             init_agent_live_detail(&task_id, agent_id, agent_name, instance_id.as_deref());
+        } else {
+            // SubagentStarted 与 BgTaskStarted 走不同通道，任务行可能晚到：
+            // 先建立占位 owner，迟到文本/工具/终态才有归属。
+            init_pending_agent_live_detail(agent_id, agent_name, instance_id.as_deref());
         }
     }
     state.variant = 1;

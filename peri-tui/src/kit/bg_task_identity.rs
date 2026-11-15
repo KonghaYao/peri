@@ -100,11 +100,38 @@ pub fn task_id_for_agent_id(agent_id: &str) -> Option<String> {
             }
         }
     }
+    // 反向乱序：任务行尚未出现时，占位 owner 以 agent_id 为键承接迟到预览。
+    if BG_LIVE_DETAIL.state().read().contains_key(agent_id) {
+        return Some(agent_id.to_string());
+    }
     let display = display_store.read();
     display
         .iter()
         .find(|e| e.id == agent_id)
         .map(|e| e.id.clone())
+}
+
+/// 把已存在但未绑定 agent 的任务行认领给迟到的 `SubagentStarted` 对应 child。
+///
+/// 返回是否真的建立了绑定（任务行存在、active 且仍是未绑定 agent 行）。
+pub(crate) fn link_row_to_agent(task_id: &str, agent_id: &str, agent_name: &str) -> bool {
+    let display_store = BG_DISPLAY.state();
+    {
+        let mut display = display_store.write();
+        let Some(entry) = display
+            .iter_mut()
+            .find(|entry| entry.id == task_id && entry.is_active && is_unbound_agent_row(entry))
+        else {
+            return false;
+        };
+        entry.linked_agent_id = Some(agent_id.to_string());
+    }
+    let identity_store = BG_TASK_IDENTITY.state();
+    let mut identities = identity_store.write();
+    let identity = identities.entry(task_id.to_owned()).or_default();
+    identity.agent_id = Some(agent_id.to_string());
+    identity.agent_name = Some(bounded_label(agent_name));
+    true
 }
 
 pub fn with_bg_display_for_agent<F>(agent_id: &str, f: F)

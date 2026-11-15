@@ -514,6 +514,133 @@ pub fn init_agent_live_detail(
     });
 }
 
+static NEXT_PENDING_ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// 为「任务行尚未出现」的后台 child 建立占位 live owner（key = agent_id）。
+///
+/// `SubagentStarted` 与 `BgTaskStarted` 来自不同通道，任务行可能晚到；占位 owner
+/// 让迟到的文本/工具/终态先有归属，行到达后由 [`attach_pending_live_detail`] 移交。
+pub(crate) fn init_pending_agent_live_detail(
+    agent_id: &str,
+    agent_name: &str,
+    subagent_instance_id: Option<&str>,
+) {
+    let live = BG_LIVE_DETAIL.state();
+    let mut map = live.write();
+    // 同一 agent_id 的新 occurrence 覆盖旧终态；重复 Started（同 occurrence）不复活。
+    let stale_terminal = map.get(agent_id).is_some_and(|detail| {
+        matches!(
+            detail.status,
+            BgLiveStatus::Succeeded | BgLiveStatus::Failed | BgLiveStatus::Cancelled
+        ) && detail.subagent_instance_id.as_deref() != subagent_instance_id
+    });
+    if stale_terminal {
+        map.remove(agent_id);
+    }
+    let detail = map.entry(agent_id.to_string()).or_default();
+    if matches!(
+        detail.status,
+        BgLiveStatus::Succeeded | BgLiveStatus::Failed | BgLiveStatus::Cancelled
+    ) {
+        return;
+    }
+    detail.agent_id = Some(agent_id.to_string());
+    detail.agent_name = Some(preview::text(
+        agent_name,
+        preview::FIELD_BYTES,
+        &mut detail.preview_omitted,
+    ));
+    detail.subagent_instance_id = subagent_instance_id.map(str::to_string);
+    detail.status = BgLiveStatus::Running;
+    if detail.pending_order == 0 {
+        detail.pending_order =
+            NEXT_PENDING_ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    preview::touch(detail);
+    preview::enforce(&mut map);
+}
+
+/// 最早创建且仍在等待任务行的占位 owner。
+///
+/// 只认仍在 `BG_AGENT_IDS` 里的 child：Stop 之后占位 owner 只保留终态预览，
+/// 不得再认领后来出现的任务行。
+pub(crate) fn oldest_pending_live_owner() -> Option<(String, String)> {
+    let active = crate::kit::atoms::BG_AGENT_IDS.state().read().clone();
+    let live = BG_LIVE_DETAIL.state();
+    let map = live.read();
+    map.iter()
+        .filter(|(id, detail)| {
+            detail.pending_order != 0
+                && detail.status == BgLiveStatus::Running
+                && active.contains(*id)
+        })
+        .min_by_key(|(_, detail)| detail.pending_order)
+        .map(|(id, detail)| (id.clone(), detail.agent_name.clone().unwrap_or_default()))
+}
+
+/// 把占位 owner 的正文与终态移交给迟到的任务行。
+///
+/// 任务行已由 `seed_live_from_started` 提供权威 kind/summary/pid；占位 owner 提供
+/// child 正文与终态。
+pub(crate) fn attach_pending_live_detail(task_id: &str, agent_id: &str) {
+    if task_id == agent_id {
+        return;
+    }
+    let live = BG_LIVE_DETAIL.state();
+    let mut map = live.write();
+    let Some(mut pending) = map.remove(agent_id) else {
+        return;
+    };
+    pending.pending_order = 0;
+    let Some(detail) = map.get_mut(task_id) else {
+        map.insert(task_id.to_string(), pending);
+        preview::enforce(&mut map);
+        return;
+    };
+    if !pending.kind.is_empty() {
+        detail.kind = std::mem::take(&mut pending.kind);
+    }
+    if !pending.summary.is_empty() {
+        detail.summary = std::mem::take(&mut pending.summary);
+    }
+    if pending.pid.is_some() {
+        detail.pid = pending.pid;
+    }
+    let agent_id = pending.agent_id.take().or_else(|| detail.agent_id.take());
+    detail.agent_id = agent_id;
+    let agent_name = pending
+        .agent_name
+        .take()
+        .or_else(|| detail.agent_name.take());
+    detail.agent_name = agent_name;
+    let instance = pending
+        .subagent_instance_id
+        .take()
+        .or_else(|| detail.subagent_instance_id.take());
+    detail.subagent_instance_id = instance;
+    detail.nested_units = std::mem::take(&mut pending.nested_units);
+    detail.tool_cards = std::mem::take(&mut pending.tool_cards);
+    detail.stream = pending.stream.take();
+    detail.subagent_result = pending.subagent_result.take();
+    detail.subagent_is_error = pending.subagent_is_error;
+    detail.preview_omitted |= pending.preview_omitted;
+    detail.duration_ms = detail.duration_ms.or(pending.duration_ms);
+    detail.output_preview = detail
+        .output_preview
+        .take()
+        .or_else(|| pending.output_preview.take());
+    detail.cancel_reason = detail
+        .cancel_reason
+        .take()
+        .or_else(|| pending.cancel_reason.take());
+    if pending.status != BgLiveStatus::Running {
+        detail.status = pending.status;
+        preview::finish(detail);
+    }
+    preview::touch(detail);
+    preview::enforce(&mut map);
+}
+
 pub fn seed_live_from_started(task_id: &str, kind: &str, summary: &str, pid: Option<u32>) {
     with_live_detail(task_id, |d| {
         if matches!(
@@ -771,7 +898,11 @@ pub(crate) fn reconcile_snapshot_tasks(observed: &std::collections::HashSet<Stri
     let live = BG_LIVE_DETAIL.state();
     let mut map = live.write();
     for (id, detail) in map.iter_mut() {
-        if detail.status == BgLiveStatus::Running && !observed.contains(id) {
+        // 占位 owner 以 agent_id 为键，本来就不在任务快照中；不能当成 lost 证据。
+        if detail.status == BgLiveStatus::Running
+            && detail.pending_order == 0
+            && !observed.contains(id)
+        {
             flush_detail(detail);
             detail.stream = None;
             detail.status = BgLiveStatus::Unobserved;
