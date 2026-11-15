@@ -146,15 +146,26 @@ impl Drop for WorkflowChildSettlement {
             return;
         };
         handle.spawn(async move {
-            if let Err(error) =
-                crate::session::subagent::close_subagent_session_scope(session).await
-            {
-                tracing::warn!(
-                    session_id = thread_id.as_str(),
-                    %error,
-                    "workflow child scope close incomplete after cancelled execution"
-                );
-            }
+            let scope_closed =
+                match crate::session::subagent::close_subagent_session_scope(session).await {
+                    Ok(()) => true,
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id = thread_id.as_str(),
+                            %error,
+                            "workflow child scope close incomplete after cancelled execution"
+                        );
+                        false
+                    }
+                };
+            // 与显式路径同一约定：scope 未结清时按 Error + Idle 收口，不用
+            // Cancelled 掩盖未释放的资源；但仍必须写终态，否则 active + working
+            // 会重新变成父会话的恢复候选。
+            let status = if scope_closed {
+                status
+            } else {
+                AgentStatus::Error
+            };
             settle_workflow_child(resources.as_ref(), &thread_id, status).await;
         });
     }
