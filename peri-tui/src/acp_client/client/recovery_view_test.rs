@@ -115,7 +115,7 @@ fn partial_notice_asks_for_explicit_resume_and_counts_child_threads() {
     let message = notice.as_ref().expect("部分恢复必须有通知").message.clone();
     drop(notice);
     assert!(
-        message.contains("2 个相关子线程需要显式 resume（缺少投递目标）"),
+        message.contains("2 个相关子线程需要显式 resume（缺少投递目标或恢复失败）"),
         "{message}"
     );
     crate::i18n::init(None);

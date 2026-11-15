@@ -30,11 +30,13 @@ pub(crate) mod restore;
 mod session_apps_capability;
 pub(crate) use restore::{
     assemble_for_recovery, handle_context, handle_fork_shared, handle_load, handle_load_shared,
-    handle_metadata, handle_resume, handle_resume_shared, rollback_restore_publication,
+    handle_metadata, handle_resume, handle_resume_shared, rollback_unused_restore_publication,
     RestorePublication,
 };
 #[cfg(test)]
-pub(crate) use restore::{cleanup_unpublished_restore, publication_test_hook};
+pub(crate) use restore::{
+    cleanup_unpublished_restore, publication_test_hook, rollback_restore_publication,
+};
 use restore::{identity_response, prepare_existing, response_identity};
 use session_apps_capability::apps_capability;
 

@@ -24,7 +24,9 @@ use tokio::sync::Mutex;
 
 use super::super::{AcpServerConfig, SharedSessions};
 use super::{interrupted, reminder, runtime_binding, scope};
-use crate::host::requests::session_lifecycle::{rollback_restore_publication, RestorePublication};
+use crate::host::requests::session_lifecycle::{
+    rollback_unused_restore_publication, RestorePublication,
+};
 use crate::session::executor::ContinuationRequest;
 use crate::session::SessionManager;
 use crate::transport::types::AcpError;
@@ -428,7 +430,11 @@ impl HostSessionRecovery {
         }
     }
 
-    /// 拒绝本次冷装配：只回收本调用发布的实例，旧代次或他人实例不受影响。
+    /// 拒绝本次冷装配：只回收尚无 turn 占用的本次发布。
+    ///
+    /// 回滚在同一次 `SharedSessions` 锁内复核 generation 与 `cancel_token`：准入等待
+    /// 期间若有 prompt/continuation 取得该会话，实例归执行方，这里放弃删除。旧代次
+    /// 或他人实例同样不受影响。
     async fn reject_cold_child(
         &self,
         publication: Option<RestorePublication>,
@@ -438,7 +444,8 @@ impl HostSessionRecovery {
             return outcome;
         };
         if let Err(error) =
-            rollback_restore_publication(self.cfg.as_ref(), &self.sessions, &publication).await
+            rollback_unused_restore_publication(self.cfg.as_ref(), &self.sessions, &publication)
+                .await
         {
             tracing::warn!(
                 session_id = %publication.session_id,
