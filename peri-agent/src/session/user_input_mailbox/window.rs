@@ -68,11 +68,11 @@ pub(super) fn retain_terminal(state: &mut MailboxState, id: &str) {
     let Ok(input_uuid) = uuid::Uuid::parse_str(id) else {
         return;
     };
-    let record = state
-        .records
-        .iter()
-        .find(|record| record.input_id == id)
-        .expect("终态记录存在");
+    let Some(record) = state.records.iter().find(|record| record.input_id == id) else {
+        // 竞态：另一路径已结算该记录（终态身份由赢家写入并 prune）。这里不能
+        // 假定调用方仍持有记录，否则 dispatch / takeback 同时成功时会 panic。
+        return;
+    };
     if state.terminal_identities.contains_key(&input_uuid) {
         return;
     }
