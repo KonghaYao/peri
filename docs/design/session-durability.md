@@ -214,7 +214,7 @@ child 的终态、`work_state` 收尾、结果接纳到目标 MQ，以及适用�
 
 sync 委派实际转为后台继续执行时，worker 持有 `working` 写入并向调用方确认；写入失败取消子执行并返回错误，成功确认前不能返回 Pending。调用方在 `working` 已提交后消失时，调用方消失后仍存活的认领 worker 负责把 `agent_status` 与 `work_state` 一起恢复到认领前的值，不留「终态 + working」。终态写入只归 handoff worker。执行体与 worker 用进程内 `TerminalOwnership` CAS 决定唯一写入者；worker 先建立父 `AsyncResultMailbox` 的 Queued 责任，再用 `finalize_child_terminal` 一次提交 child 终态、`work_state` 与父 MQ 结果。没有可用 terminal route 时不 detach，按同步路径执行并用 `settle_terminal_without_result` 收尾；worker 准入被拒时同样回退同步，由 wrapper/执行体按同一 CAS 唯一写终态，不产生父回执。映射为：正常结束 `Done + Idle`；明确取消 `Cancelled + Stopped`；其他中断、失败、交接未完成或 close 失败 `Error + Idle`。finalize 失败时结果未确认，child 仍按 `working` 交给下一次进入，并用同一消息身份重试（若提交实际已落地，重试为幂等 no-op），不伪报完成。
 
-workflow agent 的 hidden child 没有父 MQ 结果，但在 `execute` 的每个退出路径尝试复用 `settle_terminal_without_result` 写同一组终态映射；close 未结清时统一降级为 `Error + Idle`，future 被 workflow kill 或会话关闭 drop 时由结算守卫先取消并结清会话作用域，再兜底结算。结算成功后不再留给父会话恢复；写入失败时 child 仍可能为 `working`，继续按本节前面的终态门与恢复复核处理，并由 error 日志暴露。
+workflow agent 的 hidden child 没有父 MQ 结果，但在 `execute` 的每个退出路径尝试复用 `settle_terminal_without_result` 写同一组终态映射；显式完成路径 close 未结清时降级为 `Error + Idle`，future 被 workflow kill 或会话关闭 drop 时由结算守卫先取消并结清会话作用域，再按取消语义写 `Cancelled + Stopped`（close 失败只记录 warn）。结算成功后不再留给父会话恢复；写入失败时 child 仍可能为 `working`，继续按本节前面的终态门与恢复复核处理，并由 error 日志暴露。
 
 恢复 child 的 continuation 在 turn 真正获得准入后登记到 live 且未 closing 的实际接收会话。`TaskManager::register_live_agent` 同时建立任务投影、原 child thread 的可撤销消息入口和取消令牌；`TaskRecord.child_thread_id` 填写原 thread。`active_agents` 沿已保存的 `cancel_policy` 保留 Cascade／Independent 行为。接收会话未 live 时跳过登记，其之后进入时补做 adoption，不冷装配祖先链；child 终态结算或启动早失败时关闭 inbox 并收尾任务。
 

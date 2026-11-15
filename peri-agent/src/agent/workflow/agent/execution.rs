@@ -142,27 +142,27 @@ impl Drop for WorkflowChildSettlement {
             return;
         };
         handle.spawn(async move {
-            let scope_closed =
-                match crate::session::subagent::close_subagent_session_scope(session).await {
-                    Ok(()) => true,
-                    Err(error) => {
-                        tracing::warn!(
-                            session_id = thread_id.as_str(),
-                            %error,
-                            "workflow child scope close incomplete after cancelled execution"
-                        );
-                        false
-                    }
-                };
-            let status = drop_terminal_status(panicking, scope_closed);
+            // close 失败只影响清理证据，不改变用户取消的终态：外部执行守卫在
+            // future drop 时必然留下 uncertainty，close 因此常报 Incomplete；
+            // 取消语义仍按 sync/background child 约定写 Cancelled + Stopped。
+            if let Err(error) =
+                crate::session::subagent::close_subagent_session_scope(session).await
+            {
+                tracing::warn!(
+                    session_id = thread_id.as_str(),
+                    %error,
+                    "workflow child scope close incomplete after cancelled execution"
+                );
+            }
+            let status = drop_terminal_status(panicking);
             settle_workflow_child(resources.as_ref(), &thread_id, status).await;
         });
     }
 }
 
-/// Drop 路径必须结算，但 scope 未结清或 panic 都不能伪装成用户取消。
-fn drop_terminal_status(panicking: bool, scope_closed: bool) -> AgentStatus {
-    if panicking || !scope_closed {
+/// Drop 路径必须结算：panic 是执行失败，其余 drop 都表达取消意图。
+fn drop_terminal_status(panicking: bool) -> AgentStatus {
+    if panicking {
         AgentStatus::Error
     } else {
         AgentStatus::Cancelled
@@ -210,11 +210,9 @@ mod tests {
     use peri_acp_types::thread::AgentStatus;
 
     #[test]
-    fn drop_settles_cancelled_only_after_clean_close() {
-        assert_eq!(drop_terminal_status(false, true), AgentStatus::Cancelled);
-        assert_eq!(drop_terminal_status(false, false), AgentStatus::Error);
-        assert_eq!(drop_terminal_status(true, true), AgentStatus::Error);
-        assert_eq!(drop_terminal_status(true, false), AgentStatus::Error);
+    fn drop_settles_cancelled_unless_panicking() {
+        assert_eq!(drop_terminal_status(false), AgentStatus::Cancelled);
+        assert_eq!(drop_terminal_status(true), AgentStatus::Error);
     }
 
     #[test]
