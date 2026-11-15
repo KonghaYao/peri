@@ -503,6 +503,9 @@ pub fn effective_name_of(instance: &str, original_name: &str) -> Option<&'static
         .map(|tool| tool.effective_name)
 }
 
+/// v5 单出口能力声明源（迁移期与 v4 实例表并存；默认路径尚未切换）。
+pub mod v5;
+
 #[cfg(test)]
 #[path = "builtin_mcp_test.rs"]
 mod tests;

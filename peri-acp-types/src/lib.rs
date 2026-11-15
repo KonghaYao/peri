@@ -38,7 +38,7 @@
 //! - `workflow` — workflow 协议契约（AgentRunParams/ProgressEvent/AgentExecutor/...）
 //! - `hooks` — hook 契约（HookEvent/HookType/RegisteredHook/...）
 //! - `plugin` — 插件契约（PluginManifest/LoadedPlugin/PluginLoadResult/PluginManagerPort）
-//! - `builtin_mcp` — builtin MCP 注册表纯数据（实例 / 原始工具名 / effective name / direct / 声明模板）
+//! - `builtin_mcp` — builtin MCP 注册表纯数据（实例 / 原始工具名 / effective name / direct / 声明模板；`v5` 子模块为单出口能力声明与迁移映射，默认路径未切换）
 //! - `ports` — 装配注入端口（McpPoolPort/ToolSearchPort/AgentCatalogPort）
 
 pub mod acp_mcp;
