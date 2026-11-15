@@ -83,7 +83,7 @@ M4 是回滚支持截止点：M4 开始前必须记录截止决定并确认旧�
 迁移与回滚验收项：
 
 1. **beta flag**：v5 新装配只对新会话生效，flag 关闭时走 v4 六实例兼容路径（仅到 M4 前）；flag id 与注册表条目在实现期按 `beta-flags.md` 引入，本阶段不预占。
-2. **能力集模型**：新会话冻结配置能力集并记录来源 revision 供诊断；运行时能力投影由该集合减去失败能力派生，用于目录、ToolSearch、资源/订阅、继承面、宿主任务、readiness、诊断与 runtime authorization；子 Agent 复用；冷加载/恢复不重新解析、不隐式换身份。
+2. **能力集模型**：新会话冻结配置能力集并记录来源 revision 供诊断；运行时能力投影由该集合减去失败能力派生，用于目录、ToolSearch、资源/订阅、继承面、宿主任务、readiness、诊断与 runtime authorization；恢复只通过显式重连、新会话或冷恢复，冷恢复不持久化降级状态；子 Agent 复用；冷加载/恢复不重新解析、不隐式换身份。
 3. **旧配置 adapter**：v4 逐实例 `.mcp.json` 条目确定性映射为能力开关；映射失败为 typed error；新会话不写回六条目。
 4. **旧 transcript**：v5 路由只把旧名用于展示/匹配归一；`original_tool_name_of_effective` 不用于执行路由；归一失败报错。v4 路径继续执行其 `mcp__<instance>__<tool>` 名，直到 M4。
 5. **回滚**：只对新会话选择旧装配（仅到 M4 前）；已冻结会话不得热替换 pool、重写历史或重新发布已关闭实例。
