@@ -89,9 +89,15 @@ pub enum UpstreamConnectError {
     #[error("upstream handshake timed out")]
     Timeout,
     #[error(transparent)]
-    Initialize(#[from] ClientInitializeError),
+    Initialize(Box<ClientInitializeError>),
     #[error(transparent)]
     Attach(#[from] UpstreamAttachError),
+}
+
+impl From<ClientInitializeError> for UpstreamConnectError {
+    fn from(error: ClientInitializeError) -> Self {
+        Self::Initialize(Box::new(error))
+    }
 }
 
 /// 旧代次连接不得覆盖当前代次。
@@ -675,6 +681,7 @@ impl ClientHandler for UpstreamProxyClient {
         )
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn on_progress(
         &self,
         params: ProgressNotificationParam,
@@ -723,8 +730,8 @@ impl ClientHandler for UpstreamProxyClient {
         &self,
         context: NotificationContext<RoleClient>,
     ) -> impl Future<Output = ()> + MaybeSendFuture + '_ {
-        let mut notification = ResourceListChangedNotification::default();
-        notification.extensions = notification_extensions(context.meta);
+        let notification =
+            with_notification_meta(ResourceListChangedNotification::default(), context.meta);
         let notification = ServerNotification::ResourceListChangedNotification(notification);
         async move { self.inner.send_downstream(notification).await }
     }
@@ -733,8 +740,8 @@ impl ClientHandler for UpstreamProxyClient {
         &self,
         context: NotificationContext<RoleClient>,
     ) -> impl Future<Output = ()> + MaybeSendFuture + '_ {
-        let mut notification = ToolListChangedNotification::default();
-        notification.extensions = notification_extensions(context.meta);
+        let notification =
+            with_notification_meta(ToolListChangedNotification::default(), context.meta);
         let notification = ServerNotification::ToolListChangedNotification(notification);
         async move { self.inner.send_downstream(notification).await }
     }
@@ -743,12 +750,13 @@ impl ClientHandler for UpstreamProxyClient {
         &self,
         context: NotificationContext<RoleClient>,
     ) -> impl Future<Output = ()> + MaybeSendFuture + '_ {
-        let mut notification = PromptListChangedNotification::default();
-        notification.extensions = notification_extensions(context.meta);
+        let notification =
+            with_notification_meta(PromptListChangedNotification::default(), context.meta);
         let notification = ServerNotification::PromptListChangedNotification(notification);
         async move { self.inner.send_downstream(notification).await }
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn on_task_status(
         &self,
         mut params: TaskStatusNotificationParams,
@@ -768,6 +776,7 @@ impl ClientHandler for UpstreamProxyClient {
         }
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn on_custom_notification(
         &self,
         notification: CustomNotification,
@@ -785,6 +794,14 @@ impl ClientHandler for UpstreamProxyClient {
             self.inner.send_downstream(notification).await;
         }
     }
+}
+
+fn with_notification_meta<M>(
+    mut notification: rmcp::model::NotificationNoParam<M>,
+    meta: NotificationMetaObject,
+) -> rmcp::model::NotificationNoParam<M> {
+    notification.extensions = notification_extensions(meta);
+    notification
 }
 
 fn notification_extensions(meta: NotificationMetaObject) -> rmcp::model::Extensions {
