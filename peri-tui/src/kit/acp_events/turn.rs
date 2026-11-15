@@ -32,7 +32,8 @@ pub(super) fn handle_turn_done(state: &mut BridgeState) {
     // buffered_text 已由 LocalUserBubble 事件提前入队 committed，
     // TurnDone 不再代为搬运。
     let _ = state.pending_cache_usage.take();
-    state.flush_current_turn();
+    // 普通 TurnDone 是 turn 边界：后台 child 不阻塞父消息归档（M2）。
+    state.flush_current_turn_at_boundary();
     state.last_pushed_text_len = 0;
     state.last_pushed_reasoning_len = 0;
     state.variant = 0;

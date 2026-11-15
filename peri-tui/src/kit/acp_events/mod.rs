@@ -280,6 +280,19 @@ impl BridgeState {
         has_running_sync_subagent
     }
 
+    /// turn 边界归档：只有仍在运行的**同步** child 需要保留容器。
+    ///
+    /// 后台 child 跨 turn 由全局 live 明细维护；若按 any-running 保留，固定后台
+    /// 任务期间每轮父正文都会滞留在 CurrentTurn，内存随轮数线性增长。
+    fn flush_current_turn_at_boundary(&mut self) {
+        // 消息身份只在同一段流式输出内有效；turn 边界后不得沿用到下一轮。
+        live_tool_links::note_turn_boundary(&self.active_session_id);
+        if !self.commit_current_turn_units() {
+            self.current_turn.reset();
+        }
+        self.sample_memory("bridge_flush");
+    }
+
     /// 将 current_turn 已产出内容 flush 到 committed，然后 reset。
     ///
     /// 需要保证时序正确性的位置会调用该入口；running subagent 不会清除 current_turn，
@@ -307,8 +320,8 @@ impl BridgeState {
     }
 
     /// Put a user prompt after all output already received from the preceding
-    /// turn. A live subagent keeps its container in current_turn, so in that
-    /// case the prompt joins the same chronological segment stream.
+    /// turn. Only a running sync subagent keeps its container in current_turn;
+    /// a background child is archived with the rest of the finished turn.
     fn push_user_bubble(
         &mut self,
         text: String,
@@ -324,7 +337,7 @@ impl BridgeState {
             .iter()
             .any(|tool| tool.output_summary.is_none());
         if !has_running_tool {
-            self.flush_current_turn();
+            self.flush_current_turn_at_boundary();
         }
         let mut bubble = TuiUserBubble::with_attachments(text, attachments);
         bubble.message_id = message_id;

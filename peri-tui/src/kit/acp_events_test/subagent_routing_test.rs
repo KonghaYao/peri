@@ -528,11 +528,11 @@ fn completed_subagent_is_consumed_only_at_archive_boundary() {
     assert!(turn.take_completed_subagents().is_empty());
 }
 
-/// [回归测试 R05] 运行中的 A 分组之后的已完成 B 分组不得被单独抽到 committed。
+/// [回归测试 R05/M2] 后台 A 分组仍在运行时，已完成 B 分组随整轮一起归档，
+/// 展示顺序不变；不能只抽 B 或把整轮留在 current_turn。
 ///
-/// committed 整段渲染在 current_turn 之前；若把 B 分组（位于 A 分组之后）独立
-/// 归档，B 会跨越仍在运行的 A 分组移到它前面，用户看到的时间线变成
-/// `A 调用卡 → B 分组 → A 分组 → B 调用卡`。
+/// committed 整段渲染在 current_turn 之前；归档时必须保持 segment 顺序，
+/// 否则用户看到的时间线会变成 `A 调用卡 → B 分组 → A 分组 → B 调用卡`。
 #[test]
 #[serial]
 fn test_flush_does_not_reorder_completed_subagent_after_running_group() {
@@ -598,14 +598,13 @@ fn test_flush_does_not_reorder_completed_subagent_after_running_group() {
 
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert!(
-        state.current_turn.has_running_subagent(),
-        "A 分组仍在运行，turn 不得整体 reset"
+        state.current_turn.is_empty(),
+        "只有后台 A 仍在运行，普通 TurnDone 必须整段归档并 reset（M2）"
     );
 
     let layout: Vec<String> = state
         .committed
         .iter()
-        .chain(state.current_turn.view_models().iter())
         .map(|vm| match vm {
             TuiRenderUnit::TuiToolCard(card) => format!("card:{}", card.tool_id),
             TuiRenderUnit::TuiSubAgentGroup(group) => format!("group:{}", group.agent_id),
@@ -620,12 +619,281 @@ fn test_flush_does_not_reorder_completed_subagent_after_running_group() {
             "card:agent-call-b",
             "group:agent-b",
         ],
-        "运行中分组之后的已完成分组不得越过它被提前归档"
+        "整段归档后展示顺序不变：B 分组仍必须位于运行中的 A 分组之后"
+    );
+}
+
+/// [回归测试 M2] 固定后台 child 长期 running 时，父会话连续 TurnDone 必须
+/// 整段归档；CurrentTurn 的 raw/VM/segments/tool_cards 不随轮数增长。
+#[test]
+#[serial]
+fn test_turn_done_with_only_background_child_keeps_current_turn_bounded() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    crate::kit::atoms::BG_AGENT_IDS.state().write().clear();
+    let mut state = make_state(SessionPhase::PromptRunning, 0);
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "bg-long".into(),
+            agent_name: "bg-long".into(),
+            is_background: true,
+            parent_tool_call_id: None,
+        },
+    );
+    assert!(state.current_turn.has_running_subagent());
+    assert!(!state.current_turn.has_running_sync_subagent());
+
+    for round in 0..1000 {
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+                text: format!("parent round {round}"),
+                message_id: Some(format!("parent-{round}")),
+                agent_id: None,
+            }),
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
+                agent_id: None,
+                tool_name: "Read".into(),
+                tool_id: format!("tool-{round}"),
+                input_summary: "file.rs".into(),
+                raw_input: serde_json::Value::Null,
+                origin_message_id: None,
+                origin_readable: None,
+            }),
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+                agent_id: None,
+                tool_id: format!("tool-{round}"),
+                output_summary: "ok".into(),
+                is_error: false,
+            }),
+        );
+        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+
+        assert!(
+            state.current_turn.is_empty(),
+            "round {round}: TurnDone 后 CurrentTurn 必须为空"
+        );
+        assert_eq!(
+            state.current_turn.view_model_count(),
+            0,
+            "round {round}: CurrentTurn VM 不得随轮数增长"
+        );
+        assert_eq!(
+            state.current_turn.raw_memory_bytes().body,
+            0,
+            "round {round}: CurrentTurn raw 正文不得随轮数增长"
+        );
+        assert!(
+            state.current_turn.tool_cards.is_empty(),
+            "round {round}: 工具卡不得滞留"
+        );
+    }
+    crate::kit::atoms::BG_AGENT_IDS.state().write().clear();
+}
+
+/// [回归测试 M2] 后台 A 长期 running、同步 B 已完成时：
+/// - 用户气泡边界与普通 TurnDone 都整段归档父消息，展示顺序不变；
+/// - 迟到的 A 文本/Stop 只进 BG_LIVE_DETAIL，不进入主回复。
+#[test]
+#[serial]
+fn test_turn_boundary_archives_parent_and_routes_late_background_events() {
+    use crate::kit::atoms::{BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_IDENTITY, BG_TASKS};
+    use crate::kit::stream_data::TuiTextChunk;
+
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    BG_TASKS.state().write().clear();
+    BG_DISPLAY.state().write().clear();
+    BG_LIVE_DETAIL.state().write().clear();
+    BG_TASK_IDENTITY.state().write().clear();
+    crate::kit::atoms::BG_AGENT_IDS.state().write().clear();
+    crate::kit::atoms::BG_TASK_REVISION.set(None);
+    let mut state = make_state(SessionPhase::PromptRunning, 0);
+
+    let root_text = |text: &str, message_id: &str| {
+        AcpEventData::TextChunk(TuiTextChunk {
+            text: text.into(),
+            message_id: Some(message_id.into()),
+            agent_id: None,
+        })
+    };
+    let child_text = |agent_id: &str, text: &str, message_id: &str| {
+        AcpEventData::TextChunk(TuiTextChunk {
+            text: text.into(),
+            message_id: Some(message_id.into()),
+            agent_id: Some(agent_id.into()),
+        })
+    };
+
+    // 后台 A 的任务身份：迟到事件需要能落进 BG_LIVE_DETAIL。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+            task_id: "task-a".into(),
+            kind: "agent".into(),
+            summary: "bg".into(),
+            started_at: String::new(),
+            pid: None,
+            revision: None,
+            status: None,
+        }),
+    );
+    dispatch_and_notify(&mut state, &root_text("p0", "m0"));
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "bg-a".into(),
+            agent_name: "bg-a".into(),
+            is_background: true,
+            parent_tool_call_id: None,
+        },
+    );
+    dispatch_and_notify(&mut state, &child_text("bg-a", "a-live", "bg-live"));
+
+    // 用户气泡边界：A 仍在运行也要把前面的父正文与 A 一起归档。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble {
+            text: "u1".into(),
+            attachments: Vec::new(),
+        },
     );
     assert!(
-        !state.committed.iter().any(
-            |vm| matches!(vm, TuiRenderUnit::TuiSubAgentGroup(group) if group.agent_id == "agent-b")
-        ),
-        "B 分组必须留在容器里等待 A 分组结束"
+        state.current_turn.is_empty(),
+        "用户气泡边界必须整段归档，后台 A 不得保留容器"
     );
+
+    // 同步 B 在本轮内启动并完成；父正文仍排在 B 之后。
+    dispatch_and_notify(&mut state, &root_text("p1", "m1"));
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "sync-b".into(),
+            agent_name: "sync-b".into(),
+            is_background: false,
+            parent_tool_call_id: None,
+        },
+    );
+    dispatch_and_notify(&mut state, &child_text("sync-b", "b-done", "b-msg"));
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "sync-b".into(),
+            result: String::new(),
+            is_error: false,
+        },
+    );
+    dispatch_and_notify(&mut state, &root_text("p1-after", "m1b"));
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    dispatch_and_notify(&mut state, &root_text("p2", "m2"));
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    assert!(
+        state.current_turn.is_empty(),
+        "多轮 TurnDone 后 CurrentTurn 必须保持为空"
+    );
+
+    let layout: Vec<String> = state
+        .committed
+        .iter()
+        .map(|unit| match unit {
+            TuiRenderUnit::TuiAssistantBubble(bubble) => format!("text:{}", bubble.text),
+            TuiRenderUnit::TuiUserBubble(bubble) => format!("user:{}", bubble.text),
+            TuiRenderUnit::TuiSubAgentGroup(group) => format!("group:{}", group.agent_id),
+            other => format!("other:{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        layout,
+        vec![
+            "text:p0",
+            "group:bg-a",
+            "user:u1",
+            "text:p1",
+            "group:sync-b",
+            "text:p1-after",
+            "text:p2",
+        ],
+        "整段归档后父消息与子分组顺序不变"
+    );
+
+    let committed_len = state.committed.len();
+    fn group_texts(state: &BridgeState, agent_id: &str) -> Vec<String> {
+        state
+            .committed
+            .iter()
+            .find_map(|unit| match unit {
+                TuiRenderUnit::TuiSubAgentGroup(group) if group.agent_id == agent_id => Some(
+                    group
+                        .view_models
+                        .iter()
+                        .filter_map(|vm| match vm {
+                            TuiRenderUnit::TuiAssistantBubble(bubble) => Some(bubble.text.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+    assert_eq!(
+        group_texts(&state, "bg-a"),
+        vec!["a-live".to_string()],
+        "归档组冻结在 turn 边界那一刻"
+    );
+
+    // 迟到的 A 文本：只累积到 BG_LIVE_DETAIL，committed/current_turn 都不变。
+    dispatch_and_notify(&mut state, &child_text("bg-a", "a-late", "bg-live"));
+    assert_eq!(
+        state.committed.len(),
+        committed_len,
+        "迟到后台文本不得进入主回复"
+    );
+    assert!(state.current_turn.is_empty());
+    assert_eq!(group_texts(&state, "bg-a"), vec!["a-live".to_string()]);
+
+    // 迟到的 A Stop：只结算后台预览，不改主回复。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "bg-a".into(),
+            result: "done".into(),
+            is_error: false,
+        },
+    );
+    assert_eq!(
+        state.committed.len(),
+        committed_len,
+        "迟到后台 Stop 不得进入主回复"
+    );
+    assert!(state.current_turn.is_empty());
+
+    let live_store = BG_LIVE_DETAIL.state();
+    let live = live_store.read();
+    let detail = live.get("task-a").expect("bg live detail");
+    let live_texts: Vec<String> = detail
+        .nested_units
+        .iter()
+        .filter_map(|vm| match vm {
+            TuiRenderUnit::TuiAssistantBubble(bubble) => Some(bubble.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(live_texts, vec!["a-livea-late".to_string()]);
+    assert_eq!(detail.status, crate::kit::atoms::BgLiveStatus::Succeeded);
+    drop(live);
+
+    BG_TASKS.state().write().clear();
+    BG_DISPLAY.state().write().clear();
+    BG_LIVE_DETAIL.state().write().clear();
+    BG_TASK_IDENTITY.state().write().clear();
+    crate::kit::atoms::BG_AGENT_IDS.state().write().clear();
 }

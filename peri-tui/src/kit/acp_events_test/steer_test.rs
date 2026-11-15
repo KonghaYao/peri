@@ -114,11 +114,12 @@ fn test_steer_delivered_reuses_chat_bubble_between_assistant_turns() {
     );
 }
 
-/// P0 regression: a running subagent keeps its parent turn open; a delivered
-/// prompt and the following answer must still stay in chronological order.
+/// P0/M2 regression: a running background subagent must not hold the parent
+/// turn open. A delivered prompt archives the preceding output in order, and
+/// the following answer stays after the prompt.
 #[test]
 #[serial]
-fn p0_delivered_prompt_follows_output_when_subagent_keeps_turn_open() {
+fn p0_delivered_prompt_follows_output_with_running_background_child() {
     let (mut state, _restore) = make_steer_bridge();
     dispatch_and_notify(
         &mut state,
@@ -158,11 +159,15 @@ fn p0_delivered_prompt_follows_output_when_subagent_keeps_turn_open() {
         "delivered prompt must follow existing output"
     );
     assert!(
-        state
-            .current_turn
-            .subagents
-            .iter()
-            .any(|agent| agent.is_running)
+        state.current_turn.is_empty(),
+        "只有后台 child 运行时，delivered prompt 边界必须整段归档（M2）"
+    );
+    assert!(
+        state.committed.iter().any(|vm| matches!(
+            vm,
+            TuiRenderUnit::TuiSubAgentGroup(group) if group.agent_id == "child"
+        )),
+        "运行中的后台分组随父消息一起归档，顺序不得丢失"
     );
 
     dispatch_and_notify(
