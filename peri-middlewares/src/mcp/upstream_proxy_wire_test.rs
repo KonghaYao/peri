@@ -222,6 +222,7 @@ struct MockState {
     subscribe_failures: AtomicUsize,
     unsubscribe_failures: AtomicUsize,
     subscribe_delay_ms: AtomicU64,
+    subscribe_started: AtomicUsize,
     started_tx: Mutex<Option<mpsc::UnboundedSender<(RequestId, String)>>>,
     release: Arc<Notify>,
 }
@@ -288,6 +289,10 @@ impl MockUpstream {
         self.state
             .subscribe_delay_ms
             .store(delay_ms, Ordering::SeqCst);
+    }
+
+    fn subscribe_started(&self) -> usize {
+        self.state.subscribe_started.load(Ordering::SeqCst)
     }
 
     fn listens(&self) -> Vec<SubscriptionFilter> {
@@ -519,6 +524,7 @@ impl ServerHandler for MockUpstream {
         request: SubscribeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<(), McpError> {
+        self.state.subscribe_started.fetch_add(1, Ordering::SeqCst);
         if self.state.subscribe_failures.load(Ordering::SeqCst) > 0 {
             self.state.subscribe_failures.fetch_sub(1, Ordering::SeqCst);
             return Err(internal("subscribe", "mock subscribe failure"));

@@ -537,8 +537,8 @@ impl ServerHandler for UpstreamProxy {
     ) -> Result<(), McpError> {
         self.inner.remember_downstream(&context.peer);
         let uri = request.uri.clone();
-        let _gate = self.inner.subscription_gate.lock().await;
         let (generation, peer) = self.inner.upstream()?;
+        let _gate = self.inner.subscription_lock(generation).await?;
         if !self.inner.acquire_subscription(generation, &uri)? {
             return Ok(());
         }
@@ -566,8 +566,8 @@ impl ServerHandler for UpstreamProxy {
     ) -> Result<(), McpError> {
         self.inner.remember_downstream(&context.peer);
         let uri = request.uri.clone();
-        let _gate = self.inner.subscription_gate.lock().await;
         let (generation, peer) = self.inner.upstream()?;
+        let _gate = self.inner.subscription_lock(generation).await?;
         if !self.inner.release_subscription(generation, &uri)? {
             return Ok(());
         }

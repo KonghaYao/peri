@@ -4,7 +4,10 @@
 
 use std::{
     collections::HashMap,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -67,6 +70,20 @@ impl SubscriptionCounts {
     }
 }
 
+/// 订阅操作按代次串行化；每代独立 mutex，旧代次未完成的请求不会阻塞新代次。
+#[derive(Default)]
+pub(super) struct SubscriptionGate {
+    generation: Option<UpstreamGeneration>,
+    mutex: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl SubscriptionGate {
+    fn reset(&mut self, generation: Option<UpstreamGeneration>) {
+        self.generation = generation;
+        self.mutex = Arc::new(tokio::sync::Mutex::new(()));
+    }
+}
+
 /// progress token 映射与早到通知缓冲。
 ///
 /// 上游 token 由 rmcp 在发送时生成，通知可能早于 `RequestHandle` 返回；
@@ -92,8 +109,7 @@ pub(super) struct ProxyInner {
     tasks: Mutex<TaskRegistry>,
     pub(super) progress: Mutex<ProgressRegistry>,
     subscriptions: Mutex<SubscriptionCounts>,
-    /// 串行化同一代理的订阅建立/退订，避免并发首订阅绕过上行结果。
-    pub(super) subscription_gate: tokio::sync::Mutex<()>,
+    subscription_gate: Mutex<SubscriptionGate>,
     pub(super) request_timeout: Option<Duration>,
 }
 
@@ -108,7 +124,7 @@ impl ProxyInner {
             tasks: Mutex::new(TaskRegistry::default()),
             progress: Mutex::new(ProgressRegistry::default()),
             subscriptions: Mutex::new(SubscriptionCounts::default()),
-            subscription_gate: tokio::sync::Mutex::new(()),
+            subscription_gate: Mutex::new(SubscriptionGate::default()),
             request_timeout: None,
         }
     }
@@ -140,6 +156,7 @@ impl ProxyInner {
         self.tasks.lock().clear();
         *self.progress.lock() = ProgressRegistry::default();
         self.subscriptions.lock().reset(Some(generation));
+        self.subscription_gate.lock().reset(Some(generation));
         self.health.send_replace(CapabilityHealth::Ready);
         drop(lifecycle);
         tracing::info!(
@@ -165,6 +182,7 @@ impl ProxyInner {
         self.tasks.lock().clear();
         *self.progress.lock() = ProgressRegistry::default();
         self.subscriptions.lock().reset(None);
+        self.subscription_gate.lock().reset(None);
         self.health
             .send_replace(CapabilityHealth::Degraded { reason });
         drop(lifecycle);
@@ -413,6 +431,21 @@ impl ProxyInner {
             ),
             None,
         )
+    }
+
+    /// 取得当前代次的订阅串行锁；代次不匹配立即拒绝，不等待旧代次请求。
+    pub(super) async fn subscription_lock(
+        &self,
+        generation: UpstreamGeneration,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, McpError> {
+        let gate = {
+            let gate = self.subscription_gate.lock();
+            if gate.generation != Some(generation) {
+                return Err(self.stale_subscription_error());
+            }
+            Arc::clone(&gate.mutex)
+        };
+        Ok(gate.lock_owned().await)
     }
 
     /// 资源订阅按 URI 引用计数；只有首个订阅与最后一个退订上行。

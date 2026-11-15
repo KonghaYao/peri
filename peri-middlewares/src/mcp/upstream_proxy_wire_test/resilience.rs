@@ -265,6 +265,72 @@ async fn replaced_upstream_notifications_are_dropped() {
     stop_server(second_upstream.server).await;
 }
 
+#[tokio::test]
+#[allow(deprecated)]
+async fn unanswered_stale_subscribe_does_not_block_replacement_generation() {
+    let proxy = UpstreamProxy::new("workspace");
+    let first_mock = MockUpstream::new();
+    first_mock.delay_subscribes(10_000);
+    let first_upstream = connect_legacy_upstream(&proxy, first_mock.clone()).await;
+    let downstream = connect_downstream(&proxy, false).await;
+    let peer = downstream.client.peer().clone();
+
+    let stale = tokio::spawn({
+        let peer = peer.clone();
+        async move { peer.subscribe(SubscribeRequestParams::new(URI)).await }
+    });
+    wait_until(|| first_mock.subscribe_started() > 0).await;
+
+    let second_mock = MockUpstream::new();
+    let second_upstream = connect_legacy_upstream(&proxy, second_mock.clone()).await;
+    tokio::time::timeout(
+        TEST_TIMEOUT,
+        peer.subscribe(SubscribeRequestParams::new(URI)),
+    )
+    .await
+    .expect("replacement subscribe must not wait for the old generation")
+    .expect("replacement subscribe succeeds");
+    assert_eq!(second_mock.subscriptions(), vec![URI.to_owned()]);
+
+    stale.abort();
+    let _ = stale.await;
+    assert!(proxy.is_ready());
+
+    stop_server(first_upstream.server).await;
+    stop_server(second_upstream.server).await;
+}
+
+#[tokio::test]
+async fn stale_subscription_operations_do_not_reset_current_generation() {
+    let proxy = UpstreamProxy::new("workspace");
+    let first_upstream = connect_legacy_upstream(&proxy, MockUpstream::new()).await;
+    let old = first_upstream.generation;
+    assert!(proxy
+        .inner
+        .acquire_subscription(old, URI)
+        .expect("old generation acquire"));
+
+    let second_upstream = connect_legacy_upstream(&proxy, MockUpstream::new()).await;
+    let current = second_upstream.generation;
+
+    let stale = proxy
+        .inner
+        .acquire_subscription(old, URI)
+        .expect_err("stale acquire must be rejected");
+    assert!(stale.message.contains("generation changed"));
+    assert!(proxy.inner.release_subscription(old, URI).is_err());
+    assert!(
+        proxy
+            .inner
+            .acquire_subscription(current, URI)
+            .expect("current generation acquire"),
+        "新代次计数不得被旧代次操作清空"
+    );
+
+    stop_server(first_upstream.server).await;
+    stop_server(second_upstream.server).await;
+}
+
 #[test]
 fn old_generation_progress_cleanup_preserves_current_mapping() {
     let proxy = UpstreamProxy::new("workspace");
