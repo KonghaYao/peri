@@ -93,9 +93,9 @@ fn resolve_options(args: Args) -> Result<Options> {
     };
     let workspace = workspace
         .canonicalize()
-        .with_context(|| format!("cannot resolve workspace {}", workspace.display()))?;
+        .with_context(|| format!("cannot resolve workspace {}", display_path(&workspace)))?;
     if !workspace.is_dir() {
-        bail!("workspace is not a directory: {}", workspace.display());
+        bail!("workspace is not a directory: {}", display_path(&workspace));
     }
     let transport = if args.stdio {
         Transport::Stdio
@@ -173,12 +173,25 @@ fn read_mcp_capability_file(workspace: &Path) -> Result<Option<McpCapabilityFile
         return Ok(None);
     }
     let raw = fs::read_to_string(&path)
-        .with_context(|| format!("cannot read MCP config {}", path.display()))?;
+        .with_context(|| format!("cannot read MCP config {}", display_path(&path)))?;
     let document: serde_json::Value = serde_json::from_str(&raw)
-        .with_context(|| format!("invalid JSON in MCP config {}", path.display()))?;
+        .with_context(|| format!("invalid JSON in MCP config {}", display_path(&path)))?;
     let file = parse_mcp_file_capabilities(&document)
-        .with_context(|| format!("invalid MCP capability config {}", path.display()))?;
+        .with_context(|| format!("invalid MCP capability config {}", display_path(&path)))?;
     Ok(Some(file))
+}
+
+/// Render a path for diagnostics without the Windows verbatim prefix that
+/// `canonicalize` adds but users never typed. Runs on every platform so Unix CI
+/// covers the `\\?\` / `\\?\UNC\` normalization.
+fn display_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc}");
+    }
+    text.strip_prefix(r"\\?\")
+        .unwrap_or(text.as_ref())
+        .to_string()
 }
 
 #[cfg(test)]

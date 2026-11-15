@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use peri_acp_types::builtin_mcp::BUILTIN_RESERVED_INSTANCE_NAMES;
 
-use super::{Args, resolve_options, run};
+use super::{Args, display_path, resolve_options, run};
 
 fn parse(args: &[&str]) -> Args {
     let mut argv = vec!["peri mcp-start"];
@@ -296,9 +296,27 @@ fn invalid_mcp_file_is_reported_with_path() {
     .unwrap_err()
     .to_string();
     assert!(error.contains("invalid JSON in MCP config"), "{error}");
-    assert!(
-        error.contains(&dir.path().join(".mcp.json").display().to_string()),
-        "{error}"
+    // The workspace is canonicalized, so compare against the canonical file and
+    // require the friendly rendering that hides the Windows `\\?\` prefix.
+    let expected = fs::canonicalize(dir.path().join(".mcp.json")).unwrap();
+    assert!(error.contains(&display_path(&expected)), "{error}");
+    assert!(error.contains(".mcp.json"), "{error}");
+    assert!(!error.contains(r"\\?\"), "{error}");
+}
+
+#[test]
+fn display_path_strips_windows_verbatim_prefix() {
+    assert_eq!(
+        display_path(Path::new(r"\\?\C:\workspace\.mcp.json")),
+        r"C:\workspace\.mcp.json"
+    );
+    assert_eq!(
+        display_path(Path::new(r"\\?\UNC\server\share\.mcp.json")),
+        r"\\server\share\.mcp.json"
+    );
+    assert_eq!(
+        display_path(Path::new(r"C:\workspace\.mcp.json")),
+        r"C:\workspace\.mcp.json"
     );
 }
 
