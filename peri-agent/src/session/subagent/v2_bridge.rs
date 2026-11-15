@@ -333,7 +333,7 @@ pub fn build_v2_subagent_context(
 
     if let Some(manager) = host.and_then(|host| host.task_manager.clone()) {
         let wait = crate::agent::async_tasks::handoff::BoundedWait::new(
-            crate::agent::async_tasks::handoff::HANDOFF_MAX_WAIT,
+            crate::agent::async_tasks::handoff::handoff_max_wait(),
         );
         builder = builder
             .with_idle_waiting()

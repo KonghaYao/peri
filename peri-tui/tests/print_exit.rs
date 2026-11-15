@@ -537,7 +537,7 @@ async fn streamed_multistep_usage_includes_final_provider_counts_and_exits() {
     );
     assert_eq!(
         events.last().unwrap(),
-        &json!({"type": "result", "stop_reason": "end_turn", "status": "completed", "is_error": false, "total_cost_usd": null,
+        &json!({"type": "result", "stop_reason": "end_turn", "status": "completed", "is_error": false, "pending_tasks": 0, "total_cost_usd": null,
         "usage": {"input_tokens": 600, "cache_read_input_tokens": 40, "cache_creation_input_tokens": 60, "output_tokens": 18}})
     );
 }
@@ -630,7 +630,7 @@ async fn ask_user_unanswered_exits_process_without_fabricated_answer() {
                 );
                 assert_eq!(
                     events.last().unwrap(),
-                    &json!({"type": "result", "stop_reason": "end_turn", "status": "completed", "is_error": false, "total_cost_usd": null,
+                    &json!({"type": "result", "stop_reason": "end_turn", "status": "completed", "is_error": false, "pending_tasks": 0, "total_cost_usd": null,
                     "usage": {"input_tokens": 600, "cache_read_input_tokens": 40, "cache_creation_input_tokens": 60, "output_tokens": 18}})
                 );
             }

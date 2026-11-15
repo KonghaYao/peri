@@ -6,6 +6,10 @@ rust-version.workspace = true
 description = "Rust Agent framework with middleware system, aligned with @langgraph-js/standard-agent"
 license = "Apache-2.0"
 
+[features]
+# Test-only injection (never enabled in production builds).
+test-support = []
+
 [dependencies]
 peri-time = { path = "../peri-time" }
 anyhow.workspace = true
