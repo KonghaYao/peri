@@ -51,6 +51,22 @@ pub(super) fn terminal_status(result: &AgentRunResult) -> AgentStatus {
     }
 }
 
+/// 作用域未结清时，正常完成不能记成 `Done`。
+///
+/// sync child 在 close 失败时不写终态；workflow child 必须结算（否则残留
+/// `active + working` 会被父会话反复恢复），因此折中为 `Error + Idle`：
+/// 保留「资源未完全释放」的事实，同时不再成为续跑候选。显式取消仍按
+/// `Cancelled` 投影，close 失败不改变用户停止意图。
+pub(super) fn terminal_status_after_close(
+    result: &AgentRunResult,
+    scope_closed: bool,
+) -> AgentStatus {
+    match terminal_status(result) {
+        AgentStatus::Done if !scope_closed => AgentStatus::Error,
+        status => status,
+    }
+}
+
 /// 调用方必须先关闭 EventBus 并 await forwarder，再读取最终统计与输出。
 pub(super) fn project_run_result(
     loop_result: LoopResult,

@@ -214,12 +214,12 @@ fn child_meta(
 async fn wait_for_terminal_child(
     resources: &crate::session::test_resources::mock::MockSessionResources,
 ) -> ThreadMeta {
-    for _ in 0..500 {
+    for _ in 0..200 {
         let meta = child_meta(resources);
         if meta.agent_status.is_terminal() {
             return meta;
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     panic!("workflow child was not settled after execute future was dropped");
 }

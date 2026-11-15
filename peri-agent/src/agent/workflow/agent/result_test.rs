@@ -306,3 +306,38 @@ fn workflow_terminal_status_follows_child_lifecycle_mapping() {
         );
     }
 }
+
+/// close 未结清时正常完成降级为 Error；取消仍保留 Cancelled。
+#[test]
+fn workflow_terminal_status_after_incomplete_close() {
+    let done = AgentRunResult::Ok {
+        output: json!("ok"),
+        usage: Usage { output_tokens: 0 },
+        model: None,
+        tool_count: None,
+        token_count: None,
+        phase: None,
+        duration_ms: None,
+    };
+    assert_eq!(terminal_status_after_close(&done, true), AgentStatus::Done);
+    assert_eq!(
+        terminal_status_after_close(&done, false),
+        AgentStatus::Error
+    );
+    let cancelled = AgentRunResult::Dead {
+        reason: Some("interrupted".into()),
+        detail: None,
+    };
+    assert_eq!(
+        terminal_status_after_close(&cancelled, false),
+        AgentStatus::Cancelled
+    );
+    let failed = AgentRunResult::Dead {
+        reason: None,
+        detail: None,
+    };
+    assert_eq!(
+        terminal_status_after_close(&failed, false),
+        AgentStatus::Error
+    );
+}

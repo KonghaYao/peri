@@ -85,10 +85,14 @@ impl WorkflowExecution {
         })
     }
 
-    pub(super) fn settlement(&self) -> WorkflowChildSettlement {
+    pub(super) fn settlement(
+        &self,
+        session: Arc<crate::session::Session>,
+    ) -> WorkflowChildSettlement {
         WorkflowChildSettlement {
             resources: Arc::clone(&self.resources),
             thread_id: ThreadId::from(self.session_id.clone()),
+            session,
             settled: false,
         }
     }
@@ -99,10 +103,11 @@ impl WorkflowExecution {
 /// workflow child 以 `active + working` 入队初始指令；run 结束后若只关闭会话作用域，
 /// 父会话每次进入都会把这个 child 当作待续跑候选。显式路径 await [`Self::settle`]，
 /// 把终态与 `work_state` 交给资源侧一次提交；future 被 workflow kill / 会话关闭
-/// drop 或 panic 时无法 await，由 [`Drop`] 兜底提交取消/失败终态。
+/// drop 或 panic 时无法 await，由 [`Drop`] 先停掉本次 child 的后台工作再结算。
 pub(super) struct WorkflowChildSettlement {
     resources: Arc<dyn SessionResources>,
     thread_id: ThreadId,
+    session: Arc<crate::session::Session>,
     settled: bool,
 }
 
@@ -128,6 +133,10 @@ impl Drop for WorkflowChildSettlement {
         };
         let resources = Arc::clone(&self.resources);
         let thread_id = self.thread_id.clone();
+        let session = Arc::clone(&self.session);
+        // 先同步停掉模型/工具工作，再在后台任务中等 close 收敛；终态必须等
+        // 后台工作停下后再写，避免把「已结束」与仍在运行的任务同时暴露。
+        session.config().cancel_token.cancel();
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             tracing::error!(
                 session_id = self.thread_id.as_str(),
@@ -137,6 +146,15 @@ impl Drop for WorkflowChildSettlement {
             return;
         };
         handle.spawn(async move {
+            if let Err(error) =
+                crate::session::subagent::close_subagent_session_scope(session).await
+            {
+                tracing::warn!(
+                    session_id = thread_id.as_str(),
+                    %error,
+                    "workflow child scope close incomplete after cancelled execution"
+                );
+            }
             settle_workflow_child(resources.as_ref(), &thread_id, status).await;
         });
     }
