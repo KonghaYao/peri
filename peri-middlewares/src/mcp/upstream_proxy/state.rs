@@ -57,21 +57,32 @@ impl TaskRegistry {
 #[derive(Default)]
 pub(super) struct SubscriptionCounts {
     by_uri: HashMap<String, usize>,
-    generation: UpstreamGeneration,
+    generation: Option<UpstreamGeneration>,
+}
+
+impl SubscriptionCounts {
+    fn reset(&mut self, generation: Option<UpstreamGeneration>) {
+        self.by_uri.clear();
+        self.generation = generation;
+    }
 }
 
 /// progress token 映射与早到通知缓冲。
 ///
 /// 上游 token 由 rmcp 在发送时生成，通知可能早于 `RequestHandle` 返回；
 /// 未命中映射的通知先缓冲，注册映射时按序补发，避免丢进度。
+/// 键含 generation：重连后新 peer 可能复用同一 token。
 #[derive(Default)]
 pub(super) struct ProgressRegistry {
-    mappings: HashMap<ProgressToken, ProgressToken>,
-    pending: HashMap<ProgressToken, Vec<ProgressNotificationParam>>,
+    mappings: HashMap<(u64, ProgressToken), ProgressToken>,
+    pending: HashMap<(u64, ProgressToken), Vec<ProgressNotificationParam>>,
     pending_total: usize,
 }
 
 const PENDING_PROGRESS_LIMIT: usize = 64;
+
+/// 取消通知只做有界投递；上游写阻塞不能延长请求超时/取消的返回。
+const UPSTREAM_CANCEL_DELIVERY_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub(super) struct ProxyInner {
     pub(super) capability: String,
@@ -81,6 +92,8 @@ pub(super) struct ProxyInner {
     tasks: Mutex<TaskRegistry>,
     pub(super) progress: Mutex<ProgressRegistry>,
     subscriptions: Mutex<SubscriptionCounts>,
+    /// 串行化同一代理的订阅建立/退订，避免并发首订阅绕过上行结果。
+    pub(super) subscription_gate: tokio::sync::Mutex<()>,
     pub(super) request_timeout: Option<Duration>,
 }
 
@@ -95,6 +108,7 @@ impl ProxyInner {
             tasks: Mutex::new(TaskRegistry::default()),
             progress: Mutex::new(ProgressRegistry::default()),
             subscriptions: Mutex::new(SubscriptionCounts::default()),
+            subscription_gate: tokio::sync::Mutex::new(()),
             request_timeout: None,
         }
     }
@@ -121,11 +135,13 @@ impl ProxyInner {
             peer,
             info,
         });
-        drop(lifecycle);
+        // 保持 lifecycle 锁到注册表清空与 health 发布完成：旧代次的 mark_lost
+        // 不能在新代次 attach 后清掉新注册表或覆盖 Ready。
         self.tasks.lock().clear();
         *self.progress.lock() = ProgressRegistry::default();
-        self.subscriptions.lock().clear();
+        self.subscriptions.lock().reset(Some(generation));
         self.health.send_replace(CapabilityHealth::Ready);
+        drop(lifecycle);
         tracing::info!(
             capability = %self.capability,
             generation = generation.value(),
@@ -146,12 +162,12 @@ impl ProxyInner {
         {
             return;
         }
-        drop(lifecycle);
         self.tasks.lock().clear();
         *self.progress.lock() = ProgressRegistry::default();
-        self.subscriptions.lock().clear();
+        self.subscriptions.lock().reset(None);
         self.health
             .send_replace(CapabilityHealth::Degraded { reason });
+        drop(lifecycle);
         tracing::warn!(
             capability = %self.capability,
             generation = generation.value(),
@@ -194,7 +210,14 @@ impl ProxyInner {
         }
     }
 
-    pub(super) async fn send_downstream(&self, notification: ServerNotification) {
+    pub(super) async fn send_downstream(
+        &self,
+        generation: UpstreamGeneration,
+        notification: ServerNotification,
+    ) {
+        if !self.is_current(generation) {
+            return;
+        }
         let peer = self.downstream.read().clone();
         let Some(peer) = peer else {
             tracing::debug!(
@@ -235,14 +258,16 @@ impl ProxyInner {
 
     pub(super) fn register_progress(
         &self,
+        generation: UpstreamGeneration,
         upstream_token: ProgressToken,
         downstream_token: ProgressToken,
     ) -> Vec<ProgressNotificationParam> {
+        let key = (generation.value(), upstream_token);
         let mut progress = self.progress.lock();
         progress
             .mappings
-            .insert(upstream_token.clone(), downstream_token.clone());
-        let mut pending = progress.pending.remove(&upstream_token).unwrap_or_default();
+            .insert(key.clone(), downstream_token.clone());
+        let mut pending = progress.pending.remove(&key).unwrap_or_default();
         progress.pending_total = progress.pending_total.saturating_sub(pending.len());
         for params in &mut pending {
             params.progress_token = downstream_token.clone();
@@ -250,10 +275,15 @@ impl ProxyInner {
         pending
     }
 
-    pub(super) fn unregister_progress(&self, upstream_token: &ProgressToken) {
+    pub(super) fn unregister_progress(
+        &self,
+        generation: UpstreamGeneration,
+        upstream_token: &ProgressToken,
+    ) {
+        let key = (generation.value(), upstream_token.clone());
         let mut progress = self.progress.lock();
-        progress.mappings.remove(upstream_token);
-        if let Some(pending) = progress.pending.remove(upstream_token) {
+        progress.mappings.remove(&key);
+        if let Some(pending) = progress.pending.remove(&key) {
             progress.pending_total = progress.pending_total.saturating_sub(pending.len());
         }
     }
@@ -261,10 +291,12 @@ impl ProxyInner {
     /// 已注册映射时替换为下游 token；未知 token 先缓冲，超限则丢弃。
     pub(super) fn route_progress(
         &self,
+        generation: UpstreamGeneration,
         mut params: ProgressNotificationParam,
     ) -> Option<ProgressNotificationParam> {
+        let key = (generation.value(), params.progress_token.clone());
         let mut progress = self.progress.lock();
-        if let Some(downstream) = progress.mappings.get(&params.progress_token) {
+        if let Some(downstream) = progress.mappings.get(&key) {
             params.progress_token = downstream.clone();
             return Some(params);
         }
@@ -276,11 +308,7 @@ impl ProxyInner {
             return None;
         }
         progress.pending_total += 1;
-        progress
-            .pending
-            .entry(params.progress_token.clone())
-            .or_default()
-            .push(params);
+        progress.pending.entry(key).or_default().push(params);
         None
     }
 
@@ -290,12 +318,12 @@ impl ProxyInner {
         request_id: rmcp::model::RequestId,
         reason: &str,
     ) {
-        let _ = peer
-            .notify_cancelled(rmcp::model::CancelledNotificationParam::new(
-                Some(request_id),
-                Some(reason.to_owned()),
-            ))
-            .await;
+        let delivery = peer.notify_cancelled(rmcp::model::CancelledNotificationParam::new(
+            Some(request_id),
+            Some(reason.to_owned()),
+        ));
+        // 取消是 best-effort：transport 写阻塞不得拖住超时/取消路径的返回。
+        let _ = tokio::time::timeout(UPSTREAM_CANCEL_DELIVERY_TIMEOUT, delivery).await;
     }
 
     fn task_id_for(&self, generation: UpstreamGeneration, upstream_task_id: &str) -> String {
@@ -377,21 +405,34 @@ impl ProxyInner {
         }
     }
 
+    fn stale_subscription_error(&self) -> McpError {
+        McpError::internal_error(
+            format!(
+                "{} upstream generation changed during subscription request",
+                self.capability
+            ),
+            None,
+        )
+    }
+
     /// 资源订阅按 URI 引用计数；只有首个订阅与最后一个退订上行。
-    pub(super) fn acquire_subscription(&self, generation: UpstreamGeneration, uri: &str) -> bool {
+    pub(super) fn acquire_subscription(
+        &self,
+        generation: UpstreamGeneration,
+        uri: &str,
+    ) -> Result<bool, McpError> {
         let mut subscriptions = self.subscriptions.lock();
-        if subscriptions.generation != generation {
-            subscriptions.by_uri.clear();
-            subscriptions.generation = generation;
+        if subscriptions.generation != Some(generation) {
+            return Err(self.stale_subscription_error());
         }
         let count = subscriptions.by_uri.entry(uri.to_owned()).or_insert(0);
         *count += 1;
-        *count == 1
+        Ok(*count == 1)
     }
 
     pub(super) fn rollback_subscription(&self, generation: UpstreamGeneration, uri: &str) {
         let mut subscriptions = self.subscriptions.lock();
-        if subscriptions.generation != generation {
+        if subscriptions.generation != Some(generation) {
             return;
         }
         if let Some(count) = subscriptions.by_uri.get_mut(uri) {
@@ -402,25 +443,32 @@ impl ProxyInner {
         }
     }
 
-    pub(super) fn release_subscription(&self, generation: UpstreamGeneration, uri: &str) -> bool {
+    pub(super) fn release_subscription(
+        &self,
+        generation: UpstreamGeneration,
+        uri: &str,
+    ) -> Result<bool, McpError> {
         let mut subscriptions = self.subscriptions.lock();
-        if subscriptions.generation != generation {
-            return false;
+        if subscriptions.generation != Some(generation) {
+            return Err(self.stale_subscription_error());
         }
         let Some(count) = subscriptions.by_uri.get_mut(uri) else {
-            return false;
+            return Ok(false);
         };
         *count = count.saturating_sub(1);
         if *count == 0 {
             subscriptions.by_uri.remove(uri);
-            return true;
+            return Ok(true);
         }
-        false
+        Ok(false)
     }
-}
 
-impl SubscriptionCounts {
-    fn clear(&mut self) {
-        self.by_uri.clear();
+    /// 上游退订失败时恢复最后一个引用，保证下游重试仍会真正上行。
+    pub(super) fn restore_subscription(&self, generation: UpstreamGeneration, uri: &str) {
+        let mut subscriptions = self.subscriptions.lock();
+        if subscriptions.generation != Some(generation) {
+            return;
+        }
+        *subscriptions.by_uri.entry(uri.to_owned()).or_insert(0) += 1;
     }
 }

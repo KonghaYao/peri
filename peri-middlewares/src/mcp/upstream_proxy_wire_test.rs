@@ -5,7 +5,7 @@
 
 use std::{
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -19,14 +19,15 @@ use rmcp::{
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, CancelTaskParams,
         CancelledNotificationParam, ClientCapabilities, ClientRequest, ContentBlock,
-        CreateTaskResult, CustomNotification, DetailedTask, ErrorCode, GetTaskParams,
-        GetTaskResult, Implementation, InitializeRequestParams, ListResourcesResult,
-        ListToolsResult, PaginatedRequestParams, ProgressNotificationParam, ProgressToken,
-        ReadResourceRequestParams, ReadResourceResult, RequestId, RequestMetaObject, Resource,
-        ResourceContents, ResourceUpdatedNotification, ResourceUpdatedNotificationParam,
-        ServerCapabilities, ServerConfig, ServerNotification, SubscribeRequestParams,
-        SubscriptionFilter, Task, TaskPayload, TaskStatus, TaskStatusNotification,
-        TaskStatusNotificationParams, Tool, UnsubscribeRequestParams,
+        CreateTaskResult, CustomNotification, CustomRequest, CustomResult, DetailedTask, ErrorCode,
+        ExtensionCapabilities, GetMeta, GetTaskParams, GetTaskResult, Implementation,
+        InitializeRequestParams, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
+        ProgressNotificationParam, ProgressToken, PromptsCapability, ReadResourceRequestParams,
+        ReadResourceResult, RequestId, RequestMetaObject, Resource, ResourceContents,
+        ResourceUpdatedNotification, ResourceUpdatedNotificationParam, ServerCapabilities,
+        ServerConfig, ServerNotification, SubscribeRequestParams, SubscriptionFilter, Task,
+        TaskPayload, TaskStatus, TaskStatusNotification, TaskStatusNotificationParams, Tool,
+        UnsubscribeRequestParams, UpdateTaskParams,
     },
     service::{
         serve_client, serve_client_with_lifecycle, ClientLifecycleMode, NotificationContext,
@@ -214,7 +215,13 @@ struct MockState {
     cancels: Mutex<Vec<CancelledNotificationParam>>,
     task_gets: Mutex<Vec<(String, RequestMetaObject)>>,
     task_cancels: Mutex<Vec<(String, RequestMetaObject)>>,
+    task_updates: Mutex<Vec<(String, RequestMetaObject)>>,
+    list_tool_meta: Mutex<Option<RequestMetaObject>>,
+    custom_requests: Mutex<Vec<(String, RequestMetaObject)>>,
     listens: Mutex<Vec<SubscriptionFilter>>,
+    subscribe_failures: AtomicUsize,
+    unsubscribe_failures: AtomicUsize,
+    subscribe_delay_ms: AtomicU64,
     started_tx: Mutex<Option<mpsc::UnboundedSender<(RequestId, String)>>>,
     release: Arc<Notify>,
 }
@@ -255,6 +262,34 @@ impl MockUpstream {
         self.state.task_cancels.lock().clone()
     }
 
+    fn task_updates(&self) -> Vec<(String, RequestMetaObject)> {
+        self.state.task_updates.lock().clone()
+    }
+
+    fn list_tool_meta(&self) -> Option<RequestMetaObject> {
+        self.state.list_tool_meta.lock().clone()
+    }
+
+    fn custom_requests(&self) -> Vec<(String, RequestMetaObject)> {
+        self.state.custom_requests.lock().clone()
+    }
+
+    fn fail_next_subscribes(&self, count: usize) {
+        self.state.subscribe_failures.store(count, Ordering::SeqCst);
+    }
+
+    fn fail_next_unsubscribes(&self, count: usize) {
+        self.state
+            .unsubscribe_failures
+            .store(count, Ordering::SeqCst);
+    }
+
+    fn delay_subscribes(&self, delay_ms: u64) {
+        self.state
+            .subscribe_delay_ms
+            .store(delay_ms, Ordering::SeqCst);
+    }
+
     fn listens(&self) -> Vec<SubscriptionFilter> {
         self.state.listens.lock().clone()
     }
@@ -282,6 +317,15 @@ fn capabilities() -> ServerCapabilities {
     if let Some(tools) = capabilities.tools.as_mut() {
         tools.list_changed = Some(true);
     }
+    // 上游声明但代理不转发的面：验证 get_info 不会把它们泄漏给下游。
+    capabilities.prompts = Some(PromptsCapability::default());
+    capabilities
+        .extensions
+        .get_or_insert_with(ExtensionCapabilities::new)
+        .insert(
+            peri_acp_types::skills::SKILLS_EXTENSION_ID.to_owned(),
+            rmcp::model::JsonObject::new(),
+        );
     capabilities
 }
 
@@ -298,8 +342,9 @@ impl ServerHandler for MockUpstream {
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
+        *self.state.list_tool_meta.lock() = Some(context.meta.clone());
         let tools = [
             "echo",
             "progress",
@@ -474,6 +519,14 @@ impl ServerHandler for MockUpstream {
         request: SubscribeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<(), McpError> {
+        if self.state.subscribe_failures.load(Ordering::SeqCst) > 0 {
+            self.state.subscribe_failures.fetch_sub(1, Ordering::SeqCst);
+            return Err(internal("subscribe", "mock subscribe failure"));
+        }
+        let delay = self.state.subscribe_delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
         self.state.subscriptions.lock().push(request.uri.clone());
         context
             .peer
@@ -489,6 +542,12 @@ impl ServerHandler for MockUpstream {
         request: UnsubscribeRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<(), McpError> {
+        if self.state.unsubscribe_failures.load(Ordering::SeqCst) > 0 {
+            self.state
+                .unsubscribe_failures
+                .fetch_sub(1, Ordering::SeqCst);
+            return Err(internal("unsubscribe", "mock unsubscribe failure"));
+        }
         self.state.unsubscriptions.lock().push(request.uri);
         Ok(())
     }
@@ -550,6 +609,32 @@ impl ServerHandler for MockUpstream {
             .lock()
             .push((request.task_id, context.meta.clone()));
         Ok(())
+    }
+
+    async fn update_task(
+        &self,
+        request: UpdateTaskParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        self.state
+            .task_updates
+            .lock()
+            .push((request.task_id, context.meta.clone()));
+        Ok(())
+    }
+
+    async fn on_custom_request(
+        &self,
+        request: CustomRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CustomResult, McpError> {
+        self.state
+            .custom_requests
+            .lock()
+            .push((request.method.clone(), context.meta.clone()));
+        Ok(CustomResult::new(serde_json::json!({
+            "method": request.method,
+        })))
     }
 
     fn on_cancelled(
@@ -869,6 +954,15 @@ async fn task_ids_are_capability_prefixed_and_mapped_on_every_surface() {
         .await
         .expect("tasks/cancel");
 
+    let mut update = UpdateTaskParams::new(&task_id, Default::default());
+    update.meta = Some(owner_meta("session-a"));
+    downstream
+        .client
+        .peer()
+        .update_task(update)
+        .await
+        .expect("tasks/update");
+
     let gets = mock.task_gets();
     assert_eq!(gets.len(), 1);
     assert_eq!(gets[0].0, "up-task-1");
@@ -885,6 +979,20 @@ async fn task_ids_are_capability_prefixed_and_mapped_on_every_surface() {
     let cancels = mock.task_cancels();
     assert_eq!(cancels.len(), 1);
     assert_eq!(cancels[0].0, "up-task-1");
+
+    let updates = mock.task_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].0, "up-task-1");
+    assert_eq!(
+        updates[0]
+            .1
+             .0
+             .0
+            .get(peri_mcp_core::task_owner::TASK_OWNER_META_KEY)
+            .and_then(serde_json::Value::as_str),
+        Some("session-a"),
+        "tasks/update 的 owner 元数据必须原样上行"
+    );
 
     let call_owner = mock.calls()[0]
         .meta

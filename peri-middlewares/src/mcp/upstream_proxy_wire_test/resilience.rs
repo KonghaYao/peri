@@ -231,3 +231,61 @@ async fn request_timeout_cancels_upstream_without_degrading() {
     mock.release_held_call();
     stop_server(upstream.server).await;
 }
+
+#[tokio::test]
+async fn replaced_upstream_notifications_are_dropped() {
+    let proxy = UpstreamProxy::new("workspace");
+    let first_mock = MockUpstream::new();
+    let first_upstream = connect_legacy_upstream(&proxy, first_mock.clone()).await;
+    let second_mock = MockUpstream::new();
+    let second_upstream = connect_legacy_upstream(&proxy, second_mock).await;
+    let downstream = connect_downstream(&proxy, false).await;
+
+    // 直接经第一代 client 触发上游 1 的通知；proxy 已切到第二代，必须丢弃。
+    first_upstream
+        ._client
+        .as_ref()
+        .expect("legacy client retained")
+        .peer()
+        .call_tool_once(CallToolRequestParams::new("notify"))
+        .await
+        .expect("old upstream notify");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(downstream.recorder.tool_list_changed(), 0);
+    assert!(downstream.recorder.logging().is_empty());
+    assert!(downstream.recorder.custom().is_empty());
+
+    assert!(proxy.is_ready());
+    assert_eq!(
+        echo(downstream.client.peer(), "current", 0).await,
+        "current"
+    );
+
+    stop_server(first_upstream.server).await;
+    stop_server(second_upstream.server).await;
+}
+
+#[test]
+fn old_generation_progress_cleanup_preserves_current_mapping() {
+    let proxy = UpstreamProxy::new("workspace");
+    let old = UpstreamGeneration(1);
+    let current = UpstreamGeneration(2);
+    let token = |value: &str| ProgressToken(rmcp::model::NumberOrString::String(value.into()));
+    let upstream = token("shared-upstream-token");
+    let current_downstream = token("current-downstream-token");
+
+    proxy
+        .inner
+        .register_progress(old, upstream.clone(), token("old-downstream-token"));
+    proxy
+        .inner
+        .register_progress(current, upstream.clone(), current_downstream.clone());
+    // 旧代次请求完成时的清理不得删掉新 peer 复用的同一 upstream token。
+    proxy.inner.unregister_progress(old, &upstream);
+
+    let routed = proxy
+        .inner
+        .route_progress(current, ProgressNotificationParam::new(upstream, 1.0))
+        .expect("current generation mapping survives old cleanup");
+    assert_eq!(routed.progress_token, current_downstream);
+}

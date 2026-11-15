@@ -20,14 +20,16 @@ use rmcp::{
     model::{
         CallToolRequestParams, CallToolResponse, CancelTaskParams, ClientCapabilities,
         ClientRequest, CustomNotification, CustomRequest, CustomResult, ErrorData as McpError,
-        GetTaskParams, GetTaskResult, Implementation, InitializeRequestParams, InitializeResult,
-        ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, NotificationMetaObject,
-        PaginatedRequestParams, ProgressNotification, ProgressNotificationParam,
-        PromptListChangedNotification, ReadResourceRequestParams, ReadResourceResponse,
-        RequestMetaObject, ResourceListChangedNotification, ResourceUpdatedNotification,
+        ExtensionCapabilities, GetMeta, GetTaskParams, GetTaskResult, Implementation,
+        InitializeRequestParams, InitializeResult, ListResourceTemplatesResult,
+        ListResourcesResult, ListToolsResult, NotificationMetaObject, PaginatedRequestParams,
+        ProgressNotification, ProgressNotificationParam, PromptListChangedNotification,
+        ReadResourceRequestParams, ReadResourceResponse, RequestMetaObject,
+        ResourceListChangedNotification, ResourceUpdatedNotification,
         ResourceUpdatedNotificationParam, ServerCapabilities, ServerConfig, ServerNotification,
         ServerResult, SubscribeRequestParams, SubscriptionFilter, TaskStatusNotification,
         TaskStatusNotificationParams, ToolListChangedNotification, UnsubscribeRequestParams,
+        UpdateTaskParams, TASKS_EXTENSION_ID,
     },
     service::{
         serve_client_with_lifecycle_and_ct, ClientInitializeError, ClientLifecycleMode,
@@ -282,6 +284,24 @@ impl UpstreamProxy {
         (!merged.0 .0.is_empty()).then_some(merged)
     }
 
+    fn merge_paginated_meta(
+        context: &RequestContext<RoleServer>,
+        request: Option<PaginatedRequestParams>,
+    ) -> Option<PaginatedRequestParams> {
+        match request {
+            Some(mut request) => {
+                request.meta = Self::merge_request_meta(context, request.meta.take());
+                Some(request)
+            }
+            None if !context.meta.0 .0.is_empty() => {
+                let mut request = PaginatedRequestParams::default();
+                request.meta = Some(context.meta.clone());
+                Some(request)
+            }
+            None => None,
+        }
+    }
+
     /// 在固定上游代次上发送一个可取消请求。
     async fn forward_on(
         &self,
@@ -297,16 +317,18 @@ impl UpstreamProxy {
         let upstream_id = handle.id.clone();
         let upstream_progress = handle.progress_token.clone();
         let pending_progress = match context.meta.get_progress_token() {
-            Some(token) => self
-                .inner
-                .register_progress(upstream_progress.clone(), token),
+            Some(token) => {
+                self.inner
+                    .register_progress(generation, upstream_progress.clone(), token)
+            }
             None => Vec::new(),
         };
         for params in pending_progress {
             self.inner
-                .send_downstream(ServerNotification::ProgressNotification(
-                    ProgressNotification::new(params),
-                ))
+                .send_downstream(
+                    generation,
+                    ServerNotification::ProgressNotification(ProgressNotification::new(params)),
+                )
                 .await;
         }
         let timeout = self.inner.request_timeout;
@@ -343,7 +365,8 @@ impl UpstreamProxy {
                 ))
             }
         };
-        self.inner.unregister_progress(&upstream_progress);
+        self.inner
+            .unregister_progress(generation, &upstream_progress);
         response
     }
 
@@ -370,7 +393,7 @@ impl ServerHandler for UpstreamProxy {
     fn get_info(&self) -> ServerConfig {
         match self.inner.current_info() {
             Some(info) => {
-                let mut config = InitializeResult::new(info.capabilities.clone());
+                let mut config = InitializeResult::new(forwarded_capabilities(&info.capabilities));
                 config.protocol_version = info.protocol_version.clone();
                 config.server_info = info
                     .server_info
@@ -397,6 +420,7 @@ impl ServerHandler for UpstreamProxy {
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         self.inner.remember_downstream(&context.peer);
+        let request = Self::merge_paginated_meta(&context, request);
         let (_, response) = self
             .forward(&context, |_| {
                 Ok(ClientRequest::ListToolsRequest(match request {
@@ -445,6 +469,7 @@ impl ServerHandler for UpstreamProxy {
         context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         self.inner.remember_downstream(&context.peer);
+        let request = Self::merge_paginated_meta(&context, request);
         let (_, response) = self
             .forward(&context, |_| {
                 Ok(ClientRequest::ListResourcesRequest(match request {
@@ -465,6 +490,7 @@ impl ServerHandler for UpstreamProxy {
         context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
         self.inner.remember_downstream(&context.peer);
+        let request = Self::merge_paginated_meta(&context, request);
         let (_, response) = self
             .forward(&context, |_| {
                 Ok(ClientRequest::ListResourceTemplatesRequest(match request {
@@ -511,8 +537,9 @@ impl ServerHandler for UpstreamProxy {
     ) -> Result<(), McpError> {
         self.inner.remember_downstream(&context.peer);
         let uri = request.uri.clone();
+        let _gate = self.inner.subscription_gate.lock().await;
         let (generation, peer) = self.inner.upstream()?;
-        if !self.inner.acquire_subscription(generation, &uri) {
+        if !self.inner.acquire_subscription(generation, &uri)? {
             return Ok(());
         }
         let mut params = request;
@@ -539,20 +566,25 @@ impl ServerHandler for UpstreamProxy {
     ) -> Result<(), McpError> {
         self.inner.remember_downstream(&context.peer);
         let uri = request.uri.clone();
+        let _gate = self.inner.subscription_gate.lock().await;
         let (generation, peer) = self.inner.upstream()?;
-        if !self.inner.release_subscription(generation, &uri) {
+        if !self.inner.release_subscription(generation, &uri)? {
             return Ok(());
         }
         let mut params = request;
         params.meta = Self::merge_request_meta(&context, params.meta.take());
-        self.forward_on(
-            &context,
-            generation,
-            peer,
-            ClientRequest::UnsubscribeRequest(rmcp::model::UnsubscribeRequest::new(params)),
-        )
-        .await
-        .map(|_| ())
+        let response = self
+            .forward_on(
+                &context,
+                generation,
+                peer,
+                ClientRequest::UnsubscribeRequest(rmcp::model::UnsubscribeRequest::new(params)),
+            )
+            .await;
+        if response.is_err() {
+            self.inner.restore_subscription(generation, &uri);
+        }
+        response.map(|_| ())
     }
 
     fn accepted_subscription_filter(
@@ -655,12 +687,41 @@ impl ServerHandler for UpstreamProxy {
         }
     }
 
+    async fn update_task(
+        &self,
+        request: UpdateTaskParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        self.inner.remember_downstream(&context.peer);
+        let (_, response) = self
+            .forward(&context, |generation| {
+                let task_id = self.inner.resolve_task_id(generation, &request.task_id)?;
+                let mut params = request.clone();
+                params.task_id = task_id;
+                params.meta = Self::merge_request_meta(&context, params.meta.take());
+                Ok(ClientRequest::UpdateTaskRequest(
+                    rmcp::model::UpdateTaskRequest::new(params),
+                ))
+            })
+            .await?;
+        match response {
+            ServerResult::TaskAckResult(_) | ServerResult::EmptyResult(_) => Ok(()),
+            _ => Err(Self::unexpected("tasks/update")),
+        }
+    }
+
     async fn on_custom_request(
         &self,
         request: CustomRequest,
         context: RequestContext<RoleServer>,
     ) -> Result<CustomResult, McpError> {
         self.inner.remember_downstream(&context.peer);
+        let mut request = request;
+        let existing = request.get_meta().clone();
+        let existing = (!existing.0 .0.is_empty()).then_some(existing);
+        if let Some(merged) = Self::merge_request_meta(&context, existing) {
+            request.get_meta_mut().0 .0.extend(merged.0 .0);
+        }
         let (_, response) = self
             .forward(&context, |_| Ok(ClientRequest::CustomRequest(request)))
             .await?;
@@ -691,13 +752,15 @@ impl ClientHandler for UpstreamProxyClient {
             if !self.inner.is_current(self.generation) {
                 return;
             }
-            let Some(mut params) = self.inner.route_progress(params) else {
+            let Some(mut params) = self.inner.route_progress(self.generation, params) else {
                 return;
             };
             params.meta = Some(context.meta);
             let notification =
                 ServerNotification::ProgressNotification(ProgressNotification::new(params));
-            self.inner.send_downstream(notification).await;
+            self.inner
+                .send_downstream(self.generation, notification)
+                .await;
         }
     }
 
@@ -711,7 +774,11 @@ impl ClientHandler for UpstreamProxyClient {
         let notification = ServerNotification::LoggingMessageNotification(
             rmcp::model::LoggingMessageNotification::new(params),
         );
-        async move { self.inner.send_downstream(notification).await }
+        async move {
+            self.inner
+                .send_downstream(self.generation, notification)
+                .await
+        }
     }
 
     fn on_resource_updated(
@@ -723,7 +790,11 @@ impl ClientHandler for UpstreamProxyClient {
         let notification = ServerNotification::ResourceUpdatedNotification(
             ResourceUpdatedNotification::new(params),
         );
-        async move { self.inner.send_downstream(notification).await }
+        async move {
+            self.inner
+                .send_downstream(self.generation, notification)
+                .await
+        }
     }
 
     fn on_resource_list_changed(
@@ -733,7 +804,11 @@ impl ClientHandler for UpstreamProxyClient {
         let notification =
             with_notification_meta(ResourceListChangedNotification::default(), context.meta);
         let notification = ServerNotification::ResourceListChangedNotification(notification);
-        async move { self.inner.send_downstream(notification).await }
+        async move {
+            self.inner
+                .send_downstream(self.generation, notification)
+                .await
+        }
     }
 
     fn on_tool_list_changed(
@@ -743,7 +818,11 @@ impl ClientHandler for UpstreamProxyClient {
         let notification =
             with_notification_meta(ToolListChangedNotification::default(), context.meta);
         let notification = ServerNotification::ToolListChangedNotification(notification);
-        async move { self.inner.send_downstream(notification).await }
+        async move {
+            self.inner
+                .send_downstream(self.generation, notification)
+                .await
+        }
     }
 
     fn on_prompt_list_changed(
@@ -753,7 +832,11 @@ impl ClientHandler for UpstreamProxyClient {
         let notification =
             with_notification_meta(PromptListChangedNotification::default(), context.meta);
         let notification = ServerNotification::PromptListChangedNotification(notification);
-        async move { self.inner.send_downstream(notification).await }
+        async move {
+            self.inner
+                .send_downstream(self.generation, notification)
+                .await
+        }
     }
 
     #[allow(clippy::manual_async_fn)]
@@ -772,7 +855,9 @@ impl ClientHandler for UpstreamProxyClient {
             {
                 return;
             }
-            self.inner.send_downstream(notification).await;
+            self.inner
+                .send_downstream(self.generation, notification)
+                .await;
         }
     }
 
@@ -791,9 +876,26 @@ impl ClientHandler for UpstreamProxyClient {
                 params: notification.params,
                 extensions: notification_extensions(context.meta),
             });
-            self.inner.send_downstream(notification).await;
+            self.inner
+                .send_downstream(self.generation, notification)
+                .await;
         }
     }
+}
+
+/// 只声明代理真正转发的面：tools/resources/tasks；prompts/skills 等不转发即不声明。
+fn forwarded_capabilities(upstream: &ServerCapabilities) -> ServerCapabilities {
+    let mut capabilities = ServerCapabilities::default();
+    capabilities.tools = upstream.tools.clone();
+    capabilities.resources = upstream.resources.clone();
+    capabilities.extensions = upstream.extensions.as_ref().and_then(|extensions| {
+        extensions.get(TASKS_EXTENSION_ID).map(|settings| {
+            let mut filtered = ExtensionCapabilities::new();
+            filtered.insert(TASKS_EXTENSION_ID.to_owned(), settings.clone());
+            filtered
+        })
+    });
+    capabilities
 }
 
 fn with_notification_meta<M>(
