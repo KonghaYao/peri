@@ -82,7 +82,7 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 
 **目标（v5）**：`workspace` 在 Sandbox Actor 暴露 HTTP MCP descriptor；`peri` 作为代理连接该 upstream。代理契约：
 
-1. JSON-RPC 请求/响应映射：request id、`tools/call`、`resources/*`、`subscriptions/listen`。
+1. JSON-RPC 请求/响应映射：request id、`tools/call`、`resources/*`、`subscriptions/listen`，以及 workspace 现有扩展方法 `skills/list`、`skills/get`、`image/read`。
 2. 取消与任务：`notifications/cancelled`、`tasks/get|cancel`、progress token、通知中的 `taskIds`。
 3. 资源 URI 保持现状（`workspace://` 等），不因合并改名；旧任务的归属与隔离不得因代理而丢失。
 4. 出口管理上游连接，不接管 Sandbox 生命周期；Sandbox 启停仍归 Sandbox actor。
@@ -115,6 +115,8 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 1. **`.mcp.json`**：使用顶层 `mcpServers`，单出口是其中一个 server 条目；`command` / `args` / `env` / `url` / `headers` 保持 MCP 标准语义，Peri 既有 `disabled` 等字段语义不变。
 2. **`peri mcp-start` 参数**：控制本次 standalone 服务启用的能力、transport 与 workspace；它不读取完整 Peri 配置装配，也不是整个 `peri` 进程的全局开关。
 
+宿主内建条目与 standalone 的 `.mcp.json` 条目使用同一 server 契约，但身份不同：宿主条目由宿主注入且不可被同名用户条目覆盖；standalone 条目由通用 MCP 客户端启动 `peri mcp-start`，不构成对宿主 builtin 的接管。
+
 约束：
 
 1. 优先级为命令行 > `.mcp.json` > 内置默认；冲突必须能解释来源。
@@ -130,7 +132,7 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 
 ## 4. 能力关闭矩阵
 
-关闭与降级使用同一冻结的有效能力集。**关闭**由配置、部署缺席或策略决定，在加载期/会话装配期生效；**降级**由运行期初始化或连接失败触发，在会话内生效。两者都必须满足下表：
+配置关闭使用**冻结配置能力集**（会话装配时固定，冷恢复复用）；运行期降级在其上派生**运行时能力投影**（移除失败能力，仅在显式重连或新会话时恢复）。目录、ToolSearch、资源与订阅、继承面、宿主任务、readiness、诊断与 runtime authorization 都必须使用运行时能力投影；关闭能力的配置事实仍以冻结集为准。两者都必须满足下表：
 
 | 能力面 | 关闭（配置/部署） | 降级（运行期失败） |
 | --- | --- | --- |
@@ -141,8 +143,10 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 | ToolSearch | 索引、描述、代理执行都不含该能力 | 同关闭 |
 | 子 Agent/workflow 继承 | `parent_tools`、workflow agent 工具列表不含该能力；不得从完整 pool 重新引入 | 同关闭 |
 | 宿主任务 | 不启动；已有任务有界取消/收敛 | 不留下新的宿主任务；既有任务按关闭语义收敛 |
-| runtime authorization | 服务端拒绝该能力的工具调用与资源读取，不能只靠隐藏目录 | 同关闭 |
-| readiness/诊断/首个请求 | 同一有效能力集；面板、warning、首个模型请求一致 | 同一有效能力集；warning 可见 |
+| runtime authorization | 按冻结配置集拒绝该能力的工具调用与资源读取，不能只靠隐藏目录 | 按运行时能力投影拒绝；同关闭 |
+| readiness/诊断/首个请求 | 同一运行时能力投影；面板、warning、首个模型请求一致 | 同一运行时能力投影；warning 可见 |
+
+上表的 direct/deferred、资源与订阅、静态提示、ToolSearch、继承面与宿主任务均按运行时能力投影计算；冻结配置集只决定配置关闭、授权上限与冷恢复基线。
 
 附加约束：
 
@@ -150,7 +154,7 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 2. 关闭 `workspace` 能力时，其资源面一并关闭：技能、Agent 定义（`agent://`）、项目指令（`peri-instruction://`）与 MetaHarness 段落覆盖（`peri-meta://`）不可发现、不可读取；宿主不得回落磁盘读取本地技能或 `.peri/meta`。段落覆盖按可选降级：warn 并保持内置段落，不阻塞会话创建。
 3. 关闭 builtin 能力不得误杀外部同名 MCP；关闭规则只按 builtin 来源身份生效。
 4. 关闭一个能力不得占用合法 core/外部工具的名称；过滤应先于候选重名合并。
-5. 降级能力不得留下「列表隐藏但可调用」的中间态；服务端授权与目录投影使用同一有效能力集。
+5. 降级能力不得留下「列表隐藏但可调用」的中间态；服务端授权与目录投影使用同一运行时能力投影。
 6. 全部能力失败才 fail-closed；部分能力失败允许能力级降级。配置错误仍是加载期 hard fail，不退化为运行期 warning。
 
 ## 5. 命名、审批与授权
@@ -166,15 +170,15 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 7. 单出口内原始名重复、跨能力重名、无法唯一判定归属，以及用户自定义配置抢占保留名 `peri`，均为加载期确定性失败；不得静默覆盖或 first-wins。
 8. 外部 MCP 继续使用 `mcp__<server>__<tool>`；外部同名 server 不得被 builtin 关闭规则误杀，也不得借 `peri` 名称继承 builtin 审批白名单。
 
-**现行**：deferred 名按实例分裂，workspace direct 工具用原名；旧名归一函数存在。**兼容期**：旧名可用于历史显示与过滤匹配，但不能执行；迁移完成后删除旧实例命名。
+**现行**：deferred 名按实例分裂，workspace direct 工具用原名；旧名归一函数存在。**兼容期**：v4 路径（beta flag 关闭的新会话与既有 v4 会话）继续执行其 `mcp__<instance>__<tool>` 名。**v5 路由**不执行 builtin 的旧实例名，旧名仅用于历史显示与过滤匹配；外部 server 的同形名称不受影响。迁移完成（M4）后 v4 路径与旧名执行一并退役。
 
 ## 6. 降级、readiness 与可观察性
 
 **目标（v5）**：
 
 1. 运行期能力初始化或连接失败只降级该能力并发出 warning；其他能力继续服务。配置错误仍在加载期失败。
-2. `readiness` 与 `system_mcp_tools` 按降级后的有效能力集判定；部分能力可用即保持 server ready，全部失败才 fail-closed。
-3. 首个模型请求的工具面、MCP 服务快照/面板、warning 与会话诊断必须反映同一有效能力集；不得以隐藏 catalog 代替取消订阅或撤销宿主任务。
+2. `readiness` 与 `system_mcp_tools` 按运行时能力投影判定；部分能力可用即保持 server ready，全部失败才 fail-closed。
+3. 首个模型请求的工具面、MCP 服务快照/面板、warning 与会话诊断必须反映同一运行时能力投影；不得以隐藏 catalog 代替取消订阅或撤销宿主任务。
 4. warning 不能只写 tracing；必须出现在会话诊断与 MCP 面板/服务快照中，供用户判断能力缺失。
 5. 首阶段不做自动重试或热恢复；降级能力的恢复通过显式重连/新会话，不通过静默重试。
 6. 观测字段至少能回答：哪个 capability、哪个失败阶段（初始化/连接/调用）、当前是 ready/degraded/failed，以及是否仍有宿主任务或订阅。
@@ -188,14 +192,14 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 1. 迁移期 v4 六实例路径必须保留，可被新会话选择；它是兼容期与回滚路径，不是目标设计。
 2. 新路径先以 beta flag 只对新会话开启；切换默认前不得删除 v4 adapter。
 3. 切换后旧配置必须可确定性映射或 typed error；旧 transcript 名只做非执行归一。
-4. 清理期只能在观察窗口与验收完成后开始；清理不得改变已冻结会话，也不得删除外部 MCP/ACP 路径。
+4. 清理期（M4）只能在观察窗口与验收完成后开始；M4 启动即回滚支持结束，之后不得再承诺 v4 装配或旧名执行。清理前必须确认无仍需冷恢复的 v4 会话；否则保留只读 v4 adapter，不得删除。清理不得改变已冻结会话，也不得删除外部 MCP/ACP 路径。
 
-### 7.2 beta flag 与冻结能力集
+### 7.2 beta flag、冻结配置集与运行时投影
 
 1. 新装配由专用 beta flag 选择；flag id 在实现期按 [Beta Flag 系统](beta-flags.md) 注册，本文不预占。flag 只影响**新会话**，不做会话内热生效。
-2. flag 关闭时新会话仍走 v4 六实例兼容路径；这是迁移期回滚路径，不是目标设计。
-3. flag 开启时新会话冻结其有效能力集，并记录来源 revision 供诊断；同一会话及其子 Agent 复用冻结集合，不在 turn 中途重新解析。
-4. 冷加载/恢复复用已冻结的能力集；不得因当前配置变化隐式换身份、重写历史或热替换 pool。
+2. flag 关闭时新会话仍走 v4 六实例兼容路径；这是迁移期回滚路径，不是目标设计。该路径持续到回滚支持截止（M4 清理前），M4 后 flag 与 v4 路径一并退役。
+3. flag 开启时新会话冻结其**配置能力集**，并记录来源 revision 供诊断；同一会话及其子 Agent 复用冻结集合，不在 turn 中途重新解析。运行期失败由该集合派生运行时能力投影。
+4. 冷加载/恢复复用已冻结的配置能力集，并按启动结果重新建立运行时能力投影；不得因当前配置变化隐式换身份、重写历史或热替换 pool。
 5. 已存在的 v4 会话保持原装配与原模型名，不回写；回滚只改变新会话的选择，不改变已冻结会话。
 
 ### 7.3 旧配置 adapter 与旧名称
@@ -211,7 +215,7 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 1. 切换默认前，必须在观察窗口内对比新旧路径：首个模型请求的工具面、readiness、面板/诊断、资源与订阅、宿主任务与关闭矩阵。窗口时长、样本量与退出条件在 active spec 中记录。
 2. 观察期内保留 v4 adapter；出现阻断缺陷时，只对新会话切回旧装配，不热切换已冻结会话。
 3. 回滚不得重写旧 transcript、不得重新发布已关闭实例、不得把旧名变成执行别名。
-4. 观察窗口结束后才进入清理期；清理前必须证明旧配置可映射或可报错、旧历史可读、外部 MCP/ACP 不受影响。
+4. 观察窗口结束后才进入清理期（M4）；M4 开始即回滚支持截止。清理前必须证明旧配置可映射或可报错、旧历史可读、无仍需冷恢复的 v4 会话，外部 MCP/ACP 不受影响；否则保留只读 v4 adapter，不得删除。
 
 ## 8. 验收与未决项
 
@@ -222,9 +226,9 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 验收不得以 `tools/list` 通过、代码存在或单个单测替代以下证据：
 
 1. 每个能力的启用/关闭/降级在首个模型请求、ToolSearch、资源、订阅、继承面、宿主任务与授权面上的 presence/absence。
-2. workspace 代理的并发 request id、取消、进度、任务、通知与断线隔离。
+2. workspace 代理的并发 request id、取消、进度、任务、通知、断线隔离，以及 `skills/list` / `skills/get` / `image/read` 扩展方法。
 3. 配置优先级、旧键映射/报错与外部同名 server 的不误杀。
-4. 迁移期新旧会话隔离、冻结能力集与回滚。
+4. 迁移期新旧会话隔离、冻结配置能力集、运行时能力投影与回滚。
 
 ### 8.2 未决项
 
