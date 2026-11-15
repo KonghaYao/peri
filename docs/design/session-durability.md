@@ -176,7 +176,7 @@ pub trait SessionRecovery: Send + Sync {
 
 进入完成后，Host 把报告投影为 `RecoveryView`（`peri_acp_types::recovery`）并附加到 `session/load|resume` 响应的 `_meta.peri.recovery`；仅在本次实际恢复或失败时附加。`Failed` 且 `executionBlocked` 的失败在会话 runtime 上留下内存执行阻断，`session/prompt` 统一返回 `-32017` + `data.reason = "recovery_execution_blocked"`；`Unavailable` / `Superseded` 保持可重试，不阻断显式继续。阻断状态不持久化，每次新的 load/resume 重新判定。
 
-冷 child 的 `assemble_for_recovery` 只建立运行实例；调用它的 server loop 必须在响应前补齐 TaskManager 绑定与在线 endpoint。`discard` 只丢弃 `Prepared` 启动资格，MQ 中的提醒保留，下一次进入采纳同一条提醒而不是重复注入。
+冷 child 的 `assemble_for_recovery` 只建立运行实例：调用方必须先校验 `completion_target` 在根树内，装配后复核仍失败或接纳最终跳过时按本次发布的 generation 回收实例与 manager 登记，避免缓存泄漏。调用它的 server loop 必须在响应前补齐 TaskManager 绑定与在线 endpoint。`discard` 只丢弃 `Prepared` 启动资格，MQ 中的提醒保留，下一次进入采纳同一条提醒而不是重复注入。
 
 `enter`、普通执行准入、Stop、关闭和显式 resume 共用同一运行协调。恢复提醒与任务完成仍调用既有设计中的 `ThreadMq` 接口；状态变化由生命周期行为提交到 `SessionResources`，业务方不通过裸 setter 或 SQL 分别修改 MQ、历史与工作意图。
 

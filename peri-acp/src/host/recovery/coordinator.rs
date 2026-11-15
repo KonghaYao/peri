@@ -24,6 +24,9 @@ use tokio::sync::Mutex;
 
 use super::super::{AcpServerConfig, SharedSessions};
 use super::{interrupted, reminder, runtime_binding, scope};
+use crate::host::requests::session_lifecycle::{
+    rollback_unused_restore_publication, RestorePublication,
+};
 use crate::session::executor::ContinuationRequest;
 use crate::session::SessionManager;
 use crate::transport::types::AcpError;
@@ -97,6 +100,30 @@ fn effective_work_state(meta: &ThreadMeta) -> WorkState {
         WorkState::Idle
     } else {
         meta.work_state
+    }
+}
+
+/// 恢复 child 的投递目标校验：缺失、越界或装配期间变化都不得继续。
+///
+/// `expected` 来自 `prepare` 按根树的解析：`None` 表示目标缺失或不在根树内。
+/// 目标在装配前后各校验一次；同一函数保证两次判定口径一致。
+fn child_target(
+    thread: &ThreadId,
+    meta: &ThreadMeta,
+    expected: Option<&ThreadId>,
+) -> Result<ThreadId, RecoveryFailure> {
+    match peri_acp_types::thread::completion_target(meta.config.as_deref()) {
+        Ok(target) if Some(&target) == expected => Ok(target),
+        Ok(_) => Err(RecoveryFailure {
+            thread_id: thread.clone(),
+            kind: RecoveryErrorKind::Unavailable,
+            detail: "child completion target is missing, outside the root tree, or changed during recovery".into(),
+        }),
+        Err(detail) => Err(RecoveryFailure {
+            thread_id: thread.clone(),
+            kind: RecoveryErrorKind::Unavailable,
+            detail: detail.to_string(),
+        }),
     }
 }
 
@@ -276,6 +303,9 @@ impl HostSessionRecovery {
     /// 冷 child：没有本进程实例时按 `session/load` 同一路径装配，再按同一套复核
     /// 接纳它自己的提醒。父级只提供收件地址，绝不因 child 恢复而启动父级模型。
     ///
+    /// 投递目标在装配前先校验：装配会加载全量有效历史并发布运行实例，缺目标或
+    /// 越界的 child 不能为此付费。装配后复核仍保留，用于装配窗口内的目标变化；
+    /// 本次冷装配最终被跳过或失败时回收发布，不留下 sessions / manager 幽灵。
     /// 装配与接纳的失败都只记日志并按 Skip 报告，不失败请求（设计 §4.2）。
     async fn prepare_child(
         &self,
@@ -301,55 +331,81 @@ impl HostSessionRecovery {
             WorkState::Idle => return ThreadOutcome::Skipped(RecoverySkipReason::Idle),
             WorkState::Stopped => return ThreadOutcome::Skipped(RecoverySkipReason::Stopped),
         }
+        if let Err(failure) = child_target(thread, &meta, child.parent_thread_id.as_ref()) {
+            return ThreadOutcome::Failed(failure);
+        }
+
+        let mut publication = None;
         let mut session_id = self.manager.session_id_for_thread(thread);
         if session_id.is_none() {
             // 失败也可能是并发装配刚完成：以现场实例再判一次，仍没有才算装配失败。
-            if let Err(error) = self.assemble_child_session(thread).await {
-                tracing::warn!(
-                    thread_id = %thread,
-                    code = error.code,
-                    error = %error.message,
-                    "recovery: cold child session assembly failed"
-                );
+            match self.assemble_child_session(thread).await {
+                Ok(published) => publication = published,
+                Err(error) => {
+                    tracing::warn!(
+                        thread_id = %thread,
+                        code = error.code,
+                        error = %error.message,
+                        "recovery: cold child session assembly failed"
+                    );
+                }
             }
             session_id = self.manager.session_id_for_thread(thread);
         }
         let Some(session_id) = session_id else {
+            // 装配失败或并发冲突：失败路径已在装配内部排空候选环境，没有可回收的发布。
             return ThreadOutcome::Skipped(RecoverySkipReason::AssemblyFailed);
         };
+
+        #[cfg(test)]
+        admission_gate::wait(
+            thread.as_str(),
+            admission_gate::PausePoint::AfterColdAssembly,
+        )
+        .await;
 
         // 装配是异步准备：结束前可能已被收尾、停止或改挂父链，只信最终提交的意图。
         let current = match self.resources.load_session_meta(thread).await {
             Ok(meta) => meta,
             Err(error) => {
                 tracing::warn!(thread_id = %thread, %error, "recovery: child meta re-read failed");
-                return ThreadOutcome::Skipped(RecoverySkipReason::AssemblyFailed);
+                return self
+                    .reject_cold_child(
+                        publication,
+                        ThreadOutcome::Skipped(RecoverySkipReason::AssemblyFailed),
+                    )
+                    .await;
             }
         };
         match effective_work_state(&current) {
             WorkState::Working => {}
-            WorkState::Idle => return ThreadOutcome::Skipped(RecoverySkipReason::Idle),
-            WorkState::Stopped => return ThreadOutcome::Skipped(RecoverySkipReason::Stopped),
+            WorkState::Idle => {
+                return self
+                    .reject_cold_child(
+                        publication,
+                        ThreadOutcome::Skipped(RecoverySkipReason::Idle),
+                    )
+                    .await;
+            }
+            WorkState::Stopped => {
+                return self
+                    .reject_cold_child(
+                        publication,
+                        ThreadOutcome::Skipped(RecoverySkipReason::Stopped),
+                    )
+                    .await;
+            }
         }
-        let parent = match peri_acp_types::thread::completion_target(current.config.as_deref()) {
-            Ok(target) => target,
-            Err(detail) => {
-                return ThreadOutcome::Failed(RecoveryFailure {
-                    thread_id: thread.clone(),
-                    kind: RecoveryErrorKind::Unavailable,
-                    detail: detail.to_string(),
-                })
+        let parent = match child_target(thread, &current, child.parent_thread_id.as_ref()) {
+            Ok(parent) => parent,
+            Err(failure) => {
+                return self
+                    .reject_cold_child(publication, ThreadOutcome::Failed(failure))
+                    .await;
             }
         };
-
-        if child.parent_thread_id.as_ref() != Some(&parent) {
-            return ThreadOutcome::Failed(RecoveryFailure {
-                thread_id: thread.clone(), kind: RecoveryErrorKind::Unavailable,
-                detail: "child completion target is missing, outside the root tree, or changed during recovery".into(),
-            });
-        }
         let direct_children = partition.direct_children_of(thread);
-        match self
+        let outcome = match self
             .admit_thread(
                 &partition.root_thread_id,
                 thread,
@@ -365,11 +421,46 @@ impl HostSessionRecovery {
                 tracing::warn!(thread_id = %thread, %error, "recovery: child admission failed");
                 ThreadOutcome::Skipped(RecoverySkipReason::AssemblyFailed)
             }
+        };
+        match outcome {
+            // 已接纳并放行，或已有执行复用本实例：保留本次装配。
+            ThreadOutcome::Injected { .. } | ThreadOutcome::Reused => outcome,
+            // 本次冷装配最终不能续跑：回收发布，避免 manager-only 残留。
+            other => self.reject_cold_child(publication, other).await,
         }
     }
 
+    /// 拒绝本次冷装配：只回收尚无 turn 占用的本次发布。
+    ///
+    /// 回滚在同一次 `SharedSessions` 锁内复核 generation 与 `cancel_token`：准入等待
+    /// 期间若有 prompt/continuation 取得该会话，实例归执行方，这里放弃删除。旧代次
+    /// 或他人实例同样不受影响。
+    async fn reject_cold_child(
+        &self,
+        publication: Option<RestorePublication>,
+        outcome: ThreadOutcome,
+    ) -> ThreadOutcome {
+        let Some(publication) = publication else {
+            return outcome;
+        };
+        if let Err(error) =
+            rollback_unused_restore_publication(self.cfg.as_ref(), &self.sessions, &publication)
+                .await
+        {
+            tracing::warn!(
+                session_id = %publication.session_id,
+                error = %error.message,
+                "recovery: cold child session rollback incomplete"
+            );
+        }
+        outcome
+    }
+
     /// 冷 child 的运行实例：与 `session/load` 同一条装配路径（不发会话响应）。
-    async fn assemble_child_session(&self, thread: &ThreadId) -> Result<(), AcpError> {
+    async fn assemble_child_session(
+        &self,
+        thread: &ThreadId,
+    ) -> Result<Option<RestorePublication>, AcpError> {
         crate::host::requests::session_lifecycle::assemble_for_recovery(
             self.cfg.as_ref(),
             &self.sessions,
@@ -558,6 +649,8 @@ pub(crate) mod admission_gate {
         InsideGate,
         /// 外围查询与生命周期复核之后、恢复放行之前。
         BeforeAdmit,
+        /// 冷 child 已装配、装配后复核之前：构造装配期间目标变化或收尾的竞态。
+        AfterColdAssembly,
     }
 
     pub(crate) struct Gate {

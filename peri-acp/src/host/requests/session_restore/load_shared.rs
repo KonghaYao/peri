@@ -514,12 +514,39 @@ pub(crate) async fn rollback_restore_publication(
     sessions: &SharedSessions,
     publication: &RestorePublication,
 ) -> Result<(), AcpError> {
+    rollback_publication(cfg, sessions, publication, false).await
+}
+
+/// 回收已经发布、但尚无 turn 接管的 cold restore（恢复准备失败/跳过的路径）。
+///
+/// `closing` 只在该代次仍无 `cancel_token` 时设置：判定与 turn 准入共用
+/// `SharedSessions` 锁（prompt 在锁内发布令牌并检查 `closing`），因此要么 turn
+/// 先取得会话、回滚放弃删除，要么回滚先置 `closing`、新 turn 被拒绝。不能把
+/// 已开始的 turn 连同环境一起拆掉。
+pub(crate) async fn rollback_unused_restore_publication(
+    cfg: &AcpServerConfig,
+    sessions: &SharedSessions,
+    publication: &RestorePublication,
+) -> Result<(), AcpError> {
+    rollback_publication(cfg, sessions, publication, true).await
+}
+
+async fn rollback_publication(
+    cfg: &AcpServerConfig,
+    sessions: &SharedSessions,
+    publication: &RestorePublication,
+    require_idle: bool,
+) -> Result<(), AcpError> {
     let environment = {
         let mut states = sessions.lock().await;
         let Some(state) = states.get_mut(&publication.session_id) else {
             return Ok(());
         };
         if !publication.matches(state) {
+            return Ok(());
+        }
+        // 本代次已有 turn 持有会话：会话归执行方，回滚必须放弃。
+        if require_idle && state.cancel_token.is_some() {
             return Ok(());
         }
         state.closing = true;

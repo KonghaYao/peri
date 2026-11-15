@@ -5,7 +5,7 @@
 
 use super::parent_binding_tests::child_task_events;
 use super::*;
-use crate::host::recovery::{deliver_child_turn, ChildTurnOutcome};
+use crate::host::recovery::{admission_gate, deliver_child_turn, ChildTurnOutcome};
 use peri_acp_types::session::{MessageKind, MessageSource};
 use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
 
@@ -66,6 +66,24 @@ async fn set_agent_status(harness: &RecoveryHarness, thread: &str, status: Agent
             &thread.to_owned(),
             &peri_acp_types::session_resources::SessionMetaPatch {
                 status: Some(status),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// 改写 child 的投递目标；`None` 模拟缺失目标的脏数据。
+async fn set_completion_target(harness: &RecoveryHarness, thread: &str, target: Option<&str>) {
+    harness
+        .cfg
+        .session_resources
+        .update_session_meta(
+            &thread.to_owned(),
+            &peri_acp_types::session_resources::SessionMetaPatch {
+                config: Some(Some(
+                    peri_acp_types::thread::with_completion_target(None, target).unwrap(),
+                )),
                 ..Default::default()
             },
         )
@@ -136,6 +154,14 @@ async fn terminal_child_with_residual_working_is_not_recovered() {
         assert!(
             harness.recovery_rows("child-b").await.is_empty(),
             "{status:?}: 终态 child 不得收到恢复提醒"
+        );
+        assert!(
+            harness.sessions.lock().await.get("child-b").is_none(),
+            "{status:?}: 终态 child 不得装配运行实例"
+        );
+        assert!(
+            harness.cfg.session_manager.get_session("child-b").is_none(),
+            "{status:?}: 终态 child 不得登记 manager"
         );
 
         recovery.launch(&report).await;
@@ -472,6 +498,249 @@ async fn child_assembly_failure_is_reported_as_skip_without_failing_the_entry() 
         WorkState::Working,
         "失败不得改写工作意图"
     );
+}
+
+/// 121 个 active+working、缺投递目标的 child：逐项失败，但零装配、零 manager 残留。
+#[tokio::test]
+async fn missing_target_children_fail_without_assembling_or_leaking_sessions() {
+    const CHILDREN: usize = 121;
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    for index in 0..CHILDREN {
+        let child = format!("missing-{index:03}");
+        harness.add_child(&root, &child, &root).await;
+        harness.set_working(&child).await;
+        set_completion_target(&harness, &child, None).await;
+    }
+    let recovery = harness.recovery();
+
+    let report = recovery.enter(&root).await.expect("缺目标只记逐项失败");
+    assert_eq!(report.failures.len(), CHILDREN, "{report:?}");
+    assert!(
+        report.failures.iter().all(|failure| failure
+            .detail
+            .contains("child completion target is unavailable")),
+        "{report:?}"
+    );
+    assert!(report.recovered.is_empty(), "{report:?}");
+
+    let states = harness.sessions.lock().await;
+    assert_eq!(states.len(), 1, "缺目标的 child 不得发布运行实例");
+    assert!(
+        states.contains_key(&root),
+        "{:?}",
+        states.keys().collect::<Vec<_>>()
+    );
+    drop(states);
+    for index in 0..CHILDREN {
+        let child = format!("missing-{index:03}");
+        assert!(
+            harness.cfg.session_manager.get_session(&child).is_none(),
+            "{child} 不得登记 manager"
+        );
+        assert!(
+            harness
+                .cfg
+                .session_manager
+                .session_id_for_thread(&ThreadId::from(child.clone()))
+                .is_none(),
+            "{child} 不得登记 thread 映射"
+        );
+    }
+    assert!(!harness._mock.matched(), "准备阶段不得调用模型");
+}
+
+/// 投递目标越界：记录失败但不装配。
+#[tokio::test]
+async fn target_outside_the_root_tree_fails_without_assembly() {
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-b", &root).await;
+    harness.set_working("child-b").await;
+    set_completion_target(&harness, "child-b", Some("ghost-thread")).await;
+    let recovery = harness.recovery();
+
+    let report = recovery.enter(&root).await.expect("目标越界只记逐项失败");
+    let failure = report
+        .failures
+        .iter()
+        .find(|failure| failure.thread_id == "child-b")
+        .expect("越界目标必须记为失败");
+    assert!(
+        failure.detail.contains("outside the root tree"),
+        "{}",
+        failure.detail
+    );
+    assert!(harness.sessions.lock().await.get("child-b").is_none());
+    assert!(harness.cfg.session_manager.get_session("child-b").is_none());
+    assert!(harness.recovery_rows("child-b").await.is_empty());
+}
+
+/// 装配期间投递目标变化：装配后复核失败，回收本次发布的实例。
+#[tokio::test]
+async fn target_change_during_assembly_rolls_back_the_assembled_child() {
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-change", &root).await;
+    harness.add_child(&root, "child-b", &root).await;
+    harness.set_working("child-change").await;
+    let gate = admission_gate::install(
+        "child-change",
+        admission_gate::PausePoint::AfterColdAssembly,
+    );
+    let recovery = harness.recovery();
+    let entered = root.clone();
+    let task = tokio::spawn(async move { recovery.enter(&entered).await });
+
+    gate.wait_arrived(1).await;
+    assert!(
+        harness.sessions.lock().await.get("child-change").is_some(),
+        "装配后复核前应先发布运行实例"
+    );
+    set_completion_target(&harness, "child-change", Some("child-b")).await;
+    gate.release(1);
+    let report = task.await.unwrap().expect("装配期间目标变化只记逐项失败");
+    admission_gate::uninstall(
+        "child-change",
+        admission_gate::PausePoint::AfterColdAssembly,
+    );
+
+    let failure = report
+        .failures
+        .iter()
+        .find(|failure| failure.thread_id == "child-change")
+        .expect("装配期间目标变化必须记为失败");
+    assert!(
+        failure.detail.contains("changed during recovery"),
+        "{}",
+        failure.detail
+    );
+    assert!(
+        harness.sessions.lock().await.get("child-change").is_none(),
+        "最终失败必须回收本次装配"
+    );
+    assert!(
+        harness
+            .cfg
+            .session_manager
+            .get_session("child-change")
+            .is_none(),
+        "不得残留 manager 登记"
+    );
+    assert!(harness.recovery_rows("child-change").await.is_empty());
+}
+
+/// 装配期间已有 turn 取得会话：拒绝路径不得回收执行方仍在使用的实例。
+#[tokio::test]
+async fn live_turn_during_assembly_is_not_rolled_back() {
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-live-turn", &root).await;
+    harness.add_child(&root, "child-b", &root).await;
+    harness.set_working("child-live-turn").await;
+    let gate = admission_gate::install(
+        "child-live-turn",
+        admission_gate::PausePoint::AfterColdAssembly,
+    );
+    let recovery = harness.recovery();
+    let entered = root.clone();
+    let task = tokio::spawn(async move { recovery.enter(&entered).await });
+
+    gate.wait_arrived(1).await;
+    {
+        // 普通 prompt 与恢复准入共用 sessions 锁发布令牌：模拟 turn 在装配后取得会话。
+        let mut states = harness.sessions.lock().await;
+        states.get_mut("child-live-turn").unwrap().cancel_token =
+            Some(tokio_util::sync::CancellationToken::new());
+    }
+    set_completion_target(&harness, "child-live-turn", Some("child-b")).await;
+    gate.release(1);
+    let report = task.await.unwrap().expect("拒绝只记逐项失败");
+    admission_gate::uninstall(
+        "child-live-turn",
+        admission_gate::PausePoint::AfterColdAssembly,
+    );
+
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|failure| failure.thread_id == "child-live-turn"),
+        "{report:?}"
+    );
+    assert!(
+        harness
+            .sessions
+            .lock()
+            .await
+            .get("child-live-turn")
+            .is_some_and(|state| state.cancel_token.is_some()),
+        "turn 拥有的实例不得被回滚"
+    );
+    assert!(
+        harness
+            .cfg
+            .session_manager
+            .get_session("child-live-turn")
+            .is_some(),
+        "turn 拥有的 manager 登记不得移除"
+    );
+}
+
+/// 装配期间 child 收尾为终态：按 idle 跳过并回收本次装配。
+#[tokio::test]
+async fn terminal_during_assembly_rolls_back_the_assembled_child() {
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-terminal", &root).await;
+    harness.set_working("child-terminal").await;
+    let gate = admission_gate::install(
+        "child-terminal",
+        admission_gate::PausePoint::AfterColdAssembly,
+    );
+    let recovery = harness.recovery();
+    let entered = root.clone();
+    let task = tokio::spawn(async move { recovery.enter(&entered).await });
+
+    gate.wait_arrived(1).await;
+    assert!(harness
+        .sessions
+        .lock()
+        .await
+        .get("child-terminal")
+        .is_some());
+    set_agent_status(&harness, "child-terminal", AgentStatus::Done).await;
+    gate.release(1);
+    let report = task.await.unwrap().expect("终态只记跳过");
+    admission_gate::uninstall(
+        "child-terminal",
+        admission_gate::PausePoint::AfterColdAssembly,
+    );
+
+    assert!(
+        report
+            .skipped
+            .contains(&peri_acp_types::recovery::RecoverySkip {
+                thread_id: "child-terminal".to_owned(),
+                reason: RecoverySkipReason::Idle,
+            }),
+        "{report:?}"
+    );
+    assert!(
+        harness
+            .sessions
+            .lock()
+            .await
+            .get("child-terminal")
+            .is_none(),
+        "终态跳过必须回收本次装配"
+    );
+    assert!(harness
+        .cfg
+        .session_manager
+        .get_session("child-terminal")
+        .is_none());
+    assert!(harness.recovery_rows("child-terminal").await.is_empty());
 }
 
 /// 7. 恢复 turn 被取消：终态 `cancelled`、工作意图 `stopped`，结果仍入父 MQ。
