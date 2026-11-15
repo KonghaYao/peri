@@ -125,6 +125,7 @@ Workflow 是 Peri 的多 Agent 编排子系统：用户在 JS 脚本中声明并
 - **拒绝路径不留悬挂 promise**：参数非法（能取到 taskId）、任务信道未接线、实例关闭时就地回投 `agent/result`（`dead` 编码）。
 - **claim / settle**：消费者唯一认领并登记取消句柄；终态单次提交，重复回填幂等。
 - **投递**：终态提交后向 Node 发送 `agent/result`；取消/中止按现有 `AgentRunResult` 变体编码（Node 侧映射为 `WorkflowAbortedError`）。
+- **child 会话结算**：每次 agent 回调对应一个 hidden child session；run 结束（完成/失败/取消，含 future 被 kill drop）时按 `session-durability` §5.3 的映射尝试写终态与 `work_state`；写入失败时 child 可能仍为 `working`，见 §5.3。结算成功后父会话进入时不再把它当作待续跑候选。
 
 任务表是 per-session 运行期状态（process-local，不写 journal）；消费主循环、订阅与就绪语义见 [workflow-mcp.md](workflow-mcp.md) §5.5，入口为 `peri-acp/src/host/workflow_consumer.rs`。
 

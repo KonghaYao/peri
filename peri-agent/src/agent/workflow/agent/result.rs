@@ -5,6 +5,7 @@ use std::{sync::Arc, time::Instant};
 use peri_acp_types::{
     command::PromptStopReason,
     session::{ExecutionFailure, TurnTelemetryOutcome},
+    thread::AgentStatus,
     workflow::{AgentRunParams, AgentRunResult, Usage},
 };
 use tracing::{debug, warn};
@@ -32,6 +33,38 @@ impl ProjectedResult {
             },
             _ => TurnTelemetryOutcome::Completed,
         }
+    }
+}
+
+/// 本次 run 结果对应的 child 终态。
+///
+/// 与 sync/background child 的生命周期约定一致（`docs/design/session-durability.md`
+/// §5.3）：正常完成写 `Done`，用户取消写 `Cancelled`，其余中断与失败写 `Error`；
+/// `work_state` 由 [`peri_acp_types::thread::WorkState::after_agent_terminal`] 派生。
+pub(super) fn terminal_status(result: &AgentRunResult) -> AgentStatus {
+    match result {
+        AgentRunResult::Ok { .. } | AgentRunResult::Skipped => AgentStatus::Done,
+        AgentRunResult::Dead { reason, .. } if reason.as_deref() == Some("interrupted") => {
+            AgentStatus::Cancelled
+        }
+        AgentRunResult::Dead { .. } => AgentStatus::Error,
+    }
+}
+
+/// 作用域未结清时，任何结果都按失败收口为 `Error`。
+///
+/// sync child 在 close 失败时不写终态；workflow child 必须结算（否则残留
+/// `active + working` 会被父会话反复恢复），因此按 `session-durability` §5.3
+/// 的 close 失败映射写 `Error + Idle`：保留「资源未完全释放」的事实，同时不再
+/// 成为续跑候选。
+pub(super) fn terminal_status_after_close(
+    result: &AgentRunResult,
+    scope_closed: bool,
+) -> AgentStatus {
+    if scope_closed {
+        terminal_status(result)
+    } else {
+        AgentStatus::Error
     }
 }
 

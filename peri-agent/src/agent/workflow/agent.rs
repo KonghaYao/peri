@@ -34,6 +34,7 @@ use peri_acp_types::{
     interaction::UserInteractionBroker,
     messages::BaseMessage,
     session::{MessageKind, MessageSource, QueuedMessage},
+    thread::AgentStatus,
     workflow::{AgentExecutor, AgentRunParams, AgentRunResult, ProgressEvent},
 };
 use tokio_util::sync::CancellationToken;
@@ -485,6 +486,10 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 task_manager.clone(),
             );
         }
+        // child 已落库、运行实例已建立：从第一次 await（初始指令入队）起，所有退出
+        // 路径都必须结算工作意图，否则父会话进入时会把它当作待续跑候选。显式路径
+        // await `settle`，future 被 drop 时由 Drop 先停后台工作再兜底结算。
+        let mut child_settlement = execution.settlement(Arc::clone(&session));
         let v2_ctx = ctx_builder.build(
             Some(session),
             llm,
@@ -545,6 +550,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
             drop(context);
             let _ = await_workflow_forwarder(event_bus, forwarder_handle).await;
             close_session_scope(&session, &session_id).await;
+            child_settlement.settle(AgentStatus::Error).await;
             return initial_prompt_enqueue_failure(detail);
         }
 
@@ -557,6 +563,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 drop(context);
                 let _ = await_workflow_forwarder(event_bus, forwarder_handle).await;
                 close_session_scope(&session, &session_id).await;
+                child_settlement.settle(AgentStatus::Error).await;
                 return AgentRunResult::Dead {
                     reason: Some("execution-blocked".into()),
                     detail: Some(detail),
@@ -595,7 +602,17 @@ impl AgentExecutor for WorkflowAgentExecutor {
         // 未确认执行仍由 `ExternalGuard::drop` 写入 uncertainty 记录，不掩盖证据缺失。
         drop(execution_guard);
 
-        close_session_scope(&session, &session_id).await;
+        // 终态按 run 结果投影：正常完成 Done、显式取消 Cancelled、其余失败 Error。
+        // close 不完整时不能把本次执行记成成功完成（与 sync child 的收尾语义一致，
+        // 但这里仍写终态，避免 child 留在 active+working 被父会话反复恢复）。
+        // 结算失败只记录（child 仍可能停在 working），不把已完成 run 改写成失败。
+        let scope_closed = close_session_scope(&session, &session_id).await;
+        child_settlement
+            .settle(result::terminal_status_after_close(
+                &projected.result,
+                scope_closed,
+            ))
+            .await;
 
         projected.result
     }
@@ -638,16 +655,19 @@ fn initial_prompt_enqueue_failure(detail: String) -> peri_acp_types::workflow::A
 /// `Incomplete: child ... resources or required messages unfinished` 拒绝
 /// （-32010），且父会话停在半关闭态，重试也无法成功。
 ///
-/// 失败只记录：run 结果已产出，清理不完整不得改写结果语义。
-async fn close_session_scope(session: &Arc<crate::session::Session>, session_id: &str) {
-    if let Err(error) =
-        crate::session::subagent::close_subagent_session_scope(session.clone()).await
-    {
-        warn!(
-            session_id = %session_id,
-            %error,
-            "workflow agent session scope close incomplete"
-        );
+/// 返回是否结清。失败只记录：run 结果已产出，清理不完整不得改写结果语义，
+/// 但调用方据此把 child 终态降级为失败，不把未释放资源的执行记成正常完成。
+async fn close_session_scope(session: &Arc<crate::session::Session>, session_id: &str) -> bool {
+    match crate::session::subagent::close_subagent_session_scope(session.clone()).await {
+        Ok(()) => true,
+        Err(error) => {
+            warn!(
+                session_id = %session_id,
+                %error,
+                "workflow agent session scope close incomplete"
+            );
+            false
+        }
     }
 }
 
@@ -732,3 +752,7 @@ fn select_workflow_system_prompt(
 #[cfg(test)]
 #[path = "agent/agent_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "agent/settlement_test.rs"]
+mod settlement_tests;
