@@ -54,4 +54,11 @@ close 失败时退出码已为 1，但 `status` 仍为 `completed`（观察）�
 
 ## 验证记录
 
-- 待修复完成后回填。
+- `cargo test -p peri-tui --features test-support --test print_settlement -- --test-threads=1` → 6 passed（scenario 1/3/4/4b pending 路径；2/5 窗口内完成；scenario 5 嵌套子任务 pending=1）。
+- `cargo test -p peri-tui --test print_exit` → 10 passed。
+- `cargo test -p peri-tui --lib` → 2722 passed。
+- `./scripts/check-changed.sh` → exit 0。
+- `git diff --check` → OK。
+- pre-commit：check / clippy / fmt / layer-imports 通过。
+- CI（`43693594271`，head `7fd40b83`）：Classify、E2E replay、Build（macOS/Ubuntu/Windows）、CI result、CodeRabbit 全部 pass；PR #415 `MERGEABLE`。
+
