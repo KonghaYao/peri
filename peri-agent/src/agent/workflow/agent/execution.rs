@@ -126,11 +126,7 @@ impl Drop for WorkflowChildSettlement {
         }
         // 取消（kill / 调用方 drop）与 panic 都走不到显式返回；前者按取消收口，
         // 后者是执行失败。没有 runtime 时只能留下可诊断日志，不伪装已结算。
-        let status = if std::thread::panicking() {
-            AgentStatus::Error
-        } else {
-            AgentStatus::Cancelled
-        };
+        let panicking = std::thread::panicking();
         let resources = Arc::clone(&self.resources);
         let thread_id = self.thread_id.clone();
         let session = Arc::clone(&self.session);
@@ -140,7 +136,7 @@ impl Drop for WorkflowChildSettlement {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             tracing::error!(
                 session_id = self.thread_id.as_str(),
-                ?status,
+                panicking,
                 "workflow child settlement skipped without an async runtime; child remains active"
             );
             return;
@@ -158,16 +154,18 @@ impl Drop for WorkflowChildSettlement {
                         false
                     }
                 };
-            // 与显式路径同一约定：scope 未结清时按 Error + Idle 收口，不用
-            // Cancelled 掩盖未释放的资源；但仍必须写终态，否则 active + working
-            // 会重新变成父会话的恢复候选。
-            let status = if scope_closed {
-                status
-            } else {
-                AgentStatus::Error
-            };
+            let status = drop_terminal_status(panicking, scope_closed);
             settle_workflow_child(resources.as_ref(), &thread_id, status).await;
         });
+    }
+}
+
+/// Drop 路径必须结算，但 scope 未结清或 panic 都不能伪装成用户取消。
+fn drop_terminal_status(panicking: bool, scope_closed: bool) -> AgentStatus {
+    if panicking || !scope_closed {
+        AgentStatus::Error
+    } else {
+        AgentStatus::Cancelled
     }
 }
 
@@ -208,7 +206,16 @@ fn ensure_same_execution_directory(parent_cwd: &str, cwd: &str) -> Result<(), St
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_same_execution_directory;
+    use super::{drop_terminal_status, ensure_same_execution_directory};
+    use peri_acp_types::thread::AgentStatus;
+
+    #[test]
+    fn drop_settles_cancelled_only_after_clean_close() {
+        assert_eq!(drop_terminal_status(false, true), AgentStatus::Cancelled);
+        assert_eq!(drop_terminal_status(false, false), AgentStatus::Error);
+        assert_eq!(drop_terminal_status(true, true), AgentStatus::Error);
+        assert_eq!(drop_terminal_status(true, false), AgentStatus::Error);
+    }
 
     #[test]
     fn workflow_guard_accepts_same_directory_text_variants() {
