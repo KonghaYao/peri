@@ -51,19 +51,20 @@ pub(super) fn terminal_status(result: &AgentRunResult) -> AgentStatus {
     }
 }
 
-/// 作用域未结清时，正常完成不能记成 `Done`。
+/// 作用域未结清时，任何结果都按失败收口为 `Error`。
 ///
 /// sync child 在 close 失败时不写终态；workflow child 必须结算（否则残留
-/// `active + working` 会被父会话反复恢复），因此折中为 `Error + Idle`：
-/// 保留「资源未完全释放」的事实，同时不再成为续跑候选。显式取消仍按
-/// `Cancelled` 投影，close 失败不改变用户停止意图。
+/// `active + working` 会被父会话反复恢复），因此按 `session-durability` §5.3
+/// 的 close 失败映射写 `Error + Idle`：保留「资源未完全释放」的事实，同时不再
+/// 成为续跑候选。
 pub(super) fn terminal_status_after_close(
     result: &AgentRunResult,
     scope_closed: bool,
 ) -> AgentStatus {
-    match terminal_status(result) {
-        AgentStatus::Done if !scope_closed => AgentStatus::Error,
-        status => status,
+    if scope_closed {
+        terminal_status(result)
+    } else {
+        AgentStatus::Error
     }
 }
 

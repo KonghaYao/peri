@@ -307,7 +307,7 @@ fn workflow_terminal_status_follows_child_lifecycle_mapping() {
     }
 }
 
-/// close 未结清时正常完成降级为 Error；取消仍保留 Cancelled。
+/// close 未结清时任何结果都降级为 Error。
 #[test]
 fn workflow_terminal_status_after_incomplete_close() {
     let done = AgentRunResult::Ok {
@@ -330,7 +330,7 @@ fn workflow_terminal_status_after_incomplete_close() {
     };
     assert_eq!(
         terminal_status_after_close(&cancelled, false),
-        AgentStatus::Cancelled
+        AgentStatus::Error
     );
     let failed = AgentRunResult::Dead {
         reason: None,
