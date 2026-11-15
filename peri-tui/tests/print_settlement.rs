@@ -889,10 +889,13 @@ async fn scenario5_nested_child_task_settlement() {
     assert!(outcome.child_steps >= 2, "child model was not exercised");
     assert!(pid.is_some(), "child shell task never started");
     assert_eq!(outcome.stop_reason(), json!("end_turn"));
-    assert_eq!(outcome.pending_tasks(), json!(null));
-    assert_eq!(outcome.status(), json!("completed"));
-    assert_eq!(outcome.exit_code(), Some(0));
-    assert_eq!(outcome.stdout_json().unwrap()["pending_tasks"], json!(0));
+    // The child shell still sleeps (30s) when the parent ends: the parent's
+    // pending count must aggregate child-owned managers instead of reporting a
+    // settled run.
+    assert_eq!(outcome.pending_tasks(), json!(1));
+    assert_eq!(outcome.status(), json!("incomplete"));
+    assert_ne!(outcome.exit_code(), Some(0));
+    assert_eq!(outcome.stdout_json().unwrap()["pending_tasks"], json!(1));
     if let Some(pid) = pid {
         if alive_after {
             cleanup_pid(pid);
