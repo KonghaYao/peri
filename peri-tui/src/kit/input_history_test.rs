@@ -364,15 +364,19 @@ fn test_load_history_applies_byte_budget() {
 }
 
 /// 遗留超大文件在 parse 前按文件大小拒绝，启动不为其分配整份 JSON。
+///
+/// fixture 是合法 JSON（短哨兵 + 尾部空白），去掉大小门后 sentinel 会被加载，
+/// 断言因此能真正区分「大小门生效」与「文件本身解析失败」。
 #[test]
 #[serial]
 fn test_load_history_ignores_file_over_size_budget() {
     let home = setup();
     let path = history_file(&home);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let file = std::fs::File::create(&path).unwrap();
-    file.set_len(MAX_HISTORY_FILE_BYTES + 1).unwrap();
-    drop(file);
+    let mut fixture = String::from("[\"sentinel\"]");
+    let padding = MAX_HISTORY_FILE_BYTES as usize + 1 - fixture.len();
+    fixture.push_str(&" ".repeat(padding));
+    std::fs::write(&path, fixture).unwrap();
 
     load_history();
 

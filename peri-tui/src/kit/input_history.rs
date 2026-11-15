@@ -28,8 +28,9 @@ const MAX_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 /// 单条历史字节上限；更大的输入仍会提交，只是不进入回放历史。
 const MAX_ENTRY_BYTES: usize = 64 * 1024;
 /// 启动加载文件的字节上限——超过则整份忽略，避免对遗留超大文件全量 parse。
-/// 取总预算的 3 倍：覆盖引号/反斜杠等 JSON 转义（最坏按 2 倍计）。
-const MAX_HISTORY_FILE_BYTES: u64 = (MAX_HISTORY_BYTES as u64) * 3;
+/// 按 writer 最坏输出推导：serde_json 把控制字符编码为 `\u00XX`（每字节 6 字节），
+/// 另计每条的引号与分隔符；保证 `load_history` 一定能读回自己写出的文件。
+const MAX_HISTORY_FILE_BYTES: u64 = (MAX_HISTORY_BYTES as u64) * 6 + (MAX_HISTORY as u64) * 8;
 /// 合并写静默窗口：窗口内到达的提交合并为一次落盘。
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(25);
 
