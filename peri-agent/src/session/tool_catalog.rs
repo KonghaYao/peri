@@ -122,12 +122,10 @@ impl ToolFilterPolicy {
             if tool.mcp_server_name().is_some()
                 && (disabled.contains("McpMiddleware")
                     || tool.builtin_mcp_instance().is_some_and(|instance| {
-                        peri_acp_types::builtin_mcp::capability_of_switch(instance).is_ok_and(
-                            |capability| {
-                                disabled.contains(capability.name)
-                                    || disabled.contains(capability.legacy_policy_key)
-                            },
-                        )
+                        peri_acp_types::builtin_mcp::find(instance).is_some_and(|declared| {
+                            disabled.contains(declared.name)
+                                || disabled.contains(declared.legacy_policy_key)
+                        })
                     }))
             {
                 return false;

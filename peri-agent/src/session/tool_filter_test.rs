@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -93,4 +96,29 @@ fn test_catalog_applies_source_filter_on_initial_snapshot() {
         ToolFilterPolicy::canonical(Some(vec!["Read".into()]), vec![]),
     );
     assert!(!catalog.snapshot().tools.contains_key("Read"));
+}
+
+#[test]
+fn test_mcp_policy_maps_capability_and_legacy_key_to_same_closure() {
+    let builtin = SourceTool {
+        name: "Read",
+        server: Some("workspace"),
+        builtin: Some("workspace"),
+    };
+    let external = SourceTool {
+        name: "Read",
+        server: Some("external"),
+        builtin: None,
+    };
+    let base = ToolFilterPolicy::canonical(None, vec![]);
+    // 三种输入：v5 能力名、迁移期旧关闭键、未命中键。
+    for key in ["workspace", "WorkspaceMiddleware"] {
+        let policy =
+            ToolFilterPolicy::with_mcp_policy(HashSet::from([key.to_owned()]), base.clone());
+        assert!(!policy(&builtin), "{key} 必须关闭 builtin workspace");
+        assert!(policy(&external), "同名外部 server 不继承 builtin 关闭");
+    }
+    let open = ToolFilterPolicy::with_mcp_policy(HashSet::new(), base);
+    assert!(open(&builtin), "未命中关闭键时 builtin 工具保持可见");
+    assert!(open(&external));
 }
