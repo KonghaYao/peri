@@ -390,43 +390,106 @@ async fn old_generation_loss_before_attach_leaves_replacement_ready() {
     stop_server(replacement.server).await;
 }
 
-#[tokio::test]
-async fn overlapping_attach_and_old_loss_keep_replacement_ready() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attach_holds_lifecycle_until_replacement_is_published() {
     let proxy = UpstreamProxy::new("workspace");
     let first_upstream = connect_legacy_upstream(&proxy, MockUpstream::new()).await;
     let old_generation = first_upstream.generation;
     let replacement = handshake_legacy_upstream(&proxy, MockUpstream::new()).await;
 
-    let barrier = Arc::new(tokio::sync::Barrier::new(2));
-    let attach = tokio::spawn({
-        let proxy = proxy.clone();
-        let barrier = Arc::clone(&barrier);
-        let generation = replacement.generation;
-        let peer = replacement.peer();
-        async move {
-            barrier.wait().await;
-            proxy.attach(generation, peer)
-        }
-    });
-    let lost = tokio::spawn({
-        let proxy = proxy.clone();
-        let barrier = Arc::clone(&barrier);
-        async move {
-            barrier.wait().await;
-            proxy.mark_lost(old_generation, UpstreamLossReason::TransportClosed);
-        }
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    *proxy.inner.transition_hook.lock() = Some(TransitionHook {
+        entered: entered_tx,
+        release: std::sync::Mutex::new(release_rx),
     });
 
+    let attach = tokio::task::spawn_blocking({
+        let proxy = proxy.clone();
+        let generation = replacement.generation;
+        let peer = replacement.peer();
+        move || proxy.attach(generation, peer)
+    });
+    tokio::time::timeout(TEST_TIMEOUT, entered_rx.recv())
+        .await
+        .expect("attach enters the transition")
+        .expect("transition hook signalled");
+
+    let mut lost = tokio::task::spawn_blocking({
+        let proxy = proxy.clone();
+        move || proxy.mark_lost(old_generation, UpstreamLossReason::TransportClosed)
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut lost)
+            .await
+            .is_err(),
+        "旧代次 mark_lost 必须等待进行中的 attach 释放 lifecycle"
+    );
+
+    release_tx.send(()).expect("release attach");
     attach.await.expect("attach join").expect("attach succeeds");
     lost.await.expect("lost join");
-    assert!(proxy.is_ready(), "并发切换后新代次必须保持 Ready");
+    assert!(proxy.is_ready(), "旧代次丢失不得覆盖新代次的 Ready");
     assert!(
         proxy
             .inner
             .acquire_subscription(replacement.generation, URI)
             .is_ok(),
-        "并发切换后注册表必须属于新代次"
+        "注册表必须属于新代次"
     );
+
+    stop_server(first_upstream.server).await;
+    stop_server(replacement.server).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn old_generation_loss_holds_lifecycle_until_degraded_is_published() {
+    let proxy = UpstreamProxy::new("workspace");
+    let first_upstream = connect_legacy_upstream(&proxy, MockUpstream::new()).await;
+    let old_generation = first_upstream.generation;
+    let replacement = handshake_legacy_upstream(&proxy, MockUpstream::new()).await;
+
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    *proxy.inner.transition_hook.lock() = Some(TransitionHook {
+        entered: entered_tx,
+        release: std::sync::Mutex::new(release_rx),
+    });
+
+    let lost = tokio::task::spawn_blocking({
+        let proxy = proxy.clone();
+        move || proxy.mark_lost(old_generation, UpstreamLossReason::TransportClosed)
+    });
+    tokio::time::timeout(TEST_TIMEOUT, entered_rx.recv())
+        .await
+        .expect("mark_lost enters the transition")
+        .expect("transition hook signalled");
+
+    let mut attach = tokio::task::spawn_blocking({
+        let proxy = proxy.clone();
+        let generation = replacement.generation;
+        let peer = replacement.peer();
+        move || proxy.attach(generation, peer)
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut attach)
+            .await
+            .is_err(),
+        "attach 必须等待进行中的 mark_lost 释放 lifecycle"
+    );
+
+    release_tx.send(()).expect("release mark_lost");
+    lost.await.expect("lost join");
+    attach.await.expect("attach join").expect("attach succeeds");
+    assert!(proxy.is_ready(), "attach 完成后必须发布 Ready");
+    assert!(proxy
+        .inner
+        .acquire_subscription(old_generation, URI)
+        .is_err());
+    assert!(proxy
+        .inner
+        .acquire_subscription(replacement.generation, URI)
+        .is_ok());
 
     stop_server(first_upstream.server).await;
     stop_server(replacement.server).await;

@@ -84,6 +84,13 @@ impl SubscriptionGate {
     }
 }
 
+/// 测试钩子：在 lifecycle 临界区内暂停一次转换，供锁边界回归测试使用。
+#[cfg(test)]
+pub(super) struct TransitionHook {
+    pub(super) entered: tokio::sync::mpsc::UnboundedSender<()>,
+    pub(super) release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
 /// progress token 映射与早到通知缓冲。
 ///
 /// 上游 token 由 rmcp 在发送时生成，通知可能早于 `RequestHandle` 返回；
@@ -110,6 +117,8 @@ pub(super) struct ProxyInner {
     pub(super) progress: Mutex<ProgressRegistry>,
     subscriptions: Mutex<SubscriptionCounts>,
     subscription_gate: Mutex<SubscriptionGate>,
+    #[cfg(test)]
+    pub(super) transition_hook: Mutex<Option<TransitionHook>>,
     pub(super) request_timeout: Option<Duration>,
 }
 
@@ -125,8 +134,22 @@ impl ProxyInner {
             progress: Mutex::new(ProgressRegistry::default()),
             subscriptions: Mutex::new(SubscriptionCounts::default()),
             subscription_gate: Mutex::new(SubscriptionGate::default()),
+            #[cfg(test)]
+            transition_hook: Mutex::new(None),
             request_timeout: None,
         }
+    }
+
+    #[cfg(test)]
+    fn pause_transition(&self) {
+        let hook = self.transition_hook.lock().take();
+        let Some(hook) = hook else { return };
+        let _ = hook.entered.send(());
+        let _ = hook
+            .release
+            .lock()
+            .expect("transition hook release lock")
+            .recv();
     }
 
     pub(super) fn allocate_generation(&self) -> UpstreamGeneration {
@@ -157,6 +180,8 @@ impl ProxyInner {
         *self.progress.lock() = ProgressRegistry::default();
         self.subscriptions.lock().reset(Some(generation));
         self.subscription_gate.lock().reset(Some(generation));
+        #[cfg(test)]
+        self.pause_transition();
         self.health.send_replace(CapabilityHealth::Ready);
         drop(lifecycle);
         tracing::info!(
@@ -183,6 +208,8 @@ impl ProxyInner {
         *self.progress.lock() = ProgressRegistry::default();
         self.subscriptions.lock().reset(None);
         self.subscription_gate.lock().reset(None);
+        #[cfg(test)]
+        self.pause_transition();
         self.health
             .send_replace(CapabilityHealth::Degraded { reason });
         drop(lifecycle);

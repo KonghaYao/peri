@@ -41,6 +41,7 @@ use tokio::{
     sync::{mpsc, Notify},
 };
 
+use super::state::TransitionHook;
 use super::*;
 
 const IO_BUF: usize = 64 * 1024;
