@@ -102,7 +102,7 @@ impl UserInputMailbox {
             }
             state.revision += 1;
             for id in &delivered {
-                retain_terminal(&mut state, id);
+                retain_terminal(&mut state, id, None);
             }
             prune_terminal_records(&mut state);
             delivered
