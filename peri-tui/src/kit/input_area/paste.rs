@@ -11,6 +11,7 @@
 //! 剪贴板，读不到内容时给出终端原生粘贴引导，不静默吞掉按键（终端原生粘贴走
 //! bracketed paste，不受影响）。
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -180,50 +181,75 @@ fn paste_from_local_clipboard(state: &State<TextAreaState>) -> PasteOutcome {
     PasteOutcome::Pasted
 }
 
+/// 单次粘贴的字符上限——防止误粘超大日志冻结终端。
+/// 10_000 chars 足够覆盖正常长 paste（代码片段、命令输出）。
+pub(super) const MAX_PASTE_CHARS: usize = 10_000;
+
+/// 归一化 CRLF/CR 为 `\n`。
+///
+/// 部分终端（VSCode、iTerm2）在 bracketed paste 中使用 `\r` 作为换行分隔符；
+/// `render_multiline_with_cursor` 只按 `\n` 拆分行，未归一化的 `\r` 会导致换行在
+/// 渲染时不可见。
+fn normalize_paste_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// 按字符上限截断：超限返回 `(截断文本, 原始字符数)`，未超限借用原文。
+fn cap_paste_chars(text: &str) -> (Cow<'_, str>, Option<usize>) {
+    let total = text.chars().count();
+    if total > MAX_PASTE_CHARS {
+        (
+            Cow::Owned(text.chars().take(MAX_PASTE_CHARS).collect()),
+            Some(total),
+        )
+    } else {
+        (Cow::Borrowed(text), None)
+    }
+}
+
+/// 超限时明确告知用户截断位置，不静默丢内容。
+fn notify_paste_truncated() {
+    notify(
+        i18n::tr_args(
+            "paste-truncated",
+            &[("max".into(), FluentValue::from(MAX_PASTE_CHARS as i64))],
+        ),
+        2,
+    );
+}
+
 /// 终端 bracketed paste（`Event::Paste`）：归一化换行 + 上限截断后插入。
 pub(super) fn handle_bracketed_paste(state: State<TextAreaState>, paste_text: &str) -> EventResult {
-    // I22-A：paste 大小上限——防止用户误粘 10MB 日志冻结终端。
-    // 10_000 chars 足够覆盖正常长 paste（代码片段、命令输出）；
-    // 超出截断并 log warn 提示（用户可改用文件追加方式）。
-    const MAX_PASTE_CHARS: usize = 10_000;
-    // 部分终端（VSCode、iTerm2）在 Bracketed Paste 中使用 \r 作为
-    // 换行分隔符；render_multiline_with_cursor 只按 \n 拆分行，
-    // 未归一化的 \r 会导致换行在渲染时不可见。
-    let normalized = paste_text.replace("\r\n", "\n").replace('\r', "\n");
-    let char_count = normalized.chars().count();
-    if char_count > MAX_PASTE_CHARS {
+    let normalized = normalize_paste_newlines(paste_text);
+    let (bounded, original_chars) = cap_paste_chars(&normalized);
+    if let Some(original_chars) = original_chars {
         tracing::warn!(
-            original_chars = char_count,
+            original_chars,
             capped_at = MAX_PASTE_CHARS,
-            "InputArea: paste 截断——超出 10K char 上限"
+            "InputArea: paste 截断——超出字符上限"
         );
+        notify_paste_truncated();
     }
-    let truncated: String = normalized.chars().take(MAX_PASTE_CHARS).collect();
     exit_entry_focus_on_edit();
     let mut s = state.write();
-    s.insert_str(&truncated);
+    s.insert_str(&bounded);
     update_popup_prefix(&s);
     *PREDICTION.state().write() = PredictionState::default();
     EventResult::Consumed
 }
 
-/// 插入粘贴文本：超过 10K 字符截断并通知（Ctrl+V 文本分支语义）。
+/// 插入粘贴文本：超过字符上限截断并通知（Ctrl+V 文本分支语义）。
 fn insert_pasted_text(state: &State<TextAreaState>, text: &str) {
-    const MAX: usize = 10_000;
-    let total = text.chars().count();
-    if total > MAX {
-        notify(
-            i18n::tr_args(
-                "paste-truncated",
-                &[("max".into(), FluentValue::from(MAX as i64))],
-            ),
-            2,
+    let (bounded, original_chars) = cap_paste_chars(text);
+    if let Some(original_chars) = original_chars {
+        tracing::warn!(
+            original_chars,
+            capped_at = MAX_PASTE_CHARS,
+            "InputArea: clipboard paste 截断——超出字符上限"
         );
-        let truncated: String = text.chars().take(MAX).collect();
-        state.write().insert_str(&truncated);
-    } else {
-        state.write().insert_str(text);
+        notify_paste_truncated();
     }
+    state.write().insert_str(&bounded);
 }
 
 /// 上传字节上限（与 ImageMiddleware 的 20MB 校验同源）。

@@ -4,6 +4,10 @@ use super::HISTORY_DRAFT as DRAFT;
 use super::*;
 use serial_test::serial;
 use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 /// 用例级隔离 HOME：持有 TempDir 与恢复守卫。
 ///
@@ -235,5 +239,295 @@ fn test_save_history_does_not_block_and_persists_async() {
         "持久化文件应包含 marker {:?}，实际内容：{}",
         marker,
         content
+    );
+}
+
+fn history_file(home: &IsolatedHome) -> PathBuf {
+    home.path().join(".peri").join("input-history.json")
+}
+
+fn write_history_entries(home: &IsolatedHome, entries: &[String]) {
+    let path = history_file(home);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_string(entries).unwrap()).unwrap();
+}
+
+/// 等异步 writer 落盘到指定条目数，返回解析后的内容。
+fn wait_for_history_file(
+    home: &IsolatedHome,
+    expected_entries: usize,
+    timeout: Duration,
+) -> Vec<String> {
+    let path = history_file(home);
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(entries) = serde_json::from_str::<Vec<String>>(&content)
+            && entries.len() == expected_entries
+        {
+            return entries;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "history file 未在 {timeout:?} 内落盘到 {expected_entries} 条: {:?}",
+            path
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn history_bytes(history: &VecDeque<String>) -> usize {
+    history.iter().map(|entry| entry.len()).sum()
+}
+
+fn history_snapshot() -> VecDeque<String> {
+    INPUT_HISTORY.state().read().clone()
+}
+
+/// 报告场景：1000 条 × 10000 CJK。条数预算不再是唯一上限，总字节必须平台化。
+#[test]
+#[serial]
+fn test_history_bytes_are_bounded_by_budget() {
+    let _home = setup();
+    let payload = "界".repeat(10_000); // 每条 30_000 bytes
+    for i in 0..1000 {
+        push_history(&format!("{i:04}{payload}"));
+    }
+
+    let history = history_snapshot();
+    assert!(
+        history_bytes(&history) <= MAX_HISTORY_BYTES,
+        "总字节 {} 超过预算 {}",
+        history_bytes(&history),
+        MAX_HISTORY_BYTES
+    );
+    // 字节预算先于条数预算生效；每条约 30_004 bytes，应保留约 139 条。
+    assert!(
+        history.len() < MAX_HISTORY,
+        "字节预算未生效: {}",
+        history.len()
+    );
+    assert!(history.len() >= MAX_HISTORY_BYTES / 30_008 - 1);
+    assert!(history.back().unwrap().starts_with("0999"));
+    assert!(
+        !history.front().unwrap().starts_with("0000"),
+        "超限时必须淘汰最旧条目"
+    );
+}
+
+/// 单条超过 `MAX_ENTRY_BYTES` 不保留，但后续提交仍正常入栈。
+#[test]
+#[serial]
+fn test_oversized_entry_is_not_retained() {
+    let _home = setup();
+    push_history("small");
+    *INPUT_HISTORY_INDEX.state().write() = Some(0);
+
+    push_history(&"x".repeat(MAX_ENTRY_BYTES + 1));
+
+    let history = history_snapshot();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history.back().map(String::as_str), Some("small"));
+    assert!(INPUT_HISTORY_INDEX.state().read().is_none());
+}
+
+/// 浏览只返回选中项，且不改变栈内容（大条目场景下走同一路径）。
+#[test]
+#[serial]
+fn test_navigation_returns_selected_entry_without_mutating_stack() {
+    let _home = setup();
+    let older = format!("older-{}", "字".repeat(5_000));
+    let newer = format!("newer-{}", "字".repeat(5_000));
+    push_history(&older);
+    push_history(&newer);
+    let before = INPUT_HISTORY.state().read().clone();
+
+    assert_eq!(history_up(None).as_deref(), Some(newer.as_str()));
+    assert_eq!(history_up(None).as_deref(), Some(older.as_str()));
+    assert_eq!(history_up(None).as_deref(), Some(older.as_str()));
+    assert_eq!(history_down().as_deref(), Some(newer.as_str()));
+
+    let after = history_snapshot();
+    assert_eq!(before.len(), after.len());
+    assert!(before.iter().eq(after.iter()), "浏览不得改变历史栈");
+}
+
+/// 启动加载按条数预算裁剪遗留文件，保持「淘汰最旧」语义。
+#[test]
+#[serial]
+fn test_load_history_applies_count_budget() {
+    let home = setup();
+    let entries: Vec<String> = (0..1050).map(|i| format!("cmd-{i}")).collect();
+    write_history_entries(&home, &entries);
+
+    load_history();
+
+    let history = history_snapshot();
+    assert_eq!(history.len(), MAX_HISTORY);
+    assert_eq!(history.front().map(String::as_str), Some("cmd-50"));
+    assert_eq!(history.back().map(String::as_str), Some("cmd-1049"));
+}
+
+/// 启动加载按总字节预算裁剪（100 × 50 KiB ≈ 5 MiB，保留尾部 ≤ 4 MiB）。
+#[test]
+#[serial]
+fn test_load_history_applies_byte_budget() {
+    let home = setup();
+    let entries: Vec<String> = (0..100)
+        .map(|i| format!("{i:03}-{}", "x".repeat(50 * 1024)))
+        .collect();
+    write_history_entries(&home, &entries);
+
+    load_history();
+
+    let history = history_snapshot();
+    assert!(history_bytes(&history) <= MAX_HISTORY_BYTES);
+    assert!(history.len() < entries.len());
+    assert!(history.back().unwrap().starts_with("099-"));
+    assert!(!history.front().unwrap().starts_with("000-"));
+}
+
+/// 最坏 JSON 转义闭环：64 × 64 KiB U+0000（载荷恰满 4 MiB，每字节转义为 6 字节）
+/// 由 writer 落盘后，`load_history` 必须完整读回。旧 3 倍文件门会拒绝 ~24 MiB 输出。
+#[test]
+#[serial]
+fn test_worst_case_escaped_history_roundtrips_through_disk() {
+    let home = setup();
+    let entries: Vec<String> = (0..64)
+        .map(|i| format!("{i:02}{}", "\0".repeat(MAX_ENTRY_BYTES - 2)))
+        .collect();
+    for entry in &entries {
+        push_history(entry);
+    }
+
+    let saved = wait_for_history_file(&home, entries.len(), Duration::from_secs(10));
+    assert_eq!(saved, entries, "落盘内容应与入栈内容一致");
+    let history = history_snapshot();
+    assert_eq!(history.len(), entries.len());
+    assert_eq!(
+        history_bytes(&history),
+        MAX_HISTORY_BYTES,
+        "用例需占满载荷预算以触发最坏转义"
+    );
+
+    let file_bytes = std::fs::metadata(history_file(&home)).unwrap().len();
+    assert!(
+        file_bytes > MAX_HISTORY_BYTES as u64 * 5,
+        "U+0000 应按 6 字节扩展，实际文件仅 {file_bytes} 字节"
+    );
+    assert!(
+        file_bytes <= MAX_HISTORY_FILE_BYTES,
+        "文件 {file_bytes} 字节超过推导上限 {MAX_HISTORY_FILE_BYTES}"
+    );
+
+    // 模拟重启：清空内存后只从磁盘恢复。
+    *INPUT_HISTORY.state().write() = VecDeque::new();
+    load_history();
+
+    let restored = history_snapshot();
+    assert_eq!(
+        restored.len(),
+        entries.len(),
+        "load_history 必须读回 writer 写出的全部条目"
+    );
+    assert!(restored.iter().eq(entries.iter()), "恢复内容与落盘前不一致");
+}
+
+/// 遗留超大文件在 parse 前按文件大小拒绝，启动不为其分配整份 JSON。
+///
+/// fixture 是合法 JSON（短哨兵 + 尾部空白），去掉大小门后 sentinel 会被加载，
+/// 断言因此能真正区分「大小门生效」与「文件本身解析失败」。
+#[test]
+#[serial]
+fn test_load_history_ignores_file_over_size_budget() {
+    let home = setup();
+    let path = history_file(&home);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut fixture = String::from("[\"sentinel\"]");
+    let padding = MAX_HISTORY_FILE_BYTES as usize + 1 - fixture.len();
+    fixture.push_str(&" ".repeat(padding));
+    std::fs::write(&path, fixture).unwrap();
+
+    load_history();
+
+    assert!(INPUT_HISTORY.state().read().is_empty());
+}
+
+/// 文件内超限单条被过滤，其余条目保持相对顺序。
+#[test]
+#[serial]
+fn test_load_history_skips_oversized_entries() {
+    let home = setup();
+    let entries = vec![
+        "kept".to_string(),
+        "y".repeat(MAX_ENTRY_BYTES + 1),
+        "also-kept".to_string(),
+    ];
+    write_history_entries(&home, &entries);
+
+    load_history();
+
+    let history = history_snapshot();
+    let stored: Vec<&str> = history.iter().map(String::as_str).collect();
+    assert_eq!(stored, vec!["kept", "also-kept"]);
+}
+
+/// 合并写：200 次连续提交在静默窗口内只触发受控次数的落盘。
+#[test]
+fn test_writer_coalesces_burst_into_bounded_persists() {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let (persisted_tx, persisted_rx) = std::sync::mpsc::channel();
+    let writes = Arc::new(AtomicUsize::new(0));
+    let worker_writes = Arc::clone(&writes);
+    let worker = std::thread::spawn(move || {
+        run_writer(rx, move |_path| {
+            worker_writes.fetch_add(1, Ordering::SeqCst);
+            let _ = persisted_tx.send(());
+        });
+    });
+
+    for i in 0..200 {
+        // 与生产路径一致：通道满时丢弃本次请求，worker 落盘时读取最新内容。
+        let _ = tx.try_send(PathBuf::from(format!("/tmp/input-history-{i}.json")));
+    }
+    persisted_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker 应完成一次落盘");
+    // 再等一个静默窗口：若仍有迟到批次，落盘计数会继续增长。
+    std::thread::sleep(SAVE_DEBOUNCE * 2);
+
+    let write_count = writes.load(Ordering::SeqCst);
+    assert!(
+        write_count <= 3,
+        "连续 200 次提交应合并为受控次数落盘，实际 {write_count} 次"
+    );
+
+    drop(tx);
+    worker.join().unwrap();
+}
+
+/// 兜底：序列化输出超过文件门限时拒绝写入并保留旧文件。
+///
+/// 正常预算不会产生该状态；用例直接调用落盘函数，确保不变量被破坏时
+/// 不会留下 `load_history` 整份忽略的文件，也不静默覆盖旧历史。
+#[test]
+#[serial]
+fn test_persist_history_refuses_output_over_file_cap() {
+    let home = setup();
+    let path = history_file(&home);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "[\"previous\"]").unwrap();
+
+    let oversized = format!("\"{}\"", "a".repeat(MAX_HISTORY_FILE_BYTES as usize + 1));
+    persist_history(&path, &oversized);
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "[\"previous\"]",
+        "超限保存必须被拒绝，旧文件保持可加载"
+    );
+    assert!(
+        !path.with_extension("tmp").exists(),
+        "拒绝时不得残留临时文件"
     );
 }
