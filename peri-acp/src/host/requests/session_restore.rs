@@ -32,17 +32,17 @@ mod fork_shared;
 mod load_shared;
 pub(crate) use fork_shared::handle_fork_shared;
 #[cfg(test)]
-pub(crate) use load_shared::{
-    cleanup_unpublished_restore, publication_test_hook, rollback_restore_publication,
-    RestorePublication,
-};
+pub(crate) use load_shared::{cleanup_unpublished_restore, publication_test_hook};
 pub(crate) use load_shared::{handle_load_shared, handle_resume_shared};
+pub(crate) use load_shared::{rollback_restore_publication, RestorePublication};
 
 /// 冷 child 恢复的会话装配：与 `session/load` 同一条路径（含可用性、绑定、frozen
 /// 与运行登记），但不回放历史、不发会话响应。
 ///
-/// 调用方必须已经确认该 thread 仍为 `working` 并持有它的父 thread；装配只建立
-/// 运行实例，提醒接纳与启动由恢复协调器决定。运行期绑定（`bind_session_tasks`）
+/// 调用方必须已经确认该 thread 仍为 `working` 且投递目标有效，并持有它的父 thread；
+/// 装配只建立运行实例，提醒接纳与启动由恢复协调器决定。返回本次冷装配发布的身份：
+/// `None` 表示会话本就 live（未新建实例），最终拒绝时不得回收他人实例；`Some` 可用
+/// [`rollback_restore_publication`] 精确回收。运行期绑定（`bind_session_tasks`）
 /// 与在线 endpoint 注册是传输层调用方的责任：经 server loop 的恢复由
 /// `host/recovery/wiring::bind_recovered_sessions` 在响应前补齐，不经 server loop
 /// 的入口必须自行调用同一 helper。
@@ -50,11 +50,11 @@ pub(crate) async fn assemble_for_recovery(
     cfg: &AcpServerConfig,
     sessions: &crate::host::SharedSessions,
     thread_id: &str,
-) -> Result<(), AcpError> {
+) -> Result<Option<RestorePublication>, AcpError> {
     let params = serde_json::json!({ "sessionId": thread_id });
     load_shared::prepare_shared(&params, cfg, sessions)
         .await
-        .map(|_| ())
+        .map(|prepared| prepared.publication)
 }
 
 async fn reject_closing_session(params: &Value, cfg: &AcpServerConfig) -> Result<(), AcpError> {

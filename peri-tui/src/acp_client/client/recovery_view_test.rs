@@ -73,6 +73,54 @@ fn failed_blocked_view_sets_notification_with_reason() {
     );
 }
 
+fn partial_view(count: usize) -> RecoveryView {
+    RecoveryView {
+        status: RecoveryViewStatus::Partial,
+        root_thread_id: Some("session-a".to_owned()),
+        entered_thread_id: "session-a".to_owned(),
+        recovered: Vec::new(),
+        reused: Vec::new(),
+        skipped: Vec::new(),
+        failures: (0..count)
+            .map(|index| peri_acp_types::recovery::RecoveryFailureView {
+                thread_id: format!("child-{index}"),
+                kind: peri_acp_types::recovery::RecoveryErrorKind::Unavailable,
+                detail: "child completion target is unavailable; stop and explicitly resume the child to establish a delivery route".to_owned(),
+                execution_blocked: false,
+            })
+            .collect(),
+        error: None,
+        execution_blocked: false,
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn partial_notice_asks_for_explicit_resume_and_counts_child_threads() {
+    let _notification = NotificationGuard::capture();
+    crate::i18n::init(Some("en"));
+    present("session-a", &partial_view(121));
+    let state = NOTIFICATION.state();
+    let notice = state.read();
+    let message = notice.as_ref().expect("部分恢复必须有通知").message.clone();
+    drop(notice);
+    assert!(message.contains("121"), "{message}");
+    assert!(message.contains("explicit resume"), "{message}");
+    assert!(!message.contains("could not be recovered"), "{message}");
+
+    crate::i18n::init(Some("zh-CN"));
+    present("session-a", &partial_view(2));
+    let state = NOTIFICATION.state();
+    let notice = state.read();
+    let message = notice.as_ref().expect("部分恢复必须有通知").message.clone();
+    drop(notice);
+    assert!(
+        message.contains("2 个相关子线程需要显式 resume（缺少投递目标）"),
+        "{message}"
+    );
+    crate::i18n::init(None);
+}
+
 #[test]
 #[serial_test::serial]
 fn ok_view_produces_no_notification() {
