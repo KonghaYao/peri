@@ -27,10 +27,15 @@ const MAX_HISTORY: usize = 1000;
 const MAX_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 /// 单条历史字节上限；更大的输入仍会提交，只是不进入回放历史。
 const MAX_ENTRY_BYTES: usize = 64 * 1024;
+/// serde_json 的最坏转义倍率：控制字符（含 U+0000）写作 `\u00XX`，1 字节变 6 字节。
+const JSON_WORST_CASE_ESCAPE: u64 = 6;
+/// 顶层数组的容器开销上界：`[`/`]`，每条两个引号，条目间至多一个逗号。
+const JSON_ARRAY_OVERHEAD: u64 = 2 + (MAX_HISTORY as u64) * 3;
 /// 启动加载文件的字节上限——超过则整份忽略，避免对遗留超大文件全量 parse。
-/// 按 writer 最坏输出推导：serde_json 把控制字符编码为 `\u00XX`（每字节 6 字节），
-/// 另计每条的引号与分隔符；保证 `load_history` 一定能读回自己写出的文件。
-const MAX_HISTORY_FILE_BYTES: u64 = (MAX_HISTORY_BYTES as u64) * 6 + (MAX_HISTORY as u64) * 8;
+/// 由 writer 最坏输出推导（载荷 × 6 + 容器开销），保证 `load_history` 一定能
+/// 读回 writer 写出的文件；`persist_history` 以同一门限拒绝超限输出兜底。
+const MAX_HISTORY_FILE_BYTES: u64 =
+    (MAX_HISTORY_BYTES as u64) * JSON_WORST_CASE_ESCAPE + JSON_ARRAY_OVERHEAD;
 /// 合并写静默窗口：窗口内到达的提交合并为一次落盘。
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(25);
 
@@ -254,7 +259,19 @@ fn persist_current_history(path: &Path) {
 }
 
 /// 实际执行磁盘持久化——错误以 `tracing::warn!` 记录，不向上传播。
+///
+/// 序列化输出超过加载门限时拒绝写入（保留旧文件）：否则会留下 `load_history`
+/// 整份忽略的文件，形成「保存成功但重启丢失」的中间态。
 fn persist_history(path: &Path, json: &str) {
+    if json.len() as u64 > MAX_HISTORY_FILE_BYTES {
+        tracing::error!(
+            ?path,
+            bytes = json.len(),
+            limit = MAX_HISTORY_FILE_BYTES,
+            "input_history: serialized history exceeds file budget, refusing to write"
+        );
+        return;
+    }
     if let Some(parent) = path.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
     {

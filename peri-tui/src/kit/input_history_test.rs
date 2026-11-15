@@ -252,6 +252,30 @@ fn write_history_entries(home: &IsolatedHome, entries: &[String]) {
     std::fs::write(&path, serde_json::to_string(entries).unwrap()).unwrap();
 }
 
+/// 等异步 writer 落盘到指定条目数，返回解析后的内容。
+fn wait_for_history_file(
+    home: &IsolatedHome,
+    expected_entries: usize,
+    timeout: Duration,
+) -> Vec<String> {
+    let path = history_file(home);
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(entries) = serde_json::from_str::<Vec<String>>(&content)
+            && entries.len() == expected_entries
+        {
+            return entries;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "history file 未在 {timeout:?} 内落盘到 {expected_entries} 条: {:?}",
+            path
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn history_bytes(history: &VecDeque<String>) -> usize {
     history.iter().map(|entry| entry.len()).sum()
 }
@@ -363,6 +387,52 @@ fn test_load_history_applies_byte_budget() {
     assert!(!history.front().unwrap().starts_with("000-"));
 }
 
+/// 最坏 JSON 转义闭环：64 × 64 KiB U+0000（载荷恰满 4 MiB，每字节转义为 6 字节）
+/// 由 writer 落盘后，`load_history` 必须完整读回。旧 3 倍文件门会拒绝 ~24 MiB 输出。
+#[test]
+#[serial]
+fn test_worst_case_escaped_history_roundtrips_through_disk() {
+    let home = setup();
+    let entries: Vec<String> = (0..64)
+        .map(|i| format!("{i:02}{}", "\0".repeat(MAX_ENTRY_BYTES - 2)))
+        .collect();
+    for entry in &entries {
+        push_history(entry);
+    }
+
+    let saved = wait_for_history_file(&home, entries.len(), Duration::from_secs(10));
+    assert_eq!(saved, entries, "落盘内容应与入栈内容一致");
+    let history = history_snapshot();
+    assert_eq!(history.len(), entries.len());
+    assert_eq!(
+        history_bytes(&history),
+        MAX_HISTORY_BYTES,
+        "用例需占满载荷预算以触发最坏转义"
+    );
+
+    let file_bytes = std::fs::metadata(history_file(&home)).unwrap().len();
+    assert!(
+        file_bytes > MAX_HISTORY_BYTES as u64 * 5,
+        "U+0000 应按 6 字节扩展，实际文件仅 {file_bytes} 字节"
+    );
+    assert!(
+        file_bytes <= MAX_HISTORY_FILE_BYTES,
+        "文件 {file_bytes} 字节超过推导上限 {MAX_HISTORY_FILE_BYTES}"
+    );
+
+    // 模拟重启：清空内存后只从磁盘恢复。
+    *INPUT_HISTORY.state().write() = VecDeque::new();
+    load_history();
+
+    let restored = history_snapshot();
+    assert_eq!(
+        restored.len(),
+        entries.len(),
+        "load_history 必须读回 writer 写出的全部条目"
+    );
+    assert!(restored.iter().eq(entries.iter()), "恢复内容与落盘前不一致");
+}
+
 /// 遗留超大文件在 parse 前按文件大小拒绝，启动不为其分配整份 JSON。
 ///
 /// fixture 是合法 JSON（短哨兵 + 尾部空白），去掉大小门后 sentinel 会被加载，
@@ -434,4 +504,30 @@ fn test_writer_coalesces_burst_into_bounded_persists() {
 
     drop(tx);
     worker.join().unwrap();
+}
+
+/// 兜底：序列化输出超过文件门限时拒绝写入并保留旧文件。
+///
+/// 正常预算不会产生该状态；用例直接调用落盘函数，确保不变量被破坏时
+/// 不会留下 `load_history` 整份忽略的文件，也不静默覆盖旧历史。
+#[test]
+#[serial]
+fn test_persist_history_refuses_output_over_file_cap() {
+    let home = setup();
+    let path = history_file(&home);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "[\"previous\"]").unwrap();
+
+    let oversized = format!("\"{}\"", "a".repeat(MAX_HISTORY_FILE_BYTES as usize + 1));
+    persist_history(&path, &oversized);
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "[\"previous\"]",
+        "超限保存必须被拒绝，旧文件保持可加载"
+    );
+    assert!(
+        !path.with_extension("tmp").exists(),
+        "拒绝时不得残留临时文件"
+    );
 }
