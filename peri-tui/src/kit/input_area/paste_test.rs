@@ -1,6 +1,34 @@
 use super::*;
 use crate::kit::atoms::PENDING_ATTACHMENTS;
 
+/// 粘贴上限按字符计：恰好在上限内原样借用，超 1 字符才截断并回报原始字符数。
+#[test]
+fn cap_paste_chars_truncates_at_char_boundary() {
+    let at_limit = "a".repeat(MAX_PASTE_CHARS);
+    let (bounded, original) = cap_paste_chars(&at_limit);
+    assert!(matches!(bounded, std::borrow::Cow::Borrowed(_)));
+    assert_eq!(original, None);
+    assert_eq!(bounded.as_ref(), at_limit.as_str());
+
+    let over = format!("{}b", "a".repeat(MAX_PASTE_CHARS));
+    let (bounded, original) = cap_paste_chars(&over);
+    assert_eq!(original, Some(MAX_PASTE_CHARS + 1));
+    assert_eq!(bounded.chars().count(), MAX_PASTE_CHARS);
+    assert_eq!(bounded, "a".repeat(MAX_PASTE_CHARS));
+
+    // CJK 按字符而非字节截断：每条 3 字节仍只保留 10_000 字符。
+    let cjk = "界".repeat(MAX_PASTE_CHARS + 5);
+    let (bounded, original) = cap_paste_chars(&cjk);
+    assert_eq!(original, Some(MAX_PASTE_CHARS + 5));
+    assert_eq!(bounded.chars().count(), MAX_PASTE_CHARS);
+}
+
+#[test]
+fn normalize_paste_newlines_handles_crlf_and_cr() {
+    assert_eq!(normalize_paste_newlines("a\r\nb\rc"), "a\nb\nc");
+    assert_eq!(normalize_paste_newlines("a\r\n\r\nb"), "a\n\nb");
+}
+
 #[test]
 fn paste_gate_rejects_overlap_and_releases_on_return() {
     let gate = PasteGate::default();
