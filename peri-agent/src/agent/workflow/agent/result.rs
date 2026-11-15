@@ -5,6 +5,7 @@ use std::{sync::Arc, time::Instant};
 use peri_acp_types::{
     command::PromptStopReason,
     session::{ExecutionFailure, TurnTelemetryOutcome},
+    thread::AgentStatus,
     workflow::{AgentRunParams, AgentRunResult, Usage},
 };
 use tracing::{debug, warn};
@@ -32,6 +33,21 @@ impl ProjectedResult {
             },
             _ => TurnTelemetryOutcome::Completed,
         }
+    }
+}
+
+/// 本次 run 结果对应的 child 终态。
+///
+/// 与 sync/background child 的生命周期约定一致（`docs/design/session-durability.md`
+/// §5.3）：正常完成写 `Done`，用户取消写 `Cancelled`，其余中断与失败写 `Error`；
+/// `work_state` 由 [`peri_acp_types::thread::WorkState::after_agent_terminal`] 派生。
+pub(super) fn terminal_status(result: &AgentRunResult) -> AgentStatus {
+    match result {
+        AgentRunResult::Ok { .. } | AgentRunResult::Skipped => AgentStatus::Done,
+        AgentRunResult::Dead { reason, .. } if reason.as_deref() == Some("interrupted") => {
+            AgentStatus::Cancelled
+        }
+        AgentRunResult::Dead { .. } => AgentStatus::Error,
     }
 }
 

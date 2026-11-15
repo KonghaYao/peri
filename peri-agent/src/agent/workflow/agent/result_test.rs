@@ -266,3 +266,43 @@ fn run_projection_keeps_forwarder_failure_priority_and_cancel_terminal() {
     ));
     assert_eq!(completed.result.token_count(), Some(0));
 }
+
+/// child 终态与 sync/background 生命周期约定一致：完成 Done、取消 Cancelled、
+/// 其余失败 Error；`interrupted` 是唯一取消投影。
+#[test]
+fn workflow_terminal_status_follows_child_lifecycle_mapping() {
+    let done = AgentRunResult::Ok {
+        output: json!("ok"),
+        usage: Usage { output_tokens: 0 },
+        model: None,
+        tool_count: None,
+        token_count: None,
+        phase: None,
+        duration_ms: None,
+    };
+    assert_eq!(terminal_status(&done), AgentStatus::Done);
+    assert_eq!(terminal_status(&AgentRunResult::Skipped), AgentStatus::Done);
+    assert_eq!(
+        terminal_status(&AgentRunResult::Dead {
+            reason: Some("interrupted".into()),
+            detail: None,
+        }),
+        AgentStatus::Cancelled
+    );
+    for reason in [
+        None,
+        Some("runagent-threw".to_owned()),
+        Some("settlement-due".to_owned()),
+        Some("event-forwarder-failed".to_owned()),
+        Some("initial-prompt-enqueue-failed".to_owned()),
+        Some("execution-blocked".to_owned()),
+    ] {
+        assert_eq!(
+            terminal_status(&AgentRunResult::Dead {
+                reason,
+                detail: None
+            }),
+            AgentStatus::Error
+        );
+    }
+}

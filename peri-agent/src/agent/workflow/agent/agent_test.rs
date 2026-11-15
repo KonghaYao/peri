@@ -546,4 +546,19 @@ async fn workflow_initial_prompt_enqueue_failure_is_a_dead_task() {
         session.config().cancel_token.is_cancelled(),
         "失败分支必须关闭会话作用域"
     );
+    let child = resources
+        .threads()
+        .into_iter()
+        .find(|meta| meta.parent_thread_id.as_deref() == Some("workflow-parent") && meta.hidden)
+        .expect("入队失败时 child 已落库");
+    assert_eq!(
+        child.agent_status,
+        peri_acp_types::thread::AgentStatus::Error,
+        "入队失败必须写失败终态"
+    );
+    assert_eq!(
+        child.work_state,
+        peri_acp_types::thread::WorkState::Idle,
+        "入队失败后不得留下续跑意图"
+    );
 }

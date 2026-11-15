@@ -928,3 +928,60 @@ async fn closed_child_is_not_recovered() {
     recovery.launch(&report).await;
     assert!(!harness._mock.matched(), "已关闭的 child 不得调用模型");
 }
+
+/// workflow 形状 child（hidden、父链直连根）在 run 结算后既不是恢复候选，
+/// 也不会在进入父会话时产生准备失败；与 executor 的结算回归共同锁定「不再重复
+/// 唤醒已完成 workflow child」。
+#[tokio::test]
+async fn settled_workflow_child_is_not_a_candidate_or_failure() {
+    let mut harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "workflow-child", &root).await;
+    harness.set_working("workflow-child").await;
+    harness
+        .cfg
+        .session_resources
+        .settle_terminal_without_result(
+            &ThreadId::from("workflow-child".to_owned()),
+            AgentStatus::Done,
+            WorkState::Idle,
+        )
+        .await
+        .unwrap();
+
+    let entered = ThreadId::from(root.clone());
+    let scope = harness
+        .cfg
+        .session_resources
+        .load_recovery_scope(&entered)
+        .await
+        .unwrap();
+    assert!(
+        scope.candidates.is_empty(),
+        "settled workflow child must not be a candidate: {:?}",
+        scope.candidates
+    );
+    assert!(
+        harness
+            .cfg
+            .session_resources
+            .load_interrupted_threads(&entered)
+            .await
+            .unwrap()
+            .is_empty(),
+        "settled workflow child must not need Active convergence"
+    );
+
+    harness.spawn_continuation_scheduler();
+    let report = harness.recovery().enter(&entered).await.unwrap();
+    assert!(
+        report.recovered.is_empty(),
+        "settled workflow child must not be recovered: {:?}",
+        report.recovered
+    );
+    assert!(
+        report.failures.is_empty(),
+        "settled workflow child must not produce recovery failures: {:?}",
+        report.failures
+    );
+}

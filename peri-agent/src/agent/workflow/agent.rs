@@ -34,6 +34,7 @@ use peri_acp_types::{
     interaction::UserInteractionBroker,
     messages::BaseMessage,
     session::{MessageKind, MessageSource, QueuedMessage},
+    thread::AgentStatus,
     workflow::{AgentExecutor, AgentRunParams, AgentRunResult, ProgressEvent},
 };
 use tokio_util::sync::CancellationToken;
@@ -429,6 +430,9 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 };
             }
         };
+        // child 已落库：从这一刻起所有退出路径都必须结算工作意图，否则父会话进入时
+        // 会把它当作待续跑候选。显式路径 await `settle`，future 被 drop 时由 Drop 兜底。
+        let mut child_settlement = execution.settlement();
         // bridge 与 StageContext 共享同一条链：请求时 provider 读取当前贡献。
         let chain = Arc::new(chain);
         let llm = workflow_model_bridge(
@@ -545,6 +549,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
             drop(context);
             let _ = await_workflow_forwarder(event_bus, forwarder_handle).await;
             close_session_scope(&session, &session_id).await;
+            child_settlement.settle(AgentStatus::Error).await;
             return initial_prompt_enqueue_failure(detail);
         }
 
@@ -557,6 +562,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 drop(context);
                 let _ = await_workflow_forwarder(event_bus, forwarder_handle).await;
                 close_session_scope(&session, &session_id).await;
+                child_settlement.settle(AgentStatus::Error).await;
                 return AgentRunResult::Dead {
                     reason: Some("execution-blocked".into()),
                     detail: Some(detail),
@@ -596,6 +602,12 @@ impl AgentExecutor for WorkflowAgentExecutor {
         drop(execution_guard);
 
         close_session_scope(&session, &session_id).await;
+
+        // 终态按 run 结果投影：正常完成 Done、显式取消 Cancelled、其余失败 Error。
+        // 结算失败只记录（child 仍可能停在 working），不把已完成 run 改写成失败。
+        child_settlement
+            .settle(result::terminal_status(&projected.result))
+            .await;
 
         projected.result
     }
@@ -732,3 +744,7 @@ fn select_workflow_system_prompt(
 #[cfg(test)]
 #[path = "agent/agent_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "agent/settlement_test.rs"]
+mod settlement_tests;
