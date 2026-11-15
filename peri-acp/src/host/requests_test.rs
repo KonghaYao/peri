@@ -50,6 +50,30 @@ mod recovery_tests;
 #[path = "requests_mcp_control_test.rs"]
 mod mcp_control_tests;
 
+/// `bg-task-snapshot` 手工投影必须保留 child 身份：TUI 依赖它与
+/// `SubagentStarted.instance_id` 精确配对，快照恢复路径不能丢字段。
+#[test]
+fn task_snapshot_value_preserves_child_thread_identity() {
+    let snapshot = peri_acp_types::tasks::TaskSnapshot {
+        revision: 7,
+        tasks: vec![peri_acp_types::tasks::TaskRecord {
+            task_id: "bg-1".into(),
+            kind: BgTaskKind::Agent,
+            summary: "worker".into(),
+            started_at: "2026-01-01T00:00:00Z".into(),
+            status: "running".into(),
+            duration_ms: 0,
+            output_preview: None,
+            initiator_session_id: None,
+            child_thread_id: Some("child-1".into()),
+        }],
+    };
+    let value = task_snapshot_value(snapshot);
+    assert_eq!(value["revision"], 7);
+    assert_eq!(value["tasks"][0]["task_id"], "bg-1");
+    assert_eq!(value["tasks"][0]["child_thread_id"], "child-1");
+}
+
 // ── Mock AcpTransport ─────────────────────────────────────────────────────────
 
 /// 记录全部通知的 mock transport（`Mutex<Vec<(method, payload)>>`，Slice 6

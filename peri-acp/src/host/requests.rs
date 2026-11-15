@@ -358,6 +358,7 @@ pub(super) fn task_snapshot_value(snapshot: peri_acp_types::tasks::TaskSnapshot)
                 "task_id":task.task_id, "kind":task.kind, "summary":task.summary,
                 "started_at":task.started_at, "status":task.status,
                 "duration_ms":task.duration_ms, "output_preview":task.output_preview,
+                "child_thread_id":task.child_thread_id,
             })).collect::<Vec<_>>(),
     })
 }

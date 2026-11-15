@@ -1244,13 +1244,23 @@ fn test_resumed_background_occurrence_uses_current_pending_owner() {
         );
     }
 
-    // 新任务行到达：占位 owner 精确移交。
+    // 新任务行到达：占位 owner 精确移交，正文随行落到 task-new。
     dispatch_and_notify(&mut state, &task_started("task-new"));
+    crate::kit::bg_task_live::publish_pending_streams();
     assert!(!BG_LIVE_DETAIL.state().read().contains_key("child-x"));
     assert_eq!(
         BG_LIVE_DETAIL.state().read()["task-new"].status,
         crate::kit::atoms::BgLiveStatus::Running
     );
+    let new_text: String = BG_LIVE_DETAIL.state().read()["task-new"]
+        .nested_units
+        .iter()
+        .filter_map(|unit| match unit {
+            TuiRenderUnit::TuiAssistantBubble(bubble) => Some(bubble.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(new_text, "new-body", "移交后 task-new 必须持有新一轮正文");
     assert_eq!(
         BG_DISPLAY
             .state()
