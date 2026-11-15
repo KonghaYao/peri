@@ -18,7 +18,8 @@
 //!   归一，不是执行别名；`resolve_model_tool` 对旧 deferred 名字显式报错。
 //!
 //! 唯一性、模型面命名规则、旧键映射、资源归属、能力依赖和用户 server 保留名由
-//! `validate_registry` / `validate_user_server_name` 在加载期校验（typed error）。
+//! `validate_registry` / `validate_user_server_name` 以 typed error 判定；冻结表由
+//! 契约测试（`v5_test`）在 CI 覆盖，生产装配当前不重复调用。
 //! 校验实现位于 [`validation`] 子模块，名字归一与执行路由位于 [`naming`] 子模块；
 //! 对外 API 仍经 `v5::*` re-export，调用点不需要感知模块拆分。
 
@@ -114,7 +115,8 @@ pub struct CapabilityResourceSurface {
     pub uri_prefixes: &'static [&'static str],
     /// 静态资源 URI。
     pub static_resources: &'static [&'static str],
-    /// 资源模板 URI（含 `{...}` 占位符）。
+    /// 资源模板 URI（含 `{...}` 占位符）：与实例 `list_resource_templates` 的
+    /// wire 值逐字一致，由跨 crate 契约测试对齐。
     pub resource_templates: &'static [&'static str],
     /// 宿主默认订阅（`subscriptions.resources`）；空 = 无默认订阅。
     pub default_subscriptions: &'static [&'static str],
@@ -271,10 +273,21 @@ pub const BUILTIN_V5_CAPABILITIES: &[BuiltinCapability] = &[
                 "peri-instruction://workspace/index",
             ],
             resource_templates: &[
-                "skill://{scope}/{name}/{path}",
-                "skill://plugin/{plugin}/{name}/{path}",
-                "agent://{scope}/{name}/agent.md",
-                "peri-meta://workspace/{section_id}",
+                "skill://user/{name}/SKILL.md",
+                "skill://user/{name}/{+path}",
+                "skill://global/{name}/SKILL.md",
+                "skill://global/{name}/{+path}",
+                "skill://project/{name}/SKILL.md",
+                "skill://project/{name}/{+path}",
+                "skill://plugin/{plugin_name}/{name}/SKILL.md",
+                "skill://plugin/{plugin_name}/{name}/{+path}",
+                "skill://builtin/{name}/SKILL.md",
+                "skill://builtin/{name}/{+path}",
+                "agent://user/{name}/agent.md",
+                "agent://global/{name}/agent.md",
+                "agent://project/{name}/agent.md",
+                "agent://builtin/{name}/agent.md",
+                "agent://plugin/{plugin_name}/{name}/agent.md",
             ],
             default_subscriptions: &["workspace://git/ref"],
         },

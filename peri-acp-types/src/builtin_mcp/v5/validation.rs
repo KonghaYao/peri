@@ -1,7 +1,7 @@
-//! v5 声明表的加载期校验（typed error）。
+//! v5 声明表的校验（typed error）。
 //!
-//! 校验只读声明数据，不改变默认装配；生产加载期调用 [`validate_registry`]，
-//! 测试用 [`validate_capabilities`] 对合成表覆盖失败分支。
+//! 校验只读声明数据，不改变默认装配；冻结表由契约测试经 [`validate_registry`]
+//! 在 CI 覆盖，生产装配当前不重复调用。
 
 use std::collections::{HashMap, HashSet};
 
@@ -86,6 +86,13 @@ pub enum CapabilityRegistryError {
         first: String,
         second: String,
     },
+    /// 旧工具名必须全局唯一：历史 transcript / allowlist 只按该名字匹配。
+    #[error("duplicate legacy tool name `{legacy_name}` in capabilities `{first}` and `{second}`")]
+    DuplicateLegacyToolName {
+        legacy_name: String,
+        first: String,
+        second: String,
+    },
     /// direct / deferred 的模型面命名规则不一致。
     #[error(
         "capability `{capability}` tool `{original_name}` has model name `{model_name}`; expected `{expected}`"
@@ -147,8 +154,8 @@ pub fn validate_registry() -> Result<(), CapabilityRegistryError> {
 
 /// 校验任意能力表：重复 / 冲突 / 命名规则 / 资源归属 / 依赖 / 保留命名空间。
 ///
-/// 独立成泛型入口是为了让测试能用合成表覆盖失败分支；生产加载期调用
-/// [`validate_registry`]。
+/// 独立成泛型入口是为了让测试能用合成表覆盖失败分支；冻结表由
+/// [`validate_registry`] 在契约测试中校验。
 pub fn validate_capabilities(
     capabilities: &[BuiltinCapability],
 ) -> Result<(), CapabilityRegistryError> {
@@ -168,8 +175,10 @@ pub fn validate_capabilities(
     let mut legacy_policy_keys: HashMap<&str, &str> = HashMap::new();
     let mut original_names: HashMap<&str, &str> = HashMap::new();
     let mut model_names: HashMap<&str, &str> = HashMap::new();
+    let mut legacy_names: HashMap<&str, &str> = HashMap::new();
     let mut prefix_owners: HashMap<&str, &str> = HashMap::new();
     let mut resource_owners: HashMap<&str, &str> = HashMap::new();
+    let mut subscription_owners: HashMap<&str, &str> = HashMap::new();
     let mut reserved_names = Vec::new();
 
     for capability in capabilities {
@@ -275,6 +284,33 @@ pub fn validate_capabilities(
                 });
             }
         }
+        // 默认订阅可以与静态资源重叠（宿主订阅自己声明的资源），但不得逃出
+        // 能力前缀，也不得在能力表内重复声明。
+        for uri in capability.resources.default_subscriptions {
+            if uri.is_empty() {
+                return Err(CapabilityRegistryError::EmptyResourceUri {
+                    capability: capability.name.to_owned(),
+                });
+            }
+            if !capability
+                .resources
+                .uri_prefixes
+                .iter()
+                .any(|prefix| uri.starts_with(prefix))
+            {
+                return Err(CapabilityRegistryError::ResourceNotOwned {
+                    capability: capability.name.to_owned(),
+                    uri: (*uri).to_owned(),
+                });
+            }
+            if let Some(first) = subscription_owners.insert(*uri, capability.name) {
+                return Err(CapabilityRegistryError::DuplicateResourceUri {
+                    uri: (*uri).to_owned(),
+                    first: first.to_owned(),
+                    second: capability.name.to_owned(),
+                });
+            }
+        }
 
         if capability.tools.is_empty() {
             return Err(CapabilityRegistryError::EmptyCapabilityTools {
@@ -310,6 +346,14 @@ pub fn validate_capabilities(
                     expected: expected_legacy,
                 });
             }
+            if let Some(first) = legacy_names.get(tool.legacy_name) {
+                return Err(CapabilityRegistryError::DuplicateLegacyToolName {
+                    legacy_name: tool.legacy_name.to_owned(),
+                    first: (*first).to_owned(),
+                    second: capability.name.to_owned(),
+                });
+            }
+            legacy_names.insert(tool.legacy_name, capability.name);
             if let Some(first) = original_names.get(tool.original_name) {
                 return Err(CapabilityRegistryError::DuplicateOriginalToolName {
                     original_name: tool.original_name.to_owned(),

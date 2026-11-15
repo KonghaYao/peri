@@ -1,4 +1,4 @@
-//! `builtin_mcp::v5` 声明、映射与加载期校验的契约测试。
+//! `builtin_mcp::v5` 声明、映射与校验的契约测试。
 //!
 //! 边界：只断言声明数据与纯查表结果；默认注入、router 与代理行为不在本文件
 //! 覆盖范围（它们仍走 v4 路径）。
@@ -953,4 +953,103 @@ fn validation_rejects_invalid_dependencies() {
         test_capability_full("b", "b", "PolicyB", &[], TOOL_B_DIRECT, NO_RESOURCES),
     ])
     .expect("无环依赖必须通过");
+}
+
+const RES_SUBSCRIPTION_NOT_OWNED: CapabilityResourceSurface = CapabilityResourceSurface {
+    uri_prefixes: &["a://"],
+    static_resources: &[],
+    resource_templates: &[],
+    default_subscriptions: &["b://missing"],
+};
+const RES_DUPLICATE_SUBSCRIPTION: CapabilityResourceSurface = CapabilityResourceSurface {
+    uri_prefixes: &["a://"],
+    static_resources: &[],
+    resource_templates: &[],
+    default_subscriptions: &["a://sub", "a://sub"],
+};
+
+#[test]
+fn validation_covers_default_subscriptions() {
+    assert_eq!(
+        validate_capabilities(&[test_capability_with_resources(
+            "a",
+            "a",
+            "PolicyA",
+            TOOL_A_DIRECT,
+            RES_SUBSCRIPTION_NOT_OWNED
+        )]),
+        Err(CapabilityRegistryError::ResourceNotOwned {
+            capability: "a".to_owned(),
+            uri: "b://missing".to_owned(),
+        })
+    );
+    assert_eq!(
+        validate_capabilities(&[test_capability_with_resources(
+            "a",
+            "a",
+            "PolicyA",
+            TOOL_A_DIRECT,
+            RES_DUPLICATE_SUBSCRIPTION
+        )]),
+        Err(CapabilityRegistryError::DuplicateResourceUri {
+            uri: "a://sub".to_owned(),
+            first: "a".to_owned(),
+            second: "a".to_owned(),
+        })
+    );
+    // 订阅静态资源本身是合法形态（workspace 的 git ref 即如此）。
+    const RES_SUBSCRIBE_STATIC: CapabilityResourceSurface = CapabilityResourceSurface {
+        uri_prefixes: &["a://"],
+        static_resources: &["a://root"],
+        resource_templates: &[],
+        default_subscriptions: &["a://root"],
+    };
+    validate_capabilities(&[test_capability_with_resources(
+        "a",
+        "a",
+        "PolicyA",
+        TOOL_A_DIRECT,
+        RES_SUBSCRIBE_STATIC,
+    )])
+    .expect("订阅已声明的静态资源必须通过");
+}
+
+const TOOL_A_DEFERRED_COLLIDING: &[CapabilityTool] = &[test_tool(
+    "ToolA",
+    "mcp__peri__ToolA",
+    "mcp__a__ToolA",
+    false,
+)];
+const TOOL_B_DIRECT_COLLIDING: &[CapabilityTool] = &[test_tool(
+    "mcp__a__ToolA",
+    "mcp__a__ToolA",
+    "mcp__a__ToolA",
+    true,
+)];
+
+#[test]
+fn validation_rejects_duplicate_legacy_tool_names() {
+    assert_eq!(
+        validate_capabilities(&[
+            test_capability_with_resources(
+                "a",
+                "a",
+                "PolicyA",
+                TOOL_A_DEFERRED_COLLIDING,
+                NO_RESOURCES
+            ),
+            test_capability_with_resources(
+                "b",
+                "b",
+                "PolicyB",
+                TOOL_B_DIRECT_COLLIDING,
+                NO_RESOURCES
+            ),
+        ]),
+        Err(CapabilityRegistryError::DuplicateLegacyToolName {
+            legacy_name: "mcp__a__ToolA".to_owned(),
+            first: "a".to_owned(),
+            second: "b".to_owned(),
+        })
+    );
 }
