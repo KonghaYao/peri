@@ -143,7 +143,7 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 | ToolSearch | 索引、描述、代理执行都不含该能力 | 同关闭 |
 | 子 Agent/workflow 继承 | `parent_tools`、workflow agent 工具列表不含该能力；不得从完整 pool 重新引入 | 同关闭 |
 | 宿主任务 | 不启动；已有任务有界取消/收敛 | 不留下新的宿主任务；既有任务按关闭语义收敛 |
-| runtime authorization | 按冻结配置集拒绝该能力的工具调用与资源读取，不能只靠隐藏目录 | 按运行时能力投影拒绝；同关闭 |
+| runtime authorization | 按运行时能力投影拒绝该能力的工具调用与资源读取，不能只靠隐藏目录 | 同关闭；按同一投影拒绝 |
 | readiness/诊断/首个请求 | 同一运行时能力投影；面板、warning、首个模型请求一致 | 同一运行时能力投影；warning 可见 |
 
 上表的 direct/deferred、资源与订阅、静态提示、ToolSearch、继承面与宿主任务均按运行时能力投影计算；冻结配置集只决定配置关闭、授权上限与冷恢复基线。
