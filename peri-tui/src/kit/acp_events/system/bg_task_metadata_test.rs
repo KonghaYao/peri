@@ -42,6 +42,7 @@ fn task(id: String, status: &str, summary: &str) -> BgTaskEntry {
         pid: None,
         revision: None,
         status: Some(status.into()),
+        child_thread_id: None,
     }
 }
 

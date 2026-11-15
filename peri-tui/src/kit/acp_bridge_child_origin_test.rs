@@ -171,7 +171,8 @@ async fn child_origin_new_run_without_old_stop_and_same_session_reset_are_isolat
                 started_at: String::new(),
                 pid: None,
                 revision: None,
-                status: Some("running".into())
+                status: Some("running".into()),
+                child_thread_id: None,
             }),
             &old,
             epoch

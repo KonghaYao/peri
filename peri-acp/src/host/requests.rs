@@ -301,9 +301,10 @@ pub(crate) fn bind_session_tasks(
                             kind,
                             summary,
                             started_at,
+                            child_thread_id,
                         } => (
                             "bg-task-started",
-                            json!({"task_id":task_id,"kind":kind,"summary":summary,"started_at":started_at,"revision":change.revision}),
+                            json!({"task_id":task_id,"kind":kind,"summary":summary,"started_at":started_at,"revision":change.revision,"child_thread_id":child_thread_id}),
                         ),
                         BgRegistryEvent::Completed {
                             task_id,
@@ -357,6 +358,7 @@ pub(super) fn task_snapshot_value(snapshot: peri_acp_types::tasks::TaskSnapshot)
                 "task_id":task.task_id, "kind":task.kind, "summary":task.summary,
                 "started_at":task.started_at, "status":task.status,
                 "duration_ms":task.duration_ms, "output_preview":task.output_preview,
+                "child_thread_id":task.child_thread_id,
             })).collect::<Vec<_>>(),
     })
 }

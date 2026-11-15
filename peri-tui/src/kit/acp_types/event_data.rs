@@ -694,6 +694,11 @@ pub struct BgTaskEntry {
     pub revision: Option<u64>,
     #[serde(default)]
     pub status: Option<String>,
+    /// 后台 Agent child thread 身份（= `SubagentStarted.instance_id`）。
+    ///
+    /// 与 `task_id` 独立生成；任务行与 child 事件跨通道到达时按此精确配对。
+    #[serde(default)]
+    pub child_thread_id: Option<String>,
 }
 
 /// `bg-task-snapshot` 的来源。

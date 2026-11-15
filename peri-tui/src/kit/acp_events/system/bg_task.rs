@@ -13,11 +13,12 @@ use crate::kit::atoms::{
 };
 use crate::kit::bg_task_identity::{
     METADATA_TEXT_BYTES, RECENT_METADATA_BYTES, RECENT_METADATA_ENTRIES, bounded_label,
-    protected_task_ids, prune_metadata, upsert_identity_from_started,
+    link_row_to_agent, protected_task_ids, prune_metadata, upsert_identity_from_started,
 };
 use crate::kit::bg_task_live::{
-    mark_task_cancelled, mark_task_completed, seed_live_from_running_snapshot,
-    seed_live_from_started, seed_live_from_terminal_snapshot, seed_unobserved_snapshot,
+    attach_pending_live_detail, mark_task_cancelled, mark_task_completed, pending_live_owner_name,
+    seed_live_from_running_snapshot, seed_live_from_started, seed_live_from_terminal_snapshot,
+    seed_unobserved_snapshot,
 };
 use crate::kit::bg_task_status::BgTaskStatus;
 use crate::kit::program_status::{self, ProgramStatus};
@@ -86,6 +87,14 @@ pub(crate) fn apply_bg_task_snapshot(
         .collect();
     if live_source {
         BG_DISPLAY.state().write().clone_from(&entries);
+        for task in &tasks {
+            if BgTaskStatus::classify(task.status.as_deref()).is_active()
+                && is_agent_task(task)
+                && let Some(child_thread_id) = task.child_thread_id.as_deref()
+            {
+                bind_task_row_to_child(&task.task_id, child_thread_id);
+            }
+        }
     }
     for t in &tasks {
         upsert_identity_from_started(&t.task_id, &t.kind, &t.summary, t.pid);
@@ -125,6 +134,7 @@ fn project_task(task: &BgTaskEntry) -> BgTaskEntry {
         pid: task.pid,
         revision: task.revision,
         status: task.status.as_deref().map(bounded_label),
+        child_thread_id: task.child_thread_id.as_deref().map(bounded_label),
     }
 }
 
@@ -294,6 +304,17 @@ fn accept_bg_task_delta(revision: Option<u64>) -> bool {
     true
 }
 
+/// 任务行与 `SubagentStarted` 共享 child thread 身份：按身份绑定，不按到达顺序。
+///
+/// 任务行先到时也先建立 link/identity，后到的 `SubagentStarted` 可精确认领；
+/// child 先到时把占位 live owner 的正文与终态移交到任务行。
+fn bind_task_row_to_child(task_id: &str, child_thread_id: &str) {
+    let agent_name = pending_live_owner_name(child_thread_id).unwrap_or_default();
+    if link_row_to_agent(task_id, child_thread_id, &agent_name) {
+        attach_pending_live_detail(task_id, child_thread_id);
+    }
+}
+
 pub(crate) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEntry) {
     if !accept_bg_task_delta(entry.revision) {
         return;
@@ -340,6 +361,11 @@ pub(crate) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEnt
         display.push(display_entry);
     }
     drop(display);
+    if is_agent_task(entry)
+        && let Some(child_thread_id) = entry.child_thread_id.as_deref()
+    {
+        bind_task_row_to_child(&entry.task_id, child_thread_id);
+    }
     prune_metadata();
 }
 
