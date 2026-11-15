@@ -527,6 +527,18 @@ fn unknown_key_warns_and_is_ignored() {
 }
 
 #[test]
+fn capability_names_are_valid_meta_harness_keys() {
+    // v5 能力名与迁移期旧键都是合法关闭来源；未知键仍被剔除。
+    let json = r#"{"meta_harness":{"web":false,"WorkspaceMiddleware":false,"unknown":false}}"#;
+    let mut cfg: AppConfig = serde_json::from_str(json).unwrap();
+    cfg.validate_meta_harness();
+    let map = cfg.meta_harness.unwrap();
+    assert_eq!(map.get("web"), Some(&false), "v5 能力名必须保留");
+    assert_eq!(map.get("WorkspaceMiddleware"), Some(&false));
+    assert!(!map.contains_key("unknown"));
+}
+
+#[test]
 fn unknown_key_only_in_workspace_is_ignored_on_merge() {
     let mut global = AppConfig {
         meta_harness: Some(mh(&[("01_intro", true)])),

@@ -132,9 +132,9 @@ pub const MIDDLEWARE_NAMES: &[&str] = &[
 /// 派生；不再手写字面量，也不承担 v5 能力开关语义。运行时经
 /// `builtin_mcp::capability_of_switch` 做确定性映射；M4 清理时删除。
 ///
-/// - 解析期校验（`peri-acp/src/provider/config.rs::validate_meta_harness`）的
-///   「已知键」集合 = [`SECTION_IDS`] ∪ [`MIDDLEWARE_NAMES`] ∪ 本表 ∪
-///   [`BUILT_IN_SUBAGENTS_KEY`]；
+/// - 解析期校验（`peri-config/src/app.rs::validate_meta_harness`）的「已知键」
+///   集合 = [`SECTION_IDS`] ∪ [`MIDDLEWARE_NAMES`] ∪ 本表 ∪
+///   [`BUILT_IN_SUBAGENTS_KEY`] ∪ v5 能力名；
 /// - 「全部 middleware 关闭」保险丝的判定面 = [`MIDDLEWARE_NAMES`] ∪ 本表。
 pub static BUILTIN_INSTANCE_POLICY_KEYS: LazyLock<Vec<&'static str>> =
     LazyLock::new(|| crate::builtin_mcp::legacy_policy_keys().collect());

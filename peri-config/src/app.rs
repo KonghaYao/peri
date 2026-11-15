@@ -426,6 +426,12 @@ impl AppConfig {
             .chain(BUILTIN_INSTANCE_POLICY_KEYS.iter())
             .copied()
             .chain(std::iter::once(BUILT_IN_SUBAGENTS_KEY))
+            // v5 能力名与旧键等价：运行时关闭集统一经 `capability_of_switch` 映射。
+            .chain(
+                peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
+                    .iter()
+                    .map(|capability| capability.name),
+            )
             .collect();
         map.retain(|key, _| {
             if known.contains(key.as_str()) {

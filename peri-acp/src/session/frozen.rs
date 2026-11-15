@@ -332,11 +332,12 @@ pub(crate) fn build_meta_harness_state(
         } else if key == BUILT_IN_SUBAGENTS_KEY {
             state.built_in_subagents_enabled = *enabled;
         } else if (MIDDLEWARE_NAMES.contains(&key.as_str())
-            || BUILTIN_INSTANCE_POLICY_KEYS.contains(&key.as_str()))
+            || BUILTIN_INSTANCE_POLICY_KEYS.contains(&key.as_str())
+            || peri_acp_types::builtin_mcp::capability(key).is_some())
             && !*enabled
         {
             state.disabled_middlewares.insert(key.clone());
-            // middleware + true：显式恢复装配，静默
+            // middleware / capability + true：显式恢复装配，静默
         }
         // 未知 key 已在解析期校验移除（provider::config::validate_meta_harness）
     }
