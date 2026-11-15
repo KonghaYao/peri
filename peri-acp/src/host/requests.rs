@@ -301,9 +301,10 @@ pub(crate) fn bind_session_tasks(
                             kind,
                             summary,
                             started_at,
+                            child_thread_id,
                         } => (
                             "bg-task-started",
-                            json!({"task_id":task_id,"kind":kind,"summary":summary,"started_at":started_at,"revision":change.revision}),
+                            json!({"task_id":task_id,"kind":kind,"summary":summary,"started_at":started_at,"revision":change.revision,"child_thread_id":child_thread_id}),
                         ),
                         BgRegistryEvent::Completed {
                             task_id,

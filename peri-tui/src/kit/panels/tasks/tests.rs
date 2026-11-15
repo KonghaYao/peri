@@ -364,6 +364,7 @@ fn bg_task(id: &str) -> BgTaskEntry {
         pid: Some(42),
         revision: None,
         status: None,
+        child_thread_id: None,
     }
 }
 

@@ -157,6 +157,10 @@ pub enum BgRegistryEvent {
         kind: BgTaskKind,
         summary: String,
         started_at: String,
+        /// 后台 Agent 任务的 child thread 身份（= TUI `SubagentStarted.instance_id`）。
+        /// 与 `task_id` 是独立身份；消费端据此精确配对任务行与 child，不依赖到达顺序。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_thread_id: Option<String>,
     },
     Completed {
         task_id: String,

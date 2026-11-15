@@ -365,6 +365,7 @@ fn test_subagent_stopped_removes_only_matching_active_agent() {
                 pid: None,
                 revision: None,
                 status: None,
+                child_thread_id: None,
             }),
         );
         dispatch_and_notify(
@@ -412,6 +413,7 @@ fn test_unknown_subagent_stopped_keeps_running_agents() {
             pid: None,
             revision: None,
             status: None,
+            child_thread_id: None,
         }),
     );
     dispatch_and_notify(

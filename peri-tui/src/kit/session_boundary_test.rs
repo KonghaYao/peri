@@ -76,6 +76,7 @@ fn session_switch_removes_previous_session_background_tasks() {
         pid: None,
         revision: None,
         status: None,
+        child_thread_id: None,
     });
     atoms::BG_DISPLAY.state().write().push(BgDisplayEntry {
         id: "previous-shell".into(),
@@ -127,6 +128,7 @@ fn same_session_replay_keeps_running_background_task() {
         pid: None,
         revision: None,
         status: None,
+        child_thread_id: None,
     });
 
     project_session_boundary(Some("current"));

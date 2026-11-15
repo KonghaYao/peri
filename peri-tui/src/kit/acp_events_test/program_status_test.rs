@@ -65,6 +65,7 @@ fn bg_entry(task_id: &str, kind: &str, status: Option<&str>) -> crate::kit::acp_
         pid: None,
         revision: None,
         status: status.map(str::to_owned),
+        child_thread_id: None,
     }
 }
 

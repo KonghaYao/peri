@@ -744,6 +744,7 @@ fn test_turn_boundary_archives_parent_and_routes_late_background_events() {
             pid: None,
             revision: None,
             status: None,
+            child_thread_id: Some("bg-a".into()),
         }),
     );
     dispatch_and_notify(&mut state, &root_text("p0", "m0"));
@@ -964,6 +965,7 @@ fn test_background_child_started_before_task_row_keeps_late_preview() {
             pid: None,
             revision: None,
             status: Some("running".into()),
+            child_thread_id: Some("bg-early".into()),
         }),
     );
 
@@ -1025,6 +1027,332 @@ fn test_background_child_started_before_task_row_keeps_late_preview() {
         task.linked_agent_id.as_deref(),
         Some("bg-early"),
         "迟到的任务行必须认领对应 child"
+    );
+
+    BG_TASKS.state().write().clear();
+    BG_DISPLAY.state().write().clear();
+    BG_LIVE_DETAIL.state().write().clear();
+    BG_TASK_IDENTITY.state().write().clear();
+    crate::kit::atoms::BG_AGENT_IDS.state().write().clear();
+}
+
+/// [回归 / CodeRabbit Major] 任务行乱序到达时按 child_thread_id 精确配对，
+/// 不能按占位创建顺序把 A 的预览挂到 B 的行上。
+#[test]
+#[serial]
+fn test_reordered_task_rows_bind_by_child_thread_identity() {
+    use crate::kit::atoms::{BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_IDENTITY, BG_TASKS};
+    use crate::kit::stream_data::TuiTextChunk;
+
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    BG_TASKS.state().write().clear();
+    BG_DISPLAY.state().write().clear();
+    BG_LIVE_DETAIL.state().write().clear();
+    BG_TASK_IDENTITY.state().write().clear();
+    crate::kit::atoms::BG_AGENT_IDS.state().write().clear();
+    crate::kit::atoms::BG_TASK_REVISION.set(None);
+    let mut state = make_state(SessionPhase::PromptRunning, 0);
+    let child_text = |agent_id: &str, text: &str| {
+        AcpEventData::TextChunk(TuiTextChunk {
+            text: text.into(),
+            message_id: Some(format!("{agent_id}-msg")),
+            agent_id: Some(agent_id.into()),
+        })
+    };
+    let task_started = |task_id: &str, child_thread_id: &str| {
+        AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+            task_id: task_id.into(),
+            kind: "agent".into(),
+            summary: "worker".into(),
+            started_at: String::new(),
+            pid: None,
+            revision: None,
+            status: Some("running".into()),
+            child_thread_id: Some(child_thread_id.into()),
+        })
+    };
+
+    for agent in ["child-a", "child-b"] {
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::SubagentStarted {
+                agent_id: agent.into(),
+                agent_name: "coder".into(),
+                is_background: true,
+                parent_tool_call_id: None,
+            },
+        );
+    }
+    dispatch_and_notify(&mut state, &child_text("child-a", "body-a"));
+    dispatch_and_notify(&mut state, &child_text("child-b", "body-b"));
+
+    // 任务行按相反顺序到达：B 的行先出现，A 的行后出现。
+    dispatch_and_notify(&mut state, &task_started("task-b", "child-b"));
+    dispatch_and_notify(&mut state, &task_started("task-a", "child-a"));
+
+    let links: Vec<(String, Option<String>)> = BG_DISPLAY
+        .state()
+        .read()
+        .iter()
+        .map(|row| (row.id.clone(), row.linked_agent_id.clone()))
+        .collect();
+    assert!(
+        links.contains(&("task-a".into(), Some("child-a".into()))),
+        "A 的行必须绑定 child-a，实际: {links:?}"
+    );
+    assert!(
+        links.contains(&("task-b".into(), Some("child-b".into()))),
+        "B 的行必须绑定 child-b，实际: {links:?}"
+    );
+
+    crate::kit::bg_task_live::publish_pending_streams();
+    let live_store = BG_LIVE_DETAIL.state();
+    let live = live_store.read();
+    assert!(!live.contains_key("child-a") && !live.contains_key("child-b"));
+    let text = |task_id: &str| {
+        live[task_id]
+            .nested_units
+            .iter()
+            .filter_map(|unit| match unit {
+                TuiRenderUnit::TuiAssistantBubble(bubble) => Some(bubble.text.clone()),
+                _ => None,
+            })
+            .collect::<String>()
+    };
+    assert_eq!(text("task-a"), "body-a", "预览不得串到 B 的任务行");
+    assert_eq!(text("task-b"), "body-b", "预览不得串到 A 的任务行");
+    drop(live);
+
+    BG_TASKS.state().write().clear();
+    BG_DISPLAY.state().write().clear();
+    BG_LIVE_DETAIL.state().write().clear();
+    BG_TASK_IDENTITY.state().write().clear();
+    crate::kit::atoms::BG_AGENT_IDS.state().write().clear();
+}
+
+/// [回归 / CodeRabbit Minor] resume 复用 agent_id 时，当前 occurrence 的占位
+/// owner 必须优先于旧任务行/旧 identity，旧终态明细不能吞掉新一轮文本。
+#[test]
+#[serial]
+fn test_resumed_background_occurrence_uses_current_pending_owner() {
+    use crate::kit::atoms::{BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_IDENTITY, BG_TASKS};
+    use crate::kit::stream_data::TuiTextChunk;
+
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    BG_TASKS.state().write().clear();
+    BG_DISPLAY.state().write().clear();
+    BG_LIVE_DETAIL.state().write().clear();
+    BG_TASK_IDENTITY.state().write().clear();
+    crate::kit::atoms::BG_AGENT_IDS.state().write().clear();
+    crate::kit::atoms::BG_TASK_REVISION.set(None);
+    let mut state = make_state(SessionPhase::PromptRunning, 0);
+    let child_text = |text: &str| {
+        AcpEventData::TextChunk(TuiTextChunk {
+            text: text.into(),
+            message_id: Some("child-msg".into()),
+            agent_id: Some("child-x".into()),
+        })
+    };
+    let task_started = |task_id: &str| {
+        AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+            task_id: task_id.into(),
+            kind: "agent".into(),
+            summary: "worker".into(),
+            started_at: String::new(),
+            pid: None,
+            revision: None,
+            status: Some("running".into()),
+            child_thread_id: Some("child-x".into()),
+        })
+    };
+
+    // 旧 occurrence：任务行与 child 正常配对并完成（行保留在显示区，BG_TASKS 移除）。
+    dispatch_and_notify(&mut state, &task_started("task-old"));
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "child-x".into(),
+            agent_name: "coder".into(),
+            is_background: true,
+            parent_tool_call_id: None,
+        },
+    );
+    dispatch_and_notify(&mut state, &child_text("old-body"));
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "child-x".into(),
+            result: "old done".into(),
+            is_error: false,
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskCompleted {
+            task_id: "task-old".into(),
+            kind: Some("agent".into()),
+            success: true,
+            duration_ms: 10,
+            output_preview: None,
+            revision: None,
+        },
+    );
+    assert!(
+        BG_TASKS
+            .state()
+            .read()
+            .iter()
+            .all(|task| task.task_id != "task-old"),
+        "旧任务应从活动任务中移除"
+    );
+
+    // resume：同一 agent_id 的新 occurrence，任务行尚未出现。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "child-x".into(),
+            agent_name: "coder".into(),
+            is_background: true,
+            parent_tool_call_id: None,
+        },
+    );
+    dispatch_and_notify(&mut state, &child_text("new-body"));
+    crate::kit::bg_task_live::publish_pending_streams();
+
+    {
+        let live_store = BG_LIVE_DETAIL.state();
+        let live = live_store.read();
+        let pending = live
+            .get("child-x")
+            .expect("current occurrence pending owner");
+        assert_eq!(pending.status, crate::kit::atoms::BgLiveStatus::Running);
+        let pending_text: String = pending
+            .nested_units
+            .iter()
+            .filter_map(|unit| match unit {
+                TuiRenderUnit::TuiAssistantBubble(bubble) => Some(bubble.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pending_text, "new-body", "新一轮文本必须进入当前占位 owner");
+        assert_eq!(
+            live["task-old"].status,
+            crate::kit::atoms::BgLiveStatus::Succeeded,
+            "旧任务明细保持旧终态"
+        );
+    }
+
+    // 新任务行到达：占位 owner 精确移交。
+    dispatch_and_notify(&mut state, &task_started("task-new"));
+    assert!(!BG_LIVE_DETAIL.state().read().contains_key("child-x"));
+    assert_eq!(
+        BG_LIVE_DETAIL.state().read()["task-new"].status,
+        crate::kit::atoms::BgLiveStatus::Running
+    );
+    assert_eq!(
+        BG_DISPLAY
+            .state()
+            .read()
+            .iter()
+            .find(|row| row.id == "task-new")
+            .and_then(|row| row.linked_agent_id.clone())
+            .as_deref(),
+        Some("child-x")
+    );
+
+    BG_TASKS.state().write().clear();
+    BG_DISPLAY.state().write().clear();
+    BG_LIVE_DETAIL.state().write().clear();
+    BG_TASK_IDENTITY.state().write().clear();
+    crate::kit::atoms::BG_AGENT_IDS.state().write().clear();
+}
+
+/// [回归 / CodeRabbit Minor] Stop 早于任务行时，终态预览仍要在行到达后移交，
+/// 不能因为 child 已离开 BG_AGENT_IDS 就留在无法关联的占位 owner。
+#[test]
+#[serial]
+fn test_background_child_stop_before_task_row_still_attaches_terminal_preview() {
+    use crate::kit::atoms::{BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_IDENTITY, BG_TASKS};
+    use crate::kit::stream_data::TuiTextChunk;
+
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    BG_TASKS.state().write().clear();
+    BG_DISPLAY.state().write().clear();
+    BG_LIVE_DETAIL.state().write().clear();
+    BG_TASK_IDENTITY.state().write().clear();
+    crate::kit::atoms::BG_AGENT_IDS.state().write().clear();
+    crate::kit::atoms::BG_TASK_REVISION.set(None);
+    let mut state = make_state(SessionPhase::PromptRunning, 0);
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "child-early".into(),
+            agent_name: "coder".into(),
+            is_background: true,
+            parent_tool_call_id: None,
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "early-body".into(),
+            message_id: Some("early-msg".into()),
+            agent_id: Some("child-early".into()),
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "child-early".into(),
+            result: "early done".into(),
+            is_error: false,
+        },
+    );
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+            task_id: "task-late".into(),
+            kind: "agent".into(),
+            summary: "worker".into(),
+            started_at: String::new(),
+            pid: None,
+            revision: None,
+            status: Some("running".into()),
+            child_thread_id: Some("child-early".into()),
+        }),
+    );
+
+    assert!(!BG_LIVE_DETAIL.state().read().contains_key("child-early"));
+    let live_store = BG_LIVE_DETAIL.state();
+    let live = live_store.read();
+    let detail = live.get("task-late").expect("terminal preview attached");
+    assert_eq!(detail.status, crate::kit::atoms::BgLiveStatus::Succeeded);
+    assert_eq!(detail.subagent_result.as_deref(), Some("early done"));
+    let texts: String = detail
+        .nested_units
+        .iter()
+        .filter_map(|unit| match unit {
+            TuiRenderUnit::TuiAssistantBubble(bubble) => Some(bubble.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, "early-body");
+    drop(live);
+
+    assert_eq!(
+        BG_DISPLAY
+            .state()
+            .read()
+            .iter()
+            .find(|row| row.id == "task-late")
+            .and_then(|row| row.linked_agent_id.clone())
+            .as_deref(),
+        Some("child-early")
     );
 
     BG_TASKS.state().write().clear();

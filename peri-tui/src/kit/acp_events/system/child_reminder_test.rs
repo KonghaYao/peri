@@ -266,6 +266,7 @@ fn background_child_reminder_uses_its_detail_budget_and_keeps_independent_shell(
                 pid: None,
                 revision: None,
                 status: Some("running".into()),
+                child_thread_id: None,
             },
         );
     }
