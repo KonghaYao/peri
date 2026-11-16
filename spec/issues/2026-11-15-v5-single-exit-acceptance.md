@@ -2,7 +2,7 @@
 
 > 状态：v5 单出口已是宿主默认装配并有宿主级 in-process wire 回归（`mcp::builtin_runtime_tests::wave3::v5_*`）；旧 policy 键与 CLI 单实例 serving 路径已退役，`PERI_MCP_BUILTIN=legacy` 与旧 `.mcp.json` 条目映射作为回滚 adapter 保留到 M4 截止决定。Sandbox workspace 代理端到端、真实首个模型请求、E2E replay 与跨进程 owner 验收仍未执行。
 >
-> 基线：`origin/feat/v5-async-default` `367456b8` 之上的收尾分支；裁决 [#409](https://github.com/KonghaYao/peri/issues/409)；静态审计见 [2026-11-15-v5-builtin-single-exit-audit.md](2026-11-15-v5-builtin-single-exit-audit.md)。
+> 基线：`origin/main` `fa297dd7b`（#428 v5 async 默认已并入）之上的收尾分支；裁决 [#409](https://github.com/KonghaYao/peri/issues/409)；静态审计见 [2026-11-15-v5-builtin-single-exit-audit.md](2026-11-15-v5-builtin-single-exit-audit.md)。
 >
 > 设计事实源：[MCP v5 单出口目标设计](../../docs/design/mcp-v5-single-exit.md)；配置规则见 [配置权威面](../../docs/design/configuration-authority.md)；关闭规则见 `ARC-CAPABILITY-CLOSURE-001`；命名与工具规则见 `ARC-TOOLS-001`。本 spec 只记录实施范围、验收矩阵与未验证项，不复制设计正文。
 

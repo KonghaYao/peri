@@ -430,19 +430,16 @@ fn misplaced_capabilities_and_legacy_overrides_are_typed_errors() {
         "{message}"
     );
 
-    write_mcp_file(
-        dir.path(),
-        r#"{"meta_harness":{"SandboxMiddleware":false}}"#,
-    );
-    let error = resolve_options(parse(&[
+    // 旧 MetaHarness 能力键已于 M4 退役：standalone 不再把它们当能力开关。
+    write_mcp_file(dir.path(), r#"{"meta_harness":{"WebMiddleware":false}}"#);
+    let options = resolve_options(parse(&[
         "--stdio",
         "--workspace",
         workspace_arg(dir.path()),
     ]))
-    .unwrap_err();
-    let message = format!("{error:#}");
-    assert!(
-        message.contains("unknown legacy meta_harness policy key"),
-        "{message}"
-    );
+    .unwrap();
+    let Target::Capabilities(capabilities) = options.target else {
+        panic!("retired policy keys must not change the target");
+    };
+    assert_eq!(capabilities.len(), 6, "{capabilities:?}");
 }
