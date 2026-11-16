@@ -57,7 +57,8 @@ function belongs(target: ChatBindingTarget, envelope: ChatFactEnvelope): boolean
  *
  * 与 `ChatReplica` 的数据来源不同：这里直接消费 `ChatFactEnvelope` 快照与增量，
  * 不经 Yjs 同步通道，也不发起任何 IO。绑定换代时销毁旧文档并重建，旧代次事实
- * 不会写入新文档；通知按微任务合并，读取复用 `ReadCache`。
+ * 不会写入新文档；内容通知按微任务合并，但增量中的 `run-state` 迁移单独保留，
+ * 避免极速 turn 的 `true → false` 在一次合并里消失。读取复用 `ReadCache`。
  */
 export class ChatFactReplica {
     private readonly now: ProjectionClock;
@@ -65,11 +66,14 @@ export class ChatFactReplica {
     private document: ChatDocument | null = null;
     private cache = new ReadCache();
     private view: SessionView;
-    private readonly listeners = new Set<() => void>();
+    private readonly listeners = new Set<(view: SessionView) => void>();
     private statusValue: ChatFactReplicaStatus = "connecting";
     private target: ChatBindingTarget | null = null;
     private disposed = false;
     private scheduled = false;
+    /** 增量 `run-state` 到达时的真实视图；快照重放不产生迁移通知。 */
+    private runningTransitions: SessionView[] = [];
+    private lastNotifiedRunning: boolean;
     private readonly onTransaction = (transaction: Y.Transaction): void => {
         if (!transaction.changed.size) return;
         if ([...transaction.changed.keys()].some((type) => type.parent === null)) this.cache = new ReadCache();
@@ -81,9 +85,11 @@ export class ChatFactReplica {
         this.now = options.now ?? (() => new Date().toISOString());
         this.empty = emptyView();
         this.view = this.empty;
+        this.lastNotifiedRunning = this.empty.running;
         if (options.binding) {
             this.replaceDocument(options.binding, []);
             this.view = this.recompute();
+            this.lastNotifiedRunning = this.view.running;
         }
     }
 
@@ -115,7 +121,12 @@ export class ChatFactReplica {
         const document = this.document;
         if (this.disposed || !document || !this.target || !belongs(this.target, envelope)) return false;
         const applied = document.applyEnvelope(envelope);
-        if (applied) this.schedule();
+        if (applied) {
+            // `run-state` 是完成等待的唯一增量信号；先按到达顺序记下真实视图，
+            // microtask 合并只允许压缩内容更新，不允许吞掉 running 迁移。
+            if (envelope.fact.kind === "run-state") this.runningTransitions.push(this.recompute());
+            this.schedule();
+        }
         return applied;
     }
 
@@ -123,7 +134,7 @@ export class ChatFactReplica {
         return this.view;
     }
 
-    subscribe(listener: () => void): () => void {
+    subscribe(listener: (view: SessionView) => void): () => void {
         if (this.disposed) return () => {};
         this.listeners.add(listener);
         return () => { this.listeners.delete(listener); };
@@ -144,6 +155,7 @@ export class ChatFactReplica {
         this.document = null;
         this.target = null;
         this.cache = new ReadCache();
+        this.runningTransitions = [];
         this.view = this.empty;
         this.statusValue = "connecting";
         this.schedule();
@@ -157,6 +169,7 @@ export class ChatFactReplica {
         this.document = null;
         this.target = null;
         this.cache = new ReadCache();
+        this.runningTransitions = [];
         this.view = this.empty;
         this.listeners.clear();
     }
@@ -175,6 +188,7 @@ export class ChatFactReplica {
         this.document = document;
         this.target = copyBinding(binding);
         this.cache = new ReadCache();
+        this.runningTransitions = [];
         this.attach();
     }
 
@@ -194,8 +208,26 @@ export class ChatFactReplica {
         queueMicrotask(() => {
             this.scheduled = false;
             if (this.disposed) return;
-            this.view = this.recompute();
-            for (const listener of [...this.listeners]) listener();
+            const view = this.recompute();
+            const transitions = this.runningTransitions;
+            this.runningTransitions = [];
+            const deliveries: SessionView[] = [];
+            let lastRunning = this.lastNotifiedRunning;
+            for (const transition of transitions) {
+                if (transition.running === lastRunning) continue;
+                deliveries.push(transition);
+                lastRunning = transition.running;
+            }
+            // 最终视图与最后一个迁移同值时由最终视图取代，内容更新不会重复通知。
+            if (deliveries.length > 0 && deliveries[deliveries.length - 1]?.running === view.running) {
+                deliveries.pop();
+            }
+            deliveries.push(view);
+            for (const next of deliveries) {
+                this.view = next;
+                this.lastNotifiedRunning = next.running;
+                for (const listener of [...this.listeners]) listener(next);
+            }
         });
     }
 

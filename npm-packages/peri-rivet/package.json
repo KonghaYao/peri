@@ -24,6 +24,10 @@
       "types": "./dist/rivet/index.d.ts",
       "import": "./dist/rivet/index.js"
     },
+    "./sandbox": {
+      "types": "./dist/sandbox/index.d.ts",
+      "import": "./dist/sandbox/index.js"
+    },
     "./mcp": {
       "types": "./dist/mcp/index.d.ts",
       "import": "./dist/mcp/index.js"
@@ -38,6 +42,7 @@
     "dist",
     "src",
     "docs",
+    "examples",
     "scripts/check-engine.mjs",
     "README.md",
     "DESIGN.md"
@@ -74,9 +79,13 @@
   },
   "peerDependencies": {
     "@peri-code/sdk": "^0.0.0",
+    "peri-sandbox": "^0.1.0",
     "rivetkit": "^3.1.1"
   },
   "peerDependenciesMeta": {
+    "peri-sandbox": {
+      "optional": true
+    },
     "rivetkit": {
       "optional": true
     }
@@ -87,6 +96,7 @@
     "@peri-code/sdk": "file:../@peri-sdk",
     "@types/node": "^26.6.5",
     "bun-types": "^1.4.4",
+    "peri-sandbox": "file:../peri-sandbox",
     "rivetkit": "3.1.1",
     "typescript": "^7.0.2"
   }

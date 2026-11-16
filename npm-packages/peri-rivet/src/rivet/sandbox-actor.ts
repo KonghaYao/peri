@@ -58,12 +58,28 @@ export type SandboxActorResult<T> =
 export type SandboxActorDiagnostic =
   | { readonly type: 'runtime_missing'; readonly sandboxId: string }
   | {
-      readonly type: 'start_failed' | 'close_failed' | 'status_failed' | 'action_failed';
+      readonly type: 'start_failed' | 'close_failed' | 'status_failed' | 'action_failed' | 'drain_failed';
       readonly sandboxId: string;
       readonly error: unknown;
     }
   | { readonly type: 'keep_awake_failed'; readonly sandboxId: string; readonly error: unknown }
   | { readonly type: 'holders_lost_on_teardown'; readonly sandboxId: string; readonly refs: number };
+
+/** 核心只依赖这些端口；MCP actor 用同一个核心，只替换身份与 close 前的收束钩子。 */
+export interface SandboxActorCoreDependencies {
+  readonly runtime?: SandboxRuntimePort | undefined;
+  readonly now?: (() => number) | undefined;
+  readonly onDiagnostic?: ((diagnostic: SandboxActorDiagnostic) => void) | undefined;
+  /** 关闭运行实例前调用；有界取消/收束在途请求，不参与引用计数。 */
+  readonly beforeClose?: (() => Promise<void>) | undefined;
+  /**
+   * Checked inside the ref-count queue immediately before an action touches refs/runtime.
+   *
+   * The host owner retires a lease outside this queue; checking once before enqueueing would let
+   * the action start a runtime after host closeAll already completed. Close paths omit this hook.
+   */
+  readonly admit?: (() => SandboxActorResult<never> | null) | undefined;
+}
 
 export interface SandboxActorOptions {
   /** 缺省表示未启用 sandbox；acquire 返回 sandbox_unavailable。 */
@@ -131,7 +147,7 @@ function invalidKey(details?: PeriErrorDetails): SandboxActorResult<never> {
 }
 
 function diagnose(
-  sink: { readonly onDiagnostic?: (diagnostic: SandboxActorDiagnostic) => void },
+  sink: { readonly onDiagnostic?: ((diagnostic: SandboxActorDiagnostic) => void) | undefined },
   diagnostic: SandboxActorDiagnostic,
 ): void {
   try {
@@ -154,7 +170,7 @@ function reset(vars: SandboxActorVars): void {
 /** 每个 vars 一个保活句柄；vars 随休眠更换，旧句柄由 GC 回收。 */
 const holds = new WeakMap<SandboxActorVars, Deferred<void>>();
 
-function releaseHold(vars: SandboxActorVars): void {
+export function releaseSandboxHold(vars: SandboxActorVars): void {
   const deferred = holds.get(vars);
   if (deferred === undefined) {
     return;
@@ -163,9 +179,17 @@ function releaseHold(vars: SandboxActorVars): void {
   deferred.resolve();
 }
 
-function syncKeepAwake(c: SandboxActorContext, options: SandboxActorOptions, sandboxId: string): void {
+export interface SandboxKeepAwakeOptions {
+  readonly onDiagnostic?: ((diagnostic: SandboxActorDiagnostic) => void) | undefined;
+}
+
+export function syncSandboxKeepAwake(
+  c: SandboxActorContext,
+  options: SandboxKeepAwakeOptions,
+  sandboxId: string,
+): void {
   if (c.vars.refs === 0) {
-    releaseHold(c.vars);
+    releaseSandboxHold(c.vars);
     return;
   }
   if (holds.has(c.vars)) {
@@ -212,11 +236,15 @@ export class SandboxActorCore {
   constructor(
     private readonly sandboxId: string,
     private readonly vars: SandboxActorVars,
-    private readonly dependencies: Pick<SandboxActorOptions, 'runtime' | 'now' | 'onDiagnostic'> = {},
+    private readonly dependencies: SandboxActorCoreDependencies = {},
   ) {}
 
   async acquire(holder: string): Promise<SandboxActorResult<SandboxAcquireView>> {
     return await serialize(this.vars, async () => {
+      const denied = this.dependencies.admit?.();
+      if (denied !== undefined && denied !== null) {
+        return denied;
+      }
       const parsed = this.holder(holder);
       if (!parsed.ok) {
         return parsed;
@@ -246,6 +274,10 @@ export class SandboxActorCore {
 
   async release(holder: string): Promise<SandboxActorResult<{ readonly released: true }>> {
     return await serialize(this.vars, async () => {
+      const denied = this.dependencies.admit?.();
+      if (denied !== undefined && denied !== null) {
+        return denied;
+      }
       const parsed = this.holder(holder);
       if (!parsed.ok) {
         return parsed;
@@ -272,6 +304,10 @@ export class SandboxActorCore {
   /** 只读状态；读取时校正「引用仍在但实例已不在」的漂移，但不销毁孤儿。 */
   async status(): Promise<SandboxActorResult<SandboxStatusView>> {
     return await serialize(this.vars, () => {
+      const denied = this.dependencies.admit?.();
+      if (denied !== undefined && denied !== null) {
+        return denied;
+      }
       let state: string | undefined;
       try {
         state = this.dependencies.runtime?.stateOf(this.sandboxId);
@@ -347,8 +383,22 @@ export class SandboxActorCore {
     }
   }
 
-  /** close 失败只上报诊断，错误原文不进入返回信封。 */
+  /** close 前先有界收束在途请求；收束未确认时保留 holder，不能关闭实例或报告成功。 */
   private async closeInstance(): Promise<SandboxActorResult<true>> {
+    try {
+      await this.dependencies.beforeClose?.();
+    } catch (error) {
+      diagnose(this.dependencies, { type: 'drain_failed', sandboxId: this.sandboxId, error });
+      if (isPeriError(error) && error.code === 'sandbox_close_incomplete') {
+        return failureFrom(error);
+      }
+      return failure(
+        'sandbox_close_incomplete',
+        `Sandbox ${this.sandboxId} has requests that did not settle`,
+        'sandbox',
+        { reason: 'drain_failed' },
+      );
+    }
     const runtime = this.dependencies.runtime;
     if (runtime === undefined) {
       return { ok: true, value: true };
@@ -396,7 +446,7 @@ async function executeAction<T>(
     diagnose(options, { type: 'action_failed', sandboxId, error });
     result = failure('internal_error', 'sandbox actor action failed', 'internal');
   }
-  syncKeepAwake(c, options, sandboxId);
+  syncSandboxKeepAwake(c, options, sandboxId);
   return result;
 }
 
@@ -406,7 +456,7 @@ async function teardown(c: SandboxActorContext, options: SandboxActorOptions): P
     await new SandboxActorCore(resolved.value, c.vars, options).teardown();
   }
   // activation 正在结束：不能再持有一个新的 keepAwake。
-  releaseHold(c.vars);
+  releaseSandboxHold(c.vars);
 }
 
 /**

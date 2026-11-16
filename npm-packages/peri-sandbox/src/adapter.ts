@@ -49,6 +49,8 @@ export interface PeriSandboxAdapterOptions {
 
 /** Per-sandbox options forwarded to `startSandbox()`. */
 export interface PeriSandboxStartOptions {
+  /** Explicit workspace root; defaults to `<sandboxRoot>/workspace`. */
+  workspacePath?: string;
   profileName?: string;
   profile?: SandboxProfile;
   port?: number;
@@ -73,6 +75,7 @@ function startOptions(
     sandboxId: request.sandboxId,
     ...(options.settingsPath === undefined ? {} : { settingsPath: options.settingsPath }),
     ...(options.sandboxesRoot === undefined ? {} : { sandboxesRoot: options.sandboxesRoot }),
+    ...(start.workspacePath === undefined ? {} : { workspacePath: start.workspacePath }),
     ...(start.profileName === undefined ? {} : { profileName: start.profileName }),
     ...(start.profile === undefined ? {} : { profile: start.profile }),
     ...(start.port === undefined ? {} : { port: start.port }),

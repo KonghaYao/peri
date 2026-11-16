@@ -172,6 +172,24 @@ describe("ChatFactReplica", () => {
         expect(replica.read().entries).toHaveLength(3);
     });
 
+    test("keeps live run-state transitions when content notifications coalesce", async () => {
+        const replica = new ChatFactReplica({ binding: TARGET });
+        replica.applySnapshot({ binding: TARGET, overflow: false, envelopes: [] });
+        await flush();
+        const running: boolean[] = [];
+        replica.subscribe((view) => running.push(view.running));
+
+        replica.applyFact(envelope(1, user("start")));
+        replica.applyFact(envelope(2, { kind: "run-state", running: true, executionBlocked: false }));
+        replica.applyFact(envelope(3, assistant("a1", "fast")));
+        replica.applyFact(envelope(4, { kind: "run-state", running: false, executionBlocked: false }));
+        await flush();
+
+        expect(running).toEqual([true, false]);
+        expect(replica.read().running).toBe(false);
+        expect(texts(replica.read())).toEqual(["start", "fast"]);
+    });
+
     test("reports lifecycle states and stops after dispose", async () => {
         const replica = new ChatFactReplica({ binding: TARGET });
         expect(replica.binding).toEqual(TARGET);

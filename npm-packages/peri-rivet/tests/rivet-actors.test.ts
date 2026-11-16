@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { createPeriChatActor } from '../src/rivet/chat-actor.js';
 import type { ChatActorDiagnostic, ChatOwnership } from '../src/rivet/chat-ports.js';
+import { createHostResourceOwner } from '../src/rivet/host-resource-owner.js';
 import { createChatObservation } from './helpers.js';
 
 function actor() {
@@ -10,6 +11,7 @@ function actor() {
     removeItem: async () => {},
   };
   return createPeriChatActor({
+    owner: createHostResourceOwner(),
     openDatabase: () => ({
       listSessions: async () => [],
       getSession: async () => null,
@@ -67,6 +69,7 @@ describe('chat actor definition', () => {
       removeItem: async () => {},
     };
     const definition = createPeriChatActor({
+      owner: createHostResourceOwner(),
       openDatabase: () => ({
         listSessions: async () => [],
         getSession: async () => null,

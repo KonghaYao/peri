@@ -1,3 +1,10 @@
+export {
+  defaultProfile,
+  defaultSettingsPath,
+  initSettings,
+  loadSettings,
+  resolveSandboxSettings,
+} from './instance/settings.js';
 export { SandboxError } from './instance/types.js';
 export type {
   SandboxErrorCode,
@@ -11,7 +18,6 @@ export type {
 } from './instance/types.js';
 export { startSandbox } from './instance/start.js';
 export { deleteSandboxData } from './instance/workspace.js';
-export { defaultSettingsPath, initSettings, loadSettings, resolveSandboxSettings } from './instance/settings.js';
 export type { ResolvedSandboxSettings } from './instance/settings.js';
 export { createPeriSandboxAdapter } from './adapter.js';
 export type { PeriSandboxAdapterOptions, PeriSandboxStartOptions } from './adapter.js';

@@ -10,9 +10,9 @@ import type {
   HistoryPageOutcome,
   KvStorage,
   SessionReadyResult,
-  WorkspaceRef,
 } from '@peri-code/sdk';
 import type { ActorOptionsInput } from 'rivetkit';
+import type { HostResourceOwner } from './host-resource-owner.js';
 import type { PeriActorLifecycleEvent } from './lifecycle.js';
 
 /** Shared Store endpoint used to snapshot agent config; the SDK never parses it here. */
@@ -31,7 +31,13 @@ export interface ChatStorageConfig {
  */
 export interface ChatOpenTarget {
   readonly chatId: string;
-  readonly workspace: WorkspaceRef;
+  /**
+   * Canonical `peri+sandbox://` URI, exactly `WorkspaceURI.toString()`.
+   *
+   * Only the deployment's `machineId` is trusted; the URI is parsed and checked against it before
+   * any activation resource is touched.
+   */
+  readonly workspace: string;
   readonly agent: ChatAgentConfig;
   readonly storage: ChatStorageConfig;
   readonly sessionPath?: string;
@@ -88,7 +94,8 @@ export interface ChatFactsResult {
 /** Result of opening (or reusing) the chat handle for this actor key. */
 export interface ChatOpenResult {
   readonly chatId: string;
-  readonly workspace: WorkspaceRef;
+  /** The canonical `peri+sandbox://` URI this activation was opened with. */
+  readonly workspace: string;
   /** `null` until the SDK binds a Session; binding is the SDK's decision, not the actor's. */
   readonly binding: ChatBindingTarget | null;
   /** True when an earlier `open` with the same identity was reused instead of rebuilt. */
@@ -104,10 +111,18 @@ export type ChatActorDiagnostic =
   | Readonly<{ type: 'keep_awake_failed'; error: unknown }>;
 
 export interface ChatActorOptions {
+  /**
+   * Required host-owned registry for activations whose close may outlive Rivet's activation vars.
+   *
+   * The factory never creates a hidden fallback: omitting the owner would make an unconfirmed
+   * SDK/database close unreachable after the framework clears vars.
+   */
+  readonly owner: HostResourceOwner;
   /** Required: the actor owns its database lifecycle and closes it on sleep. */
   readonly openDatabase: OpenChatDatabase;
   /** Required: read once per open to clear a record left by the previous activation. */
   readonly ownership: ChatOwnership;
+  /** Deployment machine identity; every `open.workspace` URI must name this machine. */
   readonly machineId: string;
   /** Runtime plus default session init; a target may override session/lifecycle per open. */
   readonly chatConfig: ChatConfig;

@@ -4,5 +4,5 @@
     "rootDir": ".",
     "noEmit": true
   },
-  "include": ["src", "tests/sandbox-adapter-compat.test.ts"]
+  "include": ["src", "tests/sandbox-adapter-compat.test.ts", "tests/chat-state-readonly.type-test.ts"]
 }

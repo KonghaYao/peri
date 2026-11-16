@@ -106,6 +106,12 @@ export type { PublicError, PublicErrorCode } from "../state/doc-model";
 export { ChatView } from "../view/chat-view";
 export { ChatReplica } from "../view/chat-replica";
 export { ChatFactReplica } from "../view/chat-fact-replica";
+export {
+    ChatState, ChatStateInputError,
+} from "../view/chat-state";
+export type {
+    ChatStateInputErrorReason, ChatStateMessage, ChatStateSnapshot, ChatStateSnapshotInput,
+} from "../view/chat-state";
 /**
  * 宿主侧的 View 共享表：按 Chat id 复用同一个 `ChatView`。
  *

@@ -25,11 +25,18 @@ import type {
   ChatOpenResult,
   ChatOpenTarget,
 } from './chat-ports.js';
-import { chatTargetFingerprint, closeChatActivation, openChatActivation } from './chat-session.js';
+import { chatTargetFingerprint, openChatActivation, resolveChatOpenTarget } from './chat-session.js';
 import { ChatActivationActivity, type ChatActivityDiagnosticType } from './chat-session-activity.js';
 import { toUserError } from './errors.js';
+import type { HostResourceLease } from './host-resource-owner.js';
 import { type RivetKeepAwakeContext, rivetKeepAwakePort } from './keep-awake.js';
 import { notifyLifecycle, type PeriActorLifecycleEvent } from './lifecycle.js';
+
+/** One activation's host-owned value plus its transient actor-bound observation projection. */
+type ChatLive = {
+  readonly activation: ChatActivation;
+  activity: ChatActivationActivity | null;
+};
 
 /** One activation's resources; all three clear together so no half-open state is observable. */
 export type ChatActorVars = {
@@ -86,12 +93,27 @@ export type PeriChatActorDefinition = ActorDefinition<
 >;
 
 /**
- * Keep-alive projections keyed by SDK handle.
+ * Per-activation lifecycle serialization.
  *
- * Per handle, not per actor: a reopened handle must not inherit the previous handle's counters,
- * and a closed handle must stay unreachable from the vars.
+ * Actions on one actor really do run concurrently. Open/close/teardown share one queue per vars so
+ * a second open cannot construct a second database over the first, and close/teardown cannot race
+ * an in-flight open. Resource ownership and close progress live in the injected host owner, which
+ * survives the framework clearing these vars.
  */
-const activities = new WeakMap<ChatServiceContract, ChatActivationActivity>();
+const lifecycleQueues = new WeakMap<ChatActorVars, Promise<void>>();
+
+function serializeLifecycle<T>(vars: ChatActorVars, run: () => Promise<T> | T): Promise<T> {
+  const previous = lifecycleQueues.get(vars) ?? Promise.resolve();
+  const task = previous.then(run);
+  lifecycleQueues.set(
+    vars,
+    task.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return task;
+}
 
 /**
  * A Rivet actor hosting exactly one Peri chat, keyed by `[chatId]`.
@@ -114,20 +136,19 @@ export function createPeriChatActor(options: ChatActorOptions): PeriChatActorDef
     actions: {
       open: async (c, target: ChatOpenTarget) => {
         try {
-          return await openChat(c, target, options);
+          return await serializeLifecycle(c.vars, () => openChat(c, target, options));
         } catch (error) {
           toUserError(error);
         }
       },
       execute: async (c, raw: unknown, target?: ChatExecuteTarget | null) => {
         try {
-          const chat = requireChat(c.vars.chat);
+          const { chat, activity } = requireLiveChat(c, options);
           if (target !== undefined && target !== null) {
             assertTarget(chat, target);
           }
           const action = raw as ChatUserAction;
-          const activity = activities.get(chat);
-          return await (activity === undefined
+          return await (activity === null
             ? executeAction(chat, action)
             : activity.run(() => executeAction(chat, action)));
         } catch (error) {
@@ -136,9 +157,8 @@ export function createPeriChatActor(options: ChatActorOptions): PeriChatActorDef
       },
       readPayload: async (c, ref: ToolPayloadReadRef, payloadOptions?: ReadPayloadOptions) => {
         try {
-          const chat = requireChat(c.vars.chat);
-          const activity = activities.get(chat);
-          return await (activity === undefined
+          const { chat, activity } = requireLiveChat(c, options);
+          return await (activity === null
             ? chat.readPayload(ref, payloadOptions)
             : activity.run(() => chat.readPayload(ref, payloadOptions)));
         } catch (error) {
@@ -148,16 +168,17 @@ export function createPeriChatActor(options: ChatActorOptions): PeriChatActorDef
       observe: (c) => {
         try {
           const chat = requireChat(c.vars.chat);
-          return activities.get(chat)?.observe() ?? chat.observe?.() ?? null;
+          return options.owner.lease<ChatLive>(c.vars)?.value.activity?.observe() ?? chat.observe?.() ?? null;
         } catch (error) {
           toUserError(error);
         }
       },
       activity: (c) => {
         try {
+          requireChat(c.vars.chat);
           // A missing projection means `start` failed; report an incomplete snapshot so the caller
           // never mistakes it for a releasable unit.
-          return activities.get(requireChat(c.vars.chat))?.activity() ?? idleActivity();
+          return options.owner.lease<ChatLive>(c.vars)?.value.activity?.activity() ?? idleActivity();
         } catch (error) {
           toUserError(error);
         }
@@ -171,7 +192,7 @@ export function createPeriChatActor(options: ChatActorOptions): PeriChatActorDef
       },
       close: async (c) => {
         try {
-          await closeActivation(c, options);
+          await serializeLifecycle(c.vars, () => closeActivation(c, options));
           return { closed: true };
         } catch (error) {
           toUserError(error);
@@ -188,12 +209,19 @@ async function openChat(
 ): Promise<ChatOpenResult> {
   requireTargetChat(c.key, target);
 
-  const fingerprint = chatTargetFingerprint(target);
-  if (c.vars.chat !== null && c.vars.open !== null) {
+  // Parse the workspace boundary before touching ownership, the database or the runtime: a foreign
+  // or non-canonical URI must leave the current activation exactly as it was.
+  const resolved = resolveChatOpenTarget(target, options.machineId);
+  const fingerprint = chatTargetFingerprint(resolved.target);
+  const existing = options.owner.lease<ChatLive>(c.vars);
+  if (existing !== undefined && !existing.retired && c.vars.chat !== null && c.vars.open !== null) {
+    if (existing.value.activation.chat !== c.vars.chat) {
+      throw internalStateError();
+    }
     if (c.vars.open.fingerprint === fingerprint) {
       return {
         chatId: target.chatId,
-        workspace: target.workspace,
+        workspace: resolved.workspaceUri,
         binding: c.vars.chat.binding,
         reused: true,
       };
@@ -205,70 +233,103 @@ async function openChat(
     });
   }
 
-  // A failed earlier close can leave a half-released activation; never stack a second one on it.
-  await closeActivation(c, options);
-
-  const activation = await openChatActivation(options, target);
-  // A projection that fails to subscribe leaves an otherwise healthy handle; keep the activation
-  // usable rather than forcing the caller to retry a construction that already succeeded.
-  const activity = new ChatActivationActivity({
-    chat: activation.chat,
-    keepAwake: rivetKeepAwakePort(c, {
-      onError: (error) => diagnose(options, { type: 'keep_awake_failed', error }),
-    }),
-    onFact: (envelope) => publishFact(c, options, envelope),
-    onDiagnostic: (type, error) => diagnose(options, activityDiagnostic(type, error)),
-  });
-  activities.set(activation.chat, activity);
-  try {
-    activity.start();
-  } catch (error) {
-    activities.delete(activation.chat);
-    diagnose(options, { type: 'activity_source_failed', error });
+  // A failed earlier close leaves a retired owner record. Finish it before a new database or SDK
+  // handle is created; an unconfirmed close blocks this open with its original failure.
+  if (existing !== undefined) {
+    await closeLease(c, existing);
+  } else if (c.vars.chat !== null || c.vars.database !== null) {
+    throw internalStateError();
   }
 
-  c.vars.chat = activation.chat;
-  c.vars.database = activation.database;
+  const lease = await options.owner.open<ChatLive>(c.key, c.vars, async (track) => {
+    const activation = await openChatActivation(options, resolved, track);
+    return { activation, activity: null };
+  });
+  const live = lease.value;
+  try {
+    const activity = new ChatActivationActivity({
+      chat: live.activation.chat,
+      keepAwake: rivetKeepAwakePort(c, {
+        onError: (error) => diagnose(options, { type: 'keep_awake_failed', error }),
+      }),
+      onFact: (envelope) => publishFact(c, options, envelope),
+      onDiagnostic: (type, error) => diagnose(options, activityDiagnostic(type, error)),
+    });
+    live.activity = activity;
+    // The owner keeps the real SDK/database after retire; the observer/keep-awake projections must
+    // not survive the activation that supplied `c.broadcast` and `c.keepAwake`.
+    lease.onRetire(() => {
+      live.activity?.stop();
+      live.activity = null;
+    });
+    try {
+      activity.start();
+    } catch (error) {
+      activity.stop();
+      live.activity = null;
+      diagnose(options, { type: 'activity_source_failed', error });
+    }
+  } catch (error) {
+    try {
+      await lease.close();
+    } catch (closeError) {
+      diagnose(options, { type: 'activity_source_failed', error: closeError });
+    }
+    throw error;
+  }
+
+  c.vars.chat = live.activation.chat;
+  c.vars.database = live.activation.database;
   c.vars.open = { target, fingerprint };
   emitLifecycle(options, { type: 'wake', actorId: c.actorId, key: c.key });
   return {
     chatId: target.chatId,
-    workspace: target.workspace,
-    binding: activation.chat.binding,
+    workspace: resolved.workspaceUri,
+    binding: live.activation.chat.binding,
     reused: false,
   };
 }
 
 /**
- * Releases the activation's chat and database.
+ * Releases the activation's chat and database through the host owner.
  *
- * Vars are cleared before awaiting so a rejecting close cannot leave the actor looking open; the
- * handle is still reachable through the local reference, so the database close always runs.
+ * The owner closes chat before database, keeps confirmed progress, and single-flights the close.
+ * Nothing is cleared until every resource confirmed; a failed close leaves the record owned by the
+ * host, which outlives Rivet's activation vars.
  */
-async function closeActivation(c: ChatContext, options: ChatActorOptions, rethrow = true): Promise<void> {
-  const activation = takeActivation(c);
-  if (activation === null) {
-    return;
-  }
-  await closeChatActivation(options, activation, rethrow);
+async function closeLease(c: ChatContext, lease: HostResourceLease<ChatLive>): Promise<void> {
+  await lease.close();
+  clearActivation(c);
 }
 
-function takeActivation(c: ChatContext): Pick<ChatActivation, 'chat' | 'database'> | null {
-  const { chat, database } = c.vars;
-  if (chat !== null) {
-    activities.get(chat)?.stop();
-    activities.delete(chat);
+async function closeActivation(c: ChatContext, options: ChatActorOptions): Promise<void> {
+  const lease = options.owner.lease<ChatLive>(c.vars);
+  if (lease === undefined) {
+    if (c.vars.chat !== null || c.vars.database !== null) {
+      throw internalStateError();
+    }
+    clearActivation(c);
+    return;
   }
+  await closeLease(c, lease);
+}
+
+function clearActivation(c: ChatContext): void {
   c.vars.chat = null;
   c.vars.database = null;
   c.vars.open = null;
-  return chat === null || database === null ? null : { chat, database };
 }
 
 async function teardown(c: ChatContext, type: 'sleep' | 'destroy', options: ChatActorOptions): Promise<void> {
   try {
-    // Rivet is already tearing the activation down; a release failure only needs a diagnostic.
-    await closeActivation(c, options, false);
+    // Retire first so facts/keep-awake stop before the close starts. If the close cannot confirm,
+    // the host owner retains the real SDK/database record for closeAll or the next open.
+    options.owner.retire(c.vars);
+    await serializeLifecycle(c.vars, () => closeActivation(c, options));
+  } catch (error) {
+    // Hooks have no client response boundary, but known SDK/database failures must stay explicit
+    // instead of being swallowed; the host owner keeps the activation and its progress.
+    toUserError(error);
   } finally {
     emitLifecycle(options, { type, actorId: c.actorId, key: c.key });
   }
@@ -330,6 +391,38 @@ function requireChat(chat: ChatServiceContract | null): ChatServiceContract {
     throw closedError('the chat actor has not been opened');
   }
   return chat;
+}
+
+/**
+ * Admission gate for actions that can mutate the SDK handle.
+ *
+ * Shutdown closes new execute work immediately; a retired lease is already closing and must not
+ * accept another action even though its SDK/database record is still host-owned.
+ */
+function requireLiveChat(
+  c: ChatContext,
+  options: ChatActorOptions,
+): { chat: ChatServiceContract; activity: ChatActivationActivity | null } {
+  if (options.owner.shuttingDown) {
+    throw closedError('the host is shutting down');
+  }
+  const lease = options.owner.lease<ChatLive>(c.vars);
+  if (lease === undefined || lease.retired) {
+    throw closedError('the chat actor is closing');
+  }
+  const chat = requireChat(c.vars.chat);
+  if (lease.value.activation.chat !== chat) {
+    throw internalStateError();
+  }
+  return { chat, activity: lease.value.activity };
+}
+
+function internalStateError(): PeriError {
+  return new PeriError({
+    code: 'internal_error',
+    phase: 'internal',
+    message: 'the chat activation is not owned by the host resource record',
+  });
 }
 
 /** Idle snapshot used when the projection is absent; `complete: false` keeps the unit pinned. */

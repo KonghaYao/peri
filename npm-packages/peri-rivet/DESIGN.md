@@ -36,8 +36,9 @@ host/keep-awake ─────► host/activity
 
 rivet/chat-session ──► openDatabase + createChatSession（一次激活一个 ChatDatabase）
 rivet/chat-session-activity ──► host/chat-activity + host/keep-awake
-rivet/echo-runtime ──► @peri-code/sdk（Transport；无 ACP、进程或 LLM 的参考实现）
 rivet/sandbox-actor ──► contracts/errors + contracts/identity + util/deferred（不依赖 SDK）
+rivet/sandbox-mcp-actor ──► rivet/sandbox-actor + rivet/workspace-uri（同一引用计数核心）
+sandbox/peri-sandbox-runtime ──► rivet/workspace-uri + peri-sandbox（独立 `/sandbox` 入口）
 ```
 
 约束：
@@ -53,32 +54,75 @@ Rivet 的 `vars` 是激活级数据，`createVars` 只有 5s 预算，因此共�
 | 资源 | 作用域 | 持有者 | 关闭时机 |
 | --- | --- | --- | --- |
 | `ownership` 端口、`openDatabase` 端口 | 进程 / isolate | 宿主组合根，经 `createPeriChatActor` 注入 | 进程退出或 isolate 丢弃；actor 不关闭 |
-| `ChatService`、ChatDatabase、活动投影 | 一次 `open` | `c.vars` + 按句柄索引的 `WeakMap` | `close` action、`onSleep`、`onDestroy` |
+| 宿主资源 owner | 进程 | 组合根创建并强持有的 `HostResourceOwner`，显式注入 Chat/Sandbox 工厂 | 宿主 `beginShutdown()` + `closeAll()`；不随 activation vars 消失 |
+| `ChatService`、ChatDatabase | 一次 `open` | owner 记录；`c.vars` 只是 action 面引用 | `close` action、`onSleep`、`onDestroy`、宿主 `closeAll` |
+| 活动投影、事实订阅、keep-awake | 一次 activation | owner 记录的 detach 回调（只在不退役期间持有 `c` 回调） | retire/close 时先解绑；真实 SDK/DB 继续归 owner |
 | 共享 KV（ownership 记录） | 跨实例 | 宿主提供的 `ChatOwnership` | actor 只在 `open` 前清一条陈旧记录 |
-| sandbox 运行实例 | 进程，按 `sandboxId` 分片 | 宿主提供的 `SandboxRuntimePort` | refs 归零、`closeAll`、sleep/destroy；进程级回收由宿主在自己的 runtime 上完成 |
+| sandbox 运行实例 | 进程，按 workspace URI 分片（兼容入口按 `sandboxId`） | 宿主提供的 `SandboxRuntimePort` / `SandboxMcpRuntimePort`；owner 记录 gate 与关闭 closure | refs 归零、`closeAll`、sleep/destroy、宿主 `closeAll`；进程级回收由宿主在自己的 runtime 上完成 |
 
-本包不提供隐藏单例：`openDatabase` 与 `ownership` 都由宿主显式持有，actor 只在一次激活内打开并关闭它们。
+owner 的 key 沿用现有 actor key（Chat 为 `[chatId]`，Sandbox 为 `['sbx', workspaceUri]`），`activationRef` 只是内存对象身份，用来区分新旧回调，不是新的业务 ID。内部是 owner 实例私有的 Map，不持久化、不保存可重放执行状态，也没有模块级孤儿表。
+
+本包不提供隐藏单例：`openDatabase`、`ownership` 与 `HostResourceOwner` 都由宿主显式持有；actor 只在一次激活内使用它们，未确认关闭留在 owner，由同一宿主进程枚举和重试。
 
 ### Sandbox actor
 
-`rivet/sandbox-actor.ts` 是单个 `sandboxId` 引用计数的唯一权威：`vars.holders` 是唯一状态，
+`rivet/sandbox-actor.ts` 是单个 sandbox 资源引用计数的唯一权威：`vars.holders` 是唯一状态，
 `refs` 恒等于其长度，同一 holder 重复 acquire 不重复计数。端口
 `SandboxRuntimePort { start, close, stateOf }` 只做 spawn/close/只读状态，不持有计数；
 `runtime` 可选，缺省时 actor 仍可注册，`acquire` 返回 `sandbox_unavailable`。
+旧 `createSandboxActor` 以 `sandboxId` 为身份保留为兼容入口，仍用同一核心。
 
-`closeAll` 只关闭本 `sandboxId`（幂等、不启动、不碰其它 id）；进程级回收由宿主在自己的
-运行端口上完成，端口契约不定义该动作。失败统一返回 `PeriErrorPayload`（`sandbox_*` / `invalid_identity` /
-`internal_error`），端口错误原文只进 `onDiagnostic`，不跨 actor。
+`rivet/sandbox-mcp-actor.ts` 把同一核心的 resource 身份换成 canonical workspace URI，
+key 固定为 `['sbx', workspaceUri]`，并新增 `SandboxMcpRuntimePort.fetchMcp(uri, request)`。
+`machineId`、`authorizedWorkspaces` 与 `token` 都来自部署组合根；key/URI 只是定位符，
+不是授权或凭据。每次 action 先校验凭据，再用 `parseWorkspaceUri` 校验 canonical 形式、
+同机与 allowlist，全部通过后才触达 runtime/start/close/state。
 
-引用只在 activation 内有效：`refs > 0` 时持有一个 keep-awake hold，归零释放；sleep/destroy
-上报 `holders_lost_on_teardown` 后 best-effort 关闭本实例。`status.orphaned` 只读地暴露
-「refs=0 但实例仍在」，监控读取不产生副作用，清理留给 `closeAll`。
+`/mcp` HTTP 只接受显式 MCP path，要求当前有 active holder，不隐式 acquire。转发请求用 URL + init
+显式构造；网关凭据（`authorization`/`cookie`/`proxy-authorization`/`x-rivet-token`）与 actor 凭据
+（`x-peri-sandbox-token`）在构造前移除，不依赖 `new Request(request, { headers })` 的空 Headers
+覆盖语义；内部 MCP 使用 `peri-sandbox` 实例自己的 Bearer token。最后一个
+release（以及 `closeAll`/sleep/destroy）先关闭新入口，abort 并主动 cancel 实际 response
+reader/stream，只有 cancel resolve 或取消前已观察到 read done/error 才算 settled；cancel
+reject 会保留 inflight/holder 并记 `drain_failed`，不会把「调用过 cancel」当作确认，也不对
+已经结束的 stream 再发一次 cancel 制造伪确认。收束未确认时返回
+`sandbox_close_incomplete`（`drain_failed`）并保留 holder/实例供重试，不返回假关闭。
+late response 同样走该收束，cancel 失败不 `finishRequest`。gate、inflight 与关闭 closure
+登记在宿主 owner 的记录里，而不是 `vars` 的 WeakMap：Rivet 清掉 vars 后，同 key 的新
+activation 仍要先关闭旧记录，旧 gate 未清时 HTTP 返回 `sandbox_closing`，不会启动第二个环境。
+关闭 closure 只捕获 vars、runtime 与 gate，不捕获 action context 或 keep-awake 回调。
+`onBeforeConnect` 对带请求头的连接复用同一凭据校验。
+
+真实宿主适配器在 `sandbox/peri-sandbox-runtime.ts`，经独立 `@peri-code/rivet/sandbox`
+入口导出：它只把 canonical URI 逐字绑定到 host 认可的 0700 真实目录，并以显式
+`workspacePath` 调用 `peri-sandbox`；不把 URI 哈希/截断/编码成 `sessionKey` 或
+`sandboxId`，也不 root-join 工作区。`peri-sandbox` 的 `sbx_...` 只是进程/状态目录句柄，
+仅用于资源控制，不是查找、授权或恢复的第二身份。授权目录与 `sandboxesRoot` 双向不重叠，
+URI 路径必须与授权的真实目录逐字相同（symlink/realpath 别名不授权）。`peri-sandbox` 是
+可选 peer，Chat 入口不导入它。
+
+`closeAll` 只关闭本 resource（幂等、不启动、不碰其它 resource）；进程级回收由宿主在自己的
+运行端口上完成（适配器额外提供 `closeAll()` 供宿主退出），端口契约不定义该动作。失败统一返回
+`PeriErrorPayload`（`sandbox_*` / `invalid_identity` / `invalid_input` / `internal_error`），
+端口错误只在 `onDiagnostic` 出口以凭据脱敏后的安全投影出现；已知 actor token 不进入
+message/stack/cause，也不跨 actor 或进入 action/HTTP 响应。
+
+引用只在 activation 内有效：`refs > 0` 时持有一个 keep-awake hold，归零释放；lease 在 owner
+`retire`/`beginShutdown`/`closeAll` 时解绑该 hold，即使资源 close 失败也不会留下失效回调；
+sleep/destroy 上报 `holders_lost_on_teardown` 后由 owner 记录执行收束与关闭，未确认则保留 gate/
+实例供宿主重试。`retire(vars)` 是 activation 身份的终态：即使随后的确认关闭删除了 owner record，
+同一 vars 的 `open` 仍被拒绝；同 key 的新 activation 在旧资源确认关闭后可以正常打开。`beginShutdown` 是准入线性化点：等待旧 lease close 后、进入 create 前重新校验，
+此后不再有新的 create/DB reset/hold；action 在 core refs 队列内再次校验 lease retired，避免
+取得 lease 后排队期间越过 owner 关闭。`status.orphaned` 只读地暴露「refs=0 但实例仍在」，监控
+读取不产生副作用，清理留给 `closeAll`；owner 的 `closeAll` 与 runtime 的进程级 `closeAll()` 是
+两条独立结果，不能用一个成功推断另一个；适配器兜底 `runtime.closeAll()` 只在 owner 确认排空后
+调用，临时 state 目录仅在 owner 与适配器关闭都确认后删除。
 
 ## 3. 身份与边界
 
 | 身份 | 生命周期 | 语义 |
 | --- | --- | --- |
-| actor id / key | Rivet actor | chat 为 `[chatId]`，sandbox 为 `[sbx, sandboxId]`；本包不解释其它业务 key |
+| actor id / key | Rivet actor | chat 为 `[chatId]`，Sandbox MCP 为 `[sbx, workspaceUri]`；兼容入口为 `[sbx, sandboxId]`；本包不解释其它业务 key |
 | `RootSessionId` | 会话 | Peri 顶层会话身份，由现有会话模型拥有 |
 | `ResourceId` | 资源读取 | 独立资源身份，不绑定客户端连接 |
 | `ResourceScope` | 授权范围 | resource 查询键的一部分；只来自认证边界，防止跨租户读取 |
@@ -98,6 +142,12 @@ Chat 路径上有三个容易混用的 id，路由只用第一个：
 
 `ChatOpenResult.chatId` 原样回显 `target.chatId`（actor key）。
 
+### Workspace 边界
+
+`open.workspace` 只接受 canonical `peri+sandbox://` 字符串，来源是 `WorkspaceURI.toString()`。actor 用 `parseWorkspaceUri` 严格校验（不接受大写 scheme/UUID、原始空格或路径归一化以外的写法），再把字符串转成 SDK 内部的 `WorkspaceRef`：`id` 就是 canonical URI 本身，`runtimePath` 是解析出的路径；不哈希、不映射、不拼 root。
+
+机器身份只来自部署组合根的 `createPeriChatActor({ machineId })`。URI 里的 machineId 与部署 machineId 不一致时，`open` 在 `resetOwnership`、`openDatabase` 和 runtime 构造之前以 `invalid_identity` 拒绝，零副作用。`ChatOpenResult.workspace` 回显 canonical URI，不泄露内部 ref。
+
 ## 4. Chat actor
 
 chat actor 是会话的执行实体，key 固定为 `[chatId]`：`chatId` 由客户端生成并保持稳定，同时是路由键与所有权键，actor 不解释其他业务身份。ACP sessionId 只存在于 `ChatService` 内部，可通过 `change_session` 切换，因此不能承担 key 的稳定性要求。
@@ -105,17 +155,23 @@ chat actor 是会话的执行实体，key 固定为 `[chatId]`：`chatId` 由客
 ### 生命周期映射
 
 ```text
-action open(target) ──► resetOwnership ──► openDatabase ──► createChatSession ──► ChatActivation
-                                                                                     │
-                                                ChatActivationActivity.start() ◄─────┘
-onSleep / onDestroy ──► chat.close() ──► database.close()（各自 try，失败记诊断）
-action close ──► 同一路径；chat 失败向调用方返回 close_incomplete
+action open(target) ──► resolveWorkspaceURI ──► owner.open(key, vars)
+                                                   │  旧 lease 关闭未确认 → 直接失败
+                                                   ▼
+                                   resetOwnership ──► openDatabase（立即登记 owner）
+                                                   ──► createChatSession（登记 chat，order 0）
+                                                   ──► ChatActivationActivity.start()
+onSleep / onDestroy ──► owner.retire(vars) ──► lease.close()（chat → database，失败即抛）
+action close ──► lease.close()；任一失败保留 owner 记录与已确认进度，返回 close_incomplete
+host shutdown ──► beginShutdown() ──► closeAll（最多 2 轮，只重试可重试 incomplete）
 ```
 
 - 只有 `open` 建立激活，除 `close` 外的 action 在未 open 时一律 `closed`（`reason: 'not_open'`）；`close` 在未 open 时是 no-op。
-- `open` 幂等：chat/workspace/agent 指纹一致直接返回 `reused: true`，不重建；不一致返回 `binding_conflict`。
-- sleep/destroy 必须先把 vars 清空再等待关闭：失败的 `close` 不能留下“看起来还开着”的 actor，下一次 `open` 重新装配。
-- chat 关闭失败不跳过 `database.close()`；两者失败都记 `close_failed` 诊断，sleep 不因释放失败而保留激活。
+- `open` 幂等：workspace、agent、storage、session、sessionPath 与 lifecycle 指纹一致直接返回 `reused: true`，不重建；任一配置不一致返回 `binding_conflict`，不会悄悄忽略变化。
+- 同一 activation 的 `open`/`close`/teardown 按 vars 串行；owner 再按 key 串行同 key 的不同 activation。并发同目标 `open` 只构造一次激活；不同目标明确 `binding_conflict`。
+- 显式 `close` 在 chat 失败时保留整个记录（database 尚未关闭），在 database 失败时保留已关闭 chat 的进度；下次 `close` 只重试未确认资源，成功后才清空 vars。失败的激活不会被 `open` 报告为 `reused`，`open` 会先重试关闭。
+- sleep/destroy 与显式 `close` 共用同一 owner 记录，不再「chat 失败也先关 database」：SDK 未确认关闭时 database 可能仍被使用。失败保留记录与进度；已知 SDK 失败映射为 `close_incomplete`，database 等未知错误原样抛出。
+- RivetKit 3.1.1 的 onSleep/onDestroy 包装在 `finally` 中清理 native runtime state 并 dispose activation；本包不把 hook 抛错当作 vars 跨激活保留。真实资源在 owner：同 key 的新 activation 必须先确认旧 lease 关闭，未确认会阻止 `resetOwnership`/`openDatabase`；进程停机用 `closeAll` 枚举重试。只有明确 incomplete 才重试，未知错误立即暴露，清空 vars 不代表 owner 已清空。`beginShutdown` 与新 `open` 共享同一有序准入：等待旧 close 后、注册/`create` 前重新校验停机状态，停机线性化之后不再 reset ownership、打开 database 或构造 SDK。
 - `onLifecycle` 只在 wake 成功之后与 sleep / destroy 收尾之后触发；抛错转为 `lifecycle_observer_failed`，不改变生命周期。
 
 ### 所有权与数据库
@@ -126,13 +182,13 @@ SDK 的 ownership 是 `get / set / remove`，没有原子 CAS；Rivet 对同一 
 2. 记录格式非法时 fail closed（SDK 抛错），不按“无记录”继续，也不覆盖；
 3. 清理失败中止 `open` 并记 `ownership_reset_failed`，此时不打开数据库、不触碰 KV 之外的任何资源。
 
-`openDatabase(target.storage)` 打开一次调用私有的会话目录；`createChatSession` 失败时必须先 `database.close()` 再抛出，不留半开句柄。actor 自身不持有任何数据库、不建表、不迁移。
+`openDatabase(target.storage)` 打开一次调用私有的会话目录；一取得就登记到 owner 记录，因此 `createChatSession` 失败时数据库仍由宿主负责关闭，关闭再次失败也不会丢 owner。actor 自身不持有数据库表结构、不建表、不迁移。
 
 ### Action 面
 
 | Action | 输入 | 输出 |
 | --- | --- | --- |
-| `open` | `ChatOpenTarget`（chatId、workspace、agent、storage、可选 session/sessionPath/lifecycle） | `ChatOpenResult`（chatId、workspace、binding、reused） |
+| `open` | `ChatOpenTarget`（chatId、canonical workspace URI、agent、storage、可选 session/sessionPath/lifecycle） | `ChatOpenResult`（chatId、workspace URI、binding、reused） |
 | `execute` | SDK `ChatUserAction` 原样 JSON + 可选 `ChatExecuteTarget` | `ChatExecuteResult`（receipt / 控制结果） |
 | `readPayload` | `ToolPayloadReadRef` + 可选 `ReadPayloadOptions` | `ToolPayloadResponse` |
 | `observe` | — | `ChatObservation \| null` |
@@ -152,9 +208,9 @@ actor 不复制 SDK 状态机：`execute` 在 SDK 边界内解析 action；`send
 
 `ChatConfig.runtime` 有两个分支：`{ kind: "wasm" }` 由 SDK 自带产物托管 ACP；`{ kind: "transport", factory }` 由宿主提供 `Transport`，每次激活（`create_new_session` 或 `change_session`）调用一次工厂。适配层不复制 transport 协议，只在 `ChatService` 边界注入 `ChatConfig`；请求/通知清单与关闭语义以 `docs/custom-runtime.md` 为准。
 
-包内的 `createEchoChatRuntime()` 是同一 transport 契约的最小实现：不启动进程、不接 LLM，把输入回显为 assistant 文本，并实现 `session/close`。它只用于打通 actor 闭环与测试，不写 transcript，也不跨激活保留历史。
+本包不内置 runtime：真实运行使用 SDK 的 `{ kind: "wasm" }`，产物加载、Store 连接与 ACP 托管都在 SDK 内；测试与示例只使用宿主提供的 `Transport`。两种分支共用同一个 `ChatService` 边界，包内不复制 transport 协议。
 
-`chat.close()` 需要 transport 确认 `session/close`：缺失、拒绝或超出 `closeDrainTimeoutMs` 时 SDK 抛 `ChatCloseIncompleteError`，actor 映射为 `close_incomplete` 并保留 SDK 侧 ownership 与未确认激活；actor 自身句柄已清空，继续使用需要重新 `open`。从未建立 Session 的激活不会发送 `session/close`。
+`chat.close()` 需要 transport 确认 `session/close`：缺失、拒绝或超出 `closeDrainTimeoutMs` 时 SDK 抛 `ChatCloseIncompleteError`，actor 映射为 `close_incomplete` 并保留 SDK 侧 ownership、未确认激活与 actor 句柄；只有所有资源都确认关闭后才清空 vars，重试、下次 `open` 或宿主 `closeAll` 会继续未完成的关闭。从未建立 Session 的激活不会发送 `session/close`。
 
 ### 错误映射
 
@@ -168,7 +224,7 @@ actor 不复制 SDK 状态机：`execute` 在 SDK 边界内解析 action；`send
 
 ### 组合根
 
-本包不提供 registry 工厂：`setup({ use: { chat, ... } })` 由部署方书写，actor options（`actionTimeout` 等）声明在 `createPeriChatActor({ options })` 上，避免出现“registry 接受但 Rivet 不解析”的伪配置。
+本包不提供 registry 工厂：`setup({ use: { chat, ... } })` 由部署方书写，actor options（`actionTimeout` 等）声明在 `createPeriChatActor({ options })` 上，避免出现“registry 接受但 Rivet 不解析”的伪配置。`createPeriChatActor` 与 `createSandboxMcpActor` 都要求显式注入 `HostResourceOwner`；组合根负责创建、强持有，并在停机时按 `beginShutdown → closeAll` 收尾。包内没有自动创建或模块级兜底 owner，避免资源在无主状态下被静默丢弃。`registry.shutdown()` 只做引擎/客户端收尾，可能吞掉部分错误，不能作为资源关闭确认；资源结果与 registry 结果分别处理，上一项失败不得跳过下一项。
 
 ## 5. 活动账本
 
@@ -300,7 +356,7 @@ HTTP handler 从 `resolveScope(request)` 得到 scope，放入 `AuthInfo.extra[S
 | ownership 记录 | 宿主的 `ChatOwnership` | 只在 `open` 前清理陈旧记录 |
 | resource 快照 | 宿主的 `ResourceQueries` | 每次读取实时查询，本包不缓存 |
 
-sleep 只关闭激活，不删除会话数据。下一次 `open` 重新装配，不恢复旧执行，也不自动回放历史：`open` 返回的 `binding` 仍是 `null`。是否可读历史取决于 runtime 与 Store；只有显式 `change_session` / `session/load` 才会请求历史，echo 不回放。数据库 schema、连接与放置都归宿主和 SDK。
+sleep 只关闭激活，不删除会话数据。下一次 `open` 重新装配，不恢复旧执行，也不自动回放历史：`open` 返回的 `binding` 仍是 `null`。是否可读历史取决于 runtime 与 Store；只有显式 `change_session` / `session/load` 才会请求历史，wasm runtime 从 Store 读取。数据库 schema、连接与放置都归宿主和 SDK。
 
 ## 11. 证据记录
 
@@ -320,9 +376,10 @@ sleep 只关闭激活，不删除会话数据。下一次 `open` 重新装配，
 1. Chat actor 的 action/event/wake/sleep 接线与 `UserError` 映射（结构级）；
 2. 活动账本、keep-awake 在租约交接、关闭 drain、观察失败下的行为；
 3. resource 只读查询的 scope 鉴权、掩码快照与 MCP 工具错误映射；
-4. sandbox actor 的引用计数、`closeAll` 只作用于自身 `sandboxId`，以及 sleep/destroy 的 best-effort 清理；
+4. sandbox actor 的引用计数、`closeAll` 只作用于自身 resource、sleep/destroy 的 best-effort 清理，以及 Sandbox MCP 的 URI 授权/凭据/`/mcp` 转发/关闭前收束；
 5. `open` 幂等、actor key 不匹配与陈旧 ownership 清理；
-6. MCP 作用域来自认证边界，会话与资源解耦。
+6. MCP 作用域来自认证边界，会话与资源解耦；
+7. 宿主 owner 在 vars 被替换后仍持有未确认资源、同 key 重开阻塞/成功、迟到旧 close 不删新记录、`closeAll` 的 timeout/并发/有界重试与未知错误暴露；sandbox cancel reject、late response 与丢 vars 新 activation 不能绕过旧 gate。
 
 ### 真实接入必须另验
 
@@ -331,7 +388,7 @@ sleep 只关闭激活，不删除会话数据。下一次 `open` 重新装配，
 | 真实 Peri runtime | 内部 Subagent、工具调用、交付与交互都能上报到活动账本 |
 | Rivet engine | sleep/wake、崩溃接管、`keepAwake` 与节点回收的时序 |
 | Store 读取 | `ResourceQueries` 指向的 Store 在多节点、超时与凭据轮换下的行为 |
-| Sandbox 运行端口 | 宿主进程能独立回收实例；sleep 丢失 holders 后 `closeAll` 能清理孤儿 |
+| Sandbox 运行端口 | 宿主进程能独立回收实例；sleep 丢失 holders 后 `closeAll` 能清理孤儿；真实 `peri-sandbox` 的环境与 MCP 在 actor `/mcp` 后可用 |
 | 部署 | 多节点、版本共存、drain 策略与忙碌节点保护 |
 
 ### 已知非目标
@@ -340,4 +397,5 @@ sleep 只关闭激活，不删除会话数据。下一次 `open` 重新装配，
 - 不保证外部副作用 exactly-once；
 - 不实现 Actor 放置或跨节点协调；
 - `keepAwake` 不防 SIGKILL、机器丢失或编排器强制终止；
+- `closeAll` 只做进程内、有界重试；SIGKILL/进程崩溃后未登记的本进程资源不会自动清理，cancel 永久拒绝的 sandbox 请求保持 incomplete；
 - 不提供 resource 写路径或持久化账本；这些属于宿主与 Store。

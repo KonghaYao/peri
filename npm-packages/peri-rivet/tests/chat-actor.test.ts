@@ -11,6 +11,8 @@ import {
 } from '@peri-code/sdk';
 import { UserError } from 'rivetkit';
 import type { ChatActorDiagnostic, ChatOpenTarget, ChatOwnership } from '../src/rivet/chat-ports.js';
+import { createHostResourceOwner } from '../src/rivet/host-resource-owner.js';
+import { WorkspaceURI } from '../src/rivet/workspace-uri.js';
 import { createDeferred } from '../src/util/deferred.js';
 import { createChatObservation } from './helpers.js';
 
@@ -43,7 +45,13 @@ const { readSessionOwnership } = realSdk;
 
 const CHAT_ID = 'chat_actor_1';
 const SESSION_ID = 'session_1';
+const MACHINE_ID = '00000000-0000-4000-8000-00000000000a';
+const OTHER_MACHINE_ID = '00000000-0000-4000-8000-00000000000b';
 const TARGET: ChatBindingTarget = { chatId: 'chat_1', sessionId: SESSION_ID, bindingRevision: 1 };
+
+function workspaceUri(runtimePath = '/workspace', machineId = MACHINE_ID): string {
+  return new WorkspaceURI({ machineId, runtimePath }).toString();
+}
 
 interface FakeChatOptions {
   readonly binding?: ChatBindingTarget | null;
@@ -125,14 +133,15 @@ interface FakeDatabase {
   readonly closeCount: number;
 }
 
-function createFakeDatabase(failClose = false): FakeDatabase {
+function createFakeDatabase(failures = 0): FakeDatabase {
   let closes = 0;
   const database = {
     listSessions: async () => [],
     getSession: async () => null,
     close: async () => {
       closes += 1;
-      if (failClose) {
+      if (failures > 0) {
+        failures -= 1;
         throw new Error('database close failed');
       }
     },
@@ -174,7 +183,7 @@ function envelope(sequence: number): ChatFactEnvelope {
 function target(overrides: Partial<ChatOpenTarget> = {}): ChatOpenTarget {
   return {
     chatId: CHAT_ID,
-    workspace: { id: 'ws_1', runtimePath: '/workspace' },
+    workspace: workspaceUri(),
     agent: { cwd: '/workspace' },
     storage: { url: 'http://store.local/db' },
     ...overrides,
@@ -228,23 +237,27 @@ function definitionFor(
     readonly onLifecycle?: (event: unknown) => void;
   } = {},
 ) {
-  const opened: { storageUrl: string | null } = { storageUrl: null };
+  const opened: { storageUrl: string | null; openCount: number } = { storageUrl: null, openCount: 0 };
   const database = overrides.database ?? createFakeDatabase();
   const ownership = overrides.ownership ?? ownershipStub(null).ownership;
+  const inputs: unknown[] = [];
   factory.calls = 0;
-  factory.behavior = async () => {
+  factory.behavior = async (input) => {
+    inputs.push(input);
     if (overrides.chat === undefined) {
       throw new Error('no fake chat configured');
     }
     return overrides.chat.chat;
   };
   const definition = createPeriChatActor({
+    owner: createHostResourceOwner(),
     openDatabase: (storage) => {
+      opened.openCount += 1;
       opened.storageUrl = storage.url;
       return database.database;
     },
     ownership,
-    machineId: 'machine_1',
+    machineId: MACHINE_ID,
     chatConfig: {
       runtime: {
         kind: 'transport',
@@ -256,7 +269,7 @@ function definitionFor(
     ...(overrides.onDiagnostic === undefined ? {} : { onDiagnostic: overrides.onDiagnostic }),
     ...(overrides.onLifecycle === undefined ? {} : { onLifecycle: overrides.onLifecycle }),
   });
-  return { definition, database, opened };
+  return { definition, database, opened, inputs };
 }
 
 beforeEach(() => {
@@ -344,17 +357,27 @@ describe('chat actor action surface', () => {
 describe('chat actor open', () => {
   test('opens the database from the target storage and builds the session once', async () => {
     const chat = createFakeChat({ binding: TARGET });
-    const { definition, database, opened } = definitionFor({ chat });
+    const { definition, database, opened, inputs } = definitionFor({ chat });
     const actions = actionsOf(definition);
     const context = actorContext();
 
     const result = await actions.open(context, target());
 
-    expect(result).toMatchObject({ chatId: CHAT_ID, reused: false, binding: TARGET });
+    expect(result).toMatchObject({
+      chatId: CHAT_ID,
+      workspace: workspaceUri(),
+      reused: false,
+      binding: TARGET,
+    });
     expect(opened.storageUrl).toBe('http://store.local/db');
     expect(factory.calls).toBe(1);
     expect(database.closeCount).toBe(0);
     expect(context.vars.chat).toBe(chat.chat);
+    // 越界后 SDK 仍只看到内部 WorkspaceRef：id 是 canonical URI，不做哈希或路径拼接。
+    expect(inputs[0]).toMatchObject({
+      target: { workspace: { id: workspaceUri(), runtimePath: '/workspace' } },
+      machineId: MACHINE_ID,
+    });
   });
 
   test('a repeated open with the same identity reuses the handle without rebuilding', async () => {
@@ -372,6 +395,206 @@ describe('chat actor open', () => {
     expect(chat.closeCount).toBe(0);
   });
 
+  test('equivalent configuration with different key insertion order is reused', async () => {
+    const chat = createFakeChat({ binding: TARGET });
+    const { definition } = definitionFor({ chat });
+    const actions = actionsOf(definition);
+    const context = actorContext();
+    const first = target({
+      agent: { cwd: '/workspace', settings: { alpha: 1, beta: 2 } },
+      session: { instructions: 'x', mcpServers: { local: { type: 'stdio', command: 'tool', args: ['a'] } } },
+      lifecycle: { startupSettleTimeoutMs: 100 },
+    });
+    const second = target({
+      agent: { settings: { beta: 2, alpha: 1 }, cwd: '/workspace' },
+      session: { mcpServers: { local: { args: ['a'], command: 'tool', type: 'stdio' } }, instructions: 'x' },
+      lifecycle: { startupSettleTimeoutMs: 100 },
+    });
+
+    await actions.open(context, first);
+    const again = (await actions.open(context, second)) as { readonly reused: boolean };
+
+    expect(again.reused).toBe(true);
+    expect(factory.calls).toBe(1);
+  });
+
+  test('non-plain session dependencies compare by identity', async () => {
+    const chat = createFakeChat({ binding: TARGET });
+    const { definition } = definitionFor({ chat });
+    const actions = actionsOf(definition);
+    const context = actorContext();
+    const server = { connect: async () => {}, close: async () => {} };
+
+    await actions.open(context, target({ session: { mcpServers: { local: { type: 'acp', server } } } }));
+    const same = (await actions.open(
+      context,
+      target({ session: { mcpServers: { local: { type: 'acp', server } } } }),
+    )) as { readonly reused: boolean };
+    expect(same.reused).toBe(true);
+
+    const raised = await actions
+      .open(
+        context,
+        target({
+          session: {
+            mcpServers: {
+              local: { type: 'acp', server: { connect: async () => {}, close: async () => {} } },
+            },
+          },
+        }),
+      )
+      .catch((error: unknown) => error);
+    expect(raised).toBeInstanceOf(UserError);
+    expect((raised as UserError).code).toBe('binding_conflict');
+    expect(factory.calls).toBe(1);
+  });
+
+  test.each([
+    ['agent provider', { agent: { cwd: '/workspace', settings: { model: 'other' } } }],
+    ['session instructions', { session: { instructions: 'other' } }],
+    [
+      'session MCP servers',
+      { session: { mcpServers: { extra: { type: 'http' as const, url: 'http://mcp' } } } },
+    ],
+    ['storage', { storage: { url: 'http://store.local/other', authToken: 'other-token' } }],
+    ['lifecycle', { lifecycle: { startupSettleTimeoutMs: 200 } }],
+  ])('a different %s is rejected instead of silently keeping the activation', async (_label, changed) => {
+    const chat = createFakeChat({ binding: TARGET });
+    const { definition } = definitionFor({ chat });
+    const actions = actionsOf(definition);
+    const context = actorContext();
+    const secret = 'project-secret-token';
+
+    await actions.open(
+      context,
+      target({
+        storage: { url: 'http://store.local/db', authToken: secret },
+        session: { instructions: 'original' },
+      }),
+    );
+    const raised = await actions
+      .open(
+        context,
+        target({
+          storage: { url: 'http://store.local/db', authToken: secret },
+          session: { instructions: 'original' },
+          ...(changed as Partial<ChatOpenTarget>),
+        }),
+      )
+      .catch((error: unknown) => error);
+
+    expect(raised).toBeInstanceOf(UserError);
+    expect((raised as UserError).code).toBe('binding_conflict');
+    expect(factory.calls).toBe(1);
+    expect(context.vars.chat).toBe(chat.chat);
+    const metadata = JSON.stringify((raised as UserError).metadata);
+    expect(metadata).not.toContain(secret);
+    expect(metadata).not.toContain('original');
+  });
+
+  test('two chat actors keep their agent and session inputs separate', async () => {
+    const chat = createFakeChat({ binding: TARGET });
+    const { definition, inputs } = definitionFor({ chat });
+    const actions = actionsOf(definition);
+    const agentA = { cwd: '/workspace', settings: { provider: 'anthropic', model: 'sonnet' } };
+    const agentB = { cwd: '/workspace', settings: { provider: 'deepseek', model: 'flash' } };
+    const sessionA = {
+      instructions: 'A',
+      mcpServers: { a: { type: 'http' as const, url: 'http://mcp-a' } },
+    };
+    const sessionB = {
+      instructions: 'B',
+      mcpServers: { b: { type: 'stdio' as const, command: 'mcp-b' } },
+    };
+
+    await actions.open(actorContext([CHAT_ID]), target({ agent: agentA, session: sessionA }));
+    await actions.open(
+      actorContext(['chat_actor_2']),
+      target({
+        chatId: 'chat_actor_2',
+        agent: agentB,
+        session: sessionB,
+      }),
+    );
+
+    const captured = inputs as Array<{
+      target: { sessionId: string; agent: unknown; session: unknown };
+      machineId: string;
+    }>;
+    expect(captured[0]?.target).toMatchObject({ sessionId: CHAT_ID, agent: agentA, session: sessionA });
+    expect(captured[1]?.target).toMatchObject({
+      sessionId: 'chat_actor_2',
+      agent: agentB,
+      session: sessionB,
+    });
+    expect(captured.map((input) => input.machineId)).toEqual([MACHINE_ID, MACHINE_ID]);
+    expect(captured[0]?.target.agent).not.toEqual(captured[1]?.target.agent);
+    expect(captured[0]?.target.session).not.toEqual(captured[1]?.target.session);
+  });
+
+  test('concurrent open calls for the same target construct one activation', async () => {
+    const chat = createFakeChat({ binding: TARGET });
+    const { definition, database, opened } = definitionFor({ chat });
+    const actions = actionsOf(definition);
+    const context = actorContext();
+
+    const results = await Promise.all([actions.open(context, target()), actions.open(context, target())]);
+    expect(results[0]).toMatchObject({ reused: false });
+    expect(results[1]).toMatchObject({ reused: true });
+    expect(opened.openCount).toBe(1);
+    expect(factory.calls).toBe(1);
+
+    await actions.close(context);
+    expect(database.closeCount).toBe(1);
+  });
+
+  test('concurrent open calls with different targets construct once and conflict', async () => {
+    const chat = createFakeChat({ binding: TARGET });
+    const { definition, opened } = definitionFor({ chat });
+    const actions = actionsOf(definition);
+    const context = actorContext();
+
+    const results = await Promise.allSettled([
+      actions.open(context, target()),
+      actions.open(context, target({ workspace: workspaceUri('/other') })),
+    ]);
+    expect(results[0]?.status).toBe('fulfilled');
+    expect(results[1]?.status).toBe('rejected');
+    expect((results[1] as PromiseRejectedResult).reason).toMatchObject({ code: 'binding_conflict' });
+    expect(opened.openCount).toBe(1);
+    await actions.close(context);
+  });
+
+  test('a failed concurrent initialization leaves no database behind and a retry succeeds', async () => {
+    const chat = createFakeChat({ binding: TARGET });
+    const { definition, database, opened } = definitionFor({ chat });
+    const actions = actionsOf(definition);
+    const context = actorContext();
+    const inner = factory.behavior;
+    if (inner === null) throw new Error('expected a configured factory');
+    let fail = true;
+    factory.behavior = async (input) => {
+      if (fail) {
+        fail = false;
+        throw new Error('init failed once');
+      }
+      return await inner(input);
+    };
+
+    const results = await Promise.allSettled([
+      actions.open(context, target()),
+      actions.open(context, target()),
+    ]);
+    expect(results[0]?.status).toBe('rejected');
+    expect(results[1]?.status).toBe('fulfilled');
+    expect(opened.openCount).toBe(2);
+    expect(database.closeCount).toBe(1);
+    expect(context.vars.chat).toBe(chat.chat);
+
+    await actions.close(context);
+    expect(database.closeCount).toBe(2);
+  });
+
   test('a different workspace on the same actor is a binding conflict', async () => {
     const chat = createFakeChat({ binding: TARGET });
     const { definition } = definitionFor({ chat });
@@ -380,13 +603,58 @@ describe('chat actor open', () => {
 
     await actions.open(context, target());
     const raised = await actions
-      .open(context, target({ workspace: { id: 'ws_2', runtimePath: '/other' } }))
+      .open(context, target({ workspace: workspaceUri('/other') }))
       .catch((error: unknown) => error);
 
     expect(raised).toBeInstanceOf(UserError);
     expect((raised as UserError).code).toBe('binding_conflict');
     expect(factory.calls).toBe(1);
     expect(context.vars.chat).toBe(chat.chat);
+  });
+
+  test('a foreign machine is rejected before ownership, database and runtime side effects', async () => {
+    const stub = ownershipStub(null);
+    const { definition, opened } = definitionFor({
+      chat: createFakeChat({ binding: TARGET }),
+      ownership: stub.ownership,
+    });
+    const actions = actionsOf(definition);
+    const context = actorContext();
+
+    const raised = await actions
+      .open(context, target({ workspace: workspaceUri('/workspace', OTHER_MACHINE_ID) }))
+      .catch((error: unknown) => error);
+
+    expect(raised).toBeInstanceOf(UserError);
+    expect((raised as UserError).code).toBe('invalid_identity');
+    expect((raised as UserError).metadata).toMatchObject({ details: { reason: 'machine_mismatch' } });
+    expect(stub.reads).toHaveLength(0);
+    expect(opened.storageUrl).toBeNull();
+    expect(factory.calls).toBe(0);
+    expect(context.vars).toEqual({ chat: null, database: null, open: null });
+  });
+
+  test.each([
+    ['a raw path', '/workspace'],
+    ['a non-canonical scheme', `PERI+SANDBOX://${MACHINE_ID}/workspace`],
+    ['an uppercase machine id', `peri+sandbox://${MACHINE_ID.toUpperCase()}/workspace`],
+  ])('rejects %s without side effects', async (_label, workspace) => {
+    const stub = ownershipStub(null);
+    const { definition, opened } = definitionFor({
+      chat: createFakeChat({ binding: TARGET }),
+      ownership: stub.ownership,
+    });
+    const actions = actionsOf(definition);
+    const context = actorContext();
+
+    const raised = await actions.open(context, target({ workspace })).catch((error: unknown) => error);
+
+    expect(raised).toBeInstanceOf(UserError);
+    expect((raised as UserError).code).toBe('invalid_identity');
+    expect(stub.reads).toHaveLength(0);
+    expect(opened.storageUrl).toBeNull();
+    expect(factory.calls).toBe(0);
+    expect(context.vars).toEqual({ chat: null, database: null, open: null });
   });
 
   test('a failed construction closes the database and leaves no vars behind', async () => {
@@ -525,7 +793,7 @@ describe('chat actor close and sleep', () => {
     expect(context.vars.chat).toBeNull();
   });
 
-  test('sleep closes the database even when the chat close fails', async () => {
+  test('sleep reports close_incomplete, keeps the retryable owner and does not close the database', async () => {
     const diagnostics: ChatActorDiagnostic[] = [];
     const chat = createFakeChat({ binding: TARGET, failClose: 1 });
     const { definition, database } = definitionFor({
@@ -536,18 +804,95 @@ describe('chat actor close and sleep', () => {
     const context = actorContext();
     await actions.open(context, target());
 
-    await (definition.config.onSleep as (c: unknown) => Promise<void>)(context);
-
+    const raised = await (definition.config.onSleep as (c: unknown) => Promise<void>)(context).catch(
+      (error: unknown) => error,
+    );
+    expect(raised).toBeInstanceOf(UserError);
+    expect((raised as UserError).code).toBe('close_incomplete');
     expect(chat.closeCount).toBe(1);
-    expect(database.closeCount).toBe(1);
-    expect(context.vars).toEqual({ chat: null, database: null, open: null });
+    expect(database.closeCount).toBe(0);
+    expect(context.vars.chat).toBe(chat.chat);
+    expect(context.vars.database).not.toBeNull();
     expect(diagnostics.map((diagnostic) => diagnostic.type)).toEqual(['close_failed']);
     expect(diagnostics[0]).toMatchObject({ scope: 'chat' });
+
+    // The failed hook keeps the progress and the owner; retrying the same hook closes for real.
+    await (definition.config.onSleep as (c: unknown) => Promise<void>)(context);
+    expect(chat.closeCount).toBe(2);
+    expect(database.closeCount).toBe(1);
+    expect(context.vars).toEqual({ chat: null, database: null, open: null });
   });
 
-  test('a failed close surfaces close_incomplete and can be retried', async () => {
+  test('destroy also refuses to clear an activation whose chat close is unconfirmed', async () => {
     const chat = createFakeChat({ binding: TARGET, failClose: 1 });
-    const { definition } = definitionFor({ chat });
+    const { definition, database } = definitionFor({ chat });
+    const actions = actionsOf(definition);
+    const context = actorContext();
+    await actions.open(context, target());
+
+    const raised = await (definition.config.onDestroy as (c: unknown) => Promise<void>)(context).catch(
+      (error: unknown) => error,
+    );
+    expect(raised).toBeInstanceOf(UserError);
+    expect((raised as UserError).code).toBe('close_incomplete');
+    expect(chat.closeCount).toBe(1);
+    expect(database.closeCount).toBe(0);
+    expect(context.vars.chat).toBe(chat.chat);
+
+    await (definition.config.onDestroy as (c: unknown) => Promise<void>)(context);
+    expect(chat.closeCount).toBe(2);
+    expect(database.closeCount).toBe(1);
+    expect(context.vars).toEqual({ chat: null, database: null, open: null });
+  });
+
+  test('sleep keeps chat-closed progress and retries only the database after a db failure', async () => {
+    const chat = createFakeChat({ binding: TARGET });
+    const database = createFakeDatabase(1);
+    const { definition } = definitionFor({ chat, database });
+    const actions = actionsOf(definition);
+    const context = actorContext();
+    await actions.open(context, target());
+
+    await expect((definition.config.onSleep as (c: unknown) => Promise<void>)(context)).rejects.toThrow(
+      'database close failed',
+    );
+    expect(chat.closeCount).toBe(1);
+    expect(database.closeCount).toBe(1);
+    expect(context.vars.chat).toBe(chat.chat);
+    expect(context.vars.database).not.toBeNull();
+
+    await (definition.config.onSleep as (c: unknown) => Promise<void>)(context);
+    expect(chat.closeCount).toBe(1);
+    expect(database.closeCount).toBe(2);
+    expect(context.vars).toEqual({ chat: null, database: null, open: null });
+  });
+
+  test('a failed sleep and a queued explicit close serialize without deadlocking', async () => {
+    const chat = createFakeChat({ binding: TARGET, failClose: 1 });
+    const { definition, database } = definitionFor({ chat });
+    const actions = actionsOf(definition);
+    const context = actorContext();
+    await actions.open(context, target());
+
+    const sleeping = (definition.config.onSleep as (c: unknown) => Promise<void>)(context).catch(
+      (error: unknown) => error,
+    );
+    const closing = actions.close(context);
+    const [sleepFailure, closed] = await Promise.all([sleeping, closing]);
+
+    expect(sleepFailure).toBeInstanceOf(UserError);
+    expect((sleepFailure as UserError).code).toBe('close_incomplete');
+    expect(closed).toEqual({ closed: true });
+    expect(chat.closeCount).toBe(2);
+    expect(database.closeCount).toBe(1);
+    expect(context.vars).toEqual({ chat: null, database: null, open: null });
+    // The queue is still usable after a rejected hook task.
+    await expect(actions.close(context)).resolves.toEqual({ closed: true });
+  });
+
+  test('a failed close retains the handle and a retry closes for real', async () => {
+    const chat = createFakeChat({ binding: TARGET, failClose: 1 });
+    const { definition, database } = definitionFor({ chat });
     const actions = actionsOf(definition);
     const context = actorContext();
     await actions.open(context, target());
@@ -555,11 +900,80 @@ describe('chat actor close and sleep', () => {
     const raised = await actions.close(context).catch((error: unknown) => error);
     expect(raised).toBeInstanceOf(UserError);
     expect((raised as UserError).code).toBe('close_incomplete');
-    expect(context.vars.chat).toBeNull();
+    expect(context.vars.chat).toBe(chat.chat);
+    expect(context.vars.database).not.toBeNull();
+    expect(context.vars.open).not.toBeNull();
+    expect(chat.closeCount).toBe(1);
+    expect(database.closeCount).toBe(0);
 
-    // The handle was released before the failure surfaced, so the next open rebuilds cleanly.
+    await expect(actions.close(context)).resolves.toEqual({ closed: true });
+    expect(chat.closeCount).toBe(2);
+    expect(database.closeCount).toBe(1);
+    expect(context.vars.chat).toBeNull();
+  });
+
+  test('a persistently failing close never reports closed', async () => {
+    const chat = createFakeChat({ binding: TARGET, failClose: 10 });
+    const { definition, database } = definitionFor({ chat });
+    const actions = actionsOf(definition);
+    const context = actorContext();
+    await actions.open(context, target());
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const raised = await actions.close(context).catch((error: unknown) => error);
+      expect(raised).toBeInstanceOf(UserError);
+      expect((raised as UserError).code).toBe('close_incomplete');
+      expect(context.vars.chat).toBe(chat.chat);
+    }
+    expect(chat.closeCount).toBe(2);
+    expect(database.closeCount).toBe(0);
+  });
+
+  test('a database close failure keeps the chat-closed progress and retries only the database', async () => {
+    const chat = createFakeChat({ binding: TARGET });
+    const database = createFakeDatabase(1);
+    const { definition } = definitionFor({ chat, database });
+    const actions = actionsOf(definition);
+    const context = actorContext();
+    await actions.open(context, target());
+
+    await expect(actions.close(context)).rejects.toThrow('database close failed');
+    expect(chat.closeCount).toBe(1);
+    expect(database.closeCount).toBe(1);
+    expect(context.vars.chat).toBe(chat.chat);
+
+    await expect(actions.close(context)).resolves.toEqual({ closed: true });
+    expect(chat.closeCount).toBe(1);
+    expect(database.closeCount).toBe(2);
+    expect(context.vars.chat).toBeNull();
+  });
+
+  test('a failed close is not reported as a reusable open and is retried first', async () => {
+    const chat = createFakeChat({ binding: TARGET, failClose: 1 });
+    const { definition } = definitionFor({ chat });
+    const actions = actionsOf(definition);
+    const context = actorContext();
+    await actions.open(context, target());
+
+    await actions.close(context).catch(() => undefined);
     await expect(actions.open(context, target())).resolves.toMatchObject({ reused: false });
+    expect(chat.closeCount).toBe(2);
     expect(factory.calls).toBe(2);
+    await actions.close(context);
+  });
+
+  test('concurrent close calls share one close and never double-close', async () => {
+    const chat = createFakeChat({ binding: TARGET });
+    const { definition, database } = definitionFor({ chat });
+    const actions = actionsOf(definition);
+    const context = actorContext();
+    await actions.open(context, target());
+
+    const results = await Promise.all([actions.close(context), actions.close(context)]);
+    expect(results).toEqual([{ closed: true }, { closed: true }]);
+    expect(chat.closeCount).toBe(1);
+    expect(database.closeCount).toBe(1);
+    expect(context.vars.chat).toBeNull();
   });
 
   test('destroy reports the lifecycle event after teardown', async () => {
