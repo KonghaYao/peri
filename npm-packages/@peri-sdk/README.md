@@ -426,6 +426,28 @@ interface SandboxAdapterInstance {
 7. 沙箱隔离由 adapter 实现决定；使用 `peri-sandbox` 时由 `adapterOptions.profile` / `profileName` 控制（出站域名、只读路径、内存/CPU/pids 上限）。SDK 不扩大这些权限，也不把 token 写入日志或状态。
 8. 同一 `sandboxId` 的创建参数不可静默改写：显式冲突返回 `conflict`，需先 `close()` 再用新参数创建。`adapterOptions` 按 key 排序的稳定 JSON 比较；不可序列化且不是同一引用时同样按冲突处理。
 
+## 观测快照（只读轮询）
+
+`@peri-code/sdk/observe` 把 `ChatManager.observe()` 与可选的 `SandboxManager.snapshot()` 组合成一次纯数据快照。读取不启动 WASM/ACP/sandbox、不改变绑定或队列；SDK 不提供 SSE/WebSocket 订阅，调用方按自己的节奏轮询。
+
+```ts
+import { observeBackend } from "@peri-code/sdk/observe";
+
+const snapshot = observeBackend({ chats, sandboxes });
+// snapshot.observedAt: ISO 8601
+// snapshot.agents: [{ agentId, chat, sandbox }]，按 agentId 稳定排序
+// snapshot.orphanSandboxes: 未被任何 chat 的 MCP endpoint 引用的 sandbox（含未 ready、无 endpoint 的实例）
+// snapshot.totals: { agents, chats, activeInstances, mcpServers, sandboxMcpServers, sandboxes }
+```
+
+- 一个 Agent 节点对应一个 Chat，当前 `agentId` 即 `chatId`；sandbox 通过 MCP endpoint（origin + pathname）匹配，每个 Chat 最多关联一个，同一 sandbox 可被多个 Chat 共享引用。
+- `chat.phase` 是有限派生值 `empty | bound | closing | blocked`；`phaseLimited: true` 表示它不是内部绑定状态机的完整投影。
+- `bindExisting` 后 SDK 不持有既有 Session 的 MCP 配置：`chat.mcp.source === "unknown"` 且 `servers` 为空；未创建/绑定会话的 Chat 同样是 `unknown`。此时实际被使用的 sandbox 可能显示为 orphan 或未关联。
+- HTTP endpoint 去掉 userinfo/query/hash；只输出 header 名称；stdio 只给 `type`/`name`，不输出 command/args/env。
+- `lastError.message` 由共享脱敏函数处理：`Authorization`/`Proxy-Authorization` 与常见敏感 header（`X-Api-Key`、`Cookie`、`Set-Cookie`、`X-Auth-Token`、`Credential`、`Password`、`Secret` 等）的值、独立 `Bearer`/`Basic` 片段、URL 的 userinfo/query/hash，以及非 URL 的 `token=`/`access_token=`/`api_key=`/`secret=` 都替换为 `[redacted]`；文本中的 URL 收敛为 origin + pathname。`SandboxManager.snapshot()` 与 `observeBackend()` 会在输出边界再次脱敏，自定义 `SandboxObservationSource` 也不能绕过。
+- 未 ready（没有 endpoint）的 sandbox 也会被列为 `orphanSandboxes`，快照不含 token。脱敏是纵深防御，不保证任意自由文本绝对无敏感信息。
+- 配置模型、持久化与后端存储归 peri-cf；SDK 不新增存储。
+
 ## 公开入口
 
 | 入口 | 内容 |
@@ -436,6 +458,7 @@ interface SandboxAdapterInstance {
 | `@peri-code/sdk/wasm-node` | `/wasm` 加 Node 兼容的网络/DNS 端口 |
 | `@peri-code/sdk/portable` | 不装配 Bun/stdio 进程或本地 SQLite；Chat 控制面 + 执行准入核心 |
 | `@peri-code/sdk/sandbox` | server-side（Node 22.12+ / Bun）；`SandboxAdapter` 契约 + `SandboxManager` 多实例注册表 + `SandboxHandle`；实现由宿主注入，SDK 不加载具体 adapter，session 由调用方组装并在 `createChat` 传入 |
+| `@peri-code/sdk/observe` | 只读观测快照：`observeBackend({ chats, sandboxes? })`；组合 Chat/Sandbox 状态与安全 endpoint，不启动实例、不新增存储 |
 | `@peri-code/sdk/openui` | 轻量门面：围栏切分、主题桥与共享类型 |
 | `@peri-code/sdk/openui/renderer` | `OpenUIProgram`；重出口，消费端应懒加载 |
 | `@peri-code/sdk/openui/error-boundary` | `OpenUIErrorBoundary`；同步兜底，不牵入 Renderer |

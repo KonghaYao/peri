@@ -42,6 +42,11 @@
       "import": "./dist/sandbox.js",
       "default": "./dist/sandbox.js"
     },
+    "./observe": {
+      "types": "./dist/entries/observe.d.ts",
+      "import": "./dist/observe.js",
+      "default": "./dist/observe.js"
+    },
     "./openui": {
       "types": "./src/openui/index.ts",
       "import": "./src/openui/index.ts"

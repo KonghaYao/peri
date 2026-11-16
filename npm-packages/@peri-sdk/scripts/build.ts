@@ -57,6 +57,13 @@ const sandbox = await Bun.build({
   format: "esm",
 });
 if (!sandbox.success) throw new Error(`Sandbox SDK bundle failed: ${sandbox.logs.join("; ")}`);
+const observe = await Bun.build({
+  entrypoints: [resolve(packageRoot, "src/entries/observe.ts")],
+  outdir: output,
+  target: "node",
+  format: "esm",
+});
+if (!observe.success) throw new Error(`Observe SDK bundle failed: ${observe.logs.join("; ")}`);
 const wasmNode = await Bun.build({
   entrypoints: [resolve(packageRoot, "src/entries/wasm-node.ts")],
   outdir: output,

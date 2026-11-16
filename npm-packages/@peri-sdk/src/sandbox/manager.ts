@@ -14,6 +14,12 @@ import {
   type SandboxManagerOptions,
   type SandboxManagerStartOptions,
 } from "./types";
+import type { SandboxObservation } from "../contracts/observability";
+import {
+  compareObservationIds,
+  redactObservationText,
+  safeEndpointUrl,
+} from "../util/observability";
 
 interface NormalizedOptions<TOptions> {
   adapter: SandboxAdapter<TOptions>;
@@ -129,6 +135,38 @@ export class SandboxManager<TOptions = unknown> {
   /** Snapshot of the current handles in creation order. */
   list(): SandboxHandle<TOptions>[] {
     return [...this.handles.values()];
+  }
+
+  /**
+   * 只读观测快照，按 sandboxId 稳定排序。
+   *
+   * 只读 handle 的 `status()`；不启动、停止或重新探测 sandbox。endpoint 输出
+   * origin + pathname，错误消息经共享脱敏再次处理（header/URL/赋值形式），
+   * token 与 header 值不进入快照。
+   */
+  snapshot(): SandboxObservation[] {
+    return this.list()
+      .map((handle) => {
+        const status = handle.status();
+        return {
+          sandboxId: status.sandboxId,
+          state: status.state,
+          serverName: handle.serverName,
+          mcpEndpoint: safeEndpointUrl(status.mcpUrl) ?? null,
+          workspace:
+            status.workspace === null ? null : { ...status.workspace },
+          lastError:
+            status.lastError === null
+              ? null
+              : {
+                  code: status.lastError.code,
+                  message: redactObservationText(status.lastError.message),
+                },
+        };
+      })
+      .sort((left, right) =>
+        compareObservationIds(left.sandboxId, right.sandboxId),
+      );
   }
 
   /**

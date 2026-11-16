@@ -8,7 +8,13 @@ import {
 } from "../wasm/runtime-pool";
 import { startWasmRuntime, type WasmRuntimeDiagnosticKind } from "../wasm/runtime";
 import { withDeadline } from "../util/deadline";
+import { compareObservationIds } from "../util/observability";
 import type { ChatDatabase, ChatSessionDirectoryEntry } from "../contracts/chat";
+import type {
+    ChatInstanceObservationSeed,
+    ChatInstanceState,
+    ChatObservation,
+} from "../contracts/observability";
 import type {
     ChatSessionInit,
     ChatSessionOptions,
@@ -257,6 +263,42 @@ export class ChatManager implements ChatManagerContract {
     }
 
     /**
+     * 只读 Chat 观测快照，按 chatId 稳定排序。
+     *
+     * WASM 实例按运行池的 ownerChatId 合并；同一 Chat 有多条时优先 live，
+     * 再按启动时间取最新。读取不会启动运行后端，也不改变绑定/队列。
+     */
+    observe(): ChatObservation[] {
+        const seeds = new Map<string, ChatInstanceObservationSeed>();
+        for (const instance of this.runtimeSnapshot().instances) {
+            if (instance.chatId === null) continue;
+            const candidate: ChatInstanceObservationSeed = {
+                state: instance.state,
+                startedAtMs: instance.startedAtMs,
+                ...(instance.linearMemoryBytes === null
+                    ? {}
+                    : { linearMemoryBytes: instance.linearMemoryBytes }),
+            };
+            const current = seeds.get(instance.chatId);
+            const rank = instanceStateRank(candidate.state);
+            if (
+                current === undefined ||
+                rank < instanceStateRank(current.state) ||
+                (rank === instanceStateRank(current.state) &&
+                    (candidate.startedAtMs ?? 0) >
+                        (current.startedAtMs ?? 0))
+            ) {
+                seeds.set(instance.chatId, candidate);
+            }
+        }
+        return [...this.chats.values()]
+            .map((chat) => this.observeChat(chat, seeds.get(chat.id)))
+            .sort((left, right) =>
+                compareObservationIds(left.chatId, right.chatId),
+            );
+    }
+
+    /**
      * 先封闭新准入，再结算在途绑定与关闭，最后关闭 WASM 运行后端。
      * 失败聚合上报并保留句柄/ownership；可再次调用重试。
      */
@@ -353,8 +395,51 @@ export class ChatManager implements ChatManagerContract {
         return this.wasmRuntimes.acquire(options);
     }
 
+    private observeChat(
+        chat: ChatService,
+        seed?: ChatInstanceObservationSeed,
+    ): ChatObservation {
+        const observation = chat.observe();
+        if (this.runtime.kind !== "wasm" || seed === undefined) {
+            return observation;
+        }
+        const current = observation.instance;
+        return {
+            ...observation,
+            instance: {
+                kind: "wasm",
+                state: seed.state,
+                ...(seed.startedAtMs === undefined
+                    ? {}
+                    : { startedAtMs: seed.startedAtMs }),
+                ...(seed.linearMemoryBytes === undefined
+                    ? {}
+                    : { linearMemoryBytes: seed.linearMemoryBytes }),
+                running: current?.running ?? false,
+                pendingInputCount: current?.pendingInputCount ?? 0,
+                pendingInteractionCount:
+                    current?.pendingInteractionCount ?? 0,
+            },
+        };
+    }
+
     private removeChat(id: string): void {
         this.chats.delete(id);
         this.sessions.removeChat(id);
+    }
+}
+
+function instanceStateRank(state: ChatInstanceState): number {
+    switch (state) {
+        case "live":
+            return 0;
+        case "closing":
+            return 1;
+        case "close-unconfirmed":
+            return 2;
+        case "closed":
+            return 3;
+        default:
+            return 4;
     }
 }
