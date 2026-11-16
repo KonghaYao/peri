@@ -28,6 +28,8 @@ use full_compact::SUMMARY_FINAL_PROMPT;
 #[cfg(test)]
 pub(super) use full_compact::full_compact_inner;
 
+pub(super) use full_compact::full_compact_inner_with_hard_memory;
+#[cfg(test)]
 pub(super) use full_compact::full_compact_inner_with_protected;
 
 #[cfg(test)]

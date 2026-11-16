@@ -8,6 +8,7 @@ pub(super) use crate::agent::compact_v2::full::summary::SummaryRecoveryReason;
 pub(super) use crate::agent::compact_v2::full::summary::SummaryStep;
 
 pub(super) use crate::agent::compact_v2::config::CompactConfig;
+pub(super) use crate::agent::compact_v2::hard_memory::HardMemorySource;
 pub(super) use crate::agent::compact_v2::projection::{
     MessageProjectionDirective, PROJECTION_POLICY_VERSION,
 };
@@ -85,12 +86,28 @@ pub(in crate::agent::compact_v2) async fn full_compact_inner(
 ///
 /// 受保护结果不进入摘要请求，也不被归档；它们由派生模型视图在摘要之后按接收
 /// 顺序重新投影。只有会话路径传入非空保护集合。
+#[cfg(test)]
 pub(in crate::agent::compact_v2) async fn full_compact_inner_with_protected(
+    transcript: &mut MessageTranscript,
+    llm: Option<&dyn peri_model::Model>,
+    config: &CompactConfig,
+    cwd: &str,
+    protected: &crate::session::async_result_mailbox::ProtectedResults,
+) -> AgentResult<crate::agent::compact_v2::CompactResult> {
+    full_compact_inner_with_hard_memory(transcript, llm, config, cwd, protected, None).await
+}
+
+/// 带运行时硬记忆来源的 Full Compact（生产入口）。
+///
+/// 软摘要生成后才调用 `hard_memory.snapshot()`，捕获摘要请求期间发生的任务
+/// 终态变化；硬记忆为空时不追加第二条消息，保持旧 compact 输出不变。
+pub(in crate::agent::compact_v2) async fn full_compact_inner_with_hard_memory(
     transcript: &mut MessageTranscript,
     llm: Option<&dyn peri_model::Model>,
     config: &CompactConfig,
     _cwd: &str,
     protected: &crate::session::async_result_mailbox::ProtectedResults,
+    hard_memory: Option<&dyn HardMemorySource>,
 ) -> AgentResult<crate::agent::compact_v2::CompactResult> {
     let llm = llm.ok_or(crate::error::AgentError::CompactNoLlm)?;
     // Full 和 Reason 读取同一已提交视图。按摘要 provider 的协议保护 reasoning；恢复器只接受
@@ -245,10 +262,19 @@ pub(in crate::agent::compact_v2) async fn full_compact_inner_with_protected(
             )?;
         }
     }
+    // 硬记忆在软摘要生成之后读取：摘要请求期间的终态变化必须反映在第二条消息里。
+    // 空快照不追加消息，无任务/无 goal 的会话保持既有 compact 输出。
+    let hard_memory = hard_memory
+        .map(HardMemorySource::snapshot)
+        .and_then(|snapshot| snapshot.render());
+    let mut appended_messages = vec![build_summary_message(&summary, summary_id)];
+    if let Some(body) = hard_memory {
+        appended_messages.push(build_hard_memory_message(&body));
+    }
     transcript
         .commit_compaction_lifecycle(CompactionChange {
             flag_updates,
-            appended_messages: vec![build_summary_message(&summary, summary_id)],
+            appended_messages,
         })
         .await?;
     transcript.mark_full_compaction_committed();
@@ -653,4 +679,10 @@ pub(super) fn build_summary_message(summary: &str, id: MessageId) -> BaseMessage
         summary
     ))
     .with_message_id(id)
+}
+
+/// 构造硬记忆消息：独立 Human 段，首行是稳定标记，不复用续接标记
+/// （续接标记只属于软摘要，旧版本读取时把本消息当普通历史即可）。
+pub(super) fn build_hard_memory_message(body: &str) -> BaseMessage {
+    BaseMessage::human(body.to_string())
 }
