@@ -65,7 +65,7 @@ fn test_tool_name_is_search_extra_tools() {
 fn test_description_uses_real_deferred_examples() {
     let tool = SearchExtraTools::new(build_test_index());
     let description = tool.description();
-    assert!(description.contains("select:mcp__cron__cron_list,mcp__cron__cron_remove"));
+    assert!(description.contains("select:mcp__peri__cron_list,mcp__peri__cron_remove"));
     assert!(!description.contains("CronCreate"));
     assert!(!description.contains("Snip"));
     assert!(description.contains("没有匹配时返回空数组"));
