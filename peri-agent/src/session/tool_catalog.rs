@@ -123,8 +123,10 @@ impl ToolFilterPolicy {
             if tool.mcp_server_name().is_some()
                 && (disabled.contains("McpMiddleware")
                     || tool.builtin_mcp_instance().is_some_and(|instance| {
-                        peri_acp_types::builtin_mcp::find(instance)
-                            .is_some_and(|declared| disabled.contains(declared.policy_key))
+                        peri_acp_types::builtin_mcp::find(instance).is_some_and(|declared| {
+                            disabled.contains(declared.name)
+                                || disabled.contains(declared.legacy_policy_key)
+                        })
                     }))
             {
                 return false;
@@ -597,7 +599,7 @@ mod filter_policy_parity_tests {
                     .iter()
                     .find(|tool| tool.original_name == original_name)
             })
-            .map(|tool| tool.effective_name)
+            .map(|tool| tool.legacy_name)
             .expect("builtin 声明表应声明该 (实例, 原始工具名)")
     }
 

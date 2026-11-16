@@ -341,7 +341,7 @@ fn effective_name(instance: &str, original_name: &str) -> &'static str {
                 .iter()
                 .find(|tool| tool.original_name == original_name)
         })
-        .map(|tool| tool.effective_name)
+        .map(|tool| tool.legacy_name)
         .expect("builtin 声明表应声明该 (实例, 原始工具名)")
 }
 

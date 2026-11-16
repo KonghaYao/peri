@@ -160,9 +160,11 @@ impl PreparedSessionInputs {
             super::workspace::frozen_runtime_env(host, &self.session_mcp_servers, &self.cwd);
         let mut deployment_closed = std::collections::HashSet::new();
         let capabilities = self.deployment_capabilities;
-        for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
-            if !capabilities.builtin_mcp || (instance.name == "cron" && !capabilities.cron) {
-                deployment_closed.insert(instance.policy_key.to_owned());
+        // 部署关闭按 capability 身份记录；兼容期的实例关闭集由
+        // `builtin_closed_instances` 经同一能力表映射得到，不写回旧 policy_key。
+        for capability in peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES {
+            if !capabilities.builtin_mcp || (capability.name == "cron" && !capabilities.cron) {
+                deployment_closed.insert(capability.name.to_owned());
             }
         }
         // beta flag 投影：从本次选中的配置来源（快照）派生一次，随冻结载体传播

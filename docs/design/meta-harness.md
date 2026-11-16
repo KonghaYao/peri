@@ -155,8 +155,9 @@ subagent_mw 槽位）联动置空，禁止半开状态。
 **语义**：
 
 - **关闭面 = 能力提供者**：链槽位 middleware 以 key = `name()` 返回值关闭；builtin
-  MCP 实例以策略键（`BUILTIN_INSTANCE_POLICY_KEYS`，映射唯一来源是声明表的
-  `policy_key`）关闭。同一提供者的全部工具随之一并关闭（连坐语义）。
+  MCP 能力以能力名或迁移期旧策略键（`BUILTIN_INSTANCE_POLICY_KEYS`，由能力表的
+  `legacy_policy_key` 派生）关闭，两者经 `capability_of_switch` 映射到同一能力。
+  同一提供者的全部工具随之一并关闭（连坐语义）。
 - 关闭后该 middleware 的钩子（before_agent / before_tool /
   prompt_contribution / first_turn_reminder）全部不执行——工具与提示词贡献
   同时消失。

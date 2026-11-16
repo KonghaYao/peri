@@ -196,7 +196,7 @@ fn test_hitl_section_rendered_by_holder() {
                 .find(|tool| tool.original_name == "Bash")
         })
         .expect("workspace 实例必须登记 Bash（N8 改名的前提）")
-        .effective_name;
+        .legacy_name;
     assert!(
         result.contains(&format!("`{bash_effective}` — shell command execution")),
         "sensitive 列表按 default_requires_approval 代码事实生成（条目名为模型面 effective name）"

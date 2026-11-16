@@ -276,7 +276,7 @@ pub(super) fn persist_partial_output_with_ref(output: &str) -> (String, Option<S
                 // 查表未命中的兜底不含工具名，不得回落到裸名。
                 "\n\n[Partial output saved to {} — {}]",
                 file_path.display(),
-                peri_acp_types::builtin_mcp::effective_name_of("workspace", "Read").map_or(
+                peri_acp_types::builtin_mcp::model_tool_name_of("workspace", "Read").map_or(
                     "read the file to view captured output so far".to_string(),
                     |name| format!("use `{name}` to view captured output so far"),
                 ),
@@ -465,7 +465,7 @@ impl BashTool {
                         // 指引指代 builtin 文件工具时必须用**模型面名字**（裸名已无提供面）；
                         // 查表未命中的兜底不含工具名，不得回落到裸名。
                         let read_lead =
-                            peri_acp_types::builtin_mcp::effective_name_of("workspace", "Read")
+                            peri_acp_types::builtin_mcp::model_tool_name_of("workspace", "Read")
                                 .map_or("open it to view".to_string(), |name| {
                                     format!("use `{name}` to view")
                                 });

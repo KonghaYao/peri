@@ -26,9 +26,9 @@ async fn builtin_handler_in_flight_cancel_has_no_replay_and_keeps_pool_serving()
     let gated = Arc::new(GatedTool::new(declaration.original_name));
     let gated_tool: Arc<dyn BaseTool> = Arc::clone(&gated) as Arc<dyn BaseTool>;
     let link = TappedLink::connect(web, "runtime-fixture-web", vec![gated_tool]).await;
-    let bridge = link.bridge(declaration.effective_name);
+    let bridge = link.bridge(declaration.legacy_name);
     let invocation_fixture = invocation_fixture::InvocationFixture::new(
-        declaration.effective_name,
+        declaration.legacy_name,
         &[
             json!({ "payload": "in-flight" }),
             json!({ "payload": "after-cancel" }),

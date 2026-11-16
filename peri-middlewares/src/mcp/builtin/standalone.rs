@@ -1,5 +1,9 @@
 //! In-process standalone handler construction for `peri mcp-start`.
 //!
+//! Migration-period instance construction: the CLI accepts one legacy instance
+//! name, and the v5 single-exit router reuses this factory per capability. The
+//! valid set comes from the capability registry.
+//!
 //! Construction goes through [`super::dispatch::builtin_server_handler_with_env`], so
 //! the standalone entry serves exactly the handlers the ACP host assembles. The
 //! `workspace` arm is the exception: one server is built up front and cloned per

@@ -47,7 +47,7 @@ async fn production_startup_path_connects_both_builtin_instances() {
         BUILTIN_MCP_INSTANCES.len(),
         "每个 builtin 实例必须登记一条 server task（关闭时有归属）"
     );
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let handle = pool
             .client(instance.name)
             .unwrap_or_else(|| panic!("{} 必须完成连接", instance.name));
@@ -88,7 +88,7 @@ async fn production_startup_path_connects_both_builtin_instances() {
             let declaration = instance
                 .tools
                 .iter()
-                .find(|tool| tool.effective_name == bridge.name())
+                .find(|tool| tool.legacy_name == bridge.name())
                 .unwrap();
             assert_eq!(
                 bridge.visible_to_model(),
@@ -235,7 +235,7 @@ async fn builtin_instances_report_builtin_transport_type() {
     let fixture = StartupFixture::start().await;
     let infos = fixture.pool.all_server_infos();
 
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let info = infos
             .iter()
             .find(|info| info.name == instance.name)
@@ -275,7 +275,7 @@ async fn startup_gate_stages_declared_direct_tools_and_required_set() {
                     (
                         instance.name.to_string(),
                         tool.original_name.to_string(),
-                        tool.effective_name.to_string(),
+                        tool.legacy_name.to_string(),
                     )
                 })
         })
@@ -405,7 +405,7 @@ async fn closure_matrix_four_faces_on_real_builtin_pool() {
         // 面②：deferred 目录（链工具集合）。
         let mut collected = super::tool_names(&middleware.collect_tools(&cwd));
         collected.retain(|name| !name.starts_with("mcp_read_resource") && name != "DiscoverMCP");
-        for instance in BUILTIN_MCP_INSTANCES {
+        for instance in BUILTIN_MCP_INSTANCES.iter() {
             for tool in super::declared_effective_names(instance) {
                 assert_eq!(
                     collected.contains(&tool.to_string()),

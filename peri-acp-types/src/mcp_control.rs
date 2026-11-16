@@ -72,10 +72,7 @@ impl McpControlRequest {
             {
                 return Err(McpControlError::invalid("invalid registration name"));
             }
-            if crate::builtin_mcp::BUILTIN_MCP_INSTANCES
-                .iter()
-                .any(|item| item.instance.eq_ignore_ascii_case(server_name))
-            {
+            if crate::builtin_mcp::v5::is_reserved_server_name_ignore_ascii_case(server_name) {
                 return Err(McpControlError::invalid("reserved MCP server name"));
             }
             config.validate()?;

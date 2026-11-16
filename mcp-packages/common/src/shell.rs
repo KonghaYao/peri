@@ -398,7 +398,7 @@ pub fn persist_truncated_output_with_ref(full_content: &str) -> (String, Option<
                 // 查表未命中的兜底不含工具名，不得回落到裸名。
                 "\n\n[Full output saved to {} — {}]",
                 file_path.display(),
-                peri_acp_types::builtin_mcp::effective_name_of("workspace", "Read").map_or(
+                peri_acp_types::builtin_mcp::model_tool_name_of("workspace", "Read").map_or(
                     "read the file to view complete content".to_string(),
                     |name| format!("use `{name}` to view complete content"),
                 ),

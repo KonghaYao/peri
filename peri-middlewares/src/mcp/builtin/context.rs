@@ -114,7 +114,7 @@ pub struct BuiltinInstanceContext {
     /// 不读配置、不派生根（AW3-11 模式）。`false` = 既有行为（未显式传参走前台）。
     #[cfg(not(target_os = "emscripten"))]
     pub workspace_bash_default_run_in_background: bool,
-    /// A24 关闭集：`policy_key ∈ disabled_middlewares` 的实例名（唯一实现
+    /// A24 关闭集：能力开关（v5 能力名或迁移期旧键）命中的实例名（唯一实现
     /// `mcp::builtin::closed_instances`，宿主经 `peri_middlewares::assembly` 的薄委托派生）。
     ///
     /// 语义是**非物理**关闭（只关本 turn 的工具投影与同步目标），因此本类型只承载它、

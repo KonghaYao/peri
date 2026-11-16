@@ -100,7 +100,7 @@ impl UserInputMailbox {
             }
             state.revision += 1;
             for id in &delivered {
-                crate::session::user_input_mailbox::window::retain_terminal(&mut state, id);
+                crate::session::user_input_mailbox::window::retain_terminal(&mut state, id, None);
             }
             crate::session::user_input_mailbox::window::prune_terminal_records(&mut state);
             delivered

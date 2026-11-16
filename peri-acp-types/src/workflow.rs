@@ -571,7 +571,7 @@ impl WorkflowTaskResult {
             // 查表未命中的兜底不含工具名，不得回落到裸名。
             // `${label}` 是写入期契约（阈值见 LONGTEXT_EXTRACT_THRESHOLD_BYTES）：
             // 不说明它是引用，读 state.json 的消费方会把 token 当结果、静默丢长文本。
-            let read_lead = crate::builtin_mcp::effective_name_of("workspace", "Read")
+            let read_lead = crate::builtin_mcp::model_tool_name_of("workspace", "Read")
                 .map_or("Read it".to_string(), |name| format!("Use `{name}`"));
             let threshold = LONGTEXT_EXTRACT_THRESHOLD_BYTES;
             format!(

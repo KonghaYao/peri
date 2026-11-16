@@ -145,36 +145,49 @@ impl UserInputMailbox {
             }
         };
 
-        let (sent_ready, results) = {
+        let (sent_ready, results, cancel_inserted) = {
             let mut state = self.state.lock();
             state.admissions_in_flight = state.admissions_in_flight.saturating_sub(1);
+            // 撤回与 enqueue 的 MQ await 可以交错：take_back 在等待期间清理了
+            // Queued 记录并写入 `Withdrawn` 身份，而本调用仍持有已提交的 MQ 行。
+            // 终态身份优先，既不复活待发记录，也要取消本次插入的行。
+            let terminal = state
+                .terminal_identities
+                .get(&input_uuid)
+                .map(|identity| identity.state);
+            let mut cancel_inserted = false;
             let sent_ready = match outcome.disposition {
                 MqEnqueueDisposition::Inserted | MqEnqueueDisposition::Existing => {
-                    if !state
-                        .records
-                        .iter()
-                        .any(|record| record.input_id == request.input_id)
-                    {
-                        let seq = state.next_record_seq();
-                        state
-                            .records
-                            .push(crate::session::user_input_mailbox::InputRecord::new(
-                                request.input_id.clone(),
-                                input_fingerprint,
-                                seq,
-                                request.content.clone(),
-                                request.original_draft.clone(),
-                            ));
-                        state.revision += 1;
-                        if state.active.is_none() || state.paused {
-                            state.paused = false;
-                            crate::session::user_input_mailbox::state::promote_next(&mut state);
-                        }
-                    }
-                    if self.wake_suspended_locked(&mut state) {
-                        crate::session::user_input_mailbox::state::ready_ids(&state)
-                    } else {
+                    if terminal.is_some() {
+                        cancel_inserted = true;
                         Vec::new()
+                    } else {
+                        if !state
+                            .records
+                            .iter()
+                            .any(|record| record.input_id == request.input_id)
+                        {
+                            let seq = state.next_record_seq();
+                            state.records.push(
+                                crate::session::user_input_mailbox::InputRecord::new(
+                                    request.input_id.clone(),
+                                    input_fingerprint,
+                                    seq,
+                                    request.content.clone(),
+                                    request.original_draft.clone(),
+                                ),
+                            );
+                            state.revision += 1;
+                            if state.active.is_none() || state.paused {
+                                state.paused = false;
+                                crate::session::user_input_mailbox::state::promote_next(&mut state);
+                            }
+                        }
+                        if self.wake_suspended_locked(&mut state) {
+                            crate::session::user_input_mailbox::state::ready_ids(&state)
+                        } else {
+                            Vec::new()
+                        }
                     }
                 }
                 _ => Vec::new(),
@@ -190,8 +203,24 @@ impl UserInputMailbox {
                 results.clone(),
                 None,
             );
-            (sent_ready, results)
+            (sent_ready, results, cancel_inserted)
         };
+        if cancel_inserted {
+            let id = MessageId::from(input_uuid);
+            match self.inbox.queue().cancel_user_input(&id).await {
+                Ok(MqCancelOutcome::Cancelled(_) | MqCancelOutcome::NotFound) => {}
+                Ok(MqCancelOutcome::AlreadyHandedOff) => {
+                    // 已移交的行无法回删；dispatch 结算会按同一 identity 收敛为终态。
+                    tracing::warn!(
+                        input_id = %request.input_id,
+                        "withdrawn input was already handed off during enqueue"
+                    );
+                }
+                Err(error) => {
+                    return Err(UserInputQueueError::Store(error.to_string()));
+                }
+            }
+        }
         self.send_ready_ids(sent_ready, true).await;
         Ok(self.receipt(results, None).await)
     }
@@ -375,7 +404,9 @@ impl UserInputMailbox {
             return Ok(receipt);
         }
         crate::session::user_input_mailbox::state::validate_input_id(&request.input_id)?;
-        let queued = {
+        // 先固定记录身份：等待 MQ 取消期间对账可能清掉 Queued 记录，终态仍须
+        // 由这个指纹写入，否则同一 ID 会重新获得执行资格。
+        let queued_fingerprint = {
             let state = self.state.lock();
             self.validate(
                 &state,
@@ -383,11 +414,15 @@ impl UserInputMailbox {
                 &request.generation,
                 &request.command_id,
             )?;
-            state.records.iter().any(|record| {
-                record.input_id == request.input_id && record.state == UserInputState::Queued
-            })
+            state
+                .records
+                .iter()
+                .find(|record| {
+                    record.input_id == request.input_id && record.state == UserInputState::Queued
+                })
+                .map(|record| record.fingerprint)
         };
-        if !queued {
+        let Some(input_fingerprint) = queued_fingerprint else {
             let results = {
                 let mut state = self.state.lock();
                 let results = crate::session::user_input_mailbox::state::results_for(
@@ -404,7 +439,7 @@ impl UserInputMailbox {
                 results
             };
             return Ok(self.receipt(results, None).await);
-        }
+        };
         let id = MessageId::from(
             uuid::Uuid::parse_str(&request.input_id).expect("input id was validated above"),
         );
@@ -432,6 +467,7 @@ impl UserInputMailbox {
                     crate::session::user_input_mailbox::window::retain_terminal(
                         &mut state,
                         &request.input_id,
+                        Some((input_fingerprint, UserInputState::Withdrawn)),
                     );
                     crate::session::user_input_mailbox::window::prune_terminal_records(&mut state);
                     taken_back =

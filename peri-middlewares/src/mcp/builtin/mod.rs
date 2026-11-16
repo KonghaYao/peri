@@ -26,6 +26,10 @@ pub(crate) mod runtime;
 #[cfg(not(target_os = "emscripten"))]
 pub(crate) mod standalone;
 
+// router：v5 单出口（`peri`）聚合与能力级隔离。
+#[cfg(not(target_os = "emscripten"))]
+pub(crate) mod router;
+
 // workspace_subscription：`workspace` 实例的默认订阅（git ref 资源；Git Watch 下沉的
 // 宿主落点，D-5）。默认层注入只在本模块的 `builtin_default_entry` / 规则 2 消费它；
 // 客户端消费侧（`mcp::client::subscription`）经下面的再导出判定「哪些实例的哪些 URI
@@ -55,6 +59,7 @@ mod dispatch;
 mod builtin_registry;
 pub(crate) use builtin_registry::apply_builtin_overlay;
 pub(crate) use builtin_registry::builtin_injection_policy_from_env;
+pub(crate) use builtin_registry::closed_capabilities;
 pub(crate) use builtin_registry::closed_instances;
 #[cfg(target_os = "emscripten")]
 pub(crate) use builtin_registry::default_subscriptions_for;

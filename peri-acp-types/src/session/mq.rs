@@ -465,6 +465,10 @@ pub trait ThreadMqStore: Send + Sync {
     #[cfg(feature = "test-support")]
     fn install_receive_gate(&self, _gate: ReceiveGate) {}
 
+    /// 仅测试：暂停下一次 enqueue 提交，供“撤回与入队交错”竞态测试使用。
+    #[cfg(feature = "test-support")]
+    fn install_enqueue_gate(&self, _gate: ReceiveGate) {}
+
     /// 仅测试：让下一次 MQ 查询在读取前暂停；默认实现忽略门控。
     #[cfg(feature = "test-support")]
     fn install_query_gate(&self, _gate: ReceiveGate) {}

@@ -400,7 +400,7 @@ async fn production_assembly_passes_session_id_to_command_hook_stdin() {
 /// 工具清单与注册表一致。用于断言 builtin 能力的三个工具面（A6）。
 fn pool_with_builtin_instances() -> Arc<McpClientPool> {
     let pool = Arc::new(McpClientPool::new_empty());
-    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
         let tools: Vec<rmcp::model::Tool> = instance
             .tools
             .iter()

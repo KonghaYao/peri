@@ -77,6 +77,7 @@ mod tests;
 
 #[path = "assembly/production_chain_assembler.rs"]
 mod production_chain_assembler;
+pub use production_chain_assembler::builtin_closed_capabilities;
 pub use production_chain_assembler::builtin_closed_instances;
 pub(crate) use production_chain_assembler::open_builtin_bridges;
 pub use production_chain_assembler::plugin_face_closed;
