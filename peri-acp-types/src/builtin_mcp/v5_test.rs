@@ -61,6 +61,8 @@ const fn test_capability_full(
     BuiltinCapability {
         name,
         legacy_instance,
+        // 测试夹具不校验旧键唯一性；用实例名占位避免再引入一个参数。
+        legacy_policy_key: legacy_instance,
         dependencies,
         tools,
         resources,

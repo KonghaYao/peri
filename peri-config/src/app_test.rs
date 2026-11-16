@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use peri_acp_types::meta_harness::MIDDLEWARE_NAMES;
+use peri_acp_types::meta_harness::{BUILTIN_INSTANCE_POLICY_KEYS, MIDDLEWARE_NAMES};
 
 use super::AppConfig;
 use super::ProfileConfig;
@@ -31,12 +31,13 @@ fn removed_skills_dir_keys_are_only_opaque_unknown_fields() {
     }
 }
 
-/// 「已知 MetaHarness 键全集」= 链槽位名 ∪ v5 能力名。
+/// 「已知 MetaHarness 键全集」= 链槽位名 ∪ builtin 旧策略键（兼容 adapter）∪ v5 能力名。
 ///
-/// 测试用它构造「全关」输入：两张表都进入关闭集，保险丝判定面缺项即失败。
+/// 测试用它构造「全关」输入：三张表都进入关闭集，保险丝判定面缺项即失败。
 fn all_known_middleware_keys() -> Vec<&'static str> {
     MIDDLEWARE_NAMES
         .iter()
+        .chain(BUILTIN_INSTANCE_POLICY_KEYS.iter())
         .copied()
         .chain(
             peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
@@ -525,15 +526,23 @@ fn unknown_key_warns_and_is_ignored() {
 }
 
 #[test]
-fn capability_names_are_valid_meta_harness_keys() {
-    // v5 能力名是合法关闭来源；退役旧键与未知键都被剔除。
-    let json = r#"{"meta_harness":{"web":false,"WorkspaceMiddleware":false,"unknown":false}}"#;
+fn legacy_and_v5_capability_keys_are_both_valid_meta_harness_keys() {
+    // 旧键保留为确定性映射 adapter（#409 §8.6），v5 能力名是开关身份。
+    let json = r#"{"meta_harness":{"web":false,"WorkspaceMiddleware":false,"WorkflowMiddleware":true,"unknown":false}}"#;
     let mut cfg: AppConfig = serde_json::from_str(json).unwrap();
     cfg.validate_meta_harness();
     let map = cfg.meta_harness.unwrap();
     assert_eq!(map.get("web"), Some(&false), "v5 能力名必须保留");
-    assert!(!map.contains_key("workspace"), "旧键必须退役");
+    assert_eq!(
+        map.get("WorkspaceMiddleware"),
+        Some(&false),
+        "旧键必须映射到 workspace，不能 silent no-op"
+    );
+    assert_eq!(map.get("WorkflowMiddleware"), Some(&true));
     assert!(!map.contains_key("unknown"));
+
+    let mapped = peri_acp_types::builtin_mcp::capability_of_switch("WorkspaceMiddleware").unwrap();
+    assert_eq!(mapped.name, "workspace");
 }
 
 #[test]
@@ -713,8 +722,8 @@ fn retired_meta_harness_keys_are_ignored() {
         cfg.validate_meta_harness();
         assert_eq!(
             cfg.meta_harness.unwrap(),
-            mh(&[("01_intro", true)]),
-            "退役旧键必须整体丢弃"
+            mh(&[("01_intro", true), ("WorkspaceMiddleware", enabled)]),
+            "未知旧键整体丢弃；builtin 旧键保留为能力映射 adapter"
         );
     }
 }

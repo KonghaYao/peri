@@ -231,6 +231,32 @@ fn task_owner_scoping_is_a_registry_field() {
 }
 
 #[test]
+fn legacy_policy_keys_are_unique_and_frozen_for_migration() {
+    let keys: HashSet<&str> = crate::builtin_mcp::legacy_policy_keys().collect();
+    assert_eq!(
+        keys.len(),
+        crate::builtin_mcp::BUILTIN_V5_CAPABILITIES.len(),
+        "旧关闭键必须逐能力唯一"
+    );
+    // 兼容 adapter 契约：旧键集合冻结，运行时经 `capability_of_switch` 映射到能力。
+    // `"WorkflowMiddleware"` 沿用旧链槽位名，旧链已删除，见 `docs/design/workflow-mcp.md`。
+    let expected: HashSet<&str> = [
+        "WebMiddleware",
+        "ArtifactMiddleware",
+        "CronMiddleware",
+        "MonitorMiddleware",
+        "WorkspaceMiddleware",
+        "WorkflowMiddleware",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        keys, expected,
+        "旧关闭键集合必须保持迁移期兼容；v5 权威是能力表"
+    );
+}
+
+#[test]
 fn find_hits_only_implemented_instances() {
     let web = find("web").expect("web 是已实现实例");
     assert_eq!(web.name, "web");

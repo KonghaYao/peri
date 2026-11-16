@@ -114,6 +114,11 @@ impl BuiltinInjectionPolicy {
         self.enabled.contains(&name)
     }
 
+    /// 是否为零注入（`PERI_MCP_BUILTIN=off`）。
+    pub(crate) fn is_none(&self) -> bool {
+        self.mode == BuiltinInjectionMode::SingleExit && self.enabled.is_empty()
+    }
+
     fn capability_enabled(&self, capability_name: &str) -> bool {
         self.mode == BuiltinInjectionMode::SingleExit && self.enables(capability_name)
     }
@@ -183,9 +188,9 @@ pub(crate) fn is_declared_model_hidden(server_name: &str, original_tool: &str) -
 
 /// IF-D10 的唯一判定入口：v5 能力名命中即关闭对应能力。
 ///
-/// `disabled_middlewares` 同时承载链槽位键与其他 middleware 键；本函数只接受能
-/// 精确命中 builtin 能力的键（`capability`），其余键静默跳过。旧
-/// `*Middleware` key 已于 M4 退役，不再映射为能力开关。
+/// `disabled_middlewares` 同时承载链槽位键与其他 middleware 键；本函数接受 v5
+/// 能力名与 builtin 旧 `*Middleware` 键（确定性映射 adapter，M4 删除），其余键
+/// 静默跳过。
 pub(crate) fn closed_instances(disabled_middlewares: &HashSet<String>) -> BTreeSet<String> {
     closed_capabilities(disabled_middlewares)
         .into_iter()
@@ -199,12 +204,15 @@ pub(crate) fn closed_instances(disabled_middlewares: &HashSet<String>) -> BTreeS
 }
 
 /// 关闭集的能力身份（v5 名字）；供 router / readiness 等后续消费方使用。
+///
+/// 同时接受能力名与迁移期旧 `*Middleware` 键；旧键经
+/// [`builtin_mcp::capability_of_switch`] 确定性映射，不能 silent no-op（#409 §8.6）。
 pub(crate) fn closed_capabilities(
     disabled_middlewares: &HashSet<String>,
 ) -> BTreeSet<&'static str> {
     disabled_middlewares
         .iter()
-        .filter_map(|key| builtin_mcp::capability(key))
+        .filter_map(|key| builtin_mcp::capability_of_switch(key).ok())
         .map(|capability| capability.name)
         .collect()
 }

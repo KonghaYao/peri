@@ -279,13 +279,22 @@ fn closed_instances_maps_capability_switches() {
         BTreeSet::from(["cron".to_string()])
     );
 
-    // v5 能力名是唯一开关身份。
+    // v5 能力名是开关身份；旧 `*Middleware` 键是确定性映射 adapter。
     for capability in peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES.iter() {
         let by_capability: HashSet<String> = HashSet::from([capability.name.to_string()]);
         assert_eq!(
             super::closed_instances(&by_capability),
             BTreeSet::from([capability.legacy_instance.to_string()]),
             "{} 必须关闭对应实例",
+            capability.name
+        );
+        let by_legacy_key: HashSet<String> =
+            HashSet::from([capability.legacy_policy_key.to_string()]);
+        assert_eq!(
+            super::closed_instances(&by_legacy_key),
+            BTreeSet::from([capability.legacy_instance.to_string()]),
+            "{} 必须映射到 {}（旧键不能 silent no-op）",
+            capability.legacy_policy_key,
             capability.name
         );
     }

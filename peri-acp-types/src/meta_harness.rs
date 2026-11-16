@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 /// 冻结期构建的 MetaHarness 状态，随冻结载体（`FrozenContext`）传播；
 /// 会话内不可变（ARC-FROZEN-001）。
@@ -87,9 +88,9 @@ pub const SECTION_IDS: &[&str] = &[
 /// `"HumanInTheLoopMiddleware": false` 语义随之从"关审批"漂移为"关提问"
 /// （纯破坏性改名，见 `spec/issues/2026-08-15-permission-hitl-split.md`）。
 ///
-/// **v5：本表只含链槽位名**。builtin 能力不再有独立的 MetaHarness 旧键；
-/// 能力开关使用 v5 能力名（`"web": false`），由 builtin 关闭集直接消费。
-/// 旧 `*Middleware` key 在 M4 退役，解析期按未知键告警丢弃。
+/// **v5：本表只含链槽位名**。builtin 能力开关使用 v5 能力名（`"web": false`）；
+/// 旧 `*Middleware` key 保留为确定性映射 adapter（`BUILTIN_INSTANCE_POLICY_KEYS`，
+/// M4 删除），不能 silent no-op。
 ///
 /// **v4-part-4（W3-C1）：`FilesystemMiddleware` / `TerminalMiddleware` 摘除**。7 个
 /// 文件/终端工具（Read / Write / Edit / Glob / Grep / folder_operations / Bash）迁为
@@ -121,6 +122,19 @@ pub const MIDDLEWARE_NAMES: &[&str] = &[
     "ToolSearch",
     "GoalMiddleware",
 ];
+
+/// 迁移期 builtin 旧 MetaHarness 关闭键（**兼容 adapter，M4 删除**）。
+///
+/// 由 [`crate::builtin_mcp::v5::BUILTIN_V5_CAPABILITIES`] 的 `legacy_policy_key`
+/// 派生；只做确定性映射，不承担 v5 能力开关身份。运行时经
+/// `builtin_mcp::capability_of_switch` 映射到能力；#409 要求旧键不得 silent no-op。
+///
+/// - 解析期校验（`peri-config/src/app.rs::validate_meta_harness`）的「已知键」
+///   集合 = [`SECTION_IDS`] ∪ [`MIDDLEWARE_NAMES`] ∪ 本表 ∪
+///   [`BUILT_IN_SUBAGENTS_KEY`] ∪ v5 能力名；
+/// - 「全部 middleware 关闭」保险丝的判定面 = [`MIDDLEWARE_NAMES`] ∪ 本表 ∪ 能力名。
+pub static BUILTIN_INSTANCE_POLICY_KEYS: LazyLock<Vec<&'static str>> =
+    LazyLock::new(|| crate::builtin_mcp::legacy_policy_keys().collect());
 
 /// 段落 → 持有 middleware 名映射表（设计 §3.1.1 拆分持有契约 3）。
 ///
@@ -220,6 +234,56 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for name in MIDDLEWARE_NAMES {
             assert!(seen.insert(*name), "duplicate middleware name: {name}");
+        }
+    }
+
+    /// 兼容 adapter：旧关闭键必须由能力表派生，手写常量或声明表漂移即红。
+    #[test]
+    fn builtin_policy_keys_are_derived_from_capabilities() {
+        let declared: std::collections::HashSet<&str> = crate::builtin_mcp::BUILTIN_V5_CAPABILITIES
+            .iter()
+            .map(|capability| capability.legacy_policy_key)
+            .collect();
+        let derived: std::collections::HashSet<&str> =
+            BUILTIN_INSTANCE_POLICY_KEYS.iter().copied().collect();
+        assert_eq!(
+            derived.len(),
+            BUILTIN_INSTANCE_POLICY_KEYS.len(),
+            "旧关闭键不得重复: {BUILTIN_INSTANCE_POLICY_KEYS:?}"
+        );
+        assert_eq!(
+            derived, declared,
+            "旧关闭键表必须由能力表 legacy_policy_key 派生"
+        );
+    }
+
+    /// 两表语义不重叠：槽位名表与 builtin 兼容键表交集为空。
+    #[test]
+    fn middleware_names_and_builtin_policy_keys_are_disjoint() {
+        let overlap: std::collections::HashSet<&str> = MIDDLEWARE_NAMES
+            .iter()
+            .copied()
+            .filter(|key| BUILTIN_INSTANCE_POLICY_KEYS.contains(key))
+            .collect();
+        assert!(
+            overlap.is_empty(),
+            "两表交集必须为空（同一键不得既关槽位又关能力）：{overlap:?}"
+        );
+    }
+
+    /// 旧键必须确定性映射到能力，不能 silent no-op（#409 §8.6）。
+    #[test]
+    fn legacy_policy_keys_map_to_capabilities() {
+        for capability in crate::builtin_mcp::BUILTIN_V5_CAPABILITIES.iter() {
+            let mapped = crate::builtin_mcp::capability_of_switch(capability.legacy_policy_key)
+                .expect("旧键必须确定性映射");
+            assert_eq!(mapped.name, capability.name);
+            assert_eq!(
+                crate::builtin_mcp::capability_of_switch(capability.name)
+                    .expect("能力名必须可作为开关")
+                    .name,
+                capability.name
+            );
         }
     }
 

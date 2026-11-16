@@ -22,8 +22,13 @@ fn capability_names_are_stable_and_unique() {
             BuiltinCapability::from_name(capability.name()),
             Some(capability)
         );
+        assert_eq!(
+            capability_from_legacy_policy_key(capability.legacy_policy_key()),
+            Some(capability)
+        );
     }
     assert_eq!(BuiltinCapability::from_name("web, cron"), None);
+    assert_eq!(capability_from_legacy_policy_key("Web"), None);
 }
 
 #[test]
@@ -313,8 +318,83 @@ fn legacy_instance_entries_reject_reserved_overrides_and_bad_types() {
 }
 
 #[test]
+fn legacy_policy_keys_map_or_fail_explicitly() {
+    let document = json!({
+        "meta_harness": {
+            "01_intro": true,
+            "WebMiddleware": false,
+            "WorkflowMiddleware": true
+        }
+    });
+    let file = parse_mcp_file_capabilities(&document).unwrap();
+    assert_eq!(
+        file.legacy_policy(),
+        &BTreeMap::from([
+            (BuiltinCapability::Web, false),
+            (BuiltinCapability::Workflow, true),
+        ])
+    );
+    let resolved = resolve_capabilities(None, Some(&file)).unwrap();
+    assert!(!resolved.is_enabled(BuiltinCapability::Web));
+    assert_eq!(
+        resolved.decision(BuiltinCapability::Web),
+        CapabilityDecision {
+            enabled: false,
+            source: CapabilitySource::LegacyPolicyKey,
+        }
+    );
+    assert!(resolved.is_enabled(BuiltinCapability::Workflow));
+
+    let unknown = json!({"meta_harness": {"SandboxMiddleware": false}});
+    assert_eq!(
+        parse_mcp_file_capabilities(&unknown).unwrap_err(),
+        CapabilityError::UnknownLegacyPolicyKey {
+            key: "SandboxMiddleware".to_string(),
+        }
+    );
+    let bad_value = json!({"meta_harness": {"WebMiddleware": "off"}});
+    assert_eq!(
+        parse_mcp_file_capabilities(&bad_value).unwrap_err(),
+        CapabilityError::InvalidLegacyPolicyValue {
+            key: "WebMiddleware".to_string(),
+        }
+    );
+    let bad_map = json!({"meta_harness": []});
+    assert_eq!(
+        parse_mcp_file_capabilities(&bad_map).unwrap_err(),
+        CapabilityError::InvalidLegacyPolicyMap
+    );
+}
+
+#[test]
+fn two_legacy_mechanisms_must_agree() {
+    let document = json!({
+        "meta_harness": {"WebMiddleware": false},
+        "mcpServers": {"web": {}}
+    });
+    let file = parse_mcp_file_capabilities(&document).unwrap();
+    assert_eq!(
+        resolve_capabilities(None, Some(&file)).unwrap_err(),
+        CapabilityError::LegacyConflict {
+            capability: "web",
+            first: CapabilitySource::LegacyPolicyKey,
+            second: CapabilitySource::LegacyInstanceEntry,
+        }
+    );
+
+    let agreeing = json!({
+        "meta_harness": {"WebMiddleware": false},
+        "mcpServers": {"web": {"disabled": true}}
+    });
+    let file = parse_mcp_file_capabilities(&agreeing).unwrap();
+    let resolved = resolve_capabilities(None, Some(&file)).unwrap();
+    assert!(!resolved.is_enabled(BuiltinCapability::Web));
+}
+
+#[test]
 fn extension_overrides_legacy_and_reports_conflict() {
     let document = json!({
+        "meta_harness": {"WebMiddleware": false},
         "mcpServers": {
             "web": {"disabled": true},
             "peri": {"x-peri": {"capabilities": ["web"]}}
@@ -409,7 +489,6 @@ fn absent_or_unrelated_config_is_empty() {
         json!({}),
         json!({"mcpServers": {"external": {"command": "npx"}}}),
         json!({"meta_harness": {"01_intro": true}}),
-        json!({"meta_harness": {"WebMiddleware": false}}),
     ] {
         let file = parse_mcp_file_capabilities(&document).unwrap();
         assert!(file.is_empty(), "{document}");

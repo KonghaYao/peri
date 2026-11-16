@@ -154,9 +154,7 @@ fn peri_positional_selects_the_single_exit() {
         workspace_arg(dir.path()),
     ]))
     .unwrap();
-    let Target::Capabilities(capabilities) = options.target else {
-        panic!("`peri` must resolve to the capability router");
-    };
+    let Target::Capabilities(capabilities) = options.target;
     assert_eq!(capabilities.len(), 6, "{capabilities:?}");
 }
 
@@ -287,9 +285,7 @@ fn no_selection_defaults_to_all_capabilities() {
         workspace_arg(dir.path()),
     ]))
     .unwrap();
-    let Target::Capabilities(capabilities) = options.target else {
-        panic!("default selection must use the router");
-    };
+    let Target::Capabilities(capabilities) = options.target;
     for name in [
         "workspace",
         "web",
@@ -344,9 +340,7 @@ fn all_is_parsed_as_every_capability() {
         workspace_arg(dir.path()),
     ]))
     .unwrap();
-    let Target::Capabilities(capabilities) = options.target else {
-        panic!("all must use the router");
-    };
+    let Target::Capabilities(capabilities) = options.target;
     assert_eq!(capabilities.len(), 6);
 }
 
@@ -430,7 +424,8 @@ fn misplaced_capabilities_and_legacy_overrides_are_typed_errors() {
         "{message}"
     );
 
-    // 旧 MetaHarness 能力键已于 M4 退役：standalone 不再把它们当能力开关。
+    // 旧 MetaHarness 能力键保留为确定性映射 adapter（#409 §8.6）：standalone
+    // 仍把它当能力开关，不能 silent no-op。
     write_mcp_file(dir.path(), r#"{"meta_harness":{"WebMiddleware":false}}"#);
     let options = resolve_options(parse(&[
         "--stdio",
@@ -438,8 +433,7 @@ fn misplaced_capabilities_and_legacy_overrides_are_typed_errors() {
         workspace_arg(dir.path()),
     ]))
     .unwrap();
-    let Target::Capabilities(capabilities) = options.target else {
-        panic!("retired policy keys must not change the target");
-    };
-    assert_eq!(capabilities.len(), 6, "{capabilities:?}");
+    let Target::Capabilities(capabilities) = options.target;
+    assert_eq!(capabilities.len(), 5, "{capabilities:?}");
+    assert!(!capabilities.iter().any(|name| name == "web"));
 }

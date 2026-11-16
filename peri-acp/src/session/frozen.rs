@@ -291,9 +291,10 @@ pub(crate) fn build_collected_sections_with_capabilities(
 /// - middleware + false → `disabled_middlewares`；
 /// - middleware + true → 不放入 disabled（显式恢复）。
 ///
-/// **v5**：`false` 键的判定面是「链槽位名 ∪ v5 能力名」并集。旧
-/// `*Middleware` key 在 M4 退役，不再进入 `disabled_middlewares`；解析期按未知键
-/// 告警丢弃，不出现「键存在但无效果」的静默路径。
+/// **v5**：`false` 键的判定面是「链槽位名 ∪ builtin 旧键 ∪ v5 能力名」并集。旧
+/// `*Middleware` key 保留为确定性映射 adapter（M4 删除）：进入
+/// `disabled_middlewares` 后由 `closed_instances` 映射到能力，不出现「键存在但无效果」
+/// 的静默路径。
 /// `disabled_middlewares` 既被链装配消费（关闭槽位），也被 builtin 关闭集消费
 /// （`closed_instances`，IF-D10），漏项即能力闭合退化
 /// （ARC-CAPABILITY-CLOSURE-001）。

@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use peri_acp_types::meta_harness::{BUILT_IN_SUBAGENTS_KEY, MIDDLEWARE_NAMES, SECTION_IDS};
+use peri_acp_types::meta_harness::{
+    BUILTIN_INSTANCE_POLICY_KEYS, BUILT_IN_SUBAGENTS_KEY, MIDDLEWARE_NAMES, SECTION_IDS,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -425,9 +427,11 @@ impl AppConfig {
         let known: HashSet<&str> = SECTION_IDS
             .iter()
             .chain(MIDDLEWARE_NAMES.iter())
+            .chain(BUILTIN_INSTANCE_POLICY_KEYS.iter())
             .copied()
             .chain(std::iter::once(BUILT_IN_SUBAGENTS_KEY))
-            // v5 能力名是 builtin 能力的唯一开关身份（旧 middleware 键已于 M4 退役）。
+            // v5 能力名是 builtin 能力的开关身份；旧 `*Middleware` 键保留为
+            // 确定性映射的兼容 adapter（#409 §8.6），M4 清理时删除。
             .chain(
                 peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
                     .iter()
@@ -436,6 +440,13 @@ impl AppConfig {
             .collect();
         map.retain(|key, _| {
             if known.contains(key.as_str()) {
+                if peri_acp_types::builtin_mcp::capability_of_legacy_policy_key(key).is_ok() {
+                    tracing::warn!(
+                        key = %key,
+                        "meta_harness: legacy builtin policy key mapped to its capability; \
+                         use the capability name (retired at M4)"
+                    );
+                }
                 true
             } else {
                 tracing::warn!(key = %key, "meta_harness: unknown key ignored");
@@ -447,12 +458,15 @@ impl AppConfig {
             .map(|capability| capability.name);
         let all_disabled = MIDDLEWARE_NAMES
             .iter()
+            .chain(BUILTIN_INSTANCE_POLICY_KEYS.iter())
             .copied()
             .chain(capability_names.clone())
             .all(|name| map.get(name).copied() == Some(false));
         if all_disabled {
             tracing::warn!(
-                middleware_count = MIDDLEWARE_NAMES.len() + capability_names.count(),
+                middleware_count = MIDDLEWARE_NAMES.len()
+                    + BUILTIN_INSTANCE_POLICY_KEYS.len()
+                    + capability_names.count(),
                 "meta_harness: ALL middleware disabled — every tool/hook/section holder \
                  will be unavailable; if this was not intentional, remove the meta_harness \
                  keys from settings.json"

@@ -11,15 +11,14 @@
 //! until an MCP ecosystem review. Do not add a top-level `capabilities` object:
 //! MCP already uses that name for protocol negotiation.
 //!
-//! Standalone never reads `settings.json`. Legacy `meta_harness` policy keys
-//! (for example `WebMiddleware`) were retired at M4: they are not a second
-//! capability switch. The remaining compatibility adapter is the legacy
-//! per-instance `mcpServers.<instance>` entry mapped to one capability.
+//! Standalone never reads `settings.json`. A `meta_harness` object found in
+//! `.mcp.json` is accepted only as a v4 compatibility bridge: known policy keys
+//! map to capabilities and unknown `*Middleware` keys are typed errors.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 use thiserror::Error;
 
 pub const BUILTIN_CAPABILITY_NAMES: &[&str] = &[
@@ -39,6 +38,9 @@ pub const PERI_EXTENSION_KEY: &str = "x-peri";
 
 /// Capability list inside [`PERI_EXTENSION_KEY`].
 pub const CAPABILITIES_FIELD: &str = "capabilities";
+
+/// Legacy settings section that held per-instance policy keys.
+const LEGACY_POLICY_MAP: &str = "meta_harness";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BuiltinCapability {
@@ -77,11 +79,29 @@ impl BuiltinCapability {
             .find(|capability| capability.name() == name)
     }
 
+    /// Legacy `meta_harness` policy key that used to switch this instance.
+    pub fn legacy_policy_key(self) -> &'static str {
+        match self {
+            Self::Workspace => "WorkspaceMiddleware",
+            Self::Web => "WebMiddleware",
+            Self::Artifact => "ArtifactMiddleware",
+            Self::Cron => "CronMiddleware",
+            Self::Monitor => "MonitorMiddleware",
+            Self::Workflow => "WorkflowMiddleware",
+        }
+    }
+
     /// Legacy per-instance `.mcp.json` key; separate from the v5 model name
     /// because the router may later rename the exposed server.
     pub fn legacy_instance_name(self) -> &'static str {
         self.name()
     }
+}
+
+pub fn capability_from_legacy_policy_key(key: &str) -> Option<BuiltinCapability> {
+    BuiltinCapability::ALL
+        .into_iter()
+        .find(|capability| capability.legacy_policy_key() == key)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +142,8 @@ pub enum CapabilitySource {
     PeriExtension,
     /// Legacy `mcpServers.<instance>` entry.
     LegacyInstanceEntry,
+    /// Legacy `meta_harness` policy key.
+    LegacyPolicyKey,
     /// Builtin default (all capabilities enabled).
     Default,
 }
@@ -132,6 +154,7 @@ impl fmt::Display for CapabilitySource {
             Self::Cli => formatter.write_str("command line (--capability)"),
             Self::PeriExtension => formatter.write_str("mcpServers.peri.x-peri.capabilities"),
             Self::LegacyInstanceEntry => formatter.write_str("legacy mcpServers.<instance> entry"),
+            Self::LegacyPolicyKey => formatter.write_str("legacy meta_harness policy key"),
             Self::Default => formatter.write_str("builtin default"),
         }
     }
@@ -155,6 +178,17 @@ pub enum CapabilityError {
     InvalidCapabilitiesValue,
     #[error("mcpServers.peri.x-peri.capabilities[{index}] must be a string")]
     InvalidCapabilityItem { index: usize },
+    #[error("meta_harness must be a JSON object")]
+    InvalidLegacyPolicyMap,
+    #[error("legacy meta_harness key `{key}` must be a boolean")]
+    InvalidLegacyPolicyValue { key: String },
+    #[error(
+        "unknown legacy meta_harness policy key `{key}` (expected one of: \
+         WorkspaceMiddleware, WebMiddleware, ArtifactMiddleware, CronMiddleware, \
+         MonitorMiddleware, WorkflowMiddleware); \
+         map it to a capability or remove it, it is not silently ignored"
+    )]
+    UnknownLegacyPolicyKey { key: String },
     #[error("legacy mcpServers.{name} entry must be a JSON object")]
     InvalidLegacyInstance { name: String },
     #[error("legacy mcpServers.{name}.disabled must be a boolean")]
@@ -299,6 +333,7 @@ where
 pub struct McpCapabilityFile {
     extension: Option<CapabilityRequest>,
     legacy_instances: BTreeMap<BuiltinCapability, bool>,
+    legacy_policy: BTreeMap<BuiltinCapability, bool>,
 }
 
 impl McpCapabilityFile {
@@ -310,17 +345,23 @@ impl McpCapabilityFile {
         &self.legacy_instances
     }
 
+    pub fn legacy_policy(&self) -> &BTreeMap<BuiltinCapability, bool> {
+        &self.legacy_policy
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.extension.is_none() && self.legacy_instances.is_empty()
+        self.extension.is_none()
+            && self.legacy_instances.is_empty()
+            && self.legacy_policy.is_empty()
     }
 }
 
 /// Read capability switches from a raw `.mcp.json` document.
 ///
 /// Standard server fields are ignored. Legacy per-instance entries map to
-/// capability switches; the retired `meta_harness` policy keys are not a second
-/// switch. Unknown `*Middleware` keys in that misplaced section are ignored by
-/// this standalone parser (the host settings loader warns and drops them).
+/// capability switches; legacy policy keys in a misplaced `meta_harness`
+/// section map the same way. Unknown `*Middleware` keys are typed errors so an
+/// old key can never survive as a silent no-op.
 pub fn parse_mcp_file_capabilities(document: &Value) -> Result<McpCapabilityFile, CapabilityError> {
     let object = document
         .as_object()
@@ -330,6 +371,12 @@ pub fn parse_mcp_file_capabilities(document: &Value) -> Result<McpCapabilityFile
             location: "top-level capabilities",
         });
     }
+
+    let legacy_policy = match object.get(LEGACY_POLICY_MAP) {
+        None => BTreeMap::new(),
+        Some(Value::Object(map)) => parse_legacy_policy_map(map)?,
+        Some(_) => return Err(CapabilityError::InvalidLegacyPolicyMap),
+    };
 
     let servers = match object.get("mcpServers") {
         None => None,
@@ -355,6 +402,7 @@ pub fn parse_mcp_file_capabilities(document: &Value) -> Result<McpCapabilityFile
     Ok(McpCapabilityFile {
         extension,
         legacy_instances,
+        legacy_policy,
     })
 }
 
@@ -407,6 +455,25 @@ fn parse_legacy_instance(name: &str, entry: &Value) -> Result<bool, CapabilityEr
             name: name.to_string(),
         }),
     }
+}
+
+fn parse_legacy_policy_map(
+    map: &Map<String, Value>,
+) -> Result<BTreeMap<BuiltinCapability, bool>, CapabilityError> {
+    let mut policy = BTreeMap::new();
+    for (key, value) in map {
+        let Some(capability) = capability_from_legacy_policy_key(key) else {
+            if key.ends_with("Middleware") {
+                return Err(CapabilityError::UnknownLegacyPolicyKey { key: key.clone() });
+            }
+            continue;
+        };
+        let enabled = value
+            .as_bool()
+            .ok_or_else(|| CapabilityError::InvalidLegacyPolicyValue { key: key.clone() })?;
+        policy.insert(capability, enabled);
+    }
+    Ok(policy)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -483,6 +550,16 @@ pub fn resolve_capabilities(
     let mut explicit: BTreeMap<BuiltinCapability, (bool, CapabilitySource)> = BTreeMap::new();
 
     if let Some(file) = file {
+        for (capability, enabled) in &file.legacy_policy {
+            explicit.insert(*capability, (*enabled, CapabilitySource::LegacyPolicyKey));
+            decisions.insert(
+                *capability,
+                CapabilityDecision {
+                    enabled: *enabled,
+                    source: CapabilitySource::LegacyPolicyKey,
+                },
+            );
+        }
         for (capability, enabled) in &file.legacy_instances {
             if let Some((previous, previous_source)) = explicit.get(capability) {
                 if *previous != *enabled {
@@ -531,10 +608,16 @@ pub fn resolve_capabilities(
             .map(|decision| decision.source)
             .or_else(|| {
                 file.and_then(|file| {
-                    file.legacy_instances
+                    file.legacy_policy
                         .keys()
                         .next()
-                        .map(|_| CapabilitySource::LegacyInstanceEntry)
+                        .map(|_| CapabilitySource::LegacyPolicyKey)
+                        .or_else(|| {
+                            file.legacy_instances
+                                .keys()
+                                .next()
+                                .map(|_| CapabilitySource::LegacyInstanceEntry)
+                        })
                 })
             })
             .unwrap_or(CapabilitySource::Default);
