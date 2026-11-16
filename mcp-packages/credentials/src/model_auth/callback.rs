@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use aws_lc_rs::rand::SecureRandom;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use ring::rand::SecureRandom;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -259,7 +259,7 @@ fn validate_callback(
 
 fn random_secret() -> AuthResult<String> {
     let mut bytes = [0_u8; 32];
-    ring::rand::SystemRandom::new()
+    aws_lc_rs::rand::SystemRandom::new()
         .fill(&mut bytes)
         .map_err(|_| AuthError::Unavailable)?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))

@@ -10,7 +10,7 @@ license = "Apache-2.0"
 async-trait.workspace = true
 peri-agent = { path = "../../peri-agent" }
 peri-mcp-common = { path = "../common" }
-pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 reqwest.workspace = true
 rmcp.workspace = true
 serde.workspace = true

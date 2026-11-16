@@ -7,6 +7,7 @@ mod cache;
 #[cfg(test)]
 #[path = "client/cache_policy_test.rs"]
 mod cache_policy_tests;
+mod http_client;
 mod instance_face;
 mod lifecycle;
 mod monitor_alert;

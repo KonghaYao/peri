@@ -80,6 +80,33 @@ fn test_md_to_html_code_block() {
     assert!(html.contains("let x = 1;"));
 }
 
+#[test]
+fn test_md_to_html_extended_syntax() {
+    let md = concat!(
+        "~~gone~~\n\n",
+        "- [x] done\n\n",
+        "footnote[^1]\n\n",
+        "[^1]: note\n\n",
+        "# Head {#intro .lead}\n\n",
+        "![alt](img.png \"title\")\n\n",
+        "<div>raw</div>\n\n",
+        "1. outer\n   - inner\n\n",
+        "```rust\nlet x = 1;\n"
+    );
+    let html = ArtifactTool::md_to_html(md);
+    assert!(html.contains("<del>gone</del>"));
+    assert!(html.contains("type=\"checkbox\""));
+    assert!(html.contains("class=\"footnote"));
+    assert!(html.contains("<h1 id=\"intro\" class=\"lead\">Head</h1>"));
+    assert!(html.contains("<img src=\"img.png\" alt=\"alt\" title=\"title\" />"));
+    assert!(html.contains("<div>raw</div>"));
+    assert_eq!(html.matches("<ul>").count(), 2, "nested list: {html}");
+    assert!(
+        html.contains("<code class=\"language-rust\">"),
+        "unclosed fence: {html}"
+    );
+}
+
 #[tokio::test]
 async fn test_invoke_file_not_found() {
     let tool = ArtifactTool::new("/tmp".into());

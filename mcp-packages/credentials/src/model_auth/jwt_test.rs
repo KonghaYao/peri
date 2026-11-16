@@ -9,15 +9,16 @@ use crate::model_auth::types::AuthResult;
 
 // Synthetic fixture private key, generated exclusively for offline tests.
 fn signed(claims: serde_json::Value) -> String {
-    let key = ring::signature::RsaKeyPair::from_pkcs8(include_bytes!("fixtures/test-only-rsa.pk8"))
-        .unwrap();
+    let key =
+        aws_lc_rs::signature::RsaKeyPair::from_pkcs8(include_bytes!("fixtures/test-only-rsa.pk8"))
+            .unwrap();
     let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","kid":"peri-synthetic-test-key"}"#);
     let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
     let input = format!("{header}.{payload}");
-    let mut signature = vec![0; key.public().modulus_len()];
+    let mut signature = vec![0; key.public_modulus_len()];
     key.sign(
-        &ring::signature::RSA_PKCS1_SHA256,
-        &ring::rand::SystemRandom::new(),
+        &aws_lc_rs::signature::RSA_PKCS1_SHA256,
+        &aws_lc_rs::rand::SystemRandom::new(),
         input.as_bytes(),
         &mut signature,
     )
@@ -77,6 +78,89 @@ fn multiple_audiences_require_matching_authorized_party() {
     ));
     value["azp"] = json!("issued-client");
     assert_eq!(check(value).unwrap().sub, "user-one");
+}
+
+#[test]
+fn non_signing_keys_and_malformed_components_are_rejected() {
+    let token = signed(claims());
+    let base =
+        || -> Jwks { serde_json::from_str(include_str!("fixtures/test-only-jwks.json")).unwrap() };
+    let verify = |jwks: &Jwks| {
+        crate::model_auth::jwt::verify(
+            &token,
+            jwks,
+            "https://auth.openai.com",
+            "issued-client",
+            Some("expected-nonce"),
+            1000,
+        )
+    };
+
+    let mut jwks = base();
+    jwks.keys[0].kty = "EC".to_string();
+    assert!(matches!(verify(&jwks), Err(AuthError::InvalidIdToken)));
+    let mut jwks = base();
+    jwks.keys[0].alg = Some("RS512".to_string());
+    assert!(matches!(verify(&jwks), Err(AuthError::InvalidIdToken)));
+    let mut jwks = base();
+    jwks.keys[0].usage = Some("enc".to_string());
+    assert!(matches!(verify(&jwks), Err(AuthError::InvalidIdToken)));
+    let mut jwks = base();
+    jwks.keys[0].n = Some(String::new());
+    assert!(matches!(verify(&jwks), Err(AuthError::InvalidIdToken)));
+    let mut jwks = base();
+    jwks.keys[0].n = Some("AA".to_string());
+    assert!(matches!(verify(&jwks), Err(AuthError::InvalidIdToken)));
+    let mut jwks = base();
+    jwks.keys[0].e = Some("AQ".to_string());
+    assert!(matches!(verify(&jwks), Err(AuthError::InvalidIdToken)));
+}
+
+#[test]
+fn openssl_generated_rs256_token_is_accepted() {
+    // Generated once with `openssl dgst -sha256 -sign test-only-rsa.pk8` so the
+    // verifier is exercised against an independent signing implementation.
+    let token = "eyJhbGciOiJSUzI1NiIsImtpZCI6InBlcmktc3ludGhldGljLXRlc3Qta2V5In0.eyJhdWQiOiJpc3N1ZWQtY2xpZW50IiwiZW1haWwiOiJzeW50aGV0aWNAZXhhbXBsZS50ZXN0IiwiZXhwIjoyMDAwLCJpYXQiOjkwMCwiaXNzIjoiaHR0cHM6Ly9hdXRoLm9wZW5haS5jb20iLCJub25jZSI6ImV4cGVjdGVkLW5vbmNlIiwic3ViIjoidXNlci1vbmUifQ.Z4ijsSt4R9O0qcfVCWiewXI6v39_v6jvXrBRf3yWtOAbBykgGpeAkHHAjwAVS-X1ewM1rtY22YdIx_9Mmt5YVfQ9Gt5LsmHxG7sktEPI1NJAbwMd3q7v5xr1BnaI10CcakrpQU6EidgIAo7R-fvCRJTY7lK0IJDucYCLePkZCSGe9DHpafUXxQ3Jsa10W4fr5DQiEZdrjDL9y9BeHjPT-KT_Ca7-GcPiTDDCw7faHGjmwOEXTGBMY9svWdLA7bBtFTo9JueTil4Qna4yp0vWo0Kt5UgxIqaQx3RL35OLV_ZvDnJWK1J3D9_sLb0Eu-m1FcbCrbfWNgoTe810KIMKTg";
+    let jwks: Jwks = serde_json::from_str(include_str!("fixtures/test-only-jwks.json")).unwrap();
+    let claims = crate::model_auth::jwt::verify(
+        token,
+        &jwks,
+        "https://auth.openai.com",
+        "issued-client",
+        Some("expected-nonce"),
+        1000,
+    )
+    .unwrap();
+    assert_eq!(claims.sub, "user-one");
+}
+
+#[test]
+fn rsa_public_component_boundaries_match_ring() {
+    let modulus = vec![0x80; 256];
+    for exponent in [
+        vec![],
+        vec![0, 3],
+        vec![1],
+        vec![2],
+        vec![4],
+        vec![0xff, 0xff, 0xff, 0xff, 0xff],
+    ] {
+        assert!(
+            matches!(
+                crate::model_auth::jwt::validate_public_components(&modulus, &exponent),
+                Err(AuthError::InvalidIdToken)
+            ),
+            "exponent {exponent:?}"
+        );
+    }
+    assert!(
+        crate::model_auth::jwt::validate_public_components(&modulus, &[3]).is_ok(),
+        "smallest odd exponent"
+    );
+    assert!(
+        crate::model_auth::jwt::validate_public_components(&modulus, &[0x01, 0x00, 0x01]).is_ok(),
+        "common 65537 exponent"
+    );
 }
 
 #[test]

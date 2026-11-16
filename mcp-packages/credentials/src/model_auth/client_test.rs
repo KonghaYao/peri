@@ -209,16 +209,17 @@ impl MockIssuer {
 }
 
 fn sign(issuer: &str, subject: &str, nonce: Option<&str>) -> String {
-    let key = ring::signature::RsaKeyPair::from_pkcs8(include_bytes!("fixtures/test-only-rsa.pk8"))
-        .unwrap();
+    let key =
+        aws_lc_rs::signature::RsaKeyPair::from_pkcs8(include_bytes!("fixtures/test-only-rsa.pk8"))
+            .unwrap();
     let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","kid":"peri-synthetic-test-key"}"#);
     let claims = json!({"iss":issuer,"sub":subject,"aud":"issued-client","exp":5000,"iat":900,"nonce":nonce,"email":"synthetic@example.test"});
     let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
     let input = format!("{header}.{payload}");
-    let mut signature = vec![0; key.public().modulus_len()];
+    let mut signature = vec![0; key.public_modulus_len()];
     key.sign(
-        &ring::signature::RSA_PKCS1_SHA256,
-        &ring::rand::SystemRandom::new(),
+        &aws_lc_rs::signature::RSA_PKCS1_SHA256,
+        &aws_lc_rs::rand::SystemRandom::new(),
         input.as_bytes(),
         &mut signature,
     )

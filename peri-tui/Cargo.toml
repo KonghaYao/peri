@@ -75,7 +75,7 @@ agent-client-protocol = { version = "3.5", features = ["unstable"] }
 agent-client-protocol-schema = { version = "=1.12.0" }
 unicode-width = "0.2"
 unicode-segmentation = "1"
-syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+syntect = { version = "5", default-features = false, features = ["parsing", "default-syntaxes", "default-themes", "regex-fancy"] }
 pulldown-cmark-012 = { package = "pulldown-cmark", version = "0.12" }  # 与 ratatui-kit-markdown 0.3.0 固定依赖保持一致（避免双版本类型混用）
 clap = { version = "4", features = ["derive"] }
 sysinfo.workspace = true

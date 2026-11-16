@@ -97,13 +97,14 @@ pub(super) fn verify(
     }
     let modulus = decode(key.n.as_deref().ok_or(AuthError::InvalidIdToken)?)?;
     let exponent = decode(key.e.as_deref().ok_or(AuthError::InvalidIdToken)?)?;
+    validate_public_components(&modulus, &exponent)?;
     let signed = token.rsplit_once('.').ok_or(AuthError::InvalidIdToken)?.0;
-    ring::signature::RsaPublicKeyComponents {
+    aws_lc_rs::signature::RsaPublicKeyComponents {
         n: &modulus,
         e: &exponent,
     }
     .verify(
-        &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+        &aws_lc_rs::signature::RSA_PKCS1_2048_8192_SHA256,
         signed.as_bytes(),
         &decode(signature)?,
     )
@@ -131,6 +132,29 @@ pub(super) fn verify(
         return Err(AuthError::InvalidIdToken);
     }
     Ok(claims)
+}
+
+/// Keep the RSA public-key acceptance boundary that ring enforced: the
+/// exponent is odd, between 3 and 2^33-1, and neither component carries a
+/// leading zero. aws-lc-rs accepts wider exponents, so these checks must stay
+/// local to the JWT verifier.
+fn validate_public_components(modulus: &[u8], exponent: &[u8]) -> AuthResult<()> {
+    if modulus.is_empty()
+        || modulus[0] == 0
+        || exponent.is_empty()
+        || exponent.len() > 5
+        || exponent[0] == 0
+    {
+        return Err(AuthError::InvalidIdToken);
+    }
+    let mut value = 0_u64;
+    for byte in exponent {
+        value = (value << 8) | u64::from(*byte);
+    }
+    if !(3..=(1_u64 << 33) - 1).contains(&value) || value & 1 != 1 {
+        return Err(AuthError::InvalidIdToken);
+    }
+    Ok(())
 }
 
 fn decode(value: &str) -> AuthResult<Vec<u8>> {

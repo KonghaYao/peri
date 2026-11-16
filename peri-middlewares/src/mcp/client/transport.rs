@@ -77,38 +77,33 @@ where
 pub(crate) fn build_http_transport(
     url: &str,
     headers: &HashMap<String, String>,
-) -> rmcp::transport::StreamableHttpClientTransport<reqwest::Client> {
-    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-    let mut config = StreamableHttpClientTransportConfig::with_uri(url);
-    let mut custom_headers = std::collections::HashMap::new();
-    for (key, value) in headers {
-        match reqwest::header::HeaderName::try_from(key.as_str()) {
-            Ok(name) => match reqwest::header::HeaderValue::from_str(value) {
-                Ok(val) => {
-                    custom_headers.insert(name, val);
-                }
-                Err(e) => {
-                    tracing::warn!(header = %key, error = %e, "header 值无效");
-                }
-            },
-            Err(e) => {
-                tracing::warn!(header = %key, error = %e, "header 名称无效");
-            }
-        }
-    }
-    if !custom_headers.is_empty() {
-        config = config.custom_headers(custom_headers);
-    }
-    rmcp::transport::StreamableHttpClientTransport::with_client(reqwest::Client::new(), config)
+) -> super::http_client::PeriHttpTransport {
+    use super::http_client::PeriHttpClient;
+    let config = transport_config(url, headers);
+    rmcp::transport::StreamableHttpClientTransport::with_client(
+        PeriHttpClient::Plain(reqwest::Client::new()),
+        config,
+    )
 }
 
 pub(crate) fn build_authed_transport(
     url: &str,
     headers: &HashMap<String, String>,
     auth_manager: rmcp::transport::auth::AuthorizationManager,
-) -> rmcp::transport::StreamableHttpClientTransport<
-    rmcp::transport::auth::AuthClient<reqwest::Client>,
-> {
+) -> super::http_client::PeriHttpTransport {
+    use super::http_client::PeriHttpClient;
+    let config = transport_config(url, headers);
+    let auth_client = rmcp::transport::auth::AuthClient::new(reqwest::Client::new(), auth_manager);
+    rmcp::transport::StreamableHttpClientTransport::with_client(
+        PeriHttpClient::Authed(auth_client),
+        config,
+    )
+}
+
+fn transport_config(
+    url: &str,
+    headers: &HashMap<String, String>,
+) -> rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig {
     use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
     let mut config = StreamableHttpClientTransportConfig::with_uri(url);
     let mut custom_headers = std::collections::HashMap::new();
@@ -130,8 +125,7 @@ pub(crate) fn build_authed_transport(
     if !custom_headers.is_empty() {
         config = config.custom_headers(custom_headers);
     }
-    let auth_client = rmcp::transport::auth::AuthClient::new(reqwest::Client::new(), auth_manager);
-    rmcp::transport::StreamableHttpClientTransport::with_client(auth_client, config)
+    config
 }
 
 #[cfg(test)]
