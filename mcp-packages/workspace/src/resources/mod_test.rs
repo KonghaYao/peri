@@ -253,7 +253,7 @@ fn empty_input_still_lists_builtin_skills_and_instruction_index() {
     );
     assert!(
         uris.iter().any(|uri| uri.starts_with("skill://builtin/")),
-        "builtin 默认启用（7 个内置技能）"
+        "builtin 默认启用（内置技能列表非空）"
     );
     assert!(
         !uris.contains(&INSTRUCTION_MAIN_URI),

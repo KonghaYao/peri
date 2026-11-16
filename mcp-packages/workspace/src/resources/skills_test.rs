@@ -35,7 +35,7 @@ fn input(roots: Vec<ResourceRoot>) -> WorkspaceResourcesInput {
         instruction_excludes: Vec::new(),
         skill_roots: roots,
         agent_roots: Vec::new(),
-        // 测本地根时关掉 builtin，避免 7 个内置技能干扰计数。
+        // 测本地根时关掉 builtin，避免内置技能干扰计数。
         disable_bundled: true,
         budget: ResourceBudget::default(),
     }
