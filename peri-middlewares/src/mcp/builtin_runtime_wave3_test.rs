@@ -396,3 +396,115 @@ async fn v5_workspace_closure_drops_default_subscriptions() {
     );
     fixture.shutdown().await;
 }
+
+/// V5-C 关闭矩阵：六种能力逐一关闭后，wire 工具、required 工具、typed bridge 与
+/// 运行时调用四个面同时消失，且其他能力保持可见。
+///
+/// 宿主任务面（cron tick / monitor 轮询 / workflow 消费者）由
+/// `builtin_runtime_policy_test` 的生命周期用例覆盖；本用例锁定同一关闭集在
+/// 目录与执行两端的投影一致性。
+#[tokio::test]
+async fn v5_closure_matrix_covers_every_capability() {
+    for capability in peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES {
+        let closed_tools: HashSet<&str> = capability
+            .tools
+            .iter()
+            .filter(|tool| tool.advertised && tool.model_visible)
+            .map(|tool| tool.original_name)
+            .collect();
+        assert!(
+            !closed_tools.is_empty(),
+            "{} 必须有可广告工具",
+            capability.name
+        );
+
+        let fixture = Wave3Fixture::start(Wave3Spec {
+            builtin_env: Some("v5"),
+            closed_instances: vec![capability.legacy_instance],
+            ..Wave3Spec::default()
+        })
+        .await;
+        let pool = Arc::clone(&fixture.pool);
+
+        let served: HashSet<String> = pool
+            .tools_for_server("peri")
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        for tool in capability.tools.iter().filter(|tool| tool.advertised) {
+            assert!(
+                !served.contains(tool.original_name),
+                "关闭 {} 后不得列出 {}",
+                capability.name,
+                tool.original_name
+            );
+            assert!(
+                !served.contains(tool.model_name),
+                "关闭 {} 后不得列出模型面名 {}",
+                capability.name,
+                tool.model_name
+            );
+        }
+        let other_visible = peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
+            .iter()
+            .filter(|other| other.name != capability.name)
+            .flat_map(|other| other.tools.iter())
+            .filter(|tool| tool.advertised && tool.model_visible)
+            .any(|tool| served.contains(tool.original_name) || served.contains(tool.model_name));
+        assert!(
+            other_visible,
+            "关闭 {} 不得连带关闭其他能力",
+            capability.name
+        );
+
+        let closed: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::from([capability.legacy_instance.to_string()]);
+        if let Some(requirement) = pool
+            .system_requirements()
+            .into_iter()
+            .find(|requirement| requirement.server == "peri")
+        {
+            let visible = crate::mcp::builtin::visible_required_tools(
+                "peri",
+                &requirement.required_tools,
+                &closed,
+            );
+            for tool in capability.tools.iter().filter(|tool| tool.direct) {
+                assert!(
+                    !visible.iter().any(|name| name == tool.original_name),
+                    "关闭 {} 后必需工具不得保留 {}",
+                    capability.name,
+                    tool.original_name
+                );
+            }
+        }
+
+        let bridges = crate::mcp::tool_bridge::build_typed_tool_bridges(&pool);
+        assert!(
+            !bridges.iter().any(|bridge| {
+                bridge.mcp_server_name() == Some("peri")
+                    && closed_tools.contains(bridge.original_tool_name())
+            }),
+            "关闭 {} 后其工具不得进入 typed bridge 集合",
+            capability.name
+        );
+
+        for tool in capability.tools.iter().filter(|tool| tool.advertised) {
+            assert!(
+                pool.call_instance_tool(
+                    capability.legacy_instance,
+                    tool.original_name,
+                    super::json!({}),
+                    None,
+                )
+                .await
+                .is_err(),
+                "关闭 {} 的工具 {} 必须由服务端拒绝执行",
+                capability.name,
+                tool.original_name
+            );
+        }
+
+        fixture.shutdown().await;
+    }
+}

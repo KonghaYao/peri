@@ -28,6 +28,7 @@ const fn test_tool(
         legacy_name,
         direct,
         model_visible: true,
+        advertised: true,
         prompt_declaration: None,
         context_retention: ContextRetention::Recomputable,
         completes_on_response: true,
