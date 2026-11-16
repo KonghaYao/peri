@@ -508,10 +508,14 @@ impl BaseTool for McpToolBridge {
                 // the terminal state always wakes the initiator once (with any
                 // unreported hits merged into it). The receipt below must still
                 // not promise resumable delivery.
-                let is_monitor = matches!(
-                    self.client.source.as_ref(),
-                    Some(super::config::ConfigSource::Builtin { instance }) if instance == "monitor"
-                );
+                // v5 单出口按能力身份判定；迁移期仍按实例名。
+                let is_monitor = capability_source
+                    .is_some_and(|capability| capability.name == "monitor")
+                    || (capability_source.is_none()
+                        && matches!(
+                            self.client.source.as_ref(),
+                            Some(super::config::ConfigSource::Builtin { instance }) if instance == "monitor"
+                        ));
                 if is_monitor {
                     // The model sees the receipt, not the raw `CreateTaskResult`.
                     // Expose both ids: `public_id` is the host task id (host task
