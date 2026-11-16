@@ -599,7 +599,6 @@ async fn idle_rules_consume_the_session_task_manager_and_fail_closed_on_type_mis
         Arc::clone(&router) as Arc<dyn peri_acp_types::interaction::UserInteractionBroker>,
         tokio_util::sync::CancellationToken::new(),
         &std::collections::HashSet::new(),
-        false,
         &cfg.session_resources,
         &session_manager,
     )
@@ -631,7 +630,6 @@ async fn idle_rules_consume_the_session_task_manager_and_fail_closed_on_type_mis
         Arc::clone(&router) as Arc<dyn peri_acp_types::interaction::UserInteractionBroker>,
         tokio_util::sync::CancellationToken::new(),
         &std::collections::HashSet::new(),
-        false,
         &cfg.session_resources,
         &foreign,
     )

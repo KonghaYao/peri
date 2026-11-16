@@ -68,6 +68,7 @@ fn extract_child_thread_id(text: &str) -> String {
     text.split("child_thread_id: ")
         .nth(1)
         .and_then(|s| s.lines().next())
+        .and_then(|line| line.split_whitespace().next())
         .expect("文本应包含 child_thread_id")
         .to_string()
 }
@@ -172,15 +173,16 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    let capture = super::install_parent_host(&store, &parent);
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    // 实例 A：spawn → LLM 首轮 Interrupted → Ok 可恢复文本带 child_thread_id 前缀
+    // 实例 A：spawn → LLM 首轮 Interrupted（后台回执带 child_thread_id）
     let t_a = make_interrupt_tool(Arc::clone(&calls), 1)
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
         .with_parent_session(parent.clone());
     let t_a = super::with_agent_face(t_a, dir.path()).await;
-    let interrupted = t_a
+    let receipt = t_a
         .invoke(
             serde_json::json!({
                 "subagent_type": "interrupt-agent",
@@ -190,15 +192,21 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
             peri_agent::tools::ToolContext::new(&[], cwd.as_str()),
         )
         .await
-        .expect("首次执行应返回可恢复的 Interrupted 文本");
+        .expect("首次执行应完成后台启动");
     assert!(
-        interrupted.contains("Sub-agent execution was interrupted")
-            && interrupted.contains("resume with Agent(resume_thread_id:")
-            && interrupted.contains("child_thread_id:"),
-        "LLM 返回 Interrupted → Ok 文本须明确中断且可恢复: {}",
-        interrupted
+        receipt.contains("Background task")
+            && receipt.contains("resume with Agent(resume_thread_id:")
+            && receipt.contains("child_thread_id:"),
+        "后台回执须明确可恢复: {}",
+        receipt
     );
-    let id = extract_child_thread_id(&interrupted);
+    let id = extract_child_thread_id(&receipt);
+    let interrupted = capture.wait().await;
+    assert!(
+        !interrupted.success && interrupted.output.contains("interrupted"),
+        "LLM 返回 Interrupted → 后台终态须明确中断: {:?}",
+        interrupted.output
+    );
 
     // 实例 B（同 store dir、同父 session thread_id）：resume → 完成
     let t_b = make_interrupt_tool(Arc::clone(&calls), 1)
@@ -206,8 +214,9 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
         .with_parent_thread_id(parent_id.clone())
         .with_parent_session(parent);
     let t_b = super::with_agent_face(t_b, dir.path()).await;
-    let result = t_b
-        .invoke(
+    let result = capture
+        .invoke_and_wait(
+            &t_b,
             serde_json::json!({
                 "resume_thread_id": id.clone(),
                 "cwd": cwd.clone(),
@@ -256,6 +265,7 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    let capture = super::install_parent_host(&store, &parent);
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     let id = {
@@ -265,7 +275,7 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
             .with_parent_thread_id(parent_id.clone())
             .with_parent_session(parent.clone());
         let t_a = super::with_agent_face(t_a, dir.path()).await;
-        let interrupted = t_a
+        let receipt = t_a
             .invoke(
                 serde_json::json!({
                     "subagent_type": "test-agent",
@@ -275,15 +285,21 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
                 peri_agent::tools::ToolContext::new(&[], "."),
             )
             .await
-            .expect("首次执行应返回可恢复的 Interrupted 文本");
+            .expect("首次执行应完成后台启动");
         assert!(
-            interrupted.contains("Sub-agent execution was interrupted")
-                && interrupted.contains("resume with Agent(resume_thread_id:")
-                && interrupted.contains("child_thread_id:"),
-            "LLM 返回 Interrupted → Ok 文本须明确中断且可恢复: {}",
-            interrupted
+            receipt.contains("Background task")
+                && receipt.contains("resume with Agent(resume_thread_id:")
+                && receipt.contains("child_thread_id:"),
+            "后台回执须明确可恢复: {}",
+            receipt
         );
-        extract_child_thread_id(&interrupted)
+        let interrupted = capture.wait().await;
+        assert!(
+            !interrupted.success && interrupted.output.contains("interrupted"),
+            "LLM 返回 Interrupted → 后台终态须明确中断: {:?}",
+            interrupted.output
+        );
+        extract_child_thread_id(&receipt)
     }; // 丢弃实例 A（模拟进程重启，仅剩磁盘现场）
 
     // 实例 B：同 store dir → resume（缺省 prompt → 隐式 continue）→ 完成
@@ -292,8 +308,9 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
         .with_parent_thread_id(parent_id.clone())
         .with_parent_session(parent.clone());
     let t_b = super::with_agent_face(t_b, dir.path()).await;
-    let result = t_b
-        .invoke(
+    let result = capture
+        .invoke_and_wait(
+            &t_b,
             serde_json::json!({
                 "resume_thread_id": id.clone(),
                 "cwd": cwd.clone(),
@@ -342,26 +359,30 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
         if cancelled {
             token.cancel();
         }
-        peri_agent::session::Session::new_with_cancel(
+        let session = peri_agent::session::Session::new_with_cancel(
             std::sync::Arc::from(cwd.as_str()),
             peri_agent::session::FrozenContext::builder().build(),
             Some(parent_id.clone()),
             token,
-        )
+        );
+        let capture = super::install_parent_host(&store, &session);
+        (session, capture)
     };
     let mk_interrupted = || async {
-        super::with_agent_face(
+        let (parent, capture) = mk_parent(false);
+        let tool = super::with_agent_face(
             make_interrupt_tool(calls.clone(), 2)
                 .with_session_resources(store.facade())
                 .with_parent_thread_id(parent_id.clone())
-                .with_parent_session(mk_parent(false)),
+                .with_parent_session(parent),
             dir.path(),
         )
-        .await
+        .await;
+        (tool, capture)
     };
 
-    // 1) spawn → 中断 #1（文本含 child_thread_id + resume 提示）
-    let t1 = mk_interrupted().await;
+    // 1) spawn → 中断 #1（回执含 child_thread_id + resume 提示）
+    let (t1, c1) = mk_interrupted().await;
     let r1 = t1
         .invoke(
             serde_json::json!({
@@ -372,16 +393,18 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
-        .expect("第一次应返回（中断文本）");
+        .expect("第一次应完成后台启动");
     assert!(
-        r1.contains("was interrupted") && r1.contains("resume with Agent(resume_thread_id:"),
-        "第一次应中断且带 resume 提示: {}",
+        r1.contains("resume with Agent(resume_thread_id:"),
+        "第一次回执应带 resume 提示: {}",
         r1
     );
+    let interrupted1 = c1.wait().await;
+    assert!(!interrupted1.success && interrupted1.output.contains("interrupted"));
     let id1 = extract_child_thread_id(&r1);
 
     // 2) resume → 中断 #2（同一 thread_id）
-    let t2 = mk_interrupted().await;
+    let (t2, c2) = mk_interrupted().await;
     let r2 = t2
         .invoke(
             serde_json::json!({
@@ -391,23 +414,27 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
-        .expect("第二次应返回（中断文本）");
+        .expect("第二次应完成后台启动");
     assert!(
-        r2.contains("was interrupted") && r2.contains("resume with Agent(resume_thread_id:"),
-        "第二次应再次中断且带 resume 提示: {}",
+        r2.contains("resume with Agent(resume_thread_id:"),
+        "第二次回执应带 resume 提示: {}",
         r2
     );
+    let interrupted2 = c2.wait().await;
+    assert!(!interrupted2.success && interrupted2.output.contains("interrupted"));
     let id2 = extract_child_thread_id(&r2);
     assert_eq!(id1, id2, "多次恢复 thread_id 必须不变");
 
     // 3) resume → 完成（新实例：父会话换回未取消的 token，归属不变）
+    let (parent3, capture3) = mk_parent(false);
     let t3 = super::make_subagent_tool(vec![])
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_parent_session(mk_parent(false));
+        .with_parent_session(parent3);
     let t3 = super::with_agent_face(t3, dir.path()).await;
-    let r3 = t3
-        .invoke(
+    let r3 = capture3
+        .invoke_and_wait(
+            &t3,
             serde_json::json!({
                 "resume_thread_id": id1.clone(),
                 "cwd": cwd,
@@ -452,6 +479,11 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
     let bridge = Arc::new(RecordingBridge {
         observes: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
+    let capture = super::install_parent_host_with_bridge(
+        &store,
+        &parent,
+        Some(Arc::clone(&bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>),
+    );
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let calls_clone = Arc::clone(&calls);
     let t = SubAgentTool::new(
@@ -476,8 +508,8 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
     let t = super::with_agent_face(t, dir.path()).await;
     let t = super::with_agent_face(t, dir.path()).await;
 
-    // 首次执行 → 中断（第 1 对 Start/Stop；LLM 返回 Interrupted → Ok 可恢复文本）
-    let interrupted = t
+    // 首次执行 → 中断（第 1 对 Start/Stop；LLM 返回 Interrupted → 后台失败终态）
+    let receipt = t
         .invoke(
             serde_json::json!({
                 "subagent_type": "test-agent",
@@ -487,21 +519,23 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
-        .expect("首次执行应返回可恢复的 Interrupted 文本");
+        .expect("首次执行应完成后台启动");
     assert!(
-        interrupted.contains("Sub-agent execution was interrupted")
-            && interrupted.contains("resume with Agent(resume_thread_id:")
-            && interrupted.contains("child_thread_id:"),
-        "首次应返回明确可恢复的中断文本: {}",
-        interrupted
+        receipt.contains("resume with Agent(resume_thread_id:")
+            && receipt.contains("child_thread_id:"),
+        "首次回执应明确可恢复: {}",
+        receipt
     );
-    let id = extract_child_thread_id(&interrupted);
+    let id = extract_child_thread_id(&receipt);
+    let interrupted = capture.wait().await;
+    assert!(!interrupted.success && interrupted.output.contains("interrupted"));
     let evs = wait_for_observe_pairs(&bridge, 1, 3000).await;
-    super::assert_start_stop_pair(&evs, "test-agent", false);
+    super::assert_start_stop_pair(&evs, "test-agent", true);
 
     // 恢复 → 完成（第 2 对 Start/Stop）
-    let result = t
-        .invoke(
+    let result = capture
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "resume_thread_id": id.clone(),
                 "cwd": cwd,
@@ -592,6 +626,7 @@ async fn test_resume_skill_preload_not_duplicated() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    let capture = super::install_parent_host(&store, &parent);
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let t = super::with_skill_registry(
         make_interrupt_tool(Arc::clone(&calls), 1)
@@ -604,7 +639,7 @@ async fn test_resume_skill_preload_not_duplicated() {
     let t = super::with_agent_face(t, dir.path()).await;
 
     // 首次执行（agent-def 路径）→ SkillPreload 注入一套 → 中断（LLM 返回 Interrupted）
-    let interrupted = t
+    let receipt = t
         .invoke(
             serde_json::json!({
                 "subagent_type": "skill-user",
@@ -614,19 +649,21 @@ async fn test_resume_skill_preload_not_duplicated() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
-        .expect("首次执行应返回可恢复的 Interrupted 文本");
+        .expect("首次执行应完成后台启动");
     assert!(
-        interrupted.contains("Sub-agent execution was interrupted")
-            && interrupted.contains("resume with Agent(resume_thread_id:")
-            && interrupted.contains("child_thread_id:"),
-        "首次应返回明确可恢复的中断文本: {}",
-        interrupted
+        receipt.contains("resume with Agent(resume_thread_id:")
+            && receipt.contains("child_thread_id:"),
+        "首次回执应明确可恢复: {}",
+        receipt
     );
-    let id = extract_child_thread_id(&interrupted);
+    let id = extract_child_thread_id(&receipt);
+    let interrupted = capture.wait().await;
+    assert!(!interrupted.success && interrupted.output.contains("interrupted"));
 
     // resume（隐式 continue，无 /skill token → 自动检测分支不触发）→ 完成
-    let result = t
-        .invoke(
+    let result = capture
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "resume_thread_id": id.clone(),
                 "cwd": cwd,
@@ -666,6 +703,7 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    let capture = super::install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     // 完整工具轮次：Ai[ToolUse] + Tool[result] 配对，末条 = Tool → 不 pop
     super::preset_resumable_thread(
@@ -730,8 +768,9 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
     .with_parent_session(parent.clone());
     let t = super::with_agent_face(t, dir.path()).await;
 
-    let result = t
-        .invoke(
+    let result = capture
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "resume_thread_id": id.clone(),
                 "cwd": cwd.clone(),
@@ -806,6 +845,7 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    let capture = super::install_parent_host(&store, &parent);
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let t = super::with_skill_registry(
         make_interrupt_tool(Arc::clone(&calls), 1)
@@ -818,7 +858,7 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
     let t = super::with_agent_face(t, dir.path()).await;
 
     // 首次执行（显式声明 skills）→ 注入一套 → 中断（LLM 返回 Interrupted）
-    let interrupted = t
+    let receipt = t
         .invoke(
             serde_json::json!({
                 "subagent_type": "skill-user",
@@ -828,19 +868,21 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
-        .expect("首次执行应返回可恢复的 Interrupted 文本");
+        .expect("首次执行应完成后台启动");
     assert!(
-        interrupted.contains("Sub-agent execution was interrupted")
-            && interrupted.contains("resume with Agent(resume_thread_id:")
-            && interrupted.contains("child_thread_id:"),
-        "首次应返回明确可恢复的中断文本: {}",
-        interrupted
+        receipt.contains("resume with Agent(resume_thread_id:")
+            && receipt.contains("child_thread_id:"),
+        "首次回执应明确可恢复: {}",
+        receipt
     );
-    let id = extract_child_thread_id(&interrupted);
+    let id = extract_child_thread_id(&receipt);
+    let interrupted = capture.wait().await;
+    assert!(!interrupted.success && interrupted.output.contains("interrupted"));
 
     // resume prompt 含 /test-skill token → 自动检测分支不存在（链未挂 SkillPreload）
-    let result = t
-        .invoke(
+    let result = capture
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "resume_thread_id": id.clone(),
                 "cwd": cwd,

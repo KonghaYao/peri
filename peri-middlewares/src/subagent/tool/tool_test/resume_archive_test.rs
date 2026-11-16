@@ -83,7 +83,7 @@ async fn permission_drift(retention: ContextRetention) {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
-    super::install_parent_host(&store, &parent);
+    let capture = super::install_parent_host(&store, &parent);
     let child = uuid::Uuid::now_v7().to_string();
     super::preset_resumable_thread(&store, &child, "archived-child", Some(&parent_id), vec![])
         .await;
@@ -165,18 +165,28 @@ async fn permission_drift(retention: ContextRetention) {
     .with_parent_session(parent);
     write_definition(false);
     let tool = super::with_agent_face(tool, dir.path()).await;
-    let failure = tool
+    let receipt = tool
         .invoke(
             serde_json::json!({"resume_thread_id":child,"cwd":cwd}),
             super::preset_child_ctx(&child, "."),
         )
         .await
-        .unwrap_err();
+        .expect("v5 resume 恒后台：权限漂移在子执行中失败");
+    assert!(receipt.contains("Background task"), "{receipt}");
+    let failure = capture.wait().await;
+    assert!(!failure.success, "权限漂移必须落为失败终态");
+    let safe_failure = failure
+        .subagent_failure
+        .as_ref()
+        .expect("typed child failure must survive background settlement");
+    let failure_text = format!(
+        "{} {}",
+        safe_failure.message(),
+        safe_failure.causes().join(" ")
+    );
     assert!(
-        failure
-            .to_string()
-            .contains("context_archive_capability_required"),
-        "权限漂移必须明确报错: {failure}"
+        failure_text.contains("context_archive_capability_required"),
+        "权限漂移必须明确报错: {failure_text}"
     );
     assert_eq!(
         calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -185,8 +195,9 @@ async fn permission_drift(retention: ContextRetention) {
     );
     write_definition(true);
     let tool = super::with_agent_face(tool, dir.path()).await;
-    let success = tool
-        .invoke(
+    let success = capture
+        .invoke_and_wait(
+            &tool,
             serde_json::json!({"resume_thread_id":child,"cwd":cwd}),
             super::preset_child_ctx(&child, "."),
         )

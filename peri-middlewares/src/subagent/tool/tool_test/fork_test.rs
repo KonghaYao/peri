@@ -58,8 +58,9 @@ async fn test_fork_inherits_parent_messages() {
         .with_parent_messages(Arc::clone(&parent_messages)),
     );
 
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "fork": true,
                 "prompt": "do the thing"
@@ -148,7 +149,8 @@ async fn test_fork_tool_surface_excludes_child_absent_capabilities() {
         .with_parent_messages(parent_messages),
     );
 
-    t.invoke(
+    host.invoke_and_wait(
+        &t,
         serde_json::json!({
             "fork": true,
             "prompt": "check tools"
@@ -194,8 +196,9 @@ async fn test_fork_without_parent_messages_returns_error() {
 
     // Fork 现在从 ToolContext 获取消息（而非 self.parent_messages），
     // 空消息也是合法输入。
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "fork": true,
                 "prompt": "do something"
@@ -237,7 +240,8 @@ async fn test_fork_system_prompt_consistent() {
         .with_system_builder(Arc::new(|_ov, _cwd| "FORK-TEST-SYSTEM".to_string())),
     );
 
-    t.invoke(
+    host.invoke_and_wait(
+        &t,
         serde_json::json!({
             "fork": true,
             "prompt": "check system"
@@ -287,7 +291,8 @@ async fn test_fork_identity_is_projected_not_parent_bytes() {
         .with_system_builder(Arc::new(|_ov, _cwd| "BUILDER-SYSTEM-PROMPT".to_string())),
     );
 
-    t.invoke(
+    host.invoke_and_wait(
+        &t,
         serde_json::json!({
             "fork": true,
             "prompt": "check projected prefix"
@@ -371,7 +376,8 @@ async fn test_fork_directive_includes_rules() {
         .with_parent_messages(parent_messages),
     );
 
-    t.invoke(
+    host.invoke_and_wait(
+        &t,
         serde_json::json!({
             "fork": true,
             "prompt": "my directive task"
@@ -658,8 +664,8 @@ async fn test_fork_rejected_when_parent_context_above_limit() {
             input[key] = value.clone();
         }
 
-        let error = tool
-            .invoke(input, ctx)
+        let error = host
+            .invoke_and_wait(&tool, input, ctx)
             .await
             .expect_err(&format!("{label} fork 在使用率 80% 时应被拒绝"));
         let message = error.to_string();
@@ -702,8 +708,8 @@ async fn test_non_fork_invocation_ignores_fork_context_gate() {
 
     // 缺少 subagent_type 时走到定义解析前的参数错误——证明没有触发 fork 门，
     // 也证明门不误伤非 fork 路径（错误来自缺失参数而非上下文使用率）。
-    let error = tool
-        .invoke(serde_json::json!({ "prompt": "do the thing" }), ctx)
+    let error = host
+        .invoke_and_wait(&tool, serde_json::json!({ "prompt": "do the thing" }), ctx)
         .await
         .expect_err("缺少 subagent_type 应报参数错误");
     let message = error.to_string();

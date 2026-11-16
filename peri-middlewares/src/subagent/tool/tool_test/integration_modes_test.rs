@@ -205,8 +205,9 @@ async fn test_named_sync_does_not_inherit_parent_messages() {
         BaseMessage::human("PARENT-HISTORY-MARKER-Q2"),
     ];
     super::super::invocation::reset_current_messages_calls();
-    let result = tool
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &tool,
             serde_json::json!({
                 "subagent_type": "named-sync",
                 "prompt": "named child task",

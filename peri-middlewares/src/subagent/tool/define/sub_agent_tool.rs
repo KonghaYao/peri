@@ -1,6 +1,6 @@
 use super::{
-    async_trait, fmt, subagent, AgentCancellationToken, AgentEventHandler, AgentId, AgentOverrides,
-    Arc, BaseMessage, BaseTool, Debug, Formatter, InvocationArgs, McpAgentRegistry, RegisteredHook,
+    async_trait, fmt, AgentCancellationToken, AgentEventHandler, AgentId, AgentOverrides, Arc,
+    BaseMessage, BaseTool, Debug, Formatter, InvocationArgs, McpAgentRegistry, RegisteredHook,
     RwLock, SubagentHost, TOOL_AGENT,
 };
 
@@ -66,14 +66,6 @@ pub struct SubAgentTool {
     pub(crate) broker: Option<Arc<dyn peri_agent::interaction::UserInteractionBroker>>,
     /// 子链装配器（middlewares 实现，链序契约 ARC-MIDDLEWARE-001）
     pub(crate) chain_assembler: Arc<dyn peri_agent::session::subagent::SubagentChainAssembler>,
-    /// 是否**强制**后台执行（middleware 装配参数，beta flag `full-async-tools`
-    /// 的投影）。字段名沿用历史命名，语义以本注释为准。
-    ///
-    /// `true` = 本会话 Agent 调用一律后台：省略 `run_in_background` 与显式 `false`
-    /// 都走后台，携带 `resume_thread_id` 的非 active 恢复同样后台。`false` = 既有
-    /// 语义：只消费显式意图，省略字段走前台。MCP Agent 仅支持同步激活，不参与强制
-    /// 后台（见 `invoke`）。
-    pub(crate) default_run_in_background: bool,
 }
 
 impl Debug for SubAgentTool {
@@ -81,7 +73,6 @@ impl Debug for SubAgentTool {
         formatter
             .debug_struct("SubAgentTool")
             .field("parent_cwd", &self.parent_cwd)
-            .field("default_run_in_background", &self.default_run_in_background)
             .finish_non_exhaustive()
     }
 }
@@ -133,7 +124,7 @@ impl BaseTool for SubAgentTool {
                 },
                 "resume_thread_id": {
                     "type": "string",
-                    "description": "目标 subagent 的 child_thread_id（UUID，即回执/通知中 `child_thread_id: ...` 标注的值）；不填即新建。它不是 task id：后台 task id 形如 `bg-<uuid>`，去掉 `bg-` 前缀后的 UUID 仍不是线程身份（形态合法但查无此线程，会以 thread not found 拒绝）。非 UUID 的非空值（例如后台 task_id `bg-...`）一样被明确拒绝，而不是忽略后新建。active 后台执行：将非空 prompt 作为 Defer 入队并立即返回 action: send / status: queued，不中断、不恢复，在后续 Receive 驱动推理，run_in_background 被忽略。非 active：从磁盘恢复，prompt 可省略以隐式继续；恢复模式由 run_in_background 决定，强制后台会话中恒为后台（显式 false 被忽略）。两种行为均优先于 subagent_type / fork。active 但当前会话没有可投递运行实例时明确报错"
+                    "description": "目标 subagent 的 child_thread_id（UUID，即回执/通知中 `child_thread_id: ...` 标注的值）；不填即新建。它不是 task id：后台 task id 形如 `bg-<uuid>`，去掉 `bg-` 前缀后的 UUID 仍不是线程身份（形态合法但查无此线程，会以 thread not found 拒绝）。非 UUID 的非空值（例如后台 task_id `bg-...`）一样被明确拒绝，而不是忽略后新建。active 后台执行：将非空 prompt 作为 Defer 入队并立即返回 action: send / status: queued，不中断、不恢复，在后续 Receive 驱动推理，run_in_background 被忽略。非 active：从磁盘恢复，prompt 可省略以隐式继续；恢复恒为后台（run_in_background 被忽略）。两种行为均优先于 subagent_type / fork。active 但当前会话没有可投递运行实例时明确报错"
                 },
                 "send_only": {
                     "type": "boolean",
@@ -154,12 +145,8 @@ impl BaseTool for SubAgentTool {
                 },
                 "run_in_background": {
                     "type": "boolean",
-                    "default": self.default_run_in_background,
-                    "description": if self.default_run_in_background {
-                        "Background execution is mandatory in this session: the sub-agent always runs in the background, and an explicit false is ignored (the call still starts in the background). MCP Agents selected via subagent_type are the exception: they support synchronous activation only. The main agent continues immediately and receives a notification when the background task completes. No fixed limit on concurrent background tasks."
-                    } else {
-                        "Set to true to run the sub-agent in the background. The main agent continues immediately and receives a notification when the background task completes. No fixed limit on concurrent background tasks"
-                    }
+                    "default": true,
+                    "description": "Background execution is mandatory: the sub-agent always runs in the background, and an explicit false is ignored (the call still starts in the background). The main agent continues immediately and receives a notification when the background task completes. No fixed limit on concurrent background tasks."
                 },
                 "cwd": {
                     "type": "string",
@@ -194,14 +181,13 @@ impl BaseTool for SubAgentTool {
         input: serde_json::Value,
         ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<peri_agent::tools::ToolOutput, Box<dyn std::error::Error + Send + Sync>> {
-        use peri_agent::tools::{ToolExecutionEvidence, ToolExecutionStatus, ToolOutput};
+        use peri_agent::tools::ToolOutput;
         let InvocationArgs {
             resume_thread_id,
             send_only,
             prompt,
             subagent_type,
             model,
-            run_in_background,
             cwd,
             is_fork,
         } = InvocationArgs::parse(&input)?;
@@ -225,10 +211,7 @@ impl BaseTool for SubAgentTool {
         // 绑定的真实 turn 事实；缺失时审批路径显式拒绝，不伪造归属。
         let approval_owner = crate::interaction_owner::owner_from_tool_context(&ctx);
 
-        // host 提前获取（resume 校验需要会话资源门面；R-M2 分支优先级）
-        let host = self.host();
-
-        // ── resume 分支（优先于 bg / fork / agent-def，R-M2）──
+        // ── resume 分支（优先于 fork / agent-def，R-M2）──
         // 容错语义：resume_thread_id 为有效 UUID 时直接进入恢复分支，subagent_type /
         // fork 字段被忽略（LLM 常按 schema 惯性同时携带，报错会让恢复被拦两次而放弃；
         // 宽容处理使恢复总是可成功，多余字段无副作用）。
@@ -236,16 +219,14 @@ impl BaseTool for SubAgentTool {
         // 也不会被静默丢弃后转入新建。
         // invoke_resume 先尝试当前会话的 live Defer 投递；只有恢复路径才需要磁盘。
         //
-        // resume 消费强制模式 + 显式意图：`default_run_in_background` 下非 active 恢复同样
-        // 后台；active 线程的 Defer 投递本就忽略该字段。非强制模式只认显式意图
-        // （设计 §首个 flag）。
+        // v5：非 active 恢复恒后台唤醒；active 线程的 Defer 投递本就忽略该字段。
+        // `run_in_background` 仍被宽容解析，但不再决定执行模式。
         if let Some(thread_id) = resume_thread_id.as_ref() {
             return self
                 .invoke_resume(
                     thread_id.clone(),
                     prompt,
                     cwd,
-                    self.default_run_in_background || run_in_background.unwrap_or(false),
                     parent_tool_call_id.clone(),
                     approval_owner,
                 )
@@ -258,92 +239,35 @@ impl BaseTool for SubAgentTool {
             return Err("Error: missing required parameter prompt".into());
         };
 
-        // ── Fork 上下文门（启动前，同步与后台 fork 共用同一决策点）──
+        // ── Fork 上下文门（启动前，所有 fork 共用同一决策点）──
         // 父会话上下文使用率高于上限时 fork 不可用：拒绝并引导改用非 fork
         // 子 agent（subagent_type）或 resume。resume 分支已先返回，不经过本门。
         if is_fork {
             crate::subagent::fork::fork_context_usage_gate(ctx.context_usage)?;
         }
 
-        let is_mcp_agent = subagent_type
-            .as_deref()
-            .is_some_and(|id| id.starts_with("mcp__"));
-        // 显式 true 与 MCP Agent 互斥（MCP Agents 只支持同步激活）。
-        if is_mcp_agent && run_in_background == Some(true) {
-            return Err("Error: MCP Agents currently support synchronous activation only".into());
-        }
-        // 调用模式（装配期注入，会话内冻结）：
-        //
-        // - MCP Agent 恒同步：定义准入必须经审批门（`load_and_approve_mcp_agent`），
-        //   而后台路径（`invoke_background` → `load_agent_def` → `registry.activate`）
-        //   **不经**该门。省略或显式 false 都走审批门，`default_run_in_background` 不得把它们
-        //   推进后台 loader；显式 true 的既有报错语义见上。
-        // - `default_run_in_background`：本会话强制后台，省略与显式 `false` 都被忽略。
-        // - 否则只消费显式意图：省略 = 前台（与 flag 引入前逐位一致）。
-        let run_in_background = if is_mcp_agent {
-            false
-        } else if self.default_run_in_background {
-            true
-        } else {
-            run_in_background.unwrap_or(false)
-        };
-
-        // 后台路径需要 task_manager（L3：经 parent_session 的 host 或 tool host 回退）。
-        // resume_thread_id.is_none() 为双保险（R-M2）：resume 分支已先返回，此处不可能
-        // 再有 resume 调用——防止未来分支重排时 resume 被 bg 分支静默吞掉。
-        //
-        // 强制模式是会话能力承诺：缺失管理器直接报错，不得静默落回同步（那会违背
-        // flag 语义）。非强制模式维持既有语义：显式 true 无管理器时落回同步。
-        // [TRAP] 语义不对称（与 Bash 有意不同，勿"修平"）：Bash 缺省后台无管理器时
-        // 报既有错误（`run_in_background is not available`），本工具非强制时静默落回同步。
-        let run_in_background = if run_in_background && host.task_manager.is_none() {
-            if self.default_run_in_background {
-                return Err(
-                    "Error: full-async Agent execution requires a background task manager; none is configured".into(),
-                );
-            }
-            false
-        } else {
-            run_in_background
-        };
-        if resume_thread_id.is_none() && run_in_background {
-            // 只有 fork 消费父历史；命名子 agent 的后台路径从零构建 transcript。
-            // 在分支内物化，避免命名路径把不会使用的父正文副本带过整个 spawn。
-            let parent_messages = if is_fork {
-                self.current_messages(ctx.messages)
-            } else {
-                Vec::new()
-            };
-            return self
-                .invoke_background(
-                    prompt,
-                    subagent_type,
-                    cwd,
-                    is_fork,
-                    parent_messages,
-                    model.as_deref(),
-                    parent_tool_call_id.clone(),
-                )
-                .await
-                .map(ToolOutput::from_legacy);
-        }
-
+        // v5 行为：Agent 调用恒后台，显式 `run_in_background: false` 只被宽容解析、
+        // 不改变执行模式。同步执行实现保留在 Agent 层（`SubagentRunMode::Sync` /
+        // `run_sync.rs`），本工具不再产生该路径。
         if is_fork {
+            // 只有 fork 消费父历史；命名子 agent 从零构建 transcript。
             let parent_messages = self.current_messages(ctx.messages);
             return self
-                .invoke_fork(&prompt, &cwd, parent_messages, parent_tool_call_id.clone())
+                .invoke_background_fork(prompt, cwd, parent_messages, parent_tool_call_id)
                 .await
                 .map(ToolOutput::from_legacy);
         }
 
-        let agent_id = match &subagent_type {
-            Some(id) => id.clone(),
+        let agent_id = match subagent_type {
+            Some(id) => id,
             None => {
                 let error = "Error: please provide subagent_type parameter to specify the agent type, or use fork: true for fork mode";
                 return Err(self.agent_error_with_suggestions(error, None).into());
             }
         };
-
+        let is_mcp_agent = agent_id.starts_with("mcp__");
+        // 定义准入在后台启动之前完成：MCP Agent 必须经内容绑定审批门，
+        // 后台 loader（`load_agent_def`）不得成为绕过审批的入口。
         let agent_def = if is_mcp_agent {
             self.load_and_approve_mcp_agent(&agent_id, approval_owner.as_ref())
                 .await?
@@ -358,76 +282,15 @@ impl BaseTool for SubAgentTool {
             }
         };
 
-        let build_result = self
-            .build_agent_from_def(&agent_def, &agent_id, &cwd, model.as_deref())
-            .await?;
-
-        let llm = build_result.llm;
-
-        let config = self.spawn_config_base(
-            agent_id.clone(),
-            prompt.clone(),
-            Vec::new(),
-            peri_agent::session::subagent::SubagentCancelPolicy::Cascade,
-            build_result.max_iterations,
-            None, // agent 定义路径不包装 fork directive
-            peri_agent::session::subagent::SubagentRunMode::Sync,
-            llm,
-            build_result
-                .tools
-                .into_iter()
-                .map(|t| Arc::from(t) as Arc<dyn BaseTool>)
-                .collect(),
-            build_result.tool_filter,
-            build_result.system_prompt,
-            build_result.skill_names,
+        self.invoke_background_agent(
+            agent_id,
+            agent_def,
+            prompt,
             cwd,
-            parent_tool_call_id.clone(),
-        );
-
-        let spawned = self.spawn(config).await?;
-
-        if let Some(pending) = spawned.pending_message() {
-            return Ok(ToolOutput::from_legacy(pending));
-        }
-
-        // Interrupted 语义与迁移前一致；文本携带 child_thread_id——主 agent 凭此
-        // 找回执行现场（会话资源门面为 None 的测试路径同样带 id：spawned.child_thread_id 恒可用）
-        if spawned.interrupted {
-            return Ok(ToolOutput::from_legacy(format!(
-                "child_thread_id: {}\nSub-agent execution was interrupted, resume with Agent(resume_thread_id: {})",
-                spawned.child_thread_id, spawned.child_thread_id
-            )));
-        }
-
-        let report = subagent::format_subagent_result(&peri_agent::agent::react::AgentOutput {
-            text: subagent::extract_last_ai_text(&spawned.session),
-            steps: 0,
-            tool_calls: Vec::new(),
-            stop_reason: None,
-            block_continue: None,
-        });
-        let text = if host.session_resources.is_some() {
-            format!("child_thread_id: {}\n{}", spawned.child_thread_id, report)
-        } else {
-            report
-        };
-        // This synchronous factory branch returned after child settlement. A retained
-        // task ID still means responsibility survives, even if the text sounds final.
-        let status = if spawned.task_id.is_none() {
-            ToolExecutionStatus::Completed
-        } else {
-            ToolExecutionStatus::Running
-        };
-        Ok(ToolOutput::with_execution(
-            text,
-            ToolExecutionEvidence {
-                status,
-                exit_code: None,
-                output_ref: None,
-                output_truncated: false,
-                task_id: spawned.task_id.clone(),
-            },
-        ))
+            model.as_deref(),
+            parent_tool_call_id,
+        )
+        .await
+        .map(ToolOutput::from_legacy)
     }
 }
