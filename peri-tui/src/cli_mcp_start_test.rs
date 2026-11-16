@@ -179,7 +179,7 @@ fn peri_positional_accepts_capability_flags() {
 }
 
 #[test]
-fn legacy_instance_does_not_read_mcp_file() {
+fn legacy_instance_maps_to_the_single_exit_without_reading_mcp_file() {
     let dir = tempfile::tempdir().unwrap();
     write_mcp_file(dir.path(), "{not json");
     let options = resolve_options(parse(&[
@@ -189,7 +189,27 @@ fn legacy_instance_does_not_read_mcp_file() {
         workspace_arg(dir.path()),
     ]))
     .unwrap();
-    assert_eq!(options.target, Target::Instance("web".to_owned()));
+    assert_eq!(options.target, Target::Capabilities(vec!["web".to_owned()]));
+}
+
+#[test]
+fn every_legacy_instance_maps_to_its_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    for capability in peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES {
+        let options = resolve_options(parse(&[
+            capability.legacy_instance,
+            "--stdio",
+            "--workspace",
+            workspace_arg(dir.path()),
+        ]))
+        .unwrap();
+        assert_eq!(
+            options.target,
+            Target::Capabilities(vec![capability.name.to_owned()]),
+            "{} must map to its capability",
+            capability.legacy_instance
+        );
+    }
 }
 
 #[test]
