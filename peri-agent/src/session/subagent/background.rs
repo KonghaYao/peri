@@ -427,10 +427,12 @@ pub(super) async fn spawn_background_subagent(
             ChildRunOutcome::Settled | ChildRunOutcome::Interrupted
         );
         let mut drain_failure: Option<String> = None;
+        // SubagentStop.result 是完整子 agent 输出，不做长度截断；显示层使用
+        // 各自的有界预览并在裁剪时标记省略。
         let (text, mut output_summary, mut status, success, failure) = match &outcome {
             ChildRunOutcome::Settled => {
                 let text = crate::session::subagent::util::extract_last_ai_text(&session);
-                let summary = text.chars().take(500).collect::<String>();
+                let summary = text.clone();
                 (text, summary, AgentStatus::Done, true, None)
             }
             ChildRunOutcome::Interrupted => (
@@ -467,7 +469,7 @@ pub(super) async fn spawn_background_subagent(
                         receipt,
                     ));
                 }
-                let summary = output.chars().take(500).collect::<String>();
+                let summary = output.clone();
                 (output, summary, AgentStatus::Error, false, failure)
             }
             ChildRunOutcome::HandoffFailed { cause, failure } => {
@@ -500,7 +502,7 @@ pub(super) async fn spawn_background_subagent(
                         SubagentFailure::safe_failure_from_error(&child_thread_id_for_task, &error)
                     }
                 };
-                let summary = output.chars().take(500).collect::<String>();
+                let summary = output.clone();
                 (output, summary, AgentStatus::Error, false, safe)
             }
         };
@@ -557,7 +559,7 @@ pub(super) async fn spawn_background_subagent(
                     SubagentFailure::new(&child_thread_id_for_task, &agent_name_for_task, error);
                 result.output =
                     format!("Background sub-agent failed: {}", failure.public_message());
-                output_summary = result.output.chars().take(500).collect();
+                output_summary = result.output.clone();
                 result.subagent_failure = failure.safe_failure();
                 result.success = false;
                 publish_completed = false;
@@ -568,7 +570,7 @@ pub(super) async fn spawn_background_subagent(
                     result.output,
                     error.user_facing_message()
                 );
-                output_summary = result.output.chars().take(500).collect();
+                output_summary = result.output.clone();
             }
         }
         if let Some(ref on_stop) = on_subagent_stop {
@@ -590,7 +592,7 @@ pub(super) async fn spawn_background_subagent(
         .await;
         if !terminal_persisted {
             publish_completed = false;
-            output_summary = result.output.chars().take(500).collect();
+            output_summary = result.output.clone();
         }
         crate::session::subagent::v2_bridge::forward_subagent_stop_v1(
             bg_stop_handler.as_ref(),
