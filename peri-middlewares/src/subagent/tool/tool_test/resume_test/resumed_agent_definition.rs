@@ -25,7 +25,7 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
-    super::install_parent_host(&store, &parent);
+    let capture = super::install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     super::preset_resumable_thread(
         &store,
@@ -84,8 +84,9 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
     .with_parent_session(parent.clone());
     let t = super::with_agent_face(t, dir.path()).await;
 
-    let result = t
-        .invoke(
+    let result = capture
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "resume_thread_id": id.clone(),
                 "cwd": cwd.clone(),
@@ -130,7 +131,7 @@ async fn test_resume_trimmed_id_wins_over_mcp_fork_and_invalid_model() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
-    super::install_parent_host(&store, &parent);
+    let capture = super::install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     super::preset_resumable_thread(&store, &id, "test-agent", Some(parent_id.as_str()), vec![])
         .await;
@@ -139,8 +140,9 @@ async fn test_resume_trimmed_id_wins_over_mcp_fork_and_invalid_model() {
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
         .with_parent_session(parent.clone());
-    let result = tool
-        .invoke(
+    let result = capture
+        .invoke_and_wait(
+            &tool,
             serde_json::json!({
                 "resume_thread_id": format!("  {id}\n"),
                 "subagent_type": "mcp__missing__agent",

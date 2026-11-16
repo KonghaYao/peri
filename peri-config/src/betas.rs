@@ -7,7 +7,8 @@
 //! - 投影：由**合并后 settings** 派生；未覆盖与未知 id 一律 false。
 //!
 //! 类型 [`BetaFlags`] 定义在契约 crate（`peri-acp-types`）：它同时是会话冻结载体
-//! （`FrozenContext`）的成员，消费方（Bash / Agent 装配面）不重新解析 flag 语义。
+//! （`FrozenContext`）的成员，消费方不重新解析 flag 语义。当前 ACP 注册表为空，
+//! 仅 TUI 本地键 `history-window-v1` 被 [`is_known`] 接受。
 
 use crate::app::PeriConfig;
 

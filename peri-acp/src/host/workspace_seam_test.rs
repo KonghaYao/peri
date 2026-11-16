@@ -58,7 +58,6 @@ async fn seam_fixture() -> SeamFixture {
         bare: true,
         drive_cron_tick: false,
         workspace_input: None,
-        workspace_bash_default_run_in_background: false,
         // 本夹具直接构造顶层装配：资源面输入同样保持未接线（会话路径才装载）。
         workspace_resources: None,
         // 同理：workflow 运行时槽位是会话级装配输入，本夹具无会话上下文。

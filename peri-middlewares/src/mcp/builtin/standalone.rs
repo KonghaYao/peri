@@ -70,7 +70,7 @@ impl StandaloneFactory {
             }
             "workspace" => {
                 workspace_server = Some(
-                    WorkspaceMcpServer::standalone(cwd, false)
+                    WorkspaceMcpServer::standalone(cwd)
                         .with_resources(default_workspace_resources(&workspace)),
                 );
             }

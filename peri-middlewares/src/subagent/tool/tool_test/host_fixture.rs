@@ -16,6 +16,9 @@ pub(crate) struct HostFixture {
     pub(crate) parent_id: ThreadId,
     pub(crate) cwd: String,
     parent_session: std::sync::Arc<peri_agent::session::Session>,
+    task_manager: Arc<peri_agent::agent::async_tasks::TaskManager>,
+    /// 后台 completion 捕获（`on_bg_complete`）：测试用同步等待替代父 MQ 投递。
+    capture: super::BackgroundCapture,
 }
 
 impl HostFixture {
@@ -34,8 +37,13 @@ impl HostFixture {
             .cloned()
             .unwrap_or_default();
         configure(&mut sub_host);
-        host.parent_session =
-            rebuild_with_host(&host.cwd, &host.parent_id, &host.fixture, sub_host);
+        host.parent_session = rebuild_with_host(
+            &host.cwd,
+            &host.parent_id,
+            &host.fixture,
+            sub_host,
+            &host.capture,
+        );
         host
     }
 
@@ -57,10 +65,17 @@ impl HostFixture {
             .as_deref()
             .cloned()
             .unwrap_or_default();
-        sub_host.task_manager = Some(task_manager);
+        sub_host.task_manager = Some(Arc::clone(&task_manager));
         sub_host.bg_event_sender = Some(bg_event_sender);
-        session = rebuild_with_host(&host.cwd, &host.parent_id, &host.fixture, sub_host);
+        session = rebuild_with_host(
+            &host.cwd,
+            &host.parent_id,
+            &host.fixture,
+            sub_host,
+            &host.capture,
+        );
         host.parent_session = session;
+        host.task_manager = task_manager;
         host
     }
 
@@ -79,10 +94,16 @@ impl HostFixture {
             .as_deref()
             .cloned()
             .unwrap_or_default();
-        sub_host.task_manager = Some(task_manager);
+        sub_host.task_manager = Some(Arc::clone(&task_manager));
         sub_host.bg_event_sender = Some(bg_event_sender);
-        host.parent_session =
-            rebuild_with_host(&host.cwd, &host.parent_id, &host.fixture, sub_host);
+        host.parent_session = rebuild_with_host(
+            &host.cwd,
+            &host.parent_id,
+            &host.fixture,
+            sub_host,
+            &host.capture,
+        );
+        host.task_manager = task_manager;
         host
     }
 
@@ -110,13 +131,17 @@ impl HostFixture {
         let mut meta = ThreadMeta::new_at(cwd.clone(), peri_time::now_wall());
         meta.title = Some(label.to_string());
         let parent_id = fixture.create_thread(meta).await.expect("建立父会话失败");
-        let parent_session = build_parent_session(&cwd, &parent_id, &fixture);
+        let capture = super::BackgroundCapture::default();
+        let (parent_session, task_manager) =
+            build_parent_session(&cwd, &parent_id, &fixture, &capture);
         Self {
             _dir: dir,
             fixture,
             parent_id,
             cwd,
             parent_session,
+            task_manager,
+            capture,
         }
     }
 
@@ -173,7 +198,13 @@ impl HostFixture {
         mut self,
         host: peri_agent::session::subagent::SubagentHost,
     ) -> Self {
-        self.parent_session = rebuild_with_host(&self.cwd, &self.parent_id, &self.fixture, host);
+        self.parent_session = rebuild_with_host(
+            &self.cwd,
+            &self.parent_id,
+            &self.fixture,
+            host,
+            &self.capture,
+        );
         self
     }
 
@@ -213,7 +244,8 @@ impl HostFixture {
         use peri_agent::session::subagent::SubagentHost;
         let mut host = SubagentHost {
             session_resources: Some(self.fixture.facade()),
-            task_manager: Some(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
+            task_manager: Some(self.task_manager()),
+            on_bg_complete: Some(self.capture.logger()),
             ..Default::default()
         };
         host.parent_thread_id = session
@@ -228,6 +260,28 @@ impl HostFixture {
     pub(crate) fn fresh_tool_call_id(&self, label: &str) -> String {
         format!("fixture-tool-call:{label}:{}", uuid::Uuid::now_v7())
     }
+
+    /// 会话级后台任务管理器（测试等待 / 断言 active_count 用）。
+    pub(crate) fn task_manager(&self) -> Arc<peri_agent::agent::async_tasks::TaskManager> {
+        Arc::clone(&self.task_manager)
+    }
+
+    /// 等待下一次后台完成并返回结果；超时即判失败。
+    pub(crate) async fn wait_background_completion(
+        &self,
+    ) -> peri_acp_types::event::BackgroundTaskResult {
+        self.capture.wait().await
+    }
+
+    /// v5 工具调用助手：发起后台委派并等待结果，返回与旧同步路径同形的文本。
+    pub(crate) async fn invoke_and_wait(
+        &self,
+        tool: &SubAgentTool,
+        input: serde_json::Value,
+        ctx: peri_agent::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        self.capture.invoke_and_wait(tool, input, ctx).await
+    }
 }
 
 /// 用给定 SubagentHost 重建 session（Write-once host 需要在装配前定稿通道）。
@@ -236,10 +290,14 @@ fn rebuild_with_host(
     parent_id: &str,
     fixture: &SessionFixture,
     mut host: peri_agent::session::subagent::SubagentHost,
+    capture: &super::BackgroundCapture,
 ) -> std::sync::Arc<peri_agent::session::Session> {
     host.session_resources = Some(fixture.facade());
     if host.task_manager.is_none() {
         host.task_manager = Some(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()));
+    }
+    if host.on_bg_complete.is_none() {
+        host.on_bg_complete = Some(capture.logger());
     }
     host.parent_thread_id = Some(parent_id.to_string());
     let session = peri_agent::session::Session::new(
@@ -256,19 +314,25 @@ fn build_parent_session(
     cwd: &str,
     parent_id: &str,
     fixture: &SessionFixture,
-) -> std::sync::Arc<peri_agent::session::Session> {
+    capture: &super::BackgroundCapture,
+) -> (
+    std::sync::Arc<peri_agent::session::Session>,
+    Arc<peri_agent::agent::async_tasks::TaskManager>,
+) {
     use peri_agent::session::subagent::SubagentHost;
     let session = peri_agent::session::Session::new(
         std::sync::Arc::from(cwd),
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.to_string()),
     );
+    let task_manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let mut host = SubagentHost {
         session_resources: Some(fixture.facade()),
-        task_manager: Some(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
+        task_manager: Some(Arc::clone(&task_manager)),
+        on_bg_complete: Some(capture.logger()),
         ..Default::default()
     };
     host.parent_thread_id = Some(parent_id.to_string());
     session.set_subagent_host(host);
-    session
+    (session, task_manager)
 }

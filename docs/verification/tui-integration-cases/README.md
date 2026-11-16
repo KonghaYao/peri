@@ -40,7 +40,7 @@
 
 1. P1-01～P1-02：[输入与消息时序](02-prompt-order.md)中的 Stop 恢复和输入延迟。
 2. P1-03：[后台任务生命周期](08-background-lifecycle.md)中的失败后新通知激活。
-3. P1-04：[配置与能力开关](10-configuration.md)中的 Beta 开关冻结语义。
+3. P1-04：[配置与能力开关](10-configuration.md)中的 Agent 默认后台与 beta 区块移除。
 4. P1-05：[审批与问答](05-interactions.md)中的内部续跑交互归属。
 5. P1-06～P1-07：[消息内容显示](11-transcript-display.md)中的链接预览与折叠状态。
 6. P1-08～P1-11：[输入区、状态栏与后台任务栏](12-composer-status.md)中的空态、历史、补全和状态栏。

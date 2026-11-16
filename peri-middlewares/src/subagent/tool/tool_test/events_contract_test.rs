@@ -8,7 +8,6 @@ use super::ObserveEvent;
 use super::RecordingBridge;
 use super::RwLock;
 use super::SubAgentTool;
-use peri_agent::tools::BaseTool as _;
 
 // ─── C2/C3：v2 SubagentStart/Stop 生产 emit 契约测试 ─────────────────────────
 //
@@ -92,7 +91,7 @@ async fn durable_host_with_bridge(
     .await
 }
 
-/// S1/T1：fork 同步路径（execute_fork.rs）—— Start/Stop 恰好一次，
+/// S1/T1：fork 路径（后台）—— Start/Stop 恰好一次，
 /// 且 child_agent_id == child_thread_id（C1 身份统一契约）
 #[tokio::test]
 async fn test_fork_path_emits_v2_start_stop_exactly_once() {
@@ -101,8 +100,9 @@ async fn test_fork_path_emits_v2_start_stop_exactly_once() {
     let host = durable_host_with_bridge(dir.path(), "fixture-events-fork", &bridge).await;
     // 会话资源门面存在时 invoke 返回携带 child_thread_id，用于身份对齐断言
     let t = host.bind(super::with_agent_face(make_tool_with_bridge(&bridge), dir.path()).await);
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "fork": true,
                 "cwd": host.cwd.clone(),
@@ -121,7 +121,7 @@ async fn test_fork_path_emits_v2_start_stop_exactly_once() {
         .to_string();
 
     let evs = wait_for_observe_start_stop(&bridge, 3000).await;
-    super::assert_start_stop_pair(&evs, "fork", false);
+    super::assert_start_stop_pair(&evs, "fork", true);
     assert_eq!(
         start_child_agent_id(&evs).to_string(),
         child_thread_id,
@@ -129,7 +129,7 @@ async fn test_fork_path_emits_v2_start_stop_exactly_once() {
     );
 }
 
-/// S4/T4：define 同步路径（define.rs）—— Start/Stop 恰好一次，
+/// S4/T4：define 路径（后台）—— Start/Stop 恰好一次，
 /// 且 child_agent_id == child_thread_id（C1 身份统一契约）
 #[tokio::test]
 async fn test_define_path_emits_v2_start_stop_exactly_once() {
@@ -138,8 +138,9 @@ async fn test_define_path_emits_v2_start_stop_exactly_once() {
     let bridge = make_bridge();
     let host = durable_host_with_bridge(dir.path(), "fixture-events-define", &bridge).await;
     let t = host.bind(super::with_agent_face(make_tool_with_bridge(&bridge), dir.path()).await);
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "subagent_type": "test-agent",
                 "cwd": host.cwd.clone(),
@@ -158,7 +159,7 @@ async fn test_define_path_emits_v2_start_stop_exactly_once() {
         .to_string();
 
     let evs = wait_for_observe_start_stop(&bridge, 3000).await;
-    super::assert_start_stop_pair(&evs, "test-agent", false);
+    super::assert_start_stop_pair(&evs, "test-agent", true);
     assert_eq!(
         start_child_agent_id(&evs).to_string(),
         child_thread_id,
@@ -191,8 +192,9 @@ async fn test_background_path_emits_v2_start_stop_exactly_once() {
         host.with_rebuilt_host(sub_host)
     };
     let t = host.bind(super::with_agent_face(make_tool_with_bridge(&bridge), dir.path()).await);
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "subagent_type": "test-agent",
                 "run_in_background": true,
@@ -243,8 +245,9 @@ async fn test_bg_fork_path_emits_v2_start_stop_exactly_once() {
         host.with_rebuilt_host(sub_host)
     };
     let t = host.bind(make_tool_with_bridge(&bridge).with_parent_messages(parent_messages));
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "fork": true,
                 "run_in_background": true,

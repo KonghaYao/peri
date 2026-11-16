@@ -58,7 +58,7 @@ async fn connect(
 async fn generic_client_without_peri_metadata_calls_write_and_bash() {
     let dir = tempfile::tempdir().expect("workspace");
     let target = dir.path().join("plain.txt");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client, server_task) = connect(server.clone(), ClientCapabilities::default()).await;
 
     let write = CallToolRequestParams::new("Write").with_arguments(
@@ -118,7 +118,7 @@ async fn generic_client_without_peri_metadata_calls_write_and_bash() {
 #[tokio::test]
 async fn task_owner_isolation_hides_and_protects_other_sessions_tasks() {
     let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client, server_task) = connect(
         server.clone(),
         ClientCapabilities::builder().enable_tasks().build(),
@@ -204,7 +204,7 @@ async fn task_owner_isolation_hides_and_protects_other_sessions_tasks() {
 #[tokio::test]
 async fn task_completion_is_delivered_to_its_subscription() {
     let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client, server_task) = connect(
         server.clone(),
         ClientCapabilities::builder().enable_tasks().build(),
@@ -255,7 +255,7 @@ async fn task_completion_is_delivered_to_its_subscription() {
 #[tokio::test]
 async fn task_cancellation_is_delivered_to_its_subscription() {
     let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client, server_task) = connect(
         server.clone(),
         ClientCapabilities::builder().enable_tasks().build(),
@@ -321,7 +321,7 @@ async fn task_cancellation_is_delivered_to_its_subscription() {
 #[tokio::test]
 async fn task_result_remains_queryable_across_connections() {
     let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let capabilities = ClientCapabilities::builder().enable_tasks().build();
     let (first, first_server) = connect(server.clone(), capabilities.clone()).await;
     let request = CallToolRequestParams::new("Bash").with_arguments(
@@ -380,7 +380,7 @@ async fn task_result_remains_queryable_across_connections() {
 #[tokio::test]
 async fn task_query_requires_client_capability() {
     let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client, server_task) = connect(server.clone(), ClientCapabilities::default()).await;
     let error = client
         .peer()
@@ -399,7 +399,7 @@ async fn task_query_requires_client_capability() {
 #[tokio::test]
 async fn task_cancel_wire_stops_the_owned_shell() {
     let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let capabilities = ClientCapabilities::builder().enable_tasks().build();
     let (client, server_task) = connect(server.clone(), capabilities).await;
     let request = CallToolRequestParams::new("Bash").with_arguments(
@@ -450,7 +450,7 @@ async fn task_cancel_wire_stops_the_owned_shell() {
 #[tokio::test]
 async fn foreground_timeout_promotion_returns_queryable_task() {
     let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let capabilities = ClientCapabilities::builder().enable_tasks().build();
     let (client, server_task) = connect(server.clone(), capabilities).await;
     let request = CallToolRequestParams::new("Bash").with_arguments(
@@ -498,81 +498,6 @@ async fn foreground_timeout_promotion_returns_queryable_task() {
     );
 }
 
-// ── beta flag `full-async-tools`（生产路径：`standalone` 注入有效缺省）──────
-
-/// 生产路径（`standalone`）：schema `default` 与 `call_tool` 判定同源——
-/// 省略 `run_in_background` 的调用走 owned 后台任务，显式 `false` 仍走前台。
-#[tokio::test]
-async fn standalone_default_run_in_background_drives_schema_and_call_path() {
-    let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), true);
-    let (client, server_task) = connect(
-        server.clone(),
-        ClientCapabilities::builder().enable_tasks().build(),
-    )
-    .await;
-
-    let tools = client.peer().list_tools(None).await.expect("tools/list");
-    let bash = tools
-        .tools
-        .iter()
-        .find(|tool| tool.name.as_ref() == "Bash")
-        .expect("Bash 必须声明");
-    assert_eq!(
-        bash.input_schema["properties"]["run_in_background"]["default"],
-        serde_json::json!(true),
-        "生产路径 schema default 必须跟随装配期有效缺省"
-    );
-
-    // 省略字段：owned 后台任务（client 支持 tasks ⇒ 返回 Task 句柄）。
-    let request = CallToolRequestParams::new("Bash").with_arguments(
-        serde_json::json!({"command": "sleep 30"})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
-    let CallToolResponse::Task(created) = client
-        .peer()
-        .call_tool_once(request)
-        .await
-        .expect("省略字段且缺省为 true 时必须走后台")
-    else {
-        panic!("缺省后台必须返回 task handle")
-    };
-    assert!(created.task.task_id.starts_with("shell-"));
-
-    // 显式 false：仍走前台（返回 Complete 而非 Task）。
-    let request = CallToolRequestParams::new("Bash").with_arguments(
-        serde_json::json!({"command": "printf explicit-foreground", "run_in_background": false})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
-    let CallToolResponse::Complete(result) = client
-        .peer()
-        .call_tool_once(request)
-        .await
-        .expect("显式 false 必须走前台")
-    else {
-        panic!("显式 false 不得返回 task handle")
-    };
-    assert_eq!(result.is_error, Some(false));
-    let text = result
-        .content
-        .iter()
-        .filter_map(|block| block.as_text().map(|text| text.text.clone()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(text.contains("explicit-foreground"), "{text}");
-
-    drop(client);
-    server_task.await.expect("server closed");
-    assert_eq!(
-        server.shutdown_shell_tasks().await,
-        Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
-    );
-}
-
 /// [回归测试] 后台 shell 被并发上限拒绝时，wire 上的错误必须保留上限事实，而不是
 /// 折叠成不透明的 `shell task launch failed`；命令文本不进入错误文本，上限不变。
 #[tokio::test]
@@ -580,7 +505,7 @@ async fn concurrent_limit_rejection_keeps_limit_facts_on_the_wire() {
     use peri_agent::agent::async_tasks::BackgroundTaskRegistry;
 
     let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let capabilities = ClientCapabilities::builder().enable_tasks().build();
     let (client, server_task) = connect(server.clone(), capabilities).await;
     let mut task_ids = Vec::new();
@@ -649,7 +574,7 @@ async fn concurrent_limit_rejection_keeps_limit_facts_on_the_wire() {
 async fn background_integral_float_timeout_is_normalized_on_the_wire() {
     let dir = tempfile::tempdir().expect("workspace");
     let finished = dir.path().join("finished");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client, server_task) = connect(
         server.clone(),
         ClientCapabilities::builder().enable_tasks().build(),
@@ -710,7 +635,7 @@ async fn background_integral_float_timeout_is_normalized_on_the_wire() {
 async fn background_invalid_timeout_is_rejected_before_spawn() {
     let dir = tempfile::tempdir().expect("workspace");
     let sentinel = dir.path().join("spawned");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client, server_task) = connect(
         server.clone(),
         ClientCapabilities::builder().enable_tasks().build(),

@@ -79,8 +79,9 @@ async fn test_agent_model_override_replaces_frontmatter() {
     )
     .await;
     let t = host.bind(t);
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "subagent_type": "test-agent",
                 "prompt": "hello",
@@ -113,8 +114,9 @@ async fn test_agent_model_inherit_uses_parent_model() {
     )
     .await;
     let t = host.bind(t);
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "subagent_type": "test-agent",
                 "prompt": "hello",
@@ -153,8 +155,8 @@ async fn test_agent_model_omitted_keeps_frontmatter() {
             input["model"] = serde_json::Value::String(m.to_string());
         }
         let invocation = host.fresh_tool_call_id("omitted");
-        let result = t
-            .invoke(input, host.context_with(&[], invocation))
+        let result = host
+            .invoke_and_wait(&t, input, host.context_with(&[], invocation))
             .await
             .unwrap();
         assert!(result.contains("echo"), "应正常执行: {}", result);
@@ -187,8 +189,9 @@ async fn test_agent_model_omitted_inherit_or_empty_frontmatter() {
             .await,
         );
         let invocation = host.fresh_tool_call_id("inherit");
-        let result = t
-            .invoke(
+        let result = host
+            .invoke_and_wait(
+                &t,
                 serde_json::json!({
                     "subagent_type": "test-agent",
                     "prompt": "hello",
@@ -223,8 +226,9 @@ async fn test_agent_model_case_insensitive() {
     let t = host.bind(t);
     for model in ["HAIKU", "InHerit"] {
         let invocation = host.fresh_tool_call_id("case");
-        let result = t
-            .invoke(
+        let result = host
+            .invoke_and_wait(
+                &t,
                 serde_json::json!({
                     "subagent_type": "test-agent",
                     "prompt": "hello",
@@ -256,8 +260,9 @@ async fn test_agent_model_unknown_ignored_on_fork() {
         make_recording_subagent_tool(vec![], Arc::clone(&aliases))
             .with_parent_messages(parent_messages),
     );
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "fork": true,
                 "prompt": "do the thing",
@@ -285,8 +290,9 @@ async fn test_agent_model_unknown_rejected() {
     )
     .await;
     let t = host.bind(t);
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "subagent_type": "test-agent",
                 "prompt": "hello",
@@ -324,8 +330,9 @@ async fn test_agent_model_ignored_on_fork() {
         make_recording_subagent_tool(vec![], Arc::clone(&aliases))
             .with_parent_messages(parent_messages),
     );
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "fork": true,
                 "prompt": "do the thing",
@@ -387,8 +394,9 @@ async fn test_resume_thread_id_ignores_model_field() {
     let tool_call = durable_face.fresh_tool_call_id("resume-model");
     ctx.invocation_id = Some(tool_call.clone().into());
     ctx.tool_call_id = Some(tool_call.into());
-    let result = t
-        .invoke(
+    let result = durable_face
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "resume_thread_id": id.clone(),
                 "model": "turbo",
@@ -425,8 +433,9 @@ async fn test_resume_rebuilds_current_definition_after_initial_override() {
         )
         .await,
     );
-    let first = tool
-        .invoke(
+    let first = host
+        .invoke_and_wait(
+            &tool,
             serde_json::json!({
                 "subagent_type": "test-agent", "prompt": "首次", "model": "haiku",
             }),
@@ -443,8 +452,9 @@ async fn test_resume_rebuilds_current_definition_after_initial_override() {
     write_test_agent_with_model(&dir, "sonnet");
     // 重接资源面，模拟续聊时已刷新到当前磁盘定义的目录。
     let tool = super::with_agent_face(tool, dir.path()).await;
-    let resumed = tool
-        .invoke(
+    let resumed = host
+        .invoke_and_wait(
+            &tool,
             serde_json::json!({
                 "resume_thread_id": id, "prompt": "继续", "model": "opus",
             }),
@@ -535,8 +545,9 @@ async fn test_agent_invoke_wrong_optional_types_keep_definition_and_parent_cwd()
         .await,
     );
     tool.parent_cwd = dir.path().to_str().unwrap().to_string();
-    let result = tool
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &tool,
             serde_json::json!({
                 "prompt": "  preserve spaces  ",
                 "subagent_type": "test-agent",
@@ -585,8 +596,9 @@ async fn test_agent_frontmatter_unknown_tier_is_rejected_on_pointed_launch() {
     .await;
     let t = host.bind(t);
 
-    let error = t
-        .invoke(
+    let error = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "subagent_type": "test-agent",
                 "prompt": "hello",
@@ -622,8 +634,9 @@ async fn test_agent_frontmatter_tier_case_normalized_on_launch() {
     .await;
     let t = host.bind(t);
 
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "subagent_type": "test-agent",
                 "prompt": "hello",

@@ -317,7 +317,6 @@ async fn test_resume_missing_resources_is_a_typed_preflight_rejection() {
             uuid::Uuid::now_v7().to_string(),
             Some("ping".into()),
             "/tmp".into(),
-            false,
             None,
             None,
         )
@@ -343,7 +342,6 @@ async fn test_resume_invalid_identity_is_a_typed_preflight_rejection() {
             "../invalid".into(),
             Some("ping".into()),
             fixture.workspace_cwd(),
-            false,
             None,
             None,
         )
@@ -615,8 +613,8 @@ async fn test_resume_thread_id_background_combination() {
     );
 }
 
-/// 强制后台（beta flag `full-async-tools`）：resume 省略 `run_in_background` 或
-/// 显式 `false` 时，非 active 恢复仍走后台；完成通知照常回传。
+/// v5 默认后台：resume 省略 `run_in_background` 或显式 `false` 时，非 active
+/// 恢复恒走后台（同步唤醒路径不可用）；完成通知照常回传。
 #[tokio::test]
 async fn test_resume_thread_id_background_forced() {
     use peri_agent::agent::events::ExecutorEvent;
@@ -652,20 +650,19 @@ async fn test_resume_thread_id_background_forced() {
     let t = super::make_subagent_tool(vec![])
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_parent_session(parent.clone())
-        .with_default_run_in_background(true);
+        .with_parent_session(parent.clone());
 
-    // 关键：不给出 run_in_background —— 强制后台必须让非 active 恢复也走后台。
+    // 关键：不给出 run_in_background —— 非 active 恢复也必须走后台。
     let result = t
         .invoke(
             serde_json::json!({ "resume_thread_id": id.clone() }),
             super::preset_child_ctx(&id, "."),
         )
         .await
-        .expect("强制后台下 resume 应启动后台任务");
+        .expect("默认后台下 resume 应启动后台任务");
     assert!(
         result.contains("Background task"),
-        "强制后台 resume 应返回启动确认文本: {result}"
+        "resume 应返回后台启动确认文本: {result}"
     );
     assert!(
         result.contains("bg-"),
@@ -686,7 +683,7 @@ async fn test_resume_thread_id_background_forced() {
         }
     })
     .await
-    .expect("强制后台 resume 应在超时内完成");
+    .expect("后台 resume 应在超时内完成");
     assert!(completed.success);
     assert_eq!(
         completed.child_thread_id.as_deref(),
@@ -695,7 +692,7 @@ async fn test_resume_thread_id_background_forced() {
     );
     assert_eq!(registry.active_count(), 0, "父任务目录必须已结算新任务");
 
-    // 显式 false 也不能落回同步：强制后台对 resume 同样生效。
+    // 显式 false 也不能落回同步。
     let explicit_false_id = uuid::Uuid::now_v7().to_string();
     super::preset_resumable_thread(
         &store,
@@ -714,10 +711,10 @@ async fn test_resume_thread_id_background_forced() {
             super::preset_child_ctx(&explicit_false_id, "."),
         )
         .await
-        .expect("强制后台下 resume 显式 false 应启动后台任务");
+        .expect("resume 显式 false 应启动后台任务");
     assert!(
         explicit_false_result.contains("Background task"),
-        "强制后台 resume 显式 false 应返回后台启动文本: {explicit_false_result}"
+        "resume 显式 false 应返回后台启动文本: {explicit_false_result}"
     );
     let explicit_false_completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -729,7 +726,7 @@ async fn test_resume_thread_id_background_forced() {
         }
     })
     .await
-    .expect("强制后台 resume 显式 false 应在超时内完成");
+    .expect("resume 显式 false 应在超时内完成");
     assert!(explicit_false_completed.success);
     assert_eq!(
         explicit_false_completed.child_thread_id.as_deref(),
@@ -756,7 +753,7 @@ async fn test_resume_thread_id_success_replays_and_completes() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
-    super::install_parent_host(&store, &parent);
+    let capture = super::install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     super::preset_resumable_thread(
         &store,
@@ -772,8 +769,9 @@ async fn test_resume_thread_id_success_replays_and_completes() {
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
         .with_parent_session(parent.clone());
-    let result = t
-        .invoke(
+    let result = capture
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "resume_thread_id": id.clone(),
                 "cwd": cwd.clone(),
@@ -810,7 +808,7 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_default_iteratio
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
-    super::install_parent_host(&store, &parent);
+    let capture = super::install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     super::preset_resumable_thread(
         &store,
@@ -874,38 +872,36 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_default_iteratio
     .with_parent_thread_id(parent_id.clone())
     .with_parent_session(parent.clone());
 
-    let result = t
+    let receipt = t
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id.clone(),
             }),
             super::preset_child_ctx(&id, "."),
         )
-        .await;
-    // 迭代上限耗尽 → MaxIterationsExceeded 错误（fork resume 上限 = DEFAULT_SUBAGENT_MAX_ITERATIONS）
-    let error = result.unwrap_err();
-    let failure = error
-        .downcast_ref::<peri_agent::session::subagent::SubagentFailure>()
-        .expect("fork resume must fail at the execution budget, not preflight or tool dispatch");
+        .await
+        .expect("v5 resume 恒后台：应先返回启动回执");
+    assert!(receipt.contains("Background task"), "{receipt}");
+
+    // 迭代上限耗尽 → max_iterations（fork resume 上限 = DEFAULT_SUBAGENT_MAX_ITERATIONS）
+    let completed = capture.wait().await;
+    assert!(!completed.success, "预算耗尽必须落为失败终态");
+    assert_eq!(completed.child_thread_id.as_deref(), Some(id.as_str()));
+    let failure = completed
+        .subagent_failure
+        .as_ref()
+        .expect("background result keeps typed child failure");
     assert_eq!(failure.child_thread_id(), id);
-    let peri_agent::error::AgentError::MaxIterationsExceeded(budget) = failure.error() else {
-        panic!("expected iteration budget exhaustion, got: {failure:?}");
-    };
-    let err = error.to_string();
-    assert!(
-        err.contains("child_thread_id") && err.contains("execution failed"),
-        "错误文本应带 child_thread_id 前缀（可恢复）: {}",
-        err
+    assert_eq!(
+        failure.category_name(),
+        "max_iterations",
+        "失败类别必须是预算耗尽：{}",
+        failure.message()
     );
     assert_eq!(
         llm_calls.load(std::sync::atomic::Ordering::SeqCst),
-        *budget,
-        "fork resume 必须耗尽配置预算，不能因无效工具调用提前退出"
-    );
-    assert_eq!(
-        *budget,
         crate::subagent::DEFAULT_SUBAGENT_MAX_ITERATIONS,
-        "fork resume 的当前默认预算必须与 fork 一致"
+        "fork resume 必须耗尽配置预算，不能因无效工具调用提前退出"
     );
     let captured = tools_capture.lock().unwrap();
     assert!(

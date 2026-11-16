@@ -17,8 +17,6 @@ use crate::mcp::McpAgentRegistry;
 use crate::tool_search::core_tools::TOOL_AGENT;
 
 use peri_acp_types::agents::AgentOverrides;
-/// 复用 peri-agent 的 subagent 结果格式与文本提取
-use peri_agent::session::subagent;
 
 #[path = "define/sub_agent_tool.rs"]
 mod sub_agent_tool;

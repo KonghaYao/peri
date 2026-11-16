@@ -95,7 +95,7 @@ async fn rewind_wire_restores_write_pre_image_and_keeps_generic_edit() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("target.txt");
     tokio::fs::write(&file, "user original").await.unwrap();
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client_io, server_io) = tokio::io::duplex(8192);
     let server_task = tokio::spawn(async move {
         server
@@ -202,7 +202,7 @@ async fn rewind_edit_snapshot_excludes_write_that_lands_after_commit() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("target.txt");
     tokio::fs::write(&file, "user=old\nalpha").await.unwrap();
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client_io, server_io) = tokio::io::duplex(8192);
     let server_task = tokio::spawn(async move {
         server

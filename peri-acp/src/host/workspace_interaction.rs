@@ -65,7 +65,6 @@ pub(crate) fn build_idle_invocation_rules<A>(
     broker: Arc<dyn UserInteractionBroker>,
     cancel: AgentCancellationToken,
     disabled_middlewares: &HashSet<String>,
-    agent_default_run_in_background: bool,
     session_resources: &Arc<dyn SessionResources>,
     session_task_manager: &Arc<dyn peri_acp_types::tasks::TaskManager>,
 ) -> Result<InvocationRuleChain, peri_agent::session::factory::AssemblyError>
@@ -183,7 +182,6 @@ where
         todo_tx,
         goal_controller: None,
         meta_harness_disabled: disabled_middlewares.clone(),
-        agent_default_run_in_background,
         agent_overrides: None,
         language: None,
     };

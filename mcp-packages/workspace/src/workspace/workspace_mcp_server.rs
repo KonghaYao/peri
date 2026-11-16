@@ -117,20 +117,15 @@ impl WorkspaceMcpServer {
 
     /// Build a Workspace server whose Bash jobs outlive individual MCP clients.
     /// Clones share the same task registry, including HTTP connections.
-    ///
-    /// `default_run_in_background` is the effective `run_in_background` default injected at
-    /// session assembly (beta flag projection; `false` = existing behavior). It reaches both the
-    /// tool schema and [`Self::call_owned_bash`]'s background decision from the same field.
     #[must_use]
-    pub fn standalone(cwd: impl Into<String>, default_run_in_background: bool) -> Self {
+    pub fn standalone(cwd: impl Into<String>) -> Self {
         let mut server = Self::new(cwd, None);
         let tasks = ShellTasks::new();
         let cwd = server.cwd.clone();
         let bash = Arc::new(
             BashTool::new(&cwd)
                 .with_task_manager(tasks.manager())
-                .with_on_bg_complete(tasks.completion_callback())
-                .with_default_run_in_background(default_run_in_background),
+                .with_on_bg_complete(tasks.completion_callback()),
         );
         server.tools[6] = bash.clone();
         server.bash = bash;
@@ -181,12 +176,10 @@ impl WorkspaceMcpServer {
             .as_ref()
             .expect("owned Bash requires task owner");
         let arguments = request.arguments.as_ref();
-        // 有效缺省（beta flag 投影）与工具 schema 同源：同一字段既写进 `parameters()`
-        // 的 `default`，也在这里决定未显式传参时的路径。显式 false 仍走前台。
         let background = arguments
             .and_then(|args| args.get("run_in_background"))
             .and_then(serde_json::Value::as_bool)
-            .unwrap_or(self.bash.default_run_in_background);
+            .unwrap_or(false);
         if background {
             let command = arguments
                 .and_then(|args| args.get("command"))

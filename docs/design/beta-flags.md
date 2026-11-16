@@ -61,17 +61,15 @@ description。消费方以注册表常量（而非字符串字面量）引用 id
 settings 位置为 `config.betas`（`BetasConfig`，内部为 bool 稀疏覆盖表）。示例：
 
 ```json
-{ "config": { "betas": { "full-async-tools": true } } }
+{ "config": { "betas": { "history-window-v1": false } } }
 ```
 
 ```mermaid
 flowchart LR
     Files["global / workspace settings"] --> Resolve["纯 typed resolve + 注册表校验"]
     Resolve --> Snapshot["ConfigurationSnapshot::flags"]
-    Snapshot --> Assemble["装配期注入"]
-    Assemble --> Bash["Bash 工具缺省"]
-    Assemble --> Agent["Agent 强制后台"]
-    Panel["ConfigPanel beta 区块"] -->|"CAS 保存"| Files
+    Snapshot --> Assemble["装配期显式输入注入"]
+    Panel["ConfigPanel beta 区块（注册表为空时不渲染）"] -->|"CAS 保存"| Files
 ```
 
 | 规则 | 内容 |
@@ -94,9 +92,8 @@ flowchart LR
   的 settings，或自行解析 flag 语义。
 - 设置更新发布新快照后，仅此后新建的会话使用新值；进行中的会话保持冻结值，
   行为不漂移。
-- 值送达使用显式装配输入：workspace 工具经实例装配输入（`WorkspaceInstanceInput`
-  同级）传递，middleware 工具经 middleware 装配参数传递；不引入全局单例读取或
-  运行时查表。
+- 值送达使用显式装配输入：消费方经实例装配输入或 middleware 装配参数接收语义化
+  布尔值；不引入全局单例读取或运行时查表。
 - 快照缺失、未覆盖与未知 id 一律按 false 处理；配置面不可用不得导致能力意外开启。
 - 装配时若有 flag 生效，记录 flag id 与来源层，供诊断。
 
@@ -104,7 +101,8 @@ flowchart LR
 
 管理入口是 ConfigPanel（Ctrl+F / `/config`）：在既有配置行之后追加 **beta flag
 区块**，按 ACP 注册表顺序为每个条目渲染一行 Toggle（id、描述、开启/关闭）。行模型从
-静态表扩展为「基础行 + 注册表驱动行」，滚动沿用面板既有能力。
+静态表扩展为「基础行 + 注册表驱动行」，滚动沿用面板既有能力；注册表为空时不渲染
+区块标题。
 
 - 切换写当前生效层的 `config.betas[id]`，经 `save_effective`（CAS）持久化；保存
   失败回滚本次内存写入（视图保持持久化前的值）并提示错误。
@@ -132,17 +130,13 @@ TUI 启动时（`peri-tui/src/kit/entry.rs`）读取一次快照 flags，调用
 行为。Beta 面板未列出该键是当前限制；在把它纳入面板前，键的定义与消费仍以
 `peri-config::betas` 和 TUI 启动路径为准。
 
-## ACP 首个 flag：full-async-tools
+## ACP 注册表现状
 
-| 项 | 语义 |
-| --- | --- |
-| id / 默认 | `full-async-tools` / false |
-| 效果 | 两种工具语义**不对称**：`Bash` 仅在调用未显式给出 `run_in_background` 时把缺省由 false 改为 true；`Agent` 则强制后台——省略与显式 `false` 都后台（MCP Agent 例外，见下），除该例外外本会话不再有 Agent 同步执行路径 |
-| 显式优先 | `Bash` 显式 `run_in_background: false` 仍走前台；`Agent` 显式 `false` 被忽略并仍然后台启动。`Agent` 的 active 线程 resume（`resume_thread_id` 命中运行实例）仍按 Defer 投递语义处理，该路径本就忽略 `run_in_background`；非 active 恢复同样强制后台 |
-| MCP Agent 例外 | `Agent` 的 `subagent_type` 以 `mcp__` 开头时仍只能同步激活：省略或显式 `false` 走审批门（`load_and_approve_mcp_agent`）的同步路径，显式 `true` 返回既有错误「MCP Agents currently support synchronous activation only」。强制后台不得把 MCP Agent 推入后台 loader（会绕过审批门） |
-| 模型可见 | `Bash` schema 的 `default` 与 `Agent` schema 的 `default` / 描述随有效语义同步：Agent 强制模式为 `default: true`，描述声明显式 `false` 被忽略并仍然后台启动。schema 只影响模型倾向，硬语义由执行路径执行 |
-| 依赖前提 | `Bash` 缺省转后台要求任务管理器就绪，缺失时报既有错误（`run_in_background is not available`）；`Agent` 强制模式没有任务管理器时**直接报错**（`full-async Agent execution requires a background task manager; none is configured`），不静默落回同步。非强制模式维持既有语义：显式 `true` 但无管理器时静默落回同步 |
-| 不变项 | 任务注册、完成回传、取消、并发上限、前台超时 promote 与输出落盘链均不因 flag 改变；Agent 显式 `true` 在无管理器时的落回同步语义（flag 关闭时）不变 |
+当前 `peri-acp-types::beta_flags::BETA_FLAGS` 为空：首个 flag `full-async-tools` 已转正为
+`Agent` 工具的常态语义并删除条目（v5 裁决）。执行模式契约见
+[Session 异步任务](session-async-tasks.md) 的「Agent 委派模式」；旧会话冻结 blob 里残留的
+`full-async-tools` 键按未知 id 忽略，不改变行为。新增 ACP flag 时在本注册表按发布顺序
+追加；条目默认值仍恒为 false。
 
 ## 治理
 
