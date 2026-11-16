@@ -174,9 +174,9 @@ subagent_mw 槽位）联动置空，禁止半开状态。
 - Artifact 上传由 builtin `artifact` MCP 实例承载（`mcp-packages/artifact/src/{server,tool}.rs`；宿主实例注册与 dispatch 仍在 `peri-middlewares/src/mcp/builtin/`）；
   能力开关 `"artifact": false` 关闭该能力的工具面，仅移除 `artifact`（模型面
   `artifact`），不影响 `ToolSearch` 的 `SearchExtraTools` / `ExecuteExtraTool`。
-- `"cron": false` 关闭 `cron` 能力，语义与 `artifact` 同构，但该能力的工具是 deferred：关闭只收缩 deferred 目录与
-  检索结果（`parent_tools` 与 workflow 工具列表本来就不含 deferred 工具），实例、handler
-  与 readiness 仍保留。
+- `"cron": false` 关闭 `cron` 能力，语义与 `artifact` 同构，但该能力的工具是 deferred：
+  关闭同时收缩首个模型请求、deferred 目录与检索、subagent 继承面及 workflow 工具列表；
+  运行时拒绝调用并停止 cron 宿主 tick，连接与其他能力的 readiness 仍保留。
 - `"workspace": false` 关闭 `workspace` 能力：7 个文件/终端
   工具（`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` /
   `Bash`）在声明表中**全部**标为 direct，因此关闭必须在同一 turn 同时收缩三个真实面——

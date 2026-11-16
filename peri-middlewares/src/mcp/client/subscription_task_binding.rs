@@ -237,6 +237,7 @@ impl McpClientPool {
                     .ok_or_else(|| "MCP pool unavailable".to_owned())?;
                 let peer = pool
                     .capability_server_name(&server)
+                    .or_else(|| pool.client(&server).map(|_| server.clone()))
                     .and_then(|resolved| pool.clients.read().get(&resolved).cloned())
                     .and_then(|client| client.peer.clone())
                     .ok_or_else(|| "MCP task owner disconnected".to_owned())?;

@@ -74,7 +74,7 @@ cd npm-packages/@peri-workflow && bun test && bun run typecheck && bun run build
 
 ## 跨模块契约
 
-- `ARC-TOOLS-001`：`Workflow`（实例工具，`mcp__workflow__Workflow`）是 deferred tool，包装层不得改变可见性；`WorkflowAgentResult` 是 host-only（`model_visible: false`）。
+- `ARC-TOOLS-001`：`Workflow`（默认单出口模型面 `mcp__peri__Workflow`，legacy 实例名 `mcp__workflow__Workflow`）是 deferred tool，包装层不得改变可见性；`WorkflowAgentResult` 是 host-only（`model_visible: false`）。
 - `ARC-EVENT-001`：run 完成通知经 bg task event 与 Defer 双路径投递；任务/进度变化经实例资源面 `notifications/resources/updated` 唤醒订阅者（先可见后通知）。
 - `ARC-FROZEN-001`：workflow agent 继承 session frozen data；执行体在 `peri-agent/src/agent/workflow/agent.rs`，装配经 `WorkflowAgentFactory` 注入（`peri-acp/src/host/session_workflow_chain.rs`）。
 - `ARC-CAPABILITY-CLOSURE-001`：关闭键 `"workflow": false` 命中即不装配实例与消费者（唯一物理关闭特例）。

@@ -52,7 +52,7 @@ impl McpClientPool {
         .map_err(|_| "Workspace rewind timed out; outcome unknown".to_string())??;
         if !self.is_open()
             || !self
-                .client_visible_to("workspace", Some(session_id))
+                .capability_client_visible_to("workspace", Some(session_id))
                 .is_some_and(|current| {
                     std::sync::Arc::ptr_eq(&current, &handle)
                         && matches!(current.status, ClientStatus::Connected)

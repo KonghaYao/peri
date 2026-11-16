@@ -315,6 +315,24 @@ fn user_fields_are_respected_without_deep_merge() {
 }
 
 #[test]
+fn v5_web_credentials_survive_legacy_instance_removal() {
+    let (_dir, cwd, claude_home, global_path) = project_with_servers(
+        r#"{"web":{"env":{"WEB_TOKEN":"legacy"}},"peri":{"env":{"OTHER_TOKEN":"current"}}}"#,
+    );
+    let merged = load(
+        &cwd,
+        &claude_home,
+        &global_path,
+        &BuiltinInjectionPolicy::all(),
+    )
+    .unwrap();
+    let env = merged.mcp_servers["peri"].env.as_ref().expect("v5 env");
+    assert_eq!(env.get("WEB_TOKEN").map(String::as_str), Some("legacy"));
+    assert_eq!(env.get("OTHER_TOKEN").map(String::as_str), Some("current"));
+    assert!(!merged.mcp_servers.contains_key("web"));
+}
+
+#[test]
 fn system_mcp_timeout_without_system_mcp_is_rejected_before_overlay() {
     // 解析期契约（IF-M1）先于 overlay：不构成 system 依赖的 timeout 声明是非法配置，
     // 不得被 overlay「顺手补齐」掩盖成可用实例。

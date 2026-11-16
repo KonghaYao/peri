@@ -54,6 +54,7 @@ impl McpClientPool {
     ///
     /// `None` = 该能力没有已配置的 server（能力不可用），不是「未连接」。
     pub(crate) fn capability_server_name(&self, capability: &str) -> Option<String> {
+        peri_acp_types::builtin_mcp::capability(capability)?;
         // 远端 Workspace 是宿主任命的外部执行环境；v5 迁移期仍以 `workspace`
         // 独立条目存在，不并入 `peri`（代理接线见 active spec 的未验证项）。
         if capability == "workspace" {

@@ -486,6 +486,9 @@ fn deployment_closed_builtin_is_omitted_from_prompt_without_weakening_approval()
         "workspace".to_owned(),
     ]);
     let visible = super::super::format_sensitive_tools_for_disabled(&disabled);
+    assert!(!visible.contains("mcp__peri__cron_register"));
+    assert!(!visible.contains("mcp__peri__monitor_start"));
+    assert!(!visible.contains("mcp__peri__Workflow"));
     assert!(!visible.contains("mcp__cron__cron_register"));
     assert!(!visible.contains("mcp__monitor__monitor_start"));
     assert!(!visible

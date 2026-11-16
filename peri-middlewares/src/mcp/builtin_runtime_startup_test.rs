@@ -72,9 +72,7 @@ async fn production_startup_path_connects_both_builtin_instances() {
         let declared: Vec<&str> = instance
             .tools
             .iter()
-            // host-only 工具可以不在 wire 目录中（如 workspace 的 shell_task_list：
-            // 仅由 handler 直接应答，不进入 tools/list）。
-            .filter(|tool| tool.model_visible || served.contains(&tool.original_name))
+            .filter(|tool| tool.advertised)
             .map(|tool| tool.original_name)
             .collect();
         assert_eq!(

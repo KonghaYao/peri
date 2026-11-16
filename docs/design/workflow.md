@@ -262,7 +262,7 @@ Git postcondition 只比较 Workflow 前后发生变化的路径，已有且未�
 
 | 组件 | 作用域 | 创建 | 销毁 |
 |------|--------|------|------|
-| builtin `workflow` 实例 | session | 会话装配（池） | session end；命中关闭集则不 spawn |
+| builtin workflow 能力（默认由 `peri` 承载，legacy 为 `workflow` 实例） | session | 会话装配（池） | session end；legacy 命中关闭集则不 spawn 实例 |
 | `WorkflowRuntime` | session | 会话装配（`create_session_workflow_chain`） | session end |
 | `WorkflowTaskConsumer` | session | 装配后订阅 `workflow://tasks` | session end（取消 + 有界排空） |
 | `WorkflowProgressStore` / `WorkflowTaskRegistry` / `WorkflowJournalStore` / `WorkflowRunner` | session | 随 runtime 构造 | session end |
@@ -345,7 +345,7 @@ Git postcondition 只比较 Workflow 前后发生变化的路径，已有且未�
 
 ## 13. 能力暴露与关闭
 
-- **工具面**：`Workflow` / `WorkflowStatus` / `WorkflowKill` 经 MCP 桥接成为 deferred 工具（`mcp__workflow__*`，经 `SearchExtraTools → ExecuteExtraTool` 发现与调用）；`WorkflowAgentResult` 是 host-only 回填通道，不进入模型可见面。工具与资源声明以 [workflow-mcp.md](workflow-mcp.md) §4 为权威。
-- **关闭**：v5 能力名 `"workflow": false`（旧 `"WorkflowMiddleware"` 键保留为确定性映射 adapter，M4 删除）进会话关闭集；workflow 是唯一物理关闭特例——命中关闭集时不 spawn 实例、不建桥接、宿主消费者不启动（`ARC-CAPABILITY-CLOSURE-001`）。
+- **工具面**：`Workflow` / `WorkflowStatus` / `WorkflowKill` 经 MCP 桥接成为 deferred 工具（默认 `mcp__peri__*`，legacy 六实例回滚为 `mcp__workflow__*`，经 `SearchExtraTools → ExecuteExtraTool` 发现与调用）；`WorkflowAgentResult` 是 host-only 回填通道，不进入模型可见面。工具与资源声明以 [workflow-mcp.md](workflow-mcp.md) §4 为权威。
+- **关闭**：v5 能力名 `"workflow": false`（旧 `"WorkflowMiddleware"` 键保留为确定性映射 adapter，M4 删除）进会话关闭集；单出口不 spawn 独立 workflow 实例、关闭时不建桥接且宿主消费者不启动；legacy 六实例回滚下命中关闭集时不 spawn 该实例（`ARC-CAPABILITY-CLOSURE-001`）。
 - **模型手册**：builtin skill `ultracode`（`mcp-packages/workspace/src/resources/builtin/skills/ultracode/SKILL.md`，宿主注册表经 `include_str!` 引用），按需加载，不常驻系统提示词；复杂全生命周期交付由 `ultra-adlc` skill 与 [Ultra-ADLC 设计](ultra-adlc.md)约束。
 - **入口命令**：`/workflows` 打开面板（`PanelKind::Workflow`）；ACP 方法名（`workflow/list_runs`、`workflow/kill_run`、`workflow/kill_agent`、`workflow/resume`）与 TUI 交互保持不变。

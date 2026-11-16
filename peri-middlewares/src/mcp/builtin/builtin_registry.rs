@@ -498,6 +498,7 @@ fn apply_v5_single_exit(
         }
     }
     let mut disabled_capabilities = BTreeSet::new();
+    let mut legacy_web_env = None;
     for capability in builtin_mcp::BUILTIN_V5_CAPABILITIES {
         if capability.name == "workspace" && remote_workspace {
             continue;
@@ -507,6 +508,8 @@ fn apply_v5_single_exit(
         };
         if legacy.disabled == Some(true) {
             disabled_capabilities.insert(capability.name);
+        } else if capability.name == "web" {
+            legacy_web_env = legacy.env;
         }
     }
     if remote_workspace {
@@ -530,6 +533,11 @@ fn apply_v5_single_exit(
         .as_ref()
         .and_then(|entry| entry.env.clone())
         .unwrap_or_default();
+    if enabled.contains(&"web") {
+        for (key, value) in legacy_web_env.unwrap_or_default() {
+            env.entry(key).or_insert(value);
+        }
+    }
     // 运行时标记：宿主每次注入都覆盖，用户配置不能扩大能力集。
     env.insert(
         builtin_mcp::BUILTIN_V5_CAPABILITIES_ENV.to_string(),

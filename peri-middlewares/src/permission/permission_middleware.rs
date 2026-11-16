@@ -262,7 +262,7 @@ pub fn format_sensitive_tools_for_disabled(disabled: &std::collections::HashSet<
                         && capability
                             .tools
                             .iter()
-                            .any(|tool| tool.legacy_name == entry.name)
+                            .any(|tool| tool.model_name == entry.name)
                 })
         })
         .map(|e| {
