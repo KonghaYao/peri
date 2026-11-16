@@ -822,6 +822,11 @@ impl BackgroundCapture {
             "v5 起 Agent 调用必须后台启动：{receipt}"
         );
         let completed = self.wait().await;
+        assert!(
+            completed.success,
+            "后台委派必须成功完成：{}",
+            completed.output
+        );
         let child = completed
             .child_thread_id
             .clone()
