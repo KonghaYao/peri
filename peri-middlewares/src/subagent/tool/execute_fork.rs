@@ -17,6 +17,8 @@ use peri_agent::session::subagent::SubagentRunMode;
 use peri_agent::tools::BaseTool;
 
 impl super::SubAgentTool {
+    /// v5 起 `Agent` 工具恒后台，本同步 fork 实现保留但不再被产品路径调用。
+    #[allow(dead_code)] // 同步路径按 v5 裁决保留实现（不可唤醒），不删除
     pub(crate) async fn invoke_fork(
         &self,
         prompt: &str,

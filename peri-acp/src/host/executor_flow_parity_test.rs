@@ -105,7 +105,6 @@ fn make_parity_context(
         goal_controller: None,
         meta_harness_disabled: disabled.iter().map(|s| s.to_string()).collect(),
         // beta flag 装配参数：对拍不涉及该语义，恒为缺省（前台）。
-        agent_default_run_in_background: false,
         agent_overrides: overrides,
         language,
     }

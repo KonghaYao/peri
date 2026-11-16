@@ -40,7 +40,7 @@ async fn shell_task_list(
 #[tokio::test]
 async fn shell_task_list_filters_live_tasks_by_direct_owner() {
     let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client, server_task) = connect(
         server.clone(),
         ClientCapabilities::builder().enable_tasks().build(),
@@ -166,7 +166,7 @@ async fn shell_task_list_without_task_state_reports_unknown() {
 #[tokio::test]
 async fn shell_task_list_matches_session_and_thread_owner() {
     let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client, server_task) = connect(
         server.clone(),
         ClientCapabilities::builder().enable_tasks().build(),

@@ -421,12 +421,10 @@ async fn invoke_resolves_agent_from_argument_cwd_before_starting_factory() {
         )
         .await
         .unwrap();
-    assert!(result.text.contains("echo: from bound face"));
-    assert_eq!(
-        result.execution.as_ref().unwrap().status,
-        peri_agent::tools::ToolExecutionStatus::Completed
-    );
-    assert!(result.execution.as_ref().unwrap().task_id.is_none());
+    assert!(result.text.contains("Background task"), "{}", result.text);
+    let completed = host.wait_background_completion().await;
+    assert!(completed.success);
+    assert!(completed.output.contains("echo: from bound face"));
     assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
 
     // 2) 未命中：失败且**不启动 factory**（顺序契约不变）。
@@ -777,10 +775,80 @@ pub(crate) fn preset_child_ctx(
 ///
 /// 子链宿主来自 owning parent session（`parent.subagent_host()`），因此端口与
 /// 资源必须装在父 session 上；工具的 host 字段只在父 session 无 host 时生效。
+/// 后台完成捕获器：测试用 `on_bg_complete` 确认接纳并留存结果。
+///
+/// v5 起 Agent 调用恒后台；需要最终结果的用例用 [`Self::invoke_and_wait`] 发起
+/// 委派并等待完成，而不是读同步返回值。
+#[derive(Clone, Default)]
+pub(crate) struct BackgroundCapture {
+    completions: Arc<std::sync::Mutex<Vec<peri_acp_types::event::BackgroundTaskResult>>>,
+}
+
+impl BackgroundCapture {
+    /// 可挂到 `SubagentHost::on_bg_complete` 的捕获器（确认接纳，不投递父 MQ）。
+    pub(crate) fn logger(&self) -> peri_acp_types::tasks::OnBgCompleteFn {
+        let completions = Arc::clone(&self.completions);
+        Arc::new(move |result, _kind| {
+            completions.lock().unwrap().push(result.clone());
+            Ok(())
+        })
+    }
+
+    /// 等待下一次后台完成并返回结果；超时即判失败。
+    pub(crate) async fn wait(&self) -> peri_acp_types::event::BackgroundTaskResult {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(result) = self.completions.lock().unwrap().pop() {
+                    return result;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("后台任务必须在超时内完成")
+    }
+
+    /// 发起后台委派并等待结果，返回与旧同步路径同形的文本
+    /// （`child_thread_id: ...` 前缀 + 子结果）。错误路径不回退等待。
+    pub(crate) async fn invoke_and_wait(
+        &self,
+        tool: &SubAgentTool,
+        input: serde_json::Value,
+        ctx: peri_agent::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let receipt = tool.invoke(input, ctx).await?;
+        assert!(
+            receipt.contains("Background task"),
+            "v5 起 Agent 调用必须后台启动：{receipt}"
+        );
+        let completed = self.wait().await;
+        assert!(
+            completed.success,
+            "后台委派必须成功完成：{}",
+            completed.output
+        );
+        let child = completed
+            .child_thread_id
+            .clone()
+            .unwrap_or_else(|| "<missing-child-id>".to_string());
+        Ok(format!("child_thread_id: {child}\n{}", completed.output))
+    }
+}
+
 pub(crate) fn install_parent_host(
     store: &SessionFixture,
     parent: &std::sync::Arc<peri_agent::session::Session>,
-) {
+) -> BackgroundCapture {
+    install_parent_host_with_bridge(store, parent, None)
+}
+
+/// 同 [`install_parent_host`]，并可选注入 Langfuse bridge（后台子链从父 host 读取）。
+pub(crate) fn install_parent_host_with_bridge(
+    store: &SessionFixture,
+    parent: &std::sync::Arc<peri_agent::session::Session>,
+    langfuse_bridge: Option<Arc<dyn peri_agent::agent::LangfuseBridgeLike>>,
+) -> BackgroundCapture {
+    let capture = BackgroundCapture::default();
     let mut host = parent
         .subagent_host()
         .as_deref()
@@ -790,8 +858,15 @@ pub(crate) fn install_parent_host(
     if host.task_manager.is_none() {
         host.task_manager = Some(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()));
     }
+    if host.on_bg_complete.is_none() {
+        host.on_bg_complete = Some(capture.logger());
+    }
+    if langfuse_bridge.is_some() {
+        host.langfuse_bridge = langfuse_bridge;
+    }
     host.parent_thread_id = parent.store().thread_id.clone();
     parent.set_subagent_host(host);
+    capture
 }
 
 /// 让目录成为 git 工作区（工作区发现需要真实仓库证据）。
@@ -850,8 +925,8 @@ async fn preset_resumable_thread(
 // rustc 不会为聚合根派生 `tool_test/` 子目录，子模块需显式 `#[path]` 指向。
 #[path = "tool_test/active_message_test.rs"]
 mod active_message_test;
-#[path = "tool_test/beta_default_test.rs"]
-mod beta_default_test;
+#[path = "tool_test/async_default_test.rs"]
+mod async_default_test;
 
 #[path = "tool_test/bg_register_cancel_test.rs"]
 mod bg_register_cancel_test;

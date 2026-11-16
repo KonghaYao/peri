@@ -5,7 +5,6 @@
 //! dispatch.  They intentionally inspect the parent's canonical tool message
 //! instead of constructing a safe failure projection by hand.
 
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -13,19 +12,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use parking_lot::RwLock;
-use peri_acp_types::event::{
-    AgentEventHandler, BackgroundTaskResult, ExecutorEvent, FnEventHandler,
-};
-use peri_acp_types::event_v2::{ObserveEvent, RenderEvent};
-use peri_acp_types::identity::AgentId;
-use peri_agent::agent::stages;
-use peri_agent::agent::stages::LoopResult;
-use peri_agent::agent::stages::StageContext;
-use peri_agent::messages::BaseMessage;
-use peri_agent::session::queue::{MessageSource, QueuedMessage};
-use peri_agent::session::store::FrozenContext;
-use peri_agent::session::Session;
+use peri_acp_types::event::{BackgroundTaskResult, ExecutorEvent};
 use peri_agent::tools::BaseTool;
 use peri_model::{
     Model, ModelCapabilities, ModelRequest, ModelResult, ModelStream, OpenAiConfig, OpenAiModel,
@@ -42,6 +29,30 @@ use super::SubAgentTool;
 enum FailureFixture {
     Http(u16),
     VisibleDeltaThenInterruption,
+}
+
+impl FailureFixture {
+    fn expected_status(self) -> Option<u16> {
+        match self {
+            Self::Http(status) => Some(status),
+            Self::VisibleDeltaThenInterruption => None,
+        }
+    }
+
+    fn expected_request_id(self) -> Option<String> {
+        self.expected_status().map(|status| format!("req-{status}"))
+    }
+
+    /// HTTP 400 不可重试：单次请求即失败。其余场景走满
+    /// `RetryConfig::max_attempts`——含「可见增量后中断」：该路径不再整轮
+    /// 作废，而是保留部分输出续跑，1 次初始请求 + 9 次续跑 = 10 次后耗尽。
+    fn expected_requests(self) -> usize {
+        if matches!(self, Self::Http(400)) {
+            1
+        } else {
+            10
+        }
+    }
 }
 
 /// A loopback-only provider boundary keeps these fixtures on the public model
@@ -166,282 +177,6 @@ impl Model for RuntimeFailureModel {
     }
 }
 
-#[derive(Clone)]
-struct ParentDriver {
-    calls: Arc<std::sync::atomic::AtomicUsize>,
-    seen: Arc<Mutex<Vec<Vec<BaseMessage>>>>,
-    input: serde_json::Value,
-}
-
-struct RecordingBridge {
-    observes: Arc<Mutex<Vec<ObserveEvent>>>,
-}
-
-impl peri_agent::agent::LangfuseBridgeLike for RecordingBridge {
-    fn process_render_event(&self, _event: &peri_agent::agent::events_v2::RenderEvent) {}
-
-    fn process_observe_event(&self, event: &peri_agent::agent::events_v2::ObserveEvent) {
-        self.observes.lock().unwrap().push(event.clone());
-    }
-}
-
-impl ParentDriver {
-    async fn respond(
-        &self,
-        request: peri_model::ModelRequest,
-        cancellation: tokio_util::sync::CancellationToken,
-    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-        use crate::subagent::test_support;
-        let _ = &cancellation;
-        let messages = test_support::base_messages(&request);
-        let defined = test_support::defined_tools(&request);
-        let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
-
-        self.seen.lock().unwrap().push(messages.to_vec());
-        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-            test_support::tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
-                "parent-agent-call",
-                "Agent",
-                self.input.clone(),
-            )])
-        } else {
-            test_support::text_events("parent completed")
-        }
-    }
-}
-crate::subagent::test_support::fixture_model_impl!(ParentDriver);
-
-struct SyncFixture {
-    tool_message: serde_json::Value,
-    parent_model_messages: Vec<BaseMessage>,
-    child_events: Vec<ExecutorEvent>,
-}
-
-async fn run_sync_fixture(fixture: FailureFixture, status: Option<u16>) -> SyncFixture {
-    let dir = tempfile::tempdir().expect("fixture directory");
-    write_agent(&dir);
-    // W5：Agent 定义只从会话绑定的资源面读取（真实 workspace 实例夹具）。
-    let fixture_face = crate::mcp::agent_face_fixture::AgentFaceFixture::connect(dir.path()).await;
-    let agent_registry = std::sync::Arc::clone(&fixture_face.registry);
-    let _face_guard = fixture_face;
-    let cwd = dir.path().to_string_lossy().into_owned();
-
-    let child_events = Arc::new(Mutex::new(Vec::new()));
-    let child_events_for_handler = Arc::clone(&child_events);
-    let child_handler: Arc<dyn AgentEventHandler> = Arc::new(FnEventHandler(move |event| {
-        child_events_for_handler.lock().unwrap().push(event);
-    }));
-    let (runtime_model, provider) = RuntimeFailureModel::new(fixture).await;
-    let model: Arc<dyn Model> = Arc::new(runtime_model);
-    let model_for_factory = Arc::clone(&model);
-    let bridge = Arc::new(RecordingBridge {
-        observes: Arc::new(Mutex::new(Vec::new())),
-    });
-    let child_tool: Arc<dyn BaseTool> = Arc::new(
-        SubAgentTool::new(
-            Arc::new(Vec::new()),
-            Some(child_handler),
-            Arc::new(move |_| {
-                crate::subagent::test_support::fixture_source(
-                    Arc::clone(&model_for_factory),
-                    "fixture-scripted",
-                )
-            }),
-            cwd.clone(),
-        )
-        .with_parent_agent_id(Arc::new(RwLock::new(Some(AgentId::new()))))
-        .with_langfuse_bridge(Arc::clone(&bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>)
-        .with_mcp_agents(Some(std::sync::Arc::clone(&agent_registry)), None),
-    );
-
-    let input = serde_json::json!({
-        "subagent_type": "fixture-agent",
-        "prompt": "exercise model failure",
-        "cwd": cwd,
-    });
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let parent = Session::new(
-        Arc::from(cwd.as_str()),
-        FrozenContext::builder().build(),
-        None,
-    );
-    let turn = parent.start_turn();
-    let transcript = parent.transcript();
-    let queue = parent.queue().clone();
-    let shared_tools = Arc::new(RwLock::new(BTreeMap::from([(
-        "Agent".to_string(),
-        child_tool,
-    )])));
-    let (event_bus, mut event_handles) =
-        peri_agent::agent::events_v2::EventBus::new(Default::default());
-    let context = StageContext::builder(turn, transcript, queue.clone())
-        .with_llm(Arc::new(
-            peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::new(ParentDriver {
-                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                seen: Arc::clone(&seen),
-                input,
-            })),
-        ))
-        .with_tools(shared_tools)
-        .with_event_bus(Arc::new(event_bus))
-        .build();
-    queue.push_sync(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human("parent request"),
-    ));
-
-    assert!(matches!(
-        stages::run_react_loop(context.clone(), 3).await,
-        LoopResult::Completed
-    ));
-    // HTTP 400 不可重试：单次请求即失败。其余场景走满 `RetryConfig::max_attempts`
-    // ——含「可见增量后中断」：该路径不再整轮作废，而是保留部分输出续跑，
-    // 1 次初始请求 + 9 次续跑 = 10 次后耗尽。
-    let expected_requests = if status.is_some_and(|status| status == 400) {
-        1
-    } else {
-        10
-    };
-    assert_eq!(provider.request_count(), expected_requests);
-    let tool_message = {
-        let transcript = context.session.transcript.read();
-        let messages = transcript.visible_messages();
-        messages
-            .iter()
-            .map(|message| serde_json::to_value(message).expect("canonical message JSON"))
-            .find(|message| message["role"] == "tool")
-            .expect("parent canonical tool result")
-    };
-    let decoded_tool_message: BaseMessage =
-        serde_json::from_value(tool_message.clone()).expect("canonical tool message JSON");
-    assert_eq!(
-        serde_json::to_value(&decoded_tool_message).expect("canonical tool message re-JSON"),
-        tool_message,
-        "canonical BaseMessage must survive serialize/deserialize with typed failure facts"
-    );
-    assert_eq!(tool_message["is_error"], true);
-    if let Some(status) = status {
-        assert_eq!(
-            tool_message["subagent_failure"]["diagnostic"]["status"],
-            status
-        );
-    } else {
-        assert!(tool_message["subagent_failure"]["diagnostic"]["status"].is_null());
-    }
-    assert_eq!(
-        tool_message["subagent_failure"]["diagnostic"]["provider"],
-        "openai-compatible"
-    );
-    assert!(tool_message["subagent_failure"]["child_thread_id"]
-        .as_str()
-        .and_then(|id| uuid::Uuid::parse_str(id).ok())
-        .is_some());
-
-    // The second parent model request is the actual model-visible projection.
-    let parent_model_messages = seen.lock().unwrap().get(1).cloned().unwrap_or_default();
-    if status.is_some() {
-        assert!(parent_model_messages
-            .iter()
-            .any(|message| message.content().contains("model_error_status")));
-    }
-    if status.is_some() {
-        assert!(parent_model_messages
-            .iter()
-            .any(|message| message.content().contains("model_error_request_id")));
-    }
-    assert!(!parent_model_messages
-        .iter()
-        .any(|message| message.content().contains("provider body")));
-
-    let render_failure = loop {
-        if let Some(event) = event_handles.try_render() {
-            if let RenderEvent::ToolEnded {
-                is_error: true,
-                subagent_failure: Some(failure),
-                ..
-            } = event
-            {
-                break Some(failure);
-            }
-        } else {
-            break None;
-        }
-    };
-    assert_eq!(
-        render_failure.map(|failure| serde_json::to_value(failure).expect("render failure JSON")),
-        Some(tool_message["subagent_failure"].clone()),
-        "live ToolEnded must preserve the canonical typed child failure"
-    );
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(1);
-    let stop_failure = loop {
-        if let Some(failure) =
-            bridge
-                .observes
-                .lock()
-                .unwrap()
-                .iter()
-                .find_map(|event| match event {
-                    ObserveEvent::SubagentStop {
-                        subagent_failure: Some(failure),
-                        ..
-                    } => Some(failure.clone()),
-                    _ => None,
-                })
-        {
-            break Some(failure);
-        }
-        if std::time::Instant::now() >= deadline {
-            break None;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    };
-    assert_eq!(
-        stop_failure.map(|failure| serde_json::to_value(failure).expect("stop failure JSON")),
-        Some(tool_message["subagent_failure"].clone()),
-        "live SubagentStop must preserve the canonical typed child failure"
-    );
-
-    // Give the child EventBus forwarder one bounded scheduling window to drain.
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    let child_events = child_events.lock().unwrap().clone();
-    let stop_positions: Vec<_> = child_events
-        .iter()
-        .enumerate()
-        .filter_map(|(index, event)| {
-            matches!(event.payload(), ExecutorEvent::SubagentStopped { .. }).then_some(index)
-        })
-        .collect();
-    assert_eq!(
-        stop_positions.len(),
-        1,
-        "each child execution must emit exactly one terminal stop"
-    );
-    let start_position = child_events
-        .iter()
-        .position(|event| matches!(event.payload(), ExecutorEvent::SubagentStarted { .. }))
-        .expect("child start event");
-    assert!(
-        start_position < stop_positions[0],
-        "child stop must follow child start"
-    );
-    if matches!(fixture, FailureFixture::VisibleDeltaThenInterruption) {
-        let delta_position = child_events
-            .iter()
-            .position(|event| matches!(event.payload(), ExecutorEvent::TextChunk { .. }))
-            .expect("visible delta event");
-        assert!(
-            delta_position < stop_positions[0],
-            "visible output must precede the terminal stop: events={child_events:?}"
-        );
-    }
-    SyncFixture {
-        tool_message,
-        parent_model_messages,
-        child_events,
-    }
-}
-
 fn write_agent(dir: &TempDir) {
     let agents = dir.path().join(".claude/agents");
     std::fs::create_dir_all(&agents).expect("agent directory");
@@ -452,62 +187,28 @@ fn write_agent(dir: &TempDir) {
     .expect("agent definition");
 }
 
-#[tokio::test]
-async fn sync_http_400_reaches_parent_canonical_result_with_safe_identity() {
-    let fixture = run_sync_fixture(FailureFixture::Http(400), Some(400)).await;
-    assert!(
-        fixture.tool_message["subagent_failure"]["diagnostic"]["request_id"]
-            .as_str()
-            .is_some()
-    );
-    assert!(!fixture
-        .parent_model_messages
-        .iter()
-        .any(|message| message.content().contains("prompt")));
+struct BackgroundFailure {
+    result: BackgroundTaskResult,
+    lifecycle: Vec<ExecutorEvent>,
+    provider: Arc<LocalProvider>,
 }
 
-#[tokio::test]
-async fn sync_http_429_reaches_parent_canonical_result_with_safe_identity() {
-    let fixture = run_sync_fixture(FailureFixture::Http(429), Some(429)).await;
-    assert_eq!(
-        fixture.tool_message["subagent_failure"]["diagnostic"]["category"],
-        "http_status"
-    );
-    assert_eq!(
-        fixture.tool_message["subagent_failure"]["diagnostic"]["retry_attempts"],
-        10
-    );
+impl BackgroundFailure {
+    fn diagnostic(&self) -> &peri_acp_types::error::SafeModelErrorDiagnostic {
+        self.result
+            .subagent_failure
+            .as_ref()
+            .expect("background result keeps typed child failure")
+            .diagnostic()
+            .expect("model diagnostic")
+    }
 }
 
-#[tokio::test]
-async fn sync_http_500_reaches_parent_canonical_result_with_safe_identity() {
-    let fixture = run_sync_fixture(FailureFixture::Http(500), Some(500)).await;
-    assert_eq!(
-        fixture.tool_message["subagent_failure"]["diagnostic"]["request_id"],
-        "req-500"
-    );
-}
-
-#[tokio::test]
-async fn visible_delta_then_interruption_reaches_parent_and_forwards_delta() {
-    let fixture = run_sync_fixture(FailureFixture::VisibleDeltaThenInterruption, None).await;
-    let delta = fixture
-        .child_events
-        .iter()
-        .find_map(|event| match event.payload() {
-            ExecutorEvent::TextChunk { chunk, .. } => Some(chunk.as_str()),
-            _ => None,
-        });
-    assert_eq!(delta, Some("visible-before-interruption"));
-    assert_eq!(
-        fixture.tool_message["subagent_failure"]["diagnostic"]["category"],
-        "stream_interrupted"
-    );
-    assert!(fixture.tool_message["subagent_failure"]["diagnostic"]["request_id"].is_null());
-}
-
-#[tokio::test]
-async fn background_http_429_consumes_typed_result_and_safe_notification() {
+/// 跑一次后台委派并收集终态结果、生命周期事件与提供方请求计数。
+///
+/// v5 起 Agent 只有后台执行模式；同步路径的失败断言按同一模型边界迁移到
+/// 后台终态（`BackgroundTaskResult` / `SubagentStopped` / 完成通知）。
+async fn run_background_fixture(fixture: FailureFixture) -> BackgroundFailure {
     let dir = tempfile::tempdir().expect("fixture directory");
     write_agent(&dir);
     // W5：Agent 定义来自会话绑定的资源面（真实 workspace 实例夹具）。
@@ -515,7 +216,7 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
     let bg_agent_registry = std::sync::Arc::clone(&bg_face.registry);
     let _bg_face_guard = bg_face;
     let cwd = dir.path().to_string_lossy().into_owned();
-    let (runtime_model, provider) = RuntimeFailureModel::new(FailureFixture::Http(429)).await;
+    let (runtime_model, provider) = RuntimeFailureModel::new(fixture).await;
     let model: Arc<dyn Model> = Arc::new(runtime_model);
     let model_for_factory = Arc::clone(&model);
     let (bg_event_tx, mut bg_event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -557,7 +258,7 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
         .expect("background task should register before model execution");
     assert!(launch.contains("Background"));
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(2), completed_rx)
+    let result = tokio::time::timeout(Duration::from_secs(5), completed_rx)
         .await
         .expect("background completion")
         .expect("completion callback");
@@ -567,15 +268,15 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
         .subagent_failure
         .as_ref()
         .expect("background result keeps typed child failure");
+    let diagnostic = failure.diagnostic().expect("model diagnostic");
+    assert_eq!(diagnostic.status(), fixture.expected_status());
     assert_eq!(
-        failure.diagnostic().expect("model diagnostic").status(),
-        Some(429)
+        diagnostic.request_id(),
+        fixture.expected_request_id().as_deref()
     );
-    assert_eq!(
-        failure.diagnostic().expect("model diagnostic").request_id(),
-        Some("req-429")
-    );
-    assert_eq!(provider.request_count(), 10);
+    assert_eq!(diagnostic.provider(), Some("openai-compatible"));
+    assert_eq!(provider.request_count(), fixture.expected_requests());
+
     let encoded_result = serde_json::to_vec(&result).expect("background result JSON");
     let decoded_result: BackgroundTaskResult =
         serde_json::from_slice(&encoded_result).expect("background result roundtrip");
@@ -589,13 +290,14 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
             .diagnostic()
             .expect("model diagnostic")
             .status(),
-        Some(429)
+        fixture.expected_status()
     );
     assert_eq!(
         decoded_result.to_notification(),
         result.to_notification(),
         "safe notification must survive the typed result serde boundary"
     );
+
     let mut lifecycle = Vec::new();
     while let Ok(event) = bg_event_rx.try_recv() {
         lifecycle.push(event);
@@ -628,14 +330,14 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
                 .diagnostic()
                 .expect("model diagnostic")
                 .status(),
-            Some(429)
+            fixture.expected_status()
         );
         assert_eq!(
             stop_failure
                 .diagnostic()
                 .expect("model diagnostic")
                 .request_id(),
-            Some("req-429")
+            fixture.expected_request_id().as_deref()
         );
     } else {
         panic!("background error stop must carry its safe failure facts");
@@ -646,8 +348,75 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
     assert!(!lifecycle
         .iter()
         .any(|event| matches!(event.payload(), ExecutorEvent::BackgroundTaskCompleted(_))));
-    let notification = result.to_notification();
-    assert!(notification.contains("model_error_status: 429"));
-    assert!(notification.contains("model_error_request_id: req-429"));
-    assert!(!notification.contains("provider body"));
+
+    if let Some(status) = fixture.expected_status() {
+        let notification = result.to_notification();
+        assert!(notification.contains(&format!("model_error_status: {status}")));
+        assert!(notification.contains(&format!("model_error_request_id: req-{status}")));
+    }
+    assert!(!result.to_notification().contains("provider body"));
+
+    if matches!(fixture, FailureFixture::VisibleDeltaThenInterruption) {
+        let delta_position = lifecycle
+            .iter()
+            .position(|event| matches!(event.payload(), ExecutorEvent::TextChunk { .. }))
+            .expect("visible delta event");
+        assert!(
+            delta_position < stop_positions[0],
+            "visible output must precede the terminal stop: events={lifecycle:?}"
+        );
+    }
+
+    BackgroundFailure {
+        result,
+        lifecycle,
+        provider,
+    }
+}
+
+#[tokio::test]
+async fn background_http_400_is_not_retried_and_keeps_safe_identity() {
+    let fixture = run_background_fixture(FailureFixture::Http(400)).await;
+    let diagnostic = fixture.diagnostic();
+    assert_eq!(diagnostic.category_name(), "http_status");
+    assert_eq!(diagnostic.status(), Some(400));
+    assert_eq!(diagnostic.request_id(), Some("req-400"));
+    assert_eq!(fixture.provider.request_count(), 1, "HTTP 400 不可重试");
+}
+
+#[tokio::test]
+async fn background_http_500_retries_and_keeps_safe_identity() {
+    let fixture = run_background_fixture(FailureFixture::Http(500)).await;
+    let diagnostic = fixture.diagnostic();
+    assert_eq!(diagnostic.category_name(), "http_status");
+    assert_eq!(diagnostic.status(), Some(500));
+    assert_eq!(diagnostic.request_id(), Some("req-500"));
+    assert_eq!(fixture.provider.request_count(), 10);
+}
+
+#[tokio::test]
+async fn background_http_429_consumes_typed_result_and_safe_notification() {
+    let fixture = run_background_fixture(FailureFixture::Http(429)).await;
+    let diagnostic = fixture.diagnostic();
+    assert_eq!(diagnostic.category_name(), "http_status");
+    assert_eq!(diagnostic.status(), Some(429));
+    assert_eq!(diagnostic.request_id(), Some("req-429"));
+    assert_eq!(fixture.provider.request_count(), 10);
+}
+
+#[tokio::test]
+async fn background_visible_delta_then_interruption_forwards_delta_before_stop() {
+    let fixture = run_background_fixture(FailureFixture::VisibleDeltaThenInterruption).await;
+    let diagnostic = fixture.diagnostic();
+    assert_eq!(diagnostic.category_name(), "stream_interrupted");
+    assert!(diagnostic.status().is_none());
+    assert!(diagnostic.request_id().is_none());
+    let delta = fixture
+        .lifecycle
+        .iter()
+        .find_map(|event| match event.payload() {
+            ExecutorEvent::TextChunk { chunk, .. } => Some(chunk.as_str()),
+            _ => None,
+        });
+    assert_eq!(delta, Some("visible-before-interruption"));
 }

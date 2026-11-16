@@ -363,8 +363,8 @@ async fn subagent_lifecycle_hook_payloads_carry_real_child_agent_id() {
         .split("child_thread_id: ")
         .nth(1)
         .and_then(|rest| rest.lines().next())
+        .and_then(|line| line.split_whitespace().next())
         .expect("工具返回文本应带 child_thread_id")
-        .trim()
         .to_string();
     assert!(
         uuid::Uuid::parse_str(&child_thread_id).is_ok(),

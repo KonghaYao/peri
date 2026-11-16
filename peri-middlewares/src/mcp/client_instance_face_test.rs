@@ -418,7 +418,7 @@ async fn workspace_live_tasks_reads_owner_scoped_shell_state() {
     }
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy().into_owned(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy().into_owned());
     let transport = runtime::spawn_builtin_transport_with_handler("workspace", server.clone());
     let (io, supervisor) = transport.into_parts();
     let mut service =

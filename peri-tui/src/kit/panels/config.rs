@@ -26,9 +26,10 @@ mod config_panel;
 pub use config_panel::*;
 
 #[cfg(test)]
-use self::actions::{activate_row, activate_row_with, toggle_beta_flag_with};
+use self::actions::{activate_row_with, toggle_beta_flag_with};
 #[cfg(test)]
 use self::rows::{
     CONFIG_ROWS, ConfigRow, PERMISSION_OPTS, ROW_1M_CONTEXT, ROW_CACHE_WARN, ROW_PERMISSION_MODE,
-    beta_description, config_rows, parse_permission_mode, permission_mode_label, read_beta_toggle,
+    ROW_SCROLL_FPS, beta_description, config_rows, parse_permission_mode, permission_mode_label,
+    read_beta_toggle,
 };

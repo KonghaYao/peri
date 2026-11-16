@@ -452,7 +452,6 @@ async fn workspace_capability_can_use_upstream_proxy() {
     std::fs::write(&file, "proxied workspace content").expect("write fixture");
     let workspace = peri_mcp_workspace::WorkspaceMcpServer::standalone(
         temp.path().to_string_lossy().into_owned(),
-        false,
     );
     let (server_io, client_io) = pair();
     let mut server = rmcp::service::serve_directly(workspace, server_io, None);

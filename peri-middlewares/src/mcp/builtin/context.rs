@@ -108,12 +108,6 @@ pub struct BuiltinInstanceContext {
     /// 关闭位）的事实源是装配期输入（F11 插件 manifest / F12 配置读取已在该层完成）。
     #[cfg(not(target_os = "emscripten"))]
     pub workspace_resources: Option<WorkspaceResourcesInput>,
-    /// `workspace` 实例 Bash 的**有效 `run_in_background` 缺省**（beta flag 投影）。
-    ///
-    /// 装配期一次注入：会话装配从**会话冻结**的 flag 值派生，dispatch 只读不改、
-    /// 不读配置、不派生根（AW3-11 模式）。`false` = 既有行为（未显式传参走前台）。
-    #[cfg(not(target_os = "emscripten"))]
-    pub workspace_bash_default_run_in_background: bool,
     /// A24 关闭集：能力开关（v5 能力名或迁移期旧键）命中的实例名（唯一实现
     /// `mcp::builtin::closed_instances`，宿主经 `peri_middlewares::assembly` 的薄委托派生）。
     ///
@@ -135,11 +129,6 @@ impl Debug for BuiltinInstanceContext {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         let mut debug = formatter.debug_struct("BuiltinInstanceContext");
         debug.field("cwd", &self.cwd);
-        #[cfg(not(target_os = "emscripten"))]
-        debug.field(
-            "workspace_bash_default_run_in_background",
-            &self.workspace_bash_default_run_in_background,
-        );
         debug
             .field("skills_face_closed", &self.skills_face_closed)
             .finish_non_exhaustive()
@@ -159,8 +148,6 @@ impl BuiltinInstanceContext {
             workspace: None,
             #[cfg(not(target_os = "emscripten"))]
             workspace_resources: None,
-            #[cfg(not(target_os = "emscripten"))]
-            workspace_bash_default_run_in_background: false,
             closed: BTreeSet::new(),
             skills_face_closed: false,
         }
@@ -206,15 +193,6 @@ impl BuiltinInstanceContext {
     #[must_use]
     pub fn with_closed(mut self, closed: BTreeSet<String>) -> Self {
         self.closed = closed;
-        self
-    }
-
-    /// 提供 `workspace` 实例 Bash 的有效 `run_in_background` 缺省（装配期 flag 投影，
-    /// 见 [`Self::workspace_bash_default_run_in_background`]；不在此处推导）。
-    #[cfg(not(target_os = "emscripten"))]
-    #[must_use]
-    pub fn with_workspace_bash_default_run_in_background(mut self, default: bool) -> Self {
-        self.workspace_bash_default_run_in_background = default;
         self
     }
 

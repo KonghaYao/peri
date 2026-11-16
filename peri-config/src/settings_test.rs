@@ -845,7 +845,7 @@ fn workspace_probe_failure_prevents_lenient_source_from_writing_global() {
 #[cfg(unix)]
 #[test]
 fn lenient_source_without_snapshot_yields_empty_beta_flags() {
-    use peri_acp_types::beta_flags::FULL_ASYNC_TOOLS;
+    use crate::betas::HISTORY_WINDOW_V1;
 
     let tmp = tempfile::tempdir().unwrap();
     let cwd = tmp.path().join("workspace");
@@ -856,7 +856,7 @@ fn lenient_source_without_snapshot_yields_empty_beta_flags() {
     std::fs::write(
         &global_path,
         format!(
-            r#"{{"config":{{"active_alias":"sonnet","betas":{{"{FULL_ASYNC_TOOLS}":true}}}}}}"#
+            r#"{{"config":{{"active_alias":"sonnet","betas":{{"{HISTORY_WINDOW_V1}":true}}}}}}"#
         ),
     )
     .unwrap();
@@ -868,7 +868,7 @@ fn lenient_source_without_snapshot_yields_empty_beta_flags() {
         "前置：lenient 源没有已发布快照"
     );
     assert_eq!(
-        source.loaded_merged().config.betas.get(FULL_ASYNC_TOOLS),
+        source.loaded_merged().config.betas.get(HISTORY_WINDOW_V1),
         Some(true),
         "前置：内存草稿视图确实带覆盖（否则本用例没有判别力）"
     );
@@ -878,7 +878,7 @@ fn lenient_source_without_snapshot_yields_empty_beta_flags() {
         flags.is_empty(),
         "无已发布快照必须返回空投影（fail-closed，不按草稿视图回升）：{flags:?}"
     );
-    assert!(!flags.is_enabled(FULL_ASYNC_TOOLS));
+    assert!(!flags.is_enabled(HISTORY_WINDOW_V1));
 }
 
 #[cfg(unix)]

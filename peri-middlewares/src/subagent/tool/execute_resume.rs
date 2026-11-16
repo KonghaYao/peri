@@ -8,8 +8,8 @@
 //! - skill_names 恒不注入（R-H1：旧 transcript 已含首轮 SkillPreload 内容，
 //!   重复注入会随多次恢复无界增长；`SubagentResumeConfig` 无该字段，结构性禁止）
 //! - 不传 system_prompt（F4：identity System 已在旧 transcript 中，重复注入会重复）
-//! - run mode 由本次调用决定（issue 决策 8）：`run_in_background: true` →
-//!   Background（新 task_id + TaskManager 注册）
+//! - run mode：v5 起非 active 恢复恒为 Background（同步唤醒路径不再可用；
+//!   同步实现保留在 Agent 层，`run_sync.rs` 不受影响）。
 //!
 //! L3：校验/重建/运行/收尾统一经
 //! `peri_agent::session::subagent::resume_subagent`（Agent 层统一入口），
@@ -115,7 +115,6 @@ impl super::SubAgentTool {
         thread_id: String,
         prompt: Option<String>,
         cwd: String,
-        run_in_background: bool,
         parent_tool_call_id: Option<String>,
         approval_owner: Option<peri_agent::interaction::TrustedInteractionOwner>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -133,18 +132,6 @@ impl super::SubAgentTool {
             &thread_id, "resources", EffectiveToolErrorCode::ApplicationFailed,
             "resume_subagent: session resources required (resume_thread_id needs a persisted thread)",
         ))?;
-
-        // 双保险（review MEDIUM-1）：bg resume 在 agent 层注册失败会回滚 status，
-        // 但无 task_manager 时先在此预检，避免「置 active → 注册失败 → 回滚」的
-        // 无效往返（execute_bg.rs:29-32 同款文本）
-        if run_in_background && host.task_manager.is_none() {
-            return Err(preflight_rejected(
-                &thread_id,
-                "background_manager",
-                EffectiveToolErrorCode::ApplicationFailed,
-                "Background tasks not available: no task manager configured",
-            ));
-        }
 
         // 0. thread_id 格式校验（review low-2）：FilesystemThreadStore 按 id 拼路径，
         //    非 UUID 在 load_meta 之前统一拒绝（agent 层同文本，双保险）
@@ -190,6 +177,17 @@ impl super::SubAgentTool {
             ));
         }
         let title = meta.title.clone().unwrap_or_default();
+
+        // v5 起 resume 恒后台：身份 / active 预检通过后再要求后台能力，
+        // 避免错误分类被能力缺失掩盖（无效 id 仍是 InvalidInput）。
+        if host.task_manager.is_none() {
+            return Err(preflight_rejected(
+                &thread_id,
+                "background_manager",
+                EffectiveToolErrorCode::ApplicationFailed,
+                "Background tasks not available: no task manager configured",
+            ));
+        }
 
         // 2. 按 title 恢复工具集 / LLM / 迭代上限：
         //    - "fork" → 父工具集 clone（execute_fork.rs 同款，无过滤）+
@@ -250,11 +248,7 @@ impl super::SubAgentTool {
         let config = self.resume_config_base(
             thread_id.clone(),
             prompt,
-            if run_in_background {
-                SubagentRunMode::Background
-            } else {
-                SubagentRunMode::Sync
-            },
+            SubagentRunMode::Background,
             max_iterations,
             llm,
             tools,
