@@ -3,11 +3,20 @@
 //! 这些用例只断言用户可观察的结果：渲染缓冲区不出现内部凭据值，但候选/JSON
 //! 仍完整保留；状态/警告/只读行不产生鼠标目标；中英文分区与列宽稳定。
 
-use super::*;
+use super::EventResult;
+use super::KeyCode;
+use super::LoginEditState;
+use super::LoginField;
+use super::LoginPanelMode;
+use super::Rect;
+use super::TEST_AREA;
+use super::buffer_text;
+use super::serial;
 use crate::chatgpt_auth::AccountStatus;
 use crate::kit::panels::login::auth::{AuthController, AuthViewState, HostConfigAuthScope};
 use crate::kit::panels::login::{auth_render, render};
 use peri_acp::provider::config::{PeriConfig, ProviderAuthConfig};
+
 use ratatui_kit::ratatui::text::Line;
 use std::path::PathBuf;
 use unicode_width::UnicodeWidthStr;
@@ -17,7 +26,7 @@ fn sentinel_store() -> PathBuf {
 }
 
 fn plan_state_with_sentinels() -> (PeriConfig, LoginEditState) {
-    let mut cfg = login_config();
+    let mut cfg = super::login_config();
     let provider = cfg
         .config
         .providers
@@ -30,7 +39,8 @@ fn plan_state_with_sentinels() -> (PeriConfig, LoginEditState) {
         subject: "sentinel-subject".to_string(),
         client_id: "sentinel-client".to_string(),
     });
-    let state = LoginEditState::edit_provider(&cfg, "plan", None).unwrap();
+    let state = LoginEditState::edit_provider(&cfg, "plan", None)
+        .expect("plan state with sentinels: the edit_provider fixture operation uses valid inputs");
     (cfg, state)
 }
 
@@ -50,7 +60,7 @@ fn text_of(lines: &[Line<'_>]) -> String {
 #[serial]
 fn edit_never_renders_hidden_credentials_but_keeps_them_in_candidate() {
     let (_cfg, state) = plan_state_with_sentinels();
-    let text = mount_edit_state_sized(
+    let text = super::mount_edit_state_sized(
         state.clone(),
         LoginField::AuthActions,
         2,
@@ -96,7 +106,7 @@ fn edit_never_renders_hidden_credentials_but_keeps_them_in_candidate() {
         .providers
         .iter()
         .find(|provider| provider.id == "plan")
-        .unwrap();
+        .expect("edit never renders hidden credentials but keeps them in candidate: fixture must contain the searched item");
     let Some(ProviderAuthConfig::ChatGptPlan {
         store,
         account,
@@ -111,7 +121,7 @@ fn edit_never_renders_hidden_credentials_but_keeps_them_in_candidate() {
     assert_eq!(subject.as_str(), "sentinel-subject");
     assert_eq!(client_id.as_str(), "sentinel-client");
 
-    let encoded = serde_json::to_value(provider).unwrap();
+    let encoded = serde_json::to_value(provider).expect("edit never renders hidden credentials but keeps them in candidate: fixture must serialize to JSON");
     assert_eq!(encoded["auth"]["account"], "sentinel-account");
     assert_eq!(encoded["auth"]["subject"], "sentinel-subject");
     assert_eq!(encoded["auth"]["clientId"], "sentinel-client");
@@ -193,7 +203,7 @@ fn auth_detail_and_logout_confirmation_hide_account_reference() {
         crate::chatgpt_auth::AuthTarget::new(sentinel_store(), "sentinel-account".to_string(),),
         vec!["plan".to_string()],
     ));
-    let layout = auth_render::build_logout_layout(logout.logout_confirm().unwrap(), &colors);
+    let layout = auth_render::build_logout_layout(logout.logout_confirm().expect("auth detail and logout confirmation hide account reference: the logout_confirm fixture operation uses valid inputs"), &colors);
     let text = text_of(&layout.lines);
     assert!(
         !text.contains("sentinel-account"),
@@ -212,7 +222,7 @@ fn account_error_moves_focus_to_auth_actions() {
     state.plan.account = "invalid/account".to_string();
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state_sized(
+    super::mount_edit_state_sized(
         state,
         LoginField::Confirm,
         2,
@@ -220,7 +230,7 @@ fn account_error_moves_focus_to_auth_actions() {
         40,
         move |index, panel| {
             if index == 0 {
-                let result = panel.event(key(KeyCode::Enter), TEST_AREA);
+                let result = panel.event(super::key(KeyCode::Enter), TEST_AREA);
                 let focus = *panel.edit_focus.read();
                 let error = panel
                     .edit_state
@@ -233,14 +243,14 @@ fn account_error_moves_focus_to_auth_actions() {
                     .as_ref()
                     .map(LoginEditState::visible_fields)
                     .unwrap_or_default();
-                tx.send((result, focus, error, visible)).unwrap();
+                tx.send((result, focus, error, visible)).expect("account error moves focus to auth actions: fixture channel must deliver its expected message");
             }
             frame += 1;
             assert_eq!(frame, index + 1);
         },
     );
 
-    let (result, focus, error, visible) = rx.try_recv().unwrap();
+    let (result, focus, error, visible) = rx.try_recv().expect("account error moves focus to auth actions: fixture channel must deliver its expected message");
     assert_eq!(result, EventResult::Consumed);
     assert_eq!(focus, LoginField::AuthActions, "隐藏账号错误必须重映射焦点");
     assert!(!visible.contains(&LoginField::PlanAccount));
@@ -260,7 +270,7 @@ fn store_error_opens_the_recovery_row_and_focuses_it() {
     assert!(!state.plan_store_editable, "进入时合法 store 默认只读");
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state_sized(
+    super::mount_edit_state_sized(
         state,
         LoginField::Confirm,
         2,
@@ -268,24 +278,24 @@ fn store_error_opens_the_recovery_row_and_focuses_it() {
         40,
         move |index, panel| {
             if index == 0 {
-                let _ = panel.event(key(KeyCode::Enter), TEST_AREA);
+                let _ = panel.event(super::key(KeyCode::Enter), TEST_AREA);
                 let (focus, editable, visible) = {
                     let state = panel.edit_state.read();
-                    let state = state.as_ref().unwrap();
+                    let state = state.as_ref().expect("store error opens the recovery row and focuses it: fixture must have the expected variant");
                     (
                         *panel.edit_focus.read(),
                         state.plan_store_editable,
                         state.visible_fields(),
                     )
                 };
-                tx.send((focus, editable, visible)).unwrap();
+                tx.send((focus, editable, visible)).expect("store error opens the recovery row and focuses it: fixture channel must deliver its expected message");
             }
             frame += 1;
             assert_eq!(frame, index + 1);
         },
     );
 
-    let (focus, editable, visible) = rx.try_recv().unwrap();
+    let (focus, editable, visible) = rx.try_recv().expect("store error opens the recovery row and focuses it: fixture channel must deliver its expected message");
     assert!(editable, "保存错误指向凭据目录时必须强制打开恢复行");
     assert_eq!(focus, LoginField::PlanStore);
     assert!(
@@ -298,10 +308,10 @@ fn store_error_opens_the_recovery_row_and_focuses_it() {
 #[serial]
 fn status_warning_and_readonly_rows_have_no_mouse_target() {
     let (_cfg, state) = plan_state_with_sentinels();
-    let area = tall_area();
+    let area = super::tall_area();
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state_sized(
+    super::mount_edit_state_sized(
         state,
         LoginField::ProviderId,
         1,
@@ -310,35 +320,40 @@ fn status_warning_and_readonly_rows_have_no_mouse_target() {
         move |index, panel| {
             if index == 0 {
                 let focus_before = *panel.edit_focus.read();
-                let layout = edit_layout(&panel, area.width);
+                let layout = super::edit_layout(&panel, area.width);
                 let mut touched = Vec::new();
-                for (row, line) in layout.lines.iter().enumerate() {
-                    let text: String = line
-                        .spans
-                        .iter()
-                        .map(|span| span.content.as_ref())
-                        .collect();
-                    let passive = text.contains('●')
-                        || text.contains('⚠')
-                        || text.contains(sentinel_store().to_string_lossy().as_ref());
-                    if passive {
-                        assert!(
-                            layout.hits[row].is_none(),
-                            "状态/警告/只读行不得有命中: {text}"
-                        );
-                        touched
-                            .push((row, panel.event(click_at(area.y + 1 + row as u16, 3), area)));
+                {
+                    let iteration_items = layout.lines.iter().enumerate();
+                    for (row, line) in iteration_items {
+                        let text: String = line
+                            .spans
+                            .iter()
+                            .map(|span| span.content.as_ref())
+                            .collect();
+                        let passive = text.contains('●')
+                            || text.contains('⚠')
+                            || text.contains(sentinel_store().to_string_lossy().as_ref());
+                        if passive {
+                            assert!(
+                                layout.hits[row].is_none(),
+                                "状态/警告/只读行不得有命中: {text}"
+                            );
+                            touched.push((
+                                row,
+                                panel.event(super::click_at(area.y + 1 + row as u16, 3), area),
+                            ));
+                        }
                     }
                 }
                 tx.send((focus_before, *panel.edit_focus.read(), touched))
-                    .unwrap();
+                    .expect("status warning and readonly rows have no mouse target: isolated fixture workspace must remain accessible");
             }
             frame += 1;
             assert_eq!(frame, index + 1);
         },
     );
 
-    let (before, after, touched) = rx.try_recv().unwrap();
+    let (before, after, touched) = rx.try_recv().expect("status warning and readonly rows have no mouse target: fixture channel must deliver its expected message");
     assert!(!touched.is_empty(), "夹具必须包含状态/警告/只读行");
     for (row, result) in touched {
         assert_eq!(result, EventResult::Consumed, "row {row} 区域内点击仍消费");
@@ -387,17 +402,17 @@ fn edit_sections_and_widths_are_language_stable() {
         crate::i18n::init(Some(lang));
         let (tx, rx) = std::sync::mpsc::channel();
         let state = state.clone();
-        let buffer = mount_edit_state_sized(
+        let buffer = super::mount_edit_state_sized(
             state,
             LoginField::ProviderId,
             2,
             100,
             40,
             move |_, panel| {
-                let _ = tx.send(text_of(&edit_layout(&panel, 100).lines));
+                let _ = tx.send(text_of(&super::edit_layout(&panel, 100).lines));
             },
         );
-        let text = rx.try_recv().unwrap();
+        let text = rx.try_recv().expect("edit sections and widths are language stable: fixture channel must deliver its expected message");
         assert!(text.contains(title), "{lang} 标题缺失:\n{text}");
         for section in sections {
             assert!(
@@ -423,7 +438,7 @@ fn edit_sections_and_widths_are_language_stable() {
             "{lang} 不得出现裸 key:\n{buffer_text}"
         );
         // 标题只由代码加 2 列缩进，FTL 不再自带前导空格。
-        let first_content = buffer_line(&buffer, 1);
+        let first_content = super::buffer_line(&buffer, 1);
         assert!(
             first_content.starts_with("  /login"),
             "{lang} 标题缩进必须恰好 2 列: {first_content:?}"
@@ -444,7 +459,7 @@ fn main_decision_area_fits_100x40() {
     };
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state_sized(
+    super::mount_edit_state_sized(
         state,
         LoginField::ProviderId,
         1,
@@ -452,7 +467,7 @@ fn main_decision_area_fits_100x40() {
         area.height,
         move |index, panel| {
             if index == 0 {
-                let layout = edit_layout(&panel, area.width);
+                let layout = super::edit_layout(&panel, area.width);
                 let confirm_row = layout
                     .hits
                     .iter()
@@ -460,13 +475,15 @@ fn main_decision_area_fits_100x40() {
                         *hit == Some(super::render::EditHit::Field(LoginField::Confirm))
                     })
                     .expect("保存按钮必须可见");
-                tx.send(confirm_row).unwrap();
+                tx.send(confirm_row).expect("main decision area fits 100x40: fixture channel must deliver its expected message");
             }
             frame += 1;
             assert_eq!(frame, index + 1);
         },
     );
-    let confirm_row = rx.try_recv().unwrap();
+    let confirm_row = rx.try_recv().expect(
+        "main decision area fits 100x40: fixture channel must deliver its expected message",
+    );
     let content_height = area.height.saturating_sub(2) as usize;
     assert!(
         confirm_row < content_height,
@@ -489,6 +506,7 @@ fn verified_status_for_actions() -> AuthViewState {
     })
 }
 
+#[must_use]
 fn action_labels_for(lang: &str) -> [&'static str; 4] {
     if lang == "zh-CN" {
         ["登录 ChatGPT", "查询状态", "使用此账号", "注销"]
@@ -706,7 +724,7 @@ fn auth_actions_move_with_left_right_and_enter_executes() {
     let (_cfg, state) = plan_state_with_sentinels();
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state_sized(
+    super::mount_edit_state_sized(
         state,
         LoginField::AuthActions,
         2,
@@ -719,17 +737,17 @@ fn auth_actions_move_with_left_right_and_enter_executes() {
                     .read()
                     .as_ref()
                     .map(|state| state.plan.clone())
-                    .unwrap();
+                    .expect("auth actions move with left right and enter executes: isolated fixture workspace must remain accessible");
                 let first = panel.auth.read().selected_action(&plan);
-                let _ = panel.event(key(KeyCode::Right), TEST_AREA);
+                let _ = panel.event(super::key(KeyCode::Right), TEST_AREA);
                 let second = panel.auth.read().selected_action(&plan);
-                let _ = panel.event(key(KeyCode::Right), TEST_AREA);
+                let _ = panel.event(super::key(KeyCode::Right), TEST_AREA);
                 let third = panel.auth.read().selected_action(&plan);
                 let focus_after_move = *panel.edit_focus.read();
-                let _ = panel.event(key(KeyCode::Left), TEST_AREA);
+                let _ = panel.event(super::key(KeyCode::Left), TEST_AREA);
                 let back = panel.auth.read().selected_action(&plan);
-                let _ = panel.event(key(KeyCode::Right), TEST_AREA);
-                let _ = panel.event(key(KeyCode::Enter), TEST_AREA);
+                let _ = panel.event(super::key(KeyCode::Right), TEST_AREA);
+                let _ = panel.event(super::key(KeyCode::Enter), TEST_AREA);
                 tx.send((
                     first,
                     second,
@@ -738,14 +756,14 @@ fn auth_actions_move_with_left_right_and_enter_executes() {
                     focus_after_move,
                     *panel.mode.read(),
                 ))
-                .unwrap();
+                .expect("auth actions move with left right and enter executes: isolated fixture workspace must remain accessible");
             }
             frame += 1;
             assert_eq!(frame, index + 1);
         },
     );
 
-    let (first, second, third, back, focus, mode) = rx.try_recv().unwrap();
+    let (first, second, third, back, focus, mode) = rx.try_recv().expect("auth actions move with left right and enter executes: fixture channel must deliver its expected message");
     assert_eq!(first, Some(super::auth::AuthAction::Login));
     assert_eq!(second, Some(super::auth::AuthAction::Status));
     assert_eq!(third, Some(super::auth::AuthAction::Logout));

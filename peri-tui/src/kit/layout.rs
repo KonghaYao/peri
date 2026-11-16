@@ -8,10 +8,10 @@ use crate::kit::input_area::InputArea;
 use crate::kit::message_area::MessageArea;
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::panel_overlay::PanelOverlay;
-use ratatui_kit::{
-    prelude::*,
-    ratatui::layout::{Constraint, Direction, Rect},
-};
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Constraint;
+use ratatui_kit::ratatui::layout::Direction;
+use ratatui_kit::ratatui::layout::Rect;
 
 // ── 居中带（§3.1）────────────────────────────────────────────────────────
 
@@ -51,10 +51,10 @@ pub(crate) fn center_band_area(area: Rect, grid: GridSpec) -> Rect {
 /// [Why 透明布局] `set_transparent_layout(true)` 让父级仍按**被包裹组件**的
 /// `Fill/Length` 约束分配区域，包装不改变布局占位；draw 期再把该区域收窄到带。
 #[derive(Default, Props)]
-pub(crate) struct CenterBandProps<'a> {
+pub(crate) struct CenterBandProps<'children> {
     /// Transcript 水平网格（终端 resize 后每帧重建）。
     pub grid: GridSpec,
-    pub children: Vec<AnyElement<'a>>,
+    pub children: Vec<AnyElement<'children>>,
 }
 
 pub(crate) struct CenterBand {
@@ -62,7 +62,7 @@ pub(crate) struct CenterBand {
 }
 
 impl Component for CenterBand {
-    type Props<'a> = CenterBandProps<'a>;
+    type Props<'children> = CenterBandProps<'children>;
 
     fn new(props: &Self::Props<'_>) -> Self {
         Self { grid: props.grid }
@@ -105,6 +105,7 @@ pub enum StatusBarMode {
 impl StatusBarMode {
     /// 各档位占用的高度行数（Full=4 / Row1Only=2 / Hidden=0）——
     /// 供 SessionColumn 计算输入区高度预算（§11 transcript ≥3 行保证）。
+    #[must_use]
     pub fn height(self) -> u16 {
         match self {
             StatusBarMode::Full => 4,
@@ -253,12 +254,12 @@ mod tests {
 
     impl Hook for AreaProbeHook {
         fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
-            *self.sink.lock().unwrap() = Some(drawer.area);
+            *self.sink.lock().expect("sink mutex must not be poisoned") = Some(drawer.area);
         }
     }
 
     impl Component for AreaProbe {
-        type Props<'a> = AreaProbeProps;
+        type Props<'children> = AreaProbeProps;
 
         fn new(_props: &Self::Props<'_>) -> Self {
             Self { text: "P" }
@@ -328,7 +329,7 @@ mod tests {
         );
         let recorded = sink
             .lock()
-            .unwrap()
+            .expect("sink mutex must not be poisoned")
             .expect("pre_component_draw 应记录组件区域");
         assert_eq!(recorded, expected);
         assert_eq!(recorded.x, grid.left_pad);

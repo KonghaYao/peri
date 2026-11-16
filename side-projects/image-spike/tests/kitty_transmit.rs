@@ -25,8 +25,7 @@ fn solid_protocol(w: u32, h: u32) -> Protocol {
     let img: DynamicImage =
         ImageBuffer::<Rgba<u8>, _>::from_pixel(w, h, Rgba([255, 0, 0, 255])).into();
     Protocol::Kitty(
-        Kitty::new(img, Size::new(w as u16, h as u16), 1, false)
-            .expect("kitty protocol 构造失败"),
+        Kitty::new(img, Size::new(w as u16, h as u16), 1, false).expect("kitty protocol 构造失败"),
     )
 }
 
@@ -72,10 +71,7 @@ fn kitty_escape_visible_in_test_backend_buffer() {
     assert_eq!(count_transmit(buf), 1, "首帧 transmit 应恰好出现一次");
 
     // 关键断言 3：占位符行数 = 图片行数（每行首 cell 含 U+10EEEE 占位符序列）。
-    let placeholder_rows = symbols
-        .iter()
-        .filter(|s| s.contains('\u{10EEEE}'))
-        .count();
+    let placeholder_rows = symbols.iter().filter(|s| s.contains('\u{10EEEE}')).count();
     assert_eq!(placeholder_rows, 8, "8 行图片应有 8 个含占位符的 cell");
 
     // 关键断言 4：同一 cell 内 transmit + 占位符共存于首行首 cell。
@@ -83,7 +79,10 @@ fn kitty_escape_visible_in_test_backend_buffer() {
         .iter()
         .find(|s| s.contains("\x1b_G"))
         .expect("首帧必有 transmit");
-    assert!(first_row.contains('\u{10EEEE}'), "首行 cell 应同时含 transmit 与占位符");
+    assert!(
+        first_row.contains('\u{10EEEE}'),
+        "首行 cell 应同时含 transmit 与占位符"
+    );
 
     // 人工检查入口：cargo test -- --nocapture 可查看完整符号。
     eprintln!("首行首 cell symbol 长度 {} 字节", first_row.len());
@@ -96,11 +95,13 @@ fn transmit_happens_only_on_first_frame() {
     let area = Rect::new(0, 0, 8, 8);
 
     // 第一帧：transmit 出现一次。
-    term.draw(|f| f.render_widget(Image::new(&proto), area)).unwrap();
+    term.draw(|f| f.render_widget(Image::new(&proto), area))
+        .unwrap();
     assert_eq!(count_transmit(term.backend().buffer()), 1);
 
     // 第二帧（同一 &Protocol，未重建）：transmit 不再出现，只有占位符。
-    term.draw(|f| f.render_widget(Image::new(&proto), area)).unwrap();
+    term.draw(|f| f.render_widget(Image::new(&proto), area))
+        .unwrap();
     assert_eq!(
         count_transmit(term.backend().buffer()),
         0,

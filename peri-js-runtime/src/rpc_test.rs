@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::*;
+use super::{JsonRpcError, RpcChannel};
 
 #[test]
 fn rpc_failure_debug_and_display_preserve_payload() {

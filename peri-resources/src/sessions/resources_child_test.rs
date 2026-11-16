@@ -1,4 +1,7 @@
-use super::*;
+use super::{Fixture, FrozenState, SessionResourceErrorKind};
+use peri_acp_types::session_resources::SessionMetaPatch;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::thread::AgentStatus;
 
 /// 旧补偿延迟到新任务 `Active + Working` 之后到达时，不得覆盖新任务的工作意图。
 ///
@@ -220,7 +223,7 @@ async fn test_save_child_preserves_parent_snapshot_and_tree() {
     );
     fixture
         .facade
-        .append_history(&"s-child".to_owned(), &[payload("child turn")])
+        .append_history(&"s-child".to_owned(), &[super::payload("child turn")])
         .await
         .unwrap();
     assert_eq!(fixture.count_messages("s-child").await, 1);
@@ -295,7 +298,7 @@ async fn test_save_child_refuses_a_snapshot_that_disagrees_with_its_parent_relat
         let error = fixture.facade.save_child(snapshot).await.unwrap_err();
         assert!(
             matches!(
-                error_kind(&error),
+                super::error_kind(&error),
                 SessionResourceErrorKind::InvalidInput { .. }
             ),
             "{label}: expected InvalidInput, got {error:?}"
@@ -326,7 +329,7 @@ async fn test_save_child_refuses_a_snapshot_that_disagrees_with_its_parent_relat
         .is_empty());
     fixture
         .facade
-        .append_history(&"s-rel-root".to_owned(), &[payload("root turn")])
+        .append_history(&"s-rel-root".to_owned(), &[super::payload("root turn")])
         .await
         .unwrap();
 
@@ -393,7 +396,7 @@ async fn test_claim_child_resume_serializes_and_restores_previous_state() {
         Err(error) => error,
     };
     assert!(matches!(
-        error_kind(&error),
+        super::error_kind(&error),
         SessionResourceErrorKind::InvalidInput { .. }
     ));
     // 准备失败：恢复到认领前，不留 active 残留。
@@ -417,7 +420,7 @@ async fn test_claim_child_resume_serializes_and_restores_previous_state() {
     claim.hand_off_to_background().await.unwrap();
     let error = claim.mark_terminated().await.unwrap_err();
     assert!(matches!(
-        error_kind(&error),
+        super::error_kind(&error),
         SessionResourceErrorKind::InvalidInput { .. }
     ));
 }

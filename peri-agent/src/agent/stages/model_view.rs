@@ -17,6 +17,7 @@
 //! 3. 退出准备作用域统一释放，hook 错误与提前取消等返回路径都不留正文
 //!    （[`ModelViewScope::release_guard`]）。
 
+use std::fmt::{self, Debug, Formatter};
 #[cfg(test)]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -242,10 +243,18 @@ impl ModelViewScope {
 }
 
 /// 退出准备作用域时释放缓存槽的守卫（见 [`ModelViewScope::release_guard`]）。
-pub(crate) struct ModelViewReleaseGuard<'a>(&'a ModelViewScope);
+pub(crate) struct ModelViewReleaseGuard<'scope>(&'scope ModelViewScope);
 
 impl Drop for ModelViewReleaseGuard<'_> {
     fn drop(&mut self) {
         self.0.release();
+    }
+}
+
+impl Debug for ModelViewScope {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ModelViewScope")
+            .finish_non_exhaustive()
     }
 }

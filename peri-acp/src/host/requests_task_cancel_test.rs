@@ -1,6 +1,14 @@
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::host::SessionState;
+use crate::provider::LlmProvider;
 use crate::transport::AcpTransport;
+
+use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::tasks::ExternalCancelFn;
+use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 fn external_cancel_registration(
     session_id: &str,
@@ -40,7 +48,7 @@ async fn start_cancel_server_loop(
         crate::host::connection::ConnectionContext::new(false),
     ));
     let cancellation = tokio_util::sync::CancellationToken::new();
-    let recovery = recovery_for(&cfg, &sessions, &cont_tx);
+    let recovery = crate::host::requests::tests::recovery_for(&cfg, &sessions, &cont_tx);
     let task = tokio::spawn(async move {
         let _cont_rx = cont_rx;
         crate::host::server_loop::ServerLoop {
@@ -66,17 +74,19 @@ async fn new_cancel_fixture() -> (
     String,
 ) {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut states = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": tmp.path()}),
         &cfg,

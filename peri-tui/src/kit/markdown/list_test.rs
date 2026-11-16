@@ -1,11 +1,13 @@
 //! 列表项间距（列表项之间插入空行）的渲染与策略测试。
 
-use super::list::{LIST_ITEM_GAP_MAX_DEPTH, list_item_gap};
-use super::*;
+use super::Color;
+use super::MarkdownSegment;
+use super::Palette;
+use super::list::LIST_ITEM_GAP_MAX_DEPTH;
 
 /// 把 markdown 渲染为纯文本行（空行渲染为空字符串）。
 fn render(md: &str) -> Vec<String> {
-    parse_markdown(md, 80, Palette::default(), Color::White)
+    super::parse_markdown(md, 80, Palette::default(), Color::White)
         .iter()
         .flat_map(|segment| match segment {
             MarkdownSegment::Text(lines) => lines.clone(),
@@ -26,11 +28,14 @@ fn render(md: &str) -> Vec<String> {
 /// 测试仍校验「渲染结果 == 生效策略」的接线是否正确。
 fn expected_list(items: &[(&str, u32)]) -> Vec<String> {
     let mut out = Vec::new();
-    for (index, (text, depth)) in items.iter().enumerate() {
-        if index > 0 && list_item_gap(LIST_ITEM_GAP_MAX_DEPTH, *depth) {
-            out.push(String::new());
+    {
+        let iteration_items = items.iter().enumerate();
+        for (index, (text, depth)) in iteration_items {
+            if index > 0 && super::list::list_item_gap(LIST_ITEM_GAP_MAX_DEPTH, *depth) {
+                out.push(String::new());
+            }
+            out.push((*text).to_string());
         }
-        out.push((*text).to_string());
     }
     out
 }
@@ -48,14 +53,26 @@ fn test_active_list_item_spacing_scope_is_top_level_only() {
 
 #[test]
 fn test_list_item_gap_scope_matrix() {
-    assert!(list_item_gap(Some(0), 0), "顶层项之间应插空行");
-    assert!(!list_item_gap(Some(0), 1), "嵌套层保持紧凑");
-    assert!(!list_item_gap(Some(0), 2), "更深层同样保持紧凑");
-    assert!(list_item_gap(Some(1), 1), "深度上限 1 时嵌套首层插空行");
-    assert!(!list_item_gap(Some(1), 2));
+    assert!(super::list::list_item_gap(Some(0), 0), "顶层项之间应插空行");
+    assert!(!super::list::list_item_gap(Some(0), 1), "嵌套层保持紧凑");
+    assert!(
+        !super::list::list_item_gap(Some(0), 2),
+        "更深层同样保持紧凑"
+    );
+    assert!(
+        super::list::list_item_gap(Some(1), 1),
+        "深度上限 1 时嵌套首层插空行"
+    );
+    assert!(!super::list::list_item_gap(Some(1), 2));
     for depth in [0, 1, 2] {
-        assert!(list_item_gap(Some(u32::MAX), depth), "所有层级生效");
-        assert!(!list_item_gap(None, depth), "关闭时列表项之间不插空行");
+        assert!(
+            super::list::list_item_gap(Some(u32::MAX), depth),
+            "所有层级生效"
+        );
+        assert!(
+            !super::list::list_item_gap(None, depth),
+            "关闭时列表项之间不插空行"
+        );
     }
 }
 

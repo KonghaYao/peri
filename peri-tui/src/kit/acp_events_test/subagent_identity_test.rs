@@ -1,7 +1,11 @@
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::TuiRenderUnit;
+use super::TuiToolStarted;
+use super::serial;
 
 fn start_parent(state: &mut BridgeState, index: usize) {
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         state,
         &AcpEventData::ToolStarted(TuiToolStarted {
             tool_id: format!("model-call:{index}"),
@@ -56,14 +60,14 @@ fn three_same_named_subagents_keep_distinct_owners_across_arrival_orders() {
             [2, 0, 1],
             [2, 1, 0],
         ] {
-            let mut state = make_fold_test_state();
+            let mut state = super::make_fold_test_state();
             if parents_first {
                 for index in 0..3 {
                     start_parent(&mut state, index);
                 }
             }
             for index in order {
-                dispatch_and_notify(
+                super::dispatch_and_notify(
                     &mut state,
                     &AcpEventData::SubagentStarted {
                         agent_id: format!("child:{index}"),
@@ -73,7 +77,7 @@ fn three_same_named_subagents_keep_distinct_owners_across_arrival_orders() {
                     },
                 );
                 for tool_index in 0..3 {
-                    dispatch_and_notify(
+                    super::dispatch_and_notify(
                         &mut state,
                         &AcpEventData::ToolStarted(TuiToolStarted {
                             tool_id: format!("child-tool:{index}:{tool_index}"),
@@ -94,7 +98,7 @@ fn three_same_named_subagents_keep_distinct_owners_across_arrival_orders() {
             }
             assert_owned_groups(&mut state, false);
             for index in order {
-                dispatch_and_notify(
+                super::dispatch_and_notify(
                     &mut state,
                     &AcpEventData::SubagentStopped {
                         agent_id: format!("child:{index}"),
@@ -107,3 +111,5 @@ fn three_same_named_subagents_keep_distinct_owners_across_arrival_orders() {
         }
     }
 }
+
+use crate::kit::atoms::VIEW_MODELS;

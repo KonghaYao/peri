@@ -16,89 +16,28 @@
 //! （`QuestionItem`）共用 `UserInteractionBroker` 契约但方向相反——审批
 //! 拒绝后 agent 靠本通道追问用户，两者可独立开关。
 
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
-use peri_agent::{
-    interaction::UserInteractionBroker,
-    middleware::{
-        prompt_sections::{PromptSection, PromptSectionZone},
-        r#trait::Middleware,
-    },
-    tools::BaseTool,
-};
+use peri_agent::interaction::UserInteractionBroker;
+use peri_agent::middleware::prompt_sections::PromptSection;
+use peri_agent::middleware::prompt_sections::PromptSectionZone;
+use peri_agent::middleware::r#trait::Middleware;
+use peri_agent::tools::BaseTool;
 
 use crate::tools::AskUserTool;
-
-// ─── HumanInTheLoopMiddleware（提问通道）──────────────────────────────────────
-
-/// HumanInTheLoopMiddleware — 向用户提问的通道（持有 `AskUserQuestion` 工具）。
-///
-/// 唯一依赖是 [`UserInteractionBroker`]；无审批钩子。关闭本 middleware 后
-/// `AskUserQuestion` 从 LLM 工具视图消失（与其余 middleware 工具一致的
-/// 关闭语义）。
-pub struct HumanInTheLoopMiddleware {
-    broker: Arc<dyn UserInteractionBroker>,
-}
-
-impl HumanInTheLoopMiddleware {
-    /// 静态工具名（`assembly_test` 与 `MIDDLEWARE_TOOL_NAMES` 锁定用）。
-    pub fn tool_names() -> Vec<&'static str> {
-        vec!["AskUserQuestion"]
-    }
-
-    /// 段落声明（渲染面收集与链收集的单一事实源）。
-    ///
-    /// `12_ask_user` 段 = 提问纪律说明（`sections/12_ask_user.md`，
-    /// include_str 零拷贝，文件在 `peri-acp/prompts/sections/`，与
-    /// `10_hitl` 同模式）。契约 3（gate 原子迁移）：本段 gate = 本
-    /// middleware 是否在链上（收集即装配）——关闭即段落消失。
-    pub fn sections() -> Vec<PromptSection> {
-        vec![PromptSection::builtin(
-            "12_ask_user",
-            PromptSectionZone::Uncached,
-            5, // 2026-08-15 拆分后编号事实：gated 12=5（11_subagent=4 之后，13_skills 顺延为 6）
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../peri-acp/prompts/sections/12_ask_user.md"
-            )),
-        )]
-    }
-}
-
-impl HumanInTheLoopMiddleware {
-    /// 创建提问通道 middleware（使用注入的 broker）。
-    pub fn new(broker: Arc<dyn UserInteractionBroker>) -> Self {
-        Self { broker }
-    }
-}
-
-impl Middleware for HumanInTheLoopMiddleware {
-    fn name(&self) -> &str {
-        "HumanInTheLoopMiddleware"
-    }
-
-    /// 声明持有的系统提示词段落（12_ask_user，装配期收集，契约 2）。
-    fn prompt_sections(&self) -> Vec<PromptSection> {
-        Self::sections()
-    }
-
-    /// 提供 `AskUserQuestion` 工具（关闭即不装配 → 视图消失）。
-    fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
-        vec![Box::new(AskUserTool::new(Arc::clone(&self.broker)))]
-    }
-}
 
 // ─── 测试 ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use peri_agent::{
-        interaction::{
-            InteractionContext, InteractionResponse, TrustedInteractionOwner, UserInteractionBroker,
-        },
-        middleware::prompt_sections::PromptSectionZone,
-    };
+    use peri_agent::interaction::InteractionContext;
+    use peri_agent::interaction::InteractionResponse;
+    use peri_agent::interaction::TrustedInteractionOwner;
+    use peri_agent::interaction::UserInteractionBroker;
+    use peri_agent::middleware::prompt_sections::PromptSectionZone;
 
     use super::*;
 
@@ -152,3 +91,6 @@ mod tests {
         assert_eq!(section.order, 5);
     }
 }
+
+mod human_in_the_loop_middleware;
+pub use human_in_the_loop_middleware::HumanInTheLoopMiddleware;

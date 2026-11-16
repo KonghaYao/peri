@@ -1,7 +1,6 @@
 //! 超大条目的持久身份与详情描述符（不持正文）。
 
 use super::{HistorySource, PersistentEntryKey};
-use crate::kit::tui_render_unit::tui_hash_str;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DetailDescriptor {
@@ -55,7 +54,7 @@ pub struct HistoryDetailTarget {
 
 /// 占位 note 的缓存键：把持久身份混入 hash，避免同尺寸占位互相命中。
 pub fn placeholder_hash(key: &PersistentEntryKey, total_bytes: u64) -> u64 {
-    tui_hash_str(&format!(
+    crate::kit::tui_render_unit::tui_hash_str(&format!(
         "{}|{}|{}",
         key.source.frozen_snapshot_id().unwrap_or("own"),
         key.entry_id,
@@ -64,6 +63,7 @@ pub fn placeholder_hash(key: &PersistentEntryKey, total_bytes: u64) -> u64 {
 }
 
 impl DetailDescriptor {
+    #[must_use]
     pub fn new(
         source: HistorySource,
         entry_id: impl Into<String>,

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::*;
+use super::ReactLLM;
 use crate::hooks::middleware::HookMiddleware;
 use crate::hooks::types::{HookAction, HookEvent, HookType, PermissionDecision, RegisteredHook};
 use crate::permission::{PermissionMode, SharedPermissionMode};
@@ -51,7 +51,7 @@ fn assert_override<'a>(
 /// [deny, allow]：后一个 hook 无判定不得抹掉先出现的 deny。
 #[test]
 fn merge_deny_then_allow_keeps_deny() {
-    let merged = merge_hook_actions(
+    let merged = super::merge_hook_actions(
         override_action(PermissionDecision::Deny, None, None, None),
         HookAction::Allow,
     );
@@ -64,7 +64,7 @@ fn merge_deny_then_allow_keeps_deny() {
 
 #[test]
 fn merge_deny_then_initial_user_message_keeps_deny() {
-    let merged = merge_hook_actions(
+    let merged = super::merge_hook_actions(
         override_action(PermissionDecision::Deny, None, None, None),
         HookAction::InitialUserMessage {
             message: "foreign output".to_string(),
@@ -79,7 +79,7 @@ fn merge_deny_then_initial_user_message_keeps_deny() {
 
 #[test]
 fn merge_ask_then_initial_user_message_keeps_ask() {
-    let merged = merge_hook_actions(
+    let merged = super::merge_hook_actions(
         override_action(PermissionDecision::Ask, None, None, None),
         HookAction::InitialUserMessage {
             message: "foreign output".to_string(),
@@ -95,7 +95,7 @@ fn merge_ask_then_initial_user_message_keeps_ask() {
 /// [allow, deny]：对称方向，deny 同样胜出。
 #[test]
 fn merge_allow_then_deny_keeps_deny() {
-    let merged = merge_hook_actions(
+    let merged = super::merge_hook_actions(
         HookAction::Allow,
         override_action(PermissionDecision::Deny, None, None, None),
     );
@@ -109,7 +109,7 @@ fn merge_allow_then_deny_keeps_deny() {
 /// [deny, systemMessage]：无判定的 systemMessage 必须被吸收，deny 不被覆盖。
 #[test]
 fn merge_deny_then_system_message_keeps_deny_and_message() {
-    let merged = merge_hook_actions(
+    let merged = super::merge_hook_actions(
         override_action(PermissionDecision::Deny, None, None, None),
         HookAction::SystemMessage {
             message: "client hint".to_string(),
@@ -127,7 +127,7 @@ fn merge_deny_then_system_message_keeps_deny_and_message() {
 /// [ask, allow]：ask 不得被后一个无判定输出降级为放行。
 #[test]
 fn merge_ask_then_allow_keeps_ask() {
-    let merged = merge_hook_actions(
+    let merged = super::merge_hook_actions(
         override_action(PermissionDecision::Ask, None, None, None),
         HookAction::Allow,
     );
@@ -141,7 +141,7 @@ fn merge_ask_then_allow_keeps_ask() {
 /// [ModifyInput, Allow]：先出现的 updatedInput 不得被后一个无判定输出丢弃。
 #[test]
 fn merge_modify_input_then_allow_keeps_updated_input() {
-    let merged = merge_hook_actions(
+    let merged = super::merge_hook_actions(
         HookAction::ModifyInput {
             new_input: serde_json::json!({"command": "echo safe"}),
         },
@@ -158,7 +158,7 @@ fn merge_modify_input_then_allow_keeps_updated_input() {
 /// [SystemMessage, deny]：先出现的 systemMessage 必须在 deny 判定里保留。
 #[test]
 fn merge_system_message_then_deny_absorbs_message() {
-    let merged = merge_hook_actions(
+    let merged = super::merge_hook_actions(
         HookAction::SystemMessage {
             message: "earlier note".to_string(),
         },
@@ -176,7 +176,7 @@ fn merge_system_message_then_deny_absorbs_message() {
 /// [ModifyInput, systemMessage]：两类字段并存时都不得丢失（以 Passthrough 承载）。
 #[test]
 fn merge_modify_input_and_system_message_keeps_both_fields() {
-    let merged = merge_hook_actions(
+    let merged = super::merge_hook_actions(
         HookAction::ModifyInput {
             new_input: serde_json::json!({"command": "echo safe"}),
         },
@@ -205,7 +205,7 @@ fn merge_modify_input_and_system_message_keeps_both_fields() {
 /// additionalContext 必须按顺序拼接，不得后者覆盖前者。
 #[test]
 fn merge_additional_context_is_concatenated() {
-    let merged = merge_hook_actions(
+    let merged = super::merge_hook_actions(
         HookAction::AdditionalContext {
             context: "first".to_string(),
         },

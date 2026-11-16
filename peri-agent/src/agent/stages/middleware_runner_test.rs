@@ -1,9 +1,11 @@
 //! 从 middleware_runner.rs 分离的测试模块
-use super::*;
+use crate::middleware::middleware_state::MiddlewareState as _;
+
 use crate::agent::stages::StageContext;
 use crate::messages::{BaseMessage, MessageContent};
 use crate::middleware::capabilities as hook_state;
 use crate::session::store::FrozenContext;
+use crate::session::tool_catalog::StartupToolUpdate;
 use crate::session::Session;
 use std::sync::Arc;
 
@@ -23,7 +25,7 @@ fn test_agent_context_add_message_dual_writes() {
         .write()
         .append(BaseMessage::human(MessageContent::text("old")));
 
-    let mut cx = make_context_from_stage(&ctx);
+    let mut cx = crate::agent::stages::middleware_runner::make_context_from_stage(&ctx);
     cx.add_message(BaseMessage::human(MessageContent::text("new")));
 
     assert_eq!(cx.messages().len(), 2);
@@ -35,7 +37,7 @@ fn test_agent_context_add_message_dual_writes() {
 fn test_drain_recall_to_buffer() {
     let ctx = make_context();
     {
-        let mut cx = make_context_from_stage(&ctx);
+        let mut cx = crate::agent::stages::middleware_runner::make_context_from_stage(&ctx);
         cx.push_recall("recall-1".to_string());
         cx.push_recall("recall-2".to_string());
         let drained = cx.drain_recall();
@@ -54,13 +56,13 @@ fn test_drain_recall_to_buffer() {
 fn test_recall_accumulates_across_hooks() {
     let ctx = make_context();
     {
-        let mut cx = make_context_from_stage(&ctx);
+        let mut cx = crate::agent::stages::middleware_runner::make_context_from_stage(&ctx);
         cx.push_recall("hook-1".to_string());
         let rec = cx.drain_recall();
         ctx.recall_buffer.write().extend(rec);
     }
     {
-        let mut cx = make_context_from_stage(&ctx);
+        let mut cx = crate::agent::stages::middleware_runner::make_context_from_stage(&ctx);
         cx.push_recall("hook-2".to_string());
         let rec = cx.drain_recall();
         ctx.recall_buffer.write().extend(rec);
@@ -74,7 +76,7 @@ fn test_recall_accumulates_across_hooks() {
 #[test]
 fn test_no_recall_keeps_buffer_empty() {
     let ctx = make_context();
-    let mut cx = make_context_from_stage(&ctx);
+    let mut cx = crate::agent::stages::middleware_runner::make_context_from_stage(&ctx);
     let drained = cx.drain_recall();
     assert!(drained.is_empty());
 }
@@ -97,7 +99,7 @@ impl crate::middleware::Middleware for ReplaceAppendRecall {
             .messages()
             .iter()
             .find(|message| message.content() == "original")
-            .unwrap()
+            .expect("the find fixture result is required for this assertion")
             .clone();
         assert!(state.replace_message(original.clone_with_content(MessageContent::text("updated"))));
         state.add_message(BaseMessage::human(MessageContent::text("added")));
@@ -153,7 +155,7 @@ async fn assert_before_agent_reconciles_replacement(fail: bool) {
     chain.add(Box::new(ObserveReplacement(Arc::clone(&observed))));
     ctx.runtime.middleware_chain = Arc::new(chain);
 
-    let result = run_before_agent(&ctx, &[]).await;
+    let result = crate::agent::stages::middleware_runner::run_before_agent(&ctx, &[]).await;
     assert_eq!(result.is_err(), fail);
     assert_eq!(observed.load(std::sync::atomic::Ordering::SeqCst), !fail);
     assert_eq!(*ctx.recall_buffer.read(), vec!["replacement recall"]);
@@ -166,7 +168,11 @@ async fn assert_before_agent_reconciles_replacement(fail: bool) {
     assert_eq!(transcript.entries()[0].message().id(), excluded_id);
     assert_eq!(transcript.entries()[1].message().id(), original_id);
     assert_eq!(
-        transcript.get(original_id).unwrap().message().content(),
+        transcript
+            .get(original_id)
+            .expect("transcript get fixture must contain the requested entry")
+            .message()
+            .content(),
         "updated"
     );
     assert_eq!(transcript.flags(original_id), original_flags);
@@ -179,7 +185,11 @@ async fn assert_before_agent_reconciles_replacement(fail: bool) {
         vec!["updated", "added"]
     );
     assert_eq!(
-        transcript.get(excluded_id).unwrap().message().content(),
+        transcript
+            .get(excluded_id)
+            .expect("transcript get fixture must contain the requested entry")
+            .message()
+            .content(),
         "excluded"
     );
 }
@@ -208,12 +218,14 @@ impl crate::middleware::Middleware for PrepareInput {
         &self,
         state: &mut dyn hook_state::BeforeInputState,
     ) -> crate::error::AgentResult<()> {
-        let id = state.input_message_ids().unwrap()[0];
+        let id = state
+            .input_message_ids()
+            .expect("the input message ids fixture result is required for this assertion")[0];
         let message = state
             .messages()
             .iter()
             .find(|message| message.id() == id)
-            .unwrap()
+            .expect("the find fixture result is required for this assertion")
             .clone();
         assert!(state.replace_message(message.clone_with_content(MessageContent::text("prepared"))));
         if self.fail {
@@ -261,14 +273,20 @@ async fn test_before_input_preserves_initial_order_without_reinitializing_later_
         .transcript
         .write()
         .append(BaseMessage::human("first"));
-    run_before_agent(&ctx, &[first]).await.unwrap();
+    crate::agent::stages::middleware_runner::run_before_agent(&ctx, &[first])
+        .await
+        .expect("the run before agent fixture result is required for this assertion");
     let later = ctx
         .session
         .transcript
         .write()
         .append(BaseMessage::human("later"));
-    run_before_input(&ctx, &[later]).await.unwrap();
-    run_before_input(&ctx, &[]).await.unwrap();
+    crate::agent::stages::middleware_runner::run_before_input(&ctx, &[later])
+        .await
+        .expect("the run before input fixture result is required for this assertion");
+    crate::agent::stages::middleware_runner::run_before_input(&ctx, &[])
+        .await
+        .expect("the run before input fixture result is required for this assertion");
     assert_eq!(
         count.load(std::sync::atomic::Ordering::SeqCst),
         1,
@@ -277,7 +295,11 @@ async fn test_before_input_preserves_initial_order_without_reinitializing_later_
     let transcript = ctx.session.transcript.read();
     assert_eq!(transcript.len(), 2, "准备不增删消息");
     assert_eq!(
-        transcript.get(later).unwrap().message().content(),
+        transcript
+            .get(later)
+            .expect("transcript get fixture must contain the requested entry")
+            .message()
+            .content(),
         "prepared"
     );
 }
@@ -293,7 +315,9 @@ async fn test_before_input_reconciles_replacement_after_error() {
         .transcript
         .write()
         .append(BaseMessage::human("original"));
-    let error = run_before_input(&ctx, &[id]).await.unwrap_err();
+    let error = crate::agent::stages::middleware_runner::run_before_input(&ctx, &[id])
+        .await
+        .unwrap_err();
     assert!(
         matches!(error, crate::error::AgentError::MiddlewareError { middleware, reason }
         if middleware == "PrepareInput" && reason == "input preparation failed")
@@ -301,7 +325,11 @@ async fn test_before_input_reconciles_replacement_after_error() {
     let transcript = ctx.session.transcript.read();
     assert_eq!(transcript.len(), 1);
     assert_eq!(
-        transcript.get(id).unwrap().message().content(),
+        transcript
+            .get(id)
+            .expect("transcript get fixture must contain the requested entry")
+            .message()
+            .content(),
         "prepared",
         "出错前已完成的转换仍须回写"
     );
@@ -471,7 +499,9 @@ async fn startup_gate_commits_staged_candidate_to_static_base_only() {
     ctx.runtime.middleware_chain = Arc::new(chain);
     let working_before = working_tool_names(&ctx);
 
-    run_before_react_start(&ctx).await.unwrap();
+    crate::agent::stages::middleware_runner::run_before_react_start(&ctx)
+        .await
+        .expect("the run before react start fixture result is required for this assertion");
 
     assert!(
         observed.load(std::sync::atomic::Ordering::SeqCst),
@@ -505,7 +535,9 @@ async fn startup_gate_discards_candidate_when_a_later_middleware_fails() {
     chain.add(Box::new(FailStartupGate));
     ctx.runtime.middleware_chain = Arc::new(chain);
 
-    let error = run_before_react_start(&ctx).await.unwrap_err();
+    let error = crate::agent::stages::middleware_runner::run_before_react_start(&ctx)
+        .await
+        .unwrap_err();
 
     assert!(
         matches!(error, crate::error::AgentError::MiddlewareError { middleware, reason }
@@ -530,7 +562,9 @@ async fn startup_gate_rejects_second_staging_with_owner_attribution() {
     chain.add(Box::new(SecondStartupStager(second)));
     ctx.runtime.middleware_chain = Arc::new(chain);
 
-    let error = run_before_react_start(&ctx).await.unwrap_err();
+    let error = crate::agent::stages::middleware_runner::run_before_react_start(&ctx)
+        .await
+        .unwrap_err();
 
     assert!(
         matches!(error, crate::error::AgentError::MiddlewareError { middleware, reason }
@@ -556,7 +590,9 @@ async fn startup_gate_commit_failure_is_attributed_to_staging_middleware() {
     chain.add(Box::new(StageStartupTools(update)));
     ctx.runtime.middleware_chain = Arc::new(chain);
 
-    let error = run_before_react_start(&ctx).await.unwrap_err();
+    let error = crate::agent::stages::middleware_runner::run_before_react_start(&ctx)
+        .await
+        .unwrap_err();
 
     match error {
         crate::error::AgentError::MiddlewareError { middleware, reason } => {
@@ -582,7 +618,9 @@ async fn startup_gate_without_candidate_leaves_catalog_and_working_map() {
     ctx.runtime.middleware_chain = Arc::new(chain);
     let working_before = working_tool_names(&ctx);
 
-    run_before_react_start(&ctx).await.unwrap();
+    crate::agent::stages::middleware_runner::run_before_react_start(&ctx)
+        .await
+        .expect("the run before react start fixture result is required for this assertion");
 
     assert!(Arc::ptr_eq(&before, &catalog.snapshot()));
     assert_eq!(working_tool_names(&ctx), working_before);
@@ -632,7 +670,9 @@ async fn startup_catalog_update_reaches_first_reason_tool_list() {
         .transcript
         .write()
         .append(BaseMessage::human(MessageContent::text("question")));
-    run_before_react_start(&ctx).await.unwrap();
+    crate::agent::stages::middleware_runner::run_before_react_start(&ctx)
+        .await
+        .expect("the run before react start fixture result is required for this assertion");
     assert!(
         !ctx.runtime.tools.read().contains_key("mcp__system__lookup"),
         "闸门提交阶段不先动 working map"
@@ -645,7 +685,7 @@ async fn startup_catalog_update_reaches_first_reason_tool_list() {
         has_tool_calls: false,
     })
     .await
-    .unwrap();
+    .expect("the run reason fixture result is required for this assertion");
 
     let names = seen.lock().clone();
     assert!(
@@ -696,7 +736,9 @@ async fn startup_gate_interrupted_is_propagated_without_commit() {
     chain.add(Box::new(InterruptStartupGate));
     ctx.runtime.middleware_chain = Arc::new(chain);
 
-    let error = run_before_react_start(&ctx).await.unwrap_err();
+    let error = crate::agent::stages::middleware_runner::run_before_react_start(&ctx)
+        .await
+        .unwrap_err();
 
     assert!(
         matches!(error, crate::error::AgentError::Interrupted),
@@ -752,8 +794,12 @@ async fn bound_approval_without_turn_returns_typed_unavailable_per_call() {
         crate::agent::react::ToolCall::new("c2", "Read", serde_json::json!({})),
     ];
 
-    let results =
-        run_before_bound_tools_batch(&invocation, &calls, &std::collections::HashMap::new()).await;
+    let results = crate::agent::stages::middleware_runner::run_before_bound_tools_batch(
+        &invocation,
+        &calls,
+        &std::collections::HashMap::new(),
+    )
+    .await;
 
     assert_eq!(results.len(), calls.len(), "结果必须与输入等长");
     for result in &results {
@@ -831,8 +877,12 @@ async fn bound_approval_without_turn_runs_rules_for_attributed_app_entry() {
         serde_json::json!({}),
     )];
 
-    let results =
-        run_before_bound_tools_batch(&invocation, &calls, &std::collections::HashMap::new()).await;
+    let results = crate::agent::stages::middleware_runner::run_before_bound_tools_batch(
+        &invocation,
+        &calls,
+        &std::collections::HashMap::new(),
+    )
+    .await;
 
     assert_eq!(results.len(), 1);
     assert!(

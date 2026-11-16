@@ -1,5 +1,6 @@
 //! Tests for auto_classifier
 
+use crate::permission::auto_classifier::AutoClassifier as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use peri_model::{
@@ -8,7 +9,7 @@ use peri_model::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::*;
+use super::{async_trait, Arc, AsyncMutex, Classification, Duration, LlmAutoClassifier};
 
 struct MockClassifyModel {
     response: std::sync::Mutex<String>,
@@ -66,7 +67,7 @@ impl Model for MockClassifyModel {
             return Err(ModelError::protocol(ProtocolErrorKind::Provider));
         }
         self.call_count.fetch_add(1, Ordering::Relaxed);
-        Ok(ModelResponse::new(
+        Ok(ModelResponse::try_new(
             ModelMessage::assistant_text(self.response.lock().unwrap().clone()),
             StopReason::EndTurn,
             None,

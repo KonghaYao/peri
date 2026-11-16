@@ -4,8 +4,9 @@
 //! `TaskManager` / `BackgroundTaskRegistry` 等运行时实现留在 peri-agent
 //! （per-session 聚合，生命周期/取消/事件跟随 session，§2 async tasks manager）。
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::{future::Future, pin::Pin};
 
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +32,7 @@ pub trait TaskRegistrationReceipt: Send + Sync {
 pub struct TaskRegistrationTicket(Arc<dyn TaskRegistrationReceipt>);
 
 impl TaskRegistrationTicket {
+    #[must_use]
     pub fn from_receipt(receipt: Arc<dyn TaskRegistrationReceipt>) -> Self {
         Self(receipt)
     }
@@ -188,6 +190,7 @@ pub struct TaskChange {
     pub event: BgRegistryEvent,
 }
 
+/// A read-only task projection; task and child-thread identities remain independent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRecord {
     pub task_id: String,
@@ -211,12 +214,14 @@ pub struct TaskRecord {
     pub child_thread_id: Option<String>,
 }
 
+/// A task projection at one revision, paired with the incremental change stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSnapshot {
     pub revision: u64,
     pub tasks: Vec<TaskRecord>,
 }
 
+/// Asynchronous cancellation supplied by the owner of an external task.
 pub type ExternalCancelFn =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
 /// Terminal delivery hook. Delivery is durable and confirmed before the task
@@ -312,6 +317,7 @@ pub enum TaskShutdownReport {
     Incomplete,
 }
 
+/// A session-owned task that can move between executor threads.
 pub type OwnedTaskFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 /// Keeps external execution in the session scope until its caller proves cleanup.
@@ -552,7 +558,7 @@ pub trait TaskManager: std::any::Any + Send + Sync {
     #[allow(clippy::too_many_arguments)] // 收尾参数集为跨层固定契约，不分组
     fn finalize_bg_shell(
         &self,
-        on_bg_complete: &Option<OnBgCompleteFn>,
+        on_bg_complete: Option<&OnBgCompleteFn>,
         ticket: TaskRegistrationTicket,
         prompt_summary: String,
         success: bool,
@@ -628,7 +634,7 @@ impl TaskManager for NoopTaskManager {
 
     fn finalize_bg_shell(
         &self,
-        _on_bg_complete: &Option<OnBgCompleteFn>,
+        _on_bg_complete: Option<&OnBgCompleteFn>,
         _ticket: TaskRegistrationTicket,
         _prompt_summary: String,
         _success: bool,

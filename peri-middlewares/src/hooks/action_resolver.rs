@@ -4,10 +4,10 @@
 //! => Err(AgentError::ToolRejected), ModifyInput => ToolCall, _ => {} }` 模板。
 //! 保持每个调用点的语义与原实现一致，包括默认 reason 文案。
 
-use peri_agent::{
-    agent::react::{ToolCall, ToolResult},
-    error::{AgentError, AgentResult},
-};
+use peri_agent::agent::react::ToolCall;
+use peri_agent::agent::react::ToolResult;
+use peri_agent::error::AgentError;
+use peri_agent::error::AgentResult;
 
 use crate::hooks::types::HookAction;
 
@@ -91,6 +91,7 @@ pub enum PostToolBatchDecision {
 }
 
 /// 把 PostToolBatch hook 的归并 action 映射成执行语义决策。
+#[must_use]
 pub fn resolve_post_tool_batch_action(action: &HookAction) -> PostToolBatchDecision {
     match action {
         HookAction::Block { reason } => PostToolBatchDecision::Feedback {
@@ -104,6 +105,7 @@ pub fn resolve_post_tool_batch_action(action: &HookAction) -> PostToolBatchDecis
 }
 
 /// 把 `ToolResult.output` 转成 hook 使用的 `serde_json::Value`（透传字符串）。
+#[must_use]
 pub fn tool_output_to_json(result: &ToolResult) -> serde_json::Value {
     serde_json::json!(result.output)
 }

@@ -1,7 +1,7 @@
 use crate::i18n;
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::tui_render_unit::{FoldState, UserAttachment};
-use crate::truncate::{truncate_by_width, wrap_by_width};
+
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::ratatui::style::{Modifier, Style};
@@ -9,9 +9,6 @@ use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::ImageLineInfo;
-use super::helpers::{
-    cont_prefix, first_prefix, prefixed_cont_line, process_cont_prefix, process_first_prefix, sym,
-};
 
 /// 用户 prompt 正文最多展示的视觉行数（§6.1），超出显示 `… +N lines`。
 const USER_BODY_MAX_LINES: usize = 6;
@@ -51,13 +48,14 @@ pub(super) fn render_system_reminder_lines(
         )
     };
     let symbol = if data.fold == FoldState::Expanded {
-        sym().expanded
+        super::helpers::sym().expanded
     } else {
-        sym().collapsed
+        super::helpers::sym().collapsed
     };
-    let mut spans = process_first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
+    let mut spans =
+        super::helpers::process_first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
     spans.push(Span::styled(
-        truncate_by_width(&heading, grid.process_content_width()),
+        crate::truncate::truncate_by_width(&heading, grid.process_content_width()),
         Style::default().fg(sem.text.dim),
     ));
     let mut lines = vec![Line::from(spans)];
@@ -68,18 +66,19 @@ pub(super) fn render_system_reminder_lines(
                 "reminder-relayed-from",
                 &[("name".into(), FluentValue::from(relay.label()))],
             );
-            let mut spans = process_cont_prefix(grid, sem.accents.reasoning);
+            let mut spans = super::helpers::process_cont_prefix(grid, sem.accents.reasoning);
             spans.push(Span::styled(text, Style::default().fg(sem.text.dim)));
             lines.push(Line::from(spans));
         }
-        for text in data
-            .body
-            .lines()
-            .flat_map(|line| wrap_by_width(line, grid.process_content_width()))
         {
-            let mut spans = process_cont_prefix(grid, sem.accents.reasoning);
-            spans.push(Span::styled(text, Style::default().fg(sem.text.muted)));
-            lines.push(Line::from(spans));
+            let iteration_items = data.body.lines().flat_map(|line| {
+                crate::truncate::wrap_by_width(line, grid.process_content_width())
+            });
+            for text in iteration_items {
+                let mut spans = super::helpers::process_cont_prefix(grid, sem.accents.reasoning);
+                spans.push(Span::styled(text, Style::default().fg(sem.text.muted)));
+                lines.push(Line::from(spans));
+            }
         }
     }
     lines
@@ -124,16 +123,19 @@ pub(super) fn render_user_bubble_lines(
     let mut total = 0usize; // 全部视觉行（含超限部分，用于 `… +N lines`）
     // 附件记录行先于正文：一条一张，`[图片] 图片 1 · 128.0 KB`——发送后仍能看出
     // 这条消息带了图片（上传式附件没有可复制的路径文本，只有这里的记录）。
-    for (index, attachment) in data.attachments.iter().enumerate() {
-        push_meta_body_lines(
-            &mut lines,
-            grid,
-            attachment_meta_text(attachment, index + 1),
-            sem.text.secondary,
-            Style::default().fg(sem.text.primary),
-            &mut visual_count,
-            &mut total,
-        );
+    {
+        let iteration_items = data.attachments.iter().enumerate();
+        for (index, attachment) in iteration_items {
+            push_meta_body_lines(
+                &mut lines,
+                grid,
+                attachment_meta_text(attachment, index + 1),
+                sem.text.secondary,
+                Style::default().fg(sem.text.primary),
+                &mut visual_count,
+                &mut total,
+            );
+        }
     }
     for raw in data.text.lines() {
         let is_image = parse_image_line(raw);
@@ -160,14 +162,14 @@ pub(super) fn render_user_bubble_lines(
             }
             continue;
         }
-        let wrapped = wrap_by_width(raw, grid.content_width());
+        let wrapped = crate::truncate::wrap_by_width(raw, grid.content_width());
         total += wrapped.len();
         if visual_count >= USER_BODY_MAX_LINES {
             continue;
         }
         let take = (USER_BODY_MAX_LINES - visual_count).min(wrapped.len());
         for w in &wrapped[..take] {
-            let mut spans = cont_prefix(grid, sem.text.secondary);
+            let mut spans = super::helpers::cont_prefix(grid, sem.text.secondary);
             spans.extend(emphasize_user_line(w, grid, &sem));
             lines.push(Line::from(spans));
         }
@@ -181,7 +183,7 @@ pub(super) fn render_user_bubble_lines(
                 FluentValue::from((total - USER_BODY_MAX_LINES) as u64),
             )],
         );
-        let mut spans = cont_prefix(grid, sem.text.secondary);
+        let mut spans = super::helpers::cont_prefix(grid, sem.text.secondary);
         spans.push(Span::styled(more, Style::default().fg(sem.text.dim)));
         lines.push(Line::from(spans));
     }
@@ -189,7 +191,7 @@ pub(super) fn render_user_bubble_lines(
     // thinking/tool；Wide/Standard 由转场台阶承担分隔，不再保留。尾随空行带
     // 竖线前缀，左缘时间线连续。
     if grid.indent == 0 {
-        lines.push(prefixed_cont_line(
+        lines.push(super::helpers::prefixed_cont_line(
             grid,
             sem.text.secondary,
             Line::default(),
@@ -211,7 +213,7 @@ fn push_meta_body_lines(
     visual_count: &mut usize,
     total: &mut usize,
 ) -> (usize, usize, usize) {
-    let wrapped = wrap_by_width(&text, grid.content_width());
+    let wrapped = crate::truncate::wrap_by_width(&text, grid.content_width());
     *total += wrapped.len();
     let logical_idx = lines.len();
     if *visual_count >= USER_BODY_MAX_LINES {
@@ -219,7 +221,7 @@ fn push_meta_body_lines(
     }
     let take = (USER_BODY_MAX_LINES - *visual_count).min(wrapped.len());
     for segment in &wrapped[..take] {
-        let mut spans = cont_prefix(grid, prefix_color);
+        let mut spans = super::helpers::cont_prefix(grid, prefix_color);
         spans.push(Span::styled(segment.clone(), text_style));
         lines.push(Line::from(spans));
     }
@@ -351,8 +353,8 @@ pub(crate) fn render_image_hover_line(
     );
     // §4.6 path 显示注入：路径进终端前过 T5 sanitize（控制字符过滤）。
     let text = crate::kit::image_safety::sanitize_for_terminal(&text);
-    let clipped = truncate_by_width(&text, grid.content_width());
-    let mut spans = cont_prefix(grid, sem.text.secondary);
+    let clipped = crate::truncate::truncate_by_width(&text, grid.content_width());
+    let mut spans = super::helpers::cont_prefix(grid, sem.text.secondary);
     spans.push(Span::styled(clipped, Style::default().fg(sem.accents.user)));
     Line::from(spans)
 }
@@ -405,7 +407,11 @@ pub(super) fn render_reminder_condensed(
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
     let mut lines = vec![Line::from({
-        let mut spans = first_prefix(grid, sym().warning, Style::default().fg(sem.status.warning));
+        let mut spans = super::helpers::first_prefix(
+            grid,
+            super::helpers::sym().warning,
+            Style::default().fg(sem.status.warning),
+        );
         spans.push(Span::styled(
             info.reminder_type.label(),
             Style::default()
@@ -415,9 +421,9 @@ pub(super) fn render_reminder_condensed(
         spans
     })];
     if !info.summary.is_empty() {
-        let mut spans = cont_prefix(grid, sem.text.dim);
+        let mut spans = super::helpers::cont_prefix(grid, sem.text.dim);
         spans.push(Span::styled(
-            truncate_by_width(&info.summary, grid.content_width()),
+            crate::truncate::truncate_by_width(&info.summary, grid.content_width()),
             Style::default().fg(sem.text.muted),
         ));
         lines.push(Line::from(spans));

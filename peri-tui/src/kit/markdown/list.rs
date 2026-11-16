@@ -1,10 +1,7 @@
-use ratatui::{
-    style::Style,
-    text::{Line, Span},
-};
+use ratatui::style::Style;
+use ratatui::text::Line;
+use ratatui::text::Span;
 use ratatui_kit_markdown::{ListItemData, MarkdownTheme};
-
-use super::span_style::apply_span_styles;
 
 /// 连续列表项之间插入空行的范围（生效策略；调整范围只改这一个常量）。
 ///
@@ -35,6 +32,10 @@ pub(crate) fn list_item_line(
         format!("{indent}• ")
     };
     let mut spans = vec![Span::styled(prefix, theme.list_marker_style)];
-    spans.extend(apply_span_styles(&item.spans, theme, Some(base_style)));
+    spans.extend(super::span_style::apply_span_styles(
+        &item.spans,
+        theme,
+        Some(base_style),
+    ));
     Line::from(spans)
 }

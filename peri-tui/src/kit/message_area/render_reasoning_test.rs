@@ -1,5 +1,15 @@
-use super::*;
+use super::Duration;
+use super::EntryStatus;
+use super::FoldState;
+use super::Instant;
+use super::TuiAssistantBubble;
+use super::TuiReasoningBlock;
+use super::TuiRenderUnit;
+
+use crate::kit::message_area::grid::GridSpec;
 use crate::kit::message_area::grid::TextLineSource;
+use crate::kit::message_area::grid::ZoneTransition;
+use crate::kit::message_area::render;
 
 // ── Reasoning 三态（§6.3）──────────────────────────────────────────────
 
@@ -28,9 +38,9 @@ fn test_reasoning_running_header_elapsed_tail() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
 
-    let header = header_of(&lines);
+    let header = super::header_of(&lines);
     assert!(header.contains("Thinking"), "运行中 header 应含 Thinking…");
     assert!(
         header.contains("8s"),
@@ -38,7 +48,7 @@ fn test_reasoning_running_header_elapsed_tail() {
     );
 
     // tail ≤ 4 行（t3..t6），t1/t2 被截掉；header 行同形竖线不计入正文
-    let tail_count = body_vline_count(&lines);
+    let tail_count = super::body_vline_count(&lines);
     assert_eq!(tail_count, 4, "Preview tail 最多 4 行");
 
     // running 块尾无空行——tail 即块尾，正文未到不预留间隔空行
@@ -68,9 +78,9 @@ fn test_reasoning_running_header_elapsed_tail() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
     assert!(
-        header_of(&lines).contains("Thinking"),
+        super::header_of(&lines).contains("Thinking"),
         "空 reasoning 必出 Thinking…"
     );
 }
@@ -90,16 +100,16 @@ fn test_reasoning_completed_single_line() {
             started_at: None,
             duration_ms: None,
             text: String::new(),
-            reasoning: Some(reasoning_block(&text)),
+            reasoning: Some(super::reasoning_block(&text)),
             message_id: None,
             content_hash: 3,
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
     // 单行折叠摘要（无前导/尾部空行——与工具卡片紧凑布局一致）
     assert_eq!(lines.len(), 1);
-    let header = header_of(&lines);
+    let header = super::header_of(&lines);
     assert!(header.contains("12s"), "应含冻结时长 12s，实际 {header:?}");
     assert!(
         header.contains("14 lines"),
@@ -133,13 +143,16 @@ fn test_reasoning_expanded_body_style() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
     assert!(
-        header_of(&lines).contains("\u{2502}"),
+        super::header_of(&lines).contains("\u{2502}"),
         "展开态首行 icon 统一竖线 │"
     );
-    let body = nth_nonempty_line(&lines, 1);
-    assert!(line_text(&body).contains("body line"), "展开态应渲染正文");
+    let body = super::nth_nonempty_line(&lines, 1);
+    assert!(
+        super::line_text(&body).contains("body line"),
+        "展开态应渲染正文"
+    );
 }
 
 /// Completed + duration_ms = None（历史恢复路径 `handle_committed_assistant_text`，
@@ -167,8 +180,8 @@ fn test_reasoning_completed_no_duration_omits_seconds() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
-    let header = header_of(&lines);
+    let lines = render::vm_to_lines(&vm, &grid);
+    let header = super::header_of(&lines);
     assert!(
         header.contains("Thought ·") && !header.contains("0s"),
         "无时长降级为 `Thought · 1 line`（不含 0s），实际 {header:?}"
@@ -205,15 +218,15 @@ fn test_reasoning_running_collapsed_shows_status_line_only() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
-    let header = header_of(&lines);
+    let lines = render::vm_to_lines(&vm, &grid);
+    let header = super::header_of(&lines);
     assert!(header.contains("Thinking"), "活动状态行仍可见");
     assert!(
         header.contains("\u{2502}"),
         "running 首行 icon 统一竖线 │（颜色承担状态感）"
     );
     assert_eq!(
-        body_vline_count(&lines),
+        super::body_vline_count(&lines),
         0,
         "running+Collapsed 不渲染 tail（与 Preview 的 4 行 tail 有视觉差异）"
     );
@@ -245,13 +258,17 @@ fn test_reasoning_completed_preview_maps_to_collapsed_symbol() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
-    let header = header_of(&lines);
+    let lines = render::vm_to_lines(&vm, &grid);
+    let header = super::header_of(&lines);
     assert!(
         header.contains("\u{2502}") && !header.contains("\u{25b8}") && !header.contains("\u{25be}"),
         "completed+Preview 首行 icon 统一竖线 │（无箭头符号），实际 {header:?}"
     );
-    assert_eq!(body_vline_count(&lines), 0, "completed+Preview 不渲染正文");
+    assert_eq!(
+        super::body_vline_count(&lines),
+        0,
+        "completed+Preview 不渲染正文"
+    );
 }
 
 /// reasoning Preview tail 高度有界且不折行——wrap 后取最后 ≤4 视觉行（显示尾部
@@ -283,7 +300,7 @@ fn test_reasoning_preview_tail_wrap_height_stable() {
     let mut failures = Vec::new();
     for term in [40u16, 60, 80, 120] {
         let grid = GridSpec::grid_for(term);
-        let lines = vm_to_lines(&vm, &grid);
+        let lines = render::vm_to_lines(&vm, &grid);
         // 高度有界：header + 最后 ≤4 视觉行（wrap 后取尾），不随内容长度增长。
         assert_eq!(
             lines.len(),
@@ -291,33 +308,38 @@ fn test_reasoning_preview_tail_wrap_height_stable() {
             "term={term}: Preview 块高应为 1 header + 4 tail，实际 {}",
             lines.len()
         );
-        let tail_count = body_vline_count(&lines);
+        let tail_count = super::body_vline_count(&lines);
         assert_eq!(tail_count, 4, "term={term}: Preview tail 最多 4 行");
         // 内容不丢：tail 显示尾部视觉行，无 truncate 省略号（header 行
         // 「Thinking…」的省略号是文案，跳过）。
-        for l in lines
-            .iter()
-            .skip_while(|l| !l.spans.iter().any(|s| !s.content.is_empty()))
-            .skip(1)
         {
-            let text = line_text(l);
-            if text.contains('\u{2502}') {
-                assert!(
-                    !text.contains('\u{2026}'),
-                    "term={term}: tail 不应含省略号（显示尾部），实际 {text:?}"
-                );
+            let iteration_items = lines
+                .iter()
+                .skip_while(|l| !l.spans.iter().any(|s| !s.content.is_empty()))
+                .skip(1);
+            for l in iteration_items {
+                let text = super::line_text(l);
+                if text.contains('\u{2502}') {
+                    assert!(
+                        !text.contains('\u{2026}'),
+                        "term={term}: tail 不应含省略号（显示尾部），实际 {text:?}"
+                    );
+                }
             }
         }
-        let (_, wm) = build_wrap_map(&lines, term);
-        for (logical_idx, info) in wm.iter().enumerate() {
-            if lines[logical_idx].spans.is_empty() {
-                continue;
-            }
-            let rows = info.visual_end - info.visual_start;
-            if rows != 1 {
-                failures.push(format!(
-                    "term={term}: logical line {logical_idx} has {rows} visual rows, expected 1"
-                ));
+        let (_, wm) = super::build_wrap_map(&lines, term);
+        {
+            let iteration_items = wm.iter().enumerate();
+            for (logical_idx, info) in iteration_items {
+                if lines[logical_idx].spans.is_empty() {
+                    continue;
+                }
+                let rows = info.visual_end - info.visual_start;
+                if rows != 1 {
+                    failures.push(format!(
+                        "term={term}: logical line {logical_idx} has {rows} visual rows, expected 1"
+                    ));
+                }
             }
         }
     }
@@ -354,14 +376,14 @@ fn test_reasoning_preview_tail_shows_end_of_long_line() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
 
     // 过程区正文宽 = 74 - 2 = 72 → 304 字符折 5 个视觉行，取最后 4 行
     // （HEAD 所在第 1 行被挤出）。
     assert_eq!(lines.len(), 5, "块高应为 1 header + 4 tail");
-    assert_eq!(body_vline_count(&lines), 4, "Preview tail 应为 4 行");
-    let tail_first = line_text(&nth_nonempty_line(&lines, 1));
-    let tail_last = line_text(&nth_nonempty_line(&lines, 4));
+    assert_eq!(super::body_vline_count(&lines), 4, "Preview tail 应为 4 行");
+    let tail_first = super::line_text(&super::nth_nonempty_line(&lines, 1));
+    let tail_last = super::line_text(&super::nth_nonempty_line(&lines, 4));
     assert!(
         tail_last.contains("TAIL"),
         "tail 末尾应含 TAIL（显示尾部），实际 {tail_last:?}"
@@ -403,7 +425,7 @@ fn test_reasoning_height_stable_across_4_to_5_visual_lines() {
             }
             .into(),
         );
-        let lines = vm_to_lines(&vm, &grid);
+        let lines = render::vm_to_lines(&vm, &grid);
         assert_eq!(
             lines.len(),
             1 + n.min(4),
@@ -439,8 +461,8 @@ fn test_reasoning_summary_n_equals_expanded_visual_rows() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
-    let header = header_of(&lines);
+    let lines = render::vm_to_lines(&vm, &grid);
+    let header = super::header_of(&lines);
     assert!(
         header.contains("6 lines"),
         "摘要 N 应为视觉行总数 6，实际 {header:?}"
@@ -480,8 +502,8 @@ fn test_reasoning_summary_n_equals_expanded_visual_rows() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
-    let header = header_of(&lines);
+    let lines = render::vm_to_lines(&vm, &grid);
+    let header = super::header_of(&lines);
     assert!(
         header.contains("150 lines"),
         "摘要 N 应为总数 150（不封顶），实际 {header:?}"
@@ -520,8 +542,8 @@ fn test_reasoning_empty_lines_skipped_consistently() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
-    let header = header_of(&lines);
+    let lines = render::vm_to_lines(&vm, &grid);
+    let header = super::header_of(&lines);
     assert!(
         header.contains("2 lines"),
         "空行不计入摘要 N，实际 {header:?}"
@@ -546,7 +568,7 @@ fn test_reasoning_empty_lines_skipped_consistently() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
     assert_eq!(
         lines
             .iter()
@@ -575,9 +597,9 @@ fn test_reasoning_empty_lines_skipped_consistently() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
     assert_eq!(lines.len(), 3, "running Preview 应为 1 header + 2 tail");
-    assert_eq!(body_vline_count(&lines), 2, "空行不渲染为 tail");
+    assert_eq!(super::body_vline_count(&lines), 2, "空行不渲染为 tail");
 
     // 尾部空行不占槽位：raw 末尾空元素被过滤 → 最后 4 个视觉行 = t2..t5
     // （t1 被挤出，顺序保持）。
@@ -601,14 +623,14 @@ fn test_reasoning_empty_lines_skipped_consistently() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
     assert_eq!(lines.len(), 5, "1 header + 4 tail（尾部空行不占槽位）");
-    let tail_first = line_text(&nth_nonempty_line(&lines, 1));
+    let tail_first = super::line_text(&super::nth_nonempty_line(&lines, 1));
     assert!(
         tail_first.contains("t2"),
         "tail 首行应为 t2（t1 被挤出、尾部空行不消耗槽位），实际 {tail_first:?}"
     );
-    let tail_last = line_text(&nth_nonempty_line(&lines, 4));
+    let tail_last = super::line_text(&super::nth_nonempty_line(&lines, 4));
     assert!(
         tail_last.contains("t5"),
         "tail 末尾应含 t5，实际 {tail_last:?}"
@@ -643,8 +665,8 @@ fn test_empty_reasoning_placeholder_running_and_completed() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
-    let header = header_of(&lines);
+    let lines = render::vm_to_lines(&vm, &grid);
+    let header = super::header_of(&lines);
     assert!(
         header.contains("Thinking"),
         "空占位块必渲染 Thinking…，实际 {header:?}"
@@ -678,8 +700,8 @@ fn test_empty_reasoning_placeholder_running_and_completed() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
-    let header = header_of(&lines);
+    let lines = render::vm_to_lines(&vm, &grid);
+    let header = super::header_of(&lines);
     assert!(
         header.contains("Thought for 0s") || header.contains("Thought for 0 sec"),
         "completed 空块收束为折叠单行，实际 {header:?}"
@@ -707,13 +729,19 @@ fn test_assistant_duration_meta_three_breakpoints() {
             }
             .into(),
         );
-        vm_to_lines(&vm, &GridSpec::grid_for(term))
+        render::vm_to_lines(&vm, &GridSpec::grid_for(term))
     };
 
     // Wide（120）：正文末行右对齐含 12.4s，行总宽铺满到居中带右缘（line_width）
     let wide = mk(120);
-    let last = wide.iter().rev().find(|l| has_body_content(l)).unwrap();
-    let text = line_text(last);
+    let last = wide
+        .iter()
+        .rev()
+        .find(|l| super::has_body_content(l))
+        .expect(
+            "assistant duration meta three breakpoints: fixture must contain the searched item",
+        );
+    let text = super::line_text(last);
     assert!(text.contains("12.4s"), "Wide 应显示 12.4s，实际 {text:?}");
     let g = GridSpec::grid_for(120);
     assert_eq!(
@@ -727,9 +755,11 @@ fn test_assistant_duration_meta_three_breakpoints() {
     let last = std_lines
         .iter()
         .rev()
-        .find(|l| has_body_content(l))
-        .unwrap();
-    let text = line_text(last);
+        .find(|l| super::has_body_content(l))
+        .expect(
+            "assistant duration meta three breakpoints: fixture must contain the searched item",
+        );
+    let text = super::line_text(last);
     assert!(
         text.contains("12.4s"),
         "Standard 应显示 12.4s，实际 {text:?}"
@@ -742,7 +772,7 @@ fn test_assistant_duration_meta_three_breakpoints() {
     // Compact（48）：隐藏非关键 duration
     let compact = mk(48);
     assert!(
-        !all_text(&compact).contains("12.4s"),
+        !super::all_text(&compact).contains("12.4s"),
         "Compact 应隐藏 duration"
     );
 }
@@ -776,7 +806,7 @@ fn test_bubble_reasoning_uses_process_zone_body_returns_to_baseline() {
         .into(),
     );
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_cached_with_layout(
         &vm,
         &grid,
         &mut cache,
@@ -786,8 +816,8 @@ fn test_bubble_reasoning_uses_process_zone_body_returns_to_baseline() {
     );
 
     // 入口台阶（§6）：转场后的 entry 行首独立成行，先于 reasoning header
-    assert!(super::is_step_row(&lines[0]), "首行应是入口台阶");
-    assert_eq!(line_text(&lines[0]), " \u{2570}\u{2500}\u{256e}");
+    assert!(render::is_step_row(&lines[0]), "首行应是入口台阶");
+    assert_eq!(super::line_text(&lines[0]), " \u{2570}\u{2500}\u{256e}");
 
     // reasoning header（过程区首行）：[outer 空][indent 留空][│][gap] + 摘要
     let header = &lines[1];
@@ -795,7 +825,7 @@ fn test_bubble_reasoning_uses_process_zone_body_returns_to_baseline() {
     assert_eq!(header.spans[1].content.as_ref(), "  ", "indent 格留空");
     assert_eq!(header.spans[2].content.as_ref(), "\u{2502}", "标记列竖线");
     assert_eq!(header.spans[3].content.as_ref(), "  ", "gap");
-    let header_text = line_text(header);
+    let header_text = super::line_text(header);
     assert!(
         header_text.contains("Thought for 1s"),
         "实际 {header_text:?}"
@@ -806,7 +836,7 @@ fn test_bubble_reasoning_uses_process_zone_body_returns_to_baseline() {
     // reasoning 正文（过程区续行）：`[outer 空][indent 留空][│][gap]` → 与 header 摘要同列
     let body = lines
         .iter()
-        .find(|l| line_text(l).contains("long thought"))
+        .find(|l| super::line_text(l).contains("long thought"))
         .expect("reasoning 正文行");
     assert_eq!(body.spans[1].content.as_ref(), "  ", "indent 格留空");
     assert_eq!(body.spans[2].content.as_ref(), "\u{2502}");
@@ -816,7 +846,7 @@ fn test_bubble_reasoning_uses_process_zone_body_returns_to_baseline() {
     // 正文段（文本区）：回基准列 4
     let answer = lines
         .iter()
-        .find(|l| line_text(l).contains("正文回答"))
+        .find(|l| super::line_text(l).contains("正文回答"))
         .expect("正文行");
     assert_eq!(answer.spans[0].content.as_ref(), " ");
     assert_eq!(answer.spans[1].content.as_ref(), "\u{2502}");
@@ -828,22 +858,27 @@ fn test_bubble_reasoning_uses_process_zone_body_returns_to_baseline() {
     let step_rows: Vec<usize> = lines
         .iter()
         .enumerate()
-        .filter(|(_, l)| super::is_step_row(l))
+        .filter(|(_, l)| render::is_step_row(l))
         .map(|(index, _)| index)
         .collect();
     let thought_index = lines
         .iter()
-        .position(|l| line_text(l).contains("long thought"))
+        .position(|l| super::line_text(l).contains("long thought"))
         .expect("reasoning 正文行");
     let answer_index = lines
         .iter()
-        .position(|l| line_text(l).contains("正文回答"))
+        .position(|l| super::line_text(l).contains("正文回答"))
         .expect("正文行");
     assert_eq!(
         step_rows,
         vec![0, thought_index + 1],
         "台阶只在区内转场两端"
     );
-    assert_eq!(line_text(&lines[step_rows[1]]), " \u{256d}\u{2500}\u{256f}");
+    assert_eq!(
+        super::line_text(&lines[step_rows[1]]),
+        " \u{256d}\u{2500}\u{256f}"
+    );
     assert!(step_rows[1] < answer_index, "退出台阶在正文段之前");
 }
+
+use unicode_width::UnicodeWidthStr;

@@ -1,12 +1,9 @@
 //! Cron runtime lifecycle tests that exercise the host-owned tick supervisor.
 
-use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use peri_mcp_cron::CronScheduler;
@@ -14,9 +11,11 @@ use peri_mcp_cron::CronTrigger;
 use rmcp::service::QuitReason;
 use tokio::sync::mpsc;
 
-use crate::mcp::builtin::runtime::{
-    test_supervisor, BuiltinServerExit, TickCloseOutcome, TickGuard, BUILTIN_CONVERGE_TIMEOUT,
-};
+use crate::mcp::builtin::runtime;
+use crate::mcp::builtin::runtime::BuiltinServerExit;
+use crate::mcp::builtin::runtime::TickCloseOutcome;
+use crate::mcp::builtin::runtime::TickGuard;
+use crate::mcp::builtin::runtime::BUILTIN_CONVERGE_TIMEOUT;
 
 const REGISTER_EXPRESSION: &str = "*/5 * * * *";
 const REGISTER_PROMPT: &str = "cron-gate-test-prompt";
@@ -148,7 +147,7 @@ async fn tick_shutdown_joins_task_and_stops_triggers() {
     );
 
     // ④ 同一结论由代监督者承载：`close` 依次给出 tick 侧与 server 侧结论。
-    let supervisor = test_supervisor(
+    let supervisor = runtime::test_supervisor(
         "cron",
         Some(TickGuard::spawn(
             TICK_PERIOD,
@@ -244,7 +243,7 @@ async fn tick_guard_reports_join_state() {
     );
 
     // 有 tick 且运行中 ⇒ `tick_is_finished()` 为 false；`close` 同时给出两侧结论。
-    let supervisor = test_supervisor(
+    let supervisor = runtime::test_supervisor(
         "cron",
         Some(TickGuard::spawn(TICK_PERIOD, || {})),
         quit_server_task(),
@@ -265,7 +264,7 @@ async fn tick_guard_reports_join_state() {
     );
 
     // 无 tick 的一代：`tick_is_finished()` 是 true（不是 false），close → `NotSpawned`。
-    let without_tick = test_supervisor("web", None, quit_server_task());
+    let without_tick = runtime::test_supervisor("web", None, quit_server_task());
     assert!(
         without_tick.tick_is_finished(),
         "无 tick ⇒ 已无运行中的 tick（读成 false 会让非 cron 实例永远过不了关闭检查）"

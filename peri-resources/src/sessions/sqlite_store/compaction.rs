@@ -1,12 +1,10 @@
 //! 消息生命周期持久化：删除、flags、回滚与原子 compaction 事务。
 
-use super::failure::commit_failure;
-use super::{database::SqliteSessionDatabase, row_mapping::role_of};
+use super::database::SqliteSessionDatabase;
 use anyhow::Result;
-use peri_acp_types::{
-    store::{CompactionChange, MessageFlags},
-    thread::ThreadId,
-};
+use peri_acp_types::store::CompactionChange;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::thread::ThreadId;
 use sqlx::{AssertSqlSafe, SqliteConnection};
 use std::collections::HashMap;
 
@@ -39,7 +37,7 @@ pub(super) async fn delete_messages(
     .await?;
     tx.commit()
         .await
-        .map_err(|_| commit_failure(Some(thread_id.clone())))?;
+        .map_err(|_| super::failure::commit_failure(Some(thread_id.clone())))?;
     Ok(())
 }
 
@@ -76,7 +74,7 @@ pub(super) async fn commit_compaction_lifecycle(
     commit_compaction_lifecycle_on(&mut tx, thread_id, lifecycle).await?;
     tx.commit()
         .await
-        .map_err(|_| commit_failure(Some(thread_id.clone())))?;
+        .map_err(|_| super::failure::commit_failure(Some(thread_id.clone())))?;
     Ok(())
 }
 
@@ -94,7 +92,7 @@ pub(super) async fn commit_compaction_lifecycle_on(
         )
         .bind(&message_id)
         .bind(thread_id.as_str())
-        .bind(role_of(message))
+        .bind(super::row_mapping::role_of(message))
         .bind(&content)
         .execute(&mut *tx)
         .await?;
@@ -282,7 +280,7 @@ pub(super) async fn delete_messages_since(
         .await?;
         tx.commit()
             .await
-            .map_err(|_| commit_failure(Some(thread_id.clone())))?;
+            .map_err(|_| super::failure::commit_failure(Some(thread_id.clone())))?;
     }
     Ok(())
 }

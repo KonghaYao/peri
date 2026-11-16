@@ -1,10 +1,11 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
+use std::sync::Arc;
 
-use rmcp::{
-    model::ProtocolVersion,
-    service::{ClientInitializeError, ClientLifecycleMode, RoleClient},
-    transport::IntoTransport,
-};
+use rmcp::model::ProtocolVersion;
+use rmcp::service::ClientInitializeError;
+use rmcp::service::ClientLifecycleMode;
+use rmcp::service::RoleClient;
+use rmcp::transport::IntoTransport;
 
 use super::{McpClientPool, McpServiceWrapper, NotificationTap, PeriClientHandler};
 

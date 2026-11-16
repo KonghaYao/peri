@@ -2,14 +2,15 @@
 //!
 //! 由 `system` 挂载；`system::handle_*` / `system::hitl_input_summary` 路径经 `pub use` 保持不变。
 
-use super::*;
+use super::BridgeState;
+
 use crate::i18n;
 use crate::kit::acp_types::PendingInteraction;
-use crate::kit::atoms::ASK_USER_PENDING;
+
 use crate::kit::program_status::{self, BlockedKind, ProgramStatus};
 use crate::kit::tui_render_unit::{InteractionKind, TuiAskUserBlock, TuiRenderUnit};
 use fluent_bundle::FluentValue;
-use peri_acp_types::event_data::{AskUser, HitlPending};
+
 use serde_json::Value;
 
 pub(crate) fn handle_hitl_pending(
@@ -132,25 +133,28 @@ pub(crate) fn handle_interaction_terminal(
         }
     }
     let mut updated: Option<(usize, TuiRenderUnit)> = None;
-    for (i, vm) in state.committed.iter().enumerate() {
-        if let TuiRenderUnit::TuiAskUserBlock(a) = vm
-            && a.pending
-            && a.owner.as_ref() == Some(owner)
-        {
-            let mut b = a.clone();
-            b.pending = false;
-            b.result = Some(result.clone());
-            // 结果回写后收束为结果行（§7 completed → Collapsed）——
-            // 手动展开的覆盖由折叠 pass 依据 FOLD_OVERRIDES 恢复。
-            if !b.user_modified {
-                b.fold = crate::kit::tui_render_unit::fold_for_status(
-                    crate::kit::tui_render_unit::FoldTarget::Interaction,
-                    crate::kit::tui_render_unit::EntryStatus::Completed,
-                );
+    {
+        let iteration_items = state.committed.iter().enumerate();
+        for (i, vm) in iteration_items {
+            if let TuiRenderUnit::TuiAskUserBlock(a) = vm
+                && a.pending
+                && a.owner.as_ref() == Some(owner)
+            {
+                let mut b = a.clone();
+                b.pending = false;
+                b.result = Some(result.clone());
+                // 结果回写后收束为结果行（§7 completed → Collapsed）——
+                // 手动展开的覆盖由折叠 pass 依据 FOLD_OVERRIDES 恢复。
+                if !b.user_modified {
+                    b.fold = crate::kit::tui_render_unit::fold_for_status(
+                        crate::kit::tui_render_unit::FoldTarget::Interaction,
+                        crate::kit::tui_render_unit::EntryStatus::Completed,
+                    );
+                }
+                b.recompute_hash();
+                updated = Some((i, TuiRenderUnit::TuiAskUserBlock(b)));
+                break;
             }
-            b.recompute_hash();
-            updated = Some((i, TuiRenderUnit::TuiAskUserBlock(b)));
-            break;
         }
     }
     if let Some((i, vm)) = updated {
@@ -272,3 +276,9 @@ pub(crate) fn hitl_input_summary(input: &Value) -> String {
         _ => i18n::tr("render-interaction-tool-unknown"),
     }
 }
+
+use crate::kit::atoms::ASK_USER_PENDING;
+
+use peri_acp_types::event_data::AskUser;
+
+use peri_acp_types::event_data::HitlPending;

@@ -1,7 +1,10 @@
 #![cfg(test)]
 
-use super::*;
-use peri_acp_types::event_data::{AskUser, Question};
+use super::FormOutcome;
+use super::FormState;
+use super::PendingInteraction;
+use ratatui_kit::prelude::*;
+
 use serde_json::json;
 
 #[test]
@@ -46,10 +49,18 @@ fn test_ask_user_same_question_ids_new_owner_resets_answers() {
         ScrollViewState::with_offset(ratatui_kit::ratatui::layout::Position::new(0, 9));
 
     // Re-rendering the same owner must preserve both form edits and scroll.
-    assert!(!reset_for_owner_change(&mut form, Some(&a), &mut scroll));
+    assert!(!super::reset_for_owner_change(
+        &mut form,
+        Some(&a),
+        &mut scroll
+    ));
     assert_eq!(form.typing_state.all_text(), "answer owned by A");
     assert_eq!(scroll.offset().y, 9);
-    assert!(reset_for_owner_change(&mut form, Some(&b), &mut scroll));
+    assert!(super::reset_for_owner_change(
+        &mut form,
+        Some(&b),
+        &mut scroll
+    ));
     assert_eq!(form.focused, 0);
     assert_eq!(form.answers, vec![Vec::<usize>::new()]);
     assert_eq!(form.focused_option, 0);
@@ -58,12 +69,16 @@ fn test_ask_user_same_question_ids_new_owner_resets_answers() {
     assert_eq!(form.typing_state.cursor_byte(), 0);
     assert_eq!(form.custom_answers, vec![None]);
     assert_eq!(scroll.offset().y, 0);
-    assert!(!reset_for_owner_change(&mut form, Some(&b), &mut scroll));
+    assert!(!super::reset_for_owner_change(
+        &mut form,
+        Some(&b),
+        &mut scroll
+    ));
     assert_eq!(
-        build_answers_map(Some(&b.payload), &form.answers, &form.custom_answers),
+        super::build_answers_map(Some(&b.payload), &form.answers, &form.custom_answers),
         json!({"same": ""})
     );
-    assert!(reset_for_owner_change(&mut form, None, &mut scroll));
+    assert!(super::reset_for_owner_change(&mut form, None, &mut scroll));
     assert!(form.answers.is_empty());
     assert!(form.custom_answers.is_empty());
 }
@@ -85,6 +100,7 @@ fn make_question(id: &str, multi_select: bool, labels: &[&str]) -> Question {
     }
 }
 
+#[must_use]
 fn make_ask_user(questions: Vec<Question>) -> AskUser {
     AskUser { questions }
 }
@@ -96,7 +112,7 @@ fn test_build_answers_map_single_select_preset() {
     let au = make_ask_user(vec![make_question("q1", false, &["A", "B", "C"])]);
     let answers = vec![vec![1usize]];
     let custom = vec![None];
-    let result = build_answers_map(Some(&au), &answers, &custom);
+    let result = super::build_answers_map(Some(&au), &answers, &custom);
     assert_eq!(result, json!({"q1": "B"}));
 }
 
@@ -105,7 +121,7 @@ fn test_build_answers_map_multi_select_preset() {
     let au = make_ask_user(vec![make_question("q1", true, &["A", "B", "C"])]);
     let answers = vec![vec![0usize, 2]];
     let custom = vec![None];
-    let result = build_answers_map(Some(&au), &answers, &custom);
+    let result = super::build_answers_map(Some(&au), &answers, &custom);
     assert_eq!(result, json!({"q1": ["A", "C"]}));
 }
 
@@ -114,7 +130,7 @@ fn test_build_answers_map_custom_text() {
     let au = make_ask_user(vec![make_question("q1", false, &["A", "B"])]);
     let answers = vec![vec![]];
     let custom = vec![Some("my custom answer".to_string())];
-    let result = build_answers_map(Some(&au), &answers, &custom);
+    let result = super::build_answers_map(Some(&au), &answers, &custom);
     assert_eq!(result, json!({"q1": "my custom answer"}));
 }
 
@@ -123,7 +139,7 @@ fn test_build_answers_map_custom_overrides_preset() {
     let au = make_ask_user(vec![make_question("q1", false, &["A", "B"])]);
     let answers = vec![vec![0usize]];
     let custom = vec![Some("overridden text".to_string())];
-    let result = build_answers_map(Some(&au), &answers, &custom);
+    let result = super::build_answers_map(Some(&au), &answers, &custom);
     assert_eq!(result, json!({"q1": "overridden text"}));
 }
 
@@ -132,7 +148,7 @@ fn test_build_answers_map_empty_custom_not_override() {
     let au = make_ask_user(vec![make_question("q1", false, &["A", "B"])]);
     let answers = vec![vec![1usize]];
     let custom = vec![Some(String::new())];
-    let result = build_answers_map(Some(&au), &answers, &custom);
+    let result = super::build_answers_map(Some(&au), &answers, &custom);
     assert_eq!(result, json!({"q1": ""}));
 }
 
@@ -150,7 +166,7 @@ fn test_build_answers_map_mixed_preset_and_custom() {
         Some("extra note".to_string()),
         None,
     ];
-    let result = build_answers_map(Some(&au), &answers, &custom);
+    let result = super::build_answers_map(Some(&au), &answers, &custom);
     assert_eq!(
         result,
         json!({"q1": "custom answer", "q2": ["X", "Y", "extra note"], "q3": "Q"})
@@ -163,7 +179,7 @@ fn test_build_answers_map_multi_select_empty_with_custom() {
     let au = make_ask_user(vec![make_question("q1", true, &["A", "B"])]);
     let answers = vec![vec![]];
     let custom = vec![Some("only me".to_string())];
-    let result = build_answers_map(Some(&au), &answers, &custom);
+    let result = super::build_answers_map(Some(&au), &answers, &custom);
     assert_eq!(result, json!({"q1": ["only me"]}));
 }
 
@@ -171,7 +187,7 @@ fn test_build_answers_map_multi_select_empty_with_custom() {
 
 #[test]
 fn test_wrap_text_short_returns_single_line() {
-    let result = wrap_text("hello", 80);
+    let result = super::wrap_text("hello", 80);
     assert_eq!(result, vec!["hello"]);
 }
 
@@ -180,26 +196,26 @@ fn test_wrap_text_long_splits_at_whitespace() {
     // wrap_text prefers whitespace breaks: "hello world" fits (11≤12),
     // then "foo" & "bar" are separate because the space after "foo" is
     // the preferred break point.
-    let result = wrap_text("hello world foo bar", 12);
+    let result = super::wrap_text("hello world foo bar", 12);
     assert_eq!(result, vec!["hello world", "foo", "bar"]);
 }
 
 #[test]
 fn test_wrap_text_cjk_splits_at_boundary() {
     // 12 CJK chars × 2 width = 24 total. max_width=10 → 5 chars per line.
-    let result = wrap_text("你好世界你好世界你好世界", 10);
+    let result = super::wrap_text("你好世界你好世界你好世界", 10);
     assert_eq!(result, vec!["你好世界你", "好世界你好", "世界"]);
 }
 
 #[test]
 fn test_wrap_text_empty_returns_single_empty() {
-    let result = wrap_text("", 80);
+    let result = super::wrap_text("", 80);
     assert_eq!(result, vec![""]);
 }
 
 #[test]
 fn test_wrap_text_zero_width_returns_original() {
-    let result = wrap_text("hello", 0);
+    let result = super::wrap_text("hello", 0);
     assert_eq!(result, vec!["hello"]);
 }
 
@@ -429,3 +445,7 @@ fn form_empty_questions_and_unrelated_keys_have_explicit_decisions() {
         FormOutcome::Submit(json!({}))
     );
 }
+
+use peri_acp_types::event_data::AskUser;
+
+use peri_acp_types::event_data::Question;

@@ -110,14 +110,20 @@
 mod composition;
 mod connection;
 mod credentials;
-mod endpoint;
-mod environment;
-mod execution;
-mod failure;
+mod remote_endpoint;
+use remote_endpoint as endpoint;
+mod remote_workspace_environment;
+use remote_workspace_environment as environment;
+mod remote_execution;
+use remote_execution as execution;
+mod remote_failure_class;
+use remote_failure_class as failure;
 mod generation;
 mod ledger;
-mod mutation;
-mod oauth_credentials;
+mod remote_store;
+use remote_store as mutation;
+mod remote_oauth_credentials;
+use remote_oauth_credentials as oauth_credentials;
 mod schema;
 mod schema_upgrade;
 
@@ -153,7 +159,8 @@ mod session_schema;
 mod session_settlement;
 mod session_sql;
 mod session_write;
-mod sql;
+mod statement_spec;
+use statement_spec as sql;
 
 pub(crate) use composition::open_remote;
 pub(crate) use composition::open_remote_in_environment;

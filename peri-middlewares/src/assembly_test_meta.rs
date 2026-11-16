@@ -1,4 +1,9 @@
-use super::*;
+use super::slot_middleware_name;
+use super::Arc;
+use super::FakeGoalController;
+use super::McpClientHandle;
+use super::McpClientPool;
+use super::ProductionChainAssembler;
 
 // ─── MetaHarness（设计 §2.5）：middleware 关闭契约测试 ────────────────────────
 
@@ -8,11 +13,11 @@ use peri_acp_types::meta_harness::{MIDDLEWARE_NAMES, MIDDLEWARE_TOOL_NAMES};
 /// 每个已知 middleware 名单独禁用：链上不出现、空 disabled 时完整链序不变。
 #[test]
 fn meta_harness_disables_each_known_middleware() {
-    let baseline = assemble_names(&base_context());
+    let baseline = super::assemble_names(&super::base_context());
     for name in MIDDLEWARE_NAMES {
-        let mut ctx = base_context();
+        let mut ctx = super::base_context();
         ctx.meta_harness_disabled.insert(name.to_string());
-        let names = assemble_names(&ctx);
+        let names = super::assemble_names(&ctx);
         assert!(
             !names.iter().any(|n| n == name),
             "disabled {name} 后仍出现在链上: {names:?}"
@@ -20,7 +25,7 @@ fn meta_harness_disables_each_known_middleware() {
     }
     // 空 disabled 与默认配置完全一致（default_config_produces_canonical_chain 的
     // 基线由本断言再次锁定，防止过滤逻辑误伤未禁用 middleware）。
-    assert_eq!(assemble_names(&base_context()), baseline);
+    assert_eq!(super::assemble_names(&super::base_context()), baseline);
 }
 
 /// 条件注册 middleware：即使运行条件满足，disabled 后也不构造（构造副作用
@@ -28,27 +33,27 @@ fn meta_harness_disables_each_known_middleware() {
 #[test]
 fn meta_harness_disables_conditional_middleware_despite_conditions() {
     // MCP：pool 存在 + disabled → 不注册（notifier 不设置）
-    let mut ctx = base_context();
+    let mut ctx = super::base_context();
     ctx.mcp_pool = Some(Arc::new(McpClientPool::new_empty()));
     ctx.meta_harness_disabled
         .insert("McpMiddleware".to_string());
-    let names = assemble_names(&ctx);
+    let names = super::assemble_names(&ctx);
     assert!(!names.iter().any(|n| n == "McpMiddleware"), "{names:?}");
 
     // Goal：controller 存在 + disabled → 不注册
-    let mut ctx = base_context();
+    let mut ctx = super::base_context();
     ctx.goal_controller = Some(Arc::new(FakeGoalController));
     ctx.meta_harness_disabled
         .insert("GoalMiddleware".to_string());
-    let names = assemble_names(&ctx);
+    let names = super::assemble_names(&ctx);
     assert!(!names.iter().any(|n| n == "GoalMiddleware"), "{names:?}");
 
     // Hook：hook group 存在 + disabled → 全部组不展开
-    let mut ctx = base_context();
-    ctx.hook_groups = vec![vec![make_hook()], vec![make_hook()]];
+    let mut ctx = super::base_context();
+    ctx.hook_groups = vec![vec![super::make_hook()], vec![super::make_hook()]];
     ctx.meta_harness_disabled
         .insert("HookMiddleware".to_string());
-    let names = assemble_names(&ctx);
+    let names = super::assemble_names(&ctx);
     assert!(!names.iter().any(|n| n == "HookMiddleware"), "{names:?}");
 }
 
@@ -111,12 +116,14 @@ fn builtin_capability_closure_matrix_covers_all_faces() {
             policy_keys.iter().map(|key| key.to_string()).collect();
         assert!(!disabled.is_empty(), "关闭输入必须映射到至少一个策略键");
 
-        let mut ctx = base_context();
-        ctx.mcp_pool = Some(pool_with_builtin_instances());
+        let mut ctx = super::base_context();
+        ctx.mcp_pool = Some(super::pool_with_builtin_instances());
         ctx.meta_harness_disabled = disabled.clone();
 
         // 面①/②：链工具集合里不得残留该实例的 bridge（direct 与 deferred 都不行）。
-        let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
+        let out =
+            peri_agent::session::factory::build_middleware_chain(&ProductionChainAssembler, &ctx)
+                .expect("assembly");
         let collected: Vec<(String, bool)> = out
             .chain
             .collect_tools(&ctx.cwd)
@@ -190,9 +197,10 @@ fn builtin_capability_closure_matrix_covers_all_faces() {
         }
 
         // 面④：workflow agent 工具列表（生产入口的带池工厂）。
-        let workflow_tools =
-            default_workflow_middleware_factory_with_pool(Some(pool_with_builtin_instances()))
-                .build_tools("/tmp/contract-test", &disabled, None, None);
+        let workflow_tools = super::default_workflow_middleware_factory_with_pool(Some(
+            super::pool_with_builtin_instances(),
+        ))
+        .build_tools("/tmp/contract-test", &disabled, None, None);
         let workflow_names: Vec<&str> = workflow_tools.iter().map(|t| t.name()).collect();
         for tool in closed_tools {
             assert!(
@@ -219,24 +227,25 @@ fn builtin_capability_closure_matrix_covers_all_faces() {
 
     // `McpMiddleware=false`：整个 MCP 槽位不构造 —— 主链与 workflow 面都不该出现
     // 任何 MCP 工具（builtin 能力随槽位关闭，而不是「天然关闭」）。
-    let mut mcp_off = base_context();
-    mcp_off.mcp_pool = Some(pool_with_builtin_instances());
+    let mut mcp_off = super::base_context();
+    mcp_off.mcp_pool = Some(super::pool_with_builtin_instances());
     mcp_off
         .meta_harness_disabled
         .insert("McpMiddleware".to_string());
-    let collected_off = assemble_tool_names(&mcp_off);
+    let collected_off = super::assemble_tool_names(&mcp_off);
     assert!(
         !collected_off.iter().any(|name| name.starts_with("mcp__")),
         "McpMiddleware 关闭后主链不得含 MCP 工具: {collected_off:?}"
     );
-    let workflow_off =
-        default_workflow_middleware_factory_with_pool(Some(pool_with_builtin_instances()))
-            .build_tools(
-                "/tmp/contract-test",
-                &["McpMiddleware".to_string()].into_iter().collect(),
-                None,
-                None,
-            );
+    let workflow_off = super::default_workflow_middleware_factory_with_pool(Some(
+        super::pool_with_builtin_instances(),
+    ))
+    .build_tools(
+        "/tmp/contract-test",
+        &["McpMiddleware".to_string()].into_iter().collect(),
+        None,
+        None,
+    );
     assert!(
         !workflow_off
             .iter()
@@ -250,10 +259,11 @@ fn builtin_capability_closure_matrix_covers_all_faces() {
 /// subagent_mw 槽位 None、链上不注册、SubAgent 工具消失——禁止半开状态）。
 #[test]
 fn meta_harness_disables_subagent_middleware_fully() {
-    let mut ctx = base_context();
+    let mut ctx = super::base_context();
     ctx.meta_harness_disabled
         .insert("SubAgentMiddleware".to_string());
-    let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
+    let out = peri_agent::session::factory::build_middleware_chain(&ProductionChainAssembler, &ctx)
+        .expect("assembly");
 
     assert!(
         out.subagent_mw.is_none(),
@@ -298,9 +308,9 @@ fn meta_harness_disabled_tools_removed_from_chain() {
         ("SubAgentMiddleware", &["Agent", "AgentResult"]),
     ];
     for (mw, expected_gone) in cases {
-        let mut ctx = base_context();
+        let mut ctx = super::base_context();
         ctx.meta_harness_disabled.insert(mw.to_string());
-        let tool_names = assemble_tool_names(&ctx);
+        let tool_names = super::assemble_tool_names(&ctx);
         for tool in *expected_gone {
             assert!(
                 !tool_names.iter().any(|n| n == tool),
@@ -311,9 +321,9 @@ fn meta_harness_disabled_tools_removed_from_chain() {
 
     // 全开（含 builtin pool）：direct 工具按原名进入链工具面。
     let open_names = {
-        let mut ctx = base_context();
-        ctx.mcp_pool = Some(pool_with_builtin_instances());
-        assemble_tool_names(&ctx)
+        let mut ctx = super::base_context();
+        ctx.mcp_pool = Some(super::pool_with_builtin_instances());
+        super::assemble_tool_names(&ctx)
     };
     for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
         for declaration in instance.tools {
@@ -327,11 +337,11 @@ fn meta_harness_disabled_tools_removed_from_chain() {
 
     // builtin 实例关闭：关闭键按注册表 policy_key 命中，工具面同时归零。
     for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
-        let mut ctx = base_context();
-        ctx.mcp_pool = Some(pool_with_builtin_instances());
+        let mut ctx = super::base_context();
+        ctx.mcp_pool = Some(super::pool_with_builtin_instances());
         ctx.meta_harness_disabled
             .insert(instance.legacy_policy_key.to_string());
-        let tool_names = assemble_tool_names(&ctx);
+        let tool_names = super::assemble_tool_names(&ctx);
         for declaration in instance.tools {
             assert!(
                 !tool_names.iter().any(|n| n == declaration.legacy_name),
@@ -361,8 +371,8 @@ fn meta_harness_disabled_tools_removed_from_chain() {
 #[test]
 fn meta_harness_ask_user_tool_follows_hitl_disabled() {
     // 全开：AskUserQuestion 在工具集中
-    let mut ctx = base_context();
-    let tool_names = assemble_tool_names(&ctx);
+    let mut ctx = super::base_context();
+    let tool_names = super::assemble_tool_names(&ctx);
     assert!(
         tool_names.iter().any(|n| n == "AskUserQuestion"),
         "全开时 AskUserQuestion 应可见"
@@ -371,7 +381,7 @@ fn meta_harness_ask_user_tool_follows_hitl_disabled() {
     // 关闭 HumanInTheLoopMiddleware：AskUserQuestion 消失；其余不变
     ctx.meta_harness_disabled
         .insert("HumanInTheLoopMiddleware".to_string());
-    let tool_names = assemble_tool_names(&ctx);
+    let tool_names = super::assemble_tool_names(&ctx);
     assert!(
         !tool_names.iter().any(|n| n == "AskUserQuestion"),
         "关闭 HumanInTheLoopMiddleware 后 AskUserQuestion 应消失: {tool_names:?}"
@@ -382,17 +392,18 @@ fn meta_harness_ask_user_tool_follows_hitl_disabled() {
     );
 
     // 关闭 PermissionMiddleware 不影响 AskUserQuestion（审批/提问独立开关）
-    let mut ctx2 = base_context();
+    let mut ctx2 = super::base_context();
     ctx2.meta_harness_disabled
         .insert("PermissionMiddleware".to_string());
-    let tool_names = assemble_tool_names(&ctx2);
+    let tool_names = super::assemble_tool_names(&ctx2);
     assert!(
         tool_names.iter().any(|n| n == "AskUserQuestion"),
         "关闭 PermissionMiddleware 后 AskUserQuestion 应保留"
     );
 
     // 宿主级 shared_tools 不再注册任何工具（生产路径写入点归零）
-    build_middleware_chain(&ProductionChainAssembler, &ctx2).expect("assembly");
+    peri_agent::session::factory::build_middleware_chain(&ProductionChainAssembler, &ctx2)
+        .expect("assembly");
     assert!(
         !ctx2.shared_tools.read().contains_key("AskUserQuestion"),
         "shared_tools 不应再注册 AskUserQuestion（移入链 collect_tools）"
@@ -414,12 +425,14 @@ fn meta_harness_disabled_parent_tools_filtered() {
     use crate::subagent::SubAgentMiddleware;
 
     for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
-        let mut ctx = base_context();
+        let mut ctx = super::base_context();
         // 需要 builtin pool：否则 parent_tools 的 builtin 面为空，断言成空转。
-        ctx.mcp_pool = Some(pool_with_builtin_instances());
+        ctx.mcp_pool = Some(super::pool_with_builtin_instances());
         ctx.meta_harness_disabled
             .insert(instance.legacy_policy_key.to_string());
-        let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
+        let out =
+            peri_agent::session::factory::build_middleware_chain(&ProductionChainAssembler, &ctx)
+                .expect("assembly");
         let subagent = out
             .subagent_mw
             .expect("parent_tools 过滤测试需要 SubAgentMiddleware")
@@ -441,9 +454,10 @@ fn meta_harness_disabled_parent_tools_filtered() {
     // 未关闭时声明 `direct: true` 的 builtin 工具必须在场且直连性等于声明；
     // 声明 `direct: false` 的（cron 三工具）必须缺席——deferred 工具在
     // 这条链上没有 ToolSearch 可发现，注入即模型看不见的注册项。
-    let mut ctx = base_context();
-    ctx.mcp_pool = Some(pool_with_builtin_instances());
-    let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
+    let mut ctx = super::base_context();
+    ctx.mcp_pool = Some(super::pool_with_builtin_instances());
+    let out = peri_agent::session::factory::build_middleware_chain(&ProductionChainAssembler, &ctx)
+        .expect("assembly");
     // 还原依据是对象自身 TypeId；offset 0 包装器不会被误认。
     let subagent = out
         .subagent_mw
@@ -482,13 +496,16 @@ fn meta_harness_disabled_parent_tools_filtered() {
     }
 
     // 关闭 Web 实例：只影响该实例的 bridge（面②的关闭过滤）。
-    let mut closed_ctx = base_context();
-    closed_ctx.mcp_pool = Some(pool_with_builtin_instances());
+    let mut closed_ctx = super::base_context();
+    closed_ctx.mcp_pool = Some(super::pool_with_builtin_instances());
     closed_ctx
         .meta_harness_disabled
         .insert("WebMiddleware".to_string());
-    let closed_out =
-        build_middleware_chain(&ProductionChainAssembler, &closed_ctx).expect("assembly");
+    let closed_out = peri_agent::session::factory::build_middleware_chain(
+        &ProductionChainAssembler,
+        &closed_ctx,
+    )
+    .expect("assembly");
     let closed_subagent = closed_out
         .subagent_mw
         .expect("parent_tools 关闭断言需要 SubAgentMiddleware")
@@ -509,10 +526,11 @@ fn meta_harness_disabled_parent_tools_filtered() {
     );
 
     // SubAgentMiddleware 关闭 → parent_tools 完全不构造（subagent_mw 槽位 None）
-    let mut ctx = base_context();
+    let mut ctx = super::base_context();
     ctx.meta_harness_disabled
         .insert("SubAgentMiddleware".to_string());
-    let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
+    let out = peri_agent::session::factory::build_middleware_chain(&ProductionChainAssembler, &ctx)
+        .expect("assembly");
     assert!(
         out.subagent_mw.is_none(),
         "SubAgentMiddleware 关闭后 parent_tools 不应注入（槽位联动置空）"
@@ -535,7 +553,7 @@ fn meta_harness_disabled_parent_tools_filtered() {
 /// 「I-03 → S-02」两个时点都成立且强度不降。
 #[test]
 fn middleware_names_match_production_blueprint() {
-    let blueprint = production_blueprint();
+    let blueprint = super::production_blueprint();
     let slot_names: std::collections::HashSet<&str> =
         blueprint.iter().map(slot_middleware_name).collect();
     let policy_keys: std::collections::HashSet<&str> =
@@ -691,15 +709,17 @@ async fn assembled_discover_agents(ctx: &crate::assembly::AssemblyContext) -> Ve
 #[tokio::test]
 async fn mcp_slot_derives_discover_agent_face_from_sub_agent_closed_key() {
     use peri_acp_types::plugin::ConfigSource;
-    use peri_acp_types::workspace_resources::{
-        agent_uri, ResourceScope, META_KEY_FRONTMATTER, META_KEY_SCOPE,
-    };
+    use peri_acp_types::workspace_resources;
+    use peri_acp_types::workspace_resources::ResourceScope;
+    use peri_acp_types::workspace_resources::META_KEY_FRONTMATTER;
+    use peri_acp_types::workspace_resources::META_KEY_SCOPE;
     use rmcp::model::{MetaObject, Resource};
 
     /// 本地 agent 标识（provider 投影形状：裸名 id + scope/frontmatter `_meta`）。
     const LOCAL_AGENT: &str = "assembly-probe-agent";
 
-    let uri = agent_uri(ResourceScope::Project, None, LOCAL_AGENT).expect("agent uri");
+    let uri = workspace_resources::agent_uri(ResourceScope::Project, None, LOCAL_AGENT)
+        .expect("agent uri");
     let mut meta = serde_json::Map::new();
     meta.insert(
         META_KEY_SCOPE.to_string(),
@@ -736,7 +756,7 @@ async fn mcp_slot_derives_discover_agent_face_from_sub_agent_closed_key() {
 
     // 正对照：未关闭 ⇒ 本地来源经生产装配可见。
     let open_port: Arc<dyn peri_acp_types::ports::McpPoolPort> = pool.clone();
-    let mut open_ctx = base_context();
+    let mut open_ctx = super::base_context();
     open_ctx.mcp_pool = Some(open_port);
     assert!(
         assembled_discover_agents(&open_ctx)
@@ -748,7 +768,7 @@ async fn mcp_slot_derives_discover_agent_face_from_sub_agent_closed_key() {
 
     // 关闭键（链槽关闭键常量，非第二份字面量）⇒ 同一池不可见。
     let closed_port: Arc<dyn peri_acp_types::ports::McpPoolPort> = pool.clone();
-    let mut closed_ctx = base_context();
+    let mut closed_ctx = super::base_context();
     closed_ctx.mcp_pool = Some(closed_port);
     closed_ctx
         .meta_harness_disabled

@@ -1,4 +1,5 @@
-use std::{collections::HashSet, path::Path};
+use std::collections::HashSet;
+use std::path::Path;
 
 /// 替换插件路径变量
 ///
@@ -6,9 +7,10 @@ use std::{collections::HashSet, path::Path};
 /// - `${CLAUDE_PLUGIN_ROOT}` / `$CLAUDE_PLUGIN_ROOT` → 插件安装路径
 /// - `${CLAUDE_PLUGIN_DATA}` / `$CLAUDE_PLUGIN_DATA` → 插件数据路径
 ///
-/// [TRAP] 不再支持 `$ARGUMENTS` / `${ARGUMENTS}` 文本替换（H4 参数隔离）：
+/// `[TRAP]` 不再支持 `$ARGUMENTS` / `${ARGUMENTS}` 文本替换（H4 参数隔离）：
 /// HookInput 数据只经 stdin JSON 传递，command 字符串里的旧写法由 executor
 /// 报迁移错误；这里绝不能悄悄把数据拼回命令文本。
+#[must_use]
 pub fn resolve_hook_variables(input: &str, plugin_root: &Path, plugin_data_dir: &Path) -> String {
     let mut result = input.to_string();
 
@@ -29,6 +31,7 @@ pub fn resolve_hook_variables(input: &str, plugin_root: &Path, plugin_data_dir: 
 ///
 /// 在 resolve_hook_variables 基础上，额外支持环境变量展开。
 /// 仅白名单内的环境变量会被替换，白名单外的保持原样。
+#[must_use]
 pub fn resolve_hook_variables_with_env(
     input: &str,
     plugin_root: &Path,

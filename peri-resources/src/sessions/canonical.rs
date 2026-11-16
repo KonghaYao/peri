@@ -21,7 +21,8 @@
 //! 真引擎上 `rowid` 可投影、按插入序、跨连接稳定（探测项 3a/3b/3c），因此统一到本机
 //! 形状后该列与它的索引一并删除，两种执行器的语句文本才可能逐字一致。
 //!
-use peri_acp_types::{messages::BaseMessage, store::PersistedPayload};
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::store::PersistedPayload;
 
 /// 两种会话数据 adapter 的同一 schema 版本。
 ///

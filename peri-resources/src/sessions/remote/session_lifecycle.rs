@@ -24,11 +24,10 @@ use peri_acp_types::session_resources::{
 use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
 use turso_serverless::Value;
 
-use super::mutation::incomplete_reply;
 use super::session_codec as codec;
-use super::session_data::{invalid_input, not_found, RemoteSessionData};
+use super::session_data::RemoteSessionData;
 use super::session_sql;
-use super::sql::{int_at, text_at, StatementSpec};
+use super::sql::StatementSpec;
 use crate::sessions::data::ChildResumeRecord;
 
 // ─── 批内守卫 ─────────────────────────────────────────────────────────────────
@@ -88,7 +87,7 @@ const SELECT_AGENT_STATUS_SQL: &str = "SELECT agent_status FROM threads WHERE id
 impl RemoteSessionData {
     pub(super) async fn write_close_intent(&self, id: &ThreadId) -> SessionResourceResult<()> {
         if !self.exists(id).await? {
-            return Err(not_found());
+            return Err(super::session_data::not_found());
         }
         self.commit_effects(
             "mark_session_closing",
@@ -192,7 +191,11 @@ impl RemoteSessionData {
             .await?;
         // 子会话数与后面的写入各取一次连接：借用不跨过去（见上）。
         drop(store);
-        revocation_gate(children.as_ref().and_then(|values| int_at(values, 0)))?;
+        revocation_gate(
+            children
+                .as_ref()
+                .and_then(|values| super::sql::int_at(values, 0)),
+        )?;
         // 预检只负责尽早给出可读的错误；真正的判据在批内重算，child 创建与撤销因此互斥。
         let mut guarded = Vec::with_capacity(effects.len() + 1);
         guarded.push(guard_children_statement(id));
@@ -207,7 +210,7 @@ impl RemoteSessionData {
                 if matches!(error.kind(), SessionResourceErrorKind::InvalidInput { .. })
                     && self.has_children(id).await.unwrap_or(false)
                 {
-                    return Err(invalid_input(
+                    return Err(super::session_data::invalid_input(
                         "session has published children and cannot be revoked",
                     ));
                 }
@@ -227,7 +230,7 @@ impl RemoteSessionData {
             .await?;
         Ok(children
             .as_ref()
-            .and_then(|values| int_at(values, 0))
+            .and_then(|values| super::sql::int_at(values, 0))
             .is_some_and(|count| count > 0))
     }
 
@@ -280,7 +283,7 @@ impl RemoteSessionData {
                 if matches!(error.kind(), SessionResourceErrorKind::InvalidInput { .. })
                     && !self.exists(id).await.unwrap_or(true)
                 {
-                    return Err(not_found());
+                    return Err(super::session_data::not_found());
                 }
                 Err(error)
             }
@@ -301,8 +304,8 @@ impl RemoteSessionData {
                 vec![Value::Text(child.as_str().to_owned())],
             ))
             .await?
-            .ok_or_else(not_found)?;
-        let status = text_at(&row, 0)
+            .ok_or_else(super::session_data::not_found)?;
+        let status = super::sql::text_at(&row, 0)
             .and_then(|text| AgentStatus::from_str(text).ok())
             .ok_or_else(|| codec::corrupt("agent_status is not a known value"))?;
         Ok(ChildResumeRecord {
@@ -405,10 +408,10 @@ fn timestamp() -> String {
 fn revocation_gate(children: Option<i64>) -> SessionResourceResult<()> {
     match children {
         Some(0) => Ok(()),
-        Some(_) => Err(invalid_input(
+        Some(_) => Err(super::session_data::invalid_input(
             "session has published children and cannot be revoked",
         )),
-        None => Err(incomplete_reply(
+        None => Err(super::mutation::incomplete_reply(
             "child session count row is missing or not an integer",
         )),
     }
@@ -448,7 +451,8 @@ mod tests {
             (UPDATE_AGENT_STATUS_SQL, 3),
         ];
         let tree_deletes = TREE_DELETES.iter().map(|(sql, _)| (*sql, 1));
-        for (sql, expected) in cases.into_iter().chain(tree_deletes) {
+        let selected_entries = cases.into_iter().chain(tree_deletes);
+        for (sql, expected) in selected_entries {
             assert_eq!(placeholders(sql), expected, "绑定量与占位符不一致: {sql}");
             assert!(!sql.contains('\''), "语句里出现了字面量: {sql}");
         }

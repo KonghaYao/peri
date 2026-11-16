@@ -1,14 +1,20 @@
 //! Tests for main
 
-#[cfg(test)]
-use super::*;
+use super::AccessMode;
+use super::Cli;
+use super::Commands;
+use super::MachineAction;
+use super::MetaAction;
+use super::OsString;
+use super::PathBuf;
+use super::SessionStoreDeployment;
 
 #[cfg(test)]
 use peri_acp_types::session_store::SessionStoreLocator;
 
 #[test]
 fn test_propagate_tui_result_preserves_startup_failure() {
-    let error = propagate_tui_result(Err(anyhow::anyhow!("database open failed")))
+    let error = super::propagate_tui_result(Err(anyhow::anyhow!("database open failed")))
         .expect_err("TUI startup failure must produce a non-zero process status");
 
     assert_eq!(error.to_string(), "database open failed");
@@ -16,7 +22,9 @@ fn test_propagate_tui_result_preserves_startup_failure() {
 
 #[test]
 fn acp_settings_stdin_is_explicit_opt_in() {
-    let cli = Cli::try_parse_from(["peri", "acp", "--settings-stdin"]).unwrap();
+    let cli = Cli::try_parse_from(["peri", "acp", "--settings-stdin"]).expect(
+        "acp settings stdin is explicit opt in: the fixture command-line arguments must parse",
+    );
     assert!(matches!(
         cli.command,
         Some(Commands::Acp {
@@ -24,7 +32,9 @@ fn acp_settings_stdin_is_explicit_opt_in() {
             ..
         })
     ));
-    let cli = Cli::try_parse_from(["peri", "acp"]).unwrap();
+    let cli = Cli::try_parse_from(["peri", "acp"]).expect(
+        "acp settings stdin is explicit opt in: the fixture command-line arguments must parse",
+    );
     assert!(matches!(
         cli.command,
         Some(Commands::Acp {
@@ -37,7 +47,7 @@ fn acp_settings_stdin_is_explicit_opt_in() {
         OsString::from("acp"),
         OsString::from("--settings-stdin"),
     ];
-    assert!(argv_requests_settings_stdin(&args));
+    assert!(cli_args::argv_requests_settings_stdin(&args));
     let cli = Cli::try_parse_from([
         "peri",
         "--config-file",
@@ -45,19 +55,21 @@ fn acp_settings_stdin_is_explicit_opt_in() {
         "acp",
         "--settings-stdin",
     ])
-    .unwrap();
-    assert!(validate_cli(&cli).is_err());
+    .expect("acp settings stdin is explicit opt in: the fixture command-line arguments must parse");
+    assert!(super::validate_cli(&cli).is_err());
 }
 
 #[test]
 fn update_use_proxy_is_opt_in() {
-    let cli = Cli::try_parse_from(["peri", "update"]).unwrap();
+    let cli = Cli::try_parse_from(["peri", "update"])
+        .expect("update use proxy is opt in: the fixture command-line arguments must parse");
     assert!(matches!(
         cli.command,
         Some(Commands::Update { use_proxy: false })
     ));
 
-    let cli = Cli::try_parse_from(["peri", "update", "--use-proxy"]).unwrap();
+    let cli = Cli::try_parse_from(["peri", "update", "--use-proxy"])
+        .expect("update use proxy is opt in: the fixture command-line arguments must parse");
     assert!(matches!(
         cli.command,
         Some(Commands::Update { use_proxy: true })
@@ -66,17 +78,24 @@ fn update_use_proxy_is_opt_in() {
 
 fn make_temp_file(content: &str) -> tempfile::TempPath {
     use std::io::Write;
-    let mut file = tempfile::NamedTempFile::new().unwrap();
-    file.write_all(content.as_bytes()).unwrap();
+    let mut file = tempfile::NamedTempFile::new()
+        .expect("make temp file: fixture parameters must construct a valid value");
+    file.write_all(content.as_bytes())
+        .expect("make temp file: fixture must have the expected variant");
     file.into_temp_path()
 }
 
 #[test]
 fn test_inject_from_config_env() {
+    if !isolated_environment("test_inject_from_config_env") {
+        return;
+    }
+
     // 测试 config.env 标准格式
     let path = make_temp_file(r#"{"config": {"env": {"TEST_C1": "v1"}}}"#);
-    inject_env_from_file(&path, &[&["config", "env"]]);
-    assert_eq!(std::env::var("TEST_C1").unwrap(), "v1");
+    super::inject_env_from_file(&path, &[&["config", "env"]]);
+    assert_eq!(std::env::var("TEST_C1").expect("inject from config env: the isolated fixture environment must contain its configured value"), "v1");
+    // SAFETY: Only this exact environment fixture runs in the isolated child process.
     unsafe {
         std::env::remove_var("TEST_C1");
     }
@@ -84,10 +103,15 @@ fn test_inject_from_config_env() {
 
 #[test]
 fn test_inject_from_top_level_env() {
+    if !isolated_environment("test_inject_from_top_level_env") {
+        return;
+    }
+
     // 测试顶层 env 格式（兼容旧格式/Claude Code 格式）
     let path = make_temp_file(r#"{"env": {"TEST_T1": "v2"}}"#);
-    inject_env_from_file(&path, &[&["env"]]);
-    assert_eq!(std::env::var("TEST_T1").unwrap(), "v2");
+    super::inject_env_from_file(&path, &[&["env"]]);
+    assert_eq!(std::env::var("TEST_T1").expect("inject from top level env: the isolated fixture environment must contain its configured value"), "v2");
+    // SAFETY: Only this exact environment fixture runs in the isolated child process.
     unsafe {
         std::env::remove_var("TEST_T1");
     }
@@ -95,11 +119,16 @@ fn test_inject_from_top_level_env() {
 
 #[test]
 fn test_inject_fallback_order() {
+    if !isolated_environment("test_inject_fallback_order") {
+        return;
+    }
+
     // 测试优先 config.env 再回退顶层 env
     // 只存在顶层 env 时应该回退成功
     let path = make_temp_file(r#"{"env": {"TEST_FB1": "from_fallback"}}"#);
-    inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
-    assert_eq!(std::env::var("TEST_FB1").unwrap(), "from_fallback");
+    super::inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
+    assert_eq!(std::env::var("TEST_FB1").expect("inject fallback order: the isolated fixture environment must contain its configured value"), "from_fallback");
+    // SAFETY: Only this exact environment fixture runs in the isolated child process.
     unsafe {
         std::env::remove_var("TEST_FB1");
     }
@@ -107,12 +136,17 @@ fn test_inject_fallback_order() {
 
 #[test]
 fn test_inject_config_env_priority_over_top_level() {
+    if !isolated_environment("test_inject_config_env_priority_over_top_level") {
+        return;
+    }
+
     // config.env 存在时优先使用，不回退到顶层 env
     let path = make_temp_file(
         r#"{"config": {"env": {"TEST_PRI": "from_config"}}, "env": {"TEST_PRI": "from_top"}}"#,
     );
-    inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
-    assert_eq!(std::env::var("TEST_PRI").unwrap(), "from_config");
+    super::inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
+    assert_eq!(std::env::var("TEST_PRI").expect("inject config env priority over top level: the isolated fixture environment must contain its configured value"), "from_config");
+    // SAFETY: Only this exact environment fixture runs in the isolated child process.
     unsafe {
         std::env::remove_var("TEST_PRI");
     }
@@ -120,13 +154,19 @@ fn test_inject_config_env_priority_over_top_level() {
 
 #[test]
 fn test_process_env_priority() {
+    if !isolated_environment("test_process_env_priority") {
+        return;
+    }
+
     // 进程环境变量存在时不被 settings.json 覆盖
+    // SAFETY: Only this exact environment fixture runs in the isolated child process.
     unsafe {
         std::env::set_var("TEST_PROC_PRI", "from_process");
     }
     let path = make_temp_file(r#"{"env": {"TEST_PROC_PRI": "from_file"}}"#);
-    inject_env_from_file(&path, &[&["env"]]);
-    assert_eq!(std::env::var("TEST_PROC_PRI").unwrap(), "from_process");
+    super::inject_env_from_file(&path, &[&["env"]]);
+    assert_eq!(std::env::var("TEST_PROC_PRI").expect("process env priority: the isolated fixture environment must contain its configured value"), "from_process");
+    // SAFETY: Only this exact environment fixture runs in the isolated child process.
     unsafe {
         std::env::remove_var("TEST_PROC_PRI");
     }
@@ -134,12 +174,17 @@ fn test_process_env_priority() {
 
 #[test]
 fn test_skip_non_string_values() {
+    if !isolated_environment("test_skip_non_string_values") {
+        return;
+    }
+
     // 非字符串值应跳过不 panic
     let path = make_temp_file(r#"{"env": {"TEST_NUM": 123, "TEST_STR": "ok"}}"#);
-    inject_env_from_file(&path, &[&["env"]]);
+    super::inject_env_from_file(&path, &[&["env"]]);
     // 数字值不应被注入
     assert!(std::env::var("TEST_NUM").is_err());
-    assert_eq!(std::env::var("TEST_STR").unwrap(), "ok");
+    assert_eq!(std::env::var("TEST_STR").expect("skip non string values: the isolated fixture environment must contain its configured value"), "ok");
+    // SAFETY: Only this exact environment fixture runs in the isolated child process.
     unsafe {
         std::env::remove_var("TEST_STR");
     }
@@ -147,21 +192,33 @@ fn test_skip_non_string_values() {
 
 #[test]
 fn test_no_file_no_panic() {
+    if !isolated_environment("test_no_file_no_panic") {
+        return;
+    }
+
     // 文件不存在时不应 panic
     let path = std::path::PathBuf::from("/nonexistent/path/settings.json");
-    inject_env_from_file(&path, &[&["env"]]);
+    super::inject_env_from_file(&path, &[&["env"]]);
 }
 
 #[test]
 fn test_no_env_field_no_panic() {
+    if !isolated_environment("test_no_env_field_no_panic") {
+        return;
+    }
+
     // JSON 中没有 env 字段时不应 panic
     let path = make_temp_file(r#"{"other": "data"}"#);
-    inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
+    super::inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
 }
 
 /// 端到端测试：模拟顶层 env 格式 → 注入进程环境 → LlmProvider::from_env() 可用
 #[test]
 fn test_e2e_top_level_env_to_provider() {
+    if !isolated_environment("test_e2e_top_level_env_to_provider") {
+        return;
+    }
+
     // 保存可能被覆盖的环境变量
     let save_keys = ["TEST_E2E_API_KEY", "TEST_E2E_BASE_URL", "MODEL_PROVIDER"];
     let saved: Vec<(&str, Option<String>)> = save_keys
@@ -175,22 +232,24 @@ fn test_e2e_top_level_env_to_provider() {
     );
 
     // 调用注入函数（使用 inject_env_from_settings 相同的查找策略）
-    inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
+    super::inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
 
     // 验证环境变量已注入
     assert_eq!(
-        std::env::var("TEST_E2E_API_KEY").unwrap(),
+        std::env::var("TEST_E2E_API_KEY").expect("e2e top level env to provider: the isolated fixture environment must contain its configured value"),
         "sk-e2e-test-key"
     );
     assert_eq!(
-        std::env::var("TEST_E2E_BASE_URL").unwrap(),
+        std::env::var("TEST_E2E_BASE_URL").expect("e2e top level env to provider: the isolated fixture environment must contain its configured value"),
         "https://e2e-test.example.com/v1"
     );
 
     // 清理测试环境变量
+    // SAFETY: Only this exact environment fixture runs in the isolated child process.
     unsafe {
         std::env::remove_var("TEST_E2E_API_KEY");
     }
+    // SAFETY: Only this exact environment fixture runs in the isolated child process.
     unsafe {
         std::env::remove_var("TEST_E2E_BASE_URL");
     }
@@ -198,10 +257,14 @@ fn test_e2e_top_level_env_to_provider() {
     // 恢复之前保存的环境变量
     for (key, value) in saved {
         match value {
-            Some(v) => unsafe {
+            Some(v) =>
+            // SAFETY: Only this exact environment fixture runs in the isolated child process.
+            unsafe {
                 std::env::set_var(key, v);
             },
-            None => unsafe { std::env::remove_var(key) },
+            None =>
+            // SAFETY: Only this exact environment fixture runs in the isolated child process.
+            unsafe { std::env::remove_var(key) },
         }
     }
 }
@@ -210,10 +273,15 @@ fn test_e2e_top_level_env_to_provider() {
 /// 修复：2026-07-24，此前 inject_env_from_settings 仅读取 ~/.peri/settings.json。
 #[test]
 fn test_project_local_settings_env_injection() {
+    if !isolated_environment("test_project_local_settings_env_injection") {
+        return;
+    }
+
     // 模拟项目本地 .peri/settings.json 的 config.env 标准格式
     let path = make_temp_file(r#"{"config": {"env": {"PRJ_LOCAL_KEY": "from_project"}}}"#);
-    inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
-    assert_eq!(std::env::var("PRJ_LOCAL_KEY").unwrap(), "from_project");
+    super::inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
+    assert_eq!(std::env::var("PRJ_LOCAL_KEY").expect("project local settings env injection: the isolated fixture environment must contain its configured value"), "from_project");
+    // SAFETY: Only this exact environment fixture runs in the isolated child process.
     unsafe {
         std::env::remove_var("PRJ_LOCAL_KEY");
     }
@@ -225,7 +293,7 @@ fn test_project_local_settings_env_injection() {
 fn test_prescan_config_file_space_form() {
     let args = ["--config-file", "/tmp/cfg.json"].map(std::ffi::OsString::from);
     assert_eq!(
-        pre_scan_config_file(args.into_iter()),
+        super::pre_scan_config_file(args.into_iter()),
         Some(PathBuf::from("/tmp/cfg.json"))
     );
 }
@@ -234,7 +302,7 @@ fn test_prescan_config_file_space_form() {
 fn test_prescan_config_file_equals_form() {
     let args = ["--config-file=/tmp/cfg.json"].map(std::ffi::OsString::from);
     assert_eq!(
-        pre_scan_config_file(args.into_iter()),
+        super::pre_scan_config_file(args.into_iter()),
         Some(PathBuf::from("/tmp/cfg.json"))
     );
 }
@@ -243,7 +311,7 @@ fn test_prescan_config_file_equals_form() {
 fn test_prescan_config_file_camel_alias() {
     let args = ["--configFile", "/tmp/cfg.json"].map(std::ffi::OsString::from);
     assert_eq!(
-        pre_scan_config_file(args.into_iter()),
+        super::pre_scan_config_file(args.into_iter()),
         Some(PathBuf::from("/tmp/cfg.json"))
     );
 }
@@ -252,7 +320,7 @@ fn test_prescan_config_file_camel_alias() {
 fn test_prescan_config_file_camel_equals_form() {
     let args = ["--configFile=/tmp/cfg.json"].map(std::ffi::OsString::from);
     assert_eq!(
-        pre_scan_config_file(args.into_iter()),
+        super::pre_scan_config_file(args.into_iter()),
         Some(PathBuf::from("/tmp/cfg.json"))
     );
 }
@@ -276,10 +344,10 @@ fn non_utf8_os_string() -> std::ffi::OsString {
 fn test_prescan_config_file_non_utf8_value() {
     // 非 UTF-8 值直接构造 PathBuf，保留原始字节
     let value = non_utf8_os_string();
-    let result = pre_scan_config_file(
+    let result = super::pre_scan_config_file(
         [std::ffi::OsString::from("--config-file"), value.clone()].into_iter(),
     )
-    .unwrap();
+    .expect("prescan config file non utf8 value: the pre_scan_config_file fixture operation uses valid inputs");
     assert_eq!(result.as_os_str(), value.as_os_str());
 }
 
@@ -287,28 +355,28 @@ fn test_prescan_config_file_non_utf8_value() {
 fn test_prescan_config_file_missing_value_none() {
     // 下一 token 是 option-like（--db-path）→ 缺值，fail-open 返回 None 交给 clap 报错
     let args = ["--config-file", "--db-path"].map(std::ffi::OsString::from);
-    assert_eq!(pre_scan_config_file(args.into_iter()), None);
+    assert_eq!(super::pre_scan_config_file(args.into_iter()), None);
 }
 
 #[test]
 fn test_prescan_config_file_followed_by_short_flag_none() {
     // M2 增补：后跟短 flag（-p）→ 缺值 → None
     let args = ["--config-file", "-p", "x"].map(std::ffi::OsString::from);
-    assert_eq!(pre_scan_config_file(args.into_iter()), None);
+    assert_eq!(super::pre_scan_config_file(args.into_iter()), None);
 }
 
 #[test]
 fn test_prescan_config_file_followed_by_db_flag_none() {
     // M2 增补：后跟 --db-path → 缺值 → None
     let args = ["--config-file", "--db-path", "/x"].map(std::ffi::OsString::from);
-    assert_eq!(pre_scan_config_file(args.into_iter()), None);
+    assert_eq!(super::pre_scan_config_file(args.into_iter()), None);
 }
 
 #[test]
 fn test_prescan_stops_after_double_dash() {
     // `--` 之后停止扫描，`--config-file` 不再被识别
     let args = ["--", "--config-file", "x"].map(std::ffi::OsString::from);
-    assert_eq!(pre_scan_config_file(args.into_iter()), None);
+    assert_eq!(super::pre_scan_config_file(args.into_iter()), None);
 }
 
 #[test]
@@ -316,7 +384,7 @@ fn test_prescan_last_occurrence_wins() {
     // 重复 flag 取最后一次（last-wins）
     let args = ["--config-file", "a", "--config-file", "b"].map(std::ffi::OsString::from);
     assert_eq!(
-        pre_scan_config_file(args.into_iter()),
+        super::pre_scan_config_file(args.into_iter()),
         Some(PathBuf::from("b"))
     );
 }
@@ -333,29 +401,29 @@ fn test_db_path_conflicts_with_session_store_before_io() {
         "--session-store",
         "/tmp/b.db",
     ])
-    .unwrap();
+    .expect("db path conflicts with session store before io: the fixture command-line arguments must parse");
     assert_eq!(
-        validate_cli(&cli),
+        super::validate_cli(&cli),
         Err("--db-path cannot be combined with --session-store".to_string())
     );
     // 部署参数构造同样拒绝，不设隐式覆盖顺序。
-    assert!(session_store_deployment(&cli, AccessMode::ReadWrite).is_err());
+    assert!(super::session_store_deployment(&cli, AccessMode::ReadWrite).is_err());
 }
 
 /// 定位参数归一：默认 / `--db-path`（含 `--dbPath` 别名）/ `--session-store` + 可选
 /// 引擎与凭证来源；访问意图由入口给出。
 #[test]
 fn test_session_store_deployment_normalizes_locator_options() {
-    let cli = Cli::try_parse_from(["peri"]).unwrap();
-    let deployment = session_store_deployment(&cli, AccessMode::ReadWrite).unwrap();
+    let cli = Cli::try_parse_from(["peri"]).expect("session store deployment normalizes locator options: the fixture command-line arguments must parse");
+    let deployment = super::session_store_deployment(&cli, AccessMode::ReadWrite).expect("session store deployment normalizes locator options: the session_store_deployment fixture operation uses valid inputs");
     assert_eq!(deployment.locator(), &SessionStoreLocator::Default);
     assert_eq!(deployment.access(), AccessMode::ReadWrite);
     assert!(deployment.engine_name().is_none());
     assert!(deployment.credential_env_name().is_none());
 
     for flag in ["--db-path", "--dbPath"] {
-        let cli = Cli::try_parse_from(["peri", flag, "/tmp/threads.db"]).unwrap();
-        let deployment = session_store_deployment(&cli, AccessMode::ReadWrite).unwrap();
+        let cli = Cli::try_parse_from(["peri", flag, "/tmp/threads.db"]).expect("session store deployment normalizes locator options: the fixture command-line arguments must parse");
+        let deployment = super::session_store_deployment(&cli, AccessMode::ReadWrite).expect("session store deployment normalizes locator options: the session_store_deployment fixture operation uses valid inputs");
         assert_eq!(
             deployment.locator(),
             &SessionStoreLocator::LocalPath(std::path::PathBuf::from("/tmp/threads.db"))
@@ -372,8 +440,8 @@ fn test_session_store_deployment_normalizes_locator_options() {
         "--session-store-engine",
         "turso",
     ])
-    .unwrap();
-    let deployment = session_store_deployment(&cli, AccessMode::ReadOnly).unwrap();
+    .expect("session store deployment normalizes locator options: the fixture command-line arguments must parse");
+    let deployment = super::session_store_deployment(&cli, AccessMode::ReadOnly).expect("session store deployment normalizes locator options: the session_store_deployment fixture operation uses valid inputs");
     assert_eq!(
         deployment.locator(),
         &SessionStoreLocator::Locator("env:TURSO_URL".to_owned())
@@ -386,7 +454,7 @@ fn test_session_store_deployment_normalizes_locator_options() {
 /// 本机会话库路径：默认库、`--db-path` 绝对化、远程 locator 不猜。
 #[test]
 fn test_local_session_db_path_default_is_threads_db() {
-    let path = local_session_db_path(&SessionStoreDeployment::default_local())
+    let path = super::local_session_db_path(&SessionStoreDeployment::default_local())
         .expect("默认本机库应可定位");
     assert!(path.is_absolute());
     assert!(path.ends_with(PathBuf::from(".peri").join("threads").join("threads.db")));
@@ -394,23 +462,23 @@ fn test_local_session_db_path_default_is_threads_db() {
 
 #[test]
 fn test_local_session_db_path_keeps_absolute_local_path() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("local session db path keeps absolute local path: isolated fixture workspace must remain accessible");
     let expected = directory.path().join("custom.db");
     let deployment = SessionStoreDeployment::local_path(expected.clone());
-    assert_eq!(local_session_db_path(&deployment), Some(expected));
+    assert_eq!(super::local_session_db_path(&deployment), Some(expected));
 }
 
 #[test]
 fn test_local_session_db_path_absolutizes_relative_local_path() {
     let deployment = SessionStoreDeployment::local_path(PathBuf::from("relative/custom.db"));
-    let expected = std::env::current_dir().unwrap().join("relative/custom.db");
-    assert_eq!(local_session_db_path(&deployment), Some(expected));
+    let expected = std::env::current_dir().expect("local session db path absolutizes relative local path: isolated fixture workspace must remain accessible").join("relative/custom.db");
+    assert_eq!(super::local_session_db_path(&deployment), Some(expected));
 }
 
 #[test]
 fn test_local_session_db_path_ignores_remote_locator() {
     let deployment = SessionStoreDeployment::from_locator("libsql://example/db");
-    assert_eq!(local_session_db_path(&deployment), None);
+    assert_eq!(super::local_session_db_path(&deployment), None);
 }
 
 /// `Debug` 保留 locator 原文，供运行时诊断。
@@ -421,8 +489,8 @@ fn test_session_store_deployment_debug_preserves_locator() {
         "--session-store",
         "turso://sentinel-db-sentinel.turso.io",
     ])
-    .unwrap();
-    let deployment = session_store_deployment(&cli, AccessMode::ReadWrite).unwrap();
+    .expect("session store deployment debug preserves locator: the fixture command-line arguments must parse");
+    let deployment = super::session_store_deployment(&cli, AccessMode::ReadWrite).expect("session store deployment debug preserves locator: the session_store_deployment fixture operation uses valid inputs");
     let rendered = format!("{deployment:?}");
     assert!(rendered.contains("sentinel-db-sentinel"));
 }
@@ -442,11 +510,13 @@ fn test_meta_grammar_allows_session_store_options() {
         session_id,
         "--json",
     ])
-    .unwrap();
-    assert!(validate_cli(&cli).is_ok());
+    .expect(
+        "meta grammar allows session store options: the fixture command-line arguments must parse",
+    );
+    assert!(super::validate_cli(&cli).is_ok());
     assert_eq!(
-        session_store_deployment(&cli, AccessMode::ReadOnly)
-            .unwrap()
+        super::session_store_deployment(&cli, AccessMode::ReadOnly)
+            .expect("meta grammar allows session store options: the session_store_deployment fixture operation uses valid inputs")
             .access(),
         AccessMode::ReadOnly
     );
@@ -460,14 +530,14 @@ fn test_meta_grammar_allows_session_store_options() {
         let mut args = vec!["peri"];
         args.extend(extra.iter().copied());
         args.extend(["meta", "session", session_id]);
-        let cli = Cli::try_parse_from(args).unwrap();
-        assert!(validate_cli(&cli).is_err());
+        let cli = Cli::try_parse_from(args).expect("meta grammar allows session store options: the fixture command-line arguments must parse");
+        assert!(super::validate_cli(&cli).is_err());
     }
 }
 
 #[test]
 fn machine_catalog_and_explicit_adoption_parse_as_distinct_actions() {
-    let catalog = Cli::try_parse_from(["peri", "meta", "machines", "--json"]).unwrap();
+    let catalog = Cli::try_parse_from(["peri", "meta", "machines", "--json"]).expect("machine catalog and explicit adoption parse as distinct actions: the fixture command-line arguments must parse");
     assert!(matches!(
         catalog.command,
         Some(Commands::Meta {
@@ -484,7 +554,7 @@ fn machine_catalog_and_explicit_adoption_parse_as_distinct_actions() {
         "--apply",
         "--confirm-no-active-executions",
     ])
-    .unwrap();
+    .expect("machine catalog and explicit adoption parse as distinct actions: the fixture command-line arguments must parse");
     assert!(matches!(
         adopt.command,
         Some(Commands::Machine {
@@ -496,3 +566,41 @@ fn machine_catalog_and_explicit_adoption_parse_as_distinct_actions() {
         })
     ));
 }
+
+/// Run only the selected environment fixture; verify that its assertion body ran.
+fn isolated_environment(case: &str) -> bool {
+    const CHILD: &str = "PERI_ENV_STYLE_FIXTURE";
+    if std::env::var(CHILD).as_deref() == Ok(case) {
+        return true;
+    }
+    let module = module_path!()
+        .split_once("::")
+        .expect("test module has a crate prefix")
+        .1;
+    let output = std::process::Command::new(
+        std::env::current_exe().expect("the running test executable remains available"),
+    )
+    .args([
+        "--exact",
+        &format!("{module}::{case}"),
+        "--nocapture",
+        "--test-threads=1",
+    ])
+    .env(CHILD, case)
+    .output()
+    .expect("the isolated environment fixture must launch");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "the child must execute one fixture"
+    );
+    false
+}
+
+use super::cli_args;
+use clap::Parser;

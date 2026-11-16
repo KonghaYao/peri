@@ -1,6 +1,5 @@
 use crate::acp_client::{InteractionOwner, InteractionUiOutcome};
-use crate::kit::stream_data::*;
-use peri_acp_types::event_data::*;
+
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
@@ -642,6 +641,7 @@ impl AcpEventData {
     }
 
     /// Helper to construct the [`AcpEventData::Unknown`] variant.
+    #[must_use]
     fn unknown(event: &str, data: serde_json::Value) -> Self {
         AcpEventData::Unknown {
             event: event.to_owned(),
@@ -703,7 +703,7 @@ pub struct BgTaskEntry {
 
 /// `bg-task-snapshot` 的来源。
 ///
-/// [Why] 快照内容本身无法区分「当前权威快照」与「历史回放」：两者都可能携带
+/// \[Why\] 快照内容本身无法区分「当前权威快照」与「历史回放」：两者都可能携带
 /// `running`，但只有前者可以作为当前执行的活动证据。来源必须由传输/回放边界显式
 /// 标记，不能靠状态文字猜测。
 ///
@@ -767,3 +767,11 @@ where
         Err(_) => AcpEventData::unknown(event, data),
     }
 }
+
+use crate::kit::stream_data::{TuiReasoningChunk, TuiTextChunk, TuiToolEnded, TuiToolStarted};
+
+use peri_acp_types::event_data::{
+    AskUser, BudgetWarning, FileSuggestions, HitlPending, OauthNeeded, PluginActionResult,
+    PluginSearchResult, PluginSnapshot, Prediction, Progress, RewindPreview, SystemNotification,
+    ToolCount,
+};

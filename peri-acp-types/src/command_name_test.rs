@@ -2,7 +2,9 @@
 //! 双下划线/空白拒绝、全名小写规范化 Display roundtrip、CommandLevel serde
 //! roundtrip、裸名 core/ui 展开候选。
 
-use super::*;
+use crate::command::command_name::CommandLevel;
+use crate::command::command_name::CommandName;
+use crate::command::command_name::CommandNameError;
 
 // ─── 三形态解析 ────────────────────────────────────────────────────────────
 

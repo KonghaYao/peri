@@ -12,16 +12,15 @@
 //!
 //! Edit/Auth 表单仍按行语义布局，不接入本模块。
 
-use ratatui_kit::ratatui::{
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-};
+use ratatui_kit::ratatui::style::Color;
+use ratatui_kit::ratatui::style::Modifier;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
 
 use crate::i18n;
-use crate::kit::atoms::ProviderSummary;
-use crate::kit::panels::shared::list::{ListMetrics, ListViewport};
 
-use super::render::{make_hint_line_for_login, provider_type_display};
+use crate::kit::panels::shared::list::{ListMetrics, ListViewport};
 
 /// Browse 列表内容的固定行度量：计数行 1 行、每项 4 行、提示行 1 行。
 pub(super) const BROWSE_METRICS: ListMetrics = ListMetrics::new(1, 4, 1);
@@ -49,6 +48,7 @@ pub(super) fn viewport(content_rows: u16, item_count: usize, selected: usize) ->
 }
 
 /// 计数行（内容区第 1 行）。
+#[must_use]
 pub(super) fn header_line(count: usize, colors: &BrowseRenderColors) -> Line<'static> {
     Line::from(vec![Span::styled(
         format!("  {} providers configured", count),
@@ -105,7 +105,7 @@ fn item_lines(
                 format!(
                     "{}  ({})",
                     provider.id,
-                    provider_type_display(&provider.provider_type)
+                    super::render::provider_type_display(&provider.provider_type)
                 ),
                 row_style,
             ),
@@ -133,7 +133,7 @@ fn base_url_display(provider: &ProviderSummary) -> String {
 
 /// 操作提示行（内容区最后一行）；文案与按键与既有 Browse 一致。
 pub(super) fn hint_line(colors: &BrowseRenderColors) -> Line<'static> {
-    make_hint_line_for_login(
+    super::render::make_hint_line_for_login(
         vec![
             (
                 "\u{2191}/\u{2193}".to_string(),
@@ -148,3 +148,5 @@ pub(super) fn hint_line(colors: &BrowseRenderColors) -> Line<'static> {
         colors.accent,
     )
 }
+
+use crate::kit::atoms::ProviderSummary;

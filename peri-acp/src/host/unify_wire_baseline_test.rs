@@ -30,9 +30,9 @@ use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::PeriCaps;
 use serde_json::{json, Value};
 
-use crate::dispatch::commands::build_available_commands_update;
-use crate::host::notify::{send_available_commands_update, send_session_info_update_with_title};
-use crate::session::command::register_builtins;
+use crate::dispatch::commands;
+use crate::host::notify;
+use crate::session::command;
 use peri_acp_types::mcp_apps::MCP_APPS_HTML_MIME;
 
 use crate::transport::types::{AcpError, IncomingMessage, RequestId};
@@ -142,14 +142,14 @@ async fn test_available_commands_update_wire_identical_between_paths() {
         ..Default::default()
     };
     let reg = Arc::new(CommandRegistry::new());
-    register_builtins(&reg);
+    command::register_builtins(&reg);
     reg.register(mcp_entry("demo:hello", "demo"))
         .expect("mcp 条目注册应成功");
 
     // —— 统一宿主发射面：驱动真实发送，捕获最终 payload ——
     let transport = Arc::new(MockTransport::default());
     let dyn_transport: Arc<dyn AcpTransport> = transport.clone();
-    send_available_commands_update(
+    notify::send_available_commands_update(
         &dyn_transport,
         "s-wire",
         &caps,
@@ -166,7 +166,7 @@ async fn test_available_commands_update_wire_identical_between_paths() {
     );
 
     // —— 参照线：同一 snapshot 投影重建 → schema typed SessionNotification 序列化 ——
-    let update = build_available_commands_update(&reg.snapshot(), &caps);
+    let update = commands::build_available_commands_update(&reg.snapshot(), &caps);
     let typed_wire = serde_json::to_value(SessionNotification::new(
         SessionId::new("s-wire"),
         SessionUpdate::AvailableCommandsUpdate(update),
@@ -196,12 +196,12 @@ async fn test_available_commands_update_wire_identical_between_paths() {
 async fn test_stdio_command_filter_hides_rewind_and_clear_from_list() {
     let caps = PeriCaps::default();
     let reg = Arc::new(CommandRegistry::new());
-    register_builtins(&reg);
+    command::register_builtins(&reg);
 
     // stdio（stdio_command_filter=true）：rewind/clear 从命令列表过滤。
     let transport = Arc::new(MockTransport::default());
     let dyn_transport: Arc<dyn AcpTransport> = transport.clone();
-    send_available_commands_update(
+    notify::send_available_commands_update(
         &dyn_transport,
         "s-stdio",
         &caps,
@@ -228,7 +228,7 @@ async fn test_stdio_command_filter_hides_rewind_and_clear_from_list() {
     // 非 stdio（false）：rewind/clear 保留。
     let transport = Arc::new(MockTransport::default());
     let dyn_transport: Arc<dyn AcpTransport> = transport.clone();
-    send_available_commands_update(
+    notify::send_available_commands_update(
         &dyn_transport,
         "s-tui",
         &caps,
@@ -260,11 +260,11 @@ async fn test_stdio_command_filter_hides_rewind_and_clear_from_list() {
 async fn test_available_commands_update_meta_omission_rules() {
     let caps = PeriCaps::default(); // skill_names = false
     let reg = Arc::new(CommandRegistry::new());
-    register_builtins(&reg);
+    command::register_builtins(&reg);
 
     let transport = Arc::new(MockTransport::default());
     let dyn_transport: Arc<dyn AcpTransport> = transport.clone();
-    send_available_commands_update(
+    notify::send_available_commands_update(
         &dyn_transport,
         "s-meta",
         &caps,
@@ -299,7 +299,8 @@ async fn test_session_info_update_wire_identical_between_paths() {
     // —— 发射面：带 title ——
     let transport = Arc::new(MockTransport::default());
     let dyn_transport: Arc<dyn AcpTransport> = transport.clone();
-    send_session_info_update_with_title(dyn_transport.as_ref(), "s-info", Some("新标题")).await;
+    notify::send_session_info_update_with_title(dyn_transport.as_ref(), "s-info", Some("新标题"))
+        .await;
     let (method, notify_payload) = &transport.notifications()[0];
     assert_eq!(method, "session/update");
     assert_eq!(notify_payload["sessionId"], "s-info");
@@ -336,7 +337,7 @@ async fn test_session_info_update_wire_identical_between_paths() {
 async fn test_session_info_update_title_omitted_when_unset() {
     let transport = Arc::new(MockTransport::default());
     let dyn_transport: Arc<dyn AcpTransport> = transport.clone();
-    send_session_info_update_with_title(dyn_transport.as_ref(), "s-info", None).await;
+    notify::send_session_info_update_with_title(dyn_transport.as_ref(), "s-info", None).await;
     let (_, payload) = &transport.notifications()[0];
 
     assert_eq!(payload["update"]["sessionUpdate"], "session_info_update");
@@ -484,9 +485,9 @@ async fn test_stdio_notify_adapter_payload_roundtrip_preserves_wire() {
         ..Default::default()
     };
     let reg = Arc::new(CommandRegistry::new());
-    register_builtins(&reg);
+    command::register_builtins(&reg);
     let update_value = serde_json::to_value(SessionUpdate::AvailableCommandsUpdate(
-        build_available_commands_update(&reg.snapshot(), &caps),
+        commands::build_available_commands_update(&reg.snapshot(), &caps),
     ))
     .expect("AvailableCommandsUpdate 序列化不应失败");
     let payload = json!({

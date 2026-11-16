@@ -1,4 +1,10 @@
-use super::*;
+use crate::agent::async_tasks::BackgroundTask;
+use crate::agent::async_tasks::BackgroundTaskStatus;
+use crate::agent::async_tasks::BgCancelHandle;
+use crate::agent::async_tasks::BgTaskKind;
+use crate::agent::async_tasks::TaskManager;
+use crate::session::subagent::background::UnstartedRegistrationGuard;
+use std::sync::Arc;
 
 fn task(id: &str) -> BackgroundTask {
     BackgroundTask {
@@ -23,7 +29,9 @@ fn task(id: &str) -> BackgroundTask {
 #[test]
 fn unpolled_background_future_withdraws_only_its_unstarted_receipt() {
     let manager = Arc::new(TaskManager::new());
-    let ticket = manager.register_pending_start(task("unpolled")).unwrap();
+    let ticket = manager
+        .register_pending_start(task("unpolled"))
+        .expect("the register pending start fixture result is required for this assertion");
     let guard = UnstartedRegistrationGuard {
         manager: manager.clone(),
         ticket: Arc::new(parking_lot::Mutex::new(Some(ticket.clone()))),
@@ -42,13 +50,17 @@ fn unpolled_background_future_withdraws_only_its_unstarted_receipt() {
 #[test]
 fn successful_start_disarms_unstarted_withdrawal_without_claiming_completion() {
     let manager = Arc::new(TaskManager::new());
-    let ticket = manager.register_pending_start(task("started")).unwrap();
+    let ticket = manager
+        .register_pending_start(task("started"))
+        .expect("the register pending start fixture result is required for this assertion");
     let mut guard = UnstartedRegistrationGuard {
         manager: manager.clone(),
         ticket: Arc::new(parking_lot::Mutex::new(Some(ticket.clone()))),
         armed: true,
     };
-    manager.mark_execution_started(&ticket).unwrap();
+    manager
+        .mark_execution_started(&ticket)
+        .expect("the mark execution started fixture result is required for this assertion");
     guard.armed = false;
     drop(guard);
     assert_eq!(manager.active_count(), 1);

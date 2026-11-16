@@ -1,8 +1,14 @@
+use crate::tools::ToolInvocationResolver as _;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use super::*;
+use crate::agent::react::ToolCall;
+use crate::error::AgentError;
+use crate::tools::invocation::DirectToolInvocationResolver;
+use crate::tools::BaseTool;
 use crate::tools::ToolContext;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 struct AppOnlyTool;
 
@@ -50,18 +56,20 @@ async fn model_resolution_vetoes_app_only_without_disabling_app_resolution() {
             Err(AgentError::ToolExecutionFailed { reason, .. })
                 if reason.contains("not available to the model")
         ));
-        let invocation = DirectToolInvocationResolver.resolve(&call, &tools).unwrap();
+        let invocation = DirectToolInvocationResolver
+            .resolve(&call, &tools)
+            .expect("the resolve fixture result is required for this assertion");
         assert!(Arc::ptr_eq(&invocation.target, &target));
     }
     let invocation = DirectToolInvocationResolver
         .resolve(&ToolCall::new("app-call", "AppOnly", json!({})), &tools)
-        .unwrap();
+        .expect("the resolve fixture result is required for this assertion");
     assert_eq!(
         invocation
             .target
             .invoke(invocation.policy_call.input, ToolContext::new(&[], "."))
             .await
-            .unwrap(),
+            .expect("the new fixture result is required for this assertion"),
         "app-result"
     );
 }
@@ -113,7 +121,10 @@ fn supports_tool_scoped_input_aliases() {
             name: tool_name,
             properties: vec![canonical],
         };
-        let output = normalize_params(json!({(alias): value.clone()}), Some(&tool));
+        let output = crate::tools::invocation::normalize_params(
+            json!({(alias): value.clone()}),
+            Some(&tool),
+        );
         assert_eq!(output.get(canonical), Some(&value));
         assert!(output.get(alias).is_none());
     }
@@ -126,7 +137,10 @@ fn does_not_apply_scoped_alias_to_other_tools() {
         properties: vec!["query"],
     };
     let input = json!({"search_term": "Rust"});
-    assert_eq!(normalize_params(input.clone(), Some(&tool)), input);
+    assert_eq!(
+        crate::tools::invocation::normalize_params(input.clone(), Some(&tool)),
+        input
+    );
 }
 
 #[test]
@@ -136,7 +150,10 @@ fn canonical_input_wins_without_removing_alias() {
         properties: vec!["content"],
     };
     let input = json!({"contents": "old", "content": "new"});
-    assert_eq!(normalize_params(input.clone(), Some(&tool)), input);
+    assert_eq!(
+        crate::tools::invocation::normalize_params(input.clone(), Some(&tool)),
+        input
+    );
 }
 
 #[test]
@@ -146,7 +163,10 @@ fn declared_alias_is_not_rewritten() {
         properties: vec!["contents", "content"],
     };
     let input = json!({"contents": "old"});
-    assert_eq!(normalize_params(input.clone(), Some(&tool)), input);
+    assert_eq!(
+        crate::tools::invocation::normalize_params(input.clone(), Some(&tool)),
+        input
+    );
 }
 struct NamedTool {
     name: &'static str,
@@ -192,7 +212,9 @@ fn resolver_binds_registered_key_canonical_name_and_declared_alias() {
         "READING",
     ] {
         let call = ToolCall::new("call", name, json!({"value": 1}));
-        let invocation = DirectToolInvocationResolver.resolve(&call, &tools).unwrap();
+        let invocation = DirectToolInvocationResolver
+            .resolve(&call, &tools)
+            .expect("the resolve fixture result is required for this assertion");
         assert!(Arc::ptr_eq(&invocation.target, &target));
         assert_eq!(invocation.raw_call.name, name);
         assert_eq!(invocation.policy_call.name, "Read");
@@ -251,7 +273,7 @@ fn resolver_deduplicates_one_target_registered_under_multiple_matching_keys() {
     for name in ["READ", "reader"] {
         let invocation = DirectToolInvocationResolver
             .resolve(&ToolCall::new("call", name, json!({})), &tools)
-            .unwrap();
+            .expect("the resolve fixture result is required for this assertion");
         assert!(Arc::ptr_eq(&invocation.target, &target));
         assert_eq!(invocation.policy_call.name, "Read");
     }
@@ -299,7 +321,7 @@ fn resolver_preserves_shell_and_task_alias_consumers() {
         let tools = BTreeMap::from([(canonical.to_string(), Arc::clone(&target))]);
         let invocation = DirectToolInvocationResolver
             .resolve(&ToolCall::new("consumer", requested, json!({})), &tools)
-            .unwrap();
+            .expect("the resolve fixture result is required for this assertion");
         assert!(Arc::ptr_eq(&invocation.target, &target));
         assert_eq!(invocation.policy_call.name, canonical);
         assert_eq!(invocation.raw_call.name, requested);
@@ -336,7 +358,10 @@ fn builtin_effective_names_hit_parameter_aliases() {
             name,
             properties: vec!["query"],
         };
-        let output = normalize_params(json!({"search_term": "Rust 2024"}), Some(&tool));
+        let output = crate::tools::invocation::normalize_params(
+            json!({"search_term": "Rust 2024"}),
+            Some(&tool),
+        );
         assert_eq!(
             output.get("query"),
             Some(&json!("Rust 2024")),
@@ -357,7 +382,7 @@ fn parameter_alias_matching_is_unchanged_for_other_names() {
         };
         let input = json!({"search_term": "Rust"});
         assert_eq!(
-            normalize_params(input.clone(), Some(&tool)),
+            crate::tools::invocation::normalize_params(input.clone(), Some(&tool)),
             input,
             "{name} 不命中别名行，输入必须原样"
         );
@@ -366,7 +391,7 @@ fn parameter_alias_matching_is_unchanged_for_other_names() {
     // （即使大小写不敏感）也不相等 ⇒ 不可能命中任何别名行。
     let lowered = effective_name("web", "WebSearch").to_lowercase();
     assert!(
-        original_tool_name_of_effective(&lowered).is_none(),
+        peri_acp_types::builtin_mcp::original_tool_name_of_effective(&lowered).is_none(),
         "归一表是精确匹配：{lowered} 不得命中"
     );
     assert!(
@@ -382,7 +407,7 @@ fn parameter_alias_matching_is_unchanged_for_other_names() {
         };
         let input = json!({"search_term": "Rust"});
         assert_eq!(
-            normalize_params(input.clone(), Some(&tool)),
+            crate::tools::invocation::normalize_params(input.clone(), Some(&tool)),
             input,
             "{effective} 无别名行，输入必须原样"
         );
@@ -399,7 +424,9 @@ fn parameter_alias_does_not_change_tool_resolution() {
     });
     let tools = BTreeMap::from([(effective.to_string(), Arc::clone(&target))]);
     let call = ToolCall::new("call", effective, json!({"search_term": "Rust"}));
-    let invocation = DirectToolInvocationResolver.resolve(&call, &tools).unwrap();
+    let invocation = DirectToolInvocationResolver
+        .resolve(&call, &tools)
+        .expect("the resolve fixture result is required for this assertion");
     assert!(Arc::ptr_eq(&invocation.target, &target));
     assert_eq!(
         invocation.raw_call.name, effective,
@@ -454,6 +481,9 @@ fn external_raw_tool_does_not_inherit_builtin_parameter_aliases() {
         ),
     ] {
         let tool = External(SchemaToolStub { name, properties });
-        assert_eq!(normalize_params(input.clone(), Some(&tool)), input);
+        assert_eq!(
+            crate::tools::invocation::normalize_params(input.clone(), Some(&tool)),
+            input
+        );
     }
 }

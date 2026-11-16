@@ -1,10 +1,14 @@
-use super::*;
-use crate::kit::stream_data::TuiTextChunk;
-use peri_acp_types::{
-    identity::AttemptId,
-    session::{ExecutionBinding, TurnId},
-};
+use super::AcpEventData;
+use super::ChildEventOrigin;
+use super::ChildRunRouting;
+use super::CurrentTurn;
+use super::RETIRED_RUNS;
 
+use peri_acp_types::identity::AttemptId;
+use peri_acp_types::session::ExecutionBinding;
+use peri_acp_types::session::TurnId;
+
+#[must_use]
 fn origin(id: &str, run_order: u64) -> ChildEventOrigin {
     ChildEventOrigin {
         child_thread_id: id.into(),
@@ -16,6 +20,7 @@ fn origin(id: &str, run_order: u64) -> ChildEventOrigin {
         sequence: 1,
     }
 }
+#[must_use]
 fn start(id: &str) -> AcpEventData {
     AcpEventData::SubagentStarted {
         agent_id: id.into(),
@@ -24,6 +29,7 @@ fn start(id: &str) -> AcpEventData {
         parent_tool_call_id: None,
     }
 }
+#[must_use]
 fn stop(id: &str) -> AcpEventData {
     AcpEventData::SubagentStopped {
         agent_id: id.into(),
@@ -167,17 +173,23 @@ fn extremely_late_first_start_expires_only_its_preview_beyond_retirement_window(
     assert!(!routing.accept(&start("unseen-delayed-child"), &unseen, true));
     assert!(routing.active.is_empty());
     // Preview expiry neither invents completion nor owns business task updates.
-    assert!(!is_child_preview_event(&AcpEventData::BgTaskCompleted {
-        task_id: "real-task".into(),
-        kind: Some("agent".into()),
-        success: true,
-        duration_ms: 1,
-        output_preview: Some("real result".into()),
-        revision: None,
-    }));
-    assert!(!is_child_preview_event(&AcpEventData::BgTaskCancelled {
-        task_id: "real-task".into(),
-        reason: "real cancellation".into(),
-        revision: None,
-    }));
+    assert!(!super::is_child_preview_event(
+        &AcpEventData::BgTaskCompleted {
+            task_id: "real-task".into(),
+            kind: Some("agent".into()),
+            success: true,
+            duration_ms: 1,
+            output_preview: Some("real result".into()),
+            revision: None,
+        }
+    ));
+    assert!(!super::is_child_preview_event(
+        &AcpEventData::BgTaskCancelled {
+            task_id: "real-task".into(),
+            reason: "real cancellation".into(),
+            revision: None,
+        }
+    ));
 }
+
+use crate::kit::stream_data::TuiTextChunk;

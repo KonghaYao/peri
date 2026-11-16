@@ -15,18 +15,19 @@
 //!
 //! 运行：`cargo test -p peri-tui --release --lib legacy_group_probe -- --ignored --nocapture`
 
-use crate::kit::atoms::FOLD_OVERRIDES;
-use crate::kit::tui_render_unit::{
-    FoldKey, FoldState, TuiCollapsedGroup, TuiDivider, TuiRenderUnit, TuiToolPresentation,
-    fold_state_code, tui_hash_combine, tui_hash_str,
-};
+use crate::kit::tui_render_unit::FoldKey;
+use crate::kit::tui_render_unit::FoldState;
+use crate::kit::tui_render_unit::TuiCollapsedGroup;
+use crate::kit::tui_render_unit::TuiDivider;
+use crate::kit::tui_render_unit::TuiRenderUnit;
+use crate::kit::tui_render_unit::TuiToolPresentation;
 
 // ---------------------------------------------------------------------------
-// 旧实现（HEAD 逐字迁移，仅重命名 + 独立缓存）
+// 旧算法（HEAD 的分组规则，使用独立派生缓存）
 // ---------------------------------------------------------------------------
 
 /// 流式 bubble 的内容不进指纹：段末 bubble 的内容每 token 变化。
-const LEGACY_TRAILING_BUBBLE_MARKER: u64 = 0x5EAB_1E5E;
+const LEGACY_TRAILING_BUBBLE_MARKER: u64 = 0x5eab_1e5e;
 /// `TuiToolCard` 的指纹变体码。
 const LEGACY_TOOL_VARIANT_CODE: u64 = 3;
 
@@ -36,50 +37,63 @@ struct LegacyToolGroupCache {
     has_trailing_bubble: bool,
 }
 
-static LEGACY_TOOL_GROUP_CACHE: std::sync::Mutex<Option<LegacyToolGroupCache>> =
-    std::sync::Mutex::new(None);
+static LEGACY_TOOL_GROUP_CACHE: Mutex<Option<LegacyToolGroupCache>> = Mutex::new(None);
 
 fn legacy_group_input_fingerprint(segment: &im::Vector<TuiRenderUnit>) -> (u64, bool) {
     use std::hash::{Hash, Hasher};
     let mut h: u64 = 0;
     let last = segment.len().saturating_sub(1);
-    for (i, vm) in segment.iter().enumerate() {
-        let is_trailing_bubble = i == last && matches!(vm, TuiRenderUnit::TuiAssistantBubble(_));
-        let entry_hash = if is_trailing_bubble {
-            LEGACY_TRAILING_BUBBLE_MARKER
-        } else {
-            match vm {
-                TuiRenderUnit::TuiToolCard(t) => {
-                    let mut eh = tui_hash_combine(LEGACY_TOOL_VARIANT_CODE, vm.content_hash());
-                    eh = tui_hash_combine(eh, tui_hash_str(&t.tool_id));
-                    eh = tui_hash_combine(eh, tui_hash_str(&t.tool_name));
-                    let flags = u64::from(t.is_running)
-                        | (u64::from(t.is_error) << 1)
-                        | (u64::from(t.diff.is_some()) << 2)
-                        | (u64::from(t.user_modified) << 3)
-                        | (u64::from(matches!(t.presentation, TuiToolPresentation::Generic)) << 4);
-                    tui_hash_combine(eh, flags)
+    {
+        let iteration_items = segment.iter().enumerate();
+        for (i, vm) in iteration_items {
+            let is_trailing_bubble =
+                i == last && matches!(vm, TuiRenderUnit::TuiAssistantBubble(_));
+            let entry_hash = if is_trailing_bubble {
+                LEGACY_TRAILING_BUBBLE_MARKER
+            } else {
+                match vm {
+                    TuiRenderUnit::TuiToolCard(t) => {
+                        let mut eh = crate::kit::tui_render_unit::tui_hash_combine(
+                            LEGACY_TOOL_VARIANT_CODE,
+                            vm.content_hash(),
+                        );
+                        eh = crate::kit::tui_render_unit::tui_hash_combine(
+                            eh,
+                            crate::kit::tui_render_unit::tui_hash_str(&t.tool_id),
+                        );
+                        eh = crate::kit::tui_render_unit::tui_hash_combine(
+                            eh,
+                            crate::kit::tui_render_unit::tui_hash_str(&t.tool_name),
+                        );
+                        let flags = u64::from(t.is_running)
+                            | (u64::from(t.is_error) << 1)
+                            | (u64::from(t.diff.is_some()) << 2)
+                            | (u64::from(t.user_modified) << 3)
+                            | (u64::from(matches!(t.presentation, TuiToolPresentation::Generic))
+                                << 4);
+                        crate::kit::tui_render_unit::tui_hash_combine(eh, flags)
+                    }
+                    other => {
+                        let code = match other {
+                            TuiRenderUnit::TuiUserBubble(_) => 1,
+                            TuiRenderUnit::TuiAssistantBubble(_) => 2,
+                            TuiRenderUnit::TuiSystemNote(_) => 4,
+                            TuiRenderUnit::TuiSystemReminder(_) => 10,
+                            TuiRenderUnit::TuiSubAgentGroup(_) => 5,
+                            TuiRenderUnit::TuiCollapsedGroup(_) => 6,
+                            TuiRenderUnit::TuiDivider(_) => 7,
+                            TuiRenderUnit::TuiAskUserBlock(_) => 8,
+                            TuiRenderUnit::TuiTodoSummary(_) => 9,
+                            TuiRenderUnit::TuiToolCard(_) => unreachable!(),
+                        };
+                        crate::kit::tui_render_unit::tui_hash_combine(code, other.content_hash())
+                    }
                 }
-                other => {
-                    let code = match other {
-                        TuiRenderUnit::TuiUserBubble(_) => 1,
-                        TuiRenderUnit::TuiAssistantBubble(_) => 2,
-                        TuiRenderUnit::TuiSystemNote(_) => 4,
-                        TuiRenderUnit::TuiSystemReminder(_) => 10,
-                        TuiRenderUnit::TuiSubAgentGroup(_) => 5,
-                        TuiRenderUnit::TuiCollapsedGroup(_) => 6,
-                        TuiRenderUnit::TuiDivider(_) => 7,
-                        TuiRenderUnit::TuiAskUserBlock(_) => 8,
-                        TuiRenderUnit::TuiTodoSummary(_) => 9,
-                        TuiRenderUnit::TuiToolCard(_) => unreachable!(),
-                    };
-                    tui_hash_combine(code, other.content_hash())
-                }
-            }
-        };
-        h = tui_hash_combine(h, entry_hash);
+            };
+            h = crate::kit::tui_render_unit::tui_hash_combine(h, entry_hash);
+        }
     }
-    h = tui_hash_combine(h, segment.len() as u64);
+    h = crate::kit::tui_render_unit::tui_hash_combine(h, segment.len() as u64);
     let mut fh = std::collections::hash_map::DefaultHasher::new();
     let focus_state = crate::kit::atoms::FOCUSED_ENTRY.state();
     focus_state
@@ -87,20 +101,20 @@ fn legacy_group_input_fingerprint(segment: &im::Vector<TuiRenderUnit>) -> (u64, 
         .as_ref()
         .and_then(|f| f.key.as_ref())
         .hash(&mut fh);
-    h = tui_hash_combine(h, fh.finish());
+    h = crate::kit::tui_render_unit::tui_hash_combine(h, fh.finish());
     let mut oh = std::collections::hash_map::DefaultHasher::new();
     let overrides_state = FOLD_OVERRIDES.state();
     let overrides_guard = overrides_state.read();
     let mut group_overrides: Vec<_> = overrides_guard
         .iter()
         .filter_map(|(key, fold)| match key {
-            FoldKey::Group(ids) => Some((ids, fold_state_code(*fold))),
+            FoldKey::Group(ids) => Some((ids, crate::kit::tui_render_unit::fold_state_code(*fold))),
             _ => None,
         })
         .collect();
     group_overrides.sort_by_key(|(ids, _)| *ids);
     group_overrides.hash(&mut oh);
-    h = tui_hash_combine(h, oh.finish());
+    h = crate::kit::tui_render_unit::tui_hash_combine(h, oh.finish());
     let has_trailing_bubble = matches!(segment.back(), Some(TuiRenderUnit::TuiAssistantBubble(_)));
     (h, has_trailing_bubble)
 }
@@ -109,9 +123,7 @@ fn legacy_group_input_fingerprint(segment: &im::Vector<TuiRenderUnit>) -> (u64, 
 fn group_successful_tools_legacy(items: &mut im::Vector<TuiRenderUnit>, start: usize) {
     let mut segment = items.split_off(start);
     let (fingerprint, has_trailing_bubble) = legacy_group_input_fingerprint(&segment);
-    let cache = LEGACY_TOOL_GROUP_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let cache = LEGACY_TOOL_GROUP_CACHE.lock();
     if let Some(c) = cache.as_ref()
         && c.fingerprint == fingerprint
         && c.has_trailing_bubble == has_trailing_bubble
@@ -163,73 +175,76 @@ fn group_successful_tools_legacy(items: &mut im::Vector<TuiRenderUnit>, start: u
         runs.push((s, segment.len()));
     }
 
-    for (run_start, run_end) in runs.into_iter().rev() {
-        let run_len = run_end - run_start;
-        if run_len < 2 {
-            continue;
-        }
-        let mut failed_count: u32 = 0;
-        for i in run_end..segment.len() {
-            let is_error = matches!(
-                segment.get(i),
-                Some(TuiRenderUnit::TuiToolCard(t)) if t.is_error
-            );
-            if is_error {
-                failed_count += 1;
-            } else {
-                break;
+    {
+        let iteration_items = runs.into_iter().rev();
+        for (run_start, run_end) in iteration_items {
+            let run_len = run_end - run_start;
+            if run_len < 2 {
+                continue;
             }
-        }
-        let mut names: Vec<(String, u32)> = Vec::new();
-        let mut hidden_vms: Vec<TuiRenderUnit> = Vec::with_capacity(run_len);
-        for i in run_start..run_end {
-            if let Some(TuiRenderUnit::TuiToolCard(t)) = segment.get(i) {
-                let display = crate::kit::tool_display::format_tool_name(&t.tool_name);
-                match names.iter_mut().find(|(n, _)| *n == display) {
-                    Some((_, c)) => *c += 1,
-                    None => names.push((display, 1)),
+            let mut failed_count: u32 = 0;
+            for i in run_end..segment.len() {
+                let is_error = matches!(
+                    segment.get(i),
+                    Some(TuiRenderUnit::TuiToolCard(t)) if t.is_error
+                );
+                if is_error {
+                    failed_count += 1;
+                } else {
+                    break;
                 }
-                hidden_vms.push(segment.get(i).cloned().unwrap());
             }
+            let mut names: Vec<(String, u32)> = Vec::new();
+            let mut hidden_vms: Vec<TuiRenderUnit> = Vec::with_capacity(run_len);
+            for i in run_start..run_end {
+                if let Some(TuiRenderUnit::TuiToolCard(t)) = segment.get(i) {
+                    let display = crate::kit::tool_display::format_tool_name(&t.tool_name);
+                    match names.iter_mut().find(|(n, _)| *n == display) {
+                        Some((_, c)) => *c += 1,
+                        None => names.push((display, 1)),
+                    }
+                    hidden_vms.push(segment.get(i).cloned().expect(
+                        "group successful tools legacy: fixture must contain the requested entry",
+                    ));
+                }
+            }
+            let title = names
+                .into_iter()
+                .map(|(name, count)| format!("{name} {count}"))
+                .collect::<Vec<_>>()
+                .join(" \u{b7} ");
+            let group_key = FoldKey::Group(
+                hidden_vms
+                    .iter()
+                    .filter_map(|vm| match vm {
+                        TuiRenderUnit::TuiToolCard(t) => Some(t.tool_id.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            );
+            let fold = FOLD_OVERRIDES
+                .state()
+                .read()
+                .get(&group_key)
+                .copied()
+                .unwrap_or(FoldState::Collapsed);
+            let mut group = TuiCollapsedGroup {
+                title,
+                count: run_len as u32,
+                failed_count,
+                view_models: hidden_vms,
+                fold,
+                content_hash: 0,
+            };
+            group.recompute_hash();
+            for i in (run_start..run_end).rev() {
+                segment.remove(i);
+            }
+            segment.insert(run_start, TuiRenderUnit::TuiCollapsedGroup(group));
         }
-        let title = names
-            .into_iter()
-            .map(|(name, count)| format!("{name} {count}"))
-            .collect::<Vec<_>>()
-            .join(" \u{b7} ");
-        let group_key = FoldKey::Group(
-            hidden_vms
-                .iter()
-                .filter_map(|vm| match vm {
-                    TuiRenderUnit::TuiToolCard(t) => Some(t.tool_id.clone()),
-                    _ => None,
-                })
-                .collect(),
-        );
-        let fold = FOLD_OVERRIDES
-            .state()
-            .read()
-            .get(&group_key)
-            .copied()
-            .unwrap_or(FoldState::Collapsed);
-        let mut group = TuiCollapsedGroup {
-            title,
-            count: run_len as u32,
-            failed_count,
-            view_models: hidden_vms,
-            fold,
-            content_hash: 0,
-        };
-        group.recompute_hash();
-        for i in (run_start..run_end).rev() {
-            segment.remove(i);
-        }
-        segment.insert(run_start, TuiRenderUnit::TuiCollapsedGroup(group));
     }
 
-    *LEGACY_TOOL_GROUP_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some(LegacyToolGroupCache {
+    *LEGACY_TOOL_GROUP_CACHE.lock() = Some(LegacyToolGroupCache {
         fingerprint,
         grouped: segment.clone(),
         has_trailing_bubble,
@@ -242,9 +257,7 @@ fn group_successful_tools_legacy(items: &mut im::Vector<TuiRenderUnit>, start: u
 // ---------------------------------------------------------------------------
 
 fn reset_legacy_cache() {
-    *LEGACY_TOOL_GROUP_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = None;
+    *LEGACY_TOOL_GROUP_CACHE.lock() = None;
 }
 
 /// 模拟生产共享：调用前多持一份 `clone()`（`state.committed` / 上一个快照）。
@@ -335,3 +348,7 @@ fn legacy_group_probe_equivalence_and_cost() {
         });
     }
 }
+
+use crate::kit::atoms::FOLD_OVERRIDES;
+
+use parking_lot::Mutex;

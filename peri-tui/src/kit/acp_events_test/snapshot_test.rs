@@ -1,19 +1,27 @@
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::EntryStatus;
+use super::FoldState;
+use super::TuiRenderUnit;
+use super::TuiTextChunk;
+use super::TuiToolEnded;
+use super::TuiToolStarted;
+use super::serial;
 
 /// P0 regression: a newly submitted prompt must follow every visible entry
 /// from the previous turn, even when its terminal event has not arrived yet.
 #[test]
 #[serial]
 fn p0_new_prompt_follows_unarchived_previous_answer() {
-    let mut state = make_fold_test_state();
-    dispatch_and_notify(
+    let mut state = super::make_fold_test_state();
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "q1".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "a1".into(),
@@ -21,7 +29,7 @@ fn p0_new_prompt_follows_unarchived_previous_answer() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "q2".into(),
@@ -42,7 +50,7 @@ fn p0_new_prompt_follows_unarchived_previous_answer() {
         .collect();
     assert_eq!(sequence, ["user:q1", "assistant:a1", "user:q2"]);
 
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let archived: Vec<_> = VIEW_MODELS
         .state()
         .read()
@@ -65,15 +73,15 @@ fn p0_new_prompt_follows_unarchived_previous_answer() {
 #[test]
 #[serial]
 fn p0_new_prompt_preserves_running_tool_result() {
-    let mut state = make_fold_test_state();
-    dispatch_and_notify(
+    let mut state = super::make_fold_test_state();
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "q1".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
             tool_id: "tool-1".into(),
@@ -85,14 +93,14 @@ fn p0_new_prompt_preserves_running_tool_result() {
             origin_readable: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "q2".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             tool_id: "tool-1".into(),
@@ -128,17 +136,17 @@ fn p0_new_prompt_preserves_running_tool_result() {
 #[test]
 #[serial]
 fn test_snapshot_turn_divider_before_new_user_prompt() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
 
     // Turn 1：user + answer → TurnDone（committed = [user1, answer1]）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "q1".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "a1".into(),
@@ -146,17 +154,17 @@ fn test_snapshot_turn_divider_before_new_user_prompt() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
     // Turn 2 流式期间：committed = [user1, answer1, user2]
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "q2".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "a2".into(),
@@ -178,7 +186,7 @@ fn test_snapshot_turn_divider_before_new_user_prompt() {
     );
 
     // TurnDone 后 divider 仍随 user2 保留，避免横线闪动。
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let snap = VIEW_MODELS.state().read().clone();
     assert_eq!(snap.items.len(), 5, "turn 完成后分隔线仍在");
     assert!(matches!(snap.items[2], TuiRenderUnit::TuiDivider(_)));
@@ -189,15 +197,15 @@ fn test_snapshot_turn_divider_before_new_user_prompt() {
 #[test]
 #[serial]
 fn test_snapshot_no_divider_for_first_turn_or_inside_turn() {
-    let mut state = make_fold_test_state();
-    dispatch_and_notify(
+    let mut state = super::make_fold_test_state();
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "q1".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "a1".into(),
@@ -221,7 +229,7 @@ fn test_snapshot_no_divider_for_first_turn_or_inside_turn() {
 #[test]
 #[serial]
 fn test_snapshot_todo_summary_before_final_answer() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     *crate::kit::atoms::TODO_ITEMS.state().write() = vec![
         crate::kit::message_area::TodoItem {
             status: crate::kit::message_area::TodoStatus::InProgress,
@@ -233,7 +241,7 @@ fn test_snapshot_todo_summary_before_final_answer() {
         },
     ];
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "final answer".into(),
@@ -261,7 +269,7 @@ fn test_snapshot_todo_summary_before_final_answer() {
     );
 
     // TurnDone 后（current_turn 清空）→ 无 todo 摘要
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let snap = VIEW_MODELS.state().read().clone();
     assert!(
         snap.items
@@ -277,13 +285,13 @@ fn test_snapshot_todo_summary_before_final_answer() {
 #[test]
 #[serial]
 fn test_snapshot_cache_tracks_subagent_before_todo_summary() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     *crate::kit::atoms::TODO_ITEMS.state().write() = vec![crate::kit::message_area::TodoItem {
         status: crate::kit::message_area::TodoStatus::InProgress,
         content: "subagent fingerprint regression sentinel".into(),
     }];
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "cache-agent".into(),
@@ -292,7 +300,7 @@ fn test_snapshot_cache_tracks_subagent_before_todo_summary() {
             parent_tool_call_id: None,
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "child text".into(),
@@ -323,10 +331,10 @@ fn test_snapshot_cache_tracks_subagent_before_todo_summary() {
 #[test]
 #[serial]
 fn test_snapshot_group_successful_tools() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
 
     let start_read = |st: &mut BridgeState, id: &str, path: &str| {
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             st,
             &AcpEventData::ToolStarted(TuiToolStarted {
                 tool_id: id.into(),
@@ -340,7 +348,7 @@ fn test_snapshot_group_successful_tools() {
         );
     };
     let end_tool = |st: &mut BridgeState, id: &str, is_error: bool| {
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             st,
             &AcpEventData::ToolEnded(TuiToolEnded {
                 tool_id: id.into(),
@@ -402,9 +410,9 @@ fn test_snapshot_group_successful_tools() {
     }
 
     // 正文打断相邻性：Read + text + Read → 不跨正文分组
-    let mut state2 = make_fold_test_state();
+    let mut state2 = super::make_fold_test_state();
     let start2 = |st: &mut BridgeState, id: &str| {
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             st,
             &AcpEventData::ToolStarted(TuiToolStarted {
                 tool_id: id.into(),
@@ -418,7 +426,7 @@ fn test_snapshot_group_successful_tools() {
         );
     };
     start2(&mut state2, "s1");
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state2,
         &AcpEventData::ToolEnded(TuiToolEnded {
             tool_id: "s1".into(),
@@ -427,7 +435,7 @@ fn test_snapshot_group_successful_tools() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state2,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "中间正文".into(),
@@ -436,7 +444,7 @@ fn test_snapshot_group_successful_tools() {
         }),
     );
     start2(&mut state2, "s2");
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state2,
         &AcpEventData::ToolEnded(TuiToolEnded {
             tool_id: "s2".into(),
@@ -459,9 +467,10 @@ fn test_snapshot_group_successful_tools() {
 #[test]
 #[serial]
 fn test_snapshot_group_excludes_semantic_cards() {
-    let mut state = make_fold_test_state();
-    for (i, name) in ["Skill", "TodoWrite"].iter().enumerate() {
-        dispatch_and_notify(
+    let mut state = super::make_fold_test_state();
+    let indexed_tool_names = ["Skill", "TodoWrite"].iter().enumerate();
+    for (i, name) in indexed_tool_names {
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ToolStarted(TuiToolStarted {
                 tool_id: format!("k{i}"),
@@ -473,7 +482,7 @@ fn test_snapshot_group_excludes_semantic_cards() {
                 origin_readable: None,
             }),
         );
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ToolEnded(TuiToolEnded {
                 tool_id: format!("k{i}"),
@@ -501,10 +510,10 @@ fn test_snapshot_group_excludes_semantic_cards() {
 #[serial]
 fn test_snapshot_group_excludes_focused_tool() {
     use crate::kit::atoms::{FOCUSED_ENTRY, FocusedEntry};
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     *FOCUSED_ENTRY.state().write() = None;
     let start_read = |st: &mut BridgeState, id: &str, path: &str| {
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             st,
             &AcpEventData::ToolStarted(TuiToolStarted {
                 tool_id: id.into(),
@@ -518,7 +527,7 @@ fn test_snapshot_group_excludes_focused_tool() {
         );
     };
     let end_tool = |st: &mut BridgeState, id: &str| {
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             st,
             &AcpEventData::ToolEnded(TuiToolEnded {
                 tool_id: id.into(),
@@ -553,7 +562,7 @@ fn test_snapshot_group_excludes_focused_tool() {
 
     // 焦点移走（Esc → 单一事实源清除）→ 下一帧快照恢复自动合并。
     *FOCUSED_ENTRY.state().write() = None;
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "总结".into(),
@@ -572,9 +581,9 @@ fn test_snapshot_group_excludes_focused_tool() {
 #[test]
 #[serial]
 fn test_probe_two_reads_then_text_grouped() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     for id in ["t1", "t2"] {
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ToolStarted(TuiToolStarted {
                 tool_id: id.into(),
@@ -586,7 +595,7 @@ fn test_probe_two_reads_then_text_grouped() {
                 origin_readable: None,
             }),
         );
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ToolEnded(TuiToolEnded {
                 tool_id: id.into(),
@@ -596,7 +605,7 @@ fn test_probe_two_reads_then_text_grouped() {
             }),
         );
     }
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "已使用 Read 工具读取 Cargo.toml。".into(),
@@ -644,9 +653,9 @@ fn assistant_of(
 #[test]
 #[serial]
 fn test_empty_reasoning_placeholder_streams_then_folds() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "回复内容".into(),
@@ -655,7 +664,7 @@ fn test_empty_reasoning_placeholder_streams_then_folds() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
-    let r = reasoning_of(&snap, 0);
+    let r = super::reasoning_of(&snap, 0);
     assert_eq!(
         r.text, "",
         "无 reasoning chunk → 空占位块（不出现空白 block）"
@@ -664,9 +673,9 @@ fn test_empty_reasoning_placeholder_streams_then_folds() {
     assert!(r.is_running);
     assert_eq!(r.fold, FoldState::Preview, "§7 running 行 → Preview");
 
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let snap = VIEW_MODELS.state().read().clone();
-    let r = reasoning_of(&snap, 0);
+    let r = super::reasoning_of(&snap, 0);
     assert_eq!(
         r.status,
         EntryStatus::Completed,
@@ -684,9 +693,9 @@ fn test_empty_reasoning_placeholder_streams_then_folds() {
 #[test]
 #[serial]
 fn test_empty_reasoning_placeholder_hash_stable_across_rebuild() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "a".into(),
@@ -698,7 +707,7 @@ fn test_empty_reasoning_placeholder_hash_stable_across_rebuild() {
     let running_hash = assistant_of(&snap, 0).content_hash;
 
     // 流式追加文本——bubble 重建，hash 随内容变化
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "b".into(),
@@ -711,13 +720,13 @@ fn test_empty_reasoning_placeholder_hash_stable_across_rebuild() {
     assert_ne!(grown_hash, running_hash, "内容变化 hash 必须变化");
 
     // TurnDone 冻结（fold/status/duration 翻转）——hash 再变一次
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let snap = VIEW_MODELS.state().read().clone();
     let frozen_hash = assistant_of(&snap, 0).content_hash;
     assert_ne!(frozen_hash, grown_hash, "状态翻转 hash 必须变化");
 
     // 冻结后快照静态：再次触发快照后处理，hash 秒级稳定（R6）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnCommitted {
             messages_json: "[]".into(),
@@ -737,9 +746,9 @@ fn test_empty_reasoning_placeholder_hash_stable_across_rebuild() {
 #[test]
 #[serial]
 fn test_assistant_duration_frozen_on_turn_done() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "hello".into(),
@@ -753,7 +762,7 @@ fn test_assistant_duration_frozen_on_turn_done() {
     assert_eq!(b.duration_ms, None, "流式期间无冻结值");
     let running_hash = b.content_hash;
 
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let snap = VIEW_MODELS.state().read().clone();
     let b = assistant_of(&snap, 0);
     assert!(
@@ -769,7 +778,7 @@ fn test_assistant_duration_frozen_on_turn_done() {
     );
 
     // 冻结后快照静态：再次触发快照后处理，hash 秒级稳定
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnCommitted {
             messages_json: "[]".into(),
@@ -780,3 +789,5 @@ fn test_assistant_duration_frozen_on_turn_done() {
     let b = assistant_of(&snap, 0);
     assert_eq!(b.content_hash, frozen_hash, "冻结后 hash 稳定");
 }
+
+use crate::kit::atoms::{VIEW_MODELS, ViewModelsSnapshot};

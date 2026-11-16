@@ -3,7 +3,7 @@
 use crate::kit::acp_types::AcpEventData;
 use crate::kit::slash_completion::SlashActionKind;
 use crate::kit::slash_projection::{ArgsSchema, SlashCommandEntry, parse_projection_kind};
-use crate::truncate::summarize_input;
+
 use serde_json::Value;
 
 #[derive(Default)]
@@ -214,7 +214,7 @@ pub(super) fn decode_stream_update_with(
                 .to_string();
             let input_summary = {
                 let raw_input = update.get("rawInput").unwrap_or(&Value::Null);
-                summarize_input(&tool_name, raw_input)
+                crate::truncate::summarize_input(&tool_name, raw_input)
             };
             let raw_input = update.get("rawInput").cloned().unwrap_or(Value::Null);
             // 真实所属 assistant 消息（服务端经 `_meta.peri.originMessageId` 透传）。

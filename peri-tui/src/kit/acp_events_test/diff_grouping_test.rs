@@ -1,4 +1,8 @@
-use super::*;
+use super::AcpEventData;
+use super::TuiRenderUnit;
+use super::TuiToolEnded;
+use super::TuiToolStarted;
+use super::serial;
 
 // ── [G-Diff] Slice 5：含 diff 的 Edit 不入组 + 生产路径 diff 解析 ─────────
 
@@ -10,7 +14,7 @@ use super::*;
 #[test]
 #[serial]
 fn test_edit_with_diff_not_grouped() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     let diff_text = "\
 --- a/src/main.rs
 +++ b/src/main.rs
@@ -18,7 +22,7 @@ fn test_edit_with_diff_not_grouped() {
 -old line
 +new line
 ";
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
             tool_id: "e1".into(),
@@ -30,7 +34,7 @@ fn test_edit_with_diff_not_grouped() {
             origin_readable: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             tool_id: "e1".into(),
@@ -40,7 +44,7 @@ fn test_edit_with_diff_not_grouped() {
         }),
     );
     // 相邻 Read 工具（可合并组）+ Edit 带 diff
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
             tool_id: "r1".into(),
@@ -52,7 +56,7 @@ fn test_edit_with_diff_not_grouped() {
             origin_readable: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             tool_id: "r1".into(),
@@ -76,7 +80,10 @@ fn test_edit_with_diff_not_grouped() {
         edit.diff.is_some(),
         "Edit 输出中的 unified diff 被解析（G-Diff 生产路径）"
     );
-    let diff = edit.diff.as_ref().unwrap();
+    let diff = edit
+        .diff
+        .as_ref()
+        .expect("edit with diff not grouped: fixture must have the expected variant");
     assert_eq!(
         diff.path, "src/main.rs",
         "path hint 来自 raw_input.file_path"
@@ -114,8 +121,8 @@ fn test_edit_with_diff_not_grouped() {
 #[test]
 #[serial]
 fn test_edit_plain_output_grouped_normally() {
-    let mut state = make_fold_test_state();
-    dispatch_and_notify(
+    let mut state = super::make_fold_test_state();
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
             tool_id: "e1".into(),
@@ -127,7 +134,7 @@ fn test_edit_plain_output_grouped_normally() {
             origin_readable: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             tool_id: "e1".into(),
@@ -136,7 +143,7 @@ fn test_edit_plain_output_grouped_normally() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
             tool_id: "e2".into(),
@@ -148,7 +155,7 @@ fn test_edit_plain_output_grouped_normally() {
             origin_readable: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             tool_id: "e2".into(),
@@ -172,7 +179,7 @@ fn test_edit_plain_output_grouped_normally() {
         other => panic!("expected TuiCollapsedGroup, got {other:?}"),
     }
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnCommitted {
             messages_json: "[]".into(),
@@ -189,7 +196,7 @@ fn test_edit_plain_output_grouped_normally() {
         "TurnCommitted 检查点应保持流式期间的工具分组"
     );
 
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let final_snapshot = VIEW_MODELS.state().read().clone();
     assert_eq!(final_snapshot.items.len(), 1);
     assert!(
@@ -206,8 +213,8 @@ fn test_edit_plain_output_grouped_normally() {
 #[test]
 #[serial]
 fn test_edit_with_real_summary_diff_not_grouped() {
-    let mut state = make_fold_test_state();
-    dispatch_and_notify(
+    let mut state = super::make_fold_test_state();
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
             tool_id: "s1".into(),
@@ -219,7 +226,7 @@ fn test_edit_with_real_summary_diff_not_grouped() {
             origin_readable: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             tool_id: "s1".into(),
@@ -242,7 +249,7 @@ fn test_edit_with_real_summary_diff_not_grouped() {
     assert_eq!((adds, dels), (2, 0), "摘要计数进入顶层字段");
 
     // 相邻成功 Read（可合并）+ 带 diff 的 Edit → Edit 不入组
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
             tool_id: "s2".into(),
@@ -254,7 +261,7 @@ fn test_edit_with_real_summary_diff_not_grouped() {
             origin_readable: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             tool_id: "s2".into(),
@@ -281,12 +288,12 @@ fn test_edit_with_real_summary_diff_not_grouped() {
 #[test]
 #[serial]
 fn test_edit_same_line_replacement_with_count_not_grouped() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     for (id, output) in [
         ("r1", "Replaced 1 line to src/a.rs"),
         ("r2", "Replaced 1 line to src/b.rs"),
     ] {
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ToolStarted(TuiToolStarted {
                 tool_id: id.into(),
@@ -298,7 +305,7 @@ fn test_edit_same_line_replacement_with_count_not_grouped() {
                 origin_readable: None,
             }),
         );
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ToolEnded(TuiToolEnded {
                 tool_id: id.into(),
@@ -325,3 +332,5 @@ fn test_edit_same_line_replacement_with_count_not_grouped() {
         }
     }
 }
+
+use crate::kit::atoms::VIEW_MODELS;

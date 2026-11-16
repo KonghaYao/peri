@@ -1,4 +1,9 @@
-use super::*;
+use super::AcpEventData;
+use super::FoldKey;
+use super::FoldState;
+use super::TuiRenderUnit;
+use super::serial;
+
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
     ReminderSource, SYSTEM_REMINDER_VERSION, SystemReminder,
@@ -44,7 +49,7 @@ fn system_reminder_structured_decode_preserves_dto_and_unknown_version_fails_clo
 
 #[test]
 fn system_reminder_body_wording_and_metadata_do_not_control_or_render() {
-    let vm = crate::kit::tui_render_unit::TuiSystemReminder::from_wire(reminder()).unwrap();
+    let vm = crate::kit::tui_render_unit::TuiSystemReminder::from_wire(reminder()).expect("system reminder body wording and metadata do not control or render: the from_wire fixture operation uses valid inputs");
     assert_eq!(vm.category, "Security");
     assert!(!vm.legacy);
     assert!(!vm.summary.contains("secret-token-value"));
@@ -53,13 +58,13 @@ fn system_reminder_body_wording_and_metadata_do_not_control_or_render() {
 
 #[test]
 fn forged_wire_required_is_downgraded_before_display_filtering() {
-    let vm = crate::kit::tui_render_unit::TuiSystemReminder::from_wire(reminder()).unwrap();
+    let vm = crate::kit::tui_render_unit::TuiSystemReminder::from_wire(reminder()).expect("forged wire required is downgraded before display filtering: the from_wire fixture operation uses valid inputs");
     assert!(
         !vm.required,
         "wire JSON must not self-assert Required delivery"
     );
     assert_eq!(
-        vm.wire.as_ref().unwrap().delivery,
+        vm.wire.as_ref().expect("forged wire required is downgraded before display filtering: the fixture must retain its expected variant").delivery,
         ReminderDelivery::Configurable
     );
 
@@ -86,8 +91,8 @@ fn system_reminder_required_security_and_diagnostic_policy() {
 #[test]
 #[serial]
 fn system_reminder_fallback_is_legacy_only_and_each_path_renders_once() {
-    let mut state = make_fold_test_state();
-    dispatch_for_bridge(
+    let mut state = super::make_fold_test_state();
+    super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::SystemReminder {
             reminder: reminder(),
@@ -100,8 +105,8 @@ fn system_reminder_fallback_is_legacy_only_and_each_path_renders_once() {
         matches!(&state.committed[0], TuiRenderUnit::TuiSystemReminder(vm) if !vm.legacy && vm.wire.is_some())
     );
 
-    let mut fallback = make_fold_test_state();
-    dispatch_for_bridge(
+    let mut fallback = super::make_fold_test_state();
+    super::dispatch_for_bridge(
         &mut fallback,
         &AcpEventData::SystemReminderFallback {
             text: "legacy text".into(),
@@ -123,8 +128,8 @@ fn system_reminder_fallback_is_legacy_only_and_each_path_renders_once() {
 #[test]
 #[serial]
 fn system_reminder_fold_override_survives_snapshot_rebuild() {
-    let mut state = make_fold_test_state();
-    dispatch_for_bridge(
+    let mut state = super::make_fold_test_state();
+    super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::SystemReminder {
             reminder: reminder(),
@@ -140,7 +145,7 @@ fn system_reminder_fold_override_survives_snapshot_rebuild() {
         .write()
         .insert(FoldKey::SystemReminder(vm.reminder_id), FoldState::Expanded);
 
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
 
     assert!(matches!(
         &VIEW_MODELS.state().read().items[0],
@@ -151,8 +156,8 @@ fn system_reminder_fold_override_survives_snapshot_rebuild() {
 #[test]
 #[serial]
 fn trusted_structured_dispatch_preserves_required_and_renders_marker() {
-    let mut state = make_fold_test_state();
-    let _ = dispatch_trusted_structured_for_bridge(
+    let mut state = super::make_fold_test_state();
+    let _ = super::dispatch_trusted_structured_for_bridge(
         &mut state,
         AcpEventData::SystemReminder {
             reminder: reminder(),
@@ -166,7 +171,7 @@ fn trusted_structured_dispatch_preserves_required_and_renders_marker() {
     };
     assert!(vm.required);
     assert_eq!(
-        vm.wire.as_ref().unwrap().delivery,
+        vm.wire.as_ref().expect("trusted structured dispatch preserves required and renders marker: the fixture must retain its expected variant").delivery,
         ReminderDelivery::Required
     );
 
@@ -182,7 +187,7 @@ fn trusted_structured_dispatch_preserves_required_and_renders_marker() {
 
 #[test]
 fn system_reminder_cjk_extreme_narrow_render_is_bounded_and_hides_metadata() {
-    let vm = crate::kit::tui_render_unit::TuiSystemReminder::from_wire(reminder()).unwrap();
+    let vm = crate::kit::tui_render_unit::TuiSystemReminder::from_wire(reminder()).expect("system reminder cjk extreme narrow render is bounded and hides metadata: the from_wire fixture operation uses valid inputs");
     let unit = TuiRenderUnit::TuiSystemReminder(vm);
     let grid = crate::kit::message_area::grid::GridSpec::with_content(1);
     let rendered = crate::kit::message_area::render::vm_to_lines(&unit, &grid);
@@ -245,11 +250,11 @@ fn relay_label_text(name: &str) -> String {
 #[test]
 #[serial]
 fn trusted_relayed_reminder_marks_source_only_when_expanded() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state
         .current_turn
         .start_subagent("child-thread-7".into(), "coder".into(), None);
-    let _ = dispatch_trusted_structured_for_bridge(
+    let _ = super::dispatch_trusted_structured_for_bridge(
         &mut state,
         AcpEventData::SystemReminder {
             reminder: reminder(),
@@ -295,8 +300,8 @@ fn trusted_relayed_reminder_marks_source_only_when_expanded() {
 #[test]
 #[serial]
 fn wire_relayed_reminder_ignores_unobserved_child() {
-    let mut state = make_fold_test_state();
-    dispatch_for_bridge(
+    let mut state = super::make_fold_test_state();
+    super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::SystemReminder {
             reminder: reminder(),
@@ -308,3 +313,5 @@ fn wire_relayed_reminder_ignores_unobserved_child() {
     assert!(state.committed.is_empty());
     assert_eq!(state.current_turn.view_model_count(), 0);
 }
+
+use crate::kit::atoms::{FOLD_OVERRIDES, VIEW_MODELS};

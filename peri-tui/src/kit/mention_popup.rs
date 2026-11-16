@@ -8,23 +8,25 @@ use std::sync::{Arc, Mutex};
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
-use ratatui_kit::{
-    crossterm::event::{Event, KeyEventKind, MouseButton, MouseEventKind},
-    prelude::*,
-    ratatui::{
-        layout::{Constraint, Direction},
-        style::{Style, Stylize},
-        text::Line,
-        widgets::{Block, Borders, Paragraph},
-    },
-};
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::KeyEventKind;
+use ratatui_kit::crossterm::event::MouseButton;
+use ratatui_kit::crossterm::event::MouseEventKind;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Constraint;
+use ratatui_kit::ratatui::layout::Direction;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::style::Stylize;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::widgets::Block;
+use ratatui_kit::ratatui::widgets::Borders;
+use ratatui_kit::ratatui::widgets::Paragraph;
 
 use crate::i18n;
-use crate::kit::atoms::MENTION_SELECTED_INDEX;
-use crate::kit::inline_nav::{
-    InlineNavAction, clamp_selection, classify_inline_nav, next_selection, previous_selection,
-};
-use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item};
+
+use crate::kit::inline_nav::InlineNavAction;
+use crate::kit::panel_mouse::AreaTracker;
+use crate::kit::panel_mouse::ListLayout;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
@@ -82,7 +84,7 @@ pub fn MentionPopup(props: &MentionPopupProps, mut hooks: Hooks) -> impl Into<An
             // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
             if let Event::Mouse(mouse) = event {
                 if let Some(area) = area
-                    && let Some(idx) = hit_item(
+                    && let Some(idx) = crate::kit::panel_mouse::hit_item(
                         &mouse,
                         area,
                         ListLayout {
@@ -119,20 +121,21 @@ pub fn MentionPopup(props: &MentionPopupProps, mut hooks: Hooks) -> impl Into<An
             if key.kind != KeyEventKind::Press {
                 return EventResult::Ignored;
             }
-            match classify_inline_nav(&key) {
+            match crate::kit::inline_nav::classify_inline_nav(&key) {
                 Some(InlineNavAction::MoveUp) => {
                     let mut s = selection.write();
-                    *s = previous_selection(*s);
+                    *s = crate::kit::inline_nav::previous_selection(*s);
                     EventResult::Consumed
                 }
                 Some(InlineNavAction::MoveDown) => {
                     let mut s = selection.write();
-                    *s = next_selection(*s, item_count);
+                    *s = crate::kit::inline_nav::next_selection(*s, item_count);
                     EventResult::Consumed
                 }
                 Some(InlineNavAction::Confirm) => {
                     let selected = {
-                        let sel_idx = clamp_selection(*selection.read(), item_count);
+                        let sel_idx =
+                            crate::kit::inline_nav::clamp_selection(*selection.read(), item_count);
                         filtered_for_handler.get(sel_idx).cloned()
                     };
                     if let Some(item) = selected {
@@ -160,7 +163,7 @@ pub fn MentionPopup(props: &MentionPopupProps, mut hooks: Hooks) -> impl Into<An
     let guard = state.read();
     let popup_tokens = &guard.component.popup;
     let semantic = guard.semantic;
-    let sel_idx = clamp_selection(*selection.read(), item_count);
+    let sel_idx = crate::kit::inline_nav::clamp_selection(*selection.read(), item_count);
     let display_lines: Vec<Line<'_>> = filtered
         .iter()
         .enumerate()
@@ -205,3 +208,5 @@ pub fn MentionPopup(props: &MentionPopupProps, mut hooks: Hooks) -> impl Into<An
         }
     )
 }
+
+use crate::kit::atoms::MENTION_SELECTED_INDEX;

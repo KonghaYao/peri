@@ -13,21 +13,28 @@
 //! 证据边界：`cwd` 只是相对路径解析根，**不是**安全沙箱（沿用既有口径）；本文件不
 //! 断言能力根 / 凭据隔离在 builtin 形态下的成立（记 UNVERIFIED）。
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
-use peri_acp_types::builtin_mcp::find;
+use peri_acp_types::builtin_mcp;
 use peri_agent::tools::BaseTool;
-use rmcp::{
-    model::{CallToolRequestParams, CallToolResponse, CallToolResult, ErrorCode},
-    service::{Peer, QuitReason, RunningService},
-    ClientLifecycleMode, RoleClient, ServerHandler, ServiceError,
-};
+use rmcp::model::CallToolRequestParams;
+use rmcp::model::CallToolResponse;
+use rmcp::model::CallToolResult;
+use rmcp::model::ErrorCode;
+use rmcp::service::Peer;
+use rmcp::service::QuitReason;
+use rmcp::service::RunningService;
+use rmcp::ClientLifecycleMode;
+use rmcp::RoleClient;
+use rmcp::ServerHandler;
+use rmcp::ServiceError;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::ArtifactMcpServer;
-use crate::{client::ArtifactClient, ArtifactTool};
-use peri_mcp_common::{invoke_tool_call, list_tools_of};
+use crate::client::ArtifactClient;
+use crate::server::ArtifactMcpServer;
+use crate::ArtifactTool;
 
 /// duplex 双向缓冲（与既有夹具一致）。
 const DUPLEX_BUF: usize = 8 * 1024;
@@ -192,14 +199,14 @@ fn artifact_server_info_declares_tools_capability_and_instance_name() {
 fn artifact_list_tools_matches_registry_declared_tool_set() {
     let dir = cwd_with_report();
     let server = ArtifactMcpServer::new(dir.path());
-    let expected: Vec<&str> = find("artifact")
+    let expected: Vec<&str> = builtin_mcp::find("artifact")
         .expect("artifact 是已实现实例")
         .tools
         .iter()
         .map(|tool| tool.original_name)
         .collect();
 
-    let listed = list_tools_of(server.tools());
+    let listed = peri_mcp_common::list_tools_of(server.tools());
     let actual: Vec<&str> = listed.tools.iter().map(|tool| tool.name.as_ref()).collect();
     assert_eq!(
         actual, expected,
@@ -228,9 +235,10 @@ fn artifact_list_tools_matches_registry_declared_tool_set() {
 async fn artifact_call_tool_unknown_name_is_invalid_params() {
     let dir = cwd_with_report();
     let server = ArtifactMcpServer::new(dir.path());
-    let error = invoke_tool_call(server.tools(), &server.cwd, &call("Nope", json!({})))
-        .await
-        .expect_err("未知工具名必须是协议错误（invalid_params）");
+    let error =
+        peri_mcp_common::invoke_tool_call(server.tools(), &server.cwd, &call("Nope", json!({})))
+            .await
+            .expect_err("未知工具名必须是协议错误（invalid_params）");
     assert_eq!(error.code.0, ErrorCode::INVALID_PARAMS.0);
     assert!(
         error.message.contains("unknown tool: Nope"),
@@ -245,7 +253,7 @@ async fn artifact_call_tool_missing_file_maps_to_error_result_with_path() {
     let cwd = dir.path().to_string_lossy().into_owned();
     let server = ArtifactMcpServer::with_tools(&cwd, vec![artifact_tool(&cwd, UNREACHED_BASE_URL)]);
 
-    let response = invoke_tool_call(
+    let response = peri_mcp_common::invoke_tool_call(
         server.tools(),
         &server.cwd,
         &call("artifact", json!({ "file_path": "missing.html" })),
@@ -267,7 +275,7 @@ async fn artifact_call_tool_upload_connection_failure_maps_to_error_result() {
     let server = ArtifactMcpServer::with_tools(&cwd, vec![artifact_tool(&cwd, UNREACHED_BASE_URL)]);
 
     let result = complete(
-        invoke_tool_call(
+        peri_mcp_common::invoke_tool_call(
             server.tools(),
             &server.cwd,
             &call("artifact", json!({ "file_path": "report.html" })),
@@ -291,7 +299,7 @@ async fn artifact_call_tool_non_success_status_maps_to_error_result() {
     let server = ArtifactMcpServer::with_tools(&cwd, vec![artifact_tool(&cwd, &base_url)]);
 
     let result = complete(
-        invoke_tool_call(
+        peri_mcp_common::invoke_tool_call(
             server.tools(),
             &server.cwd,
             &call("artifact", json!({ "file_path": "report.html" })),
@@ -317,7 +325,7 @@ async fn artifact_call_tool_200_with_error_field_maps_to_error_result() {
     let server = ArtifactMcpServer::with_tools(&cwd, vec![artifact_tool(&cwd, &base_url)]);
 
     let result = complete(
-        invoke_tool_call(
+        peri_mcp_common::invoke_tool_call(
             server.tools(),
             &server.cwd,
             &call("artifact", json!({ "file_path": "report.html" })),
@@ -342,7 +350,7 @@ async fn artifact_call_tool_invalid_json_maps_to_error_result() {
     let server = ArtifactMcpServer::with_tools(&cwd, vec![artifact_tool(&cwd, &base_url)]);
 
     let result = complete(
-        invoke_tool_call(
+        peri_mcp_common::invoke_tool_call(
             server.tools(),
             &server.cwd,
             &call("artifact", json!({ "file_path": "report.html" })),
@@ -368,7 +376,7 @@ async fn artifact_call_tool_empty_response_maps_to_error_result() {
     let server = ArtifactMcpServer::with_tools(&cwd, vec![artifact_tool(&cwd, &base_url)]);
 
     let result = complete(
-        invoke_tool_call(
+        peri_mcp_common::invoke_tool_call(
             server.tools(),
             &server.cwd,
             &call("artifact", json!({ "file_path": "report.html" })),
@@ -393,7 +401,7 @@ async fn artifact_call_tool_upload_success_maps_to_text_content() {
     let (base_url, stub) = spawn_upload_stub(200, STUB_UPLOAD_BODY).await;
     let server = ArtifactMcpServer::with_tools(&cwd, vec![artifact_tool(&cwd, &base_url)]);
 
-    let response = invoke_tool_call(
+    let response = peri_mcp_common::invoke_tool_call(
         server.tools(),
         &server.cwd,
         &call(
@@ -440,7 +448,7 @@ async fn artifact_instance_environment_reaches_upload_request() {
         ("PERI_ARTIFACTS_TOKEN".to_owned(), FAKE_TOKEN.to_owned()),
     ]);
     let server = ArtifactMcpServer::with_instance_env(dir.path(), &env);
-    let response = invoke_tool_call(
+    let response = peri_mcp_common::invoke_tool_call(
         server.tools(),
         &server.cwd,
         &call("artifact", json!({ "file_path": "report.html" })),

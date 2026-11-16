@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::fmt::{self, Debug, Formatter};
 
 use langfuse_client::{IngestionEvent, LangfuseError};
 use parking_lot::Mutex;
@@ -32,6 +33,7 @@ pub struct LangfuseDropSnapshot {
 }
 
 impl LangfuseEventKind {
+    #[must_use]
     pub fn from_event(event: &IngestionEvent) -> Self {
         match event {
             IngestionEvent::TraceCreate { .. } => Self::Trace,
@@ -76,6 +78,7 @@ struct DropEntries {
 }
 
 impl LangfuseDropRegistry {
+    #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity,
@@ -128,3 +131,12 @@ impl Default for LangfuseDropRegistry {
 #[cfg(test)]
 #[path = "drop_telemetry_test.rs"]
 mod tests;
+
+impl Debug for LangfuseDropRegistry {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LangfuseDropRegistry")
+            .field("capacity", &self.capacity)
+            .finish_non_exhaustive()
+    }
+}

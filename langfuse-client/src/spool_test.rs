@@ -5,14 +5,15 @@
 //! fragment/非 http(s) 端点。端口本身的行为在 `spool/types_test.rs` 与
 //! `spool/cleanup_test.rs` 中测试；native 适配器行为在 `spool/native_test.rs` 中测试。
 
-use super::*;
+use super::LangfuseError;
+use super::RouteFingerprint;
 
 const ENDPOINT: &str = "https://cloud.langfuse.com";
 const PUBLIC_KEY: &str = "pk-lf-11111111-2222-3333-4444-555555555555";
 const SECRET_KEY: &str = "sk-lf-99999999-8888-7777-6666-555555555555";
 
 fn fingerprint(endpoint: &str) -> RouteFingerprint {
-    route_fingerprint(endpoint, PUBLIC_KEY, SECRET_KEY).expect("endpoint should be accepted")
+    super::route_fingerprint(endpoint, PUBLIC_KEY, SECRET_KEY).expect("endpoint should be accepted")
 }
 
 #[test]
@@ -59,9 +60,9 @@ fn host_and_explicit_port_stay_distinct() {
 
 #[test]
 fn credential_rotation_isolates_old_objects() {
-    let base = route_fingerprint(ENDPOINT, PUBLIC_KEY, SECRET_KEY).unwrap();
-    let rotated_public = route_fingerprint(ENDPOINT, "pk-lf-rotated", SECRET_KEY).unwrap();
-    let rotated_secret = route_fingerprint(ENDPOINT, PUBLIC_KEY, "sk-lf-rotated").unwrap();
+    let base = super::route_fingerprint(ENDPOINT, PUBLIC_KEY, SECRET_KEY).unwrap();
+    let rotated_public = super::route_fingerprint(ENDPOINT, "pk-lf-rotated", SECRET_KEY).unwrap();
+    let rotated_secret = super::route_fingerprint(ENDPOINT, PUBLIC_KEY, "sk-lf-rotated").unwrap();
     assert_ne!(base, rotated_public);
     assert_ne!(base, rotated_secret);
     assert_ne!(rotated_public, rotated_secret);
@@ -70,8 +71,8 @@ fn credential_rotation_isolates_old_objects() {
 #[test]
 fn framing_separates_field_boundaries() {
     // 无长度分帧时 "ab"+"c" 与 "a"+"bc" 会碰撞；分帧必须让它们不同。
-    let left = route_fingerprint(ENDPOINT, "ab", "c").unwrap();
-    let right = route_fingerprint(ENDPOINT, "a", "bc").unwrap();
+    let left = super::route_fingerprint(ENDPOINT, "ab", "c").unwrap();
+    let right = super::route_fingerprint(ENDPOINT, "a", "bc").unwrap();
     assert_ne!(left, right);
 }
 
@@ -88,7 +89,7 @@ fn rejected_endpoints_never_echo_credentials() {
         "ftp://cloud.langfuse.com",
         "",
     ] {
-        let error = route_fingerprint(rejected, PUBLIC_KEY, secret).unwrap_err();
+        let error = super::route_fingerprint(rejected, PUBLIC_KEY, secret).unwrap_err();
         assert!(
             matches!(error, LangfuseError::Config(_)),
             "unexpected error for {rejected}: {error}"
@@ -114,7 +115,8 @@ fn rejected_endpoints_never_echo_credentials() {
 #[test]
 fn disabled_spool_never_opens_native_and_leaves_the_spool_directory_untouched() {
     use crate::config::TelemetryConfig;
-    use crate::spool::native::{hex, NativeSpool};
+    use crate::spool::native as native_functions;
+    use crate::spool::native::NativeSpool;
 
     const RESIDUE: &str = "tmp/00112233445566778899aabbccddeeff.part";
     let temp = tempfile::tempdir().expect("临时根");
@@ -127,7 +129,7 @@ fn disabled_spool_never_opens_native_and_leaves_the_spool_directory_untouched() 
     let route_dir = temp
         .path()
         .join("peri/telemetry-spool/v1")
-        .join(hex(route.as_bytes()));
+        .join(native_functions::hex(route.as_bytes()));
     let residue = route_dir.join(RESIDUE);
     std::fs::write(&residue, b"crashed writer body").expect("写入残留");
     drop(enabled);

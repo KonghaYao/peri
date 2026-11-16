@@ -1,7 +1,11 @@
 //! Tests
-use super::*;
+use super::InlineNavAction;
+use super::KeyCode;
+use super::KeyEvent;
+
 use ratatui_kit::crossterm::event::{KeyEventKind, KeyEventState, KeyModifiers};
 
+#[must_use]
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent {
         code,
@@ -14,39 +18,39 @@ fn key(code: KeyCode) -> KeyEvent {
 #[test]
 fn test_classify_inline_nav_supports_arrows_and_tab() {
     assert_eq!(
-        classify_inline_nav(&key(KeyCode::Up)),
+        super::classify_inline_nav(&key(KeyCode::Up)),
         Some(InlineNavAction::MoveUp)
     );
     assert_eq!(
-        classify_inline_nav(&key(KeyCode::BackTab)),
+        super::classify_inline_nav(&key(KeyCode::BackTab)),
         Some(InlineNavAction::MoveUp)
     );
     assert_eq!(
-        classify_inline_nav(&key(KeyCode::Down)),
+        super::classify_inline_nav(&key(KeyCode::Down)),
         Some(InlineNavAction::MoveDown)
     );
     assert_eq!(
-        classify_inline_nav(&key(KeyCode::Tab)),
+        super::classify_inline_nav(&key(KeyCode::Tab)),
         Some(InlineNavAction::MoveDown)
     );
     assert_eq!(
-        classify_inline_nav(&key(KeyCode::Enter)),
+        super::classify_inline_nav(&key(KeyCode::Enter)),
         Some(InlineNavAction::Confirm)
     );
     assert_eq!(
-        classify_inline_nav(&key(KeyCode::Esc)),
+        super::classify_inline_nav(&key(KeyCode::Esc)),
         Some(InlineNavAction::Cancel)
     );
-    assert_eq!(classify_inline_nav(&key(KeyCode::Char('x'))), None);
+    assert_eq!(super::classify_inline_nav(&key(KeyCode::Char('x'))), None);
 }
 
 #[test]
 fn test_selection_helpers_are_bounded() {
-    assert_eq!(clamp_selection(5, 0), 0);
-    assert_eq!(clamp_selection(5, 3), 2);
-    assert_eq!(next_selection(0, 0), 0);
-    assert_eq!(next_selection(0, 3), 1);
-    assert_eq!(next_selection(2, 3), 2);
-    assert_eq!(previous_selection(0), 0);
-    assert_eq!(previous_selection(2), 1);
+    assert_eq!(super::clamp_selection(5, 0), 0);
+    assert_eq!(super::clamp_selection(5, 3), 2);
+    assert_eq!(super::next_selection(0, 0), 0);
+    assert_eq!(super::next_selection(0, 3), 1);
+    assert_eq!(super::next_selection(2, 3), 2);
+    assert_eq!(super::previous_selection(0), 0);
+    assert_eq!(super::previous_selection(2), 1);
 }

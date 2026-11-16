@@ -1,16 +1,18 @@
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use peri_agent::{
-    interaction::{
-        InteractionContext, InteractionResponse, QuestionItem, QuestionOption,
-        UserInteractionBroker,
-    },
-    tools::BaseTool,
-};
+use peri_agent::interaction::InteractionContext;
+use peri_agent::interaction::InteractionResponse;
+use peri_agent::interaction::QuestionItem;
+use peri_agent::interaction::QuestionOption;
+use peri_agent::interaction::UserInteractionBroker;
+use peri_agent::tools::BaseTool;
 use serde_json::Value;
 
-use crate::ask_user::{ask_user_tool_definition, ASK_USER_TOOL_DESCRIPTION};
+use crate::ask_user;
+use crate::ask_user::ASK_USER_TOOL_DESCRIPTION;
 
 // ─── AskUserTool ──────────────────────────────────────────────────────────────
 
@@ -22,7 +24,16 @@ pub struct AskUserTool {
     broker: Arc<dyn UserInteractionBroker>,
 }
 
+impl Debug for AskUserTool {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AskUserTool")
+            .finish_non_exhaustive()
+    }
+}
+
 impl AskUserTool {
+    #[must_use]
     pub fn new(broker: Arc<dyn UserInteractionBroker>) -> Self {
         Self { broker }
     }
@@ -111,7 +122,7 @@ impl BaseTool for AskUserTool {
     }
 
     fn parameters(&self) -> Value {
-        ask_user_tool_definition().parameters
+        ask_user::ask_user_tool_definition().parameters
     }
 
     fn timeout(&self) -> Option<std::time::Duration> {

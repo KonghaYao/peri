@@ -1,12 +1,12 @@
 //! Production builtin instance isolation contract (I01).
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
-use peri_acp_types::{
-    builtin_mcp::find as find_builtin_instance,
-    ports::{McpPoolPort, McpPoolShutdownReport},
-};
+use peri_acp_types::builtin_mcp;
+use peri_acp_types::ports::McpPoolPort;
+use peri_acp_types::ports::McpPoolShutdownReport;
 use peri_mcp_cron::{CronScheduler, CronTrigger};
 use peri_middlewares::assembly::{BuiltinInstanceContext, CronInstanceInput};
 use peri_middlewares::mcp::{
@@ -59,10 +59,10 @@ struct BuiltinIsolationFixture {
 impl BuiltinIsolationFixture {
     /// 该实例的池条目（不存在即失败）。
     fn handle(&self, instance: &str) -> Arc<McpClientHandle> {
-        self.pool.get_client(instance).unwrap_or_else(|| {
+        self.pool.client(instance).unwrap_or_else(|| {
             let known: Vec<String> = self
                 .pool
-                .get_all_clients()
+                .clients()
                 .iter()
                 .map(|handle| handle.name.clone())
                 .collect();
@@ -84,7 +84,7 @@ impl BuiltinIsolationFixture {
 
     fn connected_count(&self) -> usize {
         self.pool
-            .get_all_clients()
+            .clients()
             .iter()
             .filter(|handle| matches!(handle.status, ClientStatus::Connected))
             .count()
@@ -229,7 +229,7 @@ impl BuiltinIsolationFixture {
 
 /// 注册表声明的原始工具名（断言一律从注册表派生，不硬编码工具名）。
 fn declared_original_tools(instance: &str) -> Vec<String> {
-    let mut names: Vec<String> = find_builtin_instance(instance)
+    let mut names: Vec<String> = builtin_mcp::find(instance)
         .unwrap_or_else(|| panic!("注册表必须含实例 {instance}"))
         .tools
         .iter()
@@ -493,7 +493,7 @@ async fn instances_have_independent_transport_task_and_state() {
     );
     fixture.pool.remove_server(artifact).await;
     assert!(
-        fixture.pool.get_client(artifact).is_none(),
+        fixture.pool.client(artifact).is_none(),
         "remove_server 必须移除该实例的池条目（连带配置）"
     );
     assert!(

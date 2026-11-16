@@ -27,11 +27,14 @@ fn peri_command(home: &Path, cwd: &Path) -> Command {
 }
 
 fn run_peri(home: &Path, cwd: &Path, args: &[&str]) -> Output {
-    peri_command(home, cwd).args(args).output().unwrap()
+    peri_command(home, cwd)
+        .args(args)
+        .output()
+        .expect("run peri: isolated fixture workspace must remain accessible")
 }
 
 fn text(bytes: &[u8]) -> &str {
-    std::str::from_utf8(bytes).unwrap()
+    std::str::from_utf8(bytes).expect("text: fixture paths and protocol text must be valid UTF-8")
 }
 
 fn assert_success(output: &Output) {
@@ -54,8 +57,15 @@ fn assert_json_error(output: &Output, exit_code: i32, kind: &str, message: &str)
             "{{\"schemaVersion\":1,\"error\":{{\"kind\":\"{kind}\",\"message\":\"{message}\"}}}}\n"
         )
     );
-    let value: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
-    assert_eq!(value.as_object().unwrap().len(), 2);
+    let value: serde_json::Value = serde_json::from_slice(&output.stderr)
+        .expect("assert json error: fixture JSON must match the expected schema");
+    assert_eq!(
+        value
+            .as_object()
+            .expect("assert json error: the fixture must retain its expected variant")
+            .len(),
+        2
+    );
 }
 
 fn assert_human_error(output: &Output, exit_code: i32, kind: &str, message: &str) {
@@ -70,12 +80,27 @@ fn assert_json_diagnostic(output: &Output, exit_code: i32, kind: &str, fragments
     let stderr = text(&output.stderr);
     assert!(stderr.ends_with('\n'));
     assert_eq!(stderr.lines().count(), 1);
-    let value: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
-    assert_eq!(value.as_object().unwrap().len(), 2);
+    let value: serde_json::Value = serde_json::from_slice(&output.stderr)
+        .expect("assert json diagnostic: fixture JSON must match the expected schema");
+    assert_eq!(
+        value
+            .as_object()
+            .expect("assert json diagnostic: the fixture must retain its expected variant")
+            .len(),
+        2
+    );
     assert_eq!(value["schemaVersion"], 1);
-    assert_eq!(value["error"].as_object().unwrap().len(), 2);
+    assert_eq!(
+        value["error"]
+            .as_object()
+            .expect("assert json diagnostic: the fixture must retain its expected variant")
+            .len(),
+        2
+    );
     assert_eq!(value["error"]["kind"], kind);
-    let message = value["error"]["message"].as_str().unwrap();
+    let message = value["error"]["message"]
+        .as_str()
+        .expect("assert json diagnostic: fixture must have the expected variant");
     for fragment in fragments {
         assert!(
             message.contains(fragment),
@@ -113,8 +138,14 @@ fn fixture_meta(id: &str, title: &str, cwd: &str) -> ThreadMeta {
         id: id.to_owned(),
         title: Some(title.to_owned()),
         cwd: fixture_cwd(cwd),
-        created_at: Utc.with_ymd_and_hms(2026, 9, 4, 1, 2, 3).unwrap(),
-        updated_at: Utc.with_ymd_and_hms(2026, 9, 4, 4, 5, 6).unwrap(),
+        created_at: Utc
+            .with_ymd_and_hms(2026, 9, 4, 1, 2, 3)
+            .single()
+            .expect("fixture meta: the fixed fixture date and time must be valid"),
+        updated_at: Utc
+            .with_ymd_and_hms(2026, 9, 4, 4, 5, 6)
+            .single()
+            .expect("fixture meta: the fixed fixture date and time must be valid"),
         message_count: 7,
         content_size: 99,
         parent_thread_id: None,
@@ -129,11 +160,17 @@ fn fixture_meta(id: &str, title: &str, cwd: &str) -> ThreadMeta {
 }
 
 fn create_database(path: &Path, metas: Vec<ThreadMeta>) {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let runtime = tokio::runtime::Runtime::new()
+        .expect("create database: fixture parameters must construct a valid value");
     runtime.block_on(async {
-        let store = SqliteThreadStore::new(path).await.unwrap();
+        let store = SqliteThreadStore::try_new(path)
+            .await
+            .expect("create database: fixture task and request must complete successfully");
         for meta in metas {
-            store.create_thread(meta).await.unwrap();
+            store
+                .create_thread(meta)
+                .await
+                .expect("create database: fixture task and request must complete successfully");
         }
         // 必须在子进程读取前确定性收尾：仅依赖 Drop 会让最后一次连接关闭触发的
         // WAL checkpoint 与 `-wal`/`-shm` 清理异步落在只读打开窗口内，使子进程
@@ -171,7 +208,7 @@ fn assert_forbidden_output(output: &Output) {
 
 #[test]
 fn human_success_is_stdout_only_and_escapes_persisted_controls() {
-    let sandbox = TempDir::new().unwrap();
+    let sandbox = TempDir::new().expect("human success is stdout only and escapes persisted controls: fixture parameters must construct a valid value");
     let db = sandbox.path().join("threads.db");
     create_database(
         &db,
@@ -187,7 +224,7 @@ fn human_success_is_stdout_only_and_escapes_persisted_controls() {
         sandbox.path(),
         &[
             "--db-path",
-            db.to_str().unwrap(),
+            db.to_str().expect("human success is stdout only and escapes persisted controls: fixture paths and protocol text must be valid UTF-8"),
             "meta",
             "session",
             SESSION_ID,
@@ -208,7 +245,7 @@ fn human_success_is_stdout_only_and_escapes_persisted_controls() {
 
 #[test]
 fn json_success_is_one_exact_allowlisted_object() {
-    let sandbox = TempDir::new().unwrap();
+    let sandbox = TempDir::new().expect("json success is one exact allowlisted object: fixture parameters must construct a valid value");
     let db = sandbox.path().join("threads.db");
     create_database(
         &db,
@@ -220,7 +257,7 @@ fn json_success_is_one_exact_allowlisted_object() {
         sandbox.path(),
         &[
             "--db-path",
-            db.to_str().unwrap(),
+            db.to_str().expect("json success is one exact allowlisted object: fixture paths and protocol text must be valid UTF-8"),
             "meta",
             "session",
             SESSION_ID,
@@ -230,7 +267,9 @@ fn json_success_is_one_exact_allowlisted_object() {
 
     assert_success(&output);
     assert_eq!(text(&output.stdout).lines().count(), 1);
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect(
+        "json success is one exact allowlisted object: fixture JSON must match the expected schema",
+    );
     assert_eq!(
         value,
         serde_json::json!({
@@ -250,7 +289,7 @@ fn json_success_is_one_exact_allowlisted_object() {
 
 #[test]
 fn legal_non_v7_uuid_preserves_original_text_lookup() {
-    let sandbox = TempDir::new().unwrap();
+    let sandbox = TempDir::new().expect("legal non v7 uuid preserves original text lookup: fixture parameters must construct a valid value");
     let db = sandbox.path().join("uppercase-id.db");
     let uppercase_id = SESSION_ID.to_ascii_uppercase();
     create_database(
@@ -263,7 +302,7 @@ fn legal_non_v7_uuid_preserves_original_text_lookup() {
         sandbox.path(),
         &[
             "--db-path",
-            db.to_str().unwrap(),
+            db.to_str().expect("legal non v7 uuid preserves original text lookup: fixture paths and protocol text must be valid UTF-8"),
             "meta",
             "session",
             &uppercase_id,
@@ -271,14 +310,14 @@ fn legal_non_v7_uuid_preserves_original_text_lookup() {
         ],
     );
     assert_success(&output);
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("legal non v7 uuid preserves original text lookup: fixture JSON must match the expected schema");
     assert_eq!(value["id"], uppercase_id);
     assert_eq!(value["title"], "uppercase");
 }
 
 #[test]
 fn invalid_id_wins_over_missing_database_without_creating_it() {
-    let sandbox = TempDir::new().unwrap();
+    let sandbox = TempDir::new().expect("invalid id wins over missing database without creating it: fixture parameters must construct a valid value");
     let db = sandbox.path().join("missing-parent").join("threads.db");
 
     let output = run_peri(
@@ -286,7 +325,7 @@ fn invalid_id_wins_over_missing_database_without_creating_it() {
         sandbox.path(),
         &[
             "--db-path",
-            db.to_str().unwrap(),
+            db.to_str().expect("invalid id wins over missing database without creating it: fixture paths and protocol text must be valid UTF-8"),
             "meta",
             "session",
             "not-a-uuid",
@@ -301,13 +340,13 @@ fn invalid_id_wins_over_missing_database_without_creating_it() {
         "session ID must be a valid UUID",
     );
     assert!(!db.exists());
-    assert!(!db.parent().unwrap().exists());
+    assert!(!db.parent().expect("invalid id wins over missing database without creating it: the fixture path must have its expected parent directory").exists());
     assert_forbidden_output(&output);
 }
 
 #[test]
 fn explicit_database_selection_never_falls_back_to_another_database() {
-    let sandbox = TempDir::new().unwrap();
+    let sandbox = TempDir::new().expect("explicit database selection never falls back to another database: fixture parameters must construct a valid value");
     let db_a = sandbox.path().join("a.db");
     let db_b = sandbox.path().join("b.db");
     create_database(&db_a, vec![fixture_meta(OTHER_SESSION_ID, "only-a", "/a")]);
@@ -318,7 +357,7 @@ fn explicit_database_selection_never_falls_back_to_another_database() {
         sandbox.path(),
         &[
             "--db-path",
-            db_a.to_str().unwrap(),
+            db_a.to_str().expect("explicit database selection never falls back to another database: fixture paths and protocol text must be valid UTF-8"),
             "meta",
             "session",
             SESSION_ID,
@@ -337,7 +376,7 @@ fn explicit_database_selection_never_falls_back_to_another_database() {
         sandbox.path(),
         &[
             "--db-path",
-            db_b.to_str().unwrap(),
+            db_b.to_str().expect("explicit database selection never falls back to another database: fixture paths and protocol text must be valid UTF-8"),
             "meta",
             "session",
             SESSION_ID,
@@ -345,7 +384,7 @@ fn explicit_database_selection_never_falls_back_to_another_database() {
         ],
     );
     assert_success(&selected);
-    let value: serde_json::Value = serde_json::from_slice(&selected.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&selected.stdout).expect("explicit database selection never falls back to another database: fixture JSON must match the expected schema");
     assert_eq!(value["title"], "only-b");
     assert_eq!(value["cwd"], fixture_cwd("/b"));
 }
@@ -357,28 +396,28 @@ fn explicit_database_selection_never_falls_back_to_another_database() {
 #[test]
 #[serial]
 fn default_database_reads_existing_single_store_without_modifying_history() {
-    let sandbox = TempDir::new().unwrap();
+    let sandbox = TempDir::new().expect("default database reads existing single store without modifying history: fixture parameters must construct a valid value");
     let home = sandbox.path().join("home");
     let cwd = sandbox.path().join("cwd");
-    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&cwd).expect("default database reads existing single store without modifying history: isolated fixture workspace must remain accessible");
     let db = home.join(".peri/threads/threads.db");
     create_database(&db, vec![fixture_meta(SESSION_ID, "old-history", "/old")]);
-    let before = std::fs::read(&db).unwrap();
+    let before = std::fs::read(&db).expect("default database reads existing single store without modifying history: isolated fixture workspace must remain accessible");
 
     let output = run_peri(&home, &cwd, &["meta", "session", SESSION_ID, "--json"]);
 
     assert_success(&output);
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("default database reads existing single store without modifying history: fixture JSON must match the expected schema");
     assert_eq!(value["title"], "old-history");
     assert_eq!(value["cwd"], fixture_cwd("/old"));
-    assert_eq!(std::fs::read(&db).unwrap(), before);
+    assert_eq!(std::fs::read(&db).expect("default database reads existing single store without modifying history: the fixture storage and layout must support the requested operation"), before);
     assert!(!home.join(".peri/threads/threads-v2.db").exists());
     assert_forbidden_output(&output);
 }
 
 #[test]
 fn explicit_database_selection_returns_each_selected_database_value() {
-    let sandbox = TempDir::new().unwrap();
+    let sandbox = TempDir::new().expect("explicit database selection returns each selected database value: fixture parameters must construct a valid value");
     let db_a = sandbox.path().join("a-same-id.db");
     let db_b = sandbox.path().join("b-same-id.db");
     create_database(&db_a, vec![fixture_meta(SESSION_ID, "selected-a", "/a")]);
@@ -390,7 +429,7 @@ fn explicit_database_selection_returns_each_selected_database_value() {
             sandbox.path(),
             &[
                 "--db-path",
-                db.to_str().unwrap(),
+                db.to_str().expect("explicit database selection returns each selected database value: fixture paths and protocol text must be valid UTF-8"),
                 "meta",
                 "session",
                 SESSION_ID,
@@ -398,7 +437,7 @@ fn explicit_database_selection_returns_each_selected_database_value() {
             ],
         );
         assert_success(&output);
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("explicit database selection returns each selected database value: fixture JSON must match the expected schema");
         assert_eq!(value["title"], expected_title);
     }
 }
@@ -409,10 +448,10 @@ fn explicit_database_selection_returns_each_selected_database_value() {
 #[test]
 #[serial]
 fn missing_default_database_does_not_create_home_paths() {
-    let sandbox = TempDir::new().unwrap();
+    let sandbox = TempDir::new().expect("missing default database does not create home paths: fixture parameters must construct a valid value");
     let home = sandbox.path().join("unused-home");
     let cwd = sandbox.path().join("cwd");
-    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&cwd).expect("missing default database does not create home paths: isolated fixture workspace must remain accessible");
 
     let output = run_peri(&home, &cwd, &["meta", "session", SESSION_ID, "--json"]);
 
@@ -427,14 +466,14 @@ fn missing_default_database_does_not_create_home_paths() {
 
 #[test]
 fn missing_database_and_incompatible_schema_have_stable_process_contracts() {
-    let sandbox = TempDir::new().unwrap();
+    let sandbox = TempDir::new().expect("missing database and incompatible schema have stable process contracts: fixture parameters must construct a valid value");
     let missing = sandbox.path().join("missing.db");
     let missing_output = run_peri(
         sandbox.path(),
         sandbox.path(),
         &[
             "--db-path",
-            missing.to_str().unwrap(),
+            missing.to_str().expect("missing database and incompatible schema have stable process contracts: fixture paths and protocol text must be valid UTF-8"),
             "meta",
             "session",
             SESSION_ID,
@@ -445,18 +484,18 @@ fn missing_database_and_incompatible_schema_have_stable_process_contracts() {
         &missing_output,
         3,
         "database_not_found",
-        &[missing.to_str().unwrap(), "session database not found"],
+        &[missing.to_str().expect("missing database and incompatible schema have stable process contracts: fixture paths and protocol text must be valid UTF-8"), "session database not found"],
     );
     assert!(!missing.exists());
 
     let incompatible = sandbox.path().join("incompatible.db");
-    std::fs::write(&incompatible, b"not a sqlite database").unwrap();
+    std::fs::write(&incompatible, b"not a sqlite database").expect("missing database and incompatible schema have stable process contracts: isolated fixture workspace must remain accessible");
     let incompatible_output = run_peri(
         sandbox.path(),
         sandbox.path(),
         &[
             "--db-path",
-            incompatible.to_str().unwrap(),
+            incompatible.to_str().expect("missing database and incompatible schema have stable process contracts: fixture paths and protocol text must be valid UTF-8"),
             "meta",
             "session",
             SESSION_ID,
@@ -467,14 +506,14 @@ fn missing_database_and_incompatible_schema_have_stable_process_contracts() {
         &incompatible_output,
         4,
         "schema_incompatible",
-        &[incompatible.to_str().unwrap(), "schema"],
+        &[incompatible.to_str().expect("missing database and incompatible schema have stable process contracts: fixture paths and protocol text must be valid UTF-8"), "schema"],
     );
     assert_forbidden_output(&incompatible_output);
 }
 
 #[test]
 fn ordinary_meta_values_preserve_real_process_clap_behavior() {
-    let sandbox = TempDir::new().unwrap();
+    let sandbox = TempDir::new().expect("ordinary meta values preserve real process clap behavior: fixture parameters must construct a valid value");
     let help_cases: &[&[&str]] = &[
         &["-p", "meta", "--help"],
         &["--print", "meta", "--help"],
@@ -532,7 +571,7 @@ fn ordinary_meta_values_preserve_real_process_clap_behavior() {
 
 #[test]
 fn json_grammar_failures_are_single_stable_process_errors() {
-    let sandbox = TempDir::new().unwrap();
+    let sandbox = TempDir::new().expect("json grammar failures are single stable process errors: fixture parameters must construct a valid value");
     let cases: &[&[&str]] = &[
         &["meta", "session", "--json"],
         &[
@@ -596,7 +635,7 @@ fn json_grammar_failures_are_single_stable_process_errors() {
 
 #[test]
 fn malformed_prefix_meta_shape_has_stable_real_process_errors() {
-    let sandbox = TempDir::new().unwrap();
+    let sandbox = TempDir::new().expect("malformed prefix meta shape has stable real process errors: fixture parameters must construct a valid value");
     let cases: &[&[&str]] = &[
         &["--definitely-invalid", "meta", "session", SESSION_ID],
         &[
@@ -631,7 +670,7 @@ fn malformed_prefix_meta_shape_has_stable_real_process_errors() {
 
 #[test]
 fn every_unrelated_top_level_option_is_rejected_by_real_process() {
-    let sandbox = TempDir::new().unwrap();
+    let sandbox = TempDir::new().expect("every unrelated top level option is rejected by real process: fixture parameters must construct a valid value");
     let cases: &[&[&str]] = &[
         &["--print=prompt"],
         &["--output-format", "json"],
@@ -666,262 +705,16 @@ fn every_unrelated_top_level_option_is_rejected_by_real_process() {
 }
 
 #[test]
-fn every_error_kind_has_human_real_binary_stream_and_exit_evidence() {
-    let sandbox = TempDir::new().unwrap();
-
-    let grammar = run_peri(sandbox.path(), sandbox.path(), &["meta", "list"]);
-    assert_human_error(
-        &grammar,
-        2,
-        "invalid_argument",
-        "invalid Meta command arguments",
-    );
-
-    let invalid = run_peri(
-        sandbox.path(),
-        sandbox.path(),
-        &["meta", "session", "not-a-uuid"],
-    );
-    assert_human_error(
-        &invalid,
-        2,
-        "invalid_session_id",
-        "session ID must be a valid UUID",
-    );
-
-    let missing_path = sandbox.path().join("missing.db");
-    let missing_database = run_peri(
-        sandbox.path(),
-        sandbox.path(),
-        &[
-            "--db-path",
-            missing_path.to_str().unwrap(),
-            "meta",
-            "session",
-            SESSION_ID,
-        ],
-    );
-    assert_human_diagnostic(
-        &missing_database,
-        3,
-        "database_not_found",
-        &[missing_path.to_str().unwrap(), "session database not found"],
-    );
-
-    let unreadable = run_peri(
-        sandbox.path(),
-        sandbox.path(),
-        &[
-            "--db-path",
-            sandbox.path().to_str().unwrap(),
-            "meta",
-            "session",
-            SESSION_ID,
-        ],
-    );
-    assert_human_diagnostic(
-        &unreadable,
-        4,
-        "database_unreadable",
-        &[
-            sandbox.path().to_str().unwrap(),
-            "session database is unreadable",
-        ],
-    );
-
-    let incompatible_path = sandbox.path().join("incompatible.db");
-    std::fs::write(&incompatible_path, b"not sqlite").unwrap();
-    let incompatible = run_peri(
-        sandbox.path(),
-        sandbox.path(),
-        &[
-            "--db-path",
-            incompatible_path.to_str().unwrap(),
-            "meta",
-            "session",
-            SESSION_ID,
-        ],
-    );
-    assert_human_diagnostic(
-        &incompatible,
-        4,
-        "schema_incompatible",
-        &[incompatible_path.to_str().unwrap(), "schema"],
-    );
-
-    let compatible_path = sandbox.path().join("compatible.db");
-    create_database(
-        &compatible_path,
-        vec![fixture_meta(OTHER_SESSION_ID, "other", "/other")],
-    );
-    let session_missing = run_peri(
-        sandbox.path(),
-        sandbox.path(),
-        &[
-            "--db-path",
-            compatible_path.to_str().unwrap(),
-            "meta",
-            "session",
-            SESSION_ID,
-        ],
-    );
-    assert_human_diagnostic(
-        &session_missing,
-        3,
-        "session_not_found",
-        &["session not found", "NotApplied"],
-    );
-
-    let corrupt_path = sandbox.path().join("corrupt-human.db");
-    let mut corrupt = fixture_meta(SESSION_ID, "corrupt", "/corrupt");
-    corrupt.message_count = usize::MAX;
-    create_database(&corrupt_path, vec![corrupt]);
-    let corrupt_output = run_peri(
-        sandbox.path(),
-        sandbox.path(),
-        &[
-            "--db-path",
-            corrupt_path.to_str().unwrap(),
-            "meta",
-            "session",
-            SESSION_ID,
-        ],
-    );
-    assert_human_diagnostic(
-        &corrupt_output,
-        4,
-        "corrupt_session_data",
-        &[
-            "session data is corrupt",
-            "stored session data is not readable",
-        ],
-    );
-}
-
-#[test]
-fn human_argument_and_storage_failures_are_stderr_only() {
-    let sandbox = TempDir::new().unwrap();
-    let invalid = run_peri(
-        sandbox.path(),
-        sandbox.path(),
-        &["meta", "session", "not-a-uuid"],
-    );
-    assert_eq!(invalid.status.code(), Some(2));
-    assert!(invalid.stdout.is_empty());
-    assert_eq!(
-        text(&invalid.stderr),
-        "invalid_session_id: session ID must be a valid UUID\n"
-    );
-
-    let missing = sandbox.path().join("missing.db");
-    let database = run_peri(
-        sandbox.path(),
-        sandbox.path(),
-        &[
-            "--db-path",
-            missing.to_str().unwrap(),
-            "meta",
-            "session",
-            SESSION_ID,
-        ],
-    );
-    assert_eq!(database.status.code(), Some(3));
-    assert!(database.stdout.is_empty());
-    assert_human_diagnostic(
-        &database,
-        3,
-        "database_not_found",
-        &[missing.to_str().unwrap(), "session database not found"],
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn unreadable_regular_file_has_real_binary_stream_and_exit_contract() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let effective_uid = Command::new("id").arg("-u").output().unwrap();
-    if text(&effective_uid.stdout).trim() == "0" {
-        return;
-    }
-
-    let sandbox = TempDir::new().unwrap();
-    let db = sandbox.path().join("unreadable.db");
-    create_database(
-        &db,
-        vec![fixture_meta(SESSION_ID, "unreadable", "/unreadable")],
-    );
-    let original_permissions = std::fs::metadata(&db).unwrap().permissions();
-    let mut unreadable_permissions = original_permissions.clone();
-    unreadable_permissions.set_mode(0o000);
-    std::fs::set_permissions(&db, unreadable_permissions).unwrap();
-    let output = run_peri(
-        sandbox.path(),
-        sandbox.path(),
-        &[
-            "--db-path",
-            db.to_str().unwrap(),
-            "meta",
-            "session",
-            SESSION_ID,
-            "--json",
-        ],
-    );
-    std::fs::set_permissions(&db, original_permissions).unwrap();
-    assert_json_diagnostic(
-        &output,
-        4,
-        "database_unreadable",
-        &[db.to_str().unwrap(), "session database is unreadable"],
-    );
-}
-
-#[test]
-fn corrupt_session_data_is_stderr_only_and_does_not_echo_stored_value() {
-    let sandbox = TempDir::new().unwrap();
-    let db = sandbox.path().join("corrupt.db");
-    let mut corrupt = fixture_meta(SESSION_ID, "corrupt-title", "/corrupt");
-    corrupt.message_count = usize::MAX;
-    create_database(&db, vec![corrupt]);
-
-    let output = run_peri(
-        sandbox.path(),
-        sandbox.path(),
-        &[
-            "--db-path",
-            db.to_str().unwrap(),
-            "meta",
-            "session",
-            SESSION_ID,
-            "--json",
-        ],
-    );
-
-    assert_json_diagnostic(
-        &output,
-        4,
-        "corrupt_session_data",
-        &[
-            "session data is corrupt",
-            "stored session data is not readable",
-        ],
-    );
-    assert!(!text(&output.stderr).contains("orrupt-title"));
-    assert!(!text(&output.stderr).contains("corrupt-title"));
-    assert_forbidden_output(&output);
-}
-
-#[test]
 fn meta_path_does_not_read_settings_or_mutate_environment() {
-    let sandbox = TempDir::new().unwrap();
+    let sandbox = TempDir::new().expect("meta path does not read settings or mutate environment: fixture parameters must construct a valid value");
     let home = sandbox.path().join("home");
     let cwd = sandbox.path().join("cwd");
-    std::fs::create_dir_all(home.join(".peri")).unwrap();
-    std::fs::create_dir_all(cwd.join(".peri")).unwrap();
-    std::fs::create_dir_all(home.join(".claude")).unwrap();
-    std::fs::write(home.join(".peri/settings.json"), "leaked").unwrap();
-    std::fs::write(cwd.join(".peri/settings.json"), "leaked").unwrap();
-    std::fs::write(home.join(".claude/settings.json"), "leaked").unwrap();
+    std::fs::create_dir_all(home.join(".peri")).expect("meta path does not read settings or mutate environment: isolated fixture workspace must remain accessible");
+    std::fs::create_dir_all(cwd.join(".peri")).expect("meta path does not read settings or mutate environment: isolated fixture workspace must remain accessible");
+    std::fs::create_dir_all(home.join(".claude")).expect("meta path does not read settings or mutate environment: isolated fixture workspace must remain accessible");
+    std::fs::write(home.join(".peri/settings.json"), "leaked").expect("meta path does not read settings or mutate environment: isolated fixture workspace must remain accessible");
+    std::fs::write(cwd.join(".peri/settings.json"), "leaked").expect("meta path does not read settings or mutate environment: isolated fixture workspace must remain accessible");
+    std::fs::write(home.join(".claude/settings.json"), "leaked").expect("meta path does not read settings or mutate environment: isolated fixture workspace must remain accessible");
     let db = sandbox.path().join("threads.db");
     create_database(
         &db,
@@ -933,7 +726,7 @@ fn meta_path_does_not_read_settings_or_mutate_environment() {
         &cwd,
         &[
             "--db-path",
-            db.to_str().unwrap(),
+            db.to_str().expect("meta path does not read settings or mutate environment: fixture paths and protocol text must be valid UTF-8"),
             "meta",
             "session",
             SESSION_ID,
@@ -943,27 +736,27 @@ fn meta_path_does_not_read_settings_or_mutate_environment() {
     assert_success(&output);
     assert!(!text(&output.stdout).contains("leaked"));
     assert!(!text(&output.stderr).contains("leaked"));
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("meta path does not read settings or mutate environment: fixture JSON must match the expected schema");
     assert_eq!(value["title"], "settings-proof");
 }
 
 #[test]
 fn settings_and_environment_do_not_change_explicit_query_or_contaminate_stdout() {
-    let sandbox = TempDir::new().unwrap();
+    let sandbox = TempDir::new().expect("settings and environment do not change explicit query or contaminate stdout: fixture parameters must construct a valid value");
     let home = sandbox.path().join("home");
     let cwd = sandbox.path().join("cwd");
-    std::fs::create_dir_all(home.join(".peri")).unwrap();
-    std::fs::create_dir_all(cwd.join(".peri")).unwrap();
+    std::fs::create_dir_all(home.join(".peri")).expect("settings and environment do not change explicit query or contaminate stdout: isolated fixture workspace must remain accessible");
+    std::fs::create_dir_all(cwd.join(".peri")).expect("settings and environment do not change explicit query or contaminate stdout: isolated fixture workspace must remain accessible");
     std::fs::write(
         home.join(".peri/settings.json"),
         r#"{"env":{"PERI_META_SENTINEL":"global-setting"}}"#,
     )
-    .unwrap();
+    .expect("settings and environment do not change explicit query or contaminate stdout: isolated fixture workspace must remain accessible");
     std::fs::write(
         cwd.join(".peri/settings.json"),
         r#"{"env":{"PERI_META_SENTINEL":"workspace-setting"}}"#,
     )
-    .unwrap();
+    .expect("settings and environment do not change explicit query or contaminate stdout: isolated fixture workspace must remain accessible");
     let db = sandbox.path().join("explicit.db");
     create_database(
         &db,
@@ -975,18 +768,18 @@ fn settings_and_environment_do_not_change_explicit_query_or_contaminate_stdout()
         .env("PERI_META_SENTINEL", "process-setting")
         .args([
             "--db-path",
-            db.to_str().unwrap(),
+            db.to_str().expect("settings and environment do not change explicit query or contaminate stdout: fixture paths and protocol text must be valid UTF-8"),
             "meta",
             "session",
             SESSION_ID,
             "--json",
         ])
         .output()
-        .unwrap();
+        .expect("settings and environment do not change explicit query or contaminate stdout: isolated fixture workspace must remain accessible");
 
     assert_success(&output);
     assert_eq!(text(&output.stdout).lines().count(), 1);
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("settings and environment do not change explicit query or contaminate stdout: fixture JSON must match the expected schema");
     assert_eq!(value["id"], SESSION_ID);
     assert_eq!(value["title"], "stable-result");
     let combined = format!("{}{}", text(&output.stdout), text(&output.stderr));
@@ -996,3 +789,6 @@ fn settings_and_environment_do_not_change_explicit_query_or_contaminate_stdout()
     assert!(!combined.contains("global-setting"));
     assert_forbidden_output(&output);
 }
+
+#[path = "meta_session_cli/error_contracts.rs"]
+mod error_contracts;

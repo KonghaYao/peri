@@ -20,16 +20,18 @@
 //! 全局 Esc 由 `event_handlers::register_root_handlers` 处理——优先级最高，
 //! 即使面板或 @mention 也开着，先关弹窗。
 
-use crate::kit::atoms::{self, DownloadProgressPayload, PopupKind};
-use crate::kit::popups::{
-    confirm_popup::ConfirmPopup, download_progress::DownloadProgressPopup, hitl_popup::HitlPopup,
-    model_quick_switch::ModelQuickSwitchPopup, oauth_popup::OAuthPopup, rewind_popup::RewindPopup,
-};
+use crate::kit::atoms;
+
+use crate::kit::popups::confirm_popup::ConfirmPopup;
+use crate::kit::popups::download_progress::DownloadProgressPopup;
+use crate::kit::popups::hitl_popup::HitlPopup;
+use crate::kit::popups::model_quick_switch::ModelQuickSwitchPopup;
+use crate::kit::popups::oauth_popup::OAuthPopup;
+use crate::kit::popups::rewind_popup::RewindPopup;
 use peri_theme::atoms::THEME_ATOM;
-use ratatui_kit::{
-    prelude::*,
-    ratatui::layout::{Constraint, Rect},
-};
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Constraint;
+use ratatui_kit::ratatui::layout::Rect;
 
 /// 弹窗覆盖层组件。
 ///
@@ -187,6 +189,7 @@ pub fn close_hitl_popup_for_owner(owner: &crate::acp_client::InteractionOwner) -
 }
 
 /// 是否有弹窗激活。
+#[must_use]
 pub fn is_popup_active() -> bool {
     atoms::POPUP_KIND.state().read().is_some()
 }
@@ -194,3 +197,7 @@ pub fn is_popup_active() -> bool {
 #[cfg(test)]
 #[path = "popup_overlay_test.rs"]
 mod tests;
+
+use crate::kit::atoms::DownloadProgressPayload;
+
+use crate::kit::atoms::PopupKind;

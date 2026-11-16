@@ -1,14 +1,14 @@
-use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
-    sync::Arc,
-};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashSet;
+use std::fmt::{self, Debug, Formatter};
+use std::sync::Arc;
 
 use parking_lot::RwLock;
-use peri_acp_types::{
-    builtin_mcp::{original_tool_name_of_effective, BUILTIN_MCP_INSTANCES},
-    mcp_control::SessionMcpCatalogSnapshot,
-    ports::SessionMcpCatalogPort,
-};
+
+use peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES;
+use peri_acp_types::mcp_control::SessionMcpCatalogSnapshot;
+use peri_acp_types::ports::SessionMcpCatalogPort;
 
 use crate::tools::{BaseTool, ToolDefinition};
 
@@ -47,8 +47,8 @@ pub struct StartupToolUpdate {
     pub required: Vec<StartupRequiredTool>,
 }
 
-impl std::fmt::Debug for StartupToolUpdate {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for StartupToolUpdate {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("StartupToolUpdate")
             .field(
@@ -84,8 +84,8 @@ pub struct SessionToolCatalogSnapshot {
     pub aliases: BTreeMap<String, String>,
 }
 
-impl std::fmt::Debug for SessionToolCatalogSnapshot {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for SessionToolCatalogSnapshot {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SessionToolCatalogSnapshot")
             .field("generation", &self.generation)
@@ -97,6 +97,7 @@ impl std::fmt::Debug for SessionToolCatalogSnapshot {
 }
 
 impl SessionToolCatalogSnapshot {
+    #[must_use]
     pub fn tool_map(&self) -> BTreeMap<String, Arc<dyn BaseTool>> {
         self.tools
             .iter()
@@ -135,6 +136,7 @@ impl ToolFilterPolicy {
     }
 
     /// 在按名策略之外校验 MCP 来源；显式 builtin allowlist 不能授权同名外部 raw 工具。
+    #[must_use]
     pub fn canonical(allowed: Option<Vec<String>>, disallowed: Vec<String>) -> ToolFilter {
         let explicit_without_wildcard = allowed
             .as_ref()
@@ -151,7 +153,9 @@ impl ToolFilterPolicy {
             {
                 return true;
             }
-            let policy_name = original_tool_name_of_effective(tool.name()).unwrap_or(tool.name());
+            let policy_name =
+                peri_acp_types::builtin_mcp::original_tool_name_of_effective(tool.name())
+                    .unwrap_or(tool.name());
             !BUILTIN_MCP_INSTANCES.iter().any(|instance| {
                 instance
                     .tools
@@ -207,7 +211,7 @@ impl ToolFilterPolicy {
 /// 名字字面量只在声明表里声明一份，本模块不得复制或反拆。
 fn name_candidates(name: &str) -> Vec<String> {
     let lowered = name.to_lowercase();
-    match original_tool_name_of_effective(name) {
+    match peri_acp_types::builtin_mcp::original_tool_name_of_effective(name) {
         Some(original) => vec![lowered, original.to_lowercase()],
         None => vec![lowered],
     }
@@ -230,6 +234,7 @@ pub struct SessionToolCatalog {
 }
 
 impl SessionToolCatalog {
+    #[must_use]
     pub fn new(
         base_tools: BTreeMap<String, Arc<dyn BaseTool>>,
         capability: Option<Arc<dyn SessionMcpCatalogPort>>,
@@ -245,6 +250,7 @@ impl SessionToolCatalog {
         Self::try_with_filter(base_tools, capability, Arc::new(|_| true))
     }
 
+    #[must_use]
     pub fn with_filter(
         base_tools: BTreeMap<String, Arc<dyn BaseTool>>,
         capability: Option<Arc<dyn SessionMcpCatalogPort>>,
@@ -284,6 +290,7 @@ impl SessionToolCatalog {
         })
     }
 
+    #[must_use]
     pub fn snapshot(&self) -> Arc<SessionToolCatalogSnapshot> {
         Arc::clone(&self.state.read().published)
     }
@@ -553,6 +560,23 @@ pub(crate) fn warn_tool_collision(winner: &dyn BaseTool, skipped: &dyn BaseTool)
     );
 }
 
+impl Debug for CatalogToolEntry {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogToolEntry")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Debug for SessionToolCatalog {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionToolCatalog")
+            .field("capability_present", &self.capability.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 #[path = "tool_catalog_test.rs"]
 mod tests;
@@ -564,7 +588,7 @@ mod tests;
 /// 裸名与 effective name 两种写法都必须继续生效）。
 #[cfg(test)]
 mod filter_policy_parity_tests {
-    use super::*;
+    use crate::session::tool_catalog::ToolFilterPolicy;
 
     /// 声明表里的 effective name（字面量只在 `peri_acp_types::builtin_mcp` 声明一份）。
     fn effective_name(instance: &str, original_name: &str) -> &'static str {
@@ -626,11 +650,15 @@ mod filter_policy_parity_tests {
             "未命中归一表的名字不受 builtin 归一影响"
         );
         assert!(
-            original_tool_name_of_effective(&lowered).is_none(),
+            peri_acp_types::builtin_mcp::original_tool_name_of_effective(&lowered).is_none(),
             "未命中归一表 ⇒ 候选只有原样"
         );
         assert!(
-            original_tool_name_of_effective(effective_name("web", "WebSearch")).is_some(),
+            peri_acp_types::builtin_mcp::original_tool_name_of_effective(effective_name(
+                "web",
+                "WebSearch"
+            ))
+            .is_some(),
             "对照组：冻结字面量必须命中归一表"
         );
         // 通配符语义不变：`*` 只对 allow 生效

@@ -6,13 +6,12 @@
 
 use std::path::PathBuf;
 
-use super::resolve_log_target;
-
 /// 裸文件名（无目录部分）必须落到当前目录：`Path::new("peri.log").parent()` 是
 /// `Some("")` 而不是 `None`，空路径会让 appender 读目录失败。
 #[test]
 fn bare_log_file_name_resolves_to_current_directory() {
-    let (directory, prefix) = resolve_log_target(Some("peri.log"), "peri-print");
+    let (directory, prefix) =
+        crate::telemetry::subscriber::resolve_log_target(Some("peri.log"), "peri-print");
     assert_eq!(directory, PathBuf::from("."));
     // 前缀取 file_stem（轮转时拼日期后缀，与既有行为一致）。
     assert_eq!(prefix, "peri");
@@ -30,7 +29,8 @@ fn every_log_file_input_resolves_to_a_non_empty_directory() {
         "/var/tmp/peri.log",
         "./peri.log",
     ] {
-        let (directory, prefix) = resolve_log_target(Some(input), "peri-print");
+        let (directory, prefix) =
+            crate::telemetry::subscriber::resolve_log_target(Some(input), "peri-print");
         assert!(
             !directory.as_os_str().is_empty(),
             "RUST_LOG_FILE={input:?} 解析出空日志目录"
@@ -44,14 +44,16 @@ fn every_log_file_input_resolves_to_a_non_empty_directory() {
 
 #[test]
 fn nested_relative_log_file_keeps_its_directory_and_stem() {
-    let (directory, prefix) = resolve_log_target(Some(".tmp/agent-tui.log"), "agent-tui");
+    let (directory, prefix) =
+        crate::telemetry::subscriber::resolve_log_target(Some(".tmp/agent-tui.log"), "agent-tui");
     assert_eq!(directory, PathBuf::from(".tmp"));
     assert_eq!(prefix, "agent-tui");
 }
 
 #[test]
 fn absolute_log_file_keeps_its_directory_and_stem() {
-    let (directory, prefix) = resolve_log_target(Some("/var/tmp/peri.log"), "peri-print");
+    let (directory, prefix) =
+        crate::telemetry::subscriber::resolve_log_target(Some("/var/tmp/peri.log"), "peri-print");
     assert_eq!(directory, PathBuf::from("/var/tmp"));
     assert_eq!(prefix, "peri");
 }
@@ -60,7 +62,7 @@ fn absolute_log_file_keeps_its_directory_and_stem() {
 /// 与 service 名（生产默认路径）。
 #[test]
 fn default_log_target_is_the_peri_home_logs_directory() {
-    let (directory, prefix) = resolve_log_target(None, "agent-tui");
+    let (directory, prefix) = crate::telemetry::subscriber::resolve_log_target(None, "agent-tui");
     assert!(directory.is_absolute(), "默认日志目录应为绝对路径");
     match dirs::home_dir() {
         Some(home) => assert_eq!(

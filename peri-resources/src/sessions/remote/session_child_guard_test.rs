@@ -23,7 +23,6 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::store::InheritedContext;
 
-use super::cloud_tests::{synth_binding, synth_thread};
 use super::schema::StoreId;
 use super::session_data::RemoteSessionData;
 use crate::sessions::data::SessionDataPort;
@@ -44,7 +43,7 @@ impl ClosedRemote {
 /// 合成一份新建输入：默认是 root（`parent_thread_id: None`），由调用方按需改成带父。
 fn root_session(thread: &str) -> NewSession {
     NewSession {
-        thread_id: synth_thread(thread),
+        thread_id: super::cloud_tests::synth_thread(thread),
         created_at: "2026-09-26T00:00:00Z".to_owned(),
         meta: NewSessionMeta {
             title: Some(format!("session {thread}")),
@@ -54,7 +53,7 @@ fn root_session(thread: &str) -> NewSession {
             cancel_policy: Default::default(),
             snapshot_at_message_id: None,
         },
-        binding: synth_binding(),
+        binding: super::cloud_tests::synth_binding(),
         frozen: FrozenSnapshotBytes::new(r#"{"frozen":"guard"}"#),
     }
 }
@@ -68,21 +67,21 @@ fn child_snapshot(
 ) -> ChildSnapshot {
     ChildSnapshot {
         target: NewSession {
-            thread_id: synth_thread(child),
+            thread_id: super::cloud_tests::synth_thread(child),
             created_at: "2026-09-26T00:00:00Z".to_owned(),
             meta: NewSessionMeta {
                 title: Some(format!("child {child}")),
                 cwd: "/tmp/peri-child-guard".to_owned(),
-                parent_thread_id: meta_parent.map(synth_thread),
+                parent_thread_id: meta_parent.map(super::cloud_tests::synth_thread),
                 hidden: true,
                 cancel_policy: Default::default(),
                 snapshot_at_message_id: None,
             },
-            binding: synth_binding(),
+            binding: super::cloud_tests::synth_binding(),
             frozen: FrozenSnapshotBytes::new(r#"{"frozen":"guard"}"#),
         },
-        parent_id: synth_thread(parent),
-        root_id: synth_thread(root),
+        parent_id: super::cloud_tests::synth_thread(parent),
+        root_id: super::cloud_tests::synth_thread(root),
         inherited: InheritedContext::default(),
     }
 }
@@ -129,7 +128,7 @@ async fn test_remote_root_entry_rejects_a_parent_before_any_io() {
     let remote = ClosedRemote::open().await;
 
     let mut with_parent = root_session("root-with-parent");
-    with_parent.meta.parent_thread_id = Some(synth_thread("root-parent"));
+    with_parent.meta.parent_thread_id = Some(super::cloud_tests::synth_thread("root-parent"));
     let error = remote
         .adapter
         .save_new_session(&with_parent)

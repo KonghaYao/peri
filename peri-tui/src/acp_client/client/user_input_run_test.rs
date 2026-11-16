@@ -1,11 +1,17 @@
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use peri_acp::event::AcpEvent;
-use peri_acp::transport::{AcpTransport, mpsc::mpsc_transport_pair, types::RequestId};
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::RequestId;
 use serde_json::json;
 
-use super::*;
+use super::{
+    AcpNotification, AcpTuiClient, IncomingMessage, InteractionLifecycle, RegisterDecision,
+    ReverseInteractionKind,
+};
+
 use crate::acp_client::interaction_lifecycle::TransitionKind;
 
 fn bound_lifecycle() -> InteractionLifecycle {
@@ -17,7 +23,7 @@ fn bound_lifecycle() -> InteractionLifecycle {
 
 #[tokio::test]
 async fn test_external_execution_stop_does_not_target_user_input_ticket() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, tx, mut rx) = AcpTuiClient::new_interactive(transport);
     client.lifecycle.force_stable("s1", false);
     client.user_input_queue.store(true, Ordering::Release);
@@ -30,14 +36,14 @@ async fn test_external_execution_stop_does_not_target_user_input_ticket() {
             }}),
         )
         .await
-        .unwrap();
+        .expect("external execution stop does not target user input ticket: fixture task and request must complete successfully");
     assert!(matches!(
         rx.recv().await,
         Some(AcpNotification::AgentEvent { .. })
     ));
     assert!(client.lifecycle.active_execution(false).is_some());
     assert!(client.lifecycle.active_execution(true).is_none());
-    client.cancel().await.unwrap();
+    client.cancel().await.expect("external execution stop does not target user input ticket: fixture task and request must complete successfully");
     assert!(
         matches!(server.recv().await, Some(IncomingMessage::Notification {
         method, params,
@@ -49,7 +55,7 @@ async fn test_external_execution_stop_does_not_target_user_input_ticket() {
 /// [回归测试] 内部执行开始不得绕过 generation、retired request 或选中会话边界。
 #[tokio::test]
 async fn test_execution_started_rejects_duplicate_generation_and_switched_session() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, tx, mut rx) = AcpTuiClient::new_interactive(transport);
     client.lifecycle.force_stable("s1", false);
     client.spawn_pump(tx);
@@ -61,7 +67,7 @@ async fn test_execution_started_rejects_duplicate_generation_and_switched_sessio
     server
         .send_notification("peri/agent_event", started("s1", "g1", "A"))
         .await
-        .unwrap();
+        .expect("execution started rejects duplicate generation and switched session: fixture task and request must complete successfully");
     assert!(matches!(rx.recv().await, Some(AcpNotification::AgentEvent {
         event: AcpEvent::ExecutionStarted { request_id, .. }, ..
     }) if request_id == "A"));
@@ -73,12 +79,12 @@ async fn test_execution_started_rejects_duplicate_generation_and_switched_sessio
         server
             .send_notification("peri/agent_event", event)
             .await
-            .unwrap();
+            .expect("execution started rejects duplicate generation and switched session: fixture task and request must complete successfully");
     }
     server
         .send_notification("session/update", json!({"sessionId":"s1","test":"barrier"}))
         .await
-        .unwrap();
+        .expect("execution started rejects duplicate generation and switched session: fixture task and request must complete successfully");
     assert!(matches!(
         rx.recv().await,
         Some(AcpNotification::SessionUpdate { .. })
@@ -89,21 +95,21 @@ async fn test_execution_started_rejects_duplicate_generation_and_switched_sessio
             json!({"sessionId":"s1","requestId":"A"}),
         )
         .await
-        .unwrap();
+        .expect("execution started rejects duplicate generation and switched session: fixture task and request must complete successfully");
     assert!(
         matches!(rx.recv().await, Some(AcpNotification::AgentDone { request_id: Some(id), .. }) if id == "A")
     );
     server
         .send_notification("peri/agent_event", started("s1", "g1", "A"))
         .await
-        .unwrap();
+        .expect("execution started rejects duplicate generation and switched session: fixture task and request must complete successfully");
     server
         .send_notification(
             "session/update",
             json!({"sessionId":"s1","test":"retired-barrier"}),
         )
         .await
-        .unwrap();
+        .expect("execution started rejects duplicate generation and switched session: fixture task and request must complete successfully");
     assert!(matches!(
         rx.recv().await,
         Some(AcpNotification::SessionUpdate { .. })
@@ -111,7 +117,7 @@ async fn test_execution_started_rejects_duplicate_generation_and_switched_sessio
     let transition = client
         .lifecycle
         .begin_transition(TransitionKind::Load, Some("s2".into()))
-        .unwrap();
+        .expect("execution started rejects duplicate generation and switched session: the begin_transition fixture operation uses valid inputs");
     client
         .lifecycle
         .commit_stable(transition.generation, "s2".into());
@@ -120,11 +126,11 @@ async fn test_execution_started_rejects_duplicate_generation_and_switched_sessio
     server
         .send_notification("peri/agent_event", started("s1", "g1", "C"))
         .await
-        .unwrap();
+        .expect("execution started rejects duplicate generation and switched session: fixture task and request must complete successfully");
     server
         .send_notification("peri/agent_event", started("s2", "g2", "D"))
         .await
-        .unwrap();
+        .expect("execution started rejects duplicate generation and switched session: fixture task and request must complete successfully");
     assert!(matches!(rx.recv().await, Some(AcpNotification::AgentEvent {
         session_id, event: AcpEvent::ExecutionStarted { request_id, .. },
     }) if session_id == "s2" && request_id == "D"));
@@ -133,7 +139,7 @@ async fn test_execution_started_rejects_duplicate_generation_and_switched_sessio
 /// [回归测试] snapshot 尚未经 pump 到达时，真实执行开始本身即可首次绑定 generation。
 #[tokio::test]
 async fn test_execution_started_before_initial_snapshot_opens_lease() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, tx, mut rx) = AcpTuiClient::new_interactive(transport);
     client.lifecycle.force_stable("s1", false);
     client.user_input_queue.store(true, Ordering::Release);
@@ -148,7 +154,7 @@ async fn test_execution_started_before_initial_snapshot_opens_lease() {
             }),
         )
         .await
-        .unwrap();
+        .expect("execution started before initial snapshot opens lease: fixture task and request must complete successfully");
     assert!(matches!(rx.recv().await, Some(AcpNotification::AgentEvent {
         event: AcpEvent::ExecutionStarted { request_id, .. }, ..
     }) if request_id == "internal"));
@@ -171,7 +177,7 @@ async fn test_execution_started_before_initial_snapshot_opens_lease() {
 
 #[tokio::test]
 async fn test_execution_started_opens_first_permission_and_ask_until_matching_done() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, tx, mut rx) = AcpTuiClient::new_interactive(transport);
     client.lifecycle.force_stable("s1", false);
     client.spawn_pump(tx);
@@ -182,11 +188,11 @@ async fn test_execution_started_opens_first_permission_and_ask_until_matching_do
             json!({
                 "sessionId": "s1", "event_json": serde_json::to_string(&AcpEvent::ExecutionStarted {
                     generation: "mailbox-1".into(), request_id: "run-1".into(),
-                }).unwrap(),
+                }).expect("execution started opens first permission and ask until matching done: fixture data must serialize to JSON"),
             }),
         )
         .await
-        .unwrap();
+        .expect("execution started opens first permission and ask until matching done: fixture must serialize to JSON");
     assert!(matches!(rx.recv().await, Some(AcpNotification::AgentEvent {
         event: AcpEvent::ExecutionStarted { request_id, .. }, ..
     }) if request_id == "run-1"));
@@ -196,12 +202,12 @@ async fn test_execution_started_opens_first_permission_and_ask_until_matching_do
             request_server
                 .send_request(method, json!({ "sessionId": "s1" }))
                 .await
-                .unwrap()
+                .expect("execution started opens first permission and ask until matching done: fixture task and request must complete successfully")
         });
         let notification = tokio::time::timeout(Duration::from_secs(3), rx.recv())
             .await
-            .unwrap()
-            .unwrap();
+            .expect("execution started opens first permission and ask until matching done: fixture task and request must complete successfully")
+            .expect("execution started opens first permission and ask until matching done: fixture task and request must complete successfully");
         let owner = match notification {
             AcpNotification::RequestPermission { owner, .. }
             | AcpNotification::Elicitation { owner, .. } => owner,
@@ -216,8 +222,8 @@ async fn test_execution_started_opens_first_permission_and_ask_until_matching_do
                     "cancelled".into(),
                 )
                 .await
-                .unwrap();
-            request.await.unwrap();
+                .expect("execution started opens first permission and ask until matching done: fixture task and request must complete successfully");
+            request.await.expect("execution started opens first permission and ask until matching done: fixture task and request must complete successfully");
             assert!(matches!(
                 rx.recv().await,
                 Some(AcpNotification::InteractionTerminal { .. })
@@ -230,8 +236,8 @@ async fn test_execution_started_opens_first_permission_and_ask_until_matching_do
                     "answered".into(),
                 )
                 .await
-                .unwrap();
-            let response = request.await.unwrap();
+                .expect("execution started opens first permission and ask until matching done: fixture task and request must complete successfully");
+            let response = request.await.expect("execution started opens first permission and ask until matching done: fixture task and request must complete successfully");
             assert_eq!(response["action"], "accept");
             assert!(matches!(
                 rx.recv().await,
@@ -244,9 +250,9 @@ async fn test_execution_started_opens_first_permission_and_ask_until_matching_do
         request_server
             .send_request("elicitation/create", json!({"sessionId":"s1"}))
             .await
-            .unwrap()
+            .expect("execution started opens first permission and ask until matching done: fixture task and request must complete successfully")
     });
-    let AcpNotification::Elicitation { owner, .. } = rx.recv().await.unwrap() else {
+    let AcpNotification::Elicitation { owner, .. } = rx.recv().await.expect("execution started opens first permission and ask until matching done: fixture task and request must complete successfully") else {
         panic!("matching done 前应接纳 AskUser")
     };
     server
@@ -255,11 +261,11 @@ async fn test_execution_started_opens_first_permission_and_ask_until_matching_do
             json!({"sessionId":"s1","requestId":"old-run"}),
         )
         .await
-        .unwrap();
+        .expect("execution started opens first permission and ask until matching done: fixture task and request must complete successfully");
     server
         .send_notification("session/update", json!({"sessionId":"s1","test":"barrier"}))
         .await
-        .unwrap();
+        .expect("execution started opens first permission and ask until matching done: fixture task and request must complete successfully");
     assert!(matches!(
         rx.recv().await,
         Some(AcpNotification::SessionUpdate { .. })
@@ -274,7 +280,7 @@ async fn test_execution_started_opens_first_permission_and_ask_until_matching_do
             json!({"sessionId":"s1","requestId":"run-1"}),
         )
         .await
-        .unwrap();
+        .expect("execution started opens first permission and ask until matching done: fixture task and request must complete successfully");
     assert!(
         matches!(rx.recv().await, Some(AcpNotification::InteractionTerminal { owner: ended, .. }) if ended == owner)
     );
@@ -282,7 +288,7 @@ async fn test_execution_started_opens_first_permission_and_ask_until_matching_do
         rx.recv().await,
         Some(AcpNotification::AgentDone { .. })
     ));
-    let response = pending.await.unwrap();
+    let response = pending.await.expect("execution started opens first permission and ask until matching done: fixture task and request must complete successfully");
     assert_eq!(response["action"], "cancel");
     assert!(matches!(
         client.lifecycle.register_reverse(
@@ -298,7 +304,7 @@ async fn test_execution_started_opens_first_permission_and_ask_until_matching_do
 /// [回归测试] 快照先恢复 B 时，阻塞在 operation gate 后的 A done 不能重置 B。
 #[tokio::test]
 async fn test_user_input_run_snapshot_before_old_done_keeps_new_run_active() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, tx, mut rx) = AcpTuiClient::new_interactive(transport);
     client.lifecycle.force_stable("s1", false);
     client.user_input_queue.store(true, Ordering::Release);
@@ -316,7 +322,7 @@ async fn test_user_input_run_snapshot_before_old_done_keeps_new_run_active() {
             json!({"sessionId":"s1", "event":started("A")}),
         )
         .await
-        .unwrap();
+        .expect("user input run snapshot before old done keeps new run active: fixture task and request must complete successfully");
     assert!(matches!(
         rx.recv().await,
         Some(AcpNotification::AgentEvent { .. })
@@ -328,11 +334,11 @@ async fn test_user_input_run_snapshot_before_old_done_keeps_new_run_active() {
             json!({"sessionId":"s1", "requestId":"A"}),
         )
         .await
-        .unwrap();
+        .expect("user input run snapshot before old done keeps new run active: fixture task and request must complete successfully");
     client
         .lifecycle
         .open_execution("s1", "mailbox-1", "B", true)
-        .unwrap();
+        .expect("user input run snapshot before old done keeps new run active: the open_execution fixture operation uses valid inputs");
     client.deliver_immediate(AcpNotification::AgentEvent {
         session_id: "s1".into(),
         event: started("B"),
@@ -347,14 +353,14 @@ async fn test_user_input_run_snapshot_before_old_done_keeps_new_run_active() {
             json!({"sessionId":"s1", "event":started("B")}),
         )
         .await
-        .unwrap();
+        .expect("user input run snapshot before old done keeps new run active: fixture task and request must complete successfully");
     server
         .send_notification(
             "session/update",
             json!({"sessionId":"s1", "test":"barrier"}),
         )
         .await
-        .unwrap();
+        .expect("user input run snapshot before old done keeps new run active: fixture task and request must complete successfully");
     assert!(
         matches!(rx.recv().await, Some(AcpNotification::SessionUpdate { .. })),
         "旧 done 和重复开始都不得再次发布 UI 状态"
@@ -423,11 +429,11 @@ fn test_user_input_run_returning_to_live_session_can_restore_same_run() {
     );
     let away = lifecycle
         .begin_transition(TransitionKind::Load, Some("s2".into()))
-        .unwrap();
+        .expect("user input run returning to live session can restore same run: the begin_transition fixture operation uses valid inputs");
     lifecycle.commit_stable(away.generation, "s2".into());
     let back = lifecycle
         .begin_transition(TransitionKind::Load, Some("s1".into()))
-        .unwrap();
+        .expect("user input run returning to live session can restore same run: the begin_transition fixture operation uses valid inputs");
     lifecycle.commit_stable(back.generation, "s1".into());
     assert!(
         !lifecycle.bind_user_input_generation("s1", 1, "mailbox-1"),
@@ -453,7 +459,7 @@ fn test_user_input_run_new_attempt_retires_old_permission_owner() {
     let lifecycle = bound_lifecycle();
     lifecycle
         .open_execution("s1", "mailbox-1", "run-1", true)
-        .unwrap();
+        .expect("user input run new attempt retires old permission owner: the open_execution fixture operation uses valid inputs");
     let RegisterDecision::Forward(first) = lifecycle.register_reverse(
         ReverseInteractionKind::Permission,
         RequestId::Number(1),
@@ -464,7 +470,7 @@ fn test_user_input_run_new_attempt_retires_old_permission_owner() {
     };
     let claims = lifecycle
         .open_execution("s1", "mailbox-1", "run-2", true)
-        .unwrap();
+        .expect("user input run new attempt retires old permission owner: the open_execution fixture operation uses valid inputs");
     assert_eq!(claims.len(), 1);
     assert_eq!(claims[0].owner, first.owner);
     assert!(!lifecycle.is_pending_owner(&first.owner));
@@ -479,7 +485,7 @@ fn test_user_input_run_new_attempt_retires_old_permission_owner() {
 #[test]
 fn test_execution_start_replaces_preopened_legacy_prompt_and_reopens_it() {
     let lifecycle = bound_lifecycle();
-    let _pending_legacy = lifecycle.open_prompt(Some("B".into())).unwrap();
+    let _pending_legacy = lifecycle.open_prompt(Some("B".into())).expect("execution start replaces preopened legacy prompt and reopens it: the open_prompt fixture operation uses valid inputs");
     assert!(
         lifecycle
             .open_execution("s1", "mailbox-1", "A", false)
@@ -495,7 +501,7 @@ fn test_execution_start_replaces_preopened_legacy_prompt_and_reopens_it() {
     };
     let claims = lifecycle
         .open_execution("s1", "mailbox-1", "B", false)
-        .unwrap();
+        .expect("execution start replaces preopened legacy prompt and reopens it: the open_execution fixture operation uses valid inputs");
     assert_eq!(claims.len(), 1);
     assert_eq!(claims[0].owner, first.owner);
     assert!(matches!(
@@ -508,13 +514,13 @@ fn test_execution_start_replaces_preopened_legacy_prompt_and_reopens_it() {
         RegisterDecision::Forward(_)
     ));
     lifecycle.close_prompt_by_wire_identity("s1", Some("A"));
-    assert_eq!(lifecycle.active_execution(false).unwrap().2, "B");
+    assert_eq!(lifecycle.active_execution(false).expect("execution start replaces preopened legacy prompt and reopens it: the active_execution fixture operation uses valid inputs").2, "B");
 }
 
 #[test]
 fn test_execution_started_same_local_request_keeps_existing_prompt_owner() {
     let lifecycle = bound_lifecycle();
-    let _local_prompt = lifecycle.open_prompt(Some("direct".into())).unwrap();
+    let _local_prompt = lifecycle.open_prompt(Some("direct".into())).expect("execution started same local request keeps existing prompt owner: the open_prompt fixture operation uses valid inputs");
     let RegisterDecision::Forward(pending) = lifecycle.register_reverse(
         ReverseInteractionKind::Permission,
         RequestId::Number(1),
@@ -529,7 +535,7 @@ fn test_execution_started_same_local_request_keeps_existing_prompt_owner() {
             .is_none()
     );
     assert!(lifecycle.is_pending_owner(&pending.owner));
-    assert_eq!(lifecycle.active_execution(false).unwrap().2, "direct");
+    assert_eq!(lifecycle.active_execution(false).expect("execution started same local request keeps existing prompt owner: the active_execution fixture operation uses valid inputs").2, "direct");
     lifecycle.close_prompt_by_wire_identity("s1", Some("direct"));
     assert!(!lifecycle.is_pending_owner(&pending.owner));
     assert!(
@@ -545,7 +551,7 @@ fn test_user_input_generation_can_change_only_after_session_boundary() {
     assert!(!lifecycle.bind_user_input_generation("s1", 1, "mailbox-2"));
     let transition = lifecycle
         .begin_transition(TransitionKind::Load, Some("s1".into()))
-        .unwrap();
+        .expect("user input generation can change only after session boundary: the begin_transition fixture operation uses valid inputs");
     lifecycle.commit_stable(transition.generation, "s1".into());
     assert!(lifecycle.bind_user_input_generation("s1", transition.generation, "mailbox-2"));
     assert!(

@@ -8,20 +8,22 @@
 //! 用户不会执行到自己没看到的动作。
 use std::time::Duration;
 
-use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
-    prelude::*,
-    ratatui::{layout::Rect, style::Stylize, text::Line},
-};
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::KeyCode;
+use ratatui_kit::crossterm::event::KeyEventKind;
+use ratatui_kit::crossterm::event::KeyModifiers;
+use ratatui_kit::crossterm::event::MouseButton;
+use ratatui_kit::crossterm::event::MouseEventKind;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Rect;
+use ratatui_kit::ratatui::style::Stylize;
+use ratatui_kit::ratatui::text::Line;
 
 use crate::i18n;
 use crate::kit::ask_user_action::AskUserResponseAction;
-use crate::kit::atoms::{
-    self, ASK_USER_RESPONSE_TX, CONFIRM_PAYLOAD, ConfirmAction, ConfirmPayload, LANG_VERSION,
-    NOTIFICATION, Notification,
-};
+
 use crate::kit::panel_mouse::AreaTracker;
-use crate::kit::popup_overlay::close_popup;
+
 use peri_theme::atoms::THEME_ATOM;
 
 /// 渲染某帧时锁定的确认目标：该帧展示的 payload 版本 + 动作。
@@ -35,6 +37,7 @@ pub(crate) struct RenderedConfirm {
 }
 
 impl RenderedConfirm {
+    #[must_use]
     fn from_payload(payload: &ConfirmPayload) -> Self {
         Self {
             version: payload.version,
@@ -95,13 +98,13 @@ fn confirm(rendered: Option<&RenderedConfirm>) -> EventResult {
                 }
             });
             *CONFIRM_PAYLOAD.state().write() = None;
-            close_popup();
+            crate::kit::popup_overlay::close_popup();
         }
         // 不执行、不关闭：下一帧渲染新 payload，用户可对新内容再确认。
         ConfirmOutcome::Superseded => notify_superseded(),
         ConfirmOutcome::Empty => {
             *CONFIRM_PAYLOAD.state().write() = None;
-            close_popup();
+            crate::kit::popup_overlay::close_popup();
         }
     }
     EventResult::Consumed
@@ -131,7 +134,7 @@ fn handle_confirm_event(
         (KeyModifiers::NONE, KeyCode::Esc) => {
             // 用户选择返回继续作答
             *CONFIRM_PAYLOAD.state().write() = None;
-            close_popup();
+            crate::kit::popup_overlay::close_popup();
             EventResult::Consumed
         }
         _ => EventResult::Ignored,
@@ -249,3 +252,18 @@ pub(crate) fn execute_confirm_action(
 #[cfg(test)]
 #[path = "confirm_popup_test.rs"]
 mod tests;
+
+use crate::kit::atoms::ASK_USER_RESPONSE_TX;
+
+use crate::kit::atoms::CONFIRM_PAYLOAD;
+
+use crate::kit::atoms::ConfirmAction;
+
+use crate::kit::atoms::ConfirmPayload;
+
+use crate::kit::atoms::LANG_VERSION;
+
+use crate::kit::atoms::NOTIFICATION;
+
+use crate::kit::atoms;
+use crate::kit::atoms::Notification;

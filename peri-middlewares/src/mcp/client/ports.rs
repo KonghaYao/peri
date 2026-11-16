@@ -1,4 +1,10 @@
-use super::*;
+use super::{
+    Arc, ClientStatus, CommandRegistry, HashMap, HashSet, InboxHandle, McpBuiltinWorkspaceState,
+    McpClientPool, McpInitStatus, McpOAuthStartDisposition, McpPoolShutdownReport, McpResourceInfo,
+    McpServerConnectionStatus, McpServerInfo, McpServerOAuthStatus, McpSkillRegistry,
+    McpSubscriptionPort, McpToolInfo, OAuthStartDisposition, OAuthStatus, ServerInfo,
+    SkillMetadata, TaskManager,
+};
 use peri_acp_types::plugin::McpSubscriptionsConfig;
 
 // 3.0 批 2 波 2：装配注入端口实现（ACP 侧只持 `Arc<dyn McpPoolPort>`）。
@@ -63,7 +69,7 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
     }
 
     fn has_instance(&self, instance: &str) -> bool {
-        McpClientPool::get_client(self, instance).is_some()
+        McpClientPool::client(self, instance).is_some()
     }
 
     fn bind_agent_session(
@@ -263,7 +269,7 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
     }
 
     fn builtin_workspace_state(&self) -> McpBuiltinWorkspaceState {
-        match McpClientPool::get_client(self, "workspace") {
+        match McpClientPool::client(self, "workspace") {
             None => McpBuiltinWorkspaceState::Absent,
             Some(handle) if matches!(handle.status, ClientStatus::Connected) => {
                 McpBuiltinWorkspaceState::Connected

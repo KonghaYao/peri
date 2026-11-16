@@ -1,6 +1,10 @@
 use super::super::failure::RemoteFailureClass;
 use super::super::schema::StoreId;
-use super::*;
+use super::{
+    Arc, MutationOutcome, OAuthCredentialError, RemoteSessionData, SessionResourceError,
+    SessionResourceErrorKind, StatementSpec, Value,
+};
+
 use crate::sessions::canonical::{
     CREATE_OAUTH_CREDENTIALS_TABLE_SQL, DELETE_ALL_OAUTH_CREDENTIALS_SQL,
     DELETE_OAUTH_CREDENTIAL_SQL, LIST_OAUTH_CREDENTIALS_SQL, SELECT_OAUTH_CREDENTIAL_SQL,
@@ -81,7 +85,7 @@ fn sql_binds_all_dynamic_values() {
     let key = "https://secret-endpoint/'?token=secret";
     let payload = r#"{ "access_token": "top-secret", "refresh_token": "opaque", "extra": [1] }"#;
     for sql in [SELECT_OAUTH_CREDENTIAL_SQL, DELETE_OAUTH_CREDENTIAL_SQL] {
-        let spec = statement(sql, principal, machine, Some(key));
+        let spec = super::statement(sql, principal, machine, Some(key));
         assert_eq!(
             spec.params,
             vec![
@@ -94,13 +98,13 @@ fn sql_binds_all_dynamic_values() {
         assert!(!spec.sql.contains(key));
     }
     for sql in [LIST_OAUTH_CREDENTIALS_SQL, DELETE_ALL_OAUTH_CREDENTIALS_SQL] {
-        let spec = statement(sql, principal, machine, None);
+        let spec = super::statement(sql, principal, machine, None);
         assert_eq!(
             spec.params,
             vec![Value::Text(principal.into()), Value::Text(machine.into())]
         );
     }
-    let spec = save_statement(principal, machine, key, payload);
+    let spec = super::save_statement(principal, machine, key, payload);
     assert_eq!(spec.sql, UPSERT_OAUTH_CREDENTIAL_SQL);
     assert_eq!(
         &spec.params[..4],
@@ -133,40 +137,40 @@ async fn sqlite_roundtrip_preserves_complete_json_and_updates_same_key() {
     let key = "server'; DELETE FROM mcp_oauth_credentials;--";
     execute(
         &mut connection,
-        save_statement("local", "machine", key, payload),
+        super::save_statement("local", "machine", key, payload),
     )
     .await;
     let rows = read(
         &mut connection,
-        statement(SELECT_OAUTH_CREDENTIAL_SQL, "local", "machine", Some(key)),
+        super::statement(SELECT_OAUTH_CREDENTIAL_SQL, "local", "machine", Some(key)),
     )
     .await;
-    assert_eq!(decode_load(rows).unwrap().as_deref(), Some(payload));
+    assert_eq!(super::decode_load(rows).unwrap().as_deref(), Some(payload));
     execute(
         &mut connection,
-        save_statement("local", "machine", key, r#"{"access_token":"changed"}"#),
+        super::save_statement("local", "machine", key, r#"{"access_token":"changed"}"#),
     )
     .await;
     let rows = read(
         &mut connection,
-        statement(LIST_OAUTH_CREDENTIALS_SQL, "local", "machine", None),
+        super::statement(LIST_OAUTH_CREDENTIALS_SQL, "local", "machine", None),
     )
     .await;
-    assert_eq!(decode_list(rows).unwrap(), vec![key]);
+    assert_eq!(super::decode_list(rows).unwrap(), vec![key]);
     execute(
         &mut connection,
-        statement(DELETE_OAUTH_CREDENTIAL_SQL, "local", "machine", Some(key)),
+        super::statement(DELETE_OAUTH_CREDENTIAL_SQL, "local", "machine", Some(key)),
     )
     .await;
     let rows = read(
         &mut connection,
-        statement(SELECT_OAUTH_CREDENTIAL_SQL, "local", "machine", Some(key)),
+        super::statement(SELECT_OAUTH_CREDENTIAL_SQL, "local", "machine", Some(key)),
     )
     .await;
-    assert!(decode_load(rows).unwrap().is_none());
+    assert!(super::decode_load(rows).unwrap().is_none());
     execute(
         &mut connection,
-        statement(DELETE_OAUTH_CREDENTIAL_SQL, "local", "machine", Some(key)),
+        super::statement(DELETE_OAUTH_CREDENTIAL_SQL, "local", "machine", Some(key)),
     )
     .await;
 }
@@ -181,24 +185,27 @@ async fn principal_and_machine_scope_isolate_all_crud() {
     ] {
         execute(
             &mut connection,
-            save_statement(principal, machine, "same-key", payload),
+            super::save_statement(principal, machine, "same-key", payload),
         )
         .await;
     }
     execute(
         &mut connection,
-        save_statement("local", "first", "another-key", "{}"),
+        super::save_statement("local", "first", "another-key", "{}"),
     )
     .await;
     let rows = read(
         &mut connection,
-        statement(LIST_OAUTH_CREDENTIALS_SQL, "local", "first", None),
+        super::statement(LIST_OAUTH_CREDENTIALS_SQL, "local", "first", None),
     )
     .await;
-    assert_eq!(decode_list(rows).unwrap(), vec!["another-key", "same-key"]);
+    assert_eq!(
+        super::decode_list(rows).unwrap(),
+        vec!["another-key", "same-key"]
+    );
     execute(
         &mut connection,
-        statement(
+        super::statement(
             DELETE_OAUTH_CREDENTIAL_SQL,
             "local",
             "first",
@@ -208,22 +215,22 @@ async fn principal_and_machine_scope_isolate_all_crud() {
     .await;
     execute(
         &mut connection,
-        statement(DELETE_ALL_OAUTH_CREDENTIALS_SQL, "local", "first", None),
+        super::statement(DELETE_ALL_OAUTH_CREDENTIALS_SQL, "local", "first", None),
     )
     .await;
     let rows = read(
         &mut connection,
-        statement(LIST_OAUTH_CREDENTIALS_SQL, "local", "first", None),
+        super::statement(LIST_OAUTH_CREDENTIALS_SQL, "local", "first", None),
     )
     .await;
-    assert!(decode_list(rows).unwrap().is_empty());
+    assert!(super::decode_list(rows).unwrap().is_empty());
     for (principal, machine, expected) in [
         ("local", "second", r#"{"token":"second"}"#),
         ("other", "first", r#"{"token":"other"}"#),
     ] {
         let rows = read(
             &mut connection,
-            statement(
+            super::statement(
                 SELECT_OAUTH_CREDENTIAL_SQL,
                 principal,
                 machine,
@@ -231,7 +238,7 @@ async fn principal_and_machine_scope_isolate_all_crud() {
             ),
         )
         .await;
-        assert_eq!(decode_load(rows).unwrap().as_deref(), Some(expected));
+        assert_eq!(super::decode_load(rows).unwrap().as_deref(), Some(expected));
     }
 }
 
@@ -249,7 +256,7 @@ fn malformed_records_fail_closed() {
         vec![vec![]],
     ] {
         assert!(matches!(
-            decode_load(rows),
+            super::decode_load(rows),
             Err(OAuthCredentialError::InvalidData)
         ));
     }
@@ -260,7 +267,7 @@ fn malformed_records_fail_closed() {
         vec![Value::Text("key".into()), Value::Null],
     ] {
         assert!(matches!(
-            decode_list(vec![row]),
+            super::decode_list(vec![row]),
             Err(OAuthCredentialError::InvalidData)
         ));
     }
@@ -268,19 +275,19 @@ fn malformed_records_fail_closed() {
 
 #[test]
 fn ledger_identities_are_unique_and_do_not_expose_payload() {
-    let first = mutation(
+    let first = super::mutation(
         "save_oauth_credentials",
-        save_statement("local", "machine", "secret-key", r#"{"token":"secret"}"#),
+        super::save_statement("local", "machine", "secret-key", r#"{"token":"secret"}"#),
     );
-    let second = mutation("save_oauth_credentials", first.effects[0].clone());
+    let second = super::mutation("save_oauth_credentials", first.effects[0].clone());
     assert_ne!(
         first.identity.operation_id.as_str(),
         second.identity.operation_id.as_str()
     );
     assert_eq!(first.identity.digest, second.identity.digest);
-    let changed = mutation(
+    let changed = super::mutation(
         "save_oauth_credentials",
-        save_statement("local", "machine", "secret-key", r#"{"token":"changed"}"#),
+        super::save_statement("local", "machine", "secret-key", r#"{"token":"changed"}"#),
     );
     assert_ne!(first.identity.digest, changed.identity.digest);
     let debug = format!("{:?}", first.identity);
@@ -300,23 +307,23 @@ fn uncertain_and_rejected_writes_never_report_success() {
         },
     ] {
         assert!(matches!(
-            write_result(outcome),
+            super::write_result(outcome),
             Err(OAuthCredentialError::Unavailable)
         ));
     }
     assert!(matches!(
-        write_result(MutationOutcome::NotApplied {
+        super::write_result(MutationOutcome::NotApplied {
             class: RemoteFailureClass::Readonly,
             rejected_statement: None
         }),
         Err(OAuthCredentialError::ReadOnly)
     ));
-    let identity = mutation(
+    let identity = super::mutation(
         "clear_oauth_credentials",
-        statement(DELETE_OAUTH_CREDENTIAL_SQL, "local", "machine", Some("key")),
+        super::statement(DELETE_OAUTH_CREDENTIAL_SQL, "local", "machine", Some("key")),
     )
     .identity;
-    assert!(write_result(MutationOutcome::Applied {
+    assert!(super::write_result(MutationOutcome::Applied {
         receipt: identity.receipt,
         replayed: false
     })
@@ -339,7 +346,7 @@ fn errors_discard_backend_detail() {
         SessionResourceErrorKind::ReadOnlyStore,
         SessionResourceErrorKind::PersistenceUncertain { thread_id: None },
     ] {
-        let error = storage_error(SessionResourceError::new(kind));
+        let error = super::storage_error(SessionResourceError::new(kind));
         let exposed = format!(
             "{error} {error:?} {}",
             serde_json::to_string(&error).unwrap()
@@ -357,7 +364,7 @@ async fn old_readonly_schema_query_does_not_create_table() {
         .execute(&mut connection)
         .await
         .unwrap();
-    let spec = statement(SELECT_OAUTH_CREDENTIAL_SQL, "local", "machine", Some("key"));
+    let spec = super::statement(SELECT_OAUTH_CREDENTIAL_SQL, "local", "machine", Some("key"));
     assert!(sqlx::query(spec.sql)
         .bind("local")
         .bind("machine")
@@ -373,7 +380,7 @@ async fn old_readonly_schema_query_does_not_create_table() {
     .unwrap();
     assert_eq!(count, 0);
     assert!(matches!(
-        storage_error(RemoteFailureClass::ServerError.into_session_resource_error()),
+        super::storage_error(RemoteFailureClass::ServerError.into_session_resource_error()),
         OAuthCredentialError::Unavailable
     ));
 }

@@ -1,4 +1,4 @@
-use super::*;
+use crate::langfuse::tracer::tool_batch::ToolBatch;
 
 fn dummy_parent() -> String {
     "span_stage_act_123".to_string()
@@ -55,7 +55,9 @@ fn test_flush_returns_batch_and_tools() {
     tb.record_end_time("2026-07-14T10:00:00Z".into());
     let flush = tb.flush();
     assert!(flush.batch.is_some(), "应有 batch record");
-    let batch = flush.batch.unwrap();
+    let batch = flush
+        .batch
+        .expect("the batch fixture result is required for this assertion");
     assert!(batch.batch_span_id.starts_with("batch_"));
     assert_eq!(flush.tools.len(), 1, "应有 1 个已完成工具");
     assert_eq!(flush.tools[0].name, "Read");
@@ -134,18 +136,29 @@ fn test_is_empty() {
 fn test_completed_tool_moves_payload_into_flush() {
     let mut batch = ToolBatch::new();
     let input = serde_json::json!({"content": "input".repeat(16_384)});
-    let input_ptr = input["content"].as_str().unwrap().as_ptr();
+    let input_ptr = input["content"]
+        .as_str()
+        .expect("the as str fixture result is required for this assertion")
+        .as_ptr();
     batch.on_tool_start("call", "Write", input, "parent");
     let output = "output".repeat(16_384);
-    let completed = batch.on_tool_end("call", &output, false).unwrap();
+    let completed = batch
+        .on_tool_end("call", &output, false)
+        .expect("the on tool end fixture result is required for this assertion");
     let output_ptr = completed.output.as_ptr();
     assert_eq!(
-        completed.input["content"].as_str().unwrap().as_ptr(),
+        completed.input["content"]
+            .as_str()
+            .expect("the as str fixture result is required for this assertion")
+            .as_ptr(),
         input_ptr
     );
     let flush = batch.flush();
     assert_eq!(
-        flush.tools[0].input["content"].as_str().unwrap().as_ptr(),
+        flush.tools[0].input["content"]
+            .as_str()
+            .expect("the as str fixture result is required for this assertion")
+            .as_ptr(),
         input_ptr
     );
     assert_eq!(flush.tools[0].output.as_ptr(), output_ptr);

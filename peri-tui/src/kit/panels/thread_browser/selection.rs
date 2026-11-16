@@ -3,7 +3,6 @@
 //! 列表由后台快照周期性重排：选中项以 thread 身份为载体，行号只在当前帧有效。
 //! 本模块把身份解析结果与滚动视口对齐，保证高亮可见、动作目标仍是列表成员。
 
-use crate::kit::atoms::ThreadSummary;
 use ratatui_kit::components::scroll_view::ScrollViewState;
 use ratatui_kit::ratatui::layout::Position;
 
@@ -57,3 +56,5 @@ pub(super) fn keep_selection_visible(
     }
     state.set_offset(Position::new(0, start.min(max_start) as u16));
 }
+
+use crate::kit::atoms::ThreadSummary;

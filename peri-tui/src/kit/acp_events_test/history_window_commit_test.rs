@@ -1,6 +1,10 @@
 //! S5.5：提交/compact/turn 事件不得误封印或触碰执行状态。
 
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::SessionPhase;
+use super::TuiRenderUnit;
+
 use crate::kit::history_window::{
     HistoryCommitInfo, HistoryEntryView, HistorySource, HistoryWindow, HistoryWindowConfig,
     PersistentEntryKey, SegmentDraft, SegmentPlacement, WindowIdentity,
@@ -11,7 +15,7 @@ use peri_acp_types::thread::ThreadId;
 use serial_test::serial;
 
 fn state_with_window() -> BridgeState {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "s1".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state
@@ -64,7 +68,7 @@ fn commit_info() -> HistoryCommitInfo {
 #[test]
 #[serial]
 fn test_commit_releases_only_outside_viewport_when_anchor_exists() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "s1".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state
@@ -107,7 +111,7 @@ fn test_commit_releases_only_outside_viewport_when_anchor_exists() {
             None,
             crate::kit::history_window::WindowAnchorOffset::CharOffset(0),
         )));
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::HistoryCommitted(commit_info_at(15)),
     );
@@ -125,7 +129,7 @@ fn test_commit_does_not_release_without_viewport_anchor() {
     state
         .window
         .mark_display_block(&[(PersistentEntryKey::own("s1:m1"), 1)], 0);
-    dispatch_and_notify(&mut state, &AcpEventData::HistoryCommitted(commit_info()));
+    super::dispatch_and_notify(&mut state, &AcpEventData::HistoryCommitted(commit_info()));
     assert_eq!(state.window.segment_count(), 1);
     assert_eq!(state.committed.len(), 1);
     assert_eq!(
@@ -138,7 +142,7 @@ fn test_commit_does_not_release_without_viewport_anchor() {
 
 /// 当前 turn 已有带持久 message_id 的正文、窗口已启用的状态。
 fn state_with_live_message_text(message_id: &str, text: &str) -> BridgeState {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "s1".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state
@@ -154,7 +158,7 @@ fn state_with_live_message_text(message_id: &str, text: &str) -> BridgeState {
 fn test_turn_suspended_registers_exact_body_bytes_for_message() {
     let text = "exact-suspend-body-".repeat(16);
     let mut state = state_with_live_message_text("m-suspend", &text);
-    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
     assert_eq!(state.window.budget().resident_body_bytes, text.len());
 }
 
@@ -163,7 +167,7 @@ fn test_turn_suspended_registers_exact_body_bytes_for_message() {
 fn test_turn_interrupted_registers_exact_body_bytes_for_message() {
     let text = "exact-cancel-body-".repeat(16);
     let mut state = state_with_live_message_text("m-cancel", &text);
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "cancel".into(),
@@ -180,7 +184,7 @@ fn test_stale_turn_interrupted_registers_exact_body_bytes_for_message() {
     let mut state = state_with_live_message_text("m-stale", &text);
     state.turn_generation = 2;
     state.last_prompt_generation = 1;
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "cancel".into(),
@@ -196,13 +200,13 @@ fn test_stale_turn_interrupted_registers_exact_body_bytes_for_message() {
 fn test_repeated_suspend_and_flush_do_not_double_register() {
     let text = "repeat-body-".repeat(16);
     let mut state = state_with_live_message_text("m-repeat", &text);
-    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
     let segments_once = state.window.segment_count();
     let bytes_once = state.window.budget().resident_body_bytes;
     assert_eq!(bytes_once, text.len());
 
-    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert_eq!(state.window.segment_count(), segments_once);
     assert_eq!(state.window.budget().resident_body_bytes, bytes_once);
     assert_eq!(state.window.sealed_segment_count(), 0);
@@ -210,7 +214,7 @@ fn test_repeated_suspend_and_flush_do_not_double_register() {
 
 /// 当前 turn 已有未归档正文、窗口已启用的状态（suspend / stale 归档用例共用）。
 fn state_with_live_text() -> BridgeState {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "s1".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state
@@ -227,7 +231,7 @@ fn state_with_live_text() -> BridgeState {
 #[serial]
 fn test_turn_suspended_archive_registers_resident_bytes() {
     let mut state = state_with_live_text();
-    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
     assert!(!state.committed.is_empty(), "挂起前产出的正文必须归档");
     assert!(
         state.window.budget().unattributed_live_bytes > 0,
@@ -244,7 +248,7 @@ fn test_turn_suspended_archive_registers_resident_bytes() {
 #[serial]
 fn test_turn_interrupted_archive_registers_resident_bytes() {
     let mut state = state_with_live_text();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "cancel".into(),
@@ -263,13 +267,13 @@ fn test_turn_interrupted_archive_registers_resident_bytes() {
 #[test]
 #[serial]
 fn test_turn_suspended_preserves_running_sync_subagent_and_registers_bytes() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "s1".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state
         .window
         .begin_window(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "stable-prefix".into(),
@@ -277,7 +281,7 @@ fn test_turn_suspended_preserves_running_sync_subagent_and_registers_bytes() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "child".into(),
@@ -286,7 +290,7 @@ fn test_turn_suspended_preserves_running_sync_subagent_and_registers_bytes() {
             parent_tool_call_id: Some("parent-call-1".into()),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "child-streaming-body".repeat(8),
@@ -296,7 +300,7 @@ fn test_turn_suspended_preserves_running_sync_subagent_and_registers_bytes() {
     );
     assert!(state.current_turn.has_running_sync_subagent());
 
-    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
     assert!(
         state.current_turn.has_running_sync_subagent(),
         "挂起不得 reset 仍在运行的同步组"
@@ -321,7 +325,7 @@ fn test_turn_suspended_preserves_running_sync_subagent_and_registers_bytes() {
         "活动组必须保留在 current_turn 等待后续事件"
     );
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "child".into(),
@@ -329,7 +333,7 @@ fn test_turn_suspended_preserves_running_sync_subagent_and_registers_bytes() {
             is_error: false,
         },
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert!(
         state.committed.iter().any(|unit| matches!(
             unit,
@@ -346,7 +350,7 @@ fn test_stale_turn_interrupted_archive_registers_resident_bytes() {
     let mut state = state_with_live_text();
     state.turn_generation = 2;
     state.last_prompt_generation = 1;
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "cancel".into(),
@@ -366,14 +370,14 @@ fn test_stale_turn_interrupted_archive_registers_resident_bytes() {
 #[serial]
 fn test_tool_card_archive_joins_assistant_message_segment_and_releases() {
     use crate::kit::history_window::{SegmentOrigin, WindowAnchor, WindowAnchorOffset};
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "s1".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state
         .window
         .begin_window(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
     for (text, message_id) in [("anchor", "m-anchor"), ("neighbor", "m-neighbor")] {
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
                 text: text.into(),
@@ -381,9 +385,9 @@ fn test_tool_card_archive_joins_assistant_message_segment_and_releases() {
                 agent_id: None,
             }),
         );
-        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+        super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     }
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "live answer".into(),
@@ -391,7 +395,7 @@ fn test_tool_card_archive_joins_assistant_message_segment_and_releases() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
             tool_id: "tool-live".into(),
@@ -403,7 +407,7 @@ fn test_tool_card_archive_joins_assistant_message_segment_and_releases() {
             origin_readable: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
     let key = PersistentEntryKey::own("s1:m-target");
     let locator = state
@@ -438,7 +442,7 @@ fn test_tool_card_archive_joins_assistant_message_segment_and_releases() {
         None,
         WindowAnchorOffset::CharOffset(0),
     )));
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::HistoryCommitted(commit_info_at(15)),
     );
@@ -472,13 +476,13 @@ fn test_tool_card_archive_joins_assistant_message_segment_and_releases() {
 #[test]
 #[serial]
 fn late_tool_end_updates_archived_card_and_segment_bytes() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "s1".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state
         .window
         .begin_window(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "cancelled body".into(),
@@ -486,7 +490,7 @@ fn late_tool_end_updates_archived_card_and_segment_bytes() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
             tool_id: "tool-cancelled".into(),
@@ -498,7 +502,7 @@ fn late_tool_end_updates_archived_card_and_segment_bytes() {
             origin_readable: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "cancel".into(),
@@ -507,10 +511,10 @@ fn late_tool_end_updates_archived_card_and_segment_bytes() {
     );
     let key = PersistentEntryKey::own("s1:m-cancel-tool");
     let locator = *state.window.index().locate_entry(&key).expect("segment");
-    let body_before = state.window.segment(locator.segment).unwrap().body_bytes;
-    assert!(state.window.segment(locator.segment).unwrap().body_bytes > 0);
+    let body_before = state.window.segment(locator.segment).expect("late tool end updates archived card and segment bytes: the segment fixture operation uses valid inputs").body_bytes;
+    assert!(state.window.segment(locator.segment).expect("late tool end updates archived card and segment bytes: the segment fixture operation uses valid inputs").body_bytes > 0);
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
             tool_id: "tool-cancelled".into(),
@@ -545,7 +549,7 @@ fn late_tool_end_updates_archived_card_and_segment_bytes() {
 #[test]
 #[serial]
 fn unattributed_tool_bytes_fall_back_after_claim() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "s1".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state
@@ -602,7 +606,7 @@ fn unattributed_tool_bytes_fall_back_after_claim() {
 #[test]
 #[serial]
 fn test_tool_card_without_message_identity_stays_unattributed() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "s1".into();
     // 进程级 live 关联按会话保留：显式清掉消息身份，确保本用例从「无身份」开始。
     crate::kit::acp_events::live_tool_links::note_turn_boundary("s1");
@@ -610,7 +614,7 @@ fn test_tool_card_without_message_identity_stays_unattributed() {
     state
         .window
         .begin_window(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
             tool_id: "tool-only".into(),
@@ -622,7 +626,7 @@ fn test_tool_card_without_message_identity_stays_unattributed() {
             origin_readable: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     // 没有持久身份不能伪造可淘汰段，但正文必须计入总预算。
     assert_eq!(state.window.segment_count(), 0);
     assert!(
@@ -639,13 +643,13 @@ fn test_tool_card_without_message_identity_stays_unattributed() {
 #[test]
 #[serial]
 fn test_sync_subagent_preview_uses_its_own_budget_without_canonical_credit() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "s1".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state
         .window
         .begin_window(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "root answer".into(),
@@ -653,7 +657,7 @@ fn test_sync_subagent_preview_uses_its_own_budget_without_canonical_credit() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "child".into(),
@@ -662,7 +666,7 @@ fn test_sync_subagent_preview_uses_its_own_budget_without_canonical_credit() {
             parent_tool_call_id: None,
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "child body".repeat(8),
@@ -670,7 +674,7 @@ fn test_sync_subagent_preview_uses_its_own_budget_without_canonical_credit() {
             agent_id: Some("child".into()),
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "child".into(),
@@ -678,7 +682,7 @@ fn test_sync_subagent_preview_uses_its_own_budget_without_canonical_credit() {
             is_error: false,
         },
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert!(
         state
             .window
@@ -719,15 +723,15 @@ fn test_history_committed_seals_window_without_touching_execution_state() {
     let before_request = state.current_request_id.clone();
     let before_generation = state.turn_generation;
 
-    dispatch_and_notify(&mut state, &AcpEventData::HistoryCommitted(commit_info()));
-    dispatch_and_notify(&mut state, &AcpEventData::HistoryCommitted(commit_info()));
+    super::dispatch_and_notify(&mut state, &AcpEventData::HistoryCommitted(commit_info()));
+    super::dispatch_and_notify(&mut state, &AcpEventData::HistoryCommitted(commit_info()));
 
     assert_eq!(state.window.sealed_segment_count(), 1);
     assert!(
         state
             .window
             .segment(*state.window.segments().keys().next().expect("segment"))
-            .unwrap()
+            .expect("history committed seals window without touching execution state: the fixture operation must finish without an inner failure")
             .durable
     );
     assert_eq!(state.phase, before_phase);
@@ -743,7 +747,7 @@ fn test_history_committed_seals_window_without_touching_execution_state() {
 fn test_compact_completed_does_not_seal_or_release_window_segments() {
     let mut state = state_with_window();
     let before_stats = state.window.stats();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::CompactCompleted {
             summary: "summary".into(),
@@ -761,8 +765,8 @@ fn test_compact_completed_does_not_seal_or_release_window_segments() {
     assert!(
         !state
             .window
-            .segment(*state.window.segments().keys().next().unwrap())
-            .unwrap()
+            .segment(*state.window.segments().keys().next().expect("compact completed does not seal or release window segments: the fixture collection must contain the expected entry"))
+            .expect("compact completed does not seal or release window segments: the fixture collection must contain the expected entry")
             .durable
     );
     assert_eq!(state.window.stats(), before_stats);
@@ -774,11 +778,11 @@ fn test_compact_completed_does_not_seal_or_release_window_segments() {
 #[serial]
 fn test_turn_done_does_not_seal_live_window_segment() {
     let mut state = state_with_window();
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let segment = state
         .window
-        .segment(*state.window.segments().keys().next().unwrap())
-        .unwrap();
+        .segment(*state.window.segments().keys().next().expect("turn done does not seal live window segment: fixture iterator must yield its expected item"))
+        .expect("turn done does not seal live window segment: fixture iterator must yield its expected item");
     assert!(!segment.durable);
     assert!(!segment.sealed);
     assert_eq!(state.window.sealed_segment_count(), 0);
@@ -788,7 +792,7 @@ fn test_turn_done_does_not_seal_live_window_segment() {
 #[serial]
 fn live_archive_groups_split_message_and_releases_only_its_bubbles() {
     use crate::kit::history_window::{WindowAnchor, WindowAnchorOffset};
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "s1".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state
@@ -796,7 +800,7 @@ fn live_archive_groups_split_message_and_releases_only_its_bubbles() {
         .begin_window(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
     for id in ["anchor", "neighbor"] {
         state.current_turn.append_text(id, Some(id));
-        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+        super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     }
     state.current_turn.append_text("before", Some("split"));
     state
@@ -807,15 +811,15 @@ fn live_archive_groups_split_message_and_releases_only_its_bubbles() {
             "file".into(),
         ));
     state.current_turn.append_text("after", Some("split"));
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let key = PersistentEntryKey::own("s1:split");
-    let locator = *state.window.index().locate_entry(&key).unwrap();
+    let locator = *state.window.index().locate_entry(&key).expect("live archive groups split message and releases only its bubbles: the index fixture operation uses valid inputs");
     assert_eq!(locator.unit_count, 2);
     assert_eq!(
         state.window.segment_display_bounds(locator.segment),
         Some((2, 5))
     );
-    let segment = state.window.segment(locator.segment).unwrap();
+    let segment = state.window.segment(locator.segment).expect("live archive groups split message and releases only its bubbles: the segment fixture operation uses valid inputs");
     assert_eq!(segment.body_bytes, "beforeafter".len());
     assert!(segment.reserved_bytes > segment.body_bytes);
     assert_eq!(state.committed.len(), 5);
@@ -829,7 +833,7 @@ fn live_archive_groups_split_message_and_releases_only_its_bubbles() {
         None,
         WindowAnchorOffset::CharOffset(0),
     )));
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::HistoryCommitted(commit_info_at(15)),
     );
@@ -855,7 +859,7 @@ fn live_archive_groups_split_message_and_releases_only_its_bubbles() {
 fn cross_turn_tool_ownership_does_not_bleed() {
     use crate::kit::history_window::SegmentOrigin;
 
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "s1".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state
@@ -863,7 +867,7 @@ fn cross_turn_tool_ownership_does_not_bleed() {
         .begin_window(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
 
     // 第 1 轮：文本 + 回退归属的工具卡（旧服务端无 originMessageId）。
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "first".into(),
@@ -871,7 +875,7 @@ fn cross_turn_tool_ownership_does_not_bleed() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
             tool_id: "tool-first".into(),
@@ -883,10 +887,10 @@ fn cross_turn_tool_ownership_does_not_bleed() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
     // 第 2 轮：纯工具卡带真实来源；第 1 轮的 ToolEnded 迟到。
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
             tool_id: "tool-second".into(),
@@ -898,7 +902,7 @@ fn cross_turn_tool_ownership_does_not_bleed() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
             tool_id: "tool-first".into(),
@@ -907,7 +911,7 @@ fn cross_turn_tool_ownership_does_not_bleed() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
             tool_id: "tool-second".into(),
@@ -916,7 +920,7 @@ fn cross_turn_tool_ownership_does_not_bleed() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
     let first = PersistentEntryKey::own("s1:m-first");
     let second = PersistentEntryKey::own("s1:m-second");
@@ -932,11 +936,11 @@ fn cross_turn_tool_ownership_does_not_bleed() {
         .expect("第 2 轮纯工具卡归属自己的 assistant 消息");
     assert_ne!(first_locator.segment, second_locator.segment);
     assert_eq!(
-        state.window.segment(first_locator.segment).unwrap().origin,
+        state.window.segment(first_locator.segment).expect("cross turn tool ownership does not bleed: the segment fixture operation uses valid inputs").origin,
         SegmentOrigin::LiveSeal
     );
     assert_eq!(
-        state.window.segment(second_locator.segment).unwrap().origin,
+        state.window.segment(second_locator.segment).expect("cross turn tool ownership does not bleed: the segment fixture operation uses valid inputs").origin,
         SegmentOrigin::LiveSeal
     );
     assert_eq!(

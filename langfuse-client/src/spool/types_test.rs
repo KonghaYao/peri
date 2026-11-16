@@ -166,7 +166,7 @@ fn dyn_store(store: &Arc<FakeStore>) -> Arc<dyn SpoolStore> {
 fn registry(store: &Arc<FakeStore>) -> CleanupRegistry {
     CleanupRegistry::new(
         dyn_store(store),
-        MemoryBudget::new(64 * 1024).expect("budget"),
+        MemoryBudget::try_new(64 * 1024).expect("budget"),
         4,
     )
 }

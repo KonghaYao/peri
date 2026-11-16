@@ -1,11 +1,19 @@
 //! Observable control behavior over a real child MCP transport and owned tasks.
-use super::*;
-use crate::mcp::{
-    client::{ControlledMcpService, McpServiceWrapper},
-    config::{ConfigSource, McpCachePolicy},
-    task_scope::McpTaskOwner,
-    McpInitStatus,
-};
+use super::Arc;
+use super::ClientStatus;
+use super::HashMap;
+use super::McpClientPool;
+use super::McpControlRequest;
+use super::McpControlStatus;
+use super::McpRegistrationConfig;
+use super::McpTaskKey;
+use super::Ordering;
+use crate::mcp::client::ControlledMcpService;
+use crate::mcp::client::McpServiceWrapper;
+use crate::mcp::config::ConfigSource;
+use crate::mcp::config::McpCachePolicy;
+use crate::mcp::task_scope::McpTaskOwner;
+use crate::mcp::McpInitStatus;
 use serde_json::json;
 use std::sync::atomic::AtomicUsize;
 
@@ -78,7 +86,7 @@ for line in sys.stdin:
 async fn wire_register_stop_restart_rejects_old_bridge_and_isolates_pools() {
     let (mut owner, pool, _cwd) = pool_fixture();
     let (mut other_owner, other, _other_cwd) = pool_fixture();
-    let source = catalog_source(pool.clone(), "s1");
+    let source = super::catalog_source(pool.clone(), "s1");
     let initial = source.snapshot();
     let registered = pool
         .clone()
@@ -90,7 +98,7 @@ async fn wire_register_stop_restart_rejects_old_bridge_and_isolates_pools() {
         .call_instance_tool("docs", "echo", json!({}), None)
         .await
         .unwrap();
-    let old_handle = pool.get_client("docs").unwrap();
+    let old_handle = pool.client("docs").unwrap();
     let connected = source.snapshot();
     assert!(connected.generation > initial.generation);
     let old_tool = connected
@@ -108,7 +116,7 @@ async fn wire_register_stop_restart_rejects_old_bridge_and_isolates_pools() {
             .kind,
         "server_not_found"
     );
-    assert!(catalog_source(other.clone(), "s1")
+    assert!(super::catalog_source(other.clone(), "s1")
         .snapshot()
         .tools
         .is_empty());
@@ -159,7 +167,7 @@ async fn wire_register_stop_restart_rejects_old_bridge_and_isolates_pools() {
         .await
         .unwrap();
     assert_ne!(first_pid, next_pid);
-    assert!(!Arc::ptr_eq(&old_handle, &pool.get_client("docs").unwrap()));
+    assert!(!Arc::ptr_eq(&old_handle, &pool.client("docs").unwrap()));
     assert!(!old_handle.call_gate.is_open());
     let error = old_tool
         .invoke(json!({}), peri_agent::tools::ToolContext::new(&[], "."))
@@ -286,7 +294,7 @@ async fn cleanup_failure_stays_owned_and_stop_retry_never_publishes_tools() {
         assert_eq!(error.kind, "shutdown_incomplete");
         assert_eq!(count.load(Ordering::SeqCst), expected);
         assert_eq!(pool.server_slot("docs").services.lock().len(), 1);
-        assert!(catalog_source(pool.clone(), "s1")
+        assert!(super::catalog_source(pool.clone(), "s1")
             .snapshot()
             .tools
             .is_empty());
@@ -351,7 +359,7 @@ async fn register_oauth_without_credentials_returns_authorization_without_callba
     let response = pool.clone().control_mcp(request).await.unwrap();
     assert_eq!(response.status, McpControlStatus::NeedsAuthorization);
     assert!(pool.active_oauth_flow("authdocs").is_none());
-    assert!(catalog_source(pool.clone(), "s1")
+    assert!(super::catalog_source(pool.clone(), "s1")
         .snapshot()
         .tools
         .is_empty());

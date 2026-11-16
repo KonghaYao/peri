@@ -1,4 +1,12 @@
-use super::*;
+use super::Arc;
+use super::GetReply;
+use super::HandleToken;
+use super::McpResourceTool;
+use super::ReadItem;
+use super::RoleClient;
+use super::ServerDiscoveryState;
+use super::SkillResource;
+use peri_agent::tools::BaseTool as _;
 
 // ─── 读取面热更新闭环（digest 失败/未列出 → skills/get 刷新回写）──────────
 
@@ -10,7 +18,7 @@ async fn read_skill_digest_mismatch_recovers_via_skills_get() {
     let old_text = "---\nname: demo\ndescription: Demo skill\n---\n\n# Demo v1\n";
     let new_text = "---\nname: demo\ndescription: Demo skill\n---\n\n# Demo v2\n";
     let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(read_server(
+    tokio::spawn(super::read_server(
         server_io,
         vec![ReadItem {
             uri: "skill://demo/SKILL.md",
@@ -19,7 +27,7 @@ async fn read_skill_digest_mismatch_recovers_via_skills_get() {
         }],
         // get 返回当前条目快照：新 digest（匹配 new_text）
         GetReply {
-            skill_digest: Some(format!("sha256:{}", sha256_hex(new_text))),
+            skill_digest: Some(format!("sha256:{}", super::sha256_hex(new_text))),
             ..GetReply::default()
         },
         None,
@@ -32,16 +40,16 @@ async fn read_skill_digest_mismatch_recovers_via_skills_get() {
         client_io,
         None::<rmcp::model::ServerPeerInfo>,
     );
-    let pool = make_connected_pool(running.peer().clone());
-    let reg = empty_registry();
-    seed_registry(
+    let pool = super::make_connected_pool(running.peer().clone());
+    let reg = super::empty_registry();
+    super::seed_registry(
         &reg,
-        vec![mcp_entry(
+        vec![super::mcp_entry(
             "skill://demo/SKILL.md",
             vec![SkillResource {
                 uri: "skill://demo/SKILL.md".to_string(),
                 // 旧 digest：只匹配 old_text（stale——server 内容已更新）
-                digest: format!("sha256:{}", sha256_hex(old_text)),
+                digest: format!("sha256:{}", super::sha256_hex(old_text)),
             }],
         )],
     );
@@ -61,7 +69,7 @@ async fn read_skill_digest_mismatch_recovers_via_skills_get() {
         skills[0].content.is_none(),
         "W2：条目只发布 metadata，不落正文"
     );
-    let new_digest = format!("sha256:{}", sha256_hex(new_text));
+    let new_digest = format!("sha256:{}", super::sha256_hex(new_text));
     assert_eq!(
         skills[0].resources[0].digest, new_digest,
         "registry 条目 digest 应为新条目声明"
@@ -73,7 +81,7 @@ async fn read_skill_digest_mismatch_recovers_via_skills_get() {
 async fn read_skill_digest_mismatch_get_failed_rejected() {
     let old_text = "---\nname: demo\ndescription: Demo skill\n---\n\n# Demo v1\n";
     let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(read_server(
+    tokio::spawn(super::read_server(
         server_io,
         vec![ReadItem {
             uri: "skill://demo/SKILL.md",
@@ -91,11 +99,11 @@ async fn read_skill_digest_mismatch_get_failed_rejected() {
         client_io,
         None::<rmcp::model::ServerPeerInfo>,
     );
-    let pool = make_connected_pool(running.peer().clone());
-    let reg = empty_registry();
-    seed_registry(
+    let pool = super::make_connected_pool(running.peer().clone());
+    let reg = super::empty_registry();
+    super::seed_registry(
         &reg,
-        vec![mcp_entry(
+        vec![super::mcp_entry(
             "skill://demo/SKILL.md",
             vec![SkillResource {
                 uri: "skill://demo/SKILL.md".to_string(),
@@ -131,7 +139,7 @@ async fn read_skill_recovery_handle_mismatch_no_writeback() {
     let new_text = "---\nname: demo\ndescription: Demo skill\n---\n\n# Demo v2\n";
     let get_done = Arc::new(tokio::sync::Notify::new());
     let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(read_server(
+    tokio::spawn(super::read_server(
         server_io,
         vec![ReadItem {
             uri: "skill://demo/SKILL.md",
@@ -139,7 +147,7 @@ async fn read_skill_recovery_handle_mismatch_no_writeback() {
             blob_b64: None,
         }],
         GetReply {
-            skill_digest: Some(format!("sha256:{}", sha256_hex(new_text))),
+            skill_digest: Some(format!("sha256:{}", super::sha256_hex(new_text))),
             ..GetReply::default()
         },
         None,
@@ -153,15 +161,15 @@ async fn read_skill_recovery_handle_mismatch_no_writeback() {
         client_io,
         None::<rmcp::model::ServerPeerInfo>,
     );
-    let pool = make_connected_pool(running.peer().clone());
-    let reg = empty_registry();
-    seed_registry(
+    let pool = super::make_connected_pool(running.peer().clone());
+    let reg = super::empty_registry();
+    super::seed_registry(
         &reg,
-        vec![mcp_entry(
+        vec![super::mcp_entry(
             "skill://demo/SKILL.md",
             vec![SkillResource {
                 uri: "skill://demo/SKILL.md".to_string(),
-                digest: format!("sha256:{}", sha256_hex(old_text)),
+                digest: format!("sha256:{}", super::sha256_hex(old_text)),
             }],
         )],
     );
@@ -177,11 +185,11 @@ async fn read_skill_recovery_handle_mismatch_no_writeback() {
     // Discovered（带不同的重连条目）。
     get_done.notified().await;
     let reconnect_entry = {
-        let mut e = mcp_entry(
+        let mut e = super::mcp_entry(
             "skill://demo/SKILL.md",
             vec![SkillResource {
                 uri: "skill://demo/SKILL.md".to_string(),
-                digest: format!("sha256:{}", sha256_hex("reconnected content")),
+                digest: format!("sha256:{}", super::sha256_hex("reconnected content")),
             }],
         );
         e.content = Some("reconnected content".to_string());
@@ -222,7 +230,7 @@ async fn read_unlisted_recovers_when_new_entry_lists_uri() {
     let skill_text = "---\nname: demo\ndescription: Demo skill\n---\n\n# Demo\n";
     let notes_text = "# Notes v2\n";
     let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(read_server(
+    tokio::spawn(super::read_server(
         server_io,
         vec![
             ReadItem {
@@ -237,11 +245,11 @@ async fn read_unlisted_recovers_when_new_entry_lists_uri() {
             },
         ],
         GetReply {
-            skill_digest: Some(format!("sha256:{}", sha256_hex(skill_text))),
+            skill_digest: Some(format!("sha256:{}", super::sha256_hex(skill_text))),
             // 新条目把 notes.md 也列入了 resources（热更新后新增文件）
             extra_resources: vec![(
                 "skill://demo/notes.md".to_string(),
-                format!("sha256:{}", sha256_hex(notes_text)),
+                format!("sha256:{}", super::sha256_hex(notes_text)),
             )],
             ..GetReply::default()
         },
@@ -255,16 +263,16 @@ async fn read_unlisted_recovers_when_new_entry_lists_uri() {
         client_io,
         None::<rmcp::model::ServerPeerInfo>,
     );
-    let pool = make_connected_pool(running.peer().clone());
-    let reg = empty_registry();
-    seed_registry(
+    let pool = super::make_connected_pool(running.peer().clone());
+    let reg = super::empty_registry();
+    super::seed_registry(
         &reg,
-        vec![mcp_entry(
+        vec![super::mcp_entry(
             "skill://demo/SKILL.md",
             // 旧条目 resources 未列出 notes.md → 读它时 Unlisted
             vec![SkillResource {
                 uri: "skill://demo/SKILL.md".to_string(),
-                digest: format!("sha256:{}", sha256_hex(skill_text)),
+                digest: format!("sha256:{}", super::sha256_hex(skill_text)),
             }],
         )],
     );
@@ -300,7 +308,7 @@ async fn read_skill_recovery_wrong_uri_rejected() {
     let old_text = "---\nname: demo\ndescription: Demo skill\n---\n\n# Demo v1\n";
     let new_text = "---\nname: demo\ndescription: Demo skill\n---\n\n# Demo v2\n";
     let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(read_server(
+    tokio::spawn(super::read_server(
         server_io,
         vec![ReadItem {
             uri: "skill://demo/SKILL.md",
@@ -308,7 +316,7 @@ async fn read_skill_recovery_wrong_uri_rejected() {
             blob_b64: None,
         }],
         GetReply {
-            skill_digest: Some(format!("sha256:{}", sha256_hex(new_text))),
+            skill_digest: Some(format!("sha256:{}", super::sha256_hex(new_text))),
             wrong_uri: true,
             ..GetReply::default()
         },
@@ -322,16 +330,16 @@ async fn read_skill_recovery_wrong_uri_rejected() {
         client_io,
         None::<rmcp::model::ServerPeerInfo>,
     );
-    let pool = make_connected_pool(running.peer().clone());
-    let reg = empty_registry();
-    seed_registry(
+    let pool = super::make_connected_pool(running.peer().clone());
+    let reg = super::empty_registry();
+    super::seed_registry(
         &reg,
-        vec![mcp_entry(
+        vec![super::mcp_entry(
             "skill://demo/SKILL.md",
             vec![SkillResource {
                 uri: "skill://demo/SKILL.md".to_string(),
                 // 旧 digest：只匹配 old_text（stale——触发恢复）
-                digest: format!("sha256:{}", sha256_hex(old_text)),
+                digest: format!("sha256:{}", super::sha256_hex(old_text)),
             }],
         )],
     );
@@ -350,7 +358,7 @@ async fn read_skill_recovery_wrong_uri_rejected() {
     // registry 未被回写（仍为旧条目）
     assert_eq!(
         reg.skills_of("srv")[0].resources[0].digest,
-        format!("sha256:{}", sha256_hex(old_text)),
+        format!("sha256:{}", super::sha256_hex(old_text)),
         "恢复被拒不得回写条目"
     );
 }
@@ -365,7 +373,7 @@ async fn read_unlisted_recovery_digest_mismatch_rejected() {
     let notes_text = "# Notes v2\n";
     let request_log: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
     let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(read_server(
+    tokio::spawn(super::read_server(
         server_io,
         vec![
             ReadItem {
@@ -380,7 +388,7 @@ async fn read_unlisted_recovery_digest_mismatch_rejected() {
             },
         ],
         GetReply {
-            skill_digest: Some(format!("sha256:{}", sha256_hex(skill_text))),
+            skill_digest: Some(format!("sha256:{}", super::sha256_hex(skill_text))),
             // 新条目列出了 notes.md 但 digest 给错（与重读内容不一致）
             extra_resources: vec![(
                 "skill://demo/notes.md".to_string(),
@@ -398,16 +406,16 @@ async fn read_unlisted_recovery_digest_mismatch_rejected() {
         client_io,
         None::<rmcp::model::ServerPeerInfo>,
     );
-    let pool = make_connected_pool(running.peer().clone());
-    let reg = empty_registry();
-    seed_registry(
+    let pool = super::make_connected_pool(running.peer().clone());
+    let reg = super::empty_registry();
+    super::seed_registry(
         &reg,
-        vec![mcp_entry(
+        vec![super::mcp_entry(
             "skill://demo/SKILL.md",
             // 旧条目 resources 未列出 notes.md → 读它时 Unlisted
             vec![SkillResource {
                 uri: "skill://demo/SKILL.md".to_string(),
-                digest: format!("sha256:{}", sha256_hex(skill_text)),
+                digest: format!("sha256:{}", super::sha256_hex(skill_text)),
             }],
         )],
     );
@@ -451,7 +459,7 @@ async fn read_unlisted_recovery_new_entry_still_unlisted_rejected() {
     let notes_text = "# Notes v2\n";
     let request_log: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
     let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(read_server(
+    tokio::spawn(super::read_server(
         server_io,
         vec![
             ReadItem {
@@ -467,7 +475,7 @@ async fn read_unlisted_recovery_new_entry_still_unlisted_rejected() {
         ],
         GetReply {
             // get 正常应答，但新条目 resources 仍不含 notes.md
-            skill_digest: Some(format!("sha256:{}", sha256_hex(skill_text))),
+            skill_digest: Some(format!("sha256:{}", super::sha256_hex(skill_text))),
             ..GetReply::default()
         },
         None,
@@ -480,15 +488,15 @@ async fn read_unlisted_recovery_new_entry_still_unlisted_rejected() {
         client_io,
         None::<rmcp::model::ServerPeerInfo>,
     );
-    let pool = make_connected_pool(running.peer().clone());
-    let reg = empty_registry();
-    seed_registry(
+    let pool = super::make_connected_pool(running.peer().clone());
+    let reg = super::empty_registry();
+    super::seed_registry(
         &reg,
-        vec![mcp_entry(
+        vec![super::mcp_entry(
             "skill://demo/SKILL.md",
             vec![SkillResource {
                 uri: "skill://demo/SKILL.md".to_string(),
-                digest: format!("sha256:{}", sha256_hex(skill_text)),
+                digest: format!("sha256:{}", super::sha256_hex(skill_text)),
             }],
         )],
     );
@@ -520,7 +528,7 @@ async fn refresh_entry_and_content_digest_mismatch_rejected() {
     let notes_text = "# Notes v2\n";
     let request_log: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
     let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(read_server(
+    tokio::spawn(super::read_server(
         server_io,
         vec![
             ReadItem {
@@ -535,7 +543,7 @@ async fn refresh_entry_and_content_digest_mismatch_rejected() {
             },
         ],
         GetReply {
-            skill_digest: Some(format!("sha256:{}", sha256_hex(skill_text))),
+            skill_digest: Some(format!("sha256:{}", super::sha256_hex(skill_text))),
             extra_resources: vec![(
                 "skill://demo/notes.md".to_string(),
                 format!("sha256:{}", "0".repeat(64)),
@@ -577,7 +585,7 @@ async fn refresh_entry_and_content_new_entry_unlisted_rejected() {
     let notes_text = "# Notes v2\n";
     let request_log: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
     let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(read_server(
+    tokio::spawn(super::read_server(
         server_io,
         vec![
             ReadItem {
@@ -593,7 +601,7 @@ async fn refresh_entry_and_content_new_entry_unlisted_rejected() {
         ],
         GetReply {
             // get 正常应答，但新条目 resources 仍不含 notes.md
-            skill_digest: Some(format!("sha256:{}", sha256_hex(skill_text))),
+            skill_digest: Some(format!("sha256:{}", super::sha256_hex(skill_text))),
             ..GetReply::default()
         },
         None,
@@ -632,7 +640,7 @@ async fn read_skill_recovery_writeback_keeps_original_name() {
     let old_text = "---\nname: refunds\ndescription: Refunds skill\n---\n\n# Refunds v1\n";
     let new_text = "---\nname: refunds\ndescription: Refunds skill\n---\n\n# Refunds v2\n";
     let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(read_server(
+    tokio::spawn(super::read_server(
         server_io,
         vec![ReadItem {
             uri: "skill://acme/billing/refunds/SKILL.md",
@@ -640,7 +648,7 @@ async fn read_skill_recovery_writeback_keeps_original_name() {
             blob_b64: None,
         }],
         GetReply {
-            skill_digest: Some(format!("sha256:{}", sha256_hex(new_text))),
+            skill_digest: Some(format!("sha256:{}", super::sha256_hex(new_text))),
             ..GetReply::default()
         },
         None,
@@ -653,19 +661,19 @@ async fn read_skill_recovery_writeback_keeps_original_name() {
         client_io,
         None::<rmcp::model::ServerPeerInfo>,
     );
-    let pool = make_connected_pool(running.peer().clone());
-    let reg = empty_registry();
-    let mut entry = mcp_entry(
+    let pool = super::make_connected_pool(running.peer().clone());
+    let reg = super::empty_registry();
+    let mut entry = super::mcp_entry(
         "skill://acme/billing/refunds/SKILL.md",
         vec![SkillResource {
             uri: "skill://acme/billing/refunds/SKILL.md".to_string(),
             // 旧 digest：只匹配 old_text（stale——触发恢复）
-            digest: format!("sha256:{}", sha256_hex(old_text)),
+            digest: format!("sha256:{}", super::sha256_hex(old_text)),
         }],
     );
     // 模拟 disambiguate_names 消歧后的注册名（未消歧名是 mcp__srv__refunds）
     entry.name = "mcp__srv__acme_billing_refunds".to_string();
-    seed_registry(&reg, vec![entry]);
+    super::seed_registry(&reg, vec![entry]);
     let tool = McpResourceTool::new(pool, Arc::clone(&reg));
     let out = tool
         .invoke(
@@ -687,7 +695,7 @@ async fn read_skill_recovery_writeback_keeps_original_name() {
     );
     assert_eq!(
         skills[0].resources[0].digest,
-        format!("sha256:{}", sha256_hex(new_text)),
+        format!("sha256:{}", super::sha256_hex(new_text)),
         "刷新后的 manifest digest 必须回写"
     );
 }

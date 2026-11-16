@@ -1,24 +1,30 @@
 //! Real process boundaries, MCP requests and an offline HTTP issuer.
 #![cfg(unix)]
 
-use std::{
-    collections::HashMap,
-    process::{Child, Command, Stdio},
-    sync::Mutex,
-};
+use peri_model::RequestAuth;
+use std::collections::HashMap;
+use std::process::Child;
+use std::process::Command;
+use std::process::Stdio;
+use std::sync::Mutex;
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use serde_json::{json, Value};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-};
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
 
-use super::*;
-use crate::model_auth::{
-    types::{StoredAccount, TokenSet},
-    RESOURCE, SCOPES,
-};
+use crate::model_auth::client::ChatGptAuthManager;
+use crate::model_auth::oauth::OAuth;
+use crate::model_auth::types::AuthError;
+use crate::model_auth::types::StoredAccount;
+use crate::model_auth::types::TokenSet;
+use crate::model_auth::RESOURCE;
+use crate::model_auth::SCOPES;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 const CHILD_TEST: &str = "model_auth::client::process_tests::cross_process_auth_helper";
 
@@ -148,7 +154,7 @@ fn sign(issuer: &str, nonce: &str) -> String {
 }
 
 fn manager(root: &std::path::Path, base: url::Url) -> ChatGptAuthManager {
-    let mut value = ChatGptAuthManager::new(root.to_owned(), "one".into()).unwrap();
+    let mut value = ChatGptAuthManager::try_new(root.to_owned(), "one".into()).unwrap();
     let server = Arc::get_mut(&mut value.server).unwrap();
     server.oauth = OAuth::for_test(base);
     server.clock = Arc::new(|| 1000);

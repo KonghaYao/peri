@@ -13,7 +13,8 @@
 //! peri-tui / peri-controller。生产接线（Agent EventBus → Runtime 聚合）随
 //! executor 拆分（L5）落地，本 crate 不承载业务装配。
 
-pub mod error;
+pub mod runtime_error;
+pub use runtime_error as error;
 pub mod runtime;
 
 pub use error::RuntimeError;

@@ -74,11 +74,13 @@ impl AgentStatus {
     }
 
     /// 是否仍处于活跃状态
+    #[must_use]
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Active)
     }
 
     /// 是否已是终态（结束、失败或取消）
+    #[must_use]
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Done | Self::Cancelled | Self::Error)
     }
@@ -192,14 +194,17 @@ pub enum ThreadMetaParseError {
 }
 
 impl ThreadMetaParseError {
+    #[must_use]
     pub fn invalid_cancel_policy(s: impl Into<String>) -> Self {
         Self::InvalidCancelPolicy(s.into())
     }
 
+    #[must_use]
     pub fn invalid_agent_status(s: impl Into<String>) -> Self {
         Self::InvalidAgentStatus(s.into())
     }
 
+    #[must_use]
     pub fn invalid_work_state(s: impl Into<String>) -> Self {
         Self::InvalidWorkState(s.into())
     }

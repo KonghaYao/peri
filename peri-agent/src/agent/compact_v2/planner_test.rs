@@ -1,10 +1,20 @@
 //! Planner behavior from canonical history through the final model view.
-use super::*;
-use crate::agent::compact_v2::projection::{
-    render_micro_plan, MessageProjectionDirective, MicroCompactPlan, ProjectionAction,
-    ProviderCapabilities,
-};
+use crate::agent::compact_v2::config::CompactConfig;
+
+use crate::agent::compact_v2::planner::index;
+use crate::agent::compact_v2::planner::ArchivePlanningScope;
+use crate::agent::compact_v2::planner::ContextPressure;
+use crate::agent::compact_v2::planner::MicroPlanningFacts;
+
+use crate::agent::compact_v2::projection::MessageProjectionDirective;
+use crate::agent::compact_v2::projection::MicroCompactPlan;
+use crate::agent::compact_v2::projection::ProjectionAction;
+use crate::agent::compact_v2::projection::ProviderCapabilities;
+use crate::agent::compact_v2::projection::PROJECTION_POLICY_VERSION;
+use crate::messages::MessageId;
 use crate::messages::{BaseMessage, ContentBlock, MessageContent, ToolCallRequest};
+use crate::session::transcript::MessageTranscript;
+use crate::tools::ContextRetention;
 use crate::tools::{ToolExecutionEvidence, ToolExecutionStatus};
 
 fn pressure(window: u32) -> ContextPressure {
@@ -67,7 +77,7 @@ fn facts(transcript: &MessageTranscript, policy: ContextRetention) -> MicroPlann
 }
 
 fn plan(transcript: &MessageTranscript, facts: &MicroPlanningFacts) -> MicroCompactPlan {
-    plan_micro_with_facts(
+    crate::agent::compact_v2::planner::planning::plan_micro_with_facts(
         transcript,
         &CompactConfig {
             micro_compact_stale_steps: 0,
@@ -77,7 +87,7 @@ fn plan(transcript: &MessageTranscript, facts: &MicroPlanningFacts) -> MicroComp
         facts,
         &ProviderCapabilities::openai(),
     )
-    .unwrap()
+    .expect("the plan micro with facts fixture result is required for this assertion")
 }
 
 #[test]
@@ -86,14 +96,14 @@ fn test_pressure_keeps_original_reclaim_and_separates_desired_view() {
     assert_eq!(p.target_tokens(), 192_000);
     assert_eq!(p.target_reclaim_tokens(), 4_000);
     let transcript = MessageTranscript::new();
-    let plan = plan_micro_with_facts(
+    let plan = crate::agent::compact_v2::planner::planning::plan_micro_with_facts(
         &transcript,
         &CompactConfig::default(),
         &p,
         &MicroPlanningFacts::default(),
         &ProviderCapabilities::openai(),
     )
-    .unwrap();
+    .expect("the plan micro with facts fixture result is required for this assertion");
     assert_eq!(plan.diagnostics.desired_view_tokens, 90_000);
     assert_eq!(plan.diagnostics.soft_recent_budget_tokens, 8192);
     assert_eq!(plan.diagnostics.receipt_budget_tokens, 2048);
@@ -118,15 +128,20 @@ fn test_one_user_hundred_steps_archive_old_history_with_default_age() {
         step(&mut transcript, i, "Read", &"old result".repeat(3000));
     }
     let facts = facts(&transcript, ContextRetention::Recomputable);
-    let plan = plan_micro_with_facts(
+    let plan = crate::agent::compact_v2::planner::planning::plan_micro_with_facts(
         &transcript,
         &CompactConfig::default(),
         &pressure(16_000),
         &facts,
         &ProviderCapabilities::openai(),
     )
-    .unwrap();
-    let view = render_micro_plan(&transcript, &plan, &ProviderCapabilities::openai()).unwrap();
+    .expect("the plan micro with facts fixture result is required for this assertion");
+    let view = crate::agent::compact_v2::projection::render_micro_plan(
+        &transcript,
+        &plan,
+        &ProviderCapabilities::openai(),
+    )
+    .expect("the render micro plan fixture result is required for this assertion");
     println!(
         "micro_100_step_fixture candidates={} archived={} before={} after={} delta={}",
         plan.diagnostics.candidate_count,
@@ -183,7 +198,12 @@ fn test_cross_human_interjection_pairs_by_identity() {
     facts.fixed_view_tokens = 8_000;
     let plan = plan(&transcript, &facts);
     assert!(plan.estimated_before_tokens > plan.diagnostics.desired_view_tokens);
-    let view = render_micro_plan(&transcript, &plan, &ProviderCapabilities::openai()).unwrap();
+    let view = crate::agent::compact_v2::projection::render_micro_plan(
+        &transcript,
+        &plan,
+        &ProviderCapabilities::openai(),
+    )
+    .expect("the render micro plan fixture result is required for this assertion");
     assert!(plan.actions.iter().any(|action| action.message_id == ai_id));
     assert!(view
         .iter()
@@ -199,7 +219,7 @@ fn test_duplicate_call_identity_is_explicit_error() {
             vec![ToolCallRequest::new("same", "Read", serde_json::json!({}))],
         ));
     }
-    let error = plan_micro_with_facts(
+    let error = crate::agent::compact_v2::planner::planning::plan_micro_with_facts(
         &transcript,
         &CompactConfig::default(),
         &pressure(16_000),
@@ -214,7 +234,7 @@ fn test_duplicate_call_identity_is_explicit_error() {
 fn test_conflicting_cached_and_raw_call_is_rejected() {
     let mut transcript = MessageTranscript::new();
     transcript.append(BaseMessage::Ai { id: MessageId::new(), content: MessageContent::Raw(vec![serde_json::json!({"type":"tool_use","id":"a","name":"Read","input":{"path":"different"}})]), tool_calls: vec![ToolCallRequest::new("a", "Read", serde_json::json!({"path":"original"}))] });
-    let error = plan_micro_with_facts(
+    let error = crate::agent::compact_v2::planner::planning::plan_micro_with_facts(
         &transcript,
         &CompactConfig::default(),
         &pressure(16_000),
@@ -255,7 +275,11 @@ fn test_missing_recovery_blocks_preview_and_group_archive() {
 fn test_running_receipt_and_unconsumed_terminal_are_hard_protected() {
     let mut transcript = MessageTranscript::new();
     let (_, first) = step(&mut transcript, 0, "Bash", &"running".repeat(3000));
-    let mut message = transcript.get(first).unwrap().message().clone();
+    let mut message = transcript
+        .get(first)
+        .expect("transcript get fixture must contain the requested entry")
+        .message()
+        .clone();
     if let BaseMessage::Tool { execution, .. } = &mut message {
         *execution = Some(ToolExecutionEvidence {
             status: ToolExecutionStatus::Running,
@@ -278,14 +302,19 @@ fn test_running_receipt_and_unconsumed_terminal_are_hard_protected() {
 #[test]
 fn test_similar_error_prefixes_remain_distinct_diagnostics() {
     let mut transcript = MessageTranscript::new();
-    for (i, diagnosis) in ["E0308", "E0599"].iter().enumerate() {
+    let paired_items = ["E0308", "E0599"].iter().enumerate();
+    for (i, diagnosis) in paired_items {
         let (_, id) = step(
             &mut transcript,
             i,
             "Bash",
             &format!("{}\n{diagnosis}", "same prefix".repeat(3000)),
         );
-        let mut message = transcript.get(id).unwrap().message().clone();
+        let mut message = transcript
+            .get(id)
+            .expect("transcript get fixture must contain the requested entry")
+            .message()
+            .clone();
         if let BaseMessage::Tool { is_error, .. } = &mut message {
             *is_error = true;
         }
@@ -293,7 +322,12 @@ fn test_similar_error_prefixes_remain_distinct_diagnostics() {
     }
     let facts = facts(&transcript, ContextRetention::SideEffectReceipt);
     let plan = plan(&transcript, &facts);
-    let view = render_micro_plan(&transcript, &plan, &ProviderCapabilities::openai()).unwrap();
+    let view = crate::agent::compact_v2::projection::render_micro_plan(
+        &transcript,
+        &plan,
+        &ProviderCapabilities::openai(),
+    )
+    .expect("the render micro plan fixture result is required for this assertion");
     assert_eq!(plan.diagnostics.archived_exchange_count, 0);
     assert!(view
         .iter()
@@ -324,7 +358,12 @@ fn test_mixed_open_batch_retires_only_closed_independent_exchange() {
     let plan = plan(&transcript, &facts);
     assert!(plan.estimated_before_tokens > plan.diagnostics.desired_view_tokens);
     assert_eq!(plan.diagnostics.archived_exchange_count, 1);
-    let view = render_micro_plan(&transcript, &plan, &ProviderCapabilities::openai()).unwrap();
+    let view = crate::agent::compact_v2::projection::render_micro_plan(
+        &transcript,
+        &plan,
+        &ProviderCapabilities::openai(),
+    )
+    .expect("the render micro plan fixture result is required for this assertion");
     assert!(view
         .iter()
         .flat_map(|message| message.tool_calls())
@@ -342,7 +381,11 @@ fn test_mixed_open_batch_retires_only_closed_independent_exchange() {
 fn test_pure_persisted_media_is_candidate_without_text_length() {
     let mut transcript = MessageTranscript::new();
     let (_, result_id) = step(&mut transcript, 0, "Read", "");
-    let mut message = transcript.get(result_id).unwrap().message().clone();
+    let mut message = transcript
+        .get(result_id)
+        .expect("transcript get fixture must contain the requested entry")
+        .message()
+        .clone();
     if let BaseMessage::Tool { content, .. } = &mut message {
         *content = MessageContent::blocks(vec![
             ContentBlock::image_base64("image/png", "AQID"),
@@ -371,7 +414,11 @@ fn test_pure_persisted_media_is_candidate_without_text_length() {
 fn test_unknown_block_preserved_with_explicit_coverage_gap() {
     let mut transcript = MessageTranscript::new();
     let (_, result_id) = step(&mut transcript, 0, "Read", "");
-    let mut message = transcript.get(result_id).unwrap().message().clone();
+    let mut message = transcript
+        .get(result_id)
+        .expect("transcript get fixture must contain the requested entry")
+        .message()
+        .clone();
     if let BaseMessage::Tool { content, .. } = &mut message {
         *content = MessageContent::blocks(vec![
             ContentBlock::text("text".repeat(5000)),
@@ -383,7 +430,12 @@ fn test_unknown_block_preserved_with_explicit_coverage_gap() {
         &transcript,
         &facts(&transcript, ContextRetention::Recomputable),
     );
-    let view = render_micro_plan(&transcript, &plan, &ProviderCapabilities::openai()).unwrap();
+    let view = crate::agent::compact_v2::projection::render_micro_plan(
+        &transcript,
+        &plan,
+        &ProviderCapabilities::openai(),
+    )
+    .expect("the render micro plan fixture result is required for this assertion");
     assert!(plan.diagnostics.unhandled_by_reason["unknown_block"] > 0);
     assert_eq!(plan.diagnostics.archived_exchange_count, 0);
     assert!(view.iter().any(|message| matches!(message.message_content(), MessageContent::Blocks(blocks) if blocks.iter().any(|block| matches!(block, ContentBlock::Unknown(_))))));
@@ -393,7 +445,11 @@ fn test_unknown_block_preserved_with_explicit_coverage_gap() {
 fn provider_replay_preserves_whole_call_result_step_under_micro_pressure() {
     let mut transcript = MessageTranscript::new();
     let (assistant_id, _) = step(&mut transcript, 0, "Read", &"large result".repeat(5000));
-    let mut assistant = transcript.get(assistant_id).unwrap().message().clone();
+    let mut assistant = transcript
+        .get(assistant_id)
+        .expect("transcript get fixture must contain the requested entry")
+        .message()
+        .clone();
     if let BaseMessage::Ai { content, .. } = &mut assistant {
         *content = MessageContent::blocks(vec![ContentBlock::ProviderState {
             provider: "openai_responses".into(),
@@ -401,15 +457,24 @@ fn provider_replay_preserves_whole_call_result_step_under_micro_pressure() {
         }]);
     }
     transcript.replace_by_id(assistant);
-    let expected = serde_json::to_value(transcript.visible_messages()).unwrap();
+    let expected = serde_json::to_value(transcript.visible_messages())
+        .expect("to_value must accept this test fixture representation");
     let plan = plan(
         &transcript,
         &facts(&transcript, ContextRetention::Recomputable),
     );
     assert!(plan.actions.is_empty());
     assert_eq!(plan.diagnostics.archived_exchange_count, 0);
-    let view = render_micro_plan(&transcript, &plan, &ProviderCapabilities::openai()).unwrap();
-    assert_eq!(serde_json::to_value(&view).unwrap(), expected);
+    let view = crate::agent::compact_v2::projection::render_micro_plan(
+        &transcript,
+        &plan,
+        &ProviderCapabilities::openai(),
+    )
+    .expect("the render micro plan fixture result is required for this assertion");
+    assert_eq!(
+        serde_json::to_value(&view).expect("to_value must accept this test fixture representation"),
+        expected
+    );
     assert!(view[0].message_content().has_provider_state());
 }
 
@@ -417,14 +482,14 @@ fn provider_replay_preserves_whole_call_result_step_under_micro_pressure() {
 fn test_small_window_recent_budget_scales_and_does_not_preserve_entire_task() {
     let mut transcript = MessageTranscript::new();
     step(&mut transcript, 0, "Read", &"large recent".repeat(5000));
-    let plan = plan_micro_with_facts(
+    let plan = crate::agent::compact_v2::planner::planning::plan_micro_with_facts(
         &transcript,
         &CompactConfig::default(),
         &pressure(4000),
         &facts(&transcript, ContextRetention::Recomputable),
         &ProviderCapabilities::openai(),
     )
-    .unwrap();
+    .expect("the plan micro with facts fixture result is required for this assertion");
     assert_eq!(plan.diagnostics.soft_recent_budget_tokens, 400);
     assert_eq!(plan.diagnostics.receipt_budget_tokens, 80);
     assert!(!plan.actions.is_empty());
@@ -468,7 +533,7 @@ fn test_already_previewed_history_can_advance_without_recounting_original() {
             ..Default::default()
         },
     );
-    let plan = plan_micro_with_facts(
+    let plan = crate::agent::compact_v2::planner::planning::plan_micro_with_facts(
         &transcript,
         &CompactConfig {
             micro_compact_stale_steps: 0,
@@ -478,7 +543,7 @@ fn test_already_previewed_history_can_advance_without_recounting_original() {
         &facts,
         &ProviderCapabilities::openai(),
     )
-    .unwrap();
+    .expect("the plan micro with facts fixture result is required for this assertion");
     assert!(plan.estimated_before_tokens > plan.diagnostics.desired_view_tokens);
     assert_eq!(plan.diagnostics.archived_exchange_count, 1);
     assert!(
@@ -519,7 +584,7 @@ fn test_archive_read_preview_reuses_source_reference_without_catalog_chain() {
         },
     }
     .encode()
-    .unwrap();
+    .expect("the encode fixture result is required for this assertion");
     transcript.append(BaseMessage::ai_with_tool_calls(
         "",
         vec![ToolCallRequest::new(
@@ -534,7 +599,12 @@ fn test_archive_read_preview_reuses_source_reference_without_catalog_chain() {
     let mut facts = facts(&transcript, ContextRetention::ArchiveRead);
     facts.archive_scope = None;
     let plan = plan(&transcript, &facts);
-    let view = render_micro_plan(&transcript, &plan, &ProviderCapabilities::openai()).unwrap();
+    let view = crate::agent::compact_v2::projection::render_micro_plan(
+        &transcript,
+        &plan,
+        &ProviderCapabilities::openai(),
+    )
+    .expect("the render micro plan fixture result is required for this assertion");
     assert!(plan.catalogs.is_empty());
     assert!(plan.archive_roots.is_empty());
     assert!(
@@ -567,7 +637,7 @@ fn test_signed_batch_keeps_reasoning_when_one_result_is_not_exposed() {
     transcript.append(fresh);
     let mut facts = facts(&transcript, ContextRetention::Recomputable);
     facts.exposed_message_ids.remove(&fresh_id);
-    let plan = plan_micro_with_facts(
+    let plan = crate::agent::compact_v2::planner::planning::plan_micro_with_facts(
         &transcript,
         &CompactConfig {
             micro_compact_stale_steps: 0,
@@ -577,8 +647,13 @@ fn test_signed_batch_keeps_reasoning_when_one_result_is_not_exposed() {
         &facts,
         &ProviderCapabilities::anthropic(),
     )
-    .unwrap();
-    let view = render_micro_plan(&transcript, &plan, &ProviderCapabilities::anthropic()).unwrap();
+    .expect("the plan micro with facts fixture result is required for this assertion");
+    let view = crate::agent::compact_v2::projection::render_micro_plan(
+        &transcript,
+        &plan,
+        &ProviderCapabilities::anthropic(),
+    )
+    .expect("the render micro plan fixture result is required for this assertion");
     assert_eq!(plan.diagnostics.archived_exchange_count, 0);
     assert!(view.iter().any(|message| message.content_blocks().iter().any(|block| matches!(block, ContentBlock::Reasoning { signature: Some(signature), .. } if signature == "original-signature"))));
     assert!(view
@@ -592,9 +667,13 @@ fn test_index_understands_raw_calls_and_inline_results_across_user_content() {
     transcript.append(BaseMessage::Ai { id: MessageId::new(), content: MessageContent::raw(vec![serde_json::json!({"type":"tool_use","id":"raw","name":"Read","input":{"path":"past.rs"}})]), tool_calls: Vec::new() });
     transcript.append(BaseMessage::human("additional constraint"));
     transcript.append(BaseMessage::human(MessageContent::raw(vec![serde_json::json!({"type":"tool_result","tool_use_id":"raw","content":[{"type":"text","text":"actual historical result"}]}), serde_json::json!({"type":"text","text":"retain user text"})])));
-    let index = index::HistoryIndex::collect(&transcript).unwrap();
+    let index = index::HistoryIndex::collect(&transcript)
+        .expect("the collect fixture result is required for this assertion");
     assert_eq!(index.exchanges.len(), 1);
-    let result = index.exchanges[0].result.as_ref().unwrap();
+    let result = index.exchanges[0]
+        .result
+        .as_ref()
+        .expect("the as ref fixture result is required for this assertion");
     assert_eq!(index.exchanges[0].call_id, "raw");
     assert_eq!(
         result.content.text_chars(),
@@ -624,18 +703,25 @@ fn test_ten_thousand_exchanges_have_bounded_index_and_net_projection() {
         .entries()
         .iter()
         .filter_map(|entry| entry.as_message())
-        .map(|message| (message.id(), serde_json::to_vec(message).unwrap().len()))
+        .map(|message| {
+            (
+                message.id(),
+                serde_json::to_vec(message)
+                    .expect("to_vec must accept this test fixture representation")
+                    .len(),
+            )
+        })
         .collect::<std::collections::HashMap<_, _>>();
     let canonical_serialized_bytes: usize = source_bytes.values().sum();
     let start = std::time::Instant::now();
-    let plan = plan_micro_with_facts(
+    let plan = crate::agent::compact_v2::planner::planning::plan_micro_with_facts(
         &transcript,
         &CompactConfig::default(),
         &pressure(16_000),
         &facts,
         &ProviderCapabilities::openai(),
     )
-    .unwrap();
+    .expect("the plan micro with facts fixture result is required for this assertion");
     let elapsed = start.elapsed();
     let source_fingerprint_bytes: usize = plan
         .source_content
@@ -672,14 +758,14 @@ fn test_strong_levels_stop_after_desired_view_is_reached() {
         step(&mut transcript, i, "Read", &"history".repeat(12000));
     }
     let facts = facts(&transcript, ContextRetention::Recomputable);
-    let roomy = plan_micro_with_facts(
+    let roomy = crate::agent::compact_v2::planner::planning::plan_micro_with_facts(
         &transcript,
         &CompactConfig::default(),
         &pressure(200_000),
         &facts,
         &ProviderCapabilities::openai(),
     )
-    .unwrap();
+    .expect("the plan micro with facts fixture result is required for this assertion");
     assert!(roomy.diagnostics.preview_count > 0);
     assert_eq!(
         roomy.diagnostics.archived_exchange_count, 0,
@@ -728,11 +814,20 @@ fn test_report_requires_closed_consumed_evidence_and_never_becomes_fact_summary(
         .iter()
         .any(|action| action.message_id == call_id));
     assert_eq!(closed.diagnostics.archived_exchange_count, 0);
-    let view = render_micro_plan(&transcript, &closed, &ProviderCapabilities::openai()).unwrap();
+    let view = crate::agent::compact_v2::projection::render_micro_plan(
+        &transcript,
+        &closed,
+        &ProviderCapabilities::openai(),
+    )
+    .expect("the render micro plan fixture result is required for this assertion");
     assert!(view.iter().any(|message| message
         .content()
         .contains("Report conclusion remains distinct")));
-    let mut unknown = transcript.get(result_id).unwrap().message().clone();
+    let mut unknown = transcript
+        .get(result_id)
+        .expect("transcript get fixture must contain the requested entry")
+        .message()
+        .clone();
     if let BaseMessage::Tool { execution, .. } = &mut unknown {
         *execution = Some(ToolExecutionEvidence {
             status: ToolExecutionStatus::Unknown,
@@ -758,7 +853,7 @@ fn test_preview_below_desired_does_not_claim_required_reclaim_was_met() {
         estimated_tokens: 196_000,
         ..pressure(200_000)
     };
-    let plan = plan_micro_with_facts(
+    let plan = crate::agent::compact_v2::planner::planning::plan_micro_with_facts(
         &transcript,
         &CompactConfig {
             micro_compact_stale_steps: 0,
@@ -768,7 +863,7 @@ fn test_preview_below_desired_does_not_claim_required_reclaim_was_met() {
         &facts,
         &ProviderCapabilities::openai(),
     )
-    .unwrap();
+    .expect("the plan micro with facts fixture result is required for this assertion");
     assert!(plan.estimated_before_tokens < plan.diagnostics.desired_view_tokens);
     assert!(plan.diagnostics.preview_count > 0);
     assert_eq!(plan.diagnostics.archived_exchange_count, 0);
@@ -776,128 +871,7 @@ fn test_preview_below_desired_does_not_claim_required_reclaim_was_met() {
     assert!(plan.estimated_tokens_saved > 0);
     assert!(!plan.meets_target(), "required reclaim remains independent of the desired view; the 95% Full gate retains its decision");
 }
-
-fn inline_batch(count: usize) -> MessageTranscript {
-    let mut transcript = MessageTranscript::new();
-    transcript.append(BaseMessage::ai_with_tool_calls(
-        "retain this reasoning",
-        (0..count)
-            .map(|i| {
-                ToolCallRequest::new(
-                    format!("inline-{i:04}"),
-                    "Read",
-                    serde_json::json!({"path":format!("source-{i}.rs"),"options":[true,7,null]}),
-                )
-            })
-            .collect(),
-    ));
-    transcript.append(BaseMessage::human(MessageContent::blocks(
-        (0..count)
-            .map(|i| ContentBlock::ToolResult {
-                id: Some(format!("native-{i}")),
-                tool_use_id: format!("inline-{i:04}"),
-                content: vec![ContentBlock::text(format!(
-                    "result {i}: {}",
-                    "body".repeat(2000)
-                ))],
-                is_error: false,
-            })
-            .collect(),
-    )));
-    transcript
-}
-
-#[test]
-fn shared_inline_results_build_one_catalog_and_bound_batch_actions() {
-    let transcript = inline_batch(128);
-    let mut evidence = facts(&transcript, ContextRetention::Recomputable);
-    evidence.fixed_view_tokens = 8_000;
-    let planned = plan(&transcript, &evidence);
-    assert_eq!(planned.diagnostics.preview_catalog_source_scans, 1);
-    assert_eq!(planned.catalogs.len(), 1);
-    assert_eq!(planned.actions.len(), 32);
-    assert_eq!(planned.diagnostics.archived_exchange_count, 0);
-    assert!(planned.diagnostics.unhandled_by_reason["inline_preview_action_limit"] > 0);
-    assert!(planned.diagnostics.unhandled_by_reason["archive_group_exchange_limit"] > 0);
-    assert_eq!(
-        planned.source_content.len(),
-        1,
-        "one canonical result source is fingerprinted"
-    );
-    let view = render_micro_plan(&transcript, &planned, &ProviderCapabilities::openai()).unwrap();
-    assert_eq!(
-        view[0].tool_calls(),
-        transcript.entries()[0].message().tool_calls()
-    );
-    let original = transcript.entries()[1].message().content_blocks();
-    let retained = view[1].content_blocks();
-    assert_eq!(
-        &retained[32..],
-        &original[32..],
-        "unadmitted result IDs and content stay intact"
-    );
-    assert!(planned.estimated_after_tokens < planned.estimated_before_tokens);
-}
-
-#[test]
-fn closed_inline_batch_uses_linear_call_identity_payloads() {
-    let transcript = inline_batch(16);
-    let mut evidence = facts(&transcript, ContextRetention::Recomputable);
-    evidence.fixed_view_tokens = 8_000;
-    let planned = plan(&transcript, &evidence);
-    assert_eq!(planned.diagnostics.archived_exchange_count, 16);
-    assert_eq!(planned.actions.len(), 32);
-    for action in &planned.actions {
-        let ProjectionAction::OmitToolExchange { tool_call_ids, .. } = &action.action else {
-            panic!("closed batch must retire as a protocol group");
-        };
-        let crate::agent::compact_v2::projection::ProjectionTarget::ToolCall { tool_call_id } =
-            &action.target
-        else {
-            panic!("each member action is tied to one call identity");
-        };
-        assert_eq!(tool_call_ids.as_slice(), std::slice::from_ref(tool_call_id));
-    }
-    let view = render_micro_plan(&transcript, &planned, &ProviderCapabilities::openai()).unwrap();
-    assert!(view.iter().all(|message| message.tool_calls().is_empty()));
-    assert!(view
-        .iter()
-        .any(|message| message.content().contains("retain this reasoning")));
-}
-
-#[test]
-fn complete_metadata_budget_preserves_the_old_view_before_publication() {
-    use peri_acp_types::context_archive::{build_catalog, ARCHIVE_MAX_METADATA_BYTES};
-    let mut transcript = MessageTranscript::new();
-    let (_, result_id) = step(&mut transcript, 0, "Read", &"large output".repeat(1000));
-    let catalog = build_catalog(
-        "current-session".into(),
-        "existing-preview".into(),
-        result_id,
-        &[transcript.get(result_id).unwrap().clone().into_payload()],
-        String::new(),
-    )
-    .unwrap();
-    let mut directive = MessageProjectionDirective {
-        policy_version: PROJECTION_POLICY_VERSION,
-        archive_catalog: Some(catalog),
-        ..Default::default()
-    };
-    let base_size = serde_json::to_vec(&directive).unwrap().len();
-    directive.archive_catalog.as_mut().unwrap().receipt =
-        "x".repeat(ARCHIVE_MAX_METADATA_BYTES - base_size - 96);
-    peri_acp_types::context_archive::validate_projection_metadata(&directive).unwrap();
-    transcript.set_flags_projection(result_id, directive.clone());
-    let evidence = facts(&transcript, ContextRetention::PreviewOnly);
-    let planned = plan(&transcript, &evidence);
-    assert!(planned.actions.is_empty() && planned.catalogs.is_empty());
-    assert_eq!(
-        planned.estimated_before_tokens,
-        planned.estimated_after_tokens
-    );
-    assert!(planned.diagnostics.unhandled_by_reason["archive_metadata_budget"] > 0);
-    assert_eq!(transcript.projection_ref(result_id), Some(&directive));
-}
+include!("planner_inline_result_cases_test.rs");
 
 /// [回归测试] typed 失败只证明调用已结算，缺少 is_error 也不能整组省略失败。
 #[test]
@@ -909,7 +883,11 @@ fn test_typed_unsuccessful_terminal_without_error_flag_is_not_wholly_archived() 
     ] {
         let mut transcript = MessageTranscript::new();
         let (ai, result) = step(&mut transcript, 0, "Write", &"failed detail ".repeat(4_000));
-        let mut message = transcript.get(result).unwrap().message().clone();
+        let mut message = transcript
+            .get(result)
+            .expect("transcript get fixture must contain the requested entry")
+            .message()
+            .clone();
         if let BaseMessage::Tool {
             execution,
             is_error,
@@ -931,7 +909,12 @@ fn test_typed_unsuccessful_terminal_without_error_flag_is_not_wholly_archived() 
         let plan = plan(&transcript, &facts);
         assert_eq!(plan.diagnostics.archived_exchange_count, 0, "{status:?}");
         assert!(plan.diagnostics.unhandled_by_reason["unresolved_error"] > 0);
-        let view = render_micro_plan(&transcript, &plan, &ProviderCapabilities::openai()).unwrap();
+        let view = crate::agent::compact_v2::projection::render_micro_plan(
+            &transcript,
+            &plan,
+            &ProviderCapabilities::openai(),
+        )
+        .expect("the render micro plan fixture result is required for this assertion");
         assert!(view.iter().any(|message| message.id() == ai));
         assert!(view.iter().any(|message| message.id() == result));
     }

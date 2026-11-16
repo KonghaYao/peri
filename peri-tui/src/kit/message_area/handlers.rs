@@ -3,20 +3,13 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 
-use super::entry_nav::{
-    apply_fold_toggle, cycle_interaction_option, entry_click_decision, move_entry_focus,
-    pending_interaction_of, set_entry_focus, submit_interaction_option,
-};
 use super::grid::GridSpec;
 use super::hits::{CopyButtonHit, ImageHoverState, ImageLineHit, InteractionOptionHit};
-use super::image_action::{hover_target_for, try_open_image};
+
 use super::props::ScrollbarFields;
 use super::scroll::{self, DragThrottle, ScrollbarDragState};
-use super::selection::{self, copy_to_clipboard};
-use crate::kit::atoms::{
-    FOCUSED_ENTRY, IMAGE_HOVER, IMAGE_PREVIEW_HOVER, KEEPGOING_BLOCKED_UNTIL, RENDER_HEARTBEAT,
-    SUBMIT_TX, VIEW_MODELS, ViewModelsSnapshot,
-};
+use super::selection;
+
 use crate::kit::focus_router;
 use crate::kit::mouse_router;
 use crate::kit::submit_request::SubmitRequest;
@@ -156,7 +149,7 @@ pub(super) fn register_copy_click(
         let text = copy_text_for_hit(&snapshot, hit);
         drop(snapshot);
         if let Some(text) = text {
-            copy_to_clipboard(text);
+            super::selection::copy_to_clipboard(text);
         }
         // 命中按钮（即使 VM 不匹配）也 Consumed——防止点击落到文本选区逻辑
         EventResult::Consumed
@@ -259,11 +252,11 @@ pub(super) fn register_interaction_option_click(
             .items
             .get(hit.slot_index)
             .filter(|vm| vm.content_hash() == hit.vm_hash)
-            .and_then(pending_interaction_of)
+            .and_then(super::entry_nav::pending_interaction_of)
             .cloned();
         drop(vm_guard);
         if let Some(block) = block {
-            submit_interaction_option(&block, hit.option_index);
+            super::entry_nav::submit_interaction_option(&block, hit.option_index);
         }
         // 命中（即使 VM 不匹配）也 Consumed——防止点击落到文本选区逻辑
         EventResult::Consumed
@@ -309,7 +302,7 @@ pub(super) fn register_image_click(
         });
         drop(vm_guard);
         if matched {
-            try_open_image(&hit.path);
+            super::image_action::try_open_image(&hit.path);
         }
         // 命中（即使 VM 不匹配）也 Consumed——防止点击落到文本选区逻辑
         EventResult::Consumed
@@ -335,7 +328,7 @@ pub(super) fn register_image_hover(
         if mouse.kind != MouseEventKind::Moved {
             return EventResult::Ignored;
         }
-        let new_state = hover_target_for(
+        let new_state = super::image_action::hover_target_for(
             &image_rects_for_hover.read(),
             mouse.column,
             mouse.row,
@@ -440,7 +433,7 @@ pub(super) fn register_entry_click(
         // 见 scroll/event.rs 同款处理）——带内最右列现在只是正文留白列，不是
         // 滚动条列。缺省（首帧）回退带内区域，保持旧行为。
         let sb_area = scrollbar_rect.unwrap_or(area);
-        let Some(slot) = entry_click_decision(
+        let Some(slot) = super::entry_nav::entry_click_decision(
             gesture.read().as_ref(),
             mouse.row,
             area,
@@ -470,17 +463,17 @@ pub(super) fn register_entry_click(
         }
         // 持写锁内派生 key（桥线程可并发写 VIEW_MODELS——锁外派生会读到
         // 漂移索引；key 与索引一致性由同一快照保证）。
-        set_entry_focus(&snapshot, slot);
+        super::entry_nav::set_entry_focus(&snapshot, slot);
         // pending interaction：Enter 语义是提交 option（鼠标不承担）；
         // 首行点击仅聚焦，不提交不折叠。
-        if pending_interaction_of(&snapshot.items[slot]).is_some() {
+        if super::entry_nav::pending_interaction_of(&snapshot.items[slot]).is_some() {
             *gesture.write_no_update() = None;
             return EventResult::Consumed;
         }
         // 点击 = 取消选区语义（与 keepgoing / md 复制按钮点击一致）
         text_sel.write().clear();
         *gesture.write_no_update() = None;
-        let result = apply_fold_toggle(&mut snapshot, slot, false);
+        let result = super::entry_nav::apply_fold_toggle(&mut snapshot, slot, false);
         tracing::trace!(target: "frozen_diag", slot, "click: handler exit");
         result
     });
@@ -582,7 +575,7 @@ pub(super) fn register_keyboard_nav(hooks: &mut Hooks, interaction_option: State
                 // 同线程 read+write 冲突会 panic。
                 let current = FOCUSED_ENTRY.state().read().as_ref().map(|f| f.slot);
                 let items_len = VIEW_MODELS.state().read().items.len();
-                let next = move_entry_focus(
+                let next = super::entry_nav::move_entry_focus(
                     items_len,
                     current,
                     if key.code == KeyCode::Up { -1 } else { 1 },
@@ -594,7 +587,7 @@ pub(super) fn register_keyboard_nav(hooks: &mut Hooks, interaction_option: State
                 let vm_state_ref = VIEW_MODELS.state();
                 let snapshot = vm_state_ref.write();
                 match next {
-                    Some(next_slot) => set_entry_focus(&snapshot, next_slot),
+                    Some(next_slot) => super::entry_nav::set_entry_focus(&snapshot, next_slot),
                     None => *FOCUSED_ENTRY.state().write() = None,
                 }
                 // 焦点移动到其他 entry——重置 interaction option 到首项
@@ -615,14 +608,14 @@ pub(super) fn register_keyboard_nav(hooks: &mut Hooks, interaction_option: State
                 let items = &vm_guard.read().items;
                 let block = idx
                     .and_then(|i| items.get(i))
-                    .and_then(pending_interaction_of);
+                    .and_then(super::entry_nav::pending_interaction_of);
                 let Some(block) = block else {
                     return EventResult::Ignored;
                 };
                 let opt_count = block.options.len().max(1);
                 let opt = *option_state.read();
                 // Tab/← 后退、→ 前进；首末回绕（循环语义，浏览器 Tab 直觉）
-                let next_opt = cycle_interaction_option(
+                let next_opt = super::entry_nav::cycle_interaction_option(
                     opt,
                     opt_count,
                     matches!(key.code, KeyCode::Left | KeyCode::Tab),
@@ -665,16 +658,18 @@ pub(super) fn register_keyboard_nav(hooks: &mut Hooks, interaction_option: State
                 // Enter 提交当前 option（双轨：响应 channel + 关闭模态层；
                 // owner-aware InteractionTerminal 由 client 发出）；Space 消费但不动作
                 // （防止泄漏给输入区插入空格）。提交后退出 entry 焦点。
-                if let Some(block) = pending_interaction_of(&snapshot.items[idx]) {
+                if let Some(block) = super::entry_nav::pending_interaction_of(&snapshot.items[idx])
+                {
                     if !next_is_preview {
                         let opt = *option_state.read();
-                        submit_interaction_option(block, opt);
+                        super::entry_nav::submit_interaction_option(block, opt);
                     }
                     *FOCUSED_ENTRY.state().write() = None;
                     tracing::trace!(target: "frozen_diag", "enter: interaction submit exit");
                     return EventResult::Consumed;
                 }
-                let result = apply_fold_toggle(&mut snapshot, idx, next_is_preview);
+                let result =
+                    super::entry_nav::apply_fold_toggle(&mut snapshot, idx, next_is_preview);
                 tracing::trace!(target: "frozen_diag", "enter: handler exit");
                 result
             }
@@ -682,3 +677,19 @@ pub(super) fn register_keyboard_nav(hooks: &mut Hooks, interaction_option: State
         }
     });
 }
+
+use crate::kit::atoms::FOCUSED_ENTRY;
+
+use crate::kit::atoms::IMAGE_HOVER;
+
+use crate::kit::atoms::IMAGE_PREVIEW_HOVER;
+
+use crate::kit::atoms::KEEPGOING_BLOCKED_UNTIL;
+
+use crate::kit::atoms::RENDER_HEARTBEAT;
+
+use crate::kit::atoms::SUBMIT_TX;
+
+use crate::kit::atoms::VIEW_MODELS;
+
+use crate::kit::atoms::ViewModelsSnapshot;

@@ -1,6 +1,7 @@
 //! Tests for mod_attrib
 
-use super::*;
+use super::{async_trait, Arc, GitAttributionMiddleware, Mutex};
+use peri_agent::middleware::Middleware as _;
 
 struct BranchReader {
     responses: Mutex<

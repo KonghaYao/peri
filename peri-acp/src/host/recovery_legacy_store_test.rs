@@ -5,14 +5,18 @@
 //! 1. 旧库按生产意图（读写）进入：只补两列，旧 Active 不触发恢复，历史与 MQ 内容不被改写；
 //! 2. 只读 Store 进入：返回可浏览的视图（历史/占用），执行被阻断、零写入——恢复不放行执行，也不悄悄升级旧库。
 
-use super::*;
+use crate::host::requests::tests::recovery_tests::RecoveryHarness;
+use crate::transport::types::RequestId;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::session::MqFilter;
 use peri_acp_types::session_resources::AccessMode;
+
 use peri_acp_types::session_store::SessionStoreDeployment;
 use peri_acp_types::store::PersistedPayload;
-use peri_resources::sessions::open_store_and_facade_for_tests;
+use peri_resources::sessions;
+use serde_json::json;
 use sqlx::Connection as _;
+use std::sync::Arc;
 
 const V13: i64 = 13;
 const LEGACY_MESSAGE: &str = "interrupted before upgrade";
@@ -22,7 +26,9 @@ const LEGACY_MESSAGE: &str = "interrupted before upgrade";
 ///
 /// 关库用 `close()` 而非 `Drop`：只读打开要等在 WAL 收尾之后，否则会撞上 mmap 独占锁。
 async fn seed_schema_v13(db_path: &std::path::Path, cwd: &str) -> String {
-    let (bridge, facade) = open_store_and_facade_for_tests(db_path).await.unwrap();
+    let (bridge, facade) = sessions::open_store_and_facade_for_tests(db_path)
+        .await
+        .unwrap();
     let mut seed = RecoveryHarness::assemble(
         tempfile::tempdir().unwrap(),
         db_path.to_path_buf(),
@@ -132,7 +138,7 @@ async fn downgrade_to_v13(db_path: &std::path::Path) {
 async fn current_schema_version() -> i64 {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
-    let store = peri_resources::sessions::SqliteThreadStore::new(&path)
+    let store = peri_resources::sessions::SqliteThreadStore::try_new(&path)
         .await
         .unwrap();
     store.close().await;
@@ -333,9 +339,10 @@ async fn schema_v13_read_only_entry_serves_history_with_execution_block() {
         }),
     );
     super::wire_tests::run_server_loop(&harness).await;
-    wait_for("只读视图的 prompt 被阻断", || async {
-        harness.recorded.error_for(RequestId::Number(3)).is_some()
-    })
+    crate::host::requests::tests::recovery_tests::wait_for(
+        "只读视图的 prompt 被阻断",
+        || async { harness.recorded.error_for(RequestId::Number(3)).is_some() },
+    )
     .await;
     let error = harness
         .recorded

@@ -5,6 +5,7 @@ use crate::failure::ToolFailure;
 const MAX_FAILURE_BYTES: usize = 16 * 1024;
 const MAX_FAILURE_DEPTH: usize = 16;
 
+#[must_use]
 pub fn failure_text(tool: &str, error: &(dyn std::error::Error + 'static)) -> String {
     let mut text = format!("tool `{tool}` failed to execute; {error}");
     let mut cause = error.source();
@@ -38,6 +39,7 @@ pub fn failure_text(tool: &str, error: &(dyn std::error::Error + 'static)) -> St
 mod tests;
 
 /// Preserve producer execution facts across the builtin MCP transport.
+#[must_use]
 pub fn with_execution(
     mut result: rmcp::model::CallToolResult,
     evidence: Option<&peri_agent::tools::ToolExecutionEvidence>,

@@ -1,6 +1,9 @@
 //! Tests for execute_tool
 
-use super::*;
+use super::{
+    async_trait, json, Arc, BTreeMap, BaseTool, ExecuteExtraTool, ExecuteExtraToolResolver, RwLock,
+    ToolCall, ToolInvocationResolver, Value, EXECUTE_EXTRA_TOOL_NAME,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::tool_search::tool_index::ToolSearchIndex;
@@ -173,7 +176,8 @@ async fn test_invoke_executes_deferred_tool() {
 
 #[test]
 fn test_resolver_projects_wrapper_to_canonical_target() {
-    use peri_agent::{agent::react::ToolCall, tools::ToolInvocationResolver};
+    use peri_agent::agent::react::ToolCall;
+    use peri_agent::tools::ToolInvocationResolver;
 
     let registry = build_test_registry();
     let mut tools = registry.read().clone();
@@ -203,7 +207,8 @@ fn test_resolver_projects_wrapper_to_canonical_target() {
 
 #[test]
 fn external_mcp_execute_extra_tool_is_not_unwrapped() {
-    use peri_agent::{agent::react::ToolCall, tools::ToolInvocationResolver};
+    use peri_agent::agent::react::ToolCall;
+    use peri_agent::tools::ToolInvocationResolver;
 
     let external: Arc<dyn BaseTool> = Arc::new(
         MockTool::new(EXECUTE_EXTRA_TOOL_NAME, "external system tool")
@@ -493,7 +498,8 @@ async fn stale_index_entry_does_not_bypass_execute_time_visibility_check() {
 /// 不得把 app-only 目标交给后续审批/执行。
 #[test]
 fn resolver_rejects_app_only_target_after_resolution() {
-    use peri_agent::{agent::react::ToolCall, tools::ToolInvocationResolver};
+    use peri_agent::agent::react::ToolCall;
+    use peri_agent::tools::ToolInvocationResolver;
 
     let (registry, hidden_calls) = build_app_only_registry();
     let mut tools = registry.read().clone();
@@ -525,7 +531,8 @@ fn resolver_rejects_app_only_target_after_resolution() {
 
 #[test]
 fn model_resolver_rejects_direct_app_only_names_but_preserves_app_calls() {
-    use peri_agent::{agent::react::ToolCall, tools::ToolInvocationResolver};
+    use peri_agent::agent::react::ToolCall;
+    use peri_agent::tools::ToolInvocationResolver;
 
     let (registry, hidden_calls) = build_app_only_registry();
     let tools = registry.read().clone();

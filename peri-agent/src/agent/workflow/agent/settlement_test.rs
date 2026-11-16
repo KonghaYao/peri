@@ -9,7 +9,7 @@ use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::thread::{AgentStatus, ThreadMeta, WorkState};
 use peri_acp_types::workflow::{AgentExecutor, AgentRunParams, AgentRunResult};
 
-use super::WorkflowAgentContext;
+use crate::agent::workflow::agent::WorkflowAgentContext;
 
 const PARENT: &str = "workflow-parent";
 const CWD: &str = "/workflow-settle";
@@ -67,7 +67,7 @@ impl peri_model::Model for DoneModel {
         _request: peri_model::ModelRequest,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> peri_model::ModelResult<peri_model::ModelStream> {
-        let response = peri_model::ModelResponse::new(
+        let response = peri_model::ModelResponse::try_new(
             peri_model::ModelMessage::assistant_text("done"),
             peri_model::StopReason::EndTurn,
             None,
@@ -120,7 +120,7 @@ impl peri_model::Model for GatedModel {
     ) -> peri_model::ModelResult<peri_model::ModelStream> {
         self.entered.notify_one();
         self.release.notified().await;
-        let response = peri_model::ModelResponse::new(
+        let response = peri_model::ModelResponse::try_new(
             peri_model::ModelMessage::assistant_text("done"),
             peri_model::StopReason::EndTurn,
             None,
@@ -305,7 +305,10 @@ mod sqlite_recovery {
     use peri_resources::sessions::SessionResourcesImpl;
     use tempfile::TempDir;
 
-    use super::{params, workflow_context, DoneModel, PARENT};
+    use crate::agent::workflow::agent::settlement_tests::params;
+    use crate::agent::workflow::agent::settlement_tests::workflow_context;
+    use crate::agent::workflow::agent::settlement_tests::DoneModel;
+    use crate::agent::workflow::agent::settlement_tests::PARENT;
 
     fn git(root: &Path, args: &[&str]) {
         let output = std::process::Command::new("git")
@@ -317,7 +320,7 @@ mod sqlite_recovery {
             .arg(root)
             .args(args)
             .output()
-            .unwrap();
+            .expect("the output fixture result is required for this assertion");
         assert!(
             output.status.success(),
             "Git fixture failed: {}",
@@ -326,7 +329,8 @@ mod sqlite_recovery {
     }
 
     fn repository() -> TempDir {
-        let directory = tempfile::tempdir().unwrap();
+        let directory =
+            tempfile::tempdir().expect("the temporary test directory must be available");
         git(directory.path(), &["init", "-q"]);
         git(
             directory.path(),
@@ -351,13 +355,16 @@ mod sqlite_recovery {
     #[tokio::test]
     async fn completed_workflow_child_is_not_a_recovery_candidate() {
         let repo = repository();
-        let db = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().expect("the temporary test directory must be available");
         let resources = Arc::new(
             SessionResourcesImpl::open(db.path().join("threads.db"))
                 .await
-                .unwrap(),
+                .expect("the temporary session store fixture must open successfully"),
         );
-        let workspace = resources.resolve_workspace(repo.path()).await.unwrap();
+        let workspace = resources
+            .resolve_workspace(repo.path())
+            .await
+            .expect("the resolve workspace fixture result is required for this assertion");
         let cwd = workspace.cwd.to_string_lossy().into_owned();
         resources
             .create_session(&NewSession {
@@ -375,7 +382,7 @@ mod sqlite_recovery {
                 frozen: FrozenSnapshotBytes::new(r#"{"v":1,"fixture":true}"#),
             })
             .await
-            .unwrap();
+            .expect("the create session fixture result is required for this assertion");
 
         let ctx = workflow_context(
             cwd,
@@ -388,7 +395,10 @@ mod sqlite_recovery {
         assert!(matches!(result, AgentRunResult::Ok { .. }), "{result:?}");
 
         let parent = ThreadId::from(PARENT.to_owned());
-        let tree = resources.list_session_tree(&parent).await.unwrap();
+        let tree = resources
+            .list_session_tree(&parent)
+            .await
+            .expect("the list session tree fixture result is required for this assertion");
         let child = tree
             .iter()
             .find(|meta| meta.parent_thread_id.as_deref() == Some(PARENT))
@@ -396,13 +406,19 @@ mod sqlite_recovery {
         assert_eq!(child.agent_status, AgentStatus::Done);
         assert_eq!(child.work_state, WorkState::Idle);
 
-        let scope = resources.load_recovery_scope(&parent).await.unwrap();
+        let scope = resources
+            .load_recovery_scope(&parent)
+            .await
+            .expect("the load recovery scope fixture result is required for this assertion");
         assert!(
             scope.candidates.is_empty(),
             "settled workflow child must not be a recovery candidate: {:?}",
             scope.candidates
         );
-        let interrupted = resources.load_interrupted_threads(&parent).await.unwrap();
+        let interrupted = resources
+            .load_interrupted_threads(&parent)
+            .await
+            .expect("the load interrupted threads fixture result is required for this assertion");
         assert!(
             interrupted.is_empty(),
             "settled workflow child must not need Active convergence: {interrupted:?}"

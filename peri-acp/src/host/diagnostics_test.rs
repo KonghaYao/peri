@@ -4,8 +4,13 @@ use std::sync::{Arc, Mutex};
 use serde_json::json;
 use tracing::instrument::WithSubscriber;
 
-use super::*;
-use crate::transport::{mpsc::mpsc_transport_pair, types::IncomingMessage};
+use crate::host::response_diagnostics::ResponseDiagnostics;
+use crate::transport::mpsc;
+use crate::transport::types::AcpError;
+use crate::transport::types::IncomingMessage;
+use crate::transport::types::RequestId;
+use crate::transport::AcpTransport;
+use serde_json::Value;
 
 #[derive(Clone, Default)]
 struct LogBuffer(Arc<Mutex<Vec<u8>>>);
@@ -49,7 +54,7 @@ async fn error_response_logs_context_without_payload_and_preserves_wire_error() 
         (-32602, "WARN"),
         (-32601, "WARN"),
     ] {
-        let (client, server) = mpsc_transport_pair();
+        let (client, server) = mpsc::mpsc_transport_pair();
         let request = tokio::spawn(async move {
             client
                 .send_request("session/load", json!({"sessionId": "session-42"}))
@@ -101,7 +106,7 @@ async fn successful_and_cancelled_responses_are_not_warning_logs() {
         Ok(json!({"ok": true})),
         Err(AcpError::new(-32800, "request cancelled")),
     ] {
-        let (_client, server) = mpsc_transport_pair();
+        let (_client, server) = mpsc::mpsc_transport_pair();
         let buffer = LogBuffer::default();
         ResponseDiagnostics::new(RequestId::Number(1), "session/prompt", &json!({}))
             .send(&server, result)
@@ -114,7 +119,7 @@ async fn successful_and_cancelled_responses_are_not_warning_logs() {
 
 #[tokio::test]
 async fn delivery_failure_is_logged_even_for_successful_response() {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = mpsc::mpsc_transport_pair();
     client.close();
     let buffer = LogBuffer::default();
     let error = ResponseDiagnostics::new(
@@ -152,10 +157,10 @@ fn legacy_session_id_is_retained_in_diagnostics() {
 
 #[tokio::test]
 async fn session_update_delivery_failure_logs_metadata_without_payload() {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = mpsc::mpsc_transport_pair();
     client.close();
     let buffer = LogBuffer::default();
-    send_session_update(
+    crate::host::diagnostics::send_session_update(
         &server,
         "session-42",
         "config_options_update",
@@ -178,10 +183,15 @@ async fn session_update_delivery_failure_logs_metadata_without_payload() {
 
 #[tokio::test]
 async fn successful_session_update_is_unchanged_and_not_logged() {
-    let (_client, server) = mpsc_transport_pair();
+    let (_client, server) = mpsc::mpsc_transport_pair();
     let buffer = LogBuffer::default();
-    send_session_update(&server, "session-42", "session_info_update", Value::Null)
-        .with_subscriber(buffer.subscriber())
-        .await;
+    crate::host::diagnostics::send_session_update(
+        &server,
+        "session-42",
+        "session_info_update",
+        Value::Null,
+    )
+    .with_subscriber(buffer.subscriber())
+    .await;
     assert!(buffer.text().is_empty(), "{}", buffer.text());
 }

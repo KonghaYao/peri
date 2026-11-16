@@ -1,8 +1,13 @@
 //! Tests
-use super::*;
-use crate::kit::atoms::ViewModelsSnapshot;
+use super::BgDisplayEntry;
+use super::GridSpec;
+use super::Rect;
+use super::ScrollbarGeometry;
+use super::TuiRenderUnit;
+
 use crate::kit::tui_render_unit::{TuiCollapsedGroup, TuiSubAgentGroup, TuiUserBubble};
 
+#[must_use]
 fn make_subagent(id: &str, name: &str) -> TuiSubAgentGroup {
     TuiSubAgentGroup {
         instance_id: format!("instance-{id}"),
@@ -23,7 +28,7 @@ fn make_subagent(id: &str, name: &str) -> TuiSubAgentGroup {
 #[test]
 fn test_subagent_detail_content_height_exposes_scroll_overflow() {
     let viewport_height = 20u16;
-    let content_height = scroll_content_height(80);
+    let content_height = super::scroll_content_height(80);
     let bottom_offset = content_height.saturating_sub(viewport_height);
 
     assert_eq!(content_height, 80);
@@ -33,22 +38,22 @@ fn test_subagent_detail_content_height_exposes_scroll_overflow() {
 
 #[test]
 fn test_subagent_detail_content_height_is_non_zero_and_saturating() {
-    assert_eq!(scroll_content_height(0), 1);
-    assert_eq!(scroll_content_height(usize::MAX), u16::MAX);
+    assert_eq!(super::scroll_content_height(0), 1);
+    assert_eq!(super::scroll_content_height(usize::MAX), u16::MAX);
 }
 
 #[test]
 fn virtual_detail_offset_preserves_full_height_and_clamps_after_resize() {
-    assert_eq!(clamp_detail_offset(90_000, 100_000, 20), 90_000);
-    assert_eq!(clamp_detail_offset(100_000, 100_000, 20), 99_980);
-    assert_eq!(clamp_detail_offset(99_980, 100_000, 100), 99_900);
-    assert_eq!(clamp_detail_offset(50, 10, 20), 0);
+    assert_eq!(super::clamp_detail_offset(90_000, 100_000, 20), 90_000);
+    assert_eq!(super::clamp_detail_offset(100_000, 100_000, 20), 99_980);
+    assert_eq!(super::clamp_detail_offset(99_980, 100_000, 100), 99_900);
+    assert_eq!(super::clamp_detail_offset(50, 10, 20), 0);
 }
 
 #[test]
 fn detail_viewport_uses_panel_bounds_once() {
     assert_eq!(
-        detail_viewport(Rect::new(4, 3, 60, 12)),
+        super::detail_viewport(Rect::new(4, 3, 60, 12)),
         Rect::new(4, 4, 59, 10)
     );
 }
@@ -56,7 +61,7 @@ fn detail_viewport_uses_panel_bounds_once() {
 #[test]
 fn detail_width_budget_matches_drawn_viewport() {
     for width in [2, 3, 6, 7, 30, 40, 60, 100, 120] {
-        let viewport = detail_viewport(Rect::new(0, 0, width, 12));
+        let viewport = super::detail_viewport(Rect::new(0, 0, width, 12));
         let grid = GridSpec::grid_for(width);
         assert!(grid.line_width() <= viewport.width, "panel width {width}");
         if width >= 7 {
@@ -70,16 +75,16 @@ fn detail_width_budget_matches_drawn_viewport() {
 
 #[test]
 fn growing_detail_follows_only_when_already_at_bottom() {
-    assert_eq!(follow_detail_offset(20, 30, 10, 35, 10, true), 25);
-    assert_eq!(follow_detail_offset(12, 30, 10, 35, 10, true), 12);
-    assert_eq!(follow_detail_offset(20, 30, 10, 35, 10, false), 20);
-    assert_eq!(follow_detail_offset(20, 30, 10, 15, 10, true), 5);
+    assert_eq!(super::follow_detail_offset(20, 30, 10, 35, 10, true), 25);
+    assert_eq!(super::follow_detail_offset(12, 30, 10, 35, 10, true), 12);
+    assert_eq!(super::follow_detail_offset(20, 30, 10, 35, 10, false), 20);
+    assert_eq!(super::follow_detail_offset(20, 30, 10, 15, 10, true), 5);
 }
 
 #[test]
 fn running_detail_opens_at_live_tail_and_completed_detail_opens_at_header() {
-    assert_eq!(initial_detail_offset(true, 30, 10), 20);
-    assert_eq!(initial_detail_offset(false, 30, 10), 0);
+    assert_eq!(super::initial_detail_offset(true, 30, 10), 20);
+    assert_eq!(super::initial_detail_offset(false, 30, 10), 0);
 }
 
 #[test]
@@ -102,7 +107,7 @@ fn test_find_selected_subagent_none_when_no_selection() {
         ))]),
         generation: 0,
     };
-    assert!(find_selected_subagent(&snap, None).is_none());
+    assert!(super::find_selected_subagent(&snap, None).is_none());
 }
 
 #[test]
@@ -114,7 +119,7 @@ fn test_find_selected_subagent_matches_by_id() {
         ]),
         generation: 0,
     };
-    let g = find_selected_subagent(&snap, Some("beta")).expect("应匹配 beta");
+    let g = super::find_selected_subagent(&snap, Some("beta")).expect("应匹配 beta");
     assert_eq!(g.agent_id, "beta");
     assert_eq!(g.agent_name, "Beta");
 }
@@ -133,7 +138,8 @@ fn test_find_selected_subagent_uses_instance_id_for_resumed_occurrence() {
         generation: 0,
     };
 
-    let found = find_selected_subagent(&snap, Some("occurrence-2")).expect("resumed occurrence");
+    let found =
+        super::find_selected_subagent(&snap, Some("occurrence-2")).expect("resumed occurrence");
     assert_eq!(found.agent_name, "Resumed");
 }
 
@@ -145,7 +151,7 @@ fn test_find_selected_subagent_unknown_id_returns_none() {
         ))]),
         generation: 0,
     };
-    assert!(find_selected_subagent(&snap, Some("nope")).is_none());
+    assert!(super::find_selected_subagent(&snap, Some("nope")).is_none());
 }
 
 #[test]
@@ -165,7 +171,7 @@ fn test_find_selected_subagent_recurses_into_collapsed_group() {
         items: im::Vector::from(vec![TuiRenderUnit::TuiCollapsedGroup(collapsed)]),
         generation: 0,
     };
-    let g = find_selected_subagent(&snap, Some("hidden")).expect("应找到组内 subagent");
+    let g = super::find_selected_subagent(&snap, Some("hidden")).expect("应找到组内 subagent");
     assert_eq!(g.agent_id, "hidden");
 }
 
@@ -180,9 +186,9 @@ fn test_find_selected_subagent_recurses_into_nested_subagent() {
         items: im::Vector::from(vec![TuiRenderUnit::TuiSubAgentGroup(outer)]),
         generation: 0,
     };
-    let g = find_selected_subagent(&snap, Some("inner")).expect("应找到嵌套内层");
+    let g = super::find_selected_subagent(&snap, Some("inner")).expect("应找到嵌套内层");
     assert_eq!(g.agent_id, "inner");
-    let outer_match = find_selected_subagent(&snap, Some("outer")).expect("外层也可匹配");
+    let outer_match = super::find_selected_subagent(&snap, Some("outer")).expect("外层也可匹配");
     assert_eq!(outer_match.agent_id, "outer");
 }
 
@@ -230,8 +236,8 @@ fn test_find_live_detail_subagent_prefers_latest_resumed_task() {
         },
     ];
 
-    let found =
-        find_live_detail_subagent(&live, &display, Some("shared-agent")).expect("latest task");
+    let found = super::find_live_detail_subagent(&live, &display, Some("shared-agent"))
+        .expect("latest task");
     assert_eq!(found.instance_id, "task-a-latest");
     assert_eq!(found.agent_name, "Latest");
 }
@@ -249,7 +255,7 @@ fn test_find_selected_subagent_skips_non_subagent_vms() {
         })]),
         generation: 0,
     };
-    assert!(find_selected_subagent(&snap, Some("alpha")).is_none());
+    assert!(super::find_selected_subagent(&snap, Some("alpha")).is_none());
 }
 
 // ── 后台 subagent 的权威源解析（回归：跨 turn 边界后组被冻结）─────────────
@@ -329,8 +335,9 @@ fn test_resolve_selected_subagent_prefers_live_detail_over_frozen_group() {
     let display = vec![bg_display_entry("task-1", "bg-agent")];
 
     // 消息区 Enter 写入组 instance_id。
-    let by_instance = resolve_selected_subagent(&snap, &live, &display, Some("instance-bg-agent"))
-        .expect("live detail via instance id");
+    let by_instance =
+        super::resolve_selected_subagent(&snap, &live, &display, Some("instance-bg-agent"))
+            .expect("live detail via instance id");
     assert_eq!(
         nested_texts(&by_instance),
         vec!["first+second".to_string()],
@@ -339,7 +346,7 @@ fn test_resolve_selected_subagent_prefers_live_detail_over_frozen_group() {
     assert_eq!(by_instance.instance_id, "task-1");
 
     // 底栏行点击写入绑定的 agent_id。
-    let by_agent = resolve_selected_subagent(&snap, &live, &display, Some("bg-agent"))
+    let by_agent = super::resolve_selected_subagent(&snap, &live, &display, Some("bg-agent"))
         .expect("live detail via agent id");
     assert_eq!(nested_texts(&by_agent), vec!["first+second".to_string()]);
 }
@@ -364,7 +371,7 @@ fn test_resolve_selected_subagent_keeps_foreground_resume_group() {
     )]);
     let display = vec![bg_display_entry("task-1", "bg-agent")];
 
-    let group = resolve_selected_subagent(&snap, &live, &display, Some("subagent-2"))
+    let group = super::resolve_selected_subagent(&snap, &live, &display, Some("subagent-2"))
         .expect("foreground resume group");
     assert_eq!(
         nested_texts(&group),
@@ -393,20 +400,20 @@ fn test_resolve_selected_subagent_matches_selected_occurrence() {
         bg_display_entry("task-new", "bg-agent"),
     ];
 
-    let older = resolve_selected_subagent(&snap, &live, &display, Some("subagent-1"))
+    let older = super::resolve_selected_subagent(&snap, &live, &display, Some("subagent-1"))
         .expect("older occurrence");
     assert_eq!(older.instance_id, "task-old");
     assert_eq!(nested_texts(&older), vec!["old run".to_string()]);
 
-    let newer = resolve_selected_subagent(&snap, &live, &display, Some("subagent-2"))
+    let newer = super::resolve_selected_subagent(&snap, &live, &display, Some("subagent-2"))
         .expect("newer occurrence");
     assert_eq!(newer.instance_id, "task-new");
     assert_eq!(nested_texts(&newer), vec!["new run".to_string()]);
 
     // 底栏点击使用 task_id；同一 agent 的旧行和新行各自打开自己的记录。
-    let older_row = resolve_selected_subagent(&snap, &live, &display, Some("task-old"))
+    let older_row = super::resolve_selected_subagent(&snap, &live, &display, Some("task-old"))
         .expect("older task row");
-    let newer_row = resolve_selected_subagent(&snap, &live, &display, Some("task-new"))
+    let newer_row = super::resolve_selected_subagent(&snap, &live, &display, Some("task-new"))
         .expect("newer task row");
     assert_eq!(nested_texts(&older_row), vec!["old run".to_string()]);
     assert_eq!(nested_texts(&newer_row), vec!["new run".to_string()]);
@@ -426,9 +433,12 @@ fn test_resolve_selected_subagent_falls_back_to_view_models_for_sync_group() {
     )]);
     let display = vec![bg_display_entry("task-1", "bg-agent")];
 
-    let found = resolve_selected_subagent(&snap, &live, &display, Some("instance-sync-agent"))
-        .expect("sync group from view models");
+    let found =
+        super::resolve_selected_subagent(&snap, &live, &display, Some("instance-sync-agent"))
+            .expect("sync group from view models");
     assert_eq!(found.agent_id, "sync-agent");
     assert_eq!(found.instance_id, "instance-sync-agent");
-    assert!(resolve_selected_subagent(&snap, &live, &display, Some("nope")).is_none());
+    assert!(super::resolve_selected_subagent(&snap, &live, &display, Some("nope")).is_none());
 }
+
+use crate::kit::atoms::ViewModelsSnapshot;

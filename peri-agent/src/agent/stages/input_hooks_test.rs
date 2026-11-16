@@ -1,10 +1,20 @@
 //! 输入批次准备与 before_agent hook 的调用生命周期。
-use super::super::*;
+use crate::agent::react::ReactLLM;
+
+use crate::agent::stages::context::StageContext;
+use crate::agent::stages::LoopResult;
+use crate::agent::stages::SharedToolMap;
+use crate::messages::BaseMessage;
 use crate::messages::MessageContent;
 use crate::middleware::capabilities as hook_state;
+use crate::middleware::chain::MiddlewareChain;
 use crate::session::queue::MessageSource;
 use crate::session::store::FrozenContext;
+use crate::session::QueuedMessage;
 use crate::session::Session;
+
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 /// 构造测试用 StageContext
 fn make_stage_context() -> StageContext {
@@ -100,7 +110,7 @@ async fn test_input_batch_reaches_single_before_agent_without_history_or_backgro
     ]);
 
     assert!(matches!(
-        run_react_loop(ctx.clone(), 1).await,
+        crate::agent::stages::run_react_loop(ctx.clone(), 1).await,
         LoopResult::Completed
     ));
     assert_eq!(
@@ -116,14 +126,22 @@ async fn test_input_batch_reaches_single_before_agent_without_history_or_backgro
     let transcript = ctx.session.transcript.read();
     for input in [&first, &second] {
         assert_eq!(
-            transcript.get(input.id()).unwrap().message().content(),
+            transcript
+                .get(input.id())
+                .expect("the id fixture result is required for this assertion")
+                .message()
+                .content(),
             format!("{} prepared", input.content()),
             "每条输入都经同一链准备且稳定 ID 写回"
         );
     }
     for untouched in [&historical, &background] {
         assert_eq!(
-            transcript.get(untouched.id()).unwrap().message().content(),
+            transcript
+                .get(untouched.id())
+                .expect("the id fixture result is required for this assertion")
+                .message()
+                .content(),
             untouched.content(),
             "历史与后台 Human 不属于本批用户输入"
         );
@@ -150,7 +168,7 @@ async fn test_input_batch_empty_background_attempt_does_not_reprocess_history() 
     ));
 
     assert!(matches!(
-        run_react_loop(ctx.clone(), 1).await,
+        crate::agent::stages::run_react_loop(ctx.clone(), 1).await,
         LoopResult::Completed
     ));
     assert_eq!(
@@ -168,7 +186,7 @@ async fn test_input_batch_empty_background_attempt_does_not_reprocess_history() 
             .transcript
             .read()
             .get(historical.id())
-            .unwrap()
+            .expect("the id fixture result is required for this assertion")
             .message()
             .content(),
         historical.content()
@@ -177,10 +195,10 @@ async fn test_input_batch_empty_background_attempt_does_not_reprocess_history() 
 #[tokio::test]
 async fn test_p0_2_before_agent_runs_once_after_tool_round_trip() {
     use std::collections::BTreeMap;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    };
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use std::sync::Mutex;
 
     struct ToolRoundTripLLM(Arc<AtomicUsize>);
 
@@ -257,12 +275,15 @@ async fn test_p0_2_before_agent_runs_once_after_tool_round_trip() {
             state: &mut dyn hook_state::BeforeAgentState,
         ) -> crate::error::AgentResult<()> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            self.prompt_visible.lock().unwrap().push(
-                state
-                    .messages()
-                    .iter()
-                    .any(|message| message.content().contains("p0-2 prompt marker")),
-            );
+            self.prompt_visible
+                .lock()
+                .expect("self prompt visible mutex must remain unpoisoned throughout the test")
+                .push(
+                    state
+                        .messages()
+                        .iter()
+                        .any(|message| message.content().contains("p0-2 prompt marker")),
+                );
             state.push_recall("p0-2 recall marker".to_string());
             Ok(())
         }
@@ -299,13 +320,18 @@ async fn test_p0_2_before_agent_runs_once_after_tool_round_trip() {
     ));
 
     assert!(matches!(
-        run_react_loop(context.clone(), 10).await,
+        crate::agent::stages::run_react_loop(context.clone(), 10).await,
         LoopResult::Completed
     ));
     assert_eq!(llm_calls.load(Ordering::SeqCst), 2);
     assert_eq!(tool_calls.load(Ordering::SeqCst), 1);
     assert_eq!(before_agent_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(*prompt_visible.lock().unwrap(), vec![true]);
+    assert_eq!(
+        *prompt_visible
+            .lock()
+            .expect("prompt visible lock mutex must remain unpoisoned throughout the test"),
+        vec![true]
+    );
     assert_eq!(
         context.recall_buffer.read().as_slice(),
         ["p0-2 recall marker"]
@@ -314,10 +340,10 @@ async fn test_p0_2_before_agent_runs_once_after_tool_round_trip() {
 
 #[tokio::test]
 async fn test_p0_2_before_agent_runs_once_after_receive_and_skips_empty_or_cancelled_turns() {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    };
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use std::sync::Mutex;
 
     struct CountingLLM(Arc<AtomicUsize>);
 
@@ -350,12 +376,15 @@ async fn test_p0_2_before_agent_runs_once_after_receive_and_skips_empty_or_cance
             state: &mut dyn hook_state::BeforeAgentState,
         ) -> crate::error::AgentResult<()> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            self.prompt_visible.lock().unwrap().push(
-                state
-                    .messages()
-                    .iter()
-                    .any(|message| message.content().contains("p0-2 prompt marker")),
-            );
+            self.prompt_visible
+                .lock()
+                .expect("self prompt visible mutex must remain unpoisoned throughout the test")
+                .push(
+                    state
+                        .messages()
+                        .iter()
+                        .any(|message| message.content().contains("p0-2 prompt marker")),
+                );
             state.push_recall("p0-2 recall marker".to_string());
             Ok(())
         }
@@ -383,11 +412,16 @@ async fn test_p0_2_before_agent_runs_once_after_receive_and_skips_empty_or_cance
     ));
 
     assert!(matches!(
-        run_react_loop(context.clone(), 10).await,
+        crate::agent::stages::run_react_loop(context.clone(), 10).await,
         LoopResult::Completed
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(*prompt_visible.lock().unwrap(), vec![true]);
+    assert_eq!(
+        *prompt_visible
+            .lock()
+            .expect("prompt visible lock mutex must remain unpoisoned throughout the test"),
+        vec![true]
+    );
     assert_eq!(llm_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         context.recall_buffer.read().as_slice(),
@@ -409,7 +443,7 @@ async fn test_p0_2_before_agent_runs_once_after_receive_and_skips_empty_or_cance
     .with_middleware_chain(context.runtime.middleware_chain.clone())
     .build();
     assert!(matches!(
-        run_react_loop(empty_context.clone(), 10).await,
+        crate::agent::stages::run_react_loop(empty_context.clone(), 10).await,
         LoopResult::Completed
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -432,7 +466,7 @@ async fn test_p0_2_before_agent_runs_once_after_receive_and_skips_empty_or_cance
     .build();
     cancelled_context.session.turn.cancel_token.cancel();
     assert!(matches!(
-        run_react_loop(cancelled_context.clone(), 10).await,
+        crate::agent::stages::run_react_loop(cancelled_context.clone(), 10).await,
         LoopResult::Interrupted
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);

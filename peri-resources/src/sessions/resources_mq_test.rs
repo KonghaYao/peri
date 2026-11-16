@@ -9,9 +9,12 @@ use peri_acp_types::session::{
     MqEnqueueDisposition, MqEntry, MqFilter, MqInput, MqReceiveDisposition, MqReceiveItem,
     MqReceiveOutcome, MqReceivePurpose, MqReceiveSelection, MqReceiveStatus, TurnId,
 };
+use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::thread::ThreadId;
+use peri_acp_types::thread::WorkState;
 
-use super::*;
+use super::Fixture;
 
 fn input(id: MessageId, text: &str) -> MqInput {
     with_policy(

@@ -1,11 +1,8 @@
-use std::{
-    collections::VecDeque,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::collections::VecDeque;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 
 const ERROR_BODY_READ_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -18,7 +15,8 @@ use crate::{
     RetryObserver,
 };
 
-use super::retry::{retrying_stream, StreamAttempt};
+use super::retry;
+use super::retry::StreamAttempt;
 
 /// Provider decoder 使用的 crate-private SSE 事件转换器。
 pub(crate) type SseDecoder =
@@ -63,7 +61,7 @@ pub(crate) fn retrying_http_sse_stream(
             .await
         })
     });
-    retrying_stream(config, cancellation, observer, attempt)
+    retry::retrying_stream(config, cancellation, observer, attempt)
 }
 
 /// 使用运行时配置构造 HTTP/SSE/retry 链路，确保上层注册的安全 observer 生效。
@@ -157,7 +155,7 @@ pub(crate) fn runtime_authenticated_http_sse_stream(
             .await
         })
     });
-    let stream = retrying_stream(
+    let stream = retry::retrying_stream(
         runtime.retry().clone(),
         call_cancellation.clone(),
         runtime.retry_observer(),

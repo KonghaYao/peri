@@ -221,7 +221,11 @@ async fn virtual_remote_cold_recovery_and_read_only_fallbacks() {
         .await
         .unwrap();
     sqlx::query("INSERT INTO peri_store_meta VALUES (0, ?1, 'virtual-test', ?2, 'now')")
-        .bind(schema::REMOTE_SCHEMA_VERSION).bind(schema::STORE_CONTRACT).execute(&pool).await.unwrap();
+        .bind(schema::REMOTE_SCHEMA_VERSION)
+        .bind(schema::STORE_CONTRACT)
+        .execute(&pool)
+        .await
+        .unwrap();
     let transport = Arc::new(SqliteTransport {
         pool: pool.clone(),
         writes: AtomicUsize::new(0),
@@ -392,7 +396,11 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
         .await
         .unwrap();
     sqlx::query("INSERT INTO peri_store_meta VALUES (0, ?1, 'remote-only-test', ?2, 'now')")
-        .bind(schema::REMOTE_SCHEMA_VERSION).bind(schema::STORE_CONTRACT).execute(&pool).await.unwrap();
+        .bind(schema::REMOTE_SCHEMA_VERSION)
+        .bind(schema::STORE_CONTRACT)
+        .execute(&pool)
+        .await
+        .unwrap();
     let transport = Arc::new(SqliteTransport {
         pool: pool.clone(),
         writes: AtomicUsize::new(0),

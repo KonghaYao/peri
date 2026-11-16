@@ -21,9 +21,8 @@
 //! - **三通道全部关闭时 task 自动退出**：`else => break` 防止 task 泄漏。
 
 use peri_acp_types::event::ExecutorEvent;
-use peri_acp_types::event_v2::{
-    observe_event_to_executor, render_event_to_executor, state_event_to_executor, EventHandles,
-};
+use peri_acp_types::event_v2;
+use peri_acp_types::event_v2::EventHandles;
 use peri_acp_types::identity::EventDeliveryClass;
 use peri_acp_types::runtime::UnstampedEvent;
 
@@ -109,7 +108,7 @@ pub(crate) async fn forward_eventbus<F>(
                 if let Some(ref bridge) = bridge {
                     bridge.process_render_event(&ev);
                 }
-                if let Some(exec_ev) = render_event_to_executor(ev.clone()) {
+                if let Some(exec_ev) = event_v2::render_event_to_executor(ev.clone()) {
                     let source = UnstampedEvent::new(
                         ev.turn_id().to_string(),
                         ev.agent_id().to_string(),
@@ -121,7 +120,7 @@ pub(crate) async fn forward_eventbus<F>(
             }
             Some(ev) = handles.state_rx.recv() => {
                 // Langfuse: state 层追踪（当前无映射）
-                if let Some(exec_ev) = state_event_to_executor(ev.clone()) {
+                if let Some(exec_ev) = event_v2::state_event_to_executor(ev.clone()) {
                     let source = UnstampedEvent::new(
                         ev.turn_id().to_string(),
                         ev.agent_id().to_string(),
@@ -144,7 +143,7 @@ pub(crate) async fn forward_eventbus<F>(
                             // 共享入口在采样后借用请求 Arc，避免在冻结准入前复制上下文。
                             bridge.process_observe_event(&ev);
                         }
-                        if let Some(exec_ev) = observe_event_to_executor(ev.clone()) {
+                        if let Some(exec_ev) = event_v2::observe_event_to_executor(ev.clone()) {
                             let source = UnstampedEvent::new(
                                 ev.turn_id().to_string(),
                                 ev.agent_id().to_string(),

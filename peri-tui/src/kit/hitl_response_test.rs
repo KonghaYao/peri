@@ -1,42 +1,50 @@
 use std::sync::Arc;
 
-use peri_acp::transport::{AcpTransport, mpsc::mpsc_transport_pair};
+use peri_acp::transport::AcpTransport;
 use serde_json::json;
 
-use super::*;
+use super::AcpTuiClient;
+use super::CancellationToken;
+use super::HitlResponseAction;
+use super::mpsc;
 
 #[tokio::test]
 async fn test_shutdown_exits_loop() {
-    let (client_transport, _) = mpsc_transport_pair();
+    let (client_transport, _) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(client_transport);
     let (_tx, rx) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
-    let handle = spawn_hitl_response_consumer(client, rx, shutdown.clone());
+    let handle = super::spawn_hitl_response_consumer(client, rx, shutdown.clone());
     shutdown.cancel();
-    handle.await.unwrap();
+    handle
+        .await
+        .expect("shutdown exits loop: fixture task and request must complete successfully");
 }
 
 async fn run_hitl_action(approve: bool) -> serde_json::Value {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
     client.force_stable_for_test("s1", true);
     client.spawn_pump(notification_tx);
     let (tx, rx) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
-    let handle = spawn_hitl_response_consumer(client, rx, shutdown.clone());
+    let handle = super::spawn_hitl_response_consumer(client, rx, shutdown.clone());
     let server = Arc::new(server_transport);
     let request_server = server.clone();
     let request = tokio::spawn(async move {
         request_server
             .send_request("session/request_permission", json!({"sessionId":"s1"}))
             .await
-            .unwrap()
+            .expect("run hitl action: fixture task and request must complete successfully")
     });
     let crate::acp_client::AcpNotification::RequestPermission {
         owner,
         request_id_json,
         ..
-    } = notification_rx.recv().await.unwrap()
+    } = notification_rx
+        .recv()
+        .await
+        .expect("run hitl action: fixture task and request must complete successfully")
     else {
         panic!()
     };
@@ -51,15 +59,23 @@ async fn run_hitl_action(approve: bool) -> serde_json::Value {
             request_id_str: request_id_json,
         }
     };
-    tx.send(action).unwrap();
-    let response = request.await.unwrap();
-    let terminal = notification_rx.recv().await.unwrap();
+    tx.send(action)
+        .expect("run hitl action: fixture channel must deliver its expected message");
+    let response = request
+        .await
+        .expect("run hitl action: fixture task and request must complete successfully");
+    let terminal = notification_rx
+        .recv()
+        .await
+        .expect("run hitl action: fixture task and request must complete successfully");
     assert!(matches!(
         terminal,
         crate::acp_client::AcpNotification::InteractionTerminal { .. }
     ));
     shutdown.cancel();
-    handle.await.unwrap();
+    handle
+        .await
+        .expect("run hitl action: fixture task and request must complete successfully");
     response
 }
 

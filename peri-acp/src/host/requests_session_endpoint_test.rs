@@ -9,11 +9,21 @@
 //! 断言它**真实送达**该连接（审批帧）而不是 `Unanswered`。反证用一条不经 server
 //! loop 建立的会话（等价于修复前状态）：同一归属得到 `NoOnlineEndpoint`。
 
-use super::*;
+use crate::host::requests::tests::history_lifecycle_tests::Fixture;
+use crate::host::requests::tests::MockTransport;
+use crate::provider::LlmProvider;
+use crate::transport::types::AcpError;
+use crate::transport::types::IncomingMessage;
+use crate::transport::types::RequestId;
 use peri_acp_types::interaction::{
     ApprovalItem, InteractionContext, InteractionResponse, TrustedInteractionOwner,
     UserInteractionBroker as _,
 };
+use serde_json::json;
+use serde_json::Value;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 脚本化 ACP 客户端：按序投递请求、记录响应 / 审批帧、按键应答。
 struct ScriptedTransport {
@@ -152,7 +162,7 @@ async fn session_load_registers_connection_endpoint_and_scheduled_approval_is_de
         crate::host::connection::ConnectionContext::new(true),
     ));
     let cancellation = tokio_util::sync::CancellationToken::new();
-    let recovery = recovery_for(&cfg, &sessions, &cont_tx);
+    let recovery = crate::host::requests::tests::recovery_for(&cfg, &sessions, &cont_tx);
     crate::host::server_loop::ServerLoop {
         transport: &erased,
         cfg: &cfg,
@@ -218,14 +228,17 @@ async fn session_load_binds_restored_task_manager() {
     let fixture = Fixture::new().await;
     let id = fixture.id.clone();
     // 新进程：丢弃旧 SessionManager 的运行期状态，重新打开同一存储。
-    let config = make_peri_config_with_provider(make_provider_config(
-        "local",
-        "openai",
-        "fixture-key",
-        "fixture-model",
-    ));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "local",
+            "openai",
+            "fixture-key",
+            "fixture-model",
+        ),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, &fixture.tmp).await;
+    let mut cfg =
+        crate::host::requests::tests::make_server_config(config, provider, &fixture.tmp).await;
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd: fixture.cwd.to_string_lossy().into_owned(),
         bare: true,
@@ -257,7 +270,7 @@ async fn session_load_binds_restored_task_manager() {
         crate::host::connection::ConnectionContext::new(true),
     ));
     let cancellation = tokio_util::sync::CancellationToken::new();
-    let recovery = recovery_for(&cfg, &sessions, &cont_tx);
+    let recovery = crate::host::requests::tests::recovery_for(&cfg, &sessions, &cont_tx);
     crate::host::server_loop::ServerLoop {
         transport: &erased,
         cfg: &cfg,
@@ -296,14 +309,16 @@ async fn session_without_loop_registration_is_not_deliverable() {
     std::fs::create_dir(&cwd).unwrap();
     std::fs::create_dir_all(cwd.join(".peri")).unwrap();
     let cwd = cwd.to_string_lossy().into_owned();
-    let config = make_peri_config_with_provider(make_provider_config(
-        "local",
-        "openai",
-        "fixture-key",
-        "fixture-model",
-    ));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "local",
+            "openai",
+            "fixture-key",
+            "fixture-model",
+        ),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, &tmp).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(config, provider, &tmp).await;
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd: cwd.clone(),
         bare: true,
@@ -313,7 +328,7 @@ async fn session_without_loop_registration_is_not_deliverable() {
     });
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": cwd}),
         &cfg,
@@ -402,7 +417,7 @@ async fn session_fork_registers_connection_endpoint_and_scheduled_approval_is_de
         crate::host::connection::ConnectionContext::new(true),
     ));
     let cancellation = tokio_util::sync::CancellationToken::new();
-    let recovery = recovery_for(&cfg, &sessions, &cont_tx);
+    let recovery = crate::host::requests::tests::recovery_for(&cfg, &sessions, &cont_tx);
     crate::host::server_loop::ServerLoop {
         transport: &erased,
         cfg: &cfg,
@@ -502,14 +517,16 @@ async fn invoke_during_prompt_is_admitted_through_the_real_server_loop() {
     std::fs::create_dir_all(target.join(".peri")).unwrap();
     let cwd = target.to_string_lossy().into_owned();
 
-    let config = make_peri_config_with_provider(make_provider_config(
-        "local",
-        "openai",
-        "fixture-key",
-        "fixture-model",
-    ));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "local",
+            "openai",
+            "fixture-key",
+            "fixture-model",
+        ),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, &tmp).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(config, provider, &tmp).await;
     // apps 能力打开：会话环境装配点据此构造 relay + facade（`apps/*` 与旧别名共用）。
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd: cwd.clone(),
@@ -523,7 +540,7 @@ async fn invoke_during_prompt_is_admitted_through_the_real_server_loop() {
     // 先建会话（真实 `session/new` 装配），才能把「prompt 在飞」写进它的状态。
     let mut sessions = HashMap::new();
     let bootstrap: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": cwd}),
         &cfg,
@@ -575,7 +592,7 @@ async fn invoke_during_prompt_is_admitted_through_the_real_server_loop() {
         crate::host::connection::ConnectionContext::new(true),
     ));
     let cancellation = tokio_util::sync::CancellationToken::new();
-    let recovery = recovery_for(&cfg, &sessions, &cont_tx);
+    let recovery = crate::host::requests::tests::recovery_for(&cfg, &sessions, &cont_tx);
     crate::host::server_loop::ServerLoop {
         transport: &erased,
         cfg: &cfg,

@@ -3,7 +3,13 @@
 //! 首屏由随后的 `history.open` 提供；跳过回放不能绕过所有权检查。非窗口连接
 //! 保持现有回放行为（本文件用旧分页连接验证“不跳过”）。
 
-use super::*;
+use crate::host::requests::tests::history_page_wire_tests::PageFixture;
+use crate::transport::AcpTransport;
+use peri_acp_types::PeriCaps;
+use serde_json::json;
+use serde_json::Value;
+use serial_test::serial;
+use std::sync::Arc;
 
 /// 历史回放通知里的正文（只统计 user/agent message chunk）。
 fn replay_texts(notifications: &[(String, Value)]) -> Vec<String> {
@@ -33,14 +39,28 @@ async fn window_connection_load_skips_replay_and_open_provides_the_first_screen(
     let fixture = PageFixture::new(&tmp).await;
     let sid = fixture.sid.clone();
     let cfg = Arc::clone(&fixture.cfg);
-    let (client, sessions, task) = spawn_loop(cfg, fixture.sessions, Some(window_caps())).await;
+    let (client, sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            cfg,
+            fixture.sessions,
+            Some(
+                crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
+            ),
+        )
+        .await;
 
     client
         .send_request("session/load", json!({ "sessionId": sid }))
         .await
         .expect("window connection load must succeed");
     assert!(
-        replay_texts(&s9c_drain_notifications(&client).await).is_empty(),
+        replay_texts(
+            &crate::host::requests::tests::history_page_wire_tests::s9c_drain_notifications(
+                &client
+            )
+            .await
+        )
+        .is_empty(),
         "声明 historyWindowV1 的连接，session/load 不得交付任何历史回放"
     );
     assert!(
@@ -48,7 +68,7 @@ async fn window_connection_load_skips_replay_and_open_provides_the_first_screen(
         "load 本身不建立窗口票据；首屏必须由客户端显式 open"
     );
 
-    let opened = open(
+    let opened = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({ "kind": "open", "direction": "before", "limit": 2 }),
@@ -75,14 +95,24 @@ async fn non_window_connection_load_keeps_full_replay() {
     let sid = fixture.sid.clone();
     let cfg = Arc::clone(&fixture.cfg);
     let (client, _sessions, task) =
-        spawn_loop(cfg, fixture.sessions, Some(PeriCaps::default())).await;
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            cfg,
+            fixture.sessions,
+            Some(PeriCaps::default()),
+        )
+        .await;
 
     client
         .send_request("session/load", json!({ "sessionId": sid }))
         .await
         .expect("non-window connection load must succeed");
     assert_eq!(
-        replay_texts(&s9c_drain_notifications(&client).await),
+        replay_texts(
+            &crate::host::requests::tests::history_page_wire_tests::s9c_drain_notifications(
+                &client
+            )
+            .await
+        ),
         vec!["第一轮用户问题", "第一轮回答", "第二轮用户问题"],
         "未声明 historyWindowV1 的连接必须保持现有全量回放"
     );
@@ -97,7 +127,15 @@ async fn window_connection_load_still_rejects_handed_off_context() {
     let fixture = PageFixture::new(&tmp).await;
     let sid = fixture.sid.clone();
     let cfg = Arc::clone(&fixture.cfg);
-    let (client, sessions, task) = spawn_loop(cfg, fixture.sessions, Some(window_caps())).await;
+    let (client, sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            cfg,
+            fixture.sessions,
+            Some(
+                crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
+            ),
+        )
+        .await;
     {
         let mut states = sessions.lock().await;
         let state = states.get_mut(&sid).expect("fixture session must be live");
@@ -115,7 +153,13 @@ async fn window_connection_load_still_rejects_handed_off_context() {
         "HandedOff：措辞"
     );
     assert!(
-        replay_texts(&s9c_drain_notifications(&client).await).is_empty(),
+        replay_texts(
+            &crate::host::requests::tests::history_page_wire_tests::s9c_drain_notifications(
+                &client
+            )
+            .await
+        )
+        .is_empty(),
         "拒绝不得发出任何回放通知"
     );
     let states = sessions.lock().await;

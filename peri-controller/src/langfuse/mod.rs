@@ -9,10 +9,13 @@
 pub mod bridge;
 pub mod config;
 pub mod drop_telemetry;
-pub mod fake_session;
-mod metric_sink;
+pub mod fake_langfuse_session;
+pub use fake_langfuse_session as fake_session;
+mod langfuse_metrics_sink;
+use langfuse_metrics_sink as metric_sink;
+pub mod langfuse_session_like;
 pub mod session;
-pub mod session_like;
+pub use langfuse_session_like as session_like;
 pub mod tracer;
 mod turn_traces;
 

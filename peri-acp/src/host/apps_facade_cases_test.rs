@@ -1,7 +1,31 @@
 //! `apps/*` 第二组用例（A2–A13 的其余行）。夹具在 `apps_facade_test.rs` 同模块树。
 
-use super::*;
+use crate::host::apps_facade::tests::Fixture;
+use crate::host::apps_facade::tests::FrameTransport;
+use crate::host::apps_facade::tests::APP_HELPER;
+use crate::host::apps_facade::tests::APP_TOOL;
+use crate::host::apps_facade::tests::LOCAL_URI;
+use crate::host::apps_facade::tests::MODEL_TOOL;
+use crate::host::apps_facade::tests::MODEL_URI;
+use crate::host::apps_facade::tests::RESOURCE_URI;
+use crate::host::apps_facade::tests::SERVER;
+use crate::host::apps_facade::tests::SESSION;
+use crate::host::apps_facade::tests::VIDEO_URI;
+use crate::host::connection::ConnectionContext;
+use peri_acp_types::mcp_apps::McpAppsErrorKind;
+
 use peri_acp_types::mcp_apps::NotExecutedCause;
+use peri_acp_types::mcp_apps::SessionInvocationOutcome;
+use peri_acp_types::mcp_apps_facade::AppQualification;
+use peri_acp_types::mcp_apps_facade::AppsRequestOutcome;
+use peri_acp_types::mcp_apps_facade::CancelVerdict;
+use peri_acp_types::mcp_apps_facade::CloseVerdict;
+use peri_acp_types::mcp_apps_facade::RequestSeq;
+use peri_acp_types::mcp_apps_facade::RequestVerdict;
+use serde_json::json;
+use serde_json::Value;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 /// [A2/A12] `apps/close` 撤销交互资格，但**不取消**已 dispatch 的执行；
 /// close 之后同 key 复用不能绕过拒绝（D9 附加）。
@@ -215,7 +239,7 @@ async fn rerun_target_comes_from_source_invocation_not_client_fields() {
         )
         .await
         .expect_err("客户端伪造目标字段必须被拒绝");
-    assert_kind(
+    crate::host::apps_facade::tests::assert_kind(
         &forged,
         McpAppsErrorKind::InvalidEnvelope,
         "带未知字段的 rerun 请求不合法",
@@ -297,7 +321,7 @@ async fn two_sessions_two_connections_do_not_cross_namespaces() {
         )
         .await
         .expect_err("跨会话 sessionId 必须被拒绝");
-    assert_kind(
+    crate::host::apps_facade::tests::assert_kind(
         &foreign_session,
         McpAppsErrorKind::InvalidSession,
         "sessionId 只作定位，与环境不符即拒绝",
@@ -329,7 +353,7 @@ async fn two_sessions_two_connections_do_not_cross_namespaces() {
     )
     .await
     .expect_err("非在线 endpoint 的连接必须被拒绝");
-    assert_kind(
+    crate::host::apps_facade::tests::assert_kind(
         &stranger_result,
         McpAppsErrorKind::InvalidSession,
         "仅知 sessionId 不能 attach（A9）",
@@ -588,7 +612,7 @@ async fn disconnect_after_dispatch_keeps_real_outcome_and_never_reexecutes() {
         )
         .await
         .expect_err("retire 的连接不得再提交");
-    assert_kind(
+    crate::host::apps_facade::tests::assert_kind(
         &stale_connection,
         McpAppsErrorKind::InvalidSession,
         "离线连接不是在线 endpoint",
@@ -650,7 +674,7 @@ async fn request_without_online_endpoint_is_refused_without_fabricated_outcome()
         )
         .await
         .expect_err("无在线 endpoint 的连接不得提交");
-    assert_kind(
+    crate::host::apps_facade::tests::assert_kind(
         &refused,
         McpAppsErrorKind::InvalidSession,
         "连接不是在线 endpoint ⇒ 显式拒绝（AcpError）",
@@ -745,7 +769,7 @@ async fn verdicts_are_distinguishable_by_stable_keys() {
         )
         .await
         .expect_err("未知附件必须被拒绝");
-    assert_kind(
+    crate::host::apps_facade::tests::assert_kind(
         &unknown_cancel,
         McpAppsErrorKind::UnknownNamespace,
         "未知附件 ⇒ UnknownNamespace 判决键",

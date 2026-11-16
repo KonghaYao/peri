@@ -1,4 +1,17 @@
-use super::*;
+use super::Arc;
+use super::BaseTool;
+use super::BuiltinInstanceContext;
+use super::CronInstanceInput;
+use super::CronScheduler;
+use super::Duration;
+use super::HashSet;
+use super::LoaderEnvGuard;
+use super::McpClientPool;
+use super::McpInitStatus;
+use super::McpMiddleware;
+use super::McpToolBridge;
+use super::WorkflowInstanceInput;
+use peri_agent::middleware::Middleware as _;
 
 // V-02 / WP-MW（wave 3）：关闭四维矩阵、四类关闭来源分列、tick 与取消收敛
 // （主 plan §8 第 10、25 行；sub-plan-v §5 真值表与生命周期表）
@@ -61,7 +74,7 @@ impl Wave3Fixture {
         let cwd = project.to_string_lossy().to_string();
 
         let pool = Arc::new(McpClientPool::new_pending());
-        bind_fixture_session(&pool);
+        super::bind_fixture_session(&pool);
         let (cron_trigger_tx, triggers) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Arc::new(parking_lot::Mutex::new(CronScheduler::new(cron_trigger_tx)));
         // A33：实例上下文由宿主装配在 `run_initialize` **之前**注入（本夹具扮演宿主）。
@@ -143,7 +156,7 @@ impl Wave3Fixture {
 
     /// 池中某实例的类型化 bridge（生产构造：声明 direct 生效）。
     fn typed_bridge(&self, effective_name: &str) -> McpToolBridge {
-        build_typed_tool_bridges(&self.pool)
+        crate::mcp::tool_bridge::build_typed_tool_bridges(&self.pool)
             .into_iter()
             .find(|bridge| bridge.name() == effective_name)
             .unwrap_or_else(|| panic!("必须存在 {effective_name} 的 typed bridge"))
@@ -169,7 +182,7 @@ impl Wave3Fixture {
 fn mw_projection_tools(pool: &Arc<McpClientPool>, disabled: &[&str]) -> Vec<Box<dyn BaseTool>> {
     let disabled: HashSet<String> = disabled.iter().map(|name| name.to_string()).collect();
     McpMiddleware::new(Arc::clone(pool))
-        .with_builtin_closures(closed_instances(&disabled))
+        .with_builtin_closures(super::closed_instances(&disabled))
         .collect_tools("/tmp/mw-projection")
 }
 
@@ -185,7 +198,7 @@ fn mw_instance_tools(tools: &[Box<dyn BaseTool>], instance: &str) -> Vec<String>
 /// 注册表声明的某实例工具数（期望的可见性计数一律**从注册表派生**，不硬编码条数）：
 /// 注册表增删工具时相关用例自动跟随。
 fn mw_declared_tool_count(instance: &str) -> usize {
-    declared_effective_names(find(instance).expect("实例必须已注册")).len()
+    super::declared_effective_names(super::find(instance).expect("实例必须已注册")).len()
 }
 
 #[path = "builtin_runtime_policy_test.rs"]

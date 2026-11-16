@@ -1,0 +1,988 @@
+//! 全局 Atom 定义——替代部分 Effect 变体。
+//!
+//! 使用 ratatui-kit 0.7 AtomStatic<T> + AtomState<T> 作为全局状态容器。
+//! 组件通过 use_atom(&ATOM) 订阅。写入自动唤醒订阅组件。
+//!
+//! 类型别名：pub type Handle<T> = AtomState<T>（供其他文件引用）。
+//!
+//! Channel 约定：
+//! - SUBMIT_TX: event_handlers 按键 → submit_consumer 消费
+//! - CANCEL_TX: event_handlers Ctrl+C → cancel_consumer 消费
+//! - REWIND_ACTION_TX: rewind popup → rewind_consumer
+//! - THREAD_LOAD_TX: thread browser → thread_load_consumer
+
+use super::mcp;
+
+use crate::kit::tui_render_unit::{FoldKey, FoldState, TuiRenderUnit};
+use crate::kit::workflow_snapshot::WorkflowSnapshot;
+use chrono::{DateTime, Utc};
+
+use ratatui_kit::prelude::{Atom as AtomStatic, AtomState};
+use ratatui_kit::ratatui::layout::Rect;
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::Instant;
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::app::panel_types::PanelKind;
+use crate::app::setup_wizard::SetupWizardState;
+use crate::kit::acp_types::AcpEventWithEpoch;
+use crate::kit::ask_user_action::AskUserResponseAction;
+use crate::kit::hitl_response::HitlResponseAction;
+use crate::kit::image_safety::{ImageMeta, PathGrade};
+use crate::kit::rewind_action::RewindAction;
+use crate::kit::slash_projection::SlashCommandEntry;
+use crate::kit::submit_request::SubmitRequest;
+use image::DynamicImage;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopupKind {
+    Hitl,
+    AskUser,
+    Rewind,
+    OAuth,
+    Confirm,
+    /// 下载进度弹窗（主题下载）
+    Download,
+    /// 状态栏模型段点击弹出的 alias 快速切换弹窗
+    ModelQuickSwitch,
+}
+
+pub type Handle<T> = AtomState<T>;
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AcpStateSnapshot {
+    pub variant: u8,
+    pub view_count: usize,
+    pub is_loading: bool,
+    pub wizard_active: bool,
+    pub at_mention_active: bool,
+    pub slash_hint_active: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ViewModelsSnapshot {
+    pub items: im::Vector<TuiRenderUnit>,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct TranscriptPublication {
+    pub(crate) generation: u64,
+    pub(crate) previous_generation: u64,
+    pub(crate) changed_from: usize,
+}
+
+pub(crate) static TRANSCRIPT_PUBLICATION: AtomStatic<TranscriptPublication> =
+    AtomStatic::new(TranscriptPublication::default);
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ServiceSnapshot {
+    pub cwd: String,
+    pub provider_name: String,
+    pub model_alias: String,
+    pub model_name: String,
+    /// 当前 active profile 的推理力度（low/medium/high/xhigh/max）
+    pub effort: String,
+    pub permission_mode: String,
+    pub memory_mb: u64,
+    pub cpu_percent: f32,
+    pub mcp: McpStatusSnapshot,
+    pub cron_total: usize,
+    pub cron_enabled: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpStatusSnapshot {
+    pub init_phase: McpInitPhase,
+    pub total: usize,
+    pub connected: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum McpInitPhase {
+    #[default]
+    Pending,
+    Initializing,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThreadSummary {
+    pub id: String,
+    pub title: Option<String>,
+    pub cwd: String,
+    pub message_count: usize,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CronJobSummary {
+    pub id: String,
+    pub expression: String,
+    pub prompt: String,
+    pub enabled: bool,
+    pub next_fire: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct HookSummary {
+    pub event: String,
+    pub plugin_name: String,
+    pub command: String,
+    pub matcher: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PluginViewTab {
+    #[default]
+    Installed = 0,
+    Discover = 1,
+    Marketplaces = 2,
+    Errors = 3,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct PluginSummary {
+    pub name: String,
+    pub version: String,
+    pub enabled: bool,
+    pub root: String,
+    pub description: String,
+    pub marketplace: String,
+    pub author: Option<String>,
+    pub skills_count: usize,
+    pub commands_count: usize,
+    pub agents_count: usize,
+    pub mcp_count: usize,
+    pub install_scope: Option<String>,
+    pub toggle_supported: Option<bool>,
+    pub management_error: Option<String>,
+    pub load_error: Option<String>,
+}
+
+use mcp::McpServerSummary;
+
+#[derive(Debug, Clone, Default)]
+pub struct SubagentSummary {
+    pub agent_id: String,
+    pub display_name: String,
+    pub is_running: bool,
+    pub total_steps: usize,
+    pub status_text: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderSummary {
+    pub id: String,
+    pub provider_type: String,
+    pub is_active: bool,
+    pub has_api_key: bool,
+    /// Responses provider 使用 ChatGPT plan 引用（凭据状态不在 Browse 批量查询）。
+    pub has_chatgpt_plan: bool,
+    pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryEntry {
+    pub path: String,
+    pub size_bytes: u64,
+    pub modified: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PredictionState {
+    pub text: String,
+    /// 最近一次预测的会话摘要（spinner 名言位优先显示）
+    pub summary: Option<String>,
+    pub received_at: Option<Instant>,
+}
+
+/// 待发送附件（图片）：base64 载荷 + MIME 类型。
+///
+/// \[上传式\] 剪贴板字节经 base64 直接随消息上行（`MessageContent::Blocks` 的 image
+/// block），不再落盘、不再插入 `@image <path>` 文本。
+///
+/// Debug 为手写实现：`base64_data` 是整张图的载荷，derive 会让任何 `{:?}`
+/// 打印出全量图片（日志 / tracing / panic 消息）。故只暴露长度。
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct PendingAttachment {
+    pub label: String,
+    pub media_type: String,
+    pub base64_data: String,
+}
+
+impl PendingAttachment {
+    /// 以图片 MIME 与标准 base64 载荷构造待发送附件。
+    pub fn image(media_type: impl Into<String>, base64_data: impl Into<String>) -> Self {
+        let media_type = media_type.into();
+        Self {
+            label: media_type.clone(),
+            media_type,
+            base64_data: base64_data.into(),
+        }
+    }
+}
+
+impl std::fmt::Debug for PendingAttachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingAttachment")
+            .field("label", &self.label)
+            .field("media_type", &self.media_type)
+            .field("base64_bytes", &self.base64_data.len())
+            .finish()
+    }
+}
+
+/// `INPUT_BUFFER` 排队项：loading 期间缓存的待提交输入。
+///
+/// 文本与附件必须一起出队——只存文本会在 drain 时静默丢弃用户已提交的图片。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BufferedInput {
+    pub text: String,
+    pub attachments: Vec<PendingAttachment>,
+}
+
+impl BufferedInput {
+    /// 纯文本排队项（无附件）。
+    #[must_use]
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            attachments: Vec::new(),
+        }
+    }
+
+    /// 带附件的排队项。
+    #[must_use]
+    pub fn with_attachments(text: impl Into<String>, attachments: Vec<PendingAttachment>) -> Self {
+        Self {
+            text: text.into(),
+            attachments,
+        }
+    }
+}
+
+/// 待发送附件（§10 composer footer `@ N files` 消费）。
+/// 早期为 OnceLock<Handle<...>>（无消费方）；Slice 3 起输入区订阅显示计数，
+/// 改为 AtomStatic 以获得订阅唤醒（写入自动重渲染）。
+pub static PENDING_ATTACHMENTS: AtomStatic<Vec<PendingAttachment>> = AtomStatic::new(Vec::new);
+
+pub static ACP_STATE: AtomStatic<AcpStateSnapshot> = AtomStatic::new(AcpStateSnapshot::default);
+
+/// OSC 7501 上报值。bridge 写入，AppShell effect 实际写 stdout——effect 与绘制
+/// 同线程串行，避免状态序列插进一帧中间。
+pub static PROGRAM_STATUS: AtomStatic<crate::kit::program_status::ProgramStatus> =
+    AtomStatic::new(|| crate::kit::program_status::ProgramStatus::Idle);
+/// 用户手动折叠覆盖表（Slice 2）——key 为 entry 身份（message_id/tool_id/agent_id），
+/// value 为手动 fold 目标。存在即视为 `user_modified=true`：折叠 pass
+/// （`acp_events/render.rs::apply_fold_pass`）必须跳过这些 entry 的自动策略，
+/// 并在每次快照重建后复写 fold（流式重建后手动选择依然生效）。
+/// 生产写入经 `fold_overrides::insert` 按条数与键字节预算保留最近操作；
+/// session 复位（push_view_models_for_reset）时清空。
+pub static FOLD_OVERRIDES: AtomStatic<HashMap<FoldKey, FoldState>> = AtomStatic::new(HashMap::new);
+/// [Slice 2 §3.4 焦点单一事实源] 消息区 entry 导航焦点——一次写入即完整表达
+/// 导航事实（slot + key），取代旧「局部 entry_focus + 共享折叠键 atom」
+/// 双轨（仲裁/渲染读局部、外部清除只写共享，收敛依赖下一帧 effect → 窗口期）。
+/// 所有设焦点/清除写点收口在 message_area（写锁内派生 key），外部组件（输入区
+/// 点击 / session 复位）事件边界同步清 None——无异步收敛。
+/// key 为派生值：foldable entry 有值；无折叠能力 entry / request_id 缺失的
+/// interaction 合法 `key: None`（slot 仍表达「焦点在消息区」）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FocusedEntry {
+    pub slot: usize,
+    pub key: Option<FoldKey>,
+}
+
+pub static FOCUSED_ENTRY: AtomStatic<Option<FocusedEntry>> = AtomStatic::new(|| None);
+/// 终端能力（启动时由 entry.rs 探测一次写入；默认全能力——未探测场景不做剥离/降级）。
+/// 渲染层按此决定 NO_COLOR 剥离 pass 与符号/italic/truecolor 降级。
+pub static TERMINAL_CAPS: AtomStatic<crate::kit::terminal_caps::TerminalCaps> =
+    AtomStatic::new(crate::kit::terminal_caps::TerminalCaps::default);
+/// loading 会话 epoch 计数器。每次 submit_consumer 发起新的 agent prompt 时递增。
+/// message_area 据此检测新的 loading 会话，即便 is_loading 的 false→true 过渡在
+/// 同一渲染周期内完成（如 drain_input_buffer 的立即续跑）也能可靠感知。
+pub static LOADING_EPOCH: AtomStatic<u64> = AtomStatic::new(|| 0u64);
+/// 会话是否正在建立：建立过程在途为 true，会话可用或建立失败后为 false。
+///
+/// 由 `AcpTuiClient::new_session_under_gate` 在整段建立过程置位，离开即清除
+/// （成功、失败、超时或 future 被丢弃）；状态栏据此显示「正在准备会话」。这段
+/// 窗口里输入既不在待发送队列、也还没有发出请求，没有别的投影能说明正在做什么。
+pub static SESSION_PREPARING: AtomStatic<bool> = AtomStatic::new(|| false);
+pub static VIEW_MODELS: AtomStatic<ViewModelsSnapshot> =
+    AtomStatic::new(ViewModelsSnapshot::default);
+pub static MODEL_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
+pub static PROVIDER_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
+pub static MODE_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
+pub static AT_MENTION_ACTIVE: AtomStatic<bool> = AtomStatic::new(|| false);
+pub static SLASH_HINT_ACTIVE: AtomStatic<bool> = AtomStatic::new(|| false);
+pub static SUBMIT_TX: OnceLock<UnboundedSender<SubmitRequest>> = OnceLock::new();
+pub static CANCEL_TX: OnceLock<UnboundedSender<()>> = OnceLock::new();
+/// /exit 命令：submit_consumer 设为 true，app_shell use_effect 消费并调用 exit_fn()。
+pub static EXIT_REQUESTED: AtomStatic<bool> = AtomStatic::new(|| false);
+pub static RESIZE_TX: OnceLock<UnboundedSender<u16>> = OnceLock::new();
+
+pub static SERVICE_SNAPSHOT: AtomStatic<ServiceSnapshot> =
+    AtomStatic::new(ServiceSnapshot::default);
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ThreadBrowserScope {
+    #[default]
+    Project,
+    Workspace,
+    All,
+}
+
+pub static ACTIVE_EXECUTION_CWD: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+pub static THREAD_BROWSER_SCOPE: AtomStatic<ThreadBrowserScope> =
+    AtomStatic::new(ThreadBrowserScope::default);
+pub static THREAD_BROWSER_ARCHIVED: AtomStatic<bool> = AtomStatic::new(|| false);
+pub static THREAD_LIST_ERROR: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+pub static THREAD_LIST_HAS_MORE: AtomStatic<bool> = AtomStatic::new(|| false);
+pub static THREAD_LIST_PAGE_COUNT: AtomStatic<u32> = AtomStatic::new(|| 1);
+pub const THREAD_LIST_PAGE_SIZE: u32 = 50;
+
+pub static THREAD_LIST: AtomStatic<Vec<ThreadSummary>> = AtomStatic::new(Vec::new);
+pub static CRON_JOBS: AtomStatic<Vec<CronJobSummary>> = AtomStatic::new(Vec::new);
+pub static HOOK_LIST: AtomStatic<Vec<HookSummary>> = AtomStatic::new(Vec::new);
+pub static PLUGIN_LIST: AtomStatic<Vec<PluginSummary>> = AtomStatic::new(Vec::new);
+pub static MCP_SERVERS: AtomStatic<Vec<McpServerSummary>> = AtomStatic::new(Vec::new);
+pub static SUBAGENT_LIST: AtomStatic<Vec<SubagentSummary>> = AtomStatic::new(Vec::new);
+pub static PROVIDER_LIST: AtomStatic<Vec<ProviderSummary>> = AtomStatic::new(Vec::new);
+
+/// Model → Login 的一次性导航请求。
+///
+/// 只携带目标 provider 身份，不复制任何配置编辑状态：Login 打开后仍从权威配置
+/// 构建自己的草稿，并在消费后清空本值（一次有效）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginPanelRequest {
+    pub provider_id: Option<String>,
+}
+pub static LOGIN_PANEL_REQUEST: AtomStatic<Option<LoginPanelRequest>> = AtomStatic::new(|| None);
+pub static MEMORY_LIST: AtomStatic<Vec<MemoryEntry>> = AtomStatic::new(Vec::new);
+
+/// Todo 列表数据（来自 ACP SessionUpdate::Plan）
+pub static TODO_ITEMS: AtomStatic<Vec<crate::kit::message_area::TodoItem>> =
+    AtomStatic::new(Vec::new);
+
+pub static OPEN_PANELS: AtomStatic<Vec<PanelKind>> = AtomStatic::new(Vec::new);
+pub static ACTIVE_PANEL: AtomStatic<Option<PanelKind>> = AtomStatic::new(|| None);
+/// §6.7 subagent 详情 pane 的选中 agent id——焦点在 `TuiSubAgentGroup` 上按
+/// Enter 时写入（mod.rs 焦点分派），SubAgentDetail 面板按此从 VIEW_MODELS
+/// 扫描嵌套 `view_models` 渲染。Esc 关闭面板后保留（重开仍显示同一 agent）。
+pub static SELECTED_SUBAGENT_ID: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+pub static POPUP_KIND: AtomStatic<Option<PopupKind>> = AtomStatic::new(|| None);
+/// 当前弹窗的屏幕矩形（上一帧渲染写入）——供鼠标遮挡判定区分「弹窗内/外」：
+/// 居中弹窗（HITL 授权等）只覆盖屏幕中部，弹窗外消息区滚轮放行（见
+/// mouse_router::occludes_scroll）。写入用 write_no_update（判定读取不依赖
+/// 订阅唤醒，与 PANEL_SCROLL_OWNER 同模式）；无弹窗/自定位小层（ModelQuickSwitch
+/// 不登记矩形）时为 None → 保守遮挡。
+pub static POPUP_AREA: AtomStatic<Option<Rect>> = AtomStatic::new(|| None);
+/// 当前激活面板的整体屏幕矩形（上一帧渲染写入，PanelOverlay 的 AreaTracker
+/// 回填）——供鼠标遮挡判定区分「面板内/外」：面板打开时，面板区域外（消息区
+/// 可见部分）滚轮放行给 chat 滚动（见 mouse_router::occludes_scroll）。
+/// 写入用 write_no_update；无面板/尚未渲染时为 None → 保守遮挡。
+pub static PANEL_AREA: AtomStatic<Option<Rect>> = AtomStatic::new(|| None);
+/// 面板滚轮仲裁注册表：当前激活面板的滚动槽位（每帧由面板渲染体覆盖写入，
+/// 见 panel_scroll.rs）。写入用 write_no_update（仲裁读取不依赖订阅唤醒）。
+pub static PANEL_SCROLL_OWNER: AtomStatic<Option<crate::kit::panel_scroll::PanelScrollOwner>> =
+    AtomStatic::new(|| None);
+/// 模型快速切换弹窗锚点（屏幕坐标：状态栏模型段起点 (x, y)）。
+/// StatusBarRow1 在 open_popup(ModelQuickSwitch) 前写入，弹窗组件读取后
+/// 自定位到锚点上方（非居中大弹窗）。
+pub static MODEL_SWITCH_ANCHOR: AtomStatic<Option<(u16, u16)>> = AtomStatic::new(|| None);
+
+pub static INPUT_HISTORY: AtomStatic<VecDeque<String>> = AtomStatic::new(VecDeque::new);
+pub static INPUT_HISTORY_INDEX: AtomStatic<Option<usize>> = AtomStatic::new(|| None);
+/// 进入历史模式时保存的用户当前输入文本草稿。
+pub static DRAFT: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+/// loading 期间缓存的待提交输入（文本 + 附件，见 [`BufferedInput`]）。
+pub static INPUT_BUFFER: AtomStatic<VecDeque<BufferedInput>> = AtomStatic::new(VecDeque::new);
+/// 取消时需恢复到输入框的文本。TurnInterrupted 零产出时写入，input_area 消费后清空。
+/// 使用非 atom 存储（OnceLock + Mutex）避免 render body 中写 atom 产生自激回路。
+/// TurnInterrupted 写入后递增 RENDER_HEARTBEAT 触发重渲染，input_area 消费文本并清空。
+pub static INPUT_RESTORE_TEXT: std::sync::OnceLock<parking_lot::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+
+pub static FILE_LIST: AtomStatic<Vec<String>> = AtomStatic::new(Vec::new);
+pub static MENTION_PREFIX: AtomStatic<String> = AtomStatic::new(String::new);
+pub static SLASH_PREFIX: AtomStatic<String> = AtomStatic::new(String::new);
+
+pub static MENTION_SELECTED_INDEX: AtomStatic<usize> = AtomStatic::new(|| 0);
+pub static SLASH_SELECTED_INDEX: AtomStatic<usize> = AtomStatic::new(|| 0);
+
+pub static REWIND_PREVIEW: AtomStatic<Option<RewindPreview>> = AtomStatic::new(|| None);
+
+/// 回退目标 user 消息文本暂存——候选 Enter 时写入，RewindCompleted 到达后
+/// 消费回填输入框；任何失败/取消路径清空。
+pub static REWIND_TARGET_TEXT: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+
+/// `session/rewind-preview` 返回的内容指纹。执行 RPC 必须原样带回；任何新的
+/// preview 都先清空旧值，避免用户确认已经过期的文件影响范围。
+pub static REWIND_PREVIEW_FINGERPRINT: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+
+/// 文件回退预算状态——候选 Enter 后由 rewind_consumer 写入：
+/// `Idle` = 未进入预算阶段（候选视图）；`Executing` = 预算为空自动执行或
+/// 用户确认后执行中（弹窗显示"正在回退…"）；`Files(v)` = 待用户确认的预算。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RewindBudgetState {
+    #[default]
+    Idle,
+    Executing,
+    Files(Vec<RewindFileChange>),
+}
+
+/// 单个文件回退预算条目（服务端 `session/rewind-preview` 响应元素）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct RewindFileChange {
+    pub path: String,
+    pub kind: String,
+}
+
+pub static REWIND_BUDGET_STATE: AtomStatic<RewindBudgetState> =
+    AtomStatic::new(|| RewindBudgetState::Idle);
+
+/// 候选查询失败信息（Option<String> 错误文案）；None = 查询中或未查询。
+pub static REWIND_QUERY_ERROR: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+
+/// 候选查询代次——`spawn_candidates_query` 每次递增并捕获；响应到达时与
+/// 当前代次比对，不一致（已发起新查询）则丢弃，防止慢响应覆盖新数据
+/// （P1 竞态防护）。
+pub static REWIND_QUERY_GEN: AtomStatic<u64> = AtomStatic::new(|| 0);
+
+pub static OAUTH_SESSION_ID: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+pub static OAUTH_INFO: AtomStatic<Option<OauthNeeded>> = AtomStatic::new(|| None);
+pub static HITL_PENDING: AtomStatic<
+    Option<crate::kit::acp_types::PendingInteraction<HitlPending>>,
+> = AtomStatic::new(|| None);
+pub static ASK_USER_PENDING: AtomStatic<
+    Option<crate::kit::acp_types::PendingInteraction<AskUser>>,
+> = AtomStatic::new(|| None);
+
+pub static LAST_ESC_TIME: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
+pub static QUIT_PENDING_SINCE: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
+/// 防重入：记录上一次 Ctrl+C 事件被处理的时间。同一次按键在 200ms 内重复分发则忽略。
+/// 这是防御性保护，防止 ratatui-kit 在事件处理 → atom 写入 → 重渲染过程中
+/// 将同一事件二次分发，导致 FirstQuit → 立即 Quit 的 race condition。
+pub static LAST_CTRL_C_PROCESSED: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
+
+pub static REWIND_ACTION_TX: OnceLock<UnboundedSender<RewindAction>> = OnceLock::new();
+pub static ASK_USER_RESPONSE_TX: OnceLock<UnboundedSender<AskUserResponseAction>> = OnceLock::new();
+pub static HITL_RESPONSE_TX: OnceLock<UnboundedSender<HitlResponseAction>> = OnceLock::new();
+pub static THREAD_LOAD_TX: OnceLock<crate::kit::thread_load_consumer::ThreadLoadDispatcher> =
+    OnceLock::new();
+
+/// 历史页请求通道——滚动触发（message_area）→ history_page_consumer。
+///
+/// 与 `THREAD_LOAD_TX` 刻意分开：历史页是只读浏览，不参与会话装配、生命周期锁与
+/// load reservation（未取 reservation 的请求不会阻塞提交，也不会改会话绑定）。
+pub static HISTORY_PAGES_TX: OnceLock<
+    UnboundedSender<crate::kit::history_page_consumer::HistoryPageRequest>,
+> = OnceLock::new();
+
+/// S5.4 窗口请求通道（open/page/seek）；与旧分页通道独立。
+pub static HISTORY_WINDOW_TX: OnceLock<
+    UnboundedSender<crate::kit::history_page_consumer::WindowConsumerRequest>,
+> = OnceLock::new();
+
+/// 历史分页浏览状态（快照身份 / 下一游标 / 在途请求）。
+///
+/// 写入方只有三处：初始 load 响应（`note_initial_cursor`）、触发侧认领在途请求、
+/// 消费侧结算（成功推进游标 / 失败记录原因）。会话边界由
+/// `project_session_boundary` 清空——它同时清空 committed，两者必须同源。
+pub(crate) static HISTORY_PAGING: AtomStatic<crate::kit::history_paging::HistoryPagingState> =
+    AtomStatic::new(crate::kit::history_paging::HistoryPagingState::default);
+
+/// S5 窗口开关：atom 初值 false；启动时由 beta 读取写入（未配置视为开启，显式 false 关闭）。
+/// 只有它与连接能力同时为真才走 `historyWindowV1`。
+pub static HISTORY_WINDOW_V1: AtomStatic<bool> = AtomStatic::new(|| false);
+/// 当前连接是否协商 `peri.historyWindowV1`（initialize 响应写入；未回显一律 fail-closed）。
+pub static HISTORY_WINDOW_CAPABLE: AtomStatic<bool> = AtomStatic::new(|| false);
+/// 桥接窗口当前代次；consumer 用它给页请求盖代次。
+pub static HISTORY_WINDOW_GENERATION: AtomStatic<u64> = AtomStatic::new(|| 0);
+/// S5.4 consumer 侧窗口请求/在途/待合并状态。
+pub(crate) static HISTORY_WINDOW_PAGING: AtomStatic<
+    crate::kit::history_page_consumer::WindowPagingState,
+> = AtomStatic::new(crate::kit::history_page_consumer::WindowPagingState::default);
+/// S5.6 窗口视口身份（桥接侧锚点，不按行号补偿）。
+pub static WINDOW_VIEWPORT: AtomStatic<Option<crate::kit::history_window::WindowViewport>> =
+    AtomStatic::new(|| None);
+/// 窗口页合并后发布的渲染单元身份 → 持久条目映射（真实视口发布用）。
+pub static WINDOW_UNIT_KEYS: AtomStatic<Vec<crate::kit::history_window::WindowUnitMapping>> =
+    AtomStatic::new(Vec::new);
+/// 缺口重读候选（桥接发布；滚动按方向消费）。
+pub(crate) static WINDOW_GAP_REQUEST: AtomStatic<
+    Vec<crate::kit::history_paging::WindowGapRequest>,
+> = AtomStatic::new(Vec::new);
+/// 结构性释放代次：递增后渲染侧清空 slot/index 缓存。
+pub static STRUCTURAL_EPOCH: AtomStatic<u64> = AtomStatic::new(|| 0);
+/// 渲染侧已处理的结构性代次。
+pub static RENDER_ACHIEVED_EPOCH: AtomStatic<u64> = AtomStatic::new(|| 0);
+/// 渲染侧当前 retained 缓存字节（诊断）。
+pub static TUI_RENDER_CACHE_BYTES: AtomStatic<usize> = AtomStatic::new(|| 0);
+/// 占位 note hash → 详情描述符（由桥接发布；事件层据此打开详情）。
+pub static HISTORY_DETAIL_TARGETS: AtomStatic<
+    Vec<crate::kit::history_window::HistoryDetailTarget>,
+> = AtomStatic::new(Vec::new);
+/// inherited 未分段读取的显式提示（None = 无提示）。
+pub static HISTORY_INHERITED_NOTICE: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+/// S7.3 当前详情窗口（只保留有界 chunks）。
+pub static HISTORY_DETAIL: AtomStatic<
+    Option<crate::kit::panels::history_detail::HistoryDetailWindow>,
+> = AtomStatic::new(|| None);
+/// 窗口诊断（释放/淘汰/预留账目）。
+pub static HISTORY_WINDOW_STATS: AtomStatic<crate::kit::history_window::HistoryWindowDiagnostics> =
+    AtomStatic::new(Default::default);
+
+/// 更早历史并入窗口的代数——桥接任务每次成功并入一页时 +1。
+///
+/// 这是桥接侧对渲染侧唯一的并合事实：它**只表达「发生过一次并合」**，不携带任何
+/// 槽位号（桥接 `committed` 槽位与发布后渲染槽位是两把尺子，曾经用槽位包络跨层传递
+/// 导致过补偿，见 `.recon/S7d-verification.md` §5.1）。渲染侧 `Transcript::prepare`
+/// 把它与「本次快照发布」配对后，用**锚点身份重定位**（`message_area::viewport_anchor`）
+/// 换算视口目标偏移；只有翻页会改它，流式追加不会。
+pub static HISTORY_PREPEND_EPOCH: AtomStatic<u64> = AtomStatic::new(|| 0);
+
+pub static PERI_CONFIG_HANDLE: OnceLock<
+    std::sync::Arc<parking_lot::RwLock<crate::config::PeriConfig>>,
+> = OnceLock::new();
+/// 配置源句柄（读写路径决策的唯一事实源）：启动早期 `ConfigSource::load_lenient`
+/// 构建一次，TUI 与 ACP 共享同一 `Arc`；所有保存经
+/// [`crate::config::save_effective`] 走此句柄。
+pub static CONFIG_SOURCE_HANDLE: OnceLock<std::sync::Arc<crate::config::ConfigSource>> =
+    OnceLock::new();
+/// TUI 渲染配置共享句柄（仅 UI 字段，与 PERI_CONFIG_HANDLE 独立）
+pub static TUI_CONFIG_HANDLE: OnceLock<
+    std::sync::Arc<parking_lot::RwLock<crate::config::TuiConfig>>,
+> = OnceLock::new();
+pub static PERMISSION_MODE_HANDLE: OnceLock<
+    std::sync::Arc<peri_acp_types::permission::SharedPermissionMode>,
+> = OnceLock::new();
+pub static SERVICE_PROJECTION_ERROR: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+pub static CRON_ACTION_ERROR: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+/// ACP 客户端全局句柄——供 Plugin Panel 等面板调用 send_raw_request。
+/// 在 entry.rs 中 acp_client 就绪后 set。
+pub static ACP_CLIENT_HANDLE: OnceLock<std::sync::Arc<crate::acp_client::client::AcpTuiClient>> =
+    OnceLock::new();
+/// i18n 语言版本计数器——语言切换时递增，订阅此 atom 的组件自动重渲染。
+/// LcRegistry 本体存于 thread_local!（FluentBundle !Send，无法进 static）。
+pub static LANG_VERSION: AtomStatic<u64> = AtomStatic::new(|| 0);
+pub static WORKFLOW_SNAPSHOT: AtomStatic<Option<WorkflowSnapshot>> = AtomStatic::new(|| None);
+
+/// ACP 服务器下发的可用 slash 命令投影列表（含 skills）。
+/// 由 kit notifier 在收到 `SessionUpdate::AvailableCommandsUpdate` 后写入：
+/// 结构化为投影 DTO，kind/level/args 等元数据随 `_meta` 通道携带，解析在
+/// acp_notifier `available_commands_update` 分支完成（`_meta` 五键 +
+/// 缺省回退 kind=Command/level=1），写入后立即 `refresh_slash_items()`。
+pub static AVAILABLE_SLASH_COMMANDS: AtomStatic<Vec<SlashCommandEntry>> = AtomStatic::new(Vec::new);
+pub static WIZARD_ACTIVE: AtomStatic<bool> = AtomStatic::new(|| false);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupChatGptPhase {
+    Login,
+    Model,
+}
+
+pub static SETUP_CHATGPT_PHASE: AtomStatic<Option<SetupChatGptPhase>> = AtomStatic::new(|| None);
+/// True while the first-run wizard owns a temporary fullscreen pass. Closing
+/// that wizard ends the pass; entry attaches ACP only when [`SETUP_COMPLETED`]
+/// is true, and otherwise tears down the process.
+pub static SETUP_PREFLIGHT: AtomStatic<bool> = AtomStatic::new(|| false);
+pub static SETUP_COMPLETED: AtomStatic<bool> = AtomStatic::new(|| false);
+/// Setup Wizard 全量状态（步骤、Provider 列表、光标位置等）
+pub static SETUP_WIZARD: AtomStatic<SetupWizardState> = AtomStatic::new(SetupWizardState::default);
+pub static PREDICTION: AtomStatic<PredictionState> = AtomStatic::new(PredictionState::default);
+pub static INPUT_AREA_ESC_PREFIX: AtomStatic<bool> = AtomStatic::new(|| false);
+
+/// 最近一次复制到剪贴板的字符数（用于状态栏提示 "已复制 N 字符"）
+pub static COPY_CHAR_COUNT: AtomStatic<usize> = AtomStatic::new(|| 0);
+/// 复制提示显示截止时间
+pub static COPY_MESSAGE_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
+
+/// keepgoing 按钮防抖截止时间——点击后短时间内禁用按钮，避免连续误触
+/// 触发多轮空跑。超过此刻后恢复可点击。
+pub static KEEPGOING_BLOCKED_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
+
+/// @image 行即时 hover 状态（T4 §4.4）：Moved 事件命中变化时由消息区 handler
+/// 写入（写入自动唤醒订阅者重渲染），渲染 body 读取决定 meta 行是否显示
+/// 绝对路径 + accent 高亮；移出/遮挡 → None 恢复默认渲染。仅当「命中集合
+/// 变化」时写入——防高频 Moved 风暴（§4.6）。
+pub(crate) static IMAGE_HOVER: AtomStatic<Option<crate::kit::message_area::ImageHoverState>> =
+    AtomStatic::new(|| None);
+
+/// 已通过稳定悬停等待的图片预览目标。与 [`IMAGE_HOVER`] 分离，使链接行可以
+/// 即时高亮，而像素预览只在鼠标停留后触发；移出或切换目标时立即清空。
+pub(crate) static IMAGE_PREVIEW_HOVER: AtomStatic<
+    Option<crate::kit::message_area::ImageHoverState>,
+> = AtomStatic::new(|| None);
+
+/// 图片预览状态机（image-p0-p1-spec §7.3 T7）：写入边界为事件/effect 与后台
+/// 解码线程，渲染 body 只读（TUI-RENDER-001）。默认 `Idle`（无预览）。
+#[derive(Debug, Clone, Default)]
+pub enum ImagePreviewState {
+    #[default]
+    Idle,
+    /// 后台解码中（T5 全链校验已通过；`grade` 为分级结果）。
+    Loading { path: PathBuf, grade: PathGrade },
+    /// 解码完成：像素数据以 `Arc` 共享给 overlay 渲染（同路径重复请求复用）。
+    Ready {
+        path: PathBuf,
+        meta: ImageMeta,
+        img: Arc<DynamicImage>,
+    },
+    /// 手工路径/非受管理目录（§6.1 Q6）：仅文本 meta 行降级，不触发解码。
+    Degraded { path: PathBuf, reason: String },
+    /// 校验/解码失败：固定错误文案（安全降级，reason 仅内部诊断，不含路径）。
+    Error { path: PathBuf, reason: String },
+}
+
+pub static IMAGE_PREVIEW_STATE: AtomStatic<ImagePreviewState> =
+    AtomStatic::new(ImagePreviewState::default);
+
+/// 渲染心跳计数器——后台任务每 5 秒 +1，确保 render loop 周期性唤醒。
+/// 即使终端无输入、atom 无变化，也能防止 `futures::select` 在 EventStream 阻塞时
+/// 永久卡死。AppShell 组件 `use_atom` 订阅此 atom。
+pub static RENDER_HEARTBEAT: AtomStatic<u64> = AtomStatic::new(|| 0);
+
+/// ChatGPT 认证后台任务的完成事件计数：任务只投递到 auth inbox 并递增此值，
+/// Login 面板订阅后在自己的 effect 边界取值、过完成门并更新视图。
+pub static AUTH_EVENT_REVISION: AtomStatic<u64> = AtomStatic::new(|| 0);
+
+/// 当前活跃 session 的 ID。由 submit_consumer/thread_load_consumer 在 session 变更时设置。
+/// acp_bridge 在 reset 后用于过滤陈旧事件（event.active_session_id != ACTIVE_SESSION_ID → 丢弃）。
+pub static ACTIVE_SESSION_ID: AtomStatic<String> = AtomStatic::new(String::new);
+
+/// 当前活跃 session 的标题。由 service_snapshot 经 ACP session/metadata 查询，
+/// InputArea 上边栏右侧以 hash 稳定底色展示。
+/// 空字符串表示尚无标题（新会话 / 未加载），此时不渲染。
+pub static CURRENT_SESSION_TITLE: AtomStatic<String> = AtomStatic::new(String::new);
+
+/// Bridge 重置计数器——/clear 或 thread 切换时 +1，acp_bridge 检测到变更时
+/// 清空 committed / has_view_commit / current_turn，防止旧 session 的 VM
+/// 残留污染新 session 的消息区。
+///
+/// ACP server 在 session/new 响应后推送空 ViewCommit 清空旧 session 残留。
+/// bridge 只需在 counter 变更时重置内部状态——新 session 的空 ViewCommit
+/// 会通过正常事件流到达，确保 committed 清空。
+pub static BRIDGE_RESET_COUNTER: AtomStatic<u64> = AtomStatic::new(|| 0);
+
+/// compact 完成提示（manual `/compact` 的 CommandFeedback UiOnly 消息），跨**同会话
+/// reset 边界**存活：BRIDGE_RESET_COUNTER 重置会清空 committed（含已注入的
+/// SystemNote），bridge reset 分支据此重建到 current_turn 后消费清空；TurnDone 与
+/// 切换会话都清空。REQ-C02 / A12 之后 manual compact 不再触发 session/load replay，
+/// 本 atom 只服务 reset 搬运，语义上不再有「跨 replay」。写入点：
+/// `handle_compact_completed` / `handle_command_feedback`（去重紧随 compact 的
+/// UiOnly 反馈——机制沿袭 aecc2834，issue
+/// 2026-08-08-e2e-compact-command-screenshot-too-early）。None = 无待重建提示。
+pub static PENDING_COMPACT_NOTE: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+
+/// TUI 内部事件通道——input_area 本地提交通过此 channel 发送 LocalUserBubble
+/// 到 acp_bridge，统一走 dispatch_and_notify 路径写入 VIEW_MODELS atom。
+pub static LOCAL_EVENT_TX: OnceLock<UnboundedSender<AcpEventWithEpoch>> = OnceLock::new();
+
+/// Spinner token 计数——由 acp_bridge 在收到 TokenUsage 事件时写入（input+output），
+/// MessageArea 的 build_footer_lines 读取后作为参数传入 `render_to_lines(..., token_count)`，
+/// 最终在 spinner 行右侧显示 `↓ X.Xk tokens`。render body 纯只读，不写 spinner state。
+pub static SPINNER_TOKEN_COUNT: AtomStatic<usize> = AtomStatic::new(|| 0);
+
+/// 上下文占用展示值。
+///
+/// 进入会话时来自 `threads.context_usage_tokens`（已保存的展示快照），运行中由
+/// `StateSnapshotMeta` 覆盖；两者都不是本次请求的精确 usage。百分比一律按当前
+/// 有效 context window 现算，`Unknown` 必须显式显示为未知而不是 0%。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextUsage {
+    /// 有效占用 token 数与当前有效 context window。
+    Known { tokens: u64, window: u64 },
+    /// 占用未知（保存值为 NULL / 启动载荷缺失）。
+    Unknown,
+}
+
+impl ContextUsage {
+    /// 只有 token 与有效 window 都已知时才能计算占用比例。
+    #[must_use]
+    pub fn from_tokens(tokens: Option<u64>, window: Option<u64>) -> Self {
+        match (tokens, window) {
+            (Some(tokens), Some(window)) if window > 0 => Self::Known { tokens, window },
+            _ => Self::Unknown,
+        }
+    }
+
+    /// 占用百分比（0.0-100.0）；未知或 window 无效时为 `None`。
+    pub fn percent(&self) -> Option<f64> {
+        match self {
+            Self::Known { tokens, window } if *window > 0 => {
+                Some(*tokens as f64 / *window as f64 * 100.0)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// 上下文窗口使用信息：进入会话时先显示已保存值，随 StateSnapshot 更新。
+/// 由 acp_notifier / context_usage 写入，composer footer 订阅显示。
+pub static CONTEXT_USAGE: AtomStatic<Option<ContextUsage>> = AtomStatic::new(|| None);
+
+/// 当前 session 的 Goal 只读投影，由 ACP GoalSnapshot 状态事件更新。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GoalSnapshot {
+    pub objective: Option<String>,
+    pub status: Option<peri_acp_types::goal::GoalStatus>,
+    pub token_budget: Option<u64>,
+    pub tokens_used: u64,
+    pub time_used_seconds: u64,
+    pub continuation_count: u64,
+    pub blocked_reason: Option<String>,
+}
+
+pub static GOAL_SNAPSHOT: AtomStatic<Option<GoalSnapshot>> = AtomStatic::new(|| None);
+
+/// 最近一次消息区视口快照。由 MessageArea 在 render 阶段计算后写入，
+/// 仅供调试导出命令读取；screen 模式按此范围导出当前可见文本。
+#[derive(Debug, Clone, Default)]
+pub struct MessageViewportSnapshot {
+    pub scroll_y: u16,
+    pub vis_height: u16,
+    pub first_line: usize,
+    pub last_line: usize,
+}
+pub(super) static MESSAGE_VIEWPORT: OnceLock<parking_lot::RwLock<MessageViewportSnapshot>> =
+    OnceLock::new();
+
+pub fn message_viewport_snapshot() -> &'static parking_lot::RwLock<MessageViewportSnapshot> {
+    MESSAGE_VIEWPORT.get_or_init(|| parking_lot::RwLock::new(MessageViewportSnapshot::default()))
+}
+
+// ── Background Tasks 相关 State ──────────────────────────────────────────────
+
+/// 后台任务条目列表（TUI 侧定义，与 agent 层 BgTaskInfo 对应）
+use crate::kit::acp_types::BgTaskEntry;
+
+/// 活跃的后台任务列表（由 bg-task-started/completed/cancelled 事件维护）
+pub static BG_TASKS: AtomStatic<Vec<BgTaskEntry>> = AtomStatic::new(Vec::new);
+
+/// Last session task revision applied by the TUI; None is the legacy event path.
+pub static BG_TASK_REVISION: AtomStatic<Option<u64>> = AtomStatic::new(|| None);
+
+// ── Background Display Area (后台显示区域) ────────────────────────────────────
+
+#[derive(Debug, Clone, Default)]
+pub struct BgTaskIdentity {
+    pub kind: String,
+    pub summary: String,
+    pub agent_id: Option<String>,
+    pub agent_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BgLiveStatus {
+    Unobserved,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone)]
+pub struct BgLiveDetail {
+    pub status: BgLiveStatus,
+    pub kind: String,
+    pub summary: String,
+    pub agent_id: Option<String>,
+    pub agent_name: Option<String>,
+    /// 创建本明细的 subagent occurrence（`SubAgentAccumulator::instance_id`）。
+    ///
+    /// 只有 instance 能区分同一 agent 的多次运行——resume 复用 `agent_id`
+    /// （child_thread_id），按 agent_id 回查会把旧运行当成当前运行。
+    pub subagent_instance_id: Option<String>,
+    pub pid: Option<u32>,
+    pub duration_ms: Option<u64>,
+    pub output_preview: Option<String>,
+    pub cancel_reason: Option<String>,
+    /// The display preview is incomplete; canonical/task results are unaffected.
+    pub preview_omitted: bool,
+    pub(crate) preview_updated: u64,
+    /// 等待任务行的占位 owner；绑定任务行/移交后归 false。
+    pub(crate) pending_owner: bool,
+    pub nested_units: im::Vector<crate::kit::tui_render_unit::TuiRenderUnit>,
+    pub(crate) tool_cards: Vec<crate::kit::acp_types::ToolCardAccumulator>,
+    pub(crate) subagent_result: Option<String>,
+    pub(crate) subagent_is_error: bool,
+    pub(crate) stream: Option<crate::kit::bg_task_live::BgStream>,
+}
+
+impl Default for BgLiveDetail {
+    fn default() -> Self {
+        Self {
+            status: BgLiveStatus::Unobserved,
+            kind: String::new(),
+            summary: String::new(),
+            agent_id: None,
+            agent_name: None,
+            subagent_instance_id: None,
+            pid: None,
+            duration_ms: None,
+            output_preview: None,
+            cancel_reason: None,
+            preview_omitted: false,
+            preview_updated: 0,
+            pending_owner: false,
+            nested_units: im::Vector::new(),
+            tool_cards: Vec::new(),
+            subagent_result: None,
+            subagent_is_error: false,
+            stream: None,
+        }
+    }
+}
+
+/// 后台显示区域条目（由 bg-task-* + subagent tool 事件维护）
+#[derive(Debug, Clone)]
+pub struct BgDisplayEntry {
+    pub id: String,
+    pub linked_agent_id: Option<String>,
+    pub agent_type: String,
+    /// 任务描述（来自 BgTaskEntry.summary）
+    pub desc: String,
+    /// 当前执行的工具名（None 为空闲态）
+    pub current_tool: Option<String>,
+    /// 已完成工具调用计数
+    pub tool_count: u32,
+    /// false → 3s 倒计时中，到期后渲染层移除
+    pub is_active: bool,
+    /// 失败标志
+    pub is_error: bool,
+    /// 创建时间（用于显示运行时长）
+    pub created_at: Instant,
+    /// 完成时间（3s 倒计时起点）
+    pub completed_at: Option<Instant>,
+}
+
+/// 后台显示区域条目列表（仅活跃 + 3s 缓冲中的任务）
+pub static BG_DISPLAY: AtomStatic<Vec<BgDisplayEntry>> = AtomStatic::new(Vec::new);
+
+/// 后台 agent_id 集合——用于判断 tool 事件是否属于后台任务
+/// key = SubagentStarted.instance_id (is_background=true)
+pub static BG_AGENT_IDS: AtomStatic<std::collections::HashSet<String>> =
+    AtomStatic::new(std::collections::HashSet::new);
+
+pub static BG_TASK_IDENTITY: AtomStatic<std::collections::HashMap<String, BgTaskIdentity>> =
+    AtomStatic::new(std::collections::HashMap::new);
+
+pub static BG_LIVE_DETAIL: AtomStatic<std::collections::HashMap<String, BgLiveDetail>> =
+    AtomStatic::new(std::collections::HashMap::new);
+
+pub static SELECTED_BG_TASK_ID: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+
+pub static SELECTED_WORKFLOW_RUN_ID: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+
+/// 通知消息（状态栏短暂显示，过期后自动忽略）
+pub struct Notification {
+    pub message: String,
+    pub until: Instant,
+}
+pub static NOTIFICATION: AtomStatic<Option<Notification>> = AtomStatic::new(|| None);
+
+// ── Confirm Popup 相关 State ─────────────────────────────────────────────────
+
+/// 确认弹窗要执行的操作
+#[derive(Debug, Clone)]
+pub enum ConfirmAction {
+    /// 切换到指定 thread_id
+    ThreadSwitch(String),
+    /// 用户确认拒绝回答 AskUser 提问
+    RejectAskUser {
+        owner: crate::acp_client::InteractionOwner,
+        request_id_json: String,
+    },
+}
+
+/// 确认弹窗的 payload
+#[derive(Debug, Clone)]
+pub struct ConfirmPayload {
+    /// 进程内单调递增的版本——payload 的业务身份，由 [`ConfirmPayload::new`] 分配。
+    pub version: u64,
+    pub title: String,
+    pub message: String,
+    pub details: Vec<String>,
+    pub pending_action: ConfirmAction,
+}
+
+/// payload 版本计数器（进程内单调递增）。
+pub(super) static CONFIRM_PAYLOAD_VERSION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+impl ConfirmPayload {
+    /// 构造确认 payload——版本由本函数分配，发布点不得自带版本号。
+    ///
+    /// \[Why\] 弹窗渲染的是某一帧读到的 payload，确认键却在按下的瞬间重新读取全局
+    /// payload；两者之间 payload 可能被其它发布点替换。版本随 payload 一起发布，
+    /// 弹窗据此拒绝执行「用户没看到的动作」。
+    #[must_use]
+    pub fn new(
+        title: String,
+        message: String,
+        details: Vec<String>,
+        pending_action: ConfirmAction,
+    ) -> Self {
+        let version =
+            CONFIRM_PAYLOAD_VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        Self {
+            version,
+            title,
+            message,
+            details,
+            pending_action,
+        }
+    }
+}
+
+pub static CONFIRM_PAYLOAD: AtomStatic<Option<ConfirmPayload>> = AtomStatic::new(|| None);
+
+// ── Download Progress Popup 相关 ────────────────────────────────────────────
+
+/// 下载进度中的单文件状态
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileDownloadStatus {
+    /// 等待下载
+    Pending,
+    /// 正在下载
+    Downloading,
+    /// 下载完成
+    Done,
+    /// 下载失败（包含错误信息）
+    Failed(String),
+}
+
+/// 下载进度条目
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadItem {
+    pub filename: String,
+    pub status: FileDownloadStatus,
+}
+
+/// 下载进度弹窗的完整状态
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DownloadProgressPayload {
+    pub items: Vec<DownloadItem>,
+    /// 下载是否已完成（true 时 Esc 可关闭弹窗）
+    pub finished: bool,
+    /// 成功下载的文件数量
+    pub success_count: usize,
+    /// 失败的文件数量
+    pub fail_count: usize,
+}
+
+pub static DOWNLOAD_PROGRESS: AtomStatic<DownloadProgressPayload> =
+    AtomStatic::new(DownloadProgressPayload::default);
+
+pub fn init_atoms() {}
+
+use peri_acp_types::event_data::AskUser;
+
+use peri_acp_types::event_data::HitlPending;
+
+use peri_acp_types::event_data::OauthNeeded;
+
+use peri_acp_types::event_data::RewindPreview;

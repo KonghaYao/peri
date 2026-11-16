@@ -1,4 +1,9 @@
-use super::*;
+use crate::rpc::PendingAgent;
+use crate::rpc::RpcChannel;
+use dashmap::DashMap;
+use peri_js_runtime::ParsedMessage;
+use std::sync::Arc;
+use tokio::sync::oneshot;
 
 #[test]
 fn test_duplicate_active_agent_id_preserves_original_cancel_handle() {
@@ -7,7 +12,7 @@ fn test_duplicate_active_agent_id_preserves_original_cancel_handle() {
     let (duplicate_tx, _duplicate_rx) = oneshot::channel();
     let key = ("run-1".to_string(), 7);
 
-    assert!(insert_pending_agent(
+    assert!(crate::rpc::insert_pending_agent(
         &pending,
         key.clone(),
         PendingAgent {
@@ -16,7 +21,7 @@ fn test_duplicate_active_agent_id_preserves_original_cancel_handle() {
             token: 0,
         },
     ));
-    assert!(!insert_pending_agent(
+    assert!(!crate::rpc::insert_pending_agent(
         &pending,
         key.clone(),
         PendingAgent {
@@ -26,8 +31,13 @@ fn test_duplicate_active_agent_id_preserves_original_cancel_handle() {
         },
     ));
 
-    let (_, original) = pending.remove(&key).unwrap();
-    original.cancel_tx.send(()).unwrap();
+    let (_, original) = pending
+        .remove(&key)
+        .expect("the remove fixture result is required for this assertion");
+    original
+        .cancel_tx
+        .send(())
+        .expect("original cancel tx test receiver must remain available for this delivery");
     assert_eq!(first_rx.try_recv(), Ok(()));
 }
 
@@ -51,12 +61,16 @@ async fn make_rpc_channel() -> (Arc<peri_js_runtime::JsExecutionHost>, RpcChanne
 async fn test_deregister_agent_stale_token_preserves_new_instance() {
     let (_host, ch) = make_rpc_channel().await;
 
-    let (cancel_rx_1, token_1) = ch.register_agent("run-1", 7, Some(1)).unwrap();
+    let (cancel_rx_1, token_1) = ch
+        .register_agent("run-1", 7, Some(1))
+        .expect("the register agent fixture result is required for this assertion");
     assert!(ch.deregister_agent("run-1", 7, token_1));
     drop(cancel_rx_1); // 模拟第一实例完成
 
     // 同 key 的新实例注册（同 agentId 重试/新调用）
-    let (cancel_rx_2, token_2) = ch.register_agent("run-1", 7, Some(2)).unwrap();
+    let (cancel_rx_2, token_2) = ch
+        .register_agent("run-1", 7, Some(2))
+        .expect("the register agent fixture result is required for this assertion");
     // 旧实例迟到注销：token 不匹配 → false，且不触碰新实例
     assert!(!ch.deregister_agent("run-1", 7, token_1));
     // kill 句柄仍指向新实例：kill 成功且 cancel 被触发
@@ -72,7 +86,9 @@ async fn test_deregister_agent_stale_token_preserves_new_instance() {
 async fn test_deregister_after_kill_returns_false() {
     let (_host, ch) = make_rpc_channel().await;
 
-    let (cancel_rx, token) = ch.register_agent("run-1", 8, Some(3)).unwrap();
+    let (cancel_rx, token) = ch
+        .register_agent("run-1", 8, Some(3))
+        .expect("the register agent fixture result is required for this assertion");
     assert!(ch.kill_agent("run-1", 8).await);
     assert_eq!(cancel_rx.await, Ok(()), "kill 应触发 cancel");
     assert!(
@@ -86,7 +102,8 @@ async fn test_deregister_after_kill_returns_false() {
 #[test]
 fn test_parse_message_response() {
     let raw = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
-    let msg = parse_message(raw).unwrap();
+    let msg = peri_js_runtime::parse_message(raw)
+        .expect("the parse message fixture result is required for this assertion");
     match msg {
         ParsedMessage::Response { id, result, .. } => {
             assert_eq!(id, 1);
@@ -99,7 +116,8 @@ fn test_parse_message_response() {
 #[test]
 fn test_parse_message_request_with_id() {
     let raw = r#"{"jsonrpc":"2.0","id":100,"method":"agent/run","params":{"prompt":"hi"}}"#;
-    let msg = parse_message(raw).unwrap();
+    let msg = peri_js_runtime::parse_message(raw)
+        .expect("the parse message fixture result is required for this assertion");
     match msg {
         ParsedMessage::Request { id, method, .. } => {
             assert_eq!(id, Some(100));
@@ -112,7 +130,8 @@ fn test_parse_message_request_with_id() {
 #[test]
 fn test_parse_message_notification_no_id() {
     let raw = r#"{"jsonrpc":"2.0","method":"progress/event","params":{"type":"run_started"}}"#;
-    let msg = parse_message(raw).unwrap();
+    let msg = peri_js_runtime::parse_message(raw)
+        .expect("the parse message fixture result is required for this assertion");
     match msg {
         ParsedMessage::Request { id, method, .. } => {
             assert!(id.is_none());
@@ -124,19 +143,25 @@ fn test_parse_message_notification_no_id() {
 
 #[test]
 fn test_parse_message_invalid_json_returns_protocol_error() {
-    assert!(parse_message("not json").is_err());
+    assert!(peri_js_runtime::parse_message("not json").is_err());
 }
 
 #[test]
 fn test_parse_message_error_response() {
     let raw = r#"{"jsonrpc":"2.0","id":5,"error":{"code":-32000,"message":"aborted"}}"#;
-    let msg = parse_message(raw).unwrap();
+    let msg = peri_js_runtime::parse_message(raw)
+        .expect("the parse message fixture result is required for this assertion");
     match msg {
         ParsedMessage::Response { id, result, error } => {
             assert_eq!(id, 5);
             assert!(result.is_none());
             assert!(error.is_some());
-            assert_eq!(error.unwrap().code, -32000);
+            assert_eq!(
+                error
+                    .expect("the error fixture result is required for this assertion")
+                    .code,
+                -32000
+            );
         }
         _ => panic!("expected Response"),
     }
@@ -145,7 +170,8 @@ fn test_parse_message_error_response() {
 #[test]
 fn test_parse_message_response_null_result() {
     let raw = r#"{"jsonrpc":"2.0","id":3,"result":null}"#;
-    let msg = parse_message(raw).unwrap();
+    let msg = peri_js_runtime::parse_message(raw)
+        .expect("the parse message fixture result is required for this assertion");
     match msg {
         ParsedMessage::Response { id, result, .. } => {
             assert_eq!(id, 3);
@@ -158,10 +184,10 @@ fn test_parse_message_response_null_result() {
 #[test]
 fn test_parse_message_no_method_no_result_returns_protocol_error() {
     let raw = r#"{"jsonrpc":"2.0","id":7}"#;
-    assert!(parse_message(raw).is_err());
+    assert!(peri_js_runtime::parse_message(raw).is_err());
 }
 
 #[test]
 fn test_parse_message_empty_string_returns_protocol_error() {
-    assert!(parse_message("").is_err());
+    assert!(peri_js_runtime::parse_message("").is_err());
 }

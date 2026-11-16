@@ -7,10 +7,20 @@
 //! 用 `Fixture::with_authorization` 逐一替换成未注入 / 作答 `None` / grant 错位 / 只授
 //! 单项能力的桩——生产 stdio 装配**不注入**，因此 `apps/*` 六个受控方法默认拒绝。
 
-use super::*;
+use crate::host::apps_facade::tests::Fixture;
+use crate::host::apps_facade::tests::FrameTransport;
+use crate::host::apps_facade::tests::APP_TOOL;
+use crate::transport::types::AcpError;
+use peri_acp_types::mcp_apps::McpAppsErrorKind;
+use peri_acp_types::mcp_apps_facade::AppsAttachResponse;
+use peri_acp_types::mcp_apps_facade::CloseVerdict;
+use peri_acp_types::mcp_apps_facade::RequestNamespaceId;
 use peri_acp_types::session_authorization::{
     SessionAuthorizationPort, SessionCapability, SessionEntitlementRequest, SessionGrant,
 };
+use peri_acp_types::tool_invocation::InvocationId;
+use serde_json::json;
+use std::sync::Arc;
 
 // ─── 部署侧身份层桩（只用于本文件） ─────────────────────────────────────────
 
@@ -88,7 +98,11 @@ async fn absent_port_denies_attach_without_side_effects() {
     let error = attach_raw(&mut fixture, &app_id)
         .await
         .expect_err("未注入身份层（None）必须拒绝");
-    assert_kind(&error, McpAppsErrorKind::EntitlementDenied, "未注入端口");
+    crate::host::apps_facade::tests::assert_kind(
+        &error,
+        McpAppsErrorKind::EntitlementDenied,
+        "未注入端口",
+    );
     assert!(
         fixture.router.attachments_for_app(&app_id).is_empty(),
         "拒绝不得留下附件（附件是副作用事实）"
@@ -108,7 +122,11 @@ async fn port_that_does_not_grant_is_denied() {
     let error = attach_raw(&mut fixture, &app_id)
         .await
         .expect_err("grant 返回 None 必须拒绝");
-    assert_kind(&error, McpAppsErrorKind::EntitlementDenied, "grant = None");
+    crate::host::apps_facade::tests::assert_kind(
+        &error,
+        McpAppsErrorKind::EntitlementDenied,
+        "grant = None",
+    );
     assert!(
         fixture.router.attachments_for_app(&app_id).is_empty(),
         "拒绝不得留下附件"
@@ -134,7 +152,11 @@ async fn grant_for_other_session_is_denied() {
     let error = attach_raw(&mut fixture, &app_id)
         .await
         .expect_err("grant 的 session 与请求不符必须拒绝");
-    assert_kind(&error, McpAppsErrorKind::EntitlementDenied, "错 session");
+    crate::host::apps_facade::tests::assert_kind(
+        &error,
+        McpAppsErrorKind::EntitlementDenied,
+        "错 session",
+    );
     assert!(
         fixture.router.attachments_for_app(&app_id).is_empty(),
         "拒绝不得留下附件"
@@ -160,7 +182,11 @@ async fn grant_for_other_caller_is_denied() {
     let error = attach_raw(&mut fixture, &app_id)
         .await
         .expect_err("grant 的 caller 与请求不符必须拒绝");
-    assert_kind(&error, McpAppsErrorKind::EntitlementDenied, "错 caller");
+    crate::host::apps_facade::tests::assert_kind(
+        &error,
+        McpAppsErrorKind::EntitlementDenied,
+        "错 caller",
+    );
     assert!(
         fixture.router.attachments_for_app(&app_id).is_empty(),
         "拒绝不得留下附件"
@@ -186,7 +212,11 @@ async fn grant_for_other_capability_is_denied() {
     let error = attach_raw(&mut fixture, &app_id)
         .await
         .expect_err("grant 的能力与请求不符必须拒绝");
-    assert_kind(&error, McpAppsErrorKind::EntitlementDenied, "错 capability");
+    crate::host::apps_facade::tests::assert_kind(
+        &error,
+        McpAppsErrorKind::EntitlementDenied,
+        "错 capability",
+    );
     assert!(
         fixture.router.attachments_for_app(&app_id).is_empty(),
         "拒绝不得留下附件"
@@ -253,7 +283,7 @@ async fn attach_capability_does_not_authorize_app_operations() {
         )
         .await
         .expect_err("AppOperations 未授 ⇒ request 必须拒绝");
-    assert_kind(
+    crate::host::apps_facade::tests::assert_kind(
         &error,
         McpAppsErrorKind::EntitlementDenied,
         "只授 AttachApps",
@@ -302,7 +332,11 @@ async fn app_operations_does_not_authorize_control_apps() {
         )
         .await
         .expect_err("ControlApps 未授 ⇒ close 必须拒绝");
-    assert_kind(&close_error, McpAppsErrorKind::EntitlementDenied, "close");
+    crate::host::apps_facade::tests::assert_kind(
+        &close_error,
+        McpAppsErrorKind::EntitlementDenied,
+        "close",
+    );
     let cancel_error = fixture
         .apps(
             "peri/mcp/apps/cancel",
@@ -315,7 +349,11 @@ async fn app_operations_does_not_authorize_control_apps() {
         )
         .await
         .expect_err("ControlApps 未授 ⇒ cancel 必须拒绝");
-    assert_kind(&cancel_error, McpAppsErrorKind::EntitlementDenied, "cancel");
+    crate::host::apps_facade::tests::assert_kind(
+        &cancel_error,
+        McpAppsErrorKind::EntitlementDenied,
+        "cancel",
+    );
     let detach_error = fixture
         .apps(
             "peri/mcp/apps/detach",
@@ -327,7 +365,11 @@ async fn app_operations_does_not_authorize_control_apps() {
         )
         .await
         .expect_err("ControlApps 未授 ⇒ detach 必须拒绝");
-    assert_kind(&detach_error, McpAppsErrorKind::EntitlementDenied, "detach");
+    crate::host::apps_facade::tests::assert_kind(
+        &detach_error,
+        McpAppsErrorKind::EntitlementDenied,
+        "detach",
+    );
     assert!(
         !fixture.router.attachments_for_app(&app_id).is_empty(),
         "被拒的 close / cancel / detach 不得改变附件状态"
@@ -350,7 +392,11 @@ async fn control_capability_does_not_authorize_attach() {
     let error = attach_raw(&mut fixture, &app_id)
         .await
         .expect_err("AttachApps 未授 ⇒ attach 必须拒绝");
-    assert_kind(&error, McpAppsErrorKind::EntitlementDenied, "attach");
+    crate::host::apps_facade::tests::assert_kind(
+        &error,
+        McpAppsErrorKind::EntitlementDenied,
+        "attach",
+    );
     assert!(
         fixture.router.attachments_for_app(&app_id).is_empty(),
         "拒绝不得留下附件"
@@ -391,7 +437,7 @@ async fn rerun_shares_the_app_operations_gate() {
         )
         .await
         .expect_err("AppOperations 未授 ⇒ rerun 必须拒绝");
-    assert_kind(
+    crate::host::apps_facade::tests::assert_kind(
         &error,
         McpAppsErrorKind::EntitlementDenied,
         "rerun 与 apps/request 同一能力门",

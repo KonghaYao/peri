@@ -8,10 +8,11 @@ use crate::{
     ProtocolErrorKind, ProviderProtocol,
 };
 
-use super::{
-    replay::ReplayBinding, request_content::messages_to_input, ResponsesConfig, ResponsesProfile,
-    TOOL_NAMESPACE,
-};
+use super::replay::ReplayBinding;
+use super::request_content;
+use super::ResponsesConfig;
+use super::ResponsesProfile;
+use super::TOOL_NAMESPACE;
 
 pub(super) struct BuiltResponsesRequest {
     pub endpoint: Url,
@@ -57,7 +58,7 @@ pub(super) fn build_request(
     };
     let mut body = json!({
         "model": config.model,
-        "input": messages_to_input(&request.messages, &binding)?,
+        "input": request_content::messages_to_input(&request.messages, &binding)?,
         "stream": true,
         "store": false,
         "include": ["reasoning.encrypted_content"],

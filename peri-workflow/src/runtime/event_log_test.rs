@@ -1,7 +1,7 @@
 //! `runtime/event_log.rs` 的行为测试：单调 sequence、保留边界与分页语义
 //! （design §4.3 的读取契约）。
 
-use super::*;
+use crate::runtime::event_log::BoundedEventLog;
 
 #[test]
 fn empty_log_reports_zero_head_and_no_entries() {

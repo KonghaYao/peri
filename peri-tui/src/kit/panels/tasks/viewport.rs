@@ -14,10 +14,7 @@
 use ratatui_kit::crossterm::event::MouseEvent;
 use ratatui_kit::ratatui::layout::Rect;
 
-use crate::kit::atoms::BgTaskEntry;
 use crate::kit::bg_task_status::BgTaskStatus;
-use crate::kit::list_nav::{clamp_selection, scroll_start_for_selected};
-use crate::kit::panel_mouse::left_down;
 
 /// 段顺序——即选中下标空间（与 `selected`）的排列顺序，绘制顺序同此。
 pub(super) const SEGMENTS: [TaskSegment; 3] = [
@@ -44,11 +41,13 @@ pub(super) struct SegmentCounts {
 
 impl SegmentCounts {
     /// 三段总项数（= 选中下标空间长度）。
+    #[must_use]
     pub(super) fn total(self) -> usize {
         self.background + self.cron + self.subagent
     }
 
     /// 段在全量下标空间中的起点。
+    #[must_use]
     fn base(self, segment: TaskSegment) -> usize {
         match segment {
             TaskSegment::Background => 0,
@@ -58,6 +57,7 @@ impl SegmentCounts {
     }
 
     /// 段长。
+    #[must_use]
     fn len(self, segment: TaskSegment) -> usize {
         match segment {
             TaskSegment::Background => self.background,
@@ -125,9 +125,10 @@ impl TasksViewport {
         counts: SegmentCounts,
         selected: usize,
     ) -> Self {
-        let selected = clamp_selection(selected, counts.total());
+        let selected = crate::kit::list_nav::clamp_selection(selected, counts.total());
         let capacity = (content_rows as usize).saturating_sub(fixed_rows(counts));
-        let scroll_start = scroll_start_for_selected(selected, counts.total(), capacity);
+        let scroll_start =
+            crate::kit::list_nav::scroll_start_for_selected(selected, counts.total(), capacity);
         let mut rows = build_rows(counts, capacity, scroll_start);
         // 面板矮于固定行时按预算截行：绘制本来也会被裁掉，截断保证行表不会给出
         // 屏幕外的命中（`panel_mouse::hit_row` 同款「越界不可点」语义）。
@@ -140,16 +141,19 @@ impl TasksViewport {
     }
 
     /// 本帧行表——绘制按它逐行渲染。
+    #[must_use]
     pub(super) fn rows(&self) -> &[TasksRow] {
         &self.rows
     }
 
     /// 本帧段边界。
+    #[must_use]
     pub(super) fn counts(&self) -> SegmentCounts {
         self.counts
     }
 
     /// 本帧收敛后的选中下标。
+    #[must_use]
     pub(super) fn selected(&self) -> usize {
         self.selected
     }
@@ -179,7 +183,7 @@ impl TasksViewport {
     /// 行号，而本面板的段标题与段间空行把任务行切成三段，同一算式会把空行算成任务行。
     /// 行表长度已被内容行预算截断，因此行号越界（含上下边框）自然落空。
     pub(super) fn hit_item(&self, mouse: &MouseEvent, area: Rect) -> Option<usize> {
-        let (row, _column) = left_down(mouse)?;
+        let (row, _column) = crate::kit::panel_mouse::left_down(mouse)?;
         // 顶部边框行不可点
         let visual = row.checked_sub(area.y.saturating_add(1))?;
         self.item_at_row(visual as usize)
@@ -257,11 +261,14 @@ fn build_rows(counts: SegmentCounts, capacity: usize, scroll_start: usize) -> Ve
             .filter(|(_, start, end)| start < end)
             .collect();
         let last_slot = visible.len().saturating_sub(1);
-        for (slot, (segment, start, end)) in visible.into_iter().enumerate() {
-            rows.push(TasksRow::SectionHeader(segment));
-            rows.extend((start..end).map(TasksRow::Item));
-            if slot != last_slot {
-                rows.push(TasksRow::Blank);
+        {
+            let iteration_items = visible.into_iter().enumerate();
+            for (slot, (segment, start, end)) in iteration_items {
+                rows.push(TasksRow::SectionHeader(segment));
+                rows.extend((start..end).map(TasksRow::Item));
+                if slot != last_slot {
+                    rows.push(TasksRow::Blank);
+                }
             }
         }
     }
@@ -269,3 +276,5 @@ fn build_rows(counts: SegmentCounts, capacity: usize, scroll_start: usize) -> Ve
     rows.push(TasksRow::NavHint);
     rows
 }
+
+use crate::kit::atoms::BgTaskEntry;

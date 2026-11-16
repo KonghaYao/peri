@@ -1,5 +1,5 @@
-use super::{classify_loop_terminal, log_loop_terminal};
-use crate::{agent::stages::LoopResult, error::AgentError};
+use crate::agent::stages::LoopResult;
+use crate::error::AgentError;
 use std::sync::Arc;
 
 #[derive(Clone, Default)]
@@ -26,8 +26,10 @@ fn capture_terminal(result: LoopResult, cancelled: bool) -> String {
         .with_writer(move || writer.clone())
         .finish();
     tracing::subscriber::with_default(subscriber, || {
-        let terminal = classify_loop_terminal(&result, cancelled);
-        log_loop_terminal(
+        let terminal = crate::session::exec::executor_helpers::v2_execute::classify_loop_terminal(
+            &result, cancelled,
+        );
+        crate::session::exec::executor_helpers::v2_execute::log_loop_terminal(
             "session-diagnostic",
             "turn-diagnostic",
             &result,
@@ -35,7 +37,8 @@ fn capture_terminal(result: LoopResult, cancelled: bool) -> String {
             false,
         );
     });
-    let text = String::from_utf8(logs.0.lock().clone()).unwrap();
+    let text =
+        String::from_utf8(logs.0.lock().clone()).expect("the fixture text must be valid UTF-8");
     text
 }
 
@@ -64,7 +67,13 @@ fn default_info_fatal_log_retains_chain_and_execution_identity() {
             assert!(text.contains(fact), "missing {fact}: {text}");
         }
         assert!(!text.contains("Check logs for details"));
-        assert!(text.find("finish execution").unwrap() < text.find(root).unwrap());
+        assert!(
+            text.find("finish execution")
+                .expect("the find fixture result is required for this assertion")
+                < text
+                    .find(root)
+                    .expect("the find fixture result is required for this assertion")
+        );
     }
 }
 

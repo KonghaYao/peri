@@ -12,8 +12,9 @@ use std::collections::{BTreeSet, HashSet};
 
 use peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES;
 
-use super::*;
-use crate::mcp::tool_bridge::effective_mcp_tool_name;
+use super::BuiltinInjectionPolicy;
+use super::BUILTIN_INJECTION_ENV;
+use crate::mcp::tool_bridge;
 
 // ─── 冻结字面量 ─────────────────────────────────────────────────────────────
 
@@ -131,7 +132,7 @@ fn declared_direct_tools_is_derived_from_registry() {
         }
         for tool in declared {
             assert!(
-                is_declared_direct(instance.name, tool),
+                super::is_declared_direct(instance.name, tool),
                 "{}/{tool} 必须判定为 declared direct",
                 instance.name
             );
@@ -162,16 +163,16 @@ fn is_declared_direct_true_for_implemented_false_for_unknown() {
         "Bash",
     ] {
         assert!(
-            is_declared_direct("workspace", tool),
+            super::is_declared_direct("workspace", tool),
             "workspace/{tool} 必须判定为 declared direct"
         );
     }
     // 未知名 / 表外 server / 未声明工具：恒 false。
-    assert!(!is_declared_direct("workspace", "Nope"));
-    assert!(!is_declared_direct("cron", "CronCreate"));
-    assert!(!is_declared_direct("web", "Unknown"));
-    assert!(!is_declared_direct("some-user-server", "WebSearch"));
-    assert!(!is_declared_direct("not-a-builtin", "Read"));
+    assert!(!super::is_declared_direct("workspace", "Nope"));
+    assert!(!super::is_declared_direct("cron", "CronCreate"));
+    assert!(!super::is_declared_direct("web", "Unknown"));
+    assert!(!super::is_declared_direct("some-user-server", "WebSearch"));
+    assert!(!super::is_declared_direct("not-a-builtin", "Read"));
 }
 
 /// host-only 判定与注册表逐工具 `model_visible` 派生一致（桥接发现过滤的事实源）。
@@ -183,7 +184,7 @@ fn is_declared_model_hidden_is_derived_from_registry() {
     for instance in BUILTIN_MCP_INSTANCES.iter() {
         for tool in instance.tools {
             assert_eq!(
-                is_declared_model_hidden(instance.name, tool.original_name),
+                super::is_declared_model_hidden(instance.name, tool.original_name),
                 !tool.model_visible,
                 "{}/{} 的 host-only 判定必须由注册表逐工具 model_visible 派生",
                 instance.name,
@@ -192,12 +193,12 @@ fn is_declared_model_hidden_is_derived_from_registry() {
         }
     }
     // 未知名 / 表外 server / 未声明工具：恒 false（可见性默认开放，保守默认）。
-    assert!(!is_declared_model_hidden("workspace", "Nope"));
-    assert!(!is_declared_model_hidden(
+    assert!(!super::is_declared_model_hidden("workspace", "Nope"));
+    assert!(!super::is_declared_model_hidden(
         "some-user-server",
         "WorkflowAgentResult"
     ));
-    assert!(!is_declared_model_hidden("not-a-builtin", "Read"));
+    assert!(!super::is_declared_model_hidden("not-a-builtin", "Read"));
 }
 
 #[test]
@@ -241,20 +242,26 @@ fn builtin_prompt_declaration_matches_registry() {
 #[test]
 fn closed_instances_maps_capability_switches() {
     let none: HashSet<String> = HashSet::new();
-    assert!(closed_instances(&none).is_empty(), "空关闭集 ⇒ 无实例关闭");
+    assert!(
+        super::closed_instances(&none).is_empty(),
+        "空关闭集 ⇒ 无实例关闭"
+    );
 
     let web: HashSet<String> = HashSet::from(["WebMiddleware".to_string()]);
-    assert_eq!(closed_instances(&web), BTreeSet::from(["web".to_string()]));
+    assert_eq!(
+        super::closed_instances(&web),
+        BTreeSet::from(["web".to_string()])
+    );
 
     let artifact: HashSet<String> = HashSet::from(["ArtifactMiddleware".to_string()]);
     assert_eq!(
-        closed_instances(&artifact),
+        super::closed_instances(&artifact),
         BTreeSet::from(["artifact".to_string()])
     );
 
     let cron: HashSet<String> = HashSet::from(["CronMiddleware".to_string()]);
     assert_eq!(
-        closed_instances(&cron),
+        super::closed_instances(&cron),
         BTreeSet::from(["cron".to_string()])
     );
 
@@ -263,13 +270,13 @@ fn closed_instances_maps_capability_switches() {
         let by_capability: HashSet<String> = HashSet::from([capability.name.to_string()]);
         let by_legacy: HashSet<String> = HashSet::from([capability.legacy_policy_key.to_string()]);
         assert_eq!(
-            closed_instances(&by_capability),
-            closed_instances(&by_legacy),
+            super::closed_instances(&by_capability),
+            super::closed_instances(&by_legacy),
             "{} 与旧键必须关闭同一实例",
             capability.name
         );
         assert_eq!(
-            closed_instances(&by_capability),
+            super::closed_instances(&by_capability),
             BTreeSet::from([capability.legacy_instance.to_string()]),
             "{} 必须关闭对应实例",
             capability.name
@@ -281,7 +288,7 @@ fn closed_instances_maps_capability_switches() {
         "ArtifactMiddleware".to_string(),
     ]);
     assert_eq!(
-        closed_instances(&both),
+        super::closed_instances(&both),
         BTreeSet::from(["artifact".to_string(), "web".to_string()])
     );
 
@@ -289,7 +296,7 @@ fn closed_instances_maps_capability_switches() {
     for unknown in ["SomeOtherMiddleware", "McpMiddleware", "Artifact", "web2"] {
         let set: HashSet<String> = HashSet::from([unknown.to_string()]);
         assert!(
-            closed_instances(&set).is_empty(),
+            super::closed_instances(&set).is_empty(),
             "{unknown} 不得关闭任何 builtin 实例"
         );
     }
@@ -303,7 +310,7 @@ fn closed_capabilities_returns_v5_identity() {
         "McpMiddleware".to_string(),
     ]);
     assert_eq!(
-        closed_capabilities(&mixed),
+        super::closed_capabilities(&mixed),
         BTreeSet::from(["cron", "web"]),
         "旧键与 v5 能力名必须落到同一能力身份，非 builtin 键忽略"
     );
@@ -312,9 +319,9 @@ fn closed_capabilities_returns_v5_identity() {
 #[test]
 fn is_closed_reads_the_closed_set() {
     let closed: BTreeSet<String> = BTreeSet::from(["web".to_string()]);
-    assert!(is_closed("web", &closed));
-    assert!(!is_closed("artifact", &closed));
-    assert!(!is_closed("some-user-server", &closed));
+    assert!(super::is_closed("web", &closed));
+    assert!(!super::is_closed("artifact", &closed));
+    assert!(!super::is_closed("some-user-server", &closed));
 }
 
 // ─── 注入策略（A2）────────────────────────────────────────────────────────
@@ -393,25 +400,27 @@ fn injection_policy_from_env_three_states() {
     for off in ["off", "0", "OFF", " 0 "] {
         let _guard = BuiltinEnvGuard::set(Some(off));
         assert!(
-            builtin_injection_policy_from_env().enabled.is_empty(),
+            super::builtin_injection_policy_from_env()
+                .enabled
+                .is_empty(),
             "关闭取值必须解析为 none"
         );
         assert_eq!(
-            builtin_injection_policy_from_env(),
+            super::builtin_injection_policy_from_env(),
             BuiltinInjectionPolicy::none()
         );
     }
     for on in ["", "1", "true", "yes"] {
         let _guard = BuiltinEnvGuard::set(Some(on));
         assert_eq!(
-            builtin_injection_policy_from_env(),
+            super::builtin_injection_policy_from_env(),
             BuiltinInjectionPolicy::all(),
             "缺省 / 未知取值必须解析为 all"
         );
     }
     let _guard = BuiltinEnvGuard::set(None);
     assert_eq!(
-        builtin_injection_policy_from_env(),
+        super::builtin_injection_policy_from_env(),
         BuiltinInjectionPolicy::all(),
         "未设置（缺省语义）必须解析为 all"
     );
@@ -419,7 +428,7 @@ fn injection_policy_from_env_three_states() {
 
 /// 测试投影复用实际名字规则，核对声明表中的 effective name 字面量。
 fn effective_tool_name(instance: &str, original_tool: &str) -> Option<String> {
-    let instance = find(instance)?;
+    let instance = peri_acp_types::builtin_mcp::find(instance)?;
     let tool = instance
         .tools
         .iter()
@@ -427,13 +436,13 @@ fn effective_tool_name(instance: &str, original_tool: &str) -> Option<String> {
     Some(if tool.direct {
         tool.original_name.to_string()
     } else {
-        effective_mcp_tool_name(instance.name, original_tool)
+        tool_bridge::effective_mcp_tool_name(instance.name, original_tool)
     })
 }
 
 /// 为注册表成员断言收集模型面工具名。
 fn effective_tool_names(instance: &str) -> BTreeSet<String> {
-    find(instance)
+    peri_acp_types::builtin_mcp::find(instance)
         .map(|instance| {
             instance
                 .tools
@@ -447,7 +456,7 @@ fn effective_tool_names(instance: &str) -> BTreeSet<String> {
 /// 为 direct 声明断言收集注册表中的原始工具名。
 fn declared_direct_tools(instance: &str) -> Option<Vec<&'static str>> {
     Some(
-        find(instance)?
+        peri_acp_types::builtin_mcp::find(instance)?
             .tools
             .iter()
             .filter(|tool| tool.direct)
@@ -458,7 +467,7 @@ fn declared_direct_tools(instance: &str) -> Option<Vec<&'static str>> {
 
 /// 查询声明模板，供模板形状断言使用。
 fn builtin_prompt_declaration(server_name: &str, original_tool: &str) -> Option<&'static str> {
-    find(server_name)?
+    peri_acp_types::builtin_mcp::find(server_name)?
         .tools
         .iter()
         .find(|tool| tool.original_name == original_tool)?

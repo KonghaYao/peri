@@ -13,11 +13,12 @@ use std::time::{Duration, Instant};
 use fs4::FileExt;
 use sha2::{Digest, Sha256};
 
-use super::super::{
-    create_private_dir_all, id_hex, native_scan, now_ms, probe_durable_io, random_object_id,
-    write_atomic, LockAttempt, NativeInner, DESCRIPTOR_VERSION,
-};
-use super::{id_of, route_of, Fixture, QUOTA_BYTES};
+use super::super::native_scan;
+use super::super::LockAttempt;
+use super::super::NativeInner;
+use super::super::DESCRIPTOR_VERSION;
+use super::Fixture;
+use super::QUOTA_BYTES;
 use crate::config::Compression;
 use crate::spool::types::{ObjectId, ObjectKind, ObjectMeta, SpoolState};
 use crate::spool::SpoolError;
@@ -29,16 +30,17 @@ use crate::spool::SpoolError;
 #[test]
 fn lock_attempt_reports_gone_instead_of_io_error_when_parent_is_deleted() {
     let dir = tempfile::tempdir().expect("temporary root");
-    let fixture = Fixture::open(dir.path().to_path_buf(), route_of(13));
+    let fixture = Fixture::open(dir.path().to_path_buf(), super::route_of(13));
     // 对象目录不存在（已被并发删除或从未发布）：不可领取，但不是 IO 故障。
-    let gone_path = fixture.object_dir(id_of(0x71)).join("lock");
+    let gone_path = fixture.object_dir(super::id_of(0x71)).join("lock");
     assert!(matches!(
         super::super::try_lock_file(&gone_path).expect("lock attempt"),
         LockAttempt::Gone
     ));
     // 父目录存在时照常建锁：第一次 Free、第二次 Held，释放后可再次取得。
-    let held_path = fixture.object_dir(id_of(0x72)).join("lock");
-    create_private_dir_all(held_path.parent().expect("parent")).expect("object directory");
+    let held_path = fixture.object_dir(super::id_of(0x72)).join("lock");
+    super::super::create_private_dir_all(held_path.parent().expect("parent"))
+        .expect("object directory");
     let held = match super::super::try_lock_file(&held_path).expect("first lock") {
         LockAttempt::Free(lock) => lock,
         other => panic!("expected Free, got {other:?}"),
@@ -68,8 +70,8 @@ fn write_corrupt_entry(
 ) -> bool {
     let path = objects
         .join(format!("{:02x}", NativeInner::bucket_of(id)))
-        .join(id_hex(id));
-    let accepted = now_ms();
+        .join(super::super::id_hex(id));
+    let accepted = super::super::now_ms();
     let meta = ObjectMeta {
         version: DESCRIPTOR_VERSION,
         id,
@@ -88,9 +90,9 @@ fn write_corrupt_entry(
         state: SpoolState::Ready,
     };
     let descriptor = native_scan::descriptor_bytes(&meta).expect("descriptor bytes");
-    create_private_dir_all(&path).is_ok()
+    super::super::create_private_dir_all(&path).is_ok()
         && fs::write(path.join("body"), body).is_ok()
-        && write_atomic(&path.join("meta"), &descriptor).is_ok()
+        && super::super::write_atomic(&path.join("meta"), &descriptor).is_ok()
 }
 
 /// 并发删除不得把取锁升级为 IO 故障（契约 §5.2；`tests/spool_recovery` 竞态回归）。
@@ -109,12 +111,12 @@ fn write_corrupt_entry(
 fn concurrent_delete_never_turns_lock_attempts_into_io_faults() {
     const BODY: &[u8] = b"corrupt entry body";
     let dir = tempfile::tempdir().expect("temporary root");
-    let fixture = Fixture::open(dir.path().to_path_buf(), route_of(14));
+    let fixture = Fixture::open(dir.path().to_path_buf(), super::route_of(14));
     let objects = fixture.route_dir().join("objects");
     let route = fixture.route;
     // 确定性覆盖：单个摘要不符条目在没有并发修改时必须走到持锁清理并显式报损坏。
     assert!(
-        write_corrupt_entry(&objects, route, id_of(0x5a), BODY),
+        write_corrupt_entry(&objects, route, super::id_of(0x5a), BODY),
         "先写入一个摘要不符条目"
     );
     let planted = fixture.store.list(None, 64);
@@ -129,10 +131,10 @@ fn concurrent_delete_never_turns_lock_attempts_into_io_faults() {
         let live = Arc::clone(&live);
         std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                let id = random_object_id();
+                let id = super::super::random_object_id();
                 let path = objects
                     .join(format!("{:02x}", NativeInner::bucket_of(id)))
-                    .join(id_hex(id));
+                    .join(super::super::id_hex(id));
                 if write_corrupt_entry(&objects, route, id, BODY) {
                     let mut live = live.lock().expect("live ids");
                     if live.len() >= 32 {
@@ -187,9 +189,9 @@ fn concurrent_delete_never_turns_lock_attempts_into_io_faults() {
 #[test]
 fn open_failure_is_classified_by_error_kind_not_by_probing_the_object_dir() {
     let dir = tempfile::tempdir().expect("temporary root");
-    let fixture = Fixture::open(dir.path().to_path_buf(), route_of(15));
-    let object_dir = fixture.object_dir(id_of(0x73));
-    create_private_dir_all(&object_dir).expect("object directory");
+    let fixture = Fixture::open(dir.path().to_path_buf(), super::route_of(15));
+    let object_dir = fixture.object_dir(super::id_of(0x73));
+    super::super::create_private_dir_all(&object_dir).expect("object directory");
     let lock_path = object_dir.join("lock");
     std::os::unix::fs::symlink(object_dir.join("missing").join("target"), &lock_path)
         .expect("dangling lock symlink");
@@ -241,13 +243,16 @@ fn access_denied_open_failure_is_classified_as_concurrent_dir_removal() {
 #[test]
 fn peer_holding_the_domain_lock_is_contention_not_unavailability() {
     let dir = tempfile::tempdir().expect("temporary root");
-    let fixture = Fixture::open(dir.path().to_path_buf(), route_of(15));
+    let fixture = Fixture::open(dir.path().to_path_buf(), super::route_of(15));
     let inner = NativeInner {
         route_dir: fixture.route_dir(),
         route: fixture.route,
         quota_bytes: QUOTA_BYTES,
     };
-    assert!(probe_durable_io(&inner).is_ok(), "无竞争时探针必须通过");
+    assert!(
+        super::super::probe_durable_io(&inner).is_ok(),
+        "无竞争时探针必须通过"
+    );
 
     // 只借对端锁文件持锁：允许不存在时新建，已存在时保持原内容。
     let peer = OpenOptions::new()
@@ -258,9 +263,12 @@ fn peer_holding_the_domain_lock_is_contention_not_unavailability() {
         .expect("peer opens domain lock");
     FileExt::lock(&peer).expect("peer holds domain lock");
     assert!(
-        probe_durable_io(&inner).is_ok(),
+        super::super::probe_durable_io(&inner).is_ok(),
         "对端持锁只是竞争，不得判定为卷不支持持久化"
     );
     drop(peer);
-    assert!(probe_durable_io(&inner).is_ok(), "释放后照常通过");
+    assert!(
+        super::super::probe_durable_io(&inner).is_ok(),
+        "释放后照常通过"
+    );
 }

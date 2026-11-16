@@ -19,10 +19,12 @@ use peri_acp_types::mcp_apps_facade::{
 use peri_acp_types::session::TurnId;
 use serde_json::Value;
 
-use super::{
-    scope_host_request_connection, AttachRejection, AttachmentState, DetachVerdict,
-    SessionInteractionRouter, ViewAttachRequest, MAX_ONLINE_ENDPOINTS,
-};
+use super::AttachRejection;
+use super::AttachmentState;
+use super::DetachVerdict;
+use super::SessionInteractionRouter;
+use super::ViewAttachRequest;
+use super::MAX_ONLINE_ENDPOINTS;
 use crate::transport::types::{AcpError, IncomingMessage, RequestId};
 use crate::transport::AcpTransport;
 
@@ -683,7 +685,7 @@ async fn host_request_routes_to_its_request_scope_connection() {
 
     let owner = TrustedInteractionOwner::host("peri/mcp/invoke", 1);
     let router_for_scope = Arc::clone(&router);
-    let response = scope_host_request_connection("conn-2".to_string(), async move {
+    let response = super::scope_host_request_connection("conn-2".to_string(), async move {
         router_for_scope.request(owner, approval()).await
     })
     .await;

@@ -26,13 +26,11 @@ use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::thread::AgentStatus;
 use turso_serverless::Value;
 
-use super::cloud_tests::{
-    check, classify_engine, failure, http_base_url, numeric_version, scheme_class, session_input,
-    synth_binding, unique_run_label, with_cleanup, CloudTarget,
-};
-use super::connection::{connect_sdk, RemoteTransport, SdkTransport};
+use super::cloud_tests::CloudTarget;
+use super::connection::RemoteTransport;
+use super::connection::SdkTransport;
 use super::mutation::StoreAccess;
-use super::sql::{text_at, StatementSpec};
+use super::sql::StatementSpec;
 use crate::sessions::data::SessionDataPort;
 
 /// 本会话在远端账本上的行数（操作 id 以会话 id 开头，清理与核对共用这一约定）。
@@ -44,12 +42,12 @@ const COUNT_THREAD_LEDGER_SQL: &str =
 #[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
 async fn cloud_operation_identity_survives_repeat_values() {
     let target = CloudTarget::load();
-    let run = unique_run_label("peri-id");
+    let run = super::cloud_tests::unique_run_label("peri-id");
     let mut out = target.out();
     out.push("experiment=operation_identity".to_owned());
     out.push(format!("run_prefix_len={}", run.len()));
     out.flush();
-    let result = with_cleanup(&target, &run, || async {
+    let result = super::cloud_tests::with_cleanup(&target, &run, || async {
         identity_flow(&target, &run).await
     })
     .await;
@@ -67,20 +65,21 @@ async fn identity_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
     let writer = target
         .session_data(StoreAccess::ReadWrite)
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let root = format!("{run}-id");
     let root_id = peri_acp_types::thread::ThreadId::from(root.as_str());
     let created_at = chrono::Utc::now().to_rfc3339();
     let frozen = format!("{{\"frozen\":\"{run}\"}}");
-    let binding = synth_binding();
+    let binding = super::cloud_tests::synth_binding();
 
     // 标题先给一个显式值：后面用「x → y → x → y」把同内容复用走到头。
-    let mut new_session = session_input(&root, &created_at, &binding, &frozen, None);
+    let mut new_session =
+        super::cloud_tests::session_input(&root, &created_at, &binding, &frozen, None);
     new_session.meta.title = Some("x".to_owned());
     writer
         .save_new_session(&new_session)
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
 
     // 状态 A(创建默认 Active) → Done → Active → Done：第三次与第一次**内容完全相同**。
     for status in [AgentStatus::Done, AgentStatus::Active, AgentStatus::Done] {
@@ -95,7 +94,7 @@ async fn identity_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
                 },
             )
             .await
-            .map_err(failure)?;
+            .map_err(super::cloud_tests::failure)?;
     }
     // 标题 x → y → x → y：同样第 3 次与第 1 次内容相同。
     for title in ["y", "x", "y"] {
@@ -110,7 +109,7 @@ async fn identity_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
                 },
             )
             .await
-            .map_err(failure)?;
+            .map_err(super::cloud_tests::failure)?;
     }
 
     // 同边界复用：rewind 到 m1 之后追加 m3，再 rewind 到**同一边界**必须真的裁掉 m3。
@@ -119,45 +118,48 @@ async fn identity_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
     writer
         .append_history(&root_id, &[first.clone(), second.clone()])
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let boundary = RewindBoundary::KeepThrough(first.id());
     writer
         .rewind_history(&root_id, boundary, &[])
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let third = PersistedPayload::Message(BaseMessage::human("identity third"));
     writer
         .append_history(&root_id, std::slice::from_ref(&third))
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     writer
         .rewind_history(&root_id, boundary, &[])
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
 
     // 断言走新连接（只读打开），不读本连接的缓存。
     let reader = target
         .session_data(StoreAccess::ReadOnly)
         .await
-        .map_err(failure)?;
-    let meta = reader.load_meta(&root_id).await.map_err(failure)?;
-    check(
+        .map_err(super::cloud_tests::failure)?;
+    let meta = reader
+        .load_meta(&root_id)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         meta.title.as_deref() == Some("y"),
         "title must be the value of the last call, not a replayed earlier one",
     )?;
     let claim = reader
         .load_child_resume_record(&root_id)
         .await
-        .map_err(failure)?;
-    check(
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         claim.status == AgentStatus::Done,
         "status must be the value of the last call, not a replayed earlier one",
     )?;
     let history = reader
         .load_session_history(&root_id)
         .await
-        .map_err(failure)?;
-    check(
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         history.len() == 1 && history[0].id() == first.id(),
         "rewind to the same boundary must trim the appended entry, not be dropped as a replay",
     )?;
@@ -166,8 +168,8 @@ async fn identity_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
     let recovery = writer
         .recover_persistence(&root_id)
         .await
-        .map_err(failure)?;
-    check(
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         matches!(
             recovery,
             peri_acp_types::session_resources::PersistenceRecovery::Recovered
@@ -177,14 +179,17 @@ async fn identity_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
 
     // 账本行数：创建 1 + 状态 3 + 标题 3 + 追加 2 + rewind 2 = 11。
     let expected_operations = 11i64;
-    let store = target.store(StoreAccess::ReadOnly).await.map_err(failure)?;
+    let store = target
+        .store(StoreAccess::ReadOnly)
+        .await
+        .map_err(super::cloud_tests::failure)?;
     let batches = store
         .read_batch(vec![StatementSpec::new(
             COUNT_THREAD_LEDGER_SQL,
             vec![Value::Text(format!("{root}.%"))],
         )])
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let counted = batches
         .into_iter()
         .next()
@@ -195,8 +200,8 @@ async fn identity_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
             _ => None,
         })
         .unwrap_or(-1);
-    store.close().await.map_err(failure)?;
-    check(
+    store.close().await.map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         counted == expected_operations,
         "each domain call must leave exactly one ledger row of its own",
     )?;
@@ -205,8 +210,8 @@ async fn identity_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
     out.push(format!("operations={counted}"));
     out.push("identity=ok".to_owned());
     out.flush();
-    writer.close().await.map_err(failure)?;
-    reader.close().await.map_err(failure)?;
+    writer.close().await.map_err(super::cloud_tests::failure)?;
+    reader.close().await.map_err(super::cloud_tests::failure)?;
     Ok(())
 }
 
@@ -245,11 +250,11 @@ async fn shape_snapshot(target: &CloudTarget) -> Result<Vec<String>, String> {
     lines.push(format!("host_class={}", target.endpoint().host_class()));
     lines.push(format!(
         "scheme_class={}",
-        scheme_class(target.endpoint().sdk_url())
+        super::cloud_tests::scheme_class(target.endpoint().sdk_url())
     ));
 
     // `GET /version`（libSQL/sqld 的版本身份入口）：只报状态码与分类，不回显响应正文。
-    let base = http_base_url(target.endpoint().sdk_url())
+    let base = super::cloud_tests::http_base_url(target.endpoint().sdk_url())
         .map_err(|class| format!("locator cannot rewrite to an http base: {class}"))?;
     let response = reqwest::Client::new()
         .get(format!("{}/version", base.as_str().trim_end_matches('/')))
@@ -267,13 +272,19 @@ async fn shape_snapshot(target: &CloudTarget) -> Result<Vec<String>, String> {
         .text()
         .await
         .map_err(|_| "GET /version body unreadable".to_owned())?;
-    lines.push(format!("get_version_body_class={}", classify_engine(&body)));
-    lines.push(format!("get_version_numeric={}", numeric_version(&body)));
+    lines.push(format!(
+        "get_version_body_class={}",
+        super::cloud_tests::classify_engine(&body)
+    ));
+    lines.push(format!(
+        "get_version_numeric={}",
+        super::cloud_tests::numeric_version(&body)
+    ));
 
     let transport = SdkTransport::new(
-        connect_sdk(target.endpoint(), target.credential())
+        super::connection::connect_sdk(target.endpoint(), target.credential())
             .await
-            .map_err(failure)?,
+            .map_err(super::cloud_tests::failure)?,
     );
 
     for table in crate::sessions::canonical::CANONICAL_TABLES {
@@ -307,7 +318,7 @@ async fn shape_snapshot(target: &CloudTarget) -> Result<Vec<String>, String> {
     let table_rows = read_rows(&transport, &StatementSpec::bare(LIST_TABLES_SQL)).await?;
     let tables: Vec<String> = table_rows
         .iter()
-        .filter_map(|row| text_at(row, 0).map(str::to_owned))
+        .filter_map(|row| super::sql::text_at(row, 0).map(str::to_owned))
         .collect();
     lines.push(format!("table_count={}", tables.len()));
     lines.push(format!("tables={}", tables.join(",")));
@@ -337,9 +348,9 @@ async fn shape_snapshot(target: &CloudTarget) -> Result<Vec<String>, String> {
                     _ => None,
                 });
                 lines.push(format!("peri_store_meta_schema_version={version:?}"));
-                let contract = text_at(row, 2).unwrap_or("<non-text>");
+                let contract = super::sql::text_at(row, 2).unwrap_or("<non-text>");
                 lines.push(format!("peri_store_meta_contract={contract}"));
-                let store_prefix = text_at(row, 1)
+                let store_prefix = super::sql::text_at(row, 1)
                     .map(|id| id.chars().take(8).collect::<String>())
                     .unwrap_or_else(|| "<non-text>".to_owned());
                 lines.push(format!("peri_store_meta_store_id_prefix={store_prefix}"));

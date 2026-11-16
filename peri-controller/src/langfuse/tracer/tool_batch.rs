@@ -88,7 +88,10 @@ impl ToolBatch {
         }
         let tool_span_id = format!("obs_{}", uuid::Uuid::now_v7());
         let is_agent = name == "Agent" || name == "Task";
-        let parent = self.batch_span_id.clone().unwrap();
+        let parent = self
+            .batch_span_id
+            .clone()
+            .expect("on_tool_start initializes the batch span before recording a tool");
         self.pending_tools.insert(
             tool_call_id.to_string(),
             PendingTool {

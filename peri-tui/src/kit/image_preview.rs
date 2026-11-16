@@ -106,6 +106,7 @@ pub struct AsyncImage {
 impl AsyncImage {
     /// 构造：从 picker 取 `StatefulProtocol` 并启动后台 resize/encode 线程。
     /// 图片所有权转移给协议（内部保留原始 `DynamicImage` 供后续重编码）。
+    #[must_use]
     pub fn new(picker: &Picker, img: DynamicImage) -> Self {
         let (tx_request, rx_request) = mpsc::channel::<ResizeRequest>();
         let (tx_completed, rx_completed) = mpsc::channel();

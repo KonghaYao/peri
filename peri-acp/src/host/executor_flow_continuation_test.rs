@@ -1,4 +1,22 @@
-use super::*;
+use crate::host::executor_flow_tests::execution_fixture;
+#[cfg(not(windows))]
+use crate::host::executor_flow_tests::CancelGateModel;
+#[cfg(not(windows))]
+use crate::host::executor_flow_tests::CapturePromptModel;
+#[cfg(not(windows))]
+use crate::host::executor_flow_tests::FatalModel;
+use crate::host::executor_flow_tests::MockEventSink;
+#[cfg(not(windows))]
+use crate::host::executor_flow_tests::UsageModel;
+use crate::session::event_sink::EventSink;
+use crate::session::executor::PromptStopReason;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageContent;
+#[cfg(not(windows))]
+use peri_model::Model;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 // ── run_session_loop: AsyncContinuation 内部续跑（非 keepgoing）─────────────
 
@@ -8,11 +26,11 @@ use super::*;
 #[tokio::test]
 async fn test_continuation_bypasses_keepgoing_short_circuit() {
     // Arrange：预取消 token，保证进入管线后快速中断（不触发真实 LLM 调用）
-    let ctx = make_session_context("test-continuation").await;
+    let ctx = crate::host::executor_flow_tests::make_session_context("test-continuation").await;
     ctx.cancel.cancel();
-    let stage_build = make_stage_build(&ctx);
+    let stage_build = crate::host::executor_flow_tests::make_stage_build(&ctx);
     let mock_sink = Arc::new(MockEventSink::new());
-    let turn = make_turn_input(
+    let turn = crate::host::executor_flow_tests::make_turn_input(
         Arc::clone(&mock_sink) as Arc<dyn EventSink>,
         MessageContent::text(""),
         true,
@@ -21,7 +39,8 @@ async fn test_continuation_bypasses_keepgoing_short_circuit() {
     );
 
     // Act
-    let result = run_session_loop(ctx, turn).await;
+    let result =
+        crate::host::executor_flow_tests::execution_fixture::run_session_loop(ctx, turn).await;
 
     // Assert：未走 keepgoing 短路（短路会返回 ok=true/EndTurn 且不构建 agent），
     // 而是进入管线后被预取消 token 中断（ok=false/Cancelled）。
@@ -44,10 +63,10 @@ async fn test_continuation_bypasses_keepgoing_short_circuit() {
 async fn test_turn_terminal_state_unique_and_last() {
     // Arrange：预取消 token，进入管线后立即中断（不触发真实 LLM 调用）
     let mock_sink = Arc::new(MockEventSink::new());
-    let ctx = make_session_context("test-turn-terminal").await;
+    let ctx = crate::host::executor_flow_tests::make_session_context("test-turn-terminal").await;
     ctx.cancel.cancel();
-    let stage_build = make_stage_build(&ctx);
-    let turn = make_turn_input(
+    let stage_build = crate::host::executor_flow_tests::make_stage_build(&ctx);
+    let turn = crate::host::executor_flow_tests::make_turn_input(
         Arc::clone(&mock_sink) as Arc<dyn EventSink>,
         MessageContent::text(""),
         true,
@@ -56,7 +75,8 @@ async fn test_turn_terminal_state_unique_and_last() {
     );
 
     // Act
-    let result = run_session_loop(ctx, turn).await;
+    let result =
+        crate::host::executor_flow_tests::execution_fixture::run_session_loop(ctx, turn).await;
 
     // Assert：终态唯一（Interrupted）
     assert!(!result.ok);
@@ -110,11 +130,13 @@ async fn test_turn_terminal_state_unique_and_last() {
 #[tokio::test]
 async fn test_forwarder_barrier_orders_final_usage_before_done() {
     let model: Arc<dyn Model> = Arc::new(UsageModel);
-    let mut ctx = make_session_context("test-forwarder-usage-barrier").await;
+    let mut ctx =
+        crate::host::executor_flow_tests::make_session_context("test-forwarder-usage-barrier")
+            .await;
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
-    let stage_build = make_stage_build(&ctx);
+    let stage_build = crate::host::executor_flow_tests::make_stage_build(&ctx);
     let sink = Arc::new(MockEventSink::new());
-    let mut turn = make_turn_input(
+    let mut turn = crate::host::executor_flow_tests::make_turn_input(
         Arc::clone(&sink) as Arc<dyn EventSink>,
         MessageContent::text("finish with usage"),
         false,
@@ -123,9 +145,12 @@ async fn test_forwarder_barrier_orders_final_usage_before_done() {
     );
     let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    turn.forwarder_launcher = make_gated_forwarder_launcher(reached_tx, release_rx);
+    turn.forwarder_launcher =
+        crate::host::executor_flow_tests::make_gated_forwarder_launcher(reached_tx, release_rx);
 
-    let task = tokio::spawn(async move { run_session_loop(ctx, turn).await });
+    let task = tokio::spawn(async move {
+        crate::host::executor_flow_tests::execution_fixture::run_session_loop(ctx, turn).await
+    });
     tokio::time::timeout(std::time::Duration::from_secs(5), reached_rx)
         .await
         .expect("forwarder must observe final LlmCallEnd")
@@ -160,20 +185,22 @@ async fn test_forwarder_barrier_orders_final_usage_before_done() {
 #[tokio::test]
 async fn test_forwarder_join_error_fails_turn_before_done_without_late_usage() {
     let model: Arc<dyn Model> = Arc::new(UsageModel);
-    let mut ctx = make_session_context("test-forwarder-join-error").await;
+    let mut ctx =
+        crate::host::executor_flow_tests::make_session_context("test-forwarder-join-error").await;
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
-    let stage_build = make_stage_build(&ctx);
+    let stage_build = crate::host::executor_flow_tests::make_stage_build(&ctx);
     let sink = Arc::new(MockEventSink::new());
-    let mut turn = make_turn_input(
+    let mut turn = crate::host::executor_flow_tests::make_turn_input(
         Arc::clone(&sink) as Arc<dyn EventSink>,
         MessageContent::text("finish with failed forwarder"),
         false,
         vec![],
         stage_build,
     );
-    turn.forwarder_launcher = make_aborting_forwarder_launcher();
+    turn.forwarder_launcher = crate::host::executor_flow_tests::make_aborting_forwarder_launcher();
 
-    let result = run_session_loop(ctx, turn).await;
+    let result =
+        crate::host::executor_flow_tests::execution_fixture::run_session_loop(ctx, turn).await;
     assert!(!result.ok);
     assert!(result.failure.is_some());
     assert!(
@@ -253,19 +280,22 @@ async fn test_cancel_during_reason_has_one_interrupted_terminal() {
     let model: Arc<dyn Model> = Arc::new(CancelGateModel {
         entered: Mutex::new(Some(entered_tx)),
     });
-    let mut ctx = make_session_context("test-cancel-during-reason").await;
+    let mut ctx =
+        crate::host::executor_flow_tests::make_session_context("test-cancel-during-reason").await;
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
     let cancel = ctx.cancel.clone();
-    let stage_build = make_stage_build(&ctx);
+    let stage_build = crate::host::executor_flow_tests::make_stage_build(&ctx);
     let sink = Arc::new(MockEventSink::new());
-    let turn = make_turn_input(
+    let turn = crate::host::executor_flow_tests::make_turn_input(
         Arc::clone(&sink) as Arc<dyn EventSink>,
         MessageContent::text("cancel while reasoning"),
         false,
         vec![],
         stage_build,
     );
-    let task = tokio::spawn(async move { run_session_loop(ctx, turn).await });
+    let task = tokio::spawn(async move {
+        crate::host::executor_flow_tests::execution_fixture::run_session_loop(ctx, turn).await
+    });
     entered_rx.await.expect("primary model stream 必须已返回");
 
     cancel.cancel();
@@ -319,11 +349,12 @@ async fn test_cancel_during_reason_has_one_interrupted_terminal() {
 #[tokio::test]
 async fn test_fatal_failure_precedes_turn_end_and_done() {
     let model: Arc<dyn Model> = Arc::new(FatalModel);
-    let mut ctx = make_session_context("test-fatal-terminal-order").await;
+    let mut ctx =
+        crate::host::executor_flow_tests::make_session_context("test-fatal-terminal-order").await;
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
-    let stage_build = make_stage_build(&ctx);
+    let stage_build = crate::host::executor_flow_tests::make_stage_build(&ctx);
     let sink = Arc::new(MockEventSink::new());
-    let turn = make_turn_input(
+    let turn = crate::host::executor_flow_tests::make_turn_input(
         Arc::clone(&sink) as Arc<dyn EventSink>,
         MessageContent::text("trigger fatal model error"),
         false,
@@ -331,7 +362,8 @@ async fn test_fatal_failure_precedes_turn_end_and_done() {
         stage_build,
     );
 
-    let result = run_session_loop(ctx, turn).await;
+    let result =
+        crate::host::executor_flow_tests::execution_fixture::run_session_loop(ctx, turn).await;
 
     let failure = result.failure.expect("fatal model error 必须产生 failure");
     assert_eq!(
@@ -385,20 +417,21 @@ async fn test_fatal_failure_precedes_turn_end_and_done() {
 async fn test_continuation_skips_empty_prompt_push() {
     let tmp = tempfile::TempDir::new().unwrap();
     let session_id = "test-continuation-queue";
-    let (ctx, sm) = make_session_context_with_manager(session_id, &tmp).await;
+    let (ctx, sm) =
+        crate::host::executor_flow_tests::make_session_context_with_manager(session_id, &tmp).await;
     ctx.cancel.cancel();
-    let stage_build = make_stage_build(&ctx);
+    let stage_build = crate::host::executor_flow_tests::make_stage_build(&ctx);
     let history = vec![BaseMessage::human("prior turn")];
 
     // Act 1：continuation=true（空 content + 非空历史）
-    let turn = make_turn_input(
+    let turn = crate::host::executor_flow_tests::make_turn_input(
         Arc::new(MockEventSink::new()) as Arc<dyn EventSink>,
         MessageContent::text(""),
         true,
         history.clone(),
         stage_build.clone(),
     );
-    let _ = run_session_loop(ctx, turn).await;
+    let _ = crate::host::executor_flow_tests::execution_fixture::run_session_loop(ctx, turn).await;
 
     // Assert 1：队列无任何消息（未写空 human）
     let queue = sm
@@ -412,7 +445,7 @@ async fn test_continuation_skips_empty_prompt_push() {
     );
 
     // Act 2：keepgoing（continuation=false，同为空 content）——对比组
-    let mut ctx2 = make_session_context(session_id).await;
+    let mut ctx2 = crate::host::executor_flow_tests::make_session_context(session_id).await;
     // `make_session_context` 的默认占用者（MockSessionAccess）持有本上下文 store 所在
     // 的临时目录：接管 session_access 时保留它，否则临时目录随 mock 析构被删除，
     // 让 v2 执行前的 snapshot 读取落在已删除的库文件上（读取报错即在 Phase 6 之前
@@ -424,15 +457,16 @@ async fn test_continuation_skips_empty_prompt_push() {
     // inbox（生产装配下两者恒为同一 queue），而不是 mock 的 inbox。
     execution_fixture::initialize_runtime(&mut ctx2, None);
     ctx2.cancel.cancel();
-    let stage_build2 = make_stage_build(&ctx2);
-    let turn2 = make_turn_input(
+    let stage_build2 = crate::host::executor_flow_tests::make_stage_build(&ctx2);
+    let turn2 = crate::host::executor_flow_tests::make_turn_input(
         Arc::new(MockEventSink::new()) as Arc<dyn EventSink>,
         MessageContent::text(""),
         false,
         history,
         stage_build2,
     );
-    let result2 = run_session_loop(ctx2, turn2).await;
+    let result2 =
+        crate::host::executor_flow_tests::execution_fixture::run_session_loop(ctx2, turn2).await;
 
     // 前置不变量：空 Prompt 入队在 v2 执行的 Phase 6，早于它的 snapshot 读取或
     // stage 装配一旦失败就带着 failure 直接返回（不入队）。先把这条报出来，避免
@@ -497,13 +531,13 @@ async fn test_keepgoing_empty_prompt_reaches_reason() {
     let model: Arc<dyn Model> = Arc::new(CapturePromptModel {
         requests: Arc::clone(&requests),
     });
-    let mut ctx = make_session_context(session_id).await;
+    let mut ctx = crate::host::executor_flow_tests::make_session_context(session_id).await;
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
-    let stage_build = make_stage_build(&ctx);
+    let stage_build = crate::host::executor_flow_tests::make_stage_build(&ctx);
     let sink = Arc::new(MockEventSink::new());
     // 非空历史：不落入「空历史 + 空 prompt」短路，必须真实驱动一轮。
     let history = vec![BaseMessage::human("prior turn")];
-    let turn = make_turn_input(
+    let turn = crate::host::executor_flow_tests::make_turn_input(
         Arc::clone(&sink) as Arc<dyn EventSink>,
         MessageContent::text(""),
         false,
@@ -511,7 +545,8 @@ async fn test_keepgoing_empty_prompt_reaches_reason() {
         stage_build,
     );
 
-    let result = run_session_loop(ctx, turn).await;
+    let result =
+        crate::host::executor_flow_tests::execution_fixture::run_session_loop(ctx, turn).await;
 
     assert!(
         result.ok,

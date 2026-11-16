@@ -4,7 +4,13 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use tokio::sync::Notify;
 
-use super::*;
+use super::BatchLimits;
+use super::EventMeasure;
+use super::InputSource;
+use super::LangfuseError;
+use super::OtlpMeter;
+use super::PreparedEvent;
+use super::TelemetryEvent;
 use crate::batcher::split::OversizeReason;
 use crate::memory::MemoryBudget;
 use crate::payload::{BudgetedBytes, InputSnapshot};
@@ -12,7 +18,7 @@ use crate::snapshot::{SnapshotCell, SnapshotState, SnapshotTicket};
 use crate::types::{IngestionEvent, TraceBody};
 
 fn budget() -> Arc<MemoryBudget> {
-    MemoryBudget::new(1 << 20).unwrap()
+    MemoryBudget::try_new(1 << 20).unwrap()
 }
 
 fn limits() -> BatchLimits {
@@ -78,7 +84,7 @@ fn raw_and_encoded_are_measured_separately() {
     let telemetry = TelemetryEvent::try_new(source.clone(), None, None, &budget).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
 
-    let prepared = prepare_event(&telemetry, &limits(), &fixed_meter(4000, &calls)).unwrap();
+    let prepared = super::prepare_event(&telemetry, &limits(), &fixed_meter(4000, &calls)).unwrap();
 
     assert_eq!(
         prepared,
@@ -104,7 +110,7 @@ fn measurements_exactly_at_the_limits_are_not_oversized() {
     };
     let calls = Arc::new(AtomicUsize::new(0));
 
-    let prepared = prepare_event(&telemetry, &limits, &fixed_meter(4096, &calls)).unwrap();
+    let prepared = super::prepare_event(&telemetry, &limits, &fixed_meter(4096, &calls)).unwrap();
 
     assert_eq!(
         prepared,
@@ -122,7 +128,8 @@ fn encoded_oversize_is_identified_with_the_full_measurement() {
     let telemetry = TelemetryEvent::try_new(source.clone(), None, None, &budget).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
 
-    let prepared = prepare_event(&telemetry, &limits(), &fixed_meter(9_999_999, &calls)).unwrap();
+    let prepared =
+        super::prepare_event(&telemetry, &limits(), &fixed_meter(9_999_999, &calls)).unwrap();
 
     match prepared {
         PreparedEvent::Oversized { measure, reason } => {
@@ -148,7 +155,7 @@ fn raw_oversize_is_identified_without_truncating_the_event() {
     };
     let calls = Arc::new(AtomicUsize::new(0));
 
-    let prepared = prepare_event(&telemetry, &limits, &fixed_meter(10, &calls)).unwrap();
+    let prepared = super::prepare_event(&telemetry, &limits, &fixed_meter(10, &calls)).unwrap();
 
     match prepared {
         PreparedEvent::Oversized { measure, reason } => {
@@ -180,7 +187,7 @@ fn preparing_snapshot_waits_without_measuring() {
     .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
 
-    let prepared = prepare_event(&telemetry, &limits(), &fixed_meter(1, &calls)).unwrap();
+    let prepared = super::prepare_event(&telemetry, &limits(), &fixed_meter(1, &calls)).unwrap();
 
     assert_eq!(prepared, PreparedEvent::Waiting);
     // 未就绪来源不产生任何计量：不伪造「零内容」的最终编码。
@@ -192,7 +199,8 @@ fn ready_inline_source_keeps_the_raw_measurement_independent_of_content() {
     let budget = budget();
     let source = event(None);
     let permit = budget.try_reserve(64).unwrap();
-    let bytes = BudgetedBytes::new(Bytes::from_static(br#"{"input":"payload"}"#), permit).unwrap();
+    let bytes =
+        BudgetedBytes::try_new(Bytes::from_static(br#"{"input":"payload"}"#), permit).unwrap();
     let telemetry = TelemetryEvent::try_new(
         source.clone(),
         Some(InputSource::Ready(InputSnapshot::Inline(bytes))),
@@ -202,7 +210,7 @@ fn ready_inline_source_keeps_the_raw_measurement_independent_of_content() {
     .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
 
-    let prepared = prepare_event(&telemetry, &limits(), &fixed_meter(64, &calls)).unwrap();
+    let prepared = super::prepare_event(&telemetry, &limits(), &fixed_meter(64, &calls)).unwrap();
 
     // 原文计量是冻结后的事件对象；来源正文由编码计量覆盖，不在这里重复累加。
     assert_eq!(
@@ -220,7 +228,7 @@ fn meter_errors_propagate_unchanged() {
     let budget = budget();
     let telemetry = TelemetryEvent::try_new(event(Some("x")), None, None, &budget).unwrap();
 
-    let result = prepare_event(&telemetry, &limits(), &FailingMeter);
+    let result = super::prepare_event(&telemetry, &limits(), &FailingMeter);
 
     assert!(matches!(
         result,
@@ -239,7 +247,7 @@ fn plain_function_matches_the_otlp_meter_port() {
     let telemetry = TelemetryEvent::try_new(event(Some("wiring")), None, None, &budget).unwrap();
     let meter: &dyn OtlpMeter = &plain_meter;
 
-    let prepared = prepare_event(&telemetry, &limits(), meter).unwrap();
+    let prepared = super::prepare_event(&telemetry, &limits(), meter).unwrap();
 
     assert!(matches!(
         prepared,

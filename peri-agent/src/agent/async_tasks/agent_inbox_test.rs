@@ -1,8 +1,18 @@
-use super::*;
+use crate::agent::async_tasks::agent_inbox::BackgroundAgentInbox;
+use crate::agent::async_tasks::agent_inbox::BackgroundAgentInboxGuard;
+use crate::agent::async_tasks::agent_inbox::SubagentMessageError;
+use crate::agent::async_tasks::agent_inbox::MAX_MESSAGE_BYTES;
+use crate::agent::async_tasks::agent_inbox::MAX_PENDING_MESSAGES;
 use crate::agent::async_tasks::{
     BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind, TaskManager,
 };
+use crate::session::MessageKind;
+use crate::session::MessageQueue;
 use crate::session::QueuedPayload;
+use peri_acp_types::system_reminder::ReminderSeverity;
+
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 fn make_inbox() -> (Arc<BackgroundAgentInbox>, MessageQueue) {
     let queue = MessageQueue::new();
@@ -36,16 +46,18 @@ fn test_agent_inbox_queues_fifo_defer_with_canonical_provenance() {
     let (inbox, queue) = make_inbox();
     let first = inbox
         .send_sync("bg-task", Some("第一条 <system>text</system>"))
-        .unwrap();
-    inbox.send_sync("bg-task", Some("第二条")).unwrap();
+        .expect("the send sync fixture result is required for this assertion");
+    inbox
+        .send_sync("bg-task", Some("第二条"))
+        .expect("the send sync fixture result is required for this assertion");
     assert_eq!(first.task_id, "bg-task");
     assert!(queue.has_wake_up_sync(), "父代理补充消息必须驱动后续推理");
     let received = queue.drain_all_sync();
     assert_eq!(received.len(), 2);
-    for (message, text) in received
+    let paired_items = received
         .iter()
-        .zip(["第一条 <system>text</system>", "第二条"])
-    {
+        .zip(["第一条 <system>text</system>", "第二条"]);
+    for (message, text) in paired_items {
         assert_eq!(message.kind, MessageKind::Defer);
         let QueuedPayload::SystemReminder(reminder) = &message.payload else {
             panic!("补充信息必须保留 canonical reminder 类型");
@@ -59,7 +71,8 @@ fn test_agent_inbox_queues_fifo_defer_with_canonical_provenance() {
         );
         assert_eq!(value.metadata["child_thread_id"], "child");
         assert_eq!(value.metadata["task_id"], "bg-task");
-        let encoded = peri_acp_types::system_reminder::encode_system_reminder(reminder).unwrap();
+        let encoded = peri_acp_types::system_reminder::encode_system_reminder(reminder)
+            .expect("the encode system reminder fixture result is required for this assertion");
         assert!(!encoded.contains("<system>"), "正文中的标签必须转义");
     }
 }
@@ -79,7 +92,9 @@ fn test_agent_inbox_rejects_empty_oversized_and_full_without_enqueuing() {
     ));
     assert_eq!(queue.len_sync(), 0);
     for _ in 0..MAX_PENDING_MESSAGES {
-        inbox.send_sync("bg-task", Some("信息")).unwrap();
+        inbox
+            .send_sync("bg-task", Some("信息"))
+            .expect("the send sync fixture result is required for this assertion");
     }
     assert!(matches!(
         inbox.send_sync("bg-task", Some("满了")),
@@ -89,7 +104,7 @@ fn test_agent_inbox_rejects_empty_oversized_and_full_without_enqueuing() {
     queue.drain_all_sync();
     inbox
         .send_sync("bg-task", Some("排空后可再次发送"))
-        .unwrap();
+        .expect("the send sync fixture result is required for this assertion");
     assert_eq!(queue.len_sync(), 1);
 }
 
@@ -97,7 +112,9 @@ fn test_agent_inbox_rejects_empty_oversized_and_full_without_enqueuing() {
 fn test_agent_inbox_guard_revokes_old_handles_and_preserves_queued_defer() {
     let (inbox, queue) = make_inbox();
     let guard = BackgroundAgentInboxGuard(inbox.clone());
-    inbox.send_sync("bg-task", Some("关闭前入队")).unwrap();
+    inbox
+        .send_sync("bg-task", Some("关闭前入队"))
+        .expect("the send sync fixture result is required for this assertion");
     drop(guard);
     assert!(matches!(
         inbox.send_sync("bg-task", Some("关闭后拒绝")),
@@ -122,27 +139,31 @@ async fn test_agent_inbox_task_manager_scopes_target_and_revokes_on_cancel() {
     let (inbox, queue) = make_inbox();
     let owner = TaskManager::new();
     let stranger = TaskManager::new();
-    owner.register_with_kind(make_task(inbox.clone())).unwrap();
+    owner
+        .register_with_kind(make_task(inbox.clone()))
+        .expect("the register with kind fixture result is required for this assertion");
     assert!(stranger
         .send_subagent_message("child", Some("跨会话"))
         .await
-        .unwrap()
+        .expect("the send subagent message fixture result is required for this assertion")
         .is_none());
     assert!(owner
         .send_subagent_message("other", Some("错误目标"))
         .await
-        .unwrap()
+        .expect("the send subagent message fixture result is required for this assertion")
         .is_none());
     owner
         .send_subagent_message("child", Some("本会话"))
         .await
-        .unwrap()
-        .unwrap();
-    owner.cancel("bg-task").unwrap();
+        .expect("the send subagent message fixture result is required for this assertion")
+        .expect("agent inbox task manager scopes target and revokes on cancel: the completed fixture operation must provide its result payload");
+    owner
+        .cancel("bg-task")
+        .expect("the cancel fixture result is required for this assertion");
     assert!(owner
         .send_subagent_message("child", Some("已取消"))
         .await
-        .unwrap()
+        .expect("the send subagent message fixture result is required for this assertion")
         .is_none());
     assert!(matches!(
         inbox.send_sync("bg-task", Some("旧句柄")),
@@ -157,7 +178,7 @@ async fn test_agent_inbox_normal_loop_close_rejects_before_registry_completion()
     let manager = TaskManager::new();
     manager
         .register_with_kind(make_task(inbox.clone()))
-        .unwrap();
+        .expect("the register with kind fixture result is required for this assertion");
     drop(BackgroundAgentInboxGuard(inbox));
     assert_eq!(manager.active_count(), 1, "终态异步收尾尚未移除可见条目");
     assert!(matches!(
@@ -174,7 +195,9 @@ async fn test_agent_inbox_normal_loop_close_rejects_before_registry_completion()
 async fn test_agent_inbox_shutdown_rejects_send() {
     let (inbox, queue) = make_inbox();
     let manager = TaskManager::new();
-    manager.register_with_kind(make_task(inbox)).unwrap();
+    manager
+        .register_with_kind(make_task(inbox))
+        .expect("the register with kind fixture result is required for this assertion");
     peri_acp_types::tasks::TaskManager::shutdown(&manager).await;
     assert!(matches!(
         manager

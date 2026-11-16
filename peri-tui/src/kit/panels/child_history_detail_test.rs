@@ -1,6 +1,20 @@
-use super::*;
+use super::AcpError;
+use super::Action;
+use super::Arc;
+use super::CHUNK_BYTES;
+use super::ChildHistoryView;
+use super::HistoryWindowError;
+use super::OperationScope;
+use super::Page;
+use super::ReadFailure;
+use super::Scope;
+use super::TEXT_BYTES;
+use super::Value;
+use super::i18n;
+
 use serde_json::json;
 
+#[must_use]
 fn scope(child: &str, reset: u64) -> Scope {
     Scope {
         parent: OperationScope::new("parent", reset),
@@ -31,7 +45,9 @@ fn page(child: &str, text: &str) -> Value {
 fn opened() -> ChildHistoryView {
     let mut view = ChildHistoryView::default();
     view.reset(scope("child", 1));
-    let (ticket, request) = view.begin(Action::Open).unwrap();
+    let (ticket, request) = view
+        .begin(Action::Open)
+        .expect("opened: the begin fixture operation uses valid inputs");
     assert!(view.finish(&ticket, &request, Ok(page("child", "saved"))));
     assert!(view.error.is_none());
     view
@@ -41,17 +57,17 @@ fn opened() -> ChildHistoryView {
 fn selected_child_reset_and_close_reject_old_responses() {
     let mut view = ChildHistoryView::default();
     view.reset(scope("a", 1));
-    let (old, request) = view.begin(Action::Open).unwrap();
+    let (old, request) = view.begin(Action::Open).expect("selected child reset and close reject old responses: the begin fixture operation uses valid inputs");
     assert!(view.begin(Action::Open).is_none(), "one in-flight request");
     view.reset(scope("b", 1));
     assert!(old.is_cancelled());
     assert!(!view.finish(&old, &request, Ok(page("a", "old secret"))));
     assert!(view.page.is_none());
 
-    let (old, request) = view.begin(Action::Open).unwrap();
+    let (old, request) = view.begin(Action::Open).expect("selected child reset and close reject old responses: the begin fixture operation uses valid inputs");
     view.reset(scope("b", 2));
     assert!(!view.finish(&old, &request, Ok(page("b", "old reset"))));
-    let (closed, request) = view.begin(Action::Open).unwrap();
+    let (closed, request) = view.begin(Action::Open).expect("selected child reset and close reject old responses: the begin fixture operation uses valid inputs");
     view.close();
     assert!(!view.finish(&closed, &request, Ok(page("b", "closed"))));
     assert!(view.page.is_none());
@@ -62,34 +78,34 @@ fn selected_child_reset_and_close_reject_old_responses() {
 fn history_pages_replace_previous_bodies_and_keep_snapshot_fixed() {
     let mut view = opened();
     for index in 0..100 {
-        let old = Arc::downgrade(&view.page.as_ref().unwrap().text);
-        let (ticket, request) = view.begin(Action::Older).unwrap();
+        let old = Arc::downgrade(&view.page.as_ref().expect("history pages replace previous bodies and keep snapshot fixed: fixture must have the expected variant").text);
+        let (ticket, request) = view.begin(Action::Older).expect("history pages replace previous bodies and keep snapshot fixed: the begin fixture operation uses valid inputs");
         let marker = format!("page-{index}:{}", "x".repeat(32768));
         assert!(view.finish(&ticket, &request, Ok(page("child", &marker))));
         assert!(
             old.upgrade().is_none(),
             "previous page body must be released"
         );
-        let stored = &view.page.as_ref().unwrap().text;
+        let stored = &view.page.as_ref().expect("history pages replace previous bodies and keep snapshot fixed: fixture must have the expected variant").text;
         assert!(stored.contains(&marker));
         assert!(
             stored.len() < 128 * 1024,
             "one page, not a growing transcript"
         );
     }
-    let (ticket, request) = view.begin(Action::Older).unwrap();
+    let (ticket, request) = view.begin(Action::Older).expect("history pages replace previous bodies and keep snapshot fixed: the begin fixture operation uses valid inputs");
     let mut changed = page("child", "other snapshot");
     changed["structureVersion"] = json!(2);
     view.finish(&ticket, &request, Ok(changed));
     assert!(view.error.is_some());
-    assert!(!view.page.as_ref().unwrap().text.contains("other snapshot"));
+    assert!(!view.page.as_ref().expect("history pages replace previous bodies and keep snapshot fixed: the fixture must retain its expected variant").text.contains("other snapshot"));
 }
 
 #[test]
 fn wrong_parent_child_and_oversize_pages_are_rejected() {
     for invalid in ["parent", "child", "entry", "bytes"] {
         let mut view = opened();
-        let (ticket, request) = view.begin(Action::Open).unwrap();
+        let (ticket, request) = view.begin(Action::Open).expect("wrong parent child and oversize pages are rejected: the begin fixture operation uses valid inputs");
         let mut raw = page("child", "untrusted");
         match invalid {
             "parent" => raw["parentSessionId"] = json!("other"),
@@ -103,7 +119,7 @@ fn wrong_parent_child_and_oversize_pages_are_rejected() {
         }
         view.finish(&ticket, &request, Ok(raw));
         assert!(view.error.is_some(), "{invalid}");
-        assert!(view.page.as_ref().unwrap().text.contains("saved"));
+        assert!(view.page.as_ref().expect("wrong parent child and oversize pages are rejected: the fixture must retain its expected variant").text.contains("saved"));
     }
 }
 
@@ -132,28 +148,28 @@ fn body_response(offset: u64, text: &[u8], complete: bool) -> Value {
 #[test]
 fn body_chunks_are_bounded_replace_previous_and_reject_raw_envelopes() {
     let mut view = opened();
-    let (ticket, request) = view.begin(Action::Open).unwrap();
+    let (ticket, request) = view.begin(Action::Open).expect("body chunks are bounded replace previous and reject raw envelopes: the begin fixture operation uses valid inputs");
     view.finish(&ticket, &request, Ok(descriptor_page()));
     assert!(view.error.is_none());
-    let (ticket, request) = view.begin(Action::Body).unwrap();
+    let (ticket, request) = view.begin(Action::Body).expect("body chunks are bounded replace previous and reject raw envelopes: the begin fixture operation uses valid inputs");
     let mut unsafe_raw = body_response(0, b"provider replay secret", true);
-    unsafe_raw.as_object_mut().unwrap().remove("format");
+    unsafe_raw.as_object_mut().expect("body chunks are bounded replace previous and reject raw envelopes: fixture must have the expected variant").remove("format");
     view.finish(&ticket, &request, Ok(unsafe_raw));
     assert!(view.body.is_none());
     assert!(view.error.is_some());
 
-    let (ticket, request) = view.begin(Action::Body).unwrap();
+    let (ticket, request) = view.begin(Action::Body).expect("body chunks are bounded replace previous and reject raw envelopes: the begin fixture operation uses valid inputs");
     view.finish(&ticket, &request, Ok(body_response(0, b"first", false)));
-    assert_eq!(view.body.as_ref().unwrap().text.as_ref(), "first");
-    let (ticket, request) = view.begin(Action::NextChunk).unwrap();
+    assert_eq!(view.body.as_ref().expect("body chunks are bounded replace previous and reject raw envelopes: the fixture must retain its expected variant").text.as_ref(), "first");
+    let (ticket, request) = view.begin(Action::NextChunk).expect("body chunks are bounded replace previous and reject raw envelopes: the begin fixture operation uses valid inputs");
     view.finish(&ticket, &request, Ok(body_response(5, b"second", true)));
-    assert_eq!(view.body.as_ref().unwrap().text.as_ref(), "second");
+    assert_eq!(view.body.as_ref().expect("body chunks are bounded replace previous and reject raw envelopes: the fixture must retain its expected variant").text.as_ref(), "second");
     assert!(view.begin(Action::NextChunk).is_none());
 
     view.back_to_page();
     assert!(view.body.is_none());
     assert!(view.page.is_some());
-    let (ticket, request) = view.begin(Action::Body).unwrap();
+    let (ticket, request) = view.begin(Action::Body).expect("body chunks are bounded replace previous and reject raw envelopes: the begin fixture operation uses valid inputs");
     let mut wrong = body_response(0, b"wrong", true);
     wrong["snapshotToken"] = json!("old");
     view.finish(&ticket, &request, Ok(wrong));
@@ -164,7 +180,7 @@ fn body_chunks_are_bounded_replace_previous_and_reject_raw_envelopes() {
 #[test]
 fn unicode_chunk_edges_and_wrapping_do_not_expose_terminal_controls() {
     let mut lines = Vec::new();
-    wrap("中中A\u{1b}[31m", 3, &mut lines);
+    super::wrap("中中A\u{1b}[31m", 3, &mut lines);
     assert!(lines.iter().all(|line| line.width() <= 3));
     assert!(
         lines
@@ -177,7 +193,7 @@ fn unicode_chunk_edges_and_wrapping_do_not_expose_terminal_controls() {
 #[test]
 fn canonical_history_formatting_keeps_user_tool_and_reasoning() {
     let mut raw = page("child", "answer");
-    let sub_items = raw["items"][0]["subItems"].as_array_mut().unwrap();
+    let sub_items = raw["items"][0]["subItems"].as_array_mut().expect("canonical history formatting keeps user tool and reasoning: fixture must have the expected variant");
     sub_items.push(json!({"position": 1, "update": {
         "sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "question"}
     }}));
@@ -188,7 +204,7 @@ fn canonical_history_formatting_keeps_user_tool_and_reasoning() {
         "sessionUpdate": "tool_call_update", "toolCallId": "call", "status": "failed",
         "rawOutput": "visible failure"
     }}));
-    let result = Page::from_response(decode_window_page_response(&raw).unwrap()).unwrap();
+    let result = Page::from_response(crate::kit::history_paging::decode_window_page_response(&raw).expect("canonical history formatting keeps user tool and reasoning: the decode_window_page_response fixture operation uses valid inputs")).expect("canonical history formatting keeps user tool and reasoning: the from_response fixture operation uses valid inputs");
     for expected in ["question", "reasoning", "answer", "visible failure"] {
         assert!(result.text.contains(expected), "{expected}");
     }
@@ -201,9 +217,13 @@ fn canonical_history_formatting_keeps_user_tool_and_reasoning() {
 
 fn body_opened() -> ChildHistoryView {
     let mut view = opened();
-    let (ticket, request) = view.begin(Action::Open).unwrap();
+    let (ticket, request) = view
+        .begin(Action::Open)
+        .expect("body opened: the begin fixture operation uses valid inputs");
     view.finish(&ticket, &request, Ok(descriptor_page()));
-    let (ticket, request) = view.begin(Action::Body).unwrap();
+    let (ticket, request) = view
+        .begin(Action::Body)
+        .expect("body opened: the begin fixture operation uses valid inputs");
     view.finish(
         &ticket,
         &request,
@@ -216,8 +236,8 @@ fn body_opened() -> ChildHistoryView {
 #[test]
 fn page_and_body_cannot_change_the_committed_tail() {
     let mut view = opened();
-    let old = Arc::downgrade(&view.page.as_ref().unwrap().text);
-    let (ticket, request) = view.begin(Action::Older).unwrap();
+    let old = Arc::downgrade(&view.page.as_ref().expect("page and body cannot change the committed tail: fixture must have the expected variant").text);
+    let (ticket, request) = view.begin(Action::Older).expect("page and body cannot change the committed tail: the begin fixture operation uses valid inputs");
     let mut raw = page("child", "new snapshot body");
     raw["committedTail"] = json!("changed-tail");
     view.finish(&ticket, &request, Ok(raw));
@@ -229,8 +249,8 @@ fn page_and_body_cannot_change_the_committed_tail() {
     );
 
     let mut view = body_opened();
-    let old = Arc::downgrade(&view.body.as_ref().unwrap().text);
-    let (ticket, request) = view.begin(Action::NextChunk).unwrap();
+    let old = Arc::downgrade(&view.body.as_ref().expect("page and body cannot change the committed tail: fixture must have the expected variant").text);
+    let (ticket, request) = view.begin(Action::NextChunk).expect("page and body cannot change the committed tail: the begin fixture operation uses valid inputs");
     let mut raw = body_response(11, b"new body", true);
     raw["committedTail"] = Value::Null;
     view.finish(&ticket, &request, Ok(raw));
@@ -256,12 +276,12 @@ fn typed_invalidation_and_deleted_entries_release_cached_page_and_chunk() {
         },
     ] {
         let mut view = body_opened();
-        let page = Arc::downgrade(&view.page.as_ref().unwrap().text);
-        let body = Arc::downgrade(&view.body.as_ref().unwrap().text);
+        let page = Arc::downgrade(&view.page.as_ref().expect("typed invalidation and deleted entries release cached page and chunk: fixture must have the expected variant").text);
+        let body = Arc::downgrade(&view.body.as_ref().expect("typed invalidation and deleted entries release cached page and chunk: fixture must have the expected variant").text);
         let mut cache = super::super::render_cache::DetailRenderCache::default();
         let (header, text) = view.presentation(80);
         cache.prepare_text(header, text, 80);
-        let (ticket, request) = view.begin(Action::NextChunk).unwrap();
+        let (ticket, request) = view.begin(Action::NextChunk).expect("typed invalidation and deleted entries release cached page and chunk: the begin fixture operation uses valid inputs");
         let failure = AcpError::new(i64::from(error.code()), "typed invalidation")
             .with_data(json!({"reason": error.reason()}));
         view.finish(&ticket, &request, Err(ReadFailure::Remote(failure)));
@@ -272,7 +292,7 @@ fn typed_invalidation_and_deleted_entries_release_cached_page_and_chunk() {
             page.upgrade().is_none() && body.upgrade().is_none(),
             "{error}"
         );
-        assert!(view.error.as_ref().unwrap().contains("typed invalidation"));
+        assert!(view.error.as_ref().expect("typed invalidation and deleted entries release cached page and chunk: the fixture must retain its expected variant").contains("typed invalidation"));
         assert!(view.begin(Action::NextChunk).is_none());
         assert!(view.begin(Action::Open).is_some());
     }
@@ -294,12 +314,12 @@ fn transient_failure_keeps_valid_snapshot_and_never_guesses_from_message_text() 
         ),
     ] {
         let mut view = body_opened();
-        let page = Arc::downgrade(&view.page.as_ref().unwrap().text);
-        let body = Arc::downgrade(&view.body.as_ref().unwrap().text);
-        let (ticket, request) = view.begin(Action::NextChunk).unwrap();
+        let page = Arc::downgrade(&view.page.as_ref().expect("transient failure keeps valid snapshot and never guesses from message text: fixture must have the expected variant").text);
+        let body = Arc::downgrade(&view.body.as_ref().expect("transient failure keeps valid snapshot and never guesses from message text: fixture must have the expected variant").text);
+        let (ticket, request) = view.begin(Action::NextChunk).expect("transient failure keeps valid snapshot and never guesses from message text: the begin fixture operation uses valid inputs");
         view.finish(&ticket, &request, Err(failure));
         assert!(page.upgrade().is_some() && body.upgrade().is_some());
-        assert_eq!(view.body.as_ref().unwrap().text.as_ref(), "saved chunk");
+        assert_eq!(view.body.as_ref().expect("transient failure keeps valid snapshot and never guesses from message text: the fixture must retain its expected variant").text.as_ref(), "saved chunk");
         assert!(view.error.as_ref().is_some_and(|error| !error.is_empty()));
     }
 }
@@ -311,8 +331,8 @@ fn explicit_reopen_response_releases_old_snapshot() {
         json!({"scope":"child", "parentSessionId":"parent"}),
     ] {
         let mut view = opened();
-        let old = Arc::downgrade(&view.page.as_ref().unwrap().text);
-        let (ticket, request) = view.begin(Action::Older).unwrap();
+        let old = Arc::downgrade(&view.page.as_ref().expect("explicit reopen response releases old snapshot: fixture must have the expected variant").text);
+        let (ticket, request) = view.begin(Action::Older).expect("explicit reopen response releases old snapshot: the begin fixture operation uses valid inputs");
         raw["rewindInvalidation"] = json!({"reopenRequired": true});
         view.finish(&ticket, &request, Ok(raw));
         assert!(view.page.is_none());
@@ -324,9 +344,9 @@ fn explicit_reopen_response_releases_old_snapshot() {
 #[test]
 fn old_typed_invalidation_cannot_erase_a_new_child_snapshot() {
     let mut view = opened();
-    let (old, old_request) = view.begin(Action::Older).unwrap();
+    let (old, old_request) = view.begin(Action::Older).expect("old typed invalidation cannot erase a new child snapshot: the begin fixture operation uses valid inputs");
     view.reset(scope("other", 1));
-    let (ticket, request) = view.begin(Action::Open).unwrap();
+    let (ticket, request) = view.begin(Action::Open).expect("old typed invalidation cannot erase a new child snapshot: the begin fixture operation uses valid inputs");
     view.finish(&ticket, &request, Ok(page("other", "new child body")));
     let error = HistoryWindowError::WindowInvalidated {
         detail: "old child rewound".into(),
@@ -334,6 +354,6 @@ fn old_typed_invalidation_cannot_erase_a_new_child_snapshot() {
     let failure = AcpError::new(i64::from(error.code()), error.to_string())
         .with_data(json!({"reason": error.reason()}));
     assert!(!view.finish(&old, &old_request, Err(ReadFailure::Remote(failure))));
-    assert!(view.page.as_ref().unwrap().text.contains("new child body"));
+    assert!(view.page.as_ref().expect("old typed invalidation cannot erase a new child snapshot: the fixture must retain its expected variant").text.contains("new child body"));
     assert!(view.error.is_none());
 }

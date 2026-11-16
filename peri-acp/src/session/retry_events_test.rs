@@ -3,7 +3,8 @@
 //! 测试对象是 `session::retry_events`（转发器翻译 RetryObservation →
 //! ExecutorEvent::LlmRetrying），与 provider 模块无关，按位置表独立成文件。
 
-use super::*;
+use crate::session::retry_events::RetryEventForwarder;
+use std::sync::Arc;
 
 /// [回归测试] `RetryEventForwarder` 把 `RetryObservation` 翻译为 `ExecutorEvent::LlmRetrying`。
 ///

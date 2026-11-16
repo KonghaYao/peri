@@ -5,7 +5,6 @@
 use crate::agent::compact_v2::config::CompactConfig;
 use crate::agent::compact_v2::planner::ContextPressure;
 use crate::agent::compact_v2::planner::{ArchivePlanningScope, MicroPlanningFacts};
-use crate::agent::compact_v2::run_compact;
 use crate::agent::events::CompactStrategy;
 use crate::messages::{BaseMessage, MessageContent};
 use crate::session::test_resources::TestSession;
@@ -22,7 +21,8 @@ fn exposed_facts(transcript: &MessageTranscript, session_id: &str) -> MicroPlann
             }),
         ..Default::default()
     };
-    for entry in transcript.entries().iter().skip(transcript.ancestor_len()) {
+    let entry_items = transcript.entries().iter().skip(transcript.ancestor_len());
+    for entry in entry_items {
         facts.exposed_message_ids.insert(entry.id());
         if let Some(message) = entry.as_message() {
             for call in message.tool_calls() {
@@ -88,7 +88,7 @@ async fn test_run_compact_low_budget_skips() {
     let config = CompactConfig::default();
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.5);
-    let result = run_compact(
+    let result = crate::agent::compact_v2::run_compact(
         &mut t,
         None,
         &config,
@@ -147,7 +147,7 @@ async fn test_run_compact_full_no_llm_fails_gracefully() {
     let mut failures = 0u32;
     // force=true 但无 LLM → 失败降级
     let pressure = pressure_from_budget(0.5);
-    let result = run_compact(
+    let result = crate::agent::compact_v2::run_compact(
         &mut t,
         None,
         &config,
@@ -171,7 +171,7 @@ async fn test_run_compact_consecutive_failure_degradation() {
     let config = CompactConfig::default();
     let mut failures = config.max_consecutive_failures; // 已达上限
     let pressure = pressure_from_budget(0.95);
-    let result = run_compact(
+    let result = crate::agent::compact_v2::run_compact(
         &mut t,
         None,
         &config,
@@ -236,7 +236,7 @@ async fn test_run_compact_rerun_clears_stale_excluded_flags() {
     let config = CompactConfig::default();
     let mut failures = config.max_consecutive_failures; // 已达到上限
     let pressure = pressure_from_budget(0.5);
-    let result = run_compact(
+    let result = crate::agent::compact_v2::run_compact(
         &mut t,
         None,
         &config,
@@ -274,7 +274,7 @@ async fn test_run_compact_first_run_does_not_clear_flags() {
     let config = CompactConfig::default();
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.5);
-    let _ = run_compact(
+    let _ = crate::agent::compact_v2::run_compact(
         &mut t,
         None,
         &config,
@@ -307,7 +307,7 @@ async fn test_run_compact_rerun_only_clears_excluded_not_truncated() {
     let config = CompactConfig::default();
     let mut failures = config.max_consecutive_failures;
     let pressure = pressure_from_budget(0.5);
-    let _ = run_compact(
+    let _ = crate::agent::compact_v2::run_compact(
         &mut t,
         None,
         &config,
@@ -326,7 +326,7 @@ async fn test_run_compact_rerun_only_clears_excluded_not_truncated() {
 
 // ── Task 6: 端到端 economy 字段 + projection 测试 ────────────────────────
 
-use crate::agent::compact_v2::planner::{plan_micro, FullEscalationReason};
+use crate::agent::compact_v2::planner::FullEscalationReason;
 
 #[tokio::test]
 async fn test_compact_result_economy_fields_populated() {
@@ -389,7 +389,7 @@ async fn test_full_compact_escalation_reason_preserved() {
     let config = CompactConfig::default();
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.5);
-    let result = run_compact(
+    let result = crate::agent::compact_v2::run_compact(
         &mut t,
         None,
         &config,
@@ -417,7 +417,7 @@ fn test_compact_plan_empty_no_projection_side_effects() {
     t.append(make_human("hello"));
 
     let config = CompactConfig::default();
-    let plan = plan_micro(&t, &config, false);
+    let plan = crate::agent::compact_v2::planner::plan_micro(&t, &config, false);
 
     assert!(!plan.has_changes(), "单消息 transcript 的 plan 应为空");
     assert_eq!(plan.estimated_tokens_saved, 0, "空 plan 不应有 token 节省");
@@ -444,7 +444,7 @@ fn test_compact_plan_age_alone_cannot_authorize_projection() {
         micro_compact_stale_steps: 1,
         ..Default::default()
     };
-    let plan = plan_micro(&t, &config, false);
+    let plan = crate::agent::compact_v2::planner::plan_micro(&t, &config, false);
 
     assert!(!plan.has_changes(), "没有暴露事实，历史年龄不能授权压缩");
     assert_eq!(plan.estimated_tokens_saved, 0);

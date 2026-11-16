@@ -1,4 +1,8 @@
-use super::*;
+use crate::private_temp::PrivateDirCache;
+use crate::private_temp::DIR_RETENTION;
+use crate::private_temp::LOCK_FILE;
+use crate::private_temp::OUTPUT_PREFIX;
+use std::path::Path;
 #[cfg(unix)]
 use std::time::{Duration, SystemTime};
 
@@ -12,8 +16,9 @@ fn mode(path: &Path) -> u32 {
 #[test]
 fn created_directory_and_file_are_owner_only() {
     let parent = tempfile::tempdir().unwrap();
-    let dir = create_private_dir(parent.path()).unwrap();
-    let path = write_private_file(&dir.path, "payload.txt", b"secret").unwrap();
+    let dir = crate::private_temp::create_private_dir(parent.path()).unwrap();
+    let path =
+        crate::private_temp::write_private_file(&dir.path, "payload.txt", b"secret").unwrap();
 
     assert_eq!(mode(&dir.path), 0o700);
     assert_eq!(mode(&path), 0o600);
@@ -23,8 +28,8 @@ fn created_directory_and_file_are_owner_only() {
 
 #[test]
 fn persisted_directory_is_process_private_and_stable() {
-    let first = write_output("first").expect("private output file");
-    let second = write_output("second").expect("private output file");
+    let first = crate::private_temp::write_output("first").expect("private output file");
+    let second = crate::private_temp::write_output("second").expect("private output file");
     let first_dir = first.parent().expect("file parent");
     let second_dir = second.parent().expect("file parent");
 
@@ -44,6 +49,7 @@ fn initialization_failure_is_retried_after_recovery() {
 
     // Root bypasses directory permissions, so the injected failure would not
     // occur there.
+    // SAFETY: This identity query has no pointer or ownership preconditions.
     if unsafe { libc::geteuid() } == 0 {
         return;
     }
@@ -52,12 +58,13 @@ fn initialization_failure_is_retried_after_recovery() {
     let cache = PrivateDirCache::default();
 
     std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
-    let error = write_output_to(&cache, parent.path(), "first").unwrap_err();
+    let error = crate::private_temp::write_output_to(&cache, parent.path(), "first").unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     assert!(cache.dir.lock().unwrap().is_none());
 
     std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let path = write_output_to(&cache, parent.path(), "recovered").expect("retry after recovery");
+    let path = crate::private_temp::write_output_to(&cache, parent.path(), "recovered")
+        .expect("retry after recovery");
 
     assert_eq!(std::fs::read(&path).unwrap(), b"recovered");
     assert_eq!(mode(&path), 0o600);
@@ -67,10 +74,11 @@ fn initialization_failure_is_retried_after_recovery() {
 #[test]
 fn existing_file_is_never_overwritten() {
     let parent = tempfile::tempdir().unwrap();
-    let dir = create_private_dir(parent.path()).unwrap();
-    write_private_file(&dir.path, "payload.txt", b"first").unwrap();
+    let dir = crate::private_temp::create_private_dir(parent.path()).unwrap();
+    crate::private_temp::write_private_file(&dir.path, "payload.txt", b"first").unwrap();
 
-    let error = write_private_file(&dir.path, "payload.txt", b"second").unwrap_err();
+    let error =
+        crate::private_temp::write_private_file(&dir.path, "payload.txt", b"second").unwrap_err();
 
     assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
     assert_eq!(
@@ -101,7 +109,7 @@ fn sweep_removes_abandoned_directories_only() {
     std::fs::create_dir(&unrelated).unwrap();
     age_directory(&unrelated, DIR_RETENTION + Duration::from_secs(60));
 
-    sweep_stale_dirs(parent.path());
+    crate::private_temp::sweep_stale_dirs(parent.path());
 
     assert!(
         !stale.exists(),

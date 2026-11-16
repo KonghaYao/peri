@@ -1,4 +1,7 @@
-use super::*;
+use super::Color;
+use super::MarkdownRenderCache;
+use super::MarkdownSegment;
+use super::Palette;
 
 const TEST_BASE_FG: Color = Color::White;
 
@@ -19,8 +22,9 @@ fn test_cached_parse_matches_full_parse_on_first_call() {
     // 首次调用（cache 空）：输出应与全量 parse_markdown 一致
     let mut cache = MarkdownRenderCache::default();
     let input = "para1\n\npara2";
-    let cached = parse_markdown_cached(input, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full = parse_markdown(input, 80, Palette::default(), TEST_BASE_FG);
+    let cached =
+        super::parse_markdown_cached(input, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full = super::parse_markdown(input, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&cached),
         segments_to_text(&full),
@@ -35,7 +39,7 @@ fn test_cached_parse_reuses_prefix_on_append() {
 
     // 第一次：一个完整 paragraph（以 \n\n 结尾，触发持久化）
     let t1 = "para1\n\n";
-    let _r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let _r1 = super::parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
     assert!(
         cache.stable_text_len() > 0,
         "首次以 \\n\\n 结尾应持久化 stable_text"
@@ -48,8 +52,8 @@ fn test_cached_parse_reuses_prefix_on_append() {
 
     // 第二次：追加 para2，仍以 t1 为前缀
     let t2 = "para1\n\npara2";
-    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    let r2 = super::parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = super::parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r2),
         segments_to_text(&full2),
@@ -68,13 +72,15 @@ fn test_cached_parse_reuses_prefix_on_append() {
 fn test_cached_parse_invalidates_on_width_change() {
     let mut cache = MarkdownRenderCache::default();
     let input = "long paragraph with multiple words that must wrap at a narrower width\n\n";
-    let wide = parse_markdown_cached(input, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let wide =
+        super::parse_markdown_cached(input, 80, Palette::default(), TEST_BASE_FG, &mut cache);
     assert!(cache.stable_text_len() > 0);
-    let narrow = parse_markdown_cached(input, 12, Palette::default(), TEST_BASE_FG, &mut cache);
+    let narrow =
+        super::parse_markdown_cached(input, 12, Palette::default(), TEST_BASE_FG, &mut cache);
     assert_ne!(narrow, wide);
     assert_eq!(
         narrow,
-        parse_markdown(input, 12, Palette::default(), TEST_BASE_FG)
+        super::parse_markdown(input, 12, Palette::default(), TEST_BASE_FG)
     );
 }
 
@@ -83,13 +89,16 @@ fn test_cached_parse_invalidates_on_palette_change() {
     let mut cache = MarkdownRenderCache::default();
     let input = "[link](https://example.invalid)\n\n";
     let palette = Palette::default();
-    let initial = parse_markdown_cached(input, 80, palette, TEST_BASE_FG, &mut cache);
+    let initial = super::parse_markdown_cached(input, 80, palette, TEST_BASE_FG, &mut cache);
     assert!(cache.stable_text_len() > 0);
     let mut changed = palette;
     changed.info = Color::Red;
-    let recolored = parse_markdown_cached(input, 80, changed, TEST_BASE_FG, &mut cache);
+    let recolored = super::parse_markdown_cached(input, 80, changed, TEST_BASE_FG, &mut cache);
     assert_ne!(recolored, initial);
-    assert_eq!(recolored, parse_markdown(input, 80, changed, TEST_BASE_FG));
+    assert_eq!(
+        recolored,
+        super::parse_markdown(input, 80, changed, TEST_BASE_FG)
+    );
 }
 
 #[test]
@@ -100,8 +109,8 @@ fn test_cached_parse_preserves_spacing_on_append() {
 
     // 第一次：paragraph + list（以 \n\n 结尾）
     let t1 = "intro paragraph\n\n- item 1\n- item 2\n\n";
-    let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full1 = parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
+    let r1 = super::parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full1 = super::parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r1),
         segments_to_text(&full1),
@@ -110,8 +119,8 @@ fn test_cached_parse_preserves_spacing_on_append() {
 
     // 第二次：追加新 paragraph
     let t2 = "intro paragraph\n\n- item 1\n- item 2\n\nnew paragraph";
-    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    let r2 = super::parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = super::parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r2),
         segments_to_text(&full2),
@@ -126,12 +135,12 @@ fn test_cached_parse_preserves_table_boundary_on_append() {
 
     // 第一次：paragraph + table（以 \n\n 结尾）
     let t1 = "intro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n";
-    let _r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let _r1 = super::parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
 
     // 第二次：table 后追加 paragraph
     let t2 = "intro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nafter table para";
-    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    let r2 = super::parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = super::parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r2),
         segments_to_text(&full2),
@@ -152,21 +161,30 @@ fn test_cached_parse_multiple_progressive_appends() {
         "first\n\nsecond\n\nthird\n\nfourth",
     ];
     let mut prev_stable_len = 0usize;
-    for (i, text) in steps.iter().enumerate() {
-        let cached = parse_markdown_cached(text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-        let full = parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
-        assert_eq!(
-            segments_to_text(&cached),
-            segments_to_text(&full),
-            "step {i} 输出应与全量一致"
-        );
-        // stable_text 应单调增长（每次新闭合 \n\n 时扩展）
-        if text.ends_with("\n\n") {
-            assert!(
-                cache.stable_text_len() >= prev_stable_len,
-                "step {i} stable_text 应单调增长"
+    {
+        let iteration_items = steps.iter().enumerate();
+        for (i, text) in iteration_items {
+            let cached = super::parse_markdown_cached(
+                text,
+                80,
+                Palette::default(),
+                TEST_BASE_FG,
+                &mut cache,
             );
-            prev_stable_len = cache.stable_text_len();
+            let full = super::parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
+            assert_eq!(
+                segments_to_text(&cached),
+                segments_to_text(&full),
+                "step {i} 输出应与全量一致"
+            );
+            // stable_text 应单调增长（每次新闭合 \n\n 时扩展）
+            if text.ends_with("\n\n") {
+                assert!(
+                    cache.stable_text_len() >= prev_stable_len,
+                    "step {i} stable_text 应单调增长"
+                );
+                prev_stable_len = cache.stable_text_len();
+            }
         }
     }
 }
@@ -180,8 +198,8 @@ fn test_cached_parse_unclosed_code_block_not_persisted_but_still_correct() {
 
     // 第一次：未闭合 code block（末尾不是 \n）
     let t1 = "```rust\nlet x = 1;";
-    let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full1 = parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
+    let r1 = super::parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full1 = super::parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r1),
         segments_to_text(&full1),
@@ -196,8 +214,8 @@ fn test_cached_parse_unclosed_code_block_not_persisted_but_still_correct() {
 
     // 第二次：代码块内追加一行 → 前缀不匹配 → 全量重跑，输出与全量一致
     let t2 = "```rust\nlet x = 1;\nlet y = 2;";
-    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    let r2 = super::parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = super::parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r2),
         segments_to_text(&full2),
@@ -206,8 +224,8 @@ fn test_cached_parse_unclosed_code_block_not_persisted_but_still_correct() {
 
     // 第三次：代码块闭合 + 追加文本 → 命中续跑，输出仍一致
     let t3 = "```rust\nlet x = 1;\nlet y = 2;\n```\n\nafter";
-    let r3 = parse_markdown_cached(t3, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full3 = parse_markdown(t3, 80, Palette::default(), TEST_BASE_FG);
+    let r3 = super::parse_markdown_cached(t3, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full3 = super::parse_markdown(t3, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r3),
         segments_to_text(&full3),
@@ -219,7 +237,7 @@ fn test_cached_parse_unclosed_code_block_not_persisted_but_still_correct() {
 fn test_cached_parse_empty_input_no_cache_pollution() {
     // 空输入不应污染 cache
     let mut cache = MarkdownRenderCache::default();
-    let _r = parse_markdown_cached("", 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let _r = super::parse_markdown_cached("", 80, Palette::default(), TEST_BASE_FG, &mut cache);
     assert_eq!(cache.stable_text_len(), 0, "空输入不应持久化");
 }
 
@@ -231,19 +249,19 @@ fn test_cached_parse_does_not_persist_unstable_suffix() {
 
     // Step 1：闭合 paragraph
     let t1 = "para1\n\n";
-    let _r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let _r1 = super::parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
     let stable_len_after_t1 = cache.stable_text_len();
     assert!(stable_len_after_t1 > 0);
 
     // Step 2：追加半个 paragraph（不以 \n 结尾）——[新契约] 同样持久化并扩展
     let t2 = "para1\n\npara2 half";
-    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let r2 = super::parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
     assert_eq!(
         cache.stable_text_len(),
         t2.len(),
         "追加非闭合内容后 stable_text 应扩展为整个文本"
     );
-    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    let full2 = super::parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r2),
         segments_to_text(&full2),
@@ -252,8 +270,8 @@ fn test_cached_parse_does_not_persist_unstable_suffix() {
 
     // Step 3：继续追加（仍以 t2 为前缀）
     let t3 = "para1\n\npara2 half continued";
-    let r3 = parse_markdown_cached(t3, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full3 = parse_markdown(t3, 80, Palette::default(), TEST_BASE_FG);
+    let r3 = super::parse_markdown_cached(t3, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full3 = super::parse_markdown(t3, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r3),
         segments_to_text(&full3),
@@ -293,25 +311,34 @@ fn test_cached_streaming_every_frame_matches_full_parse() {
         "**bold** and `code`.",
     ];
     let mut text = String::new();
-    for (i, tok) in tokens.iter().enumerate() {
-        text.push_str(tok);
-        let cached = parse_markdown_cached(&text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-        let full = parse_markdown(&text, 80, Palette::default(), TEST_BASE_FG);
-        assert_eq!(
-            segments_to_text(&cached),
-            segments_to_text(&full),
-            "token {i} ('{tok}') 帧输出应与全量一致\n文本: {text:?}"
-        );
-        assert_eq!(
-            cached
-                .iter()
-                .filter(|s| matches!(s, MarkdownSegment::Table(_)))
-                .count(),
-            full.iter()
-                .filter(|s| matches!(s, MarkdownSegment::Table(_)))
-                .count(),
-            "token {i} Table segment 数应与全量一致"
-        );
+    {
+        let iteration_items = tokens.iter().enumerate();
+        for (i, tok) in iteration_items {
+            text.push_str(tok);
+            let cached = super::parse_markdown_cached(
+                &text,
+                80,
+                Palette::default(),
+                TEST_BASE_FG,
+                &mut cache,
+            );
+            let full = super::parse_markdown(&text, 80, Palette::default(), TEST_BASE_FG);
+            assert_eq!(
+                segments_to_text(&cached),
+                segments_to_text(&full),
+                "token {i} ('{tok}') 帧输出应与全量一致\n文本: {text:?}"
+            );
+            assert_eq!(
+                cached
+                    .iter()
+                    .filter(|s| matches!(s, MarkdownSegment::Table(_)))
+                    .count(),
+                full.iter()
+                    .filter(|s| matches!(s, MarkdownSegment::Table(_)))
+                    .count(),
+                "token {i} Table segment 数应与全量一致"
+            );
+        }
     }
 }
 
@@ -331,20 +358,29 @@ fn test_cached_prose_single_paragraph_grows() {
         "text more words and more",
     ];
     let mut prev_stable_len = 0usize;
-    for (i, text) in steps.iter().enumerate() {
-        let cached = parse_markdown_cached(text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-        let full = parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
-        assert_eq!(
-            segments_to_text(&cached),
-            segments_to_text(&full),
-            "step {i} 单段散文增长输出应与全量一致"
-        );
-        // stable_text 应单调扩展（任意输入都持久化）
-        assert!(
-            cache.stable_text_len() >= prev_stable_len,
-            "step {i} stable_text 应单调扩展"
-        );
-        prev_stable_len = cache.stable_text_len();
+    {
+        let iteration_items = steps.iter().enumerate();
+        for (i, text) in iteration_items {
+            let cached = super::parse_markdown_cached(
+                text,
+                80,
+                Palette::default(),
+                TEST_BASE_FG,
+                &mut cache,
+            );
+            let full = super::parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
+            assert_eq!(
+                segments_to_text(&cached),
+                segments_to_text(&full),
+                "step {i} 单段散文增长输出应与全量一致"
+            );
+            // stable_text 应单调扩展（任意输入都持久化）
+            assert!(
+                cache.stable_text_len() >= prev_stable_len,
+                "step {i} stable_text 应单调扩展"
+            );
+            prev_stable_len = cache.stable_text_len();
+        }
     }
 }
 
@@ -354,12 +390,13 @@ fn test_cached_prose_single_paragraph_grows() {
 #[test]
 fn test_cached_paragraph_soft_break_grows() {
     let mut cache = MarkdownRenderCache::default();
-    for (i, text) in ["para\n", "para\nmore", "para\nmore words"]
+    let indexed_paragraph_revisions = ["para\n", "para\nmore", "para\nmore words"]
         .iter()
-        .enumerate()
-    {
-        let cached = parse_markdown_cached(text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-        let full = parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
+        .enumerate();
+    for (i, text) in indexed_paragraph_revisions {
+        let cached =
+            super::parse_markdown_cached(text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+        let full = super::parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
         assert_eq!(
             segments_to_text(&cached),
             segments_to_text(&full),
@@ -375,13 +412,13 @@ fn test_cached_paragraph_soft_break_grows() {
 fn test_cached_list_lazy_continuation_grows() {
     let mut cache = MarkdownRenderCache::default();
     let t1 = "- A\n- B\n";
-    let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let r1 = super::parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
     assert!(segments_to_text(&r1).contains("B"), "t1 应含 B");
 
     // lazy continuation：追加无缩进行，内容并入最后列表项
     let t2 = "- A\n- B\ncontinued";
-    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    let r2 = super::parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = super::parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
     let text2 = segments_to_text(&r2);
     assert!(
         text2.contains("continued"),
@@ -394,9 +431,11 @@ fn test_cached_list_lazy_continuation_grows() {
 #[test]
 fn test_cached_heading_same_line_growth() {
     let mut cache = MarkdownRenderCache::default();
-    for (i, text) in ["# h", "# h x", "# h xy"].iter().enumerate() {
-        let cached = parse_markdown_cached(text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-        let full = parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
+    let indexed_heading_revisions = ["# h", "# h x", "# h xy"].iter().enumerate();
+    for (i, text) in indexed_heading_revisions {
+        let cached =
+            super::parse_markdown_cached(text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+        let full = super::parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
         assert_eq!(
             segments_to_text(&cached),
             segments_to_text(&full),
@@ -410,12 +449,13 @@ fn test_cached_heading_same_line_growth() {
 #[test]
 fn test_cached_indented_code_block_grows() {
     let mut cache = MarkdownRenderCache::default();
-    for (i, text) in ["    a", "    a\n    b", "    a\n    b\n    c"]
+    let indexed_code_revisions = ["    a", "    a\n    b", "    a\n    b\n    c"]
         .iter()
-        .enumerate()
-    {
-        let cached = parse_markdown_cached(text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-        let full = parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
+        .enumerate();
+    for (i, text) in indexed_code_revisions {
+        let cached =
+            super::parse_markdown_cached(text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+        let full = super::parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
         assert_eq!(
             segments_to_text(&cached),
             segments_to_text(&full),
@@ -431,8 +471,8 @@ fn test_cached_rule_flips_to_paragraph() {
     let mut cache = MarkdownRenderCache::default();
     // Step 1：Rule
     let t1 = "---";
-    let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full1 = parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
+    let r1 = super::parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full1 = super::parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r1),
         segments_to_text(&full1),
@@ -440,8 +480,8 @@ fn test_cached_rule_flips_to_paragraph() {
     );
     // Step 2：同行追加 → 翻转为 Paragraph
     let t2 = "---x";
-    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    let r2 = super::parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = super::parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r2),
         segments_to_text(&full2),
@@ -449,8 +489,8 @@ fn test_cached_rule_flips_to_paragraph() {
     );
     // Step 3：追加完整行 → Rule + 段落
     let t3 = "---x\n\npara";
-    let r3 = parse_markdown_cached(t3, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full3 = parse_markdown(t3, 80, Palette::default(), TEST_BASE_FG);
+    let r3 = super::parse_markdown_cached(t3, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full3 = super::parse_markdown(t3, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r3),
         segments_to_text(&full3),
@@ -464,16 +504,16 @@ fn test_cached_rule_flips_to_paragraph() {
 fn test_cached_closed_code_block_same_line_append() {
     let mut cache = MarkdownRenderCache::default();
     let t1 = "```rust\ncode\n```";
-    let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full1 = parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
+    let r1 = super::parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full1 = super::parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r1),
         segments_to_text(&full1),
         "闭合代码块输出应与全量一致"
     );
     let t2 = "```rust\ncode\n```more";
-    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    let r2 = super::parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = super::parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r2),
         segments_to_text(&full2),
@@ -487,16 +527,16 @@ fn test_cached_closed_code_block_same_line_append() {
 fn test_cached_closed_code_block_then_text_appended() {
     let mut cache = MarkdownRenderCache::default();
     let t1 = "```rust\ncode\n```\n\npara1";
-    let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full1 = parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
+    let r1 = super::parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full1 = super::parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r1),
         segments_to_text(&full1),
         "首次输出应与全量一致"
     );
     let t2 = "```rust\ncode\n```\n\npara1 continued";
-    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    let r2 = super::parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = super::parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r2),
         segments_to_text(&full2),
@@ -516,21 +556,26 @@ fn test_cached_table_rows_grow_correctly() {
 
     // Step 1: 缓存只有 header+separator 的表格
     let t1 = "| # | 测试场景 | 结果 |\n|---|---------|------|\n";
-    let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let r1 = super::parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
     let table1 = r1.iter().find_map(|s| match s {
         MarkdownSegment::Table(d) => Some(d),
         _ => None,
     });
     assert!(table1.is_some(), "t1 应含 Table segment");
     assert!(
-        table1.unwrap().rows.is_empty(),
+        table1
+            .expect(
+                "cached table rows grow correctly: the iter fixture operation uses valid inputs"
+            )
+            .rows
+            .is_empty(),
         "t1 Table rows 应为空（仅有 header+separator，无数据行）"
     );
 
     // Step 2: 追加数据行
     let t2 = "| # | 测试场景 | 结果 |\n|---|---------|------|\n| 1 | 简单中文表 | ✅ |\n| 2 | 长中文内容 | ✅ |\n";
-    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    let r2 = super::parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = super::parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
 
     // 提取 Table 数据
     let table_cached = r2.iter().find_map(|s| match s {
@@ -577,7 +622,7 @@ fn test_cached_list_items_no_disappearing() {
 
     // Step 1: 一个列表项（以 \n 结尾，触发持久化）
     let t1 = "- A\n";
-    let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let r1 = super::parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
     let text1 = segments_to_text(&r1);
     assert!(text1.contains("A"), "t1 应含 A，实际: {text1:?}");
     // cache 已持久化
@@ -585,8 +630,8 @@ fn test_cached_list_items_no_disappearing() {
 
     // Step 2: 追加第二个列表项（最关键的回归断言）
     let t2 = "- A\n- B\n";
-    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    let r2 = super::parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = super::parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
     let text2 = segments_to_text(&r2);
     let full_text2 = segments_to_text(&full2);
 
@@ -610,7 +655,7 @@ fn test_cached_table_header_streamed_before_separator() {
 
     // Step 1: 表头单独到达（无分隔符），pulldown-cmark → Paragraph
     let t1 = "| a | b |\n";
-    let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let r1 = super::parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
     // 验证：t1 被解析为 Text（Paragraph），不是 Table
     let has_table_t1 = r1.iter().any(|s| matches!(s, MarkdownSegment::Table(_)));
     assert!(
@@ -620,8 +665,8 @@ fn test_cached_table_header_streamed_before_separator() {
 
     // Step 2: 分隔符 + 数据行到达，此时完整表格应被识别为 Table
     let t2 = "| a | b |\n|---|---|\n| 1 | 2 |\n";
-    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    let r2 = super::parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = super::parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
 
     // 断言：续跑后应解析出 Table segment
     let has_table_r2 = r2.iter().any(|s| matches!(s, MarkdownSegment::Table(_)));
@@ -642,14 +687,24 @@ fn test_cached_table_header_streamed_before_separator() {
 fn test_incremental_reference_definition_keeps_reference_region_mutable() {
     let mut cache = MarkdownRenderCache::default();
     let initial = "[foo]\n\n";
-    let first =
-        parse_markdown_chunks_cached(initial, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let first = super::parse_markdown_chunks_cached(
+        initial,
+        80,
+        Palette::default(),
+        TEST_BASE_FG,
+        &mut cache,
+    );
     assert!(first.stable.is_empty());
 
     let completed = "[foo]\n\n[foo]: https://example.invalid\n";
-    let incremental =
-        parse_markdown_chunks_cached(completed, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full = parse_markdown(completed, 80, Palette::default(), TEST_BASE_FG);
+    let incremental = super::parse_markdown_chunks_cached(
+        completed,
+        80,
+        Palette::default(),
+        TEST_BASE_FG,
+        &mut cache,
+    );
+    let full = super::parse_markdown(completed, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&incremental.tail),
         segments_to_text(&full),
@@ -662,7 +717,7 @@ fn test_rendered_chunks_reuse_stable_identity_and_only_parse_suffix() {
     use crate::kit::acp_bridge::{perf_counters, reset_perf_counters};
 
     let mut cache = MarkdownRenderCache::default();
-    let first = parse_markdown_chunks_cached(
+    let first = super::parse_markdown_chunks_cached(
         "alpha paragraph\n\nmutable",
         80,
         Palette::default(),
@@ -674,7 +729,7 @@ fn test_rendered_chunks_reuse_stable_identity_and_only_parse_suffix() {
     let stable = first.stable_identities();
 
     reset_perf_counters();
-    let second = parse_markdown_chunks_cached(
+    let second = super::parse_markdown_chunks_cached(
         "alpha paragraph\n\nmutable tail grows",
         80,
         Palette::default(),
@@ -699,12 +754,26 @@ fn test_rendered_chunks_fixed_length_more_publications_do_not_reparse_prefix() {
     let suffix = "mutable suffix split across publications";
     let mut cache = MarkdownRenderCache::default();
     let mut source = stable.clone();
-    let _ = parse_markdown_chunks_cached(&source, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let _ = super::parse_markdown_chunks_cached(
+        &source,
+        80,
+        Palette::default(),
+        TEST_BASE_FG,
+        &mut cache,
+    );
     reset_perf_counters();
-    for part in suffix.as_bytes().chunks(3) {
-        source.push_str(std::str::from_utf8(part).unwrap());
-        let _ =
-            parse_markdown_chunks_cached(&source, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    {
+        let iteration_items = suffix.as_bytes().chunks(3);
+        for part in iteration_items {
+            source.push_str(std::str::from_utf8(part).expect("rendered chunks fixed length more publications do not reparse prefix: fixture paths and protocol text must be valid UTF-8"));
+            let _ = super::parse_markdown_chunks_cached(
+                &source,
+                80,
+                Palette::default(),
+                TEST_BASE_FG,
+                &mut cache,
+            );
+        }
     }
     let counters = perf_counters();
     let quadratic_full_prefix = stable.len() as u64 * suffix.len().div_ceil(3) as u64;
@@ -724,33 +793,36 @@ fn test_terminal_barrier_matches_full_reference_for_streaming_matrix() {
     ];
     for input in cases {
         for width in [12, 40, 80] {
-            for chunk in [1, 2, 7, input.len().max(1)] {
-                let mut cache = MarkdownRenderCache::default();
-                let mut source = String::new();
-                let chars: Vec<char> = input.chars().collect();
-                for chars in chars.chunks(chunk) {
-                    source.extend(chars);
-                    let _ = parse_markdown_chunks_cached(
+            {
+                let iteration_items = [1, 2, 7, input.len().max(1)];
+                for chunk in iteration_items {
+                    let mut cache = MarkdownRenderCache::default();
+                    let mut source = String::new();
+                    let chars: Vec<char> = input.chars().collect();
+                    for chars in chars.chunks(chunk) {
+                        source.extend(chars);
+                        let _ = super::parse_markdown_chunks_cached(
+                            &source,
+                            width,
+                            Palette::default(),
+                            TEST_BASE_FG,
+                            &mut cache,
+                        );
+                    }
+                    let terminal = super::parse_markdown_terminal(
                         &source,
                         width,
                         Palette::default(),
                         TEST_BASE_FG,
                         &mut cache,
                     );
+                    assert_eq!(
+                        terminal.tail,
+                        super::parse_markdown(&source, width, Palette::default(), TEST_BASE_FG),
+                        "width={width} chunk={chunk} input={input:?}"
+                    );
+                    assert!(terminal.stable.is_empty());
                 }
-                let terminal = parse_markdown_terminal(
-                    &source,
-                    width,
-                    Palette::default(),
-                    TEST_BASE_FG,
-                    &mut cache,
-                );
-                assert_eq!(
-                    terminal.tail,
-                    parse_markdown(&source, width, Palette::default(), TEST_BASE_FG),
-                    "width={width} chunk={chunk} input={input:?}"
-                );
-                assert!(terminal.stable.is_empty());
             }
         }
     }
@@ -759,7 +831,7 @@ fn test_terminal_barrier_matches_full_reference_for_streaming_matrix() {
 #[test]
 fn test_unclosed_fence_stays_mutable_until_closed() {
     let mut cache = MarkdownRenderCache::default();
-    let first = parse_markdown_chunks_cached(
+    let first = super::parse_markdown_chunks_cached(
         "before\n\n```rust\nlet x = 1;",
         80,
         Palette::default(),
@@ -768,7 +840,7 @@ fn test_unclosed_fence_stays_mutable_until_closed() {
     );
     assert_eq!(first.stable.len(), 1);
     let ids = first.stable_identities();
-    let second = parse_markdown_chunks_cached(
+    let second = super::parse_markdown_chunks_cached(
         "before\n\n```rust\nlet x = 1;\n```\n\nafter",
         80,
         Palette::default(),
@@ -786,17 +858,27 @@ fn test_width_and_theme_invalidate_rendered_chunks() {
 
     let input = "stable paragraph with 中文\n\nmutable";
     let mut cache = MarkdownRenderCache::default();
-    let first =
-        parse_markdown_chunks_cached(input, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let first = super::parse_markdown_chunks_cached(
+        input,
+        80,
+        Palette::default(),
+        TEST_BASE_FG,
+        &mut cache,
+    );
     let first_ids = first.stable_identities();
     reset_perf_counters();
-    let resized =
-        parse_markdown_chunks_cached(input, 40, Palette::default(), TEST_BASE_FG, &mut cache);
+    let resized = super::parse_markdown_chunks_cached(
+        input,
+        40,
+        Palette::default(),
+        TEST_BASE_FG,
+        &mut cache,
+    );
     assert_eq!(perf_counters().tail_parsed_bytes, "mutable".len() as u64);
     assert_ne!(resized.stable_identities(), first_ids);
 
     let mut palette = Palette::default();
     palette.accent = Color::Red;
-    let themed = parse_markdown_chunks_cached(input, 40, palette, TEST_BASE_FG, &mut cache);
+    let themed = super::parse_markdown_chunks_cached(input, 40, palette, TEST_BASE_FG, &mut cache);
     assert_ne!(themed.stable_identities(), resized.stable_identities());
 }

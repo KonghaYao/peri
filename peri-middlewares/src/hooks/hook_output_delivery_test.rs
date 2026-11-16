@@ -4,11 +4,12 @@
 //! 红→绿：实现前这些字段只被诊断后丢弃；实现后必须出现在 canonical queue 里，
 //! 且受众、来源与有界性可断言。
 
+use peri_agent::middleware::Middleware as _;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::*;
+use super::{BaseMessage, HookEvent, HookMiddleware, HookType, ReactLLM, RegisteredHook, ToolCall};
 use crate::hooks::hook_output_delivery::MAX_HOOK_OUTPUT_BYTES;
 use crate::permission::{PermissionMode, SharedPermissionMode};
 use peri_acp_types::session::QueuedPayload;

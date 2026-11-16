@@ -1,3 +1,5 @@
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -26,13 +28,16 @@ pub struct TodoState {
 /// 渲染当前 todo 状态文本（注入 steering 用）
 pub(crate) fn render_todo_status(items: &[TodoItem]) -> String {
     let mut lines: Vec<String> = Vec::new();
-    for (i, item) in items.iter().enumerate() {
-        let status = match item.status {
-            TodoStatus::Pending => "pending",
-            TodoStatus::InProgress => "in_progress",
-            TodoStatus::Completed => "completed",
-        };
-        lines.push(format!("[{i}] [{status}] {}", item.content));
+    {
+        let indexed_items = items.iter().enumerate();
+        for (i, item) in indexed_items {
+            let status = match item.status {
+                TodoStatus::Pending => "pending",
+                TodoStatus::InProgress => "in_progress",
+                TodoStatus::Completed => "completed",
+            };
+            lines.push(format!("[{i}] [{status}] {}", item.content));
+        }
     }
     lines.join("\n")
 }
@@ -48,7 +53,16 @@ pub struct TodoWriteTool {
     notify_tx: Option<mpsc::Sender<Vec<TodoItem>>>,
 }
 
+impl Debug for TodoWriteTool {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TodoWriteTool")
+            .finish_non_exhaustive()
+    }
+}
+
 impl TodoWriteTool {
+    #[must_use]
     pub fn new(notify_tx: mpsc::Sender<Vec<TodoItem>>, state: Arc<Mutex<TodoState>>) -> Self {
         Self {
             state,

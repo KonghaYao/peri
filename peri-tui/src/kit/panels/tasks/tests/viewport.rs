@@ -1,6 +1,5 @@
 //! 三段行表推导与取消动作解析（纯函数，不经挂载）。
 
-use super::bg_task;
 use crate::kit::panels::tasks::viewport::{
     CancelAction, CancelTarget, SegmentCounts, TaskSegment, TasksRow, TasksViewport,
 };
@@ -105,8 +104,11 @@ fn row_table_respects_budget() {
     // 预算 3 行连一个任务行都放不下：行表截断，任何行都不可命中
     let tiny = TasksViewport::for_content_rows(3, counts, 0);
     assert_eq!(tiny.rows().len(), 3);
-    for row in 0..tiny.rows().len() {
-        assert_eq!(tiny.item_at_row(row), None, "第 {row} 行不得命中");
+    {
+        let iteration_items = 0..tiny.rows().len();
+        for row in iteration_items {
+            assert_eq!(tiny.item_at_row(row), None, "第 {row} 行不得命中");
+        }
     }
     assert!(
         TasksViewport::for_content_rows(0, counts, 0)
@@ -159,14 +161,15 @@ fn cancel_action_rejects_terminal_states_and_keeps_lost_cancelable() {
         ..SegmentCounts::default()
     };
     let viewport = TasksViewport::for_content_rows(16, counts, 0);
-    let mut snapshot: Vec<_> = (0..5).map(|i| bg_task(&format!("bg{i}"))).collect();
+    let mut snapshot: Vec<_> = (0..5).map(|i| super::bg_task(&format!("bg{i}"))).collect();
     snapshot[0].status = Some("completed".into());
     snapshot[1].status = Some("failed".into());
     snapshot[2].status = Some("cancelled".into());
     snapshot[3].status = Some("lost".into());
     snapshot[4].status = Some("future_status".into());
 
-    for (index, status) in ["completed", "failed", "cancelled"].into_iter().enumerate() {
+    let indexed_terminal_statuses = ["completed", "failed", "cancelled"].into_iter().enumerate();
+    for (index, status) in indexed_terminal_statuses {
         assert_eq!(
             viewport.cancel_action(index, &snapshot),
             CancelAction::NotCancelable,
@@ -193,7 +196,7 @@ fn cancel_action_only_for_background_rows() {
         subagent: 1,
     };
     let viewport = TasksViewport::for_content_rows(16, counts, 0);
-    let snapshot = vec![bg_task("bg0"), bg_task("bg1")];
+    let snapshot = vec![super::bg_task("bg0"), super::bg_task("bg1")];
 
     assert_eq!(
         viewport.cancel_action(1, &snapshot),

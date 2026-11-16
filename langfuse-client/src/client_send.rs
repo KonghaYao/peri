@@ -78,6 +78,7 @@ pub(crate) trait AttemptCheckpoint: Send {
 }
 
 /// direct ingest 的累计登记水位：无磁盘 checkpoint，只有预先计数的尝试次数。
+#[derive(Default)]
 pub(crate) struct MemoryCheckpoint {
     attempts: u64,
 }
@@ -224,6 +225,7 @@ fn poisoned_slot() -> LangfuseError {
 /// 本次 attempt 的正文所有权：读泵 join、取消位与 HTTP 工作区许可。
 ///
 /// 字段私有：调用方只能通过 [`BodyTaskOwner::drain`] 确认读泵已停，不能自己 join 或复用流。
+#[derive(Default)]
 pub(crate) struct BodyTaskOwner {
     pump: Option<Pump>,
     /// 文件读泵的桥接缓冲工作区（固定池租约）；内存正文不需要。
@@ -323,7 +325,8 @@ impl OrphanPump {
 }
 
 /// 进程级待回收读泵；只在拿不到 runtime（进程退出、runtime 已关）时短暂滞留。
-static ORPHAN_PUMPS: Mutex<Vec<OrphanPump>> = Mutex::new(Vec::new());
+// The registry only moves whole owners; joining pumps always happens after unlocking.
+static ORPHAN_PUMPS: parking_lot::Mutex<Vec<OrphanPump>> = parking_lot::Mutex::new(Vec::new());
 /// 常驻回收任务是否在跑；同一时刻至多一个。
 static REAPER_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -341,10 +344,7 @@ fn hand_to_reaper(owner: &mut BodyTaskOwner) {
 }
 
 fn push_orphan(orphan: OrphanPump) {
-    ORPHAN_PUMPS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .push(orphan);
+    ORPHAN_PUMPS.lock().push(orphan);
     start_reaper();
 }
 
@@ -359,18 +359,13 @@ fn start_reaper() {
     };
     handle.spawn(async move {
         loop {
-            let next = ORPHAN_PUMPS
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .pop();
+            let next = ORPHAN_PUMPS.lock().pop();
             if let Some(orphan) = next {
                 orphan.join().await;
                 continue;
             }
             // 与 `push_orphan` 的竞态只有这一处：持锁确认空表后才落标志，push 侧才会重起任务。
-            let pending = ORPHAN_PUMPS
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let pending = ORPHAN_PUMPS.lock();
             REAPER_RUNNING.store(false, Ordering::Release);
             if pending.is_empty() || REAPER_RUNNING.swap(true, Ordering::AcqRel) {
                 return;

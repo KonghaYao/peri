@@ -7,7 +7,9 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn check_session(command: &mut std::process::Command) {
+    // SAFETY: The numeric process ID is only queried; this syscall accepts missing processes and reports an error.
     let host_session = unsafe { libc::getsid(0) };
+    // SAFETY: The post-fork callback uses only async-signal-safe session/group syscalls and constructs errors from numeric codes.
     unsafe {
         command.pre_exec(move || {
             let pid = libc::getpid();
@@ -24,7 +26,7 @@ fn check_session(command: &mut std::process::Command) {
 async fn async_prepare_creates_session_and_dedicated_group() {
     let mut command = tokio::process::Command::new("true");
     command.stdin(Stdio::null());
-    let mut tree = ProcessTree::new().unwrap();
+    let mut tree = ProcessTree::try_new().unwrap();
     tree.prepare(&mut command);
     check_session(command.as_std_mut());
     let mut child = command.spawn().unwrap();
@@ -38,7 +40,7 @@ async fn async_prepare_creates_session_and_dedicated_group() {
 fn blocking_prepare_creates_session_and_dedicated_group() {
     let mut command = std::process::Command::new("true");
     command.stdin(Stdio::null());
-    let mut tree = ProcessTree::new().unwrap();
+    let mut tree = ProcessTree::try_new().unwrap();
     tree.prepare_std(&mut command);
     check_session(&mut command);
     let mut child = command.spawn().unwrap();
@@ -52,7 +54,7 @@ fn blocking_prepare_creates_session_and_dedicated_group() {
 fn prepare_overrides_existing_group_configuration() {
     let mut command = std::process::Command::new("true");
     command.process_group(0);
-    let tree = ProcessTree::new().unwrap();
+    let tree = ProcessTree::try_new().unwrap();
     tree.prepare_std(&mut command);
     check_session(&mut command);
     assert!(command.status().unwrap().success());
@@ -61,7 +63,7 @@ fn prepare_overrides_existing_group_configuration() {
 #[tokio::test]
 async fn prepare_survives_later_group_configuration() {
     let mut command = tokio::process::Command::new("true");
-    let tree = ProcessTree::new().unwrap();
+    let tree = ProcessTree::try_new().unwrap();
     tree.prepare(&mut command);
     command.process_group(0);
     check_session(command.as_std_mut());
@@ -71,7 +73,7 @@ async fn prepare_survives_later_group_configuration() {
 #[test]
 fn duplicate_prepare_reports_session_setup_failure() {
     let mut command = std::process::Command::new("true");
-    let tree = ProcessTree::new().unwrap();
+    let tree = ProcessTree::try_new().unwrap();
     tree.prepare_std(&mut command);
     tree.prepare_std(&mut command);
     assert_eq!(
@@ -82,7 +84,7 @@ fn duplicate_prepare_reports_session_setup_failure() {
 
 #[test]
 fn one_owner_can_prepare_distinct_commands() {
-    let tree = ProcessTree::new().unwrap();
+    let tree = ProcessTree::try_new().unwrap();
     for _attempt in 0..2 {
         let mut command = std::process::Command::new("true");
         tree.prepare_std(&mut command);
@@ -93,7 +95,7 @@ fn one_owner_can_prepare_distinct_commands() {
 
 #[test]
 fn prepared_command_can_spawn_again() {
-    let tree = ProcessTree::new().unwrap();
+    let tree = ProcessTree::try_new().unwrap();
     let mut command = std::process::Command::new("true");
     tree.prepare_std(&mut command);
     check_session(&mut command);
@@ -122,7 +124,7 @@ async fn echo_probe(child: &mut tokio::process::Child, marker: &[u8]) -> io::Res
 #[tokio::test]
 async fn settled_owner_does_not_signal_reassigned_owned_group() {
     let mut command = tokio::process::Command::new("true");
-    let mut settled_tree = ProcessTree::new().unwrap();
+    let mut settled_tree = ProcessTree::try_new().unwrap();
     settled_tree.prepare(&mut command);
     let mut child = command.spawn().unwrap();
     settled_tree.attach(&child).unwrap();
@@ -141,7 +143,7 @@ async fn settled_owner_does_not_signal_reassigned_owned_group() {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut target_tree = ProcessTree::new().unwrap();
+    let mut target_tree = ProcessTree::try_new().unwrap();
     target_tree.prepare(&mut command);
     let mut target = command.spawn().unwrap();
     target_tree.attach(&target).unwrap();

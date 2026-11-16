@@ -1,17 +1,18 @@
 //! Real shell regression tests for the session directory and process-tree owner.
-use crate::hooks::{
-    dispatcher::{fire_standalone_lifecycle_hooks_owned, HookDispatcher},
-    executor::execute_command_hook_owned,
-    once_tracker::OnceTracker,
-    types::{HookAction, HookEvent, HookInput, RegisteredHook},
-};
+use crate::hooks::dispatcher;
+use crate::hooks::dispatcher::HookDispatcher;
+use crate::hooks::executor;
+use crate::hooks::once_tracker::OnceTracker;
+use crate::hooks::types::HookAction;
+use crate::hooks::types::HookEvent;
+use crate::hooks::types::HookInput;
+use crate::hooks::types::RegisteredHook;
 use peri_acp_types::tasks::{TaskManager, TaskShutdownReport};
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 fn hook(command: &str, event: HookEvent, asynchronous: bool, timeout: u64) -> RegisteredHook {
     RegisteredHook {
@@ -90,7 +91,7 @@ async fn command_executes_relative_paths_in_its_session_directory() {
         ),
     ] {
         let registered = hook(&command, HookEvent::SessionStart, false, 5);
-        let action = execute_command_hook_owned(
+        let action = executor::execute_command_hook_owned(
             &registered.hook,
             &event_input,
             &registered,
@@ -108,7 +109,7 @@ async fn command_executes_relative_paths_in_its_session_directory() {
         5,
     );
     assert_block(
-        execute_command_hook_owned(
+        executor::execute_command_hook_owned(
             &registered.hook,
             &event_input,
             &registered,
@@ -128,7 +129,7 @@ async fn sync_hook_cancel_reaps_descendants_before_session_close() {
     let manager = manager();
     let owner = manager.clone();
     let task = tokio::spawn(async move {
-        execute_command_hook_owned(
+        executor::execute_command_hook_owned(
             &registered.hook,
             &event_input,
             &registered,
@@ -152,7 +153,7 @@ async fn dropped_sync_hook_future_retains_process_cleanup_ownership() {
     let manager = manager();
     let owner = manager.clone();
     let task = tokio::spawn(async move {
-        execute_command_hook_owned(
+        executor::execute_command_hook_owned(
             &registered.hook,
             &event_input,
             &registered,
@@ -227,7 +228,7 @@ async fn timeout_keeps_allow_semantics_but_drains_the_process_group() {
     let cwd = tempfile::tempdir().unwrap();
     let registered = hook(SLOW_COMMAND, HookEvent::SessionStart, false, 1);
     let manager = manager();
-    let action = execute_command_hook_owned(
+    let action = executor::execute_command_hook_owned(
         &registered.hook,
         &input(cwd.path()),
         &registered,
@@ -250,7 +251,7 @@ async fn session_end_waits_for_an_async_hook_before_returning() {
         5,
     );
     let manager = manager();
-    fire_standalone_lifecycle_hooks_owned(
+    dispatcher::fire_standalone_lifecycle_hooks_owned(
         &[registered],
         HookEvent::SessionEnd,
         cwd.path().to_str().unwrap(),

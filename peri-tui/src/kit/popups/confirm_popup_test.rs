@@ -3,11 +3,20 @@
 //! 事件闭包随渲染帧重建，本测试用 `render_snapshot()` 复现「该帧闭包持有的确认目标」，
 //! 再直接投喂事件入口——与 `panels/tasks/tests.rs` 投喂当帧快照的做法同源。
 
-use super::*;
+use super::AskUserResponseAction;
+use super::CONFIRM_PAYLOAD;
+use super::ConfirmAction;
+use super::ConfirmPayload;
+use super::Event;
+use super::NOTIFICATION;
+use super::Notification;
+use super::RenderedConfirm;
+use super::i18n;
 use crate::acp_client::InteractionOwner;
 use crate::app::panel_types::PanelKind;
 use crate::kit::acp_types::PendingInteraction;
-use crate::kit::atoms::{ACTIVE_PANEL, ASK_USER_PENDING, OPEN_PANELS, POPUP_KIND, PopupKind};
+use ratatui_kit::prelude::*;
+
 use ratatui_kit::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serial_test::serial;
 
@@ -128,7 +137,7 @@ fn test_confirm_executes_when_rendered_payload_unchanged() {
 
     let shown = render_snapshot();
     assert_eq!(
-        handle_confirm_event(&key(KeyCode::Enter), shown.as_ref(), None),
+        super::handle_confirm_event(&key(KeyCode::Enter), shown.as_ref(), None),
         EventResult::Consumed
     );
 
@@ -158,7 +167,7 @@ fn test_confirm_superseded_payload_is_not_executed() {
     publish(reject_payload(owner.clone(), "B"));
 
     assert_eq!(
-        handle_confirm_event(&key(KeyCode::Enter), shown.as_ref(), None),
+        super::handle_confirm_event(&key(KeyCode::Enter), shown.as_ref(), None),
         EventResult::Consumed
     );
     assert!(!reject_executed(), "用户没看到的旧动作不能执行");
@@ -186,7 +195,7 @@ fn test_confirm_superseded_payload_is_not_executed() {
     // 下一帧渲染新 payload 后，用户对新内容再确认——此时执行的是新动作。
     let shown_new = render_snapshot();
     assert_eq!(
-        handle_confirm_event(&key(KeyCode::Enter), shown_new.as_ref(), None),
+        super::handle_confirm_event(&key(KeyCode::Enter), shown_new.as_ref(), None),
         EventResult::Consumed
     );
     assert!(reject_executed(), "对新 payload 确认后执行新动作");
@@ -207,7 +216,7 @@ fn test_confirm_esc_clears_payload_without_action() {
 
     let shown = render_snapshot();
     assert_eq!(
-        handle_confirm_event(&key(KeyCode::Esc), shown.as_ref(), None),
+        super::handle_confirm_event(&key(KeyCode::Esc), shown.as_ref(), None),
         EventResult::Consumed
     );
 
@@ -234,7 +243,7 @@ fn test_confirm_reject_a_preserves_active_b_panel() {
     *OPEN_PANELS.state().write() = vec![PanelKind::AskUser];
     *ACTIVE_PANEL.state().write() = Some(PanelKind::AskUser);
     let mut sent = None;
-    execute_confirm_action(
+    super::execute_confirm_action(
         &ConfirmAction::RejectAskUser {
             owner: crate::acp_client::InteractionOwner {
                 token: 1,
@@ -252,7 +261,7 @@ fn test_confirm_reject_a_preserves_active_b_panel() {
             .state()
             .read()
             .as_ref()
-            .unwrap()
+            .expect("confirm reject a preserves active b panel: the fixture storage and layout must support the requested operation")
             .request_id_json,
         "B"
     );
@@ -261,3 +270,13 @@ fn test_confirm_reject_a_preserves_active_b_panel() {
     *ACTIVE_PANEL.state().write() = old_active;
     *OPEN_PANELS.state().write() = old_open;
 }
+
+use crate::kit::atoms::ACTIVE_PANEL;
+
+use crate::kit::atoms::ASK_USER_PENDING;
+
+use crate::kit::atoms::OPEN_PANELS;
+
+use crate::kit::atoms::POPUP_KIND;
+
+use crate::kit::atoms::PopupKind;

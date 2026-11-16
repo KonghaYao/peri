@@ -1,4 +1,10 @@
-use super::*;
+use crate::host::requests::tests::unnegotiated_replay_tests::ReplayFixture;
+use crate::host::requests::tests::unnegotiated_replay_tests::SpyMode;
+use peri_acp_types::messages::BaseMessage;
+
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::PeriCaps;
+use serde_json::Value;
 
 /// 未协商连接 + 含 Full 归档（excluded 行）的会话：回放**包含归档原文**，且逐条内容与顺序
 /// 等于 `load_session_history` 的 canonical 序列。
@@ -15,7 +21,11 @@ async fn streamed_canonical_replay_delivers_the_archived_bodies_in_canonical_ord
         ])
         .await;
     let canonical = fixture.canonical().await;
-    fixture.archive(&payload_ids(&canonical)[..2]).await;
+    fixture
+        .archive(
+            &crate::host::requests::tests::unnegotiated_replay_tests::payload_ids(&canonical)[..2],
+        )
+        .await;
     fixture.set_caps(PeriCaps::default());
 
     let effective = fixture.effective().await;
@@ -28,7 +38,10 @@ async fn streamed_canonical_replay_delivers_the_archived_bodies_in_canonical_ord
 
     fixture.load_unnegotiated().await.unwrap();
 
-    let expected: Vec<String> = canonical.iter().map(payload_text).collect();
+    let expected: Vec<String> = canonical
+        .iter()
+        .map(crate::host::requests::tests::unnegotiated_replay_tests::payload_text)
+        .collect();
     assert_eq!(expected.len(), 4);
     assert!(
         expected.contains(&"归档：第一轮问题".to_owned()),
@@ -59,16 +72,18 @@ async fn streamed_canonical_replay_wire_carries_no_peri_private_fields_for_a_sta
 
     let response = fixture.load_unnegotiated().await.unwrap();
 
-    let keys = replay_keys(&fixture);
+    let keys = crate::host::requests::tests::unnegotiated_replay_tests::replay_keys(&fixture);
     assert!(!keys.is_empty(), "回放通知上确实有内容可查");
     let peri: Vec<&String> = keys.iter().filter(|key| key.starts_with("peri")).collect();
     assert!(
         peri.is_empty(),
         "未协商连接的回放通知不得出现 Peri 私有字段: {peri:?}"
     );
-    assert_no_pagination_fields(&wire_keys(&fixture, &response));
+    crate::host::requests::tests::unnegotiated_replay_tests::assert_no_pagination_fields(
+        &crate::host::requests::tests::unnegotiated_replay_tests::wire_keys(&fixture, &response),
+    );
     assert!(
-        !wire_keys(&fixture, &response)
+        !crate::host::requests::tests::unnegotiated_replay_tests::wire_keys(&fixture, &response)
             .iter()
             .any(|key| key == "periLoadGeneration"),
         "未声明 peri.replay 的连接不会拿到代次"
@@ -121,7 +136,9 @@ async fn streamed_canonical_replay_keeps_the_generation_gated_by_the_replay_capa
         );
     }
     // 代次之外一个分页私有字段都没有：声明了回放扩展 ≠ 拿到分页语义。
-    assert_no_pagination_fields(&wire_keys(&fixture, &response));
+    crate::host::requests::tests::unnegotiated_replay_tests::assert_no_pagination_fields(
+        &crate::host::requests::tests::unnegotiated_replay_tests::wire_keys(&fixture, &response),
+    );
 }
 
 /// 边界：空会话（没有任何自有行）回放成功且不产出一条通知。
@@ -203,7 +220,7 @@ async fn streamed_canonical_replay_delivers_an_oversized_body_whole() {
 #[tokio::test]
 async fn streamed_canonical_replay_of_a_live_session_still_reads_storage() {
     let mut fixture = ReplayFixture::new(SpyMode::Forward).await;
-    let sid = register_session_with_history(
+    let sid = crate::host::requests::tests::register_session_with_history(
         &mut fixture.sessions,
         fixture.cwd.to_str().unwrap(),
         &fixture.cfg,
@@ -211,7 +228,9 @@ async fn streamed_canonical_replay_of_a_live_session_still_reads_storage() {
     .await;
     fixture.id = sid.clone();
     fixture.set_caps(PeriCaps::default());
-    let live_ids = payload_ids(&fixture.canonical().await);
+    let live_ids = crate::host::requests::tests::unnegotiated_replay_tests::payload_ids(
+        &fixture.canonical().await,
+    );
     fixture.archive(&live_ids[..2]).await;
     let live_tail = fixture.sessions[&sid]
         .history_payloads
@@ -256,7 +275,11 @@ async fn negotiated_initial_load_keeps_the_effective_set_and_the_entry_marks() {
         .await;
     let canonical = fixture.canonical().await;
     let live_id = canonical[2].id();
-    fixture.archive(&payload_ids(&canonical)[..2]).await;
+    fixture
+        .archive(
+            &crate::host::requests::tests::unnegotiated_replay_tests::payload_ids(&canonical)[..2],
+        )
+        .await;
     fixture.set_connection_caps(PeriCaps {
         replay: true,
         history_pagination: true,

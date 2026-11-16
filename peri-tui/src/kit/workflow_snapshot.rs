@@ -16,10 +16,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::acp_client::client::AcpTuiClient;
-use crate::kit::atoms::WORKFLOW_SNAPSHOT;
 
 // ── DTO types ──────────────────────────────────────────────────────────────
 
+#[must_use]
 fn unknown_status() -> String {
     "unknown".to_string()
 }
@@ -132,6 +132,8 @@ pub fn spawn_workflow_poll(
     })
 }
 
+use crate::kit::atoms::WORKFLOW_SNAPSHOT;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,7 +146,7 @@ mod tests {
             "post_processing_status": "failed", "delivery_status": "blocked",
             "phases": [], "agents": []
         }]}))
-        .unwrap();
+        .expect("terminal projection preserves four statuses: fixture JSON must match the expected schema");
         let run = &snapshot.runs[0];
         assert_eq!(run.execution_status, "completed");
         assert_eq!(run.acceptance_status, "passed");
@@ -158,7 +160,7 @@ mod tests {
             "run_id": "legacy", "workflow_name": "legacy", "status": "completed",
             "phases": [], "agents": []
         }))
-        .unwrap();
+        .expect("legacy snapshot defaults delivery dimensions to unknown: fixture JSON must match the expected schema");
         assert_eq!(run.execution_status, "unknown");
         assert_eq!(run.acceptance_status, "unknown");
         assert_eq!(run.post_processing_status, "unknown");

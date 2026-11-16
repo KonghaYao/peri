@@ -1,20 +1,21 @@
 // ─── SEP-2640 规范路径：skills/list ───────────────────────────────────────
 
-use super::super::client::cache_scope_allows_persistence;
+use super::super::client;
 use super::super::client::ConnectionResourceCache;
 use peri_acp_types::skills::{SkillMetadata, SkillResource};
-use rmcp::{
-    model::{
-        CacheScope, ClientRequest, CustomRequest, ReadResourceRequestParams, ResourceContents,
-        ServerResult,
-    },
-    Peer, RoleClient,
-};
+use rmcp::model::CacheScope;
+use rmcp::model::ClientRequest;
+use rmcp::model::CustomRequest;
+use rmcp::model::ReadResourceRequestParams;
+use rmcp::model::ResourceContents;
+use rmcp::model::ServerResult;
+use rmcp::Peer;
+use rmcp::RoleClient;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
-use super::legacy_scan::uri_eq_ignore_scheme_case;
-use super::verify::{build_metadata, disambiguate_names, frontmatter_maps_equal, verify_digest};
+use super::legacy_scan;
+use super::verify;
 use super::{MAX_LIST_PAGES, RESOURCE_READ_TIMEOUT, SKILLS_LIST_TIMEOUT};
 
 /// `skills/list` 响应（分页；`nextCursor` 缺省兼容未分页 server）。
@@ -219,7 +220,7 @@ async fn collect_via_skills_list_inner(
                 if !cache.is_current() {
                     return Err("skills/list connection changed".to_string());
                 }
-                if cache_scope_allows_persistence(page.cache_scope)
+                if client::cache_scope_allows_persistence(page.cache_scope)
                     || (page.cache_scope.is_none() && page.ttl_ms.is_some())
                 {
                     if let Some(ticket) = ticket {
@@ -399,7 +400,7 @@ pub(crate) async fn recover_entry_via_skills_get(
     uri: &str,
 ) -> Option<SkillMetadata> {
     let refreshed = fetch_skill_entry(peer, uri).await?;
-    if !uri_eq_ignore_scheme_case(&refreshed.uri, uri) {
+    if !legacy_scan::uri_eq_ignore_scheme_case(&refreshed.uri, uri) {
         tracing::warn!(
             server,
             %uri,
@@ -445,7 +446,7 @@ pub(crate) async fn refresh_entry_and_content(
     let Some(expected) = meta
         .resources
         .iter()
-        .find(|resource| uri_eq_ignore_scheme_case(&resource.uri, request_uri))
+        .find(|resource| legacy_scan::uri_eq_ignore_scheme_case(&resource.uri, request_uri))
     else {
         tracing::warn!(
             server,
@@ -456,7 +457,7 @@ pub(crate) async fn refresh_entry_and_content(
     };
     let (text, mime) = match read_skill_resource_text(peer, server, request_uri).await {
         SkillResourceRead::Text(text, mime) => {
-            if !verify_digest(&text, &expected.digest) {
+            if !verify::verify_digest(&text, &expected.digest) {
                 tracing::warn!(
                     server,
                     %request_uri,
@@ -484,7 +485,7 @@ pub(crate) async fn refresh_entry_and_content(
         }
     };
     // SKILL.md 自身：内容即身份载体，frontmatter 必须与刷新条目全量一致。
-    if uri_eq_ignore_scheme_case(request_uri, entry_uri) {
+    if legacy_scan::uri_eq_ignore_scheme_case(request_uri, entry_uri) {
         let Some(expected_fm) = meta.frontmatter.as_ref() else {
             tracing::warn!(server, %request_uri, "MCP skill 恢复失败：刷新条目缺 frontmatter 快照");
             return None;
@@ -493,7 +494,7 @@ pub(crate) async fn refresh_entry_and_content(
             tracing::warn!(server, %request_uri, "MCP skill 恢复失败：正文 frontmatter 解析失败");
             return None;
         };
-        if !frontmatter_maps_equal(&actual_fm, expected_fm) {
+        if !verify::frontmatter_maps_equal(&actual_fm, expected_fm) {
             tracing::warn!(
                 server,
                 %request_uri,
@@ -644,7 +645,7 @@ pub(crate) fn entry_to_metadata(server: &str, entry: &SkillListEntry) -> Option<
     }
     let name = entry.frontmatter.get("name")?.as_str()?;
     let description = entry.frontmatter.get("description")?.as_str()?;
-    build_metadata(
+    verify::build_metadata(
         server,
         &entry.uri,
         name,
@@ -669,5 +670,5 @@ pub(crate) fn entries_to_metadata(
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     let all_rejected = total > 0 && out.is_empty();
-    (all_rejected, disambiguate_names(server, out))
+    (all_rejected, verify::disambiguate_names(server, out))
 }

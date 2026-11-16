@@ -1,6 +1,14 @@
 //! Tests for panel_registry
-#[cfg(test)]
-use super::*;
+
+use super::ACTIVE_PANEL;
+use super::KeyCode;
+use super::MutexGroup;
+use super::OPEN_PANELS;
+use super::PANELS;
+use super::PanelKind;
+use super::PanelScope;
+use super::PanelSize;
+
 #[cfg(test)]
 use ratatui_kit::ratatui::layout::Constraint;
 #[cfg(test)]
@@ -19,7 +27,7 @@ fn test_meta_all_panels_present() {
     // 验证 PANELS 穷举所有 PanelKind
     for kind in ALL_PANEL_KINDS {
         assert!(
-            meta(*kind).is_some(),
+            super::meta(*kind).is_some(),
             "PanelKind {:?} missing from PANELS",
             kind
         );
@@ -48,7 +56,7 @@ fn test_shortcuts_unique() {
 #[serial]
 fn test_open_panel_pushes_to_stack() {
     setup_atoms();
-    open_panel(PanelKind::Model);
+    super::open_panel(PanelKind::Model);
     let stack = OPEN_PANELS.state().read().clone();
     assert_eq!(stack, vec![PanelKind::Model]);
     assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::Model));
@@ -58,8 +66,8 @@ fn test_open_panel_pushes_to_stack() {
 #[serial]
 fn test_open_two_panels_different_groups() {
     setup_atoms();
-    open_panel(PanelKind::Model); // Settings 组
-    open_panel(PanelKind::Cron); // Tools 组
+    super::open_panel(PanelKind::Model); // Settings 组
+    super::open_panel(PanelKind::Cron); // Tools 组
     let stack = OPEN_PANELS.state().read().clone();
     assert_eq!(stack, vec![PanelKind::Model, PanelKind::Cron]);
     assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::Cron));
@@ -70,8 +78,8 @@ fn test_open_two_panels_different_groups() {
 fn test_open_same_mutex_group_replaces() {
     setup_atoms();
     // Model 和 Config 都属于 Settings 组
-    open_panel(PanelKind::Model);
-    open_panel(PanelKind::Config);
+    super::open_panel(PanelKind::Model);
+    super::open_panel(PanelKind::Config);
     let stack = OPEN_PANELS.state().read().clone();
     // Model 应被替换为 Config
     assert_eq!(stack, vec![PanelKind::Config]);
@@ -82,9 +90,9 @@ fn test_open_same_mutex_group_replaces() {
 #[serial]
 fn test_open_already_open_brings_to_top() {
     setup_atoms();
-    open_panel(PanelKind::Model); // Settings
-    open_panel(PanelKind::Cron); // Tools（不同组，共存）
-    open_panel(PanelKind::Model); // 再次打开 Model——应移到栈顶
+    super::open_panel(PanelKind::Model); // Settings
+    super::open_panel(PanelKind::Cron); // Tools（不同组，共存）
+    super::open_panel(PanelKind::Model); // 再次打开 Model——应移到栈顶
 
     let stack = OPEN_PANELS.state().read().clone();
     assert_eq!(stack, vec![PanelKind::Cron, PanelKind::Model]);
@@ -95,10 +103,10 @@ fn test_open_already_open_brings_to_top() {
 #[serial]
 fn test_close_active_panel() {
     setup_atoms();
-    open_panel(PanelKind::Model);
-    open_panel(PanelKind::Cron); // 栈: [Model, Cron], active=Cron
+    super::open_panel(PanelKind::Model);
+    super::open_panel(PanelKind::Cron); // 栈: [Model, Cron], active=Cron
 
-    let closed = close_active_panel();
+    let closed = super::close_active_panel();
     assert_eq!(closed, Some(PanelKind::Cron));
     let stack = OPEN_PANELS.state().read().clone();
     assert_eq!(stack, vec![PanelKind::Model]);
@@ -109,7 +117,7 @@ fn test_close_active_panel() {
 #[serial]
 fn test_close_active_when_empty_returns_none() {
     setup_atoms();
-    let closed = close_active_panel();
+    let closed = super::close_active_panel();
     assert_eq!(closed, None);
 }
 
@@ -117,11 +125,11 @@ fn test_close_active_when_empty_returns_none() {
 #[serial]
 fn test_close_panel_specific() {
     setup_atoms();
-    open_panel(PanelKind::Model);
-    open_panel(PanelKind::Cron); // 栈: [Model, Cron]
+    super::open_panel(PanelKind::Model);
+    super::open_panel(PanelKind::Cron); // 栈: [Model, Cron]
 
     // 关闭非栈顶的 Model
-    let removed = close_panel(PanelKind::Model);
+    let removed = super::close_panel(PanelKind::Model);
     assert!(removed);
     let stack = OPEN_PANELS.state().read().clone();
     assert_eq!(stack, vec![PanelKind::Cron]);
@@ -132,7 +140,7 @@ fn test_close_panel_specific() {
 #[serial]
 fn test_close_panel_not_present_returns_false() {
     setup_atoms();
-    let removed = close_panel(PanelKind::Model);
+    let removed = super::close_panel(PanelKind::Model);
     assert!(!removed);
 }
 
@@ -140,11 +148,11 @@ fn test_close_panel_not_present_returns_false() {
 #[serial]
 fn test_toggle_panel() {
     setup_atoms();
-    let opened = toggle_panel(PanelKind::Model);
+    let opened = super::toggle_panel(PanelKind::Model);
     assert!(opened);
     assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::Model));
 
-    let closed = toggle_panel(PanelKind::Model);
+    let closed = super::toggle_panel(PanelKind::Model);
     assert!(!closed);
     assert!(OPEN_PANELS.state().read().is_empty());
     assert_eq!(*ACTIVE_PANEL.state().read(), None);
@@ -154,9 +162,9 @@ fn test_toggle_panel() {
 #[serial]
 fn test_close_all_panels() {
     setup_atoms();
-    open_panel(PanelKind::Model);
-    open_panel(PanelKind::Cron);
-    close_all_panels();
+    super::open_panel(PanelKind::Model);
+    super::open_panel(PanelKind::Cron);
+    super::close_all_panels();
     assert!(OPEN_PANELS.state().read().is_empty());
     assert_eq!(*ACTIVE_PANEL.state().read(), None);
 }
@@ -167,10 +175,14 @@ fn test_close_all_panels() {
 #[serial]
 fn test_subagent_detail_panel_registered() {
     // 穷举矩阵：meta 存在、标题/描述 FTL key 存在、无快捷键（Enter 分派打开）
-    let m = meta(PanelKind::SubAgentDetail).expect("SubAgentDetail 必须注册");
+    let m = super::meta(PanelKind::SubAgentDetail).expect("SubAgentDetail 必须注册");
     assert_eq!(m.shortcut_letter, '\0', "详情 pane 无快捷键");
-    assert!(!panel_title(PanelKind::SubAgentDetail).trim().is_empty());
-    assert!(!panel_description(PanelKind::SubAgentDetail).is_empty());
+    assert!(
+        !super::panel_title(PanelKind::SubAgentDetail)
+            .trim()
+            .is_empty()
+    );
+    assert!(!super::panel_description(PanelKind::SubAgentDetail).is_empty());
     assert_eq!(m.mutex_group, MutexGroup::Agent, "与 Agent 面板同互斥组");
 }
 
@@ -178,9 +190,9 @@ fn test_subagent_detail_panel_registered() {
 #[serial]
 fn test_subagent_detail_opens_and_replaces_agent_group() {
     setup_atoms();
-    open_panel(PanelKind::Agent);
+    super::open_panel(PanelKind::Agent);
     // 与 Agent 同 MutexGroup：打开详情关闭 Agent 面板（栈顶唯一）
-    open_panel(PanelKind::SubAgentDetail);
+    super::open_panel(PanelKind::SubAgentDetail);
     let stack = OPEN_PANELS.state().read().clone();
     assert_eq!(stack, vec![PanelKind::SubAgentDetail]);
     assert_eq!(
@@ -188,7 +200,7 @@ fn test_subagent_detail_opens_and_replaces_agent_group() {
         Some(PanelKind::SubAgentDetail)
     );
     // Esc 单层关闭（close_active_panel 弹栈）
-    let closed = close_active_panel();
+    let closed = super::close_active_panel();
     assert_eq!(closed, Some(PanelKind::SubAgentDetail));
     assert!(OPEN_PANELS.state().read().is_empty());
 }
@@ -196,20 +208,20 @@ fn test_subagent_detail_opens_and_replaces_agent_group() {
 #[test]
 #[serial]
 fn test_shell_detail_registered_tools_mutex() {
-    let m = meta(PanelKind::ShellDetail).expect("ShellDetail 必须注册");
+    let m = super::meta(PanelKind::ShellDetail).expect("ShellDetail 必须注册");
     assert_eq!(m.shortcut_letter, '\0', "Shell 详情无快捷键");
     assert_eq!(m.slash_command, "", "Shell 详情无 slash");
     assert_eq!(m.mutex_group, MutexGroup::Tools);
-    assert!(!panel_title(PanelKind::ShellDetail).trim().is_empty());
-    assert!(!panel_description(PanelKind::ShellDetail).is_empty());
+    assert!(!super::panel_title(PanelKind::ShellDetail).trim().is_empty());
+    assert!(!super::panel_description(PanelKind::ShellDetail).is_empty());
 }
 
 #[test]
 #[serial]
 fn test_open_shell_detail_closes_tasks() {
     setup_atoms();
-    open_panel(PanelKind::Tasks);
-    open_panel(PanelKind::ShellDetail);
+    super::open_panel(PanelKind::Tasks);
+    super::open_panel(PanelKind::ShellDetail);
     let stack = OPEN_PANELS.state().read().clone();
     assert_eq!(stack, vec![PanelKind::ShellDetail]);
     assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::ShellDetail));
@@ -242,7 +254,7 @@ fn test_bg_task_click_route_subagent_agent_mutex() {
     setup_atoms();
     use crate::kit::bg_task_click::{BgTaskClickRoute, apply_bg_task_click_route};
 
-    open_panel(PanelKind::Agent);
+    super::open_panel(PanelKind::Agent);
     apply_bg_task_click_route(BgTaskClickRoute::SubAgent {
         subagent_id: "sub-1".into(),
     });
@@ -254,25 +266,31 @@ fn test_bg_task_click_route_subagent_agent_mutex() {
 #[serial]
 fn test_shell_detail_esc_closes() {
     setup_atoms();
-    open_panel(PanelKind::ShellDetail);
-    let closed = close_active_panel();
+    super::open_panel(PanelKind::ShellDetail);
+    let closed = super::close_active_panel();
     assert_eq!(closed, Some(PanelKind::ShellDetail));
     assert!(OPEN_PANELS.state().read().is_empty());
 }
 
 #[test]
 fn test_from_key_code_ctrl_m_maps_to_model() {
-    assert_eq!(from_key_code(KeyCode::Char('m')), Some(PanelKind::Model));
-    assert_eq!(from_key_code(KeyCode::Char('M')), Some(PanelKind::Model));
+    assert_eq!(
+        super::from_key_code(KeyCode::Char('m')),
+        Some(PanelKind::Model)
+    );
+    assert_eq!(
+        super::from_key_code(KeyCode::Char('M')),
+        Some(PanelKind::Model)
+    );
 }
 
 #[test]
 fn test_from_key_code_unmapped_letter_returns_none() {
     // 'c' 和 'k' 未注册面板（Ctrl+C/K 保留）
-    assert_eq!(from_key_code(KeyCode::Char('c')), None);
-    assert_eq!(from_key_code(KeyCode::Char('k')), None);
+    assert_eq!(super::from_key_code(KeyCode::Char('c')), None);
+    assert_eq!(super::from_key_code(KeyCode::Char('k')), None);
     // 数字 / 其他按键也应返回 None
-    assert_eq!(from_key_code(KeyCode::Enter), None);
+    assert_eq!(super::from_key_code(KeyCode::Enter), None);
 }
 
 #[test]
@@ -335,24 +353,27 @@ fn test_registry_metadata_has_expected_shape() {
         assert!(m.priority < PANELS.len() as u8);
     }
     assert_eq!(
-        meta(PanelKind::Model).map(|m| m.mutex_group),
+        super::meta(PanelKind::Model).map(|m| m.mutex_group),
         Some(MutexGroup::Settings)
     );
     assert_eq!(
-        meta(PanelKind::ThreadBrowser).map(|m| m.scope),
+        super::meta(PanelKind::ThreadBrowser).map(|m| m.scope),
         Some(PanelScope::Session)
     );
     assert_eq!(
-        meta(PanelKind::Workflow).map(|m| m.scope),
+        super::meta(PanelKind::Workflow).map(|m| m.scope),
         Some(PanelScope::Global)
     );
 }
 
 #[test]
 fn test_panel_constraint_maps_panel_size() {
-    assert_eq!(panel_constraint(PanelSize::Fill), Constraint::Fill(1));
     assert_eq!(
-        panel_constraint(PanelSize::Length(42)),
+        super::panel_constraint(PanelSize::Fill),
+        Constraint::Fill(1)
+    );
+    assert_eq!(
+        super::panel_constraint(PanelSize::Length(42)),
         Constraint::Length(42)
     );
 }
@@ -360,7 +381,7 @@ fn test_panel_constraint_maps_panel_size() {
 #[test]
 fn test_render_all_registered_panels_constructs_element() {
     for m in PANELS {
-        let _panel = render(m.kind).expect("registered panel should render");
+        let _panel = super::render(m.kind).expect("registered panel should render");
     }
 }
 
@@ -371,7 +392,7 @@ fn test_from_shortcut_round_trip() {
         if m.shortcut_letter == '\0' {
             continue;
         }
-        assert_eq!(from_shortcut(m.shortcut_letter), Some(m.kind));
+        assert_eq!(super::from_shortcut(m.shortcut_letter), Some(m.kind));
     }
 }
 

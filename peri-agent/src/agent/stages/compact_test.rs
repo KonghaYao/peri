@@ -1,8 +1,8 @@
 //! Tests for compact
 
-use super::*;
 use crate::agent::compact_v2::config::CompactConfig;
 use crate::agent::events_v2::{EventBus, EventBusConfig, EventHandles, ObserveEvent};
+use crate::agent::stages::CompactInput;
 use crate::agent::stages::StageContext;
 use crate::agent::token::ContextBudget;
 use crate::messages::{BaseMessage, MessageContent, ToolCallRequest};
@@ -109,9 +109,13 @@ async fn confirm_fixture_exposure(
     for entry in original.entries() {
         transcript.append(entry.message().clone());
     }
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let request: Vec<_> = transcript.visible_messages().into_iter().cloned().collect();
-    let exposure = RequestExposure::capture(&request, &transcript).unwrap();
+    let exposure = RequestExposure::capture(&request, &transcript)
+        .expect("the capture fixture result is required for this assertion");
     let closed = request
         .iter()
         .flat_map(|message| message.tool_calls().iter().map(|call| call.id.clone()))
@@ -178,13 +182,12 @@ async fn test_full_failure_after_admission_does_not_commit_micro_or_reset_tracke
     });
     let token_tracker = ctx.compact.token_tracker.clone();
 
-    let error = run_compact(CompactInput {
+    let error = crate::agent::stages::compact::run_compact(CompactInput {
         context: ctx.clone(),
         has_tool_calls: true,
     })
     .await
-    .err()
-    .expect("高压 Full 失败必须结束本轮");
+    .expect_err("高压 Full 失败必须结束本轮");
 
     assert!(matches!(error, crate::error::AgentError::CompactNoLlm));
     assert!(
@@ -243,13 +246,12 @@ async fn test_compact_stage_smart_uses_same_admission_and_stops_without_tracker_
     });
     let token_tracker = ctx.compact.token_tracker.clone();
 
-    let error = run_compact(CompactInput {
+    let error = crate::agent::stages::compact::run_compact(CompactInput {
         context: ctx.clone(),
         has_tool_calls: true,
     })
     .await
-    .err()
-    .expect("高压 Full 失败必须结束本轮");
+    .expect_err("高压 Full 失败必须结束本轮");
 
     assert!(matches!(error, crate::error::AgentError::CompactNoLlm));
     assert!(
@@ -305,12 +307,12 @@ async fn test_compact_stage_micro_shadow_mode_is_not_compacted() {
         cache_read_input_tokens: None,
     });
 
-    let output = run_compact(CompactInput {
+    let output = crate::agent::stages::compact::run_compact(CompactInput {
         context: ctx,
         has_tool_calls: true,
     })
     .await
-    .unwrap();
+    .expect("the run compact fixture result is required for this assertion");
 
     assert!(
         !output.compacted,
@@ -354,12 +356,12 @@ async fn test_compact_stage_smart_shadow_mode_is_not_compacted() {
         cache_read_input_tokens: None,
     });
 
-    let output = run_compact(CompactInput {
+    let output = crate::agent::stages::compact::run_compact(CompactInput {
         context: ctx,
         has_tool_calls: true,
     })
     .await
-    .unwrap();
+    .expect("the run compact fixture result is required for this assertion");
     assert!(
         !output.compacted,
         "Smart shadow mode 不得向 stage 报告 compacted=true"
@@ -383,12 +385,12 @@ async fn test_compact_stage_shadow_mode_emits_no_messages_compacted() {
         cache_read_input_tokens: None,
     });
 
-    let output = run_compact(CompactInput {
+    let output = crate::agent::stages::compact::run_compact(CompactInput {
         context: ctx,
         has_tool_calls: true,
     })
     .await
-    .unwrap();
+    .expect("the run compact fixture result is required for this assertion");
 
     assert!(!output.compacted);
     let events = observe_events(&mut handles);
@@ -428,12 +430,12 @@ async fn test_compact_stage_failure_limit_emits_no_messages_compacted() {
         cache_read_input_tokens: None,
     });
 
-    let output = run_compact(CompactInput {
+    let output = crate::agent::stages::compact::run_compact(CompactInput {
         context: ctx,
         has_tool_calls: true,
     })
     .await
-    .unwrap();
+    .expect("the run compact fixture result is required for this assertion");
 
     assert!(!output.compacted);
     let events = observe_events(&mut handles);
@@ -474,12 +476,12 @@ async fn test_micro_success_does_not_reset_provider_usage() {
     });
     let token_tracker = ctx.compact.token_tracker.clone();
 
-    let output = run_compact(CompactInput {
+    let output = crate::agent::stages::compact::run_compact(CompactInput {
         context: ctx.clone(),
         has_tool_calls: true,
     })
     .await
-    .unwrap();
+    .expect("the run compact fixture result is required for this assertion");
 
     assert!(output.compacted, "足量收益应提交一次 Micro");
     assert_eq!(
@@ -525,12 +527,12 @@ async fn test_compact_stage_deferred_emits_paired_end_without_completion() {
         cache_read_input_tokens: None,
     });
 
-    let output = run_compact(CompactInput {
+    let output = crate::agent::stages::compact::run_compact(CompactInput {
         context: ctx.clone(),
         has_tool_calls: true,
     })
     .await
-    .unwrap();
+    .expect("the run compact fixture result is required for this assertion");
 
     assert!(!output.compacted, "延后不得向 stage 报告 compacted=true");
     assert_eq!(
@@ -611,12 +613,12 @@ async fn test_auto_compact_consumes_each_pressure_sample_once() {
         cache_read_input_tokens: None,
     });
 
-    let first = run_compact(CompactInput {
+    let first = crate::agent::stages::compact::run_compact(CompactInput {
         context: ctx.clone(),
         has_tool_calls: true,
     })
     .await
-    .unwrap();
+    .expect("the run compact fixture result is required for this assertion");
     assert!(first.compacted);
     let first_started = observe_events(&mut handles)
         .into_iter()
@@ -630,12 +632,12 @@ async fn test_auto_compact_consumes_each_pressure_sample_once() {
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
     });
-    let repeated = run_compact(CompactInput {
+    let repeated = crate::agent::stages::compact::run_compact(CompactInput {
         context: ctx.clone(),
         has_tool_calls: true,
     })
     .await
-    .unwrap();
+    .expect("the run compact fixture result is required for this assertion");
     assert!(!repeated.compacted);
     assert!(observe_events(&mut handles).is_empty());
 
@@ -645,12 +647,12 @@ async fn test_auto_compact_consumes_each_pressure_sample_once() {
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
     });
-    run_compact(CompactInput {
+    crate::agent::stages::compact::run_compact(CompactInput {
         context: ctx.clone(),
         has_tool_calls: true,
     })
     .await
-    .unwrap();
+    .expect("the run compact fixture result is required for this assertion");
     assert_eq!(
         observe_events(&mut handles)
             .into_iter()
@@ -664,12 +666,12 @@ async fn test_auto_compact_consumes_each_pressure_sample_once() {
         .token_tracker
         .write()
         .add_estimated_tool_tokens("new tool output");
-    run_compact(CompactInput {
+    crate::agent::stages::compact::run_compact(CompactInput {
         context: ctx,
         has_tool_calls: true,
     })
     .await
-    .unwrap();
+    .expect("the run compact fixture result is required for this assertion");
     assert_eq!(
         observe_events(&mut handles)
             .into_iter()
@@ -705,7 +707,7 @@ async fn test_compact_stage_cancel_without_commit_emits_compact_ended() {
     // 预先取消 turn token：select biased cancel arm 立即胜出
     ctx.session.turn.cancel_token.cancel();
 
-    let result = run_compact(CompactInput {
+    let result = crate::agent::stages::compact::run_compact(CompactInput {
         context: ctx.clone(),
         has_tool_calls: true,
     })
@@ -805,12 +807,12 @@ async fn test_auto_gate_7499_7500_7501_with_and_without_usage() {
                     cache_read_input_tokens: None,
                 });
             }
-            let outcome = run_compact(CompactInput {
+            let outcome = crate::agent::stages::compact::run_compact(CompactInput {
                 context: ctx.clone(),
                 has_tool_calls: false,
             })
             .await
-            .unwrap();
+            .expect("the run compact fixture result is required for this assertion");
             assert!(!outcome.compacted, "shadow mode never commits");
             assert_eq!(
                 ctx.compact.token_tracker.read().estimated_context_tokens(),
@@ -853,16 +855,23 @@ async fn test_archive_probe_cancel_and_failure_restore_history_and_close_events(
         let (entered_tx, entered) = tokio::sync::oneshot::channel();
         let (release, released) = tokio::sync::oneshot::channel();
         let dropped = Arc::new(AtomicBool::new(false));
-        *store.archive_probe_gate.lock().unwrap() = Some(ResumeLoadGate {
-            entered: entered_tx,
-            release: released,
-            dropped: dropped.clone(),
-        });
+        *store
+            .archive_probe_gate
+            .lock()
+            .expect("store archive probe gate mutex must remain unpoisoned throughout the test") =
+            Some(ResumeLoadGate {
+                entered: entered_tx,
+                release: released,
+                dropped: dropped.clone(),
+            });
         let source = BaseMessage::human("Preserve my canonical instruction.");
         let mut transcript = crate::session::MessageTranscript::new()
             .with_persistence(store, "archive-probe".into());
         transcript.append(source.clone());
-        transcript.flush_persistence().await.unwrap();
+        transcript
+            .flush_persistence()
+            .await
+            .expect("the flush persistence fixture result is required for this assertion");
         *ctx.session.transcript.write() = transcript;
         ctx.runtime.tools.write().insert(
             "ReadContextArchive".into(),
@@ -881,24 +890,27 @@ async fn test_archive_probe_cancel_and_failure_restore_history_and_close_events(
         });
         let context = ctx.clone();
         let run = tokio::spawn(async move {
-            run_compact(CompactInput {
+            crate::agent::stages::compact::run_compact(CompactInput {
                 context,
                 has_tool_calls: false,
             })
             .await
         });
-        entered.await.unwrap();
+        entered
+            .await
+            .expect("the entered fixture result is required for this assertion");
         if cancel {
             ctx.session.turn.cancel_token.cancel();
         } else {
-            release.send(()).unwrap();
+            release
+                .send(())
+                .expect("release send test receiver must remain available for this delivery");
         }
         let error = tokio::time::timeout(std::time::Duration::from_secs(2), run)
             .await
             .expect("archive probing must not delay cancellation")
-            .unwrap()
-            .err()
-            .expect("cancelled or failed archive probe must fail compaction");
+            .expect("the expect fixture result is required for this assertion")
+            .expect_err("cancelled or failed archive probe must fail compaction");
         if cancel {
             assert!(matches!(error, crate::error::AgentError::Interrupted));
         } else {
@@ -910,8 +922,15 @@ async fn test_archive_probe_cancel_and_failure_restore_history_and_close_events(
         let transcript = ctx.session.transcript.read();
         assert_eq!(transcript.entries().len(), 1);
         assert_eq!(
-            serde_json::to_value(transcript.get(source.id()).unwrap().message()).unwrap(),
-            serde_json::to_value(source).unwrap()
+            serde_json::to_value(
+                transcript
+                    .get(source.id())
+                    .expect("the id fixture result is required for this assertion")
+                    .message()
+            )
+            .expect("the fixture entry must contain a message payload"),
+            serde_json::to_value(source)
+                .expect("to_value must accept this test fixture representation")
         );
         let events = observe_events(&mut handles);
         assert_eq!(

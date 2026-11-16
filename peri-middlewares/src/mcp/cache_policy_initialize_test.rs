@@ -1,4 +1,4 @@
-use super::*;
+use super::{Arc, ConfigSource, McpClientPool, McpInitStatus, McpServerConfig, Path};
 
 #[tokio::test]
 async fn configuration_policy_is_installed_before_empty_pool_becomes_ready() {
@@ -66,9 +66,11 @@ async fn reinitialization_cannot_reenable_disabled_cache_policy() {
 }
 
 fn frozen_snapshot(directory: &Path, file_cache: bool) -> Arc<peri_config::ConfigurationSnapshot> {
-    let scope =
-        peri_config::ConfigurationScope::new(directory.to_owned(), directory.join("settings.json"))
-            .unwrap();
+    let scope = peri_config::ConfigurationScope::try_new(
+        directory.to_owned(),
+        directory.join("settings.json"),
+    )
+    .unwrap();
     Arc::new(
         peri_config::ConfigurationSnapshot::resolve(
             scope,

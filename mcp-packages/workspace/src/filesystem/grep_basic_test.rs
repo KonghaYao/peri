@@ -1,4 +1,5 @@
-use super::*;
+use crate::filesystem::grep::GrepTool;
+use peri_agent::tools::BaseTool;
 
 #[tokio::test]
 async fn test_grep_hit() {

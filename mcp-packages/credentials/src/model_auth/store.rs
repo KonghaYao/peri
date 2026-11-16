@@ -1,10 +1,11 @@
-use std::{
-    fs::{File, OpenOptions},
-    io::{Read, Write},
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::fs::File;
+use std::fs::OpenOptions;
+use std::io::Read;
+use std::io::Write;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
@@ -26,7 +27,7 @@ pub(super) struct Lease {
 }
 
 impl Store {
-    pub fn new(root: PathBuf, account: String) -> AuthResult<Self> {
+    pub fn try_new(root: PathBuf, account: String) -> AuthResult<Self> {
         if !cfg!(unix) {
             return Err(AuthError::UnsupportedPlatform);
         }

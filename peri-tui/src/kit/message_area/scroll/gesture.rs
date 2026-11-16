@@ -5,6 +5,7 @@ use crate::kit::text_selection::TextSelection;
 use ratatui_kit::crossterm::event::{MouseButton, MouseEventKind};
 use ratatui_kit::ratatui::layout::Rect;
 
+#[must_use]
 pub(in crate::kit::message_area) fn selection_captures_pointer(
     pending: Option<GesturePending>,
     dragging: bool,
@@ -51,11 +52,13 @@ pub(in crate::kit::message_area) fn selection_bounds_on_release(
 /// [Why 屏幕坐标] 只比较屏幕坐标（`(column, row)`）——Down/Drag 天然都是屏幕
 /// 坐标，判定不再经过视觉换算，滚动偏移/网格前缀的坐标空间问题在判定路径上
 /// 不复存在。判定时机在 Drag 分支（升级判定先于节流闸门）。
+#[must_use]
 pub(in crate::kit::message_area) fn is_click(down: (u16, u16), cur: (u16, u16)) -> bool {
     cur.0.abs_diff(down.0) <= 2 && cur.1.abs_diff(down.1) <= 1
 }
 
 /// 按手势类型选择单击容差：entry header 保留防抖，正文任何位移都算拖拽意图。
+#[must_use]
 pub(in crate::kit::message_area) fn is_click_for(
     pending: &GesturePending,
     cur: (u16, u16),
@@ -69,6 +72,7 @@ pub(in crate::kit::message_area) fn is_click_for(
 
 /// Up 时按**最终位移**补结算：没有收到中间 Drag 的正文拖选也能建立选区。
 /// 仅正文（无 entry 点击动作）生效；header 的单击语义保持不变。
+#[must_use]
 pub(in crate::kit::message_area) fn release_upgrades(
     pending: &GesturePending,
     up_screen: (u16, u16),
@@ -207,6 +211,7 @@ pub(in crate::kit::message_area) fn drag_step(
 /// 先消费 Pending 命中，未命中才落到 scroll.rs Up 分支）。
 /// 返回是否应复位 gesture：Pending 未命中（gesture 仍为 Some）→ 复位；
 /// Armed（dragging）→ 复制流程，gesture 已在升级瞬间复位为 None，无需再写。
+#[must_use]
 pub(in crate::kit::message_area) fn settle_up(dragging: bool, gesture_pending: bool) -> bool {
     !dragging && gesture_pending
 }

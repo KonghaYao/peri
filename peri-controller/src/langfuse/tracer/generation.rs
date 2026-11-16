@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use peri_model::TokenUsage;
 
-use super::input_snapshot::GenerationInput;
+use crate::langfuse::tracer::input_snapshot::GenerationInput;
 
 /// 单个 generation 的缓存条目；`input` 不可 Clone/Debug（来源与 permit 私有）。
 pub(crate) struct GenerationCached {

@@ -1,4 +1,6 @@
-use super::*;
+use super::AuthCommand;
+use super::ChatGptAction;
+
 use clap::Parser;
 
 #[test]
@@ -14,7 +16,7 @@ fn test_auth_cli_parses_account_and_explicit_store() {
         "--account".into(),
         "work".into(),
     ])
-    .unwrap();
+    .expect("auth cli parses account and explicit store: fixture must have the expected variant");
     let Some(crate::Commands::Auth {
         action: AuthCommand::Chatgpt {
             action: ChatGptAction::Login(options),
@@ -30,8 +32,8 @@ fn test_auth_cli_parses_account_and_explicit_store() {
 #[test]
 fn test_auth_store_default_tracks_selected_config_file() {
     let config = std::env::temp_dir().join("isolated/settings.json");
-    let store = credential_store(&config, None).unwrap();
-    assert_eq!(store, config.parent().unwrap().join("credentials/chatgpt"));
+    let store = super::credential_store(&config, None).expect("auth store default tracks selected config file: the credential_store fixture operation uses valid inputs");
+    assert_eq!(store, config.parent().expect("auth store default tracks selected config file: the fixture path must have its expected parent directory").join("credentials/chatgpt"));
 }
 
 #[test]

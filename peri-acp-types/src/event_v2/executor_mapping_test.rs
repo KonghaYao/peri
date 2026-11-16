@@ -1,6 +1,8 @@
 //! 协议映射与显式过滤契约。
 
-use super::*;
+use crate::event_v2::ObserveEvent;
+use crate::event_v2::RenderEvent;
+use crate::event_v2::StateEvent;
 
 use crate::event::CompactTrigger;
 use crate::event::ExecutorEvent;
@@ -30,7 +32,7 @@ fn test_user_input_delivered_maps_identity_generation_and_full_content() {
         generation,
         input_id: mapped_id,
         content,
-    } = render_event_to_executor(decoded).unwrap()
+    } = crate::event_v2::executor_mapping::render_event_to_executor(decoded).unwrap()
     else {
         panic!("应映射真实用户输入投递事件");
     };
@@ -58,7 +60,8 @@ fn test_user_input_queue_snapshot_maps_without_losing_revision() {
     assert_eq!(event.agent_id(), agent_id, "不允许 mapper 补造来源");
     let encoded = serde_json::to_value(&event).unwrap();
     let decoded: StateEvent = serde_json::from_value(encoded).unwrap();
-    let ExecutorEvent::UserInputQueueChanged(snapshot) = state_event_to_executor(decoded).unwrap()
+    let ExecutorEvent::UserInputQueueChanged(snapshot) =
+        crate::event_v2::executor_mapping::state_event_to_executor(decoded).unwrap()
     else {
         panic!("应映射队列快照");
     };
@@ -78,7 +81,7 @@ fn test_user_input_run_started_maps_prompt_identity() {
     let ExecutorEvent::UserInputRunStarted {
         generation,
         request_id,
-    } = state_event_to_executor(event).unwrap()
+    } = crate::event_v2::executor_mapping::state_event_to_executor(event).unwrap()
     else {
         panic!("应映射 mailbox 执行准入");
     };
@@ -98,7 +101,8 @@ fn test_text_chunk_maps() {
         message_id: crate::messages::MessageId::new(),
         chunk: "hello".to_string(),
     };
-    let executor_event = render_event_to_executor(r).expect("TextChunk 应映射");
+    let executor_event =
+        crate::event_v2::executor_mapping::render_event_to_executor(r).expect("TextChunk 应映射");
     match executor_event {
         ExecutorEvent::TextChunk {
             chunk,
@@ -124,7 +128,7 @@ fn test_thinking_chunk_maps() {
         message_id: crate::messages::MessageId::new(),
         chunk: "thinking".to_string(),
     };
-    match render_event_to_executor(r).unwrap() {
+    match crate::event_v2::executor_mapping::render_event_to_executor(r).unwrap() {
         ExecutorEvent::AiReasoning {
             text,
             message_id,
@@ -155,7 +159,7 @@ fn test_tool_started_maps() {
         origin_message_id: None,
         origin_readable: None,
     };
-    match render_event_to_executor(r).unwrap() {
+    match crate::event_v2::executor_mapping::render_event_to_executor(r).unwrap() {
         ExecutorEvent::ToolStart {
             tool_call_id,
             name,
@@ -182,7 +186,7 @@ fn test_tool_ended_maps() {
         is_error: true,
         subagent_failure: None,
     };
-    match render_event_to_executor(r).unwrap() {
+    match crate::event_v2::executor_mapping::render_event_to_executor(r).unwrap() {
         ExecutorEvent::ToolEnd {
             tool_call_id,
             is_error,
@@ -208,7 +212,9 @@ fn test_render_event_tool_ended_carries_output() {
         is_error: false,
         subagent_failure: None,
     };
-    match render_event_to_executor(r).expect("ToolEnded 应映射为 ToolEnd") {
+    match crate::event_v2::executor_mapping::render_event_to_executor(r)
+        .expect("ToolEnded 应映射为 ToolEnd")
+    {
         ExecutorEvent::ToolEnd {
             output,
             is_error,
@@ -236,7 +242,7 @@ fn test_budget_warning_maps() {
         total_tokens: 200000,
         percentage: 0.5,
     };
-    match render_event_to_executor(r).unwrap() {
+    match crate::event_v2::executor_mapping::render_event_to_executor(r).unwrap() {
         ExecutorEvent::ContextWarning {
             used_tokens,
             total_tokens,
@@ -258,7 +264,7 @@ fn test_hitl_pending_filtered() {
         tool_call_id: "tc".to_string(),
         tool_name: "Bash".to_string(),
     };
-    assert!(render_event_to_executor(r).is_none());
+    assert!(crate::event_v2::executor_mapping::render_event_to_executor(r).is_none());
 }
 
 #[test]
@@ -280,7 +286,9 @@ fn test_render_event_turn_committed_carries_messages() {
         elapsed_secs: 0.1,
         finalized_messages: std::sync::Arc::new(msgs.clone()),
     };
-    match render_event_to_executor(r).expect("TurnCompleted 不应被丢弃") {
+    match crate::event_v2::executor_mapping::render_event_to_executor(r)
+        .expect("TurnCompleted 不应被丢弃")
+    {
         ExecutorEvent::TurnCommitted { messages, steps } => {
             assert_eq!(messages.len(), 2);
             assert_eq!(messages[0].content(), "hello");
@@ -305,7 +313,8 @@ fn test_state_event_snapshot_maps_to_meta() {
         budget_pct: Some(0.66),
         context_total_tokens: Some(150_000),
     };
-    let exec_ev = state_event_to_executor(s).expect("StateSnapshot 不应被丢弃");
+    let exec_ev = crate::event_v2::executor_mapping::state_event_to_executor(s)
+        .expect("StateSnapshot 不应被丢弃");
     match exec_ev {
         ExecutorEvent::StateSnapshotMeta {
             message_count,
@@ -340,7 +349,7 @@ fn test_state_event_snapshot_meta_none_budget_preserved() {
         budget_pct: None,
         context_total_tokens: None,
     };
-    match state_event_to_executor(s).unwrap() {
+    match crate::event_v2::executor_mapping::state_event_to_executor(s).unwrap() {
         ExecutorEvent::StateSnapshotMeta {
             budget_pct,
             context_total_tokens,
@@ -368,7 +377,7 @@ fn test_observe_llm_call_end_maps_with_usage() {
         cache_read_input_tokens: Some(400),
         request_id: Some("req-abc".to_string()),
     };
-    match observe_event_to_executor(o).unwrap() {
+    match crate::event_v2::executor_mapping::observe_event_to_executor(o).unwrap() {
         ExecutorEvent::LlmCallEnd {
             usage,
             model,
@@ -417,7 +426,9 @@ fn test_observe_llm_call_end_maps_with_output() {
         cache_read_input_tokens: Some(0),
         request_id: None,
     };
-    match observe_event_to_executor(o).expect("LlmCallEnd 应映射") {
+    match crate::event_v2::executor_mapping::observe_event_to_executor(o)
+        .expect("LlmCallEnd 应映射")
+    {
         ExecutorEvent::LlmCallEnd {
             output,
             step,
@@ -447,7 +458,8 @@ fn test_observe_llm_call_start_maps_with_messages_tools() {
         messages: std::sync::Arc::new(vec![]),
         tools: vec![],
     };
-    let mapped = observe_event_to_executor(s).expect("LlmCallStart 应映射为 Some");
+    let mapped = crate::event_v2::executor_mapping::observe_event_to_executor(s)
+        .expect("LlmCallStart 应映射为 Some");
     match mapped {
         ExecutorEvent::LlmCallStart {
             step,
@@ -488,7 +500,7 @@ fn test_observe_messages_compacted_maps() {
         outcome: crate::compact::CompactOutcome::MicroApplied,
     };
     // Phase 5 Step 4：映射收敛为重建信号三字段（summary/messages/trigger）。
-    match observe_event_to_executor(o).unwrap() {
+    match crate::event_v2::executor_mapping::observe_event_to_executor(o).unwrap() {
         ExecutorEvent::CompactCompleted {
             summary, trigger, ..
         } => {
@@ -512,7 +524,7 @@ fn test_observe_subagent_lifecycle_maps() {
         is_background: false,
         parent_tool_call_id: Some("tool-call-7".to_string()),
     };
-    match observe_event_to_executor(start).unwrap() {
+    match crate::event_v2::executor_mapping::observe_event_to_executor(start).unwrap() {
         ExecutorEvent::SubagentStarted {
             agent_name,
             is_background,
@@ -536,7 +548,7 @@ fn test_observe_subagent_lifecycle_maps() {
         is_error: false,
         subagent_failure: None,
     };
-    match observe_event_to_executor(stop).unwrap() {
+    match crate::event_v2::executor_mapping::observe_event_to_executor(stop).unwrap() {
         ExecutorEvent::SubagentStopped {
             agent_name, result, ..
         } => {
@@ -581,7 +593,7 @@ fn test_tool_started_origin_message_identity_survives_mapping_and_legacy_payload
         }
     ));
 
-    let mapped = render_event_to_executor(event).unwrap();
+    let mapped = crate::event_v2::executor_mapping::render_event_to_executor(event).unwrap();
     let ExecutorEvent::ToolStart {
         message_id,
         origin_message_id,
@@ -604,16 +616,17 @@ fn test_tool_started_origin_message_identity_survives_mapping_and_legacy_payload
     );
 
     // 嵌套执行：没有 origin，但显式声明不可回读。
-    let nested = render_event_to_executor(RenderEvent::ToolStarted {
-        turn_id,
-        agent_id,
-        tool_call_id: "tc-nested".to_string(),
-        name: "Read".to_string(),
-        input: serde_json::json!({}),
-        origin_message_id: None,
-        origin_readable: Some(false),
-    })
-    .unwrap();
+    let nested =
+        crate::event_v2::executor_mapping::render_event_to_executor(RenderEvent::ToolStarted {
+            turn_id,
+            agent_id,
+            tool_call_id: "tc-nested".to_string(),
+            name: "Read".to_string(),
+            input: serde_json::json!({}),
+            origin_message_id: None,
+            origin_readable: Some(false),
+        })
+        .unwrap();
     assert!(matches!(
         nested,
         ExecutorEvent::ToolStart {

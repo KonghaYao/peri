@@ -1,4 +1,4 @@
-use super::ShellOutputCapture;
+use crate::shell_output::ShellOutputCapture;
 
 #[tokio::test]
 async fn capture_preserves_unicode_and_large_tail() {

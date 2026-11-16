@@ -1,30 +1,34 @@
-use super::*;
+use super::ArgKind;
+use super::ArgsSchema;
+use super::SlashActionKind;
+use super::SlashCommandEntry;
+
 use serde_json::json;
 
 // ─── display_name：分级展示（「权威词法」）───────────────────────────────
 
 #[test]
 fn display_name_level1_uses_bare_name_after_last_colon() {
-    assert_eq!(display_name("core:compact", 1), "compact");
-    assert_eq!(display_name("ui:history", 1), "history");
+    assert_eq!(super::display_name("core:compact", 1), "compact");
+    assert_eq!(super::display_name("ui:history", 1), "history");
     // 多段全名取最右段
-    assert_eq!(display_name("demo:hello", 1), "hello");
+    assert_eq!(super::display_name("demo:hello", 1), "hello");
 }
 
 #[test]
 fn display_name_level2_keeps_fullname() {
-    assert_eq!(display_name("core:compact", 2), "core:compact");
-    assert_eq!(display_name("demo:hello", 2), "demo:hello");
-    assert_eq!(display_name("plaincmd", 2), "plaincmd");
+    assert_eq!(super::display_name("core:compact", 2), "core:compact");
+    assert_eq!(super::display_name("demo:hello", 2), "demo:hello");
+    assert_eq!(super::display_name("plaincmd", 2), "plaincmd");
 }
 
 #[test]
 fn display_name_without_colon_falls_back_to_fullname() {
     // level 1 但全名无冒号（防御：裸名条目）——原样返回
-    assert_eq!(display_name("plaincmd", 1), "plaincmd");
+    assert_eq!(super::display_name("plaincmd", 1), "plaincmd");
     // 未知 level 一律全名原样
-    assert_eq!(display_name("core:compact", 0), "core:compact");
-    assert_eq!(display_name("core:compact", 3), "core:compact");
+    assert_eq!(super::display_name("core:compact", 0), "core:compact");
+    assert_eq!(super::display_name("core:compact", 3), "core:compact");
 }
 
 // ─── parse_projection_kind：wire snake_case → 渲染枚举 ────────────────────
@@ -32,26 +36,32 @@ fn display_name_without_colon_falls_back_to_fullname() {
 #[test]
 fn parse_projection_kind_all_variants() {
     assert_eq!(
-        parse_projection_kind("command"),
+        super::parse_projection_kind("command"),
         Some(SlashActionKind::Command)
     );
-    assert_eq!(parse_projection_kind("skill"), Some(SlashActionKind::Skill));
     assert_eq!(
-        parse_projection_kind("mcp_skill"),
+        super::parse_projection_kind("skill"),
+        Some(SlashActionKind::Skill)
+    );
+    assert_eq!(
+        super::parse_projection_kind("mcp_skill"),
         Some(SlashActionKind::McpSkill)
     );
-    assert_eq!(parse_projection_kind("panel"), Some(SlashActionKind::Panel));
+    assert_eq!(
+        super::parse_projection_kind("panel"),
+        Some(SlashActionKind::Panel)
+    );
 }
 
 #[test]
 fn parse_projection_kind_unknown_returns_none() {
-    assert_eq!(parse_projection_kind(""), None);
-    assert_eq!(parse_projection_kind("unknown"), None);
+    assert_eq!(super::parse_projection_kind(""), None);
+    assert_eq!(super::parse_projection_kind("unknown"), None);
     // 大小写敏感：wire 是 Phase 1 snake_case 锁定形态，大写/驼峰不命中
-    assert_eq!(parse_projection_kind("Command"), None);
-    assert_eq!(parse_projection_kind("mcpSkill"), None);
+    assert_eq!(super::parse_projection_kind("Command"), None);
+    assert_eq!(super::parse_projection_kind("mcpSkill"), None);
     // 缺失 key 语义 = 调用方缺省回退 Command（None 不 panic）
-    assert_eq!(parse_projection_kind("__missing__"), None);
+    assert_eq!(super::parse_projection_kind("__missing__"), None);
 }
 
 // ─── ArgsSchema：wire 往返（flags 为 object 数组的 FlagSpec，P1-5）───────
@@ -103,7 +113,9 @@ fn args_schema_roundtrips_choice_and_path_kinds() {
             { "name": "file", "kind": "Path" }
         ]
     });
-    let schema: ArgsSchema = serde_json::from_value(wire).unwrap();
+    let schema: ArgsSchema = serde_json::from_value(wire).expect(
+        "args schema roundtrips choice and path kinds: fixture JSON must match the expected schema",
+    );
     assert_eq!(
         schema.positionals[0].kind,
         ArgKind::Choice(vec!["fast".to_string(), "safe".to_string()])
@@ -111,7 +123,8 @@ fn args_schema_roundtrips_choice_and_path_kinds() {
     assert_eq!(schema.positionals[1].kind, ArgKind::Path);
 
     // 序列化往返保持 wire 形态（externally tagged，变体名原样）
-    let back = serde_json::to_value(&schema).unwrap();
+    let back = serde_json::to_value(&schema)
+        .expect("args schema roundtrips choice and path kinds: fixture must serialize to JSON");
     assert_eq!(
         back["positionals"][0]["kind"],
         json!({ "Choice": ["fast", "safe"] })
@@ -122,7 +135,9 @@ fn args_schema_roundtrips_choice_and_path_kinds() {
 #[test]
 fn args_schema_missing_fields_default_to_empty() {
     // 旧投影不含 args 字段 / 维度缺省 → 反序列化即得全默认（serde default）
-    let schema: ArgsSchema = serde_json::from_value(json!({})).unwrap();
+    let schema: ArgsSchema = serde_json::from_value(json!({})).expect(
+        "args schema missing fields default to empty: fixture JSON must match the expected schema",
+    );
     assert_eq!(schema, ArgsSchema::default());
 }
 

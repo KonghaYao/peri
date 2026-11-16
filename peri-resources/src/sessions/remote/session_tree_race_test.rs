@@ -13,7 +13,6 @@ use peri_acp_types::store::InheritedContext;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 
-use super::cloud_tests::{synth_binding, synth_thread};
 use super::generation::{ConnectionFactory, ConnectionGate};
 use super::mutation::{RemoteStore, StoreAccess};
 use super::schema::{self, StoreId};
@@ -151,21 +150,21 @@ async fn count_orphans(pool: &SqlitePool) -> i64 {
 fn child_snapshot(child: &str, parent: &str) -> ChildSnapshot {
     ChildSnapshot {
         target: NewSession {
-            thread_id: synth_thread(child),
+            thread_id: super::cloud_tests::synth_thread(child),
             created_at: CREATED_AT.to_owned(),
             meta: NewSessionMeta {
                 title: Some(child.to_owned()),
                 cwd: "/tmp".to_owned(),
-                parent_thread_id: Some(synth_thread(parent)),
+                parent_thread_id: Some(super::cloud_tests::synth_thread(parent)),
                 hidden: true,
                 cancel_policy: Default::default(),
                 snapshot_at_message_id: None,
             },
-            binding: synth_binding(),
+            binding: super::cloud_tests::synth_binding(),
             frozen: FrozenSnapshotBytes::new(FROZEN),
         },
-        parent_id: synth_thread(parent),
-        root_id: synth_thread(parent),
+        parent_id: super::cloud_tests::synth_thread(parent),
+        root_id: super::cloud_tests::synth_thread(parent),
         inherited: InheritedContext::default(),
     }
 }

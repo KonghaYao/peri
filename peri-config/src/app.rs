@@ -27,7 +27,7 @@ pub struct ProviderModels {
 }
 
 impl ProviderModels {
-    pub fn get_model(&self, alias: &str) -> Option<&str> {
+    pub fn model(&self, alias: &str) -> Option<&str> {
         match alias.to_lowercase().as_str() {
             "opus" => Some(&self.opus),
             "sonnet" => Some(&self.sonnet),
@@ -54,7 +54,7 @@ fn default_profile_max_tokens() -> u32 {
     32000
 }
 
-fn is_default_effort(value: &String) -> bool {
+fn is_default_effort(value: &str) -> bool {
     *value == default_profile_effort()
 }
 
@@ -107,6 +107,7 @@ impl Default for ProfileConfig {
 }
 
 impl ProfileConfig {
+    #[must_use]
     pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
@@ -161,6 +162,7 @@ pub struct BetasConfig {
 }
 
 impl BetasConfig {
+    #[must_use]
     pub fn is_default(&self) -> bool {
         self.overrides.is_empty()
     }
@@ -191,6 +193,7 @@ impl BetasConfig {
 /// 原始配置文档里仍存在的已删除 compact 键（判定与诊断分离，判定可测）。
 ///
 /// 在**解析类型之前**调用：类型化模型已不认识这些键，只靠反序列化无法发现它们。
+#[must_use]
 pub fn legacy_compact_keys_in(document: &serde_json::Value) -> Vec<&'static str> {
     let Some(compact) = document.pointer("/config/compact") else {
         return Vec::new();
@@ -323,6 +326,7 @@ impl AppConfig {
             && provider.auth == base.auth
     }
 
+    #[must_use]
     pub fn extract_overrides(&self, global: &AppConfig) -> AppConfig {
         let mut overrides = AppConfig::default();
         if self.providers != global.providers {
@@ -514,6 +518,7 @@ pub enum ProviderAuthConfig {
 }
 
 impl ProviderConfig {
+    #[must_use]
     pub fn display_name(&self) -> &str {
         self.name.as_deref().unwrap_or(&self.id)
     }

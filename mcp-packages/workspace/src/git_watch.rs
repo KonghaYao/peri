@@ -13,10 +13,10 @@
 //! 「无订阅者 ⇒ 不采样（零 git 调用）」由调用方（`workspace.rs` 的 `spawn_git_sample`）
 //! 保证：本模块只提供状态机，不自行判断订阅者。
 
-use std::{
-    sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
-};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
 
 use parking_lot::Mutex;
 use tokio::process::Command;
@@ -84,6 +84,7 @@ pub fn notice_text(previous: Option<&GitSnapshot>, current: &GitSnapshot) -> Opt
 ///
 /// 与 [`notice_text`] 同风格（`[Git watch]` 前缀 + 逐行读数 + 行动指引），但只描述
 /// 当前值、不含箭头；采样触发口径按新事实（工具运行后）。
+#[must_use]
 pub fn snapshot_text(snapshot: &GitSnapshot) -> String {
     format!(
         "[Git watch] Repository ref snapshot:\n- Branch: {}\n- HEAD: {}\n\nSampled after a tool run. Run `git status` and `git log -1` before irreversible git operations.",
@@ -93,6 +94,7 @@ pub fn snapshot_text(snapshot: &GitSnapshot) -> String {
 }
 
 /// 短 hash（7 位；不足 7 位原样；旧 `short_hash` 逐字）。
+#[must_use]
 pub fn short_hash(full: &str) -> String {
     let trimmed = full.trim();
     if trimmed.len() <= 7 {
@@ -103,6 +105,7 @@ pub fn short_hash(full: &str) -> String {
 }
 
 /// 解析 `git rev-parse --is-inside-work-tree` + HEAD + branch 的合并输出（旧实现逐字）。
+#[must_use]
 pub fn parse_sample_stdout(stdout: &str) -> SampleOutcome {
     let mut lines = stdout.lines().map(str::trim).filter(|l| !l.is_empty());
     let Some(work_tree) = lines.next() else {
@@ -196,11 +199,13 @@ impl Default for GitWatchState {
 
 impl GitWatchState {
     /// 生产构造：60s 节流 + 1s 超时。
+    #[must_use]
     pub fn new() -> Self {
         Self::with_timing(GIT_THROTTLE, GIT_SAMPLE_TIMEOUT)
     }
 
     /// 注入节流窗口与超时（**测试 seam**：生产恒为 [`GIT_THROTTLE`] / [`GIT_SAMPLE_TIMEOUT`]）。
+    #[must_use]
     pub fn with_timing(throttle: Duration, sample_timeout: Duration) -> Self {
         Self {
             repo_mode: Mutex::new(RepoMode::Unknown),
@@ -214,6 +219,7 @@ impl GitWatchState {
     }
 
     /// 采样超时（调用方的 `peri_time::timeout` 取它，保持「超时不推进节流」在同一处收敛）。
+    #[must_use]
     pub fn sample_timeout(&self) -> Duration {
         self.sample_timeout
     }
@@ -280,6 +286,7 @@ impl GitWatchState {
     }
 
     /// 当前资源正文（`resources/read` 命中时返回它）。
+    #[must_use]
     pub fn resource_text(&self) -> String {
         self.resource_text.lock().clone()
     }

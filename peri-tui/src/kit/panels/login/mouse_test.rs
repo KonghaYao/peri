@@ -1,13 +1,22 @@
 //! Login Edit/类型确认/认证动作的鼠标命中回归。
 
-use super::*;
+use super::EventResult;
+use super::KeyCode;
+use super::LoginEditState;
+use super::LoginField;
+use super::LoginPanelMode;
+use super::MountedPanel;
+use super::Position;
+use super::ProviderKind;
+use super::Rect;
+use super::serial;
 
 // ── 鼠标命中：Edit 动态字段 / choice / 类型确认 ─────────────────────────────
 
 #[test]
 #[serial]
 fn mouse_click_focuses_every_visible_text_field() {
-    let state = new_responses_mouse_state();
+    let state = super::new_responses_mouse_state();
     let fields: Vec<LoginField> = state
         .visible_fields()
         .into_iter()
@@ -16,32 +25,35 @@ fn mouse_click_focuses_every_visible_text_field() {
     assert!(fields.len() >= 6, "动态文本字段必须全部覆盖");
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state(state, LoginField::ProviderType, 1, move |index, panel| {
+    super::mount_edit_state(state, LoginField::ProviderType, 1, move |index, panel| {
         if index == 0 {
-            let area = tall_area();
+            let area = super::tall_area();
             let mut observed = Vec::new();
             for field in &fields {
-                let row = edit_hit_row(&panel, super::render::EditHit::Field(*field), area);
-                let result = panel.event(click_at(row, 3), area);
+                let row = super::edit_hit_row(&panel, super::render::EditHit::Field(*field), area);
+                let result = panel.event(super::click_at(row, 3), area);
                 observed.push((*field, result, *panel.edit_focus.read()));
             }
-            tx.send(observed).unwrap();
+            tx.send(observed).expect("mouse click focuses every visible text field: fixture channel must deliver its expected message");
         }
         frame += 1;
         assert_eq!(frame, index + 1);
     });
 
-    for (field, result, focus) in rx.try_recv().unwrap() {
-        assert_eq!(result, EventResult::Consumed, "字段 {field:?} 点击必须消费");
-        assert_eq!(focus, field, "点击文本行必须聚焦该字段");
+    {
+        let iteration_items = rx.try_recv().expect("mouse click focuses every visible text field: fixture channel must deliver its expected message");
+        for (field, result, focus) in iteration_items {
+            assert_eq!(result, EventResult::Consumed, "字段 {field:?} 点击必须消费");
+            assert_eq!(focus, field, "点击文本行必须聚焦该字段");
+        }
     }
 }
 
 #[test]
 #[serial]
 fn mouse_click_focuses_plan_text_fields() {
-    let cfg = login_config();
-    let state = LoginEditState::edit_provider(&cfg, "plan", None).unwrap();
+    let cfg = super::login_config();
+    let state = LoginEditState::edit_provider(&cfg, "plan", None).expect("mouse click focuses plan text fields: the edit_provider fixture operation uses valid inputs");
     let fields: Vec<LoginField> = state
         .visible_fields()
         .into_iter()
@@ -57,32 +69,35 @@ fn mouse_click_focuses_plan_text_fields() {
     );
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state(state, LoginField::AuthMode, 1, move |index, panel| {
+    super::mount_edit_state(state, LoginField::AuthMode, 1, move |index, panel| {
         if index == 0 {
-            let area = tall_area();
+            let area = super::tall_area();
             let mut observed = Vec::new();
             for field in &fields {
-                let row = edit_hit_row(&panel, super::render::EditHit::Field(*field), area);
-                let result = panel.event(click_at(row, 3), area);
+                let row = super::edit_hit_row(&panel, super::render::EditHit::Field(*field), area);
+                let result = panel.event(super::click_at(row, 3), area);
                 observed.push((*field, result, *panel.edit_focus.read()));
             }
-            tx.send(observed).unwrap();
+            tx.send(observed).expect("mouse click focuses plan text fields: fixture channel must deliver its expected message");
         }
         frame += 1;
         assert_eq!(frame, index + 1);
     });
 
-    for (field, result, focus) in rx.try_recv().unwrap() {
-        assert_eq!(result, EventResult::Consumed, "字段 {field:?} 点击必须消费");
-        assert_eq!(focus, field, "点击 plan 文本行必须聚焦该字段");
+    {
+        let iteration_items = rx.try_recv().expect("mouse click focuses plan text fields: fixture channel must deliver its expected message");
+        for (field, result, focus) in iteration_items {
+            assert_eq!(result, EventResult::Consumed, "字段 {field:?} 点击必须消费");
+            assert_eq!(focus, field, "点击 plan 文本行必须聚焦该字段");
+        }
     }
 }
 
 #[test]
 #[serial]
 fn mouse_click_focuses_the_recovery_store_row() {
-    let cfg = login_config();
-    let mut state = LoginEditState::edit_provider(&cfg, "plan", None).unwrap();
+    let cfg = super::login_config();
+    let mut state = LoginEditState::edit_provider(&cfg, "plan", None).expect("mouse click focuses the recovery store row: the edit_provider fixture operation uses valid inputs");
     state.plan_store_editable = true;
     assert!(
         state.visible_fields().contains(&LoginField::PlanStore),
@@ -90,22 +105,22 @@ fn mouse_click_focuses_the_recovery_store_row() {
     );
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state(state, LoginField::AuthActions, 1, move |index, panel| {
+    super::mount_edit_state(state, LoginField::AuthActions, 1, move |index, panel| {
         if index == 0 {
-            let area = tall_area();
-            let row = edit_hit_row(
+            let area = super::tall_area();
+            let row = super::edit_hit_row(
                 &panel,
                 super::render::EditHit::Field(LoginField::PlanStore),
                 area,
             );
-            let result = panel.event(click_at(row, 3), area);
-            tx.send((result, *panel.edit_focus.read())).unwrap();
+            let result = panel.event(super::click_at(row, 3), area);
+            tx.send((result, *panel.edit_focus.read())).expect("mouse click focuses the recovery store row: isolated fixture workspace must remain accessible");
         }
         frame += 1;
         assert_eq!(frame, index + 1);
     });
 
-    let (result, focus) = rx.try_recv().unwrap();
+    let (result, focus) = rx.try_recv().expect("mouse click focuses the recovery store row: fixture channel must deliver its expected message");
     assert_eq!(result, EventResult::Consumed);
     assert_eq!(focus, LoginField::PlanStore, "恢复行点击必须聚焦凭据目录");
 }
@@ -113,11 +128,11 @@ fn mouse_click_focuses_the_recovery_store_row() {
 #[test]
 #[serial]
 fn mouse_click_choices_match_keyboard_actions() {
-    let base = new_responses_mouse_state();
-    let area = tall_area();
+    let base = super::new_responses_mouse_state();
+    let area = super::tall_area();
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state(
+    super::mount_edit_state(
         base.clone(),
         LoginField::ProviderType,
         1,
@@ -135,12 +150,12 @@ fn mouse_click_choices_match_keyboard_actions() {
                 // 类型：鼠标点击与键盘 Enter 都只进入显式确认/循环，不静默改值。
                 reset(&panel);
                 *panel.edit_focus.write() = LoginField::ProviderType;
-                let row = edit_hit_row(
+                let row = super::edit_hit_row(
                     &panel,
                     super::render::EditHit::Field(LoginField::ProviderType),
                     area,
                 );
-                let _ = panel.event(click_at(row, 3), area);
+                let _ = panel.event(super::click_at(row, 3), area);
                 let mouse_type = panel
                     .edit_state
                     .read()
@@ -148,7 +163,7 @@ fn mouse_click_choices_match_keyboard_actions() {
                     .map(|state| (state.kind, state.type_change_candidate, *panel.mode.read()));
                 reset(&panel);
                 *panel.edit_focus.write() = LoginField::ProviderType;
-                let _ = panel.event(key(KeyCode::Enter), area);
+                let _ = panel.event(super::key(KeyCode::Enter), area);
                 let key_type = panel
                     .edit_state
                     .read()
@@ -159,12 +174,12 @@ fn mouse_click_choices_match_keyboard_actions() {
                 // 认证方式：鼠标 Enter 等价动作。
                 reset(&panel);
                 *panel.edit_focus.write() = LoginField::AuthMode;
-                let row = edit_hit_row(
+                let row = super::edit_hit_row(
                     &panel,
                     super::render::EditHit::Field(LoginField::AuthMode),
                     area,
                 );
-                let _ = panel.event(click_at(row, 3), area);
+                let _ = panel.event(super::click_at(row, 3), area);
                 let mouse_auth = panel.edit_state.read().as_ref().map(|state| {
                     (
                         state.auth_choice,
@@ -176,7 +191,7 @@ fn mouse_click_choices_match_keyboard_actions() {
                 });
                 reset(&panel);
                 *panel.edit_focus.write() = LoginField::AuthMode;
-                let _ = panel.event(key(KeyCode::Enter), area);
+                let _ = panel.event(super::key(KeyCode::Enter), area);
                 let key_auth = panel.edit_state.read().as_ref().map(|state| {
                     (
                         state.auth_choice,
@@ -191,12 +206,12 @@ fn mouse_click_choices_match_keyboard_actions() {
                 // Confirm：鼠标点击与 Enter 走同一保存校验（无 authority 时同样保留草稿）。
                 reset(&panel);
                 *panel.edit_focus.write() = LoginField::Confirm;
-                let row = edit_hit_row(
+                let row = super::edit_hit_row(
                     &panel,
                     super::render::EditHit::Field(LoginField::Confirm),
                     area,
                 );
-                let _ = panel.event(click_at(row, 3), area);
+                let _ = panel.event(super::click_at(row, 3), area);
                 let mouse_confirm = panel.edit_state.read().as_ref().map(|state| {
                     (
                         *panel.mode.read(),
@@ -208,7 +223,7 @@ fn mouse_click_choices_match_keyboard_actions() {
                 });
                 reset(&panel);
                 *panel.edit_focus.write() = LoginField::Confirm;
-                let _ = panel.event(key(KeyCode::Enter), area);
+                let _ = panel.event(super::key(KeyCode::Enter), area);
                 let key_confirm = panel.edit_state.read().as_ref().map(|state| {
                     (
                         *panel.mode.read(),
@@ -223,7 +238,7 @@ fn mouse_click_choices_match_keyboard_actions() {
                     "Confirm 点击与 Enter 必须走同一保存校验"
                 );
 
-                tx.send(()).unwrap();
+                tx.send(()).expect("mouse click choices match keyboard actions: fixture channel must deliver its expected message");
             }
             frame += 1;
             assert_eq!(frame, index + 1);
@@ -235,28 +250,29 @@ fn mouse_click_choices_match_keyboard_actions() {
 #[test]
 #[serial]
 fn mouse_click_locked_type_requires_explicit_confirmation() {
-    let cfg = login_config();
-    let state = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
-    let area = tall_area();
+    let cfg = super::login_config();
+    let state = LoginEditState::edit_provider(&cfg, "resp", None).expect("mouse click locked type requires explicit confirmation: the edit_provider fixture operation uses valid inputs");
+    let area = super::tall_area();
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state(state, LoginField::ProviderType, 1, move |index, panel| {
+    super::mount_edit_state(state, LoginField::ProviderType, 1, move |index, panel| {
         if index == 0 {
-            let row = edit_hit_row(
+            let row = super::edit_hit_row(
                 &panel,
                 super::render::EditHit::Field(LoginField::ProviderType),
                 area,
             );
-            let _ = panel.event(click_at(row, 3), area);
+            let _ = panel.event(super::click_at(row, 3), area);
             let after_click = (
                 *panel.mode.read(),
                 panel.edit_state.read().as_ref().map(|state| state.kind),
             );
 
-            let candidate_row =
-                type_change_semantic_row(&panel, super::render::EditHit::TypeChangeCandidate)
-                    as u16;
-            let _ = panel.event(click_at(area.y + 1 + candidate_row, 3), area);
+            let candidate_row = super::type_change_semantic_row(
+                &panel,
+                super::render::EditHit::TypeChangeCandidate,
+            ) as u16;
+            let _ = panel.event(super::click_at(area.y + 1 + candidate_row, 3), area);
             let candidate = panel
                 .edit_state
                 .read()
@@ -264,19 +280,20 @@ fn mouse_click_locked_type_requires_explicit_confirmation() {
                 .and_then(|state| state.type_change_candidate);
 
             let confirm_row =
-                type_change_semantic_row(&panel, super::render::EditHit::TypeChangeConfirm) as u16;
-            let _ = panel.event(click_at(area.y + 1 + confirm_row, 3), area);
+                super::type_change_semantic_row(&panel, super::render::EditHit::TypeChangeConfirm)
+                    as u16;
+            let _ = panel.event(super::click_at(area.y + 1 + confirm_row, 3), area);
             let after_confirm = (
                 *panel.mode.read(),
                 panel.edit_state.read().as_ref().map(|state| state.kind),
             );
-            tx.send((after_click, candidate, after_confirm)).unwrap();
+            tx.send((after_click, candidate, after_confirm)).expect("mouse click locked type requires explicit confirmation: fixture channel must deliver its expected message");
         }
         frame += 1;
         assert_eq!(frame, index + 1);
     });
 
-    let (after_click, candidate, after_confirm) = rx.try_recv().unwrap();
+    let (after_click, candidate, after_confirm) = rx.try_recv().expect("mouse click locked type requires explicit confirmation: fixture channel must deliver its expected message");
     assert_eq!(
         after_click,
         (
@@ -296,11 +313,11 @@ fn mouse_click_locked_type_requires_explicit_confirmation() {
 #[test]
 #[serial]
 fn mouse_click_blank_border_and_scrollbar_leave_edit_state_unchanged() {
-    let state = new_responses_mouse_state();
-    let area = tall_area();
+    let state = super::new_responses_mouse_state();
+    let area = super::tall_area();
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state(state, LoginField::ProviderId, 1, move |index, panel| {
+    super::mount_edit_state(state, LoginField::ProviderId, 1, move |index, panel| {
         if index == 0 {
             let snapshot = |panel: &MountedPanel| {
                 let state = panel.edit_state.read();
@@ -318,13 +335,13 @@ fn mouse_click_blank_border_and_scrollbar_leave_edit_state_unchanged() {
                 )
             };
             let before = snapshot(&panel);
-            let layout = edit_layout(&panel, area.width);
+            let layout = super::edit_layout(&panel, area.width);
             let blank_row = layout
                 .hits
                 .iter()
                 .position(|hit| hit.is_none())
                 .expect("布局中存在不可点击行") as u16;
-            let hit_row = edit_hit_row(
+            let hit_row = super::edit_hit_row(
                 &panel,
                 super::render::EditHit::Field(LoginField::ProviderId),
                 area,
@@ -336,23 +353,23 @@ fn mouse_click_blank_border_and_scrollbar_leave_edit_state_unchanged() {
                 (hit_row, area.x + area.width - 1), // 滚动条列
             ];
             for (row, column) in targets {
-                let result = panel.event(click_at(row, column), area);
+                let result = panel.event(super::click_at(row, column), area);
                 assert_eq!(result, EventResult::Consumed, "区域内点击仍消费防穿透");
             }
-            tx.send((before, snapshot(&panel))).unwrap();
+            tx.send((before, snapshot(&panel))).expect("mouse click blank border and scrollbar leave edit state unchanged: fixture channel must deliver its expected message");
         }
         frame += 1;
         assert_eq!(frame, index + 1);
     });
 
-    let (before, after) = rx.try_recv().unwrap();
+    let (before, after) = rx.try_recv().expect("mouse click blank border and scrollbar leave edit state unchanged: fixture channel must deliver its expected message");
     assert_eq!(before, after, "空白/边框/滚动条不得改变草稿或焦点");
 }
 
 #[test]
 #[serial]
 fn mouse_click_after_scroll_hits_the_visible_semantic_row() {
-    let state = new_responses_mouse_state();
+    let state = super::new_responses_mouse_state();
     let area = Rect {
         x: 0,
         y: 0,
@@ -361,9 +378,9 @@ fn mouse_click_after_scroll_hits_the_visible_semantic_row() {
     };
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state(state, LoginField::ProviderType, 1, move |index, panel| {
+    super::mount_edit_state(state, LoginField::ProviderType, 1, move |index, panel| {
         if index == 0 {
-            let row = hit_semantic_row(
+            let row = super::hit_semantic_row(
                 &panel,
                 super::render::EditHit::Field(LoginField::OpusModel),
                 area.width,
@@ -371,14 +388,14 @@ fn mouse_click_after_scroll_hits_the_visible_semantic_row() {
             let offset = row.saturating_sub(1) as u16;
             panel.sv.write().set_offset(Position::new(0, offset));
             let screen_row = area.y + 1 + row as u16 - offset;
-            let result = panel.event(click_at(screen_row, 3), area);
-            tx.send((result, *panel.edit_focus.read(), offset)).unwrap();
+            let result = panel.event(super::click_at(screen_row, 3), area);
+            tx.send((result, *panel.edit_focus.read(), offset)).expect("mouse click after scroll hits the visible semantic row: isolated fixture workspace must remain accessible");
         }
         frame += 1;
         assert_eq!(frame, index + 1);
     });
 
-    let (result, focus, offset) = rx.try_recv().unwrap();
+    let (result, focus, offset) = rx.try_recv().expect("mouse click after scroll hits the visible semantic row: fixture channel must deliver its expected message");
     assert!(offset > 0, "前置条件：视口必须已滚动");
     assert_eq!(result, EventResult::Consumed);
     assert_eq!(focus, LoginField::OpusModel, "滚动后点击仍命中同一语义行");
@@ -387,18 +404,18 @@ fn mouse_click_after_scroll_hits_the_visible_semantic_row() {
 #[test]
 #[serial]
 fn mouse_click_auth_action_executes_selected_action() {
-    let cfg = login_config();
-    let state = LoginEditState::edit_provider(&cfg, "plan", None).unwrap();
-    let area = tall_area();
+    let cfg = super::login_config();
+    let state = LoginEditState::edit_provider(&cfg, "plan", None).expect("mouse click auth action executes selected action: the edit_provider fixture operation uses valid inputs");
+    let area = super::tall_area();
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state(state, LoginField::AuthActions, 1, move |index, panel| {
+    super::mount_edit_state(state, LoginField::AuthActions, 1, move |index, panel| {
         if index == 0 {
             let (semantic_row, start_column) =
-                action_hit_span(&panel, super::auth::AuthAction::Logout, area.width);
+                super::action_hit_span(&panel, super::auth::AuthAction::Logout, area.width);
             let offset = panel.sv.read().offset().y;
             let row = area.y + 1 + semantic_row as u16 - offset;
-            let result = panel.event(click_at(row, area.x + start_column as u16 + 1), area);
+            let result = panel.event(super::click_at(row, area.x + start_column as u16 + 1), area);
             tx.send((
                 result,
                 *panel.mode.read(),
@@ -409,13 +426,13 @@ fn mouse_click_auth_action_executes_selected_action() {
                     .logout_confirm()
                     .map(|confirm| confirm.target.account.clone()),
             ))
-            .unwrap();
+            .expect("mouse click auth action executes selected action: isolated fixture workspace must remain accessible");
         }
         frame += 1;
         assert_eq!(frame, index + 1);
     });
 
-    let (result, mode, focus, target) = rx.try_recv().unwrap();
+    let (result, mode, focus, target) = rx.try_recv().expect("mouse click auth action executes selected action: fixture channel must deliver its expected message");
     assert_eq!(result, EventResult::Consumed);
     assert_eq!(
         mode,

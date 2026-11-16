@@ -1,7 +1,6 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
@@ -9,15 +8,29 @@ use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::{
-    prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
-    transport::{HttpBody, HttpRequest, HttpResponse, HttpTransport},
-    ContentBlock, JsonObject, Model, ModelMessage, ModelRequest, ModelResult, ModelRuntimeConfig,
-    ModelStreamEvent, RetryConfig, RetryableErrorClasses, StopReason, ToolCall, ToolDefinition,
-    ToolResult,
-};
+use crate::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
+use crate::transport::HttpBody;
+use crate::transport::HttpRequest;
+use crate::transport::HttpResponse;
+use crate::transport::HttpTransport;
+use crate::ContentBlock;
+use crate::JsonObject;
+use crate::Model;
+use crate::ModelMessage;
+use crate::ModelRequest;
+use crate::ModelResult;
+use crate::ModelRuntimeConfig;
+use crate::ModelStreamEvent;
+use crate::RetryConfig;
+use crate::RetryableErrorClasses;
+use crate::StopReason;
+use crate::ToolCall;
+use crate::ToolDefinition;
+use crate::ToolResult;
 
-use super::{request::body_for_test, OpenAiConfig, OpenAiModel};
+use super::request as request_functions;
+use super::OpenAiConfig;
+use super::OpenAiModel;
 
 #[derive(Default)]
 struct FakeTransport {
@@ -104,7 +117,7 @@ fn switching_from_responses_omits_opaque_state_and_keeps_typed_calls() {
             JsonObject::from_value(json!({"path":"a"})).unwrap(),
         )],
     )]);
-    let body = body_for_test(&config("test-model"), &request);
+    let body = request_functions::body_for_test(&config("test-model"), &request);
     let encoded = body.to_string();
     assert!(!encoded.contains("foreign-opaque"));
     assert!(!encoded.contains("provider_state"));
@@ -164,7 +177,7 @@ fn request() -> ModelRequest {
 
 #[test]
 fn request_contract_preserves_system_tools_tool_results_and_reasoning() {
-    let body = body_for_test(&config("deepseek-r1"), &request());
+    let body = request_functions::body_for_test(&config("deepseek-r1"), &request());
     let messages = body["messages"].as_array().expect("messages array");
     assert_eq!(
         messages[0],
@@ -205,7 +218,7 @@ fn system_cache_transport_tokens_are_stripped_without_changing_other_bytes() {
         ModelMessage::system_text("REQUEST-MIDDLEWARE"),
         ModelMessage::user_text("go"),
     ]);
-    let body = body_for_test(&config("gpt-4o"), &request);
+    let body = request_functions::body_for_test(&config("gpt-4o"), &request);
     let expected = "BASE-STATIC\n\nBASE-DYNAMIC\n\nREQUEST-MIDDLEWARE";
 
     assert_eq!(body["messages"][0]["content"], expected);
@@ -234,29 +247,32 @@ fn prepared_body_keeps_existing_prefix_stable_when_tool_round_is_appended() {
             "next file contents",
         )));
 
-    let before = body_for_test(&config("gpt-5.6-sol"), &before_request);
-    let after = body_for_test(&config("gpt-5.6-sol"), &after_request);
+    let before = request_functions::body_for_test(&config("gpt-5.6-sol"), &before_request);
+    let after = request_functions::body_for_test(&config("gpt-5.6-sol"), &after_request);
 
     assert_eq!(before["messages"][0], after["messages"][0]);
     assert_eq!(before.get("tools"), after.get("tools"));
     let before_messages = before["messages"].as_array().expect("messages array");
     let after_messages = after["messages"].as_array().expect("messages array");
     assert_eq!(after_messages.len(), before_messages.len() + 2);
-    for (index, message) in before_messages.iter().enumerate() {
-        assert_eq!(
-            serde_json::to_vec(message).expect("message serializes"),
-            serde_json::to_vec(&after_messages[index]).expect("message serializes"),
-            "existing prepared message element {index} must stay byte-identical"
-        );
+    {
+        let indexed_before_messages = before_messages.iter().enumerate();
+        for (index, message) in indexed_before_messages {
+            assert_eq!(
+                serde_json::to_vec(message).expect("message serializes"),
+                serde_json::to_vec(&after_messages[index]).expect("message serializes"),
+                "existing prepared message element {index} must stay byte-identical"
+            );
+        }
     }
 }
 
 #[test]
 fn request_contract_covers_qwen_kimi_and_litellm_options() {
-    let qwen = body_for_test(&config("qwen3"), &request());
+    let qwen = request_functions::body_for_test(&config("qwen3"), &request());
     assert_eq!(qwen["stream_options"], json!({ "include_usage": true }));
 
-    let kimi = body_for_test(
+    let kimi = request_functions::body_for_test(
         &config("kimi-k2")
             .with_thinking_enabled(true)
             .with_reasoning_effort("high"),
@@ -265,7 +281,7 @@ fn request_contract_covers_qwen_kimi_and_litellm_options() {
     assert_eq!(kimi["thinking"], json!({ "type": "enabled" }));
     assert!(kimi.get("reasoning_effort").is_none());
 
-    let metadata = body_for_test(
+    let metadata = request_functions::body_for_test(
         &config("litellm").with_thinking_content(true),
         &ModelRequest {
             session_id: Some("session-1".into()),
@@ -932,7 +948,7 @@ fn output_token_limit_matches_the_resolved_wire_budget() {
             .with_reasoning_effort("high"),
     );
     assert_eq!(model.output_token_limit(), Some(4_096));
-    let body = body_for_test(
+    let body = request_functions::body_for_test(
         &model.config,
         &ModelRequest::new(vec![ModelMessage::user_text("summarize")]),
     );

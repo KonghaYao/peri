@@ -1,7 +1,9 @@
 //! 从 reason.rs 分离的测试模块
-use super::*;
 use crate::agent::events_v2::{EventBus, EventBusConfig, ObserveEvent, TurnErrorReason};
+use crate::agent::stages::ReasonInput;
 use crate::agent::stages::StageContext;
+use crate::error::AgentError;
+
 use crate::messages::BaseMessage;
 #[cfg(test)]
 use crate::messages::MessageContent;
@@ -39,7 +41,7 @@ async fn test_run_reason_emits_llm_call_end_with_correct_step() {
 
     // Act 1：step=0（turn 初始）→ NullReactLLM 触发错误路径 emit
     assert_eq!(ctx.session.turn.current_step(), 0);
-    let _ = run_reason(ReasonInput {
+    let _ = crate::agent::stages::reason::run_reason(ReasonInput {
         context: ctx.clone(),
         has_tool_calls: false,
     })
@@ -65,7 +67,7 @@ async fn test_run_reason_emits_llm_call_end_with_correct_step() {
     // Act 2：推进 step → step=1，再次 run_reason
     ctx.session.turn.advance_step();
     assert_eq!(ctx.session.turn.current_step(), 1);
-    let _ = run_reason(ReasonInput {
+    let _ = crate::agent::stages::reason::run_reason(ReasonInput {
         context: ctx,
         has_tool_calls: false,
     })
@@ -89,7 +91,7 @@ async fn test_reason_with_null_llm_returns_interrupted() {
         context: ctx,
         has_tool_calls: false,
     };
-    let result = run_reason(input).await;
+    let result = crate::agent::stages::reason::run_reason(input).await;
     assert!(
         matches!(result, Err(AgentError::Interrupted)),
         "NullReactLLM 应返回 Interrupted，实际 {:?}",
@@ -112,7 +114,7 @@ async fn test_reason_captures_message_snapshot() {
         context: ctx,
         has_tool_calls: false,
     };
-    let result = run_reason(input).await;
+    let result = crate::agent::stages::reason::run_reason(input).await;
     assert!(result.is_err());
 }
 
@@ -134,7 +136,7 @@ async fn test_run_reason_emits_turn_error_interrupted_on_null_llm() {
         .with_event_bus(event_bus)
         .build();
 
-    let _ = run_reason(ReasonInput {
+    let _ = crate::agent::stages::reason::run_reason(ReasonInput {
         context: ctx,
         has_tool_calls: false,
     })
@@ -193,7 +195,10 @@ impl crate::middleware::Middleware for RecordingErrorMiddleware {
         _state: &mut dyn hook_state::StateView,
         error: &crate::error::AgentError,
     ) -> crate::error::AgentResult<()> {
-        self.calls.lock().unwrap().push(error.to_string());
+        self.calls
+            .lock()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
+            .push(error.to_string());
         Ok(())
     }
 }
@@ -221,7 +226,7 @@ async fn test_run_reason_interrupted_runs_on_error_with_interrupted() {
         .build();
     // builder 默认 NullReactLLM → generate_reasoning 直接返回 Err(AgentError::Interrupted)
 
-    let result = run_reason(ReasonInput {
+    let result = crate::agent::stages::reason::run_reason(ReasonInput {
         context: ctx,
         has_tool_calls: false,
     })
@@ -243,7 +248,9 @@ async fn test_run_reason_interrupted_runs_on_error_with_interrupted() {
     assert!(found_interrupted_reason, "应 emit TurnError(Interrupted)");
 
     // run_on_error 行为：middleware on_error 被调用且收到 Interrupted
-    let recorded = calls.lock().unwrap();
+    let recorded = calls
+        .lock()
+        .expect("calls lock mutex must remain unpoisoned throughout the test");
     assert_eq!(recorded.len(), 1, "on_error 应恰好被调用一次");
     assert!(
         recorded[0].contains("Interrupted"),

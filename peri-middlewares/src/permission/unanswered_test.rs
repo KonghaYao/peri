@@ -7,13 +7,18 @@
 //! 本文件同时升级一处旧「现状钉死」用例：R9 之前两类事实共享同一 typed 失败
 //!（只在诊断文本里可区分），现在必须 typed 可区分（见文件末尾用例）。
 
+use peri_agent::middleware::Middleware as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use peri_agent::agent::state::AgentState;
 use peri_agent::interaction::UnansweredCause;
 
-use super::*;
+use super::{
+    async_trait, default_requires_approval, AgentError, AgentResult, ApprovalDecision,
+    InteractionContext, InteractionResponse, PermissionMiddleware, ToolCall,
+    TrustedInteractionOwner, UserInteractionBroker,
+};
 use peri_acp_types::error::ToolRejectionCause;
 
 /// 恒定返回「无人可作答」的 broker，并记录交互次数。

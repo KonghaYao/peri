@@ -13,14 +13,14 @@ use peri_model::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::*;
-use crate::agent::compact_v2::planner::{
-    plan_micro_call_count, reset_plan_micro_calls, FullEscalationReason, MicroPlanningFacts,
-};
-use crate::agent::compact_v2::{
-    run_compact_with_facts_and_resident, CompactOutcome, ProviderCapabilities,
-    ResidentHistoryPressure,
-};
+use crate::agent::compact_v2::config::CompactConfig;
+
+use crate::agent::compact_v2::planner::ContextPressure;
+use crate::agent::compact_v2::planner::FullEscalationReason;
+use crate::agent::compact_v2::planner::MicroPlanningFacts;
+use crate::agent::compact_v2::CompactOutcome;
+use crate::agent::compact_v2::ProviderCapabilities;
+use crate::agent::compact_v2::ResidentHistoryPressure;
 use crate::agent::events::CompactStrategy;
 use crate::messages::{BaseMessage, MessageContent};
 use crate::session::async_result_mailbox::ProtectedResults;
@@ -81,7 +81,8 @@ fn exposed_facts(transcript: &MessageTranscript, session_id: &str) -> MicroPlann
         }),
         ..Default::default()
     };
-    for entry in transcript.entries().iter().skip(transcript.ancestor_len()) {
+    let entry_items = transcript.entries().iter().skip(transcript.ancestor_len());
+    for entry in entry_items {
         facts.exposed_message_ids.insert(entry.id());
         if let Some(message) = entry.as_message() {
             for call in message.tool_calls() {
@@ -152,7 +153,7 @@ impl Model for RecordingModel {
         if self.fail {
             return Err(ModelError::http_status(500, "resident-test", None::<&str>));
         }
-        Ok(ModelResponse::new(
+        Ok(ModelResponse::try_new(
             ModelMessage::assistant_text("<summary>resident full summary</summary>"),
             StopReason::EndTurn,
             None,
@@ -166,7 +167,10 @@ struct LogBuffer(Arc<Mutex<Vec<u8>>>);
 
 impl std::io::Write for LogBuffer {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
+        self.0
+            .lock()
+            .expect("self lock mutex must remain unpoisoned throughout the test")
+            .extend_from_slice(buf);
         Ok(buf.len())
     }
 
@@ -298,9 +302,9 @@ async fn resident_budget_forces_full_at_zero_token_pressure() {
     let model = RecordingModel::new(false);
     let mut failures = 0u32;
     let facts = exposed_facts(&transcript, &bound.thread_id);
-    reset_plan_micro_calls();
+    crate::agent::compact_v2::planner::reset_plan_micro_calls();
 
-    let result = run_compact_with_facts_and_resident(
+    let result = crate::agent::compact_v2::run_compact_with_facts_and_resident(
         &mut transcript,
         Some(&model),
         &config,
@@ -325,7 +329,7 @@ async fn resident_budget_forces_full_at_zero_token_pressure() {
     assert_eq!(model.request_count(), 1);
     assert_eq!(failures, 0);
     assert_eq!(
-        plan_micro_call_count(),
+        crate::agent::compact_v2::planner::plan_micro_call_count(),
         0,
         "驻留 Full 早于 Micro planner，不得先规划 Micro"
     );
@@ -345,9 +349,9 @@ async fn resident_budget_forces_full_even_when_micro_would_meet_target() {
     let model = RecordingModel::new(false);
     let mut failures = 0u32;
     let facts = exposed_facts(&transcript, &bound.thread_id);
-    reset_plan_micro_calls();
+    crate::agent::compact_v2::planner::reset_plan_micro_calls();
 
-    let result = run_compact_with_facts_and_resident(
+    let result = crate::agent::compact_v2::run_compact_with_facts_and_resident(
         &mut transcript,
         Some(&model),
         &config,
@@ -369,7 +373,10 @@ async fn resident_budget_forces_full_even_when_micro_would_meet_target() {
         "Micro 本可满足目标，但驻留超限必须先 Full"
     );
     assert_eq!(model.request_count(), 1);
-    assert_eq!(plan_micro_call_count(), 0);
+    assert_eq!(
+        crate::agent::compact_v2::planner::plan_micro_call_count(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -388,9 +395,9 @@ async fn resident_budget_below_limit_keeps_micro_only() {
     let model = RecordingModel::new(false);
     let mut failures = 0u32;
     let facts = exposed_facts(&transcript, &bound.thread_id);
-    reset_plan_micro_calls();
+    crate::agent::compact_v2::planner::reset_plan_micro_calls();
 
-    let result = run_compact_with_facts_and_resident(
+    let result = crate::agent::compact_v2::run_compact_with_facts_and_resident(
         &mut transcript,
         Some(&model),
         &config,
@@ -409,7 +416,11 @@ async fn resident_budget_below_limit_keeps_micro_only() {
     assert_eq!(result.outcome, CompactOutcome::MicroApplied);
     assert!(result.summary.is_none());
     assert_eq!(model.request_count(), 0, "未超限时不应调用摘要模型");
-    assert_eq!(plan_micro_call_count(), 1, "未超限时保留 Micro 规划");
+    assert_eq!(
+        crate::agent::compact_v2::planner::plan_micro_call_count(),
+        1,
+        "未超限时保留 Micro 规划"
+    );
 }
 
 #[tokio::test]
@@ -425,9 +436,9 @@ async fn resident_full_failure_is_explicit() {
     let model = RecordingModel::new(true);
     let mut failures = 0u32;
     let facts = exposed_facts(&transcript, &bound.thread_id);
-    reset_plan_micro_calls();
+    crate::agent::compact_v2::planner::reset_plan_micro_calls();
 
-    let result = run_compact_with_facts_and_resident(
+    let result = crate::agent::compact_v2::run_compact_with_facts_and_resident(
         &mut transcript,
         Some(&model),
         &config,
@@ -450,7 +461,10 @@ async fn resident_full_failure_is_explicit() {
         Some(FullEscalationReason::ResidentHistoryBudgetExceeded)
     );
     assert_eq!(failures, 1);
-    assert_eq!(plan_micro_call_count(), 0);
+    assert_eq!(
+        crate::agent::compact_v2::planner::plan_micro_call_count(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -468,7 +482,7 @@ async fn resident_full_residual_is_recorded_after_success() {
     let facts = exposed_facts(&transcript, &bound.thread_id);
     let (logs, _capture) = capture_logs();
 
-    let result = run_compact_with_facts_and_resident(
+    let result = crate::agent::compact_v2::run_compact_with_facts_and_resident(
         &mut transcript,
         Some(&model),
         &config,
@@ -490,7 +504,13 @@ async fn resident_full_residual_is_recorded_after_success() {
         residual.is_exceeded(),
         "1 字节上限在 Full 摘要后仍会被超过，用于验证残余记录"
     );
-    let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    let text = String::from_utf8(
+        logs.0
+            .lock()
+            .expect("logs lock mutex must remain unpoisoned throughout the test")
+            .clone(),
+    )
+    .expect("the fixture text must be valid UTF-8");
     assert!(
         text.contains("resident_residual_total_reserved_bytes"),
         "Full 后必须记录残余字节: {text}"
@@ -512,9 +532,9 @@ async fn resident_budget_shadow_reports_without_commit() {
     let model = RecordingModel::new(false);
     let mut failures = 0u32;
     let facts = exposed_facts(&transcript, &bound.thread_id);
-    reset_plan_micro_calls();
+    crate::agent::compact_v2::planner::reset_plan_micro_calls();
 
-    let result = run_compact_with_facts_and_resident(
+    let result = crate::agent::compact_v2::run_compact_with_facts_and_resident(
         &mut transcript,
         Some(&model),
         &config,
@@ -538,7 +558,10 @@ async fn resident_budget_shadow_reports_without_commit() {
         "shadow 必须报告拟执行的 Full 原因"
     );
     assert_eq!(model.request_count(), 0);
-    assert_eq!(plan_micro_call_count(), 0);
+    assert_eq!(
+        crate::agent::compact_v2::planner::plan_micro_call_count(),
+        0
+    );
     assert_eq!(
         transcript.memory_snapshot().total_entries,
         before.total_entries,
@@ -560,9 +583,9 @@ async fn resident_budget_auto_disabled_does_not_trigger_full() {
     let model = RecordingModel::new(false);
     let mut failures = 0u32;
     let facts = exposed_facts(&transcript, &bound.thread_id);
-    reset_plan_micro_calls();
+    crate::agent::compact_v2::planner::reset_plan_micro_calls();
 
-    let result = run_compact_with_facts_and_resident(
+    let result = crate::agent::compact_v2::run_compact_with_facts_and_resident(
         &mut transcript,
         Some(&model),
         &config,
@@ -580,7 +603,10 @@ async fn resident_budget_auto_disabled_does_not_trigger_full() {
 
     assert_eq!(result.outcome, CompactOutcome::Skipped);
     assert_eq!(model.request_count(), 0);
-    assert_eq!(plan_micro_call_count(), 0);
+    assert_eq!(
+        crate::agent::compact_v2::planner::plan_micro_call_count(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -598,7 +624,7 @@ async fn manual_force_still_precedes_resident_budget() {
     let mut failures = 0u32;
     let facts = exposed_facts(&transcript, &bound.thread_id);
 
-    let result = run_compact_with_facts_and_resident(
+    let result = crate::agent::compact_v2::run_compact_with_facts_and_resident(
         &mut transcript,
         Some(&model),
         &config,

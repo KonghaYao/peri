@@ -22,13 +22,11 @@ use peri_acp_types::store::MessageFlags;
 use peri_acp_types::thread::{ThreadId, WorkState};
 use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding, WorkspaceError};
 
-use crate::sessions::data::ensure_child_relation;
-
 use super::ledger::{OperationId, OperationIdentity};
 use super::mutation::QualifiedMutation;
-use super::session_codec::{self as codec, corrupt};
-use super::session_data::{invalid_input, not_found, RemoteSessionData};
-use super::session_lifecycle::guard_session_statement;
+use super::session_codec as codec;
+use super::session_data::RemoteSessionData;
+
 use super::session_sql::{self, SessionInsert};
 use super::sql::StatementSpec;
 
@@ -41,8 +39,9 @@ fn projected_evidence(workspace: &ResolvedWorkspace) -> SessionResourceResult<Op
         .discovery_snapshot
         .as_deref()
         .map(|raw| {
-            crate::sessions::binding_evidence::project(raw)
-                .map_err(|_| invalid_input("workspace creation evidence is invalid"))
+            crate::sessions::binding_evidence::project(raw).map_err(|_| {
+                super::session_data::invalid_input("workspace creation evidence is invalid")
+            })
         })
         .transpose()
 }
@@ -56,15 +55,15 @@ impl RemoteSessionData {
         let path = workspace
             .root
             .to_str()
-            .ok_or_else(|| invalid_input("workspace path is not UTF-8"))?;
-        let evidence = workspace
-            .discovery_snapshot
-            .as_deref()
-            .ok_or_else(|| invalid_input("workspace creation evidence is unavailable"))?;
-        let snapshot: serde_json::Value = serde_json::from_str(evidence)
-            .map_err(|_| invalid_input("workspace creation evidence is invalid"))?;
+            .ok_or_else(|| super::session_data::invalid_input("workspace path is not UTF-8"))?;
+        let evidence = workspace.discovery_snapshot.as_deref().ok_or_else(|| {
+            super::session_data::invalid_input("workspace creation evidence is unavailable")
+        })?;
+        let snapshot: serde_json::Value = serde_json::from_str(evidence).map_err(|_| {
+            super::session_data::invalid_input("workspace creation evidence is invalid")
+        })?;
         if snapshot.get("root").and_then(serde_json::Value::as_str) != Some(path) {
-            return Err(invalid_input(
+            return Err(super::session_data::invalid_input(
                 "workspace creation evidence does not match root",
             ));
         }
@@ -92,7 +91,7 @@ impl RemoteSessionData {
         workspace: &ResolvedWorkspace,
     ) -> SessionResourceResult<()> {
         if input.meta.parent_thread_id.is_some() {
-            return Err(invalid_input(
+            return Err(super::session_data::invalid_input(
                 "child sessions must be saved through the child path",
             ));
         }
@@ -113,7 +112,7 @@ impl RemoteSessionData {
         workspace: &ResolvedWorkspace,
     ) -> SessionResourceResult<()> {
         if draft.meta.parent_thread_id.is_some() {
-            return Err(invalid_input(
+            return Err(super::session_data::invalid_input(
                 "child sessions must be saved through the child path",
             ));
         }
@@ -147,7 +146,7 @@ impl RemoteSessionData {
         // 注意这是**远程侧**的规则，不上升成门面的通用输入校验：本机 `save_new_session` 一直
         // 接受带父的目标，`sqlite_store` 侧的夹具依赖这一点（见本文件顶部的模块文档）。
         if input.meta.parent_thread_id.is_some() {
-            return Err(invalid_input(
+            return Err(super::session_data::invalid_input(
                 "child sessions must be saved through the child path",
             ));
         }
@@ -168,7 +167,7 @@ impl RemoteSessionData {
         draft: &NewSessionDraft,
     ) -> SessionResourceResult<()> {
         if draft.meta.parent_thread_id.is_some() {
-            return Err(invalid_input(
+            return Err(super::session_data::invalid_input(
                 "child sessions must be saved through the child path",
             ));
         }
@@ -208,7 +207,7 @@ impl RemoteSessionData {
             Some(0) => Err(SessionResourceError::conflict(
                 "session frozen snapshot was already committed",
             )),
-            Some(_) => Err(corrupt(
+            Some(_) => Err(super::session_codec::corrupt(
                 "frozen snapshot commit did not apply to exactly one row",
             )),
         }
@@ -233,24 +232,30 @@ impl RemoteSessionData {
         workspace: Option<&ResolvedWorkspace>,
     ) -> SessionResourceResult<()> {
         if fork.target.thread_id == fork.source_id {
-            return Err(invalid_input("fork target must differ from its source"));
+            return Err(super::session_data::invalid_input(
+                "fork target must differ from its source",
+            ));
         }
         // flags 必须落在本批 payload 上，且 payload 内 id 不得重复：两者都在发请求前拒绝，
         // 因此批内不需要「更新了几行」式的后续核对。
         let mut ids: Vec<MessageId> = Vec::with_capacity(fork.payloads.len());
         for payload in &fork.payloads {
             if ids.contains(&payload.id()) {
-                return Err(invalid_input("history batch repeats a message id"));
+                return Err(super::session_data::invalid_input(
+                    "history batch repeats a message id",
+                ));
             }
             ids.push(payload.id());
         }
         for message_id in fork.flags.keys() {
             if !ids.contains(message_id) {
-                return Err(invalid_input("fork flags reference an unknown message id"));
+                return Err(super::session_data::invalid_input(
+                    "fork flags reference an unknown message id",
+                ));
             }
         }
         if !self.exists(&fork.source_id).await? {
-            return Err(not_found());
+            return Err(super::session_data::not_found());
         }
         let mut insert =
             session_sql::session_insert(&fork.target, fork.payloads.len() as i64, None);
@@ -295,16 +300,18 @@ impl RemoteSessionData {
     pub(super) async fn write_child(&self, child: &ChildSnapshot) -> SessionResourceResult<()> {
         // 与门面、本机 adapter 共用同一条输入规则；它在任何远端读取之前生效，因此一次
         // 被拒的 child 既不发批、也不在本机日志里留下任何收据。
-        ensure_child_relation(child)?;
+        crate::sessions::data::ensure_child_relation(child)?;
         if !self.exists(&child.parent_id).await? {
-            return Err(not_found());
+            return Err(super::session_data::not_found());
         }
         let root = self.root_of(&child.parent_id).await?;
         if root != child.root_id {
-            return Err(invalid_input("child root does not match its parent chain"));
+            return Err(super::session_data::invalid_input(
+                "child root does not match its parent chain",
+            ));
         }
         if self.frozen_of(&child.root_id).await?.as_deref() != Some(child.target.frozen.as_str()) {
-            return Err(invalid_input(
+            return Err(super::session_data::invalid_input(
                 "child frozen snapshot must be the root's saved snapshot",
             ));
         }
@@ -321,7 +328,9 @@ impl RemoteSessionData {
             session_sql::session_insert(&child.target, 0, Some(inherited.as_str()));
         // 父存在性的预检在批外，删除树可能在这两步之间提交；守卫把同一判据放进批内，
         // 父行消失时整批回滚，不会留下指向空父节点的 child。
-        let mut statements = vec![guard_session_statement(&child.parent_id)];
+        let mut statements = vec![super::session_lifecycle::guard_session_statement(
+            &child.parent_id,
+        )];
         statements.extend(session_sql::insert_session_statements(&insert)?);
         let mut inputs = session_inputs(&child.target);
         inputs.push(format!("parent:{}", child.parent_id.as_str()));
@@ -343,7 +352,7 @@ impl RemoteSessionData {
                 if matches!(error.kind(), SessionResourceErrorKind::InvalidInput { .. })
                     && !self.exists(&child.parent_id).await.unwrap_or(true)
                 {
-                    return Err(not_found());
+                    return Err(super::session_data::not_found());
                 }
                 Err(error)
             }
@@ -364,7 +373,7 @@ impl RemoteSessionData {
             return Ok(());
         }
         let now = peri_time::now_utc_rfc3339();
-        let title_input = patch_input(&patch.title);
+        let title_input = patch_input(patch.title.as_ref().map(|value| value.as_deref()));
         let status_input = patch
             .status
             .map(|status| status.as_str().to_owned())
@@ -373,7 +382,7 @@ impl RemoteSessionData {
             .cancel_policy
             .map(|policy| policy.as_str().to_owned())
             .unwrap_or_default();
-        let config_input = patch_input(&patch.config);
+        let config_input = patch_input(patch.config.as_ref().map(|value| value.as_deref()));
         let inputs = vec![
             format!("id:{}", id.as_str()),
             format!("title:{title_input}"),
@@ -389,8 +398,8 @@ impl RemoteSessionData {
             // 重放：原操作已生效，效果落在第一次提交里。
             None => Ok(()),
             Some(1) => Ok(()),
-            Some(0) => Err(not_found()),
-            Some(_) => Err(corrupt(
+            Some(0) => Err(super::session_data::not_found()),
+            Some(_) => Err(super::session_codec::corrupt(
                 "session metadata update did not apply to exactly one row",
             )),
         }
@@ -452,8 +461,8 @@ impl RemoteSessionData {
             // 重放：原操作已生效，效果落在第一次提交里。
             None => Ok(()),
             Some(1) => Ok(()),
-            Some(0) => Err(not_found()),
-            Some(_) => Err(corrupt(
+            Some(0) => Err(super::session_data::not_found()),
+            Some(_) => Err(super::session_codec::corrupt(
                 "single-row session write matched more than one row",
             )),
         }
@@ -505,7 +514,7 @@ fn input_labels(inputs: &[String]) -> Vec<&str> {
 }
 
 /// 定向更新的摘要输入：区分「不动」与「清除」，否则两种不同意图会撞同一个操作 id。
-fn patch_input(slot: &Option<Option<String>>) -> String {
+fn patch_input(slot: Option<Option<&str>>) -> String {
     match slot {
         None => "keep".to_owned(),
         Some(None) => "clear".to_owned(),

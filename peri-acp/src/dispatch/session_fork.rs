@@ -14,7 +14,7 @@ use peri_acp_types::session_resources::{
     BindingState, ForkSnapshot, FrozenSnapshotBytes, FrozenState, NewSession, NewSessionMeta,
     SessionResources, SessionSnapshot,
 };
-use peri_acp_types::store::history::remap_fork_history;
+use peri_acp_types::store::history;
 use peri_acp_types::store::{MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{CancelPolicy, ThreadId};
 use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding};
@@ -77,7 +77,8 @@ pub(crate) async fn fork_bound_session(
     // SQLite 的 message_id 是库级主键：复用 source ID 会让写入静默丢行，因此复制前
     // 先做纯 ID 重映射（adapter 不重复执行 fork 算法）。
     let target_id = uuid::Uuid::now_v7().to_string();
-    let forked = remap_fork_history(&target_id, &source.payloads, &source.flags, MessageId::new)?;
+    let forked =
+        history::remap_fork_history(&target_id, &source.payloads, &source.flags, MessageId::new)?;
     // 新会话状态只发布有效集合：已排除正文随复制进目标存储（完整 canonical 历史），
     // 但不回到内存执行上下文。
     let published = forked.active_payloads();

@@ -30,6 +30,7 @@ impl TokenFreshness {
     pub(super) const EXPIRING_WINDOW_SECS: u64 = 300;
 
     /// `expires_at == 0` 表示旧服务端/未知；时间比较由调用方注入，不读真实时钟。
+    #[must_use]
     pub(super) fn classify(expires_at: u64, now: u64) -> Self {
         if expires_at == 0 {
             Self::Unknown
@@ -42,6 +43,7 @@ impl TokenFreshness {
         }
     }
 
+    #[must_use]
     pub(super) fn i18n_key(self) -> &'static str {
         match self {
             Self::Valid => "login-auth-token-valid",
@@ -69,6 +71,7 @@ pub(super) enum IdentityBlock {
 }
 
 impl IdentityBlock {
+    #[must_use]
     pub(super) fn i18n_key(self) -> &'static str {
         match self {
             Self::Checking => "login-auth-identity-checking",
@@ -84,11 +87,13 @@ impl IdentityBlock {
     }
 
     /// 状态查询中：保存只提示等待，不写红字。
+    #[must_use]
     pub(super) fn is_wait(self) -> bool {
         matches!(self, Self::Checking)
     }
 
     /// 推荐动作；绝不返回注销。
+    #[must_use]
     pub(super) fn recommended_action(self) -> AuthAction {
         match self {
             Self::SignedOut | Self::LoggedOut | Self::NoPlanScope | Self::Incomplete => {
@@ -118,23 +123,23 @@ impl IdentityBlock {
 }
 
 /// 草稿身份相对已验证状态的唯一结论。
-pub(super) enum IdentityReadiness<'a> {
+pub(super) enum IdentityReadiness<'identity> {
     /// 草稿身份完整，或已与状态一致：无需认证干预。
     Ready,
     /// 当前作用域的已登录状态可静默写入空/兼容草稿身份。
-    Adoptable(&'a AccountStatus),
+    Adoptable(&'identity AccountStatus),
     /// 草稿已有不同身份：只能显式“使用此账号”，不得自动覆盖。
-    Conflict(&'a AccountStatus),
+    Conflict(&'identity AccountStatus),
     /// 需要用户动作或等待。
     NeedsAction(IdentityBlock),
 }
 
-pub(super) fn readiness<'a>(
+pub(super) fn readiness<'identity>(
     plan: &PlanDraft,
-    view: &'a AuthViewState,
+    view: &'identity AuthViewState,
     status_scope: &HostConfigAuthScope,
     current_scope: &HostConfigAuthScope,
-) -> IdentityReadiness<'a> {
+) -> IdentityReadiness<'identity> {
     if let AuthViewState::SignedIn(status) = view {
         if status_scope != current_scope {
             return if plan.needs_identity() {
@@ -165,12 +170,12 @@ pub(super) fn readiness<'a>(
 }
 
 /// 当前作用域内已登录但身份不同：保存前必须显式采用。
-pub(super) fn conflict_status<'a>(
+pub(super) fn conflict_status<'identity>(
     plan: &PlanDraft,
-    view: &'a AuthViewState,
+    view: &'identity AuthViewState,
     status_scope: &HostConfigAuthScope,
     current_scope: &HostConfigAuthScope,
-) -> Option<&'a AccountStatus> {
+) -> Option<&'identity AccountStatus> {
     match readiness(plan, view, status_scope, current_scope) {
         IdentityReadiness::Conflict(status) => Some(status),
         _ => None,
@@ -205,6 +210,7 @@ pub(super) fn save_block(
     }
 }
 
+#[must_use]
 fn status_has_identity(status: &AccountStatus) -> bool {
     !status.subject.trim().is_empty() && !status.client_id.trim().is_empty()
 }

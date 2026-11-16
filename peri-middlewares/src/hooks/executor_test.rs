@@ -1,6 +1,12 @@
 use std::path::PathBuf;
 
-use super::*;
+use super::Arc;
+use super::HashSet;
+use super::HookAction;
+use super::HookInput;
+use super::HookType;
+use super::ReactLLM;
+use super::RegisteredHook;
 use crate::hooks::types::HookEvent;
 
 fn make_registered() -> RegisteredHook {
@@ -40,7 +46,7 @@ async fn test_command_hook_echo_plain_text() {
     let hook = make_command_hook("echo plain-text-hook-output");
     let input = make_hook_input();
     let registered = make_registered();
-    let action = execute_command_hook(&hook, &input, &registered).await;
+    let action = super::execute_command_hook(&hook, &input, &registered).await;
     assert!(matches!(action, HookAction::Allow));
 }
 
@@ -54,7 +60,7 @@ async fn test_command_hook_echo_input_json_is_rejected() {
     let hook = make_command_hook(command);
     let input = make_hook_input();
     let registered = make_registered();
-    let action = execute_command_hook(&hook, &input, &registered).await;
+    let action = super::execute_command_hook(&hook, &input, &registered).await;
     assert!(matches!(
         action,
         HookAction::Block { reason }
@@ -68,7 +74,7 @@ async fn test_command_hook_exit_code_2_blocks() {
     let hook = make_command_hook("exit 2");
     let input = make_hook_input();
     let registered = make_registered();
-    let action = execute_command_hook(&hook, &input, &registered).await;
+    let action = super::execute_command_hook(&hook, &input, &registered).await;
     assert!(matches!(action, HookAction::Block { .. }));
 }
 
@@ -77,7 +83,7 @@ async fn test_command_hook_exit_code_1_allows() {
     let hook = make_command_hook("echo 'error msg' >&2 && exit 1");
     let input = make_hook_input();
     let registered = make_registered();
-    let action = execute_command_hook(&hook, &input, &registered).await;
+    let action = super::execute_command_hook(&hook, &input, &registered).await;
     assert!(matches!(action, HookAction::Allow));
 }
 
@@ -87,7 +93,7 @@ async fn test_command_hook_json_output_continue_false() {
     let hook = make_command_hook(r#"echo '{"continue":false,"stopReason":"test stop"}'"#);
     let input = make_hook_input();
     let registered = make_registered();
-    let action = execute_command_hook(&hook, &input, &registered).await;
+    let action = super::execute_command_hook(&hook, &input, &registered).await;
     assert!(matches!(
         action,
         HookAction::PreventContinuation {
@@ -102,7 +108,7 @@ async fn test_command_hook_json_output_block() {
     let hook = make_command_hook(r#"echo '{"decision":"block","reason":"not allowed"}'"#);
     let input = make_hook_input();
     let registered = make_registered();
-    let action = execute_command_hook(&hook, &input, &registered).await;
+    let action = super::execute_command_hook(&hook, &input, &registered).await;
     assert!(matches!(
         action,
         HookAction::Block {
@@ -121,7 +127,7 @@ async fn test_command_hook_timeout() {
     .unwrap();
     let input = make_hook_input();
     let registered = make_registered();
-    let action = execute_command_hook(&hook, &input, &registered).await;
+    let action = super::execute_command_hook(&hook, &input, &registered).await;
     assert!(matches!(action, HookAction::Allow));
 }
 
@@ -131,7 +137,7 @@ async fn test_command_hook_exit_code_2_with_stdout_reason() {
     let hook = make_command_hook("echo 'custom block reason' && exit 2");
     let input = make_hook_input();
     let registered = make_registered();
-    let action = execute_command_hook(&hook, &input, &registered).await;
+    let action = super::execute_command_hook(&hook, &input, &registered).await;
     assert!(matches!(
         action,
         HookAction::Block {
@@ -149,7 +155,7 @@ async fn test_command_hook_plugin_options_env() {
 
     let hook = make_command_hook("echo $CLAUDE_PLUGIN_OPTION_API_KEY");
     let input = make_hook_input();
-    let action = execute_command_hook(&hook, &input, &registered).await;
+    let action = super::execute_command_hook(&hook, &input, &registered).await;
     assert!(matches!(action, HookAction::Allow));
 }
 
@@ -158,21 +164,21 @@ async fn test_command_hook_plugin_options_env() {
 #[test]
 fn test_sanitize_crlf_injection() {
     let allowed: HashSet<String> = HashSet::new();
-    let result = sanitize_header_value("value\r\nX-Injected: evil", &allowed);
+    let result = super::sanitize_header_value("value\r\nX-Injected: evil", &allowed);
     assert_eq!(result, "valueX-Injected: evil");
 }
 
 #[test]
 fn test_sanitize_lf_only() {
     let allowed: HashSet<String> = HashSet::new();
-    let result = sanitize_header_value("value\nX-Injected: evil", &allowed);
+    let result = super::sanitize_header_value("value\nX-Injected: evil", &allowed);
     assert_eq!(result, "valueX-Injected: evil");
 }
 
 #[test]
 fn test_sanitize_cr_only() {
     let allowed: HashSet<String> = HashSet::new();
-    let result = sanitize_header_value("value\rX-Injected: evil", &allowed);
+    let result = super::sanitize_header_value("value\rX-Injected: evil", &allowed);
     assert_eq!(result, "valueX-Injected: evil");
 }
 
@@ -180,7 +186,7 @@ fn test_sanitize_cr_only() {
 fn test_sanitize_env_var_expansion_allowed() {
     std::env::set_var("TEST_SANITIZE_HOOK_VAR", "secret-value");
     let allowed: HashSet<String> = ["TEST_SANITIZE_HOOK_VAR".to_string()].into_iter().collect();
-    let result = sanitize_header_value("Bearer ${TEST_SANITIZE_HOOK_VAR}", &allowed);
+    let result = super::sanitize_header_value("Bearer ${TEST_SANITIZE_HOOK_VAR}", &allowed);
     assert_eq!(result, "Bearer secret-value");
     std::env::remove_var("TEST_SANITIZE_HOOK_VAR");
 }
@@ -188,7 +194,7 @@ fn test_sanitize_env_var_expansion_allowed() {
 #[test]
 fn test_sanitize_env_var_expansion_not_allowed() {
     let allowed: HashSet<String> = HashSet::new();
-    let result = sanitize_header_value("Bearer ${SECRET_KEY}", &allowed);
+    let result = super::sanitize_header_value("Bearer ${SECRET_KEY}", &allowed);
     assert_eq!(result, "Bearer ${SECRET_KEY}");
 }
 
@@ -198,7 +204,7 @@ fn test_sanitize_env_var_brace_expansion() {
     let allowed: HashSet<String> = ["TEST_SANITIZE_HOOK_BRACE".to_string()]
         .into_iter()
         .collect();
-    let result = sanitize_header_value("token-${TEST_SANITIZE_HOOK_BRACE}", &allowed);
+    let result = super::sanitize_header_value("token-${TEST_SANITIZE_HOOK_BRACE}", &allowed);
     assert_eq!(result, "token-expanded");
     std::env::remove_var("TEST_SANITIZE_HOOK_BRACE");
 }
@@ -214,7 +220,7 @@ async fn test_http_hook_ssrf_blocked() {
     }))
     .unwrap();
     let input = make_hook_input();
-    let action = execute_http_hook(&hook, &input).await;
+    let action = super::execute_http_hook(&hook, &input).await;
     assert!(matches!(action, HookAction::Block { .. }));
 }
 
@@ -227,7 +233,7 @@ async fn test_http_hook_invalid_url() {
     }))
     .unwrap();
     let input = make_hook_input();
-    let action = execute_http_hook(&hook, &input).await;
+    let action = super::execute_http_hook(&hook, &input).await;
     assert!(matches!(action, HookAction::Block { .. }));
 }
 
@@ -242,7 +248,7 @@ async fn test_command_hook_wrong_type_returns_allow() {
     .unwrap();
     let input = make_hook_input();
     let registered = make_registered();
-    let action = execute_command_hook(&hook, &input, &registered).await;
+    let action = super::execute_command_hook(&hook, &input, &registered).await;
     assert!(matches!(action, HookAction::Allow));
 }
 
@@ -256,7 +262,7 @@ async fn test_prompt_hook_wrong_type_returns_allow() {
     let input = make_hook_input();
     let llm_factory: Arc<dyn Fn() -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
         Arc::new(|| unimplemented!());
-    let action = execute_prompt_hook(&hook, &input, &llm_factory, None).await;
+    let action = super::execute_prompt_hook(&hook, &input, &llm_factory, None).await;
     assert!(matches!(action, HookAction::Allow));
 }
 
@@ -264,7 +270,7 @@ async fn test_prompt_hook_wrong_type_returns_allow() {
 async fn test_http_hook_wrong_type_returns_allow() {
     let hook = make_command_hook("echo test");
     let input = make_hook_input();
-    let action = execute_http_hook(&hook, &input).await;
+    let action = super::execute_http_hook(&hook, &input).await;
     assert!(matches!(action, HookAction::Allow));
 }
 
@@ -274,7 +280,7 @@ async fn test_agent_hook_wrong_type_returns_allow() {
     let input = make_hook_input();
     let llm_factory: Arc<dyn Fn() -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
         Arc::new(|| unimplemented!());
-    let action = execute_agent_hook(&hook, &input, &llm_factory, "/tmp", None).await;
+    let action = super::execute_agent_hook(&hook, &input, &llm_factory, "/tmp", None).await;
     assert!(matches!(action, HookAction::Allow));
 }
 
@@ -303,7 +309,7 @@ async fn test_command_hook_arguments_substitution_is_migration_error_with_zero_p
     let hook = make_command_hook(&format!("touch {}; echo $ARGUMENTS", marker.display()));
     let input = make_hook_input();
     let registered = make_registered();
-    let action = execute_command_hook(&hook, &input, &registered).await;
+    let action = super::execute_command_hook(&hook, &input, &registered).await;
 
     match action {
         HookAction::Block { ref reason } => {
@@ -333,7 +339,7 @@ async fn test_command_hook_braced_arguments_is_migration_error() {
     let hook = make_command_hook(&format!("touch {}; echo ${{ARGUMENTS}}", marker.display()));
     let input = make_hook_input();
     let registered = make_registered();
-    let action = execute_command_hook(&hook, &input, &registered).await;
+    let action = super::execute_command_hook(&hook, &input, &registered).await;
 
     assert!(
         matches!(action, HookAction::Block { ref reason } if reason.contains("${ARGUMENTS}") || reason.contains("$ARGUMENTS")),
@@ -363,7 +369,7 @@ async fn test_command_hook_stdin_json_is_byte_exact_with_benign_special_chars() 
     );
     input.tool_input = Some(serde_json::json!({"pattern": "a\"b\\c\n d"}));
 
-    let action = execute_command_hook(&hook, &input, &registered).await;
+    let action = super::execute_command_hook(&hook, &input, &registered).await;
     assert!(matches!(action, HookAction::Allow), "got {action:?}");
 
     let written = std::fs::read_to_string(&out).expect("hook 应把 stdin 原样写入文件");

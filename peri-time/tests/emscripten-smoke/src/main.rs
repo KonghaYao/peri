@@ -1,4 +1,5 @@
-use std::{future::pending, time::Duration};
+use std::future;
+use std::time::Duration;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -8,7 +9,7 @@ pub async fn run_smoke() -> Result<String, JsValue> {
         return Err(JsValue::from_str("ready future lost zero-budget race"));
     }
     peri_time::sleep(Duration::from_millis(2)).await;
-    let expired = peri_time::timeout(Duration::from_millis(2), pending::<()>()).await;
+    let expired = peri_time::timeout(Duration::from_millis(2), future::pending::<()>()).await;
     if expired != Err(peri_time::Elapsed) {
         return Err(JsValue::from_str("pending future did not expire"));
     }
@@ -22,8 +23,14 @@ pub async fn run_smoke() -> Result<String, JsValue> {
 /// Poll then cancel two pending waits so the JS harness can inspect cleanup.
 #[wasm_bindgen]
 pub fn test_timer_edges() -> Result<(), JsValue> {
-    use std::{future::Future, task::{Context, Poll, Waker}};
-    for duration in [Duration::from_nanos(1), Duration::from_millis(i32::MAX as u64 + 10)] {
+    use std::future::Future;
+    use std::task::Context;
+    use std::task::Poll;
+    use std::task::Waker;
+    for duration in [
+        Duration::from_nanos(1),
+        Duration::from_millis(i32::MAX as u64 + 10),
+    ] {
         let mut sleep = Box::pin(peri_time::sleep(duration));
         let mut context = Context::from_waker(Waker::noop());
         if !matches!(sleep.as_mut().poll(&mut context), Poll::Pending) {

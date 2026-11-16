@@ -1,4 +1,6 @@
-use std::{collections::BTreeMap, io, path::Path};
+use std::collections::BTreeMap;
+use std::io;
+use std::path::Path;
 
 use crate::{ConfigurationInputs, ConfigurationScope};
 
@@ -47,7 +49,7 @@ impl ConfigurationSource for McpConfigurationSource {
         expected: Option<&str>,
         content: &str,
     ) -> io::Result<bool> {
-        crate::io::write_text_if_unchanged(path, &expected.map(str::to_owned), content)
+        crate::io::write_text_if_unchanged(path, expected, content)
     }
 }
 

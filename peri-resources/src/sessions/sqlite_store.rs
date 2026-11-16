@@ -9,11 +9,15 @@
 mod compaction;
 mod connection;
 mod context;
-mod database;
+mod sqlite_session_database;
+mod sqlite_thread_store;
 pub(in crate::sessions) use super::discovery;
+use sqlite_session_database as database;
 mod failure;
-mod local;
-mod oauth_credentials;
+mod local_execution;
+use local_execution as local;
+mod sqlite_oauth_credential_store;
+use sqlite_oauth_credential_store as oauth_credentials;
 pub(crate) mod row_mapping;
 mod schema;
 mod schema_cleanup;
@@ -24,24 +28,27 @@ mod storage_v11_migration;
 mod workspace;
 mod workspace_identity;
 
-use anyhow::{Context, Result};
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 pub use connection::{ReadOnlyStoreErrorKind, ReadOnlyThreadStoreError};
-use peri_acp_types::{
-    messages::BaseMessage,
-    store::{
-        deserialize_persisted_payload, serialize_persisted_payload, CompactionChange,
-        InheritedContext, MessageFlags, PersistedPayload, ThreadStore,
-    },
-    thread::{AgentStatus, ThreadId, ThreadListEntry, ThreadMeta, WorkState},
+#[cfg(test)]
+use sqlite_thread_store::{
+    serialize_persisted_payload, AgentStatus, BaseMessage, CompactionChange, InheritedContext,
+    MessageFlags, PersistedPayload, ThreadMeta, ThreadStore,
 };
-use row_mapping::{extract_title, meta_from_row, role_of, ThreadRow};
-use sqlx::AssertSqlSafe;
-use std::{collections::HashMap, path::PathBuf, str::FromStr, sync::Arc};
 
-use super::resources::SessionResourcesImpl;
-use database::SqliteSessionDatabase;
+#[cfg(test)]
+use sqlite_thread_store::meta_from_row;
+
+#[cfg(test)]
+use sqlite_thread_store::AssertSqlSafe;
+
+#[cfg(test)]
+use sqlite_thread_store::{Arc, HashMap};
+
+#[cfg(test)]
+use sqlite_thread_store::SessionResourcesImpl;
+
+#[cfg(test)]
+use sqlite_thread_store::SqliteSessionDatabase;
 
 pub(in crate::sessions) use failure::execution_failure;
 /// 提交阶段/领域失败映射：由门面测试驱动真实写入准入，生产路径在 `session_data`
@@ -50,580 +57,26 @@ pub(in crate::sessions) use failure::execution_failure;
 pub(in crate::sessions) use failure::{commit_failure, write_failure};
 pub(in crate::sessions) use local::LocalExecution;
 #[cfg(test)]
-use schema::CURRENT_SCHEMA_VERSION;
+use sqlite_thread_store::CURRENT_SCHEMA_VERSION;
+
 /// 多行 INSERT 的分块行数；测试用它构造跨块批次，与生产共用同一个上限。
 #[cfg(test)]
 pub(in crate::sessions::sqlite_store) use session_data::message_insert_chunk_rows;
 /// 数据面实现：生产组合从 [`LocalExecution::data_port`] 取得它，本重导出供测试夹具直接命名。
 #[cfg(test)]
 pub(crate) use session_data::SqliteSessionData;
+#[cfg(test)]
+use sqlite_thread_store::{
+    classify_shape_probe_failure, REQUIRED_MESSAGE_COLUMNS, REQUIRED_THREAD_COLUMNS,
+};
 
 #[cfg(test)]
-use connection::{classify_shape_probe_failure, REQUIRED_MESSAGE_COLUMNS, REQUIRED_THREAD_COLUMNS};
-#[cfg(test)]
-use sqlx::sqlite::SqliteConnectOptions;
+use sqlite_thread_store::SqliteConnectOptions;
 
-/// 基于 SQLite 的 ThreadStore 实现（迁移桥）
-///
-/// 使用 WAL 模式提升并发读性能，sqlx SqlitePool 连接池管理并发。连接池、canonical
-/// 路径与连接池归共享库句柄所有：数据面与工作区校验共享连接真相。
-pub struct SqliteThreadStore {
-    database: Arc<SqliteSessionDatabase>,
-}
-
-impl SqliteThreadStore {
-    /// 打开或创建会话数据库，原地升级已知旧 schema 并保留历史数据。
-    pub async fn new(db_path: impl Into<PathBuf>) -> Result<Self> {
-        Ok(Self {
-            database: Arc::new(SqliteSessionDatabase::open(db_path).await?),
-        })
-    }
-
-    /// 以 SQLite read-only capability 打开已存在的数据库；不创建目录、库或 schema。
-    pub async fn open_existing_read_only(
-        db_path: impl AsRef<std::path::Path>,
-    ) -> std::result::Result<Self, ReadOnlyThreadStoreError> {
-        Ok(Self {
-            database: Arc::new(SqliteSessionDatabase::open_existing_read_only(db_path).await?),
-        })
-    }
-
-    /// 默认数据库位置 `~/.peri/threads/threads.db`；不创建目录、数据库或连接。
-    pub fn default_database_path() -> Result<PathBuf> {
-        SqliteSessionDatabase::default_database_path()
-    }
-
-    /// 使用默认路径 `~/.peri/threads/threads.db` 创建
-    pub async fn default_path() -> Result<Self> {
-        Self::new(Self::default_database_path()?).await
-    }
-
-    /// 关闭连接池并等待全部连接释放（见 `SqliteSessionDatabase::close`）。
-    pub async fn close(&self) {
-        self.database.close().await;
-    }
-
-    /// 夹具装配（唯一调用点 `open_store_and_facade_for_tests`）：迁移桥与门面共用
-    /// **同一个库句柄**（同一 pool）。
-    pub(in crate::sessions) async fn open_shared(
-        db_path: impl Into<PathBuf>,
-    ) -> Result<(Self, SessionResourcesImpl)> {
-        let database = Arc::new(SqliteSessionDatabase::open(db_path).await?);
-        Ok((
-            Self {
-                database: Arc::clone(&database),
-            },
-            SessionResourcesImpl::from_local(LocalExecution::from_shared_database(database)),
-        ))
-    }
-}
-
-// ── ThreadStore impl（迁移桥转发） ─────────────────────────────────────────────
-
-#[async_trait]
-impl ThreadStore for SqliteThreadStore {
-    async fn resolve_workspace(
-        &self,
-        cwd: &std::path::Path,
-    ) -> Result<peri_acp_types::workspace::ResolvedWorkspace> {
-        self.database.resolve_workspace_impl(cwd).await
-    }
-    async fn create_bound_thread(
-        &self,
-        meta: ThreadMeta,
-        workspace: &peri_acp_types::workspace::ResolvedWorkspace,
-    ) -> Result<ThreadId> {
-        self.database
-            .create_bound_thread_impl(meta, workspace)
-            .await
-    }
-    async fn load_session_binding(
-        &self,
-        id: &ThreadId,
-    ) -> Result<Option<peri_acp_types::workspace::SessionBinding>> {
-        self.database.load_session_binding_impl(id).await
-    }
-    async fn validate_session_binding(
-        &self,
-        id: &ThreadId,
-    ) -> Result<peri_acp_types::workspace::ResolvedWorkspace> {
-        self.database.validate_session_binding_impl(id).await
-    }
-    async fn reassert_session_binding(
-        &self,
-        id: &ThreadId,
-    ) -> Result<peri_acp_types::workspace::ResolvedWorkspace> {
-        self.database.reassert_session_binding_impl(id).await
-    }
-    async fn adopt_legacy_thread(
-        &self,
-        id: &ThreadId,
-        saved_cwd: &str,
-        workspace: &peri_acp_types::workspace::ResolvedWorkspace,
-        frozen_snapshot: &str,
-    ) -> Result<()> {
-        self.database
-            .adopt_legacy_thread_impl(id, saved_cwd, workspace, frozen_snapshot)
-            .await
-    }
-    async fn list_scoped_threads(
-        &self,
-        query: &peri_acp_types::workspace::ScopedThreadQuery,
-    ) -> Result<peri_acp_types::workspace::ScopedThreadPage> {
-        self.database.list_scoped_threads_impl(query).await
-    }
-    async fn create_thread(&self, meta: ThreadMeta) -> Result<ThreadId> {
-        let id = meta.id.clone();
-        let mut transaction = self.database.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let workspace_id = workspace_identity::identity_for_new_thread(
-            &mut transaction,
-            meta.parent_thread_id.as_deref(),
-            None,
-            &meta.cwd,
-        )
-        .await?;
-        sqlx::query(
-            "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
-                parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, agent_status, workspace_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-        )
-        .bind(&meta.id)
-        .bind(&meta.title)
-        .bind(&meta.cwd)
-        .bind(meta.created_at.to_rfc3339())
-        .bind(meta.updated_at.to_rfc3339())
-        .bind(meta.message_count as i64)
-        .bind(&meta.parent_thread_id)
-        .bind(&meta.snapshot_at_message_id)
-        .bind(meta.hidden)
-        .bind(meta.cancel_policy.as_str())
-        .bind(&meta.config)
-        .bind(meta.agent_status.as_str())
-        .bind(workspace_id.to_string())
-        .execute(&mut *transaction)
-        .await?;
-        transaction.commit().await?;
-        Ok(id)
-    }
-
-    async fn append_messages(&self, id: &ThreadId, msgs: &[BaseMessage]) -> Result<()> {
-        let payloads = msgs
-            .iter()
-            .cloned()
-            .map(PersistedPayload::Message)
-            .collect::<Vec<_>>();
-        self.append_payloads(id, &payloads).await
-    }
-
-    async fn load_messages(&self, id: &ThreadId) -> Result<Vec<BaseMessage>> {
-        let rows: Vec<(String,)> =
-            sqlx::query_as("SELECT content FROM messages WHERE thread_id = ?1 ORDER BY rowid")
-                .bind(id.as_str())
-                .fetch_all(&self.database.pool)
-                .await?;
-
-        rows.into_iter()
-            .filter_map(|(content,)| match deserialize_persisted_payload(&content) {
-                Ok(PersistedPayload::Message(message)) => Some(Ok(message)),
-                Ok(PersistedPayload::SystemReminder { .. }) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .collect()
-    }
-
-    async fn append_payloads(&self, id: &ThreadId, payloads: &[PersistedPayload]) -> Result<()> {
-        let result = async {
-            if payloads.is_empty() {
-                return Ok(());
-            }
-            let mut tx = self.database.pool.begin().await?;
-            for payload in payloads {
-                let message_id = payload.id().as_uuid().to_string();
-                let role = payload
-                    .as_message()
-                    .map(role_of)
-                    .unwrap_or("system_reminder");
-                let content = serialize_persisted_payload(payload)?;
-                sqlx::query(
-                    "INSERT OR IGNORE INTO messages (message_id, thread_id, role, content)
-                 VALUES (?1, ?2, ?3, ?4)",
-                )
-                .bind(&message_id)
-                .bind(id.as_str())
-                .bind(role)
-                .bind(&content)
-                .execute(&mut *tx)
-                .await?;
-            }
-            sqlx::query(
-                "UPDATE threads SET updated_at = ?1,
-                message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
-             WHERE id = ?2",
-            )
-            .bind(peri_time::now_utc_rfc3339())
-            .bind(id.as_str())
-            .execute(&mut *tx)
-            .await?;
-            let messages = payloads
-                .iter()
-                .filter_map(PersistedPayload::as_message)
-                .cloned()
-                .collect::<Vec<_>>();
-            if let Some(title) = extract_title(&messages) {
-                sqlx::query("UPDATE threads SET title = ?1 WHERE id = ?2 AND title IS NULL")
-                    .bind(&title)
-                    .bind(id.as_str())
-                    .execute(&mut *tx)
-                    .await?;
-            }
-            tx.commit().await?;
-            Ok(())
-        }
-        .await;
-        result
-    }
-
-    async fn load_payloads(&self, id: &ThreadId) -> Result<Vec<PersistedPayload>> {
-        self.database.load_payloads(id).await
-    }
-
-    async fn load_meta(&self, id: &ThreadId) -> Result<ThreadMeta> {
-        let row: ThreadRow = match sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT {} FROM threads t WHERE t.id = ?1",
-            self.database.thread_meta_columns()
-        )))
-        .bind(id.as_str())
-        .fetch_one(&self.database.pool)
-        .await
-        {
-            Ok(row) => row,
-            Err(error) if self.database.read_only => {
-                let kind = if matches!(error, sqlx::Error::RowNotFound) {
-                    ReadOnlyStoreErrorKind::SessionNotFound
-                } else if matches!(
-                    error,
-                    sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_)
-                ) {
-                    ReadOnlyStoreErrorKind::CorruptSessionData
-                } else {
-                    ReadOnlyStoreErrorKind::DatabaseUnreadable
-                };
-                return Err(ReadOnlyThreadStoreError::from_kind(kind).into());
-            }
-            Err(error) => return Err(error.into()),
-        };
-
-        let result = meta_from_row(
-            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11,
-            row.12, row.13, row.14,
-        );
-        if self.database.read_only {
-            result.map_err(|_| {
-                ReadOnlyThreadStoreError::from_kind(ReadOnlyStoreErrorKind::CorruptSessionData)
-                    .into()
-            })
-        } else {
-            result
-        }
-    }
-
-    async fn update_meta(&self, id: &ThreadId, meta: ThreadMeta) -> Result<()> {
-        let result = async {
-            if self.database.load_session_binding_impl(id).await?.is_some() {
-                let original: (String, Option<String>) =
-                    sqlx::query_as("SELECT cwd, parent_thread_id FROM threads WHERE id = ?")
-                        .bind(id)
-                        .fetch_one(&self.database.pool)
-                        .await?;
-                if original.0 != meta.cwd || original.1 != meta.parent_thread_id {
-                    return Err(
-                        peri_acp_types::workspace::WorkspaceError::ExecutionBindingMismatch.into(),
-                    );
-                }
-            }
-            sqlx::query(
-                "UPDATE threads SET title = ?1, cwd = ?2, updated_at = ?3, message_count = ?4,
-                parent_thread_id = ?5, snapshot_at_message_id = ?6, hidden = ?7,
-                cancel_policy = ?8, config = ?9, agent_status = ?10
-             WHERE id = ?11",
-            )
-            .bind(&meta.title)
-            .bind(&meta.cwd)
-            .bind(meta.updated_at.to_rfc3339())
-            .bind(meta.message_count as i64)
-            .bind(&meta.parent_thread_id)
-            .bind(&meta.snapshot_at_message_id)
-            .bind(meta.hidden)
-            .bind(meta.cancel_policy.as_str())
-            .bind(&meta.config)
-            .bind(meta.agent_status.as_str())
-            .bind(id.as_str())
-            .execute(&self.database.pool)
-            .await?;
-            Ok(())
-        }
-        .await;
-        result
-    }
-
-    async fn load_frozen_snapshot(&self, id: &ThreadId) -> Result<Option<String>> {
-        let row: (Option<String>,) =
-            sqlx::query_as("SELECT frozen_context FROM threads WHERE id = ?1")
-                .bind(id.as_str())
-                .fetch_one(&self.database.pool)
-                .await?;
-        Ok(row.0)
-    }
-
-    async fn store_frozen_snapshot_if_absent(&self, id: &ThreadId, snapshot: &str) -> Result<bool> {
-        let result = async {
-            let result = sqlx::query(
-                "UPDATE threads SET frozen_context = ?1 WHERE id = ?2 AND frozen_context IS NULL",
-            )
-            .bind(snapshot)
-            .bind(id.as_str())
-            .execute(&self.database.pool)
-            .await?;
-            if result.rows_affected() == 1 {
-                return Ok(true);
-            }
-            let row: Option<(Option<String>,)> =
-                sqlx::query_as("SELECT frozen_context FROM threads WHERE id = ?1")
-                    .bind(id.as_str())
-                    .fetch_optional(&self.database.pool)
-                    .await?;
-            match row {
-                Some((Some(_),)) => Ok(false),
-                Some((None,)) => anyhow::bail!(
-                    "frozen snapshot write lost without a persisted winner for thread: {id}"
-                ),
-                None => anyhow::bail!("thread 不存在，无法写入 frozen snapshot: {id}"),
-            }
-        }
-        .await;
-        result
-    }
-
-    async fn list_threads(&self) -> Result<Vec<ThreadMeta>> {
-        let rows: Vec<ThreadRow> = sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT {} FROM threads t WHERE t.hidden = 0 ORDER BY t.updated_at DESC",
-            self.database.thread_meta_columns()
-        )))
-        .fetch_all(&self.database.pool)
-        .await?;
-
-        rows.into_iter()
-            .map(|row| {
-                meta_from_row(
-                    row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
-                    row.11, row.12, row.13, row.14,
-                )
-            })
-            .collect()
-    }
-
-    async fn list_thread_entries(&self, cwd: &str) -> Result<Vec<ThreadListEntry>> {
-        let rows: Vec<(String, Option<String>, String, i64, String)> = sqlx::query_as(
-            "SELECT id, title, cwd, message_count, updated_at
-             FROM threads
-             WHERE hidden = 0 AND message_count > 0 AND cwd = ?
-             ORDER BY updated_at DESC",
-        )
-        .bind(cwd)
-        .fetch_all(&self.database.pool)
-        .await?;
-
-        rows.into_iter()
-            .map(|(id, title, cwd, message_count, updated_at)| {
-                Ok(ThreadListEntry {
-                    id,
-                    title,
-                    cwd,
-                    message_count: message_count as usize,
-                    updated_at: DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc),
-                })
-            })
-            .collect()
-    }
-
-    async fn delete_thread(&self, id: &ThreadId) -> Result<()> {
-        let mut deleted: Vec<String> = Vec::new();
-        let result = async {
-            let mut tx = self.database.pool.begin().await?;
-            // 级联删除整个线程树：hidden 子 agent 线程沿 parent_thread_id 挂链，
-            // 若不递归删除会留下永远无法通过 UI/协议访问的孤儿数据。
-            let mut to_delete = vec![id.as_str().to_string()];
-            let mut idx = 0;
-            while idx < to_delete.len() {
-                let children: Vec<(String,)> =
-                    sqlx::query_as("SELECT id FROM threads WHERE parent_thread_id = ?1")
-                        .bind(&to_delete[idx])
-                        .fetch_all(&mut *tx)
-                        .await?;
-                to_delete.extend(children.into_iter().map(|(cid,)| cid));
-                idx += 1;
-            }
-            for tid in &to_delete {
-                // `messages` 与 `session_bindings` 同样显式删除，**不再**依赖
-                // `ON DELETE CASCADE`：那份级联只在 SQLite 上存在，远端执行器没有
-                // （见 `session_rows::THREAD_CHILD_DELETES`）。先子后父，顺序与数据面
-                // 的 delete_tree 及远端一致。
-                session_rows::delete_thread_child_rows(&mut tx, tid).await?;
-                sqlx::query(session_rows::DELETE_THREAD_SQL)
-                    .bind(tid)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-            tx.commit().await?;
-            deleted = to_delete;
-            Ok(())
-        }
-        .await;
-        // 只有效果确定才结清写入准入：提交自身的失败落在证明之外，交给 Drop 留下未决证据。
-        let _ = deleted;
-        result
-    }
-
-    async fn update_title(&self, id: &ThreadId, title: &str) -> Result<()> {
-        let result = async {
-            let now = peri_time::now_utc_rfc3339();
-            sqlx::query("UPDATE threads SET title = ?1, updated_at = ?2 WHERE id = ?3")
-                .bind(title)
-                .bind(&now)
-                .bind(id.as_str())
-                .execute(&self.database.pool)
-                .await?;
-            Ok(())
-        }
-        .await;
-        result
-    }
-
-    async fn store_inherited_context(
-        &self,
-        thread_id: &ThreadId,
-        inherited: &InheritedContext,
-    ) -> Result<()> {
-        let result = async {
-            self.database
-                .store_inherited_context(thread_id, inherited)
-                .await
-        }
-        .await;
-        result
-    }
-
-    async fn load_inherited_context(&self, thread_id: &ThreadId) -> Result<InheritedContext> {
-        self.database.load_inherited_context(thread_id).await
-    }
-
-    async fn load_context_payloads(&self, thread_id: &ThreadId) -> Result<Vec<PersistedPayload>> {
-        self.database.load_context_payloads(thread_id).await
-    }
-
-    async fn load_context(&self, thread_id: &ThreadId) -> Result<Vec<BaseMessage>> {
-        self.database.load_context(thread_id).await
-    }
-
-    async fn list_child_threads(&self, parent_id: &ThreadId) -> Result<Vec<ThreadMeta>> {
-        self.database.list_child_threads(parent_id).await
-    }
-
-    async fn list_session_threads(&self, root_id: &ThreadId) -> Result<Vec<ThreadMeta>> {
-        self.database.list_session_threads(root_id).await
-    }
-
-    async fn update_thread_status(&self, id: &ThreadId, status: &str) -> Result<()> {
-        let result = async {
-            // 关键约束：参数字符串必须经 FromStr 解析，非法值直接返回错误，不静默 fallback
-            let status = AgentStatus::from_str(status)
-                .with_context(|| format!("非法 agent_status 值: {status:?}"))?;
-            let now = peri_time::now_utc_rfc3339();
-            sqlx::query("UPDATE threads SET agent_status = ?1, updated_at = ?2 WHERE id = ?3")
-                .bind(status.as_str())
-                .bind(&now)
-                .bind(id.as_str())
-                .execute(&self.database.pool)
-                .await?;
-            Ok(())
-        }
-        .await;
-        result
-    }
-
-    async fn set_work_state(&self, id: &ThreadId, state: WorkState) -> Result<()> {
-        session_rows::write_work_state(&self.database.pool, id, state).await
-    }
-
-    async fn set_context_usage(&self, id: &ThreadId, tokens: Option<u64>) -> Result<()> {
-        session_rows::write_context_usage(&self.database.pool, id, tokens).await
-    }
-
-    async fn delete_messages(
-        &self,
-        thread_id: &ThreadId,
-        message_ids: &[peri_acp_types::messages::MessageId],
-    ) -> Result<()> {
-        let result =
-            async { compaction::delete_messages(&self.database, thread_id, message_ids).await }
-                .await;
-        result
-    }
-
-    async fn update_message_flags(
-        &self,
-        message_id: &peri_acp_types::messages::MessageId,
-        flags: &MessageFlags,
-    ) -> Result<()> {
-        let result =
-            async { compaction::update_message_flags(&self.database, message_id, flags).await }
-                .await;
-        result
-    }
-
-    fn supports_compaction_lifecycle(&self) -> bool {
-        true
-    }
-
-    async fn commit_compaction_lifecycle(
-        &self,
-        thread_id: &ThreadId,
-        lifecycle: &CompactionChange,
-    ) -> Result<()> {
-        let result = async {
-            compaction::commit_compaction_lifecycle(&self.database, thread_id, lifecycle).await
-        }
-        .await;
-        result
-    }
-
-    async fn load_message_flags(
-        &self,
-        thread_id: &ThreadId,
-    ) -> Result<HashMap<peri_acp_types::messages::MessageId, MessageFlags>> {
-        compaction::load_message_flags(&self.database, thread_id).await
-    }
-
-    async fn delete_messages_since(
-        &self,
-        thread_id: &ThreadId,
-        message_id: &peri_acp_types::messages::MessageId,
-    ) -> Result<()> {
-        let result = async {
-            compaction::delete_messages_since(&self.database, thread_id, message_id).await
-        }
-        .await;
-        result
-    }
-}
+pub use sqlite_thread_store::SqliteThreadStore;
 
 #[cfg(test)]
-fn absolute_test_path(relative: &str) -> String {
-    std::env::temp_dir()
-        .join(relative)
-        .to_string_lossy()
-        .into_owned()
-}
+use sqlite_thread_store::absolute_test_path;
 
 #[cfg(test)]
 #[path = "sqlite_store_test.rs"]

@@ -252,6 +252,7 @@ pub(crate) fn bounded_error_causes(causes: Vec<String>) -> Vec<String> {
 pub struct SafeModelErrorDiagnostic(peri_model::ModelErrorDiagnostic);
 
 impl SafeModelErrorDiagnostic {
+    #[must_use]
     pub fn from_model(diagnostic: peri_model::ModelErrorDiagnostic) -> Self {
         Self(diagnostic)
     }
@@ -400,6 +401,7 @@ impl SafeSubagentFailure {
         })
     }
 
+    #[must_use]
     pub fn child_thread_id(&self) -> &str {
         &self.child_thread_id
     }
@@ -430,14 +432,17 @@ impl SafeSubagentFailure {
         })
     }
 
+    #[must_use]
     pub fn category_name(&self) -> &str {
         &self.category
     }
 
+    #[must_use]
     pub fn message(&self) -> &str {
         &self.message
     }
 
+    #[must_use]
     pub fn causes(&self) -> &[String] {
         &self.causes
     }

@@ -135,6 +135,7 @@ pub struct MqWatermark {
 }
 
 impl MqWatermark {
+    #[must_use]
     pub fn new(enqueued_at: impl Into<String>, id: MessageId) -> Self {
         Self {
             enqueued_at: enqueued_at.into(),
@@ -196,7 +197,7 @@ pub enum MqEnqueueDisposition {
     AlreadyHandedOff,
 }
 
-/// 入队结果。只有 [`Inserted`](MqEnqueueDisposition::Inserted)/[`Existing`] 的
+/// 入队结果。只有 [`Inserted`](MqEnqueueDisposition::Inserted)/[`Existing`](MqEnqueueDisposition::Existing) 的
 /// `entry.enqueued_at` 是持久事实；`AlreadyHandedOff` 的 entry 是请求内容的投影
 /// （历史表不保存入队时间，MQ 行也已不存在）。
 #[derive(Debug, Clone)]
@@ -480,6 +481,7 @@ pub struct SessionResourcesMqStore {
 }
 
 impl SessionResourcesMqStore {
+    #[must_use]
     pub fn new(resources: Arc<dyn SessionResources>) -> Self {
         Self { resources }
     }

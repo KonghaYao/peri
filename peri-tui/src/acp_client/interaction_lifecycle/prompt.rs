@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use super::leases::PromptLease;
-use super::reverse::drain_pending;
+
 use super::{
     ClaimCause, ClaimedInteraction, ExecutionRuns, InteractionLifecycle, InteractionLifecycleState,
     PromptMarker, SessionRoute, UserInputSnapshotIdentity,
@@ -11,7 +11,7 @@ use super::{
 
 impl InteractionLifecycle {
     pub fn open_prompt(&self, request_id: Option<String>) -> Result<PromptLease, &'static str> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         let client_instance_id = state.client_instance_id;
         let (session_id, generation, next_epoch) = match &state.route {
             SessionRoute::Stable {
@@ -59,7 +59,7 @@ impl InteractionLifecycle {
         local_generation: u64,
         generation: &str,
     ) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         if generation.is_empty()
             || !matches!(&state.route, SessionRoute::Stable { session_id: current, generation: local, .. }
                 if current == session_id && *local == local_generation)
@@ -93,7 +93,7 @@ impl InteractionLifecycle {
     }
 
     pub(crate) fn matches_user_input_generation(&self, session_id: &str, generation: &str) -> bool {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("state mutex must not be poisoned");
         if state.deleted_session_ids.contains(session_id) {
             return false;
         }
@@ -106,7 +106,7 @@ impl InteractionLifecycle {
         &self,
         session_id: &str,
     ) -> Option<UserInputSnapshotIdentity> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("state mutex must not be poisoned");
         let SessionRoute::Stable {
             session_id: current,
             generation: local,
@@ -139,7 +139,7 @@ impl InteractionLifecycle {
         request_id: &str,
         managed_input: bool,
     ) -> Option<Vec<ClaimedInteraction>> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         if request_id.is_empty() || state.deleted_session_ids.contains(session_id) {
             return None;
         }
@@ -173,7 +173,7 @@ impl InteractionLifecycle {
             return None;
         }
         let old_marker = state.active_prompt.take();
-        let claims = drain_pending(&mut state, ClaimCause::TurnTerminal, |owner| {
+        let claims = super::reverse::drain_pending(&mut state, ClaimCause::TurnTerminal, |owner| {
             old_marker.as_ref().is_some_and(|marker| {
                 owner.session_id == marker.session_id
                     && owner.generation == marker.generation
@@ -208,7 +208,7 @@ impl InteractionLifecycle {
     }
 
     pub(crate) fn active_execution(&self, managed_only: bool) -> Option<(String, String, String)> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("state mutex must not be poisoned");
         let marker = state.active_prompt.as_ref()?;
         let runs = state.execution_runs.get(&marker.session_id)?;
         let request_id = marker.request_id.as_ref()?;
@@ -230,7 +230,7 @@ impl InteractionLifecycle {
         marker: &PromptMarker,
         cause: ClaimCause,
     ) -> Vec<ClaimedInteraction> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         if state.active_prompt.as_ref() != Some(marker) {
             return Vec::new();
         }
@@ -249,7 +249,7 @@ impl InteractionLifecycle {
         {
             *accepting_reverse = false;
         }
-        drain_pending(&mut state, cause, |owner| {
+        super::reverse::drain_pending(&mut state, cause, |owner| {
             owner.client_instance_id == marker.client_instance_id
                 && owner.session_id == marker.session_id
                 && owner.generation == marker.generation
@@ -266,7 +266,7 @@ impl InteractionLifecycle {
             return Vec::new();
         };
         let marker = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect("state mutex must not be poisoned");
             if let Some(runs) = state.execution_runs.get_mut(session_id)
                 && runs.pending_terminal_request.as_deref() == Some(request_id)
             {
@@ -290,7 +290,7 @@ impl InteractionLifecycle {
         session_id: &str,
         request_id: Option<&str>,
     ) -> bool {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("state mutex must not be poisoned");
         if let Some(marker) = &state.active_prompt
             && marker.session_id == session_id
             && marker.request_id.is_some()
@@ -305,11 +305,16 @@ impl InteractionLifecycle {
     }
 
     pub fn cancel_active_prompt(&self) -> Vec<ClaimedInteraction> {
-        let marker = self.state.lock().unwrap().active_prompt.clone();
+        let marker = self
+            .state
+            .lock()
+            .expect("state mutex must not be poisoned")
+            .active_prompt
+            .clone();
         let claims = marker
             .map(|marker| self.close_prompt_exact(&marker, ClaimCause::TurnTerminal))
             .unwrap_or_default();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         if let SessionRoute::Stable { prompt_epoch, .. } = &mut state.route {
             *prompt_epoch = prompt_epoch.checked_add(1).expect("prompt epoch exhausted");
         }

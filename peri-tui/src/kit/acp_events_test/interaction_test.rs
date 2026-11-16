@@ -1,15 +1,27 @@
-use super::*;
+use super::AcpEventData;
+use super::AskUser;
+use super::BridgeState;
+use super::FoldKey;
+use super::FoldState;
+use super::HitlPending;
+use super::InteractionKind;
+use super::Question;
+use super::QuestionOption;
+use super::TuiAskUserBlock;
+use super::TuiRenderUnit;
+use super::serial;
 
 // ── [Slice 4 §6.8] Interaction block：生产创建点 + 结果回写 + 折叠表 ──
 
 fn make_interaction_state() -> BridgeState {
-    make_fold_test_state()
+    super::make_fold_test_state()
 }
 
 fn hitl_event(payload: HitlPending) -> AcpEventData {
     AcpEventData::HitlPending(crate::kit::acp_types::PendingInteraction {
         owner: Default::default(),
-        request_id_json: serde_json::to_string(&"hitl-1").unwrap(),
+        request_id_json: serde_json::to_string(&"hitl-1")
+            .expect("hitl event: fixture must serialize to JSON"),
         payload,
     })
 }
@@ -17,7 +29,8 @@ fn hitl_event(payload: HitlPending) -> AcpEventData {
 fn ask_user_event(payload: AskUser) -> AcpEventData {
     AcpEventData::AskUser(crate::kit::acp_types::PendingInteraction {
         owner: Default::default(),
-        request_id_json: serde_json::to_string(&"ask-1").unwrap(),
+        request_id_json: serde_json::to_string(&"ask-1")
+            .expect("ask user event: fixture must serialize to JSON"),
         payload,
     })
 }
@@ -40,7 +53,7 @@ fn test_hitl_pending_injects_pending_permission_block() {
         tool_input: serde_json::json!({"command": "cargo test"}),
         batch: None,
     };
-    dispatch_and_notify(&mut state, &hitl_event(hp));
+    super::dispatch_and_notify(&mut state, &hitl_event(hp));
 
     let snap = VIEW_MODELS.state().read().clone();
     // committed 末尾是 interaction block（无 current_turn 内容 → 快照即 committed）
@@ -56,7 +69,10 @@ fn test_hitl_pending_injects_pending_permission_block() {
         "§7 interaction Running → Expanded（可聚焦）"
     );
     assert!(
-        block.request_id.as_deref() == Some(&serde_json::to_string(&"hitl-1").unwrap()),
+        block.request_id.as_deref()
+            == Some(&serde_json::to_string(&"hitl-1").expect(
+                "hitl pending injects pending permission block: fixture data must serialize to JSON"
+            )),
         "request_id 与 payload 由同一 composite 事件提供"
     );
     assert_eq!(
@@ -73,7 +89,7 @@ fn test_hitl_pending_injects_pending_permission_block() {
 #[serial]
 fn test_hitl_handler_publishes_same_composite_to_atom_and_block() {
     let mut state = make_interaction_state();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &hitl_event(HitlPending {
             tool_name: "Bash".into(),
@@ -85,7 +101,7 @@ fn test_hitl_handler_publishes_same_composite_to_atom_and_block() {
         .state()
         .read()
         .as_ref()
-        .unwrap()
+        .expect("hitl handler publishes same composite to atom and block: isolated fixture workspace must remain accessible")
         .request_id_json
         .clone();
     let snap = VIEW_MODELS.state().read().clone();
@@ -106,8 +122,8 @@ fn test_hitl_pending_duplicate_request_id_not_reinjected() {
         tool_input: serde_json::json!({"command": "cargo test"}),
         batch: None,
     };
-    dispatch_and_notify(&mut state, &hitl_event(hp()));
-    dispatch_and_notify(&mut state, &hitl_event(hp()));
+    super::dispatch_and_notify(&mut state, &hitl_event(hp()));
+    super::dispatch_and_notify(&mut state, &hitl_event(hp()));
 
     let snap = VIEW_MODELS.state().read().clone();
     let pending = snap
@@ -151,7 +167,7 @@ fn test_ask_user_injects_pending_ask_user_block() {
             },
         ],
     };
-    dispatch_and_notify(&mut state, &ask_user_event(au));
+    super::dispatch_and_notify(&mut state, &ask_user_event(au));
 
     let snap = VIEW_MODELS.state().read().clone();
     let block = ask_user_block_of(&snap, snap.items.len() - 1);
@@ -176,12 +192,12 @@ fn test_ask_user_handler_publishes_same_composite_and_question_ids() {
             multi_select: false,
         }],
     };
-    dispatch_and_notify(&mut state, &ask_user_event(payload));
+    super::dispatch_and_notify(&mut state, &ask_user_event(payload));
     let atom_id = crate::kit::atoms::ASK_USER_PENDING
         .state()
         .read()
         .as_ref()
-        .unwrap()
+        .expect("ask user handler publishes same composite and question ids: isolated fixture workspace must remain accessible")
         .request_id_json
         .clone();
     let snap = VIEW_MODELS.state().read().clone();
@@ -195,7 +211,7 @@ fn test_ask_user_handler_publishes_same_composite_and_question_ids() {
 fn test_queued_interaction_blocks_keep_origin_request_ids() {
     let mut state = make_interaction_state();
     for (token, id) in [(1, "A"), (2, "B")] {
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::HitlPending(crate::kit::acp_types::PendingInteraction {
                 owner: crate::acp_client::InteractionOwner {
@@ -225,7 +241,7 @@ fn test_queued_interaction_blocks_keep_origin_request_ids() {
             .state()
             .read()
             .as_ref()
-            .unwrap()
+            .expect("queued interaction blocks keep origin request ids: the fixture storage and layout must support the requested operation")
             .request_id_json,
         "B"
     );
@@ -237,7 +253,7 @@ fn test_queued_interaction_blocks_keep_origin_request_ids() {
 #[serial]
 fn test_interaction_resolved_writes_back_pending_block() {
     let mut state = make_interaction_state();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &hitl_event(HitlPending {
             tool_name: "Bash".into(),
@@ -250,7 +266,7 @@ fn test_interaction_resolved_writes_back_pending_block() {
     let before = ask_user_block_of(&snap, idx).clone();
     let hash_before = before.content_hash;
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::InteractionTerminal {
             owner: Default::default(),
@@ -275,7 +291,7 @@ fn test_interaction_resolved_writes_back_pending_block() {
     );
 
     // 幂等：重复到达（迟到/重复事件）不改变结果（matched 条件 pending=false 不再命中）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::InteractionTerminal {
             owner: Default::default(),
@@ -295,7 +311,7 @@ fn test_interaction_resolved_writes_back_pending_block() {
 #[serial]
 fn test_interaction_resolved_mismatched_request_id_noop() {
     let mut state = make_interaction_state();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &hitl_event(HitlPending {
             tool_name: "Bash".into(),
@@ -303,7 +319,7 @@ fn test_interaction_resolved_mismatched_request_id_noop() {
             batch: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::InteractionTerminal {
             owner: crate::acp_client::InteractionOwner {
@@ -327,7 +343,7 @@ fn test_interaction_resolved_mismatched_request_id_noop() {
 #[serial]
 fn test_fold_pass_interaction_pending_expanded_override_priority() {
     let mut state = make_interaction_state();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &hitl_event(HitlPending {
             tool_name: "Bash".into(),
@@ -340,7 +356,7 @@ fn test_fold_pass_interaction_pending_expanded_override_priority() {
     assert_eq!(ask_user_block_of(&snap, idx).fold, FoldState::Expanded);
 
     // 结果回写 → Completed → Expanded（不自动收束）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::InteractionTerminal {
             owner: Default::default(),
@@ -354,12 +370,14 @@ fn test_fold_pass_interaction_pending_expanded_override_priority() {
 
     // 手动折叠覆盖：FOLD_OVERRIDES 写入 Interaction(rid) → 折叠 pass 恢复 Collapsed
     //（默认策略已是 Expanded，覆盖必须优先）
-    let rid = serde_json::to_string(&"hitl-1").unwrap();
+    let rid = serde_json::to_string(&"hitl-1").expect(
+        "fold pass interaction pending expanded override priority: fixture must serialize to JSON",
+    );
     FOLD_OVERRIDES
         .state()
         .write()
         .insert(FoldKey::Interaction(rid.clone()), FoldState::Collapsed);
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let snap = VIEW_MODELS.state().read().clone();
     let block = ask_user_block_of(&snap, idx);
     assert_eq!(block.fold, FoldState::Collapsed, "用户覆盖优先于自动策略");
@@ -398,3 +416,5 @@ fn test_hitl_input_summary_extraction_matrix() {
         crate::i18n::tr("render-interaction-tool-unknown")
     );
 }
+
+use crate::kit::atoms::{FOLD_OVERRIDES, VIEW_MODELS, ViewModelsSnapshot};

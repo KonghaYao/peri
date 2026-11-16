@@ -30,6 +30,7 @@ pub use peri_acp_types::skills::{SkillMetadata, SkillRoot, SkillSource};
 /// `disable_bundled=true` 时跳过 Builtin root（用户通过 settings.json
 /// `config.disableBundledSkills: true` 关闭内置技能；该位同样作为 provider 的
 /// `disable_bundled` 输入传递，见 `WorkspaceResourcesInput::with_disable_bundled`）。
+#[must_use]
 pub fn resolve_skill_roots(
     cwd: &str,
     plugin_roots: Vec<SkillRoot>,

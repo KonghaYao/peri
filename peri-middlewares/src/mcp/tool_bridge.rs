@@ -1,3 +1,5 @@
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -6,7 +8,7 @@ use peri_agent::tools::BaseTool;
 use rmcp::model::{ContentBlock, Tool};
 use thiserror::Error;
 
-use super::client::output_store::format_output;
+use super::client::output_store;
 use super::client::{McpClientHandle, McpClientPool};
 
 /// MCP 工具调用错误
@@ -50,6 +52,21 @@ pub struct McpToolBridge {
     admission: Option<super::connection_gate::McpCallGate>,
     output_pool: Option<std::sync::Weak<McpClientPool>>,
     output_session_id: Option<String>,
+}
+
+impl Debug for McpToolBridge {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpToolBridge")
+            .field("server_name", &self.server_name)
+            .field("tool_name", &self.tool_name)
+            .field("full_name", &self.full_name)
+            .field("description", &self.description)
+            .field("model_visible", &self.model_visible)
+            .field("direct", &self.direct)
+            .field("server_generation", &self.server_generation)
+            .finish_non_exhaustive()
+    }
 }
 
 /// External MCP requests share a 120-second deadline across send and response.
@@ -135,6 +152,7 @@ pub(crate) fn declared_model_hidden(client: &McpClientHandle, tool_name: &str) -
 }
 
 impl McpToolBridge {
+    #[must_use]
     pub fn new(server_name: &str, tool: &Tool, client: Arc<McpClientHandle>) -> Self {
         let tool_name = tool.name.to_string();
         let full_name = effective_mcp_tool_name(server_name, &tool_name);
@@ -161,6 +179,7 @@ impl McpToolBridge {
         }
     }
 
+    #[must_use]
     pub fn with_output_store(
         mut self,
         pool: &Arc<McpClientPool>,
@@ -171,11 +190,13 @@ impl McpToolBridge {
         self
     }
 
+    #[must_use]
     pub fn with_server_generation(mut self, generation: u64) -> Self {
         self.server_generation = generation;
         self
     }
 
+    #[must_use]
     pub fn with_binding_leases(
         mut self,
         registry: Arc<super::apps::McpAppBindingRegistry>,
@@ -275,7 +296,7 @@ impl BaseTool for McpToolBridge {
     /// ACP / 模型面）各自从返回值解读，不得经旁路 registry 捞取。
     ///
     /// `isError: true` 是工具报告的**结果事实**而不是调用失败：它作为
-    /// [`ToolOutcome::Reported`] 的正常返回值离开本函数。只有 transport/协议层失败
+    /// [`peri_agent::tools::ToolOutcome::Reported`] 的正常返回值离开本函数。只有 transport/协议层失败
     /// 才返回 `Err`。
     async fn invoke_output(
         &self,
@@ -291,17 +312,12 @@ impl BaseTool for McpToolBridge {
             None => None,
         };
         // 1. 检查连接状态
-        match &self.client.peer {
-            Some(_) => {}
-            None => {
-                return Err(Box::new(ToolCallError::NotConnected {
-                    server: self.server_name.clone(),
-                    status: format!("{:?}", self.client.status),
-                }));
-            }
-        }
-
-        let peer = self.client.peer.as_ref().unwrap();
+        let Some(peer) = &self.client.peer else {
+            return Err(Box::new(ToolCallError::NotConnected {
+                server: self.server_name.clone(),
+                status: format!("{:?}", self.client.status),
+            }));
+        };
         let session_id = ctx.session_id.as_deref().ok_or_else(|| {
             Box::new(ToolCallError::CallFailed {
                 server: self.server_name.clone(),
@@ -630,7 +646,8 @@ impl BaseTool for McpToolBridge {
             .as_deref()
             .or(ctx.session_id.as_deref());
         let text = if raw.is_error() {
-            let reason = format_output(pool.as_deref(), session_id, formatted, true).await;
+            let reason =
+                output_store::format_output(pool.as_deref(), session_id, formatted, true).await;
             ToolCallError::CallFailed {
                 server: self.server_name.clone(),
                 tool: self.tool_name.clone(),
@@ -638,7 +655,7 @@ impl BaseTool for McpToolBridge {
             }
             .to_string()
         } else {
-            format_output(pool.as_deref(), session_id, formatted, false).await
+            output_store::format_output(pool.as_deref(), session_id, formatted, false).await
         };
         // 远端 JSON-RPC error 的原始载荷尚未在协议失败分支接线，见该分支注释。
         super::tool_execution::complete(self, text, raw)
@@ -718,7 +735,7 @@ fn build_bridges(
     session_id: Option<&str>,
 ) -> Vec<McpToolBridge> {
     let mut bridges: Vec<McpToolBridge> = Vec::new();
-    let mut clients = pool.get_all_clients_visible_to(session_id);
+    let mut clients = pool.clients_visible_to(session_id);
     clients.sort_by(|left, right| left.name.cmp(&right.name));
     for client in clients {
         let generation = pool.handle_generation(&client);
@@ -753,6 +770,7 @@ fn build_bridges(
 ///
 /// 不过滤会话归属（部署面视图）：会话内装配必须走
 /// [`build_tool_bridges_visible_to`]，否则会拿到其他会话声明的 ACP 工具。
+#[must_use]
 pub fn build_tool_bridges(pool: &Arc<McpClientPool>) -> Vec<Box<dyn BaseTool>> {
     build_deferred_tool_bridges(pool)
         .into_iter()
@@ -761,6 +779,7 @@ pub fn build_tool_bridges(pool: &Arc<McpClientPool>) -> Vec<Box<dyn BaseTool>> {
 }
 
 /// 会话可见的 bridge 集合（[`build_tool_bridges`] 的 ACP 归属过滤版）。
+#[must_use]
 pub fn build_tool_bridges_visible_to(
     pool: &Arc<McpClientPool>,
     session_id: Option<&str>,

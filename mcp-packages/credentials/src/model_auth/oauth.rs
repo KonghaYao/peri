@@ -4,11 +4,12 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::{
-    jwt,
-    types::{AuthError, AuthResult, TokenSet},
-    ISSUER, RESOURCE,
-};
+use super::jwt;
+use super::types::AuthError;
+use super::types::AuthResult;
+use super::types::TokenSet;
+use super::ISSUER;
+use super::RESOURCE;
 
 #[derive(Clone)]
 pub(super) struct OAuth {
@@ -45,10 +46,10 @@ struct Failure {
 
 impl OAuth {
     pub fn production() -> AuthResult<Self> {
-        Self::new(Url::parse(ISSUER).map_err(|_| AuthError::InvalidReference)?)
+        Self::try_new(Url::parse(ISSUER).map_err(|_| AuthError::InvalidReference)?)
     }
 
-    fn new(issuer: Url) -> AuthResult<Self> {
+    fn try_new(issuer: Url) -> AuthResult<Self> {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
@@ -76,7 +77,7 @@ impl OAuth {
 
     #[cfg(test)]
     pub(super) fn for_test(issuer: Url) -> Self {
-        Self::new(issuer).unwrap()
+        Self::try_new(issuer).unwrap()
     }
 
     pub async fn exchange(

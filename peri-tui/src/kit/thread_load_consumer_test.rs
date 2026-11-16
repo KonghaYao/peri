@@ -1,12 +1,15 @@
 //! Tests for thread_load_consumer
 
-#[cfg(test)]
-use super::*;
-use peri_acp::transport::{
-    AcpTransport,
-    mpsc::{MpscClientTransport, MpscServerTransport, mpsc_transport_pair},
-    types::IncomingMessage,
-};
+use super::AcpTuiClient;
+use super::CancellationToken;
+use super::ThreadLoadDispatcher;
+use super::ThreadLoadRequest;
+use super::mpsc;
+
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::mpsc::MpscClientTransport;
+use peri_acp::transport::mpsc::MpscServerTransport;
+use peri_acp::transport::types::IncomingMessage;
 use serial_test::serial;
 use std::time::Duration;
 
@@ -64,14 +67,14 @@ async fn recv_session_load(server: &MpscServerTransport, timeout: Duration) -> I
 
 fn make_client_without_pump() -> (AcpTuiClient, MpscServerTransport) {
     let (client_transport, server_transport): (MpscClientTransport, MpscServerTransport) =
-        mpsc_transport_pair();
+        peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
     (client, server_transport)
 }
 
 fn make_interactive_client_without_pump() -> (AcpTuiClient, MpscServerTransport) {
     let (client_transport, server_transport): (MpscClientTransport, MpscServerTransport) =
-        mpsc_transport_pair();
+        peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _notification_tx, _notification_rx) =
         AcpTuiClient::new_interactive(client_transport);
     (client, server_transport)
@@ -81,7 +84,7 @@ fn make_interactive_client_without_pump() -> (AcpTuiClient, MpscServerTransport)
 async fn test_empty_thread_id_skipped() {
     let (client, _server) = make_client_without_pump();
     let reservation = client.reserve_session_load();
-    let result = handle_load(&client, ".", "   ".to_string(), &reservation).await;
+    let result = super::handle_load(&client, ".", "   ".to_string(), &reservation).await;
     assert!(result.is_ok());
 }
 
@@ -90,7 +93,7 @@ async fn test_shutdown_exits_loop() {
     let (client, _server) = make_client_without_pump();
     let (tx, rx) = mpsc::unbounded_channel::<ThreadLoadRequest>();
     let shutdown = CancellationToken::new();
-    let handle = spawn_thread_load_consumer(client, rx, ".".into(), shutdown.clone());
+    let handle = super::spawn_thread_load_consumer(client, rx, ".".into(), shutdown.clone());
     shutdown.cancel();
     let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
     let _ = tx;
@@ -101,7 +104,7 @@ async fn test_dropped_tx_exits_loop() {
     let (client, _server) = make_client_without_pump();
     let (tx, rx) = mpsc::unbounded_channel::<ThreadLoadRequest>();
     let shutdown = CancellationToken::new();
-    let handle = spawn_thread_load_consumer(client, rx, ".".into(), shutdown);
+    let handle = super::spawn_thread_load_consumer(client, rx, ".".into(), shutdown);
     drop(tx);
     let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
 }
@@ -114,9 +117,10 @@ async fn test_shutdown_cancels_inflight_load_and_releases_reservation() {
     let (tx, rx) = mpsc::unbounded_channel::<ThreadLoadRequest>();
     let dispatcher = ThreadLoadDispatcher::new(tx, client.clone());
     let shutdown = CancellationToken::new();
-    let handle = spawn_thread_load_consumer(client.clone(), rx, ".".into(), shutdown.clone());
+    let handle =
+        super::spawn_thread_load_consumer(client.clone(), rx, ".".into(), shutdown.clone());
     tokio::task::yield_now().await;
-    dispatcher.send("target".into()).unwrap();
+    dispatcher.send("target".into()).expect("shutdown cancels inflight load and releases reservation: fixture channel must deliver its expected message");
 
     let request = recv_session_load(&server, Duration::from_secs(5)).await;
     assert!(matches!(
@@ -129,7 +133,7 @@ async fn test_shutdown_cancels_inflight_load_and_releases_reservation() {
     tokio::time::timeout(Duration::from_secs(5), handle)
         .await
         .expect("consumer must stop while session/load is in-flight")
-        .unwrap();
+        .expect("shutdown cancels inflight load and releases reservation: fixture task and request must complete successfully");
     assert_eq!(
         client.pending_session_load_count(),
         0,
@@ -175,7 +179,7 @@ async fn test_handle_load_resets_popup_todo_history_atoms() {
         let client = client.clone();
         let cwd = cwd.clone();
         tokio::spawn(async move {
-            handle_load(&client, &cwd, "thread-xyz".to_string(), &reservation).await
+            super::handle_load(&client, &cwd, "thread-xyz".to_string(), &reservation).await
         })
     };
     wait_for_session_boundary_reset(Duration::from_secs(5)).await;

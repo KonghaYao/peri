@@ -1,4 +1,8 @@
-use super::*;
+use super::HookAction;
+use super::HookDecision;
+use super::HookEvent;
+use super::HookSpecificOutput;
+use super::SyncHookResponse;
 use crate::hooks::types::PermissionDecision;
 
 // === parse_command_hook_output tests ===
@@ -6,7 +10,7 @@ use crate::hooks::types::PermissionDecision;
 #[test]
 fn test_parse_command_plain_text() {
     assert!(matches!(
-        parse_command_hook_output(&HookEvent::PreToolUse, "hello world"),
+        super::parse_command_hook_output(&HookEvent::PreToolUse, "hello world"),
         HookAction::Allow
     ));
 }
@@ -14,7 +18,7 @@ fn test_parse_command_plain_text() {
 #[test]
 fn test_parse_command_continue_false() {
     assert!(matches!(
-        parse_command_hook_output(&HookEvent::PreToolUse, r#"{"continue": false}"#),
+        super::parse_command_hook_output(&HookEvent::PreToolUse, r#"{"continue": false}"#),
         HookAction::PreventContinuation { stop_reason: None }
     ));
 }
@@ -22,7 +26,7 @@ fn test_parse_command_continue_false() {
 #[test]
 fn test_parse_command_decision_block() {
     assert!(matches!(
-        parse_command_hook_output(&HookEvent::PreToolUse, r#"{"decision": "block", "reason": "test"}"#),
+        super::parse_command_hook_output(&HookEvent::PreToolUse, r#"{"decision": "block", "reason": "test"}"#),
         HookAction::Block { reason } if reason == "test"
     ));
 }
@@ -30,7 +34,7 @@ fn test_parse_command_decision_block() {
 #[test]
 fn test_parse_command_system_message() {
     assert!(matches!(
-        parse_command_hook_output(&HookEvent::PreToolUse, r#"{"systemMessage": "warning"}"#),
+        super::parse_command_hook_output(&HookEvent::PreToolUse, r#"{"systemMessage": "warning"}"#),
         HookAction::SystemMessage { message } if message == "warning"
     ));
 }
@@ -38,7 +42,7 @@ fn test_parse_command_system_message() {
 #[test]
 fn test_parse_command_invalid_json() {
     assert!(matches!(
-        parse_command_hook_output(&HookEvent::PreToolUse, "{invalid json}"),
+        super::parse_command_hook_output(&HookEvent::PreToolUse, "{invalid json}"),
         HookAction::Block { .. }
     ));
 }
@@ -46,7 +50,7 @@ fn test_parse_command_invalid_json() {
 #[test]
 fn test_parse_command_empty() {
     assert!(matches!(
-        parse_command_hook_output(&HookEvent::PreToolUse, ""),
+        super::parse_command_hook_output(&HookEvent::PreToolUse, ""),
         HookAction::Allow
     ));
 }
@@ -56,7 +60,7 @@ fn test_parse_command_empty() {
 #[test]
 fn test_parse_http_empty_body() {
     assert!(matches!(
-        parse_http_hook_response(&HookEvent::PreToolUse, ""),
+        super::parse_http_hook_response(&HookEvent::PreToolUse, ""),
         HookAction::Allow
     ));
 }
@@ -64,7 +68,7 @@ fn test_parse_http_empty_body() {
 #[test]
 fn test_parse_http_whitespace_body() {
     assert!(matches!(
-        parse_http_hook_response(&HookEvent::PreToolUse, "   "),
+        super::parse_http_hook_response(&HookEvent::PreToolUse, "   "),
         HookAction::Allow
     ));
 }
@@ -72,7 +76,7 @@ fn test_parse_http_whitespace_body() {
 #[test]
 fn test_parse_http_non_json_body() {
     assert!(matches!(
-        parse_http_hook_response(&HookEvent::PreToolUse, "plain text"),
+        super::parse_http_hook_response(&HookEvent::PreToolUse, "plain text"),
         HookAction::Block { .. }
     ));
 }
@@ -80,7 +84,7 @@ fn test_parse_http_non_json_body() {
 #[test]
 fn test_parse_http_valid_json() {
     assert!(matches!(
-        parse_http_hook_response(&HookEvent::PreToolUse, r#"{"continue": false, "stopReason": "test"}"#),
+        super::parse_http_hook_response(&HookEvent::PreToolUse, r#"{"continue": false, "stopReason": "test"}"#),
         HookAction::PreventContinuation { stop_reason } if stop_reason.as_deref() == Some("test")
     ));
 }
@@ -88,7 +92,7 @@ fn test_parse_http_valid_json() {
 #[test]
 fn test_parse_http_invalid_json() {
     assert!(matches!(
-        parse_http_hook_response(&HookEvent::PreToolUse, "{invalid}"),
+        super::parse_http_hook_response(&HookEvent::PreToolUse, "{invalid}"),
         HookAction::Block { .. }
     ));
 }
@@ -105,7 +109,7 @@ fn test_sync_response_priority_continue_over_decision() {
     };
     // continue=false 优先级高于 decision=block
     assert!(matches!(
-        sync_response_to_action(&resp, &HookEvent::PreToolUse),
+        super::sync_response_to_action(&resp, &HookEvent::PreToolUse),
         HookAction::PreventContinuation { .. }
     ));
 }
@@ -118,7 +122,7 @@ fn test_sync_response_decision_block() {
         ..Default::default()
     };
     assert!(matches!(
-        sync_response_to_action(&resp, &HookEvent::PreToolUse),
+        super::sync_response_to_action(&resp, &HookEvent::PreToolUse),
         HookAction::Block { reason } if reason == "blocked"
     ));
 }
@@ -130,7 +134,7 @@ fn test_sync_response_system_message() {
         ..Default::default()
     };
     assert!(matches!(
-        sync_response_to_action(&resp, &HookEvent::PreToolUse),
+        super::sync_response_to_action(&resp, &HookEvent::PreToolUse),
         HookAction::SystemMessage { message } if message == "msg"
     ));
 }
@@ -147,7 +151,7 @@ fn test_sync_response_hook_specific_updated_input() {
         ..Default::default()
     };
     assert!(matches!(
-        sync_response_to_action(&resp, &HookEvent::PreToolUse),
+        super::sync_response_to_action(&resp, &HookEvent::PreToolUse),
         HookAction::ModifyInput { new_input } if new_input["key"] == "val"
     ));
 }
@@ -164,7 +168,7 @@ fn test_sync_response_hook_specific_permission_decision() {
         ..Default::default()
     };
     assert!(matches!(
-        sync_response_to_action(&resp, &HookEvent::PreToolUse),
+        super::sync_response_to_action(&resp, &HookEvent::PreToolUse),
         HookAction::PermissionOverride { decision, .. } if decision == PermissionDecision::Deny
     ));
 }
@@ -178,7 +182,7 @@ fn test_sync_response_hook_specific_user_prompt_context() {
         ..Default::default()
     };
     assert!(matches!(
-        sync_response_to_action(&resp, &HookEvent::UserPromptSubmit),
+        super::sync_response_to_action(&resp, &HookEvent::UserPromptSubmit),
         HookAction::AdditionalContext { context } if context == "extra context"
     ));
 }
@@ -194,7 +198,7 @@ fn test_sync_response_hook_specific_session_start_message() {
         ..Default::default()
     };
     assert!(matches!(
-        sync_response_to_action(&resp, &HookEvent::SessionStart),
+        super::sync_response_to_action(&resp, &HookEvent::SessionStart),
         HookAction::InitialUserMessage { message } if message == "start msg"
     ));
 }
@@ -203,7 +207,7 @@ fn test_sync_response_hook_specific_session_start_message() {
 fn test_sync_response_default_allow() {
     let resp = SyncHookResponse::default();
     assert!(matches!(
-        sync_response_to_action(&resp, &HookEvent::PreToolUse),
+        super::sync_response_to_action(&resp, &HookEvent::PreToolUse),
         HookAction::Allow
     ));
 }
@@ -216,7 +220,7 @@ fn test_sync_response_decision_approve_is_allow() {
     };
     // Approve is not Block, so falls through to Allow
     assert!(matches!(
-        sync_response_to_action(&resp, &HookEvent::PreToolUse),
+        super::sync_response_to_action(&resp, &HookEvent::PreToolUse),
         HookAction::Allow
     ));
 }
@@ -235,7 +239,7 @@ fn test_pretooluse_deny_with_updated_input_keeps_all_fields() {
         }),
         ..Default::default()
     };
-    match sync_response_to_action(&resp, &HookEvent::PreToolUse) {
+    match super::sync_response_to_action(&resp, &HookEvent::PreToolUse) {
         HookAction::PermissionOverride {
             decision,
             reason,
@@ -267,7 +271,7 @@ fn test_pretooluse_allow_with_updated_input_keeps_both() {
         }),
         ..Default::default()
     };
-    match sync_response_to_action(&resp, &HookEvent::PreToolUse) {
+    match super::sync_response_to_action(&resp, &HookEvent::PreToolUse) {
         HookAction::PermissionOverride {
             decision,
             updated_input,
@@ -294,7 +298,7 @@ fn test_pretooluse_additional_context_only_is_not_swallowed() {
         }),
         ..Default::default()
     };
-    match sync_response_to_action(&resp, &HookEvent::PreToolUse) {
+    match super::sync_response_to_action(&resp, &HookEvent::PreToolUse) {
         HookAction::PermissionOverride {
             decision,
             additional_context,
@@ -320,7 +324,7 @@ fn test_pretooluse_invalid_decision_is_not_allow() {
         }),
         ..Default::default()
     };
-    match sync_response_to_action(&resp, &HookEvent::PreToolUse) {
+    match super::sync_response_to_action(&resp, &HookEvent::PreToolUse) {
         HookAction::PermissionOverride { decision, .. } => {
             assert_eq!(decision, PermissionDecision::Invalid("explode".into()));
         }
@@ -331,7 +335,7 @@ fn test_pretooluse_invalid_decision_is_not_allow() {
 #[test]
 fn test_pretooluse_invalid_decision_in_raw_json_is_not_allow() {
     // 端到端：未知 permissionDecision 取值不得让整份输出 fail-open 成 Allow
-    let action = parse_command_hook_output(
+    let action = super::parse_command_hook_output(
         &HookEvent::PreToolUse,
         r#"{"hook_specific_output":{"hookEventName":"PreToolUse","permissionDecision":"explode"}}"#,
     );

@@ -1,9 +1,13 @@
-use super::*;
+use super::Arc;
+use super::EchoLLM;
+use super::HostFixture;
+use super::SubAgentTool;
+use peri_agent::tools::BaseTool as _;
 use peri_agent::tools::{EffectiveToolError, EffectiveToolErrorCode};
 
 #[test]
 fn test_agent_schema_only_promises_supported_inputs() {
-    let tool = make_subagent_tool(vec![]);
+    let tool = super::make_subagent_tool(vec![]);
     let params = tool.parameters();
     let props = params["properties"].as_object().unwrap();
     assert!(!props.contains_key("name"));
@@ -84,9 +88,9 @@ async fn test_isolation_rejected_before_any_dispatch() {
 /// [回归测试] 显式不同目录不能只改变元数据而沿用父 Workspace。
 #[tokio::test]
 async fn test_cwd_rejected_before_spawn_fork_and_resume() {
-    let dir = tempdir().unwrap();
-    let other = tempdir().unwrap();
-    let mut tool = make_subagent_tool(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let mut tool = super::make_subagent_tool(vec![]);
     tool.parent_cwd = dir.path().to_string_lossy().into_owned();
     for mode in [
         serde_json::json!({"subagent_type": "test-agent"}),
@@ -116,9 +120,9 @@ async fn test_cwd_rejected_before_spawn_fork_and_resume() {
 
 #[tokio::test]
 async fn test_equivalent_explicit_cwd_and_non_string_tolerance() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("nested")).unwrap();
-    let mut tool = make_subagent_tool(vec![]);
+    let mut tool = super::make_subagent_tool(vec![]);
     tool.parent_cwd = dir.path().to_string_lossy().into_owned();
     for cwd in [
         format!("{}/", tool.parent_cwd),

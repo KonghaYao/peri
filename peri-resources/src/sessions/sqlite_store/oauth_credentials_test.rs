@@ -1,11 +1,14 @@
-use super::*;
+use super::{Arc, OAuthCredentialError, SqliteOAuthCredentialStore, WorkspaceId};
+use peri_acp_types::oauth_credentials::OAuthCredentialPort;
+
 use crate::sessions::canonical::OAUTH_CREDENTIALS_TABLE;
 use crate::sessions::data::SessionDataPort;
-use crate::sessions::sqlite_store::{session_data::SqliteSessionData, SqliteThreadStore};
+use crate::sessions::sqlite_store::session_data::SqliteSessionData;
+use crate::sessions::sqlite_store::SqliteThreadStore;
 
 async fn fixture() -> (tempfile::TempDir, SqliteThreadStore) {
     let directory = tempfile::tempdir().unwrap();
-    let store = SqliteThreadStore::new(directory.path().join("sessions.db"))
+    let store = SqliteThreadStore::try_new(directory.path().join("sessions.db"))
         .await
         .unwrap();
     (directory, store)
@@ -66,7 +69,7 @@ async fn trait_crud_survives_session_database_restart() {
     assert_eq!(row.1, owner.workspace_id);
     assert!(chrono::DateTime::parse_from_rfc3339(&row.2).is_ok());
     store.close().await;
-    let reopened = SqliteThreadStore::new(directory.path().join("sessions.db"))
+    let reopened = SqliteThreadStore::try_new(directory.path().join("sessions.db"))
         .await
         .unwrap();
     let port = Arc::new(SqliteSessionData::new(reopened.database.clone()))
@@ -261,7 +264,7 @@ async fn current_schema_adds_only_oauth_table_without_version_change_or_json_imp
     tokio::fs::write(directory.path().join("oauth_tokens.json"), legacy)
         .await
         .unwrap();
-    let reopened = SqliteThreadStore::new(directory.path().join("sessions.db"))
+    let reopened = SqliteThreadStore::try_new(directory.path().join("sessions.db"))
         .await
         .unwrap();
     let port = scoped(&reopened, "local", "/workspace-a").await;
@@ -303,7 +306,9 @@ async fn mislabeled_v2_schema_is_rejected_without_rebuilding_credentials() {
         .await
         .unwrap();
     store.close().await;
-    assert!(SqliteThreadStore::new(directory.path().join("sessions.db"))
-        .await
-        .is_err());
+    assert!(
+        SqliteThreadStore::try_new(directory.path().join("sessions.db"))
+            .await
+            .is_err()
+    );
 }

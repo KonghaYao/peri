@@ -1,9 +1,8 @@
 //! User input control and session event wiring. Scheduling decisions remain in Agent.
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use peri_acp_types::event::{EventSink, ExecutorEvent};
 use peri_acp_types::event_v2::{EventBus, EventBusConfig};
@@ -13,7 +12,8 @@ use peri_agent::session::user_input_mailbox::{
 
 use super::{task_scope, AcpServerConfig, PromptLocks, SharedSessions};
 use crate::session::event_sink::TransportEventSink;
-use crate::transport::{types::AcpError, AcpTransport};
+use crate::transport::types::AcpError;
+use crate::transport::AcpTransport;
 
 #[derive(Clone)]
 pub(crate) struct UserInputRun {

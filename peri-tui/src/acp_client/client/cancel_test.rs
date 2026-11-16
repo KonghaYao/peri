@@ -1,15 +1,17 @@
-use super::*;
+use super::{AcpTuiClient, json};
+
 use crate::acp_client::AcpNotification;
 use peri_acp::event::AcpEvent;
-use peri_acp::transport::{AcpTransport, mpsc::mpsc_transport_pair, types::IncomingMessage};
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::IncomingMessage;
 
 #[tokio::test]
 async fn cancel_sends_plain_notification_without_recovery_protocol() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("session", false);
-    client.cancel().await.unwrap();
-    let IncomingMessage::Notification { method, params } = server.recv().await.unwrap() else {
+    client.cancel().await.expect("cancel sends plain notification without recovery protocol: fixture task and request must complete successfully");
+    let IncomingMessage::Notification { method, params } = server.recv().await.expect("cancel sends plain notification without recovery protocol: fixture task and request must complete successfully") else {
         panic!("expected cancellation notification");
     };
     assert_eq!(method, "session/cancel");
@@ -20,16 +22,19 @@ async fn cancel_sends_plain_notification_without_recovery_protocol() {
 
 #[tokio::test]
 async fn cancel_without_session_is_an_error() {
-    let (transport, _server) = mpsc_transport_pair();
+    let (transport, _server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
-    let error = client.cancel().await.unwrap_err();
+    let error = client
+        .cancel()
+        .await
+        .expect_err("cancel without session is an error: the invalid fixture must be rejected");
     assert_eq!(error.code, -32603);
     client.close();
 }
 
 #[tokio::test]
 async fn managed_cancel_preserves_matching_terminal_but_rejects_duplicate() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notifications, mut rx) = AcpTuiClient::new(transport);
     client.force_stable_for_test("session", false);
     client
@@ -49,12 +54,12 @@ async fn managed_cancel_preserves_matching_terminal_but_rejects_duplicate() {
             }}),
         )
         .await
-        .unwrap();
+        .expect("managed cancel preserves matching terminal but rejects duplicate: fixture task and request must complete successfully");
     assert!(matches!(
         rx.recv().await,
         Some(AcpNotification::AgentEvent { .. })
     ));
-    client.cancel().await.unwrap();
+    client.cancel().await.expect("managed cancel preserves matching terminal but rejects duplicate: fixture task and request must complete successfully");
     assert!(
         matches!(server.recv().await, Some(IncomingMessage::Notification { method, params })
         if method == "session/cancel" && params["generation"] == "generation" && params["requestId"] == "run")
@@ -63,31 +68,31 @@ async fn managed_cancel_preserves_matching_terminal_but_rejects_duplicate() {
     server
         .send_notification("peri/agent_event_done", done.clone())
         .await
-        .unwrap();
+        .expect("managed cancel preserves matching terminal but rejects duplicate: fixture task and request must complete successfully");
     let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
     if terminal.is_err() {
         client.close();
     }
     assert!(
-        matches!(terminal.unwrap(), Some(AcpNotification::AgentDone { stop_reason, request_id, .. })
+        matches!(terminal.expect("managed cancel preserves matching terminal but rejects duplicate: the fixture channel must exchange its expected message"), Some(AcpNotification::AgentDone { stop_reason, request_id, .. })
         if stop_reason == "cancelled" && request_id.as_deref() == Some("run"))
     );
     server
         .send_notification("peri/agent_event_done", done)
         .await
-        .unwrap();
+        .expect("managed cancel preserves matching terminal but rejects duplicate: fixture task and request must complete successfully");
     server
         .send_notification(
             "session/update",
             json!({"sessionId":"session", "update":{}}),
         )
         .await
-        .unwrap();
+        .expect("managed cancel preserves matching terminal but rejects duplicate: fixture task and request must complete successfully");
     assert!(
         matches!(
             tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
                 .await
-                .unwrap(),
+                .expect("managed cancel preserves matching terminal but rejects duplicate: the fixture channel must exchange its expected message"),
             Some(AcpNotification::SessionUpdate { .. })
         ),
         "duplicate terminal must be dropped before the next notification"

@@ -16,7 +16,8 @@
 //! namespace = 来源域内标识（server / 插件名），name = 命令名。
 //! 解析仅做词法判定，不执行路由；裸名 → core/ui 域展开属注册表层。
 
-use std::{fmt, str::FromStr};
+use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -55,14 +56,14 @@ pub enum CommandName {
     /// 第一等级显式：`domain:name`（core:compact / ui:history）。
     Level1 { domain: String, name: String },
     /// 第二等级完整：`domain:namespace:name`（plugin:ecc:deploy；Mcp 生产
-    /// 形态为 [`Level2Short`]，决策 1）。
+    /// 形态为 [`Self::Level2Short`]，决策 1）。
     Level2 {
         domain: String,
         namespace: String,
         name: String,
     },
     /// 外部动态域短形态（决策 1）：`domain:name`（如 MCP server 命令
-    /// `demo:hello`），无 namespace 段。词法地位等同 [`Level2`]（完整全名
+    /// `demo:hello`），无 namespace 段。词法地位等同 [`Self::Level2`]（完整全名
     /// 展示、不登记裸名），仅语法为 2 段；真实可用性由注册表 provenance
     /// 域校验把关（`CommandSource::Mcp` 的 `domain()` = server 名）。
     Level2Short { domain: String, name: String },
@@ -194,6 +195,7 @@ impl CommandName {
     }
 
     /// 末段命令名（Bare / Level1 / Level2 的 name 字段）。
+    #[must_use]
     pub fn name(&self) -> &str {
         match self {
             CommandName::Bare { name } => name,

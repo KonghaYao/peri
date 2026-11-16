@@ -1,9 +1,9 @@
 use std::time::Duration;
 
-use rmcp::{
-    model::{ClientRequest, CustomRequest, ServerResult},
-    ServiceExt,
-};
+use rmcp::model::ClientRequest;
+use rmcp::model::CustomRequest;
+use rmcp::model::ServerResult;
+use rmcp::ServiceExt;
 
 use crate::WorkspaceMcpServer;
 
@@ -69,7 +69,7 @@ async fn invalid_missing_and_non_utf8_reads_do_not_expose_paths() {
         serde_json::json!({"path": 5}),
         serde_json::json!({"path": ""}),
     ] {
-        let error = super::read_text(
+        let error = crate::file_observation::read_text(
             dir.path().to_str().unwrap(),
             CustomRequest::new("workspace/readText", Some(params)),
         )
@@ -83,7 +83,7 @@ async fn invalid_missing_and_non_utf8_reads_do_not_expose_paths() {
 async fn mention_reads_workspace_range_and_limits_directory_entries() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("target.txt"), "one\ntwo\nthree\nfour\n").unwrap();
-    let result = super::read_mention(
+    let result = crate::file_observation::read_mention(
         dir.path().to_str().unwrap(),
         CustomRequest::new(
             "workspace/readMention",
@@ -99,7 +99,7 @@ async fn mention_reads_workspace_range_and_limits_directory_entries() {
         std::fs::write(dir.path().join(format!("file{index:03}")), "content").unwrap();
     }
     std::fs::create_dir(dir.path().join("nested")).unwrap();
-    let result = super::read_mention(
+    let result = crate::file_observation::read_mention(
         dir.path().to_str().unwrap(),
         CustomRequest::new(
             "workspace/readMention",
@@ -121,7 +121,7 @@ async fn mention_equal_range_endpoints_returns_requested_line() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("f"), "one\ntwo\nthree\nfour\n五").unwrap();
     for line in [1, 5] {
-        let result = super::read_mention(
+        let result = crate::file_observation::read_mention(
             root.path().to_str().unwrap(),
             CustomRequest::new(
                 "workspace/readMention",
@@ -142,7 +142,7 @@ async fn mention_rejects_traversal_and_symlink_escape() {
     std::fs::write(outside.path().join("secret"), "outside secret").unwrap();
     let outside_file = outside.path().join("secret");
     for path in ["../secret", outside_file.to_str().unwrap()] {
-        let result = super::read_mention(
+        let result = crate::file_observation::read_mention(
             root.path().to_str().unwrap(),
             CustomRequest::new(
                 "workspace/readMention",
@@ -156,7 +156,7 @@ async fn mention_rejects_traversal_and_symlink_escape() {
     {
         std::os::unix::fs::symlink(outside.path().join("secret"), root.path().join("link"))
             .unwrap();
-        let result = super::read_mention(
+        let result = crate::file_observation::read_mention(
             root.path().to_str().unwrap(),
             CustomRequest::new(
                 "workspace/readMention",
@@ -172,7 +172,7 @@ async fn mention_rejects_traversal_and_symlink_escape() {
 async fn mention_caps_long_file_at_2000_lines() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("large.txt"), "line\n".repeat(2001)).unwrap();
-    let result = super::read_mention(
+    let result = crate::file_observation::read_mention(
         root.path().to_str().unwrap(),
         CustomRequest::new(
             "workspace/readMention",
@@ -194,7 +194,7 @@ async fn mention_caps_long_file_at_2000_lines() {
 async fn mention_bounds_single_line_output_by_utf8_bytes() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("wide.txt"), "x".repeat(200 * 1024)).unwrap();
-    let result = super::read_mention(
+    let result = crate::file_observation::read_mention(
         root.path().to_str().unwrap(),
         CustomRequest::new(
             "workspace/readMention",
@@ -227,7 +227,7 @@ async fn mention_byte_budget_never_splits_a_utf8_character() {
         format!("{}\n", "中".repeat(40 * 1024)),
     )
     .unwrap();
-    let result = super::read_mention(
+    let result = crate::file_observation::read_mention(
         root.path().to_str().unwrap(),
         CustomRequest::new(
             "workspace/readMention",

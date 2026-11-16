@@ -21,8 +21,15 @@
 //! `WorkspaceMcpServer::with_resources` → 冻结期 P4 经真实 MCP 连接 `resources/list` +
 //! `resources/read`。**没有测试专用构造器**参与这条链。
 
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::provider::LlmProvider;
+
 use peri_acp_types::ports::McpPoolPort as _;
+use serde_json::json;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 覆盖段落 ID（∈ 契约 `SECTION_IDS`）。
 const META_SECTION: &str = "01_intro";
@@ -64,10 +71,11 @@ fn meta_fixture(meta_harness: &str) -> (tempfile::TempDir, String, String) {
 
 /// 生产装配的宿主配置：bare（只建 workspace 池）+ 指定的启动目录。
 async fn meta_server_config(tmp: &tempfile::TempDir, startup_cwd: String) -> AcpServerConfig {
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "key", "model"),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, tmp).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(config, provider, tmp).await;
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd,
         bare: true,
@@ -97,7 +105,7 @@ fn workspace_client_state(
     else {
         return "池不是生产 McpClientPool".to_owned();
     };
-    match pool.get_client("workspace") {
+    match pool.client("workspace") {
         Some(handle) => format!(
             "status={:?}, resources={}",
             handle.status,
@@ -126,7 +134,7 @@ async fn new_session_meta_override_flows_through_builtin_workspace_resources() {
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
 
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": target}),
         &cfg,
@@ -183,7 +191,7 @@ async fn new_session_meta_override_flows_through_builtin_workspace_resources() {
         .downcast_ref::<peri_middlewares::mcp::McpClientPool>()
         .expect("会话池是生产 McpClientPool");
     let uris: Vec<String> = pool
-        .get_resources("workspace")
+        .resources_for_server("workspace")
         .iter()
         .map(|resource| resource.uri.clone())
         .collect();
@@ -201,7 +209,7 @@ async fn new_session_meta_override_flows_through_builtin_workspace_resources() {
         "W4b 起技能面与 meta 面同批接线：{uris:?}"
     );
 
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": id}),
         &cfg,
@@ -231,7 +239,7 @@ async fn new_session_meta_override_unavailable_keeps_builtin_and_never_reads_dis
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
 
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": target}),
         &cfg,
@@ -252,7 +260,7 @@ async fn new_session_meta_override_unavailable_keeps_builtin_and_never_reads_dis
         "宿主不得回落到磁盘读 `.peri/meta`（X8 零 FS 兜底；实例关闭 ⇒ 覆盖不可得）"
     );
 
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": id}),
         &cfg,

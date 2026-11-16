@@ -3,15 +3,20 @@
 //! 不可克隆句柄（[`TemporaryObject`]、[`ObjectClaim`]、[`SpoolObject`]）。句柄正文不可变，不暴露
 //! 宿主路径，也不能在 crate 外伪造；端口方法同步且可能阻塞，只在有并发上限的 blocking job 中执行。
 
+use parking_lot::{Mutex, MutexGuard};
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::config::Compression;
 
-use super::{
-    cleanup::CleanupRegistration, error::SpoolError, sealed, SpoolReader, SpoolResult,
-    MAX_PAGE_CURSOR_BYTES,
-};
+use super::cleanup::CleanupRegistration;
+use super::error::SpoolError;
+use super::sealed;
+use super::SpoolReader;
+use super::SpoolResult;
+use super::MAX_PAGE_CURSOR_BYTES;
 
 /// 对象标识；私有字节只能由 crate 内构造器生成。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -154,8 +159,17 @@ pub struct SpoolObject {
     pub(crate) cleanup: CleanupRegistration,
 }
 
+impl Debug for SpoolObject {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SpoolObject")
+            .finish_non_exhaustive()
+    }
+}
+
 impl SpoolObject {
     /// 只读元数据；同步、无 IO。
+    #[must_use]
     pub fn meta(&self) -> &ObjectMeta {
         &self.meta
     }
@@ -194,20 +208,14 @@ impl SpoolObject {
         })
     }
 
-    fn lock_claim(&self) -> std::sync::MutexGuard<'_, Option<Box<dyn ObjectClaim>>> {
-        self.claim
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn lock_claim(&self) -> MutexGuard<'_, Option<Box<dyn ObjectClaim>>> {
+        self.claim.lock()
     }
 }
 
 impl Drop for SpoolObject {
     fn drop(&mut self) {
-        let claim = self
-            .claim
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+        let claim = self.claim.get_mut().take();
         self.cleanup.abandon(claim);
     }
 }

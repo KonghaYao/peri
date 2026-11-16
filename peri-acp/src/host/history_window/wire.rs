@@ -18,12 +18,12 @@ use peri_acp_types::session_resources::{
 use peri_acp_types::thread::ThreadId;
 use peri_acp_types::PeriCaps;
 
-use crate::host::history_page::page_item;
+use crate::host::history_page;
 
-use super::{
-    anchor_unavailable, resource_window_error, visibility::VisibilityCache, AcpError,
-    AcpServerConfig, IssuedWindowTicket,
-};
+use super::visibility::VisibilityCache;
+use super::AcpError;
+use super::AcpServerConfig;
+use super::IssuedWindowTicket;
 
 // 在票据登记和 wire descriptor 构造之前过滤；游标仍按存储行推进。
 pub(super) async fn filter_rows(
@@ -97,7 +97,7 @@ pub(super) async fn body_visible(
     };
 
     // 每个请求都先读持久内容的前缀块：缓存只复用结论，不复用「已登记 descriptor」。
-    let first = load_chunk(0).await.map_err(resource_window_error)?;
+    let first = load_chunk(0).await.map_err(super::resource_window_error)?;
     first
         .validate(&expected, 0, HISTORY_WINDOW_DEFAULT_CHUNK_SIZE)
         .map_err(super::window_error)?;
@@ -119,7 +119,10 @@ pub(super) async fn body_visible(
     let mut offset = first.next_offset;
     let mut failure = None;
     while let Some(next_offset) = offset {
-        let chunk = match load_chunk(next_offset).await.map_err(resource_window_error) {
+        let chunk = match load_chunk(next_offset)
+            .await
+            .map_err(super::resource_window_error)
+        {
             Ok(chunk) => chunk,
             Err(error) => {
                 failure = Some(error);
@@ -140,14 +143,18 @@ pub(super) async fn body_visible(
     drop(sender);
     let parsed = parsing.await.map_err(|error| {
         tracing::error!(%error, "history audience parser failed");
-        anchor_unavailable("history audience could not be verified")
+        crate::host::history_window::history_window_coordinator::anchor_unavailable(
+            "history audience could not be verified",
+        )
     })?;
     if let Some(error) = failure {
         return Err(error);
     }
     let visible = parsed.map_err(|_| {
         tracing::warn!("history audience decoding failed");
-        anchor_unavailable("history audience could not be verified")
+        crate::host::history_window::history_window_coordinator::anchor_unavailable(
+            "history audience could not be verified",
+        )
     })?;
     // 解析成功才写缓存；失败不缓存，下一次仍走完整校验。
     cache.store(entry_id, &prefix, visible);
@@ -240,7 +247,7 @@ pub(super) async fn is_oversize_descriptor(
         .session_resources
         .load_history_window_page(&ThreadId::from(thread_id.to_owned()), &plan)
         .await
-        .map_err(resource_window_error)?;
+        .map_err(super::resource_window_error)?;
     let own = rows.entries.iter().any(|entry| {
         matches!(
             entry,
@@ -269,7 +276,7 @@ pub(super) fn response(
     for entry in rows.entries {
         match entry {
             HistoryWindowEntry::Loaded(item) => {
-                if let Some(mut value) = page_item(&item, thread_id, caps) {
+                if let Some(mut value) = history_page::page_item(&item, thread_id, caps) {
                     value["source"] = json!(source);
                     items.push(value);
                 }
@@ -279,7 +286,7 @@ pub(super) fn response(
                 position,
                 total_bytes,
             } => {
-                let body = HistoryBodyDescriptor::new(
+                let body = HistoryBodyDescriptor::try_new(
                     total_bytes,
                     HISTORY_WINDOW_DEFAULT_CHUNK_SIZE,
                     metadata.snapshot_token.clone(),
@@ -299,7 +306,7 @@ pub(super) fn response(
     for entry in rows.inherited_entries {
         match entry {
             InheritedHistoryEntry::Loaded(item) => {
-                if let Some(mut value) = page_item(&item, thread_id, caps) {
+                if let Some(mut value) = history_page::page_item(&item, thread_id, caps) {
                     value["position"] = Value::Null;
                     value["source"] = json!(source);
                     items.push(value);
@@ -309,7 +316,7 @@ pub(super) fn response(
                 entry_id,
                 total_bytes,
             } => {
-                let body = HistoryBodyDescriptor::new(
+                let body = HistoryBodyDescriptor::try_new(
                     total_bytes,
                     HISTORY_WINDOW_DEFAULT_CHUNK_SIZE,
                     metadata.snapshot_token.clone(),

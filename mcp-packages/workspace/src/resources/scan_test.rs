@@ -3,8 +3,6 @@
 
 use std::path::Path;
 
-use super::*;
-
 fn tempdir() -> tempfile::TempDir {
     tempfile::tempdir().expect("临时目录夹具必须可创建")
 }
@@ -48,7 +46,7 @@ fn find_skill_dirs_uses_leaf_semantics_and_skips_tool_dirs() {
         &skill_file("hidden", "d"),
     );
 
-    let mut found: Vec<String> = find_skill_dirs(root, 6, 1000)
+    let mut found: Vec<String> = crate::resources::scan::find_skill_dirs(root, 6, 1000)
         .iter()
         .map(|path| {
             path.strip_prefix(root)
@@ -74,7 +72,7 @@ fn find_skill_dirs_treats_root_with_entry_as_single_leaf() {
         &root.join("child").join("SKILL.md"),
         &skill_file("child", "d"),
     );
-    let found = find_skill_dirs(root, 6, 1000);
+    let found = crate::resources::scan::find_skill_dirs(root, 6, 1000);
     assert_eq!(
         found,
         vec![root.to_path_buf()],
@@ -92,10 +90,13 @@ fn find_skill_dirs_respects_depth_and_dir_budget() {
     );
     // 深度 2：c 位于第 3 层，发现不到；深度 3 可见。
     assert!(
-        find_skill_dirs(root, 2, 1000).is_empty(),
+        crate::resources::scan::find_skill_dirs(root, 2, 1000).is_empty(),
         "深度预算必须生效"
     );
-    assert_eq!(find_skill_dirs(root, 3, 1000).len(), 1);
+    assert_eq!(
+        crate::resources::scan::find_skill_dirs(root, 3, 1000).len(),
+        1
+    );
     // 目录数预算 1：根目录消耗 1 后即停。
     let many = tempdir();
     write(
@@ -103,7 +104,7 @@ fn find_skill_dirs_respects_depth_and_dir_budget() {
         &skill_file("x", "d"),
     );
     assert!(
-        find_skill_dirs(many.path(), 6, 1).is_empty(),
+        crate::resources::scan::find_skill_dirs(many.path(), 6, 1).is_empty(),
         "单 root 目录数预算必须生效"
     );
 }
@@ -116,7 +117,7 @@ fn find_skill_dirs_skips_symlinked_directories() {
     let dir = tempdir();
     std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).expect("建 symlink");
     assert!(
-        find_skill_dirs(dir.path(), 6, 1000).is_empty(),
+        crate::resources::scan::find_skill_dirs(dir.path(), 6, 1000).is_empty(),
         "symlink 技能目录不得被发现（X3：公开面禁 symlink）"
     );
 }
@@ -138,7 +139,7 @@ fn enumerate_skill_files_is_sorted_and_skips_hidden_and_symlinks() {
             .expect("建 symlink");
     }
 
-    let files = enumerate_skill_files(root, 64);
+    let files = crate::resources::scan::enumerate_skill_files(root, 64);
     #[cfg(unix)]
     let expected = vec![
         "SKILL.md",
@@ -159,7 +160,7 @@ fn enumerate_skill_files_is_sorted_and_skips_hidden_and_symlinks() {
         "排序确定、隐藏与 symlink 跳过、嵌套 SKILL.md 作为附件"
     );
     // 预算截断按排序前缀。
-    let truncated = enumerate_skill_files(root, 2);
+    let truncated = crate::resources::scan::enumerate_skill_files(root, 2);
     assert_eq!(truncated, vec!["SKILL.md", "assets/logo.bin"]);
 }
 
@@ -167,12 +168,15 @@ fn enumerate_skill_files_is_sorted_and_skips_hidden_and_symlinks() {
 fn relative_path_string_rejects_escape() {
     let base = Path::new("/tmp/base");
     assert_eq!(
-        relative_path_string(base, &base.join("a").join("b.txt")).as_deref(),
+        crate::resources::scan::relative_path_string(base, &base.join("a").join("b.txt"))
+            .as_deref(),
         Some("a/b.txt")
     );
-    assert!(relative_path_string(base, Path::new("/tmp/other/x")).is_none());
     assert!(
-        relative_path_string(base, base).is_none(),
+        crate::resources::scan::relative_path_string(base, Path::new("/tmp/other/x")).is_none()
+    );
+    assert!(
+        crate::resources::scan::relative_path_string(base, base).is_none(),
         "空相对路径无意义"
     );
 }

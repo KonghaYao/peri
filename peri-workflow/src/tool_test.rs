@@ -6,13 +6,13 @@ use peri_acp_types::tools::{BaseTool, ToolContext};
 
 use serial_test::serial;
 
-use super::*;
-use crate::preflight::{preflight_validate_script, validate_script_with};
 use crate::protocol::{AgentRunParams, AgentRunResult, Usage};
 use crate::registry::{WorkflowRunStatus, WorkflowTaskRegistry};
 use crate::runner::AgentExecutor;
+
 use crate::runtime::params::MAX_SAFE_BUDGET_TOTAL;
 use crate::runtime::WorkflowRuntime;
+use crate::tool::WorkflowTool;
 
 struct CountingExecutor {
     calls: Arc<AtomicUsize>,
@@ -83,11 +83,17 @@ async fn test_production_description_example_passes_real_node_preflight() {
     if !require_explicit_engine() {
         return;
     }
-    let tmp = tempfile::TempDir::new().unwrap();
-    let (tool, _) = make_tool(tmp.path().to_str().unwrap(), Arc::new(AtomicUsize::new(0)));
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
+    let (tool, _) = make_tool(
+        tmp.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+        Arc::new(AtomicUsize::new(0)),
+    );
     let script = script_example_from_parameters(&tool);
 
-    preflight_validate_script(&script)
+    crate::preflight::preflight_validate_script(&script)
         .await
         .expect("生产 description 示例必须通过随包 parser");
 }
@@ -99,8 +105,14 @@ async fn test_production_description_mutations_hit_parser_rejection_boundaries()
     if !require_explicit_engine() {
         return;
     }
-    let tmp = tempfile::TempDir::new().unwrap();
-    let (tool, _) = make_tool(tmp.path().to_str().unwrap(), Arc::new(AtomicUsize::new(0)));
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
+    let (tool, _) = make_tool(
+        tmp.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+        Arc::new(AtomicUsize::new(0)),
+    );
     let script = script_example_from_parameters(&tool);
     let cases = [
         (
@@ -121,7 +133,7 @@ async fn test_production_description_mutations_hit_parser_rejection_boundaries()
     ];
 
     for (label, invalid, expected) in cases {
-        let error = match preflight_validate_script(&invalid).await {
+        let error = match crate::preflight::preflight_validate_script(&invalid).await {
             Ok(()) => panic!("{label} 必须被 parser 拒绝"),
             Err(error) => error,
         };
@@ -154,7 +166,7 @@ async fn test_production_description_mutations_hit_parser_rejection_boundaries()
         ),
     ];
     for (label, invalid) in old_api_cases {
-        let error = match preflight_validate_script(&invalid).await {
+        let error = match crate::preflight::preflight_validate_script(&invalid).await {
             Ok(()) => panic!("旧式 {label} 必须被 parser 拒绝"),
             Err(error) => error,
         };
@@ -162,7 +174,7 @@ async fn test_production_description_mutations_hit_parser_rejection_boundaries()
     }
 
     let no_return = script.replacen("return result", "void result", 1);
-    preflight_validate_script(&no_return)
+    crate::preflight::preflight_validate_script(&no_return)
         .await
         .expect("缺少顶层 return 只应产生 warning，不能作为 parser error");
 }
@@ -170,10 +182,15 @@ async fn test_production_description_mutations_hit_parser_rejection_boundaries()
 /// [回归测试] writeIntent 的 cwd 偏离 canonical cwd 时必须在 workflow 启动前拒绝。
 #[tokio::test]
 async fn test_write_intent_rejects_noncanonical_cwd_before_workflow_side_effects() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cwd = tmp.path().to_str().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
+    let cwd = tmp
+        .path()
+        .to_str()
+        .expect("the fixture text must be valid UTF-8");
     let nested = tmp.path().join("nested");
-    std::fs::create_dir(&nested).unwrap();
+    std::fs::create_dir(&nested)
+        .expect("the create dir fixture result is required for this assertion");
     let run_git = |args: &[&str]| {
         assert!(
             std::process::Command::new("git")
@@ -182,13 +199,14 @@ async fn test_write_intent_rejects_noncanonical_cwd_before_workflow_side_effects
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .current_dir(&tmp)
                 .status()
-                .unwrap()
+                .expect("the status fixture result is required for this assertion")
                 .success(),
             "git command failed: {args:?}"
         );
     };
     run_git(&["init", "-q"]);
-    std::fs::write(tmp.path().join("README.md"), "baseline\n").unwrap();
+    std::fs::write(tmp.path().join("README.md"), "baseline\n")
+        .expect("the test fixture file must be writable");
     run_git(&["add", "README.md"]);
     run_git(&[
         "-c",
@@ -244,9 +262,15 @@ async fn test_write_intent_rejects_noncanonical_cwd_before_workflow_side_effects
 
 #[test]
 fn workflow_schema_exposes_budget_total_integer_bounds() {
-    let tmp = tempfile::TempDir::new().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
     let calls = Arc::new(AtomicUsize::new(0));
-    let (tool, _) = make_tool(tmp.path().to_str().unwrap(), calls);
+    let (tool, _) = make_tool(
+        tmp.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+        calls,
+    );
 
     let schema = tool.parameters();
     let budget = &schema["properties"]["budgetTotal"];
@@ -256,7 +280,7 @@ fn workflow_schema_exposes_budget_total_integer_bounds() {
     assert_eq!(budget["maximum"], MAX_SAFE_BUDGET_TOTAL);
     assert!(budget["description"]
         .as_str()
-        .unwrap()
+        .expect("the as str fixture result is required for this assertion")
         .contains("total token budget"));
 }
 
@@ -268,8 +292,12 @@ fn workflow_schema_exposes_budget_total_integer_bounds() {
 #[tokio::test]
 #[serial]
 async fn failed_start_leaves_no_workflow_side_effects() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cwd = tmp.path().to_str().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
+    let cwd = tmp
+        .path()
+        .to_str()
+        .expect("the fixture text must be valid UTF-8");
     let previous_home = std::env::var_os("HOME");
     std::env::set_var("HOME", tmp.path());
     std::env::set_var(
@@ -309,8 +337,12 @@ async fn failed_start_leaves_no_workflow_side_effects() {
 
 #[tokio::test]
 async fn strict_preflight_fails_before_workflow_side_effects() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cwd = tmp.path().to_str().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
+    let cwd = tmp
+        .path()
+        .to_str()
+        .expect("the fixture text must be valid UTF-8");
     let calls = Arc::new(AtomicUsize::new(0));
     let (tool, registry) = make_tool(cwd, Arc::clone(&calls));
 
@@ -333,8 +365,12 @@ async fn strict_preflight_fails_before_workflow_side_effects() {
 
 #[tokio::test]
 async fn invalid_write_intent_fails_before_workflow_side_effects() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cwd = tmp.path().to_str().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
+    let cwd = tmp
+        .path()
+        .to_str()
+        .expect("the fixture text must be valid UTF-8");
     let calls = Arc::new(AtomicUsize::new(0));
     let (tool, registry) = make_tool(cwd, Arc::clone(&calls));
 
@@ -357,8 +393,12 @@ async fn invalid_write_intent_fails_before_workflow_side_effects() {
 
 #[tokio::test]
 async fn invalid_budget_fails_before_workflow_side_effects() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cwd = tmp.path().to_str().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
+    let cwd = tmp
+        .path()
+        .to_str()
+        .expect("the fixture text must be valid UTF-8");
     let calls = Arc::new(AtomicUsize::new(0));
     let (tool, registry) = make_tool(cwd, Arc::clone(&calls));
     let resume_id = uuid::Uuid::now_v7().to_string();
@@ -386,13 +426,16 @@ fn isolated_completion_child(test: &str) -> bool {
     if std::env::var("PERI_WORKFLOW_COMPLETION_TEST").as_deref() == Ok(test) {
         return false;
     }
-    let home = tempfile::tempdir().unwrap();
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", test, "--nocapture"])
-        .env("PERI_WORKFLOW_COMPLETION_TEST", test)
-        .env("HOME", home.path())
-        .output()
-        .unwrap();
+    let home = tempfile::tempdir().expect("the temporary test directory must be available");
+    let output = std::process::Command::new(
+        std::env::current_exe()
+            .expect("the current exe fixture result is required for this assertion"),
+    )
+    .args(["--exact", test, "--nocapture"])
+    .env("PERI_WORKFLOW_COMPLETION_TEST", test)
+    .env("HOME", home.path())
+    .output()
+    .expect("the output fixture result is required for this assertion");
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -458,23 +501,24 @@ fn test_invoke_fast_kill_preserves_terminal_projection() {
     if !require_explicit_engine() {
         return;
     }
-    if isolated_completion_child("tool::tests::test_invoke_fast_kill_preserves_terminal_projection")
-    {
+    if isolated_completion_child(
+        "workflow_tool::tests::test_invoke_fast_kill_preserves_terminal_projection",
+    ) {
         return;
     }
-    tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap().block_on(async {
-        let dir = tempfile::tempdir().unwrap();
-        let (tool, registry, _entered, _release) = make_completion_tool(dir.path().to_str().unwrap());
+    tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("the build fixture result is required for this assertion").block_on(async {
+        let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+        let (tool, registry, _entered, _release) = make_completion_tool(dir.path().to_str().expect("the fixture text must be valid UTF-8"));
         let mut notifications = registry.notification_tx().subscribe();
-        let mut invoke = Box::pin(tool.invoke(serde_json::json!({"script": "export const meta = { name: 'fixture', description: 'lifecycle' }; return await agent('finish');"}), ToolContext::new(&[], dir.path().to_str().unwrap())));
+        let mut invoke = Box::pin(tool.invoke(serde_json::json!({"script": "export const meta = { name: 'fixture', description: 'lifecycle' }; return await agent('finish');"}), ToolContext::new(&[], dir.path().to_str().expect("the fixture text must be valid UTF-8"))));
         std::future::poll_fn(|cx| {
             assert!(invoke.as_mut().poll(cx).is_pending());
             if registry.active_count() == 1 { std::task::Poll::Ready(()) } else { std::task::Poll::Pending }
         }).await;
         let run_id = registry.list_runs()[0].0.clone();
-        registry.kill(&run_id).unwrap();
-        assert!(tokio::time::timeout(std::time::Duration::from_secs(10), invoke).await.unwrap().is_err());
-        let result = tokio::time::timeout(std::time::Duration::from_secs(3), notifications.recv()).await.unwrap().unwrap();
+        registry.kill(&run_id).expect("the kill fixture result is required for this assertion");
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(10), invoke).await.expect("the from secs fixture result is required for this assertion").is_err());
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), notifications.recv()).await.expect("the timeout fixture result is required for this assertion").expect("invoke fast kill preserves terminal projection: the completed fixture operation must provide its result payload");
         assert_eq!(result.status, WorkflowRunStatus::Killed);
         assert_eq!(result.execution_status, peri_acp_types::workflow::ExecutionStatus::Killed);
         assert!(notifications.try_recv().is_err());
@@ -487,26 +531,27 @@ fn test_invoke_fast_kill_preserves_terminal_projection() {
 #[serial]
 fn test_preflight_cancellation_releases_process_and_script() {
     if isolated_completion_child(
-        "tool::tests::test_preflight_cancellation_releases_process_and_script",
+        "workflow_tool::tests::test_preflight_cancellation_releases_process_and_script",
     ) {
         return;
     }
     use std::os::unix::fs::PermissionsExt;
-    let fixture = tempfile::tempdir().unwrap();
+    let fixture = tempfile::tempdir().expect("the temporary test directory must be available");
     let probe = fixture.path().join("probe");
     let node = fixture.path().join("node");
-    std::fs::write(&node, "#!/bin/sh\nprintf '%s\\n' \"$$\" \"$3\" > \"$PERI_WORKFLOW_PREFLIGHT_PROBE\"\nexec /bin/sleep 30\n").unwrap();
-    std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(&node, "#!/bin/sh\nprintf '%s\\n' \"$$\" \"$3\" > \"$PERI_WORKFLOW_PREFLIGHT_PROBE\"\nexec /bin/sleep 30\n").expect("the test fixture file must be writable");
+    std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755))
+        .expect("the set permissions fixture result is required for this assertion");
     // 当前测试只在独立子进程中设置环境，且 runtime 尚未启动。
     std::env::set_var("PATH", fixture.path());
     std::env::set_var("PERI_WORKFLOW_PREFLIGHT_PROBE", &probe);
-    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+    tokio::runtime::Builder::new_current_thread().enable_all().build().expect("the build fixture result is required for this assertion").block_on(async {
         // 合成引擎命令 + PATH 上的假 node：不依赖任何真实引擎产物。
         let command = crate::runner::WorkflowCommand {
             program: "node".into(),
             args: vec!["dist/peri-workflow.js".into()],
         };
-        let mut validation = Box::pin(validate_script_with(&command, "return 'ok'"));
+        let mut validation = Box::pin(crate::preflight::validate_script_with(&command, "return 'ok'"));
         let observed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 tokio::select! {
@@ -522,13 +567,13 @@ fn test_preflight_cancellation_releases_process_and_script() {
             }
         }).await.expect("真实进程必须启动并报告 PID 与脚本路径");
         drop(validation);
-        let directory = observed.1.parent().unwrap();
+        let directory = observed.1.parent().expect("the parent fixture result is required for this assertion");
         let directory_removed = !directory.exists();
         let reaped = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 let alive = tokio::process::Command::new("/bin/kill").args(["-0", &observed.0])
                     .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-                    .status().await.unwrap().success();
+                    .status().await.expect("the status fixture result is required for this assertion").success();
                 if !alive { break; }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }

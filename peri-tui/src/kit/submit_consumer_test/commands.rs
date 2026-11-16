@@ -1,9 +1,11 @@
 //! 远程命令、KeepGoing、清空与视图命令回归。
 
-use super::super::*;
-use super::support::*;
+use super::super::CancellationToken;
+use super::super::Duration;
+use super::super::SessionControlRequest;
+use super::super::SubmitRequest;
+use super::super::mpsc;
 
-use crate::kit::atoms::{VIEW_MODELS, ViewModelsSnapshot};
 use peri_acp::transport::AcpTransport;
 use serde_json::json;
 use serial_test::serial;
@@ -19,18 +21,18 @@ async fn test_remote_command_without_session_creates_it() {
         .read()
         .clone();
     let previous_window_capable = crate::kit::atoms::HISTORY_WINDOW_CAPABLE.get();
-    let (client, server) = make_client_without_pump();
+    let (client, server) = super::support::make_client_without_pump();
     let negotiator = client.clone();
     let negotiate = tokio::spawn(async move { negotiator.register_ui_commands(&[]).await });
-    let (init_id, _) = expect_request(&server, "initialize").await;
+    let (init_id, _) = super::support::expect_request(&server, "initialize").await;
     server
         .send_response(
             init_id,
             Ok(json!({"agentCapabilities": {"_meta": {"peri.userInputQueue": true}}})),
         )
         .await
-        .unwrap();
-    negotiate.await.unwrap().unwrap();
+        .expect("remote command without session creates it: fixture task and request must complete successfully");
+    negotiate.await.expect("remote command without session creates it: fixture task and request must complete successfully").expect("remote command without session creates it: fixture task and request must complete successfully");
     assert!(client.supports_user_input_queue());
     *crate::kit::atoms::AVAILABLE_SLASH_COMMANDS.state().write() =
         vec![crate::kit::slash_projection::SlashCommandEntry {
@@ -41,25 +43,26 @@ async fn test_remote_command_without_session_creates_it() {
 
     let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
     let shutdown = CancellationToken::new();
-    let consumer = spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
+    let consumer =
+        super::super::spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
 
-    tx.send(agent_text("/demo:remote")).unwrap();
-    let (new_id, _) = expect_request(&server, "session/new").await;
+    tx.send(super::support::agent_text("/demo:remote")).expect("remote command without session creates it: fixture channel must deliver its expected message");
+    let (new_id, _) = super::support::expect_request(&server, "session/new").await;
     server
         .send_response(new_id, Ok(json!({"sessionId": "remote-session"})))
         .await
-        .unwrap();
+        .expect("remote command without session creates it: fixture task and request must complete successfully");
     // 新式服务端在会话建立后拉取输入快照，之后才发送 prompt。
-    let (snapshot_id, _) = expect_request(&server, "session/input/snapshot").await;
+    let (snapshot_id, _) = super::support::expect_request(&server, "session/input/snapshot").await;
     server
         .send_response(
             snapshot_id,
             Ok(json!({"sessionId": "remote-session", "generation": "g", "revision": 1, "items": []})),
         )
         .await
-        .unwrap();
+        .expect("remote command without session creates it: fixture task and request must complete successfully");
 
-    let (_prompt_id, session_id, text) = expect_prompt(&server).await;
+    let (_prompt_id, session_id, text) = super::support::expect_prompt(&server).await;
     assert_eq!(
         (session_id.as_str(), text.as_str()),
         ("remote-session", "/demo:remote"),
@@ -78,47 +81,50 @@ async fn test_remote_command_without_session_creates_it() {
 #[serial]
 async fn test_keepgoing_bypasses_lane_when_server_queues_input() {
     let previous_window_capable = crate::kit::atoms::HISTORY_WINDOW_CAPABLE.get();
-    let (client, server) = make_client_without_pump();
+    let (client, server) = super::support::make_client_without_pump();
     let negotiator = client.clone();
     let negotiate = tokio::spawn(async move { negotiator.register_ui_commands(&[]).await });
-    let (init_id, _) = expect_request(&server, "initialize").await;
+    let (init_id, _) = super::support::expect_request(&server, "initialize").await;
     server
         .send_response(
             init_id,
             Ok(json!({"agentCapabilities": {"_meta": {"peri.userInputQueue": true}}})),
         )
         .await
-        .unwrap();
-    negotiate.await.unwrap().unwrap();
+        .expect("keepgoing bypasses lane when server queues input: fixture task and request must complete successfully");
+    negotiate.await.expect("keepgoing bypasses lane when server queues input: fixture task and request must complete successfully").expect("keepgoing bypasses lane when server queues input: fixture task and request must complete successfully");
     assert!(client.supports_user_input_queue());
 
     client.force_stable_for_test("session-a", false);
     let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
     let shutdown = CancellationToken::new();
-    let consumer = spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
+    let consumer =
+        super::super::spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
 
     // 第一条 keepgoing 故意不返回：模拟 suspended turn 上仍挂着的 prompt RPC。
-    tx.send(SubmitRequest::KeepGoing).unwrap();
-    let (first_id, first_session, first_text) = expect_prompt(&server).await;
+    tx.send(SubmitRequest::KeepGoing).expect("keepgoing bypasses lane when server queues input: fixture channel must deliver its expected message");
+    let (first_id, first_session, first_text) = super::support::expect_prompt(&server).await;
     assert_eq!(first_session, "session-a");
     assert_eq!(first_text, "");
 
-    tx.send(SubmitRequest::KeepGoing).unwrap();
-    let (second_id, second_session, second_text) =
-        tokio::time::timeout(Duration::from_millis(500), expect_prompt(&server))
-            .await
-            .expect("KeepGoing 不得等待挂起的 prompt 完成");
+    tx.send(SubmitRequest::KeepGoing).expect("keepgoing bypasses lane when server queues input: fixture channel must deliver its expected message");
+    let (second_id, second_session, second_text) = tokio::time::timeout(
+        Duration::from_millis(500),
+        super::support::expect_prompt(&server),
+    )
+    .await
+    .expect("KeepGoing 不得等待挂起的 prompt 完成");
     assert_eq!(second_session, "session-a");
     assert_eq!(second_text, "");
 
     server
         .send_response(second_id, Ok(json!({"stopReason": "end_turn"})))
         .await
-        .unwrap();
+        .expect("keepgoing bypasses lane when server queues input: fixture task and request must complete successfully");
     server
         .send_response(first_id, Ok(json!({"stopReason": "end_turn"})))
         .await
-        .unwrap();
+        .expect("keepgoing bypasses lane when server queues input: fixture task and request must complete successfully");
 
     crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(previous_window_capable);
     shutdown.cancel();
@@ -126,10 +132,10 @@ async fn test_keepgoing_bypasses_lane_when_server_queues_input() {
 }
 #[tokio::test]
 async fn test_empty_agent_text_skipped() {
-    let (client, _server_transport) = make_client_without_pump();
+    let (client, _server_transport) = super::support::make_client_without_pump();
     let cwd = ".".to_string();
 
-    let result = handle_submit(
+    let result = super::super::handle_submit(
         &client,
         &cwd,
         SubmitRequest::AgentText {
@@ -145,14 +151,14 @@ async fn test_empty_agent_text_skipped() {
 
 #[tokio::test]
 async fn test_creates_session_when_missing() {
-    let (client, _server_transport) = make_client_without_pump();
+    let (client, _server_transport) = super::support::make_client_without_pump();
     let cwd = ".".to_string();
 
     // 无 pump 时 new_session 调用 recv() 会 hang——此测试只验证控制流：
     // 启动一个简短超时，确保 handle_submit 进入 new_session 分支
     let result = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        handle_submit(
+        super::super::handle_submit(
             &client,
             &cwd,
             SubmitRequest::AgentText {
@@ -166,7 +172,7 @@ async fn test_creates_session_when_missing() {
 
     // 超时是预期（无 server 处理 RPC），但已确认走到了 new_session 路径
     assert!(
-        result.is_err() || result.unwrap().is_err(),
+        result.is_err() || result.expect("creates session when missing: the fixture operation must finish without an inner failure").is_err(),
         "expected timeout or RPC error (no server), got success"
     );
 }
@@ -191,13 +197,13 @@ async fn test_clear_request_bypasses_prompt() {
         )]),
         generation: 0,
     };
-    let (client, _server_transport) = make_client_without_pump();
+    let (client, _server_transport) = super::support::make_client_without_pump();
     let cwd = ".".to_string();
 
     // /clear 在无 server 时会因 new_session RPC 超时，但不走 prompt 路径
     let result = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        handle_submit(
+        super::super::handle_submit(
             &client,
             &cwd,
             SubmitRequest::SessionControl(SessionControlRequest::Clear),
@@ -208,7 +214,7 @@ async fn test_clear_request_bypasses_prompt() {
 
     // 超时表示走到了 new_session 路径（因无 server 响应而 hang）
     assert!(
-        result.is_err() || result.unwrap().is_err(),
+        result.is_err() || result.expect("clear request bypasses prompt: the fixture operation must finish without an inner failure").is_err(),
         "expected timeout (clear → new_session with no server)"
     );
 }
@@ -242,14 +248,14 @@ async fn test_handle_clear_submit_resets_popup_todo_history_atoms() {
     *crate::kit::atoms::INPUT_HISTORY_INDEX.state().write() = Some(3);
     *crate::kit::atoms::DRAFT.state().write() = Some("stale draft".to_string());
 
-    let (client, _server) = make_interactive_client_without_pump();
+    let (client, _server) = super::support::make_interactive_client_without_pump();
     let cwd = ".".to_string();
 
     // Act：handle_clear_submit 在 new_session 处会 hang（无 server），
     // 我们只关心它 await 之前的同步重置块，所以 100ms 超时即返回。
     let _ = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        handle_clear_submit(&client, &cwd),
+        super::super::handle_clear_submit(&client, &cwd),
     )
     .await;
 
@@ -278,3 +284,7 @@ async fn test_handle_clear_submit_resets_popup_todo_history_atoms() {
         "DRAFT should be None after /clear"
     );
 }
+
+use crate::kit::atoms::VIEW_MODELS;
+
+use crate::kit::atoms::ViewModelsSnapshot;

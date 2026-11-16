@@ -5,6 +5,8 @@
 //!
 //! 这些类型不实现 `Debug`：正文与凭据不得因日志/断言而外泄。
 
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -23,11 +25,19 @@ pub struct BudgetedBytes {
     pub(crate) permit: MemoryPermit,
 }
 
+impl Debug for BudgetedBytes {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BudgetedBytes")
+            .finish_non_exhaustive()
+    }
+}
+
 impl BudgetedBytes {
     /// 绑定一份已记账正文；permit 未覆盖 `bytes` 时按预算身份不一致拒收。
     ///
     /// 同步无 IO；permit 是 crate 内受控凭证，正文字节数不得超过其预约额度。
-    pub(crate) fn new(bytes: Bytes, permit: MemoryPermit) -> Result<Self, LangfuseError> {
+    pub(crate) fn try_new(bytes: Bytes, permit: MemoryPermit) -> Result<Self, LangfuseError> {
         if permit.bytes() < bytes.len() {
             return Err(LangfuseError::BudgetMismatch);
         }
@@ -57,12 +67,14 @@ impl BudgetedBytes {
 }
 
 /// 冻结的观测 input：小对象留内存，大对象保存为暂存对象句柄。
+#[derive(Debug)]
 pub enum InputSnapshot {
     Inline(BudgetedBytes),
     Spooled(SpoolObject),
 }
 
 /// payload 正文来源：受预算约束的内存前缀，或已原子发布的暂存文件。
+#[derive(Debug)]
 pub enum PayloadBody {
     Memory(BudgetedBytes),
     File(SpoolObject),
@@ -72,6 +84,7 @@ pub enum PayloadBody {
 ///
 /// `raw_len` 是解压后的 JSON 字节数，`wire_len` 是实际发送的字节数（含内容编码）；
 /// `sha256` 针对 `wire` 字节序列。
+#[derive(Debug)]
 pub struct ExportPayload {
     pub(crate) body: PayloadBody,
     pub encoding: Compression,

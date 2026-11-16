@@ -1,6 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
 
-use super::*;
+use super::parse_global;
+use super::parse_project;
+use super::McpCachePolicy;
+use super::McpConfigError;
+use super::MCP_BUILTIN_ENV;
+use super::MCP_CACHE_ENV;
 
 #[test]
 fn global_prefers_nested_servers_but_validates_both_candidates() {
@@ -8,7 +13,7 @@ fn global_prefers_nested_servers_but_validates_both_candidates() {
         "config": {"mcpServers": {"chosen": {"command": "echo"}}},
         "mcpServers": {"fallback": {"command": "uvx"}}
     });
-    let parsed = parse_global(&value).unwrap();
+    let parsed = super::parse_global(&value).unwrap();
     assert!(parsed.mcp_servers.contains_key("chosen"));
     assert!(!parsed.mcp_servers.contains_key("fallback"));
 
@@ -16,14 +21,14 @@ fn global_prefers_nested_servers_but_validates_both_candidates() {
         "config": {"mcpServers": {"chosen": {"command": "echo"}}},
         "mcpServers": {"bad": {"system_mcp_tools": []}}
     });
-    assert!(parse_global(&invalid_shadowed).is_err());
+    assert!(super::parse_global(&invalid_shadowed).is_err());
 }
 
 #[test]
 fn cache_policy_parses_environment_and_disable_wins() {
     let empty = BTreeMap::new();
     let mut environment = BTreeMap::from([(MCP_CACHE_ENV.to_string(), " ON ".to_string())]);
-    let result = resolve(
+    let result = super::resolve(
         &serde_json::json!({"config": {"mcpCache": true}}),
         &serde_json::json!({"mcpCache": false}),
         &HashMap::new(),
@@ -38,7 +43,7 @@ fn cache_policy_parses_environment_and_disable_wins() {
 
     environment.insert(MCP_CACHE_ENV.to_string(), "invalid-secret".to_string());
     assert!(matches!(
-        resolve(
+        super::resolve(
             &serde_json::json!({}),
             &serde_json::json!({}),
             &HashMap::new(),
@@ -47,7 +52,7 @@ fn cache_policy_parses_environment_and_disable_wins() {
         Err(McpConfigError::InvalidCacheEnvironment)
     ));
     assert_eq!(
-        resolve(
+        super::resolve(
             &serde_json::json!({}),
             &serde_json::json!({}),
             &HashMap::new(),
@@ -61,15 +66,15 @@ fn cache_policy_parses_environment_and_disable_wins() {
 
 #[test]
 fn builtin_switch_disables_only_for_off_and_zero() {
-    assert!(builtin_enabled(&BTreeMap::new()));
+    assert!(super::builtin_enabled(&BTreeMap::new()));
     for value in ["off", " OFF ", "0"] {
-        assert!(!builtin_enabled(&BTreeMap::from([(
+        assert!(!super::builtin_enabled(&BTreeMap::from([(
             MCP_BUILTIN_ENV.to_string(),
             value.to_string(),
         )])));
     }
     for value in ["on", "false", "", "unknown"] {
-        assert!(builtin_enabled(&BTreeMap::from([(
+        assert!(super::builtin_enabled(&BTreeMap::from([(
             MCP_BUILTIN_ENV.to_string(),
             value.to_string(),
         )])));
@@ -79,7 +84,7 @@ fn builtin_switch_disables_only_for_off_and_zero() {
 #[test]
 fn plugin_servers_are_namespaced_and_deduplicated_against_manual_servers() {
     assert_eq!(
-        plugin_server_name("sample", "search"),
+        super::plugin_server_name("sample", "search"),
         "plugin:sample:search"
     );
     let shared = serde_json::json!({
@@ -98,7 +103,8 @@ fn plugin_servers_are_namespaced_and_deduplicated_against_manual_servers() {
             serde_json::from_value(serde_json::json!({"command": "other"})).unwrap(),
         ),
     ]);
-    let projection = resolve(&shared, &serde_json::json!({}), &plugins, &BTreeMap::new()).unwrap();
+    let projection =
+        super::resolve(&shared, &serde_json::json!({}), &plugins, &BTreeMap::new()).unwrap();
     assert!(!projection
         .mcp_servers
         .contains_key("plugin:sample:duplicate"));
@@ -109,7 +115,7 @@ fn plugin_servers_are_namespaced_and_deduplicated_against_manual_servers() {
 
 #[test]
 fn project_config_rejects_non_boolean_cache_and_invalid_credentials() {
-    assert!(parse_project(&serde_json::json!({"mcpCache": "false"})).is_err());
+    assert!(super::parse_project(&serde_json::json!({"mcpCache": "false"})).is_err());
     let invalid_credentials = serde_json::json!({
         "mcpServers": {
             "http": {
@@ -118,7 +124,7 @@ fn project_config_rejects_non_boolean_cache_and_invalid_credentials() {
             }
         }
     });
-    assert!(parse_project(&invalid_credentials).is_err());
+    assert!(super::parse_project(&invalid_credentials).is_err());
 }
 
 #[test]

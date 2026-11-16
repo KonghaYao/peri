@@ -3,24 +3,27 @@
 //! 与 `compact_session_adversarial_test.rs` 分开的原因是按职责拆分：本文件只覆盖
 //! `execute_compact` 命令入口（结果、反馈、取消、诊断与次数预算），自动压力路径
 //! 的会话级用例留在原文件。测试辅助代码按仓库约定在各测试文件内部局部定义。
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use peri_acp_types::{
-    command::{CommandContext, DependencyBag, FeedbackLevel, PromptStopReason},
-    event::{EventSink, ExecutorEvent},
-    session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources},
-    thread::CancelPolicy,
-    workspace::SessionBinding,
-};
-use peri_agent::{
-    agent::compact_v2::CompactConfig, messages::BaseMessage,
-    session::exec::compact_pipeline::execute_compact,
-};
+use peri_acp_types::command::CommandContext;
+use peri_acp_types::command::DependencyBag;
+use peri_acp_types::command::FeedbackLevel;
+use peri_acp_types::command::PromptStopReason;
+use peri_acp_types::event::EventSink;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::session_resources::FrozenSnapshotBytes;
+use peri_acp_types::session_resources::NewSession;
+use peri_acp_types::session_resources::NewSessionMeta;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::thread::CancelPolicy;
+use peri_acp_types::workspace::SessionBinding;
+use peri_agent::agent::compact_v2::CompactConfig;
+use peri_agent::messages::BaseMessage;
+
 use peri_model::{
     Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult, ModelStream,
     StopReason,
@@ -36,14 +39,18 @@ struct BoundSession {
 
 impl BoundSession {
     async fn open() -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory =
+            tempfile::tempdir().expect("the temporary test directory must be available");
         let db_path = directory.path().join("compact-audit.db");
         let resources: Arc<dyn SessionResources> = Arc::new(
             peri_resources::sessions::SessionResourcesImpl::open(&db_path)
                 .await
-                .unwrap(),
+                .expect("the open fixture result is required for this assertion"),
         );
-        let workspace = resources.resolve_workspace(directory.path()).await.unwrap();
+        let workspace = resources
+            .resolve_workspace(directory.path())
+            .await
+            .expect("the resolve workspace fixture result is required for this assertion");
         let thread_id = uuid::Uuid::now_v7().to_string();
         let cwd = workspace.cwd.to_string_lossy().into_owned();
         resources
@@ -62,7 +69,7 @@ impl BoundSession {
                 frozen: FrozenSnapshotBytes::new("{\"version\":1,\"test\":true}"),
             })
             .await
-            .unwrap();
+            .expect("the create session fixture result is required for this assertion");
         Self {
             resources,
             thread_id,
@@ -94,7 +101,7 @@ impl Model for SummaryModel {
             cancel.cancel();
             std::future::pending::<()>().await;
         }
-        ModelResponse::new(
+        ModelResponse::try_new(
             ModelMessage::assistant_text(if call < self.failures {
                 "<analysis>no summary</analysis>"
             } else {
@@ -185,7 +192,7 @@ async fn manual_with_budget(
     command.auxiliary_model = Some(model.clone());
     command.session_resources = Some(bound.resources.clone());
     command.thread_id = Some(bound.thread_id.clone());
-    let result = execute_compact(command).await;
+    let result = peri_agent::session::exec::compact_pipeline::execute_compact(command).await;
     (bound, result, sink, history)
 }
 
@@ -213,10 +220,14 @@ async fn test_compact_session_manual_honors_single_attempt_budget() {
         "预算为 1 时只运行首次生成"
     );
     assert_eq!(
-        serde_json::to_value(&result.messages).unwrap(),
-        serde_json::to_value(&history).unwrap()
+        serde_json::to_value(&result.messages)
+            .expect("to_value must accept this test fixture representation"),
+        serde_json::to_value(&history)
+            .expect("to_value must accept this test fixture representation")
     );
-    let feedback = result.feedback.unwrap();
+    let feedback = result
+        .feedback
+        .expect("the feedback fixture result is required for this assertion");
     assert!(matches!(feedback.level, FeedbackLevel::Error));
     assert!(
         feedback.message.contains("after 1 summary attempt"),
@@ -227,7 +238,7 @@ async fn test_compact_session_manual_honors_single_attempt_budget() {
         .resources
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(snapshot.flags.values().all(|flag| !flag.excluded));
     assert_eq!(snapshot.payloads.len(), history.len());
 }
@@ -239,7 +250,10 @@ async fn test_compact_session_manual_empty_summary_regenerates_without_next_prom
     assert_eq!(model.calls.load(Ordering::SeqCst), 2);
     assert!(matches!(result.stop_reason, PromptStopReason::EndTurn));
     assert!(matches!(
-        result.feedback.unwrap().level,
+        result
+            .feedback
+            .expect("the feedback fixture result is required for this assertion")
+            .level,
         FeedbackLevel::Info
     ));
     assert!(result.messages[0].content().contains("RECOVERED"));
@@ -247,7 +261,7 @@ async fn test_compact_session_manual_empty_summary_regenerates_without_next_prom
         .resources
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     for original in history {
         assert!(snapshot.flags[&original.id()].excluded);
     }
@@ -273,10 +287,14 @@ async fn test_compact_session_manual_failure_preserves_history_and_reports_feedb
     let (bound, result, model, sink, history) = manual_case(usize::MAX, false).await;
     assert_eq!(model.calls.load(Ordering::SeqCst), 2);
     assert_eq!(
-        serde_json::to_value(&result.messages).unwrap(),
-        serde_json::to_value(&history).unwrap()
+        serde_json::to_value(&result.messages)
+            .expect("to_value must accept this test fixture representation"),
+        serde_json::to_value(&history)
+            .expect("to_value must accept this test fixture representation")
     );
-    let feedback = result.feedback.unwrap();
+    let feedback = result
+        .feedback
+        .expect("the feedback fixture result is required for this assertion");
     assert!(matches!(feedback.level, FeedbackLevel::Error));
     // 手动路径的错误文案必须说明原历史未变、实际次数、无后台重试。
     assert!(
@@ -295,7 +313,7 @@ async fn test_compact_session_manual_failure_preserves_history_and_reports_feedb
         .resources
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(snapshot.flags.values().all(|flag| !flag.excluded));
     assert_eq!(snapshot.payloads.len(), history.len());
     assert_eq!(
@@ -311,17 +329,21 @@ async fn test_compact_session_manual_cancel_preserves_history() {
     assert_eq!(model.calls.load(Ordering::SeqCst), 1);
     assert!(matches!(result.stop_reason, PromptStopReason::Cancelled));
     assert_eq!(
-        serde_json::to_value(&result.messages).unwrap(),
-        serde_json::to_value(&history).unwrap()
+        serde_json::to_value(&result.messages)
+            .expect("to_value must accept this test fixture representation"),
+        serde_json::to_value(&history)
+            .expect("to_value must accept this test fixture representation")
     );
-    let feedback = result.feedback.unwrap();
+    let feedback = result
+        .feedback
+        .expect("the feedback fixture result is required for this assertion");
     assert!(matches!(feedback.level, FeedbackLevel::Warning));
     assert_eq!(feedback.message, "compact cancelled");
     let snapshot = bound
         .resources
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(snapshot.flags.values().all(|flag| !flag.excluded));
     assert_eq!(snapshot.payloads.len(), history.len());
     assert_eq!(
@@ -370,21 +392,25 @@ async fn test_compact_session_manual_http_failure_reports_classified_cause() {
         CancellationToken::new(),
     )
     .await;
-    let feedback = result.feedback.unwrap();
+    let feedback = result
+        .feedback
+        .expect("the feedback fixture result is required for this assertion");
     assert!(matches!(feedback.level, FeedbackLevel::Error));
     assert_eq!(
         feedback.message,
         "An LLM API error occurred (HTTP 401, request id: req-compact-401, provider: fixture). Please try again."
     );
     assert_eq!(
-        serde_json::to_value(result.messages).unwrap(),
-        serde_json::to_value(history).unwrap()
+        serde_json::to_value(result.messages)
+            .expect("to_value must accept this test fixture representation"),
+        serde_json::to_value(history)
+            .expect("to_value must accept this test fixture representation")
     );
     let snapshot = bound
         .resources
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(snapshot.flags.values().all(|flag| !flag.excluded));
 }
 
@@ -399,7 +425,9 @@ async fn test_compact_session_manual_protocol_failure_preserves_classified_cause
         CancellationToken::new(),
     )
     .await;
-    let feedback = result.feedback.unwrap();
+    let feedback = result
+        .feedback
+        .expect("the feedback fixture result is required for this assertion");
     assert!(matches!(feedback.level, FeedbackLevel::Error));
     assert_eq!(
         feedback.message,
@@ -420,9 +448,17 @@ async fn test_compact_session_manual_cancel_wins_over_ready_provider_error() {
     )
     .await;
     assert!(matches!(result.stop_reason, PromptStopReason::Cancelled));
-    assert_eq!(result.feedback.unwrap().message, "compact cancelled");
     assert_eq!(
-        serde_json::to_value(result.messages).unwrap(),
-        serde_json::to_value(history).unwrap()
+        result
+            .feedback
+            .expect("the feedback fixture result is required for this assertion")
+            .message,
+        "compact cancelled"
+    );
+    assert_eq!(
+        serde_json::to_value(result.messages)
+            .expect("to_value must accept this test fixture representation"),
+        serde_json::to_value(history)
+            .expect("to_value must accept this test fixture representation")
     );
 }

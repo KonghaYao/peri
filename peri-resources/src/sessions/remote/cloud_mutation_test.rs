@@ -32,9 +32,11 @@ use peri_acp_types::session_resources::{
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
 
-use super::cloud_tests::{remote_error_class, unique_run_label, CloudTarget};
+use super::cloud_tests::CloudTarget;
 use super::failure::RemoteFailureClass;
-use super::ledger::{qualify_statement, OperationId, OperationIdentity, Receipt};
+use super::ledger::OperationId;
+use super::ledger::OperationIdentity;
+use super::ledger::Receipt;
 use super::mutation::{
     MutationOutcome, OperationResolution, QualifiedMutation, RemoteStore, StoreAccess,
 };
@@ -72,7 +74,7 @@ fn mutation(identity: OperationIdentity, witnesses: &[&OperationIdentity]) -> Qu
         identity,
         effects: witnesses
             .iter()
-            .map(|identity| qualify_statement(identity, "witness"))
+            .map(|identity| super::ledger::qualify_statement(identity, "witness"))
             .collect(),
     }
 }
@@ -89,7 +91,10 @@ where
         (Err(message), _) => Err(message),
         (Ok(()), Ok(MutationOutcome::Applied { .. })) => Ok(()),
         (Ok(()), Ok(other)) => Err(format!("cleanup did not apply: {other:?}")),
-        (Ok(()), Err(error)) => Err(format!("cleanup failed: {}", remote_error_class(&error))),
+        (Ok(()), Err(error)) => Err(format!(
+            "cleanup failed: {}",
+            super::cloud_tests::remote_error_class(&error)
+        )),
     }
 }
 
@@ -123,22 +128,36 @@ async fn prepare(target: &CloudTarget) -> Result<(RemoteStore, String), String> 
     let store = target
         .store(StoreAccess::ReadWrite)
         .await
-        .map_err(|error| format!("connect failed: {}", remote_error_class(&error)))?;
-    let outcome = store
-        .initialize_store()
-        .await
-        .map_err(|error| format!("initialize failed: {}", remote_error_class(&error)))?;
+        .map_err(|error| {
+            format!(
+                "connect failed: {}",
+                super::cloud_tests::remote_error_class(&error)
+            )
+        })?;
+    let outcome = store.initialize_store().await.map_err(|error| {
+        format!(
+            "initialize failed: {}",
+            super::cloud_tests::remote_error_class(&error)
+        )
+    })?;
     // canonical 会话表就位（全部 `IF NOT EXISTS`，重复执行是空操作）：本轮不写它们，
     // 但清理语句删的正是这几张表，形状得先到——不依赖「别的用例已经建过表」。
-    store
-        .force_parent_checks_off()
-        .await
-        .map_err(|error| format!("foreign key reset failed: {}", remote_error_class(&error)))?;
+    store.force_parent_checks_off().await.map_err(|error| {
+        format!(
+            "foreign key reset failed: {}",
+            super::cloud_tests::remote_error_class(&error)
+        )
+    })?;
     store
         .apply_schema(super::session_schema::initialization_plan())
         .await
-        .map_err(|error| format!("session schema failed: {}", remote_error_class(&error)))?;
-    let run = unique_run_label("peri-mut");
+        .map_err(|error| {
+            format!(
+                "session schema failed: {}",
+                super::cloud_tests::remote_error_class(&error)
+            )
+        })?;
+    let run = super::cloud_tests::unique_run_label("peri-mut");
     let mut out = target.out();
     out.push(format!("run_prefix={}", &run[..14.min(run.len())]));
     out.push(format!("schema_version={REMOTE_SCHEMA_VERSION}"));
@@ -171,15 +190,17 @@ async fn cloud_mutation_atomic_batch_leaves_no_partial_results() {
         let mutation = QualifiedMutation {
             identity: identity.clone(),
             effects: vec![
-                qualify_statement(&first, "witness"),
-                qualify_statement(&first, "witness"),
-                qualify_statement(&second, "witness"),
+                super::ledger::qualify_statement(&first, "witness"),
+                super::ledger::qualify_statement(&first, "witness"),
+                super::ledger::qualify_statement(&second, "witness"),
             ],
         };
-        let outcome = store
-            .apply_qualified(&mutation)
-            .await
-            .map_err(|error| format!("apply failed: {}", remote_error_class(&error)))?;
+        let outcome = store.apply_qualified(&mutation).await.map_err(|error| {
+            format!(
+                "apply failed: {}",
+                super::cloud_tests::remote_error_class(&error)
+            )
+        })?;
 
         let mut out = target.out();
         out.push(format!("atomic_batch_outcome={}", outcome_name(&outcome)));
@@ -205,7 +226,12 @@ async fn cloud_mutation_atomic_batch_leaves_no_partial_results() {
         let fresh = target
             .store(StoreAccess::ReadWrite)
             .await
-            .map_err(|error| format!("second connect failed: {}", remote_error_class(&error)))?;
+            .map_err(|error| {
+                format!(
+                    "second connect failed: {}",
+                    super::cloud_tests::remote_error_class(&error)
+                )
+            })?;
         for (label, operation_id) in [
             ("qualification_absent", identity.operation_id.clone()),
             ("witness_1_absent", first.operation_id.clone()),
@@ -217,7 +243,7 @@ async fn cloud_mutation_atomic_batch_leaves_no_partial_results() {
                 Err(error) => {
                     return Err(format!(
                         "{label} read failed: {}",
-                        remote_error_class(&error)
+                        super::cloud_tests::remote_error_class(&error)
                     ));
                 }
             }
@@ -247,7 +273,12 @@ async fn cloud_mutation_repeat_qualification_returns_the_original_receipt() {
         let first = store
             .apply_qualified(&mutation(identity.clone(), &[&first_effect]))
             .await
-            .map_err(|error| format!("first apply failed: {}", remote_error_class(&error)))?;
+            .map_err(|error| {
+                format!(
+                    "first apply failed: {}",
+                    super::cloud_tests::remote_error_class(&error)
+                )
+            })?;
         let original = receipt_of(&first)?.clone();
 
         // 第二次：同一 operation_id，不同效果（模拟重试时输入摘要不同）。
@@ -255,7 +286,12 @@ async fn cloud_mutation_repeat_qualification_returns_the_original_receipt() {
         let second = store
             .apply_qualified(&mutation(identity.clone(), &[&second_effect]))
             .await
-            .map_err(|error| format!("repeat apply failed: {}", remote_error_class(&error)))?;
+            .map_err(|error| {
+                format!(
+                    "repeat apply failed: {}",
+                    super::cloud_tests::remote_error_class(&error)
+                )
+            })?;
 
         let mut out = target.out();
         out.push(format!("first_outcome={}", outcome_name(&first)));
@@ -275,7 +311,12 @@ async fn cloud_mutation_repeat_qualification_returns_the_original_receipt() {
         let state = store
             .resolve_operation(&identity.operation_id)
             .await
-            .map_err(|error| format!("resolve failed: {}", remote_error_class(&error)))?;
+            .map_err(|error| {
+                format!(
+                    "resolve failed: {}",
+                    super::cloud_tests::remote_error_class(&error)
+                )
+            })?;
         match state {
             super::ledger::LedgerRow::Applied { receipt, .. } => check(
                 receipt.as_str() == original.as_str(),
@@ -291,7 +332,7 @@ async fn cloud_mutation_repeat_qualification_returns_the_original_receipt() {
             Err(error) => {
                 return Err(format!(
                     "second effect read failed: {}",
-                    remote_error_class(&error)
+                    super::cloud_tests::remote_error_class(&error)
                 ));
             }
         }
@@ -303,7 +344,7 @@ async fn cloud_mutation_repeat_qualification_returns_the_original_receipt() {
             Err(error) => {
                 return Err(format!(
                     "first effect read failed: {}",
-                    remote_error_class(&error)
+                    super::cloud_tests::remote_error_class(&error)
                 ));
             }
         }
@@ -338,9 +379,18 @@ async fn cloud_mutation_concurrent_qualification_applies_once() {
             store.apply_qualified(&mutation),
             second_store.apply_qualified(&mutation)
         );
-        let left = left.map_err(|error| format!("left failed: {}", remote_error_class(&error)))?;
-        let right =
-            right.map_err(|error| format!("right failed: {}", remote_error_class(&error)))?;
+        let left = left.map_err(|error| {
+            format!(
+                "left failed: {}",
+                super::cloud_tests::remote_error_class(&error)
+            )
+        })?;
+        let right = right.map_err(|error| {
+            format!(
+                "right failed: {}",
+                super::cloud_tests::remote_error_class(&error)
+            )
+        })?;
 
         let mut out = target.out();
         out.push(format!("race_left={}", outcome_name(&left)));
@@ -377,7 +427,12 @@ async fn cloud_mutation_concurrent_qualification_applies_once() {
                 out.push("race_qualification_applied=true".to_owned())
             }
             Ok(other) => return Err(format!("expected applied, got {other:?}")),
-            Err(error) => return Err(format!("resolve failed: {}", remote_error_class(&error))),
+            Err(error) => {
+                return Err(format!(
+                    "resolve failed: {}",
+                    super::cloud_tests::remote_error_class(&error)
+                ))
+            }
         }
         match store.resolve_operation(&effect.operation_id).await {
             Ok(super::ledger::LedgerRow::Applied { .. }) => {
@@ -387,7 +442,7 @@ async fn cloud_mutation_concurrent_qualification_applies_once() {
             Err(error) => {
                 return Err(format!(
                     "effect read failed: {}",
-                    remote_error_class(&error)
+                    super::cloud_tests::remote_error_class(&error)
                 ));
             }
         }
@@ -415,10 +470,12 @@ async fn cloud_mutation_closure_beats_late_original_and_replays_applied() {
             "probe_ghost",
             &[&run, "ghost"],
         );
-        let closure = store
-            .close_operation(&ghost)
-            .await
-            .map_err(|error| format!("closure failed: {}", remote_error_class(&error)))?;
+        let closure = store.close_operation(&ghost).await.map_err(|error| {
+            format!(
+                "closure failed: {}",
+                super::cloud_tests::remote_error_class(&error)
+            )
+        })?;
         out.push(format!("ghost_closure={}", resolution_name(&closure)));
         check(
             matches!(closure, OperationResolution::ClosedNeverApplied),
@@ -431,7 +488,12 @@ async fn cloud_mutation_closure_beats_late_original_and_replays_applied() {
         let late_outcome = store
             .apply_qualified(&mutation(late, &[&late_effect]))
             .await
-            .map_err(|error| format!("late apply failed: {}", remote_error_class(&error)))?;
+            .map_err(|error| {
+                format!(
+                    "late apply failed: {}",
+                    super::cloud_tests::remote_error_class(&error)
+                )
+            })?;
         out.push(format!("late_original={}", outcome_name(&late_outcome)));
         check(
             !matches!(late_outcome, MutationOutcome::Applied { .. }),
@@ -443,7 +505,7 @@ async fn cloud_mutation_closure_beats_late_original_and_replays_applied() {
             Err(error) => {
                 return Err(format!(
                     "late effect read failed: {}",
-                    remote_error_class(&error)
+                    super::cloud_tests::remote_error_class(&error)
                 ));
             }
         }
@@ -458,13 +520,20 @@ async fn cloud_mutation_closure_beats_late_original_and_replays_applied() {
         let applied_outcome = store
             .apply_qualified(&mutation(applied.clone(), &[&applied_effect]))
             .await
-            .map_err(|error| format!("apply failed: {}", remote_error_class(&error)))?;
+            .map_err(|error| {
+                format!(
+                    "apply failed: {}",
+                    super::cloud_tests::remote_error_class(&error)
+                )
+            })?;
         let original = receipt_of(&applied_outcome)?.clone();
 
-        let replay = store
-            .close_operation(&applied)
-            .await
-            .map_err(|error| format!("closure failed: {}", remote_error_class(&error)))?;
+        let replay = store.close_operation(&applied).await.map_err(|error| {
+            format!(
+                "closure failed: {}",
+                super::cloud_tests::remote_error_class(&error)
+            )
+        })?;
         out.push(format!("applied_closure={}", resolution_name(&replay)));
         match replay {
             OperationResolution::Applied { receipt } => check(
@@ -481,7 +550,7 @@ async fn cloud_mutation_closure_beats_late_original_and_replays_applied() {
             Err(error) => {
                 return Err(format!(
                     "applied effect read failed: {}",
-                    remote_error_class(&error)
+                    super::cloud_tests::remote_error_class(&error)
                 ));
             }
         }
@@ -510,32 +579,51 @@ async fn cloud_mutation_committed_rows_are_visible_to_a_new_connection() {
         let outcome = store
             .apply_qualified(&mutation(identity.clone(), &[&effect]))
             .await
-            .map_err(|error| format!("apply failed: {}", remote_error_class(&error)))?;
+            .map_err(|error| {
+                format!(
+                    "apply failed: {}",
+                    super::cloud_tests::remote_error_class(&error)
+                )
+            })?;
         let original = receipt_of(&outcome)?.clone();
 
         // 新连接：读回同一条事实，并确认身份读取在真实引擎上可用。
         let fresh = target
             .store(StoreAccess::ReadWrite)
             .await
-            .map_err(|error| format!("second connect failed: {}", remote_error_class(&error)))?;
+            .map_err(|error| {
+                format!(
+                    "second connect failed: {}",
+                    super::cloud_tests::remote_error_class(&error)
+                )
+            })?;
         match fresh.resolve_operation(&identity.operation_id).await {
             Ok(super::ledger::LedgerRow::Applied { receipt, .. }) => check(
                 receipt.as_str() == original.as_str(),
                 "new connection must read the same receipt",
             )?,
             Ok(other) => return Err(format!("expected applied row, got {other:?}")),
-            Err(error) => return Err(format!("resolve failed: {}", remote_error_class(&error))),
+            Err(error) => {
+                return Err(format!(
+                    "resolve failed: {}",
+                    super::cloud_tests::remote_error_class(&error)
+                ))
+            }
         }
         out.push("cross_connection_read_after_write=true".to_owned());
 
-        let first_identity = store
-            .read_identity()
-            .await
-            .map_err(|error| format!("identity read failed: {}", remote_error_class(&error)))?;
-        let second_identity = fresh
-            .read_identity()
-            .await
-            .map_err(|error| format!("identity read failed: {}", remote_error_class(&error)))?;
+        let first_identity = store.read_identity().await.map_err(|error| {
+            format!(
+                "identity read failed: {}",
+                super::cloud_tests::remote_error_class(&error)
+            )
+        })?;
+        let second_identity = fresh.read_identity().await.map_err(|error| {
+            format!(
+                "identity read failed: {}",
+                super::cloud_tests::remote_error_class(&error)
+            )
+        })?;
         match (first_identity, second_identity) {
             (
                 super::schema::StoreIdentityRead::Present(left),
@@ -552,10 +640,12 @@ async fn cloud_mutation_committed_rows_are_visible_to_a_new_connection() {
         }
 
         // 再次初始化：读回同一身份、且结论是 `Existing`（本次没有建立任何东西）。
-        let again = fresh
-            .initialize_store()
-            .await
-            .map_err(|error| format!("re-initialize failed: {}", remote_error_class(&error)))?;
+        let again = fresh.initialize_store().await.map_err(|error| {
+            format!(
+                "re-initialize failed: {}",
+                super::cloud_tests::remote_error_class(&error)
+            )
+        })?;
         check(
             initialize_name(&again) == "existing",
             "re-initialize must report an existing identity, not a created one",
@@ -569,7 +659,7 @@ async fn cloud_mutation_committed_rows_are_visible_to_a_new_connection() {
             Err(error) => {
                 return Err(format!(
                     "identity read failed: {}",
-                    remote_error_class(&error)
+                    super::cloud_tests::remote_error_class(&error)
                 ));
             }
         }

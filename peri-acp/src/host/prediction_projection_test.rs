@@ -1,6 +1,6 @@
 use peri_acp_types::messages::{BaseMessage, ToolCallRequest};
 
-use super::{project_prediction_history, PREDICTION_HISTORY_WINDOW};
+use super::PREDICTION_HISTORY_WINDOW;
 
 fn call(id: &str) -> ToolCallRequest {
     ToolCallRequest::new(id, "Read", serde_json::json!({}))
@@ -32,7 +32,7 @@ fn single_call_crossing_window_soft_expands_complete_group() {
         (0..PREDICTION_HISTORY_WINDOW - 1).map(|index| BaseMessage::human(index.to_string())),
     );
 
-    let projected = project_prediction_history(&history);
+    let projected = super::project_prediction_history(&history);
 
     assert_eq!(projected.len(), PREDICTION_HISTORY_WINDOW + 1);
     assert!(projected[0].has_tool_calls());
@@ -50,7 +50,7 @@ fn parallel_calls_crossing_window_keep_all_results() {
         (0..PREDICTION_HISTORY_WINDOW - 2).map(|index| BaseMessage::human(index.to_string())),
     );
 
-    let projected = project_prediction_history(&history);
+    let projected = super::project_prediction_history(&history);
 
     assert_eq!(projected.len(), PREDICTION_HISTORY_WINDOW + 1);
     assert_eq!(
@@ -73,7 +73,7 @@ fn error_tool_result_is_kept_with_its_call() {
         (0..PREDICTION_HISTORY_WINDOW - 1).map(|index| BaseMessage::human(index.to_string())),
     );
 
-    let projected = project_prediction_history(&history);
+    let projected = super::project_prediction_history(&history);
 
     assert!(projected
         .iter()
@@ -88,7 +88,7 @@ fn orphan_tool_result_at_boundary_is_dropped() {
         (0..PREDICTION_HISTORY_WINDOW - 1).map(|index| BaseMessage::human(index.to_string())),
     );
 
-    let projected = project_prediction_history(&history);
+    let projected = super::project_prediction_history(&history);
 
     assert_eq!(projected.len(), PREDICTION_HISTORY_WINDOW - 1);
     assert!(!projected
@@ -107,7 +107,7 @@ fn duplicate_call_id_does_not_pair_result_with_later_declaration() {
         (0..PREDICTION_HISTORY_WINDOW - 2).map(|index| BaseMessage::human(index.to_string())),
     );
 
-    let projected = project_prediction_history(&history);
+    let projected = super::project_prediction_history(&history);
 
     assert!(matches!(projected[0], BaseMessage::Ai { .. }));
     assert!(matches!(projected[1], BaseMessage::Tool { .. }));
@@ -129,7 +129,7 @@ fn incomplete_parallel_group_is_dropped_as_a_whole() {
         BaseMessage::human("next"),
     ];
 
-    let projected = project_prediction_history(&history);
+    let projected = super::project_prediction_history(&history);
 
     assert_eq!(projected.len(), 1);
     assert!(matches!(projected[0], BaseMessage::Human { .. }));

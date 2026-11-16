@@ -20,11 +20,13 @@ use crate::spool::types::{ObjectId, ObjectKind, ObjectMeta, PageCursor, SpoolPag
 use crate::spool::{RouteFingerprint, SpoolResult};
 
 use super::native_object;
-use super::native_quota::accounted_bytes;
-use super::{
-    hex, id_hex, io_error, now_ms, open_read_only, parse_id, try_lock_file, unhex, LockAttempt,
-    NativeInner, DESCRIPTOR_VERSION, MAX_DESCRIPTOR_BYTES, MAX_PAGE_LIMIT, OBJECT_BUCKETS,
-};
+use super::native_quota;
+use super::LockAttempt;
+use super::NativeInner;
+use super::DESCRIPTOR_VERSION;
+use super::MAX_DESCRIPTOR_BYTES;
+use super::MAX_PAGE_LIMIT;
+use super::OBJECT_BUCKETS;
 
 /// 描述信息 v1；字段与 [`ObjectMeta`] 一一对应，未知字段视为不可识别格式并隔离。
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -100,7 +102,7 @@ fn parse_encoding(text: &str) -> Option<Compression> {
 }
 
 fn route_from_hex(text: &str) -> Option<RouteFingerprint> {
-    let bytes = unhex(text)?;
+    let bytes = super::unhex(text)?;
     if bytes.len() != 32 {
         return None;
     }
@@ -113,14 +115,14 @@ impl Descriptor {
     fn from_meta(meta: &ObjectMeta) -> Self {
         Self {
             version: meta.version,
-            id: id_hex(meta.id),
+            id: super::id_hex(meta.id),
             kind: kind_name(meta.kind).to_string(),
-            route: hex(meta.route.as_bytes()),
+            route: super::hex(meta.route.as_bytes()),
             event_count: meta.event_count,
             encoding: encoding_name(meta.encoding).to_string(),
             raw_len: meta.raw_len,
             stored_len: meta.stored_len,
-            sha256: hex(&meta.sha256),
+            sha256: super::hex(&meta.sha256),
             accepted_at_ms: meta.accepted_at_ms,
             expires_at_ms: meta.expires_at_ms,
             attempts: meta.attempts,
@@ -130,7 +132,7 @@ impl Descriptor {
     }
 
     fn into_meta(self) -> SpoolResult<ObjectMeta> {
-        let digest = unhex(&self.sha256).ok_or(SpoolError::InvalidMetadata)?;
+        let digest = super::unhex(&self.sha256).ok_or(SpoolError::InvalidMetadata)?;
         if digest.len() != 32 {
             return Err(SpoolError::InvalidMetadata);
         }
@@ -138,7 +140,7 @@ impl Descriptor {
         sha256.copy_from_slice(&digest);
         Ok(ObjectMeta {
             version: self.version,
-            id: parse_id(&self.id).ok_or(SpoolError::InvalidMetadata)?,
+            id: super::parse_id(&self.id).ok_or(SpoolError::InvalidMetadata)?,
             kind: parse_kind(&self.kind).ok_or(SpoolError::InvalidMetadata)?,
             route: route_from_hex(&self.route).ok_or(SpoolError::InvalidMetadata)?,
             event_count: self.event_count,
@@ -187,17 +189,17 @@ pub(crate) fn descriptor_bytes(meta: &ObjectMeta) -> SpoolResult<Vec<u8>> {
 
 /// 读取并校验描述信息；没有 `meta` 表示尚未发布（[`SpoolError::NotFound`]）。
 pub(crate) fn read_meta(inner: &NativeInner, id: ObjectId) -> SpoolResult<ObjectMeta> {
-    let file = match open_read_only(&inner.object_meta_path(id)) {
+    let file = match super::open_read_only(&inner.object_meta_path(id)) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(SpoolError::NotFound)
         }
-        Err(error) => return Err(io_error("read spool descriptor", error)),
+        Err(error) => return Err(super::io_error("read spool descriptor", error)),
     };
     let mut bytes = Vec::new();
     file.take(MAX_DESCRIPTOR_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| io_error("read spool descriptor", error))?;
+        .map_err(|error| super::io_error("read spool descriptor", error))?;
     if bytes.len() as u64 > MAX_DESCRIPTOR_BYTES {
         return Err(SpoolError::InvalidMetadata);
     }
@@ -217,7 +219,7 @@ pub(crate) fn project_expiry(meta: &mut ObjectMeta) {
         meta.state,
         SpoolState::Delivered | SpoolState::TerminalFailed
     );
-    if !settled && now_ms() >= meta.expires_at_ms {
+    if !settled && super::now_ms() >= meta.expires_at_ms {
         meta.state = SpoolState::TerminalFailed;
     }
 }
@@ -245,7 +247,7 @@ pub(crate) fn list(
             if bound.as_deref().is_some_and(|bound| name.as_str() <= bound) {
                 continue;
             }
-            let Some(id) = parse_id(&name) else {
+            let Some(id) = super::parse_id(&name) else {
                 continue;
             };
             let dir = bucket_dir.join(&name);
@@ -267,14 +269,14 @@ pub(crate) fn list(
                 // 损坏或隔离域不符：持锁清理后显式失败；被其他 owner 持锁或条目已被并发
                 // 删除则跳过，正常清理竞争不升级为整页扫描失败。
                 Err(error) => {
-                    match try_lock_file(&inner.object_lock_path(id))
-                        .map_err(|error| io_error("lock spool object", error))?
+                    match super::try_lock_file(&inner.object_lock_path(id))
+                        .map_err(|error| super::io_error("lock spool object", error))?
                     {
                         LockAttempt::Held | LockAttempt::Gone => continue,
                         LockAttempt::Free(_lock) => {
                             native_object::remove_object(inner, id, &dir)?;
                             warn!(
-                                object = %id_hex(id),
+                                object = %super::id_hex(id),
                                 reason = %error,
                                 "telemetry spool discarded unreadable entry"
                             );
@@ -306,7 +308,7 @@ pub(crate) fn scan_totals(inner: &NativeInner) -> SpoolResult<(u64, u64)> {
         let bucket_dir = inner.bucket_dir(bucket as u8);
         for name in bucket_names(&bucket_dir)? {
             let dir = bucket_dir.join(&name);
-            let Some(id) = parse_id(&name) else {
+            let Some(id) = super::parse_id(&name) else {
                 continue;
             };
             if !dir.is_dir() {
@@ -314,7 +316,8 @@ pub(crate) fn scan_totals(inner: &NativeInner) -> SpoolResult<(u64, u64)> {
             }
             match native_object::load_validated(inner, id) {
                 Ok(_) => {
-                    stored = stored.saturating_add(accounted_bytes(&dir).unwrap_or(0));
+                    stored =
+                        stored.saturating_add(native_quota::accounted_bytes(&dir).unwrap_or(0));
                     objects = objects.saturating_add(1);
                 }
                 // 尚未发布（writing 残留）：不可见也不计账，由发布路径或启动清扫处理。
@@ -322,7 +325,7 @@ pub(crate) fn scan_totals(inner: &NativeInner) -> SpoolResult<(u64, u64)> {
                 Err(error) => {
                     discard_entry(inner, id, &dir)?;
                     warn!(
-                        object = %id_hex(id),
+                        object = %super::id_hex(id),
                         reason = %error,
                         "telemetry spool discarded unreadable entry at startup"
                     );
@@ -335,8 +338,8 @@ pub(crate) fn scan_totals(inner: &NativeInner) -> SpoolResult<(u64, u64)> {
 
 /// 重建期持锁删除条目；账本由本次重建统一结算，不做扣减。
 fn discard_entry(inner: &NativeInner, id: ObjectId, dir: &Path) -> SpoolResult<()> {
-    let _lock = match try_lock_file(&inner.object_lock_path(id))
-        .map_err(|error| io_error("lock spool object", error))?
+    let _lock = match super::try_lock_file(&inner.object_lock_path(id))
+        .map_err(|error| super::io_error("lock spool object", error))?
     {
         // 其他 owner 持锁：交由其处理，不抢删；条目已被并发删除：没有残留可清。
         LockAttempt::Held | LockAttempt::Gone => return Ok(()),
@@ -345,7 +348,7 @@ fn discard_entry(inner: &NativeInner, id: ObjectId, dir: &Path) -> SpoolResult<(
     match fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(io_error("remove spool residue", error)),
+        Err(error) => Err(super::io_error("remove spool residue", error)),
     }
 }
 
@@ -355,12 +358,12 @@ pub(crate) fn bucket_names(bucket_dir: &Path) -> SpoolResult<Vec<String>> {
     let entries = match fs::read_dir(bucket_dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(names),
-        Err(error) => return Err(io_error("scan spool bucket", error)),
+        Err(error) => return Err(super::io_error("scan spool bucket", error)),
     };
     for entry in entries {
-        let entry = entry.map_err(|error| io_error("scan spool bucket", error))?;
+        let entry = entry.map_err(|error| super::io_error("scan spool bucket", error))?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if parse_id(&name).is_some() {
+        if super::parse_id(&name).is_some() {
             names.push(name);
         }
     }
@@ -369,11 +372,11 @@ pub(crate) fn bucket_names(bucket_dir: &Path) -> SpoolResult<Vec<String>> {
 }
 
 fn encode_cursor(id: ObjectId) -> SpoolResult<PageCursor> {
-    PageCursor::try_from_bytes(id_hex(id).into_bytes())
+    PageCursor::try_from_bytes(super::id_hex(id).into_bytes())
 }
 
 fn decode_cursor(bytes: &[u8]) -> SpoolResult<(u8, Option<String>)> {
     let text = std::str::from_utf8(bytes).map_err(|_| SpoolError::InvalidMetadata)?;
-    let id = parse_id(text).ok_or(SpoolError::InvalidMetadata)?;
+    let id = super::parse_id(text).ok_or(SpoolError::InvalidMetadata)?;
     Ok((NativeInner::bucket_of(id), Some(text.to_string())))
 }

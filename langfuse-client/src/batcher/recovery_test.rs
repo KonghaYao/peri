@@ -6,27 +6,42 @@
 //! flush 不清零积压。全部用例用真实 native 对象与本地 OTLP 服务，不共享 test_helpers、不新增
 //! mockall、不靠固定 sleep 断言进度。
 
-use std::{
-    collections::{BTreeSet, VecDeque},
-    fs,
-    io::Read,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::collections::BTreeSet;
+use std::collections::VecDeque;
+use std::fs;
+use std::io::Read;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::*;
+use super::recovery;
+use super::Batcher;
+use super::BatcherConfig;
+use super::DeliveryCounts;
+use super::FlushReport;
+use super::IngestionEvent;
+use super::LangfuseClient;
+use super::LangfuseError;
+use super::ShutdownReport;
 use crate::config::{BackpressurePolicy, Compression};
-use crate::spool::native::{
-    create_private_dir_all, hex, id_hex, native_scan, NativeSpool, DESCRIPTOR_VERSION,
-};
-use crate::spool::{
-    route_fingerprint, ObjectId, ObjectKind, ObjectMeta, RouteFingerprint, SpoolError, SpoolState,
-    SpoolStore,
-};
+use crate::spool;
+use crate::spool::native;
+use crate::spool::native::native_scan;
+use crate::spool::native::NativeSpool;
+use crate::spool::native::DESCRIPTOR_VERSION;
+use crate::spool::ObjectId;
+use crate::spool::ObjectKind;
+use crate::spool::ObjectMeta;
+use crate::spool::RouteFingerprint;
+use crate::spool::SpoolError;
+use crate::spool::SpoolState;
+use crate::spool::SpoolStore;
 use crate::types::TraceBody;
 
 const PUBLIC_KEY: &str = "pk-test";
@@ -109,7 +124,8 @@ struct Fixture {
 impl Fixture {
     fn open(url: &str) -> Self {
         let root = tempfile::tempdir().expect("temporary spool root");
-        let route = route_fingerprint(url, PUBLIC_KEY, SECRET_KEY).expect("route fingerprint");
+        let route =
+            spool::route_fingerprint(url, PUBLIC_KEY, SECRET_KEY).expect("route fingerprint");
         let store: Arc<dyn SpoolStore> = Arc::new(
             NativeSpool::open_at(root.path().to_path_buf(), route, QUOTA_BYTES)
                 .expect("native spool"),
@@ -131,14 +147,14 @@ impl Fixture {
         self.root
             .path()
             .join("peri/telemetry-spool/v1")
-            .join(hex(self.route.as_bytes()))
+            .join(native::hex(self.route.as_bytes()))
     }
 
     fn object_dir(&self, id: ObjectId) -> PathBuf {
         self.route_dir()
             .join("objects")
             .join(format!("{:02x}", id.as_bytes()[0]))
-            .join(id_hex(id))
+            .join(native::id_hex(id))
     }
 
     fn meta_for(
@@ -171,7 +187,7 @@ impl Fixture {
     /// 直接按适配器格式铺一个已发布对象（`meta` 最后发布即不可见），返回正文。
     fn write(&self, meta: &ObjectMeta, body: &[u8]) {
         let dir = self.object_dir(meta.id);
-        create_private_dir_all(&dir).expect("object directory");
+        native::create_private_dir_all(&dir).expect("object directory");
         fs::write(dir.join("body"), body).expect("object body");
         fs::write(
             dir.join("meta"),
@@ -183,7 +199,7 @@ impl Fixture {
     /// 铺一个刚被上一进程发布并退出的 Export 对象；`window_ms` 为接受时刻起的 TTL。
     fn export(&self, seed: u8, name: &str, events: u64, window_ms: i64) -> ObjectId {
         let body = otlp_body(name);
-        let accepted_at_ms = wall_ms();
+        let accepted_at_ms = super::wall_ms();
         let id = ObjectId::from_bytes([seed; 16]);
         let meta = self.meta_for(
             id,
@@ -659,7 +675,7 @@ async fn expired_entry_is_cleaned_without_send() {
     let server = Server::start(&[200]).await;
     let fixture = Fixture::open(&server.url);
     // 上一进程留下的超期对象：metadata 与正文都完好，只是已过 TTL。
-    let now = wall_ms();
+    let now = super::wall_ms();
     let body = otlp_body("expired");
     let expired = ObjectId::from_bytes([9; 16]);
     let meta = fixture.meta_for(
@@ -707,7 +723,7 @@ async fn corrupt_entry_is_quarantined_without_send_and_next_round_recovers() {
     let survivor = fixture.export(1, "survivor", 1, LONG_TTL_MS);
     // 损坏描述符（未知版本）：端口在枚举时就地隔离并删除，本轮扫描不发送任何对象。
     let body = otlp_body("corrupt");
-    let now = wall_ms();
+    let now = super::wall_ms();
     let corrupt_id = ObjectId::from_bytes([7; 16]);
     let mut corrupt = fixture.meta_for(
         corrupt_id,

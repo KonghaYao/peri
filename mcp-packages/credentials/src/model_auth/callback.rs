@@ -1,20 +1,23 @@
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
+use std::time::Duration;
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use ring::rand::SecureRandom;
 use sha2::{Digest, Sha256};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-};
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::{
-    oauth::OAuth,
-    types::{AuthError, AuthResult, PendingLogin, StoredAccount},
-    RESOURCE, SCOPES,
-};
+use super::oauth::OAuth;
+use super::types::AuthError;
+use super::types::AuthResult;
+use super::types::PendingLogin;
+use super::types::StoredAccount;
+use super::RESOURCE;
+use super::SCOPES;
 
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
 

@@ -1,6 +1,7 @@
 // 从核心库导入 trait 和数据类型
+use peri_agent::agent::react::ToolCall;
+use peri_agent::error::AgentError;
 pub use peri_agent::interaction::{InteractionContext, QuestionItem, QuestionOption};
-use peri_agent::{agent::react::ToolCall, error::AgentError};
 
 use crate::tool_search::core_tools::TOOL_ASK_USER;
 
@@ -66,6 +67,7 @@ pub(crate) const ASK_USER_TOOL_DESCRIPTION: &str = "Batch ask users questions wi
                       Each question provides a clear list of options, and users can always input custom content.";
 
 /// `ask_user_question` tool definition (aligned with Claude AskUserQuestion)
+#[must_use]
 pub fn ask_user_tool_definition() -> peri_agent::tools::ToolDefinition {
     peri_agent::tools::ToolDefinition {
         name: TOOL_ASK_USER.to_string(),

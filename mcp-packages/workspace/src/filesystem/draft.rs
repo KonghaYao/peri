@@ -5,6 +5,7 @@
 //! 避免重试时重新输出整个 content。路径校验/参数错误不落草稿。
 
 use std::collections::HashMap;
+use std::fmt::{self, Debug, Formatter};
 
 /// 一次失败写入的完整内容。
 pub(crate) struct DraftEntry {
@@ -29,6 +30,15 @@ pub(crate) enum DraftAccessError<E> {
 #[derive(Default)]
 pub(crate) struct DraftStore {
     by_target: HashMap<String, DraftEntry>,
+}
+
+impl Debug for DraftStore {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DraftStore")
+            .field("draft_count", &self.by_target.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl DraftStore {

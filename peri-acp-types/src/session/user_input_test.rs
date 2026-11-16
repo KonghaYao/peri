@@ -1,4 +1,8 @@
-use super::*;
+use crate::messages::MessageContent;
+use crate::session::user_input::DispatchUserInputsRequest;
+use crate::session::user_input::EnqueueUserInputRequest;
+use crate::session::user_input::UserInputQueueReceipt;
+use crate::session::user_input::UserInputQueueSnapshotRequest;
 
 #[test]
 fn test_user_input_enqueue_roundtrip_preserves_draft_and_content() {

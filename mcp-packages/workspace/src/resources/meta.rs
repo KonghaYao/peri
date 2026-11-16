@@ -22,7 +22,7 @@
 
 use std::path::Path;
 
-use peri_acp_types::workspace_resources::{digest_bytes, meta_uri};
+use peri_acp_types::workspace_resources;
 
 use super::ResourceError;
 
@@ -125,7 +125,7 @@ fn scan_entry(entry: &std::fs::DirEntry) -> Option<MetaSection> {
         tracing::warn!(entry = %label, "MetaHarness 覆盖文档文件名非 UTF-8，跳过");
         return None;
     };
-    if meta_uri(section_id).is_none() {
+    if workspace_resources::meta_uri(section_id).is_none() {
         tracing::warn!(
             section = %section_id,
             "MetaHarness 段落 ID 不符合 URI 段约束，不公开"
@@ -143,7 +143,7 @@ fn scan_entry(entry: &std::fs::DirEntry) -> Option<MetaSection> {
         tracing::warn!(section = %section_id, "MetaHarness 覆盖文档非 UTF-8 文本，跳过");
         return None;
     };
-    let digest = digest_bytes(text.as_bytes());
+    let digest = workspace_resources::digest_bytes(text.as_bytes());
     Some(MetaSection {
         section_id: section_id.to_string(),
         text,

@@ -4,11 +4,11 @@
 //! server. Neither exists in a browser worker. Session persistence is supplied
 //! separately; this port reads the deployment's injected configuration files.
 
-use std::{
-    io::{self, Write},
-    path::{Path, PathBuf},
-    sync::Mutex,
-};
+use std::io;
+use std::io::Write;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Mutex;
 
 static GLOBAL_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
@@ -35,22 +35,26 @@ pub fn read_environment(name: &str) -> io::Result<Option<String>> {
 }
 
 pub fn write_text_atomic(path: &Path, content: &str) -> io::Result<()> {
-    let _guard = WRITE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let _guard = WRITE_LOCK
+        .lock()
+        .expect("configuration write state must remain consistent after a panic");
     write_atomic_locked(path, content)
 }
 
 pub fn write_text_if_unchanged(
     path: &Path,
-    expected: &Option<String>,
+    expected: Option<&str>,
     content: &str,
 ) -> io::Result<bool> {
-    let _guard = WRITE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let _guard = WRITE_LOCK
+        .lock()
+        .expect("configuration write state must remain consistent after a panic");
     let current = match std::fs::read(path) {
         Ok(current) => Some(current),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error),
     };
-    if current.as_deref() != expected.as_deref().map(str::as_bytes) {
+    if current.as_deref() != expected.map(str::as_bytes) {
         return Ok(false);
     }
     write_atomic_locked(path, content)?;
@@ -97,10 +101,11 @@ pub fn canonicalize(path: &Path) -> io::Result<Option<PathBuf>> {
     }
 }
 
+#[must_use]
 pub fn global_config_path() -> PathBuf {
     GLOBAL_PATH
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
+        .expect("configuration write state must remain consistent after a panic")
         .clone()
         .unwrap_or_else(|| {
             home_dir()
@@ -121,7 +126,7 @@ pub fn set_global_config_path(path: Option<PathBuf>) {
     });
     *GLOBAL_PATH
         .lock()
-        .unwrap_or_else(|error| error.into_inner()) = path;
+        .expect("configuration write state must remain consistent after a panic") = path;
 }
 
 pub fn home_dir() -> Option<PathBuf> {

@@ -1,4 +1,5 @@
-use super::oauth_delivery::{oauth_delivery_policy, OAuthDeliveryPolicy};
+use super::oauth_delivery;
+use super::oauth_delivery::OAuthDeliveryPolicy;
 
 #[test]
 fn test_oauth_delivery_policy_keeps_safe_and_legacy_caps_independent() {
@@ -7,7 +8,7 @@ fn test_oauth_delivery_policy_keeps_safe_and_legacy_caps_independent() {
         ..Default::default()
     };
     assert_eq!(
-        oauth_delivery_policy(&safe_only),
+        oauth_delivery::oauth_delivery_policy(&safe_only),
         OAuthDeliveryPolicy {
             safe: true,
             legacy: false
@@ -18,7 +19,7 @@ fn test_oauth_delivery_policy_keeps_safe_and_legacy_caps_independent() {
         ..Default::default()
     };
     assert_eq!(
-        oauth_delivery_policy(&legacy_only),
+        oauth_delivery::oauth_delivery_policy(&legacy_only),
         OAuthDeliveryPolicy {
             safe: false,
             legacy: true

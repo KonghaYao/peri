@@ -1,9 +1,19 @@
-use super::*;
+use crate::agent::compact_v2::config::CompactConfig;
+use crate::agent::compact_v2::planner::ResidentHistoryPressure;
+use crate::agent::stages::compact_progress::CompactBudgetRecovery;
+use crate::agent::stages::compact_progress::FullBudgetProbe;
+use crate::agent::stages::compact_progress::ResidentFullSnapshot;
+use crate::agent::token::ContextBudget;
+use crate::error::AgentError;
+use crate::error::AgentResult;
+use crate::messages::BaseMessage;
 use crate::messages::MessageContent;
+use crate::session::MessageTranscript;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
     ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
 };
+use peri_model::TokenUsage;
 
 fn make_usage(input_tokens: u32) -> TokenUsage {
     TokenUsage {
@@ -45,7 +55,7 @@ fn append_reminder(transcript: &mut MessageTranscript) {
                 summary: None,
                 metadata: serde_json::json!({}),
             })
-            .unwrap(),
+            .expect("the construct fixture result is required for this assertion"),
     );
 }
 
@@ -83,7 +93,8 @@ fn test_budget_recovery_reminders_and_generated_messages_do_not_reset_attempts()
     append_reminder(&mut transcript);
     let mut state = CompactBudgetRecovery::default();
     append_full_result(&mut state, &mut transcript);
-    observe(&mut state, &transcript, 96_000).unwrap();
+    observe(&mut state, &transcript, 96_000)
+        .expect("the observe fixture result is required for this assertion");
     transcript.append(BaseMessage::ai("继续执行"));
     append_reminder(&mut transcript);
     append_full_result(&mut state, &mut transcript);
@@ -117,11 +128,14 @@ fn test_budget_recovery_below_full_threshold_resets_attempts() {
     let mut transcript = MessageTranscript::new();
     let mut state = CompactBudgetRecovery::default();
     append_full_result(&mut state, &mut transcript);
-    observe(&mut state, &transcript, 96_000).unwrap();
+    observe(&mut state, &transcript, 96_000)
+        .expect("the observe fixture result is required for this assertion");
     append_full_result(&mut state, &mut transcript);
-    observe(&mut state, &transcript, 80_000).unwrap();
+    observe(&mut state, &transcript, 80_000)
+        .expect("the observe fixture result is required for this assertion");
     append_full_result(&mut state, &mut transcript);
-    observe(&mut state, &transcript, 96_000).unwrap();
+    observe(&mut state, &transcript, 96_000)
+        .expect("the observe fixture result is required for this assertion");
     assert_eq!(state.unrecovered_observations, 1, "Micro区间仍有可用预算");
 }
 
@@ -130,13 +144,15 @@ fn test_budget_recovery_new_tool_output_allows_another_full_epoch() {
     let mut transcript = MessageTranscript::new();
     let mut state = CompactBudgetRecovery::default();
     append_full_result(&mut state, &mut transcript);
-    observe(&mut state, &transcript, 96_000).unwrap();
+    observe(&mut state, &transcript, 96_000)
+        .expect("the observe fixture result is required for this assertion");
     transcript.append(BaseMessage::tool_result(
         "new-tool",
         MessageContent::text("x".repeat(80_000)),
     ));
     append_full_result(&mut state, &mut transcript);
-    observe(&mut state, &transcript, 96_000).unwrap();
+    observe(&mut state, &transcript, 96_000)
+        .expect("the observe fixture result is required for this assertion");
     assert_eq!(
         state.unrecovered_observations, 1,
         "真实新工具结果允许重新压缩"
@@ -148,10 +164,12 @@ fn test_budget_recovery_request_after_new_user_work_is_not_full_probe() {
     let mut transcript = MessageTranscript::new();
     let mut state = CompactBudgetRecovery::default();
     append_full_result(&mut state, &mut transcript);
-    observe(&mut state, &transcript, 96_000).unwrap();
+    observe(&mut state, &transcript, 96_000)
+        .expect("the observe fixture result is required for this assertion");
     append_full_result(&mut state, &mut transcript);
     transcript.append(BaseMessage::human("new user work"));
-    observe(&mut state, &transcript, 96_000).unwrap();
+    observe(&mut state, &transcript, 96_000)
+        .expect("the observe fixture result is required for this assertion");
     assert_eq!(
         state.unrecovered_observations, 0,
         "新用户输入使请求不再代表Full输出"
@@ -171,14 +189,14 @@ fn test_budget_recovery_stale_request_and_repeated_response_are_ignored() {
     let usage = make_usage(96_000);
     state
         .observe_response(old_probe, Some(&usage), &config, &budget)
-        .unwrap();
+        .expect("the observe response fixture result is required for this assertion");
     assert_eq!(state.unrecovered_observations, 0);
     state
         .observe_response(current_probe, Some(&usage), &config, &budget)
-        .unwrap();
+        .expect("the observe response fixture result is required for this assertion");
     state
         .observe_response(current_probe, Some(&usage), &config, &budget)
-        .unwrap();
+        .expect("the observe response fixture result is required for this assertion");
     assert_eq!(state.unrecovered_observations, 1, "同一请求不能被观察两次");
 }
 
@@ -187,19 +205,21 @@ fn test_budget_recovery_missing_and_zero_usage_never_borrow_stale_pressure() {
     let mut transcript = MessageTranscript::new();
     let mut state = CompactBudgetRecovery::default();
     append_full_result(&mut state, &mut transcript);
-    observe(&mut state, &transcript, 96_000).unwrap();
+    observe(&mut state, &transcript, 96_000)
+        .expect("the observe fixture result is required for this assertion");
     append_full_result(&mut state, &mut transcript);
     let probe = begin(&mut state, &transcript);
     let config = CompactConfig::default();
     let budget = ContextBudget::new(100_000);
     state
         .observe_response(probe, None, &config, &budget)
-        .unwrap();
+        .expect("the observe response fixture result is required for this assertion");
     state
         .observe_response(probe, Some(&make_usage(0)), &config, &budget)
-        .unwrap();
+        .expect("the observe response fixture result is required for this assertion");
     assert_eq!(state.unrecovered_observations, 1);
-    observe(&mut state, &transcript, 40_000).unwrap();
+    observe(&mut state, &transcript, 40_000)
+        .expect("the observe fixture result is required for this assertion");
     assert_eq!(state.unrecovered_observations, 0);
 }
 
@@ -266,13 +286,13 @@ fn test_budget_recovery_previous_request_after_same_full_is_not_current_probe() 
     let usage = make_usage(96_000);
     state
         .observe_response(previous_request, Some(&usage), &config, &budget)
-        .unwrap();
+        .expect("the observe response fixture result is required for this assertion");
     assert_eq!(
         state.unrecovered_observations, 0,
         "同一次Full的旧请求也不能作为新请求证据"
     );
     state
         .observe_response(current_request, Some(&usage), &config, &budget)
-        .unwrap();
+        .expect("the observe response fixture result is required for this assertion");
     assert_eq!(state.unrecovered_observations, 1);
 }

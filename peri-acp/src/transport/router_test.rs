@@ -1,12 +1,14 @@
 //! Tests for router.
 
-use super::*;
-use futures::{pin_mut, task::noop_waker_ref};
+use crate::transport::request_router::RequestRouter;
+use crate::transport::types::AcpError;
+use crate::transport::types::IncomingMessage;
+use crate::transport::types::RequestId;
+use futures::pin_mut;
 use serde_json::json;
-use std::{
-    future::Future,
-    task::{Context, Poll},
-};
+use std::future::Future;
+use std::task::Context;
+use std::task::Poll;
 
 fn assert_transport_closed(error: AcpError) {
     assert_eq!(error.code, -32603);
@@ -160,7 +162,7 @@ fn test_wait_closed_completes_when_wait_precedes_close() {
     let router = RequestRouter::new();
     let waiter = router.wait_closed();
     pin_mut!(waiter);
-    let mut context = Context::from_waker(noop_waker_ref());
+    let mut context = Context::from_waker(futures::task::noop_waker_ref());
     assert!(
         matches!(waiter.as_mut().poll(&mut context), Poll::Pending),
         "wait_closed must be pending before close"

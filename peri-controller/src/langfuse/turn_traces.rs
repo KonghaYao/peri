@@ -30,7 +30,7 @@ pub struct ActiveTurnTrace {
 }
 
 /// 进程级注册表（随 `LangfuseSession` 共享，所有 turn 与指标出口共用一份）。
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct TurnTraceRegistry {
     active: Mutex<HashMap<String, ActiveTurnTrace>>,
 }

@@ -1,27 +1,32 @@
 //! The configuration entity: its sources, domain merge rules and consumer projections.
 //! Source adapters collect bytes; this module alone assembles their meaning.
 
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
 
 use peri_acp_types::plugin::{ConfigSource, McpServerConfig};
 use serde_json::Value;
 
-use crate::{
-    app::PeriConfig,
-    betas::{self, BetaFlags},
-    mcp::{self, McpConfigFile},
-    observability::{self, LangfuseConfig},
-    provider::{self, ResolvedProvider},
-    resources::{self, ResourceConfiguration},
-    system::{
-        ConfigurationError, ConfigurationField, ConfigurationInputs, ConfigurationRevision,
-        ConfigurationScope, FieldExplanation, SourceIdentity,
-    },
-    ui::TuiConfig,
-};
+use crate::app::PeriConfig;
+use crate::betas;
+use crate::betas::BetaFlags;
+use crate::mcp;
+use crate::mcp::McpConfigFile;
+use crate::observability;
+use crate::observability::LangfuseConfig;
+use crate::provider;
+use crate::provider::ResolvedProvider;
+use crate::resources;
+use crate::resources::ResourceConfiguration;
+use crate::system::ConfigurationError;
+use crate::system::ConfigurationField;
+use crate::system::ConfigurationInputs;
+use crate::system::ConfigurationRevision;
+use crate::system::ConfigurationScope;
+use crate::system::FieldExplanation;
+use crate::system::SourceIdentity;
+use crate::ui::TuiConfig;
 
 #[derive(Clone, Copy)]
 enum Source {

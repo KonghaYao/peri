@@ -1,17 +1,18 @@
-use super::*;
+use super::AcpHostShutdownReport;
+use super::AcpTuiClient;
+
 use peri_acp::host::{DeliveryCounts, LangfuseShutdownReport};
-use peri_acp::transport::{
-    AcpTransport,
-    mpsc::mpsc_transport_pair,
-    types::{AcpError, IncomingMessage},
-};
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::AcpError;
+use peri_acp::transport::types::IncomingMessage;
 use serde_json::json;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 #[tokio::test]
 async fn test_deployment_error_exit_closes_pump_and_joins_host() {
     for method in ["session/new", "session/prompt"] {
-        let (transport, server) = mpsc_transport_pair();
+        let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
         let (client, tx, mut notifications) = AcpTuiClient::new(transport);
         client.spawn_pump(tx);
         let survivor = client.clone();
@@ -36,7 +37,7 @@ async fn test_deployment_error_exit_closes_pump_and_joins_host() {
                     }),
                 )
                 .await
-                .unwrap();
+                .expect("deployment error exit closes pump and joins host: fixture task and request must complete successfully");
             assert!(
                 server.recv().await.is_none(),
                 "错误返回后显式 close 必须让宿主收到 EOF"
@@ -45,7 +46,7 @@ async fn test_deployment_error_exit_closes_pump_and_joins_host() {
         });
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            finish_operation(
+            super::finish_operation(
                 async {
                     client.send_raw_request(method, json!({})).await?;
                     Ok(())
@@ -55,10 +56,10 @@ async fn test_deployment_error_exit_closes_pump_and_joins_host() {
             ),
         )
         .await
-        .unwrap();
+        .expect("deployment error exit closes pump and joins host: fixture task and request must complete successfully");
         assert!(
             result
-                .unwrap_err()
+                .expect_err("deployment error exit closes pump and joins host: the invalid fixture must be rejected")
                 .to_string()
                 .contains("controlled request failure")
         );
@@ -70,7 +71,7 @@ async fn test_deployment_error_exit_closes_pump_and_joins_host() {
         );
         while tokio::time::timeout(Duration::from_secs(5), notifications.recv())
             .await
-            .unwrap()
+            .expect("deployment error exit closes pump and joins host: fixture task and request must complete successfully")
             .is_some()
         {}
     }
@@ -83,7 +84,7 @@ async fn test_deployment_incomplete_exit_is_visible_and_preserves_business_error
             AcpHostShutdownReport::Incomplete,
             AcpHostShutdownReport::TaskFailed { cancelled: true },
         ] {
-            let (transport, server) = mpsc_transport_pair();
+            let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
             let (client, tx, _notifications) = AcpTuiClient::new(transport);
             client.spawn_pump(tx);
             let host = tokio::spawn(async move {
@@ -95,20 +96,20 @@ async fn test_deployment_incomplete_exit_is_visible_and_preserves_business_error
                 } else {
                     Ok(json!({}))
                 };
-                server.send_response(id, result).await.unwrap();
+                server.send_response(id, result).await.expect("deployment incomplete exit is visible and preserves business error: fixture task and request must complete successfully");
                 assert!(server.recv().await.is_none());
                 report
             });
-            let error = finish_operation(
+            let error = super::finish_operation(
                 async {
                     client.send_raw_request("session/prompt", json!({})).await?;
                     Ok(())
                 },
                 &client,
-                async { host.await.unwrap() },
+                async { host.await.expect("deployment incomplete exit is visible and preserves business error: fixture task and request must complete successfully") },
             )
             .await
-            .unwrap_err();
+            .expect_err("deployment incomplete exit is visible and preserves business error: the invalid fixture must be rejected");
             assert!(
                 error
                     .to_string()
@@ -122,6 +123,7 @@ async fn test_deployment_incomplete_exit_is_visible_and_preserves_business_error
     }
 }
 
+#[must_use]
 fn counts(pending_events: u64, persisted_pending_events: u64, active_tasks: u64) -> DeliveryCounts {
     DeliveryCounts {
         pending_events,
@@ -146,7 +148,7 @@ async fn test_deployment_telemetry_pending_never_changes_business_result() {
                 counts: counts(2, 2, 0),
             }),
         ] {
-            let (transport, server) = mpsc_transport_pair();
+            let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
             let (client, tx, _notifications) = AcpTuiClient::new(transport);
             client.spawn_pump(tx);
             let host = tokio::spawn(async move {
@@ -158,17 +160,17 @@ async fn test_deployment_telemetry_pending_never_changes_business_result() {
                 } else {
                     Ok(json!({}))
                 };
-                server.send_response(id, response).await.unwrap();
+                server.send_response(id, response).await.expect("deployment telemetry pending never changes business result: fixture task and request must complete successfully");
                 assert!(server.recv().await.is_none());
                 report
             });
-            let outcome = finish_operation(
+            let outcome = super::finish_operation(
                 async {
                     client.send_raw_request("session/prompt", json!({})).await?;
                     Ok(())
                 },
                 &client,
-                async { host.await.unwrap() },
+                async { host.await.expect("deployment telemetry pending never changes business result: fixture task and request must complete successfully") },
             )
             .await;
             match (business_failed, outcome) {

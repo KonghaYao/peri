@@ -1,7 +1,6 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    path::Path,
-};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::path::Path;
 
 use thiserror::Error;
 

@@ -16,8 +16,8 @@ use super::schema_upgrade::{
     self, GUARD_MESSAGES_COUNT_SQL, GUARD_REGISTRATION_COUNT_SQL, GUARD_REGISTRATION_ROW_SQL,
     GUARD_UNASSIGNED_THREADS_SQL,
 };
-use super::schema_upgrade_tests::{probed_shape, Fixture};
-use super::session_data::{open_step, probe_shape, verify_legacy_open_identity, OpenStep};
+use super::schema_upgrade_tests::Fixture;
+use super::session_data::OpenStep;
 use crate::sessions::canonical::{CREATE_INDEXES, CREATE_REBUILD_THREADS_TABLE_SQL};
 
 /// 批次形状：canonical 索引集在**末尾**一次性重放（版本推进之前），每条只出现一次；
@@ -192,7 +192,9 @@ async fn open_probe_refuses_a_previous_store_missing_its_bindings_table() {
     let store = fixture.store(StoreAccess::ReadOnly);
     let read = store.read_identity().await.unwrap();
     assert_eq!(
-        probe_shape(&store, &read).await.unwrap(),
+        super::session_data::probe_shape(&store, &read)
+            .await
+            .unwrap(),
         Some(StoreShapeRead::Consistent),
         "完整夹具先探一次：判定不是恒拒绝"
     );
@@ -201,13 +203,16 @@ async fn open_probe_refuses_a_previous_store_missing_its_bindings_table() {
         .execute(&fixture.transport.pool)
         .await
         .unwrap();
-    let shape = probe_shape(&store, &read).await.unwrap();
+    let shape = super::session_data::probe_shape(&store, &read)
+        .await
+        .unwrap();
     assert!(
         matches!(&shape, Some(StoreShapeRead::Drifted(detail)) if detail.contains("session_bindings")),
         "{shape:?}"
     );
     for access in [StoreAccess::ReadOnly, StoreAccess::ReadWrite] {
-        let error = open_step(read.clone(), shape.clone(), access).unwrap_err();
+        let error =
+            super::session_data::open_step(read.clone(), shape.clone(), access).unwrap_err();
         assert!(
             matches!(error.kind(), SessionResourceErrorKind::Unsupported),
             "形状漂移必须在打开路径被拒绝（{access:?}）"
@@ -230,7 +235,9 @@ async fn open_probe_refuses_a_current_store_with_drifted_threads() {
     let store = fixture.store(StoreAccess::ReadOnly);
     let read = store.read_identity().await.unwrap();
     assert_eq!(
-        probe_shape(&store, &read).await.unwrap(),
+        super::session_data::probe_shape(&store, &read)
+            .await
+            .unwrap(),
         Some(StoreShapeRead::Consistent),
         "升级终点先探一次：迁移留下的形状就是 canonical"
     );
@@ -239,12 +246,14 @@ async fn open_probe_refuses_a_current_store_with_drifted_threads() {
         .execute(&fixture.transport.pool)
         .await
         .unwrap();
-    let shape = probe_shape(&store, &read).await.unwrap();
+    let shape = super::session_data::probe_shape(&store, &read)
+        .await
+        .unwrap();
     assert!(
         matches!(&shape, Some(StoreShapeRead::Drifted(detail)) if detail.contains("threads")),
         "{shape:?}"
     );
-    let error = open_step(read, shape, StoreAccess::ReadWrite).unwrap_err();
+    let error = super::session_data::open_step(read, shape, StoreAccess::ReadWrite).unwrap_err();
     assert!(matches!(
         error.kind(),
         SessionResourceErrorKind::Unsupported
@@ -262,7 +271,9 @@ async fn current_open_probe_batches_shape_and_repairs_missing_index() {
     let read = store.read_identity().await.unwrap();
     let before = fixture.transport.read_batches.load(Ordering::SeqCst);
     assert_eq!(
-        probe_shape(&store, &read).await.unwrap(),
+        super::session_data::probe_shape(&store, &read)
+            .await
+            .unwrap(),
         Some(StoreShapeRead::Consistent)
     );
     assert_eq!(
@@ -275,7 +286,9 @@ async fn current_open_probe_batches_shape_and_repairs_missing_index() {
         .await
         .unwrap();
     assert_eq!(
-        probe_shape(&store, &read).await.unwrap(),
+        super::session_data::probe_shape(&store, &read)
+            .await
+            .unwrap(),
         Some(StoreShapeRead::NeedsCurrentRepair {
             missing_indexes: true,
             missing_close_intents: false,
@@ -286,7 +299,9 @@ async fn current_open_probe_batches_shape_and_repairs_missing_index() {
         .await
         .unwrap();
     assert_eq!(
-        probe_shape(&store, &read).await.unwrap(),
+        super::session_data::probe_shape(&store, &read)
+            .await
+            .unwrap(),
         Some(StoreShapeRead::Consistent)
     );
 }
@@ -309,7 +324,9 @@ async fn current_open_probe_repairs_missing_close_intents_only() {
     let store = fixture.store(StoreAccess::ReadWrite);
     let read = store.read_identity().await.unwrap();
     assert_eq!(
-        probe_shape(&store, &read).await.unwrap(),
+        super::session_data::probe_shape(&store, &read)
+            .await
+            .unwrap(),
         Some(StoreShapeRead::NeedsCurrentRepair {
             missing_indexes: false,
             missing_close_intents: true,
@@ -320,7 +337,9 @@ async fn current_open_probe_repairs_missing_close_intents_only() {
         .await
         .unwrap();
     assert_eq!(
-        probe_shape(&store, &read).await.unwrap(),
+        super::session_data::probe_shape(&store, &read)
+            .await
+            .unwrap(),
         Some(StoreShapeRead::Consistent)
     );
     assert_eq!(
@@ -351,12 +370,14 @@ async fn current_open_probe_refuses_wrong_index_definition() {
     .unwrap();
     let store = fixture.store(StoreAccess::ReadWrite);
     let read = store.read_identity().await.unwrap();
-    let shape = probe_shape(&store, &read).await.unwrap();
+    let shape = super::session_data::probe_shape(&store, &read)
+        .await
+        .unwrap();
     assert!(
         matches!(&shape, Some(StoreShapeRead::Drifted(detail)) if detail.contains("idx_messages_thread_id")),
         "{shape:?}"
     );
-    assert!(open_step(read, shape, StoreAccess::ReadWrite).is_err());
+    assert!(super::session_data::open_step(read, shape, StoreAccess::ReadWrite).is_err());
 }
 
 /// [回归测试] 只读 v2 打开期间被另一实例升级后，旧版读法不得交付。
@@ -366,14 +387,16 @@ async fn read_only_legacy_open_refuses_concurrent_upgrade() {
     let read_only = fixture.store(StoreAccess::ReadOnly);
     let initial = read_only.read_identity().await.unwrap();
     assert_eq!(
-        probe_shape(&read_only, &initial).await.unwrap(),
+        super::session_data::probe_shape(&read_only, &initial)
+            .await
+            .unwrap(),
         Some(StoreShapeRead::Consistent)
     );
     schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
         .await
         .unwrap();
     let final_read = read_only.read_identity().await.unwrap();
-    assert!(verify_legacy_open_identity(&initial, &final_read).is_err());
+    assert!(super::session_data::verify_legacy_open_identity(&initial, &final_read).is_err());
 }
 
 /// 身份先于会话表建立的库（只有 meta 与账本）：探测结论是「形状还没建立」——不是漂移。
@@ -396,12 +419,14 @@ async fn open_probe_reports_a_store_without_session_tables_as_unbuilt() {
     let store = fixture.store(StoreAccess::ReadWrite);
     let read = store.read_identity().await.unwrap();
     assert_eq!(
-        probe_shape(&store, &read).await.unwrap(),
+        super::session_data::probe_shape(&store, &read)
+            .await
+            .unwrap(),
         Some(StoreShapeRead::Unbuilt),
         "一张声明的会话表都没有 = 形状还没建立"
     );
     assert!(matches!(
-        open_step(
+        super::session_data::open_step(
             read.clone(),
             Some(StoreShapeRead::Unbuilt),
             StoreAccess::ReadWrite
@@ -409,7 +434,9 @@ async fn open_probe_reports_a_store_without_session_tables_as_unbuilt() {
         .unwrap(),
         OpenStep::Existing(_)
     ));
-    let error = open_step(read, Some(StoreShapeRead::Unbuilt), StoreAccess::ReadOnly).unwrap_err();
+    let error =
+        super::session_data::open_step(read, Some(StoreShapeRead::Unbuilt), StoreAccess::ReadOnly)
+            .unwrap_err();
     assert!(matches!(
         error.kind(),
         SessionResourceErrorKind::Unsupported
@@ -423,12 +450,17 @@ async fn open_probe_serves_a_store_whose_shape_matches_its_contract() {
     let store = fixture.store(StoreAccess::ReadWrite);
     let read = store.read_identity().await.unwrap();
     assert_eq!(
-        probed_shape(&store).await,
+        super::schema_upgrade_tests::probed_shape(&store).await,
         Some(StoreShapeRead::Consistent),
         "压缩前形状（v2）在探测上就是「迁移输入」"
     );
     assert!(matches!(
-        open_step(read, probed_shape(&store).await, StoreAccess::ReadWrite).unwrap(),
+        super::session_data::open_step(
+            read,
+            super::schema_upgrade_tests::probed_shape(&store).await,
+            StoreAccess::ReadWrite
+        )
+        .unwrap(),
         OpenStep::Upgrade(_)
     ));
     assert_eq!(

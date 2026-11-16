@@ -1,4 +1,4 @@
-use super::*;
+use crate::mcp_control::McpControlRequest;
 #[test]
 fn control_dto_is_strict_and_roundtrips() {
     let request = serde_json::json!({"sessionId":"s1","serverName":"docs","action":"register","config":{"type":"http","url":"https://example.com/mcp"}});

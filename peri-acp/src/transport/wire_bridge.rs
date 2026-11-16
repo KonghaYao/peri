@@ -10,11 +10,11 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex};
 
-use super::{
-    mpsc::MpscClientTransport,
-    types::{AcpError, IncomingMessage, RequestId},
-    AcpTransport,
-};
+use super::mpsc::MpscClientTransport;
+use super::types::AcpError;
+use super::types::IncomingMessage;
+use super::types::RequestId;
+use super::AcpTransport;
 
 /// 出站 JSON-RPC 帧队列容量。外部宿主不读时有限等待，超时关闭桥接，
 /// 不静默丢帧、也不无限增长。

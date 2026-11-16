@@ -7,11 +7,12 @@ use crate::agent::compact_v2::config::CompactConfig;
 use crate::error::AgentResult;
 use crate::messages::MessageId;
 use crate::session::transcript::MessageTranscript;
-use peri_acp_types::context_archive::{validate_projection_metadata, ArchiveError};
+
+use peri_acp_types::context_archive::ArchiveError;
 use peri_acp_types::projection::ArchiveGroupLink;
 use peri_acp_types::store::{CompactionChange, MessageFlags};
 
-use super::projection::{MessageProjectionDirective, MicroCompactPlan};
+use crate::agent::compact_v2::projection::{MessageProjectionDirective, MicroCompactPlan};
 
 /// Persist a single already validated plan without replanning or publishing early.
 pub async fn apply_micro_plan(
@@ -144,7 +145,7 @@ fn prepare_updates(
     let mut flag_updates: Vec<_> = directives
         .into_iter()
         .map(|(id, directive)| {
-            validate_projection_metadata(&directive)?;
+            peri_acp_types::context_archive::validate_projection_metadata(&directive)?;
             let mut flags: MessageFlags = transcript.flags(id);
             flags.truncated = true;
             flags.projection = Some(directive);
@@ -171,7 +172,7 @@ fn validate_source_flags(
     for (id, expected) in &plan.source_content {
         let actual = transcript.get(*id).and_then(|entry| entry.as_message());
         if match actual {
-            Some(message) => super::exposure::fingerprint(message)? != *expected,
+            Some(message) => crate::agent::compact_v2::exposure::fingerprint(message)? != *expected,
             None => true,
         } {
             return Err(anyhow::anyhow!(
@@ -188,7 +189,7 @@ pub async fn micro_compact(
     transcript: &mut MessageTranscript,
     config: &CompactConfig,
 ) -> AgentResult<usize> {
-    let plan = super::planner::plan_micro(transcript, config, true);
+    let plan = crate::agent::compact_v2::planner::plan_micro(transcript, config, true);
     apply_micro_plan(transcript, &plan).await
 }
 

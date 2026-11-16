@@ -2,11 +2,11 @@
 //! 同输入复用、frozen 字节同源、按需复用 host 配置、fork 复用源字节、准备无写、
 //! 发布段只消费给定的准备对象（不重读外部输入）。
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use peri_middlewares::permission::shared_mode::{PermissionMode, SharedPermissionMode};
 use serial_test::serial;
@@ -16,7 +16,7 @@ use super::assemble::WorkspaceAssembly;
 use super::prepared::PreparedSessionInputs;
 use super::AcpServerConfig;
 use crate::provider::{LlmProvider, ProviderConfig, ProviderModels};
-use crate::session::frozen_snapshot::{decode_frozen_snapshot, encode_frozen_snapshot};
+use crate::session::frozen_snapshot;
 
 /// 外部输入（cwd/CLAUDE.md 内容）的三个取样：创建期读到的那份，与它前后各一次改写。
 ///
@@ -147,7 +147,8 @@ fn snapshot_tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
-        for entry in entries.flatten() {
+        let flattened_entry = entries.flatten();
+        for entry in flattened_entry {
             let path = entry.path();
             if path.is_dir() {
                 walk(&path, root, out);
@@ -198,7 +199,8 @@ async fn prepare_new_is_repeatable_and_frozen_bytes_are_single_source() {
         first.frozen.as_ref().unwrap().date(),
         second.frozen.as_ref().unwrap().date()
     );
-    let decoded = decode_frozen_snapshot(first.frozen_encoded.as_ref().unwrap()).unwrap();
+    let decoded =
+        frozen_snapshot::decode_frozen_snapshot(first.frozen_encoded.as_ref().unwrap()).unwrap();
     assert_eq!(
         decoded.date(),
         first.frozen.as_ref().unwrap().date(),
@@ -369,7 +371,8 @@ async fn new_session_persists_frozen_bytes_from_its_single_preparation() {
         peri_acp_types::session_resources::FrozenState::Present(bytes) => bytes.into_string(),
         other => panic!("frozen must be present after create_session: {other:?}"),
     };
-    let decoded = decode_frozen_snapshot(&persisted).expect("持久化字节必须可解码");
+    let decoded =
+        frozen_snapshot::decode_frozen_snapshot(&persisted).expect("持久化字节必须可解码");
     assert_eq!(
         decoded.claude_md(),
         Some(FROZEN_INPUT_AT_PREPARATION),
@@ -380,7 +383,7 @@ async fn new_session_persists_frozen_bytes_from_its_single_preparation() {
         .clone()
         .expect("创建必须发布 live frozen");
     assert_eq!(
-        encode_frozen_snapshot(&live).unwrap(),
+        frozen_snapshot::encode_frozen_snapshot(&live).unwrap(),
         persisted,
         "发布到 live state 的 frozen 与持久化字节必须逐字节同源"
     );
@@ -475,7 +478,7 @@ async fn new_session_from_prepared_does_not_reread_external_frozen_inputs() {
         .frozen
         .clone()
         .expect("创建必须发布 live frozen");
-    let live_bytes_at_create = encode_frozen_snapshot(&live).unwrap();
+    let live_bytes_at_create = frozen_snapshot::encode_frozen_snapshot(&live).unwrap();
     assert_eq!(
         live_bytes_at_create, persisted,
         "发布到 live state 的 frozen 与持久化字节必须逐字节同源"
@@ -493,7 +496,7 @@ async fn new_session_from_prepared_does_not_reread_external_frozen_inputs() {
         .clone()
         .expect("live frozen 仍在（创建后改写磁盘不得撤销会话状态）");
     assert_eq!(
-        encode_frozen_snapshot(&live_after).unwrap(),
+        frozen_snapshot::encode_frozen_snapshot(&live_after).unwrap(),
         live_bytes_at_create,
         "创建后改写外部输入不得改变 live frozen"
     );
@@ -573,7 +576,8 @@ async fn remote_workspace_declaration_freezes_unavailable_runtime_env_without_pr
         "不得用宿主平台冒充远端执行环境"
     );
     // 持久化后仍为 unavailable（解码视图一致）
-    let decoded = decode_frozen_snapshot(inputs.frozen_encoded.as_ref().unwrap()).unwrap();
+    let decoded =
+        frozen_snapshot::decode_frozen_snapshot(inputs.frozen_encoded.as_ref().unwrap()).unwrap();
     assert_eq!(decoded.runtime_env(), None);
 }
 

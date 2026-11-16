@@ -1,8 +1,25 @@
 //! Tests for input_area
 
-use super::*;
+use super::ACTIVE_PANEL;
+use super::AT_MENTION_ACTIVE;
+use super::AVAILABLE_SLASH_COMMANDS;
+use super::Block;
+use super::ConfirmOutcome;
+use super::FILE_LIST;
+use super::FluentValue;
+use super::GridSpec;
+use super::Line;
+use super::MENTION_PREFIX;
+use super::SLASH_HINT_ACTIVE;
+use super::SLASH_PREFIX;
+use super::SlashActionKind;
+use super::SlashCompletionItem;
+use super::TextAreaState;
+use super::WIZARD_ACTIVE;
+use super::i18n;
 use crate::app::panel_types::PanelKind;
 use crate::kit::slash_projection::SlashCommandEntry;
+
 use serial_test::serial;
 use unicode_width::UnicodeWidthStr;
 
@@ -11,7 +28,7 @@ fn test_apply_slash_selection_replaces_only_current_token() {
     let mut s = TextAreaState::default();
     s.insert_str("run /hel after");
     s.cursor = 8;
-    apply_slash_selection(&mut s, "help");
+    super::apply_slash_selection(&mut s, "help");
     assert_eq!(s.text, "run /help  after");
     assert_eq!(s.cursor, 10);
 }
@@ -21,21 +38,21 @@ fn test_apply_slash_selection_preserves_cjk_before_token() {
     let mut s = TextAreaState::default();
     s.insert_str("你好 /he 后面");
     s.cursor = 6;
-    apply_slash_selection(&mut s, "help");
+    super::apply_slash_selection(&mut s, "help");
     assert_eq!(s.text, "你好 /help  后面");
     assert_eq!(s.cursor, 9);
 }
 
 #[test]
 fn test_detect_slash_token_rejects_path_or_comment() {
-    assert!(detect_slash_token("src/foo", 7).is_none());
-    assert!(detect_slash_token("//", 2).is_none());
+    assert!(super::detect_slash_token("src/foo", 7).is_none());
+    assert!(super::detect_slash_token("//", 2).is_none());
 }
 
 #[test]
 fn test_detect_slash_token_accepts_line_start() {
     assert_eq!(
-        detect_slash_token("hello\n/com", 10),
+        super::detect_slash_token("hello\n/com", 10),
         Some(("com".to_string(), 6))
     );
 }
@@ -54,7 +71,7 @@ fn test_update_popup_prefix_slash_token_at_cursor() {
     reset_popup_atoms();
     let mut s = TextAreaState::default();
     s.insert_str("say /hel");
-    update_popup_prefix(&s);
+    popup::update_popup_prefix(&s);
     assert!(!*AT_MENTION_ACTIVE.state().read());
     assert!(*SLASH_HINT_ACTIVE.state().read());
     assert_eq!(SLASH_PREFIX.state().read().as_str(), "hel");
@@ -67,7 +84,7 @@ fn test_update_popup_prefix_slash_with_space_disables_after_token() {
     reset_popup_atoms();
     let mut s = TextAreaState::default();
     s.insert_str("say /hel o");
-    update_popup_prefix(&s);
+    popup::update_popup_prefix(&s);
     assert!(!*SLASH_HINT_ACTIVE.state().read());
 }
 
@@ -78,7 +95,7 @@ fn test_update_popup_prefix_mention_trigger() {
     reset_popup_atoms();
     let mut s = TextAreaState::default();
     s.insert_str("see @auth");
-    update_popup_prefix(&s);
+    popup::update_popup_prefix(&s);
     assert!(*AT_MENTION_ACTIVE.state().read());
     assert_eq!(MENTION_PREFIX.state().read().as_str(), "auth");
 }
@@ -90,7 +107,7 @@ fn test_update_popup_prefix_mention_with_space_disables() {
     reset_popup_atoms();
     let mut s = TextAreaState::default();
     s.insert_str("see @auth service");
-    update_popup_prefix(&s);
+    popup::update_popup_prefix(&s);
     assert!(!*AT_MENTION_ACTIVE.state().read());
 }
 
@@ -104,22 +121,22 @@ fn test_prompt_prefix_aligns_with_grid_content_start() {
     let wide = GridSpec::grid_for(120); // Wide, gap=2
     assert_eq!(narrow.gap, 1);
     assert_eq!(wide.gap, 2);
-    assert_eq!(prompt_and_border_width(narrow), 5);
-    assert_eq!(prompt_and_border_width(wide), 6);
+    assert_eq!(render::prompt_and_border_width(narrow), 5);
+    assert_eq!(render::prompt_and_border_width(wide), 6);
 
     // 正文起点 = 前缀宽度 = transcript first_prefix_width（outer+accent+gap）。
-    let lines = build_composer_lines(vec![Line::from("hi".to_string())], false, narrow);
+    let lines = render::build_composer_lines(vec![Line::from("hi".to_string())], false, narrow);
     let first = &lines[0].spans[0];
     assert_eq!(first.content, " ❯ ", "gap=1：前缀 3 列（1 空 + ❯ + 1 空）");
     assert_eq!(first.content.width(), narrow.first_prefix_width());
 
-    let lines = build_composer_lines(vec![Line::from("hi".to_string())], false, wide);
+    let lines = render::build_composer_lines(vec![Line::from("hi".to_string())], false, wide);
     let first = &lines[0].spans[0];
     assert_eq!(first.content, " ❯  ", "gap=2：前缀 4 列（1 空 + ❯ + 2 空）");
     assert_eq!(first.content.width(), wide.first_prefix_width());
 
     // 续行前缀与首行同宽（accent 位置留空）。
-    let multi = build_composer_lines(
+    let multi = render::build_composer_lines(
         vec![Line::from("a".to_string()), Line::from("b".to_string())],
         false,
         wide,
@@ -133,7 +150,7 @@ fn test_prompt_prefix_aligns_with_grid_content_start() {
 fn test_build_queue_lines_caps_at_five_and_more_row() {
     crate::kit::atoms::init_atoms();
     let items: Vec<String> = (0..5).map(|i| format!("prompt {i}")).collect();
-    let lines = build_queue_lines(&items, true, 40);
+    let lines = render::build_queue_lines(&items, true, 40);
     assert_eq!(lines.len(), 6, "5 条 + 1 行溢出标记");
     assert!(lines[0].spans[0].content.starts_with('·'));
     assert!(
@@ -141,11 +158,11 @@ fn test_build_queue_lines_caps_at_five_and_more_row() {
         "溢出行 `· · ·`"
     );
     // 无溢出标记时只有 items 行。
-    assert_eq!(build_queue_lines(&items, false, 40).len(), 5);
+    assert_eq!(render::build_queue_lines(&items, false, 40).len(), 5);
     // 空队列 → 无行（不占高度）。
-    assert!(build_queue_lines(&[], false, 40).is_empty());
+    assert!(render::build_queue_lines(&[], false, 40).is_empty());
     // 超长文本按宽度截断（truncate_by_width：正文预算 max_width + 省略号 1 列）。
-    let long = build_queue_lines(&["x".repeat(100)], false, 10);
+    let long = render::build_queue_lines(&["x".repeat(100)], false, 10);
     assert_eq!(long[0].spans[1].content.width(), 11);
 }
 
@@ -175,7 +192,7 @@ fn test_build_composer_block_titles_and_degrades() {
     crate::kit::atoms::init_atoms();
     i18n::init(None);
     // 全显示：top 仅保留 session title；footer 左 files 右资源线（CPU·MEM·ctx）。
-    let full = build_composer_block(
+    let full = render::build_composer_block(
         false,
         "session",
         Some("@ 2 files"),
@@ -206,7 +223,7 @@ fn test_build_composer_block_titles_and_degrades() {
     );
 
     // h<12：隐藏 session title。
-    let no_top = build_composer_block(
+    let no_top = render::build_composer_block(
         false,
         "session",
         Some("f"),
@@ -223,7 +240,7 @@ fn test_build_composer_block_titles_and_degrades() {
     );
 
     // h<8：title_bottom 也隐藏。
-    let all_hidden = build_composer_block(
+    let all_hidden = render::build_composer_block(
         false,
         "session",
         Some("f"),
@@ -247,11 +264,11 @@ fn test_composer_shows_submitting_without_delivery_or_session_title() {
     for language in ["en", "zh-CN"] {
         i18n::init(Some(language));
         let title = i18n::tr("composer-submitting");
-        let block = build_composer_block(false, &title, None, None, true, false, 80);
+        let block = render::build_composer_block(false, &title, None, None, true, false, 80);
         let rows = render_block_text(&block, 80, 3);
         assert!(rows[0].replace(' ', "").contains(&title));
         let narrow_title = crate::truncate::truncate_by_width(&title, 5);
-        let narrow = build_composer_block(false, &narrow_title, None, None, true, false, 8);
+        let narrow = render::build_composer_block(false, &narrow_title, None, None, true, false, 8);
         let rows = render_block_text(&narrow, 8, 3);
         assert!(
             rows[0].replace(' ', "").contains(&narrow_title),
@@ -272,7 +289,7 @@ fn test_filter_files_empty_prefix_returns_top_20() {
         *list = (0..25).map(|i| format!("file{i}.rs")).collect();
         list.sort();
     }
-    let result = filter_files_for_mention("");
+    let result = popup::filter_files_for_mention("");
     assert_eq!(result.len(), 20);
 }
 
@@ -287,7 +304,7 @@ fn test_filter_files_substring_case_insensitive() {
         "OAUTH.md".into(),
         "utils.rs".into(),
     ];
-    let result = filter_files_for_mention("AUTH");
+    let result = popup::filter_files_for_mention("AUTH");
     // 三个含 auth/AUTH 的文件应被过滤出来（大小写不敏感）
     assert_eq!(result.len(), 3);
     assert!(result.contains(&"auth.rs".to_string()));
@@ -305,8 +322,8 @@ fn test_filter_files_prefix_start_priority() {
         "auth.rs".into(),   // 开头匹配，应优先
         "oauth.rs".into(),  // 子串匹配
     ];
-    let result = filter_files_for_mention("auth");
-    assert_eq!(result.first().unwrap(), "auth.rs");
+    let result = popup::filter_files_for_mention("auth");
+    assert_eq!(result.first().expect("filter files prefix start priority: the fixture collection must contain the expected entry"), "auth.rs");
 }
 
 /// M5：`exit_history_mode_if_active` 在 `INPUT_HISTORY_INDEX` 为 Some 时调用
@@ -323,13 +340,13 @@ fn test_exit_history_mode_helper_resets_index_and_keeps_draft_unused() {
     assert!(INPUT_HISTORY_INDEX.state().read().is_some());
     assert!(HISTORY_DRAFT.state().read().is_some());
 
-    exit_history_mode_if_active();
+    submit::exit_history_mode_if_active();
     // helper 应清空 index + DRAFT，回到"编辑新文本"状态。
     assert!(INPUT_HISTORY_INDEX.state().read().is_none());
     assert!(HISTORY_DRAFT.state().read().is_none());
 
     // 非历史模式调用应为 no-op，不 panic。
-    exit_history_mode_if_active();
+    submit::exit_history_mode_if_active();
     assert!(INPUT_HISTORY_INDEX.state().read().is_none());
 }
 
@@ -344,13 +361,13 @@ fn test_paste_does_not_trigger_slash_or_mention_popup() {
     reset_popup_atoms();
     let mut s = TextAreaState::default();
     s.insert_str("see @auth");
-    update_popup_prefix(&s);
+    popup::update_popup_prefix(&s);
     // 触发了 mention 弹窗。
     assert!(*AT_MENTION_ACTIVE.state().read());
 
     // 模拟粘贴分支：先 reset，而不是 update_popup_prefix。
-    reset_mention_popup();
-    reset_slash_popup();
+    popup::reset_mention_popup();
+    popup::reset_slash_popup();
     assert!(!*AT_MENTION_ACTIVE.state().read());
     assert!(!*SLASH_HINT_ACTIVE.state().read());
 }
@@ -360,27 +377,33 @@ fn test_paste_does_not_trigger_slash_or_mention_popup() {
 #[test]
 fn test_stable_hash_is_deterministic() {
     // 同一标题跨调用 hash 稳定（跨进程稳定的前提）
-    assert_eq!(stable_hash("修复登录"), stable_hash("修复登录"));
+    assert_eq!(
+        super::stable_hash("修复登录"),
+        super::stable_hash("修复登录")
+    );
     // 不同标题大概率不同色（hash 不同）
-    assert_ne!(stable_hash("修复登录"), stable_hash("重构状态机"));
+    assert_ne!(
+        super::stable_hash("修复登录"),
+        super::stable_hash("重构状态机")
+    );
     // 与直接实现比对，锁定算法不漂移（FNV-1a 64）
-    assert_eq!(stable_hash("hello"), 0xa430_d846_80aa_bd0b_u64);
+    assert_eq!(super::stable_hash("hello"), 0xa430_d846_80aa_bd0b_u64);
 }
 
 #[test]
 fn test_truncate_title_to_width_handles_cjk() {
     // 32 个半角字符预算
     let s = "a".repeat(40);
-    let t = truncate_title_to_width(&s, 32);
+    let t = super::truncate_title_to_width(&s, 32);
     assert!(t.ends_with('…'));
     assert_eq!(t.chars().count(), 33); // 32 + 省略号
 
     // CJK 双宽字符：16 个汉字 = 32 列，不截断
     let cjk = "字".repeat(16);
-    assert_eq!(truncate_title_to_width(&cjk, 32), cjk);
+    assert_eq!(super::truncate_title_to_width(&cjk, 32), cjk);
 
     // 17 个汉字 = 34 列 → 截断到 32 列（16 字 + 省略号）
-    let t = truncate_title_to_width(&"字".repeat(17), 32);
+    let t = super::truncate_title_to_width(&"字".repeat(17), 32);
     assert!(t.ends_with('…'));
 }
 
@@ -388,16 +411,16 @@ fn test_truncate_title_to_width_handles_cjk() {
 fn test_readable_fg_contrast() {
     use ratatui::style::Color;
     // 深底 → 白字；浅底 → 黑字
-    assert_eq!(readable_fg(Color::Rgb(18, 52, 26)), Color::White);
-    assert_eq!(readable_fg(Color::Rgb(240, 215, 205)), Color::Black);
+    assert_eq!(super::readable_fg(Color::Rgb(18, 52, 26)), Color::White);
+    assert_eq!(super::readable_fg(Color::Rgb(240, 215, 205)), Color::Black);
     // 非 RGB（如 Reset）fallback 白字
-    assert_eq!(readable_fg(Color::Reset), Color::White);
+    assert_eq!(super::readable_fg(Color::Reset), Color::White);
 }
 
 #[test]
 fn test_build_session_title_line_has_palette_bg() {
     crate::kit::atoms::init_atoms();
-    let line = build_session_title_line("修复登录");
+    let line = super::build_session_title_line("修复登录");
     let span = &line.spans[0];
     let style = span.style;
     // 底色来自主题 palette（非 Reset），前景与底色对比
@@ -418,7 +441,7 @@ fn test_exit_entry_focus_on_edit_clears_focused_entry() {
     crate::kit::atoms::init_atoms();
     *crate::kit::atoms::FOCUSED_ENTRY.state().write() =
         Some(crate::kit::atoms::FocusedEntry { slot: 0, key: None });
-    exit_entry_focus_on_edit();
+    super::exit_entry_focus_on_edit();
     assert!(
         crate::kit::atoms::FOCUSED_ENTRY.state().read().is_none(),
         "输入内容变化后 entry 导航焦点必须清除（焦点回到输入态）"
@@ -431,7 +454,7 @@ fn test_exit_entry_focus_on_edit_clears_focused_entry() {
 fn test_exit_entry_focus_on_edit_noop_when_no_focus() {
     crate::kit::atoms::init_atoms();
     *crate::kit::atoms::FOCUSED_ENTRY.state().write() = None;
-    exit_entry_focus_on_edit();
+    super::exit_entry_focus_on_edit();
     assert!(crate::kit::atoms::FOCUSED_ENTRY.state().read().is_none());
 }
 
@@ -466,7 +489,7 @@ fn test_build_slash_items_uses_projection_kind_level() {
         },
     ];
 
-    let items = build_slash_items();
+    let items = super::build_slash_items();
     let find = |label: &str| {
         items
             .iter()
@@ -507,7 +530,7 @@ fn test_build_slash_items_display_is_lexical() {
     // acp_notifier 投影解析测试）可能已写入 AVAILABLE_SLASH_COMMANDS
     *AVAILABLE_SLASH_COMMANDS.state().write() = Vec::new();
     // 步骤 6：不预置投影 → 空列表（无本地合成兜底）
-    let items = build_slash_items();
+    let items = super::build_slash_items();
     assert!(
         items.is_empty(),
         "纯投影收口后不预置投影不得有任何条目（PANELS 合成与 /setup 硬编码已删除）"
@@ -534,7 +557,7 @@ fn test_build_slash_items_display_is_lexical() {
         },
     ];
 
-    let items = build_slash_items();
+    let items = super::build_slash_items();
     assert!(!items.is_empty(), "预置投影后应有条目");
     for item in &items {
         assert_eq!(
@@ -571,7 +594,7 @@ fn test_build_slash_items_projection_aliases() {
         },
     ];
 
-    let items = build_slash_items();
+    let items = super::build_slash_items();
     let find = |label: &str| {
         items
             .iter()
@@ -631,7 +654,7 @@ fn test_build_slash_items_dedup_prefers_ui_kind_meta() {
         },
     ];
 
-    let items = build_slash_items();
+    let items = super::build_slash_items();
     let history: Vec<&SlashCompletionItem> =
         items.iter().filter(|i| i.label == "history").collect();
     assert_eq!(
@@ -673,12 +696,12 @@ fn slash_item(label: &str, fullname: &str) -> SlashCompletionItem {
 #[serial]
 fn test_slash_on_select_history_alias_opens_thread_browser() {
     crate::kit::atoms::init_atoms();
-    reset_submit_side_effect_state();
+    super::reset_submit_side_effect_state();
     let mut s = TextAreaState::default();
     s.insert_str("/hist");
     s.cursor = 5;
     let item = slash_item("history", "ui:history");
-    handle_slash_selection(&mut s, &item);
+    popup::handle_slash_selection(&mut s, &item);
     assert!(s.text.is_empty(), "命中 ui 域命令后输入框必须清空");
     assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::ThreadBrowser));
 }
@@ -689,12 +712,12 @@ fn test_slash_on_select_history_alias_opens_thread_browser() {
 #[serial]
 fn test_slash_on_select_ui_prefix_opens_model_panel() {
     crate::kit::atoms::init_atoms();
-    reset_submit_side_effect_state();
+    super::reset_submit_side_effect_state();
     let mut s = TextAreaState::default();
     s.insert_str("/ui:mo");
     s.cursor = 6;
     let item = slash_item("model", "ui:model");
-    handle_slash_selection(&mut s, &item);
+    popup::handle_slash_selection(&mut s, &item);
     assert!(s.text.is_empty(), "命中 ui 域命令后输入框必须清空");
     assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::Model));
 }
@@ -704,13 +727,13 @@ fn test_slash_on_select_ui_prefix_opens_model_panel() {
 #[serial]
 fn test_slash_on_select_setup_activates_wizard() {
     crate::kit::atoms::init_atoms();
-    reset_submit_side_effect_state();
+    super::reset_submit_side_effect_state();
     *WIZARD_ACTIVE.state().write() = false;
     let mut s = TextAreaState::default();
     s.insert_str("/set");
     s.cursor = 4;
     let item = slash_item("setup", "ui:setup");
-    handle_slash_selection(&mut s, &item);
+    popup::handle_slash_selection(&mut s, &item);
     assert!(s.text.is_empty(), "命中 ui 域命令后输入框必须清空");
     assert!(
         *WIZARD_ACTIVE.state().read(),
@@ -724,13 +747,13 @@ fn test_slash_on_select_setup_activates_wizard() {
 #[test]
 #[serial]
 fn test_empty_slash_popup_enter_submits_and_opens_plugin_panel() {
-    reset_submit_side_effect_state();
+    super::reset_submit_side_effect_state();
     assert_eq!(
-        confirm_outcome(0, 0),
+        super::confirm_outcome(0, 0),
         ConfirmOutcome::Submit,
         "无候选（列表空/无匹配）时 Enter 必须走提交分支，不得只关弹窗"
     );
-    submit_text("/plugin".to_string());
+    super::submit_text("/plugin".to_string());
     assert_eq!(
         *ACTIVE_PANEL.state().read(),
         Some(PanelKind::Plugin),
@@ -744,13 +767,13 @@ fn test_empty_slash_popup_enter_submits_and_opens_plugin_panel() {
 #[serial]
 fn test_slash_on_select_non_ui_command_applies_selection() {
     crate::kit::atoms::init_atoms();
-    reset_submit_side_effect_state();
+    super::reset_submit_side_effect_state();
     *WIZARD_ACTIVE.state().write() = false;
     let mut s = TextAreaState::default();
     s.insert_str("/com");
     s.cursor = 4;
     let item = slash_item("compact", "core:compact");
-    handle_slash_selection(&mut s, &item);
+    popup::handle_slash_selection(&mut s, &item);
     assert_eq!(
         s.text, "/compact ",
         "未命中 ui 域应落输入框（display 即 lexical）"
@@ -760,8 +783,6 @@ fn test_slash_on_select_non_ui_command_applies_selection() {
 }
 
 // ── 粘贴图片附件：输入区标签与整张移除 ─────────────────────────────────────
-
-use crate::kit::atoms::PendingAttachment;
 
 fn png_attachment() -> PendingAttachment {
     PendingAttachment::image("image/png", "AQID")
@@ -774,7 +795,7 @@ fn test_composer_label_single_image_attachment() {
     crate::kit::atoms::init_atoms();
     i18n::init(Some("zh-CN"));
     assert_eq!(
-        build_attachments_label(&[png_attachment()]).as_deref(),
+        render::build_attachments_label(&[png_attachment()]).as_deref(),
         Some("[图片] 图片 1")
     );
 }
@@ -787,7 +808,7 @@ fn test_composer_label_multiple_images_are_distinguishable() {
     i18n::init(Some("zh-CN"));
     let attachments = vec![png_attachment(), png_attachment(), png_attachment()];
     assert_eq!(
-        build_attachments_label(&attachments).as_deref(),
+        render::build_attachments_label(&attachments).as_deref(),
         Some("[图片] ×3 · 图片 1 · 图片 2 · 图片 3")
     );
 }
@@ -805,7 +826,7 @@ fn test_composer_label_caps_listed_names() {
         png_attachment(),
     ];
     assert_eq!(
-        build_attachments_label(&attachments).as_deref(),
+        render::build_attachments_label(&attachments).as_deref(),
         Some("[图片] ×4 · 图片 1 · 图片 2 · 图片 3 · …")
     );
 }
@@ -822,10 +843,10 @@ fn test_composer_label_non_image_keeps_file_count() {
         base64_data: "AQID".to_string(),
     };
     assert_eq!(
-        build_attachments_label(&[doc]).as_deref(),
+        render::build_attachments_label(&[doc]).as_deref(),
         Some("@ 1 个文件")
     );
-    assert_eq!(build_attachments_label(&[]), None);
+    assert_eq!(render::build_attachments_label(&[]), None);
 }
 
 /// 标签 + 边框：composer 底栏确实显示图片标签（端到端，不只测生成函数）。
@@ -834,9 +855,9 @@ fn test_composer_label_non_image_keeps_file_count() {
 fn test_composer_block_renders_image_attachment_label() {
     crate::kit::atoms::init_atoms();
     i18n::init(Some("zh-CN"));
-    let label =
-        build_attachments_label(&[png_attachment(), png_attachment()]).expect("两张图片应有标签");
-    let block = build_composer_block(false, "session", Some(&label), None, true, true, 80);
+    let label = render::build_attachments_label(&[png_attachment(), png_attachment()])
+        .expect("两张图片应有标签");
+    let block = render::build_composer_block(false, "session", Some(&label), None, true, true, 80);
     let rows = render_block_text(&block, 80, 4);
     // 逐格取样会为宽字符补位（CJK 后跟空格），比较前先去空白。
     let left = rows[3].replace(' ', "");
@@ -902,3 +923,9 @@ fn test_attachment_label_keys_localized_in_both_locales() {
         );
     }
 }
+
+use crate::kit::atoms::PendingAttachment;
+
+use super::{popup, render};
+
+use super::submit;

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::TurnTraceRegistry;
+use crate::langfuse::turn_traces::TurnTraceRegistry;
 
 #[test]
 fn registered_sid_resolves_to_turn_trace_with_parent() {
@@ -140,12 +140,30 @@ fn sids_are_isolated() {
     registry.register("sid-a", "trace-a", None);
     registry.register("sid-b", "trace-b", None);
 
-    assert_eq!(registry.resolve("sid-a").unwrap().trace_id, "trace-a");
-    assert_eq!(registry.resolve("sid-b").unwrap().trace_id, "trace-b");
+    assert_eq!(
+        registry
+            .resolve("sid-a")
+            .expect("the resolve fixture result is required for this assertion")
+            .trace_id,
+        "trace-a"
+    );
+    assert_eq!(
+        registry
+            .resolve("sid-b")
+            .expect("the resolve fixture result is required for this assertion")
+            .trace_id,
+        "trace-b"
+    );
 
     registry.clear("sid-a", "trace-a");
     assert!(registry.resolve("sid-a").is_none());
-    assert_eq!(registry.resolve("sid-b").unwrap().trace_id, "trace-b");
+    assert_eq!(
+        registry
+            .resolve("sid-b")
+            .expect("the resolve fixture result is required for this assertion")
+            .trace_id,
+        "trace-b"
+    );
 }
 
 #[test]

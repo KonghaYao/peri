@@ -3,9 +3,12 @@
 //! 单独成测试二进制：`tracing` 的 callsite interest 是进程级多订阅者 AND，
 //! 与其它并行测试的 level 过滤订阅共存时，断言会依赖测试调度。
 
+use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 
-use peri_middlewares::hooks::{parse_command_hook_output, HookAction, HookEvent};
+use peri_middlewares::hooks;
+use peri_middlewares::hooks::HookAction;
+use peri_middlewares::hooks::HookEvent;
 
 struct ErrorCapture(Arc<Mutex<Vec<String>>>);
 
@@ -26,7 +29,7 @@ impl tracing::Subscriber for ErrorCapture {
     fn event(&self, event: &tracing::Event<'_>) {
         struct Fields(String);
         impl tracing::field::Visit for Fields {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn Debug) {
                 self.0.push_str(&format!("{}={value:?} ", field.name()));
             }
         }
@@ -41,7 +44,7 @@ fn invalid_output_is_diagnosed_without_body() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let _guard = tracing::subscriber::set_default(ErrorCapture(Arc::clone(&events)));
 
-    let action = parse_command_hook_output(
+    let action = hooks::parse_command_hook_output(
         &HookEvent::PermissionRequest,
         r#"{"hook_specific_output":{"hookEventName":"secret-unknown-event","secret-body":"deny"}}"#,
     );

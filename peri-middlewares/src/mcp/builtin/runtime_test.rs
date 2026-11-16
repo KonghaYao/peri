@@ -4,38 +4,46 @@
 //! `serve_client_auto`（真实 Auto lifecycle），两侧用 `(ReadHalf, WriteHalf)` 元组交给
 //! `IntoTransport`。每个用例都有界收尾，不留 orphan task。
 
-use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 
-use rmcp::{
-    model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-        ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig,
-        Tool,
-    },
-    service::{QuitReason, RequestContext, RoleServer},
-    ErrorData as McpError, ServerHandler,
-};
+use rmcp::model::CallToolRequestParams;
+use rmcp::model::CallToolResponse;
+use rmcp::model::CallToolResult;
+use rmcp::model::ContentBlock;
+use rmcp::model::Implementation;
+use rmcp::model::ListToolsResult;
+use rmcp::model::PaginatedRequestParams;
+use rmcp::model::ProtocolVersion;
+use rmcp::model::ServerCapabilities;
+use rmcp::model::ServerConfig;
+use rmcp::model::Tool;
+use rmcp::service::QuitReason;
+use rmcp::service::RequestContext;
+use rmcp::service::RoleServer;
+use rmcp::ErrorData as McpError;
+use rmcp::ServerHandler;
 
-use crate::mcp::{
-    apps::McpCapabilityProfile,
-    builtin::{
-        context::BuiltinInstanceContext,
-        runtime::{
-            spawn_builtin_transport_with_handler, spawn_builtin_transport_with_tap,
-            BuiltinCloseOutcome, BuiltinInstanceSupervisor, BuiltinServerExit, BuiltinServerTask,
-            BuiltinSpawnError, TickCloseOutcome, TickGuard, BUILTIN_CONVERGE_TIMEOUT,
-            BUILTIN_DUPLEX_BUF,
-        },
-    },
-    client::{serve_client_auto, ClientStatus, McpClientHandle, McpClientPool, SHUTDOWN_TIMEOUT},
-    config::McpServerConfig,
-};
+use crate::mcp::apps::McpCapabilityProfile;
+use crate::mcp::builtin::context::BuiltinInstanceContext;
+use crate::mcp::builtin::runtime;
+use crate::mcp::builtin::runtime::BuiltinCloseOutcome;
+use crate::mcp::builtin::runtime::BuiltinInstanceSupervisor;
+use crate::mcp::builtin::runtime::BuiltinServerExit;
+use crate::mcp::builtin::runtime::BuiltinServerTask;
+use crate::mcp::builtin::runtime::BuiltinSpawnError;
+use crate::mcp::builtin::runtime::TickCloseOutcome;
+use crate::mcp::builtin::runtime::TickGuard;
+use crate::mcp::builtin::runtime::BUILTIN_CONVERGE_TIMEOUT;
+use crate::mcp::builtin::runtime::BUILTIN_DUPLEX_BUF;
+use crate::mcp::client;
+use crate::mcp::client::ClientStatus;
+use crate::mcp::client::McpClientHandle;
+use crate::mcp::client::McpClientPool;
+use crate::mcp::client::SHUTDOWN_TIMEOUT;
+use crate::mcp::config::McpServerConfig;
 use peri_acp_types::plugin::ConfigSource;
 
 /// client 侧握手上界（夹具自身收尾用；生产 builtin 超时常量在 `transport.rs`）。
@@ -143,12 +151,13 @@ impl Link {
 /// 用**生产** `serve_client_auto` 握手一条经 [`spawn_builtin_transport_with_handler`]
 /// 装配的链路。
 async fn connect(instance: &str, server: FixtureServer) -> Link {
-    let transport = spawn_builtin_transport_with_handler(instance, server);
+    let transport = runtime::spawn_builtin_transport_with_handler(instance, server);
     let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
-        .await
-        .expect("builtin 握手不得超时（同进程链路）")
-        .expect("builtin 握手不得失败");
+    let service =
+        client::serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+            .await
+            .expect("builtin 握手不得超时（同进程链路）")
+            .expect("builtin 握手不得失败");
     Link {
         service,
         supervisor,
@@ -229,8 +238,8 @@ async fn builtin_link_uses_modern_handshake_and_keeps_peer_info() {
 #[tokio::test]
 async fn builtin_wire_has_no_initialize_and_tools_list_reaches_server() {
     let (server, probe) = fixture("fixture_tool", "reply");
-    let (transport, wire) = spawn_builtin_transport_with_tap("web", server);
-    let mut service = serve_client_auto(
+    let (transport, wire) = runtime::spawn_builtin_transport_with_tap("web", server);
+    let mut service = client::serve_client_auto(
         transport.io,
         &McpCapabilityProfile::disabled(),
         HANDSHAKE_TIMEOUT,
@@ -273,7 +282,7 @@ async fn builtin_wire_has_no_initialize_and_tools_list_reaches_server() {
 /// （那会走错超时，并把失败日志的 `transport` 写成事实错误）。
 #[test]
 fn builtin_uses_its_own_timeout_and_transport_label() {
-    use crate::mcp::initialize::{connect_timeout, transport_label};
+    use crate::mcp::initialize;
     use crate::mcp::transport::{TransportKind, BUILTIN_CONNECT_TIMEOUT};
 
     assert_eq!(
@@ -282,23 +291,26 @@ fn builtin_uses_its_own_timeout_and_transport_label() {
         "builtin 握手超时的冻结取值"
     );
     assert_eq!(
-        connect_timeout(TransportKind::Builtin),
+        initialize::connect_timeout(TransportKind::Builtin),
         BUILTIN_CONNECT_TIMEOUT,
         "builtin 必须走自己的超时常量"
     );
     assert_ne!(
-        connect_timeout(TransportKind::Builtin),
-        connect_timeout(TransportKind::Stdio),
+        initialize::connect_timeout(TransportKind::Builtin),
+        initialize::connect_timeout(TransportKind::Stdio),
         "builtin 不得复用 stdio 超时"
     );
     assert_ne!(
-        connect_timeout(TransportKind::Builtin),
-        connect_timeout(TransportKind::Http),
+        initialize::connect_timeout(TransportKind::Builtin),
+        initialize::connect_timeout(TransportKind::Http),
         "builtin 不得复用 http 超时"
     );
-    assert_eq!(transport_label(TransportKind::Builtin), "builtin");
-    assert_eq!(transport_label(TransportKind::Stdio), "stdio");
-    assert_eq!(transport_label(TransportKind::Http), "http");
+    assert_eq!(
+        initialize::transport_label(TransportKind::Builtin),
+        "builtin"
+    );
+    assert_eq!(initialize::transport_label(TransportKind::Stdio), "stdio");
+    assert_eq!(initialize::transport_label(TransportKind::Http), "http");
 }
 
 // ─── ② 大 payload（A16）──────────────────────────────────────────────────────
@@ -338,7 +350,7 @@ async fn large_payload_round_trips_intact() {
 #[tokio::test]
 async fn converge_waits_then_aborts_without_orphan() {
     let (server, _probe) = fixture("fixture_tool", "reply");
-    let transport = spawn_builtin_transport_with_handler("web", server);
+    let transport = runtime::spawn_builtin_transport_with_handler("web", server);
     // 保持 io 存活：server 读不到 EOF，因此不可能在等待上界内收敛。
     let io = transport.io;
     let mut server_task = transport.server_task;
@@ -470,10 +482,11 @@ async fn registered_web_instance_handshakes_with_real_handler() {
         .spawn_builtin_transport("web")
         .expect("web 实例必须已接线")
         .into_parts();
-    let mut service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
-        .await
-        .expect("web 实例握手不得超时")
-        .expect("web 实例握手不得失败");
+    let mut service =
+        client::serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+            .await
+            .expect("web 实例握手不得超时")
+            .expect("web 实例握手不得失败");
 
     let tools = service
         .peer()
@@ -698,7 +711,7 @@ async fn pool_shutdown_drains_builtin_tasks() {
 async fn pool_shutdown_aborts_unconverged_builtin_task() {
     let pool = McpClientPool::new_pending();
     let (server, _probe) = fixture("fixture_tool", "reply");
-    let transport = spawn_builtin_transport_with_handler("web", server);
+    let transport = runtime::spawn_builtin_transport_with_handler("web", server);
     let (io, supervisor) = transport.into_parts(); // io 保持存活：server 收不到 EOF
     pool.register_builtin_task("web".to_string(), supervisor);
 
@@ -802,9 +815,9 @@ async fn builtin_task_table_replaces_same_name() {
     let (first, _first_probe) = fixture("fixture_tool", "first");
     let (second, _second_probe) = fixture("fixture_tool", "second");
     let (first_io, first_supervisor) =
-        spawn_builtin_transport_with_handler("web", first).into_parts();
+        runtime::spawn_builtin_transport_with_handler("web", first).into_parts();
     let (second_io, second_supervisor) =
-        spawn_builtin_transport_with_handler("web", second).into_parts();
+        runtime::spawn_builtin_transport_with_handler("web", second).into_parts();
     drop(first_io);
     drop(second_io);
 

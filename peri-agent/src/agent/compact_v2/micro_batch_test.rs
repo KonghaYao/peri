@@ -1,23 +1,61 @@
 //! Planner → persistence barrier → bounded verification → atomic publish, using a controlled remote read port.
-use super::*;
-use crate::agent::compact_v2::planner::{
-    plan_micro_with_facts, ArchivePlanningScope, ContextPressure, MicroPlanningFacts,
-};
-use crate::agent::compact_v2::projection::{render_persisted_llm_view, ProviderCapabilities};
+use crate::agent::compact_v2::config::CompactConfig;
+
+use crate::agent::compact_v2::planner::ArchivePlanningScope;
+use crate::agent::compact_v2::planner::ContextPressure;
+use crate::agent::compact_v2::planner::MicroPlanningFacts;
+
+use crate::agent::compact_v2::projection::MicroCompactPlan;
+use crate::agent::compact_v2::projection::ProviderCapabilities;
+use crate::error::AgentResult;
+use crate::messages::MessageId;
 use crate::messages::{BaseMessage, ToolCallRequest};
 use crate::session::test_resources::TestSession;
+use crate::session::transcript::MessageTranscript;
 use crate::tools::ContextRetention;
 use async_trait::async_trait;
+
+use peri_acp_types::context_archive::ArchiveChunk;
+use peri_acp_types::context_archive::ArchiveChunkBatch;
+use peri_acp_types::context_archive::ArchiveChunkQuery;
+use peri_acp_types::context_archive::ArchiveMetadataPage;
+use peri_acp_types::context_archive::ArchiveMetadataQuery;
+use peri_acp_types::context_archive::ARCHIVE_CHUNKS_PER_BATCH;
+use peri_acp_types::context_archive::ARCHIVE_CHUNK_BYTES;
+use peri_acp_types::session_resources::BindingRecheck;
+use peri_acp_types::session_resources::BindingState;
+use peri_acp_types::session_resources::ChildResumeClaim;
+use peri_acp_types::session_resources::ChildSnapshot;
+use peri_acp_types::session_resources::CloseSettlement;
+use peri_acp_types::session_resources::ForkSnapshot;
+use peri_acp_types::session_resources::FrozenSnapshotBytes;
+use peri_acp_types::session_resources::NewSession;
+use peri_acp_types::session_resources::NewSessionDraft;
+use peri_acp_types::session_resources::PersistenceRecovery;
+use peri_acp_types::session_resources::RewindBoundary;
+use peri_acp_types::session_resources::RewindOutcome;
+use peri_acp_types::session_resources::SessionAvailability;
+use peri_acp_types::session_resources::SessionInitialization;
+use peri_acp_types::session_resources::SessionMetaPatch;
+use peri_acp_types::session_resources::SessionResourceResult;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::session_resources::SessionSnapshot;
+
+use peri_acp_types::store::CompactionChange;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::system_reminder::TrustedSystemReminder;
-use peri_acp_types::{context_archive::*, session_resources::*, store::*, thread::*, workspace::*};
-use std::{
-    path::Path,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
-    time::{Duration, Instant},
-};
+use peri_acp_types::thread::ThreadId;
+use peri_acp_types::thread::ThreadMeta;
+use peri_acp_types::workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery};
+
+use std::path::Path;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
 
 #[derive(Default, Debug)]
 struct Statistics {
@@ -69,7 +107,10 @@ struct InFlight {
 }
 impl Drop for InFlight {
     fn drop(&mut self) {
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self
+            .stats
+            .lock()
+            .expect("self stats mutex must remain unpoisoned throughout the test");
         stats.in_flight -= 1;
         if !self.completed {
             stats.dropped_reads += 1;
@@ -86,7 +127,10 @@ impl SessionResources for MeteredArchive {
     ) -> SessionResourceResult<ArchiveMetadataPage> {
         let start = Instant::now();
         let result = self.inner.read_archive_metadata(id, query).await;
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self
+            .stats
+            .lock()
+            .expect("self stats mutex must remain unpoisoned throughout the test");
         stats.metadata_reads += 1;
         stats.metadata_io += start.elapsed();
         result
@@ -96,9 +140,13 @@ impl SessionResources for MeteredArchive {
         id: &ThreadId,
         query: &ArchiveChunkQuery,
     ) -> SessionResourceResult<ArchiveChunk> {
-        self.read_archive_chunks(id, &ArchiveChunkBatch::new(vec![query.clone()]).unwrap())
-            .await
-            .map(|mut chunks| chunks.remove(0))
+        self.read_archive_chunks(
+            id,
+            &ArchiveChunkBatch::try_new(vec![query.clone()])
+                .expect("the try new fixture result is required for this assertion"),
+        )
+        .await
+        .map(|mut chunks| chunks.remove(0))
     }
     async fn read_archive_chunks(
         &self,
@@ -107,7 +155,10 @@ impl SessionResources for MeteredArchive {
     ) -> SessionResourceResult<Vec<ArchiveChunk>> {
         let start = Instant::now();
         {
-            let mut stats = self.stats.lock().unwrap();
+            let mut stats = self
+                .stats
+                .lock()
+                .expect("self stats mutex must remain unpoisoned throughout the test");
             stats.batch_reads += 1;
             stats.in_flight += 1;
             stats.maximum_in_flight = stats.maximum_in_flight.max(stats.in_flight);
@@ -123,20 +174,27 @@ impl SessionResources for MeteredArchive {
             completed: false,
         };
         if self.block_read.load(Ordering::SeqCst) {
-            let _permit = self.release.acquire().await.unwrap();
+            let _permit = self
+                .release
+                .acquire()
+                .await
+                .expect("the acquire fixture result is required for this assertion");
         }
-        let canonical = self.canonical.lock().unwrap();
+        let canonical = self
+            .canonical
+            .lock()
+            .expect("self canonical mutex must remain unpoisoned throughout the test");
         let tail = canonical
             .iter()
             .position(|(id, _)| *id == batch.queries()[0].committed_tail)
-            .unwrap();
+            .expect("the position fixture result is required for this assertion");
         let mut result = Vec::new();
         for query in batch.queries() {
             let bytes = &canonical
                 .iter()
                 .take(tail + 1)
                 .find(|(id, _)| *id == query.message_id)
-                .unwrap()
+                .expect("the find fixture result is required for this assertion")
                 .1;
             let mut chunk = bytes[query.offset as usize
                 ..bytes
@@ -146,13 +204,19 @@ impl SessionResources for MeteredArchive {
             if self.corrupt_read.load(Ordering::SeqCst) {
                 chunk[0] ^= 1;
             }
-            self.stats.lock().unwrap().verified_bytes += chunk.len();
+            self.stats
+                .lock()
+                .expect("self stats mutex must remain unpoisoned throughout the test")
+                .verified_bytes += chunk.len();
             result.push(ArchiveChunk {
                 bytes: chunk,
                 total_bytes: bytes.len() as u64,
             });
         }
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self
+            .stats
+            .lock()
+            .expect("self stats mutex must remain unpoisoned throughout the test");
         stats.chunks += result.len();
         stats.verification_io += start.elapsed();
         drop(stats);
@@ -247,21 +311,28 @@ impl SessionResources for MeteredArchive {
         payloads: &[PersistedPayload],
     ) -> SessionResourceResult<()> {
         if self.hold_appends.load(Ordering::SeqCst) {
-            let _permit = self.release_append.acquire().await.unwrap();
+            let _permit = self
+                .release_append
+                .acquire()
+                .await
+                .expect("the acquire fixture result is required for this assertion");
         }
         let start = Instant::now();
         self.inner.append_history(id, payloads).await?;
         let elapsed = start.elapsed();
         self.canonical
             .lock()
-            .unwrap()
+            .expect("self canonical mutex must remain unpoisoned throughout the test")
             .extend(payloads.iter().map(|payload| {
                 (
                     payload.id(),
-                    serialize_persisted_payload(payload).unwrap().into_bytes(),
+                    peri_acp_types::store::serialize_persisted_payload(payload).expect("the serialize persisted payload fixture result is required for this assertion").into_bytes(),
                 )
             }));
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self
+            .stats
+            .lock()
+            .expect("self stats mutex must remain unpoisoned throughout the test");
         stats.append_calls += 1;
         stats.append_io += elapsed;
         Ok(())
@@ -302,7 +373,10 @@ impl SessionResources for MeteredArchive {
     ) -> SessionResourceResult<()> {
         let start = Instant::now();
         self.inner.apply_compaction(id, change).await?;
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self
+            .stats
+            .lock()
+            .expect("self stats mutex must remain unpoisoned throughout the test");
         stats.commits += 1;
         stats.commit_io += start.elapsed();
         Ok(())
@@ -382,13 +456,17 @@ fn make_fixture(
     }
     facts.archive_scope = Some(ArchivePlanningScope {
         thread_id: session_id,
-        committed_tail: transcript.entries().last().unwrap().id(),
+        committed_tail: transcript
+            .entries()
+            .last()
+            .expect("transcript entries fixture must contain the expected element")
+            .id(),
     });
     facts
 }
 
 fn plan_fixture(transcript: &MessageTranscript, facts: &MicroPlanningFacts) -> MicroCompactPlan {
-    plan_micro_with_facts(
+    crate::agent::compact_v2::planner::plan_micro_with_facts(
         transcript,
         &CompactConfig {
             micro_compact_stale_steps: 0,
@@ -405,7 +483,7 @@ fn plan_fixture(transcript: &MessageTranscript, facts: &MicroPlanningFacts) -> M
         facts,
         &ProviderCapabilities::openai(),
     )
-    .unwrap()
+    .expect("the plan micro with facts fixture result is required for this assertion")
 }
 
 fn populate(
@@ -425,7 +503,11 @@ async fn test_micro_batches_entire_plan_under_one_tail_and_one_atomic_commit() {
         MessageTranscript::new().with_persistence(resources.clone(), bound.thread_id.clone());
     let plan = populate(&mut transcript, 80, bound.thread_id.clone());
     assert!(plan.catalogs.len() > 32);
-    let tail = transcript.entries().last().unwrap().id();
+    let tail = transcript
+        .entries()
+        .last()
+        .expect("transcript entries fixture must contain the expected element")
+        .id();
     let chunks: usize = plan
         .catalogs
         .iter()
@@ -438,9 +520,14 @@ async fn test_micro_batches_entire_plan_under_one_tail_and_one_atomic_commit() {
         .flat_map(|c| &c.members)
         .map(|m| m.canonical_bytes as usize)
         .sum();
-    apply_micro_plan(&mut transcript, &plan).await.unwrap();
+    crate::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
+        .await
+        .expect("the apply micro plan fixture result is required for this assertion");
     {
-        let stats = resources.stats.lock().unwrap();
+        let stats = resources
+            .stats
+            .lock()
+            .expect("resources stats mutex must remain unpoisoned throughout the test");
         assert_eq!(stats.metadata_reads, 1, "整个计划只固定一次持久尾界");
         assert_eq!(stats.batch_reads, chunks.div_ceil(ARCHIVE_CHUNKS_PER_BATCH));
         assert_eq!(stats.chunks, chunks);
@@ -457,18 +544,18 @@ async fn test_micro_batches_entire_plan_under_one_tail_and_one_atomic_commit() {
         .await
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     let mut restored = MessageTranscript::new().with_own_payloads(snapshot.payloads);
     restored.set_flags_batch(snapshot.flags);
     assert_eq!(
         serde_json::to_value(
-            render_persisted_llm_view(&transcript, &ProviderCapabilities::openai()).unwrap()
+            crate::agent::compact_v2::projection::render_persisted_llm_view(&transcript, &ProviderCapabilities::openai()).expect("the openai fixture result is required for this assertion")
         )
-        .unwrap(),
+        .expect("micro batches entire plan under one tail and one atomic commit: the completed fixture operation must provide its result payload"),
         serde_json::to_value(
-            render_persisted_llm_view(&restored, &ProviderCapabilities::openai()).unwrap()
+            crate::agent::compact_v2::projection::render_persisted_llm_view(&restored, &ProviderCapabilities::openai()).expect("the openai fixture result is required for this assertion")
         )
-        .unwrap()
+        .expect("micro batches entire plan under one tail and one atomic commit: the completed fixture operation must provide its result payload")
     );
 }
 
@@ -482,22 +569,25 @@ async fn test_micro_cancel_drops_the_inflight_batch_without_publishing_projectio
     let plan = populate(&mut transcript, 40, bound.thread_id.clone());
     let revision = transcript.view_revision();
     {
-        let work = apply_micro_plan(&mut transcript, &plan);
+        let work = crate::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan);
         tokio::pin!(work);
         peri_time::timeout(Duration::from_secs(5), async {
             loop {
                 tokio::select! {
                     result = &mut work => panic!("验证在取消前意外结束: {result:?}"),
                     _ = tokio::task::yield_now() => {
-                        if resources.stats.lock().unwrap().in_flight > 0 { break; }
+                        if resources.stats.lock().expect("archive read statistics mutex must remain unpoisoned").in_flight > 0 { break; }
                     }
                 }
             }
         })
         .await
-        .unwrap();
+        .expect("the timeout fixture result is required for this assertion");
     }
-    let stats = resources.stats.lock().unwrap();
+    let stats = resources
+        .stats
+        .lock()
+        .expect("resources stats mutex must remain unpoisoned throughout the test");
     assert_eq!(
         (
             stats.batch_reads,
@@ -523,12 +613,21 @@ async fn test_micro_corrupt_batch_fails_before_any_projection_is_published() {
         MessageTranscript::new().with_persistence(resources.clone(), bound.thread_id.clone());
     let plan = populate(&mut transcript, 40, bound.thread_id.clone());
     let revision = transcript.view_revision();
-    let error = apply_micro_plan(&mut transcript, &plan).await.unwrap_err();
+    let error = crate::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
+        .await
+        .unwrap_err();
     assert!(
         error.to_string().contains("archive_content_mismatch"),
         "错误必须保留原文认证失败: {error}"
     );
-    assert_eq!(resources.stats.lock().unwrap().commits, 0);
+    assert_eq!(
+        resources
+            .stats
+            .lock()
+            .expect("resources stats mutex must remain unpoisoned throughout the test")
+            .commits,
+        0
+    );
     assert_eq!(transcript.view_revision(), revision);
     assert!(transcript
         .entries()
@@ -540,10 +639,14 @@ async fn test_micro_corrupt_batch_fails_before_any_projection_is_published() {
 fn cpu_seconds() -> f64 {
     // Process CPU is separate from wall time and excludes other verification processes.
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    // SAFETY: usage points to correctly aligned writable storage for one rusage value. The
+    // platform syscall is needed to measure process CPU independently of wall-clock delays.
+    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
     assert_eq!(
-        unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
-        0
+        status, 0,
+        "getrusage must initialize the process CPU sample"
     );
+    // SAFETY: A successful getrusage call initialized the complete rusage value above.
     let usage = unsafe { usage.assume_init() };
     usage.ru_utime.tv_sec as f64
         + usage.ru_utime.tv_usec as f64 / 1e6
@@ -558,13 +661,18 @@ async fn apply_serial_baseline(
     transcript: &mut MessageTranscript,
     plan: &MicroCompactPlan,
 ) -> AgentResult<usize> {
-    validate_source_flags(transcript, plan)?;
-    validate_plan_metadata(transcript, plan).unwrap();
+    crate::agent::compact_v2::micro::validate_source_flags(transcript, plan)?;
+    crate::agent::compact_v2::micro::validate_plan_metadata(transcript, plan)
+        .expect("the validate plan metadata fixture result is required for this assertion");
     transcript.flush_persistence().await?;
-    let (resources, session_id, _) = transcript.idempotent_reminder_port().unwrap();
+    let (resources, session_id, _) = transcript
+        .idempotent_reminder_port()
+        .expect("the idempotent reminder port fixture result is required for this assertion");
     let mut tails = std::collections::HashMap::new();
     for catalog in &plan.catalogs {
-        catalog.validate().unwrap();
+        catalog
+            .validate()
+            .expect("the validate fixture result is required for this assertion");
         let page = resources
             .read_archive_metadata(
                 &session_id,
@@ -577,7 +685,8 @@ async fn apply_serial_baseline(
             .await
             .map_err(anyhow::Error::new)?;
         for member in &catalog.members {
-            for (index, digest) in member.chunk_digests.iter().enumerate() {
+            let paired_items = member.chunk_digests.iter().enumerate();
+            for (index, digest) in paired_items {
                 let chunk = resources
                     .read_archive_chunk(
                         &session_id,
@@ -591,13 +700,17 @@ async fn apply_serial_baseline(
                     .await
                     .map_err(anyhow::Error::new)?;
                 assert_eq!(chunk.total_bytes, member.canonical_bytes);
-                assert_eq!(&content_digest(&chunk.bytes), digest);
+                assert_eq!(
+                    &peri_acp_types::context_archive::content_digest(&chunk.bytes),
+                    digest
+                );
             }
         }
         tails.insert(catalog.source_thread_id.clone(), page.committed_tail);
     }
-    validate_source_flags(transcript, plan)?;
-    let flag_updates = prepare_updates(transcript, plan, &tails).unwrap();
+    crate::agent::compact_v2::micro::validate_source_flags(transcript, plan)?;
+    let flag_updates = crate::agent::compact_v2::micro::prepare_updates(transcript, plan, &tails)
+        .expect("the prepare updates fixture result is required for this assertion");
     let affected = flag_updates.len();
     transcript
         .commit_compaction_lifecycle(CompactionChange {
@@ -626,12 +739,19 @@ async fn measure_complete_path(case: &str, steps: usize, body_bytes: usize) {
         let planner_cpu = cpu_seconds() - cpu_start;
         let apply_start = Instant::now();
         let affected = if serial {
-            apply_serial_baseline(&mut transcript, &plan).await.unwrap()
+            apply_serial_baseline(&mut transcript, &plan)
+                .await
+                .expect("the apply serial baseline fixture result is required for this assertion")
         } else {
-            apply_micro_plan(&mut transcript, &plan).await.unwrap()
+            crate::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
+                .await
+                .expect("the apply micro plan fixture result is required for this assertion")
         };
         let total_cpu = cpu_seconds() - cpu_start;
-        let stats = resources.stats.lock().unwrap();
+        let stats = resources
+            .stats
+            .lock()
+            .expect("resources stats mutex must remain unpoisoned throughout the test");
         eprintln!("MICRO_COMPLETE_PATH case={case} strategy={} steps={steps} body_bytes={body_bytes} catalogs={} affected={affected} chunks={} canonical_bytes={} planner_wall_ms={} planner_process_cpu_ms={} apply_wall_ms={} apply_process_cpu_ms={} total_wall_ms={} total_process_cpu_ms={} metadata_api_calls={} body_batch_api_calls={} maximum_in_flight_batches={} maximum_body_bytes={} append_calls={} commit_calls={} sqlite_append_port_wall_ms={} sqlite_metadata_port_wall_ms={} controlled_body_port_wall_ms={} sqlite_commit_port_wall_ms={} network_rtt=not_measured", if serial { "serial_baseline" } else { "bounded_batch" }, plan.catalogs.len(), stats.chunks, stats.verified_bytes, planner_wall.as_millis(), (planner_cpu * 1000.0) as u64, apply_start.elapsed().as_millis(), ((total_cpu - planner_cpu) * 1000.0) as u64, start.elapsed().as_millis(), (total_cpu * 1000.0) as u64, stats.metadata_reads, stats.batch_reads, stats.maximum_in_flight, stats.maximum_batch_bytes, stats.append_calls, stats.commits, stats.append_io.as_millis(), stats.metadata_io.as_millis(), stats.verification_io.as_millis(), stats.commit_io.as_millis());
         assert_eq!(
             stats.batch_reads,

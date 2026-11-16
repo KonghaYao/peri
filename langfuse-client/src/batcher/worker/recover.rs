@@ -6,9 +6,9 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use super::BatchWorker;
+use crate::batcher;
 use crate::batcher::recovery::{self, DiscardReason, RetryEntry};
-use crate::batcher::shutdown::drain_cleanup;
-use crate::batcher::wall_ms;
+use crate::batcher::shutdown;
 use crate::payload::{ExportPayload, PayloadBody};
 use crate::spool::SpoolObject;
 
@@ -27,7 +27,7 @@ impl BatchWorker {
                 return;
             }
         };
-        let now_ms = wall_ms();
+        let now_ms = batcher::wall_ms();
         let scan_store = Arc::clone(&store);
         let report = match tokio::task::spawn_blocking(move || {
             recovery::scan(&scan_store, context.route, now_ms)
@@ -112,7 +112,7 @@ impl BatchWorker {
                 "telemetry spool objects from another route were left untouched"
             );
         }
-        drain_cleanup(
+        shutdown::drain_cleanup(
             self.registry.as_mut(),
             &self.ledger,
             self.spool.as_ref(),
@@ -154,7 +154,7 @@ impl BatchWorker {
             events: meta.event_count,
             persisted: true,
             handed_off: false,
-            due_at_ms: Some(wall_ms()),
+            due_at_ms: Some(batcher::wall_ms()),
             prefix_seq: None,
         });
     }

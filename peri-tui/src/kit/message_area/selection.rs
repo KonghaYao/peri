@@ -5,7 +5,6 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL};
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::text_selection::{self, SelectionAnchor, TextSelection};
 use ratatui_kit::ratatui::style::Style;
@@ -36,18 +35,21 @@ pub(crate) fn build_wrap_map(lines: &[Line<'static>], width: u16) -> (usize, Vec
     );
     let mut wrap_map = Vec::with_capacity(lines.len());
     let mut visual_row = 0usize;
-    for (idx, line) in lines.iter().enumerate() {
-        let rows = Paragraph::new(ratatui_kit::ratatui::text::Text::from(line.clone()))
-            .wrap(Wrap { trim: false })
-            .line_count(width);
-        let rows = rows.max(1);
-        wrap_map.push(WrappedLineInfo {
-            logical_idx: idx,
-            visual_start: visual_row,
-            visual_end: visual_row + rows,
-            slot_index: 0,
-        });
-        visual_row += rows;
+    {
+        let iteration_items = lines.iter().enumerate();
+        for (idx, line) in iteration_items {
+            let rows = Paragraph::new(ratatui_kit::ratatui::text::Text::from(line.clone()))
+                .wrap(Wrap { trim: false })
+                .line_count(width);
+            let rows = rows.max(1);
+            wrap_map.push(WrappedLineInfo {
+                logical_idx: idx,
+                visual_start: visual_row,
+                visual_end: visual_row + rows,
+                slot_index: 0,
+            });
+            visual_row += rows;
+        }
     }
     (visual_row, wrap_map)
 }
@@ -120,6 +122,7 @@ impl SlotLines {
         Self { parts, prefix }
     }
 
+    #[must_use]
     pub(super) fn len(&self) -> usize {
         self.prefix.last().copied().unwrap_or(0)
     }
@@ -391,13 +394,16 @@ pub(super) fn resolve_selection_anchor(
 ) -> Option<usize> {
     let items = index.canonical_items()?;
     let mut hit: Option<usize> = None;
-    for (slot, vm) in items.iter().enumerate() {
-        let token = super::window_identity_token(vm);
-        if token.kind == anchor.unit_kind && token.hash == anchor.unit_hash {
-            if hit.is_some() {
-                return None;
+    {
+        let iteration_items = items.iter().enumerate();
+        for (slot, vm) in iteration_items {
+            let token = super::window_identity_token(vm);
+            if token.kind == anchor.unit_kind && token.hash == anchor.unit_hash {
+                if hit.is_some() {
+                    return None;
+                }
+                hit = Some(slot);
             }
-            hit = Some(slot);
         }
     }
     let (start, end) = index.slot_visual_range(hit?)?;
@@ -698,17 +704,22 @@ pub(super) fn extract_visual_range_index(
             if b0 >= b1 {
                 continue;
             }
-            parts.push(map_slice_to_semantic(&plain, b0, b1, &semantic));
+            parts.push(map_slice_to_semantic(&plain, b0, b1, semantic.as_ref()));
         } else if li == first {
             // 首行：从 sr_off 行内的列 sc 到逻辑行末尾
             let s_row_byte = row_starts[sr_off];
             let b0 = row_start_byte(&plain, s_row_byte, sc);
-            parts.push(map_slice_to_semantic(&plain, b0, plain.len(), &semantic));
+            parts.push(map_slice_to_semantic(
+                &plain,
+                b0,
+                plain.len(),
+                semantic.as_ref(),
+            ));
         } else if li == last {
             // 末行：从逻辑行开头到 er_off 行内的列 ec
             let e_row_byte = row_starts[er_off];
             let b1 = row_end_byte(&plain, e_row_byte, ec);
-            parts.push(map_slice_to_semantic(&plain, 0, b1, &semantic));
+            parts.push(map_slice_to_semantic(&plain, 0, b1, semantic.as_ref()));
         } else {
             // 中间行（完整选择）：直接用语义全文
             match &semantic {
@@ -771,7 +782,7 @@ fn map_slice_to_semantic(
     plain: &str,
     b0: usize,
     b1: usize,
-    semantic: &Option<(String, usize)>,
+    semantic: Option<&(String, usize)>,
 ) -> String {
     let Some((sem, p)) = semantic else {
         return plain[b0..b1].to_string();
@@ -802,3 +813,7 @@ mod grapheme_tests;
 #[cfg(test)]
 #[path = "selection_anchor_test.rs"]
 mod anchor_tests;
+
+use crate::kit::atoms::COPY_CHAR_COUNT;
+
+use crate::kit::atoms::COPY_MESSAGE_UNTIL;

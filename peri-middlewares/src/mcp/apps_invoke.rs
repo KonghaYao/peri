@@ -1,7 +1,7 @@
 //! Host-initiated MCP Apps invocation admission.
 //!
 //! Host 调用与 App 回调走**同一个** session-owned canonical 入口
-//!（[`SessionInvocationPort`]）：本模块只做请求级前置校验（信封 / server / 工具
+//!（[`peri_acp_types::mcp_apps::SessionInvocationPort`]）：本模块只做请求级前置校验（信封 / server / 工具
 //! 可见性 / 连接在线）与结果投影，准入与执行交给 service。
 //!
 //! 一切准入失败都由 service 以 typed `NotExecuted` 事实报告，并在 wire 调用之前
@@ -14,8 +14,9 @@ use peri_acp_types::mcp_apps::{
 use peri_acp_types::tool_invocation::{InvocationId, InvocationOrigin};
 use tokio_util::sync::CancellationToken;
 
-use super::apps::{tool_resource_uri, tool_visibility};
-use super::apps_relay::{relay_error, PoolMcpAppsRelay};
+use super::apps;
+use super::apps_relay;
+use super::apps_relay::PoolMcpAppsRelay;
 
 impl PoolMcpAppsRelay {
     pub(super) async fn invoke_app_inner(
@@ -25,38 +26,40 @@ impl PoolMcpAppsRelay {
         cancellation: CancellationToken,
     ) -> Result<McpAppInvokeOutcome, McpAppsRelayError> {
         if cancellation.is_cancelled() {
-            return Err(relay_error(McpAppsErrorKind::Cancelled));
+            return Err(apps_relay::relay_error(McpAppsErrorKind::Cancelled));
         }
         if request.owner_session_id.trim().is_empty() {
-            return Err(relay_error(McpAppsErrorKind::InvalidSession));
+            return Err(apps_relay::relay_error(McpAppsErrorKind::InvalidSession));
         }
         if request.server_id.trim().is_empty() {
-            return Err(relay_error(McpAppsErrorKind::UnknownServer));
+            return Err(apps_relay::relay_error(McpAppsErrorKind::UnknownServer));
         }
         if request.tool_name.trim().is_empty() {
-            return Err(relay_error(McpAppsErrorKind::ToolNotFound));
+            return Err(apps_relay::relay_error(McpAppsErrorKind::ToolNotFound));
         }
         let handle = self
             .pool
-            .get_client(&request.server_id)
-            .ok_or_else(|| relay_error(McpAppsErrorKind::UnknownServer))?;
+            .client(&request.server_id)
+            .ok_or_else(|| apps_relay::relay_error(McpAppsErrorKind::UnknownServer))?;
         let _permit = handle
             .call_gate
             .try_acquire()
-            .map_err(|_| relay_error(McpAppsErrorKind::ServerDisconnected))?;
+            .map_err(|_| apps_relay::relay_error(McpAppsErrorKind::ServerDisconnected))?;
         let tool = handle
             .tools
             .iter()
             .find(|tool| tool.name.as_ref() == request.tool_name)
-            .ok_or_else(|| relay_error(McpAppsErrorKind::ToolNotFound))?;
-        if !tool_visibility(tool).app {
-            return Err(relay_error(McpAppsErrorKind::ToolNotAppVisible));
+            .ok_or_else(|| apps_relay::relay_error(McpAppsErrorKind::ToolNotFound))?;
+        if !apps::tool_visibility(tool).app {
+            return Err(apps_relay::relay_error(McpAppsErrorKind::ToolNotAppVisible));
         }
-        if tool_resource_uri(tool).is_none() {
-            return Err(relay_error(McpAppsErrorKind::InvalidResource));
+        if apps::tool_resource_uri(tool).is_none() {
+            return Err(apps_relay::relay_error(McpAppsErrorKind::InvalidResource));
         }
         if handle.peer.is_none() {
-            return Err(relay_error(McpAppsErrorKind::ServerDisconnected));
+            return Err(apps_relay::relay_error(
+                McpAppsErrorKind::ServerDisconnected,
+            ));
         }
         let protocol = handle
             .peer
@@ -104,7 +107,7 @@ impl PoolMcpAppsRelay {
                 // raw 事实的 JSON 文本投影（宿主面）：与模型面同一事实，不二次解释。
                 output: raw.into_value().to_string(),
             }),
-            other => Err(relay_error(other.error_kind())),
+            other => Err(apps_relay::relay_error(other.error_kind())),
         }
     }
 }

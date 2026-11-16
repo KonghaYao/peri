@@ -1,4 +1,14 @@
-use super::*;
+use super::AgentCancellationToken;
+use super::AgentId;
+use super::Arc;
+use super::BaseMessage;
+use super::BaseTool;
+use super::ObserveEvent;
+use super::RecordingBridge;
+use super::RwLock;
+use super::SessionFixture;
+use super::SubAgentTool;
+use super::ThreadMeta;
 
 // ─── Slice 7:集成测试(中断 → 恢复 → 完成 / 跨实例 / 多次恢复 / 事件配对) ─────
 
@@ -17,17 +27,17 @@ impl InterruptThenEchoLLM {
         request: peri_model::ModelRequest,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-        use crate::subagent::test_support::*;
+        use crate::subagent::test_support;
         let _ = &cancellation;
-        let messages = base_messages(&request);
-        let defined = defined_tools(&request);
+        let messages = test_support::base_messages(&request);
+        let defined = test_support::defined_tools(&request);
         let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
         if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < self.interrupt_rounds {
             return vec![Err(peri_model::ModelError::cancelled())];
         }
         let last = messages.last().map(|m| m.content()).unwrap_or_default();
-        text_events(format!("echo: {}", last))
+        test_support::text_events(format!("echo: {}", last))
     }
 }
 crate::subagent::test_support::fixture_model_impl!(InterruptThenEchoLLM);
@@ -141,7 +151,7 @@ async fn wait_for_messages(
 /// R-L3：进程重启后凭 child_thread_id 恢复（thread_id 即凭证，父链仅作落盘记录）。
 #[tokio::test]
 async fn test_resume_interrupted_then_resumed_across_instances() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -169,7 +179,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
         .with_parent_session(parent.clone());
-    let t_a = with_agent_face(t_a, dir.path()).await;
+    let t_a = super::with_agent_face(t_a, dir.path()).await;
     let interrupted = t_a
         .invoke(
             serde_json::json!({
@@ -195,7 +205,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
         .with_parent_session(parent);
-    let t_b = with_agent_face(t_b, dir.path()).await;
+    let t_b = super::with_agent_face(t_b, dir.path()).await;
     let result = t_b
         .invoke(
             serde_json::json!({
@@ -232,8 +242,8 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
 /// （消息数/顺序：spawn prompt → 隐式 continue → 新 AI）。
 #[tokio::test]
 async fn test_resume_across_instances_replays_transcript_in_order() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
+    let dir = tempfile::tempdir().unwrap();
+    super::write_test_agent(&dir);
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
@@ -254,7 +264,7 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
             .with_session_resources(store.facade())
             .with_parent_thread_id(parent_id.clone())
             .with_parent_session(parent.clone());
-        let t_a = with_agent_face(t_a, dir.path()).await;
+        let t_a = super::with_agent_face(t_a, dir.path()).await;
         let interrupted = t_a
             .invoke(
                 serde_json::json!({
@@ -281,7 +291,7 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
         .with_parent_session(parent.clone());
-    let t_b = with_agent_face(t_b, dir.path()).await;
+    let t_b = super::with_agent_face(t_b, dir.path()).await;
     let result = t_b
         .invoke(
             serde_json::json!({
@@ -318,8 +328,8 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
 /// 最终完成、磁盘 status 收尾 done。
 #[tokio::test]
 async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
+    let dir = tempfile::tempdir().unwrap();
+    super::write_test_agent(&dir);
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
@@ -340,7 +350,7 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
         )
     };
     let mk_interrupted = || async {
-        with_agent_face(
+        super::with_agent_face(
             make_interrupt_tool(calls.clone(), 2)
                 .with_session_resources(store.facade())
                 .with_parent_thread_id(parent_id.clone())
@@ -391,11 +401,11 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
     assert_eq!(id1, id2, "多次恢复 thread_id 必须不变");
 
     // 3) resume → 完成（新实例：父会话换回未取消的 token，归属不变）
-    let t3 = make_subagent_tool(vec![])
+    let t3 = super::make_subagent_tool(vec![])
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
         .with_parent_session(mk_parent(false));
-    let t3 = with_agent_face(t3, dir.path()).await;
+    let t3 = super::with_agent_face(t3, dir.path()).await;
     let r3 = t3
         .invoke(
             serde_json::json!({
@@ -425,8 +435,8 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
 /// 配对顺序正确（Start→Stop→Start→Stop）、child_agent_id 恒同（同一 thread）。
 #[tokio::test]
 async fn test_resume_emits_new_start_stop_pair_per_execution() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
+    let dir = tempfile::tempdir().unwrap();
+    super::write_test_agent(&dir);
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
@@ -463,8 +473,8 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
     .with_session_resources(store.facade())
     .with_parent_thread_id(parent_id.clone())
     .with_parent_session(parent.clone());
-    let t = with_agent_face(t, dir.path()).await;
-    let t = with_agent_face(t, dir.path()).await;
+    let t = super::with_agent_face(t, dir.path()).await;
+    let t = super::with_agent_face(t, dir.path()).await;
 
     // 首次执行 → 中断（第 1 对 Start/Stop；LLM 返回 Interrupted → Ok 可恢复文本）
     let interrupted = t
@@ -487,7 +497,7 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
     );
     let id = extract_child_thread_id(&interrupted);
     let evs = wait_for_observe_pairs(&bridge, 1, 3000).await;
-    assert_start_stop_pair(&evs, "test-agent", false);
+    super::assert_start_stop_pair(&evs, "test-agent", false);
 
     // 恢复 → 完成（第 2 对 Start/Stop）
     let result = t
@@ -553,7 +563,7 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
 /// 工具调用消息恒为一套。
 #[tokio::test]
 async fn test_resume_skill_preload_not_duplicated() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let agents_dir = dir.path().join(".claude").join("agents");
     let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -591,7 +601,7 @@ async fn test_resume_skill_preload_not_duplicated() {
         "workspace",
         &[("test-skill", "This is the test skill content.\n")],
     );
-    let t = with_agent_face(t, dir.path()).await;
+    let t = super::with_agent_face(t, dir.path()).await;
 
     // 首次执行（agent-def 路径）→ SkillPreload 注入一套 → 中断（LLM 返回 Interrupted）
     let interrupted = t
@@ -642,8 +652,8 @@ async fn test_resume_skill_preload_not_duplicated() {
 /// transcript 仅追加 continue + 新 AI，已完成轮次原样保留）。
 #[tokio::test]
 async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
+    let dir = tempfile::tempdir().unwrap();
+    super::write_test_agent(&dir);
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
@@ -658,7 +668,7 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
     );
     let id = uuid::Uuid::now_v7().to_string();
     // 完整工具轮次：Ai[ToolUse] + Tool[result] 配对，末条 = Tool → 不 pop
-    preset_resumable_thread(
+    super::preset_resumable_thread(
         &store,
         &id,
         "test-agent",
@@ -687,10 +697,10 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
             request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let _ = &cancellation;
-            let messages = base_messages(&request);
-            let defined = defined_tools(&request);
+            let messages = test_support::base_messages(&request);
+            let defined = test_support::defined_tools(&request);
             let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             let n = messages
@@ -698,7 +708,7 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
                 .filter(|m| m.content().contains("tool-result-1"))
                 .count();
             *self.seen.lock().unwrap() = n;
-            text_events("round-preserved")
+            test_support::text_events("round-preserved")
         }
     }
     crate::subagent::test_support::fixture_model_impl!(ToolRoundCheckLLM);
@@ -718,7 +728,7 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
     .with_session_resources(store.facade())
     .with_parent_thread_id(parent_id.clone())
     .with_parent_session(parent.clone());
-    let t = with_agent_face(t, dir.path()).await;
+    let t = super::with_agent_face(t, dir.path()).await;
 
     let result = t
         .invoke(
@@ -767,7 +777,7 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
 /// 无从触发。锁定该行为：SkillTool 计数恒为 1（首轮声明注入的一套）。
 #[tokio::test]
 async fn test_resume_skill_token_in_prompt_reinjects_once() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let agents_dir = dir.path().join(".claude").join("agents");
     let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -805,7 +815,7 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
         "workspace",
         &[("test-skill", "This is the test skill content.\n")],
     );
-    let t = with_agent_face(t, dir.path()).await;
+    let t = super::with_agent_face(t, dir.path()).await;
 
     // 首次执行（显式声明 skills）→ 注入一套 → 中断（LLM 返回 Interrupted）
     let interrupted = t

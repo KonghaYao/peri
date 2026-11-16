@@ -5,20 +5,26 @@ use crate::kit::tui_render_unit::TuiSystemNote;
 impl CurrentTurn {
     pub(crate) fn bound_system_notes(&mut self, budget: &mut DisplayBudget) -> bool {
         let mut pending_remove = Vec::new();
-        for (index, note) in self.pending_notes.iter().enumerate().rev() {
-            if !budget.retain(std::mem::size_of::<TuiSystemNote>() + note.text.capacity()) {
-                pending_remove.push(index);
+        {
+            let iteration_items = self.pending_notes.iter().enumerate().rev();
+            for (index, note) in iteration_items {
+                if !budget.retain(std::mem::size_of::<TuiSystemNote>() + note.text.capacity()) {
+                    pending_remove.push(index);
+                }
             }
         }
         for &index in &pending_remove {
             self.pending_notes.remove(index);
         }
         let mut segment_remove = Vec::new();
-        for (index, segment) in self.segments.iter().enumerate().rev() {
-            if let TurnSegment::SystemNote { text, .. } = segment
-                && !budget.retain(std::mem::size_of::<TuiSystemNote>() + text.capacity())
-            {
-                segment_remove.push(index);
+        {
+            let iteration_items = self.segments.iter().enumerate().rev();
+            for (index, segment) in iteration_items {
+                if let TurnSegment::SystemNote { text, .. } = segment
+                    && !budget.retain(std::mem::size_of::<TuiSystemNote>() + text.capacity())
+                {
+                    segment_remove.push(index);
+                }
             }
         }
         for &index in &segment_remove {

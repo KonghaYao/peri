@@ -11,17 +11,14 @@ use std::sync::Arc;
 use crate::cli_args::OutputFormat;
 use agent_client_protocol::schema::v1::StopReason;
 use anyhow::Result;
-use peri_acp::host::assemble::{HostAssemblyInput, assemble_server_config};
-use peri_acp::transport::mpsc::mpsc_transport_pair;
+use peri_acp::host::assemble::HostAssemblyInput;
+
 use peri_acp_types::interaction::UnansweredCause;
 use peri_acp_types::messages::MessageContent;
 use peri_acp_types::session_store::SessionStoreDeployment;
-use peri_tui::acp_client::{
-    AcpDeployment, AcpNotification, AcpTuiClient,
-    interaction_response::{
-        elicitation_unanswered_response, permission_selected_allow_once_response,
-    },
-};
+use peri_tui::acp_client::AcpDeployment;
+use peri_tui::acp_client::AcpNotification;
+use peri_tui::acp_client::AcpTuiClient;
 use serde_json::{Value, json};
 
 fn load_print_config_source(
@@ -176,7 +173,7 @@ pub async fn run_print(
     let (session_resources, session_store_shutdown) = resources.into_parts();
 
     // ── ACP host 装配（与 TUI 同源，见 peri_acp::host::assemble）──
-    let mut host_config = assemble_server_config(HostAssemblyInput {
+    let mut host_config = peri_acp::host::assemble::assemble_server_config(HostAssemblyInput {
         provider: provider.clone(),
         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
         config_source: config_source.clone(),
@@ -208,7 +205,7 @@ pub async fn run_print(
     })
     .await;
     host_config.model_transport_route = model_transport_route;
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (acp_client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
     let server_transport = Arc::new(server_transport);
     let host = peri_acp::host::spawn_acp_server(server_transport, host_config);
@@ -393,12 +390,14 @@ async fn auto_approve(
 }
 
 fn print_permission_response() -> Value {
-    permission_selected_allow_once_response()
+    peri_tui::acp_client::interaction_response::permission_selected_allow_once_response()
 }
 
 /// `-p` 无交互界面：声明「无人可作答」而非裸 cancel，工具据此如实转述。
 fn print_elicitation_response() -> Value {
-    elicitation_unanswered_response(UnansweredCause::NonInteractiveClient)
+    peri_tui::acp_client::interaction_response::elicitation_unanswered_response(
+        UnansweredCause::NonInteractiveClient,
+    )
 }
 
 /// 事件输出器：消费 ACP 协议化事件（session/update 通知），输出格式与
@@ -445,6 +444,7 @@ impl PrintUsage {
 }
 
 impl PrintOutput {
+    #[must_use]
     fn new(fmt: OutputFormat) -> Self {
         Self {
             fmt,
@@ -499,7 +499,7 @@ impl PrintOutput {
                             "type": "text",
                             "content": text
                         }))
-                        .unwrap(),
+                        .expect("serializing JSON Value containing only JSON data is infallible"),
                     ),
                     OutputFormat::Text | OutputFormat::Json => {
                         self.text_buffer.push_str(&text);
@@ -528,7 +528,7 @@ impl PrintOutput {
                             "name": name,
                             "input": input,
                         }))
-                        .unwrap(),
+                        .expect("serializing JSON Value containing only JSON data is infallible"),
                     )
                 } else {
                     None
@@ -561,7 +561,7 @@ impl PrintOutput {
                             "id": tool_call_id,
                             "output": output,
                         }))
-                        .unwrap(),
+                        .expect("serializing JSON Value containing only JSON data is infallible"),
                     )
                 } else {
                     None
@@ -586,7 +586,7 @@ impl PrintOutput {
                     pending_tasks,
                     cleanup_error
                 ))
-                .unwrap()
+                .expect("serializing the print result JSON Value is infallible")
             ),
             OutputFormat::StreamJson => {
                 println!("{}", self.result(stop_reason, pending_tasks, cleanup_error))
@@ -653,7 +653,7 @@ mod tests {
     #[tokio::test]
     async fn test_print_drain_waits_for_sender_close_and_keeps_tail_events() {
         for fmt in [OutputFormat::Json, OutputFormat::StreamJson] {
-            let (transport, _server) = mpsc_transport_pair();
+            let (transport, _server) = peri_acp::transport::mpsc::mpsc_transport_pair();
             let (client, sender, mut receiver) = AcpTuiClient::new(transport);
             let mut output = PrintOutput::new(fmt);
             {
@@ -674,7 +674,7 @@ mod tests {
                             params: json!({"sessionId": "s1", "update": update}),
                         })
                         .await
-                        .unwrap();
+                        .expect("print drain waits for sender close and keeps tail events: fixture task and request must complete successfully");
                 }
                 drop(sender);
                 drain.await;
@@ -726,10 +726,10 @@ mod tests {
     #[test]
     fn test_pending_tasks_from_meta_reads_nested_object() {
         let meta: serde_json::Map<String, Value> =
-            serde_json::from_value(json!({"peri": {"pendingTasks": 3}})).unwrap();
+            serde_json::from_value(json!({"peri": {"pendingTasks": 3}})).expect("pending tasks from meta reads nested object: fixture JSON must match the expected schema");
         assert_eq!(pending_tasks_from_meta(Some(&meta)), 3);
         let flat: serde_json::Map<String, Value> =
-            serde_json::from_value(json!({"peri.pendingTasks": 3})).unwrap();
+            serde_json::from_value(json!({"peri.pendingTasks": 3})).expect("pending tasks from meta reads nested object: fixture JSON must match the expected schema");
         assert_eq!(pending_tasks_from_meta(Some(&flat)), 0);
         assert_eq!(pending_tasks_from_meta(None), 0);
     }
@@ -748,7 +748,7 @@ mod tests {
     #[test]
     fn test_print_permission_response_is_selected_allow_once() {
         let response: RequestPermissionResponse =
-            serde_json::from_value(print_permission_response()).unwrap();
+            serde_json::from_value(print_permission_response()).expect("print permission response is selected allow once: fixture JSON must match the expected schema");
         let RequestPermissionOutcome::Selected(selected) = response.outcome else {
             panic!("print permission 应自动选择 allow_once")
         };
@@ -760,7 +760,7 @@ mod tests {
     #[test]
     fn test_print_elicitation_response_declares_non_interactive_client() {
         let response: CreateElicitationResponse =
-            serde_json::from_value(print_elicitation_response()).unwrap();
+            serde_json::from_value(print_elicitation_response()).expect("print elicitation response declares non interactive client: fixture JSON must match the expected schema");
         assert!(matches!(response.action, ElicitationAction::Cancel));
         assert_eq!(
             UnansweredCause::from_meta(response.meta.as_ref()),

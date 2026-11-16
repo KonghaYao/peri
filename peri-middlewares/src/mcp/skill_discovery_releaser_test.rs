@@ -1,4 +1,18 @@
-use super::*;
+use super::Arc;
+use super::PathBuf;
+use super::RoleClient;
+use super::SkillMetadata;
+use super::SkillOrigin;
+use super::SkillSource;
+use super::SpecSkill;
+use crate::mcp::skill_discovery::McpSkillReleaser;
+use peri_acp_types::command::command_handler::CommandOutcome;
+use peri_acp_types::command::CommandContext;
+use peri_acp_types::command::CommandHandler as _;
+use peri_acp_types::command::FeedbackLevel;
+use peri_acp_types::mcp_skills::HandleToken;
+use peri_acp_types::mcp_skills::McpSkillRegistry;
+use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 // ─── McpSkillReleaser（决策 A2/D 放行跳板）─────────────────────────────────
 
@@ -215,7 +229,7 @@ async fn cached_skill_discovery_reads_no_bodies() {
     let text = "---\nname: cached\ndescription: Cached skill\n---\n\n# Cached\n";
     let request_log = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(spec_skill_server(
+    tokio::spawn(super::spec_skill_server(
         server_io,
         vec![SpecSkill {
             uri: "skill://cached/SKILL.md",
@@ -238,7 +252,7 @@ async fn cached_skill_discovery_reads_no_bodies() {
     );
     let cache_dir = tempfile::tempdir().unwrap();
     let cache = crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
-    let handle = make_spec_handle(&running);
+    let handle = super::make_spec_handle(&running);
     let (cache, origin) = super::cache_fixture::scoped_cache(
         handle.clone(),
         cache,
@@ -249,7 +263,7 @@ async fn cached_skill_discovery_reads_no_bodies() {
     let first = Arc::new(McpSkillRegistry::new());
     let first_token: HandleToken = Arc::new(41u32);
     first.mark_discovery_started("srv", first_token.clone());
-    run_discovery_with_cache(
+    crate::mcp::skill_discovery::run_discovery_with_cache(
         first.clone(),
         None,
         handle.clone(),
@@ -275,7 +289,7 @@ async fn cached_skill_discovery_reads_no_bodies() {
     let second = Arc::new(McpSkillRegistry::new());
     let second_token: HandleToken = Arc::new(42u32);
     second.mark_discovery_started("srv", second_token.clone());
-    run_discovery_with_cache(
+    crate::mcp::skill_discovery::run_discovery_with_cache(
         second.clone(),
         None,
         handle,

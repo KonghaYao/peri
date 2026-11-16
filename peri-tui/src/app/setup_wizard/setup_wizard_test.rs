@@ -1,6 +1,13 @@
 //! Tests for setup_wizard
-use super::*;
-use crate::kit::atoms::SETUP_WIZARD;
+use super::FormField;
+use super::FormMode;
+use super::MigratedProvider;
+use super::PROVIDER_PRESETS;
+use super::ProviderType;
+use super::SetupSource;
+use super::SetupStep;
+use super::SetupWizardState;
+
 use serial_test::serial;
 use std::path::{Path, PathBuf};
 
@@ -28,14 +35,20 @@ fn guarded_config_paths() -> [PathBuf; 2] {
 }
 
 /// 配置提交用例在独立子进程中冻结临时 HOME/cwd，父进程核对真实配置文件未变。
-fn isolated(name: &str, scenario: fn()) {
+fn run_isolated(test_module: &str, name: &str, scenario: fn()) {
     if std::env::var(SETUP_CHILD).as_deref() == Ok(name) {
-        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
-        let cwd = std::env::current_dir().unwrap();
+        let home = PathBuf::from(std::env::var_os("HOME").expect(
+            "isolated: the isolated fixture environment must contain its configured value",
+        ));
+        let cwd = std::env::current_dir()
+            .expect("isolated: isolated fixture workspace must remain accessible");
         assert!(
             home.canonicalize()
-                .unwrap()
-                .starts_with(cwd.canonicalize().unwrap()),
+                .expect("isolated: the canonicalize fixture operation uses valid inputs")
+                .starts_with(
+                    cwd.canonicalize()
+                        .expect("isolated: the canonicalize fixture operation uses valid inputs")
+                ),
             "子进程 HOME 必须位于临时 cwd 内"
         );
         assert_ne!(cwd, Path::new(env!("CARGO_MANIFEST_DIR")));
@@ -44,22 +57,33 @@ fn isolated(name: &str, scenario: fn()) {
     }
 
     let guarded = guarded_config_paths().map(|path| (read_if_exists(&path), path));
-    let dir = tempfile::tempdir().unwrap();
+    let dir =
+        tempfile::tempdir().expect("isolated: isolated fixture workspace must remain accessible");
     let home = dir.path().join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            &format!("{}::{name}", module_path!().split_once("::").unwrap().1),
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env(SETUP_CHILD, name)
-        .env("HOME", &home)
-        .env("USERPROFILE", &home)
-        .current_dir(dir.path())
-        .output()
-        .unwrap();
+    std::fs::create_dir_all(&home)
+        .expect("isolated: isolated fixture workspace must remain accessible");
+    let output = std::process::Command::new(
+        std::env::current_exe()
+            .expect("isolated: isolated fixture workspace must remain accessible"),
+    )
+    .args([
+        "--exact",
+        &format!("{test_module}::{name}"),
+        "--nocapture",
+        "--test-threads=1",
+    ])
+    .env(SETUP_CHILD, name)
+    .env_remove("OPENAI_API_KEY")
+    .env_remove("ANTHROPIC_API_KEY")
+    .env_remove("CODEX_API_KEY")
+    .env_remove("ANTHROPIC_BASE_URL")
+    .env_remove("OPENAI_BASE_URL")
+    .env_remove("CODEX_BASE_URL")
+    .env("HOME", &home)
+    .env("USERPROFILE", &home)
+    .current_dir(dir.path())
+    .output()
+    .expect("isolated: isolated fixture workspace must remain accessible");
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -80,30 +104,32 @@ fn isolated(name: &str, scenario: fn()) {
 #[test]
 #[serial]
 fn test_needs_setup_empty_providers_no_env() {
-    let _env = EnvKeys::clear();
-    let config = crate::config::AppConfig::default();
-    assert!(
-        needs_setup(&config),
-        "无 providers 且无有效 env 时应需要 setup"
-    );
+    isolated("test_needs_setup_empty_providers_no_env", || {
+        let config = crate::config::AppConfig::default();
+        assert!(
+            super::needs_setup(&config),
+            "无 providers 且无有效 env 时应需要 setup"
+        );
+    });
 }
 
 #[test]
 #[serial]
 fn test_needs_setup_api_key_from_config() {
-    let _env = EnvKeys::clear();
-    let mut config = crate::config::AppConfig {
-        active_alias: "sonnet".into(),
-        ..Default::default()
-    };
-    config.profiles.sonnet.provider = "test".into();
-    config.providers.push(crate::config::ProviderConfig {
-        id: "test".into(),
-        provider_type: "openai".into(),
-        api_key: "sk-fake-test-key".into(),
-        ..Default::default()
+    isolated("test_needs_setup_api_key_from_config", || {
+        let mut config = crate::config::AppConfig {
+            active_alias: "sonnet".into(),
+            ..Default::default()
+        };
+        config.profiles.sonnet.provider = "test".into();
+        config.providers.push(crate::config::ProviderConfig {
+            id: "test".into(),
+            provider_type: "openai".into(),
+            api_key: "sk-fake-test-key".into(),
+            ..Default::default()
+        });
+        assert!(!super::needs_setup(&config));
     });
-    assert!(!needs_setup(&config));
 }
 
 #[test]
@@ -128,9 +154,9 @@ fn test_migrated_provider_is_complete() {
 
 #[test]
 fn test_mask_api_key() {
-    assert_eq!(mask_api_key("sk-short"), "••••••••");
+    assert_eq!(super::mask_api_key("sk-short"), "••••••••");
     assert_eq!(
-        mask_api_key("sk-ant-api03-very-long-key-here"),
+        super::mask_api_key("sk-ant-api03-very-long-key-here"),
         "sk-a••••here"
     );
 }
@@ -158,7 +184,7 @@ fn test_build_wizard_config_fixed_tier_profiles() {
         language: "zh-CN".to_string(),
         ..Default::default()
     };
-    let cfg = build_wizard_config(&state);
+    let cfg = super::build_wizard_config(&state);
     assert_eq!(
         cfg.config.active_alias, "sonnet",
         "免费服务默认档位为 sonnet"
@@ -183,7 +209,7 @@ fn test_build_wizard_config_fixed_tier_profiles() {
     assert_eq!(cfg.config.profiles.haiku.effort, "low");
     for alias in ["fable", "opus", "sonnet", "haiku"] {
         assert_eq!(
-            cfg.config.profiles.get(alias).unwrap().provider,
+            cfg.config.profiles.get(alias).expect("build wizard config fixed tier profiles: the fixture collection must contain the expected entry").provider,
             "peri",
             "{alias} 档位应绑定 peri provider"
         );
@@ -201,7 +227,7 @@ fn test_build_wizard_config_custom_api_keeps_opus_only() {
         providers: vec![mp],
         ..Default::default()
     };
-    let cfg = build_wizard_config(&state);
+    let cfg = super::build_wizard_config(&state);
     assert_eq!(cfg.config.active_alias, "opus", "手动配置默认档位仍为 opus");
     assert_eq!(cfg.config.profiles.opus.provider, "anthropic");
     // 无固定档位的 provider：其余档位保持默认
@@ -217,7 +243,7 @@ fn test_build_wizard_config_fixed_tiers_follow_provider_not_id() {
     let mut manual = MigratedProvider::new(ProviderType::OpenAiCompatible);
     manual.provider_id = "peri".into();
     manual.api_key = "public".into();
-    let cfg = build_wizard_config(&SetupWizardState {
+    let cfg = super::build_wizard_config(&SetupWizardState {
         providers: vec![manual],
         ..Default::default()
     });
@@ -226,45 +252,17 @@ fn test_build_wizard_config_fixed_tiers_follow_provider_not_id() {
     // 预设 provider 改 id 后仍保留固定档位，并绑定到新 id
     let mut from_preset = PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1].to_migrated();
     from_preset.provider_id = "my-gateway".into();
-    let cfg = build_wizard_config(&SetupWizardState {
+    let cfg = super::build_wizard_config(&SetupWizardState {
         providers: vec![from_preset],
         ..Default::default()
     });
     assert_eq!(cfg.config.active_alias, "sonnet");
     for alias in ["fable", "opus", "sonnet", "haiku"] {
         assert_eq!(
-            cfg.config.profiles.get(alias).unwrap().provider,
+            cfg.config.profiles.get(alias).expect("build wizard config fixed tiers follow provider not id: the fixture collection must contain the expected entry").provider,
             "my-gateway",
             "{alias} 档位应绑定新 id"
         );
-    }
-}
-
-struct EnvKeys(Vec<(&'static str, Option<std::ffi::OsString>)>);
-
-impl EnvKeys {
-    fn clear() -> Self {
-        let saved = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
-            .into_iter()
-            .map(|name| (name, std::env::var_os(name)))
-            .collect::<Vec<_>>();
-        for (name, _) in &saved {
-            unsafe { std::env::remove_var(name) };
-        }
-        Self(saved)
-    }
-}
-
-impl Drop for EnvKeys {
-    fn drop(&mut self) {
-        for (name, value) in &self.0 {
-            unsafe {
-                match value {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
-                }
-            }
-        }
     }
 }
 
@@ -272,169 +270,16 @@ impl Drop for EnvKeys {
 #[test]
 #[serial]
 fn test_needs_setup_empty_alias_matches_runtime_resolution() {
-    let _env = EnvKeys::clear();
-    let mut cfg = build_wizard_config(&SetupWizardState {
-        providers: vec![PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1].to_migrated()],
-        ..Default::default()
-    });
-    cfg.config.active_alias.clear();
-    assert!(crate::app::agent::LlmProvider::from_config(&cfg).is_none());
-    assert!(needs_setup(&cfg.config));
-}
-
-/// [回归测试] 重开表单后保存仅编辑 provider 字段，保留用户的档位和扩展配置。
-#[test]
-fn test_reopened_setup_preserves_active_profile_and_provider_metadata() {
-    let mut cfg = build_wizard_config(&SetupWizardState {
-        providers: vec![PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1].to_migrated()],
-        ..Default::default()
-    });
-    cfg.config.active_alias = "haiku".into();
-    cfg.config.profiles.haiku.provider = "peri".into();
-    cfg.config.profiles.haiku.model = Some("custom-model".into());
-    cfg.config.profiles.haiku.effort = "low".into();
-    cfg.config.profiles.haiku.max_tokens = 1234;
-    cfg.config.providers[0].name = Some("My endpoint".into());
-    cfg.config.providers[0]
-        .extra
-        .insert("custom-option".into(), serde_json::json!(true));
-    cfg.config
-        .extra
-        .insert("unrelated-option".into(), serde_json::json!(42));
-    let profiles = serde_json::to_value(&cfg.config.profiles).unwrap();
-    let mut draft = state_from_config(&cfg);
-    assert!(draft.from_command);
-    assert_eq!(draft.step, SetupStep::Form);
-    assert_eq!(draft.source, SetupSource::CustomApi);
-    assert_eq!(draft.form_mode, FormMode::Browse);
-    draft.providers[0].base_url = "http://localhost:7001/v1".into();
-    let merged = merge_setup(&draft, cfg);
-    assert_eq!(merged.config.active_alias, "haiku");
-    assert_eq!(
-        serde_json::to_value(&merged.config.profiles).unwrap(),
-        profiles
-    );
-    assert_eq!(
-        merged.config.providers[0].base_url,
-        "http://localhost:7001/v1"
-    );
-    assert_eq!(
-        merged.config.providers[0].name.as_deref(),
-        Some("My endpoint")
-    );
-    assert_eq!(merged.config.providers[0].extra["custom-option"], true);
-    assert_eq!(merged.config.extra["unrelated-option"], 42);
-}
-
-/// [回归测试] 已有自定义 provider 时重开 `/setup` 并保存，不得用默认值覆盖，
-/// 也不得新增同 ID 的重复 provider；真实 HOME/仓库配置只由父进程做前后比对。
-#[test]
-fn test_reopened_setup_save_preserves_existing_custom_provider_fields() {
     isolated(
-        "test_reopened_setup_save_preserves_existing_custom_provider_fields",
+        "test_needs_setup_empty_alias_matches_runtime_resolution",
         || {
-            for key in [
-                "ANTHROPIC_API_KEY",
-                "OPENAI_API_KEY",
-                "CODEX_API_KEY",
-                "ANTHROPIC_BASE_URL",
-                "OPENAI_BASE_URL",
-                "CODEX_BASE_URL",
-            ] {
-                // SAFETY: 当前用例独占子进程，且尚未派发任何任务。
-                unsafe { std::env::remove_var(key) };
-            }
-            let root = std::env::current_dir().unwrap();
-            let home = PathBuf::from(std::env::var_os("HOME").unwrap());
-            let cwd = root.join("workspace");
-            std::fs::create_dir_all(cwd.join(".peri")).unwrap();
-            let global = home.join(".peri/settings.json");
-            let cfg: crate::config::PeriConfig = serde_json::from_value(serde_json::json!({
-                "config": {
-                    "active_alias": "opus",
-                    "language": "zh-CN",
-                    "profiles": {
-                        "opus": {
-                            "provider": "custom",
-                            "model": "keep-model",
-                            "effort": "high"
-                        }
-                    },
-                    "providers": [{
-                        "id": "custom",
-                        "name": "Keep me",
-                        "type": "openai",
-                        "apiKey": "custom-key",
-                        "baseUrl": "https://custom.example/v1",
-                        "models": {
-                            "fable": "fable-keep",
-                            "opus": "opus-keep",
-                            "sonnet": "sonnet-keep",
-                            "haiku": "haiku-keep"
-                        }
-                    }]
-                }
-            }))
-            .unwrap();
-            crate::config::save_to(&cfg, &global).unwrap();
-            let global_before = std::fs::read(&global).unwrap();
-            std::fs::write(
-                cwd.join(".peri/settings.json"),
-                r#"{"config":{"language":"zh-CN"}}"#,
-            )
-            .unwrap();
-            let sentinel = root.join(".peri/settings.json");
-            std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
-            std::fs::write(&sentinel, "do-not-touch-sentinel").unwrap();
-
-            let source = std::sync::Arc::new(
-                crate::config::ConfigSource::load_at(&cwd, global.clone()).unwrap(),
-            );
-            assert!(
-                crate::kit::atoms::CONFIG_SOURCE_HANDLE
-                    .set(source.clone())
-                    .is_ok()
-            );
-
-            let state = state_from_config(&source.loaded_merged());
-            assert_eq!(state.step, SetupStep::Form, "已有 provider 直接进入 Form");
-            assert_eq!(state.providers.len(), 1);
-            assert_eq!(state.providers[0].provider_id, "custom");
-
-            let merged = save_setup(&state).unwrap();
-            assert_eq!(merged.config.providers.len(), 1, "不得新增重复 provider");
-            let disk = crate::config::ConfigSource::load_at(&cwd, global.clone())
-                .unwrap()
-                .loaded_merged();
-            assert_eq!(
-                merged, disk,
-                "save_setup 必须返回 authority 接纳后的快照，而不是保存前候选"
-            );
-            assert_eq!(disk.config.providers.len(), 1);
-            let provider = disk
-                .config
-                .providers
-                .iter()
-                .find(|provider| provider.id == "custom")
-                .expect("既有 provider 必须保留");
-            assert_eq!(provider.provider_type, "openai");
-            assert_eq!(provider.api_key, "custom-key");
-            assert_eq!(provider.base_url, "https://custom.example/v1");
-            assert_eq!(provider.models.fable, "fable-keep");
-            assert_eq!(provider.models.opus, "opus-keep");
-            assert_eq!(provider.models.sonnet, "sonnet-keep");
-            assert_eq!(provider.models.haiku, "haiku-keep");
-            assert_eq!(provider.name.as_deref(), Some("Keep me"));
-            assert_eq!(disk.config.profiles.opus.provider, "custom");
-            assert_eq!(
-                disk.config.profiles.opus.model.as_deref(),
-                Some("keep-model")
-            );
-            assert_eq!(std::fs::read(&global).unwrap(), global_before);
-            assert_eq!(
-                std::fs::read_to_string(&sentinel).unwrap(),
-                "do-not-touch-sentinel"
-            );
+            let mut cfg = super::build_wizard_config(&SetupWizardState {
+                providers: vec![PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1].to_migrated()],
+                ..Default::default()
+            });
+            cfg.config.active_alias.clear();
+            assert!(crate::app::agent::LlmProvider::from_config(&cfg).is_none());
+            assert!(super::needs_setup(&cfg.config));
         },
     );
 }
@@ -447,21 +292,10 @@ fn test_setup_endpoint_change_without_own_key_keeps_persisted_provider() {
     isolated(
         "test_setup_endpoint_change_without_own_key_keeps_persisted_provider",
         || {
-            for key in [
-                "ANTHROPIC_API_KEY",
-                "OPENAI_API_KEY",
-                "CODEX_API_KEY",
-                "ANTHROPIC_BASE_URL",
-                "OPENAI_BASE_URL",
-                "CODEX_BASE_URL",
-            ] {
-                // SAFETY: 当前用例独占子进程，且尚未派发任何任务。
-                unsafe { std::env::remove_var(key) };
-            }
-            let root = std::env::current_dir().unwrap();
-            let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            let root = std::env::current_dir().expect("setup endpoint change without own key keeps persisted provider: isolated fixture workspace must remain accessible");
+            let home = PathBuf::from(std::env::var_os("HOME").expect("setup endpoint change without own key keeps persisted provider: the isolated fixture environment must contain its configured value"));
             let cwd = root.join("workspace");
-            std::fs::create_dir_all(cwd.join(".peri")).unwrap();
+            std::fs::create_dir_all(cwd.join(".peri")).expect("setup endpoint change without own key keeps persisted provider: isolated fixture workspace must remain accessible");
             let global = home.join(".peri/settings.json");
             let cfg: crate::config::PeriConfig = serde_json::from_value(serde_json::json!({
                 "config": {
@@ -489,15 +323,15 @@ fn test_setup_endpoint_change_without_own_key_keeps_persisted_provider() {
                     }]
                 }
             }))
-            .unwrap();
-            crate::config::save_to(&cfg, &global).unwrap();
-            let global_before = std::fs::read(&global).unwrap();
+            .expect("setup endpoint change without own key keeps persisted provider: fixture JSON must match the expected schema");
+            crate::config::save_to(&cfg, &global).expect("setup endpoint change without own key keeps persisted provider: the save_to fixture operation uses valid inputs");
+            let global_before = std::fs::read(&global).expect("setup endpoint change without own key keeps persisted provider: isolated fixture workspace must remain accessible");
             let workspace = cwd.join(".peri/settings.json");
             let workspace_before = r#"{"config":{"language":"zh-CN"}}"#;
-            std::fs::write(&workspace, workspace_before).unwrap();
+            std::fs::write(&workspace, workspace_before).expect("setup endpoint change without own key keeps persisted provider: isolated fixture workspace must remain accessible");
 
             let source = std::sync::Arc::new(
-                crate::config::ConfigSource::load_at(&cwd, global.clone()).unwrap(),
+                crate::config::ConfigSource::load_at(&cwd, global.clone()).expect("setup endpoint change without own key keeps persisted provider: the load_at fixture operation uses valid inputs"),
             );
             assert!(
                 crate::kit::atoms::CONFIG_SOURCE_HANDLE
@@ -505,33 +339,33 @@ fn test_setup_endpoint_change_without_own_key_keeps_persisted_provider() {
                     .is_ok()
             );
 
-            let mut state = state_from_config(&source.loaded_merged());
+            let mut state = super::state_from_config(&source.loaded_merged());
             assert_eq!(
                 state.providers[0].api_key, "global-secret",
                 "加载后的候选应包含从 global 继承的凭据"
             );
             state.providers[0].base_url = "https://changed.example/v1".into();
 
-            let error =
-                save_setup(&state).expect_err("accepted snapshot 无可用 provider 时必须拒绝保存");
+            let error = super::save_setup(&state)
+                .expect_err("accepted snapshot 无可用 provider 时必须拒绝保存");
             assert!(
                 error.to_string().contains("no usable active provider"),
                 "错误必须说明 accepted 配置没有可用 provider: {error}"
             );
 
             assert_eq!(
-                std::fs::read(&workspace).unwrap(),
+                std::fs::read(&workspace).expect("setup endpoint change without own key keeps persisted provider: the fixture storage and layout must support the requested operation"),
                 workspace_before.as_bytes(),
                 "拒绝保存时不得写工作区文件"
             );
-            assert_eq!(std::fs::read(&global).unwrap(), global_before);
+            assert_eq!(std::fs::read(&global).expect("setup endpoint change without own key keeps persisted provider: the fixture storage and layout must support the requested operation"), global_before);
             assert!(
                 !std::fs::read_to_string(&workspace)
-                    .unwrap()
+                    .expect("setup endpoint change without own key keeps persisted provider: the fixture storage and layout must support the requested operation")
                     .contains("global-secret")
             );
 
-            let reloaded = crate::config::ConfigSource::load_at(&cwd, global).unwrap();
+            let reloaded = crate::config::ConfigSource::load_at(&cwd, global).expect("setup endpoint change without own key keeps persisted provider: the load_at fixture operation uses valid inputs");
             let merged = reloaded.loaded_merged();
             let provider = merged
                 .config
@@ -549,127 +383,6 @@ fn test_setup_endpoint_change_without_own_key_keeps_persisted_provider() {
     );
 }
 
-/// [回归测试] 已有 `openai_responses` provider（含 apiKey/auth/endpoint/models）
-/// 重开 `/setup` 保存时，表单投影不得把原始协议或认证引用改写为 `openai`。
-#[test]
-fn test_reopened_setup_preserves_openai_responses_provider() {
-    isolated(
-        "test_reopened_setup_preserves_openai_responses_provider",
-        || {
-            for key in [
-                "ANTHROPIC_API_KEY",
-                "OPENAI_API_KEY",
-                "CODEX_API_KEY",
-                "ANTHROPIC_BASE_URL",
-                "OPENAI_BASE_URL",
-                "CODEX_BASE_URL",
-            ] {
-                // SAFETY: 当前用例独占子进程，且尚未派发任何任务。
-                unsafe { std::env::remove_var(key) };
-            }
-            let root = std::env::current_dir().unwrap();
-            let home = PathBuf::from(std::env::var_os("HOME").unwrap());
-            let cwd = root.join("workspace");
-            std::fs::create_dir_all(cwd.join(".peri")).unwrap();
-            let global = home.join(".peri/settings.json");
-            let responses_url = "https://api.openai.com/v1/responses";
-            let cfg: crate::config::PeriConfig = serde_json::from_value(serde_json::json!({
-                "config": {
-                    "active_alias": "opus",
-                    "profiles": {
-                        "opus": {
-                            "provider": "codex",
-                            "model": "gpt-6-astra",
-                            "contextWindow": 64000
-                        }
-                    },
-                    "providers": [{
-                        "id": "codex",
-                        "name": "Keep Responses",
-                        "type": "openai_responses",
-                        "apiKey": "responses-key",
-                        "baseUrl": responses_url,
-                        "auth": {"kind": "api_key"},
-                        "models": {
-                            "fable": "gpt-6-astra",
-                            "opus": "gpt-6-astra",
-                            "sonnet": "gpt-6.1-sol",
-                            "haiku": "gpt-6-luna"
-                        }
-                    }]
-                }
-            }))
-            .unwrap();
-            crate::config::save_to(&cfg, &global).unwrap();
-            let global_before = std::fs::read(&global).unwrap();
-            std::fs::write(
-                cwd.join(".peri/settings.json"),
-                r#"{"config":{"language":"en"}}"#,
-            )
-            .unwrap();
-            let sentinel = root.join(".peri/settings.json");
-            std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
-            std::fs::write(&sentinel, "do-not-touch-sentinel").unwrap();
-
-            let source = std::sync::Arc::new(
-                crate::config::ConfigSource::load_at(&cwd, global.clone()).unwrap(),
-            );
-            assert!(
-                crate::kit::atoms::CONFIG_SOURCE_HANDLE
-                    .set(source.clone())
-                    .is_ok()
-            );
-
-            let state = state_from_config(&source.loaded_merged());
-            assert_eq!(state.step, SetupStep::Form, "已有 provider 直接进入 Form");
-            assert_eq!(state.providers.len(), 1);
-            assert_eq!(state.providers[0].provider_id, "codex");
-
-            let merged = save_setup(&state).expect("既有 Responses provider 必须可保存");
-            let provider = merged
-                .config
-                .providers
-                .iter()
-                .find(|provider| provider.id == "codex")
-                .expect("既有 provider 必须保留");
-            assert_eq!(provider.provider_type, "openai_responses");
-            assert_eq!(
-                serde_json::to_value(&provider.auth).unwrap(),
-                serde_json::json!({"kind": "api_key"})
-            );
-            assert_eq!(provider.api_key, "responses-key");
-            assert_eq!(provider.base_url, responses_url);
-            assert_eq!(provider.models.fable, "gpt-6-astra");
-            assert_eq!(provider.models.opus, "gpt-6-astra");
-            assert_eq!(provider.models.sonnet, "gpt-6.1-sol");
-            assert_eq!(provider.models.haiku, "gpt-6-luna");
-            assert_eq!(provider.name.as_deref(), Some("Keep Responses"));
-
-            let disk = crate::config::ConfigSource::load_at(&cwd, global.clone())
-                .unwrap()
-                .loaded_merged();
-            let provider = disk
-                .config
-                .providers
-                .iter()
-                .find(|provider| provider.id == "codex")
-                .expect("落盘后 provider 必须保留");
-            assert_eq!(provider.provider_type, "openai_responses");
-            assert_eq!(
-                serde_json::to_value(&provider.auth).unwrap(),
-                serde_json::json!({"kind": "api_key"})
-            );
-            assert_eq!(provider.base_url, responses_url);
-            assert_eq!(provider.models.haiku, "gpt-6-luna");
-            assert_eq!(std::fs::read(&global).unwrap(), global_before);
-            assert_eq!(
-                std::fs::read_to_string(&sentinel).unwrap(),
-                "do-not-touch-sentinel"
-            );
-        },
-    );
-}
-
 #[test]
 fn test_wizard_replaces_broken_active_selection_with_usable_profile() {
     // 普通 provider：修复为默认档位绑定 opus
@@ -682,7 +395,7 @@ fn test_wizard_replaces_broken_active_selection_with_usable_profile() {
         providers: vec![plain],
         ..Default::default()
     };
-    let merged = merge_setup(&draft, cfg);
+    let merged = super::merge_setup(&draft, cfg);
     assert!(crate::app::agent::LlmProvider::from_config(&merged).is_some());
     assert_eq!(merged.config.active_alias, "opus");
 
@@ -694,7 +407,7 @@ fn test_wizard_replaces_broken_active_selection_with_usable_profile() {
         providers: vec![PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1].to_migrated()],
         ..Default::default()
     };
-    let merged = merge_setup(&draft, cfg);
+    let merged = super::merge_setup(&draft, cfg);
     assert!(crate::app::agent::LlmProvider::from_config(&merged).is_some());
     assert_eq!(merged.config.active_alias, "sonnet");
 }
@@ -730,18 +443,19 @@ async fn test_connectivity_http_status_and_errors_do_not_expose_url_or_body() {
         ),
         ("not an HTTP response: private-body", false),
     ] {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("connectivity http status and errors do not expose url or body: fixture task and request must complete successfully");
+        let address = listener.local_addr().expect("connectivity http status and errors do not expose url or body: the fixture listener must expose its bound local address");
         let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
+            let (mut stream, _) = listener.accept().await.expect("connectivity http status and errors do not expose url or body: fixture task and request must complete successfully");
             let mut request = [0; 4096];
-            let received = stream.read(&mut request).await.unwrap();
+            let received = stream.read(&mut request).await.expect("connectivity http status and errors do not expose url or body: fixture task and request must complete successfully");
             assert!(received > 0, "客户端应发送 HTTP 请求");
-            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(response.as_bytes()).await.expect("connectivity http status and errors do not expose url or body: fixture task and request must complete successfully");
         });
         let result =
-            test_connectivity(&format!("http://{address}/v1?credential=private-query")).await;
-        server.await.unwrap();
+            super::test_connectivity(&format!("http://{address}/v1?credential=private-query"))
+                .await;
+        server.await.expect("connectivity http status and errors do not expose url or body: fixture task and request must complete successfully");
         assert_eq!(result.0, expected_success);
         assert!(!result.1.contains("private-query"));
         assert!(!result.1.contains("private-body"));
@@ -756,7 +470,7 @@ async fn test_connectivity_rejects_embedded_credentials_safely() {
         "bad-url?key=private-query",
         "file:///private-path",
     ] {
-        let (success, message) = test_connectivity(url).await;
+        let (success, message) = super::test_connectivity(url).await;
         assert!(!success);
         assert!(!message.contains("private-"));
         assert!(!message.contains(url));
@@ -767,19 +481,19 @@ async fn test_connectivity_rejects_embedded_credentials_safely() {
 #[tokio::test]
 async fn test_connectivity_stalled_http_response_times_out() {
     use tokio::io::AsyncReadExt;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("connectivity stalled http response times out: fixture task and request must complete successfully");
+    let address = listener.local_addr().expect("connectivity stalled http response times out: the fixture listener must expose its bound local address");
     let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let (mut stream, _) = listener.accept().await.expect("connectivity stalled http response times out: fixture task and request must complete successfully");
         let mut request = [0; 4096];
-        let received = stream.read(&mut request).await.unwrap();
+        let received = stream.read(&mut request).await.expect("connectivity stalled http response times out: fixture task and request must complete successfully");
         assert!(received > 0, "客户端应发送 HTTP 请求");
         std::future::pending::<()>().await;
         drop(stream);
     });
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(7),
-        test_connectivity(&format!("http://{address}")),
+        super::test_connectivity(&format!("http://{address}")),
     )
     .await;
     server.abort();
@@ -794,11 +508,11 @@ async fn test_connectivity_stalled_http_response_times_out() {
 fn test_persisted_provider_type_change_preserves_identity_and_active_binding() {
     let mut provider = MigratedProvider::new(ProviderType::Anthropic);
     provider.api_key = "test-only".into();
-    let cfg = build_wizard_config(&SetupWizardState {
+    let cfg = super::build_wizard_config(&SetupWizardState {
         providers: vec![provider],
         ..Default::default()
     });
-    let mut draft = state_from_config(&cfg);
+    let mut draft = super::state_from_config(&cfg);
     let provider = &mut draft.providers[0];
     provider.provider_type.cycle();
     provider.refresh_provider_defaults();
@@ -807,7 +521,7 @@ fn test_persisted_provider_type_change_preserves_identity_and_active_binding() {
         provider.base_url,
         ProviderType::OpenAiCompatible.default_base_url()
     );
-    let merged = merge_setup(&draft, cfg);
+    let merged = super::merge_setup(&draft, cfg);
     assert_eq!(merged.config.providers.len(), 1);
     assert_eq!(merged.config.profiles.opus.provider, "anthropic");
     assert!(matches!(
@@ -827,59 +541,54 @@ fn test_new_provider_type_change_keeps_matching_default_identity() {
 /// [回归测试] 向导不提供已有身份改名；手动输入不能留下孤立旧绑定。
 #[test]
 fn test_persisted_provider_id_cannot_be_edited_or_saved_as_another_id() {
-    let cfg = build_wizard_config(&SetupWizardState {
+    let cfg = super::build_wizard_config(&SetupWizardState {
         providers: vec![PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1].to_migrated()],
         ..Default::default()
     });
-    let mut draft = state_from_config(&cfg);
+    let mut draft = super::state_from_config(&cfg);
     draft.form_focus = FormField::ProviderId;
     assert!(!draft.active_field_is_editable());
     draft.set_active_field_value("other".into());
     assert_eq!(draft.providers[0].provider_id, "peri");
     draft.providers[0].provider_id = "other".into();
     assert!(
-        save_setup(&draft).is_err(),
+        super::save_setup(&draft).is_err(),
         "非法改名应在任何磁盘读写前拒绝"
     );
 }
 
 #[test]
 fn test_provider_identity_provenance_survives_state_roundtrip() {
-    let cfg = build_wizard_config(&SetupWizardState {
+    let cfg = super::build_wizard_config(&SetupWizardState {
         providers: vec![PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1].to_migrated()],
         ..Default::default()
     });
-    let state = state_from_config(&cfg);
-    let encoded = serde_json::to_value(state).unwrap();
-    let restored: SetupWizardState = serde_json::from_value(encoded).unwrap();
+    let state = super::state_from_config(&cfg);
+    let encoded = serde_json::to_value(state).expect(
+        "provider identity provenance survives state roundtrip: fixture must serialize to JSON",
+    );
+    let restored: SetupWizardState = serde_json::from_value(encoded).expect("provider identity provenance survives state roundtrip: fixture JSON must match the expected schema");
     assert!(!restored.providers[0].provider_id_is_editable());
     let mut old_provider =
-        serde_json::to_value(PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1].to_migrated()).unwrap();
+        serde_json::to_value(PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1].to_migrated()).expect(
+            "provider identity provenance survives state roundtrip: fixture must serialize to JSON",
+        );
     old_provider
         .as_object_mut()
-        .unwrap()
+        .expect("provider identity provenance survives state roundtrip: fixture must have the expected variant")
         .remove("original_provider_id");
-    let restored: MigratedProvider = serde_json::from_value(old_provider).unwrap();
+    let restored: MigratedProvider = serde_json::from_value(old_provider).expect("provider identity provenance survives state roundtrip: fixture JSON must match the expected schema");
     assert!(restored.provider_id_is_editable());
 }
 
 /// 独立子进程内的全局 key + 工作区 fixture。
 fn write_inherited_key_fixture() -> (PathBuf, PathBuf, PathBuf, Vec<u8>) {
-    for key in [
-        "ANTHROPIC_API_KEY",
-        "OPENAI_API_KEY",
-        "CODEX_API_KEY",
-        "ANTHROPIC_BASE_URL",
-        "OPENAI_BASE_URL",
-        "CODEX_BASE_URL",
-    ] {
-        // SAFETY: 当前用例独占子进程，且尚未派发任何任务。
-        unsafe { std::env::remove_var(key) };
-    }
-    let root = std::env::current_dir().unwrap();
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    let root = std::env::current_dir()
+        .expect("write inherited key fixture: isolated fixture workspace must remain accessible");
+    let home = PathBuf::from(std::env::var_os("HOME").expect("write inherited key fixture: the isolated fixture environment must contain its configured value"));
     let cwd = root.join("workspace");
-    std::fs::create_dir_all(cwd.join(".peri")).unwrap();
+    std::fs::create_dir_all(cwd.join(".peri"))
+        .expect("write inherited key fixture: isolated fixture workspace must remain accessible");
     let global = home.join(".peri/settings.json");
     let cfg: crate::config::PeriConfig = serde_json::from_value(serde_json::json!({
         "config": {
@@ -907,109 +616,26 @@ fn write_inherited_key_fixture() -> (PathBuf, PathBuf, PathBuf, Vec<u8>) {
             }]
         }
     }))
-    .unwrap();
-    crate::config::save_to(&cfg, &global).unwrap();
-    let global_before = std::fs::read(&global).unwrap();
+    .expect("write inherited key fixture: fixture JSON must match the expected schema");
+    crate::config::save_to(&cfg, &global)
+        .expect("write inherited key fixture: the save_to fixture operation uses valid inputs");
+    let global_before = std::fs::read(&global)
+        .expect("write inherited key fixture: isolated fixture workspace must remain accessible");
     let workspace = cwd.join(".peri/settings.json");
-    std::fs::write(&workspace, r#"{"config":{"language":"zh-CN"}}"#).unwrap();
+    std::fs::write(&workspace, r#"{"config":{"language":"zh-CN"}}"#)
+        .expect("write inherited key fixture: isolated fixture workspace must remain accessible");
     (cwd, global, workspace, global_before)
 }
 
-/// [回归测试] 保存失败时 finish_setup 不得发布保存前候选，也不得完成 setup。
-#[test]
-fn test_finish_setup_never_publishes_credential_stripped_candidate() {
-    isolated(
-        "test_finish_setup_never_publishes_credential_stripped_candidate",
-        || {
-            let (cwd, global, workspace, global_before) = write_inherited_key_fixture();
-            let workspace_before = std::fs::read(&workspace).unwrap();
-            let source = std::sync::Arc::new(
-                crate::config::ConfigSource::load_at(&cwd, global.clone()).unwrap(),
-            );
-            assert!(
-                crate::kit::atoms::CONFIG_SOURCE_HANDLE
-                    .set(source.clone())
-                    .is_ok()
-            );
-            let original = source.loaded_merged();
-            let handle = std::sync::Arc::new(parking_lot::RwLock::new(original.clone()));
-            assert!(
-                crate::kit::atoms::PERI_CONFIG_HANDLE
-                    .set(handle.clone())
-                    .is_ok()
-            );
+#[path = "setup_wizard_test/configuration_persistence.rs"]
+mod configuration_persistence;
 
-            let mut state = state_from_config(&original);
-            state.from_command = true;
-            state.save_in_progress = true;
-            state.providers[0].base_url = "https://changed.example/v1".into();
-            SETUP_WIZARD.set(state.clone());
-
-            let runtime = tokio::runtime::Runtime::new().unwrap();
-            runtime.block_on(crate::kit::setup_wizard::finish_setup(state));
-
-            assert_eq!(
-                *handle.read(),
-                original,
-                "失败时运行态必须保持已持久化配置，不得发布候选"
-            );
-            assert!(!*crate::kit::atoms::SETUP_COMPLETED.state().read());
-            let wizard = SETUP_WIZARD.state();
-            let current = wizard.read();
-            assert!(current.submit_error.is_some());
-            assert!(!current.save_in_progress);
-            drop(current);
-            assert_eq!(std::fs::read(&workspace).unwrap(), workspace_before);
-            assert_eq!(std::fs::read(&global).unwrap(), global_before);
-            assert!(
-                !std::fs::read_to_string(&workspace)
-                    .unwrap()
-                    .contains("global-secret")
-            );
-        },
-    );
+fn isolated(name: &str, scenario: fn()) {
+    let module = module_path!()
+        .split_once("::")
+        .expect("the test module has a crate prefix")
+        .1;
+    run_isolated(module, name, scenario);
 }
 
-/// [回归测试] 保存成功时 finish_setup 发布 authority 接纳的 accepted snapshot。
-#[test]
-fn test_finish_setup_publishes_accepted_snapshot() {
-    isolated("test_finish_setup_publishes_accepted_snapshot", || {
-        let (cwd, global, workspace, global_before) = write_inherited_key_fixture();
-        let source = std::sync::Arc::new(
-            crate::config::ConfigSource::load_at(&cwd, global.clone()).unwrap(),
-        );
-        assert!(
-            crate::kit::atoms::CONFIG_SOURCE_HANDLE
-                .set(source.clone())
-                .is_ok()
-        );
-        let original = source.loaded_merged();
-        let handle = std::sync::Arc::new(parking_lot::RwLock::new(original.clone()));
-        assert!(
-            crate::kit::atoms::PERI_CONFIG_HANDLE
-                .set(handle.clone())
-                .is_ok()
-        );
-
-        let mut state = state_from_config(&original);
-        state.from_command = false;
-        state.save_in_progress = true;
-        SETUP_WIZARD.set(state.clone());
-
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(crate::kit::setup_wizard::finish_setup(state));
-
-        let accepted = crate::config::ConfigSource::load_at(&cwd, global.clone())
-            .unwrap()
-            .loaded_merged();
-        assert_eq!(*handle.read(), accepted, "只能发布 accepted snapshot");
-        assert!(*crate::kit::atoms::SETUP_COMPLETED.state().read());
-        assert!(SETUP_WIZARD.state().read().submit_error.is_none());
-        assert_eq!(std::fs::read(&global).unwrap(), global_before);
-        assert!(
-            !std::fs::read_to_string(&workspace)
-                .unwrap()
-                .contains("global-secret")
-        );
-    });
-}
+use super::{build_wizard_config, merge_setup, save_setup, state_from_config};

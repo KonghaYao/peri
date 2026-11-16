@@ -1,6 +1,14 @@
 //! `auth_policy` 纯函数回归：自动采用、作用域、状态化阻断与 token 新鲜度。
 
-use super::*;
+use super::AuthAction;
+use super::AuthFailure;
+use super::AuthViewState;
+use super::HostConfigAuthScope;
+use super::IdentityBlock;
+use super::IdentityReadiness;
+use super::PlanDraft;
+use super::TokenFreshness;
+
 use crate::application::operations::OutcomeUnknownReason;
 use crate::chatgpt_auth::{AccountStatus, AuthTarget, LogoutOutcome};
 
@@ -26,6 +34,7 @@ fn plan(subject: &str, client_id: &str) -> PlanDraft {
     }
 }
 
+#[must_use]
 fn status(subject: &str, client_id: &str, plan_enabled: bool) -> AccountStatus {
     AccountStatus {
         account_ref: "work".into(),
@@ -41,7 +50,7 @@ fn status(subject: &str, client_id: &str, plan_enabled: bool) -> AccountStatus {
 fn adopt_vacant_identity_for_current_scope() {
     let mut draft = plan("", "");
     let view = AuthViewState::SignedIn(status("verified-subject", "verified-client", true));
-    assert!(adopt_if_verified(
+    assert!(super::adopt_if_verified(
         &mut draft,
         &view,
         &scope("work"),
@@ -55,7 +64,7 @@ fn adopt_vacant_identity_for_current_scope() {
 fn adopt_compatible_partial_identity_without_overwrite() {
     let mut draft = plan("verified-subject", "");
     let view = AuthViewState::SignedIn(status("verified-subject", "verified-client", true));
-    assert!(adopt_if_verified(
+    assert!(super::adopt_if_verified(
         &mut draft,
         &view,
         &scope("work"),
@@ -68,7 +77,7 @@ fn adopt_compatible_partial_identity_without_overwrite() {
 fn do_not_overwrite_different_identity() {
     let mut draft = plan("saved-subject", "saved-client");
     let view = AuthViewState::SignedIn(status("verified-subject", "verified-client", true));
-    assert!(!adopt_if_verified(
+    assert!(!super::adopt_if_verified(
         &mut draft,
         &view,
         &scope("work"),
@@ -77,17 +86,17 @@ fn do_not_overwrite_different_identity() {
     assert_eq!(draft.subject, "saved-subject");
     assert_eq!(draft.client_id, "saved-client");
     assert!(matches!(
-        readiness(&draft, &view, &scope("work"), &scope("work")),
+        super::readiness(&draft, &view, &scope("work"), &scope("work")),
         IdentityReadiness::Conflict(_)
     ));
-    assert!(save_block(&draft, &view, &scope("work"), &scope("work")).is_none());
+    assert!(super::save_block(&draft, &view, &scope("work"), &scope("work")).is_none());
 }
 
 #[test]
 fn do_not_adopt_for_other_scope() {
     let mut draft = plan("", "");
     let view = AuthViewState::SignedIn(status("verified-subject", "verified-client", true));
-    assert!(!adopt_if_verified(
+    assert!(!super::adopt_if_verified(
         &mut draft,
         &view,
         &scope("work"),
@@ -95,7 +104,7 @@ fn do_not_adopt_for_other_scope() {
     ));
     assert!(draft.needs_identity());
     assert_eq!(
-        save_block(&draft, &view, &scope("work"), &scope("other")),
+        super::save_block(&draft, &view, &scope("work"), &scope("other")),
         Some(IdentityBlock::ScopeStale)
     );
 }
@@ -104,14 +113,14 @@ fn do_not_adopt_for_other_scope() {
 fn do_not_adopt_without_plan_scope() {
     let mut draft = plan("", "");
     let view = AuthViewState::SignedIn(status("verified-subject", "verified-client", false));
-    assert!(!adopt_if_verified(
+    assert!(!super::adopt_if_verified(
         &mut draft,
         &view,
         &scope("work"),
         &scope("work")
     ));
     assert_eq!(
-        save_block(&draft, &view, &scope("work"), &scope("work")),
+        super::save_block(&draft, &view, &scope("work"), &scope("work")),
         Some(IdentityBlock::NoPlanScope)
     );
 }
@@ -121,19 +130,19 @@ fn checked_unchecked_signed_out_failed_mismatch_map_to_blocks() {
     let draft = plan("", "");
     let current = scope("work");
     assert_eq!(
-        save_block(&draft, &AuthViewState::Checking, &current, &current),
+        super::save_block(&draft, &AuthViewState::Checking, &current, &current),
         Some(IdentityBlock::Checking)
     );
     assert_eq!(
-        save_block(&draft, &AuthViewState::Unchecked, &current, &current),
+        super::save_block(&draft, &AuthViewState::Unchecked, &current, &current),
         Some(IdentityBlock::Unchecked)
     );
     assert_eq!(
-        save_block(&draft, &AuthViewState::SignedOut, &current, &current),
+        super::save_block(&draft, &AuthViewState::SignedOut, &current, &current),
         Some(IdentityBlock::SignedOut)
     );
     assert_eq!(
-        save_block(
+        super::save_block(
             &draft,
             &AuthViewState::Failed(AuthFailure::Unavailable),
             &current,
@@ -142,7 +151,7 @@ fn checked_unchecked_signed_out_failed_mismatch_map_to_blocks() {
         Some(IdentityBlock::Failed(AuthFailure::Unavailable))
     );
     assert_eq!(
-        save_block(
+        super::save_block(
             &draft,
             &AuthViewState::OutcomeUnknown(OutcomeUnknownReason::WaitCancelled),
             &current,
@@ -151,7 +160,7 @@ fn checked_unchecked_signed_out_failed_mismatch_map_to_blocks() {
         Some(IdentityBlock::OutcomeUnknown)
     );
     assert_eq!(
-        save_block(
+        super::save_block(
             &draft,
             &AuthViewState::LoggedOut(LogoutOutcome {
                 local_cleared: true,
@@ -174,7 +183,7 @@ fn complete_reference_is_not_blocked_by_signed_out_or_failed_status() {
         AuthViewState::Checking,
         AuthViewState::Unchecked,
     ] {
-        assert_eq!(save_block(&draft, &view, &current, &current), None);
+        assert_eq!(super::save_block(&draft, &view, &current, &current), None);
     }
 }
 

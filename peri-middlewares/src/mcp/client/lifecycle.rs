@@ -8,7 +8,8 @@ use crate::mcp::builtin::runtime::{
     BUILTIN_CONVERGE_TIMEOUT,
 };
 use peri_acp_types::ports::McpPoolShutdownReport;
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 pub(super) enum ServiceShutdownState {
     Idle,
@@ -169,6 +170,7 @@ impl McpClientPool {
     /// 无归属条目的 server（配置来源、dynamic 投影）对所有会话可见；有归属的
     /// 仅对归属会话可见——同一 ACP 连接下不同会话各自声明 server 时，工具不得
     /// 跨会话泄漏。
+    #[must_use]
     pub fn is_visible_to_session(&self, server_name: &str, session_id: &str) -> bool {
         match self.acp_owners.read().get(server_name) {
             Some(owner) => owner == session_id,

@@ -1,4 +1,11 @@
-use super::*;
+use super::ConfigSource;
+use super::HashMap;
+use super::McpServerConfig;
+use super::McpServerConfigValidationError;
+use super::TransportConfig;
+use super::TransportError;
+use super::TransportKind;
+use super::BUILTIN_CONNECT_TIMEOUT;
 
 fn test_config() -> McpServerConfig {
     McpServerConfig {
@@ -238,13 +245,14 @@ fn test_builtin_unknown_instance_is_typed_error() {
     // 名字不在注册表内的一律 typed error（不含路径 / env / 凭据）。
     for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
         assert!(
-            require_known_builtin_instance(instance.name).is_ok(),
+            super::require_known_builtin_instance(instance.name).is_ok(),
             "注册表实例 `{}` 必须可解析（未实现的预留名不得留在注册表内）",
             instance.name
         );
     }
     for unknown in ["not-a-builtin", "some-user-server", ""] {
-        let err = require_known_builtin_instance(unknown).expect_err("未注册实例名必须被拒绝");
+        let err =
+            super::require_known_builtin_instance(unknown).expect_err("未注册实例名必须被拒绝");
         assert!(matches!(err, TransportError::UnknownBuiltinInstance { .. }));
         let text = err.to_string();
         assert!(

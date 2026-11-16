@@ -228,13 +228,24 @@ impl AcpTuiClient {
 
     pub(crate) async fn fail_startup_restore(&self, error: &AcpError) {
         let _operation = self.lifecycle.operation_gate().lock().await;
-        *self.restore_error.lock().unwrap() = Some(error.to_string());
-        *self.startup_restore_target.lock().unwrap() = None;
+        *self
+            .restore_error
+            .lock()
+            .expect("restore_error mutex must not be poisoned") = Some(error.to_string());
+        *self
+            .startup_restore_target
+            .lock()
+            .expect("startup_restore_target mutex must not be poisoned") = None;
         self.startup_restore_tx.send_replace(false);
     }
 
     pub(super) fn check_restore_error(&self) -> Result<(), AcpError> {
-        match self.restore_error.lock().unwrap().as_ref() {
+        match self
+            .restore_error
+            .lock()
+            .expect("restore_error mutex must not be poisoned")
+            .as_ref()
+        {
             Some(error) => Err(AcpError::new(-32602, error.clone())),
             None => Ok(()),
         }

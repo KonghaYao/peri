@@ -269,7 +269,7 @@ impl CloudTarget {
     pub(super) fn load() -> Self {
         let env = load_env();
         let (raw_url, token) = required_credentials(&env);
-        let credential = SessionStoreCredential::new(token.clone()).unwrap_or_else(|error| {
+        let credential = SessionStoreCredential::try_new(token.clone()).unwrap_or_else(|error| {
             panic!("cloud experiment credential rejected: {error}");
         });
         let endpoint = RemoteEndpoint::parse(&raw_url, None).unwrap_or_else(|error| {
@@ -714,7 +714,7 @@ async fn cloud_engine_read_only_probe() {
 async fn cloud_sdk_connection_read_only_probe() {
     let env = load_env();
     let (raw_url, token) = required_credentials(&env);
-    let credential = match SessionStoreCredential::new(token.clone()) {
+    let credential = match SessionStoreCredential::try_new(token.clone()) {
         Ok(credential) => credential,
         Err(error) => {
             println!("PROBE credential_error={error}");

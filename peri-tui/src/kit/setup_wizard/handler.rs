@@ -1,7 +1,18 @@
-use crate::app::setup_wizard::*;
+use crate::app::setup_wizard;
+use crate::app::setup_wizard::FormField;
+use crate::app::setup_wizard::FormMode;
+use crate::app::setup_wizard::LANGUAGE_OPTIONS;
+use crate::app::setup_wizard::MigratedProvider;
+use crate::app::setup_wizard::PROVIDER_PRESETS;
+use crate::app::setup_wizard::ProviderType;
+use crate::app::setup_wizard::SetupSource;
+use crate::app::setup_wizard::SetupStep;
+use crate::app::setup_wizard::SetupWizardState;
 use crate::i18n;
-use crate::kit::atoms::{self, SETUP_WIZARD};
-use crate::kit::panel_mouse::{ListLayout, hit_item, hit_row};
+use crate::kit::atoms;
+use crate::kit::atoms::SETUP_WIZARD;
+
+use crate::kit::panel_mouse::ListLayout;
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui_kit::prelude::EventResult;
 
@@ -41,7 +52,7 @@ pub(super) fn wizard_click(
     match state.step {
         SetupStep::Language => {
             // 布局：空行 + prompt + 空行（header 3），每语言项 2 行（label + 空行）
-            if let Some(idx) = hit_item(
+            if let Some(idx) = crate::kit::panel_mouse::hit_item(
                 mouse,
                 area,
                 ListLayout {
@@ -60,7 +71,7 @@ pub(super) fn wizard_click(
         }
         SetupStep::Choose => {
             // 布局：空行 + prompt + 空行（header 3），每项 3 行（label + desc + 空行）
-            if let Some(idx) = hit_item(
+            if let Some(idx) = crate::kit::panel_mouse::hit_item(
                 mouse,
                 area,
                 ListLayout {
@@ -79,7 +90,7 @@ pub(super) fn wizard_click(
             }
         }
         SetupStep::ChatGpt => {
-            if let Some(idx) = hit_item(
+            if let Some(idx) = crate::kit::panel_mouse::hit_item(
                 mouse,
                 area,
                 ListLayout {
@@ -98,7 +109,7 @@ pub(super) fn wizard_click(
         }
         SetupStep::Preset => {
             // 布局：空行 + prompt + 空行（header 3），每预设 1 行
-            if let Some(idx) = hit_item(
+            if let Some(idx) = crate::kit::panel_mouse::hit_item(
                 mouse,
                 area,
                 ListLayout {
@@ -123,14 +134,17 @@ pub(super) fn wizard_click(
                 if state.providers.is_empty() {
                     cur += 2; // "no providers" + 空行
                 }
-                for (i, mp) in state.providers.iter().enumerate() {
-                    let item_h = if mp.base_url.is_empty() { 7u16 } else { 8u16 };
-                    if visual >= cur && visual < cur + item_h {
-                        state.browse_cursor = i;
-                        handle_browse_keys(state, enter);
-                        return true;
+                {
+                    let iteration_items = state.providers.iter().enumerate();
+                    for (i, mp) in iteration_items {
+                        let item_h = if mp.base_url.is_empty() { 7u16 } else { 8u16 };
+                        if visual >= cur && visual < cur + item_h {
+                            state.browse_cursor = i;
+                            handle_browse_keys(state, enter);
+                            return true;
+                        }
+                        cur += item_h;
                     }
-                    cur += item_h;
                 }
                 // submit 行（submit_error 存在时多 2 行）
                 if state.submit_error.is_some() {
@@ -152,7 +166,7 @@ pub(super) fn wizard_click(
                     FormField::TestConnectivity,
                     FormField::ApiKey,
                 ];
-                if let Some(idx) = hit_row(
+                if let Some(idx) = crate::kit::panel_mouse::hit_row(
                     mouse.row,
                     area,
                     ListLayout {
@@ -176,7 +190,7 @@ pub(super) fn wizard_click(
                     FormField::HaikuModel,
                     FormField::Confirm,
                 ];
-                if let Some(idx) = hit_row(
+                if let Some(idx) = crate::kit::panel_mouse::hit_row(
                     mouse.row,
                     area,
                     ListLayout {
@@ -293,7 +307,7 @@ fn handle_choose_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm:
             state.submit_error = None;
             match state.source {
                 SetupSource::MigrateClaudeCode => {
-                    if !migrate_from_claude_code(state, None) {
+                    if !setup_wizard::migrate_from_claude_code(state, None) {
                         state.source = SetupSource::CustomApi;
                         state.choose_cursor = 0;
                         state.submit_error = Some(i18n::tr("setup-migration-failed"));

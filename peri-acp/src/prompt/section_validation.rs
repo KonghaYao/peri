@@ -18,7 +18,7 @@ use peri_acp_types::meta_harness::MetaHarnessState;
 use peri_acp_types::model::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
 use peri_agent::middleware::{PromptSection, PromptSectionZone};
 
-use super::{placeholder_tokens, KNOWN_PLACEHOLDERS};
+use super::KNOWN_PLACEHOLDERS;
 
 /// 单段覆盖文本的 UTF-8 字节上限。
 ///
@@ -98,7 +98,7 @@ pub(crate) fn validate_section_override(
     if text.contains(SYSTEM_PROMPT_DYNAMIC_BOUNDARY) {
         return Err(OverrideRejection::ReservedBoundaryToken);
     }
-    for token in placeholder_tokens(text) {
+    for token in crate::prompt::prompt_template::placeholder_tokens(text) {
         let sample = bounded_token(&token);
         if zone == PromptSectionZone::Cached {
             return Err(OverrideRejection::CachedDynamicPlaceholder(sample));

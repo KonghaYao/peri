@@ -2,7 +2,8 @@
 //!
 //! 新增的 spool/compression 新键用例已按 §8 映射迁至 `observability_spool_test.rs`。
 
-use super::{resolve, LangfuseConfig, ENVIRONMENT_KEYS};
+use super::LangfuseConfig;
+use super::ENVIRONMENT_KEYS;
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -10,7 +11,7 @@ fn resolve_ok(
     settings: &serde_json::Value,
     environment: &BTreeMap<String, String>,
 ) -> LangfuseConfig {
-    resolve(settings, environment).expect("测试配置必须解析成功")
+    super::resolve(settings, environment).expect("测试配置必须解析成功")
 }
 
 /// §6 的 11 个新键与默认值。

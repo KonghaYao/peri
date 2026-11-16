@@ -1,6 +1,7 @@
 //! Tests for shell_detail panel helpers.
-use super::*;
-use crate::kit::atoms::{BgDisplayEntry, BgLiveDetail, BgLiveStatus};
+use super::OutputSection;
+use super::i18n;
+
 use serial_test::serial;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -19,7 +20,7 @@ fn test_output_section_uses_preview_when_present() {
         output_preview: Some("done".to_string()),
         ..Default::default()
     };
-    match output_section(Some(&live), None) {
+    match super::output_section(Some(&live), None) {
         OutputSection::Preview(p) => assert_eq!(p, "done"),
         _ => panic!("expected preview"),
     }
@@ -50,7 +51,7 @@ fn test_resolve_shell_detail_context_after_removed_from_bg_tasks() {
         created_at: Instant::now(),
         completed_at: Some(Instant::now()),
     }];
-    let ctx = resolve_shell_detail_context(&[], &display, &live, Some("s-done"))
+    let ctx = super::resolve_shell_detail_context(&[], &display, &live, Some("s-done"))
         .expect("completed shell still resolvable");
     assert_eq!(ctx.summary, "echo done");
 }
@@ -71,7 +72,7 @@ fn test_build_shell_lines_non_empty_when_only_live_projection() {
         },
     );
     let theme = peri_theme::atoms::THEME_ATOM.state().read().clone();
-    let lines = build_shell_detail_lines(Some("s1"), &[], &[], &live, theme.as_ref());
+    let lines = super::build_shell_detail_lines(Some("s1"), &[], &[], &live, theme.as_ref());
     assert!(
         !lines.is_empty(),
         "drawer should stay populated after bar row expires"
@@ -85,7 +86,13 @@ fn test_output_section_running_without_preview() {
         ..Default::default()
     };
     assert!(matches!(
-        output_section(Some(&live), None),
+        super::output_section(Some(&live), None),
         OutputSection::RunningNoStream
     ));
 }
+
+use crate::kit::atoms::BgDisplayEntry;
+
+use crate::kit::atoms::BgLiveDetail;
+
+use crate::kit::atoms::BgLiveStatus;

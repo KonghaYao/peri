@@ -32,37 +32,37 @@
 //! 边界：本文件不实现生产代码；不修改 `mcp_v4_startup_test.rs` 的既有断言，也不修改
 //! `mcp_v4_wire_fixture_test.rs` 的既有命题（只在那里补充 V-02 需要的 seam 与可见性）。
 
-use std::{
-    ffi::OsString,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
-};
+use std::ffi::OsString;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
-use peri_acp_types::builtin_mcp::{find as find_builtin_instance, original_tool_name_of_effective};
-use peri_acp_types::{
-    event::{ExecutorEvent, TurnStatus},
-    interaction::{
-        ApprovalDecision, InteractionContext, InteractionResponse, TrustedInteractionOwner,
-        UserInteractionBroker,
-    },
-    permission::{PermissionMode, SharedPermissionMode},
-    session::ExecutionFailureKind,
-};
+use peri_acp_types::builtin_mcp;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::event::TurnStatus;
+use peri_acp_types::interaction::ApprovalDecision;
+use peri_acp_types::interaction::InteractionContext;
+use peri_acp_types::interaction::InteractionResponse;
+use peri_acp_types::interaction::TrustedInteractionOwner;
+use peri_acp_types::interaction::UserInteractionBroker;
+use peri_acp_types::permission::PermissionMode;
+use peri_acp_types::permission::SharedPermissionMode;
+use peri_acp_types::session::ExecutionFailureKind;
 use peri_agent::session::FrozenContext;
-use peri_middlewares::permission::{default_requires_approval, is_edit_tool};
+use peri_middlewares::permission;
 use serial_test::serial;
 
-use super::{
-    executor_flow_tests::MockEventSink,
-    mcp_v4_wire_fixture::{
-        run_wire_prompt, run_wire_prompt_with_frozen, ExtraServer, ScriptedToolCall,
-        WireFixtureHarness, WireScriptedModel, WEB_ARTIFACT_CAPABILITIES,
-        WIRE_FIXTURE_ECHO_EFFECTIVE_NAME, WIRE_FIXTURE_SERVER_NAME,
-    },
-};
+use super::executor_flow_tests::MockEventSink;
+use super::mcp_v4_wire_fixture;
+use super::mcp_v4_wire_fixture::ExtraServer;
+use super::mcp_v4_wire_fixture::ScriptedToolCall;
+use super::mcp_v4_wire_fixture::WireFixtureHarness;
+use super::mcp_v4_wire_fixture::WireScriptedModel;
+use super::mcp_v4_wire_fixture::WEB_ARTIFACT_CAPABILITIES;
+use super::mcp_v4_wire_fixture::WIRE_FIXTURE_ECHO_EFFECTIVE_NAME;
+use super::mcp_v4_wire_fixture::WIRE_FIXTURE_SERVER_NAME;
 use crate::session::executor::{FrozenSessionData, SessionContext};
 
 // ── 夹具 ─────────────────────────────────────────────────────────────────────
@@ -225,7 +225,7 @@ async fn builtin_instances_expose_frozen_effective_names_on_first_model_request(
 
     let sink = Arc::new(MockEventSink::new());
     let model = Arc::new(WireScriptedModel::new(vec![]));
-    let result = run_wire_prompt(
+    let result = mcp_v4_wire_fixture::run_wire_prompt(
         harness
             .session_context("mcp-v4-builtin-first-request")
             .await,
@@ -277,7 +277,7 @@ async fn builtin_instances_expose_frozen_effective_names_on_first_model_request(
     // v4-part-4（wave 3）的同一 XOR 判据：`workspace` 实例的 7 个文件工具从**裸名**
     // 换成 原始工具名（7 项均由 system_mcp_tools 选中）。
     // 期望值从注册表**派生**，不写第二份名单 —— 注册表是唯一的名字权威。
-    let workspace = find_builtin_instance("workspace").expect("workspace 必须在已实现实例注册表内");
+    let workspace = builtin_mcp::find("workspace").expect("workspace 必须在已实现实例注册表内");
     for tool in workspace.tools {
         assert!(
             names.iter().any(|name| name == tool.original_name),
@@ -394,7 +394,7 @@ async fn builtin_instance_closure_changes_only_the_first_model_request_surface()
 
         let sink = Arc::new(MockEventSink::new());
         let model = Arc::new(WireScriptedModel::new(vec![]));
-        let result = run_wire_prompt_with_frozen(
+        let result = mcp_v4_wire_fixture::run_wire_prompt_with_frozen(
             harness.session_context("mcp-v4-builtin-closure").await,
             &sink,
             &model,
@@ -472,7 +472,7 @@ async fn mcp_middleware_closure_removes_every_mcp_tool_from_first_model_request(
 
     let sink = Arc::new(MockEventSink::new());
     let model = Arc::new(WireScriptedModel::new(vec![]));
-    let result = run_wire_prompt_with_frozen(
+    let result = mcp_v4_wire_fixture::run_wire_prompt_with_frozen(
         harness.session_context("mcp-v4-builtin-mcp-closure").await,
         &sink,
         &model,
@@ -548,7 +548,7 @@ async fn closed_web_tool_call_never_reaches_approval_or_wire() {
     let ctx =
         session_context_with_broker(&harness, "mcp-v4-builtin-closed-diff", Arc::clone(&broker))
             .await;
-    let result = run_wire_prompt_with_frozen(
+    let result = mcp_v4_wire_fixture::run_wire_prompt_with_frozen(
         ctx,
         &sink,
         &model,
@@ -659,7 +659,12 @@ async fn closed_web_tool_call_never_reaches_approval_or_wire() {
 #[serial]
 async fn builtin_injection_off_removes_capabilities_without_fallback() {
     // 判定面基线：必须在 `PERI_MCP_BUILTIN=off` 生效**之前**取值。
-    let policy_probe = |name: &str| (default_requires_approval(name), is_edit_tool(name));
+    let policy_probe = |name: &str| {
+        (
+            permission::default_requires_approval(name),
+            permission::is_edit_tool(name),
+        )
+    };
     let policy_baseline: Vec<(bool, bool)> = WEB_ARTIFACT_CAPABILITIES
         .iter()
         .map(|(_, effective)| policy_probe(effective))
@@ -683,35 +688,34 @@ async fn builtin_injection_off_removes_capabilities_without_fallback() {
     // 逐名 parity（IF-D6 / A4 判定型）：effective name 的判定必须等于其原始名的判定。
     for (bare, effective) in WEB_ARTIFACT_CAPABILITIES {
         assert_eq!(
-            original_tool_name_of_effective(effective),
+            builtin_mcp::original_tool_name_of_effective(effective),
             Some(bare),
             "`{effective}` 必须命中归一表并给出原始名 `{bare}`（IF-D15 唯一归一入口）"
         );
         assert_eq!(
-            default_requires_approval(effective),
-            default_requires_approval(bare),
+            permission::default_requires_approval(effective),
+            permission::default_requires_approval(bare),
             "off 下 `{effective}` 的审批判定仍须等于原始名 `{bare}` 的判定"
         );
         assert_eq!(
-            is_edit_tool(effective),
-            is_edit_tool(bare),
+            permission::is_edit_tool(effective),
+            permission::is_edit_tool(bare),
             "off 下 `{effective}` 的编辑类判定仍须等于原始名 `{bare}` 的判定"
         );
     }
     // 反证：与冻结名仅差大小写的**未知名**不命中归一表 ⇒ 走既有 `mcp__*` 保守路径。
     assert_eq!(
-        original_tool_name_of_effective("mcp__web__fetch"),
+        builtin_mcp::original_tool_name_of_effective("mcp__web__fetch"),
         None,
         "未知名不得被归一（不得含 sanitize / 大小写折叠 / `mcp__` 反拆）"
     );
     assert!(
-        default_requires_approval("mcp__web__fetch"),
+        permission::default_requires_approval("mcp__web__fetch"),
         "未知 `mcp__*` 在 off 下仍保守要求审批（保守语义不得被 env 放宽）"
     );
 
     assert!(
-        harness.pool().get_client("web").is_none()
-            && harness.pool().get_client("artifact").is_none(),
+        harness.pool().client("web").is_none() && harness.pool().client("artifact").is_none(),
         "off 时两个 builtin 实例都不得被注册（`BuiltinInjectionPolicy::none()`）"
     );
     let mut servers: Vec<String> = harness
@@ -729,7 +733,7 @@ async fn builtin_injection_off_removes_capabilities_without_fallback() {
 
     let sink = Arc::new(MockEventSink::new());
     let model = Arc::new(WireScriptedModel::new(vec![]));
-    let result = run_wire_prompt(
+    let result = mcp_v4_wire_fixture::run_wire_prompt(
         harness.session_context("mcp-v4-builtin-off").await,
         &sink,
         &model,
@@ -792,7 +796,7 @@ async fn system_dependency_failure_is_fatal_even_with_builtin_instances_live() {
 
     let sink = Arc::new(MockEventSink::new());
     let model = Arc::new(WireScriptedModel::new(vec![]));
-    let result = run_wire_prompt(
+    let result = mcp_v4_wire_fixture::run_wire_prompt(
         harness.session_context("mcp-v4-builtin-fatal").await,
         &sink,
         &model,

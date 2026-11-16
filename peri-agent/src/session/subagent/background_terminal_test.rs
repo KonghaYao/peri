@@ -1,10 +1,12 @@
 //! 后台 child 的终态兜底：没有投递路由时也必须一次写定终态与工作意图。
 
-use super::*;
 use crate::agent::events::BackgroundTaskResult;
 use crate::session::test_resources::mock::MockSessionResources;
 use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::thread::AgentStatus;
+use peri_acp_types::thread::ThreadId;
 use peri_acp_types::thread::WorkState;
+use std::sync::Arc;
 
 fn result() -> BackgroundTaskResult {
     BackgroundTaskResult {
@@ -32,11 +34,18 @@ async fn persisted(store: &MockSessionResources, status: AgentStatus) -> Backgro
     store
         .set_work_state(&ThreadId::from("child"), WorkState::Working)
         .await
-        .unwrap();
+        .expect("the set work state fixture result is required for this assertion");
     let mut outcome = result();
     let store_ref: &dyn SessionResources = store;
     assert!(
-        persist_background_terminal(Some(store_ref), "child", status, &mut outcome, None).await,
+        crate::session::subagent::background::persist_background_terminal(
+            Some(store_ref),
+            "child",
+            status,
+            &mut outcome,
+            None
+        )
+        .await,
         "有存储时终态兜底必须成功"
     );
     outcome
@@ -51,7 +60,7 @@ async fn background_without_route_settles_done_idle() {
     let meta = store
         .load_session_meta(&ThreadId::from("child"))
         .await
-        .unwrap();
+        .expect("the load session meta fixture result is required for this assertion");
     assert_eq!(meta.agent_status, AgentStatus::Done);
     assert_eq!(meta.work_state, WorkState::Idle);
     assert_eq!(store.status_writes(), 1, "终态只能由一个写入点提交");
@@ -66,7 +75,7 @@ async fn background_without_route_settles_error_idle() {
     let meta = store
         .load_session_meta(&ThreadId::from("child"))
         .await
-        .unwrap();
+        .expect("the load session meta fixture result is required for this assertion");
     assert_eq!(meta.agent_status, AgentStatus::Error);
     assert_eq!(meta.work_state, WorkState::Idle);
     assert_eq!(store.status_writes(), 1, "终态只能由一个写入点提交");
@@ -77,7 +86,14 @@ async fn background_without_route_settles_error_idle() {
 async fn background_without_resources_fails_closed() {
     let mut outcome = result();
     assert!(
-        !persist_background_terminal(None, "child", AgentStatus::Done, &mut outcome, None).await
+        !crate::session::subagent::background::persist_background_terminal(
+            None,
+            "child",
+            AgentStatus::Done,
+            &mut outcome,
+            None
+        )
+        .await
     );
     assert!(!outcome.success);
     assert!(

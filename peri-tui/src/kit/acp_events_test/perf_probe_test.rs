@@ -5,8 +5,10 @@
 //! 等价于旧实现的「每事件全量重建」），用同一 state 形状对比成本差。
 //! 运行：`cargo test -p peri-tui --lib perf_probe -- --ignored --nocapture`
 
-use super::*;
-use crate::kit::stream_data::{TuiTextChunk, TuiToolEnded, TuiToolStarted};
+use super::AcpEventData;
+use super::BridgeState;
+use super::SessionPhase;
+use super::serial;
 
 fn tool_started(i: usize) -> AcpEventData {
     AcpEventData::ToolStarted(TuiToolStarted {
@@ -31,14 +33,14 @@ fn tool_ended(i: usize) -> AcpEventData {
 
 /// 用真实 handler 造 committed 数据：每轮 ToolStarted+ToolEnded → TurnSuspended 归档。
 pub(super) fn build_state(units: usize) -> BridgeState {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     crate::kit::acp_events::render::reset_tool_group_cache();
     let mut i = 0usize;
     while state.committed.len() < units {
         state.phase = SessionPhase::PromptRunning;
-        dispatch_and_notify(&mut state, &tool_started(i));
-        dispatch_and_notify(&mut state, &tool_ended(i));
-        dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+        super::dispatch_and_notify(&mut state, &tool_started(i));
+        super::dispatch_and_notify(&mut state, &tool_ended(i));
+        super::dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
         i += 1;
     }
     state
@@ -127,14 +129,14 @@ fn perf_probe_push_view_models() {
         both("B_tool_started", units, 100, &mut |s, cold| {
             c += 1;
             reset_if(cold);
-            dispatch_and_notify(s, &tool_started(10_000 + c));
+            super::dispatch_and_notify(s, &tool_started(10_000 + c));
         });
 
         // C. 流式文本（每事件 +16 字符）
         both("C_text_chunk16", units, 200, &mut |s, cold| {
             s.phase = SessionPhase::PromptRunning;
             reset_if(cold);
-            dispatch_and_notify(
+            super::dispatch_and_notify(
                 s,
                 &AcpEventData::TextChunk(TuiTextChunk {
                     text: "0123456789abcdef".into(),
@@ -165,17 +167,17 @@ fn perf_probe_push_view_models() {
             c += 1;
             s.phase = SessionPhase::PromptRunning;
             reset_if(cold);
-            dispatch_and_notify(s, &tool_started(20_000 + c));
+            super::dispatch_and_notify(s, &tool_started(20_000 + c));
             reset_if(cold);
-            dispatch_and_notify(s, &tool_ended(20_000 + c));
+            super::dispatch_and_notify(s, &tool_ended(20_000 + c));
             reset_if(cold);
-            dispatch_and_notify(s, &AcpEventData::TurnSuspended);
+            super::dispatch_and_notify(s, &AcpEventData::TurnSuspended);
         });
 
         // E. 每次 ReAct 迭代边界的 TurnCommitted（goal 自驱路径，不带状态变化）
         both("E_turn_committed", units, 200, &mut |s, cold| {
             reset_if(cold);
-            dispatch_and_notify(
+            super::dispatch_and_notify(
                 s,
                 &AcpEventData::TurnCommitted {
                     messages_json: "[]".into(),
@@ -185,3 +187,9 @@ fn perf_probe_push_view_models() {
         });
     }
 }
+
+use crate::kit::stream_data::TuiTextChunk;
+
+use crate::kit::stream_data::TuiToolEnded;
+
+use crate::kit::stream_data::TuiToolStarted;

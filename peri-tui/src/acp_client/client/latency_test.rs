@@ -1,20 +1,21 @@
 use std::time::Duration;
 
-use peri_acp::transport::{
-    mpsc::{MpscServerTransport, mpsc_transport_pair},
-    types::{IncomingMessage, RequestId},
-};
-use peri_acp_types::{messages::MessageContent, session::UserInputQueueReceipt};
+use peri_acp::transport::mpsc::MpscServerTransport;
+use peri_acp::transport::types::IncomingMessage;
+use peri_acp::transport::types::RequestId;
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::session::UserInputQueueReceipt;
 use serde_json::json;
 
-use super::*;
+use super::{AcpEvent, AcpNotification, AcpTuiClient, EnqueueUserInputRequest, Ordering};
+
 use crate::acp_client::interaction_lifecycle::TransitionKind;
 
 async fn next_request(server: &MpscServerTransport, expected: &str) -> RequestId {
     let incoming = tokio::time::timeout(Duration::from_secs(2), server.recv())
         .await
-        .unwrap()
-        .unwrap();
+        .expect("next request: fixture task and request must complete successfully")
+        .expect("next request: fixture task and request must complete successfully");
     let IncomingMessage::Request { id, method, .. } = incoming else {
         panic!("expected {expected}, got {incoming:?}");
     };
@@ -40,7 +41,7 @@ fn enqueue() -> EnqueueUserInputRequest {
 /// [回归测试] 首次 snapshot 的 generation 绑定必须先于同时到达的 canonical Delivered。
 #[tokio::test]
 async fn test_initial_snapshot_reserves_generation_before_delivery() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, mut notifications) = AcpTuiClient::new(transport);
     client.force_stable_for_test("s", false);
     client.user_input_queue.store(true, Ordering::Release);
@@ -51,20 +52,20 @@ async fn test_initial_snapshot_reserves_generation_before_delivery() {
     server.send_notification("peri/agent_event", json!({
         "sessionId":"s", "event_json":serde_json::to_string(&AcpEvent::UserInputDelivered {
             generation:"g".into(), input_id:"input".into(), content:MessageContent::text("synthetic input"),
-        }).unwrap(),
-    })).await.unwrap();
+        }).expect("initial snapshot reserves generation before delivery: fixture data must serialize to JSON"),
+    })).await.expect("initial snapshot reserves generation before delivery: fixture must serialize to JSON");
     assert!(notifications.try_recv().is_err());
     let mut response = snapshot();
     response["activeRequestId"] = json!("run");
     server
         .send_response(request_id, Ok(response))
         .await
-        .unwrap();
-    binding.await.unwrap().unwrap();
+        .expect("initial snapshot reserves generation before delivery: fixture task and request must complete successfully");
+    binding.await.expect("initial snapshot reserves generation before delivery: fixture task and request must complete successfully").expect("initial snapshot reserves generation before delivery: fixture task and request must complete successfully");
     assert!(matches!(
         tokio::time::timeout(Duration::from_secs(2), notifications.recv())
             .await
-            .unwrap(),
+            .expect("initial snapshot reserves generation before delivery: the fixture channel must exchange its expected message"),
         Some(AcpNotification::AgentEvent {
             event: AcpEvent::UserInputRunStarted { .. },
             ..
@@ -73,7 +74,7 @@ async fn test_initial_snapshot_reserves_generation_before_delivery() {
     assert!(matches!(
         tokio::time::timeout(Duration::from_secs(2), notifications.recv())
             .await
-            .unwrap(),
+            .expect("initial snapshot reserves generation before delivery: the fixture channel must exchange its expected message"),
         Some(AcpNotification::AgentEvent {
             event: AcpEvent::UserInputDelivered { .. },
             ..
@@ -85,7 +86,7 @@ async fn test_initial_snapshot_reserves_generation_before_delivery() {
 /// [回归测试] 慢 snapshot 曾跨 RPC 持有 gate，新的输入和取消无法准入。
 #[tokio::test]
 async fn test_slow_snapshot_allows_enqueue_before_snapshot_receipt() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("s", false);
     assert!(client.lifecycle.bind_user_input_generation("s", 1, "g"));
@@ -102,26 +103,26 @@ async fn test_slow_snapshot_allows_enqueue_before_snapshot_receipt() {
         client.lifecycle.operation_gate().lock(),
     )
     .await
-    .unwrap();
+    .expect("slow snapshot allows enqueue before snapshot receipt: fixture task and request must complete successfully");
     drop(gate);
     server
         .send_response(enqueue_id, Ok(json!({"snapshot":snapshot(),"results":[]})))
         .await
-        .unwrap();
-    let receipt: UserInputQueueReceipt = submitting.await.unwrap().unwrap();
+        .expect("slow snapshot allows enqueue before snapshot receipt: fixture task and request must complete successfully");
+    let receipt: UserInputQueueReceipt = submitting.await.expect("slow snapshot allows enqueue before snapshot receipt: fixture task and request must complete successfully").expect("slow snapshot allows enqueue before snapshot receipt: fixture task and request must complete successfully");
     assert_eq!(receipt.snapshot.generation, "g");
     server
         .send_response(snapshot_id, Ok(snapshot()))
         .await
-        .unwrap();
-    refreshing.await.unwrap().unwrap();
+        .expect("slow snapshot allows enqueue before snapshot receipt: fixture task and request must complete successfully");
+    refreshing.await.expect("slow snapshot allows enqueue before snapshot receipt: fixture task and request must complete successfully").expect("slow snapshot allows enqueue before snapshot receipt: fixture task and request must complete successfully");
     client.close();
 }
 
 /// [回归测试] 缩短 gate 后，迟到的受理响应不能跨 load epoch 被重新应用。
 #[tokio::test]
 async fn test_late_enqueue_receipt_is_unknown_after_session_boundary() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("s", false);
     let submitting_client = client.clone();
@@ -133,11 +134,11 @@ async fn test_late_enqueue_receipt_is_unknown_after_session_boundary() {
         client.lifecycle.operation_gate().lock(),
     )
     .await
-    .unwrap();
+    .expect("late enqueue receipt is unknown after session boundary: fixture task and request must complete successfully");
     let transition = client
         .lifecycle
         .begin_transition(TransitionKind::Load, Some("s".into()))
-        .unwrap();
+        .expect("late enqueue receipt is unknown after session boundary: the begin_transition fixture operation uses valid inputs");
     client
         .lifecycle
         .commit_stable(transition.generation, "s".into());
@@ -145,15 +146,15 @@ async fn test_late_enqueue_receipt_is_unknown_after_session_boundary() {
     server
         .send_response(request_id, Ok(json!({"snapshot":snapshot(),"results":[]})))
         .await
-        .unwrap();
-    assert_eq!(submitting.await.unwrap().unwrap_err().code, -32603);
+        .expect("late enqueue receipt is unknown after session boundary: fixture task and request must complete successfully");
+    assert_eq!(submitting.await.expect("late enqueue receipt is unknown after session boundary: the fixture operation must finish without an inner failure").expect_err("late enqueue receipt is unknown after session boundary: the invalid fixture must be rejected").code, -32603);
     client.close();
 }
 
 /// [回归测试] 旧 snapshot 不得覆盖更新 run，也不能在 Stop 后重开已退役 run。
 #[tokio::test]
 async fn test_late_snapshot_does_not_reopen_stopped_or_newer_run() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, mut notifications) = AcpTuiClient::new(transport);
     client.force_stable_for_test("s", false);
     assert!(client.lifecycle.bind_user_input_generation("s", 1, "g"));
@@ -173,7 +174,7 @@ async fn test_late_snapshot_does_not_reopen_stopped_or_newer_run() {
             client.lifecycle.operation_gate().lock(),
         )
         .await
-        .unwrap();
+        .expect("late snapshot does not reopen stopped or newer run: fixture task and request must complete successfully");
         if stop {
             client.lifecycle.cancel_active_prompt();
         } else {
@@ -190,8 +191,8 @@ async fn test_late_snapshot_does_not_reopen_stopped_or_newer_run() {
         server
             .send_response(request_id, Ok(response))
             .await
-            .unwrap();
-        refreshing.await.unwrap().unwrap();
+            .expect("late snapshot does not reopen stopped or newer run: fixture task and request must complete successfully");
+        refreshing.await.expect("late snapshot does not reopen stopped or newer run: fixture task and request must complete successfully").expect("late snapshot does not reopen stopped or newer run: fixture task and request must complete successfully");
         assert_eq!(
             client
                 .lifecycle
@@ -207,7 +208,7 @@ async fn test_late_snapshot_does_not_reopen_stopped_or_newer_run() {
 /// [回归测试] 尚未看到 run 的 Pause 也必须使已发出的 snapshot 恢复令牌失效。
 #[tokio::test]
 async fn test_snapshot_identity_invalidates_after_pause_without_local_run() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("s", false);
     assert!(client.lifecycle.bind_user_input_generation("s", 1, "g"));
@@ -215,10 +216,10 @@ async fn test_snapshot_identity_invalidates_after_pause_without_local_run() {
     let refreshing = tokio::spawn(async move { refreshing_client.user_input_snapshot("s").await });
     let request_id = next_request(&server, "session/input/snapshot").await;
     let gate = client.lifecycle.operation_gate().lock().await;
-    let before = client.lifecycle.user_input_snapshot_identity("s").unwrap();
+    let before = client.lifecycle.user_input_snapshot_identity("s").expect("snapshot identity invalidates after pause without local run: the user_input_snapshot_identity fixture operation uses valid inputs");
     client.lifecycle.cancel_active_prompt();
     assert_ne!(
-        client.lifecycle.user_input_snapshot_identity("s").unwrap(),
+        client.lifecycle.user_input_snapshot_identity("s").expect("snapshot identity invalidates after pause without local run: the user_input_snapshot_identity fixture operation uses valid inputs"),
         before
     );
     drop(gate);
@@ -227,8 +228,10 @@ async fn test_snapshot_identity_invalidates_after_pause_without_local_run() {
     server
         .send_response(request_id, Ok(response))
         .await
-        .unwrap();
-    refreshing.await.unwrap().unwrap();
+        .expect("snapshot identity invalidates after pause without local run: fixture task and request must complete successfully");
+    refreshing.await.expect("snapshot identity invalidates after pause without local run: fixture task and request must complete successfully").expect("snapshot identity invalidates after pause without local run: fixture task and request must complete successfully");
     assert!(client.lifecycle.active_execution(false).is_none());
     client.close();
 }
+
+use peri_acp::transport::AcpTransport;

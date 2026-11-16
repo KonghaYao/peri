@@ -5,6 +5,7 @@
 //! `warn!` callsite，会把兴趣缓存为 `never`，使日志断言空洞通过。
 //! 每个集成测试文件是独立进程，全局订阅只安装一次。
 
+use std::fmt::Debug;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -35,7 +36,7 @@ struct CaptureSubscriber {
 struct RenderedFields(String);
 
 impl Visit for RenderedFields {
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
         if !self.0.is_empty() {
             self.0.push(' ');
         }
@@ -112,11 +113,11 @@ async fn publishing_beyond_capacity_without_pull_consumer_logs_no_drop() {
     );
     capture.clear();
 
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().expect("the temporary test directory must be available");
     let facade =
         peri_resources::sessions::SessionResourcesImpl::open(tmp.path().join("threads.db"))
             .await
-            .unwrap();
+            .expect("the temporary session store fixture must open successfully");
     let controller = Controller::new(Arc::new(facade) as Arc<dyn SessionResources>);
     let mut sub = controller.subscribe();
     let env = EventEnvelope::new(
@@ -131,7 +132,7 @@ async fn publishing_beyond_capacity_without_pull_consumer_logs_no_drop() {
     for _ in 0..2048 {
         controller.publish(env.clone());
         assert_eq!(
-            sub.try_recv().unwrap().unwrap().envelope,
+            sub.try_recv().expect("sub try recv producer must deliver the expected test event before closing").expect("publishing beyond capacity without pull consumer logs no drop: the completed fixture operation must provide its result payload").envelope,
             env,
             "订阅者按序收到每条事件"
         );

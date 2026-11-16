@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::thread;
 
-use super::*;
+use super::{PermissionMode, SharedPermissionMode};
 
 #[test]
 fn test_next_cycle() {

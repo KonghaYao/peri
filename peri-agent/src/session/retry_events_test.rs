@@ -1,7 +1,8 @@
-use super::{translate_observation, RetryEventForwarder};
+use crate::session::retry_events::RetryEventForwarder;
 use peri_acp_types::event::{AgentEventHandler, ExecutorEvent};
 use peri_model::{ModelError, RetryObservation, RetryObserver};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Default)]
 struct EventCollector(parking_lot::Mutex<Vec<ExecutorEvent>>);
@@ -31,14 +32,15 @@ fn observation() -> RetryObservation {
         .with_message("Authorization: Bearer synthetic")
         .with_body("token=synthetic-body")
         .with_causes(vec!["upstream throttle".to_owned()]);
-    RetryObservation::from_model_error(2, 4, Duration::from_millis(10), &error).unwrap()
+    RetryObservation::from_model_error(2, 4, Duration::from_millis(10), &error)
+        .expect("the from model error fixture result is required for this assertion")
 }
 
 #[test]
 fn retry_wire_keeps_message_body_and_ordered_causes() {
     let collector = Arc::new(EventCollector::default());
     let handler: Arc<dyn AgentEventHandler> = collector.clone();
-    translate_observation(&observation(), &handler);
+    crate::session::retry_events::translate_observation(&observation(), &handler);
     let events = collector.0.lock();
     let ExecutorEvent::LlmRetrying {
         error, diagnostic, ..
@@ -48,9 +50,14 @@ fn retry_wire_keeps_message_body_and_ordered_causes() {
     };
     assert!(error.contains("Bearer synthetic"));
     assert!(error.contains("token=synthetic-body"));
-    let diagnostic = diagnostic.as_ref().unwrap();
-    let restored: peri_acp_types::error::SafeModelErrorDiagnostic =
-        serde_json::from_value(serde_json::to_value(diagnostic).unwrap()).unwrap();
+    let diagnostic = diagnostic
+        .as_ref()
+        .expect("the as ref fixture result is required for this assertion");
+    let restored: peri_acp_types::error::SafeModelErrorDiagnostic = serde_json::from_value(
+        serde_json::to_value(diagnostic)
+            .expect("to_value must accept this test fixture representation"),
+    )
+    .expect("from_value must accept this test fixture representation");
     assert_eq!(&restored, diagnostic);
     assert_eq!(restored.causes(), &["upstream throttle".to_owned()]);
 }
@@ -75,7 +82,8 @@ fn retry_and_interruption_warn_without_handler_keep_execution_identity() {
         forwarder.on_retry(observation());
         assert!(forwarder.on_interrupted(observation()));
     });
-    let text = String::from_utf8(logs.0.lock().clone()).unwrap();
+    let text =
+        String::from_utf8(logs.0.lock().clone()).expect("the fixture text must be valid UTF-8");
     assert_eq!(text.lines().count(), 2);
     for line in text.lines() {
         for fact in [

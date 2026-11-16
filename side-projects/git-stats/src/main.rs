@@ -1,10 +1,10 @@
+mod analysis;
 mod commit;
 mod git;
-mod analysis;
 mod render;
 
+use chrono::{Duration, Local, NaiveDate};
 use clap::Parser;
-use chrono::{Local, NaiveDate, Duration};
 
 /// Analyze git commit activity in a time window.
 /// Shows per-person stats including commits, lines changed,
@@ -41,20 +41,25 @@ fn resolve_dates(cli: &Cli) -> (String, String) {
             .expect("Invalid --since date format, expected YYYY-MM-DD"),
         None => today - Duration::days(cli.days as i64),
     };
-    (since.format("%Y-%m-%d").to_string(), until.format("%Y-%m-%d").to_string())
+    (
+        since.format("%Y-%m-%d").to_string(),
+        until.format("%Y-%m-%d").to_string(),
+    )
 }
 
 fn main() {
     let cli = Cli::parse();
     let (since, until) = resolve_dates(&cli);
 
-    eprintln!("Analyzing commits from {} to {} in {}...", since, until, cli.repo);
+    eprintln!(
+        "Analyzing commits from {} to {} in {}...",
+        since, until, cli.repo
+    );
 
-    let commits = git::fetch_commits(&cli.repo, &since, &until)
-        .unwrap_or_else(|e| {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        });
+    let commits = git::fetch_commits(&cli.repo, &since, &until).unwrap_or_else(|e| {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    });
 
     let stats = analysis::aggregate(&commits);
     render::render_table(&stats);

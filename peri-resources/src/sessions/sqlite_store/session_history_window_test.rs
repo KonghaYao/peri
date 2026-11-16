@@ -4,7 +4,12 @@
 //! 断言以调用方可观察结果为准：读了哪些条目、返回哪些 cursor、失败分类，以及
 //! 「lookahead / 超大正文没有被解码」这类可由损坏行反证的事实。
 
-use super::*;
+use super::{
+    BaseMessage, CompactionChange, MessageFlags, PersistedPayload, RewindBoundary,
+    SqliteSessionData, SqliteThreadStore, TempDir,
+};
+use crate::sessions::data::SessionDataPort;
+
 use peri_acp_types::history_window::{
     HistoryCommittedTail, HistorySource, HistoryWindowDirection, HISTORY_WINDOW_DEFAULT_BYTE_BUDGET,
 };
@@ -21,13 +26,13 @@ const BUDGET: usize = HISTORY_WINDOW_DEFAULT_BYTE_BUDGET as usize;
 async fn session_with_history(
     history: &[PersistedPayload],
 ) -> (SqliteThreadStore, SqliteSessionData, TempDir) {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
-    data.save_new_session(&session(
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
+    data.save_new_session(&super::session(
         WINDOW_SESSION,
         workspace.cwd.to_str().unwrap(),
         &workspace,
-        frozen(WINDOW_SESSION),
+        super::frozen(WINDOW_SESSION),
     ))
     .await
     .unwrap();
@@ -56,7 +61,7 @@ fn all_ids(rows: &peri_acp_types::session_resources::HistoryWindowRows) -> Vec<M
 
 #[tokio::test]
 async fn bounds_report_range_tail_and_unknown_sessions_fail_closed() {
-    let history = payloads(3);
+    let history = super::payloads(3);
     let (_store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
 
@@ -80,7 +85,7 @@ async fn bounds_report_range_tail_and_unknown_sessions_fail_closed() {
 
 #[tokio::test]
 async fn checkpoint_is_rebuilt_from_the_latest_superseded_by_target() {
-    let history = payloads(3);
+    let history = super::payloads(3);
     let (_store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
     let summary = BaseMessage::ai("compacted summary");
@@ -132,7 +137,7 @@ async fn checkpoint_is_rebuilt_from_the_latest_superseded_by_target() {
 
 #[tokio::test]
 async fn malformed_projection_does_not_break_bounds() {
-    let history = payloads(2);
+    let history = super::payloads(2);
     let (store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
     sqlx::query("UPDATE messages SET excluded = 1, projection = ?1 WHERE message_id = ?2")
@@ -151,7 +156,7 @@ async fn malformed_projection_does_not_break_bounds() {
 
 #[tokio::test]
 async fn open_before_reads_a_bounded_range_and_pages_backwards() {
-    let history = payloads(7);
+    let history = super::payloads(7);
     let (_store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
 
@@ -214,7 +219,7 @@ async fn open_before_reads_a_bounded_range_and_pages_backwards() {
 
 #[tokio::test]
 async fn before_page_exposes_a_later_cursor() {
-    let history = payloads(7);
+    let history = super::payloads(7);
     let (_store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
 
@@ -264,7 +269,7 @@ async fn before_page_exposes_a_later_cursor() {
 
 #[tokio::test]
 async fn after_page_exposes_an_earlier_cursor() {
-    let history = payloads(7);
+    let history = super::payloads(7);
     let (_store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
     let opened = data
@@ -308,7 +313,7 @@ async fn after_page_exposes_an_earlier_cursor() {
 
 #[tokio::test]
 async fn open_entry_after_includes_the_anchor() {
-    let history = payloads(7);
+    let history = super::payloads(7);
     let (_store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
 
@@ -337,7 +342,7 @@ async fn open_entry_after_includes_the_anchor() {
 
 #[tokio::test]
 async fn seek_with_zero_before_limit_keeps_the_anchor() {
-    let history = payloads(7);
+    let history = super::payloads(7);
     let (_store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
     let tail = data
@@ -361,7 +366,7 @@ async fn seek_with_zero_before_limit_keeps_the_anchor() {
 
 #[tokio::test]
 async fn around_open_includes_the_anchor_once() {
-    let history = payloads(7);
+    let history = super::payloads(7);
     let (_store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
 
@@ -392,7 +397,7 @@ async fn around_open_includes_the_anchor_once() {
 
 #[tokio::test]
 async fn after_reads_only_later_rows_and_appends_stay_outside_the_old_tail() {
-    let history = payloads(7);
+    let history = super::payloads(7);
     let (_store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
 
@@ -441,7 +446,7 @@ async fn after_reads_only_later_rows_and_appends_stay_outside_the_old_tail() {
 
 #[tokio::test]
 async fn rewind_past_the_fixed_tail_invalidates_the_old_snapshot() {
-    let history = payloads(6);
+    let history = super::payloads(6);
     let (_store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
     let opened = data
@@ -507,7 +512,7 @@ async fn rewind_past_the_fixed_tail_invalidates_the_old_snapshot() {
 
 #[tokio::test]
 async fn seek_includes_the_anchor_and_returns_both_sides_without_gaps() {
-    let history = payloads(7);
+    let history = super::payloads(7);
     let (_store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
     let bounds = data.history_window_bounds(&id).await.unwrap();
@@ -557,7 +562,7 @@ async fn seek_includes_the_anchor_and_returns_both_sides_without_gaps() {
 
 #[tokio::test]
 async fn excluded_archive_rows_are_readable_but_lookahead_bodies_are_not() {
-    let history = payloads(4);
+    let history = super::payloads(4);
     let (_store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
     data.apply_message_projections(
@@ -594,14 +599,14 @@ async fn excluded_archive_rows_are_readable_but_lookahead_bodies_are_not() {
 
     // 多读的 lookahead 行正文永不解码：把更早一行写成不可解码内容，页仍然成功。
     // 单独建一个会话，让不可解码行成为 lookahead（更早一侧），而不是本页条目。
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let lookahead_id = "window-lookahead".to_owned();
-    data.save_new_session(&session(
+    data.save_new_session(&super::session(
         &lookahead_id,
         workspace.cwd.to_str().unwrap(),
         &workspace,
-        frozen("window-lookahead"),
+        super::frozen("window-lookahead"),
     ))
     .await
     .unwrap();
@@ -640,14 +645,14 @@ async fn excluded_archive_rows_are_readable_but_lookahead_bodies_are_not() {
 
 #[tokio::test]
 async fn oversized_entries_become_descriptors_without_decoding_the_body() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let id = WINDOW_SESSION.to_owned();
-    data.save_new_session(&session(
+    data.save_new_session(&super::session(
         WINDOW_SESSION,
         workspace.cwd.to_str().unwrap(),
         &workspace,
-        frozen(WINDOW_SESSION),
+        super::frozen(WINDOW_SESSION),
     ))
     .await
     .unwrap();
@@ -694,15 +699,15 @@ async fn oversized_entries_become_descriptors_without_decoding_the_body() {
 #[tokio::test]
 async fn body_chunks_are_bounded_and_reconstruct_the_exact_bytes() {
     let payload = PersistedPayload::Message(BaseMessage::human("正文".repeat(64)));
-    let expected = serialize_persisted_payload(&payload).unwrap();
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
+    let expected = super::serialize_persisted_payload(&payload).unwrap();
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let id = WINDOW_SESSION.to_owned();
-    data.save_new_session(&session(
+    data.save_new_session(&super::session(
         WINDOW_SESSION,
         workspace.cwd.to_str().unwrap(),
         &workspace,
-        frozen(WINDOW_SESSION),
+        super::frozen(WINDOW_SESSION),
     ))
     .await
     .unwrap();
@@ -788,7 +793,7 @@ async fn an_empty_snapshot_stays_empty_after_later_appends() {
     assert!(opened.entries.is_empty());
     assert!(opened.committed_tail.is_none());
 
-    data.append_history(&id, &payloads(2)).await.unwrap();
+    data.append_history(&id, &super::payloads(2)).await.unwrap();
     let stale = data
         .load_history_window_page(
             &id,
@@ -815,7 +820,7 @@ async fn an_empty_snapshot_stays_empty_after_later_appends() {
 
 #[tokio::test]
 async fn a_tail_from_another_session_is_rejected() {
-    let history = payloads(2);
+    let history = super::payloads(2);
     let (_store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
     let foreign = HistoryCommittedTail::new(&"other".to_owned(), history[0].id(), 1);
@@ -842,14 +847,14 @@ async fn a_tail_from_another_session_is_rejected() {
 #[tokio::test]
 async fn body_chunk_is_bounded_by_the_snapshot_tail() {
     let first = PersistedPayload::Message(BaseMessage::human("old snapshot body"));
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let id = WINDOW_SESSION.to_owned();
-    data.save_new_session(&session(
+    data.save_new_session(&super::session(
         WINDOW_SESSION,
         workspace.cwd.to_str().unwrap(),
         &workspace,
-        frozen(WINDOW_SESSION),
+        super::frozen(WINDOW_SESSION),
     ))
     .await
     .unwrap();

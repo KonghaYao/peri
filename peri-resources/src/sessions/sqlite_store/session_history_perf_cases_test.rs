@@ -1,6 +1,11 @@
 //! A04–A07 场景用例（夹具与统计口径见父模块 `history_perf_tests`）。
 
-use super::*;
+use super::{
+    ArchivedBody, BaseMessage, Duration, Fixture, FixtureRow, HistoryCursor, Instant, MessageId,
+    PersistedPayload, ARCHIVED_BODY_BYTES, DEFAULT_ITERS, DEFAULT_PAGES, DEFAULT_TRIPWIRE_ROWS,
+    INSERT_BATCH_ROWS, LIVE_BODY_BYTES, LIVE_ENTRIES, PAGE_BYTE_BUDGET, PAGE_LIMIT, PERF_SESSION,
+    UNDECODABLE_ARCHIVED_BODY,
+};
 
 // ── 用例 ──────────────────────────────────────────────────────────────────────
 
@@ -8,13 +13,13 @@ use super::*;
 #[ignore = "性能证据夹具（1 万 / 10 万 / 100 万行）与冷热计时；运行方式见 .recon/perf-evidence.md"]
 #[tokio::test]
 async fn history_perf_restore_and_paging_evidence() {
-    let sizes = env_rows();
-    let iters = env_usize("PERI_PERF_ITERS", DEFAULT_ITERS);
-    let pages = env_usize("PERI_PERF_PAGES", DEFAULT_PAGES);
+    let sizes = super::env_rows();
+    let iters = super::env_usize("PERI_PERF_ITERS", DEFAULT_ITERS);
+    let pages = super::env_usize("PERI_PERF_PAGES", DEFAULT_PAGES);
     let largest = *sizes.iter().max().expect("至少一个规模");
 
     println!("== 环境 ==");
-    for (key, value) in machine_facts() {
+    for (key, value) in super::machine_facts() {
         println!("  {key}: {value}");
     }
     println!(
@@ -25,7 +30,7 @@ async fn history_perf_restore_and_paging_evidence() {
     for size in sizes {
         println!("\n== 归档 {size} 行 ==");
         let build_started = Instant::now();
-        let fixture = build_fixture(size, ArchivedBody::Payload, ARCHIVED_BODY_BYTES).await;
+        let fixture = super::build_fixture(size, ArchivedBody::Payload, ARCHIVED_BODY_BYTES).await;
         let build_cost = build_started.elapsed().as_secs_f64();
         let db_bytes = std::fs::metadata(&fixture.db_path)
             .map(|meta| meta.len())
@@ -39,29 +44,29 @@ async fn history_perf_restore_and_paging_evidence() {
             fixture.live_bytes,
         );
 
-        let pool = fixture_pool(&fixture.db_path).await;
-        for (key, value) in storage_facts(&pool).await {
+        let pool = super::fixture_pool(&fixture.db_path).await;
+        for (key, value) in super::storage_facts(&pool).await {
             println!("  {key}: {value}");
         }
-        let (rows_in_range, excluded_rows) = row_probe(&pool, &fixture.thread).await;
+        let (rows_in_range, excluded_rows) = super::row_probe(&pool, &fixture.thread).await;
 
         println!("  -- 计划（EXPLAIN QUERY PLAN，生产语句原文） --");
         let plans_started = Instant::now();
-        let mut plans = restore_chain_plans(&pool, &fixture.thread).await;
-        plans.extend(initial_load_extras(&pool, &fixture.thread, None, PAGE_LIMIT).await);
+        let mut plans = super::restore_chain_plans(&pool, &fixture.thread).await;
+        plans.extend(super::initial_load_extras(&pool, &fixture.thread, None, PAGE_LIMIT).await);
         let anchor = fixture.live_ids[0].as_uuid().to_string();
-        plans.extend(page_body_plan(&pool, &fixture.thread, &anchor).await);
+        plans.extend(super::page_body_plan(&pool, &fixture.thread, &anchor).await);
         for evidence in &plans {
-            assert_bounded_plan(evidence);
+            super::assert_bounded_plan(evidence);
             if evidence.label.contains("active_payloads")
                 || evidence.label.contains("active_flags")
                 || evidence.label.contains("entry_positions")
                 || evidence.label.contains("history_page")
                 || evidence.label.contains("page_bodies")
             {
-                assert_located_by_index(evidence);
+                super::assert_located_by_index(evidence);
             }
-            print_plan(evidence);
+            super::print_plan(evidence);
         }
         println!(
             "  计划采集耗时 {:.3}s",
@@ -70,7 +75,7 @@ async fn history_perf_restore_and_paging_evidence() {
         pool.close().await;
 
         // 实测：恢复只返回有效段（条数与字节都对齐夹具的有效段）。
-        let facade = deployment(&fixture.db_path).await;
+        let facade = super::deployment(&fixture.db_path).await;
         let snapshot = facade
             .load_active_snapshot(&fixture.thread)
             .await
@@ -81,7 +86,7 @@ async fn history_perf_restore_and_paging_evidence() {
             .map(|payload| payload.id())
             .collect();
         assert_eq!(ids, fixture.live_ids, "有效集合必须与写入的有效段一致");
-        let decoded = decoded_bytes(&snapshot);
+        let decoded = super::decoded_bytes(&snapshot);
         assert_eq!(
             decoded, fixture.live_bytes,
             "解码的正文必须只有有效段（字节级证据）"
@@ -102,11 +107,12 @@ async fn history_perf_restore_and_paging_evidence() {
              load_active_snapshot）+ 该链不含分页/位置读取"
         );
 
-        let cold = restore_cold(&fixture.db_path, &fixture.thread, iters).await;
-        print_restore_stats("恢复 cold（每次新句柄，SQLite 页缓存为空）", &cold);
-        let hot = restore_hot(&facade, &fixture.thread, iters).await;
-        print_restore_stats("恢复 hot（同一句柄连续读取）", &hot);
-        for sample in cold.iter().chain(hot.iter()) {
+        let cold = super::restore_cold(&fixture.db_path, &fixture.thread, iters).await;
+        super::print_restore_stats("恢复 cold（每次新句柄，SQLite 页缓存为空）", &cold);
+        let hot = super::restore_hot(&facade, &fixture.thread, iters).await;
+        super::print_restore_stats("恢复 hot（同一句柄连续读取）", &hot);
+        let selected_entries = cold.iter().chain(hot.iter());
+        for sample in selected_entries {
             assert_eq!(sample.payloads, LIVE_ENTRIES, "每次恢复都只返回有效段");
             assert_eq!(sample.payload_bytes, fixture.live_bytes);
         }
@@ -154,7 +160,7 @@ async fn history_perf_restore_and_paging_evidence() {
                     page.items.iter().filter(|item| item.oversized).count(),
                     oldest,
                     3 + page.items.len(),
-                    ms(elapsed),
+                    super::ms(elapsed),
                 );
                 cursor = page.next_cursor.clone();
                 assert!(cursor.is_some(), "{pages} 页之内不得到头");
@@ -175,8 +181,8 @@ async fn history_perf_restore_and_paging_evidence() {
                     .expect("首屏页");
                 first_page.push(started.elapsed());
             }
-            print_durations("分页 hot（无游标首屏，重复读）", &first_page);
-            print_durations("分页 20 页连续遍历（含游标页）", &walk_durations);
+            super::print_durations("分页 hot（无游标首屏，重复读）", &first_page);
+            super::print_durations("分页 20 页连续遍历（含游标页）", &walk_durations);
         }
     }
 }
@@ -185,14 +191,14 @@ async fn history_perf_restore_and_paging_evidence() {
 #[ignore = "性能证据夹具；运行方式见 .recon/perf-evidence.md"]
 #[tokio::test]
 async fn history_perf_excluded_bodies_are_never_decoded() {
-    let rows = env_usize("PERI_PERF_TRIPWIRE_ROWS", DEFAULT_TRIPWIRE_ROWS);
-    let fixture = build_fixture(rows, ArchivedBody::Undecodable, 0).await;
+    let rows = super::env_usize("PERI_PERF_TRIPWIRE_ROWS", DEFAULT_TRIPWIRE_ROWS);
+    let fixture = super::build_fixture(rows, ArchivedBody::Undecodable, 0).await;
     println!(
         "== 探针夹具：归档 {rows} 行，正文为不可解码占位（{} 字节/行，合计 {} 字节） ==",
         UNDECODABLE_ARCHIVED_BODY.len(),
         fixture.archived_bytes
     );
-    let facade = deployment(&fixture.db_path).await;
+    let facade = super::deployment(&fixture.db_path).await;
 
     // 对照组：完整读取会解码归档正文，必须失败——证明占位内容真的不可解码。
     let full = facade.load_session_snapshot(&fixture.thread).await;
@@ -210,7 +216,7 @@ async fn history_perf_excluded_bodies_are_never_decoded() {
         .map(|payload| payload.id())
         .collect();
     assert_eq!(ids, fixture.live_ids, "只返回有效段");
-    let decoded = decoded_bytes(&snapshot);
+    let decoded = super::decoded_bytes(&snapshot);
     assert_eq!(decoded, fixture.live_bytes, "解码字节只等于有效段");
     println!(
         "  处理组 load_active_snapshot 成功：payloads={} flags={} 解码正文字节={}（归档 {} 行正文一条未解码）",
@@ -227,12 +233,13 @@ async fn history_perf_excluded_bodies_are_never_decoded() {
 async fn history_perf_oversize_page_carries_one_body() {
     const OVERSIZE_ROWS: usize = 6;
     const OVERSIZE_BODY_BYTES: usize = 1_250_000;
-    let fixture = build_fixture(OVERSIZE_ROWS, ArchivedBody::Payload, OVERSIZE_BODY_BYTES).await;
+    let fixture =
+        super::build_fixture(OVERSIZE_ROWS, ArchivedBody::Payload, OVERSIZE_BODY_BYTES).await;
     println!(
         "== oversize 夹具：{OVERSIZE_ROWS} 条 × >1 MiB 正文（合计 {} 字节），页目标 {PAGE_BYTE_BUDGET} 字节 ==",
         fixture.archived_bytes
     );
-    let facade = deployment(&fixture.db_path).await;
+    let facade = super::deployment(&fixture.db_path).await;
     // 首屏：最新的 3 条有效正文各自都放得进预算，超预算的归档正文被留到下一页。
     let first = facade
         .load_history_page(&fixture.thread, None, PAGE_LIMIT, PAGE_BYTE_BUDGET)
@@ -284,7 +291,7 @@ async fn history_perf_oversize_page_carries_one_body() {
             item.encoded_bytes,
             item.oversized,
             item.position,
-            ms(elapsed),
+            super::ms(elapsed),
         );
         cursor = page.next_cursor.clone();
         assert!(cursor.is_some(), "oversized 页之后游标必须继续前进");
@@ -297,12 +304,12 @@ async fn history_perf_oversize_page_carries_one_body() {
 async fn history_perf_byte_budget_bounds_page_length() {
     const ROWS: usize = 200;
     const BODY_BYTES: usize = 20 * 1024;
-    let fixture = build_fixture(ROWS, ArchivedBody::Payload, BODY_BYTES).await;
+    let fixture = super::build_fixture(ROWS, ArchivedBody::Payload, BODY_BYTES).await;
     println!(
         "== 字节预算夹具：{ROWS} 条 × 约 {BODY_BYTES} 字节正文（合计 {} 字节），页目标 {PAGE_BYTE_BUDGET} 字节 ==",
         fixture.archived_bytes
     );
-    let facade = deployment(&fixture.db_path).await;
+    let facade = super::deployment(&fixture.db_path).await;
     let started = Instant::now();
     let page = facade
         .load_history_page(&fixture.thread, None, PAGE_LIMIT, PAGE_BYTE_BUDGET)
@@ -324,7 +331,7 @@ async fn history_perf_byte_budget_bounds_page_length() {
         page.items.len(),
         bytes,
         bytes as f64 / PAGE_BYTE_BUDGET as f64 * 100.0,
-        ms(elapsed),
+        super::ms(elapsed),
         3 + page.items.len(),
     );
 }
@@ -362,7 +369,7 @@ fn compact_live_message(index: usize) -> BaseMessage {
     let id = MessageId::from(uuid::Uuid::from_u128(
         0x0000_0000_0000_7000_8000_0000_0000_0000u128 + index as u128,
     ));
-    BaseMessage::human(live_text(index, LIVE_BODY_BYTES)).with_message_id(id)
+    BaseMessage::human(super::live_text(index, LIVE_BODY_BYTES)).with_message_id(id)
 }
 
 /// 与 [`build_fixture`] 同一套落库路径，只把有效段固定为 [`COMPACT_ACTIVE_ENTRIES`]。
@@ -371,30 +378,31 @@ fn compact_live_message(index: usize) -> BaseMessage {
 async fn build_compact_read_fixture(archived_rows: usize) -> Fixture {
     let directory = tempfile::tempdir().expect("临时目录");
     let db_path = directory.path().join("threads.db");
-    let facade = deployment(&db_path).await;
+    let facade = super::deployment(&db_path).await;
     let workspace = facade
         .resolve_workspace(directory.path())
         .await
         .expect("解析工作区");
     facade
-        .create_session(&fixture_session(PERF_SESSION, &workspace))
+        .create_session(&super::fixture_session(PERF_SESSION, &workspace))
         .await
         .expect("建立会话");
     drop(facade);
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let pool = fixture_pool(&db_path).await;
+    let pool = super::fixture_pool(&db_path).await;
     let mut archived_bytes = 0usize;
     for start in (0..archived_rows).step_by(INSERT_BATCH_ROWS) {
         let end = usize::min(start + INSERT_BATCH_ROWS, archived_rows);
         let rows = (start..end)
             .map(|index| {
-                let payload = PersistedPayload::Message(BaseMessage::human(archived_text(
+                let payload = PersistedPayload::Message(BaseMessage::human(super::archived_text(
                     index,
                     ARCHIVED_BODY_BYTES,
                 )));
                 let message_id = payload.id().as_uuid().to_string();
-                let content = serialize_persisted_payload(&payload).expect("归档载荷可序列化");
+                let content = peri_acp_types::store::serialize_persisted_payload(&payload)
+                    .expect("归档载荷可序列化");
                 archived_bytes += content.len();
                 FixtureRow {
                     message_id,
@@ -404,7 +412,7 @@ async fn build_compact_read_fixture(archived_rows: usize) -> Fixture {
                 }
             })
             .collect::<Vec<_>>();
-        insert_rows(&pool, PERF_SESSION, &rows).await;
+        super::insert_rows(&pool, PERF_SESSION, &rows).await;
     }
 
     let mut live_ids = Vec::with_capacity(COMPACT_ACTIVE_ENTRIES);
@@ -413,7 +421,8 @@ async fn build_compact_read_fixture(archived_rows: usize) -> Fixture {
     for index in 0..COMPACT_ACTIVE_ENTRIES {
         let payload = PersistedPayload::Message(compact_live_message(index));
         let id = payload.id();
-        let content = serialize_persisted_payload(&payload).expect("有效载荷可序列化");
+        let content =
+            peri_acp_types::store::serialize_persisted_payload(&payload).expect("有效载荷可序列化");
         live_bytes += content.len();
         live_ids.push(id);
         live_rows.push(FixtureRow {
@@ -424,7 +433,7 @@ async fn build_compact_read_fixture(archived_rows: usize) -> Fixture {
             truncated: index == 0,
         });
     }
-    insert_rows(&pool, PERF_SESSION, &live_rows).await;
+    super::insert_rows(&pool, PERF_SESSION, &live_rows).await;
 
     sqlx::query("UPDATE threads SET message_count = ?1, updated_at = ?2 WHERE id = ?3")
         .bind((archived_rows + COMPACT_ACTIVE_ENTRIES) as i64)
@@ -493,8 +502,8 @@ async fn compact_active_snapshot_is_independent_of_archive_size() {
         );
 
         // 先证明归档行确实以 excluded=1 落库，避免「规模没写进去」被当成线性消失。
-        let pool = fixture_pool(&fixture.db_path).await;
-        let (rows_in_range, excluded_rows) = row_probe(&pool, &fixture.thread).await;
+        let pool = super::fixture_pool(&fixture.db_path).await;
+        let (rows_in_range, excluded_rows) = super::row_probe(&pool, &fixture.thread).await;
         pool.close().await;
         assert_eq!(
             excluded_rows as usize, size,
@@ -506,7 +515,7 @@ async fn compact_active_snapshot_is_independent_of_archive_size() {
             "消息总行数 = 归档 + 固定有效段"
         );
 
-        let facade = deployment(&fixture.db_path).await;
+        let facade = super::deployment(&fixture.db_path).await;
         let started = Instant::now();
         let snapshot = facade
             .load_active_snapshot(&fixture.thread)
@@ -540,7 +549,8 @@ async fn compact_active_snapshot_is_independent_of_archive_size() {
             .payloads
             .iter()
             .map(|payload| {
-                serialize_persisted_payload(payload).expect("返回的有效载荷必须可序列化")
+                peri_acp_types::store::serialize_persisted_payload(payload)
+                    .expect("返回的有效载荷必须可序列化")
             })
             .collect();
         let encoded_bytes: usize = encoded.iter().map(String::len).sum();
@@ -617,16 +627,16 @@ async fn history_segment_statements_are_index_located() {
     let directory = tempfile::tempdir().unwrap();
     let db_path = directory.path().join("history-segment-plan.db");
     // 生产的打开路径建库（schema 与索引来自同一份 canonical DDL）。
-    let resources = deployment(&db_path).await;
-    let pool = fixture_pool(&db_path).await;
+    let resources = super::deployment(&db_path).await;
+    let pool = super::fixture_pool(&db_path).await;
 
     println!("== 向前段读取的计划（EXPLAIN QUERY PLAN，生产语句原文；无夹具） ==");
-    let plans = segment_read_plans(&pool, PERF_SESSION, 1, 2, PAGE_LIMIT).await;
+    let plans = super::segment_read_plans(&pool, PERF_SESSION, 1, 2, PAGE_LIMIT).await;
     assert_eq!(plans.len(), 4);
     for evidence in &plans {
-        assert_segment_plan_bounded(evidence);
-        assert_located_by_index(evidence);
-        print_plan(evidence);
+        super::assert_segment_plan_bounded(evidence);
+        super::assert_located_by_index(evidence);
+        super::print_plan(evidence);
     }
 
     drop(resources);

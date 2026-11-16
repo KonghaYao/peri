@@ -1,17 +1,18 @@
 //! A registered run owns execution and completion publication; callers only observe it.
-use crate::{
-    journal::WorkflowJournalStore,
-    progress::WorkflowProgressStore,
-    registry::{WorkflowRunStatus, WorkflowTaskRegistry, WorkflowTaskResult},
-    runner::{WorkflowInput, WorkflowResult, WorkflowRunner},
-};
+use crate::journal::WorkflowJournalStore;
+use crate::progress::WorkflowProgressStore;
+use crate::registry::WorkflowRunStatus;
+use crate::registry::WorkflowTaskRegistry;
+use crate::registry::WorkflowTaskResult;
+use crate::runner::WorkflowInput;
+use crate::runner::WorkflowResult;
+use crate::runner::WorkflowRunner;
 use futures::FutureExt;
 use peri_acp_types::tasks::{ExternalExecutionGuard, TaskManager, TaskRegistrationTicket};
 use std::sync::{Arc, Weak};
-use tokio::{
-    sync::{oneshot, watch},
-    task::JoinHandle,
-};
+use tokio::sync::oneshot;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 /// An unpolled admission has no process to drain. Once execution starts, only
 /// an explicit cleanup result can release the session's external owner.
@@ -229,8 +230,8 @@ impl RunCompletion {
         // 必须在 done_rx 之后读取——此时 workflow 已执行完毕，
         // progress_store 已被所有 progress/event RPC 填充。
         let (agent_count, tool_calls_count) =
-            self.progress.get_run_stats(&self.run_id).unwrap_or((0, 0));
-        let phase_summaries = self.progress.get_phase_summaries(&self.run_id);
+            self.progress.run_stats(&self.run_id).unwrap_or((0, 0));
+        let phase_summaries = self.progress.phase_summaries(&self.run_id);
         let acceptance_status = self
             .journal
             .read_state(&self.run_id)

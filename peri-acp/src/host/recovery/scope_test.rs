@@ -1,6 +1,5 @@
 //! 范围分区的边界判定。
 
-use super::*;
 use peri_acp_types::recovery::{RecoveryCandidate, RecoveryScope};
 
 fn candidate(thread: &str, parent: Option<&str>) -> RecoveryCandidate {
@@ -21,7 +20,7 @@ fn root_candidate_is_split_from_children_and_order_is_kept() {
             candidate("child-b", Some("root")),
         ],
     };
-    let partition = partition(scope);
+    let partition = crate::host::recovery::recovery_partition::partition(scope);
     assert_eq!(partition.root_thread_id, "root");
     assert_eq!(
         partition.root.as_ref().map(|c| c.thread_id.as_str()),
@@ -47,7 +46,7 @@ fn idle_root_leaves_no_root_candidate_but_keeps_children() {
         root_thread_id: "root".to_owned(),
         candidates: vec![candidate("child-a", Some("root"))],
     };
-    let partition = partition(scope);
+    let partition = crate::host::recovery::recovery_partition::partition(scope);
     assert!(partition.root.is_none());
     assert_eq!(partition.children.len(), 1);
 }
@@ -61,7 +60,7 @@ fn direct_children_are_scoped_to_the_asked_thread() {
             candidate("grandchild", Some("child-a")),
         ],
     };
-    let partition = partition(scope);
+    let partition = crate::host::recovery::recovery_partition::partition(scope);
     assert_eq!(
         partition.direct_children_of(&"child-a".to_owned()),
         ["grandchild".to_owned()]

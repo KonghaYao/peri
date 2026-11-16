@@ -1,7 +1,6 @@
-use rmcp::{
-    model::{CustomRequest, CustomResult},
-    ErrorData as McpError,
-};
+use rmcp::model::CustomRequest;
+use rmcp::model::CustomResult;
+use rmcp::ErrorData as McpError;
 use std::io::BufRead;
 use std::path::{Component, Path};
 
@@ -86,7 +85,7 @@ fn read_mention_sync(cwd: &str, request: CustomRequest) -> Result<CustomResult, 
                 name.push('/');
             }
             if entries.len() == MAX_MENTION_DIRECTORY_ENTRIES + 1
-                && name >= *entries.last().unwrap()
+                && entries.last().is_some_and(|last| name >= *last)
             {
                 continue;
             }

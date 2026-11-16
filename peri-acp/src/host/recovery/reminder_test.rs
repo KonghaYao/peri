@@ -1,12 +1,14 @@
 //! 恢复提醒中的外围任务事实：`Known` 列数量与状态，`Unknown` 如实说明无法确认。
 
-use super::*;
 use peri_acp_types::ports::{LiveTask, PeripheralTasks};
+use peri_acp_types::session::MessageKind;
+use peri_acp_types::session::MessagePolicy;
+use peri_acp_types::session::MessageSource;
 
 fn body_for(peripheral_tasks: &PeripheralTasks) -> String {
     let root = "root-thread".to_string();
     let thread = root.clone();
-    recovery_reminder(&root, &thread, &[], peripheral_tasks)
+    crate::host::recovery::reminder::recovery_reminder(&root, &thread, &[], peripheral_tasks)
         .expect("恢复提醒必须可构造")
         .as_reminder()
         .body
@@ -61,7 +63,7 @@ fn unknown_peripheral_tasks_say_they_cannot_be_confirmed() {
 
 #[test]
 fn pending_recovery_predicate_matches_only_entry_defer() {
-    let trusted = recovery_reminder(
+    let trusted = crate::host::recovery::reminder::recovery_reminder(
         &"root".to_owned(),
         &"root".to_owned(),
         &[],
@@ -81,24 +83,21 @@ fn pending_recovery_predicate_matches_only_entry_defer() {
         policy: MessagePolicy::ensure_processing(),
         original_draft: None,
     };
-    assert!(is_pending_recovery(&entry(
-        MessageKind::Defer,
-        MessageSource::SessionRecovery
-    )));
-    assert!(!is_pending_recovery(&entry(
-        MessageKind::Info,
-        MessageSource::SessionRecovery
-    )));
-    assert!(!is_pending_recovery(&entry(
-        MessageKind::Defer,
-        MessageSource::SystemInjected
-    )));
+    assert!(crate::host::recovery::reminder::is_pending_recovery(
+        &entry(MessageKind::Defer, MessageSource::SessionRecovery)
+    ));
+    assert!(!crate::host::recovery::reminder::is_pending_recovery(
+        &entry(MessageKind::Info, MessageSource::SessionRecovery)
+    ));
+    assert!(!crate::host::recovery::reminder::is_pending_recovery(
+        &entry(MessageKind::Defer, MessageSource::SystemInjected)
+    ));
 
     // 同一来源的 Defer 但 payload 不是 entry 提醒：不是恢复提醒。
     let mut failures = entry(MessageKind::Defer, MessageSource::SessionRecovery);
     failures.payload = peri_acp_types::store::PersistedPayload::SystemReminder {
         id,
-        reminder: failure_notice(
+        reminder: crate::host::recovery::reminder::failure_notice(
             &"root".to_owned(),
             &[peri_acp_types::recovery::RecoveryFailure {
                 thread_id: "child".to_owned(),
@@ -108,5 +107,7 @@ fn pending_recovery_predicate_matches_only_entry_defer() {
         )
         .unwrap(),
     };
-    assert!(!is_pending_recovery(&failures));
+    assert!(!crate::host::recovery::reminder::is_pending_recovery(
+        &failures
+    ));
 }

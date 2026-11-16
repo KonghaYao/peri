@@ -1,14 +1,24 @@
-use super::*;
+use super::AgentCancellationToken;
+use super::Arc;
+use super::BaseMessage;
+use super::BaseTool;
+use super::EchoLLM;
+use super::HostFixture;
+use super::RwLock;
+use super::SessionFixture;
+use super::SubAgentTool;
+use super::SubagentLlmSource;
+use super::ThreadMeta;
 
 #[test]
 fn test_tool_name() {
-    let t = make_subagent_tool(vec![]);
+    let t = super::make_subagent_tool(vec![]);
     assert_eq!(t.name(), "Agent");
 }
 
 #[test]
 fn test_agent_parameters_required_is_empty_for_resume() {
-    let t = make_subagent_tool(vec![]);
+    let t = super::make_subagent_tool(vec![]);
     let params = t.parameters();
     // resume_thread_id 存在时 prompt 可缺省（隐式 continue），required 恒空；
     // 非 resume 路径缺 prompt 由 invoke 运行时校验兜底（test_agent_prompt_missing_returns_error）
@@ -27,7 +37,7 @@ fn test_agent_parameters_required_is_empty_for_resume() {
 
 #[test]
 fn test_agent_fork_description_declares_exclusivity_with_subagent_type() {
-    let t = make_subagent_tool(vec![]);
+    let t = super::make_subagent_tool(vec![]);
     let params = t.parameters();
     let fork_desc = params["properties"]["fork"]["description"]
         .as_str()
@@ -41,7 +51,7 @@ fn test_agent_fork_description_declares_exclusivity_with_subagent_type() {
 /// Verify error returned when prompt parameter is missing
 #[tokio::test]
 async fn test_agent_prompt_missing_returns_error() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -50,7 +60,7 @@ async fn test_agent_prompt_missing_returns_error() {
     )
     .unwrap();
 
-    let t = with_agent_face(make_subagent_tool(vec![]), dir.path()).await;
+    let t = super::with_agent_face(super::make_subagent_tool(vec![]), dir.path()).await;
     let result = t
         .invoke(
             serde_json::json!({
@@ -71,7 +81,7 @@ async fn test_agent_prompt_missing_returns_error() {
 /// Verify error returned when subagent_type parameter is missing and fork is not set
 #[tokio::test]
 async fn test_agent_subagent_type_missing_returns_error() {
-    let t = make_subagent_tool(vec![]);
+    let t = super::make_subagent_tool(vec![]);
     let result = t
         .invoke(
             serde_json::json!({
@@ -131,8 +141,8 @@ async fn test_subagent_type_fork_treated_as_fork_mode() {
 #[tokio::test]
 async fn test_tool_agent_not_found() {
     // W5：未命中判定来自资源面（空 agent 根 ⇒ 无候选），不依赖磁盘兜底。
-    let dir = tempdir().unwrap();
-    let t = with_agent_face(make_subagent_tool(vec![]), dir.path()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let t = super::with_agent_face(super::make_subagent_tool(vec![]), dir.path()).await;
     let result = t
         .invoke(
             serde_json::json!({
@@ -152,7 +162,7 @@ async fn test_tool_agent_not_found() {
 }
 #[tokio::test]
 async fn test_tool_executes_with_valid_agent_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let host = HostFixture::open_in(dir.path(), "fixture-invoke-valid").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -162,7 +172,7 @@ async fn test_tool_executes_with_valid_agent_file() {
     )
     .unwrap();
 
-    let t = host.bind(with_agent_face(make_subagent_tool(vec![]), dir.path()).await);
+    let t = host.bind(super::with_agent_face(super::make_subagent_tool(vec![]), dir.path()).await);
     let result = t
         .invoke(
             serde_json::json!({
@@ -185,7 +195,7 @@ async fn test_tool_executes_with_valid_agent_file() {
 /// description 用于 UI，未知 name 字段仍被宽容忽略。
 #[tokio::test]
 async fn test_agent_ui_and_unknown_fields_tolerated() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let host = HostFixture::open_in(dir.path(), "fixture-invoke-reserved").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -195,7 +205,7 @@ async fn test_agent_ui_and_unknown_fields_tolerated() {
     )
     .unwrap();
 
-    let t = host.bind(with_agent_face(make_subagent_tool(vec![]), dir.path()).await);
+    let t = host.bind(super::with_agent_face(super::make_subagent_tool(vec![]), dir.path()).await);
     let result = t
         .invoke(
             serde_json::json!({
@@ -224,7 +234,7 @@ async fn test_agent_ui_and_unknown_fields_tolerated() {
 #[tokio::test]
 async fn test_agent_tool_in_list() {
     // Verify SubAgentTool's tool name is correct, can join tool list
-    let t = make_subagent_tool(vec![]);
+    let t = super::make_subagent_tool(vec![]);
     assert_eq!(t.name(), "Agent");
     let def = t.definition();
     assert_eq!(def.name, "Agent");
@@ -233,7 +243,7 @@ async fn test_agent_tool_in_list() {
 /// Verify with_system_builder correctly injects system prompt
 #[tokio::test]
 async fn test_system_builder_injects_system_message() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let host = HostFixture::open_in(dir.path(), "fixture-invoke-system").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -257,7 +267,7 @@ async fn test_system_builder_injects_system_message() {
         dir.path().to_str().unwrap().to_string(),
     )
     .with_system_builder(Arc::new(|_overrides, _cwd| "tone: be concise".to_string()));
-    let t = host.bind(with_agent_face(t, dir.path()).await);
+    let t = host.bind(super::with_agent_face(t, dir.path()).await);
 
     let result = t
         .invoke(
@@ -285,7 +295,7 @@ async fn test_system_builder_injects_system_message() {
 /// LLM received messages should contain "(system: preloaded skill file)"
 #[tokio::test]
 async fn test_skill_preload_registered() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let host = HostFixture::open_in(dir.path(), "fixture-invoke-skill").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
@@ -320,10 +330,10 @@ async fn test_skill_preload_registered() {
             request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let _ = &cancellation;
-            let messages = base_messages(&request);
-            let defined = defined_tools(&request);
+            let messages = test_support::base_messages(&request);
+            let defined = test_support::defined_tools(&request);
             let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             assert!(
@@ -340,7 +350,7 @@ async fn test_skill_preload_registered() {
                         .contains("This is the test skill content.")
                 })
                 .count();
-            text_events("skill_preload_found")
+            test_support::text_events("skill_preload_found")
         }
     }
     crate::subagent::test_support::fixture_model_impl!(SkillPreloadCheckLLM);
@@ -362,7 +372,7 @@ async fn test_skill_preload_registered() {
         "workspace",
         &[("test-skill", "This is the test skill content.\n")],
     );
-    let t = host.bind(with_agent_face(t, dir.path()).await);
+    let t = host.bind(super::with_agent_face(t, dir.path()).await);
 
     let result = t
         .invoke(
@@ -390,7 +400,7 @@ async fn test_skill_preload_registered() {
 
 #[test]
 fn test_agent_description_extended() {
-    let t = make_subagent_tool(vec![]);
+    let t = super::make_subagent_tool(vec![]);
     let desc = t.description();
     assert!(
         desc.contains("Usage:"),
@@ -417,7 +427,7 @@ fn test_agent_description_extended() {
 /// Verify cancellation token can interrupt sub-agent execution
 #[tokio::test]
 async fn test_cancel_token_interrupts_subagent() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let host = HostFixture::open_in(dir.path(), "fixture-invoke-cancel").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -436,19 +446,19 @@ async fn test_cancel_token_interrupts_subagent() {
             request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let _ = &cancellation;
-            let messages = base_messages(&request);
-            let defined = defined_tools(&request);
+            let messages = test_support::base_messages(&request);
+            let defined = test_support::defined_tools(&request);
             let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             if messages
                 .iter()
                 .any(|m| matches!(m, BaseMessage::Tool { .. }))
             {
-                text_events("done")
+                test_support::text_events("done")
             } else {
-                tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
+                test_support::tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
                     "id1",
                     "nonexistent",
                     serde_json::json!({}),
@@ -476,7 +486,7 @@ async fn test_cancel_token_interrupts_subagent() {
         dir.path().to_str().unwrap().to_string(),
     )
     .with_cancel(cancel);
-    let t = host.bind(with_agent_face(t, dir.path()).await);
+    let t = host.bind(super::with_agent_face(t, dir.path()).await);
 
     let result = t
         .invoke(
@@ -499,9 +509,9 @@ async fn test_cancel_token_interrupts_subagent() {
 /// MCP 同步限制早于后台缺 owner 的降级和 fork 分支；同步 fork 仍忽略 type。
 #[tokio::test]
 async fn test_agent_invoke_mcp_background_rejection_precedes_fork_fallback() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let host = HostFixture::open_in(dir.path(), "fixture-invoke-mcp-bg").await;
-    let tool = host.bind(make_subagent_tool(vec![]));
+    let tool = host.bind(super::make_subagent_tool(vec![]));
     let messages = vec![BaseMessage::human("parent context")];
     let mut input = serde_json::json!({
         "subagent_type": "mcp__missing__agent",
@@ -529,9 +539,9 @@ async fn test_agent_invoke_mcp_background_rejection_precedes_fork_fallback() {
 /// 父 host 整体覆盖 builder 回退：空 task_manager 也不能从旧 host 拼回后台能力。
 #[tokio::test]
 async fn test_agent_invoke_parent_host_masks_fallback_runtime_and_store() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let _host = HostFixture::open_in(dir.path(), "fixture-invoke-parent-host").await;
-    let fallback_dir = tempdir().unwrap();
+    let fallback_dir = tempfile::tempdir().unwrap();
     let store = SessionFixture::open_in(dir.path()).await;
     let fallback_store = SessionFixture::open_in(fallback_dir.path()).await;
     // 父 host 必须带完整父事实：门面 + root owner + 父 thread id（child 保存的前置条件）。
@@ -553,7 +563,7 @@ async fn test_agent_invoke_parent_host_masks_fallback_runtime_and_store() {
     // 本次委派的 tool-call 身份（父侧 provenance 来源）。
     let invocation_id = "fixture-mask-invocation";
     let fallback_manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
-    let mut tool = make_subagent_tool(vec![])
+    let mut tool = super::make_subagent_tool(vec![])
         .with_session_resources(fallback_store.facade())
         .with_task_manager(fallback_manager.clone())
         .with_parent_thread_id(parent_id.clone())

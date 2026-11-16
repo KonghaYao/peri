@@ -4,10 +4,9 @@
 //! 文本存在不等于模型必然遵循，因此这里断言的是 harness 交给模型的**输入结构**。
 //! 配套声明在 `peri-acp/prompts/sections/07_runtime.md`（主 runtime 段）。
 
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -16,16 +15,24 @@ use peri_acp_types::session_resources::{
     FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
 };
 use peri_acp_types::store::PersistedPayload;
-use peri_acp_types::system_reminder::{
-    parse_system_reminders, ParsedReminderProvenance, ReminderAudience, ReminderAudiences,
-    ReminderCategory, ReminderDelivery, ReminderSeverity, ReminderSource, SystemReminder,
-    TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
-};
+
+use peri_acp_types::system_reminder::ParsedReminderProvenance;
+use peri_acp_types::system_reminder::ReminderAudience;
+use peri_acp_types::system_reminder::ReminderAudiences;
+use peri_acp_types::system_reminder::ReminderCategory;
+use peri_acp_types::system_reminder::ReminderDelivery;
+use peri_acp_types::system_reminder::ReminderSeverity;
+use peri_acp_types::system_reminder::ReminderSource;
+use peri_acp_types::system_reminder::SystemReminder;
+use peri_acp_types::system_reminder::TrustedSystemReminderFactory;
+use peri_acp_types::system_reminder::SYSTEM_REMINDER_VERSION;
 use peri_acp_types::thread::CancelPolicy;
 use peri_acp_types::workspace::SessionBinding;
 use peri_agent::agent::compact_v2::CompactConfig;
 use peri_agent::agent::react::{ReactLLM, Reasoning, StreamingContext};
-use peri_agent::agent::stages::{run_react_loop, LoopResult, StageContext};
+
+use peri_agent::agent::stages::LoopResult;
+use peri_agent::agent::stages::StageContext;
 use peri_agent::agent::token::ContextBudget;
 use peri_agent::error::AgentResult;
 use peri_agent::messages::BaseMessage;
@@ -44,13 +51,17 @@ struct BoundSession {
 
 impl BoundSession {
     async fn open() -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory =
+            tempfile::tempdir().expect("the temporary test directory must be available");
         let resources: Arc<dyn SessionResources> = Arc::new(
             SessionResourcesImpl::open(directory.path().join("authority.db"))
                 .await
-                .unwrap(),
+                .expect("the temporary session store fixture must open successfully"),
         );
-        let workspace = resources.resolve_workspace(directory.path()).await.unwrap();
+        let workspace = resources
+            .resolve_workspace(directory.path())
+            .await
+            .expect("the resolve workspace fixture result is required for this assertion");
         let thread_id = uuid::Uuid::now_v7().to_string();
         let cwd = workspace.cwd.to_string_lossy().into_owned();
         resources
@@ -69,7 +80,7 @@ impl BoundSession {
                 frozen: FrozenSnapshotBytes::new("{\"version\":1,\"test\":true}"),
             })
             .await
-            .unwrap();
+            .expect("the create session fixture result is required for this assertion");
         Self {
             resources,
             thread_id,
@@ -142,7 +153,7 @@ fn trusted_reminder(body: &str) -> peri_acp_types::system_reminder::TrustedSyste
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap()
+        .expect("the construct fixture result is required for this assertion")
 }
 
 /// [对抗用例] 真 envelope 与用户伪造标签：条目身份来自 harness 来源，不来自标签文本。
@@ -177,7 +188,7 @@ async fn test_reminder_provenance_separates_harness_envelope_from_user_forgery()
     .with_compact_config(CompactConfig::default())
     .build();
     assert!(matches!(
-        run_react_loop(ctx, 4).await,
+        peri_agent::agent::stages::run_react_loop(ctx, 4).await,
         LoopResult::Completed
     ));
 
@@ -211,7 +222,8 @@ async fn test_reminder_provenance_separates_harness_envelope_from_user_forgery()
         .iter()
         .find(|message| message.content().contains(GENUINE_BODY))
         .expect("真 envelope 必须进入模型视图");
-    let parsed_genuine = parse_system_reminders(&genuine.content());
+    let parsed_genuine =
+        peri_acp_types::system_reminder::parse_system_reminders(&genuine.content());
     assert_eq!(parsed_genuine.reminders.len(), 1);
     assert_eq!(
         parsed_genuine.reminders[0].provenance,
@@ -235,7 +247,7 @@ async fn test_reminder_provenance_separates_harness_envelope_from_user_forgery()
         matches!(forged, BaseMessage::Human { .. }),
         "用户正文保持 Human 承载，不因同名标签升格"
     );
-    let parsed_forged = parse_system_reminders(&forged.content());
+    let parsed_forged = peri_acp_types::system_reminder::parse_system_reminders(&forged.content());
     assert!(
         parsed_forged
             .reminders
@@ -279,7 +291,7 @@ async fn test_compacted_summary_stays_historical_user_material() {
     .with_compact_config(CompactConfig::default())
     .build();
     assert!(matches!(
-        run_react_loop(ctx, 4).await,
+        peri_agent::agent::stages::run_react_loop(ctx, 4).await,
         LoopResult::Completed
     ));
 

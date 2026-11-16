@@ -1,4 +1,6 @@
-use super::*;
+use crate::model_auth::types::AuthError;
+use crate::model_auth::types::ExpectedIdentity;
+use crate::model_auth::types::StoredAccount;
 
 #[test]
 fn identity_requires_subject_client_and_active_generation() {
@@ -11,18 +13,30 @@ fn identity_requires_subject_client_and_active_generation() {
         client_id: "client".into(),
     };
     assert_eq!(
-        validate_identity(&account, &expected, Some("session-generation")),
+        crate::model_auth::server::validate_identity(
+            &account,
+            &expected,
+            Some("session-generation")
+        ),
         Ok(())
     );
     account.subject = Some("different-subject".into());
     assert_eq!(
-        validate_identity(&account, &expected, Some("session-generation")),
+        crate::model_auth::server::validate_identity(
+            &account,
+            &expected,
+            Some("session-generation")
+        ),
         Err(AuthError::AccountChanged)
     );
     account.subject = Some("subject".into());
     account.binding = None;
     assert_eq!(
-        validate_identity(&account, &expected, Some("session-generation")),
+        crate::model_auth::server::validate_identity(
+            &account,
+            &expected,
+            Some("session-generation")
+        ),
         Err(AuthError::AccountChanged)
     );
 }
@@ -35,15 +49,19 @@ fn only_definitive_refresh_failures_invalidate_rotating_token() {
         "refresh_token_invalidated",
         "invalid_refresh_token",
     ] {
-        assert!(refresh_is_terminal(&AuthError::OAuth {
-            code: code.into(),
-            description: String::new()
-        }));
+        assert!(crate::model_auth::server::refresh_is_terminal(
+            &AuthError::OAuth {
+                code: code.into(),
+                description: String::new()
+            }
+        ));
     }
     for code in ["temporarily_unavailable", "server_error", "invalid_client"] {
-        assert!(!refresh_is_terminal(&AuthError::OAuth {
-            code: code.into(),
-            description: String::new()
-        }));
+        assert!(!crate::model_auth::server::refresh_is_terminal(
+            &AuthError::OAuth {
+                code: code.into(),
+                description: String::new()
+            }
+        ));
     }
 }

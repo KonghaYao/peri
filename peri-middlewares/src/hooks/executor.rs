@@ -1,21 +1,25 @@
+use std::collections::HashSet;
 #[cfg(not(target_os = "emscripten"))]
 use std::process::Stdio;
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use peri_acp_types::tasks::TaskManager;
-use peri_agent::{agent::react::ReactLLM, messages::BaseMessage};
+use peri_agent::agent::react::ReactLLM;
+use peri_agent::messages::BaseMessage;
 #[cfg(not(target_os = "emscripten"))]
 use peri_mcp_common::shell::ShellExecutionGuard;
 #[cfg(not(target_os = "emscripten"))]
 use tokio::io::AsyncWriteExt;
 
+use crate::hooks::output_parser;
+use crate::hooks::ssrf_guard;
+use crate::hooks::types::HookAction;
+use crate::hooks::types::HookInput;
+use crate::hooks::types::HookType;
+use crate::hooks::types::RegisteredHook;
 #[cfg(not(target_os = "emscripten"))]
-use crate::hooks::variables::resolve_hook_variables;
-use crate::hooks::{
-    output_parser::{parse_command_hook_output, parse_http_hook_response},
-    ssrf_guard::check_url,
-    types::{HookAction, HookInput, HookType, RegisteredHook},
-};
+use crate::hooks::variables;
 
 /// Execute a command hook (shell script).
 ///
@@ -76,7 +80,7 @@ pub async fn execute_command_hook_owned(
     };
 
     // 只替换插件路径变量；HookInput 数据只经 stdin JSON 传递（H4 参数隔离）
-    let command = resolve_hook_variables(
+    let command = variables::resolve_hook_variables(
         &command,
         &registered.plugin_root,
         &registered.plugin_data_dir,
@@ -167,7 +171,7 @@ pub async fn execute_command_hook_owned(
             match output.status.code() {
                 Some(0) => {
                     // Parse structured output
-                    parse_command_hook_output(&input.hook_event_name, &stdout)
+                    output_parser::parse_command_hook_output(&input.hook_event_name, &stdout)
                 }
                 Some(1) => {
                     // Exit code 1 → Allow with warning（不记录 stderr 正文）
@@ -281,7 +285,7 @@ pub async fn execute_prompt_hook(
                 .unwrap_or(reasoning.thought)
                 .trim()
                 .to_string();
-            parse_command_hook_output(&input.hook_event_name, &answer)
+            output_parser::parse_command_hook_output(&input.hook_event_name, &answer)
         }
         Ok(Err(e)) => {
             tracing::warn!("Prompt hook LLM call failed: {}", e);
@@ -319,7 +323,7 @@ pub async fn execute_http_hook(hook: &HookType, input: &HookInput) -> HookAction
     };
 
     // SSRF guard
-    if let Err(reason) = check_url(url) {
+    if let Err(reason) = ssrf_guard::check_url(url) {
         tracing::warn!("HTTP hook blocked by SSRF guard: {}", reason);
         return HookAction::Block {
             reason: format!("SSRF guard blocked URL: {}", reason),
@@ -385,7 +389,7 @@ pub async fn execute_http_hook(hook: &HookType, input: &HookInput) -> HookAction
                 return HookAction::Allow;
             }
 
-            parse_http_hook_response(&input.hook_event_name, &body)
+            output_parser::parse_http_hook_response(&input.hook_event_name, &body)
         }
         Err(e) => {
             tracing::warn!("HTTP hook request failed: {}", e);
@@ -473,7 +477,7 @@ pub async fn execute_agent_hook(
                 return HookAction::Allow;
             }
             // 复用 command hook 的 output parser 解析 JSON 决策
-            parse_command_hook_output(&input.hook_event_name, &text)
+            output_parser::parse_command_hook_output(&input.hook_event_name, &text)
         }
         Ok(Err(e)) => {
             tracing::warn!("Hook agent: LLM failed: {}, allowing", e);

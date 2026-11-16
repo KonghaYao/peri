@@ -8,7 +8,9 @@ use peri_acp_types::mcp_apps_facade::{
     AppsRequestOutcome, AppsRequestResponse, RequestNamespaceId, RequestSeq, RequestVerdict,
 };
 
-use super::super::apps_ledger::{not_executed_before_commit, AdmissionVerdict, RequestLedger};
+use super::super::apps_ledger;
+use super::super::apps_ledger::AdmissionVerdict;
+use super::super::apps_ledger::RequestLedger;
 
 pub(super) fn admission_verdict(verdict: &AdmissionVerdict) -> RequestVerdict {
     match verdict {
@@ -41,7 +43,7 @@ pub(super) fn unexecuted_response(
 }
 
 pub(super) fn not_executed_outcome() -> AppsRequestOutcome {
-    AppsRequestOutcome::ToolsCall(not_executed_before_commit())
+    AppsRequestOutcome::ToolsCall(apps_ledger::not_executed_before_commit())
 }
 
 /// 资源操作失败：显式未执行（4a 没有资源级的 `NotExecutedCause` 变体，也不新增；

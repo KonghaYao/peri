@@ -26,6 +26,7 @@ impl DisplayBudget {
     }
 }
 
+#[must_use]
 pub(crate) fn is_disposable(unit: &TuiRenderUnit) -> bool {
     matches!(
         unit,

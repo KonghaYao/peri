@@ -7,7 +7,7 @@ use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::store::{MessageFlags, PersistedPayload};
 use peri_acp_types::thread::ThreadId;
 
-use super::session_history_page_tests::{remote_with_history, REWIND_CANDIDATES_SESSION};
+use super::session_history_page_tests::REWIND_CANDIDATES_SESSION;
 use crate::sessions::data::SessionDataPort;
 
 fn texts(candidates: &[peri_acp_types::session_resources::RewindCandidate]) -> Vec<String> {
@@ -32,7 +32,7 @@ async fn remote_candidates_are_user_only_newest_first_and_bounded() {
         PersistedPayload::Message(BaseMessage::human("第二轮问题")),
         PersistedPayload::Message(BaseMessage::human("第三轮问题")),
     ];
-    let (_directory, data) = remote_with_history(&history).await;
+    let (_directory, data) = super::session_history_page_tests::remote_with_history(&history).await;
     let id: ThreadId = REWIND_CANDIDATES_SESSION.to_owned();
 
     let candidates = data.load_rewind_candidates(&id, 64).await.unwrap();
@@ -60,7 +60,7 @@ async fn remote_candidates_survive_trailing_reminders_across_batches() {
             "<system-reminder>notice-{index}</system-reminder>"
         )))
     }));
-    let (_directory, data) = remote_with_history(&history).await;
+    let (_directory, data) = super::session_history_page_tests::remote_with_history(&history).await;
     let id: ThreadId = REWIND_CANDIDATES_SESSION.to_owned();
 
     let candidates = data.load_rewind_candidates(&id, 64).await.unwrap();
@@ -76,7 +76,7 @@ async fn remote_candidates_include_users_archived_by_compaction() {
         PersistedPayload::Message(BaseMessage::ai("回答")),
         PersistedPayload::Message(BaseMessage::human("仍然有效的问题")),
     ];
-    let (_directory, data) = remote_with_history(&history).await;
+    let (_directory, data) = super::session_history_page_tests::remote_with_history(&history).await;
     let id: ThreadId = REWIND_CANDIDATES_SESSION.to_owned();
     data.apply_message_projections(
         &id,

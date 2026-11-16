@@ -1,12 +1,29 @@
 //! Real SQLite spawn/compact/reopen/resume regression for read-only inherited history.
-use super::*;
-use crate::agent::compact_v2::{run_compact, CompactConfig, CompactOutcome, ContextPressure};
+
+use crate::agent::compact_v2::CompactConfig;
+use crate::agent::compact_v2::CompactOutcome;
+use crate::agent::compact_v2::ContextPressure;
+use crate::messages::BaseMessage;
 use crate::messages::MessageId;
+use crate::messages::ToolCallRequest;
+use crate::session::subagent::tests::EchoLLM;
+use crate::session::subagent::tests::EmptyChainAssembler;
+use crate::session::subagent::tests::RecordingLLM;
+use crate::session::subagent::ForkDirectiveKind;
+use crate::session::subagent::SessionFactory;
+use crate::session::subagent::SubagentCancelPolicy;
+use crate::session::subagent::SubagentRunMode;
+use crate::session::subagent::SubagentSpawnConfig;
+use crate::session::FrozenContext;
+use crate::session::Session;
+
 use peri_acp_types::projection::{
     MessageProjectionDirective, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
 };
 use peri_acp_types::session_resources::{SessionResources, SessionStoreShutdownPort};
 use peri_acp_types::store::PersistedPayload;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 // The provenance scenario retains lossy directives and therefore grants recovery
 // explicitly, just as the production permission-filtered tool catalog must.
@@ -60,7 +77,7 @@ impl peri_model::Model for SummaryModel {
         _: peri_model::ModelRequest,
         _: CancellationToken,
     ) -> peri_model::ModelResult<peri_model::ModelResponse> {
-        peri_model::ModelResponse::new(
+        peri_model::ModelResponse::try_new(
             peri_model::ModelMessage::assistant_text("<summary>child durable summary</summary>"),
             peri_model::StopReason::EndTurn,
             None,
@@ -145,7 +162,7 @@ async fn compact(session: &Arc<Session>, cwd: &str) {
     };
     let transcript = session.transcript();
     let mut owned = std::mem::take(&mut *transcript.write());
-    let outcome = run_compact(
+    let outcome = crate::agent::compact_v2::run_compact(
         &mut owned,
         Some(&SummaryModel),
         &CompactConfig::default(),
@@ -163,7 +180,10 @@ async fn compact(session: &Arc<Session>, cwd: &str) {
 async fn flush_session(session: &Arc<Session>) {
     let arc = session.transcript();
     let transcript = std::mem::take(&mut *arc.write());
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     *arc.write() = transcript;
 }
 
@@ -171,17 +191,21 @@ async fn flush_session(session: &Arc<Session>) {
 #[tokio::test]
 async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance() {
     let repo = crate::session::test_resources::git_repository();
-    let db = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().expect("the temporary test directory must be available");
     let db_path = db.path().join("provenance.db");
     // 真门面（真 SQLite）：绑定、frozen 原字节与继承区都来自真实实现，
     // 冷重开是同一库文件的第二个句柄——不是另一个空替身。
     let resources = peri_resources::Resources::open_with(Some(db_path.clone()))
         .await
-        .unwrap();
+        .expect("the open with fixture result is required for this assertion");
     let (store, shutdown) = resources.into_parts();
-    let workspace = store.resolve_workspace(repo.path()).await.unwrap();
+    let workspace = store
+        .resolve_workspace(repo.path())
+        .await
+        .expect("the resolve workspace fixture result is required for this assertion");
     let cwd = workspace.cwd.to_string_lossy().into_owned();
-    let parent_id = create_bound_root(&store, &workspace, None).await;
+    let parent_id =
+        crate::session::subagent::tests::create_bound_root(&store, &workspace, None).await;
     let parent = Session::new(
         Arc::from(cwd.as_str()),
         FrozenContext::builder().build(),
@@ -211,27 +235,41 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
         }
         transcript.set_excluded(parent_hidden.id(), true);
         transcript.set_flags_projection(parent_tool.id(), directive(parent_tool.id()));
-        transcript.flush_persistence().await.unwrap();
+        transcript
+            .flush_persistence()
+            .await
+            .expect("the flush persistence fixture result is required for this assertion");
         *arc.write() = transcript;
     }
     let config = spawn_config(store.clone(), parent_messages.clone(), &cwd);
     let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
-        .unwrap();
+        .expect("the spawn subagent fixture result is required for this assertion");
     let child_id = spawned.child_thread_id.clone();
     assert_eq!(
         spawned.session.transcript().read().ancestor_len(),
         parent_messages.len()
     );
     // [M03 回归] snapshot 锚点仍在父消息尾部；inherited 逐条保持原 ID 顺序。
-    let snapshot_tail = parent_messages.last().unwrap().id().as_uuid().to_string();
-    let child_meta = store.load_session_meta(&child_id).await.unwrap();
+    let snapshot_tail = parent_messages
+        .last()
+        .expect("parent messages last fixture must contain the expected element")
+        .id()
+        .as_uuid()
+        .to_string();
+    let child_meta = store
+        .load_session_meta(&child_id)
+        .await
+        .expect("the load session meta fixture result is required for this assertion");
     assert_eq!(
         child_meta.snapshot_at_message_id.as_deref(),
         Some(snapshot_tail.as_str()),
         "fork child 的 snapshot_at_message_id 必须指向父消息尾"
     );
-    let child_snapshot = store.load_session_snapshot(&child_id).await.unwrap();
+    let child_snapshot = store
+        .load_session_snapshot(&child_id)
+        .await
+        .expect("the load session snapshot fixture result is required for this assertion");
     let inherited_ids = child_snapshot
         .inherited
         .payloads
@@ -265,11 +303,18 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
         // Cold history alone is no longer exposure evidence for new Micro planning.
         transcript.set_flags_projection(own_tool.id(), directive(own_tool.id()));
         assert!(transcript.flags(own_tool.id()).truncated);
-        transcript.flush_persistence().await.unwrap();
+        transcript
+            .flush_persistence()
+            .await
+            .expect("the flush persistence fixture result is required for this assertion");
         transcript.shutdown_persistence();
         *arc.write() = transcript;
     }
-    let child_flags = store.load_session_snapshot(&child_id).await.unwrap().flags;
+    let child_flags = store
+        .load_session_snapshot(&child_id)
+        .await
+        .expect("the load session snapshot fixture result is required for this assertion")
+        .flags;
     assert!(child_flags.values().any(|flags| flags.excluded));
     assert!(child_flags[&own_tool.id()].truncated);
     assert!(parent_messages
@@ -278,7 +323,7 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
     let own_ids = store
         .load_session_snapshot(&child_id)
         .await
-        .unwrap()
+        .expect("the load session snapshot fixture result is required for this assertion")
         .payloads
         .iter()
         .map(PersistedPayload::id)
@@ -286,26 +331,38 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
     assert!(parent_messages
         .iter()
         .all(|message| !own_ids.contains(&message.id())));
-    let parent_flags_before = store.load_session_snapshot(&parent_id).await.unwrap().flags;
+    let parent_flags_before = store
+        .load_session_snapshot(&parent_id)
+        .await
+        .expect("the load session snapshot fixture result is required for this assertion")
+        .flags;
     assert_eq!(
         parent_flags_before[&parent_tool.id()].projection,
         Some(directive(parent_tool.id()))
     );
     compact(&parent, &cwd).await;
     assert!(
-        store.load_session_snapshot(&parent_id).await.unwrap().flags[&parent_tool.id()].excluded
+        store
+            .load_session_snapshot(&parent_id)
+            .await
+            .expect("the load session snapshot fixture result is required for this assertion")
+            .flags[&parent_tool.id()]
+            .excluded
     );
     parent.transcript().read().shutdown_persistence();
     drop(spawned);
     // 关闭走部署关闭权（业务句柄没有全局关闭；这里与部署装配同形）。
-    shutdown.shutdown().await.unwrap();
+    shutdown
+        .shutdown()
+        .await
+        .expect("the shutdown fixture result is required for this assertion");
     let reopened_resources = peri_resources::Resources::open_with(Some(db_path.clone()))
         .await
-        .unwrap();
+        .expect("the open with fixture result is required for this assertion");
     let (reopened, reopened_shutdown) = reopened_resources.into_parts();
     let recording = RecordingLLM::new();
     let received = recording.received.clone();
-    let mut config = resume_config_with(
+    let mut config = crate::session::subagent::tests::resume_config_with(
         Arc::clone(&reopened),
         child_id.clone(),
         crate::session::test_resources::mock::model::fixture_source(
@@ -319,7 +376,7 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
     config.tools.push(Arc::new(RecoveryTool));
     let resumed = SessionFactory::resume_subagent(Some(&parent), config)
         .await
-        .unwrap();
+        .expect("the resume subagent fixture result is required for this assertion");
     let archived_ids = {
         let arc = resumed.session.transcript();
         let transcript = arc.read();
@@ -333,7 +390,8 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
             Some(directive(parent_tool.id()))
         );
         // 冷恢复只重建有效视图：有效 own 条目的标记必须逐项还原。
-        for (id, flags) in child_flags.iter().filter(|(_, flags)| !flags.excluded) {
+        let paired_items = child_flags.iter().filter(|(_, flags)| !flags.excluded);
+        for (id, flags) in paired_items {
             assert_eq!(
                 transcript.flags(*id),
                 *flags,
@@ -364,7 +422,7 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
         let archived = reopened
             .load_session_history(&peri_acp_types::thread::ThreadId::from(child_id.clone()))
             .await
-            .unwrap();
+            .expect("the load session history fixture result is required for this assertion");
         let archived = archived
             .iter()
             .map(PersistedPayload::id)
@@ -401,5 +459,8 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
     flush_session(&resumed.session).await;
     resumed.session.transcript().read().shutdown_persistence();
     drop(resumed);
-    reopened_shutdown.shutdown().await.unwrap();
+    reopened_shutdown
+        .shutdown()
+        .await
+        .expect("the shutdown fixture result is required for this assertion");
 }

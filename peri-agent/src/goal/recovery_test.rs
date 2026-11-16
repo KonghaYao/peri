@@ -1,9 +1,11 @@
-use super::goal_recovery_reason;
 use peri_acp_types::error::{AgentError, WorkBudgetKind};
 
 #[test]
 fn test_user_cancel_does_not_schedule_goal_recovery() {
-    assert_eq!(goal_recovery_reason(&AgentError::Interrupted), None);
+    assert_eq!(
+        crate::goal::recovery::goal_recovery_reason(&AgentError::Interrupted),
+        None
+    );
 }
 
 #[test]
@@ -13,20 +15,23 @@ fn test_work_budget_exhausted_does_not_schedule_goal_recovery() {
         used: 10,
         limit: 10,
     };
-    assert_eq!(goal_recovery_reason(&error), None);
+    assert_eq!(crate::goal::recovery::goal_recovery_reason(&error), None);
 }
 
 #[test]
 fn test_deterministic_compact_configuration_errors_do_not_schedule_recovery() {
-    assert_eq!(goal_recovery_reason(&AgentError::CompactNoLlm), None);
     assert_eq!(
-        goal_recovery_reason(&AgentError::CompactSummaryBudgetInvalid {
+        crate::goal::recovery::goal_recovery_reason(&AgentError::CompactNoLlm),
+        None
+    );
+    assert_eq!(
+        crate::goal::recovery::goal_recovery_reason(&AgentError::CompactSummaryBudgetInvalid {
             reason: "no budget"
         }),
         None
     );
     assert_eq!(
-        goal_recovery_reason(&AgentError::CompactBudgetUnrecovered {
+        crate::goal::recovery::goal_recovery_reason(&AgentError::CompactBudgetUnrecovered {
             input_tokens: 100,
             context_window: 200,
             full_attempts: 2,
@@ -43,7 +48,7 @@ fn test_model_http_errors_are_recoverable() {
             message: "provider failure".to_string(),
         };
         assert_eq!(
-            goal_recovery_reason(&error),
+            crate::goal::recovery::goal_recovery_reason(&error),
             Some("model_error"),
             "HTTP {status} 应允许 goal 恢复重试"
         );
@@ -57,17 +62,20 @@ fn test_compact_retry_exhaustion_is_recoverable() {
         context_tokens: 100,
         context_window: 200,
     };
-    assert_eq!(goal_recovery_reason(&error), Some("compact_failed"));
+    assert_eq!(
+        crate::goal::recovery::goal_recovery_reason(&error),
+        Some("compact_failed")
+    );
 }
 
 #[test]
 fn test_output_truncation_and_tool_failure_are_recoverable() {
     assert_eq!(
-        goal_recovery_reason(&AgentError::OutputTruncated { attempts: 3 }),
+        crate::goal::recovery::goal_recovery_reason(&AgentError::OutputTruncated { attempts: 3 }),
         Some("output_truncated")
     );
     assert_eq!(
-        goal_recovery_reason(&AgentError::ToolExecutionFailed {
+        crate::goal::recovery::goal_recovery_reason(&AgentError::ToolExecutionFailed {
             tool: "Bash".to_string(),
             reason: "exited".to_string(),
         }),
@@ -86,7 +94,7 @@ struct RecordingGoalController {
 }
 
 #[async_trait]
-impl super::GoalController for RecordingGoalController {
+impl crate::goal::GoalController for RecordingGoalController {
     async fn create_goal(&self, _objective: String) -> Result<(), String> {
         Ok(())
     }
@@ -118,8 +126,8 @@ fn recording_controller() -> Arc<RecordingGoalController> {
 #[tokio::test]
 async fn test_terminal_model_error_schedules_goal_recovery() {
     let concrete = recording_controller();
-    let controller: Arc<dyn super::GoalController> = concrete.clone();
-    super::schedule_goal_recovery_after_error(
+    let controller: Arc<dyn crate::goal::GoalController> = concrete.clone();
+    crate::goal::recovery::schedule_goal_recovery_after_error(
         Some(&controller),
         &AgentError::LlmHttpError {
             status: 429,
@@ -136,8 +144,8 @@ async fn test_terminal_model_error_schedules_goal_recovery() {
 #[tokio::test]
 async fn test_cancelled_turn_does_not_schedule_goal_recovery() {
     let concrete = recording_controller();
-    let controller: Arc<dyn super::GoalController> = concrete.clone();
-    super::schedule_goal_recovery_after_error(
+    let controller: Arc<dyn crate::goal::GoalController> = concrete.clone();
+    crate::goal::recovery::schedule_goal_recovery_after_error(
         Some(&controller),
         &AgentError::LlmHttpError {
             status: 503,
@@ -153,8 +161,8 @@ async fn test_cancelled_turn_does_not_schedule_goal_recovery() {
 #[tokio::test]
 async fn test_excluded_error_does_not_schedule_goal_recovery() {
     let concrete = recording_controller();
-    let controller: Arc<dyn super::GoalController> = concrete.clone();
-    super::schedule_goal_recovery_after_error(
+    let controller: Arc<dyn crate::goal::GoalController> = concrete.clone();
+    crate::goal::recovery::schedule_goal_recovery_after_error(
         Some(&controller),
         &AgentError::WorkBudgetExhausted {
             budget: WorkBudgetKind::ReasonRequests,

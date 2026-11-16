@@ -12,10 +12,13 @@
 //! 所有库都在 tempdir 中构造，不触碰真实本机数据库。
 
 use super::schema::CURRENT_SCHEMA_VERSION;
-use super::*;
+use super::SqliteThreadStore;
+
 use crate::sessions::canonical::{OAUTH_CREDENTIALS_TABLE, SESSION_ENVIRONMENTS_TABLE};
 use peri_acp_types::workspace::WorkspaceError;
-use sqlx::{sqlite::SqliteConnectOptions, Connection, SqliteConnection};
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::Connection;
+use sqlx::SqliteConnection;
 use std::path::Path;
 
 /// v10 回退删掉的本机表。
@@ -229,7 +232,7 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
         let definitions_before = preserved_table_definitions(&mut connection).await;
         connection.close().await.unwrap();
 
-        let store = SqliteThreadStore::new(&path).await.unwrap();
+        let store = SqliteThreadStore::try_new(&path).await.unwrap();
         let mut connection = read_only(&path).await;
         let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
             .fetch_one(&mut connection)
@@ -290,7 +293,7 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
 
         // 迁移后的库可以正常写打开（门面与桥共用同一条连接真相）。
         store.close().await;
-        let reopened = SqliteThreadStore::new(&path).await.unwrap();
+        let reopened = SqliteThreadStore::try_new(&path).await.unwrap();
         reopened.close().await;
     }
 }
@@ -328,7 +331,7 @@ async fn test_database_without_remote_tables_is_idempotent() {
     let definitions_before = preserved_table_definitions(&mut connection).await;
     connection.close().await.unwrap();
 
-    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let store = SqliteThreadStore::try_new(&path).await.unwrap();
     let mut connection = read_only(&path).await;
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
         .fetch_one(&mut connection)
@@ -381,7 +384,7 @@ async fn test_mismatched_table_shape_fails_closed_and_rolls_back() {
     connection.close().await.unwrap();
     let before = std::fs::read(&path).unwrap();
 
-    let error = SqliteThreadStore::new(&path).await.err().unwrap();
+    let error = SqliteThreadStore::try_new(&path).await.err().unwrap();
     assert!(matches!(
         error.downcast_ref::<WorkspaceError>(),
         Some(WorkspaceError::UnsupportedDatabaseSchema)

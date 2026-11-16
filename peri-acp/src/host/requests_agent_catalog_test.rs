@@ -11,7 +11,13 @@
 //! `.claude/agents/*.md`），没有测试专用构造器参与。
 //! 反向验证（mutation）：注释掉 `assemble_with_frozen` 里的定点绑定调用 ⇒ 本用例失败。
 
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::provider::LlmProvider;
+use serde_json::json;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 会话 cwd 下的 project agent 定义 id（= 文件名词干）。
 const AGENT_ID: &str = "frozen-catalog-probe-agent";
@@ -56,10 +62,11 @@ async fn agent_catalog_server_config(
     tmp: &tempfile::TempDir,
     startup_cwd: String,
 ) -> AcpServerConfig {
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "key", "model"),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, tmp).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(config, provider, tmp).await;
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd,
         bare: true,
@@ -85,7 +92,7 @@ async fn new_session_frozen_prompt_lists_agent_catalog_entries() {
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
 
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": target}),
         &cfg,
@@ -125,7 +132,7 @@ async fn new_session_frozen_prompt_lists_agent_catalog_entries() {
         "打开配置：会话创建期 bind 后端口目录必须含 project 候选；实际={port_ids:?}"
     );
 
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": id}),
         &cfg,
@@ -157,7 +164,7 @@ async fn new_session_frozen_prompt_hides_catalog_when_sub_agent_face_closed() {
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
 
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": target}),
         &cfg,
@@ -193,7 +200,7 @@ async fn new_session_frozen_prompt_hides_catalog_when_sub_agent_face_closed() {
         "关闭集命中 ⇒ 会话创建期 bind 派生的本地面关闭 ⇒ 端口目录必须为空"
     );
 
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": id}),
         &cfg,

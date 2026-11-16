@@ -1,6 +1,6 @@
 //! PermissionRequest hook 门控逻辑。
 //!
-//! [TRAP] PermissionRequest 双条件门控：`requires_approval(tool_name)`
+//! `[TRAP]` PermissionRequest 双条件门控：`requires_approval(tool_name)`
 //! **与** `needs_permission_dialog(tool_name)`，顺序不能颠倒（短路优化 +
 //! 语义对齐 Claude Code）。AutoMode 始终触发 PermissionRequest 的特殊处理
 //! 不能丢。
@@ -19,6 +19,7 @@ use peri_agent::middleware::capabilities::BoundToolOrigin;
 /// 该函数仅描述"权限模式是否会导致弹窗"，不与 `requires_approval` 合并：
 /// 调用方必须先调用 `requires_approval(tool_name)`，再调用本函数（见
 /// `should_fire_permission_request`）。
+#[must_use]
 pub fn needs_permission_dialog(mode: PermissionMode, tool_name: &str) -> bool {
     match mode {
         // Bypass: 所有工具直接放行，无对话框
@@ -36,9 +37,10 @@ pub fn needs_permission_dialog(mode: PermissionMode, tool_name: &str) -> bool {
 /// 综合判断是否应该触发 PermissionRequest hook：
 /// `requires_approval(tool_name) && needs_permission_dialog(mode, tool_name)`。
 ///
-/// [TRAP] 顺序固定：先判断 `requires_approval`，短路后再判断
+/// `[TRAP]` 顺序固定：先判断 `requires_approval`，短路后再判断
 /// `needs_permission_dialog`。若颠倒顺序，Bypass 模式下仍会为敏感工具触发
 /// PermissionRequest，违反"权限对话框即将展示时才触发"的语义。
+#[must_use]
 pub fn should_fire_permission_request(
     mode: PermissionMode,
     tool_name: &str,
@@ -48,6 +50,7 @@ pub fn should_fire_permission_request(
 }
 
 /// Bound source prevents a raw external MCP tool from inheriting builtin approval exemptions.
+#[must_use]
 pub fn should_fire_permission_request_for_origin(
     mode: PermissionMode,
     tool_name: &str,

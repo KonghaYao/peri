@@ -1,6 +1,9 @@
 //! 图片压缩切面 —— 为后续实现预留接口，MVP 空管线。
 
-use std::{borrow::Cow, error::Error};
+use std::borrow::Cow;
+use std::error::Error;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 
 /// 图片压缩器 trait
 ///
@@ -31,8 +34,17 @@ pub struct CompressorPipeline {
     compressors: Vec<Box<dyn ImageCompressor>>,
 }
 
+impl Debug for CompressorPipeline {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CompressorPipeline")
+            .finish_non_exhaustive()
+    }
+}
+
 impl CompressorPipeline {
     /// 创建空管线（MVP 默认无压缩器）
+    #[must_use]
     pub fn new() -> Self {
         Self {
             compressors: Vec::new(),
@@ -64,6 +76,7 @@ impl CompressorPipeline {
     }
 
     /// 管线是否为空
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.compressors.is_empty()
     }

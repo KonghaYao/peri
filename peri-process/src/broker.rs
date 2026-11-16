@@ -50,6 +50,7 @@ impl Registration {
         let fd = self.stream.as_raw_fd();
         // The child cannot execute a command until the SDK has registered its
         // process group. Only async-signal-safe syscalls run after fork.
+        // SAFETY: The captured broker descriptor stays live through spawn; register_child uses only async-signal-safe syscalls after fork.
         unsafe {
             command.pre_exec(move || register_child(fd));
         }
@@ -59,6 +60,7 @@ impl Registration {
 fn register_child(fd: libc::c_int) -> io::Result<()> {
     let mut message = [0_u8; 5];
     message[0] = b'P';
+    // SAFETY: This process-identity query has no pointer or ownership preconditions.
     message[1..].copy_from_slice(&(unsafe { libc::getpid() } as u32).to_le_bytes());
     write_all_fd(fd, &message)?;
     let mut ack = [0_u8; 1];
@@ -66,6 +68,7 @@ fn register_child(fd: libc::c_int) -> io::Result<()> {
     if ack[0] != ACK {
         return Err(io::Error::from_raw_os_error(libc::EPERM));
     }
+    // SAFETY: This runs only in the post-fork pre-exec child; both resulting paths use async-signal-safe syscalls until exec or _exit.
     let command_pid = unsafe { libc::fork() };
     if command_pid < 0 {
         return Err(io::Error::last_os_error());
@@ -81,6 +84,7 @@ fn register_child(fd: libc::c_int) -> io::Result<()> {
     let fd = close_anchor_descriptors(fd);
     let mut status = 0;
     loop {
+        // SAFETY: The PID is the child just forked and status is a valid writable integer for the duration of the wait.
         let waited = unsafe { libc::waitpid(command_pid, &mut status, 0) };
         if waited == command_pid {
             break;
@@ -88,17 +92,20 @@ fn register_child(fd: libc::c_int) -> io::Result<()> {
         if waited < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
             continue;
         }
+        // SAFETY: The post-fork anchor must terminate without running Rust destructors or other non-async-signal-safe cleanup.
         unsafe {
             libc::_exit(127);
         }
     }
     if write_all_fd(fd, b"E").is_err() {
+        // SAFETY: The post-fork anchor must terminate without running Rust destructors or other non-async-signal-safe cleanup.
         unsafe {
             libc::_exit(127);
         }
     }
     let mut release = [0_u8; 1];
     if read_exact_fd(fd, &mut release).is_err() || release[0] != ACK {
+        // SAFETY: The post-fork anchor must terminate without running Rust destructors or other non-async-signal-safe cleanup.
         unsafe {
             libc::_exit(127);
         }
@@ -110,6 +117,7 @@ fn register_child(fd: libc::c_int) -> io::Result<()> {
     } else {
         127
     };
+    // SAFETY: The post-fork anchor must terminate without running Rust destructors or other non-async-signal-safe cleanup.
     unsafe {
         libc::_exit(code);
     }
@@ -121,18 +129,22 @@ fn close_anchor_descriptors(fd: libc::c_int) -> libc::c_int {
     let retained = if fd == 3 {
         3
     } else {
+        // SAFETY: The live broker descriptor is duplicated to the reserved anchor descriptor before all other descriptors are closed.
         unsafe { libc::dup2(fd, 3) }
     };
     if retained < 0 {
+        // SAFETY: The post-fork anchor must terminate without running Rust destructors or other non-async-signal-safe cleanup.
         unsafe {
             libc::_exit(127);
         }
     }
     for descriptor in 0..3 {
+        // SAFETY: This post-fork anchor owns its descriptor table; these descriptors are intentionally discarded before _exit.
         unsafe {
             libc::close(descriptor);
         }
     }
+    // SAFETY: The constant selects a scalar descriptor limit and this query has no pointer preconditions.
     let limit = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
     let limit = if limit > 0 {
         limit.min(65_536) as libc::c_int
@@ -140,6 +152,7 @@ fn close_anchor_descriptors(fd: libc::c_int) -> libc::c_int {
         4096
     };
     for descriptor in 4..limit {
+        // SAFETY: This post-fork anchor owns its descriptor table; these descriptors are intentionally discarded before _exit.
         unsafe {
             libc::close(descriptor);
         }
@@ -149,6 +162,7 @@ fn close_anchor_descriptors(fd: libc::c_int) -> libc::c_int {
 
 fn write_all_fd(fd: libc::c_int, mut bytes: &[u8]) -> io::Result<()> {
     while !bytes.is_empty() {
+        // SAFETY: The slice pointer is valid for its length and remains borrowed throughout the synchronous write syscall.
         let count = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
         if count > 0 {
             bytes = &bytes[count as usize..];
@@ -164,6 +178,7 @@ fn write_all_fd(fd: libc::c_int, mut bytes: &[u8]) -> io::Result<()> {
 
 fn read_exact_fd(fd: libc::c_int, mut bytes: &mut [u8]) -> io::Result<()> {
     while !bytes.is_empty() {
+        // SAFETY: The mutable slice points to writable storage of the given length for the synchronous read syscall.
         let count = unsafe { libc::read(fd, bytes.as_mut_ptr().cast(), bytes.len()) };
         if count > 0 {
             bytes = &mut bytes[count as usize..];

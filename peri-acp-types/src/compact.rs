@@ -82,6 +82,7 @@ pub enum CompactOutcome {
 
 impl CompactOutcome {
     /// 是否已在 transcript 中应用 Compact 变更。
+    #[must_use]
     pub fn has_applied_change(self) -> bool {
         matches!(
             self,
@@ -95,11 +96,13 @@ impl CompactOutcome {
     }
 
     /// 是否已成功应用 Full Compact。
+    #[must_use]
     pub fn is_full_applied(self) -> bool {
         matches!(self, Self::FullApplied)
     }
 
     /// 是否为「收益不足的主动延后」。延后不是失败。
+    #[must_use]
     pub fn is_deferred(self) -> bool {
         matches!(self, Self::Deferred)
     }
@@ -311,7 +314,7 @@ pub struct CompactConfig {
     pub max_consecutive_failures: u32,
 
     // ── Smart Compact 配置 ──────────────────────────────────────────────
-    /// [DEPRECATED] 不再使用。Smart Compact 已计划废弃并收敛为 Micro Compact。
+    /// `DEPRECATED` 不再使用。Smart Compact 已计划废弃并收敛为 Micro Compact。
     /// 当前仅保留字段以兼容旧配置，但运行时始终按 false 处理。
     #[serde(default = "default_false")]
     pub smart_compact_enabled: bool,
@@ -395,6 +398,7 @@ impl Default for CompactConfig {
 pub const LEGACY_COMPACT_KEYS: [&str; 1] = ["ptl_max_retries"];
 
 impl CompactConfig {
+    #[must_use]
     pub fn has_valid_micro_min_gain_divisor(&self) -> bool {
         self.micro_min_gain_divisor > 0
     }

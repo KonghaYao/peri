@@ -2,13 +2,14 @@ use crate::acp_client::AcpTuiClient;
 use crate::application::operations::{
     CompletionGate, OperationOutcome, OperationScope, OperationTicket, OutcomeUnknownReason,
 };
-use crate::kit::atoms::{ACP_CLIENT_HANDLE, PluginSummary};
-use crate::kit::panel_mouse::{ListLayout, hit_item, is_scrollbar_column};
+
+use crate::kit::panel_mouse::ListLayout;
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui_kit::prelude::State;
 use ratatui_kit::ratatui::layout::Rect;
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -24,10 +25,10 @@ pub(super) fn detail_action_index(
         }
         Event::Mouse(mouse) => {
             let area = area?;
-            if is_scrollbar_column(mouse, area) {
+            if crate::kit::panel_mouse::is_scrollbar_column(mouse, area) {
                 return None;
             }
-            hit_item(
+            crate::kit::panel_mouse::hit_item(
                 mouse,
                 area,
                 ListLayout {
@@ -173,6 +174,7 @@ impl OperationState {
     }
 
     /// 是否有在途操作：与完成门同源，不另存一份在途标志。
+    #[must_use]
     pub fn is_pending(&self) -> bool {
         self.gate.is_pending()
     }
@@ -442,3 +444,7 @@ pub(super) fn confirm_marketplace_remove(
 #[cfg(test)]
 #[path = "operation_test.rs"]
 pub(super) mod tests;
+
+use crate::kit::atoms::ACP_CLIENT_HANDLE;
+
+use crate::kit::atoms::PluginSummary;

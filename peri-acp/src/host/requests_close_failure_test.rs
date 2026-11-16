@@ -6,9 +6,14 @@
 //! 收到关闭失败，会话必须保持开放、运行期未被取消，后续 `session/prompt` 仍能跑完整
 //! 一轮（旧行为：先置 `closing` 并预关闭，失败后会话被永久拒绝）。
 
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::host::SessionState;
 use crate::host::{PromptLocks, SharedSessions};
+use crate::provider::LlmProvider;
+use crate::transport::types::AcpError;
 use crate::transport::AcpTransport;
+use async_trait::async_trait;
 use peri_acp_types::history_page::{
     HistoryCursor, HistoryForwardCursor, HistoryPage, HistoryPageBounds, HistorySegment,
 };
@@ -20,6 +25,10 @@ use peri_acp_types::session::{
     EnqueueUserInputRequest, MqCancelOutcome, MqEnqueueOutcome, MqEntry, MqFilter, MqInput,
     MqReceiveOutcome, MqReceiveSelection,
 };
+use peri_acp_types::session_resources::BindingState;
+use peri_acp_types::session_resources::FrozenState;
+use peri_acp_types::session_resources::NewSession;
+use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingRecheck, ChildResumeClaim, ChildSnapshot, CloseSettlement,
     ForkSnapshot, FrozenSnapshotBytes, HistoryWindowPagePlan, HistoryWindowRows, NewSessionDraft,
@@ -27,10 +36,16 @@ use peri_acp_types::session_resources::{
     SessionHistoryWindowBounds, SessionInitialization, SessionMetaPatch, SessionResourceError,
     SessionResourceErrorKind, SessionResourceResult, SessionSnapshot, TerminalSettlementOutcome,
 };
+use peri_acp_types::store::PersistedPayload;
+
 use peri_acp_types::store::{CompactionChange, MessageFlags};
 use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta, WorkState};
 use peri_acp_types::workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery};
+use serde_json::json;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 // ── 故障注入门面：真实 SQLite 门面 + 单点失败 ────────────────────────────────
 
@@ -218,9 +233,11 @@ impl CloseHarness {
             )
             .create_async()
             .await;
-        let mut provider = make_provider_config("local", "openai", "test", "gpt-test");
+        let mut provider = crate::host::requests::tests::make_provider_config(
+            "local", "openai", "test", "gpt-test",
+        );
         provider.base_url = mock_server.url();
-        let config = make_peri_config_with_provider(provider);
+        let config = crate::host::requests::tests::make_peri_config_with_provider(provider);
         let provider = LlmProvider::from_config(&config).unwrap();
         let inner = peri_agent::resources::open_session_resources_with(Some(
             directory.path().join("threads.db"),
@@ -235,12 +252,17 @@ impl CloseHarness {
             inner,
             switch: Arc::clone(&switch),
         });
-        let cfg = Arc::new(build_server_config(config, provider, &directory, resources).await);
+        let cfg = Arc::new(
+            crate::host::requests::tests::build_server_config(
+                config, provider, &directory, resources,
+            )
+            .await,
+        );
 
         // 生产同款 `session/new`：发布 `SessionState` + 冻结上下文 + 运行期登记。
         let mut sessions = HashMap::new();
         let recorder: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-        let created = handle_request(
+        let created = crate::host::requests::handle_request(
             "session/new",
             &json!({ "cwd": cwd }),
             &cfg,
@@ -270,7 +292,8 @@ impl CloseHarness {
                     crate::host::connection::ConnectionContext::new(false),
                 ));
                 let cancellation = tokio_util::sync::CancellationToken::new();
-                let recovery = recovery_for(&cfg, &sessions, &cont_tx);
+                let recovery =
+                    crate::host::requests::tests::recovery_for(&cfg, &sessions, &cont_tx);
                 crate::host::server_loop::ServerLoop {
                     transport: &server_transport,
                     cfg: &cfg,
@@ -327,7 +350,7 @@ impl CloseHarness {
         let cwd = self._directory.path().to_str().unwrap();
         let recorder: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
         let mut states = self.sessions.lock().await;
-        let response = handle_request(
+        let response = crate::host::requests::handle_request(
             "session/new",
             &json!({ "cwd": cwd }),
             &self.cfg,

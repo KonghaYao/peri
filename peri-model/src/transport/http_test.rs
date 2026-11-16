@@ -1,15 +1,13 @@
-use std::{
-    collections::VecDeque,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
-    time::Duration,
-};
+use std::collections::VecDeque;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
-use tokio::time::timeout;
+use tokio::time;
 use tokio_util::sync::CancellationToken;
 
 use super::{HttpBody, HttpRequest, HttpResponse, HttpTransport};
@@ -154,7 +152,7 @@ async fn fake_transport_connect_wait_observes_cancellation() {
 
     tokio::task::yield_now().await;
     cancellation.cancel();
-    let result = timeout(Duration::from_millis(100), send)
+    let result = time::timeout(Duration::from_millis(100), send)
         .await
         .expect("connect cancellation must resolve")
         .expect("task must not panic");
@@ -171,7 +169,7 @@ async fn fake_transport_body_read_observes_cancellation() {
 
     tokio::task::yield_now().await;
     cancellation.cancel();
-    let item = timeout(Duration::from_millis(100), read)
+    let item = time::timeout(Duration::from_millis(100), read)
         .await
         .expect("body cancellation must resolve")
         .expect("task must not panic")

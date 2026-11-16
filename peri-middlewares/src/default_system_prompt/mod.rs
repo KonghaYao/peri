@@ -29,10 +29,11 @@
 //! 覆盖在无用户配置时仍可注入（覆盖先于空过滤生效）。
 
 use peri_acp_types::agents::AgentOverrides;
-use peri_agent::middleware::{
-    prompt_sections::{PromptSection, PromptSectionZone},
-    r#trait::Middleware,
-};
+use peri_agent::middleware::prompt_sections::PromptSection;
+use peri_agent::middleware::prompt_sections::PromptSectionZone;
+use peri_agent::middleware::r#trait::Middleware;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 
 /// 基础段落声明（ID / 内容 / 位置属性）。
 ///
@@ -122,8 +123,17 @@ pub struct DefaultSystemPromptMiddleware {
     overrides: Option<AgentOverrides>,
 }
 
+impl Debug for DefaultSystemPromptMiddleware {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DefaultSystemPromptMiddleware")
+            .finish_non_exhaustive()
+    }
+}
+
 impl DefaultSystemPromptMiddleware {
     /// 构造（`overrides` 为 agent.md / CLI --agent 覆盖项；None = 无 persona）。
+    #[must_use]
     pub fn new(overrides: Option<AgentOverrides>) -> Self {
         Self { overrides }
     }
@@ -133,6 +143,7 @@ impl DefaultSystemPromptMiddleware {
     /// persona 段**恒声明**（内容为空串时由渲染面空内容过滤跳过）——
     /// 保证 MetaHarness 覆盖 `.peri/meta/persona.md` 在无用户 overrides
     /// 时仍可注入（决策记录 D2）。
+    #[must_use]
     pub fn sections(overrides: Option<&AgentOverrides>) -> Vec<PromptSection> {
         let mut sections = Vec::with_capacity(BASE_SECTIONS.len() + 1);
         sections.push(PromptSection::dynamic(
@@ -165,12 +176,14 @@ impl Middleware for DefaultSystemPromptMiddleware {
 /// 文本）；位置属性 = 非缓存区最后段（gated 之后，现状顺序）。可关闭
 /// （`"LangMiddleware": false` → 语言段消失）、可覆盖
 /// （`.peri/meta/language.md` 全文替换语言指令）。
+#[derive(Debug)]
 pub struct LangMiddleware {
     language: Option<String>,
 }
 
 impl LangMiddleware {
     /// 构造（`language` 为冻结的 `settings.language`；None = 自动检测）。
+    #[must_use]
     pub fn new(language: Option<String>) -> Self {
         Self { language }
     }
@@ -179,6 +192,7 @@ impl LangMiddleware {
     ///
     /// language 段**恒声明**（无语言配置时内容为空串，由渲染面空内容
     /// 过滤跳过）——保证 `.peri/meta/language.md` 覆盖可注入。
+    #[must_use]
     pub fn sections(language: Option<&str>) -> Vec<PromptSection> {
         vec![PromptSection::dynamic(
             "language",

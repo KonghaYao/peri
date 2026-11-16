@@ -5,7 +5,7 @@
 //! `compact_v2::run_compact`）的 `/compact` 命令执行体；ACP 协议面
 //! `session::command::compact::pipeline` 保留 re-export 薄壳。
 //!
-//! [v2] 从 v1 压缩路径迁移到 `compact_v2::run_compact(force=true)`：
+//! \[v2\] 从 v1 压缩路径迁移到 `compact_v2::run_compact(force=true)`：
 //! - 把 history 加载进临时 `MessageTranscript`
 //! - 调用 `run_compact` 触发 Full Compact
 //! - 从 transcript 拿 compact 后的 visible_messages 组装事件载荷
@@ -17,7 +17,7 @@
 //!   → run_v2_compact_with_cancel → assemble_compact_messages
 //!   → (emit_completed)
 //!
-//! [TRAP] cancel_token.cancelled() 分支返回 PromptStopReason::Cancelled；错误/空历史/
+//! \[TRAP\] cancel_token.cancelled() 分支返回 PromptStopReason::Cancelled；错误/空历史/
 //! 无模型当前都返回 EndTurn。executor.rs 上游对 Cancelled 有专门处理
 //! （spec/global/domains/agent.md#issue_2026-05-29-ctrl-c-interrupt-causes-agent-amnesia）。
 //!
@@ -26,6 +26,7 @@
 //! env overrides 每轮重新应用，语义保持）。
 
 use std::collections::HashSet;
+use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
 use peri_acp_types::command::{
@@ -43,8 +44,6 @@ use tracing::{info, warn};
 use crate::agent::compact_v2;
 use crate::session::async_result_mailbox::AsyncResultMailbox;
 use crate::session::transcript::{CompactionCommitState, MessageTranscript};
-
-use super::events::{emit_compact_completed, emit_compact_started};
 
 /// Pipeline 终态。编排层据此决定返回值与是否中途 short-circuit。
 pub enum PipelineOutcome {
@@ -75,6 +74,7 @@ pub enum PipelineOutcome {
 /// CompactError 变体与发射已删除——错误不再经事件通道，改由
 /// [`PipelineOutcome::EarlyReturn`] 结构化返回，由 execute_compact 最外层
 /// 统一映射 feedback(Error, UiOnly)）。
+#[must_use]
 pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     // The interceptor owns a clone beyond both cancellation select boundaries.
     let commit_state = ctx
@@ -361,7 +361,7 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     }
 
     // 阶段 6: 发出 CompactStarted 事件
-    emit_compact_started(&event_sink, &session_id).await;
+    crate::session::exec::events::emit_compact_started(&event_sink, &session_id).await;
 
     let mut consecutive_failures = 0u32;
     let compact_result = match run_v2_compact_with_cancel(
@@ -396,10 +396,10 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     );
 
     // 阶段 6: 组装最终消息（从 transcript visible_messages 取）
-    let assembled = assemble_compact_messages(&transcript, &compact_result.summary.clone());
+    let assembled = assemble_compact_messages(&transcript, compact_result.summary.as_deref());
 
     // 阶段 7: 发出 CompactCompleted 事件（重建信号 + 展示/观测计数）。
-    emit_compact_completed(
+    crate::session::exec::events::emit_compact_completed(
         &event_sink,
         &session_id,
         compact_result.summary.clone().unwrap_or_default(),
@@ -498,12 +498,13 @@ async fn run_v2_compact_with_cancel(
 
 /// 组装最终消息：从 transcript visible_messages 提取摘要及保留的可见消息。
 ///
-/// [TRAP] compact 后消息结构必须以 `BaseMessage::human(summary + continuation)` 开头。
+/// \[TRAP\] compact 后消息结构必须以 `BaseMessage::human(summary + continuation)` 开头。
 /// 但 v2 的 run_compact 已经在 transcript 内部追加了符合不变量的消息，
 /// 此处直接读 visible_messages 即可，无需重新构造首条消息。
+#[must_use]
 pub fn assemble_compact_messages(
     transcript: &MessageTranscript,
-    _summary: &Option<String>,
+    _summary: Option<&str>,
 ) -> AssembledMessages {
     let mut messages: Vec<BaseMessage> = transcript
         .visible_messages()
@@ -589,3 +590,28 @@ pub async fn execute_compact(ctx: CommandContext) -> CommandResult {
 #[cfg(test)]
 #[path = "compact_pipeline_test.rs"]
 mod tests;
+
+impl Debug for PipelineOutcome {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        let variant = match self {
+            Self::Completed { .. } => "Completed",
+            Self::Cancelled { .. } => "Cancelled",
+            Self::EarlyReturn { .. } => "EarlyReturn",
+        };
+        formatter
+            .debug_tuple("PipelineOutcome")
+            .field(&variant)
+            .finish()
+    }
+}
+
+impl Debug for AssembledMessages {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AssembledMessages")
+            .field("messages_len", &self.messages.len())
+            .field("files_len", &self.files.len())
+            .field("skills_len", &self.skills.len())
+            .finish_non_exhaustive()
+    }
+}

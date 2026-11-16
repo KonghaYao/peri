@@ -1,4 +1,9 @@
-use super::*;
+use crate::host::connection_context::ConnectionContext;
+use crate::host::connection_context::SessionSetupRequest;
+use crate::host::connection_context::SESSION_SETUP_IN_PROGRESS_REASON;
+use crate::host::connection_context::SESSION_SWITCH_REQUIRED_REASON;
+use crate::transport::types::AcpError;
+use peri_acp_types::PeriCaps;
 
 #[test]
 fn deployment_capability_is_immutable_and_close_invalidates_sessions() {

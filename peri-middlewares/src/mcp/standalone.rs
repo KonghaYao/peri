@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 #[cfg(not(target_os = "emscripten"))]
-use peri_mcp_common::standalone::{serve_http, serve_stdio};
+use peri_mcp_common::standalone;
 
 #[cfg(not(target_os = "emscripten"))]
 use super::builtin::router::RouterTemplate;
@@ -70,15 +70,15 @@ pub async fn run(options: Options) -> Result<()> {
 
 #[cfg(not(target_os = "emscripten"))]
 async fn run_instance(instance: String, transport: Transport, workspace: PathBuf) -> Result<()> {
-    let factory = StandaloneFactory::new(&instance, workspace)?;
+    let factory = StandaloneFactory::try_new(&instance, workspace)?;
     let workspace = factory.workspace_handle();
     let served = match transport {
-        Transport::Stdio => serve_stdio(factory.create()?).await,
+        Transport::Stdio => standalone::serve_stdio(factory.create()?).await,
         Transport::Http {
             host,
             port,
             allowed_hosts,
-        } => serve_http(move || factory.create(), &host, port, &allowed_hosts).await,
+        } => standalone::serve_http(move || factory.create(), &host, port, &allowed_hosts).await,
     };
     cleanup_workspace(workspace, served).await
 }
@@ -94,14 +94,14 @@ async fn run_router(
     let served = match transport {
         Transport::Stdio => {
             let router = template.create()?;
-            serve_stdio(router).await
+            standalone::serve_stdio(router).await
         }
         Transport::Http {
             host,
             port,
             allowed_hosts,
         } => {
-            serve_http(
+            standalone::serve_http(
                 move || template.create().map_err(std::io::Error::other),
                 &host,
                 port,

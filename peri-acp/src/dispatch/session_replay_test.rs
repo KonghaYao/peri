@@ -14,7 +14,14 @@ use peri_acp_types::system_reminder::{
 };
 use peri_acp_types::PeriCaps;
 
-use super::*;
+use crate::dispatch::session_replay::EntryMarks;
+use crate::dispatch::session_replay::LoadGeneration;
+use crate::dispatch::session_replay::ReplayError;
+use crate::dispatch::session_replay::ReplayMarks;
+use crate::dispatch::session_replay::ReplaySender;
+use peri_acp_types::messages::ContentBlock as PeriContentBlock;
+use peri_acp_types::messages::MessageContent as PeriMessageContent;
+use std::collections::HashMap;
 
 /// 收集 replay 通知的测试 sender。
 struct CollectSender {
@@ -53,7 +60,7 @@ async fn collect_replay(history: Vec<BaseMessage>) -> Vec<SessionUpdate> {
     let positions = HashMap::new();
     let generation = LoadGeneration::from_client("gen-1");
     let marks = ReplayMarks::new(&generation, "s1", &positions);
-    replay_session_history("s1", &history, &sender, &caps, &marks)
+    crate::dispatch::session_replay::replay_session_history("s1", &history, &sender, &caps, &marks)
         .await
         .expect("replay 发送失败");
     sender.updates.into_inner().unwrap()
@@ -140,7 +147,7 @@ async fn replay_notifications_carry_the_load_generation_next_to_the_replay_marke
     let sender = CollectSender {
         updates: std::sync::Mutex::new(Vec::new()),
     };
-    replay_session_history(
+    crate::dispatch::session_replay::replay_session_history(
         "s1",
         &[BaseMessage::human("hello")],
         &sender,
@@ -159,7 +166,7 @@ async fn replay_notifications_carry_the_load_generation_next_to_the_replay_marke
     };
     // 未协商分页：回放不带条目身份 / 位置戳（`periReplay` 仍按 `caps.replay` 单独判定）。
     let no_pagination = ReplayMarks::without_entry_marks(&generation, "s1");
-    replay_session_history(
+    crate::dispatch::session_replay::replay_session_history(
         "s1",
         &[BaseMessage::human("hello")],
         &sender,
@@ -180,7 +187,7 @@ async fn replay_notifications_carry_the_load_generation_next_to_the_replay_marke
     let sender = CollectSender {
         updates: std::sync::Mutex::new(Vec::new()),
     };
-    replay_session_history(
+    crate::dispatch::session_replay::replay_session_history(
         "s1",
         &[BaseMessage::human("hello")],
         &sender,
@@ -211,7 +218,7 @@ async fn replay_marks_carry_the_same_entry_identity_and_position_as_a_history_pa
         updates: std::sync::Mutex::new(Vec::new()),
     };
 
-    replay_session_history(
+    crate::dispatch::session_replay::replay_session_history(
         "s1",
         &[visible.clone(), inherited.clone()],
         &sender,
@@ -229,7 +236,10 @@ async fn replay_marks_carry_the_same_entry_identity_and_position_as_a_history_pa
     let own_meta = own["_meta"].clone();
     assert_eq!(
         own_meta["periEntryId"],
-        serde_json::json!(entry_id("s1", visible.id())),
+        serde_json::json!(crate::dispatch::session_replay::entry_id(
+            "s1",
+            visible.id()
+        )),
         "回放与历史页必须给出同一个身份字符串"
     );
     assert_eq!(
@@ -242,7 +252,10 @@ async fn replay_marks_carry_the_same_entry_identity_and_position_as_a_history_pa
     let inherited_meta = inherited_update["_meta"].clone();
     assert_eq!(
         inherited_meta["periEntryId"],
-        serde_json::json!(entry_id("s1", inherited.id())),
+        serde_json::json!(crate::dispatch::session_replay::entry_id(
+            "s1",
+            inherited.id()
+        )),
         "继承条目没有存储行，但仍然带身份"
     );
     assert!(
@@ -281,9 +294,15 @@ async fn persisted_reminder_is_not_replayed_as_user_content() {
     let positions = HashMap::new();
     let generation = LoadGeneration::from_client("gen-1");
     let marks = ReplayMarks::new(&generation, "s1", &positions);
-    replay_persisted_session_history("s1", &history, &sender, &PeriCaps::default(), &marks)
-        .await
-        .unwrap();
+    crate::dispatch::session_replay::replay_persisted_session_history(
+        "s1",
+        &history,
+        &sender,
+        &PeriCaps::default(),
+        &marks,
+    )
+    .await
+    .unwrap();
     let updates = sender.updates.into_inner().unwrap();
     assert_eq!(updates.len(), 2);
     assert!(matches!(updates[0], SessionUpdate::UserMessageChunk(_)));
@@ -567,7 +586,7 @@ async fn test_replay_tool_completion_keeps_raw_output_compatibility_and_failure_
             let positions = HashMap::new();
             let generation = LoadGeneration::from_client("gen-1");
             let marks = ReplayMarks::new(&generation, "s1", &positions);
-            replay_session_history(
+            crate::dispatch::session_replay::replay_session_history(
                 "s1",
                 &[BaseMessage::tool_result_with_execution_and_failure(
                     "tc-completion",

@@ -1,7 +1,7 @@
 //! host 装配面目标测试：池的 cwd 绑定必须发生在延迟初始化之前（STD-SIZE-001 拆分，
 //! 原 `assemble.rs` 内联 `mod tests` 迁出）。
 
-use super::*;
+use peri_acp_types::ports::McpPoolPort;
 
 #[tokio::test]
 async fn worktree_mcp_pool_is_bound_before_deferred_initialization() {
@@ -13,7 +13,7 @@ async fn worktree_mcp_pool_is_bound_before_deferred_initialization() {
             .unwrap()
             .into_parts();
     let (_owner, spawner) = peri_middlewares::mcp::McpTaskOwner::new();
-    let pool = pending_mcp_pool(
+    let pool = crate::host::assemble::host_capabilities::pending_mcp_pool(
         spawner,
         peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
         Some(target.path()),

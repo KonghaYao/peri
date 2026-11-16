@@ -1,4 +1,10 @@
-use super::*;
+use super::Arc;
+use super::McpClientPool;
+use super::OAuthFlowEvent;
+use super::OAuthStartDisposition;
+use super::TestDropSignal;
+use crate::mcp::client::SHUTDOWN_TIMEOUT;
+use peri_acp_types::ports::McpPoolShutdownReport;
 
 #[tokio::test]
 async fn test_shutdown_drops_pending_oauth_callbacks() {
@@ -44,7 +50,7 @@ async fn test_cancelled_shutdown_waiter_keeps_single_service_transaction_owned()
     let (second_entered_tx, mut second_entered_rx) = tokio::sync::oneshot::channel();
     pool.services.lock().insert(
         "first".to_string(),
-        controlled_service(
+        super::controlled_service(
             first_entered_tx,
             Arc::clone(&first_release),
             Arc::clone(&first_count),
@@ -52,7 +58,7 @@ async fn test_cancelled_shutdown_waiter_keeps_single_service_transaction_owned()
     );
     pool.services.lock().insert(
         "second".to_string(),
-        controlled_service(
+        super::controlled_service(
             second_entered_tx,
             Arc::clone(&second_release),
             Arc::clone(&second_count),
@@ -137,7 +143,7 @@ async fn test_concurrent_and_repeated_shutdown_share_one_service_transaction() {
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     pool.services.lock().insert(
         "only".to_string(),
-        controlled_service(entered_tx, Arc::clone(&release), Arc::clone(&close_count)),
+        super::controlled_service(entered_tx, Arc::clone(&release), Arc::clone(&close_count)),
     );
 
     let first_pool = Arc::clone(&pool);
@@ -164,7 +170,7 @@ async fn test_timed_out_service_is_recorded_incomplete_and_never_publishes_close
     let close_count = Arc::new(AtomicUsize::new(0));
     pool.services.lock().insert(
         "unfinished".to_string(),
-        timing_out_service(Arc::clone(&close_count)),
+        super::timing_out_service(Arc::clone(&close_count)),
     );
 
     let first = pool.shutdown().await;
@@ -277,7 +283,7 @@ async fn test_blocked_oauth_task_crossing_shutdown_cannot_commit_callback_or_ser
     close_release.notify_one();
     let close_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (close_entered_tx, _close_entered_rx) = tokio::sync::oneshot::channel();
-    let service = controlled_service(close_entered_tx, close_release, close_count);
+    let service = super::controlled_service(close_entered_tx, close_release, close_count);
     pool.spawn_background(McpTaskKey::OAuth("flow-blocked".into()), async move {
         let _ = started_tx.send(());
         let _ = release_rx.await;
@@ -289,7 +295,7 @@ async fn test_blocked_oauth_task_crossing_shutdown_cannot_commit_callback_or_ser
         });
         let committed = match task_pool.try_commit_connection(
             "docs".to_string(),
-            connected_test_handle("docs"),
+            super::connected_test_handle("docs"),
             service,
         ) {
             Ok(()) => true,
@@ -358,7 +364,7 @@ async fn test_concurrent_terminal_shutdown_settles_pending_task_subscription_and
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     pool.services.lock().insert(
         "docs".to_string(),
-        controlled_service(entered_tx, Arc::clone(&release), Arc::clone(&close_count)),
+        super::controlled_service(entered_tx, Arc::clone(&release), Arc::clone(&close_count)),
     );
 
     pool.begin_shutdown();

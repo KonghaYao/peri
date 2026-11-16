@@ -1,13 +1,13 @@
 //! 实验语义评估；预期负例精确匹配，所有组共同决定进程退出码。
 
 use crate::matrix::{self, Case};
-use crate::scanner::{
-    block_rows, count_occurrences, parse, replace_collision_free, replace_images, scan_images,
-    token, TokenKind,
-};
+use crate::scanner;
+use crate::scanner::block_rows;
+use crate::scanner::TokenKind;
 use ratatui_kit_markdown::ParsedBlock;
 
 /// 单 case 结果。
+#[derive(Debug)]
 pub struct Outcome {
     pub name: String,
     pub note: String,
@@ -26,6 +26,7 @@ pub struct Outcome {
 }
 
 impl Outcome {
+    #[must_use]
     pub fn pass(&self) -> bool {
         self.actual_hits == self.expect_hits
             && self.slice_ok
@@ -38,18 +39,19 @@ impl Outcome {
 }
 
 /// 评估单个 case。
+#[must_use]
 pub fn evaluate(c: &Case) -> Outcome {
     let md = c.md;
-    let hits = scan_images(md);
+    let hits = scanner::scan_images(md);
 
     // 三种替换
-    let nul = replace_images(md, &hits, TokenKind::Nul);
-    let pua = replace_images(md, &hits, TokenKind::Pua);
-    let plain = replace_images(md, &hits, TokenKind::Plain);
+    let nul = scanner::replace_images(md, &hits, TokenKind::Nul);
+    let pua = scanner::replace_images(md, &hits, TokenKind::Pua);
+    let plain = scanner::replace_images(md, &hits, TokenKind::Plain);
 
-    let nul_blocks = parse(&nul);
-    let pua_blocks = parse(&pua);
-    let plain_blocks = parse(&plain);
+    let nul_blocks = scanner::parse(&nul);
+    let pua_blocks = scanner::parse(&pua);
+    let plain_blocks = scanner::parse(&plain);
 
     // 结构形状比较：kind 序列 + 每行 span 数
     let shape_of = |blocks: &[ParsedBlock]| -> Vec<(String, Vec<usize>)> {
@@ -66,7 +68,7 @@ pub fn evaluate(c: &Case) -> Outcome {
     let all_text = |blocks: &[ParsedBlock]| -> String {
         let mut s = String::new();
         for b in blocks {
-            let (_, rows) = block_rows(b);
+            let (_, rows) = scanner::block_rows(b);
             for row in rows {
                 for sp in row {
                     s.push_str(&sp);
@@ -149,10 +151,11 @@ fn tokens_match_expectation(
         } else {
             1
         };
-        count_occurrences(text, &token(kind, i)) == expected
+        scanner::count_occurrences(text, &scanner::token(kind, i)) == expected
     })
 }
 
+#[derive(Debug)]
 pub struct Check {
     pub name: String,
     pub passed: bool,
@@ -180,6 +183,7 @@ impl Check {
     }
 }
 
+#[derive(Debug)]
 pub struct Experiment {
     pub matrix: Vec<Outcome>,
     pub streaming: Vec<Check>,
@@ -188,6 +192,7 @@ pub struct Experiment {
 }
 
 impl Experiment {
+    #[must_use]
     pub fn failures(&self) -> usize {
         self.matrix.iter().filter(|o| !o.pass()).count()
             + self
@@ -199,6 +204,7 @@ impl Experiment {
                 .count()
     }
 
+    #[must_use]
     pub fn exit_code(&self) -> u8 {
         let complete = !self.matrix.is_empty()
             && !self.streaming.is_empty()
@@ -256,14 +262,17 @@ fn streaming_checks() -> Vec<Check> {
     ];
     let mut checks = Vec::new();
     for (id, md, expected_hits) in stages {
-        let hits = scan_images(md);
-        let substituted = replace_images(md, &hits, TokenKind::Nul);
-        let plain = replace_images(md, &hits, TokenKind::Plain);
-        let nul_shape: Vec<_> = parse(&substituted)
+        let hits = scanner::scan_images(md);
+        let substituted = scanner::replace_images(md, &hits, TokenKind::Nul);
+        let plain = scanner::replace_images(md, &hits, TokenKind::Plain);
+        let nul_shape: Vec<_> = scanner::parse(&substituted)
             .iter()
             .map(crate::scanner::shape)
             .collect();
-        let plain_shape: Vec<_> = parse(&plain).iter().map(crate::scanner::shape).collect();
+        let plain_shape: Vec<_> = scanner::parse(&plain)
+            .iter()
+            .map(crate::scanner::shape)
+            .collect();
         checks.push(Check::count(
             &format!("{id} 命中"),
             hits.len(),
@@ -282,22 +291,23 @@ fn streaming_checks() -> Vec<Check> {
         ));
     }
     let mut previous = Vec::new();
-    for (i, md) in ["intro\n\n![a](", "intro\n\n![a](u", "intro\n\n![a](u)"]
-        .iter()
-        .enumerate()
     {
-        let hits = scan_images(md);
-        let substituted = replace_images(md, &hits, TokenKind::Nul);
-        let current = parse(&substituted)
-            .iter()
-            .map(crate::scanner::shape)
-            .collect::<Vec<_>>();
-        checks.push(prefix_check(
-            &format!("F 多段 stage{}", i + 1),
-            &previous,
-            &current,
-        ));
-        previous = current;
+        let partial_images = ["intro\n\n![a](", "intro\n\n![a](u", "intro\n\n![a](u)"];
+        let indexed_partial_images = partial_images.iter().enumerate();
+        for (i, md) in indexed_partial_images {
+            let hits = scanner::scan_images(md);
+            let substituted = scanner::replace_images(md, &hits, TokenKind::Nul);
+            let current = scanner::parse(&substituted)
+                .iter()
+                .map(crate::scanner::shape)
+                .collect::<Vec<_>>();
+            checks.push(prefix_check(
+                &format!("F 多段 stage{}", i + 1),
+                &previous,
+                &current,
+            ));
+            previous = current;
+        }
     }
     checks
 }
@@ -309,18 +319,18 @@ fn collision_checks() -> Vec<Check> {
         ("G PUA", TokenKind::Pua),
         ("G Plain", TokenKind::Plain),
     ] {
-        let user_token = token(kind, 0);
+        let user_token = scanner::token(kind, 0);
         let md = format!("复制了 {user_token} 然后 ![a](u)");
-        let hits = scan_images(&md);
+        let hits = scanner::scan_images(&md);
         checks.push(Check::count(&format!("{name} 命中"), hits.len(), 1, false));
-        let naive = replace_images(&md, &hits, kind);
+        let naive = scanner::replace_images(&md, &hits, kind);
         checks.push(Check::count(
             &format!("{name} 朴素替换碰撞"),
-            count_occurrences(&naive, &user_token),
+            scanner::count_occurrences(&naive, &user_token),
             2,
             true,
         ));
-        let (fixed, tokens) = replace_collision_free(&md, &hits, kind);
+        let (fixed, tokens) = scanner::replace_collision_free(&md, &hits, kind);
         checks.push(resolved_collision_check(
             &format!("{name} 重编号"),
             &md,
@@ -330,19 +340,19 @@ fn collision_checks() -> Vec<Check> {
             &user_token,
         ));
     }
-    let user_token = token(TokenKind::Nul, 999);
+    let user_token = scanner::token(TokenKind::Nul, 999);
     let md = format!("复制了 {user_token} 然后 ![a](u)");
-    let hits = scan_images(&md);
-    let (fixed, tokens) = replace_collision_free(&md, &hits, TokenKind::Nul);
+    let hits = scanner::scan_images(&md);
+    let (fixed, tokens) = scanner::replace_collision_free(&md, &hits, TokenKind::Nul);
     checks.push(Check::condition(
         "G 不存在编号保留",
         hits.len() == 1 && collision_resolved(&md, &fixed, &tokens, hits.len(), &user_token),
         format!("tokens={tokens:?}；用户串={user_token:?}；结果={fixed:?}"),
     ));
     let md = "```\n\u{0}IMG0\u{0}\n```";
-    let hits = scan_images(md);
-    let substituted = replace_images(md, &hits, TokenKind::Nul);
-    let blocks = parse(&substituted);
+    let hits = scanner::scan_images(md);
+    let substituted = scanner::replace_images(md, &hits, TokenKind::Nul);
+    let blocks = scanner::parse(&substituted);
     let code_preserved = matches!(blocks.as_slice(), [ParsedBlock::CodeBlock(_, lines)]
         if lines.join("\n") == "\u{0}IMG0\u{0}");
     checks.push(Check::condition(
@@ -381,9 +391,12 @@ fn collision_resolved(
 ) -> bool {
     tokens.len() == hits
         && tokens.iter().enumerate().all(|(i, t)| {
-            !source.contains(t) && !tokens[..i].contains(t) && count_occurrences(fixed, t) == 1
+            !source.contains(t)
+                && !tokens[..i].contains(t)
+                && scanner::count_occurrences(fixed, t) == 1
         })
-        && count_occurrences(fixed, user_token) == count_occurrences(source, user_token)
+        && scanner::count_occurrences(fixed, user_token)
+            == scanner::count_occurrences(source, user_token)
 }
 
 fn reference_checks() -> Vec<Check> {
@@ -404,7 +417,7 @@ fn reference_checks() -> Vec<Check> {
     cases
         .into_iter()
         .map(|(name, md, expected)| {
-            let hits = scan_images(md);
+            let hits = scanner::scan_images(md);
             let actual: Vec<_> = hits
                 .iter()
                 .map(|h| (h.alt.as_str(), h.url.as_str(), h.id.as_str()))

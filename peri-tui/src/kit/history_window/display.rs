@@ -30,6 +30,7 @@ impl DisplayLedger {
         true
     }
 
+    #[must_use]
     pub fn contains(&self, key: &PersistentEntryKey) -> bool {
         self.entries.contains(key)
     }
@@ -130,21 +131,24 @@ impl DisplayLedger {
             .filter(|(_, (key, _))| keys.contains(key))
             .map(|(start, (_, len))| (*start, *len))
             .collect();
-        for (start, len) in ranges.iter().rev() {
-            self.slots.remove(start);
-            let shifted: BTreeMap<usize, (PersistentEntryKey, usize)> = self
-                .slots
-                .iter()
-                .map(|(other, value)| {
-                    let other = if *other > *start {
-                        other.saturating_sub(*len)
-                    } else {
-                        *other
-                    };
-                    (other, value.clone())
-                })
-                .collect();
-            self.slots = shifted;
+        {
+            let iteration_items = ranges.iter().rev();
+            for (start, len) in iteration_items {
+                self.slots.remove(start);
+                let shifted: BTreeMap<usize, (PersistentEntryKey, usize)> = self
+                    .slots
+                    .iter()
+                    .map(|(other, value)| {
+                        let other = if *other > *start {
+                            other.saturating_sub(*len)
+                        } else {
+                            *other
+                        };
+                        (other, value.clone())
+                    })
+                    .collect();
+                self.slots = shifted;
+            }
         }
         for key in keys {
             self.entries.remove(key);
@@ -167,10 +171,12 @@ impl DisplayLedger {
         self.positions.clear();
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -219,6 +225,7 @@ impl HistoryWindow {
         self.display.remove_unmapped_slot(slot)
     }
 
+    #[must_use]
     pub fn is_entry_displayed(&self, key: &PersistentEntryKey) -> bool {
         self.display.contains(key)
     }
@@ -269,6 +276,7 @@ impl HistoryWindow {
         self.display.clear();
     }
 
+    #[must_use]
     pub fn displayed_entry_count(&self) -> usize {
         self.display.len()
     }

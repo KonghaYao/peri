@@ -28,18 +28,18 @@ use tracing::{error, info, warn};
 use crate::acp_client::{AcpTuiClient, AdmissionGuard};
 use crate::i18n;
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
-use crate::kit::atoms::{
-    ACP_STATE, EXIT_REQUESTED, LOADING_EPOCH, LOCAL_EVENT_TX, NOTIFICATION, RENDER_HEARTBEAT,
-    REWIND_ACTION_TX,
-};
+
 use crate::kit::submit_request::{
     ExportMode, SessionControlRequest, SubmitRequest, ViewActionRequest,
 };
 
-use super::submit_admission::{
-    CohortMode, CohortState, CohortTicket, Cohorts, LaneKey, SessionIdentity, SubmitAdmission,
-    register_admission,
-};
+use super::submit_admission::CohortMode;
+use super::submit_admission::CohortState;
+use super::submit_admission::CohortTicket;
+use super::submit_admission::Cohorts;
+use super::submit_admission::LaneKey;
+use super::submit_admission::SessionIdentity;
+use super::submit_admission::SubmitAdmission;
 
 /// 取消通知的等待上限；超时不把未知结果当作已停止。
 const CANCEL_RPC_TIMEOUT_SECS: u64 = 2;
@@ -56,6 +56,7 @@ pub(super) struct SubmitLanes<K> {
 }
 
 impl<K: Eq + Hash> SubmitLanes<K> {
+    #[must_use]
     pub(super) fn new() -> Self {
         Self {
             tails: HashMap::new(),
@@ -81,6 +82,7 @@ impl<K: Eq + Hash> SubmitLanes<K> {
     }
 
     /// `key` 车道是否还有未完成的提交。
+    #[must_use]
     pub(super) fn is_active(&self, key: &K) -> bool {
         self.tails.get(key).is_some_and(|tail| !tail.is_finished())
     }
@@ -156,7 +158,7 @@ pub fn spawn_submit_consumer(
                                             lanes.is_active(&LaneKey::Cohort(*key))
                                         });
                                         let (lane, admission) =
-                                            register_admission(&acp_client, &mut cohorts, &lanes);
+                                            super::submit_admission::register_admission(&acp_client, &mut cohorts, &lanes);
                                         (Some(lane), Some(admission))
                                     }
                                 }
@@ -407,7 +409,11 @@ async fn resolve_admission_identity(
             None => Ok(None),
         };
     };
-    match &*cohort.state.lock().unwrap() {
+    match &*cohort
+        .state
+        .lock()
+        .expect("cohort.state mutex must not be poisoned")
+    {
         CohortState::Adopted(identity) => return Ok(Some(identity.clone())),
         CohortState::Cancelled => return Ok(None),
         CohortState::Pending => {}
@@ -420,7 +426,10 @@ async fn resolve_admission_identity(
     let mut resolved = None;
     acp_client
         .resolve_session_admission(cwd, guard, |identity| {
-            let mut state = cohort.state.lock().unwrap();
+            let mut state = cohort
+                .state
+                .lock()
+                .expect("cohort.state mutex must not be poisoned");
             match identity {
                 Some(identity) => {
                     resolved = Some(identity.clone());
@@ -645,6 +654,7 @@ fn lines_to_plain_text(lines: &[Line<'static>]) -> String {
     output
 }
 
+#[must_use]
 fn debug_export_path(cwd: &str) -> PathBuf {
     Path::new(cwd).join(format!(
         "peri-debug-export-{}.txt",
@@ -770,30 +780,40 @@ mod admission_probe {
         Mutex::new(None);
 
     pub(super) fn install(session_id: &str, tx: mpsc::UnboundedSender<oneshot::Sender<()>>) {
-        *PROBE.lock().unwrap() = Some((session_id.to_string(), tx));
+        *PROBE.lock().expect("PROBE mutex must not be poisoned") =
+            Some((session_id.to_string(), tx));
     }
 
     pub(super) fn clear() {
-        *PROBE.lock().unwrap() = None;
+        *PROBE.lock().expect("PROBE mutex must not be poisoned") = None;
     }
 
     pub(super) fn install_registration_probe(tx: mpsc::UnboundedSender<(String, super::LaneKey)>) {
-        *REGISTRATIONS.lock().unwrap() = Some(tx);
+        *REGISTRATIONS
+            .lock()
+            .expect("REGISTRATIONS mutex must not be poisoned") = Some(tx);
     }
 
     pub(super) fn clear_registration_probe() {
-        *REGISTRATIONS.lock().unwrap() = None;
+        *REGISTRATIONS
+            .lock()
+            .expect("REGISTRATIONS mutex must not be poisoned") = None;
     }
 
     pub(super) fn note_registration(lane: &super::LaneKey, label: String) {
-        let probe = REGISTRATIONS.lock().unwrap();
+        let probe = REGISTRATIONS
+            .lock()
+            .expect("REGISTRATIONS mutex must not be poisoned");
         if let Some(tx) = probe.as_ref() {
             let _ = tx.send((label, lane.clone()));
         }
     }
 
     pub(super) async fn pause(identity: &super::SessionIdentity) {
-        let probe = PROBE.lock().unwrap().clone();
+        let probe = PROBE
+            .lock()
+            .expect("PROBE mutex must not be poisoned")
+            .clone();
         let Some((session_id, tx)) = probe else {
             return;
         };
@@ -811,3 +831,17 @@ mod admission_probe {
 #[cfg(test)]
 #[path = "submit_consumer_test.rs"]
 mod tests;
+
+use crate::kit::atoms::ACP_STATE;
+
+use crate::kit::atoms::EXIT_REQUESTED;
+
+use crate::kit::atoms::LOADING_EPOCH;
+
+use crate::kit::atoms::LOCAL_EVENT_TX;
+
+use crate::kit::atoms::NOTIFICATION;
+
+use crate::kit::atoms::RENDER_HEARTBEAT;
+
+use crate::kit::atoms::REWIND_ACTION_TX;

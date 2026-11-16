@@ -1,6 +1,13 @@
 //! Agent 公共路径与 prelude 必须继续导出同一组契约类型和转换函数。
 
-use super::*;
+use peri_acp_types::event_v2::Event;
+use peri_acp_types::event_v2::EventBus;
+use peri_acp_types::event_v2::EventBusConfig;
+use peri_acp_types::event_v2::EventHandles;
+use peri_acp_types::event_v2::ObserveEvent;
+use peri_acp_types::event_v2::RenderEvent;
+use peri_acp_types::event_v2::StateEvent;
+use peri_acp_types::event_v2::TurnErrorReason;
 use std::any::TypeId;
 
 fn assert_same_type<T: 'static, U: 'static>() {
@@ -27,9 +34,9 @@ fn test_events_v2_public_paths_keep_contract_type_identity() {
     assert_same_type::<crate::prelude::EventBusConfig, contract::EventBusConfig>();
     assert_same_type::<crate::prelude::EventHandles, contract::EventHandles>();
     let _: fn(contract::RenderEvent) -> Option<peri_acp_types::event::ExecutorEvent> =
-        render_event_to_executor;
+        peri_acp_types::event_v2::render_event_to_executor;
     let _: fn(contract::StateEvent) -> Option<peri_acp_types::event::ExecutorEvent> =
-        state_event_to_executor;
+        peri_acp_types::event_v2::state_event_to_executor;
     let _: fn(contract::ObserveEvent) -> Option<peri_acp_types::event::ExecutorEvent> =
-        observe_event_to_executor;
+        peri_acp_types::event_v2::observe_event_to_executor;
 }

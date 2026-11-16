@@ -1,9 +1,11 @@
-use super::*;
-use std::future::{pending, ready};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use super::Duration;
+use super::Elapsed;
+use super::Future;
+use super::Instant;
+use std::future;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 struct PendingWithDrop(Arc<AtomicBool>);
 
@@ -22,27 +24,33 @@ impl Drop for PendingWithDrop {
 
 #[tokio::test]
 async fn test_ready_future_wins_zero_budget() {
-    assert_eq!(timeout(Duration::ZERO, ready(7)).await, Ok(7));
+    assert_eq!(
+        super::timeout(Duration::ZERO, future::ready(7)).await,
+        Ok(7)
+    );
 }
 
 #[tokio::test]
 async fn test_pending_future_expires_at_past_deadline() {
     let deadline = Instant::now() - Duration::from_secs(1);
-    assert_eq!(timeout_at(deadline, pending::<()>()).await, Err(Elapsed));
+    assert_eq!(
+        super::timeout_at(deadline, future::pending::<()>()).await,
+        Err(Elapsed)
+    );
 }
 
 #[tokio::test]
 async fn test_expiry_drops_business_future() {
     let dropped = Arc::new(AtomicBool::new(false));
-    let result = timeout(Duration::ZERO, PendingWithDrop(dropped.clone())).await;
+    let result = super::timeout(Duration::ZERO, PendingWithDrop(dropped.clone())).await;
     assert_eq!(result, Err(Elapsed));
     assert!(dropped.load(Ordering::SeqCst));
 }
 
 #[tokio::test]
 async fn test_interval_first_tick_is_immediate() {
-    let mut ticker = interval(Duration::from_secs(1));
-    assert!(timeout(Duration::ZERO, ticker.tick()).await.is_ok());
+    let mut ticker = super::interval(Duration::from_secs(1));
+    assert!(super::timeout(Duration::ZERO, ticker.tick()).await.is_ok());
 }
 
 #[cfg(not(target_os = "emscripten"))]

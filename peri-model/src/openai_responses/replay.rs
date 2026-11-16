@@ -3,7 +3,10 @@ use serde_json::{json, Value};
 
 use crate::{ContentBlock, ModelResult, ToolCall};
 
-use super::{request::invalid, response::project_items, ResponsesProfile, PROVIDER_NAME};
+use super::request;
+use super::response;
+use super::ResponsesProfile;
+use super::PROVIDER_NAME;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,13 +44,13 @@ pub(super) fn replay_items(
                 continue;
             }
             if state.is_some() {
-                return Err(invalid(
+                return Err(request::invalid(
                     "Assistant contains duplicate Responses replay state",
                 ));
             }
             state = Some(
                 serde_json::from_value::<ReplayState>(data.clone()).map_err(|error| {
-                    invalid("Malformed Responses replay state").with_error(&error)
+                    request::invalid("Malformed Responses replay state").with_error(&error)
                 })?,
             );
         }
@@ -56,10 +59,12 @@ pub(super) fn replay_items(
         return Ok(None);
     };
     if state.version != 1 {
-        return Err(invalid("Unsupported Responses replay state version"));
+        return Err(request::invalid(
+            "Unsupported Responses replay state version",
+        ));
     }
     let (projected_content, projected_calls) =
-        project_items(&state.items, state.binding.profile, None)?;
+        response::project_items(&state.items, state.binding.profile, None)?;
     let visible_content: Vec<_> = content
         .iter()
         .filter(|block| {
@@ -86,7 +91,7 @@ pub(super) fn replay_items(
         || projected_calls != calls
         || (!embedded_calls.is_empty() && embedded_calls != projected_calls)
     {
-        return Err(invalid(
+        return Err(request::invalid(
             "Responses replay state no longer matches the assistant text/reasoning/tool projection",
         ));
     }

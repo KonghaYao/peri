@@ -1,11 +1,18 @@
-use super::*;
-use crate::kit::{stream_data::TuiTextChunk, tui_render_unit::TuiRenderUnit};
-use peri_acp_types::{
-    event::ChildEventOrigin,
-    identity::AttemptId,
-    session::{ExecutionBinding, TurnId},
-};
+use super::AcpEventData;
+use super::AcpEventWithEpoch;
+use super::CancellationToken;
+use super::ReplayAtomsGuard;
+use super::atoms;
+use super::mpsc;
+use super::serial;
 
+use crate::kit::tui_render_unit::TuiRenderUnit;
+use peri_acp_types::event::ChildEventOrigin;
+use peri_acp_types::identity::AttemptId;
+use peri_acp_types::session::ExecutionBinding;
+use peri_acp_types::session::TurnId;
+
+#[must_use]
 fn run(order: u64) -> ChildEventOrigin {
     ChildEventOrigin {
         child_thread_id: "child".into(),
@@ -17,6 +24,7 @@ fn run(order: u64) -> ChildEventOrigin {
         sequence: 1,
     }
 }
+#[must_use]
 fn start() -> AcpEventData {
     AcpEventData::SubagentStarted {
         agent_id: "child".into(),
@@ -32,6 +40,7 @@ fn body(text: &str) -> AcpEventData {
         agent_id: Some("child".into()),
     })
 }
+#[must_use]
 fn stop() -> AcpEventData {
     AcpEventData::SubagentStopped {
         agent_id: "child".into(),
@@ -53,8 +62,11 @@ async fn send(
         active_session_id: "s1".into(),
     })
     .await
-    .unwrap();
-    observed.recv().await.unwrap()
+    .expect("send: fixture task and request must complete successfully");
+    observed
+        .recv()
+        .await
+        .expect("send: fixture task and request must complete successfully")
 }
 fn child_text() -> String {
     atoms::VIEW_MODELS
@@ -100,7 +112,7 @@ async fn child_origin_new_run_without_old_stop_and_same_session_reset_are_isolat
     let (tx, rx) = mpsc::channel(32);
     let (observed_tx, mut observed) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
-    let bridge = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
+    let bridge = super::spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
     let mut old = run(1);
     assert!(send(&tx, &mut observed, start(), &old, epoch).await);
     old.sequence = 2;
@@ -208,7 +220,7 @@ async fn child_origin_new_run_without_old_stop_and_same_session_reset_are_isolat
             .any(|task| task.task_id == task_id)
     );
     shutdown.cancel();
-    bridge.await.unwrap();
+    bridge.await.expect("child origin new run without old stop and same session reset are isolated: fixture task and request must complete successfully");
     atoms::ACTIVE_SESSION_ID.set(old_active);
     atoms::BRIDGE_RESET_COUNTER.set(old_reset);
     atoms::BG_TASKS.set(old_tasks);
@@ -218,3 +230,5 @@ async fn child_origin_new_run_without_old_stop_and_same_session_reset_are_isolat
     atoms::BG_AGENT_IDS.set(old_agent_ids);
     atoms::NOTIFICATION.set(old_notification);
 }
+
+use crate::kit::stream_data::TuiTextChunk;

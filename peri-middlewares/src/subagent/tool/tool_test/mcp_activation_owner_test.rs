@@ -3,7 +3,8 @@
 //! 覆盖 `load_and_approve_mcp_agent` 的 fail-closed 分支：缺少可信归属 ⇒ 显式拒绝、
 //! 零 broker 交互；并用真实线路夹具做路径证明。
 
-use super::*;
+use super::Arc;
+use super::AGENT_FACE_FIXTURES;
 
 // ══════════════════════════════════════════════════════════════════════════════
 // MCP Agent 内容绑定审批门：缺少可信归属 ⇒ fail-closed
@@ -55,7 +56,7 @@ async fn remote_agent_face(dir: &std::path::Path) -> Arc<crate::mcp::McpAgentReg
     let pool = Arc::clone(&fixture.pool);
     {
         let builtin = pool
-            .get_client("workspace")
+            .client("workspace")
             .expect("夹具必须注册 workspace 句柄");
         pool.clients.write().insert(
             "workspace".to_string(),
@@ -92,8 +93,8 @@ async fn remote_agent_face(dir: &std::path::Path) -> Arc<crate::mcp::McpAgentReg
 async fn mcp_agent_activation_without_trusted_owner_is_rejected_without_asking() {
     use peri_agent::interaction::TrustedInteractionOwner;
 
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
+    let dir = tempfile::tempdir().unwrap();
+    super::write_test_agent(&dir);
     std::fs::write(
         dir.path()
             .join(".claude")
@@ -104,7 +105,7 @@ async fn mcp_agent_activation_without_trusted_owner_is_rejected_without_asking()
     .unwrap();
     let registry = remote_agent_face(dir.path()).await;
     let broker = CountingBroker::new();
-    let tool = make_subagent_tool(Vec::new()).with_mcp_agents(
+    let tool = super::make_subagent_tool(Vec::new()).with_mcp_agents(
         Some(Arc::clone(&registry)),
         Some(Arc::clone(&broker) as Arc<dyn peri_agent::interaction::UserInteractionBroker>),
     );

@@ -1,10 +1,18 @@
-use super::*;
+use crate::messages::adapters::openai::OpenAiAdapter;
+use crate::messages::adapters::MessageAdapter as _;
+use crate::messages::BaseMessage;
+use crate::messages::ContentBlock;
+use crate::messages::MessageContent;
+use crate::messages::ToolCallRequest;
+use serde_json::json;
 
 #[test]
 fn test_from_base_messages_human_ai() {
     let msgs = vec![BaseMessage::human("Hello"), BaseMessage::ai("Hi")];
     let val = OpenAiAdapter::from_base_messages(&msgs);
-    let arr = val.as_array().unwrap();
+    let arr = val
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     assert_eq!(arr.len(), 2);
     assert_eq!(arr[0]["role"], "user");
     assert_eq!(arr[1]["role"], "assistant");
@@ -17,7 +25,9 @@ fn test_from_base_messages_system_prepended() {
         BaseMessage::human("Hello"),
     ];
     let val = OpenAiAdapter::from_base_messages(&msgs);
-    let arr = val.as_array().unwrap();
+    let arr = val
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     assert_eq!(arr[0]["role"], "system");
     assert_eq!(arr[0]["content"], "You are helpful");
 }
@@ -36,7 +46,9 @@ fn test_from_base_messages_tool() {
         BaseMessage::tool_result("tc1", "file.txt"),
     ];
     let val = OpenAiAdapter::from_base_messages(&msgs);
-    let arr = val.as_array().unwrap();
+    let arr = val
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     assert_eq!(arr[0]["role"], "assistant");
     assert!(arr[0]["tool_calls"].is_array());
     assert_eq!(arr[1]["role"], "tool");
@@ -47,8 +59,11 @@ fn test_from_base_messages_tool() {
 fn test_to_base_message_roundtrip() {
     let original = BaseMessage::human("Test message");
     let val = OpenAiAdapter::from_base_messages(&[original]);
-    let arr = val.as_array().unwrap();
-    let restored = OpenAiAdapter::to_base_message(&arr[0]).unwrap();
+    let arr = val
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
+    let restored = OpenAiAdapter::to_base_message(&arr[0])
+        .expect("the to base message fixture result is required for this assertion");
     assert_eq!(restored.content(), "Test message");
 }
 
@@ -59,7 +74,8 @@ fn test_to_base_message_tool() {
         "tool_call_id": "tc1",
         "content": "result"
     });
-    let msg = OpenAiAdapter::to_base_message(&val).unwrap();
+    let msg = OpenAiAdapter::to_base_message(&val)
+        .expect("the to base message fixture result is required for this assertion");
     if let BaseMessage::Tool { tool_call_id, .. } = msg {
         assert_eq!(tool_call_id, "tc1");
     } else {
@@ -85,7 +101,8 @@ fn test_tool_calls_dual_write_roundtrip() {
         }]
     });
 
-    let msg = OpenAiAdapter::to_base_message(&api_response).unwrap();
+    let msg = OpenAiAdapter::to_base_message(&api_response)
+        .expect("the to base message fixture result is required for this assertion");
 
     // tool_calls 字段应正确提取
     assert!(msg.has_tool_calls());
@@ -102,9 +119,14 @@ fn test_tool_calls_dual_write_roundtrip() {
 
     // 序列化回 OpenAI 格式后，tool_calls 字段应存在（OpenAI 用 tool_calls 字段，不在 content 里）
     let re_serialized = OpenAiAdapter::from_base_messages(&[msg]);
-    let arr = re_serialized.as_array().unwrap();
+    let arr = re_serialized
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     // system prompt prepended if any, here just one assistant msg
-    let assistant = arr.iter().find(|m| m["role"] == "assistant").unwrap();
+    let assistant = arr
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("the find fixture result is required for this assertion");
     assert!(assistant["tool_calls"].is_array());
     assert_eq!(assistant["tool_calls"][0]["id"], "tc1");
     // OpenAI content 不含 ToolUse（已过滤），只保留 text
@@ -126,8 +148,13 @@ fn test_reasoning_block_filtered_but_preserved() {
         ContentBlock::text("final answer"),
     ]);
     let val = OpenAiAdapter::from_base_messages(&[msg]);
-    let arr = val.as_array().unwrap();
-    let assistant = arr.iter().find(|m| m["role"] == "assistant").unwrap();
+    let arr = val
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
+    let assistant = arr
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("the find fixture result is required for this assertion");
     // reasoning 从 content 中过滤，只剩 text
     let content = assistant["content"].as_array().expect("content 应为 array");
     assert_eq!(content.len(), 1);
@@ -146,8 +173,13 @@ fn test_reasoning_with_tool_calls_serialization() {
         ContentBlock::tool_use("tc1", "Bash", json!({"command": "ls"})),
     ]);
     let val = OpenAiAdapter::from_base_messages(&[msg]);
-    let arr = val.as_array().unwrap();
-    let assistant = arr.iter().find(|m| m["role"] == "assistant").unwrap();
+    let arr = val
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
+    let assistant = arr
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("the find fixture result is required for this assertion");
     // content 只包含 text，不含 thinking 或 tool_use
     let content = assistant["content"].as_array().expect("content 应为 array");
     assert_eq!(content.len(), 1);
@@ -165,8 +197,13 @@ fn test_reasoning_with_tool_calls_serialization() {
 fn test_reasoning_only_serialization() {
     let msg = BaseMessage::ai_from_blocks(vec![ContentBlock::reasoning("thinking only")]);
     let val = OpenAiAdapter::from_base_messages(&[msg]);
-    let arr = val.as_array().unwrap();
-    let assistant = arr.iter().find(|m| m["role"] == "assistant").unwrap();
+    let arr = val
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
+    let assistant = arr
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("the find fixture result is required for this assertion");
     assert_eq!(assistant["content"], json!(""));
     assert_eq!(assistant["reasoning_content"], "thinking only");
 }
@@ -176,8 +213,13 @@ fn test_reasoning_only_serialization() {
 fn test_no_reasoning_empty_reasoning_content() {
     let msg = BaseMessage::ai("just text");
     let val = OpenAiAdapter::from_base_messages(&[msg]);
-    let arr = val.as_array().unwrap();
-    let assistant = arr.iter().find(|m| m["role"] == "assistant").unwrap();
+    let arr = val
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
+    let assistant = arr
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("the find fixture result is required for this assertion");
     // content 为纯文本字符串，非 array
     assert!(assistant["content"].is_string());
     // reasoning_content 应为空字符串
@@ -194,7 +236,9 @@ fn test_projected_content_with_placeholder_serializes() {
         ContentBlock::text("[图片已压缩: image]"),
     ]));
     let val = OpenAiAdapter::from_base_messages(&[projected]);
-    let arr = val.as_array().unwrap();
+    let arr = val
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     assert_eq!(arr[0]["role"], "user");
 
     let content = arr[0]["content"].as_array().expect("content 应为 array");
@@ -216,8 +260,13 @@ fn test_compacted_tool_result_serializes() {
         "AAAA".repeat(50) + "\n... [字符已省略] ...\n" + &"BBBB".repeat(25),
     );
     let val = OpenAiAdapter::from_base_messages(&[msg]);
-    let arr = val.as_array().unwrap();
+    let arr = val
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     assert_eq!(arr[0]["role"], "tool");
     assert_eq!(arr[0]["tool_call_id"], "tc_1");
-    assert!(arr[0]["content"].as_str().unwrap().contains("字符已省略"));
+    assert!(arr[0]["content"]
+        .as_str()
+        .expect("the as str fixture result is required for this assertion")
+        .contains("字符已省略"));
 }

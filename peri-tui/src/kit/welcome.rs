@@ -5,17 +5,18 @@
 #![allow(clippy::needless_update)]
 
 use crate::i18n;
-use crate::kit::atoms::LANG_VERSION;
+
 use peri_theme::atoms::THEME_ATOM;
-use ratatui_kit::{
-    prelude::*,
-    ratatui::{
-        layout::{Constraint, Direction, Flex},
-        style::{Color, Modifier, Style},
-        text::{Line, Span},
-        widgets::Paragraph,
-    },
-};
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Constraint;
+use ratatui_kit::ratatui::layout::Direction;
+use ratatui_kit::ratatui::layout::Flex;
+use ratatui_kit::ratatui::style::Color;
+use ratatui_kit::ratatui::style::Modifier;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
+use ratatui_kit::ratatui::widgets::Paragraph;
 
 const LOGO: &[&str] = &[
     "██████╗ ███████╗██████╗ ██╗",
@@ -27,6 +28,7 @@ const LOGO: &[&str] = &[
 ];
 
 /// 判断是否为边界字符（非 █ 非空格的双线框字符）
+#[must_use]
 fn is_border(c: char) -> bool {
     matches!(c, '╗' | '╔' | '╝' | '╚' | '║' | '═')
 }
@@ -49,7 +51,8 @@ fn logo_row_to_spans(row: &str, color: Color) -> Vec<Span<'static>> {
             if count == 0 || ch.is_none() {
                 return;
             }
-            let ch = ch.unwrap();
+            let ch =
+                ch.expect("the welcome animation branch checked that the next character exists");
             let s = if ch == ' ' {
                 " ".repeat(count)
             } else {
@@ -174,3 +177,5 @@ pub fn Welcome(props: &WelcomeProps, mut hooks: Hooks) -> impl Into<AnyElement<'
         }
     )
 }
+
+use crate::kit::atoms::LANG_VERSION;

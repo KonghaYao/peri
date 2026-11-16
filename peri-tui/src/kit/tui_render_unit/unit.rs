@@ -32,6 +32,7 @@ mod shared_bubble_tests;
 impl TuiRenderUnit {
     /// 返回该 VM 内部存储的 content_hash。
     /// 供按 VM 分片的渲染缓存作为 key 使用——hash 不变时直接 Arc::clone 复用渲染结果。
+    #[must_use]
     pub fn content_hash(&self) -> u64 {
         match self {
             Self::TuiUserBubble(d) => d.content_hash,
@@ -49,6 +50,7 @@ impl TuiRenderUnit {
 
     /// 该 VM 是否需要运行中刷新：工具与子 agent 按 braille 帧刷新，
     /// reasoning 仅刷新秒级时长；具体节拍由 animation_period_frames 决定。
+    #[must_use]
     pub fn is_animating(&self) -> bool {
         self.animation_period_frames() != 0
     }

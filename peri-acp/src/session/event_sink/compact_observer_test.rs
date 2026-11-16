@@ -1,8 +1,16 @@
 //! Full Compact 提交观察者：只有 Full 触发宿主回调，展示事件不被吞掉。
 
-use super::*;
+use crate::session::event_sink::transport_event_sink::CompactCommitObserver;
+use crate::session::event_sink::transport_event_sink::TransportEventSink;
 use crate::transport::types::{AcpError, IncomingMessage, RequestId};
+use crate::transport::AcpTransport;
+use async_trait::async_trait;
+use dashmap::DashMap;
+use peri_acp_types::event::EventSink;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::PeriCaps;
 use serde_json::Value;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 #[derive(Debug, Default)]

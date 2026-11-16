@@ -1,26 +1,29 @@
 //! 通过生产 runner 验证窄接口的消息、目录和队列能力。
 use std::collections::HashMap;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage, SessionInbox};
 
+use crate::agent::react::AgentOutput;
+use crate::agent::react::Reasoning;
+use crate::agent::react::ToolCall;
+use crate::agent::react::ToolResult;
+use crate::agent::stages::middleware_runner;
+use crate::agent::stages::ExecutionEntryOrigin;
+use crate::agent::stages::InvocationContext;
+use crate::agent::stages::SharedToolMap;
+use crate::agent::stages::StageContext;
+use crate::error::AgentResult;
+use crate::messages::BaseMessage;
+use crate::messages::MessageContent;
 use crate::middleware::{capabilities as hook_state, Middleware, MiddlewareChain};
-use crate::{
-    agent::{
-        react::{AgentOutput, Reasoning, ToolCall, ToolResult},
-        stages::{
-            middleware_runner, ExecutionEntryOrigin, InvocationContext, SharedToolMap, StageContext,
-        },
-    },
-    error::AgentResult,
-    messages::{BaseMessage, MessageContent},
-    session::{FrozenContext, Session},
-    tools::{BaseTool, ToolContext},
-};
+use crate::session::FrozenContext;
+use crate::session::Session;
+use crate::tools::BaseTool;
+use crate::tools::ToolContext;
 
 fn context_with(middleware: impl Middleware + 'static) -> StageContext {
     let session = Session::new(
@@ -84,7 +87,7 @@ async fn test_after_agent_background_capability_keeps_completing_active() {
             owner_session_id: None,
             owner_identity: None,
         })
-        .unwrap();
+        .expect("the register with kind fixture result is required for this assertion");
     let seen = Arc::new(AtomicBool::new(false));
     let mut ctx = context_with(BackgroundProbe(seen.clone()));
     ctx.async_ctx.idle_should_wait = Some({
@@ -93,7 +96,7 @@ async fn test_after_agent_background_capability_keeps_completing_active() {
     });
     middleware_runner::run_after_agent(&ctx, AgentOutput::new("等待", 1))
         .await
-        .unwrap();
+        .expect("the run after agent fixture result is required for this assertion");
     assert!(seen.load(Ordering::SeqCst), "Completing 尚未提交终态");
     assert!(manager.complete(
         &registration,
@@ -113,7 +116,7 @@ async fn test_after_agent_background_capability_keeps_completing_active() {
     ));
     middleware_runner::run_after_agent(&ctx, AgentOutput::new("完成", 1))
         .await
-        .unwrap();
+        .expect("the run after agent fixture result is required for this assertion");
     assert!(!seen.load(Ordering::SeqCst), "同一适配器应读取实时终态");
 }
 
@@ -148,7 +151,9 @@ impl Middleware for ModelProbe {
 async fn model_append_is_visible_to_the_next_read_only_hook() {
     let seen = Arc::new(AtomicBool::new(false));
     let ctx = context_with(ModelProbe(Arc::clone(&seen)));
-    middleware_runner::run_before_model(&ctx).await.unwrap();
+    middleware_runner::run_before_model(&ctx)
+        .await
+        .expect("the run before model fixture result is required for this assertion");
     let reasoning = Reasoning {
         thought: String::new(),
         final_answer: None,
@@ -163,7 +168,7 @@ async fn model_append_is_visible_to_the_next_read_only_hook() {
     };
     middleware_runner::run_after_model(&ctx, &reasoning)
         .await
-        .unwrap();
+        .expect("the run after model fixture result is required for this assertion");
     assert!(seen.load(Ordering::SeqCst));
     assert_eq!(ctx.session.transcript.read().len(), 1);
 }
@@ -220,7 +225,7 @@ async fn catalog_capability_rebinds_the_working_map_and_drains_recall() {
     ctx.runtime.tools = Arc::clone(&tools);
     middleware_runner::run_before_reason_catalog(&ctx)
         .await
-        .unwrap();
+        .expect("the run before reason catalog fixture result is required for this assertion");
     assert!(tools.read().contains_key("catalog_marker"));
     assert!(
         !tools.read()["catalog_marker"].is_direct(),
@@ -293,15 +298,17 @@ async fn tool_and_agent_feedback_use_queue_capability_without_writing_history() 
     let mut approved =
         middleware_runner::run_before_bound_tools_batch(&invocation, &[call], &HashMap::new())
             .await;
-    let approved = approved.remove(0).unwrap();
+    let approved = approved
+        .remove(0)
+        .expect("the remove fixture result is required for this assertion");
     assert_eq!(approved.input, serde_json::json!({ "approved": true }));
     let result = ToolResult::success("call", "probe", "done");
     middleware_runner::run_after_tool(&invocation, &approved, &result)
         .await
-        .unwrap();
+        .expect("the run after tool fixture result is required for this assertion");
     let output = middleware_runner::run_after_agent(&ctx, AgentOutput::new("done", 1))
         .await
-        .unwrap();
+        .expect("the run after agent fixture result is required for this assertion");
     assert_eq!(output.block_continue.as_deref(), Some("queued feedback"));
     assert!(ctx.session.queue.has_wake_up_sync());
     inbox.await_wake().await;

@@ -1,15 +1,17 @@
 //! Deployment-owned task lifecycle for work that may retain an MCP pool.
 
-use std::{
-    collections::HashMap,
-    future::Future,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex, Weak,
-    },
-};
+use std::collections::HashMap;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
+use std::future::Future;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::Weak;
 
-use tokio::{sync::Notify, task::AbortHandle};
+use tokio::sync::Notify;
+use tokio::task::AbortHandle;
 use tokio_util::task::TaskTracker;
 
 pub use peri_acp_types::ports::McpTaskShutdownReport;
@@ -64,6 +66,7 @@ enum TaskPhase {
     Stopping,
 }
 
+#[derive(Default)]
 struct Completion {
     done: AtomicBool,
     notify: Notify,
@@ -116,10 +119,26 @@ pub struct McpTaskOwner {
     inner: Option<Arc<McpTaskInner>>,
 }
 
+impl Debug for McpTaskOwner {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpTaskOwner")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Weak task admission handle held by the pool and callbacks.
 #[derive(Clone)]
 pub struct McpTaskSpawner {
     inner: Weak<McpTaskInner>,
+}
+
+impl Debug for McpTaskSpawner {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpTaskSpawner")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -170,6 +189,7 @@ impl Drop for CompletionGuard {
 }
 
 impl McpTaskOwner {
+    #[must_use]
     pub fn new() -> (Self, McpTaskSpawner) {
         let inner = Arc::new(McpTaskInner {
             state: Mutex::new(McpTaskState {

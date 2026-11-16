@@ -6,10 +6,10 @@
 //! `kit::panels::config_test::base_row_save_failure_keeps_persisted_value_and_reports`
 //! 与 `kit::panels::model::commit_test::model_commit_save_failure_keeps_memory_and_pushes_nothing`。
 
-use super::{DraftSaveError, persist_candidate_with, persist_draft_with};
+use super::DraftSaveError;
 use crate::config::{ConfigSource, ConfigurationRevision, PeriConfig};
 use crate::i18n;
-use crate::kit::atoms::{NOTIFICATION, Notification};
+
 use fluent_bundle::FluentValue;
 use serial_test::serial;
 use std::time::Duration;
@@ -61,7 +61,7 @@ fn success_reports_saved_with_one_second_ttl() {
     let mut saved: Option<PeriConfig> = None;
     let mut save_calls = 0usize;
 
-    let persisted = persist_candidate_with(&candidate, |cfg| {
+    let persisted = super::persist_candidate_with(&candidate, |cfg| {
         save_calls += 1;
         saved = Some(cfg.clone());
         Ok(())
@@ -86,7 +86,7 @@ fn failure_reports_reason_with_two_second_ttl() {
     let candidate = candidate();
     let mut save_calls = 0usize;
 
-    let persisted = persist_candidate_with(&candidate, |_| {
+    let persisted = super::persist_candidate_with(&candidate, |_| {
         save_calls += 1;
         Err(anyhow::anyhow!("configuration revision conflict"))
     });
@@ -116,11 +116,17 @@ fn failure_reports_reason_with_two_second_ttl() {
 
 /// 一个真实 revision（`ConfigurationRevision` 无公开构造器，从临时配置源取得）。
 fn revision() -> ConfigurationRevision {
-    let dir = tempfile::tempdir().unwrap();
+    let dir =
+        tempfile::tempdir().expect("revision: isolated fixture workspace must remain accessible");
     let cwd = dir.path().join("workspace");
-    std::fs::create_dir_all(&cwd).unwrap();
-    let source = ConfigSource::load_at(&cwd, dir.path().join("settings.json")).unwrap();
-    source.snapshot().unwrap().revision()
+    std::fs::create_dir_all(&cwd)
+        .expect("revision: isolated fixture workspace must remain accessible");
+    let source = ConfigSource::load_at(&cwd, dir.path().join("settings.json"))
+        .expect("revision: the load_at fixture operation uses valid inputs");
+    source
+        .snapshot()
+        .expect("revision: the snapshot fixture operation uses valid inputs")
+        .revision()
 }
 
 /// 显式 revision 入口：expected 原样传给 authority，返回 accepted 值，提示为成功。
@@ -134,14 +140,14 @@ fn draft_save_passes_expected_revision_and_returns_accepted_snapshot() {
     accepted.config.active_alias = "haiku".into();
     let accepted_for_assert = accepted.clone();
 
-    let result = persist_draft_with(&candidate, expected, |passed, saved| {
+    let result = super::persist_draft_with(&candidate, expected, |passed, saved| {
         assert_eq!(passed, expected, "expected revision 必须原样传递");
         assert_eq!(saved, &candidate, "保存入口必须收到调用方草稿");
         Ok(accepted_for_assert)
     });
 
     assert_eq!(
-        result.unwrap(),
+        result.expect("draft save passes expected revision and returns accepted snapshot: the persist_draft_with fixture operation uses valid inputs"),
         accepted,
         "调用方只能发布 authority 接纳后的快照"
     );
@@ -160,7 +166,8 @@ fn draft_save_reports_revision_conflict_separately() {
     let guard = NotificationGuard::install();
     let expected = revision();
 
-    let result = persist_draft_with(&candidate(), expected, |_, _| Err(DraftSaveError::Conflict));
+    let result =
+        super::persist_draft_with(&candidate(), expected, |_, _| Err(DraftSaveError::Conflict));
 
     assert!(matches!(result, Err(DraftSaveError::Conflict)));
     let (message, ttl) = guard.latest();
@@ -178,7 +185,7 @@ fn draft_save_reports_generic_failure_with_reason() {
     let guard = NotificationGuard::install();
     let expected = revision();
 
-    let result = persist_draft_with(&candidate(), expected, |_, _| {
+    let result = super::persist_draft_with(&candidate(), expected, |_, _| {
         Err(DraftSaveError::Failed(anyhow::anyhow!("disk is read-only")))
     });
 
@@ -197,3 +204,7 @@ fn draft_save_reports_generic_failure_with_reason() {
         "失败提示时长应为 2s，实际 {ttl:?}"
     );
 }
+
+use crate::kit::atoms::NOTIFICATION;
+
+use crate::kit::atoms::Notification;

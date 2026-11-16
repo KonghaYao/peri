@@ -5,15 +5,11 @@
 //! （MODEL_HIGHLIGHT_UNTIL / LAST_ESC_TIME / REWIND_PREVIEW / POPUP_KIND 等）
 //! 或 kit/setup_wizard.rs 独立维护。本结构体保留为未来扩展容器。
 
+#[derive(Debug, Clone, Copy, Default)]
 pub struct GlobalUiState;
 
-impl Default for GlobalUiState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl GlobalUiState {
+    #[must_use]
     pub fn new() -> Self {
         Self
     }

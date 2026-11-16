@@ -30,6 +30,7 @@ pub enum GoalStatus {
 
 impl GoalStatus {
     /// 检查状态转换是否合法
+    #[must_use]
     pub fn can_transition_to(&self, target: &GoalStatus) -> bool {
         use GoalStatus::*;
         match (self, target) {
@@ -42,6 +43,7 @@ impl GoalStatus {
     }
 
     /// 是否是终态（continuation 应停止）
+    #[must_use]
     pub fn is_terminal(&self) -> bool {
         use GoalStatus::*;
         matches!(self, Complete | Blocked)
@@ -157,21 +159,17 @@ pub enum GoalStoreError {
 }
 
 /// 纯内存实现（测试 + fallback）
+#[derive(Default)]
 pub struct InMemoryGoalStore {
     inner: Arc<RwLock<HashMap<String, ThreadGoal>>>,
 }
 
 impl InMemoryGoalStore {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
         }
-    }
-}
-
-impl Default for InMemoryGoalStore {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

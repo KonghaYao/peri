@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    LifecycleState, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
+    SessionResourcesImpl, SETTLE_WAIT,
+};
 
 // ─── 部署关闭 ─────────────────────────────────────────────────────────────────
 

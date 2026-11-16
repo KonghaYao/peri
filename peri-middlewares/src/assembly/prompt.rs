@@ -1,6 +1,8 @@
 //! 冻结 prompt 与 skills 的生产槽位投影。
 use super::AssemblyContext;
-use crate::{skills::SkillsMiddleware, subagent::SkillPreloadMiddleware, AgentsMdMiddleware};
+use crate::skills::SkillsMiddleware;
+use crate::subagent::SkillPreloadMiddleware;
+use crate::AgentsMdMiddleware;
 use peri_agent::middleware::chain::MiddlewareChain;
 
 pub(super) fn add_agents_md(ctx: &AssemblyContext, chain: &mut MiddlewareChain) {

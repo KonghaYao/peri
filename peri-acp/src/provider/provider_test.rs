@@ -4,7 +4,12 @@
 //! 而非旧 LLM facade trait。环境读取仍只发生在 ACP
 //! （`from_env` / `from_config`），`peri-model` 不解析任何环境变量。
 
-use super::*;
+use crate::provider::config::{
+    AppConfig, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels,
+};
+use crate::provider::llm_provider::LlmProvider;
+use crate::provider::store::ConfigSource;
+use peri_config::provider::ResolvedProvider;
 
 fn openai_provider(model: &str) -> LlmProvider {
     LlmProvider::OpenAi {

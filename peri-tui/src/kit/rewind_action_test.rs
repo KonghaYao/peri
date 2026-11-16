@@ -1,14 +1,24 @@
 //! Tests for rewind_action.
 
-use super::*;
-use peri_acp::transport::mpsc::{MpscClientTransport, MpscServerTransport, mpsc_transport_pair};
+use super::AcpTuiClient;
+use super::CancellationToken;
+use super::REWIND_BUDGET_STATE;
+use super::REWIND_PREVIEW_FINGERPRINT;
+use super::REWIND_QUERY_ERROR;
+use super::REWIND_TARGET_TEXT;
+use super::RewindAction;
+use super::RewindBudgetState;
+use super::mpsc;
+
+use peri_acp::transport::mpsc::MpscClientTransport;
+use peri_acp::transport::mpsc::MpscServerTransport;
 use serde_json::json;
 use serial_test::serial;
 
 /// 用真实 mpsc transport 对创建 AcpTuiClient（不启动 pump）。
 fn make_client_without_pump() -> (AcpTuiClient, MpscServerTransport) {
     let (client_transport, server_transport): (MpscClientTransport, MpscServerTransport) =
-        mpsc_transport_pair();
+        peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
     (client, server_transport)
 }
@@ -18,7 +28,7 @@ async fn test_shutdown_exits_loop() {
     let (client, _server_transport) = make_client_without_pump();
     let (_tx, rx) = mpsc::unbounded_channel::<RewindAction>();
     let shutdown = CancellationToken::new();
-    let handle = spawn_rewind_consumer(client, rx, shutdown.clone());
+    let handle = super::spawn_rewind_consumer(client, rx, shutdown.clone());
 
     shutdown.cancel();
     let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
@@ -29,7 +39,7 @@ async fn test_dropped_tx_exits_loop() {
     let (client, _server_transport) = make_client_without_pump();
     let (tx, rx) = mpsc::unbounded_channel::<RewindAction>();
     let shutdown = CancellationToken::new();
-    let handle = spawn_rewind_consumer(client, rx, shutdown);
+    let handle = super::spawn_rewind_consumer(client, rx, shutdown);
 
     drop(tx);
     let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
@@ -39,7 +49,7 @@ async fn test_dropped_tx_exits_loop() {
 async fn test_confirm_without_session_skipped() {
     let (client, _server_transport) = make_client_without_pump();
     // 没有 session——handle_action 应当 Ok(()) 且不发送任何 RPC
-    let result = handle_action(
+    let result = super::handle_action(
         &client,
         RewindAction::Confirm {
             target_message_id: "msg-1".into(),
@@ -52,14 +62,14 @@ async fn test_confirm_without_session_skipped() {
 
 #[test]
 fn test_build_preview_params_carries_target() {
-    let params = build_preview_params("test-sid", "m1");
+    let params = super::build_preview_params("test-sid", "m1");
     assert_eq!(params["sessionId"], "test-sid");
     assert_eq!(params["target_message_id"], "m1");
 }
 
 #[test]
 fn test_build_execute_params_carries_target() {
-    let params = build_execute_params("test-sid", "m1", &"a".repeat(64));
+    let params = super::build_execute_params("test-sid", "m1", &"a".repeat(64));
     assert_eq!(params["sessionId"], "test-sid");
     assert_eq!(params["target_message_id"], "m1");
     assert_eq!(params["preview_fingerprint"], "a".repeat(64));
@@ -74,7 +84,7 @@ fn test_parse_budget_response_extracts_changes() {
         ],
         "preview_fingerprint": "a".repeat(64),
     });
-    let preview = parse_budget_response(&resp).unwrap();
+    let preview = super::parse_budget_response(&resp).expect("parse budget response extracts changes: the fixture value must satisfy its target representation");
     assert_eq!(preview.changes.len(), 2);
     assert_eq!(preview.changes[0].path, "src/main.rs");
     assert_eq!(preview.changes[0].kind, "edit");
@@ -89,14 +99,16 @@ fn test_parse_budget_response_empty_ok() {
         "file_changes": [],
         "preview_fingerprint": "b".repeat(64),
     });
-    let preview = parse_budget_response(&resp).unwrap();
+    let preview = super::parse_budget_response(&resp).expect(
+        "parse budget response empty ok: the fixture value must satisfy its target representation",
+    );
     assert!(preview.changes.is_empty());
 }
 
 #[test]
 fn test_empty_file_preview_still_requires_confirmation() {
     assert_eq!(
-        confirmation_state(Vec::new()),
+        super::confirmation_state(Vec::new()),
         RewindBudgetState::Files(Vec::new())
     );
 }
@@ -104,7 +116,7 @@ fn test_empty_file_preview_still_requires_confirmation() {
 #[test]
 fn test_parse_budget_response_malformed_returns_err() {
     let resp = json!({ "unexpected": 1 });
-    assert!(parse_budget_response(&resp).is_err());
+    assert!(super::parse_budget_response(&resp).is_err());
 }
 
 /// 编译期断言：UnboundedSender<RewindAction> 与 atoms::REWIND_ACTION_TX 类型契约一致。
@@ -146,7 +158,7 @@ fn test_rewind_action_variants() {
 /// （虽有服务端默认值兜底，TUI 侧仍应显式声明回退文件语义）。
 #[test]
 fn test_build_execute_params_includes_revert_files() {
-    let params = build_execute_params("sid-1", "msg-1", &"c".repeat(64));
+    let params = super::build_execute_params("sid-1", "msg-1", &"c".repeat(64));
     assert_eq!(params["sessionId"], "sid-1");
     assert_eq!(params["target_message_id"], "msg-1");
     assert_eq!(
@@ -166,7 +178,7 @@ fn test_on_action_failed_writes_query_error() {
     *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Executing;
     *REWIND_QUERY_ERROR.state().write() = None;
 
-    on_action_failed("RPC timeout");
+    super::on_action_failed("RPC timeout");
 
     assert!(
         REWIND_TARGET_TEXT.state().read().is_none(),

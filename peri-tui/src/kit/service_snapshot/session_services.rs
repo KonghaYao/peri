@@ -6,13 +6,7 @@
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{
-    acp_client::AcpTuiClient,
-    kit::atoms::{
-        CronJobSummary, HookSummary, McpInitPhase, McpServerSummary, McpStatusSnapshot,
-        PluginSummary,
-    },
-};
+use crate::acp_client::AcpTuiClient;
 
 pub(super) struct SessionServices {
     pub hooks: Vec<HookSummary>,
@@ -48,11 +42,11 @@ impl SessionServices {
         &mut self,
         source: &super::SnapshotSource,
         session_id: &str,
-        identity: &Option<(String, u64)>,
+        identity: Option<&(String, u64)>,
     ) -> ServiceObservation {
         if let Some(client) = &source.client
             && !session_id.is_empty()
-            && identity.as_ref().is_some_and(|owner| owner.0 == session_id)
+            && identity.is_some_and(|owner| owner.0 == session_id)
         {
             let error = query(client, session_id, self).await;
             return ServiceObservation {
@@ -323,3 +317,15 @@ async fn request(
 #[cfg(test)]
 #[path = "session_services_test.rs"]
 mod tests;
+
+use crate::kit::atoms::CronJobSummary;
+
+use crate::kit::atoms::HookSummary;
+
+use crate::kit::atoms::McpInitPhase;
+
+use crate::kit::atoms::McpServerSummary;
+
+use crate::kit::atoms::McpStatusSnapshot;
+
+use crate::kit::atoms::PluginSummary;

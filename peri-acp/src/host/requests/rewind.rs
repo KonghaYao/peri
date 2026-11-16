@@ -36,8 +36,9 @@ use peri_acp_types::PeriCaps;
 use serde_json::{json, Value};
 
 use super::super::{AcpServerConfig, SessionState};
+use crate::dispatch;
 use crate::session::command::DurableRewindCommit;
-use crate::{dispatch, transport::types::AcpError};
+use crate::transport::types::AcpError;
 
 /// 候选/预览/执行共用的会话存在性检查（wire 错误形态与既有请求一致）。
 fn require_registered_session(

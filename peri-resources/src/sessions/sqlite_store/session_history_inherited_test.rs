@@ -1,6 +1,10 @@
 //! S7.4: inherited 冻结前缀的 bounds/page/seek/body 与父变更隔离。
 
-use super::*;
+use super::{
+    BaseMessage, CompactionChange, PersistedPayload, RewindBoundary, SqliteSessionData,
+    SqliteThreadStore, TempDir,
+};
+use crate::sessions::data::SessionDataPort;
 
 use peri_acp_types::history_window::{
     HistorySource, HistoryWindowDirection, HISTORY_WINDOW_DEFAULT_BYTE_BUDGET,
@@ -9,7 +13,7 @@ use peri_acp_types::session_resources::{
     HistoryWindowEntry, HistoryWindowPagePlan, HistoryWindowReadIntent,
     HistoryWindowTailExpectation, InheritedHistoryEntry,
 };
-use peri_acp_types::store::{serialize_persisted_payload, InheritedContext};
+use peri_acp_types::store::InheritedContext;
 
 const WINDOW_SESSION: &str = "window-session";
 const BUDGET: usize = HISTORY_WINDOW_DEFAULT_BYTE_BUDGET as usize;
@@ -17,13 +21,13 @@ const BUDGET: usize = HISTORY_WINDOW_DEFAULT_BYTE_BUDGET as usize;
 async fn session_with_history(
     history: &[PersistedPayload],
 ) -> (SqliteThreadStore, SqliteSessionData, TempDir) {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
-    data.save_new_session(&session(
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
+    data.save_new_session(&super::session(
         WINDOW_SESSION,
         workspace.cwd.to_str().unwrap(),
         &workspace,
-        frozen(WINDOW_SESSION),
+        super::frozen(WINDOW_SESSION),
     ))
     .await
     .unwrap();
@@ -65,10 +69,10 @@ fn inherited_source(
 
 #[tokio::test]
 async fn inherited_bounds_report_the_frozen_range_and_snapshot_identity() {
-    let history = payloads(2);
+    let history = super::payloads(2);
     let (store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
-    let inherited = payloads(3);
+    let inherited = super::payloads(3);
     set_inherited_context(&store, &id, &inherited, "parent-session").await;
 
     let bounds = data.history_window_bounds(&id).await.unwrap();
@@ -88,18 +92,18 @@ async fn inherited_bounds_report_the_frozen_range_and_snapshot_identity() {
 
 #[tokio::test]
 async fn inherited_page_seek_and_chunks_are_bounded_and_isolated_from_parent_changes() {
-    let history = payloads(2);
+    let history = super::payloads(2);
     let (store, data, directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
-    let inherited = payloads(4);
+    let inherited = super::payloads(4);
     set_inherited_context(&store, &id, &inherited, "parent-session").await;
     // 真实父会话：后续 append/compact/rewind 都发生在父行上，子会话冻结列不变。
-    let parent_workspace = workspace(&store, directory.path()).await;
-    data.save_new_session(&session(
+    let parent_workspace = super::workspace(&store, directory.path()).await;
+    data.save_new_session(&super::session(
         "parent-session",
         parent_workspace.cwd.to_str().unwrap(),
         &parent_workspace,
-        frozen("parent-session"),
+        super::frozen("parent-session"),
     ))
     .await
     .unwrap();
@@ -195,7 +199,7 @@ async fn inherited_page_seek_and_chunks_are_bounded_and_isolated_from_parent_cha
     );
     let entry = sought.inherited_entries.first().unwrap();
     let entry_id = entry.entry_id();
-    let expected = serialize_persisted_payload(&inherited[2]).unwrap();
+    let expected = peri_acp_types::store::serialize_persisted_payload(&inherited[2]).unwrap();
     let chunk = data
         .load_history_body_chunk(
             &id,
@@ -212,7 +216,7 @@ async fn inherited_page_seek_and_chunks_are_bounded_and_isolated_from_parent_cha
     assert!(chunk.complete);
 
     // 父侧变更不改变冻结前缀。
-    data.append_history(&"parent-session".to_owned(), &payloads(2))
+    data.append_history(&"parent-session".to_owned(), &super::payloads(2))
         .await
         .unwrap();
     data.apply_compaction(
@@ -263,10 +267,10 @@ async fn inherited_page_seek_and_chunks_are_bounded_and_isolated_from_parent_cha
 
 #[tokio::test]
 async fn inherited_snapshot_mismatch_and_absent_prefix_fail_closed() {
-    let history = payloads(2);
+    let history = super::payloads(2);
     let (store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
-    let inherited = payloads(2);
+    let inherited = super::payloads(2);
     set_inherited_context(&store, &id, &inherited, "parent-session").await;
     let snapshot = data
         .history_window_bounds(&id)
@@ -336,10 +340,10 @@ async fn inherited_snapshot_mismatch_and_absent_prefix_fail_closed() {
 
 #[tokio::test]
 async fn inherited_prefix_is_not_part_of_own_pages() {
-    let history = payloads(2);
+    let history = super::payloads(2);
     let (store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
-    let inherited = payloads(2);
+    let inherited = super::payloads(2);
     set_inherited_context(&store, &id, &inherited, "parent-session").await;
 
     let bounds = data.history_window_bounds(&id).await.unwrap();
@@ -394,10 +398,10 @@ async fn inherited_snapshot_source(
 
 #[tokio::test]
 async fn inherited_before_page_exposes_a_later_cursor() {
-    let history = payloads(2);
+    let history = super::payloads(2);
     let (store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
-    let inherited = payloads(4);
+    let inherited = super::payloads(4);
     set_inherited_context(&store, &id, &inherited, "parent-session").await;
     let source = inherited_snapshot_source(&data, &id).await;
 
@@ -455,10 +459,10 @@ async fn inherited_before_page_exposes_a_later_cursor() {
 
 #[tokio::test]
 async fn inherited_open_entry_after_includes_the_anchor() {
-    let history = payloads(2);
+    let history = super::payloads(2);
     let (store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
-    let inherited = payloads(4);
+    let inherited = super::payloads(4);
     set_inherited_context(&store, &id, &inherited, "parent-session").await;
     let source = inherited_snapshot_source(&data, &id).await;
 
@@ -490,10 +494,10 @@ async fn inherited_open_entry_after_includes_the_anchor() {
 
 #[tokio::test]
 async fn inherited_after_page_exposes_an_earlier_cursor() {
-    let history = payloads(2);
+    let history = super::payloads(2);
     let (store, data, _directory) = session_with_history(&history).await;
     let id = WINDOW_SESSION.to_owned();
-    let inherited = payloads(4);
+    let inherited = super::payloads(4);
     set_inherited_context(&store, &id, &inherited, "parent-session").await;
     let source = inherited_snapshot_source(&data, &id).await;
 

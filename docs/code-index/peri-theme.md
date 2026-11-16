@@ -19,16 +19,16 @@
 | --- | --- | --- | --- |
 | 加载主题 | `peri-theme/src/loader.rs` | `load_theme`、`ThemeLoadError` | 返回 `Arc<ThemeDefinition>`；用户文件优先于内置 JSON，已有用户文件解析失败直接返回错误 |
 | 查看主题名称 | `peri-theme/src/loader.rs` | `list_available_themes` | 委托来源目录枚举，排序去重，不预先解析 JSON |
-| 调整 HOME 和内置别名查找 | `peri-theme/src/loader/source.rs` | `ThemeSources::from_environment`、`read` | 读取 `~/.peri/themes/{name}.json`，再查 dark/peri-dark、light/peri-light；根加载保留路径和符号链接支持 |
-| 修改继承策略 | `peri-theme/src/loader/source.rs` | `load_flat`、`merge_document`、`validate_name` | `extends` 只接受主题名；当前链检测循环，最多 10 个父级；父先子后覆盖叶子键，子 name 默认 unnamed、mode 可继承 |
+| 调整 HOME 和内置别名查找 | `peri-theme/src/loader/theme_sources.rs` | `ThemeSources::from_environment`、`read` | 读取 `~/.peri/themes/{name}.json`，再查 dark/peri-dark、light/peri-light；根加载保留路径和符号链接支持 |
+| 修改继承策略 | `peri-theme/src/loader/theme_sources.rs` | `load_flat`、`merge_document`、`validate_name` | `extends` 只接受主题名；当前链检测循环，最多 10 个父级；父先子后覆盖叶子键，子 name 默认 unnamed、mode 可继承 |
 | 支持更多 JSON 表达形式 | `peri-theme/src/loader/resolve.rs` | `flatten_json_obj` | 对象用点连接，数组用数字索引；保留键大小写，字符串、数字、布尔转为文本 |
 | 修改引用规则 | `peri-theme/src/loader/resolve.rs` | `resolve_refs`、`resolve_ref_value` | 每个根独立活动链；先精确键查找再不区分大小写匹配；最多 10 条引用边，未解析键返回错误 |
 | 修改颜色格式 | `peri-theme/src/loader/resolve.rs` | `parse_hex_color` | trim 后仅接受 ASCII #RGB/#RRGGBB；先验证字节再切片，Unicode 非法输入返回错误 |
 | 添加或调整 token 解码 | `peri-theme/src/loader/decode.rs` | `decode_flat`、`build_theme_from_flat` | 提取元数据、解析全部引用后构造 Palette/SemanticTokens/ComponentTokens，必填项缺失报错 |
 | 兼容旧版用户主题字段 | `peri-theme/src/loader/decode.rs` | `build_session_title_palette`、`build_theme_from_flat` | 新语义键和会话标题色板保留既有默认值；色板逐项允许缺省或非法值回退 |
 | 修改默认主题 | `peri-theme/src/builtin.rs`、`peri-theme/themes/dark.json`、`peri-theme/themes/light.json` | `dark_theme`、`light_theme` | Rust 默认与内置 JSON 的整个 ThemeDefinition 由相等测试约束，light 主文字为 #1E1E1E |
-| 将主题映射到 ratatui-kit | `peri-theme/src/bridge.rs` | `ThemeDefinitionExt`、`to_palette` | 映射到 kit 的 Palette，保持上游类型边界 |
-| 将主题映射到 Peri 颜色 | `peri-theme/src/bridge.rs` | `to_peri_colors`、`default_peri_colors` | 从语义 token 派生 PeriColors，默认构造使用 dark |
+| 将主题映射到 ratatui-kit | `peri-theme/src/bridge/theme_definition_ext.rs` | `ThemeDefinitionExt`、`to_palette` | 映射到 kit 的 Palette，保持上游类型边界 |
+| 将主题映射到 Peri 颜色 | `peri-theme/src/bridge/theme_definition_ext.rs` | `to_peri_colors`、`default_peri_colors` | 从语义 token 派生 PeriColors，默认构造使用 dark |
 | 切换全局主题 | `peri-theme/src/atoms.rs` | `init_theme_atoms` | 先派生 Palette/PeriColors，再依次写 THEME_ATOM、PALETTE_ATOM、PERI_COLORS_ATOM |
 
 ## 类型与消费边界

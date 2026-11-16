@@ -29,7 +29,10 @@ use tokio_util::sync::CancellationToken;
 use super::super::apps::{AttachmentRoute, McpAppRecord, McpAppRecordSpec};
 use super::super::client::output_store::tests::Wire;
 use super::super::client::McpClientPool;
-use super::*;
+use super::EffectiveToolErrorCode;
+use super::InvocationRuleChain;
+use super::SessionInvocationInputs;
+use super::SessionInvocationService;
 use peri_acp_types::mcp_apps_facade::AppQualification;
 
 const SESSION: &str = "idle-session";
@@ -222,10 +225,7 @@ impl Fixture {
     /// 附件事实单独记下，供 `app_request` 构造「来自该 View 的请求」——撤销不改变
     /// 这个历史事实，只是它不再有效。
     fn attach_record(&self, connection_id: &str) -> Arc<McpAppRecord> {
-        let handle = self
-            .pool
-            .get_client(SERVER)
-            .expect("fixture server installed");
+        let handle = self.pool.client(SERVER).expect("fixture server installed");
         let generation = self.pool.handle_generation(&handle);
         // 生产同序：会话环境登记运行时世代 → 实例化调用签发 record → 附着连接。
         self.pool
@@ -866,7 +866,7 @@ fn map_dispatch_error_reads_typed_cause_without_side_channel() {
     )
     .with_unanswered_cause(UnansweredCause::OwnerUnmatched);
     assert_eq!(
-        map_dispatch_error(unavailable, false),
+        super::map_dispatch_error(unavailable, false),
         SessionInvocationOutcome::NotExecuted {
             cause: NotExecutedCause::ApprovalUnavailable(UnansweredCause::OwnerUnmatched)
         },
@@ -878,7 +878,7 @@ fn map_dispatch_error_reads_typed_cause_without_side_channel() {
         "用户拒绝",
     );
     assert_eq!(
-        map_dispatch_error(rejected, false),
+        super::map_dispatch_error(rejected, false),
         SessionInvocationOutcome::NotExecuted {
             cause: NotExecutedCause::UserRejected
         },
@@ -892,7 +892,7 @@ fn map_dispatch_error_reads_typed_cause_without_side_channel() {
         "Hook blocked this call",
     );
     assert_eq!(
-        map_dispatch_error(policy, false),
+        super::map_dispatch_error(policy, false),
         SessionInvocationOutcome::NotExecuted {
             cause: NotExecutedCause::PolicyDenied
         }

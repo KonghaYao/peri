@@ -1,5 +1,11 @@
-use super::semantic_copy_tests::sem_at;
-use super::*;
+use super::Instant;
+use super::TuiAssistantBubble;
+use super::TuiRenderUnit;
+use crate::kit::message_area::grid::GridSpec;
+use crate::kit::message_area::render;
+use unicode_width::UnicodeWidthStr;
+
+use crate::kit::message_area::grid::ZoneTransition;
 
 // ── md 复制按钮 ─────────────────────────────────────────────────────────
 
@@ -10,9 +16,9 @@ use super::*;
 fn test_assistant_bubble_renders_copy_button() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(80);
-    let vm = assistant_bubble_with_text(&"x".repeat(401), 1);
+    let vm = super::assistant_bubble_with_text(&"x".repeat(401), 1);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, btn, _, _) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+    let (lines, btn, _, _) = render::vm_to_lines_cached(&vm, &grid, &mut cache, true);
 
     let btn = btn.expect("超过 400 字符的 AssistantBubble 应返回按钮布局");
     let btn_line = &lines[btn.logical_idx];
@@ -54,23 +60,23 @@ fn test_assistant_bubble_renders_copy_button() {
 #[test]
 fn test_copy_button_hidden_when_narrow() {
     crate::i18n::init(Some("en"));
-    let vm = assistant_bubble_with_text(&"x".repeat(401), 2);
+    let vm = super::assistant_bubble_with_text(&"x".repeat(401), 2);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
     let (lines, btn, _, _) =
-        super::vm_to_lines_cached(&vm, &GridSpec::grid_for(3), &mut cache, true);
+        render::vm_to_lines_cached(&vm, &GridSpec::grid_for(3), &mut cache, true);
 
     assert!(btn.is_none(), "宽度不足时不应返回按钮布局");
-    let text = all_text(&lines);
+    let text = super::all_text(&lines);
     assert!(!text.contains("Copy"), "宽度不足时不应渲染按钮行");
 }
 
 /// 空文本不渲染按钮（没有可复制的内容），且返回 0 行。
 #[test]
 fn test_copy_button_hidden_for_empty_text() {
-    let vm = assistant_bubble_with_text("", 3);
+    let vm = super::assistant_bubble_with_text("", 3);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
     let (lines, btn, _, _) =
-        super::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
+        render::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
 
     assert!(lines.is_empty());
     assert!(btn.is_none());
@@ -89,9 +95,9 @@ fn test_copy_button_hidden_for_user_bubble() {
     });
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
     let (lines, btn, _, _) =
-        super::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
+        render::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
 
-    let text = all_text(&lines);
+    let text = super::all_text(&lines);
     assert!(!text.contains("Copy"), "UserBubble 不应包含复制按钮文本");
     assert!(btn.is_none());
 }
@@ -100,9 +106,9 @@ fn test_copy_button_hidden_for_user_bubble() {
 #[test]
 fn test_copy_button_hidden_in_nested_render() {
     crate::i18n::init(Some("en"));
-    let vm = assistant_bubble_with_text(&"x".repeat(401), 5);
-    let lines = vm_to_lines(&vm, &GridSpec::grid_for(80));
-    let text = all_text(&lines);
+    let vm = super::assistant_bubble_with_text(&"x".repeat(401), 5);
+    let lines = render::vm_to_lines(&vm, &GridSpec::grid_for(80));
+    let text = super::all_text(&lines);
     assert!(!text.contains("Copy"), "嵌套渲染不应包含复制按钮行");
 }
 
@@ -111,14 +117,14 @@ fn test_copy_button_hidden_in_nested_render() {
 fn test_copy_button_hidden_for_short_text() {
     crate::i18n::init(Some("en"));
     for text in ["hello world".to_string(), "x".repeat(400)] {
-        let vm = assistant_bubble_with_text(&text, 6);
+        let vm = super::assistant_bubble_with_text(&text, 6);
         let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
         let (lines, btn, _, _) =
-            super::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
+            render::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
 
         assert!(btn.is_none(), "≤400 字符不应返回按钮布局");
         assert!(
-            !all_text(&lines).contains("Copy"),
+            !super::all_text(&lines).contains("Copy"),
             "≤400 字符不应渲染按钮行"
         );
     }
@@ -144,23 +150,33 @@ fn test_assistant_md_paragraph_lines_stay_within_viewport() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
     assert!(!lines.is_empty(), "应有渲染行");
-    for (i, l) in lines.iter().enumerate() {
-        let w: usize = l.spans.iter().map(|s| s.content.width()).sum();
-        assert!(w <= 80, "行 {i} 宽度 {w} 超过视口 80：{:#?}", line_text(l));
+    {
+        let iteration_items = lines.iter().enumerate();
+        for (i, l) in iteration_items {
+            let w: usize = l.spans.iter().map(|s| s.content.width()).sum();
+            assert!(
+                w <= 80,
+                "行 {i} 宽度 {w} 超过视口 80：{:#?}",
+                super::line_text(l)
+            );
+        }
     }
     // 每行第 2 个 span 都是竖线前缀（Wide 无 leading 空行，正文行自身带前缀）
-    for (i, l) in lines.iter().enumerate() {
-        if l.spans.is_empty() {
-            continue;
+    {
+        let iteration_items = lines.iter().enumerate();
+        for (i, l) in iteration_items {
+            if l.spans.is_empty() {
+                continue;
+            }
+            assert_eq!(
+                l.spans[1].content.as_ref(),
+                "\u{2502}",
+                "行 {i} 缺竖线前缀：{:#?}",
+                super::line_text(l)
+            );
         }
-        assert_eq!(
-            l.spans[1].content.as_ref(),
-            "\u{2502}",
-            "行 {i} 缺竖线前缀：{:#?}",
-            line_text(l)
-        );
     }
 }
 
@@ -189,23 +205,30 @@ fn test_assistant_md_all_block_types_stay_within_viewport() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
     assert!(lines.len() > 1, "应有渲染行");
-    for (i, l) in lines.iter().enumerate() {
-        if l.spans.is_empty() {
-            continue; // 段间空行
+    {
+        let iteration_items = lines.iter().enumerate();
+        for (i, l) in iteration_items {
+            if l.spans.is_empty() {
+                continue; // 段间空行
+            }
+            let w: usize = l.spans.iter().map(|s| s.content.width()).sum();
+            assert!(
+                w <= 80,
+                "行 {i} 宽度 {w} 超过视口 80：{:#?}",
+                super::line_text(l)
+            );
+            assert_eq!(
+                l.spans[1].content.as_ref(),
+                "\u{2502}",
+                "行 {i} 缺竖线前缀：{:#?}",
+                super::line_text(l)
+            );
         }
-        let w: usize = l.spans.iter().map(|s| s.content.width()).sum();
-        assert!(w <= 80, "行 {i} 宽度 {w} 超过视口 80：{:#?}", line_text(l));
-        assert_eq!(
-            l.spans[1].content.as_ref(),
-            "\u{2502}",
-            "行 {i} 缺竖线前缀：{:#?}",
-            line_text(l)
-        );
     }
     // 折行不丢内容：代码行 x 总数守恒；`**` 强调文本仍完整
-    let all = all_text(&lines);
+    let all = super::all_text(&lines);
     assert_eq!(all.matches('x').count(), 200, "代码行折行不丢内容");
     assert!(
         all.replace('*', "").contains("加粗强调"),
@@ -229,12 +252,12 @@ fn test_semantic_wrapped_md_line_strips_prefix() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
     let sem_lines: Vec<String> = lines
         .iter()
         .enumerate()
         .filter(|(_, l)| !l.spans.is_empty())
-        .map(|(idx, _l)| sem_at(&vm, idx, &grid).unwrap_or_default())
+        .map(|(idx, _l)| super::semantic_copy_tests::sem_at(&vm, idx, &grid).unwrap_or_default())
         .collect();
     let joined = sem_lines.join("");
     assert!(
@@ -256,12 +279,12 @@ fn test_semantic_wrapped_md_line_strips_prefix() {
 /// 独占图片段：渲染输出带 │ 前缀、独占段前后各有一空行（§3.5 间隙规则）。
 #[test]
 fn test_image_standalone_segment_rendering() {
-    let vm = assistant_bubble_with_text("before\n\n![a](u)\n\nafter", 7);
+    let vm = super::assistant_bubble_with_text("before\n\n![a](u)\n\nafter", 7);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
     let (lines, _, _, _) =
-        super::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
+        render::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
 
-    let texts: Vec<String> = lines.iter().map(line_text).collect();
+    let texts: Vec<String> = lines.iter().map(super::line_text).collect();
     let img_idx = texts
         .iter()
         .position(|t| t.contains("[Image: a] (u)"))
@@ -271,30 +294,36 @@ fn test_image_standalone_segment_rendering() {
         "Image 段行应带 │ 前缀，实际: {:?}",
         texts[img_idx]
     );
-    assert!(is_blank_separator(&lines[img_idx - 1]), "独占段前应有空行");
-    assert!(is_blank_separator(&lines[img_idx + 1]), "独占段后应有空行");
+    assert!(
+        super::is_blank_separator(&lines[img_idx - 1]),
+        "独占段前应有空行"
+    );
+    assert!(
+        super::is_blank_separator(&lines[img_idx + 1]),
+        "独占段后应有空行"
+    );
 }
 
 /// 行内图片段：前后无空行（拆段后仍属同一视觉段落，§3.5 行内规则）。
 #[test]
 fn test_image_inline_segment_no_gap() {
-    let vm = assistant_bubble_with_text("before ![a](u) after", 8);
+    let vm = super::assistant_bubble_with_text("before ![a](u) after", 8);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
     let (lines, _, _, _) =
-        super::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
+        render::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
 
-    let texts: Vec<String> = lines.iter().map(line_text).collect();
+    let texts: Vec<String> = lines.iter().map(super::line_text).collect();
     let img_idx = texts
         .iter()
         .position(|t| t.contains("[Image: a] (u)"))
         .expect("应渲染出降级行");
     assert!(
-        !is_blank_separator(&lines[img_idx - 1]),
+        !super::is_blank_separator(&lines[img_idx - 1]),
         "行内图片段前不应有空行，实际: {:?}",
         texts[img_idx - 1]
     );
     assert!(
-        !is_blank_separator(&lines[img_idx + 1]),
+        !super::is_blank_separator(&lines[img_idx + 1]),
         "行内图片段后不应有空行，实际: {:?}",
         texts[img_idx + 1]
     );
@@ -314,12 +343,12 @@ fn test_image_inline_segment_no_gap() {
 /// 此处 [Image, Image] 跨段走默认 gap 规则。
 #[test]
 fn test_image_cross_paragraph_rendering() {
-    let vm = assistant_bubble_with_text("![a](u)\n\n![b](v)", 7);
+    let vm = super::assistant_bubble_with_text("![a](u)\n\n![b](v)", 7);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
     let (lines, _, _, _) =
-        super::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
+        render::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
 
-    let texts: Vec<String> = lines.iter().map(line_text).collect();
+    let texts: Vec<String> = lines.iter().map(super::line_text).collect();
     let a_idx = texts
         .iter()
         .position(|t| t.contains("[Image: a] (u)"))
@@ -335,7 +364,7 @@ fn test_image_cross_paragraph_rendering() {
         &texts[a_idx..b_idx]
     );
     assert!(
-        is_blank_separator(&lines[a_idx + 1]),
+        super::is_blank_separator(&lines[a_idx + 1]),
         "跨段独立图片之间应有空行（P1-1）"
     );
 }
@@ -344,12 +373,12 @@ fn test_image_cross_paragraph_rendering() {
 /// （convert 层合并，render 层默认规则不误加空行）。
 #[test]
 fn test_image_same_paragraph_multiple_no_gap() {
-    let vm = assistant_bubble_with_text("![a](u) ![b](v)", 7);
+    let vm = super::assistant_bubble_with_text("![a](u) ![b](v)", 7);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
     let (lines, _, _, _) =
-        super::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
+        render::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
 
-    let texts: Vec<String> = lines.iter().map(line_text).collect();
+    let texts: Vec<String> = lines.iter().map(super::line_text).collect();
     let a_idx = texts
         .iter()
         .position(|t| t.contains("[Image: a] (u)"))
@@ -366,27 +395,32 @@ fn test_image_same_paragraph_multiple_no_gap() {
 /// 顶层列表项之间恰好一行空行（终态路径）。
 #[test]
 fn test_top_level_list_items_separated_by_blank_line() {
-    let vm = assistant_bubble_with_text("- alpha\n- beta\n- gamma", 80);
+    let vm = super::assistant_bubble_with_text("- alpha\n- beta\n- gamma", 80);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
     let (lines, _, _, _) =
-        super::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
+        render::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
 
     let index_of = |needle: &str| {
         lines
             .iter()
-            .position(|l| line_text(l).contains(needle))
-            .unwrap_or_else(|| panic!("应渲染出列表项 {needle:?}，实际: {:?}", all_text(&lines)))
+            .position(|l| super::line_text(l).contains(needle))
+            .unwrap_or_else(|| {
+                panic!(
+                    "应渲染出列表项 {needle:?}，实际: {:?}",
+                    super::all_text(&lines)
+                )
+            })
     };
     let (alpha, beta, gamma) = (index_of("alpha"), index_of("beta"), index_of("gamma"));
     assert_eq!(beta, alpha + 2, "alpha/beta 之间应恰好 1 空行");
     assert_eq!(gamma, beta + 2, "beta/gamma 之间应恰好 1 空行");
-    assert!(is_blank_separator(&lines[alpha + 1]));
-    assert!(is_blank_separator(&lines[beta + 1]));
+    assert!(super::is_blank_separator(&lines[alpha + 1]));
+    assert!(super::is_blank_separator(&lines[beta + 1]));
     for idx in [alpha, beta, gamma] {
         assert!(
-            line_text(&lines[idx]).contains('\u{2022}'),
+            super::line_text(&lines[idx]).contains('\u{2022}'),
             "列表标记应保留，实际: {:?}",
-            line_text(&lines[idx])
+            super::line_text(&lines[idx])
         );
     }
 }
@@ -409,7 +443,7 @@ fn test_nested_list_items_stay_compact_between_top_level_items() {
     let grid = GridSpec::grid_for(80);
     let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
     let mut layout = crate::kit::message_area::vm_cache::MarkdownLineCache::default();
-    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_cached_with_layout(
         &vm,
         &grid,
         &mut md_cache,
@@ -421,8 +455,13 @@ fn test_nested_list_items_stay_compact_between_top_level_items() {
     let index_of = |needle: &str| {
         lines
             .iter()
-            .position(|l| line_text(l).contains(needle))
-            .unwrap_or_else(|| panic!("应渲染出列表项 {needle:?}，实际: {:?}", all_text(&lines)))
+            .position(|l| super::line_text(l).contains(needle))
+            .unwrap_or_else(|| {
+                panic!(
+                    "应渲染出列表项 {needle:?}，实际: {:?}",
+                    super::all_text(&lines)
+                )
+            })
     };
     let (parent, child_a, child_b, sibling) = (
         index_of("parent"),
@@ -433,9 +472,9 @@ fn test_nested_list_items_stay_compact_between_top_level_items() {
     assert_eq!(child_a, parent + 1, "子项应紧跟父项，无空行");
     assert_eq!(child_b, child_a + 1, "同级子项之间无空行");
     assert!(
-        is_blank_separator(&lines[sibling - 1]),
+        super::is_blank_separator(&lines[sibling - 1]),
         "回到顶层项（sibling）前应有空行，实际: {:?}",
-        line_text(&lines[sibling - 1])
+        super::line_text(&lines[sibling - 1])
     );
 }
 
@@ -466,7 +505,7 @@ fn test_assistant_bubble_resize_rebuilds_stable_chunks_without_panic() {
 
     for term in [80u16, 30, 55, 20] {
         let grid = GridSpec::grid_for(term);
-        let (lines, ..) = super::vm_to_lines_cached_with_layout(
+        let (lines, ..) = render::vm_to_lines_cached_with_layout(
             &vm,
             &grid,
             &mut md_cache,
@@ -480,7 +519,7 @@ fn test_assistant_bubble_resize_rebuilds_stable_chunks_without_panic() {
             .expect("流式 AssistantBubble 应产生 stable overlay");
         let stable_text: String = stable
             .iter()
-            .flat_map(|chunk| chunk.iter().map(line_text))
+            .flat_map(|chunk| chunk.iter().map(super::line_text))
             .collect();
         assert!(
             stable_text.contains("段落甲"),
@@ -511,7 +550,7 @@ fn test_streaming_table_without_leading_pipe_stays_visible() {
     let grid = GridSpec::grid_for(80);
     let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
     let mut layout = crate::kit::message_area::vm_cache::MarkdownLineCache::default();
-    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_cached_with_layout(
         &vm,
         &grid,
         &mut md_cache,
@@ -525,11 +564,11 @@ fn test_streaming_table_without_leading_pipe_stays_visible() {
         .map(|(_, stable)| {
             stable
                 .iter()
-                .flat_map(|chunk| chunk.iter().map(line_text))
+                .flat_map(|chunk| chunk.iter().map(super::line_text))
                 .collect::<String>()
         })
         .unwrap_or_default();
-    let rendered = format!("{}{}", all_text(&lines), stable_text);
+    let rendered = format!("{}{}", super::all_text(&lines), stable_text);
     for cell in ["甲", "乙", "丙", "丁"] {
         assert!(
             rendered.contains(cell),

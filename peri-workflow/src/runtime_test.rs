@@ -48,8 +48,12 @@ fn minimal_input() -> WorkflowInput {
 
 #[tokio::test]
 async fn closed_runtime_rejects_new_runs_on_both_entry_points() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = make_runtime(dir.path().to_str().unwrap());
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
 
     runtime.mark_closed();
     assert!(runtime.is_closed());
@@ -75,8 +79,12 @@ async fn closed_runtime_rejects_new_runs_on_both_entry_points() {
 
 #[tokio::test]
 async fn resume_rejects_unsafe_run_id_and_mismatched_state() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = make_runtime(dir.path().to_str().unwrap());
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
 
     // 路径分隔符 / 非 UUID：同一权威校验（is_safe_run_id）。
     for candidate in ["../../etc", "not-a-uuid", "a/b"] {
@@ -93,8 +101,14 @@ async fn resume_rejects_unsafe_run_id_and_mismatched_state() {
     // 合法 UUID 但 state.json 属于另一个 run：拒绝（目录被替换 / 损坏）。
     let requested = uuid::Uuid::now_v7().to_string();
     let other = uuid::Uuid::now_v7().to_string();
-    let journal = WorkflowJournalStore::new(dir.path().to_str().unwrap());
-    journal.init_run(&requested, "return 1").unwrap();
+    let journal = WorkflowJournalStore::new(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
+    journal
+        .init_run(&requested, "return 1")
+        .expect("the init run fixture result is required for this assertion");
     journal
         .write_state(
             &requested,
@@ -119,7 +133,7 @@ async fn resume_rejects_unsafe_run_id_and_mismatched_state() {
                 error: None,
             },
         )
-        .unwrap();
+        .expect("the write state fixture result is required for this assertion");
     let error = runtime
         .resume(&requested)
         .await
@@ -132,8 +146,12 @@ async fn resume_rejects_unsafe_run_id_and_mismatched_state() {
 
 #[test]
 fn consumer_token_is_bound_once_and_verified() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = make_runtime(dir.path().to_str().unwrap());
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
     assert!(!runtime.consumer_bound(), "未绑定时回填一律拒绝");
     assert!(!runtime.verify_consumer_token(""), "空令牌不构成绑定");
 
@@ -146,8 +164,12 @@ fn consumer_token_is_bound_once_and_verified() {
 
 #[test]
 fn kill_run_only_reports_running_runs_as_killed() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = make_runtime(dir.path().to_str().unwrap());
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
     let run_id = uuid::Uuid::now_v7().to_string();
 
     // 未登记的 run：不算命中。
@@ -171,8 +193,12 @@ fn kill_run_only_reports_running_runs_as_killed() {
 
 #[test]
 fn kill_run_fences_run_tasks_before_registry_kill() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = make_runtime(dir.path().to_str().unwrap());
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
     let run_id = uuid::Uuid::now_v7().to_string();
     let _ = runtime.registry().reserve(crate::registry::WorkflowRun {
         run_id: run_id.clone(),
@@ -183,7 +209,7 @@ fn kill_run_fences_run_tasks_before_registry_kill() {
         child_handle: None,
         kill_tx: None,
     });
-    runtime.tasks().publish(
+    let _ = runtime.tasks().publish(
         "t-1".into(),
         crate::protocol::AgentRunParams {
             run_id: run_id.clone(),
@@ -232,8 +258,12 @@ fn kill_run_fences_run_tasks_before_registry_kill() {
 
 #[test]
 fn event_watermark_tracks_the_run_event_log() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = make_runtime(dir.path().to_str().unwrap());
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
     let mut updates: broadcast::Receiver<WorkflowResourceUpdate> = runtime.subscribe();
 
     assert_eq!(runtime.event_watermark("run-1"), 0, "无事件时水位为 0");
@@ -269,19 +299,23 @@ fn event_watermark_tracks_the_run_event_log() {
 /// run-2 的 `CAPACITY + 1` 条事件占 2..=CAPACITY+2，水位期望 `CAPACITY + 2`。
 #[test]
 fn event_watermark_does_not_regress_when_events_are_evicted() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = make_runtime(dir.path().to_str().unwrap());
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
 
     assert_eq!(
         runtime.run_events().append(run_event("run-1")),
         1,
         "全局 sequence 从 1 起分配"
     );
-    let last_sequence = (0..=super::RUN_EVENT_LOG_CAPACITY)
+    let last_sequence = (0..=crate::runtime::RUN_EVENT_LOG_CAPACITY)
         .fold(0, |_, _| runtime.run_events().append(run_event("run-2")));
     assert_eq!(
         last_sequence,
-        (super::RUN_EVENT_LOG_CAPACITY + 2) as u64,
+        (crate::runtime::RUN_EVENT_LOG_CAPACITY + 2) as u64,
         "run-1 已消耗首个 sequence；run-2 的末条事件为 CAPACITY + 2"
     );
 
@@ -292,7 +326,7 @@ fn event_watermark_does_not_regress_when_events_are_evicted() {
     );
     assert_eq!(
         runtime.event_watermark("run-2"),
-        (super::RUN_EVENT_LOG_CAPACITY + 2) as u64
+        (crate::runtime::RUN_EVENT_LOG_CAPACITY + 2) as u64
     );
     // 防假阳性：淘汰必须真的发生（保留窗口容量即 CAPACITY），否则本用例会退化为
     // 「未触发淘汰路径仍通过」。
@@ -314,8 +348,12 @@ fn event_watermark_does_not_regress_when_events_are_evicted() {
 /// 而不是只在启动 fast-path 补发一次。
 #[test]
 fn runs_index_is_notified_on_index_affecting_commits() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = make_runtime(dir.path().to_str().unwrap());
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
     let mut updates = runtime.subscribe();
 
     runtime
@@ -354,8 +392,12 @@ fn runs_index_is_notified_on_index_affecting_commits() {
 /// F6 回归：关闭位必须封住任务发布（关闭顺序第 ① 步：停止接受新 run 与新任务发布）。
 #[test]
 fn closed_runtime_refuses_task_publication() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = make_runtime(dir.path().to_str().unwrap());
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
     runtime.mark_closed();
 
     let _ = runtime

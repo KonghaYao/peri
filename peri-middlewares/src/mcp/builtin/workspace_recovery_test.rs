@@ -6,10 +6,11 @@
 //! （`peri-mcp-workspace` 的 `filesystem/path_hints_test.rs`、`filesystem/*_test.rs`、
 //! `terminal_evidence_test.rs`），本文件不重复。
 use crate::mcp::apps::McpCapabilityProfile;
-use crate::mcp::builtin::runtime::{
-    spawn_builtin_transport_with_handler, BuiltinInstanceSupervisor, BUILTIN_CONVERGE_TIMEOUT,
-};
-use crate::mcp::client::{serve_client_auto, McpServiceWrapper};
+use crate::mcp::builtin::runtime;
+use crate::mcp::builtin::runtime::BuiltinInstanceSupervisor;
+use crate::mcp::builtin::runtime::BUILTIN_CONVERGE_TIMEOUT;
+use crate::mcp::client;
+use crate::mcp::client::McpServiceWrapper;
 use crate::mcp::client::{ClientStatus, McpClientHandle};
 use crate::mcp::config::ConfigSource;
 use crate::mcp::tool_bridge::McpToolBridge;
@@ -17,13 +18,13 @@ use crate::mcp::McpClientPool;
 use peri_acp_types::tasks::TaskManager;
 use peri_agent::tools::{BaseTool, ToolContext};
 use peri_mcp_workspace::{WorkspaceInstanceInput, WorkspaceMcpServer};
-use rmcp::{
-    model::CallToolRequestParams,
-    service::{Peer, RoleClient},
-    ServiceError,
-};
+use rmcp::model::CallToolRequestParams;
+use rmcp::service::Peer;
+use rmcp::service::RoleClient;
+use rmcp::ServiceError;
 use serde_json::{json, Value};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 const SESSION_ID: &str = "workspace-recovery-session";
 
@@ -336,13 +337,16 @@ async fn connect(cwd: &str, input: Option<WorkspaceInstanceInput>) -> Pair {
     let manager: Arc<dyn TaskManager> =
         Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     pool.bind_session_task_manager(SESSION_ID, &manager);
-    let transport =
-        spawn_builtin_transport_with_handler("workspace", WorkspaceMcpServer::new(cwd, input));
+    let transport = runtime::spawn_builtin_transport_with_handler(
+        "workspace",
+        WorkspaceMcpServer::new(cwd, input),
+    );
     let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
-        .await
-        .expect("builtin 握手不得超时（同进程链路）")
-        .expect("builtin 握手不得失败");
+    let service =
+        client::serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+            .await
+            .expect("builtin 握手不得超时（同进程链路）")
+            .expect("builtin 握手不得失败");
     Pair {
         service,
         supervisor,

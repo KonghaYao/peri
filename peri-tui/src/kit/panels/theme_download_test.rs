@@ -1,24 +1,21 @@
 //! Download launch → real HTTP/setup → progress → popup interaction regressions.
 
-use super::{DownloadRequest, THEME_LIST, trigger_download_themes_with};
-use crate::kit::atoms::{
-    DOWNLOAD_PROGRESS, DownloadProgressPayload, FileDownloadStatus, NOTIFICATION, Notification,
-    POPUP_KIND, PopupKind,
-};
-use crate::kit::popup_overlay::close_popup;
-use crate::kit::popups::download_progress::handle_download_progress_event;
-use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers},
-    prelude::EventResult,
-};
+use super::DownloadRequest;
+use super::THEME_LIST;
+
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::KeyCode;
+use ratatui_kit::crossterm::event::KeyEvent;
+use ratatui_kit::crossterm::event::KeyModifiers;
+use ratatui_kit::prelude::EventResult;
 use serial_test::serial;
-use std::{path::Path, time::Duration};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-    sync::oneshot,
-    task::JoinHandle,
-};
+use std::path::Path;
+use std::time::Duration;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -73,8 +70,15 @@ impl ListingServer {
     }
 
     async fn with_bodies(bodies: Vec<Option<String>>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/contents", listener.local_addr().unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("with bodies: fixture task and request must complete successfully");
+        let url = format!(
+            "http://{}/contents",
+            listener
+                .local_addr()
+                .expect("with bodies: the fixture listener must expose its bound local address")
+        );
         let (seen_tx, seen) = oneshot::channel();
         let (release, mut release_rx) = oneshot::channel();
         let (stop, mut stop_rx) = oneshot::channel();
@@ -87,11 +91,17 @@ impl ListingServer {
                     _ = &mut stop_rx => break,
                     accepted = listener.accept() => accepted,
                 };
-                let (mut stream, _) = accepted.unwrap();
+                let (mut stream, _) =
+                    accepted.expect("with bodies: the accept fixture operation uses valid inputs");
                 let mut request = Vec::new();
                 loop {
                     let mut byte = [0u8; 1];
-                    if stream.read(&mut byte).await.unwrap() == 0 {
+                    if stream
+                        .read(&mut byte)
+                        .await
+                        .expect("with bodies: fixture task and request must complete successfully")
+                        == 0
+                    {
                         break;
                     }
                     request.push(byte[0]);
@@ -99,7 +109,10 @@ impl ListingServer {
                         break;
                     }
                 }
-                requests.push(String::from_utf8(request).unwrap());
+                requests
+                    .push(String::from_utf8(request).expect(
+                        "with bodies: fixture paths and protocol text must be valid UTF-8",
+                    ));
                 if let Some(seen_tx) = seen_tx.take() {
                     let _ = seen_tx.send(());
                     let _ = (&mut release_rx).await;
@@ -173,19 +186,25 @@ async fn join_workers(workers: Vec<JoinHandle<()>>) -> Vec<Result<(), String>> {
 }
 
 fn home(path: &Path) -> Result<String, std::env::VarError> {
-    Ok(path.to_str().unwrap().to_string())
+    Ok(path
+        .to_str()
+        .expect("home: fixture paths and protocol text must be valid UTF-8")
+        .to_string())
 }
 
 fn press_escape() -> EventResult {
-    handle_download_progress_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)))
+    crate::kit::popups::download_progress::handle_download_progress_event(Event::Key(
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+    ))
 }
 
 async fn duplicate_during_listing(dismiss: bool) {
     let _atoms = AtomsGuard::capture_and_reset();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir()
+        .expect("duplicate during listing: isolated fixture workspace must remain accessible");
     let mut server = ListingServer::start().await;
     let request = server.request(home(directory.path()));
-    let first = trigger_download_themes_with(move || request);
+    let first = super::trigger_download_themes_with(move || request);
     let first_accepted = first.is_some();
     let requested = server.wait_until_requested().await;
     let before = DOWNLOAD_PROGRESS.state().read().clone();
@@ -194,12 +213,12 @@ async fn duplicate_during_listing(dismiss: bool) {
     let closed = if dismiss {
         // The root Esc handler delegates to this actual close entry point even
         // when the child popup ignores Esc. Closing must not cancel the worker.
-        close_popup()
+        crate::kit::popup_overlay::close_popup()
     } else {
         None
     };
     let request = server.request(home(directory.path()));
-    let second = trigger_download_themes_with(move || request);
+    let second = super::trigger_download_themes_with(move || request);
     let duplicate_accepted = second.is_some();
     server.release();
     let outcomes = join_workers(first.into_iter().chain(second).collect()).await;
@@ -208,7 +227,8 @@ async fn duplicate_during_listing(dismiss: bool) {
 
     // Every asynchronous writer has stopped before an assertion can unwind.
     assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
-    let requests = requests.unwrap();
+    let requests =
+        requests.expect("duplicate during listing: the unwrap fixture operation uses valid inputs");
     assert!(first_accepted && requested && popup_opened);
     assert!(before.items.is_empty() && !before.finished);
     assert!(local_escape_ignored);
@@ -240,9 +260,12 @@ async fn test_theme_download_dismiss_does_not_release_active_owner() {
 
 async fn setup_error_reaches_finished(missing_home: bool) {
     let _atoms = AtomsGuard::capture_and_reset();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir()
+        .expect("setup error reaches finished: isolated fixture workspace must remain accessible");
     if !missing_home {
-        std::fs::write(directory.path().join(".peri"), "not a directory").unwrap();
+        std::fs::write(directory.path().join(".peri"), "not a directory").expect(
+            "setup error reaches finished: isolated fixture workspace must remain accessible",
+        );
     }
     let server = ListingServer::start().await;
     let request = server.request(if missing_home {
@@ -250,7 +273,7 @@ async fn setup_error_reaches_finished(missing_home: bool) {
     } else {
         home(directory.path())
     });
-    let worker = trigger_download_themes_with(move || request);
+    let worker = super::trigger_download_themes_with(move || request);
     let accepted = worker.is_some();
     let outcomes = join_workers(worker.into_iter().collect()).await;
     let requests = server.finish().await;
@@ -260,7 +283,7 @@ async fn setup_error_reaches_finished(missing_home: bool) {
 
     assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
     assert!(
-        requests.unwrap().is_empty(),
+        requests.expect("setup error reaches finished: the fixture operation must finish without an inner failure").is_empty(),
         "setup failure must not send HTTP"
     );
     assert!(accepted);
@@ -286,12 +309,12 @@ async fn test_theme_download_directory_error_reaches_finished() {
 #[serial]
 async fn test_theme_download_empty_listing_finishes_and_releases_owner() {
     let _atoms = AtomsGuard::capture_and_reset();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("theme download empty listing finishes and releases owner: isolated fixture workspace must remain accessible");
     let mut runs = Vec::new();
     for _ in 0..2 {
         let mut server = ListingServer::start().await;
         let request = server.request(home(directory.path()));
-        let worker = trigger_download_themes_with(move || request);
+        let worker = super::trigger_download_themes_with(move || request);
         let accepted = worker.is_some();
         let requested = server.wait_until_requested().await;
         server.release();
@@ -313,7 +336,7 @@ async fn test_theme_download_empty_listing_finishes_and_releases_owner() {
     for (accepted, requested, outcomes, requests, completed, escape, popup_closed) in runs {
         assert!(accepted && requested);
         assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
-        let requests = requests.unwrap();
+        let requests = requests.expect("theme download empty listing finishes and releases owner: the unwrap fixture operation uses valid inputs");
         assert_eq!(requests.len(), 1);
         assert!(requests[0].starts_with("GET /contents HTTP/1.1\r\n"));
         assert!(completed.finished && completed.items.is_empty());
@@ -329,7 +352,7 @@ async fn test_theme_download_success_writes_original_body_and_refreshes_catalog(
     let mut atoms = AtomsGuard::capture_and_reset();
     atoms.capture_catalog();
     *THEME_LIST.state().write() = vec!["stale-theme".to_string()];
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("theme download success writes original body and refreshes catalog: isolated fixture workspace must remain accessible");
     let theme_directory = directory.path().join(".peri/themes");
     let body = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -344,16 +367,16 @@ async fn test_theme_download_success_writes_original_body_and_refreshes_catalog(
     let scan_directory = theme_directory.clone();
     request.scan_catalog = Box::new(move || {
         std::fs::read_dir(scan_directory)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
+            .expect("theme download success writes original body and refreshes catalog: the fixture storage and layout must support the requested operation")
+            .map(|entry| entry.expect("theme download success writes original body and refreshes catalog: the fixture establishes entry before this assertion").path())
             .filter(|path| {
                 path.extension()
                     .is_some_and(|extension| extension == "json")
             })
-            .map(|path| path.file_stem().unwrap().to_string_lossy().to_string())
+            .map(|path| path.file_stem().expect("theme download success writes original body and refreshes catalog: the file_stem fixture operation uses valid inputs").to_string_lossy().to_string())
             .collect()
     });
-    let worker = trigger_download_themes_with(move || request);
+    let worker = super::trigger_download_themes_with(move || request);
     let accepted = worker.is_some();
     let requested = server.wait_until_requested().await;
     server.release();
@@ -368,7 +391,7 @@ async fn test_theme_download_success_writes_original_body_and_refreshes_catalog(
 
     assert!(accepted && requested);
     assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
-    let requests = requests.unwrap();
+    let requests = requests.expect("theme download success writes original body and refreshes catalog: the unwrap fixture operation uses valid inputs");
     assert_eq!(requests.len(), 2);
     assert!(requests[0].starts_with("GET /contents HTTP/1.1\r\n"));
     assert!(requests[1].starts_with("GET /contents/raw/downloaded-theme.json HTTP/1.1\r\n"));
@@ -377,7 +400,7 @@ async fn test_theme_download_success_writes_original_body_and_refreshes_catalog(
             .to_ascii_lowercase()
             .contains("user-agent: peri-tui/0.1\r\n")
     }));
-    assert_eq!(stored.unwrap(), body);
+    assert_eq!(stored.expect("theme download success writes original body and refreshes catalog: the fixture storage and layout must support the requested operation"), body);
     assert!(!theme_directory.join("README.md").exists());
     assert_eq!(catalog, vec!["downloaded-theme"]);
     assert!(completed.finished);
@@ -396,12 +419,12 @@ async fn test_theme_download_success_writes_original_body_and_refreshes_catalog(
 #[serial]
 async fn test_theme_download_transport_failure_finishes_and_releases_owner() {
     let _atoms = AtomsGuard::capture_and_reset();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("theme download transport failure finishes and releases owner: isolated fixture workspace must remain accessible");
     // No HTTP response: fail the real reqwest send rather than injecting an
     // outcome after the transport boundary. Any retry also gets a closed peer.
     let mut server = ListingServer::with_bodies(Vec::new()).await;
     let request = server.request(home(directory.path()));
-    let worker = trigger_download_themes_with(move || request);
+    let worker = super::trigger_download_themes_with(move || request);
     let accepted = worker.is_some();
     let requested = server.wait_until_requested().await;
     server.release();
@@ -413,7 +436,7 @@ async fn test_theme_download_transport_failure_finishes_and_releases_owner() {
 
     assert!(accepted && requested);
     assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
-    assert!(!requests.unwrap().is_empty());
+    assert!(!requests.expect("theme download transport failure finishes and releases owner: the fixture operation must finish without an inner failure").is_empty());
     assert!(completed.finished && completed.items.is_empty());
     assert_eq!((completed.success_count, completed.fail_count), (0, 1));
     assert!(matches!(escape, EventResult::Consumed));
@@ -439,7 +462,7 @@ async fn abort_and_join(worker: Option<JoinHandle<()>>) -> bool {
 async fn complete_empty_retry(directory: &Path) -> bool {
     let mut server = ListingServer::start().await;
     let request = server.request(home(directory));
-    let worker = trigger_download_themes_with(move || request);
+    let worker = super::trigger_download_themes_with(move || request);
     let accepted = worker.is_some();
     let requested = server.wait_until_requested().await;
     server.release();
@@ -458,18 +481,17 @@ async fn complete_empty_retry(directory: &Path) -> bool {
 #[tokio::test]
 #[serial]
 async fn test_theme_download_abort_before_first_poll_releases_owner() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
 
     let _atoms = AtomsGuard::capture_and_reset();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("theme download abort before first poll releases owner: isolated fixture workspace must remain accessible");
     let server = ListingServer::start().await;
     let request = server.request(home(directory.path()));
     let polled = Arc::new(AtomicBool::new(false));
     let polled_in_task = polled.clone();
-    let worker = trigger_download_themes_with(move || {
+    let worker = super::trigger_download_themes_with(move || {
         polled_in_task.store(true, Ordering::Relaxed);
         request
     });
@@ -482,7 +504,7 @@ async fn test_theme_download_abort_before_first_poll_releases_owner() {
 
     assert!(cancelled);
     assert!(!polled.load(Ordering::Relaxed));
-    assert!(requests.unwrap().is_empty());
+    assert!(requests.expect("theme download abort before first poll releases owner: the fixture operation must finish without an inner failure").is_empty());
     assert!(aborted.finished);
     assert_eq!(aborted.fail_count, 1);
     assert!(retry_succeeded);
@@ -492,10 +514,10 @@ async fn test_theme_download_abort_before_first_poll_releases_owner() {
 #[serial]
 async fn test_theme_download_abort_in_flight_releases_owner() {
     let _atoms = AtomsGuard::capture_and_reset();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("theme download abort in flight releases owner: isolated fixture workspace must remain accessible");
     let mut server = ListingServer::start().await;
     let request = server.request(home(directory.path()));
-    let worker = trigger_download_themes_with(move || request);
+    let worker = super::trigger_download_themes_with(move || request);
     let requested = server.wait_until_requested().await;
     let cancelled = abort_and_join(worker).await;
     let requests = server.finish().await;
@@ -503,8 +525,22 @@ async fn test_theme_download_abort_in_flight_releases_owner() {
     let retry_succeeded = complete_empty_retry(directory.path()).await;
 
     assert!(requested && cancelled);
-    assert_eq!(requests.unwrap().len(), 1);
+    assert_eq!(requests.expect("theme download abort in flight releases owner: the fixture operation must finish without an inner failure").len(), 1);
     assert!(aborted.finished);
     assert_eq!(aborted.fail_count, 1);
     assert!(retry_succeeded);
 }
+
+use crate::kit::atoms::DOWNLOAD_PROGRESS;
+
+use crate::kit::atoms::DownloadProgressPayload;
+
+use crate::kit::atoms::FileDownloadStatus;
+
+use crate::kit::atoms::NOTIFICATION;
+
+use crate::kit::atoms::Notification;
+
+use crate::kit::atoms::POPUP_KIND;
+
+use crate::kit::atoms::PopupKind;

@@ -1,9 +1,11 @@
-use super::super::tool_card::build_tool_card;
 use super::{CurrentTurn, TurnSegment};
-use crate::kit::tui_render_unit::{
-    EntryStatus, FoldTarget, TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit, TuiSystemNote,
-    TuiUserBubble, fold_for_status,
-};
+use crate::kit::tui_render_unit::EntryStatus;
+use crate::kit::tui_render_unit::FoldTarget;
+use crate::kit::tui_render_unit::TuiAssistantBubble;
+use crate::kit::tui_render_unit::TuiReasoningBlock;
+use crate::kit::tui_render_unit::TuiRenderUnit;
+use crate::kit::tui_render_unit::TuiSystemNote;
+use crate::kit::tui_render_unit::TuiUserBubble;
 use std::time::Instant;
 
 impl CurrentTurn {
@@ -69,7 +71,7 @@ impl CurrentTurn {
             };
             Some(TuiReasoningBlock {
                 text: Self::materialize_text(reasoning),
-                fold: fold_for_status(FoldTarget::Reasoning, status),
+                fold: crate::kit::tui_render_unit::fold_for_status(FoldTarget::Reasoning, status),
                 status,
                 is_running: reasoning_running,
                 started_at: if reasoning_running {
@@ -168,142 +170,145 @@ impl CurrentTurn {
         let mut prev_text_end: usize = 0;
         let mut prev_reasoning_end: usize = 0;
 
-        for (i, segment) in self.segments.iter().enumerate() {
-            match segment {
-                TurnSegment::AssistantText {
-                    text_end_byte,
-                    reasoning_end_byte,
-                    text_hash,
-                    reasoning_hash,
-                    message_id,
-                    reasoning_duration_ms,
-                } => {
-                    let text_end = (*text_end_byte).min(self.text.len());
-                    let reason_end = (*reasoning_end_byte).min(self.reasoning.len());
-                    // 冻结段只构建一次，此后直接复用缓存（内容不再变化）。
-                    if self.cached_view_models.len() <= i {
-                        let text_slice = &self.text[prev_text_end..text_end];
-                        let reasoning_slice = &self.reasoning[prev_reasoning_end..reason_end];
-                        let (reasoning, content_hash) = Self::build_bubble_parts(
-                            reasoning_slice,
-                            *text_hash,
-                            *reasoning_hash,
-                            false,
-                            None,
-                            *reasoning_duration_ms,
-                            None,
-                        );
-                        self.cached_view_models
-                            .push_back(TuiRenderUnit::TuiAssistantBubble(
-                                TuiAssistantBubble {
-                                    text: Self::materialize_text(text_slice),
-                                    reasoning,
-                                    message_id: message_id.clone(),
-                                    // 冻结段无正文时长起点——时长由折叠 pass 在翻转点
-                                    // 对 trailing bubble 冻结；此处恒 None（G-Tokens）。
-                                    started_at: None,
-                                    duration_ms: None,
-                                    content_hash,
+        {
+            let iteration_items = self.segments.iter().enumerate();
+            for (i, segment) in iteration_items {
+                match segment {
+                    TurnSegment::AssistantText {
+                        text_end_byte,
+                        reasoning_end_byte,
+                        text_hash,
+                        reasoning_hash,
+                        message_id,
+                        reasoning_duration_ms,
+                    } => {
+                        let text_end = (*text_end_byte).min(self.text.len());
+                        let reason_end = (*reasoning_end_byte).min(self.reasoning.len());
+                        // 冻结段只构建一次，此后直接复用缓存（内容不再变化）。
+                        if self.cached_view_models.len() <= i {
+                            let text_slice = &self.text[prev_text_end..text_end];
+                            let reasoning_slice = &self.reasoning[prev_reasoning_end..reason_end];
+                            let (reasoning, content_hash) = Self::build_bubble_parts(
+                                reasoning_slice,
+                                *text_hash,
+                                *reasoning_hash,
+                                false,
+                                None,
+                                *reasoning_duration_ms,
+                                None,
+                            );
+                            self.cached_view_models
+                                .push_back(TuiRenderUnit::TuiAssistantBubble(
+                                    TuiAssistantBubble {
+                                        text: Self::materialize_text(text_slice),
+                                        reasoning,
+                                        message_id: message_id.clone(),
+                                        // 冻结段无正文时长起点——时长由折叠 pass 在翻转点
+                                        // 对 trailing bubble 冻结；此处恒 None（G-Tokens）。
+                                        started_at: None,
+                                        duration_ms: None,
+                                        content_hash,
+                                    }
+                                    .into(),
+                                ));
+                        }
+                        prev_text_end = text_end;
+                        prev_reasoning_end = reason_end;
+                    }
+                    TurnSegment::Tool { tool_idx } => {
+                        if let Some(t) = self.tool_cards.get(*tool_idx) {
+                            let is_running = self.active && t.output_summary.is_none();
+                            let duration = is_running
+                                .then(|| peri_time::elapsed_since(t.started_at).as_millis() as u64);
+                            let needs_rebuild = match self.cached_view_models.get(i) {
+                                Some(TuiRenderUnit::TuiToolCard(c)) => {
+                                    c.is_running != is_running
+                                        || c.tool_name != t.tool_name
+                                        || c.input_summary != t.input_summary
+                                        || c.presentation != t.presentation
+                                        || c.is_error != t.is_error
+                                        || c.output_summary
+                                            != t.output_summary.as_deref().unwrap_or_default()
+                                        || c.completed_duration_ms
+                                            != if is_running {
+                                                None
+                                            } else {
+                                                t.completed_duration_ms
+                                            }
                                 }
-                                .into(),
-                            ));
-                    }
-                    prev_text_end = text_end;
-                    prev_reasoning_end = reason_end;
-                }
-                TurnSegment::Tool { tool_idx } => {
-                    if let Some(t) = self.tool_cards.get(*tool_idx) {
-                        let is_running = self.active && t.output_summary.is_none();
-                        let duration = is_running
-                            .then(|| peri_time::elapsed_since(t.started_at).as_millis() as u64);
-                        let needs_rebuild = match self.cached_view_models.get(i) {
-                            Some(TuiRenderUnit::TuiToolCard(c)) => {
-                                c.is_running != is_running
-                                    || c.tool_name != t.tool_name
-                                    || c.input_summary != t.input_summary
-                                    || c.presentation != t.presentation
-                                    || c.is_error != t.is_error
-                                    || c.output_summary
-                                        != t.output_summary.as_deref().unwrap_or_default()
-                                    || c.completed_duration_ms
-                                        != if is_running {
-                                            None
-                                        } else {
-                                            t.completed_duration_ms
-                                        }
-                            }
-                            _ => true,
-                        };
-                        if needs_rebuild {
-                            let card = build_tool_card(t, self.active);
-                            if self.cached_view_models.len() <= i {
-                                self.cached_view_models
-                                    .push_back(TuiRenderUnit::TuiToolCard(card));
-                            } else {
-                                self.cached_view_models
-                                    .set(i, TuiRenderUnit::TuiToolCard(card));
-                            }
-                        } else if let Some(TuiRenderUnit::TuiToolCard(card)) =
-                            self.cached_view_models.get(i)
-                            && card.running_duration_ms.map(|ms| ms / 1000)
-                                != duration.map(|ms| ms / 1000)
-                            && let Some(TuiRenderUnit::TuiToolCard(card)) =
-                                self.cached_view_models.get_mut(i)
-                        {
-                            card.running_duration_ms = duration;
-                            card.recompute_hash();
-                        }
-                    }
-                }
-                TurnSegment::SubAgent { subagent_idx } => {
-                    if let Some(s) = self.subagents.get_mut(*subagent_idx) {
-                        let group_vm = s.view_model();
-                        // O(1) hash 比较——未变化的 subagent 直接跳过 set()，
-                        // 已变化的替换为新组（im::Vector set 走 COW，共享未变子节点）。
-                        let changed = self
-                            .cached_view_models
-                            .get(i)
-                            .is_none_or(|old| old.content_hash() != group_vm.content_hash());
-                        if changed {
-                            if self.cached_view_models.len() <= i {
-                                self.cached_view_models.push_back(group_vm);
-                            } else {
-                                self.cached_view_models.set(i, group_vm);
+                                _ => true,
+                            };
+                            if needs_rebuild {
+                                let card = super::super::tool_card::build_tool_card(t, self.active);
+                                if self.cached_view_models.len() <= i {
+                                    self.cached_view_models
+                                        .push_back(TuiRenderUnit::TuiToolCard(card));
+                                } else {
+                                    self.cached_view_models
+                                        .set(i, TuiRenderUnit::TuiToolCard(card));
+                                }
+                            } else if let Some(TuiRenderUnit::TuiToolCard(card)) =
+                                self.cached_view_models.get(i)
+                                && card.running_duration_ms.map(|ms| ms / 1000)
+                                    != duration.map(|ms| ms / 1000)
+                                && let Some(TuiRenderUnit::TuiToolCard(card)) =
+                                    self.cached_view_models.get_mut(i)
+                            {
+                                card.running_duration_ms = duration;
+                                card.recompute_hash();
                             }
                         }
                     }
-                }
-                TurnSegment::SystemNote {
-                    text,
-                    level,
-                    content_hash,
-                } => {
-                    if self.cached_view_models.len() <= i {
-                        self.cached_view_models
-                            .push_back(TuiRenderUnit::TuiSystemNote(TuiSystemNote {
-                                text: text.clone(),
-                                level: level.clone(),
-                                content_hash: *content_hash,
-                            }));
+                    TurnSegment::SubAgent { subagent_idx } => {
+                        if let Some(s) = self.subagents.get_mut(*subagent_idx) {
+                            let group_vm = s.view_model();
+                            // O(1) hash 比较——未变化的 subagent 直接跳过 set()，
+                            // 已变化的替换为新组（im::Vector set 走 COW，共享未变子节点）。
+                            let changed = self
+                                .cached_view_models
+                                .get(i)
+                                .is_none_or(|old| old.content_hash() != group_vm.content_hash());
+                            if changed {
+                                if self.cached_view_models.len() <= i {
+                                    self.cached_view_models.push_back(group_vm);
+                                } else {
+                                    self.cached_view_models.set(i, group_vm);
+                                }
+                            }
+                        }
                     }
-                }
-                TurnSegment::SystemReminder(reminder) => {
-                    if self.cached_view_models.len() <= i {
-                        self.cached_view_models
-                            .push_back(TuiRenderUnit::TuiSystemReminder((**reminder).clone()));
+                    TurnSegment::SystemNote {
+                        text,
+                        level,
+                        content_hash,
+                    } => {
+                        if self.cached_view_models.len() <= i {
+                            self.cached_view_models
+                                .push_back(TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+                                    text: text.clone(),
+                                    level: level.clone(),
+                                    content_hash: *content_hash,
+                                }));
+                        }
                     }
-                }
-                TurnSegment::UserBubble {
-                    text,
-                    attachments,
-                    message_id,
-                } => {
-                    if self.cached_view_models.len() <= i {
-                        let mut bubble =
-                            TuiUserBubble::with_attachments(text.clone(), attachments.clone());
-                        bubble.message_id.clone_from(message_id);
-                        self.cached_view_models
-                            .push_back(TuiRenderUnit::TuiUserBubble(bubble));
+                    TurnSegment::SystemReminder(reminder) => {
+                        if self.cached_view_models.len() <= i {
+                            self.cached_view_models
+                                .push_back(TuiRenderUnit::TuiSystemReminder((**reminder).clone()));
+                        }
+                    }
+                    TurnSegment::UserBubble {
+                        text,
+                        attachments,
+                        message_id,
+                    } => {
+                        if self.cached_view_models.len() <= i {
+                            let mut bubble =
+                                TuiUserBubble::with_attachments(text.clone(), attachments.clone());
+                            bubble.message_id.clone_from(message_id);
+                            self.cached_view_models
+                                .push_back(TuiRenderUnit::TuiUserBubble(bubble));
+                        }
                     }
                 }
             }
@@ -354,7 +359,10 @@ impl CurrentTurn {
                     let reasoning = reasoning.or_else(|| {
                         Some(TuiReasoningBlock {
                             text: String::new(),
-                            fold: fold_for_status(FoldTarget::Reasoning, EntryStatus::Completed),
+                            fold: crate::kit::tui_render_unit::fold_for_status(
+                                FoldTarget::Reasoning,
+                                EntryStatus::Completed,
+                            ),
                             status: EntryStatus::Completed,
                             is_running: false,
                             started_at: None,

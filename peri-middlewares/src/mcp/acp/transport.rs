@@ -8,7 +8,8 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol_schema::{v1::MessageMcpResponse, MaybeUndefined};
+use agent_client_protocol_schema::v1::MessageMcpResponse;
+use agent_client_protocol_schema::MaybeUndefined;
 use parking_lot::Mutex;
 use peri_acp_types::acp_mcp::AcpMcpError;
 use peri_acp_types::ports::AcpMcpGatewayPort;

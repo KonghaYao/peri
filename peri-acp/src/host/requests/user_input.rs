@@ -1,16 +1,19 @@
 //! Short user input RPCs; execution is admitted separately by the Agent mailbox.
 
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use peri_acp_types::session::{
     DispatchUserInputsRequest, EnqueueUserInputRequest, TakeBackUserInputRequest,
     UserInputQueueSnapshotRequest,
 };
-use serde::{de::DeserializeOwned, Serialize};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::Value;
 
 use super::super::{AcpServerConfig, SessionState};
-use crate::transport::{types::AcpError, AcpTransport};
+use crate::transport::types::AcpError;
+use crate::transport::AcpTransport;
 
 pub(super) async fn handle_user_input(
     method: &str,

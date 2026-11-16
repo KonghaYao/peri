@@ -2,12 +2,20 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use crate::{
-    runtime::stream::SseDecoderFactory, transport::SseEvent, ContentBlock, JsonObject, ModelError,
-    ModelMessage, ModelResponse, ModelResult, ModelStreamEvent, TokenUsage, ToolCall,
-};
+use crate::runtime::stream::SseDecoderFactory;
+use crate::transport::SseEvent;
+use crate::ContentBlock;
+use crate::JsonObject;
+use crate::ModelError;
+use crate::ModelMessage;
+use crate::ModelResponse;
+use crate::ModelResult;
+use crate::ModelStreamEvent;
+use crate::TokenUsage;
+use crate::ToolCall;
 
-use super::response::{provider_protocol_error, stop_reason};
+use super::response;
+use super::response::provider_protocol_error;
 
 /// 畸形帧的解码诊断：保留 `Provider` 分类并附带有界摘要，
 /// 使 fail-closed 的原因在错误出口可见，而不是被降级成空事件。
@@ -84,25 +92,25 @@ fn decode_event_inner(
     header_request_id: Option<String>,
 ) -> ModelResult<Vec<ModelStreamEvent>> {
     let value: Value = serde_json::from_str(&event.data)
-        .map_err(|error| provider_protocol_error().with_error(&error))?;
+        .map_err(|error| response::provider_protocol_error().with_error(&error))?;
     let payload_type = match value.get("type") {
         Some(Value::String(payload_type)) => Some(payload_type.as_str()),
-        Some(_) => return Err(provider_protocol_error()),
+        Some(_) => return Err(response::provider_protocol_error()),
         None => None,
     };
     let event_type = match (event.event.as_deref(), payload_type) {
         (Some(event_type), Some(payload_type)) if event_type == payload_type => event_type,
-        (Some(_), Some(_)) => return Err(provider_protocol_error()),
+        (Some(_), Some(_)) => return Err(response::provider_protocol_error()),
         (Some(event_type), None) | (None, Some(event_type)) => event_type,
-        (None, None) => return Err(provider_protocol_error()),
+        (None, None) => return Err(response::provider_protocol_error()),
     };
     let mut state = state
         .lock()
-        .map_err(|error| provider_protocol_error().with_message(error.to_string()))?;
+        .map_err(|error| response::provider_protocol_error().with_message(error.to_string()))?;
     match event_type {
         "message_start" => {
             if state.message_started || state.completed {
-                return Err(provider_protocol_error());
+                return Err(response::provider_protocol_error());
             }
             state.message_started = true;
             if state.request_id.is_none() {
@@ -136,7 +144,7 @@ fn decode_event_inner(
         "message_delta" => {
             ensure_streaming(&state)?;
             if state.active.is_some() || state.message_delta_seen {
-                return Err(provider_protocol_error());
+                return Err(response::provider_protocol_error());
             }
             state.message_delta_seen = true;
             let delta = value
@@ -155,7 +163,7 @@ fn decode_event_inner(
         "message_stop" => {
             ensure_streaming(&state)?;
             if state.active.is_some() || !state.message_delta_seen {
-                return Err(provider_protocol_error());
+                return Err(response::provider_protocol_error());
             }
             update_input_usage(&mut state, value.get("usage"))?;
             update_output_usage(&mut state, value.get("usage"))?;
@@ -166,10 +174,10 @@ fn decode_event_inner(
             events.push(ModelStreamEvent::Completed(completed_response(&state)?));
             Ok(events)
         }
-        "error" => Err(provider_protocol_error()
+        "error" => Err(response::provider_protocol_error()
             .with_message(value.get("error").unwrap_or(&value).to_string())),
         "ping" if !state.completed => Ok(Vec::new()),
-        _ => Err(provider_protocol_error()),
+        _ => Err(response::provider_protocol_error()),
     }
 }
 
@@ -177,13 +185,13 @@ fn ensure_streaming(state: &StreamState) -> ModelResult<()> {
     if state.message_started && !state.completed {
         Ok(())
     } else {
-        Err(provider_protocol_error())
+        Err(response::provider_protocol_error())
     }
 }
 
 fn start_block(state: &mut StreamState, value: &Value) -> ModelResult<Vec<ModelStreamEvent>> {
     if state.active.is_some() || state.message_delta_seen {
-        return Err(provider_protocol_error());
+        return Err(response::provider_protocol_error());
     }
     let index = value
         .get("index")
@@ -191,7 +199,7 @@ fn start_block(state: &mut StreamState, value: &Value) -> ModelResult<Vec<ModelS
         .and_then(|index| usize::try_from(index).ok())
         .ok_or_else(provider_protocol_error)?;
     if index != state.next_content_block_index {
-        return Err(provider_protocol_error());
+        return Err(response::provider_protocol_error());
     }
     state.next_content_block_index = state
         .next_content_block_index
@@ -238,7 +246,7 @@ fn start_block(state: &mut StreamState, value: &Value) -> ModelResult<Vec<ModelS
                 arguments_delta: String::new(),
             }]);
         }
-        _ => return Err(provider_protocol_error()),
+        _ => return Err(response::provider_protocol_error()),
     };
     state.active = Some(ActiveBlock { index, kind });
     Ok(Vec::new())
@@ -253,7 +261,7 @@ fn apply_delta(state: &mut StreamState, value: &Value) -> ModelResult<Vec<ModelS
     let delta = value.get("delta").ok_or_else(provider_protocol_error)?;
     let active = state.active.as_mut().ok_or_else(provider_protocol_error)?;
     if active.index != index {
-        return Err(provider_protocol_error());
+        return Err(response::provider_protocol_error());
     }
     match (&mut active.kind, delta.get("type").and_then(Value::as_str)) {
         (ActiveKind::Text { text }, Some("text_delta")) => {
@@ -310,7 +318,7 @@ fn apply_delta(state: &mut StreamState, value: &Value) -> ModelResult<Vec<ModelS
                 arguments_delta: delta.into(),
             }])
         }
-        _ => Err(provider_protocol_error()),
+        _ => Err(response::provider_protocol_error()),
     }
 }
 
@@ -322,7 +330,7 @@ fn finish_block(state: &mut StreamState, value: &Value) -> ModelResult<Vec<Model
         .ok_or_else(provider_protocol_error)?;
     let active = state.active.take().ok_or_else(provider_protocol_error)?;
     if active.index != index {
-        return Err(provider_protocol_error());
+        return Err(response::provider_protocol_error());
     }
     match active.kind {
         ActiveKind::Text { text } => state.content.push(ContentBlock::text(text)),
@@ -338,12 +346,12 @@ fn finish_block(state: &mut StreamState, value: &Value) -> ModelResult<Vec<Model
             arguments,
         } => {
             let arguments: Value = serde_json::from_str(&arguments).map_err(|error| {
-                provider_protocol_error()
+                response::provider_protocol_error()
                     .with_error(&error)
                     .with_body(&arguments)
             })?;
             let arguments = JsonObject::from_value(arguments)
-                .map_err(|error| provider_protocol_error().with_error(&error))?;
+                .map_err(|error| response::provider_protocol_error().with_error(&error))?;
             state.content.push(ContentBlock::ToolUse {
                 tool_call: ToolCall::new(id, name, arguments),
             });
@@ -421,9 +429,9 @@ fn completed_response(state: &StreamState) -> ModelResult<ModelResponse> {
         })
         .collect();
     let usage = current_usage(state)?;
-    ModelResponse::new(
+    ModelResponse::try_new(
         ModelMessage::assistant(state.content.clone(), tool_calls),
-        stop_reason(state.stop_reason.as_deref()),
+        response::stop_reason(state.stop_reason.as_deref()),
         Some(usage),
         state.request_id.clone(),
     )

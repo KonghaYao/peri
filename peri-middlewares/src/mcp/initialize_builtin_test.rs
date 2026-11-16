@@ -1,4 +1,4 @@
-use super::*;
+use super::{Arc, BuiltinInstanceContext, ClientStatus, McpClientPool, McpInitStatus};
 
 // ── builtin 分支（E-03，W2）────────────────────────────────────────────────────
 //
@@ -60,7 +60,7 @@ async fn unavailable_builtin_is_rejected_on_initialize_and_reconnect() {
     )
     .await;
     assert!(
-        matches!(&pool.get_client("workspace").unwrap().status, ClientStatus::Failed(reason) if reason.contains("unavailable"))
+        matches!(&pool.client("workspace").unwrap().status, ClientStatus::Failed(reason) if reason.contains("unavailable"))
     );
     assert_eq!(pool.builtin_task_count(), 0);
     let error = pool.reconnect("workspace", None).await.unwrap_err();
@@ -93,7 +93,7 @@ async fn builtin_unregistered_instance_fails_without_ready_evidence() {
     .await;
 
     let handle = pool
-        .get_client(UNREGISTERED_INSTANCE)
+        .client(UNREGISTERED_INSTANCE)
         .expect("失败必须留下可核对的句柄，而不是空 entry");
     let ClientStatus::Failed(reason) = &handle.status else {
         panic!("未注册实例必须显式 Failed，实际: {:?}", handle.status);
@@ -213,7 +213,7 @@ async fn builtin_instance_completes_initialization_and_registers_task() {
     .await;
 
     let handle = pool
-        .get_client("web")
+        .client("web")
         .expect("已实现的 builtin 实例必须完成连接");
     assert!(
         matches!(handle.status, ClientStatus::Connected),
@@ -287,7 +287,7 @@ async fn reconnect_builtin_replaces_link_and_advances_generation() {
     )
     .await;
 
-    let first = pool.get_client("artifact").expect("首轮必须完成连接");
+    let first = pool.client("artifact").expect("首轮必须完成连接");
     let first_generation = pool.handle_generation(&first);
     let first_evidence = pool
         .discovery_evidence("artifact")
@@ -298,7 +298,7 @@ async fn reconnect_builtin_replaces_link_and_advances_generation() {
         .await
         .expect("已实现 builtin 实例的重连必须成功");
 
-    let second = pool.get_client("artifact").expect("重连成功后必须有句柄");
+    let second = pool.client("artifact").expect("重连成功后必须有句柄");
     assert!(
         matches!(second.status, ClientStatus::Connected),
         "重连后必须仍为 Connected，实际: {:?}",

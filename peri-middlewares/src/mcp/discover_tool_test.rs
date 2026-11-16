@@ -1,17 +1,26 @@
 //! DiscoverMCPTool 测试：deferred/meta 元数据、search/list/detail 语义、
 //! JSON-RPC 错误契约、只读断言（空 services 池 + 空 registry 不 panic）。
 
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
+use std::sync::Arc;
 
-use peri_acp_types::{
-    mcp_skills::{mcp_skill_name, HandleToken, McpSkillRegistry},
-    skills::{SkillMetadata, SkillOrigin, SkillSource},
-};
+use peri_acp_types::mcp_skills;
+use peri_acp_types::mcp_skills::HandleToken;
+use peri_acp_types::mcp_skills::McpSkillRegistry;
+use peri_acp_types::skills::SkillMetadata;
+use peri_acp_types::skills::SkillOrigin;
+use peri_acp_types::skills::SkillSource;
 use peri_agent::tools::{BaseTool, ToolContext};
 use rmcp::model::{Resource, Tool};
 use serde_json::{json, Value};
 
-use super::*;
+use super::async_trait;
+use super::ClientStatus;
+use super::ConfigSource;
+use super::DiscoverMCPTool;
+use super::McpClientPool;
+use super::RwLock;
+use super::SharedToolMap;
 use crate::mcp::client::{McpClientHandle, OAuthStatus};
 
 fn schema() -> serde_json::Map<String, Value> {
@@ -60,7 +69,7 @@ fn make_registry_with_skills() -> Arc<McpSkillRegistry> {
     let reg = Arc::new(McpSkillRegistry::new());
     let h: HandleToken = Arc::new(1u32);
     let skill = SkillMetadata {
-        name: mcp_skill_name("zzsrv", "zzskill"),
+        name: mcp_skills::mcp_skill_name("zzsrv", "zzskill"),
         aliases: Vec::new(),
         description: "A zz skill for zz query".to_string(),
         source: SkillSource::Mcp,
@@ -98,17 +107,20 @@ fn tool_metadata_is_deferred_meta() {
     assert_eq!(params["type"], "object");
     let branches = params["oneOf"].as_array().unwrap();
     assert_eq!(branches.len(), 3);
-    for (branch, (method, required)) in branches.iter().zip([
-        ("search", "query"),
-        ("list", "server"),
-        ("detail", "server"),
-    ]) {
-        assert_eq!(branch["properties"]["method"]["enum"], json!([method]));
-        assert_eq!(branch["required"], json!(["method", "params"]));
-        assert_eq!(branch["additionalProperties"], false);
-        let nested = &branch["properties"]["params"];
-        assert_eq!(nested["required"], json!([required]));
-        assert_eq!(nested["additionalProperties"], false);
+    {
+        let paired_branches = branches.iter().zip([
+            ("search", "query"),
+            ("list", "server"),
+            ("detail", "server"),
+        ]);
+        for (branch, (method, required)) in paired_branches {
+            assert_eq!(branch["properties"]["method"]["enum"], json!([method]));
+            assert_eq!(branch["required"], json!(["method", "params"]));
+            assert_eq!(branch["additionalProperties"], false);
+            let nested = &branch["properties"]["params"];
+            assert_eq!(nested["required"], json!([required]));
+            assert_eq!(nested["additionalProperties"], false);
+        }
     }
     assert_eq!(
         branches[0]["properties"]["params"]["properties"]["max_results"],
@@ -407,7 +419,10 @@ async fn search_hits_all_four_types_with_labels_and_schema() {
     // skill 结果带 server（来自 origin）/name/description
     let skill_entry = arr.iter().find(|e| e["type"] == "skill").unwrap();
     assert_eq!(skill_entry["server"], "zzsrv");
-    assert_eq!(skill_entry["name"], mcp_skill_name("zzsrv", "zzskill"));
+    assert_eq!(
+        skill_entry["name"],
+        mcp_skills::mcp_skill_name("zzsrv", "zzskill")
+    );
 }
 
 #[tokio::test]
@@ -434,7 +449,7 @@ async fn search_skill_without_origin_parses_server_from_name() {
     let reg = Arc::new(McpSkillRegistry::new());
     let h: HandleToken = Arc::new(2u32);
     let skill = SkillMetadata {
-        name: mcp_skill_name("plain", "myskill"),
+        name: mcp_skills::mcp_skill_name("plain", "myskill"),
         aliases: Vec::new(),
         description: "plain skill".to_string(),
         ..SkillMetadata::default()
@@ -573,7 +588,7 @@ async fn search_same_type_entries_sorted_stably() {
 
     // 排序：type 字典序 resource < tool；同 type 内 resource 按 uri、tool 按 name
     fn key_str(e: &Value) -> String {
-        let (a, b, c) = sort_key(e);
+        let (a, b, c) = super::sort_key(e);
         format!("{a}|{b}|{c}")
     }
     let keys: Vec<String> = arr.iter().map(key_str).collect();
@@ -625,7 +640,7 @@ async fn search_truncated_subset_deterministic() {
     let keys: Vec<String> = arr
         .iter()
         .map(|e| {
-            let (a, b, c) = sort_key(e);
+            let (a, b, c) = super::sort_key(e);
             format!("{a}|{b}|{c}")
         })
         .collect();
@@ -860,140 +875,4 @@ async fn empty_pool_and_registry_search_and_list_do_not_panic() {
     assert_eq!(detail["error"]["code"], -32000);
 }
 
-// ─── 确定性排序（组 A 评审修复）────────────────────────────────────────────
-
-/// search 结果必须在 truncate 前按 (type, name) 稳定排序：来源含 HashMap /
-/// 快照迭代，顺序不定——截断前排序消除跨运行抖动（ARC-SERIAL-001）。
-#[tokio::test]
-async fn search_results_sorted_by_type_then_name() {
-    let pool = Arc::new(McpClientPool::new_empty());
-    // 插入顺序故意与字典序相反：b 先入、a 后入（HashMap 迭代顺序本身不定，
-    // 断言只看排序后输出）
-    insert_handle(
-        &pool,
-        make_handle(
-            "zz-srv-b",
-            vec![make_tool("zz_tool", "create zz")],
-            vec![Resource::new("zz://res/1", "zz resource")],
-        ),
-    );
-    insert_handle(&pool, make_handle("zz-srv-a", vec![], vec![]));
-
-    // registry：同一 server 内条目序故意反字典序（z 先于 a）——排序必须把
-    // skill-a 提到 skill-z 前（证明同 type 内按 name 排序生效）
-    let reg = Arc::new(McpSkillRegistry::new());
-    let h: HandleToken = Arc::new(3u32);
-    let skill_z = SkillMetadata {
-        name: mcp_skill_name("zzs1", "skill-z"),
-        aliases: Vec::new(),
-        description: "zz skill".to_string(),
-        ..Default::default()
-    };
-    let skill_a = SkillMetadata {
-        name: mcp_skill_name("zzs1", "skill-a"),
-        aliases: Vec::new(),
-        description: "zz skill".to_string(),
-        ..Default::default()
-    };
-    reg.mark_discovery_started("zzs1", h.clone());
-    reg.mark_discovery_completed("zzs1", h, vec![skill_z, skill_a]);
-
-    let tool = DiscoverMCPTool::new(pool, Some(reg));
-    let result = invoke(&tool, "search", json!({ "query": "zz", "max_results": 20 })).await;
-    let arr = result.as_array().expect("search 应返回数组");
-
-    // (type, name) 序列整体非降
-    let pairs: Vec<(String, String)> = arr
-        .iter()
-        .map(|e| {
-            (
-                e["type"].as_str().unwrap_or("").to_string(),
-                e["name"].as_str().unwrap_or("").to_string(),
-            )
-        })
-        .collect();
-    let mut sorted = pairs.clone();
-    sorted.sort();
-    assert_eq!(pairs, sorted, "结果必须按 (type, name) 稳定排序: {result}");
-
-    // type 字典序：resource < server < skill < tool；同 type 内 name 升序
-    let types: Vec<&str> = arr.iter().map(|e| e["type"].as_str().unwrap()).collect();
-    assert_eq!(
-        types,
-        vec!["resource", "server", "server", "skill", "skill", "tool"]
-    );
-    let server_names: Vec<&str> = arr
-        .iter()
-        .filter(|e| e["type"] == "server")
-        .map(|e| e["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        server_names,
-        vec!["zz-srv-a", "zz-srv-b"],
-        "server 按 name 升序"
-    );
-    let skill_names: Vec<&str> = arr
-        .iter()
-        .filter(|e| e["type"] == "skill")
-        .map(|e| e["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        skill_names,
-        vec![
-            mcp_skill_name("zzs1", "skill-a").as_str(),
-            mcp_skill_name("zzs1", "skill-z").as_str(),
-        ],
-        "skill 按 name 升序（条目序被排序纠正）"
-    );
-}
-
-// ─── max_results 参数错误（组 A 评审修复）───────────────────────────────────
-
-#[tokio::test]
-async fn search_negative_max_results_returns_32602() {
-    let tool = make_tool_box(None);
-    let result = invoke(&tool, "search", json!({ "query": "zz", "max_results": -1 })).await;
-    assert_eq!(result["error"]["code"], -32602);
-    assert_eq!(
-        result["error"]["message"], "max_results must be a non-negative integer",
-        "负数不得静默归零，必须走 -32602 参数错误契约"
-    );
-}
-
-#[tokio::test]
-async fn search_float_max_results_returns_32602() {
-    let tool = make_tool_box(None);
-    let result = invoke(
-        &tool,
-        "search",
-        json!({ "query": "zz", "max_results": 1.5 }),
-    )
-    .await;
-    assert_eq!(result["error"]["code"], -32602);
-    assert_eq!(
-        result["error"]["message"],
-        "max_results must be a non-negative integer"
-    );
-}
-
-// ─── ToolSearch 索引可见性（验收 1 锁定）────────────────────────────────────
-
-/// DiscoverMCP 进 ToolSearchIndex 后 search("discover") 可命中、且 namespace
-/// 为 meta 分组可见（deferred + meta 契约的工具搜索半边）。
-#[test]
-fn tool_search_index_hits_discover_mcp_with_meta_namespace() {
-    let tool: Arc<dyn BaseTool> = Arc::new(make_tool_box(None));
-    let index = crate::tool_search::ToolSearchIndex::new();
-    index.build(vec![Arc::clone(&tool) as Arc<dyn BaseTool>]);
-
-    let results = index.search("discover", 10);
-    assert!(
-        results.iter().any(|r| r.name == "DiscoverMCP"),
-        "search(\"discover\") 必须命中 DiscoverMCP: {:?}",
-        results.iter().map(|r| &r.name).collect::<Vec<_>>()
-    );
-
-    let found = index.get_tool("DiscoverMCP").expect("按名可取回");
-    assert_eq!(found.namespace(), Some("meta"), "namespace 为 meta 分组");
-    assert!(!found.is_direct(), "deferred 工具不进直接工具列表");
-}
+include!("discover_tool_test/result_ordering_and_limits.rs");

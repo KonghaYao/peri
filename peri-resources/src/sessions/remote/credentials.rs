@@ -105,7 +105,7 @@ pub(crate) struct SessionStoreCredential(String);
 
 impl SessionStoreCredential {
     /// 直接注入（云实验 runner 在受控进程内解析 `.env` 后注入）。
-    pub(crate) fn new(value: impl Into<String>) -> Result<Self, CredentialError> {
+    pub(crate) fn try_new(value: impl Into<String>) -> Result<Self, CredentialError> {
         let value = value.into();
         if value.is_empty() {
             return Err(CredentialError::EmptyValue);

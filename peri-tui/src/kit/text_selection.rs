@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 /// 选区起点的稳定身份：渲染单元 token + 单元内视觉行偏移 + 列。
 ///
-/// [Why] 历史页前插会改变视觉行号，但原单元的内容身份不变。选区起点必须按
+/// \[Why\] 历史页前插会改变视觉行号，但原单元的内容身份不变。选区起点必须按
 /// 身份重新解析，不能把旧行号直接解释成前插后的新内容（F5）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectionAnchor {
@@ -43,6 +43,7 @@ impl Default for TextSelection {
 }
 
 impl TextSelection {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             start: None,
@@ -94,6 +95,7 @@ impl TextSelection {
     }
 
     /// 是否有活跃的选区（正在拖拽或已选中文字）
+    #[must_use]
     pub fn is_active(&self) -> bool {
         self.dragging || self.selected_text.is_some()
     }
@@ -124,11 +126,11 @@ pub fn line_to_plain_text(line: &Line) -> String {
 /// 在纯文本 text 中，将 visual_col 转换为 byte 偏移量。
 /// visual_col 是 Unicode 显示宽度列号。CJK 字符占 2 列。
 ///
-/// [字素边界] 按字素簇（grapheme cluster）遍历，宽度取整个字素簇的显示宽度——
+/// \[字素边界\] 按字素簇（grapheme cluster）遍历，宽度取整个字素簇的显示宽度——
 /// 与 ratatui 的渲染口径一致。ZWJ 组合 emoji（家庭/职业等）逐标量计宽会得到
 /// 远大于 2 的宽度，导致列→字节映射落到字素内部（F7）。
 ///
-/// [半字符规则] 鼠标拖拽时终端报告的列号可能落在双宽字符（CJK / emoji）的左右半
+/// \[半字符规则\] 鼠标拖拽时终端报告的列号可能落在双宽字符（CJK / emoji）的左右半
 /// 任一列上。光标在字符左半 → 不含该字符；光标在字符右半 → 已越过该字符，应包含。
 /// 例如 '你' 占 col 2-3：target_col=2 不含、target_col=3 含。
 /// 这与原 `col + cw > target_col` 的"只要落在范围内就不含"语义不同——后者会让

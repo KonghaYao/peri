@@ -1,8 +1,24 @@
-use super::*;
 use crate::journal::RunState;
+use crate::journal::WorkflowJournalStore;
+use crate::progress::WorkflowProgressStore;
 use crate::progress::{RunProgress, RunStatus};
+use crate::protocol::WorkflowLimits;
+use crate::rpc::IncomingMessage;
+use crate::rpc::RpcChannel;
+use crate::runner::limits::RunLimitState;
+use crate::runner::message_loop::MessageLoop;
+use crate::runner::AgentTaskPublish;
+use crate::runner::AgentTaskSink;
+use crate::runner::WorkflowInput;
+use crate::runner::WorkflowResult;
+use peri_acp_types::workflow::AgentRunParams;
+use peri_acp_types::workflow::ProgressEvent;
+use peri_js_runtime::JsExecutionHost;
 use serde_json::json;
+
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::sync::watch;
 
 /// 记录发布调用的测试 sink：返回固定结果（不触达任务表）。
 ///
@@ -29,9 +45,15 @@ async fn run_messages(
     params: serde_json::Value,
     limits: WorkflowLimits,
 ) -> (WorkflowResult, RunState, RunProgress) {
-    let tmp = tempfile::tempdir().unwrap();
-    let journal = Arc::new(WorkflowJournalStore::new(tmp.path().to_str().unwrap()));
-    journal.init_run("run-1", "return null").unwrap();
+    let tmp = tempfile::tempdir().expect("the temporary test directory must be available");
+    let journal = Arc::new(WorkflowJournalStore::new(
+        tmp.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    ));
+    journal
+        .init_run("run-1", "return null")
+        .expect("the init run fixture result is required for this assertion");
     let progress = Arc::new(WorkflowProgressStore::new());
     progress.apply_event(&ProgressEvent::RunStarted {
         run_id: "run-1".into(),
@@ -53,7 +75,7 @@ async fn run_messages(
             params: Some(params),
         })
         .await
-        .unwrap();
+        .expect("msg tx send test receiver must remain available for this delivery");
     msg_tx
         .send(IncomingMessage::Request {
             id: None,
@@ -61,11 +83,11 @@ async fn run_messages(
             params: Some(json!({"runId": "run-1", "status": "completed"})),
         })
         .await
-        .unwrap();
+        .expect("msg tx send test receiver must remain available for this delivery");
     drop(msg_tx);
     let (done_tx, mut done_rx) = watch::channel(None);
     let message_loop = MessageLoop {
-        run_scope: Arc::new(super::super::scope::RunScope::new()),
+        run_scope: Arc::new(crate::runner::scope::RunScope::new()),
         agent_task_sink: Some(sink),
         limit_state: Arc::new(RunLimitState::new(limits.max_tool_calls)),
         channel: Arc::new(RpcChannel::new(host.channel())),
@@ -96,8 +118,12 @@ async fn run_messages(
         .expect("消息循环必须发布终态");
     (
         result,
-        journal.read_state("run-1").unwrap(),
-        progress.get_run("run-1").unwrap(),
+        journal
+            .read_state("run-1")
+            .expect("the read state fixture result is required for this assertion"),
+        progress
+            .run_snapshot("run-1")
+            .expect("the run snapshot fixture result is required for this assertion"),
     )
 }
 

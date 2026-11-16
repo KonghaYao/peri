@@ -2,7 +2,12 @@ use std::collections::HashMap;
 
 use peri_acp_types::meta_harness::{BUILTIN_INSTANCE_POLICY_KEYS, MIDDLEWARE_NAMES};
 
-use super::*;
+use super::AppConfig;
+use super::ProfileConfig;
+use super::Profiles;
+use super::ProviderAuthConfig;
+use super::ProviderConfig;
+use super::ProviderModels;
 
 #[test]
 fn removed_skills_dir_keys_are_only_opaque_unknown_fields() {
@@ -298,17 +303,17 @@ fn provider_models_fable_tier_and_fallback() {
         fable: String::new(),
     };
     // fable 档位为空 → 回退 opus
-    assert_eq!(m.get_model("fable"), Some("claude-opus-4-6"));
-    assert_eq!(m.get_model("FABLE"), Some("claude-opus-4-6"));
+    assert_eq!(m.model("fable"), Some("claude-opus-4-6"));
+    assert_eq!(m.model("FABLE"), Some("claude-opus-4-6"));
     let m2 = ProviderModels {
         fable: "claude-fable-1-0".into(),
         ..m
     };
-    assert_eq!(m2.get_model("fable"), Some("claude-fable-1-0"));
-    assert_eq!(m2.get_model("opus"), Some("claude-opus-4-6"));
-    assert_eq!(m2.get_model("sonnet"), Some("claude-sonnet-4-6"));
-    assert_eq!(m2.get_model("haiku"), Some("claude-haiku-4-5"));
-    assert_eq!(m2.get_model("turbo"), None);
+    assert_eq!(m2.model("fable"), Some("claude-fable-1-0"));
+    assert_eq!(m2.model("opus"), Some("claude-opus-4-6"));
+    assert_eq!(m2.model("sonnet"), Some("claude-sonnet-4-6"));
+    assert_eq!(m2.model("haiku"), Some("claude-haiku-4-5"));
+    assert_eq!(m2.model("turbo"), None);
 }
 
 #[test]
@@ -922,7 +927,10 @@ fn removed_compact_keys_are_reported_once_and_only_when_present() {
     let legacy = serde_json::json!({
         "config": { "compact": { "ptl_max_retries": 5, "summary_max_tokens": 8000 } }
     });
-    assert_eq!(legacy_compact_keys_in(&legacy), vec!["ptl_max_retries"]);
+    assert_eq!(
+        super::legacy_compact_keys_in(&legacy),
+        vec!["ptl_max_retries"]
+    );
 
     for silent in [
         serde_json::json!({ "config": { "compact": { "summary_max_tokens": 8000 } } }),
@@ -931,7 +939,7 @@ fn removed_compact_keys_are_reported_once_and_only_when_present() {
         serde_json::json!({ "config": { "compact": 7 } }),
     ] {
         assert!(
-            legacy_compact_keys_in(&silent).is_empty(),
+            super::legacy_compact_keys_in(&silent).is_empty(),
             "无旧键的文档不得产生迁移诊断：{silent}"
         );
     }

@@ -19,8 +19,10 @@ use std::time::Duration;
 
 use langfuse_client::client::ExportConfig;
 use langfuse_client::config::{BatcherConfig, Compression, TelemetryConfig};
+use langfuse_client::spool;
 use langfuse_client::spool::native::NativeSpool;
-use langfuse_client::spool::{route_fingerprint, RouteFingerprint, SpoolStore};
+use langfuse_client::spool::RouteFingerprint;
+use langfuse_client::spool::SpoolStore;
 use langfuse_client::types::{GenerationBody, TraceBody};
 use langfuse_client::{Batcher, IngestionEvent, LangfuseClient};
 use sha2::{Digest, Sha256};
@@ -323,7 +325,7 @@ fn client(url: &str, compression: Compression) -> LangfuseClient {
 }
 
 fn route(url: &str) -> RouteFingerprint {
-    route_fingerprint(url, PK, SK).expect("route fingerprint")
+    spool::route_fingerprint(url, PK, SK).expect("route fingerprint")
 }
 
 fn spool_at(root: &Path, url: &str) -> Arc<dyn SpoolStore> {

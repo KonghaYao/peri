@@ -1,0 +1,623 @@
+use super::agents;
+use super::instructions;
+use super::meta;
+use super::skills;
+use super::Error;
+use super::MetaObject;
+use super::PathBuf;
+use super::Resource;
+use super::ResourceScope;
+use super::ResourceTemplate;
+use super::INSTRUCTION_INDEX_URI;
+use super::INSTRUCTION_LOCAL_URI;
+use super::INSTRUCTION_MAIN_URI;
+use super::META_KEY_DIGEST;
+use super::META_KEY_PLUGIN;
+use super::META_KEY_SCOPE;
+use super::MIME_JSON;
+use super::MIME_MARKDOWN;
+use super::SKILL_ENTRY_FILE;
+
+/// 资源根（宿主构造；顺序即扫描优先级，跨根同名先到先得）。
+#[derive(Debug, Clone)]
+pub struct ResourceRoot {
+    /// 目录路径（宿主解析的根；可能是符号链接，provider 对其做 canonical 化）。
+    pub path: PathBuf,
+    /// 来源 scope（进 URI authority 与 `_meta`）。
+    pub scope: ResourceScope,
+    /// 插件来源名（仅 [`ResourceScope::Plugin`] 填；进 URI 的 plugin 段）。
+    pub plugin_name: Option<String>,
+}
+
+impl ResourceRoot {
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>, scope: ResourceScope) -> Self {
+        Self {
+            path: path.into(),
+            scope,
+            plugin_name: None,
+        }
+    }
+
+    /// 插件根（携带插件名标签）。
+    #[must_use]
+    pub fn plugin(path: impl Into<PathBuf>, plugin_name: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            scope: ResourceScope::Plugin,
+            plugin_name: Some(plugin_name.into()),
+        }
+    }
+}
+
+/// 资源面预算（宿主可调；默认值即 W1 冻结的初始值）。
+#[derive(Debug, Clone, Copy)]
+pub struct ResourceBudget {
+    /// 技能目录发现的最大递归深度（相对每个根）。
+    pub max_depth: usize,
+    /// 每个根的最大目录访问数。
+    pub max_dirs_per_root: usize,
+    /// 公开批的技能总数上限（超出截断并记日志）。
+    pub max_skills: usize,
+    /// 单技能附件枚举上限（含 `SKILL.md`）。
+    pub max_files_per_skill: usize,
+    /// 单文件大小上限（字节）；超限文件不列入 manifest、读取按预算拒绝。
+    pub max_file_bytes: u64,
+    /// 项目指令 `@import` 的数量上限。
+    pub max_imports: usize,
+    /// 项目指令 `@import` 展开树的**累计读取字节**上限（含根正文与每一层被导入
+    /// 文件，递归共享同一预算；M9）。达到上限后不再读取后续 import，保留有界
+    /// 占位符并记 warn。
+    pub max_instruction_total_bytes: u64,
+    /// 项目指令最终文本的字节上限（main 展开结果与 local 正文各自适用；M9）。
+    /// 超限时保留有界前缀 + 显式截断说明，不先生成巨串再截。
+    pub max_instruction_text_bytes: usize,
+}
+
+impl Default for ResourceBudget {
+    fn default() -> Self {
+        Self {
+            max_depth: 6,
+            max_dirs_per_root: 1000,
+            max_skills: 512,
+            max_files_per_skill: 256,
+            max_file_bytes: 1024 * 1024,
+            max_imports: 64,
+            max_instruction_total_bytes: 4 * 1024 * 1024,
+            max_instruction_text_bytes: 1024 * 1024,
+        }
+    }
+}
+
+/// 资源面输入（**独立于 `WorkspaceInstanceInput` 的 Bash 输入**；plan §5.1）。
+///
+/// 根列表由宿主装配提供（F11 插件 manifest / F12 配置读取仍归宿主）；provider
+/// 不自行推导配置目录。`disable_bundled` 是 builtin 技能关闭位（F12）。
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceResourcesInput {
+    pub skill_roots: Vec<ResourceRoot>,
+    pub agent_roots: Vec<ResourceRoot>,
+    pub disable_bundled: bool,
+    /// 项目指令 main 候选的排除 glob（W5 自宿主设置迁入；语义 = 与候选的绝对
+    /// 路径字符串做 `glob::Pattern` 匹配，命中则该候选不参与选择——迁移前
+    /// `AgentsMdMiddleware::find_file` 的同一口径）。
+    pub instruction_excludes: Vec<String>,
+    pub budget: ResourceBudget,
+}
+
+impl WorkspaceResourcesInput {
+    /// 空输入（无根、builtin 启用、默认预算）。
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with_skill_root(mut self, root: ResourceRoot) -> Self {
+        self.skill_roots.push(root);
+        self
+    }
+
+    #[must_use]
+    pub fn with_agent_root(mut self, root: ResourceRoot) -> Self {
+        self.agent_roots.push(root);
+        self
+    }
+
+    #[must_use]
+    pub fn with_instruction_excludes(mut self, excludes: Vec<String>) -> Self {
+        self.instruction_excludes = excludes;
+        self
+    }
+
+    #[must_use]
+    pub fn with_disable_bundled(mut self, disable_bundled: bool) -> Self {
+        self.disable_bundled = disable_bundled;
+        self
+    }
+
+    #[must_use]
+    pub fn with_budget(mut self, budget: ResourceBudget) -> Self {
+        self.budget = budget;
+        self
+    }
+}
+
+/// 资源面错误（映射到 MCP 错误码的职责在 handler；文案不含绝对路径）。
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ResourceError {
+    /// URI 语法非法 / scheme 未知 / 段非法（编码穿越、NUL、绝对路径等）。
+    #[error("invalid resource uri")]
+    InvalidUri,
+    /// 合法 URI 但目标不存在或未公开（symlink、隐藏项、被预算排除等）。
+    #[error("resource not found")]
+    NotFound,
+    /// 越界访问（canonical 前缀校验失败等）。
+    #[error("resource access denied")]
+    Denied,
+    /// 超过预算（大小 / 数量）。
+    #[error("resource exceeds budget")]
+    Budget,
+    /// 其他 IO 失败。
+    #[error("resource io failure")]
+    Io,
+}
+
+/// 资源正文（文本或二进制）。
+#[derive(Debug)]
+pub(crate) enum ResourceBody {
+    Text(String),
+    Blob(Vec<u8>),
+}
+
+/// 读取产物：`digest` / `body` 同源（同一次读取的字节）；`meta` 是 `_meta` 投影。
+#[derive(Debug)]
+pub(crate) struct ResourcePayload {
+    pub uri: String,
+    pub mime: String,
+    pub digest: String,
+    pub meta: MetaObject,
+    pub body: ResourceBody,
+}
+
+/// 资源提供器（构造期冻结 cwd 与输入；只读）。
+pub(crate) struct WorkspaceResourceProvider {
+    pub(super) cwd: PathBuf,
+    pub(super) input: WorkspaceResourcesInput,
+}
+
+impl WorkspaceResourceProvider {
+    #[must_use]
+    pub fn new(cwd: impl Into<PathBuf>, input: WorkspaceResourcesInput) -> Self {
+        Self {
+            cwd: cwd.into(),
+            input,
+        }
+    }
+
+    pub(super) fn budget(&self) -> ResourceBudget {
+        self.input.budget
+    }
+
+    /// 全部公开资源的发现批（技能文件 + agent 定义 + 指令文档）。
+    #[must_use]
+    pub fn list_resources(&self) -> Vec<Resource> {
+        let budget = self.budget();
+        let mut resources = Vec::new();
+
+        for record in skills::scan_catalog(&self.input, &budget) {
+            if record.uri().is_none() {
+                continue;
+            }
+            for file in &record.files {
+                let Some(uri) = super::skill_uri(
+                    record.scope,
+                    record.plugin_name.as_deref(),
+                    &record.name,
+                    &file.relative_path,
+                ) else {
+                    continue;
+                };
+                let mime = skills::mime_for(&file.relative_path, file.text);
+                let mut resource = Resource::new(uri, file.relative_path.clone())
+                    .with_mime_type(mime)
+                    .with_size(file.size)
+                    .with_meta(resource_meta(
+                        record.scope,
+                        record.plugin_name.as_deref(),
+                        Some(&file.digest),
+                    ));
+                if file.relative_path == SKILL_ENTRY_FILE {
+                    resource = resource.with_description(record.description.clone());
+                }
+                resources.push(resource);
+            }
+        }
+
+        for record in agents::scan_catalog(&self.input, &budget) {
+            let Some(uri) = record.uri() else {
+                continue;
+            };
+            let mut meta = resource_meta(
+                record.scope,
+                record.plugin_name.as_deref(),
+                Some(&record.digest),
+            );
+            // W5：frontmatter JSON 逐字投影（宿主目录渲染的 capability 推断输入；
+            // 正文不在这里公开）。
+            for (key, value) in record.meta() {
+                meta.0.insert(key, value);
+            }
+            let mut resource = Resource::new(uri, record.agent_id.clone())
+                .with_mime_type(MIME_MARKDOWN)
+                .with_meta(meta);
+            if record.display_name != record.agent_id {
+                resource = resource.with_title(record.display_name.clone());
+            }
+            if !record.description.is_empty() {
+                resource = resource.with_description(record.description.clone());
+            }
+            resources.push(resource);
+        }
+
+        let bundle = instructions::scan(&self.cwd, &budget, &self.input.instruction_excludes);
+        if let Some(main) = &bundle.main {
+            resources.push(
+                Resource::new(INSTRUCTION_MAIN_URI, "main")
+                    .with_description(main.source_label.clone())
+                    .with_mime_type(MIME_MARKDOWN)
+                    .with_meta(resource_meta(
+                        ResourceScope::Project,
+                        None,
+                        Some(&main.digest),
+                    )),
+            );
+        }
+        if let Some(local) = &bundle.local {
+            resources.push(
+                Resource::new(INSTRUCTION_LOCAL_URI, "local")
+                    .with_description(local.source_label.clone())
+                    .with_meta(resource_meta(
+                        ResourceScope::Project,
+                        None,
+                        Some(&local.digest),
+                    )),
+            );
+        }
+        resources.push(Resource::new(INSTRUCTION_INDEX_URI, "index").with_mime_type(MIME_JSON));
+
+        // 段落覆盖文档（J6）：list 只列 `.peri/meta/*.md` 实际存在的 stem（含不在
+        // SECTION_IDS 的项）；正文不在此预取，宿主仅对启用 section 走 read。
+        for section in meta::scan_sections(&self.cwd) {
+            let Some(uri) = super::meta_uri(&section.section_id) else {
+                // 扫描期已按 URI 段约束过滤；此处保持诚实映射。
+                continue;
+            };
+            resources.push(
+                Resource::new(uri, section.section_id.clone())
+                    .with_description(format!(
+                        "{}/{}.md",
+                        meta::META_DIR_RELATIVE,
+                        section.section_id
+                    ))
+                    .with_mime_type(MIME_MARKDOWN)
+                    .with_meta(resource_meta(
+                        ResourceScope::Project,
+                        None,
+                        Some(&section.digest),
+                    )),
+            );
+        }
+
+        resources
+    }
+
+    /// 资源模板（只描述可读路径范围；read 仍逐 URI 校验）。
+    #[must_use]
+    pub fn list_resource_templates(&self) -> Vec<ResourceTemplate> {
+        let mut templates = Vec::new();
+        for scope in ResourceScope::ALL {
+            let (entry_template, attachment_template) = match scope {
+                ResourceScope::Plugin => (
+                    "skill://plugin/{plugin_name}/{name}/SKILL.md".to_string(),
+                    "skill://plugin/{plugin_name}/{name}/{+path}".to_string(),
+                ),
+                other => (
+                    format!("skill://{}/{{name}}/SKILL.md", other.as_str()),
+                    format!("skill://{}/{{name}}/{{+path}}", other.as_str()),
+                ),
+            };
+            templates.push(
+                ResourceTemplate::new(entry_template, format!("skill-entry-{}", scope.as_str()))
+                    .with_description("Skill entry document (SKILL.md)")
+                    .with_mime_type(MIME_MARKDOWN),
+            );
+            templates.push(
+                ResourceTemplate::new(
+                    attachment_template,
+                    format!("skill-attachment-{}", scope.as_str()),
+                )
+                .with_description("Skill attachment file (root-relative path)"),
+            );
+        }
+        for scope in [
+            ResourceScope::User,
+            ResourceScope::Global,
+            ResourceScope::Project,
+            // W5：builtin 静态 Agent 定义（`agent://builtin/{name}/agent.md`）。
+            ResourceScope::Builtin,
+        ] {
+            templates.push(
+                ResourceTemplate::new(
+                    format!("agent://{}/{{name}}/agent.md", scope.as_str()),
+                    format!("agent-definition-{}", scope.as_str()),
+                )
+                .with_description("Agent definition document")
+                .with_mime_type(MIME_MARKDOWN),
+            );
+        }
+        templates.push(
+            ResourceTemplate::new(
+                "agent://plugin/{plugin_name}/{name}/agent.md",
+                "agent-definition-plugin",
+            )
+            .with_description("Plugin agent definition document")
+            .with_mime_type(MIME_MARKDOWN),
+        );
+        templates
+    }
+
+    /// 读取任意资源 URI（按 scheme 分派；未知 scheme / 非法形态 → `InvalidUri`）。
+    pub fn read(&self, uri: &str) -> Result<ResourcePayload, ResourceError> {
+        if let Some(parsed) = super::parse_skill_uri(uri) {
+            return self.read_skill(uri, &parsed);
+        }
+        if let Some(parsed) = super::parse_agent_uri(uri) {
+            return self.read_agent(uri, &parsed);
+        }
+        if let Some(document) = super::parse_instruction_uri(uri) {
+            let read = instructions::read(
+                &self.cwd,
+                &self.budget(),
+                document,
+                &self.input.instruction_excludes,
+            )?;
+            return Ok(ResourcePayload {
+                uri: uri.to_string(),
+                mime: read.mime.to_string(),
+                digest: read.digest.clone(),
+                meta: resource_meta(ResourceScope::Project, None, Some(&read.digest)),
+                body: ResourceBody::Text(read.text),
+            });
+        }
+        if let Some(section) = super::parse_meta_uri(uri) {
+            // 只服务扫描得到的 stem（不做任意路径 join）；未知 / 不可得 → NotFound。
+            let read = meta::read(&self.cwd, &section.section_id)?;
+            return Ok(ResourcePayload {
+                uri: uri.to_string(),
+                mime: MIME_MARKDOWN.to_string(),
+                digest: read.digest.clone(),
+                meta: resource_meta(ResourceScope::Project, None, Some(&read.digest)),
+                body: ResourceBody::Text(read.text),
+            });
+        }
+        Err(ResourceError::InvalidUri)
+    }
+
+    pub(super) fn read_skill(
+        &self,
+        uri: &str,
+        parsed: &peri_acp_types::workspace_resources::SkillUri,
+    ) -> Result<ResourcePayload, ResourceError> {
+        let budget = self.budget();
+        let record = skills::locate(
+            &self.input,
+            &budget,
+            parsed.scope,
+            parsed.plugin_name.as_deref(),
+            &parsed.name,
+        )?;
+        let (bytes, file) = record.read_file(&parsed.relative_path, budget.max_file_bytes)?;
+        let mime = skills::mime_for(&parsed.relative_path, file.text).to_string();
+        let digest = peri_acp_types::workspace_resources::digest_bytes(&bytes);
+        let body = if file.text {
+            match String::from_utf8(bytes) {
+                Ok(text) => ResourceBody::Text(text),
+                Err(_) => return Err(ResourceError::Io),
+            }
+        } else {
+            ResourceBody::Blob(bytes)
+        };
+        Ok(ResourcePayload {
+            uri: uri.to_string(),
+            mime,
+            digest: digest.clone(),
+            meta: resource_meta(parsed.scope, parsed.plugin_name.as_deref(), Some(&digest)),
+            body,
+        })
+    }
+
+    pub(super) fn read_agent(
+        &self,
+        uri: &str,
+        parsed: &peri_acp_types::workspace_resources::AgentUri,
+    ) -> Result<ResourcePayload, ResourceError> {
+        let budget = self.budget();
+        let record = agents::locate(
+            &self.input,
+            &budget,
+            parsed.scope,
+            parsed.plugin_name.as_deref(),
+            &parsed.name,
+        )?;
+        let bytes =
+            agents::read_record_definition(&record, &budget).ok_or(ResourceError::NotFound)?;
+        let digest = peri_acp_types::workspace_resources::digest_bytes(&bytes);
+        let text = String::from_utf8(bytes).map_err(|_| ResourceError::Io)?;
+        let mut meta = resource_meta(parsed.scope, parsed.plugin_name.as_deref(), Some(&digest));
+        // 读取面同样投影 frontmatter（与 list 面同键同值，来源是本次读取的字节
+        // 所携带的定义文本；scope/plugin 以 URI 解析结果为准）。
+        for (key, value) in record.meta() {
+            meta.0.insert(key, value);
+        }
+        Ok(ResourcePayload {
+            uri: uri.to_string(),
+            mime: MIME_MARKDOWN.to_string(),
+            digest: digest.clone(),
+            meta,
+            body: ResourceBody::Text(text),
+        })
+    }
+
+    /// 类型化 `skills/list`：rmcp 3.9.0 把该请求升为一等 `ClientRequest` 变体，
+    /// 结果要求 `resources[].size`；schema 校验所需的字节数只有扫描批持有。
+    pub fn list_skills(
+        &self,
+        cursor: Option<String>,
+    ) -> Result<rmcp::model::ListSkillsResult, ResourceError> {
+        let catalog = skills::scan_catalog_for_list(&self.input, &self.budget(), cursor)?;
+        // 直接消费本次扫描的 manifest：按 URI 回查 `locate` 会对每条技能重扫
+        // 匹配根，且扫描间删除技能会让整页失败。
+        let skills = catalog
+            .iter()
+            .map(typed_skill_from_record)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rmcp::model::ListSkillsResult::with_all_items(skills))
+    }
+
+    /// 类型化 `skills/get`：按 URI 回查扫描记录补齐 `size`（条目 DTO 只带 digest）。
+    pub fn get_skill(&self, uri: &str) -> Result<rmcp::model::GetSkillResult, ResourceError> {
+        let page = skills::skills_get_response(&self.input, &self.budget(), uri)?;
+        let skill = typed_skill(&self.input, &self.budget(), page.skill)?;
+        Ok(rmcp::model::GetSkillResult::new(skill))
+    }
+}
+
+/// 扫描记录 → 类型化技能：`size` 直接取同一次扫描的 manifest，不再回查磁盘。
+pub(super) fn typed_skill_from_record(
+    record: &skills::SkillRecord,
+) -> Result<rmcp::model::Skill, ResourceError> {
+    let uri = record.uri().ok_or(ResourceError::InvalidUri)?;
+    let resources = record
+        .files
+        .iter()
+        .map(|file| {
+            Some(rmcp::model::SkillResource::new(
+                super::skill_uri(
+                    record.scope,
+                    record.plugin_name.as_deref(),
+                    &record.name,
+                    &file.relative_path,
+                )?,
+                file.digest.clone(),
+                file.size,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or(ResourceError::InvalidUri)?;
+    // name/description 取 frontmatter 原始值：`record.description` 已被摘要 trim，
+    // 带前导空白的引号标量会与 `skills/get` 和正文不一致，激活的 trim_end-only
+    // 比对会因此误拒。
+    let name = record
+        .frontmatter
+        .get("name")
+        .and_then(|value| value.as_str());
+    let description = record
+        .frontmatter
+        .get("description")
+        .and_then(|value| value.as_str());
+    let (Some(name), Some(description)) = (name, description) else {
+        return Err(ResourceError::InvalidUri);
+    };
+    let mut frontmatter = rmcp::model::SkillFrontmatter::new(name, description);
+    for (key, value) in &record.frontmatter {
+        if key != "name" && key != "description" {
+            frontmatter = frontmatter.with_field(key.clone(), value.clone());
+        }
+    }
+    Ok(rmcp::model::Skill::new(
+        uri,
+        frontmatter,
+        rmcp::model::SkillResources::Files(resources),
+    ))
+}
+
+/// 条目 → 类型化技能（`skills/get` 专用）：按 URI 回查扫描记录补齐 `size`。
+pub(super) fn typed_skill(
+    input: &WorkspaceResourcesInput,
+    budget: &ResourceBudget,
+    entry: peri_acp_types::workspace_resources::SkillEntry,
+) -> Result<rmcp::model::Skill, ResourceError> {
+    let uri = entry.uri.clone();
+    let parsed = peri_acp_types::workspace_resources::parse_skill_uri(&uri)
+        .ok_or(ResourceError::InvalidUri)?;
+    let record = skills::locate(
+        input,
+        budget,
+        parsed.scope,
+        parsed.plugin_name.as_deref(),
+        &parsed.name,
+    )?;
+    let resources = record
+        .files
+        .iter()
+        .map(|file| {
+            Some(rmcp::model::SkillResource::new(
+                super::skill_uri(
+                    record.scope,
+                    record.plugin_name.as_deref(),
+                    &record.name,
+                    &file.relative_path,
+                )?,
+                file.digest.clone(),
+                file.size,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or(ResourceError::InvalidUri)?;
+    let name = entry.frontmatter.get("name").and_then(|v| v.as_str());
+    let description = entry
+        .frontmatter
+        .get("description")
+        .and_then(|v| v.as_str());
+    let (Some(name), Some(description)) = (name, description) else {
+        return Err(ResourceError::InvalidUri);
+    };
+    let mut frontmatter = rmcp::model::SkillFrontmatter::new(name, description);
+    for (key, value) in &entry.frontmatter {
+        if key != "name" && key != "description" {
+            frontmatter = frontmatter.with_field(key.clone(), value.clone());
+        }
+    }
+    Ok(rmcp::model::Skill::new(
+        uri,
+        frontmatter,
+        rmcp::model::SkillResources::Files(resources),
+    ))
+}
+
+/// `_meta` 私有 metadata（`io.peri/` 命名空间；不含主机绝对路径）。
+pub(super) fn resource_meta(
+    scope: ResourceScope,
+    plugin_name: Option<&str>,
+    digest: Option<&str>,
+) -> MetaObject {
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        META_KEY_SCOPE.to_string(),
+        serde_json::Value::String(scope.as_str().to_string()),
+    );
+    if let Some(plugin) = plugin_name {
+        meta.insert(
+            META_KEY_PLUGIN.to_string(),
+            serde_json::Value::String(plugin.to_string()),
+        );
+    }
+    if let Some(digest) = digest {
+        meta.insert(
+            META_KEY_DIGEST.to_string(),
+            serde_json::Value::String(digest.to_string()),
+        );
+    }
+    MetaObject(meta)
+}

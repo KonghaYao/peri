@@ -56,12 +56,14 @@ pub(super) fn event_bytes(event: &IngestionEvent, limit: usize) -> Result<usize,
 /// 队列记账字节：事件原文 + 每个冻结来源的描述账单。
 pub(super) fn queued_bytes(event: &TelemetryEvent, limit: usize) -> Result<usize, LangfuseError> {
     let mut bytes = event_bytes(&event.event, limit)?;
-    for source in [event.input.as_ref(), event.output.as_ref()]
-        .into_iter()
-        .flatten()
     {
-        let _ = source;
-        bytes = bytes.saturating_add(SOURCE_DESCRIPTOR_BYTES);
+        let snapshot_sources = [event.input.as_ref(), event.output.as_ref()]
+            .into_iter()
+            .flatten();
+        for source in snapshot_sources {
+            let _ = source;
+            bytes = bytes.saturating_add(SOURCE_DESCRIPTOR_BYTES);
+        }
     }
     Ok(bytes)
 }

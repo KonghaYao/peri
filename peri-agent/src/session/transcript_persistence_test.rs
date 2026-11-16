@@ -1,7 +1,14 @@
 //! 异步持久化行为：落库内容与顺序、sticky 失败、预算有界、压缩生命周期落盘、
 //! shutdown / Drop 排空。
 
-use super::*;
+use crate::messages::BaseMessage;
+use crate::messages::MessageId;
+
+use crate::session::transcript::entry::TranscriptEntry;
+
+use crate::session::transcript::MessageTranscript;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
 
 use std::sync::Arc;
 
@@ -36,15 +43,22 @@ async fn test_flush_persistence_makes_appends_visible() {
     let mut transcript =
         MessageTranscript::new().with_persistence(session.resources(), session.thread_id.clone());
 
-    transcript.append(make_human("persisted message"));
-    transcript.append(make_ai("assistant reply"));
-    transcript.flush_persistence().await.unwrap();
+    transcript.append(crate::session::transcript::tests::make_human(
+        "persisted message",
+    ));
+    transcript.append(crate::session::transcript::tests::make_ai(
+        "assistant reply",
+    ));
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
 
     let snapshot = session
         .resources()
         .load_session_snapshot(&session.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     let contents: Vec<String> = snapshot
         .payloads
         .iter()
@@ -63,7 +77,9 @@ async fn test_flush_persistence_failure_is_sticky() {
         session.read_only_resources().await,
         session.thread_id.clone(),
     );
-    transcript.append(make_human("cannot be persisted"));
+    transcript.append(crate::session::transcript::tests::make_human(
+        "cannot be persisted",
+    ));
 
     let error = transcript.flush_persistence().await.unwrap_err();
     let repeated = transcript.flush_persistence().await.unwrap_err();
@@ -78,7 +94,7 @@ async fn test_flush_persistence_failure_is_sticky() {
         .resources()
         .load_session_snapshot(&session.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(snapshot.payloads.is_empty(), "写入未成立时不得留下半条");
 }
 
@@ -87,14 +103,14 @@ async fn test_flush_persistence_failure_is_sticky() {
 #[tokio::test]
 async fn test_persistence_budget_exhaustion_is_sticky_and_rejects_writes() {
     let store = mock_store();
-    let budget = super::persistence::PersistenceBudget::new(1, 8);
+    let budget = crate::session::transcript::persistence::PersistenceBudget::new(1, 8);
     let mut transcript = MessageTranscript::new().with_persistence_budget(
         store.clone(),
         "budget-exhausted".to_string(),
         budget,
     );
 
-    transcript.append(make_human(
+    transcript.append(crate::session::transcript::tests::make_human(
         "this payload is larger than the whole byte budget",
     ));
     assert!(
@@ -113,7 +129,10 @@ async fn test_persistence_budget_exhaustion_is_sticky_and_rejects_writes() {
 /// 没有绑定持久化后端时 flush 是不报错的 no-op（不制造失败，也不声称保存）。
 #[tokio::test]
 async fn test_flush_persistence_without_backend_is_ok() {
-    MessageTranscript::new().flush_persistence().await.unwrap();
+    MessageTranscript::new()
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
 }
 
 /// 投影与 rewind 各走一次完整行为：flags 落库、rewind 截断、缓存视图由资源侧维护
@@ -124,9 +143,12 @@ async fn test_projection_and_rewind_use_single_behaviors() {
     let mut transcript =
         MessageTranscript::new().with_persistence(store.clone(), "projection".to_string());
 
-    let first = transcript.append(make_human("first"));
-    let second = transcript.append(make_ai("second"));
-    transcript.flush_persistence().await.unwrap();
+    let first = transcript.append(crate::session::transcript::tests::make_human("first"));
+    let second = transcript.append(crate::session::transcript::tests::make_ai("second"));
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     assert_eq!(
         store.append_calls(),
         1,
@@ -135,11 +157,20 @@ async fn test_projection_and_rewind_use_single_behaviors() {
     assert_eq!(store.payloads().len(), 2);
 
     transcript.set_excluded(first, true);
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     assert!(store.flags(&first).excluded);
 
-    transcript.rewind_to(first).await.unwrap();
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .rewind_to(first)
+        .await
+        .expect("the rewind to fixture result is required for this assertion");
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let messages = persisted_messages(&store);
     assert_eq!(messages.len(), 1, "rewind 保留目标本身（KeepThrough）");
     assert_eq!(messages[0].id(), first);
@@ -150,7 +181,10 @@ async fn test_projection_and_rewind_use_single_behaviors() {
 #[tokio::test]
 async fn test_rewind_known_failure_preserves_prefix_suffix_and_revision() {
     let bound = TestSession::open().await;
-    let messages = vec![make_human("keep"), make_ai("suffix")];
+    let messages = vec![
+        crate::session::transcript::tests::make_human("keep"),
+        crate::session::transcript::tests::make_ai("suffix"),
+    ];
     let keep = messages[0].id();
     bound
         .resources()
@@ -163,7 +197,7 @@ async fn test_rewind_known_failure_preserves_prefix_suffix_and_revision() {
                 .collect::<Vec<_>>(),
         )
         .await
-        .unwrap();
+        .expect("the append history fixture result is required for this assertion");
     let mut transcript = MessageTranscript::new()
         .with_own_payloads(
             messages
@@ -183,7 +217,7 @@ async fn test_rewind_known_failure_preserves_prefix_suffix_and_revision() {
             .resources()
             .load_session_snapshot(&bound.thread_id)
             .await
-            .unwrap()
+            .expect("the load session snapshot fixture result is required for this assertion")
             .payloads
             .len(),
         2
@@ -198,10 +232,15 @@ async fn test_commit_compaction_lifecycle_known_failure_retains_old_view() {
     let mut transcript =
         MessageTranscript::new().with_persistence(store.clone(), "lifecycle".to_string());
 
-    let first = transcript.append(make_human("原始用户消息"));
-    transcript.flush_persistence().await.unwrap();
+    let first = transcript.append(crate::session::transcript::tests::make_human(
+        "原始用户消息",
+    ));
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
 
-    let summary = make_human("压缩摘要");
+    let summary = crate::session::transcript::tests::make_human("压缩摘要");
     let summary_id = summary.id();
     transcript
         .commit_compaction_lifecycle(CompactionChange {
@@ -215,7 +254,7 @@ async fn test_commit_compaction_lifecycle_known_failure_retains_old_view() {
             appended_messages: vec![summary],
         })
         .await
-        .unwrap();
+        .expect("the commit compaction lifecycle fixture result is required for this assertion");
     assert_eq!(store.compaction_calls(), 1, "compaction 必须一次提交");
     assert!(store.flags(&first).excluded);
     assert!(persisted_messages(&store)
@@ -228,9 +267,12 @@ async fn test_commit_compaction_lifecycle_known_failure_retains_old_view() {
     store2.fail_compaction();
     let mut failing =
         MessageTranscript::new().with_persistence(store2.clone(), "lifecycle-fail".to_string());
-    let id = failing.append(make_human("keep me"));
-    failing.flush_persistence().await.unwrap();
-    let extra = make_human("never applied");
+    let id = failing.append(crate::session::transcript::tests::make_human("keep me"));
+    failing
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
+    let extra = crate::session::transcript::tests::make_human("never applied");
     let extra_id = extra.id();
     let result = failing
         .commit_compaction_lifecycle(CompactionChange {
@@ -261,7 +303,7 @@ async fn test_commit_compaction_lifecycle_known_failure_retains_old_view() {
 #[tokio::test]
 async fn test_full_commit_releases_excluded_own_entries() {
     let store = mock_store();
-    let ancestor = make_human("ancestor snapshot");
+    let ancestor = crate::session::transcript::tests::make_human("ancestor snapshot");
     let ancestor_id = ancestor.id();
     let mut transcript = MessageTranscript::new()
         .with_ancestor(vec![ancestor])
@@ -269,18 +311,25 @@ async fn test_full_commit_releases_excluded_own_entries() {
 
     // 条目数要明显多于保留数，容量差异才能证明旧分配确实被释放。
     let system_id = transcript.append(BaseMessage::system("session identity"));
-    let kept_id = transcript.append(make_ai("kept history"));
+    let kept_id = transcript.append(crate::session::transcript::tests::make_ai("kept history"));
     transcript.set_truncated(kept_id, true);
     let released_ids: Vec<MessageId> = (0..24)
-        .map(|idx| transcript.append(make_human(&format!("excluded {idx}"))))
+        .map(|idx| {
+            transcript.append(crate::session::transcript::tests::make_human(&format!(
+                "excluded {idx}"
+            )))
+        })
         .collect();
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
 
     let entries_capacity_before = transcript.entries.capacity();
     let id_index_capacity_before = transcript.id_index.capacity();
     let flags_capacity_before = transcript.flags.capacity();
 
-    let summary = make_human("compaction summary");
+    let summary = crate::session::transcript::tests::make_human("compaction summary");
     let summary_id = summary.id();
     transcript
         .commit_compaction_lifecycle(CompactionChange {
@@ -299,7 +348,7 @@ async fn test_full_commit_releases_excluded_own_entries() {
             appended_messages: vec![summary],
         })
         .await
-        .unwrap();
+        .expect("the commit compaction lifecycle fixture result is required for this assertion");
 
     // 保留：祖先、System、未排除条目与本次追加的摘要，顺序不变。
     let kept_ids: Vec<MessageId> = transcript
@@ -324,7 +373,7 @@ async fn test_full_commit_releases_excluded_own_entries() {
             !transcript.flags.contains_key(id),
             "被释放条目的标记必须一并移除"
         );
-        assert!(transcript.get_flags(*id).is_none());
+        assert!(transcript.message_flags(*id).is_none());
     }
     assert!(
         transcript.flags(kept_id).truncated,
@@ -362,8 +411,11 @@ async fn test_full_commit_keeps_excluded_system_entry() {
     let mut transcript =
         MessageTranscript::new().with_persistence(store.clone(), "shrink-system".to_string());
     let system_id = transcript.append(BaseMessage::system("session identity"));
-    let dropped = transcript.append(make_human("excluded"));
-    transcript.flush_persistence().await.unwrap();
+    let dropped = transcript.append(crate::session::transcript::tests::make_human("excluded"));
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
 
     transcript
         .commit_compaction_lifecycle(CompactionChange {
@@ -386,7 +438,7 @@ async fn test_full_commit_keeps_excluded_system_entry() {
             appended_messages: Vec::new(),
         })
         .await
-        .unwrap();
+        .expect("the commit compaction lifecycle fixture result is required for this assertion");
 
     assert!(transcript.get(system_id).is_some(), "System 条目必须保留");
     assert!(transcript.get(dropped).is_none(), "非 System 条目必须释放");
@@ -406,8 +458,13 @@ async fn test_rebuild_keeps_persistence_writer_alive() {
     let store = mock_store();
     let mut transcript =
         MessageTranscript::new().with_persistence(store.clone(), "rebuild-writer".to_string());
-    let id = transcript.append(make_human("before rebuild"));
-    transcript.flush_persistence().await.unwrap();
+    let id = transcript.append(crate::session::transcript::tests::make_human(
+        "before rebuild",
+    ));
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
 
     let entries: Vec<(BaseMessage, MessageFlags)> = transcript
         .entries()
@@ -416,8 +473,13 @@ async fn test_rebuild_keeps_persistence_writer_alive() {
         .collect();
     let mut rebuilt = transcript.rebuild(entries);
 
-    rebuilt.append(make_human("appended after rebuild"));
-    rebuilt.flush_persistence().await.unwrap();
+    rebuilt.append(crate::session::transcript::tests::make_human(
+        "appended after rebuild",
+    ));
+    rebuilt
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
 
     let messages = persisted_messages(&store);
     assert_eq!(
@@ -435,7 +497,9 @@ async fn test_shutdown_persistence_flushes_pending_and_writer_exits() {
     let store = mock_store();
     let mut transcript =
         MessageTranscript::new().with_persistence(store.clone(), "shutdown-flush".to_string());
-    transcript.append(make_human("last batch before shutdown"));
+    transcript.append(crate::session::transcript::tests::make_human(
+        "last batch before shutdown",
+    ));
 
     transcript.shutdown_persistence();
 
@@ -458,7 +522,9 @@ async fn test_drop_flushes_pending_appends_to_store() {
     {
         let mut transcript =
             MessageTranscript::new().with_persistence(store.clone(), "drop-flush".to_string());
-        transcript.append(make_human("flush on drop"));
+        transcript.append(crate::session::transcript::tests::make_human(
+            "flush on drop",
+        ));
         // writer 持有独立 Arc；Drop 只发 Shutdown，detached 收尾
     }
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -483,8 +549,13 @@ async fn test_drop_without_persistence_is_noop() {
 async fn test_compaction_unknown_outcome_requires_reload() {
     let store = mock_store();
     let mut transcript = MessageTranscript::new().with_persistence(store.clone(), "unknown".into());
-    let id = transcript.append(make_human("old committed view"));
-    transcript.flush_persistence().await.unwrap();
+    let id = transcript.append(crate::session::transcript::tests::make_human(
+        "old committed view",
+    ));
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let revision = transcript.view_revision();
     store.uncertain_compaction();
     let error = transcript

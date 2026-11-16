@@ -1,6 +1,8 @@
-use super::*;
 use peri_acp_types::messages::{BaseMessage, ContentBlock};
-use peri_acp_types::store::{serialize_persisted_payload, PersistedPayload};
+use peri_acp_types::store;
+use peri_acp_types::store::PersistedPayload;
+use std::io;
+use std::io::Read;
 
 struct OneByte<R>(R);
 impl<R: Read> Read for OneByte<R> {
@@ -22,8 +24,9 @@ fn child_display_filters_provider_state_signature_and_unknown_fields() {
         ContentBlock::tool_use("tool-1", "Read", serde_json::json!({"path":"visible.rs"})),
         ContentBlock::tool_result("tool-1", vec![ContentBlock::text("visible result")], false),
     ]));
-    let encoded = serialize_persisted_payload(&payload).unwrap();
-    let chunk = project(encoded.as_bytes(), 0, 4096).unwrap();
+    let encoded = store::serialize_persisted_payload(&payload).unwrap();
+    let chunk =
+        crate::host::history_window::child_display::project(encoded.as_bytes(), 0, 4096).unwrap();
     let text = String::from_utf8(chunk.bytes).unwrap();
     for visible in [
         "visible reasoning",
@@ -52,13 +55,21 @@ fn child_display_filters_provider_state_signature_and_unknown_fields() {
 #[test]
 fn child_display_handles_split_escapes_surrogates_and_utf8_windows() {
     let encoded = r#"{"version":1,"type":"message","message":{"role":"assistant","id":"x","content":"A\n\"\\\t\uD83D\uDE00中文"}}"#;
-    let full = project(OneByte(encoded.as_bytes()), 0, 4096).unwrap().bytes;
+    let full =
+        crate::host::history_window::child_display::project(OneByte(encoded.as_bytes()), 0, 4096)
+            .unwrap()
+            .bytes;
     let text = String::from_utf8(full.clone()).unwrap();
     assert!(text.contains("A\n\"\\\t😀中文"));
     let mut joined = Vec::new();
     let mut offset = 0;
     loop {
-        let chunk = project(OneByte(encoded.as_bytes()), offset, 7).unwrap();
+        let chunk = crate::host::history_window::child_display::project(
+            OneByte(encoded.as_bytes()),
+            offset,
+            7,
+        )
+        .unwrap();
         assert!(std::str::from_utf8(&chunk.bytes).is_ok());
         assert!(chunk.bytes.len() <= 7);
         let end = offset + chunk.bytes.len() as u64;
@@ -78,7 +89,9 @@ fn child_display_handles_split_escapes_surrogates_and_utf8_windows() {
 fn child_display_rejects_unknown_late_types_and_malformed_json() {
     let mixed = br#"{"version":1,"type":"message","message":{"role":"assistant","content":"visible"},"content":"private unknown envelope field"}"#;
     assert_eq!(
-        project(mixed.as_slice(), 0, 4096).unwrap_err().kind(),
+        crate::host::history_window::child_display::project(mixed.as_slice(), 0, 4096)
+            .unwrap_err()
+            .kind(),
         io::ErrorKind::Unsupported
     );
     for block in [
@@ -89,7 +102,9 @@ fn child_display_rejects_unknown_late_types_and_malformed_json() {
             r#"{{"version":1,"type":"message","message":{{"role":"assistant","content":[{block}]}}}}"#
         );
         assert_eq!(
-            project(encoded.as_bytes(), 0, 4096).unwrap_err().kind(),
+            crate::host::history_window::child_display::project(encoded.as_bytes(), 0, 4096)
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::Unsupported
         );
     }
@@ -101,12 +116,13 @@ fn child_display_rejects_unknown_late_types_and_malformed_json() {
         r#"{"role":"assistant","content":"ok",}"#,
     ] {
         assert!(
-            project(OneByte(encoded.as_bytes()), 0, 32).is_err(),
+            crate::host::history_window::child_display::project(OneByte(encoded.as_bytes()), 0, 32)
+                .is_err(),
             "accepted malformed input"
         );
     }
     assert_eq!(
-        project(
+        crate::host::history_window::child_display::project(
             br#"{"version":2,"type":"message","message":{"content":"x"}}"#.as_slice(),
             0,
             32
@@ -122,7 +138,12 @@ fn child_display_large_visible_string_only_retains_the_requested_window() {
     let prefix = std::io::Cursor::new(br#"{"role":"assistant","content":""#.as_slice());
     let body = std::io::repeat(b'x').take(4 * 1024 * 1024);
     let suffix = std::io::Cursor::new(br#""}"#.as_slice());
-    let chunk = project(prefix.chain(body).chain(suffix), 2 * 1024 * 1024, 64).unwrap();
+    let chunk = crate::host::history_window::child_display::project(
+        prefix.chain(body).chain(suffix),
+        2 * 1024 * 1024,
+        64,
+    )
+    .unwrap();
     assert_eq!(chunk.bytes, vec![b'x'; 64]);
     assert!(chunk.bytes.capacity() <= 64);
     assert_eq!(chunk.next_offset, Some(2 * 1024 * 1024 + 64));
@@ -131,7 +152,10 @@ fn child_display_large_visible_string_only_retains_the_requested_window() {
 
 #[test]
 fn child_visibility_matches_shared_reminder_egress_with_maximum_identifiers() {
-    use peri_acp_types::system_reminder::*;
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, SYSTEM_REMINDER_VERSION,
+    };
     for category in [ReminderCategory::Task, ReminderCategory::Legacy] {
         for delivery in [
             ReminderDelivery::Required,
@@ -159,14 +183,30 @@ fn child_visibility_matches_shared_reminder_egress_with_maximum_identifiers() {
                     encoded.as_bytes(),
                 )
                 .unwrap();
-                assert_eq!(visible(OneByte(encoded.as_bytes())).unwrap(), expected);
+                assert_eq!(
+                    crate::host::history_window::child_display::visible(OneByte(
+                        encoded.as_bytes()
+                    ))
+                    .unwrap(),
+                    expected
+                );
                 if expected {
-                    let text = project(encoded.as_bytes(), 0, 4096).unwrap();
+                    let text = crate::host::history_window::child_display::project(
+                        encoded.as_bytes(),
+                        0,
+                        4096,
+                    )
+                    .unwrap();
                     assert!(String::from_utf8(text.bytes)
                         .unwrap()
                         .contains("summary only"));
                 } else {
-                    assert!(project(encoded.as_bytes(), 0, 4096).is_err());
+                    assert!(crate::host::history_window::child_display::project(
+                        encoded.as_bytes(),
+                        0,
+                        4096
+                    )
+                    .is_err());
                 }
             }
         }
@@ -213,7 +253,9 @@ fn child_visibility_rejects_generated_large_reminder_without_collecting_its_body
             bytes: bytes.clone(),
         };
         assert_eq!(
-            visible(reader).unwrap_err().kind(),
+            crate::host::history_window::child_display::visible(reader)
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::Unsupported
         );
         assert!(max_buffer.load(Ordering::Relaxed) <= 8 * 1024);
@@ -234,8 +276,8 @@ fn child_display_rejects_all_mixed_envelope_variants() {
         format!(r#"{{"version":1,"type":"message","message":{{"role":"assistant","content":"visible"}},"reminder":{reminder}}}"#),
         r#"{"role":"assistant","content":"visible","message":{"role":"assistant","content":"PRIVATE"}}"#.into(),
     ] {
-        assert_eq!(project(encoded.as_bytes(), 0, 4096).unwrap_err().kind(), io::ErrorKind::Unsupported);
-        assert!(visible(encoded.as_bytes()).is_err());
+        assert_eq!(crate::host::history_window::child_display::project(encoded.as_bytes(), 0, 4096).unwrap_err().kind(), io::ErrorKind::Unsupported);
+        assert!(crate::host::history_window::child_display::visible(encoded.as_bytes()).is_err());
     }
 }
 
@@ -247,7 +289,10 @@ fn child_visibility_and_display_reject_duplicate_policy_or_envelope_fields() {
         r#"{"version":1,"version":1,"type":"message","message":{"role":"assistant","content":"visible"}}"#,
         r#"{"version":1,"type":"message","message":{"role":"system","role":"assistant","content":"PRIVATE"}}"#,
     ] {
-        assert!(visible(encoded.as_bytes()).is_err());
-        assert!(project(encoded.as_bytes(), 0, 4096).is_err());
+        assert!(crate::host::history_window::child_display::visible(encoded.as_bytes()).is_err());
+        assert!(
+            crate::host::history_window::child_display::project(encoded.as_bytes(), 0, 4096)
+                .is_err()
+        );
     }
 }

@@ -1,9 +1,28 @@
 //! RCRA 中的 Compact 压力代际、持久化 Full 与模型可见视图。
-use super::super::*;
+use crate::agent::compact_v2::config::CompactConfig;
+
+use crate::agent::events_v2::ObserveEvent;
+use crate::agent::react::ReactLLM;
+
+use crate::agent::stages::context::StageContext;
+
+use crate::agent::stages::CompactInput;
+use crate::agent::stages::LoopResult;
+use crate::agent::stages::ReasonInput;
+use crate::agent::stages::SharedToolMap;
+
+use crate::messages::BaseMessage;
 use crate::session::queue::MessageSource;
 use crate::session::store::FrozenContext;
 use crate::session::test_resources::TestSession;
+
+use crate::session::QueuedMessage;
 use crate::session::Session;
+
+use std::collections::BTreeMap;
+
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 /// 构造测试用 StageContext
 fn make_stage_context() -> StageContext {
@@ -31,7 +50,10 @@ impl ReactLLM for UsageChurnReactLLM {
         _streaming: Option<crate::agent::react::StreamingContext>,
     ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        self.requests.lock().unwrap().push(messages.len());
+        self.requests
+            .lock()
+            .expect("self requests mutex must remain unpoisoned throughout the test")
+            .push(messages.len());
         let usage = self.usages[call];
         let mut reasoning = if call + 1 == self.usages.len() {
             crate::agent::react::Reasoning::with_answer("finish", "done")
@@ -118,7 +140,7 @@ impl peri_model::Model for CountingCompactModel {
         _cancellation: tokio_util::sync::CancellationToken,
     ) -> peri_model::ModelResult<peri_model::ModelResponse> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        peri_model::ModelResponse::new(
+        peri_model::ModelResponse::try_new(
             peri_model::ModelMessage::assistant_text(format!(
                 "<summary>compact generation {call}</summary>"
             )),
@@ -144,12 +166,15 @@ impl ReactLLM for SuccessfulFullReactLLM {
         _streaming: Option<crate::agent::react::StreamingContext>,
     ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        self.requests.lock().unwrap().push(
-            messages
-                .iter()
-                .map(|message| message.content().to_string())
-                .collect(),
-        );
+        self.requests
+            .lock()
+            .expect("self requests mutex must remain unpoisoned throughout the test")
+            .push(
+                messages
+                    .iter()
+                    .map(|message| message.content().to_string())
+                    .collect(),
+            );
         let mut reasoning = if call == 0 {
             crate::agent::react::Reasoning::with_tools(
                 "original reasoning marker",
@@ -200,7 +225,9 @@ impl crate::tools::BaseTool for SuccessfulFullReadTool {
         _ctx: crate::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Ok(std::fs::read_to_string(
-            input["file_path"].as_str().unwrap(),
+            input["file_path"]
+                .as_str()
+                .expect("the as str fixture result is required for this assertion"),
         )?)
     }
 }
@@ -210,10 +237,10 @@ impl crate::tools::BaseTool for SuccessfulFullReadTool {
 #[tokio::test]
 async fn test_run_react_loop_successful_full_replaces_history_without_file_re_read_and_resets_usage(
 ) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
     let file_path = dir.path().join("full-read-marker.txt");
     let file_marker = "successful full historical file marker";
-    std::fs::write(&file_path, file_marker).unwrap();
+    std::fs::write(&file_path, file_marker).expect("the test fixture file must be writable");
 
     let bound = TestSession::open().await;
     let store = bound.resources();
@@ -267,14 +294,16 @@ async fn test_run_react_loop_successful_full_replaces_history_without_file_re_re
         .await;
 
     assert!(matches!(
-        run_react_loop(context.clone(), 2).await,
+        crate::agent::stages::run_react_loop(context.clone(), 2).await,
         LoopResult::Completed
     ));
     assert_eq!(reason_calls.load(Ordering::SeqCst), 2);
     assert_eq!(compact_calls.load(Ordering::SeqCst), 1);
 
     {
-        let requests = reason_requests.lock().unwrap();
+        let requests = reason_requests
+            .lock()
+            .expect("reason requests lock mutex must remain unpoisoned throughout the test");
         assert!(requests[0]
             .iter()
             .any(|content| content.contains(prompt_marker)));
@@ -321,8 +350,11 @@ async fn test_run_react_loop_successful_full_replaces_history_without_file_re_re
         .expect("测试 transcript 应绑定持久化 writer");
     crate::session::transcript::MessageTranscript::flush_via_tx(&persist_tx)
         .await
-        .unwrap();
-    let snapshot = store.load_session_snapshot(&thread_id).await.unwrap();
+        .expect("the flush via tx fixture result is required for this assertion");
+    let snapshot = store
+        .load_session_snapshot(&thread_id)
+        .await
+        .expect("the load session snapshot fixture result is required for this assertion");
     let persisted: Vec<_> = snapshot
         .payloads
         .iter()
@@ -406,11 +438,17 @@ async fn test_run_react_loop_new_high_usage_generations_preserve_unexposed_histo
         ))
         .await;
 
-    let result = run_react_loop(context.clone(), 4).await;
+    let result = crate::agent::stages::run_react_loop(context.clone(), 4).await;
 
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
     assert_eq!(reason_calls.load(Ordering::SeqCst), 4);
-    assert_eq!(reason_requests.lock().unwrap().len(), 4);
+    assert_eq!(
+        reason_requests
+            .lock()
+            .expect("reason requests lock mutex must remain unpoisoned throughout the test")
+            .len(),
+        4
+    );
     let compacted: Vec<_> = std::iter::from_fn(|| handles.try_observe())
         .filter_map(|event| match event {
             ObserveEvent::MessagesCompacted {
@@ -452,12 +490,15 @@ async fn test_run_react_loop_new_high_usage_generations_preserve_unexposed_histo
         "两次 Full 各调用一次 compact LLM；中间 Micro 不调用"
     );
     let transcript = std::mem::take(&mut *context.session.transcript.write());
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let stored = bound
         .resources
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert_eq!(
         stored
             .payloads
@@ -501,11 +542,17 @@ impl crate::tools::BaseTool for AuditAlternatingOutputTool {
         input: serde_json::Value,
         _ctx: crate::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(if input["generation"].as_u64().unwrap().is_multiple_of(2) {
-            "x".repeat(8_000)
-        } else {
-            "ok".to_string()
-        })
+        Ok(
+            if input["generation"]
+                .as_u64()
+                .expect("the as u64 fixture result is required for this assertion")
+                .is_multiple_of(2)
+            {
+                "x".repeat(8_000)
+            } else {
+                "ok".to_string()
+            },
+        )
     }
 }
 
@@ -513,7 +560,9 @@ impl crate::tools::BaseTool for AuditAlternatingOutputTool {
 /// usage 数列为受控输入，只证明新高样本下的执行链，不代表现场 token 测量。
 #[tokio::test]
 async fn test_run_react_loop_successful_full_does_not_recompact_excluded_history() {
-    use crate::agent::compact_v2::{planner::plan_micro, projection, CompactOutcome};
+    use crate::agent::compact_v2::planner;
+    use crate::agent::compact_v2::projection;
+    use crate::agent::compact_v2::CompactOutcome;
     let bound = TestSession::open().await;
     let store = bound.resources();
     let thread_id = bound.thread_id();
@@ -558,7 +607,7 @@ async fn test_run_react_loop_successful_full_does_not_recompact_excluded_history
         ))
         .await;
     assert!(matches!(
-        run_react_loop(context.clone(), 5).await,
+        crate::agent::stages::run_react_loop(context.clone(), 5).await,
         LoopResult::Completed
     ));
     assert_eq!(reason_calls.load(Ordering::SeqCst), 5);
@@ -580,17 +629,22 @@ async fn test_run_react_loop_successful_full_does_not_recompact_excluded_history
     );
     {
         let transcript = context.session.transcript.read();
-        let plan = plan_micro(&transcript, &config, false);
+        let plan = planner::plan_micro(&transcript, &config, false);
         assert!(
             plan.actions.is_empty(),
             "Full 后只有短结果可见，不应再次规划旧工具输出"
         );
-        let canonical = transcript.visible_model_messages().unwrap();
+        let canonical = transcript
+            .visible_model_messages()
+            .expect("the visible model messages fixture result is required for this assertion");
         let projected =
-            projection::render_llm_view(&transcript, &plan.actions, &Default::default()).unwrap();
+            projection::render_llm_view(&transcript, &plan.actions, &Default::default())
+                .expect("the render llm view fixture result is required for this assertion");
         assert_eq!(
-            serde_json::to_value(canonical).unwrap(),
-            serde_json::to_value(projected).unwrap(),
+            serde_json::to_value(canonical)
+                .expect("to_value must accept this test fixture representation"),
+            serde_json::to_value(projected)
+                .expect("to_value must accept this test fixture representation"),
             "无 Micro action 时维持 canonical 模型视图"
         );
     }
@@ -599,13 +653,16 @@ async fn test_run_react_loop_successful_full_does_not_recompact_excluded_history
         .transcript
         .read()
         .persist_tx_handle()
-        .unwrap();
+        .expect("the persist tx handle fixture result is required for this assertion");
     crate::session::transcript::MessageTranscript::flush_via_tx(&tx)
         .await
-        .unwrap();
+        .expect("the flush via tx fixture result is required for this assertion");
     // 被排除行不得残留**渲染指令**（否则后续 Micro 会作用到 excluded 历史）；新语义下
     // Full 归档行必带一条空投影指令，只承载取代关系，取代目标是本次追加的摘要。
-    let snapshot = store.load_session_snapshot(&thread_id).await.unwrap();
+    let snapshot = store
+        .load_session_snapshot(&thread_id)
+        .await
+        .expect("the load session snapshot fixture result is required for this assertion");
     let flags = &snapshot.flags;
     let position: std::collections::HashMap<_, _> = snapshot
         .payloads
@@ -658,7 +715,7 @@ async fn test_audit_dispatch_must_account_for_tool_output_pressure() {
         .runtime
         .tool_catalog
         .pin_working_tools(&context.runtime.tools.read())
-        .unwrap();
+        .expect("the pin working tools fixture result is required for this assertion");
     context
         .compact
         .token_tracker
@@ -677,14 +734,14 @@ async fn test_audit_dispatch_must_account_for_tool_output_pressure() {
             serde_json::json!({"generation": 0}),
         )],
     );
-    super::tool_dispatch::dispatch_tools(
+    let _ = crate::agent::stages::tool_dispatch::dispatch_tools(
         &context,
         &reasoning,
         &catalog,
         &tokio_util::sync::CancellationToken::new(),
     )
     .await
-    .unwrap();
+    .expect("the dispatch tools fixture result is required for this assertion");
     assert!(
         context
             .session
@@ -744,12 +801,12 @@ async fn test_audit_micro_savings_must_change_previous_reason_view() {
     .with_context_budget(crate::agent::token::ContextBudget::new(100_000))
     .with_compact_config(CompactConfig::default())
     .build();
-    let first = super::reason::run_reason(ReasonInput {
+    let first = crate::agent::stages::reason::run_reason(ReasonInput {
         context: context.clone(),
         has_tool_calls: false,
     })
     .await
-    .unwrap();
+    .expect("the run reason fixture result is required for this assertion");
     let first_tool_outputs = first
         .messages_snapshot
         .iter()
@@ -761,12 +818,12 @@ async fn test_audit_micro_savings_must_change_previous_reason_view() {
         vec![8_000; 4],
         "没有已提交 directive 时 Reason 必须发送 canonical 工具结果"
     );
-    super::compact::run_compact(CompactInput {
+    crate::agent::stages::compact::run_compact(CompactInput {
         context: context.clone(),
         has_tool_calls: false,
     })
     .await
-    .unwrap();
+    .expect("the run compact fixture result is required for this assertion");
     let saved = std::iter::from_fn(|| handles.try_observe())
         .find_map(|event| match event {
             ObserveEvent::MessagesCompacted {
@@ -776,16 +833,18 @@ async fn test_audit_micro_savings_must_change_previous_reason_view() {
             _ => None,
         })
         .unwrap_or(0);
-    let second = super::reason::run_reason(ReasonInput {
+    let second = crate::agent::stages::reason::run_reason(ReasonInput {
         context,
         has_tool_calls: false,
     })
     .await
-    .unwrap();
+    .expect("the run reason fixture result is required for this assertion");
     assert!(
         saved == 0
-            || serde_json::to_value(&*first.messages_snapshot).unwrap()
-                != serde_json::to_value(&*second.messages_snapshot).unwrap(),
+            || serde_json::to_value(&*first.messages_snapshot)
+                .expect("to_value must accept this test fixture representation")
+                != serde_json::to_value(&*second.messages_snapshot)
+                    .expect("to_value must accept this test fixture representation"),
         "Micro 报告节省 {saved} tokens，但两次真实 Reason 消息快照完全相同"
     );
 }

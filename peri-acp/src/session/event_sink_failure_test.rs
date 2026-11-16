@@ -1,6 +1,18 @@
 //! 真实 TransportEventSink 的发送失败注入回归（与主 sink 测试分离，保持文件规模）。
 
-use super::*;
+use crate::session::event_sink::transport_event_sink::TransportEventSink;
+use crate::transport::types::AcpError;
+use crate::transport::types::IncomingMessage;
+use crate::transport::types::RequestId;
+use crate::transport::AcpTransport;
+use async_trait::async_trait;
+use dashmap::DashMap;
+use peri_acp_types::event::EventSink;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::PeriCaps;
+use serde_json::Value;
+use std::sync::Arc;
 
 /// 真实 TransportEventSink 的发送失败必须上报，而不是被 legacy/reminder helper 吞掉。
 struct FailingTransport;
@@ -50,7 +62,7 @@ async fn real_transport_send_failures_propagate_for_delivery_and_reminder() {
         "legacy delivery send failure must propagate"
     );
 
-    let reminder = reminder_for_test(
+    let reminder = crate::session::event_sink::tests::reminder_for_test(
         "send_failure",
         ReminderDelivery::Configurable,
         vec![ReminderAudience::Tui],

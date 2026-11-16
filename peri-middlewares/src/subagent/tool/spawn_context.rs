@@ -1,11 +1,12 @@
 //! Lifecycle adapters and creation/resume intent for the Agent-owned factory.
 use crate::tool_search::ExecuteExtraToolResolver;
 use peri_acp_types::session_resources::SessionResources;
+use peri_agent::messages::BaseMessage;
 use peri_agent::session::subagent::{
     SessionFactory, SubagentLifecycleStart, SubagentLifecycleStop, SubagentLlmSource,
     SubagentResumeConfig, SubagentRunMode, SubagentSpawnConfig, SubagentSpawned,
 };
-use peri_agent::{messages::BaseMessage, tools::BaseTool};
+use peri_agent::tools::BaseTool;
 use std::sync::Arc;
 
 /// 生命周期 hook 默认非阻断：非 Allow action 只做无正文诊断，不影响子 agent。

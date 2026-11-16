@@ -1,4 +1,5 @@
-use super::*;
+use crate::session::config::PermissionMode;
+use crate::session::config::SessionConfig;
 
 #[test]
 fn test_permission_mode_hitl_enabled() {

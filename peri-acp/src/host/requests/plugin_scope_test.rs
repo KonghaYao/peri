@@ -1,14 +1,29 @@
-use super::*;
+use crate::host::requests::tests::HomeDirGuard;
+use crate::host::requests::tests::MockPluginManager;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::provider::LlmProvider;
+use peri_acp_types::plugin::InstallScope;
+
+use serde_json::json;
+use serde_json::Value;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 async fn scope_config(tmp: &tempfile::TempDir) -> AcpServerConfig {
-    let config = make_peri_config_with_provider(make_provider_config(
-        "fixture",
-        "openai",
-        "fixture-unused",
-        "fixture-model",
-    ));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "fixture",
+            "openai",
+            "fixture-unused",
+            "fixture-model",
+        ),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, tmp).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(config, provider, tmp).await;
     cfg.plugin_manager = Arc::new(peri_middlewares::host_ports::PluginManager);
     cfg
 }
@@ -44,8 +59,12 @@ async fn plugin_list_scope_round_trips_through_real_toggle_request() {
         let cache = cfg.plugin_manager.cache_dir();
         seed_scope_marketplace(&cache);
         let mut sessions = HashMap::new();
-        let session_id =
-            register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
+        let session_id = crate::host::requests::tests::register_session_with_history(
+            &mut sessions,
+            tmp.path().to_str().unwrap(),
+            &cfg,
+        )
+        .await;
         let cwd = PathBuf::from(&sessions[&session_id].cwd);
         let project_dir = if scope == InstallScope::User {
             None
@@ -53,7 +72,7 @@ async fn plugin_list_scope_round_trips_through_real_toggle_request() {
             Some(cwd.as_path())
         };
         let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-        handle_request("plugin/install", &json!({"name": "scoped", "marketplace": "scope-market", "scope": format!("{scope:?}").to_lowercase(), "sessionId": session_id}), &cfg, &mut sessions, &transport).await.unwrap();
+        crate::host::requests::handle_request("plugin/install", &json!({"name": "scoped", "marketplace": "scope-market", "scope": format!("{scope:?}").to_lowercase(), "sessionId": session_id}), &cfg, &mut sessions, &transport).await.unwrap();
         let records = peri_middlewares::plugin::load_installed_plugins(Some(
             &claude_dir.join("plugins/installed_plugins.json"),
         ))
@@ -67,7 +86,7 @@ async fn plugin_list_scope_round_trips_through_real_toggle_request() {
         cfg.plugin_loaded =
             peri_middlewares::plugin::load_enabled_plugins(&claude_dir, project_dir).unwrap();
         assert_eq!(cfg.plugin_loaded.len(), 1);
-        let response = handle_request(
+        let response = crate::host::requests::handle_request(
             "plugin/list",
             &json!({"sessionId": session_id}),
             &cfg,
@@ -92,9 +111,15 @@ async fn plugin_list_scope_round_trips_through_real_toggle_request() {
         }
         let params = json!({"sessionId": session_id, "pluginId": installed.id, "scope": entry["install_scope"], "enable": false});
         assert_eq!(
-            handle_request("plugin/toggle", &params, &cfg, &mut sessions, &transport)
-                .await
-                .unwrap()["success"],
+            crate::host::requests::handle_request(
+                "plugin/toggle",
+                &params,
+                &cfg,
+                &mut sessions,
+                &transport
+            )
+            .await
+            .unwrap()["success"],
             true
         );
         let settings: Value =
@@ -102,9 +127,15 @@ async fn plugin_list_scope_round_trips_through_real_toggle_request() {
         assert!(settings["enabledPlugins"].get(&installed.id).is_none());
         let mut params = params;
         params["enable"] = json!(true);
-        handle_request("plugin/toggle", &params, &cfg, &mut sessions, &transport)
-            .await
-            .unwrap();
+        crate::host::requests::handle_request(
+            "plugin/toggle",
+            &params,
+            &cfg,
+            &mut sessions,
+            &transport,
+        )
+        .await
+        .unwrap();
         let settings: Value =
             serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
         assert_eq!(settings["enabledPlugins"][&installed.id], true);
@@ -114,7 +145,7 @@ async fn plugin_list_scope_round_trips_through_real_toggle_request() {
                 r#"{"pluginConfigs":{"private":"keep"}}"#
             );
         }
-        handle_request(
+        crate::host::requests::handle_request(
             "plugin/uninstall",
             &json!({"pluginId": installed.id, "scope": format!("{scope:?}").to_lowercase(), "sessionId": session_id}),
             &cfg,
@@ -150,7 +181,7 @@ async fn plugin_scope_request_rejection_precedes_production_port_writes() {
         Value::Null,
         json!(42),
     ] {
-        let error = handle_request(
+        let error = crate::host::requests::handle_request(
             "plugin/install",
             &json!({"name": "scoped", "marketplace": "scope-market", "scope": scope}),
             &cfg,
@@ -171,8 +202,12 @@ async fn plugin_scope_request_rejection_precedes_production_port_writes() {
             .join("plugins/installed_plugins.json")
             .exists());
     }
-    let session_id =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
+    let session_id = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
     sessions.get_mut(&session_id).unwrap().closing = true;
     for (method, params) in [
         (
@@ -189,7 +224,7 @@ async fn plugin_scope_request_rejection_precedes_production_port_writes() {
         ),
     ] {
         assert_eq!(
-            handle_request(method, &params, &cfg, &mut sessions, &transport)
+            crate::host::requests::handle_request(method, &params, &cfg, &mut sessions, &transport)
                 .await
                 .unwrap_err()
                 .code,
@@ -200,10 +235,16 @@ async fn plugin_scope_request_rejection_precedes_production_port_writes() {
     sessions.get_mut(&session_id).unwrap().cwd = "untrusted-relative".into();
     let params = json!({"name": "scoped", "marketplace": "scope-market", "scope": "project", "sessionId": session_id});
     assert_eq!(
-        handle_request("plugin/install", &params, &cfg, &mut sessions, &transport)
-            .await
-            .unwrap_err()
-            .code,
+        crate::host::requests::handle_request(
+            "plugin/install",
+            &params,
+            &cfg,
+            &mut sessions,
+            &transport
+        )
+        .await
+        .unwrap_err()
+        .code,
         -32602
     );
     assert!(!cfg
@@ -222,7 +263,7 @@ async fn plugin_user_install_uninstall_requests_work_without_session() {
     seed_scope_marketplace(&cfg.plugin_manager.cache_dir());
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let installed = handle_request(
+    let installed = crate::host::requests::handle_request(
         "plugin/install",
         &json!({"name": "scoped", "marketplace": "scope-market"}),
         &cfg,
@@ -232,7 +273,7 @@ async fn plugin_user_install_uninstall_requests_work_without_session() {
     .await
     .unwrap();
     assert_eq!(installed["plugin"], "scoped@scope-market");
-    let response = handle_request(
+    let response = crate::host::requests::handle_request(
         "plugin/uninstall",
         &json!({"pluginId": installed["plugin"]}),
         &cfg,
@@ -282,9 +323,15 @@ async fn plugin_list_unrecorded_source_is_read_only_and_preserves_load_error() {
     cfg.plugin_manager = Arc::new(manager);
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let response = handle_request("plugin/list", &json!({}), &cfg, &mut sessions, &transport)
-        .await
-        .unwrap();
+    let response = crate::host::requests::handle_request(
+        "plugin/list",
+        &json!({}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
     let entry = &response["plugins"][0];
     assert!(entry["install_scope"].is_null());
     assert_eq!(entry["toggle_supported"], false);
@@ -295,7 +342,7 @@ async fn plugin_list_unrecorded_source_is_read_only_and_preserves_load_error() {
         .contains("no writable"));
     cfg.plugin_manager = Arc::new(peri_middlewares::host_ports::PluginManager);
     let before = std::fs::read(claude_dir.join("settings.json")).unwrap();
-    let error = handle_request(
+    let error = crate::host::requests::handle_request(
         "plugin/toggle",
         &json!({"pluginId": installed.id, "scope": "user", "enable": false}),
         &cfg,

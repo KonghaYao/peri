@@ -9,7 +9,7 @@ use peri_acp_types::store::InheritedContext;
 use peri_acp_types::thread::{AgentStatus, CancelPolicy, ThreadId, WorkState};
 use peri_acp_types::workflow::AgentRunParams;
 
-use super::WorkflowAgentContext;
+use crate::agent::workflow::agent::WorkflowAgentContext;
 
 pub(super) struct WorkflowExecution {
     pub(super) session_id: String,
@@ -206,7 +206,8 @@ fn ensure_same_execution_directory(parent_cwd: &str, cwd: &str) -> Result<(), St
 
 #[cfg(test)]
 mod tests {
-    use super::{drop_terminal_status, ensure_same_execution_directory};
+    use crate::agent::workflow::agent::execution::drop_terminal_status;
+    use crate::agent::workflow::agent::execution::ensure_same_execution_directory;
     use peri_acp_types::thread::AgentStatus;
 
     #[test]

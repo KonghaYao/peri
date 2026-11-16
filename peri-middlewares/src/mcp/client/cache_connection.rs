@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
-use rmcp::{service::ServiceError, Peer, RoleClient};
-use serde::{de::DeserializeOwned, Serialize};
+use rmcp::service::ServiceError;
+use rmcp::Peer;
+use rmcp::RoleClient;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 
 use super::super::{McpClientHandle, McpClientPool, McpConnectionKey};
 use crate::mcp::resource_cache::CacheTicket;
@@ -41,7 +44,7 @@ impl McpClientPool {
         name: &str,
         peer: &Peer<RoleClient>,
     ) -> Result<CacheConnection, ServiceError> {
-        let handle = self.get_client(name);
+        let handle = self.client(name);
         if let Some(handle) = &handle {
             let matches = handle.peer.as_ref().is_some_and(|current| {
                 std::ptr::eq(current, peer)
@@ -92,7 +95,7 @@ impl McpClientPool {
         {
             return Err(ServiceError::TransportClosed);
         }
-        let handle = self.get_client(name);
+        let handle = self.client(name);
         let connection = CacheConnection {
             name: name.to_owned(),
             generation: handle
@@ -116,7 +119,7 @@ impl McpClientPool {
         &self,
         connection: &CacheConnection,
     ) -> Result<(), ServiceError> {
-        let current = self.get_client(&connection.name);
+        let current = self.client(&connection.name);
         let same_handle = match (&connection.handle, current) {
             (Some(captured), Some(current)) => {
                 Arc::ptr_eq(captured, &current)

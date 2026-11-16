@@ -11,6 +11,7 @@ pub(super) struct InstalledIdentity {
 }
 
 impl InstalledIdentity {
+    #[must_use]
     pub fn new(plugin: &PluginSummary, scope: OperationScope) -> Self {
         Self {
             name: plugin.name.clone(),
@@ -20,6 +21,7 @@ impl InstalledIdentity {
         }
     }
 
+    #[must_use]
     pub fn plugin_id(&self) -> String {
         if self.marketplace.is_empty() {
             self.name.clone()
@@ -55,6 +57,7 @@ pub(super) struct MarketplaceIdentity {
 }
 
 impl MarketplaceIdentity {
+    #[must_use]
     pub fn new(entry: &MsEntry, scope: OperationScope) -> Self {
         Self {
             name: entry.name.clone(),

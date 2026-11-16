@@ -1,12 +1,15 @@
 //! 执行预留、attempt 生命周期、停止、idle 唤醒与领取标记。
 
-use peri_acp_types::{event_v2::StateEvent, messages::MessageId, session::UserInputState};
+use peri_acp_types::event_v2::StateEvent;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::UserInputState;
 use tokio_util::sync::CancellationToken;
 
-use super::state::{matches_id, new_ticket, promote_next, ready_ids};
-use super::{
-    ActiveRun, InterruptReason, UserInputAttemptOutcome, UserInputMailbox, UserInputRunTicket,
-};
+use crate::session::user_input_mailbox::ActiveRun;
+use crate::session::user_input_mailbox::InterruptReason;
+use crate::session::user_input_mailbox::UserInputAttemptOutcome;
+use crate::session::user_input_mailbox::UserInputMailbox;
+use crate::session::user_input_mailbox::UserInputRunTicket;
 
 impl UserInputMailbox {
     /// 只预留一次执行，不交接消息；宿主取得既有 prompt lock 后再 attach。
@@ -15,7 +18,7 @@ impl UserInputMailbox {
         if !state.valid || state.paused || state.active.is_some() || state.ready.is_empty() {
             return None;
         }
-        let ticket = new_ticket();
+        let ticket = crate::session::user_input_mailbox::state::new_ticket();
         state.active = Some(ActiveRun {
             ticket: ticket.clone(),
             cancel: None,
@@ -48,7 +51,7 @@ impl UserInputMailbox {
             // 预留期间的 dispatch 还没有真正中断一个执行。
             active.reason = InterruptReason::None;
             state.revision += 1;
-            ready_ids(&state)
+            crate::session::user_input_mailbox::state::ready_ids(&state)
         };
         self.send_ready_ids(ready, true).await;
         let snapshot = self.snapshot().await;
@@ -67,7 +70,7 @@ impl UserInputMailbox {
             if !state.valid || state.active.is_some() {
                 return None;
             }
-            let ticket = new_ticket();
+            let ticket = crate::session::user_input_mailbox::state::new_ticket();
             state.active = Some(ActiveRun {
                 ticket: ticket.clone(),
                 cancel: Some(cancel),
@@ -78,9 +81,12 @@ impl UserInputMailbox {
             state.revision += 1;
             if resume_pending {
                 state.paused = false;
-                promote_next(&mut state);
+                crate::session::user_input_mailbox::state::promote_next(&mut state);
             }
-            (ticket, ready_ids(&state))
+            (
+                ticket,
+                crate::session::user_input_mailbox::state::ready_ids(&state),
+            )
         };
         self.send_ready_ids(ready, true).await;
         let snapshot = self.snapshot().await;
@@ -138,6 +144,7 @@ impl UserInputMailbox {
     /// 当前 attempt 是否被用户暂存区发送打断（steer 而非 Stop）。
     ///
     /// 必须在 `finish_attempt` 之前判定：收尾会移除 active 记录，之后恒为 false。
+    #[must_use]
     pub fn is_steer_interruption(&self, ticket: &UserInputRunTicket) -> bool {
         self.state.lock().active.as_ref().is_some_and(|active| {
             active.ticket == *ticket && active.reason == InterruptReason::Steer
@@ -145,6 +152,7 @@ impl UserInputMailbox {
     }
 
     /// 本 ticket 是否仍持有执行准入；宿主据此判断一次尝试是否已结算。
+    #[must_use]
     pub fn is_active_ticket(&self, ticket: &UserInputRunTicket) -> bool {
         self.state
             .lock()
@@ -207,7 +215,7 @@ impl UserInputMailbox {
             // 已接受的立即发送优先；普通待办每次只释放队首一条。
             // 这里只做运行期 promotion；真实 `send_inputs` 留给下一次 attach。
             let mut state = self.state.lock();
-            promote_next(&mut state);
+            crate::session::user_input_mailbox::state::promote_next(&mut state);
         }
         let snapshot = self.snapshot().await;
         self.publish(snapshot);
@@ -332,7 +340,7 @@ impl UserInputMailbox {
             let mut state = self.state.lock();
             state.suspended = true;
             match self.wake_suspended_locked(&mut state) {
-                true => ready_ids(&state),
+                true => crate::session::user_input_mailbox::state::ready_ids(&state),
                 false => Vec::new(),
             }
         };
@@ -348,7 +356,10 @@ impl UserInputMailbox {
         self.state.lock().suspended = false;
     }
 
-    pub(super) fn wake_suspended_locked(&self, state: &mut super::MailboxState) -> bool {
+    pub(super) fn wake_suspended_locked(
+        &self,
+        state: &mut crate::session::user_input_mailbox::MailboxState,
+    ) -> bool {
         // 迟到的 idle 不能恢复 Stop、立即发送收尾或已经取消的旧 attempt。
         if !state.valid
             || state.paused
@@ -365,7 +376,8 @@ impl UserInputMailbox {
         }
         // ready 可能在 enqueue 与 idle 之间已经完成 promotion；不能因未再次
         // promote 而跳过交接，否则输入会停在 ready 且当前执行收不到。
-        if state.ready.is_empty() && !promote_next(state) {
+        if state.ready.is_empty() && !crate::session::user_input_mailbox::state::promote_next(state)
+        {
             return false;
         }
         // 交接即占用本次 idle，后续 enqueue 不能在 Receive 开始前追加第二条。
@@ -379,7 +391,9 @@ impl UserInputMailbox {
             let mut state = self.state.lock();
             let mut changed = false;
             for record in &mut state.records {
-                if record.state == UserInputState::Dispatching && matches_id(record, ids) {
+                if record.state == UserInputState::Dispatching
+                    && crate::session::user_input_mailbox::state::matches_id(record, ids)
+                {
                     record.state = UserInputState::Claimed;
                     changed = true;
                 }

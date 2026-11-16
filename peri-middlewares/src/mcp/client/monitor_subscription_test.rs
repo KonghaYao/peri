@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use peri_acp_types::mcp::McpSubscriptionPort;
-use peri_acp_types::monitor::monitor_alert_delivery_id;
+use peri_acp_types::monitor;
 use peri_acp_types::plugin::ConfigSource;
 use peri_acp_types::ports::McpPoolPort;
 use peri_acp_types::session::{
@@ -22,13 +22,15 @@ use rmcp::service::{Peer, RoleClient};
 use serde_json::json;
 
 use crate::mcp::apps::McpCapabilityProfile;
-use crate::mcp::builtin::runtime::{
-    spawn_builtin_transport_with_handler, BuiltinInstanceSupervisor, BuiltinServerExit,
-    BUILTIN_CONVERGE_TIMEOUT,
-};
-use crate::mcp::client::{
-    serve_client_auto, ClientStatus, McpClientHandle, McpClientPool, McpServiceWrapper,
-};
+use crate::mcp::builtin::runtime;
+use crate::mcp::builtin::runtime::BuiltinInstanceSupervisor;
+use crate::mcp::builtin::runtime::BuiltinServerExit;
+use crate::mcp::builtin::runtime::BUILTIN_CONVERGE_TIMEOUT;
+use crate::mcp::client;
+use crate::mcp::client::ClientStatus;
+use crate::mcp::client::McpClientHandle;
+use crate::mcp::client::McpClientPool;
+use crate::mcp::client::McpServiceWrapper;
 use crate::mcp::current_invocation_fixture::CurrentInvocationFixture;
 use crate::mcp::tool_bridge::McpToolBridge;
 use crate::mcp::McpTaskOwner;
@@ -82,12 +84,13 @@ impl MonitorLink {
 async fn connect_monitor() -> MonitorLink {
     let dir = tempfile::tempdir().expect("tempdir");
     let server = MonitorMcpServer::new(dir.path().to_string_lossy().into_owned());
-    let transport = spawn_builtin_transport_with_handler("monitor", server);
+    let transport = runtime::spawn_builtin_transport_with_handler("monitor", server);
     let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
-        .await
-        .expect("monitor handshake must not time out")
-        .expect("monitor handshake must not fail");
+    let service =
+        client::serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+            .await
+            .expect("monitor handshake must not time out")
+            .expect("monitor handshake must not fail");
     MonitorLink {
         service,
         supervisor,
@@ -477,7 +480,7 @@ async fn completed_monitor_merges_its_alert_into_the_terminal_reminder() {
     assert!(messages[0].delivery_id.is_some());
     assert_ne!(
         messages[0].delivery_id,
-        Some(monitor_alert_delivery_id(&monitor_id, 1)),
+        Some(monitor::monitor_alert_delivery_id(&monitor_id, 1)),
         "the merged reminder keeps the terminal delivery id, not the alert id"
     );
     let body = reminder_body(&messages[0]);

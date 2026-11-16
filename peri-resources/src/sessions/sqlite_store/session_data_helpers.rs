@@ -1,4 +1,10 @@
-use super::*;
+use super::{
+    workspace_store, AgentStatus, FrozenSnapshotBytes, FrozenState, HashSet, MessageFlags,
+    MessageId, NewSession, NewSessionDraft, PersistedPayload, SessionBinding, SessionResourceError,
+    SessionResourceErrorKind, SessionResourceResult, SqliteConnection, ThreadId, ThreadRowInsert,
+    WorkspaceError, SESSION_BINDING_VERSION,
+};
+
 use sqlx::AssertSqlSafe;
 
 pub(in crate::sessions::sqlite_store) fn validate_unbound_legacy_frozen(
@@ -17,7 +23,7 @@ pub(super) async fn machine_id_on(
             .bind(id.as_str())
             .fetch_optional(pool)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
     Ok(identity.map(|row| row.0))
 }
 
@@ -151,7 +157,7 @@ pub(in crate::sessions) async fn binding_row_state_on(
         .bind(id.as_str())
         .fetch_optional(&mut *connection)
         .await
-        .map_err(|error| map_sqlx(&error))?;
+        .map_err(|error| super::map_sqlx(&error))?;
     let Some((version, project_id, workspace_id, relative_cwd)) = row else {
         return Ok(BindingRowState::Absent);
     };
@@ -163,7 +169,7 @@ pub(in crate::sessions) async fn binding_row_state_on(
     }
     let binding =
         workspace_store::decode_binding((version, project_id, workspace_id, relative_cwd))
-            .map_err(|_| corrupt("session binding is not decodable"))?;
+            .map_err(|_| super::corrupt("session binding is not decodable"))?;
     Ok(BindingRowState::Bound(binding))
 }
 
@@ -191,21 +197,21 @@ pub(in crate::sessions) async fn frozen_state_on(
         .bind(id.as_str())
         .fetch_optional(&mut *connection)
         .await
-        .map_err(|error| map_sqlx(&error))?;
+        .map_err(|error| super::map_sqlx(&error))?;
     match row {
         Some((Some(bytes),)) => Ok(FrozenState::Present(FrozenSnapshotBytes::new(bytes))),
         Some((None,)) => Ok(FrozenState::LegacyAbsent),
-        None => Err(not_found()),
+        None => Err(super::not_found()),
     }
 }
 
 /// `NewSession` 的 `threads` 行插入参数（创建路径与 fork/child 共用同一列形状）。
-pub(in crate::sessions) fn new_session_row<'a>(
-    input: &'a NewSession,
-    snapshot_at_message_id: Option<&'a str>,
-    frozen: Option<&'a str>,
+pub(in crate::sessions) fn new_session_row<'payloads>(
+    input: &'payloads NewSession,
+    snapshot_at_message_id: Option<&'payloads str>,
+    frozen: Option<&'payloads str>,
     message_count: i64,
-) -> ThreadRowInsert<'a> {
+) -> ThreadRowInsert<'payloads> {
     ThreadRowInsert {
         id: &input.thread_id,
         title: input.meta.title.as_deref(),
@@ -226,11 +232,11 @@ pub(in crate::sessions) fn new_session_row<'a>(
 
 /// `NewSessionDraft` 的 `threads` 行插入参数：与 [`new_session_row`] 同一列形状，
 /// 只有 `frozen_context` 固定为 `NULL`（内容准入在取得所有权之后定稿）。
-pub(in crate::sessions) fn new_session_draft_row<'a>(
-    draft: &'a NewSessionDraft,
-    snapshot_at_message_id: Option<&'a str>,
+pub(in crate::sessions) fn new_session_draft_row<'payloads>(
+    draft: &'payloads NewSessionDraft,
+    snapshot_at_message_id: Option<&'payloads str>,
     message_count: i64,
-) -> ThreadRowInsert<'a> {
+) -> ThreadRowInsert<'payloads> {
     ThreadRowInsert {
         id: &draft.thread_id,
         title: draft.meta.title.as_deref(),
@@ -286,13 +292,13 @@ pub(in crate::sessions) fn message_insert_chunk_rows() -> usize {
 }
 
 /// 按正文累计字节和绑定变量上限惰性序列化；最多额外持有一条待下批写入的正文。
-pub(super) struct SerializedHistoryChunks<'a> {
-    payloads: std::slice::Iter<'a, PersistedPayload>,
+pub(super) struct SerializedHistoryChunks<'payloads> {
+    payloads: std::slice::Iter<'payloads, PersistedPayload>,
     pending: Option<MessageInsertRow>,
 }
 
-impl<'a> SerializedHistoryChunks<'a> {
-    pub(super) fn new(payloads: &'a [PersistedPayload]) -> Self {
+impl<'payloads> SerializedHistoryChunks<'payloads> {
+    pub(super) fn new(payloads: &'payloads [PersistedPayload]) -> Self {
         Self {
             payloads: payloads.iter(),
             pending: None,
@@ -314,13 +320,13 @@ impl Iterator for SerializedHistoryChunks<'_> {
                     let Some(payload) = self.payloads.next() else {
                         break;
                     };
-                    let content = match serialize_persisted_payload(payload) {
+                    let content = match super::serialize_persisted_payload(payload) {
                         Ok(content) => content,
                         Err(error) => return Some(Err(error)),
                     };
                     MessageInsertRow {
                         id: payload.id().as_uuid().to_string(),
-                        role: payload_role(payload),
+                        role: super::payload_role(payload),
                         content,
                     }
                 }
@@ -411,7 +417,7 @@ pub(in crate::sessions) fn projection_json(
         .as_ref()
         .map(serde_json::to_string)
         .transpose()
-        .map_err(|_| corrupt("message projection is not serializable"))
+        .map_err(|_| super::corrupt("message projection is not serializable"))
 }
 
 /// 历史变更后同步派生视图：计数、时间戳与缓存版本一起更新。
@@ -429,6 +435,6 @@ pub(in crate::sessions) async fn refresh_history_derivations(
     .bind(id.as_str())
     .execute(&mut *connection)
     .await
-    .map_err(|error| map_sqlx(&error))?;
+    .map_err(|error| super::map_sqlx(&error))?;
     Ok(())
 }

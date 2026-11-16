@@ -14,16 +14,16 @@
 //! canonical 入口（少一层 wire 投影），断言落在 `SessionInvocationOutcome` 与其
 //! `error_kind()` 上：审批不可用必须与「用户拒绝」可区分，且绝不自动批准。
 
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex as StdMutex,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 
 use async_trait::async_trait;
 use peri_acp_types::interaction::{AttachmentId, ConnectionEpoch};
 use peri_acp_types::mcp_apps::{
     InvocationTarget, McpAppInvokeRequest, McpAppsErrorKind, McpAppsRelayError, McpAppsRelayPort,
-    NotExecutedCause, SessionInvocationOutcome, SessionInvocationPort, SessionInvocationRequest,
+    SessionInvocationOutcome, SessionInvocationPort, SessionInvocationRequest,
     MCP_APPS_ENVELOPE_VERSION, MCP_APPS_PROTOCOL_VERSION,
 };
 use peri_acp_types::mcp_apps_facade::{

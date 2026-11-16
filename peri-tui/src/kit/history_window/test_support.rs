@@ -1,7 +1,12 @@
 //! `history_window` 测试共用构造器。
 
-use super::*;
+use super::{
+    AdmissionDecision, HistoryEntryView, HistorySource, HistoryWindow, HistoryWindowConfig,
+    PageDraft, PagePlacement, PersistentEntryKey, ReleasePlan, ReserveOutcome, SegmentDraft,
+    SegmentKey, WindowIdentity, WindowLimits,
+};
 
+#[must_use]
 pub(crate) fn identity() -> WindowIdentity {
     WindowIdentity::new("s1", "gen-1", 7, "snap-1")
 }

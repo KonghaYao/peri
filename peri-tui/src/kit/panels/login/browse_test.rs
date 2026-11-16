@@ -1,9 +1,26 @@
 //! Browse 列表、删除确认门与配置候选回归。
 
 use super::super::browse_render;
-use super::*;
-use crate::kit::panel_mouse::hit_row;
-use crate::kit::panel_overlay::panel_content_rows;
+use super::Event;
+use super::EventResult;
+use super::KeyCode;
+use super::KeyEvent;
+use super::KeyModifiers;
+use super::LoginPanelMode;
+use super::MouseButton;
+use super::MouseEvent;
+use super::MouseEventKind;
+use super::NOTIFICATION;
+use super::NotificationGuard;
+use super::PROVIDER_LIST;
+use super::Position;
+use super::ProviderConfig;
+use super::ProviderListGuard;
+use super::ProviderSummary;
+use super::Rect;
+use super::TEST_AREA;
+use super::serial;
+
 use ratatui_kit::ratatui::style::Color;
 
 /// 删除确认门绑定确认时的身份：确认期间列表刷新（每 tick 重派生）不改变待删目标。
@@ -12,13 +29,13 @@ use ratatui_kit::ratatui::style::Color;
 #[test]
 #[serial]
 fn delete_confirms_the_provider_that_was_frozen() {
-    let _list = ProviderListGuard::install(vec![provider("alpha"), provider("beta")]);
+    let _list = ProviderListGuard::install(vec![super::provider("alpha"), super::provider("beta")]);
     let _note = NotificationGuard::install();
-    let _ = take_delete_requests();
+    let _ = super::take_delete_requests();
 
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_panel_at(4, move |panel| {
+    super::mount_panel_at(4, move |panel| {
         if frame == 0 {
             // Ctrl+D：冻结光标处（下标 0 = alpha）的身份
             let opened = panel.event(
@@ -32,10 +49,11 @@ fn delete_confirms_the_provider_that_was_frozen() {
                 "进入确认时必须冻结待删除身份"
             );
             // 列表刷新：下标 0 变成 beta
-            *PROVIDER_LIST.state().write() = vec![provider("beta"), provider("alpha")];
+            *PROVIDER_LIST.state().write() =
+                vec![super::provider("beta"), super::provider("alpha")];
         }
         if frame == 1 {
-            let result = panel.event(key(KeyCode::Enter), TEST_AREA);
+            let result = panel.event(super::key(KeyCode::Enter), TEST_AREA);
             tx.send((
                 result,
                 *panel.mode.read(),
@@ -51,7 +69,7 @@ fn delete_confirms_the_provider_that_was_frozen() {
     assert_eq!(mode, LoginPanelMode::Browse, "确认后退出确认门");
     assert_eq!(target, None, "确认门是一次性的，目标随之清空");
     assert_eq!(
-        take_delete_requests(),
+        super::take_delete_requests(),
         vec!["alpha".to_string()],
         "删除必须按确认时冻结的身份发出，而不是刷新后该下标上的 beta"
     );
@@ -61,13 +79,13 @@ fn delete_confirms_the_provider_that_was_frozen() {
 #[test]
 #[serial]
 fn delete_skips_request_and_hints_when_target_vanished() {
-    let _list = ProviderListGuard::install(vec![provider("alpha"), provider("beta")]);
+    let _list = ProviderListGuard::install(vec![super::provider("alpha"), super::provider("beta")]);
     let _note = NotificationGuard::install();
-    let _ = take_delete_requests();
+    let _ = super::take_delete_requests();
 
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_panel_at(4, move |panel| {
+    super::mount_panel_at(4, move |panel| {
         if frame == 0 {
             let opened = panel.event(
                 Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
@@ -75,10 +93,10 @@ fn delete_skips_request_and_hints_when_target_vanished() {
             );
             assert_eq!(opened, EventResult::Consumed);
             // 目标从列表消失
-            *PROVIDER_LIST.state().write() = vec![provider("beta")];
+            *PROVIDER_LIST.state().write() = vec![super::provider("beta")];
         }
         if frame == 1 {
-            let result = panel.event(key(KeyCode::Enter), TEST_AREA);
+            let result = panel.event(super::key(KeyCode::Enter), TEST_AREA);
             tx.send((result, *panel.mode.read()))
                 .expect("测试结果通道仍打开");
         }
@@ -89,7 +107,7 @@ fn delete_skips_request_and_hints_when_target_vanished() {
     assert_eq!(result, EventResult::Consumed);
     assert_eq!(mode, LoginPanelMode::Browse);
     assert!(
-        take_delete_requests().is_empty(),
+        super::take_delete_requests().is_empty(),
         "目标已消失时不得发出删除请求（更不得改成删除当前下标上的 beta）"
     );
     let message = NOTIFICATION
@@ -108,22 +126,23 @@ fn delete_skips_request_and_hints_when_target_vanished() {
 #[test]
 #[serial]
 fn confirm_view_shows_frozen_target_after_refresh() {
-    let _list = ProviderListGuard::install(vec![provider("alpha"), provider("beta")]);
+    let _list = ProviderListGuard::install(vec![super::provider("alpha"), super::provider("beta")]);
 
     let mut frame = 0usize;
-    let buf = mount_panel_at(4, move |panel| {
+    let buf = super::mount_panel_at(4, move |panel| {
         if frame == 0 {
             let _ = panel.event(
                 Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
                 TEST_AREA,
             );
             // 刷新：下标 0 变成 beta，确认门目标必须仍是 alpha
-            *PROVIDER_LIST.state().write() = vec![provider("beta"), provider("alpha")];
+            *PROVIDER_LIST.state().write() =
+                vec![super::provider("beta"), super::provider("alpha")];
         }
         frame += 1;
     });
 
-    let text = buffer_text(&buf);
+    let text = super::buffer_text(&buf);
     assert!(
         text.contains("Provider: alpha"),
         "确认视图必须显示冻结的目标身份：\n{text}"
@@ -138,17 +157,18 @@ fn confirm_view_shows_frozen_target_after_refresh() {
 #[test]
 #[serial]
 fn click_confirms_frozen_target() {
-    let _list = ProviderListGuard::install(vec![provider("alpha"), provider("beta")]);
-    let _ = take_delete_requests();
+    let _list = ProviderListGuard::install(vec![super::provider("alpha"), super::provider("beta")]);
+    let _ = super::take_delete_requests();
 
     let mut frame = 0usize;
-    mount_panel_at(3, move |panel| {
+    super::mount_panel_at(3, move |panel| {
         if frame == 0 {
             let _ = panel.event(
                 Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
                 TEST_AREA,
             );
-            *PROVIDER_LIST.state().write() = vec![provider("beta"), provider("alpha")];
+            *PROVIDER_LIST.state().write() =
+                vec![super::provider("beta"), super::provider("alpha")];
         }
         if frame == 1 {
             let result = panel.event(
@@ -166,7 +186,7 @@ fn click_confirms_frozen_target() {
     });
 
     assert_eq!(
-        take_delete_requests(),
+        super::take_delete_requests(),
         vec!["alpha".to_string()],
         "点击确认与 Enter 同语义：按冻结身份删除"
     );
@@ -178,11 +198,11 @@ fn click_confirms_frozen_target() {
 #[test]
 #[serial]
 fn edit_mode_without_state_renders_browse_in_the_same_frame() {
-    let _list = ProviderListGuard::install(vec![provider("alpha")]);
+    let _list = ProviderListGuard::install(vec![super::provider("alpha")]);
 
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    let buf = mount_panel_at(2, move |panel| {
+    let buf = super::mount_panel_at(2, move |panel| {
         if frame == 0 {
             *panel.mode.write() = LoginPanelMode::Edit;
             *panel.edit_state.write() = None;
@@ -195,7 +215,7 @@ fn edit_mode_without_state_renders_browse_in_the_same_frame() {
 
     let mode = rx.try_recv().expect("末帧必须上报状态");
     assert_eq!(mode, LoginPanelMode::Browse, "状态异常必须回退到 Browse");
-    let text = buffer_text(&buf);
+    let text = super::buffer_text(&buf);
     assert!(
         text.contains("providers configured"),
         "回退发生在渲染之前，本帧即渲染 Browse 视图：\n{text}"
@@ -228,7 +248,7 @@ fn config_with_providers(ids: &[&str]) -> crate::config::PeriConfig {
 fn delete_candidate_prunes_copy_only_when_target_exists() {
     let cfg = config_with_providers(&["alpha", "beta"]);
 
-    let candidate = delete_candidate(&cfg, "alpha").expect("目标存在时必须产出候选");
+    let candidate = super::delete_candidate(&cfg, "alpha").expect("目标存在时必须产出候选");
     assert_eq!(
         candidate
             .config
@@ -249,7 +269,7 @@ fn delete_candidate_prunes_copy_only_when_target_exists() {
         "候选构造在副本上进行，不得改动源配置"
     );
     assert!(
-        delete_candidate(&cfg, "gamma").is_none(),
+        super::delete_candidate(&cfg, "gamma").is_none(),
         "目标已不在配置里时无候选：调用方跳过落盘与发布"
     );
 }
@@ -258,17 +278,18 @@ fn delete_candidate_prunes_copy_only_when_target_exists() {
 
 fn providers(count: usize) -> Vec<ProviderSummary> {
     (0..count)
-        .map(|index| provider(&format!("p{index}")))
+        .map(|index| super::provider(&format!("p{index}")))
         .collect()
 }
 
 fn provider_with_url(id: &str, url: &str) -> ProviderSummary {
     ProviderSummary {
         base_url: Some(url.to_string()),
-        ..provider(id)
+        ..super::provider(id)
     }
 }
 
+#[must_use]
 fn browse_colors() -> browse_render::BrowseRenderColors {
     browse_render::BrowseRenderColors {
         marker: Color::Reset,
@@ -291,9 +312,9 @@ fn line_text(line: &ratatui_kit::ratatui::text::Line<'_>) -> String {
 /// 面板内容区行数预测：终端 24/40/60 → 18/26/26（主题 max_height=28）。
 #[test]
 fn content_rows_prediction_matches_panel_overlay() {
-    assert_eq!(panel_content_rows(24), 18);
-    assert_eq!(panel_content_rows(40), 26);
-    assert_eq!(panel_content_rows(60), 26);
+    assert_eq!(crate::kit::panel_overlay::panel_content_rows(24), 18);
+    assert_eq!(crate::kit::panel_overlay::panel_content_rows(40), 26);
+    assert_eq!(crate::kit::panel_overlay::panel_content_rows(60), 26);
 }
 
 /// 可见槽位由内容区行数推导；5 项在高度 40 时全部显示，高度 24 时只显示 4 项。
@@ -301,11 +322,19 @@ fn content_rows_prediction_matches_panel_overlay() {
 fn visible_slots_follow_panel_height() {
     let list = providers(5);
 
-    let short = browse_render::viewport(panel_content_rows(24), list.len(), 0);
+    let short = browse_render::viewport(
+        crate::kit::panel_overlay::panel_content_rows(24),
+        list.len(),
+        0,
+    );
     assert_eq!(short.visible_items, 4);
     assert_eq!(short.window(&list).count(), 4, "内容区 18 行只放得下 4 项");
 
-    let tall = browse_render::viewport(panel_content_rows(40), list.len(), 0);
+    let tall = browse_render::viewport(
+        crate::kit::panel_overlay::panel_content_rows(40),
+        list.len(),
+        0,
+    );
     assert_eq!(tall.visible_items, 6);
     assert_eq!(tall.window(&list).count(), 5);
 
@@ -365,18 +394,27 @@ fn window_and_hit_layout_agree() {
 
     let visible: Vec<usize> = viewport.window(&items).map(|(index, _)| index).collect();
     assert_eq!(visible, vec![9, 10, 11, 12, 13]);
-    for (slot, expected) in visible.iter().enumerate() {
-        let visual_row = layout.header_rows + (slot as u16) * layout.item_rows;
-        assert_eq!(
-            hit_row(rect.y + 1 + visual_row, rect, layout),
-            Some(*expected),
-            "第 {slot} 个可见槽位命中的全量索引必须与 window 一致"
-        );
+    {
+        let iteration_items = visible.iter().enumerate();
+        for (slot, expected) in iteration_items {
+            let visual_row = layout.header_rows + (slot as u16) * layout.item_rows;
+            assert_eq!(
+                crate::kit::panel_mouse::hit_row(rect.y + 1 + visual_row, rect, layout),
+                Some(*expected),
+                "第 {slot} 个可见槽位命中的全量索引必须与 window 一致"
+            );
+        }
     }
 
     // 提示行与底部边框不可点
-    assert_eq!(hit_row(rect.y + 1 + 21, rect, layout), None);
-    assert_eq!(hit_row(rect.y + 23, rect, layout), None);
+    assert_eq!(
+        crate::kit::panel_mouse::hit_row(rect.y + 1 + 21, rect, layout),
+        None
+    );
+    assert_eq!(
+        crate::kit::panel_mouse::hit_row(rect.y + 23, rect, layout),
+        None
+    );
 }
 
 /// 每项严格 4 行；Base URL 缺省用 `—` 占位，空列表只有空态提示行。
@@ -384,7 +422,7 @@ fn window_and_hit_layout_agree() {
 fn body_lines_keep_fixed_item_height() {
     let list = vec![
         provider_with_url("with-url", "https://example.test/v1"),
-        provider("no-url"),
+        super::provider("no-url"),
     ];
     let lines = browse_render::body_lines(
         browse_render::viewport(22, list.len(), 0),
@@ -419,20 +457,23 @@ fn body_lines_keep_fixed_item_height() {
 fn height_24_shows_all_items_and_pins_hint_to_bottom() {
     let buf = {
         let _list = ProviderListGuard::install(providers(5));
-        mount_panel_sized(3, 80, 24, |_| {})
+        super::mount_panel_sized(3, 80, 24, |_| {})
     };
 
-    let text = buffer_text(&buf);
+    let text = super::buffer_text(&buf);
     for index in 0..5 {
         assert!(
             text.contains(&format!("p{index}")),
             "高度 24 应显示 p{index}：\n{text}"
         );
     }
-    assert!(buffer_line(&buf, 1).contains("5 providers configured"));
-    assert!(buffer_line(&buf, 22).contains("↑/↓"), "提示行必须贴底");
+    assert!(super::buffer_line(&buf, 1).contains("5 providers configured"));
     assert!(
-        !buffer_line(&buf, 23).contains("Enter"),
+        super::buffer_line(&buf, 22).contains("↑/↓"),
+        "提示行必须贴底"
+    );
+    assert!(
+        !super::buffer_line(&buf, 23).contains("Enter"),
         "第 23 行是底边框/路径，不应放提示"
     );
 }
@@ -443,13 +484,13 @@ fn height_24_shows_all_items_and_pins_hint_to_bottom() {
 fn height_20_shows_four_items_and_hint_at_18() {
     let buf = {
         let _list = ProviderListGuard::install(providers(5));
-        mount_panel_sized(3, 80, 20, |_| {})
+        super::mount_panel_sized(3, 80, 20, |_| {})
     };
 
-    let text = buffer_text(&buf);
+    let text = super::buffer_text(&buf);
     assert!(text.contains("p3"));
     assert!(!text.contains("p4"), "第 5 项超出窗口：\n{text}");
-    assert!(buffer_line(&buf, 18).contains("↑/↓"));
+    assert!(super::buffer_line(&buf, 18).contains("↑/↓"));
 }
 
 /// 高度 28、宽 120：5 项全见，提示行在 26。
@@ -458,14 +499,14 @@ fn height_20_shows_four_items_and_hint_at_18() {
 fn height_28_shows_all_items_and_hint_at_26() {
     let buf = {
         let _list = ProviderListGuard::install(providers(5));
-        mount_panel_sized(3, 120, 28, |_| {})
+        super::mount_panel_sized(3, 120, 28, |_| {})
     };
 
-    let text = buffer_text(&buf);
+    let text = super::buffer_text(&buf);
     for index in 0..5 {
         assert!(text.contains(&format!("p{index}")), "\n{text}");
     }
-    assert!(buffer_line(&buf, 26).contains("↑/↓"));
+    assert!(super::buffer_line(&buf, 26).contains("↑/↓"));
 }
 
 /// 高度/宽度矩阵：不 panic，5 项全见，提示行始终在内容区最后一行。
@@ -485,16 +526,16 @@ fn size_matrix_keeps_hint_on_last_content_row() {
     ] {
         let buf = {
             let _list = ProviderListGuard::install(providers(5));
-            mount_panel_sized(2, width, height, |_| {})
+            super::mount_panel_sized(2, width, height, |_| {})
         };
-        let text = buffer_text(&buf);
+        let text = super::buffer_text(&buf);
         for index in 0..5 {
             assert!(
                 text.contains(&format!("p{index}")),
                 "{width}x{height} 应显示 p{index}：\n{text}"
             );
         }
-        let hint = buffer_line(&buf, height - 2);
+        let hint = super::buffer_line(&buf, height - 2);
         assert!(
             hint.contains("↑/↓"),
             "{width}x{height} 的提示行必须在 y={}：{hint:?}",
@@ -510,14 +551,14 @@ fn list_length_matrix_renders_expected_window() {
     for count in [0usize, 3, 5, 20] {
         let buf = {
             let _list = ProviderListGuard::install(providers(count));
-            mount_panel_sized(2, 80, 24, |_| {})
+            super::mount_panel_sized(2, 80, 24, |_| {})
         };
-        let text = buffer_text(&buf);
+        let text = super::buffer_text(&buf);
         assert!(
-            buffer_line(&buf, 1).contains(&format!("{count} providers configured")),
+            super::buffer_line(&buf, 1).contains(&format!("{count} providers configured")),
             "计数行必须反映列表长度"
         );
-        assert!(buffer_line(&buf, 22).contains("↑/↓"));
+        assert!(super::buffer_line(&buf, 22).contains("↑/↓"));
 
         if count == 0 {
             assert!(text.contains("Ctrl+N"), "空列表必须给出新建提示：\n{text}");
@@ -528,12 +569,12 @@ fn list_length_matrix_renders_expected_window() {
         assert!(text.contains("p0"));
         assert!(text.contains(&format!("p{}", count.saturating_sub(1).min(4))));
         let first_row = (0..22)
-            .find(|&y| buffer_line(&buf, y).contains("p0"))
+            .find(|&y| super::buffer_line(&buf, y).contains("p0"))
             .expect("非空列表必须渲染首项");
         assert_eq!(first_row, 2, "内容不足时列表顶部对齐（header 下一行）");
         if count == 3 {
             assert!(
-                buffer_line(&buf, 14).trim().is_empty(),
+                super::buffer_line(&buf, 14).trim().is_empty(),
                 "第 3 项后的剩余空间留在列表体内部"
             );
         }
@@ -549,11 +590,11 @@ fn list_length_matrix_renders_expected_window() {
 fn down_key_scrolls_window_with_selection() {
     let _list = ProviderListGuard::install(providers(20));
     let mut frame = 0usize;
-    let buf = mount_panel_sized(3, 80, 20, move |panel| {
+    let buf = super::mount_panel_sized(3, 80, 20, move |panel| {
         if frame == 0 {
             let area = Rect::new(0, 0, 80, 20);
             for _ in 0..10 {
-                let result = panel.event(key(KeyCode::Down), area);
+                let result = panel.event(super::key(KeyCode::Down), area);
                 assert_eq!(result, EventResult::Consumed);
             }
             assert_eq!(*panel.cursor.read(), 10);
@@ -561,16 +602,16 @@ fn down_key_scrolls_window_with_selection() {
         frame += 1;
     });
 
-    let text = buffer_text(&buf);
+    let text = super::buffer_text(&buf);
     for index in [9usize, 10, 11, 12] {
         assert!(text.contains(&format!("p{index}")), "\n{text}");
     }
     assert!(!text.contains("p0"), "窗口已滚离首项：\n{text}");
     assert!(!text.contains("p13"), "窗口只保留 4 项：\n{text}");
     assert!(
-        buffer_line(&buf, 6).contains("> p10"),
+        super::buffer_line(&buf, 6).contains("> p10"),
         "选中项 10 位于窗口第 2 槽：{:?}",
-        buffer_line(&buf, 6)
+        super::buffer_line(&buf, 6)
     );
 }
 
@@ -581,21 +622,21 @@ fn items_with_and_without_url_keep_four_row_spacing() {
     let buf = {
         let _list = ProviderListGuard::install(vec![
             provider_with_url("p0", "https://example.test/v1"),
-            provider("p1"),
+            super::provider("p1"),
         ]);
-        mount_panel_sized(2, 80, 24, |_| {})
+        super::mount_panel_sized(2, 80, 24, |_| {})
     };
 
     let row_of = |id: &str| {
         (0..24)
-            .find(|&y| buffer_line(&buf, y).contains(id))
-            .unwrap_or_else(|| panic!("未找到 {id}：\n{}", buffer_text(&buf)))
+            .find(|&y| super::buffer_line(&buf, y).contains(id))
+            .unwrap_or_else(|| panic!("未找到 {id}：\n{}", super::buffer_text(&buf)))
     };
     let first = row_of("p0");
     let second = row_of("p1");
     assert_eq!(second - first, 4);
-    assert!(buffer_line(&buf, first + 2).contains("base url: https://example.test/v1"));
-    assert!(buffer_line(&buf, second + 2).contains("base url: —"));
+    assert!(super::buffer_line(&buf, first + 2).contains("base url: https://example.test/v1"));
+    assert!(super::buffer_line(&buf, second + 2).contains("base url: —"));
 }
 
 /// 窄屏：列表行按宽度裁剪但不换行，提示行仍在最后一行。
@@ -605,13 +646,13 @@ fn narrow_widths_clip_rows_and_keep_hint_row() {
     for width in [60u16, 80, 120] {
         let buf = {
             let _list = ProviderListGuard::install(providers(5));
-            mount_panel_sized(2, width, 24, |_| {})
+            super::mount_panel_sized(2, width, 24, |_| {})
         };
         assert!(
-            buffer_line(&buf, 22).contains("↑/↓"),
+            super::buffer_line(&buf, 22).contains("↑/↓"),
             "宽度 {width} 的提示行必须在最后一行"
         );
-        assert!(buffer_line(&buf, 2).contains("p0"));
+        assert!(super::buffer_line(&buf, 2).contains("p0"));
     }
 }
 
@@ -622,10 +663,10 @@ fn click_third_visible_item_selects_full_index() {
     let _list = ProviderListGuard::install(providers(5));
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_panel_sized(2, 80, 20, move |panel| {
+    super::mount_panel_sized(2, 80, 20, move |panel| {
         if frame == 0 {
             let area = Rect::new(0, 0, 80, 20);
-            let result = panel.event(click_at(10, 5), area);
+            let result = panel.event(super::click_at(10, 5), area);
             tx.send((result, *panel.cursor.read()))
                 .expect("测试结果通道仍打开");
         }
@@ -644,18 +685,18 @@ fn click_after_scroll_hits_window_slot() {
     let _list = ProviderListGuard::install(providers(20));
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_panel_sized(2, 80, 24, move |panel| {
+    super::mount_panel_sized(2, 80, 24, move |panel| {
         if frame == 0 {
             let area = Rect::new(0, 0, 80, 24);
             *panel.cursor.write() = 19;
-            let result_last = panel.event(click_at(18, 5), area);
+            let result_last = panel.event(super::click_at(18, 5), area);
             let cursor_last = *panel.cursor.read();
 
             // 同帧再点一次：恢复 Browse（测试进程无配置句柄，进入编辑会回退）
             *panel.mode.write() = LoginPanelMode::Browse;
             *panel.edit_state.write() = None;
             *panel.cursor.write() = 19;
-            let result_first = panel.event(click_at(2, 5), area);
+            let result_first = panel.event(super::click_at(2, 5), area);
             let cursor_first = *panel.cursor.read();
 
             tx.send((result_last, cursor_last, result_first, cursor_first))
@@ -679,16 +720,16 @@ fn non_item_rows_do_not_change_selection() {
     let _list = ProviderListGuard::install(providers(2));
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_panel_sized(2, 80, 24, move |panel| {
+    super::mount_panel_sized(2, 80, 24, move |panel| {
         if frame == 0 {
             let area = Rect::new(0, 0, 80, 24);
             *panel.cursor.write() = 1;
             for row in [0u16, 1, 16, 22, 23] {
-                let result = panel.event(click_at(row, 5), area);
+                let result = panel.event(super::click_at(row, 5), area);
                 assert_eq!(result, EventResult::Consumed);
             }
             // 右侧滚动条列即使落在列表行上也不可点
-            let result = panel.event(click_at(10, 79), area);
+            let result = panel.event(super::click_at(10, 79), area);
             assert_eq!(result, EventResult::Consumed);
             tx.send((*panel.cursor.read(), *panel.mode.read()))
                 .expect("测试结果通道仍打开");
@@ -708,10 +749,10 @@ fn empty_list_has_hint_and_ignores_body_clicks() {
     let _list = ProviderListGuard::install(Vec::new());
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    let buf = mount_panel_sized(2, 80, 24, move |panel| {
+    let buf = super::mount_panel_sized(2, 80, 24, move |panel| {
         if frame == 0 {
             let area = Rect::new(0, 0, 80, 24);
-            let result = panel.event(click_at(3, 5), area);
+            let result = panel.event(super::click_at(3, 5), area);
             assert_eq!(result, EventResult::Consumed);
             tx.send((*panel.cursor.read(), *panel.mode.read()))
                 .expect("测试结果通道仍打开");
@@ -719,10 +760,10 @@ fn empty_list_has_hint_and_ignores_body_clicks() {
         frame += 1;
     });
 
-    let text = buffer_text(&buf);
+    let text = super::buffer_text(&buf);
     assert!(text.contains("0 providers configured"), "\n{text}");
     assert!(text.contains("Ctrl+N"), "\n{text}");
-    assert!(buffer_line(&buf, 22).contains("↑/↓"));
+    assert!(super::buffer_line(&buf, 22).contains("↑/↓"));
     assert_eq!(
         rx.try_recv().expect("点击必须走真实事件入口"),
         (0, LoginPanelMode::Browse)
@@ -735,7 +776,7 @@ fn empty_list_has_hint_and_ignores_body_clicks() {
 fn entering_edit_resets_browse_scroll_offset() {
     let _list = ProviderListGuard::install(providers(3));
     let mut frame = 0usize;
-    let _ = mount_panel_sized(3, 80, 24, move |panel| {
+    let _ = super::mount_panel_sized(3, 80, 24, move |panel| {
         let area = Rect::new(0, 0, 80, 24);
         // 测试进程无配置句柄：每次进入 Edit 后由 effect 回退，这里恢复 Browse 继续下一入口
         if frame > 0 {
@@ -745,7 +786,7 @@ fn entering_edit_resets_browse_scroll_offset() {
         match frame {
             0 => {
                 panel.sv.write().set_offset(Position::new(0, 7));
-                let _ = panel.event(key(KeyCode::Enter), area);
+                let _ = panel.event(super::key(KeyCode::Enter), area);
                 assert_eq!(panel.sv.read().offset().y, 0, "Enter 进入 Edit 前必须归零");
             }
             1 => {
@@ -758,7 +799,7 @@ fn entering_edit_resets_browse_scroll_offset() {
             }
             2 => {
                 panel.sv.write().set_offset(Position::new(0, 3));
-                let _ = panel.event(click_at(2, 5), area);
+                let _ = panel.event(super::click_at(2, 5), area);
                 assert_eq!(panel.sv.read().offset().y, 0, "鼠标进入 Edit 前必须归零");
             }
             _ => {}

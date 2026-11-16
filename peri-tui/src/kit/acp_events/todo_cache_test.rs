@@ -1,11 +1,7 @@
-use super::*;
-use crate::kit::acp_events::acp_events_test::make_fold_test_state;
+use super::{CACHE_BYTES, CACHE_ENTRIES, INPUT_BYTES, TodoSnapshot, Value};
+
 use crate::kit::acp_events::tool;
-use crate::kit::atoms::{
-    BG_AGENT_IDS, BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_IDENTITY, BgDisplayEntry, BgLiveDetail,
-    BgTaskIdentity,
-};
-use crate::kit::stream_data::TuiToolStarted;
+
 use crate::kit::tui_render_unit::{TuiRenderUnit, TuiToolPresentation};
 use serde_json::json;
 use serial_test::serial;
@@ -18,7 +14,7 @@ fn todos(status: &str) -> Value {
 #[test]
 #[serial]
 fn oversized_input_blocks_older_success_until_a_complete_new_success() {
-    let mut state = make_fold_test_state();
+    let mut state = crate::kit::acp_events::acp_events_test::make_fold_test_state();
     state.record_todo_started("baseline".into(), &todos("pending"), INPUT_BYTES);
     assert!(state.complete_todo_if_current("baseline", false));
     state.record_todo_started("old-pending".into(), &todos("in_progress"), INPUT_BYTES);
@@ -47,7 +43,7 @@ fn oversized_input_blocks_older_success_until_a_complete_new_success() {
 #[test]
 #[serial]
 fn evicted_and_older_completions_cannot_replace_a_newer_baseline() {
-    let mut state = make_fold_test_state();
+    let mut state = crate::kit::acp_events::acp_events_test::make_fold_test_state();
     for index in 0..=CACHE_ENTRIES {
         state.record_todo_started(format!("pending-{index}"), &todos("pending"), INPUT_BYTES);
     }
@@ -79,7 +75,7 @@ fn evicted_and_older_completions_cannot_replace_a_newer_baseline() {
 #[test]
 #[serial]
 fn missing_and_malformed_inputs_do_not_restore_initial_state() {
-    let mut state = make_fold_test_state();
+    let mut state = crate::kit::acp_events::acp_events_test::make_fold_test_state();
     state.record_todo_started("missing".into(), &Value::Null, INPUT_BYTES);
     assert!(state.todo_baseline_unknown());
     assert!(state.todo_call_inputs.is_empty());
@@ -92,7 +88,7 @@ fn missing_and_malformed_inputs_do_not_restore_initial_state() {
 #[test]
 #[serial]
 fn pending_comparison_inputs_have_a_byte_limit_as_well_as_an_entry_limit() {
-    let mut state = make_fold_test_state();
+    let mut state = crate::kit::acp_events::acp_events_test::make_fold_test_state();
     let input = json!({"todos": [{"content": "x".repeat(INPUT_BYTES / 2), "status": "pending"}]});
     for index in 0..CACHE_ENTRIES {
         state.record_todo_started(format!("input-{index}"), &input, INPUT_BYTES);
@@ -100,7 +96,9 @@ fn pending_comparison_inputs_have_a_byte_limit_as_well_as_an_entry_limit() {
     let reserved: usize = state
         .todo_call_inputs
         .iter()
-        .map(|(id, (_, input))| id.capacity() + json_value_bytes(input).reserved)
+        .map(|(id, (_, input))| {
+            id.capacity() + crate::kit::retained_bytes::json_value_bytes(input).reserved
+        })
         .sum();
     assert!(reserved <= CACHE_BYTES);
     assert!(state.todo_call_inputs.len() < CACHE_ENTRIES);
@@ -134,6 +132,7 @@ impl Drop for RestoreBackground {
     }
 }
 
+#[must_use]
 fn started(id: &str, child: Option<&str>, input: Value) -> TuiToolStarted {
     TuiToolStarted {
         tool_id: id.into(),
@@ -149,7 +148,7 @@ fn started(id: &str, child: Option<&str>, input: Value) -> TuiToolStarted {
 #[test]
 #[serial]
 fn unknown_baseline_uses_generic_cards_for_root_child_background_and_replay() {
-    let mut state = make_fold_test_state();
+    let mut state = crate::kit::acp_events::acp_events_test::make_fold_test_state();
     let _restore = RestoreBackground::empty();
     state.record_todo_started("missing".into(), &Value::Null, INPUT_BYTES);
     tool::handle_tool_started(&mut state, &started("root", None, todos("pending")));
@@ -200,7 +199,7 @@ fn unknown_baseline_uses_generic_cards_for_root_child_background_and_replay() {
         "one task",
         &todos("pending"),
     );
-    let TuiRenderUnit::TuiToolCard(card) = state.committed.back().unwrap() else {
+    let TuiRenderUnit::TuiToolCard(card) = state.committed.back().expect("unknown baseline uses generic cards for root child background and replay: the back fixture operation uses valid inputs") else {
         panic!("expected replay tool");
     };
     assert!(matches!(&card.presentation, TuiToolPresentation::Generic));
@@ -209,7 +208,7 @@ fn unknown_baseline_uses_generic_cards_for_root_child_background_and_replay() {
 #[test]
 #[serial]
 fn oversized_child_input_marks_unknown_then_small_success_restores_semantics() {
-    let mut state = make_fold_test_state();
+    let mut state = crate::kit::acp_events::acp_events_test::make_fold_test_state();
     let _restore = RestoreBackground::empty();
     state.record_todo_started("known".into(), &todos("pending"), INPUT_BYTES);
     assert!(state.complete_todo_if_current("known", false));
@@ -217,7 +216,7 @@ fn oversized_child_input_marks_unknown_then_small_success_restores_semantics() {
         .current_turn
         .start_subagent("child".into(), "coder".into(), None);
     let oversized = json!({"todos": [{"content": "x".repeat(20 * 1024), "status": "completed"}]});
-    assert!(json_value_bytes(&oversized).reserved < INPUT_BYTES);
+    assert!(crate::kit::retained_bytes::json_value_bytes(&oversized).reserved < INPUT_BYTES);
     tool::handle_tool_started(
         &mut state,
         &started("too-large-for-child", Some("child"), oversized),
@@ -256,3 +255,19 @@ fn oversized_child_input_marks_unknown_then_small_success_restores_semantics() {
     };
     assert!(!presentation.is_initial);
 }
+
+use crate::kit::atoms::BG_AGENT_IDS;
+
+use crate::kit::atoms::BG_DISPLAY;
+
+use crate::kit::atoms::BG_LIVE_DETAIL;
+
+use crate::kit::atoms::BG_TASK_IDENTITY;
+
+use crate::kit::atoms::BgDisplayEntry;
+
+use crate::kit::atoms::BgLiveDetail;
+
+use crate::kit::atoms::BgTaskIdentity;
+
+use crate::kit::stream_data::TuiToolStarted;

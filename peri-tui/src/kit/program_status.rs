@@ -9,13 +9,11 @@
 
 use std::io::{IsTerminal, Write};
 
-use crate::kit::atoms::PROGRAM_STATUS;
-
 /// `app` 的稳定机器名——外层按它分组与展示。
 const APP: &str = "peri";
 
 /// 环境读取面（测试注入用）。
-type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
+type Env<'status> = &'status dyn Fn(&str) -> Option<String>;
 
 /// 上报给终端的程序状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +42,7 @@ pub enum BlockedKind {
 }
 
 impl ProgramStatus {
+    #[must_use]
     fn state(self) -> &'static str {
         match self {
             Self::Idle => "idle",
@@ -75,6 +74,7 @@ fn sequence(status: ProgramStatus) -> String {
 }
 
 /// `state=clear` 删除根记录及其子记录。
+#[must_use]
 fn clear_sequence() -> &'static str {
     "\x1b]7501;state=clear\x1b\\"
 }
@@ -137,6 +137,7 @@ fn write_sequence(writer: &mut impl Write, sequence: &str) -> std::io::Result<()
 }
 
 /// `PERI_PROGRAM_STATUS` 显式关闭；未知取值按自动（开启）处理，与 `PERI_CLIPBOARD` 一致。
+#[must_use]
 fn enabled(env: Env<'_>) -> bool {
     !matches!(
         env("PERI_PROGRAM_STATUS")
@@ -151,3 +152,5 @@ fn enabled(env: Env<'_>) -> bool {
 #[cfg(test)]
 #[path = "program_status_test.rs"]
 mod tests;
+
+use crate::kit::atoms::PROGRAM_STATUS;

@@ -25,10 +25,7 @@ use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
 use super::cloud_deployment_tests::{
     CHILD_SUFFIX, FORK_SUFFIX, HOME_ENV, READ_ONLY_ENV, ROOT_SUFFIX, RUN_ENV, WORKSPACE_ENV,
 };
-use super::cloud_tests::{
-    check, failure, load_env, remote_error_class, required_credential_keys, required_credentials,
-    CloudTarget,
-};
+use super::cloud_tests::CloudTarget;
 use crate::sessions::SessionResourcesImpl;
 
 /// 子进程启动上下文；没有标记变量时返回 `None`（该测试只在被父测试拉起时工作）。
@@ -47,7 +44,7 @@ fn child_context() -> Option<ChildContext> {
         home: PathBuf::from(home),
         workspace: PathBuf::from(workspace),
         run,
-        env: load_env(),
+        env: super::cloud_tests::load_env(),
     })
 }
 
@@ -56,8 +53,8 @@ impl ChildContext {
     ///
     /// 凭证值只在本进程内注入同名变量：部署参数按设计只接受来源名，门面再按名取值。
     fn deployment(&self, access: AccessMode) -> Result<SessionStoreDeployment, String> {
-        let (_, token_key) = required_credential_keys();
-        let (url, token) = required_credentials(&self.env);
+        let (_, token_key) = super::cloud_tests::required_credential_keys();
+        let (url, token) = super::cloud_tests::required_credentials(&self.env);
         std::env::set_var(&token_key, &token);
         let engine = self
             .endpoint()
@@ -73,7 +70,7 @@ impl ChildContext {
 
     /// 端点（与门面解析 locator 用的是同一段纯解析，因此引擎名与摘要一致）。
     fn endpoint(&self) -> Result<super::RemoteEndpoint, super::EndpointError> {
-        let (url, _) = required_credentials(&self.env);
+        let (url, _) = super::cloud_tests::required_credentials(&self.env);
         super::RemoteEndpoint::parse(&url, None)
     }
 
@@ -116,14 +113,14 @@ async fn write_flow(context: &ChildContext, target: &CloudTarget) -> Result<Vec<
     let workspace = facade
         .resolve_workspace(&context.workspace)
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let root = context.thread(ROOT_SUFFIX);
 
     // ① 远端 durable 保存 + workspace 绑定检查。
     facade
         .create_session(&session_input(context, &root, &workspace, None))
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
 
     // ② 追加 + 排空（append/flush）：排空是「已排队的写入结束」的有界等待，不是成功声明。
     let first = PersistedPayload::Message(BaseMessage::human("synthetic question"));
@@ -131,14 +128,17 @@ async fn write_flow(context: &ChildContext, target: &CloudTarget) -> Result<Vec<
     facade
         .append_history(&root, &[first.clone(), second.clone()])
         .await
-        .map_err(failure)?;
-    facade.drain_persistence(&root).await.map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
+    facade
+        .drain_persistence(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
     lines.push(format!(
         "append_rows={}",
         facade
             .load_session_history(&root)
             .await
-            .map_err(failure)?
+            .map_err(super::cloud_tests::failure)?
             .len()
     ));
 
@@ -160,8 +160,11 @@ async fn write_flow(context: &ChildContext, target: &CloudTarget) -> Result<Vec<
             },
         )
         .await
-        .map_err(failure)?;
-    let compacted = facade.load_session_history(&root).await.map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
+    let compacted = facade
+        .load_session_history(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
     lines.push(format!("compact_rows={}", compacted.len()));
 
     // ④ fork：目标快照独立落库（source 不变）。
@@ -178,7 +181,7 @@ async fn write_flow(context: &ChildContext, target: &CloudTarget) -> Result<Vec<
             flags: std::collections::HashMap::new(),
         })
         .await;
-    check(
+    super::cloud_tests::check(
         matches!(
             reused.as_ref().map_err(|error| error.kind()),
             Err(SessionResourceErrorKind::InvalidInput { .. })
@@ -193,12 +196,12 @@ async fn write_flow(context: &ChildContext, target: &CloudTarget) -> Result<Vec<
             flags: std::collections::HashMap::new(),
         })
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
 
     // ⑤ child：继承区 + 父子关系，沿用 root 关系与 root 的 frozen 原文。
     let child = context.thread(CHILD_SUFFIX);
     let root_frozen = frozen_of(&facade, &root).await?;
-    check(
+    super::cloud_tests::check(
         root_frozen == synthetic_frozen(context),
         "the frozen snapshot must round-trip through the remote store",
     )?;
@@ -213,15 +216,19 @@ async fn write_flow(context: &ChildContext, target: &CloudTarget) -> Result<Vec<
             },
         })
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     lines.push(format!(
         "tree_sessions={} children={}",
         facade
             .list_session_tree(&root)
             .await
-            .map_err(failure)?
+            .map_err(super::cloud_tests::failure)?
             .len(),
-        facade.list_children(&root).await.map_err(failure)?.len()
+        facade
+            .list_children(&root)
+            .await
+            .map_err(super::cloud_tests::failure)?
+            .len()
     ));
 
     // ⑥ 标题 A→B→A：第三次领域调用必须落地（同内容不是「历史重放」，是新的领域调用）。
@@ -236,19 +243,22 @@ async fn write_flow(context: &ChildContext, target: &CloudTarget) -> Result<Vec<
                 },
             )
             .await
-            .map_err(failure)?;
+            .map_err(super::cloud_tests::failure)?;
     }
-    let meta = facade.load_session_meta(&root).await.map_err(failure)?;
+    let meta = facade
+        .load_session_meta(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
     lines.push(format!(
         "title_after_aba={}",
         meta.title.as_deref().unwrap_or("-")
     ));
-    check(
+    super::cloud_tests::check(
         meta.title.as_deref() == Some("title-a"),
         "the third update (same title as the first) must still apply",
     )?;
 
-    facade.close().await.map_err(failure)?;
+    facade.close().await.map_err(super::cloud_tests::failure)?;
     Ok(lines)
 }
 
@@ -280,8 +290,8 @@ async fn recover_flow(context: &ChildContext, target: &CloudTarget) -> Result<Ve
     let recovery = facade
         .recover_session_persistence(&root)
         .await
-        .map_err(failure)?;
-    check(
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         recovery == PersistenceRecovery::Recovered,
         "cold recovery must converge with no unsettled operations",
     )?;
@@ -289,12 +299,15 @@ async fn recover_flow(context: &ChildContext, target: &CloudTarget) -> Result<Ve
     let availability = facade
         .inspect_availability(Some(&root))
         .await
-        .map_err(failure)?;
-    check(
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         availability.execution == Some(ExecutionAvailability::Available),
         "workspace execution must be available in a newly opened process",
     )?;
-    let before = facade.load_session_snapshot(&root).await.map_err(failure)?;
+    let before = facade
+        .load_session_snapshot(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
 
     facade
         .validate_bound_workspace(
@@ -302,38 +315,50 @@ async fn recover_flow(context: &ChildContext, target: &CloudTarget) -> Result<Ve
             peri_acp_types::session_resources::BindingRecheck::Full,
         )
         .await
-        .map_err(failure)?;
-    let after = facade.load_session_snapshot(&root).await.map_err(failure)?;
-    check(
+        .map_err(super::cloud_tests::failure)?;
+    let after = facade
+        .load_session_snapshot(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         after.binding == before.binding && after.frozen == before.frozen,
         "validating workspace evidence must not change canonical binding or frozen bytes",
     )?;
     lines.push("workspace_evidence=validated".to_owned());
 
     // ③ rewind：保留到第一条消息（显式边界），派生计数随之更新。
-    let history = facade.load_session_history(&root).await.map_err(failure)?;
-    check(
+    let history = facade
+        .load_session_history(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         history.len() >= 2,
         "cold read must return the saved history",
     )?;
     facade
         .rewind_history(&root, RewindBoundary::KeepThrough(history[0].id()), &[])
         .await
-        .map_err(failure)?;
-    let rewound = facade.load_session_history(&root).await.map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
+    let rewound = facade
+        .load_session_history(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
     lines.push(format!("rewind_rows={}", rewound.len()));
-    check(rewound.len() == 1, "rewind must keep exactly one message")?;
+    super::cloud_tests::check(rewound.len() == 1, "rewind must keep exactly one message")?;
 
     // ④ 删除整棵树：root 与 child 一起消失，fork 目标是另一棵树，必须仍在。
-    facade.delete_session_tree(&root).await.map_err(failure)?;
-    check(
+    facade
+        .delete_session_tree(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         matches!(
             facade.load_session_meta(&root).await.unwrap_err().kind(),
             SessionResourceErrorKind::NotFound
         ),
         "the deleted root must be gone",
     )?;
-    check(
+    super::cloud_tests::check(
         matches!(
             facade
                 .load_session_history(&child)
@@ -344,17 +369,17 @@ async fn recover_flow(context: &ChildContext, target: &CloudTarget) -> Result<Ve
         ),
         "the deleted tree must take its child",
     )?;
-    check(
+    super::cloud_tests::check(
         !facade
             .load_session_history(&fork)
             .await
-            .map_err(failure)?
+            .map_err(super::cloud_tests::failure)?
             .is_empty(),
         "an unrelated tree must survive the deletion",
     )?;
     lines.push("delete=applied".to_owned());
 
-    facade.close().await.map_err(failure)?;
+    facade.close().await.map_err(super::cloud_tests::failure)?;
     Ok(lines)
 }
 
@@ -387,16 +412,22 @@ async fn read_only_flow(
     let before = listing(&context.home)?;
 
     let facade = open_facade(context, AccessMode::ReadOnly, target).await?;
-    let availability = facade.inspect_availability(None).await.map_err(failure)?;
-    check(
+    let availability = facade
+        .inspect_availability(None)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         availability.access == AccessMode::ReadOnly
             && availability.capabilities == DataCapabilities::HistoryReadOnly,
         "read-only intent must select the read-only capability face",
     )?;
 
     let fork = context.thread(FORK_SUFFIX);
-    let history = facade.load_session_history(&fork).await.map_err(failure)?;
-    check(
+    let history = facade
+        .load_session_history(&fork)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         !history.is_empty(),
         "read-only open must still read the remote session data",
     )?;
@@ -404,9 +435,9 @@ async fn read_only_flow(
     let fork_availability = facade
         .inspect_availability(Some(&fork))
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     // Both fresh and existing HOME read the remote history without execution rights.
-    check(
+    super::cloud_tests::check(
         fork_availability.execution == Some(ExecutionAvailability::ReadOnlyStore),
         "a read-only open must report the read-only execution face",
     )?;
@@ -422,23 +453,23 @@ async fn read_only_flow(
         )
         .await
         .expect_err("read-only open must refuse writes");
-    check(
+    super::cloud_tests::check(
         matches!(error.kind(), SessionResourceErrorKind::ReadOnlyStore),
         &format!(
             "read-only refusal must be typed ({mode}): {}",
-            remote_error_class(&error)
+            super::cloud_tests::remote_error_class(&error)
         ),
     )?;
     lines.push(format!(
         "read_only_mode={mode} rows={} refusal={}",
         history.len(),
-        remote_error_class(&error)
+        super::cloud_tests::remote_error_class(&error)
     ));
 
-    facade.close().await.map_err(failure)?;
+    facade.close().await.map_err(super::cloud_tests::failure)?;
     // 只读打开与只读拒绝都不得在本机留下任何文件（本机库、锁）。
     let after = listing(&context.home)?;
-    check(
+    super::cloud_tests::check(
         before == after,
         &format!("a read-only open must not create local files: before={before:?} after={after:?}"),
     )?;
@@ -455,7 +486,8 @@ fn listing(root: &Path) -> Result<Vec<String>, String> {
         let Ok(entries) = std::fs::read_dir(&directory) else {
             continue;
         };
-        for entry in entries.flatten() {
+        let selected_entries = entries.flatten();
+        for entry in selected_entries {
             let path = entry.path();
             if path.is_dir() {
                 pending.push(path.clone());
@@ -576,7 +608,7 @@ async fn frozen_of(
     match facade
         .load_session_snapshot(id)
         .await
-        .map_err(failure)?
+        .map_err(super::cloud_tests::failure)?
         .frozen
     {
         FrozenState::Present(bytes) => Ok(bytes),

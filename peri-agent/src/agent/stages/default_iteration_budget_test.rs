@@ -1,9 +1,17 @@
-use super::*;
+use crate::agent::react::ReactLLM;
+
+use crate::agent::stages::context::StageContext;
+use crate::agent::stages::LoopResult;
+use crate::messages::BaseMessage;
 use crate::session::config::DEFAULT_AGENT_MAX_ITERATIONS;
 use crate::session::queue::MessageSource;
 use crate::session::store::FrozenContext;
+
+use crate::session::QueuedMessage;
 use crate::session::Session;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 struct RepeatingLlm {
     calls: Arc<AtomicUsize>,
@@ -52,7 +60,7 @@ async fn default_iteration_budget_allows_more_than_500_steps() {
         queue: session.queue().clone(),
     }))
     .build();
-    let result = run_react_loop(context, DEFAULT_AGENT_MAX_ITERATIONS).await;
+    let result = crate::agent::stages::run_react_loop(context, DEFAULT_AGENT_MAX_ITERATIONS).await;
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
     assert_eq!(calls.load(Ordering::SeqCst), 501);
 }

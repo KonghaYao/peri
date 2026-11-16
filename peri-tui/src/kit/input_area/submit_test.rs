@@ -3,12 +3,15 @@
 //! 与 input_area 的其余测试拆开：本模块覆盖「提交出口」——slash 路由、history、
 //! 旧服务端排队缓冲与上传式附件的随行/不丢弃语义。
 
-use super::super::reset_submit_side_effect_state;
-use super::*;
+use super::ACP_STATE;
+use super::INPUT_BUFFER;
+use super::SubmitRequest;
+
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{PENDING_ATTACHMENTS, VIEW_MODELS};
+
 use serial_test::serial;
 
+#[must_use]
 fn make_submit_recorder() -> std::sync::Arc<parking_lot::Mutex<Vec<SubmitRequest>>> {
     std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()))
 }
@@ -22,8 +25,8 @@ fn recorded_submit(
 #[test]
 #[serial]
 fn test_submit_text_model_opens_panel_without_history_or_bubble() {
-    reset_submit_side_effect_state();
-    submit_text("/model".to_string());
+    super::super::reset_submit_side_effect_state();
+    super::submit_text("/model".to_string());
     assert_eq!(
         *crate::kit::atoms::ACTIVE_PANEL.state().read(),
         Some(PanelKind::Model)
@@ -35,9 +38,9 @@ fn test_submit_text_model_opens_panel_without_history_or_bubble() {
 #[test]
 #[serial]
 fn test_submit_text_clear_sends_session_control_without_history_or_bubble() {
-    reset_submit_side_effect_state();
+    super::super::reset_submit_side_effect_state();
     let recorder = make_submit_recorder();
-    dispatch_submit_request(parse_submit_request("/clear").unwrap(), false, |request| {
+    super::dispatch_submit_request(crate::kit::submit_request::parse_submit_request("/clear").expect("submit text clear sends session control without history or bubble: the fixture value must satisfy its target representation"), false, |request| {
         recorder.lock().push(request)
     });
     assert!(crate::kit::atoms::INPUT_HISTORY.state().read().is_empty());
@@ -53,10 +56,10 @@ fn test_submit_text_clear_sends_session_control_without_history_or_bubble() {
 #[test]
 #[serial]
 fn test_submit_text_provider_sends_view_action_without_history_or_bubble() {
-    reset_submit_side_effect_state();
+    super::super::reset_submit_side_effect_state();
     let recorder = make_submit_recorder();
-    dispatch_submit_request(
-        parse_submit_request("/provider").unwrap(),
+    super::dispatch_submit_request(
+        crate::kit::submit_request::parse_submit_request("/provider").expect("submit text provider sends view action without history or bubble: the fixture value must satisfy its target representation"),
         false,
         |request| recorder.lock().push(request),
     );
@@ -73,10 +76,10 @@ fn test_submit_text_provider_sends_view_action_without_history_or_bubble() {
 #[test]
 #[serial]
 fn test_submit_text_compact_appends_bubble_and_history_and_sends_agent_text() {
-    reset_submit_side_effect_state();
+    super::super::reset_submit_side_effect_state();
     let recorder = make_submit_recorder();
-    dispatch_submit_request(
-        parse_submit_request("/compact").unwrap(),
+    super::dispatch_submit_request(
+        crate::kit::submit_request::parse_submit_request("/compact").expect("submit text compact appends bubble and history and sends agent text: the fixture value must satisfy its target representation"),
         false,
         |request| recorder.lock().push(request),
     );
@@ -94,9 +97,9 @@ fn test_submit_text_compact_appends_bubble_and_history_and_sends_agent_text() {
 #[test]
 #[serial]
 fn test_submit_text_unknown_slash_appends_bubble_and_history_and_sends_agent_text() {
-    reset_submit_side_effect_state();
+    super::super::reset_submit_side_effect_state();
     let recorder = make_submit_recorder();
-    dispatch_submit_request(parse_submit_request("/foo").unwrap(), false, |request| {
+    super::dispatch_submit_request(crate::kit::submit_request::parse_submit_request("/foo").expect("submit text unknown slash appends bubble and history and sends agent text: the fixture value must satisfy its target representation"), false, |request| {
         recorder.lock().push(request)
     });
     assert_eq!(crate::kit::atoms::INPUT_HISTORY.state().read().len(), 1);
@@ -112,9 +115,9 @@ fn test_submit_text_unknown_slash_appends_bubble_and_history_and_sends_agent_tex
 #[test]
 #[serial]
 fn test_submit_text_loading_unknown_slash_buffers_agent_text() {
-    reset_submit_side_effect_state();
+    super::super::reset_submit_side_effect_state();
     ACP_STATE.state().write().is_loading = true;
-    submit_text("/foo".to_string());
+    super::submit_text("/foo".to_string());
     assert_eq!(crate::kit::atoms::INPUT_HISTORY.state().read().len(), 1);
     // Slice 3 D4（§10 queued 反转）：loading 提交只入队，**不**发本地气泡——
     // transcript 不得提前出现 user bubble（drain 后才恰一次）。
@@ -129,29 +132,36 @@ fn test_submit_text_loading_unknown_slash_buffers_agent_text() {
 #[test]
 #[serial]
 fn test_submit_text_loading_queue_caps_at_32() {
-    reset_submit_side_effect_state();
+    super::super::reset_submit_side_effect_state();
     ACP_STATE.state().write().is_loading = true;
     for i in 0..33 {
-        submit_text(format!("/c{i}"));
+        super::submit_text(format!("/c{i}"));
     }
     let state = INPUT_BUFFER.state();
     let buf = state.read();
     assert_eq!(buf.len(), 32, "排队上限 32 条");
     assert_eq!(
-        buf.front().unwrap().text,
+        buf.front().expect("submit text loading queue caps at 32: the front fixture operation uses valid inputs").text,
         "/c1",
         "超出上限时队首（最旧）被挤出"
     );
-    assert_eq!(buf.back().unwrap().text, "/c32");
+    assert_eq!(
+        buf.back()
+            .expect(
+                "submit text loading queue caps at 32: the back fixture operation uses valid inputs"
+            )
+            .text,
+        "/c32"
+    );
 }
 
 /// Slice 3 D4：非 loading 提交路径不变——本地气泡 + AgentText 双发。
 #[test]
 #[serial]
 fn test_submit_text_not_loading_sends_bubble_and_agent_text() {
-    reset_submit_side_effect_state();
+    super::super::reset_submit_side_effect_state();
     let recorder = make_submit_recorder();
-    dispatch_submit_request(parse_submit_request("/foo").unwrap(), false, |request| {
+    super::dispatch_submit_request(crate::kit::submit_request::parse_submit_request("/foo").expect("submit text not loading sends bubble and agent text: the fixture value must satisfy its target representation"), false, |request| {
         recorder.lock().push(request)
     });
     assert!(INPUT_BUFFER.state().read().is_empty(), "非 loading 不入队");
@@ -177,22 +187,22 @@ fn pending_png() -> crate::kit::atoms::PendingAttachment {
 #[test]
 #[serial]
 fn test_submit_text_loading_buffers_attachments_with_text() {
-    reset_submit_side_effect_state();
+    super::super::reset_submit_side_effect_state();
     ACP_STATE.state().write().is_loading = true;
     PENDING_ATTACHMENTS.state().write().push(pending_png());
 
-    submit_text("/foo".to_string());
+    super::submit_text("/foo".to_string());
 
     let state = INPUT_BUFFER.state();
     let buf = state.read();
     assert_eq!(buf.len(), 1);
-    assert_eq!(buf.front().unwrap().text, "/foo");
+    assert_eq!(buf.front().expect("submit text loading buffers attachments with text: the front fixture operation uses valid inputs").text, "/foo");
     assert_eq!(
-        buf.front().unwrap().attachments.len(),
+        buf.front().expect("submit text loading buffers attachments with text: the front fixture operation uses valid inputs").attachments.len(),
         1,
         "附件随排队项保留"
     );
-    assert_eq!(buf.front().unwrap().attachments[0].base64_data, "AQID");
+    assert_eq!(buf.front().expect("submit text loading buffers attachments with text: the front fixture operation uses valid inputs").attachments[0].base64_data, "AQID");
     drop(buf);
     assert!(
         PENDING_ATTACHMENTS.state().read().is_empty(),
@@ -204,7 +214,7 @@ fn test_submit_text_loading_buffers_attachments_with_text() {
 #[test]
 #[serial]
 fn test_submit_text_agent_text_carries_pending_attachments() {
-    reset_submit_side_effect_state();
+    super::super::reset_submit_side_effect_state();
     PENDING_ATTACHMENTS.state().write().push(pending_png());
 
     let recorder = make_submit_recorder();
@@ -215,7 +225,7 @@ fn test_submit_text_agent_text_carries_pending_attachments() {
             attachments,
         }
     };
-    dispatch_submit_request(request, false, |request| recorder.lock().push(request));
+    super::dispatch_submit_request(request, false, |request| recorder.lock().push(request));
 
     match recorded_submit(&recorder) {
         Some(SubmitRequest::AgentText { attachments, .. }) => {
@@ -230,10 +240,10 @@ fn test_submit_text_agent_text_carries_pending_attachments() {
 #[test]
 #[serial]
 fn test_submit_text_control_request_keeps_pending_attachments() {
-    reset_submit_side_effect_state();
+    super::super::reset_submit_side_effect_state();
     PENDING_ATTACHMENTS.state().write().push(pending_png());
 
-    submit_text("/clear".to_string());
+    super::submit_text("/clear".to_string());
 
     assert_eq!(
         PENDING_ATTACHMENTS.state().read().len(),
@@ -247,11 +257,11 @@ fn test_submit_text_control_request_keeps_pending_attachments() {
 #[test]
 #[serial]
 fn test_submit_text_image_only_enqueues_when_steer_enabled() {
-    reset_submit_side_effect_state();
+    super::super::reset_submit_side_effect_state();
     crate::kit::steer_state::STEERS.state().write().enabled = true;
     PENDING_ATTACHMENTS.state().write().push(pending_png());
 
-    submit_text(String::new());
+    super::submit_text(String::new());
 
     assert!(
         PENDING_ATTACHMENTS.state().read().is_empty(),
@@ -273,9 +283,9 @@ fn test_submit_text_image_only_enqueues_when_steer_enabled() {
 #[test]
 #[serial]
 fn test_submit_text_loading_clear_shows_notification_without_history_or_buffer() {
-    reset_submit_side_effect_state();
+    super::super::reset_submit_side_effect_state();
     ACP_STATE.state().write().is_loading = true;
-    submit_text("/clear".to_string());
+    super::submit_text("/clear".to_string());
     assert!(crate::kit::atoms::INPUT_HISTORY.state().read().is_empty());
     assert!(VIEW_MODELS.state().read().items.is_empty());
     assert!(INPUT_BUFFER.state().read().is_empty());
@@ -289,7 +299,7 @@ fn test_submit_text_loading_clear_shows_notification_without_history_or_buffer()
 fn test_submit_after_removal_sends_remaining_attachments_only() {
     use peri_acp_types::messages::ContentBlock;
 
-    reset_submit_side_effect_state();
+    super::super::reset_submit_side_effect_state();
     let atom = PENDING_ATTACHMENTS.state();
     {
         let mut pending = atom.write();
@@ -326,7 +336,7 @@ fn test_submit_after_removal_sends_remaining_attachments_only() {
     assert_eq!(images, 1, "发给模型的内容只含剩余图片");
 
     let recorder = make_submit_recorder();
-    dispatch_submit_request(
+    super::dispatch_submit_request(
         SubmitRequest::AgentText {
             text: "看一下".to_string(),
             attachments,
@@ -342,3 +352,7 @@ fn test_submit_after_removal_sends_remaining_attachments_only() {
     }
     atom.write().clear();
 }
+
+use crate::kit::atoms::PENDING_ATTACHMENTS;
+
+use crate::kit::atoms::VIEW_MODELS;

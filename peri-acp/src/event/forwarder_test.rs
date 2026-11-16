@@ -18,7 +18,7 @@ use peri_controller::langfuse::config::LangfuseConfig;
 use peri_controller::langfuse::fake_session::FakeLangfuseSession;
 use peri_controller::langfuse::tracer::LangfuseTracer;
 
-use crate::event::spawn_eventbus_forwarder;
+use crate::event;
 
 #[tokio::test]
 async fn test_suspended_then_resumed_output_remains_fifo_when_forwarder_is_delayed() {
@@ -36,7 +36,7 @@ async fn test_suspended_then_resumed_output_remains_fifo_when_forwarder_is_delay
     let events = Arc::new(Mutex::new(Vec::new()));
     let captured = events.clone();
     let forwarder =
-        spawn_eventbus_forwarder(handles, move |_, event| captured.lock().push(event), None);
+        event::spawn_eventbus_forwarder(handles, move |_, event| captured.lock().push(event), None);
     tokio::time::timeout(Duration::from_secs(3), forwarder)
         .await
         .unwrap()
@@ -94,7 +94,7 @@ async fn test_forwarder_branches_to_bridge_before_mapper() {
     let turn_id = TurnId::new();
     let collected: Arc<Mutex<Vec<ExecutorEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let collected_for_task = Arc::clone(&collected);
-    spawn_eventbus_forwarder(
+    event::spawn_eventbus_forwarder(
         handles,
         move |_source, ev| collected_for_task.lock().push(ev),
         Some(bridge),
@@ -222,7 +222,7 @@ async fn test_forwarder_without_bridge_keeps_mapper_path() {
     let agent_id = AgentId::new();
     let collected: Arc<Mutex<Vec<ExecutorEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let collected_for_task = Arc::clone(&collected);
-    spawn_eventbus_forwarder(
+    event::spawn_eventbus_forwarder(
         handles,
         move |_source, ev| collected_for_task.lock().push(ev),
         None,
@@ -267,7 +267,7 @@ async fn test_forwarder_stage_events_reach_bridge() {
     let turn_id = TurnId::new();
     let collected: Arc<Mutex<Vec<ExecutorEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let collected_for_task = Arc::clone(&collected);
-    spawn_eventbus_forwarder(
+    event::spawn_eventbus_forwarder(
         handles,
         move |_source, ev| collected_for_task.lock().push(ev),
         Some(bridge),
@@ -376,7 +376,7 @@ async fn test_forwarder_shares_snapshot_until_freeze_then_releases_it() {
         tools: vec![],
     });
     drop(bus);
-    let forwarder = spawn_eventbus_forwarder(
+    let forwarder = event::spawn_eventbus_forwarder(
         handles,
         move |_, event| {
             let ExecutorEvent::LlmCallStart { messages, .. } = event else {

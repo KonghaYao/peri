@@ -2,24 +2,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::kit::focus_router;
-use crate::kit::message_area::props::{ScrollbarFields, mouse_in_area};
-use crate::kit::message_area::selection::{
-    AnchorResolution, SlotIndex, capture_selection_anchor, copy_to_clipboard,
-    extract_visual_range_index, relocate_selection_start,
-};
+use crate::kit::message_area::props::ScrollbarFields;
+use crate::kit::message_area::selection::AnchorResolution;
+use crate::kit::message_area::selection::SlotIndex;
 use crate::kit::mouse_router;
 use crate::kit::text_selection::TextSelection;
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::layout::Rect;
 
-use super::{
-    DragAction, DragThrottle, GesturePending, SCROLL_LINES, ScrollPos, ScrollbarDragState,
-    apply_scroll, compute_thumb_geometry, drag_step, freeze_down_index, is_scrollbar_column,
-    position_to_scroll_y, release_upgrades, scroll_frame_ms, selection_bounds_on_release,
-    selection_captures_pointer, selection_position, settle_up, text_selection_accepts_pointer,
-    thumb_start_to_position, update_follow_on_scroll,
-};
+use super::DragAction;
+use super::DragThrottle;
+use super::GesturePending;
+use super::SCROLL_LINES;
+use super::ScrollPos;
+use super::ScrollbarDragState;
 
 // ── 鼠标事件处理 ─────────────────────────────────────────────────────────
 
@@ -219,11 +216,15 @@ pub(in crate::kit::message_area) fn handle_event(
             return EventResult::Ignored;
         }
         if let Some(area) = area_rect {
-            let in_area = mouse_in_area(mouse.row, mouse.column, area);
+            let in_area =
+                crate::kit::message_area::props::mouse_in_area(mouse.row, mouse.column, area);
             // 滚动条几何/命中用收窄前的整幅矩形（缺省回退带内区域，保持旧行为）。
             let sb_area = scrollbar_rect.unwrap_or(area);
-            let selection_captured =
-                selection_captures_pointer(*gesture.read(), text_sel.read().dragging, mouse.kind);
+            let selection_captured = super::selection_captures_pointer(
+                *gesture.read(),
+                text_sel.read().dragging,
+                mouse.kind,
+            );
 
             // ── 滚动条点击/拖拽（优先于文本选区）──
             // [Why] 滚动条列（窗口最右 1 列）以前 fallthrough 到文本选区，
@@ -231,19 +232,20 @@ pub(in crate::kit::message_area) fn handle_event(
             // 拖拽中（drag_active）即使鼠标移出滚动条列也继续滚动条逻辑——
             // 否则会 fallthrough 到文本选区，触发误复制。
             // [§3.1] 滚动条列在居中带之外，命中判定不要求 `in_area`。
-            let on_scrollbar_col = mouse_in_area(mouse.row, mouse.column, sb_area)
-                && is_scrollbar_column(mouse.column, sb_area);
+            let on_scrollbar_col =
+                crate::kit::message_area::props::mouse_in_area(mouse.row, mouse.column, sb_area)
+                    && super::is_scrollbar_column(mouse.column, sb_area);
             let drag_active = scrollbar_drag.read().active;
             if drag_active || (on_scrollbar_col && !selection_captured) {
                 let fields = *scrollbar_fields.read();
                 let max_scroll = fields.content_length.saturating_sub(fields.viewport_length);
-                if let Some(geo) = compute_thumb_geometry(&fields, sb_area) {
+                if let Some(geo) = super::compute_thumb_geometry(&fields, sb_area) {
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) if on_scrollbar_col => {
                             // ▲ 端点（area 顶行）—— 直接跳到顶部
                             if mouse.row == sb_area.y {
                                 scroll_state.write_no_update().set_offset(0);
-                                update_follow_on_scroll(follow_bottom, max_scroll, 0);
+                                super::update_follow_on_scroll(follow_bottom, max_scroll, 0);
                                 request_pages_after_scroll(
                                     scroll_state,
                                     scrollbar_fields,
@@ -257,7 +259,11 @@ pub(in crate::kit::message_area) fn handle_event(
                                 sb_area.y.saturating_add(sb_area.height).saturating_sub(1);
                             if mouse.row == bottom_row {
                                 scroll_state.write_no_update().set_offset(max_scroll);
-                                update_follow_on_scroll(follow_bottom, max_scroll, max_scroll);
+                                super::update_follow_on_scroll(
+                                    follow_bottom,
+                                    max_scroll,
+                                    max_scroll,
+                                );
                                 return EventResult::Consumed;
                             }
                             // thumb / track
@@ -281,11 +287,15 @@ pub(in crate::kit::message_area) fn handle_event(
                                     mouse.row.saturating_sub(sb_area.y).saturating_sub(1) as usize;
                                 let target_thumb_start =
                                     track_click.saturating_sub(geo.thumb_length / 2);
-                                let position = thumb_start_to_position(target_thumb_start, &geo);
-                                let target =
-                                    position_to_scroll_y(position, geo.max_position, max_scroll);
+                                let position =
+                                    super::thumb_start_to_position(target_thumb_start, &geo);
+                                let target = super::position_to_scroll_y(
+                                    position,
+                                    geo.max_position,
+                                    max_scroll,
+                                );
                                 scroll_state.write_no_update().set_offset(target);
-                                update_follow_on_scroll(follow_bottom, max_scroll, target);
+                                super::update_follow_on_scroll(follow_bottom, max_scroll, target);
                                 // 轨道点击可能落在已载入窗口顶端（REQ-C01-1）。
                                 request_pages_after_scroll(
                                     scroll_state,
@@ -311,7 +321,7 @@ pub(in crate::kit::message_area) fn handle_event(
                             {
                                 let d = scrollbar_drag.read();
                                 if now.duration_since(d.last_flush)
-                                    < Duration::from_millis(scroll_frame_ms())
+                                    < Duration::from_millis(super::scroll_frame_ms())
                                 {
                                     return EventResult::Consumed;
                                 }
@@ -324,11 +334,11 @@ pub(in crate::kit::message_area) fn handle_event(
                                 .saturating_sub(sb_area.y)
                                 .saturating_sub(1)
                                 as usize;
-                            let position = thumb_start_to_position(target_track_click, &geo);
+                            let position = super::thumb_start_to_position(target_track_click, &geo);
                             let target =
-                                position_to_scroll_y(position, geo.max_position, max_scroll);
+                                super::position_to_scroll_y(position, geo.max_position, max_scroll);
                             scroll_state.write_no_update().set_offset(target);
-                            update_follow_on_scroll(follow_bottom, max_scroll, target);
+                            super::update_follow_on_scroll(follow_bottom, max_scroll, target);
                             // 拖到顶端同样是「滚动贴边」（REQ-C01-1）。
                             request_pages_after_scroll(
                                 scroll_state,
@@ -381,8 +391,9 @@ pub(in crate::kit::message_area) fn handle_event(
             // [F2] Down 的接收范围是收窄前的外框（居中带左右留白也可起拖）；
             // 后续 Drag/Up 由 Pending/Armed 捕获，或在文本带内接收。
             let outer_area = scrollbar_rect.unwrap_or(area);
-            let in_outer_area = mouse_in_area(mouse.row, mouse.column, outer_area);
-            let accepts_text_pointer = text_selection_accepts_pointer(
+            let in_outer_area =
+                crate::kit::message_area::props::mouse_in_area(mouse.row, mouse.column, outer_area);
+            let accepts_text_pointer = super::text_selection_accepts_pointer(
                 in_area,
                 in_outer_area,
                 selection_captured,
@@ -403,8 +414,8 @@ pub(in crate::kit::message_area) fn handle_event(
                         // 超长内容（>65535 视觉行）下选中中间行不再被 u16 clamp 截断错位。
                         // [F2] 留白起拖时列坐标钳到正文边缘（左 0 / 右 width）。
                         let (visual_row, visual_col) =
-                            selection_position(area, (mouse.column, mouse.row), scroll_y);
-                        let pending = freeze_down_index(
+                            super::selection_position(area, (mouse.column, mouse.row), scroll_y);
+                        let pending = super::freeze_down_index(
                             (mouse.column, mouse.row),
                             (visual_row, visual_col),
                             slot_index,
@@ -427,17 +438,23 @@ pub(in crate::kit::message_area) fn handle_event(
                         let within_throttle_window = {
                             let dt = drag_throttle.read();
                             now.duration_since(dt.last_flush)
-                                < Duration::from_millis(scroll_frame_ms())
+                                < Duration::from_millis(super::scroll_frame_ms())
                         };
-                        match drag_step(pending, (mouse.column, mouse.row), within_throttle_window)
-                        {
+                        match super::drag_step(
+                            pending,
+                            (mouse.column, mouse.row),
+                            within_throttle_window,
+                        ) {
                             DragAction::Upgrade(p) => {
                                 // ── 升级为拖拽（Armed）──
                                 let scroll_y = scroll_state.read().offset();
                                 // [usize 视觉行] 同 Down 分支：不做 u16 clamp，
                                 // 超长内容选区不错位。
-                                let (visual_row, visual_col) =
-                                    selection_position(area, (mouse.column, mouse.row), scroll_y);
+                                let (visual_row, visual_col) = super::selection_position(
+                                    area,
+                                    (mouse.column, mouse.row),
+                                    scroll_y,
+                                );
                                 // 单次 write guard，drop 时只 wake 一次（不是两次）
                                 // start_drag + update_drag 合并到同一 guard 内
                                 {
@@ -450,7 +467,7 @@ pub(in crate::kit::message_area) fn handle_event(
                                     sel_guard.start_drag_anchored(
                                         p.visual.0,
                                         p.visual.1,
-                                        capture_selection_anchor(slot_index, p.visual),
+                                        crate::kit::message_area::selection::capture_selection_anchor(slot_index, p.visual),
                                     );
                                     sel_guard.update_drag(visual_row, visual_col);
                                 }
@@ -468,14 +485,17 @@ pub(in crate::kit::message_area) fn handle_event(
                                 // 现状行为：update_drag 空转（dragging=false 时
                                 // no-op；已升级后的拖拽延续则跟随鼠标）。
                                 let scroll_y = scroll_state.read().offset();
-                                let (visual_row, visual_col) =
-                                    selection_position(area, (mouse.column, mouse.row), scroll_y);
+                                let (visual_row, visual_col) = super::selection_position(
+                                    area,
+                                    (mouse.column, mouse.row),
+                                    scroll_y,
+                                );
                                 let mut sel_guard = text_sel.write();
                                 if sel_guard.dragging {
                                     // [F5] 历史前插后先把起点按身份搬到新索引；
                                     // 身份失效则明确取消（不复制错误内容）。
                                     if matches!(
-                                        relocate_selection_start(slot_index, &mut sel_guard),
+                                        crate::kit::message_area::selection::relocate_selection_start(slot_index, &mut sel_guard),
                                         AnchorResolution::Lost
                                     ) {
                                         sel_guard.clear();
@@ -503,16 +523,21 @@ pub(in crate::kit::message_area) fn handle_event(
                         let mut dragging = text_sel.read().dragging;
                         if !dragging
                             && let Some(p) = pending
-                            && release_upgrades(&p, (mouse.column, mouse.row))
+                            && super::release_upgrades(&p, (mouse.column, mouse.row))
                         {
                             let scroll_y = scroll_state.read().offset();
-                            let (visual_row, visual_col) =
-                                selection_position(area, (mouse.column, mouse.row), scroll_y);
+                            let (visual_row, visual_col) = super::selection_position(
+                                area,
+                                (mouse.column, mouse.row),
+                                scroll_y,
+                            );
                             let mut sel_guard = text_sel.write();
                             sel_guard.start_drag_anchored(
                                 p.visual.0,
                                 p.visual.1,
-                                capture_selection_anchor(slot_index, p.visual),
+                                crate::kit::message_area::selection::capture_selection_anchor(
+                                    slot_index, p.visual,
+                                ),
                             );
                             sel_guard.update_drag(visual_row, visual_col);
                             dragging = true;
@@ -520,7 +545,7 @@ pub(in crate::kit::message_area) fn handle_event(
                         if !dragging {
                             // Pending 未命中（非 entry / 未移动）→ 复位手势，
                             // 本次不产生选区，也不复制。
-                            if settle_up(false, pending.is_some()) {
+                            if super::settle_up(false, pending.is_some()) {
                                 *gesture.write_no_update() = None;
                             }
                             return EventResult::Consumed;
@@ -528,7 +553,7 @@ pub(in crate::kit::message_area) fn handle_event(
                         // Armed 结束时清除任何残留 Pending（正常升级路径已清）。
                         *gesture.write_no_update() = None;
                         // 先 copy 出 normalized_bounds（owned Option），drop read guard
-                        let visual = selection_position(
+                        let visual = super::selection_position(
                             area,
                             (mouse.column, mouse.row),
                             scroll_state.read().offset(),
@@ -536,17 +561,20 @@ pub(in crate::kit::message_area) fn handle_event(
                         let bounds = {
                             let mut sel_guard = text_sel.write();
                             if matches!(
-                                relocate_selection_start(slot_index, &mut sel_guard),
+                                crate::kit::message_area::selection::relocate_selection_start(
+                                    slot_index,
+                                    &mut sel_guard
+                                ),
                                 AnchorResolution::Lost
                             ) {
                                 sel_guard.clear();
                                 None
                             } else {
-                                selection_bounds_on_release(&mut sel_guard, visual)
+                                super::selection_bounds_on_release(&mut sel_guard, visual)
                             }
                         };
                         let extracted: Option<String> = if let Some(((sr, sc), (er, ec))) = bounds {
-                            extract_visual_range_index(
+                            crate::kit::message_area::selection::extract_visual_range_index(
                                 slot_index,
                                 (sr, sc),
                                 (er, ec),
@@ -566,7 +594,7 @@ pub(in crate::kit::message_area) fn handle_event(
 
                         // 复制（独立线程，不阻塞）
                         if let Some(text) = extracted {
-                            copy_to_clipboard(text);
+                            crate::kit::message_area::selection::copy_to_clipboard(text);
                         }
 
                         return EventResult::Consumed;
@@ -602,7 +630,7 @@ pub(in crate::kit::message_area) fn handle_event(
             // ── 滚动处理（区域内外通用）──
             match mouse.kind {
                 MouseEventKind::ScrollDown => {
-                    apply_scroll(
+                    super::apply_scroll(
                         SCROLL_LINES as i32,
                         scroll_state,
                         scrollbar_fields,
@@ -616,7 +644,7 @@ pub(in crate::kit::message_area) fn handle_event(
                     );
                 }
                 MouseEventKind::ScrollUp => {
-                    apply_scroll(
+                    super::apply_scroll(
                         -(SCROLL_LINES as i32),
                         scroll_state,
                         scrollbar_fields,
@@ -666,7 +694,7 @@ pub(in crate::kit::message_area) fn handle_event(
         }
         drop(st);
         // [TRAP] read+write 同 state 同线程冲突——write guard 已 drop 再 read。
-        update_follow_on_scroll(follow_bottom, max_scroll, scroll_state.read().offset());
+        super::update_follow_on_scroll(follow_bottom, max_scroll, scroll_state.read().offset());
         // Ctrl+Up/Home 可以一路滚到已载入窗口顶端（REQ-C01-1）。
         request_pages_after_scroll(scroll_state, scrollbar_fields, follow_bottom, None);
         return EventResult::Consumed;

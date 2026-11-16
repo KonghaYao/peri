@@ -15,6 +15,7 @@ pub(crate) struct OperationScope {
 }
 
 impl OperationScope {
+    #[must_use]
     pub(crate) fn new(session_id: impl Into<String>, reset: u64) -> Self {
         Self {
             session_id: session_id.into(),
@@ -23,6 +24,7 @@ impl OperationScope {
     }
 
     /// 活动会话 id：请求参数与日志用。
+    #[must_use]
     pub(crate) fn session_id(&self) -> &str {
         &self.session_id
     }

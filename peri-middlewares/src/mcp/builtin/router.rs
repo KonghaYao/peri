@@ -303,7 +303,7 @@ fn build_factory(
     workspace: &Path,
 ) -> Result<StandaloneFactory, String> {
     catch_build(declared.name, || {
-        StandaloneFactory::new(declared.legacy_instance, workspace.to_path_buf())
+        StandaloneFactory::try_new(declared.legacy_instance, workspace.to_path_buf())
             .map_err(|error| error.to_string())
     })
 }

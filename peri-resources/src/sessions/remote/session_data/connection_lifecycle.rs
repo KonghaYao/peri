@@ -14,7 +14,7 @@ use super::super::generation::ConnectionFactory;
 use super::super::mutation::{RemoteStore, StoreAccess};
 use super::super::schema::StoreIdentityRead;
 use super::super::session_codec;
-use super::{unsupported_behavior, RemoteSessionData};
+use super::RemoteSessionData;
 
 impl RemoteSessionData {
     /// 取当前连接（已就绪的借用）。
@@ -107,14 +107,14 @@ impl RemoteSessionData {
                 if !(snapshot.matches_build()
                     || (store.access() == StoreAccess::ReadOnly && snapshot.readable())) =>
             {
-                Err(unsupported_behavior(
+                Err(super::unsupported_behavior(
                     "unrecognized remote store schema after reconnect",
                 ))
             }
             StoreIdentityRead::Present(snapshot)
                 if snapshot.store_id.as_str() != self.store_id.as_str() =>
             {
-                Err(unsupported_behavior(
+                Err(super::unsupported_behavior(
                     "reconnect reached a different remote store",
                 ))
             }
@@ -122,7 +122,7 @@ impl RemoteSessionData {
             StoreIdentityRead::Malformed => Err(session_codec::corrupt(
                 "remote session store metadata is not interpretable after reconnect",
             )),
-            StoreIdentityRead::Uninitialized => Err(unsupported_behavior(
+            StoreIdentityRead::Uninitialized => Err(super::unsupported_behavior(
                 "reconnected remote store has no session schema",
             )),
         }

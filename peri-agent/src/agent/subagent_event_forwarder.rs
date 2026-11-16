@@ -29,13 +29,12 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 
-use super::langfuse_bridge::LangfuseBridgeLike;
 use crate::agent::events::AgentEventHandler;
 use crate::agent::events::ExecutorEvent;
-use crate::agent::events_v2::{
-    observe_event_to_executor, render_event_to_executor, state_event_to_executor, EventHandles,
-    ObserveEvent,
-};
+
+use crate::agent::events_v2::EventHandles;
+use crate::agent::events_v2::ObserveEvent;
+use crate::agent::langfuse_bridge::LangfuseBridgeLike;
 
 /// Capture provenance once for the entire child lifecycle, including handoff.
 pub(crate) fn with_child_event_origin(
@@ -148,7 +147,7 @@ async fn forward_subagent_events(
                             );
                             continue;
                         }
-                        if let Some(mut exec_ev) = observe_event_to_executor(ev) {
+                        if let Some(mut exec_ev) = crate::agent::events_v2::observe_event_to_executor(ev) {
                             set_source_agent_id(&mut exec_ev, &child_thread_id);
                             if let Some(h) = &event_handler {
                                 h.on_event(exec_ev);
@@ -183,7 +182,7 @@ async fn forward_subagent_events(
                     if let Some(ref b) = bridge {
                         b.process_render_event(&ev);
                     }
-                    if let Some(mut exec_ev) = render_event_to_executor(ev) {
+                    if let Some(mut exec_ev) = crate::agent::events_v2::render_event_to_executor(ev) {
                         tracing::trace!(
                             target: "agent.subagent_forwarder",
                             child_thread_id = %child_thread_id,
@@ -212,7 +211,7 @@ async fn forward_subagent_events(
                     crate::agent::events_v2::StateEvent::StateSnapshot { .. }
                 );
                 if should_forward {
-                    if let Some(mut exec_ev) = state_event_to_executor(ev) {
+                    if let Some(mut exec_ev) = crate::agent::events_v2::state_event_to_executor(ev) {
                         // 子 Agent 的提醒经父会话转发展示：打上来源，供父视图标注归属。
                         set_source_agent_id(&mut exec_ev, &child_thread_id);
                         if let Some(h) = &event_handler {

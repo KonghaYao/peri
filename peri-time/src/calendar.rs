@@ -1,4 +1,5 @@
-use std::{fmt, time::SystemTime};
+use std::fmt;
+use std::time::SystemTime;
 
 /// The calendar convention selected by the deployment, not by a stored timestamp.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -9,6 +10,7 @@ pub enum CalendarConvention {
 
 impl CalendarConvention {
     /// Native hosts retain their local calendar; Emscripten uses UTC.
+    #[must_use]
     pub const fn deployment_default() -> Self {
         #[cfg(target_os = "emscripten")]
         {
@@ -36,6 +38,7 @@ impl fmt::Display for CalendarDate {
 }
 
 /// Interpret one fixed wall-clock value using the selected calendar convention.
+#[must_use]
 pub fn calendar_date(at: SystemTime, convention: CalendarConvention) -> CalendarDate {
     use chrono::{DateTime, Datelike, Local, Utc};
     let utc: DateTime<Utc> = at.into();
@@ -57,6 +60,7 @@ pub fn calendar_date(at: SystemTime, convention: CalendarConvention) -> Calendar
 }
 
 /// Serialize a wall-clock value in RFC 3339 with an explicit UTC offset.
+#[must_use]
 pub fn format_utc_rfc3339(at: SystemTime) -> String {
     let utc: chrono::DateTime<chrono::Utc> = at.into();
     utc.to_rfc3339()

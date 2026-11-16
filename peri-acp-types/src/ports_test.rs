@@ -1,6 +1,13 @@
 use std::sync::Arc;
 
-use super::*;
+use crate::agents::AgentCatalogEntry;
+
+use crate::ports::AgentCatalogPort;
+use crate::ports::McpPoolPort;
+use crate::ports::McpPoolShutdownReport;
+use crate::ports::McpTaskOwnerPort;
+use crate::ports::McpTaskShutdownReport;
+use crate::ports::ToolSearchPort;
 
 #[derive(Default)]
 struct MockMcpTaskOwner {

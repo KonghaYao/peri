@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::*;
+use super::{ThemeLoadError, ThemeSources};
 use ratatui::style::Color;
 
 fn write_theme(directory: &Path, name: &str, json: serde_json::Value) {

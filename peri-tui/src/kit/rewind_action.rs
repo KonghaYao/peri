@@ -19,10 +19,6 @@ use tracing::{error, info, warn};
 
 use crate::acp_client::AcpTuiClient;
 use crate::i18n;
-use crate::kit::atoms::{
-    ACTIVE_SESSION_ID, REWIND_BUDGET_STATE, REWIND_PREVIEW_FINGERPRINT, REWIND_QUERY_ERROR,
-    REWIND_TARGET_TEXT, RewindBudgetState, RewindFileChange,
-};
 
 /// Rewind 用户操作——由 RewindPopup 通过 REWIND_ACTION_TX 发送。
 #[derive(Debug, Clone)]
@@ -231,3 +227,17 @@ async fn execute_rewind(
 #[cfg(test)]
 #[path = "rewind_action_test.rs"]
 mod tests;
+
+use crate::kit::atoms::ACTIVE_SESSION_ID;
+
+use crate::kit::atoms::REWIND_BUDGET_STATE;
+
+use crate::kit::atoms::REWIND_PREVIEW_FINGERPRINT;
+
+use crate::kit::atoms::REWIND_QUERY_ERROR;
+
+use crate::kit::atoms::REWIND_TARGET_TEXT;
+
+use crate::kit::atoms::RewindBudgetState;
+
+use crate::kit::atoms::RewindFileChange;

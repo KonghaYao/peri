@@ -48,6 +48,7 @@ struct SessionLinks {
 }
 
 impl SessionLinks {
+    #[must_use]
     fn new(last_used: u64) -> Self {
         Self {
             last_used,

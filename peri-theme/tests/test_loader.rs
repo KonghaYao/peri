@@ -1,6 +1,7 @@
 //! 公共 loader API 在独立 HOME 中验证，避免本机主题影响测试或污染环境。
 
-use peri_theme::loader::{ThemeLoadError, list_available_themes, load_theme};
+use peri_theme::loader;
+use peri_theme::loader::ThemeLoadError;
 use ratatui::style::Color;
 
 #[test]
@@ -35,22 +36,25 @@ fn public_loader_uses_isolated_home() {
         return;
     }
 
-    assert_eq!(load_theme("peri-dark").unwrap().name, "peri-dark");
-    assert_eq!(load_theme("peri-light").unwrap().name, "peri-light");
+    assert_eq!(loader::load_theme("peri-dark").unwrap().name, "peri-dark");
+    assert_eq!(loader::load_theme("peri-light").unwrap().name, "peri-light");
     assert_eq!(
-        load_theme("dark").unwrap(),
-        load_theme("peri-dark").unwrap()
+        loader::load_theme("dark").unwrap(),
+        loader::load_theme("peri-dark").unwrap()
     );
     assert_eq!(
-        load_theme("light").unwrap(),
-        load_theme("peri-light").unwrap()
+        loader::load_theme("light").unwrap(),
+        loader::load_theme("peri-light").unwrap()
     );
     assert!(matches!(
-        load_theme("nonexistent"),
+        loader::load_theme("nonexistent"),
         Err(ThemeLoadError::ThemeNotFound(_))
     ));
-    assert_eq!(list_available_themes(), ["nord", "peri-dark", "peri-light"]);
-    let nord = load_theme("nord").unwrap();
+    assert_eq!(
+        loader::list_available_themes(),
+        ["nord", "peri-dark", "peri-light"]
+    );
+    let nord = loader::load_theme("nord").unwrap();
     assert_eq!(nord.name, "nord");
     assert_eq!(nord.palette.accent.primary, Color::Rgb(136, 192, 208));
     assert_eq!(nord.semantic.accent, Color::Rgb(136, 192, 208));

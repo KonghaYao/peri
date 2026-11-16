@@ -20,9 +20,14 @@ use std::time::Duration;
 
 use langfuse_client::client::ExportConfig;
 use langfuse_client::config::{BatcherConfig, Compression, TelemetryConfig};
-use langfuse_client::snapshot::{snapshot_value, SnapshotSource};
+use langfuse_client::snapshot;
+use langfuse_client::snapshot::SnapshotSource;
+use langfuse_client::spool;
 use langfuse_client::spool::native::NativeSpool;
-use langfuse_client::spool::{route_fingerprint, ObjectKind, ObjectMeta, SpoolState, SpoolStore};
+use langfuse_client::spool::ObjectKind;
+use langfuse_client::spool::ObjectMeta;
+use langfuse_client::spool::SpoolState;
+use langfuse_client::spool::SpoolStore;
 use langfuse_client::types::{IngestionEvent, SpanBody, TraceBody};
 use langfuse_client::{Batcher, LangfuseClient, LangfuseError, ShutdownReport, TelemetryEvent};
 use serde_json::{json, Value};
@@ -168,7 +173,7 @@ fn batcher_with(
 
 /// 真实临时根上的 native 暂存；route 必须与同一凭据/端点派生的导出 route 一致。
 fn native_spool(root: &Path, url: &str) -> Arc<dyn SpoolStore> {
-    let route = route_fingerprint(url, PK, SK).expect("route fingerprint");
+    let route = spool::route_fingerprint(url, PK, SK).expect("route fingerprint");
     Arc::new(NativeSpool::open_at(root.to_path_buf(), route, QUOTA_BYTES).expect("native spool"))
 }
 
@@ -356,7 +361,8 @@ fn read_tree(dir: &Path) -> Vec<Vec<u8>> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return bodies;
     };
-    for entry in entries.flatten() {
+    let entries = entries.flatten();
+    for entry in entries {
         let path = entry.path();
         if path.is_dir() {
             bodies.extend(read_tree(&path));
@@ -667,7 +673,7 @@ async fn oversized_frozen_input_is_spooled_and_arrives_byte_identically() {
         expected_input.len()
     );
     let input = batcher
-        .try_freeze(snapshot_value(&value))
+        .try_freeze(snapshot::snapshot_value(&value))
         .expect("freeze ticket");
 
     // 小输出：自定义公开来源，低于阈值 ⇒ 留在内存。

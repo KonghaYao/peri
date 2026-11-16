@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    identity_bytes, version2_database, version3_database, Path, SqliteConnectOptions,
+    SqliteConnection, SqliteThreadStore, ThreadMeta, WorkspaceError, CURRENT_SCHEMA_VERSION,
+};
+use peri_acp_types::store::ThreadStore;
+use sqlx::Connection;
 
 /// 历史 `schema 4` 的登记载荷规范化：只保留 `device`/`inode`，丢弃已退役的创建时间字段。
 ///
@@ -89,10 +94,10 @@ async fn test_upgrade_to_v19_keeps_one_row_per_path_and_preserves_rows() {
     .await;
     assert!(blocked.is_err(), "schema 4 的单列唯一约束必须仍然存在");
     let before = identity_bytes(&mut connection).await;
-    let before_history = history_bytes(&mut connection).await;
+    let before_history = super::history_bytes(&mut connection).await;
     connection.close().await.unwrap();
 
-    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let store = SqliteThreadStore::try_new(&path).await.unwrap();
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
         .fetch_one(&store.database.pool)
         .await
@@ -145,7 +150,7 @@ async fn test_upgrade_to_v19_keeps_one_row_per_path_and_preserves_rows() {
     )
     .await
     .unwrap();
-    let after_history = history_bytes(&mut probe).await;
+    let after_history = super::history_bytes(&mut probe).await;
     probe.close().await.unwrap();
     assert_eq!(
         before_history, after_history,
@@ -223,10 +228,10 @@ async fn assert_registration_upgrade_allows_directory_changes(version: i64) {
         .await
         .unwrap();
     }
-    let old_history = history_bytes(&mut connection).await;
+    let old_history = super::history_bytes(&mut connection).await;
     let old_identity = identity_bytes(&mut connection).await;
     connection.close().await.unwrap();
-    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let store = SqliteThreadStore::try_new(&path).await.unwrap();
     let original = dir.path().join("original");
     std::fs::create_dir(&original).unwrap();
     let workspace = store.resolve_workspace(&original).await.unwrap();
@@ -243,7 +248,7 @@ async fn assert_registration_upgrade_allows_directory_changes(version: i64) {
     let moved = dir.path().join("moved");
     std::fs::rename(&original, &moved).unwrap();
     std::fs::create_dir(&original).unwrap();
-    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let store = SqliteThreadStore::try_new(&path).await.unwrap();
     for cwd in [&moved, &original] {
         let resolved = store.resolve_workspace(cwd).await.unwrap_or_else(|error| {
             panic!("schema {version} 升级后目录 {cwd:?} 必须可登记：{error}")
@@ -276,7 +281,7 @@ async fn assert_registration_upgrade_allows_directory_changes(version: i64) {
     assert_eq!(resolved.project_id, workspace.project_id);
     let mut connection = store.database.pool.acquire().await.unwrap();
     // 精确读取旧会话，不以新增线程的插入顺序推断目标。
-    assert_eq!(history_bytes(&mut connection).await, old_history);
+    assert_eq!(super::history_bytes(&mut connection).await, old_history);
     let after = identity_bytes(&mut connection).await;
     assert!(
         old_identity[2..].iter().all(|row| after.contains(row)),
@@ -361,7 +366,7 @@ async fn test_registration_upgrade_preserves_healthy_v5_composite_registrations(
              FROM workspaces WHERE id = '22222222-2222-4222-8222-222222222222';"
     ).execute(&mut connection).await.unwrap();
     let before = identity_bytes(&mut connection).await;
-    let history = history_bytes(&mut connection).await;
+    let history = super::history_bytes(&mut connection).await;
     connection.close().await.unwrap();
     // 幸存的行：原路径的 '22222222'（同路径 id 最小的一条）与换位路径的 '55555555'；
     // '66666666' 是同一路径的第二条登记，并入后不再有独立行。
@@ -376,14 +381,14 @@ async fn test_registration_upgrade_preserves_healthy_v5_composite_registrations(
     );
     // 首次开库升级，第二次开库保持同一结果；不访问 fixture 中不存在的旧目录。
     for _ in 0..2 {
-        let store = SqliteThreadStore::new(&path).await.unwrap();
+        let store = SqliteThreadStore::try_new(&path).await.unwrap();
         let mut connection = store.database.pool.acquire().await.unwrap();
         assert_eq!(
             identity_bytes(&mut connection).await,
             expected,
             "不同路径的登记必须连 id 一起原样保留，同路径的多条只并入 id 最小的一条"
         );
-        assert_eq!(history_bytes(&mut connection).await, history);
+        assert_eq!(super::history_bytes(&mut connection).await, history);
         let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
             .fetch_one(&mut *connection)
             .await
@@ -409,14 +414,14 @@ async fn test_registration_upgrade_corrupt_v5_rolls_back_all_state() {
     .await
     .unwrap();
     let rows = identity_bytes(&mut connection).await;
-    let history = history_bytes(&mut connection).await;
+    let history = super::history_bytes(&mut connection).await;
     let schema: Vec<(String, Option<String>)> =
         sqlx::query_as("SELECT name, sql FROM sqlite_schema ORDER BY name")
             .fetch_all(&mut connection)
             .await
             .unwrap();
     connection.close().await.unwrap();
-    let error = SqliteThreadStore::new(&path).await.err().unwrap();
+    let error = SqliteThreadStore::try_new(&path).await.err().unwrap();
     assert!(
         matches!(error.downcast_ref::<WorkspaceError>(),
         Some(WorkspaceError::DiscoveryError(message)) if message == "registration rebuild broke references"),
@@ -434,7 +439,7 @@ async fn test_registration_upgrade_corrupt_v5_rolls_back_all_state() {
             .unwrap();
     assert_eq!(after_schema, schema);
     assert_eq!(identity_bytes(&mut connection).await, rows);
-    assert_eq!(history_bytes(&mut connection).await, history);
+    assert_eq!(super::history_bytes(&mut connection).await, history);
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
         .fetch_one(&mut connection)
         .await

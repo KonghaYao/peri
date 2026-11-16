@@ -108,7 +108,7 @@ pub fn build_config_options(
                     want.is_empty() || prov.id == want
                 });
                 provider
-                    .and_then(|p| p.models.get_model(alias))
+                    .and_then(|p| p.models.model(alias))
                     .map(str::to_string)
                     .filter(|m| !m.is_empty())
             })

@@ -1,12 +1,12 @@
-use std::{
-    collections::{BTreeMap, HashSet},
-    sync::Arc,
-};
+use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
 
-use super::{SessionToolCatalog, ToolFilterPolicy};
+use crate::session::tool_catalog::SessionToolCatalog;
+use crate::session::tool_catalog::ToolFilterPolicy;
 use crate::tools::{BaseTool, ToolContext};
 
 struct SourceTool {

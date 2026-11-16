@@ -1,18 +1,40 @@
-use super::*;
+use crate::host::prompt::prompt_turn::execution_failure_to_acp_error;
+use crate::host::prompt::prompt_turn::ACP_TURN_EXECUTION_FAILED_CODE;
 
 /// stdio 部署过滤 rewind/clear：stdio（true）命中 rewind/clear 返回 true。
 #[test]
 fn test_stdio_filters_rewind_and_clear_only_when_stdio() {
     // stdio 开启：rewind / clear（含别名解析后的 fullname）被过滤。
-    assert!(super::stdio_filters_command("core:rewind", true));
-    assert!(super::stdio_filters_command("core:clear", true));
+    assert!(crate::host::prompt::prompt_turn::stdio_filters_command(
+        "core:rewind",
+        true
+    ));
+    assert!(crate::host::prompt::prompt_turn::stdio_filters_command(
+        "core:clear",
+        true
+    ));
     // 其它命令不过滤。
-    assert!(!super::stdio_filters_command("core:compact", true));
-    assert!(!super::stdio_filters_command("core:loop", true));
-    assert!(!super::stdio_filters_command("core:cron", true));
+    assert!(!crate::host::prompt::prompt_turn::stdio_filters_command(
+        "core:compact",
+        true
+    ));
+    assert!(!crate::host::prompt::prompt_turn::stdio_filters_command(
+        "core:loop",
+        true
+    ));
+    assert!(!crate::host::prompt::prompt_turn::stdio_filters_command(
+        "core:cron",
+        true
+    ));
     // 非 stdio（TUI/print）：一律不过滤，rewind/clear 照常作为命令。
-    assert!(!super::stdio_filters_command("core:rewind", false));
-    assert!(!super::stdio_filters_command("core:clear", false));
+    assert!(!crate::host::prompt::prompt_turn::stdio_filters_command(
+        "core:rewind",
+        false
+    ));
+    assert!(!crate::host::prompt::prompt_turn::stdio_filters_command(
+        "core:clear",
+        false
+    ));
 }
 
 /// [AsyncContinuation] 续跑不吞 recall：clone 而非 mem::take，保留在
@@ -23,7 +45,7 @@ fn test_continuation_recall_not_consumed_or_overwritten() {
 
     // 续跑读取：clone（不 take），SessionState 值保持不变
     let mut state_recall = prior_recall.clone();
-    let incoming = take_recall_for_turn(&mut state_recall, true);
+    let incoming = crate::host::prompt::prompt_turn::take_recall_for_turn(&mut state_recall, true);
     assert_eq!(
         incoming, prior_recall,
         "续跑注入侧取到 clone（供 executor 判定后丢弃，不注入）"
@@ -35,7 +57,7 @@ fn test_continuation_recall_not_consumed_or_overwritten() {
 
     // 续跑结束：不回写（result recall 不覆盖保留值）
     let continuation_result_recall = vec!["续跑产生的 recall".to_string()];
-    if recall_overwrite_allowed(true) {
+    if crate::host::prompt::prompt_turn::recall_overwrite_allowed(true) {
         state_recall = continuation_result_recall.clone();
     }
     assert_eq!(
@@ -45,13 +67,14 @@ fn test_continuation_recall_not_consumed_or_overwritten() {
 
     // 对照：用户 prompt 正常 take + 回写
     let mut user_state_recall = prior_recall.clone();
-    let user_incoming = take_recall_for_turn(&mut user_state_recall, false);
+    let user_incoming =
+        crate::host::prompt::prompt_turn::take_recall_for_turn(&mut user_state_recall, false);
     assert_eq!(user_incoming, prior_recall);
     assert!(
         user_state_recall.is_empty(),
         "用户 prompt 应 take 掉 recall"
     );
-    if recall_overwrite_allowed(false) {
+    if crate::host::prompt::prompt_turn::recall_overwrite_allowed(false) {
         user_state_recall = vec!["本轮新 recall".to_string()];
     }
     assert_eq!(user_state_recall, vec!["本轮新 recall".to_string()]);
@@ -64,15 +87,12 @@ fn test_continuation_recall_not_consumed_or_overwritten() {
 // end-turn → 成功 `PromptResponse`。`ExecutionFailureKind` 穷尽映射 + 脱敏
 // 消息基线一并固定。
 mod wire_projection {
-    use peri_acp_types::{
-        error::AgentError,
-        session::{ExecutionFailure, ExecutionFailureKind, EXECUTION_FAILURE_FALLBACK_MESSAGE},
-    };
+    use peri_acp_types::error::AgentError;
+    use peri_acp_types::session::ExecutionFailure;
+    use peri_acp_types::session::ExecutionFailureKind;
+    use peri_acp_types::session::EXECUTION_FAILURE_FALLBACK_MESSAGE;
 
-    use super::{
-        execution_failure_kind_code, execution_failure_to_acp_error, prompt_wire_response,
-        ACP_TURN_EXECUTION_FAILED_CODE,
-    };
+    use super::ACP_TURN_EXECUTION_FAILED_CODE;
 
     #[test]
     fn complete_error_details_survive_acp_projection() {
@@ -100,7 +120,7 @@ mod wire_projection {
             error_category: Some("http_status".into()),
             causes: causes.clone(),
         };
-        let wire = execution_failure_to_acp_error(&failure);
+        let wire = super::execution_failure_to_acp_error(&failure);
         let data = wire.data.expect("error data");
         assert_eq!(data["error_category"], "http_status");
         assert_eq!(data["causes"], serde_json::json!(causes));
@@ -122,7 +142,9 @@ mod wire_projection {
             error_category: Some("storage".into()),
             causes: vec!["SQL token=fixture failed\nconnection reset".into()],
         };
-        let data = execution_failure_to_acp_error(&failure).data.unwrap();
+        let data = super::execution_failure_to_acp_error(&failure)
+            .data
+            .unwrap();
         assert_eq!(data["error_category"], "storage");
         assert_eq!(
             data["causes"][0],
@@ -142,7 +164,7 @@ mod wire_projection {
             ),
         };
         let failure = ExecutionFailure::from_agent_error(&error);
-        let wire = execution_failure_to_acp_error(&failure);
+        let wire = super::execution_failure_to_acp_error(&failure);
         assert_eq!(wire.code, ACP_TURN_EXECUTION_FAILED_CODE);
         assert_eq!(wire.message, error.user_facing_message());
         let data = wire.data.unwrap();
@@ -159,20 +181,28 @@ mod wire_projection {
     #[test]
     fn execution_failure_kind_exhaustive_mapping_pins_named_code() {
         assert_eq!(
-            execution_failure_kind_code(ExecutionFailureKind::Internal),
+            crate::host::prompt::prompt_turn::execution_failure_kind_code(
+                ExecutionFailureKind::Internal
+            ),
             -32000
         );
         assert_eq!(
-            execution_failure_kind_code(ExecutionFailureKind::Internal),
+            crate::host::prompt::prompt_turn::execution_failure_kind_code(
+                ExecutionFailureKind::Internal
+            ),
             ACP_TURN_EXECUTION_FAILED_CODE,
             "Internal 必须使用具名常量（替代调用点 magic number）"
         );
         assert_eq!(
-            execution_failure_kind_code(ExecutionFailureKind::Llm),
+            crate::host::prompt::prompt_turn::execution_failure_kind_code(
+                ExecutionFailureKind::Llm
+            ),
             ACP_TURN_EXECUTION_FAILED_CODE
         );
         assert_eq!(
-            execution_failure_kind_code(ExecutionFailureKind::LlmHttp),
+            crate::host::prompt::prompt_turn::execution_failure_kind_code(
+                ExecutionFailureKind::LlmHttp
+            ),
             ACP_TURN_EXECUTION_FAILED_CODE
         );
     }
@@ -182,7 +212,7 @@ mod wire_projection {
     #[test]
     fn fatal_failure_maps_to_server_error_with_code_message_data() {
         let failure = ExecutionFailure::internal("LLM API error");
-        let err = execution_failure_to_acp_error(&failure);
+        let err = super::execution_failure_to_acp_error(&failure);
         assert_eq!(err.code, ACP_TURN_EXECUTION_FAILED_CODE);
         assert_eq!(err.message, "LLM API error");
         assert_eq!(err.data, Some(serde_json::json!({"kind": "internal"})));
@@ -194,7 +224,7 @@ mod wire_projection {
             status: 421,
             message: "Misdirected Request token=top-secret".to_string(),
         });
-        let err = execution_failure_to_acp_error(&failure);
+        let err = super::execution_failure_to_acp_error(&failure);
 
         assert_eq!(err.code, ACP_TURN_EXECUTION_FAILED_CODE);
         assert!(err.message.contains("LLM HTTP 421"));
@@ -216,7 +246,7 @@ mod wire_projection {
             status: 401,
             message: r#"Unauthorized Authorization:'Bearer auth-secret' api_key="key-secret" endpoint="https://api.example.test/v1?token=query-secret""#.to_string(),
         });
-        let err = execution_failure_to_acp_error(&failure);
+        let err = super::execution_failure_to_acp_error(&failure);
         let wire = serde_json::to_value(&err).expect("AcpError 序列化不应失败");
 
         assert_eq!(wire["data"]["kind"], "llm_http");
@@ -237,7 +267,7 @@ mod wire_projection {
         let failure = ExecutionFailure::from_agent_error(&AgentError::ModelError(
             peri_model::ModelError::http_status(429, "anthropic", Some("req_429")),
         ));
-        let err = execution_failure_to_acp_error(&failure);
+        let err = super::execution_failure_to_acp_error(&failure);
 
         let data = err.data.as_ref().unwrap();
         assert_eq!(data["kind"], "llm_http");
@@ -259,7 +289,7 @@ mod wire_projection {
         let failure = ExecutionFailure::from_agent_error(&AgentError::ModelError(
             peri_model::ModelError::http_status(401, credential, Some(credential)),
         ));
-        let err = execution_failure_to_acp_error(&failure);
+        let err = super::execution_failure_to_acp_error(&failure);
         let wire = serde_json::to_string(&err).expect("safe ACP error should serialize");
 
         assert!(wire.contains(credential));
@@ -278,7 +308,7 @@ mod wire_projection {
             diagnostic: None,
         };
 
-        let err = execution_failure_to_acp_error(&failure);
+        let err = super::execution_failure_to_acp_error(&failure);
         assert_eq!(err.data, Some(serde_json::json!({"kind": "llm"})));
     }
 
@@ -286,7 +316,7 @@ mod wire_projection {
     #[test]
     fn fatal_failure_empty_message_falls_back_to_nonempty_safe_text() {
         let failure = ExecutionFailure::internal("");
-        let err = execution_failure_to_acp_error(&failure);
+        let err = super::execution_failure_to_acp_error(&failure);
         assert_eq!(err.code, ACP_TURN_EXECUTION_FAILED_CODE);
         assert_eq!(err.message, EXECUTION_FAILURE_FALLBACK_MESSAGE);
         assert!(!err.message.is_empty(), "fallback message 必须非空");
@@ -297,7 +327,7 @@ mod wire_projection {
     #[test]
     fn prompt_wire_response_fatal_returns_error_with_allowlist_data() {
         let failure = ExecutionFailure::internal("middleware fatal");
-        let err = prompt_wire_response(
+        let err = crate::host::prompt::prompt_turn::prompt_wire_response(
             Some(&failure),
             crate::session::executor::PromptStopReason::EndTurn,
             0,
@@ -316,7 +346,7 @@ mod wire_projection {
     /// 用户 cancel → 成功 `PromptResponse(Cancelled)`，不升级为请求错误。
     #[test]
     fn prompt_wire_response_cancel_is_success_prompt_response() {
-        let value = prompt_wire_response(
+        let value = crate::host::prompt::prompt_turn::prompt_wire_response(
             None,
             crate::session::executor::PromptStopReason::Cancelled,
             0,
@@ -329,7 +359,7 @@ mod wire_projection {
     /// 最大轮数 → 成功 `PromptResponse(MaxTurnRequests)`。
     #[test]
     fn prompt_wire_response_max_turn_requests_is_success_prompt_response() {
-        let value = prompt_wire_response(
+        let value = crate::host::prompt::prompt_turn::prompt_wire_response(
             None,
             crate::session::executor::PromptStopReason::MaxTurnRequests,
             0,
@@ -341,7 +371,7 @@ mod wire_projection {
 
     #[test]
     fn prompt_wire_response_max_tokens_preserves_incomplete_stop_reason() {
-        let value = prompt_wire_response(
+        let value = crate::host::prompt::prompt_turn::prompt_wire_response(
             None,
             crate::session::executor::PromptStopReason::MaxTokens,
             0,
@@ -354,9 +384,12 @@ mod wire_projection {
     /// 正常完成 → 成功 `PromptResponse(EndTurn)`。
     #[test]
     fn prompt_wire_response_end_turn_is_success_prompt_response() {
-        let value =
-            prompt_wire_response(None, crate::session::executor::PromptStopReason::EndTurn, 0)
-                .expect("正常完成必须返回成功 PromptResponse");
+        let value = crate::host::prompt::prompt_turn::prompt_wire_response(
+            None,
+            crate::session::executor::PromptStopReason::EndTurn,
+            0,
+        )
+        .expect("正常完成必须返回成功 PromptResponse");
         assert_eq!(value["stopReason"], "end_turn", "{value}");
         assert!(value.get("error").is_none());
     }
@@ -378,7 +411,7 @@ mod wire_projection {
         assert_eq!(failure.http_status, None);
         assert!(failure.diagnostic.is_none(), "非模型失败不得携带模型诊断");
 
-        let err = prompt_wire_response(
+        let err = crate::host::prompt::prompt_turn::prompt_wire_response(
             Some(&failure),
             crate::session::executor::PromptStopReason::EndTurn,
             0,
@@ -414,15 +447,23 @@ mod wire_projection {
 // [回归测试] §7.3 有界等待摘要：无未结算任务时响应保持原形；有则携带 pending:n。
 #[test]
 fn test_prompt_wire_response_carries_pending_tasks_only_when_unsettled() {
-    let settled =
-        prompt_wire_response(None, crate::session::executor::PromptStopReason::EndTurn, 0).unwrap();
+    let settled = crate::host::prompt::prompt_turn::prompt_wire_response(
+        None,
+        crate::session::executor::PromptStopReason::EndTurn,
+        0,
+    )
+    .unwrap();
     assert!(
         settled.get("_meta").is_none_or(serde_json::Value::is_null),
         "无未结算任务不得附加 pending 标记: {settled}"
     );
 
-    let pending =
-        prompt_wire_response(None, crate::session::executor::PromptStopReason::EndTurn, 3).unwrap();
+    let pending = crate::host::prompt::prompt_turn::prompt_wire_response(
+        None,
+        crate::session::executor::PromptStopReason::EndTurn,
+        3,
+    )
+    .unwrap();
     assert_eq!(pending["_meta"]["peri"]["pendingTasks"], 3, "{pending}");
     assert_eq!(pending["stopReason"], "end_turn", "{pending}");
 }

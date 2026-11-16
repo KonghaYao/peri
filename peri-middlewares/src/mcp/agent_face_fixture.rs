@@ -23,12 +23,14 @@ use peri_mcp_workspace::{
 };
 
 use super::apps::McpCapabilityProfile;
-use super::builtin::runtime::{
-    spawn_builtin_transport_with_handler, BuiltinInstanceSupervisor, BUILTIN_CONVERGE_TIMEOUT,
-};
-use super::client::{
-    serve_client_auto, ClientStatus, McpClientHandle, McpClientPool, McpServiceWrapper,
-};
+use super::builtin::runtime;
+use super::builtin::runtime::BuiltinInstanceSupervisor;
+use super::builtin::runtime::BUILTIN_CONVERGE_TIMEOUT;
+use super::client;
+use super::client::ClientStatus;
+use super::client::McpClientHandle;
+use super::client::McpClientPool;
+use super::client::McpServiceWrapper;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -54,13 +56,13 @@ impl AgentFaceFixture {
             ResourceScope::Project,
         ));
         let (service, supervisor, pool) = async move {
-            let transport = spawn_builtin_transport_with_handler(
+            let transport = runtime::spawn_builtin_transport_with_handler(
                 "workspace",
                 WorkspaceMcpServer::new(cwd.to_string_lossy().as_ref(), None).with_resources(input),
             );
             let (io, supervisor) = transport.into_parts();
             let service =
-                serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+                client::serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
                     .await
                     .expect("builtin 握手不得超时（同进程链路）")
                     .expect("builtin 握手不得失败");

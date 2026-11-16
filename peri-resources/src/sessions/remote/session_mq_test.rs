@@ -423,7 +423,8 @@ async fn query_clear_and_tree_deletion_follow_the_thread_scope() {
     let main = thread("mq-thread");
     let other = thread("other-thread");
     let ids = [MessageId::new(), MessageId::new()];
-    for (index, id) in ids.iter().enumerate() {
+    let indexed_entries = ids.iter().enumerate();
+    for (index, id) in indexed_entries {
         fixture
             .data
             .mq_enqueue(&main, input(*id, &format!("message {index}")))

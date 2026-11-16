@@ -13,6 +13,7 @@ pub(super) struct SessionLoadReservationState {
 }
 
 impl SessionLoadReservationState {
+    #[must_use]
     pub(super) fn new(epoch_tx: watch::Sender<u64>) -> Self {
         Self {
             reservations: Mutex::new(SessionLoadReservations::default()),
@@ -21,7 +22,10 @@ impl SessionLoadReservationState {
     }
 
     pub(super) fn pending(&self) -> usize {
-        self.reservations.lock().unwrap().pending()
+        self.reservations
+            .lock()
+            .expect("reservations mutex must not be poisoned")
+            .pending()
     }
 }
 
@@ -56,6 +60,7 @@ impl SessionLoadReservations {
         self.unclaimed.retain(|candidate| *candidate != operation);
     }
 
+    #[must_use]
     pub(super) fn pending(&self) -> usize {
         self.pending
     }
@@ -78,6 +83,7 @@ pub(crate) struct SessionLoadReservation {
 }
 
 impl SessionLoadReservation {
+    #[must_use]
     pub(super) fn new(
         state: Arc<SessionLoadReservationState>,
         operation: SessionOperationId,
@@ -86,6 +92,7 @@ impl SessionLoadReservation {
     }
 
     /// 本次预约的操作身份；`load` 切换与队列车道都使用它。
+    #[must_use]
     pub(super) fn operation(&self) -> SessionOperationId {
         self.operation
     }
@@ -93,7 +100,11 @@ impl SessionLoadReservation {
 
 impl Drop for SessionLoadReservation {
     fn drop(&mut self) {
-        let mut reservations = self.state.reservations.lock().unwrap();
+        let mut reservations = self
+            .state
+            .reservations
+            .lock()
+            .expect("state.reservations mutex must not be poisoned");
         reservations.release(self.operation);
         drop(reservations);
         self.state

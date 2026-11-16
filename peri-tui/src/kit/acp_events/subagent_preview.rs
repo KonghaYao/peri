@@ -3,7 +3,7 @@
 
 use super::{BridgeState, TuiRenderUnit};
 use crate::kit::acp_types::subagent_preview::{STORE_BYTES, TERMINAL_BYTES, TERMINAL_ENTRIES};
-use crate::kit::retained_bytes::{SeenAllocations, retained_unit_bytes};
+use crate::kit::retained_bytes::SeenAllocations;
 
 pub(super) fn enforce(state: &mut BridgeState) {
     let (mut changed, mut retired) = state.current_turn.bound_subagent_previews();
@@ -11,7 +11,9 @@ pub(super) fn enforce(state: &mut BridgeState) {
         .committed
         .iter()
         .filter(|unit| matches!(unit, TuiRenderUnit::TuiSubAgentGroup(_)))
-        .map(|unit| retained_unit_bytes(unit, &mut SeenAllocations::default()))
+        .map(|unit| {
+            crate::kit::retained_bytes::retained_unit_bytes(unit, &mut SeenAllocations::default())
+        })
         .sum();
     for index in 0..state.committed.len() {
         if bytes <= STORE_BYTES {
@@ -23,7 +25,10 @@ pub(super) fn enforce(state: &mut BridgeState) {
         if group.view_models.is_empty() {
             continue;
         }
-        let before = retained_unit_bytes(&state.committed[index], &mut SeenAllocations::default());
+        let before = crate::kit::retained_bytes::retained_unit_bytes(
+            &state.committed[index],
+            &mut SeenAllocations::default(),
+        );
         // Copy only bounded header metadata; do not COW-clone every nested body.
         let mut next = group.clone();
         next.view_models = im::Vector::new();
@@ -32,7 +37,10 @@ pub(super) fn enforce(state: &mut BridgeState) {
         state
             .committed
             .set(index, TuiRenderUnit::TuiSubAgentGroup(next));
-        let after = retained_unit_bytes(&state.committed[index], &mut SeenAllocations::default());
+        let after = crate::kit::retained_bytes::retained_unit_bytes(
+            &state.committed[index],
+            &mut SeenAllocations::default(),
+        );
         let freed = before.saturating_sub(after);
         bytes = bytes.saturating_sub(freed);
         changed = true;
@@ -41,16 +49,22 @@ pub(super) fn enforce(state: &mut BridgeState) {
     // groups. Its live task remains independently represented by the task layer.
     let (mut count, mut retained) = (0usize, 0usize);
     let mut remove = Vec::new();
-    for (index, unit) in state.committed.iter().enumerate().rev() {
-        if !matches!(unit, TuiRenderUnit::TuiSubAgentGroup(_)) {
-            continue;
-        }
-        let size = retained_unit_bytes(unit, &mut SeenAllocations::default());
-        if count >= TERMINAL_ENTRIES || retained.saturating_add(size) > TERMINAL_BYTES {
-            remove.push(index);
-        } else {
-            count += 1;
-            retained += size;
+    {
+        let iteration_items = state.committed.iter().enumerate().rev();
+        for (index, unit) in iteration_items {
+            if !matches!(unit, TuiRenderUnit::TuiSubAgentGroup(_)) {
+                continue;
+            }
+            let size = crate::kit::retained_bytes::retained_unit_bytes(
+                unit,
+                &mut SeenAllocations::default(),
+            );
+            if count >= TERMINAL_ENTRIES || retained.saturating_add(size) > TERMINAL_BYTES {
+                remove.push(index);
+            } else {
+                count += 1;
+                retained += size;
+            }
         }
     }
     for index in remove {

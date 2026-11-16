@@ -4,7 +4,12 @@
 //! 分类。同一份语义在远端 adapter 上由 `remote/session_history_page_test.rs` 断言（两个
 //! 后端必须同形）。
 
-use super::*;
+use super::{
+    BaseMessage, HashMap, PersistedPayload, SqliteSessionData, SqliteThreadStore, TempDir,
+};
+use crate::sessions::data::SessionDataPort;
+use peri_acp_types::store::ThreadStore;
+
 use peri_acp_types::history_page::{HistoryCursorError, HistoryForwardCursor};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::SessionResourceErrorKind;
@@ -60,13 +65,13 @@ fn model_only_reminder() -> PersistedPayload {
 async fn session_with_history(
     history: &[PersistedPayload],
 ) -> (SqliteThreadStore, SqliteSessionData, TempDir) {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
-    data.save_new_session(&session(
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
+    data.save_new_session(&super::session(
         SEGMENT_SESSION,
         workspace.cwd.to_str().unwrap(),
         &workspace,
-        frozen("history-segment"),
+        super::frozen("history-segment"),
     ))
     .await
     .unwrap();
@@ -327,7 +332,9 @@ async fn history_segment_gives_an_oversized_entry_its_own_segment() {
 async fn history_segment_length_is_decided_by_bytes_not_limit() {
     let history = messages(4);
     let (_store, data, _directory) = session_with_history(&history).await;
-    let one_row = serialize_persisted_payload(&history[3]).unwrap().len();
+    let one_row = super::serialize_persisted_payload(&history[3])
+        .unwrap()
+        .len();
 
     // 预算只够一行、limit 很大：段长由字节决定（每段一行）。
     let segments = replay_segments(&data, 10, one_row).await;

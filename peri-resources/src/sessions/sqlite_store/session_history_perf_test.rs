@@ -43,16 +43,16 @@ use super::history::{
     HISTORY_SEGMENT_NEXT_SQL, HISTORY_SEGMENT_TAIL_SQL,
 };
 use crate::sessions::sqlite_store::compaction::ACTIVE_FLAGS_SQL;
-use crate::sessions::sqlite_store::context::{
-    meta_by_id_statement_with, ACTIVE_PAYLOADS_SQL, INHERITED_CONTEXT_SQL, PARENT_THREAD_ID_SQL,
-};
+use crate::sessions::sqlite_store::context::ACTIVE_PAYLOADS_SQL;
+use crate::sessions::sqlite_store::context::INHERITED_CONTEXT_SQL;
+use crate::sessions::sqlite_store::context::PARENT_THREAD_ID_SQL;
 use crate::sessions::sqlite_store::row_mapping::THREAD_META_COLUMNS;
 use peri_acp_types::history_page::HistoryCursor;
 use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
 };
-use peri_acp_types::store::{serialize_persisted_payload, PersistedPayload};
+use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -286,8 +286,8 @@ async fn build_fixture(
                         // 行 id 取载荷自己的 id：生产 `append_history` 就是这么写的，
                         // 存储层读取时会复核「行内 ID 与主键一致」。
                         let message_id = payload.id().as_uuid().to_string();
-                        let content =
-                            serialize_persisted_payload(&payload).expect("归档载荷可序列化");
+                        let content = peri_acp_types::store::serialize_persisted_payload(&payload)
+                            .expect("归档载荷可序列化");
                         (message_id, content)
                     }
                     ArchivedBody::Undecodable => (
@@ -322,7 +322,8 @@ async fn build_fixture(
         let payload =
             PersistedPayload::Message(BaseMessage::human(live_text(index, LIVE_BODY_BYTES)));
         let id = payload.id();
-        let content = serialize_persisted_payload(&payload).expect("有效载荷可序列化");
+        let content =
+            peri_acp_types::store::serialize_persisted_payload(&payload).expect("有效载荷可序列化");
         live_bytes += content.len();
         live_ids.push(id);
         live_rows.push(FixtureRow {
@@ -359,9 +360,9 @@ async fn build_fixture(
 // ── 计划证据 ──────────────────────────────────────────────────────────────────
 
 /// 计划参数：显式枚举，绑定形状与生产调用一致（`EXPLAIN` 不执行，值不参与计划）。
-enum Param<'a> {
-    Text(&'a str),
-    OptionalText(Option<&'a str>),
+enum Param<'query> {
+    Text(&'query str),
+    OptionalText(Option<&'query str>),
     Integer(i64),
 }
 
@@ -394,7 +395,8 @@ async fn explain_plan(pool: &SqlitePool, sql: &str, params: &[Param<'_>]) -> Vec
 
 /// 初始恢复（门面 `load_active_snapshot`）的语句链与计划，顺序 = `session_data.rs` 里的执行顺序。
 async fn restore_chain_plans(pool: &SqlitePool, thread: &str) -> Vec<PlanEvidence> {
-    let meta = meta_by_id_statement_with(THREAD_META_COLUMNS);
+    let meta =
+        crate::sessions::sqlite_store::context::meta_by_id_statement_with(THREAD_META_COLUMNS);
     vec![
         PlanEvidence {
             label: "load_meta_on",
@@ -693,7 +695,7 @@ fn decoded_bytes(snapshot: &ActiveSessionSnapshot) -> usize {
         .payloads
         .iter()
         .map(|payload| {
-            serialize_persisted_payload(payload)
+            peri_acp_types::store::serialize_persisted_payload(payload)
                 .map(|encoded| encoded.len())
                 .unwrap_or(0)
         })

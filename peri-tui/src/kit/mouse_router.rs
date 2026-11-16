@@ -9,17 +9,18 @@
 //! （弹窗矩形/面板区域外放行给消息区滚动）；点击类事件不受影响，仍由
 //! `is_occluded` 全遮挡。
 
-use crate::kit::atoms::{ACTIVE_PANEL, PANEL_AREA, POPUP_AREA, POPUP_KIND};
 use ratatui_kit::ratatui::layout::Rect;
 
 /// 任何前景模态层（弹窗/面板）激活时返回 true，背景组件应让路（返回 `EventResult::Ignored`）。
 ///
 /// 遮挡集集中定义：新增浮层类型只需改这里，背景组件零改动。
+#[must_use]
 pub fn is_occluded() -> bool {
     POPUP_KIND.state().read().is_some() || ACTIVE_PANEL.state().read().is_some()
 }
 
 /// 仅弹窗层（不含面板）——底栏 D4：面板打开时仍可点 BgTask 行，弹窗仍挡。
+#[must_use]
 pub fn is_popup_active() -> bool {
     POPUP_KIND.state().read().is_some()
 }
@@ -66,6 +67,14 @@ fn rect_contains(x: u16, y: u16, rect: Rect) -> bool {
     let bottom = rect.y.saturating_add(rect.height);
     x >= rect.x && x < right && y >= rect.y && y < bottom
 }
+
+use crate::kit::atoms::ACTIVE_PANEL;
+
+use crate::kit::atoms::PANEL_AREA;
+
+use crate::kit::atoms::POPUP_AREA;
+
+use crate::kit::atoms::POPUP_KIND;
 
 #[cfg(test)]
 mod tests {

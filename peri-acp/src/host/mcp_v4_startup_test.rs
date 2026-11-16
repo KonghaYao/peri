@@ -22,23 +22,23 @@
 
 #![cfg(not(windows))]
 
-use std::{
-    ffi::OsString,
-    path::Path,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex, MutexGuard, OnceLock,
-    },
-};
+use parking_lot::MutexGuard;
+use std::ffi::OsString;
+use std::path::Path;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use futures::stream;
-use peri_acp_types::{
-    event::{ExecutorEvent, TurnStatus},
-    messages::{BaseMessage, MessageContent},
-    ports::McpPoolPort,
-    session::ExecutionFailureKind,
-};
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::event::TurnStatus;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::ports::McpPoolPort;
+use peri_acp_types::session::ExecutionFailureKind;
 use peri_middlewares::mcp::{ClientStatus, McpClientPool, McpInitStatus, McpTaskOwner};
 use peri_model::{
     Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult, ModelStream,
@@ -47,9 +47,8 @@ use peri_model::{
 use serial_test::serial;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
-use super::executor_flow_tests::{
-    make_session_context, make_stage_build, make_turn_input, run_session_loop, MockEventSink,
-};
+use super::executor_flow_tests;
+use super::executor_flow_tests::MockEventSink;
 use crate::session::executor::{PromptStopReason, SessionContext};
 
 /// 受控 stdio MCP 对端。只实现启动准入涉及的方法：
@@ -129,13 +128,10 @@ impl HomeRedirect {
     const BUILTIN_INJECTION_ENV: &'static str = "PERI_MCP_BUILTIN";
 
     fn set(home: &Path) -> Self {
-        static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        static HOME_LOCK: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
         // 一个用例 panic 不得毒化 HOME 重定向，使后续用例连带失败（HOME 由 Drop
-        // 恢复，中毒锁不影响环境事实）。
-        let lock = HOME_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        // 恢复；此锁不记录中毒状态）。
+        let lock = HOME_LOCK.get_or_init(|| parking_lot::Mutex::new(())).lock();
         let previous = std::env::var_os("HOME");
         std::env::set_var("HOME", home);
         let previous_builtin_injection = std::env::var_os(Self::BUILTIN_INJECTION_ENV);
@@ -211,7 +207,7 @@ impl Model for CountingModel {
     ) -> ModelResult<ModelStream> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.requests.lock().unwrap().push(request);
-        let response = ModelResponse::new(
+        let response = ModelResponse::try_new(
             ModelMessage::assistant_text("done"),
             StopReason::EndTurn,
             None,
@@ -284,7 +280,7 @@ impl McpStartupHarness {
 
     /// 注入 fixture pool 的 session 装配面（真实 assembler 会据此构造 McpMiddleware）。
     async fn session_context(&self, session_id: &str) -> SessionContext {
-        let mut ctx = make_session_context(session_id).await;
+        let mut ctx = executor_flow_tests::make_session_context(session_id).await;
         ctx.mcp_pool = Some(Arc::clone(&self.pool) as Arc<dyn McpPoolPort>);
         ctx
     }
@@ -293,7 +289,7 @@ impl McpStartupHarness {
     async fn await_status(&self, server: &str, expect: &str, predicate: fn(&ClientStatus) -> bool) {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
-            if let Some(handle) = self.pool.get_client(server) {
+            if let Some(handle) = self.pool.client(server) {
                 if predicate(&handle.status) {
                     return;
                 }
@@ -353,16 +349,16 @@ async fn run_prompt(
     let model = Arc::clone(model);
     let mut ctx = ctx;
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model) as Arc<dyn Model>));
-    let turn = make_turn_input(
+    let turn = executor_flow_tests::make_turn_input(
         Arc::clone(sink) as Arc<dyn crate::session::event_sink::EventSink>,
         MessageContent::text("system mcp startup probe"),
         false,
         vec![],
-        make_stage_build(&ctx),
+        executor_flow_tests::make_stage_build(&ctx),
     );
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        run_session_loop(ctx, turn),
+        executor_flow_tests::run_session_loop(ctx, turn),
     )
     .await
     .expect("prompt 不得挂起")
@@ -858,7 +854,7 @@ async fn builtin_injection_off_leaves_only_fixture_servers() {
 
     let mut servers: Vec<String> = harness
         .pool
-        .get_all_clients()
+        .clients()
         .into_iter()
         .map(|handle| handle.name.clone())
         .collect();
@@ -870,7 +866,7 @@ async fn builtin_injection_off_leaves_only_fixture_servers() {
     );
     for instance in ["web", "artifact"] {
         assert!(
-            harness.pool.get_client(instance).is_none(),
+            harness.pool.client(instance).is_none(),
             "off 时不得注册 builtin 实例 `{instance}`"
         );
     }

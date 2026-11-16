@@ -1,4 +1,23 @@
-use super::*;
+use super::default_requires_approval;
+use super::invocation_fixture;
+use super::json;
+use super::AgentError;
+use super::Arc;
+use super::BaseTool;
+use super::BuiltinInstanceContext;
+use super::BuiltinServerExit;
+use super::CallToolRequestParams;
+use super::ClientStatus;
+use super::ErrorCode;
+use super::McpClientHandle;
+use super::McpClientPool;
+use super::PermissionMiddleware;
+use super::RecordingBroker;
+use super::StubTool;
+use super::TappedLink;
+use super::UserInteractionBroker;
+use super::Value;
+use super::LARGE_INPUT_BYTES;
 use crate::mcp::builtin::runtime::BUILTIN_DUPLEX_BUF;
 
 // B. 线路观测（per-instance wire，A13 ④）：现代握手 / 审批两态 / 大 payload / 不串
@@ -8,7 +27,7 @@ use crate::mcp::builtin::runtime::BUILTIN_DUPLEX_BUF;
 /// **线路全程无 `initialize`**），且 `tools/list` 真的上了线路、清单等于注册表声明。
 #[tokio::test]
 async fn web_instance_wire_uses_modern_discover_and_lists_tools() {
-    let web = find("web").expect("web 已实现");
+    let web = super::find("web").expect("web 已实现");
     let stubs: Vec<Arc<dyn BaseTool>> = web
         .tools
         .iter()
@@ -36,7 +55,7 @@ async fn web_instance_wire_uses_modern_discover_and_lists_tools() {
 
     let served: Vec<String> = link
         .pool
-        .get_client("web")
+        .client("web")
         .expect("web 必须已连接")
         .tools
         .iter()
@@ -62,7 +81,7 @@ async fn web_instance_wire_uses_modern_discover_and_lists_tools() {
 /// （归一不得泄漏到 wire，§3 IF-D15 / §9 规则 11）。
 #[tokio::test]
 async fn direct_builtin_tool_call_passes_approval_then_touches_wire_once() {
-    let web = find("web").expect("web 已实现");
+    let web = super::find("web").expect("web 已实现");
     let declaration = &web.tools[0];
     assert!(declaration.direct, "本用例要求该工具声明为 direct");
     let stub = Arc::new(StubTool::fixed(
@@ -72,7 +91,7 @@ async fn direct_builtin_tool_call_passes_approval_then_touches_wire_once() {
     let stub_tool: Arc<dyn BaseTool> = Arc::clone(&stub) as Arc<dyn BaseTool>;
     let link = TappedLink::connect(web, "runtime-fixture-web", vec![stub_tool]).await;
 
-    let call = tool_call(
+    let call = super::tool_call(
         declaration.legacy_name,
         json!({ "query": "builtin runtime approval" }),
     );
@@ -82,7 +101,7 @@ async fn direct_builtin_tool_call_passes_approval_then_touches_wire_once() {
         default_requires_approval,
     );
 
-    let results = run_approval_chain(&middleware, &call).await;
+    let results = super::run_approval_chain(&middleware, &call).await;
     assert_eq!(broker.requests(), 1, "恰好一次审批请求");
     assert_eq!(
         broker.seen(),
@@ -140,13 +159,13 @@ async fn direct_builtin_tool_call_passes_approval_then_touches_wire_once() {
 /// 为 0（链路本身是活的，handshake 帧在），结果为拒绝语义，且**不重试**（只审批一次）。
 #[tokio::test]
 async fn rejected_direct_tool_call_never_reaches_the_wire() {
-    let web = find("web").expect("web 已实现");
+    let web = super::find("web").expect("web 已实现");
     let declaration = &web.tools[0];
     let stub = Arc::new(StubTool::fixed(declaration.original_name, "must-not-run"));
     let stub_tool: Arc<dyn BaseTool> = Arc::clone(&stub) as Arc<dyn BaseTool>;
     let link = TappedLink::connect(web, "runtime-fixture-web", vec![stub_tool]).await;
 
-    let call = tool_call(
+    let call = super::tool_call(
         declaration.legacy_name,
         json!({ "query": "builtin runtime rejection" }),
     );
@@ -156,7 +175,7 @@ async fn rejected_direct_tool_call_never_reaches_the_wire() {
         default_requires_approval,
     );
 
-    let results = run_approval_chain(&middleware, &call).await;
+    let results = super::run_approval_chain(&middleware, &call).await;
     assert_eq!(broker.requests(), 1, "拒绝路径不得触发第二次审批");
     assert_eq!(broker.seen().len(), 1, "拒绝路径只记录一次审批项");
     let rejection = match results.into_iter().next().expect("一个审批结果") {
@@ -188,7 +207,7 @@ async fn rejected_direct_tool_call_never_reaches_the_wire() {
 /// 直接把它发到真实 handler 上会被按未知工具拒绝（生产 handler 同样只认原始名）。
 #[tokio::test]
 async fn old_namespaced_name_is_not_a_wire_alias_on_real_handler() {
-    let web = find("web").expect("web 已实现");
+    let web = super::find("web").expect("web 已实现");
     let declaration = &web.tools[0];
     let namespaced =
         crate::mcp::tool_bridge::effective_mcp_tool_name(web.name, declaration.original_name);
@@ -233,7 +252,7 @@ async fn old_namespaced_name_is_not_a_wire_alias_on_real_handler() {
 /// `spawn_builtin_transport_with_handler` 链路），本文件不重复该方向。
 #[tokio::test]
 async fn large_payload_crosses_builtin_instance_intact() {
-    let web = find("web").expect("web 已实现");
+    let web = super::find("web").expect("web 已实现");
     let declaration = &web.tools[0];
     let stub = Arc::new(StubTool::new(
         declaration.original_name,
@@ -279,8 +298,8 @@ async fn large_payload_crosses_builtin_instance_intact() {
 /// （由 `mcp_server_name()` 与各自的 server 侧观测共同锁定）。
 #[tokio::test]
 async fn per_instance_wire_does_not_cross_between_instances() {
-    let web = find("web").expect("web 已实现");
-    let artifact = find("artifact").expect("artifact 已实现");
+    let web = super::find("web").expect("web 已实现");
+    let artifact = super::find("artifact").expect("artifact 已实现");
     let web_stub = Arc::new(StubTool::fixed(web.tools[0].original_name, "web-reply"));
     let artifact_stub = Arc::new(StubTool::fixed(
         artifact.tools[0].original_name,
@@ -377,8 +396,8 @@ async fn per_instance_wire_does_not_cross_between_instances() {
 ///   线路帧序列。本记录**不宣称**该命题（acceptance §12.5）。
 #[tokio::test]
 async fn same_pool_instances_never_cross_wires_and_reconnect_touches_one_link() {
-    let web = find("web").expect("web 已实现");
-    let artifact = find("artifact").expect("artifact 已实现");
+    let web = super::find("web").expect("web 已实现");
+    let artifact = super::find("artifact").expect("artifact 已实现");
     let web_stub = Arc::new(StubTool::fixed(web.tools[0].original_name, "web-reply"));
     let artifact_stub = Arc::new(StubTool::fixed(
         artifact.tools[0].original_name,
@@ -572,8 +591,8 @@ async fn same_pool_instances_never_cross_wires_and_reconnect_touches_one_link() 
         "用例前提：重连前两条夹具 server task 都在运行"
     );
 
-    let web_handle_before = pool.get_client("web").expect("web 句柄必须存在");
-    let artifact_handle_before = pool.get_client("artifact").expect("artifact 句柄必须存在");
+    let web_handle_before = pool.client("web").expect("web 句柄必须存在");
+    let artifact_handle_before = pool.client("artifact").expect("artifact 句柄必须存在");
     let artifact_log_before_reconnect = artifact_link.wire_methods();
     let artifact_served_before_reconnect = artifact_link.served_calls();
     let peer_name_of = |handle: &Arc<McpClientHandle>| -> Option<String> {
@@ -600,7 +619,7 @@ async fn same_pool_instances_never_cross_wires_and_reconnect_touches_one_link() 
         .expect("builtin 实例必须能重连");
 
     // 反证「重连真的发生了」：否则下面「artifact 逐字不变」可能只是整体 no-op 的假绿。
-    let web_handle_after = pool.get_client("web").expect("重连后必须留下新句柄");
+    let web_handle_after = pool.client("web").expect("重连后必须留下新句柄");
     assert!(
         !Arc::ptr_eq(&web_handle_before, &web_handle_after),
         "重连必须换新句柄（旧代证据不得继续有效）"
@@ -613,7 +632,7 @@ async fn same_pool_instances_never_cross_wires_and_reconnect_touches_one_link() 
     assert!(
         Arc::ptr_eq(
             &artifact_handle_before,
-            &pool.get_client("artifact").expect("artifact 必须仍在")
+            &pool.client("artifact").expect("artifact 必须仍在")
         ),
         "重连 web 不得触碰 artifact 的句柄"
     );

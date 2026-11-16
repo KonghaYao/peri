@@ -1,4 +1,4 @@
-use super::*;
+use crate::langfuse::tracer::compact::CompactSpan;
 use peri_agent::agent::events::{CompactStrategy, CompactTrigger};
 
 #[test]
@@ -35,7 +35,9 @@ fn test_double_start_overwrites() {
     let mut c = CompactSpan::new();
     c.on_start(CompactStrategy::Micro, CompactTrigger::Auto);
     c.on_start(CompactStrategy::Full, CompactTrigger::Manual);
-    let ctx = c.on_end().unwrap();
+    let ctx = c
+        .on_end()
+        .expect("the on end fixture result is required for this assertion");
     assert_eq!(ctx.strategy, CompactStrategy::Full);
     assert_eq!(ctx.trigger, CompactTrigger::Manual);
 }

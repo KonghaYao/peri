@@ -3,12 +3,21 @@
 //! 夹具与 `activation_test.rs` 同形：真实 `AcpServerConfig` + 临时 SQLite + mock 模型端点；
 //! `ServerLoop` 用例走真实请求分发，断言可观察的 wire 顺序与错误码。
 
-use super::*;
+use crate::host::AcpServerConfig;
 use crate::host::{PromptLocks, SharedSessions};
-use peri_acp_types::recovery::{RecoverySkipReason, SessionRecovery};
+use crate::provider::LlmProvider;
+use crate::transport::types::AcpError;
+use crate::transport::types::IncomingMessage;
+use crate::transport::types::RequestId;
+use async_trait::async_trait;
 use peri_acp_types::session::{MessageSource, MqFilter};
+
 use peri_acp_types::thread::WorkState;
+use serde_json::json;
+use serde_json::Value;
+use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -167,11 +176,16 @@ impl RecoveryHarness {
             .expect(1)
             .create_async()
             .await;
-        let mut provider = make_provider_config("local", "openai", "test", "gpt-test");
+        let mut provider = crate::host::requests::tests::make_provider_config(
+            "local", "openai", "test", "gpt-test",
+        );
         provider.base_url = server.url();
-        let config = make_peri_config_with_provider(provider);
+        let config = crate::host::requests::tests::make_peri_config_with_provider(provider);
         let provider = LlmProvider::from_config(&config).unwrap();
-        let mut cfg = build_server_config(config, provider, &directory, resources).await;
+        let mut cfg = crate::host::requests::tests::build_server_config(
+            config, provider, &directory, resources,
+        )
+        .await;
         if with_workspace {
             cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
                 startup_cwd: cwd.clone(),
@@ -208,7 +222,7 @@ impl RecoveryHarness {
     async fn create_session(&mut self) {
         let cwd = self.cwd.clone();
         let mut states = self.sessions.lock().await;
-        let created = handle_request(
+        let created = crate::host::requests::handle_request(
             "session/new",
             &json!({"cwd": cwd}),
             &self.cfg,
@@ -224,7 +238,7 @@ impl RecoveryHarness {
     async fn load_session(&mut self, thread_id: &str) {
         let cwd = self.cwd.clone();
         let mut states = self.sessions.lock().await;
-        handle_request(
+        crate::host::requests::handle_request(
             "session/load",
             &json!({"sessionId": thread_id, "cwd": cwd}),
             &self.cfg,
@@ -237,7 +251,7 @@ impl RecoveryHarness {
     }
 
     fn recovery(&self) -> crate::host::recovery::HostSessionRecovery {
-        recovery_for(&self.cfg, &self.sessions, &self.sender)
+        crate::host::requests::tests::recovery_for(&self.cfg, &self.sessions, &self.sender)
     }
 
     async fn set_working(&self, thread_id: &str) {

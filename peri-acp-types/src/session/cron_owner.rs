@@ -14,6 +14,7 @@ use std::sync::Arc;
 /// 循环依赖规避：本模块不 import `CronScheduler` / `CronTrigger`
 /// （peri-middlewares 类型），只接收 `UnboundedReceiver<String>`——
 /// 从 `CronTrigger.prompt` 到本通道的桥接在装配点（peri-acp host）完成。
+#[derive(Default)]
 pub struct CronOwner {
     /// Handle to the spawned trigger-forwarding task.
     /// `None` before [`start`](Self::start) is called.
@@ -22,6 +23,7 @@ pub struct CronOwner {
 
 impl CronOwner {
     /// Create a new (not yet started) CronOwner.
+    #[must_use]
     pub fn new() -> Self {
         Self { handle_task: None }
     }
@@ -102,12 +104,6 @@ impl CronOwner {
         if let Some(handle) = self.handle_task.take() {
             handle.abort();
         }
-    }
-}
-
-impl Default for CronOwner {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

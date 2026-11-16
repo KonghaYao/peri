@@ -1,8 +1,22 @@
 //! 跨真实 StageContext / user turn 的消费证据与冷恢复回归。
-use super::compact::run_compact;
-use super::*;
-use crate::agent::compact_v2::projection::{render_persisted_llm_view, ProjectionAction};
-use crate::session::{test_resources::TestSession, FrozenContext, MessageTranscript, Session};
+use crate::agent::compact_v2::config::CompactConfig;
+use crate::agent::react::ReactLLM;
+
+use crate::agent::stages::context::StageContext;
+use crate::agent::stages::CompactInput;
+use crate::agent::stages::LoopResult;
+use crate::agent::stages::SharedToolMap;
+
+use crate::messages::BaseMessage;
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use crate::agent::compact_v2::projection::ProjectionAction;
+use crate::session::test_resources::TestSession;
+use crate::session::FrozenContext;
+use crate::session::MessageTranscript;
+use crate::session::Session;
 use crate::tools::{
     BaseTool, ContextRetention, ToolContext, ToolExecutionEvidence, ToolExecutionStatus, ToolOutput,
 };
@@ -162,7 +176,7 @@ async fn session(bound: &TestSession, cold: bool) -> Arc<Session> {
             .resources()
             .load_session_snapshot(&bound.thread_id)
             .await
-            .unwrap();
+            .expect("the load session snapshot fixture result is required for this assertion");
         transcript = transcript.with_own_payloads(snapshot.payloads);
         transcript.set_flags_batch(snapshot.flags);
     }
@@ -190,14 +204,17 @@ fn receipt_id(ctx: &StageContext) -> crate::messages::MessageId {
             }) if tool_call_id == "write-old" => Some(*id),
             _ => None,
         })
-        .unwrap()
+        .expect("the find map fixture result is required for this assertion")
 }
 fn has_whole_omission(ctx: &StageContext, id: crate::messages::MessageId) -> bool {
     let transcript = ctx.session.transcript.read();
-    !render_persisted_llm_view(&transcript, &Default::default())
-        .unwrap()
-        .iter()
-        .any(|m| m.id() == id)
+    !crate::agent::compact_v2::projection::render_persisted_llm_view(
+        &transcript,
+        &Default::default(),
+    )
+    .expect("the render persisted llm view fixture result is required for this assertion")
+    .iter()
+    .any(|m| m.id() == id)
 }
 async fn first_turn(
     bound: &TestSession,
@@ -205,7 +222,7 @@ async fn first_turn(
     let session = session(bound, false).await;
     prompt(&session, "write fixture");
     let context = context(&session, script(true, false));
-    let result = run_react_loop(context.clone(), 4).await;
+    let result = crate::agent::stages::run_react_loop(context.clone(), 4).await;
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
     let id = receipt_id(&context);
     assert!(
@@ -230,7 +247,7 @@ async fn test_new_turn_retains_exposure_and_terminal_evidence() {
         &second.compact.exposure
     ));
     prompt(&session, "user-owned constraint ".repeat(12_000));
-    let outcome = run_react_loop(second.clone(), 2).await;
+    let outcome = crate::agent::stages::run_react_loop(second.clone(), 2).await;
     assert!(matches!(outcome, LoopResult::Completed), "{outcome:?}");
     assert!(has_whole_omission(&second, id), "上一轮回执应可整组省略");
     assert!(
@@ -255,16 +272,18 @@ async fn test_committed_preview_upgrade_below_gain_gate_is_deferred() {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
         });
-    let compact = run_compact(CompactInput {
+    let compact = crate::agent::stages::compact::run_compact(CompactInput {
         context: first.clone(),
         has_tool_calls: false,
     })
     .await
-    .unwrap();
+    .expect("the run compact fixture result is required for this assertion");
     assert!(compact.compacted);
     {
         let transcript = first.session.transcript.read();
-        let directive = transcript.projection_ref(id).unwrap();
+        let directive = transcript
+            .projection_ref(id)
+            .expect("the projection ref fixture result is required for this assertion");
         assert!(directive
             .entries
             .iter()
@@ -291,12 +310,12 @@ async fn test_committed_preview_upgrade_below_gain_gate_is_deferred() {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
         });
-    let deferred = run_compact(CompactInput {
+    let deferred = crate::agent::stages::compact::run_compact(CompactInput {
         context: second.clone(),
         has_tool_calls: false,
     })
     .await
-    .unwrap();
+    .expect("the run compact fixture result is required for this assertion");
     assert!(!deferred.compacted, "低收益升级必须延后");
     assert!(
         !has_whole_omission(&second, id),
@@ -308,7 +327,7 @@ async fn test_committed_preview_upgrade_below_gain_gate_is_deferred() {
             .transcript
             .read()
             .projection_ref(id)
-            .unwrap()
+            .expect("the projection ref fixture result is required for this assertion")
             .entries
             .iter()
             .any(|entry| matches!(entry.action, ProjectionAction::CompactToolResult { .. })),
@@ -326,7 +345,7 @@ async fn test_cold_history_reexposure_enables_typed_synchronous_completion() {
     let reexpose = context(&cold, script(false, false));
     assert!(reexpose.compact.exposure.lock().closed_calls().is_empty());
     prompt(&cold, "consume restored history");
-    let outcome = run_react_loop(reexpose.clone(), 2).await;
+    let outcome = crate::agent::stages::run_react_loop(reexpose.clone(), 2).await;
     assert!(matches!(outcome, LoopResult::Completed), "{outcome:?}");
     assert!(reexpose
         .compact
@@ -336,7 +355,7 @@ async fn test_cold_history_reexposure_enables_typed_synchronous_completion() {
         .contains("write-old"));
     let next = context(&cold, script(false, false));
     prompt(&cold, "user-owned constraint ".repeat(12_000));
-    let outcome = run_react_loop(next.clone(), 2).await;
+    let outcome = crate::agent::stages::run_react_loop(next.clone(), 2).await;
     assert!(matches!(outcome, LoopResult::Completed), "{outcome:?}");
     assert!(has_whole_omission(&next, id), "冷历史成功重新暴露后可压缩");
 }
@@ -361,12 +380,12 @@ async fn test_new_turn_below_gate_does_not_create_projection() {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
         });
-    let result = run_compact(CompactInput {
+    let result = crate::agent::stages::compact::run_compact(CompactInput {
         context: second.clone(),
         has_tool_calls: false,
     })
     .await
-    .unwrap();
+    .expect("the run compact fixture result is required for this assertion");
     assert!(!result.compacted, "74.99% 不新建投影");
     assert!(!second.session.transcript.read().is_truncated(id));
     assert!(!has_whole_omission(&second, id));
@@ -380,14 +399,17 @@ async fn test_failed_cold_request_keeps_history_protected() {
     let cold = session(&bound, true).await;
     let failed = context(&cold, script(false, true));
     prompt(&cold, "consume restored history");
-    let outcome = run_react_loop(failed.clone(), 2).await;
+    let outcome = crate::agent::stages::run_react_loop(failed.clone(), 2).await;
     assert!(
         !matches!(outcome, LoopResult::Completed),
         "失败请求应结束为错误"
     );
     let transcript = failed.session.transcript.read();
     let ledger = failed.compact.exposure.lock();
-    assert!(!ledger.exposed_ids(&transcript).unwrap().contains(&id));
+    assert!(!ledger
+        .exposed_ids(&transcript)
+        .expect("the exposed ids fixture result is required for this assertion")
+        .contains(&id));
     assert!(!ledger.closed_calls().contains("write-old"));
     assert!(!transcript.is_truncated(id));
 }

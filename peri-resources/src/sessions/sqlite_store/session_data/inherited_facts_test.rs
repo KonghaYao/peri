@@ -8,7 +8,8 @@ use super::inherited_facts::{
     CachedInheritedFacts, InheritedCacheLookup, InheritedFactsCache, InheritedSummary,
     INHERITED_FACTS_CACHE_CAPACITY,
 };
-use super::*;
+use super::SqliteSessionData;
+
 use crate::sessions::data::SessionDataPort;
 use crate::sessions::sqlite_store::SqliteThreadStore;
 use peri_acp_types::messages::{BaseMessage, MessageId};
@@ -20,7 +21,7 @@ use tempfile::TempDir;
 
 async fn database() -> (SqliteThreadStore, SqliteSessionData, TempDir) {
     let directory = tempfile::tempdir().unwrap();
-    let store = SqliteThreadStore::new(directory.path().join("threads.db"))
+    let store = SqliteThreadStore::try_new(directory.path().join("threads.db"))
         .await
         .unwrap();
     let data = SqliteSessionData::new(Arc::clone(&store.database));

@@ -1,6 +1,6 @@
-use super::SubagentStatus;
 use crate::langfuse::config::LangfuseConfig;
 use crate::langfuse::fake_session::FakeLangfuseSession;
+use crate::langfuse::tracer::registry::types::SubagentStatus;
 use crate::langfuse::tracer::LangfuseTracer;
 use langfuse_client::types::ObservationType;
 use langfuse_client::IngestionEvent;
@@ -81,7 +81,11 @@ fn cached_agent(
     tracer: &LangfuseTracer,
     agent_id: &str,
 ) -> (String, Option<String>, Option<String>) {
-    let cached = tracer.subagent.by_agent_id.get(agent_id).unwrap();
+    let cached = tracer
+        .subagent
+        .by_agent_id
+        .get(agent_id)
+        .expect("tracer subagent fixture must contain the requested entry");
     (
         cached.observation_id.clone(),
         Some(cached.parent_observation_id.clone()),
@@ -239,7 +243,10 @@ async fn test_full_lifecycle_eight_steps() {
         !child_event_times.is_empty(),
         "child AGENT obs 应有子节点(非空壳)"
     );
-    let earliest_child = child_event_times.iter().min().unwrap();
+    let earliest_child = child_event_times
+        .iter()
+        .min()
+        .expect("the min fixture result is required for this assertion");
     let agent_start = parse_time(child_start.as_ref().expect("AGENT start"));
     assert!(
         agent_start <= *earliest_child,
@@ -247,7 +254,10 @@ async fn test_full_lifecycle_eight_steps() {
     );
 
     // 关闭时间 ≥ 最晚 child 事件
-    let latest_child = child_event_times.iter().max().unwrap();
+    let latest_child = child_event_times
+        .iter()
+        .max()
+        .expect("the max fixture result is required for this assertion");
     let agent_end = parse_time(completions[0].1.as_ref().expect("AGENT end"));
     assert!(
         agent_end >= *latest_child,
@@ -276,7 +286,7 @@ async fn test_start_after_tool_ended() {
 
     let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_1b")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     let main_span = main_act.span_id.clone();
     // ① 父 ToolStart(Agent):invocation 登记,parent 冻结为 main_span
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
@@ -362,13 +372,13 @@ async fn test_stop_before_tool_ended() {
 
     let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_2")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
     t.on_subagent_start("main", "child_1", "fork", false);
 
     let child_reason = t
         .on_stage_start_gated("child_1", Stage::Reason, "turn_2")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     // 确保 stage duration > 0(v2 条件上报)
     std::thread::sleep(std::time::Duration::from_millis(2));
     t.on_tool_start("child_1", "call_bash", "Bash", &serde_json::json!({}));
@@ -416,7 +426,12 @@ async fn test_stop_before_tool_ended() {
     assert_eq!(batch_spans, 1, "child tool-batch 应 flush 恰好一次");
 
     // AGENT obs end ≥ child 事件 end
-    let agent_end = parse_time(completions[0].1.as_ref().unwrap());
+    let agent_end = parse_time(
+        completions[0]
+            .1
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion"),
+    );
     let _ = main_act;
     let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
@@ -439,7 +454,7 @@ async fn test_stop_before_content_end_time_takes_max() {
 
     let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_sb")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
     t.on_subagent_start("main", "child_1", "coder", false);
     // Stop 先到:暂存 → StopReceived(父 ToolEnded 未到,不关闭)
@@ -453,7 +468,7 @@ async fn test_stop_before_content_end_time_takes_max() {
     std::thread::sleep(std::time::Duration::from_millis(2));
     let child_reason = t
         .on_stage_start_gated("child_1", Stage::Reason, "turn_sb")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     t.on_tool_start("child_1", "call_bash", "Bash", &serde_json::json!({}));
     t.on_tool_end("child_1", "call_bash", "out", false);
     t.on_stage_end("child_1", &child_reason, StageStatus::Done);
@@ -464,7 +479,12 @@ async fn test_stop_before_content_end_time_takes_max() {
     assert_eq!(completions.len(), 1, "应关闭 AGENT obs");
 
     // end_time ≥ 最后子内容时刻(stage start),而非早到的 Stop 时刻
-    let agent_end = parse_time(completions[0].1.as_ref().unwrap());
+    let agent_end = parse_time(
+        completions[0]
+            .1
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion"),
+    );
     assert!(
         agent_end >= parse_time(&child_reason.start_time),
         "end_time 应取最后子内容时刻(≥ stage start),实际 {agent_end} < {}",

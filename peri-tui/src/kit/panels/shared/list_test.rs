@@ -2,11 +2,11 @@
 
 use ratatui_kit::ratatui::layout::Rect;
 
-use super::{ListMetrics, ListViewport, content_rows};
-use crate::kit::panel_mouse::hit_row;
-use crate::kit::panel_overlay::panel_content_rows;
+use super::ListMetrics;
+use super::ListViewport;
 
 /// 面板区域（含上下边框），命中行号以它为准。
+#[must_use]
 fn area(height: u16) -> Rect {
     Rect::new(0, 0, 60, height)
 }
@@ -54,14 +54,17 @@ fn window_and_hit_layout_agree() {
     assert_eq!(visible, vec![4, 5, 6]);
 
     // 每个可见项的第一行命中同一个全量索引——绘制窗口与命中布局同源
-    for (slot, expected) in visible.iter().enumerate() {
-        let visual_row = layout.header_rows + (slot as u16) * layout.item_rows;
-        let mouse_row = rect.y + 1 + visual_row;
-        assert_eq!(
-            hit_row(mouse_row, rect, layout),
-            Some(*expected),
-            "第 {slot} 个可见槽位命中索引应与 window 一致"
-        );
+    {
+        let iteration_items = visible.iter().enumerate();
+        for (slot, expected) in iteration_items {
+            let visual_row = layout.header_rows + (slot as u16) * layout.item_rows;
+            let mouse_row = rect.y + 1 + visual_row;
+            assert_eq!(
+                crate::kit::panel_mouse::hit_row(mouse_row, rect, layout),
+                Some(*expected),
+                "第 {slot} 个可见槽位命中索引应与 window 一致"
+            );
+        }
     }
 }
 
@@ -72,19 +75,22 @@ fn row_beyond_rendered_items_does_not_hit() {
     let vp = ListViewport::for_content_rows(12, METRICS, 2, 0);
     let layout = vp.hit_layout();
     let third_slot_row = rect.y + 1 + layout.header_rows + 2 * layout.item_rows;
-    assert_eq!(hit_row(third_slot_row, rect, layout), None);
+    assert_eq!(
+        crate::kit::panel_mouse::hit_row(third_slot_row, rect, layout),
+        None
+    );
 }
 
 #[test]
 fn first_frame_prediction_is_not_empty() {
     // 首帧 AreaTracker 未测量（Rect::default()）：不能按 0 行渲染空面板
-    let predicted = content_rows(None, 30);
-    assert_eq!(predicted, panel_content_rows(30));
+    let predicted = super::content_rows(None, 30);
+    assert_eq!(predicted, crate::kit::panel_overlay::panel_content_rows(30));
     assert!(predicted > 0);
 }
 
 #[test]
 fn measured_height_wins_over_prediction() {
     let measured = Some(area(18));
-    assert_eq!(content_rows(measured, 30), 16);
+    assert_eq!(super::content_rows(measured, 30), 16);
 }

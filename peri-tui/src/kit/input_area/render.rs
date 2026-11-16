@@ -1,16 +1,18 @@
 use fluent_bundle::FluentValue;
 use unicode_width::UnicodeWidthStr;
 
-use ratatui_kit::ratatui::{
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders},
-};
+use ratatui_kit::ratatui::style::Color;
+use ratatui_kit::ratatui::style::Modifier;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
+use ratatui_kit::ratatui::widgets::Block;
+use ratatui_kit::ratatui::widgets::Borders;
 
 use crate::i18n;
-use crate::kit::atoms::PendingAttachment;
+
 use crate::kit::message_area::grid::GridSpec;
-use crate::kit::tui_render_unit::user_attachment_name;
+
 use peri_theme::atoms::THEME_ATOM;
 
 /// §10 queued 队列在 composer 上方最多显示的行数，超出显示 `· · ·`。
@@ -44,7 +46,7 @@ pub(super) fn build_attachments_label(attachments: &[PendingAttachment]) -> Opti
             .iter()
             .take(ATTACHMENT_NAMES_MAX)
             .enumerate()
-            .map(|(index, _)| user_attachment_name(index + 1))
+            .map(|(index, _)| crate::kit::tui_render_unit::user_attachment_name(index + 1))
             .collect();
         if images.len() > names.len() {
             names.push("…".to_string());
@@ -160,6 +162,7 @@ pub(super) fn build_queue_lines(
 /// §10 对齐：composer 正文起点 = prompt 前缀宽度（outer1 + accent1 + gap，
 /// 与 transcript `first_prefix_width` 一致）+ 右预留 2 列。gap=1 → 5；
 /// gap=2 → 6。
+#[must_use]
 pub(super) fn prompt_and_border_width(grid: GridSpec) -> u16 {
     (2 + grid.gap) + 2
 }
@@ -199,6 +202,7 @@ pub(super) fn truncate_title_to_width(s: &str, max_width: usize) -> String {
 }
 
 /// 根据底色亮度选择黑白对比前景（保证可读性的"反色"效果）。
+#[must_use]
 pub(super) fn readable_fg(bg: Color) -> Color {
     match bg {
         Color::Rgb(r, g, b) => {
@@ -243,18 +247,21 @@ pub(super) fn build_composer_lines(
         return lines;
     }
 
-    for (index, line) in editor_lines.into_iter().enumerate() {
-        let mut spans = Vec::with_capacity(line.spans.len() + 1);
-        if index == 0 {
-            spans.push(Span::styled(prompt_prefix.clone(), prompt_style));
-        } else {
-            spans.push(Span::styled(
-                cont_prefix.clone(),
-                Style::default().fg(tokens.continuation),
-            ));
+    {
+        let iteration_items = editor_lines.into_iter().enumerate();
+        for (index, line) in iteration_items {
+            let mut spans = Vec::with_capacity(line.spans.len() + 1);
+            if index == 0 {
+                spans.push(Span::styled(prompt_prefix.clone(), prompt_style));
+            } else {
+                spans.push(Span::styled(
+                    cont_prefix.clone(),
+                    Style::default().fg(tokens.continuation),
+                ));
+            }
+            spans.extend(line.spans);
+            lines.push(Line::from(spans));
         }
-        spans.extend(line.spans);
-        lines.push(Line::from(spans));
     }
 
     lines
@@ -301,3 +308,5 @@ pub(super) fn render_multiline_with_cursor_for_themed(
         show_cursor,
     )
 }
+
+use crate::kit::atoms::PendingAttachment;

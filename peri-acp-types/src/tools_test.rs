@@ -1,6 +1,21 @@
 //! 工具契约类型测试（design v2 §2.5.1：ToolDescription / title 推导 / trait 默认实现）。
 
-use super::*;
+use crate::tool_invocation::EffectiveToolCall;
+use crate::tool_invocation::InvocationId;
+use crate::tool_invocation::InvocationOrigin;
+use crate::tool_invocation::ToolCallId;
+use crate::tools::BaseTool;
+use crate::tools::ContextUsage;
+use crate::tools::EffectiveToolDefinition;
+use crate::tools::EffectiveToolDispatcher;
+use crate::tools::EffectiveToolError;
+use crate::tools::EffectiveToolErrorCode;
+use crate::tools::ToolContext;
+use crate::tools::ToolDescription;
+use crate::tools::ToolExecutionEvidence;
+use crate::tools::ToolExecutionStatus;
+use crate::tools::ToolOutcome;
+use crate::tools::ToolOutput;
 
 #[test]
 fn tool_context_keeps_model_call_identity_independent_from_invocation() {
@@ -111,7 +126,7 @@ fn test_tool_description_serde_roundtrip() {
 #[test]
 fn test_derive_title_from_name_camel_case() {
     assert_eq!(
-        derive_title_from_name("AskUserQuestion"),
+        crate::tools::derive_title_from_name("AskUserQuestion"),
         "Ask User Question"
     );
 }
@@ -119,20 +134,23 @@ fn test_derive_title_from_name_camel_case() {
 #[test]
 fn test_derive_title_from_name_snake_case() {
     assert_eq!(
-        derive_title_from_name("folder_operations"),
+        crate::tools::derive_title_from_name("folder_operations"),
         "Folder Operations"
     );
 }
 
 #[test]
 fn test_derive_title_from_name_single_word() {
-    assert_eq!(derive_title_from_name("Read"), "Read");
+    assert_eq!(crate::tools::derive_title_from_name("Read"), "Read");
 }
 
 #[test]
 fn test_derive_title_from_name_mixed_case() {
     // 小写 → 大写边界切词；词首大写
-    assert_eq!(derive_title_from_name("WebFetch"), "Web Fetch");
+    assert_eq!(
+        crate::tools::derive_title_from_name("WebFetch"),
+        "Web Fetch"
+    );
 }
 
 // -- BaseTool 默认实现 ---------------------------------------------------------

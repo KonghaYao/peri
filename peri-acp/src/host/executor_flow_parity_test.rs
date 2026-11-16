@@ -1,4 +1,11 @@
-use super::*;
+use crate::host::executor_flow_tests::NoopBroker;
+use crate::host::executor_flow_tests::ParityFakeEventHandler;
+use async_trait::async_trait;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::permission::PermissionMode;
+use peri_acp_types::permission::SharedPermissionMode;
+use peri_middlewares::tool_search::ToolSearchIndex;
+use std::sync::Arc;
 
 // ── P2-1（实施质量审查）：链收集 vs 渲染面静态声明直接对拍 ─────────────────
 
@@ -36,10 +43,9 @@ fn make_parity_context(
 
     use parking_lot::RwLock;
     use peri_acp_types::tools::TodoItem;
-    use peri_agent::{
-        agent::{async_tasks::TaskManager, AgentCancellationToken},
-        tools::BaseTool,
-    };
+    use peri_agent::agent::async_tasks::TaskManager;
+    use peri_agent::agent::AgentCancellationToken;
+    use peri_agent::tools::BaseTool;
 
     let (todo_tx, _todo_rx) = tokio::sync::mpsc::channel::<Vec<TodoItem>>(8);
     let (bg_event_tx, _bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
@@ -116,7 +122,7 @@ fn make_parity_context(
 fn chain_collection_parity_with_build_collected_sections() {
     use peri_acp_types::agents::AgentOverrides;
     use peri_acp_types::meta_harness::MetaHarnessState;
-    use peri_agent::session::factory::build_middleware_chain;
+    use peri_agent::session::factory;
     use peri_middlewares::assembly::ProductionChainAssembler;
 
     let cases = &[
@@ -166,7 +172,8 @@ fn chain_collection_parity_with_build_collected_sections() {
 
     for (name, overrides, language, disabled) in cases {
         let ctx = make_parity_context(disabled, overrides.clone(), language.clone());
-        let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
+        let out =
+            factory::build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
         let mut chain_sections: Vec<(String, u16, u16, String)> = out
             .chain
             .collect_prompt_sections()

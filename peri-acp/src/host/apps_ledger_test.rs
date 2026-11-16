@@ -7,7 +7,27 @@ use std::time::Duration;
 
 use peri_acp_types::mcp_apps::{NotExecutedCause, SessionInvocationOutcome};
 
-use super::*;
+use crate::host::apps_ledger::AdmissionVerdict;
+use crate::host::apps_ledger::LedgerBudget;
+use crate::host::apps_ledger::NamespaceKind;
+use crate::host::apps_ledger::NamespaceOpenError;
+use crate::host::apps_ledger::RequestCancelReason;
+use crate::host::apps_ledger::RequestFingerprint;
+use crate::host::apps_ledger::RequestLedger;
+use crate::host::apps_ledger::RequestOperation;
+use crate::host::apps_ledger::DESTROYED_TOMBSTONES;
+use peri_acp_types::mcp_apps_facade::AppsRequestOutcome;
+use peri_acp_types::mcp_apps_facade::CancelVerdict;
+use peri_acp_types::mcp_apps_facade::RequestNamespaceId;
+use peri_acp_types::mcp_apps_facade::RequestSeq;
+use peri_acp_types::mcp_apps_facade::MAX_NAMESPACES_PER_SESSION;
+use peri_acp_types::mcp_apps_facade::MAX_PENDING_PER_NAMESPACE;
+use peri_acp_types::mcp_apps_facade::MAX_RESULT_BYTES;
+use peri_acp_types::mcp_apps_facade::MAX_RETAINED_BYTES;
+use peri_acp_types::mcp_apps_facade::MAX_RETAINED_RESULTS;
+use serde_json::Map;
+use serde_json::Value;
+use std::sync::Arc;
 
 fn operation(value: u64) -> RequestOperation {
     RequestOperation::AppToolsCall {
@@ -34,7 +54,7 @@ fn completed(text: &str) -> AppsRequestOutcome {
 }
 
 fn not_executed() -> AppsRequestOutcome {
-    tools_call(not_executed_before_commit())
+    tools_call(crate::host::apps_ledger::not_executed_before_commit())
 }
 
 fn ledger(max_pending: usize, max_results: usize, max_bytes: usize) -> RequestLedger {
@@ -512,13 +532,13 @@ fn fingerprint_covers_arguments_and_ignores_key_order() {
 #[test]
 fn not_executed_before_commit_is_cancelled_before_commit() {
     assert_eq!(
-        not_executed_before_commit(),
+        crate::host::apps_ledger::not_executed_before_commit(),
         SessionInvocationOutcome::NotExecuted {
             cause: NotExecutedCause::CancelledBeforeCommit
         }
     );
     assert_ne!(
-        not_executed_before_commit(),
+        crate::host::apps_ledger::not_executed_before_commit(),
         SessionInvocationOutcome::NotExecuted {
             cause: NotExecutedCause::UserRejected
         },

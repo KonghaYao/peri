@@ -1,6 +1,7 @@
 //! Read a descendant's canonical timeline without loading an executable session.
 
-use peri_acp::transport::{AcpTransport, types::AcpError};
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::AcpError;
 use serde_json::{Value, json};
 
 use crate::kit::history_paging::{HistoryBodyRequest, WindowRequest};
@@ -55,7 +56,8 @@ mod tests {
         WINDOW_DEFAULT_BYTE_BUDGET, WindowDirection, WindowOpenRequest, WindowRequestAnchor,
     };
     use crate::kit::history_window::HistorySource;
-    use peri_acp::transport::{mpsc::mpsc_transport_pair, types::IncomingMessage};
+    use peri_acp::transport::mpsc::mpsc_transport_pair;
+    use peri_acp::transport::types::IncomingMessage;
 
     #[tokio::test]
     async fn child_history_requests_never_use_session_load() {
@@ -65,7 +67,7 @@ mod tests {
             for expected in ["session/history/child", "session/history/child/body"] {
                 let IncomingMessage::Request {
                     id, method, params, ..
-                } = server_transport.recv().await.unwrap()
+                } = server_transport.recv().await.expect("child history requests never use session load: fixture task and request must complete successfully")
                 else {
                     panic!("expected request");
                 };
@@ -81,7 +83,7 @@ mod tests {
                 server_transport
                     .send_response(id, Ok(json!({"ok": true})))
                     .await
-                    .unwrap();
+                    .expect("child history requests never use session load: fixture task and request must complete successfully");
             }
         });
         let request = WindowRequest::Open(WindowOpenRequest {
@@ -95,7 +97,7 @@ mod tests {
         client
             .load_child_history_window("parent", "child", &request)
             .await
-            .unwrap();
+            .expect("child history requests never use session load: fixture task and request must complete successfully");
         client
             .load_child_history_body(
                 "parent",
@@ -110,7 +112,7 @@ mod tests {
                 },
             )
             .await
-            .unwrap();
-        server.await.unwrap();
+            .expect("child history requests never use session load: fixture task and request must complete successfully");
+        server.await.expect("child history requests never use session load: fixture task and request must complete successfully");
     }
 }

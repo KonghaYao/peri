@@ -1,6 +1,10 @@
-use super::*;
+use crate::provider::LlmProvider;
+use crate::provider::PeriConfig;
+use crate::session::agent_pool::AgentPool;
+use crate::session::agent_pool::CachedLlmInstances;
 use peri_model::{ModelRequest, ProviderProtocol};
 use serde_json::json;
+use std::sync::Arc;
 
 #[test]
 fn factories_cache_models_by_effective_capacity_for_every_provider() {
@@ -19,8 +23,14 @@ fn factories_cache_models_by_effective_capacity_for_every_provider() {
         let small = LlmProvider::from_config_for_alias(&config, "haiku").unwrap();
         let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));
         let retry = pool.lock().retry_events.clone();
-        let factories =
-            build_model_factories(&large, &config, &pool, &retry, "fixture-session", None);
+        let factories = crate::host::prompt::models::build_model_factories(
+            &large,
+            &config,
+            &pool,
+            &retry,
+            "fixture-session",
+            None,
+        );
         let primary = factories.primary_llm_factory.as_ref().unwrap()();
         assert_eq!(primary.context_window(), Some(200_000));
         assert!(Arc::ptr_eq(
@@ -56,8 +66,14 @@ fn factories_cache_models_by_effective_capacity_for_every_provider() {
         });
         let cached = factories.get_cached_llm.as_ref().unwrap()().unwrap();
         assert!(Arc::ptr_eq(&auxiliary, &cached.auxiliary_model));
-        let small_factories =
-            build_model_factories(&small, &config, &pool, &retry, "fixture-session", None);
+        let small_factories = crate::host::prompt::models::build_model_factories(
+            &small,
+            &config,
+            &pool,
+            &retry,
+            "fixture-session",
+            None,
+        );
         assert!(small_factories.get_cached_llm.as_ref().unwrap()().is_none());
         let small_primary = small_factories.primary_llm_factory.as_ref().unwrap()();
         assert!(Arc::ptr_eq(&child, &small_primary));
@@ -80,8 +96,14 @@ fn test_responses_factories_after_config_roundtrip_cover_primary_compact_and_sub
     let provider = LlmProvider::from_config_for_alias(&config, "opus").unwrap();
     let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));
     let retry = pool.lock().retry_events.clone();
-    let factories =
-        build_model_factories(&provider, &config, &pool, &retry, "fixture-session", None);
+    let factories = crate::host::prompt::models::build_model_factories(
+        &provider,
+        &config,
+        &pool,
+        &retry,
+        "fixture-session",
+        None,
+    );
     for model in [
         factories.primary_llm_factory.as_ref().unwrap()(),
         factories.fresh_auxiliary_model.as_ref().unwrap()(),
@@ -120,12 +142,12 @@ async fn every_host_model_factory_keeps_the_captured_transport_route() {
     let provider = LlmProvider::from_config_for_alias(&config, "opus").unwrap();
     let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));
     let retry = pool.lock().retry_events.clone();
-    let route = peri_model::ModelTransportRoute::new(
+    let route = peri_model::ModelTransportRoute::try_new(
         url::Url::parse("http://127.0.0.1:9").unwrap(),
         "route-test",
     )
     .unwrap();
-    let factories = build_model_factories(
+    let factories = crate::host::prompt::models::build_model_factories(
         &provider,
         &config,
         &pool,

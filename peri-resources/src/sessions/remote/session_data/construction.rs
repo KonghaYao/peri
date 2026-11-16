@@ -15,11 +15,10 @@ use super::super::schema::{StoreIdentityRead, StoreShapeRead};
 use super::super::sql::StatementSpec;
 use super::super::{schema_upgrade, session_schema};
 use super::connection_lifecycle::ConnectionSlot;
-use super::session_open::{refuse_legacy_shape, resolve_open_machine_id};
-use super::{
-    open_step, open_verdict, probe_shape, verify_legacy_open_identity, OpenStep, RemoteSessionData,
-    StoreInitialization,
-};
+
+use super::OpenStep;
+use super::RemoteSessionData;
+use super::StoreInitialization;
 
 impl RemoteSessionData {
     /// 打开远程会话数据：读回 store 身份；未初始化时只在可写打开下创建本任务 schema。
@@ -57,12 +56,12 @@ impl RemoteSessionData {
         // 打开路径的两份只读事实：身份（版本 + 契约 + store id）与会话表形状。
         // 后者连同必要索引在一次只读批中探测；列形状不符即拒绝。
         let read = store.read_identity().await?;
-        let shape = probe_shape(&store, &read).await?;
+        let shape = super::probe_shape(&store, &read).await?;
         let schema_work = shape.clone();
         let legacy_shape = matches!(&read, StoreIdentityRead::Present(snapshot) if !snapshot.matches_build())
             && access == StoreAccess::ReadOnly;
         let legacy_open_identity = legacy_shape.then(|| read.clone());
-        let step = open_step(read, shape, access)?;
+        let step = super::open_step(read, shape, access)?;
         let upgraded = matches!(step, OpenStep::Upgrade(_));
         let (store_id, initialization) = match step {
             OpenStep::Existing(store_id) => (store_id, StoreInitialization::Existing),
@@ -74,11 +73,12 @@ impl RemoteSessionData {
             // 不由「刚才读到空库」推定创建。
             OpenStep::NeedsInitialization => {
                 // 空库与「旧形状的库」在身份读取上都读作未初始化：先问一次后者，命中即拒绝。
-                refuse_legacy_shape(&store).await?;
-                open_verdict(store.initialize_store().await?)
+                super::session_open::refuse_legacy_shape(&store).await?;
+                super::open_verdict(store.initialize_store().await?)
             }
         };
-        let machine_id = resolve_open_machine_id(supplied_machine_id, access).await?;
+        let machine_id =
+            super::session_open::resolve_open_machine_id(supplied_machine_id, access).await?;
         // 健康的当前库已通过严格列形状与必要索引检查，无须每次重放 DDL。
         // 身份早于会话表建立的库仍需补齐；缺索引时只补索引。
         if access == StoreAccess::ReadWrite {
@@ -115,7 +115,7 @@ impl RemoteSessionData {
         }
         // 旧形状只读打开可能与另一实例的原子升级竞争；不可带过期的读法返回。
         if let Some(initial) = legacy_open_identity {
-            verify_legacy_open_identity(&initial, &store.read_identity().await?)?;
+            super::verify_legacy_open_identity(&initial, &store.read_identity().await?)?;
         }
         Ok((
             Self {

@@ -1,20 +1,19 @@
 use std::sync::Arc;
 
-use super::test_support::*;
-use super::*;
+use super::{PersistentEntryKey, ResidentIndex, SegmentPlacement, WindowLimits, WindowModelError};
 
 #[test]
 fn resident_index_keeps_slot_prefix_sums_in_layout_order() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let a = window
         .register_segment(
-            segment_with_units("a", 10, 1, 10, 20),
+            super::test_support::segment_with_units("a", 10, 1, 10, 20),
             SegmentPlacement::Tail,
         )
         .expect("a");
     let b = window
         .register_segment(
-            segment_with_units("b", 20, 2, 20, 30),
+            super::test_support::segment_with_units("b", 20, 2, 20, 30),
             SegmentPlacement::Tail,
         )
         .expect("b");
@@ -24,7 +23,7 @@ fn resident_index_keeps_slot_prefix_sums_in_layout_order() {
 
     let c = window
         .register_segment(
-            segment_with_units("c", 5, 3, 30, 40),
+            super::test_support::segment_with_units("c", 5, 3, 30, 40),
             SegmentPlacement::BeforeSegment(a),
         )
         .expect("c");
@@ -36,12 +35,18 @@ fn resident_index_keeps_slot_prefix_sums_in_layout_order() {
 
 #[test]
 fn resident_index_rejects_duplicate_identity_until_segment_is_released() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let first = window
-        .register_segment(segment("a", 10, 10, 20), SegmentPlacement::Tail)
+        .register_segment(
+            super::test_support::segment("a", 10, 10, 20),
+            SegmentPlacement::Tail,
+        )
         .expect("first");
     assert!(matches!(
-        window.register_segment(segment("a", 10, 10, 20), SegmentPlacement::Tail),
+        window.register_segment(
+            super::test_support::segment("a", 10, 10, 20),
+            SegmentPlacement::Tail
+        ),
         Err(WindowModelError::DuplicateEntry(_))
     ));
 
@@ -53,7 +58,10 @@ fn resident_index_rejects_duplicate_identity_until_segment_is_released() {
     );
     assert!(
         window
-            .register_segment(segment("a", 10, 10, 20), SegmentPlacement::Tail)
+            .register_segment(
+                super::test_support::segment("a", 10, 10, 20),
+                SegmentPlacement::Tail
+            )
             .is_ok(),
         "after eviction the same identity may be materialized again (A25)"
     );

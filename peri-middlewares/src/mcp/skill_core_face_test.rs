@@ -34,8 +34,6 @@ use crate::mcp::builtin::context::BuiltinInstanceContext;
 use crate::mcp::client::{ClientStatus, McpClientHandle, McpClientPool, OAuthStatus};
 use crate::mcp::middleware::McpMiddleware;
 
-use super::{finish_command_source, mark_system_origins, project_core_skill_commands};
-
 /// builtin 来源（`ConfigSource::Builtin`）的连接句柄：`mark_system_origins` 的
 /// 判定事实是「连接事实」而不是名字自称，因此夹具必须以真实标记构造。
 fn builtin_handle(name: &str) -> Arc<McpClientHandle> {
@@ -84,7 +82,7 @@ fn seed_system_skills(
     let token: HandleToken = Arc::clone(handle) as HandleToken;
     registry.mark_discovery_started("workspace", token.clone());
     registry.mark_discovery_completed("workspace", token.clone(), vec![workspace_skill()]);
-    mark_system_origins(registry, std::slice::from_ref(handle), &BTreeSet::new());
+    super::mark_system_origins(registry, std::slice::from_ref(handle), &BTreeSet::new());
     token
 }
 
@@ -97,7 +95,11 @@ fn core_projection_registers_builtin_system_skills_with_aliases() {
     let handle = builtin_handle("workspace");
     seed_system_skills(&registry, &handle);
 
-    project_core_skill_commands(&Some(Arc::clone(&command_registry)), &registry, false);
+    super::project_core_skill_commands(
+        (Some(Arc::clone(&command_registry))).as_ref(),
+        &registry,
+        false,
+    );
 
     let entry = command_registry
         .resolve("/core:hello")
@@ -125,12 +127,12 @@ fn system_origin_uses_connection_identity_even_for_workspace_name() {
     let builtin = builtin_handle("workspace");
     let mut external = (*builtin).clone();
     external.source = Some(ConfigSource::Project("/tmp/.mcp.json".into()));
-    mark_system_origins(&registry, &[Arc::new(external)], &BTreeSet::new());
+    super::mark_system_origins(&registry, &[Arc::new(external)], &BTreeSet::new());
     assert!(!registry.is_system_origin("workspace"));
 
     let mut trusted = (*builtin).clone();
     trusted.source = Some(ConfigSource::WorkspaceRemote);
-    mark_system_origins(&registry, &[Arc::new(trusted)], &BTreeSet::new());
+    super::mark_system_origins(&registry, &[Arc::new(trusted)], &BTreeSet::new());
     assert!(registry.is_system_origin("workspace"));
 }
 
@@ -154,8 +156,8 @@ fn core_projection_withdraws_when_skills_face_closed() {
         1,
         "模拟旧版本路由"
     );
-    finish_command_source(
-        &Some(Arc::clone(&command_registry)),
+    super::finish_command_source(
+        (Some(Arc::clone(&command_registry))).as_ref(),
         &registry,
         "workspace",
         token,
@@ -164,14 +166,22 @@ fn core_projection_withdraws_when_skills_face_closed() {
     assert!(command_registry.resolve("/workspace:hello").is_none());
 
     // 位为假：core 面注册。
-    project_core_skill_commands(&Some(Arc::clone(&command_registry)), &registry, false);
+    super::project_core_skill_commands(
+        (Some(Arc::clone(&command_registry))).as_ref(),
+        &registry,
+        false,
+    );
     assert!(
         command_registry.resolve("/core:hello").is_some(),
         "前置：core 面已注册（关闭差分才有可撤下的对象）"
     );
 
     // 位为真：core 面整体撤下。
-    project_core_skill_commands(&Some(Arc::clone(&command_registry)), &registry, true);
+    super::project_core_skill_commands(
+        (Some(Arc::clone(&command_registry))).as_ref(),
+        &registry,
+        true,
+    );
     assert!(
         command_registry.resolve("/core:hello").is_none(),
         "位为真：core 裸名命令必须撤下"

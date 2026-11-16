@@ -1,20 +1,26 @@
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
-use peri_acp_types::{
-    session::{MessageKind, MessagePolicy, MessageSource, QueuedMessage},
-    system_reminder::{ReminderCategory, ReminderDelivery, ReminderSeverity},
-    tasks::BgTaskKind,
-};
+use peri_acp_types::session::MessageKind;
+use peri_acp_types::session::MessagePolicy;
+use peri_acp_types::session::MessageSource;
+use peri_acp_types::session::QueuedMessage;
+use peri_acp_types::system_reminder::ReminderCategory;
+use peri_acp_types::system_reminder::ReminderDelivery;
+use peri_acp_types::system_reminder::ReminderSeverity;
+use peri_acp_types::tasks::BgTaskKind;
 
-use super::super::Session;
-use super::types::{ChildHandoffFailure, ChildHandoffReason, ChildHandoffReceipt, ChildRunOutcome};
-use super::ParkedChildOwner;
 use crate::agent::async_tasks::handoff::ChildSettlementWindow;
 use crate::agent::async_tasks::{BackgroundTaskStatus, BgTaskInfo};
-use crate::agent::stages::{run_react_loop, LoopResult, StageContext};
+
+use crate::agent::stages::LoopResult;
+use crate::agent::stages::StageContext;
+use crate::session::subagent::resource_owner::ParkedChildOwner;
+use crate::session::subagent::types::{
+    ChildHandoffFailure, ChildHandoffReason, ChildHandoffReceipt, ChildRunOutcome,
+};
+use crate::session::Session;
 
 fn active_shell_tasks(manager: &crate::agent::async_tasks::TaskManager) -> Vec<BgTaskInfo> {
     let mut tasks: Vec<_> = manager
@@ -70,7 +76,7 @@ async fn commit_handoff(
     unprocessed_tool_calls: Vec<String>,
     handoff_start: &mut Option<tokio::sync::oneshot::Sender<ChildHandoffReceipt>>,
 ) -> Result<ChildHandoffReceipt, crate::agent::async_tasks::handoff::HandoffCommitError> {
-    let receipt = super::commit_child_handoff(
+    let receipt = crate::agent::async_tasks::handoff::commit_child_handoff(
         &context.session,
         owner,
         reason,
@@ -165,7 +171,7 @@ async fn run_child_with_handoff_signal_inner(
         .subagent_host()
         .and_then(|host| host.task_manager.clone())
     else {
-        return match run_react_loop(context, max_iterations).await {
+        return match crate::agent::stages::run_react_loop(context, max_iterations).await {
             LoopResult::Completed => ChildRunOutcome::Settled,
             LoopResult::SettlementDue { .. } => missing_handoff_owner(),
             LoopResult::HookStopped {
@@ -208,7 +214,7 @@ async fn run_child_with_handoff_signal_inner(
             original_idle_probe.as_ref().is_some_and(|probe| probe())
         })
     });
-    let mut result = run_react_loop(context.clone(), max_iterations).await;
+    let mut result = crate::agent::stages::run_react_loop(context.clone(), max_iterations).await;
 
     loop {
         if cancel.is_cancelled() {
@@ -369,7 +375,7 @@ async fn run_child_with_handoff_signal_inner(
                 .unwrap_or(false)
         {
             let remaining = max_iterations.saturating_sub(context.session.turn.current_step());
-            result = run_react_loop(context.clone(), remaining).await;
+            result = crate::agent::stages::run_react_loop(context.clone(), remaining).await;
             continue;
         }
         let shells = active_shell_tasks(&manager);
@@ -421,7 +427,7 @@ async fn run_child_with_handoff_signal_inner(
                 if let Err(error) = context.session.queue.enqueue(message).await {
                     tracing::warn!(%error, "child shell reminder enqueue failed");
                 }
-                result = run_react_loop(context.clone(), remaining).await;
+                result = crate::agent::stages::run_react_loop(context.clone(), remaining).await;
                 continue;
             }
             tracing::warn!(task_ids = ?shells.iter().map(|task| &task.task_id).collect::<Vec<_>>(), "child shell reminder skipped because model budget is exhausted");

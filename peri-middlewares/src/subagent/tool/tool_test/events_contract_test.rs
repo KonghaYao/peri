@@ -1,4 +1,14 @@
-use super::*;
+use super::AgentId;
+use super::Arc;
+use super::BaseMessage;
+use super::EchoLLM;
+use super::ExecutorEvent;
+use super::HostFixture;
+use super::ObserveEvent;
+use super::RecordingBridge;
+use super::RwLock;
+use super::SubAgentTool;
+use peri_agent::tools::BaseTool as _;
 
 // ─── C2/C3：v2 SubagentStart/Stop 生产 emit 契约测试 ─────────────────────────
 //
@@ -86,11 +96,11 @@ async fn durable_host_with_bridge(
 /// 且 child_agent_id == child_thread_id（C1 身份统一契约）
 #[tokio::test]
 async fn test_fork_path_emits_v2_start_stop_exactly_once() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let bridge = make_bridge();
     let host = durable_host_with_bridge(dir.path(), "fixture-events-fork", &bridge).await;
     // 会话资源门面存在时 invoke 返回携带 child_thread_id，用于身份对齐断言
-    let t = host.bind(with_agent_face(make_tool_with_bridge(&bridge), dir.path()).await);
+    let t = host.bind(super::with_agent_face(make_tool_with_bridge(&bridge), dir.path()).await);
     let result = t
         .invoke(
             serde_json::json!({
@@ -111,7 +121,7 @@ async fn test_fork_path_emits_v2_start_stop_exactly_once() {
         .to_string();
 
     let evs = wait_for_observe_start_stop(&bridge, 3000).await;
-    assert_start_stop_pair(&evs, "fork", false);
+    super::assert_start_stop_pair(&evs, "fork", false);
     assert_eq!(
         start_child_agent_id(&evs).to_string(),
         child_thread_id,
@@ -123,11 +133,11 @@ async fn test_fork_path_emits_v2_start_stop_exactly_once() {
 /// 且 child_agent_id == child_thread_id（C1 身份统一契约）
 #[tokio::test]
 async fn test_define_path_emits_v2_start_stop_exactly_once() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
+    let dir = tempfile::tempdir().unwrap();
+    super::write_test_agent(&dir);
     let bridge = make_bridge();
     let host = durable_host_with_bridge(dir.path(), "fixture-events-define", &bridge).await;
-    let t = host.bind(with_agent_face(make_tool_with_bridge(&bridge), dir.path()).await);
+    let t = host.bind(super::with_agent_face(make_tool_with_bridge(&bridge), dir.path()).await);
     let result = t
         .invoke(
             serde_json::json!({
@@ -148,7 +158,7 @@ async fn test_define_path_emits_v2_start_stop_exactly_once() {
         .to_string();
 
     let evs = wait_for_observe_start_stop(&bridge, 3000).await;
-    assert_start_stop_pair(&evs, "test-agent", false);
+    super::assert_start_stop_pair(&evs, "test-agent", false);
     assert_eq!(
         start_child_agent_id(&evs).to_string(),
         child_thread_id,
@@ -160,8 +170,8 @@ async fn test_define_path_emits_v2_start_stop_exactly_once() {
 /// 且 child_agent_id == v1 SubagentStarted.instance_id（C1 身份统一契约）
 #[tokio::test]
 async fn test_background_path_emits_v2_start_stop_exactly_once() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
+    let dir = tempfile::tempdir().unwrap();
+    super::write_test_agent(&dir);
     let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let bridge = make_bridge();
@@ -180,7 +190,7 @@ async fn test_background_path_emits_v2_start_stop_exactly_once() {
             Some(Arc::clone(&bridge_for_host) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>);
         host.with_rebuilt_host(sub_host)
     };
-    let t = host.bind(with_agent_face(make_tool_with_bridge(&bridge), dir.path()).await);
+    let t = host.bind(super::with_agent_face(make_tool_with_bridge(&bridge), dir.path()).await);
     let result = t
         .invoke(
             serde_json::json!({
@@ -195,7 +205,7 @@ async fn test_background_path_emits_v2_start_stop_exactly_once() {
     assert!(result.is_ok(), "bg 应启动成功: {:?}", result.err());
 
     let evs = wait_for_observe_start_stop(&bridge, 5000).await;
-    assert_start_stop_pair(&evs, "test-agent", true);
+    super::assert_start_stop_pair(&evs, "test-agent", true);
 
     // v1 SubagentStarted.instance_id（= child_thread_id）与 v2 Start.child_agent_id 对齐
     let instance_id = tokio::time::timeout(std::time::Duration::from_secs(2), bg_rx.recv())
@@ -246,7 +256,7 @@ async fn test_bg_fork_path_emits_v2_start_stop_exactly_once() {
     assert!(result.is_ok(), "bg fork 应启动成功: {:?}", result.err());
 
     let evs = wait_for_observe_start_stop(&bridge, 5000).await;
-    assert_start_stop_pair(&evs, "fork", true);
+    super::assert_start_stop_pair(&evs, "fork", true);
 
     // v1 SubagentStarted.instance_id（= child_thread_id）与 v2 Start.child_agent_id 对齐
     let instance_id = tokio::time::timeout(std::time::Duration::from_secs(2), bg_rx.recv())

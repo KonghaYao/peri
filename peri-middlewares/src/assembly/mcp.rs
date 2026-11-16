@@ -6,9 +6,9 @@ use std::sync::Arc;
 pub(super) fn add_mcp(
     ctx: &AssemblyContext,
     chain: &mut MiddlewareChain,
-    mcp_pool_concrete: &Option<Arc<McpClientPool>>,
+    mcp_pool_concrete: Option<&Arc<McpClientPool>>,
 ) {
-    if let Some(pool) = mcp_pool_concrete.as_ref() {
+    if let Some(pool) = mcp_pool_concrete {
         let mw = McpMiddleware::new(Arc::clone(pool))
             .with_session_id(ctx.session_id.clone())
             .with_skill_discovery(ctx.mcp_skill_registry.clone(), ctx.cancel.clone())

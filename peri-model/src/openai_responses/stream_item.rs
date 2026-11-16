@@ -4,11 +4,9 @@ use serde_json::Value;
 
 use crate::{ModelResult, ModelStreamEvent};
 
-use super::{
-    request::invalid,
-    response::{function_name, required_array, required_string, required_string_allow_empty},
-    ResponsesProfile,
-};
+use super::request;
+use super::response;
+use super::ResponsesProfile;
 
 pub(super) struct StreamItem {
     identity: Value,
@@ -20,38 +18,40 @@ pub(super) struct StreamItem {
 }
 
 impl StreamItem {
-    pub(super) fn new(
+    pub(super) fn try_new(
         index: usize,
         item: &Value,
         profile: ResponsesProfile,
         tools: &BTreeSet<String>,
     ) -> ModelResult<(Self, Vec<ModelStreamEvent>)> {
         if item.get("id").is_some() {
-            required_string(item, "id")?;
+            response::required_string(item, "id")?;
         }
-        let kind = required_string(item, "type")?.to_owned();
+        let kind = response::required_string(item, "type")?.to_owned();
         let mut events = Vec::new();
         match kind.as_str() {
             "message" => {
-                if required_string(item, "role")? != "assistant" {
-                    return Err(invalid("Output message has a non-assistant role"));
+                if response::required_string(item, "role")? != "assistant" {
+                    return Err(request::invalid("Output message has a non-assistant role"));
                 }
             }
             "reasoning" => {}
             "function_call" => {
-                let name = function_name(item, profile)?;
+                let name = response::function_name(item, profile)?;
                 if !tools.contains(name) {
-                    return Err(invalid("Responses called a function that was not offered"));
+                    return Err(request::invalid(
+                        "Responses called a function that was not offered",
+                    ));
                 }
                 events.push(ModelStreamEvent::ToolCallDelta {
                     index,
-                    id: Some(required_string(item, "call_id")?.to_owned()),
+                    id: Some(response::required_string(item, "call_id")?.to_owned()),
                     name: Some(name.to_owned()),
                     arguments_delta: String::new(),
                 });
             }
             _ => {
-                return Err(invalid(
+                return Err(request::invalid(
                     "Unsupported Responses output item; hosted/executable tools are not enabled",
                 ));
             }
@@ -87,9 +87,9 @@ impl StreamItem {
     pub(super) fn truncate(&mut self, item: &Value) -> ModelResult<Vec<ModelStreamEvent>> {
         match item.get("status").filter(|status| !status.is_null()) {
             Some(status) if status == "completed" => self.finish(item),
-            Some(status) if status != "in_progress" && status != "incomplete" => {
-                Err(invalid("Responses output item has an invalid status"))
-            }
+            Some(status) if status != "in_progress" && status != "incomplete" => Err(
+                request::invalid("Responses output item has an invalid status"),
+            ),
             _ if self.done.is_some() => self.finish(item),
             _ => self.reconcile(item),
         }
@@ -101,7 +101,11 @@ impl StreamItem {
                 None => return Ok(Some(done.clone())),
                 Some(status) if status == "completed" => return Ok(Some(done.clone())),
                 Some(status) if status == "in_progress" || status == "incomplete" => {}
-                _ => return Err(invalid("Responses output item has an invalid status")),
+                _ => {
+                    return Err(request::invalid(
+                        "Responses output item has an invalid status",
+                    ))
+                }
             }
         }
         if self.done.is_none()
@@ -116,7 +120,9 @@ impl StreamItem {
                     )
                 })
         {
-            return Err(invalid("Responses output item has an invalid status"));
+            return Err(request::invalid(
+                "Responses output item has an invalid status",
+            ));
         }
         // 半截思考和函数调用没有安全回放依据；正文只保留已校验的纯内容，
         // 不伪造原生 item 的完成状态或携带其未完成身份。
@@ -140,8 +146,10 @@ impl StreamItem {
     }
 
     pub(super) fn check_id(&self, event: &Value) -> ModelResult<()> {
-        if Some(required_string(event, "item_id")?) != self.id() {
-            return Err(invalid("Responses output_index and item_id disagree"));
+        if Some(response::required_string(event, "item_id")?) != self.id() {
+            return Err(request::invalid(
+                "Responses output_index and item_id disagree",
+            ));
         }
         Ok(())
     }
@@ -159,7 +167,7 @@ impl StreamItem {
             _ => false,
         };
         if !valid {
-            return Err(invalid(
+            return Err(request::invalid(
                 "Responses delta kind does not match its output item",
             ));
         }
@@ -168,7 +176,9 @@ impl StreamItem {
             .entry(index)
             .or_insert_with(|| (part_kind.to_owned(), String::new()));
         if part.0 != part_kind {
-            return Err(invalid("Responses content index changed its content kind"));
+            return Err(request::invalid(
+                "Responses content index changed its content kind",
+            ));
         }
         part.1.push_str(delta);
         Ok(self.text_event(delta))
@@ -177,7 +187,9 @@ impl StreamItem {
     pub(super) fn arguments_delta(&mut self, delta: &str) -> ModelResult<Vec<ModelStreamEvent>> {
         self.ensure_live()?;
         if self.kind != "function_call" {
-            return Err(invalid("Arguments delta belongs to a non-function item"));
+            return Err(request::invalid(
+                "Arguments delta belongs to a non-function item",
+            ));
         }
         self.arguments.push_str(delta);
         Ok(self.arguments_event(delta))
@@ -186,13 +198,15 @@ impl StreamItem {
     pub(super) fn arguments_done(&mut self, arguments: &str) -> ModelResult<Vec<ModelStreamEvent>> {
         self.ensure_live()?;
         if self.kind != "function_call" {
-            return Err(invalid(
+            return Err(request::invalid(
                 "Arguments completion belongs to a non-function item",
             ));
         }
         let suffix = arguments
             .strip_prefix(&self.arguments)
-            .ok_or_else(|| invalid("Function arguments snapshot disagrees with emitted deltas"))?
+            .ok_or_else(|| {
+                request::invalid("Function arguments snapshot disagrees with emitted deltas")
+            })?
             .to_owned();
         self.arguments = arguments.to_owned();
         Ok(self.arguments_event(&suffix))
@@ -212,7 +226,7 @@ impl StreamItem {
             .unwrap_or("");
         let suffix = text
             .strip_prefix(emitted)
-            .ok_or_else(|| invalid("Content snapshot disagrees with emitted deltas"))?
+            .ok_or_else(|| request::invalid("Content snapshot disagrees with emitted deltas"))?
             .to_owned();
         self.part_delta(index, kind, &suffix)
     }
@@ -222,7 +236,7 @@ impl StreamItem {
             if equivalent_finished_item(done, item) {
                 return Ok(Vec::new());
             }
-            return Err(invalid(
+            return Err(request::invalid(
                 "Completed Responses item changed after output_item.done",
             ));
         }
@@ -238,38 +252,45 @@ impl StreamItem {
             let before = self.identity.get(field).filter(|value| !value.is_null());
             let after = item.get(field).filter(|value| !value.is_null());
             if before != after {
-                return Err(invalid("Responses item changed identity during the stream"));
+                return Err(request::invalid(
+                    "Responses item changed identity during the stream",
+                ));
             }
         }
         if self.kind == "function_call" {
-            return self.arguments_done(required_string_allow_empty(item, "arguments")?);
+            return self.arguments_done(response::required_string_allow_empty(item, "arguments")?);
         }
         let field = if self.kind == "message" {
             "content"
         } else {
             "summary"
         };
-        let parts = required_array(item, field)?;
+        let parts = response::required_array(item, field)?;
         if self.parts.keys().any(|index| *index >= parts.len()) {
-            return Err(invalid(
+            return Err(request::invalid(
                 "Responses snapshot omitted previously emitted content",
             ));
         }
         let mut events = Vec::new();
-        for (index, part) in parts.iter().enumerate() {
-            let kind = required_string(part, "type")?;
-            let text = required_string_allow_empty(
-                part,
-                if kind == "refusal" { "refusal" } else { "text" },
-            )?;
-            events.extend(self.part_done(index, kind, text)?);
+        {
+            let indexed_parts = parts.iter().enumerate();
+            for (index, part) in indexed_parts {
+                let kind = response::required_string(part, "type")?;
+                let text = response::required_string_allow_empty(
+                    part,
+                    if kind == "refusal" { "refusal" } else { "text" },
+                )?;
+                events.extend(self.part_done(index, kind, text)?);
+            }
         }
         Ok(events)
     }
 
     fn ensure_live(&self) -> ModelResult<()> {
         if self.done.is_some() {
-            return Err(invalid("Responses delta arrived after output_item.done"));
+            return Err(request::invalid(
+                "Responses delta arrived after output_item.done",
+            ));
         }
         Ok(())
     }

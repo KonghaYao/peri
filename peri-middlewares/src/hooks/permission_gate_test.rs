@@ -1,4 +1,5 @@
-use super::*;
+use super::BoundToolOrigin;
+use super::PermissionMode;
 
 fn external(name: &str) -> BoundToolOrigin {
     BoundToolOrigin {
@@ -12,7 +13,7 @@ fn external(name: &str) -> BoundToolOrigin {
 #[test]
 fn test_external_raw_read_fires_permission_request() {
     let origin = external("Read");
-    assert!(should_fire_permission_request_for_origin(
+    assert!(super::should_fire_permission_request_for_origin(
         PermissionMode::Default,
         "Read",
         crate::permission::default_requires_approval,
@@ -24,7 +25,7 @@ fn test_external_raw_read_fires_permission_request() {
 #[test]
 fn test_external_raw_write_fires_in_accept_edit_mode() {
     let origin = external("Write");
-    assert!(should_fire_permission_request_for_origin(
+    assert!(super::should_fire_permission_request_for_origin(
         PermissionMode::AcceptEdit,
         "Write",
         crate::permission::default_requires_approval,
@@ -39,7 +40,7 @@ fn test_builtin_read_does_not_fire_permission_request() {
         mcp_tool_name: Some("Read".to_string()),
         builtin_mcp_instance: Some("workspace".to_string()),
     };
-    assert!(!should_fire_permission_request_for_origin(
+    assert!(!super::should_fire_permission_request_for_origin(
         PermissionMode::Default,
         "Read",
         crate::permission::default_requires_approval,

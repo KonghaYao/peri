@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    InstallScope, InstalledPlugin, InstalledPlugins, KnownMarketplace, MarketplaceSource,
+    McpServerEntry, PluginAgent, PluginAuthor, PluginCommand, PluginCommandEntry, PluginManifest,
+    PluginOrigin,
+};
 
 #[test]
 fn test_plugin_manifest_minimal() {

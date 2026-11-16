@@ -1,0 +1,763 @@
+use super::{
+    async_trait, client, fmt, hook_state, json, system_tools, AgentCancellationToken, Arc,
+    AtomicBool, BTreeMap, BTreeSet, BaseTool, ClientStatus, CommandRegistry, Debug,
+    DiscoverMCPTool, Formatter, HandleToken, McpAdmissionPreparation, McpClientHandle,
+    McpClientPool, McpResourceTool, McpSkillRegistry, McpToolBridge, MessageKind, Middleware,
+    Ordering, QueueMessageSource, QueuedMessage, ReminderAudience, ReminderAudiences,
+    ReminderCategory, ReminderDelivery, ReminderSeverity, ReminderSource, SharedToolMap,
+    SystemMcpManifest, SystemReadinessError, SystemReminder, TrustedSystemReminderFactory,
+    MCP_MIDDLEWARE_NAME, SYSTEM_REMINDER_VERSION,
+};
+
+pub(super) const MCP_TOOL_USAGE_HINT: &str = "已直接注入的 system MCP 工具按原始名称调用；其余 MCP 工具经 tool search 发现，名称格式为 mcp__<server>__<tool>。";
+
+/// MCP 中间件 —— 将所有已连接 MCP 服务器的工具和资源注入 ReAct 循环，
+/// 并向模型通报 MCP 连接状态（首 turn 概览 + 运行中上下线变化）。
+pub struct McpMiddleware {
+    /// Session connection pool shared by tools, resources, discovery, and status.
+    pub(super) pool: Arc<McpClientPool>,
+    /// 会话级 MCP skill 远端注册表（None = 未装配 session 透传；DiscoverMCP
+    /// 的 skill 域查询读它）。
+    pub(super) registry: Option<Arc<McpSkillRegistry>>,
+    /// 会话级命令注册表（命令面，Phase 6 A3；None = 未装配 session 透传，
+    /// 跳过 mcp 域命令发现投影）。与 `registry` 是两条独立写路径：
+    /// 元数据面发现结果经 [`crate::mcp::skill_discovery::mcp_route_entries`]
+    /// 转换后写本注册表。
+    pub(super) command_registry: Option<Arc<CommandRegistry>>,
+    /// 会话 id：MCP 事实面（工具 / 概览 / 发现）按 ACP 连接归属过滤，
+    /// `None` = 未装配会话上下文（print 模式 / 既有测试），不过滤。
+    pub(super) session_id: Option<String>,
+    pub(super) discover_catalog: Arc<parking_lot::RwLock<Option<SharedToolMap>>>,
+    /// session 取消令牌（发现任务持有；触发后 before_agent 不再投影/spawn）
+    pub(super) cancel: AgentCancellationToken,
+    /// 是否已向模型提示过 tool search 用法（每个会话实例恰好一次）
+    pub(super) hint_sent: AtomicBool,
+    /// 本 turn 关闭的 builtin 实例名集合（IF-D10 面①/②）。
+    ///
+    /// 来源 = 通话装配面按冻结的 `meta_harness_disabled` 求出的
+    /// `builtin::closed_instances`；空集合 = 不关闭任何实例（既有测试与
+    /// print 模式语义逐位不变）。判定只走 `builtin::is_closed`，
+    /// 本文件不硬编码实例名或 `mcp__web__` 前缀。
+    pub(super) builtin_closures: BTreeSet<String>,
+    ///  链槽关闭位（F11）：DiscoverMCP 的 agent 投影与
+    /// SubAgent 工具面同源——关闭后不得再列本地 agent 来源。
+    pub(super) sub_agent_face_closed: bool,
+}
+
+impl Debug for McpMiddleware {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpMiddleware")
+            .field("session_id", &self.session_id)
+            .field("hint_sent", &self.hint_sent)
+            .field("sub_agent_face_closed", &self.sub_agent_face_closed)
+            .finish_non_exhaustive()
+    }
+}
+
+impl McpMiddleware {
+    /// 本 turn 的准入准备投影：四个输入全是 session 级事实（deployment pool /
+    /// session id / session 取消令牌 / 冻结关闭集），不含任何 turn 输入。
+    ///
+    /// 取投影而非把 admission 存成字段：middleware 每 turn 新建，准入输入的权威
+    /// 来源仍是 middleware 自身字段，存第二份可写副本会引入漂移面（业务规则单一
+    /// 权威）。session invocation 复用
+    /// [`McpAdmissionPreparation::new`] 同一条构造路径。
+    pub(super) fn admission(&self) -> McpAdmissionPreparation {
+        McpAdmissionPreparation::new(
+            Arc::clone(&self.pool),
+            self.session_id.clone(),
+            self.cancel.clone(),
+            self.builtin_closures.clone(),
+        )
+    }
+
+    #[must_use]
+    pub fn new(pool: Arc<McpClientPool>) -> Self {
+        Self {
+            pool,
+            registry: None,
+            command_registry: None,
+            session_id: None,
+            discover_catalog: Arc::new(parking_lot::RwLock::new(None)),
+            cancel: AgentCancellationToken::new(),
+            hint_sent: AtomicBool::new(false),
+            builtin_closures: BTreeSet::new(),
+            sub_agent_face_closed: false,
+        }
+    }
+
+    pub(super) fn publish_discover_catalog(&self, state: &dyn hook_state::CatalogState) {
+        *self.discover_catalog.write() = state.local_tools().cloned();
+    }
+
+    /// 注入会话 id（装配槽位调用）：ACP 声明的 server 只对本会话可见。
+    #[must_use]
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// 注入 skill 发现装配（session 级 registry + cancel token；assembly 槽位
+    /// 调用）。不调用时保持无发现行为（既有测试/print 模式兼容）。
+    #[must_use]
+    pub fn with_skill_discovery(
+        mut self,
+        registry: Option<Arc<McpSkillRegistry>>,
+        cancel: AgentCancellationToken,
+    ) -> Self {
+        self.registry = registry;
+        self.cancel = cancel;
+        self
+    }
+
+    /// 注入命令面注册表（session 级 CommandRegistry；assembly 槽位调用，
+    /// Phase 6 A3）。None = 未装配命令面（print 模式/既有测试），发现任务
+    /// 仅回写元数据面。
+    #[must_use]
+    pub fn with_command_registry(self, command_registry: Option<Arc<CommandRegistry>>) -> Self {
+        Self {
+            command_registry,
+            ..self
+        }
+    }
+
+    /// 幂等发现驱动（决策 B）：装配后立即 / pool 连接完成事件 / before_agent
+    /// 三挂点共用同一执行体。
+    ///
+    /// 幂等性由两侧注册表投影保证：`project_connected` / `project_sources`
+    /// 只对「无状态或 handle 变化（`!Arc::ptr_eq`）」的来源返回
+    /// `to_discover`——Started 去重、Completed 跳过、重连经 ptr_eq 重新
+    /// 进入，重复调用安全（无新来源时零 spawn）。
+    pub(crate) fn ensure_discovery(&self) {
+        run_ensure_discovery(
+            &self.pool,
+            self.registry.as_ref(),
+            self.command_registry.as_ref(),
+            self.session_id.as_deref(),
+            &self.cancel,
+        );
+    }
+
+    /// 注入本次 turn 的 builtin 关闭集（IF-D10 面①/②；装配面按冻结的
+    /// `meta_harness_disabled` 用 `builtin::closed_instances` 求出）。
+    ///
+    /// 语义分层（IF-D10 第 3 条）：关闭集**只**决定本 turn 是否投影该实例的工具，
+    /// 不影响 readiness——`await_system_connections` 仍按 pool 级配置判定实例
+    /// 是否 ready（「实例必须健康」与「本 turn 是否注入」是两件事），
+    /// 因此有意的关闭不会被误报成启动失败。
+    pub(crate) fn with_builtin_closures(mut self, closed: BTreeSet<String>) -> Self {
+        self.builtin_closures = closed;
+        self
+    }
+
+    /// 注入 Agent 工具面关闭位（F11；装配点从同一份 `meta_harness_disabled` 派生）。
+    pub(crate) fn with_sub_agent_face_closed(mut self, closed: bool) -> Self {
+        self.sub_agent_face_closed = closed;
+        self
+    }
+}
+
+/// 发现驱动执行体（决策 B；[`McpMiddleware::ensure_discovery`] 与装配面
+/// pool 连接完成钩子共用）。无 tokio runtime 时跳过 spawn（装配期测试等
+/// 场景；before_agent 幂等兜底，不 panic）。
+pub(crate) fn run_ensure_discovery(
+    pool: &Arc<McpClientPool>,
+    registry: Option<&Arc<McpSkillRegistry>>,
+    command_registry: Option<&Arc<CommandRegistry>>,
+    session_id: Option<&str>,
+    cancel: &AgentCancellationToken,
+) {
+    let Some(registry) = registry else {
+        return;
+    };
+    if cancel.is_cancelled() {
+        return;
+    }
+    pool.bind_discovery_projection(registry, command_registry, session_id);
+    // A24 关闭集：关闭的 builtin 实例既不可发现也不可激活（X4）——技能/命令面
+    // 在**来源投影**处整体剔除，因此关闭实例不会留下 registry 条目、命令路由
+    // 或可激活句柄（无 FS fallback 的说法在这里落地：关闭后无任何本地来源）。
+    //
+    // W4b 收口：同一份上下文对象一次读出「宿主技能面关闭位」
+    //（`skills_face_closed`，与关闭集同源 = `"SkillsMiddleware" ∈ disabled`）——
+    // 真 ⇒ `core:{skill}` 裸名投影整体撤下；系统来源不再注册
+    // `{server}:{skill}`，实例本身仍由独立的 `closed` 集判定。
+    let builtin_context = pool.builtin_instance_context();
+    let closed = builtin_context
+        .as_ref()
+        .map(|context| context.closed.clone())
+        .unwrap_or_default();
+    let skills_face_closed = builtin_context
+        .as_ref()
+        .is_some_and(|context| context.skills_face_closed);
+    let connected_handles: Vec<Arc<McpClientHandle>> = pool
+        .clients_visible_to(session_id)
+        .into_iter()
+        .filter(|handle| {
+            !super::super::builtin::is_closed_source(&handle.name, handle.source.as_ref(), &closed)
+        })
+        .collect();
+    tracing::debug!(
+        session_id,
+        ?closed,
+        sources = ?connected_handles.iter().map(|handle| (&handle.name, &handle.source)).collect::<Vec<_>>(),
+        "MCP skill projection boundary"
+    );
+    let connected: Vec<(String, HandleToken)> = connected_handles
+        .iter()
+        .map(|h| (h.name.clone(), h.clone() as HandleToken))
+        .collect();
+    // W4b（F6/J1）：标注系统来源（host 绑定的 builtin 实例）——system 摘要投递
+    // 与 `core:{skill}` 裸名命令投影都按该标注判定，且只认连接事实（X6/X7）。
+    crate::mcp::skill_discovery::mark_system_origins(registry, &connected_handles, &closed);
+    // 命令面投影（决策 1）：同 connected 列表，来源键 =
+    // `mcp_source_key(server)`（plugin server key 取末段，与
+    // mcp_route_entries 的 fullname 词法首段同构——断连批量注销
+    // `{末段}:` 才能命中条目）。
+    if let Some(reg) = command_registry {
+        // 审查 B1：保留词法域 server 整体跳过命令面（不 Started、断连
+        // 不注销）——源头无键即不会误删内置域条目；元数据面照常。
+        let cmd_connected: Vec<(String, HandleToken)> = connected
+            .iter()
+            .filter(|(name, _)| !crate::mcp::skill_discovery::mcp_namespace_reserved(name))
+            .filter(|(name, token)| {
+                !matches!(registry.discovery_state(name),
+                    Some(peri_acp_types::mcp_skills::ServerDiscoveryState::Failed { handle })
+                        if Arc::ptr_eq(&handle, token))
+            })
+            .map(|(name, token)| {
+                (
+                    crate::mcp::skill_discovery::mcp_source_key(name),
+                    token.clone(),
+                )
+            })
+            .collect();
+        let cmd_projection = reg.project_sources(&cmd_connected);
+        // removed_any 已由注册表内部消费（on_change 触发决策，含断连
+        // 批量注销），本层只需处理 to_discover（与元数据面 Projection
+        // 同构，非漏处理）。
+        for (prefix, handle_token) in cmd_projection.to_discover {
+            reg.mark_source_started(&prefix, handle_token);
+        }
+    }
+    let projection = registry.project_connected(&connected);
+    // W4b（F6）：`core:{skill}` 裸名命令随来源集合重算（关闭/断连 ⇒ 同批撤下；
+    // 幂等，无变化不触发 on_change）。放在 runtime 判定之前：纯投影不需要 runtime。
+    crate::mcp::skill_discovery::project_core_skill_commands(
+        (command_registry.cloned()).as_ref(),
+        registry,
+        skills_face_closed,
+    );
+    let Some(_runtime) = tokio::runtime::Handle::try_current().ok() else {
+        // 无 tokio runtime（装配期/纯函数测试）：跳过 spawn，before_agent
+        // 幂等兜底（生产路径恒在 runtime 内，不触发本分支）。
+        return;
+    };
+    for (name, handle_token) in projection.to_discover {
+        // 仅置位者 spawn（审查 M1）：装配后立即 / 连接完成事件 / before_agent
+        // 三个挂点可并发执行，同代已 Started 时跳过 spawn；换代立即独立发现，
+        // 不等待旧代任务结束。注册表按 handle token 拒绝旧代回写。
+        if !registry.mark_discovery_started(&name, handle_token.clone()) {
+            continue;
+        }
+        // mark 后取到的 handle 必须仍是投影时的同一代；换代则清理旧 Started。
+        // cache 可选，缺失不代表跳过发现；无 peer 的当前连接须发布 Failed。
+        let Some(handle) = pool.client(&name) else {
+            continue;
+        };
+        let cache = pool.resource_cache_for_handle(&handle);
+        let current_token: HandleToken = handle.clone();
+        if !pool.is_open()
+            || !Arc::ptr_eq(&current_token, &handle_token)
+            || !pool
+                .client(&name)
+                .is_some_and(|current| Arc::ptr_eq(&current, &handle))
+        {
+            registry.clear_discovery_started(&name, handle_token.clone());
+            if let Some(commands) = command_registry {
+                commands.clear_source_started(
+                    &crate::mcp::skill_discovery::mcp_source_key(&name),
+                    handle_token,
+                );
+            }
+            continue;
+        }
+        let reg = Arc::clone(registry);
+        let cmd_reg = command_registry.cloned();
+        let cancel = cancel.clone();
+        let key = super::super::task_scope::McpTaskKey::SkillDiscovery {
+            server: name.clone(),
+            session: session_id.unwrap_or_default().into(),
+            registry: Arc::as_ptr(registry) as usize,
+            handle: Arc::as_ptr(&handle) as usize,
+        };
+        let rollback_token = handle_token.clone();
+        let rollback_name = name.clone();
+        if pool
+            .spawn_background(key, async move {
+                crate::mcp::skill_discovery::run_discovery_with_cache(
+                    reg,
+                    cmd_reg,
+                    handle,
+                    handle_token,
+                    cancel,
+                    cache,
+                    skills_face_closed,
+                )
+                .await;
+            })
+            .is_err()
+        {
+            registry.clear_discovery_started(&rollback_name, rollback_token);
+        }
+    }
+}
+
+/// session/new 预热入口（决策 B 扩展，审查会话生命周期）：不装配 chain
+/// 即可触发幂等发现——新会话（/clear）在首 turn 装配前即 spawn 发现，
+/// 面板无需等首轮消息即有 mcp 命令。幂等语义与装配面一致（Started 去重 /
+/// Completed 跳过 / 重连 ptr_eq）；已连接 server 立即发现，连接中的
+/// server 空跑，由首 turn 装配与连接完成事件兜底。cancel 持调用方 session
+/// token，session 关闭即早退。
+///
+/// `session_id` 必填：预热面按会话归属过滤（本会话声明的 ACP 连接才预热），
+/// 与装配面 [`McpMiddleware::with_session_id`] 同口径。
+pub fn prewarm_discovery(
+    pool: &Arc<McpClientPool>,
+    registry: &Arc<McpSkillRegistry>,
+    command_registry: &Arc<CommandRegistry>,
+    session_id: &str,
+    cancel: &AgentCancellationToken,
+) {
+    run_ensure_discovery(
+        pool,
+        Some(registry),
+        Some(command_registry),
+        Some(session_id),
+        cancel,
+    );
+}
+
+/// 挂接 pool 连接完成事件（决策 B）：Connected 状态变化 → 触发幂等发现，
+/// 补偿「装配时连接尚未完成 / 重连 / OAuth 授权后连接」的场景。装配面
+/// 与 session/new 预热面共用（覆盖语义：后挂者生效，持其 cancel 生命周期）。
+///
+/// `notify_tx`：装配面传入 session 事件通道以展示连接通知（SystemNotification）；
+/// session/new 预热面无 ExecutorEvent 通道传 None（仅发现触发；首 turn 装配
+/// 时覆盖为完整版，窗口期行为与 notifier 未挂一致，无退化）。
+pub fn attach_connection_notifier(
+    pool: &Arc<McpClientPool>,
+    registry: Option<&Arc<McpSkillRegistry>>,
+    command_registry: Option<&Arc<CommandRegistry>>,
+    cancel: &AgentCancellationToken,
+    notify_tx: Option<tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>>,
+) {
+    let discovery_pool = Arc::downgrade(pool);
+    let discovery_registry = registry.cloned();
+    let discovery_cmd = command_registry.cloned();
+    let discovery_cancel = cancel.clone();
+    pool.set_notifier(Box::new(move |text: &str| {
+        if let Some(tx) = notify_tx.as_ref() {
+            let _ = tx.send(
+                peri_agent::agent::events::ExecutorEvent::SystemNotification {
+                    text: text.to_string(),
+                    level: "info".to_string(),
+                },
+            );
+        }
+        // 文本匹配 Connected 固定形态（status_change_text 唯一来源，
+        // `connected (` 后缀稳定；Failed reason 含 " connected " 不误触发）。
+        if text.contains(" connected (") {
+            let Some(discovery_pool) = discovery_pool.upgrade() else {
+                return;
+            };
+            run_ensure_discovery(
+                &discovery_pool,
+                discovery_registry.as_ref(),
+                discovery_cmd.as_ref(),
+                // 连接事件通知器是部署级的（多会话可能共享一个 pool）：事件
+                // 文本不携带会话身份，这里按「不过滤」推进——会话级 ACP 连接
+                // 不产生状态变化通知（`record_status_change` 按归属跳过），
+                // 走到本分支的只会是部署级 server。
+                None,
+                &discovery_cancel,
+            );
+        }
+    }));
+}
+
+impl McpMiddleware {
+    /// 本批收集的静态 MCP bridge 集合。
+    ///
+    /// System 依赖已具备可信配置清单时使用 [`prepare_system_tools`] 的**整批**
+    /// 结果（必需项 direct、普通 deferred）整体替换 deferred 收集，禁止在旧集合上
+    /// 再 append 一份所需工具。准入候选本身不落 middleware 字段（IF-M5）：这里用与
+    /// 闸门同一套纯函数按当次 handle 快照推导，不跨 loop / 跨 session 复用旧代标记。
+    ///
+    /// 两条路径都走**类型化构造 + 关闭集过滤**（IF-D10 面①/②，A6/R22）：
+    /// 关闭实例的 bridge 不进入目录，声明的 direct（IF-D13）对未关闭实例生效。
+    ///
+    /// 校验不通过（缺工具 / schema / 可见性 / 原始名非法）时仅收集非 system
+    /// 工具：该结果不构成 ready，闸门仍会在进入 Compact 前以 fatal 结束本次 loop。
+    pub(super) fn static_tool_bridges(&self) -> Vec<Box<dyn BaseTool>> {
+        match self.prepared_static_bridges() {
+            Some(prepared) => prepared
+                .into_iter()
+                .map(|bridge| Box::new(bridge) as Box<dyn BaseTool>)
+                .collect(),
+            None => {
+                // 部分 system server 已连接时不得先抢占同名目录项；等整批
+                // required 工具验证完成后统一按稳定顺序提交。
+                let pending_system: std::collections::BTreeSet<String> =
+                    if self.pool.system_manifest() == SystemMcpManifest::Loaded {
+                        self.pool
+                            .system_requirements()
+                            .into_iter()
+                            .map(|item| item.server)
+                            .collect()
+                    } else {
+                        std::collections::BTreeSet::new()
+                    };
+                self.admission()
+                    .open_typed_bridges()
+                    .into_iter()
+                    .filter(|bridge| {
+                        !bridge
+                            .mcp_server_name()
+                            .is_some_and(|server| pending_system.contains(server))
+                    })
+                    .map(|bridge| Box::new(bridge) as Box<dyn BaseTool>)
+                    .collect()
+            }
+        }
+    }
+
+    /// `Some(整批 prepared bridge)` 仅当配置清单已完整发布且必需工具校验通过。
+    pub(super) fn prepared_static_bridges(&self) -> Option<Vec<McpToolBridge>> {
+        // 清单未发布（Pending / Failed）时 `configs` 不是可信的 System 依赖事实源。
+        if self.pool.system_manifest() != SystemMcpManifest::Loaded {
+            return None;
+        }
+        // 与准入（`McpAdmissionPreparation`）同一份关闭集判定：一次投影供本函数内
+        // 必需工具校验与 bridge 构造共用，不逐项重复投影。
+        let admission = self.admission();
+        let required: BTreeMap<String, Vec<String>> = self
+            .pool
+            .system_requirements()
+            .into_iter()
+            // 关闭实例不参与必需工具校验（与准入同一份关闭集）。
+            .filter(|requirement| !admission.is_source_closed(&requirement.server))
+            .map(|requirement| (requirement.server, requirement.required_tools))
+            .collect();
+        if required.is_empty() {
+            // 无 System 依赖（含「全部 system 实例被关闭」）：prepared 与 deferred
+            // 集合等价，保持原路径。
+            return None;
+        }
+        // 空 required 数组无法用工具名证明 server 已发现。整批 system server
+        // 均具备本代 tools/list 证据后才允许初始目录注入，避免先连接者抢占名字。
+        if required.keys().any(|server| {
+            let Some(handle) = self.pool.client(server) else {
+                return true;
+            };
+            !matches!(handle.status, super::super::client::ClientStatus::Connected)
+                || !self
+                    .pool
+                    .discovery_evidence(server)
+                    .is_some_and(|evidence| {
+                        evidence.is_complete()
+                            && evidence.generation == self.pool.handle_generation(&handle)
+                    })
+        }) {
+            return None;
+        }
+        system_tools::prepare_system_tools(admission.open_typed_bridges(), &required).ok()
+    }
+
+    /// 首 turn 概览：MCP 基础情况（服务器名 + 状态 + 工具数），失败报名字 + 错误。
+    ///
+    /// 无任何已配置服务器时返回 `None`（零噪音，不注入）。
+    pub(super) fn overview_text(&self) -> Option<String> {
+        let mut infos = self
+            .pool
+            .all_server_infos_visible_to(self.session_id.as_deref());
+        if infos.is_empty() {
+            return None;
+        }
+        // This is a set snapshot, not the ordered lifecycle event stream.
+        infos.sort_by(|left, right| left.name.cmp(&right.name));
+        let (mut connected, mut failed, mut disabled, mut other) = (0usize, 0usize, 0usize, 0usize);
+        let mut lines = Vec::new();
+        for info in &infos {
+            match &info.status {
+                ClientStatus::Connected => {
+                    connected += 1;
+                    lines.push(format!(
+                        "- {} (connected, {} tools)",
+                        info.name, info.tool_count
+                    ));
+                }
+                ClientStatus::Failed(reason) => {
+                    failed += 1;
+                    lines.push(format!("- {} (failed: {})", info.name, reason));
+                }
+                ClientStatus::Disabled => {
+                    disabled += 1;
+                    lines.push(format!("- {} (disabled)", info.name));
+                }
+                ClientStatus::Disconnected => {
+                    other += 1;
+                    lines.push(format!("- {} (disconnected)", info.name));
+                }
+                ClientStatus::Uninitialized => {
+                    other += 1;
+                    lines.push(format!("- {} (uninitialized)", info.name));
+                }
+            }
+        }
+        let summary = format!("MCP: {connected} connected, {failed} failed, {disabled} disabled");
+        if other > 0 {
+            lines.push(format!("- {} 台未连接", other));
+        }
+        Some(format!(
+            "{}\n{}\n\n{}",
+            summary,
+            lines.join("\n"),
+            MCP_TOOL_USAGE_HINT,
+        ))
+    }
+
+    /// 状态变化以 canonical Info reminder 注入模型上下文；自定义通知在同一点位
+    /// 以仅 TUI/诊断受众的 Info reminder 投递。
+    ///
+    /// 首条推送附 tool search 提示（每个会话恰好一次），后续只推送变化行。
+    pub(super) async fn push_status_changes(&self, state: &mut dyn hook_state::QueueState) {
+        let changes = self.pool.drain_pending_changes();
+        if !changes.is_empty() {
+            let producer = state.v2_producer();
+            let mut texts = Vec::with_capacity(changes.len() + 1);
+            if !self.hint_sent.swap(true, Ordering::SeqCst) {
+                texts.push(format!("MCP 连接状态变化：{MCP_TOOL_USAGE_HINT}"));
+            }
+            texts.extend(changes);
+            for text in texts {
+                let reminder = TrustedSystemReminderFactory::for_producer()
+                    .construct(SystemReminder {
+                        version: SYSTEM_REMINDER_VERSION,
+                        category: ReminderCategory::Lifecycle,
+                        source: ReminderSource("mcp".into()),
+                        kind: "connection_status_changed".into(),
+                        severity: if text.contains("failed") {
+                            ReminderSeverity::Warning
+                        } else {
+                            ReminderSeverity::Info
+                        },
+                        delivery: ReminderDelivery::Configurable,
+                        audiences: ReminderAudiences(vec![
+                            ReminderAudience::Model,
+                            ReminderAudience::Tui,
+                            ReminderAudience::Diagnostics,
+                        ]),
+                        summary: Some(text.clone()),
+                        body: text,
+                        metadata: json!({}),
+                    })
+                    .expect("MCP status reminder mapping must be valid");
+                if let Err(error) = producer
+                    .enqueue(QueuedMessage::system_reminder(
+                        MessageKind::Info,
+                        QueueMessageSource::SystemInjected,
+                        reminder,
+                    ))
+                    .await
+                {
+                    tracing::warn!(%error, "MCP status change enqueue failed");
+                }
+            }
+        }
+        self.push_custom_notifications(state).await;
+    }
+
+    /// 自定义通知 → canonical Info reminder（`Diagnostic` / `custom_notification`）。
+    ///
+    /// 受众不含 `Model`：server 自由文本不进入模型上下文；`Info` 不唤醒会话。
+    pub(super) async fn push_custom_notifications(&self, state: &mut dyn hook_state::QueueState) {
+        let notifications = self.pool.drain_pending_notifications();
+        if notifications.is_empty() {
+            return;
+        }
+        let producer = state.v2_producer();
+        for notification in notifications {
+            let reminder = client::pending_notification_reminder(&notification);
+            if let Err(error) = producer
+                .enqueue(QueuedMessage::system_reminder(
+                    MessageKind::Info,
+                    QueueMessageSource::SystemInjected,
+                    reminder,
+                ))
+                .await
+            {
+                tracing::warn!(%error, "MCP custom notification enqueue failed");
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl Middleware for McpMiddleware {
+    fn name(&self) -> &str {
+        // 链槽名与准入错误归属同源（`MCP_MIDDLEWARE_NAME`）：准入准备不是链槽，
+        // 失败仍归属到本 middleware，用户可见文案不因抽取而变。
+        MCP_MIDDLEWARE_NAME
+    }
+
+    fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
+        // 整批替换初始 Vec（不是 append）：System 依赖就绪时 prepared 集合已包含
+        // 全部静态 bridge（必需项 direct），再 extend 会重复注册同一工具。
+        let mut tools = self.static_tool_bridges();
+        #[cfg(not(target_os = "emscripten"))]
+        tools.push(Box::new(
+            super::super::context_archive::ReadContextArchiveTool,
+        ));
+
+        let resource_tool = McpResourceTool::new(
+            Arc::clone(&self.pool),
+            // 未装配 session 注册表（print 模式/既有测试）→ 空注册表：
+            // 无条目 = 无内容绑定校验（与现状一致）。
+            self.registry
+                .clone()
+                .unwrap_or_else(|| Arc::new(McpSkillRegistry::new())),
+        );
+        tools.push(Box::new(match self.session_id.clone() {
+            Some(session_id) => resource_tool.with_session_id(session_id),
+            None => resource_tool,
+        }));
+
+        // F11（安全面/关闭语义）：DiscoverMCP 的 Agent 投影必须与 SubAgent 工具面
+        // 同源——绑定会话（ACP 归属过滤）与**同一份**关闭位（链槽关闭键常量，
+        // 不写第二份字面量判定）。否则关闭  后 DiscoverMCP
+        // 仍会列出本地 agent（W5 新增的本地来源）。
+        let sub_agent_face_closed = self.sub_agent_face_closed;
+        let agent_registry =
+            super::super::agent_registry::McpAgentRegistry::new(Arc::clone(&self.pool))
+                .with_session(self.session_id.clone())
+                .with_local_face_closed(sub_agent_face_closed);
+        let discover_tool = DiscoverMCPTool::new(Arc::clone(&self.pool), self.registry.clone())
+            .with_catalog_slot(&self.discover_catalog)
+            .with_agent_registry(Arc::new(agent_registry));
+        tools.push(Box::new(match self.session_id.clone() {
+            Some(session_id) => discover_tool.with_session_id(session_id),
+            None => discover_tool,
+        }));
+
+        tools
+    }
+
+    /// 首轮用户 turn：注入 MCP 基础情况概览（覆盖"初始化已完成、无上下线
+    /// 事件"的场景）。由 executor 在首 turn 组装前调用。
+    async fn first_turn_reminder(
+        &self,
+        state: &mut dyn hook_state::QueueState,
+    ) -> peri_agent::error::AgentResult<Option<String>> {
+        let Some(body) = self.overview_text() else {
+            return Ok(None);
+        };
+        let summary = body.lines().next().map(str::to_string);
+        let reminder = TrustedSystemReminderFactory::for_producer()
+            .construct(SystemReminder {
+                version: SYSTEM_REMINDER_VERSION,
+                category: ReminderCategory::Capability,
+                source: ReminderSource("mcp".into()),
+                kind: "connection_summary".into(),
+                severity: ReminderSeverity::Info,
+                delivery: ReminderDelivery::Configurable,
+                audiences: ReminderAudiences(vec![
+                    ReminderAudience::Model,
+                    ReminderAudience::Tui,
+                    ReminderAudience::Diagnostics,
+                ]),
+                body,
+                summary,
+                metadata: json!({}),
+            })
+            .map_err(|error| peri_agent::error::AgentError::MiddlewareError {
+                middleware: self.name().to_string(),
+                reason: error.to_string(),
+            })?;
+        state.enqueue_v2_message(QueuedMessage::system_reminder(
+            MessageKind::Info,
+            QueueMessageSource::SystemInjected,
+            reminder,
+        ));
+        Ok(None)
+    }
+
+    /// 每轮投映 pool 已连接 server → 触发 MCP skill 发现（决策 B：before_agent
+    /// 保留为幂等增量挂点，装配后立即 / pool 连接完成事件共用同一执行体）。
+    ///
+    /// - registry 未装配 / cancel 已触发 → 直接返回（零动作）；
+    /// - `project_connected` 内部完成断连清理（有移除才触发 on_change）；
+    /// - 需发现的 (name, handle) 同步置 Started 后 spawn 发现任务（持
+    ///   session cancel token）。发现本身静默：不向 state 写任何消息。
+    /// - 命令面（`command_registry` 装配时）：同 connected 列表以
+    ///   [`crate::mcp::skill_discovery::mcp_source_key`] 投影来源
+    ///   （Started/断连清理），发现任务完成回写经
+    ///   [`crate::mcp::skill_discovery::run_discovery_with_cache`] 双写（元数据面 +
+    ///   命令面）。
+    async fn before_agent(
+        &self,
+        state: &mut dyn hook_state::BeforeAgentState,
+    ) -> peri_agent::error::AgentResult<()> {
+        self.publish_discover_catalog(state);
+        self.ensure_discovery();
+        Ok(())
+    }
+
+    async fn before_reason_catalog(
+        &self,
+        state: &mut dyn hook_state::CatalogState,
+    ) -> peri_agent::error::AgentResult<()> {
+        self.publish_discover_catalog(state);
+        self.ensure_discovery();
+        Ok(())
+    }
+
+    /// 启动闸门：System MCP 未完成 transport / initialize / 能力协商 / 必需工具
+    /// 检查前不得进入 Compact / Reason / Act（契约 2）。
+    ///
+    /// - 无 System 依赖时零动作：普通 MCP 的 pending / failed 永不阻塞启动；
+    /// - 候选经 `StartupState` 暂存，失败或取消时随本次 state 丢弃，不落 middleware
+    ///   字段、不发布 ready、不写宿主共享工具表；
+    /// - 既有 discovery 与状态通知行为不变（仍在 `before_agent` / `before_model`）。
+    async fn before_react_start(
+        &self,
+        state: &mut dyn hook_state::StartupState,
+    ) -> peri_agent::error::AgentResult<()> {
+        // 顺序不变：await_system_ready → startup_tool_update → stage_startup_tools。
+        // 准入逻辑复用 session invocation 的 `McpAdmissionPreparation`，
+        // 本钩子只保留触发时机与提交出口。
+        let admission = self.admission();
+        let snapshot = admission
+            .await_system_ready()
+            .await
+            .map_err(|error| admission.startup_agent_error(error))?;
+        match admission.startup_tool_update(&snapshot) {
+            Ok(Some(update)) => state.stage_startup_tools(update),
+            Ok(None) => Ok(()),
+            Err(source) => {
+                Err(admission.startup_agent_error(SystemReadinessError::RequiredTools { source }))
+            }
+        }
+    }
+
+    /// 每轮 ReAct 迭代：drain 状态变化缓冲并以 Info 消息推送（不唤醒循环；
+    /// 空闲期变化由下个 turn 首轮 Receive 消费）。
+    async fn before_model(
+        &self,
+        state: &mut dyn hook_state::BeforeModelState,
+    ) -> peri_agent::error::AgentResult<()> {
+        self.push_status_changes(state).await;
+        Ok(())
+    }
+}

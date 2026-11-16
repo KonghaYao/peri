@@ -1,4 +1,14 @@
-use super::*;
+use super::{
+    context, HashSet, HistoryCursor, HistoryCursorError, HistoryForwardCursor, HistoryPage,
+    HistoryPageBounds, HistoryPageCandidate, HistoryPagePlan, HistoryPageRow, HistorySegment,
+    HistorySegmentPlan, MessageId, PersistedPayload, RewindBoundary, RewindOutcome,
+    SessionResourceResult, SqliteConnection, SqliteSessionData, ThreadId,
+};
+use crate::sessions::sqlite_store::session_data::insert_message_rows;
+use crate::sessions::sqlite_store::session_data::refresh_history_derivations;
+use crate::sessions::sqlite_store::session_data::thread_exists_on;
+use crate::sessions::sqlite_store::session_data::SerializedHistoryChunks;
+
 use crate::sessions::sqlite_store::row_mapping::THREAD_META_COLUMNS;
 use peri_acp_types::history_window::{
     HistoryBodyChunk, HistoryEntryId, HistoryInheritedSnapshot, HistoryWindowError,
@@ -202,9 +212,9 @@ impl SqliteSessionData {
             .bind(anchor)
             .fetch_optional(&mut *connection)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         // 会话不存在时边界语句一行都没有；起点缺失为 NULL。
-        let (range_head, anchor_rowid) = bounds.ok_or_else(not_found)?;
+        let (range_head, anchor_rowid) = bounds.ok_or_else(super::not_found)?;
         Ok((range_head, anchor_rowid.is_some()))
     }
 
@@ -222,14 +232,14 @@ impl SqliteSessionData {
             .pool
             .acquire()
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let mut tx = sqlx::Connection::begin(&mut *connection)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         self.require_session(&mut tx, id).await?;
         let (range_head, _) = Self::read_page_bounds(&mut tx, id, None).await?;
-        tx.commit().await.map_err(|error| map_sqlx(&error))?;
-        HistoryPageBounds::new(range_head.as_deref())
+        tx.commit().await.map_err(|error| super::map_sqlx(&error))?;
+        HistoryPageBounds::try_new(range_head.as_deref())
     }
 
     /// 自有**有效**条目的存储序键（`message_id → rowid`）：一次有界读取，**不读正文**。
@@ -248,13 +258,13 @@ impl SqliteSessionData {
             .bind(id.as_str())
             .fetch_all(&self.database.pool)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         rows.into_iter()
             .map(|(message_id, position)| {
                 Ok((
-                    message_id_of(&message_id)?,
+                    super::message_id_of(&message_id)?,
                     u64::try_from(position)
-                        .map_err(|_| corrupt("history row position is negative"))?,
+                        .map_err(|_| super::corrupt("history row position is negative"))?,
                 ))
             })
             .collect()
@@ -287,17 +297,17 @@ impl SqliteSessionData {
             .pool
             .acquire()
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let mut tx = sqlx::Connection::begin(&mut *connection)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         self.require_session(&mut tx, id).await?;
         let anchor_target = cursor.map(|cursor| cursor.anchor.as_uuid().to_string());
         let (range_head, anchor_present) =
             Self::read_page_bounds(&mut tx, id, anchor_target.as_deref()).await?;
         // 锚点行在不在：rowid 只作存在性判据，游标身份始终是 message_id（游标身份规则见
         // [`resolve_browsing_range`]）。
-        let range_token = resolve_browsing_range(cursor, range_head, anchor_present)?;
+        let range_token = super::resolve_browsing_range(cursor, range_head, anchor_present)?;
         // 阶段一：`limit + 1` 是「多出的那一条候选行」，只用来判断更早方向还有没有内容。
         let candidates: Vec<(String, i64)> = sqlx::query_as(HISTORY_PAGE_ROWS_SQL)
             .bind(id.as_str())
@@ -305,19 +315,19 @@ impl SqliteSessionData {
             .bind(limit.saturating_add(1) as i64)
             .fetch_all(&mut *tx)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let candidates = read_content_lengths(&mut tx, candidates).await?;
         let candidates = candidates
             .into_iter()
             .map(|(message_id, position, encoded_bytes)| {
-                HistoryPageCandidate::new(&message_id, position, encoded_bytes)
+                HistoryPageCandidate::try_new(&message_id, position, encoded_bytes)
             })
             .collect::<SessionResourceResult<Vec<_>>>()?;
         let plan = HistoryPagePlan::plan(id, &range_token, candidates, limit, byte_budget);
         // 阶段二：只取本页那些行，同一事务（同一快照）。
         let rows = Self::read_page_bodies(&mut tx, id, &plan.body_ids()).await?;
         // 只读事务：没有写入效果可以证明，提交失败仍按原因分类。
-        tx.commit().await.map_err(|error| map_sqlx(&error))?;
+        tx.commit().await.map_err(|error| super::map_sqlx(&error))?;
         plan.materialize(rows)
     }
 
@@ -344,10 +354,10 @@ impl SqliteSessionData {
             .pool
             .acquire()
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let mut tx = sqlx::Connection::begin(&mut *connection)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         // 会话存在性由边界语句自己回答（与分页读取的边界语句同形），不另发一次探询。
         let (inherited, tail, candidates) = match bounds {
             None => {
@@ -355,19 +365,19 @@ impl SqliteSessionData {
                     .bind(id.as_str())
                     .fetch_optional(&mut *tx)
                     .await
-                    .map_err(|error| map_sqlx(&error))?
-                    .ok_or_else(not_found)?;
+                    .map_err(|error| super::map_sqlx(&error))?
+                    .ok_or_else(super::not_found)?;
                 let rows: Vec<(String, i64)> = sqlx::query_as(HISTORY_SEGMENT_HEAD_SQL)
                     .bind(id.as_str())
                     .bind(limit.saturating_add(1) as i64)
                     .fetch_all(&mut *tx)
                     .await
-                    .map_err(|error| map_sqlx(&error))?;
+                    .map_err(|error| super::map_sqlx(&error))?;
                 let rows = read_content_lengths(&mut tx, rows).await?;
                 let inherited =
                     context::load_inherited_context_on(&mut tx, id, THREAD_META_COLUMNS)
                         .await
-                        .map_err(read_failure)?
+                        .map_err(super::read_failure)?
                         .payloads;
                 (inherited, tail, rows)
             }
@@ -377,8 +387,8 @@ impl SqliteSessionData {
                     .bind(after)
                     .fetch_optional(&mut *tx)
                     .await
-                    .map_err(|error| map_sqlx(&error))?;
-                if anchor.ok_or_else(not_found)?.is_none() {
+                    .map_err(|error| super::map_sqlx(&error))?;
+                if anchor.ok_or_else(super::not_found)?.is_none() {
                     return Err(HistoryCursorError::Expired {
                         thread_id: id.clone(),
                     }
@@ -391,7 +401,7 @@ impl SqliteSessionData {
                     .bind(limit.saturating_add(1) as i64)
                     .fetch_all(&mut *tx)
                     .await
-                    .map_err(|error| map_sqlx(&error))?;
+                    .map_err(|error| super::map_sqlx(&error))?;
                 let rows = read_content_lengths(&mut tx, rows).await?;
                 (Vec::new(), Some(tail), rows)
             }
@@ -399,14 +409,14 @@ impl SqliteSessionData {
         let candidates = candidates
             .into_iter()
             .map(|(message_id, position, encoded_bytes)| {
-                HistoryPageCandidate::new(&message_id, position, encoded_bytes)
+                HistoryPageCandidate::try_new(&message_id, position, encoded_bytes)
             })
             .collect::<SessionResourceResult<Vec<_>>>()?;
         let plan = HistorySegmentPlan::plan(candidates, limit, byte_budget);
         // 阶段二：只取本段那些行，同一事务（同一快照）。
         let rows = Self::read_page_bodies(&mut tx, id, &plan.body_ids()).await?;
         // 只读事务：没有写入效果可以证明，提交失败仍按原因分类。
-        tx.commit().await.map_err(|error| map_sqlx(&error))?;
+        tx.commit().await.map_err(|error| super::map_sqlx(&error))?;
         plan.materialize(
             inherited,
             tail.map(|tail| tail.to_string()).as_deref(),
@@ -432,9 +442,9 @@ impl SqliteSessionData {
                 .bind(&expected)
                 .fetch_optional(&mut *connection)
                 .await
-                .map_err(|error| map_sqlx(&error))?;
-            let content = row.ok_or_else(|| corrupt("history page body is missing"))?;
-            rows.push(HistoryPageRow::new(&expected, content)?);
+                .map_err(|error| super::map_sqlx(&error))?;
+            let content = row.ok_or_else(|| super::corrupt("history page body is missing"))?;
+            rows.push(HistoryPageRow::try_new(&expected, content)?);
         }
         Ok(rows)
     }
@@ -452,7 +462,7 @@ pub(super) async fn read_content_lengths(
     for (message_id, rowid) in rows {
         let total = read_content_length(connection, rowid).await?;
         let encoded_bytes = i64::try_from(total)
-            .map_err(|_| corrupt("history entry length exceeds the supported range"))?;
+            .map_err(|_| super::corrupt("history entry length exceeds the supported range"))?;
         measured.push((message_id, rowid, encoded_bytes));
     }
     Ok(measured)
@@ -497,7 +507,7 @@ impl SqliteSessionData {
         let mut seen = HashSet::with_capacity(payloads.len());
         for payload in payloads {
             if !seen.insert(payload.id()) {
-                return Err(invalid_input("history batch repeats a message id"));
+                return Err(super::invalid_input("history batch repeats a message id"));
             }
         }
         let mut tx = self
@@ -505,17 +515,20 @@ impl SqliteSessionData {
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         self.require_session(&mut tx, id).await?;
-        if !thread_exists_on(&mut tx, id).await.map_err(read_failure)? {
+        if !thread_exists_on(&mut tx, id)
+            .await
+            .map_err(super::read_failure)?
+        {
             // 目标会话不存在与「外键拒绝」是两个不同的原因，前者更可诊断。
-            return Err(not_found());
+            return Err(super::not_found());
         }
         for chunk in SerializedHistoryChunks::new(payloads) {
-            let rows = chunk.map_err(|_| corrupt("history entry is not serializable"))?;
+            let rows = chunk.map_err(|_| super::corrupt("history entry is not serializable"))?;
             insert_message_rows(&mut tx, id, rows)
                 .await
-                .map_err(|error| map_sqlx(&error))?;
+                .map_err(|error| super::map_sqlx(&error))?;
         }
         let now = peri_time::now_utc_rfc3339();
         let updated = sqlx::query(
@@ -527,22 +540,23 @@ impl SqliteSessionData {
         .bind(id.as_str())
         .execute(&mut *tx)
         .await
-        .map_err(|error| map_sqlx(&error))?;
+        .map_err(|error| super::map_sqlx(&error))?;
         if updated.rows_affected() != 1 {
-            return Err(not_found());
+            return Err(super::not_found());
         }
-        if let Some(title) = extract_title(payloads.iter().filter_map(PersistedPayload::as_message))
+        if let Some(title) =
+            super::extract_title(payloads.iter().filter_map(PersistedPayload::as_message))
         {
             sqlx::query("UPDATE threads SET title = ?1 WHERE id = ?2 AND title IS NULL")
                 .bind(&title)
                 .bind(id.as_str())
                 .execute(&mut *tx)
                 .await
-                .map_err(|error| map_sqlx(&error))?;
+                .map_err(|error| super::map_sqlx(&error))?;
         }
         tx.commit()
             .await
-            .map_err(|_| commit_failure(Some(id.clone())))?;
+            .map_err(|_| super::commit_failure(Some(id.clone())))?;
         Ok(())
     }
 }
@@ -561,7 +575,7 @@ impl SqliteSessionData {
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         self.require_session(&mut tx, id).await?;
         let rowid: Option<(i64,)> =
             sqlx::query_as("SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?2")
@@ -569,7 +583,7 @@ impl SqliteSessionData {
                 .bind(&target)
                 .fetch_optional(&mut *tx)
                 .await
-                .map_err(|error| map_sqlx(&error))?;
+                .map_err(|error| super::map_sqlx(&error))?;
         // 未知截止点保持无变更语义：找不到目标就不动历史，也不清零 flags
         // （调用方的清零集合锚在同一份历史的目标上，目标已不在即整次操作失效）。
         // 但「没生效」必须如实回报：调用方若把它当成已生效，热态会被改写成
@@ -589,7 +603,7 @@ impl SqliteSessionData {
                     .bind(rowid)
                     .execute(&mut *tx)
                     .await
-                    .map_err(|error| map_sqlx(&error))?;
+                    .map_err(|error| super::map_sqlx(&error))?;
                 // 边界删除与有效视图重建同属这一事务：任何一半生效都会让热态与冷恢复分叉。
                 super::history_projection::reconcile_rewind(&mut tx, id, clear_excluded).await?;
                 refresh_history_derivations(&mut tx, id).await?;
@@ -599,14 +613,14 @@ impl SqliteSessionData {
                     .bind(id.as_str())
                     .execute(&mut *tx)
                     .await
-                    .map_err(|error| map_sqlx(&error))?;
+                    .map_err(|error| super::map_sqlx(&error))?;
                 RewindOutcome::Applied
             }
             None => RewindOutcome::BoundaryMissing,
         };
         tx.commit()
             .await
-            .map_err(|_| commit_failure(Some(id.clone())))?;
+            .map_err(|_| super::commit_failure(Some(id.clone())))?;
         Ok(outcome)
     }
 
@@ -628,7 +642,7 @@ impl SqliteSessionData {
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         self.require_session(&mut tx, id).await?;
         for message_id in &unique {
             // 别会话的条目不允许被「精确移除」静默命中或静默跳过。
@@ -637,7 +651,7 @@ impl SqliteSessionData {
                     .bind(message_id.as_uuid().to_string())
                     .fetch_optional(&mut *tx)
                     .await
-                    .map_err(|error| map_sqlx(&error))?;
+                    .map_err(|error| super::map_sqlx(&error))?;
             match owner {
                 Some((owner,)) if owner == id.as_str() => {
                     sqlx::query("DELETE FROM messages WHERE message_id = ?1 AND thread_id = ?2")
@@ -645,9 +659,13 @@ impl SqliteSessionData {
                         .bind(id.as_str())
                         .execute(&mut *tx)
                         .await
-                        .map_err(|error| map_sqlx(&error))?;
+                        .map_err(|error| super::map_sqlx(&error))?;
                 }
-                Some(_) => return Err(invalid_input("history entry belongs to another session")),
+                Some(_) => {
+                    return Err(super::invalid_input(
+                        "history entry belongs to another session",
+                    ))
+                }
                 // 已经不存在的条目是幂等删除，不产生错误。
                 None => {}
             }
@@ -655,7 +673,7 @@ impl SqliteSessionData {
         refresh_history_derivations(&mut tx, id).await?;
         tx.commit()
             .await
-            .map_err(|_| commit_failure(Some(id.clone())))?;
+            .map_err(|_| super::commit_failure(Some(id.clone())))?;
         Ok(())
     }
 }
@@ -780,28 +798,28 @@ impl SqliteSessionData {
                 .bind(id.as_str())
                 .fetch_optional(&mut *connection)
                 .await
-                .map_err(|error| map_sqlx(&error))?;
+                .map_err(|error| super::map_sqlx(&error))?;
         let Some((parent, bytes, count, first, last, payloads_type, version)) = row else {
-            return Err(not_found());
+            return Err(super::not_found());
         };
         if count < 0 {
-            return Err(corrupt("inherited context is not valid JSON"));
+            return Err(super::corrupt("inherited context is not valid JSON"));
         }
         if count == 0 {
             return Ok(None);
         }
         if payloads_type.as_deref() != Some("array") || version != Some(1) {
-            return Err(corrupt("inherited context has an unsupported shape"));
+            return Err(super::corrupt("inherited context has an unsupported shape"));
         }
         let first_payload =
-            first.ok_or_else(|| corrupt("inherited context first payload is missing"))?;
+            first.ok_or_else(|| super::corrupt("inherited context first payload is missing"))?;
         let last_payload =
-            last.ok_or_else(|| corrupt("inherited context last payload is missing"))?;
-        let first_id = deserialize_persisted_payload(&first_payload)
-            .map_err(|_| corrupt("inherited context first payload is not decodable"))?
+            last.ok_or_else(|| super::corrupt("inherited context last payload is missing"))?;
+        let first_id = super::deserialize_persisted_payload(&first_payload)
+            .map_err(|_| super::corrupt("inherited context first payload is not decodable"))?
             .id();
-        let last_id = deserialize_persisted_payload(&last_payload)
-            .map_err(|_| corrupt("inherited context last payload is not decodable"))?
+        let last_id = super::deserialize_persisted_payload(&last_payload)
+            .map_err(|_| super::corrupt("inherited context last payload is not decodable"))?
             .id();
         let snapshot_id = super::history_window::inherited_snapshot_id(
             id,
@@ -834,7 +852,7 @@ impl SqliteSessionData {
     ) -> SessionResourceResult<HistoryBodyChunk> {
         let mut tx = sqlx::Connection::begin(&mut *connection)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         self.require_session(&mut tx, id).await?;
         let snapshot = Self::read_inherited_facts_sql(&mut tx, id)
             .await?
@@ -858,7 +876,7 @@ impl SqliteSessionData {
             .bind(entry_id.as_uuid().to_string())
             .fetch_optional(&mut *tx)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let Some((key,)) = key else {
             return Err(HistoryWindowError::anchor_unavailable(
                 "inherited history entry is not present in this frozen snapshot",
@@ -872,8 +890,8 @@ impl SqliteSessionData {
             .bind(i64::from(max_bytes))
             .fetch_optional(&mut *tx)
             .await
-            .map_err(|error| map_sqlx(&error))?;
-        tx.commit().await.map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
+        tx.commit().await.map_err(|error| super::map_sqlx(&error))?;
         let Some((total, bytes)) = row else {
             return Err(HistoryWindowError::anchor_unavailable(
                 "inherited history entry is not present in this frozen snapshot",
@@ -881,9 +899,9 @@ impl SqliteSessionData {
             .into());
         };
         let total = u64::try_from(total)
-            .map_err(|_| corrupt("inherited history body length is negative"))?;
+            .map_err(|_| super::corrupt("inherited history body length is negative"))?;
         let offset = u64::try_from(offset)
-            .map_err(|_| corrupt("inherited history body offset is negative"))?;
+            .map_err(|_| super::corrupt("inherited history body offset is negative"))?;
         if offset > total {
             return Err(HistoryWindowError::invalid_request(
                 "body chunk offset is beyond the entry length",

@@ -4,9 +4,12 @@
 //! `false` 都走后台；resume 的非 active 恢复同样强制后台；MCP Agent 仍只支持
 //! 同步激活（审批门例外）。flag 关闭时只消费显式意图，与引入前逐位一致。
 
+use peri_agent::tools::BaseTool as _;
 use std::sync::Arc;
 
-use super::*;
+use super::EchoLLM;
+use super::HostFixture;
+use super::SubAgentTool;
 
 /// 准备一个带后台任务管理器的宿主与本地 agent 定义（定义来自会话绑定的资源面）。
 async fn setup_background_host(
@@ -47,7 +50,7 @@ async fn bind_tool(
         dir.to_str().unwrap().to_string(),
     )
     .with_default_run_in_background(default_run_in_background);
-    host.bind(with_agent_face(tool, dir).await)
+    host.bind(super::with_agent_face(tool, dir).await)
 }
 
 /// 有效缺省 = true：schema `default: true` 且省略字段的调用走后台。

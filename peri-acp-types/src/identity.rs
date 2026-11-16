@@ -24,10 +24,12 @@ impl AgentId {
     }
 
     /// 从 UUID 构造 AgentId（供 subagent 身份统一：child_thread_id → AgentId）
+    #[must_use]
     pub fn from_uuid(uuid: uuid::Uuid) -> Self {
         Self(uuid)
     }
 
+    #[must_use]
     pub fn as_uuid(&self) -> uuid::Uuid {
         self.0
     }
@@ -62,16 +64,19 @@ pub struct SessionEpoch(u64);
 
 impl SessionEpoch {
     /// 首次创建的纪元（1；0 保留给"未知/未分配"场景）。
+    #[must_use]
     pub const fn initial() -> Self {
         Self(1)
     }
 
     /// 递增到下个纪元（session 重建/恢复时调用）。epoch 不可复用，只增不减。
+    #[must_use]
     pub fn next(self) -> Self {
         Self(self.0.saturating_add(1))
     }
 
     /// 底层值。
+    #[must_use]
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -97,6 +102,7 @@ impl AttemptId {
     }
 
     /// 底层字符串。
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -125,6 +131,7 @@ pub struct TurnIdentity {
 }
 
 impl TurnIdentity {
+    #[must_use]
     pub fn new(session_id: impl Into<String>, session_epoch: SessionEpoch) -> Self {
         Self {
             session_id: session_id.into(),
@@ -146,6 +153,7 @@ pub struct AttemptIdentity {
 }
 
 impl AttemptIdentity {
+    #[must_use]
     pub fn new(
         session_id: impl Into<String>,
         session_epoch: SessionEpoch,
@@ -175,16 +183,19 @@ pub struct SessionSeq(u64);
 
 impl SessionSeq {
     /// 首个事件的序号（1；0 保留给"未知/未分配"场景）。
+    #[must_use]
     pub const fn initial() -> Self {
         Self(1)
     }
 
     /// 递增到下个序号。单调不变量：`next` 严格大于当前值，绝不回退。
+    #[must_use]
     pub fn next(self) -> Self {
         Self(self.0.saturating_add(1))
     }
 
     /// 底层值。
+    #[must_use]
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -230,6 +241,7 @@ pub struct EventEnvelope {
 }
 
 impl EventEnvelope {
+    #[must_use]
     pub fn new(
         session_id: impl Into<String>,
         session_epoch: SessionEpoch,
@@ -270,6 +282,7 @@ pub struct CancelRequest {
 
 impl CancelRequest {
     /// 构造 cancel 请求：默认不清除 MQ 待办（§9：cancel ≠ 清除待办）。
+    #[must_use]
     pub fn new(identity: AttemptIdentity, policy: CancelPolicy) -> Self {
         Self {
             identity,

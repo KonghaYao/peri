@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use peri_acp_types::builtin_mcp::find;
+use peri_acp_types::builtin_mcp;
 use peri_acp_types::tasks::TaskManager;
 use rmcp::model::RequestMetaObject;
 
@@ -16,7 +16,7 @@ pub(crate) fn source_uses_task_owner(source: Option<&crate::mcp::config::ConfigS
     match source {
         Some(crate::mcp::config::ConfigSource::WorkspaceRemote) => true,
         Some(crate::mcp::config::ConfigSource::Builtin { instance }) => {
-            find(instance).is_some_and(|declared| declared.task_owner_scoped)
+            builtin_mcp::find(instance).is_some_and(|declared| declared.task_owner_scoped)
         }
         Some(_) | None => false,
     }

@@ -1,36 +1,46 @@
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
-use peri_model::{
-    prompt_cache::{strip_system_prompt_dynamic_boundaries, SYSTEM_PROMPT_DYNAMIC_BOUNDARY},
-    JsonObject, Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult,
-    ModelStream, ModelStreamEvent, PreparedModelRequest, StopReason, TokenUsage, ToolCall,
-};
+
+use peri_model::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
+use peri_model::JsonObject;
+use peri_model::Model;
+use peri_model::ModelCapabilities;
+use peri_model::ModelMessage;
+use peri_model::ModelRequest;
+use peri_model::ModelResponse;
+use peri_model::ModelResult;
+use peri_model::ModelStream;
+use peri_model::ModelStreamEvent;
+use peri_model::PreparedModelRequest;
+use peri_model::StopReason;
+use peri_model::TokenUsage;
+use peri_model::ToolCall;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    convert_model_message, map_model_error, stop_reason_display, AgentModelBridge, StreamingContext,
-};
-use crate::{
-    agent::{
-        compact_v2::projection::{ProviderCapabilities, ProviderProtocol},
-        events_v2::{EventBus, EventBusConfig, RenderEvent},
-        react::ReactLLM,
-    },
-    error::AgentError,
-    messages::{BaseMessage, ContentBlock, MessageContent},
-    session::turn::TurnId,
-};
+use crate::agent::compact_v2::projection::ProviderCapabilities;
+use crate::agent::compact_v2::projection::ProviderProtocol;
+use crate::agent::events_v2::EventBus;
+use crate::agent::events_v2::EventBusConfig;
+use crate::agent::events_v2::RenderEvent;
+use crate::agent::model_bridge::AgentModelBridge;
+use crate::agent::react::ReactLLM;
+use crate::agent::react::StreamingContext;
+use crate::error::AgentError;
+use crate::messages::BaseMessage;
+use crate::messages::ContentBlock;
+use crate::messages::MessageContent;
+use crate::session::turn::TurnId;
 use peri_acp_types::identity::AgentId;
 
 #[test]
 fn bridge_keeps_typed_model_error_context() {
-    let error = map_model_error(peri_model::ModelError::http_status(
+    let error = crate::agent::model_bridge::map_model_error(peri_model::ModelError::http_status(
         429,
         "anthropic",
         Some("req_429"),
@@ -108,13 +118,15 @@ async fn test_bridge_stream_interruption_preserves_only_partial_text() {
                 }),
             )
             .await
-            .unwrap();
+            .expect("the generate reasoning fixture result is required for this assertion");
         let expected = text.repeat(2);
         assert_eq!(reasoning.thought, expected);
         assert!(reasoning.tool_calls.is_empty());
         assert!(reasoning.usage.is_none());
         assert!(reasoning.streamed);
-        let interruption = reasoning.stream_interruption.unwrap();
+        let interruption = reasoning
+            .stream_interruption
+            .expect("the stream interruption fixture result is required for this assertion");
         assert_eq!((interruption.attempts, interruption.max_attempts), (2, 4));
         assert_eq!(interruption.error.request_id(), Some("req-partial"));
         let mut chunks = Vec::new();
@@ -213,7 +225,10 @@ fn test_bridge_pressure_estimate_is_pure_and_includes_frozen_system() {
     assert_eq!(bridge.estimate_request_tokens(&messages, &[]), 96_000);
     assert_eq!(bridge.estimate_request_tokens(&messages, &[]), 96_000);
     assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
-    assert!(streamed_requests.lock().unwrap().is_empty());
+    assert!(streamed_requests
+        .lock()
+        .expect("streamed requests lock mutex must remain unpoisoned throughout the test")
+        .is_empty());
 }
 
 #[async_trait]
@@ -242,8 +257,11 @@ impl Model for CaptureSystemModel {
         request: ModelRequest,
         cancellation: CancellationToken,
     ) -> ModelResult<ModelStream> {
-        self.streamed_requests.lock().unwrap().push(request);
-        let response = ModelResponse::new(
+        self.streamed_requests
+            .lock()
+            .expect("self streamed requests mutex must remain unpoisoned throughout the test")
+            .push(request);
+        let response = ModelResponse::try_new(
             ModelMessage::assistant_text("done"),
             StopReason::EndTurn,
             None,
@@ -268,7 +286,10 @@ async fn test_bridge_dynamic_system_contribution_reads_current_value_once_per_re
         let provider_calls = Arc::clone(&provider_calls);
         Arc::new(move || {
             provider_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(dynamic.lock().unwrap().clone())
+            Ok(dynamic
+                .lock()
+                .expect("dynamic lock mutex must remain unpoisoned throughout the test")
+                .clone())
         })
     };
     let bridge = AgentModelBridge::from_arc(Arc::new(CaptureSystemModel {
@@ -280,14 +301,19 @@ async fn test_bridge_dynamic_system_contribution_reads_current_value_once_per_re
     bridge
         .generate_reasoning_with_observed_body(&[BaseMessage::human("one")], &[], None)
         .await
-        .unwrap();
-    *dynamic.lock().unwrap() = "DYNAMIC_TWO".to_string();
+        .expect("the generate reasoning with observed body fixture result is required for this assertion");
+    *dynamic
+        .lock()
+        .expect("dynamic lock mutex must remain unpoisoned throughout the test") =
+        "DYNAMIC_TWO".to_string();
     bridge
         .generate_reasoning_with_observed_body(&[BaseMessage::human("two")], &[], None)
         .await
-        .unwrap();
+        .expect("the generate reasoning with observed body fixture result is required for this assertion");
 
-    let requests = streamed_requests.lock().unwrap();
+    let requests = streamed_requests
+        .lock()
+        .expect("streamed requests lock mutex must remain unpoisoned throughout the test");
     assert_eq!(requests.len(), 2);
     let systems: Vec<_> = requests
         .iter()
@@ -314,7 +340,7 @@ async fn test_bridge_dynamic_system_contribution_reads_current_value_once_per_re
     assert_eq!(
         systems
             .iter()
-            .map(|system| strip_system_prompt_dynamic_boundaries(system))
+            .map(|system| peri_model::prompt_cache::strip_system_prompt_dynamic_boundaries(system))
             .collect::<Vec<_>>(),
         ["BASE\n\nDYNAMIC_ONE", "BASE\n\nDYNAMIC_TWO"]
     );
@@ -346,15 +372,17 @@ async fn test_bridge_dynamic_contribution_preserves_explicit_seam_for_empty_and_
         bridge
             .generate_reasoning(&[BaseMessage::human("hello")], &[], None)
             .await
-            .unwrap();
+            .expect("the generate reasoning fixture result is required for this assertion");
 
-        let requests = streamed_requests.lock().unwrap();
+        let requests = streamed_requests
+            .lock()
+            .expect("streamed requests lock mutex must remain unpoisoned throughout the test");
         let system = requests[0].messages[0]
             .text_content()
             .expect("dynamic contribution must produce a system message");
         assert_eq!(system, expected);
         assert_eq!(
-            strip_system_prompt_dynamic_boundaries(&system),
+            peri_model::prompt_cache::strip_system_prompt_dynamic_boundaries(&system),
             expected_wire
         );
     }
@@ -371,9 +399,11 @@ async fn test_bridge_without_contribution_provider_preserves_base_system() {
     bridge
         .generate_reasoning(&[BaseMessage::human("hello")], &[], None)
         .await
-        .unwrap();
+        .expect("the generate reasoning fixture result is required for this assertion");
 
-    let requests = streamed_requests.lock().unwrap();
+    let requests = streamed_requests
+        .lock()
+        .expect("streamed requests lock mutex must remain unpoisoned throughout the test");
     assert_eq!(requests.len(), 1);
     assert_eq!(
         requests[0].messages[0]
@@ -403,9 +433,11 @@ async fn test_bridge_empty_dynamic_contribution_preserves_base_system() {
     bridge
         .generate_reasoning(&[BaseMessage::human("hello")], &[], None)
         .await
-        .unwrap();
+        .expect("the generate reasoning fixture result is required for this assertion");
 
-    let requests = streamed_requests.lock().unwrap();
+    let requests = streamed_requests
+        .lock()
+        .expect("streamed requests lock mutex must remain unpoisoned throughout the test");
     assert_eq!(requests.len(), 1);
     assert_eq!(
         requests[0].messages[0]
@@ -435,7 +467,7 @@ impl Model for FakeModel {
         _request: ModelRequest,
         cancellation: CancellationToken,
     ) -> ModelResult<ModelStream> {
-        let response = ModelResponse::new(
+        let response = ModelResponse::try_new(
             ModelMessage::assistant(
                 vec![
                     peri_model::ContentBlock::Reasoning {
@@ -447,7 +479,8 @@ impl Model for FakeModel {
                 vec![ToolCall::new(
                     "call_1",
                     "shell",
-                    JsonObject::from_value(json!({"command": "pwd"})).unwrap(),
+                    JsonObject::from_value(json!({"command": "pwd"}))
+                        .expect("from_value must accept this test fixture representation"),
                 )],
             ),
             StopReason::ToolUse,
@@ -529,7 +562,7 @@ async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
     let reasoning = bridge
         .generate_reasoning(&[BaseMessage::human("hello")], &[], Some(streaming))
         .await
-        .unwrap();
+        .expect("the generate reasoning fixture result is required for this assertion");
 
     assert_eq!(reasoning.final_answer.as_deref(), Some("answer"));
     assert_eq!(reasoning.thought, "think");
@@ -537,7 +570,13 @@ async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
     assert_eq!(reasoning.tool_calls[0].id, "call_1");
     assert_eq!(reasoning.tool_calls[0].name, "shell");
     assert_eq!(reasoning.tool_calls[0].input, json!({"command": "pwd"}));
-    assert_eq!(reasoning.usage.unwrap().input_tokens, 3);
+    assert_eq!(
+        reasoning
+            .usage
+            .expect("the usage fixture result is required for this assertion")
+            .input_tokens,
+        3
+    );
     assert_eq!(reasoning.stop_reason, StopReason::ToolUse);
 
     // v2 直发（v1 ExecutorEvent 流式中间态已退役）：TextDelta → RenderEvent::TextChunk
@@ -592,7 +631,7 @@ impl Model for ThinkingToolModel {
         _request: ModelRequest,
         cancellation: CancellationToken,
     ) -> ModelResult<ModelStream> {
-        let response = ModelResponse::new(
+        let response = ModelResponse::try_new(
             ModelMessage::assistant(
                 vec![peri_model::ContentBlock::Reasoning {
                     text: "think".into(),
@@ -601,7 +640,8 @@ impl Model for ThinkingToolModel {
                 vec![ToolCall::new(
                     "call_1",
                     "shell",
-                    JsonObject::from_value(json!({"command": "pwd"})).unwrap(),
+                    JsonObject::from_value(json!({"command": "pwd"}))
+                        .expect("from_value must accept this test fixture representation"),
                 )],
             ),
             StopReason::ToolUse,
@@ -653,7 +693,7 @@ async fn bridge_emits_tool_started_on_first_tool_call_delta() {
     let reasoning = bridge
         .generate_reasoning(&[BaseMessage::human("hello")], &[], Some(streaming))
         .await
-        .unwrap();
+        .expect("the generate reasoning fixture result is required for this assertion");
     assert_eq!(reasoning.thought, "think");
     assert_eq!(reasoning.tool_calls.len(), 1);
     assert_eq!(reasoning.tool_calls[0].id, "call_1");
@@ -783,7 +823,8 @@ fn redacted_reasoning_roundtrips_through_agent_content() {
         Vec::new(),
     );
 
-    let agent_message = convert_model_message(&message).expect("model content converts to Agent");
+    let agent_message = crate::agent::model_bridge::convert_model_message(&message)
+        .expect("model content converts to Agent");
     let roundtrip = AgentModelBridge::convert_message(&agent_message)
         .expect("Agent must preserve standard redacted reasoning");
 
@@ -802,151 +843,27 @@ fn unknown_agent_content_fails_closed() {
 
 #[test]
 fn stop_reason_display_matches_legacy_wire_format() {
-    assert_eq!(stop_reason_display(&StopReason::EndTurn), "end_turn");
-    assert_eq!(stop_reason_display(&StopReason::ToolUse), "tool_use");
-    assert_eq!(stop_reason_display(&StopReason::MaxTokens), "max_tokens");
-    assert_eq!(stop_reason_display(&StopReason::Continue), "continue");
     assert_eq!(
-        stop_reason_display(&StopReason::Other {
+        crate::agent::model_bridge::stop_reason_display(&StopReason::EndTurn),
+        "end_turn"
+    );
+    assert_eq!(
+        crate::agent::model_bridge::stop_reason_display(&StopReason::ToolUse),
+        "tool_use"
+    );
+    assert_eq!(
+        crate::agent::model_bridge::stop_reason_display(&StopReason::MaxTokens),
+        "max_tokens"
+    );
+    assert_eq!(
+        crate::agent::model_bridge::stop_reason_display(&StopReason::Continue),
+        "continue"
+    );
+    assert_eq!(
+        crate::agent::model_bridge::stop_reason_display(&StopReason::Other {
             value: "custom".into()
         }),
         "custom"
     );
 }
-
-/// 流永远 pending，绝不产出 Completed；取消由 bridge 侧处理。
-struct CancellingModel;
-
-#[async_trait]
-impl Model for CancellingModel {
-    fn capabilities(&self) -> ModelCapabilities {
-        ModelCapabilities::default()
-    }
-
-    async fn stream(
-        &self,
-        _request: ModelRequest,
-        cancellation: CancellationToken,
-    ) -> ModelResult<ModelStream> {
-        Ok(ModelStream::with_parent_cancellation(
-            stream::pending::<ModelResult<ModelStreamEvent>>(),
-            cancellation,
-        ))
-    }
-}
-
-/// 取消前先 emit 一个 TextDelta，随后永久 pending。
-struct HalfStreamingModel {
-    reasoning: bool,
-}
-
-#[async_trait]
-impl Model for HalfStreamingModel {
-    fn capabilities(&self) -> ModelCapabilities {
-        ModelCapabilities::default()
-    }
-
-    async fn stream(
-        &self,
-        _request: ModelRequest,
-        cancellation: CancellationToken,
-    ) -> ModelResult<ModelStream> {
-        let delta = if self.reasoning {
-            ModelStreamEvent::ReasoningDelta {
-                text: "partial".into(),
-            }
-        } else {
-            ModelStreamEvent::TextDelta {
-                text: "partial".into(),
-            }
-        };
-        Ok(ModelStream::with_parent_cancellation(
-            stream::iter(vec![Ok(delta)]).chain(stream::pending::<ModelResult<ModelStreamEvent>>()),
-            cancellation,
-        ))
-    }
-}
-
-#[tokio::test]
-async fn bridge_maps_precancelled_token_to_interrupted_without_events() {
-    let bridge = AgentModelBridge::from_arc(Arc::new(CancellingModel));
-    let cancel = CancellationToken::new();
-    cancel.cancel();
-    let (bus, mut handles) = EventBus::new(EventBusConfig::default());
-    let streaming = StreamingContext {
-        event_bus: Arc::new(bus),
-        turn_id: TurnId::new(),
-        agent_id: AgentId::new(),
-        cancel,
-        call_context: None,
-    };
-
-    let result = bridge
-        .generate_reasoning(&[BaseMessage::human("hello")], &[], Some(streaming))
-        .await;
-
-    assert!(
-        matches!(result, Err(AgentError::Interrupted)),
-        "预取消 token 应映射为 Interrupted，实际 {:?}",
-        result
-    );
-    assert!(
-        handles.render_rx.try_recv().is_err(),
-        "取消后不得 emit 任何 RenderEvent"
-    );
-}
-
-async fn assert_bridge_stops_emitting_after_cancellation(reasoning: bool) {
-    let bridge = AgentModelBridge::from_arc(Arc::new(HalfStreamingModel { reasoning }));
-    let cancel = CancellationToken::new();
-    let cancel_on_first_render = cancel.clone();
-    let (bus, handles) = EventBus::new(EventBusConfig::default());
-    // v2 直发后无法在发射点挂钩 cancel：观察任务在首个 Render 事件到达时取消，
-    // 并统计取消后的残留事件（bridge 必须在 poll 下一项前中断，不得再 emit）。
-    let mut handles_for_watcher = handles;
-    let watcher = tokio::spawn(async move {
-        let first = handles_for_watcher.render_rx.recv().await;
-        if first.is_none() {
-            return 0; // 通道关闭（未收到事件）
-        }
-        cancel_on_first_render.cancel();
-        let mut extra = 0;
-        while handles_for_watcher.render_rx.recv().await.is_some() {
-            extra += 1;
-        }
-        extra
-    });
-    let streaming = StreamingContext {
-        event_bus: Arc::new(bus),
-        turn_id: TurnId::new(),
-        agent_id: AgentId::new(),
-        cancel,
-        call_context: None,
-    };
-
-    let result = bridge
-        .generate_reasoning(&[BaseMessage::human("hello")], &[], Some(streaming))
-        .await;
-
-    let extra_events = watcher.await.unwrap();
-    assert!(
-        matches!(result, Err(AgentError::Interrupted)),
-        "流中途取消应映射为 Interrupted，实际 {:?}",
-        result
-    );
-    assert_eq!(
-        extra_events, 0,
-        "取消后不得再 emit 事件（残留 {} 个）",
-        extra_events
-    );
-}
-
-#[tokio::test]
-async fn bridge_stops_emitting_events_after_mid_stream_cancellation() {
-    assert_bridge_stops_emitting_after_cancellation(false).await;
-}
-
-#[tokio::test]
-async fn bridge_stops_emitting_events_after_mid_thinking_cancellation() {
-    assert_bridge_stops_emitting_after_cancellation(true).await;
-}
+include!("model_bridge_cancellation_cases.rs");

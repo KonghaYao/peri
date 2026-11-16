@@ -1,14 +1,18 @@
 //! Inherited snapshots must survive a new store and reject corrupt state.
-use super::*;
+use super::{
+    BaseMessage, HashMap, InheritedContext, MessageFlags, PersistedPayload, SqliteThreadStore,
+    ThreadMeta,
+};
+use peri_acp_types::store::ThreadStore;
 
 #[tokio::test]
 async fn test_inherited_context_freezes_payloads_and_flags_across_store_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("inherited.db");
-    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let store = SqliteThreadStore::try_new(&path).await.unwrap();
     let parent_id = store
         .create_thread(ThreadMeta::new_at(
-            absolute_test_path("tmp"),
+            super::absolute_test_path("tmp"),
             peri_time::now_wall(),
         ))
         .await
@@ -22,7 +26,8 @@ async fn test_inherited_context_freezes_payloads_and_flags_across_store_reopen()
         truncated: true,
         ..Default::default()
     };
-    let mut child_meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
+    let mut child_meta =
+        ThreadMeta::new_at(super::absolute_test_path("tmp"), peri_time::now_wall());
     child_meta.parent_thread_id = Some(parent_id.clone());
     child_meta.snapshot_at_message_id = Some(parent.id().as_uuid().to_string());
     let child_id = store.create_thread(child_meta).await.unwrap();
@@ -56,7 +61,7 @@ async fn test_inherited_context_freezes_payloads_and_flags_across_store_reopen()
         .await
         .unwrap();
     store.close().await;
-    let reopened = SqliteThreadStore::new(&path).await.unwrap();
+    let reopened = SqliteThreadStore::try_new(&path).await.unwrap();
     let inherited = reopened.load_inherited_context(&child_id).await.unwrap();
     assert_eq!(
         inherited.payloads[0].as_message().unwrap().content(),
@@ -89,12 +94,12 @@ async fn test_inherited_context_freezes_payloads_and_flags_across_store_reopen()
 #[tokio::test]
 async fn test_inherited_context_rejects_future_corrupt_and_foreign_flags_without_overwrite() {
     let dir = tempfile::tempdir().unwrap();
-    let store = SqliteThreadStore::new(dir.path().join("invalid.db"))
+    let store = SqliteThreadStore::try_new(dir.path().join("invalid.db"))
         .await
         .unwrap();
     let id = store
         .create_thread(ThreadMeta::new_at(
-            absolute_test_path("tmp"),
+            super::absolute_test_path("tmp"),
             peri_time::now_wall(),
         ))
         .await
@@ -126,7 +131,7 @@ async fn test_inherited_context_rejects_future_corrupt_and_foreign_flags_without
     }
     let fresh = store
         .create_thread(ThreadMeta::new_at(
-            absolute_test_path("tmp"),
+            super::absolute_test_path("tmp"),
             peri_time::now_wall(),
         ))
         .await
@@ -153,17 +158,18 @@ async fn test_inherited_context_rejects_future_corrupt_and_foreign_flags_without
 #[tokio::test]
 async fn test_inherited_context_legacy_missing_cutoff_and_cycle_fail_closed() {
     let dir = tempfile::tempdir().unwrap();
-    let store = SqliteThreadStore::new(dir.path().join("legacy.db"))
+    let store = SqliteThreadStore::try_new(dir.path().join("legacy.db"))
         .await
         .unwrap();
     let parent_id = store
         .create_thread(ThreadMeta::new_at(
-            absolute_test_path("tmp"),
+            super::absolute_test_path("tmp"),
             peri_time::now_wall(),
         ))
         .await
         .unwrap();
-    let mut child_meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
+    let mut child_meta =
+        ThreadMeta::new_at(super::absolute_test_path("tmp"), peri_time::now_wall());
     child_meta.parent_thread_id = Some(parent_id.clone());
     child_meta.snapshot_at_message_id =
         Some(BaseMessage::human("missing").id().as_uuid().to_string());

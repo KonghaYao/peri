@@ -3,10 +3,9 @@ use ratatui_kit::prelude::State;
 use crate::components::textarea::TextAreaState;
 use crate::i18n;
 use crate::kit::acp_types::AcpEventWithEpoch;
-use crate::kit::atoms::{ACP_STATE, INPUT_BUFFER, LOCAL_EVENT_TX, SUBMIT_TX, WIZARD_ACTIVE};
-use crate::kit::input_history::{push_history, reset_history_cursor};
-use crate::kit::panel_registry::open_panel;
-use crate::kit::submit_request::{SessionControlRequest, SubmitRequest, parse_submit_request};
+
+use crate::kit::submit_request::SessionControlRequest;
+use crate::kit::submit_request::SubmitRequest;
 
 /// 取出待发送附件。附件只在「确定要提交 agent 文本」时消费——控制类请求
 /// （`/clear` 等）不碰 `PENDING_ATTACHMENTS`，图片保留在 composer 供下次提交。
@@ -30,7 +29,7 @@ pub(super) fn submit_text(submitted: String) {
             attachments: take_pending_attachments(),
         })
     } else {
-        parse_submit_request(&submitted).map(|request| match request {
+        crate::kit::submit_request::parse_submit_request(&submitted).map(|request| match request {
             SubmitRequest::AgentText { text, .. } => SubmitRequest::AgentText {
                 text,
                 attachments: take_pending_attachments(),
@@ -46,8 +45,8 @@ pub(super) fn submit_text(submitted: String) {
         && !is_remote_command(&submitted)
         && let SubmitRequest::AgentText { text, attachments } = request
     {
-        push_history(&submitted);
-        reset_history_cursor();
+        crate::kit::input_history::push_history(&submitted);
+        crate::kit::input_history::reset_history_cursor();
         if let Err(error) = crate::kit::steer_state::enqueue(text, attachments) {
             tracing::warn!(error = %error, "user input queue submission rejected locally");
         }
@@ -69,7 +68,7 @@ pub(super) fn dispatch_submit_request<F>(
     F: FnMut(SubmitRequest),
 {
     match request {
-        SubmitRequest::OpenPanel(kind) => open_panel(kind),
+        SubmitRequest::OpenPanel(kind) => crate::kit::panel_registry::open_panel(kind),
         SubmitRequest::SessionControl(SessionControlRequest::ToggleSetup) => {
             *WIZARD_ACTIVE.state().write() = true;
         }
@@ -78,8 +77,8 @@ pub(super) fn dispatch_submit_request<F>(
                 let _ = crate::kit::steer_state::enqueue(text, attachments);
                 return;
             }
-            push_history(&text);
-            reset_history_cursor();
+            crate::kit::input_history::push_history(&text);
+            crate::kit::input_history::reset_history_cursor();
             if is_loading {
                 // 旧服务端兼容队列：运行期间延后提交，出队时再加入聊天记录。
                 // 支持用户输入队列的服务端在上方分支处理普通输入。
@@ -137,8 +136,8 @@ pub(super) fn commit_input(state: State<TextAreaState>) {
     drop(s);
 
     submit_text(submitted);
-    super::reset_mention_popup();
-    super::reset_slash_popup();
+    super::popup::reset_mention_popup();
+    super::popup::reset_slash_popup();
     *crate::kit::atoms::PREDICTION.state().write() = crate::kit::atoms::PredictionState::default();
 }
 
@@ -157,6 +156,7 @@ pub(super) fn show_submit_blocked_notification(request: &SubmitRequest) {
         .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
 }
 
+#[must_use]
 pub(crate) fn is_remote_command(text: &str) -> bool {
     let Some(name) = text
         .split_whitespace()
@@ -209,10 +209,20 @@ pub(crate) fn send_local_user_bubble(
 pub(super) fn exit_history_mode_if_active() {
     use crate::kit::atoms::INPUT_HISTORY_INDEX;
     if INPUT_HISTORY_INDEX.state().read().is_some() {
-        reset_history_cursor();
+        crate::kit::input_history::reset_history_cursor();
     }
 }
 
 #[cfg(test)]
 #[path = "submit_test.rs"]
 mod tests;
+
+use crate::kit::atoms::ACP_STATE;
+
+use crate::kit::atoms::INPUT_BUFFER;
+
+use crate::kit::atoms::LOCAL_EVENT_TX;
+
+use crate::kit::atoms::SUBMIT_TX;
+
+use crate::kit::atoms::WIZARD_ACTIVE;

@@ -1,7 +1,9 @@
 //! 真实 CLI 回归：后台输出落盘，模型按通知路径读取后自行结束。
 #![cfg(unix)]
 
-use std::{path::Path, process::Stdio, time::Duration};
+use std::path::Path;
+use std::process::Stdio;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -18,31 +20,39 @@ async fn read_request(socket: &mut TcpStream) -> Value {
     let mut bytes = Vec::new();
     let (body_start, body_len) = loop {
         let mut chunk = [0; 4096];
-        let count = socket.read(&mut chunk).await.unwrap();
+        let count = socket
+            .read(&mut chunk)
+            .await
+            .expect("read request: fixture task and request must complete successfully");
         assert_ne!(count, 0, "provider 请求不应提前结束");
         bytes.extend_from_slice(&chunk[..count]);
         if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
-            let headers = std::str::from_utf8(&bytes[..end]).unwrap();
+            let headers = std::str::from_utf8(&bytes[..end])
+                .expect("read request: fixture paths and protocol text must be valid UTF-8");
             assert!(headers.starts_with("POST /v1/messages "));
             let length = headers
                 .lines()
                 .filter_map(|line| line.split_once(':'))
                 .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                .unwrap()
+                .expect("read request: fixture must contain the searched item")
                 .1
                 .trim()
                 .parse::<usize>()
-                .unwrap();
+                .expect("read request: fixture must contain the searched item");
             break (end + 4, length);
         }
     };
     while bytes.len() < body_start + body_len {
         let mut chunk = [0; 4096];
-        let count = socket.read(&mut chunk).await.unwrap();
+        let count = socket
+            .read(&mut chunk)
+            .await
+            .expect("read request: fixture task and request must complete successfully");
         assert_ne!(count, 0, "provider 请求 body 不应被截断");
         bytes.extend_from_slice(&chunk[..count]);
     }
-    serde_json::from_slice(&bytes[body_start..body_start + body_len]).unwrap()
+    serde_json::from_slice(&bytes[body_start..body_start + body_len])
+        .expect("read request: fixture JSON must match the expected schema")
 }
 
 async fn respond(socket: &mut TcpStream, tool: Option<(&str, &str, Value)>, text: &str) {
@@ -82,14 +92,21 @@ async fn respond(socket: &mut TcpStream, tool: Option<(&str, &str, Value)>, text
     socket
         .write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes())
         .await
-        .unwrap();
-    socket.shutdown().await.unwrap();
+        .expect("respond: fixture task and request must complete successfully");
+    socket
+        .shutdown()
+        .await
+        .expect("respond: fixture task and request must complete successfully");
 }
 
 fn output_files(directory: &Path) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
-    for entry in std::fs::read_dir(directory).unwrap() {
-        let path = entry.unwrap().path();
+    for entry in std::fs::read_dir(directory)
+        .expect("output files: the fixture storage and layout must support the requested operation")
+    {
+        let path = entry
+            .expect("output files: the fixture establishes entry before this assertion")
+            .path();
         if path.is_dir() {
             files.extend(output_files(&path));
         } else {
@@ -100,23 +117,35 @@ fn output_files(directory: &Path) -> Vec<std::path::PathBuf> {
 }
 
 async fn assert_background_output_exits(explicit_background: bool, bare: bool) {
-    let fixture = tempfile::tempdir().unwrap();
-    let fixture_path = fixture.path().canonicalize().unwrap();
+    let fixture = tempfile::tempdir().expect(
+        "assert background output exits: isolated fixture workspace must remain accessible",
+    );
+    let fixture_path = fixture.path().canonicalize().expect(
+        "assert background output exits: isolated fixture workspace must remain accessible",
+    );
     let output_dir = fixture_path.join("output-artifacts");
-    std::fs::create_dir(&output_dir).unwrap();
+    std::fs::create_dir(&output_dir).expect(
+        "assert background output exits: isolated fixture workspace must remain accessible",
+    );
     let line = format!("{OUTPUT_MARKER} {}\n", "文".repeat(100));
     let payload = format!("{}{TAIL}\n", line.repeat(OUTPUT_LINES));
     assert!(payload.len() > 2 * 1024 * 1024);
-    std::fs::write(fixture_path.join("payload.txt"), &payload).unwrap();
+    std::fs::write(fixture_path.join("payload.txt"), &payload).expect(
+        "assert background output exits: isolated fixture workspace must remain accessible",
+    );
     let gate = fixture_path.join("release-shell");
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect(
+        "assert background output exits: fixture task and request must complete successfully",
+    );
+    let address = listener.local_addr().expect(
+        "assert background output exits: the fixture listener must expose its bound local address",
+    );
     let settings = fixture_path.join("settings.json");
-    std::fs::write(&settings, json!({"config":{"providers":[{"id":"fixture", "type":"anthropic", "apiKey":"test-only", "baseUrl":format!("http://{address}"), "models":{"opus":"fixture-model"}}]}}).to_string()).unwrap();
+    std::fs::write(&settings, json!({"config":{"providers":[{"id":"fixture", "type":"anthropic", "apiKey":"test-only", "baseUrl":format!("http://{address}"), "models":{"opus":"fixture-model"}}]}}).to_string()).expect("assert background output exits: isolated fixture workspace must remain accessible");
     let provider = tokio::spawn(async move {
         let mut step = 0;
         loop {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = listener.accept().await.expect("assert background output exits: fixture task and request must complete successfully");
             let request = read_request(&mut socket).await;
             assert_eq!(request["stream"], true);
             // 会话标题调用不计入主模型步骤。
@@ -140,7 +169,7 @@ async fn assert_background_output_exits(explicit_background: bool, bare: bool) {
                 1 => {
                     let tool_result = request["messages"]
                         .as_array()
-                        .unwrap()
+                        .expect("assert background output exits: fixture must have the expected variant")
                         .iter()
                         .filter_map(|message| message["content"].as_array())
                         .flatten()
@@ -175,7 +204,7 @@ async fn assert_background_output_exits(explicit_background: bool, bare: bool) {
                     }
                     respond(&mut socket, None, "Waiting for the background result.").await;
                     // 收到工具返回且发出最终回答后才放行真实 shell，无需猜测启动耗时。
-                    std::fs::write(&gate, "release").unwrap();
+                    std::fs::write(&gate, "release").expect("assert background output exits: isolated fixture workspace must remain accessible");
                 }
                 2 => {
                     assert!(
@@ -186,17 +215,17 @@ async fn assert_background_output_exits(explicit_background: bool, bare: bool) {
                     let files = output_files(&output_dir);
                     let stdout = files
                         .iter()
-                        .find(|path| std::fs::read(path).unwrap() == payload.as_bytes())
+                        .find(|path| std::fs::read(path).expect("assert background output exits: isolated fixture workspace must remain accessible") == payload.as_bytes())
                         .expect("stdout 文件必须保留超过 2 MiB 的完整 Unicode 内容");
                     let stderr = files
                         .iter()
                         .find(|path| {
-                            std::fs::read(path).unwrap() == format!("{STDERR}\n").as_bytes()
+                            std::fs::read(path).expect("assert background output exits: isolated fixture workspace must remain accessible") == format!("{STDERR}\n").as_bytes()
                         })
                         .expect("stderr 文件必须完整可读");
                     for path in [stdout, stderr] {
                         assert!(
-                            messages.contains(path.to_str().unwrap()),
+                            messages.contains(path.to_str().expect("assert background output exits: fixture paths and protocol text must be valid UTF-8")),
                             "通知必须携带可读取的绝对路径"
                         );
                     }
@@ -212,7 +241,7 @@ async fn assert_background_output_exits(explicit_background: bool, bare: bool) {
                         "通知必须保留真实失败状态与退出码"
                     );
                     // 输出文件独立于原始 fixture；随后只能从持久化产物读取结果。
-                    std::fs::remove_file(gate.parent().unwrap().join("payload.txt")).unwrap();
+                    std::fs::remove_file(gate.parent().expect("assert background output exits: the fixture path must have its expected parent directory").join("payload.txt")).expect("assert background output exits: the fixture path must have its expected parent directory");
                     respond(
                         &mut socket,
                         Some((
@@ -263,16 +292,20 @@ async fn assert_background_output_exits(explicit_background: bool, bare: bool) {
     if bare {
         command.arg("--bare");
     }
-    let child = command.spawn().unwrap();
+    let child = command.spawn().expect(
+        "assert background output exits: isolated fixture workspace must remain accessible",
+    );
     let result = tokio::time::timeout(Duration::from_secs(25), child.wait_with_output()).await;
     if result.is_err() {
         provider.abort();
     }
-    let output = result.expect("后台结果落盘后 print 必须自行退出").unwrap();
+    let output = result.expect("后台结果落盘后 print 必须自行退出").expect("assert background output exits: the fixture operation must finish without an inner failure");
     tokio::time::timeout(Duration::from_secs(1), provider)
         .await
         .expect("fixture 应完成真实 Read 回合")
-        .unwrap();
+        .expect(
+            "assert background output exits: fixture task and request must complete successfully",
+        );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert!(!stderr.contains("panicked"), "后台任务不得 panic：{stderr}");
@@ -280,17 +313,33 @@ async fn assert_background_output_exits(explicit_background: bool, bare: bool) {
         .stdout
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
-        .map(|line| serde_json::from_slice(line).unwrap())
+        .map(|line| {
+            serde_json::from_slice(line).expect(
+                "assert background output exits: fixture JSON must match the expected schema",
+            )
+        })
         .collect();
-    assert!(events.iter().any(|event| event["type"] == "tool_result"
-        && event["id"] == "read-output-tail"
-        && event["output"].as_str().unwrap().contains(TAIL)));
+    assert!(events.iter().any(|event| {
+        event["type"] == "tool_result"
+            && event["id"] == "read-output-tail"
+            && event["output"]
+                .as_str()
+                .expect(
+                    "assert background output exits: the fixture must retain its expected variant",
+                )
+                .contains(TAIL)
+    }));
     assert!(
         events
             .iter()
             .any(|event| event["type"] == "text" && event["content"] == ANSWER)
     );
-    assert_eq!(events.last().unwrap()["type"], "result");
+    assert_eq!(
+        events.last().expect(
+            "assert background output exits: the fixture collection must contain the expected entry"
+        )["type"],
+        "result"
+    );
 }
 
 /// [回归测试] timeout promotion 曾因大输出 reminder panic 遗留 Running，最终回答后挂起。

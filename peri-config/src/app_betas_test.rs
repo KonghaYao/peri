@@ -1,6 +1,6 @@
 //! `config.betas` 覆盖表测试：解析、合并、差异提取（设计 §配置面接入）。
 
-use super::*;
+use super::AppConfig;
 
 /// 覆盖表按 bool 稀疏 map 解析，缺省为空（不落盘）。
 #[test]

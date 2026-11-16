@@ -2,7 +2,11 @@
 //!
 //! 由 `full_remote_test.rs` 挂载（`include!` 装载，故用 `#[path]` 显式指向）。
 
-use super::*;
+use super::{schema, Arc, SqlitePoolOptions, SqliteTransport};
+use super::{virtual_remote_facade, MessageId, PersistedPayload, RewindBoundary};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+use std::sync::Mutex;
 
 // ─── rewind 有效视图重建（远端批，与本机同一套语义） ──────────────────────────
 

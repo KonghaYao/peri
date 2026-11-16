@@ -1,13 +1,25 @@
 //! Deployment → session/new → MCP → session scheduler → continuation regression.
-use super::*;
+use crate::host::requests::tests::HomeDirGuard;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::host::SessionState;
+use crate::provider::LlmProvider;
+use async_trait::async_trait;
 use peri_mcp_cron::CronSchedulerPortHandle;
 use peri_middlewares::mcp::McpClientPool;
+use peri_middlewares::permission::shared_mode::PermissionMode;
+use peri_middlewares::permission::shared_mode::SharedPermissionMode;
 use peri_model::{
     Model, ModelCapabilities, ModelError, ModelMessage, ModelRequest, ModelResponse, ModelResult,
     ModelStream, ModelStreamEvent, PreparedModelCall, PreparedModelRequest, ProtocolErrorKind,
     ProviderProtocol, StopReason,
 };
+use serde_json::json;
+use serde_json::Value;
+use serial_test::serial;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[path = "requests/cron_endpoint_test.rs"]
@@ -80,7 +92,7 @@ impl Model for CronModel {
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
-        let response = ModelResponse::new(
+        let response = ModelResponse::try_new(
             ModelMessage::assistant_text("scheduled done"),
             StopReason::EndTurn,
             None,
@@ -102,12 +114,14 @@ async fn deployment_with_capabilities(
     drive_cron_tick: bool,
     capabilities: crate::host::assemble::HostCapabilities,
 ) -> AcpServerConfig {
-    let config = make_peri_config_with_provider(make_provider_config(
-        "test",
-        "openai",
-        "test-key",
-        "test-model",
-    ));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "test",
+            "openai",
+            "test-key",
+            "test-model",
+        ),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
     let cwd = tmp.path().canonicalize().unwrap();
     crate::host::assemble::assemble_server_config_with_capabilities(
@@ -223,7 +237,7 @@ async fn restricted_deployment_omits_local_optional_capabilities_in_session() {
         );
     }
 
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": id}),
         &cfg,
@@ -233,7 +247,7 @@ async fn restricted_deployment_omits_local_optional_capabilities_in_session() {
     .await
     .expect("restricted session closes");
     assert!(!shared.lock().await.contains_key(&id));
-    handle_request(
+    crate::host::requests::handle_request(
         "session/load",
         &json!({"sessionId": id}),
         &cfg,
@@ -258,7 +272,7 @@ async fn restricted_deployment_omits_local_optional_capabilities_in_session() {
         peri_middlewares::assembly::builtin_closed_instances(&disabled).contains("cron"),
         "兼容期实例关闭集必须由同一能力映射派生"
     );
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": id}),
         &cfg,
@@ -285,7 +299,7 @@ async fn cron_tool(
         .unwrap_or_else(|_| panic!("MCP pool"));
     let client = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Some(client) = pool.get_client("cron") {
+            if let Some(client) = pool.client("cron") {
                 if client.peer.is_some() && !client.tools.is_empty() {
                     break client;
                 }
@@ -331,7 +345,7 @@ async fn new_session(
     transport: &Arc<dyn crate::transport::AcpTransport>,
     cwd: &str,
 ) -> String {
-    handle_request(
+    crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": cwd}),
         cfg,
@@ -465,7 +479,7 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
     .await;
     let closed_task = cron_jobs(&env_a).await[0].id.clone();
     let mut observer = sched_a.lock().subscribe();
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId":a}),
         &cfg,
@@ -492,7 +506,7 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
     )
     .await;
     assert_eq!(cron_jobs(&env_b).await.len(), 1);
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId":b}),
         &cfg,
@@ -539,7 +553,7 @@ async fn cron_deployment_without_tick_retains_manual_schedule_policy() {
     assert!(tokio::time::timeout(Duration::from_millis(1200), rx.recv())
         .await
         .is_err());
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId":id}),
         &cfg,

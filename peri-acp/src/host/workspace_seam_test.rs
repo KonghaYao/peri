@@ -6,7 +6,8 @@ use std::sync::Arc;
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 
 use super::workspace::SessionEnvironment;
-use crate::host::assemble::{assemble_server_config, HostAssemblyInput};
+use crate::host::assemble;
+use crate::host::assemble::HostAssemblyInput;
 use crate::provider::{ConfigSource, LlmProvider, PeriConfig, ProviderConfig, ProviderModels};
 
 // ── 夹具 ─────────────────────────────────────────────────────────────────────
@@ -43,7 +44,7 @@ async fn seam_fixture() -> SeamFixture {
         .expect("夹具配置源"),
     );
 
-    let cfg = assemble_server_config(HostAssemblyInput {
+    let cfg = assemble::assemble_server_config(HostAssemblyInput {
         provider,
         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
         config_source,
@@ -167,7 +168,7 @@ async fn workflow_consumer_waits_for_instance_registration_then_dispatches() {
         "runId": "delayed-run", "agentId": 1, "prompt": "dispatch"
     }))
     .unwrap();
-    runtime.tasks().publish("delayed-task".into(), params);
+    let _ = runtime.tasks().publish("delayed-task".into(), params);
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let page = pool

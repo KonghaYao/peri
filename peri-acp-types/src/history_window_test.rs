@@ -2,9 +2,29 @@
 
 use serde_json::json;
 
-use super::*;
 use crate::history_page::{HistoryPageCandidate, HistoryPagePlan};
+use crate::history_window::HistoryBodyChunk;
+use crate::history_window::HistoryBodyDescriptor;
+use crate::history_window::HistoryCommittedTail;
+use crate::history_window::HistoryEntryId;
+use crate::history_window::HistoryReadTicket;
+use crate::history_window::HistoryReadTicketBinding;
+use crate::history_window::HistoryRewindInvalidation;
+use crate::history_window::HistoryRewindStatus;
+use crate::history_window::HistorySource;
+use crate::history_window::HistoryWindowAnchor;
+use crate::history_window::HistoryWindowCursor;
+use crate::history_window::HistoryWindowDirection;
+use crate::history_window::HistoryWindowError;
+use crate::history_window::HistoryWindowMetadata;
+use crate::history_window::HISTORY_WINDOW_DEFAULT_BYTE_BUDGET;
+use crate::history_window::HISTORY_WINDOW_DEFAULT_LIMIT;
+use crate::history_window::HISTORY_WINDOW_MAX_CHUNK_SIZE;
+use crate::history_window::HISTORY_WINDOW_MAX_LIMIT;
+use crate::history_window::HISTORY_WINDOW_PROJECTION_VERSION;
+use crate::history_window_request::HistoryWindowRequest;
 use crate::messages::MessageId;
+use crate::thread::ThreadId;
 
 fn thread() -> ThreadId {
     "window-session".to_owned()
@@ -483,8 +503,10 @@ fn body_chunk_validation_requires_progress_and_bounded_bytes() {
 
 #[test]
 fn descriptor_requires_a_positive_length_and_bounded_chunk() {
-    assert!(HistoryBodyDescriptor::new(0, 16, "snapshot", HistoryReadTicket::new("t")).is_err());
-    assert!(HistoryBodyDescriptor::new(
+    assert!(
+        HistoryBodyDescriptor::try_new(0, 16, "snapshot", HistoryReadTicket::new("t")).is_err()
+    );
+    assert!(HistoryBodyDescriptor::try_new(
         10,
         HISTORY_WINDOW_MAX_CHUNK_SIZE + 1,
         "snapshot",
@@ -492,7 +514,7 @@ fn descriptor_requires_a_positive_length_and_bounded_chunk() {
     )
     .is_err());
     let descriptor =
-        HistoryBodyDescriptor::new(10, 16, "snapshot", HistoryReadTicket::new("t")).unwrap();
+        HistoryBodyDescriptor::try_new(10, 16, "snapshot", HistoryReadTicket::new("t")).unwrap();
     assert_eq!(descriptor.total_bytes, 10);
     assert_eq!(descriptor.snapshot_token, "snapshot");
 }

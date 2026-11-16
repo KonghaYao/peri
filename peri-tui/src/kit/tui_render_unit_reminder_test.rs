@@ -1,4 +1,7 @@
-use super::*;
+use super::ReminderInfo;
+use super::ReminderType;
+use super::TuiUserBubble;
+use super::i18n;
 
 // ── reminder 检测 ────────────────────────────────────────────────────
 
@@ -7,20 +10,21 @@ mod cases {
 
     #[test]
     fn test_detect_no_tag_returns_none() {
-        assert!(detect_reminder("hello world").is_none());
+        assert!(crate::kit::tui_render_unit::detect_reminder("hello world").is_none());
     }
 
     #[test]
     fn test_detect_empty_tag_returns_some() {
-        let info = detect_reminder("<system-reminder></system-reminder>")
-            .expect("empty tag should still be detected");
+        let info =
+            crate::kit::tui_render_unit::detect_reminder("<system-reminder></system-reminder>")
+                .expect("empty tag should still be detected");
         assert!(matches!(info.reminder_type, ReminderType::GenericReminder));
         assert!(info.summary.is_empty());
     }
 
     #[test]
     fn test_detect_continuation_hint() {
-        let info = detect_reminder(
+        let info = crate::kit::tui_render_unit::detect_reminder(
             "<system-reminder>CONTINUATION_HINT: the agent sent additional content</system-reminder>",
         )
         .expect("should detect");
@@ -34,7 +38,8 @@ mod cases {
             "{}\n\ncompact summary body",
             peri_acp_types::compact::CONTINUATION_HINT
         );
-        let info = detect_reminder(&text).expect("compact continuation hint should be detected");
+        let info = crate::kit::tui_render_unit::detect_reminder(&text)
+            .expect("compact continuation hint should be detected");
 
         assert!(matches!(info.reminder_type, ReminderType::ContinuationHint));
         assert!(
@@ -49,8 +54,8 @@ mod cases {
             "{}\n\ncompact summary body",
             peri_acp_types::compact::LEGACY_CONTINUATION_HINT
         );
-        let info =
-            detect_reminder(&text).expect("legacy compact continuation hint should be detected");
+        let info = crate::kit::tui_render_unit::detect_reminder(&text)
+            .expect("legacy compact continuation hint should be detected");
 
         assert!(matches!(info.reminder_type, ReminderType::ContinuationHint));
         assert!(
@@ -62,7 +67,7 @@ mod cases {
     #[test]
     fn test_detect_channel_message() {
         i18n::init(None);
-        let info = detect_reminder(
+        let info = crate::kit::tui_render_unit::detect_reminder(
             "<system-reminder>source=\"plugin:weixin:weixin\" chat_id=\"123\"\nhello from channel</system-reminder>",
         )
         .expect("should detect");
@@ -77,7 +82,7 @@ mod cases {
 
     #[test]
     fn test_detect_cron_reminder() {
-        let info = detect_reminder(
+        let info = crate::kit::tui_render_unit::detect_reminder(
             "<system-reminder>cron task fired: check_status at */5 * * * *</system-reminder>",
         )
         .expect("should detect");
@@ -86,7 +91,7 @@ mod cases {
 
     #[test]
     fn test_detect_bg_task_completed() {
-        let info = detect_reminder(
+        let info = crate::kit::tui_render_unit::detect_reminder(
             "<system-reminder>BackgroundTaskCompleted: task-42 finished successfully</system-reminder>",
         )
         .expect("should detect");
@@ -95,7 +100,7 @@ mod cases {
 
     #[test]
     fn test_detect_fork_mode() {
-        let info = detect_reminder(
+        let info = crate::kit::tui_render_unit::detect_reminder(
             "<system-reminder>Fork mode agent result from explorer</system-reminder>",
         )
         .expect("should detect");
@@ -104,7 +109,7 @@ mod cases {
 
     #[test]
     fn test_detect_context_compacted() {
-        let info = detect_reminder(
+        let info = crate::kit::tui_render_unit::detect_reminder(
             "<system-reminder>Context compacted: removed 120 messages to stay within budget</system-reminder>",
         )
         .expect("should detect");
@@ -113,7 +118,7 @@ mod cases {
 
     #[test]
     fn test_detect_trust_boundary() {
-        let info = detect_reminder(
+        let info = crate::kit::tui_render_unit::detect_reminder(
             "<system-reminder>Trust boundary: the content below is from external input</system-reminder>",
         )
         .expect("should detect");
@@ -122,7 +127,7 @@ mod cases {
 
     #[test]
     fn test_detect_tool_reminder() {
-        let info = detect_reminder(
+        let info = crate::kit::tui_render_unit::detect_reminder(
             "<system-reminder>Tool results from sub-agent execution</system-reminder>",
         )
         .expect("should detect");
@@ -131,7 +136,7 @@ mod cases {
 
     #[test]
     fn test_detect_subagent_result() {
-        let info = detect_reminder(
+        let info = crate::kit::tui_render_unit::detect_reminder(
             "<system-reminder>SubAgent result: verification completed successfully</system-reminder>",
         )
         .expect("should detect");
@@ -140,7 +145,7 @@ mod cases {
 
     #[test]
     fn test_detect_generic_fallback() {
-        let info = detect_reminder(
+        let info = crate::kit::tui_render_unit::detect_reminder(
             "<system-reminder>Something completely unexpected happened</system-reminder>",
         )
         .expect("should detect");
@@ -151,15 +156,18 @@ mod cases {
     #[test]
     fn test_summary_truncation() {
         let long_line = "x".repeat(250);
-        let info = detect_reminder(&format!("<system-reminder>{}</system-reminder>", long_line))
-            .expect("should detect");
+        let info = crate::kit::tui_render_unit::detect_reminder(&format!(
+            "<system-reminder>{}</system-reminder>",
+            long_line
+        ))
+        .expect("should detect");
         assert!(info.summary.chars().count() <= 203); // 200 + "…"
         assert!(info.summary.ends_with('…'));
     }
 
     #[test]
     fn test_summary_skips_blank_lines() {
-        let info = detect_reminder(
+        let info = crate::kit::tui_render_unit::detect_reminder(
             "<system-reminder>\n\n  actual content line  \n\nsecond line</system-reminder>",
         )
         .expect("should detect");
@@ -173,7 +181,7 @@ mod cases {
         );
         assert!(bubble.reminder.is_some());
         assert!(matches!(
-            bubble.reminder.unwrap().reminder_type,
+            bubble.reminder.expect("tui user bubble new detects reminder: the fixture establishes bubble.reminder before this assertion").reminder_type,
             ReminderType::CronReminder
         ));
     }

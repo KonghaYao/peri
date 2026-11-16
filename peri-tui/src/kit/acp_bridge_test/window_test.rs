@@ -1,6 +1,11 @@
 //! Bridge reset 必须同时清空 S5 历史窗口模型（会话边界清理）。
 
-use super::*;
+use super::AcpEventData;
+use super::AcpEventWithEpoch;
+use super::CancellationToken;
+use super::mpsc;
+use super::serial;
+
 use crate::kit::history_window::{
     HistoryEntryView, HistorySource, HistoryWindow, HistoryWindowConfig, PersistentEntryKey,
     SegmentDraft, SegmentPlacement, WindowIdentity,
@@ -11,7 +16,7 @@ use crate::kit::history_window::{
 fn test_bridge_reset_clears_history_window() {
     let old_reset = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();
     let old_active = crate::kit::atoms::ACTIVE_SESSION_ID.state().read().clone();
-    let mut state = scheduler_state();
+    let mut state = super::scheduler_state();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state
         .window
@@ -38,7 +43,7 @@ fn test_bridge_reset_clears_history_window() {
     assert_eq!(state.window.segment_count(), 1);
 
     let mut last_reset = old_reset;
-    apply_bridge_reset(&mut state, &mut last_reset, old_reset.wrapping_add(1));
+    super::apply_bridge_reset(&mut state, &mut last_reset, old_reset.wrapping_add(1));
 
     assert_eq!(state.window.segment_count(), 0);
     assert!(state.window.identity().is_none());
@@ -61,7 +66,7 @@ fn delayed_bridge_reset_keeps_new_session_first_open_in_flight() {
 
     let old_reset = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();
     let old_active = crate::kit::atoms::ACTIVE_SESSION_ID.state().read().clone();
-    let mut state = scheduler_state();
+    let mut state = super::scheduler_state();
     crate::kit::atoms::HISTORY_WINDOW_V1.set(true);
     crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(true);
     let session = "s-first-open";
@@ -80,7 +85,7 @@ fn delayed_bridge_reset_keeps_new_session_first_open_in_flight() {
     };
 
     let mut last_reset = old_reset;
-    apply_bridge_reset(&mut state, &mut last_reset, old_reset.wrapping_add(1));
+    super::apply_bridge_reset(&mut state, &mut last_reset, old_reset.wrapping_add(1));
 
     assert!(
         crate::kit::atoms::HISTORY_WINDOW_PAGING
@@ -191,7 +196,7 @@ async fn dropped_page_event_from_previous_session_releases_consumer_reservation(
     let (tx, rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
-    let handle = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
+    let handle = super::spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
     tx.send(AcpEventWithEpoch {
         child_origin: None,
         view_epoch: BRIDGE_RESET_COUNTER.get(),
@@ -202,7 +207,7 @@ async fn dropped_page_event_from_previous_session_releases_consumer_reservation(
         active_session_id: "s-b".into(),
     })
     .await
-    .unwrap();
+    .expect("dropped page event from previous session releases consumer reservation: fixture task and request must complete successfully");
 
     assert_eq!(observed_rx.recv().await, Some(false));
     let paging = HISTORY_WINDOW_PAGING.state().read().clone();
@@ -212,7 +217,7 @@ async fn dropped_page_event_from_previous_session_releases_consumer_reservation(
 
     shutdown.cancel();
     drop(tx);
-    handle.await.unwrap();
+    handle.await.expect("dropped page event from previous session releases consumer reservation: fixture task and request must complete successfully");
     HISTORY_WINDOW_V1.set(old_v1);
     HISTORY_WINDOW_CAPABLE.set(old_capable);
     *ACTIVE_SESSION_ID.state().write() = old_active;

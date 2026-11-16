@@ -1,23 +1,33 @@
-use crate::app::setup_wizard::*;
+use crate::app::setup_wizard;
+use crate::app::setup_wizard::FormField;
+use crate::app::setup_wizard::FormMode;
+use crate::app::setup_wizard::LANGUAGE_OPTIONS;
+use crate::app::setup_wizard::PROVIDER_PRESETS;
+use crate::app::setup_wizard::SetupSource;
+use crate::app::setup_wizard::SetupWizardState;
 use crate::i18n;
-use ratatui_kit::ratatui::{
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-};
+use ratatui_kit::ratatui::style::Color;
+use ratatui_kit::ratatui::style::Modifier;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
 
 // ── 辅助渲染函数 ──────────────────────────────────────────────────────────────
 
 fn make_hint_line(items: Vec<(String, String)>, dim: Color, accent: Color) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
-    for (i, (key, desc)) in items.into_iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled("  ", Style::default()));
+    {
+        let iteration_items = items.into_iter().enumerate();
+        for (i, (key, desc)) in iteration_items {
+            if i > 0 {
+                spans.push(Span::styled("  ", Style::default()));
+            }
+            spans.push(Span::styled(
+                key,
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(format!(" {}", desc), Style::default().fg(dim)));
         }
-        spans.push(Span::styled(
-            key,
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(format!(" {}", desc), Style::default().fg(dim)));
     }
     Line::from(spans)
 }
@@ -30,33 +40,36 @@ fn render_cursor_items(
     dim: Color,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    for (i, (label, desc)) in items.into_iter().enumerate() {
-        let is_cursor = i == cursor;
-        let c = if is_cursor { "❯" } else { " " };
-        let label_style = if is_cursor {
-            Style::default()
-                .fg(cursor_color)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(text_color)
-        };
-        let detail_style = if is_cursor {
-            Style::default().fg(cursor_color)
-        } else {
-            Style::default().fg(dim)
-        };
-        let l = label.clone();
-        lines.push(Line::from(vec![
-            Span::styled(format!("{} ", c), Style::default().fg(cursor_color)),
-            Span::styled(format!("{} ", l), label_style),
-        ]));
-        if !desc.is_empty() {
+    {
+        let iteration_items = items.into_iter().enumerate();
+        for (i, (label, desc)) in iteration_items {
+            let is_cursor = i == cursor;
+            let c = if is_cursor { "❯" } else { " " };
+            let label_style = if is_cursor {
+                Style::default()
+                    .fg(cursor_color)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(text_color)
+            };
+            let detail_style = if is_cursor {
+                Style::default().fg(cursor_color)
+            } else {
+                Style::default().fg(dim)
+            };
+            let l = label.clone();
             lines.push(Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(desc, detail_style),
+                Span::styled(format!("{} ", c), Style::default().fg(cursor_color)),
+                Span::styled(format!("{} ", l), label_style),
             ]));
+            if !desc.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled(desc, detail_style),
+                ]));
+            }
+            lines.push(Line::from(""));
         }
-        lines.push(Line::from(""));
     }
     lines
 }
@@ -98,21 +111,24 @@ fn render_editable_line(
     // 聚焦字段：渲染文本 + 光标
     let chars: Vec<char> = display_value.chars().collect();
     let clamped_cursor = cursor_pos.min(chars.len());
-    for (i, ch) in chars.iter().enumerate() {
-        if i == clamped_cursor && clamped_cursor < chars.len() {
-            // 光标在字符上
-            spans.push(Span::styled(
-                ch.to_string(),
-                Style::default()
-                    .fg(text_color)
-                    .bg(cursor_color)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            spans.push(Span::styled(
-                ch.to_string(),
-                Style::default().fg(text_color),
-            ));
+    {
+        let iteration_items = chars.iter().enumerate();
+        for (i, ch) in iteration_items {
+            if i == clamped_cursor && clamped_cursor < chars.len() {
+                // 光标在字符上
+                spans.push(Span::styled(
+                    ch.to_string(),
+                    Style::default()
+                        .fg(text_color)
+                        .bg(cursor_color)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    ch.to_string(),
+                    Style::default().fg(text_color),
+                ));
+            }
         }
     }
     if clamped_cursor >= chars.len() {
@@ -294,24 +310,27 @@ pub(super) fn render_preset_step(
     ];
 
     // 每预设 1 行：光标前缀 + 名称 + 两空格 + 摘要
-    for (idx, preset) in PROVIDER_PRESETS.iter().enumerate() {
-        let is_cursor = idx == state.preset_cursor;
-        let cursor = if is_cursor { "❯" } else { " " };
-        let name_style = if is_cursor {
-            Style::default().fg(accent).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(text_color)
-        };
-        let summary_style = if is_cursor {
-            Style::default().fg(accent)
-        } else {
-            Style::default().fg(dim)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!("{} ", cursor), Style::default().fg(cursor_color)),
-            Span::styled(format!("{}  ", preset.name), name_style),
-            Span::styled(preset.summary, summary_style),
-        ]));
+    {
+        let iteration_items = PROVIDER_PRESETS.iter().enumerate();
+        for (idx, preset) in iteration_items {
+            let is_cursor = idx == state.preset_cursor;
+            let cursor = if is_cursor { "❯" } else { " " };
+            let name_style = if is_cursor {
+                Style::default().fg(accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(text_color)
+            };
+            let summary_style = if is_cursor {
+                Style::default().fg(accent)
+            } else {
+                Style::default().fg(dim)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", cursor), Style::default().fg(cursor_color)),
+                Span::styled(format!("{}  ", preset.name), name_style),
+                Span::styled(preset.summary, summary_style),
+            ]));
+        }
     }
 
     lines.push(Line::from(""));
@@ -374,76 +393,81 @@ fn render_browse(
         lines.push(Line::from(""));
     }
 
-    for (idx, mp) in state.providers.iter().enumerate() {
-        let is_cursor = idx == state.browse_cursor;
-        let cursor = if is_cursor { "❯" } else { " " };
-        let check_char = if mp.selected { "✓" } else { " " };
-        let check_color = if mp.selected { accent } else { dim };
-        let name_style = if is_cursor {
-            Style::default()
-                .fg(cursor_color)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(text_color)
-        };
-        let detail_style = if is_cursor {
-            Style::default().fg(cursor_color)
-        } else {
-            Style::default().fg(dim)
-        };
-
-        let key_summary = if mp.api_key.is_empty() {
-            i18n::tr("setup-no-key")
-        } else {
-            mask_api_key(&mp.api_key)
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(format!("{} ", cursor), Style::default().fg(cursor_color)),
-            Span::styled(
-                format!("[{}] ", check_char),
-                Style::default().fg(check_color),
-            ),
-            Span::styled(
-                format!("{} ", i18n::tr(mp.provider_type.label())),
-                name_style,
-            ),
-            Span::styled(format!("({}) ", mp.provider_id), Style::default().fg(dim)),
-            Span::styled(key_summary, detail_style),
-        ]));
-
-        if !mp.base_url.is_empty() {
-            let url_text = if mp.base_url.len() > 60 {
-                format!("{}...", mp.base_url.chars().take(57).collect::<String>())
+    {
+        let iteration_items = state.providers.iter().enumerate();
+        for (idx, mp) in iteration_items {
+            let is_cursor = idx == state.browse_cursor;
+            let cursor = if is_cursor { "❯" } else { " " };
+            let check_char = if mp.selected { "✓" } else { " " };
+            let check_color = if mp.selected { accent } else { dim };
+            let name_style = if is_cursor {
+                Style::default()
+                    .fg(cursor_color)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                mp.base_url.clone()
+                Style::default().fg(text_color)
             };
-            lines.push(Line::from(vec![
-                Span::styled("     ", Style::default()),
-                Span::styled(url_text, Style::default().fg(dim)),
-            ]));
-        }
+            let detail_style = if is_cursor {
+                Style::default().fg(cursor_color)
+            } else {
+                Style::default().fg(dim)
+            };
 
-        // 显示模型别名（与上方 Provider 信息间空一行）
-        lines.push(Line::from(""));
-        let alias_labels = [
-            i18n::tr("setup-field-fable"),
-            i18n::tr("setup-field-opus"),
-            i18n::tr("setup-field-sonnet"),
-            i18n::tr("setup-field-haiku"),
-        ];
-        // 模型别名可含 CJK/emoji：按显示宽度截断，避免按字节索引切在字符内部。
-        const ALIAS_MAX_WIDTH: usize = 40;
-        for (ai, label) in alias_labels.iter().enumerate() {
-            let model_text = crate::truncate::truncate_by_width(&mp.aliases[ai], ALIAS_MAX_WIDTH);
-            lines.push(Line::from(vec![
-                Span::styled("     ", Style::default()),
-                Span::styled(format!("{} → ", label), Style::default().fg(dim)),
-                Span::styled(model_text, Style::default().fg(accent)),
-            ]));
-        }
+            let key_summary = if mp.api_key.is_empty() {
+                i18n::tr("setup-no-key")
+            } else {
+                setup_wizard::mask_api_key(&mp.api_key)
+            };
 
-        lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", cursor), Style::default().fg(cursor_color)),
+                Span::styled(
+                    format!("[{}] ", check_char),
+                    Style::default().fg(check_color),
+                ),
+                Span::styled(
+                    format!("{} ", i18n::tr(mp.provider_type.label())),
+                    name_style,
+                ),
+                Span::styled(format!("({}) ", mp.provider_id), Style::default().fg(dim)),
+                Span::styled(key_summary, detail_style),
+            ]));
+
+            if !mp.base_url.is_empty() {
+                let url_text = if mp.base_url.len() > 60 {
+                    format!("{}...", mp.base_url.chars().take(57).collect::<String>())
+                } else {
+                    mp.base_url.clone()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("     ", Style::default()),
+                    Span::styled(url_text, Style::default().fg(dim)),
+                ]));
+            }
+
+            // 显示模型别名（与上方 Provider 信息间空一行）
+            lines.push(Line::from(""));
+            let alias_labels = [
+                i18n::tr("setup-field-fable"),
+                i18n::tr("setup-field-opus"),
+                i18n::tr("setup-field-sonnet"),
+                i18n::tr("setup-field-haiku"),
+            ];
+            // 模型别名可含 CJK/emoji：按显示宽度截断，避免按字节索引切在字符内部。
+            const ALIAS_MAX_WIDTH: usize = 40;
+            let indexed_alias_labels = alias_labels.iter().enumerate();
+            for (ai, label) in indexed_alias_labels {
+                let model_text =
+                    crate::truncate::truncate_by_width(&mp.aliases[ai], ALIAS_MAX_WIDTH);
+                lines.push(Line::from(vec![
+                    Span::styled("     ", Style::default()),
+                    Span::styled(format!("{} → ", label), Style::default().fg(dim)),
+                    Span::styled(model_text, Style::default().fg(accent)),
+                ]));
+            }
+
+            lines.push(Line::from(""));
+        }
     }
 
     // Submit 错误提示
@@ -629,7 +653,7 @@ fn render_edit(
     let api_display = if mp.api_key.is_empty() {
         String::new()
     } else {
-        mask_api_key(&mp.api_key)
+        setup_wizard::mask_api_key(&mp.api_key)
     };
     lines.push(render_editable_line(
         i18n::tr("setup-field-api-key"),
@@ -649,15 +673,15 @@ fn render_edit(
     )));
 
     // Fable / Opus / Sonnet / Haiku 模型名
-    for (i, field) in [
+    let indexed_model_fields = [
         FormField::FableModel,
         FormField::OpusModel,
         FormField::SonnetModel,
         FormField::HaikuModel,
     ]
     .iter()
-    .enumerate()
-    {
+    .enumerate();
+    for (i, field) in indexed_model_fields {
         lines.push(render_editable_line(
             i18n::tr(field.i18n_key()),
             mp.aliases[i].clone(),
@@ -728,7 +752,7 @@ pub(super) fn render_done_step(
             continue;
         }
         let provider_id = mp.provider_id.clone();
-        let api_key_display = mask_api_key(&mp.api_key);
+        let api_key_display = setup_wizard::mask_api_key(&mp.api_key);
         let aliases = mp.aliases.clone();
         let type_label = i18n::tr(mp.provider_type.label());
         lines.push(Line::from(""));
@@ -751,12 +775,15 @@ pub(super) fn render_done_step(
             i18n::tr("setup-field-sonnet"),
             i18n::tr("setup-field-haiku"),
         ];
-        for (i, label) in alias_labels.iter().enumerate() {
-            let model = aliases[i].clone();
-            lines.push(Line::from(vec![
-                Span::styled(format!("   {:>6} → ", label), Style::default().fg(dim)),
-                Span::styled(model, Style::default().fg(accent)),
-            ]));
+        {
+            let iteration_items = alias_labels.iter().enumerate();
+            for (i, label) in iteration_items {
+                let model = aliases[i].clone();
+                lines.push(Line::from(vec![
+                    Span::styled(format!("   {:>6} → ", label), Style::default().fg(dim)),
+                    Span::styled(model, Style::default().fg(accent)),
+                ]));
+            }
         }
     }
 

@@ -2,8 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::*;
-use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
+use super::CtrlCAction;
 
 fn setup_atoms() {
     crate::kit::atoms::init_atoms();
@@ -25,15 +24,15 @@ fn test_determine_ctrl_c_action_loading() {
     // loading 状态下始终返回 Cancel
     let now = Instant::now();
     assert_eq!(
-        determine_ctrl_c_action(true, None, now),
+        super::determine_ctrl_c_action(true, None, now),
         CtrlCAction::Cancel
     );
     assert_eq!(
-        determine_ctrl_c_action(true, Some(now), now),
+        super::determine_ctrl_c_action(true, Some(now), now),
         CtrlCAction::Cancel
     );
     assert_eq!(
-        determine_ctrl_c_action(true, Some(now - Duration::from_millis(500)), now),
+        super::determine_ctrl_c_action(true, Some(now - Duration::from_millis(500)), now),
         CtrlCAction::Cancel
     );
 }
@@ -43,7 +42,7 @@ fn test_determine_ctrl_c_action_idle_first() {
     // 空闲状态下首次按 Ctrl+C 返回 FirstQuit
     let now = Instant::now();
     assert_eq!(
-        determine_ctrl_c_action(false, None, now),
+        super::determine_ctrl_c_action(false, None, now),
         CtrlCAction::FirstQuit
     );
 }
@@ -54,7 +53,7 @@ fn test_determine_ctrl_c_action_idle_double() {
     let now = Instant::now();
     let first = now - Duration::from_millis(500);
     assert_eq!(
-        determine_ctrl_c_action(false, Some(first), now),
+        super::determine_ctrl_c_action(false, Some(first), now),
         CtrlCAction::Quit
     );
 }
@@ -65,7 +64,7 @@ fn test_determine_ctrl_c_action_idle_expired() {
     let now = Instant::now();
     let first = now - Duration::from_millis(1500);
     assert_eq!(
-        determine_ctrl_c_action(false, Some(first), now),
+        super::determine_ctrl_c_action(false, Some(first), now),
         CtrlCAction::FirstQuit
     );
 }
@@ -77,12 +76,16 @@ fn test_determine_ctrl_c_action_idle_expired() {
 fn test_disconnected_recovery_makes_ctrl_c_quit_reachable() {
     let now = Instant::now();
     assert_eq!(
-        determine_ctrl_c_action(false, None, now),
+        super::determine_ctrl_c_action(false, None, now),
         CtrlCAction::FirstQuit
     );
     let first = now - Duration::from_millis(500);
     assert_eq!(
-        determine_ctrl_c_action(false, Some(first), now),
+        super::determine_ctrl_c_action(false, Some(first), now),
         CtrlCAction::Quit
     );
 }
+
+use crate::kit::atoms::ACTIVE_PANEL;
+
+use crate::kit::atoms::OPEN_PANELS;

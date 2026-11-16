@@ -1,9 +1,9 @@
 //! S5.6：真实视口发布窗口身份，宽度变化后仍按身份重定位。
 
+use super::Arc;
 use super::grid::GridSpec;
 use super::transcript::Transcript;
-use super::*;
-use crate::kit::atoms::{TranscriptPublication, ViewModelsSnapshot};
+
 use crate::kit::entry_render_cache::{EntryRenderContext, EntrySurface};
 use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble};
 use peri_theme::atoms::THEME_ATOM;
@@ -222,3 +222,7 @@ fn structural_epoch_drops_old_slot_lines_and_uses_8mib_to_6mib_budget() {
     crate::kit::atoms::STRUCTURAL_EPOCH.set(old_epoch);
     crate::kit::atoms::RENDER_ACHIEVED_EPOCH.set(old_epoch);
 }
+
+use crate::kit::atoms::TranscriptPublication;
+
+use crate::kit::atoms::ViewModelsSnapshot;

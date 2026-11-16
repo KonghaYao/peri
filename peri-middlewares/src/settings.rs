@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 
 /// 配置数据面的全局配置文件路径，默认 `~/.peri/settings.json`。
+#[must_use]
 pub fn global_config_path() -> PathBuf {
     peri_config::io::global_config_path()
 }
@@ -18,11 +19,13 @@ pub fn global_config_path() -> PathBuf {
 /// F12（保留为宿主适配器）：session/new 时一次性读取并冻结，会话内不再重新读取
 /// （保持系统提示词稳定性）。W4b 起它是 workspace 资源 provider 的**输入位**
 /// （`disable_bundled`），不再是宿主扫描的开关。
+#[must_use]
 pub fn load_disable_bundled_skills() -> bool {
     load_disable_bundled_skills_from_path(&global_config_path())
 }
 
 /// 测试注入入口：从指定 settings 文件读取 disableBundledSkills。
+#[must_use]
 pub fn load_disable_bundled_skills_from_path(path: &std::path::Path) -> bool {
     let global = peri_config::io::read_text(path)
         .ok()

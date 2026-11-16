@@ -27,6 +27,7 @@ impl SessionInbox {
     ///
     /// The queue is typically the session-level shared instance passed through
     /// `Session::new_with_cancel_and_queue`.
+    #[must_use]
     pub fn new(queue: Arc<MessageQueue>) -> Self {
         Self { queue }
     }
@@ -39,7 +40,7 @@ impl SessionInbox {
     /// ## Non-destructive
     ///
     /// This method does NOT consume any messages. The actual consumption happens in
-    /// the Receive stage via [`MessageQueue::select_for_receive`]/[`MessageQueue::receive`].
+    /// the Receive stage via [`crate::session::QueueOwner::select_for_receive`]/[`crate::session::QueueOwner::receive`].
     ///
     /// ## Spurious wakeup guard
     ///
@@ -72,6 +73,7 @@ impl SessionInbox {
     ///
     /// 生产构建不提供，避免把 owner 能力重新从 inbox 暴露出去。
     #[cfg(feature = "test-support")]
+    #[must_use]
     pub fn queue_for_test(&self) -> &MessageQueue {
         &self.queue
     }

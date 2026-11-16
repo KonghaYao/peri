@@ -1,9 +1,9 @@
 use std::time::Duration;
 
-use rmcp::{
-    model::{ClientRequest, CustomRequest, ServerResult},
-    service::PeerRequestOptions,
-};
+use rmcp::model::ClientRequest;
+use rmcp::model::CustomRequest;
+use rmcp::model::ServerResult;
+use rmcp::service::PeerRequestOptions;
 
 use super::{ClientStatus, McpClientPool};
 
@@ -18,14 +18,14 @@ impl McpClientPool {
         }
         if self.builtin_instance_context().is_some_and(|context| {
             let source = self
-                .get_client("workspace")
+                .client("workspace")
                 .and_then(|handle| handle.source.clone());
             crate::mcp::builtin::is_closed_source("workspace", source.as_ref(), &context.closed)
         }) {
             return Err("Workspace capability is closed".into());
         }
         let handle = self
-            .get_client_visible_to("workspace", Some(session_id))
+            .client_visible_to("workspace", Some(session_id))
             .filter(|handle| matches!(handle.status, ClientStatus::Connected))
             .filter(|handle| crate::mcp::builtin::is_workspace_source(handle.source.as_ref()))
             .ok_or("trusted Workspace capability unavailable")?;
@@ -54,7 +54,7 @@ impl McpClientPool {
         .map_err(|_| "Workspace rewind timed out; outcome unknown".to_string())??;
         if !self.is_open()
             || !self
-                .get_client_visible_to("workspace", Some(session_id))
+                .client_visible_to("workspace", Some(session_id))
                 .is_some_and(|current| {
                     std::sync::Arc::ptr_eq(&current, &handle)
                         && matches!(current.status, ClientStatus::Connected)

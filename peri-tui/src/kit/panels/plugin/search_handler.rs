@@ -1,11 +1,10 @@
 use crate::components::textarea::TextAreaState;
-use crate::kit::atoms::PluginViewTab;
-use crate::kit::panel_mouse::is_scrollbar_column;
+
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui_kit::prelude::{EventResult, State};
 use ratatui_kit::ratatui::layout::Rect;
 
-use super::{close_panel, discover::DiscoverState};
+use super::discover::DiscoverState;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_search_event(
@@ -55,7 +54,7 @@ pub(super) fn handle_search_event(
             return EventResult::Ignored;
         }
         if let Some(area) = area
-            && !is_scrollbar_column(&mouse, area)
+            && !crate::kit::panel_mouse::is_scrollbar_column(&mouse, area)
         {
             // add_marketplace 输入模式：点击仅消费（文本输入，无动作）
             if *add_marketplace_active.read() {
@@ -107,7 +106,7 @@ pub(super) fn handle_search_event(
             *marketplace_confirmation.write() = None;
             return EventResult::Consumed;
         }
-        close_panel();
+        super::close_panel();
         return EventResult::Consumed;
     }
 
@@ -150,3 +149,5 @@ pub(super) fn handle_search_event(
 
     EventResult::Ignored
 }
+
+use crate::kit::atoms::PluginViewTab;

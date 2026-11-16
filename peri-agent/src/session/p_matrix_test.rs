@@ -18,7 +18,9 @@
 //! PERI_P07_MIB=512 ./scripts/... -- --ignored --nocapture p07_
 //! ```
 
-use super::*;
+use crate::messages::BaseMessage;
+
+use crate::session::transcript::MessageTranscript;
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -26,7 +28,7 @@ use std::time::{Duration, Instant};
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 
 use crate::messages::MessageId;
-use crate::session::memory_probe::message_bytes;
+
 use crate::session::test_resources::TestSession;
 
 // ─── 夹具口径 ────────────────────────────────────────────────────────────────
@@ -41,22 +43,22 @@ const P06_BODY_BYTES: usize = 8 * 1024;
 const P06_CONTINUED_ROUNDS: usize = 4;
 
 fn make_human_body(prefix: &str, body_bytes: usize) -> BaseMessage {
-    make_human(&format!("{prefix}-{}", "h".repeat(body_bytes)))
+    crate::session::transcript::tests::make_human(&format!("{prefix}-{}", "h".repeat(body_bytes)))
 }
 
 fn make_ai_body(prefix: &str, body_bytes: usize) -> BaseMessage {
-    make_ai(&format!("{prefix}-{}", "a".repeat(body_bytes)))
+    crate::session::transcript::tests::make_ai(&format!("{prefix}-{}", "a".repeat(body_bytes)))
 }
 
 fn make_summary(round: usize) -> BaseMessage {
-    make_ai(&format!(
+    crate::session::transcript::tests::make_ai(&format!(
         "FULL-SUMMARY-{round:02}-{}",
         "s".repeat(SUMMARY_TEXT_BYTES)
     ))
 }
 
 fn summary_body_bytes() -> usize {
-    message_bytes(&make_summary(0)).body
+    crate::session::memory_probe::message_bytes(&make_summary(0)).body
 }
 
 fn own_flag_updates(
@@ -261,7 +263,7 @@ async fn p02_ten_full_compactions_keep_hot_baseline_bounded() {
     let ancestor_len = INHERITED_MESSAGES;
     let inherited: Vec<PersistedPayload> = (0..INHERITED_MESSAGES)
         .map(|index| {
-            PersistedPayload::Message(make_human(&format!(
+            PersistedPayload::Message(crate::session::transcript::tests::make_human(&format!(
                 "inherited-{index}-{}",
                 "i".repeat(128)
             )))
@@ -274,12 +276,12 @@ async fn p02_ten_full_compactions_keep_hot_baseline_bounded() {
     let summary_body = summary_body_bytes();
     let work_body_per_round: usize = (0..P02_WORK_PAIRS)
         .map(|pair| {
-            message_bytes(&make_human_body(
+            crate::session::memory_probe::message_bytes(&make_human_body(
                 &format!("P02-R00-H{pair:02}"),
                 P02_WORK_BODY_BYTES,
             ))
             .body
-                + message_bytes(&make_ai_body(
+                + crate::session::memory_probe::message_bytes(&make_ai_body(
                     &format!("P02-R00-A{pair:02}"),
                     P02_WORK_BODY_BYTES,
                 ))
@@ -309,7 +311,10 @@ async fn p02_ten_full_compactions_keep_hot_baseline_bounded() {
                 P02_WORK_BODY_BYTES,
             ));
         }
-        transcript.flush_persistence().await.unwrap();
+        transcript
+            .flush_persistence()
+            .await
+            .expect("the flush persistence fixture result is required for this assertion");
 
         let t0 = transcript.memory_snapshot();
         let flagged = own_flag_updates(&transcript, ancestor_len);
@@ -329,7 +334,9 @@ async fn p02_ten_full_compactions_keep_hot_baseline_bounded() {
                 appended_messages: vec![summary],
             })
             .await
-            .unwrap();
+            .expect(
+                "the commit compaction lifecycle fixture result is required for this assertion",
+            );
         let commit_elapsed = commit_started.elapsed();
 
         let t1 = transcript.memory_snapshot();
@@ -395,8 +402,13 @@ async fn p02_ten_full_compactions_keep_hot_baseline_bounded() {
         assert_eq!(row.t1.entries_capacity, first.t1.entries_capacity);
         assert_eq!(row.t1.id_index_capacity, first.t1.id_index_capacity);
     }
-    let baseline_growth =
-        rounds.last().unwrap().t0.own_bytes.body as i64 - baseline.t0.own_bytes.body as i64;
+    let baseline_growth = rounds
+        .last()
+        .expect("rounds last fixture must contain the expected element")
+        .t0
+        .own_bytes
+        .body as i64
+        - baseline.t0.own_bytes.body as i64;
     assert_eq!(baseline_growth, 0, "T0 历史正文基线随 Full 次数增长");
 
     // 权威存储仍保留全部归档正文；热态释放不是删除历史。
@@ -404,7 +416,7 @@ async fn p02_ten_full_compactions_keep_hot_baseline_bounded() {
         .resources()
         .load_session_history(&session.thread_id)
         .await
-        .unwrap();
+        .expect("the load session history fixture result is required for this assertion");
     let expected = P02_ROUNDS * (P02_WORK_PAIRS * 2 + 1);
     assert_eq!(
         stored.len(),
@@ -423,7 +435,8 @@ async fn p02_ten_full_compactions_keep_hot_baseline_bounded() {
             "round {round} 的归档正文必须仍在 SQLite 中"
         );
     }
-    for (round, ids) in archived_by_round.iter().enumerate() {
+    let paired_items = archived_by_round.iter().enumerate();
+    for (round, ids) in paired_items {
         let stored_ids: HashSet<MessageId> = stored.iter().map(|payload| payload.id()).collect();
         for id in ids {
             assert!(
@@ -470,7 +483,10 @@ async fn p06_full_release_barrier_is_independent_of_turn_end() {
         archived_ids
             .push(transcript.append(make_ai_body(&format!("P06-A{pair:02}"), P06_BODY_BYTES)));
     }
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
 
     let t0 = transcript.memory_snapshot();
     let mem_t0 = sample_process_memory();
@@ -495,7 +511,7 @@ async fn p06_full_release_barrier_is_independent_of_turn_end() {
             appended_messages: vec![summary],
         })
         .await
-        .unwrap();
+        .expect("the commit compaction lifecycle fixture result is required for this assertion");
     let commit_elapsed = commit_started.elapsed();
     let t1 = transcript.memory_snapshot();
     print_transcript("T1 release barrier", &t1);
@@ -523,7 +539,10 @@ async fn p06_full_release_barrier_is_independent_of_turn_end() {
         handoff_bytes
     );
     drop(handoff);
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let t3 = transcript.memory_snapshot();
     print_transcript("T3 drained", &t3);
     assert_eq!(t3.own_bytes.body, summary_body);
@@ -533,10 +552,14 @@ async fn p06_full_release_barrier_is_independent_of_turn_end() {
     for round in 0..P06_CONTINUED_ROUNDS {
         let human = make_human_body(&format!("P06-CONT-H{round}"), P06_BODY_BYTES);
         let ai = make_ai_body(&format!("P06-CONT-A{round}"), P06_BODY_BYTES);
-        continued_body += message_bytes(&human).body + message_bytes(&ai).body;
+        continued_body += crate::session::memory_probe::message_bytes(&human).body
+            + crate::session::memory_probe::message_bytes(&ai).body;
         transcript.append(human);
         transcript.append(ai);
-        transcript.flush_persistence().await.unwrap();
+        transcript
+            .flush_persistence()
+            .await
+            .expect("the flush persistence fixture result is required for this assertion");
         let snapshot = transcript.memory_snapshot();
         assert_ids_absent(&transcript, &archived_ids);
         assert_eq!(
@@ -550,9 +573,12 @@ async fn p06_full_release_barrier_is_independent_of_turn_end() {
 
     // T5：任务结束；旧归档正文早已在 T1 释放，结束时不产生第二段大释放。
     let final_message = make_ai_body("P06-FINAL", P06_BODY_BYTES);
-    let final_body = message_bytes(&final_message).body;
+    let final_body = crate::session::memory_probe::message_bytes(&final_message).body;
     transcript.append(final_message);
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let t5 = transcript.memory_snapshot();
     print_transcript("T5 task end", &t5);
     print_memory("process(T5)", &sample_process_memory());
@@ -648,7 +674,10 @@ async fn p07_history_body_scale_curves() {
             };
             archived_ids.push(transcript.append(message));
         }
-        transcript.flush_persistence().await.unwrap();
+        transcript
+            .flush_persistence()
+            .await
+            .expect("the flush persistence fixture result is required for this assertion");
         appended += count;
     }
     let build_elapsed = build_started.elapsed();
@@ -672,7 +701,10 @@ async fn p07_history_body_scale_curves() {
     // T0：compact 前。
     let stage_started = Instant::now();
     stages.push(sample("T0", &transcript, stage_started));
-    let t0 = stages.last().unwrap().snapshot;
+    let t0 = stages
+        .last()
+        .expect("stages last fixture must contain the expected element")
+        .snapshot;
     assert_eq!(t0.own_entries, messages);
     assert!(
         t0.own_bytes.body >= mib * 1024 * 1024,
@@ -689,11 +721,14 @@ async fn p07_history_body_scale_curves() {
             appended_messages: vec![summary],
         })
         .await
-        .unwrap();
+        .expect("the commit compaction lifecycle fixture result is required for this assertion");
     let commit_elapsed = commit_started.elapsed();
     let stage_started = Instant::now();
     stages.push(sample("T1", &transcript, stage_started));
-    let t1 = stages.last().unwrap().snapshot;
+    let t1 = stages
+        .last()
+        .expect("stages last fixture must contain the expected element")
+        .snapshot;
     assert_eq!(t1.own_entries, 1, "T1 只应保留摘要");
     assert_eq!(t1.own_bytes.body, summary_body_bytes());
     assert_ids_absent(&transcript, &archived_ids);
@@ -715,7 +750,10 @@ async fn p07_history_body_scale_curves() {
 
     // T3：排空持久化队列与临时引用。
     let stage_started = Instant::now();
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     stages.push(sample("T3", &transcript, stage_started));
 
     // T4：长任务继续工作 8 条（固定 512 KiB）。
@@ -727,24 +765,38 @@ async fn p07_history_body_scale_curves() {
         } else {
             make_ai_body(&format!("P07-CONT-{index:02}-A"), body_bytes)
         };
-        continued_body += message_bytes(&message).body;
+        continued_body += crate::session::memory_probe::message_bytes(&message).body;
         transcript.append(message);
     }
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     stages.push(sample("T4", &transcript, stage_started));
     assert_eq!(
-        stages.last().unwrap().snapshot.own_bytes.body,
+        stages
+            .last()
+            .expect("stages last fixture must contain the expected element")
+            .snapshot
+            .own_bytes
+            .body,
         summary_body_bytes() + continued_body
     );
 
     // T5：任务结束。
     let stage_started = Instant::now();
     let final_message = make_ai_body("P07-FINAL-A", body_bytes);
-    let final_body = message_bytes(&final_message).body;
+    let final_body = crate::session::memory_probe::message_bytes(&final_message).body;
     transcript.append(final_message);
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     stages.push(sample("T5", &transcript, stage_started));
-    let t5 = stages.last().unwrap().snapshot;
+    let t5 = stages
+        .last()
+        .expect("stages last fixture must contain the expected element")
+        .snapshot;
     assert_eq!(
         t5.own_bytes.body,
         summary_body_bytes() + continued_body + final_body
@@ -765,7 +817,7 @@ async fn p07_history_body_scale_curves() {
             .resources()
             .load_history_page(&session.thread_id, cursor.as_ref(), page_limit, page_budget)
             .await
-            .unwrap();
+            .expect("the load history page fixture result is required for this assertion");
         let bytes = page.total_bytes();
         assert!(
             bytes <= page_budget || page.items.iter().any(|item| item.oversized),
@@ -786,13 +838,16 @@ async fn p07_history_body_scale_curves() {
         .resources()
         .load_active_snapshot(&session.thread_id)
         .await
-        .unwrap();
+        .expect("the load active snapshot fixture result is required for this assertion");
     let active_payloads = crate::session::memory_probe::payload_set_snapshot(
         &active.payloads,
         active.payloads.capacity(),
     );
     stages.push(sample("T6", &transcript, stage_started));
-    let t6 = stages.last().unwrap().snapshot;
+    let t6 = stages
+        .last()
+        .expect("stages last fixture must contain the expected element")
+        .snapshot;
 
     // 翻页后有效尾部身份/规模不变；归档正文没有借分页回到热态。
     assert_eq!(t6.own_entries, t5.own_entries);
@@ -816,7 +871,13 @@ async fn p07_history_body_scale_curves() {
         active_payloads.bytes.body
     );
     print_memory("T6 paging before", &memory_before_pages);
-    print_memory("T6 paging after", &stages.last().unwrap().memory);
+    print_memory(
+        "T6 paging after",
+        &stages
+            .last()
+            .expect("stages last fixture must contain the expected element")
+            .memory,
+    );
 
     println!("== P07 阶段汇总（{mib} MiB） ==");
     for stage in &stages {

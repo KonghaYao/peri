@@ -159,6 +159,7 @@ pub enum ProgressEvent {
 }
 
 impl ProgressEvent {
+    #[must_use]
     pub fn run_id(&self) -> &str {
         match self {
             Self::RunStarted { run_id, .. }
@@ -498,6 +499,7 @@ impl WorkflowTaskResult {
     }
 
     /// 主 Agent 是否应把 workflow 视为「成功交付」（非仅 engine 跑完）。
+    #[must_use]
     pub fn agent_facing_success(&self) -> bool {
         self.status == WorkflowRunStatus::Completed
             && self.delivery_status != DeliveryStatus::Blocked

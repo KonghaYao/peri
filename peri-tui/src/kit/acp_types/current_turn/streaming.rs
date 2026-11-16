@@ -1,8 +1,8 @@
 use super::super::tool_card::ToolCardAccumulator;
 use super::{CurrentTurn, PendingNote, TurnSegment};
-use crate::kit::tui_render_unit::{
-    TuiNoteLevel, TuiRenderUnit, TuiSystemNote, tui_hash_roll_update,
-};
+use crate::kit::tui_render_unit::TuiNoteLevel;
+use crate::kit::tui_render_unit::TuiRenderUnit;
+use crate::kit::tui_render_unit::TuiSystemNote;
 
 impl CurrentTurn {
     /// If text has grown since the last `AssistantText` segment, push a new
@@ -115,7 +115,8 @@ impl CurrentTurn {
         }
         self.last_message_id = message_id.map(|s| s.to_string());
         self.text.push_str(t);
-        self.open_text_hash = tui_hash_roll_update(self.open_text_hash, t);
+        self.open_text_hash =
+            crate::kit::tui_render_unit::tui_hash_roll_update(self.open_text_hash, t);
         self.text_started_at
             .get_or_insert_with(peri_time::monotonic_now);
         self.active = true;
@@ -136,7 +137,8 @@ impl CurrentTurn {
         }
         self.last_message_id = message_id.map(|s| s.to_string());
         self.reasoning.push_str(t);
-        self.open_reasoning_hash = tui_hash_roll_update(self.open_reasoning_hash, t);
+        self.open_reasoning_hash =
+            crate::kit::tui_render_unit::tui_hash_roll_update(self.open_reasoning_hash, t);
         self.reasoning_started_at
             .get_or_insert_with(peri_time::monotonic_now);
         self.active = true;

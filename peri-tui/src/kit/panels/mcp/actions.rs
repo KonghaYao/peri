@@ -13,7 +13,6 @@ use crate::application::operations::{
     CompletionGate, OperationOutcome, OperationScope, OperationTicket, OutcomeUnknownReason,
 };
 use crate::i18n;
-use crate::kit::atoms::{ACP_CLIENT_HANDLE, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, MCP_SERVERS};
 
 const MCP_CONTROL_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -24,6 +23,7 @@ pub(super) enum ControlAction {
 }
 
 impl ControlAction {
+    #[must_use]
     fn wire(self) -> &'static str {
         match self {
             Self::Restart => "restart",
@@ -315,3 +315,11 @@ pub(super) fn unavailable_message(reason: Option<&str>) -> String {
 #[cfg(test)]
 #[path = "actions_test.rs"]
 mod tests;
+
+use crate::kit::atoms::ACP_CLIENT_HANDLE;
+
+use crate::kit::atoms::ACTIVE_SESSION_ID;
+
+use crate::kit::atoms::BRIDGE_RESET_COUNTER;
+
+use crate::kit::atoms::MCP_SERVERS;

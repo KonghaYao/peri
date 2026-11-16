@@ -1,9 +1,11 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde_json::Value;
 
 use super::super::{AcpServerConfig, SessionState};
-use crate::transport::{types::AcpError, AcpTransport};
+use crate::transport::types::AcpError;
+use crate::transport::AcpTransport;
 
 pub(in crate::host) fn handles(method: &str) -> bool {
     matches!(

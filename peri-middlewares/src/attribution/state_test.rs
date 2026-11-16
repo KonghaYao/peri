@@ -1,4 +1,4 @@
-use super::*;
+use super::AttributionState;
 
 #[test]
 fn test_track_change_entirely_new_file() {

@@ -1,6 +1,14 @@
 //! 使用真实有界广播验证运行中和尾部 drain 的 lag 恢复。
-use super::*;
+use crate::session::exec::executor_helpers::event_pump_tests::RecordingSink;
+use async_trait::async_trait;
+use peri_acp_types::event::EventMessage;
+use peri_acp_types::event::EventSubscriber;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::event::SubscriptionError;
 use peri_acp_types::event_v2::{BusHealth, BusHealthSnapshot};
+use peri_acp_types::identity::SessionSeq;
+use peri_acp_types::messages::MessageId;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 struct LagSubscriber {
@@ -36,31 +44,36 @@ impl EventSubscriber for LagSubscriber {
 }
 
 async fn assert_lag_recovery(drain_only: bool) {
-    let (mailbox, _) = mailbox_with_claimed_input();
+    let (mailbox, _) =
+        crate::session::exec::executor_helpers::event_pump_tests::mailbox_with_claimed_input();
     let (tx, rx) = broadcast::channel(1);
     let health = Arc::new(BusHealth::default());
     for chunk in ["被覆盖", "保留尾事件"] {
-        tx.send(sequenced_message(
-            SessionSeq::initial(),
-            ExecutorEvent::TextChunk {
-                message_id: MessageId::new(),
-                chunk: chunk.into(),
-                source_agent_id: None,
-            },
-        ))
-        .unwrap();
+        tx.send(
+            crate::session::exec::executor_helpers::event_pump_tests::sequenced_message(
+                SessionSeq::initial(),
+                ExecutorEvent::TextChunk {
+                    message_id: MessageId::new(),
+                    chunk: chunk.into(),
+                    source_agent_id: None,
+                },
+            ),
+        )
+        .expect("tx send test receiver must remain available for this delivery");
     }
     let sink = Arc::new(RecordingSink::default());
-    let (event_tx, stop_tx, handle) = start_pump_with_subscription(
-        mailbox,
-        Box::new(LagSubscriber {
-            rx,
-            health: health.clone(),
-            drain_only,
-        }),
-        sink.clone(),
-    );
-    finish(event_tx, stop_tx, handle).await;
+    let (event_tx, stop_tx, handle) =
+        crate::session::exec::executor_helpers::event_pump_tests::start_pump_with_subscription(
+            mailbox,
+            Box::new(LagSubscriber {
+                rx,
+                health: health.clone(),
+                drain_only,
+            }),
+            sink.clone(),
+        );
+    crate::session::exec::executor_helpers::event_pump_tests::finish(event_tx, stop_tx, handle)
+        .await;
     assert_eq!(
         health.snapshot(),
         BusHealthSnapshot {

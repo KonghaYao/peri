@@ -1,10 +1,13 @@
+use peri_agent::middleware::Middleware as _;
 use std::path::{Path, PathBuf};
 
-use peri_agent::{
-    messages::BaseMessage, middleware::state::MiddlewareState, session::MessageQueue,
-};
+use peri_agent::messages::BaseMessage;
+use peri_agent::middleware::state::MiddlewareState;
+use peri_agent::session::MessageQueue;
 
-use super::*;
+use super::{
+    async_trait, Arc, GitAttributionMiddleware, Mutex, ToolCall, ToolResult, TOOL_EDIT, TOOL_WRITE,
+};
 
 struct MemoryReader {
     text: Mutex<Option<String>>,

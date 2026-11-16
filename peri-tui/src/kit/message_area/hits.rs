@@ -3,7 +3,7 @@ use std::sync::Arc;
 use super::footer::KeepGoingLayout;
 use super::grid::GridSpec;
 use super::vm_cache::VmCacheSlot;
-use crate::kit::atoms::{FocusedEntry, ViewModelsSnapshot};
+
 use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit};
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::layout::Rect;
@@ -123,32 +123,35 @@ pub(super) fn update_copy_button_hits(
                 .get(slot_index)
                 .map(|vm| super::render::subagent_error_buttons(vm, &grid))
                 .unwrap_or_default();
-            for btn in slot.copy_button.iter().chain(extra.iter()) {
-                let Some(entry) = slot.wrap_map.get(btn.logical_idx) else {
-                    continue;
-                };
-                let vis_row = index
-                    .slot_visual_start(slot_index)
-                    .unwrap_or(0)
-                    .saturating_add(entry.visual_start);
-                let row = area.y as i64 + vis_row as i64 - scroll_y as i64;
-                if row < area.y as i64 || row >= vp_end as i64 {
-                    continue;
-                }
-                let hit_hash = match vms_guard.items.get(slot_index) {
-                    Some(TuiRenderUnit::TuiAssistantBubble(b)) => {
-                        TuiAssistantBubble::stable_identity_hash(&b.text, b.reasoning.as_ref())
+            {
+                let iteration_items = slot.copy_button.iter().chain(extra.iter());
+                for btn in iteration_items {
+                    let Some(entry) = slot.wrap_map.get(btn.logical_idx) else {
+                        continue;
+                    };
+                    let vis_row = index
+                        .slot_visual_start(slot_index)
+                        .unwrap_or(0)
+                        .saturating_add(entry.visual_start);
+                    let row = area.y as i64 + vis_row as i64 - scroll_y as i64;
+                    if row < area.y as i64 || row >= vp_end as i64 {
+                        continue;
                     }
-                    _ => slot.content_hash,
-                };
-                hits.push(CopyButtonHit {
-                    row: row as u16,
-                    x_start: area.x.saturating_add(btn.x_start),
-                    x_end: area.x.saturating_add(btn.x_end),
-                    slot_index,
-                    vm_hash: hit_hash,
-                    logical_idx: btn.logical_idx,
-                });
+                    let hit_hash = match vms_guard.items.get(slot_index) {
+                        Some(TuiRenderUnit::TuiAssistantBubble(b)) => {
+                            TuiAssistantBubble::stable_identity_hash(&b.text, b.reasoning.as_ref())
+                        }
+                        _ => slot.content_hash,
+                    };
+                    hits.push(CopyButtonHit {
+                        row: row as u16,
+                        x_start: area.x.saturating_add(btn.x_start),
+                        x_end: area.x.saturating_add(btn.x_end),
+                        slot_index,
+                        vm_hash: hit_hash,
+                        logical_idx: btn.logical_idx,
+                    });
+                }
             }
         }
     }
@@ -235,38 +238,41 @@ pub(super) fn update_interaction_hits(
             let Some(il) = &slot.interaction else {
                 continue;
             };
-            for (opt_i, row_local) in il.option_rows.iter().enumerate() {
-                let Some(entry) = slot.wrap_map.get(*row_local) else {
-                    continue;
-                };
-                let vis_row = index
-                    .slot_visual_start(slot_index)
-                    .unwrap_or(0)
-                    .saturating_add(entry.visual_start);
-                let row = area.y as i64 + vis_row as i64 - scroll_y as i64;
-                if row < area.y as i64 || row >= vp_end as i64 {
-                    continue;
-                }
-                // 列区间：横向布局按 option 文本区间；垂直/超宽整行命中
-                let (x_start, x_end) = match il.option_cols.get(opt_i).copied().flatten() {
-                    Some((s, e)) => (area.x.saturating_add(s), area.x.saturating_add(e)),
-                    None => (
-                        area.x,
-                        area.x
-                            .saturating_add(area.width)
-                            .max(area.x.saturating_add(1)),
-                    ),
-                };
-                hits.push(InteractionOptionHit {
-                    row: row as u16,
-                    x_start,
-                    x_end,
-                    slot_index,
-                    vm_hash: slot.content_hash,
-                    option_index: opt_i,
-                });
-                if focus_slot == Some(slot_index) && opt_i == cur_option {
-                    focused_interaction_row = Some((slot_index, *row_local));
+            {
+                let iteration_items = il.option_rows.iter().enumerate();
+                for (opt_i, row_local) in iteration_items {
+                    let Some(entry) = slot.wrap_map.get(*row_local) else {
+                        continue;
+                    };
+                    let vis_row = index
+                        .slot_visual_start(slot_index)
+                        .unwrap_or(0)
+                        .saturating_add(entry.visual_start);
+                    let row = area.y as i64 + vis_row as i64 - scroll_y as i64;
+                    if row < area.y as i64 || row >= vp_end as i64 {
+                        continue;
+                    }
+                    // 列区间：横向布局按 option 文本区间；垂直/超宽整行命中
+                    let (x_start, x_end) = match il.option_cols.get(opt_i).copied().flatten() {
+                        Some((s, e)) => (area.x.saturating_add(s), area.x.saturating_add(e)),
+                        None => (
+                            area.x,
+                            area.x
+                                .saturating_add(area.width)
+                                .max(area.x.saturating_add(1)),
+                        ),
+                    };
+                    hits.push(InteractionOptionHit {
+                        row: row as u16,
+                        x_start,
+                        x_end,
+                        slot_index,
+                        vm_hash: slot.content_hash,
+                        option_index: opt_i,
+                    });
+                    if focus_slot == Some(slot_index) && opt_i == cur_option {
+                        focused_interaction_row = Some((slot_index, *row_local));
+                    }
                 }
             }
         }
@@ -309,3 +315,7 @@ pub(super) fn compute_keepgoing_rect(
         layout.width,
     ))
 }
+
+use crate::kit::atoms::FocusedEntry;
+
+use crate::kit::atoms::ViewModelsSnapshot;

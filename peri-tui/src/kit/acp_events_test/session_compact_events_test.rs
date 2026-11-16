@@ -1,6 +1,15 @@
 //! Compact 生命周期用例（完成提示与 TurnDone 保窗语义）。
 
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::CurrentTurn;
+use super::FeedbackChannel;
+use super::FeedbackLevel;
+use super::SessionPhase;
+use super::TuiCommandFeedback;
+use super::TuiRenderUnit;
+
+use super::serial;
 
 #[test]
 #[serial]
@@ -218,7 +227,7 @@ async fn test_compact_turndone_keeps_window_without_reload() {
     // CommandFeedback 写入 PENDING_COMPACT_NOTE（跨 replay 存活桥接，
     // 沿袭 aecc2834；replay reset 清空 committed 后由 acp_bridge reset 分支
     // 重建 SystemNote 到 current_turn）。
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::CommandFeedback(TuiCommandFeedback {
             level: FeedbackLevel::Info,
@@ -240,7 +249,7 @@ async fn test_compact_turndone_keeps_window_without_reload() {
         crate::kit::tui_render_unit::TuiUserBubble::new("compact 之前已加载的旧消息".into()),
     ));
 
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
     assert!(
         rx_a.try_recv().is_err(),
@@ -308,7 +317,7 @@ async fn test_compact_turndone_keeps_window_without_reload() {
     // ① CompactCompleted（auto）：不置标志（S4.1 方案 A——服务端透传 trigger，
     //    auto compact 不置位，zero-output 后重放旧消息的边缘洞根治）。
     //    同时注入 SystemNote（current_turn 非空）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::CompactCompleted {
             summary: "compact summary".into(),
@@ -327,7 +336,7 @@ async fn test_compact_turndone_keeps_window_without_reload() {
     );
 
     // ② agent 继续产出——流事件到达（标志从未置位，防御逻辑无操作）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "agent response after compact".into(),
@@ -341,7 +350,7 @@ async fn test_compact_turndone_keeps_window_without_reload() {
     );
 
     // ③ turn 结束——不得触发 session/load 重放
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
     assert!(!state.compact_just_completed, "场景 B: flag 应清除");
     assert!(
@@ -353,7 +362,7 @@ async fn test_compact_turndone_keeps_window_without_reload() {
     // CommandFeedback 不得写 PENDING_COMPACT_NOTE——无 replay 触发，避免
     // 残留串到后续 thread 切换的 reset。
     crate::kit::atoms::PENDING_COMPACT_NOTE.set(None);
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::CommandFeedback(TuiCommandFeedback {
             level: FeedbackLevel::Info,
@@ -373,7 +382,7 @@ async fn test_compact_turndone_keeps_window_without_reload() {
     // manual compact 置位后，若 agent 继续产出流事件（理论上 manual 是
     // Immediate 命令无流事件，但防御逻辑保留），标志被清除，TurnDone
     // 不触发 reload。
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::CompactCompleted {
             summary: "manual compact summary".into(),
@@ -395,7 +404,7 @@ async fn test_compact_turndone_keeps_window_without_reload() {
     // 由 handle_command_feedback 承担（manual 场景写入 PENDING_COMPACT_NOTE
     // 跨 replay 存活——见场景 A/B 补遗断言）；此处仅保留标志链断言。
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "defensive stream after manual compact".into(),
@@ -408,10 +417,12 @@ async fn test_compact_turndone_keeps_window_without_reload() {
         "场景 B2: 流事件到达后标志应清除（方案 B 防御）"
     );
 
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert!(!state.compact_just_completed, "场景 B2: flag 应清除");
     assert!(
         rx_a.try_recv().is_err(),
         "场景 B2: 防御路径下也不应触发重放"
     );
 }
+
+use crate::kit::atoms::{THREAD_LOAD_TX, VIEW_MODELS, ViewModelsSnapshot};

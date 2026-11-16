@@ -131,6 +131,7 @@ fn parse_prefixed_json(stderr: &[u8], prefix: &str) -> Option<Value> {
         .and_then(|json| serde_json::from_str(json).ok())
 }
 
+#[must_use]
 fn is_prediction_request(body: &Value) -> bool {
     body.to_string().contains("<prediction_directive>")
 }
@@ -220,8 +221,11 @@ async fn respond(socket: &mut TcpStream, status: &str, content_type: &str, body:
             .as_bytes(),
         )
         .await
-        .unwrap();
-    socket.shutdown().await.unwrap();
+        .expect("respond: fixture task and request must complete successfully");
+    socket
+        .shutdown()
+        .await
+        .expect("respond: fixture task and request must complete successfully");
 }
 
 fn route(
@@ -289,9 +293,14 @@ fn route(
 }
 
 async fn run_case(script: Script, window_ms: u64, timeout: Duration) -> RunOutcome {
-    let fixture = tempfile::tempdir().unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    let fixture =
+        tempfile::tempdir().expect("run case: isolated fixture workspace must remain accessible");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("run case: fixture task and request must complete successfully");
+    let address = listener
+        .local_addr()
+        .expect("run case: the fixture listener must expose its bound local address");
     let settings = fixture.path().join("settings.json");
     std::fs::write(
         &settings,
@@ -304,7 +313,7 @@ async fn run_case(script: Script, window_ms: u64, timeout: Duration) -> RunOutco
         }})
         .to_string(),
     )
-    .unwrap();
+    .expect("run case: isolated fixture workspace must remain accessible");
 
     let requests = Arc::new(Mutex::new(Vec::new()));
     let parent_steps = Arc::new(AtomicUsize::new(0));
@@ -316,35 +325,47 @@ async fn run_case(script: Script, window_ms: u64, timeout: Duration) -> RunOutco
         let script = script.clone();
         async move {
             loop {
-                let (mut socket, _) = listener.accept().await.unwrap();
+                let (mut socket, _) = listener
+                    .accept()
+                    .await
+                    .expect("run case: fixture task and request must complete successfully");
                 let mut request = Vec::new();
                 let (header_end, content_length) = loop {
                     let mut buffer = [0; 4096];
-                    let count = socket.read(&mut buffer).await.unwrap();
+                    let count = socket
+                        .read(&mut buffer)
+                        .await
+                        .expect("run case: fixture task and request must complete successfully");
                     assert_ne!(count, 0, "provider request ended before headers");
                     request.extend_from_slice(&buffer[..count]);
                     if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let headers = std::str::from_utf8(&request[..end]).unwrap();
+                        let headers = std::str::from_utf8(&request[..end]).expect(
+                            "run case: fixture paths and protocol text must be valid UTF-8",
+                        );
                         assert!(headers.starts_with("POST /v1/messages "));
                         let length = headers
                             .lines()
                             .filter_map(|line| line.split_once(':'))
                             .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                            .unwrap()
+                            .expect("run case: fixture must contain the searched item")
                             .1
                             .trim()
                             .parse::<usize>()
-                            .unwrap();
+                            .expect("run case: fixture must contain the searched item");
                         break (end + 4, length);
                     }
                 };
                 while request.len() < header_end + content_length {
                     let mut buffer = [0; 4096];
-                    let count = socket.read(&mut buffer).await.unwrap();
+                    let count = socket
+                        .read(&mut buffer)
+                        .await
+                        .expect("run case: fixture task and request must complete successfully");
                     assert_ne!(count, 0, "provider request body was truncated");
                     request.extend_from_slice(&buffer[..count]);
                 }
-                let body: Value = serde_json::from_slice(&request[header_end..]).unwrap();
+                let body: Value = serde_json::from_slice(&request[header_end..])
+                    .expect("run case: fixture JSON must match the expected schema");
                 if is_prediction_request(&body) {
                     let frames = sse_frames(&[
                         (
@@ -374,7 +395,10 @@ async fn run_case(script: Script, window_ms: u64, timeout: Duration) -> RunOutco
                     respond(&mut socket, "200 OK", "text/event-stream", &frames).await;
                     continue;
                 }
-                requests.lock().unwrap().push(body.clone());
+                requests
+                    .lock()
+                    .expect("requests mutex must not be poisoned")
+                    .push(body.clone());
                 let response = route(&script, &body, &parent_steps, &child_steps);
                 respond(&mut socket, "200 OK", "text/event-stream", &response).await;
             }
@@ -413,9 +437,17 @@ async fn run_case(script: Script, window_ms: u64, timeout: Duration) -> RunOutco
     }
 
     let started = Instant::now();
-    let mut child = command.spawn().unwrap();
-    let mut stdout_pipe = child.stdout.take().unwrap();
-    let mut stderr_pipe = child.stderr.take().unwrap();
+    let mut child = command
+        .spawn()
+        .expect("run case: isolated fixture workspace must remain accessible");
+    let mut stdout_pipe = child
+        .stdout
+        .take()
+        .expect("run case: the fixture process outcome must include the expected output stream");
+    let mut stderr_pipe = child
+        .stderr
+        .take()
+        .expect("run case: the fixture process outcome must include the expected output stream");
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let result = tokio::time::timeout(timeout, async {
@@ -427,18 +459,23 @@ async fn run_case(script: Script, window_ms: u64, timeout: Duration) -> RunOutco
     })
     .await;
     let elapsed = started.elapsed();
-    let status = match result {
-        Ok(result) => result.unwrap().0,
-        Err(_) => {
-            provider.abort();
-            let _ = tokio::time::timeout(Duration::from_secs(5), child.kill()).await;
-            panic!(
-                "print did not exit within {timeout:?}\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&stdout),
-                String::from_utf8_lossy(&stderr),
-            );
-        }
-    };
+    let status =
+        match result {
+            Ok(result) => result
+                .expect(
+                    "run case: the fixture storage and layout must support the requested operation",
+                )
+                .0,
+            Err(_) => {
+                provider.abort();
+                let _ = tokio::time::timeout(Duration::from_secs(5), child.kill()).await;
+                panic!(
+                    "print did not exit within {timeout:?}\nstdout:\n{}\nstderr:\n{}",
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr),
+                );
+            }
+        };
     provider.abort();
     let _ = provider.await;
 
@@ -448,7 +485,10 @@ async fn run_case(script: Script, window_ms: u64, timeout: Duration) -> RunOutco
             stdout,
             stderr,
         },
-        requests: requests.lock().unwrap().clone(),
+        requests: requests
+            .lock()
+            .expect("requests mutex must not be poisoned")
+            .clone(),
         parent_steps: parent_steps.load(Ordering::SeqCst),
         child_steps: child_steps.load(Ordering::SeqCst),
         elapsed,
@@ -496,7 +536,7 @@ fn cleanup_pid(pid: u32) {
 
 #[tokio::test]
 async fn scenario1_deadline_with_active_shell_task() {
-    let fixture = tempfile::tempdir().unwrap();
+    let fixture = tempfile::tempdir().expect("scenario1 deadline with active shell task: isolated fixture workspace must remain accessible");
     let (command, pidfile, siglog, _done) = write_probe(fixture.path(), "30", false);
     let outcome = run_case(Script::Deadline { command }, 2_000, Duration::from_secs(40)).await;
 
@@ -524,7 +564,7 @@ async fn scenario1_deadline_with_active_shell_task() {
     assert_eq!(outcome.status(), json!("incomplete"));
     assert_ne!(outcome.exit_code(), Some(0));
     assert_eq!(
-        outcome.stdout_json().unwrap()["pending_tasks"],
+        outcome.stdout_json().expect("scenario1 deadline with active shell task: the fixture process outcome must include the expected output stream")["pending_tasks"],
         json!(1),
         "the result JSON must expose the unsettled task count"
     );
@@ -555,7 +595,7 @@ async fn scenario1_deadline_with_active_shell_task() {
 
 #[tokio::test]
 async fn scenario2_completion_inside_window_reaches_next_request() {
-    let fixture = tempfile::tempdir().unwrap();
+    let fixture = tempfile::tempdir().expect("scenario2 completion inside window reaches next request: isolated fixture workspace must remain accessible");
     let (command, pidfile, siglog, donelog) = write_probe(fixture.path(), "0.8", false);
     let outcome = run_case(
         Script::WithinWindow { command },
@@ -601,7 +641,7 @@ async fn scenario2_completion_inside_window_reaches_next_request() {
     assert_eq!(outcome.pending_tasks(), json!(null));
     assert_eq!(outcome.status(), json!("completed"));
     assert_eq!(outcome.exit_code(), Some(0));
-    assert_eq!(outcome.stdout_json().unwrap()["pending_tasks"], json!(0));
+    assert_eq!(outcome.stdout_json().expect("scenario2 completion inside window reaches next request: the fixture process outcome must include the expected output stream")["pending_tasks"], json!(0));
     assert_eq!(read_trimmed(&donelog), "DONE");
     assert_eq!(
         read_trimmed(&siglog),
@@ -617,20 +657,20 @@ async fn scenario3_deadline_race_repeated_runs() {
     // 2.0s window; sweep the task duration across the boundary. Two runs per
     // step so both outcomes are sampled even with process-start jitter.
     let mut rows = Vec::new();
-    for (index, sleep_secs) in [
+    let indexed_delay_seconds = [
         "1.90", "1.95", "2.00", "2.05", "2.10", "2.15", "2.20", "2.25", "2.30", "2.35", "2.40",
     ]
     .into_iter()
-    .enumerate()
-    {
+    .enumerate();
+    for (index, sleep_secs) in indexed_delay_seconds {
         for repeat in 0..2 {
-            let fixture = tempfile::tempdir().unwrap();
+            let fixture = tempfile::tempdir().expect("scenario3 deadline race repeated runs: isolated fixture workspace must remain accessible");
             let (command, pidfile, siglog, _done) = write_probe(fixture.path(), sleep_secs, false);
             let outcome = run_case(Script::Race { command }, 2_000, Duration::from_secs(25)).await;
             let pid: Option<u32> = read_trimmed(&pidfile).parse().ok();
             let alive_after = pid.is_some_and(|pid| outcome.child_alive(pid));
             let row = json!({
-                "sleep_ms": (sleep_secs.parse::<f64>().unwrap() * 1000.0) as u64,
+                "sleep_ms": (sleep_secs.parse::<f64>().expect("scenario3 deadline race repeated runs: the fixture value must satisfy its target representation") * 1000.0) as u64,
                 "run": index * 2 + repeat,
                 "parent_steps": outcome.parent_steps,
                 "completion_turn": outcome.parent_steps >= 3,
@@ -694,7 +734,9 @@ async fn scenario3_deadline_race_repeated_runs() {
 
 #[tokio::test]
 async fn scenario4_close_with_active_child() {
-    let fixture = tempfile::tempdir().unwrap();
+    let fixture = tempfile::tempdir().expect(
+        "scenario4 close with active child: isolated fixture workspace must remain accessible",
+    );
     let (command, pidfile, siglog, _done) = write_probe(fixture.path(), "30", true);
     let outcome = run_case(Script::Close { command }, 1_500, Duration::from_secs(40)).await;
     let pid: Option<u32> = read_trimmed(&pidfile).parse().ok();
@@ -717,7 +759,7 @@ async fn scenario4_close_with_active_child() {
     assert_eq!(outcome.pending_tasks(), json!(1));
     assert_eq!(outcome.status(), json!("incomplete"));
     assert_ne!(outcome.exit_code(), Some(0));
-    assert_eq!(outcome.stdout_json().unwrap()["pending_tasks"], json!(1));
+    assert_eq!(outcome.stdout_json().expect("scenario4 close with active child: the fixture process outcome must include the expected output stream")["pending_tasks"], json!(1));
     if let Some(pid) = pid {
         if alive_after {
             cleanup_pid(pid);
@@ -735,7 +777,7 @@ async fn scenario4_close_with_active_child() {
 
 #[tokio::test]
 async fn scenario4b_close_rejected_with_detached_descendant() {
-    let fixture = tempfile::tempdir().unwrap();
+    let fixture = tempfile::tempdir().expect("scenario4b close rejected with detached descendant: isolated fixture workspace must remain accessible");
     let shell_pidfile = fixture.path().join("shell.pid");
     let detached_pidfile = fixture.path().join("detached.pid");
     let siglog = fixture.path().join("shell.signal.log");
@@ -797,7 +839,9 @@ async fn scenario4b_close_rejected_with_detached_descendant() {
 
 #[tokio::test]
 async fn scenario5_nested_child_task_settlement() {
-    let fixture = tempfile::tempdir().unwrap();
+    let fixture = tempfile::tempdir().expect(
+        "scenario5 nested child task settlement: isolated fixture workspace must remain accessible",
+    );
     let (parent_command, _parent_pid, _parent_sig, _parent_done) =
         write_probe(fixture.path(), "0.1", false);
     let child_pid = fixture.path().join("child.pid");
@@ -838,51 +882,54 @@ async fn scenario5_nested_child_task_settlement() {
         outcome.close_diag(),
         read_trimmed(&child_sig),
     );
-    for (index, body) in outcome.requests.iter().enumerate() {
-        let tool_names: Vec<&str> = body
-            .get("tools")
-            .and_then(Value::as_array)
-            .map(|tools| {
-                tools
-                    .iter()
-                    .filter_map(|tool| tool.get("name").and_then(Value::as_str))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let text = body.to_string();
-        let mut tool_use_commands = Vec::new();
-        let mut tool_use_count = 0usize;
-        if let Some(messages) = body.get("messages").and_then(Value::as_array) {
-            for message in messages {
-                if let Some(blocks) = message.get("content").and_then(Value::as_array) {
-                    for block in blocks {
-                        if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                            tool_use_count += 1;
-                            if block.get("name").and_then(Value::as_str) == Some("Bash") {
-                                tool_use_commands.push(
-                                    block
-                                        .pointer("/input/command")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or("<missing>")
-                                        .to_owned(),
-                                );
+    {
+        let iteration_items = outcome.requests.iter().enumerate();
+        for (index, body) in iteration_items {
+            let tool_names: Vec<&str> = body
+                .get("tools")
+                .and_then(Value::as_array)
+                .map(|tools| {
+                    tools
+                        .iter()
+                        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let text = body.to_string();
+            let mut tool_use_commands = Vec::new();
+            let mut tool_use_count = 0usize;
+            if let Some(messages) = body.get("messages").and_then(Value::as_array) {
+                for message in messages {
+                    if let Some(blocks) = message.get("content").and_then(Value::as_array) {
+                        for block in blocks {
+                            if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+                                tool_use_count += 1;
+                                if block.get("name").and_then(Value::as_str) == Some("Bash") {
+                                    tool_use_commands.push(
+                                        block
+                                            .pointer("/input/command")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or("<missing>")
+                                            .to_owned(),
+                                    );
+                                }
                             }
                         }
                     }
                 }
             }
+            eprintln!(
+                "[scenario5-request-{index}] child_class={} has_agent_tool={} has_pending_tasks={} has_child_marker={} messages={} tool_uses={tool_use_count} bash_commands={tool_use_commands:?}",
+                is_child_request(body),
+                tool_names.contains(&"Agent"),
+                text.contains("pending_tasks"),
+                text.contains(CHILD_MARKER),
+                body.get("messages")
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or(0),
+            );
         }
-        eprintln!(
-            "[scenario5-request-{index}] child_class={} has_agent_tool={} has_pending_tasks={} has_child_marker={} messages={} tool_uses={tool_use_count} bash_commands={tool_use_commands:?}",
-            is_child_request(body),
-            tool_names.contains(&"Agent"),
-            text.contains("pending_tasks"),
-            text.contains(CHILD_MARKER),
-            body.get("messages")
-                .and_then(Value::as_array)
-                .map(Vec::len)
-                .unwrap_or(0),
-        );
     }
 
     // Construction check: the sub-agent really ran and really owned a shell.
@@ -895,7 +942,7 @@ async fn scenario5_nested_child_task_settlement() {
     assert_eq!(outcome.pending_tasks(), json!(1));
     assert_eq!(outcome.status(), json!("incomplete"));
     assert_ne!(outcome.exit_code(), Some(0));
-    assert_eq!(outcome.stdout_json().unwrap()["pending_tasks"], json!(1));
+    assert_eq!(outcome.stdout_json().expect("scenario5 nested child task settlement: the fixture process outcome must include the expected output stream")["pending_tasks"], json!(1));
     if let Some(pid) = pid {
         if alive_after {
             cleanup_pid(pid);

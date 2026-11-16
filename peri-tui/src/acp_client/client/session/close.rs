@@ -1,6 +1,7 @@
 //! Closing the previous session and remembering incomplete closes.
 
-use peri_acp::transport::{AcpTransport, types::AcpError};
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::AcpError;
 use serde_json::json;
 
 use crate::acp_client::client::AcpTuiClient;
@@ -70,19 +71,25 @@ impl AcpTuiClient {
         resume_load: Option<String>,
         error: &AcpError,
     ) {
-        *self.pending_close.lock().unwrap() =
+        *self
+            .pending_close
+            .lock()
+            .expect("pending_close mutex must not be poisoned") =
             PendingClose::from_close_failure(session_id, resume_load, error);
     }
 
     pub(super) fn clear_pending_close(&self) {
-        *self.pending_close.lock().unwrap() = None;
+        *self
+            .pending_close
+            .lock()
+            .expect("pending_close mutex must not be poisoned") = None;
     }
 
     /// 尚未关闭成功的旧会话身份；存在时下一次建立会话必须先关闭它。
     pub(super) fn pending_close_target(&self) -> Option<String> {
         self.pending_close
             .lock()
-            .unwrap()
+            .expect("pending_close mutex must not be poisoned")
             .as_ref()
             .map(|pending| pending.session_id.clone())
     }
@@ -91,7 +98,7 @@ impl AcpTuiClient {
     pub(super) fn pending_resume_load(&self) -> Option<String> {
         self.pending_close
             .lock()
-            .unwrap()
+            .expect("pending_close mutex must not be poisoned")
             .as_ref()
             .and_then(|pending| pending.resume_load.clone())
     }

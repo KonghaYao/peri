@@ -10,11 +10,12 @@
 //! - [`persist_draft`]：长草稿（Login / Model 内联 editor），调用方捕获 expected
 //!   revision，成功返回 authority 接纳后的快照，失败区分 revision 冲突与普通失败。
 
-use crate::config::{
-    ConfigurationRevision, PeriConfig, SaveEffectiveError, save_effective, save_effective_at,
-};
+use crate::config::ConfigurationRevision;
+use crate::config::PeriConfig;
+use crate::config::SaveEffectiveError;
+use crate::config::save_effective;
 use crate::i18n;
-use crate::kit::atoms::{NOTIFICATION, Notification};
+
 use fluent_bundle::FluentValue;
 use std::time::Duration;
 
@@ -65,7 +66,7 @@ pub(crate) fn persist_draft(
     expected_revision: ConfigurationRevision,
 ) -> Result<PeriConfig, DraftSaveError> {
     persist_draft_with(candidate, expected_revision, |revision, cfg| {
-        save_effective_at(revision, cfg).map_err(DraftSaveError::from_save_error)
+        crate::config::save_effective_at(revision, cfg).map_err(DraftSaveError::from_save_error)
     })
 }
 
@@ -188,3 +189,7 @@ fn notify(message: String, ttl: Duration) {
 #[cfg(test)]
 #[path = "config_service_test.rs"]
 mod tests;
+
+use crate::kit::atoms::NOTIFICATION;
+
+use crate::kit::atoms::Notification;

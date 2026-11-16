@@ -12,10 +12,10 @@
 //!   （顶层链 / Workflow agent 链 / 子链并集），与 blueprint/name 映射
 //!   有测试锁定（见 `assembly_test.rs`）。
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, LazyLock},
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::LazyLock;
 
 /// 冻结期构建的 MetaHarness 状态，随冻结载体（`FrozenContext`）传播；
 /// 会话内不可变（ARC-FROZEN-001）。

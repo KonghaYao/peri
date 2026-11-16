@@ -11,7 +11,7 @@ use peri_acp_types::session::{
 };
 use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::tasks::{BgTaskKind, TaskManager, TaskTerminalDelivery};
-use peri_agent::session::bg_complete::session_bg_complete_callback;
+use peri_agent::session::bg_complete;
 
 const SESSION_ID: &str = "session-bg-complete-test";
 
@@ -133,7 +133,7 @@ async fn test_cancelled_background_shell_delivers_cleanup_once_without_second_te
     let port = Arc::new(SessionDeliveryAccess {
         delivery: delivery.clone(),
     });
-    let delivered = session_bg_complete_callback(port, SESSION_ID.to_string());
+    let delivered = bg_complete::session_bg_complete_callback(port, SESSION_ID.to_string());
     let calls = Arc::new(AtomicUsize::new(0));
     let counting: peri_acp_types::tasks::OnBgCompleteFn = {
         let calls = Arc::clone(&calls);
@@ -217,7 +217,7 @@ async fn test_natural_background_shell_completion_delivers_defer_through_the_man
     let port = Arc::new(SessionDeliveryAccess {
         delivery: delivery.clone(),
     });
-    let delivered = session_bg_complete_callback(port, SESSION_ID.to_string());
+    let delivered = bg_complete::session_bg_complete_callback(port, SESSION_ID.to_string());
     let calls = Arc::new(AtomicUsize::new(0));
     let counting: peri_acp_types::tasks::OnBgCompleteFn = {
         let calls = Arc::clone(&calls);

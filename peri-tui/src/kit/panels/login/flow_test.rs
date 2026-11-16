@@ -1,13 +1,16 @@
 //! Login 流程回归：冲突提示分类，以及 Model → Login 的一次性导航请求。
 
-use super::*;
+use super::LoginEditState;
+use super::LoginField;
+use super::LoginPanelMode;
+use super::serial;
 use crate::kit::panels::login::edit_types::LoginError;
 
 /// 冲突提示只属于 revision/authority 冲突；字段校验错误不得显示“重新载入”。
 #[test]
 #[serial]
 fn conflict_reload_hint_is_reserved_for_conflict_errors() {
-    let cfg = login_config();
+    let cfg = super::login_config();
     let auth = crate::kit::panels::login::auth::AuthController::new();
     let colors = crate::kit::panels::login::render::LoginRenderColors::reset();
     let render_text = |state: &LoginEditState| {
@@ -25,7 +28,7 @@ fn conflict_reload_hint_is_reserved_for_conflict_errors() {
         .collect::<String>()
     };
 
-    let mut field_error = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut field_error = LoginEditState::edit_provider(&cfg, "resp", None).expect("conflict reload hint is reserved for conflict errors: the edit_provider fixture operation uses valid inputs");
     field_error.inline_error = Some(LoginError::field(
         LoginField::ProviderId,
         crate::i18n::tr("login-error-id-duplicate"),
@@ -37,7 +40,7 @@ fn conflict_reload_hint_is_reserved_for_conflict_errors() {
         "字段错误只显示字段提示，不得显示冲突重载提示：\n{text}"
     );
 
-    let mut conflict = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut conflict = LoginEditState::edit_provider(&cfg, "resp", None).expect("conflict reload hint is reserved for conflict errors: the edit_provider fixture operation uses valid inputs");
     conflict.inline_error = Some(LoginError::conflict(crate::i18n::tr(
         "config-draft-conflict",
     )));
@@ -62,7 +65,7 @@ fn provider_management_request_opens_target_provider_edit_once() {
     let _ = PERI_CONFIG_HANDLE.set(Arc::new(parking_lot::RwLock::new(PeriConfig::default())));
     let handle = Arc::clone(PERI_CONFIG_HANDLE.get().expect("配置句柄必须存在"));
     let previous = handle.read().clone();
-    *handle.write() = login_config();
+    *handle.write() = super::login_config();
     *LOGIN_PANEL_REQUEST.state().write() = Some(LoginPanelRequest {
         provider_id: Some("resp".to_string()),
     });

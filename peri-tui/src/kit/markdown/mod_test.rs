@@ -1,4 +1,6 @@
-use super::*;
+use super::Color;
+use super::MarkdownSegment;
+use super::Palette;
 
 const TEST_BASE_FG: Color = Color::White;
 
@@ -17,13 +19,18 @@ fn flatten(segments: &[MarkdownSegment]) -> Vec<ratatui::text::Line<'static>> {
 
 #[test]
 fn test_empty_input() {
-    let result = flatten(&parse_markdown("", 80, Palette::default(), TEST_BASE_FG));
+    let result = flatten(&super::parse_markdown(
+        "",
+        80,
+        Palette::default(),
+        TEST_BASE_FG,
+    ));
     assert!(result.is_empty());
 }
 
 #[test]
 fn test_heading() {
-    let result = flatten(&parse_markdown(
+    let result = flatten(&super::parse_markdown(
         "# Hello",
         80,
         Palette::default(),
@@ -38,7 +45,7 @@ fn test_heading() {
 
 #[test]
 fn test_paragraph() {
-    let result = flatten(&parse_markdown(
+    let result = flatten(&super::parse_markdown(
         "hello world",
         80,
         Palette::default(),
@@ -56,7 +63,7 @@ fn test_paragraph() {
 
 #[test]
 fn test_adjacent_paragraphs() {
-    let result = flatten(&parse_markdown(
+    let result = flatten(&super::parse_markdown(
         "a\n\nb",
         80,
         Palette::default(),
@@ -70,7 +77,7 @@ fn test_adjacent_paragraphs() {
 
 #[test]
 fn test_inline_code() {
-    let result = flatten(&parse_markdown(
+    let result = flatten(&super::parse_markdown(
         "use `code` here",
         80,
         Palette::default(),
@@ -109,7 +116,7 @@ fn test_inline_code() {
 
 #[test]
 fn test_unordered_list() {
-    let result = flatten(&parse_markdown(
+    let result = flatten(&super::parse_markdown(
         "- item 1\n- item 2",
         80,
         Palette::default(),
@@ -134,7 +141,7 @@ fn test_unordered_list() {
 #[test]
 fn test_code_block_background_fills_each_visual_line() {
     let width = 12;
-    let result = flatten(&parse_markdown(
+    let result = flatten(&super::parse_markdown(
         "```text\nshort\nthis line is much longer than the width\n```",
         width,
         Palette::default(),
@@ -160,7 +167,7 @@ fn test_code_block_background_fills_each_visual_line() {
 
 #[test]
 fn test_code_block_spacing() {
-    let result = flatten(&parse_markdown(
+    let result = flatten(&super::parse_markdown(
         "text\n\n```rust\nlet x = 1;\n```",
         80,
         Palette::default(),
@@ -176,7 +183,12 @@ fn test_code_block_spacing() {
 
 #[test]
 fn test_rule() {
-    let result = flatten(&parse_markdown("---", 80, Palette::default(), TEST_BASE_FG));
+    let result = flatten(&super::parse_markdown(
+        "---",
+        80,
+        Palette::default(),
+        TEST_BASE_FG,
+    ));
     assert_eq!(result.len(), 1);
     let content: String = result[0].spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(content.contains('─'));
@@ -184,7 +196,7 @@ fn test_rule() {
 
 #[test]
 fn test_bold_text() {
-    let result = flatten(&parse_markdown(
+    let result = flatten(&super::parse_markdown(
         "**bold**",
         80,
         Palette::default(),
@@ -205,7 +217,12 @@ fn test_bold_text() {
 fn test_unclosed_code_block_content_visible() {
     // [回归测试] 流式输入末尾若 ``` 未闭合，内容不应被丢弃
     let input = "```rust\nlet x = 1;\nlet y = 2;";
-    let result = flatten(&parse_markdown(input, 80, Palette::default(), TEST_BASE_FG));
+    let result = flatten(&super::parse_markdown(
+        input,
+        80,
+        Palette::default(),
+        TEST_BASE_FG,
+    ));
     let content: String = result
         .iter()
         .flat_map(|l| l.spans.iter())
@@ -225,7 +242,12 @@ fn test_unclosed_code_block_content_visible() {
 fn test_closed_code_block_unchanged_after_fix() {
     // 闭合的代码块渲染结果稳定（验证修复不引入回归）
     let input = "```rust\nlet x = 1;\n```";
-    let result = flatten(&parse_markdown(input, 80, Palette::default(), TEST_BASE_FG));
+    let result = flatten(&super::parse_markdown(
+        input,
+        80,
+        Palette::default(),
+        TEST_BASE_FG,
+    ));
     let content: String = result
         .iter()
         .flat_map(|l| l.spans.iter())
@@ -243,31 +265,31 @@ fn test_closed_code_block_unchanged_after_fix() {
 fn test_ensure_closed_code_fences_even_count_unchanged() {
     // 已闭合：fence 数为偶数，不补
     let input = "```rust\ncode\n```";
-    assert_eq!(ensure_closed_code_fences(input), input);
+    assert_eq!(super::ensure_closed_code_fences(input), input);
 }
 
 #[test]
 fn test_ensure_closed_code_fences_zero_count_unchanged() {
     // 无 fence：不补
     let input = "普通段落文本";
-    assert_eq!(ensure_closed_code_fences(input), input);
+    assert_eq!(super::ensure_closed_code_fences(input), input);
 }
 
 #[test]
 fn test_ensure_closed_code_fences_odd_count_appends_closer() {
     // 未闭合：fence 数为奇数，补一个闭合
     let input = "```rust\nlet x = 1;";
-    let result = ensure_closed_code_fences(input);
+    let result = super::ensure_closed_code_fences(input);
     assert_eq!(result, "```rust\nlet x = 1;\n```");
     // 验证补完后变成偶数（递归调用应不再追加）
-    assert_eq!(ensure_closed_code_fences(&result), result);
+    assert_eq!(super::ensure_closed_code_fences(&result), result);
 }
 
 #[test]
 fn test_ensure_closed_code_fences_multiple_blocks() {
     // 多个代码块 + 末尾未闭合
     let input = "```rust\na\n```\n\ntext\n\n```python\nb";
-    let result = ensure_closed_code_fences(input);
+    let result = super::ensure_closed_code_fences(input);
     assert!(result.ends_with("```"), "应在末尾补闭合 fence");
     assert_eq!(
         result.matches("```").count() % 2,

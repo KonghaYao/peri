@@ -1,4 +1,10 @@
-use super::*;
+use crate::host::requests::tests::HomeDirGuard;
+use crate::host::requests::tests::MockTransport;
+use crate::provider::LlmProvider;
+use serde_json::json;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[path = "requests_config_options_test.rs"]
 mod config_options_tests;
@@ -15,17 +21,20 @@ async fn test_update_config_refreshes_existing_owner_environments() {
     std::fs::create_dir(&startup).unwrap();
     std::fs::create_dir(&target).unwrap();
     std::fs::write(startup.join("CLAUDE.md"), "FROZEN_BEFORE_SETUP").unwrap();
-    let mut config = make_peri_config_with_provider(make_provider_config(
-        "same-id",
-        "openai",
-        "old-secret",
-        "sonnet-model",
-    ));
+    let mut config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "same-id",
+            "openai",
+            "old-secret",
+            "sonnet-model",
+        ),
+    );
     config.config.providers[0].base_url = "https://old.example/v1".into();
     config.config.profiles.opus.model = Some("session-opus-model".into());
     config.config.profiles.opus.effort = "low".into();
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config.clone(), provider, &tmp).await;
+    let mut cfg =
+        crate::host::requests::tests::make_server_config(config.clone(), provider, &tmp).await;
     crate::provider::save_to(&config, cfg.config_source.global_path()).unwrap();
     cfg.config_source.reload_merged().unwrap();
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
@@ -39,7 +48,7 @@ async fn test_update_config_refreshes_existing_owner_environments() {
     let mut sessions = HashMap::new();
     let mut ids = Vec::new();
     for cwd in [&startup, &startup, &target] {
-        let created = handle_request(
+        let created = crate::host::requests::handle_request(
             "session/new",
             &json!({"cwd": cwd}),
             &cfg,
@@ -50,7 +59,7 @@ async fn test_update_config_refreshes_existing_owner_environments() {
         .unwrap();
         ids.push(created["sessionId"].as_str().unwrap().to_owned());
     }
-    handle_request(
+    crate::host::requests::handle_request(
         "session/set_config_option",
         &json!({"sessionId": ids[1], "configId": "model", "value": "opus"}),
         &cfg,
@@ -89,7 +98,7 @@ async fn test_update_config_refreshes_existing_owner_environments() {
     updated.config.providers[0].base_url = "https://new.example/v1".into();
     updated.config.profiles.opus.model = Some("host-opus-model".into());
     updated.config.profiles.opus.effort = "high".into();
-    handle_request(
+    crate::host::requests::handle_request(
         "session/update_config",
         &json!({"config": updated}),
         &cfg,
@@ -98,7 +107,8 @@ async fn test_update_config_refreshes_existing_owner_environments() {
     )
     .await
     .unwrap();
-    for (index, id) in ids.iter().enumerate() {
+    let enumerated_id = ids.iter().enumerate();
+    for (index, id) in enumerated_id {
         let state = &sessions[id];
         let environment = state.environment.as_ref().unwrap();
         let provider = environment.cfg.provider.read().clone();
@@ -157,7 +167,7 @@ async fn test_update_config_refreshes_existing_owner_environments() {
         );
     }
     for id in ids {
-        handle_request(
+        crate::host::requests::handle_request(
             "session/close",
             &json!({"sessionId": id}),
             &cfg,
@@ -173,14 +183,16 @@ async fn test_update_config_refreshes_existing_owner_environments() {
 #[tokio::test]
 async fn test_update_config_unusable_provider_leaves_state_unchanged() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("same", "openai", "valid", "old"));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("same", "openai", "valid", "old"),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let cfg = make_server_config(config.clone(), provider, &tmp).await;
+    let cfg =
+        crate::host::requests::tests::make_server_config(config.clone(), provider, &tmp).await;
     let mut updated = config.clone();
     updated.config.providers[0].api_key.clear();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let error = handle_request(
+    let error = crate::host::requests::handle_request(
         "session/update_config",
         &json!({"config": updated}),
         &cfg,
@@ -200,15 +212,17 @@ async fn test_update_config_unusable_provider_leaves_state_unchanged() {
 #[tokio::test]
 async fn test_update_config_persistence_failure_leaves_state_unchanged() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("same", "openai", "valid", "old"));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("same", "openai", "valid", "old"),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let cfg = make_server_config(config.clone(), provider, &tmp).await;
+    let cfg =
+        crate::host::requests::tests::make_server_config(config.clone(), provider, &tmp).await;
     std::fs::create_dir(cfg.config_source.global_path()).unwrap();
     let mut updated = config.clone();
     updated.config.providers[0].models.sonnet = "new".into();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let error = handle_request(
+    let error = crate::host::requests::handle_request(
         "session/update_config",
         &json!({"config": updated}),
         &cfg,

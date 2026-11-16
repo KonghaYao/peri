@@ -115,7 +115,7 @@ impl Model for RecordingModel {
         Ok(peri_model::PreparedModelCall::new(
             checkpoint,
             move |cancellation| {
-                let response = ModelResponse::new(
+                let response = ModelResponse::try_new(
                     ModelMessage::assistant_text(answer),
                     StopReason::EndTurn,
                     None,
@@ -136,7 +136,7 @@ impl Model for RecordingModel {
     ) -> ModelResult<ModelStream> {
         *self.calls.lock().unwrap() += 1;
         self.requests.lock().unwrap().push(request);
-        let response = ModelResponse::new(
+        let response = ModelResponse::try_new(
             ModelMessage::assistant_text(self.answer.clone()),
             StopReason::EndTurn,
             None,

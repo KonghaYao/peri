@@ -1,15 +1,13 @@
-use std::{
-    path::PathBuf,
-    sync::{Arc, Barrier},
-    thread,
-};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Barrier;
+use std::thread;
 
 use serde_json::Value;
 
-use crate::{
-    settings::{ConfigSource, SettingsError},
-    ConfigurationError,
-};
+use crate::settings::ConfigSource;
+use crate::settings::SettingsError;
+use crate::ConfigurationError;
 
 fn make_source() -> (tempfile::TempDir, ConfigSource, PathBuf, PathBuf) {
     let temp = tempfile::tempdir().unwrap();

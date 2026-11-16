@@ -1,10 +1,8 @@
-use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
-    time::Duration,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
@@ -12,11 +10,21 @@ use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::{
-    transport::{HttpBody, HttpRequest, HttpResponse, HttpTransport},
-    ContentBlock, Model, ModelError, ModelMessage, ModelRequest, ModelResult, ModelRuntimeConfig,
-    ModelStreamEvent, RetryConfig, RetryableErrorClasses, TransportErrorKind,
-};
+use crate::transport::HttpBody;
+use crate::transport::HttpRequest;
+use crate::transport::HttpResponse;
+use crate::transport::HttpTransport;
+use crate::ContentBlock;
+use crate::Model;
+use crate::ModelError;
+use crate::ModelMessage;
+use crate::ModelRequest;
+use crate::ModelResult;
+use crate::ModelRuntimeConfig;
+use crate::ModelStreamEvent;
+use crate::RetryConfig;
+use crate::RetryableErrorClasses;
+use crate::TransportErrorKind;
 
 use super::{AnthropicConfig, AnthropicModel};
 

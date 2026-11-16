@@ -1,14 +1,61 @@
 //! A08 / A05 / A06：真实 Host 所有权收尾及 SQLite 恢复组合回归。
 
-use super::*;
-use crate::host::{
-    connection::ConnectionFacts, history_window, ownership, prompt,
-    prompt_dispatch::admission_gate, requests::session_lifecycle, AcpServerConfig,
-    ContextOwnership,
-};
-use crate::transport::{mpsc::mpsc_transport_pair, AcpTransport};
+use crate::host::connection::ConnectionFacts;
+use crate::host::executor_flow_tests::compact_history_tests::CompactStore;
+use crate::host::executor_flow_tests::compact_history_tests::SummaryModel;
+use crate::host::executor_flow_tests::compact_history_tests::OLD;
+use crate::host::executor_flow_tests::compact_history_tests::SUMMARY;
+use crate::host::executor_flow_tests::HomeGuard;
+use crate::host::history_window;
+use crate::host::ownership;
+use crate::host::prompt;
+use crate::host::prompt_dispatch::admission_gate;
+use crate::host::requests::session_lifecycle;
+use crate::host::AcpServerConfig;
+use crate::host::ContextOwnership;
+use crate::host::SharedSessions;
+use crate::provider::LlmProvider;
+use crate::provider::PeriConfig;
+use crate::session::agent_pool::AgentPool;
+use crate::session::executor::PromptStopReason;
+use crate::session::executor::SessionContext;
+use crate::transport::mpsc;
+use crate::transport::AcpTransport;
+use async_trait::async_trait;
+#[cfg(not(windows))]
+use futures::stream;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::session_resources::PersistenceRecovery;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::thread::ThreadId;
+#[cfg(not(windows))]
+use peri_model::Model;
+#[cfg(not(windows))]
+use peri_model::ModelCapabilities;
+#[cfg(not(windows))]
+use peri_model::ModelMessage;
+#[cfg(not(windows))]
+use peri_model::ModelRequest;
+#[cfg(not(windows))]
+use peri_model::ModelResponse;
+#[cfg(not(windows))]
+use peri_model::ModelResult;
+#[cfg(not(windows))]
+use peri_model::ModelStream;
+#[cfg(not(windows))]
+use peri_model::ModelStreamEvent;
+#[cfg(not(windows))]
+use peri_model::StopReason;
 use serde_json::json;
+use serial_test::serial;
+#[cfg(not(windows))]
+use std::sync::atomic::AtomicUsize;
+#[cfg(not(windows))]
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 async fn config(
     dir: &tempfile::TempDir,
@@ -112,7 +159,7 @@ async fn assert_active_store_matches(
 }
 
 async fn open_ticket(cfg: &AcpServerConfig, sessions: &SharedSessions, sid: &str) {
-    let (_client, server) = mpsc_transport_pair();
+    let (_client, server) = mpsc::mpsc_transport_pair();
     let connection = history_window::WindowConnection::new(
         "ownership-test",
         Arc::new(history_window::TransportWindowSink::new(Arc::new(server))),
@@ -147,9 +194,14 @@ async fn assert_reload_required(sessions: &SharedSessions, sid: &str) {
 async fn a08_abort_after_take_with_lock_contention_recovers_on_next_prompt() {
     let dir = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(dir.path());
-    let (ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
+    let (ctx, store, sessions) =
+        crate::host::executor_flow_tests::compact_history_tests::make_compact_context(
+            &dir,
+            Arc::new(SummaryModel),
+        )
+        .await;
     let cfg = config(&dir, &ctx, store.clone()).await;
-    let (_client, server) = mpsc_transport_pair();
+    let (_client, server) = mpsc::mpsc_transport_pair();
     let transport: Arc<dyn AcpTransport> = Arc::new(server);
     let gate = admission_gate::install(&format!("{}:handed-off", ctx.session_id));
     let task = tokio::spawn(run_host_prompt(
@@ -213,9 +265,14 @@ async fn a08_abort_after_take_with_lock_contention_recovers_on_next_prompt() {
 async fn a08_dropped_future_recovers_via_restore_without_cleanup_task() {
     let dir = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(dir.path());
-    let (ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
+    let (ctx, store, sessions) =
+        crate::host::executor_flow_tests::compact_history_tests::make_compact_context(
+            &dir,
+            Arc::new(SummaryModel),
+        )
+        .await;
     let cfg = config(&dir, &ctx, store.clone()).await;
-    let (_client, server) = mpsc_transport_pair();
+    let (_client, server) = mpsc::mpsc_transport_pair();
     let transport: Arc<dyn AcpTransport> = Arc::new(server);
     let gate = admission_gate::install(&format!("{}:handed-off", ctx.session_id));
     let mut future = Box::pin(run_host_prompt(
@@ -244,9 +301,14 @@ async fn a08_dropped_future_recovers_via_restore_without_cleanup_task() {
 async fn a08_run_session_start_failure_requires_reload_and_restores() {
     let dir = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(dir.path());
-    let (ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
+    let (ctx, store, sessions) =
+        crate::host::executor_flow_tests::compact_history_tests::make_compact_context(
+            &dir,
+            Arc::new(SummaryModel),
+        )
+        .await;
     let cfg = config(&dir, &ctx, store.clone()).await;
-    let (_client, server) = mpsc_transport_pair();
+    let (_client, server) = mpsc::mpsc_transport_pair();
     let transport: Arc<dyn AcpTransport> = Arc::new(server);
     let gate = admission_gate::install(&format!("{}:registered", ctx.session_id));
     let task = tokio::spawn(run_host_prompt(
@@ -278,7 +340,12 @@ async fn a08_run_session_start_failure_requires_reload_and_restores() {
 async fn a08_finished_or_superseded_guard_does_not_invalidate_current_context() {
     let dir = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(dir.path());
-    let (ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
+    let (ctx, store, sessions) =
+        crate::host::executor_flow_tests::compact_history_tests::make_compact_context(
+            &dir,
+            Arc::new(SummaryModel),
+        )
+        .await;
     for outcome in 0..3 {
         let (payloads, guard) = {
             let mut states = sessions.lock().await;
@@ -288,7 +355,8 @@ async fn a08_finished_or_superseded_guard_does_not_invalidate_current_context() 
                 &ctx.session_id,
             )
         };
-        let mut result = synthetic_result(false);
+        let mut result =
+            crate::host::executor_flow_tests::compact_history_tests::synthetic_result(false);
         result.persisted_payloads = payloads;
         if outcome == 1 {
             result.ok = false;
@@ -299,7 +367,7 @@ async fn a08_finished_or_superseded_guard_does_not_invalidate_current_context() 
                 "模型失败",
             ));
         }
-        let response = finish_prompt_turn(
+        let response = crate::host::prompt::finish_prompt_turn(
             &sessions,
             &ctx.session_id,
             false,
@@ -322,9 +390,10 @@ async fn a08_finished_or_superseded_guard_does_not_invalidate_current_context() 
             &ctx.session_id,
         )
     };
-    let mut result = synthetic_result(false);
+    let mut result =
+        crate::host::executor_flow_tests::compact_history_tests::synthetic_result(false);
     result.persisted_payloads = payloads;
-    finish_prompt_turn(
+    crate::host::prompt::finish_prompt_turn(
         &sessions,
         &ctx.session_id,
         false,
@@ -355,13 +424,19 @@ async fn a08_finished_or_superseded_guard_does_not_invalidate_current_context() 
 async fn a05_inconsistent_result_revokes_ticket_then_restores_sqlite_active_set() {
     let dir = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(dir.path());
-    let (ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
+    let (ctx, store, sessions) =
+        crate::host::executor_flow_tests::compact_history_tests::make_compact_context(
+            &dir,
+            Arc::new(SummaryModel),
+        )
+        .await;
     let cfg = config(&dir, &ctx, store.clone()).await;
     open_ticket(&cfg, &sessions, &ctx.session_id).await;
-    let mut result = synthetic_result(false);
+    let mut result =
+        crate::host::executor_flow_tests::compact_history_tests::synthetic_result(false);
     result.persistence_inconsistent = true;
     result.persisted_payloads = vec![PersistedPayload::Message(BaseMessage::human("不可信热态"))];
-    finish_prompt_turn(
+    crate::host::prompt::finish_prompt_turn(
         &sessions,
         &ctx.session_id,
         false,
@@ -371,7 +446,7 @@ async fn a05_inconsistent_result_revokes_ticket_then_restores_sqlite_active_set(
     .await
     .unwrap();
     assert_reload_required(&sessions, &ctx.session_id).await;
-    let (_client, server) = mpsc_transport_pair();
+    let (_client, server) = mpsc::mpsc_transport_pair();
     let transport: Arc<dyn AcpTransport> = Arc::new(server);
     restore(&cfg, &sessions, &ctx.session_id, &transport).await;
     assert_active_store_matches(&ctx, &store, &sessions).await;
@@ -382,13 +457,21 @@ async fn a05_inconsistent_result_revokes_ticket_then_restores_sqlite_active_set(
 async fn a06_full_commit_then_flush_failure_preserves_archive_and_restores_only_active() {
     let dir = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(dir.path());
-    let (ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
+    let (ctx, store, sessions) =
+        crate::host::executor_flow_tests::compact_history_tests::make_compact_context(
+            &dir,
+            Arc::new(SummaryModel),
+        )
+        .await;
     let cfg = config(&dir, &ctx, store.clone()).await;
     open_ticket(&cfg, &sessions, &ctx.session_id).await;
     store
         .fail_append_after_compact
         .store(true, Ordering::SeqCst);
-    let mut turn = make_compact_turn(&ctx, &sessions, true).await;
+    let mut turn = crate::host::executor_flow_tests::compact_history_tests::make_compact_turn(
+        &ctx, &sessions, true,
+    )
+    .await;
     let guard = {
         let mut states = sessions.lock().await;
         let (payloads, guard) = ownership::begin_handoff(
@@ -399,7 +482,9 @@ async fn a06_full_commit_then_flush_failure_preserves_archive_and_restores_only_
         turn.history_payloads = payloads;
         guard
     };
-    let result = run_session_loop(ctx.clone(), turn).await;
+    let result =
+        crate::host::executor_flow_tests::execution_fixture::run_session_loop(ctx.clone(), turn)
+            .await;
     assert_eq!(store.compact_commits.load(Ordering::SeqCst), 1);
     assert!(
         store.failed_appends.load(Ordering::SeqCst) > 0,
@@ -409,7 +494,7 @@ async fn a06_full_commit_then_flush_failure_preserves_archive_and_restores_only_
     // flush 失败时结果不声明可采纳的 compact 快照；提交事实由 SQLite 断言。
     assert!(!result.history_replaced_by_compaction);
     assert!(result.failure.is_some());
-    assert!(finish_prompt_turn(
+    assert!(crate::host::prompt::finish_prompt_turn(
         &sessions,
         &ctx.session_id,
         false,
@@ -441,7 +526,7 @@ async fn a06_full_commit_then_flush_failure_preserves_archive_and_restores_only_
     store
         .fail_append_after_compact
         .store(false, Ordering::SeqCst);
-    let (_client, server) = mpsc_transport_pair();
+    let (_client, server) = mpsc::mpsc_transport_pair();
     let transport: Arc<dyn AcpTransport> = Arc::new(server);
     restore(&cfg, &sessions, &ctx.session_id, &transport).await;
     assert_active_store_matches(&ctx, &store, &sessions).await;
@@ -453,7 +538,10 @@ async fn a06_full_commit_then_flush_failure_preserves_archive_and_restores_only_
         .join("\n");
     assert!(text.contains(SUMMARY));
     assert!(!text.contains(OLD));
-    assert_next_turn_sees_summary(ctx, &sessions).await;
+    crate::host::executor_flow_tests::compact_history_tests::assert_next_turn_sees_summary(
+        ctx, &sessions,
+    )
+    .await;
 }
 
 // SQLite 写锁阻止提交；取消真实 append future，让 MutationGate::WriteScope::drop
@@ -546,7 +634,7 @@ impl Model for RecoveryModel {
                 StopReason::EndTurn,
             )
         };
-        let response = ModelResponse::new(message, stop, None, None)?;
+        let response = ModelResponse::try_new(message, stop, None, None)?;
         Ok(ModelStream::with_parent_cancellation(
             stream::iter(vec![Ok(ModelStreamEvent::Completed(response))]),
             cancellation,
@@ -586,7 +674,12 @@ async fn sticky_unknown_prompt_case(recover: bool) {
     let calls = Arc::new(AtomicUsize::new(0));
     let tools = Arc::new(AtomicUsize::new(0));
     let model: Arc<dyn Model> = Arc::new(RecoveryModel(calls.clone()));
-    let (ctx, store, sessions) = make_compact_context(&dir, model.clone()).await;
+    let (ctx, store, sessions) =
+        crate::host::executor_flow_tests::compact_history_tests::make_compact_context(
+            &dir,
+            model.clone(),
+        )
+        .await;
     let cfg = config(&dir, &ctx, store.clone()).await;
     cfg.shared_tools.write().insert(
         "RecoveryProbe".into(),
@@ -616,7 +709,7 @@ async fn sticky_unknown_prompt_case(recover: bool) {
             )))),
             fingerprint,
         });
-    let (_client, server) = mpsc_transport_pair();
+    let (_client, server) = mpsc::mpsc_transport_pair();
     let transport: Arc<dyn AcpTransport> = Arc::new(server);
     let id = ctx.thread_id.as_ref().unwrap();
     make_sticky_unknown(&dir, &store, id).await;

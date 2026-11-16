@@ -1,11 +1,19 @@
-use super::*;
+use peri_acp_types::session::MessageQueue;
 use peri_acp_types::session::QueuedPayload;
+use peri_acp_types::system_reminder::ReminderAudience;
+
+use peri_acp_types::system_reminder::MAX_REMINDER_BODY_BYTES;
 
 #[test]
 fn test_user_input_recall_preserves_unicode_and_model_only_audience() {
     let queue = MessageQueue::new();
     let body = "回顾\n".repeat(MAX_REMINDER_BODY_BYTES / 3);
-    futures::executor::block_on(push_input_recalls(&queue, std::slice::from_ref(&body)));
+    futures::executor::block_on(
+        crate::session::exec::executor::input_recalls::push_input_recalls(
+            &queue,
+            std::slice::from_ref(&body),
+        ),
+    );
     assert!(!queue.has_wake_up_sync(), "recall 不单独唤醒新执行");
     let chunks: Vec<_> = queue
         .drain_all_sync()
@@ -29,6 +37,8 @@ fn test_user_input_recall_preserves_unicode_and_model_only_audience() {
 #[test]
 fn test_user_input_recall_empty_is_noop() {
     let queue = MessageQueue::new();
-    futures::executor::block_on(push_input_recalls(&queue, &[]));
+    futures::executor::block_on(
+        crate::session::exec::executor::input_recalls::push_input_recalls(&queue, &[]),
+    );
     assert!(queue.is_empty_sync(), "空 recall 不引入空消息");
 }

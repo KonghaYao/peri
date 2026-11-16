@@ -1,8 +1,13 @@
-use super::*;
+use crate::agent::react::ReactLLM;
 use crate::agent::react::{Reasoning, StreamingContext};
+use crate::agent::stages::context::StageContext;
+use crate::agent::stages::LoopResult;
 use crate::error::AgentResult;
 use crate::messages::BaseMessage;
+use crate::session::MessageQueue;
+use crate::session::QueuedMessage;
 use crate::session::{FrozenContext, MessageKind, MessageSource, Session};
+use crate::tools::BaseTool;
 use peri_acp_types::session::{ExecutionBinding, MessageDisposition, MessagePolicy};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -55,8 +60,12 @@ fn context() -> StageContext {
 #[test]
 fn recovery_instructions_bind_both_turn_and_attempt() {
     let context = context();
-    futures::executor::block_on(enqueue_truncation_continuation(&context));
-    futures::executor::block_on(enqueue_stream_interruption_continuation(&context));
+    futures::executor::block_on(crate::agent::stages::enqueue_truncation_continuation(
+        &context,
+    ));
+    futures::executor::block_on(
+        crate::agent::stages::enqueue_stream_interruption_continuation(&context),
+    );
     let execution = context.session.turn.execution_binding();
     let other_attempt = ExecutionBinding {
         turn_id: execution.turn_id,
@@ -95,7 +104,7 @@ async fn passive_tail_projects_without_another_reason() {
     });
     let queue = context.session.queue.clone();
     assert!(matches!(
-        run_react_loop(context, 3).await,
+        crate::agent::stages::run_react_loop(context, 3).await,
         LoopResult::Completed
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -123,7 +132,7 @@ async fn required_message_behind_multiple_passive_batches_is_not_starved() {
         tail: None,
     });
     assert!(matches!(
-        run_react_loop(context, 1).await,
+        crate::agent::stages::run_react_loop(context, 1).await,
         LoopResult::Completed
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -144,7 +153,7 @@ async fn required_tail_continues_current_run_without_source_dispatch() {
         tail: Some(MessagePolicy::continue_current_run(execution)),
     });
     assert!(matches!(
-        run_react_loop(context, 3).await,
+        crate::agent::stages::run_react_loop(context, 3).await,
         LoopResult::Completed
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -164,7 +173,7 @@ async fn stale_attempt_steering_is_suppressed_without_reason() {
     );
     let queue = context.session.queue.clone();
     assert!(matches!(
-        run_react_loop(context, 0).await,
+        crate::agent::stages::run_react_loop(context, 0).await,
         LoopResult::Completed
     ));
     assert_eq!(queue.suppressed_messages().len(), 1);
@@ -189,7 +198,7 @@ async fn idle_run_wakes_for_its_bound_steering() {
         let calls = calls.clone();
         Arc::new(move || calls.load(Ordering::SeqCst) == 0)
     });
-    let task = tokio::spawn(run_react_loop(context, 3));
+    let task = tokio::spawn(crate::agent::stages::run_react_loop(context, 3));
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while !suspended.load(Ordering::Acquire) {
             tokio::task::yield_now().await;

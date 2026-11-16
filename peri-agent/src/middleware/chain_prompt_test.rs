@@ -1,9 +1,7 @@
-use super::*;
+use crate::middleware::chain::MiddlewareChain;
+use crate::middleware::prompt_sections::PromptSection;
+use crate::middleware::prompt_sections::PromptSectionZone;
 use crate::middleware::r#trait::{Middleware, NoopMiddleware};
-use crate::middleware::{
-    project_enabled_sections,
-    prompt_sections::{PromptSection, PromptSectionZone},
-};
 use async_trait::async_trait;
 
 /// 声明段落的中间件（collect_prompt_sections 测试；默认无段落，契约 4）
@@ -66,7 +64,10 @@ fn test_collect_prompt_sections_gathers_provided_sections() {
     assert_eq!(hitl.zone, PromptSectionZone::Uncached);
     assert_eq!(hitl.order, 3);
     assert_eq!(hitl.content.as_str(), "hitl");
-    let dyn_section = collected.iter().find(|s| s.id == "zz_dyn").unwrap();
+    let dyn_section = collected
+        .iter()
+        .find(|s| s.id == "zz_dyn")
+        .expect("the find fixture result is required for this assertion");
     assert_eq!(dyn_section.content.as_str(), "dyn", "动态内容透传");
 }
 
@@ -76,7 +77,7 @@ fn test_project_enabled_sections_from_chain_names() {
     use std::collections::HashSet;
 
     // 空集合 → 无段落开启
-    assert!(project_enabled_sections(&HashSet::new()).is_empty());
+    assert!(crate::middleware::project_enabled_sections(&HashSet::new()).is_empty());
 
     let names: HashSet<&str> = [
         "SubAgentMiddleware",
@@ -85,7 +86,7 @@ fn test_project_enabled_sections_from_chain_names() {
     ]
     .into_iter()
     .collect();
-    let enabled = project_enabled_sections(&names);
+    let enabled = crate::middleware::project_enabled_sections(&names);
     assert!(
         enabled.contains("11_subagent"),
         "SubAgentMiddleware 在链上 → 11_subagent 开启"
@@ -119,7 +120,9 @@ fn test_project_enabled_sections_from_chain_names() {
         .iter()
         .map(|s| s.id)
         .collect();
-    let projected = project_enabled_sections(&chain.names().into_iter().collect::<HashSet<&str>>());
+    let projected = crate::middleware::project_enabled_sections(
+        &chain.names().into_iter().collect::<HashSet<&str>>(),
+    );
     assert_eq!(
         collected_ids, projected,
         "收集到的段落 = 映射表投影（同一判定，两条路径一致）"

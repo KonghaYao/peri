@@ -1,6 +1,7 @@
 //! Prompt 执行结果、canonical 终态及有界错误投影。
 
-use crate::{command::PromptStopReason, messages::BaseMessage};
+use crate::command::PromptStopReason;
+use crate::messages::BaseMessage;
 
 // ─── ExecutionFailure（Agent→ACP 结果契约的 fatal failure DTO）────────────
 
@@ -85,6 +86,7 @@ pub struct ExecutionFailure {
 impl ExecutionFailure {
     /// 构造 [`ExecutionFailureKind::Internal`] 类别，并保证 `public_message`
     /// 非空（空输入 → [`EXECUTION_FAILURE_FALLBACK_MESSAGE`]）。
+    #[must_use]
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(ExecutionFailureKind::Internal, message, None, None)
     }
@@ -163,6 +165,7 @@ impl ExecutionFailure {
 
     /// 结果缺失时的防御性 failure（`PromptResult::default()` 等场景）：
     /// 缺失结果不能作为成功 `EndTurn` 继续交给 ACP。
+    #[must_use]
     pub fn missing_result() -> Self {
         Self::internal(EXECUTION_FAILURE_FALLBACK_MESSAGE)
     }
@@ -191,6 +194,7 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 
 /// 单轮 prompt 执行结果（ACP 协议面 / 执行薄壳消费；Agent 层命令执行体与
 /// 执行句柄经本类型回传）。
+#[must_use]
 pub struct PromptResult {
     /// Actual Agent execution that produced this result; absent when no turn was started.
     /// Auxiliary work triggered by completion must use this fact, not a user-input ticket ID.

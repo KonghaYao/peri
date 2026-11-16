@@ -7,11 +7,11 @@ use crate::{
     ToolCall,
 };
 
-use super::{
-    replay::{self, ReplayBinding},
-    request::{invalid, valid_tool_name},
-    ResponsesProfile, TOOL_NAMESPACE,
-};
+use super::replay;
+use super::replay::ReplayBinding;
+use super::request;
+use super::ResponsesProfile;
+use super::TOOL_NAMESPACE;
 
 /// A single parser is used for completed responses and replay validation.
 /// Unknown output kinds are rejected: a hosted tool must never accidentally
@@ -29,9 +29,9 @@ pub(super) fn project_items(
         if let Some(id) = item.get("id") {
             let id = id
                 .as_str()
-                .ok_or_else(|| invalid("Responses item id must be a string"))?;
+                .ok_or_else(|| request::invalid("Responses item id must be a string"))?;
             if id.is_empty() || !ids.insert(id) {
-                return Err(invalid(
+                return Err(request::invalid(
                     "Responses output contains empty or duplicate item IDs",
                 ));
             }
@@ -39,7 +39,9 @@ pub(super) fn project_items(
         match required_string(item, "type")? {
             "message" => {
                 if required_string(item, "role")? != "assistant" {
-                    return Err(invalid("Responses output message must have assistant role"));
+                    return Err(request::invalid(
+                        "Responses output message must have assistant role",
+                    ));
                 }
                 validate_finished_status(item)?;
                 for part in required_array(item, "content")? {
@@ -50,14 +52,20 @@ pub(super) fn project_items(
                         "refusal" => content.push(ContentBlock::text(required_string_allow_empty(
                             part, "refusal",
                         )?)),
-                        _ => return Err(invalid("Unsupported Responses message content type")),
+                        _ => {
+                            return Err(request::invalid(
+                                "Unsupported Responses message content type",
+                            ))
+                        }
                     }
                 }
             }
             "reasoning" => {
                 for part in required_array(item, "summary")? {
                     if required_string(part, "type")? != "summary_text" {
-                        return Err(invalid("Unsupported Responses reasoning summary type"));
+                        return Err(request::invalid(
+                            "Unsupported Responses reasoning summary type",
+                        ));
                     }
                     content.push(ContentBlock::reasoning(required_string_allow_empty(
                         part, "text",
@@ -67,25 +75,29 @@ pub(super) fn project_items(
             "function_call" => {
                 let name = function_name(item, profile)?;
                 if allowed_tools.is_some_and(|tools| !tools.contains(name)) {
-                    return Err(invalid("Responses called a function that was not offered"));
+                    return Err(request::invalid(
+                        "Responses called a function that was not offered",
+                    ));
                 }
                 let call_id = required_string(item, "call_id")?;
                 if !call_ids.insert(call_id) {
-                    return Err(invalid(
+                    return Err(request::invalid(
                         "Responses output contains duplicate call_id values",
                     ));
                 }
                 validate_finished_status(item)?;
                 let arguments = required_string_allow_empty(item, "arguments")?;
                 let arguments: Value = serde_json::from_str(arguments).map_err(|error| {
-                    invalid("Responses function arguments are not valid JSON").with_error(&error)
+                    request::invalid("Responses function arguments are not valid JSON")
+                        .with_error(&error)
                 })?;
-                let arguments = JsonObject::from_value(arguments)
-                    .map_err(|_| invalid("Responses function arguments must be a JSON object"))?;
+                let arguments = JsonObject::from_value(arguments).map_err(|_| {
+                    request::invalid("Responses function arguments must be a JSON object")
+                })?;
                 calls.push(ToolCall::new(call_id, name, arguments));
             }
             _ => {
-                return Err(invalid(
+                return Err(request::invalid(
                     "Unsupported Responses output item; hosted/executable tools are not enabled",
                 ));
             }
@@ -100,7 +112,7 @@ fn validate_finished_status(item: &Value) -> ModelResult<()> {
         .filter(|status| !status.is_null())
         .is_some_and(|status| status.as_str() != Some("completed"))
     {
-        return Err(invalid("Responses output item was not completed"));
+        return Err(request::invalid("Responses output item was not completed"));
     }
     Ok(())
 }
@@ -115,7 +127,9 @@ pub(super) fn complete(
         .get("status")
         .is_some_and(|status| status.as_str() != Some("completed"))
     {
-        return Err(invalid("response.completed carried a non-completed status"));
+        return Err(request::invalid(
+            "response.completed carried a non-completed status",
+        ));
     }
     let items = required_array(response, "output")?;
     let (mut content, calls) = project_items(items, binding.profile, Some(allowed_tools))?;
@@ -132,7 +146,7 @@ pub(super) fn complete(
         .filter(|usage| !usage.is_null())
         .map(parse_usage)
         .transpose()?;
-    ModelResponse::new(
+    ModelResponse::try_new(
         ModelMessage::assistant(content, calls),
         reason,
         usage,
@@ -145,7 +159,7 @@ pub(super) fn parse_usage(value: &Value) -> ModelResult<TokenUsage> {
         value
             .as_u64()
             .and_then(|v| u32::try_from(v).ok())
-            .ok_or_else(|| invalid("Responses usage token count is not a u32"))
+            .ok_or_else(|| request::invalid("Responses usage token count is not a u32"))
     };
     let input_tokens = number(&value["input_tokens"])?;
     let output_tokens = number(&value["output_tokens"])?;
@@ -153,7 +167,9 @@ pub(super) fn parse_usage(value: &Value) -> ModelResult<TokenUsage> {
         .get("input_tokens_details")
         .filter(|value| !value.is_null());
     if details.is_some_and(|details| !details.is_object()) {
-        return Err(invalid("Responses input_tokens_details must be an object"));
+        return Err(request::invalid(
+            "Responses input_tokens_details must be an object",
+        ));
     }
     let detail_count = |field| {
         details
@@ -167,7 +183,7 @@ pub(super) fn parse_usage(value: &Value) -> ModelResult<TokenUsage> {
     // Both are subsets of total input, not additional input tokens. Use a
     // widened sum so untrusted counters cannot overflow before validation.
     if u64::from(cached.unwrap_or(0)) + u64::from(written.unwrap_or(0)) > u64::from(input_tokens) {
-        return Err(invalid(
+        return Err(request::invalid(
             "Responses cache read/write tokens exceed input tokens",
         ));
     }
@@ -181,8 +197,8 @@ pub(super) fn parse_usage(value: &Value) -> ModelResult<TokenUsage> {
 
 pub(super) fn function_name(item: &Value, profile: ResponsesProfile) -> ModelResult<&str> {
     let name = required_string(item, "name")?;
-    if !valid_tool_name(name) {
-        return Err(invalid("Invalid Responses function name"));
+    if !request::valid_tool_name(name) {
+        return Err(request::invalid("Invalid Responses function name"));
     }
     match (
         profile,
@@ -192,7 +208,7 @@ pub(super) fn function_name(item: &Value, profile: ResponsesProfile) -> ModelRes
         (ResponsesProfile::ChatGptPlan, Some(Value::String(namespace)))
             if namespace == TOOL_NAMESPACE => {}
         _ => {
-            return Err(invalid(
+            return Err(request::invalid(
                 "Responses function namespace does not match the offered tools",
             ));
         }
@@ -203,7 +219,7 @@ pub(super) fn function_name(item: &Value, profile: ResponsesProfile) -> ModelRes
 pub(super) fn required_string<'a>(value: &'a Value, field: &str) -> ModelResult<&'a str> {
     required_string_allow_empty(value, field).and_then(|text| {
         if text.is_empty() {
-            Err(invalid(&format!(
+            Err(request::invalid(&format!(
                 "Responses field {field} must not be empty"
             )))
         } else {
@@ -219,12 +235,12 @@ pub(super) fn required_string_allow_empty<'a>(
     value
         .get(field)
         .and_then(Value::as_str)
-        .ok_or_else(|| invalid(&format!("Responses field {field} must be a string")))
+        .ok_or_else(|| request::invalid(&format!("Responses field {field} must be a string")))
 }
 
 pub(super) fn required_array<'a>(value: &'a Value, field: &str) -> ModelResult<&'a Vec<Value>> {
     value
         .get(field)
         .and_then(Value::as_array)
-        .ok_or_else(|| invalid(&format!("Responses field {field} must be an array")))
+        .ok_or_else(|| request::invalid(&format!("Responses field {field} must be an array")))
 }

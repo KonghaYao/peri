@@ -13,7 +13,8 @@ use peri_acp_types::thread::{CancelPolicy, ThreadId};
 use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
 use peri_resources::sessions::SessionResourcesImpl;
 
-use super::{FrozenContext, Session};
+use crate::session::store::FrozenContext;
+use crate::session::Session;
 
 /// 一条已创建、已绑定的会话（临时库 + 临时 git 工作区）。
 pub(crate) struct TestSession {
@@ -26,13 +27,16 @@ pub(crate) struct TestSession {
 impl TestSession {
     pub(crate) async fn open() -> Self {
         let repo = git_repository();
-        let db = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().expect("the temporary test directory must be available");
         let resources: Arc<dyn SessionResources> = Arc::new(
             SessionResourcesImpl::open(db.path().join("threads.db"))
                 .await
-                .unwrap(),
+                .expect("the temporary session store fixture must open successfully"),
         );
-        let workspace = resources.resolve_workspace(repo.path()).await.unwrap();
+        let workspace = resources
+            .resolve_workspace(repo.path())
+            .await
+            .expect("the resolve workspace fixture result is required for this assertion");
         let thread_id = uuid::Uuid::now_v7().to_string();
         let session = NewSession {
             thread_id: thread_id.clone(),
@@ -54,7 +58,10 @@ impl TestSession {
             },
             frozen: FrozenSnapshotBytes::new("{\"version\":1,\"test\":true}"),
         };
-        resources.create_session(&session).await.unwrap();
+        resources
+            .create_session(&session)
+            .await
+            .expect("the create session fixture result is required for this assertion");
         Self {
             resources,
             thread_id,
@@ -74,7 +81,7 @@ impl TestSession {
             .resources
             .load_session_binding(&self.thread_id)
             .await
-            .unwrap()
+            .expect("the load session binding fixture result is required for this assertion")
         {
             BindingState::Bound(binding) => binding,
             other => panic!("fixture root must be bound, got {other:?}"),
@@ -83,7 +90,7 @@ impl TestSession {
             .resources
             .load_session_meta(&self.thread_id)
             .await
-            .unwrap();
+            .expect("the load session meta fixture result is required for this assertion");
         let child = uuid::Uuid::now_v7().to_string();
         self.resources
             .create_session(&NewSession {
@@ -101,7 +108,7 @@ impl TestSession {
                 frozen: FrozenSnapshotBytes::new("{\"version\":1,\"test\":true}"),
             })
             .await
-            .unwrap();
+            .expect("the create session fixture result is required for this assertion");
         child
     }
 
@@ -137,14 +144,14 @@ impl TestSession {
         Arc::new(
             SessionResourcesImpl::open_existing_read_only(self._db.path().join("threads.db"))
                 .await
-                .unwrap(),
+                .expect("the temporary session store fixture must open successfully"),
         )
     }
 }
 
 /// 临时 git 仓库（工作区发现需要真实仓库证据）。
 pub(crate) fn git_repository() -> tempfile::TempDir {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("the temporary test directory must be available");
     for args in [
         vec!["init", "-q"],
         vec![
@@ -169,7 +176,7 @@ pub(crate) fn git_repository() -> tempfile::TempDir {
             .arg(directory.path())
             .args(&args)
             .output()
-            .unwrap();
+            .expect("the output fixture result is required for this assertion");
         assert!(output.status.success(), "git fixture failed");
     }
     directory

@@ -1,12 +1,16 @@
 //! PR #175 追加审查：公开估算入口的媒体及工具调用表示边界。
 //! 固定 base64 字符串只测预算，不声称由这里验证媒体解码或 provider 成本。
 use async_trait::async_trait;
-use peri_agent::{
-    agent::react::{ReactLLM, Reasoning, StreamingContext},
-    error::AgentResult,
-    messages::{BaseMessage, ContentBlock, DocumentSource, MessageContent, ToolCallRequest},
-    tools::BaseTool,
-};
+use peri_agent::agent::react::ReactLLM;
+use peri_agent::agent::react::Reasoning;
+use peri_agent::agent::react::StreamingContext;
+use peri_agent::error::AgentResult;
+use peri_agent::messages::BaseMessage;
+use peri_agent::messages::ContentBlock;
+use peri_agent::messages::DocumentSource;
+use peri_agent::messages::MessageContent;
+use peri_agent::messages::ToolCallRequest;
+use peri_agent::tools::BaseTool;
 
 struct BudgetProbe;
 
@@ -62,7 +66,7 @@ fn test_followup_nested_and_raw_media_cost_does_not_scale_with_base64() {
         large.clone()
     ])));
     let raw_large = estimate(BaseMessage::human(MessageContent::Raw(vec![
-        serde_json::to_value(large).unwrap(),
+        serde_json::to_value(large).expect("to_value must accept this test fixture representation"),
     ])));
     assert_eq!(typed_small, typed_large);
     assert_eq!(typed_large, raw_large);
@@ -85,7 +89,8 @@ fn test_followup_text_documents_remain_budgeted_in_all_supported_shapes() {
         block.clone()
     ])));
     let raw = estimate(BaseMessage::human(MessageContent::Raw(vec![
-        serde_json::to_value(&block).unwrap(),
+        serde_json::to_value(&block)
+            .expect("to_value must accept this test fixture representation"),
     ])));
     let nested = estimate(BaseMessage::tool_result(
         "doc",
@@ -110,7 +115,12 @@ fn test_followup_data_uri_scheme_case_preserves_bounded_media_budget() {
     ])));
     for scheme in ["DATA", "Data", "dAtA"] {
         let url = format!("{scheme}:image/png;base64,{body}");
-        assert_eq!(url::Url::parse(&url).unwrap().scheme(), "data");
+        assert_eq!(
+            url::Url::parse(&url)
+                .expect("the parse fixture result is required for this assertion")
+                .scheme(),
+            "data"
+        );
         let image = estimate(BaseMessage::human(MessageContent::Blocks(vec![
             ContentBlock::image_url(&url),
         ])));
@@ -130,8 +140,11 @@ fn test_followup_data_uri_scheme_case_preserves_bounded_media_budget() {
 fn test_followup_ai_tool_blocks_without_canonical_mirror_are_budgeted() {
     let block = tool_block("write", 440_000);
     let message = BaseMessage::ai(MessageContent::Blocks(vec![block.clone()]));
-    let restored: BaseMessage =
-        serde_json::from_value(serde_json::to_value(message).unwrap()).unwrap();
+    let restored: BaseMessage = serde_json::from_value(
+        serde_json::to_value(message)
+            .expect("to_value must accept this test fixture representation"),
+    )
+    .expect("from_value must accept this test fixture representation");
     assert!(matches!(&restored, BaseMessage::Ai { tool_calls, .. } if tool_calls.is_empty()));
     assert!(
         estimate(restored) >= 110_000,
@@ -140,7 +153,8 @@ fn test_followup_ai_tool_blocks_without_canonical_mirror_are_budgeted() {
     // Raw 估算形状也需一致；当前生产 AgentModelBridge 明确拒绝 Raw，不将其当作 provider 支持证明。
     assert!(
         estimate(BaseMessage::ai(MessageContent::Raw(vec![
-            serde_json::to_value(block).unwrap()
+            serde_json::to_value(block)
+                .expect("to_value must accept this test fixture representation")
         ]))) >= 110_000
     );
 }

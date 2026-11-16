@@ -1,17 +1,30 @@
+use super::EntryStatus;
+use super::FoldState;
+use super::Line;
+use super::TuiAssistantBubble;
+use super::TuiNoteLevel;
+use super::TuiReasoningBlock;
+use super::TuiRenderUnit;
+use super::TuiSystemNote;
+use super::TuiTodoSummary;
+use super::TuiToolCard;
+use super::TuiUserBubble;
+
+use crate::kit::message_area::grid::GridSpec;
+use crate::kit::message_area::grid::ZoneTransition;
+use crate::kit::message_area::render;
+
 use super::tool_activity_tests::EDIT_DIFF;
-use super::*;
 use crate::kit::message_area::grid::TextLineSource;
 
 // ── [D3 §9] 语义复制：semantic_line_text 变体分派矩阵 ────────────────────
 
-use crate::kit::message_area::render::semantic_line_text;
-
 /// 测试辅助：渲染 VM 后对 `local_idx` 行提取语义文本（复制路径语义——
 /// 传入已渲染行，不重渲染 VM）。
 pub(super) fn sem_at(vm: &TuiRenderUnit, local_idx: usize, grid: &GridSpec) -> Option<String> {
-    let lines = vm_to_lines(vm, grid);
+    let lines = render::vm_to_lines(vm, grid);
     let line = lines.get(local_idx)?;
-    semantic_line_text(vm, local_idx, line, grid)
+    crate::kit::message_area::render::semantic_line_text(vm, local_idx, line, grid)
 }
 
 /// 普通 assistant 正文行：剥前缀列——长回复剥文本区前缀（outer + accent + gap）、
@@ -76,7 +89,7 @@ fn test_no_role_label_line_rendered() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
     let text = crate::kit::text_selection::line_to_plain_text(&lines[1]);
     assert!(
         !text.contains("Perihelion"),
@@ -97,7 +110,7 @@ fn test_no_role_label_line_rendered() {
         message_id: None,
         content_hash: 0,
     });
-    let ulines = vm_to_lines(&user_vm, &grid);
+    let ulines = render::vm_to_lines(&user_vm, &grid);
     let utext = crate::kit::text_selection::line_to_plain_text(&ulines[0]);
     assert!(
         !utext.contains("You"),
@@ -116,7 +129,7 @@ fn test_no_role_label_line_rendered() {
 fn test_semantic_tool_header_edit_write_count_only() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(120);
-    let card = edit_card_with_diff(EDIT_DIFF);
+    let card = super::edit_card_with_diff(EDIT_DIFF);
     let vm = TuiRenderUnit::TuiToolCard(card);
     let sem = sem_at(&vm, 0, &grid).expect("header 行");
     assert_eq!(
@@ -129,7 +142,7 @@ fn test_semantic_tool_header_edit_write_count_only() {
     );
 
     // Write：新文件摘要（`Wrote 1 line to x.rs`）→ 同样只留计数
-    let mut write = tool_card("Write", "/tmp/x.rs", false, false);
+    let mut write = super::tool_card("Write", "/tmp/x.rs", false, false);
     write.output_summary = "Wrote 1 line to /tmp/x.rs".into();
     write.diff = crate::kit::diff_parser::parse_edit_write_summary(
         "Wrote 1 line to /tmp/x.rs",
@@ -148,7 +161,7 @@ fn test_semantic_tool_header_edit_write_count_only() {
 fn test_semantic_tool_header() {
     let grid = GridSpec::grid_for(120);
     // Read：label + path + `— N lines` 后缀
-    let mut read_card = tool_card("Read", "src/main.rs", false, false);
+    let mut read_card = super::tool_card("Read", "src/main.rs", false, false);
     read_card.output_summary = "line1\nline2\nline3\n".into();
     read_card.recompute_hash();
     let vm = TuiRenderUnit::TuiToolCard(read_card);
@@ -159,7 +172,7 @@ fn test_semantic_tool_header() {
     );
 
     // Bash：label + command（不展开时；label 用显示名 Shell）
-    let bash_card = tool_card("Bash", "cargo test -p peri-tui", false, false);
+    let bash_card = super::tool_card("Bash", "cargo test -p peri-tui", false, false);
     let vm = TuiRenderUnit::TuiToolCard(bash_card);
     let sem = sem_at(&vm, 0, &grid).expect("header 行");
     assert_eq!(
@@ -168,7 +181,7 @@ fn test_semantic_tool_header() {
     );
 
     // Bash 展开态：summary 移到 `$ ` 行——header 只留 label
-    let mut bash_expanded = tool_card("Bash", "cargo test", false, false);
+    let mut bash_expanded = super::tool_card("Bash", "cargo test", false, false);
     bash_expanded.fold = FoldState::Expanded;
     bash_expanded.recompute_hash();
     let vm = TuiRenderUnit::TuiToolCard(bash_expanded);
@@ -184,14 +197,14 @@ fn test_semantic_subagent_tool_line() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(120);
     let children = im::Vector::from(vec![
-        TuiRenderUnit::TuiToolCard(tool_card("Grep", "pattern: x", true, false)),
-        TuiRenderUnit::TuiToolCard(tool_card("Bash", "cargo test", false, false)),
-        TuiRenderUnit::TuiToolCard(tool_card("Read", "src/main.rs", false, true)),
+        TuiRenderUnit::TuiToolCard(super::tool_card("Grep", "pattern: x", true, false)),
+        TuiRenderUnit::TuiToolCard(super::tool_card("Bash", "cargo test", false, false)),
+        TuiRenderUnit::TuiToolCard(super::tool_card("Read", "src/main.rs", false, true)),
     ]);
-    let running = subagent_group(children, true, false, None);
+    let running = super::subagent_group(children, true, false, None);
     // 行序：Read（running）/ Bash（completed）/ Grep（error）/ 原因行
     // ——running 有工具时无顶层单行摘要（render_subagent_group_lines 早退）
-    let lines = vm_to_lines(&running, &grid);
+    let lines = render::vm_to_lines(&running, &grid);
     assert_eq!(lines.len(), 4, "3 工具行 + 原因行，实际 {}", lines.len());
 
     let sem_read = sem_at(&running, 0, &grid).expect("Read 工具行");
@@ -221,8 +234,8 @@ fn test_semantic_subagent_tool_line() {
     // 非 running（工具行 + 原因行）：工具行语义 `{Verb} {summary}`；
     // 原因行剥缩进。genuine parent error（is_error=true），canonical reason
     // 为空时回退子工具 last_error 兜底。无顶层组头。
-    let failed = subagent_group(
-        im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
+    let failed = super::subagent_group(
+        im::Vector::from(vec![TuiRenderUnit::TuiToolCard(super::tool_card(
             "Grep", "src", true, false,
         ))]),
         false,
@@ -246,8 +259,8 @@ fn test_semantic_subagent_tool_line() {
 fn test_semantic_subagent_without_tools_copies_entry_and_error_reason() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(80);
-    let failed = subagent_group(im::Vector::new(), false, true, Some("child failed"));
-    let lines = vm_to_lines(&failed, &grid);
+    let failed = super::subagent_group(im::Vector::new(), false, true, Some("child failed"));
+    let lines = render::vm_to_lines(&failed, &grid);
     assert_eq!(lines.len(), 2);
     assert_eq!(sem_at(&failed, 0, &grid).as_deref(), Some("Agent explorer"));
     assert_eq!(sem_at(&failed, 1, &grid).as_deref(), Some("child failed"));
@@ -257,15 +270,15 @@ fn test_semantic_subagent_without_tools_copies_entry_and_error_reason() {
 #[test]
 fn test_semantic_bash_command_line() {
     let grid = GridSpec::grid_for(120);
-    let mut bash_expanded = tool_card("Bash", "cargo test --workspace", false, false);
+    let mut bash_expanded = super::tool_card("Bash", "cargo test --workspace", false, false);
     bash_expanded.fold = FoldState::Expanded;
     bash_expanded.recompute_hash();
     let vm = TuiRenderUnit::TuiToolCard(bash_expanded);
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
     // 找 `$ cmd` 行（非空且含 `$ `）
     let idx = lines
         .iter()
-        .position(|l| line_text(l).contains("$ cargo test --workspace"))
+        .position(|l| super::line_text(l).contains("$ cargo test --workspace"))
         .expect("`$ cmd` 行存在");
     let sem = sem_at(&vm, idx, &grid).expect("$ 行");
     assert_eq!(sem, "$ cargo test --workspace", "保留 $ 前缀与 command");
@@ -275,12 +288,12 @@ fn test_semantic_bash_command_line() {
 #[test]
 fn test_semantic_diff_lines_strip_gutter() {
     let grid = GridSpec::grid_for(120);
-    let card = edit_card_with_diff(EDIT_DIFF);
+    let card = super::edit_card_with_diff(EDIT_DIFF);
     let vm = TuiRenderUnit::TuiToolCard(card);
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
     let del_idx = lines
         .iter()
-        .position(|l| line_text(l).contains("let x = 1"))
+        .position(|l| super::line_text(l).contains("let x = 1"))
         .expect("del 行");
     let sem = sem_at(&vm, del_idx, &grid).expect("del 行");
     assert_eq!(
@@ -289,14 +302,14 @@ fn test_semantic_diff_lines_strip_gutter() {
     );
     let add_idx = lines
         .iter()
-        .position(|l| line_text(l).contains("let x = 2"))
+        .position(|l| super::line_text(l).contains("let x = 2"))
         .expect("add 行");
     let sem = sem_at(&vm, add_idx, &grid).expect("add 行");
     assert_eq!(sem, "+     let x = 2;", "add 行同规则，实际: {sem:?}");
     // context 行：纯正文（符号为空格，剥离后无补丁标记）
     let ctx_idx = lines
         .iter()
-        .position(|l| line_text(l).contains("fn main() {"))
+        .position(|l| super::line_text(l).contains("fn main() {"))
         .expect("context 行");
     let sem = sem_at(&vm, ctx_idx, &grid).expect("context 行");
     assert_eq!(sem, "fn main() {", "context 行纯正文，实际: {sem:?}");
@@ -306,15 +319,15 @@ fn test_semantic_diff_lines_strip_gutter() {
 #[test]
 fn test_semantic_output_line_not_mistaken_for_diff() {
     let grid = GridSpec::grid_for(120);
-    let mut card = tool_card("Bash", "echo 42", false, false);
+    let mut card = super::tool_card("Bash", "echo 42", false, false);
     card.output_summary = "42  foo\nbar".into();
     card.fold = FoldState::Expanded;
     card.recompute_hash();
     let vm = TuiRenderUnit::TuiToolCard(card);
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
     let idx = lines
         .iter()
-        .position(|l| line_text(l).contains("42  foo"))
+        .position(|l| super::line_text(l).contains("42  foo"))
         .expect("输出行");
     let sem = sem_at(&vm, idx, &grid).expect("输出行");
     assert_eq!(sem, "42  foo", "输出行不剥内容（非 diff gutter 模式）");
@@ -335,10 +348,10 @@ fn test_semantic_code_block_strips_gutter() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
     let idx = lines
         .iter()
-        .position(|l| line_text(l).contains("let x = 1"))
+        .position(|l| super::line_text(l).contains("let x = 1"))
         .expect("code 行");
     let sem = sem_at(&vm, idx, &grid).expect("code 行");
     assert_eq!(sem, "let x = 1;", "剥 `│ ` gutter，实际: {sem:?}");
@@ -358,10 +371,10 @@ fn test_semantic_code_block_preserves_source_trailing_spaces() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
     let idx = lines
         .iter()
-        .position(|line| line_text(line).contains("value"))
+        .position(|line| super::line_text(line).contains("value"))
         .expect("code 行");
     let sem = sem_at(&vm, idx, &grid).expect("code 行");
     assert_eq!(sem, "value  ", "只剥视觉 padding，保留源码尾随空格");
@@ -398,10 +411,10 @@ fn test_semantic_process_prefix_and_step_are_stripped() {
     let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
         fold: FoldState::Expanded,
         output_summary: "out1\nout2".into(),
-        ..tool_card("Read", "src/main.rs", false, false)
+        ..super::tool_card("Read", "src/main.rs", false, false)
     });
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_cached_with_layout(
         &tool,
         &grid,
         &mut cache,
@@ -409,7 +422,7 @@ fn test_semantic_process_prefix_and_step_are_stripped() {
         false,
         ZoneTransition::EnterProcess(TextLineSource::User),
     );
-    assert!(super::is_step_row(&lines[0]), "首行应是入口台阶");
+    assert!(render::is_step_row(&lines[0]), "首行应是入口台阶");
     assert_eq!(
         sem_at_lines(&tool, &lines, 0, &grid).as_deref(),
         Some(""),
@@ -451,7 +464,7 @@ fn test_semantic_process_prefix_and_step_are_stripped() {
         .into(),
     );
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_cached_with_layout(
         &bubble,
         &grid,
         &mut cache,
@@ -461,7 +474,7 @@ fn test_semantic_process_prefix_and_step_are_stripped() {
     );
     let header_idx = lines
         .iter()
-        .position(|l| line_text(l).contains("Thought for 1s"))
+        .position(|l| super::line_text(l).contains("Thought for 1s"))
         .expect("reasoning header");
     assert_eq!(
         sem_at_lines(&bubble, &lines, header_idx, &grid).as_deref(),
@@ -470,7 +483,7 @@ fn test_semantic_process_prefix_and_step_are_stripped() {
     );
     let thought_idx = lines
         .iter()
-        .position(|l| line_text(l).contains("long thought"))
+        .position(|l| super::line_text(l).contains("long thought"))
         .expect("reasoning 正文");
     assert_eq!(
         sem_at_lines(&bubble, &lines, thought_idx, &grid).as_deref(),
@@ -479,7 +492,7 @@ fn test_semantic_process_prefix_and_step_are_stripped() {
     );
     let answer_idx = lines
         .iter()
-        .position(|l| line_text(l).contains("正文回答"))
+        .position(|l| super::line_text(l).contains("正文回答"))
         .expect("正文行");
     assert_eq!(
         sem_at_lines(&bubble, &lines, answer_idx, &grid).as_deref(),
@@ -516,8 +529,13 @@ fn sem_at_lines(
     grid: &GridSpec,
 ) -> Option<String> {
     let line = lines.get(local_idx)?;
-    let step_offset = usize::from(lines.first().is_some_and(super::is_step_row));
-    semantic_line_text(vm, local_idx.saturating_sub(step_offset), line, grid)
+    let step_offset = usize::from(lines.first().is_some_and(render::is_step_row));
+    crate::kit::message_area::render::semantic_line_text(
+        vm,
+        local_idx.saturating_sub(step_offset),
+        line,
+        grid,
+    )
 }
 
 /// 过程区符号行（系统 note / Todo 摘要）复制时同样剥净前缀与状态符号：
@@ -532,7 +550,7 @@ fn test_semantic_process_note_and_todo_strip_prefix() {
         content_hash: 7,
     });
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_cached_with_layout(
         &note,
         &grid,
         &mut cache,
@@ -541,9 +559,9 @@ fn test_semantic_process_note_and_todo_strip_prefix() {
         ZoneTransition::EnterProcess(TextLineSource::User),
     );
     assert!(
-        super::is_step_row(&lines[0]),
+        render::is_step_row(&lines[0]),
         "note 首行应是入口台阶，实际 {:?}",
-        line_text(&lines[0])
+        super::line_text(&lines[0])
     );
     assert_eq!(
         sem_at_lines(&note, &lines, 0, &grid).as_deref(),
@@ -564,7 +582,7 @@ fn test_semantic_process_note_and_todo_strip_prefix() {
     let todo =
         TuiRenderUnit::TuiTodoSummary(TuiTodoSummary::new("3/7 tasks \u{b7} Running tests".into()));
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_cached_with_layout(
         &todo,
         &grid,
         &mut cache,

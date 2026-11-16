@@ -1,4 +1,7 @@
-use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet};
+use std::collections::hash_map::DefaultHasher;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
 use peri_acp_types::plugin::{ConfigSource, McpServerConfig};
@@ -13,6 +16,7 @@ mod tests;
 pub const MCP_CACHE_ENV: &str = "PERI_MCP_CACHE";
 pub const MCP_BUILTIN_ENV: &str = "PERI_MCP_BUILTIN";
 
+#[must_use]
 pub fn builtin_enabled(environment: &BTreeMap<String, String>) -> bool {
     match environment
         .get(MCP_BUILTIN_ENV)
@@ -38,6 +42,7 @@ pub enum McpCachePolicy {
 }
 
 impl McpCachePolicy {
+    #[must_use]
     pub fn from_setting(setting: Option<bool>) -> Self {
         if setting == Some(false) {
             Self::Disabled
@@ -133,6 +138,7 @@ pub fn merge_settings(settings: &[Option<bool>]) -> Option<bool> {
     }
 }
 
+#[must_use]
 pub fn server_config_hash(config: &McpServerConfig) -> u64 {
     let mut hasher = DefaultHasher::new();
     if let Some(command) = &config.command {
@@ -161,6 +167,7 @@ pub fn server_config_hash(config: &McpServerConfig) -> u64 {
     hasher.finish()
 }
 
+#[must_use]
 pub fn plugin_server_name(plugin_name: &str, server_name: &str) -> String {
     format!("plugin:{plugin_name}:{server_name}")
 }

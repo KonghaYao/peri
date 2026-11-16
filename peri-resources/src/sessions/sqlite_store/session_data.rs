@@ -74,9 +74,12 @@ mod mq;
 #[path = "session_data/rewind_candidates.rs"]
 mod rewind_candidates;
 
-#[path = "session_data/handle.rs"]
-mod handle;
+#[path = "session_data/sqlite_session_data.rs"]
+mod sqlite_session_data;
 pub(crate) use handle::SqliteSessionData;
+use sqlite_session_data as handle;
+#[path = "session_data/creation.rs"]
+mod creation;
 #[path = "session_data/port.rs"]
 mod port;
 
@@ -86,7 +89,13 @@ mod port;
 mod helpers;
 #[cfg(test)]
 pub(super) use helpers::message_insert_chunk_rows;
-use helpers::*;
+use helpers::{
+    binding_row_state_on, frozen_bytes_on, frozen_state_on, insert_history_rows,
+    insert_message_rows, machine_id_on, projection_json, recovery_scope_statement_with,
+    refresh_history_derivations, strict_thread_root_on, thread_exists_on, thread_root_on,
+    thread_tree_on, BindingRowState, SerializedHistoryChunks, ThreadRootFailure,
+    INTERRUPTED_TREE_SQL,
+};
 pub(super) use helpers::{new_session_draft_row, new_session_row, validate_unbound_legacy_frozen};
 
 /// 有界读取的性能证据（需求 §9 A04/A05/A06/A07）：默认 `#[ignore]`，不拖慢默认测试。

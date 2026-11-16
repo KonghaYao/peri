@@ -1,6 +1,10 @@
 //! 审计补充：verification 独立复核用（不是切片交付物）。
 
-use super::*;
+use super::{
+    ArchivedBody, BaseMessage, FixtureRow, MessageId, PersistedPayload, SqlitePool,
+    HISTORY_PAGE_ROWS_SQL, HISTORY_SEGMENT_NEXT_SQL, LIVE_ENTRIES, UNDECODABLE_ARCHIVED_BODY,
+};
+use sqlx::Row;
 
 // ── 审计补充（verification 独立复核用；不是切片交付物） ────────────────────────
 
@@ -44,8 +48,8 @@ async fn audit_segment_lookahead_and_plan_shape() {
     // ── ① 字节码形状（无夹具） ──
     let directory = tempfile::tempdir().unwrap();
     let db_path = directory.path().join("audit-plan.db");
-    let resources = deployment(&db_path).await;
-    let pool = fixture_pool(&db_path).await;
+    let resources = super::deployment(&db_path).await;
+    let pool = super::fixture_pool(&db_path).await;
     println!("== EXPLAIN（VDBE 字节码，生产语句原文；参数未绑定） ==");
     for (label, sql) in [
         (
@@ -73,9 +77,9 @@ async fn audit_segment_lookahead_and_plan_shape() {
     pool.close().await;
 
     // ── ② 探针：本段之后那一条候选行的正文不可解码 ──
-    let fixture = build_fixture(6, ArchivedBody::Payload, 8 * 1024).await;
-    let pool = fixture_pool(&fixture.db_path).await;
-    insert_rows(
+    let fixture = super::build_fixture(6, ArchivedBody::Payload, 8 * 1024).await;
+    let pool = super::fixture_pool(&fixture.db_path).await;
+    super::insert_rows(
         &pool,
         &fixture.thread,
         &[FixtureRow {
@@ -87,7 +91,7 @@ async fn audit_segment_lookahead_and_plan_shape() {
     )
     .await;
     pool.close().await;
-    let facade = deployment(&fixture.db_path).await;
+    let facade = super::deployment(&fixture.db_path).await;
     println!(
         "== 探针：6 条 8 KiB 归档行 + 3 条 64 KiB 有效行 + 1 条不可解码行（rowid 最大），limit=3 =="
     );
@@ -135,8 +139,8 @@ async fn audit_segment_lookahead_and_plan_shape() {
     assert_eq!(index, 4, "探针行必须真的被推进过一段（否则探针没响）");
 
     // ── ③ 段长与字节预算实测 ──
-    let fixture = build_fixture(6, ArchivedBody::Payload, 8 * 1024).await;
-    let facade = deployment(&fixture.db_path).await;
+    let fixture = super::build_fixture(6, ArchivedBody::Payload, 8 * 1024).await;
+    let facade = super::deployment(&fixture.db_path).await;
     let budget = 96 * 1024;
     let limit = 50;
     println!("== 段长/字节预算实测：limit={limit} 预算={budget} 字节 ==");
@@ -152,7 +156,7 @@ async fn audit_segment_lookahead_and_plan_shape() {
             .payloads
             .iter()
             .map(|payload| {
-                serialize_persisted_payload(payload)
+                peri_acp_types::store::serialize_persisted_payload(payload)
                     .expect("段载荷可序列化")
                     .len()
             })
@@ -189,8 +193,8 @@ async fn audit_segment_lookahead_and_plan_shape() {
     // `tail` 是首段那一刻的**数值**上界；契约只要求「追加的行 rowid > tail 时不进入本次遍历」，
     // 不检测上界行自己消失。SQLite 在删掉最大 rowid 之后会把该 rowid 复用给下一次插入，
     // 于是新行落回 (after, tail] 区间内。这一条测的是该情形下的实际交付。
-    let fixture = build_fixture(0, ArchivedBody::Payload, 0).await;
-    let facade = deployment(&fixture.db_path).await;
+    let fixture = super::build_fixture(0, ArchivedBody::Payload, 0).await;
+    let facade = super::deployment(&fixture.db_path).await;
     let thread = fixture.thread.clone();
     let first = facade
         .load_history_segment(&thread, None, 2, usize::MAX)

@@ -1,6 +1,7 @@
 //! New-session and load transitions under the operation gate.
 
-use peri_acp::transport::{AcpTransport, types::AcpError};
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::AcpError;
 use serde_json::{Value, json};
 
 use crate::acp_client::client::{AcpTuiClient, ClientProjectionMode, SessionLoadReservation};
@@ -46,7 +47,10 @@ impl AcpTuiClient {
         operation: TransitionOperation,
     ) -> Result<String, AcpError> {
         let _preparing = PreparingSessionGuard::enter();
-        *self.restore_error.lock().unwrap() = None;
+        *self
+            .restore_error
+            .lock()
+            .expect("restore_error mutex must not be poisoned") = None;
         self.clear_startup_restore_target();
         self.project_execution_cwd(None);
         let start = self
@@ -75,7 +79,10 @@ impl AcpTuiClient {
                 // 旧会话清理失败不写入粘滞 `restore_error`：那会让后续每次
                 // 建立/发送都被同一条陈旧错误拦截且无从清除。改记待关闭身份，
                 // 下一次建立会话先重放同一关闭。
-                *self.restore_error.lock().unwrap() = None;
+                *self
+                    .restore_error
+                    .lock()
+                    .expect("restore_error mutex must not be poisoned") = None;
                 self.remember_close_failure(old_sid, None, &error);
                 tracing::warn!(
                     session_id = %old_sid,
@@ -127,7 +134,10 @@ impl AcpTuiClient {
             crate::kit::history_paging::WindowDirection::Before,
         );
         self.project_execution_cwd(Some(effective_cwd));
-        *self.restore_error.lock().unwrap() = None;
+        *self
+            .restore_error
+            .lock()
+            .expect("restore_error mutex must not be poisoned") = None;
         projection.committed = true;
         transition.disarm();
         self.flush_buffered();
@@ -187,7 +197,10 @@ impl AcpTuiClient {
         reservation: Option<&SessionLoadReservation>,
         operation: TransitionOperation,
     ) -> Result<String, AcpError> {
-        *self.restore_error.lock().unwrap() =
+        *self
+            .restore_error
+            .lock()
+            .expect("restore_error mutex must not be poisoned") =
             Some("session restore has not completed; retry or create a new session".into());
         let effective_cwd = if self.supports_session_workspace() {
             match self.session_context(Some(session_id), None).await {
@@ -198,7 +211,11 @@ impl AcpTuiClient {
                     .into_string()
                     .map_err(|_| AcpError::new(-32603, "session cwd is not valid UTF-8"))?,
                 Err(error) => {
-                    *self.restore_error.lock().unwrap() = Some(error.to_string());
+                    *self
+                        .restore_error
+                        .lock()
+                        .expect("restore_error mutex must not be poisoned") =
+                        Some(error.to_string());
                     return Err(error);
                 }
             }
@@ -238,7 +255,10 @@ impl AcpTuiClient {
                 // 与 `new_session_under_gate` 同一口径：清理旧会话失败不是
                 // 恢复失败，不写入粘滞 `restore_error`（含本函数入口的占位）。
                 // 额外记住本次要加载的目标，避免用户的历史意图被换成空会话。
-                *self.restore_error.lock().unwrap() = None;
+                *self
+                    .restore_error
+                    .lock()
+                    .expect("restore_error mutex must not be poisoned") = None;
                 self.remember_close_failure(old_sid, Some(session_id.to_owned()), &error);
                 tracing::warn!(
                     session_id = %old_sid,
@@ -264,7 +284,10 @@ impl AcpTuiClient {
                 if let Some(owner) = cleanup_incomplete_owner(&error) {
                     self.remember_close_failure(owner, None, &error);
                 }
-                *self.restore_error.lock().unwrap() = Some(error.to_string());
+                *self
+                    .restore_error
+                    .lock()
+                    .expect("restore_error mutex must not be poisoned") = Some(error.to_string());
                 self.lifecycle.fail_transition(start.generation);
                 transition.disarm();
                 if self.projection_mode == ClientProjectionMode::Interactive {
@@ -304,9 +327,15 @@ impl AcpTuiClient {
             crate::kit::history_paging::WindowDirection::Before,
         );
         self.project_execution_cwd(Some(effective_cwd));
-        *self.restore_error.lock().unwrap() = None;
+        *self
+            .restore_error
+            .lock()
+            .expect("restore_error mutex must not be poisoned") = None;
         {
-            let mut target = self.startup_restore_target.lock().unwrap();
+            let mut target = self
+                .startup_restore_target
+                .lock()
+                .expect("startup_restore_target mutex must not be poisoned");
             if target.as_deref() == Some(session_id) {
                 *target = None;
             }
@@ -328,7 +357,10 @@ impl AcpTuiClient {
             let claims = self.lifecycle.fail_transition(generation);
             self.settle_claims_owned(claims).await;
             self.project_execution_cwd(None);
-            *self.restore_error.lock().unwrap() = Some(error.to_string());
+            *self
+                .restore_error
+                .lock()
+                .expect("restore_error mutex must not be poisoned") = Some(error.to_string());
             if self.projection_mode == ClientProjectionMode::Interactive {
                 crate::kit::session_boundary::project_session_boundary(None);
             }

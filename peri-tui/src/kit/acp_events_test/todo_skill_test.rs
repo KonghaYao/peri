@@ -1,4 +1,12 @@
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::CurrentTurn;
+use super::SessionPhase;
+use super::TuiRenderUnit;
+use super::TuiTodoChangeKind;
+use super::TuiToolPresentation;
+use super::json;
+use super::serial;
 
 #[test]
 #[serial]
@@ -53,18 +61,18 @@ fn test_todo_snapshot_advances_only_after_successful_tool_end() {
         })
     };
 
-    dispatch_and_notify(&mut state, &start("todo-1", "pending"));
-    dispatch_and_notify(&mut state, &end("todo-1", false));
+    super::dispatch_and_notify(&mut state, &start("todo-1", "pending"));
+    super::dispatch_and_notify(&mut state, &end("todo-1", false));
     assert!(state.last_successful_todos.is_some());
 
-    dispatch_and_notify(&mut state, &start("todo-2", "completed"));
+    super::dispatch_and_notify(&mut state, &start("todo-2", "completed"));
     let TuiToolPresentation::Todo(second) = &state.current_turn.tool_cards[1].presentation else {
         panic!("expected semantic todo card");
     };
     assert_eq!(second.changes[0].kind, TuiTodoChangeKind::Completed);
-    dispatch_and_notify(&mut state, &end("todo-2", true));
+    super::dispatch_and_notify(&mut state, &end("todo-2", true));
 
-    dispatch_and_notify(&mut state, &start("todo-3", "in_progress"));
+    super::dispatch_and_notify(&mut state, &start("todo-3", "in_progress"));
     let TuiToolPresentation::Todo(third) = &state.current_turn.tool_cards[2].presentation else {
         panic!("expected semantic todo card");
     };
@@ -125,12 +133,12 @@ fn test_duplicate_todo_end_cannot_roll_back_newer_successful_snapshot() {
         })
     };
 
-    dispatch_and_notify(&mut state, &start("todo-a", "pending"));
-    dispatch_and_notify(&mut state, &end("todo-a"));
-    dispatch_and_notify(&mut state, &start("todo-b", "completed"));
-    dispatch_and_notify(&mut state, &end("todo-b"));
-    dispatch_and_notify(&mut state, &end("todo-a"));
-    dispatch_and_notify(&mut state, &start("todo-c", "in_progress"));
+    super::dispatch_and_notify(&mut state, &start("todo-a", "pending"));
+    super::dispatch_and_notify(&mut state, &end("todo-a"));
+    super::dispatch_and_notify(&mut state, &start("todo-b", "completed"));
+    super::dispatch_and_notify(&mut state, &end("todo-b"));
+    super::dispatch_and_notify(&mut state, &end("todo-a"));
+    super::dispatch_and_notify(&mut state, &start("todo-c", "in_progress"));
 
     let TuiToolPresentation::Todo(todo) = &state.current_turn.tool_cards[2].presentation else {
         panic!("expected semantic Todo card");
@@ -173,7 +181,7 @@ fn test_replay_skill_card_hides_raw_skill_output() {
         window: Default::default(),
     };
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ReplayToolStarted {
             tool_id: "skill-replay".into(),
@@ -182,7 +190,7 @@ fn test_replay_skill_card_hides_raw_skill_output() {
             raw_input: json!({"skill": "using-superpowers"}),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ReplayToolEnded {
             tool_id: "skill-replay".into(),
@@ -254,11 +262,11 @@ fn test_later_started_todo_wins_when_successful_ends_arrive_out_of_order() {
         })
     };
 
-    dispatch_and_notify(&mut state, &start("todo-a", "pending"));
-    dispatch_and_notify(&mut state, &start("todo-b", "completed"));
-    dispatch_and_notify(&mut state, &end("todo-b"));
-    dispatch_and_notify(&mut state, &end("todo-a"));
-    dispatch_and_notify(&mut state, &start("todo-c", "in_progress"));
+    super::dispatch_and_notify(&mut state, &start("todo-a", "pending"));
+    super::dispatch_and_notify(&mut state, &start("todo-b", "completed"));
+    super::dispatch_and_notify(&mut state, &end("todo-b"));
+    super::dispatch_and_notify(&mut state, &end("todo-a"));
+    super::dispatch_and_notify(&mut state, &start("todo-c", "in_progress"));
 
     let TuiToolPresentation::Todo(todo) = &state.current_turn.tool_cards[2].presentation else {
         panic!("expected semantic Todo card");
@@ -269,3 +277,5 @@ fn test_later_started_todo_wins_when_successful_ends_arrive_out_of_order() {
         "较早启动的 Todo 晚到成功结束时不得回退较新成功基线"
     );
 }
+
+use crate::kit::atoms::{VIEW_MODELS, ViewModelsSnapshot};

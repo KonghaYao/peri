@@ -1,32 +1,33 @@
 //! Production planner/commit/Full lifecycle, followed by recovery in a separate process.
-use super::{
-    config::CompactConfig,
-    full::full_compact_inner,
-    micro::apply_micro_plan,
-    planner::{plan_micro_with_facts, ArchivePlanningScope, ContextPressure, MicroPlanningFacts},
-    projection::{render_persisted_llm_view, ProviderCapabilities},
-};
-use crate::{
-    context_archive::ContextArchiveReader,
-    messages::{BaseMessage, ToolCallRequest},
-    session::MessageTranscript,
-    tools::ContextRetention,
-};
-use peri_acp_types::{
-    context_archive::{content_digest, ArchiveReadRequest, ContextArchiveReadPort},
-    session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources},
-    store::serialize_persisted_payload,
-    workspace::SessionBinding,
-};
+use crate::agent::compact_v2::config::CompactConfig;
+
+use crate::agent::compact_v2::planner::ArchivePlanningScope;
+use crate::agent::compact_v2::planner::ContextPressure;
+use crate::agent::compact_v2::planner::MicroPlanningFacts;
+
+use crate::agent::compact_v2::projection::ProviderCapabilities;
+use crate::context_archive::ContextArchiveReader;
+use crate::messages::BaseMessage;
+use crate::messages::ToolCallRequest;
+use crate::session::MessageTranscript;
+use crate::tools::ContextRetention;
+
+use peri_acp_types::context_archive::ArchiveReadRequest;
+use peri_acp_types::context_archive::ContextArchiveReadPort;
+use peri_acp_types::session_resources::FrozenSnapshotBytes;
+use peri_acp_types::session_resources::NewSession;
+use peri_acp_types::session_resources::NewSessionMeta;
+use peri_acp_types::session_resources::SessionResources;
+
+use peri_acp_types::workspace::SessionBinding;
 use peri_model::{
     Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult, ModelStream,
     ModelStreamEvent, StopReason,
 };
 use peri_resources::sessions::SessionResourcesImpl;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 struct NoIdentifierSummary {
@@ -58,7 +59,11 @@ async fn archive_preview_upgrade_earlier_anchors_survive_full_and_enumerate_all_
     let mut facts = MicroPlanningFacts {
         archive_scope: Some(ArchivePlanningScope {
             thread_id: bound.thread_id.clone(),
-            committed_tail: transcript.entries().last().unwrap().id(),
+            committed_tail: transcript
+                .entries()
+                .last()
+                .expect("transcript entries fixture must contain the expected element")
+                .id(),
         }),
         ..Default::default()
     };
@@ -80,22 +85,22 @@ async fn archive_preview_upgrade_earlier_anchors_survive_full_and_enumerate_all_
     };
     let mut all_anchors = std::collections::HashSet::new();
     let mut first_round = Vec::new();
-    for (round, policy) in [
+    let paired_items = [
         ContextRetention::PreviewOnly,
         ContextRetention::Recomputable,
     ]
     .into_iter()
-    .enumerate()
-    {
+    .enumerate();
+    for (round, policy) in paired_items {
         facts.tool_retention.insert("read".into(), policy);
-        let plan = plan_micro_with_facts(
+        let plan = crate::agent::compact_v2::planner::plan_micro_with_facts(
             &transcript,
             &config,
             &pressure,
             &facts,
             &ProviderCapabilities::openai(),
         )
-        .unwrap();
+        .expect("the plan micro with facts fixture result is required for this assertion");
         assert!(!plan.catalogs.is_empty());
         let anchors: Vec<_> = plan
             .catalogs
@@ -110,7 +115,7 @@ async fn archive_preview_upgrade_earlier_anchors_survive_full_and_enumerate_all_
                     .entries()
                     .iter()
                     .position(|entry| entry.id() == id)
-                    .unwrap()
+                    .expect("the position fixture result is required for this assertion")
             };
             assert!(
                 anchors
@@ -120,16 +125,26 @@ async fn archive_preview_upgrade_earlier_anchors_survive_full_and_enumerate_all_
             );
         }
         all_anchors.extend(anchors);
-        apply_micro_plan(&mut transcript, &plan).await.unwrap();
+        crate::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
+            .await
+            .expect("the apply micro plan fixture result is required for this assertion");
     }
     let model = NoIdentifierSummary {
         calls: AtomicUsize::new(0),
     };
-    full_compact_inner(&mut transcript, Some(&model), &config, ".")
-        .await
-        .unwrap();
+    let _ = crate::agent::compact_v2::full::full_compact_inner(
+        &mut transcript,
+        Some(&model),
+        &config,
+        ".",
+    )
+    .await
+    .expect("the full compact inner fixture result is required for this assertion");
     let fresh = bound.read_only_resources().await;
-    let active = fresh.load_active_snapshot(&bound.thread_id).await.unwrap();
+    let active = fresh
+        .load_active_snapshot(&bound.thread_id)
+        .await
+        .expect("the load active snapshot fixture result is required for this assertion");
     let roots = active
         .flags
         .values()
@@ -147,12 +162,14 @@ async fn archive_preview_upgrade_earlier_anchors_survive_full_and_enumerate_all_
     for _ in 0..100 {
         let page = reader
             .read(ArchiveReadRequest {
-                archive_ref: roots[0].reference().unwrap(),
+                archive_ref: roots[0]
+                    .reference()
+                    .expect("the reference fixture result is required for this assertion"),
                 cursor,
                 budget_tokens: Some(2048),
             })
             .await
-            .unwrap();
+            .expect("the archive fixture must be readable through the canonical recovery port");
         discovered.extend(page.entries.iter().map(|entry| entry.message_id));
         if page.complete {
             break;
@@ -178,7 +195,7 @@ impl Model for NoIdentifierSummary {
         _cancellation: CancellationToken,
     ) -> ModelResult<ModelResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        ModelResponse::new(ModelMessage::assistant_text("<summary>Preserve the public interface. Historical checks completed; continue the next requested change.</summary>"),StopReason::EndTurn,None,None)
+        ModelResponse::try_new(ModelMessage::assistant_text("<summary>Preserve the public interface. Historical checks completed; continue the next requested change.</summary>"),StopReason::EndTurn,None,None)
     }
     async fn stream(
         &self,
@@ -204,16 +221,15 @@ async fn recover(reader: &ContextArchiveReader, archive_ref: &str) -> Vec<u8> {
                 budget_tokens: Some(2048),
             })
             .await
-            .unwrap();
+            .expect("the archive fixture must be readable through the canonical recovery port");
         for entry in page.entries {
             assert_eq!(entry.offset, bytes.len() as u64);
             match entry.encoding.as_str() {
                 "utf8" => bytes.extend_from_slice(entry.data.as_bytes()),
-                "hex" => bytes.extend(
-                    (0..entry.data.len())
-                        .step_by(2)
-                        .map(|i| u8::from_str_radix(&entry.data[i..i + 2], 16).unwrap()),
-                ),
+                "hex" => bytes.extend((0..entry.data.len()).step_by(2).map(|i| {
+                    u8::from_str_radix(&entry.data[i..i + 2], 16)
+                        .expect("the from str radix fixture result is required for this assertion")
+                })),
                 other => panic!("unexpected recovery encoding {other}"),
             }
         }
@@ -227,15 +243,19 @@ async fn recover(reader: &ContextArchiveReader, archive_ref: &str) -> Vec<u8> {
 
 #[tokio::test]
 async fn archive_two_micro_two_full_keep_original_references_after_process_restart() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("the temporary test directory must be available");
     let database = directory.path().join("archive-lifecycle.db");
-    let workspace_dir = tempfile::tempdir().unwrap();
-    let resources: Arc<dyn SessionResources> =
-        Arc::new(SessionResourcesImpl::open(&database).await.unwrap());
+    let workspace_dir =
+        tempfile::tempdir().expect("the temporary test directory must be available");
+    let resources: Arc<dyn SessionResources> = Arc::new(
+        SessionResourcesImpl::open(&database)
+            .await
+            .expect("the open fixture result is required for this assertion"),
+    );
     let workspace = resources
         .resolve_workspace(workspace_dir.path())
         .await
-        .unwrap();
+        .expect("the resolve workspace fixture result is required for this assertion");
     let thread_id = uuid::Uuid::now_v7().to_string();
     resources
         .create_session(&NewSession {
@@ -253,7 +273,7 @@ async fn archive_two_micro_two_full_keep_original_references_after_process_resta
             frozen: FrozenSnapshotBytes::new("{\"version\":1}"),
         })
         .await
-        .unwrap();
+        .expect("the create session fixture result is required for this assertion");
     let mut transcript =
         MessageTranscript::new().with_persistence(resources.clone(), thread_id.clone());
     transcript.append(BaseMessage::human("Keep the public interface unchanged."));
@@ -281,7 +301,11 @@ async fn archive_two_micro_two_full_keep_original_references_after_process_resta
         let mut facts = MicroPlanningFacts {
             archive_scope: Some(ArchivePlanningScope {
                 thread_id: thread_id.clone(),
-                committed_tail: transcript.entries().last().unwrap().id(),
+                committed_tail: transcript
+                    .entries()
+                    .last()
+                    .expect("transcript entries fixture must contain the expected element")
+                    .id(),
             }),
             ..Default::default()
         };
@@ -297,7 +321,7 @@ async fn archive_two_micro_two_full_keep_original_references_after_process_resta
                 }
             }
         }
-        let plan = plan_micro_with_facts(
+        let plan = crate::agent::compact_v2::planner::plan_micro_with_facts(
             &transcript,
             &config,
             &ContextPressure {
@@ -311,7 +335,7 @@ async fn archive_two_micro_two_full_keep_original_references_after_process_resta
             &facts,
             &ProviderCapabilities::openai(),
         )
-        .unwrap();
+        .expect("the plan micro with facts fixture result is required for this assertion");
         assert!(
             !plan.catalogs.is_empty(),
             "production planner must create recoverable groups in each round"
@@ -324,19 +348,37 @@ async fn archive_two_micro_two_full_keep_original_references_after_process_resta
             .entries()
             .iter()
             .find(|entry| entry.id() == catalog.members[0].message_id)
-            .unwrap()
+            .expect("the find fixture result is required for this assertion")
             .clone()
             .into_payload();
         references.push((
-            catalog.member_ref(0).unwrap(),
-            serialize_persisted_payload(&source).unwrap().into_bytes(),
+            catalog
+                .member_ref(0)
+                .expect("the member ref fixture result is required for this assertion"),
+            peri_acp_types::store::serialize_persisted_payload(&source)
+                .expect(
+                    "the serialize persisted payload fixture result is required for this assertion",
+                )
+                .into_bytes(),
         ));
-        assert!(apply_micro_plan(&mut transcript, &plan).await.unwrap() > 0);
-        let full = full_compact_inner(&mut transcript, Some(&model), &config, ".")
-            .await
-            .unwrap();
+        assert!(
+            crate::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
+                .await
+                .expect("the apply micro plan fixture result is required for this assertion")
+                > 0
+        );
+        let full = crate::agent::compact_v2::full::full_compact_inner(
+            &mut transcript,
+            Some(&model),
+            &config,
+            ".",
+        )
+        .await
+        .expect("the full compact inner fixture result is required for this assertion");
         assert!(full.affected_count > 0);
-        let summary = full.summary.unwrap();
+        let summary = full
+            .summary
+            .expect("the summary fixture result is required for this assertion");
         assert!(
             !summary.contains("pa1:")
                 && !summary.contains(&catalog.anchor_message_id.as_uuid().to_string()),
@@ -344,15 +386,21 @@ async fn archive_two_micro_two_full_keep_original_references_after_process_resta
         );
     }
     assert_eq!(model.calls.load(Ordering::SeqCst), 2);
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     drop(transcript);
     drop(resources);
     let fresh: Arc<dyn SessionResources> = Arc::new(
         SessionResourcesImpl::open_existing_read_only(&database)
             .await
-            .unwrap(),
+            .expect("the open existing read only fixture result is required for this assertion"),
     );
-    let active = fresh.load_active_snapshot(&thread_id).await.unwrap();
+    let active = fresh
+        .load_active_snapshot(&thread_id)
+        .await
+        .expect("the load active snapshot fixture result is required for this assertion");
     let roots = active
         .flags
         .values()
@@ -369,7 +417,11 @@ async fn archive_two_micro_two_full_keep_original_references_after_process_resta
     );
     let mut cold = MessageTranscript::new().with_own_payloads(active.payloads);
     cold.set_flags_batch(active.flags);
-    let visible = render_persisted_llm_view(&cold, &ProviderCapabilities::openai()).unwrap();
+    let visible = crate::agent::compact_v2::projection::render_persisted_llm_view(
+        &cold,
+        &ProviderCapabilities::openai(),
+    )
+    .expect("the render persisted llm view fixture result is required for this assertion");
     assert!(visible
         .iter()
         .any(|message| message.content().contains("ReadContextArchive")));
@@ -380,12 +432,14 @@ async fn archive_two_micro_two_full_keep_original_references_after_process_resta
         for _ in 0..100 {
             let page = reader
                 .read(ArchiveReadRequest {
-                    archive_ref: root.reference().unwrap(),
+                    archive_ref: root
+                        .reference()
+                        .expect("the reference fixture result is required for this assertion"),
                     cursor,
                     budget_tokens: None,
                 })
                 .await
-                .unwrap();
+                .expect("the archive fixture must be readable through the canonical recovery port");
             discovered.extend(page.entries.iter().map(|entry| entry.message_id));
             if page.complete {
                 break;
@@ -402,25 +456,28 @@ async fn archive_two_micro_two_full_keep_original_references_after_process_resta
     }
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        tokio::process::Command::new(std::env::current_exe().unwrap())
-            .kill_on_drop(true)
-            .args([
-                "--exact",
-                "agent::compact_v2::archive_lifecycle_tests::archive_recovery_process_entry",
-                "--nocapture",
-            ])
-            .env("PERI_ARCHIVE_TEST_DATABASE", &database)
-            .env("PERI_ARCHIVE_TEST_SESSION", &thread_id)
-            .env("PERI_ARCHIVE_TEST_REFERENCE", &references[0].0)
-            .env(
-                "PERI_ARCHIVE_TEST_EXPECTED_DIGEST",
-                content_digest(&references[0].1),
-            )
-            .output(),
+        tokio::process::Command::new(
+            std::env::current_exe()
+                .expect("the current exe fixture result is required for this assertion"),
+        )
+        .kill_on_drop(true)
+        .args([
+            "--exact",
+            "agent::compact_v2::archive_lifecycle_tests::archive_recovery_process_entry",
+            "--nocapture",
+        ])
+        .env("PERI_ARCHIVE_TEST_DATABASE", &database)
+        .env("PERI_ARCHIVE_TEST_SESSION", &thread_id)
+        .env("PERI_ARCHIVE_TEST_REFERENCE", &references[0].0)
+        .env(
+            "PERI_ARCHIVE_TEST_EXPECTED_DIGEST",
+            peri_acp_types::context_archive::content_digest(&references[0].1),
+        )
+        .output(),
     )
     .await
     .expect("archive reader subprocess timed out")
-    .unwrap();
+    .expect("the expect fixture result is required for this assertion");
     assert!(
         output.status.success(),
         "fresh process recovery failed: {}{}",
@@ -439,20 +496,23 @@ async fn archive_recovery_process_entry() {
     let resources: Arc<dyn SessionResources> = Arc::new(
         SessionResourcesImpl::open_existing_read_only(std::path::PathBuf::from(database))
             .await
-            .unwrap(),
+            .expect("the open existing read only fixture result is required for this assertion"),
     );
     let reader = ContextArchiveReader::new(
         resources,
-        std::env::var("PERI_ARCHIVE_TEST_SESSION").unwrap(),
+        std::env::var("PERI_ARCHIVE_TEST_SESSION")
+            .expect("the var fixture result is required for this assertion"),
     );
     let recovered = recover(
         &reader,
-        &std::env::var("PERI_ARCHIVE_TEST_REFERENCE").unwrap(),
+        &std::env::var("PERI_ARCHIVE_TEST_REFERENCE")
+            .expect("the var fixture result is required for this assertion"),
     )
     .await;
     assert_eq!(
-        content_digest(&recovered),
-        std::env::var("PERI_ARCHIVE_TEST_EXPECTED_DIGEST").unwrap()
+        peri_acp_types::context_archive::content_digest(&recovered),
+        std::env::var("PERI_ARCHIVE_TEST_EXPECTED_DIGEST")
+            .expect("the var fixture result is required for this assertion")
     );
     println!("ARCHIVE_FRESH_PROCESS_VERIFIED");
 }

@@ -12,6 +12,7 @@ use ratatui_kit::ratatui::text::Span;
 use super::VALUE_ALIGN_COL;
 
 /// 底部“管理 Provider”按钮文本——渲染与鼠标命中同源，避免两处文本宽度漂移。
+#[must_use]
 pub(super) fn provider_button_label() -> String {
     format!("[{}]", i18n::tr("model-panel-provider-manage-hint"))
 }

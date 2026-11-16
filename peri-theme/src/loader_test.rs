@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use ratatui::style::Color;
 
 use super::ThemeLoadError;
-use super::resolve::{parse_hex_color, resolve_refs};
+use super::resolve;
 use super::source::ThemeSources;
 
 fn parse_theme_json(json: &str) -> Result<crate::theme::ThemeDefinition, ThemeLoadError> {
@@ -16,35 +16,44 @@ use crate::bridge::ThemeDefinitionExt;
 #[test]
 fn test_parse_hex() {
     assert_eq!(
-        parse_hex_color("#FFFFFF").unwrap(),
+        resolve::parse_hex_color("#FFFFFF").unwrap(),
         Color::Rgb(255, 255, 255)
     );
-    assert_eq!(parse_hex_color("#000000").unwrap(), Color::Rgb(0, 0, 0));
     assert_eq!(
-        parse_hex_color("#4EBA65").unwrap(),
+        resolve::parse_hex_color("#000000").unwrap(),
+        Color::Rgb(0, 0, 0)
+    );
+    assert_eq!(
+        resolve::parse_hex_color("#4EBA65").unwrap(),
         Color::Rgb(78, 186, 101)
     );
     // #RGB 简写
-    assert_eq!(parse_hex_color("#FFF").unwrap(), Color::Rgb(255, 255, 255));
-    assert_eq!(parse_hex_color("#000").unwrap(), Color::Rgb(0, 0, 0));
+    assert_eq!(
+        resolve::parse_hex_color("#FFF").unwrap(),
+        Color::Rgb(255, 255, 255)
+    );
+    assert_eq!(
+        resolve::parse_hex_color("#000").unwrap(),
+        Color::Rgb(0, 0, 0)
+    );
 }
 
 #[test]
 fn test_parse_hex_invalid() {
-    assert!(parse_hex_color("").is_err());
-    assert!(parse_hex_color("not-a-color").is_err());
+    assert!(resolve::parse_hex_color("").is_err());
+    assert!(resolve::parse_hex_color("not-a-color").is_err());
 }
 
 #[test]
 fn test_unicode_hex_returns_error_without_panicking() {
     for invalid in ["#0é000", "#é0000", "#é0", "#中", "#12345é", "#GGG"] {
         assert!(matches!(
-            parse_hex_color(invalid),
+            resolve::parse_hex_color(invalid),
             Err(ThemeLoadError::InvalidColor(_))
         ));
     }
     assert_eq!(
-        parse_hex_color("  #aBc  ").unwrap(),
+        resolve::parse_hex_color("  #aBc  ").unwrap(),
         Color::Rgb(170, 187, 204)
     );
 }
@@ -62,7 +71,7 @@ fn test_shared_reference_chain_is_not_a_cycle_in_any_iteration_order() {
     flat.insert(roots[0].clone(), format!("${}", roots[3]));
     flat.insert(roots[1].clone(), format!("${}", roots[2]));
     flat.insert(roots[2].clone(), format!("${}", roots[0]));
-    let resolved = resolve_refs(&flat, 0).unwrap();
+    let resolved = resolve::resolve_refs(&flat, 0).unwrap();
     assert_eq!(resolved.len(), 4);
     assert!(resolved.values().all(|value| value == "#123456"));
 }
@@ -73,17 +82,17 @@ fn test_case_insensitive_references_track_actual_keys() {
         ("First".to_string(), "$SECOND".to_string()),
         ("Second".to_string(), "#abc".to_string()),
     ]);
-    assert_eq!(resolve_refs(&flat, 0).unwrap()["First"], "#abc");
+    assert_eq!(resolve::resolve_refs(&flat, 0).unwrap()["First"], "#abc");
     let cycle = HashMap::from([
         ("First".to_string(), "$SECOND".to_string()),
         ("Second".to_string(), "$FIRST".to_string()),
     ]);
     assert!(matches!(
-        resolve_refs(&cycle, 0),
+        resolve::resolve_refs(&cycle, 0),
         Err(ThemeLoadError::CircularRef(_))
     ));
     assert!(matches!(
-        resolve_refs(
+        resolve::resolve_refs(
             &HashMap::from([("a".to_string(), "$missing".to_string())]),
             0
         ),
@@ -97,10 +106,10 @@ fn test_ten_reference_edges_are_allowed_but_eleven_are_not() {
         .map(|index| (format!("k{index}"), format!("$k{}", index + 1)))
         .collect();
     flat.insert("k10".to_string(), "#abc".to_string());
-    assert_eq!(resolve_refs(&flat, 0).unwrap()["k0"], "#abc");
+    assert_eq!(resolve::resolve_refs(&flat, 0).unwrap()["k0"], "#abc");
     flat.insert("extra".to_string(), "$k0".to_string());
     assert!(matches!(
-        resolve_refs(&flat, 0),
+        resolve::resolve_refs(&flat, 0),
         Err(ThemeLoadError::CircularRef(_))
     ));
 }
@@ -127,7 +136,7 @@ fn test_resolve_refs_simple() {
     flat.insert("palette.base.bg".to_string(), "$other.bg".to_string());
     flat.insert("other.bg".to_string(), "#000000".to_string());
 
-    let resolved = resolve_refs(&flat, 0).unwrap();
+    let resolved = resolve::resolve_refs(&flat, 0).unwrap();
     assert_eq!(resolved.get("palette.base.bg").unwrap(), "#000000");
     assert_eq!(resolved.get("other.bg").unwrap(), "#000000");
 }
@@ -139,7 +148,7 @@ fn test_resolve_refs_chain() {
     flat.insert("b".to_string(), "$c".to_string());
     flat.insert("c".to_string(), "#FFFFFF".to_string());
 
-    let resolved = resolve_refs(&flat, 0).unwrap();
+    let resolved = resolve::resolve_refs(&flat, 0).unwrap();
     assert_eq!(resolved.get("a").unwrap(), "#FFFFFF");
 }
 
@@ -149,7 +158,7 @@ fn test_resolve_refs_circular() {
     flat.insert("a".to_string(), "$b".to_string());
     flat.insert("b".to_string(), "$a".to_string());
 
-    let result = resolve_refs(&flat, 0);
+    let result = resolve::resolve_refs(&flat, 0);
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
@@ -167,7 +176,7 @@ fn test_resolve_refs_max_depth() {
     }
     flat.insert("k12".to_string(), "#000000".to_string());
 
-    let result = resolve_refs(&flat, 0);
+    let result = resolve::resolve_refs(&flat, 0);
     assert!(result.is_err());
 }
 

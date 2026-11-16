@@ -62,18 +62,22 @@ impl AllocationAccount {
         true
     }
 
+    #[must_use]
     pub fn bytes(&self) -> usize {
         self.bytes
     }
 
+    #[must_use]
     pub fn deduplicated_calls(&self) -> usize {
         self.deduplicated
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.seen.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.seen.is_empty()
     }
@@ -101,6 +105,7 @@ pub struct ResidentIndex {
 }
 
 impl ResidentIndex {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
@@ -116,22 +121,27 @@ impl ResidentIndex {
         }
     }
 
+    #[must_use]
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
 
+    #[must_use]
     pub fn sub_item_count(&self) -> usize {
         self.sub_items.len()
     }
 
+    #[must_use]
     pub fn body_bytes(&self) -> usize {
         self.body_bytes
     }
 
+    #[must_use]
     pub fn pinned_bytes(&self) -> usize {
         self.pinned_bytes
     }
 
+    #[must_use]
     pub fn total_units(&self) -> usize {
         self.total_units
     }
@@ -140,6 +150,7 @@ impl ResidentIndex {
         self.entries.contains_key(entry)
     }
 
+    #[must_use]
     pub fn contains_sub_item(&self, sub_item: &PersistentSubItemKey) -> bool {
         self.sub_items.contains(sub_item)
     }
@@ -168,10 +179,12 @@ impl ResidentIndex {
             .map(|slot| slot.start..slot.start + slot.unit_count)
     }
 
+    #[must_use]
     pub fn allocations(&self) -> &AllocationAccount {
         &self.allocations
     }
 
+    #[must_use]
     pub fn allocations_mut(&mut self) -> &mut AllocationAccount {
         &mut self.allocations
     }
@@ -210,20 +223,23 @@ impl ResidentIndex {
             },
         );
         let mut keys = Vec::with_capacity(segment.entries.len());
-        for (ordinal, entry) in segment.entries.iter().enumerate() {
-            self.entries.insert(
-                entry.key.clone(),
-                EntryLocator {
-                    segment: segment.key,
-                    ordinal,
-                    slot_start: 0,
-                    unit_count: entry.unit_count,
-                },
-            );
-            for sub_item in &entry.sub_items {
-                self.sub_items.insert(sub_item.clone());
+        {
+            let iteration_items = segment.entries.iter().enumerate();
+            for (ordinal, entry) in iteration_items {
+                self.entries.insert(
+                    entry.key.clone(),
+                    EntryLocator {
+                        segment: segment.key,
+                        ordinal,
+                        slot_start: 0,
+                        unit_count: entry.unit_count,
+                    },
+                );
+                for sub_item in &entry.sub_items {
+                    self.sub_items.insert(sub_item.clone());
+                }
+                keys.push(entry.key.clone());
             }
-            keys.push(entry.key.clone());
         }
         self.by_segment.insert(segment.key, keys);
     }
@@ -309,14 +325,17 @@ impl ResidentIndex {
                     unit_count: segment.unit_count,
                 },
             );
-            for (ordinal, entry) in segment.entries.iter().enumerate() {
-                if let Some(locator) = self.entries.get_mut(&entry.key) {
-                    locator.segment = *key;
-                    locator.ordinal = ordinal;
-                    locator.slot_start = cursor;
-                    locator.unit_count = entry.unit_count;
+            {
+                let iteration_items = segment.entries.iter().enumerate();
+                for (ordinal, entry) in iteration_items {
+                    if let Some(locator) = self.entries.get_mut(&entry.key) {
+                        locator.segment = *key;
+                        locator.ordinal = ordinal;
+                        locator.slot_start = cursor;
+                        locator.unit_count = entry.unit_count;
+                    }
+                    cursor = cursor.saturating_add(entry.unit_count);
                 }
-                cursor = cursor.saturating_add(entry.unit_count);
             }
         }
         self.total_units = cursor;

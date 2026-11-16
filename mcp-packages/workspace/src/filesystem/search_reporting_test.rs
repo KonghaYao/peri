@@ -4,8 +4,8 @@ use std::ffi::OsString;
 use peri_agent::tools::{BaseTool, ToolContext};
 use serde_json::json;
 
-use super::super::glob::GlobFilesTool;
-use super::GrepTool;
+use crate::filesystem::glob::GlobFilesTool;
+use crate::filesystem::grep::GrepTool;
 
 struct IsolatedEnvironment {
     _lock: peri_mcp_common::process_env::EnvLockFile,

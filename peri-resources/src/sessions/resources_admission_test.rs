@@ -1,4 +1,15 @@
-use super::*;
+use super::{
+    payload, Fixture, FrozenSnapshotBytes, FrozenState, PersistedPayload, SessionResourceError,
+    SessionResourceErrorKind, SessionResourceResult, SessionResourcesImpl,
+};
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session_resources::BindingState;
+use peri_acp_types::session_resources::ExecutionAvailability;
+use peri_acp_types::session_resources::ForkSnapshot;
+use peri_acp_types::session_resources::SessionMetaPatch;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::thread::AgentStatus;
+use peri_acp_types::workspace::WorkspaceError;
 
 fn canonical_history_bytes(payloads: &[PersistedPayload]) -> Vec<String> {
     payloads
@@ -59,7 +70,7 @@ async fn test_create_session_rejects_invalid_binding_without_partial_data() {
         Err(error) => error,
     };
     assert!(matches!(
-        error_kind(&error),
+        super::error_kind(&error),
         SessionResourceErrorKind::Workspace(WorkspaceError::InvalidBinding)
     ));
     assert_eq!(fixture.count_threads("s-fail").await, 0);
@@ -77,7 +88,7 @@ async fn test_create_session_rejects_a_reused_identity_with_different_frozen() {
         Err(error) => error,
     };
     assert!(matches!(
-        error_kind(&error),
+        super::error_kind(&error),
         SessionResourceErrorKind::Conflict { .. }
     ));
 }
@@ -110,7 +121,7 @@ async fn test_create_session_rejects_conflicting_binding_without_overwriting_dat
         Err(error) => error,
     };
     assert!(matches!(
-        error_kind(&error),
+        super::error_kind(&error),
         SessionResourceErrorKind::Conflict { .. }
     ));
     assert_eq!(
@@ -129,7 +140,7 @@ async fn test_same_id_creation_retry_preserves_saved_data_after_reopen() {
     fixture.facade.create_session(&input).await.unwrap();
     fixture
         .facade
-        .append_history(&id, &[payload("persisted")])
+        .append_history(&id, &[super::payload("persisted")])
         .await
         .unwrap();
     fixture
@@ -174,7 +185,7 @@ async fn test_creation_retry_rejects_all_immutable_conflicts_without_overwriting
     fixture.facade.create_session(&input).await.unwrap();
     fixture
         .facade
-        .append_history(&id, &[payload("original")])
+        .append_history(&id, &[super::payload("original")])
         .await
         .unwrap();
     let before = fixture.facade.load_session_snapshot(&id).await.unwrap();
@@ -191,7 +202,7 @@ async fn test_creation_retry_rejects_all_immutable_conflicts_without_overwriting
             Err(error) => error,
         };
         assert!(matches!(
-            error_kind(&error),
+            super::error_kind(&error),
             SessionResourceErrorKind::Conflict { .. }
         ));
         let after = fixture.facade.load_session_snapshot(&id).await.unwrap();
@@ -224,7 +235,7 @@ async fn test_same_id_fork_retry_preserves_history_and_checks_target_identity() 
     fixture.facade.save_fork(&fork).await.unwrap();
     fixture
         .facade
-        .append_history(&id, &[payload("continued")])
+        .append_history(&id, &[super::payload("continued")])
         .await
         .unwrap();
     fork.payloads = vec![payload("must not replace history")];
@@ -236,7 +247,7 @@ async fn test_same_id_fork_retry_preserves_history_and_checks_target_identity() 
         Err(error) => error,
     };
     assert!(matches!(
-        error_kind(&error),
+        super::error_kind(&error),
         SessionResourceErrorKind::Conflict { .. }
     ));
     assert_eq!(fixture.count_messages(&id).await, 2);
@@ -284,15 +295,15 @@ async fn test_read_only_store_refuses_registration_and_session_writes() {
         Err(error) => error,
     };
     assert!(matches!(
-        error_kind(&error),
+        super::error_kind(&error),
         SessionResourceErrorKind::Workspace(WorkspaceError::ReadOnlyStore)
     ));
     let error = read_only
-        .append_history(&"s-readonly".to_owned(), &[payload("late")])
+        .append_history(&"s-readonly".to_owned(), &[super::payload("late")])
         .await
         .unwrap_err();
     assert!(matches!(
-        error_kind(&error),
+        super::error_kind(&error),
         SessionResourceErrorKind::ReadOnlyStore
     ));
     // 只读路径不创建任何文件：目录内容与只读打开之前逐项一致（包括不建锁文件）。
@@ -320,7 +331,7 @@ async fn test_unknown_write_blocks_local_mutations_until_recovery() {
     let id = "s-unsure".to_owned();
     fixture
         .facade
-        .append_history(&id, &[payload("first turn")])
+        .append_history(&id, &[super::payload("first turn")])
         .await
         .unwrap();
     let scope = fixture.facade.gate.admit(&id).await.unwrap();
@@ -331,7 +342,7 @@ async fn test_unknown_write_blocks_local_mutations_until_recovery() {
     // 后续写入与删除都被拒绝：不能在一个结果未知的写入之后继续写。
     let error = fixture
         .facade
-        .append_history(&id, &[payload("blocked")])
+        .append_history(&id, &[super::payload("blocked")])
         .await
         .unwrap_err();
     assert!(error.is_persistence_uncertain());
@@ -356,7 +367,7 @@ async fn test_unknown_write_blocks_local_mutations_until_recovery() {
 
     let reopened = fixture.second_host().await;
     reopened
-        .append_history(&id, &[payload("after restart")])
+        .append_history(&id, &[super::payload("after restart")])
         .await
         .unwrap();
     assert_eq!(fixture.count_messages(&id).await, 2);
@@ -372,7 +383,7 @@ async fn test_unknown_write_blocks_local_mutations_until_recovery() {
         .unwrap();
     fixture
         .facade
-        .append_history(&id, &[payload("after recovery")])
+        .append_history(&id, &[super::payload("after recovery")])
         .await
         .unwrap();
     assert_eq!(fixture.count_messages(&id).await, 3);
@@ -396,7 +407,7 @@ async fn test_write_scope_settles_only_on_determinate_effect() {
     scope.settle(&not_applied);
     fixture
         .facade
-        .append_history(&id, &[payload("after not applied")])
+        .append_history(&id, &[super::payload("after not applied")])
         .await
         .unwrap();
     let scope = fixture.facade.gate.admit(&id).await.unwrap();
@@ -406,7 +417,7 @@ async fn test_write_scope_settles_only_on_determinate_effect() {
     scope.settle(&unknown);
     let error = fixture
         .facade
-        .append_history(&id, &[payload("after unknown")])
+        .append_history(&id, &[super::payload("after unknown")])
         .await
         .unwrap_err();
     assert!(error.is_persistence_uncertain());
@@ -420,14 +431,14 @@ async fn test_commit_stage_failure_blocks_writes_and_drain() {
     fixture.create("s-commit").await;
     let id = "s-commit".to_owned();
 
-    let error = write_failure(anyhow::Error::new(commit_failure(Some(id.clone()))));
+    let error = super::write_failure(anyhow::Error::new(super::commit_failure(Some(id.clone()))));
     assert!(error.is_persistence_uncertain());
     let scope = fixture.facade.gate.admit(&id).await.unwrap();
     scope.settle(&Err::<(), _>(error));
 
     let blocked = fixture
         .facade
-        .append_history(&id, &[payload("after commit failure")])
+        .append_history(&id, &[super::payload("after commit failure")])
         .await
         .unwrap_err();
     assert!(blocked.is_persistence_uncertain());
@@ -443,7 +454,7 @@ async fn test_cancelled_mutation_blocks_writes_and_drain() {
     }
     let error = fixture
         .facade
-        .append_history(&id, &[payload("after cancel")])
+        .append_history(&id, &[super::payload("after cancel")])
         .await
         .unwrap_err();
     assert!(error.is_persistence_uncertain());
@@ -492,7 +503,7 @@ async fn test_aborted_mutation_requires_recovery_before_writes_resume() {
         .unwrap();
     fixture
         .facade
-        .append_history(&id, &[payload("recovered")])
+        .append_history(&id, &[super::payload("recovered")])
         .await
         .unwrap();
     assert_eq!(fixture.count_messages(&id).await, 1);

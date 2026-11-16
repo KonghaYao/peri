@@ -1,11 +1,12 @@
-use super::*;
+use super::ThreadMeta;
+use peri_acp_types::store::ThreadStore;
 
 #[tokio::test]
 async fn test_frozen_snapshot_roundtrip_and_legacy_null() {
-    let (store, _dir) = make_store().await;
+    let (store, _dir) = super::make_store().await;
     let id = store
         .create_thread(ThreadMeta::new_at(
-            absolute_test_path("tmp"),
+            super::absolute_test_path("tmp"),
             peri_time::now_wall(),
         ))
         .await
@@ -33,10 +34,10 @@ async fn test_frozen_snapshot_roundtrip_and_legacy_null() {
 
 #[tokio::test]
 async fn test_frozen_snapshot_concurrent_backfill_has_one_winner() {
-    let (store, _dir) = make_store().await;
+    let (store, _dir) = super::make_store().await;
     let id = store
         .create_thread(ThreadMeta::new_at(
-            absolute_test_path("tmp"),
+            super::absolute_test_path("tmp"),
             peri_time::now_wall(),
         ))
         .await

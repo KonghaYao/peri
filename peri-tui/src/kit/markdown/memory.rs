@@ -44,6 +44,7 @@ pub(super) fn cache_retained_bytes(cache: &MarkdownRenderCache) -> usize {
     bytes
 }
 
+// The owned container reference preserves allocation capacity for retained-memory accounting.
 fn vec_storage_bytes<Value>(values: &Vec<Value>) -> usize {
     values.capacity().saturating_mul(size_of::<Value>())
 }

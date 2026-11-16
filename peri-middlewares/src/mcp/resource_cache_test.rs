@@ -1,8 +1,12 @@
 use peri_acp_types::plugin::McpServerConfig;
 use rmcp::model::Tool;
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
+use std::time::Duration;
 
-use super::*;
+use super::CacheLoadStatus;
+use super::McpResourceCache;
+use super::CACHE_NAMESPACE;
+use super::MAX_CACHE_BYTES;
 
 #[tokio::test]
 async fn test_successful_write_marks_cache_strategy() {
@@ -276,7 +280,7 @@ fn test_cache_origin_does_not_expose_endpoint() {
         system_mcp_timeout: None,
         source: None,
     };
-    let origin = cache_origin("server", Some(&config));
+    let origin = super::cache_origin("server", Some(&config));
     assert!(origin.starts_with("mcp-origin:"));
     assert!(!origin.contains("example.test"));
     assert!(!origin.contains("secret"));
@@ -353,8 +357,8 @@ fn test_stdio_cache_origin_changes_with_config_identity() {
         ..first.clone()
     };
     assert_ne!(
-        cache_origin("filesystem", Some(&first)),
-        cache_origin("filesystem", Some(&second)),
+        super::cache_origin("filesystem", Some(&first)),
+        super::cache_origin("filesystem", Some(&second)),
         "command + url 同存时仍以实际 stdio 配置隔离磁盘缓存"
     );
     let stdio_without_url = McpServerConfig {
@@ -362,8 +366,8 @@ fn test_stdio_cache_origin_changes_with_config_identity() {
         ..first.clone()
     };
     assert_eq!(
-        cache_origin("filesystem", Some(&first)),
-        cache_origin("filesystem", Some(&stdio_without_url)),
+        super::cache_origin("filesystem", Some(&first)),
+        super::cache_origin("filesystem", Some(&stdio_without_url)),
         "未实际使用的 URL 不得改变 stdio server 的缓存身份"
     );
 }
@@ -402,7 +406,8 @@ fn test_cache_directory_uses_peri_home() {
 async fn content_total(cache: &McpResourceCache) -> (u64, usize) {
     let mut total = 0u64;
     let mut count = 0;
-    for entry in cacache::list_sync(&cache.content_path).filter_map(Result::ok) {
+    let entries = cacache::list_sync(&cache.content_path).filter_map(Result::ok);
+    for entry in entries {
         if entry.key.starts_with(CACHE_NAMESPACE) {
             total += entry.size as u64;
             count += 1;

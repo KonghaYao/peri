@@ -10,25 +10,24 @@ use peri_acp_types::workspace::{SessionBinding, WorkspaceId};
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::sessions::canonical;
-use crate::sessions::sqlite_store::workspace::require_project_exists;
 
 /// 新建 `threads` 行的显式输入；派生字段（`message_count`、时间戳）由调用方给定，
 /// 不在本层读时钟。
-pub(super) struct ThreadRowInsert<'a> {
-    pub id: &'a str,
-    pub title: Option<&'a str>,
-    pub cwd: &'a str,
-    pub created_at: &'a str,
-    pub updated_at: &'a str,
+pub(super) struct ThreadRowInsert<'row> {
+    pub id: &'row str,
+    pub title: Option<&'row str>,
+    pub cwd: &'row str,
+    pub created_at: &'row str,
+    pub updated_at: &'row str,
     pub message_count: i64,
-    pub parent_thread_id: Option<&'a str>,
-    pub snapshot_at_message_id: Option<&'a str>,
+    pub parent_thread_id: Option<&'row str>,
+    pub snapshot_at_message_id: Option<&'row str>,
     pub hidden: bool,
-    pub cancel_policy: &'a str,
-    pub config: Option<&'a str>,
-    pub agent_status: &'a str,
-    pub frozen_context: Option<&'a str>,
-    pub owner_workspace_id: Option<&'a WorkspaceId>,
+    pub cancel_policy: &'row str,
+    pub config: Option<&'row str>,
+    pub agent_status: &'row str,
+    pub frozen_context: Option<&'row str>,
+    pub owner_workspace_id: Option<&'row WorkspaceId>,
 }
 
 /// 插入一条 `threads` 行
@@ -81,7 +80,11 @@ pub(super) async fn insert_binding_row(
 ) -> Result<()> {
     super::workspace::validate_relative(&binding.cwd_relative_to_workspace)?;
     // 写绑定必须引用已登记项目；缺失按 InvalidBinding 拒绝，不静默补造。
-    require_project_exists(connection, binding.project_id).await?;
+    crate::sessions::sqlite_store::workspace::require_project_exists(
+        connection,
+        binding.project_id,
+    )
+    .await?;
     let version = i64::from(binding.schema_version);
     let recorded: Option<(Option<String>,)> =
         sqlx::query_as("SELECT discovery FROM workspaces WHERE id = ?1")

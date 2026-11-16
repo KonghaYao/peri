@@ -1,9 +1,12 @@
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use serde_json::json;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn session_io_preparation_rejects_mutations_during_close_but_allows_snapshot() {
     let temporary = tempfile::TempDir::new().unwrap();
-    let (_cfg, mut states, session_id) = make_user_input_session(&temporary).await;
+    let (_cfg, mut states, session_id) =
+        crate::host::requests::tests::user_input_tests::make_user_input_session(&temporary).await;
     states.get_mut(&session_id).unwrap().closing = true;
     let params = json!({"sessionId": session_id});
     let error =
@@ -26,7 +29,8 @@ async fn session_io_preparation_rejects_mutations_during_close_but_allows_snapsh
 #[tokio::test]
 async fn removed_execution_protocols_are_unsupported() {
     let temporary = tempfile::TempDir::new().unwrap();
-    let (cfg, mut states, session_id) = make_user_input_session(&temporary).await;
+    let (cfg, mut states, session_id) =
+        crate::host::requests::tests::user_input_tests::make_user_input_session(&temporary).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     for method in [
         "session/control",
@@ -37,7 +41,7 @@ async fn removed_execution_protocols_are_unsupported() {
         "session/execute",
         "session/execute/resolve",
     ] {
-        let error = handle_request(
+        let error = crate::host::requests::handle_request(
             method,
             &json!({"sessionId":session_id}),
             &cfg,

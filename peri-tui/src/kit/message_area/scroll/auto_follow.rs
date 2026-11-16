@@ -14,6 +14,7 @@ use super::{AutoFollowCtx, SCROLL_PADDING};
 /// 判定，用户滚到视觉底部（真实内容底 = max_scroll - 2）时 offset 恒差 2 行，
 /// 吸底跟随永不恢复。扣除缓冲后「滚到视觉底部」即恢复；内容不满一屏
 /// （max_scroll ≤ padding）时 offset=0 仍视为底部。
+#[must_use]
 pub(super) fn should_follow_after_user_scroll(max_scroll: usize, offset_y: usize) -> bool {
     offset_y >= max_scroll.saturating_sub(SCROLL_PADDING)
 }
@@ -39,6 +40,7 @@ pub(super) fn update_follow_on_scroll(
 /// 恢复（`should_follow_after_user_scroll` 同样扣缓冲）口径对齐：滚到底时
 /// follow 恢复 true 且指示器消失；浏览态中内容增长不移动 viewport，指示器
 /// 出现提示有未看的新输出。
+#[must_use]
 pub(in crate::kit::message_area) fn new_output_indicator_active(
     follow_bottom: bool,
     scroll_y: usize,

@@ -1,15 +1,16 @@
 //! Structured ownership for background work admitted by the ACP host.
 
-use std::{
-    future::Future,
-    pin::Pin,
-    sync::{Arc, Mutex, Weak},
-    time::Duration,
-};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::Weak;
+use std::time::Duration;
 
 use peri_acp_types::ports::McpPoolShutdownReport;
 use tokio::task::AbortHandle;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HostTaskOwnerKind {
@@ -79,27 +80,27 @@ enum WaitOutcome {
     Expired,
 }
 
-type DrainFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
-type WaitFuture<'a> = Pin<Box<dyn Future<Output = WaitOutcome> + Send + 'a>>;
+type DrainFuture<'wait> = Pin<Box<dyn Future<Output = ()> + Send + 'wait>>;
+type WaitFuture<'wait> = Pin<Box<dyn Future<Output = WaitOutcome> + Send + 'wait>>;
 
 trait HostWaitDriver: Send + Sync {
-    fn race<'a>(
-        &'a self,
+    fn race<'wait>(
+        &'wait self,
         phase: WaitPhase,
         duration: Duration,
-        drain: DrainFuture<'a>,
-    ) -> WaitFuture<'a>;
+        drain: DrainFuture<'wait>,
+    ) -> WaitFuture<'wait>;
 }
 
 struct TokioWaitDriver;
 
 impl HostWaitDriver for TokioWaitDriver {
-    fn race<'a>(
-        &'a self,
+    fn race<'wait>(
+        &'wait self,
         _phase: WaitPhase,
         duration: Duration,
-        drain: DrainFuture<'a>,
-    ) -> WaitFuture<'a> {
+        drain: DrainFuture<'wait>,
+    ) -> WaitFuture<'wait> {
         Box::pin(async move {
             match peri_time::timeout(duration, drain).await {
                 Ok(()) => WaitOutcome::Drained,

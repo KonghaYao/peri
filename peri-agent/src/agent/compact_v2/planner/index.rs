@@ -1,40 +1,44 @@
 //! One borrowed index for steps, exchanges and provider protocol closures.
 use std::collections::{HashMap, HashSet};
+use std::fmt::{self, Debug, Formatter};
 
-use super::super::projection::ProjectionTarget;
+use crate::agent::compact_v2::projection::ProjectionTarget;
 use crate::error::{AgentError, AgentResult};
 use crate::messages::{BaseMessage, ContentBlock, MessageContent, MessageId};
 use crate::session::transcript::{MessageTranscript, TranscriptEntry};
 
-pub struct Step<'a> {
-    pub entry: &'a TranscriptEntry,
+#[derive(Debug)]
+pub struct Step<'history> {
+    pub entry: &'history TranscriptEntry,
     pub exchanges: Vec<usize>,
     pub protocol_dependency: bool,
     pub unknown: bool,
 }
 
-pub struct Exchange<'a> {
-    pub call_id: &'a str,
-    pub tool_name: &'a str,
-    pub arguments: &'a serde_json::Value,
+#[derive(Debug)]
+pub struct Exchange<'history> {
+    pub call_id: &'history str,
+    pub tool_name: &'history str,
+    pub arguments: &'history serde_json::Value,
     pub step: usize,
-    pub result: Option<ResultLocation<'a>>,
+    pub result: Option<ResultLocation<'history>>,
 }
 
-pub struct ResultLocation<'a> {
-    pub entry: &'a TranscriptEntry,
+pub struct ResultLocation<'history> {
+    pub entry: &'history TranscriptEntry,
     pub target: ProjectionTarget,
     pub is_error: bool,
-    pub content: ResultContent<'a>,
+    pub content: ResultContent<'history>,
 }
 
-pub enum ResultContent<'a> {
-    Message(&'a MessageContent),
-    Blocks(&'a [ContentBlock]),
-    Raw(&'a serde_json::Value),
+pub enum ResultContent<'history> {
+    Message(&'history MessageContent),
+    Blocks(&'history [ContentBlock]),
+    Raw(&'history serde_json::Value),
 }
 
 impl ResultContent<'_> {
+    #[must_use]
     pub fn text_chars(&self) -> usize {
         fn blocks_len(blocks: &[ContentBlock]) -> usize {
             blocks
@@ -65,13 +69,18 @@ impl ResultContent<'_> {
         }
     }
 
+    #[must_use]
     pub fn preview_text_chars(&self, head: usize, tail: usize) -> usize {
         fn blocks_cost(blocks: &[ContentBlock], head: usize, tail: usize) -> usize {
             blocks
                 .iter()
                 .map(|block| match block {
                     ContentBlock::Text { text } => {
-                        super::planning::preview_chars(text.chars().count(), head, tail)
+                        crate::agent::compact_v2::planner::planning::preview_chars(
+                            text.chars().count(),
+                            head,
+                            tail,
+                        )
                     }
                     ContentBlock::ToolResult { content, .. } => blocks_cost(content, head, tail),
                     _ => 0,
@@ -80,7 +89,11 @@ impl ResultContent<'_> {
         }
         match self {
             Self::Message(MessageContent::Text(text)) => {
-                super::planning::preview_chars(text.chars().count(), head, tail)
+                crate::agent::compact_v2::planner::planning::preview_chars(
+                    text.chars().count(),
+                    head,
+                    tail,
+                )
             }
             Self::Message(MessageContent::Blocks(blocks)) => blocks_cost(blocks, head, tail),
             Self::Blocks(blocks) => blocks_cost(blocks, head, tail),
@@ -89,6 +102,7 @@ impl ResultContent<'_> {
         }
     }
 
+    #[must_use]
     pub fn has_unrecoverable_media(&self) -> bool {
         fn block_unsafe(block: &ContentBlock) -> bool {
             match block {
@@ -128,9 +142,10 @@ impl ResultContent<'_> {
     }
 }
 
-pub struct HistoryIndex<'a> {
-    pub steps: Vec<Step<'a>>,
-    pub exchanges: Vec<Exchange<'a>>,
+#[derive(Debug)]
+pub struct HistoryIndex<'history> {
+    pub steps: Vec<Step<'history>>,
+    pub exchanges: Vec<Exchange<'history>>,
     pub positions: HashMap<MessageId, usize>,
 }
 
@@ -138,8 +153,8 @@ fn invalid(detail: impl std::fmt::Display) -> AgentError {
     AgentError::LlmError(format!("Micro protocol index: {detail}"))
 }
 
-impl<'a> HistoryIndex<'a> {
-    pub fn collect(transcript: &'a MessageTranscript) -> AgentResult<Self> {
+impl<'history> HistoryIndex<'history> {
+    pub fn collect(transcript: &'history MessageTranscript) -> AgentResult<Self> {
         let mut index = Self {
             steps: Vec::new(),
             exchanges: Vec::new(),
@@ -147,7 +162,8 @@ impl<'a> HistoryIndex<'a> {
         };
         let mut calls = HashMap::new();
         let mut results = HashMap::new();
-        for (position, entry) in transcript.entries().iter().enumerate() {
+        let paired_items = transcript.entries().iter().enumerate();
+        for (position, entry) in paired_items {
             if position < transcript.ancestor_len() || transcript.is_excluded(entry.id()) {
                 continue;
             }
@@ -253,7 +269,8 @@ impl<'a> HistoryIndex<'a> {
             } else {
                 match message.message_content() {
                     MessageContent::Blocks(blocks) => {
-                        for (bi, block) in blocks.iter().enumerate() {
+                        let paired_items_2 = blocks.iter().enumerate();
+                        for (bi, block) in paired_items_2 {
                             if let ContentBlock::ToolResult {
                                 tool_use_id,
                                 content,
@@ -281,7 +298,8 @@ impl<'a> HistoryIndex<'a> {
                         }
                     }
                     MessageContent::Raw(values) => {
-                        for (bi, value) in values.iter().enumerate() {
+                        let paired_items_3 = values.iter().enumerate();
+                        for (bi, value) in paired_items_3 {
                             if value["type"] != "tool_result" {
                                 continue;
                             }
@@ -362,4 +380,27 @@ fn protocol_features(content: &MessageContent) -> AgentResult<(bool, bool)> {
         }
     }
     Ok((signed, unknown))
+}
+
+impl<'history> Debug for ResultLocation<'history> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResultLocation")
+            .field("is_error", &self.is_error)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'history> Debug for ResultContent<'history> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        let variant = match self {
+            Self::Message(..) => "Message",
+            Self::Blocks(..) => "Blocks",
+            Self::Raw(..) => "Raw",
+        };
+        formatter
+            .debug_tuple("ResultContent")
+            .field(&variant)
+            .finish()
+    }
 }

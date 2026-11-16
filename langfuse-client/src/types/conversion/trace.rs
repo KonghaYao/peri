@@ -1,6 +1,8 @@
-use super::{
-    build_span, frozen_input, metadata, span_head, EventView, LangfuseError, OtlpSink, SpanStatus,
-};
+use super::metadata;
+use super::EventView;
+use super::LangfuseError;
+use super::OtlpSink;
+use super::SpanStatus;
 use crate::types::TraceBody;
 
 /// trace-create → OTLP span；属性书写顺序即输出字节顺序（与旧 serde 基线逐字节一致）。
@@ -10,7 +12,7 @@ pub(super) fn trace_create(
     view: &EventView<'_>,
     sink: &mut OtlpSink<'_>,
 ) -> Result<(), LangfuseError> {
-    let span = build_span(
+    let span = super::build_span(
         body.id.as_deref(),
         body.id.as_deref(),
         None,
@@ -18,7 +20,10 @@ pub(super) fn trace_create(
         None,
         timestamp,
     )?;
-    sink.begin_span(&span_head(&span), body.name.as_deref().unwrap_or("trace"))?;
+    sink.begin_span(
+        &super::span_head(&span),
+        body.name.as_deref().unwrap_or("trace"),
+    )?;
     if let Some(session_id) = body.session_id.as_deref() {
         sink.attr_str("langfuse.session.id", session_id)?;
     }
@@ -38,10 +43,10 @@ pub(super) fn trace_create(
         let joined = tags.join(",");
         sink.attr_str("langfuse.trace.tags", &joined)?;
     }
-    if let Some(input) = frozen_input(body.input.as_ref(), view.input) {
+    if let Some(input) = super::frozen_input(body.input.as_ref(), view.input) {
         sink.attr_frozen("langfuse.trace.input", input)?;
     }
-    if let Some(output) = frozen_input(body.output.as_ref(), view.output) {
+    if let Some(output) = super::frozen_input(body.output.as_ref(), view.output) {
         sink.attr_frozen("langfuse.trace.output", output)?;
     }
     if let Some(name) = body.name.as_deref() {

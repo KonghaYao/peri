@@ -14,8 +14,15 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use super::*;
-use futures::{pin_mut, task::noop_waker_ref};
+use crate::transport::stdio_transport::CancelHook;
+use crate::transport::stdio_transport::JsonRpcEnvelope;
+use crate::transport::stdio_transport::StdioTransport;
+use crate::transport::types::AcpError;
+use crate::transport::types::IncomingMessage;
+use crate::transport::types::RequestId;
+use crate::transport::AcpTransport;
+use futures::pin_mut;
+use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
 use tokio::sync::oneshot;
 
@@ -57,9 +64,9 @@ fn test_envelope_roundtrip_notification() {
 #[test]
 fn test_request_id_conversion() {
     let v = Value::Number(42.into());
-    let id = value_to_request_id(&v);
+    let id = crate::transport::stdio::value_to_request_id(&v);
     assert_eq!(id, RequestId::Number(42));
-    let back = request_id_to_value(&id);
+    let back = crate::transport::stdio::request_id_to_value(&id);
     assert_eq!(back, v);
 }
 
@@ -301,7 +308,8 @@ async fn test_concurrent_requests_out_of_order_id_matching() {
     }
 
     // 乱序回写响应（反转 id 顺序）
-    for idx in (0..n).rev() {
+    let reversed_items = (0..n).rev();
+    for idx in reversed_items {
         let resp = json!({"echo": param_i[idx]});
         write_line(
             &mut input,
@@ -522,7 +530,7 @@ async fn test_blocked_writer_and_mutex_waiter_exit_on_eof() {
     let second = transport.send_request("blocked/mutex", json!({}));
     pin_mut!(second);
     {
-        let mut context = Context::from_waker(noop_waker_ref());
+        let mut context = Context::from_waker(futures::task::noop_waker_ref());
         assert!(
             matches!(second.as_mut().poll(&mut context), Poll::Pending),
             "second request must register and block behind the writer mutex before EOF"
@@ -559,32 +567,38 @@ async fn test_blocked_writer_and_mutex_waiter_exit_on_eof() {
 #[test]
 fn test_request_id_domain_validation() {
     // 域内：整数 Number(i64) 与 String 保真
-    assert!(is_domain_id(&json!(0i64)));
-    assert!(is_domain_id(&json!(42i64)));
-    assert!(is_domain_id(&json!(-1i64)));
-    assert!(is_domain_id(&json!("req-1")));
+    assert!(crate::transport::stdio::is_domain_id(&json!(0i64)));
+    assert!(crate::transport::stdio::is_domain_id(&json!(42i64)));
+    assert!(crate::transport::stdio::is_domain_id(&json!(-1i64)));
+    assert!(crate::transport::stdio::is_domain_id(&json!("req-1")));
     // 域外：小数 / u64 溢出 i64 / null / bool（协议违规）
-    assert!(!is_domain_id(&json!(1.5)), "小数 id 域外");
     assert!(
-        !is_domain_id(&json!(18446744073709551615u64)),
+        !crate::transport::stdio::is_domain_id(&json!(1.5)),
+        "小数 id 域外"
+    );
+    assert!(
+        !crate::transport::stdio::is_domain_id(&json!(18446744073709551615u64)),
         "u64 溢出 i64 域外"
     );
     assert!(
-        !is_domain_id(&Value::Null),
+        !crate::transport::stdio::is_domain_id(&Value::Null),
         "null id 域外（pump 按通知单独处理）"
     );
-    assert!(!is_domain_id(&Value::Bool(true)), "bool id 域外");
+    assert!(
+        !crate::transport::stdio::is_domain_id(&Value::Bool(true)),
+        "bool id 域外"
+    );
 }
 
 #[test]
 fn test_request_id_string_conversion_fidelity() {
     // String id 保真往返（Number 往返由既有 test_request_id_conversion 覆盖）
     assert_eq!(
-        value_to_request_id(&json!("req-1")),
+        crate::transport::stdio::value_to_request_id(&json!("req-1")),
         RequestId::String("req-1".into())
     );
     assert_eq!(
-        request_id_to_value(&RequestId::String("req-1".into())),
+        crate::transport::stdio::request_id_to_value(&RequestId::String("req-1".into())),
         json!("req-1")
     );
 }

@@ -1,17 +1,21 @@
-use super::super::run_sync::run_sync_subagent;
-use super::*;
 use crate::agent::async_tasks::handoff::ChildSettlementWindow;
 use crate::agent::async_tasks::TaskManager;
 use crate::agent::events::BackgroundTaskResult;
 use crate::agent::react::{ReactLLM, Reasoning, StreamingContext, ToolCall};
-use crate::agent::stages::receive::run_receive;
-use crate::agent::stages::{run_react_loop, LoopResult, ReceiveInput};
+
+use crate::agent::stages::LoopResult;
+use crate::agent::stages::ReceiveInput;
+
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::queue::{MessageSource, QueuedMessage};
-use crate::session::subagent::{
-    agent_id_from_child_thread, build_v2_subagent_context, ChildExecutionPermit,
-    ChildHandoffReason, ChildRunOutcome, ParkedChildOwner, SubagentHost, V2SubagentContext,
-};
+
+use crate::session::subagent::ChildExecutionPermit;
+use crate::session::subagent::ChildHandoffReason;
+use crate::session::subagent::ChildRunOutcome;
+use crate::session::subagent::ParkedChildOwner;
+use crate::session::subagent::SubagentHost;
+use crate::session::subagent::V2SubagentContext;
+use crate::session::Session;
 use crate::session::{FrozenContext, MessageTranscript};
 use crate::tools::BaseTool;
 use peri_acp_types::session_resources::SessionResources;
@@ -20,6 +24,7 @@ use peri_acp_types::tasks::{
 };
 use peri_acp_types::thread::ThreadId;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 fn bind_owner_store(
@@ -29,7 +34,11 @@ fn bind_owner_store(
     Arc<ParkedChildOwner>,
     Arc<crate::session::test_resources::mock::MockSessionResources>,
 ) {
-    let id = child.store().thread_id.clone().unwrap();
+    let id = child
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
     let store = crate::session::test_resources::mock::MockSessionResources::new();
     *child.transcript().write() =
         MessageTranscript::new().with_persistence(store.clone(), id.clone());
@@ -59,7 +68,7 @@ fn permit_for(
         .map(|owner| {
             owner
                 .acquire(context.session.turn.execution_binding())
-                .unwrap()
+                .expect("the acquire fixture result is required for this assertion")
         })
 }
 
@@ -132,7 +141,7 @@ fn child_with_shell_task(
             kill: Some(Box::new(|| {})),
         },
     )
-    .unwrap();
+    .expect("the register fixture result is required for this assertion");
     // This fixture models result timing without an actual process tree.
     manager.confirm_external_execution_stopped(&ticket);
     child.queue().push_sync(QueuedMessage::prompt(
@@ -140,7 +149,7 @@ fn child_with_shell_task(
         crate::messages::BaseMessage::human("run shell"),
     ));
     let reminder_calls = Arc::new(AtomicUsize::new(0));
-    let built = build_v2_subagent_context(
+    let built = crate::session::subagent::build_v2_subagent_context(
         Some(child.clone()),
         Box::new(ShellReminderLlm {
             manager: manager.clone(),
@@ -158,8 +167,12 @@ fn child_with_shell_task(
         None,
         None,
         None,
-        Some(agent_id_from_child_thread(
-            &child.store().thread_id.clone().unwrap(),
+        Some(crate::session::subagent::agent_id_from_child_thread(
+            &child
+                .store()
+                .thread_id
+                .clone()
+                .expect("the clone fixture result is required for this assertion"),
         )),
     );
     (child, manager, built, reminder_calls, ticket)
@@ -211,7 +224,7 @@ fn child_with_nested_task() -> (
             kill: Some(Box::new(|| {})),
         },
     )
-    .unwrap();
+    .expect("the register fixture result is required for this assertion");
     // This fixture models a nested result; it owns no external execution.
     manager.confirm_external_execution_stopped(&ticket);
     child.queue().push_sync(QueuedMessage::prompt(
@@ -229,8 +242,12 @@ fn nested_context(
     initial_calls: Arc<AtomicUsize>,
     result_calls: Arc<AtomicUsize>,
 ) -> V2SubagentContext {
-    let child_id = child.store().thread_id.clone().unwrap();
-    build_v2_subagent_context(
+    let child_id = child
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
+    crate::session::subagent::build_v2_subagent_context(
         Some(child.clone()),
         Box::new(NestedResultLlm {
             initial_calls,
@@ -246,7 +263,9 @@ fn nested_context(
         None,
         None,
         None,
-        Some(agent_id_from_child_thread(&child_id)),
+        Some(crate::session::subagent::agent_id_from_child_thread(
+            &child_id,
+        )),
     )
 }
 
@@ -258,7 +277,7 @@ fn settle_nested_task(child: &Session, manager: &TaskManager, ticket: &TaskRegis
     );
     assert!(manager
         .settle_completed(ticket, nested_result(), delivery)
-        .unwrap());
+        .expect("the settle completed fixture result is required for this assertion"));
 }
 
 fn nested_result() -> BackgroundTaskResult {
@@ -285,7 +304,7 @@ async fn child_without_active_tasks_settles_immediately() {
     let permit = permit_for(&child, &built.context);
     let outcome = tokio::time::timeout(
         Duration::from_secs(1),
-        run_child_until_terminal(built.context, 10, &child),
+        crate::session::subagent::child_runner::run_child_until_terminal(built.context, 10, &child),
     )
     .await
     .expect("no active tasks must not trigger a settlement wait");
@@ -304,7 +323,7 @@ async fn shell_reminder_settles_before_deadline() {
     let permit = permit_for(&child, &built.context);
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        run_child_until_terminal(built.context, 10, &child),
+        crate::session::subagent::child_runner::run_child_until_terminal(built.context, 10, &child),
     )
     .await
     .expect("settling on the reminder must not wait for the deadline");
@@ -335,7 +354,12 @@ async fn ignored_shell_reminder_settles_when_task_finishes_before_deadline() {
     let (child, manager, built, reminder_calls, ticket) = child_with_shell_task(false);
     let permit = permit_for(&child, &built.context);
     let owner = tokio::spawn(async move {
-        let outcome = run_child_until_terminal(built.context, 10, &child).await;
+        let outcome = crate::session::subagent::child_runner::run_child_until_terminal(
+            built.context,
+            10,
+            &child,
+        )
+        .await;
         if let Some(permit) = permit {
             permit.finish(Ok(()));
         }
@@ -343,7 +367,9 @@ async fn ignored_shell_reminder_settles_when_task_finishes_before_deadline() {
     });
     tokio::time::advance(Duration::from_secs(1)).await;
     assert!(manager.complete(&ticket, nested_result()));
-    let result = owner.await.unwrap();
+    let result = owner
+        .await
+        .expect("the owner fixture result is required for this assertion");
     assert!(matches!(result, ChildRunOutcome::Settled), "{result:?}");
     assert_eq!(reminder_calls.load(Ordering::SeqCst), 1);
 }
@@ -356,7 +382,12 @@ async fn exhausted_budget_settles_without_unprocessable_reminder() {
     let child_for_run = child.clone();
     let permit = permit_for(&child, &built.context);
     let owner = tokio::spawn(async move {
-        let outcome = run_child_until_terminal(built.context, 1, &child_for_run).await;
+        let outcome = crate::session::subagent::child_runner::run_child_until_terminal(
+            built.context,
+            1,
+            &child_for_run,
+        )
+        .await;
         if let Some(permit) = permit {
             permit.finish(Ok(()));
         }
@@ -364,7 +395,9 @@ async fn exhausted_budget_settles_without_unprocessable_reminder() {
     });
     tokio::time::advance(Duration::from_secs(1)).await;
     settle_task(&manager, &child, &ticket);
-    let outcome = owner.await.unwrap();
+    let outcome = owner
+        .await
+        .expect("the owner fixture result is required for this assertion");
     assert!(
         matches!(
             outcome,
@@ -384,7 +417,9 @@ async fn cancelled_child_does_not_emit_shell_reminder() {
     let (child, _manager, built, reminder_calls, _ticket) = child_with_shell_task(false);
     child.config().cancel_token.cancel();
     let permit = permit_for(&child, &built.context);
-    let outcome = run_child_until_terminal(built.context, 10, &child).await;
+    let outcome =
+        crate::session::subagent::child_runner::run_child_until_terminal(built.context, 10, &child)
+            .await;
     if let Some(permit) = permit {
         permit.finish(Ok(()));
     }
@@ -400,7 +435,7 @@ async fn permanent_shell_hands_off_at_deadline_without_notifications() {
     let started = tokio::time::Instant::now();
     let outcome = tokio::time::timeout(
         Duration::from_secs(125),
-        run_child_until_terminal(built.context, 10, &child),
+        crate::session::subagent::child_runner::run_child_until_terminal(built.context, 10, &child),
     )
     .await
     .expect("deadline must close the settlement wait");
@@ -432,7 +467,12 @@ async fn activity_and_new_tasks_do_not_reset_deadline() {
     let child_for_run = child.clone();
     let permit = permit_for(&child, &built.context);
     let mut owner = tokio::spawn(async move {
-        let outcome = run_child_until_terminal(built.context, 10, &child_for_run).await;
+        let outcome = crate::session::subagent::child_runner::run_child_until_terminal(
+            built.context,
+            10,
+            &child_for_run,
+        )
+        .await;
         if let Some(permit) = permit {
             permit.finish(Ok(()));
         }
@@ -460,7 +500,7 @@ async fn activity_and_new_tasks_do_not_reset_deadline() {
                 kill: Some(Box::new(|| {})),
             },
         )
-        .unwrap();
+        .expect("the register fixture result is required for this assertion");
         tokio::task::yield_now().await;
     }
     tokio::time::advance(Duration::from_secs(114)).await;
@@ -474,11 +514,11 @@ async fn activity_and_new_tasks_do_not_reset_deadline() {
             kill: Some(Box::new(|| {})),
         },
     )
-    .unwrap();
+    .expect("the register fixture result is required for this assertion");
     let outcome = tokio::time::timeout(Duration::from_secs(5), &mut owner)
         .await
         .expect("activity storm must not move D")
-        .unwrap();
+        .expect("the expect fixture result is required for this assertion");
     let ChildRunOutcome::HandedOff { receipt } = outcome else {
         panic!("expected handoff: {outcome:?}");
     };
@@ -504,7 +544,12 @@ async fn terminal_result_without_consumption_still_hands_off() {
     let run_child = child.clone();
     let permit = permit_for(&child, &built.context);
     let mut owner = tokio::spawn(async move {
-        let outcome = run_child_until_terminal(built.context, 10, &run_child).await;
+        let outcome = crate::session::subagent::child_runner::run_child_until_terminal(
+            built.context,
+            10,
+            &run_child,
+        )
+        .await;
         if let Some(permit) = permit {
             permit.finish(Ok(()));
         }
@@ -515,7 +560,7 @@ async fn terminal_result_without_consumption_still_hands_off() {
     let outcome = tokio::time::timeout(Duration::from_secs(125), &mut owner)
         .await
         .expect("unconsumed result must keep the bounded settlement obligation")
-        .unwrap();
+        .expect("the expect fixture result is required for this assertion");
     let ChildRunOutcome::HandedOff { receipt } = outcome else {
         panic!("expected handoff: {outcome:?}");
     };
@@ -533,7 +578,9 @@ fn settle_task(manager: &TaskManager, child: &Session, ticket: &TaskRegistration
     );
     let mut result = nested_result();
     result.task_id = ticket.task_id().to_owned();
-    assert!(manager.settle_completed(ticket, result, delivery).unwrap());
+    assert!(manager
+        .settle_completed(ticket, result, delivery)
+        .expect("the settle completed fixture result is required for this assertion"));
 }
 
 /// Receive 期间跨过 D：消息已落库并记录引用，但不再准入推理。
@@ -553,11 +600,11 @@ async fn receive_across_deadline_preserves_committed_result() {
     child
         .queue()
         .push_sync(QueuedMessage::prompt(MessageSource::UserInput, message));
-    let received = run_receive(ReceiveInput {
+    let received = crate::agent::stages::receive::run_receive(ReceiveInput {
         context: built.context.clone(),
     })
     .await
-    .unwrap();
+    .expect("the run receive fixture result is required for this assertion");
     assert_eq!(received.consumed_count, 1);
     assert!(child.transcript().read().entries().iter().any(|entry| entry
         .as_message()
@@ -592,7 +639,7 @@ async fn deadline_before_receive_does_not_consume_new_input() {
     child
         .queue()
         .push_sync(QueuedMessage::prompt(MessageSource::UserInput, message));
-    let outcome = run_react_loop(built.context.clone(), 10).await;
+    let outcome = crate::agent::stages::run_react_loop(built.context.clone(), 10).await;
     assert!(matches!(outcome, LoopResult::SettlementDue { .. }));
     assert!(child.queue().snapshot_sync().iter().any(|message| message
         .message()
@@ -635,7 +682,7 @@ async fn admitted_reason_completes_act_after_deadline() {
         crate::messages::BaseMessage::human("use a tool"),
     ));
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut built = build_v2_subagent_context(
+    let mut built = crate::session::subagent::build_v2_subagent_context(
         Some(child.clone()),
         Box::new(ToolThenExpireLlm {
             calls: calls.clone(),
@@ -650,14 +697,18 @@ async fn admitted_reason_completes_act_after_deadline() {
         None,
         None,
         None,
-        Some(agent_id_from_child_thread(
-            &child.store().thread_id.clone().unwrap(),
+        Some(crate::session::subagent::agent_id_from_child_thread(
+            &child
+                .store()
+                .thread_id
+                .clone()
+                .expect("the clone fixture result is required for this assertion"),
         )),
     );
     let window = Arc::new(ChildSettlementWindow::default());
     window.start();
     built.context.async_ctx.child_settlement = Some(window);
-    let outcome = run_react_loop(built.context, 10).await;
+    let outcome = crate::agent::stages::run_react_loop(built.context, 10).await;
     let LoopResult::SettlementDue {
         unprocessed_tool_calls,
     } = outcome
@@ -689,11 +740,16 @@ async fn max_iterations_keeps_reason_and_residual_handoff() {
             kill: Some(Box::new(|| {})),
         },
     )
-    .unwrap();
+    .expect("the register fixture result is required for this assertion");
     let run_child = child.clone();
     let permit = permit_for(&child, &built.context);
     let mut owner = tokio::spawn(async move {
-        let outcome = run_child_until_terminal(built.context, 1, &run_child).await;
+        let outcome = crate::session::subagent::child_runner::run_child_until_terminal(
+            built.context,
+            1,
+            &run_child,
+        )
+        .await;
         if let Some(permit) = permit {
             permit.finish(Ok(()));
         }
@@ -707,11 +763,13 @@ async fn max_iterations_keeps_reason_and_residual_handoff() {
     );
     let mut result = nested_result();
     result.task_id = "shell-task".into();
-    assert!(manager.settle_completed(&ticket, result, delivery).unwrap());
+    assert!(manager
+        .settle_completed(&ticket, result, delivery)
+        .expect("the settle completed fixture result is required for this assertion"));
     let outcome = tokio::time::timeout(Duration::from_secs(5), &mut owner)
         .await
         .expect("budget error must not wait for D")
-        .unwrap();
+        .expect("the expect fixture result is required for this assertion");
     let ChildRunOutcome::Failed { error, residual } = outcome else {
         panic!("expected typed failure: {outcome:?}");
     };
@@ -725,207 +783,7 @@ async fn max_iterations_keeps_reason_and_residual_handoff() {
         .iter()
         .any(|task| task.task_id == "shell-permanent"));
 }
-
-/// 截止后的晚结果不自动复活旧 run；显式 resume 读取同一队列并推理。
-#[tokio::test(start_paused = true)]
-async fn late_result_after_deadline_requires_explicit_resume() {
-    let (child, manager, built, initial_calls, result_calls, ticket) = child_with_nested_task();
-    let child_id = child.store().thread_id.clone().unwrap();
-    let first = run_sync_subagent(
-        &child_id,
-        "fixture",
-        "/tmp",
-        10,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        built,
-        child.clone(),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    assert!(
-        matches!(first, ChildRunOutcome::HandedOff { .. }),
-        "{first:?}"
-    );
-    settle_nested_task(&child, &manager, &ticket);
-    tokio::time::advance(Duration::from_secs(1)).await;
-    assert_eq!(
-        result_calls.load(Ordering::SeqCst),
-        0,
-        "旧 run 不得自动消费截止后的结果"
-    );
-    child.queue().push_sync(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        crate::messages::BaseMessage::human("continue explicitly"),
-    ));
-    let resumed = nested_context(&child, initial_calls.clone(), result_calls.clone());
-    let second = run_sync_subagent(
-        &child_id,
-        "fixture",
-        "/tmp",
-        10,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        resumed,
-        child.clone(),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    assert!(matches!(second, ChildRunOutcome::Settled), "{second:?}");
-    assert_eq!(result_calls.load(Ordering::SeqCst), 1);
-    assert!(super::super::util::extract_last_ai_text(&child).contains("processed nested result"));
-}
-
-/// 无 owner 的嵌入路径在 D 后显式失败，不无限等待。
-#[tokio::test(start_paused = true)]
-async fn missing_owner_reports_capability_failure() {
-    let manager = Arc::new(TaskManager::new());
-    let child = make_child(manager.clone(), false);
-    TaskManagerPort::register(
-        manager.as_ref(),
-        BgTaskRegistration {
-            task_id: "shell-task".into(),
-            kind: BgTaskKind::Shell,
-            summary: "permanent".into(),
-            pid: None,
-            kill: Some(Box::new(|| {})),
-        },
-    )
-    .unwrap();
-    child.queue().push_sync(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        crate::messages::BaseMessage::human("run shell"),
-    ));
-    let built = build_v2_subagent_context(
-        Some(child.clone()),
-        Box::new(NestedResultLlm {
-            initial_calls: Arc::new(AtomicUsize::new(0)),
-            result_calls: Arc::new(AtomicUsize::new(0)),
-        }),
-        Arc::new(MiddlewareChain::new()),
-        Vec::new(),
-        Arc::new(|_| true),
-        None,
-        "/tmp",
-        child.config().cancel_token.as_ref().clone(),
-        None,
-        None,
-        None,
-        None,
-        Some(agent_id_from_child_thread(
-            &child.store().thread_id.clone().unwrap(),
-        )),
-    );
-    let outcome = tokio::time::timeout(
-        Duration::from_secs(125),
-        run_child_until_terminal(built.context, 10, &child),
-    )
-    .await
-    .expect("missing owner must not wait beyond D");
-    let ChildRunOutcome::HandoffFailed { failure, .. } = outcome else {
-        panic!("expected capability failure: {outcome:?}");
-    };
-    assert!(failure
-        .error
-        .to_string()
-        .contains("handoff_capability_unavailable"));
-}
-
-/// 交接 canonical 写入失败：结构化 HandoffFailed，不返回 HandedOff 或成功。
-#[tokio::test(start_paused = true)]
-async fn handoff_persistence_failure_is_not_reported_as_handed_off() {
-    let manager = Arc::new(TaskManager::new());
-    let child_id = uuid::Uuid::now_v7().to_string();
-    let child = Session::new(
-        Arc::from("/tmp"),
-        FrozenContext::builder().build(),
-        Some(child_id.clone()),
-    );
-    let (owner, store) = bind_owner_store(&child, &manager);
-    child.set_subagent_host(SubagentHost {
-        task_manager: Some(manager.clone()),
-        child_owner: Some(owner.clone()),
-        ..Default::default()
-    });
-    store.restrict_to_history_read_only();
-    TaskManagerPort::register(
-        manager.as_ref(),
-        BgTaskRegistration {
-            task_id: "shell-task".into(),
-            kind: BgTaskKind::Shell,
-            summary: "permanent".into(),
-            pid: None,
-            kill: Some(Box::new(|| {})),
-        },
-    )
-    .unwrap();
-    child.queue().push_sync(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        crate::messages::BaseMessage::human("run shell"),
-    ));
-    let built = build_v2_subagent_context(
-        Some(child.clone()),
-        Box::new(NestedResultLlm {
-            initial_calls: Arc::new(AtomicUsize::new(0)),
-            result_calls: Arc::new(AtomicUsize::new(0)),
-        }),
-        Arc::new(MiddlewareChain::new()),
-        Vec::new(),
-        Arc::new(|_| true),
-        None,
-        "/tmp",
-        child.config().cancel_token.as_ref().clone(),
-        None,
-        None,
-        None,
-        None,
-        Some(agent_id_from_child_thread(&child_id)),
-    );
-    let permit = permit_for(&child, &built.context);
-    let outcome = tokio::time::timeout(
-        Duration::from_secs(125),
-        run_child_until_terminal(built.context, 10, &child),
-    )
-    .await
-    .expect("persistence failure must not wait beyond D");
-    if let Some(permit) = permit {
-        permit.finish(Err("handoff persistence failed".into()));
-    }
-    let ChildRunOutcome::HandoffFailed { failure, .. } = outcome else {
-        panic!("持久化失败不得伪装成交接: {outcome:?}");
-    };
-    assert!(
-        failure.error.to_string().contains("persistence")
-            || failure
-                .error
-                .to_string()
-                .contains("handoff_capability_unavailable")
-    );
-    assert!(
-        owner.receipt().is_none(),
-        "未提交的交接不得留 committed receipt"
-    );
-    assert!(owner.pending_receipt().is_some(), "冻结身份必须保留供重试");
-    assert_eq!(manager.active_count(), 1);
-}
+include!("child_runner_handoff_failure_test.rs");
 
 struct FixedLlm(&'static str);
 
@@ -943,8 +801,12 @@ impl ReactLLM for FixedLlm {
 
 /// 旧执行的 ContinueCurrentRun 控制消息不得驱动新 run。
 fn fixed_context(session: &Arc<Session>, answer: &'static str) -> V2SubagentContext {
-    let id = session.store().thread_id.clone().unwrap();
-    build_v2_subagent_context(
+    let id = session
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
+    crate::session::subagent::build_v2_subagent_context(
         Some(session.clone()),
         Box::new(FixedLlm(answer)),
         Arc::new(MiddlewareChain::new()),
@@ -957,7 +819,7 @@ fn fixed_context(session: &Arc<Session>, answer: &'static str) -> V2SubagentCont
         None,
         None,
         None,
-        Some(agent_id_from_child_thread(&id)),
+        Some(crate::session::subagent::agent_id_from_child_thread(&id)),
     )
 }
 
@@ -1013,7 +875,7 @@ async fn child_terminal_persists_context_usage_snapshot() {
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("child work"),
     ));
-    let built = build_v2_subagent_context(
+    let built = crate::session::subagent::build_v2_subagent_context(
         Some(child.clone()),
         Box::new(UsageSnapshotLlm),
         Arc::new(MiddlewareChain::new()),
@@ -1026,12 +888,14 @@ async fn child_terminal_persists_context_usage_snapshot() {
         None,
         None,
         None,
-        Some(agent_id_from_child_thread(&child_id)),
+        Some(crate::session::subagent::agent_id_from_child_thread(
+            &child_id,
+        )),
     );
 
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
-        run_child_until_terminal(built.context, 10, &child),
+        crate::session::subagent::child_runner::run_child_until_terminal(built.context, 10, &child),
     )
     .await
     .expect("child run must terminate");

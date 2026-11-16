@@ -5,29 +5,25 @@
 
 use super::super::LoginPanelMode;
 use super::super::auth::AuthController;
-use super::super::config_store::save_login_edit;
-use super::super::edit_handler::{LoginEditContext, enter_login_edit_mode, handle_login_edit_keys};
+
+use super::super::edit_handler::LoginEditContext;
 use super::super::edit_state::{LoginEditState, LoginErrorKind, LoginField, ProviderKind};
-use super::super::render::provider_type_display;
+
 use crate::acp_client::{AcpNotification, AcpTuiClient};
 use crate::config::{ConfigSource, PeriConfig, Profiles, ProviderModels};
-use crate::kit::atoms::{
-    ACP_CLIENT_HANDLE, CONFIG_SOURCE_HANDLE, NOTIFICATION, PERI_CONFIG_HANDLE, PROVIDER_LIST,
-};
-use peri_acp::transport::{
-    AcpTransport,
-    mpsc::{MpscServerTransport, mpsc_transport_pair},
-    types::{AcpError, IncomingMessage},
-};
+
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::mpsc::MpscServerTransport;
+use peri_acp::transport::types::AcpError;
+use peri_acp::transport::types::IncomingMessage;
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use serde_json::{Value, json};
-use std::{
-    future::Future,
-    path::PathBuf,
-    process::Command,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::future::Future;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 const CHILD_CASE: &str = "PERI_LOGIN_COMMIT_CASE";
 
@@ -40,7 +36,14 @@ impl Drop for ChildGuard {
 }
 
 fn isolated(name: &str, scenario: impl Future<Output = ()>) {
-    run_isolated(name, module_path!().split_once("::").unwrap().1, scenario);
+    run_isolated(
+        name,
+        module_path!()
+            .split_once("::")
+            .expect("isolated: the fixture text must contain its expected delimiter")
+            .1,
+        scenario,
+    );
 }
 
 /// 子模块（`commit::auth_save`）必须传自己的 `module_path!()`：宏在定义处展开，
@@ -50,32 +53,48 @@ pub(super) fn run_isolated(name: &str, test_module: &str, scenario: impl Future<
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap()
+            .expect("run isolated: isolated fixture workspace must remain accessible")
             .block_on(scenario);
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir()
+        .expect("run isolated: isolated fixture workspace must remain accessible");
     let log_path = dir.path().join("child.log");
     let home = dir.path().join("home");
     let cwd = dir.path().join("cwd");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::create_dir_all(&cwd).unwrap();
-    let log = std::fs::File::create(&log_path).unwrap();
-    let child = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", &format!("{test_module}::{name}"), "--nocapture"])
-        .env(CHILD_CASE, name)
-        .env("HOME", &home)
-        .env("USERPROFILE", &home)
-        .current_dir(&cwd)
-        .stdout(log.try_clone().unwrap())
-        .stderr(log)
-        .spawn()
-        .unwrap();
+    std::fs::create_dir_all(&home)
+        .expect("run isolated: isolated fixture workspace must remain accessible");
+    std::fs::create_dir_all(&cwd)
+        .expect("run isolated: isolated fixture workspace must remain accessible");
+    let log = std::fs::File::create(&log_path).expect(
+        "run isolated: the fixture storage and layout must support the requested operation",
+    );
+    let child = Command::new(
+        std::env::current_exe()
+            .expect("run isolated: isolated fixture workspace must remain accessible"),
+    )
+    .args(["--exact", &format!("{test_module}::{name}"), "--nocapture"])
+    .env(CHILD_CASE, name)
+    .env("HOME", &home)
+    .env("USERPROFILE", &home)
+    .current_dir(&cwd)
+    .stdout(
+        log.try_clone()
+            .expect("run isolated: the try_clone fixture operation uses valid inputs"),
+    )
+    .stderr(log)
+    .spawn()
+    .expect("run isolated: isolated fixture workspace must remain accessible");
     let mut guard = ChildGuard(child);
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        if let Some(status) = guard.0.try_wait().unwrap() {
-            let output = std::fs::read_to_string(&log_path).unwrap();
+        if let Some(status) = guard
+            .0
+            .try_wait()
+            .expect("run isolated: the try_wait fixture operation uses valid inputs")
+        {
+            let output = std::fs::read_to_string(&log_path)
+                .expect("run isolated: isolated fixture workspace must remain accessible");
             assert!(status.success(), "{name}: {status}\n{output}");
             assert!(
                 output.contains("1 passed"),
@@ -106,7 +125,7 @@ fn initial_config() -> PeriConfig {
             "haiku":{"provider":"plan", "contextWindow":4000, "effort":"max"}
         }
     }}))
-    .unwrap()
+    .expect("initial config: fixture JSON must match the expected schema")
 }
 
 struct Fixture {
@@ -126,21 +145,29 @@ impl Fixture {
     fn new(workspace: bool) -> Self {
         crate::kit::atoms::init_atoms();
         crate::i18n::init(Some("en"));
-        let dir = tempfile::tempdir().unwrap();
+        let dir =
+            tempfile::tempdir().expect("new: isolated fixture workspace must remain accessible");
         let cwd = dir.path().join("workspace");
-        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&cwd)
+            .expect("new: isolated fixture workspace must remain accessible");
         let global = dir.path().join("global.json");
         let initial = initial_config();
-        crate::config::save_to(&initial, &global).unwrap();
+        crate::config::save_to(&initial, &global)
+            .expect("new: the save_to fixture operation uses valid inputs");
         let target = if workspace {
             let target = cwd.join(".peri/settings.json");
-            crate::config::save_to(&PeriConfig::default(), &target).unwrap();
+            crate::config::save_to(&PeriConfig::default(), &target)
+                .expect("new: the save_to fixture operation uses valid inputs");
             target
         } else {
             global.clone()
         };
-        let original_global = std::fs::read(&global).unwrap();
-        let source = Arc::new(ConfigSource::load_at(&cwd, global.clone()).unwrap());
+        let original_global =
+            std::fs::read(&global).expect("new: isolated fixture workspace must remain accessible");
+        let source = Arc::new(
+            ConfigSource::load_at(&cwd, global.clone())
+                .expect("new: the load_at fixture operation uses valid inputs"),
+        );
         let mut loaded = source.loaded_merged();
         // Workspace defaults make serde apply `active_alias = opus`; keep the fixture's
         // effective alias stable across global/workspace cases.
@@ -148,7 +175,7 @@ impl Fixture {
         let config = Arc::new(parking_lot::RwLock::new(loaded));
         assert!(PERI_CONFIG_HANDLE.set(config.clone()).is_ok());
         assert!(CONFIG_SOURCE_HANDLE.set(source.clone()).is_ok());
-        let (transport, server) = mpsc_transport_pair();
+        let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
         let (client, tx, notifications) = AcpTuiClient::new(transport);
         client.spawn_pump(tx);
         let client = Arc::new(client);
@@ -168,14 +195,17 @@ impl Fixture {
     }
 
     fn revision(&self) -> crate::config::ConfigurationRevision {
-        self.source.snapshot().unwrap().revision()
+        self.source
+            .snapshot()
+            .expect("revision: the snapshot fixture operation uses valid inputs")
+            .revision()
     }
 
     async fn recv(&self) -> IncomingMessage {
         tokio::time::timeout(Duration::from_secs(3), self.server.recv())
             .await
             .expect("login save must reach real transport")
-            .unwrap()
+            .expect("recv: fixture task and request must complete successfully")
     }
 
     fn assert_disk_and_frame(&self, params: &Value) {
@@ -184,9 +214,11 @@ impl Fixture {
             "config lock must be released before RPC"
         );
         let expected = self.config.read().clone();
-        let wire: PeriConfig = serde_json::from_value(params["config"].clone()).unwrap();
+        let wire: PeriConfig = serde_json::from_value(params["config"].clone())
+            .expect("assert disk and frame: fixture JSON must match the expected schema");
         assert_eq!(wire, expected);
-        let loaded = ConfigSource::load_at(&self.cwd, self.global.clone()).unwrap();
+        let loaded = ConfigSource::load_at(&self.cwd, self.global.clone())
+            .expect("assert disk and frame: the load_at fixture operation uses valid inputs");
         assert_eq!(
             loaded.loaded_merged(),
             expected,
@@ -214,7 +246,7 @@ impl Fixture {
                 },
             )
             .await
-            .unwrap();
+            .expect("expect request: fixture task and request must complete successfully");
     }
 
     async fn finish(mut self) {
@@ -227,7 +259,7 @@ impl Fixture {
         assert!(
             tokio::time::timeout(Duration::from_secs(3), self.server.recv())
                 .await
-                .unwrap()
+                .expect("finish: the fixture channel must exchange its expected message")
                 .is_none()
         );
     }
@@ -257,7 +289,7 @@ fn login_commit_api_key_provider_writes_global_disk_and_frame() {
         async {
             let fixture = Fixture::new(false);
             let mut state = new_responses_state(&fixture);
-            assert!(save_login_edit(&mut state));
+            assert!(super::super::config_store::save_login_edit(&mut state));
 
             assert_eq!(
                 PROVIDER_LIST
@@ -276,7 +308,7 @@ fn login_commit_api_key_provider_writes_global_disk_and_frame() {
                 .providers
                 .iter()
                 .find(|provider| provider.id == "new-responses")
-                .unwrap();
+                .expect("login commit api key provider writes global disk and frame: fixture must contain the searched item");
             assert_eq!(provider.api_key, "new-key");
             assert_eq!(
                 provider.auth,
@@ -307,7 +339,7 @@ fn login_commit_api_key_provider_writes_workspace_and_preserves_global_bytes() {
         async {
             let fixture = Fixture::new(true);
             let mut state = new_responses_state(&fixture);
-            let saved = save_login_edit(&mut state);
+            let saved = super::super::config_store::save_login_edit(&mut state);
             assert!(
                 saved,
                 "workspace save failed: inline={:?} notice={:?}",
@@ -323,12 +355,12 @@ fn login_commit_api_key_provider_writes_workspace_and_preserves_global_bytes() {
             );
             fixture.expect_request(false).await;
             assert_eq!(
-                std::fs::read(&fixture.global).unwrap(),
+                std::fs::read(&fixture.global).expect("login commit api key provider writes workspace and preserves global bytes: the fixture storage and layout must support the requested operation"),
                 fixture.original_global,
                 "workspace save must not rewrite the global file"
             );
             assert!(fixture.target.exists());
-            let loaded = ConfigSource::load_at(&fixture.cwd, fixture.global.clone()).unwrap();
+            let loaded = ConfigSource::load_at(&fixture.cwd, fixture.global.clone()).expect("login commit api key provider writes workspace and preserves global bytes: the load_at fixture operation uses valid inputs");
             assert_eq!(loaded.loaded_merged(), fixture.config.read().clone());
             fixture.finish().await;
         },
@@ -343,8 +375,8 @@ fn login_commit_plan_reference_is_preserved_and_has_empty_api_key() {
             let fixture = Fixture::new(false);
             let cfg = fixture.config.read().clone();
             let mut state =
-                LoginEditState::edit_provider(&cfg, "plan", Some(fixture.revision())).unwrap();
-            assert!(save_login_edit(&mut state));
+                LoginEditState::edit_provider(&cfg, "plan", Some(fixture.revision())).expect("login commit plan reference is preserved and has empty api key: the edit_provider fixture operation uses valid inputs");
+            assert!(super::super::config_store::save_login_edit(&mut state));
             fixture.expect_request(false).await;
 
             let provider = fixture
@@ -355,13 +387,13 @@ fn login_commit_plan_reference_is_preserved_and_has_empty_api_key() {
                 .iter()
                 .find(|provider| provider.id == "plan")
                 .cloned()
-                .unwrap();
+                .expect("login commit plan reference is preserved and has empty api key: fixture must contain the searched item");
             assert!(matches!(
                 provider.auth,
                 Some(peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan { .. })
             ));
             assert!(provider.api_key.is_empty());
-            let encoded = serde_json::to_value(&provider).unwrap();
+            let encoded = serde_json::to_value(&provider).expect("login commit plan reference is preserved and has empty api key: fixture must serialize to JSON");
             assert_eq!(encoded["apiKey"], "");
             assert!(encoded.get("accessToken").is_none());
             assert!(encoded.get("refreshToken").is_none());
@@ -373,7 +405,7 @@ fn login_commit_plan_reference_is_preserved_and_has_empty_api_key() {
             assert_eq!(encoded["auth"]["account"], "work");
             assert_eq!(encoded["auth"]["subject"], "subject");
             assert_eq!(encoded["auth"]["clientId"], "client");
-            let disk = ConfigSource::load_at(&fixture.cwd, fixture.global.clone()).unwrap();
+            let disk = ConfigSource::load_at(&fixture.cwd, fixture.global.clone()).expect("login commit plan reference is preserved and has empty api key: the load_at fixture operation uses valid inputs");
             let disk_provider = disk
                 .loaded_merged()
                 .config
@@ -381,7 +413,7 @@ fn login_commit_plan_reference_is_preserved_and_has_empty_api_key() {
                 .into_iter()
                 .find(|provider| provider.id == "plan")
                 .expect("saved provider must be on disk");
-            let disk_encoded = serde_json::to_value(&disk_provider).unwrap();
+            let disk_encoded = serde_json::to_value(&disk_provider).expect("login commit plan reference is preserved and has empty api key: fixture must serialize to JSON");
             assert_eq!(disk_encoded["auth"]["account"], "work");
             assert_eq!(disk_encoded["auth"]["subject"], "subject");
             assert_eq!(disk_encoded["auth"]["clientId"], "client");
@@ -403,10 +435,10 @@ fn login_commit_save_failure_keeps_memory_disk_and_pushes_nothing() {
             let fixture = Fixture::new(false);
             let mut state = new_responses_state(&fixture);
             let before = fixture.config.read().clone();
-            std::fs::remove_file(&fixture.target).unwrap();
-            std::fs::create_dir(&fixture.target).unwrap();
+            std::fs::remove_file(&fixture.target).expect("login commit save failure keeps memory disk and pushes nothing: the fixture storage and layout must support the requested operation");
+            std::fs::create_dir(&fixture.target).expect("login commit save failure keeps memory disk and pushes nothing: isolated fixture workspace must remain accessible");
 
-            assert!(!save_login_edit(&mut state));
+            assert!(!super::super::config_store::save_login_edit(&mut state));
             assert_eq!(*fixture.config.read(), before);
             assert!(
                 state.inline_error.is_none(),
@@ -444,7 +476,7 @@ fn login_commit_revision_conflict_does_not_overwrite_external_write() {
                 .save(fixture.revision(), &external)
                 .expect("external save");
 
-            assert!(!save_login_edit(&mut state));
+            assert!(!super::super::config_store::save_login_edit(&mut state));
             let error = state
                 .inline_error
                 .as_ref()
@@ -456,7 +488,7 @@ fn login_commit_revision_conflict_does_not_overwrite_external_write() {
                 "冲突时不得发布旧草稿或外部配置"
             );
             let disk = ConfigSource::load_at(&fixture.cwd, fixture.global.clone())
-                .unwrap()
+                .expect("login commit revision conflict does not overwrite external write: the load_at fixture operation uses valid inputs")
                 .loaded_merged();
             assert_eq!(disk.config.active_alias, "haiku");
             assert!(
@@ -478,7 +510,7 @@ fn login_commit_acp_failure_reports_sync_warning_after_saved() {
         async {
             let fixture = Fixture::new(false);
             let mut state = new_responses_state(&fixture);
-            assert!(save_login_edit(&mut state));
+            assert!(super::super::config_store::save_login_edit(&mut state));
             fixture.expect_request(true).await;
 
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -509,7 +541,7 @@ fn login_commit_acp_failure_reports_sync_warning_after_saved() {
                 "ACP failure must not roll back the saved settings"
             );
             let disk = ConfigSource::load_at(&fixture.cwd, fixture.global.clone())
-                .unwrap()
+                .expect("login commit acp failure reports sync warning after saved: the load_at fixture operation uses valid inputs")
                 .loaded_merged();
             assert_eq!(disk, saved);
             fixture.finish().await;
@@ -520,187 +552,17 @@ fn login_commit_acp_failure_reports_sync_warning_after_saved() {
 #[test]
 fn login_commit_browse_label_keeps_unknown_type_raw() {
     assert_eq!(
-        provider_type_display("openai_responses"),
+        super::super::render::provider_type_display("openai_responses"),
         "OpenAI Responses"
     );
-    assert_eq!(provider_type_display("future_type"), "future_type");
+    assert_eq!(
+        super::super::render::provider_type_display("future_type"),
+        "future_type"
+    );
 }
 
 fn ctrl_s() -> Event {
     Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
-}
-
-/// 多行粘贴被清洗后仍可能改变 provider 字段：错误未修正前不得落盘或推送 ACP。
-#[test]
-fn login_commit_multiline_provider_paste_blocks_save_until_corrected() {
-    isolated(
-        "login_commit_multiline_provider_paste_blocks_save_until_corrected",
-        async {
-            let fixture = Fixture::new(false);
-            let mut state = new_responses_state(&fixture);
-            state.base_url = "https://api.openai.com/v1/responses".into();
-            let config = Arc::clone(&fixture.config);
-            let target = fixture.target.clone();
-            let before = config.read().clone();
-            let disk_before = std::fs::read(&target).unwrap();
-
-            let (tx, rx) = std::sync::mpsc::channel();
-            super::mount_edit_state(state, LoginField::BaseUrl, 2, move |index, panel| {
-                if index != 0 {
-                    return;
-                }
-                // 光标置于末尾：清洗后的 "7" 追加到 Base URL。
-                let base_url = panel
-                    .edit_state
-                    .read()
-                    .as_ref()
-                    .unwrap()
-                    .base_url
-                    .chars()
-                    .count();
-                *panel.edit_cursor.write() = base_url;
-                let paste_result = panel.event(Event::Paste("7\n".into()), super::TEST_AREA);
-                let pasted = {
-                    let guard = panel.edit_state.read();
-                    let state = guard.as_ref().unwrap();
-                    (
-                        state.base_url.clone(),
-                        state
-                            .inline_error
-                            .as_ref()
-                            .map(|error| (error.field, error.message.clone())),
-                    )
-                };
-
-                let save_result = panel.event(ctrl_s(), super::TEST_AREA);
-                let blocked = {
-                    let guard = panel.edit_state.read();
-                    let state = guard.as_ref();
-                    (
-                        *panel.mode.read(),
-                        *panel.edit_focus.read(),
-                        state.and_then(|state| {
-                            state
-                                .inline_error
-                                .as_ref()
-                                .map(|error| error.message.clone())
-                        }),
-                        state.map(|state| state.base_url.clone()),
-                    )
-                };
-                let handle_unchanged = *config.read() == before;
-                let disk_unchanged = std::fs::read(&target).unwrap() == disk_before;
-                let listed_after_block = PROVIDER_LIST
-                    .state()
-                    .read()
-                    .iter()
-                    .any(|provider| provider.id == "new-responses");
-                let notice = NOTIFICATION
-                    .state()
-                    .read()
-                    .as_ref()
-                    .map(|note| note.message.clone());
-
-                // 修正：删除粘贴进来的数字，错误随实际编辑清除。
-                let _ = panel.event(super::key(KeyCode::Backspace), super::TEST_AREA);
-                let corrected = {
-                    let guard = panel.edit_state.read();
-                    let state = guard.as_ref().unwrap();
-                    (state.base_url.clone(), state.inline_error.is_some())
-                };
-                let corrected_result = panel.event(ctrl_s(), super::TEST_AREA);
-                let finished = (
-                    *panel.mode.read(),
-                    panel.edit_state.read().is_none(),
-                    config.read().config.profiles.clone(),
-                );
-                let listed_after_save = PROVIDER_LIST
-                    .state()
-                    .read()
-                    .iter()
-                    .any(|provider| provider.id == "new-responses");
-                tx.send((
-                    paste_result,
-                    pasted,
-                    save_result,
-                    blocked,
-                    handle_unchanged,
-                    disk_unchanged,
-                    listed_after_block,
-                    notice,
-                    corrected,
-                    corrected_result,
-                    finished,
-                    listed_after_save,
-                ))
-                .unwrap();
-            });
-
-            let (
-                paste_result,
-                pasted,
-                save_result,
-                blocked,
-                handle_unchanged,
-                disk_unchanged,
-                listed_after_block,
-                notice,
-                corrected,
-                corrected_result,
-                finished,
-                listed_after_save,
-            ) = rx.try_recv().unwrap();
-            let single_line = crate::i18n::tr("login-error-single-line");
-
-            assert_eq!(paste_result, ratatui_kit::prelude::EventResult::Consumed);
-            assert_eq!(
-                pasted.0, "https://api.openai.com/v1/responses7",
-                "清洗后的单行内容进入草稿"
-            );
-            assert_eq!(pasted.1, Some((LoginField::BaseUrl, single_line.clone())));
-            assert_eq!(save_result, ratatui_kit::prelude::EventResult::Consumed);
-            assert_eq!(
-                blocked,
-                (
-                    LoginPanelMode::Edit,
-                    LoginField::BaseUrl,
-                    Some(single_line.clone()),
-                    Some("https://api.openai.com/v1/responses7".to_string()),
-                ),
-                "错误未修正时必须保持编辑视图并聚焦出错字段"
-            );
-            assert!(handle_unchanged, "拒绝保存不得改动内存配置");
-            assert!(disk_unchanged, "拒绝保存不得写盘");
-            assert!(!listed_after_block, "拒绝保存不得发布 Provider 投影");
-            assert_eq!(
-                notice,
-                Some(single_line.clone()),
-                "拒绝保存必须显示既有字段错误"
-            );
-
-            assert_eq!(
-                corrected,
-                ("https://api.openai.com/v1/responses".to_string(), false)
-            );
-            assert_eq!(
-                corrected_result,
-                ratatui_kit::prelude::EventResult::Consumed
-            );
-            assert_eq!(
-                finished,
-                (
-                    LoginPanelMode::Browse,
-                    true,
-                    initial_config().config.profiles,
-                ),
-                "修正后保存成功并退出编辑，且不改动任何档位"
-            );
-            assert!(listed_after_save, "成功保存后发布 Provider 投影");
-
-            fixture.expect_request(false).await;
-            fixture.finish().await;
-        },
-    );
 }
 
 #[test]
@@ -709,9 +571,9 @@ fn login_commit_rename_preserves_profile_parameters() {
         let fixture = Fixture::new(false);
         let cfg = fixture.config.read().clone();
         let mut state =
-            LoginEditState::edit_provider(&cfg, "base", Some(fixture.revision())).unwrap();
+            LoginEditState::edit_provider(&cfg, "base", Some(fixture.revision())).expect("login commit rename preserves profile parameters: the edit_provider fixture operation uses valid inputs");
         state.provider_id = "base-renamed".into();
-        assert!(save_login_edit(&mut state));
+        assert!(super::super::config_store::save_login_edit(&mut state));
         fixture.expect_request(false).await;
 
         let saved = fixture.config.read().clone();
@@ -725,7 +587,7 @@ fn login_commit_rename_preserves_profile_parameters() {
         );
         let baseline = initial_config();
         for alias in Profiles::ALL {
-            let mut expected = baseline.config.profiles.get(alias).unwrap().clone();
+            let mut expected = baseline.config.profiles.get(alias).expect("login commit rename preserves profile parameters: fixture must contain the requested entry").clone();
             if expected.provider == "base" {
                 expected.provider = "base-renamed".to_string();
             }
@@ -735,7 +597,7 @@ fn login_commit_rename_preserves_profile_parameters() {
                 "{alias} must keep model/window/effort; only its reference is renamed"
             );
         }
-        let disk = ConfigSource::load_at(&fixture.cwd, fixture.global.clone()).unwrap();
+        let disk = ConfigSource::load_at(&fixture.cwd, fixture.global.clone()).expect("login commit rename preserves profile parameters: the load_at fixture operation uses valid inputs");
         assert_eq!(disk.loaded_merged(), saved);
         fixture.finish().await;
     });
@@ -749,14 +611,14 @@ fn login_commit_plan_reference_saves_workspace_without_rewriting_global() {
             let fixture = Fixture::new(true);
             let cfg = fixture.config.read().clone();
             let mut state =
-                LoginEditState::edit_provider(&cfg, "plan", Some(fixture.revision())).unwrap();
-            assert!(save_login_edit(&mut state));
+                LoginEditState::edit_provider(&cfg, "plan", Some(fixture.revision())).expect("login commit plan reference saves workspace without rewriting global: the edit_provider fixture operation uses valid inputs");
+            assert!(super::super::config_store::save_login_edit(&mut state));
             fixture.expect_request(false).await;
             assert_eq!(
-                std::fs::read(&fixture.global).unwrap(),
+                std::fs::read(&fixture.global).expect("login commit plan reference saves workspace without rewriting global: the fixture storage and layout must support the requested operation"),
                 fixture.original_global
             );
-            let loaded = ConfigSource::load_at(&fixture.cwd, fixture.global.clone()).unwrap();
+            let loaded = ConfigSource::load_at(&fixture.cwd, fixture.global.clone()).expect("login commit plan reference saves workspace without rewriting global: the load_at fixture operation uses valid inputs");
             assert_eq!(loaded.loaded_merged(), fixture.config.read().clone());
             let provider = fixture
                 .config
@@ -766,7 +628,7 @@ fn login_commit_plan_reference_saves_workspace_without_rewriting_global() {
                 .iter()
                 .find(|provider| provider.id == "plan")
                 .cloned()
-                .unwrap();
+                .expect("login commit plan reference saves workspace without rewriting global: fixture must contain the searched item");
             assert!(matches!(
                 provider.auth,
                 Some(peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan { .. })
@@ -786,14 +648,14 @@ fn login_commit_conflict_reload_rebases_and_preserves_external_write() {
             let fixture = Fixture::new(false);
             let cfg = fixture.config.read().clone();
             let mut state =
-                LoginEditState::edit_provider(&cfg, "base", Some(fixture.revision())).unwrap();
+                LoginEditState::edit_provider(&cfg, "base", Some(fixture.revision())).expect("login commit conflict reload rebases and preserves external write: the edit_provider fixture operation uses valid inputs");
             let stale_revision = state.expected_revision;
             state.api_key = "stale-key".into();
 
             // 1) 普通字段校验错误：不得被归类为 revision 冲突。
             let provider_id = state.provider_id.clone();
             state.provider_id.clear();
-            assert!(!save_login_edit(&mut state));
+            assert!(!super::super::config_store::save_login_edit(&mut state));
             let field_error = state
                 .inline_error
                 .as_ref()
@@ -817,7 +679,7 @@ fn login_commit_conflict_reload_rebases_and_preserves_external_write() {
                 .source
                 .save(fixture.revision(), &external)
                 .expect("external save");
-            assert!(!save_login_edit(&mut state));
+            assert!(!super::super::config_store::save_login_edit(&mut state));
             let conflict = state
                 .inline_error
                 .as_ref()
@@ -843,7 +705,7 @@ fn login_commit_conflict_reload_rebases_and_preserves_external_write() {
             let mut focus = LoginField::Confirm;
             let mut cursor = 0;
             let mut auth = AuthController::new();
-            let _ = handle_login_edit_keys(
+            let _ = super::super::edit_handler::handle_login_edit_keys(
                 LoginEditContext {
                     mode: &mut mode,
                     edit_state: &mut edit_state,
@@ -875,10 +737,10 @@ fn login_commit_conflict_reload_rebases_and_preserves_external_write() {
             );
 
             // 4) 用新 revision 保存成功；外部值保持，旧草稿值不落盘。
-            assert!(save_login_edit(&mut recovered));
+            assert!(super::super::config_store::save_login_edit(&mut recovered));
             fixture.expect_request(false).await;
             let disk = ConfigSource::load_at(&fixture.cwd, fixture.global.clone())
-                .unwrap()
+                .expect("login commit conflict reload rebases and preserves external write: the load_at fixture operation uses valid inputs")
                 .loaded_merged();
             assert_eq!(disk.config.active_alias, "haiku");
             assert_eq!(disk.config.providers[0].api_key, "external-key");
@@ -904,7 +766,7 @@ fn login_edit_existing_provider_defaults_focus_to_provider_id() {
             let mut edit_state = None;
             let mut focus = LoginField::ProviderType;
             let mut cursor = 0;
-            assert!(enter_login_edit_mode(
+            assert!(super::super::edit_handler::enter_login_edit_mode(
                 &mut edit_state,
                 &mut focus,
                 &mut cursor,
@@ -981,3 +843,16 @@ fn login_commit_mouse_confirm_saves_provider() {
 
 #[path = "auth_save_commit_test.rs"]
 mod auth_save;
+
+use crate::kit::atoms::ACP_CLIENT_HANDLE;
+
+use crate::kit::atoms::CONFIG_SOURCE_HANDLE;
+
+use crate::kit::atoms::NOTIFICATION;
+
+use crate::kit::atoms::PERI_CONFIG_HANDLE;
+
+use crate::kit::atoms::PROVIDER_LIST;
+
+#[path = "commit_test/paste_validation.rs"]
+mod paste_validation;

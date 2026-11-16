@@ -1,14 +1,27 @@
-use super::*;
+use crate::host::requests::tests::HomeDirGuard;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::provider::LlmProvider;
+use peri_acp_types::plugin::InstallScope;
+
+use serde_json::json;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 async fn identity_config(tmp: &tempfile::TempDir) -> AcpServerConfig {
-    let config = make_peri_config_with_provider(make_provider_config(
-        "fixture",
-        "openai",
-        "fixture-unused",
-        "fixture-model",
-    ));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "fixture",
+            "openai",
+            "fixture-unused",
+            "fixture-model",
+        ),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, tmp).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(config, provider, tmp).await;
     cfg.plugin_manager = Arc::new(peri_middlewares::host_ports::PluginManager);
     cfg
 }
@@ -39,13 +52,17 @@ async fn plugin_rpc_selected_scope_preserves_other_root_with_same_id() {
         let claude_dir = cfg.plugin_manager.claude_home();
         let cache = cfg.plugin_manager.cache_dir();
         let mut sessions = HashMap::new();
-        let session_id =
-            register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
+        let session_id = crate::host::requests::tests::register_session_with_history(
+            &mut sessions,
+            tmp.path().to_str().unwrap(),
+            &cfg,
+        )
+        .await;
         let cwd = PathBuf::from(&sessions[&session_id].cwd);
         let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
         for (scope, version) in [("user", "1.0.0"), ("project", "2.0.0")] {
             seed_identity_marketplace(&cache, version);
-            handle_request("plugin/install", &json!({"name": "shared", "marketplace": "identity-market", "scope": scope, "sessionId": session_id}), &cfg, &mut sessions, &transport).await.unwrap();
+            crate::host::requests::handle_request("plugin/install", &json!({"name": "shared", "marketplace": "identity-market", "scope": scope, "sessionId": session_id}), &cfg, &mut sessions, &transport).await.unwrap();
         }
         cfg.plugin_loaded =
             peri_middlewares::plugin::load_enabled_plugins(&claude_dir, Some(&cwd)).unwrap();
@@ -54,7 +71,7 @@ async fn plugin_rpc_selected_scope_preserves_other_root_with_same_id() {
             cfg.plugin_loaded[0].install_path,
             cfg.plugin_loaded[1].install_path
         );
-        let listed = handle_request(
+        let listed = crate::host::requests::handle_request(
             "plugin/list",
             &json!({"sessionId": session_id}),
             &cfg,
@@ -98,9 +115,15 @@ async fn plugin_rpc_selected_scope_preserves_other_root_with_same_id() {
         if let Some(scope) = requested_scope {
             params["scope"] = json!(scope);
         }
-        handle_request("plugin/update", &params, &cfg, &mut sessions, &transport)
-            .await
-            .unwrap();
+        crate::host::requests::handle_request(
+            "plugin/update",
+            &params,
+            &cfg,
+            &mut sessions,
+            &transport,
+        )
+        .await
+        .unwrap();
         let after_update =
             peri_middlewares::plugin::load_installed_plugins(Some(&records_path)).unwrap();
         assert_eq!(after_update.plugins.len(), 2);
@@ -123,9 +146,15 @@ async fn plugin_rpc_selected_scope_preserves_other_root_with_same_id() {
         );
         assert_eq!(std::fs::read(&manifest_path).unwrap(), original_manifest);
         assert_eq!(std::fs::read(&settings_path).unwrap(), original_settings);
-        handle_request("plugin/uninstall", &params, &cfg, &mut sessions, &transport)
-            .await
-            .unwrap();
+        crate::host::requests::handle_request(
+            "plugin/uninstall",
+            &params,
+            &cfg,
+            &mut sessions,
+            &transport,
+        )
+        .await
+        .unwrap();
         let after_uninstall =
             peri_middlewares::plugin::load_installed_plugins(Some(&records_path)).unwrap();
         assert_eq!(after_uninstall.plugins.len(), 1);
@@ -150,11 +179,15 @@ async fn plugin_rpc_missing_or_ambiguous_identity_is_fail_closed() {
     let claude_dir = cfg.plugin_manager.claude_home();
     let cache = cfg.plugin_manager.cache_dir();
     let mut sessions = HashMap::new();
-    let session_id =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
+    let session_id = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     seed_identity_marketplace(&cache, "1.0.0");
-    handle_request("plugin/install", &json!({"name": "shared", "marketplace": "identity-market", "scope": "project", "sessionId": session_id}), &cfg, &mut sessions, &transport).await.unwrap();
+    crate::host::requests::handle_request("plugin/install", &json!({"name": "shared", "marketplace": "identity-market", "scope": "project", "sessionId": session_id}), &cfg, &mut sessions, &transport).await.unwrap();
     let records_path = claude_dir.join("plugins/installed_plugins.json");
     let original = std::fs::read(&records_path).unwrap();
     seed_identity_marketplace(&cache, "3.0.0");
@@ -165,11 +198,15 @@ async fn plugin_rpc_missing_or_ambiguous_identity_is_fail_closed() {
         json!({"pluginId": "shared@identity-market", "scope": "managed", "sessionId": session_id}),
     ] {
         for method in ["plugin/update", "plugin/uninstall"] {
-            assert!(
-                handle_request(method, &params, &cfg, &mut sessions, &transport)
-                    .await
-                    .is_err()
-            );
+            assert!(crate::host::requests::handle_request(
+                method,
+                &params,
+                &cfg,
+                &mut sessions,
+                &transport
+            )
+            .await
+            .is_err());
             assert_eq!(std::fs::read(&records_path).unwrap(), original);
             assert!(!claude_dir
                 .join("plugins/cache/identity-market/shared/3.0.0")
@@ -185,9 +222,10 @@ async fn plugin_rpc_missing_or_ambiguous_identity_is_fail_closed() {
     let params =
         json!({"pluginId": "shared@identity-market", "scope": "project", "sessionId": session_id});
     for method in ["plugin/update", "plugin/uninstall", "plugin/toggle"] {
-        let error = handle_request(method, &params, &cfg, &mut sessions, &transport)
-            .await
-            .unwrap_err();
+        let error =
+            crate::host::requests::handle_request(method, &params, &cfg, &mut sessions, &transport)
+                .await
+                .unwrap_err();
         assert_eq!(error.code, -32603);
         assert_eq!(std::fs::read(&records_path).unwrap(), duplicate);
         assert!(!claude_dir

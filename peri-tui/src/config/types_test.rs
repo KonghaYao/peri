@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    AppConfig, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels,
+    SaveEffectiveError,
+};
 
 // ── ProfileConfig 默认值 ───────────────────────────────────────────────────
 
@@ -33,8 +36,10 @@ fn test_profiles_serde_roundtrip_four_tiers() {
         p.max_tokens = 64000;
         p.context_1m = true;
     }
-    let json = serde_json::to_string(&profiles).unwrap();
-    let back: Profiles = serde_json::from_str(&json).unwrap();
+    let json = serde_json::to_string(&profiles)
+        .expect("profiles serde roundtrip four tiers: fixture must serialize to JSON");
+    let back: Profiles = serde_json::from_str(&json)
+        .expect("profiles serde roundtrip four tiers: fixture JSON must match the expected schema");
     assert_eq!(back.opus.effort, "max");
     assert_eq!(back.opus.max_tokens, 64000);
     assert!(back.opus.context_1m);
@@ -48,7 +53,9 @@ fn test_profiles_serde_roundtrip_four_tiers() {
 fn test_app_config_old_thinking_absorbed_into_extra() {
     // 旧 thinking 字段缺失时为 None 语义：不 panic，且不产生 thinking 字段
     let json = r#"{"active_alias": "opus", "providers": []}"#;
-    let cfg: AppConfig = serde_json::from_str(json).unwrap();
+    let cfg: AppConfig = serde_json::from_str(json).expect(
+        "app config old thinking absorbed into extra: fixture JSON must match the expected schema",
+    );
     assert!(!cfg.extra.contains_key("thinking"));
 }
 
@@ -59,12 +66,15 @@ fn test_app_config_thinking_roundtrip_absorbed() {
             "providers": [],
             "thinking": {"enabled": true, "budget_tokens": 8000}
         }"#;
-    let cfg: AppConfig = serde_json::from_str(json).unwrap();
+    let cfg: AppConfig = serde_json::from_str(json).expect(
+        "app config thinking roundtrip absorbed: fixture JSON must match the expected schema",
+    );
     // 旧 thinking 键被 extra 捕获，不回写
     assert!(cfg.extra.contains_key("thinking"));
 
     // 序列化后不再含顶层 thinking 字段（extra 由 flatten 保留原始键）
-    let out = serde_json::to_string(&cfg).unwrap();
+    let out = serde_json::to_string(&cfg)
+        .expect("app config thinking roundtrip absorbed: fixture must serialize to JSON");
     assert!(out.contains("\"active_alias\""));
 }
 
@@ -78,9 +88,9 @@ fn test_provider_models_get_model_known_aliases() {
         haiku: "h".to_string(),
         fable: String::new(),
     };
-    assert_eq!(models.get_model("opus"), Some("o"));
-    assert_eq!(models.get_model("sonnet"), Some("s"));
-    assert_eq!(models.get_model("haiku"), Some("h"));
+    assert_eq!(models.model("opus"), Some("o"));
+    assert_eq!(models.model("sonnet"), Some("s"));
+    assert_eq!(models.model("haiku"), Some("h"));
 }
 
 #[test]
@@ -92,14 +102,14 @@ fn test_provider_models_fable_falls_back_to_opus() {
         fable: String::new(),
     };
     // fable 空 → 回退 opus
-    assert_eq!(models.get_model("fable"), Some("o"));
+    assert_eq!(models.model("fable"), Some("o"));
     let models2 = ProviderModels {
         opus: "o".to_string(),
         sonnet: "s".to_string(),
         haiku: "h".to_string(),
         fable: "f".to_string(),
     };
-    assert_eq!(models2.get_model("fable"), Some("f"));
+    assert_eq!(models2.model("fable"), Some("f"));
 }
 
 #[test]
@@ -110,9 +120,9 @@ fn test_provider_models_get_model_case_insensitive() {
         haiku: "h".to_string(),
         fable: String::new(),
     };
-    assert_eq!(models.get_model("Opus"), Some("o"));
-    assert_eq!(models.get_model("SONNET"), Some("s"));
-    assert_eq!(models.get_model("Haiku"), Some("h"));
+    assert_eq!(models.model("Opus"), Some("o"));
+    assert_eq!(models.model("SONNET"), Some("s"));
+    assert_eq!(models.model("Haiku"), Some("h"));
 }
 
 #[test]
@@ -123,7 +133,7 @@ fn test_provider_models_get_model_unknown_returns_none() {
         haiku: "h".to_string(),
         fable: String::new(),
     };
-    assert_eq!(models.get_model("turbo"), None);
+    assert_eq!(models.model("turbo"), None);
 }
 
 #[test]
@@ -152,8 +162,11 @@ fn test_provider_config_models_serde_roundtrip() {
         },
         extra: Default::default(),
     };
-    let json = serde_json::to_string(&p).unwrap();
-    let back: ProviderConfig = serde_json::from_str(&json).unwrap();
+    let json = serde_json::to_string(&p)
+        .expect("provider config models serde roundtrip: fixture must serialize to JSON");
+    let back: ProviderConfig = serde_json::from_str(&json).expect(
+        "provider config models serde roundtrip: fixture JSON must match the expected schema",
+    );
     assert_eq!(back.models.opus, "claude-opus-4-7");
     assert_eq!(back.models.sonnet, "claude-sonnet-4-6");
     assert_eq!(back.models.haiku, "claude-haiku-4-5");
@@ -163,7 +176,9 @@ fn test_provider_config_models_serde_roundtrip() {
 fn test_app_config_active_provider_id_serde_absorbed() {
     // 旧 active_provider_id 键被 extra 吸收（不再作为字段）
     let json = r#"{"active_alias": "opus", "active_provider_id": "anthropic", "providers": []}"#;
-    let cfg: AppConfig = serde_json::from_str(json).unwrap();
+    let cfg: AppConfig = serde_json::from_str(json).expect(
+        "app config active provider id serde absorbed: fixture JSON must match the expected schema",
+    );
     assert_eq!(
         cfg.extra.get("active_provider_id").and_then(|v| v.as_str()),
         Some("anthropic")
@@ -173,7 +188,8 @@ fn test_app_config_active_provider_id_serde_absorbed() {
 #[test]
 fn test_app_config_old_fields_ignored() {
     let json = r#"{"provider_id": "old", "model_id": "old-model", "model_aliases": {"opus": {"provider_id": "x", "model_id": "y"}}, "providers": []}"#;
-    let cfg: AppConfig = serde_json::from_str(json).unwrap();
+    let cfg: AppConfig = serde_json::from_str(json)
+        .expect("app config old fields ignored: fixture JSON must match the expected schema");
     // 旧字段被 extra 吸收
     assert!(cfg.extra.contains_key("provider_id"));
     assert!(cfg.extra.contains_key("model_id"));
@@ -193,11 +209,15 @@ fn test_app_config_env_serde_roundtrip() {
         ..Default::default()
     };
 
-    let json = serde_json::to_string(&cfg).unwrap();
-    let back: AppConfig = serde_json::from_str(&json).unwrap();
+    let json = serde_json::to_string(&cfg)
+        .expect("app config env serde roundtrip: fixture must serialize to JSON");
+    let back: AppConfig = serde_json::from_str(&json)
+        .expect("app config env serde roundtrip: fixture JSON must match the expected schema");
 
     assert!(back.env.is_some());
-    let env_back = back.env.unwrap();
+    let env_back = back.env.expect(
+        "app config env serde roundtrip: the fixture establishes back.env before this assertion",
+    );
     assert_eq!(
         env_back.get("ANTHROPIC_API_KEY"),
         Some(&"sk-ant-123".to_string())
@@ -209,14 +229,16 @@ fn test_app_config_env_serde_roundtrip() {
 fn test_app_config_env_optional() {
     // env 字段缺失时应为 None
     let json = r#"{"active_alias": "opus", "providers": []}"#;
-    let cfg: AppConfig = serde_json::from_str(json).unwrap();
+    let cfg: AppConfig = serde_json::from_str(json)
+        .expect("app config env optional: fixture JSON must match the expected schema");
     assert!(cfg.env.is_none());
 }
 
 #[test]
 fn test_app_config_env_skip_when_none() {
     let cfg = AppConfig::default(); // env = None
-    let out = serde_json::to_string(&cfg).unwrap();
+    let out = serde_json::to_string(&cfg)
+        .expect("app config env skip when none: fixture must serialize to JSON");
     // skip_serializing_if = "Option::is_none"，所以 env 字段不应出现
     assert!(!out.contains("env"), "env should be absent when None");
 }
@@ -235,17 +257,20 @@ fn test_app_config_compact_serde_roundtrip() {
         compact: Some(compact),
         ..Default::default()
     };
-    let json = serde_json::to_string(&cfg).unwrap();
-    let back: AppConfig = serde_json::from_str(&json).unwrap();
-    let c = back.compact.unwrap();
+    let json = serde_json::to_string(&cfg)
+        .expect("app config compact serde roundtrip: fixture must serialize to JSON");
+    let back: AppConfig = serde_json::from_str(&json)
+        .expect("app config compact serde roundtrip: fixture JSON must match the expected schema");
+    let c = back.compact.expect("app config compact serde roundtrip: the fixture establishes back.compact before this assertion");
     assert!(!c.auto_compact_enabled);
     assert!((c.auto_compact_threshold - 0.9).abs() < 0.001);
     assert_eq!(c.max_resident_history_bytes, 4096);
 
     // 缺省 compact 字段使用 128 MiB 默认值。
-    let cfg: AppConfig = serde_json::from_str(r#"{"compact": {}}"#).unwrap();
+    let cfg: AppConfig = serde_json::from_str(r#"{"compact": {}}"#)
+        .expect("app config compact serde roundtrip: fixture JSON must match the expected schema");
     assert_eq!(
-        cfg.compact.unwrap().max_resident_history_bytes,
+        cfg.compact.expect("app config compact serde roundtrip: the fixture establishes cfg.compact before this assertion").max_resident_history_bytes,
         128 * 1024 * 1024
     );
 }
@@ -253,14 +278,16 @@ fn test_app_config_compact_serde_roundtrip() {
 #[test]
 fn test_app_config_compact_none_when_absent() {
     let json = r#"{"active_alias": "opus", "providers": []}"#;
-    let cfg: AppConfig = serde_json::from_str(json).unwrap();
+    let cfg: AppConfig = serde_json::from_str(json)
+        .expect("app config compact none when absent: fixture JSON must match the expected schema");
     assert!(cfg.compact.is_none());
 }
 
 #[test]
 fn test_app_config_compact_skip_when_none() {
     let cfg = AppConfig::default();
-    let out = serde_json::to_string(&cfg).unwrap();
+    let out = serde_json::to_string(&cfg)
+        .expect("app config compact skip when none: fixture must serialize to JSON");
     assert!(
         !out.contains("compact"),
         "compact should be absent when None"
@@ -272,7 +299,8 @@ fn test_app_config_compact_skip_when_none() {
 #[test]
 fn test_app_config_new_fields_optional() {
     let json = r#"{"active_alias": "opus", "providers": []}"#;
-    let cfg: AppConfig = serde_json::from_str(json).unwrap();
+    let cfg: AppConfig = serde_json::from_str(json)
+        .expect("app config new fields optional: fixture JSON must match the expected schema");
     assert!(cfg.language.is_none());
     assert!(cfg.persona.is_none());
     assert!(cfg.tone.is_none());
@@ -285,8 +313,10 @@ fn test_app_config_language_serde_roundtrip() {
         language: Some("zh-CN".to_string()),
         ..Default::default()
     };
-    let json = serde_json::to_string(&cfg).unwrap();
-    let back: AppConfig = serde_json::from_str(&json).unwrap();
+    let json = serde_json::to_string(&cfg)
+        .expect("app config language serde roundtrip: fixture must serialize to JSON");
+    let back: AppConfig = serde_json::from_str(&json)
+        .expect("app config language serde roundtrip: fixture JSON must match the expected schema");
     assert_eq!(back.language.as_deref(), Some("zh-CN"));
 }
 
@@ -296,15 +326,19 @@ fn test_app_config_proactiveness_serde_roundtrip() {
         proactiveness: Some("low".to_string()),
         ..Default::default()
     };
-    let json = serde_json::to_string(&cfg).unwrap();
-    let back: AppConfig = serde_json::from_str(&json).unwrap();
+    let json = serde_json::to_string(&cfg)
+        .expect("app config proactiveness serde roundtrip: fixture must serialize to JSON");
+    let back: AppConfig = serde_json::from_str(&json).expect(
+        "app config proactiveness serde roundtrip: fixture JSON must match the expected schema",
+    );
     assert_eq!(back.proactiveness.as_deref(), Some("low"));
 }
 
 #[test]
 fn test_app_config_persona_tone_skip_when_none() {
     let cfg = AppConfig::default();
-    let out = serde_json::to_string(&cfg).unwrap();
+    let out = serde_json::to_string(&cfg)
+        .expect("app config persona tone skip when none: fixture must serialize to JSON");
     assert!(
         !out.contains("persona"),
         "persona should be absent when None"
@@ -317,19 +351,22 @@ fn test_app_config_persona_tone_skip_when_none() {
 #[test]
 fn test_peri_config_schema_roundtrip() {
     let json = r#"{ "$schema": "https://example.com/schema.json", "config": {} }"#;
-    let cfg: PeriConfig = serde_json::from_str(json).unwrap();
+    let cfg: PeriConfig = serde_json::from_str(json)
+        .expect("peri config schema roundtrip: fixture JSON must match the expected schema");
     assert_eq!(
         cfg.schema.as_deref(),
         Some("https://example.com/schema.json")
     );
-    let out = serde_json::to_string(&cfg).unwrap();
+    let out = serde_json::to_string(&cfg)
+        .expect("peri config schema roundtrip: fixture must serialize to JSON");
     assert!(out.contains("$schema"));
 }
 
 #[test]
 fn test_peri_config_schema_none_absent() {
     let cfg = PeriConfig::default();
-    let out = serde_json::to_string(&cfg).unwrap();
+    let out = serde_json::to_string(&cfg)
+        .expect("peri config schema none absent: fixture must serialize to JSON");
     assert!(!out.contains("$schema"));
 }
 
@@ -338,7 +375,8 @@ fn test_peri_config_schema_none_absent() {
 #[test]
 fn test_app_config_claude_md_excludes_none_absent() {
     let cfg = AppConfig::default();
-    let out = serde_json::to_string(&cfg).unwrap();
+    let out = serde_json::to_string(&cfg)
+        .expect("app config claude md excludes none absent: fixture must serialize to JSON");
     assert!(
         !out.contains("claude_md_excludes"),
         "claude_md_excludes should be absent when None"
@@ -351,8 +389,11 @@ fn test_app_config_claude_md_excludes_roundtrip() {
         claude_md_excludes: Some(vec!["node_modules/**".to_string()]),
         ..Default::default()
     };
-    let json = serde_json::to_string(&cfg).unwrap();
-    let back: AppConfig = serde_json::from_str(&json).unwrap();
+    let json = serde_json::to_string(&cfg)
+        .expect("app config claude md excludes roundtrip: fixture must serialize to JSON");
+    let back: AppConfig = serde_json::from_str(&json).expect(
+        "app config claude md excludes roundtrip: fixture JSON must match the expected schema",
+    );
     assert_eq!(
         back.claude_md_excludes,
         Some(vec!["node_modules/**".to_string()])

@@ -30,19 +30,18 @@ use peri_acp_types::session_resources::{
 use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
 use turso_serverless::Value;
 
-use crate::sessions::mq_rows::{
-    decode_entry, enqueued_at_now, filter_entries, item_outcome, kind_token, payload_json,
-    policy_json, same_payload, source_token, title_of, RawMqRow, DELETE_THREAD_MQ_ROW_SQL,
-    DERIVE_THREAD_TITLE_SQL, INSERT_MESSAGE_FROM_MQ_SQL, INSERT_THREAD_MQ_SQL,
-    REFRESH_THREAD_COUNT_SQL, SELECT_MESSAGE_ROW_SQL, SELECT_THREAD_MQ_BY_ID_SQL,
-    SELECT_THREAD_MQ_SQL,
-};
+use crate::sessions::mq_rows::RawMqRow;
+use crate::sessions::mq_rows::DELETE_THREAD_MQ_ROW_SQL;
+use crate::sessions::mq_rows::DERIVE_THREAD_TITLE_SQL;
+use crate::sessions::mq_rows::INSERT_MESSAGE_FROM_MQ_SQL;
+use crate::sessions::mq_rows::INSERT_THREAD_MQ_SQL;
+use crate::sessions::mq_rows::REFRESH_THREAD_COUNT_SQL;
+use crate::sessions::mq_rows::SELECT_MESSAGE_ROW_SQL;
+use crate::sessions::mq_rows::SELECT_THREAD_MQ_BY_ID_SQL;
+use crate::sessions::mq_rows::SELECT_THREAD_MQ_SQL;
 
-use crate::sessions::failure::conflict;
-
-use super::session_codec::{corrupt, optional_text};
-use super::session_data::{invalid_input, not_found, RemoteSessionData};
-use super::sql::{int_at, text_at, StatementSpec};
+use super::session_data::RemoteSessionData;
+use super::sql::StatementSpec;
 
 /// 接纳确认后的工作意图提升：只把 `idle` 提升为 `working`，且仅当该消息仍以
 /// 本次接纳的稳定行存在（并发移交/替换后不再提升），同时 thread 仍 `active`
@@ -119,21 +118,21 @@ impl RemoteSessionData {
         input: MqInput,
     ) -> SessionResourceResult<MqEnqueueOutcome> {
         if !self.exists(thread_id).await? {
-            return Err(not_found());
+            return Err(super::session_data::not_found());
         }
         // 与本机同一条边界校验：MQ 行与最终历史必须共用一个稳定 ID。
         if input.payload.id() != input.id {
-            return Err(invalid_input(
+            return Err(super::session_data::invalid_input(
                 "MQ payload id must match the queued message id",
             ));
         }
         let message_id = label(input.id);
-        let payload = payload_json(&input.payload)?;
-        let policy = policy_json(&input.policy);
+        let payload = crate::sessions::mq_rows::payload_json(&input.payload)?;
+        let policy = crate::sessions::mq_rows::policy_json(&input.policy);
         let ensures_processing = input.policy.ensures_processing();
-        let kind = kind_token(input.kind)?;
-        let source = source_token(&input.source)?;
-        let enqueued_at = enqueued_at_now();
+        let kind = crate::sessions::mq_rows::kind_token(input.kind)?;
+        let source = crate::sessions::mq_rows::source_token(&input.source)?;
+        let enqueued_at = crate::sessions::mq_rows::enqueued_at_now();
         let inputs = vec![
             thread_id.as_str().to_owned(),
             message_id.clone(),
@@ -165,7 +164,7 @@ impl RemoteSessionData {
             .commit_effects("mq_enqueue", &inputs, effects, thread_id)
             .await?;
         if counts.first() == Some(&1) {
-            let entry = decode_entry(incoming)?;
+            let entry = crate::sessions::mq_rows::decode_entry(incoming)?;
             return Ok(MqEnqueueOutcome {
                 disposition: MqEnqueueDisposition::Inserted,
                 entry,
@@ -184,7 +183,7 @@ impl RemoteSessionData {
             }
             return Ok(outcome);
         }
-        Err(conflict(
+        Err(crate::sessions::failure::conflict(
             "MQ enqueue raced the same message id; read the id back before retrying",
         ))
     }
@@ -241,43 +240,45 @@ impl RemoteSessionData {
         // 落在 no-op 也属于写意图，不能在只读 store 上宣称完成。
         self.ensure_writable().await?;
         if input.payload.id() != input.id {
-            return Err(invalid_input(
+            return Err(super::session_data::invalid_input(
                 "MQ payload id must match the queued message id",
             ));
         }
         let message_id = label(input.id);
-        let payload = payload_json(&input.payload)?;
-        let policy = policy_json(&input.policy);
-        let kind = kind_token(input.kind)?;
-        let source = source_token(&input.source)?;
+        let payload = crate::sessions::mq_rows::payload_json(&input.payload)?;
+        let policy = crate::sessions::mq_rows::policy_json(&input.policy);
+        let kind = crate::sessions::mq_rows::kind_token(input.kind)?;
+        let source = crate::sessions::mq_rows::source_token(&input.source)?;
         let ensures_processing = input.policy.ensures_processing();
         let (current, target_exists, message, mq) = self
             .read_settlement_facts(child, target, &message_id)
             .await?;
         if !target_exists {
-            return Err(not_found());
+            return Err(super::session_data::not_found());
         }
         if current.is_terminal() && settlement_landed(target, message.as_ref(), mq.as_ref()) {
             return Ok(settled_without_write(input));
         }
         if let Some((owner, _)) = &message {
             if owner != target.as_str() {
-                return Err(conflict(
+                return Err(crate::sessions::failure::conflict(
                     "message id already belongs to another thread's history",
                 ));
             }
         }
         if let Some(row) = &mq {
             if row.thread_id != target.as_str() {
-                return Err(conflict("message id already belongs to another thread"));
+                return Err(crate::sessions::failure::conflict(
+                    "message id already belongs to another thread",
+                ));
             }
-            if !same_payload(&row.payload_json, &payload) {
-                return Err(conflict(
+            if !crate::sessions::mq_rows::same_payload(&row.payload_json, &payload) {
+                return Err(crate::sessions::failure::conflict(
                     "a different message already uses this id in the thread MQ",
                 ));
             }
         }
-        let enqueued_at = enqueued_at_now();
+        let enqueued_at = crate::sessions::mq_rows::enqueued_at_now();
         let incoming = RawMqRow {
             id: &message_id,
             enqueued_at: &enqueued_at,
@@ -312,7 +313,7 @@ impl RemoteSessionData {
                 Value::Text(source.clone()),
                 Value::Text(policy.clone()),
                 Value::Text(payload.clone()),
-                optional_text(input.original_draft.as_deref()),
+                super::session_codec::optional_text(input.original_draft.as_deref()),
                 Value::Text(child.as_str().to_owned()),
             ],
         ));
@@ -354,11 +355,11 @@ impl RemoteSessionData {
         {
             Ok(counts) if counts.get(insert_index) == Some(&1) => Ok(MqEnqueueOutcome {
                 disposition: MqEnqueueDisposition::Inserted,
-                entry: decode_entry(incoming)?,
+                entry: crate::sessions::mq_rows::decode_entry(incoming)?,
             }),
             Ok(_) => match self.enqueue_mq_fact(target, &incoming).await? {
                 Some(outcome) => Ok(outcome),
-                None => Err(conflict(
+                None => Err(crate::sessions::failure::conflict(
                     "child terminal settlement raced the result message; read the id back before retrying",
                 )),
             },
@@ -383,7 +384,7 @@ impl RemoteSessionData {
             return error;
         }
         if !self.exists(child).await.unwrap_or(true) || !self.exists(target).await.unwrap_or(true) {
-            return not_found();
+            return super::session_data::not_found();
         }
         match self.read_mq_facts(message_id).await {
             Ok((message, mq)) => {
@@ -394,7 +395,9 @@ impl RemoteSessionData {
                         .as_ref()
                         .is_some_and(|row| row.thread_id != target.as_str());
                 if foreign {
-                    conflict("message id already belongs to another thread")
+                    crate::sessions::failure::conflict(
+                        "message id already belongs to another thread",
+                    )
                 } else {
                     error
                 }
@@ -451,17 +454,21 @@ impl RemoteSessionData {
             .ok_or_else(|| super::mutation::incomplete_reply("expected the MQ result set"))?;
         let status = status_rows
             .first()
-            .and_then(|row| text_at(row, 0))
-            .ok_or_else(not_found)?;
-        let status = AgentStatus::from_str(status).map_err(|_| corrupt("invalid agent status"))?;
-        let target_exists = target_rows.first().and_then(|row| int_at(row, 0)) == Some(1);
+            .and_then(|row| super::sql::text_at(row, 0))
+            .ok_or_else(super::session_data::not_found)?;
+        let status = AgentStatus::from_str(status)
+            .map_err(|_| super::session_codec::corrupt("invalid agent status"))?;
+        let target_exists = target_rows
+            .first()
+            .and_then(|row| super::sql::int_at(row, 0))
+            == Some(1);
         let message = match message_rows.first() {
             Some(row) => Some((
-                text_at(row, 0)
-                    .ok_or_else(|| corrupt("invalid history row"))?
+                super::sql::text_at(row, 0)
+                    .ok_or_else(|| super::session_codec::corrupt("invalid history row"))?
                     .to_owned(),
-                text_at(row, 1)
-                    .ok_or_else(|| corrupt("invalid history row"))?
+                super::sql::text_at(row, 1)
+                    .ok_or_else(|| super::session_codec::corrupt("invalid history row"))?
                     .to_owned(),
             )),
             None => None,
@@ -502,14 +509,14 @@ impl RemoteSessionData {
         let (message, mq) = self.read_mq_facts(incoming.id).await?;
         if let Some((owner, _content)) = message {
             if owner != thread_id.as_str() {
-                return Err(conflict(
+                return Err(crate::sessions::failure::conflict(
                     "message id already belongs to another thread's history",
                 ));
             }
             return Ok(Some(MqEnqueueOutcome {
                 disposition: MqEnqueueDisposition::AlreadyHandedOff,
-                entry: decode_entry(RawMqRow {
-                    enqueued_at: &enqueued_at_now(),
+                entry: crate::sessions::mq_rows::decode_entry(RawMqRow {
+                    enqueued_at: &crate::sessions::mq_rows::enqueued_at_now(),
                     ..*incoming
                 })?,
             }));
@@ -518,15 +525,17 @@ impl RemoteSessionData {
             return Ok(None);
         };
         if row.thread_id != thread_id.as_str() {
-            return Err(conflict("message id already belongs to another thread"));
+            return Err(crate::sessions::failure::conflict(
+                "message id already belongs to another thread",
+            ));
         }
         let same = row.kind == incoming.kind
             && row.source == incoming.source
             && row.policy_json == incoming.policy_json
-            && same_payload(&row.payload_json, incoming.payload_json)
+            && crate::sessions::mq_rows::same_payload(&row.payload_json, incoming.payload_json)
             && row.original_draft.as_deref() == incoming.original_draft;
         if !same {
-            return Err(conflict(
+            return Err(crate::sessions::failure::conflict(
                 "a different message already uses this id in the thread MQ",
             ));
         }
@@ -556,7 +565,7 @@ impl RemoteSessionData {
             .iter()
             .map(|row| decode_remote_entry(row))
             .collect::<SessionResourceResult<Vec<_>>>()?;
-        Ok(filter_entries(entries, &filter))
+        Ok(crate::sessions::mq_rows::filter_entries(entries, &filter))
     }
 
     pub(super) async fn cancel_mq(
@@ -565,7 +574,7 @@ impl RemoteSessionData {
         id: MessageId,
     ) -> SessionResourceResult<MqCancelOutcome> {
         if !self.exists(thread_id).await? {
-            return Err(not_found());
+            return Err(super::session_data::not_found());
         }
         let message_id = label(id);
         let (message, mq) = self.read_mq_facts(&message_id).await?;
@@ -579,7 +588,7 @@ impl RemoteSessionData {
         };
         let entry = row.clone().into_entry()?;
         if entry.source != MessageSource::UserInput {
-            return Err(invalid_input(
+            return Err(super::session_data::invalid_input(
                 "only pending user input can be cancelled from the thread MQ",
             ));
         }
@@ -622,7 +631,7 @@ impl RemoteSessionData {
         selection: MqReceiveSelection,
     ) -> SessionResourceResult<MqReceiveOutcome> {
         if !self.exists(thread_id).await? {
-            return Err(not_found());
+            return Err(super::session_data::not_found());
         }
         let mut effects = Vec::with_capacity(selection.items.len() * 2 + 2);
         // 每条选择项在批次里的语句位置：`(插入历史, 删除 MQ)`，`None` 表示这类处置不写该语句。
@@ -677,7 +686,9 @@ impl RemoteSessionData {
                 DERIVE_THREAD_TITLE_SQL,
                 vec![
                     Value::Text(thread_id.as_str().to_owned()),
-                    super::session_codec::optional_text(title_of(&committed).as_deref()),
+                    super::session_codec::optional_text(
+                        crate::sessions::mq_rows::title_of(&committed).as_deref(),
+                    ),
                 ],
             ));
         }
@@ -685,10 +696,15 @@ impl RemoteSessionData {
             .commit_effects("mq_receive", &inputs, effects, thread_id)
             .await?;
         let mut items = Vec::with_capacity(selection.items.len());
-        for (item, (insert, delete)) in selection.items.iter().zip(&placements) {
+        let paired_entries = selection.items.iter().zip(&placements);
+        for (item, (insert, delete)) in paired_entries {
             let deleted = counts.get(*delete) == Some(&1);
             if !deleted {
-                items.push(item_outcome(item.entry.id, MqReceiveStatus::Missing, None));
+                items.push(crate::sessions::mq_rows::item_outcome(
+                    item.entry.id,
+                    MqReceiveStatus::Missing,
+                    None,
+                ));
                 continue;
             }
             let status = match (item.disposition, *insert) {
@@ -703,9 +719,11 @@ impl RemoteSessionData {
                         match message {
                             Some((owner, content))
                                 if owner == thread_id.as_str()
-                                    && same_payload(
+                                    && crate::sessions::mq_rows::same_payload(
                                         &content,
-                                        &payload_json(&item.entry.payload)?,
+                                        &crate::sessions::mq_rows::payload_json(
+                                            &item.entry.payload,
+                                        )?,
                                     ) =>
                             {
                                 MqReceiveStatus::AlreadyPresent
@@ -716,7 +734,7 @@ impl RemoteSessionData {
                 }
                 (MqReceiveDisposition::Commit, None) => MqReceiveStatus::Missing,
             };
-            items.push(item_outcome(
+            items.push(crate::sessions::mq_rows::item_outcome(
                 item.entry.id,
                 status,
                 Some(item.entry.clone()),
@@ -727,7 +745,7 @@ impl RemoteSessionData {
 
     pub(super) async fn clear_mq(&self, thread_id: &ThreadId) -> SessionResourceResult<()> {
         if !self.exists(thread_id).await? {
-            return Err(not_found());
+            return Err(super::session_data::not_found());
         }
         let inputs = vec![thread_id.as_str().to_owned()];
         self.commit_effects(
@@ -750,7 +768,7 @@ impl RemoteSessionData {
         id: MessageId,
     ) -> SessionResourceResult<bool> {
         if !self.exists(thread_id).await? {
-            return Err(not_found());
+            return Err(super::session_data::not_found());
         }
         let (message, _mq) = self.read_mq_facts(&label(id)).await?;
         Ok(matches!(message, Some((owner, _)) if owner == thread_id.as_str()))
@@ -783,11 +801,11 @@ impl RemoteSessionData {
             .ok_or_else(|| super::mutation::incomplete_reply("expected the MQ result set"))?;
         let message = match message_rows.first() {
             Some(row) => Some((
-                text_at(row, 0)
-                    .ok_or_else(|| corrupt("invalid history row"))?
+                super::sql::text_at(row, 0)
+                    .ok_or_else(|| super::session_codec::corrupt("invalid history row"))?
                     .to_owned(),
-                text_at(row, 1)
-                    .ok_or_else(|| corrupt("invalid history row"))?
+                super::sql::text_at(row, 1)
+                    .ok_or_else(|| super::session_codec::corrupt("invalid history row"))?
                     .to_owned(),
             )),
             None => None,
@@ -835,7 +853,7 @@ fn insert_mq_statement(thread_id: &ThreadId, row: &RawMqRow<'_>) -> StatementSpe
             Value::Text(row.source.to_owned()),
             Value::Text(row.policy_json.to_owned()),
             Value::Text(row.payload_json.to_owned()),
-            optional_text(row.original_draft),
+            super::session_codec::optional_text(row.original_draft),
         ],
     )
 }
@@ -856,7 +874,7 @@ fn settled_without_write(input: MqInput) -> MqEnqueueOutcome {
         disposition: MqEnqueueDisposition::Existing,
         entry: MqEntry {
             id: input.id,
-            enqueued_at: enqueued_at_now(),
+            enqueued_at: crate::sessions::mq_rows::enqueued_at_now(),
             kind: input.kind,
             source: input.source,
             payload: input.payload,
@@ -882,33 +900,33 @@ struct RemoteMqRow {
 impl RemoteMqRow {
     fn decode(values: &[Value]) -> SessionResourceResult<Self> {
         Ok(Self {
-            thread_id: text_at(values, 0)
-                .ok_or_else(|| corrupt("invalid MQ row"))?
+            thread_id: super::sql::text_at(values, 0)
+                .ok_or_else(|| super::session_codec::corrupt("invalid MQ row"))?
                 .to_owned(),
-            id: text_at(values, 1)
-                .ok_or_else(|| corrupt("invalid MQ row"))?
+            id: super::sql::text_at(values, 1)
+                .ok_or_else(|| super::session_codec::corrupt("invalid MQ row"))?
                 .to_owned(),
-            enqueued_at: text_at(values, 2)
-                .ok_or_else(|| corrupt("invalid MQ row"))?
+            enqueued_at: super::sql::text_at(values, 2)
+                .ok_or_else(|| super::session_codec::corrupt("invalid MQ row"))?
                 .to_owned(),
-            kind: text_at(values, 3)
-                .ok_or_else(|| corrupt("invalid MQ row"))?
+            kind: super::sql::text_at(values, 3)
+                .ok_or_else(|| super::session_codec::corrupt("invalid MQ row"))?
                 .to_owned(),
-            source: text_at(values, 4)
-                .ok_or_else(|| corrupt("invalid MQ row"))?
+            source: super::sql::text_at(values, 4)
+                .ok_or_else(|| super::session_codec::corrupt("invalid MQ row"))?
                 .to_owned(),
-            policy_json: text_at(values, 5)
-                .ok_or_else(|| corrupt("invalid MQ row"))?
+            policy_json: super::sql::text_at(values, 5)
+                .ok_or_else(|| super::session_codec::corrupt("invalid MQ row"))?
                 .to_owned(),
-            payload_json: text_at(values, 6)
-                .ok_or_else(|| corrupt("invalid MQ row"))?
+            payload_json: super::sql::text_at(values, 6)
+                .ok_or_else(|| super::session_codec::corrupt("invalid MQ row"))?
                 .to_owned(),
             original_draft: optional_text_at(values, 7),
         })
     }
 
     fn into_entry(self) -> SessionResourceResult<MqEntry> {
-        decode_entry(RawMqRow {
+        crate::sessions::mq_rows::decode_entry(RawMqRow {
             id: &self.id,
             enqueued_at: &self.enqueued_at,
             kind: &self.kind,
@@ -922,13 +940,19 @@ impl RemoteMqRow {
 
 /// 列表行的列序与常量 SQL 一致（不带 `thread_id`）。
 fn decode_remote_entry(values: &[Value]) -> SessionResourceResult<MqEntry> {
-    decode_entry(RawMqRow {
-        id: text_at(values, 0).ok_or_else(|| corrupt("invalid MQ row"))?,
-        enqueued_at: text_at(values, 1).ok_or_else(|| corrupt("invalid MQ row"))?,
-        kind: text_at(values, 2).ok_or_else(|| corrupt("invalid MQ row"))?,
-        source: text_at(values, 3).ok_or_else(|| corrupt("invalid MQ row"))?,
-        policy_json: text_at(values, 4).ok_or_else(|| corrupt("invalid MQ row"))?,
-        payload_json: text_at(values, 5).ok_or_else(|| corrupt("invalid MQ row"))?,
+    crate::sessions::mq_rows::decode_entry(RawMqRow {
+        id: super::sql::text_at(values, 0)
+            .ok_or_else(|| super::session_codec::corrupt("invalid MQ row"))?,
+        enqueued_at: super::sql::text_at(values, 1)
+            .ok_or_else(|| super::session_codec::corrupt("invalid MQ row"))?,
+        kind: super::sql::text_at(values, 2)
+            .ok_or_else(|| super::session_codec::corrupt("invalid MQ row"))?,
+        source: super::sql::text_at(values, 3)
+            .ok_or_else(|| super::session_codec::corrupt("invalid MQ row"))?,
+        policy_json: super::sql::text_at(values, 4)
+            .ok_or_else(|| super::session_codec::corrupt("invalid MQ row"))?,
+        payload_json: super::sql::text_at(values, 5)
+            .ok_or_else(|| super::session_codec::corrupt("invalid MQ row"))?,
         original_draft: optional_text_at(values, 6).as_deref(),
     })
 }

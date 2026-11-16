@@ -4,13 +4,24 @@
 //! 按「会话 + 快照」丢弃迟到页、投影隔离（不碰执行 / 输入 / Todo 状态）、
 //! 跨页的工具起点-终点配对。
 
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::SessionPhase;
+use super::SubmittedInputRollback;
+use super::TuiRenderUnit;
+use super::TuiToolStarted;
+use super::TuiUserBubble;
+use super::history_page;
+
+use super::serial;
+
 use crate::kit::history_paging::{self, HistoryPageItem, HistoryPageResponse, HistorySubItem};
 use serde_json::json;
 
 #[path = "history_page_test/over_budget_tool_result.rs"]
 mod over_budget_tool_result;
 
+#[must_use]
 fn sub(position: u64, update: serde_json::Value) -> HistorySubItem {
     HistorySubItem {
         position,
@@ -79,7 +90,7 @@ fn browsing_state(token: &str) -> BridgeState {
     crate::kit::atoms::init_atoms();
     history_paging::reset_browsing_state();
     *crate::kit::atoms::ACTIVE_SESSION_ID.state().write() = "s1".to_string();
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "s1".to_string();
     history_paging::note_initial_cursor(
         "s1",
@@ -119,7 +130,7 @@ fn dispatch_landing_page_with_origin(
             .accepts("s1", token),
         "浏览身份在派发前被并行用例改写（测试间共享 atom 干扰）"
     );
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         state,
         &AcpEventData::HistoryPageLoaded {
             response: Box::new(response),
@@ -139,7 +150,7 @@ fn paging_probe() -> String {
 
 /// 让首屏自带一条自有条目（回放标记 + 一条 user 气泡），返回它的槽位。
 fn seed_first_screen_own_entry(state: &mut BridgeState, entry_id: &str, position: u64) -> usize {
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         state,
         &AcpEventData::ReplayEntryMarked {
             entry_id: entry_id.to_string(),
@@ -147,14 +158,14 @@ fn seed_first_screen_own_entry(state: &mut BridgeState, entry_id: &str, position
         },
     );
     let slot = state.committed.len();
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         state,
         &AcpEventData::ReplayedUserBubble {
             input_id: format!("input-{entry_id}"),
             text: format!("first-screen-{entry_id}"),
         },
     );
-    dispatch_for_bridge(state, &AcpEventData::SessionReplayDone);
+    super::dispatch_for_bridge(state, &AcpEventData::SessionReplayDone);
     slot
 }
 
@@ -216,14 +227,14 @@ fn test_history_page_prepends_after_prefix_without_replay_done() {
         "inherited".to_string(),
     ))]);
     // 只发标记与单元，不发 SessionReplayDone。
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::ReplayEntryMarked {
             entry_id: "s1:own-latest".to_string(),
             position: 100,
         },
     );
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::ReplayedUserBubble {
             input_id: "input-own".to_string(),
@@ -277,35 +288,35 @@ fn test_history_page_dedupes_repeated_page() {
 fn test_history_page_fills_gap_between_loaded_entries() {
     let mut state = browsing_state("tok");
     // 首屏：own-a(position 10) 与 own-b(position 100)。
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::ReplayEntryMarked {
             entry_id: "s1:own-a".to_string(),
             position: 10,
         },
     );
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::ReplayedUserBubble {
             input_id: "input-a".to_string(),
             text: "own-a".to_string(),
         },
     );
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::ReplayEntryMarked {
             entry_id: "s1:own-b".to_string(),
             position: 100,
         },
     );
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::CommittedAssistantText {
             text: "own-b".to_string(),
             reasoning: None,
         },
     );
-    dispatch_for_bridge(&mut state, &AcpEventData::SessionReplayDone);
+    super::dispatch_for_bridge(&mut state, &AcpEventData::SessionReplayDone);
 
     // 页 1 早于 own-a；页 2 落在 own-a 与 own-b 之间。
     let newer = page(
@@ -344,7 +355,7 @@ fn test_history_page_drops_page_from_stale_snapshot() {
         vec![("s1:old", 10, vec![sub(0, text_update("stale"))])],
     );
     // 刻意不走 `dispatch_landing_page`：本用例要的正是「身份不一致 → 页被丢」。
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::HistoryPageLoaded {
             response: Box::new(stale),
@@ -541,14 +552,14 @@ fn test_history_page_keeps_prefix_before_reminder_only_own_entry() {
         "inherited".to_string(),
     ))]);
     // 回放形状：条目标记 → 唯一单元是结构化 reminder（非 session/update 出口）。
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::ReplayEntryMarked {
             entry_id: "s1:own-reminder".to_string(),
             position: 100,
         },
     );
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::SystemReminder {
             reminder: reminder_fixture(),
@@ -599,7 +610,7 @@ fn test_history_page_is_dropped_after_same_session_rewind() {
         });
 
     // rewind 完成：committed 由回退后的消息 JSON 重建。
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::RewindCompleted {
             messages_json: json!([{"id": "m1", "role": "user", "content": "kept"}]).to_string(),
@@ -614,7 +625,7 @@ fn test_history_page_is_dropped_after_same_session_rewind() {
         None,
         vec![("s1:old", 10, vec![sub(0, text_update("late page"))])],
     );
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::HistoryPageLoaded {
             response: Box::new(late),
@@ -652,7 +663,7 @@ fn test_pending_history_tool_end_never_completes_live_card() {
     let mut state = browsing_state("tok");
 
     // 实时 turn：一个 tool_id = t1 的卡片，回合结束后留在窗口里。
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
             tool_id: "t1".to_string(),
@@ -664,7 +675,7 @@ fn test_pending_history_tool_end_never_completes_live_card() {
             origin_readable: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let live_cards: Vec<&TuiRenderUnit> = state
         .committed
         .iter()
@@ -732,3 +743,5 @@ fn test_pending_history_tool_end_never_completes_live_card() {
     // 否则同 `tool_id` 的后续用例会被它改写终态。
     history_page::clear_pending_tool_ends_for_tests();
 }
+
+use super::{dispatch_and_notify, dispatch_for_bridge};

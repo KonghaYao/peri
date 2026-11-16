@@ -11,7 +11,7 @@ use ratatui_kit::ratatui::layout::{Position, Rect};
 use crate::kit::panels::login::auth::{self, AuthAction, AuthController, AuthEffect, LogoutFocus};
 use crate::kit::panels::login::auth_policy;
 use crate::kit::panels::login::auth_render;
-use crate::kit::panels::login::edit_handler::{LoginEditIntent, auth_scope};
+use crate::kit::panels::login::edit_handler::LoginEditIntent;
 use crate::kit::panels::login::edit_state::{LoginEditState, LoginField};
 use crate::kit::panels::login::render;
 
@@ -97,7 +97,7 @@ pub(super) fn apply_auth_effects(
         if !es.is_plan_mode() {
             return;
         }
-        let scope = auth_scope(es);
+        let scope = crate::kit::panels::login::edit_handler::auth_scope(es);
         auth_policy::adopt_if_verified(&mut es.plan, auth_guard.view(), auth_guard.scope(), &scope)
     };
     if adopted || login_succeeded {
@@ -143,7 +143,7 @@ pub(super) fn execute_edit_intent(ctx: &LoginEventCtx, intent: LoginEditIntent) 
                 let Some(es) = edit_state.as_ref() else {
                     return;
                 };
-                let scope = auth_scope(es);
+                let scope = crate::kit::panels::login::edit_handler::auth_scope(es);
                 match scope.target() {
                     Some(target) => {
                         let providers = shared_plan_providers(es, &target);
@@ -166,7 +166,7 @@ pub(super) fn execute_edit_intent(ctx: &LoginEventCtx, intent: LoginEditIntent) 
 
 pub(super) fn sync_auth_scope(ctx: &LoginEventCtx) {
     if let Some(es) = ctx.edit_state.read().as_ref() {
-        let scope = auth_scope(es);
+        let scope = crate::kit::panels::login::edit_handler::auth_scope(es);
         ctx.auth.write().sync_scope(scope);
     }
 }

@@ -13,7 +13,8 @@
 //!
 //! 注意：本文件是回执契约与边界的锁定；文本断言不构成「误用率下降」的因果证明。
 
-use super::*;
+use super::HostFixture;
+use peri_agent::tools::BaseTool as _;
 
 /// 从启动回执中取出 task 身份（`bg-` 前缀）与线程身份（规范句标注）。
 fn receipt_identities(receipt: &str) -> (String, String) {
@@ -37,8 +38,9 @@ async fn start_background_agent(
     host: &HostFixture,
     label: &str,
 ) -> String {
-    write_test_agent(dir);
-    let tool = host.bind(with_agent_face(make_subagent_tool(vec![]), dir.path()).await);
+    super::write_test_agent(dir);
+    let tool =
+        host.bind(super::with_agent_face(super::make_subagent_tool(vec![]), dir.path()).await);
     let receipt = tool
         .invoke(
             serde_json::json!({
@@ -58,7 +60,7 @@ async fn start_background_agent(
 /// 且其中的 id 是真实存在的线程身份；裸线程标注 `(thread: …)` 不再出现。
 #[tokio::test]
 async fn background_launch_receipt_names_reusable_child_thread_id() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let host = HostFixture::open_in(dir.path(), "fixture-resume-identity").await;
     let receipt = start_background_agent(&dir, &host, "identity probe").await;
 
@@ -102,7 +104,7 @@ async fn background_launch_receipt_names_reusable_child_thread_id() {
 /// 且不回退/转义为该任务真实的 child_thread_id。
 #[tokio::test]
 async fn task_uuid_is_rejected_without_translation_to_child_thread() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let host = HostFixture::open_in(dir.path(), "fixture-resume-task-uuid").await;
     let receipt = start_background_agent(&dir, &host, "task uuid probe").await;
     let (task_id, child_thread_id) = receipt_identities(&receipt);
@@ -112,7 +114,8 @@ async fn task_uuid_is_rejected_without_translation_to_child_thread() {
         .to_string();
     assert_ne!(task_uuid, child_thread_id);
 
-    let tool = host.bind(with_agent_face(make_subagent_tool(vec![]), dir.path()).await);
+    let tool =
+        host.bind(super::with_agent_face(super::make_subagent_tool(vec![]), dir.path()).await);
     let error = tool
         .invoke(
             serde_json::json!({

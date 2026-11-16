@@ -1,9 +1,8 @@
 //! Instance-wide accounting and eviction for active and terminal event rings.
 
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-};
+use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 

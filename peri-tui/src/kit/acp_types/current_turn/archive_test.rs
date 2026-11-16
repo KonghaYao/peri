@@ -1,6 +1,8 @@
-use super::*;
+use super::{CurrentTurn, TuiRenderUnit};
+
 use crate::kit::acp_types::ToolCardAccumulator;
 
+#[must_use]
 fn tool(tool_id: &str, tool_name: &str) -> ToolCardAccumulator {
     ToolCardAccumulator::new(tool_id.into(), tool_name.into(), String::new())
 }

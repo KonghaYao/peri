@@ -6,9 +6,13 @@
 //! 任务完成时才退出）。本测试用 tokio 时间控制证明：界本身会唤醒 loop，
 //! 到点即写交接并结束 turn，不依赖任何外部事件。
 
-use super::*;
 use crate::agent::async_tasks::handoff::BoundedWait;
+
+use crate::agent::stages::context::StageContext;
+use crate::agent::stages::LoopResult;
+
 use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager as TaskManagerPort};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// 构造一个「parked idle 且有一个永不结算任务」的 loop。
@@ -73,7 +77,7 @@ fn register_never_settling_task(manager: &crate::agent::async_tasks::TaskManager
             kill: Some(Box::new(|| {})),
         },
     )
-    .unwrap();
+    .expect("the register fixture result is required for this assertion");
 }
 
 #[tokio::test(start_paused = true)]
@@ -86,7 +90,7 @@ async fn test_parked_idle_exits_at_the_bound_without_any_wakeup() {
     let flag = context.async_ctx.idle_suspended_flag.clone();
     assert!(flag.is_none(), "测试不注入 suspended 标志，保持最小接线");
 
-    let mut handle = tokio::spawn(run_react_loop(context, 4));
+    let mut handle = tokio::spawn(crate::agent::stages::run_react_loop(context, 4));
     // 界内：没有任何外部唤醒时不得退出（parked）。
     assert!(
         tokio::time::timeout(Duration::from_secs(60), &mut handle)
@@ -126,7 +130,7 @@ async fn test_idle_without_pending_work_does_not_park() {
     .with_handoff_deadline(std::sync::Arc::new(move || deadline.deadline()))
     .build();
     let started = tokio::time::Instant::now();
-    let result = run_react_loop(context, 4).await;
+    let result = crate::agent::stages::run_react_loop(context, 4).await;
     assert!(matches!(result, LoopResult::Completed));
     assert!(
         started.elapsed() < Duration::from_secs(1),
@@ -153,7 +157,7 @@ async fn test_second_turn_handoff_of_the_same_pending_set_completes() {
     for turn in 0..2 {
         let bounded = BoundedWait::new(Duration::from_secs(120));
         let context = parked_context_on(&session, bounded, std::sync::Arc::clone(&manager));
-        let mut handle = tokio::spawn(run_react_loop(context, 4));
+        let mut handle = tokio::spawn(crate::agent::stages::run_react_loop(context, 4));
         assert!(
             tokio::time::timeout(Duration::from_secs(60), &mut handle)
                 .await

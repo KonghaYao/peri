@@ -634,7 +634,8 @@ fn search_marketplace_plugins(
     let mut results = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(cache_dir) {
-        for entry in entries.flatten() {
+        let flattened_entry = entries.flatten();
+        for entry in flattened_entry {
             let mp_dir = entry.path();
             let mp_name = mp_dir
                 .file_name()

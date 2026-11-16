@@ -1,6 +1,7 @@
 //! `glob` 过滤器的用户可见契约：工具描述推荐的 `*.{ts,tsx}` 必须可用，
 //! 非法 glob 必须报错而不是静默放宽成「搜索全部文件」。
-use super::*;
+use crate::filesystem::grep::GrepTool;
+use peri_agent::tools::BaseTool;
 
 /// 夹具：三种扩展名、同一标记，用于区分 glob 是否真的生效。
 fn write_ext_fixture(dir: &std::path::Path) {

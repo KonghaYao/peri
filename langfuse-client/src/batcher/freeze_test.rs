@@ -4,10 +4,21 @@
 //! **落盘正文逐字节保真**（不只内存 fake）；磁盘失败只允许一次非等待内存回退，额度不足即
 //! 拒收；未开启暂存时不落盘、超 allowance 显式超限。
 
+use sha2::Digest;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use super::*;
+use super::CleanupRegistration;
+use super::InputSnapshot;
+use super::InputSpool;
+use super::LangfuseError;
+use super::ObjectKind;
+use super::ObjectMeta;
+use super::RouteFingerprint;
+use super::SnapshotSource;
+use super::SpoolError;
+use super::SpoolObject;
+use super::SpoolStore;
 use crate::config::Compression;
 use crate::memory::MemoryBudget;
 use crate::spool::cleanup::CleanupRegistry;
@@ -50,7 +61,7 @@ fn dyn_store(store: &Arc<NativeSpool>) -> Arc<dyn SpoolStore> {
 }
 
 fn budget(limit: usize) -> Arc<MemoryBudget> {
-    MemoryBudget::new(limit).expect("memory budget")
+    MemoryBudget::try_new(limit).expect("memory budget")
 }
 
 fn context(
@@ -104,7 +115,7 @@ fn threshold_boundary_decides_between_inline_and_disk() {
     // 阈值 -1：留在内存。
     let allowance = budget.try_reserve(THRESHOLD).expect("allowance");
     let (source, entered) = exact_source(vec![b'a'; THRESHOLD - 1]);
-    let snapshot = freeze_snapshot(
+    let snapshot = super::freeze_snapshot(
         &(Arc::clone(&source) as Arc<dyn SnapshotSource>),
         allowance,
         Some((
@@ -134,7 +145,7 @@ fn threshold_boundary_decides_between_inline_and_disk() {
         let allowance = budget.try_reserve(THRESHOLD).expect("allowance");
         let payload: Vec<u8> = (0..len).map(|index| b'a' + (index % 26) as u8).collect();
         let (source, entered) = exact_source(payload.clone());
-        let snapshot = freeze_snapshot(
+        let snapshot = super::freeze_snapshot(
             &(Arc::clone(&source) as Arc<dyn SnapshotSource>),
             allowance,
             Some((
@@ -173,13 +184,12 @@ fn disabled_spool_never_touches_disk_and_rejects_over_allowance() {
     let budget = budget(1024);
     let allowance = budget.try_reserve(16).expect("allowance");
     let (source, _) = exact_source(vec![b'a'; 32]);
-    let error = freeze_snapshot(
+    let error = super::freeze_snapshot(
         &(Arc::clone(&source) as Arc<dyn SnapshotSource>),
         allowance,
         None,
     )
-    .err()
-    .expect("oversized frozen snapshot without spool");
+    .expect_err("oversized frozen snapshot without spool");
     assert!(matches!(
         error,
         LangfuseError::PayloadTooLarge { limit_bytes: 16 }
@@ -272,7 +282,7 @@ fn disk_failure_falls_back_to_memory_once() {
         let allowance = budget.try_reserve(32).expect("allowance");
         let payload: Vec<u8> = (0..512).map(|index| (index % 251) as u8).collect();
         let (source, entered) = exact_source(payload.clone());
-        let snapshot = freeze_snapshot(
+        let snapshot = super::freeze_snapshot(
             &(Arc::clone(&source) as Arc<dyn SnapshotSource>),
             allowance,
             Some(failing_context(&store, &budget)),
@@ -305,13 +315,12 @@ fn disk_failure_without_headroom_is_rejected() {
     let store = failing_store(true);
     let allowance = budget.try_reserve(32).expect("allowance");
     let (source, _) = exact_source(vec![b'a'; 512]);
-    let error = freeze_snapshot(
+    let error = super::freeze_snapshot(
         &(Arc::clone(&source) as Arc<dyn SnapshotSource>),
         allowance,
         Some(failing_context(&store, &budget)),
     )
-    .err()
-    .expect("fallback without headroom");
+    .expect_err("fallback without headroom");
     assert!(
         matches!(error, LangfuseError::Spool(SpoolError::Unavailable)),
         "unexpected error: {error}"
@@ -329,7 +338,7 @@ fn spooled_content_beyond_the_logical_limit_is_rejected() {
     let registry = CleanupRegistry::new(dyn_store(&store), Arc::clone(&budget), 4);
     let allowance = budget.try_reserve(32).expect("allowance");
     let (source, _) = exact_source(vec![b'a'; MAX_BYTES + 1]);
-    let error = freeze_snapshot(
+    let error = super::freeze_snapshot(
         &(Arc::clone(&source) as Arc<dyn SnapshotSource>),
         allowance,
         Some((
@@ -337,8 +346,7 @@ fn spooled_content_beyond_the_logical_limit_is_rejected() {
             registry.try_register().expect("slot"),
         )),
     )
-    .err()
-    .expect("oversized spooled snapshot");
+    .expect_err("oversized spooled snapshot");
     assert!(
         matches!(
             error,

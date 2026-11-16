@@ -11,9 +11,9 @@ use std::sync::Arc;
 use peri_acp_types::hooks::SettingsHooksPort;
 use peri_acp_types::ports::{AgentCatalogPort, McpPoolPort};
 
-use super::{
-    bind_agent_catalog_from_pool, AgentCatalogProvider, NoopAgentCatalog, SettingsHooksLoader,
-};
+use super::AgentCatalogProvider;
+use super::NoopAgentCatalog;
+use super::SettingsHooksLoader;
 use crate::mcp::agent_face_fixture::AgentFaceFixture;
 
 /// 正例：池与端口都是本 crate 实现 ⇒ 绑定成立，且绑定后目录非空。
@@ -40,7 +40,7 @@ async fn bind_agent_catalog_from_pool_exposes_catalog_and_honours_closure() {
     let pool: Arc<dyn McpPoolPort> = fixture.pool.clone();
 
     let open_port: Arc<dyn AgentCatalogPort> = Arc::new(AgentCatalogProvider::new());
-    bind_agent_catalog_from_pool(&open_port, &pool, SESSION, &HashSet::new())
+    super::bind_agent_catalog_from_pool(&open_port, &pool, SESSION, &HashSet::new())
         .expect("池与端口都是本 crate 实现 ⇒ 绑定必须成立");
     let ids: Vec<String> = open_port.catalog(false).into_iter().map(|e| e.id).collect();
     assert_eq!(
@@ -53,7 +53,7 @@ async fn bind_agent_catalog_from_pool_exposes_catalog_and_honours_closure() {
     let closed_port: Arc<dyn AgentCatalogPort> = Arc::new(AgentCatalogProvider::new());
     let mut disabled = HashSet::new();
     disabled.insert(crate::assembly::SUB_AGENT_FACE_CLOSED_KEY.to_string());
-    bind_agent_catalog_from_pool(&closed_port, &pool, SESSION, &disabled)
+    super::bind_agent_catalog_from_pool(&closed_port, &pool, SESSION, &disabled)
         .expect("关闭集不影响绑定成立与否，只决定本地面开关");
     assert!(
         closed_port.catalog(false).is_empty(),
@@ -70,7 +70,12 @@ fn bind_agent_catalog_from_pool_rejects_foreign_port() {
     let pool: Arc<dyn McpPoolPort> = Arc::new(crate::mcp::McpClientPool::new_pending());
     let foreign: Arc<dyn AgentCatalogPort> = Arc::new(NoopAgentCatalog);
     assert_eq!(
-        bind_agent_catalog_from_pool(&foreign, &pool, "foreign-port-session", &HashSet::new()),
+        super::bind_agent_catalog_from_pool(
+            &foreign,
+            &pool,
+            "foreign-port-session",
+            &HashSet::new()
+        ),
         Err(super::AgentCatalogBindingError::AgentCatalogMismatch),
         "端口非 `AgentCatalogProvider` ⇒ fail-closed 返回显式错误"
     );
@@ -102,7 +107,7 @@ async fn bind_agent_catalog_from_pool_rejects_foreign_pool() {
     let pool: Arc<dyn McpPoolPort> = Arc::new(ForeignPool);
     let port: Arc<dyn AgentCatalogPort> = Arc::new(AgentCatalogProvider::new());
     assert_eq!(
-        bind_agent_catalog_from_pool(&port, &pool, "foreign-pool-session", &HashSet::new()),
+        super::bind_agent_catalog_from_pool(&port, &pool, "foreign-pool-session", &HashSet::new()),
         Err(super::AgentCatalogBindingError::McpPoolMismatch),
         "池非 `McpClientPool` ⇒ fail-closed 返回显式错误"
     );
@@ -136,7 +141,12 @@ fn bind_agent_catalog_from_pool_rejects_offset_zero_pool_wrapper() {
     let pool: Arc<dyn McpPoolPort> = wrapper;
     let port: Arc<dyn AgentCatalogPort> = Arc::new(AgentCatalogProvider::new());
     assert_eq!(
-        bind_agent_catalog_from_pool(&port, &pool, "offset-zero-pool-session", &HashSet::new()),
+        super::bind_agent_catalog_from_pool(
+            &port,
+            &pool,
+            "offset-zero-pool-session",
+            &HashSet::new()
+        ),
         Err(super::AgentCatalogBindingError::McpPoolMismatch),
         "offset 0 包装器不得被当成 McpClientPool"
     );
@@ -162,7 +172,7 @@ fn bind_agent_catalog_from_pool_rejects_offset_zero_catalog_wrapper() {
         tail: [0; 1024],
     });
     assert_eq!(
-        bind_agent_catalog_from_pool(
+        super::bind_agent_catalog_from_pool(
             &catalog,
             &pool,
             "offset-zero-catalog-session",

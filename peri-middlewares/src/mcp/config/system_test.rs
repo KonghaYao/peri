@@ -1,4 +1,10 @@
-use super::*;
+use super::BuiltinInjectionPolicy;
+use super::HashMap;
+use super::McpConfigError;
+use super::McpConfigFile;
+use super::McpServerConfig;
+use super::Path;
+use peri_acp_types::plugin::ConfigSource;
 
 // ─── System MCP 配置失败闭环（契约 1 / 4 的配置部分）──────────────────────
 
@@ -35,7 +41,8 @@ fn test_system_mcp_project_rejects_tools_without_true() {
         )
         .unwrap();
 
-        let error = load_from_path(&project_path).expect_err("非法组合必须失败");
+        let error =
+            crate::mcp::config::load_from_path(&project_path).expect_err("非法组合必须失败");
         assert_parse_error(error, &project_path);
     }
 }
@@ -50,7 +57,8 @@ fn test_system_mcp_global_rejects_invalid_maps() {
         let settings_path = dir.path().join("settings.json");
         std::fs::write(&settings_path, content).unwrap();
 
-        let error = load_global_config(&settings_path).expect_err("非法 map 必须失败");
+        let error =
+            crate::mcp::config::load_global_config(&settings_path).expect_err("非法 map 必须失败");
         assert_parse_error(error, &settings_path);
     }
 
@@ -63,7 +71,8 @@ fn test_system_mcp_global_rejects_invalid_maps() {
         r#"{"config":{"mcpServers":{"ok":{"command":"npx"}}},"mcpServers":{"sys":{"system_mcp_tools":[]}}}"#,
     )
     .unwrap();
-    let error = load_global_config(&settings_path).expect_err("非法备用 map 必须失败");
+    let error =
+        crate::mcp::config::load_global_config(&settings_path).expect_err("非法备用 map 必须失败");
     assert_parse_error(error, &settings_path);
 
     // 双 map 均合法：仍按 nested > top-level 选择。
@@ -72,7 +81,7 @@ fn test_system_mcp_global_rejects_invalid_maps() {
         r#"{"config":{"mcpServers":{"chosen":{"command":"npx"}}},"mcpServers":{"fallback":{"command":"uvx"}}}"#,
     )
     .unwrap();
-    let config = load_global_config(&settings_path).unwrap();
+    let config = crate::mcp::config::load_global_config(&settings_path).unwrap();
     assert_eq!(config.mcp_servers.len(), 1);
     assert!(config.mcp_servers.contains_key("chosen"));
 }
@@ -85,13 +94,13 @@ fn test_system_mcp_merged_errors_are_not_empty_success() {
     std::fs::create_dir_all(&cwd).unwrap();
     let claude_home = dir.path().join(".claude-test");
     std::fs::create_dir_all(&claude_home).unwrap();
-    let global_path = missing_global_path(dir.path());
+    let global_path = super::missing_global_path(dir.path());
     std::fs::write(
         &global_path,
         r#"{"mcpServers":{"sys":{"system_mcp_tools":[]}}}"#,
     )
     .unwrap();
-    let error = load_merged_config_full_with_paths(
+    let error = crate::mcp::config::load_merged_config_full_with_paths(
         &cwd,
         &claude_home,
         &global_path,
@@ -112,10 +121,10 @@ fn test_system_mcp_merged_errors_are_not_empty_success() {
         r#"{"mcpServers":{"sys":{"system_mcp":false,"system_mcp_tools":["a"]}}}"#,
     )
     .unwrap();
-    let error = load_merged_config_full_with_paths(
+    let error = crate::mcp::config::load_merged_config_full_with_paths(
         &cwd,
         &claude_home,
-        &missing_global_path(dir.path()),
+        &super::missing_global_path(dir.path()),
         &BuiltinInjectionPolicy::none(),
     )
     .expect_err("项目非法配置必须失败");
@@ -127,7 +136,7 @@ fn test_system_mcp_merged_errors_are_not_empty_success() {
     std::fs::create_dir_all(&cwd).unwrap();
     let claude_home = dir.path().join(".claude-test");
     std::fs::create_dir_all(&claude_home).unwrap();
-    let global_path = missing_global_path(dir.path());
+    let global_path = super::missing_global_path(dir.path());
     std::fs::write(
         &global_path,
         r#"{"mcpServers":{"sys":{"system_mcp_tools":[]}}}"#,
@@ -138,7 +147,7 @@ fn test_system_mcp_merged_errors_are_not_empty_success() {
         r#"{"mcpServers":{"sys":{"command":"npx","system_mcp":true}}}"#,
     )
     .unwrap();
-    let error = load_merged_config_full_with_paths(
+    let error = crate::mcp::config::load_merged_config_full_with_paths(
         &cwd,
         &claude_home,
         &global_path,
@@ -155,7 +164,8 @@ fn test_system_mcp_plugin_error_does_not_block_other_sources() {
     std::fs::create_dir_all(&cwd).unwrap();
     let claude_home = dir.path().join(".claude-test");
     std::fs::create_dir_all(&claude_home).unwrap();
-    let plugin_dir = install_enabled_plugin(&claude_home, "p1", r#"{"srv":"servers/.mcp.json"}"#);
+    let plugin_dir =
+        super::install_enabled_plugin(&claude_home, "p1", r#"{"srv":"servers/.mcp.json"}"#);
     let servers_dir = plugin_dir.join("servers");
     std::fs::create_dir_all(&servers_dir).unwrap();
     let broken = servers_dir.join(".mcp.json");
@@ -165,10 +175,10 @@ fn test_system_mcp_plugin_error_does_not_block_other_sources() {
     )
     .unwrap();
 
-    let (merged, sources) = load_merged_config_full_with_paths(
+    let (merged, sources) = crate::mcp::config::load_merged_config_full_with_paths(
         &cwd,
         &claude_home,
-        &missing_global_path(dir.path()),
+        &super::missing_global_path(dir.path()),
         &BuiltinInjectionPolicy::none(),
     )
     .expect("插件非法 MCP 配置不得阻止会话启动");
@@ -187,7 +197,7 @@ fn test_system_mcp_typed_validation_includes_disabled() {
                 disabled,
                 system_mcp: Some(false),
                 system_mcp_tools: Some(Vec::new()),
-                ..test_config()
+                ..crate::mcp::config::test_config()
             },
         );
         let config = McpConfigFile {
@@ -195,7 +205,8 @@ fn test_system_mcp_typed_validation_includes_disabled() {
             ..Default::default()
         };
 
-        let error = validate_config(&config).expect_err("disabled 不能绕过校验");
+        let error =
+            crate::mcp::config::validate_config(&config).expect_err("disabled 不能绕过校验");
         let McpConfigError::InvalidServer {
             server_name,
             source,
@@ -209,7 +220,9 @@ fn test_system_mcp_typed_validation_includes_disabled() {
             peri_acp_types::plugin::McpServerConfigValidationError::SystemMcpToolsRequiresSystemMcp
         );
 
-        let display = validate_config(&config).unwrap_err().to_string();
+        let display = crate::mcp::config::validate_config(&config)
+            .unwrap_err()
+            .to_string();
         assert_eq!(
             display,
             format!("MCP 服务器配置无效: sys: {SYSTEM_TOOLS_RULE}")
@@ -225,7 +238,7 @@ fn test_system_mcp_empty_tools_survive_config_pipeline() {
     std::fs::create_dir_all(&cwd).unwrap();
     let claude_home = dir.path().join(".claude-test");
     std::fs::create_dir_all(&claude_home).unwrap();
-    let global_path = missing_global_path(dir.path());
+    let global_path = super::missing_global_path(dir.path());
     let project_path = cwd.join(".mcp.json");
     std::fs::write(
         &project_path,
@@ -233,7 +246,7 @@ fn test_system_mcp_empty_tools_survive_config_pipeline() {
     )
     .unwrap();
 
-    let (merged, _) = load_merged_config_full_with_paths(
+    let (merged, _) = crate::mcp::config::load_merged_config_full_with_paths(
         &cwd,
         &claude_home,
         &global_path,
@@ -246,13 +259,13 @@ fn test_system_mcp_empty_tools_survive_config_pipeline() {
     assert_ne!(sys.system_mcp_tools, None, "Some([]) 与 None 必须可区分");
 
     // 展开不得把 [] 变成 None，也不得凭空产生工具名。
-    let expanded = expand_server_config(sys);
+    let expanded = crate::mcp::config::expand_server_config(sys);
     assert_eq!(expanded.system_mcp_tools, Some(Vec::new()));
 
     // 写回（切换 disabled）必须被拒绝：`disabled + system_mcp` 是非法组合，
     // 写回路径不得静默去掉其中一个开关，也不得写入一个下一个会话加载不了的配置。
     let before = std::fs::read_to_string(&project_path).unwrap();
-    let error = set_server_disabled_with_paths(&cwd, &global_path, "sys", true)
+    let error = crate::mcp::config::set_server_disabled_with_paths(&cwd, &global_path, "sys", true)
         .expect_err("对 system server 置 disabled 必须在写盘前拒绝");
     assert!(
         matches!(
@@ -268,7 +281,7 @@ fn test_system_mcp_empty_tools_survive_config_pipeline() {
     let after = std::fs::read_to_string(&project_path).unwrap();
     assert_eq!(before, after, "被拒绝的写入不得改动既有文件");
     // 文件仍可加载，显式空数组与 system 声明逐字保留。
-    let reloaded = load_from_path(&project_path).unwrap();
+    let reloaded = crate::mcp::config::load_from_path(&project_path).unwrap();
     assert_eq!(
         reloaded.mcp_servers["sys"].system_mcp_tools,
         Some(Vec::new())
@@ -286,16 +299,16 @@ fn test_system_mcp_tools_survive_expansion_and_namespace() {
     let claude_home = dir.path().join(".claude-test");
     std::fs::create_dir_all(&claude_home).unwrap();
     let tools = r#"["Search","search","${PLUGIN_TOOL_VAR}",""]"#;
-    install_enabled_plugin(
+    super::install_enabled_plugin(
         &claude_home,
         "p1",
         &format!(r#"{{"srv":{{"command":"node","system_mcp":true,"system_mcp_tools":{tools}}}}}"#),
     );
 
-    let (merged, _) = load_merged_config_full_with_paths(
+    let (merged, _) = crate::mcp::config::load_merged_config_full_with_paths(
         &cwd,
         &claude_home,
-        &missing_global_path(dir.path()),
+        &super::missing_global_path(dir.path()),
         &BuiltinInjectionPolicy::all(),
     )
     .unwrap();
@@ -319,7 +332,7 @@ fn test_system_mcp_tools_survive_expansion_and_namespace() {
     std::fs::create_dir_all(&cwd).unwrap();
     let claude_home = dir.path().join(".claude-test");
     std::fs::create_dir_all(&claude_home).unwrap();
-    let global_path = missing_global_path(dir.path());
+    let global_path = super::missing_global_path(dir.path());
     std::fs::write(
         &global_path,
         r#"{"mcpServers":{"sys":{"command":"echo","system_mcp":true,"system_mcp_tools":["global-tool"]}}}"#,
@@ -332,7 +345,7 @@ fn test_system_mcp_tools_survive_expansion_and_namespace() {
     )
     .unwrap();
 
-    let (merged, _) = load_merged_config_full_with_paths(
+    let (merged, _) = crate::mcp::config::load_merged_config_full_with_paths(
         &cwd,
         &claude_home,
         &global_path,
@@ -355,10 +368,10 @@ fn test_system_mcp_dedup_preserves_required_namespaces() {
     std::fs::create_dir_all(&cwd).unwrap();
     let claude_home = dir.path().join(".claude-test");
     std::fs::create_dir_all(&claude_home).unwrap();
-    let global_path = missing_global_path(dir.path());
+    let global_path = super::missing_global_path(dir.path());
     // 插件（System 声明 + 普通声明各一）；手动配置与插件 server 内容完全一致，
     // 使内容 hash 相等——去重规则本身成为唯一变量。
-    let plugin_dir = install_enabled_plugin(
+    let plugin_dir = super::install_enabled_plugin(
         &claude_home,
         "p1",
         r#"{
@@ -380,7 +393,7 @@ fn test_system_mcp_dedup_preserves_required_namespaces() {
     }});
     std::fs::write(&global_path, serde_json::to_string(&manual).unwrap()).unwrap();
 
-    let (merged, _) = load_merged_config_full_with_paths(
+    let (merged, _) = crate::mcp::config::load_merged_config_full_with_paths(
         &cwd,
         &claude_home,
         &global_path,
@@ -413,15 +426,18 @@ fn test_system_mcp_dedup_preserves_required_namespaces() {
         command: Some("node".into()),
         system_mcp: Some(true),
         system_mcp_tools: Some(vec!["t".into()]),
-        ..test_config()
+        ..crate::mcp::config::test_config()
     };
     assert_ne!(
-        server_config_hash(&base),
-        server_config_hash(&test_config())
+        crate::mcp::config::server_config_hash(&base),
+        crate::mcp::config::server_config_hash(&crate::mcp::config::test_config())
     );
     let mut other_tools = base.clone();
     other_tools.system_mcp_tools = Some(vec!["t2".into()]);
-    assert_ne!(server_config_hash(&base), server_config_hash(&other_tools));
+    assert_ne!(
+        crate::mcp::config::server_config_hash(&base),
+        crate::mcp::config::server_config_hash(&other_tools)
+    );
 }
 
 #[test]
@@ -433,9 +449,9 @@ fn test_system_mcp_disabled_write_rejects_invalid_input() {
         let project_path = dir.path().join(".mcp.json");
         let invalid = r#"{"mcpServers":{"sys":{"system_mcp_tools":[]}}}"#;
         std::fs::write(&project_path, invalid).unwrap();
-        let error = set_server_disabled_with_paths(
+        let error = crate::mcp::config::set_server_disabled_with_paths(
             dir.path(),
-            &missing_global_path(dir.path()),
+            &super::missing_global_path(dir.path()),
             "sys",
             disabled,
         )
@@ -447,20 +463,22 @@ fn test_system_mcp_disabled_write_rejects_invalid_input() {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
-        let global_path = missing_global_path(dir.path());
+        let global_path = super::missing_global_path(dir.path());
         let invalid =
             r#"{"config":{"mcpServers":{"sys":{"system_mcp_tools":[]}}},"otherSetting":42}"#;
         std::fs::write(&global_path, invalid).unwrap();
-        let error = set_server_disabled_with_paths(&cwd, &global_path, "sys", disabled)
-            .expect_err("全局 nested 非法配置必须拒绝写盘");
+        let error =
+            crate::mcp::config::set_server_disabled_with_paths(&cwd, &global_path, "sys", disabled)
+                .expect_err("全局 nested 非法配置必须拒绝写盘");
         assert_parse_error(error, &global_path);
         assert_eq!(std::fs::read_to_string(&global_path).unwrap(), invalid);
 
         // 全局 top-level 非法
         let invalid = r#"{"mcpServers":{"sys":{"system_mcp":false,"system_mcp_tools":["a"]}}}"#;
         std::fs::write(&global_path, invalid).unwrap();
-        let error = set_server_disabled_with_paths(&cwd, &global_path, "sys", disabled)
-            .expect_err("全局 top-level 非法配置必须拒绝写盘");
+        let error =
+            crate::mcp::config::set_server_disabled_with_paths(&cwd, &global_path, "sys", disabled)
+                .expect_err("全局 top-level 非法配置必须拒绝写盘");
         assert_parse_error(error, &global_path);
         assert_eq!(std::fs::read_to_string(&global_path).unwrap(), invalid);
     }
@@ -473,9 +491,12 @@ fn test_system_mcp_remove_rejects_invalid_input() {
     let project_path = dir.path().join(".mcp.json");
     let target_invalid = r#"{"mcpServers":{"sys":{"system_mcp_tools":[]}}}"#;
     std::fs::write(&project_path, target_invalid).unwrap();
-    let error =
-        remove_server_from_config_with_paths(dir.path(), &missing_global_path(dir.path()), "sys")
-            .expect_err("删除非法目标也必须拒绝");
+    let error = crate::mcp::config::remove_server_from_config_with_paths(
+        dir.path(),
+        &super::missing_global_path(dir.path()),
+        "sys",
+    )
+    .expect_err("删除非法目标也必须拒绝");
     assert_parse_error(error, &project_path);
     assert_eq!(
         std::fs::read_to_string(&project_path).unwrap(),
@@ -485,9 +506,9 @@ fn test_system_mcp_remove_rejects_invalid_input() {
     let sibling_invalid =
         r#"{"mcpServers":{"victim":{"command":"npx"},"sys":{"system_mcp_tools":[]}}}"#;
     std::fs::write(&project_path, sibling_invalid).unwrap();
-    let error = remove_server_from_config_with_paths(
+    let error = crate::mcp::config::remove_server_from_config_with_paths(
         dir.path(),
-        &missing_global_path(dir.path()),
+        &super::missing_global_path(dir.path()),
         "victim",
     )
     .expect_err("同文件其它 server 非法也必须拒绝");
@@ -501,12 +522,13 @@ fn test_system_mcp_remove_rejects_invalid_input() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().join("project");
     std::fs::create_dir_all(&cwd).unwrap();
-    let global_path = missing_global_path(dir.path());
+    let global_path = super::missing_global_path(dir.path());
     let nested_invalid =
         r#"{"config":{"mcpServers":{"victim":{"command":"npx"},"sys":{"system_mcp_tools":[]}}}}"#;
     std::fs::write(&global_path, nested_invalid).unwrap();
-    let error = remove_server_from_config_with_paths(&cwd, &global_path, "victim")
-        .expect_err("全局 nested 非法必须拒绝");
+    let error =
+        crate::mcp::config::remove_server_from_config_with_paths(&cwd, &global_path, "victim")
+            .expect_err("全局 nested 非法必须拒绝");
     assert_parse_error(error, &global_path);
     assert_eq!(
         std::fs::read_to_string(&global_path).unwrap(),
@@ -516,8 +538,9 @@ fn test_system_mcp_remove_rejects_invalid_input() {
     let top_level_invalid =
         r#"{"mcpServers":{"victim":{"command":"npx"},"sys":{"system_mcp_tools":[]}}}"#;
     std::fs::write(&global_path, top_level_invalid).unwrap();
-    let error = remove_server_from_config_with_paths(&cwd, &global_path, "victim")
-        .expect_err("全局 top-level 非法必须拒绝");
+    let error =
+        crate::mcp::config::remove_server_from_config_with_paths(&cwd, &global_path, "victim")
+            .expect_err("全局 top-level 非法必须拒绝");
     assert_parse_error(error, &global_path);
     assert_eq!(
         std::fs::read_to_string(&global_path).unwrap(),
@@ -530,7 +553,7 @@ fn test_system_mcp_write_preserves_remaining_tools() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().join("project");
     std::fs::create_dir_all(&cwd).unwrap();
-    let global_path = missing_global_path(dir.path());
+    let global_path = super::missing_global_path(dir.path());
     std::fs::write(
         &global_path,
         r#"{"config":{"mcpServers":{
@@ -541,12 +564,12 @@ fn test_system_mcp_write_preserves_remaining_tools() {
     .unwrap();
 
     // 删除普通 server：其余 System 数组顺序与值不变，其它 settings 字段仍在。
-    remove_server_from_config_with_paths(&cwd, &global_path, "plain").unwrap();
+    crate::mcp::config::remove_server_from_config_with_paths(&cwd, &global_path, "plain").unwrap();
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&global_path).unwrap()).unwrap();
     assert!(value["config"]["mcpServers"].get("plain").is_none());
     assert_eq!(value["otherSetting"], 42);
-    let reloaded = load_global_config(&global_path).unwrap();
+    let reloaded = crate::mcp::config::load_global_config(&global_path).unwrap();
     assert_eq!(
         reloaded.mcp_servers["sys"].system_mcp_tools.as_deref(),
         Some(["z".to_string(), "a".to_string(), "z".to_string()].as_slice())
@@ -555,13 +578,16 @@ fn test_system_mcp_write_preserves_remaining_tools() {
     // 切换 disabled 必须被拒绝（M7）：`disabled + system_mcp` 非法，写回路径
     // 既不静默去掉开关，也不写出后续加载不了的配置；既有数组逐字保留。
     let before = std::fs::read_to_string(&global_path).unwrap();
-    assert!(set_server_disabled_with_paths(&cwd, &global_path, "sys", true).is_err());
+    assert!(
+        crate::mcp::config::set_server_disabled_with_paths(&cwd, &global_path, "sys", true)
+            .is_err()
+    );
     assert_eq!(
         before,
         std::fs::read_to_string(&global_path).unwrap(),
         "被拒绝的写入不得改动既有文件"
     );
-    let reloaded = load_global_config(&global_path).unwrap();
+    let reloaded = crate::mcp::config::load_global_config(&global_path).unwrap();
     assert_eq!(reloaded.mcp_servers["sys"].disabled, None);
     assert_eq!(
         reloaded.mcp_servers["sys"].system_mcp_tools.as_deref(),

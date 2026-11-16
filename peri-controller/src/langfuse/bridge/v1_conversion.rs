@@ -1,6 +1,6 @@
 //! v1 协议载体到观测事件的纯转换。
 
-use super::UnifiedLangfuseEvent;
+use crate::langfuse::bridge::unified_event::UnifiedLangfuseEvent;
 use crate::langfuse::tracer::stages::MAIN_AGENT_KEY;
 use peri_agent::agent::events::ExecutorEvent;
 use peri_agent::messages::BaseMessage;

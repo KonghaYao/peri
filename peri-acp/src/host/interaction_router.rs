@@ -32,15 +32,13 @@
 //! 依赖方向：本文件只用 `peri-acp` 内部 transport 与 `peri-acp-types` 契约，
 //! **不引用 `peri_middlewares`**（`scripts/import-exemptions.conf` 边 2 无需新增豁免）。
 
-use std::{
-    collections::HashMap,
-    future::Future,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::{Duration, Instant},
-};
+use std::collections::HashMap;
+use std::future::Future;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
@@ -91,6 +89,7 @@ pub struct SessionInteractionEndpoint {
 
 impl SessionInteractionEndpoint {
     /// 构造在线 endpoint（唯一在线事实源是 [`Self::retire`] 之前的 `online` 位）。
+    #[must_use]
     pub fn new(
         connection_id: impl Into<String>,
         connection_epoch: ConnectionEpoch,
@@ -104,10 +103,12 @@ impl SessionInteractionEndpoint {
         }
     }
 
+    #[must_use]
     pub fn connection_epoch(&self) -> ConnectionEpoch {
         self.connection_epoch
     }
 
+    #[must_use]
     pub fn transport(&self) -> &Arc<dyn AcpTransport> {
         &self.transport
     }
@@ -194,24 +195,29 @@ pub struct SessionAttachment {
 // 读面（身份 / namespace / 纪元 / 状态）：`SessionAppsFacade`（S6）据此构造
 // `AttachmentBinding` 与判决——生产调用者已就位，故不再需要 `allow(dead_code)`。
 impl SessionAttachment {
+    #[must_use]
     pub fn attachment_id(&self) -> &AttachmentId {
         &self.attachment_id
     }
 
+    #[must_use]
     pub fn app_id(&self) -> &str {
         &self.app_id
     }
 
+    #[must_use]
     pub fn view_key(&self) -> &ClientViewId {
         &self.view_key
     }
 
     /// 请求去重域（ledger 的 namespace 权威值）。
+    #[must_use]
     pub fn namespace(&self) -> &RequestNamespaceId {
         &self.namespace
     }
 
     /// 附件纪元（投递资格的唯一权威）。
+    #[must_use]
     pub fn epoch(&self) -> ConnectionEpoch {
         self.epoch
     }
@@ -222,6 +228,7 @@ impl SessionAttachment {
     /// [`Self::connection_id`]（二者是本模块给出的判决面）。保留本访问器是为了让
     /// D6/到期清理的用例能直接断言「detach 而非销毁」的状态迁移。
     #[allow(dead_code)]
+    #[must_use]
     pub fn state(&self) -> &AttachmentState {
         &self.state
     }
@@ -235,6 +242,7 @@ impl SessionAttachment {
     }
 
     /// 是否仍可投递（附着中）。
+    #[must_use]
     pub fn is_deliverable(&self) -> bool {
         matches!(self.state, AttachmentState::Attached { .. })
     }

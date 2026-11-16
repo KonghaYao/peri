@@ -8,7 +8,12 @@
 //! 修复后的行为：本机按保存 cwd 的**当前观测证据**重建归属（原归属行从未被观测过时
 //! 收敛过去；行上已有证据则如实失败，不静默改绑），随后接纳在同一个事务里写下绑定。
 
-use super::*;
+use super::{Arc, FrozenSnapshotBytes, Path, SessionResourceErrorKind, SessionResourcesImpl};
+use peri_acp_types::session_resources::BindingRecheck;
+use peri_acp_types::session_resources::BindingState;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::workspace::WorkspaceError;
+
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Connection, SqliteConnection};
 
@@ -102,7 +107,7 @@ async fn insert_thread(
     .await
     .unwrap();
     // 正文列是版本化 payload 的 JSON；行 id 必须与 payload 自身的 id 一致（canonical 不变量）。
-    let entry = payload(message);
+    let entry = super::payload(message);
     sqlx::query(
         "INSERT INTO messages(message_id, thread_id, role, content) VALUES (?1, ?2, 'human', ?3)",
     )
@@ -129,7 +134,7 @@ struct Migrated {
 
 impl Migrated {
     async fn build() -> Self {
-        let repo = repository();
+        let repo = super::repository();
         let repo_root = std::fs::canonicalize(repo.path()).unwrap();
         let sub = repo_root.join("sub");
         std::fs::create_dir_all(&sub).unwrap();
@@ -309,7 +314,7 @@ async fn migrated_unbound_history_is_relinked_from_current_evidence() {
         .unwrap_err();
     assert!(
         matches!(
-            error_kind(&refused),
+            super::error_kind(&refused),
             SessionResourceErrorKind::Workspace(WorkspaceError::UnverifiedLegacyOwner)
         ),
         "展示投影不是执行证据：{refused}"
@@ -387,7 +392,7 @@ async fn unverifiable_history_fails_with_actionable_guidance() {
     let error = facade.relink_unbound_session(&id).await.unwrap_err();
     assert!(
         matches!(
-            error_kind(&error),
+            super::error_kind(&error),
             SessionResourceErrorKind::Workspace(WorkspaceError::UnverifiedLegacyOwner)
         ),
         "{error}"
@@ -433,7 +438,7 @@ async fn relink_refuses_to_rebind_a_row_with_recorded_evidence() {
     let error = facade.relink_unbound_session(&id).await.unwrap_err();
     assert!(
         matches!(
-            error_kind(&error),
+            super::error_kind(&error),
             SessionResourceErrorKind::Workspace(WorkspaceError::UnverifiedLegacyOwner)
         ),
         "{error}"

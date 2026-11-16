@@ -1,12 +1,15 @@
 use serde_json::json;
 use std::time::Duration;
 
-use super::*;
-use crate::transport::mpsc::mpsc_transport_pair;
+use crate::transport::mpsc;
+use crate::transport::types::AcpError;
+use crate::transport::types::IncomingMessage;
+use crate::transport::wire_bridge::WireBridge;
+use crate::transport::AcpTransport;
 
 #[tokio::test]
 async fn preserves_wire_ids_and_forwards_both_directions() {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = mpsc::mpsc_transport_pair();
     let bridge = WireBridge::new(client);
 
     bridge
@@ -54,7 +57,7 @@ async fn preserves_wire_ids_and_forwards_both_directions() {
 
 #[tokio::test]
 async fn rejects_invalid_frames_without_dispatching() {
-    let (client, _server) = mpsc_transport_pair();
+    let (client, _server) = mpsc::mpsc_transport_pair();
     let bridge = WireBridge::new(client);
     assert_eq!(
         bridge
@@ -77,7 +80,7 @@ async fn rejects_invalid_frames_without_dispatching() {
 
 #[tokio::test]
 async fn notification_can_overtake_a_pending_request() {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = mpsc::mpsc_transport_pair();
     let bridge = WireBridge::new(client);
     bridge
         .send(json!({"jsonrpc":"2.0","id":7,"method":"slow/request"}))
@@ -111,7 +114,7 @@ async fn notification_can_overtake_a_pending_request() {
 
 #[tokio::test]
 async fn reverse_error_preserves_code_message_and_data() {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = mpsc::mpsc_transport_pair();
     let bridge = WireBridge::new(client);
     let reverse = tokio::spawn(async move { server.send_request("client/ask", json!({})).await });
     let request = bridge.recv().await.unwrap();
@@ -130,7 +133,7 @@ async fn reverse_error_preserves_code_message_and_data() {
 
 #[tokio::test]
 async fn explicit_close_settles_requests_in_both_directions() {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = mpsc::mpsc_transport_pair();
     let bridge = WireBridge::new(client);
     bridge
         .send(json!({"jsonrpc":"2.0","id":"external","method":"server/slow"}))
@@ -167,7 +170,7 @@ async fn explicit_close_settles_requests_in_both_directions() {
 
 #[tokio::test]
 async fn drop_settles_reverse_pending_request() {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = mpsc::mpsc_transport_pair();
     let bridge = WireBridge::new(client);
     let reverse = tokio::spawn(async move { server.send_request("client/slow", json!({})).await });
     let _request = bridge.recv().await.unwrap();

@@ -207,6 +207,7 @@ impl HistoryWindow {
     }
 }
 
+#[must_use]
 fn commit_matches_identity(identity: &WindowIdentity, info: &HistoryCommitInfo) -> bool {
     identity.session_id == info.session_id
         && identity.session_generation == info.session_generation

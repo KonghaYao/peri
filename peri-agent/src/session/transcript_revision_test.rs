@@ -11,7 +11,8 @@ use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use crate::agent::compact_v2::projection::MessageProjectionDirective;
 use crate::messages::{BaseMessage, MessageContent, MessageId};
 
-use super::super::{MessageTranscript, TranscriptRevision};
+use crate::session::transcript::view::TranscriptRevision;
+use crate::session::transcript::MessageTranscript;
 
 fn make_human(text: &str) -> BaseMessage {
     BaseMessage::human(MessageContent::text(text.to_string()))
@@ -50,7 +51,7 @@ fn reminder_with(
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap()
+        .expect("the construct fixture result is required for this assertion")
 }
 
 /// 断言修订号前进（实例身份保持）。
@@ -193,7 +194,10 @@ async fn test_view_revision_advances_on_model_view_mutations() {
     let keep = rebuilt.append(make_human("keep"));
     rebuilt.append(make_human("drop"));
     let before_rewind = rebuilt.view_revision();
-    rebuilt.rewind_to(keep).await.unwrap();
+    rebuilt
+        .rewind_to(keep)
+        .await
+        .expect("the rewind to fixture result is required for this assertion");
     assert_revision_advanced(&rebuilt, before_rewind, "rewind_to");
 }
 
