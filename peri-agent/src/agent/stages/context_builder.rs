@@ -137,6 +137,15 @@ impl StageContextBuilder {
     }
 
     #[must_use]
+    pub fn with_task_manager(
+        mut self,
+        manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
+    ) -> Self {
+        self.task_manager = Some(manager);
+        self
+    }
+
+    #[must_use]
     pub fn build(self) -> StageContext {
         StageContext {
             session: self.session,
@@ -144,6 +153,7 @@ impl StageContextBuilder {
             compact: self.compact,
             async_ctx: self.async_ctx,
             goal_controller: self.goal_controller,
+            task_manager: self.task_manager,
             recall_buffer: Arc::new(RwLock::new(Vec::new())),
             model_view: Arc::new(crate::agent::stages::model_view::ModelViewScope::default()),
         }

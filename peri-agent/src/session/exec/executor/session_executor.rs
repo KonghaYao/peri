@@ -255,6 +255,10 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     let task_manager_for_cmd = pending_task_probe
         .clone()
         .unwrap_or_else(|| Arc::new(peri_acp_types::tasks::NoopTaskManager));
+    let goal_controller_for_cmd = ctx
+        .session_access
+        .as_ref()
+        .and_then(|sa| sa.goal_controller(&ctx.session_id));
     task_manager_for_cmd.retry_pending_deliveries();
 
     // ── L5 命令拦截注入面（注册表 / compact 配置）──
@@ -291,6 +295,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         event_sink: &event_sink,
         auxiliary_model: &auxiliary_model,
         task_manager: &task_manager_for_cmd,
+        goal_controller: goal_controller_for_cmd,
         mcp_pool: ctx.mcp_pool.clone(),
         async_result_mailbox: ctx.async_result_mailbox.clone(),
         command_lookup,

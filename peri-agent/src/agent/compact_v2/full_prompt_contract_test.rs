@@ -21,7 +21,10 @@ fn summary_instruction_lists_recovery_resources_before_current_state() {
     assert!(prompt.contains("body archived by this compaction"));
     assert!(prompt.contains("when retention is not explicitly shown"));
     assert!(prompt.contains("preloaded; do not reload"));
-    assert!(prompt.contains("work which depends on their results waits"));
+    assert!(prompt.contains("Work which depends on a running background task or subagent waits for its result"));
+    assert!(prompt.contains("separate hard-memory message"));
+    assert!(prompt.contains("Do not restate their task ids"));
+    assert!(prompt.contains("Never invent a missing id"));
     assert!(prompt.contains("Contract: X. Recent actual: Y (deviation)."));
     assert!(prompt.contains("Recovery targets the contract"));
     assert!(prompt.contains("report it as unrecoverable"));

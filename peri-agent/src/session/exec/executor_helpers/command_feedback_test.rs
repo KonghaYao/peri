@@ -114,6 +114,7 @@ fn make_intercept_request<'a>(
     InterceptRequest {
         mcp_pool: None,
         async_result_mailbox: None,
+        goal_controller: None,
         content,
         history_payloads: std::borrow::Cow::Owned(
             history

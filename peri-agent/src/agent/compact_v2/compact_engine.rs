@@ -5,6 +5,7 @@ use super::CompactOutcome;
 use super::ProviderCapabilities;
 use super::{decision, full, micro, planner};
 use super::{ContextPressure, FullEscalationReason, ResidentHistoryPressure};
+pub(super) use crate::agent::compact_v2::hard_memory::HardMemorySource;
 pub(super) use tracing::{debug, info, warn};
 
 pub(super) use crate::agent::events::CompactStrategy;
@@ -212,6 +213,42 @@ pub async fn run_compact_with_facts(
         facts,
         caps,
         &ResidentHistoryPressure::DISABLED,
+        None,
+    )
+    .await
+}
+
+/// 带运行时硬记忆的 Compact（手动 `/compact` 走此入口）。
+///
+/// Full 摘要生成后从 `hard_memory` 读取实时任务/goal 状态，作为第二条 Human
+/// 消息与软摘要同批提交；其余决策与 [`run_compact_with_facts`] 相同。
+#[allow(clippy::too_many_arguments)]
+pub async fn run_compact_with_hard_memory(
+    transcript: &mut MessageTranscript,
+    llm: Option<&dyn peri_model::Model>,
+    config: &CompactConfig,
+    pressure: &ContextPressure,
+    force: bool,
+    consecutive_failures: &mut u32,
+    cwd: &str,
+    before_full_summary: Option<FullSummaryNotice<'_>>,
+    protected: &crate::session::async_result_mailbox::ProtectedResults,
+    hard_memory: Option<&dyn HardMemorySource>,
+) -> CompactResult {
+    run_compact_with_facts_and_resident(
+        transcript,
+        llm,
+        config,
+        pressure,
+        force,
+        consecutive_failures,
+        cwd,
+        before_full_summary,
+        protected,
+        &planner::MicroPlanningFacts::default(),
+        &ProviderCapabilities::default(),
+        &ResidentHistoryPressure::DISABLED,
+        hard_memory,
     )
     .await
 }
@@ -235,6 +272,7 @@ pub async fn run_compact_with_facts_and_resident(
     facts: &planner::MicroPlanningFacts,
     caps: &ProviderCapabilities,
     resident: &ResidentHistoryPressure,
+    hard_memory: Option<&dyn HardMemorySource>,
 ) -> CompactResult {
     let before_visible_len = transcript.visible_messages().len();
 
@@ -255,6 +293,7 @@ pub async fn run_compact_with_facts_and_resident(
             FullEscalationReason::ManualForce,
             before_full_summary,
             protected,
+            hard_memory,
         )
         .await;
     }
@@ -271,6 +310,7 @@ pub async fn run_compact_with_facts_and_resident(
             before_full_summary,
             protected,
             resident,
+            hard_memory,
         )
         .await;
     }
@@ -456,6 +496,7 @@ pub async fn run_compact_with_facts_and_resident(
                 reason,
                 before_full_summary,
                 protected,
+                hard_memory,
             )
             .await
         }
@@ -479,6 +520,7 @@ pub(super) async fn run_full_or_degrade(
     escalation_reason: FullEscalationReason,
     before_full_summary: Option<FullSummaryNotice<'_>>,
     protected: &crate::session::async_result_mailbox::ProtectedResults,
+    hard_memory: Option<&dyn HardMemorySource>,
 ) -> CompactResult {
     let before_visible_len = transcript.visible_messages().len();
     let error = if *consecutive_failures >= config.max_consecutive_failures {
@@ -492,7 +534,15 @@ pub(super) async fn run_full_or_degrade(
         if let Some(notice) = before_full_summary {
             notice();
         }
-        match full::full_compact_inner_with_protected(transcript, llm, config, cwd, protected).await
+        match full::full_compact_inner_with_hard_memory(
+            transcript,
+            llm,
+            config,
+            cwd,
+            protected,
+            hard_memory,
+        )
+        .await
         {
             Ok(mut result) => {
                 *consecutive_failures = 0;
@@ -539,6 +589,7 @@ pub(super) async fn run_resident_full(
     before_full_summary: Option<FullSummaryNotice<'_>>,
     protected: &crate::session::async_result_mailbox::ProtectedResults,
     resident: &ResidentHistoryPressure,
+    hard_memory: Option<&dyn HardMemorySource>,
 ) -> CompactResult {
     warn!(
         resident_limit_bytes = resident.limit_bytes,
@@ -586,6 +637,7 @@ pub(super) async fn run_resident_full(
         FullEscalationReason::ResidentHistoryBudgetExceeded,
         before_full_summary,
         protected,
+        hard_memory,
     )
     .await;
 
