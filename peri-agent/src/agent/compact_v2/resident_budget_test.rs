@@ -317,6 +317,7 @@ async fn resident_budget_forces_full_at_zero_token_pressure() {
         &facts,
         &ProviderCapabilities::openai(),
         &resident,
+        None,
     )
     .await;
 
@@ -364,6 +365,7 @@ async fn resident_budget_forces_full_even_when_micro_would_meet_target() {
         &facts,
         &ProviderCapabilities::openai(),
         &resident,
+        None,
     )
     .await;
 
@@ -410,6 +412,7 @@ async fn resident_budget_below_limit_keeps_micro_only() {
         &facts,
         &ProviderCapabilities::openai(),
         &resident,
+        None,
     )
     .await;
 
@@ -451,6 +454,7 @@ async fn resident_full_failure_is_explicit() {
         &facts,
         &ProviderCapabilities::openai(),
         &resident,
+        None,
     )
     .await;
 
@@ -495,6 +499,7 @@ async fn resident_full_residual_is_recorded_after_success() {
         &facts,
         &ProviderCapabilities::openai(),
         &resident,
+        None,
     )
     .await;
 
@@ -547,6 +552,7 @@ async fn resident_budget_shadow_reports_without_commit() {
         &facts,
         &ProviderCapabilities::openai(),
         &resident,
+        None,
     )
     .await;
 
@@ -598,6 +604,7 @@ async fn resident_budget_auto_disabled_does_not_trigger_full() {
         &facts,
         &ProviderCapabilities::openai(),
         &resident,
+        None,
     )
     .await;
 
@@ -637,6 +644,7 @@ async fn manual_force_still_precedes_resident_budget() {
         &facts,
         &ProviderCapabilities::openai(),
         &resident,
+        None,
     )
     .await;
 

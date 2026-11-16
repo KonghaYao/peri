@@ -95,6 +95,8 @@ pub struct StageContext {
     pub async_ctx: AsyncContext,
     /// 当前 session 的 Goal 只读/控制投影源。
     pub goal_controller: Option<Arc<dyn peri_acp_types::goal::GoalController>>,
+    /// 会话级后台任务注册表（Compact 硬记忆的运行时 id 事实源）。
+    pub task_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
     /// Recall 累加器（跨 middleware hook 共享）。
     ///
     /// 每次 middleware hook 都会构造临时 [`AgentContext`](crate::agent::agent_context::AgentContext)，
@@ -208,6 +210,7 @@ impl StageContext {
                 hook_stop_requested: None,
             },
             goal_controller: None,
+            task_manager: None,
             recall_buffer: rbuf,
             model_view: Arc::new(ModelViewScope::default()),
         }
@@ -270,6 +273,7 @@ impl StageContext {
                 hook_stop_requested: None,
             },
             goal_controller: None,
+            task_manager: None,
         }
     }
 
@@ -310,6 +314,7 @@ pub struct StageContextBuilder {
     pub(super) compact: CompactContext,
     pub(super) async_ctx: AsyncContext,
     pub(super) goal_controller: Option<Arc<dyn peri_acp_types::goal::GoalController>>,
+    pub(super) task_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
 }
 
 impl Debug for SessionHandle {

@@ -339,20 +339,26 @@ pub(super) async fn compact_core(
                         }
                     }
                 };
+                let hard_memory = crate::agent::compact_v2::RuntimeHardMemory::new(
+                    ctx.task_manager.clone(),
+                    ctx.goal_controller.clone(),
+                );
                 crate::agent::compact_v2::run_compact_with_facts_and_resident(
-                &mut transcript_owned,
-                compact_llm_ref,
-                &config_clone,
-                &pressure,
-                false, // force=false（自动触发）
-                &mut consecutive,
-                ctx.cwd(),
-                Some(&before_full_summary),
-                &protected,
-                &facts,
-                &capabilities,
-                &resident_gate,
-                ).await
+                    &mut transcript_owned,
+                    compact_llm_ref,
+                    &config_clone,
+                    &pressure,
+                    false, // force=false（自动触发）
+                    &mut consecutive,
+                    ctx.cwd(),
+                    Some(&before_full_summary),
+                    &protected,
+                    &facts,
+                    &capabilities,
+                    &resident_gate,
+                    Some(&hard_memory),
+                )
+                .await
             } => r,
         };
 

@@ -446,7 +446,8 @@ pub fn build_stage_context(
         .with_tool_invocation_resolver(Arc::clone(&input.tool_invocation_resolver))
         .with_middleware_chain(Arc::clone(&chain))
         .with_event_bus(Arc::new(event_bus))
-        .with_session_context(session_context);
+        .with_session_context(session_context)
+        .with_task_manager(task_manager.clone());
 
     let builder = dependencies::configure_stage(
         builder,

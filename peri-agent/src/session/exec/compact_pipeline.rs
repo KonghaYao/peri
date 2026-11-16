@@ -87,6 +87,12 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         .dep::<AsyncResultMailbox>()
         .map(|mailbox| mailbox.protected_snapshot())
         .unwrap_or_default();
+    // 手动 compact 同样生成硬记忆；task_manager 与 goal 均由会话装配注入。
+    // 缺失时硬记忆为空，不追加第二条消息。
+    let goal_controller = ctx
+        .dep::<Arc<dyn peri_acp_types::goal::GoalController>>()
+        .map(|goal| (*goal).clone());
+    let hard_memory = compact_v2::RuntimeHardMemory::new(ctx.task_manager.clone(), goal_controller);
     let CommandContext {
         session_id,
         history,
@@ -373,6 +379,7 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         &session_id,
         &mut consecutive_failures,
         &protected,
+        Some(&hard_memory),
     )
     .await
     {
@@ -441,6 +448,7 @@ async fn run_v2_compact_with_cancel(
     session_id: &str,
     consecutive_failures: &mut u32,
     protected: &crate::session::async_result_mailbox::ProtectedResults,
+    hard_memory: Option<&dyn compact_v2::HardMemorySource>,
 ) -> Result<compact_v2::CompactResult, CancelOrError> {
     let result = tokio::select! {
         biased;
@@ -448,7 +456,7 @@ async fn run_v2_compact_with_cancel(
             tracing::info!(session_id = %session_id, "compact cancelled by user");
             return Err(CancelOrError::Cancelled);
         }
-        r = compact_v2::run_compact_with_protected(
+        r = compact_v2::run_compact_with_hard_memory(
             transcript,
             Some(model),
             config,
@@ -465,6 +473,7 @@ async fn run_v2_compact_with_cancel(
             cwd,
             None,
             protected,
+            hard_memory,
         ) => r,
     };
 
