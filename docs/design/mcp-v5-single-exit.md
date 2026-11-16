@@ -1,12 +1,12 @@
 # MCP v5：builtin 单出口目标设计
 
-> 状态：已批准目标设计（2026-11-15，Issue #409）；尚未实现。运行时代码、协议测试与迁移状态以代码、契约测试和 [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md) 为准。
+> 状态：已批准目标设计（2026-11-15，Issue #409）。standalone router（`peri mcp-start --capability`）与 workspace 代理接缝已实现并有 crate 级测试；宿主默认装配、Sandbox 端到端与切换验收未完成。运行时代码、协议测试与迁移状态以代码、契约测试和 [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md) 为准。
 >
 > 规范性用语：**必须**表示不可违反的契约，**不得**表示禁止行为，**可以**表示实现选择。本文使用三种状态标记：
 >
 > - **现行**：当前 `origin/main` 的代码行为，由代码与契约测试证明。
 > - **兼容期**：v4 六实例路径在迁移期间仍可用，用于未迁移会话与回滚；不是长期目标。
-> - **目标（v5）**：已裁决但尚未实现的单出口契约。不得把目标写成现状。
+> - **目标（v5）**：已裁决的单出口契约；standalone 部分已实现，宿主切换与端到端验收仍未完成。不得把未验收部分写成现状。
 >
 > 术语：配置权威使用 `McpConfigFile`（`.mcp.json` 的 typed 解析结果）与 `ConfigurationSnapshot`（配置权威快照）；本文不使用旧 issue 中的其他配置类型名。
 
@@ -128,7 +128,7 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 7. v4 的逐实例 `.mcp.json` 条目在迁移期由 adapter 确定性映射为单出口能力开关；新会话不得写回六条目。
 8. 宿主内的 builtin 单出口条目由宿主注入，能力开关以 `mcp-start` 参数为准；standalone 与宿主共用能力注册表，但不重新绑定整个 settings 装配。
 
-状态说明：以上是目标契约，当前 `mcp-start` 的参数语法与扩展键尚未实现或裁决；验收矩阵见 active spec 的配置组合维度。
+状态说明：`mcp-start` 的 `--capability` 参数语法已实现；`.mcp.json` 扩展键名仍未裁决。宿主默认装配仍是 v4 六实例，验收矩阵见 active spec 的配置组合维度。
 
 ## 4. 能力关闭矩阵
 

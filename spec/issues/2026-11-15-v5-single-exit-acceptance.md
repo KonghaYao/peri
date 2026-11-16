@@ -1,6 +1,6 @@
 # v5 builtin 单出口：设计门槛与验收（#409）
 
-> 状态：设计门槛完成；运行时实施未授权。除标注「设计门槛完成」的文档项外，本 spec 的运行验收项均**未验证**。
+> 状态：standalone router、能力开关/降级、task 归属与 workspace 代理接缝已实现并有 crate 级测试；宿主默认装配与 §3 的运行验收项仍未完成或未验证。
 >
 > 基线：`origin/main` `9d27a634e`；裁决 [#409](https://github.com/KonghaYao/peri/issues/409)；静态审计见 [2026-11-15-v5-builtin-single-exit-audit.md](2026-11-15-v5-builtin-single-exit-audit.md)。
 >
@@ -8,10 +8,10 @@
 
 ## 1. 范围与门禁
 
-1. 本阶段只完成 #409 的 P0 设计门槛：修订设计契约，写明 v5 单出口目标、兼容期与回滚，并把验收矩阵写入 active spec。
-2. 本阶段不改运行时代码、不改 schema、不改数据库表结构、不改变既有会话配置。
+1. P0 设计门槛：修订设计契约，写明 v5 单出口目标、兼容期与回滚，并把验收矩阵写入 active spec。
+2. P0 阶段不改运行时代码；后续 P2/P3 已实现 standalone router、`mcp-start --capability` 与 workspace 代理接缝，不改 schema、数据库表结构或既有会话配置。
 3. #409 §10.1（用户裁决）已完成；§10.2–§10.4 的落点与状态见 §2。
-4. 在 §3 的运行验收完成前，不得把 v5 单出口、capability router、workspace 代理或能力级降级描述为已实现。
+4. router、能力开关/降级与代理接缝可按 crate 级测试描述为已实现；在 §3 的 V5-C/G/W/L/N/M 运行验收完成前，不得描述为验收通过，也不得说宿主默认装配已切换。
 
 ## 2. #409 批准条件与设计门槛
 
@@ -96,7 +96,7 @@ M4 是回滚支持截止点：M4 开始前必须记录截止决定并确认旧�
 ### 6.1 本轮未验证
 
 1. 单出口 router、能力开关/降级、task 归属与 workspace 代理接缝已实现并有 crate 级测试（`mcp::builtin::router`，15 项）；未接入宿主默认装配，也未验证 router + host 的端到端生命周期。
-2. 未运行 Sandbox upstream 或端到端 MCP wire 实验；并发 request id、取消、进度、任务、通知、订阅与断线清理均未验证。
+2. 代理的 mock-peer wire 测试已覆盖并发 request id、取消透传、progress token、task id 映射、资源读取/订阅与断线降级；未运行 Sandbox upstream 或 router + host 端到端 MCP wire 实验，断线清理与重连后的订阅恢复仍未验证。
 3. 未验证 beta flag 接线、影子装配、新旧会话隔离或回滚。
 4. 未验证跨进程 `taskOwner`、task id 归属或 workspace 上游重连。
 5. 未验证能力级降级在首个模型请求、面板、诊断三处的一致性。
