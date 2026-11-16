@@ -23,6 +23,15 @@ impl McpClientPool {
 
     /// 池内是否配置了 v5 单出口 `peri`（会话声明优先；未连接也算配置事实）。
     pub(crate) fn v5_single_exit_configured(&self) -> bool {
+        // 已连接的 `peri` 是比配置快照更早可用的事实：print/bare 路径可能在
+        // 会话声明写入前就登记后台任务，配置快照尚未包含注入条目。
+        if self
+            .clients
+            .read()
+            .contains_key(peri_acp_types::builtin_mcp::BUILTIN_V5_SERVER_NAME)
+        {
+            return true;
+        }
         let is_peri = |config: &peri_acp_types::plugin::McpServerConfig| {
             matches!(
                 &config.source,

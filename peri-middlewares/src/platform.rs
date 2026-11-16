@@ -34,12 +34,15 @@ pub(crate) fn builtin_policy(
 }
 
 /// bare 配置的 builtin 策略：v5 单出口只保留 `workspace` 能力。
+///
+/// `PERI_MCP_BUILTIN=off` 是部署级 kill switch，bare 路径也必须遵守；`legacy`
+/// 回滚值在 bare 中只投影 `workspace`（bare 从不注入其他能力）。
 pub(crate) fn builtin_workspace_policy(
     configured_enabled: bool,
 ) -> crate::mcp::builtin::BuiltinInjectionPolicy {
-    if IN_PROCESS_BUILTINS && configured_enabled {
-        crate::mcp::builtin::BuiltinInjectionPolicy::capabilities(&["workspace"])
-    } else {
-        crate::mcp::builtin::BuiltinInjectionPolicy::none()
+    let deploy_policy = builtin_policy(configured_enabled);
+    if deploy_policy.is_none() {
+        return deploy_policy;
     }
+    crate::mcp::builtin::BuiltinInjectionPolicy::capabilities(&["workspace"])
 }
