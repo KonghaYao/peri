@@ -21,6 +21,7 @@ pub mod config;
 pub(crate) mod decision;
 pub mod exposure;
 pub mod full;
+pub mod hard_memory;
 pub mod micro;
 pub mod planner;
 pub mod projection;
@@ -31,6 +32,10 @@ pub mod smart;
 pub use config::{CompactConfig, CONTINUATION_HINT};
 pub use decision::min_micro_gain_tokens;
 pub use full::{extract_file_info, extract_skill_names};
+pub use hard_memory::{
+    from_parts, is_hard_memory_content, snapshot_from_runtime, HardMemoryGoal, HardMemorySnapshot,
+    HardMemorySource, HardMemoryTask, RuntimeHardMemory, HARD_MEMORY_HEADER,
+};
 pub use micro::micro_compact;
 pub use planner::{
     plan_micro, ApplyReport, CompactPolicy, ContextPressure, FullEscalationReason,
@@ -61,6 +66,8 @@ pub use compact_engine::run_compact_with_protected;
 pub use compact_engine::run_compact_with_facts;
 
 pub use compact_engine::run_compact_with_facts_and_resident;
+
+pub use compact_engine::run_compact_with_hard_memory;
 
 #[cfg(test)]
 #[path = "projection_test.rs"]
@@ -93,6 +100,14 @@ pub(crate) use compact_engine::micro_failure;
 #[cfg(test)]
 #[path = "archive_lifecycle_test.rs"]
 mod archive_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "hard_memory_test.rs"]
+mod hard_memory_tests;
+
+#[cfg(test)]
+#[path = "hard_memory_compact_test.rs"]
+mod hard_memory_compact_tests;
 
 #[cfg(test)]
 #[path = "resident_budget_test.rs"]

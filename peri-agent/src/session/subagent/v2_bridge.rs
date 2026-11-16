@@ -342,6 +342,7 @@ pub fn build_v2_subagent_context(
             crate::agent::async_tasks::handoff::handoff_max_wait(),
         );
         builder = builder
+            .with_task_manager(manager.clone())
             .with_idle_waiting()
             .with_idle_registry(manager.registry().subscribe_activity())
             .with_idle_should_wait({

@@ -66,6 +66,8 @@ pub struct InterceptRequest<'request> {
     pub auxiliary_model: &'request Option<Arc<dyn peri_model::Model>>,
     // ── 异步服务 ──
     pub task_manager: &'request Arc<dyn TaskManager>,
+    /// 会话级 goal 控制面（手动 `/compact` 硬记忆的运行时来源）。
+    pub goal_controller: Option<Arc<dyn peri_acp_types::goal::GoalController>>,
     pub mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
     /// 会话级后台结果处理责任；`/compact` 必须据此保护未覆盖的终态通知。
     pub async_result_mailbox: Option<Arc<crate::session::async_result_mailbox::AsyncResultMailbox>>,
@@ -235,6 +237,12 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
         deps.insert(
             std::any::TypeId::of::<crate::session::async_result_mailbox::AsyncResultMailbox>(),
             mailbox,
+        );
+    }
+    if let Some(goal) = req.goal_controller.clone() {
+        deps.insert(
+            std::any::TypeId::of::<Arc<dyn peri_acp_types::goal::GoalController>>(),
+            Arc::new(goal),
         );
     }
     let mut ctx = CommandContext::new(
