@@ -1,6 +1,10 @@
 # MCP v5：builtin 单出口目标设计
 
-> 状态：已批准目标设计（2026-11-15，Issue #409）。standalone router（`peri mcp-start --capability`）与 workspace 代理接缝已实现并有 crate 级测试；宿主默认装配、Sandbox 端到端与切换验收未完成。运行时代码、协议测试与迁移状态以代码、契约测试和 [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md) 为准。
+> 状态：已批准目标设计（2026-11-15，Issue #409）。v5 单出口 `peri` 已是宿主默认装配；
+> 六个独立 builtin server 仅在 `PERI_MCP_BUILTIN=legacy` 回滚路径保留到 M4。
+> Sandbox workspace 的宿主内代理接线仍是兼容路径（见 active spec 未验证项）。
+> 运行时代码、协议测试与迁移状态以代码、契约测试和
+> [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md) 为准。
 >
 > 规范性用语：**必须**表示不可违反的契约，**不得**表示禁止行为，**可以**表示实现选择。本文使用三种状态标记：
 >
@@ -50,7 +54,9 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 4. 对外单 transport 不等于共享可变状态：每个 capability 保留独立 handler 状态、凭据、资源根、任务归属与关闭逻辑。
 5. `mcp-packages/*` 仍是能力实现的组织方式；运行时实例划分与 crate 划分解耦。聚合 handler 只做路由、生命周期、代理与错误隔离，不复制业务规则。
 
-**现行**：六实例各自一条 duplex 与独立 task；默认层把它们写成六个 `mcpServers` 条目；`workspace` 的 7 个工具用原名直连，其余实例使用 `mcp__<instance>__<tool>`。**兼容期**：该路径保留，供未迁移会话与回滚使用。
+**现行（v5 默认）**：宿主默认只注入 `peri` 一个 builtin 条目（`source = Builtin`，`system_mcp = true`），
+由 capability router 聚合六项能力；workspace 能力在出口内同进程服务。`PERI_MCP_BUILTIN=legacy`
+保留六实例逐实例 transport / task 的回滚路径（M4 截止），`PERI_MCP_BUILTIN=off` 是零注入 kill switch。
 
 ### 2.2 能力注册表
 
@@ -108,7 +114,7 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 
 ## 3. 配置权威
 
-**现行**：普通会话的 MCP 配置由 `ConfigurationSnapshot` 投影，`McpConfigFile` 解析 `.mcp.json` 的 `mcpServers`；builtin 默认层由宿主注入，`PERI_MCP_BUILTIN` 由 `mcp::builtin_enabled` 单一解释。`peri mcp-start` 在配置加载前分派，当前只接受单个 instance，standalone 不读取完整 settings。
+**现行**：普通会话的 MCP 配置由 `ConfigurationSnapshot` 投影，`McpConfigFile` 解析 `.mcp.json` 的 `mcpServers`；builtin 默认层由宿主注入一个 `peri` 条目，能力集合来自 `.mcp.json` 旧逐实例条目的确定性映射（`disabled` → 能力关闭）与会话冻结关闭集。`PERI_MCP_BUILTIN` 由 `mcp::builtin_enabled`/overlay 单一解释：缺省 v5、`off` 零注入、`legacy` 回滚六实例。`peri mcp-start peri --capability ...` 在配置加载前分派，standalone 不读取完整 settings。
 
 **目标（v5）**：单出口有两个一等配置入口，不把 `ConfigurationSnapshot` 作为 standalone 的唯一权威：
 
@@ -170,7 +176,7 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 7. 单出口内原始名重复、跨能力重名、无法唯一判定归属，以及用户自定义配置抢占保留名 `peri`，均为加载期确定性失败；不得静默覆盖或 first-wins。
 8. 外部 MCP 继续使用 `mcp__<server>__<tool>`；外部同名 server 不得被 builtin 关闭规则误杀，也不得借 `peri` 名称继承 builtin 审批白名单。
 
-**现行**：deferred 名按实例分裂，workspace direct 工具用原名；旧名归一函数存在。**兼容期**：v4 路径（beta flag 关闭的新会话与既有 v4 会话）继续执行其 `mcp__<instance>__<tool>` 名。**v5 路由**不执行 builtin 的旧实例名，旧名仅用于历史显示与过滤匹配；外部 server 的同形名称不受影响。迁移完成（M4）后 v4 路径与旧名执行一并退役。
+**现行（v5 默认）**：deferred 工具经工具桥生成 `mcp__peri__<original>`，direct 工具保持原名；`peri` 的 wire `tools/list` 使用原始名，模型面命名只由工具桥生成。**兼容期**：`PERI_MCP_BUILTIN=legacy` 回滚路径与既有 v4 会话继续执行 `mcp__<instance>__<tool>` 名。**v5 路由**不执行 builtin 的旧实例名，旧名仅用于历史显示与过滤匹配；外部 server 的同形名称不受影响。M4 后 v4 路径与旧名执行一并退役。
 
 ## 6. 降级、readiness 与可观察性
 
@@ -190,15 +196,15 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 迁移阶段、批次、观察窗口与验收勾选只写 [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md)，不回填设计。设计冻结以下语义：
 
 1. 迁移期 v4 六实例路径必须保留，可被新会话选择；它是兼容期与回滚路径，不是目标设计。
-2. 新路径先以 beta flag 只对新会话开启；切换默认前不得删除 v4 adapter。
+2. 默认装配已切换为 v5 单出口；v4 路径由 `PERI_MCP_BUILTIN=legacy` 显式选择（部署级回滚），M4 截止。
 3. 切换后旧配置必须可确定性映射或 typed error；旧 transcript 名只做非执行归一。
 4. 清理期（M4）只能在观察窗口与验收完成后开始；M4 启动即回滚支持结束，之后不得再承诺 v4 装配或旧名执行。清理前必须确认无仍需冷恢复的 v4 会话；否则保留只读 v4 adapter，不得删除。清理不得改变已冻结会话，也不得删除外部 MCP/ACP 路径。
 
-### 7.2 beta flag、冻结配置集与运行时投影
+### 7.2 回滚开关、冻结配置集与运行时投影
 
-1. 新装配由专用 beta flag 选择；flag id 在实现期按 [Beta Flag 系统](beta-flags.md) 注册，本文不预占。flag 只影响**新会话**，不做会话内热生效。
-2. flag 关闭时新会话仍走 v4 六实例兼容路径；这是迁移期回滚路径，不是目标设计。该路径持续到回滚支持截止（M4 清理前），M4 后 flag 与 v4 路径一并退役。
-3. flag 开启时新会话冻结其**配置能力集**，并记录来源 revision 供诊断；同一会话及其子 Agent 复用冻结集合，不在 turn 中途重新解析。运行期失败由该集合派生运行时能力投影。
+1. 默认（`PERI_MCP_BUILTIN` 未设置 / `on` / `v5`）走单出口；`legacy` / `v4` 走 v4 六实例兼容路径；`off` / `0` 是零注入 kill switch。回滚开关只影响**新会话装配**，不做会话内热生效。
+2. v4 路径持续到回滚支持截止（M4 清理前），M4 后与旧名执行一并退役。
+3. 新会话冻结其**配置能力集**，并记录来源 revision 供诊断；同一会话及其子 Agent 复用冻结集合，不在 turn 中途重新解析。运行期失败由该集合派生运行时能力投影。
 4. 冷加载/恢复复用已冻结的配置能力集，并按启动结果重新建立运行时能力投影。冷恢复是允许的恢复事件：不持久化降级状态、不恢复旧执行状态、不改变会话身份或历史；不得因当前配置变化隐式换身份、重写历史或热替换 pool。
 5. 已存在的 v4 会话保持原装配与原模型名，不回写；回滚只改变新会话的选择，不改变已冻结会话。
 
@@ -239,7 +245,7 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 | 聚合 handler 的 crate 落点 | 已裁决（实现期） | `peri-middlewares::mcp::builtin::router`：复用 `BuiltinServerHandler`、`StandaloneFactory` 与 `UpstreamProxy`，不新增 crate |
 | workspace upstream descriptor 来源、授权与生命周期 | 未裁决 | 由 Sandbox Actor 提供；代理 wire 门槛必须验证 |
 | task id 编码 | 未裁决 | 全局唯一或稳定能力前缀；必须能唯一判定归属 |
-| beta flag id 与注册表条目 | 实现期裁决 | 按 beta-flags.md 引入，不预占 id |
+| 回滚开关 | 已裁决（实现期） | `PERI_MCP_BUILTIN=legacy`（M4 截止）；不新增 beta flag |
 | 观察窗口参数与退出条件 | 实现期裁决 | 记录在 active spec；不在设计写死数字 |
 | 代理重连/超时/重试策略 | 未裁决 | 首阶段不做自动热恢复；wire 门槛验证断线清理与旧任务隔离 |
 

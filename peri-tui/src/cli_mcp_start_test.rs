@@ -145,6 +145,40 @@ fn instance_and_capability_are_mutually_exclusive() {
 }
 
 #[test]
+fn peri_positional_selects_the_single_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = resolve_options(parse(&[
+        "peri",
+        "--stdio",
+        "--workspace",
+        workspace_arg(dir.path()),
+    ]))
+    .unwrap();
+    let Target::Capabilities(capabilities) = options.target else {
+        panic!("`peri` must resolve to the capability router");
+    };
+    assert_eq!(capabilities.len(), 6, "{capabilities:?}");
+}
+
+#[test]
+fn peri_positional_accepts_capability_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = resolve_options(parse(&[
+        "peri",
+        "--capability",
+        "web,cron",
+        "--stdio",
+        "--workspace",
+        workspace_arg(dir.path()),
+    ]))
+    .unwrap();
+    assert_eq!(
+        options.target,
+        Target::Capabilities(vec!["web".to_owned(), "cron".to_owned()])
+    );
+}
+
+#[test]
 fn legacy_instance_does_not_read_mcp_file() {
     let dir = tempfile::tempdir().unwrap();
     write_mcp_file(dir.path(), "{not json");

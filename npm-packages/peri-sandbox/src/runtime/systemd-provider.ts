@@ -112,6 +112,8 @@ export class SystemdProvider implements Provider {
       '--wait',
       options.periPath,
       'mcp-start',
+      'peri',
+      '--capability',
       'workspace',
       '--stdio',
       '--workspace',
