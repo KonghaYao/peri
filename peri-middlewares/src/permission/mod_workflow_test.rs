@@ -414,7 +414,7 @@ fn cron_sensitive_markdown_uses_registry_effective_name() {
         .expect("cron 实例应声明 cron_register");
     let cron_line = format!(
         "- `{}` — scheduled task registration (can trigger arbitrary prompts later, equivalent to delegated execution rights)",
-        register.legacy_name
+        register.model_name
     );
     assert!(
         lines.contains(&cron_line.as_str()),
@@ -431,7 +431,7 @@ fn cron_sensitive_markdown_uses_registry_effective_name() {
         lines.contains(
             &format!(
                 "- `{}` — monitor command execution (starts a shell command and watches its output)",
-                start.legacy_name
+                start.model_name
             )
             .as_str()
         ),
@@ -448,7 +448,7 @@ fn cron_sensitive_markdown_uses_registry_effective_name() {
         *lines.last().expect("敏感工具列表非空"),
         format!(
             "- `{}` — workflow delegation (launches a multi-agent workflow that bypasses HITL, equivalent to delegated execution rights)",
-            workflow_start.legacy_name
+            workflow_start.model_name
         ),
         "末项（Workflow 启动）显示名必须是注册表解析出的 effective name，实际渲染：\n{rendered}"
     );
