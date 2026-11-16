@@ -1,0 +1,28 @@
+{
+  "name": "@peri/memory-plugin",
+  "version": "0.1.0",
+  "description": "Peri long-term memory MCP and independent Hindsight message importer",
+  "type": "module",
+  "license": "Apache-2.0",
+  "bin": { "memory-plugin": "dist/index.js" },
+  "exports": { ".": "./dist/index.js", "./server": "./dist/index.js", "./stdio": "./dist/index.js" },
+  "files": ["dist/index.js", "README.md", "DESIGN.md", "VALIDATION.md", "examples"],
+  "engines": { "node": ">=22.22.2" },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "tsc --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "prepack": "npm run check && npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.3.1",
+    "mcp-use": "2.12.4",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.3.1",
+    "@types/node": "22.20.0",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
+  }
+}
