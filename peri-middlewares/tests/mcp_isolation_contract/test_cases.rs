@@ -103,9 +103,9 @@ pub(super) const BUILTIN_INJECTION_ENV: &str = "PERI_MCP_BUILTIN";
 /// `run_initialize` 走的是生产加载路径，会读真实的 `~/.peri/settings.json`
 /// 与凭证存储；不隔离就会去启动开发者本机配置的 MCP server（可能带真实凭据）。
 /// `PERI_MCP_BUILTIN=off` 停用 builtin 默认层注入：stdio 用例测的是两台 fixture stdio
-/// server 之间的隔离，注入 `web` / `artifact` 会让 pool 变成四台（off 语义本身由本文件
-/// 新增的 `builtin_injection_off_*` 用例断言，见 §5 R28）。builtin 用例（I01）反过来要求
-/// **缺省注入**（变量缺失 ⇒ 注入全部已实现实例），因此取值是夹具参数而不是常量。
+/// server 之间的隔离，注入 builtin 会改变 pool 的实例数（off 语义本身由本文件
+/// 新增的 `builtin_injection_off_*` 用例断言，见 §5 R28）。builtin 用例（I01）要求
+/// **v4 回滚注入**（`legacy` ⇒ 独立的 cron 实例），因此取值是夹具参数而不是常量。
 /// 进程级互斥沿用仓库既有 `EnvLockFile`（`Drop` 复原 env 时仍持锁）。
 pub(super) struct EnvIsolation {
     pub(super) _lock: EnvLockFile,

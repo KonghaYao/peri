@@ -22,6 +22,8 @@ pub struct McpClientPool {
     pub(super) workspace_scope: std::sync::OnceLock<peri_acp_types::workspace::WorkspaceId>,
     pub(in crate::mcp) configuration_snapshot:
         std::sync::OnceLock<Arc<peri_config::ConfigurationSnapshot>>,
+    pub(in crate::mcp) frozen_builtin_mode:
+        std::sync::OnceLock<peri_acp_types::builtin_mcp::BuiltinAssemblyMode>,
     pub(in crate::mcp) session_servers: std::sync::OnceLock<HashMap<String, McpServerConfig>>,
     pub(super) credential_client:
         std::sync::OnceLock<super::super::auth_store::OAuthCredentialClient>,
@@ -235,6 +237,7 @@ impl McpClientPool {
             cache_policy: std::sync::OnceLock::new(),
             workspace_scope: std::sync::OnceLock::new(),
             configuration_snapshot: std::sync::OnceLock::new(),
+            frozen_builtin_mode: std::sync::OnceLock::new(),
             session_servers: std::sync::OnceLock::new(),
             credential_client: std::sync::OnceLock::new(),
             builtin_available: std::sync::atomic::AtomicBool::new(true),
@@ -408,6 +411,24 @@ impl McpClientPool {
         })
     }
 
+    pub fn set_frozen_builtin_mode(
+        &self,
+        mode: peri_acp_types::builtin_mcp::BuiltinAssemblyMode,
+    ) -> std::io::Result<()> {
+        let context = self.builtin_context.lock();
+        if context.initialize_started || !self.is_open() {
+            return Err(std::io::Error::other(
+                "builtin assembly mode must be bound before MCP initialization",
+            ));
+        }
+        self.frozen_builtin_mode.set(mode).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "builtin assembly mode is already bound",
+            )
+        })
+    }
+
     /// Bind persistent MCP data to the saved Workspace before initialization.
     pub fn bind_workspace_scope(
         &self,
@@ -442,18 +463,7 @@ impl McpClientPool {
     /// **被 `disabled` 的条目同样返回来源**：禁用只表示能力关闭，不改变
     /// 「该声明的执行环境不在本机」这一事实。
     pub fn workspace_source(&self) -> Option<peri_acp_types::plugin::ConfigSource> {
-        if let Some(servers) = self.session_servers.get() {
-            if let Some(source) = servers
-                .get("workspace")
-                .and_then(|config| config.source.clone())
-            {
-                return Some(source);
-            }
-        }
-        self.configs
-            .read()
-            .get("workspace")
-            .and_then(|config| config.source.clone())
+        self.capability_source("workspace")
     }
 
     /// ACP session setup declarations are scoped to this pool and override file configuration.
@@ -574,36 +584,14 @@ impl McpClientPool {
         self.builtin_context.lock().context.clone()
     }
 
-    /// 订阅建立门（A24 关闭集；判定只走 `builtin::is_closed`）。
-    ///
-    /// `closed` 取自宿主经 [`BuiltinInstanceContext`] 注入的 A24 关闭集（会话装配从
-    /// frozen meta-harness 派生）：命中的 builtin 实例**不建立** `subscriptions/listen`
-    /// 长流。订阅是能力的外部副作用（服务端据此才采样 git），关闭语义必须覆盖它
-    /// （ARC-CAPABILITY-CLOSURE-001；粗粒度关闭 = `WorkspaceMiddleware: false`）。
-    ///
-    /// 未注入上下文 / 非 builtin 名字（关闭集只含 builtin 实例名）⇒ 恒允许，既有外部
-    /// server 的订阅行为逐位不变。
-    pub(crate) fn subscription_allowed(&self, server: &str) -> bool {
-        let closed = self
-            .builtin_instance_context()
-            .map(|context| context.closed.clone())
-            .unwrap_or_default();
-        let source = self
-            .configs
-            .read()
-            .get(server)
-            .and_then(|config| config.source.clone());
-        !super::super::builtin::is_closed_source(server, source.as_ref(), &closed)
-    }
-
     pub(super) fn workspace_source_closed(
         &self,
         closed: &std::collections::BTreeSet<String>,
     ) -> bool {
         let source = self
-            .client("workspace")
+            .capability_client("workspace")
             .and_then(|handle| handle.source.clone());
-        super::super::builtin::is_closed_source("workspace", source.as_ref(), closed)
+        super::super::builtin::is_capability_closed("workspace", source.as_ref(), closed)
     }
 
     /// builtin 实例的**唯一** spawn 点（IF-P3-04 / A32）：实例解析 → 上下文 → 链路
@@ -655,6 +643,26 @@ impl McpClientPool {
                 }));
             }
         }
+        // v5 单出口：cron 能力启用且宿主开启 tick 时，仍由 pool 的唯一 spawn 点驱动。
+        #[cfg(not(target_os = "emscripten"))]
+        if builtin_mcp::is_v5_server_name(instance) {
+            let cron_enabled = crate::mcp::builtin::router::RouterTemplate::host_capabilities(
+                env,
+                &context.closed,
+            )
+            .iter()
+            .any(|capability| capability == "cron");
+            if let Some(cron) = context
+                .cron
+                .as_ref()
+                .filter(|cron| cron_enabled && cron.tick_enabled)
+            {
+                let scheduler = Arc::clone(&cron.scheduler);
+                transport.tick = Some(TickGuard::spawn(BUILTIN_TICK_INTERVAL, move || {
+                    scheduler.lock().tick();
+                }));
+            }
+        }
         Ok(transport)
     }
 
@@ -683,7 +691,7 @@ impl McpClientPool {
             tracing::warn!("meta_harness: builtin workspace is closed; keeping builtin sections");
             return Ok(HashMap::new());
         }
-        let Some(handle) = self.client("workspace") else {
+        let Some(handle) = self.capability_client("workspace") else {
             return Ok(HashMap::new());
         };
         if !matches!(handle.status, ClientStatus::Connected)
@@ -694,8 +702,9 @@ impl McpClientPool {
         let Some(peer) = handle.peer.as_ref() else {
             return Ok(HashMap::new());
         };
+        let server = handle.name.as_str();
         let resources = self
-            .list_all_resources_cached("workspace", peer)
+            .list_all_resources_cached(server, peer)
             .await
             .map_err(|error| format!("resources/list failed: {error}"))?;
         let mut docs = HashMap::new();
@@ -710,11 +719,10 @@ impl McpClientPool {
                 continue;
             }
             let (result, ticket) = self
-                .read_resource_cached("workspace", &resource.uri, peer)
+                .read_resource_cached(server, &resource.uri, peer)
                 .await
                 .map_err(|error| format!("resources/read failed: {error}"))?;
-            self.cache_verified_resource("workspace", ticket, &result)
-                .await;
+            self.cache_verified_resource(server, ticket, &result).await;
             if let Some(text) = result.contents.iter().find_map(|content| match content {
                 ResourceContents::TextResourceContents { text, .. } => Some(text.clone()),
                 _ => None,
@@ -753,7 +761,7 @@ impl McpClientPool {
             );
             return Ok((None, None));
         }
-        let Some(handle) = self.client("workspace") else {
+        let Some(handle) = self.capability_client("workspace") else {
             return Ok((None, None));
         };
         if !matches!(handle.status, ClientStatus::Connected)
@@ -770,8 +778,9 @@ impl McpClientPool {
         // M9：`resources/list` 只是发现提示，**不证明正文已锁定**。首次采集
         // 出现不一致（已列出的指令资源读取失败）时只做一次有界重采集；仍不一致
         // 就返回明确的可重试准入错误，不提交半套冻结数据。
+        let server = handle.name.clone();
         collect_with_single_recollect("workspace instruction face", || {
-            self.collect_instruction_documents(&peer)
+            self.collect_instruction_documents(&server, &peer)
         })
         .await
     }
@@ -779,13 +788,14 @@ impl McpClientPool {
     /// 一次 list→read 采集（main / local）；任一已列出资源读取失败即返回 `Err`。
     pub(super) async fn collect_instruction_documents(
         &self,
+        server: &str,
         peer: &rmcp::service::Peer<rmcp::service::RoleClient>,
     ) -> Result<(Option<String>, Option<String>), String> {
         use peri_acp_types::workspace_resources;
         use peri_acp_types::workspace_resources::INSTRUCTION_LOCAL_URI;
         use peri_acp_types::workspace_resources::INSTRUCTION_MAIN_URI;
         let resources = self
-            .list_all_resources_cached("workspace", peer)
+            .list_all_resources_cached(server, peer)
             .await
             .map_err(|error| format!("resources/list failed: {error}"))?;
         let mut main: Option<String> = None;
@@ -801,14 +811,13 @@ impl McpClientPool {
             if workspace_resources::parse_instruction_uri(uri).is_none() {
                 continue;
             }
-            let (result, ticket) = self
-                .read_resource_cached("workspace", uri, peer)
-                .await
-                .map_err(|error| {
-                    format!("listed instruction resource {uri} could not be read: {error}")
-                })?;
-            self.cache_verified_resource("workspace", ticket, &result)
-                .await;
+            let (result, ticket) =
+                self.read_resource_cached(server, uri, peer)
+                    .await
+                    .map_err(|error| {
+                        format!("listed instruction resource {uri} could not be read: {error}")
+                    })?;
+            self.cache_verified_resource(server, ticket, &result).await;
             let Some(text) = result.contents.iter().find_map(|content| match content {
                 ResourceContents::TextResourceContents { text, .. } => Some(text.clone()),
                 _ => None,
@@ -852,11 +861,17 @@ impl McpClientPool {
             .filter(|handle| handle.skills_capable)
             .filter(|handle| matches!(handle.status, ClientStatus::Connected))
             .filter(|handle| {
-                !super::super::builtin::is_closed_source(
-                    &handle.name,
-                    handle.source.as_ref(),
-                    &closed,
-                )
+                if peri_acp_types::builtin_mcp::is_v5_server_name(&handle.name) {
+                    // 技能面由 workspace 能力承载；能力关闭时整条 peri 连接仍在，
+                    // 但不得再读 skills。
+                    !closed.contains("workspace")
+                } else {
+                    !super::super::builtin::is_closed_source(
+                        &handle.name,
+                        handle.source.as_ref(),
+                        &closed,
+                    )
+                }
             })
             .collect();
         if handles.is_empty() {

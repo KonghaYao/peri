@@ -145,7 +145,39 @@ fn instance_and_capability_are_mutually_exclusive() {
 }
 
 #[test]
-fn legacy_instance_does_not_read_mcp_file() {
+fn peri_positional_selects_the_single_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = resolve_options(parse(&[
+        "peri",
+        "--stdio",
+        "--workspace",
+        workspace_arg(dir.path()),
+    ]))
+    .unwrap();
+    let Target::Capabilities(capabilities) = options.target;
+    assert_eq!(capabilities.len(), 6, "{capabilities:?}");
+}
+
+#[test]
+fn peri_positional_accepts_capability_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = resolve_options(parse(&[
+        "peri",
+        "--capability",
+        "web,cron",
+        "--stdio",
+        "--workspace",
+        workspace_arg(dir.path()),
+    ]))
+    .unwrap();
+    assert_eq!(
+        options.target,
+        Target::Capabilities(vec!["web".to_owned(), "cron".to_owned()])
+    );
+}
+
+#[test]
+fn legacy_instance_maps_to_the_single_exit_without_reading_mcp_file() {
     let dir = tempfile::tempdir().unwrap();
     write_mcp_file(dir.path(), "{not json");
     let options = resolve_options(parse(&[
@@ -155,7 +187,27 @@ fn legacy_instance_does_not_read_mcp_file() {
         workspace_arg(dir.path()),
     ]))
     .unwrap();
-    assert_eq!(options.target, Target::Instance("web".to_owned()));
+    assert_eq!(options.target, Target::Capabilities(vec!["web".to_owned()]));
+}
+
+#[test]
+fn every_legacy_instance_maps_to_its_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    for capability in peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES {
+        let options = resolve_options(parse(&[
+            capability.legacy_instance,
+            "--stdio",
+            "--workspace",
+            workspace_arg(dir.path()),
+        ]))
+        .unwrap();
+        assert_eq!(
+            options.target,
+            Target::Capabilities(vec![capability.name.to_owned()]),
+            "{} must map to its capability",
+            capability.legacy_instance
+        );
+    }
 }
 
 #[test]
@@ -233,9 +285,7 @@ fn no_selection_defaults_to_all_capabilities() {
         workspace_arg(dir.path()),
     ]))
     .unwrap();
-    let Target::Capabilities(capabilities) = options.target else {
-        panic!("default selection must use the router");
-    };
+    let Target::Capabilities(capabilities) = options.target;
     for name in [
         "workspace",
         "web",
@@ -290,9 +340,7 @@ fn all_is_parsed_as_every_capability() {
         workspace_arg(dir.path()),
     ]))
     .unwrap();
-    let Target::Capabilities(capabilities) = options.target else {
-        panic!("all must use the router");
-    };
+    let Target::Capabilities(capabilities) = options.target;
     assert_eq!(capabilities.len(), 6);
 }
 
@@ -376,19 +424,16 @@ fn misplaced_capabilities_and_legacy_overrides_are_typed_errors() {
         "{message}"
     );
 
-    write_mcp_file(
-        dir.path(),
-        r#"{"meta_harness":{"SandboxMiddleware":false}}"#,
-    );
-    let error = resolve_options(parse(&[
+    // 旧 MetaHarness 能力键保留为确定性映射 adapter（#409 §8.6）：standalone
+    // 仍把它当能力开关，不能 silent no-op。
+    write_mcp_file(dir.path(), r#"{"meta_harness":{"WebMiddleware":false}}"#);
+    let options = resolve_options(parse(&[
         "--stdio",
         "--workspace",
         workspace_arg(dir.path()),
     ]))
-    .unwrap_err();
-    let message = format!("{error:#}");
-    assert!(
-        message.contains("unknown legacy meta_harness policy key"),
-        "{message}"
-    );
+    .unwrap();
+    let Target::Capabilities(capabilities) = options.target;
+    assert_eq!(capabilities.len(), 5, "{capabilities:?}");
+    assert!(!capabilities.iter().any(|name| name == "web"));
 }

@@ -84,7 +84,7 @@ fn builtin_capability_closure_matrix_covers_all_faces() {
     // (关闭的实例名列表, 进入 disabled 的策略键列表)
     let both_keys: Vec<&str> = peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
         .iter()
-        .map(|instance| instance.legacy_policy_key)
+        .map(|instance| instance.name)
         .collect();
     let cases: Vec<(Vec<&'static str>, Vec<&str>)> = {
         let mut cases = Vec::new();
@@ -95,7 +95,7 @@ fn builtin_capability_closure_matrix_covers_all_faces() {
                     .iter()
                     .map(|declaration| declaration.legacy_name)
                     .collect::<Vec<_>>(),
-                vec![instance.legacy_policy_key],
+                vec![instance.name],
             ));
         }
         cases.push((all_builtin.clone(), both_keys.clone()));
@@ -339,14 +339,13 @@ fn meta_harness_disabled_tools_removed_from_chain() {
     for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
         let mut ctx = super::base_context();
         ctx.mcp_pool = Some(super::pool_with_builtin_instances());
-        ctx.meta_harness_disabled
-            .insert(instance.legacy_policy_key.to_string());
+        ctx.meta_harness_disabled.insert(instance.name.to_string());
         let tool_names = super::assemble_tool_names(&ctx);
         for declaration in instance.tools {
             assert!(
                 !tool_names.iter().any(|n| n == declaration.legacy_name),
                 "disabled {} 后 builtin 工具 {} 仍可见: {tool_names:?}",
-                instance.legacy_policy_key,
+                instance.name,
                 declaration.legacy_name
             );
         }
@@ -361,7 +360,7 @@ fn meta_harness_disabled_tools_removed_from_chain() {
         assert!(
             tool_names.iter().any(|n| n == survivor),
             "关闭 {} 不得影响 {survivor}: {tool_names:?}",
-            instance.legacy_policy_key
+            instance.name
         );
     }
 }
@@ -428,8 +427,7 @@ fn meta_harness_disabled_parent_tools_filtered() {
         let mut ctx = super::base_context();
         // 需要 builtin pool：否则 parent_tools 的 builtin 面为空，断言成空转。
         ctx.mcp_pool = Some(super::pool_with_builtin_instances());
-        ctx.meta_harness_disabled
-            .insert(instance.legacy_policy_key.to_string());
+        ctx.meta_harness_disabled.insert(instance.name.to_string());
         let out =
             peri_agent::session::factory::build_middleware_chain(&ProductionChainAssembler, &ctx)
                 .expect("assembly");
@@ -444,7 +442,7 @@ fn meta_harness_disabled_parent_tools_filtered() {
             assert!(
                 !parent_names.contains(&declaration.legacy_name),
                 "disabled {} 后 parent_tools 仍含 {}: {parent_names:?}",
-                instance.legacy_policy_key,
+                instance.name,
                 declaration.legacy_name
             );
         }
@@ -498,9 +496,7 @@ fn meta_harness_disabled_parent_tools_filtered() {
     // 关闭 Web 实例：只影响该实例的 bridge（面②的关闭过滤）。
     let mut closed_ctx = super::base_context();
     closed_ctx.mcp_pool = Some(super::pool_with_builtin_instances());
-    closed_ctx
-        .meta_harness_disabled
-        .insert("WebMiddleware".to_string());
+    closed_ctx.meta_harness_disabled.insert("web".to_string());
     let closed_out = peri_agent::session::factory::build_middleware_chain(
         &ProductionChainAssembler,
         &closed_ctx,
@@ -559,7 +555,7 @@ fn middleware_names_match_production_blueprint() {
     let policy_keys: std::collections::HashSet<&str> =
         peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
             .iter()
-            .map(|instance| instance.legacy_policy_key)
+            .map(|instance| instance.name)
             .collect();
     let const_names: std::collections::HashSet<&str> = MIDDLEWARE_NAMES.iter().copied().collect();
 

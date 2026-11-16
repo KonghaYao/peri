@@ -373,6 +373,7 @@ fn test_all_real_tool_declarations_render_without_placeholder_residue() {
     let mut expected: Vec<&str> = workspace
         .tools
         .iter()
+        .filter(|tool| tool.advertised)
         .map(|tool| tool.legacy_name)
         .collect();
     expected.extend([
@@ -399,7 +400,7 @@ fn test_all_real_tool_declarations_render_without_placeholder_residue() {
         );
     }
     // system MCP 的七个 workspace 工具以原名进入 direct 工具面。
-    for tool in workspace.tools {
+    for tool in workspace.tools.iter().filter(|tool| tool.advertised) {
         assert!(
             tools.iter().any(|t| t.name() == tool.original_name),
             "原名 {} 必须出现在 direct 工具集",

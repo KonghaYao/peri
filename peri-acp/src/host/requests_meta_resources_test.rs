@@ -105,7 +105,8 @@ fn workspace_client_state(
     else {
         return "池不是生产 McpClientPool".to_owned();
     };
-    match pool.client("workspace") {
+    let handle = pool.client("peri").or_else(|| pool.client("workspace"));
+    match handle {
         Some(handle) => format!(
             "status={:?}, resources={}",
             handle.status,
@@ -190,8 +191,11 @@ async fn new_session_meta_override_flows_through_builtin_workspace_resources() {
     let pool = (pool.as_ref() as &dyn std::any::Any)
         .downcast_ref::<peri_middlewares::mcp::McpClientPool>()
         .expect("会话池是生产 McpClientPool");
-    let uris: Vec<String> = pool
-        .resources_for_server("workspace")
+    let mut resources = pool.resources_for_server("peri");
+    if resources.is_empty() {
+        resources = pool.resources_for_server("workspace");
+    }
+    let uris: Vec<String> = resources
         .iter()
         .map(|resource| resource.uri.clone())
         .collect();
@@ -234,7 +238,7 @@ async fn new_session_meta_override_flows_through_builtin_workspace_resources() {
 #[tokio::test]
 #[serial]
 async fn new_session_meta_override_unavailable_keeps_builtin_and_never_reads_disk() {
-    let (tmp, startup, target) = meta_fixture(r#""01_intro":true,"WorkspaceMiddleware":false"#);
+    let (tmp, startup, target) = meta_fixture(r#""01_intro":true,"workspace":false"#);
     let cfg = meta_server_config(&tmp, startup).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();

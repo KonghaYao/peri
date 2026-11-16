@@ -237,7 +237,7 @@ async fn cold_load_derives_builtin_closed_set_from_persisted_frozen() {
     let mut frozen_off =
         crate::host::requests::tests::make_peri_config_with_provider(provider_config.clone());
     frozen_off.config.meta_harness =
-        Some(HashMap::from([("WorkspaceMiddleware".to_string(), false)]));
+        Some(HashMap::from([("workspace".to_string(), false)]));
     let provider = LlmProvider::from_config(&frozen_off).unwrap();
     let mut cfg =
         crate::host::requests::tests::make_server_config(frozen_off, provider.clone(), &tmp).await;
@@ -276,7 +276,7 @@ async fn cold_load_derives_builtin_closed_set_from_persisted_frozen() {
         persisted_frozen
             .meta_harness()
             .disabled_middlewares
-            .contains("WorkspaceMiddleware"),
+            .contains("workspace"),
         "前提：冻结快照必须记录创建时的关闭项"
     );
     crate::host::requests::tests::append_human_message(&cfg, &id, "existing history").await;
@@ -296,7 +296,7 @@ async fn cold_load_derives_builtin_closed_set_from_persisted_frozen() {
     let mut frozen_on =
         crate::host::requests::tests::make_peri_config_with_provider(provider_config);
     frozen_on.config.meta_harness =
-        Some(HashMap::from([("WorkspaceMiddleware".to_string(), true)]));
+        Some(HashMap::from([("workspace".to_string(), true)]));
     let mut restarted =
         crate::host::requests::tests::make_server_config(frozen_on, provider, &tmp).await;
     restarted.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {

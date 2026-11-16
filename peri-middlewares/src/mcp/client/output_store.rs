@@ -49,10 +49,8 @@ impl Drop for PendingOutput {
 fn workspace_available(pool: &McpClientPool) -> bool {
     pool.is_open()
         && !pool.builtin_instance_context().is_some_and(|context| {
-            let source = pool
-                .client("workspace")
-                .and_then(|handle| handle.source.clone());
-            crate::mcp::builtin::is_closed_source("workspace", source.as_ref(), &context.closed)
+            let source = pool.capability_source("workspace");
+            crate::mcp::builtin::is_capability_closed("workspace", source.as_ref(), &context.closed)
         })
 }
 
@@ -76,7 +74,7 @@ impl McpClientPool {
             return Err("workspace output store unavailable or disabled");
         }
         let handle = self
-            .client_visible_to("workspace", session_id)
+            .capability_client_visible_to("workspace", session_id)
             .filter(|handle| matches!(handle.status, ClientStatus::Connected))
             .filter(|handle| crate::mcp::builtin::is_workspace_source(handle.source.as_ref()))
             .ok_or("workspace output store unavailable")?;
@@ -110,7 +108,7 @@ impl McpClientPool {
         if !workspace_available(self)
             || self.acp_owners.read().get("workspace").cloned() != owner
             || !self
-                .client_visible_to("workspace", session_id)
+                .capability_client_visible_to("workspace", session_id)
                 .is_some_and(|current| {
                     Arc::ptr_eq(&current, &handle)
                         && matches!(current.status, ClientStatus::Connected)

@@ -26,7 +26,7 @@ Host process (SDK / CLI / 测试)
     └─ SandboxAdapter.start()          ← createPeriSandboxAdapter()
          └─ startSandbox()
               ├─ settings/profile → random token → workspace lock
-              ├─ Provider.start() ──> SRT CLI ──> peri mcp-start workspace --stdio
+              ├─ Provider.start() ──> SRT CLI ──> peri mcp-start peri --capability workspace --stdio
               ├─ PeriBackend (MCP stdio client; capability mirror, request/notification relay, Bash limits, runId)
               └─ HTTP MCP server 127.0.0.1:<ephemeral>/mcp (Bearer, Host/Origin)
                    └─ ChatSessionInit.mcpServers
@@ -147,7 +147,7 @@ starting -> ready -> stopping -> closed
 
 ### macOS（`macos-process-group`）
 
-- `spawn(node, [srt.cli, '--settings', policy, '--', peri, 'mcp-start', ...], { detached: true })`。
+- `spawn(node, [srt.cli, '--settings', policy, '--', peri, 'mcp-start', 'peri', '--capability', 'workspace', ...], { detached: true })`。
 - `stop`：`ps` 校验 leader 命令行含 SRT CLI 与 policy 路径、启动时间一致后，对进程组 SIGTERM/SIGKILL，等待组消失；随后清理 `/private/tmp/peri-*`。
 - 不写 process record 文件，不做 `listOwned`/`pruneStopped`。
 

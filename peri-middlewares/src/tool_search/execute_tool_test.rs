@@ -114,7 +114,7 @@ fn test_description_preserves_target_permissions_and_real_examples() {
     let example = params["properties"]["tool_name"]["description"]
         .as_str()
         .unwrap();
-    assert!(example.contains("mcp__cron__cron_list"));
+    assert!(example.contains("mcp__peri__cron_list"));
     assert!(!example.contains("CronCreate"));
     assert!(!example.contains("Snip"));
 }

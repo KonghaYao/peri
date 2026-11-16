@@ -51,6 +51,37 @@ fn connected_test_handle(name: &str) -> Arc<McpClientHandle> {
 }
 
 #[test]
+fn v5_does_not_route_unknown_capabilities_to_peri() {
+    let pool = McpClientPool::new_pending();
+    let mut peri = connected_test_handle("peri");
+    Arc::get_mut(&mut peri).unwrap().source = Some(crate::mcp::config::ConfigSource::Builtin {
+        instance: "peri".into(),
+    });
+    pool.clients.write().insert("peri".into(), peri);
+    assert_eq!(pool.capability_server_name("web").as_deref(), Some("peri"));
+    assert_eq!(pool.capability_server_name("unregistered"), None);
+}
+
+#[test]
+fn external_subscriptions_keep_flag_only_filters_and_uris() {
+    let pool = McpClientPool::new_pending();
+    let flags = McpSubscriptionsConfig {
+        tools_list_changed: true,
+        ..Default::default()
+    };
+    assert_eq!(pool.filter_subscriptions("external", &flags), Some(flags));
+
+    let resources = McpSubscriptionsConfig {
+        resources: vec!["workspace://git/ref".into()],
+        ..Default::default()
+    };
+    assert_eq!(
+        pool.filter_subscriptions("external", &resources),
+        Some(resources)
+    );
+}
+
+#[test]
 fn task_owner_metadata_is_scoped_to_session_capable_builtin_sources() {
     let pool = McpClientPool::new_pending();
     assert!(

@@ -401,7 +401,7 @@ fn test_config_source_load_merges_meta_harness_per_key() {
         "config": {
             "meta_harness": {
                 "01_intro": true,
-                "WebMiddleware": false
+                "web": false
             }
         }
     }"#,
@@ -412,7 +412,7 @@ fn test_config_source_load_merges_meta_harness_per_key() {
         "config": {
             "meta_harness": {
                 "01_intro": false,
-                "WorkspaceMiddleware": false
+                "workspace": false
             }
         }
     }"#,
@@ -425,12 +425,8 @@ fn test_config_source_load_merges_meta_harness_per_key() {
         .meta_harness
         .expect("merged 后存在");
     assert_eq!(map.get("01_intro"), Some(&false), "同 key：工作区覆盖全局");
-    assert_eq!(
-        map.get("WorkspaceMiddleware"),
-        Some(&false),
-        "新 key：追加保留"
-    );
-    assert_eq!(map.get("WebMiddleware"), Some(&false), "全局其余 key 保留");
+    assert_eq!(map.get("workspace"), Some(&false), "新 key：追加保留");
+    assert_eq!(map.get("web"), Some(&false), "全局其余 key 保留");
     assert_eq!(
         source
             .global_config()

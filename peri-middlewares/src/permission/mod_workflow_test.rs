@@ -414,7 +414,7 @@ fn cron_sensitive_markdown_uses_registry_effective_name() {
         .expect("cron 实例应声明 cron_register");
     let cron_line = format!(
         "- `{}` — scheduled task registration (can trigger arbitrary prompts later, equivalent to delegated execution rights)",
-        register.legacy_name
+        register.model_name
     );
     assert!(
         lines.contains(&cron_line.as_str()),
@@ -431,7 +431,7 @@ fn cron_sensitive_markdown_uses_registry_effective_name() {
         lines.contains(
             &format!(
                 "- `{}` — monitor command execution (starts a shell command and watches its output)",
-                start.legacy_name
+                start.model_name
             )
             .as_str()
         ),
@@ -448,7 +448,7 @@ fn cron_sensitive_markdown_uses_registry_effective_name() {
         *lines.last().expect("敏感工具列表非空"),
         format!(
             "- `{}` — workflow delegation (launches a multi-agent workflow that bypasses HITL, equivalent to delegated execution rights)",
-            workflow_start.legacy_name
+            workflow_start.model_name
         ),
         "末项（Workflow 启动）显示名必须是注册表解析出的 effective name，实际渲染：\n{rendered}"
     );
@@ -480,12 +480,15 @@ fn cron_sensitive_markdown_uses_registry_effective_name() {
 #[test]
 fn deployment_closed_builtin_is_omitted_from_prompt_without_weakening_approval() {
     let disabled = std::collections::HashSet::from([
-        "CronMiddleware".to_owned(),
-        "MonitorMiddleware".to_owned(),
-        "WorkflowMiddleware".to_owned(),
-        "WorkspaceMiddleware".to_owned(),
+        "cron".to_owned(),
+        "monitor".to_owned(),
+        "workflow".to_owned(),
+        "workspace".to_owned(),
     ]);
     let visible = super::super::format_sensitive_tools_for_disabled(&disabled);
+    assert!(!visible.contains("mcp__peri__cron_register"));
+    assert!(!visible.contains("mcp__peri__monitor_start"));
+    assert!(!visible.contains("mcp__peri__Workflow"));
     assert!(!visible.contains("mcp__cron__cron_register"));
     assert!(!visible.contains("mcp__monitor__monitor_start"));
     assert!(!visible

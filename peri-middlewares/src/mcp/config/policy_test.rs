@@ -29,8 +29,17 @@ fn explicit_policy_gates_defaults_without_gating_configuration_io() {
             config.mcp_servers["external"].source,
             Some(ConfigSource::Global(global_path.clone()))
         );
+        assert_eq!(
+            config.mcp_servers.contains_key("peri"),
+            enabled,
+            "v5 单出口注入必须由策略闸门控制"
+        );
         for instance in BUILTIN_MCP_INSTANCES.iter() {
-            assert_eq!(config.mcp_servers.contains_key(instance.name), enabled);
+            assert!(
+                !config.mcp_servers.contains_key(instance.name),
+                "v5 默认路径不得写回迁移期实例 {}",
+                instance.name
+            );
         }
     }
 }
@@ -59,7 +68,7 @@ fn builtin_closure_list_survives_configuration_reads_and_disabled_updates() {
         directory.path(),
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .unwrap();
     for instance in BUILTIN_MCP_INSTANCES.iter() {
@@ -80,7 +89,7 @@ fn builtin_closure_list_survives_configuration_reads_and_disabled_updates() {
         directory.path(),
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .unwrap();
     for instance in BUILTIN_MCP_INSTANCES.iter() {

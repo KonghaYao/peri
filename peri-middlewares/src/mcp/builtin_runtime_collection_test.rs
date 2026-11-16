@@ -174,7 +174,7 @@ fn builtin_tools_are_collected_with_declared_direct() {
 #[test]
 fn closed_builtin_instance_disappears_from_collected_tools() {
     // 关闭 web：两个 web 工具消失，artifact 与外部 server 保留。
-    let web_closed = collected_tool_names(&pool_with_builtin_instances(), &["WebMiddleware"]);
+    let web_closed = collected_tool_names(&pool_with_builtin_instances(), &["web"]);
     assert!(
         !web_closed
             .iter()
@@ -191,8 +191,7 @@ fn closed_builtin_instance_disappears_from_collected_tools() {
     );
 
     // 关闭 artifact：只有 artifact 消失。
-    let artifact_closed =
-        collected_tool_names(&pool_with_builtin_instances(), &["ArtifactMiddleware"]);
+    let artifact_closed = collected_tool_names(&pool_with_builtin_instances(), &["artifact"]);
     assert!(artifact_closed.iter().any(|name| name == "WebSearch"));
     assert!(
         !artifact_closed.iter().any(|name| name == "artifact"),
@@ -200,10 +199,7 @@ fn closed_builtin_instance_disappears_from_collected_tools() {
     );
 
     // 两者都关闭：builtin 工具一个不剩。
-    let both_closed = collected_tool_names(
-        &pool_with_builtin_instances(),
-        &["WebMiddleware", "ArtifactMiddleware"],
-    );
+    let both_closed = collected_tool_names(&pool_with_builtin_instances(), &["web", "artifact"]);
     assert!(
         !both_closed
             .iter()

@@ -151,15 +151,15 @@ impl SessionMcpCatalogPort for MutableCatalog {
 }
 
 const CASES: &[(&str, &[&str])] = &[
-    ("WorkspaceMiddleware", &["Write", "Edit"]),
-    ("WebMiddleware", &["WebSearch", "WebFetch"]),
-    ("ArtifactMiddleware", &["artifact"]),
+    ("workspace", &["Write", "Edit"]),
+    ("web", &["WebSearch", "WebFetch"]),
+    ("artifact", &["artifact"]),
     (
-        "CronMiddleware",
+        "cron",
         &["mcp__cron__cron_register", "mcp__cron__cron_list"],
     ),
     (
-        "WorkflowMiddleware",
+        "workflow",
         &["mcp__workflow__Workflow", "mcp__workflow__WorkflowStatus"],
     ),
     ("McpMiddleware", &[]),
@@ -297,7 +297,7 @@ fn disabled_mcp_does_not_query_failed_source_or_block_core_tools() {
 
 #[test]
 fn closed_mcp_candidate_does_not_replace_same_named_core_during_initial_merge() {
-    for policy in ["WorkspaceMiddleware", "McpMiddleware"] {
+    for policy in ["workspace", "McpMiddleware"] {
         let core = core_tools().remove(0);
         let closed: Arc<dyn BaseTool> = Arc::new(SourceTool {
             name: "Read",
@@ -354,10 +354,8 @@ fn closed_builtin_does_not_shadow_allowed_remote_in_catalog_generations() {
         generation: 1,
         tools: vec![closed.clone(), remote.clone()],
     });
-    let filter = ToolFilterPolicy::with_mcp_policy(
-        ["WebMiddleware".into()].into_iter().collect(),
-        child_filter(true),
-    );
+    let filter =
+        ToolFilterPolicy::with_mcp_policy(["web".into()].into_iter().collect(), child_filter(true));
     let catalog = SessionToolCatalog::with_filter(Default::default(), Some(source.clone()), filter);
     assert!(Arc::ptr_eq(
         &catalog.snapshot().tools["WebSearch"].tool,
@@ -393,10 +391,8 @@ fn startup_merge_ignores_closed_candidates_and_preserves_allowed_same_name() {
         server: Some("remote"),
         builtin: None,
     });
-    let filter = ToolFilterPolicy::with_mcp_policy(
-        ["WebMiddleware".into()].into_iter().collect(),
-        child_filter(true),
-    );
+    let filter =
+        ToolFilterPolicy::with_mcp_policy(["web".into()].into_iter().collect(), child_filter(true));
     let catalog = SessionToolCatalog::with_filter(
         [("WebSearch".into(), closed.clone())].into_iter().collect(),
         None,

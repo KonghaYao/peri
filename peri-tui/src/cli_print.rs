@@ -185,6 +185,7 @@ pub async fn run_print(
         bare,
         // print 无 tick 语义（迁移前 print 路径无每秒 tick，行为零变化）。
         drive_cron_tick: false,
+        builtin_assembly_mode: None,
         // 顶层装配不构造 builtin 上下文：session 级 workspace 输入由每 session 的
         // 会话环境装配产生（AW3-11）。
         workspace_input: None,

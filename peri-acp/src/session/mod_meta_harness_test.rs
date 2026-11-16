@@ -78,10 +78,12 @@ fn build_meta_harness_state_section_false_does_not_override() {
 #[test]
 fn build_meta_harness_state_middleware_false_enters_disabled() {
     let state = super::super::frozen::build_meta_harness_state(
-        Some(&mh_cfg(&[("WebMiddleware", false)])),
+        Some(&mh_cfg(&[("PermissionMiddleware", false)])),
         HashMap::new(),
     );
-    assert!(state.disabled_middlewares.contains("WebMiddleware"));
+    assert!(state
+        .disabled_middlewares
+        .contains("PermissionMiddleware"));
     assert!(state.section_overrides.is_empty());
 }
 
@@ -105,7 +107,7 @@ fn build_meta_harness_state_capability_name_enters_disabled() {
 #[test]
 fn build_meta_harness_state_middleware_true_not_disabled() {
     let state = super::super::frozen::build_meta_harness_state(
-        Some(&mh_cfg(&[("WebMiddleware", true)])),
+        Some(&mh_cfg(&[("PermissionMiddleware", true)])),
         HashMap::new(),
     );
     assert!(
@@ -123,8 +125,8 @@ fn build_meta_harness_state_mixed_entries() {
         Some(&mh_cfg(&[
             ("01_intro", true),
             ("05_using_tools", false),
-            ("WebMiddleware", false),
-            ("WorkspaceMiddleware", true),
+            ("web", false),
+            ("workspace", true),
         ])),
         docs,
     );
@@ -132,8 +134,8 @@ fn build_meta_harness_state_mixed_entries() {
     assert!(state.section_overrides.contains_key("01_intro"));
     assert!(!state.section_overrides.contains_key("05_using_tools"));
     assert_eq!(state.disabled_middlewares.len(), 1);
-    assert!(state.disabled_middlewares.contains("WebMiddleware"));
-    assert!(!state.disabled_middlewares.contains("WorkspaceMiddleware"));
+    assert!(state.disabled_middlewares.contains("web"));
+    assert!(!state.disabled_middlewares.contains("workspace"));
 }
 
 /// 集成：build_frozen_data 应用段落覆盖 + middleware 关闭集合到冻结载体；
@@ -162,7 +164,7 @@ async fn test_build_frozen_data_applies_meta_harness_state() {
     peri_config.config.meta_harness = Some(mh_cfg(&[
         ("01_intro", true),
         ("05_using_tools", true),
-        ("WebMiddleware", false),
+        ("web", false),
     ]));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let config = Arc::new(peri_config);
@@ -210,7 +212,7 @@ async fn test_build_frozen_data_applies_meta_harness_state() {
         Some("CUSTOM-TOOLS-BODY")
     );
     assert!(
-        state.disabled_middlewares.contains("WebMiddleware"),
+        state.disabled_middlewares.contains("web"),
         "冻结状态包含关闭集合"
     );
     // 主 prompt 应用覆盖（SubAgent / fork / workflow agent 直接复用主

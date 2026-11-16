@@ -355,7 +355,7 @@ async fn worktree_new_resources_use_the_target_directory() {
         .unwrap_or_else(|_| panic!("workspace MCP pool"));
     let workspace = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if let Some(client) = pool.client("workspace") {
+            if let Some(client) = pool.client("peri").or_else(|| pool.client("workspace")) {
                 if client.peer.is_some() && !client.resources.is_empty() {
                     break client;
                 }

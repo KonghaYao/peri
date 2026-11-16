@@ -114,8 +114,38 @@ impl Drop for HomeRedirect {
 struct FixtureDirs {
     tmp: tempfile::TempDir,
     _home_guard: HomeRedirect,
+    _builtin_guard: BuiltinInjectionLegacy,
     workspace: PathBuf,
     claude_home: PathBuf,
+}
+
+/// v4 wave2 suite 固定走六实例回滚路径；默认装配已经是 v5 单出口。
+struct BuiltinInjectionLegacy {
+    previous: Option<OsString>,
+    applied: bool,
+}
+
+impl BuiltinInjectionLegacy {
+    fn set() -> Self {
+        let previous = std::env::var_os("PERI_MCP_BUILTIN");
+        let applied = previous.is_none();
+        if applied {
+            std::env::set_var("PERI_MCP_BUILTIN", "legacy");
+        }
+        Self { previous, applied }
+    }
+}
+
+impl Drop for BuiltinInjectionLegacy {
+    fn drop(&mut self) {
+        if !self.applied {
+            return;
+        }
+        match self.previous.take() {
+            Some(value) => std::env::set_var("PERI_MCP_BUILTIN", value),
+            None => std::env::remove_var("PERI_MCP_BUILTIN"),
+        }
+    }
 }
 
 impl FixtureDirs {
@@ -128,9 +158,11 @@ impl FixtureDirs {
             std::fs::create_dir_all(dir).expect("创建临时目录");
         }
         let guard = HomeRedirect::set(&home);
+        let builtin_guard = BuiltinInjectionLegacy::set();
         Self {
             tmp,
             _home_guard: guard,
+            _builtin_guard: builtin_guard,
             workspace,
             claude_home,
         }
@@ -336,6 +368,7 @@ async fn assemble_host_with_workspace_input(
             cwd: dirs.workspace_str(),
             bare: false,
             drive_cron_tick,
+            builtin_assembly_mode: None,
             // session 级 `workspace` 输入（AW3-11）由调用方给定：默认 `None` ⇒
             // 可见但退化，本文件断言面（cron）不含它。
             workspace_input,
@@ -468,6 +501,7 @@ fn declared_tool_names(instance: &str) -> Vec<&'static str> {
         .unwrap_or_else(|| panic!("{instance} 必须在 builtin 注册表内"))
         .tools
         .iter()
+        .filter(|tool| tool.advertised)
         .map(|tool| tool.original_name)
         .collect()
 }

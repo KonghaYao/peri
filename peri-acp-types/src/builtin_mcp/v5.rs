@@ -4,9 +4,9 @@
 //! 源**。父模块的 v4 实例表、保留名表与关闭键表都由 [`BUILTIN_V5_CAPABILITIES`]
 //! 派生，没有第二份字面量。
 //!
-//! 状态：默认注入仍走 v4 六实例兼容路径，router / 代理尚未接线；迁移期由父模块
-//! 把能力表投影成实例视图。`legacy_instance` / `legacy_policy_key` / `legacy_name`
-//! 只服务该兼容路径与旧历史归一，M4 清理时与 v4 路径一并删除。
+//! 状态：宿主默认只注入单出口 `peri`；`PERI_MCP_BUILTIN=legacy` 保留 v4 六实例
+//! 回滚路径（M4 截止）。`legacy_instance` / `legacy_policy_key` / `legacy_name`
+//! 只服务该兼容路径、旧配置映射与旧历史归一，M4 清理时与 v4 路径一并删除。
 //!
 //! 三层命名（不要混淆）：
 //! - **执行身份**：`(capability, original_name)`，由 `capability_tool` 唯一定位。
@@ -45,6 +45,13 @@ pub const THREAD_OWNER_META_KEY: &str = "peri/threadOwner";
 
 /// 宿主消费者令牌键；仅 workflow 回填通道接收。
 pub const WORKFLOW_CONSUMER_META_KEY: &str = "peri/workflowConsumer";
+
+/// 宿主注入的**运行时**能力选择标记（`peri` 条目 env，不来自用户配置）。
+///
+/// 值是以逗号分隔的能力名，按 [`BUILTIN_V5_CAPABILITIES`] 声明顺序写出。
+/// 它是配置加载期把 `.mcp.json` 旧逐实例条目确定性映射到能力开关的唯一载体；
+/// overlay 每次注入都覆盖该键，用户配置不能扩大能力集。
+pub const BUILTIN_V5_CAPABILITIES_ENV: &str = "PERI_MCP_V5_CAPABILITIES";
 
 /// 能力执行绑定（v5 §4.3.5）：绑定是实现字段，不改变能力身份。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +142,11 @@ pub struct CapabilityTool {
     pub direct: bool,
     /// 模型可见性：`false` 表示 host-only（不进桥接、ToolSearch 与 LLM tools）。
     pub model_visible: bool,
+    /// 是否进入 wire `tools/list`。
+    ///
+    /// v4 兼容视图只投影 advertised 工具；`false` 表示仅由 handler 的
+    /// `tools/call` 直接应答（如 workspace `shell_task_list`）。
+    pub advertised: bool,
     /// 提示词层声明模板；`{{name}}` / `{{title}}` 的渲染仍归消费方。
     pub prompt_declaration: Option<&'static str>,
     /// 上下文保留策略。
@@ -150,7 +162,7 @@ pub struct BuiltinCapability {
     pub name: &'static str,
     /// 迁移期旧实例身份；确定性映射与旧名归一只索引这张表。
     pub legacy_instance: &'static str,
-    /// 迁移期旧 middleware 关闭键；只用于识别旧键，不承担 v5 能力开关。
+    /// 迁移期旧 middleware 关闭键；只做确定性兼容映射，不承担 v5 开关身份。M4 删除。
     pub legacy_policy_key: &'static str,
     /// 能力依赖：被依赖能力关闭时，本能力必须同步关闭或安全失败。
     pub dependencies: &'static [&'static str],
@@ -193,7 +205,7 @@ pub enum CapabilityNameError {
     /// 未知迁移期旧关闭键。
     #[error("unknown legacy builtin policy key: {key}")]
     UnknownPolicyKey { key: String },
-    /// 未知 v5 能力开关。
+    /// 未知能力开关。
     #[error("unknown capability switch: {key}")]
     UnknownSwitch { key: String },
     /// 资源 URI 无归属能力。
@@ -436,7 +448,7 @@ pub fn capability_of_legacy_instance(
         })
 }
 
-/// 迁移期旧 middleware 关闭键 → 能力。旧键只做确定性映射，不再承担开关语义。
+/// 迁移期旧 middleware 关闭键 → 能力。旧键只做确定性映射，不再是开关身份。
 pub fn capability_of_legacy_policy_key(
     key: &str,
 ) -> Result<&'static BuiltinCapability, CapabilityNameError> {
@@ -450,7 +462,7 @@ pub fn capability_of_legacy_policy_key(
 
 /// 能力开关：接受 v5 能力名或迁移期旧关闭键；两者映射到同一能力。
 ///
-/// 这是运行时关闭集与配置投影的唯一入口；不得按 server 名或工具名反推能力。
+/// 运行时关闭集与旧配置兼容都经此入口；M4 清理时删除旧键分支。
 pub fn capability_of_switch(
     switch: &str,
 ) -> Result<&'static BuiltinCapability, CapabilityNameError> {
@@ -504,6 +516,27 @@ pub fn capability_tool(
             capability: capability_name.to_owned(),
             original_name: original_name.to_owned(),
         })
+}
+
+/// 原始工具名 → 唯一能力与工具声明。
+///
+/// 单出口内原始名全局唯一（`validate_registry` 冻结）；本函数只做查表，
+/// 不承担校验。未登记返回 `None`。
+pub fn capability_of_original_tool(
+    original_name: &str,
+) -> Option<(&'static BuiltinCapability, &'static CapabilityTool)> {
+    BUILTIN_V5_CAPABILITIES.iter().find_map(|capability| {
+        capability
+            .tools
+            .iter()
+            .find(|tool| tool.original_name == original_name)
+            .map(|tool| (capability, tool))
+    })
+}
+
+/// 名字是否为 v5 单出口 server 身份。
+pub fn is_v5_server_name(name: &str) -> bool {
+    name == BUILTIN_V5_SERVER_NAME
 }
 
 /// 用户自定义 MCP server 名校验：空名与 builtin 保留名都是加载期 typed error。

@@ -451,7 +451,7 @@ async fn t6_session_delivery_is_info_and_closure_skips_subscription() {
 
     // 关闭面隔离：关闭集命中的实例不建立订阅（`subscription_allowed` 的唯一判定）。
     let closed = crate::assembly::builtin_closed_instances(&std::collections::HashSet::from([
-        "WorkspaceMiddleware".to_string(),
+        "workspace".to_string(),
     ]));
     assert_eq!(
         closed,

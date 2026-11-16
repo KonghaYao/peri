@@ -142,7 +142,7 @@ fn builtin_artifact_instance_can_be_closed_independently() {
     disabled.mcp_pool = Some(super::pool_with_builtin_instances());
     disabled
         .meta_harness_disabled
-        .insert("ArtifactMiddleware".to_string());
+        .insert("artifact".to_string());
     let disabled_tools = super::assemble_tool_names(&disabled);
     assert!(!disabled_tools.iter().any(|name| name == "artifact"));
     assert!(

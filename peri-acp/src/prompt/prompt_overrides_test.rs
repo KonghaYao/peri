@@ -233,9 +233,7 @@ fn meta_harness_disabled_set_does_not_affect_sections() {
     state
         .section_overrides
         .insert("01_intro".to_string(), Arc::from("OVR-INTRO"));
-    state
-        .disabled_middlewares
-        .insert("WebMiddleware".to_string());
+    state.disabled_middlewares.insert("web".to_string());
     let result = crate::prompt::tests::render_with_state(&state);
     assert!(result.contains("OVR-INTRO"), "disabled 集合不影响覆盖渲染");
 }

@@ -275,6 +275,11 @@ impl ConfigurationSnapshot {
     }
 
     #[must_use]
+    pub fn builtin_assembly_mode(&self) -> peri_acp_types::builtin_mcp::BuiltinAssemblyMode {
+        crate::mcp::builtin_assembly_mode(&self.inputs.environment)
+    }
+
+    #[must_use]
     pub fn explain(&self, field: ConfigurationField) -> FieldExplanation {
         assembly::explain(field, self.revision, &self.inputs)
     }

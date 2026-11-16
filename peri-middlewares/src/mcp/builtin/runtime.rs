@@ -82,6 +82,11 @@ pub(crate) enum BuiltinSpawnError {
     /// 当前注册表内实例均由 dispatch 显式接线；该分支保护未来新增实现避免静默回退。
     #[error("builtin 实例 handler 尚未接线: {instance}")]
     HandlerNotWired { instance: String },
+    /// v5 单出口 router 装配失败（全部能力不可用 / 能力依赖非法）。
+    ///
+    /// 错误文本只含能力名与固定规则文本，不含路径 / env / 凭据。
+    #[error("builtin 单出口装配失败: {reason}")]
+    RouterBuild { reason: String },
 }
 
 /// server task 的退出事实。
@@ -515,6 +520,17 @@ pub(crate) fn spawn_builtin_transport_with_context(
             instance: instance.to_string(),
         }
     })?;
+    if peri_acp_types::builtin_mcp::is_v5_server_name(instance) {
+        let (router, workspace_tasks) =
+            super::router::build_host_router(ctx, env).map_err(|error| {
+                BuiltinSpawnError::RouterBuild {
+                    reason: error.to_string(),
+                }
+            })?;
+        let mut transport = spawn_builtin_transport_with_handler(instance, router);
+        transport.workspace_tasks = workspace_tasks;
+        return Ok(transport);
+    }
     if !ctx.instance_input_ready(instance) {
         return Err(BuiltinSpawnError::InstanceInputMissing {
             instance: instance.to_string(),

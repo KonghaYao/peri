@@ -448,7 +448,16 @@ impl McpMiddleware {
             .into_iter()
             // 关闭实例不参与必需工具校验（与准入同一份关闭集）。
             .filter(|requirement| !admission.is_source_closed(&requirement.server))
-            .map(|requirement| (requirement.server, requirement.required_tools))
+            .map(|requirement| {
+                (
+                    requirement.server.clone(),
+                    crate::mcp::builtin::visible_required_tools(
+                        &requirement.server,
+                        &requirement.required_tools,
+                        admission.closed_instances(),
+                    ),
+                )
+            })
             .collect();
         if required.is_empty() {
             // 无 System 依赖（含「全部 system 实例被关闭」）：prepared 与 deferred

@@ -97,10 +97,8 @@ impl McpWorkspaceFileReader {
         let closed = crate::mcp::builtin::closed_instances(disabled);
         Self {
             pool: pool.filter(|pool| {
-                let source = pool
-                    .client("workspace")
-                    .and_then(|handle| handle.source.clone());
-                !crate::mcp::builtin::is_closed_source("workspace", source.as_ref(), &closed)
+                let source = pool.capability_source("workspace");
+                !crate::mcp::builtin::is_capability_closed("workspace", source.as_ref(), &closed)
             }),
             session_id,
         }
@@ -116,7 +114,7 @@ impl McpWorkspaceFileReader {
             .filter(|pool| !workspace_closed(pool))
             .ok_or(WorkspaceReadError::Unavailable)?;
         let handle = pool
-            .client_visible_to("workspace", self.session_id.as_deref())
+            .capability_client_visible_to("workspace", self.session_id.as_deref())
             .filter(|handle| matches!(handle.status, ClientStatus::Connected))
             .filter(|handle| crate::mcp::builtin::is_workspace_source(handle.source.as_ref()))
             .ok_or(WorkspaceReadError::Unavailable)?;
@@ -150,7 +148,7 @@ impl McpWorkspaceFileReader {
         if workspace_closed(pool)
             || pool.acp_owners.read().get("workspace").cloned() != owner
             || !pool
-                .client_visible_to("workspace", self.session_id.as_deref())
+                .capability_client_visible_to("workspace", self.session_id.as_deref())
                 .is_some_and(|current| {
                     Arc::ptr_eq(&current, &handle)
                         && matches!(current.status, ClientStatus::Connected)
@@ -217,10 +215,8 @@ impl WorkspaceFileReader for McpWorkspaceFileReader {
 fn workspace_closed(pool: &McpClientPool) -> bool {
     !pool.is_open()
         || pool.builtin_instance_context().is_some_and(|context| {
-            let source = pool
-                .client("workspace")
-                .and_then(|handle| handle.source.clone());
-            crate::mcp::builtin::is_closed_source("workspace", source.as_ref(), &context.closed)
+            let source = pool.capability_source("workspace");
+            crate::mcp::builtin::is_capability_closed("workspace", source.as_ref(), &context.closed)
         })
 }
 

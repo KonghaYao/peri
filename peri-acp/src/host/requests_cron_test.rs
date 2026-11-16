@@ -143,6 +143,7 @@ async fn deployment_with_capabilities(
             cwd: cwd.to_string_lossy().into_owned(),
             bare: false,
             drive_cron_tick,
+            builtin_assembly_mode: None,
             workspace_input: None,
             // 本夹具构造顶层装配：资源面输入保持未接线（会话路径才装载）。
             workspace_resources: None,
@@ -298,7 +299,8 @@ async fn cron_tool(
         .unwrap_or_else(|_| panic!("MCP pool"));
     let client = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Some(client) = pool.client("cron") {
+            // v5 默认装配只有一个 `peri` 出口；回滚路径仍保留 `cron` 实例。
+            if let Some(client) = pool.client("peri").or_else(|| pool.client("cron")) {
                 if client.peer.is_some() && !client.tools.is_empty() {
                     break client;
                 }

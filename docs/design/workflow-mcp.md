@@ -17,7 +17,7 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 1. workflow 以 **builtin MCP 实例**（`workflow`，per-session 池内、同进程 `rmcp::serve_server`）接入；工具、资源、订阅、关闭全部走标准 MCP 面。该形态是 v4 兼容期路径；v5 目标为单出口内的 `workflow` capability。
 2. agent 回调改为 **MCPP Channel 语义**：agent 任务作为 outbound 资源（event-log）发布，宿主消费者发现并执行，经 inbound 工具回填结果。不新增私有 JSON-RPC method 或 vendor capability。
 3. 删除 `ChainSlot::Workflow`、`WorkflowMiddlewarePort`、`WorkflowMiddlewareAdaptor`、`SessionState.workflow_middleware` 与 `peri-resources/src/workflow.rs` 门面。旧槽位、端口、旧 middleware 目录与 Resources 门面均已删除；workflow 接入归 builtin MCP 实例。
-4. 用户可见配置语义保持兼容：MetaHarness 关闭键 `"WorkflowMiddleware"` 沿用（从中间件表迁到 builtin 实例关闭表）；ACP 方法名（`workflow/*`）与 TUI 交互不变。v5 中该旧键只做确定性映射或 typed error，能力开关以单出口配置为准。
+4. 能力开关使用 v5 能力名 `"workflow": false`；旧 `"WorkflowMiddleware"` 键保留为确定性映射 adapter（M4 删除）。ACP 方法名（`workflow/*`）与 TUI 交互不变，能力开关以单出口配置为准。
 
 ### 2.2 非目标
 
@@ -77,7 +77,7 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 `peri-acp-types/src/builtin_mcp.rs` 声明：
 
 - `WORKFLOW_TOOLS`：`Workflow` / `WorkflowStatus` / `WorkflowKill`（模型面，`direct: false`），以及 `WorkflowAgentResult` / `WorkflowAgentClaim` / `WorkflowConsumerReady` / `WorkflowCompletionAck` / `WorkflowClose` / `WorkflowTaskObserved`（host-only，`model_visible: false`）。
-- `BUILTIN_MCP_INSTANCES` 派生视图：`name = "workflow"`、`legacy_policy_key = "WorkflowMiddleware"`（由能力表派生，沿用旧槽位键，用户配置兼容）。
+- `BUILTIN_MCP_INSTANCES` 派生视图：`name = "workflow"`、`legacy_instance = "workflow"`（由能力表派生，只服务迁移期 adapter）。
 - `BUILTIN_RESERVED_INSTANCE_NAMES` 包含 `"workflow"`。
 - `BuiltinMcpTool::model_visible` 区分模型可见面与 host-only 工具；其余实例默认 `true`。
 
@@ -124,7 +124,7 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 
 ### 4.4 关闭
 
-- 关闭键 `"WorkflowMiddleware"` 在 `BUILTIN_INSTANCE_POLICY_KEYS` 中声明；`closed_instances` 命中时实例不 spawn、桥接不建、宿主消费者不启动（与 workspace 同构）。v5 目标下关闭单位为 `workflow` capability：工具、`workflow://` 资源与订阅、继承面、消费者与宿主任务必须同时消失；旧键按配置权威规则映射或报错。
+- 关闭键为 v5 能力名 `"workflow"`；`closed_instances` 命中时实例不 spawn、桥接不建、宿主消费者不启动（与 workspace 同构）。工具、`workflow://` 资源与订阅、继承面、消费者与宿主任务必须同时消失；旧键保留为确定性映射 adapter（M4 删除）。
 - `MIDDLEWARE_NAMES` 不含该键，`MIDDLEWARE_TOOL_NAMES` 不含 `"Workflow"`；两表零交集由装配测试断言。
 - 工具归一/过滤面（`tool_catalog`、`permission`）按实例身份自动生效（`mcp__workflow__*`）。
 - 子 Agent 按实例身份整体排除 `workflow`（`CHILD_ABSENT_BUILTIN_INSTANCES`），不另立逐工具名单。

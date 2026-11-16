@@ -207,13 +207,27 @@ fn builtin_prompt_declaration_matches_registry() {
         for tool in instance.tools {
             let template = builtin_prompt_declaration(instance.name, tool.original_name);
             match instance.name {
-                "web" | "artifact" | "workspace" => {
+                "web" | "artifact" => {
                     let template = template.expect("这些工具都必须有声明模板（A9 / Q3）");
                     assert_eq!(template, tool.prompt_declaration.unwrap());
                     assert!(
                         template.contains("{{name}}"),
                         "模板必须含占位符: {template}"
                     );
+                }
+                // workspace 的模型面工具必须有模板；host-only 恢复工具同形为 None。
+                "workspace" => {
+                    if tool.model_visible {
+                        let template = template.expect("workspace 模型面工具必须有声明模板");
+                        assert_eq!(template, tool.prompt_declaration.unwrap());
+                        assert!(
+                            template.contains("{{name}}"),
+                            "模板必须含占位符: {template}"
+                        );
+                    } else {
+                        assert_eq!(template, None);
+                        assert_eq!(template, tool.prompt_declaration);
+                    }
                 }
                 // wave 2：cron 冻结 `None`（A4：声明段零变化）。
                 // monitor 六个工具同形（无 `BaseTool::prompt_declaration()` 文本）。
@@ -247,46 +261,45 @@ fn closed_instances_maps_capability_switches() {
         "空关闭集 ⇒ 无实例关闭"
     );
 
-    let web: HashSet<String> = HashSet::from(["WebMiddleware".to_string()]);
+    let web: HashSet<String> = HashSet::from(["web".to_string()]);
     assert_eq!(
         super::closed_instances(&web),
         BTreeSet::from(["web".to_string()])
     );
 
-    let artifact: HashSet<String> = HashSet::from(["ArtifactMiddleware".to_string()]);
+    let artifact: HashSet<String> = HashSet::from(["artifact".to_string()]);
     assert_eq!(
         super::closed_instances(&artifact),
         BTreeSet::from(["artifact".to_string()])
     );
 
-    let cron: HashSet<String> = HashSet::from(["CronMiddleware".to_string()]);
+    let cron: HashSet<String> = HashSet::from(["cron".to_string()]);
     assert_eq!(
         super::closed_instances(&cron),
         BTreeSet::from(["cron".to_string()])
     );
 
-    // v5 能力名是新的开关身份；旧键必须映射到同一实例。
+    // v5 能力名是开关身份；旧 `*Middleware` 键是确定性映射 adapter。
     for capability in peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES.iter() {
         let by_capability: HashSet<String> = HashSet::from([capability.name.to_string()]);
-        let by_legacy: HashSet<String> = HashSet::from([capability.legacy_policy_key.to_string()]);
-        assert_eq!(
-            super::closed_instances(&by_capability),
-            super::closed_instances(&by_legacy),
-            "{} 与旧键必须关闭同一实例",
-            capability.name
-        );
         assert_eq!(
             super::closed_instances(&by_capability),
             BTreeSet::from([capability.legacy_instance.to_string()]),
             "{} 必须关闭对应实例",
             capability.name
         );
+        let by_legacy_key: HashSet<String> =
+            HashSet::from([capability.legacy_policy_key.to_string()]);
+        assert_eq!(
+            super::closed_instances(&by_legacy_key),
+            BTreeSet::from([capability.legacy_instance.to_string()]),
+            "{} 必须映射到 {}（旧键不能 silent no-op）",
+            capability.legacy_policy_key,
+            capability.name
+        );
     }
 
-    let both: HashSet<String> = HashSet::from([
-        "WebMiddleware".to_string(),
-        "ArtifactMiddleware".to_string(),
-    ]);
+    let both: HashSet<String> = HashSet::from(["web".to_string(), "artifact".to_string()]);
     assert_eq!(
         super::closed_instances(&both),
         BTreeSet::from(["artifact".to_string(), "web".to_string()])
@@ -305,7 +318,7 @@ fn closed_instances_maps_capability_switches() {
 #[test]
 fn closed_capabilities_returns_v5_identity() {
     let mixed: HashSet<String> = HashSet::from([
-        "WebMiddleware".to_string(),
+        "web".to_string(),
         "cron".to_string(),
         "McpMiddleware".to_string(),
     ]);
@@ -396,6 +409,17 @@ fn injection_policy_all_and_none_shapes() {
 }
 
 #[test]
+fn bare_legacy_policy_keeps_workspace_as_an_independent_instance() {
+    let _env = BuiltinEnvGuard::set(Some("legacy"));
+    let policy = crate::platform::builtin_workspace_policy(true);
+    let mut servers = std::collections::HashMap::new();
+    super::apply_builtin_overlay(&mut servers, &policy).unwrap();
+    assert_eq!(servers.len(), 1);
+    assert!(servers.contains_key("workspace"));
+    assert!(!servers.contains_key("peri"));
+}
+
+#[test]
 fn injection_policy_from_env_three_states() {
     for off in ["off", "0", "OFF", " 0 "] {
         let _guard = BuiltinEnvGuard::set(Some(off));
@@ -447,6 +471,7 @@ fn effective_tool_names(instance: &str) -> BTreeSet<String> {
             instance
                 .tools
                 .iter()
+                .filter(|tool| tool.advertised)
                 .filter_map(|tool| effective_tool_name(instance.name, tool.original_name))
                 .collect()
         })

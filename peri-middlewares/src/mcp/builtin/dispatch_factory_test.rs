@@ -319,7 +319,7 @@ async fn builtin_source_propagates() {
 
     // ① overlay：空用户配置 ⇒ 每个已实现实例一条完整 builtin 条目，身份写进 `source`。
     let mut servers: HashMap<String, McpServerConfig> = HashMap::new();
-    super::apply_builtin_overlay(&mut servers, &BuiltinInjectionPolicy::all())
+    super::apply_builtin_overlay(&mut servers, &BuiltinInjectionPolicy::legacy_instances())
         .expect("空用户配置必须被 overlay 接受");
     let mut configs: Vec<(&str, McpServerConfig)> = Vec::new();
     for instance in WAVE2_INSTANCES {

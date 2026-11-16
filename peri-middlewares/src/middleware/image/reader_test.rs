@@ -89,7 +89,7 @@ async fn image_same_named_nonbuiltin_server_cannot_supply_attachments() {
 async fn image_construct_time_workspace_disable_overrides_open_pool() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = ImageFixture::new(dir.path()).await;
-    let disabled = std::collections::HashSet::from(["WorkspaceMiddleware".to_owned()]);
+    let disabled = std::collections::HashSet::from(["workspace".to_owned()]);
     let middleware = crate::middleware::image::ImageMiddleware::new().with_mcp_pool(
         fixture.pool.clone(),
         "image-session".to_owned(),

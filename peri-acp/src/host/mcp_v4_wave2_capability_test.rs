@@ -6,6 +6,7 @@ use crate::host::mcp_v4_wave2::WAVE2_INSTANCES;
 
 use peri_middlewares::assembly::BuiltinInstanceContext;
 use peri_middlewares::assembly::CronInstanceInput;
+use peri_middlewares::assembly::WorkflowInstanceInput;
 use peri_middlewares::tool_search::core_tools;
 use peri_middlewares::tool_search::SEARCH_EXTRA_TOOLS_NAME;
 use serial_test::serial;
@@ -181,10 +182,12 @@ async fn off_has_zero_builtin_injection() {
     );
     let fixture = BuiltinHostFixture::start_with_context(
         dirs,
-        BuiltinInstanceContext::new(cwd.clone()).with_cron(CronInstanceInput {
-            scheduler: Arc::clone(&scheduler),
-            tick_enabled: true,
-        }),
+        BuiltinInstanceContext::new(cwd.clone())
+            .with_cron(CronInstanceInput {
+                scheduler: Arc::clone(&scheduler),
+                tick_enabled: true,
+            })
+            .with_workflow(WorkflowInstanceInput::slot()),
     )
     .await;
     crate::host::mcp_v4_wave2::assert_instance_ready(

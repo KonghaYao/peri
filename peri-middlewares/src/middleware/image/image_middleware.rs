@@ -55,11 +55,10 @@ impl ImageMiddleware {
         disabled: &std::collections::HashSet<String>,
     ) -> Self {
         let closed = crate::mcp::builtin::closed_instances(disabled);
-        let source = pool
-            .client("workspace")
-            .and_then(|handle| handle.source.clone());
-        self.pool = (!crate::mcp::builtin::is_closed_source("workspace", source.as_ref(), &closed))
-            .then_some(pool);
+        let source = pool.capability_source("workspace");
+        self.pool =
+            (!crate::mcp::builtin::is_capability_closed("workspace", source.as_ref(), &closed))
+                .then_some(pool);
         self.session_id = Some(session_id);
         self
     }

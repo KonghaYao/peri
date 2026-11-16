@@ -68,12 +68,13 @@ async fn production_startup_path_connects_both_builtin_instances() {
             instance.name
         );
 
+        let served: Vec<&str> = handle.tools.iter().map(|tool| tool.name.as_ref()).collect();
         let declared: Vec<&str> = instance
             .tools
             .iter()
+            .filter(|tool| tool.advertised)
             .map(|tool| tool.original_name)
             .collect();
-        let served: Vec<&str> = handle.tools.iter().map(|tool| tool.name.as_ref()).collect();
         assert_eq!(
             served, declared,
             "{} 的 live tools/list 必须按声明顺序返回注册表工具",
@@ -83,7 +84,8 @@ async fn production_startup_path_connects_both_builtin_instances() {
             .into_iter()
             .filter(|tool| tool.builtin_mcp_instance() == Some(instance.name))
             .collect();
-        assert_eq!(bridges.len(), instance.tools.len());
+        // host-only 且不在 wire 目录中的工具没有 bridge（如 shell_task_list）。
+        assert_eq!(bridges.len(), served.len());
         for bridge in bridges {
             let declaration = instance
                 .tools
@@ -336,12 +338,9 @@ async fn closure_matrix_four_faces_on_real_builtin_pool() {
         .collect();
 
     let cases: Vec<Vec<String>> = vec![
-        vec!["WebMiddleware".to_string()],
-        vec!["ArtifactMiddleware".to_string()],
-        vec![
-            "WebMiddleware".to_string(),
-            "ArtifactMiddleware".to_string(),
-        ],
+        vec!["web".to_string()],
+        vec!["artifact".to_string()],
+        vec!["web".to_string(), "artifact".to_string()],
     ];
     for disabled_list in cases {
         let disabled: HashSet<String> = disabled_list.iter().cloned().collect();
@@ -584,7 +583,7 @@ async fn closing_web_keeps_artifact_capability_and_real_call() {
     let fixture = StartupFixture::start().await;
     let pool = Arc::clone(&fixture.pool);
     let cwd = fixture.project.to_string_lossy().into_owned();
-    let disabled: HashSet<String> = ["WebMiddleware".to_string()].into_iter().collect();
+    let disabled: HashSet<String> = ["web".to_string()].into_iter().collect();
     let closed = super::closed_instances(&disabled);
     assert_eq!(
         closed,

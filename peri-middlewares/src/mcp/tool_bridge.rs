@@ -355,7 +355,12 @@ impl BaseTool for McpToolBridge {
         // WorkspaceRemote）与 monitor 实例按直接发起会话隔离后台任务，其他
         // server 不注入 Peri 元数据。
         if let Some(owner) = super::client::task_owner_metadata::task_owner_meta(
-            self.client.source.as_ref(),
+            self.client.source.as_ref().filter(|source| {
+                super::client::task_owner_metadata::tool_uses_task_owner(
+                    Some(source),
+                    &self.tool_name,
+                )
+            }),
             session_id,
         ) {
             request.meta = Some(owner);
@@ -368,11 +373,19 @@ impl BaseTool for McpToolBridge {
 
         // Workspace tools retain their own deadlines (Bash promotes at <=120s).
         // Source identity, not a spoofable server name, grants this behavior.
-        let timeout = (!matches!(
-            self.client.source.as_ref(),
-            Some(super::config::ConfigSource::Builtin { instance }) if instance == "workspace"
-        ))
-        .then_some(TOOL_CALL_TIMEOUT);
+        let workspace_tool = match self.client.source.as_ref() {
+            Some(super::config::ConfigSource::Builtin { instance }) if instance == "workspace" => {
+                true
+            }
+            Some(super::config::ConfigSource::Builtin { instance })
+                if peri_acp_types::builtin_mcp::is_v5_server_name(instance) =>
+            {
+                peri_acp_types::builtin_mcp::capability_of_original_tool(&self.tool_name)
+                    .is_some_and(|(capability, _)| capability.name == "workspace")
+            }
+            _ => false,
+        };
+        let timeout = (!workspace_tool).then_some(TOOL_CALL_TIMEOUT);
         let response = match super::tool_request::call_tool(peer, request, timeout).await {
             Ok(response) => response,
             Err(error) => {
@@ -408,18 +421,31 @@ impl BaseTool for McpToolBridge {
             rmcp::model::CallToolResponse::Task(created) => {
                 let task_created_at = created.task.created_at;
                 let task_id = created.task.task_id;
-                let owner_scoped = super::client::task_owner_metadata::source_uses_task_owner(
+                let capability_source = super::client::task_owner_metadata::tool_capability(
                     self.client.source.as_ref(),
+                    &self.tool_name,
                 );
+                let owner_scoped = capability_source
+                    .is_some_and(|capability| capability.host_injection.task_owner_scoped)
+                    || (capability_source.is_none()
+                        && super::client::task_owner_metadata::source_uses_task_owner(
+                            self.client.source.as_ref(),
+                        ));
                 let is_shell = self.tool_name == "Bash"
-                    && (matches!(
-                        self.client.source.as_ref(),
-                        Some(super::config::ConfigSource::Builtin { instance })
-                            if instance == "workspace"
-                    ) || matches!(
-                        self.client.source.as_ref(),
-                        Some(super::config::ConfigSource::WorkspaceRemote)
-                    ));
+                    && (capability_source.is_some_and(|capability| capability.name == "workspace")
+                        || matches!(
+                            self.client.source.as_ref(),
+                            Some(super::config::ConfigSource::Builtin { instance })
+                                if instance == "workspace"
+                        )
+                        || matches!(
+                            self.client.source.as_ref(),
+                            Some(super::config::ConfigSource::WorkspaceRemote)
+                        ));
+                // 任务面板与终态语义按能力身份（workspace/monitor）而不是出口名。
+                let task_server = capability_source
+                    .map(|capability| capability.legacy_instance.to_string())
+                    .unwrap_or_else(|| self.server_name.clone());
                 let summary = if is_shell {
                     input
                         .get("command")
@@ -437,7 +463,7 @@ impl BaseTool for McpToolBridge {
                     session_id,
                     Some(session_id),
                     delivery.clone(),
-                    &self.server_name,
+                    &task_server,
                     &task_id,
                     kind,
                     summary,
@@ -459,7 +485,7 @@ impl BaseTool for McpToolBridge {
                 };
                 let public_id = ticket.task_id().to_owned();
                 if let Err(error) = pool.spawn_managed_task_subscription(
-                    self.server_name.clone(),
+                    task_server,
                     session_id.to_owned(),
                     task_id.clone(),
                     ticket,
@@ -482,10 +508,14 @@ impl BaseTool for McpToolBridge {
                 // the terminal state always wakes the initiator once (with any
                 // unreported hits merged into it). The receipt below must still
                 // not promise resumable delivery.
-                let is_monitor = matches!(
-                    self.client.source.as_ref(),
-                    Some(super::config::ConfigSource::Builtin { instance }) if instance == "monitor"
-                );
+                // v5 单出口按能力身份判定；迁移期仍按实例名。
+                let is_monitor = capability_source
+                    .is_some_and(|capability| capability.name == "monitor")
+                    || (capability_source.is_none()
+                        && matches!(
+                            self.client.source.as_ref(),
+                            Some(super::config::ConfigSource::Builtin { instance }) if instance == "monitor"
+                        ));
                 if is_monitor {
                     // The model sees the receipt, not the raw `CreateTaskResult`.
                     // Expose both ids: `public_id` is the host task id (host task

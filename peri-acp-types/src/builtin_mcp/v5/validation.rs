@@ -22,16 +22,6 @@ pub enum CapabilityRegistryError {
     /// 迁移期旧实例身份不得为空。
     #[error("capability `{capability}` has an empty legacy instance")]
     EmptyLegacyInstance { capability: String },
-    /// 迁移期旧关闭键不得为空。
-    #[error("capability `{capability}` has an empty legacy policy key")]
-    EmptyLegacyPolicyKey { capability: String },
-    /// 旧关闭键必须一对一映射到能力，否则关闭集不确定。
-    #[error("duplicate legacy policy key `{key}` in capabilities `{first}` and `{second}`")]
-    DuplicateLegacyPolicyKey {
-        key: String,
-        first: String,
-        second: String,
-    },
     /// 能力依赖不得引用自身或未声明能力。
     #[error("capability `{capability}` has unknown or self dependency `{dependency}`")]
     InvalidDependency {
@@ -172,7 +162,6 @@ pub fn validate_capabilities(
     }
 
     let mut legacy_instances: HashMap<&str, &str> = HashMap::new();
-    let mut legacy_policy_keys: HashMap<&str, &str> = HashMap::new();
     let mut original_names: HashMap<&str, &str> = HashMap::new();
     let mut model_names: HashMap<&str, &str> = HashMap::new();
     let mut legacy_names: HashMap<&str, &str> = HashMap::new();
@@ -201,29 +190,6 @@ pub fn validate_capabilities(
                 second: capability.name.to_owned(),
             });
         }
-        if capability.legacy_policy_key.is_empty() {
-            return Err(CapabilityRegistryError::EmptyLegacyPolicyKey {
-                capability: capability.name.to_owned(),
-            });
-        }
-        if capability_names.contains(capability.legacy_policy_key) {
-            // 同一字符串既是能力名又是旧键会让开关来源不可判定。
-            return Err(CapabilityRegistryError::DuplicateLegacyPolicyKey {
-                key: capability.legacy_policy_key.to_owned(),
-                first: "capability name".to_owned(),
-                second: capability.name.to_owned(),
-            });
-        }
-        if let Some(first) =
-            legacy_policy_keys.insert(capability.legacy_policy_key, capability.name)
-        {
-            return Err(CapabilityRegistryError::DuplicateLegacyPolicyKey {
-                key: capability.legacy_policy_key.to_owned(),
-                first: first.to_owned(),
-                second: capability.name.to_owned(),
-            });
-        }
-
         let mut seen_dependencies = HashSet::new();
         for dependency in capability.dependencies {
             if !seen_dependencies.insert(*dependency) {
