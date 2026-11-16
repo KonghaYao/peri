@@ -27,6 +27,30 @@ fn builtin_registry_names_match_frontmatter() {
     }
 }
 
+/// interview 是用户可触发的内置技能：注册、frontmatter 可解析、description 非空。
+#[test]
+fn interview_builtin_skill_is_registered_and_user_invocable() {
+    let skill = BUILTIN_SKILLS
+        .iter()
+        .find(|skill| skill.name == "interview")
+        .expect("interview 必须注册为 builtin 技能");
+    let map = peri_mcp_common::agent_definition::frontmatter::frontmatter_json(skill.content)
+        .expect("interview frontmatter 必须可解析");
+    let (name, description) =
+        peri_mcp_common::agent_definition::frontmatter::frontmatter_summary(&map)
+            .expect("interview 必须有 name/description");
+    assert_eq!(name, "interview");
+    assert!(
+        !description.trim().is_empty(),
+        "interview description 不得为空"
+    );
+    assert_eq!(
+        map.get("userInvocable"),
+        Some(&serde_json::Value::Bool(true)),
+        "interview 必须允许用户直接调用"
+    );
+}
+
 #[test]
 fn builtin_skill_records_expose_entry_bytes_and_index() {
     let budget = ResourceBudget::default();
