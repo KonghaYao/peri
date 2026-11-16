@@ -74,7 +74,7 @@
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | M1 设计门槛 | 取代关系、配置权威、关闭矩阵、命名/授权、故障域与验收矩阵落入设计/spec | 完成（仅文档） |
-| M2 代理与影子 | 先完成 workspace 代理 wire 测试与 capability router；v4 六实例保留，beta flag 只对新会话开启 v5 | 未开始 |
+| M2 代理与影子 | 先完成 workspace 代理 wire 测试与 capability router；v4 六实例保留，beta flag 只对新会话开启 v5 | 进行中：router、能力开关/降级、task 归属与 workspace 代理接缝已实现（`mcp::builtin::router`）；宿主默认装配与 beta flag 未接线 |
 | M3 切换 | 单出口成为新会话默认；v4 注入降级为兼容 adapter；旧 transcript 归一；旧键映射或报错 | 未开始 |
 | M4 清理 | 进入条件：观察窗口通过、回滚支持正式截止。内容：删除六实例注入、独立 runtime/client 条目与旧 policy 键；保留外部 MCP/ACP 路径。删除前须确认无仍需冷恢复的 v4 会话，否则保留只读 v4 adapter。M4 后不再承诺 v4 装配或旧名执行 | 未开始 |
 
@@ -95,7 +95,7 @@ M4 是回滚支持截止点：M4 开始前必须记录截止决定并确认旧�
 
 ### 6.1 本轮未验证
 
-1. 未实现单出口 router、单 transport/生命周期或 workspace 代理。
+1. 单出口 router、能力开关/降级、task 归属与 workspace 代理接缝已实现并有 crate 级测试（`mcp::builtin::router`，15 项）；未接入宿主默认装配，也未验证 router + host 的端到端生命周期。
 2. 未运行 Sandbox upstream 或端到端 MCP wire 实验；并发 request id、取消、进度、任务、通知、订阅与断线清理均未验证。
 3. 未验证 beta flag 接线、影子装配、新旧会话隔离或回滚。
 4. 未验证跨进程 `taskOwner`、task id 归属或 workspace 上游重连。
@@ -107,7 +107,7 @@ M4 是回滚支持截止点：M4 开始前必须记录截止决定并确认旧�
 | --- | --- | --- |
 | `.mcp.json` server 条目的能力扩展键名 | 未裁决 | 按 MCP 生态复核后裁决；标准客户端忽略不影响连接 |
 | 能力/工具声明表的类型名与字段名 | 实现期裁决 | 语义冻结为 capability；可保留 `instance` 字段名 |
-| 聚合 handler 的 crate 落点 | 未裁决 | `peri-mcp-common` 或新建 `peri-mcp-builtin`；实现前记录 |
+| 聚合 handler 的 crate 落点 | 已裁决（实现期） | `peri-middlewares::mcp::builtin::router`；复用现有 builtin dispatch 与 `UpstreamProxy` |
 | workspace upstream descriptor 来源、授权与生命周期 | 未裁决 | wire 门槛验证；Sandbox actor 拥有生命周期 |
 | task id 编码 | 未裁决 | 全局唯一或稳定能力前缀；出口内可唯一判定 |
 | beta flag id 与注册表条目 | 实现期裁决 | 按 `beta-flags.md` 引入并记录 |

@@ -236,7 +236,7 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 | --- | --- | --- |
 | `.mcp.json` server 条目的能力扩展键名 | 未裁决 | 只允许 server 条目命名空间扩展；实现前按 MCP 生态复核，本文不预占 |
 | 能力/工具声明表的类型名与字段名 | 实现期裁决 | 语义已冻结；可保留 `instance` 字段名以减少机械改动，但语义改为 capability |
-| 聚合 handler 的 crate 落点 | 未裁决 | `peri-mcp-common` 或新建 `peri-mcp-builtin`，实现前裁决 |
+| 聚合 handler 的 crate 落点 | 已裁决（实现期） | `peri-middlewares::mcp::builtin::router`：复用 `BuiltinServerHandler`、`StandaloneFactory` 与 `UpstreamProxy`，不新增 crate |
 | workspace upstream descriptor 来源、授权与生命周期 | 未裁决 | 由 Sandbox Actor 提供；代理 wire 门槛必须验证 |
 | task id 编码 | 未裁决 | 全局唯一或稳定能力前缀；必须能唯一判定归属 |
 | beta flag id 与注册表条目 | 实现期裁决 | 按 beta-flags.md 引入，不预占 id |
