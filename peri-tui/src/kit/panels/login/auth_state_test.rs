@@ -4,14 +4,14 @@
 
 use std::time::UNIX_EPOCH;
 
-use super::super::{NotificationGuard, TEST_AREA, key, mount_panel_at};
-use super::{plan_edit_state, test_auth_controller};
+use super::super::NotificationGuard;
+use super::super::TEST_AREA;
+
 use crate::chatgpt_auth::AccountStatus;
-use crate::kit::atoms::NOTIFICATION;
+
 use crate::kit::panels::login::LoginPanelMode;
 use crate::kit::panels::login::auth::{AuthAction, AuthEvent};
-use crate::kit::panels::login::auth_ui::apply_auth_effects;
-use crate::kit::panels::login::edit_handler::auth_scope;
+
 use crate::kit::panels::login::edit_state::{
     LoginEditState, LoginError, LoginErrorKind, LoginField,
 };
@@ -19,7 +19,7 @@ use ratatui_kit::crossterm::event::KeyCode;
 use serial_test::serial;
 
 fn vacant_plan_state() -> LoginEditState {
-    let mut state = plan_edit_state();
+    let mut state = super::plan_edit_state();
     state.plan.subject.clear();
     state.plan.client_id.clear();
     state
@@ -49,13 +49,16 @@ fn checking_save_reports_wait_then_status_success_adopts_and_clears_stale_error(
     let mut ticket = None;
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_panel_at(2, move |panel| {
+    super::super::mount_panel_at(2, move |panel| {
         if frame == 0 {
             *panel.edit_state.write() = Some(state.clone());
             *panel.mode.write() = LoginPanelMode::Edit;
             *panel.edit_focus.write() = LoginField::Confirm;
-            *panel.auth.write() = test_auth_controller();
-            panel.auth.write().sync_scope(auth_scope(&state));
+            *panel.auth.write() = super::test_auth_controller();
+            panel
+                .auth
+                .write()
+                .sync_scope(crate::kit::panels::login::edit_handler::auth_scope(&state));
             ticket = Some(
                 panel
                     .auth
@@ -65,14 +68,14 @@ fn checking_save_reports_wait_then_status_success_adopts_and_clears_stale_error(
                     .ticket,
             );
             // 模拟上一轮留下的陈旧身份错误；状态成功或保存门必须能清掉。
-            panel.edit_state.write().as_mut().unwrap().inline_error =
+            panel.edit_state.write().as_mut().expect("checking save reports wait then status success adopts and clears stale error: isolated fixture workspace must remain accessible").inline_error =
                 Some(LoginError::identity_required(
                     LoginField::AuthActions,
                     crate::i18n::tr("login-auth-identity-required"),
                 ));
         }
         if frame == 1 {
-            let _ = panel.event(key(KeyCode::Enter), TEST_AREA);
+            let _ = panel.event(super::super::key(KeyCode::Enter), TEST_AREA);
             let checking = (
                 *panel.mode.read(),
                 panel
@@ -92,7 +95,7 @@ fn checking_save_reports_wait_then_status_success_adopts_and_clears_stale_error(
                 ticket,
                 AuthEvent::StatusChecked(Ok(Some(verified_status()))),
             );
-            apply_auth_effects(
+            crate::kit::panels::login::auth_ui::apply_auth_effects(
                 panel.auth,
                 panel.mode,
                 panel.edit_state,
@@ -100,7 +103,7 @@ fn checking_save_reports_wait_then_status_success_adopts_and_clears_stale_error(
                 panel.edit_cursor,
             );
             let after_status = {
-                let state = panel.edit_state.read().clone().unwrap();
+                let state = panel.edit_state.read().clone().expect("checking save reports wait then status success adopts and clears stale error: isolated fixture workspace must remain accessible");
                 (
                     state.plan.subject.clone(),
                     state.plan.client_id.clone(),
@@ -110,18 +113,18 @@ fn checking_save_reports_wait_then_status_success_adopts_and_clears_stale_error(
             };
 
             *panel.edit_focus.write() = LoginField::Confirm;
-            let _ = panel.event(key(KeyCode::Enter), TEST_AREA);
+            let _ = panel.event(super::super::key(KeyCode::Enter), TEST_AREA);
             let second_save = panel
                 .edit_state
                 .read()
                 .as_ref()
                 .and_then(|state| state.inline_error.as_ref().map(|error| error.kind));
-            tx.send((checking, after_status, second_save)).unwrap();
+            tx.send((checking, after_status, second_save)).expect("checking save reports wait then status success adopts and clears stale error: fixture channel must deliver its expected message");
         }
         frame += 1;
     });
 
-    let (checking, after_status, second_save) = rx.try_recv().unwrap();
+    let (checking, after_status, second_save) = rx.try_recv().expect("checking save reports wait then status success adopts and clears stale error: fixture channel must deliver its expected message");
     assert_eq!(checking.0, LoginPanelMode::Edit);
     assert_eq!(
         checking.1, None,
@@ -146,3 +149,5 @@ fn checking_save_reports_wait_then_status_success_adopts_and_clears_stale_error(
         "采用后再次保存不得再被身份阻断"
     );
 }
+
+use crate::kit::atoms::NOTIFICATION;

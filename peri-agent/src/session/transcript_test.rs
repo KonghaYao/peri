@@ -4,7 +4,7 @@
 //! 夹具）、`memory_tests`（内存模型：构造/寻址/staging/标记与投影/祖先/rewind/
 //! rebuild）、`reminder_tests`（canonical reminder 的受众投递矩阵）。
 
-use super::*;
+use crate::messages::BaseMessage;
 
 use crate::messages::MessageContent;
 

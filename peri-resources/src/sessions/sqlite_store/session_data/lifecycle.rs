@@ -1,6 +1,11 @@
 //! Local Session metadata updates and tree deletion.
 
-use super::*;
+use super::{
+    session_rows, CloseSettlement, Ordering, SessionMetaPatch, SessionResourceError,
+    SessionResourceErrorKind, SessionResourceResult, SqliteConnection, SqliteSessionData, ThreadId,
+};
+use crate::sessions::sqlite_store::session_data::thread_exists_on;
+use crate::sessions::sqlite_store::session_data::thread_tree_on;
 
 impl SqliteSessionData {
     pub(super) async fn finish_close_intent(&self, root: &ThreadId) -> SessionResourceResult<()> {
@@ -10,13 +15,13 @@ impl SqliteSessionData {
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         self.require_session(&mut tx, root).await?;
         let deleted = sqlx::query("DELETE FROM session_close_intents WHERE thread_id = ?1")
             .bind(root.as_str())
             .execute(&mut *tx)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         if deleted.rows_affected() != 1 {
             return Err(SessionResourceError::conflict(
                 "session close intent is missing",
@@ -24,7 +29,7 @@ impl SqliteSessionData {
         }
         tx.commit()
             .await
-            .map_err(|_| commit_failure(Some(root.clone())))?;
+            .map_err(|_| super::commit_failure(Some(root.clone())))?;
         Ok(())
     }
 
@@ -37,16 +42,16 @@ impl SqliteSessionData {
             .pool
             .begin()
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let exists = thread_exists_on(&mut tx, root)
             .await
-            .map_err(read_failure)?;
+            .map_err(super::read_failure)?;
         let pending: Option<(i64,)> =
             sqlx::query_as("SELECT 1 FROM session_close_intents WHERE thread_id = ?1")
                 .bind(root.as_str())
                 .fetch_optional(&mut *tx)
                 .await
-                .map_err(|error| map_sqlx(&error))?;
+                .map_err(|error| super::map_sqlx(&error))?;
         let state = if !exists {
             CloseSettlement::Unknown
         } else if pending.is_some() {
@@ -54,7 +59,7 @@ impl SqliteSessionData {
         } else {
             CloseSettlement::Finished
         };
-        tx.commit().await.map_err(|error| map_sqlx(&error))?;
+        tx.commit().await.map_err(|error| super::map_sqlx(&error))?;
         Ok(state)
     }
     pub(super) async fn require_session(
@@ -64,9 +69,9 @@ impl SqliteSessionData {
     ) -> SessionResourceResult<()> {
         if !thread_exists_on(connection, id)
             .await
-            .map_err(read_failure)?
+            .map_err(super::read_failure)?
         {
-            return Err(not_found());
+            return Err(super::not_found());
         }
         Ok(())
     }
@@ -74,7 +79,7 @@ impl SqliteSessionData {
     /// Admission guard shared by lifecycle and mutation paths.
     pub(super) fn writable(&self) -> SessionResourceResult<()> {
         if self.closed.load(Ordering::Acquire) {
-            return Err(unavailable("session data port is closed"));
+            return Err(super::unavailable("session data port is closed"));
         }
         if self.database.is_read_only() {
             return Err(SessionResourceError::new(
@@ -104,8 +109,11 @@ impl SqliteSessionData {
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(|error| map_sqlx(&error))?;
-        if !thread_exists_on(&mut tx, id).await.map_err(read_failure)? {
+            .map_err(|error| super::map_sqlx(&error))?;
+        if !thread_exists_on(&mut tx, id)
+            .await
+            .map_err(super::read_failure)?
+        {
             return Ok(());
         }
         // 撤销只针对「本次未发布的创建」：已经派生过子会话的 identity 不能被补偿掉，
@@ -115,9 +123,9 @@ impl SqliteSessionData {
                 .bind(id.as_str())
                 .fetch_one(&mut *tx)
                 .await
-                .map_err(|error| map_sqlx(&error))?;
+                .map_err(|error| super::map_sqlx(&error))?;
         if children.0 > 0 {
-            return Err(invalid_input(
+            return Err(super::invalid_input(
                 "session has published children and cannot be revoked",
             ));
         }
@@ -127,7 +135,7 @@ impl SqliteSessionData {
                     .bind(id.as_str())
                     .fetch_optional(&mut *tx)
                     .await
-                    .map_err(|error| map_sqlx(&error))?;
+                    .map_err(|error| super::map_sqlx(&error))?;
             if matches!(committed, Some((Some(_),))) {
                 return Err(SessionResourceError::conflict(
                     "session has a committed frozen snapshot and cannot be revoked",
@@ -136,17 +144,17 @@ impl SqliteSessionData {
         }
         // 子表行同样显式删除，不借 `ON DELETE CASCADE`：那份级联只在 SQLite 上存在，
         // 远端执行器没有（见 [`session_rows::THREAD_CHILD_DELETES`]）。先子后父。
-        delete_thread_child_rows(&mut tx, id.as_str())
+        super::delete_thread_child_rows(&mut tx, id.as_str())
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         sqlx::query(session_rows::DELETE_THREAD_SQL)
             .bind(id.as_str())
             .execute(&mut *tx)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         tx.commit()
             .await
-            .map_err(|_| commit_failure(Some(id.clone())))?;
+            .map_err(|_| super::commit_failure(Some(id.clone())))?;
         Ok(())
     }
 
@@ -169,7 +177,7 @@ impl SqliteSessionData {
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(|e| map_sqlx(&e))?;
+            .map_err(|e| super::map_sqlx(&e))?;
         self.require_session(&mut tx, id).await?;
         let now = peri_time::now_utc_rfc3339();
         let mut builder: sqlx::QueryBuilder<sqlx::Sqlite> =
@@ -194,13 +202,13 @@ impl SqliteSessionData {
             .build()
             .execute(&mut *tx)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         if updated.rows_affected() != 1 {
-            return Err(not_found());
+            return Err(super::not_found());
         }
         tx.commit()
             .await
-            .map_err(|_| commit_failure(Some(id.clone())))?;
+            .map_err(|_| super::commit_failure(Some(id.clone())))?;
         Ok(())
     }
 
@@ -211,30 +219,35 @@ impl SqliteSessionData {
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         self.require_session(&mut tx, id).await?;
-        if !thread_exists_on(&mut tx, id).await.map_err(read_failure)? {
-            return Err(not_found());
+        if !thread_exists_on(&mut tx, id)
+            .await
+            .map_err(super::read_failure)?
+        {
+            return Err(super::not_found());
         }
-        let tree = thread_tree_on(&mut tx, id).await.map_err(read_failure)?;
+        let tree = thread_tree_on(&mut tx, id)
+            .await
+            .map_err(super::read_failure)?;
         // 子表行显式删除，不借 `ON DELETE CASCADE`：级联只在 SQLite 上存在，远端执行器
         // 没有（见 [`session_rows::THREAD_CHILD_DELETES`]）。顺序与远端 delete_tree 一致：
         // 子行全部先删，最后才删 threads 行。
         for thread in &tree {
-            delete_thread_child_rows(&mut tx, thread)
+            super::delete_thread_child_rows(&mut tx, thread)
                 .await
-                .map_err(|error| map_sqlx(&error))?;
+                .map_err(|error| super::map_sqlx(&error))?;
         }
         for thread in &tree {
             sqlx::query(session_rows::DELETE_THREAD_SQL)
                 .bind(thread)
                 .execute(&mut *tx)
                 .await
-                .map_err(|error| map_sqlx(&error))?;
+                .map_err(|error| super::map_sqlx(&error))?;
         }
         tx.commit()
             .await
-            .map_err(|_| commit_failure(Some(id.clone())))?;
+            .map_err(|_| super::commit_failure(Some(id.clone())))?;
         Ok(())
     }
 }

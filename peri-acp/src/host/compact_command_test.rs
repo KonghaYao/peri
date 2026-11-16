@@ -1,8 +1,29 @@
 //! 手动 compact 经 executor、Host 收尾及真实 ACP 通知的跨轮回归。
-use super::*;
+use crate::host::executor_flow_tests::compact_history_tests::SummaryModel;
+use crate::host::executor_flow_tests::compact_history_tests::OLD;
+use crate::host::executor_flow_tests::compact_history_tests::SUMMARY;
+#[cfg(not(windows))]
+use crate::host::executor_flow_tests::CancelGateModel;
+use crate::host::executor_flow_tests::HomeGuard;
+use crate::host::SharedSessions;
 use crate::session::event_sink::TransportEventSink;
-use crate::transport::{mpsc::mpsc_transport_pair, types::IncomingMessage, AcpTransport};
+use crate::session::executor::PromptStopReason;
+use crate::session::executor::SessionContext;
+use crate::transport::mpsc;
+use crate::transport::types::IncomingMessage;
+use crate::transport::AcpTransport;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::PeriCaps;
+#[cfg(not(windows))]
+use peri_model::Model;
+use serial_test::serial;
+#[cfg(not(windows))]
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 fn enable_compact_command(ctx: &mut SessionContext, model: Arc<dyn Model>) {
     let registry = Arc::new(crate::session::command::CommandRegistry::new());
@@ -12,7 +33,7 @@ fn enable_compact_command(ctx: &mut SessionContext, model: Arc<dyn Model>) {
 }
 
 async fn run_manual_compact(ctx: SessionContext, sessions: SharedSessions) -> serde_json::Value {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = mpsc::mpsc_transport_pair();
     let caps = Arc::new(dashmap::DashMap::new());
     caps.insert(
         ctx.session_id.clone(),
@@ -21,10 +42,15 @@ async fn run_manual_compact(ctx: SessionContext, sessions: SharedSessions) -> se
             ..Default::default()
         },
     );
-    let mut turn = make_compact_turn(&ctx, &sessions, false).await;
+    let mut turn = crate::host::executor_flow_tests::compact_history_tests::make_compact_turn(
+        &ctx, &sessions, false,
+    )
+    .await;
     turn.content = MessageContent::text("/compact");
     turn.event_sink = Arc::new(TransportEventSink::new(Arc::new(server), caps));
-    let result = run_session_loop(ctx.clone(), turn).await;
+    let result =
+        crate::host::executor_flow_tests::execution_fixture::run_session_loop(ctx.clone(), turn)
+            .await;
     assert!(!result.persistence_inconsistent);
     assert!(result.failure.is_none());
     if result.stop_reason == PromptStopReason::EndTurn {
@@ -41,7 +67,7 @@ async fn run_manual_compact(ctx: SessionContext, sessions: SharedSessions) -> se
                 .collect::<Vec<_>>()
         );
     }
-    let response = finish_prompt_turn(
+    let response = crate::host::prompt::finish_prompt_turn(
         &sessions,
         &ctx.session_id,
         false,
@@ -76,7 +102,12 @@ async fn run_manual_compact(ctx: SessionContext, sessions: SharedSessions) -> se
 async fn test_manual_compact_twice_through_host_preserves_canonical_history() {
     let dir = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(dir.path());
-    let (mut ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
+    let (mut ctx, store, sessions) =
+        crate::host::executor_flow_tests::compact_history_tests::make_compact_context(
+            &dir,
+            Arc::new(SummaryModel),
+        )
+        .await;
     enable_compact_command(&mut ctx, Arc::new(SummaryModel));
     let original = store
         .load_payloads(ctx.thread_id.as_ref().unwrap())
@@ -106,7 +137,10 @@ async fn test_manual_compact_twice_through_host_preserves_canonical_history() {
             1
         );
     }
-    assert_next_turn_sees_summary(ctx, &sessions).await;
+    crate::host::executor_flow_tests::compact_history_tests::assert_next_turn_sees_summary(
+        ctx, &sessions,
+    )
+    .await;
 }
 
 /// [回归测试] 自动 Full 与手动 Full 共用 canonical 历史，下一轮 Reason 不复活旧原文。
@@ -115,12 +149,22 @@ async fn test_manual_compact_twice_through_host_preserves_canonical_history() {
 async fn test_auto_full_then_manual_compact_through_host() {
     let dir = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(dir.path());
-    let (mut ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
+    let (mut ctx, store, sessions) =
+        crate::host::executor_flow_tests::compact_history_tests::make_compact_context(
+            &dir,
+            Arc::new(SummaryModel),
+        )
+        .await;
     enable_compact_command(&mut ctx, Arc::new(SummaryModel));
-    let turn = make_compact_turn(&ctx, &sessions, true).await;
-    let result = run_session_loop(ctx.clone(), turn).await;
+    let turn = crate::host::executor_flow_tests::compact_history_tests::make_compact_turn(
+        &ctx, &sessions, true,
+    )
+    .await;
+    let result =
+        crate::host::executor_flow_tests::execution_fixture::run_session_loop(ctx.clone(), turn)
+            .await;
     assert!(result.history_replaced_by_compaction);
-    finish_prompt_turn(
+    crate::host::prompt::finish_prompt_turn(
         &sessions,
         &ctx.session_id,
         false,
@@ -131,7 +175,10 @@ async fn test_auto_full_then_manual_compact_through_host() {
     .unwrap();
     run_manual_compact(ctx.clone(), sessions.clone()).await;
     assert_eq!(store.compact_commits.load(Ordering::SeqCst), 2);
-    assert_next_turn_sees_summary(ctx, &sessions).await;
+    crate::host::executor_flow_tests::compact_history_tests::assert_next_turn_sees_summary(
+        ctx, &sessions,
+    )
+    .await;
 }
 
 /// [回归测试] 新连接冷读 canonical payload 和 flags 后，手动 compact 仍然可用。
@@ -140,7 +187,12 @@ async fn test_auto_full_then_manual_compact_through_host() {
 async fn test_cold_snapshot_then_manual_compact_through_host() {
     let dir = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(dir.path());
-    let (mut ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
+    let (mut ctx, store, sessions) =
+        crate::host::executor_flow_tests::compact_history_tests::make_compact_context(
+            &dir,
+            Arc::new(SummaryModel),
+        )
+        .await;
     enable_compact_command(&mut ctx, Arc::new(SummaryModel));
     run_manual_compact(ctx.clone(), sessions.clone()).await;
     drop(sessions);
@@ -160,10 +212,16 @@ async fn test_cold_snapshot_then_manual_compact_through_host() {
         .load_active_snapshot(ctx.thread_id.as_ref().unwrap())
         .await
         .unwrap();
-    let restored = make_host_sessions(&ctx, active.payloads);
+    let restored = crate::host::executor_flow_tests::compact_history_tests::make_host_sessions(
+        &ctx,
+        active.payloads,
+    );
     run_manual_compact(ctx.clone(), restored.clone()).await;
     assert_eq!(store.compact_commits.load(Ordering::SeqCst), 2);
-    assert_next_turn_sees_summary(ctx, &restored).await;
+    crate::host::executor_flow_tests::compact_history_tests::assert_next_turn_sees_summary(
+        ctx, &restored,
+    )
+    .await;
 }
 
 /// [回归测试] 手动摘要模型正在生成时取消，wire 必须 cancelled，且未提交原文保留。
@@ -172,7 +230,12 @@ async fn test_cold_snapshot_then_manual_compact_through_host() {
 async fn test_manual_compact_model_cancel_has_consistent_wire_and_preserves_history() {
     let dir = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(dir.path());
-    let (mut ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
+    let (mut ctx, store, sessions) =
+        crate::host::executor_flow_tests::compact_history_tests::make_compact_context(
+            &dir,
+            Arc::new(SummaryModel),
+        )
+        .await;
     let (entered, ready) = tokio::sync::oneshot::channel();
     enable_compact_command(
         &mut ctx,
@@ -217,7 +280,12 @@ async fn test_manual_compact_model_cancel_has_consistent_wire_and_preserves_hist
 async fn test_finish_prompt_turn_adopts_only_active_set_and_reports_memory_shrink() {
     let dir = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(dir.path());
-    let (mut ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
+    let (mut ctx, store, sessions) =
+        crate::host::executor_flow_tests::compact_history_tests::make_compact_context(
+            &dir,
+            Arc::new(SummaryModel),
+        )
+        .await;
     enable_compact_command(&mut ctx, Arc::new(SummaryModel));
     let thread_id = ctx.thread_id.clone().unwrap();
 
@@ -301,7 +369,12 @@ async fn test_finish_prompt_turn_adopts_only_active_set_and_reports_memory_shrin
 async fn test_manual_compact_publishes_history_window_checkpoint() {
     let dir = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(dir.path());
-    let (mut ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
+    let (mut ctx, store, sessions) =
+        crate::host::executor_flow_tests::compact_history_tests::make_compact_context(
+            &dir,
+            Arc::new(SummaryModel),
+        )
+        .await;
     enable_compact_command(&mut ctx, Arc::new(SummaryModel));
 
     run_manual_compact(ctx.clone(), sessions.clone()).await;

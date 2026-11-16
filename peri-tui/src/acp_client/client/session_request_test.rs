@@ -1,10 +1,10 @@
-use super::*;
+use super::{AcpError, AcpTuiClient, Value, json};
+
 use crate::acp_client::interaction_lifecycle::TransitionKind;
 use crate::kit::atoms;
-use peri_acp::transport::{
-    mpsc::{MpscServerTransport, mpsc_transport_pair},
-    types::{IncomingMessage, RequestId},
-};
+use peri_acp::transport::mpsc::MpscServerTransport;
+use peri_acp::transport::types::IncomingMessage;
+use peri_acp::transport::types::RequestId;
 use serial_test::serial;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -69,7 +69,7 @@ async fn next_request(server: &MpscServerTransport) -> (RequestId, String, Value
 #[serial]
 async fn window_open_is_enqueued_only_after_session_initialization_succeeds() {
     let _guard = enable_window_path();
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.user_input_queue.store(true, Ordering::Release);
     let loader = client.clone();
@@ -77,7 +77,7 @@ async fn window_open_is_enqueued_only_after_session_initialization_succeeds() {
 
     let (id, method, _) = next_request(&server).await;
     assert_eq!(method, "session/load");
-    server.send_response(id, Ok(json!({}))).await.unwrap();
+    server.send_response(id, Ok(json!({}))).await.expect("window open is enqueued only after session initialization succeeds: fixture task and request must complete successfully");
 
     let (id, method, _) = next_request(&server).await;
     assert_eq!(method, "session/input/snapshot");
@@ -89,9 +89,9 @@ async fn window_open_is_enqueued_only_after_session_initialization_succeeds() {
     server
         .send_response(id, Ok(snapshot_payload()))
         .await
-        .unwrap();
+        .expect("window open is enqueued only after session initialization succeeds: fixture task and request must complete successfully");
 
-    assert_eq!(load.await.unwrap().unwrap(), WINDOW_SESSION);
+    assert_eq!(load.await.expect("window open is enqueued only after session initialization succeeds: the fixture operation must finish without an inner failure").expect("window open is enqueued only after session initialization succeeds: the fixture operation must finish without an inner failure"), WINDOW_SESSION);
     assert_eq!(
         window_state(),
         (WINDOW_SESSION.to_owned(), WINDOW_SENTINEL_SEQ + 1),
@@ -105,7 +105,7 @@ async fn window_open_is_enqueued_only_after_session_initialization_succeeds() {
 #[serial]
 async fn failed_session_initialization_does_not_enqueue_window_open() {
     let _guard = enable_window_path();
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.user_input_queue.store(true, Ordering::Release);
     let loader = client.clone();
@@ -113,23 +113,23 @@ async fn failed_session_initialization_does_not_enqueue_window_open() {
 
     let (id, method, _) = next_request(&server).await;
     assert_eq!(method, "session/load");
-    server.send_response(id, Ok(json!({}))).await.unwrap();
+    server.send_response(id, Ok(json!({}))).await.expect("failed session initialization does not enqueue window open: fixture task and request must complete successfully");
 
     let (id, method, _) = next_request(&server).await;
     assert_eq!(method, "session/input/snapshot");
     server
         .send_response(id, Err(AcpError::new(-32603, "snapshot failed")))
         .await
-        .unwrap();
+        .expect("failed session initialization does not enqueue window open: fixture task and request must complete successfully");
 
     // 初始化失败分支会关闭本会话；响应它，load 才能返回错误。
     let (id, method, _) = next_request(&server).await;
     assert_eq!(method, "session/close");
-    server.send_response(id, Ok(json!({}))).await.unwrap();
+    server.send_response(id, Ok(json!({}))).await.expect("failed session initialization does not enqueue window open: fixture task and request must complete successfully");
 
     let error = load
         .await
-        .unwrap()
+        .expect("failed session initialization does not enqueue window open: fixture task and request must complete successfully")
         .expect_err("initialization failure must fail the load");
     assert_eq!(error.code, -32603);
     assert_eq!(
@@ -145,7 +145,7 @@ async fn failed_session_initialization_does_not_enqueue_window_open() {
 #[serial]
 async fn new_session_enqueues_window_open_after_initialization_succeeds() {
     let _guard = enable_window_path();
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.user_input_queue.store(true, Ordering::Release);
     let creator = client.clone();
@@ -156,7 +156,7 @@ async fn new_session_enqueues_window_open_after_initialization_succeeds() {
     server
         .send_response(id, Ok(json!({ "sessionId": WINDOW_SESSION })))
         .await
-        .unwrap();
+        .expect("new session enqueues window open after initialization succeeds: fixture task and request must complete successfully");
 
     let (id, method, _) = next_request(&server).await;
     assert_eq!(method, "session/input/snapshot");
@@ -168,9 +168,9 @@ async fn new_session_enqueues_window_open_after_initialization_succeeds() {
     server
         .send_response(id, Ok(snapshot_payload()))
         .await
-        .unwrap();
+        .expect("new session enqueues window open after initialization succeeds: fixture task and request must complete successfully");
 
-    assert_eq!(create.await.unwrap().unwrap(), WINDOW_SESSION);
+    assert_eq!(create.await.expect("new session enqueues window open after initialization succeeds: the fixture operation must finish without an inner failure").expect("new session enqueues window open after initialization succeeds: the fixture operation must finish without an inner failure"), WINDOW_SESSION);
     assert_eq!(
         window_state(),
         (WINDOW_SESSION.to_owned(), WINDOW_SENTINEL_SEQ + 1),
@@ -184,7 +184,7 @@ async fn new_session_enqueues_window_open_after_initialization_succeeds() {
 #[serial]
 async fn failed_new_session_does_not_enqueue_window_open() {
     let _guard = enable_window_path();
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.user_input_queue.store(true, Ordering::Release);
     let creator = client.clone();
@@ -195,22 +195,22 @@ async fn failed_new_session_does_not_enqueue_window_open() {
     server
         .send_response(id, Ok(json!({ "sessionId": WINDOW_SESSION })))
         .await
-        .unwrap();
+        .expect("failed new session does not enqueue window open: fixture task and request must complete successfully");
 
     let (id, method, _) = next_request(&server).await;
     assert_eq!(method, "session/input/snapshot");
     server
         .send_response(id, Err(AcpError::new(-32603, "snapshot failed")))
         .await
-        .unwrap();
+        .expect("failed new session does not enqueue window open: fixture task and request must complete successfully");
 
     let (id, method, _) = next_request(&server).await;
     assert_eq!(method, "session/close");
-    server.send_response(id, Ok(json!({}))).await.unwrap();
+    server.send_response(id, Ok(json!({}))).await.expect("failed new session does not enqueue window open: fixture task and request must complete successfully");
 
     let error = create
         .await
-        .unwrap()
+        .expect("failed new session does not enqueue window open: fixture task and request must complete successfully")
         .expect_err("initialization failure must fail the new session");
     assert_eq!(error.code, -32603);
     assert_eq!(
@@ -223,10 +223,10 @@ async fn failed_new_session_does_not_enqueue_window_open() {
 
 #[tokio::test]
 async fn session_request_does_not_hold_operation_gate_while_waiting_for_wire_response() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("session-a", false);
-    let identity = client.stable_session_identity().unwrap();
+    let identity = client.stable_session_identity().expect("session request does not hold operation gate while waiting for wire response: the stable_session_identity fixture operation uses valid inputs");
     let requester = client.clone();
     let task = tokio::spawn(async move {
         requester
@@ -244,24 +244,24 @@ async fn session_request_does_not_hold_operation_gate_while_waiting_for_wire_res
     server
         .send_response(id, Ok(json!({"jobs":[]})))
         .await
-        .unwrap();
-    task.await.unwrap().unwrap();
+        .expect("session request does not hold operation gate while waiting for wire response: fixture task and request must complete successfully");
+    task.await.expect("session request does not hold operation gate while waiting for wire response: fixture task and request must complete successfully").expect("session request does not hold operation gate while waiting for wire response: fixture task and request must complete successfully");
 }
 
 #[tokio::test]
 async fn reloading_same_session_retires_previous_request_identity() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("session-a", false);
-    let old = client.stable_session_identity().unwrap();
+    let old = client.stable_session_identity().expect("reloading same session retires previous request identity: the stable_session_identity fixture operation uses valid inputs");
     let transition = client
         .lifecycle
         .begin_transition(TransitionKind::Load, Some("session-a".into()))
-        .unwrap();
+        .expect("reloading same session retires previous request identity: the begin_transition fixture operation uses valid inputs");
     client
         .lifecycle
         .commit_stable(transition.generation, "session-a".into());
-    assert_ne!(client.stable_session_identity().unwrap(), old);
+    assert_ne!(client.stable_session_identity().expect("reloading same session retires previous request identity: the stable_session_identity fixture operation uses valid inputs"), old);
     assert!(
         client
             .send_session_request(
@@ -278,3 +278,5 @@ async fn reloading_same_session_retires_previous_request_identity() {
             .is_err()
     );
 }
+
+use peri_acp::transport::AcpTransport;

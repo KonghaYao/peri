@@ -57,8 +57,9 @@ pub enum TuiHunkLineKind {
 }
 
 /// [G-Diff] diff 的 change 行计数（Add/Del 总数）——
-/// header `+N −M` 渲染与 [`TuiToolCard::diff_code`] hash 共用。
+/// header `+N −M` 渲染与 [`TuiToolCard::diff_code`](crate::kit::tui_render_unit::TuiToolCard::diff_code) hash 共用。
 /// 顶层字段由构造点填充（unified 解析 = hunk 内统计；摘要解析 = 文本计数）。
+#[must_use]
 pub fn diff_change_counts(diff: &TuiDiffBlock) -> (usize, usize) {
     (diff.adds, diff.dels)
 }

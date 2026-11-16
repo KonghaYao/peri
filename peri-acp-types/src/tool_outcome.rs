@@ -30,16 +30,19 @@ pub struct RawToolResult(Value);
 impl Eq for RawToolResult {}
 
 impl RawToolResult {
+    #[must_use]
     pub fn new(value: Value) -> Self {
         Self(value)
     }
 
     /// 底层 JSON 原文（只读）。
+    #[must_use]
     pub fn as_value(&self) -> &Value {
         &self.0
     }
 
     /// 取出底层 JSON 原文。
+    #[must_use]
     pub fn into_value(self) -> Value {
         self.0
     }
@@ -115,6 +118,7 @@ pub struct RemoteToolError {
 
 impl RemoteToolError {
     /// 协议层错误（JSON-RPC `error` 响应）。
+    #[must_use]
     pub fn from_jsonrpc(error: JsonRpcError) -> Self {
         Self {
             jsonrpc: Some(error),
@@ -123,6 +127,7 @@ impl RemoteToolError {
     }
 
     /// 带内失败（工具有结果载荷但 `isError: true`）。
+    #[must_use]
     pub fn from_in_band(result: RawToolResult) -> Self {
         Self {
             jsonrpc: None,

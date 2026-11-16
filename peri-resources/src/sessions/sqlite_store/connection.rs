@@ -3,15 +3,14 @@
 use super::database::SqliteSessionDatabase;
 use anyhow::{Context, Result};
 use peri_acp_types::workspace::WorkspaceError;
-use sqlx::{
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    AssertSqlSafe, Connection,
-};
-use std::{
-    collections::HashSet,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::AssertSqlSafe;
+use sqlx::Connection;
+use std::collections::HashSet;
+use std::path::Path;
+use std::path::PathBuf;
+use std::time::Duration;
 
 const READ_ONLY_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 const SCHEMA_OPEN_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -67,6 +66,7 @@ impl ReadOnlyThreadStoreError {
         }
     }
 
+    #[must_use]
     pub fn kind(&self) -> ReadOnlyStoreErrorKind {
         match self {
             Self::DatabaseNotFound => ReadOnlyStoreErrorKind::DatabaseNotFound,

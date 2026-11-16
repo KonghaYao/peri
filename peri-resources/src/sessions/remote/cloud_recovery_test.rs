@@ -24,10 +24,7 @@ use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::session_resources::PersistenceRecovery;
 use peri_acp_types::store::PersistedPayload;
 
-use super::cloud_tests::{
-    check, failure, session_input, synth_binding, synth_thread, unique_run_label, with_cleanup,
-    CloudTarget,
-};
+use super::cloud_tests::CloudTarget;
 use super::mutation::{FaultPlan, StoreAccess};
 use crate::sessions::data::SessionDataPort;
 
@@ -36,9 +33,9 @@ use crate::sessions::data::SessionDataPort;
 #[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
 async fn cloud_lost_reply_converges_to_applied() {
     let target = CloudTarget::load();
-    let run = unique_run_label("peri-rec-lost");
+    let run = super::cloud_tests::unique_run_label("peri-rec-lost");
     let collected: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-    let result = with_cleanup(&target, &run, || async {
+    let result = super::cloud_tests::with_cleanup(&target, &run, || async {
         let lines = lost_reply_flow(&target, &run).await?;
         *collected.lock().unwrap() = lines;
         Ok(())
@@ -47,8 +44,11 @@ async fn cloud_lost_reply_converges_to_applied() {
     match result {
         Ok(()) => {
             let mut out = target.out();
-            for line in collected.lock().unwrap().iter() {
-                out.push(line.clone());
+            {
+                let collected = collected.lock().unwrap();
+                for line in collected.iter() {
+                    out.push(line.clone());
+                }
             }
             out.push("recovery_lost_reply=ok".to_owned());
             out.flush();
@@ -61,18 +61,18 @@ async fn lost_reply_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>,
     let data = target
         .session_data(StoreAccess::ReadWrite)
         .await
-        .map_err(failure)?;
-    let thread = synth_thread(&format!("{run}-lost"));
+        .map_err(super::cloud_tests::failure)?;
+    let thread = super::cloud_tests::synth_thread(&format!("{run}-lost"));
     let frozen = format!("{{\"synth\":\"{run}\"}}");
-    data.save_new_session(&session_input(
+    data.save_new_session(&super::cloud_tests::session_input(
         thread.as_str(),
         &chrono::Utc::now().to_rfc3339(),
-        &synth_binding(),
+        &super::cloud_tests::synth_binding(),
         &frozen,
         None,
     ))
     .await
-    .map_err(failure)?;
+    .map_err(super::cloud_tests::failure)?;
 
     // 注入「批照常提交、结果按未知上报」：真实批、真实账本，只有回程被吞掉。
     data.inject_faults(FaultPlan {
@@ -85,7 +85,7 @@ async fn lost_reply_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>,
         .append_history(&thread, &[payload])
         .await
         .expect_err("a swallowed reply must not be reported as applied");
-    check(
+    super::cloud_tests::check(
         error.is_persistence_uncertain(),
         "an unknown outcome must surface as persistence uncertainty",
     )?;
@@ -94,20 +94,23 @@ async fn lost_reply_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>,
     let reader = target
         .session_data(StoreAccess::ReadOnly)
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let history = reader
         .load_session_history(&thread)
         .await
-        .map_err(failure)?;
-    check(
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         history.len() == 1,
         "the lost-reply write is really committed on the remote side",
     )?;
 
     // 恢复：本机已没有可证明未结态的 durable 记录，收敛结论是「可以继续」——它绝不能
     // 反过来被当成「那次写没发生」（上一步的远端计数就是反例）。
-    let recovery = data.recover_persistence(&thread).await.map_err(failure)?;
-    check(
+    let recovery = data
+        .recover_persistence(&thread)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         recovery == PersistenceRecovery::Recovered,
         "a committed-but-unacknowledged write must converge to Recovered",
     )?;
@@ -120,12 +123,12 @@ async fn lost_reply_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>,
         ))],
     )
     .await
-    .map_err(failure)?;
+    .map_err(super::cloud_tests::failure)?;
     let history = reader
         .load_session_history(&thread)
         .await
-        .map_err(failure)?;
-    check(history.len() == 2, "writes must resume after recovery")?;
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(history.len() == 2, "writes must resume after recovery")?;
     Ok(vec![
         "lost_reply=unknown_then_applied".to_owned(),
         format!("history_after_recovery={}", history.len()),

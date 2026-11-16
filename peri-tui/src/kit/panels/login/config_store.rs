@@ -1,8 +1,5 @@
 use crate::i18n;
-use crate::kit::atoms::{
-    ACP_CLIENT_HANDLE, NOTIFICATION, Notification, PERI_CONFIG_HANDLE, PROVIDER_LIST,
-    ProviderSummary,
-};
+
 use peri_acp::provider::config::{PeriConfig, ProviderAuthConfig};
 use std::time::Duration;
 
@@ -200,3 +197,15 @@ pub(super) fn delete_provider(provider_id: &str) {
     publish_accepted(candidate);
     tracing::info!(provider_id = %provider_id, "LoginPanel: provider deleted");
 }
+
+use crate::kit::atoms::ACP_CLIENT_HANDLE;
+
+use crate::kit::atoms::NOTIFICATION;
+
+use crate::kit::atoms::Notification;
+
+use crate::kit::atoms::PERI_CONFIG_HANDLE;
+
+use crate::kit::atoms::PROVIDER_LIST;
+
+use crate::kit::atoms::ProviderSummary;

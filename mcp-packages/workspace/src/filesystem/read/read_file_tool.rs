@@ -1,0 +1,450 @@
+use super::{async_tasks, folder, BaseTool, RawToolResult, ToolFailure, ToolOutput, Value};
+
+/// Read tool - 与 TypeScript read_tool 对齐
+#[derive(Debug)]
+pub struct ReadFileTool {
+    pub cwd: String,
+}
+
+impl ReadFileTool {
+    #[must_use]
+    pub fn new(cwd: impl Into<String>) -> Self {
+        Self { cwd: cwd.into() }
+    }
+
+    /// 图片读取：请求路径或解析目标命中图片扩展名时返回带 image 内容块的 MCP 风格结果。
+    ///
+    /// `NotFound` / `NotFile` / `NotImage` 回落既有文本/二进制分支，让缺文件、
+    /// 目录和伪装图片保持原有诊断；只有真正读到的图片才携带 base64 内容。
+    pub(super) async fn try_read_image(
+        &self,
+        input: &Value,
+    ) -> Result<Option<ToolOutput>, Box<dyn std::error::Error + Send + Sync>> {
+        let request = parse_read_request(input)?;
+        let resolved = super::super::resolve_path(&self.cwd, request.file_path);
+        // 同时看请求名与解析目标：`photo.png -> target` 的 symlink 不能因
+        // canonicalize 丢失请求侧扩展名，反向链接也保持可用。
+        let is_image = has_image_extension(std::path::Path::new(request.file_path))
+            || has_image_extension(&resolved);
+        if !is_image {
+            return Ok(None);
+        }
+        let cwd = self.cwd.clone();
+        let request_path = request.file_path.to_owned();
+        let image = tokio::task::spawn_blocking(move || {
+            crate::image::read_image_data(&cwd, &request_path, READ_IMAGE_MAX_BYTES)
+        })
+        .await
+        .map_err(|_| {
+            ToolFailure::new(
+                "Image read failed. Retry the Read call.",
+                "Error: Image read task failed",
+            )
+        })?;
+        let image = match image {
+            Ok(image) => image,
+            Err(crate::image::ImageReadError::TooLarge) => {
+                return Err(ToolFailure::new(
+                    "Image too large. Resize the image or read it with a shell tool.",
+                    format!(
+                        "Error: Image too large (max {} bytes): {}",
+                        READ_IMAGE_MAX_BYTES,
+                        resolved.display()
+                    ),
+                )
+                .into());
+            }
+            Err(crate::image::ImageReadError::CannotRead) => {
+                return Err(ToolFailure::new(
+                    "Cannot read image file. Verify permissions or use a shell tool.",
+                    format!("Error: Cannot read image at {}", resolved.display()),
+                )
+                .into());
+            }
+            Err(crate::image::ImageReadError::NotFound) => {
+                return Err(ToolFailure::new(
+                    super::super::path_hints::with_path_hint(
+                        "File not found. Verify file_path or locate the file with Glob.",
+                        &self.cwd,
+                        &resolved,
+                    ),
+                    format!("Error: File not found at {}", request.file_path),
+                )
+                .into());
+            }
+            Err(crate::image::ImageReadError::NotFile | crate::image::ImageReadError::NotImage) => {
+                return Ok(None)
+            }
+        };
+        let text = format!("Image read: {} ({}).", resolved.display(), image.media_type);
+        let raw = RawToolResult::new(serde_json::json!({
+            "content": [
+                {"type": "text", "text": text.clone()},
+                {"type": "image", "data": image.data, "mimeType": image.media_type},
+            ]
+        }));
+        Ok(Some(ToolOutput::from_raw_result(text, raw)))
+    }
+}
+
+pub(super) const MAX_LINES: usize = 2000;
+
+/// 最大允许读取的文件大小（32 MB）
+pub(super) const MAX_FILE_SIZE: u64 = 32 * 1024 * 1024;
+
+/// Read 图片上限：10 MiB 解码后 base64 约 13.3 MiB，低于 transcript 单次
+/// 持久化 16 MiB 预算；`@image` 附件通路仍按 `image::MAX_IMAGE_BYTES`。
+pub(super) const READ_IMAGE_MAX_BYTES: usize = 10 * 1024 * 1024;
+
+/// 单行最大字符数（超过则截断）
+pub(super) const MAX_CHARS_PER_LINE: usize = 65536;
+
+/// 输出最大字节数（超过后按行截断并提示分段读取；Read 不落盘——落盘文件会被
+/// 模型二次 Read 再编号，产生两重行号，且丢失 offset 语义）
+pub(super) const MAX_OUTPUT_BYTES: usize = 5_000;
+
+pub(super) const READ_FILE_DESCRIPTION: &str = include_str!("../descriptions/read.md");
+
+/// 解析 1-based 行号/行数参数（offset/limit）。
+///
+/// 语义与 schema 描述一致：offset 是 1-based 行号（1 = 首行），limit 是行数。
+/// 缺省时返回 `default`；显式传入非正整数（0、负数、小数、非数字）一律报错，
+/// 避免 `as_u64()` 对浮点静默回退为默认值、导致读到错误位置。
+pub(super) fn parse_line_number(
+    value: &Value,
+    name: &str,
+    default: usize,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    if value.is_null() {
+        return Ok(default);
+    }
+    let n = value.as_f64().ok_or_else(|| {
+        ToolFailure::new(
+            "offset and limit must be positive integers (1-based line numbers).",
+            format!("Error: '{name}' must be a positive integer, got {value}"),
+        )
+    })?;
+    if n.fract() != 0.0 || n < 1.0 {
+        return Err(ToolFailure::new(
+            "offset and limit must be positive integers (1-based line numbers).",
+            format!("Error: '{name}' must be a positive integer (1-based line number), got {n}"),
+        )
+        .into());
+    }
+    Ok(n as usize)
+}
+
+/// 图片分支与文本分支共用的参数集合；图片不得绕过 pages/offset/limit 校验。
+pub(super) struct ReadRequest<'path> {
+    pub(super) file_path: &'path str,
+    pub(super) offset: usize,
+    pub(super) limit: usize,
+}
+
+pub(super) fn parse_read_request(
+    input: &Value,
+) -> Result<ReadRequest<'_>, Box<dyn std::error::Error + Send + Sync>> {
+    let file_path = input["file_path"]
+        .as_str()
+        .ok_or_else(|| ToolFailure::new("The 'file_path' parameter is required for the Read tool. Provide the absolute path to the file.", "The 'file_path' parameter is required for the Read tool. Provide the absolute path to the file."))?;
+
+    // offset 语义为 1-based 行号（1 = 首行），与 schema 描述、输出行号一致；
+    // 缺省 offset=1（读全文起点）、limit=2000。
+    let offset = parse_line_number(&input["offset"], "offset", 1)?;
+    let limit = parse_line_number(&input["limit"], "limit", MAX_LINES)?;
+
+    if input.get("pages").is_some_and(|pages| !pages.is_null()) {
+        let workaround = peri_acp_types::builtin_mcp::effective_name_of("workspace", "Bash")
+            .map_or_else(
+                || "Use a shell command with a PDF reader".to_string(),
+                |name| format!("Use the `{name}` tool with a PDF reader command"),
+            );
+        let message = format!("The 'pages' parameter is not supported by Read. {workaround}.");
+        return Err(ToolFailure::new(message.clone(), message).into());
+    }
+
+    Ok(ReadRequest {
+        file_path,
+        offset,
+        limit,
+    })
+}
+
+pub(super) fn has_image_extension(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| is_image_extension(&ext.to_lowercase()))
+}
+
+pub(super) fn is_image_extension(ext: &str) -> bool {
+    matches!(ext, "png" | "jpg" | "jpeg" | "gif" | "webp")
+}
+
+pub(super) fn is_binary_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "bmp"
+            | "ico"
+            | "webp"
+            | "tiff"
+            | "pdf"
+            | "doc"
+            | "docx"
+            | "xls"
+            | "xlsx"
+            | "ppt"
+            | "pptx"
+            | "zip"
+            | "rar"
+            | "7z"
+            | "tar"
+            | "gz"
+            | "mp3"
+            | "wav"
+            | "ogg"
+            | "flac"
+            | "mp4"
+            | "avi"
+            | "mkv"
+            | "mov"
+            | "exe"
+            | "dll"
+            | "so"
+            | "dylib"
+            | "bin"
+            | "class"
+    )
+}
+
+#[async_trait::async_trait]
+impl BaseTool for ReadFileTool {
+    fn name(&self) -> &str {
+        "Read"
+    }
+
+    fn is_direct(&self) -> bool {
+        true
+    }
+
+    /// 演示分组（design v2 §2.5.1 示例：同类工具按 namespace 组织声明段）。
+    fn namespace(&self) -> Option<&str> {
+        Some("filesystem")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3 示例语义）。
+    ///
+    /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导
+    /// （"Read" → "Read"），验证缺省推导在真实工具上生效。
+    /// 全量迁移完成：声明段是工具选择指引的单一事实源，05 段落无对应条目
+    /// （守护测试断言渲染输出与 05 剩余内容无逐字重复）。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Read a file → `{{name}}` ({{title}}). Use `{{name}}` for file content, not `cat`/`head`/`tail`."
+                .to_string(),
+        )
+    }
+
+    fn description(&self) -> &str {
+        READ_FILE_DESCRIPTION
+    }
+
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "The absolute path to the file to read"
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional 1-based start line. OMIT by default. NEVER guess or estimate this value, and never use a large offset to probe the end of a file. Set it only to a line number already observed in Read/Grep output or explicitly provided by the user. For continuation, use the last line actually shown plus 1; do not derive it from limit or an assumed file length"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The maximum number of lines to read. Defaults to 2000 when omitted; use the continuation offset shown in the output to read further."
+                }
+            },
+            "required": ["file_path"]
+        })
+    }
+
+    fn aliases(&self) -> &[&str] {
+        &["reading"]
+    }
+
+    async fn invoke_output(
+        &self,
+        input: Value,
+        ctx: peri_agent::tools::ToolContext<'_>,
+    ) -> Result<ToolOutput, Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(output) = self.try_read_image(&input).await? {
+            return Ok(output);
+        }
+        self.invoke(input, ctx).await.map(ToolOutput::from_legacy)
+    }
+
+    async fn invoke(
+        &self,
+        input: Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let request = parse_read_request(&input)?;
+        let offset = request.offset;
+        let limit = request.limit;
+        let file_path = request.file_path;
+        let resolved = super::super::resolve_path(&self.cwd, file_path);
+
+        if let Some(ext) = resolved.extension().and_then(|e| e.to_str()) {
+            if is_binary_extension(&ext.to_lowercase()) {
+                return Ok(format!(
+                    "[BINARY FILE DETECTED]\n\nFile type: .{ext}\nFile path: {}\n\nThis is a binary file and cannot be displayed as text.",
+                    resolved.display()
+                ));
+            }
+        }
+
+        let content = match std::fs::metadata(&resolved) {
+            Ok(meta) if meta.len() > MAX_FILE_SIZE => {
+                return Err(ToolFailure::new("File too large. offset/limit cannot bypass the file-size limit; use Grep or another file-processing tool.", format!(
+                    "Error: File too large ({} bytes, max {} bytes). offset/limit cannot bypass the file-size limit; use Grep to locate content or another suitable file-processing tool.",
+                    meta.len(),
+                    MAX_FILE_SIZE
+                )).into());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ToolFailure::new(
+                    super::super::path_hints::with_path_hint(
+                        "File not found. Verify file_path or locate the file with Glob.",
+                        &self.cwd,
+                        &resolved,
+                    ),
+                    format!("Error: File not found at {file_path}"),
+                )
+                .into());
+            }
+            Err(e) => return Err(e.into()),
+            Ok(meta) if meta.is_dir() => {
+                return folder::list_folder(&resolved).map(|listing| {
+                    format!(
+                        "[DIRECTORY DETECTED]\n\nRead received a directory path and converted it to a directory listing. Use folder_operations with operation=\"list\" for explicit directory operations.\n\n{}",
+                        listing
+                    )
+                });
+            }
+            Ok(meta) if meta.len() == 0 => {
+                return Ok(format!(
+                    "[EMPTY FILE]\n\nFile path: {}\nThe file is empty (0 bytes).",
+                    resolved.display()
+                ));
+            }
+            _ => match std::fs::read_to_string(&resolved) {
+                Ok(c) => c,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(ToolFailure::new(
+                        super::super::path_hints::with_path_hint(
+                            "File not found. Verify file_path or locate the file with Glob.",
+                            &self.cwd,
+                            &resolved,
+                        ),
+                        format!("Error: File not found at {file_path}"),
+                    )
+                    .into());
+                }
+                Err(e) => return Err(e.into()),
+            },
+        };
+
+        let lines: Vec<&str> = content.split('\n').collect();
+        // 1-based 行号 → 0-based 切片索引
+        let start = offset - 1;
+        if start >= lines.len() {
+            return Err(ToolFailure::new("offset exceeds file length. Omit offset to read from the beginning.", format!(
+                "Error: offset {offset} exceeds file length ({} lines). Valid offsets are 1..={}; omit offset to read from the beginning. Do not guess another offset or use offset to probe the file end.",
+                lines.len(),
+                lines.len()
+            ))
+            .into());
+        }
+        let end = (start + limit).min(lines.len());
+        let selected = &lines[start..end];
+
+        let mut numbered: Vec<String> = Vec::new();
+        {
+            let indexed_selected = selected.iter().enumerate();
+            for (i, line) in indexed_selected {
+                let line_num = start + i + 1;
+                // 将截断元数据放在内容前，确保后续输出级截断不会隐藏该信息。
+                let line_char_count = line.chars().count();
+                let content = if line_char_count > MAX_CHARS_PER_LINE {
+                    format!(
+                    "[LINE TRUNCATED: {line_char_count} characters total; retained first {MAX_CHARS_PER_LINE} characters before output-level truncation] {}",
+                    line.chars().take(MAX_CHARS_PER_LINE).collect::<String>()
+                )
+                } else {
+                    (*line).to_string()
+                };
+                numbered.push(format!("{:>6}\t{}", line_num, content));
+            }
+        }
+
+        let mut output = numbered.join("\n");
+
+        // 总输出超过上限时按行截断并提示分段读取，不落盘：
+        // 落盘文件会被模型二次 Read 再编号（两重行号），且失去 offset 语义。
+        if output.len() > MAX_OUTPUT_BYTES {
+            let original_output_bytes = output.len();
+            let total_lines = lines.len();
+
+            // 在字节预算内保留尽可能多的完整行（`{:>6}\t` 前缀 + 内容）。
+            let mut budget = MAX_OUTPUT_BYTES;
+            let mut kept_lines = 0usize;
+            for l in &numbered {
+                if l.len() + 1 > budget {
+                    break;
+                }
+                budget -= l.len() + 1;
+                kept_lines += 1;
+            }
+
+            if kept_lines == 0 {
+                // 当前行自身就超过上限（issue #287）：offset/limit 是行号语义，
+                // 无法表达行内续读。不能沿用 start + 2：单行文件会越界，多行
+                // 文件会静默跳过该行剩余内容。
+                let line_no = start + 1;
+                let truncated_line = async_tasks::truncate_bytes(&numbered[0], MAX_OUTPUT_BYTES);
+                let continuation = if line_no < total_lines {
+                    format!(
+                        "continue with offset={} for the following lines",
+                        line_no + 1
+                    )
+                } else {
+                    "use a byte-oriented tool such as Bash to inspect the remainder".to_string()
+                };
+                output = format!(
+                    "{truncated_line}\n[Output truncated: {original_output_bytes} bytes total; line {line_no} alone exceeds the {MAX_OUTPUT_BYTES}-byte output limit, so the rest of this line cannot be read with line-based offset/limit; {continuation}]"
+                );
+            } else {
+                let shown_start = start + 1;
+                let shown_end = start + kept_lines;
+                let next_offset = shown_end + 1;
+                output = format!(
+                    "{}\n[Output truncated: {original_output_bytes} bytes total; showing lines {shown_start}..={shown_end} of {total_lines}; continue reading with offset={next_offset}]",
+                    numbered[..kept_lines].join("\n")
+                );
+            }
+        }
+
+        Ok(output)
+    }
+
+    fn prefers_persist(&self) -> bool {
+        true
+    }
+}

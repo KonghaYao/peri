@@ -1,10 +1,18 @@
-use super::*;
+use crate::messages::adapters::anthropic::AnthropicAdapter;
+use crate::messages::adapters::MessageAdapter as _;
+use crate::messages::BaseMessage;
+use crate::messages::ContentBlock;
+use crate::messages::MessageContent;
+use crate::messages::ToolCallRequest;
+use serde_json::json;
 
 #[test]
 fn test_from_base_messages_basic() {
     let msgs = vec![BaseMessage::human("Hello"), BaseMessage::ai("Hi")];
     let val = AnthropicAdapter::from_base_messages(&msgs);
-    let arr = val.as_array().unwrap();
+    let arr = val
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     assert_eq!(arr.len(), 2);
     assert_eq!(arr[0]["role"], "user");
     assert_eq!(arr[1]["role"], "assistant");
@@ -24,13 +32,17 @@ fn test_from_base_messages_tool_use_merged() {
         BaseMessage::tool_result("tc1", "file.txt"),
     ];
     let val = AnthropicAdapter::from_base_messages(&msgs);
-    let arr = val.as_array().unwrap();
+    let arr = val
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     // tool result 应合并到 user 消息
     assert_eq!(arr.len(), 2);
     assert_eq!(arr[0]["role"], "assistant");
     // 第二条 - tool result 合并为 user
     assert_eq!(arr[1]["role"], "user");
-    let content = arr[1]["content"].as_array().unwrap();
+    let content = arr[1]["content"]
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     assert_eq!(content[0]["type"], "tool_result");
 }
 
@@ -56,7 +68,8 @@ fn test_to_base_message_assistant_with_tool_use() {
             { "type": "tool_use", "id": "tc1", "name": "Bash", "input": {"command": "ls"} }
         ]
     });
-    let msg = AnthropicAdapter::to_base_message(&val).unwrap();
+    let msg = AnthropicAdapter::to_base_message(&val)
+        .expect("the to base message fixture result is required for this assertion");
     assert!(msg.has_tool_calls());
     assert_eq!(msg.tool_calls()[0].name, "Bash");
 }
@@ -65,8 +78,11 @@ fn test_to_base_message_assistant_with_tool_use() {
 fn test_to_base_message_roundtrip() {
     let original = BaseMessage::human("Test");
     let val = AnthropicAdapter::from_base_messages(&[original]);
-    let arr = val.as_array().unwrap();
-    let restored = AnthropicAdapter::to_base_message(&arr[0]).unwrap();
+    let arr = val
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
+    let restored = AnthropicAdapter::to_base_message(&arr[0])
+        .expect("the to base message fixture result is required for this assertion");
     assert_eq!(restored.content(), "Test");
 }
 
@@ -84,17 +100,22 @@ fn test_tool_calls_dual_write_roundtrip() {
 
     // 序列化为 Anthropic API 格式
     let api_json = AnthropicAdapter::from_base_messages(&[original]);
-    let arr = api_json.as_array().unwrap();
+    let arr = api_json
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     let assistant_msg = &arr[0];
     assert_eq!(assistant_msg["role"], "assistant");
 
     // API 格式应包含 tool_use block
-    let blocks = assistant_msg["content"].as_array().unwrap();
+    let blocks = assistant_msg["content"]
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     let has_tool_use = blocks.iter().any(|b| b["type"] == "tool_use");
     assert!(has_tool_use, "序列化后 content 应包含 tool_use block");
 
     // 反序列化回 BaseMessage，双写应仍然一致
-    let restored = AnthropicAdapter::to_base_message(assistant_msg).unwrap();
+    let restored = AnthropicAdapter::to_base_message(assistant_msg)
+        .expect("the to base message fixture result is required for this assertion");
     assert!(restored.has_tool_calls(), "反序列化后 tool_calls 应保留");
     assert_eq!(restored.tool_calls().len(), 1);
     assert_eq!(restored.tool_calls()[0].id, "tc1");
@@ -120,14 +141,21 @@ fn test_text_content_with_tool_calls_serializes_correctly() {
         )],
     );
     let api_json = AnthropicAdapter::from_base_messages(&[msg]);
-    let arr = api_json.as_array().unwrap();
-    let blocks = arr[0]["content"].as_array().unwrap();
+    let arr = api_json
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
+    let blocks = arr[0]["content"]
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
 
     let text_block = blocks.iter().find(|b| b["type"] == "text");
     let tool_block = blocks.iter().find(|b| b["type"] == "tool_use");
     assert!(text_block.is_some(), "应包含 text block");
     assert!(tool_block.is_some(), "应从 tool_calls 重建 tool_use block");
-    assert_eq!(tool_block.unwrap()["id"], "tc2");
+    assert_eq!(
+        tool_block.expect("the tool block fixture result is required for this assertion")["id"],
+        "tc2"
+    );
 }
 
 /// 验证连续 Tool 消息合并后顺序保持不变
@@ -145,12 +173,16 @@ fn test_tool_results_order_preserved() {
         BaseMessage::tool_result("t2", "content b"),
     ];
     let val = AnthropicAdapter::from_base_messages(&msgs);
-    let arr = val.as_array().unwrap();
+    let arr = val
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
 
     // tool results 应合并到第二条 user 消息
     let user_msg = &arr[1];
     assert_eq!(user_msg["role"], "user");
-    let content = user_msg["content"].as_array().unwrap();
+    let content = user_msg["content"]
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     let results: Vec<_> = content
         .iter()
         .filter(|b| b["type"] == "tool_result")
@@ -170,7 +202,9 @@ fn test_projected_content_with_placeholder_serializes() {
         ContentBlock::text("[图片已压缩: image]"),
     ]));
     let val = AnthropicAdapter::from_base_messages(&[projected]);
-    let arr = val.as_array().unwrap();
+    let arr = val
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     assert_eq!(arr[0]["role"], "user");
 
     let content = arr[0]["content"].as_array().expect("content 应为 array");
@@ -210,23 +244,37 @@ fn test_compacted_tool_result_serializes() {
         ),
     ];
     let val = AnthropicAdapter::from_base_messages(&msgs);
-    let arr = val.as_array().unwrap();
+    let arr = val
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
 
     // tool result 应合并到 user 消息
-    let user_content = arr[1]["content"].as_array().unwrap();
+    let user_content = arr[1]["content"]
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     let tool_result = user_content
         .iter()
         .find(|b| b["type"] == "tool_result")
-        .unwrap();
+        .expect("the find fixture result is required for this assertion");
     assert_eq!(tool_result["tool_use_id"], "tc_1");
-    assert!(!tool_result["is_error"].as_bool().unwrap());
+    assert!(!tool_result["is_error"]
+        .as_bool()
+        .expect("the as bool fixture result is required for this assertion"));
 
     // content 包含截断文本（可能是字符串或数组）
     let result_text = if tool_result["content"].is_string() {
-        tool_result["content"].as_str().unwrap().to_string()
+        tool_result["content"]
+            .as_str()
+            .expect("the as str fixture result is required for this assertion")
+            .to_string()
     } else if tool_result["content"].is_array() {
-        let arr = tool_result["content"].as_array().unwrap();
-        arr[0]["text"].as_str().unwrap().to_string()
+        let arr = tool_result["content"]
+            .as_array()
+            .expect("the as array fixture result is required for this assertion");
+        arr[0]["text"]
+            .as_str()
+            .expect("the as str fixture result is required for this assertion")
+            .to_string()
     } else {
         panic!("unexpected content type");
     };
@@ -245,10 +293,17 @@ fn test_signed_reasoning_preserves_signature() {
         ContentBlock::text("final answer"),
     ]);
     let val = AnthropicAdapter::from_base_messages(&[msg]);
-    let arr = val.as_array().unwrap();
-    let content = arr[0]["content"].as_array().unwrap();
+    let arr = val
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
+    let content = arr[0]["content"]
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
 
-    let thinking_block = content.iter().find(|b| b["type"] == "thinking").unwrap();
+    let thinking_block = content
+        .iter()
+        .find(|b| b["type"] == "thinking")
+        .expect("the find fixture result is required for this assertion");
     assert_eq!(thinking_block["signature"], "sig_abc123");
     assert_eq!(thinking_block["thinking"], "thinking process");
 }

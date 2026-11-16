@@ -1,4 +1,9 @@
-use super::*;
+use crate::terminal::BashTool;
+use peri_acp_types::event::BackgroundTaskResult;
+use peri_agent::tools::BaseTool;
+use peri_agent::tools::ToolExecutionStatus;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// 小数 timeout 必须在前台进程启动前显式失败，不能静默回落到默认值。
 #[tokio::test]
@@ -111,12 +116,14 @@ async fn test_redirected_background_process_reports_unknown_exit_code() {
         peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await,
         peri_acp_types::tasks::TaskShutdownReport::Complete
     );
-    for path in [files.stdout_path.as_ref(), files.stderr_path.as_ref()]
-        .into_iter()
-        .flatten()
     {
-        std::fs::read(path).expect("published file remains readable");
-        std::fs::remove_file(path).unwrap();
+        let captured_output_paths = [files.stdout_path.as_ref(), files.stderr_path.as_ref()]
+            .into_iter()
+            .flatten();
+        for path in captured_output_paths {
+            std::fs::read(path).expect("published file remains readable");
+            std::fs::remove_file(path).unwrap();
+        }
     }
     assert_eq!(files.exit_code, None, "descendant status was never waited");
     assert!(result.to_notification().contains("exit_code: unknown"));
@@ -137,7 +144,7 @@ async fn assert_nohup_pipe_timeout_promotes(redirect: &str) {
     let command = format!(
         "nohup sh -c 'while [ ! -f release ]; do sleep 0.01; done; printf late-out; printf late-err >&2; exit 7' {redirect} & printf leader-out; printf leader-err >&2"
     );
-    let output = timeout(
+    let output = peri_time::timeout(
         Duration::from_secs(3),
         tool.invoke_output(
             serde_json::json!({"command": command, "timeout": 100}),
@@ -149,7 +156,7 @@ async fn assert_nohup_pipe_timeout_promotes(redirect: &str) {
     // 即使旧实现触发外层超时，也先释放 fixture 并排空 owner，避免失败测试遗留进程。
     std::fs::write(fixture.path().join("release"), "go").unwrap();
     let completed = if active_before_release > 0 {
-        Some(timeout(Duration::from_secs(5), rx.recv()).await)
+        Some(peri_time::timeout(Duration::from_secs(5), rx.recv()).await)
     } else {
         None
     };
@@ -185,11 +192,13 @@ async fn assert_nohup_pipe_timeout_promotes(redirect: &str) {
         shutdown,
         peri_acp_types::tasks::TaskShutdownReport::Complete
     );
-    for path in [files.stdout_path, files.stderr_path, evidence.output_ref]
-        .into_iter()
-        .flatten()
     {
-        std::fs::remove_file(path).unwrap();
+        let captured_output_paths = [files.stdout_path, files.stderr_path, evidence.output_ref]
+            .into_iter()
+            .flatten();
+        for path in captured_output_paths {
+            std::fs::remove_file(path).unwrap();
+        }
     }
 }
 
@@ -211,7 +220,7 @@ async fn test_nohup_pipe_timeout_without_manager_stops_descendant() {
     let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
     let fixture = tempfile::tempdir().unwrap();
     let tool = BashTool::new(fixture.path().to_str().unwrap());
-    let output = timeout(
+    let output = peri_time::timeout(
         Duration::from_secs(3),
         tool.invoke_output(
             serde_json::json!({
@@ -241,7 +250,7 @@ async fn test_nohup_pipe_timeout_promotion_remains_cancellable() {
     let fixture = tempfile::tempdir().unwrap();
     let manager = Arc::new(peri_mcp_common::create_local_task_manager());
     let tool = BashTool::new(fixture.path().to_str().unwrap()).with_task_manager(manager.clone());
-    let output = timeout(
+    let output = peri_time::timeout(
         Duration::from_secs(3),
         tool.invoke_output(
             serde_json::json!({"command": "nohup sleep 60 &", "timeout": 100}),

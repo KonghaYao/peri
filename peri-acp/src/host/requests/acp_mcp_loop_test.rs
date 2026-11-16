@@ -19,11 +19,16 @@ use std::time::Duration;
 use async_trait::async_trait;
 use peri_acp_types::ports::McpPoolPort;
 use peri_middlewares::mcp::apps::McpCapabilityProfile;
-use peri_middlewares::mcp::tool_bridge::build_tool_bridges_visible_to;
+use peri_middlewares::mcp::tool_bridge;
 use peri_middlewares::mcp::{AcpMcpService, McpClientPool, McpTaskOwner};
 
-use super::*;
+use crate::provider::LlmProvider;
+use crate::transport::types::AcpError;
 use crate::transport::types::{IncomingMessage, RequestId};
+use serde_json::json;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// client 宿主假件：真实部署里 client 就扮演这个角色。
 #[derive(Default)]
@@ -143,10 +148,11 @@ async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
 #[tokio::test]
 async fn acp_declared_server_reaches_the_session_tool_face_and_is_cleaned_up_on_close() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "key", "model"),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, &tmp).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(config, provider, &tmp).await;
     let cwd = tmp.path().canonicalize().unwrap();
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd: cwd.to_str().unwrap().to_owned(),
@@ -163,9 +169,15 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_is_cleaned_up_on_
         "cwd": cwd,
         "mcpServers": [{ "type": "acp", "name": "fixture", "serverId": "srv-1" }],
     });
-    let created = handle_request("session/new", &params, &cfg, &mut sessions, &transport)
-        .await
-        .unwrap();
+    let created = crate::host::requests::handle_request(
+        "session/new",
+        &params,
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
     let session_id = created["sessionId"].as_str().unwrap().to_owned();
 
     // 会话级 MCP 池与 MCP over ACP 服务（非 bare 工作区装配面的产物）。
@@ -208,12 +220,12 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_is_cleaned_up_on_
     }
 
     wait_until("声明的 server 进入本会话的池", || {
-        pool.get_client_visible_to("fixture", Some(&session_id))
+        pool.client_visible_to("fixture", Some(&session_id))
             .is_some()
     })
     .await;
     let handle = pool
-        .get_client_visible_to("fixture", Some(&session_id))
+        .client_visible_to("fixture", Some(&session_id))
         .expect("归属会话应看到连接");
     assert!(matches!(
         handle.status,
@@ -268,7 +280,7 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_is_cleaned_up_on_
 
     // 工具进入该会话的工具面（deferred：`build_tool_bridges_visible_to` 是唯一
     // 会话级构造入口，名字带 server 前缀）。
-    let tools = build_tool_bridges_visible_to(&pool, Some(&session_id));
+    let tools = tool_bridge::build_tool_bridges_visible_to(&pool, Some(&session_id));
     assert_eq!(
         tools
             .iter()
@@ -312,7 +324,7 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_is_cleaned_up_on_
         .expect_err("已完成请求的迟到通知必须被拒绝");
 
     // 第二条真实会话使用独立 service / pool，但必须共享当前连接的注册表。
-    let created_second = handle_request(
+    let created_second = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": cwd}),
         &cfg,
@@ -367,7 +379,7 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_is_cleaned_up_on_
         .unwrap();
     wait_until("第二会话 MCP 就绪", || {
         second_pool
-            .get_client_visible_to("second", Some(&second_id))
+            .client_visible_to("second", Some(&second_id))
             .is_some()
     })
     .await;
@@ -393,7 +405,7 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_is_cleaned_up_on_
         registry.owner("srv-1").as_deref(),
         Some(session_id.as_str())
     );
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": second_id}),
         &cfg,
@@ -404,7 +416,7 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_is_cleaned_up_on_
     .unwrap();
 
     // 会话关闭：声明与池条目随会话消失，且不再有反向的断开请求。
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": session_id}),
         &cfg,
@@ -414,9 +426,9 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_is_cleaned_up_on_
     .await
     .unwrap();
     assert!(pool
-        .get_client_visible_to("fixture", Some(&session_id))
+        .client_visible_to("fixture", Some(&session_id))
         .is_none());
-    assert!(build_tool_bridges_visible_to(&pool, Some(&session_id)).is_empty());
+    assert!(tool_bridge::build_tool_bridges_visible_to(&pool, Some(&session_id)).is_empty());
     assert!(!port.owns_server("srv-1"));
     // 关闭后再按 serverId 定位必须失败（-32001）。
     let Err(error) = crate::host::requests::acp_mcp::route_inbound(

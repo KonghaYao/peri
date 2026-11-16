@@ -111,6 +111,7 @@ impl PlanDraft {
             || (!client_id.is_empty() && client_id != status.client_id)
     }
 
+    #[must_use]
     pub(super) fn needs_identity(&self) -> bool {
         self.subject.trim().is_empty() || self.client_id.trim().is_empty()
     }

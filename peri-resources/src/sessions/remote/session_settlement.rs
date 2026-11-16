@@ -8,18 +8,17 @@ use peri_acp_types::session::{MqEnqueueOutcome, MqEntry, MqInput, RetainedRemind
 use peri_acp_types::session_resources::{
     SessionResourceErrorKind, SessionResourceResult, TerminalSettlementOutcome,
 };
-use peri_acp_types::store::{serialize_persisted_payload, PersistedPayload};
+use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
 use turso_serverless::Value;
 
-use crate::sessions::failure::conflict;
 use crate::sessions::mq_rows::{
     DELETE_THREAD_MQ_ROW_SQL, INSERT_MESSAGE_SQL, REFRESH_THREAD_COUNT_SQL,
 };
 
-use super::session_data::{invalid_input, not_found, RemoteSessionData};
-use super::session_history::check_reminder_row;
-use super::session_mq::{guard_session_statement, SETTLE_CHILD_STATE_SQL};
+use super::session_data::RemoteSessionData;
+
+use super::session_mq::SETTLE_CHILD_STATE_SQL;
 use super::sql::StatementSpec;
 
 impl RemoteSessionData {
@@ -31,18 +30,23 @@ impl RemoteSessionData {
         rows: &[MqEntry],
     ) -> SessionResourceResult<()> {
         self.ensure_writable().await?;
-        let mut effects = vec![guard_session_statement(thread)];
+        let mut effects = vec![super::session_mq::guard_session_statement(thread)];
         let mut inputs = vec![thread.to_string()];
         for reminder in reminders {
             let payload = PersistedPayload::SystemReminder {
                 id: reminder.id,
                 reminder: reminder.reminder.clone(),
             };
-            let content = serialize_persisted_payload(&payload)
-                .map_err(|error| invalid_input(&error.to_string()))?;
+            let content = peri_acp_types::store::serialize_persisted_payload(&payload)
+                .map_err(|error| super::session_data::invalid_input(&error.to_string()))?;
             let expected = match self.read_reminder_row(reminder.id).await? {
                 Some(existing) => {
-                    check_reminder_row(thread, reminder.id, &content, existing.clone())?;
+                    super::session_history::check_reminder_row(
+                        thread,
+                        reminder.id,
+                        &content,
+                        existing.clone(),
+                    )?;
                     existing.1
                 }
                 None => content.clone(),
@@ -123,7 +127,7 @@ impl RemoteSessionData {
     ) -> SessionResourceResult<TerminalSettlementOutcome> {
         self.ensure_writable().await?;
         let effects = vec![
-            guard_session_statement(child),
+            super::session_mq::guard_session_statement(child),
             StatementSpec::new(
                 SETTLE_CHILD_STATE_SQL,
                 vec![
@@ -148,7 +152,7 @@ impl RemoteSessionData {
                 Ok(meta) if meta.agent_status.is_terminal() => Ok(
                     TerminalSettlementOutcome::AlreadyTerminal(meta.agent_status),
                 ),
-                Ok(_) => Err(conflict(
+                Ok(_) => Err(crate::sessions::failure::conflict(
                     "terminal settlement did not observe an active child row",
                 )),
                 Err(error) => Err(error),
@@ -159,7 +163,7 @@ impl RemoteSessionData {
                 if matches!(error.kind(), SessionResourceErrorKind::InvalidInput { .. })
                     && !self.exists(child).await.unwrap_or(true)
                 {
-                    return Err(not_found());
+                    return Err(super::session_data::not_found());
                 }
                 Err(error)
             }

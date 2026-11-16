@@ -1,4 +1,13 @@
-use super::*;
+use crate::host::executor_flow_tests::MockEventSink;
+use crate::host::mcp_v4_builtin::BrokerDecision;
+use crate::host::mcp_v4_builtin::RecordingBroker;
+use crate::host::mcp_v4_wire_fixture::ScriptedToolCall;
+use crate::host::mcp_v4_wire_fixture::WireFixtureHarness;
+use crate::host::mcp_v4_wire_fixture::WireScriptedModel;
+use crate::host::mcp_v4_wire_fixture::WIRE_FIXTURE_ECHO_EFFECTIVE_NAME;
+use crate::host::mcp_v4_wire_fixture::WIRE_FIXTURE_SERVER_NAME;
+use serial_test::serial;
+use std::sync::Arc;
 
 // ── 契约 6 BLOCKED 缺口复证（A10/R19）：提升 + 审批 + wire ────────────────────
 
@@ -18,8 +27,13 @@ async fn promoted_direct_tool_approval_calls_wire_exactly_once() {
         WIRE_FIXTURE_ECHO_EFFECTIVE_NAME,
         serde_json::json!({ "query": "v02-host-approve" }),
     )]));
-    let result = run_wire_prompt(
-        session_context_with_broker(&harness, "mcp-v4-builtin-approve", Arc::clone(&broker)).await,
+    let result = crate::host::mcp_v4_wire_fixture::run_wire_prompt(
+        crate::host::mcp_v4_builtin::session_context_with_broker(
+            &harness,
+            "mcp-v4-builtin-approve",
+            Arc::clone(&broker),
+        )
+        .await,
         &sink,
         &model,
     )
@@ -41,7 +55,7 @@ async fn promoted_direct_tool_approval_calls_wire_exactly_once() {
         "审批 broker 收到的必须是模型面 effective name"
     );
 
-    let calls = wire_tool_calls(&harness);
+    let calls = crate::host::mcp_v4_builtin::wire_tool_calls(&harness);
     assert_eq!(
         calls.len(),
         1,
@@ -57,7 +71,7 @@ async fn promoted_direct_tool_approval_calls_wire_exactly_once() {
         "server 侧必须收到模型给出的入参（参数真的过了 wire）: {calls:?}"
     );
 
-    let tool_ends = tool_end_events(&sink);
+    let tool_ends = crate::host::mcp_v4_builtin::tool_end_events(&sink);
     assert_eq!(tool_ends.len(), 1, "工具结果必须唯一: {tool_ends:?}");
     assert_eq!(
         tool_ends[0].0, WIRE_FIXTURE_ECHO_EFFECTIVE_NAME,
@@ -86,8 +100,13 @@ async fn promoted_direct_tool_rejection_never_reaches_wire() {
         WIRE_FIXTURE_ECHO_EFFECTIVE_NAME,
         serde_json::json!({ "query": "v02-host-reject" }),
     )]));
-    let result = run_wire_prompt(
-        session_context_with_broker(&harness, "mcp-v4-builtin-reject", Arc::clone(&broker)).await,
+    let result = crate::host::mcp_v4_wire_fixture::run_wire_prompt(
+        crate::host::mcp_v4_builtin::session_context_with_broker(
+            &harness,
+            "mcp-v4-builtin-reject",
+            Arc::clone(&broker),
+        )
+        .await,
         &sink,
         &model,
     )
@@ -100,13 +119,13 @@ async fn promoted_direct_tool_rejection_never_reaches_wire() {
     );
     assert_eq!(broker.requests(), 1, "拒绝路径同样只审批一次，不得重试");
 
-    let calls = wire_tool_calls(&harness);
+    let calls = crate::host::mcp_v4_builtin::wire_tool_calls(&harness);
     assert!(
         calls.is_empty(),
         "拒绝后 wire 上不得出现任何 tools/call: {calls:?}"
     );
 
-    let tool_ends = tool_end_events(&sink);
+    let tool_ends = crate::host::mcp_v4_builtin::tool_end_events(&sink);
     assert_eq!(
         tool_ends.len(),
         1,

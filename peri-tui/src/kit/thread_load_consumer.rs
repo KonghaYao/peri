@@ -23,7 +23,8 @@ use tracing::{error, info};
 
 use fluent_bundle::FluentValue;
 
-use crate::acp_client::{AcpTuiClient, client::SessionLoadReservation};
+use crate::acp_client::AcpTuiClient;
+use crate::acp_client::client::SessionLoadReservation;
 use crate::i18n;
 use crate::kit::atoms;
 
@@ -47,6 +48,7 @@ pub struct ThreadLoadDispatcher {
 pub struct ThreadLoadDispatchError;
 
 impl ThreadLoadDispatcher {
+    #[must_use]
     pub fn new(tx: mpsc::UnboundedSender<ThreadLoadRequest>, client: AcpTuiClient) -> Self {
         Self { tx, client }
     }

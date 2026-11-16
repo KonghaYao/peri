@@ -10,8 +10,20 @@
 
 use std::sync::atomic::Ordering;
 
-use super::*;
+use crate::agent::async_tasks::manager::TaskManager;
+
+use crate::agent::async_tasks::registry::BackgroundTask;
+use crate::agent::async_tasks::registry::BackgroundTaskRegistry;
+use crate::agent::async_tasks::registry::BackgroundTaskStatus;
+use crate::agent::async_tasks::registry::BgCancelHandle;
+use crate::agent::async_tasks::shell::BACKGROUND_MAX_TIMEOUT_MS;
+use crate::agent::async_tasks::shell::FOREGROUND_DEFAULT_TIMEOUT_MS;
+use crate::agent::async_tasks::shell::FOREGROUND_MAX_TIMEOUT_MS;
+use crate::agent::events::BackgroundTaskResult;
+use peri_acp_types::tasks::BgRegistryEvent;
+use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::tasks::ExternalTaskRegistration;
+use tokio_util::sync::CancellationToken;
 
 fn make_registry() -> BackgroundTaskRegistry {
     BackgroundTaskRegistry::new()
@@ -64,7 +76,7 @@ async fn external_completion_notifies_before_terminal_and_retries_failed_deliver
                 })
             }),
         })
-        .unwrap();
+        .expect("the register external fixture result is required for this assertion");
     let task_id = ticket.task_id().to_owned();
     assert!(manager.mark_external_lost(&task_id));
     assert_eq!(manager.snapshot().tasks[0].status, "lost");
@@ -109,13 +121,13 @@ async fn external_completion_notifies_before_terminal_and_retries_failed_deliver
     assert!(manager
         .settle_external(&ticket, "terminal-1", result.clone())
         .await
-        .unwrap());
+        .expect("the clone fixture result is required for this assertion"));
     assert_eq!(manager.active_count(), 0);
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
     assert!(!manager
         .settle_external(&ticket, "terminal-1", result)
         .await
-        .unwrap());
+        .expect("the settle external fixture result is required for this assertion"));
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
 
@@ -134,9 +146,12 @@ async fn external_cancel_request_keeps_task_active_until_owner_settles() {
             cancel: std::sync::Arc::new(|| Box::pin(async { Ok(()) })),
             on_terminal: std::sync::Arc::new(|_, _| Box::pin(async { Ok(()) })),
         })
-        .unwrap();
+        .expect("the register external fixture result is required for this assertion");
     let task_id = ticket.task_id().to_owned();
-    manager.cancel_async(&task_id).await.unwrap();
+    manager
+        .cancel_async(&task_id)
+        .await
+        .expect("the cancel async fixture result is required for this assertion");
     assert_eq!(manager.active_count(), 1);
     assert_eq!(manager.snapshot().tasks[0].status, "running");
     assert!(manager
@@ -158,7 +173,7 @@ async fn external_cancel_request_keeps_task_active_until_owner_settles() {
             }
         )
         .await
-        .unwrap());
+        .expect("the None fixture result is required for this assertion"));
     assert_eq!(manager.active_count(), 0);
 }
 
@@ -197,12 +212,14 @@ async fn cold_terminal_restore_tracks_pending_delivery_without_started_event() {
         subagent_failure: None,
         shell_output: None,
     };
-    let ticket = manager.register_external_terminal(make_request()).unwrap();
+    let ticket = manager
+        .register_external_terminal(make_request())
+        .expect("the register external terminal fixture result is required for this assertion");
     let id = ticket.task_id().to_owned();
     assert!(manager
         .settle_external(&ticket, "transition-1", result.clone())
         .await
-        .unwrap());
+        .expect("the clone fixture result is required for this assertion"));
     assert_eq!(manager.snapshot().tasks[0].task_id, id);
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
     assert_eq!(
@@ -211,24 +228,31 @@ async fn cold_terminal_restore_tracks_pending_delivery_without_started_event() {
     );
     assert_eq!(manager.active_count(), 0);
     assert!(matches!(
-        changes.try_recv().unwrap().event,
+        changes.try_recv().expect("changes try recv producer must deliver the expected test event before closing").event,
         BgRegistryEvent::Updated { status, .. } if status == "pending_delivery"
     ));
     assert!(matches!(
-        changes.try_recv().unwrap().event,
+        changes
+            .try_recv()
+            .expect("changes try recv producer must deliver the expected test event before closing")
+            .event,
         BgRegistryEvent::Completed { .. }
     ));
     assert!(changes.try_recv().is_err());
-    manager.refresh_external(&ticket, make_request()).unwrap();
+    manager
+        .refresh_external(&ticket, make_request())
+        .expect("the refresh external fixture result is required for this assertion");
     assert!(!manager
         .settle_external(&ticket, "transition-1", result)
         .await
-        .unwrap());
+        .expect("the settle external fixture result is required for this assertion"));
     assert_eq!(manager.snapshot().tasks[0].task_id, id);
     assert_eq!(deliveries.load(Ordering::SeqCst), 1);
 
     let live = TaskManager::new();
-    let live_ticket = live.register_external(make_request()).unwrap();
+    let live_ticket = live
+        .register_external(make_request())
+        .expect("the register external fixture result is required for this assertion");
     let live_id = live_ticket.task_id().to_owned();
     let live_result = BackgroundTaskResult {
         task_id: "finished-raw-id".into(),
@@ -243,11 +267,12 @@ async fn cold_terminal_restore_tracks_pending_delivery_without_started_event() {
         subagent_failure: None,
         shell_output: None,
     };
-    live.refresh_external(&live_ticket, make_request()).unwrap();
+    live.refresh_external(&live_ticket, make_request())
+        .expect("the refresh external fixture result is required for this assertion");
     assert!(live
         .settle_external(&live_ticket, "transition-1", live_result)
         .await
-        .unwrap());
+        .expect("the settle external fixture result is required for this assertion"));
     assert_eq!(live.snapshot().tasks[0].task_id, live_id);
     assert_eq!(live.snapshot().tasks[0].status, "completed");
 }
@@ -257,7 +282,9 @@ async fn test_register_and_active_count() {
     let registry = make_registry();
     assert_eq!(registry.active_count(), 0);
 
-    registry.register_with_kind(make_task("bg-1")).unwrap();
+    registry
+        .register_with_kind(make_task("bg-1"))
+        .expect("the register with kind fixture result is required for this assertion");
     assert_eq!(registry.active_count(), 1);
 }
 
@@ -278,7 +305,9 @@ async fn test_agent_kind_registration_is_not_capped() {
     assert_eq!(registry.count_by_kind(BgTaskKind::Agent), 8);
 
     // 取消路径在无限额下仍逐条生效
-    registry.cancel("bg-3").unwrap();
+    registry
+        .cancel("bg-3")
+        .expect("the cancel fixture result is required for this assertion");
     assert_eq!(registry.active_count(), 7);
     assert_eq!(registry.count_by_kind(BgTaskKind::Agent), 7);
 }
@@ -287,7 +316,9 @@ async fn test_agent_kind_registration_is_not_capped() {
 async fn test_complete_updates_status() {
     let registry = make_registry();
 
-    let ticket = registry.register_with_kind(make_task("bg-1")).unwrap();
+    let ticket = registry
+        .register_with_kind(make_task("bg-1"))
+        .expect("the register with kind fixture result is required for this assertion");
     assert_eq!(registry.active_count(), 1);
 
     let result = BackgroundTaskResult {
@@ -320,10 +351,16 @@ async fn test_complete_updates_status() {
 async fn test_cancel_removes_task() {
     let registry = make_registry();
 
-    registry.register_with_kind(make_task("bg-1")).unwrap();
-    registry.register_with_kind(make_task("bg-2")).unwrap();
+    registry
+        .register_with_kind(make_task("bg-1"))
+        .expect("the register with kind fixture result is required for this assertion");
+    registry
+        .register_with_kind(make_task("bg-2"))
+        .expect("the register with kind fixture result is required for this assertion");
 
-    registry.cancel("bg-1").unwrap();
+    registry
+        .cancel("bg-1")
+        .expect("the cancel fixture result is required for this assertion");
     let tasks = registry.list_tasks();
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].0, "bg-2");
@@ -364,11 +401,15 @@ async fn test_cancel_propagates_to_running_task() {
         owner_identity: None,
     };
 
-    registry.register_with_kind(task).unwrap();
+    registry
+        .register_with_kind(task)
+        .expect("the register with kind fixture result is required for this assertion");
     assert_eq!(registry.active_count(), 1);
 
     // 取消任务：应 abort JoinHandle 并从 registry 移除
-    registry.cancel("bg-running").unwrap();
+    registry
+        .cancel("bg-running")
+        .expect("the cancel fixture result is required for this assertion");
 
     // 验证 registry 中已清理
     let tasks = registry.list_tasks();
@@ -409,10 +450,14 @@ async fn test_cancel_workflow_invokes_kill_closure() {
         owner_session_id: None,
         owner_identity: None,
     };
-    registry.register_with_kind(task).unwrap();
+    registry
+        .register_with_kind(task)
+        .expect("the register with kind fixture result is required for this assertion");
     assert_eq!(registry.active_count(), 1);
 
-    registry.cancel("bg-wf-1").unwrap();
+    registry
+        .cancel("bg-wf-1")
+        .expect("the cancel fixture result is required for this assertion");
 
     assert!(
         killed.load(Ordering::SeqCst),
@@ -452,7 +497,9 @@ async fn test_cancel_with_unavailable_handle_returns_error_and_keeps_entry() {
         owner_session_id: None,
         owner_identity: None,
     };
-    registry.register_with_kind(task).unwrap();
+    registry
+        .register_with_kind(task)
+        .expect("the register with kind fixture result is required for this assertion");
     assert_eq!(registry.active_count(), 1);
 
     let err = registry.cancel("bg-wf-none").unwrap_err();
@@ -473,12 +520,16 @@ async fn test_count_by_kind_works() {
     let mut shell_task = make_task("bg-shell-1");
     shell_task.kind = BgTaskKind::Shell;
     shell_task.id = "bg-shell-1".to_string();
-    registry.register_with_kind(shell_task).unwrap();
+    registry
+        .register_with_kind(shell_task)
+        .expect("the register with kind fixture result is required for this assertion");
 
     let mut agent_task = make_task("bg-agent-1");
     agent_task.kind = BgTaskKind::Agent;
     agent_task.id = "bg-agent-1".to_string();
-    registry.register_with_kind(agent_task).unwrap();
+    registry
+        .register_with_kind(agent_task)
+        .expect("the register with kind fixture result is required for this assertion");
 
     assert_eq!(registry.count_by_kind(BgTaskKind::Shell), 1);
     assert_eq!(registry.count_by_kind(BgTaskKind::Agent), 1);
@@ -492,7 +543,9 @@ async fn test_register_with_kind_shell_limit() {
     for i in 0..BackgroundTaskRegistry::SHELL_LIMIT {
         let mut task = make_task(&format!("bg-shell-{}", i));
         task.kind = BgTaskKind::Shell;
-        registry.register_with_kind(task).unwrap();
+        registry
+            .register_with_kind(task)
+            .expect("the register with kind fixture result is required for this assertion");
     }
 
     // 超限的第一个应被拒绝
@@ -523,7 +576,9 @@ async fn test_register_with_kind_agent_unlimited_workflow_capped() {
     for i in 0..BackgroundTaskRegistry::WORKFLOW_LIMIT {
         let mut task = make_task(&format!("bg-wf-{}", i));
         task.kind = BgTaskKind::Workflow;
-        registry.register_with_kind(task).unwrap();
+        registry
+            .register_with_kind(task)
+            .expect("the register with kind fixture result is required for this assertion");
     }
 
     let mut task = make_task("bg-wf-over");
@@ -542,7 +597,9 @@ async fn test_list_tasks_full_returns_info() {
 
     let mut task = make_task("bg-agent-1");
     task.kind = BgTaskKind::Agent;
-    registry.register_with_kind(task).unwrap();
+    registry
+        .register_with_kind(task)
+        .expect("the register with kind fixture result is required for this assertion");
 
     let tasks = registry.list_tasks_full();
     assert_eq!(tasks.len(), 1);
@@ -577,8 +634,12 @@ async fn test_complete_after_cancel_does_not_push_ghost_event() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BgRegistryEvent>();
     registry.set_event_sender(tx, "sess-1".to_string());
 
-    let ticket = registry.register_with_kind(make_task("bg-1")).unwrap();
-    registry.cancel("bg-1").unwrap(); // 条目移除 + Cancelled 事件
+    let ticket = registry
+        .register_with_kind(make_task("bg-1"))
+        .expect("the register with kind fixture result is required for this assertion");
+    registry
+        .cancel("bg-1")
+        .expect("the cancel fixture result is required for this assertion"); // 条目移除 + Cancelled 事件
 
     let handled = registry.complete(&ticket, make_result("bg-1", true));
 
@@ -605,7 +666,7 @@ async fn test_complete_unknown_task_returns_false_no_event() {
     let other_registry = make_registry();
     let ticket = other_registry
         .register_with_kind(make_task("never-registered"))
-        .unwrap();
+        .expect("the register with kind fixture result is required for this assertion");
     let handled = registry.complete(&ticket, make_result(ticket.task_id(), true));
 
     assert!(!handled, "未注册任务的 complete 应返回 false");
@@ -622,17 +683,22 @@ async fn test_complete_existing_task_returns_true_and_pushes_event() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BgRegistryEvent>();
     registry.set_event_sender(tx, "sess-1".to_string());
 
-    let ticket = registry.register_with_kind(make_task("bg-1")).unwrap();
+    let ticket = registry
+        .register_with_kind(make_task("bg-1"))
+        .expect("the register with kind fixture result is required for this assertion");
     // 消费 register 推的 Started 事件
     assert!(matches!(
-        rx.try_recv().unwrap(),
+        rx.try_recv()
+            .expect("rx try recv producer must deliver the expected test event before closing"),
         BgRegistryEvent::Started { .. }
     ));
 
     let handled = registry.complete(&ticket, make_result("bg-1", true));
 
     assert!(handled, "条目存在时 complete 应返回 true");
-    let event = rx.try_recv().unwrap();
+    let event = rx
+        .try_recv()
+        .expect("rx try recv producer must deliver the expected test event before closing");
     assert!(
         matches!(event, BgRegistryEvent::Completed { .. }),
         "条目存在时应推 Completed 事件"
@@ -676,10 +742,14 @@ async fn test_cancel_abort_token_cancels_task_first() {
         owner_session_id: None,
         owner_identity: None,
     };
-    registry.register_with_kind(task).unwrap();
+    registry
+        .register_with_kind(task)
+        .expect("the register with kind fixture result is required for this assertion");
     assert_eq!(registry.active_count(), 1);
 
-    registry.cancel("bg-token-cancel").unwrap();
+    registry
+        .cancel("bg-token-cancel")
+        .expect("the cancel fixture result is required for this assertion");
     assert_eq!(registry.active_count(), 0);
 
     // 任务应因 token 取消而自然结束（收尾标志被置位），而非等待 abort 兜底
@@ -725,10 +795,14 @@ async fn test_cancel_abort_grace_timeout_fallback() {
         owner_session_id: None,
         owner_identity: None,
     };
-    registry.register_with_kind(task).unwrap();
+    registry
+        .register_with_kind(task)
+        .expect("the register with kind fixture result is required for this assertion");
     assert_eq!(registry.active_count(), 1);
 
-    registry.cancel("bg-stubborn").unwrap();
+    registry
+        .cancel("bg-stubborn")
+        .expect("the cancel fixture result is required for this assertion");
     assert_eq!(registry.active_count(), 0);
 
     // grace（3s）超时后 abort 兜底：任务终止
@@ -751,7 +825,8 @@ async fn test_task_manager_instances_are_isolated() {
     let tm_a = TaskManager::new();
     let tm_b = TaskManager::new();
 
-    tm_a.register_with_kind(make_task("bg-sess-a")).unwrap();
+    tm_a.register_with_kind(make_task("bg-sess-a"))
+        .expect("the register with kind fixture result is required for this assertion");
     assert_eq!(tm_a.active_count(), 1);
     assert_eq!(
         tm_b.active_count(),
@@ -766,9 +841,11 @@ async fn test_task_manager_instances_are_isolated() {
     tm_a.set_event_sender(tx_a, "sess-a".to_string());
     tm_b.set_event_sender(tx_b, "sess-b".to_string());
 
-    tm_a.register_with_kind(make_task("bg-sess-a-2")).unwrap();
+    tm_a.register_with_kind(make_task("bg-sess-a-2"))
+        .expect("the register with kind fixture result is required for this assertion");
     assert!(matches!(
-        rx_a.try_recv().unwrap(),
+        rx_a.try_recv()
+            .expect("rx a try recv producer must deliver the expected test event before closing"),
         BgRegistryEvent::Started { .. }
     ));
     assert!(
@@ -782,9 +859,12 @@ async fn test_task_manager_instances_are_isolated() {
 async fn test_task_manager_cancel_all_clears_running_tasks() {
     let tm = TaskManager::new();
 
-    tm.register_with_kind(make_task("bg-1")).unwrap();
-    tm.register_with_kind(make_task("bg-2")).unwrap();
-    tm.register_with_kind(make_task("bg-3")).unwrap();
+    tm.register_with_kind(make_task("bg-1"))
+        .expect("the register with kind fixture result is required for this assertion");
+    tm.register_with_kind(make_task("bg-2"))
+        .expect("the register with kind fixture result is required for this assertion");
+    tm.register_with_kind(make_task("bg-3"))
+        .expect("the register with kind fixture result is required for this assertion");
     assert_eq!(tm.active_count(), 3);
 
     tm.cancel_all();
@@ -813,7 +893,8 @@ async fn test_task_manager_cancel_all_keeps_unavailable_entries() {
         owner_session_id: None,
         owner_identity: None,
     };
-    tm.register_with_kind(task).unwrap();
+    tm.register_with_kind(task)
+        .expect("the register with kind fixture result is required for this assertion");
 
     tm.cancel_all();
     assert_eq!(
@@ -822,156 +903,7 @@ async fn test_task_manager_cancel_all_keeps_unavailable_entries() {
         "kill 通道不可用的条目应保留（等待自然完成）"
     );
 }
-
-// ── 输出截断（truncate_bytes）──
-
-#[test]
-fn test_truncate_bytes_ascii() {
-    let s = "hello world";
-    assert_eq!(truncate_bytes(s, 5), "hello");
-}
-
-#[test]
-fn test_truncate_bytes_within_limit() {
-    let s = "hello";
-    assert_eq!(truncate_bytes(s, 100), "hello");
-}
-
-#[test]
-fn test_truncate_bytes_utf8_safe() {
-    let s = "你好世界";
-    assert_eq!(truncate_bytes(s, 6), "你好");
-}
-
-#[test]
-fn test_truncate_bytes_utf8_mid_character() {
-    let s = "你好";
-    let result = truncate_bytes(s, 5);
-    // 5 字节位于 "好"（3 字节）中间，应回退到 "你"（3 字节）
-    assert_eq!(result, "你");
-}
-
-#[test]
-fn test_truncate_bytes_empty_string() {
-    assert_eq!(truncate_bytes("", 10), "");
-}
-
-#[test]
-fn test_truncate_bytes_zero_max() {
-    assert_eq!(truncate_bytes("hello", 0), "");
-}
-
-// ── bg shell 执行链纯函数（parse_foreground/background_timeout / bg_shell_task_id）──
-
-/// 前台 timeout 恒有界（禁止无界同步执行）：
-/// - 未传 / `null` → 默认 15000
-/// - 显式 0 → 前台上限 120000（`0` 不能被解释为"不超时"），原始请求值随结果回传
-/// - 显式 >上限 → 上限，原始请求值随结果回传
-/// - 其余 → 请求值，按平台下限兜底（Unix 1；Windows 5000）
-/// - 整数值浮点（`15000.0`）归一化为整数；小数/负数/字符串/bool/对象/数组显式报错
-#[test]
-fn test_parse_foreground_timeout_is_always_bounded() {
-    let min = if cfg!(target_os = "windows") { 5000 } else { 1 };
-    assert_eq!(
-        parse_foreground_timeout(&serde_json::json!({})).unwrap(),
-        (FOREGROUND_DEFAULT_TIMEOUT_MS, None)
-    );
-    assert_eq!(
-        parse_foreground_timeout(&serde_json::json!({"timeout": null})).unwrap(),
-        (FOREGROUND_DEFAULT_TIMEOUT_MS, None)
-    );
-    assert_eq!(
-        parse_foreground_timeout(&serde_json::json!({"timeout": 0})).unwrap(),
-        (FOREGROUND_MAX_TIMEOUT_MS, Some(0)),
-        "timeout: 0 必须界到前台上限，不能禁用超时"
-    );
-    assert_eq!(
-        parse_foreground_timeout(&serde_json::json!({"timeout": 600_000})).unwrap(),
-        (FOREGROUND_MAX_TIMEOUT_MS, Some(600_000))
-    );
-    assert_eq!(
-        parse_foreground_timeout(&serde_json::json!({"timeout": 2_000_000})).unwrap(),
-        (FOREGROUND_MAX_TIMEOUT_MS, Some(2_000_000))
-    );
-    assert_eq!(
-        parse_foreground_timeout(&serde_json::json!({"timeout": 2000})).unwrap(),
-        (2000.max(min), None)
-    );
-    assert_eq!(
-        parse_foreground_timeout(&serde_json::json!({"timeout": 15000.0})).unwrap(),
-        (15_000, None),
-        "整数值浮点应归一化为整数毫秒"
-    );
-    for invalid in [
-        serde_json::json!({"timeout": "1000"}),
-        serde_json::json!({"timeout": -5}),
-        serde_json::json!({"timeout": 1.5}),
-        serde_json::json!({"timeout": true}),
-        serde_json::json!({"timeout": {}}),
-        serde_json::json!({"timeout": []}),
-    ] {
-        let error = parse_foreground_timeout(&invalid).expect_err("invalid timeout must fail");
-        let message = error.to_string();
-        assert!(
-            message.contains("timeout") && message.contains("received"),
-            "错误应包含参数名与收到值: {message}"
-        );
-    }
-}
-
-/// 后台 timeout 语义（不阻塞 Agent，允许"不超时"）：
-/// - 未传 / `null` / 显式 0 → None；显式 >0 → clamp 到 [min, 600000]
-/// - 整数值浮点（`15000.0`）归一化为 15000；小数/负数/字符串显式报错
-#[test]
-fn test_parse_background_timeout_semantics() {
-    let min = if cfg!(target_os = "windows") { 5000 } else { 1 };
-    assert_eq!(
-        parse_background_timeout(&serde_json::json!({})).unwrap(),
-        None
-    );
-    assert_eq!(
-        parse_background_timeout(&serde_json::json!({"timeout": null})).unwrap(),
-        None
-    );
-    assert_eq!(
-        parse_background_timeout(&serde_json::json!({"timeout": 0})).unwrap(),
-        None
-    );
-    assert_eq!(
-        parse_background_timeout(&serde_json::json!({"timeout": 2000})).unwrap(),
-        Some(2000.max(min))
-    );
-    assert_eq!(
-        parse_background_timeout(&serde_json::json!({"timeout": 999_999})).unwrap(),
-        Some(BACKGROUND_MAX_TIMEOUT_MS)
-    );
-    assert_eq!(
-        parse_background_timeout(&serde_json::json!({"timeout": 15000.0})).unwrap(),
-        Some(15_000)
-    );
-    for invalid in [
-        serde_json::json!({"timeout": 1.5}),
-        serde_json::json!({"timeout": -1}),
-        serde_json::json!({"timeout": "5"}),
-    ] {
-        let error = parse_background_timeout(&invalid).expect_err("invalid timeout must fail");
-        assert!(
-            error.to_string().contains("timeout"),
-            "错误应包含参数名: {error}"
-        );
-    }
-}
-
-/// bg shell 任务 id 唯一性（issue 2026-08-05 回归防护）：
-/// 旧实现取 UUID v7 前 8 字符（毫秒时间戳高 32 位），同一毫秒内多次调用
-/// 必然碰撞 → registry 覆盖注册 → 后续 complete() 被静默跳过 → TUI 条目残留。
-/// 连续生成（大概率落在同一毫秒）必须全部唯一，且保留 `shell-` 前缀。
-#[test]
-fn test_bg_shell_task_id_uniqueness() {
-    let ids: std::collections::HashSet<String> = (0..64).map(|_| bg_shell_task_id()).collect();
-    assert_eq!(ids.len(), 64, "同一毫秒内生成的 bg shell task_id 必须唯一");
-    assert!(ids.iter().all(|id| id.starts_with("shell-")));
-}
+include!("async_task_shell_policy_test.rs");
 
 // ── 投递归属 vs scope 对账（issue：subagent 触发的后台 shell 结果投递到 root）─────
 #[path = "external_initiator_test.rs"]

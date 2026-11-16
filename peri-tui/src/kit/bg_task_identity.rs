@@ -1,9 +1,5 @@
 //! Background task `task_id` ↔ `agent_id` 双键解析。
 
-use crate::kit::atoms::{
-    BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_IDENTITY, BG_TASKS, BgDisplayEntry, BgLiveStatus,
-};
-use crate::kit::bg_task_live::pending_live_owner_for_agent;
 use crate::kit::bg_task_status::BgTaskStatus;
 use std::collections::HashSet;
 
@@ -26,6 +22,7 @@ pub(crate) fn bounded_label(value: &str) -> String {
     result
 }
 
+#[must_use]
 pub fn is_unbound_agent_row(entry: &BgDisplayEntry) -> bool {
     entry.agent_type == "agent" && entry.linked_agent_id.is_none()
 }
@@ -102,7 +99,7 @@ pub fn resolve_subagent_id_for_display(entry: &BgDisplayEntry) -> Option<String>
 pub fn task_id_for_agent_id(agent_id: &str) -> Option<String> {
     // 当前 occurrence 的占位 owner 优先于旧保留行/旧 identity：resume 复用
     // agent_id 时，旧任务的终态明细不能抢走新一轮的流式事件。
-    if let Some(task_id) = pending_live_owner_for_agent(agent_id) {
+    if let Some(task_id) = crate::kit::bg_task_live::pending_live_owner_for_agent(agent_id) {
         return Some(task_id);
     }
     let display_store = BG_DISPLAY.state();
@@ -244,18 +241,21 @@ pub(crate) fn prune_metadata() {
         let mut display = display.write();
         let (mut count, mut bytes) = (0usize, 0usize);
         let mut keep = vec![true; display.len()];
-        for (index, row) in display.iter().enumerate().rev() {
-            if row.is_active || protected.contains(&row.id) {
-                continue;
-            }
-            let size = display_reserved(row);
-            if count >= RECENT_METADATA_ENTRIES
-                || bytes.saturating_add(size) > RECENT_METADATA_BYTES
-            {
-                keep[index] = false;
-            } else {
-                count += 1;
-                bytes += size;
+        {
+            let iteration_items = display.iter().enumerate().rev();
+            for (index, row) in iteration_items {
+                if row.is_active || protected.contains(&row.id) {
+                    continue;
+                }
+                let size = display_reserved(row);
+                if count >= RECENT_METADATA_ENTRIES
+                    || bytes.saturating_add(size) > RECENT_METADATA_BYTES
+                {
+                    keep[index] = false;
+                } else {
+                    count += 1;
+                    bytes += size;
+                }
             }
         }
         let mut index = 0;
@@ -305,3 +305,15 @@ pub(crate) fn prune_metadata() {
 #[cfg(test)]
 #[path = "bg_task_identity_test.rs"]
 mod tests;
+
+use crate::kit::atoms::BG_DISPLAY;
+
+use crate::kit::atoms::BG_LIVE_DETAIL;
+
+use crate::kit::atoms::BG_TASK_IDENTITY;
+
+use crate::kit::atoms::BG_TASKS;
+
+use crate::kit::atoms::BgDisplayEntry;
+
+use crate::kit::atoms::BgLiveStatus;

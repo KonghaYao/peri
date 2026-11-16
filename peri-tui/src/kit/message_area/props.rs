@@ -20,6 +20,7 @@ pub(super) struct MsgAreaTracker {
 }
 
 impl MsgAreaTracker {
+    #[must_use]
     pub(super) fn new() -> Self {
         Self {
             rect: None,

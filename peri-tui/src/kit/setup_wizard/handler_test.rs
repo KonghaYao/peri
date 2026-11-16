@@ -1,6 +1,16 @@
-use super::*;
+use crate::app::setup_wizard::FormField;
+use crate::app::setup_wizard::FormMode;
+use crate::app::setup_wizard::MigratedProvider;
+use crate::app::setup_wizard::PROVIDER_PRESETS;
+use crate::app::setup_wizard::ProviderType;
+use crate::app::setup_wizard::SetupSource;
+use crate::app::setup_wizard::SetupStep;
+use crate::app::setup_wizard::SetupWizardState;
+use ratatui_kit::crossterm::event::KeyCode;
 use ratatui_kit::crossterm::event::KeyEvent;
+use ratatui_kit::crossterm::event::KeyModifiers;
 
+#[must_use]
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
@@ -14,7 +24,7 @@ fn chatgpt_source_opens_guide_without_touching_provider_draft() {
         ..Default::default()
     };
     let original = state.providers[0].provider_id.clone();
-    handle_choose_keys(&mut state, key(KeyCode::Enter));
+    super::handle_choose_keys(&mut state, key(KeyCode::Enter));
     assert_eq!(state.step, SetupStep::ChatGpt);
     assert_eq!(state.chatgpt_cursor, 0);
     assert_eq!(state.providers[0].provider_id, original);
@@ -26,12 +36,12 @@ fn chatgpt_guide_keyboard_cancel_returns_to_source() {
         step: SetupStep::ChatGpt,
         ..Default::default()
     };
-    handle_chatgpt_keys(&mut state, key(KeyCode::Tab));
+    super::handle_chatgpt_keys(&mut state, key(KeyCode::Tab));
     assert_eq!(state.chatgpt_cursor, 1);
-    handle_chatgpt_keys(&mut state, key(KeyCode::Enter));
+    super::handle_chatgpt_keys(&mut state, key(KeyCode::Enter));
     assert_eq!(state.step, SetupStep::Choose);
     state.step = SetupStep::ChatGpt;
-    handle_chatgpt_keys(&mut state, key(KeyCode::Esc));
+    super::handle_chatgpt_keys(&mut state, key(KeyCode::Esc));
     assert_eq!(state.step, SetupStep::Choose);
 }
 
@@ -44,14 +54,14 @@ fn test_connectivity_repeated_click_is_bounded_and_escape_cancels() {
         form_focus: FormField::TestConnectivity,
         ..Default::default()
     };
-    handle_edit_keys(&mut state, key(KeyCode::Enter));
+    super::handle_edit_keys(&mut state, key(KeyCode::Enter));
     let generation = state.connectivity_generation;
     assert!(state.connectivity_in_progress);
     for _ in 0..20 {
-        handle_edit_keys(&mut state, key(KeyCode::Enter));
+        super::handle_edit_keys(&mut state, key(KeyCode::Enter));
     }
     assert_eq!(state.connectivity_generation, generation);
-    handle_edit_keys(&mut state, key(KeyCode::Esc));
+    super::handle_edit_keys(&mut state, key(KeyCode::Esc));
     assert!(!state.connectivity_in_progress);
     assert!(state.connectivity_generation > generation);
     assert_eq!(state.form_mode, FormMode::Browse);
@@ -64,11 +74,11 @@ fn test_save_enter_sets_busy_without_claiming_completion() {
         step: SetupStep::Done,
         ..Default::default()
     };
-    handle_done_keys(&mut state, key(KeyCode::Enter));
+    super::handle_done_keys(&mut state, key(KeyCode::Enter));
     assert!(state.save_in_progress);
     assert_eq!(state.step, SetupStep::Done);
     let generation = state.connectivity_generation;
-    handle_done_keys(&mut state, key(KeyCode::Enter));
+    super::handle_done_keys(&mut state, key(KeyCode::Enter));
     assert!(state.save_in_progress);
     assert_eq!(state.connectivity_generation, generation);
 }
@@ -83,11 +93,11 @@ fn test_delete_and_paste_cancel_pending_check() {
         connectivity_in_progress: true,
         ..Default::default()
     };
-    handle_edit_keys(&mut state, key(KeyCode::Delete));
+    super::handle_edit_keys(&mut state, key(KeyCode::Delete));
     assert!(!state.connectivity_in_progress);
     state.connectivity_in_progress = true;
     let generation = state.connectivity_generation;
-    handle_paste_to_text_input(&mut state, "a");
+    super::handle_paste_to_text_input(&mut state, "a");
     assert!(!state.connectivity_in_progress);
     assert!(state.connectivity_generation > generation);
 }
@@ -102,10 +112,10 @@ fn test_choose_preset_source_enters_preset_step_without_touching_providers() {
     };
     let original_id = state.providers[0].provider_id.clone();
     for _ in 0..3 {
-        handle_choose_keys(&mut state, key(KeyCode::Down));
+        super::handle_choose_keys(&mut state, key(KeyCode::Down));
     }
     assert_eq!(state.source, SetupSource::ProviderPreset);
-    handle_choose_keys(&mut state, key(KeyCode::Enter));
+    super::handle_choose_keys(&mut state, key(KeyCode::Enter));
     assert_eq!(state.step, SetupStep::Preset);
     assert_eq!(state.preset_cursor, 0);
     assert!(state.submit_error.is_none());
@@ -132,7 +142,7 @@ fn test_choose_custom_api_keeps_existing_providers() {
         providers: vec![existing],
         ..Default::default()
     };
-    handle_choose_keys(&mut state, key(KeyCode::Enter));
+    super::handle_choose_keys(&mut state, key(KeyCode::Enter));
     assert_eq!(state.step, SetupStep::Form);
     assert_eq!(state.providers.len(), 1);
     assert_eq!(state.providers[0].provider_id, "custom");
@@ -148,7 +158,7 @@ fn test_choose_custom_api_keeps_existing_providers() {
         providers: Vec::new(),
         ..Default::default()
     };
-    handle_choose_keys(&mut fresh, key(KeyCode::Enter));
+    super::handle_choose_keys(&mut fresh, key(KeyCode::Enter));
     assert_eq!(fresh.step, SetupStep::Form);
     assert_eq!(fresh.providers.len(), 1);
     assert_eq!(fresh.providers[0].provider_id, "anthropic");
@@ -163,7 +173,7 @@ fn test_reopened_form_escape_returns_to_choose_with_chatgpt_entry() {
         form_mode: FormMode::Browse,
         ..Default::default()
     };
-    handle_form_keys(&mut state, key(KeyCode::Esc));
+    super::handle_form_keys(&mut state, key(KeyCode::Esc));
     assert_eq!(state.step, SetupStep::Choose);
     assert!(SetupSource::ALL.contains(&SetupSource::ChatGptSubscription));
 }
@@ -176,14 +186,14 @@ fn test_preset_cursor_wraps_and_clears_error() {
         submit_error: Some("stale".into()),
         ..Default::default()
     };
-    handle_preset_keys(&mut state, key(KeyCode::Up));
+    super::handle_preset_keys(&mut state, key(KeyCode::Up));
     assert_eq!(
         state.preset_cursor,
         PROVIDER_PRESETS.len() - 1,
         "首项向上环绕"
     );
     assert!(state.submit_error.is_none());
-    handle_preset_keys(&mut state, key(KeyCode::Down));
+    super::handle_preset_keys(&mut state, key(KeyCode::Down));
     assert_eq!(state.preset_cursor, 0, "末项向下环绕");
 }
 
@@ -197,7 +207,7 @@ fn test_preset_enter_prefills_provider_and_focuses_api_key() {
         connectivity_in_progress: true,
         ..Default::default()
     };
-    handle_preset_keys(&mut state, key(KeyCode::Enter));
+    super::handle_preset_keys(&mut state, key(KeyCode::Enter));
     assert_eq!(state.step, SetupStep::Form);
     assert_eq!(state.form_mode, FormMode::Edit);
     assert_eq!(state.form_focus, FormField::ApiKey);
@@ -220,7 +230,7 @@ fn test_preset_enter_resets_browse_cursor() {
         browse_cursor: 3,
         ..Default::default()
     };
-    handle_preset_keys(&mut state, key(KeyCode::Enter));
+    super::handle_preset_keys(&mut state, key(KeyCode::Enter));
     assert_eq!(state.step, SetupStep::Form);
     assert_eq!(state.browse_cursor, 0, "重建 provider 列表后光标复位");
 }
@@ -232,7 +242,7 @@ fn test_preset_escape_returns_to_choose() {
         submit_error: Some("stale".into()),
         ..Default::default()
     };
-    handle_preset_keys(&mut state, key(KeyCode::Esc));
+    super::handle_preset_keys(&mut state, key(KeyCode::Esc));
     assert_eq!(state.step, SetupStep::Choose);
     assert!(state.submit_error.is_none());
 }

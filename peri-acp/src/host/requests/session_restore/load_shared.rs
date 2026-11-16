@@ -18,11 +18,15 @@ use peri_acp_types::recovery::{
 };
 use peri_acp_types::thread::ThreadId;
 
+use crate::dispatch;
 use crate::host::connection::ConnectionFacts;
 use crate::host::{AcpServerConfig, SharedSessions};
-use crate::{dispatch, transport::types::AcpError};
+use crate::transport::types::AcpError;
 
-use super::*;
+use super::{
+    LoadGeneration, LoadSessionResponse, PreparedSession, ResumeSessionResponse, SessionState,
+    TuiReplaySender,
+};
 
 /// `session/load` 的生产入口：调用方**不得**持有 sessions 全局锁。
 pub(crate) async fn handle_load_shared(
@@ -182,7 +186,7 @@ pub(super) async fn prepare_shared(
 ) -> Result<PreparedShared, AcpError> {
     let already_loaded = {
         let states = sessions.lock().await;
-        super::reject_incomplete_local_close(params, &states)?;
+        crate::host::requests::session_lifecycle::restore::session_restore_dispatch::reject_incomplete_local_close(params, &states)?;
         params
             .get("sessionId")
             .and_then(Value::as_str)
@@ -250,7 +254,7 @@ async fn prepare_live_shared(
     cfg: &AcpServerConfig,
     sessions: &SharedSessions,
 ) -> Result<PreparedSession, AcpError> {
-    super::reject_closing_session(params, cfg).await?;
+    crate::host::requests::session_lifecycle::restore::session_restore_dispatch::reject_closing_session(params, cfg).await?;
     let id = params
         .get("sessionId")
         .and_then(Value::as_str)
@@ -285,7 +289,8 @@ async fn prepare_live_shared(
         .drain_persistence(&id)
         .await
         .map_err(crate::host::workspace::resource_error)?;
-    let effective_servers = super::super::session_mcp_servers(params)?;
+    let effective_servers =
+        crate::host::requests::session_lifecycle::session_mcp_setup::session_mcp_servers(params)?;
     let legacy_adoption =
         super::legacy_session::prepare_for_restore(cfg, &id, None, effective_servers).await?;
     let mut environment_slot = legacy_adoption
@@ -300,8 +305,8 @@ async fn prepare_live_shared(
             params.get("cwd").and_then(Value::as_str),
         )
         .await?;
-        let persisted = super::load_frozen_bytes(cfg, &id).await?;
-        super::decode_frozen_snapshot(&persisted).map_err(workspace_error)?;
+        let persisted = crate::host::requests::session_lifecycle::restore::session_restore_dispatch::load_frozen_bytes(cfg, &id).await?;
+        crate::session::frozen_snapshot::decode_frozen_snapshot(&persisted).map_err(crate::host::workspace::workspace_error)?;
         let identity = super::response_identity(cfg, &id).await?;
 
         let live = {
@@ -387,7 +392,7 @@ async fn prepare_live_shared(
     match outcome {
         Ok(prepared) => Ok(prepared),
         Err(error) => {
-            Err(super::shutdown_bootstrapped_environment(environment_slot.take(), error).await)
+            Err(crate::host::requests::session_lifecycle::restore::session_restore_dispatch::shutdown_bootstrapped_environment(environment_slot.take(), error).await)
         }
     }
 }
@@ -753,7 +758,10 @@ async fn serve_view_only_load(
             connection.history_window_v1,
         )
         .await?;
-        let identity = response_identity(cfg, &session_id).await.ok().flatten();
+        let identity = super::response_identity(cfg, &session_id)
+            .await
+            .ok()
+            .flatten();
         let context_usage = saved_context_usage(cfg, sessions, &session_id).await;
         let mut response = finish_load_response(
             cfg,
@@ -799,7 +807,7 @@ async fn serve_view_only_resume(
         ensure_view_only_state(params, cfg, sessions, kind, error).await?;
     let context_usage = saved_context_usage(cfg, sessions, &session_id).await;
     let caps = cfg.session_manager.ensure_session_caps(&session_id);
-    send_available_commands_update(
+    crate::host::notify::send_available_commands_update(
         transport,
         &session_id,
         &caps,
@@ -807,9 +815,12 @@ async fn serve_view_only_resume(
         cfg.stdio_command_filter,
     )
     .await;
-    prewarm_session_mcp_discovery(cfg, &session_id);
-    let identity = response_identity(cfg, &session_id).await.ok().flatten();
-    let mut response = identity_response(
+    crate::host::requests::session_lifecycle::prewarm_session_mcp_discovery(cfg, &session_id);
+    let identity = super::response_identity(cfg, &session_id)
+        .await
+        .ok()
+        .flatten();
+    let mut response = super::identity_response(
         serde_json::to_value(ResumeSessionResponse::new())
             .map_err(|error| AcpError::new(-32603, error.to_string()))?,
         identity,
@@ -831,17 +842,21 @@ async fn finish_load_response(
     context_usage: Option<Value>,
 ) -> Result<Value, AcpError> {
     let session_caps = cfg.session_manager.ensure_session_caps(session_id);
-    send_config_option_update(transport.as_ref(), session_id, cfg).await;
-    let modes = build_mode_state(&cfg.permission_mode);
+    crate::host::notify::send_config_option_update(transport.as_ref(), session_id, cfg).await;
+    let modes = crate::session::state_builders::build_mode_state(&cfg.permission_mode);
     let config_options = {
         let c = cfg.peri_config.read();
         let p = cfg.provider.read();
-        make_config_options(&c, &p, cfg.permission_mode.load())
+        crate::host::requests::session_lifecycle::config_update::make_config_options(
+            &c,
+            &p,
+            cfg.permission_mode.load(),
+        )
     };
     let resp = LoadSessionResponse::new()
         .modes(modes)
         .config_options(config_options);
-    send_available_commands_update(
+    crate::host::notify::send_available_commands_update(
         transport,
         session_id,
         &session_caps,
@@ -849,8 +864,8 @@ async fn finish_load_response(
         cfg.stdio_command_filter,
     )
     .await;
-    prewarm_session_mcp_discovery(cfg, session_id);
-    let mut response = identity_response(
+    crate::host::requests::session_lifecycle::prewarm_session_mcp_discovery(cfg, session_id);
+    let mut response = super::identity_response(
         serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
         identity,
     )?;
@@ -895,7 +910,7 @@ pub(crate) async fn handle_resume_shared(
         let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
         let context_usage = saved_context_usage(local, sessions, &prepared.id).await;
         let caps = local.session_manager.ensure_session_caps(&prepared.id);
-        send_available_commands_update(
+        crate::host::notify::send_available_commands_update(
             transport,
             &prepared.id,
             &caps,
@@ -903,9 +918,12 @@ pub(crate) async fn handle_resume_shared(
             local.stdio_command_filter,
         )
         .await;
-        prewarm_session_mcp_discovery(local, &prepared.id);
+        crate::host::requests::session_lifecycle::prewarm_session_mcp_discovery(
+            local,
+            &prepared.id,
+        );
         let resp = ResumeSessionResponse::new();
-        let mut response = identity_response(
+        let mut response = super::identity_response(
             serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
             prepared.identity,
         )?;

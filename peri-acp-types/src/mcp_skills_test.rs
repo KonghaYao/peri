@@ -1,12 +1,15 @@
 //! McpSkillRegistry 状态机全路径测试：project_connected 投影矩阵、token
 //! 拒绝回写、on_change 触发/不触发矩阵、find 精确 + 别名、顺序确定性。
 
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
-use super::*;
+use crate::mcp_skill_registry::HandleToken;
+use crate::mcp_skill_registry::McpSkillRegistry;
+use crate::mcp_skill_registry::ServerDiscoveryState;
+use crate::mcp_skill_registry::SkillLookup;
+use crate::skills::SkillMetadata;
 
 fn token(v: u32) -> HandleToken {
     Arc::new(v)
@@ -496,7 +499,10 @@ fn find_alias_server_colon_skill() {
     let hit = reg.find("srv:MySkill").expect("别名应命中");
     assert_eq!(hit.name, "mcp__srv__MySkill");
     // 别名拼名必须与 mcp_skill_name 公共 helper 一致（SkillTool 别名分支同源）
-    assert_eq!(hit.name, mcp_skill_name("srv", "MySkill"));
+    assert_eq!(
+        hit.name,
+        crate::mcp_skills::mcp_skill_name("srv", "MySkill")
+    );
     // 大小写无关别名
     assert!(reg.find("SRV:myskill").is_some());
 }
@@ -589,7 +595,7 @@ fn find_by_command_skips_started_servers() {
 #[test]
 fn mcp_skill_name_format() {
     assert_eq!(
-        mcp_skill_name("github", "code-review"),
+        crate::mcp_skills::mcp_skill_name("github", "code-review"),
         "mcp__github__code-review"
     );
 }
@@ -791,9 +797,18 @@ fn lookup_exact_does_not_fall_back_to_bare_name() {
 
 #[test]
 fn bare_skill_segment_units() {
-    assert_eq!(bare_skill_segment("mcp__server__skill"), Some("skill"));
-    assert_eq!(bare_skill_segment("mcp__plugin:p1:srv__a-b"), Some("a-b"));
-    assert_eq!(bare_skill_segment("mcp__srv__a__b"), Some("b"));
-    assert_eq!(bare_skill_segment("plain-name"), None);
-    assert_eq!(bare_skill_segment("mcp__srv__"), None);
+    assert_eq!(
+        crate::mcp_skills::bare_skill_segment("mcp__server__skill"),
+        Some("skill")
+    );
+    assert_eq!(
+        crate::mcp_skills::bare_skill_segment("mcp__plugin:p1:srv__a-b"),
+        Some("a-b")
+    );
+    assert_eq!(
+        crate::mcp_skills::bare_skill_segment("mcp__srv__a__b"),
+        Some("b")
+    );
+    assert_eq!(crate::mcp_skills::bare_skill_segment("plain-name"), None);
+    assert_eq!(crate::mcp_skills::bare_skill_segment("mcp__srv__"), None);
 }

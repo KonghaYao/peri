@@ -1,11 +1,19 @@
-use super::*;
+use crate::agent::compact_v2::full::summary::SummaryStep;
+use crate::error::AgentError;
+use crate::error::AgentResult;
+use peri_acp_types::error::SummaryRecoveryReason;
+use peri_model::ContentBlock;
+use peri_model::ModelMessage;
+use peri_model::ModelResponse;
+use peri_model::StopReason;
 
 fn response(text: &str, stop_reason: StopReason) -> ModelResponse {
-    ModelResponse::new(ModelMessage::assistant_text(text), stop_reason, None, None).unwrap()
+    ModelResponse::try_new(ModelMessage::assistant_text(text), stop_reason, None, None)
+        .expect("the try new fixture result is required for this assertion")
 }
 
 fn classify(text: &str, stop_reason: StopReason) -> AgentResult<SummaryStep> {
-    classify_summary_step(&response(text, stop_reason), "")
+    crate::agent::compact_v2::full::summary::classify_summary_step(&response(text, stop_reason), "")
 }
 
 fn completed(step: SummaryStep) -> String {
@@ -34,7 +42,10 @@ fn empty_reason(step: SummaryStep) -> SummaryRecoveryReason {
 #[test]
 fn classify_accepts_closed_summary_even_at_output_limit() {
     for stop_reason in [StopReason::EndTurn, StopReason::MaxTokens] {
-        let text = completed(classify("<summary>complete</summary>", stop_reason).unwrap());
+        let text = completed(
+            classify("<summary>complete</summary>", stop_reason)
+                .expect("the classify fixture result is required for this assertion"),
+        );
         assert!(text.ends_with("complete"));
     }
 }
@@ -42,26 +53,27 @@ fn classify_accepts_closed_summary_even_at_output_limit() {
 #[test]
 fn classify_completes_across_responses_without_inserting_separators() {
     // 夹具同时覆盖正文 Unicode 与跨响应拆开的控制标签。
-    let first = classify("<sum", StopReason::MaxTokens).unwrap();
+    let first = classify("<sum", StopReason::MaxTokens)
+        .expect("the classify fixture result is required for this assertion");
     let (chunk, reason) = draft(first);
     assert_eq!(chunk, "<sum");
     assert_eq!(reason, SummaryRecoveryReason::OutputLimitTruncated);
-    let step = classify_summary_step(
+    let step = crate::agent::compact_v2::full::summary::classify_summary_step(
         &response("mary>保留决策。</summary>", StopReason::EndTurn),
         &chunk,
     )
-    .unwrap();
+    .expect("the classify summary step fixture result is required for this assertion");
     assert!(completed(step).ends_with("保留决策。"));
 }
 
 #[test]
 fn classify_prefers_the_summary_closed_by_the_current_response() {
     // 模型改写全文时以本次闭合的摘要为准，不与先前片段拼接。
-    let step = classify_summary_step(
+    let step = crate::agent::compact_v2::full::summary::classify_summary_step(
         &response("<summary>full rewrite</summary>", StopReason::MaxTokens),
         "<summary>stale draft",
     )
-    .unwrap();
+    .expect("the classify summary step fixture result is required for this assertion");
     let text = completed(step);
     assert!(text.ends_with("full rewrite"));
     assert!(!text.contains("stale draft"));
@@ -69,13 +81,19 @@ fn classify_prefers_the_summary_closed_by_the_current_response() {
 
 #[test]
 fn classify_accepts_plain_text_summary_without_control_tags() {
-    let text = completed(classify("plain summary text", StopReason::EndTurn).unwrap());
+    let text = completed(
+        classify("plain summary text", StopReason::EndTurn)
+            .expect("the classify fixture result is required for this assertion"),
+    );
     assert!(text.ends_with("plain summary text"));
 }
 
 #[test]
 fn classify_collapses_repeated_blank_lines() {
-    let text = completed(classify("line1\n\n\n\n\nline2", StopReason::EndTurn).unwrap());
+    let text = completed(
+        classify("line1\n\n\n\n\nline2", StopReason::EndTurn)
+            .expect("the classify fixture result is required for this assertion"),
+    );
     assert!(text.ends_with("line1\n\nline2"), "应折叠连续空行：{text}");
 }
 
@@ -83,7 +101,10 @@ fn classify_collapses_repeated_blank_lines() {
 
 #[test]
 fn classify_keeps_truncated_body_as_draft() {
-    let (chunk, reason) = draft(classify("<summary>first", StopReason::MaxTokens).unwrap());
+    let (chunk, reason) = draft(
+        classify("<summary>first", StopReason::MaxTokens)
+            .expect("the classify fixture result is required for this assertion"),
+    );
     assert_eq!(chunk, "<summary>first");
     assert_eq!(reason, SummaryRecoveryReason::OutputLimitTruncated);
 }
@@ -92,7 +113,11 @@ fn classify_keeps_truncated_body_as_draft() {
 fn classify_does_not_treat_unfinished_end_turn_as_output_limit() {
     for (text, accumulated) in [("<summary>first", ""), (" second", "<summary>first")] {
         let (chunk, reason) = draft(
-            classify_summary_step(&response(text, StopReason::EndTurn), accumulated).unwrap(),
+            crate::agent::compact_v2::full::summary::classify_summary_step(
+                &response(text, StopReason::EndTurn),
+                accumulated,
+            )
+            .expect("the classify summary step fixture result is required for this assertion"),
         );
         assert_eq!(chunk, text);
         assert_eq!(
@@ -106,12 +131,15 @@ fn classify_does_not_treat_unfinished_end_turn_as_output_limit() {
 #[test]
 fn classify_resumes_an_unclosed_draft_without_restarting_it() {
     // 一次 EndTurn 未闭合后仍可在剩余预算内补全，不立即返回协议错误。
-    let (first_chunk, _) = draft(classify("<summary>first", StopReason::MaxTokens).unwrap());
-    let step = classify_summary_step(
+    let (first_chunk, _) = draft(
+        classify("<summary>first", StopReason::MaxTokens)
+            .expect("the classify fixture result is required for this assertion"),
+    );
+    let step = crate::agent::compact_v2::full::summary::classify_summary_step(
         &response(" second</summary>", StopReason::EndTurn),
         &first_chunk,
     )
-    .unwrap();
+    .expect("the classify summary step fixture result is required for this assertion");
     assert!(completed(step).ends_with("first second"));
 }
 
@@ -134,14 +162,17 @@ fn classify_reports_empty_response_for_blank_or_hidden_only_output() {
         ),
         ("<summary>   </summary>", StopReason::MaxTokens),
     ] {
-        let reason = empty_reason(classify(text, stop_reason).unwrap());
+        let reason = empty_reason(
+            classify(text, stop_reason)
+                .expect("the classify fixture result is required for this assertion"),
+        );
         assert_eq!(reason, SummaryRecoveryReason::EmptyResponse, "{text}");
     }
 }
 
 #[test]
 fn classify_never_exposes_hidden_reasoning_as_summary_text() {
-    let response = ModelResponse::new(
+    let response = ModelResponse::try_new(
         ModelMessage::assistant(
             vec![
                 ContentBlock::reasoning("SECRET"),
@@ -153,15 +184,18 @@ fn classify_never_exposes_hidden_reasoning_as_summary_text() {
         None,
         None,
     )
-    .unwrap();
-    let (chunk, _) = draft(classify_summary_step(&response, "").unwrap());
+    .expect("the try new fixture result is required for this assertion");
+    let (chunk, _) = draft(
+        crate::agent::compact_v2::full::summary::classify_summary_step(&response, "")
+            .expect("the classify summary step fixture result is required for this assertion"),
+    );
     assert!(!chunk.contains("SECRET"));
     assert!(chunk.contains("first"));
 }
 
 #[test]
 fn classify_does_not_accept_a_closing_tag_that_only_exists_in_reasoning() {
-    let response = ModelResponse::new(
+    let response = ModelResponse::try_new(
         ModelMessage::assistant(
             vec![ContentBlock::reasoning("<summary>hidden</summary>")],
             vec![],
@@ -170,8 +204,9 @@ fn classify_does_not_accept_a_closing_tag_that_only_exists_in_reasoning() {
         None,
         None,
     )
-    .unwrap();
-    let step = classify_summary_step(&response, "").unwrap();
+    .expect("the try new fixture result is required for this assertion");
+    let step = crate::agent::compact_v2::full::summary::classify_summary_step(&response, "")
+        .expect("the classify summary step fixture result is required for this assertion");
     assert_eq!(
         empty_reason(step),
         SummaryRecoveryReason::EmptyResponse,
@@ -183,7 +218,7 @@ fn classify_does_not_accept_a_closing_tag_that_only_exists_in_reasoning() {
 
 #[test]
 fn classify_rejects_tool_calls_in_either_response() {
-    let tool_response = ModelResponse::new(
+    let tool_response = ModelResponse::try_new(
         ModelMessage::assistant(
             vec![ContentBlock::text("<summary>unsafe</summary>")],
             vec![peri_model::ToolCall::new(
@@ -196,15 +231,18 @@ fn classify_rejects_tool_calls_in_either_response() {
         None,
         None,
     )
-    .unwrap();
+    .expect("the try new fixture result is required for this assertion");
     assert!(matches!(
-        classify_summary_step(&tool_response, ""),
+        crate::agent::compact_v2::full::summary::classify_summary_step(&tool_response, ""),
         Err(AgentError::CompactIncompleteResponse {
             stop_reason: StopReason::ToolUse
         })
     ));
     assert!(matches!(
-        classify_summary_step(&tool_response, "<summary>first"),
+        crate::agent::compact_v2::full::summary::classify_summary_step(
+            &tool_response,
+            "<summary>first"
+        ),
         Err(AgentError::CompactIncompleteResponse {
             stop_reason: StopReason::ToolUse
         })
@@ -248,7 +286,7 @@ fn classify_strips_analysis_and_extracts_the_summary_body() {
             "<analysis>some analysis</analysis><summary>the summary</summary>",
             StopReason::EndTurn,
         )
-        .unwrap(),
+        .expect("the classify fixture result is required for this assertion"),
     );
     assert!(text.ends_with("the summary"));
     assert!(!text.contains("<analysis>"));
@@ -262,7 +300,7 @@ fn classify_drops_text_outside_the_summary_tags() {
             "prefix text <summary>real summary content</summary> suffix",
             StopReason::EndTurn,
         )
-        .unwrap(),
+        .expect("the classify fixture result is required for this assertion"),
     );
     assert!(text.ends_with("real summary content"));
     assert!(!text.contains("<summary>"));
@@ -277,7 +315,7 @@ fn classify_keeps_body_after_nested_reasoning() {
             "<thinking>hidden <analysis>nested hidden</analysis></thinking><summary>保留结论与 analysis 方法。</summary><analysis>unfinished tail",
             StopReason::EndTurn,
         )
-        .unwrap(),
+        .expect("the classify fixture result is required for this assertion"),
     );
     assert!(text.ends_with("保留结论与 analysis 方法。"));
     assert!(!text.contains("hidden"));
@@ -287,6 +325,9 @@ fn classify_keeps_body_after_nested_reasoning() {
 #[test]
 fn classify_preserves_plain_text_and_similar_tag_names() {
     let body = "analysis and thinking are ordinary words; <analysis_notes>保留正文</analysis_notes> &lt;analysis&gt;";
-    let text = completed(classify(body, StopReason::EndTurn).unwrap());
+    let text = completed(
+        classify(body, StopReason::EndTurn)
+            .expect("the classify fixture result is required for this assertion"),
+    );
     assert!(text.ends_with(body), "只识别精确控制标签，不剥除相近正文");
 }

@@ -1,8 +1,14 @@
 //! StatusPanel 面板测试：页签切换（hook 顺序跨帧）、空态/错误态可见与统计取值。
 
-use super::*;
+use super::Event;
+use super::KeyCode;
+use super::SERVICE_SNAPSHOT;
+use super::TAB_CONTEXT;
+use super::TAB_SERVICE;
+use super::TuiRenderUnit;
+use super::VIEW_MODELS;
+use super::i18n;
 
-use crate::kit::atoms::{McpInitPhase, McpStatusSnapshot, ServiceSnapshot, ViewModelsSnapshot};
 use crate::kit::tui_render_unit::{TuiSubAgentGroup, TuiSystemNote, TuiUserBubble};
 use ratatui_kit::crossterm::event::{KeyEvent, KeyModifiers};
 use ratatui_kit::prelude::{EventResult, State, element};
@@ -69,7 +75,7 @@ pub(super) struct MountedPanel {
 
 impl MountedPanel {
     fn event(&self, event: Event) -> EventResult {
-        handle_status_event(event, self.active_tab)
+        super::handle_status_event(event, self.active_tab)
     }
 }
 
@@ -132,6 +138,7 @@ fn system_note(text: &str) -> TuiRenderUnit {
     })
 }
 
+#[must_use]
 fn subagent_group(id: &str) -> TuiSubAgentGroup {
     TuiSubAgentGroup {
         instance_id: format!("instance-{id}"),
@@ -311,7 +318,7 @@ fn derive_vm_stats_counts_each_kind_recursively() {
         generation: 0,
     };
 
-    let stats = derive_vm_stats(&snap);
+    let stats = super::derive_vm_stats(&snap);
     assert_eq!(
         stats.user_bubbles, 2,
         "外层 user bubble + 分组内 user bubble"
@@ -322,3 +329,11 @@ fn derive_vm_stats_counts_each_kind_recursively() {
     assert_eq!(stats.tool_cards, 0);
     assert_eq!(stats.total, 4, "total 必须等于各类之和");
 }
+
+use crate::kit::atoms::McpInitPhase;
+
+use crate::kit::atoms::McpStatusSnapshot;
+
+use crate::kit::atoms::ServiceSnapshot;
+
+use crate::kit::atoms::ViewModelsSnapshot;

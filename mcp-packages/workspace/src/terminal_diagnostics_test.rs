@@ -1,4 +1,9 @@
-use super::*;
+use crate::terminal::BashTool;
+use peri_agent::tools::BaseTool;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 /// 等待任务表清空（`active_count == 0`）。
 ///
@@ -137,7 +142,7 @@ async fn test_sync_timeout_promote_with_output_notes_progress() {
 #[test]
 fn test_background_cleanup_hints_match_host_platform() {
     for platform in ["linux", "macos", "windows"] {
-        let hint = background_cleanup_hint(5036, platform);
+        let hint = crate::terminal::background_cleanup_hint(5036, platform);
         assert!(hint.contains("verify process exit"));
         assert!(hint.contains("completion notification"));
         if platform == "windows" {

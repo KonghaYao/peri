@@ -1,4 +1,13 @@
-use super::*;
+use super::AcpEventData;
+use super::EntryStatus;
+use super::FoldKey;
+use super::FoldState;
+use super::TuiReasoningChunk;
+use super::TuiRenderUnit;
+use super::TuiTextChunk;
+use super::TuiToolEnded;
+use super::TuiToolStarted;
+use super::serial;
 
 // ── Slice 2：折叠状态机（spec §7 表）经 push_view_models 单点 pass ──────────
 
@@ -19,15 +28,15 @@ fn tool_card_of(
 #[test]
 #[serial]
 fn test_turn_interrupted_stops_running_tool_card_animation() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("r1".into()),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
             tool_id: "t1".into(),
@@ -42,7 +51,7 @@ fn test_turn_interrupted_stops_running_tool_card_animation() {
     let running = VIEW_MODELS.state().read().clone();
     assert!(tool_card_of(&running, 0).is_running);
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "user cancelled".into(),
@@ -64,9 +73,9 @@ fn test_turn_interrupted_stops_running_tool_card_animation() {
 #[test]
 #[serial]
 fn test_fold_pass_reasoning_running_preview_then_completed_collapsed() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ReasoningChunk(TuiReasoningChunk {
             text: "正在检查消息类型……".into(),
@@ -75,7 +84,7 @@ fn test_fold_pass_reasoning_running_preview_then_completed_collapsed() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
-    let r = reasoning_of(&snap, 0);
+    let r = super::reasoning_of(&snap, 0);
     assert_eq!(
         r.status,
         EntryStatus::Running,
@@ -90,7 +99,7 @@ fn test_fold_pass_reasoning_running_preview_then_completed_collapsed() {
 
     // 追加文本 chunk——文本到达 = 本消息 thinking 块结束（方案 1）：
     // 推理块立即冻结为 Completed/Collapsed（`◐ Thinking…` 停止），正文继续流式。
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "回复内容".into(),
@@ -99,7 +108,7 @@ fn test_fold_pass_reasoning_running_preview_then_completed_collapsed() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
-    let r = reasoning_of(&snap, 0);
+    let r = super::reasoning_of(&snap, 0);
     assert_eq!(
         r.status,
         EntryStatus::Completed,
@@ -116,9 +125,9 @@ fn test_fold_pass_reasoning_running_preview_then_completed_collapsed() {
         "推理冻结时应携带时长（Thought for Ns）"
     );
 
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let snap = VIEW_MODELS.state().read().clone();
-    let r = reasoning_of(&snap, 0);
+    let r = super::reasoning_of(&snap, 0);
     assert_eq!(
         r.status,
         EntryStatus::Completed,
@@ -137,10 +146,10 @@ fn test_fold_pass_reasoning_running_preview_then_completed_collapsed() {
 #[test]
 #[serial]
 fn test_fold_pass_tool_preview_then_terminal_collapsed() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
 
     // running：ToolStarted
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
             tool_id: "t1".into(),
@@ -157,7 +166,7 @@ fn test_fold_pass_tool_preview_then_terminal_collapsed() {
     assert!(!tool_card_of(&snap, 0).user_modified);
 
     // success：ToolEnded（is_error=false）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             tool_id: "t1".into(),
@@ -176,7 +185,7 @@ fn test_fold_pass_tool_preview_then_terminal_collapsed() {
     assert!(!t.is_running);
 
     // error：新工具失败
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
             tool_id: "t2".into(),
@@ -188,7 +197,7 @@ fn test_fold_pass_tool_preview_then_terminal_collapsed() {
             origin_readable: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             tool_id: "t2".into(),
@@ -210,9 +219,9 @@ fn test_fold_pass_tool_preview_then_terminal_collapsed() {
 #[test]
 #[serial]
 fn test_fold_pass_subagent_running_and_completed_collapsed() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "sa-1".into(),
@@ -234,7 +243,7 @@ fn test_fold_pass_subagent_running_and_completed_collapsed() {
         other => panic!("expected TuiSubAgentGroup, got {other:?}"),
     }
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "sa-1".into(),
@@ -258,9 +267,9 @@ fn test_fold_pass_subagent_running_and_completed_collapsed() {
 #[test]
 #[serial]
 fn test_fold_pass_subagent_error_expanded() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "sa-1".into(),
@@ -269,7 +278,7 @@ fn test_fold_pass_subagent_error_expanded() {
             parent_tool_call_id: None,
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "sa-1".into(),
@@ -298,9 +307,9 @@ fn test_fold_pass_subagent_error_expanded() {
 #[test]
 #[serial]
 fn test_subagent_error_whitespace_result_no_reason_line() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "sa-1".into(),
@@ -309,7 +318,7 @@ fn test_subagent_error_whitespace_result_no_reason_line() {
             parent_tool_call_id: None,
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "sa-1".into(),
@@ -341,9 +350,9 @@ fn test_subagent_error_whitespace_result_no_reason_line() {
 #[test]
 #[serial]
 fn test_subagent_completed_with_failed_child_tool_not_error() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "sa-1".into(),
@@ -353,7 +362,7 @@ fn test_subagent_completed_with_failed_child_tool_not_error() {
         },
     );
     // 子工具启动（agent_id 路由到子 turn）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
             tool_id: "t1".into(),
@@ -366,7 +375,7 @@ fn test_subagent_completed_with_failed_child_tool_not_error() {
         }),
     );
     // 子工具失败
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             tool_id: "t1".into(),
@@ -376,7 +385,7 @@ fn test_subagent_completed_with_failed_child_tool_not_error() {
         }),
     );
     // parent 完成（is_error=false——subagent 整体成功，失败工具重试后继续）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "sa-1".into(),
@@ -411,9 +420,9 @@ fn test_subagent_completed_with_failed_child_tool_not_error() {
 #[test]
 #[serial]
 fn test_fold_pass_reasoning_manual_override_survives_following_turn() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ReasoningChunk(TuiReasoningChunk {
             text: "第一轮思考".into(),
@@ -421,7 +430,7 @@ fn test_fold_pass_reasoning_manual_override_survives_following_turn() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "第一轮回复".into(),
@@ -429,9 +438,9 @@ fn test_fold_pass_reasoning_manual_override_survives_following_turn() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let snap = VIEW_MODELS.state().read().clone();
-    assert!(reasoning_of(&snap, 0).collapsed());
+    assert!(super::reasoning_of(&snap, 0).collapsed());
 
     // 用户手动展开（键盘 handler 的持久化等价操作）
     FOLD_OVERRIDES
@@ -440,7 +449,7 @@ fn test_fold_pass_reasoning_manual_override_survives_following_turn() {
         .insert(FoldKey::Reasoning("msg_r1".into()), FoldState::Expanded);
 
     // 新一轮开始——push 重建后手动展开必须保持
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "第二个问题".into(),
@@ -449,7 +458,7 @@ fn test_fold_pass_reasoning_manual_override_survives_following_turn() {
     );
     let snap = VIEW_MODELS.state().read().clone();
     // items = [Assistant(msg_r1), UserBubble]——LocalUserBubble append 到 committed 尾部
-    let r = reasoning_of(&snap, 0);
+    let r = super::reasoning_of(&snap, 0);
     assert_eq!(
         r.fold,
         FoldState::Expanded,
@@ -461,9 +470,9 @@ fn test_fold_pass_reasoning_manual_override_survives_following_turn() {
 #[test]
 #[serial]
 fn test_fold_pass_reasoning_manual_override_immune_during_streaming() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ReasoningChunk(TuiReasoningChunk {
             text: "思考中".into(),
@@ -472,7 +481,7 @@ fn test_fold_pass_reasoning_manual_override_immune_during_streaming() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
-    assert_eq!(reasoning_of(&snap, 0).fold, FoldState::Preview);
+    assert_eq!(super::reasoning_of(&snap, 0).fold, FoldState::Preview);
 
     // 用户手动展开（流式中）
     FOLD_OVERRIDES
@@ -481,7 +490,7 @@ fn test_fold_pass_reasoning_manual_override_immune_during_streaming() {
         .insert(FoldKey::Reasoning("msg_r2".into()), FoldState::Expanded);
 
     // 继续 streaming——不得收回 Preview
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ReasoningChunk(TuiReasoningChunk {
             text: "继续思考".into(),
@@ -491,7 +500,7 @@ fn test_fold_pass_reasoning_manual_override_immune_during_streaming() {
     );
     let snap = VIEW_MODELS.state().read().clone();
     assert_eq!(
-        reasoning_of(&snap, 0).fold,
+        super::reasoning_of(&snap, 0).fold,
         FoldState::Expanded,
         "手动展开在流式期间免疫自动策略"
     );
@@ -501,9 +510,9 @@ fn test_fold_pass_reasoning_manual_override_immune_during_streaming() {
 #[test]
 #[serial]
 fn test_fold_pass_tool_manual_override_restores_user_modified() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
             tool_id: "t1".into(),
@@ -515,7 +524,7 @@ fn test_fold_pass_tool_manual_override_restores_user_modified() {
             origin_readable: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             tool_id: "t1".into(),
@@ -534,7 +543,7 @@ fn test_fold_pass_tool_manual_override_restores_user_modified() {
 
     // 新一轮 push（LocalUserBubble 触发 view_models 重建）——
     // 卡片重建后覆盖与 user_modified 恢复
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "第二个问题".into(),
@@ -555,7 +564,7 @@ fn test_fold_pass_tool_manual_override_restores_user_modified() {
 #[test]
 #[serial]
 fn test_push_view_models_for_reset_clears_fold_overrides() {
-    make_fold_test_state();
+    super::make_fold_test_state();
     FOLD_OVERRIDES
         .state()
         .write()
@@ -569,7 +578,7 @@ fn test_push_view_models_for_reset_clears_fold_overrides() {
     });
     assert!(crate::kit::atoms::FOCUSED_ENTRY.state().read().is_some());
 
-    push_view_models_for_reset();
+    super::push_view_models_for_reset();
 
     assert!(
         FOLD_OVERRIDES.state().read().is_empty(),
@@ -587,8 +596,8 @@ fn test_push_view_models_for_reset_clears_fold_overrides() {
 #[test]
 #[serial]
 fn test_local_user_bubble_carries_attachment_records() {
-    let mut state = make_fold_test_state();
-    dispatch_and_notify(
+    let mut state = super::make_fold_test_state();
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "看这张图".into(),
@@ -613,3 +622,5 @@ fn test_local_user_bubble_carries_attachment_records() {
     assert_eq!(bubble.attachments[0].bytes, 45);
     assert_eq!(bubble.attachments[1].bytes, 2048);
 }
+
+use crate::kit::atoms::{FOLD_OVERRIDES, VIEW_MODELS, ViewModelsSnapshot};

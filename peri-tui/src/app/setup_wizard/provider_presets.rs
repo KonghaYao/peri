@@ -10,6 +10,7 @@ use super::{MigratedProvider, ProviderType};
 // ── 预设结构 ──────────────────────────────────────────────────────────────────
 
 /// 单个内置供应商预设。
+#[derive(Debug, Clone, Copy)]
 pub struct ProviderPreset {
     /// 展示名（品牌名）
     pub name: &'static str,
@@ -33,6 +34,7 @@ pub struct ProviderPreset {
 impl ProviderPreset {
     /// 转换为向导内部的 Provider 配置：以 `provider_type` 建立默认值后
     /// 逐字段覆盖，避免依赖 `MigratedProvider` 的私有字段。
+    #[must_use]
     pub fn to_migrated(&self) -> MigratedProvider {
         let mut mp = MigratedProvider::new(self.provider_type);
         mp.provider_id = self.provider_id.to_string();

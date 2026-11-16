@@ -6,9 +6,11 @@
 //! 另有缓存生命周期回归锁定：同一时刻至多一份整份正文存活——键不匹配先释放旧项再
 //! 渲染、真正压缩前释放（Full 摘要请求期间不留历史正文）、退出准备作用域统一释放。
 
-use super::model_view::ModelViewScope;
-use super::reason::run_reason;
-use super::{CompactInput, ReasonInput, StageContext};
+use crate::agent::stages::context::StageContext;
+use crate::agent::stages::model_view::ModelViewScope;
+
+use crate::agent::stages::CompactInput;
+use crate::agent::stages::ReasonInput;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -155,7 +157,7 @@ async fn test_run_reason_renders_model_view_once_per_execution() {
     let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone()).build();
     ctx.session.transcript.write().append(human("hello"));
 
-    let _ = run_reason(ReasonInput {
+    let _ = crate::agent::stages::reason::run_reason(ReasonInput {
         context: ctx.clone(),
         has_tool_calls: false,
     })
@@ -171,7 +173,7 @@ async fn test_run_reason_renders_model_view_once_per_execution() {
         "请求快照取出后必须释放缓存槽，正文副本不跨 Act 常驻"
     );
 
-    let _ = run_reason(ReasonInput {
+    let _ = crate::agent::stages::reason::run_reason(ReasonInput {
         context: ctx.clone(),
         has_tool_calls: false,
     })
@@ -201,11 +203,12 @@ async fn test_compact_check_and_reason_reuse_same_view() {
     ctx.model_view.reset();
     // Compact 阶段：判断是否 Skip 前的 refresh
     assert!(
-        super::compact::context_pressure::refresh(&ctx).expect("Compact 检查 refresh"),
+        crate::agent::stages::compact::context_pressure::refresh(&ctx)
+            .expect("Compact 检查 refresh"),
         "首次 refresh 建立估算基线，按增长处理"
     );
 
-    let _ = run_reason(ReasonInput {
+    let _ = crate::agent::stages::reason::run_reason(ReasonInput {
         context: ctx.clone(),
         has_tool_calls: false,
     })
@@ -229,11 +232,11 @@ fn test_refresh_reports_growth_after_transcript_append() {
     let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone()).build();
 
     assert!(
-        super::compact::context_pressure::refresh(&ctx).expect("首次 refresh"),
+        crate::agent::stages::compact::context_pressure::refresh(&ctx).expect("首次 refresh"),
         "首次 refresh 建立估算基线，按增长处理"
     );
     assert!(
-        !super::compact::context_pressure::refresh(&ctx).expect("同值 refresh"),
+        !crate::agent::stages::compact::context_pressure::refresh(&ctx).expect("同值 refresh"),
         "同值重复 refresh 不构成增长"
     );
     assert_eq!(ctx.model_view.render_count(), 1, "修订未变不应重建视图");
@@ -244,7 +247,7 @@ fn test_refresh_reports_growth_after_transcript_append() {
         .append(human(&"x".repeat(4_000)));
 
     assert!(
-        super::compact::context_pressure::refresh(&ctx).expect("增长后 refresh"),
+        crate::agent::stages::compact::context_pressure::refresh(&ctx).expect("增长后 refresh"),
         "transcript 增长后 refresh 必须报告 grew=true"
     );
     assert_eq!(
@@ -321,8 +324,11 @@ impl Model for SummarySlotProbe {
     ) -> ModelResult<ModelResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let cached = self.scope.get().is_some_and(|scope| scope.is_cached());
-        self.slot_cached.lock().unwrap().push(cached);
-        Ok(ModelResponse::new(
+        self.slot_cached
+            .lock()
+            .expect("self slot cached mutex must remain unpoisoned throughout the test")
+            .push(cached);
+        Ok(ModelResponse::try_new(
             ModelMessage::assistant_text("<summary>full compact summary</summary>"),
             StopReason::EndTurn,
             None,
@@ -381,7 +387,7 @@ async fn test_full_compact_summary_request_holds_no_cached_view() {
     assert!(cached_body.upgrade().is_some(), "前提：正文只由缓存槽持有");
     assert_eq!(ctx.model_view.render_count(), 1, "前提：预置视图渲染一次");
 
-    let output = super::compact::run_compact(CompactInput {
+    let output = crate::agent::stages::compact::run_compact(CompactInput {
         context: ctx.clone(),
         has_tool_calls: false,
     })
@@ -395,7 +401,11 @@ async fn test_full_compact_summary_request_holds_no_cached_view() {
         "单次 Full 只发一次摘要请求"
     );
     assert_eq!(
-        probe.slot_cached.lock().unwrap().clone(),
+        probe
+            .slot_cached
+            .lock()
+            .expect("probe slot cached mutex must remain unpoisoned throughout the test")
+            .clone(),
         vec![false],
         "摘要请求期间缓存槽必须为空：不得多驻留一份整份历史正文"
     );
@@ -423,7 +433,7 @@ async fn test_compact_skip_keeps_cached_view_for_reason() {
     ctx.session.transcript.write().append(human("hello"));
 
     ctx.model_view.reset();
-    let output = super::compact::run_compact(CompactInput {
+    let output = crate::agent::stages::compact::run_compact(CompactInput {
         context: ctx.clone(),
         has_tool_calls: false,
     })
@@ -437,7 +447,7 @@ async fn test_compact_skip_keeps_cached_view_for_reason() {
         "Skip 路径必须保留缓存槽供 Reason 复用"
     );
 
-    let _ = run_reason(ReasonInput {
+    let _ = crate::agent::stages::reason::run_reason(ReasonInput {
         context: ctx.clone(),
         has_tool_calls: false,
     })
@@ -486,7 +496,7 @@ async fn test_run_reason_releases_view_when_before_model_hook_fails() {
         .build();
     ctx.session.transcript.write().append(human("hello"));
 
-    let error = run_reason(ReasonInput {
+    let error = crate::agent::stages::reason::run_reason(ReasonInput {
         context: ctx.clone(),
         has_tool_calls: false,
     })
@@ -525,7 +535,7 @@ async fn test_run_reason_releases_view_when_preparation_is_cancelled() {
     ctx.session.transcript.write().append(human("hello"));
     ctx.session.turn.cancel_token.cancel();
 
-    let error = run_reason(ReasonInput {
+    let error = crate::agent::stages::reason::run_reason(ReasonInput {
         context: ctx.clone(),
         has_tool_calls: false,
     })
@@ -567,7 +577,7 @@ async fn test_micro_not_applied_keeps_cached_view_for_reason() {
         .append(human(&"x".repeat(4_000)));
 
     ctx.model_view.reset();
-    let output = super::compact::run_compact(CompactInput {
+    let output = crate::agent::stages::compact::run_compact(CompactInput {
         context: ctx.clone(),
         has_tool_calls: false,
     })
@@ -581,7 +591,7 @@ async fn test_micro_not_applied_keeps_cached_view_for_reason() {
         "未落地的 Micro 路径必须保留缓存槽：没有第二份正文需要让位"
     );
 
-    let _ = run_reason(ReasonInput {
+    let _ = crate::agent::stages::reason::run_reason(ReasonInput {
         context: ctx.clone(),
         has_tool_calls: false,
     })
@@ -614,7 +624,7 @@ async fn test_shadow_mode_keeps_cached_view_for_reason() {
         .append(human(&"x".repeat(4_000)));
 
     ctx.model_view.reset();
-    let output = super::compact::run_compact(CompactInput {
+    let output = crate::agent::stages::compact::run_compact(CompactInput {
         context: ctx.clone(),
         has_tool_calls: false,
     })
@@ -628,7 +638,7 @@ async fn test_shadow_mode_keeps_cached_view_for_reason() {
         "shadow 路径不构造摘要视图，缓存必须保留"
     );
 
-    let _ = run_reason(ReasonInput {
+    let _ = crate::agent::stages::reason::run_reason(ReasonInput {
         context: ctx.clone(),
         has_tool_calls: false,
     })
@@ -675,13 +685,13 @@ fn async_result_view_cache_tracks_protected_state_without_transcript_change() {
             summary: None,
             metadata: serde_json::json!({"task_id": "shell-T21"}),
         })
-        .unwrap();
+        .expect("the construct fixture result is required for this assertion");
     mailbox
         .accept(id, &terminal, MessageSource::ShellComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     mailbox
         .mark_canonical_ready(id, &terminal, MessageSource::ShellComplete, Some(1))
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
 
     // 前提：transcript 本身不变，变更只发生在 mailbox。
     let ready = scope
@@ -710,7 +720,9 @@ fn async_result_view_cache_tracks_protected_state_without_transcript_change() {
         "请求进行中仍必须携带未提交的终态事实"
     );
 
-    mailbox.cover_after_commit(&receipt, None).unwrap();
+    mailbox
+        .cover_after_commit(&receipt, None)
+        .expect("the cover after commit fixture result is required for this assertion");
     let covered = scope
         .view_with_protected(&transcript, &caps, &mailbox.protected_snapshot())
         .expect("Covered 视图");

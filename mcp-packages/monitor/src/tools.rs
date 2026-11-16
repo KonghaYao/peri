@@ -5,16 +5,24 @@
 //! direct/local use (owner from `ToolContext::session_id`); both paths share the
 //! same [`MonitorState`] operations.
 
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_agent::tools::{BaseTool, ToolContext};
 use serde_json::{Map, Value};
 
-use crate::state::{
-    validate_read_limits, MonitorError, MonitorState, ReadResult, StartRequest, StartedMonitor,
-    DEFAULT_READ_BYTES, DEFAULT_READ_LIMIT, MAX_ALERT_PATTERN_CHARS, MAX_DEADLINE_MS,
-};
+use crate::state;
+use crate::state::MonitorError;
+use crate::state::MonitorState;
+use crate::state::ReadResult;
+use crate::state::StartRequest;
+use crate::state::StartedMonitor;
+use crate::state::DEFAULT_READ_BYTES;
+use crate::state::DEFAULT_READ_LIMIT;
+use crate::state::MAX_ALERT_PATTERN_CHARS;
+use crate::state::MAX_DEADLINE_MS;
 
 /// Maximum tasks returned by `monitor_list`.
 const MAX_LIST_LIMIT: usize = 200;
@@ -54,7 +62,7 @@ pub(crate) fn parse_start(arguments: &Map<String, Value>) -> Result<StartRequest
 pub(crate) fn parse_read(arguments: &Map<String, Value>) -> Result<ReadArguments, MonitorError> {
     let limit = optional_usize(arguments, "limit")?.unwrap_or(DEFAULT_READ_LIMIT);
     let max_bytes = optional_usize(arguments, "max_bytes")?.unwrap_or(DEFAULT_READ_BYTES);
-    let (limit, max_bytes) = validate_read_limits(limit, max_bytes)?;
+    let (limit, max_bytes) = state::validate_read_limits(limit, max_bytes)?;
     Ok(ReadArguments {
         task_id: required_string(arguments, "task_id")?,
         after_seq: optional_u64(arguments, "after_seq")?,
@@ -140,6 +148,7 @@ fn optional_bool(arguments: &Map<String, Value>, key: &str) -> Result<Option<boo
 }
 
 /// All tools declared by the instance, in registry declaration order.
+#[must_use]
 pub fn tools(state: Arc<MonitorState>) -> Vec<Arc<dyn BaseTool>> {
     vec![
         Arc::new(MonitorStartTool::new(Arc::clone(&state))),
@@ -153,7 +162,16 @@ pub struct MonitorStartTool {
     state: Arc<MonitorState>,
 }
 
+impl Debug for MonitorStartTool {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MonitorStartTool")
+            .finish_non_exhaustive()
+    }
+}
+
 impl MonitorStartTool {
+    #[must_use]
     pub fn new(state: Arc<MonitorState>) -> Self {
         Self { state }
     }
@@ -229,7 +247,16 @@ pub struct MonitorReadTool {
     state: Arc<MonitorState>,
 }
 
+impl Debug for MonitorReadTool {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MonitorReadTool")
+            .finish_non_exhaustive()
+    }
+}
+
 impl MonitorReadTool {
+    #[must_use]
     pub fn new(state: Arc<MonitorState>) -> Self {
         Self { state }
     }
@@ -297,7 +324,16 @@ pub struct MonitorStopTool {
     state: Arc<MonitorState>,
 }
 
+impl Debug for MonitorStopTool {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MonitorStopTool")
+            .finish_non_exhaustive()
+    }
+}
+
 impl MonitorStopTool {
+    #[must_use]
     pub fn new(state: Arc<MonitorState>) -> Self {
         Self { state }
     }
@@ -349,7 +385,16 @@ pub struct MonitorListTool {
     state: Arc<MonitorState>,
 }
 
+impl Debug for MonitorListTool {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MonitorListTool")
+            .finish_non_exhaustive()
+    }
+}
+
 impl MonitorListTool {
+    #[must_use]
     pub fn new(state: Arc<MonitorState>) -> Self {
         Self { state }
     }

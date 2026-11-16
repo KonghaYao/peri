@@ -3,14 +3,10 @@ use std::sync::OnceLock;
 use parking_lot::RwLock;
 
 use crate::components::textarea::TextAreaState;
-use crate::kit::atoms::{
-    AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, FILE_LIST, MENTION_PREFIX, MENTION_SELECTED_INDEX,
-    SLASH_HINT_ACTIVE, SLASH_PREFIX, SLASH_SELECTED_INDEX, WIZARD_ACTIVE,
-};
-use crate::kit::panel_registry::open_panel;
+
 use crate::kit::slash_completion::{SlashActionKind, SlashCompletionItem};
-use crate::kit::slash_projection::display_name;
-use crate::kit::ui_command::{UiCommandAction, resolve_ui_command};
+
+use crate::kit::ui_command::UiCommandAction;
 
 pub(super) fn reset_mention_popup() {
     *AT_MENTION_ACTIVE.state().write() = false;
@@ -58,11 +54,11 @@ pub(super) fn apply_slash_selection(state: &mut TextAreaState, cmd: &str) {
 /// 未命中 → `apply_slash_selection` 落输入框（display 即 lexical，解析器
 /// 严格命中）。
 pub(super) fn handle_slash_selection(editor: &mut TextAreaState, item: &SlashCompletionItem) {
-    match resolve_ui_command(&item.insert_text) {
+    match crate::kit::ui_command::resolve_ui_command(&item.insert_text) {
         Some(UiCommandAction::OpenPanel(kind)) => {
             editor.text.clear();
             editor.cursor = 0;
-            open_panel(kind);
+            crate::kit::panel_registry::open_panel(kind);
         }
         Some(UiCommandAction::ToggleSetup) => {
             editor.text.clear();
@@ -83,7 +79,7 @@ pub(super) fn build_slash_items() -> Vec<SlashCompletionItem> {
     let mut items: Vec<SlashCompletionItem> = remote
         .iter()
         .flat_map(|entry| {
-            let label = display_name(&entry.fullname, entry.level);
+            let label = crate::kit::slash_projection::display_name(&entry.fullname, entry.level);
             let label_lowercase = label.to_lowercase();
             // 与主 display 名相同的 alias 跳过（主条目已生成，防重复）
             let aliases: Vec<&String> = entry
@@ -250,3 +246,21 @@ pub(super) fn detect_slash_token(text: &str, cursor_byte: usize) -> Option<(Stri
 
     Some((after_slash.to_string(), slash_pos))
 }
+
+use crate::kit::atoms::AT_MENTION_ACTIVE;
+
+use crate::kit::atoms::AVAILABLE_SLASH_COMMANDS;
+
+use crate::kit::atoms::FILE_LIST;
+
+use crate::kit::atoms::MENTION_PREFIX;
+
+use crate::kit::atoms::MENTION_SELECTED_INDEX;
+
+use crate::kit::atoms::SLASH_HINT_ACTIVE;
+
+use crate::kit::atoms::SLASH_PREFIX;
+
+use crate::kit::atoms::SLASH_SELECTED_INDEX;
+
+use crate::kit::atoms::WIZARD_ACTIVE;

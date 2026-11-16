@@ -1,4 +1,11 @@
-use super::*;
+use crate::agent::async_tasks::manager::TaskManager;
+
+use crate::agent::async_tasks::registry::BackgroundTaskRegistry;
+
+use crate::agent::async_tasks::shell_executor::ShellExecutor;
+use peri_acp_types::tasks::BgShellHandle;
+use peri_acp_types::tasks::BgTaskKind;
+use peri_acp_types::tasks::BgTaskRegistration;
 use peri_acp_types::tasks::{TaskManager as TaskManagerPort, TaskShutdownReport};
 
 #[derive(Clone, Default)]
@@ -17,7 +24,9 @@ impl std::io::Write for LogBuffer {
 
 #[tokio::test(flavor = "current_thread")]
 async fn async_tasks_owner_drop_and_cancel_join_panic_are_logged() {
-    use crate::agent::async_tasks::{BackgroundTask, BackgroundTaskStatus, BgCancelHandle};
+    use crate::agent::async_tasks::registry::BackgroundTask;
+    use crate::agent::async_tasks::registry::BackgroundTaskStatus;
+    use crate::agent::async_tasks::registry::BgCancelHandle;
     let logs = LogBuffer::default();
     let writer = logs.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -35,8 +44,11 @@ async fn async_tasks_owner_drop_and_cancel_join_panic_are_logged() {
         loop {
             tracing::callsite::rebuild_interest_cache();
             let candidate = TaskManager::new();
-            drop(candidate.begin_external_execution("test-owner").unwrap());
-            let captured = String::from_utf8(logs.0.lock().clone()).unwrap();
+            drop(candidate.begin_external_execution("test-owner").expect(
+                "the begin external execution fixture result is required for this assertion",
+            ));
+            let captured = String::from_utf8(logs.0.lock().clone())
+                .expect("the fixture text must be valid UTF-8");
             if captured.contains("scope=test-owner id=1") {
                 break candidate;
             }
@@ -71,8 +83,10 @@ async fn async_tasks_owner_drop_and_cancel_join_panic_are_logged() {
             owner_session_id: None,
             owner_identity: None,
         })
-        .unwrap();
-    manager.cancel("cancel-panic-task").unwrap();
+        .expect("the register with kind fixture result is required for this assertion");
+    manager
+        .cancel("cancel-panic-task")
+        .expect("the cancel fixture result is required for this assertion");
     // A joined panic proves that computation stopped; without the producer's
     // result it cannot prove notification/terminal settlement.
     assert_eq!(manager.shutdown().await, TaskShutdownReport::Incomplete);
@@ -82,7 +96,8 @@ async fn async_tasks_owner_drop_and_cancel_join_panic_are_logged() {
         manager.pending_handoff_tasks()[0].task_id,
         "cancel-panic-task"
     );
-    let text = String::from_utf8(logs.0.lock().clone()).unwrap();
+    let text =
+        String::from_utf8(logs.0.lock().clone()).expect("the fixture text must be valid UTF-8");
     for (message, field) in [
         (
             "external execution scope still uncertain after owner drop",
@@ -99,7 +114,8 @@ async fn async_tasks_owner_drop_and_cancel_join_panic_are_logged() {
             .expect(&text);
         assert!(line.contains("WARN"), "{line}");
         assert!(line.contains(field), "{line}");
-        std::io::Write::write_all(&mut std::io::stdout(), format!("{line}\n").as_bytes()).unwrap();
+        std::io::Write::write_all(&mut std::io::stdout(), format!("{line}\n").as_bytes())
+            .expect("the write all fixture result is required for this assertion");
     }
 }
 
@@ -126,7 +142,11 @@ impl ShellExecutor for RecordingShellExecutor {
         timeout_ms: Option<u64>,
         _on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
     ) -> Result<BgShellHandle, Box<dyn std::error::Error + Send + Sync>> {
-        *self.request.lock().unwrap() = Some((command, cwd, timeout_ms));
+        *self
+            .request
+            .lock()
+            .expect("self request mutex must remain unpoisoned throughout the test") =
+            Some((command, cwd, timeout_ms));
         ownership.confirm_stopped();
         Err("execution environment rejected request".into())
     }
@@ -146,7 +166,11 @@ async fn injected_shell_environment_receives_request_without_local_execution() {
         .unwrap_err();
     assert_eq!(error.to_string(), "execution environment rejected request");
     assert_eq!(
-        executor.request.lock().unwrap().as_ref(),
+        executor
+            .request
+            .lock()
+            .expect("executor request mutex must remain unpoisoned throughout the test")
+            .as_ref(),
         Some(&("remote-command".into(), "remote-workspace".into(), Some(37)))
     );
     assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
@@ -168,8 +192,12 @@ async fn missing_shell_environment_is_rejected_without_admitting_work() {
 #[tokio::test]
 async fn test_shutdown_signals_owned_work_and_waits_for_its_cleanup() {
     let manager = TaskManager::new();
-    let token = manager.execution_cancel_token().unwrap();
-    let other = manager.execution_cancel_token().unwrap();
+    let token = manager
+        .execution_cancel_token()
+        .expect("the execution cancel token fixture result is required for this assertion");
+    let other = manager
+        .execution_cancel_token()
+        .expect("the execution cancel token fixture result is required for this assertion");
     other.cancel();
     assert!(!token.is_cancelled());
     let (cleanup_started, started) = tokio::sync::oneshot::channel();
@@ -177,17 +205,28 @@ async fn test_shutdown_signals_owned_work_and_waits_for_its_cleanup() {
     manager
         .spawn_owned(Box::pin(async move {
             token.cancelled().await;
-            cleanup_started.send(()).unwrap();
-            finished.await.unwrap();
+            cleanup_started.send(()).expect(
+                "cleanup started send test receiver must remain available for this delivery",
+            );
+            finished
+                .await
+                .expect("the finished fixture result is required for this assertion");
         }))
-        .unwrap();
+        .expect("the spawn owned fixture result is required for this assertion");
     let mut shutdown = manager.shutdown();
     assert!(futures::poll!(&mut shutdown).is_pending());
-    started.await.unwrap();
+    started
+        .await
+        .expect("the started fixture result is required for this assertion");
     assert!(futures::poll!(&mut shutdown).is_pending());
-    finish_cleanup.send(()).unwrap();
+    finish_cleanup
+        .send(())
+        .expect("finish cleanup send test receiver must remain available for this delivery");
     assert_eq!(shutdown.await, TaskShutdownReport::Complete);
-    assert!(manager.execution_cancel_token().unwrap().is_cancelled());
+    assert!(manager
+        .execution_cancel_token()
+        .expect("the execution cancel token fixture result is required for this assertion")
+        .is_cancelled());
 }
 
 #[tokio::test]
@@ -198,18 +237,22 @@ async fn test_shutdown_waits_for_owned_completion_and_closes_admission() {
         .spawn_owned(Box::pin(async move {
             let _ = waiting.await;
         }))
-        .unwrap();
+        .expect("the spawn owned fixture result is required for this assertion");
     let mut closing = manager.shutdown();
     assert!(futures::poll!(&mut closing).is_pending());
     assert!(manager.spawn_owned(Box::pin(async {})).is_err());
-    release.send(()).unwrap();
+    release
+        .send(())
+        .expect("release send test receiver must remain available for this delivery");
     assert_eq!(closing.await, TaskShutdownReport::Complete);
 }
 
 #[tokio::test]
 async fn test_shutdown_cannot_report_clean_after_abandoned_external_execution() {
     let manager = TaskManager::new();
-    let owner = manager.begin_external_execution("workspace").unwrap();
+    let owner = manager
+        .begin_external_execution("workspace")
+        .expect("the begin external execution fixture result is required for this assertion");
     drop(owner);
     assert_eq!(manager.shutdown().await, TaskShutdownReport::Incomplete);
     assert_eq!(manager.shutdown().await, TaskShutdownReport::Incomplete);
@@ -221,8 +264,14 @@ async fn test_shutdown_cannot_report_clean_after_abandoned_external_execution() 
 #[tokio::test]
 async fn test_external_uncertainty_clears_only_with_scope_evidence() {
     let manager = TaskManager::new();
-    drop(TaskManagerPort::begin_external_execution(&manager, "workspace").unwrap());
-    drop(TaskManagerPort::begin_external_execution(&manager, "web").unwrap());
+    drop(
+        TaskManagerPort::begin_external_execution(&manager, "workspace")
+            .expect("the begin external execution fixture result is required for this assertion"),
+    );
+    drop(
+        TaskManagerPort::begin_external_execution(&manager, "web")
+            .expect("the begin external execution fixture result is required for this assertion"),
+    );
     assert!(!TaskManagerPort::is_execution_idle(&manager));
     assert_eq!(
         TaskManagerPort::resolve_external_execution_evidence(&manager, "workspace"),
@@ -243,7 +292,10 @@ async fn test_external_uncertainty_clears_only_with_scope_evidence() {
 #[tokio::test]
 async fn test_evidenced_reconciliation_restores_clean_shutdown() {
     let manager = TaskManager::new();
-    drop(TaskManagerPort::begin_external_execution(&manager, "workspace").unwrap());
+    drop(
+        TaskManagerPort::begin_external_execution(&manager, "workspace")
+            .expect("the begin external execution fixture result is required for this assertion"),
+    );
     assert_eq!(manager.shutdown().await, TaskShutdownReport::Incomplete);
     assert_eq!(
         TaskManagerPort::resolve_external_execution_evidence(&manager, "workspace"),
@@ -255,7 +307,9 @@ async fn test_evidenced_reconciliation_restores_clean_shutdown() {
 #[tokio::test]
 async fn test_shutdown_accepts_confirmed_external_cleanup() {
     let manager = TaskManager::new();
-    let mut owner = manager.begin_external_execution("workspace").unwrap();
+    let mut owner = manager
+        .begin_external_execution("workspace")
+        .expect("the begin external execution fixture result is required for this assertion");
     owner.confirm_stopped();
     drop(owner);
     assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
@@ -274,7 +328,7 @@ async fn test_shutdown_does_not_treat_kill_request_as_external_completion() {
             kill: Some(Box::new(|| {})),
         },
     )
-    .unwrap();
+    .expect("the register fixture result is required for this assertion");
     assert_eq!(manager.shutdown().await, TaskShutdownReport::Incomplete);
 }
 

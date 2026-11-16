@@ -5,6 +5,7 @@
 //! 不可变数据（System Prompt、CLAUDE.md、Skills 摘要、日期等），全生命周期
 //! 不可变，确保 Prompt Cache 前缀稳定性。
 
+use std::fmt::{self, Debug, Formatter};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -21,10 +22,12 @@ use crate::thread::ThreadId;
 pub struct SessionId(uuid::Uuid);
 
 impl SessionId {
+    #[must_use]
     pub fn new() -> Self {
         Self(uuid::Uuid::now_v7())
     }
 
+    #[must_use]
     pub fn as_uuid(&self) -> uuid::Uuid {
         self.0
     }
@@ -37,7 +40,7 @@ impl Default for SessionId {
 }
 
 impl std::fmt::Display for SessionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
@@ -91,6 +94,7 @@ pub struct FrozenContext {
 
 impl FrozenContext {
     /// 创建 Builder
+    #[must_use]
     pub fn builder() -> FrozenContextBuilder {
         FrozenContextBuilder::default()
     }
@@ -118,59 +122,70 @@ pub struct FrozenContextBuilder {
 }
 
 impl FrozenContextBuilder {
+    #[must_use]
     pub fn system_prompt(mut self, s: impl Into<String>) -> Self {
         self.system_prompt = Some(s.into());
         self
     }
 
+    #[must_use]
     pub fn external_instructions(mut self, s: impl Into<String>) -> Self {
         self.external_instructions = Some(s.into());
         self
     }
 
+    #[must_use]
     pub fn claude_md(mut self, s: impl Into<String>) -> Self {
         self.claude_md = Some(s.into());
         self
     }
 
+    #[must_use]
     pub fn environment_prompt(mut self, body: impl Into<String>) -> Self {
         self.environment_prompt = Some(body.into());
         self
     }
 
+    #[must_use]
     pub fn skill_summary(mut self, s: impl Into<String>) -> Self {
         self.skill_summary = Some(s.into());
         self
     }
 
+    #[must_use]
     pub fn date(mut self, s: impl Into<String>) -> Self {
         self.date = Some(s.into());
         self
     }
 
+    #[must_use]
     pub fn language(mut self, s: Option<impl Into<String>>) -> Self {
         self.language = Some(s.map(Into::into));
         self
     }
 
     /// 设置 MetaHarness 冻结状态；未设置时 `build()` 使用默认空状态。
+    #[must_use]
     pub fn meta_harness(mut self, state: peri_acp_types::meta_harness::MetaHarnessState) -> Self {
         self.meta_harness = Some(state);
         self
     }
 
     /// 设置 beta flag 冻结值；未设置时空投影（一切按 false）。
+    #[must_use]
     pub fn beta_flags(mut self, flags: peri_acp_types::beta_flags::BetaFlags) -> Self {
         self.beta_flags = Some(flags);
         self
     }
 
     /// 设置冻结运行环境快照（H3）；未设置时保持 `None`（unavailable）。
+    #[must_use]
     pub fn runtime_env(mut self, env: Option<peri_acp_types::frozen::FrozenRuntimeEnv>) -> Self {
         self.runtime_env = env;
         self
     }
 
+    #[must_use]
     pub fn build(self) -> FrozenContext {
         FrozenContext {
             system_prompt: self.system_prompt.unwrap_or_default().into(),
@@ -201,6 +216,7 @@ impl FrozenContextBuilder {
 /// - `frozen`：会话级不可变上下文
 /// - `is_git_repo`：是否在 git 仓库中（构建后可设置）
 /// - `thread_id`：关联的 Thread（可选）
+#[derive(Debug)]
 pub struct SessionStore {
     /// 会话唯一 ID
     pub session_id: SessionId,
@@ -218,6 +234,7 @@ impl SessionStore {
     /// 创建新 SessionStore
     ///
     /// `is_git_repo` 默认为 false，需后续调用 `set_is_git_repo` 设置。
+    #[must_use]
     pub fn new(cwd: Arc<str>, frozen: FrozenContext, thread_id: Option<ThreadId>) -> Self {
         Self {
             session_id: SessionId::new(),
@@ -229,6 +246,7 @@ impl SessionStore {
     }
 
     /// 是否在 git 仓库中
+    #[must_use]
     pub fn is_git_repo(&self) -> bool {
         self.is_git_repo.load(Ordering::Relaxed)
     }
@@ -244,3 +262,27 @@ impl SessionStore {
 #[cfg(test)]
 #[path = "store_test.rs"]
 mod tests;
+
+impl Debug for FrozenContextBuilder {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FrozenContextBuilder")
+            .field("system_prompt_present", &self.system_prompt.is_some())
+            .field(
+                "external_instructions_present",
+                &self.external_instructions.is_some(),
+            )
+            .field(
+                "environment_prompt_present",
+                &self.environment_prompt.is_some(),
+            )
+            .field("claude_md_present", &self.claude_md.is_some())
+            .field("skill_summary_present", &self.skill_summary.is_some())
+            .field("date_present", &self.date.is_some())
+            .field("language_present", &self.language.is_some())
+            .field("meta_harness_present", &self.meta_harness.is_some())
+            .field("beta_flags_present", &self.beta_flags.is_some())
+            .field("runtime_env_present", &self.runtime_env.is_some())
+            .finish_non_exhaustive()
+    }
+}

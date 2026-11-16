@@ -11,6 +11,7 @@ use crate::{ModelError, ModelResult, ProtocolErrorKind};
 pub struct JsonObject(BTreeMap<String, Value>);
 
 impl JsonObject {
+    #[must_use]
     pub fn new(fields: BTreeMap<String, Value>) -> Self {
         Self(fields)
     }
@@ -24,6 +25,7 @@ impl JsonObject {
         Ok(Self(fields.into_iter().collect()))
     }
 
+    #[must_use]
     pub fn as_map(&self) -> &BTreeMap<String, Value> {
         &self.0
     }
@@ -41,10 +43,12 @@ impl From<BTreeMap<String, Value>> for JsonObject {
 pub struct MediaType(String);
 
 impl MediaType {
+    #[must_use]
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -108,10 +112,12 @@ pub enum ContentBlock {
 }
 
 impl ContentBlock {
+    #[must_use]
     pub fn text(text: impl Into<String>) -> Self {
         Self::Text { text: text.into() }
     }
 
+    #[must_use]
     pub fn reasoning(text: impl Into<String>) -> Self {
         Self::Reasoning {
             text: text.into(),
@@ -143,6 +149,7 @@ pub struct ToolDefinition {
 }
 
 impl ToolDefinition {
+    #[must_use]
     pub fn new(name: impl Into<String>, input_schema: JsonObject) -> Self {
         Self {
             name: name.into(),
@@ -151,6 +158,7 @@ impl ToolDefinition {
         }
     }
 
+    #[must_use]
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
         self
@@ -166,6 +174,7 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
+    #[must_use]
     pub fn new(id: impl Into<String>, name: impl Into<String>, arguments: JsonObject) -> Self {
         Self {
             id: id.into(),
@@ -174,14 +183,17 @@ impl ToolCall {
         }
     }
 
+    #[must_use]
     pub fn id(&self) -> &str {
         &self.id
     }
 
+    #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    #[must_use]
     pub fn arguments(&self) -> &JsonObject {
         &self.arguments
     }
@@ -200,6 +212,7 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
+    #[must_use]
     pub fn success(
         tool_call_id: impl Into<String>,
         name: impl Into<String>,
@@ -214,6 +227,7 @@ impl ToolResult {
         }
     }
 
+    #[must_use]
     pub fn error(
         tool_call_id: impl Into<String>,
         name: impl Into<String>,
@@ -228,6 +242,7 @@ impl ToolResult {
         }
     }
 
+    #[must_use]
     pub fn is_success(&self) -> bool {
         !self.is_error
     }
@@ -255,18 +270,21 @@ pub enum ModelMessage {
 }
 
 impl ModelMessage {
+    #[must_use]
     pub fn system_text(text: impl Into<String>) -> Self {
         Self::System {
             content: vec![ContentBlock::text(text)],
         }
     }
 
+    #[must_use]
     pub fn user_text(text: impl Into<String>) -> Self {
         Self::User {
             content: vec![ContentBlock::text(text)],
         }
     }
 
+    #[must_use]
     pub fn assistant(content: Vec<ContentBlock>, tool_calls: Vec<ToolCall>) -> Self {
         Self::Assistant {
             content,
@@ -274,10 +292,12 @@ impl ModelMessage {
         }
     }
 
+    #[must_use]
     pub fn assistant_text(text: impl Into<String>) -> Self {
         Self::assistant(vec![ContentBlock::text(text)], Vec::new())
     }
 
+    #[must_use]
     pub fn tool_result(result: ToolResult) -> Self {
         Self::ToolResult { result }
     }
@@ -302,6 +322,7 @@ impl ModelMessage {
         }
     }
 
+    #[must_use]
     pub fn is_assistant(&self) -> bool {
         matches!(self, Self::Assistant { .. })
     }
@@ -325,6 +346,7 @@ pub struct ModelRequest {
 }
 
 impl ModelRequest {
+    #[must_use]
     pub fn new(messages: Vec<ModelMessage>) -> Self {
         Self {
             messages,
@@ -332,11 +354,13 @@ impl ModelRequest {
         }
     }
 
+    #[must_use]
     pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
         self.tools = tools;
         self
     }
 
+    #[must_use]
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = Some(max_tokens);
         self
@@ -370,13 +394,16 @@ impl<'de> Deserialize<'de> for ModelResponse {
         D: serde::Deserializer<'de>,
     {
         let wire = ModelResponseWire::deserialize(deserializer)?;
-        Self::new(wire.message, wire.stop_reason, wire.usage, wire.request_id)
+        Self::try_new(wire.message, wire.stop_reason, wire.usage, wire.request_id)
             .map_err(serde::de::Error::custom)
     }
 }
 
 impl ModelResponse {
-    pub fn new(
+    /// Associates provider completion facts with an assistant message.
+    /// Other message roles return `AssistantMessageRequired`; deserialization
+    /// enforces the same invariant before a response enters the model protocol.
+    pub fn try_new(
         message: ModelMessage,
         stop_reason: StopReason,
         usage: Option<TokenUsage>,
@@ -395,10 +422,12 @@ impl ModelResponse {
         })
     }
 
+    #[must_use]
     pub fn message(&self) -> &ModelMessage {
         &self.message
     }
 
+    #[must_use]
     pub fn stop_reason(&self) -> &StopReason {
         &self.stop_reason
     }
@@ -473,6 +502,7 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
+    #[must_use]
     pub fn new(input_tokens: u32, output_tokens: u32) -> Self {
         Self {
             input_tokens,

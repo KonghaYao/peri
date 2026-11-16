@@ -1,7 +1,37 @@
 //! 发布职责、无写短路和整批失效门的行为测试。
 
-use super::*;
-use crate::kit::atoms::McpInitPhase;
+use super::ACTIVE_EXECUTION_CWD;
+use super::ACTIVE_SESSION_ID;
+use super::AcpTuiClient;
+use super::BRIDGE_RESET_COUNTER;
+use super::CRON_JOBS;
+use super::CURRENT_SESSION_TITLE;
+use super::FILE_LIST;
+use super::HOOK_LIST;
+use super::MCP_SERVERS;
+use super::MEMORY_LIST;
+use super::McpServerSummary;
+use super::McpStatusSnapshot;
+use super::PLUGIN_LIST;
+use super::PROVIDER_LIST;
+use super::ProcessSnapshotPatch;
+use super::ProjectionAtoms;
+use super::ProjectionIdentity;
+use super::ProjectionUpdate;
+use super::SERVICE_PROJECTION_ERROR;
+use super::SERVICE_SNAPSHOT;
+use super::ServiceSnapshot;
+use super::ServiceSnapshotPatch;
+use super::SessionSnapshotPatch;
+use super::SnapshotPatch;
+use super::THREAD_BROWSER_ARCHIVED;
+use super::THREAD_BROWSER_SCOPE;
+use super::THREAD_LIST;
+use super::THREAD_LIST_ERROR;
+use super::THREAD_LIST_HAS_MORE;
+use super::THREAD_LIST_PAGE_COUNT;
+use super::ThreadBrowserScope;
+
 use serial_test::serial;
 
 fn reset() -> ProjectionIdentity {
@@ -48,7 +78,7 @@ fn partial_patches_preserve_other_owners_and_equal_values_do_not_write() {
         memory_mb: 9,
         cpu_percent: 4.2,
     })];
-    assert!(commit_projection(
+    assert!(super::commit_projection(
         None,
         &identity,
         &patches,
@@ -63,7 +93,7 @@ fn partial_patches_preserve_other_owners_and_equal_values_do_not_write() {
     // 因而本断言不仅比较值，还证明不存在写入和更新通知。
     let handle = SERVICE_SNAPSHOT.state();
     let guard = handle.read();
-    assert!(commit_projection(
+    assert!(super::commit_projection(
         None,
         &identity,
         &patches,
@@ -87,7 +117,7 @@ fn partial_patches_preserve_other_owners_and_equal_values_do_not_write() {
             cron_enabled: 0,
         }),
     ];
-    assert!(commit_projection(
+    assert!(super::commit_projection(
         None,
         &identity,
         &patches,
@@ -96,7 +126,7 @@ fn partial_patches_preserve_other_owners_and_equal_values_do_not_write() {
     let guard = handle.read();
     assert_eq!(guard.memory_mb, 9);
     assert_eq!(guard.cpu_percent, 4.0);
-    assert!(commit_projection(
+    assert!(super::commit_projection(
         None,
         &identity,
         &patches,
@@ -122,7 +152,7 @@ async fn every_identity_dimension_rejects_the_entire_batch_without_any_atom_writ
             2 => THREAD_BROWSER_SCOPE.set(ThreadBrowserScope::Workspace),
             3 => THREAD_BROWSER_ARCHIVED.set(true),
             4 => THREAD_LIST_PAGE_COUNT.set(2),
-            5 => identity.session_generation.as_mut().unwrap().1 += 1,
+            5 => identity.session_generation.as_mut().expect("every identity dimension rejects the entire batch without any atom write: fixture must have the expected variant").1 += 1,
             6 => identity.session_generation = None,
             7 => BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1)),
             _ => unreachable!(),
@@ -148,7 +178,7 @@ async fn every_identity_dimension_rejects_the_entire_batch_without_any_atom_writ
         hold!(mcp, _mcp, MCP_SERVERS);
         hold!(memory, _memory, MEMORY_LIST);
         assert!(
-            !commit_projection(
+            !super::commit_projection(
                 Some(&client),
                 &identity,
                 &[SnapshotPatch::Cwd("stale".into())],
@@ -174,7 +204,7 @@ fn bridge_reset_alone_rejects_a_batch_captured_before_the_boundary() {
     assert_eq!(identity.session_generation, None);
     let snapshot_before = SERVICE_SNAPSHOT.state().read().clone();
     assert!(
-        !commit_projection(
+        !super::commit_projection(
             None,
             &identity,
             &[SnapshotPatch::Cwd("stale".into())],
@@ -203,7 +233,7 @@ fn test_mcp_refresh_preserves_other_projection_owners() {
         total: 1,
         connected: 0,
     };
-    assert!(commit_projection(
+    assert!(super::commit_projection(
         None,
         &identity,
         &[SnapshotPatch::Mcp(mcp.clone())],
@@ -228,7 +258,7 @@ fn test_action_refresh_invalidates_older_periodic_projection() {
     let stale = reset();
     let current = SERVICE_SNAPSHOT.state().read().clone();
     super::super::MCP_REVISION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-    assert!(!commit_projection(
+    assert!(!super::commit_projection(
         None,
         &stale,
         &[SnapshotPatch::Mcp(McpStatusSnapshot::default())],
@@ -236,3 +266,5 @@ fn test_action_refresh_invalidates_older_periodic_projection() {
     ));
     assert_eq!(*SERVICE_SNAPSHOT.state().read(), current);
 }
+
+use crate::kit::atoms::McpInitPhase;

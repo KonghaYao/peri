@@ -1,4 +1,19 @@
-use super::*;
+use super::Arc;
+use super::HashSet;
+use super::McpInitStatus;
+use super::Wave3Fixture;
+use super::Wave3Spec;
+use super::MW_BOUND;
+use crate::mcp::builtin::runtime::BuiltinServerExit;
+use crate::mcp::builtin::runtime::TickCloseOutcome;
+use crate::mcp::builtin_runtime_tests::invocation_fixture;
+use crate::mcp::builtin_runtime_tests::wave3::MW_TICK_WINDOW;
+use crate::mcp::builtin_runtime_tests::CLOSE_TIMEOUT;
+use crate::mcp::ClientStatus;
+use peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES;
+use peri_acp_types::plugin::ConfigSource;
+use peri_agent::tools::BaseTool as _;
+use serde_json::json;
 
 // ─── 用例 2：四类关闭来源分列（各有一份独立可观察签名）──────────────────────────
 
@@ -54,7 +69,7 @@ async fn four_close_sources_are_distinct() {
     {
         let pool = Arc::clone(&fixture.pool);
         let handle = pool
-            .get_client("artifact")
+            .client("artifact")
             .expect("disabled 实例仍必须留下句柄记录（面板语义：注册为 Disabled，不是消失）");
         assert!(
             matches!(handle.status, ClientStatus::Disabled),
@@ -116,22 +131,22 @@ async fn four_close_sources_are_distinct() {
 
         // 不得把 disabled 当策略关闭：关闭集为空，artifact 缺席来自池（句柄无工具）。
         assert!(
-            closed_instances(&HashSet::new()).is_empty(),
+            crate::mcp::builtin::closed_instances(&HashSet::new()).is_empty(),
             "空 MetaHarness 关闭集必须映射到空关闭集"
         );
         let projection = fixture.projections(&[]);
         assert!(
-            mw_instance_tools(&projection, "artifact").is_empty(),
+            super::mw_instance_tools(&projection, "artifact").is_empty(),
             "disabled 实例的工具不得进入投影（原因在池，不在关闭集）"
         );
         assert_eq!(
-            mw_instance_tools(&projection, "cron").len(),
-            mw_declared_tool_count("cron"),
+            super::mw_instance_tools(&projection, "cron").len(),
+            super::mw_declared_tool_count("cron"),
             "其余实例不受 disabled 影响"
         );
         assert_eq!(
-            mw_instance_tools(&projection, "web").len(),
-            mw_declared_tool_count("web"),
+            super::mw_instance_tools(&projection, "web").len(),
+            super::mw_declared_tool_count("web"),
             "web 也不受影响（关闭只按被点名实例生效）"
         );
         assert_eq!(
@@ -142,8 +157,8 @@ async fn four_close_sources_are_distinct() {
         println!(
             "[MW close-source] disabled=true | connection=disabled_handle | task=false | tick=None \
              | ready=false | config=true | projected=false | others(cron_tools={},web_tools={},cron_tick=live)",
-            mw_declared_tool_count("cron"),
-            mw_declared_tool_count("web")
+            super::mw_declared_tool_count("cron"),
+            super::mw_declared_tool_count("web")
         );
         signatures.push((
             "mcp_config_disabled",
@@ -188,7 +203,7 @@ async fn four_close_sources_are_distinct() {
             "加载期失败不得留下任何 builtin server task"
         );
         assert!(
-            pool.get_client("artifact").is_none() && pool.get_client("cron").is_none(),
+            pool.client("artifact").is_none() && pool.client("cron").is_none(),
             "加载期失败不得注册任何连接"
         );
         assert!(
@@ -214,7 +229,7 @@ async fn four_close_sources_are_distinct() {
         // ② 投影归零，但 handler / pool / tick / readiness 全部保留。
         let projection = fixture.projections(&policy_disabled);
         assert!(
-            mw_instance_tools(&projection, "cron").is_empty(),
+            super::mw_instance_tools(&projection, "cron").is_empty(),
             "策略关闭必须让 cron 实例的工具从本 turn 投影中消失"
         );
         assert_eq!(
@@ -285,8 +300,8 @@ async fn four_close_sources_are_distinct() {
     //    半边（pool 的 `services` 表，`close_with_timeout`）→ 再 `close_builtin_task`
     //    （supervisor：先 tick cancel+join，再收敛 server task）。两个生产调用点
     //    （`lifecycle.rs` 的 `set_disabled` / `remove_server`、`reconnect.rs`）都是这个顺序。
-    let artifact_handle_before = pool.get_client("artifact").expect("artifact 必须仍已连接");
-    let web_handle_before = pool.get_client("web").expect("web 必须仍已连接");
+    let artifact_handle_before = pool.client("artifact").expect("artifact 必须仍已连接");
+    let web_handle_before = pool.client("web").expect("web 必须仍已连接");
     let cron_service = pool.services.lock().remove("cron");
     assert!(
         cron_service.is_some(),
@@ -325,26 +340,26 @@ async fn four_close_sources_are_distinct() {
     assert!(
         Arc::ptr_eq(
             &artifact_handle_before,
-            &pool.get_client("artifact").expect("artifact 必须在池中")
+            &pool.client("artifact").expect("artifact 必须在池中")
         ),
         "物理关闭 cron 不得替换 artifact 句柄"
     );
     assert!(
         Arc::ptr_eq(
             &web_handle_before,
-            &pool.get_client("web").expect("web 必须在池中")
+            &pool.client("web").expect("web 必须在池中")
         ),
         "物理关闭 cron 不得替换 web 句柄"
     );
     let projection = fixture.projections(&[]);
     assert_eq!(
-        mw_instance_tools(&projection, "artifact").len(),
-        mw_declared_tool_count("artifact"),
+        super::mw_instance_tools(&projection, "artifact").len(),
+        super::mw_declared_tool_count("artifact"),
         "A 关闭后 B（artifact）的投影必须完整"
     );
     assert_eq!(
-        mw_instance_tools(&projection, "web").len(),
-        mw_declared_tool_count("web"),
+        super::mw_instance_tools(&projection, "web").len(),
+        super::mw_declared_tool_count("web"),
         "A 关闭后 B（web）的投影必须完整"
     );
     // 组合根 scheduler / pool 不因 Arc 释放而关闭。
@@ -365,7 +380,7 @@ async fn four_close_sources_are_distinct() {
     // 实测签名：纯物理 close 只收敛 task；句柄与 ready 证据**不动**（见用例文档的差异登记）。
     assert!(
         matches!(
-            pool.get_client("cron").expect("cron 句柄记录仍在").status,
+            pool.client("cron").expect("cron 句柄记录仍在").status,
             ClientStatus::Connected
         ),
         "纯 close_builtin_task 不改句柄状态（宿主级 remove/disabled 另有 handle 失效步骤）"
@@ -376,8 +391,8 @@ async fn four_close_sources_are_distinct() {
         "纯 close_builtin_task 不撤销发现证据（实测；与 sub-plan-v §5 期望的差异见报告）"
     );
     assert_eq!(
-        mw_instance_tools(&fixture.projections(&[]), "cron").len(),
-        mw_declared_tool_count("cron"),
+        super::mw_instance_tools(&fixture.projections(&[]), "cron").len(),
+        super::mw_declared_tool_count("cron"),
         "纯物理 close 不动本 turn 投影（句柄与工具表未变）：投影关闭只由策略键驱动"
     );
     // 同一 API 的**边界形态**（登记不掩盖）：只关监督者表、**不**先关 client 半边时，
@@ -432,7 +447,7 @@ async fn four_close_sources_are_distinct() {
                 instance.name
             );
             assert!(
-                pool.get_client(instance.name).is_none(),
+                pool.client(instance.name).is_none(),
                 "off 必须零注入：{} 不得有连接记录（连 Disabled 记录都不该有）",
                 instance.name
             );
@@ -459,13 +474,13 @@ async fn four_close_sources_are_distinct() {
         let projection = off.projections(&[]);
         for instance in BUILTIN_MCP_INSTANCES {
             assert!(
-                mw_instance_tools(&projection, instance.name).is_empty(),
+                super::mw_instance_tools(&projection, instance.name).is_empty(),
                 "off 下 {} 的工具不得进入投影",
                 instance.name
             );
         }
         // 不得把 off 当策略关闭：关闭集为空，且组合根对象仍被注入（零注入 ≠ 对象不存在）。
-        assert!(closed_instances(&HashSet::new()).is_empty());
+        assert!(crate::mcp::builtin::closed_instances(&HashSet::new()).is_empty());
         assert!(
             pool.builtin_instance_context().is_some(),
             "off 只抑制 config 层注入；宿主注入的实例上下文仍在（不得据此推断组合根对象不存在）"

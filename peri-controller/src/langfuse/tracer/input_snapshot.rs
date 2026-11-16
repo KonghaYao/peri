@@ -26,10 +26,10 @@
 //! 不触达文件路径、不做 IO。
 
 use std::io;
-use std::mem::size_of;
+
 use std::sync::Arc;
 
-use langfuse_client::snapshot::{write_stable_json, SnapshotSource};
+use langfuse_client::snapshot::SnapshotSource;
 use langfuse_client::{InputSource, LangfuseError};
 use peri_agent::messages::{
     BaseMessage, ContentBlock, DocumentSource, ImageSource, MessageContent, ToolCallRequest,
@@ -60,8 +60,9 @@ impl SnapshotSource for LlmInputSource {
     fn retained_bytes(&self) -> Result<usize, LangfuseError> {
         // 顶层 `Vec` 只作为源树入账（整份列表从不被 `to_value` 复制）：
         // 适配器与两个 `Arc<Vec<…>>` 分配块（两个引用计数 + `Vec` 头）另计一次。
-        let own = size_of::<Self>()
-            + 2 * (size_of::<Vec<BaseMessage>>() + size_of::<Vec<ToolDefinition>>());
+        let own = std::mem::size_of::<Self>()
+            + 2 * (std::mem::size_of::<Vec<BaseMessage>>()
+                + std::mem::size_of::<Vec<ToolDefinition>>());
         let mut total =
             Account::slots::<BaseMessage>(self.messages.capacity(), self.messages.len())
                 .source_only()
@@ -112,11 +113,12 @@ fn write_sorted_messages(
     messages: &[BaseMessage],
 ) -> Result<(), LangfuseError> {
     write_bytes(out, b"[")?;
-    for (index, message) in messages.iter().enumerate() {
+    let paired_items = messages.iter().enumerate();
+    for (index, message) in paired_items {
         if index > 0 {
             write_bytes(out, b",")?;
         }
-        write_stable_json(out, &serde_json::to_value(message)?)?;
+        langfuse_client::snapshot::write_stable_json(out, &serde_json::to_value(message)?)?;
     }
     write_bytes(out, b"]")
 }
@@ -127,11 +129,12 @@ fn write_sorted_tools(
     tools: &[ToolDefinition],
 ) -> Result<(), LangfuseError> {
     write_bytes(out, b"[")?;
-    for (index, tool) in tools.iter().enumerate() {
+    let paired_items_2 = tools.iter().enumerate();
+    for (index, tool) in paired_items_2 {
         if index > 0 {
             write_bytes(out, b",")?;
         }
-        write_stable_json(out, &serde_json::to_value(tool)?)?;
+        langfuse_client::snapshot::write_stable_json(out, &serde_json::to_value(tool)?)?;
     }
     write_bytes(out, b"]")
 }
@@ -205,8 +208,8 @@ impl Account {
     /// `Vec<T>` 槽位：源侧按真实容量，副本按 JSON 数组的摊还增长上界。
     fn slots<T>(capacity: usize, len: usize) -> Self {
         Self {
-            retained: capacity.saturating_mul(size_of::<T>()),
-            copy: len.saturating_mul(2 * size_of::<Value>()),
+            retained: capacity.saturating_mul(std::mem::size_of::<T>()),
+            copy: len.saturating_mul(2 * std::mem::size_of::<Value>()),
         }
     }
 
@@ -216,7 +219,7 @@ impl Account {
         Self {
             retained: 0,
             copy: names.iter().map(|name| name.len()).sum::<usize>()
-                + names.len() * (size_of::<String>() + size_of::<Value>()),
+                + names.len() * (std::mem::size_of::<String>() + std::mem::size_of::<Value>()),
         }
     }
 }
@@ -443,7 +446,7 @@ fn account_value(value: &Value) -> Result<Account, LangfuseError> {
         Value::Array(items) => account_all(items.as_slice(), items.capacity(), account_value),
         Value::Object(map) => {
             // 对象的每个条目占一个键槽与一个值槽；源键按容量、副本键按长度各计一份。
-            let slots = map.len() * (size_of::<String>() + size_of::<Value>());
+            let slots = map.len() * (std::mem::size_of::<String>() + std::mem::size_of::<Value>());
             let mut total = Account {
                 retained: slots,
                 copy: slots,

@@ -254,8 +254,11 @@ fn validate_schema_object(object: &Map<String, Value>, path: &str) -> Result<(),
             let Some(nodes) = value.as_array() else {
                 return Err(invalid(&child, RULE_LIST));
             };
-            for (index, node) in nodes.iter().enumerate() {
-                validate_schema_node(node, &format!("{child}/{index}"))?;
+            {
+                let indexed_nodes = nodes.iter().enumerate();
+                for (index, node) in indexed_nodes {
+                    validate_schema_node(node, &format!("{child}/{index}"))?;
+                }
             }
         } else if SCHEMA_MAP_KEYWORDS.contains(&keyword.as_str()) {
             let Some(nodes) = value.as_object() else {
@@ -304,17 +307,20 @@ fn validate_type_keyword(value: &Value, path: &str) -> Result<(), String> {
         return Err(invalid(path, RULE_TYPE));
     }
     let mut seen: Vec<&str> = Vec::with_capacity(names.len());
-    for (index, name) in names.iter().enumerate() {
-        let Some(name) = name
-            .as_str()
-            .filter(|name| SCHEMA_TYPE_NAMES.contains(name))
-        else {
-            return Err(invalid(&format!("{path}/{index}"), RULE_TYPE));
-        };
-        if seen.contains(&name) {
-            return Err(invalid(&format!("{path}/{index}"), RULE_TYPE));
+    {
+        let indexed_names = names.iter().enumerate();
+        for (index, name) in indexed_names {
+            let Some(name) = name
+                .as_str()
+                .filter(|name| SCHEMA_TYPE_NAMES.contains(name))
+            else {
+                return Err(invalid(&format!("{path}/{index}"), RULE_TYPE));
+            };
+            if seen.contains(&name) {
+                return Err(invalid(&format!("{path}/{index}"), RULE_TYPE));
+            }
+            seen.push(name);
         }
-        seen.push(name);
     }
     Ok(())
 }
@@ -324,14 +330,17 @@ fn validate_required_keyword(value: &Value, path: &str) -> Result<(), String> {
         return Err(invalid(path, RULE_REQUIRED));
     };
     let mut seen: Vec<&str> = Vec::with_capacity(names.len());
-    for (index, name) in names.iter().enumerate() {
-        let Some(name) = name.as_str() else {
-            return Err(invalid(&format!("{path}/{index}"), RULE_REQUIRED_ITEM));
-        };
-        if seen.contains(&name) {
-            return Err(invalid(&format!("{path}/{index}"), RULE_REQUIRED_ITEM));
+    {
+        let indexed_names = names.iter().enumerate();
+        for (index, name) in indexed_names {
+            let Some(name) = name.as_str() else {
+                return Err(invalid(&format!("{path}/{index}"), RULE_REQUIRED_ITEM));
+            };
+            if seen.contains(&name) {
+                return Err(invalid(&format!("{path}/{index}"), RULE_REQUIRED_ITEM));
+            }
+            seen.push(name);
         }
-        seen.push(name);
     }
     Ok(())
 }

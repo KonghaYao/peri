@@ -1,13 +1,14 @@
 use std::path::PathBuf;
 
 use crate::chatgpt_auth::AuthTarget;
-use crate::kit::atoms::{CONFIG_SOURCE_HANDLE, PERI_CONFIG_HANDLE};
+
 use ratatui_kit::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::LoginPanelMode;
-use super::auth::{AuthController, HostConfigAuthScope, notify_key, notify_text};
+use super::auth::AuthController;
+use super::auth::HostConfigAuthScope;
 use super::auth_policy;
-use super::config_store::{refresh_provider_list, save_login_edit};
+
 use super::edit_state::{LoginEditState, LoginError, LoginErrorKind, LoginField};
 
 /// 编辑视图产生的异步认证意图；面板在释放状态借用后执行。
@@ -61,7 +62,7 @@ pub(super) fn load_latest_configuration() -> bool {
     }
     match crate::kit::config_service::reload_configuration() {
         Ok(cfg) => {
-            refresh_provider_list(&cfg);
+            super::config_store::refresh_provider_list(&cfg);
             true
         }
         Err(error) => {
@@ -182,12 +183,12 @@ pub(super) fn reload_login_edit(
 ///
 /// 这些状态由键盘与鼠标入口共同借用并原地更新；按职责打包后，调用点不再依赖
 /// 8 个位置参数的正确顺序。
-pub(super) struct LoginEditContext<'a> {
-    pub(super) mode: &'a mut LoginPanelMode,
-    pub(super) edit_state: &'a mut Option<LoginEditState>,
-    pub(super) edit_focus: &'a mut LoginField,
-    pub(super) edit_cursor: &'a mut usize,
-    pub(super) auth: &'a mut AuthController,
+pub(super) struct LoginEditContext<'input> {
+    pub(super) mode: &'input mut LoginPanelMode,
+    pub(super) edit_state: &'input mut Option<LoginEditState>,
+    pub(super) edit_focus: &'input mut LoginField,
+    pub(super) edit_cursor: &'input mut usize,
+    pub(super) auth: &'input mut AuthController,
 }
 
 /// 编辑模式下的按键处理。
@@ -214,11 +215,11 @@ pub(super) fn handle_login_edit_keys(
             super::auth::AuthViewState::LoggingOut | super::auth::AuthViewState::CancellingLogout
         ) && auth.cancel_logout_wait()
         {
-            notify_key("login-auth-cancelling-logout", 2);
+            super::auth::notify_key("login-auth-cancelling-logout", 2);
             return LoginEditIntent::None;
         }
         if auth.login_succeeded() {
-            notify_key("login-auth-unsaved", 3);
+            super::auth::notify_key("login-auth-unsaved", 3);
         }
         *mode = LoginPanelMode::Browse;
         *edit_state = None;
@@ -232,7 +233,7 @@ pub(super) fn handle_login_edit_keys(
     // 非冲突状态下也允许使用；认证在途时拒绝，避免替换认证目标仍绑定的草稿。
     if key.code == KeyCode::Char('r') && is_ctrl {
         if auth_busy {
-            notify_key("login-auth-wait-before-edit", 3);
+            super::auth::notify_key("login-auth-wait-before-edit", 3);
             return LoginEditIntent::None;
         }
         let reloaded = reload_login_edit(mode, edit_state, edit_focus, edit_cursor);
@@ -290,7 +291,7 @@ pub(super) fn handle_login_edit_keys(
         },
         LoginField::AuthMode => {
             if auth_busy {
-                notify_key("login-auth-wait-before-edit", 3);
+                super::auth::notify_key("login-auth-wait-before-edit", 3);
             } else if matches!(
                 key.code,
                 KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') | KeyCode::Enter
@@ -318,11 +319,11 @@ pub(super) fn handle_login_edit_keys(
                         if auth.use_account(&mut es.plan, &scope) {
                             es.inline_error = None;
                             auth.select_action(super::auth::AuthAction::Status, &es.plan);
-                            notify_key("login-auth-account-adopted", 2);
+                            super::auth::notify_key("login-auth-account-adopted", 2);
                         } else if auth.scope() != &scope {
-                            notify_key("login-auth-identity-scope-changed", 3);
+                            super::auth::notify_key("login-auth-identity-scope-changed", 3);
                         } else {
-                            notify_key("login-auth-identity-incomplete", 3);
+                            super::auth::notify_key("login-auth-identity-incomplete", 3);
                         }
                     }
                     Some(super::auth::AuthAction::Logout) => {
@@ -330,10 +331,10 @@ pub(super) fn handle_login_edit_keys(
                     }
                     Some(super::auth::AuthAction::CancelLogout) => {
                         if auth.cancel_logout_wait() {
-                            notify_key("login-auth-cancelling-logout", 2);
+                            super::auth::notify_key("login-auth-cancelling-logout", 2);
                         }
                     }
-                    None => notify_key("login-auth-target-required", 3),
+                    None => super::auth::notify_key("login-auth-target-required", 3),
                 }
             }
             _ => {}
@@ -412,11 +413,11 @@ fn save_and_close(
     auth: &mut AuthController,
 ) {
     if auth.blocks_config_save() {
-        notify_key("login-auth-busy-save", 3);
+        super::auth::notify_key("login-auth-busy-save", 3);
         return;
     }
     if auth.outcome_unknown() {
-        notify_key("login-auth-unknown-query", 3);
+        super::auth::notify_key("login-auth-unknown-query", 3);
         return;
     }
     let Some(es) = edit_state else {
@@ -433,7 +434,7 @@ fn save_and_close(
             ));
             *edit_focus = LoginField::AuthActions;
             auth.select_action(super::auth::AuthAction::UseAccount, &es.plan);
-            notify_text(&message, 3);
+            super::auth::notify_text(&message, 3);
             clamp_cursor(es, *edit_focus, edit_cursor);
             return;
         }
@@ -444,7 +445,7 @@ fn save_and_close(
         // 3) 认证事实已变化时，旧的身份/引用错误不得继续阻断保存。
         es.clear_auth_error();
     }
-    if save_login_edit(es) {
+    if super::config_store::save_login_edit(es) {
         *mode = LoginPanelMode::Browse;
         *edit_state = None;
         return;
@@ -453,7 +454,7 @@ fn save_and_close(
     if is_identity_required(es) && adopt_verified_identity(es, auth) {
         es.clear_auth_error();
         auth.select_action(super::auth::AuthAction::Status, &es.plan);
-        if save_login_edit(es) {
+        if super::config_store::save_login_edit(es) {
             *mode = LoginPanelMode::Browse;
             *edit_state = None;
             return;
@@ -529,7 +530,7 @@ fn apply_identity_block(
         ));
     }
     auth.select_action(block.recommended_action(), &es.plan);
-    notify_text(&message, 3);
+    super::auth::notify_text(&message, 3);
     clamp_cursor(es, *edit_focus, edit_cursor);
 }
 
@@ -569,7 +570,7 @@ fn handle_login_text_input(
         return false;
     }
     if auth_busy && matches!(field, LoginField::PlanStore | LoginField::PlanAccount) {
-        notify_key("login-auth-wait-before-edit", 3);
+        super::auth::notify_key("login-auth-wait-before-edit", 3);
         return true;
     }
 
@@ -729,3 +730,7 @@ pub(super) fn handle_login_paste(
     }
     *edit_cursor = pos + paste_len;
 }
+
+use crate::kit::atoms::CONFIG_SOURCE_HANDLE;
+
+use crate::kit::atoms::PERI_CONFIG_HANDLE;

@@ -26,7 +26,8 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use super::super::{AcpServerConfig, SessionState};
-use crate::transport::{types::AcpError, AcpTransport};
+use crate::transport::types::AcpError;
+use crate::transport::AcpTransport;
 
 /// agent → client 的 ACP 发送网关：MCP over ACP 的全部出站消息经它落成
 /// `mcp/message` 请求。

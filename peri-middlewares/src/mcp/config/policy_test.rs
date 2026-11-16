@@ -1,4 +1,5 @@
-use super::*;
+use super::ConfigSource;
+use super::McpConfigError;
 use crate::mcp::builtin::BuiltinInjectionPolicy;
 use peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES;
 
@@ -17,7 +18,7 @@ fn explicit_policy_gates_defaults_without_gating_configuration_io() {
         (BuiltinInjectionPolicy::all(), true),
         (BuiltinInjectionPolicy::none(), false),
     ] {
-        let (config, _) = load_merged_config_full_with_paths(
+        let (config, _) = super::load_merged_config_full_with_paths(
             directory.path(),
             &claude_home,
             &global_path,
@@ -54,7 +55,7 @@ fn builtin_closure_list_survives_configuration_reads_and_disabled_updates() {
     )
     .unwrap();
 
-    let (config, _) = load_merged_config_full_with_paths(
+    let (config, _) = super::load_merged_config_full_with_paths(
         directory.path(),
         &claude_home,
         &global_path,
@@ -73,8 +74,9 @@ fn builtin_closure_list_survives_configuration_reads_and_disabled_updates() {
         );
     }
 
-    set_server_disabled_with_paths(directory.path(), &global_path, "workspace", false).unwrap();
-    let (config, _) = load_merged_config_full_with_paths(
+    super::set_server_disabled_with_paths(directory.path(), &global_path, "workspace", false)
+        .unwrap();
+    let (config, _) = super::load_merged_config_full_with_paths(
         directory.path(),
         &claude_home,
         &global_path,
@@ -108,7 +110,7 @@ fn disabled_policy_does_not_bypass_builtin_admission() {
             serde_json::json!({"mcpServers": {"workspace": fragment}}).to_string(),
         )
         .unwrap();
-        let error = load_merged_config_full_with_paths(
+        let error = super::load_merged_config_full_with_paths(
             directory.path(),
             &claude_home,
             &global_path,

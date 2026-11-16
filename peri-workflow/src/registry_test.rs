@@ -1,4 +1,8 @@
-use super::*;
+use crate::registry::WorkflowRun;
+use crate::registry::WorkflowTaskRegistry;
+use peri_acp_types::tasks::TaskRecord;
+use peri_acp_types::workflow::WorkflowRunStatus;
+use peri_acp_types::workflow::WorkflowTaskResult;
 use peri_acp_types::workflow::{
     AcceptanceStatus, DeliveryStatus, ExecutionStatus, PostProcessingStatus,
 };
@@ -61,16 +65,20 @@ fn terminal_result(run_id: &str) -> WorkflowTaskResult {
 async fn test_register_and_active_count() {
     let (reg, _rx) = make_registry();
     assert_eq!(reg.active_count(), 0);
-    reg.register(make_run("r1")).unwrap();
+    reg.register(make_run("r1"))
+        .expect("the register fixture result is required for this assertion");
     assert_eq!(reg.active_count(), 1);
 }
 
 #[tokio::test]
 async fn test_concurrent_limit() {
     let (reg, _rx) = make_registry();
-    reg.register(make_run("r1")).unwrap();
-    reg.register(make_run("r2")).unwrap();
-    reg.register(make_run("r3")).unwrap();
+    reg.register(make_run("r1"))
+        .expect("the register fixture result is required for this assertion");
+    reg.register(make_run("r2"))
+        .expect("the register fixture result is required for this assertion");
+    reg.register(make_run("r3"))
+        .expect("the register fixture result is required for this assertion");
     let result = reg.register(make_run("r4"));
     assert!(result.is_err());
 }
@@ -78,7 +86,9 @@ async fn test_concurrent_limit() {
 #[tokio::test]
 async fn test_complete_sends_notification() {
     let (reg, mut rx) = make_registry();
-    let ticket = reg.register(make_run("r1")).unwrap();
+    let ticket = reg
+        .register(make_run("r1"))
+        .expect("the register fixture result is required for this assertion");
     reg.complete(
         &ticket,
         WorkflowTaskResult {
@@ -100,7 +110,10 @@ async fn test_complete_sends_notification() {
         },
         task_record("r1"),
     );
-    let result = rx.recv().await.unwrap();
+    let result = rx
+        .recv()
+        .await
+        .expect("rx recv producer must deliver the expected test event before closing");
     assert_eq!(result.run_id, "r1");
     assert!(result.success);
     assert_eq!(
@@ -126,7 +139,9 @@ async fn test_complete_sends_notification() {
 #[tokio::test]
 async fn test_complete_retains_unacknowledged_run_with_status() {
     let (reg, _rx) = make_registry();
-    let ticket = reg.register(make_run("r1")).unwrap();
+    let ticket = reg
+        .register(make_run("r1"))
+        .expect("the register fixture result is required for this assertion");
     assert_eq!(reg.active_count(), 1);
 
     reg.complete(
@@ -299,8 +314,10 @@ impl Drop for RunDirGuard {
 fn test_notification_includes_saved_state_only_when_artifact_exists() {
     let run_id = format!("notification-artifact-{}", uuid::Uuid::now_v7());
     let state_dir = std::path::Path::new(".claude/workflow-runs").join(&run_id);
-    std::fs::create_dir_all(&state_dir).unwrap();
-    std::fs::write(state_dir.join("state.json"), "{}").unwrap();
+    std::fs::create_dir_all(&state_dir)
+        .expect("the create dir all fixture result is required for this assertion");
+    std::fs::write(state_dir.join("state.json"), "{}")
+        .expect("the test fixture file must be writable");
     let _cleanup = RunDirGuard(state_dir.clone());
 
     let result = WorkflowTaskResult {
@@ -386,24 +403,30 @@ async fn cancellation_before_child_attachment_keeps_cleanup_running() {
             child_handle: None,
             kill_tx: Some(kill_tx),
         })
-        .unwrap();
-    registry.kill("attaching").unwrap();
+        .expect("the reserve fixture result is required for this assertion");
+    registry
+        .kill("attaching")
+        .expect("the kill fixture result is required for this assertion");
     let (stopped, observed) = tokio::sync::oneshot::channel();
     let child = tokio::spawn(async move {
-        kill_rx.await.unwrap();
+        kill_rx
+            .await
+            .expect("the kill rx fixture result is required for this assertion");
         let _ = stopped.send(());
     });
     registry.attach_child("attaching", child);
     tokio::time::timeout(std::time::Duration::from_secs(1), observed)
         .await
-        .unwrap()
+        .expect("the timeout fixture result is required for this assertion")
         .expect("the removed row must not abort its cleanup owner");
 }
 
 #[tokio::test]
 async fn background_start_waits_for_mcp_projection_receipt() {
     let (registry, _) = make_registry();
-    let ticket = registry.register(make_run("run-a")).unwrap();
+    let ticket = registry
+        .register(make_run("run-a"))
+        .expect("the register fixture result is required for this assertion");
     let mut pending = Box::pin(ticket.wait_for_observation());
     assert!(futures::poll!(&mut pending).is_pending());
     registry.acknowledge_observation("other-run");
@@ -417,7 +440,9 @@ async fn background_start_waits_for_mcp_projection_receipt() {
 #[tokio::test]
 async fn observation_wait_after_completion_ack_uses_the_original_receipt() {
     let (registry, _) = make_registry();
-    let ticket = registry.register(make_run("fast-run")).unwrap();
+    let ticket = registry
+        .register(make_run("fast-run"))
+        .expect("the register fixture result is required for this assertion");
     assert!(registry.complete(
         &ticket,
         terminal_result("fast-run"),
@@ -439,7 +464,9 @@ fn acknowledging_many_completions_releases_source_state_and_capacity() {
     let (registry, _) = make_registry();
     for index in 0..600 {
         let run_id = format!("retire-{index}");
-        let ticket = registry.register(make_run(&run_id)).unwrap();
+        let ticket = registry
+            .register(make_run(&run_id))
+            .expect("the register fixture result is required for this assertion");
         assert!(registry.complete(&ticket, terminal_result(&run_id), task_record(&run_id)));
     }
     assert_eq!(registry.pending_completion_records().len(), 600);

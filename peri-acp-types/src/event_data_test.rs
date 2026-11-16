@@ -1,4 +1,19 @@
-use super::*;
+use crate::event_data::AskUser;
+use crate::event_data::BudgetWarning;
+use crate::event_data::FileChange;
+use crate::event_data::FileSuggestions;
+use crate::event_data::HitlPending;
+use crate::event_data::OauthNeeded;
+use crate::event_data::Prediction;
+use crate::event_data::PredictionAction;
+use crate::event_data::Progress;
+use crate::event_data::Question;
+use crate::event_data::QuestionOption;
+use crate::event_data::RewindMessage;
+use crate::event_data::RewindPreview;
+use crate::event_data::SystemNotification;
+use crate::event_data::ToolApproval;
+use crate::event_data::ToolCount;
 
 // -- Status (§4.3) -----------------------------------------------------
 

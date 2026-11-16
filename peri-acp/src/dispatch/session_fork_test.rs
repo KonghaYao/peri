@@ -18,8 +18,6 @@ use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::CancelPolicy;
 use peri_acp_types::workspace::{ScopedThreadQuery, SessionBinding, ThreadScope};
 
-use super::{fork_bound_session, load_fork_source};
-
 const SOURCE: &str = "source";
 
 #[path = "session_fork_archive_test.rs"]
@@ -129,8 +127,8 @@ async fn forked_payloads_have_independent_ids_flags_and_compaction_lifecycle() {
         .await
         .unwrap();
 
-    let source = load_fork_source(&resources, SOURCE).await.unwrap();
-    let (fork_id, copied_payloads) = fork_bound_session(
+    let source = super::load_fork_source(&resources, SOURCE).await.unwrap();
+    let (fork_id, copied_payloads) = super::fork_bound_session(
         &resources,
         &source,
         &workspace,
@@ -252,8 +250,8 @@ async fn fork_publishes_effective_payloads_and_keeps_released_bodies_in_storage(
         .await
         .unwrap();
 
-    let source = load_fork_source(&resources, SOURCE).await.unwrap();
-    let (fork_id, published) = fork_bound_session(
+    let source = super::load_fork_source(&resources, SOURCE).await.unwrap();
+    let (fork_id, published) = super::fork_bound_session(
         &resources,
         &source,
         &workspace,
@@ -311,7 +309,7 @@ async fn fork_rejects_source_with_incomplete_tool_calls() {
         .await
         .unwrap();
 
-    let error = match load_fork_source(&resources, SOURCE).await {
+    let error = match super::load_fork_source(&resources, SOURCE).await {
         Ok(_) => panic!("未闭合工具调用必须被拒绝"),
         Err(error) => error,
     };
@@ -323,7 +321,7 @@ async fn fork_rejects_source_with_incomplete_tool_calls() {
     assert_eq!(session_ids(&resources).await, vec![source_id]);
 
     // 缺失 source 同样在读取阶段失败（领域错误分类保留），不产生目标行。
-    let missing = match load_fork_source(&resources, "no-such-source").await {
+    let missing = match super::load_fork_source(&resources, "no-such-source").await {
         Ok(_) => panic!("缺失 source 必须失败"),
         Err(error) => error,
     };
@@ -366,8 +364,8 @@ async fn a_parent_full_after_fork_leaves_the_child_snapshot_and_pages_intact() {
         .await
         .unwrap();
 
-    let source = load_fork_source(&resources, SOURCE).await.unwrap();
-    let (fork_id, _published) = fork_bound_session(
+    let source = super::load_fork_source(&resources, SOURCE).await.unwrap();
+    let (fork_id, _published) = super::fork_bound_session(
         &resources,
         &source,
         &workspace,

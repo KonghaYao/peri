@@ -9,7 +9,8 @@
 //! `SessionManager`（peri-acp）在 session 创建时调用 `register_inbox`，
 //! `close_session` 时调用 `unregister_inbox`；通知转发与唤醒由实现方完成。
 
-use std::{any::Any, sync::Arc};
+use std::any::Any;
+use std::sync::Arc;
 
 use crate::session::InboxHandle;
 
@@ -60,7 +61,7 @@ pub trait McpSubscriptionPort: Any + Send + Sync {
 impl dyn McpSubscriptionPort {
     /// 将 `Arc<dyn McpSubscriptionPort>` 还原为具体实现 `Arc<T>`
     /// （类型不符返回原 `Arc`；还原依据是对象自身 vtable 的真实 `TypeId`，
-    /// 与 [`crate::cron::CronSchedulerPort::downcast_arc`] 同一实现）。
+    /// 与 `<dyn crate::cron::CronSchedulerPort>::downcast_arc` 同一实现）。
     pub fn downcast_arc<T: McpSubscriptionPort + 'static>(
         self: Arc<Self>,
     ) -> Result<Arc<T>, Arc<Self>> {

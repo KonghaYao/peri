@@ -1,16 +1,28 @@
-use super::*;
+use crate::agent::async_tasks::TaskManager;
 use crate::agent::react::{ReactLLM, Reasoning, StreamingContext};
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::queue::{MessageSource, QueuedMessage};
-use crate::session::subagent::{
-    agent_id_from_child_thread, build_v2_subagent_context, ChildRunOutcome, ParkedChildOwner,
-    SubagentHost, V2SubagentContext,
-};
+
+use crate::session::subagent::run_sync::SyncCompletion;
+use crate::session::subagent::terminal_settlement::TerminalMqRoute;
+use crate::session::subagent::types::ChildHandoffReason;
+use crate::session::subagent::types::ChildHandoffReceipt;
+use crate::session::subagent::types::SubagentFailure;
+use crate::session::subagent::ChildRunOutcome;
+use crate::session::subagent::ParkedChildOwner;
+use crate::session::subagent::SubagentHost;
+use crate::session::subagent::V2SubagentContext;
+use crate::session::Session;
 use crate::session::{FrozenContext, MessageTranscript};
 use crate::tools::BaseTool;
+use peri_acp_types::session_resources::SessionResources;
+
 use peri_acp_types::tasks::{BgTaskRegistration, OnBgCompleteFn, TaskManager as TaskManagerPort};
+
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::oneshot;
 
 fn child(manager: Arc<TaskManager>) -> Arc<Session> {
     let session = Session::new(
@@ -55,7 +67,9 @@ pub(super) fn bound_child_with_store(
         None,
     );
     owner.set_writer(session.transcript().read().persist_tx_handle());
-    manager.register_child_owner(owner.clone()).unwrap();
+    manager
+        .register_child_owner(owner.clone())
+        .expect("the register child owner fixture result is required for this assertion");
     session.set_subagent_host(SubagentHost {
         task_manager: Some(manager),
         child_owner: Some(owner.clone()),
@@ -96,8 +110,12 @@ impl ReactLLM for ProbeLlm {
 }
 
 fn probe_context(session: &Arc<Session>, marker: Arc<()>) -> V2SubagentContext {
-    let id = session.store().thread_id.clone().unwrap();
-    build_v2_subagent_context(
+    let id = session
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
+    crate::session::subagent::build_v2_subagent_context(
         Some(session.clone()),
         Box::new(ProbeLlm(marker)),
         Arc::new(MiddlewareChain::new()),
@@ -110,7 +128,7 @@ fn probe_context(session: &Arc<Session>, marker: Arc<()>) -> V2SubagentContext {
         None,
         None,
         None,
-        Some(agent_id_from_child_thread(&id)),
+        Some(crate::session::subagent::agent_id_from_child_thread(&id)),
     )
 }
 
@@ -127,8 +145,12 @@ impl ReactLLM for AnswerLlm {
 }
 
 pub(super) fn context(session: &Arc<Session>, answer: &'static str) -> V2SubagentContext {
-    let id = session.store().thread_id.clone().unwrap();
-    build_v2_subagent_context(
+    let id = session
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
+    crate::session::subagent::build_v2_subagent_context(
         Some(session.clone()),
         Box::new(AnswerLlm(answer)),
         Arc::new(MiddlewareChain::new()),
@@ -141,7 +163,7 @@ pub(super) fn context(session: &Arc<Session>, answer: &'static str) -> V2Subagen
         None,
         None,
         None,
-        Some(agent_id_from_child_thread(&id)),
+        Some(crate::session::subagent::agent_id_from_child_thread(&id)),
     )
 }
 
@@ -170,8 +192,12 @@ fn blocking_context(
     entered: Arc<tokio::sync::Notify>,
     gate: Arc<tokio::sync::Notify>,
 ) -> V2SubagentContext {
-    let id = session.store().thread_id.clone().unwrap();
-    build_v2_subagent_context(
+    let id = session
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
+    crate::session::subagent::build_v2_subagent_context(
         Some(session.clone()),
         Box::new(BlockingLlm { entered, gate }),
         Arc::new(MiddlewareChain::new()),
@@ -184,7 +210,7 @@ fn blocking_context(
         None,
         None,
         None,
-        Some(agent_id_from_child_thread(&id)),
+        Some(crate::session::subagent::agent_id_from_child_thread(&id)),
     )
 }
 
@@ -202,7 +228,7 @@ pub(super) fn shell_task(
             kill: Some(Box::new(|| {})),
         },
     )
-    .unwrap()
+    .expect("the register fixture result is required for this assertion")
 }
 
 fn shell_result(id: &str) -> crate::agent::events::BackgroundTaskResult {
@@ -227,7 +253,11 @@ async fn settled_sync_child_returns_finished_without_parent_task() {
     let manager = Arc::new(TaskManager::new());
     let parent_manager = Arc::new(TaskManager::new());
     let (session, _owner, store) = bound_child_with_store(manager.clone());
-    let child_id = session.store().thread_id.clone().unwrap();
+    let child_id = session
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
     store.register_bound_session(&child_id, "/tmp");
     let ticket = shell_task(&manager, "shell-task");
     session.queue().push_sync(QueuedMessage::prompt(
@@ -235,51 +265,56 @@ async fn settled_sync_child_returns_finished_without_parent_task() {
         crate::messages::BaseMessage::human("run shell"),
     ));
     let built = context(&session, "child answer");
-    let task_id = new_sync_task_id();
+    let task_id = crate::session::subagent::run_sync::new_sync_task_id();
     let run_id = child_id.clone();
     let run_store = Arc::clone(&store) as Arc<dyn SessionResources>;
-    let call = tokio::spawn(run_sync_with_registered_handoff(
-        session.clone(),
-        child_id.clone(),
-        "fixture".into(),
-        Some(parent_manager.clone()),
-        Some(task_id),
-        Some(Arc::new(|_, _| Ok(()))),
-        None,
-        move |handoff, _| async move {
-            run_sync_subagent(
-                &run_id,
-                "fixture",
-                "/tmp",
-                10,
-                None,
-                None,
-                None,
-                Some(run_store),
-                None,
-                None,
-                None,
-                None,
-                None,
-                built,
-                session,
-                None,
-                Some(handoff),
-            )
-            .await
-        },
-    ));
+    let call = tokio::spawn(
+        crate::session::subagent::run_sync::run_sync_with_registered_handoff(
+            session.clone(),
+            child_id.clone(),
+            "fixture".into(),
+            Some(parent_manager.clone()),
+            Some(task_id),
+            Some(Arc::new(|_, _| Ok(()))),
+            None,
+            move |handoff, _| async move {
+                crate::session::subagent::run_sync::run_sync_subagent(
+                    &run_id,
+                    "fixture",
+                    "/tmp",
+                    10,
+                    None,
+                    None,
+                    None,
+                    Some(run_store),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    built,
+                    session,
+                    None,
+                    Some(handoff),
+                )
+                .await
+            },
+        ),
+    );
     for _ in 0..20 {
         tokio::task::yield_now().await;
     }
     manager.confirm_external_execution_stopped(&ticket);
     assert!(manager.complete(&ticket, shell_result("shell-task")));
-    let completion = call.await.unwrap().unwrap();
+    let completion = call.await.expect("the call fixture result is required for this assertion").expect("settled sync child returns finished without parent task: the completed fixture operation must provide its result payload");
     let SyncCompletion::Finished(outcome) = completion else {
         panic!("settled run must not detach");
     };
     assert!(matches!(outcome, ChildRunOutcome::Settled), "{outcome:?}");
-    let meta = store.load_session_meta(&child_id).await.unwrap();
+    let meta = store
+        .load_session_meta(&child_id)
+        .await
+        .expect("the load session meta fixture result is required for this assertion");
     assert_eq!(meta.agent_status, peri_acp_types::thread::AgentStatus::Done);
     assert_eq!(meta.work_state, peri_acp_types::thread::WorkState::Idle);
     assert_eq!(manager.active_count(), 0);
@@ -294,7 +329,11 @@ async fn settled_sync_child_returns_finished_without_parent_task() {
 async fn failed_receipt_before_cleanup_preserves_typed_failure_without_detaching() {
     let session = child(Arc::new(TaskManager::new()));
     let parent_manager = Arc::new(TaskManager::new());
-    let child_id = session.store().thread_id.clone().unwrap();
+    let child_id = session
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
     let receipt = ChildHandoffReceipt {
         child_thread_id: child_id.clone(),
         execution: session.start_turn().execution_binding(),
@@ -311,45 +350,59 @@ async fn failed_receipt_before_cleanup_preserves_typed_failure_without_detaching
     let observed_deliveries = deliveries.clone();
     let (cleanup_done, cleanup_ready) = oneshot::channel();
     let run_child_id = child_id.clone();
-    let mut completion = Box::pin(run_sync_with_registered_handoff(
-        session,
-        child_id.clone(),
-        "fixture".into(),
-        Some(parent_manager.clone()),
-        Some(new_sync_task_id()),
-        Some(Arc::new(move |_, _| {
-            observed_deliveries.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        })),
-        None,
-        move |handoff, _| async move {
-            handoff.sender.send(receipt.clone()).unwrap();
-            cleanup_ready.await.unwrap();
-            Err(Box::new(SubagentFailure::failed_with_handoff(
-                run_child_id,
-                "fixture",
-                crate::error::AgentError::MaxIterationsExceeded(400),
-                receipt,
-            )) as Box<dyn std::error::Error + Send + Sync>)
-        },
-    ));
+    let mut completion = Box::pin(
+        crate::session::subagent::run_sync::run_sync_with_registered_handoff(
+            session,
+            child_id.clone(),
+            "fixture".into(),
+            Some(parent_manager.clone()),
+            Some(crate::session::subagent::run_sync::new_sync_task_id()),
+            Some(Arc::new(move |_, _| {
+                observed_deliveries.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })),
+            None,
+            move |handoff, _| async move {
+                handoff
+                    .sender
+                    .send(receipt.clone())
+                    .expect("handoff sender test receiver must remain available for this delivery");
+                cleanup_ready
+                    .await
+                    .expect("the cleanup ready fixture result is required for this assertion");
+                Err(Box::new(SubagentFailure::failed_with_handoff(
+                    run_child_id,
+                    "fixture",
+                    crate::error::AgentError::MaxIterationsExceeded(400),
+                    receipt,
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>)
+            },
+        ),
+    );
 
     // Poll through receipt delivery while lifecycle cleanup is deliberately
     // blocked. The transport must not turn an already-known failure into Ok.
     assert!(futures::poll!(completion.as_mut()).is_pending());
     assert!(parent_manager.snapshot().tasks.is_empty());
-    cleanup_done.send(()).unwrap();
+    cleanup_done
+        .send(())
+        .expect("cleanup done send test receiver must remain available for this delivery");
     let error = match completion.await {
         Err(error) => error,
         Ok(_) => panic!("failed execution must retain its original error"),
     };
-    let failure = error.downcast_ref::<SubagentFailure>().unwrap();
+    let failure = error
+        .downcast_ref::<SubagentFailure>()
+        .expect("the <SubagentFailure> fixture result is required for this assertion");
     assert_eq!(failure.child_thread_id(), child_id);
     assert!(matches!(
         failure.error(),
         crate::error::AgentError::MaxIterationsExceeded(400)
     ));
-    let residual = failure.handoff().unwrap();
+    let residual = failure
+        .handoff()
+        .expect("the handoff fixture result is required for this assertion");
     assert_eq!(residual.canonical_message_id, expected_receipt_id);
     assert_eq!(residual.unprocessed_tool_calls, ["last-act-call"]);
     assert!(parent_manager.snapshot().tasks.is_empty());
@@ -368,16 +421,24 @@ async fn handoff_sync_child_returns_pending_and_registry_retries_delivery() {
         crate::messages::BaseMessage::human("run shell"),
     ));
     let built = context(&session, "child answer");
-    let child_id = session.store().thread_id.clone().unwrap();
+    let child_id = session
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
     store.register_bound_session(&child_id, "/tmp");
     let terminal_route = TerminalMqRoute {
         store: Arc::clone(&store) as Arc<dyn SessionResources>,
         target: child_id.clone(),
         mailbox: None,
     };
-    let sync_state = session.subagent_host().unwrap().close_state.clone();
+    let sync_state = session
+        .subagent_host()
+        .expect("the subagent host fixture result is required for this assertion")
+        .close_state
+        .clone();
     let close_session = session.clone();
-    let task_id = new_sync_task_id();
+    let task_id = crate::session::subagent::run_sync::new_sync_task_id();
     let attempts = Arc::new(AtomicUsize::new(0));
     let callback_attempts = attempts.clone();
     let (delivered_tx, delivered_rx) = tokio::sync::oneshot::channel();
@@ -392,38 +453,40 @@ async fn handoff_sync_child_returns_pending_and_registry_retries_delivery() {
         Ok(())
     });
     let run_id = child_id.clone();
-    let call = tokio::spawn(run_sync_with_registered_handoff(
-        session.clone(),
-        child_id.clone(),
-        "fixture".into(),
-        Some(parent_manager.clone()),
-        Some(task_id.clone()),
-        Some(delivery),
-        Some(terminal_route),
-        move |handoff, _| async move {
-            run_sync_subagent(
-                &run_id,
-                "fixture",
-                "/tmp",
-                10,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                built,
-                session,
-                None,
-                Some(handoff),
-            )
-            .await
-        },
-    ));
-    let completion = call.await.unwrap().unwrap();
+    let call = tokio::spawn(
+        crate::session::subagent::run_sync::run_sync_with_registered_handoff(
+            session.clone(),
+            child_id.clone(),
+            "fixture".into(),
+            Some(parent_manager.clone()),
+            Some(task_id.clone()),
+            Some(delivery),
+            Some(terminal_route),
+            move |handoff, _| async move {
+                crate::session::subagent::run_sync::run_sync_subagent(
+                    &run_id,
+                    "fixture",
+                    "/tmp",
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    built,
+                    session,
+                    None,
+                    Some(handoff),
+                )
+                .await
+            },
+        ),
+    );
+    let completion = call.await.expect("the call fixture result is required for this assertion").expect("handoff sync child returns pending and registry retries delivery: the completed fixture operation must provide its result payload");
     let SyncCompletion::Pending(pending) = completion else {
         panic!("permanent shell must be handed off");
     };
@@ -436,7 +499,7 @@ async fn handoff_sync_child_returns_pending_and_registry_retries_delivery() {
     let delivered = tokio::time::timeout(Duration::from_secs(8), delivered_rx)
         .await
         .expect("registry retry owner must deliver")
-        .unwrap();
+        .expect("the expect fixture result is required for this assertion");
     assert!(!delivered.success);
     assert!(!delivered.timed_out);
     assert_eq!(delivered.task_id, task_id);
@@ -475,18 +538,22 @@ async fn handoff_without_parent_owner_finishes_incomplete_without_task() {
         crate::messages::BaseMessage::human("run shell"),
     ));
     let built = context(&session, "child answer");
-    let child_id = session.store().thread_id.clone().unwrap();
+    let child_id = session
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
     let run_id = child_id.clone();
-    let completion = run_sync_with_registered_handoff(
+    let completion = crate::session::subagent::run_sync::run_sync_with_registered_handoff(
         session.clone(),
         child_id.clone(),
         "fixture".into(),
         None,
-        Some(new_sync_task_id()),
+        Some(crate::session::subagent::run_sync::new_sync_task_id()),
         Some(Arc::new(|_, _| Ok(()))),
         None,
         move |handoff, _| async move {
-            run_sync_subagent(
+            crate::session::subagent::run_sync::run_sync_subagent(
                 &run_id,
                 "fixture",
                 "/tmp",
@@ -509,7 +576,7 @@ async fn handoff_without_parent_owner_finishes_incomplete_without_task() {
         },
     )
     .await
-    .unwrap();
+    .expect("the run sync with registered handoff fixture result is required for this assertion");
     let SyncCompletion::Finished(ChildRunOutcome::HandedOff { receipt }) = completion else {
         panic!("handoff must return typed incomplete outcome");
     };
@@ -529,49 +596,59 @@ async fn parent_close_retains_unconfirmed_delivery_and_reports_incomplete() {
         crate::messages::BaseMessage::human("run shell"),
     ));
     let built = context(&session, "child answer");
-    let child_id = session.store().thread_id.clone().unwrap();
+    let child_id = session
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
     store.register_bound_session(&child_id, "/tmp");
     let terminal_route = TerminalMqRoute {
         store: Arc::clone(&store) as Arc<dyn SessionResources>,
         target: child_id.clone(),
         mailbox: None,
     };
-    let sync_state = session.subagent_host().unwrap().close_state.clone();
-    let task_id = new_sync_task_id();
+    let sync_state = session
+        .subagent_host()
+        .expect("the subagent host fixture result is required for this assertion")
+        .close_state
+        .clone();
+    let task_id = crate::session::subagent::run_sync::new_sync_task_id();
     let run_id = child_id.clone();
-    let call = tokio::spawn(run_sync_with_registered_handoff(
-        session.clone(),
-        child_id,
-        "fixture".into(),
-        Some(parent_manager.clone()),
-        Some(task_id.clone()),
-        Some(Arc::new(|_, _| Err("parent delivery unavailable".into()))),
-        Some(terminal_route),
-        move |handoff, _| async move {
-            run_sync_subagent(
-                &run_id,
-                "fixture",
-                "/tmp",
-                10,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                built,
-                session,
-                None,
-                Some(handoff),
-            )
-            .await
-        },
-    ));
+    let call = tokio::spawn(
+        crate::session::subagent::run_sync::run_sync_with_registered_handoff(
+            session.clone(),
+            child_id,
+            "fixture".into(),
+            Some(parent_manager.clone()),
+            Some(task_id.clone()),
+            Some(Arc::new(|_, _| Err("parent delivery unavailable".into()))),
+            Some(terminal_route),
+            move |handoff, _| async move {
+                crate::session::subagent::run_sync::run_sync_subagent(
+                    &run_id,
+                    "fixture",
+                    "/tmp",
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    built,
+                    session,
+                    None,
+                    Some(handoff),
+                )
+                .await
+            },
+        ),
+    );
     assert!(matches!(
-        call.await.unwrap().unwrap(),
+        call.await.expect("the call fixture result is required for this assertion").expect("parent close retains unconfirmed delivery and reports incomplete: the completed fixture operation must provide its result payload"),
         SyncCompletion::Pending(_)
     ));
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -606,7 +683,11 @@ async fn handoff_with_closing_parent_finishes_incomplete_without_registration() 
         crate::messages::BaseMessage::human("run shell"),
     ));
     let built = context(&session, "child answer");
-    let child_id = session.store().thread_id.clone().unwrap();
+    let child_id = session
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
     store.register_bound_session(&child_id, "/tmp");
     let terminal_route = TerminalMqRoute {
         store: Arc::clone(&store) as Arc<dyn SessionResources>,
@@ -614,16 +695,16 @@ async fn handoff_with_closing_parent_finishes_incomplete_without_registration() 
         mailbox: None,
     };
     let run_id = child_id.clone();
-    let completion = run_sync_with_registered_handoff(
+    let completion = crate::session::subagent::run_sync::run_sync_with_registered_handoff(
         session.clone(),
         child_id.clone(),
         "fixture".into(),
         Some(parent_manager.clone()),
-        Some(new_sync_task_id()),
+        Some(crate::session::subagent::run_sync::new_sync_task_id()),
         Some(Arc::new(|_, _| Ok(()))),
         Some(terminal_route),
         move |handoff, _| async move {
-            run_sync_subagent(
+            crate::session::subagent::run_sync::run_sync_subagent(
                 &run_id,
                 "fixture",
                 "/tmp",
@@ -646,7 +727,7 @@ async fn handoff_with_closing_parent_finishes_incomplete_without_registration() 
         },
     )
     .await
-    .unwrap();
+    .expect("the run sync with registered handoff fixture result is required for this assertion");
     let SyncCompletion::Finished(ChildRunOutcome::HandedOff { receipt }) = completion else {
         panic!("closing parent must return typed incomplete outcome");
     };
@@ -657,264 +738,7 @@ async fn handoff_with_closing_parent_finishes_incomplete_without_registration() 
         .any(|task| task.task_id == "shell-task"));
     assert_eq!(parent_manager.active_count(), 0, "不得留下幽灵 sync task");
 }
-
-/// pending 任务列表为空但仍有未消费消息：wrapper 仍以 receipt 交接，不因空列表 abort。
-#[tokio::test(start_paused = true)]
-async fn handoff_with_empty_task_list_keeps_retained_messages() {
-    let manager = Arc::new(TaskManager::new());
-    let parent_manager = Arc::new(TaskManager::new());
-    let (session, _owner, store) = bound_child_with_store(manager.clone());
-    let ticket = shell_task(&manager, "shell-task");
-    session.queue().push_sync(QueuedMessage::info(
-        MessageSource::HookStopIntent,
-        crate::messages::BaseMessage::human("stop"),
-    ));
-    session.queue().push_sync(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        crate::messages::BaseMessage::human("run shell"),
-    ));
-    let built = context(&session, "child answer");
-    let child_id = session.store().thread_id.clone().unwrap();
-    store.register_bound_session(&child_id, "/tmp");
-    let terminal_route = TerminalMqRoute {
-        store: Arc::clone(&store) as Arc<dyn SessionResources>,
-        target: child_id.clone(),
-        mailbox: None,
-    };
-    let task_id = new_sync_task_id();
-    let run_id = child_id.clone();
-    let run_session = session.clone();
-    let (delivered_tx, delivered_rx) = tokio::sync::oneshot::channel();
-    let delivered_tx = parking_lot::Mutex::new(Some(delivered_tx));
-    let call = tokio::spawn(run_sync_with_registered_handoff(
-        session.clone(),
-        child_id.clone(),
-        "fixture".into(),
-        Some(parent_manager.clone()),
-        Some(task_id.clone()),
-        Some(Arc::new(
-            move |result: &peri_acp_types::event::BackgroundTaskResult, _| {
-                if let Some(sender) = delivered_tx.lock().take() {
-                    let _ = sender.send(result.clone());
-                }
-                Ok(())
-            },
-        )),
-        Some(terminal_route),
-        move |handoff, _| async move {
-            run_sync_subagent(
-                &run_id,
-                "fixture",
-                "/tmp",
-                10,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                built,
-                run_session,
-                None,
-                Some(handoff),
-            )
-            .await
-        },
-    ));
-    tokio::time::advance(Duration::from_secs(1)).await;
-    let delivery = crate::session::bg_complete::task_bg_complete_callback(
-        crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(
-            session.queue().clone(),
-        ),
-    );
-    let mut result = shell_result("shell-task");
-    result.agent_name = "shell".into();
-    manager.confirm_external_execution_stopped(&ticket);
-    assert!(manager.settle_completed(&ticket, result, delivery).unwrap());
-    let completion = call.await.unwrap().unwrap();
-    let SyncCompletion::Pending(pending) = completion else {
-        panic!("retained message must hand off even with empty task list");
-    };
-    assert!(pending.receipt.tasks.is_empty());
-    assert!(!pending.receipt.message_ids.is_empty());
-    let delivered = tokio::time::timeout(Duration::from_secs(5), delivered_rx)
-        .await
-        .expect("parent result must be delivered")
-        .unwrap();
-    assert!(!delivered.success);
-    assert!(!delivered.timed_out);
-    assert_eq!(delivered.task_id, task_id);
-}
-
-/// worker 必须释放完整计算对象，而不只是 TaskTracker 计数归零。
-#[tokio::test(start_paused = true)]
-async fn sync_worker_releases_session_llm_and_context_after_takeover() {
-    let manager = Arc::new(TaskManager::new());
-    let parent_manager = Arc::new(TaskManager::new());
-    let (session, _owner, store) = bound_child_with_store(manager.clone());
-    shell_task(&manager, "shell-task");
-    session.queue().push_sync(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        crate::messages::BaseMessage::human("run shell"),
-    ));
-    let marker = Arc::new(());
-    let weak = Arc::downgrade(&marker);
-    let built = probe_context(&session, marker);
-    let child_id = session.store().thread_id.clone().unwrap();
-    store.register_bound_session(&child_id, "/tmp");
-    let terminal_route = TerminalMqRoute {
-        store: Arc::clone(&store) as Arc<dyn SessionResources>,
-        target: child_id.clone(),
-        mailbox: None,
-    };
-    let sync_state = session.subagent_host().unwrap().close_state.clone();
-    let task_id = new_sync_task_id();
-    let (delivered_tx, delivered_rx) = tokio::sync::oneshot::channel();
-    let delivered_tx = parking_lot::Mutex::new(Some(delivered_tx));
-    let run_id = child_id.clone();
-    let call = tokio::spawn(run_sync_with_registered_handoff(
-        session.clone(),
-        child_id.clone(),
-        "fixture".into(),
-        Some(parent_manager),
-        Some(task_id.clone()),
-        Some(Arc::new(
-            move |result: &peri_acp_types::event::BackgroundTaskResult, _| {
-                if let Some(sender) = delivered_tx.lock().take() {
-                    let _ = sender.send(result.clone());
-                }
-                Ok(())
-            },
-        )),
-        Some(terminal_route),
-        move |handoff, _| async move {
-            run_sync_subagent(
-                &run_id,
-                "fixture",
-                "/tmp",
-                10,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                built,
-                session,
-                None,
-                Some(handoff),
-            )
-            .await
-        },
-    ));
-    assert!(matches!(
-        call.await.unwrap().unwrap(),
-        SyncCompletion::Pending(_)
-    ));
-    let delivered = tokio::time::timeout(Duration::from_secs(5), delivered_rx)
-        .await
-        .expect("parent result must be delivered")
-        .unwrap();
-    assert!(!delivered.success);
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !sync_state.sync_workers.is_empty() {
-            peri_time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("worker must end");
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while weak.upgrade().is_some() {
-            peri_time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("LLM/StageContext 必须随 worker 释放");
-}
-
-/// 真实 run_sync_subagent：执行错误 + handoff flush 失败时父级保留完整证据。
-#[tokio::test(start_paused = true)]
-async fn run_sync_handoff_failure_preserves_error_and_receipt() {
-    use crate::session::subagent::SubagentFailure;
-
-    let manager = Arc::new(TaskManager::new());
-    let (session, owner, store) = bound_child_with_store(manager.clone());
-    shell_task(&manager, "shell-task");
-    session.queue().push_sync(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        crate::messages::BaseMessage::human("run shell"),
-    ));
-    let child_id = session.store().thread_id.clone().unwrap();
-    let built = build_v2_subagent_context(
-        Some(session.clone()),
-        Box::new(FailingLlm),
-        Arc::new(MiddlewareChain::new()),
-        Vec::new(),
-        Arc::new(|_| true),
-        None,
-        "/tmp",
-        session.config().cancel_token.as_ref().clone(),
-        None,
-        None,
-        None,
-        None,
-        Some(agent_id_from_child_thread(&child_id)),
-    );
-    store.restrict_to_history_read_only();
-    // MQ 原子移交不再排队异步持久化，handoff 前的 flush 只能因 writer 关闭而失败。
-    let writer = session.transcript().read().persist_tx_handle().unwrap();
-    session.transcript().read().shutdown_persistence();
-    tokio::time::timeout(std::time::Duration::from_secs(10), writer.closed())
-        .await
-        .expect("测试 writer 必须在 handoff 前关闭");
-    let error = run_sync_subagent(
-        &child_id, "fixture", "/tmp", 10, None, None, None, None, None, None, None, None, None,
-        built, session, None, None,
-    )
-    .await
-    .expect_err("model + handoff write failure must return a typed error");
-    let failure = error
-        .downcast_ref::<SubagentFailure>()
-        .expect("typed SubagentFailure");
-    assert!(
-        failure
-            .error()
-            .user_facing_message()
-            .contains("model failed"),
-        "原执行错误必须保留: {}",
-        failure.error().user_facing_message()
-    );
-    let handoff_failure = failure.handoff_failure().expect("结构化交接失败");
-    assert!(
-        handoff_failure.contains("handoff_persistence_failed"),
-        "{handoff_failure}"
-    );
-    let flush_failure = failure
-        .handoff_flush_failure()
-        .expect("flush 失败必须附加到结构化失败");
-    assert!(
-        flush_failure.contains("append_history") || flush_failure.contains("persistence"),
-        "{flush_failure}"
-    );
-    assert!(failure
-        .public_message()
-        .contains("handoff history flush failed"));
-    let receipt = failure.handoff().expect("冻结 receipt");
-    assert_eq!(receipt.child_thread_id, child_id);
-    assert!(receipt
-        .tasks
-        .iter()
-        .any(|task| task.task_id == "shell-task"));
-    assert!(receipt.unprocessed_tool_calls.is_empty());
-    assert!(owner.pending_receipt().is_some());
-    assert!(owner.check_resume().is_err(), "未确认交接必须拒绝 resume");
-}
+include!("run_sync_handoff_lifecycle_test.rs");
 
 #[path = "run_sync_cancellation_test.rs"]
 mod cancellation_tests;

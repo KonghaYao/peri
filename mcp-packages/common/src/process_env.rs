@@ -2,32 +2,14 @@
 //!
 //! 使用文件排他锁（`fs4`），可在 async 测试全程持有（`tokio::sync::Mutex` 在 `.await` 时会释放）。
 
-use std::{fs::OpenOptions, io, path::PathBuf, sync::OnceLock};
+use std::fs::OpenOptions;
+use std::io;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use fs4::FileExt;
 
-pub struct EnvLockFile(std::fs::File);
-
-impl Drop for EnvLockFile {
-    fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.0);
-    }
-}
-
-static LOCK_PATH: OnceLock<PathBuf> = OnceLock::new();
-
-fn lock_path() -> &'static PathBuf {
-    LOCK_PATH.get_or_init(|| std::env::temp_dir().join("peri-middlewares-process-env.lock"))
-}
-
-/// 在改写 `HOME` 或启动依赖真实 `HOME` 的子进程前获取；guard 在 drop 时释放。
-pub fn lock() -> Result<EnvLockFile, io::Error> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(lock_path())?;
-    FileExt::lock(&file)?;
-    Ok(EnvLockFile(file))
-}
+#[path = "process_env/env_lock_file.rs"]
+mod env_lock_file;
+pub use env_lock_file::lock;
+pub use env_lock_file::EnvLockFile;

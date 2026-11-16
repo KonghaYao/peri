@@ -18,23 +18,23 @@
 #![allow(clippy::needless_update)]
 
 use fluent_bundle::FluentValue;
-use peri_acp_types::event_data::RewindPreview;
+
 use peri_theme::atoms::THEME_ATOM;
 use peri_theme::theme::ThemeDefinition;
-use ratatui_kit::{
-    crossterm::event::{Event, KeyEventKind, MouseButton, MouseEventKind},
-    prelude::*,
-    ratatui::{style::Stylize, text::Line},
-};
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::KeyEventKind;
+use ratatui_kit::crossterm::event::MouseButton;
+use ratatui_kit::crossterm::event::MouseEventKind;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::style::Stylize;
+use ratatui_kit::ratatui::text::Line;
 
 use crate::i18n;
-use crate::kit::atoms::{
-    LANG_VERSION, RENDER_HEARTBEAT, REWIND_ACTION_TX, REWIND_BUDGET_STATE, REWIND_QUERY_ERROR,
-    REWIND_TARGET_TEXT, RewindBudgetState,
-};
-use crate::kit::list_nav::{ListNavAction, classify_list_nav, next_selection, previous_selection};
-use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item};
-use crate::kit::popup_overlay::close_popup;
+
+use crate::kit::list_nav::ListNavAction;
+use crate::kit::panel_mouse::AreaTracker;
+use crate::kit::panel_mouse::ListLayout;
+
 use crate::kit::rewind_action::RewindAction;
 
 /// 弹窗视图——由 `REWIND_BUDGET_STATE` 推导，非用户可切换状态。
@@ -45,6 +45,7 @@ enum RewindView {
     Executing,
 }
 
+#[must_use]
 fn rewind_view(budget_state: &RewindBudgetState) -> RewindView {
     match budget_state {
         RewindBudgetState::Files(_) => RewindView::Budget,
@@ -53,7 +54,7 @@ fn rewind_view(budget_state: &RewindBudgetState) -> RewindView {
     }
 }
 
-fn preview_action(preview: &Option<RewindPreview>, msg_sel: usize) -> Option<RewindAction> {
+fn preview_action(preview: Option<&RewindPreview>, msg_sel: usize) -> Option<RewindAction> {
     preview
         .as_ref()
         .and_then(|preview| preview.messages.get(msg_sel))
@@ -112,9 +113,9 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 渲染行构造（纯函数，测试友好）
     let lines: Vec<Line<'static>> = build_popup_lines(
-        &preview,
+        preview.as_ref(),
         &budget_state,
-        &query_error,
+        query_error.as_deref(),
         *msg_sel.read(),
         *file_sel.read(),
         &theme_def.read(),
@@ -132,7 +133,7 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // 鼠标：候选区左键点击 = 选中 + 发送 Preview（与键盘 Enter 一致）
             if let Event::Mouse(mouse) = event {
                 if let (Some(area), true) = (area, view == RewindView::Candidates)
-                    && let Some(idx) = hit_item(&mouse, area, msg_layout)
+                    && let Some(idx) = crate::kit::panel_mouse::hit_item(&mouse, area, msg_layout)
                 {
                     *msg_sel.write() = idx;
                     let target = preview_for_closure
@@ -157,23 +158,23 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             if let Event::Key(key) = event
                 && key.kind == KeyEventKind::Press
             {
-                match classify_list_nav(&key) {
+                match crate::kit::list_nav::classify_list_nav(&key) {
                     Some(ListNavAction::MoveUp) if view == RewindView::Candidates => {
                         let mut s = msg_sel.write();
-                        *s = previous_selection(*s);
+                        *s = crate::kit::list_nav::previous_selection(*s);
                         return EventResult::Consumed;
                     }
                     Some(ListNavAction::MoveDown) if view == RewindView::Candidates => {
                         let mut s = msg_sel.write();
                         // 钳制到渲染窗口（take(8)）——否则选中可移出可视区，
                         // Enter 会对屏幕外目标发送 Preview
-                        *s = next_selection(*s, msg_rendered);
+                        *s = crate::kit::list_nav::next_selection(*s, msg_rendered);
                         return EventResult::Consumed;
                     }
                     Some(ListNavAction::Confirm) => match view {
                         RewindView::Candidates => {
                             if let Some(action) =
-                                preview_action(&preview_for_closure, *msg_sel.read())
+                                preview_action(preview_for_closure.as_ref(), *msg_sel.read())
                                 && let Some(tx) = REWIND_ACTION_TX.get()
                             {
                                 let _ = tx.send(action);
@@ -220,7 +221,7 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             return EventResult::Consumed;
                         }
                         RewindView::Candidates => {
-                            close_popup();
+                            crate::kit::popup_overlay::close_popup();
                             *REWIND_TARGET_TEXT.state().write() = None;
                             *crate::kit::atoms::REWIND_PREVIEW_FINGERPRINT
                                 .state()
@@ -245,9 +246,9 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
 /// 构造弹窗内容行（纯函数，测试友好）。
 fn build_popup_lines(
-    preview: &Option<RewindPreview>,
+    preview: Option<&RewindPreview>,
     budget_state: &RewindBudgetState,
-    query_error: &Option<String>,
+    query_error: Option<&str>,
     msg_sel: usize,
     file_sel: usize,
     theme: &ThemeDefinition,
@@ -277,21 +278,24 @@ fn build_popup_lines(
                 .fg(semantic.text.primary)
                 .bold(),
             );
-            for (i, fc) in files.iter().enumerate().take(8) {
-                let is_selected = i == file_sel;
-                let prefix = if is_selected { "  > " } else { "    " };
-                let kind_label = if fc.kind == "write" { "write" } else { "edit" };
-                lines.push(
-                    Line::from(format!(
-                        "{prefix}[{kind_label}] {}",
-                        truncate_str(&fc.path, 40)
-                    ))
-                    .fg(if is_selected {
-                        theme.component.popup.selected_fg
-                    } else {
-                        semantic.text.primary
-                    }),
-                );
+            {
+                let iteration_items = files.iter().enumerate().take(8);
+                for (i, fc) in iteration_items {
+                    let is_selected = i == file_sel;
+                    let prefix = if is_selected { "  > " } else { "    " };
+                    let kind_label = if fc.kind == "write" { "write" } else { "edit" };
+                    lines.push(
+                        Line::from(format!(
+                            "{prefix}[{kind_label}] {}",
+                            truncate_str(&fc.path, 40)
+                        ))
+                        .fg(if is_selected {
+                            theme.component.popup.selected_fg
+                        } else {
+                            semantic.text.primary
+                        }),
+                    );
+                }
             }
             if files.len() > 8 {
                 lines.push(
@@ -322,7 +326,7 @@ fn build_popup_lines(
                 "  {}",
                 i18n::tr_args(
                     "rewind-query-failed",
-                    &[("error".into(), FluentValue::from(err.as_str()))]
+                    &[("error".into(), FluentValue::from(err))]
                 )
             ))
             .fg(semantic.status.error),
@@ -360,16 +364,21 @@ fn build_popup_lines(
         .fg(semantic.text.primary)
         .bold(),
     );
-    for (i, msg) in p.messages.iter().enumerate().take(8) {
-        let is_selected = i == msg_sel;
-        let prefix = if is_selected { "  > " } else { "    " };
-        lines.push(
-            Line::from(format!("{prefix}{}", truncate_str(&msg.preview, 40))).fg(if is_selected {
-                theme.component.popup.selected_fg
-            } else {
-                semantic.text.primary
-            }),
-        );
+    {
+        let iteration_items = p.messages.iter().enumerate().take(8);
+        for (i, msg) in iteration_items {
+            let is_selected = i == msg_sel;
+            let prefix = if is_selected { "  > " } else { "    " };
+            lines.push(
+                Line::from(format!("{prefix}{}", truncate_str(&msg.preview, 40))).fg(
+                    if is_selected {
+                        theme.component.popup.selected_fg
+                    } else {
+                        semantic.text.primary
+                    },
+                ),
+            );
+        }
     }
     if p.messages.len() > 8 {
         lines.push(
@@ -394,6 +403,7 @@ fn build_popup_lines(
 // ── 辅助函数 ─────────────────────────────────────────────────────────────
 
 /// 截断字符串到 max chars（CJK 安全）。
+#[must_use]
 fn truncate_str(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -406,3 +416,19 @@ fn truncate_str(s: &str, max: usize) -> String {
 #[cfg(test)]
 #[path = "rewind_popup_test.rs"]
 mod tests;
+
+use peri_acp_types::event_data::RewindPreview;
+
+use crate::kit::atoms::LANG_VERSION;
+
+use crate::kit::atoms::RENDER_HEARTBEAT;
+
+use crate::kit::atoms::REWIND_ACTION_TX;
+
+use crate::kit::atoms::REWIND_BUDGET_STATE;
+
+use crate::kit::atoms::REWIND_QUERY_ERROR;
+
+use crate::kit::atoms::REWIND_TARGET_TEXT;
+
+use crate::kit::atoms::RewindBudgetState;

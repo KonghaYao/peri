@@ -1,4 +1,7 @@
-use super::*;
+use super::Color;
+use super::MarkdownRenderCache;
+use super::MarkdownSegment;
+use super::Palette;
 
 const TEST_BASE_FG: Color = Color::White;
 
@@ -64,7 +67,7 @@ fn test_release_synthetic_matrix() {
             for width in [40, 80, 160] {
                 reset_perf_counters();
                 let mut cache = MarkdownRenderCache::default();
-                let _ = parse_markdown_cached(
+                let _ = super::parse_markdown_cached(
                     &fixture,
                     width,
                     Palette::default(),
@@ -93,8 +96,9 @@ fn test_release_synthetic_matrix() {
         let fixture = shape(shape_name, bytes);
         for width in [40u16, 80, 160] {
             reset_perf_counters();
-            for end in (chunk_bytes..bytes).step_by(chunk_bytes).chain([bytes]) {
-                let segments = parse_markdown(
+            let stream_chunk_ends = (chunk_bytes..bytes).step_by(chunk_bytes).chain([bytes]);
+            for end in stream_chunk_ends {
+                let segments = super::parse_markdown(
                     &fixture[..end],
                     usize::from(width),
                     Palette::default(),
@@ -107,8 +111,9 @@ fn test_release_synthetic_matrix() {
 
             reset_perf_counters();
             let mut cache = MarkdownRenderCache::default();
-            for end in (chunk_bytes..bytes).step_by(chunk_bytes).chain([bytes]) {
-                let rendered = parse_markdown_chunks_cached(
+            let cached_chunk_ends = (chunk_bytes..bytes).step_by(chunk_bytes).chain([bytes]);
+            for end in cached_chunk_ends {
+                let rendered = super::parse_markdown_chunks_cached(
                     &fixture[..end],
                     usize::from(width),
                     Palette::default(),

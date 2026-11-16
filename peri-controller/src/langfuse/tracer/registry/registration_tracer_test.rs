@@ -1,7 +1,7 @@
-use super::IncompleteReason;
-use super::SubagentStatus;
 use crate::langfuse::config::LangfuseConfig;
 use crate::langfuse::fake_session::FakeLangfuseSession;
+use crate::langfuse::tracer::registry::types::IncompleteReason;
+use crate::langfuse::tracer::registry::types::SubagentStatus;
 use crate::langfuse::tracer::LangfuseTracer;
 use langfuse_client::types::ObservationType;
 use langfuse_client::IngestionEvent;
@@ -135,7 +135,11 @@ fn cached_agent(
     tracer: &LangfuseTracer,
     agent_id: &str,
 ) -> (String, Option<String>, Option<String>) {
-    let cached = tracer.subagent.by_agent_id.get(agent_id).unwrap();
+    let cached = tracer
+        .subagent
+        .by_agent_id
+        .get(agent_id)
+        .expect("tracer subagent fixture must contain the requested entry");
     (
         cached.observation_id.clone(),
         Some(cached.parent_observation_id.clone()),
@@ -209,7 +213,7 @@ async fn test_content_before_start_gate() {
     // ④ 父 ToolStart 晚到:register_invocation → join → 重放
     let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_3")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
 
     let events = session.events_snapshot();
@@ -276,7 +280,7 @@ async fn test_start_before_parent_tool_start() {
     // ③ 父 ToolStart → join → AGENT obs + 重放
     let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_4")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
 
     let events = session.events_snapshot();
@@ -290,7 +294,9 @@ async fn test_start_before_parent_tool_start() {
         "AGENT obs parent = join 时冻结的父 stage span"
     );
 
-    let replay_handle = t.take_replayed_stage_handle("child_1").unwrap();
+    let replay_handle = t
+        .take_replayed_stage_handle("child_1")
+        .expect("the take replayed stage handle fixture result is required for this assertion");
     assert_eq!(replay_handle.parent_observation_id, *child_obs_id);
     assert_eq!(t.subagent.gated_len(), 0);
 }
@@ -340,7 +346,7 @@ async fn test_missing_start_incomplete() {
 
     let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_7")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     // ① 父 ToolStart(Agent):invocation 登记,但 child Start 永不出现
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
     // ② ToolEnded
@@ -381,7 +387,7 @@ async fn test_duplicate_start() {
 
     let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_8a")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
     t.on_subagent_start("main", "child_1", "fork", false);
     // 重复 Start
@@ -402,7 +408,7 @@ async fn test_duplicate_start() {
 
     t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed)
         .await
-        .unwrap();
+        .expect("the on turn end fixture result is required for this assertion");
     assert_eq!(
         agent_obs_completions(&session.events_snapshot()).len(),
         1,
@@ -420,7 +426,7 @@ async fn test_duplicate_stop() {
 
     let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_8b")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
     t.on_subagent_start("main", "child_1", "fork", false);
     t.on_subagent_stop("main", "child_1", "done", false);
@@ -444,7 +450,7 @@ async fn test_duplicate_stop() {
 
     t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed)
         .await
-        .unwrap();
+        .expect("the on turn end fixture result is required for this assertion");
     assert_eq!(
         agent_obs_completions(&session.events_snapshot()).len(),
         1,
@@ -484,7 +490,7 @@ async fn test_gate_cache_overflow() {
     // 父 ToolStart 到达:child 已 incomplete → 不 join
     let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_9")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
     assert_eq!(
         agent_obs_creates(&session.events_snapshot()).len(),
@@ -511,7 +517,7 @@ async fn test_parent_frozen_no_drift() {
     // 父 stage A1
     let act_a1 = t
         .on_stage_start_gated("main", Stage::Act, "turn_10")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     let frozen_span = act_a1.span_id.clone();
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
     t.on_subagent_start("main", "child_1", "fork", false);
@@ -527,13 +533,13 @@ async fn test_parent_frozen_no_drift() {
     // 父另开新 stage A2
     let act_a2 = t
         .on_stage_start_gated("main", Stage::Act, "turn_10")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     assert_ne!(act_a2.span_id, frozen_span);
 
     // child 继续:内容归属仍为 child AGENT obs
     let child_reason = t
         .on_stage_start_gated("child_1", Stage::Reason, "turn_10")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     assert_eq!(child_reason.parent_observation_id, *child_obs_id);
 
     // 关闭后 AGENT obs parent 仍为冻结 span(ObservationCreate 与 create 一致)
@@ -559,19 +565,25 @@ async fn test_no_cycle_parent_neq_child() {
 
     let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_11")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     // child1
     t.on_tool_start("main", "call_1", "Agent", &serde_json::json!({}));
     t.on_subagent_start("main", "child_1", "c1", false);
-    let obs_1 = t.subagent.observation_id_of("child_1").unwrap();
+    let obs_1 = t
+        .subagent
+        .observation_id_of("child_1")
+        .expect("the observation id of fixture result is required for this assertion");
 
     // child1 内再调 Agent → child2
     let c1_stage = t
         .on_stage_start_gated("child_1", Stage::Act, "turn_11")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     t.on_tool_start("child_1", "call_2", "Agent", &serde_json::json!({}));
     t.on_subagent_start("child_1", "child_2", "c2", false);
-    let obs_2 = t.subagent.observation_id_of("child_2").unwrap();
+    let obs_2 = t
+        .subagent
+        .observation_id_of("child_2")
+        .expect("the observation id of fixture result is required for this assertion");
 
     assert_ne!(obs_1, obs_2, "嵌套 child 的 obs id 应不同");
     // child2 的 AGENT obs parent = child1 的 active stage(冻结)
@@ -591,7 +603,7 @@ async fn test_no_cycle_parent_neq_child() {
     // 图无环:每个 obs 沿 parent 链最终到 trace(或主 agent obs),不回自身
     t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed)
         .await
-        .unwrap();
+        .expect("the on turn end fixture result is required for this assertion");
     let events = session.events_snapshot();
     let map = parent_map(&events);
     for (id, parent) in &map {
@@ -620,12 +632,12 @@ async fn test_tool_ended_never_closes_child() {
 
     let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_12")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
     t.on_subagent_start("main", "child_1", "fork", false);
     let child_reason = t
         .on_stage_start_gated("child_1", Stage::Reason, "turn_12")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     t.on_stage_end("child_1", &child_reason, StageStatus::Done);
 
     // 父 ToolEnded:child 不得关闭
@@ -658,12 +670,12 @@ async fn test_bg_subagent_turn_end_cleanup() {
 
     let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_13")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
     t.on_subagent_start("main", "child_1", "bg", true);
     let child_reason = t
         .on_stage_start_gated("child_1", Stage::Reason, "turn_13")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     t.on_tool_start("child_1", "call_bash", "Bash", &serde_json::json!({}));
     t.on_tool_end("child_1", "call_bash", "out", false);
     t.on_stage_end("child_1", &child_reason, StageStatus::Done);

@@ -1,5 +1,5 @@
-use super::*;
-use crate::kit::acp_bridge::{perf_counters, reset_perf_counters};
+use super::{CurrentTurn, TuiRenderUnit};
+
 use crate::kit::acp_types::ToolCardAccumulator;
 use crate::kit::tui_render_unit::{FoldState, TuiToolCard};
 
@@ -29,7 +29,7 @@ fn growing_publications_materialize_once_and_leave_old_snapshot_immutable() {
     let TuiRenderUnit::TuiAssistantBubble(previous) = &old[0] else {
         panic!("expected assistant");
     };
-    reset_perf_counters();
+    crate::kit::acp_bridge::reset_perf_counters();
     let mut expected_bytes = 0;
     for _ in 0..20 {
         turn.append_text(" 中文", Some("message"));
@@ -41,12 +41,21 @@ fn growing_publications_materialize_once_and_leave_old_snapshot_immutable() {
         assert!(!Arc::ptr_eq(previous, current));
         assert_eq!(previous.text, "initial");
     }
-    assert_eq!(perf_counters().projection_copied_bytes, expected_bytes);
-    assert_eq!(perf_counters().assistant_clone_bytes, 0);
-    reset_perf_counters();
+    assert_eq!(
+        crate::kit::acp_bridge::perf_counters().projection_copied_bytes,
+        expected_bytes
+    );
+    assert_eq!(
+        crate::kit::acp_bridge::perf_counters().assistant_clone_bytes,
+        0
+    );
+    crate::kit::acp_bridge::reset_perf_counters();
     turn.invalidate_cache();
     turn.view_models();
-    assert_eq!(perf_counters().projection_copied_bytes, 0);
+    assert_eq!(
+        crate::kit::acp_bridge::perf_counters().projection_copied_bytes,
+        0
+    );
 }
 
 /// [回归测试] 相同秒内的 publication 不重建未变工具；跨秒刷新保留 fold 与 hash 契约。
@@ -54,18 +63,18 @@ fn growing_publications_materialize_once_and_leave_old_snapshot_immutable() {
 async fn test_tool_projection_reuses_unchanged_and_ticks_with_fold() {
     let mut turn = running_turn();
     let initial_hash = card(&mut turn).content_hash;
-    reset_perf_counters();
+    crate::kit::acp_bridge::reset_perf_counters();
     for _ in 0..40 {
         turn.invalidate_cache();
         assert_eq!(card(&mut turn).content_hash, initial_hash);
     }
-    assert_eq!(perf_counters().tool_hash_calls, 0);
+    assert_eq!(crate::kit::acp_bridge::perf_counters().tool_hash_calls, 0);
     if let TuiRenderUnit::TuiToolCard(card) = &mut turn.cached_view_models[0] {
         card.fold = FoldState::Expanded;
         card.user_modified = true;
         card.recompute_hash();
     }
-    reset_perf_counters();
+    crate::kit::acp_bridge::reset_perf_counters();
     tokio::time::advance(std::time::Duration::from_secs(2)).await;
     turn.invalidate_cache();
     let updated = card(&mut turn).clone();
@@ -73,7 +82,7 @@ async fn test_tool_projection_reuses_unchanged_and_ticks_with_fold() {
     assert_eq!(updated.fold, FoldState::Expanded);
     assert!(updated.user_modified);
     assert_ne!(updated.content_hash, initial_hash);
-    assert_eq!(perf_counters().tool_hash_calls, 1);
+    assert_eq!(crate::kit::acp_bridge::perf_counters().tool_hash_calls, 1);
     let mut recomputed = updated.clone();
     recomputed.recompute_hash();
     assert_eq!(updated.content_hash, recomputed.content_hash);
@@ -100,13 +109,13 @@ async fn test_tool_projection_input_upgrade_and_terminal_output() {
     assert!(completed.is_error);
     assert_eq!(completed.completed_duration_ms, Some(1234));
     assert_eq!(completed.fold, FoldState::Collapsed);
-    reset_perf_counters();
+    crate::kit::acp_bridge::reset_perf_counters();
     tokio::time::advance(std::time::Duration::from_secs(10)).await;
     for _ in 0..40 {
         turn.invalidate_cache();
         assert_eq!(card(&mut turn).content_hash, completed.content_hash);
     }
-    assert_eq!(perf_counters().tool_hash_calls, 0);
+    assert_eq!(crate::kit::acp_bridge::perf_counters().tool_hash_calls, 0);
 }
 
 /// [回归测试] 无 ToolEnded 的取消必须退出 running，之后空输出不能反复失效。
@@ -118,8 +127,8 @@ async fn test_tool_projection_cancel_without_output() {
     let cancelled = card(&mut turn).clone();
     assert!(!cancelled.is_running);
     assert_eq!(cancelled.running_duration_ms, None);
-    reset_perf_counters();
+    crate::kit::acp_bridge::reset_perf_counters();
     turn.invalidate_cache();
     assert_eq!(card(&mut turn).content_hash, cancelled.content_hash);
-    assert_eq!(perf_counters().tool_hash_calls, 0);
+    assert_eq!(crate::kit::acp_bridge::perf_counters().tool_hash_calls, 0);
 }

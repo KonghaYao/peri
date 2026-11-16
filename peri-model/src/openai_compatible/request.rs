@@ -3,11 +3,17 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 use url::Url;
 
-use crate::{
-    prompt_cache::strip_system_prompt_dynamic_boundaries, ContentBlock, DocumentSource,
-    ImageSource, ModelError, ModelMessage, ModelRequest, ModelResult, PreparedModelRequest,
-    ProviderProtocol, ToolDefinition,
-};
+use crate::prompt_cache;
+use crate::ContentBlock;
+use crate::DocumentSource;
+use crate::ImageSource;
+use crate::ModelError;
+use crate::ModelMessage;
+use crate::ModelRequest;
+use crate::ModelResult;
+use crate::PreparedModelRequest;
+use crate::ProviderProtocol;
+use crate::ToolDefinition;
 
 use super::OpenAiConfig;
 
@@ -113,7 +119,8 @@ fn extract_system_message(messages: &[ModelMessage]) -> Option<String> {
         })
         .filter(|content| !content.trim().is_empty())
         .collect::<Vec<_>>();
-    (!parts.is_empty()).then(|| strip_system_prompt_dynamic_boundaries(&parts.join("\n\n")))
+    (!parts.is_empty())
+        .then(|| prompt_cache::strip_system_prompt_dynamic_boundaries(&parts.join("\n\n")))
 }
 
 fn messages_to_json(config: &OpenAiConfig, messages: &[ModelMessage]) -> Vec<Value> {

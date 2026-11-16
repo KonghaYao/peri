@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
-use crate::prompt_cache::{strip_system_prompt_dynamic_boundaries, SYSTEM_PROMPT_DYNAMIC_BOUNDARY};
+use crate::prompt_cache;
+use crate::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
 
 pub(super) struct SystemPromptBlock {
     pub(super) text: String,
@@ -44,7 +45,7 @@ pub(super) fn split_system_blocks(text: &str) -> SplitSystemPrompt {
             allow_fallback_cache: false,
         }
     } else if boundary_count > 1 {
-        let text = strip_system_prompt_dynamic_boundaries(text);
+        let text = prompt_cache::strip_system_prompt_dynamic_boundaries(text);
         let text = text.trim();
         SplitSystemPrompt {
             blocks: (!text.is_empty())
@@ -108,19 +109,22 @@ pub(super) fn apply_cache_to_messages(messages: &mut [Value]) {
     }
     target_indices.sort_unstable();
 
-    for target_index in target_indices.iter().copied() {
-        let effective_index = if has_cacheable_block(&messages[target_index]) {
-            Some(target_index)
-        } else {
-            user_indices.iter().rev().find_map(|&index| {
-                (index < target_index
-                    && has_cacheable_block(&messages[index])
-                    && !target_indices.contains(&index))
-                .then_some(index)
-            })
-        };
-        if let Some(index) = effective_index {
-            apply_cache_to_message(&mut messages[index]);
+    {
+        let iterated_target_indices = target_indices.iter().copied();
+        for target_index in iterated_target_indices {
+            let effective_index = if has_cacheable_block(&messages[target_index]) {
+                Some(target_index)
+            } else {
+                user_indices.iter().rev().find_map(|&index| {
+                    (index < target_index
+                        && has_cacheable_block(&messages[index])
+                        && !target_indices.contains(&index))
+                    .then_some(index)
+                })
+            };
+            if let Some(index) = effective_index {
+                apply_cache_to_message(&mut messages[index]);
+            }
         }
     }
 }

@@ -8,6 +8,8 @@
 //! 调用资格，不取消已提交的执行。
 
 use std::collections::{HashSet, VecDeque};
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -72,6 +74,15 @@ pub struct PeerBinding {
     pub record: Option<Arc<McpAppRecord>>,
 }
 
+impl Debug for PeerBinding {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PeerBinding")
+            .field("server_generation", &self.server_generation)
+            .finish_non_exhaustive()
+    }
+}
+
 /// session 级准入 owner：串行裁决 epoch / 撤销 / 换代，产出已绑定 peer 的提交。
 pub struct SessionAdmissionOwner {
     runtime_epoch: u64,
@@ -79,7 +90,18 @@ pub struct SessionAdmissionOwner {
     seq: AtomicU64,
 }
 
+impl Debug for SessionAdmissionOwner {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionAdmissionOwner")
+            .field("runtime_epoch", &self.runtime_epoch)
+            .field("seq", &self.seq)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SessionAdmissionOwner {
+    #[must_use]
     pub fn new(runtime_epoch: u64) -> Self {
         Self {
             runtime_epoch,
@@ -88,6 +110,7 @@ impl SessionAdmissionOwner {
         }
     }
 
+    #[must_use]
     pub fn runtime_epoch(&self) -> u64 {
         self.runtime_epoch
     }
@@ -98,6 +121,7 @@ impl SessionAdmissionOwner {
     }
 
     /// 该键是否已被撤销。
+    #[must_use]
     pub fn is_revoked(&self, key: &RevocationKey) -> bool {
         self.revoked.lock().contains(key)
     }
@@ -154,13 +178,25 @@ pub struct DispatchCommit {
     sequence: u64,
 }
 
+impl Debug for DispatchCommit {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DispatchCommit")
+            .field("server_generation", &self.server_generation)
+            .field("sequence", &self.sequence)
+            .finish_non_exhaustive()
+    }
+}
+
 impl DispatchCommit {
     /// 提交序号（单调；日志与测试据此关联一次提交）。
+    #[must_use]
     pub fn sequence(&self) -> u64 {
         self.sequence
     }
 
     /// 已绑定的连接句柄（**唯一**允许投递的 peer）。
+    #[must_use]
     pub fn peer(&self) -> &Arc<McpClientHandle> {
         &self.peer
     }

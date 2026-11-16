@@ -4,11 +4,15 @@
 //! Login 不再编辑档位；新建 provider 必须不写任何 profile，编辑已有 provider 必须
 //! 保持既有绑定与参数不变。
 
-use super::*;
+use super::{
+    LoginEditState, LoginField, PeriConfig, Profiles, ProviderAuthConfig, ProviderKind,
+    ProviderModels, i18n,
+};
+
 use serde_json::json;
 
 fn config(value: serde_json::Value) -> PeriConfig {
-    serde_json::from_value(value).unwrap()
+    serde_json::from_value(value).expect("config: fixture JSON must match the expected schema")
 }
 
 fn responses_config() -> PeriConfig {
@@ -66,7 +70,7 @@ fn new_provider_cycles_three_types_and_edit_requires_explicit_change() {
     assert_eq!(new.kind, Some(ProviderKind::OpenAi));
 
     let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("new provider cycles three types and edit requires explicit change: the edit_provider fixture operation uses valid inputs");
     assert_eq!(edit.kind, Some(ProviderKind::OpenAiResponses));
     edit.cycle_type(true);
     assert_eq!(
@@ -95,7 +99,7 @@ fn new_provider_cycles_three_types_and_edit_requires_explicit_change() {
 fn new_responses_provider_never_binds_or_rewrites_profiles() {
     let cfg = responses_config();
     let edit = new_responses_edit(&cfg);
-    let candidate = edit.build_candidate().unwrap();
+    let candidate = edit.build_candidate().expect("new responses provider never binds or rewrites profiles: the build_candidate fixture operation uses valid inputs");
 
     assert_eq!(candidate.config.active_alias, "sonnet");
     let new_provider = candidate
@@ -115,10 +119,12 @@ fn new_responses_provider_never_binds_or_rewrites_profiles() {
         candidate, expected,
         "candidate must contain the provider addition only"
     );
-    let value = serde_json::to_value(&candidate).unwrap();
+    let value = serde_json::to_value(&candidate).expect(
+        "new responses provider never binds or rewrites profiles: fixture must serialize to JSON",
+    );
     assert_eq!(
         value["config"]["profiles"],
-        serde_json::to_value(&cfg.config.profiles).unwrap(),
+        serde_json::to_value(&cfg.config.profiles).expect("new responses provider never binds or rewrites profiles: fixture data must serialize to JSON"),
         "disk projection must contain provider changes only"
     );
 }
@@ -146,7 +152,7 @@ fn unbound_profiles_keep_first_provider_fallback_after_adding_provider() {
         "profiles": {"opus":{}}
     }}));
     let edit = new_responses_edit(&cfg);
-    let candidate = edit.build_candidate().unwrap();
+    let candidate = edit.build_candidate().expect("unbound profiles keep first provider fallback after adding provider: the build_candidate fixture operation uses valid inputs");
 
     assert_profiles_unchanged(&candidate, &cfg);
     assert_eq!(
@@ -168,17 +174,17 @@ fn editing_existing_provider_preserves_every_profile_field() {
     cfg.config.profiles.sonnet.model = Some("custom-model".into());
     cfg.config.profiles.sonnet.effort = "low".into();
     cfg.config.profiles.sonnet.max_tokens = 777;
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("editing existing provider preserves every profile field: the edit_provider fixture operation uses valid inputs");
     edit.models.sonnet = "mapped-next".into();
 
-    let candidate = edit.build_candidate().unwrap();
+    let candidate = edit.build_candidate().expect("editing existing provider preserves every profile field: the build_candidate fixture operation uses valid inputs");
     assert_profiles_unchanged(&candidate, &cfg);
     let provider = candidate
         .config
         .providers
         .iter()
         .find(|provider| provider.id == "resp")
-        .unwrap();
+        .expect("editing existing provider preserves every profile field: fixture must contain the searched item");
     assert_eq!(provider.models.sonnet, "mapped-next");
 }
 
@@ -198,10 +204,10 @@ fn renaming_provider_updates_every_explicit_reference_and_keeps_fallback_empty()
             "haiku":{"provider":"other"}
         }
     }}));
-    let mut edit = LoginEditState::edit_provider(&cfg, "old", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "old", None).expect("renaming provider updates every explicit reference and keeps fallback empty: the edit_provider fixture operation uses valid inputs");
     edit.provider_id = "renamed".into();
 
-    let candidate = edit.build_candidate().unwrap();
+    let candidate = edit.build_candidate().expect("renaming provider updates every explicit reference and keeps fallback empty: the build_candidate fixture operation uses valid inputs");
     assert_eq!(
         candidate.config.profiles.fable.provider, "renamed",
         "显式引用必须跟随改名"
@@ -232,12 +238,12 @@ fn changing_type_to_responses_keeps_existing_bindings_and_windows() {
             "haiku":{"provider":"first", "contextWindow":4000}
         }
     }}));
-    let mut edit = LoginEditState::edit_provider(&cfg, "first", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "first", None).expect("changing type to responses keeps existing bindings and windows: the edit_provider fixture operation uses valid inputs");
     assert_eq!(edit.bound_aliases(), Profiles::ALL.to_vec());
     edit.kind = Some(ProviderKind::OpenAiResponses);
     edit.api_key = "new-key".into();
 
-    let candidate = edit.build_candidate().unwrap();
+    let candidate = edit.build_candidate().expect("changing type to responses keeps existing bindings and windows: the build_candidate fixture operation uses valid inputs");
     assert_eq!(
         candidate.config.providers[0].provider_type,
         "openai_responses"
@@ -253,11 +259,11 @@ fn switching_to_responses_without_capacity_points_to_model_panel() {
             "models":{"fable":"f", "opus":"o", "sonnet":"s", "haiku":"h"}}],
         "profiles": {"fable":{}, "opus":{}, "sonnet":{}, "haiku":{}}
     }}));
-    let mut edit = LoginEditState::edit_provider(&cfg, "first", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "first", None).expect("switching to responses without capacity points to model panel: the edit_provider fixture operation uses valid inputs");
     edit.kind = Some(ProviderKind::OpenAiResponses);
     edit.api_key = "new-key".into();
 
-    let error = edit.build_candidate().unwrap_err();
+    let error = edit.build_candidate().expect_err("switching to responses without capacity points to model panel: the invalid fixture must be rejected");
     assert_eq!(error.field, LoginField::ProviderType);
     assert_eq!(
         error.message,
@@ -279,10 +285,10 @@ fn switching_to_responses_without_capacity_points_to_model_panel() {
 #[test]
 fn newly_unresolved_binding_blocks_save_with_precise_model_error() {
     let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("newly unresolved binding blocks save with precise model error: the edit_provider fixture operation uses valid inputs");
     edit.models.sonnet.clear();
 
-    let error = edit.build_candidate().unwrap_err();
+    let error = edit.build_candidate().expect_err("newly unresolved binding blocks save with precise model error: the invalid fixture must be rejected");
     assert_eq!(
         error.field,
         LoginField::SonnetModel,
@@ -304,10 +310,10 @@ fn newly_unresolved_binding_blocks_save_with_precise_model_error() {
 fn existing_explicit_profile_model_wins_without_rewrite() {
     let mut cfg = responses_config();
     cfg.config.profiles.sonnet.model = Some("explicit-model".into());
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("existing explicit profile model wins without rewrite: the edit_provider fixture operation uses valid inputs");
     edit.models.sonnet = "mapped-model".into();
 
-    let (candidate, unresolved) = edit.build_candidate_with_warnings().unwrap();
+    let (candidate, unresolved) = edit.build_candidate_with_warnings().expect("existing explicit profile model wins without rewrite: the build_candidate_with_warnings fixture operation uses valid inputs");
     assert!(unresolved.is_empty());
     assert_eq!(
         candidate.config.profiles.sonnet.model.as_deref(),
@@ -323,10 +329,10 @@ fn existing_explicit_profile_model_wins_without_rewrite() {
 #[test]
 fn fable_empty_follows_opus_mapping_without_rewrite() {
     let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("fable empty follows opus mapping without rewrite: the edit_provider fixture operation uses valid inputs");
     edit.models.fable.clear();
 
-    let (candidate, unresolved) = edit.build_candidate_with_warnings().unwrap();
+    let (candidate, unresolved) = edit.build_candidate_with_warnings().expect("fable empty follows opus mapping without rewrite: the build_candidate_with_warnings fixture operation uses valid inputs");
     assert!(unresolved.is_empty(), "Fable 留空跟随 Opus，不是坏档位");
     assert_eq!(candidate.config.providers[0].models.fable, "");
     assert_eq!(candidate.config.providers[0].models.opus, "opus-model");
@@ -337,10 +343,10 @@ fn fable_empty_follows_opus_mapping_without_rewrite() {
 fn editing_mapping_does_not_rewrite_profile_models_or_windows() {
     let mut cfg = responses_config();
     cfg.config.profiles.sonnet.model = Some("custom-model".into());
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("editing mapping does not rewrite profile models or windows: the edit_provider fixture operation uses valid inputs");
     edit.models.sonnet = "mapped-model".into();
 
-    let candidate = edit.build_candidate().unwrap();
+    let candidate = edit.build_candidate().expect("editing mapping does not rewrite profile models or windows: the build_candidate fixture operation uses valid inputs");
     assert_profiles_unchanged(&candidate, &cfg);
 }
 
@@ -348,9 +354,9 @@ fn editing_mapping_does_not_rewrite_profile_models_or_windows() {
 fn pre_existing_unresolved_binding_does_not_block_save_without_auto_filling() {
     let mut cfg = responses_config();
     cfg.config.profiles.sonnet.context_window = None;
-    let edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("pre existing unresolved binding does not block save without auto filling: the edit_provider fixture operation uses valid inputs");
 
-    let (candidate, unresolved) = edit.build_candidate_with_warnings().unwrap();
+    let (candidate, unresolved) = edit.build_candidate_with_warnings().expect("pre existing unresolved binding does not block save without auto filling: the build_candidate_with_warnings fixture operation uses valid inputs");
     assert_eq!(
         unresolved,
         vec!["sonnet"],
@@ -373,28 +379,28 @@ fn responses_to_non_responses_clears_auth_but_keeps_profiles() {
         subject: "subject".into(),
         client_id: "client".into(),
     });
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("responses to non responses clears auth but keeps profiles: the edit_provider fixture operation uses valid inputs");
     assert!(edit.plan_reference().is_some());
     edit.kind = Some(ProviderKind::Anthropic);
 
-    let candidate = edit.build_candidate().unwrap();
+    let candidate = edit.build_candidate().expect("responses to non responses clears auth but keeps profiles: the build_candidate fixture operation uses valid inputs");
     let provider = candidate
         .config
         .providers
         .iter()
         .find(|provider| provider.id == "resp")
-        .unwrap();
+        .expect("responses to non responses clears auth but keeps profiles: fixture must contain the searched item");
     assert_eq!(provider.auth, None, "最终 candidate 清除 Responses auth");
     assert_profiles_unchanged(&candidate, &cfg);
 
     edit.kind = Some(ProviderKind::OpenAiResponses);
-    let restored = edit.build_candidate().unwrap();
+    let restored = edit.build_candidate().expect("responses to non responses clears auth but keeps profiles: the build_candidate fixture operation uses valid inputs");
     let provider = restored
         .config
         .providers
         .iter()
         .find(|provider| provider.id == "resp")
-        .unwrap();
+        .expect("responses to non responses clears auth but keeps profiles: fixture must contain the searched item");
     assert!(matches!(
         provider.auth,
         Some(ProviderAuthConfig::ChatGptPlan { .. })
@@ -414,17 +420,17 @@ fn untouched_existing_plan_reference_survives_editing_other_fields() {
         client_id: "client".into(),
     });
     cfg.config.providers[0].base_url = "https://example.invalid/v1/responses".into();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("untouched existing plan reference survives editing other fields: the edit_provider fixture operation uses valid inputs");
     edit.provider_id = "resp-renamed".into();
     edit.models.opus = "opus-next".into();
 
-    let candidate = edit.build_candidate().unwrap();
+    let candidate = edit.build_candidate().expect("untouched existing plan reference survives editing other fields: the build_candidate fixture operation uses valid inputs");
     let provider = candidate
         .config
         .providers
         .iter()
         .find(|provider| provider.id == "resp-renamed")
-        .unwrap();
+        .expect("untouched existing plan reference survives editing other fields: fixture must contain the searched item");
     assert_eq!(
         provider.auth, cfg.config.providers[0].auth,
         "未触碰的 plan auth 不得被清空"
@@ -444,7 +450,14 @@ fn assert_profiles_unchanged_after_rename(
     new: &str,
 ) {
     for alias in Profiles::ALL {
-        let mut expected = baseline.config.profiles.get(alias).unwrap().clone();
+        let mut expected = baseline
+            .config
+            .profiles
+            .get(alias)
+            .expect(
+                "assert profiles unchanged after rename: fixture must contain the requested entry",
+            )
+            .clone();
         if expected.provider == old {
             expected.provider = new.to_string();
         }
@@ -462,13 +475,13 @@ fn api_key_mode_is_fully_written_for_new_responses_provider() {
     let mut edit = new_responses_edit(&cfg);
     edit.base_url = "https://example.test/v1/responses".into();
 
-    let candidate = edit.build_candidate().unwrap();
+    let candidate = edit.build_candidate().expect("api key mode is fully written for new responses provider: the build_candidate fixture operation uses valid inputs");
     let provider = candidate
         .config
         .providers
         .iter()
         .find(|provider| provider.id == "new-responses")
-        .unwrap();
+        .expect("api key mode is fully written for new responses provider: fixture must contain the searched item");
     assert_eq!(provider.api_key, "new-key");
     assert_eq!(provider.base_url, "https://example.test/v1/responses");
     assert_eq!(provider.auth, Some(ProviderAuthConfig::ApiKey));
@@ -478,9 +491,9 @@ fn api_key_mode_is_fully_written_for_new_responses_provider() {
 fn unknown_saved_type_blocks_save_instead_of_defaulting_to_anthropic() {
     let mut cfg = responses_config();
     cfg.config.providers[0].provider_type = "future_responses".into();
-    let edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("unknown saved type blocks save instead of defaulting to anthropic: the edit_provider fixture operation uses valid inputs");
     assert_eq!(edit.kind, None);
-    let error = edit.build_candidate().unwrap_err();
+    let error = edit.build_candidate().expect_err("unknown saved type blocks save instead of defaulting to anthropic: the invalid fixture must be rejected");
     assert_eq!(error.field, LoginField::ProviderType);
     assert_eq!(error.message, i18n::tr("login-error-unknown-type"));
 }
@@ -498,7 +511,7 @@ fn provider_level_validation_still_runs_for_new_responses_provider() {
     edit.api_key = "key".into();
     edit.base_url = "not a url".into();
 
-    let error = edit.build_candidate().unwrap_err();
+    let error = edit.build_candidate().expect_err("provider level validation still runs for new responses provider: the invalid fixture must be rejected");
     assert_eq!(error.field, LoginField::BaseUrl);
     assert!(error.message.contains("baseUrl"));
 }
@@ -510,17 +523,17 @@ fn provider_name_and_unknown_extras_survive_login_edits() {
     cfg.config.providers[0]
         .extra
         .insert("customFlag".into(), serde_json::json!(true));
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("provider name and unknown extras survive login edits: the edit_provider fixture operation uses valid inputs");
     edit.provider_id = "resp-renamed".into();
     edit.models.opus = "opus-next".into();
 
-    let candidate = edit.build_candidate().unwrap();
+    let candidate = edit.build_candidate().expect("provider name and unknown extras survive login edits: the build_candidate fixture operation uses valid inputs");
     let provider = candidate
         .config
         .providers
         .iter()
         .find(|provider| provider.id == "resp-renamed")
-        .unwrap();
+        .expect("provider name and unknown extras survive login edits: fixture must contain the searched item");
     assert_eq!(provider.name.as_deref(), Some("Display Name"));
     assert_eq!(
         provider.extra.get("customFlag"),
@@ -533,8 +546,8 @@ fn provider_name_and_unknown_extras_survive_login_edits() {
 fn existing_api_key_modes_preserve_their_auth_shape() {
     let cfg = responses_config();
     assert_eq!(cfg.config.providers[0].auth, None);
-    let edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
-    let candidate = edit.build_candidate().unwrap();
+    let edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("existing api key modes preserve their auth shape: the edit_provider fixture operation uses valid inputs");
+    let candidate = edit.build_candidate().expect("existing api key modes preserve their auth shape: the build_candidate fixture operation uses valid inputs");
     assert_eq!(
         candidate.config.providers[0].auth, None,
         "未触碰的 None auth 保持 None"
@@ -542,8 +555,8 @@ fn existing_api_key_modes_preserve_their_auth_shape() {
 
     let mut explicit = cfg;
     explicit.config.providers[0].auth = Some(ProviderAuthConfig::ApiKey);
-    let edit = LoginEditState::edit_provider(&explicit, "resp", None).unwrap();
-    let candidate = edit.build_candidate().unwrap();
+    let edit = LoginEditState::edit_provider(&explicit, "resp", None).expect("existing api key modes preserve their auth shape: the edit_provider fixture operation uses valid inputs");
+    let candidate = edit.build_candidate().expect("existing api key modes preserve their auth shape: the build_candidate fixture operation uses valid inputs");
     assert_eq!(
         candidate.config.providers[0].auth,
         Some(ProviderAuthConfig::ApiKey)
@@ -657,7 +670,7 @@ fn existing_plan_provider_never_auto_fills_empty_models() {
             plan_provider("target", json!({}))
         ]
     }}));
-    let mut edit = LoginEditState::edit_provider(&cfg, "target", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "target", None).expect("existing plan provider never auto fills empty models: the edit_provider fixture operation uses valid inputs");
     edit.ensure_plan_defaults(Some(std::env::temp_dir().join("peri-login-edit-state")));
 
     assert_eq!(

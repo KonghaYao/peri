@@ -3,12 +3,11 @@
 //! 与通用详情布局测试（`tests.rs`）分开，避免单文件越过 STD-SIZE-001 上限；
 //! 复用其行文本/命中行 helper。
 
-use super::detail::{DetailAction, SkillEntry, build_detail_lines, detail_btn_row};
-use super::tests::{TEST_WIDTH, detail_lines, detail_lines_with_skills, line_text, rendered_row};
+use super::detail::DetailAction;
+use super::detail::SkillEntry;
+use super::tests::TEST_WIDTH;
 use crate::i18n;
-use crate::kit::atoms::{
-    McpResourceSummary, McpServerSummary, McpSubscriptionsSummary, McpToolSummary,
-};
+
 use fluent_bundle::FluentValue;
 use unicode_width::UnicodeWidthStr;
 
@@ -57,6 +56,7 @@ fn rich_summary() -> McpServerSummary {
     }
 }
 
+#[must_use]
 fn rich_skills() -> Vec<SkillEntry> {
     vec![
         SkillEntry {
@@ -75,14 +75,14 @@ fn rich_skills() -> Vec<SkillEntry> {
 fn detail_tables_row_count_matches_rendered_lines() {
     let summary = rich_summary();
     let skills = rich_skills();
-    let lines = detail_lines_with_skills(&summary, &skills, 0);
+    let lines = super::tests::detail_lines_with_skills(&summary, &skills, 0);
     let back = DetailAction::Back.text(&i18n::tr("panel-mcp-detail-btn-back"));
     assert_eq!(
-        rendered_row(&lines, &back),
-        detail_btn_row(&summary, skills.len(), TEST_WIDTH) as usize,
+        super::tests::rendered_row(&lines, &back),
+        super::detail::detail_btn_row(&summary, skills.len(), TEST_WIDTH) as usize,
         "表格行数推导必须与渲染一致"
     );
-    assert_eq!(rendered_row(&lines, &back), lines.len() - 3);
+    assert_eq!(super::tests::rendered_row(&lines, &back), lines.len() - 3);
 }
 
 /// 四个区块标题固定渲染；工具/技能/代理行与订阅开关同时可见。
@@ -90,9 +90,9 @@ fn detail_tables_row_count_matches_rendered_lines() {
 fn detail_tables_render_sections_rows_and_subscriptions() {
     let summary = rich_summary();
     let skills = rich_skills();
-    let text: Vec<String> = detail_lines_with_skills(&summary, &skills, 0)
+    let text: Vec<String> = super::tests::detail_lines_with_skills(&summary, &skills, 0)
         .iter()
-        .map(line_text)
+        .map(super::tests::line_text)
         .collect();
     for key in [
         "panel-mcp-table-tools",
@@ -151,8 +151,8 @@ fn detail_tables_render_sections_rows_and_subscriptions() {
 /// 空数据仍渲染四段（标题 + 四空格破折号占位），且表格行不越界。
 #[test]
 fn detail_tables_render_empty_placeholders_and_fit_width() {
-    let lines = detail_lines(&McpServerSummary::default(), 0);
-    let text: Vec<String> = lines.iter().map(line_text).collect();
+    let lines = super::tests::detail_lines(&McpServerSummary::default(), 0);
+    let text: Vec<String> = lines.iter().map(super::tests::line_text).collect();
     let empty = i18n::tr("panel-mcp-table-empty");
     for key in [
         "panel-mcp-table-tools",
@@ -172,10 +172,10 @@ fn detail_tables_render_empty_placeholders_and_fit_width() {
         );
     }
 
-    let rich = detail_lines_with_skills(&rich_summary(), &rich_skills(), 0);
+    let rich = super::tests::detail_lines_with_skills(&rich_summary(), &rich_skills(), 0);
     let mut table_rows = 0;
     for line in &rich {
-        let rendered = line_text(line);
+        let rendered = super::tests::line_text(line);
         let trimmed = rendered.trim_start();
         if ["┌", "├", "└", "│"]
             .iter()
@@ -207,10 +207,10 @@ fn detail_tables_truncate_cjk_and_emoji_by_display_width() {
         }],
         ..McpServerSummary::default()
     };
-    let lines = detail_lines(&summary, 0);
+    let lines = super::tests::detail_lines(&summary, 0);
     let table_rows: Vec<String> = lines
         .iter()
-        .map(line_text)
+        .map(super::tests::line_text)
         .filter(|line| {
             let trimmed = line.trim_start();
             ["┌", "├", "└", "│"]
@@ -247,8 +247,8 @@ fn detail_tables_fit_narrow_width_and_fall_back_to_placeholder() {
     let skills = rich_skills();
     let back = DetailAction::Back.text(&i18n::tr("panel-mcp-detail-btn-back"));
     for width in [40u16, 24, 20, 12, 10, 8] {
-        let lines = build_detail_lines(&summary, &skills, 0, &theme, width);
-        let text: Vec<String> = lines.iter().map(line_text).collect();
+        let lines = super::detail::build_detail_lines(&summary, &skills, 0, &theme, width);
+        let text: Vec<String> = lines.iter().map(super::tests::line_text).collect();
         let table_rows: Vec<&String> = text
             .iter()
             .filter(|line| {
@@ -270,9 +270,17 @@ fn detail_tables_fit_narrow_width_and_fall_back_to_placeholder() {
             assert!(table_rows.is_empty(), "width={width} 过窄必须退回占位行");
         }
         assert_eq!(
-            rendered_row(&lines, &back),
-            detail_btn_row(&summary, skills.len(), width) as usize,
+            super::tests::rendered_row(&lines, &back),
+            super::detail::detail_btn_row(&summary, skills.len(), width) as usize,
             "width={width} 按钮行号必须与渲染一致"
         );
     }
 }
+
+use crate::kit::atoms::McpResourceSummary;
+
+use crate::kit::atoms::McpServerSummary;
+
+use crate::kit::atoms::McpSubscriptionsSummary;
+
+use crate::kit::atoms::McpToolSummary;

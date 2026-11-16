@@ -3,8 +3,11 @@
 
 use std::path::Path;
 
-use super::*;
+use crate::resources::agents::AgentRecord;
+use crate::resources::ResourceBudget;
+use crate::resources::ResourceError;
 use crate::resources::ResourceRoot;
+use crate::resources::WorkspaceResourcesInput;
 use peri_acp_types::workspace_resources::ResourceScope;
 
 fn tempdir() -> tempfile::TempDir {
@@ -52,7 +55,7 @@ fn scan_supports_file_and_directory_forms() {
     write(&base.path().join("notes.txt"), "not an agent");
     write(&base.path().join(".hidden.md"), "hidden");
 
-    let catalog = super::scan_catalog(
+    let catalog = crate::resources::agents::scan_catalog(
         &input(vec![ResourceRoot::new(base.path(), ResourceScope::Project)]),
         &ResourceBudget::default(),
     );
@@ -94,7 +97,7 @@ fn scan_supports_file_and_directory_forms() {
 fn scan_without_frontmatter_falls_back_to_id_and_empty_description() {
     let base = tempdir();
     write(&base.path().join("plain.md"), "no frontmatter here\n");
-    let catalog = super::scan_catalog(
+    let catalog = crate::resources::agents::scan_catalog(
         &input(vec![ResourceRoot::new(base.path(), ResourceScope::Project)]),
         &ResourceBudget::default(),
     );
@@ -116,7 +119,8 @@ fn catalog_keeps_same_name_across_origins_and_dedupes_within_one_origin() {
         ResourceRoot::new(high.path(), ResourceScope::Project),
         ResourceRoot::new(low.path(), ResourceScope::User),
     ];
-    let catalog = super::scan_catalog(&input(roots.clone()), &ResourceBudget::default());
+    let catalog =
+        crate::resources::agents::scan_catalog(&input(roots.clone()), &ResourceBudget::default());
     // W5/§6.2：跨来源同名并存（两个来源各有自己的 URI，均可读）。
     let records = disk_records(&catalog);
     assert_eq!(records.len(), 2);
@@ -133,7 +137,7 @@ fn catalog_keeps_same_name_across_origins_and_dedupes_within_one_origin() {
     assert_ne!(project.uri(), user.uri());
 
     // 同一来源根内同名仍先到先得（第二个根不是该 scope 的根 ⇐ 同根去重按 scope 分组）。
-    let same_scope = super::scan_catalog(
+    let same_scope = crate::resources::agents::scan_catalog(
         &input(vec![
             ResourceRoot::new(high.path(), ResourceScope::Project),
             ResourceRoot::new(low.path(), ResourceScope::Project),
@@ -145,7 +149,7 @@ fn catalog_keeps_same_name_across_origins_and_dedupes_within_one_origin() {
     assert_eq!(same_scope_records[0].display_name, "high");
 
     // 各自可按 URI 定位（User 项不再是 shadow）。
-    let shadow = super::locate(
+    let shadow = crate::resources::agents::locate(
         &input(roots),
         &ResourceBudget::default(),
         ResourceScope::User,
@@ -160,7 +164,7 @@ fn catalog_keeps_same_name_across_origins_and_dedupes_within_one_origin() {
 fn builtin_agents_are_public_and_locatable() {
     let budget = ResourceBudget::default();
     let input = input(Vec::new());
-    let catalog = super::scan_catalog(&input, &budget);
+    let catalog = crate::resources::agents::scan_catalog(&input, &budget);
     let builtin: Vec<&AgentRecord> = catalog
         .iter()
         .filter(|record| record.scope == ResourceScope::Builtin)
@@ -189,9 +193,11 @@ fn builtin_agents_are_public_and_locatable() {
         Some("agent://builtin/coder/agent.md")
     );
 
-    let located = super::locate(&input, &budget, ResourceScope::Builtin, None, "coder")
-        .expect("builtin 可按 URI 定位");
-    let bytes = super::read_record_definition(&located, &budget).expect("builtin 定义可读");
+    let located =
+        crate::resources::agents::locate(&input, &budget, ResourceScope::Builtin, None, "coder")
+            .expect("builtin 可按 URI 定位");
+    let bytes = crate::resources::agents::read_record_definition(&located, &budget)
+        .expect("builtin 定义可读");
     let text = String::from_utf8(bytes).expect("UTF-8");
     assert!(text.contains("name: coder"), "定义正文应可读：{text:.64}");
     assert_eq!(
@@ -201,11 +207,11 @@ fn builtin_agents_are_public_and_locatable() {
 
     // 未知 builtin 标识与带 plugin 段的 builtin URI 都是非法/缺失，不是 panic。
     assert!(matches!(
-        super::locate(&input, &budget, ResourceScope::Builtin, None, "nope"),
+        crate::resources::agents::locate(&input, &budget, ResourceScope::Builtin, None, "nope"),
         Err(ResourceError::NotFound)
     ));
     assert!(matches!(
-        super::locate(
+        crate::resources::agents::locate(
             &input,
             &budget,
             ResourceScope::Builtin,
@@ -230,7 +236,7 @@ fn symlinked_definitions_are_skipped() {
         base.path().join("linked.md"),
     )
     .expect("建 symlink");
-    let catalog = super::scan_catalog(
+    let catalog = crate::resources::agents::scan_catalog(
         &input(vec![ResourceRoot::new(base.path(), ResourceScope::Project)]),
         &ResourceBudget::default(),
     );
@@ -241,7 +247,7 @@ fn symlinked_definitions_are_skipped() {
 fn plugin_scope_carries_plugin_name_in_uri() {
     let base = tempdir();
     write(&base.path().join("helper.md"), "---\nname: Helper\n---\n");
-    let catalog = super::scan_catalog(
+    let catalog = crate::resources::agents::scan_catalog(
         &input(vec![ResourceRoot::plugin(base.path(), "my-plugin")]),
         &ResourceBudget::default(),
     );
@@ -272,7 +278,7 @@ fn two_project_roots_prefer_the_first_one_for_same_id() {
         "---\nname: legacy-only\n---\n",
     );
 
-    let catalog = super::scan_catalog(
+    let catalog = crate::resources::agents::scan_catalog(
         &input(vec![
             ResourceRoot::new(claude.path(), ResourceScope::Project),
             ResourceRoot::new(legacy.path(), ResourceScope::Project),
@@ -299,7 +305,7 @@ fn directory_form_shadows_file_form_for_the_same_id() {
         &base.path().join("dup").join("agent.md"),
         "---\nname: from-dir\n---\n",
     );
-    let catalog = super::scan_catalog(
+    let catalog = crate::resources::agents::scan_catalog(
         &input(vec![ResourceRoot::new(base.path(), ResourceScope::Project)]),
         &ResourceBudget::default(),
     );

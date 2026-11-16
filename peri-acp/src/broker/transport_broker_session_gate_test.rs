@@ -3,7 +3,13 @@
 //! 从 `transport_broker_test.rs` 拆出以满足 STD-SIZE-001；沿用其 `tests` 模块的
 //! fixture 与 helper（`use super::*`）。
 
-use super::*;
+use crate::broker::transport_broker::tests::CausalFixture;
+use crate::broker::transport_broker::AcpTransportBroker;
+use agent_client_protocol::schema::v1::SessionId;
+use peri_acp_types::interaction::InteractionResponse;
+use peri_acp_types::interaction::UserInteractionBroker;
+use std::sync::Arc;
+use tokio::sync::oneshot;
 
 #[tokio::test]
 async fn test_interaction_gate_is_shared_by_same_session_brokers() {
@@ -15,8 +21,8 @@ async fn test_interaction_gate_is_shared_by_same_session_brokers() {
         calls,
         releases,
         ..
-    } = causal_fixture();
-    let gate = interaction_gate();
+    } = crate::broker::transport_broker::tests::causal_fixture();
+    let gate = crate::broker::transport_broker::tests::interaction_gate();
     let broker_a = Arc::new(AcpTransportBroker::new(
         transport.clone(),
         SessionId::new("session-a"),
@@ -28,18 +34,27 @@ async fn test_interaction_gate_is_shared_by_same_session_brokers() {
         Arc::clone(&gate),
     ));
 
-    let first = tokio::spawn(async move { broker_a.request(owner(), approval_context()).await });
+    let first = tokio::spawn(async move {
+        broker_a
+            .request(
+                crate::broker::transport_broker::tests::owner(),
+                crate::broker::transport_broker::tests::approval_context(),
+            )
+            .await
+    });
     assert_eq!(
-        next_entered(&mut entered_rx).await,
+        crate::broker::transport_broker::tests::next_entered(&mut entered_rx).await,
         "session/request_permission"
     );
 
     let (pending_tx, pending_rx) = oneshot::channel();
-    let second = tokio::spawn(request_with_first_pending_marker(
-        broker_b,
-        questions_context(),
-        pending_tx,
-    ));
+    let second = tokio::spawn(
+        crate::broker::transport_broker::tests::request_with_first_pending_marker(
+            broker_b,
+            crate::broker::transport_broker::tests::questions_context(),
+            pending_tx,
+        ),
+    );
     pending_rx
         .await
         .expect("second broker must report its first Pending poll");
@@ -54,7 +69,10 @@ async fn test_interaction_gate_is_shared_by_same_session_brokers() {
         first.await.unwrap(),
         InteractionResponse::Decisions(_)
     ));
-    assert_eq!(next_entered(&mut entered_rx).await, "elicitation/create");
+    assert_eq!(
+        crate::broker::transport_broker::tests::next_entered(&mut entered_rx).await,
+        "elicitation/create"
+    );
     releases.add_permits(1);
     assert!(matches!(
         second.await.unwrap(),
@@ -71,30 +89,39 @@ async fn test_interaction_gate_is_not_global_across_sessions() {
         calls,
         releases,
         ..
-    } = causal_fixture();
+    } = crate::broker::transport_broker::tests::causal_fixture();
     let broker_a = Arc::new(AcpTransportBroker::new(
         transport.clone(),
         SessionId::new("session-a"),
-        interaction_gate(),
+        crate::broker::transport_broker::tests::interaction_gate(),
     ));
     let broker_b = Arc::new(AcpTransportBroker::new(
         transport,
         SessionId::new("session-b"),
-        interaction_gate(),
+        crate::broker::transport_broker::tests::interaction_gate(),
     ));
 
-    let first = tokio::spawn(async move { broker_a.request(owner(), approval_context()).await });
+    let first = tokio::spawn(async move {
+        broker_a
+            .request(
+                crate::broker::transport_broker::tests::owner(),
+                crate::broker::transport_broker::tests::approval_context(),
+            )
+            .await
+    });
     assert_eq!(
-        next_entered(&mut entered_rx).await,
+        crate::broker::transport_broker::tests::next_entered(&mut entered_rx).await,
         "session/request_permission"
     );
 
     let (pending_tx, pending_rx) = oneshot::channel();
-    let second = tokio::spawn(request_with_first_pending_marker(
-        broker_b,
-        questions_context(),
-        pending_tx,
-    ));
+    let second = tokio::spawn(
+        crate::broker::transport_broker::tests::request_with_first_pending_marker(
+            broker_b,
+            crate::broker::transport_broker::tests::questions_context(),
+            pending_tx,
+        ),
+    );
     pending_rx
         .await
         .expect("second session broker must not wait on another session's gate");
@@ -103,7 +130,10 @@ async fn test_interaction_gate_is_not_global_across_sessions() {
         2,
         "different sessions must not share a global interaction gate"
     );
-    assert_eq!(next_entered(&mut entered_rx).await, "elicitation/create");
+    assert_eq!(
+        crate::broker::transport_broker::tests::next_entered(&mut entered_rx).await,
+        "elicitation/create"
+    );
 
     releases.add_permits(2);
     assert!(matches!(

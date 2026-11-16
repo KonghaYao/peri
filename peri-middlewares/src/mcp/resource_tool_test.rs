@@ -1,12 +1,19 @@
 //! Tests for resource_tool
 
-use super::*;
+use super::McpClientPool;
+use super::McpResourceTool;
+use super::SkillBinding;
 use crate::mcp::client::{McpClientHandle, OAuthStatus};
 use crate::mcp::ClientStatus;
-use peri_acp_types::{
-    mcp_skills::{HandleToken, McpSkillRegistry, ServerDiscoveryState},
-    skills::{SkillMetadata, SkillOrigin, SkillResource, SkillSource},
-};
+use base64::Engine as _;
+use peri_acp_types::mcp_skills::HandleToken;
+use peri_acp_types::mcp_skills::McpSkillRegistry;
+use peri_acp_types::mcp_skills::ServerDiscoveryState;
+use peri_acp_types::skills::SkillMetadata;
+use peri_acp_types::skills::SkillOrigin;
+use peri_acp_types::skills::SkillResource;
+use peri_acp_types::skills::SkillSource;
+use peri_agent::tools::BaseTool as _;
 use rmcp::RoleClient;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -324,15 +331,18 @@ async fn read_server(
 fn fm_of(text: &str) -> (String, String) {
     let mut name = String::new();
     let mut description = String::new();
-    for line in text.lines().skip(1) {
-        if line == "---" {
-            break;
-        }
-        if let Some(v) = line.strip_prefix("name:") {
-            name = v.trim().to_string();
-        }
-        if let Some(v) = line.strip_prefix("description:") {
-            description = v.trim().to_string();
+    {
+        let selected_text = text.lines().skip(1);
+        for line in selected_text {
+            if line == "---" {
+                break;
+            }
+            if let Some(v) = line.strip_prefix("name:") {
+                name = v.trim().to_string();
+            }
+            if let Some(v) = line.strip_prefix("description:") {
+                description = v.trim().to_string();
+            }
         }
     }
     (name, description)
@@ -613,7 +623,7 @@ fn locate_skill_binding_picks_longest_root_and_respects_prefix_boundary() {
     // 嵌套技能场景：根 skill://a 与 skill://a/b 都覆盖 skill://a/b/x.md
     // → 取最长根（skill://a/b）的条目
     let (entry, binding) =
-        locate_skill_binding(&entries, "skill://a/b/x.md").expect("嵌套覆盖应命中");
+        super::locate_skill_binding(&entries, "skill://a/b/x.md").expect("嵌套覆盖应命中");
     assert_eq!(
         entry.origin,
         Some(SkillOrigin::Mcp {
@@ -625,11 +635,12 @@ fn locate_skill_binding_picks_longest_root_and_respects_prefix_boundary() {
     assert!(matches!(binding, SkillBinding::Listed("sha256:ee")));
     // 前缀边界：skill://a 条目不覆盖 skill://ab/...（根以 "/" 为界）
     assert!(
-        locate_skill_binding(std::slice::from_ref(&shallow), "skill://ab/x.md").is_none(),
+        super::locate_skill_binding(std::slice::from_ref(&shallow), "skill://ab/x.md").is_none(),
         "前缀边界：skill://a 不覆盖 skill://ab/x.md"
     );
     // uri == root：读 SKILL.md 自身
-    let (entry, _) = locate_skill_binding(&entries, "skill://a/b/SKILL.md").expect("根相等应命中");
+    let (entry, _) =
+        super::locate_skill_binding(&entries, "skill://a/b/SKILL.md").expect("根相等应命中");
     assert_eq!(
         entry.origin,
         Some(SkillOrigin::Mcp {
@@ -639,7 +650,7 @@ fn locate_skill_binding_picks_longest_root_and_respects_prefix_boundary() {
     );
     // SKILL.md 自身未列入 resources（条目 resources 只列附属资源）→ Unlisted
     let shallow_only = [shallow];
-    let listed = locate_skill_binding(&shallow_only, "skill://a/SKILL.md").unwrap();
+    let listed = super::locate_skill_binding(&shallow_only, "skill://a/SKILL.md").unwrap();
     assert!(
         matches!(listed.1, SkillBinding::Unlisted),
         "覆盖但 SKILL.md 未列出 → Unlisted"
@@ -652,7 +663,7 @@ fn locate_skill_binding_picks_longest_root_and_respects_prefix_boundary() {
 fn locate_skill_binding_decision_order_and_scheme_case() {
     // 无任何条目覆盖 → None
     assert!(
-        locate_skill_binding(&[], "skill://demo/notes.md").is_none(),
+        super::locate_skill_binding(&[], "skill://demo/notes.md").is_none(),
         "无条目 → None"
     );
     // 非 skill:// 前缀（含大小写变体）→ None
@@ -663,12 +674,16 @@ fn locate_skill_binding_decision_order_and_scheme_case() {
             digest: "sha256:aa".to_string(),
         }],
     );
-    assert!(locate_skill_binding(std::slice::from_ref(&entry), "file:///tmp/x.md").is_none());
-    assert!(locate_skill_binding(std::slice::from_ref(&entry), "HTTP://demo/SKILL.md").is_none());
+    assert!(
+        super::locate_skill_binding(std::slice::from_ref(&entry), "file:///tmp/x.md").is_none()
+    );
+    assert!(
+        super::locate_skill_binding(std::slice::from_ref(&entry), "HTTP://demo/SKILL.md").is_none()
+    );
     // scheme 大小写不敏感：SKILL:// 命中同一条目
     let entry_only = [entry.clone()];
-    let (found, binding) =
-        locate_skill_binding(&entry_only, "SKILL://demo/SKILL.md").expect("大小写 scheme 命中");
+    let (found, binding) = super::locate_skill_binding(&entry_only, "SKILL://demo/SKILL.md")
+        .expect("大小写 scheme 命中");
     assert!(matches!(binding, SkillBinding::Listed("sha256:aa")));
     assert_eq!(
         found.origin,
@@ -680,10 +695,10 @@ fn locate_skill_binding_decision_order_and_scheme_case() {
     // resources 空（动态技能）→ Unbound（不校验）
     let unbound = mcp_entry("skill://demo/SKILL.md", vec![]);
     let unbound_only = [unbound];
-    let (_, binding) = locate_skill_binding(&unbound_only, "skill://demo/notes.md").unwrap();
+    let (_, binding) = super::locate_skill_binding(&unbound_only, "skill://demo/notes.md").unwrap();
     assert!(matches!(binding, SkillBinding::Unbound));
     // 覆盖但未列入 → Unlisted
-    let (_, binding) = locate_skill_binding(&entry_only, "skill://demo/notes.md").unwrap();
+    let (_, binding) = super::locate_skill_binding(&entry_only, "skill://demo/notes.md").unwrap();
     assert!(matches!(binding, SkillBinding::Unlisted));
 }
 
@@ -793,7 +808,10 @@ async fn read_skill_blob_digest_mismatch_rejected() {
 /// 非法 base64 Blob → 无法校验，视为不匹配（MUST NOT use）。
 #[test]
 fn verify_blob_digest_invalid_base64_fails() {
-    assert!(!verify_blob_digest("not-valid-base64!!!", "sha256:abc"));
+    assert!(!super::verify_blob_digest(
+        "not-valid-base64!!!",
+        "sha256:abc"
+    ));
 }
 
 // ─── 多 contents 响应：逐项校验（任一不匹配即拒绝）────────────────────────

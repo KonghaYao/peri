@@ -4,23 +4,26 @@
 //! deliberately has no session callback: completion stays with the Workspace
 //! service and can be queried after a client disconnects.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use parking_lot::Mutex;
-use peri_acp_types::{
-    event::BackgroundTaskResult,
-    tasks::{BgShellHandle, BgTaskKind, OnBgCompleteFn, TaskManager, TaskShutdownReport},
-};
+use peri_acp_types::event::BackgroundTaskResult;
+use peri_acp_types::tasks::BgShellHandle;
+use peri_acp_types::tasks::BgTaskKind;
+use peri_acp_types::tasks::OnBgCompleteFn;
+use peri_acp_types::tasks::TaskManager;
+use peri_acp_types::tasks::TaskShutdownReport;
 use peri_agent::agent::async_tasks::BackgroundRegistryError;
-use rmcp::{
-    model::{
-        CallToolResult, ContentBlock, DetailedTask, GetTaskResult, Task, TaskPayload, TaskStatus,
-    },
-    ErrorData as McpError,
-};
+use rmcp::model::CallToolResult;
+use rmcp::model::ContentBlock;
+use rmcp::model::DetailedTask;
+use rmcp::model::GetTaskResult;
+use rmcp::model::Task;
+use rmcp::model::TaskPayload;
+use rmcp::model::TaskStatus;
+use rmcp::ErrorData as McpError;
 
 #[derive(Default)]
 struct ShellState {
@@ -191,6 +194,12 @@ pub(crate) struct ShellTasks {
     owner_references: Arc<()>,
     #[cfg(test)]
     spawn_after_gate: Option<Arc<SpawnAfterGate>>,
+}
+
+impl Default for ShellTasks {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 struct SpawnCancelGuard {

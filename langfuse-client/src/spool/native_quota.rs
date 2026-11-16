@@ -27,10 +27,9 @@ use crate::spool::types::{QuotaReservation, SpoolUsage};
 use crate::spool::SpoolResult;
 
 use super::native_scan;
-use super::{
-    create_private_file, hex, id_hex, io_error, parse_id, random_object_id, try_lock_file,
-    write_atomic, LockAttempt, NativeInner, OBJECT_BUCKETS,
-};
+use super::LockAttempt;
+use super::NativeInner;
+use super::OBJECT_BUCKETS;
 
 /// 账本快照；缺失字段按默认值处理，未知字段视为不可识别格式。
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -55,9 +54,9 @@ impl Drop for DomainLock {
 }
 
 fn acquire_domain_lock(inner: &NativeInner) -> SpoolResult<DomainLock> {
-    let file = create_private_file(&inner.domain_lock_path())
-        .map_err(|error| io_error("open spool domain lock", error))?;
-    FileExt::lock(&file).map_err(|error| io_error("lock spool domain", error))?;
+    let file = super::create_private_file(&inner.domain_lock_path())
+        .map_err(|error| super::io_error("open spool domain lock", error))?;
+    FileExt::lock(&file).map_err(|error| super::io_error("lock spool domain", error))?;
     Ok(DomainLock { file })
 }
 
@@ -67,15 +66,15 @@ fn load_state(inner: &NativeInner) -> SpoolResult<QuotaState> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(QuotaState::default())
         }
-        Err(error) => return Err(io_error("read spool quota ledger", error)),
+        Err(error) => return Err(super::io_error("read spool quota ledger", error)),
     };
     serde_json::from_slice(&bytes).map_err(|_| SpoolError::InvalidMetadata)
 }
 
 fn save_state(inner: &NativeInner, state: &QuotaState) -> SpoolResult<()> {
     let bytes = serde_json::to_vec(state).map_err(|_| SpoolError::InvalidMetadata)?;
-    write_atomic(&inner.quota_state_path(), &bytes)
-        .map_err(|error| io_error("write spool quota ledger", error))
+    super::write_atomic(&inner.quota_state_path(), &bytes)
+        .map_err(|error| super::io_error("write spool quota ledger", error))
 }
 
 /// 读账本；不可读时以磁盘为准重建（调用方必须已持有 domain 锁）。
@@ -97,7 +96,7 @@ fn prune_stale(inner: &NativeInner, state: &mut QuotaState) -> bool {
     let before = state.reserved.len();
     state.reserved.retain(|reservation, _| {
         let path = inner.quota_lock_path(reservation);
-        match try_lock_file(&path) {
+        match super::try_lock_file(&path) {
             Ok(LockAttempt::Free(lock)) => {
                 drop(lock);
                 let _ = fs::remove_file(&path);
@@ -159,15 +158,15 @@ pub(crate) fn reserve(
             });
         }
     }
-    let reservation = hex(random_object_id().as_bytes());
-    let lock = match try_lock_file(&inner.quota_lock_path(&reservation))
-        .map_err(|error| io_error("create spool reservation lock", error))?
+    let reservation = super::hex(super::random_object_id().as_bytes());
+    let lock = match super::try_lock_file(&inner.quota_lock_path(&reservation))
+        .map_err(|error| super::io_error("create spool reservation lock", error))?
     {
         LockAttempt::Free(lock) => lock,
         LockAttempt::Held => return Err(SpoolError::Busy),
         // `quota/locks` 是装配期创建的必要目录：缺失是环境漂移，不是并发竞争。
         LockAttempt::Gone => {
-            return Err(io_error(
+            return Err(super::io_error(
                 "create spool reservation lock",
                 io::Error::from(io::ErrorKind::NotFound),
             ))
@@ -284,12 +283,13 @@ fn sweep_writers(inner: &NativeInner) -> SpoolResult<()> {
     let entries = match fs::read_dir(&tmp) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(io_error("scan spool temporary directory", error)),
+        Err(error) => return Err(super::io_error("scan spool temporary directory", error)),
     };
     let mut parts: Vec<String> = Vec::new();
     let mut locks: Vec<String> = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|error| io_error("scan spool temporary directory", error))?;
+        let entry =
+            entry.map_err(|error| super::io_error("scan spool temporary directory", error))?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if let Some(stem) = name.strip_suffix(".lock") {
             locks.push(stem.to_string());
@@ -299,8 +299,8 @@ fn sweep_writers(inner: &NativeInner) -> SpoolResult<()> {
     }
     for stem in &locks {
         let path = tmp.join(format!("{stem}.lock"));
-        match try_lock_file(&path)
-            .map_err(|error| io_error("lock spool temporary object", error))?
+        match super::try_lock_file(&path)
+            .map_err(|error| super::io_error("lock spool temporary object", error))?
         {
             // 存活锁仍被持有：活跃 writer，绝不清理。
             LockAttempt::Held => continue,
@@ -310,8 +310,11 @@ fn sweep_writers(inner: &NativeInner) -> SpoolResult<()> {
         }
         remove_temporary(&tmp, stem)?;
     }
-    for stem in parts.iter().filter(|stem| !locks.contains(stem)) {
-        remove_temporary(&tmp, stem)?;
+    {
+        let matching_parts = parts.iter().filter(|stem| !locks.contains(stem));
+        for stem in matching_parts {
+            remove_temporary(&tmp, stem)?;
+        }
     }
     Ok(())
 }
@@ -322,7 +325,7 @@ fn remove_temporary(tmp: &Path, stem: &str) -> SpoolResult<()> {
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(io_error("remove spool temporary object", error)),
+            Err(error) => return Err(super::io_error("remove spool temporary object", error)),
         }
     }
     warn!(object = %stem, "telemetry spool reclaimed abandoned writer");
@@ -339,7 +342,7 @@ fn sweep_unpublished_objects(inner: &NativeInner) -> SpoolResult<()> {
             if path.join("meta").exists() || !path.is_dir() {
                 continue;
             }
-            let Some(id) = parse_id(&name) else {
+            let Some(id) = super::parse_id(&name) else {
                 continue;
             };
             discard_without_quota(inner, id, &path)?;
@@ -354,17 +357,17 @@ fn discard_without_quota(
     id: crate::spool::ObjectId,
     dir: &Path,
 ) -> SpoolResult<()> {
-    let _lock = match try_lock_file(&inner.object_lock_path(id))
-        .map_err(|error| io_error("lock spool object", error))?
+    let _lock = match super::try_lock_file(&inner.object_lock_path(id))
+        .map_err(|error| super::io_error("lock spool object", error))?
     {
         LockAttempt::Free(lock) => lock,
         // 其他 owner 持锁：交由其处理；条目已被并发删除：没有残留可清。
         LockAttempt::Held | LockAttempt::Gone => return Ok(()),
     };
     match fs::remove_dir_all(dir) {
-        Ok(()) => warn!(object = %id_hex(id), "telemetry spool discarded startup residue"),
+        Ok(()) => warn!(object = %super::id_hex(id), "telemetry spool discarded startup residue"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(io_error("remove spool residue", error)),
+        Err(error) => return Err(super::io_error("remove spool residue", error)),
     }
     Ok(())
 }

@@ -1,11 +1,12 @@
-use super::{format_output, tests::Wire, MAX_BYTES};
+use super::tests::Wire;
+use super::MAX_BYTES;
 use crate::mcp::client::McpClientPool;
 use peri_acp_types::workspace_output::StoreOutputRequest;
-use rmcp::{
-    model::{CustomRequest, CustomResult},
-    service::{RequestContext, RoleServer},
-    ServerHandler,
-};
+use rmcp::model::CustomRequest;
+use rmcp::model::CustomResult;
+use rmcp::service::RequestContext;
+use rmcp::service::RoleServer;
+use rmcp::ServerHandler;
 
 const URI: &str =
     "peri-output://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
@@ -37,7 +38,8 @@ async fn oversized_and_escaped_receipt_paths_preserve_exact_uri_within_total_bud
         let pool = McpClientPool::new_empty();
         wire.install(&pool, "workspace", true);
         for error in [false, true] {
-            let output = format_output(Some(&pool), None, "雪".repeat(MAX_BYTES), error).await;
+            let output =
+                super::format_output(Some(&pool), None, "雪".repeat(MAX_BYTES), error).await;
             assert!(output.len() <= MAX_BYTES, "{}", output.len());
             assert!(output.contains(URI));
             assert!(output.contains("Full output saved"));
@@ -56,7 +58,7 @@ async fn ordinary_receipt_path_is_preserved_without_truncating_the_address() {
     let wire = Wire::connect(LongPathStore { path: path.into() }).await;
     let pool = McpClientPool::new_empty();
     wire.install(&pool, "workspace", true);
-    let output = format_output(Some(&pool), None, "x".repeat(MAX_BYTES + 1), false).await;
+    let output = super::format_output(Some(&pool), None, "x".repeat(MAX_BYTES + 1), false).await;
     assert!(output.len() <= MAX_BYTES);
     assert!(output.contains(&format!("path={}", serde_json::json!(path))));
     assert!(output.contains(URI));

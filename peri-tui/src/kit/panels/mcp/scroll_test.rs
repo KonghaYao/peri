@@ -4,9 +4,9 @@
 //! 状态恢复 helper。
 
 use super::McpView;
-use super::tests::{ForegroundGuard, mount_panel_frames};
+use super::tests::ForegroundGuard;
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{ACTIVE_PANEL, MCP_SERVERS, McpServerSummary, McpToolSummary, POPUP_KIND};
+
 use ratatui_kit::prelude::ScrollViewState;
 use ratatui_kit::ratatui::layout::Position;
 use serial_test::serial;
@@ -33,7 +33,7 @@ fn detail_scroll_offset_survives_render_when_content_overflows() {
         ..McpServerSummary::default()
     }];
 
-    mount_panel_frames(3, |frame, panel| match frame {
+    super::tests::mount_panel_frames(3, |frame, panel| match frame {
         0 => {
             // 第一帧进入详情（本帧 visitor 先于渲染，下一帧起用详情内容布局）。
             *panel.view.write() = McpView::Detail;
@@ -50,3 +50,13 @@ fn detail_scroll_offset_survives_render_when_content_overflows() {
         ),
     });
 }
+
+use crate::kit::atoms::ACTIVE_PANEL;
+
+use crate::kit::atoms::MCP_SERVERS;
+
+use crate::kit::atoms::McpServerSummary;
+
+use crate::kit::atoms::McpToolSummary;
+
+use crate::kit::atoms::POPUP_KIND;

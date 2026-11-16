@@ -22,6 +22,7 @@ pub mod standalone;
 #[cfg(all(test, unix))]
 mod shell_session_complete_test;
 
+#[must_use]
 pub fn create_local_task_manager() -> peri_agent::agent::async_tasks::TaskManager {
     peri_agent::agent::async_tasks::TaskManager::with_shell_executor(std::sync::Arc::new(
         shell_executor::LocalShellExecutor,

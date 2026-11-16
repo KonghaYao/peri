@@ -1,5 +1,3 @@
-use super::*;
-
 /// 充足上限（与应用同源）：用于「与上限无关」的编码用例。
 const MAX_ENCODE_BYTES: usize = crate::kit::image_safety::MAX_IMAGE_BYTES as usize;
 
@@ -21,38 +19,43 @@ fn png_encode_round_trips_rgba_pixels() {
     let height = 64;
     let pixels = rgba_pattern(width, height);
 
-    let encoded = png_encode_bytes(&pixels, width, height, MAX_ENCODE_BYTES).unwrap();
+    let encoded = super::png_encode_bytes(&pixels, width, height, MAX_ENCODE_BYTES).expect("png encode round trips rgba pixels: the png_encode_bytes fixture operation uses valid inputs");
     assert!(
         encoded.len() > 8192,
         "test must exercise multiple IDAT chunks"
     );
-    let decoded = image::load_from_memory(&encoded).unwrap().to_rgba8();
+    let decoded = image::load_from_memory(&encoded).expect("png encode round trips rgba pixels: the load_from_memory fixture operation uses valid inputs").to_rgba8();
     assert_eq!(decoded.dimensions(), (width as u32, height as u32));
     assert_eq!(decoded.as_raw(), &pixels);
 }
 
 #[test]
 fn png_encode_rejects_incomplete_pixel_data() {
-    let error = png_encode_bytes(&[0, 1, 2, 3], 2, 1, MAX_ENCODE_BYTES).unwrap_err();
-    let error = error.downcast::<std::io::Error>().unwrap();
+    let error = super::png_encode_bytes(&[0, 1, 2, 3], 2, 1, MAX_ENCODE_BYTES).expect_err(
+        "png encode rejects incomplete pixel data: the invalid fixture must be rejected",
+    );
+    let error = error.downcast::<std::io::Error>().expect("png encode rejects incomplete pixel data: the fixture establishes error.downcast::<std::io::Error>() before this assertion");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
 
 #[test]
 fn png_encode_rejects_excess_pixel_data() {
-    let error = png_encode_bytes(&[0, 1, 2, 3, 4, 5, 6, 7, 8], 2, 1, MAX_ENCODE_BYTES).unwrap_err();
-    let error = error.downcast::<std::io::Error>().unwrap();
+    let error = super::png_encode_bytes(&[0, 1, 2, 3, 4, 5, 6, 7, 8], 2, 1, MAX_ENCODE_BYTES)
+        .expect_err("png encode rejects excess pixel data: the invalid fixture must be rejected");
+    let error = error.downcast::<std::io::Error>().expect("png encode rejects excess pixel data: the fixture establishes error.downcast::<std::io::Error>() before this assertion");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 
-    let error = png_encode_bytes(&[0; 16], 2, 1, MAX_ENCODE_BYTES).unwrap_err();
-    let error = error.downcast::<std::io::Error>().unwrap();
+    let error = super::png_encode_bytes(&[0; 16], 2, 1, MAX_ENCODE_BYTES)
+        .expect_err("png encode rejects excess pixel data: the invalid fixture must be rejected");
+    let error = error.downcast::<std::io::Error>().expect("png encode rejects excess pixel data: the fixture establishes error.downcast::<std::io::Error>() before this assertion");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
 
 #[test]
 fn png_encode_rejects_dimension_overflow() {
-    let error = png_encode_bytes(&[], usize::MAX, 2, MAX_ENCODE_BYTES).unwrap_err();
-    let error = error.downcast::<std::io::Error>().unwrap();
+    let error = super::png_encode_bytes(&[], usize::MAX, 2, MAX_ENCODE_BYTES)
+        .expect_err("png encode rejects dimension overflow: the invalid fixture must be rejected");
+    let error = error.downcast::<std::io::Error>().expect("png encode rejects dimension overflow: the fixture establishes error.downcast::<std::io::Error>() before this assertion");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
 
@@ -66,10 +69,11 @@ fn png_encode_rejects_output_over_limit() {
     let height = 64;
     let pixels = rgba_pattern(width, height);
 
-    let error = png_encode_bytes(&pixels, width, height, 16).unwrap_err();
-    let error = error.downcast::<std::io::Error>().unwrap();
+    let error = super::png_encode_bytes(&pixels, width, height, 16)
+        .expect_err("png encode rejects output over limit: the invalid fixture must be rejected");
+    let error = error.downcast::<std::io::Error>().expect("png encode rejects output over limit: the fixture establishes error.downcast::<std::io::Error>() before this assertion");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
 
     // 同一输入在充足上限下可正常编码——失败确由上限而非数据本身引起。
-    assert!(png_encode_bytes(&pixels, width, height, MAX_ENCODE_BYTES).is_ok());
+    assert!(super::png_encode_bytes(&pixels, width, height, MAX_ENCODE_BYTES).is_ok());
 }

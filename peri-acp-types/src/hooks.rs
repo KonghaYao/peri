@@ -4,7 +4,8 @@
 //! 归契约层；middlewares 保留 re-export 保兼容）。执行器（dispatcher /
 //! executor / fire_*）留在 middlewares。
 
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -298,7 +299,7 @@ pub struct RegisteredHook {
 
 impl HookType {
     /// 返回各变体的 matcher 字段
-    pub fn get_matcher(&self) -> Option<&String> {
+    pub fn matcher(&self) -> Option<&String> {
         match self {
             HookType::Command { matcher, .. } => matcher.as_ref(),
             HookType::Prompt { matcher, .. } => matcher.as_ref(),
@@ -308,7 +309,7 @@ impl HookType {
     }
 
     /// 返回各变体的 condition 字段
-    pub fn get_condition(&self) -> Option<&String> {
+    pub fn condition(&self) -> Option<&String> {
         match self {
             HookType::Command { condition, .. } => condition.as_ref(),
             HookType::Prompt { condition, .. } => condition.as_ref(),
@@ -318,6 +319,7 @@ impl HookType {
     }
 
     /// 返回 once 标志，Command 有 once 字段，其他类型默认 false
+    #[must_use]
     pub fn is_once(&self) -> bool {
         match self {
             HookType::Command { once, .. } => *once,
@@ -328,6 +330,7 @@ impl HookType {
     }
 
     /// 返回 async 标志，仅 Command 有 async_run 字段，其他类型默认 false
+    #[must_use]
     pub fn is_async(&self) -> bool {
         match self {
             HookType::Command { async_run, .. } => *async_run,
@@ -338,7 +341,7 @@ impl HookType {
     }
 
     /// 返回 statusMessage 字段——hook 执行期间展示给用户的状态提示
-    pub fn get_status_message(&self) -> Option<&String> {
+    pub fn status_message(&self) -> Option<&String> {
         match self {
             HookType::Command { status_message, .. } => status_message.as_ref(),
             HookType::Prompt { status_message, .. } => status_message.as_ref(),

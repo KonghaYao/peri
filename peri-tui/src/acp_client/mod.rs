@@ -1,5 +1,6 @@
+mod acp_deployment;
 pub mod client;
-mod deployment;
+use self::acp_deployment as deployment;
 
 /// 排队提交绑定的会话在 prompt 准入前已被切换：不得改投新会话。
 pub(crate) const SESSION_BINDING_CHANGED_CODE: i64 = -32018;

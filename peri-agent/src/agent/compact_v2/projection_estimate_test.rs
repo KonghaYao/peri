@@ -1,7 +1,8 @@
-use super::projection::{
-    estimate_projection_chars, render_llm_view, MicroCompactPlan, ProjectionAction,
-    ProjectionActionEntry, ProjectionTarget, ProviderCapabilities,
-};
+use crate::agent::compact_v2::projection::MicroCompactPlan;
+use crate::agent::compact_v2::projection::ProjectionAction;
+use crate::agent::compact_v2::projection::ProjectionActionEntry;
+use crate::agent::compact_v2::projection::ProjectionTarget;
+use crate::agent::compact_v2::projection::ProviderCapabilities;
 use crate::messages::{BaseMessage, ContentBlock};
 use crate::session::transcript::MessageTranscript;
 fn transcript_with_tool_exchange(
@@ -44,7 +45,7 @@ fn estimate_projection_chars_ignores_directive_targeting_reminder() {
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap();
+        .expect("the construct fixture result is required for this assertion");
     let id = transcript.append_system_reminder(reminder);
     let action = ProjectionActionEntry {
         message_id: id,
@@ -56,7 +57,10 @@ fn estimate_projection_chars_ignores_directive_targeting_reminder() {
         },
     };
 
-    assert_eq!(estimate_projection_chars(&transcript, &[action]), (0, 0));
+    assert_eq!(
+        crate::agent::compact_v2::projection::estimate_projection_chars(&transcript, &[action]),
+        (0, 0)
+    );
     assert_eq!(transcript.flags(id), Default::default());
 }
 
@@ -99,7 +103,7 @@ fn test_estimate_projection_chars_counts_only_actually_truncated_values() {
     ];
 
     assert_eq!(
-        estimate_projection_chars(&transcript, &actions),
+        crate::agent::compact_v2::projection::estimate_projection_chars(&transcript, &actions),
         (0, 0),
         "ToolUse 输入受硬保护，不应计入可回收字符"
     );
@@ -138,8 +142,14 @@ fn test_estimate_projection_chars_deduplicates_repeated_tool_input_fields() {
         },
     };
 
-    let single_estimate = estimate_projection_chars(&transcript, &[single_field_action]);
-    let repeated_estimate = estimate_projection_chars(&transcript, &[repeated_field_action]);
+    let single_estimate = crate::agent::compact_v2::projection::estimate_projection_chars(
+        &transcript,
+        &[single_field_action],
+    );
+    let repeated_estimate = crate::agent::compact_v2::projection::estimate_projection_chars(
+        &transcript,
+        &[repeated_field_action],
+    );
 
     assert_eq!(repeated_estimate.0, single_estimate.0);
     assert_eq!(repeated_estimate.1, single_estimate.1);
@@ -195,10 +205,17 @@ fn duplicate_or_conflicting_tool_result_actions_fail_closed_for_render_and_estim
             actions: actions.clone(),
             ..Default::default()
         };
-        let rendered =
-            render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default()).unwrap();
+        let rendered = crate::agent::compact_v2::projection::render_llm_view(
+            &transcript,
+            &plan.actions,
+            &ProviderCapabilities::default(),
+        )
+        .expect("the render llm view fixture result is required for this assertion");
         assert_eq!(rendered[1].content(), "x".repeat(600));
-        assert_eq!(estimate_projection_chars(&transcript, &actions), (0, 0));
+        assert_eq!(
+            crate::agent::compact_v2::projection::estimate_projection_chars(&transcript, &actions),
+            (0, 0)
+        );
     }
 }
 
@@ -219,7 +236,10 @@ fn test_estimator_fails_closed_for_duplicate_tool_result_actions() {
     };
 
     assert_eq!(
-        estimate_projection_chars(&transcript, &[action.clone(), action]),
+        crate::agent::compact_v2::projection::estimate_projection_chars(
+            &transcript,
+            &[action.clone(), action]
+        ),
         (0, 0)
     );
 }

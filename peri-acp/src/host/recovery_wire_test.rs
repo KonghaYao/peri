@@ -4,7 +4,14 @@
 //! 走真实 `ServerLoop`：模式分流、生命周期锁与响应装配都是分发层的职责，只测
 //! `HostSessionRecovery` 会漏掉「恢复是否在响应之后放行」这一层。
 
-use super::*;
+use crate::host::requests::tests::recovery_tests::RecoveryHarness;
+use crate::transport::types::IncomingMessage;
+use crate::transport::types::RequestId;
+
+use peri_acp_types::thread::WorkState;
+use serde_json::json;
+use serde_json::Value;
+use std::sync::Arc;
 
 /// 真实 server loop；transport 的收件箱由用例提前填充。
 pub(super) async fn run_server_loop(harness: &RecoveryHarness) {
@@ -94,7 +101,7 @@ async fn load_response_precedes_the_recovery_turn() {
             .any(|(id, result)| *id == RequestId::Number(2) && result.is_ok()),
         "load 必须成功返回：{responses:?}"
     );
-    wait_for("恢复 turn 调用模型", || async {
+    crate::host::requests::tests::recovery_tests::wait_for("恢复 turn 调用模型", || async {
         harness._mock.matched()
     })
     .await;
@@ -222,7 +229,7 @@ async fn blocked_session_prompt_returns_recovery_execution_blocked() {
     );
     run_server_loop(&harness).await;
 
-    wait_for("阻断的 prompt 返回错误", || async {
+    crate::host::requests::tests::recovery_tests::wait_for("阻断的 prompt 返回错误", || async {
         harness.recorded.error_for(RequestId::Number(3)).is_some()
     })
     .await;

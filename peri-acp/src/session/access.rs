@@ -1,7 +1,8 @@
 //! executor 所需的会话访问端口与共享句柄投影。
 
 use std::str::FromStr;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::mcp_skills::McpSkillRegistry;
@@ -56,7 +57,7 @@ impl SessionManager {
 
     /// 取指定 session 的 goal_state 句柄（用于 TUI/stdio 注入到 middleware 链）。
     ///
-    /// 调用方应先调用 [`ensure_session`] 保证记录存在。
+    /// 调用方应先调用 [`Self::ensure_session`] 保证记录存在。
     /// 不存在时返回 None。
     pub fn goal_state_for(
         &self,
@@ -71,7 +72,7 @@ impl SessionManager {
     /// 取指定 session 的 MCP skill 远端注册表句柄（SessionAccessPort 投影用）。
     ///
     /// 内部 Arc 共享，clone 廉价；session 不存在时返回 None。
-    /// 调用方应先调用 [`ensure_session`] 保证记录存在。
+    /// 调用方应先调用 [`Self::ensure_session`] 保证记录存在。
     pub fn mcp_skill_registry_for(&self, session_id: &str) -> Option<Arc<McpSkillRegistry>> {
         self.inner
             .sessions
@@ -82,7 +83,7 @@ impl SessionManager {
     /// 取指定 session 的命令注册表句柄（命令拦截注入面 / 投影数据源用）。
     ///
     /// 内部 Arc 共享，clone 廉价；session 不存在时返回 None。
-    /// 调用方应先调用 [`ensure_session`] 保证记录存在。
+    /// 调用方应先调用 [`Self::ensure_session`] 保证记录存在。
     pub fn command_registry_for(&self, session_id: &str) -> Option<Arc<CommandRegistry>> {
         self.inner
             .sessions

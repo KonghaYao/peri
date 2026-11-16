@@ -3,9 +3,8 @@ use std::io::{self, Write};
 
 use base64::Engine;
 
-use super::{
-    Channel, Multiplexer, copy_with, select_channel, tmux_passthrough, write_osc52, write_terminal,
-};
+use super::Channel;
+use super::Multiplexer;
 
 /// 环境读取面替身：只认给出的键值对。
 fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
@@ -25,11 +24,11 @@ fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
 fn display_environment_uses_native_clipboard() {
     // 本机有显示环境：系统剪贴板即用户面前的剪贴板（macOS 无需 DISPLAY，占位值无影响）。
     assert_eq!(
-        select_channel(&env_of(&[("DISPLAY", ":0")])),
+        super::select_channel(&env_of(&[("DISPLAY", ":0")])),
         Channel::Native
     );
     assert_eq!(
-        select_channel(&env_of(&[("WAYLAND_DISPLAY", "wayland-0")])),
+        super::select_channel(&env_of(&[("WAYLAND_DISPLAY", "wayland-0")])),
         Channel::Native
     );
 }
@@ -38,13 +37,13 @@ fn display_environment_uses_native_clipboard() {
 fn ssh_and_herdr_use_terminal_clipboard() {
     for variable in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "HERDR_ENV"] {
         assert_eq!(
-            select_channel(&env_of(&[(variable, "1")])),
+            super::select_channel(&env_of(&[(variable, "1")])),
             Channel::Terminal,
             "{variable}"
         );
     }
     assert_eq!(
-        select_channel(&env_of(&[
+        super::select_channel(&env_of(&[
             ("SSH_CONNECTION", "10.0.0.1 1 10.0.0.2 2"),
             ("SSH_TTY", "/dev/pts/0"),
             ("DISPLAY", "localhost:10.0"),
@@ -61,14 +60,14 @@ fn unix_without_display_uses_terminal_clipboard() {
     } else {
         Channel::Native
     };
-    assert_eq!(select_channel(&env_of(&[])), expected);
+    assert_eq!(super::select_channel(&env_of(&[])), expected);
 }
 
 #[test]
 fn local_multiplexer_keeps_native_when_display_available() {
     // tmux/screen 可能跑在本机：本机有显示环境时系统剪贴板更可靠，不必绕 OSC 52。
     assert_eq!(
-        select_channel(&env_of(&[
+        super::select_channel(&env_of(&[
             ("TMUX", "/tmp/tmux-501/default,123,0"),
             ("DISPLAY", ":0")
         ])),
@@ -77,7 +76,7 @@ fn local_multiplexer_keeps_native_when_display_available() {
     if cfg!(all(unix, not(target_os = "macos"))) {
         let expected = Channel::Terminal;
         assert_eq!(
-            select_channel(&env_of(&[("TMUX", "/tmp/tmux-501/default,123,0")])),
+            super::select_channel(&env_of(&[("TMUX", "/tmp/tmux-501/default,123,0")])),
             expected
         );
     }
@@ -90,14 +89,14 @@ fn peri_clipboard_overrides_detection() {
 
     for value in ["native", "NATIVE", " native "] {
         assert_eq!(
-            select_channel(&env_of(&[ssh[0], ("PERI_CLIPBOARD", value)])),
+            super::select_channel(&env_of(&[ssh[0], ("PERI_CLIPBOARD", value)])),
             Channel::Native,
             "{value}"
         );
     }
     for value in ["osc52", "OSC52", "terminal", " terminal "] {
         assert_eq!(
-            select_channel(&env_of(&[local[0], ("PERI_CLIPBOARD", value)])),
+            super::select_channel(&env_of(&[local[0], ("PERI_CLIPBOARD", value)])),
             Channel::Terminal,
             "{value}"
         );
@@ -105,7 +104,7 @@ fn peri_clipboard_overrides_detection() {
     // 未知取值与 `auto` 等同：交给探测。
     for value in ["auto", "", "native-please"] {
         assert_eq!(
-            select_channel(&env_of(&[ssh[0], ("PERI_CLIPBOARD", value)])),
+            super::select_channel(&env_of(&[ssh[0], ("PERI_CLIPBOARD", value)])),
             Channel::Terminal,
             "{value}"
         );
@@ -116,7 +115,7 @@ fn peri_clipboard_overrides_detection() {
 fn osc52_preserves_unicode_newlines_and_encodes_control_characters() {
     let text = "你好 👋\nsecond line\x1b]52;c;evil\x07";
     let mut output = Vec::new();
-    write_osc52(&mut output, text).unwrap();
+    super::write_osc52(&mut output, text).expect("osc52 preserves unicode newlines and encodes control characters: the fixture storage and layout must support the requested operation");
     assert!(output.starts_with(b"\x1b]52;c;"));
     assert!(output.ends_with(b"\x07"));
     let payload = &output[7..output.len() - 1];
@@ -125,7 +124,7 @@ fn osc52_preserves_unicode_newlines_and_encodes_control_characters() {
     assert_eq!(
         base64::engine::general_purpose::STANDARD
             .decode(payload)
-            .unwrap(),
+            .expect("osc52 preserves unicode newlines and encodes control characters: the decode fixture operation uses valid inputs"),
         text.as_bytes()
     );
 }
@@ -133,14 +132,14 @@ fn osc52_preserves_unicode_newlines_and_encodes_control_characters() {
 #[test]
 fn osc52_emits_standard_sequence_without_multiplexer_wrapping() {
     let mut output = Vec::new();
-    write_terminal(&mut output, "hello", Multiplexer::None).unwrap();
+    super::write_terminal(&mut output, "hello", Multiplexer::None).expect("osc52 emits standard sequence without multiplexer wrapping: the fixture storage and layout must support the requested operation");
     assert_eq!(output, b"\x1b]52;c;aGVsbG8=\x07");
 }
 
 #[test]
 fn tmux_emits_native_sequence_plus_dcs_passthrough_copy() {
     let mut output = Vec::new();
-    write_terminal(&mut output, "hello", Multiplexer::Tmux).unwrap();
+    super::write_terminal(&mut output, "hello", Multiplexer::Tmux).expect("tmux emits native sequence plus dcs passthrough copy: the fixture storage and layout must support the requested operation");
     // 原生 OSC 52（tmux `set-clipboard on` + 客户端 terminfo `Ms`）在先，
     // 透传副本（tmux `allow-passthrough on`）在后；透传内部 ESC 必须双写，
     // tmux 转发时还原为单个 ESC（F8）。
@@ -171,11 +170,11 @@ fn decode_tmux_passthrough(wrapped: &str) -> Vec<u8> {
 
 #[test]
 fn tmux_passthrough_decodes_back_to_the_osc52_sequence() {
-    let decoded = decode_tmux_passthrough(&tmux_passthrough("hello"));
+    let decoded = decode_tmux_passthrough(&super::tmux_passthrough("hello"));
     assert_eq!(decoded, b"\x1b]52;c;aGVsbG8=\x07");
 
     // 解码后仍是一条完整 OSC 52：外层终端能识别引导 ESC 与 BEL 终止符。
-    let decoded_text = String::from_utf8(decoded).unwrap();
+    let decoded_text = String::from_utf8(decoded).expect("tmux passthrough decodes back to the osc52 sequence: fixture paths and protocol text must be valid UTF-8");
     assert!(decoded_text.starts_with("\x1b]52;c;"));
     assert!(decoded_text.ends_with('\x07'));
 }
@@ -188,6 +187,7 @@ struct ClipboardWriter {
 }
 
 impl ClipboardWriter {
+    #[must_use]
     fn working() -> Self {
         Self {
             bytes: Vec::new(),
@@ -197,6 +197,7 @@ impl ClipboardWriter {
         }
     }
 
+    #[must_use]
     fn broken() -> Self {
         Self {
             bytes: Vec::new(),
@@ -230,7 +231,7 @@ impl Write for ClipboardWriter {
 #[test]
 fn osc52_handles_partial_writes_and_flushes_output() {
     let mut writer = ClipboardWriter::working();
-    write_osc52(&mut writer, "hello").unwrap();
+    super::write_osc52(&mut writer, "hello").expect("osc52 handles partial writes and flushes output: the fixture storage and layout must support the requested operation");
     assert_eq!(writer.bytes, b"\x1b]52;c;aGVsbG8=\x07");
     assert!(writer.flushed);
 }
@@ -245,7 +246,7 @@ fn osc52_propagates_write_and_flush_failures() {
             flushed: false,
         };
         assert_eq!(
-            write_osc52(&mut writer, "hello").unwrap_err().kind(),
+            super::write_osc52(&mut writer, "hello").expect_err("osc52 propagates write and flush failures: the invalid fixture must be rejected").kind(),
             io::ErrorKind::BrokenPipe
         );
         assert_eq!(writer.flushed, !fail_write);
@@ -255,28 +256,30 @@ fn osc52_propagates_write_and_flush_failures() {
 #[test]
 fn native_channel_success_writes_no_terminal_sequence() {
     let mut output = Vec::new();
-    copy_with(
+    super::copy_with(
         "hello",
         Channel::Native,
         Multiplexer::None,
         &mut output,
         |_| Ok(()),
     )
-    .unwrap();
+    .expect("native channel success writes no terminal sequence: the copy_with fixture operation uses valid inputs");
     assert!(output.is_empty());
 }
 
 #[test]
 fn native_failure_falls_back_to_terminal() {
     let mut output = Vec::new();
-    copy_with(
+    super::copy_with(
         "hello",
         Channel::Native,
         Multiplexer::None,
         &mut output,
         |_| Err(anyhow::anyhow!("native boom")),
     )
-    .unwrap();
+    .expect(
+        "native failure falls back to terminal: the copy_with fixture operation uses valid inputs",
+    );
     assert_eq!(output, b"\x1b]52;c;aGVsbG8=\x07");
 }
 
@@ -284,7 +287,7 @@ fn native_failure_falls_back_to_terminal() {
 fn terminal_failure_falls_back_to_native() {
     let mut writer = ClipboardWriter::broken();
     let native_text = RefCell::new(Vec::new());
-    copy_with(
+    super::copy_with(
         "hello",
         Channel::Terminal,
         Multiplexer::None,
@@ -294,21 +297,23 @@ fn terminal_failure_falls_back_to_native() {
             Ok(())
         },
     )
-    .unwrap();
+    .expect(
+        "terminal failure falls back to native: the copy_with fixture operation uses valid inputs",
+    );
     assert_eq!(native_text.borrow().as_slice(), ["hello"]);
 }
 
 #[test]
 fn both_channels_failing_reports_primary_cause_and_fallback() {
     let mut writer = ClipboardWriter::broken();
-    let error = copy_with(
+    let error = super::copy_with(
         "hello",
         Channel::Native,
         Multiplexer::None,
         &mut writer,
         |_| Err(anyhow::anyhow!("native boom")),
     )
-    .unwrap_err();
+    .expect_err("both channels failing reports primary cause and fallback: the invalid fixture must be rejected");
     let message = format!("{error:#}");
     assert!(message.contains("native boom"), "{message}");
     assert!(message.contains("Terminal failed"), "{message}");

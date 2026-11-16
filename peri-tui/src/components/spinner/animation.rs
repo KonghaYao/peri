@@ -7,10 +7,12 @@ const BRAILLE_FRAMES: &[char] = &[
 pub const BRAILLE_LOADING_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// braille 动画帧（tick 为 100ms 粒度帧序号）。
+#[must_use]
 pub fn braille_frame(tick: u64) -> char {
     BRAILLE_LOADING_FRAMES[(tick as usize) % BRAILLE_LOADING_FRAMES.len()]
 }
 
+#[must_use]
 pub fn tick_to_frame(tick: u64) -> char {
     BRAILLE_FRAMES[(tick as usize) % BRAILLE_FRAMES.len()]
 }
@@ -26,6 +28,7 @@ pub fn format_elapsed(elapsed_ms: u64) -> String {
     }
 }
 
+#[must_use]
 pub fn format_tokens(count: usize) -> String {
     if count >= 1000 {
         let k = count as f64 / 1000.0;

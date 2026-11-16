@@ -36,7 +36,8 @@ async fn run_print_with_args(
     bare: bool,
     extra_args: &[&str],
 ) -> std::process::Output {
-    let fixture = tempfile::tempdir().unwrap();
+    let fixture = tempfile::tempdir()
+        .expect("run print with args: isolated fixture workspace must remain accessible");
     let big_file = fixture.path().join("big.txt");
     std::fs::write(
         &big_file,
@@ -44,9 +45,13 @@ async fn run_print_with_args(
             .map(|line| format!("line {line} the quick brown fox jumps over the lazy dog\n"))
             .collect::<String>(),
     )
-    .unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    .expect("run print with args: isolated fixture workspace must remain accessible");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("run print with args: fixture task and request must complete successfully");
+    let address = listener
+        .local_addr()
+        .expect("run print with args: the fixture listener must expose its bound local address");
     let settings = fixture.path().join("settings.json");
     std::fs::write(
         &settings,
@@ -59,7 +64,7 @@ async fn run_print_with_args(
         }})
         .to_string(),
     )
-    .unwrap();
+    .expect("run print with args: isolated fixture workspace must remain accessible");
 
     // Only the provider is mocked: the child runs the real CLI, ACP host,
     // agent loop, notification pump, session close and deployment shutdown.
@@ -79,35 +84,42 @@ async fn run_print_with_args(
             // provider 上，服务到测试收摊（`provider.abort()`）为止。step 序列是否
             // 完整由共享计数在子进程退出后断言，不靠「循环自然结束」隐式保证。
             loop {
-                let (mut socket, _) = listener.accept().await.unwrap();
+                let (mut socket, _) = listener.accept().await.expect(
+                    "run print with args: fixture task and request must complete successfully",
+                );
                 let mut request = Vec::new();
                 let (header_end, content_length) = loop {
                     let mut buffer = [0; 4096];
-                    let count = socket.read(&mut buffer).await.unwrap();
+                    let count = socket.read(&mut buffer).await.expect(
+                        "run print with args: fixture task and request must complete successfully",
+                    );
                     assert_ne!(count, 0, "provider request ended before its headers");
                     request.extend_from_slice(&buffer[..count]);
                     if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let headers = std::str::from_utf8(&request[..end]).unwrap();
+                        let headers = std::str::from_utf8(&request[..end]).expect("run print with args: fixture paths and protocol text must be valid UTF-8");
                         assert!(headers.starts_with("POST /v1/messages "));
                         let length = headers
                             .lines()
                             .filter_map(|line| line.split_once(':'))
                             .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                            .unwrap()
+                            .expect("run print with args: fixture must contain the searched item")
                             .1
                             .trim()
                             .parse::<usize>()
-                            .unwrap();
+                            .expect("run print with args: fixture must contain the searched item");
                         break (end + 4, length);
                     }
                 };
                 while request.len() < header_end + content_length {
                     let mut buffer = [0; 4096];
-                    let count = socket.read(&mut buffer).await.unwrap();
+                    let count = socket.read(&mut buffer).await.expect(
+                        "run print with args: fixture task and request must complete successfully",
+                    );
                     assert_ne!(count, 0, "provider request body was truncated");
                     request.extend_from_slice(&buffer[..count]);
                 }
-                let body: Value = serde_json::from_slice(&request[header_end..]).unwrap();
+                let body: Value = serde_json::from_slice(&request[header_end..])
+                    .expect("run print with args: fixture JSON must match the expected schema");
                 assert_eq!(body["stream"], true);
                 // 首个 prompt 之后宿主会另发一次 prediction 调用
                 // （`peri_acp::host::prediction` → `execute_prediction`）：它不属于本用例的
@@ -293,9 +305,15 @@ async fn run_print_with_args(
     if bare {
         command.arg("--bare");
     }
-    let mut child = command.spawn().unwrap();
-    let mut stdout_pipe = child.stdout.take().unwrap();
-    let mut stderr_pipe = child.stderr.take().unwrap();
+    let mut child = command
+        .spawn()
+        .expect("run print with args: isolated fixture workspace must remain accessible");
+    let mut stdout_pipe = child.stdout.take().expect(
+        "run print with args: the fixture process outcome must include the expected output stream",
+    );
+    let mut stderr_pipe = child.stderr.take().expect(
+        "run print with args: the fixture process outcome must include the expected output stream",
+    );
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     // 把 child 和已读输出留在 timeout 外；失败时先 kill/reap，再给出启动/退出
@@ -309,7 +327,7 @@ async fn run_print_with_args(
     })
     .await;
     let status = match result {
-        Ok(result) => result.unwrap().0,
+        Ok(result) => result.expect("run print with args: the fixture storage and layout must support the requested operation").0,
         Err(_) => {
             provider.abort();
             let provider_result = provider.await;
@@ -360,6 +378,7 @@ fn sse_frames(events: &[(&str, Value)]) -> String {
 /// 区分 prediction 调用与用例的 step 序列：prediction 指令由
 /// `build_prediction_directive` 生成，`execute_prediction` 把它作为 system 消息注入；
 /// Anthropic wire 格式下 system 在顶层 `system` 字段（不在 `messages[0]`），故整体扫描。
+#[must_use]
 fn is_prediction_request(body: &Value) -> bool {
     body.to_string().contains("<prediction_directive>")
 }
@@ -375,8 +394,11 @@ async fn respond(socket: &mut tokio::net::TcpStream, status: &str, content_type:
             .as_bytes(),
         )
         .await
-        .unwrap();
-    socket.shutdown().await.unwrap();
+        .expect("respond: fixture task and request must complete successfully");
+    socket
+        .shutdown()
+        .await
+        .expect("respond: fixture task and request must complete successfully");
 }
 
 /// [回归测试] 第二次真实 provider 请求必须带回诚实的失败工具结果：`is_error=true`、
@@ -416,7 +438,14 @@ async fn text_answer_exits_process() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), ANSWER);
+    assert_eq!(
+        String::from_utf8(output.stdout)
+            .expect(
+                "text answer exits process: fixture paths and protocol text must be valid UTF-8"
+            )
+            .trim(),
+        ANSWER
+    );
 }
 
 #[tokio::test]
@@ -427,7 +456,8 @@ async fn json_answer_exits_process() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result: Value = serde_json::from_slice(&output.stdout)
+        .expect("json answer exits process: fixture JSON must match the expected schema");
     assert_eq!(result["type"], "result");
     assert_eq!(result["content"], ANSWER);
     assert_eq!(result["stop_reason"], "end_turn");
@@ -443,12 +473,23 @@ async fn streamed_answer_exits_process() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let text = String::from_utf8(output.stdout).unwrap();
+    let text = String::from_utf8(output.stdout).expect(
+        "streamed answer exits process: fixture paths and protocol text must be valid UTF-8",
+    );
     let chunks = text
         .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .map(|line| {
+            serde_json::from_str::<Value>(line).expect(
+                "streamed answer exits process: fixture JSON must match the expected schema",
+            )
+        })
         .filter(|event| event["type"] == "text")
-        .map(|event| event["content"].as_str().unwrap().to_owned())
+        .map(|event| {
+            event["content"]
+                .as_str()
+                .expect("streamed answer exits process: fixture must have the expected variant")
+                .to_owned()
+        })
         .collect::<String>();
     assert_eq!(chunks, ANSWER);
 }
@@ -469,7 +510,7 @@ async fn standard_mode_answer_exits_process() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), ANSWER);
+    assert_eq!(String::from_utf8(output.stdout).expect("standard mode answer exits process: fixture paths and protocol text must be valid UTF-8").trim(), ANSWER);
 }
 
 /// [回归测试] 外部评测 harness 固定传入 `--max-turns`：该开关在 print 路径尚未
@@ -489,7 +530,7 @@ async fn max_turns_flag_is_accepted_and_ignored() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), ANSWER);
+    assert_eq!(String::from_utf8(output.stdout).expect("max turns flag is accepted and ignored: fixture paths and protocol text must be valid UTF-8").trim(), ANSWER);
 }
 
 /// [回归测试] 真实 CLI 经 Read 后继续请求，usage 尾帧穿过 ACP 到 stdout，进程自行退出。
@@ -505,9 +546,9 @@ async fn streamed_multistep_usage_includes_final_provider_counts_and_exits() {
         String::from_utf8_lossy(&output.stderr)
     );
     let events: Vec<Value> = String::from_utf8(output.stdout)
-        .unwrap()
+        .expect("streamed multistep usage includes final provider counts and exits: fixture paths and protocol text must be valid UTF-8")
         .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
+        .map(|line| serde_json::from_str(line).expect("streamed multistep usage includes final provider counts and exits: fixture JSON must match the expected schema"))
         .collect();
     let calls: Vec<&Value> = events
         .iter()
@@ -529,14 +570,14 @@ async fn streamed_multistep_usage_includes_final_provider_counts_and_exits() {
         && event["id"] == "read-big"));
     assert!(events.iter().any(|event| event["type"] == "tool_result"
         && event["id"] == "read-big"
-        && event["output"].as_str().unwrap().contains("line 60")));
+        && event["output"].as_str().expect("streamed multistep usage includes final provider counts and exits: the fixture must retain its expected variant").contains("line 60")));
     assert!(
         events
             .iter()
             .any(|event| event["type"] == "text" && event["content"] == ANSWER)
     );
     assert_eq!(
-        events.last().unwrap(),
+        events.last().expect("streamed multistep usage includes final provider counts and exits: the fixture collection must contain the expected entry"),
         &json!({"type": "result", "stop_reason": "end_turn", "status": "completed", "is_error": false, "pending_tasks": 0, "total_cost_usd": null,
         "usage": {"input_tokens": 600, "cache_read_input_tokens": 40, "cache_creation_input_tokens": 60, "output_tokens": 18}})
     );
@@ -553,11 +594,11 @@ async fn truncated_answer_exits_process_with_incomplete_result() {
             assert!(String::from_utf8_lossy(&output.stdout).contains(ANSWER));
             continue;
         }
-        let text = String::from_utf8(output.stdout).unwrap();
+        let text = String::from_utf8(output.stdout).expect("truncated answer exits process with incomplete result: fixture paths and protocol text must be valid UTF-8");
         let result: Value = if format == "json" {
-            serde_json::from_str(&text).unwrap()
+            serde_json::from_str(&text).expect("truncated answer exits process with incomplete result: fixture JSON must match the expected schema")
         } else {
-            serde_json::from_str(text.lines().last().unwrap()).unwrap()
+            serde_json::from_str(text.lines().last().expect("truncated answer exits process with incomplete result: fixture collection must contain the expected item")).expect("truncated answer exits process with incomplete result: fixture JSON must match the expected schema")
         };
         assert_eq!(result["type"], "result");
         assert_eq!(result["stop_reason"], "max_tokens");
@@ -577,16 +618,16 @@ async fn truncated_answer_recovers_and_exits_process_successfully() {
         String::from_utf8_lossy(&output.stderr)
     );
     let events: Vec<Value> = String::from_utf8(output.stdout)
-        .unwrap()
+        .expect("truncated answer recovers and exits process successfully: fixture paths and protocol text must be valid UTF-8")
         .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
+        .map(|line| serde_json::from_str(line).expect("truncated answer recovers and exits process successfully: fixture JSON must match the expected schema"))
         .collect();
     let calls: Vec<&Value> = events
         .iter()
         .filter(|event| event["type"] == "assistant")
         .collect();
     assert_eq!(calls.len(), 2, "一次截断后只需一次续跑");
-    let result = events.last().unwrap();
+    let result = events.last().expect("truncated answer recovers and exits process successfully: fixture collection must contain the expected item");
     assert_eq!(result["type"], "result");
     assert_eq!(result["stop_reason"], "end_turn");
     assert_eq!(result["status"], "completed");
@@ -608,12 +649,12 @@ async fn ask_user_unanswered_exits_process_without_fabricated_answer() {
             "无人可作答仍须正常结束本轮（{format}）：{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let text = String::from_utf8(output.stdout).unwrap();
+        let text = String::from_utf8(output.stdout).expect("ask user unanswered exits process without fabricated answer: fixture paths and protocol text must be valid UTF-8");
         match format {
             "stream-json" => {
                 let events: Vec<Value> = text
                     .lines()
-                    .map(|line| serde_json::from_str(line).unwrap())
+                    .map(|line| serde_json::from_str(line).expect("ask user unanswered exits process without fabricated answer: fixture JSON must match the expected schema"))
                     .collect();
                 let tool_result = events
                     .iter()
@@ -624,18 +665,18 @@ async fn ask_user_unanswered_exits_process_without_fabricated_answer() {
                 assert!(
                     tool_result["output"]
                         .as_str()
-                        .unwrap()
+                        .expect("ask user unanswered exits process without fabricated answer: the fixture must retain its expected variant")
                         .contains(UnansweredCause::NonInteractiveClient.reason_text()),
                     "可见工具结果必须如实说明无法交互: {tool_result}"
                 );
                 assert_eq!(
-                    events.last().unwrap(),
+                    events.last().expect("ask user unanswered exits process without fabricated answer: the fixture collection must contain the expected entry"),
                     &json!({"type": "result", "stop_reason": "end_turn", "status": "completed", "is_error": false, "pending_tasks": 0, "total_cost_usd": null,
                     "usage": {"input_tokens": 600, "cache_read_input_tokens": 40, "cache_creation_input_tokens": 60, "output_tokens": 18}})
                 );
             }
             "json" => {
-                let result: Value = serde_json::from_str(&text).unwrap();
+                let result: Value = serde_json::from_str(&text).expect("ask user unanswered exits process without fabricated answer: fixture JSON must match the expected schema");
                 assert_eq!(result["type"], "result");
                 assert_eq!(result["content"], ANSWER);
                 assert_eq!(result["status"], "completed");

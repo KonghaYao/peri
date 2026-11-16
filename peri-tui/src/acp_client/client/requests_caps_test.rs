@@ -1,5 +1,6 @@
-use super::*;
-use peri_acp::transport::{mpsc::mpsc_transport_pair, types::IncomingMessage};
+use super::AcpTuiClient;
+
+use peri_acp::transport::types::IncomingMessage;
 use serde_json::json;
 
 /// 走一次真实 initialize 协商，返回写入 atom 的窗口能力。
@@ -8,13 +9,13 @@ use serde_json::json;
 /// 服务端能力事实只来自响应的 `agentCapabilities._meta.peri.historyWindowV1` 回显，
 /// 未回显一律 fail-closed。
 async fn negotiate_history_window(agent_capabilities: serde_json::Value) -> bool {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, _) = AcpTuiClient::new(client_transport);
     client.spawn_pump(notification_tx);
     let server = tokio::spawn(async move {
-        let IncomingMessage::Request { id, method, params } =
-            server_transport.recv().await.unwrap()
-        else {
+        let IncomingMessage::Request { id, method, params } = server_transport.recv().await.expect(
+            "negotiate history window: fixture task and request must complete successfully",
+        ) else {
             panic!("应收到 initialize");
         };
         assert_eq!(method, "initialize", "应先协商能力");
@@ -26,12 +27,19 @@ async fn negotiate_history_window(agent_capabilities: serde_json::Value) -> bool
         server_transport
             .send_response(id, Ok(json!({"agentCapabilities": agent_capabilities})))
             .await
-            .unwrap();
+            .expect(
+                "negotiate history window: fixture task and request must complete successfully",
+            );
     });
     crate::kit::atoms::HISTORY_WINDOW_V1.set(true);
     crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(false);
-    client.register_ui_commands(&[]).await.unwrap();
-    server.await.unwrap();
+    client
+        .register_ui_commands(&[])
+        .await
+        .expect("negotiate history window: fixture task and request must complete successfully");
+    server
+        .await
+        .expect("negotiate history window: fixture task and request must complete successfully");
     let capable = crate::kit::atoms::HISTORY_WINDOW_CAPABLE.get();
     crate::kit::atoms::HISTORY_WINDOW_V1.set(false);
     client.close();
@@ -45,12 +53,12 @@ async fn negotiate_history_window(agent_capabilities: serde_json::Value) -> bool
 #[tokio::test]
 #[serial_test::serial]
 async fn local_disabled_beta_does_not_declare_history_window() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, _) = AcpTuiClient::new(client_transport);
     client.spawn_pump(notification_tx);
     let server = tokio::spawn(async move {
         let IncomingMessage::Request { id, method, params } =
-            server_transport.recv().await.unwrap()
+            server_transport.recv().await.expect("local disabled beta does not declare history window: fixture task and request must complete successfully")
         else {
             panic!("应收到 initialize");
         };
@@ -68,12 +76,12 @@ async fn local_disabled_beta_does_not_declare_history_window() {
                 })),
             )
             .await
-            .unwrap();
+            .expect("local disabled beta does not declare history window: fixture task and request must complete successfully");
     });
     crate::kit::atoms::HISTORY_WINDOW_V1.set(false);
     crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(false);
-    client.register_ui_commands(&[]).await.unwrap();
-    server.await.unwrap();
+    client.register_ui_commands(&[]).await.expect("local disabled beta does not declare history window: fixture task and request must complete successfully");
+    server.await.expect("local disabled beta does not declare history window: fixture task and request must complete successfully");
     assert!(
         crate::kit::atoms::HISTORY_WINDOW_CAPABLE.get(),
         "服务端回显的事实仍应记录，是否走窗口由本地开关与能力共同决定"
@@ -95,12 +103,12 @@ async fn local_disabled_beta_does_not_declare_history_window() {
 #[tokio::test]
 #[serial_test::serial]
 async fn test_ui_capability_negotiation_keeps_legacy_oauth_contract() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, _) = AcpTuiClient::new(client_transport);
     client.spawn_pump(notification_tx);
     let server = tokio::spawn(async move {
         let IncomingMessage::Request { id, method, params } =
-            server_transport.recv().await.unwrap()
+            server_transport.recv().await.expect("ui capability negotiation keeps legacy oauth contract: fixture task and request must complete successfully")
         else {
             panic!("应收到 initialize");
         };
@@ -123,10 +131,10 @@ async fn test_ui_capability_negotiation_keeps_legacy_oauth_contract() {
         server_transport
             .send_response(id, Ok(json!({"agentCapabilities": {}})))
             .await
-            .unwrap();
+            .expect("ui capability negotiation keeps legacy oauth contract: fixture task and request must complete successfully");
     });
-    client.register_ui_commands(&[]).await.unwrap();
-    server.await.unwrap();
+    client.register_ui_commands(&[]).await.expect("ui capability negotiation keeps legacy oauth contract: fixture task and request must complete successfully");
+    server.await.expect("ui capability negotiation keeps legacy oauth contract: fixture task and request must complete successfully");
     assert!(
         !crate::kit::atoms::HISTORY_WINDOW_CAPABLE.get(),
         "initialize 未回显时必须 fail-closed"
@@ -158,7 +166,7 @@ async fn test_history_window_capability_requires_explicit_server_true() {
 #[serial_test::serial]
 async fn test_mcp_control_requires_server_true_and_resets_on_close() {
     for advertised in [json!(null), json!(false), json!("true"), json!(true)] {
-        let (transport, server) = mpsc_transport_pair();
+        let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
         let (client, _, _) = AcpTuiClient::new(transport);
         assert!(!client.supports_mcp_control(), "initialize 前禁止控制");
         let supported = advertised == json!(true);
@@ -177,9 +185,9 @@ async fn test_mcp_control_requires_server_true_and_resets_on_close() {
                     Ok(json!({"agentCapabilities":{"_meta":{"peri.mcpControlV1":advertised}}})),
                 )
                 .await
-                .unwrap();
+                .expect("mcp control requires server true and resets on close: fixture task and request must complete successfully");
         });
-        client.register_ui_commands(&[]).await.unwrap();
+        client.register_ui_commands(&[]).await.expect("mcp control requires server true and resets on close: fixture task and request must complete successfully");
         assert_eq!(
             client.supports_mcp_control(),
             supported,
@@ -187,6 +195,8 @@ async fn test_mcp_control_requires_server_true_and_resets_on_close() {
         );
         client.close();
         assert!(!client.supports_mcp_control(), "连接关闭后清除能力");
-        server_task.await.unwrap();
+        server_task.await.expect("mcp control requires server true and resets on close: fixture task and request must complete successfully");
     }
 }
+
+use peri_acp::transport::AcpTransport;

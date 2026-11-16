@@ -8,7 +8,10 @@
 
 use crate::command::PromptStopReason;
 use crate::error::AgentError;
-use crate::session::{bounded_error_message, ExecutionFailure, ExecutionFailureKind, PromptResult};
+use crate::session;
+use crate::session::ExecutionFailure;
+use crate::session::ExecutionFailureKind;
+use crate::session::PromptResult;
 
 #[test]
 fn work_budget_failure_preserves_typed_error_through_anyhow_and_public_projection() {
@@ -202,17 +205,17 @@ fn typed_retry_failure_preserves_safe_exhaustion_facts_at_execution_boundary() {
 #[test]
 fn bounded_error_preserves_bearer_credentials_and_url_components() {
     let text = "Bearer sentinel-secret; client_secret=sentinel-secret private_key='sentinel-secret' endpoint=https://user:sentinel-secret@api.example.test/v1?token=sentinel-secret&mode=debug";
-    assert_eq!(bounded_error_message(text, 2_000), text);
+    assert_eq!(session::bounded_error_message(text, 2_000), text);
 }
 
 #[test]
 fn bounded_error_truncates_unicode_and_falls_back_for_empty_input() {
-    let sanitized = bounded_error_message(&"错".repeat(20), 8);
+    let sanitized = session::bounded_error_message(&"错".repeat(20), 8);
     assert_eq!(sanitized.chars().count(), 9);
     assert!(sanitized.ends_with('…'));
 
     assert_eq!(
-        bounded_error_message("   ", 2_000),
+        session::bounded_error_message("   ", 2_000),
         crate::session::EXECUTION_FAILURE_FALLBACK_MESSAGE
     );
 }

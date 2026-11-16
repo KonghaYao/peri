@@ -1,8 +1,13 @@
-use super::*;
+use crate::prompt::prompt_template::PromptEnv;
+use crate::prompt::prompt_template::PromptTemplate;
+use peri_acp_types::agents::AgentOverrides;
+use peri_acp_types::meta_harness::MetaHarnessState;
+use peri_middlewares::host_ports::AgentCatalogProvider;
+use peri_model::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
 
 #[test]
 fn test_no_overrides_contains_all_sections() {
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -35,7 +40,7 @@ fn test_no_overrides_contains_all_sections() {
 
 #[test]
 fn test_no_overrides_no_duplicate_tone_proactiveness() {
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -65,7 +70,7 @@ fn test_no_overrides_no_duplicate_tone_proactiveness() {
 
 #[test]
 fn test_no_overrides_no_leading_newlines() {
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -87,7 +92,7 @@ fn test_with_overrides_uses_override_block() {
         proactiveness: None,
         mode: None,
     };
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         Some(&overrides),
         "/tmp",
@@ -110,7 +115,7 @@ fn test_with_overrides_uses_override_block() {
 
 #[test]
 fn test_placeholders_replaced() {
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/custom/path",
@@ -140,7 +145,7 @@ fn test_env_contains_cwd() {
 
 #[test]
 fn test_assembled_holder_sections_are_included() {
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -169,7 +174,7 @@ fn test_hitl_section_rendered_by_holder() {
     // 10_hitl 由 PermissionMiddleware 持有（2026-08-15 拆分：Dynamic：机制
     // 说明 + 按代码事实生成的 sensitive 列表）；收集段恒渲染，不依赖
     // hitl_enabled 字段。
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -210,9 +215,9 @@ fn test_hitl_section_rendered_by_holder() {
 ///    互为双锁。
 #[test]
 fn test_hitl_sensitive_list_uses_system_mcp_raw_names() {
-    use peri_middlewares::permission::{format_sensitive_tools, sensitive_tool_entries};
+    use peri_middlewares::permission;
 
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -221,7 +226,7 @@ fn test_hitl_sensitive_list_uses_system_mcp_raw_names() {
         None,
     );
 
-    let list = format_sensitive_tools();
+    let list = permission::format_sensitive_tools();
     assert!(
         result.contains(&list),
         "10_hitl 段落必须逐字包含敏感清单渲染结果（条目表是渲染面单一事实源）"
@@ -243,7 +248,7 @@ fn test_hitl_sensitive_list_uses_system_mcp_raw_names() {
         "artifact 不在敏感清单（parity：与原始名判定一致）"
     );
 
-    let entries = sensitive_tool_entries();
+    let entries = permission::sensitive_tool_entries();
     assert_eq!(
         entries.len(),
         13,
@@ -265,7 +270,7 @@ fn test_hitl_sensitive_list_uses_system_mcp_raw_names() {
 fn test_subagent_section_rendered_by_holder() {
     // 11_subagent 由 SubAgentMiddleware 持有（Builtin，含 {{available_agents}}
     // 占位符——catalog 替换留在渲染层，设计 §3.5.1 步骤 2）。
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -285,7 +290,7 @@ fn test_subagent_section_does_not_hardcode_built_in_agent_ids() {
         built_in_subagents_enabled: false,
         ..Default::default()
     };
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &state,
         None,
         "/tmp",
@@ -329,7 +334,7 @@ fn test_subagent_section_does_not_hardcode_built_in_agent_ids() {
 fn test_skills_section_rendered_by_holder() {
     // 13_skills 由 SkillsMiddleware 持有（Dynamic：机制说明 + 按代码事实
     // 生成的 discovery 协议）。
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -358,7 +363,7 @@ fn test_skills_section_rendered_by_holder() {
 /// [回归测试] resume 模型与 description UI 契约必须准确投影到提示词。
 #[test]
 fn test_subagent_resume_model_and_optional_ui_contract() {
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -384,7 +389,7 @@ fn test_subagent_selection_guide_has_no_specific_mapping() {
         built_in_subagents_enabled: false,
         ..Default::default()
     };
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &state,
         None,
         "/tmp",
@@ -423,7 +428,7 @@ fn test_subagent_selection_guide_has_no_specific_mapping() {
 /// 11_subagent(4) → 13_skills(5) → language(7)，不依赖 middleware 链序。
 #[test]
 fn test_gated_sections_render_in_position_order() {
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -443,7 +448,7 @@ fn test_gated_sections_render_in_position_order() {
 
 #[test]
 fn test_retired_sections_are_not_rendered() {
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -457,7 +462,7 @@ fn test_retired_sections_are_not_rendered() {
 
 #[test]
 fn test_assembled_capability_sections_are_rendered() {
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -495,10 +500,10 @@ fn test_prompt_cache_boundary_four_state_matrix_preserves_old_wire_bytes() {
         ),
         (None, None, String::new(), ""),
     ] {
-        let rendered = render_cache_zones(cached, uncached);
+        let rendered = crate::prompt::tests::render_cache_zones(cached, uncached);
         assert_eq!(rendered, expected_rendered);
         assert_eq!(
-            strip_system_prompt_dynamic_boundaries(&rendered),
+            peri_model::prompt_cache::strip_system_prompt_dynamic_boundaries(&rendered),
             expected_wire,
             "剥离 transport token 后必须逐字节等于旧拼接算法"
         );
@@ -511,7 +516,7 @@ fn test_prompt_cache_boundary_four_state_matrix_preserves_old_wire_bytes() {
 
 #[test]
 fn test_boundary_marker_before_dynamic_content() {
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -535,7 +540,7 @@ fn test_boundary_marker_before_dynamic_content() {
 
 #[test]
 fn test_boundary_marker_with_assembled_sections() {
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -557,7 +562,7 @@ fn test_boundary_marker_with_assembled_sections() {
 
 #[test]
 fn test_default_production_template_emits_one_cache_boundary() {
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",

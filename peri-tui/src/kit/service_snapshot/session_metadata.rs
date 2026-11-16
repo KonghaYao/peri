@@ -5,7 +5,7 @@
 
 use crate::acp_client::AcpTuiClient;
 use crate::app::service_registry::SharedPeriConfig;
-use crate::kit::atoms::ProviderSummary;
+
 use peri_acp_types::permission::PermissionMode;
 
 #[derive(Default)]
@@ -137,8 +137,7 @@ pub(super) fn derive_provider_and_model(
         .filter(|model| !model.is_empty())
         .cloned()
         .or_else(|| {
-            provider
-                .and_then(|provider| provider.models.get_model(&active_alias).map(str::to_string))
+            provider.and_then(|provider| provider.models.model(&active_alias).map(str::to_string))
         })
         .filter(|model| !model.is_empty())
         .unwrap_or_else(|| active_alias.clone());
@@ -174,6 +173,7 @@ pub(super) fn derive_providers(config: &SharedPeriConfig) -> Vec<ProviderSummary
         .collect()
 }
 
+#[must_use]
 pub(super) fn permission_mode_label(mode: PermissionMode) -> &'static str {
     match mode {
         PermissionMode::Default => "default",
@@ -182,3 +182,5 @@ pub(super) fn permission_mode_label(mode: PermissionMode) -> &'static str {
         PermissionMode::Bypass => "bypass",
     }
 }
+
+use crate::kit::atoms::ProviderSummary;

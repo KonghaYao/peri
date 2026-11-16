@@ -1,12 +1,16 @@
 //! `agents` 模块的 typed 模型档位契约测试（M2）。
 
-use super::*;
+use crate::agents::AgentModelSelection;
+use crate::agents::InvalidModelTier;
+use crate::agents::ModelTier;
+use crate::agents::MODEL_TIERS;
 
 /// `MODEL_TIERS` 与 `ModelTier::ALL` 必须逐项对应（`as_str` 依赖该同序映射）。
 #[test]
 fn model_tier_all_matches_model_tiers_constant() {
     assert_eq!(ModelTier::ALL.len(), MODEL_TIERS.len());
-    for (tier, name) in ModelTier::ALL.into_iter().zip(MODEL_TIERS) {
+    let paired_name = ModelTier::ALL.into_iter().zip(MODEL_TIERS);
+    for (tier, name) in paired_name {
         assert_eq!(tier.as_str(), name, "档位枚举与常量必须同序同值");
     }
 }

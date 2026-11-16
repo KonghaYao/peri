@@ -1,10 +1,12 @@
 use std::collections::HashMap;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 
 use thiserror::Error;
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::TcpListener,
-};
+use tokio::io::AsyncBufReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::io::BufReader;
+use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 const CALLBACK_TIMEOUT_SECS: u64 = 120;
@@ -25,6 +27,14 @@ pub enum CallbackError {
 
 pub struct OAuthCallbackServer {
     listener: TcpListener,
+}
+
+impl Debug for OAuthCallbackServer {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OAuthCallbackServer")
+            .finish_non_exhaustive()
+    }
 }
 
 impl OAuthCallbackServer {

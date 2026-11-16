@@ -1,4 +1,4 @@
-use super::*;
+use super::AcpEventData;
 
 #[test]
 fn test_decode_turn_done() {

@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::continuation::{cancel_arms_continuation, cancel_should_schedule_continuation};
-use crate::dispatch::commands::{build_available_commands_update, register_ui_entries};
+use super::continuation;
+use crate::dispatch::commands;
 use crate::dispatch::config_update;
 use crate::session::executor::ContinuationRequest;
 use agent_client_protocol::schema::v1::SessionUpdate;
@@ -103,7 +103,7 @@ pub(crate) async fn handle_notification(
                 // 取消**正在执行的 continuation** 时不置位（in_flight）：否则
                 // 会形成"取消续跑 → 再次续跑"的自动链式续跑。被取消续跑遗留的
                 // Defer 保留在队列，由后续用户 prompt 消费。
-                let cancel_arms = cancel_arms_continuation(state);
+                let cancel_arms = continuation::cancel_arms_continuation(state);
                 if cancel_arms {
                     state.continuation_armed = true;
                 }
@@ -140,7 +140,7 @@ pub(crate) async fn handle_notification(
                     },
                     None => false,
                 };
-                if cancel_should_schedule_continuation(state, has_pending) {
+                if continuation::cancel_should_schedule_continuation(state, has_pending) {
                     outcome.continuation = Some(ContinuationRequest {
                         session_id: session_id.to_string(),
                         kind: BgTaskKind::Agent,
@@ -364,9 +364,9 @@ pub(crate) async fn send_available_commands_update(
     command_registry.set_on_change(None);
     // 时序（防双发）：ui 注册（一次性、幂等）必须在 set_on_change 挂载之前
     // 完成；on_change 回调内直接重建 snapshot 投影，不重放 ui 注册（P1-1）。
-    register_ui_entries(caps, &command_registry);
+    commands::register_ui_entries(caps, &command_registry);
     let entries = filtered_snapshot(&command_registry);
-    let update = build_available_commands_update(&entries, caps);
+    let update = commands::build_available_commands_update(&entries, caps);
 
     // 注册表 on_change → 投影重建重发（唯一触发源）。防引用环：回调只捕获
     // Weak(command_registry) + 不可变快照数据；session 销毁（注册表无强引用）
@@ -391,7 +391,7 @@ pub(crate) async fn send_available_commands_update(
                     !(stdio_filter && matches!(e.fullname.as_str(), "core:rewind" | "core:clear"))
                 })
                 .collect();
-            let update = build_available_commands_update(&entries, &caps);
+            let update = commands::build_available_commands_update(&entries, &caps);
             let update_value =
                 match serde_json::to_value(SessionUpdate::AvailableCommandsUpdate(update)) {
                     Ok(p) => p,

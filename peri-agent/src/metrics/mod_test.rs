@@ -1,11 +1,12 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use super::*;
+use crate::metrics::MetricEvent;
+use crate::metrics::MetricsSink;
 
 #[test]
 fn test_truncate_short_string_unchanged() {
     let val = serde_json::json!({"error": "short"});
-    let result = truncate_json_strings(val);
+    let result = crate::metrics::truncate_json_strings(val);
     assert_eq!(result["error"], "short");
 }
 
@@ -13,35 +14,60 @@ fn test_truncate_short_string_unchanged() {
 fn test_truncate_long_string() {
     let long: String = "x".repeat(600);
     let val = serde_json::json!({"error": long});
-    let result = truncate_json_strings(val);
-    assert_eq!(result["error"].as_str().unwrap().chars().count(), 500);
+    let result = crate::metrics::truncate_json_strings(val);
+    assert_eq!(
+        result["error"]
+            .as_str()
+            .expect("the as str fixture result is required for this assertion")
+            .chars()
+            .count(),
+        500
+    );
 }
 
 #[test]
 fn test_truncate_cjk_string() {
     let long: String = "你".repeat(600);
     let val = serde_json::json!({"error": long});
-    let result = truncate_json_strings(val);
-    assert_eq!(result["error"].as_str().unwrap().chars().count(), 500);
+    let result = crate::metrics::truncate_json_strings(val);
+    assert_eq!(
+        result["error"]
+            .as_str()
+            .expect("the as str fixture result is required for this assertion")
+            .chars()
+            .count(),
+        500
+    );
 }
 
 #[test]
 fn test_truncate_nested_object() {
     let long: String = "a".repeat(600);
     let val = serde_json::json!({"data": {"nested": long, "ok": "short"}, "arr": [long]});
-    let result = truncate_json_strings(val);
+    let result = crate::metrics::truncate_json_strings(val);
     assert_eq!(
-        result["data"]["nested"].as_str().unwrap().chars().count(),
+        result["data"]["nested"]
+            .as_str()
+            .expect("the as str fixture result is required for this assertion")
+            .chars()
+            .count(),
         500
     );
     assert_eq!(result["data"]["ok"], "short");
-    assert_eq!(result["arr"][0].as_str().unwrap().chars().count(), 500);
+    assert_eq!(
+        result["arr"][0]
+            .as_str()
+            .expect("the as str fixture result is required for this assertion")
+            .chars()
+            .count(),
+        500
+    );
 }
 
 #[test]
 fn test_truncate_non_string_unchanged() {
     let val = serde_json::json!({"count": 42, "flag": true, "null": null});
-    let result = truncate_json_strings(val);
+    let result = crate::metrics::truncate_json_strings(val);
     assert_eq!(result["count"], 42);
     assert_eq!(result["flag"], true);
     assert!(result["null"].is_null());
@@ -50,21 +76,26 @@ fn test_truncate_non_string_unchanged() {
 #[test]
 #[cfg_attr(not(unix), ignore = "RSS measurement only supported on Unix")]
 fn test_current_rss_mb_returns_positive_on_unix() {
-    let rss = current_rss_mb();
+    let rss = crate::metrics::current_rss_mb();
     assert!(rss.is_some(), "current_rss_mb() should return Some on Unix");
-    assert!(rss.unwrap() > 0, "RSS should be positive");
+    assert!(
+        rss.expect("the rss fixture result is required for this assertion") > 0,
+        "RSS should be positive"
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn test_current_rss_mb_is_realtime_not_monotonic_max() {
     // 验证返回的是当前 RSS（可下降），而非 ru_maxrss（单调递增）
-    let baseline = current_rss_mb().expect("should get baseline RSS");
+    let baseline = crate::metrics::current_rss_mb().expect("should get baseline RSS");
     assert!(baseline > 0);
 
     // 使用 mmap 分配并真实写入页面以强制 RSS 上升
     // Vec::drop → free() 在 macOS 上不归还物理页，必须用 munmap 才能验证回落
     let size = 200usize * 1024 * 1024; // 200 MB
+                                       // SAFETY: mmap receives no existing mapping or file descriptor; its result is checked
+                                       // before use, and munmap below releases the complete allocation.
     let ptr = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
@@ -78,11 +109,12 @@ fn test_current_rss_mb_is_realtime_not_monotonic_max() {
     assert_ne!(ptr, libc::MAP_FAILED, "mmap failed");
     // 逐页写入以触发实际物理页分配
     for i in 0..(size / 4096) {
+        // SAFETY: mmap succeeded; i * 4096 stays within this exclusively owned writable mapping.
         unsafe {
             *(ptr as *mut u8).add(i * 4096) = 1;
         }
     }
-    let peak = current_rss_mb().expect("should get peak RSS after allocation");
+    let peak = crate::metrics::current_rss_mb().expect("should get peak RSS after allocation");
     assert!(
         peak > baseline + 50,
         "peak RSS ({}) should be significantly > baseline ({}); got delta={}",
@@ -92,9 +124,10 @@ fn test_current_rss_mb_is_realtime_not_monotonic_max() {
     );
 
     // munmap 立即归还物理页给 OS（跨平台可靠）
+    // SAFETY: ptr and size identify the live mapping above, with no subsequent accesses.
     let ret = unsafe { libc::munmap(ptr, size) };
     assert_eq!(ret, 0, "munmap failed");
-    let after = current_rss_mb().expect("should get RSS after free");
+    let after = crate::metrics::current_rss_mb().expect("should get RSS after free");
     // 允许 5 MB 容差（measurement overhead）
     assert!(
         after < peak.saturating_sub(50),
@@ -115,7 +148,10 @@ struct CapturingSink {
 
 impl MetricsSink for CapturingSink {
     fn record(&self, event: MetricEvent) {
-        self.events.lock().unwrap().push(event);
+        self.events
+            .lock()
+            .expect("self events mutex must remain unpoisoned throughout the test")
+            .push(event);
     }
 }
 
@@ -128,20 +164,22 @@ struct SinkHarness {
 impl SinkHarness {
     fn new() -> Self {
         Self {
-            _lock: SINK_LOCK.lock().unwrap_or_else(|e| e.into_inner()),
+            _lock: SINK_LOCK
+                .lock()
+                .expect("metrics sink serialization mutex must remain unpoisoned"),
             sink: Arc::new(CapturingSink::default()),
         }
     }
 
     fn install(&self) {
-        set_sink(Some(Arc::clone(&self.sink) as Arc<dyn MetricsSink>));
+        crate::metrics::set_sink(Some(Arc::clone(&self.sink) as Arc<dyn MetricsSink>));
     }
 
     fn captured(&self, name: &str) -> Vec<MetricEvent> {
         self.sink
             .events
             .lock()
-            .unwrap()
+            .expect("self sink mutex must remain unpoisoned throughout the test")
             .iter()
             .filter(|e| e.event == name)
             .cloned()
@@ -151,7 +189,7 @@ impl SinkHarness {
 
 impl Drop for SinkHarness {
     fn drop(&mut self) {
-        set_sink(None);
+        crate::metrics::set_sink(None);
     }
 }
 
@@ -159,7 +197,7 @@ impl Drop for SinkHarness {
 fn emit_without_sink_drops_event_without_persistence() {
     let harness = SinkHarness::new();
     // 未安装出口 = 未配置 Langfuse：事件丢弃，本地不落盘（模块无文件系统写入）
-    emit(
+    crate::metrics::emit(
         "test.metrics.no-sink",
         serde_json::json!({"error": "boom"}),
         Some("sid-1"),
@@ -172,7 +210,7 @@ fn emit_without_sink_drops_event_without_persistence() {
 fn emit_delivers_event_with_identity_and_truncation_to_sink() {
     let harness = SinkHarness::new();
     harness.install();
-    emit(
+    crate::metrics::emit(
         "test.metrics.deliver",
         serde_json::json!({"error": "x".repeat(600), "step": 3}),
         Some("sid-1"),
@@ -188,7 +226,14 @@ fn emit_delivers_event_with_identity_and_truncation_to_sink() {
     let event = &events[0];
     assert_eq!(event.sid.as_deref(), Some("sid-1"));
     assert_eq!(event.rid.as_deref(), Some("rid-1"));
-    assert_eq!(event.data["error"].as_str().unwrap().chars().count(), 500);
+    assert_eq!(
+        event.data["error"]
+            .as_str()
+            .expect("the as str fixture result is required for this assertion")
+            .chars()
+            .count(),
+        500
+    );
     assert_eq!(event.data["step"], 3);
     assert!(!event.ts.is_empty());
 }
@@ -197,7 +242,7 @@ fn emit_delivers_event_with_identity_and_truncation_to_sink() {
 fn emit_keeps_absent_identity_as_none() {
     let harness = SinkHarness::new();
     harness.install();
-    emit("test.metrics.anonymous", serde_json::json!({}), None, None);
+    crate::metrics::emit("test.metrics.anonymous", serde_json::json!({}), None, None);
 
     let events = harness.captured("test.metrics.anonymous");
     assert_eq!(events.len(), 1);

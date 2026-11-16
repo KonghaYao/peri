@@ -1,25 +1,33 @@
 //! Real model actions, layered configuration files and ACP MPSC frames.
 //! Each scenario owns a process because the production handles are OnceLocks.
-use super::edit::set_context_window;
-use super::*;
+
+use super::Event;
+use super::EventResult;
+use super::FIELD_CONTEXT_1M;
+use super::FIELD_CONTEXT_WINDOW;
+use super::FIELD_EFFORT;
+use super::FIELD_MODEL;
+use super::FIELD_PROVIDER;
+use super::KeyCode;
+use super::PERI_CONFIG_HANDLE;
+use super::PROFILE_KEYS;
+use super::Rect;
+use super::SERVICE_SNAPSHOT;
+use super::TEST_AREA;
 use crate::acp_client::{AcpNotification, AcpTuiClient};
 use crate::config::{ConfigSource, PeriConfig, ProviderConfig, ProviderModels};
-use crate::kit::atoms::{
-    ACP_CLIENT_HANDLE, CONFIG_SOURCE_HANDLE, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, ServiceSnapshot,
-};
-use peri_acp::transport::{
-    AcpTransport,
-    mpsc::{MpscServerTransport, mpsc_transport_pair},
-    types::{AcpError, IncomingMessage},
-};
+
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::mpsc::MpscServerTransport;
+use peri_acp::transport::types::AcpError;
+use peri_acp::transport::types::IncomingMessage;
 use serde_json::{Value, json};
-use std::{
-    future::Future,
-    path::PathBuf,
-    process::Command,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::future::Future;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 const CHILD_CASE: &str = "PERI_MODEL_COMMIT_CASE";
 
@@ -36,26 +44,41 @@ fn isolated(name: &str, scenario: impl Future<Output = ()>) {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap()
+            .expect("isolated: isolated fixture workspace must remain accessible")
             .block_on(scenario);
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir =
+        tempfile::tempdir().expect("isolated: isolated fixture workspace must remain accessible");
     let log_path = dir.path().join("child.log");
-    let log = std::fs::File::create(&log_path).unwrap();
-    let (_, test_module) = module_path!().split_once("::").unwrap();
-    let child = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", &format!("{test_module}::{name}"), "--nocapture"])
-        .env(CHILD_CASE, name)
-        .stdout(log.try_clone().unwrap())
-        .stderr(log)
-        .spawn()
-        .unwrap();
+    let log = std::fs::File::create(&log_path)
+        .expect("isolated: the fixture storage and layout must support the requested operation");
+    let (_, test_module) = module_path!()
+        .split_once("::")
+        .expect("isolated: the fixture text must contain its expected delimiter");
+    let child = Command::new(
+        std::env::current_exe()
+            .expect("isolated: isolated fixture workspace must remain accessible"),
+    )
+    .args(["--exact", &format!("{test_module}::{name}"), "--nocapture"])
+    .env(CHILD_CASE, name)
+    .stdout(
+        log.try_clone()
+            .expect("isolated: the try_clone fixture operation uses valid inputs"),
+    )
+    .stderr(log)
+    .spawn()
+    .expect("isolated: isolated fixture workspace must remain accessible");
     let mut guard = ChildGuard(child);
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        if let Some(status) = guard.0.try_wait().unwrap() {
-            let output = std::fs::read_to_string(&log_path).unwrap();
+        if let Some(status) = guard
+            .0
+            .try_wait()
+            .expect("isolated: the try_wait fixture operation uses valid inputs")
+        {
+            let output = std::fs::read_to_string(&log_path)
+                .expect("isolated: isolated fixture workspace must remain accessible");
             assert!(status.success(), "{name}: {status}\n{output}");
             assert!(
                 output.contains("1 passed"),
@@ -84,9 +107,11 @@ impl Fixture {
     fn new(workspace: bool) -> Self {
         crate::kit::atoms::init_atoms();
         crate::i18n::init(Some("en"));
-        let dir = tempfile::tempdir().unwrap();
+        let dir =
+            tempfile::tempdir().expect("new: isolated fixture workspace must remain accessible");
         let cwd = dir.path().join("workspace");
-        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&cwd)
+            .expect("new: isolated fixture workspace must remain accessible");
         let global = dir.path().join("global.json");
         let mut initial = PeriConfig::default();
         initial.config.active_alias = "sonnet".into();
@@ -118,18 +143,29 @@ impl Fixture {
             ..Default::default()
         });
         for alias in PROFILE_KEYS {
-            initial.config.profiles.get_mut(alias).unwrap().provider = "a".into();
+            initial
+                .config
+                .profiles
+                .get_mut(alias)
+                .expect("new: fixture must contain the requested entry")
+                .provider = "a".into();
         }
-        crate::config::save_to(&initial, &global).unwrap();
+        crate::config::save_to(&initial, &global)
+            .expect("new: the save_to fixture operation uses valid inputs");
         let target = if workspace {
             let target = cwd.join(".peri/settings.json");
-            crate::config::save_to(&PeriConfig::default(), &target).unwrap();
+            crate::config::save_to(&PeriConfig::default(), &target)
+                .expect("new: the save_to fixture operation uses valid inputs");
             target
         } else {
             global.clone()
         };
-        let original_global = std::fs::read(&global).unwrap();
-        let source = Arc::new(ConfigSource::load_at(&cwd, global.clone()).unwrap());
+        let original_global =
+            std::fs::read(&global).expect("new: isolated fixture workspace must remain accessible");
+        let source = Arc::new(
+            ConfigSource::load_at(&cwd, global.clone())
+                .expect("new: the load_at fixture operation uses valid inputs"),
+        );
         let config = Arc::new(parking_lot::RwLock::new(source.loaded_merged()));
         // Use the effective initial alias even if the workspace default overrides it.
         config.write().config.active_alias = "sonnet".into();
@@ -145,7 +181,7 @@ impl Fixture {
             cron_total: 3,
             ..Default::default()
         };
-        let (transport, server) = mpsc_transport_pair();
+        let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
         let (client, tx, notifications) = AcpTuiClient::new(transport);
         client.spawn_pump(tx);
         let client = Arc::new(client);
@@ -167,7 +203,7 @@ impl Fixture {
         tokio::time::timeout(Duration::from_secs(3), self.server.recv())
             .await
             .expect("model action must reach real transport")
-            .unwrap()
+            .expect("recv: fixture task and request must complete successfully")
     }
 
     async fn create_session(&self) {
@@ -180,8 +216,17 @@ impl Fixture {
         self.server
             .send_response(id, Ok(json!({"sessionId":"model-session"})))
             .await
-            .unwrap();
-        assert_eq!(task.await.unwrap().unwrap(), "model-session");
+            .expect("create session: fixture task and request must complete successfully");
+        assert_eq!(
+            task.await
+                .expect(
+                    "create session: the fixture operation must finish without an inner failure"
+                )
+                .expect(
+                    "create session: the fixture operation must finish without an inner failure"
+                ),
+            "model-session"
+        );
     }
 
     fn assert_disk_and_frame(&self, params: &Value) {
@@ -190,9 +235,11 @@ impl Fixture {
             "config lock must be released before RPC"
         );
         let expected = self.config.read().clone();
-        let wire: PeriConfig = serde_json::from_value(params["config"].clone()).unwrap();
+        let wire: PeriConfig = serde_json::from_value(params["config"].clone())
+            .expect("assert disk and frame: fixture JSON must match the expected schema");
         assert_eq!(wire, expected);
-        let loaded = ConfigSource::load_at(&self.cwd, self.global.clone()).unwrap();
+        let loaded = ConfigSource::load_at(&self.cwd, self.global.clone())
+            .expect("assert disk and frame: the load_at fixture operation uses valid inputs");
         assert_eq!(
             loaded.loaded_merged(),
             expected,
@@ -222,7 +269,7 @@ impl Fixture {
                 },
             )
             .await
-            .unwrap();
+            .expect("expect request: fixture task and request must complete successfully");
     }
 
     /// 保存成功且推送成功的一次动作。
@@ -242,7 +289,7 @@ impl Fixture {
         assert!(
             tokio::time::timeout(Duration::from_secs(3), self.server.recv())
                 .await
-                .unwrap()
+                .expect("finish: the fixture channel must exchange its expected message")
                 .is_none()
         );
     }
@@ -256,7 +303,7 @@ fn model_commit_switch_persists_workspace_before_request() {
             let fixture = Fixture::new(true);
             fixture.create_session().await;
             let before = SERVICE_SNAPSHOT.state().read().clone();
-            switch_active_alias(3);
+            super::switch_active_alias(3);
             let snapshot = SERVICE_SNAPSHOT.state().read().clone();
             assert_eq!(
                 snapshot, before,
@@ -264,11 +311,11 @@ fn model_commit_switch_persists_workspace_before_request() {
             );
             fixture.expect_request(false).await;
             assert_eq!(
-                std::fs::read(&fixture.global).unwrap(),
+                std::fs::read(&fixture.global).expect("model commit switch persists workspace before request: the fixture storage and layout must support the requested operation"),
                 fixture.original_global
             );
             // Re-selecting the active alias still pushes the same saved snapshot.
-            switch_active_alias(3);
+            super::switch_active_alias(3);
             fixture.expect_request(false).await;
             fixture.finish().await;
         },
@@ -282,7 +329,7 @@ fn model_commit_active_provider_updates_mapping_and_request() {
         async {
             let fixture = Fixture::new(false);
             fixture.create_session().await;
-            edit_field("sonnet".into(), FIELD_PROVIDER, true);
+            super::edit_field("sonnet".into(), FIELD_PROVIDER, true);
             let profile = fixture.config.read().config.profiles.sonnet.clone();
             assert_eq!(profile.provider, "b");
             assert_eq!(profile.model.as_deref(), Some("b-sonnet"));
@@ -317,7 +364,7 @@ fn model_commit_responses_provider_switch_persists_immediately() {
                 cfg.config.profiles.sonnet.context_window = Some(3000);
             }
             // providers 顺序 a、b、r；从 a 后退即 r。
-            edit_field("sonnet".into(), FIELD_PROVIDER, false);
+            super::edit_field("sonnet".into(), FIELD_PROVIDER, false);
             let profile = fixture.config.read().config.profiles.sonnet.clone();
             assert_eq!(profile.provider, "r");
             assert_eq!(profile.model.as_deref(), Some("r-sonnet"));
@@ -346,7 +393,7 @@ fn model_commit_responses_model_switch_persists_immediately() {
                 cfg.config.profiles.sonnet.model = None;
                 cfg.config.profiles.sonnet.context_window = Some(3000);
             }
-            edit_field("sonnet".into(), FIELD_MODEL, true);
+            super::edit_field("sonnet".into(), FIELD_MODEL, true);
             let profile = fixture.config.read().config.profiles.sonnet.clone();
             assert_eq!(profile.model.as_deref(), Some("r-haiku"));
             assert_eq!(profile.context_window, Some(3000));
@@ -375,7 +422,7 @@ fn model_commit_unrelated_broken_responses_tier_does_not_block_save() {
                 cfg.config.profiles.haiku.model = Some("r-haiku".into());
                 cfg.config.profiles.haiku.context_window = None;
             }
-            edit_field("sonnet".into(), FIELD_MODEL, true);
+            super::edit_field("sonnet".into(), FIELD_MODEL, true);
             let cfg = fixture.config.read().clone();
             assert_eq!(
                 cfg.config.profiles.sonnet.model.as_deref(),
@@ -403,7 +450,7 @@ fn model_commit_unfinished_active_responses_binding_does_not_persist() {
             let fixture = Fixture::new(false);
             fixture.create_session().await;
             // providers 顺序 a、b、r；从 a 后退即 r（Responses，档位无 contextWindow）。
-            edit_field("sonnet".into(), FIELD_PROVIDER, false);
+            super::edit_field("sonnet".into(), FIELD_PROVIDER, false);
             let profile = fixture.config.read().config.profiles.sonnet.clone();
             assert_eq!(profile.provider, "a");
             assert_eq!(profile.context_window, None);
@@ -416,7 +463,7 @@ fn model_commit_unfinished_active_responses_binding_does_not_persist() {
                 "拒绝后仍可使用原来的活动档位"
             );
             assert_eq!(
-                std::fs::read(&fixture.global).unwrap(),
+                std::fs::read(&fixture.global).expect("model commit unfinished active responses binding does not persist: the fixture storage and layout must support the requested operation"),
                 fixture.original_global
             );
             assert!(
@@ -424,7 +471,7 @@ fn model_commit_unfinished_active_responses_binding_does_not_persist() {
                     .state()
                     .read()
                     .as_ref()
-                    .unwrap()
+                    .expect("model commit unfinished active responses binding does not persist: the fixture storage and layout must support the requested operation")
                     .message
                     .contains("context window")
             );
@@ -445,10 +492,10 @@ fn model_commit_unfinished_inactive_responses_cannot_be_activated() {
                 cfg.config.profiles.haiku.provider = "r".into();
                 cfg.config.profiles.haiku.context_window = None;
             }
-            switch_active_alias(3);
+            super::switch_active_alias(3);
             assert_eq!(fixture.config.read().config.active_alias, "sonnet");
             assert_eq!(
-                std::fs::read(&fixture.global).unwrap(),
+                std::fs::read(&fixture.global).expect("model commit unfinished inactive responses cannot be activated: the fixture storage and layout must support the requested operation"),
                 fixture.original_global
             );
             fixture.finish().await;
@@ -470,7 +517,7 @@ fn model_commit_known_plan_model_without_window_can_be_activated() {
                     .providers
                     .iter_mut()
                     .find(|provider| provider.id == "r")
-                    .unwrap();
+                    .expect("model commit known plan model without window can be activated: fixture must contain the searched item");
                 provider.api_key.clear();
                 provider.auth = Some(
                     peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan {
@@ -484,8 +531,8 @@ fn model_commit_known_plan_model_without_window_can_be_activated() {
                 cfg.config.profiles.haiku.provider = "r".into();
                 cfg.config.profiles.haiku.context_window = None;
             }
-            switch_active_alias(3);
-            let persisted = crate::config::load_from(&fixture.target).unwrap();
+            super::switch_active_alias(3);
+            let persisted = crate::config::load_from(&fixture.target).expect("model commit known plan model without window can be activated: the load_from fixture operation uses valid inputs");
             assert_eq!(persisted.config.active_alias, "haiku");
             assert_eq!(persisted.config.profiles.haiku.context_window, None);
             assert!(matches!(
@@ -514,7 +561,7 @@ fn model_commit_context_window_recovers_unfinished_active_responses() {
                 cfg.config.profiles.sonnet.provider = "r".into();
                 cfg.config.profiles.sonnet.context_window = None;
             }
-            assert!(set_context_window("sonnet", 128_000));
+            assert!(super::edit::set_context_window("sonnet", 128_000));
             assert!(
                 peri_acp::provider::LlmProvider::from_config_for_alias(
                     &fixture.config.read(),
@@ -535,12 +582,12 @@ fn model_commit_context_window_persists_for_responses_profile() {
         async {
             let fixture = Fixture::new(false);
             fixture.create_session().await;
-            assert!(set_context_window("sonnet", 128_000));
+            assert!(super::edit::set_context_window("sonnet", 128_000));
             assert_eq!(
                 fixture.config.read().config.profiles.sonnet.context_window,
                 Some(128_000)
             );
-            let persisted = crate::config::load_from(&fixture.target).unwrap();
+            let persisted = crate::config::load_from(&fixture.target).expect("model commit context window persists for responses profile: the load_from fixture operation uses valid inputs");
             assert_eq!(
                 persisted.config.profiles.sonnet.context_window,
                 Some(128_000)
@@ -559,7 +606,7 @@ fn model_mouse_and_keyboard_repair_then_activate_unfinished_profile() {
             let fixture = Fixture::new(false);
             fixture.create_session().await;
             // 先持久化未完成的非活动档位，供面板打开时重新读取。
-            edit_field("haiku".into(), FIELD_PROVIDER, false);
+            super::edit_field("haiku".into(), FIELD_PROVIDER, false);
             fixture.expect_request(false).await;
             let initial = fixture.config.read().clone();
             assert_eq!(initial.config.profiles.haiku.provider, "r");
@@ -569,15 +616,15 @@ fn model_mouse_and_keyboard_repair_then_activate_unfinished_profile() {
                 width: 110,
                 ..TEST_AREA
             };
-            let first = mount_panel_frames(area, 2, |_, _| {});
-            let (haiku_row, _) = rendered_line_of(&first, "haiku ·");
-            let (window_row, _) = rendered_line_of(&first, "Context window");
+            let first = super::mount_panel_frames(area, 2, |_, _| {});
+            let (haiku_row, _) = super::rendered_line_of(&first, "haiku ·");
+            let (window_row, _) = super::rendered_line_of(&first, "Context window");
             let config = fixture.config.clone();
             let path = fixture.target.clone();
-            mount_panel_frames(area, 5, move |frame, panel| match frame {
+            super::mount_panel_frames(area, 5, move |frame, panel| match frame {
                 1 => {
                     assert_eq!(
-                        panel.real_event(left_down(haiku_row, 5), area),
+                        panel.real_event(super::left_down(haiku_row, 5), area),
                         EventResult::Consumed
                     );
                     assert_eq!(&*panel.selected_alias.read(), "haiku");
@@ -587,35 +634,35 @@ fn model_mouse_and_keyboard_repair_then_activate_unfinished_profile() {
                             .state()
                             .read()
                             .as_ref()
-                            .unwrap()
+                            .expect("model mouse and keyboard repair then activate unfinished profile: the fixture storage and layout must support the requested operation")
                             .message
                             .contains("context window")
                     );
                     assert_eq!(
-                        crate::config::load_from(&path).unwrap().config.active_alias,
+                        crate::config::load_from(&path).expect("model mouse and keyboard repair then activate unfinished profile: the load_from fixture operation uses valid inputs").config.active_alias,
                         "sonnet"
                     );
                 }
                 2 => {
                     let column = area.width * 45 / 100 + 2;
                     assert_eq!(
-                        panel.real_event(left_down(window_row, column), area),
+                        panel.real_event(super::left_down(window_row, column), area),
                         EventResult::Consumed
                     );
                     assert_eq!(&*panel.window_target.read(), "haiku");
                     assert_eq!(panel.window_edit.read().as_deref(), Some(""));
                     panel.real_event(Event::Paste("128000".into()), area);
-                    panel.real_event(key(KeyCode::Enter), area);
+                    panel.real_event(super::key(KeyCode::Enter), area);
                     assert!(panel.window_edit.read().is_none());
-                    let saved = crate::config::load_from(&path).unwrap();
+                    let saved = crate::config::load_from(&path).expect("model mouse and keyboard repair then activate unfinished profile: the load_from fixture operation uses valid inputs");
                     assert_eq!(saved.config.active_alias, "sonnet");
                     assert_eq!(saved.config.profiles.haiku.context_window, Some(128_000));
                     assert_eq!(saved.config.profiles.sonnet, initial.config.profiles.sonnet);
                 }
                 3 => {
-                    panel.real_event(key(KeyCode::Esc), area);
-                    panel.real_event(key(KeyCode::Enter), area);
-                    let saved = crate::config::load_from(&path).unwrap();
+                    panel.real_event(super::key(KeyCode::Esc), area);
+                    panel.real_event(super::key(KeyCode::Enter), area);
+                    let saved = crate::config::load_from(&path).expect("model mouse and keyboard repair then activate unfinished profile: the load_from fixture operation uses valid inputs");
                     assert_eq!(saved.config.active_alias, "haiku");
                     assert_eq!(saved.config.profiles.haiku.context_window, Some(128_000));
                     assert_eq!(saved.config.profiles.sonnet, initial.config.profiles.sonnet);
@@ -629,14 +676,14 @@ fn model_mouse_and_keyboard_repair_then_activate_unfinished_profile() {
                     panic!("expected update request")
                 };
                 assert_eq!(method, "session/update_config");
-                let sent: PeriConfig = serde_json::from_value(params["config"].clone()).unwrap();
+                let sent: PeriConfig = serde_json::from_value(params["config"].clone()).expect("model mouse and keyboard repair then activate unfinished profile: fixture JSON must match the expected schema");
                 assert_eq!(sent.config.profiles.haiku.context_window, Some(128_000));
                 saved_states.push(sent.config.active_alias);
                 fixture
                     .server
                     .send_response(id, Ok(json!({})))
                     .await
-                    .unwrap();
+                    .expect("model mouse and keyboard repair then activate unfinished profile: fixture task and request must complete successfully");
             }
             saved_states.sort();
             assert_eq!(saved_states, ["haiku", "sonnet"]);
@@ -652,27 +699,27 @@ fn model_keyboard_selection_and_window_target_remain_independent() {
         async {
             let fixture = Fixture::new(false);
             fixture.create_session().await;
-            edit_field("haiku".into(), FIELD_PROVIDER, false);
+            super::edit_field("haiku".into(), FIELD_PROVIDER, false);
             fixture.expect_request(false).await;
             let before = fixture.config.read().config.profiles.sonnet.clone();
             let config = fixture.config.clone();
-            mount_panel_frames(TEST_AREA, 3, move |frame, panel| {
+            super::mount_panel_frames(TEST_AREA, 3, move |frame, panel| {
                 if frame != 1 {
                     return;
                 }
-                panel.real_event(key(KeyCode::Down), TEST_AREA);
+                panel.real_event(super::key(KeyCode::Down), TEST_AREA);
                 assert_eq!(&*panel.selected_alias.read(), "haiku");
                 assert_eq!(config.read().config.active_alias, "sonnet");
-                panel.real_event(key(KeyCode::Tab), TEST_AREA);
+                panel.real_event(super::key(KeyCode::Tab), TEST_AREA);
                 for _ in 0..FIELD_CONTEXT_WINDOW {
-                    panel.real_event(key(KeyCode::Down), TEST_AREA);
+                    panel.real_event(super::key(KeyCode::Down), TEST_AREA);
                 }
-                panel.real_event(key(KeyCode::Enter), TEST_AREA);
+                panel.real_event(super::key(KeyCode::Enter), TEST_AREA);
                 assert_eq!(&*panel.window_target.read(), "haiku");
                 // 模拟编辑期间的面板状态变化，保存仍绑定打开时的档位。
                 *panel.selected_alias.write() = "sonnet".into();
                 panel.real_event(Event::Paste("128000".into()), TEST_AREA);
-                panel.real_event(key(KeyCode::Enter), TEST_AREA);
+                panel.real_event(super::key(KeyCode::Enter), TEST_AREA);
                 let saved = config.read();
                 assert_eq!(saved.config.active_alias, "sonnet");
                 assert_eq!(saved.config.profiles.haiku.context_window, Some(128_000));
@@ -681,9 +728,9 @@ fn model_keyboard_selection_and_window_target_remain_independent() {
             fixture.expect_request(false).await;
 
             let config = fixture.config.clone();
-            mount_panel_frames(TEST_AREA, 3, move |frame, panel| {
+            super::mount_panel_frames(TEST_AREA, 3, move |frame, panel| {
                 if frame == 1 {
-                    panel.real_event(key(KeyCode::Up), TEST_AREA);
+                    panel.real_event(super::key(KeyCode::Up), TEST_AREA);
                     assert_eq!(&*panel.selected_alias.read(), "opus");
                     assert_eq!(config.read().config.active_alias, "opus");
                 }
@@ -701,20 +748,20 @@ fn model_selected_inactive_profile_receives_generic_field_edit() {
         async {
             let fixture = Fixture::new(false);
             fixture.create_session().await;
-            edit_field("haiku".into(), FIELD_PROVIDER, false);
+            super::edit_field("haiku".into(), FIELD_PROVIDER, false);
             fixture.expect_request(false).await;
             let before = fixture.config.read().config.profiles.sonnet.clone();
             let config = fixture.config.clone();
-            mount_panel_frames(TEST_AREA, 3, move |frame, panel| {
+            super::mount_panel_frames(TEST_AREA, 3, move |frame, panel| {
                 if frame != 1 {
                     return;
                 }
-                panel.real_event(key(KeyCode::Down), TEST_AREA);
-                panel.real_event(key(KeyCode::Tab), TEST_AREA);
+                panel.real_event(super::key(KeyCode::Down), TEST_AREA);
+                panel.real_event(super::key(KeyCode::Tab), TEST_AREA);
                 for _ in 0..FIELD_EFFORT {
-                    panel.real_event(key(KeyCode::Down), TEST_AREA);
+                    panel.real_event(super::key(KeyCode::Down), TEST_AREA);
                 }
-                panel.real_event(key(KeyCode::Right), TEST_AREA);
+                panel.real_event(super::key(KeyCode::Right), TEST_AREA);
                 let saved = config.read();
                 assert_eq!(saved.config.active_alias, "sonnet");
                 assert_eq!(saved.config.profiles.haiku.effort, "max");
@@ -733,12 +780,12 @@ fn model_commit_inactive_edit_preserves_display_and_notifies() {
         async {
             let fixture = Fixture::new(false);
             let before = SERVICE_SNAPSHOT.state().read().clone();
-            edit_field("haiku".into(), FIELD_EFFORT, true);
+            super::edit_field("haiku".into(), FIELD_EFFORT, true);
             assert_eq!(fixture.config.read().config.profiles.haiku.effort, "max");
             assert_eq!(fixture.config.read().config.active_alias, "sonnet");
             assert_eq!(SERVICE_SNAPSHOT.state().read().clone(), before);
             fixture.expect_notification().await;
-            edit_field("haiku".into(), FIELD_EFFORT, false);
+            super::edit_field("haiku".into(), FIELD_EFFORT, false);
             assert_eq!(fixture.config.read().config.profiles.haiku.effort, "xhigh");
             assert_eq!(SERVICE_SNAPSHOT.state().read().clone(), before);
             fixture.expect_notification().await;
@@ -755,9 +802,9 @@ fn model_commit_save_failure_keeps_memory_and_pushes_nothing() {
             let fixture = Fixture::new(false);
             fixture.create_session().await;
             // 让保存目标不可写：把配置文件换成同名目录
-            std::fs::remove_file(&fixture.target).unwrap();
-            std::fs::create_dir(&fixture.target).unwrap();
-            edit_field("sonnet".into(), FIELD_CONTEXT_1M, true);
+            std::fs::remove_file(&fixture.target).expect("model commit save failure keeps memory and pushes nothing: the fixture storage and layout must support the requested operation");
+            std::fs::create_dir(&fixture.target).expect("model commit save failure keeps memory and pushes nothing: isolated fixture workspace must remain accessible");
+            super::edit_field("sonnet".into(), FIELD_CONTEXT_1M, true);
             assert!(
                 !fixture.config.read().config.profiles.sonnet.context_1m,
                 "保存失败不得留下「已切换」的内存假象"
@@ -766,7 +813,7 @@ fn model_commit_save_failure_keeps_memory_and_pushes_nothing() {
                 .state()
                 .read()
                 .as_ref()
-                .unwrap()
+                .expect("model commit save failure keeps memory and pushes nothing: isolated fixture workspace must remain accessible")
                 .message
                 .clone();
             assert!(
@@ -785,7 +832,7 @@ fn model_commit_save_failure_keeps_memory_and_pushes_nothing() {
             assert!(
                 !PERI_CONFIG_HANDLE
                     .get()
-                    .unwrap()
+                    .expect("model commit save failure keeps memory and pushes nothing: the fixture collection must contain the expected entry")
                     .read()
                     .config
                     .profiles
@@ -797,7 +844,7 @@ fn model_commit_save_failure_keeps_memory_and_pushes_nothing() {
                     .state()
                     .read()
                     .as_ref()
-                    .unwrap()
+                    .expect("model commit save failure keeps memory and pushes nothing: the fixture storage and layout must support the requested operation")
                     .message
                     .clone(),
                 failed_notice
@@ -815,14 +862,14 @@ fn model_commit_rpc_failure_keeps_saved_state_without_retry() {
         async {
             let fixture = Fixture::new(false);
             fixture.create_session().await;
-            edit_field("sonnet".into(), FIELD_CONTEXT_1M, true);
+            super::edit_field("sonnet".into(), FIELD_CONTEXT_1M, true);
             assert!(fixture.config.read().config.profiles.sonnet.context_1m);
             fixture.expect_request(true).await;
             fixture.finish().await;
             assert!(
                 PERI_CONFIG_HANDLE
                     .get()
-                    .unwrap()
+                    .expect("model commit rpc failure keeps saved state without retry: the fixture collection must contain the expected entry")
                     .read()
                     .config
                     .profiles
@@ -832,3 +879,13 @@ fn model_commit_rpc_failure_keeps_saved_state_without_retry() {
         },
     );
 }
+
+use crate::kit::atoms::ACP_CLIENT_HANDLE;
+
+use crate::kit::atoms::CONFIG_SOURCE_HANDLE;
+
+use crate::kit::atoms::MODEL_HIGHLIGHT_UNTIL;
+
+use crate::kit::atoms::NOTIFICATION;
+
+use crate::kit::atoms::ServiceSnapshot;

@@ -6,20 +6,20 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{GOAL_SNAPSHOT, LANG_VERSION};
+
 use crate::kit::panel_mouse::AreaTracker;
 use peri_acp_types::goal::GoalStatus;
 use peri_theme::atoms::THEME_ATOM;
-use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind},
-    prelude::*,
-    ratatui::{
-        layout::Constraint,
-        style::{Style, Stylize},
-        text::{Line, Span},
-        widgets::Paragraph,
-    },
-};
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::KeyCode;
+use ratatui_kit::crossterm::event::KeyEventKind;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Constraint;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::style::Stylize;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
+use ratatui_kit::ratatui::widgets::Paragraph;
 
 #[component]
 pub fn GoalPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -113,6 +113,7 @@ pub fn GoalPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     })
 }
 
+#[must_use]
 fn detail_line(key: &str, text: String, label_style: Style, value_style: Style) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{}: ", i18n::tr(key)), label_style),
@@ -132,6 +133,10 @@ fn status_label(status: Option<GoalStatus>) -> String {
 fn close_panel() {
     crate::kit::panel_registry::close_active_panel();
 }
+
+use crate::kit::atoms::GOAL_SNAPSHOT;
+
+use crate::kit::atoms::LANG_VERSION;
 
 #[cfg(test)]
 mod tests {

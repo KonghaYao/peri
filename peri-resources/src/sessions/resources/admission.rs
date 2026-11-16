@@ -1,6 +1,10 @@
 //! 执行可用性判定与「已保存创建」的重试准入。
 
-use super::*;
+use super::{
+    BindingState, ExecutionAvailability, FrozenState, NewSession, Path, SessionDataHome,
+    SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionResourcesImpl,
+    ThreadId,
+};
 
 impl SessionResourcesImpl {
     pub(super) async fn execution_availability(
@@ -12,7 +16,7 @@ impl SessionResourcesImpl {
             return Ok(ExecutionAvailability::ReadOnlyStore);
         }
         if !self.gate.data().session_exists(id).await? {
-            return Err(not_found());
+            return Err(super::not_found());
         }
         if let Some(machine_id) = self.gate.data().machine_id_of(id).await? {
             if machine_id
@@ -60,7 +64,7 @@ impl SessionResourcesImpl {
         let id = &input.thread_id;
         let saved = self.gate.data().load_snapshot(id).await?;
         let created_at = chrono::DateTime::parse_from_rfc3339(&input.created_at)
-            .map_err(|_| invalid_input("invalid session creation timestamp"))?;
+            .map_err(|_| super::invalid_input("invalid session creation timestamp"))?;
         let snapshot_at = input
             .meta
             .snapshot_at_message_id

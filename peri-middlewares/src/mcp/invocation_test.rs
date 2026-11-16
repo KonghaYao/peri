@@ -1,4 +1,6 @@
-use super::*;
+use super::RequestMetaObject;
+use super::ToolContext;
+use super::INVOCATION_META_KEY;
 
 #[test]
 fn current_metadata_keeps_distinct_invocation_and_model_call_ids() {
@@ -10,7 +12,7 @@ fn current_metadata_keeps_distinct_invocation_and_model_call_ids() {
         .0
          .0
         .insert("trusted-scope".into(), serde_json::json!("scope"));
-    let metadata = request_meta(&context, Some(existing)).unwrap();
+    let metadata = super::request_meta(&context, Some(existing)).unwrap();
     assert_eq!(metadata.0 .0["trusted-scope"], "scope");
     assert_eq!(
         metadata.0 .0[INVOCATION_META_KEY]["invocationId"],
@@ -29,7 +31,7 @@ fn current_metadata_keeps_distinct_invocation_and_model_call_ids() {
 #[test]
 fn ordinary_call_does_not_require_durable_identity() {
     let context = ToolContext::new(&[], ".");
-    let metadata = request_meta(&context, None).unwrap();
+    let metadata = super::request_meta(&context, None).unwrap();
     assert!(metadata.0 .0[INVOCATION_META_KEY]["invocationId"].is_null());
     assert!(metadata.0 .0[INVOCATION_META_KEY]
         .get("recipientLifecycle")
@@ -39,6 +41,6 @@ fn ordinary_call_does_not_require_durable_identity() {
 #[test]
 fn untrusted_invocation_metadata_cannot_replace_current_context() {
     let context = ToolContext::new(&[], ".");
-    let metadata = request_meta(&context, None).unwrap();
-    assert!(request_meta(&context, Some(metadata)).is_err());
+    let metadata = super::request_meta(&context, None).unwrap();
+    assert!(super::request_meta(&context, Some(metadata)).is_err());
 }

@@ -12,6 +12,7 @@ pub(crate) struct CompactSpanStart {
 }
 
 /// Compact 结束结果：执行前状态与执行结果指标（on_compact_end 一次性传入）。
+#[derive(Debug)]
 pub struct CompactEndInfo {
     pub summary: String,
     pub files_count: usize,

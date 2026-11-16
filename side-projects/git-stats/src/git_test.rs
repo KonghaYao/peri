@@ -1,11 +1,12 @@
-use super::*;
-use std::{
-    fs,
-    io::Write,
-    path::PathBuf,
-    process::Stdio,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use super::log;
+use super::Command;
+use super::ParsedCommit;
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 struct RepositoryFixture {
     root: PathBuf,
@@ -102,7 +103,7 @@ impl RepositoryFixture {
 
     fn fetch(&self) -> Vec<ParsedCommit> {
         let mut command =
-            build_git_command(self.root.to_str().unwrap(), "2019-12-31", "2020-02-01");
+            super::build_git_command(self.root.to_str().unwrap(), "2019-12-31", "2020-02-01");
         self.isolate(&mut command);
         let output = command.output().expect("应能读取真实仓库日志");
         assert!(

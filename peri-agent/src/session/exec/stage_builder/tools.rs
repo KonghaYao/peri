@@ -1,15 +1,13 @@
 //! Session-local 工具视图与当前 MCP 目录绑定；不写宿主共享表。
-use super::StageBuildError;
-use crate::{
-    agent::stages::SharedToolMap,
-    session::tool_catalog::{SessionToolCatalog, ToolFilterPolicy},
-    tools::BaseTool,
-};
+use crate::agent::stages::SharedToolMap;
+use crate::session::exec::stage_builder::StageBuildError;
+use crate::session::tool_catalog::SessionToolCatalog;
+use crate::session::tool_catalog::ToolFilterPolicy;
+use crate::tools::BaseTool;
 use parking_lot::RwLock;
-use std::{
-    collections::{BTreeMap, HashSet},
-    sync::Arc,
-};
+use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 /// 构造 session/turn 级工具视图（MetaHarness 设计 §2.5 关闭语义防御面）。
 ///

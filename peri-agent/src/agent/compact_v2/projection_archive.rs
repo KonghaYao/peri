@@ -1,10 +1,22 @@
 //! Archive-aware model projection. Source messages remain immutable.
-use super::render::{project_message_ref, RenderAction};
-use super::*;
+
+use crate::agent::compact_v2::projection::render::RenderAction;
+use crate::agent::compact_v2::projection::ProviderCapabilities;
+use crate::error::AgentResult;
+use crate::messages::BaseMessage;
+use crate::messages::ContentBlock;
+use crate::messages::MessageContent;
+use crate::messages::MessageId;
+use crate::session::transcript::MessageTranscript;
 use crate::session::transcript::TranscriptEntry;
 use peri_acp_types::context_archive::{ArchiveCatalog, ArchiveReference, ArchiveRoot};
+use peri_acp_types::projection::ProjectionAction;
+use peri_acp_types::projection::ProjectionActionEntry;
+use peri_acp_types::projection::ProjectionTarget;
 use peri_acp_types::system_reminder::ReminderAudience;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BlockKind {
@@ -127,9 +139,13 @@ pub(super) fn render(
     for entry in transcript.entries() {
         if let Some(directive) = transcript.projection_ref(entry.id()) {
             if let Some(catalog) = &directive.archive_catalog {
-                catalog.validate().map_err(invalid)?;
+                catalog
+                    .validate()
+                    .map_err(crate::agent::compact_v2::projection::invalid)?;
                 if catalog.anchor_message_id != entry.id() {
-                    return Err(invalid("catalog anchor mismatch"));
+                    return Err(crate::agent::compact_v2::projection::invalid(
+                        "catalog anchor mismatch",
+                    ));
                 }
                 catalogs.insert(entry.id(), catalog);
             }
@@ -146,10 +162,14 @@ pub(super) fn render(
         }
     }
     for catalog in new_catalogs {
-        catalog.validate().map_err(invalid)?;
+        catalog
+            .validate()
+            .map_err(crate::agent::compact_v2::projection::invalid)?;
         if let Some(old) = catalogs.insert(catalog.anchor_message_id, catalog) {
             if old != catalog {
-                return Err(invalid("published archive catalog changed"));
+                return Err(crate::agent::compact_v2::projection::invalid(
+                    "published archive catalog changed",
+                ));
             }
         }
     }
@@ -194,7 +214,8 @@ pub(super) fn render(
     // Receipts and root entries are derived history: they keep the canonical step
     // order instead of becoming the newest messages in the request.
     let mut visible_positions = HashMap::with_capacity(visible.len());
-    for (index, message) in visible.iter().enumerate() {
+    let paired_items = visible.iter().enumerate();
+    for (index, message) in paired_items {
         visible_positions.insert(message.as_ref().id(), index);
     }
     let result_positions = visible_result_positions(&visible);
@@ -257,7 +278,8 @@ pub(super) fn render(
                     keep_head,
                     keep_tail,
                 } => {
-                    ArchiveReference::decode(archive_ref).map_err(invalid)?;
+                    ArchiveReference::decode(archive_ref)
+                        .map_err(crate::agent::compact_v2::projection::invalid)?;
                     resolved.push(RenderAction::Preview {
                         action: ProjectionAction::CompactToolResult {
                             keep_head: *keep_head,
@@ -283,7 +305,7 @@ pub(super) fn render(
         }
         // Targets use canonical block indices. Attach references before omission shifts
         // sibling positions; a previously previewed result may survive another call's retirement.
-        for entry in entries.iter().filter(|entry| {
+        let entry_items = entries.iter().filter(|entry| {
             matches!(
                 entry.action,
                 ProjectionAction::CompactToolResult {
@@ -291,7 +313,8 @@ pub(super) fn render(
                     ..
                 }
             )
-        }) {
+        });
+        for entry in entry_items {
             match catalogs.get(&id) {
                 Some(catalog) => {
                     let reference = catalog_reference(catalog)?;
@@ -301,10 +324,16 @@ pub(super) fn render(
                     });
                 }
                 None if legacy => {}
-                None => return Err(invalid("preview requires its original archive catalog")),
+                None => {
+                    return Err(crate::agent::compact_v2::projection::invalid(
+                        "preview requires its original archive catalog",
+                    ))
+                }
             }
         }
-        let result = project_message_ref(message, &ordinary, legacy, &resolved, &remove, caps)?;
+        let result = crate::agent::compact_v2::projection::render::project_message_ref(
+            message, &ordinary, legacy, &resolved, &remove, caps,
+        )?;
         if is_replay_result(message, &replay_calls)
             && result.as_ref().is_none_or(|result| {
                 result.id() != message.id()
@@ -312,7 +341,7 @@ pub(super) fn render(
                     || result.tool_calls() != message.tool_calls()
             })
         {
-            return Err(invalid(
+            return Err(crate::agent::compact_v2::projection::invalid(
                 "provider replay tool results cannot be partially projected",
             ));
         }
@@ -351,8 +380,8 @@ pub(super) fn render(
         .iter()
         .enumerate()
         .map(|(order, root)| {
-            let reference = root.reference().map_err(invalid)?;
-            ArchiveReference::decode(&reference).map_err(invalid)?;
+            let reference = root.reference().map_err(crate::agent::compact_v2::projection::invalid)?;
+            ArchiveReference::decode(&reference).map_err(crate::agent::compact_v2::projection::invalid)?;
             let position = root_positions
                 .get(&root.last_anchor)
                 .copied()
@@ -389,7 +418,8 @@ pub(super) fn render(
     }
     let extra_len: usize = derived.iter().map(Vec::len).sum();
     let mut projected = Vec::with_capacity(visible.len() + extra_len);
-    for (index, output) in outputs.into_iter().enumerate() {
+    let paired_items_2 = outputs.into_iter().enumerate();
+    for (index, output) in paired_items_2 {
         if let Some(message) = output {
             projected.push(message);
         }
@@ -398,7 +428,7 @@ pub(super) fn render(
     projected.append(&mut derived[tail]);
     let after_pairs = Pairing::from_messages(&projected)?;
     validate_delta(&original_pairs, &after_pairs, &omitted_calls)?;
-    validate_projected_view(&projected, caps)?;
+    crate::agent::compact_v2::projection::validate_projected_view(&projected, caps)?;
     Ok(projected)
 }
 
@@ -426,7 +456,8 @@ fn visible_result_positions(
     visible: &[std::borrow::Cow<'_, BaseMessage>],
 ) -> HashMap<String, usize> {
     let mut positions = HashMap::new();
-    for (index, message) in visible.iter().enumerate() {
+    let paired_items_3 = visible.iter().enumerate();
+    for (index, message) in paired_items_3 {
         let message = message.as_ref();
         if let BaseMessage::Tool { tool_call_id, .. } = message {
             positions.insert(tool_call_id.clone(), index);
@@ -515,21 +546,25 @@ fn receipt_insertion_index(
     (end.unwrap_or(tail), anchor_position.unwrap_or(tail))
 }
 
-fn catalog_for<'a>(
-    catalogs: &HashMap<MessageId, &'a ArchiveCatalog>,
+fn catalog_for<'history>(
+    catalogs: &HashMap<MessageId, &'history ArchiveCatalog>,
     anchor: MessageId,
     group: &str,
-) -> AgentResult<&'a ArchiveCatalog> {
+) -> AgentResult<&'history ArchiveCatalog> {
     catalogs
         .get(&anchor)
         .copied()
         .filter(|c| c.group_id == group)
-        .ok_or_else(|| invalid("missing or conflicting archive catalog"))
+        .ok_or_else(|| {
+            crate::agent::compact_v2::projection::invalid("missing or conflicting archive catalog")
+        })
 }
 
 fn catalog_reference(catalog: &ArchiveCatalog) -> AgentResult<String> {
-    let reference = catalog.reference().map_err(invalid)?;
-    ArchiveReference::decode(&reference).map_err(invalid)?;
+    let reference = catalog
+        .reference()
+        .map_err(crate::agent::compact_v2::projection::invalid)?;
+    ArchiveReference::decode(&reference).map_err(crate::agent::compact_v2::projection::invalid)?;
     Ok(reference)
 }
 
@@ -577,7 +612,9 @@ fn validate_groups(
                     .iter()
                     .any(|m| m.message_id == entry.message_id)
                 {
-                    return Err(invalid("archive action outside its catalog"));
+                    return Err(crate::agent::compact_v2::projection::invalid(
+                        "archive action outside its catalog",
+                    ));
                 }
                 if matches!(entry.action, ProjectionAction::OmitToolExchange { .. }) {
                     omitted_members
@@ -594,24 +631,26 @@ fn validate_groups(
         for member in &catalog.members {
             if !members.contains(&member.message_id) || transcript.get(member.message_id).is_none()
             {
-                return Err(invalid("partial archive protocol group"));
+                return Err(crate::agent::compact_v2::projection::invalid(
+                    "partial archive protocol group",
+                ));
             }
         }
     }
     Ok(())
 }
 
-type CallRepr<'a> = (&'a str, &'a serde_json::Value);
+type CallRepr<'history> = (&'history str, &'history serde_json::Value);
 
 /// Tool pairing over borrowed messages: no body or block clone.
 #[derive(Default)]
-struct Pairing<'a> {
-    calls: HashMap<&'a str, CallRepr<'a>>,
-    results: HashSet<&'a str>,
+struct Pairing<'history> {
+    calls: HashMap<&'history str, CallRepr<'history>>,
+    results: HashSet<&'history str>,
 }
 
-impl<'a> Pairing<'a> {
-    fn from_messages(messages: &'a [BaseMessage]) -> AgentResult<Self> {
+impl<'history> Pairing<'history> {
+    fn from_messages(messages: &'history [BaseMessage]) -> AgentResult<Self> {
         let mut pairing = Self::default();
         for message in messages {
             pairing.add_message(message)?;
@@ -619,8 +658,8 @@ impl<'a> Pairing<'a> {
         Ok(pairing)
     }
 
-    fn add_message(&mut self, message: &'a BaseMessage) -> AgentResult<()> {
-        let mut local: HashMap<&'a str, CallRepr<'a>> = HashMap::new();
+    fn add_message(&mut self, message: &'history BaseMessage) -> AgentResult<()> {
+        let mut local: HashMap<&'history str, CallRepr<'history>> = HashMap::new();
         if let BaseMessage::Ai {
             tool_calls,
             content,
@@ -632,7 +671,9 @@ impl<'a> Pairing<'a> {
                     .insert(call.id.as_str(), (call.name.as_str(), &call.arguments))
                     .is_some()
                 {
-                    return Err(invalid("duplicate cached call"));
+                    return Err(crate::agent::compact_v2::projection::invalid(
+                        "duplicate cached call",
+                    ));
                 }
             }
             match content {
@@ -642,14 +683,18 @@ impl<'a> Pairing<'a> {
                     for block in blocks {
                         if let ContentBlock::ToolUse { id, name, input } = block {
                             if !block_ids.insert(id.as_str()) {
-                                return Err(invalid("duplicate content tool use"));
+                                return Err(crate::agent::compact_v2::projection::invalid(
+                                    "duplicate content tool use",
+                                ));
                             }
                             let value = (name.as_str(), input);
                             if local
                                 .get(id.as_str())
                                 .is_some_and(|cached| *cached != value)
                             {
-                                return Err(invalid("conflicting tool use representations"));
+                                return Err(crate::agent::compact_v2::projection::invalid(
+                                    "conflicting tool use representations",
+                                ));
                             }
                             local.insert(id.as_str(), value);
                         }
@@ -668,15 +713,19 @@ impl<'a> Pairing<'a> {
                             continue;
                         };
                         if !block_ids.insert(id) {
-                            return Err(invalid("duplicate content tool use"));
+                            return Err(crate::agent::compact_v2::projection::invalid(
+                                "duplicate content tool use",
+                            ));
                         }
-                        let input: &'a serde_json::Value = match value.get("input") {
+                        let input: &'history serde_json::Value = match value.get("input") {
                             Some(input) => input,
                             None => empty_json_object(),
                         };
                         let value = (name, input);
                         if local.get(id).is_some_and(|cached| *cached != value) {
-                            return Err(invalid("conflicting tool use representations"));
+                            return Err(crate::agent::compact_v2::projection::invalid(
+                                "conflicting tool use representations",
+                            ));
                         }
                         local.insert(id, value);
                     }
@@ -685,12 +734,16 @@ impl<'a> Pairing<'a> {
         }
         for (id, value) in local {
             if id.is_empty() || self.calls.insert(id, value).is_some() {
-                return Err(invalid("empty or duplicate scoped call id"));
+                return Err(crate::agent::compact_v2::projection::invalid(
+                    "empty or duplicate scoped call id",
+                ));
             }
         }
         if let BaseMessage::Tool { tool_call_id, .. } = message {
             if !self.results.insert(tool_call_id.as_str()) {
-                return Err(invalid("duplicate result"));
+                return Err(crate::agent::compact_v2::projection::invalid(
+                    "duplicate result",
+                ));
             }
         } else {
             match message.message_content() {
@@ -699,7 +752,9 @@ impl<'a> Pairing<'a> {
                     for block in blocks {
                         if let ContentBlock::ToolResult { tool_use_id, .. } = block {
                             if !self.results.insert(tool_use_id.as_str()) {
-                                return Err(invalid("duplicate inline result"));
+                                return Err(crate::agent::compact_v2::projection::invalid(
+                                    "duplicate inline result",
+                                ));
                             }
                         }
                     }
@@ -714,7 +769,9 @@ impl<'a> Pairing<'a> {
                         }
                         if let Some(tool_use_id) = value["tool_use_id"].as_str() {
                             if !self.results.insert(tool_use_id) {
-                                return Err(invalid("duplicate inline result"));
+                                return Err(crate::agent::compact_v2::projection::invalid(
+                                    "duplicate inline result",
+                                ));
                             }
                         }
                     }
@@ -741,17 +798,23 @@ fn validate_delta(
             || after.calls.contains_key(id.as_str())
             || after.results.contains(id.as_str())
         {
-            return Err(invalid("archive did not remove a complete exchange"));
+            return Err(crate::agent::compact_v2::projection::invalid(
+                "archive did not remove a complete exchange",
+            ));
         }
     }
     for (id, call) in &before.calls {
         if !removed.contains(*id) && after.calls.get(*id) != Some(call) {
-            return Err(invalid("retained tool input changed"));
+            return Err(crate::agent::compact_v2::projection::invalid(
+                "retained tool input changed",
+            ));
         }
     }
     for id in &before.results {
         if !removed.contains(*id) && !after.results.contains(*id) {
-            return Err(invalid("retained result disappeared"));
+            return Err(crate::agent::compact_v2::projection::invalid(
+                "retained result disappeared",
+            ));
         }
     }
     Ok(())

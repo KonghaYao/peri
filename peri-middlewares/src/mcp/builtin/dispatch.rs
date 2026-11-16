@@ -15,18 +15,34 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use peri_acp_types::builtin_mcp::find;
-use rmcp::{
-    model::{
-        CallToolRequestParams, CallToolResponse, CancelTaskParams, CustomRequest, CustomResult,
-        ErrorCode, GetSkillRequestMethod, GetSkillRequestParams, GetSkillResult, GetTaskParams,
-        GetTaskResult, ListResourceTemplatesResult, ListResourcesResult, ListSkillsRequestMethod,
-        ListSkillsResult, ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams,
-        ReadResourceResponse, ServerConfig, SubscriptionFilter, UpdateTaskParams,
-    },
-    service::{RequestContext, RoleServer, SubscriptionContext},
-    ErrorData as McpError, ServerHandler,
-};
+use peri_acp_types::builtin_mcp;
+use rmcp::model::CallToolRequestParams;
+use rmcp::model::CallToolResponse;
+use rmcp::model::CancelTaskParams;
+use rmcp::model::CustomRequest;
+use rmcp::model::CustomResult;
+use rmcp::model::ErrorCode;
+use rmcp::model::GetSkillRequestMethod;
+use rmcp::model::GetSkillRequestParams;
+use rmcp::model::GetSkillResult;
+use rmcp::model::GetTaskParams;
+use rmcp::model::GetTaskResult;
+use rmcp::model::ListResourceTemplatesResult;
+use rmcp::model::ListResourcesResult;
+use rmcp::model::ListSkillsRequestMethod;
+use rmcp::model::ListSkillsResult;
+use rmcp::model::ListToolsResult;
+use rmcp::model::PaginatedRequestParams;
+use rmcp::model::ReadResourceRequestParams;
+use rmcp::model::ReadResourceResponse;
+use rmcp::model::ServerConfig;
+use rmcp::model::SubscriptionFilter;
+use rmcp::model::UpdateTaskParams;
+use rmcp::service::RequestContext;
+use rmcp::service::RoleServer;
+use rmcp::service::SubscriptionContext;
+use rmcp::ErrorData as McpError;
+use rmcp::ServerHandler;
 
 use super::context::BuiltinInstanceContext;
 use peri_mcp_artifact::ArtifactMcpServer;
@@ -306,7 +322,7 @@ pub(crate) fn builtin_server_handler_with_env(
     ctx: &BuiltinInstanceContext,
     env: &std::collections::HashMap<String, String>,
 ) -> Option<BuiltinServerHandler> {
-    match find(instance)?.name {
+    match builtin_mcp::find(instance)?.name {
         "web" => Some(BuiltinServerHandler::Web(WebMcpServer::with_instance_env(
             env,
         ))),

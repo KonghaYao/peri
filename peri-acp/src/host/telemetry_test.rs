@@ -18,8 +18,9 @@ use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use langfuse_client::spool;
 use langfuse_client::spool::native::NativeSpool;
-use langfuse_client::spool::{route_fingerprint, SpoolStore};
+use langfuse_client::spool::SpoolStore;
 use langfuse_client::types::TraceBody;
 use langfuse_client::{FlushReport, IngestionEvent, LangfuseError};
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
@@ -30,7 +31,10 @@ use peri_controller::langfuse::{
 };
 use serial_test::serial;
 
-use crate::host::{spawn_acp_server, AcpHostHandle, AcpHostShutdownReport, AcpServerConfig};
+use crate::host;
+use crate::host::AcpHostHandle;
+use crate::host::AcpHostShutdownReport;
+use crate::host::AcpServerConfig;
 use crate::provider::{LlmProvider, PeriConfig, ProviderConfig, ProviderModels};
 use crate::transport::stdio::StdioTransport;
 
@@ -228,7 +232,7 @@ const SPOOL_QUOTA: u64 = 8 * 1024 * 1024;
 
 /// 真实 native 端口：临时根 + 与同一凭据/端点一致的 route 摘要。
 fn native_spool(tmp: &tempfile::TempDir, url: &str) -> Arc<dyn SpoolStore> {
-    let route = route_fingerprint(url, "pk-test", "sk-test").expect("route fingerprint");
+    let route = spool::route_fingerprint(url, "pk-test", "sk-test").expect("route fingerprint");
     Arc::new(
         NativeSpool::open_at(tmp.path().join("spool-root"), route, SPOOL_QUOTA)
             .expect("native spool"),
@@ -270,7 +274,7 @@ async fn start_host(
     cfg.langfuse_shutdown_owner = Some(owner);
     cfg.session_store_shutdown = Some(Box::new(CountingClose(Arc::clone(close_calls))));
     let (transport, input, _output) = duplex_transport();
-    let host = spawn_acp_server(Arc::new(transport), cfg);
+    let host = host::spawn_acp_server(Arc::new(transport), cfg);
     (host, input)
 }
 

@@ -1,4 +1,4 @@
-use super::*;
+use super::{CompressorPipeline, Cow, Error, ImageCompressor};
 
 struct FailingCompressor;
 

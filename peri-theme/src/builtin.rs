@@ -79,6 +79,7 @@ const LIGHT_SYNTAX_COMMAND: Color = Color::Rgb(154, 107, 0); // #9A6B00
 const LIGHT_SYNTAX_PATH: Color = Color::Rgb(177, 92, 0); // #B15C00
 
 /// 构建 peri-dark 完整主题定义。
+#[must_use]
 pub fn dark_theme() -> ThemeDefinition {
     ThemeDefinition {
         name: "peri-dark".into(),
@@ -236,6 +237,7 @@ pub fn dark_theme() -> ThemeDefinition {
 }
 
 /// 构建 peri-light 完整主题定义（浅色背景为基础）。
+#[must_use]
 pub fn light_theme() -> ThemeDefinition {
     // Light 主题使用浅色背景、深色文字，保留品牌色基调。
     let light_bg = Color::Rgb(250, 250, 250); // #FAFAFA 暖白背景

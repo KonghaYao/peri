@@ -5,15 +5,37 @@ use std::sync::Arc;
 
 // Logging 类型按 SEP-2577 已废弃，但门控回调仍需保留。
 #[allow(deprecated)]
-use rmcp::{
-    model::{
-        CancelledNotificationParam, ClientCapabilities, CustomNotification, Implementation,
-        InitializeRequestParams, LoggingMessageNotificationParam, ProgressNotificationParam,
-        TaskStatusNotificationParams, TASKS_EXTENSION_ID,
-    },
-    service::{MaybeSendFuture, NotificationContext, Peer, QuitReason, RoleClient, RunningService},
-    ClientHandler,
-};
+use rmcp::model::CancelledNotificationParam;
+#[allow(deprecated)]
+use rmcp::model::ClientCapabilities;
+#[allow(deprecated)]
+use rmcp::model::CustomNotification;
+#[allow(deprecated)]
+use rmcp::model::Implementation;
+#[allow(deprecated)]
+use rmcp::model::InitializeRequestParams;
+#[allow(deprecated)]
+use rmcp::model::LoggingMessageNotificationParam;
+#[allow(deprecated)]
+use rmcp::model::ProgressNotificationParam;
+#[allow(deprecated)]
+use rmcp::model::TaskStatusNotificationParams;
+#[allow(deprecated)]
+use rmcp::model::TASKS_EXTENSION_ID;
+#[allow(deprecated)]
+use rmcp::service::MaybeSendFuture;
+#[allow(deprecated)]
+use rmcp::service::NotificationContext;
+#[allow(deprecated)]
+use rmcp::service::Peer;
+#[allow(deprecated)]
+use rmcp::service::QuitReason;
+#[allow(deprecated)]
+use rmcp::service::RoleClient;
+#[allow(deprecated)]
+use rmcp::service::RunningService;
+#[allow(deprecated)]
+use rmcp::ClientHandler;
 
 use super::NotificationTap;
 
@@ -273,6 +295,7 @@ impl McpServiceWrapper {
         }
     }
 
+    #[must_use]
     pub fn peer(&self) -> &Peer<RoleClient> {
         match self {
             McpServiceWrapper::Default(svc) => svc.peer(),

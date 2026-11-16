@@ -300,12 +300,14 @@ pub struct TrustedSystemReminderFactory {
 }
 
 impl TrustedSystemReminderFactory {
+    #[must_use]
     pub const fn for_producer() -> Self {
         Self {
             provenance: TrustedReminderProvenance::Producer,
         }
     }
 
+    #[must_use]
     pub const fn for_recovery() -> Self {
         Self {
             provenance: TrustedReminderProvenance::Recovery,
@@ -329,14 +331,17 @@ impl TrustedSystemReminderFactory {
 }
 
 impl TrustedSystemReminder {
+    #[must_use]
     pub fn as_reminder(&self) -> &SystemReminder {
         &self.reminder
     }
 
+    #[must_use]
     pub const fn provenance(&self) -> TrustedReminderProvenance {
         self.provenance
     }
 
+    #[must_use]
     pub fn into_inner(self) -> SystemReminder {
         self.reminder
     }

@@ -3,7 +3,8 @@
 use super::PluginSearchResultItem;
 use crate::acp_client::AcpTuiClient;
 use crate::application::operations::OperationTicket;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 pub(super) type SearchResult = Result<Vec<PluginSearchResultItem>, String>;
 

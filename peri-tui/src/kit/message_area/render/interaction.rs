@@ -1,13 +1,11 @@
 use crate::i18n;
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::tui_render_unit::{FoldState, TuiAskUserBlock};
-use crate::truncate::truncate_by_width;
+
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::ratatui::style::{Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
-
-use super::helpers::{process_cont_prefix, process_first_prefix, sym};
 
 /// §6.8 Interaction block（Slice 4 双轨）：pending 态 `! Approval required` /
 /// 问题摘要 / 选项行（横向 `[Allow once]  [Deny]`，Narrow 垂直排列）；
@@ -42,8 +40,11 @@ pub(super) fn render_ask_user_block_lines(
             }
         };
         lines.push(Line::from({
-            let mut spans =
-                process_first_prefix(grid, sym().warning, Style::default().fg(sem.status.warning));
+            let mut spans = super::helpers::process_first_prefix(
+                grid,
+                super::helpers::sym().warning,
+                Style::default().fg(sem.status.warning),
+            );
             spans.push(Span::styled(
                 title,
                 Style::default()
@@ -53,9 +54,9 @@ pub(super) fn render_ask_user_block_lines(
             spans
         }));
         if !data.question.is_empty() {
-            let mut spans = process_cont_prefix(grid, sem.text.dim);
+            let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
             spans.push(Span::styled(
-                truncate_by_width(&data.question, content),
+                crate::truncate::truncate_by_width(&data.question, content),
                 Style::default().fg(sem.text.muted),
             ));
             lines.push(Line::from(spans));
@@ -70,9 +71,9 @@ pub(super) fn render_ask_user_block_lines(
         if grid.is_narrow() || data.options.len() <= 1 {
             for label in &data.options {
                 let text = format!("[{label}]");
-                let mut spans = process_cont_prefix(grid, sem.text.dim);
+                let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
                 spans.push(Span::styled(
-                    truncate_by_width(&text, content),
+                    crate::truncate::truncate_by_width(&text, content),
                     Style::default().fg(sem.text.primary),
                 ));
                 lines.push(Line::from(spans));
@@ -87,12 +88,12 @@ pub(super) fn render_ask_user_block_lines(
                 .map(|o| format!("[{o}]"))
                 .collect::<Vec<_>>()
                 .join("  ");
-            let mut spans = process_cont_prefix(grid, sem.text.dim);
+            let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
             // 选项文本起始列 = 过程区续行前缀的实际宽度（`indent == 0` 时前缀
             // 回退 cont_prefix，§9）——与渲染出的 spans 同源，命中列不会漂移。
             let prefix_w: usize = spans.iter().map(|s| s.content.width()).sum();
             spans.push(Span::styled(
-                truncate_by_width(&text, content),
+                crate::truncate::truncate_by_width(&text, content),
                 Style::default().fg(sem.text.primary),
             ));
             lines.push(Line::from(spans));
@@ -119,9 +120,9 @@ pub(super) fn render_ask_user_block_lines(
     // 仅用户手动折叠（Collapsed）收束为单行结果）──
     let result = data.result.as_deref().unwrap_or("");
     let (symbol, color) = if data.is_error {
-        (sym().error, sem.status.error)
+        (super::helpers::sym().error, sem.status.error)
     } else {
-        (sym().success, sem.status.success)
+        (super::helpers::sym().success, sem.status.success)
     };
     let title = if !result.is_empty() {
         result.to_string()
@@ -131,9 +132,10 @@ pub(super) fn render_ask_user_block_lines(
         i18n::tr("render-user-answered")
     };
     lines.push(Line::from({
-        let mut spans = process_first_prefix(grid, symbol, Style::default().fg(color));
+        let mut spans =
+            super::helpers::process_first_prefix(grid, symbol, Style::default().fg(color));
         spans.push(Span::styled(
-            truncate_by_width(&title, content),
+            crate::truncate::truncate_by_width(&title, content),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
         spans
@@ -144,9 +146,9 @@ pub(super) fn render_ask_user_block_lines(
         return (lines, None);
     }
     if !data.question.is_empty() {
-        let mut spans = process_cont_prefix(grid, sem.text.dim);
+        let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
         spans.push(Span::styled(
-            truncate_by_width(&data.question, content),
+            crate::truncate::truncate_by_width(&data.question, content),
             Style::default().fg(sem.text.muted),
         ));
         lines.push(Line::from(spans));
@@ -159,23 +161,26 @@ pub(super) fn render_ask_user_block_lines(
             .as_deref()
             .and_then(|r| data.options.iter().position(|o| o == r));
         if grid.is_narrow() || data.options.len() <= 1 {
-            for (i, label) in data.options.iter().enumerate() {
-                let mut spans = process_cont_prefix(grid, sem.text.dim);
-                let is_chosen = Some(i) == chosen_idx;
-                let text = if is_chosen {
-                    format!("[{} {label}]", sym().success)
-                } else {
-                    format!("[{label}]")
-                };
-                spans.push(Span::styled(
-                    truncate_by_width(&text, content),
-                    Style::default().fg(if is_chosen {
-                        sem.status.success
+            {
+                let iteration_items = data.options.iter().enumerate();
+                for (i, label) in iteration_items {
+                    let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
+                    let is_chosen = Some(i) == chosen_idx;
+                    let text = if is_chosen {
+                        format!("[{} {label}]", super::helpers::sym().success)
                     } else {
-                        sem.text.primary
-                    }),
-                ));
-                lines.push(Line::from(spans));
+                        format!("[{label}]")
+                    };
+                    spans.push(Span::styled(
+                        crate::truncate::truncate_by_width(&text, content),
+                        Style::default().fg(if is_chosen {
+                            sem.status.success
+                        } else {
+                            sem.text.primary
+                        }),
+                    ));
+                    lines.push(Line::from(spans));
+                }
             }
         } else {
             let text = data
@@ -184,16 +189,16 @@ pub(super) fn render_ask_user_block_lines(
                 .enumerate()
                 .map(|(i, label)| {
                     if Some(i) == chosen_idx {
-                        format!("[{} {label}]", sym().success)
+                        format!("[{} {label}]", super::helpers::sym().success)
                     } else {
                         format!("[{label}]")
                     }
                 })
                 .collect::<Vec<_>>()
                 .join("  ");
-            let mut spans = process_cont_prefix(grid, sem.text.dim);
+            let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
             spans.push(Span::styled(
-                truncate_by_width(&text, content),
+                crate::truncate::truncate_by_width(&text, content),
                 Style::default().fg(sem.text.primary),
             ));
             lines.push(Line::from(spans));
@@ -202,9 +207,9 @@ pub(super) fn render_ask_user_block_lines(
     // 历史 items 问答对（旧数据兼容；生产路径 items 恒空）。
     for item in &data.items {
         let text = format!("{} \u{2192} {}", item.header, item.answer);
-        let mut spans = process_cont_prefix(grid, sem.text.dim);
+        let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
         spans.push(Span::styled(
-            truncate_by_width(&text, content),
+            crate::truncate::truncate_by_width(&text, content),
             Style::default().fg(sem.text.muted),
         ));
         lines.push(Line::from(spans));

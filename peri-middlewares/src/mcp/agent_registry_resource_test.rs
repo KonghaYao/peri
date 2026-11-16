@@ -12,12 +12,17 @@
 use std::sync::Arc;
 
 use peri_acp_types::plugin::ConfigSource;
-use peri_acp_types::workspace_resources::{
-    agent_uri, ResourceScope, META_KEY_FRONTMATTER, META_KEY_PLUGIN, META_KEY_SCOPE,
-};
+use peri_acp_types::workspace_resources;
+use peri_acp_types::workspace_resources::ResourceScope;
+use peri_acp_types::workspace_resources::META_KEY_FRONTMATTER;
+use peri_acp_types::workspace_resources::META_KEY_PLUGIN;
+use peri_acp_types::workspace_resources::META_KEY_SCOPE;
 use rmcp::model::{MetaObject, Resource};
 
-use super::*;
+use super::AgentSource;
+use super::McpAgentMetadata;
+use super::McpAgentRegistry;
+use super::McpClientPool;
 use crate::mcp::client::{ClientStatus, McpClientHandle};
 
 fn agent_resource(
@@ -26,7 +31,7 @@ fn agent_resource(
     id: &str,
     frontmatter: &str,
 ) -> Resource {
-    let uri = agent_uri(scope, plugin, id).expect("uri");
+    let uri = workspace_resources::agent_uri(scope, plugin, id).expect("uri");
     let mut meta = serde_json::Map::new();
     meta.insert(
         META_KEY_SCOPE.to_string(),
@@ -551,8 +556,8 @@ fn local_names_follow_the_contract_segment_rule_while_remote_stays_strict() {
         "本地名不得占用 mcp__ 前缀：{ids:?}"
     );
     // 远端仍是 HEAD 的严格集（大写 / 下划线拒绝）。
-    assert!(agent_name_from_uri("agent://Reviewer/agent.md").is_none());
-    assert!(agent_name_from_uri("agent://code_reviewer/agent.md").is_none());
+    assert!(super::agent_name_from_uri("agent://Reviewer/agent.md").is_none());
+    assert!(super::agent_name_from_uri("agent://code_reviewer/agent.md").is_none());
 }
 
 // ─── M2：frontmatter model 的 typed 校验（本地/插件来源）─────────────────────

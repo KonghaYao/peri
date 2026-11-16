@@ -1,17 +1,29 @@
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::provider::LlmProvider;
+
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::store::ThreadStore;
+use peri_acp_types::thread::ThreadMeta;
+use serde_json::json;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// [回归测试] 外部指令在创建任何 thread 前完成准入，非法输入不得静默丢弃。
 #[tokio::test]
 async fn test_session_new_external_instructions_admission() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     for invalid in [
@@ -23,7 +35,7 @@ async fn test_session_new_external_instructions_admission() {
             peri_agent::agent::model_bridge::SYSTEM_PROMPT_DYNAMIC_BOUNDARY
         )),
     ] {
-        let error = handle_request(
+        let error = crate::host::requests::handle_request(
             "session/new",
             &json!({"cwd": tmp.path().to_str().unwrap(), "_meta": {"peri.instructions": invalid}}),
             &cfg,
@@ -35,7 +47,7 @@ async fn test_session_new_external_instructions_admission() {
         assert_eq!(error.code, -32602);
         assert!(sessions.is_empty());
     }
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": tmp.path().to_str().unwrap(), "_meta": {"peri.instructions": ""}}),
         &cfg,
@@ -62,7 +74,8 @@ async fn frozen_case_config(
     provider: crate::provider::LlmProvider,
     tmp: &tempfile::TempDir,
 ) -> AcpServerConfig {
-    let mut cfg = make_server_config(peri_config, provider, tmp).await;
+    let mut cfg =
+        crate::host::requests::tests::make_server_config(peri_config, provider, tmp).await;
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd: std::fs::canonicalize(tmp.path())
             .expect("测试工作区必须可规范化")
@@ -87,17 +100,19 @@ async fn test_session_load_cold_host_restores_original_frozen_prompt() {
     // Arrange
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(tmp.path().join("CLAUDE.md"), "FROZEN_PROMPT_V1").unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = frozen_case_config(peri_config.clone(), provider.clone(), &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({
             "cwd": tmp.path().to_str().unwrap(),
@@ -156,8 +171,8 @@ async fn test_session_load_cold_host_restores_original_frozen_prompt() {
         original_claude_md.contains("FROZEN_PROMPT_V1"),
         "创建期指令快照必须为磁盘上的 V1: {original_claude_md:?}"
     );
-    append_human_message(&cfg, &session_id, "existing history").await;
-    handle_request(
+    crate::host::requests::tests::append_human_message(&cfg, &session_id, "existing history").await;
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": session_id}),
         &cfg,
@@ -172,7 +187,7 @@ async fn test_session_load_cold_host_restores_original_frozen_prompt() {
     let restarted = frozen_case_config(peri_config, provider, &tmp).await;
     let mut restored_sessions = HashMap::new();
     // Act
-    handle_request(
+    crate::host::requests::handle_request(
         "session/load",
         &json!({
             "sessionId": session_id,
@@ -233,7 +248,7 @@ async fn test_session_load_cold_host_restores_original_frozen_prompt() {
         !restored_claude_md.contains("FROZEN_PROMPT_V2"),
         "冷恢复不得重读磁盘（改写的 V2 不得进入快照）: {restored_claude_md:?}"
     );
-    let forked = handle_request(
+    let forked = crate::host::requests::handle_request(
         "session/fork",
         &json!({"sessionId": session_id, "cwd": tmp.path().to_str().unwrap()}),
         &restarted,
@@ -261,18 +276,20 @@ async fn test_session_resume_existing_empty_history_is_available_to_fork() {
     use peri_acp_types::messages::BaseMessage;
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let cwd = tmp.path().to_str().unwrap();
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({ "cwd": cwd }),
         &cfg,
@@ -288,7 +305,7 @@ async fn test_session_resume_existing_empty_history_is_available_to_fork() {
         .await
         .unwrap();
 
-    handle_request(
+    crate::host::requests::handle_request(
         "session/resume",
         &json!({ "sessionId": session_id, "cwd": cwd }),
         &cfg,
@@ -297,7 +314,7 @@ async fn test_session_resume_existing_empty_history_is_available_to_fork() {
     )
     .await
     .unwrap();
-    let forked = handle_request(
+    let forked = crate::host::requests::handle_request(
         "session/fork",
         &json!({ "sessionId": session_id, "cwd": cwd }),
         &cfg,
@@ -307,7 +324,7 @@ async fn test_session_resume_existing_empty_history_is_available_to_fork() {
     .await
     .unwrap();
     let fork_id = forked["sessionId"].as_str().unwrap().to_string();
-    let persisted_fork = own_payloads(&cfg, &fork_id).await;
+    let persisted_fork = crate::host::requests::tests::own_payloads(&cfg, &fork_id).await;
     assert_eq!(
         persisted_fork.len(),
         1,
@@ -320,7 +337,10 @@ async fn test_session_resume_existing_empty_history_is_available_to_fork() {
         sessions[&session_id].history_payloads[0].id(),
         original.id()
     );
-    assert_eq!(own_payloads(&cfg, &session_id).await[0].id(), original.id());
+    assert_eq!(
+        crate::host::requests::tests::own_payloads(&cfg, &session_id).await[0].id(),
+        original.id()
+    );
     assert_eq!(
         sessions[&fork_id].frozen.as_ref().unwrap().system_prompt(),
         sessions[&session_id]
@@ -335,17 +355,23 @@ async fn test_session_resume_existing_empty_history_is_available_to_fork() {
 #[tokio::test]
 async fn test_session_load_future_frozen_snapshot_fails_without_overwrite() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     // 未来版本快照是「本构建读不懂的既有事实」：夹具用裸句柄按原样落库，
     // 门面不给这种字节提供写入口（生产创建路径不接受写不懂的快照）。
-    let (cfg, bridge) =
-        make_server_config_with_bridge(peri_config.clone(), provider.clone(), &tmp).await;
+    let (cfg, bridge) = crate::host::requests::tests::make_server_config_with_bridge(
+        peri_config.clone(),
+        provider.clone(),
+        &tmp,
+    )
+    .await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let workspace = bridge.resolve_workspace(tmp.path()).await.unwrap();
     let session_id = bridge
@@ -364,9 +390,10 @@ async fn test_session_load_future_frozen_snapshot_fails_without_overwrite() {
     drop(bridge);
 
     let (restarted, restarted_bridge) =
-        make_server_config_with_bridge(peri_config, provider, &tmp).await;
+        crate::host::requests::tests::make_server_config_with_bridge(peri_config, provider, &tmp)
+            .await;
     let mut restored_sessions = HashMap::new();
-    let error = handle_request(
+    let error = crate::host::requests::handle_request(
         "session/load",
         &json!({
             "sessionId": session_id,

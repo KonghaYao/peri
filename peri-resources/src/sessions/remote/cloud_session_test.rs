@@ -25,9 +25,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use super::cloud_tests::{
-    check, failure, run_counts, session_input, unique_run_label, with_cleanup, CloudTarget,
-};
+use super::cloud_tests::CloudTarget;
 use super::mutation::StoreAccess;
 use crate::sessions::data::SessionDataPort;
 use peri_acp_types::messages::BaseMessage;
@@ -46,12 +44,12 @@ use peri_acp_types::workspace::{
 #[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
 async fn cloud_session_write_read_reconnect_round_trip() {
     let target = CloudTarget::load();
-    let run = unique_run_label("peri-sess");
+    let run = super::cloud_tests::unique_run_label("peri-sess");
     let mut out = target.out();
     out.push(format!("run_prefix_len={}", run.len()));
     out.push("experiment=session_round_trip".to_owned());
     out.flush();
-    let result = with_cleanup(&target, &run, || async {
+    let result = super::cloud_tests::with_cleanup(&target, &run, || async {
         session_round_trip(&target, &run).await
     })
     .await;
@@ -69,7 +67,7 @@ async fn session_round_trip(target: &CloudTarget, run: &str) -> Result<(), Strin
     let writer = target
         .session_data(StoreAccess::ReadWrite)
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let root = format!("{run}-root");
     let fork = format!("{run}-fork");
     let child = format!("{run}-child");
@@ -85,9 +83,15 @@ async fn session_round_trip(target: &CloudTarget, run: &str) -> Result<(), Strin
 
     // 新建：meta + 绑定 + frozen 一次落库。
     writer
-        .save_new_session(&session_input(&root, &created_at, &binding, &frozen, None))
+        .save_new_session(&super::cloud_tests::session_input(
+            &root,
+            &created_at,
+            &binding,
+            &frozen,
+            None,
+        ))
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     // 定向 metadata：标题与状态。
     writer
         .update_meta(
@@ -100,7 +104,7 @@ async fn session_round_trip(target: &CloudTarget, run: &str) -> Result<(), Strin
             },
         )
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
 
     // fork：两条 payload（领域重映射后的结果）+ 一条非默认 flag。
     let first = PersistedPayload::Message(BaseMessage::human("fork one"));
@@ -116,19 +120,25 @@ async fn session_round_trip(target: &CloudTarget, run: &str) -> Result<(), Strin
     );
     writer
         .save_fork(&ForkSnapshot {
-            target: session_input(&fork, &created_at, &binding, &frozen, None),
+            target: super::cloud_tests::session_input(&fork, &created_at, &binding, &frozen, None),
             source_id: root.clone(),
             payloads: vec![first.clone(), second.clone()],
             flags,
         })
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
 
     // child：继承区 + 父子/根归属 + root 的 frozen 原文。
     let inherited_payload = PersistedPayload::Message(BaseMessage::human("inherited"));
     writer
         .save_child(&ChildSnapshot {
-            target: session_input(&child, &created_at, &binding, &frozen, Some(&root)),
+            target: super::cloud_tests::session_input(
+                &child,
+                &created_at,
+                &binding,
+                &frozen,
+                Some(&root),
+            ),
             parent_id: root.clone(),
             root_id: root.clone(),
             inherited: InheritedContext {
@@ -137,58 +147,67 @@ async fn session_round_trip(target: &CloudTarget, run: &str) -> Result<(), Strin
             },
         })
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
 
     // 重连：新连接、只读打开，逐字段复核（不靠写路径的内存状态）。
     let reader = target
         .session_data(StoreAccess::ReadOnly)
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
 
-    let root_meta = reader.load_meta(&root).await.map_err(failure)?;
-    check(
+    let root_meta = reader
+        .load_meta(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         root_meta.title.as_deref() == Some("renamed"),
         "title patch is not visible after reconnect",
     )?;
-    check(
+    super::cloud_tests::check(
         root_meta.agent_status == AgentStatus::Done,
         "status patch is not visible after reconnect",
     )?;
-    check(
+    super::cloud_tests::check(
         root_meta.config.as_deref() == Some("{\"k\":1}"),
         "config patch is not visible after reconnect",
     )?;
-    check(
+    super::cloud_tests::check(
         root_meta.message_count == 0,
         "session without history must report zero messages",
     )?;
 
-    let root_snapshot = reader.load_snapshot(&root).await.map_err(failure)?;
-    check(
+    let root_snapshot = reader
+        .load_snapshot(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         root_snapshot.binding == BindingState::Bound(binding.clone()),
         "root binding is not the immutable binding that was written",
     )?;
-    check(
+    super::cloud_tests::check(
         root_snapshot.frozen == FrozenState::Present(FrozenSnapshotBytes::new(frozen.clone())),
         "root frozen bytes are not returned verbatim",
     )?;
-    check(
+    super::cloud_tests::check(
         root_snapshot.payloads.is_empty() && root_snapshot.flags.is_empty(),
         "root session must have no own history",
     )?;
 
-    let fork_snapshot = reader.load_snapshot(&fork).await.map_err(failure)?;
-    check(
+    let fork_snapshot = reader
+        .load_snapshot(&fork)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         fork_snapshot.payloads.len() == 2
             && fork_snapshot.payloads[0].id() == first.id()
             && fork_snapshot.payloads[1].id() == second.id(),
         "fork payloads are not the mapped batch in order",
     )?;
-    check(
+    super::cloud_tests::check(
         fork_snapshot.meta.message_count == 2,
         "fork derived message count is not the payload count",
     )?;
-    check(
+    super::cloud_tests::check(
         fork_snapshot
             .flags
             .get(&first.id())
@@ -198,33 +217,42 @@ async fn session_round_trip(target: &CloudTarget, run: &str) -> Result<(), Strin
         "derived flags view is not the non-default set",
     )?;
 
-    let child_snapshot = reader.load_snapshot(&child).await.map_err(failure)?;
-    check(
+    let child_snapshot = reader
+        .load_snapshot(&child)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         child_snapshot.inherited.payloads.len() == 1
             && child_snapshot.inherited.payloads[0].id() == inherited_payload.id(),
         "child inherited context is not the snapshot that was written",
     )?;
-    check(
+    super::cloud_tests::check(
         child_snapshot.frozen == root_snapshot.frozen,
         "child frozen must be the root's saved bytes",
     )?;
-    check(
+    super::cloud_tests::check(
         child_snapshot.meta.parent_thread_id.as_deref() == Some(root.as_str()),
         "child parent relation is not persisted",
     )?;
-    check(
+    super::cloud_tests::check(
         child_snapshot.binding == BindingState::Bound(binding.clone()),
         "child binding is not the inherited immutable binding",
     )?;
 
-    let children = reader.list_children(&root).await.map_err(failure)?;
-    check(
+    let children = reader
+        .list_children(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         children.len() == 1 && children[0].id == child,
         "children listing is not the direct child set",
     )?;
-    let tree = reader.list_session_tree(&root).await.map_err(failure)?;
+    let tree = reader
+        .list_session_tree(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
     let tree_ids: Vec<&str> = tree.iter().map(|meta| meta.id.as_str()).collect();
-    check(
+    super::cloud_tests::check(
         tree.len() == 2 && tree_ids.contains(&root.as_str()) && tree_ids.contains(&child.as_str()),
         "session tree is not root plus descendants",
     )?;
@@ -237,13 +265,13 @@ async fn session_round_trip(target: &CloudTarget, run: &str) -> Result<(), Strin
             limit: 50,
         })
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let page_ids: Vec<&str> = page
         .entries
         .iter()
         .map(|entry| entry.thread.id.as_str())
         .collect();
-    check(
+    super::cloud_tests::check(
         page_ids.contains(&fork.as_str())
             && !page_ids.contains(&root.as_str())
             && !page_ids.contains(&child.as_str()),
@@ -254,26 +282,32 @@ async fn session_round_trip(target: &CloudTarget, run: &str) -> Result<(), Strin
         .iter()
         .find(|entry| entry.thread.id == fork)
         .ok_or("fork session is missing from its scoped listing")?;
-    check(
+    super::cloud_tests::check(
         entry.binding.as_ref() == Some(&binding) && entry.workspace_root.is_none(),
         "listing entries must carry binding facts only",
     )?;
 
     // 逻辑上下文：继承区在前、自有 payload 在后。
-    let fork_history = reader.load_session_history(&fork).await.map_err(failure)?;
-    check(
+    let fork_history = reader
+        .load_session_history(&fork)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         fork_history.len() == 2 && fork_history[0].id() == first.id(),
         "fork logical context is not its own payload batch",
     )?;
-    let child_history = reader.load_session_history(&child).await.map_err(failure)?;
-    check(
+    let child_history = reader
+        .load_session_history(&child)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         child_history.len() == 1 && child_history[0].id() == inherited_payload.id(),
         "child logical context must lead with the inherited region",
     )?;
 
     // 只读打开不写：写路径在发请求前就拒绝。
     let refused = reader
-        .save_new_session(&session_input(
+        .save_new_session(&super::cloud_tests::session_input(
             &format!("{run}-extra"),
             &created_at,
             &binding,
@@ -281,18 +315,18 @@ async fn session_round_trip(target: &CloudTarget, run: &str) -> Result<(), Strin
             None,
         ))
         .await;
-    check(
+    super::cloud_tests::check(
         matches!(&refused, Err(error) if matches!(error.kind(), SessionResourceErrorKind::ReadOnlyStore)),
         "read-only open must refuse writes",
     )?;
 
     // 关闭后不再接受调用。
-    reader.close().await.map_err(failure)?;
-    check(
+    reader.close().await.map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         reader.load_meta(&root).await.is_err(),
         "closed port must fail loudly",
     )?;
-    writer.close().await.map_err(failure)?;
+    writer.close().await.map_err(super::cloud_tests::failure)?;
     Ok(())
 }
 
@@ -304,8 +338,8 @@ async fn session_round_trip(target: &CloudTarget, run: &str) -> Result<(), Strin
 #[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
 async fn cloud_session_refusals_and_replay_leave_facts_unchanged() {
     let target = CloudTarget::load();
-    let run = unique_run_label("peri-sess-neg");
-    let result = with_cleanup(&target, &run, || async {
+    let run = super::cloud_tests::unique_run_label("peri-sess-neg");
+    let result = super::cloud_tests::with_cleanup(&target, &run, || async {
         session_refusals(&target, &run).await
     })
     .await;
@@ -323,7 +357,7 @@ async fn session_refusals(target: &CloudTarget, run: &str) -> Result<(), String>
     let adapter = target
         .session_data(StoreAccess::ReadWrite)
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let root = format!("{run}-root");
     let child = format!("{run}-child");
     let binding = SessionBinding {
@@ -335,15 +369,16 @@ async fn session_refusals(target: &CloudTarget, run: &str) -> Result<(), String>
     };
     let frozen = format!("{{\"frozen\":\"{run}\"}}");
     let created_at = chrono::Utc::now().to_rfc3339();
-    let first_input = session_input(&root, &created_at, &binding, &frozen, None);
+    let first_input =
+        super::cloud_tests::session_input(&root, &created_at, &binding, &frozen, None);
 
     adapter
         .save_new_session(&first_input)
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
 
     // 同 id、不同内容：必须是冲突失败（不能冒充「已应用」），也不得改动已有行。
-    let conflicting = session_input(
+    let conflicting = super::cloud_tests::session_input(
         &root,
         &created_at,
         &binding,
@@ -351,7 +386,7 @@ async fn session_refusals(target: &CloudTarget, run: &str) -> Result<(), String>
         None,
     );
     let conflict = adapter.save_new_session(&conflicting).await;
-    check(
+    super::cloud_tests::check(
         matches!(&conflict, Err(error) if matches!(error.kind(), SessionResourceErrorKind::InvalidInput { .. })),
         "a re-create with different content must fail",
     )?;
@@ -361,7 +396,7 @@ async fn session_refusals(target: &CloudTarget, run: &str) -> Result<(), String>
     // 「同一次请求的重试」由 adapter 内部复用同一操作 id 承担（v10 撤销本机日志后不再有
     // 跨进程的原 id 取回路径），不靠调用方传令牌。
     let repeated = adapter.save_new_session(&first_input).await;
-    check(
+    super::cloud_tests::check(
         matches!(&repeated, Err(error) if matches!(error.kind(), SessionResourceErrorKind::InvalidInput { .. })),
         "re-saving the same input is a new operation and must fail on the existing row",
     )?;
@@ -369,7 +404,7 @@ async fn session_refusals(target: &CloudTarget, run: &str) -> Result<(), String>
     // child 的 frozen 不是 root 已保存的原文：拒绝，且不落行。
     let refused_child = adapter
         .save_child(&ChildSnapshot {
-            target: session_input(
+            target: super::cloud_tests::session_input(
                 &child,
                 &created_at,
                 &binding,
@@ -381,37 +416,49 @@ async fn session_refusals(target: &CloudTarget, run: &str) -> Result<(), String>
             inherited: InheritedContext::default(),
         })
         .await;
-    check(
+    super::cloud_tests::check(
         matches!(&refused_child, Err(error) if matches!(error.kind(), SessionResourceErrorKind::InvalidInput { .. })),
         "child frozen that is not the root's saved bytes must be refused",
     )?;
-    adapter.close().await.map_err(failure)?;
+    adapter.close().await.map_err(super::cloud_tests::failure)?;
 
     // 重连复核：一行 root（内容仍是第一次写入的事实）、没有 child 行。
     let reader = target
         .session_data(StoreAccess::ReadOnly)
         .await
-        .map_err(failure)?;
-    check(
-        reader.exists(&root).await.map_err(failure)?,
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
+        reader
+            .exists(&root)
+            .await
+            .map_err(super::cloud_tests::failure)?,
         "root session must exist after replay",
     )?;
-    check(
-        !reader.exists(&child).await.map_err(failure)?,
+    super::cloud_tests::check(
+        !reader
+            .exists(&child)
+            .await
+            .map_err(super::cloud_tests::failure)?,
         "refused child must not exist",
     )?;
-    let snapshot = reader.load_snapshot(&root).await.map_err(failure)?;
-    check(
+    let snapshot = reader
+        .load_snapshot(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         snapshot.frozen == FrozenState::Present(FrozenSnapshotBytes::new(frozen.clone())),
         "a refused re-create must not overwrite the saved frozen bytes",
     )?;
-    reader.close().await.map_err(failure)?;
+    reader.close().await.map_err(super::cloud_tests::failure)?;
 
     // 独立只读连接复核行数：本轮只有 root 一行会话、没有历史行。
-    let store = target.store(StoreAccess::ReadOnly).await.map_err(failure)?;
-    let counts = run_counts(&store, run).await?;
-    store.close().await.map_err(failure)?;
-    check(
+    let store = target
+        .store(StoreAccess::ReadOnly)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    let counts = super::cloud_tests::run_counts(&store, run).await?;
+    store.close().await.map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         counts.sessions == 1 && counts.messages == 0,
         "refusals and replay must leave exactly the first session row",
     )?;

@@ -4,6 +4,7 @@
 ///
 /// `CronCreate` → `["cron", "create"]`
 /// `SearchExtraTools` → `["search", "extra", "tools"]`
+#[must_use]
 pub fn split_camel_case(name: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
@@ -30,6 +31,7 @@ pub fn split_camel_case(name: &str) -> Vec<String> {
 /// `mcp__slack__send_message` → `["slack", "send_message"]`
 /// `mcp__read_resource` → `["read_resource"]`
 /// `Read` → `["read"]` (非 MCP 工具，按原样返回)
+#[must_use]
 pub fn split_mcp_prefix(name: &str) -> Vec<String> {
     if !name.starts_with("mcp__") {
         return split_camel_case(name);
@@ -54,6 +56,7 @@ pub fn split_mcp_prefix(name: &str) -> Vec<String> {
 ///
 /// `+` 前缀词归入 required，其余归入 optional
 /// `"+slack message"` → `(["slack"], ["message"])`
+#[must_use]
 pub fn parse_query(query: &str) -> (Vec<String>, Vec<String>) {
     let mut required = Vec::new();
     let mut optional = Vec::new();
@@ -78,6 +81,7 @@ pub fn parse_query(query: &str) -> (Vec<String>, Vec<String>) {
 /// - 可选词匹配 → 每个加 0.3
 /// - 工具名精确匹配加 0.5
 /// - 描述精确匹配加 0.2
+#[must_use]
 pub fn keyword_score(
     tool_name: &str,
     tool_desc: &str,
@@ -119,18 +123,24 @@ pub fn keyword_score(
     }
 
     // 工具名精确匹配
-    for opt in optional.iter().chain(required.iter()) {
-        if name_lower == *opt || name_words.contains(opt) {
-            score += 0.5;
-            break;
+    {
+        let combined_optional = optional.iter().chain(required.iter());
+        for opt in combined_optional {
+            if name_lower == *opt || name_words.contains(opt) {
+                score += 0.5;
+                break;
+            }
         }
     }
 
     // 描述精确匹配
-    for opt in optional.iter().chain(required.iter()) {
-        if desc_lower.contains(opt.as_str()) && opt.len() >= 3 {
-            score += 0.2;
-            break;
+    {
+        let combined_optional = optional.iter().chain(required.iter());
+        for opt in combined_optional {
+            if desc_lower.contains(opt.as_str()) && opt.len() >= 3 {
+                score += 0.2;
+                break;
+            }
         }
     }
 

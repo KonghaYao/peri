@@ -1,4 +1,10 @@
-use super::*;
+use super::Arc;
+use super::RoleClient;
+use super::SkillOrigin;
+use super::SpecSkill;
+use peri_acp_types::mcp_skills::HandleToken;
+use peri_acp_types::mcp_skills::McpSkillRegistry;
+use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 /// 规范模式端到端（W2）：skills/list 发现**只发布 metadata**（不读正文）——
 /// digest 不一致的条目同样注册（其完整性由 activation 在激活时判定）。
@@ -7,7 +13,7 @@ async fn run_discovery_spec_mode_via_skills_list() {
     let ok_text = "---\nname: alpha\ndescription: Alpha skill\n---\n\n# Alpha\n";
     let bad_text = "---\nname: beta\ndescription: Beta skill\n---\n\n# Beta\n";
     let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(spec_skill_server(
+    tokio::spawn(super::spec_skill_server(
         server_io,
         vec![
             SpecSkill {
@@ -42,12 +48,13 @@ async fn run_discovery_spec_mode_via_skills_list() {
         client_io,
         None::<rmcp::model::ServerPeerInfo>,
     );
-    let handle = make_spec_handle(&running);
+    let handle = super::make_spec_handle(&running);
     let reg = Arc::new(McpSkillRegistry::new());
     let token: HandleToken = Arc::new(6u32);
     reg.mark_discovery_started("srv", token.clone());
     let cancel = AgentCancellationToken::new();
-    run_discovery(reg.clone(), None, handle, token.clone(), cancel).await;
+    crate::mcp::skill_discovery::run_discovery(reg.clone(), None, handle, token.clone(), cancel)
+        .await;
 
     let skills = reg.all_skills();
     let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
@@ -90,7 +97,7 @@ async fn run_discovery_spec_mode_publishes_entries_without_reads() {
     let fm_mismatch_text = "---\nname: epsilon\ndescription: Eps content\n---\n\n# Eps\n";
     let request_log: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
     let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(spec_skill_server(
+    tokio::spawn(super::spec_skill_server(
         server_io,
         vec![
             // gamma：list 给新 digest + 旧内容（stale）→ 发现期不再恢复
@@ -99,7 +106,7 @@ async fn run_discovery_spec_mode_publishes_entries_without_reads() {
                 name: "gamma",
                 description: "Gamma skill",
                 text: old_text,
-                digest_override: Some(format!("sha256:{}", sha256_hex(new_text))),
+                digest_override: Some(format!("sha256:{}", super::sha256_hex(new_text))),
                 get_text: Some(new_text),
                 get_error: false,
                 get_wrong_uri: false,
@@ -136,12 +143,13 @@ async fn run_discovery_spec_mode_publishes_entries_without_reads() {
         client_io,
         None::<rmcp::model::ServerPeerInfo>,
     );
-    let handle = make_spec_handle(&running);
+    let handle = super::make_spec_handle(&running);
     let reg = Arc::new(McpSkillRegistry::new());
     let token: HandleToken = Arc::new(7u32);
     reg.mark_discovery_started("srv", token.clone());
     let cancel = AgentCancellationToken::new();
-    run_discovery(reg.clone(), None, handle, token.clone(), cancel).await;
+    crate::mcp::skill_discovery::run_discovery(reg.clone(), None, handle, token.clone(), cancel)
+        .await;
 
     let names: Vec<String> = reg.all_skills().iter().map(|s| s.name.clone()).collect();
     assert_eq!(

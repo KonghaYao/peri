@@ -4,8 +4,8 @@
 //! `G` 是 planner 最终完整渲染后的估算净减少量，`R` 是既有必要回收量。
 //! 本模块不规划、不提交、不做 I/O；调用方必须先完成一次合法规划再询问决策。
 
-use super::planner::ContextPressure;
-use super::CompactConfig;
+use crate::agent::compact_v2::config::CompactConfig;
+use crate::agent::compact_v2::planner::ContextPressure;
 use peri_acp_types::compact::{CompactDeferral, CompactDeferralReason, FullEscalationReason};
 
 /// 最小 Micro 净收益的门槛：完整上下文窗口的 1/N，向上取整。
@@ -13,6 +13,7 @@ use peri_acp_types::compact::{CompactDeferral, CompactDeferralReason, FullEscala
 /// 分母来自 [`CompactConfig::micro_min_gain_divisor`]；比例只在这里定义一次，
 /// planner、Full 与 Smart 分支都复用它，避免复制出第二套经济门槛。
 /// 程序内构造的零值按最严格口径（N=1）处理。
+#[must_use]
 pub fn min_micro_gain_tokens(context_window: u32, config: &CompactConfig) -> u64 {
     let divisor = u64::from(config.micro_min_gain_divisor.max(1));
     u64::from(context_window).div_ceil(divisor)

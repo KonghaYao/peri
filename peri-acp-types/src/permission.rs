@@ -3,10 +3,9 @@
 //! 自 `peri-middlewares/src/hitl/shared_mode.rs` 迁入（3.0 批 2 波 1：
 //! 协议类型归契约层；`peri-middlewares::hitl::shared_mode` 保留 re-export 保兼容）。
 
-use std::sync::{
-    atomic::{AtomicU8, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 /// 权限模式枚举，控制 HITL 审批行为
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +45,7 @@ impl PermissionMode {
     }
 }
 
-/// TryFrom<u8> 实现：异常值（>4）回退到 Default。
+/// `TryFrom<u8>` 实现：异常值（>4）回退到 Default。
 /// 值 1 保留为历史 DontAsk 的占位（已删除），映射到 Default 以保证向前兼容。
 #[allow(clippy::fallible_impl_from)]
 impl From<u8> for PermissionMode {
@@ -61,13 +60,13 @@ impl From<u8> for PermissionMode {
     }
 }
 
-/// 跨线程共享的权限模式状态（Arc<AtomicU8> 封装）
+/// 跨线程共享的权限模式状态（`Arc<AtomicU8>` 封装）
 pub struct SharedPermissionMode {
     inner: AtomicU8,
 }
 
 impl SharedPermissionMode {
-    /// 创建新的共享权限模式实例，返回 Arc<Self>
+    /// 创建新的共享权限模式实例，返回 `Arc<Self>`
     pub fn new(mode: PermissionMode) -> Arc<Self> {
         Arc::new(Self {
             inner: AtomicU8::new(mode as u8),

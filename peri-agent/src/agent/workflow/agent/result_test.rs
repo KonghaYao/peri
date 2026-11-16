@@ -1,16 +1,28 @@
-use super::*;
+use crate::agent::stages::LoopResult;
+use crate::agent::workflow::agent::observation::RunStats;
+use crate::agent::workflow::agent::observation::WorkflowObservation;
 use crate::session::FrozenContext;
+use crate::session::Session;
+use peri_acp_types::command::PromptStopReason;
+use peri_acp_types::session::ExecutionFailure;
+use peri_acp_types::session::TurnTelemetryOutcome;
+use peri_acp_types::thread::AgentStatus;
+use peri_acp_types::workflow::AgentRunParams;
+use peri_acp_types::workflow::AgentRunResult;
+use peri_acp_types::workflow::Usage;
 use serde_json::json;
+use std::sync::Arc;
+use std::time::Instant;
 
 fn params(schema: Option<serde_json::Value>) -> AgentRunParams {
     serde_json::from_value(json!({"runId": "run", "agentId": 7, "prompt": "test",
         "phase": "review", "schema": schema}))
-    .unwrap()
+    .expect("from_value must accept this test fixture representation")
 }
 
 #[test]
 fn completed_plain_output_preserves_wire_string_and_fallback_statistics() {
-    let result = completed_result(
+    let result = crate::agent::workflow::agent::result::completed_result(
         "plain text".into(),
         RunStats {
             tool_count: 3,
@@ -47,7 +59,7 @@ fn completed_structured_output_validates_without_changing_wire_or_actual_usage()
     let output = r#"{"answer": "ok"}"#;
     let schema = json!({"type": "object", "required": ["answer"],
         "properties": {"answer": {"type": "string"}}});
-    let result = completed_result(
+    let result = crate::agent::workflow::agent::result::completed_result(
         output.into(),
         RunStats {
             output_tokens: 37,
@@ -71,7 +83,7 @@ fn completed_structured_output_validates_without_changing_wire_or_actual_usage()
     assert_eq!(actual, json!(output));
     assert_eq!((usage.output_tokens, token_count), (37, Some(37)));
     assert_eq!(model.as_deref(), Some("provider-model"));
-    let invalid = completed_result(
+    let invalid = crate::agent::workflow::agent::result::completed_result(
         "{}".into(),
         RunStats::default(),
         &params(Some(schema)),
@@ -100,7 +112,7 @@ fn completed_structured_output_accepts_integer_nested_array() {
             }
         }
     });
-    let result = completed_result(
+    let result = crate::agent::workflow::agent::result::completed_result(
         r#"{"packet_revision":2,"attempts":[{"attempt_number":1,"status":"valid"}]}"#.into(),
         RunStats::default(),
         &params(Some(schema)),
@@ -114,7 +126,7 @@ fn completed_structured_output_accepts_integer_nested_array() {
 #[test]
 fn completed_structured_output_accepts_numeric_integer_semantics() {
     for output in ["2", "2.0", "2e1"] {
-        let result = completed_result(
+        let result = crate::agent::workflow::agent::result::completed_result(
             output.into(),
             RunStats::default(),
             &params(Some(json!({"type": "integer"}))),
@@ -129,7 +141,7 @@ fn completed_structured_output_accepts_numeric_integer_semantics() {
 fn completed_structured_output_accepts_integer_and_fractional_number_values() {
     let schema = json!({"type": "number"});
     for output in ["2", "2.5"] {
-        let result = completed_result(
+        let result = crate::agent::workflow::agent::result::completed_result(
             output.into(),
             RunStats::default(),
             &params(Some(schema.clone())),
@@ -148,7 +160,7 @@ fn completed_structured_output_rejects_lossless_fractional_integer_lexemes() {
         "1e-999",
         "1e-999999999999999999999",
     ] {
-        let result = completed_result(
+        let result = crate::agent::workflow::agent::result::completed_result(
             output.into(),
             RunStats::default(),
             &params(Some(json!({"type": "integer"}))),
@@ -169,7 +181,7 @@ fn completed_structured_output_rejects_fractional_integer() {
         "type": "object",
         "properties": {"packet_revision": {"type": "integer"}}
     });
-    let result = completed_result(
+    let result = crate::agent::workflow::agent::result::completed_result(
         r#"{"packet_revision":2.5}"#.into(),
         RunStats::default(),
         &params(Some(schema)),
@@ -200,7 +212,7 @@ fn completed_structured_output_rejects_missing_nested_required_field() {
             }
         }
     });
-    let result = completed_result(
+    let result = crate::agent::workflow::agent::result::completed_result(
         r#"{"attempts":[{}]}"#.into(),
         RunStats::default(),
         &params(Some(schema)),
@@ -221,7 +233,7 @@ fn run_projection_keeps_forwarder_failure_priority_and_cancel_terminal() {
     let session = Session::new(Arc::from("/unused"), FrozenContext::builder().build(), None);
     let params = params(None);
     let observation = WorkflowObservation::new(&params, None, None);
-    let failed = project_run_result(
+    let failed = crate::agent::workflow::agent::result::project_run_result(
         LoopResult::Interrupted,
         Err(ExecutionFailure::internal("forwarder join failed")),
         &session,
@@ -236,7 +248,7 @@ fn run_projection_keeps_forwarder_failure_priority_and_cancel_terminal() {
         matches!(failed.telemetry_outcome(), TurnTelemetryOutcome::Failed { failure }
         if failure.public_message == "forwarder join failed")
     );
-    let interrupted = project_run_result(
+    let interrupted = crate::agent::workflow::agent::result::project_run_result(
         LoopResult::Interrupted,
         Ok(()),
         &session,
@@ -251,7 +263,7 @@ fn run_projection_keeps_forwarder_failure_priority_and_cancel_terminal() {
             reason: PromptStopReason::Cancelled
         }
     ));
-    let completed = project_run_result(
+    let completed = crate::agent::workflow::agent::result::project_run_result(
         LoopResult::Completed,
         Ok(()),
         &session,
@@ -280,25 +292,32 @@ fn workflow_terminal_status_follows_child_lifecycle_mapping() {
         phase: None,
         duration_ms: None,
     };
-    assert_eq!(terminal_status(&done), AgentStatus::Done);
-    assert_eq!(terminal_status(&AgentRunResult::Skipped), AgentStatus::Done);
     assert_eq!(
-        terminal_status(&AgentRunResult::Dead {
+        crate::agent::workflow::agent::result::terminal_status(&done),
+        AgentStatus::Done
+    );
+    assert_eq!(
+        crate::agent::workflow::agent::result::terminal_status(&AgentRunResult::Skipped),
+        AgentStatus::Done
+    );
+    assert_eq!(
+        crate::agent::workflow::agent::result::terminal_status(&AgentRunResult::Dead {
             reason: Some("interrupted".into()),
             detail: None,
         }),
         AgentStatus::Cancelled
     );
-    for reason in [
+    let reason_items = [
         None,
         Some("runagent-threw".to_owned()),
         Some("settlement-due".to_owned()),
         Some("event-forwarder-failed".to_owned()),
         Some("initial-prompt-enqueue-failed".to_owned()),
         Some("execution-blocked".to_owned()),
-    ] {
+    ];
+    for reason in reason_items {
         assert_eq!(
-            terminal_status(&AgentRunResult::Dead {
+            crate::agent::workflow::agent::result::terminal_status(&AgentRunResult::Dead {
                 reason,
                 detail: None
             }),
@@ -319,9 +338,12 @@ fn workflow_terminal_status_after_incomplete_close() {
         phase: None,
         duration_ms: None,
     };
-    assert_eq!(terminal_status_after_close(&done, true), AgentStatus::Done);
     assert_eq!(
-        terminal_status_after_close(&done, false),
+        crate::agent::workflow::agent::result::terminal_status_after_close(&done, true),
+        AgentStatus::Done
+    );
+    assert_eq!(
+        crate::agent::workflow::agent::result::terminal_status_after_close(&done, false),
         AgentStatus::Error
     );
     let cancelled = AgentRunResult::Dead {
@@ -329,7 +351,7 @@ fn workflow_terminal_status_after_incomplete_close() {
         detail: None,
     };
     assert_eq!(
-        terminal_status_after_close(&cancelled, false),
+        crate::agent::workflow::agent::result::terminal_status_after_close(&cancelled, false),
         AgentStatus::Error
     );
     let failed = AgentRunResult::Dead {
@@ -337,7 +359,7 @@ fn workflow_terminal_status_after_incomplete_close() {
         detail: None,
     };
     assert_eq!(
-        terminal_status_after_close(&failed, false),
+        crate::agent::workflow::agent::result::terminal_status_after_close(&failed, false),
         AgentStatus::Error
     );
 }

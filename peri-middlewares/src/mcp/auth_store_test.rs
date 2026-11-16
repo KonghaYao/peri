@@ -1,7 +1,12 @@
-use super::*;
+use super::OAuthConfig;
+use super::OAuthCredentialClient;
+use super::PerServerCredentialStore;
+use super::StoredCredentials;
+use rmcp::transport::CredentialStore as _;
 use std::sync::Arc;
 
-use crate::mcp::{client::McpClientPool, config::McpServerConfig};
+use crate::mcp::client::McpClientPool;
+use crate::mcp::config::McpServerConfig;
 
 fn http_config(endpoint: &str, oauth: Option<OAuthConfig>) -> McpServerConfig {
     serde_json::from_value(serde_json::json!({ "url": endpoint, "oauth": oauth })).unwrap()
@@ -49,14 +54,14 @@ impl OAuthCredentialPort for MemoryOAuthCredentialPort {
 }
 
 fn memory_client() -> crate::mcp::auth_store::OAuthCredentialClient {
-    crate::mcp::auth_store::OAuthCredentialClient::new(std::sync::Arc::new(
+    crate::mcp::auth_store::OAuthCredentialClient::try_new(std::sync::Arc::new(
         MemoryOAuthCredentialPort::default(),
     ))
     .unwrap()
 }
 
 fn failing_clear_client() -> crate::mcp::auth_store::OAuthCredentialClient {
-    crate::mcp::auth_store::OAuthCredentialClient::new(std::sync::Arc::new(
+    crate::mcp::auth_store::OAuthCredentialClient::try_new(std::sync::Arc::new(
         MemoryOAuthCredentialPort {
             reject_clear: true,
             ..Default::default()
@@ -126,18 +131,18 @@ async fn per_server_adapter_load_save_and_clear_are_isolated() {
 #[test]
 fn static_credential_identity_binds_server_endpoint_and_oauth_config() {
     let oauth = OAuthConfig::default();
-    let key = static_credential_key("server", "https://first.example/mcp", &oauth);
+    let key = super::static_credential_key("server", "https://first.example/mcp", &oauth);
     assert_eq!(
         key,
-        static_credential_key("server", "https://first.example/mcp", &oauth)
+        super::static_credential_key("server", "https://first.example/mcp", &oauth)
     );
     assert_ne!(
         key,
-        static_credential_key("other", "https://first.example/mcp", &oauth)
+        super::static_credential_key("other", "https://first.example/mcp", &oauth)
     );
     assert_ne!(
         key,
-        static_credential_key("server", "https://second.example/mcp", &oauth)
+        super::static_credential_key("server", "https://second.example/mcp", &oauth)
     );
     for changed in [
         OAuthConfig {
@@ -157,7 +162,8 @@ fn static_credential_identity_binds_server_endpoint_and_oauth_config() {
             ..Default::default()
         },
     ] {
-        let changed_key = static_credential_key("server", "https://first.example/mcp", &changed);
+        let changed_key =
+            super::static_credential_key("server", "https://first.example/mcp", &changed);
         assert_ne!(key, changed_key);
         assert!(!changed_key.contains("secret-marker"));
     }
@@ -176,8 +182,8 @@ async fn clear_oauth_uses_current_config_key_without_clearing_other_endpoint_or_
         }),
     );
     let oauth = config.oauth.as_ref().unwrap();
-    let current_key = static_credential_key("server", config.url.as_deref().unwrap(), oauth);
-    let previous_key = static_credential_key("server", "https://old.example/mcp", oauth);
+    let current_key = super::static_credential_key("server", config.url.as_deref().unwrap(), oauth);
+    let previous_key = super::static_credential_key("server", "https://old.example/mcp", oauth);
     let dynamic_key = "dynamic:session:incarnation:server";
     for key in [&current_key, &previous_key, dynamic_key] {
         client
@@ -261,8 +267,8 @@ async fn test_load_nonexistent_server_returns_none() {
 #[tokio::test]
 async fn injected_clients_share_only_their_port() {
     let port = Arc::new(MemoryOAuthCredentialPort::default());
-    let first = OAuthCredentialClient::new(port.clone()).unwrap();
-    let second = OAuthCredentialClient::new(port).unwrap();
+    let first = OAuthCredentialClient::try_new(port.clone()).unwrap();
+    let second = OAuthCredentialClient::try_new(port).unwrap();
     first
         .save_server(
             "srv1",
@@ -346,7 +352,7 @@ async fn test_concurrent_save_across_store_instances_preserves_all_servers() {
     let port = Arc::new(MemoryOAuthCredentialPort::default());
     let mut handles = vec![];
     for i in 0..10 {
-        let store = OAuthCredentialClient::new(port.clone()).unwrap();
+        let store = OAuthCredentialClient::try_new(port.clone()).unwrap();
         handles.push(tokio::spawn(async move {
             store
                 .save_server(
@@ -361,7 +367,7 @@ async fn test_concurrent_save_across_store_instances_preserves_all_servers() {
         handle.await.unwrap();
     }
 
-    let store = OAuthCredentialClient::new(port).unwrap();
+    let store = OAuthCredentialClient::try_new(port).unwrap();
     assert_eq!(store.list_servers().await.unwrap().len(), 10);
 }
 

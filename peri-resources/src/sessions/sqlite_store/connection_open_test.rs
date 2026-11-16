@@ -1,7 +1,14 @@
-use super::*;
-use crate::sessions::sqlite_store::{schema::CURRENT_SCHEMA_VERSION, SqliteThreadStore};
+use super::{
+    AssertSqlSafe, Duration, Path, Result, SqliteConnectOptions, WorkspaceError,
+    SCHEMA_OPEN_LOCK_TIMEOUT,
+};
+use sqlx::Connection;
+
+use crate::sessions::sqlite_store::schema::CURRENT_SCHEMA_VERSION;
+use crate::sessions::sqlite_store::SqliteThreadStore;
 use std::sync::Arc;
-use tokio::{sync::Barrier, task::JoinSet};
+use tokio::sync::Barrier;
+use tokio::task::JoinSet;
 
 /// 「前一个持有者已释放，锁应当可以再获取」这类释放探测的等待预算。
 ///
@@ -23,7 +30,7 @@ const LOCK_RELEASE_PROBE_BUDGET: Duration = Duration::from_millis(250);
 /// **不在本守卫覆盖内**（已在 `.recon/S13-lock-test.md` §4.7 实测登记：那种写法绕过
 /// 本入口后回归仍绿），内联零等待会把 fork 继承窗口报成假红。
 async fn probe_initialization_lock_release(path: &Path) -> Result<std::fs::File> {
-    lock_schema_open(path, LOCK_RELEASE_PROBE_BUDGET).await
+    super::lock_schema_open(path, LOCK_RELEASE_PROBE_BUDGET).await
 }
 
 async fn concurrent_stores(path: &Path, instances: usize) -> Vec<SqliteThreadStore> {
@@ -34,7 +41,7 @@ async fn concurrent_stores(path: &Path, instances: usize) -> Vec<SqliteThreadSto
         let barrier = barrier.clone();
         opens.spawn(async move {
             barrier.wait().await;
-            SqliteThreadStore::new(path).await
+            SqliteThreadStore::try_new(path).await
         });
     }
     let mut stores = Vec::new();
@@ -67,7 +74,7 @@ async fn concurrent_cold_opens_initialize_wal_and_schema_repeatedly() {
         }
         assert!(!path.with_extension("db-wal").exists());
         assert!(!path.with_extension("db-shm").exists());
-        let reopened = SqliteThreadStore::new(&path).await.unwrap();
+        let reopened = SqliteThreadStore::try_new(&path).await.unwrap();
         reopened.close().await;
     }
 }
@@ -117,7 +124,7 @@ async fn registration_upgrade_fixture(path: &Path) {
 async fn current_shape_open_backfills_a_missing_canonical_index() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
-    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let store = SqliteThreadStore::try_new(&path).await.unwrap();
     // 模拟上一版构建建出的库：删掉新索引后，版本与形状都不变，打开路径仍判 Current。
     sqlx::raw_sql("DROP INDEX idx_messages_active")
         .execute(&store.database.pool)
@@ -125,7 +132,7 @@ async fn current_shape_open_backfills_a_missing_canonical_index() {
         .unwrap();
     store.close().await;
 
-    let reopened = SqliteThreadStore::new(&path).await.unwrap();
+    let reopened = SqliteThreadStore::try_new(&path).await.unwrap();
     let (present,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = 'idx_messages_active'",
     )
@@ -150,7 +157,7 @@ async fn concurrent_migration_rebuilds_registration_tables_only_once() {
     let directory = tempfile::tempdir().unwrap();
     let control_path = directory.path().join("control.db");
     registration_upgrade_fixture(&control_path).await;
-    let control = SqliteThreadStore::new(&control_path).await.unwrap();
+    let control = SqliteThreadStore::try_new(&control_path).await.unwrap();
     let (expected_cookie,): (i64,) = sqlx::query_as("PRAGMA schema_version")
         .fetch_one(&control.database.pool)
         .await
@@ -184,7 +191,7 @@ async fn concurrent_migration_rebuilds_registration_tables_only_once() {
         );
         store.close().await;
     }
-    let reopened = SqliteThreadStore::new(&path).await.unwrap();
+    let reopened = SqliteThreadStore::try_new(&path).await.unwrap();
     let (cookie,): (i64,) = sqlx::query_as("PRAGMA schema_version")
         .fetch_one(&reopened.database.pool)
         .await
@@ -197,16 +204,16 @@ async fn concurrent_migration_rebuilds_registration_tables_only_once() {
 async fn initialization_lock_has_a_budget_and_preserves_the_sidecar() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("budget.db");
-    let held = lock_schema_open(&path, Duration::from_secs(1))
+    let held = super::lock_schema_open(&path, Duration::from_secs(1))
         .await
         .unwrap();
-    let lock_path = schema_lock_path(&path).await.unwrap();
+    let lock_path = super::schema_lock_path(&path).await.unwrap();
     drop(held);
     tokio::fs::write(&lock_path, b"stable sidecar")
         .await
         .unwrap();
     let held = probe_initialization_lock_release(&path).await.unwrap();
-    let waiting = lock_schema_open(&path, Duration::from_millis(40));
+    let waiting = super::lock_schema_open(&path, Duration::from_millis(40));
     tokio::pin!(waiting);
     tokio::select! {
         result = &mut waiting => panic!("lock wait ended before the timer: {result:?}"),
@@ -221,7 +228,7 @@ async fn initialization_lock_has_a_budget_and_preserves_the_sidecar() {
         std::io::ErrorKind::TimedOut
     );
     drop(held);
-    let retried = lock_schema_open(&path, Duration::from_secs(1))
+    let retried = super::lock_schema_open(&path, Duration::from_secs(1))
         .await
         .unwrap();
     drop(retried);
@@ -239,7 +246,7 @@ async fn cancelling_a_lock_holder_allows_another_database_open() {
     let (ready, acquired) = tokio::sync::oneshot::channel();
     let holder_path = path.clone();
     let holder = tokio::spawn(async move {
-        let _held = lock_schema_open(&holder_path, Duration::from_secs(1))
+        let _held = super::lock_schema_open(&holder_path, Duration::from_secs(1))
             .await
             .unwrap();
         ready.send(()).unwrap();
@@ -248,34 +255,34 @@ async fn cancelling_a_lock_holder_allows_another_database_open() {
     acquired.await.unwrap();
     holder.abort();
     assert!(holder.await.unwrap_err().is_cancelled());
-    let reacquired = lock_schema_open(&path, SCHEMA_OPEN_LOCK_TIMEOUT)
+    let reacquired = super::lock_schema_open(&path, SCHEMA_OPEN_LOCK_TIMEOUT)
         .await
         .unwrap();
     drop(reacquired);
-    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let store = SqliteThreadStore::try_new(&path).await.unwrap();
     store.close().await;
-    assert!(schema_lock_path(&path).await.unwrap().exists());
+    assert!(super::schema_lock_path(&path).await.unwrap().exists());
 }
 
 #[tokio::test]
 async fn cancelling_a_waiter_does_not_acquire_an_orphan_lock() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cancelled-waiter.db");
-    let held = lock_schema_open(&path, Duration::from_secs(1))
+    let held = super::lock_schema_open(&path, Duration::from_secs(1))
         .await
         .unwrap();
     let waiter_path = path.clone();
-    let waiter = tokio::spawn(async move { SqliteThreadStore::new(waiter_path).await });
+    let waiter = tokio::spawn(async move { SqliteThreadStore::try_new(waiter_path).await });
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert!(!waiter.is_finished());
     waiter.abort();
     assert!(waiter.await.err().unwrap().is_cancelled());
     drop(held);
-    let reacquired = lock_schema_open(&path, SCHEMA_OPEN_LOCK_TIMEOUT)
+    let reacquired = super::lock_schema_open(&path, SCHEMA_OPEN_LOCK_TIMEOUT)
         .await
         .unwrap();
     drop(reacquired);
-    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let store = SqliteThreadStore::try_new(&path).await.unwrap();
     store.close().await;
 }
 
@@ -283,7 +290,7 @@ async fn cancelling_a_waiter_does_not_acquire_an_orphan_lock() {
 async fn cancelling_an_open_during_schema_initialization_releases_its_lock() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cancelled-initialization.db");
-    let initial = SqliteThreadStore::new(&path).await.unwrap();
+    let initial = SqliteThreadStore::try_new(&path).await.unwrap();
     initial.close().await;
     let mut blocker =
         sqlx::SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
@@ -294,10 +301,10 @@ async fn cancelling_an_open_during_schema_initialization_releases_its_lock() {
         .await
         .unwrap();
     let opening_path = path.clone();
-    let opening = tokio::spawn(async move { SqliteThreadStore::new(opening_path).await });
+    let opening = tokio::spawn(async move { SqliteThreadStore::try_new(opening_path).await });
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            match lock_schema_open(&path, Duration::ZERO).await {
+            match super::lock_schema_open(&path, Duration::ZERO).await {
                 Ok(held) => drop(held),
                 Err(error) => {
                     assert_eq!(
@@ -317,13 +324,13 @@ async fn cancelling_an_open_during_schema_initialization_releases_its_lock() {
     opening.abort();
     assert!(opening.await.err().unwrap().is_cancelled());
     // abort 不会中断已启动的 spawn_blocking 锁尝试；等待它归还文件句柄。
-    let held = lock_schema_open(&path, Duration::from_secs(1))
+    let held = super::lock_schema_open(&path, Duration::from_secs(1))
         .await
         .unwrap();
     drop(held);
     sqlx::query("ROLLBACK").execute(&mut blocker).await.unwrap();
     blocker.close().await.unwrap();
-    let reopened = SqliteThreadStore::new(&path).await.unwrap();
+    let reopened = SqliteThreadStore::try_new(&path).await.unwrap();
     reopened.close().await;
     tokio::time::timeout(Duration::from_secs(1), async {
         while tokio::fs::try_exists(path.with_extension("db-wal"))
@@ -362,7 +369,7 @@ async fn failed_migration_closes_connections_and_releases_initialization_lock() 
         .await
         .unwrap();
     connection.close().await.unwrap();
-    let error = SqliteThreadStore::new(&path).await.err().unwrap();
+    let error = SqliteThreadStore::try_new(&path).await.err().unwrap();
     assert!(error.to_string().contains("session_bindings"));
     assert!(!path.with_extension("db-wal").exists());
     assert!(!path.with_extension("db-shm").exists());
@@ -382,7 +389,7 @@ async fn failed_migration_closes_connections_and_releases_initialization_lock() 
         .await
         .unwrap();
     connection.close().await.unwrap();
-    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let store = SqliteThreadStore::try_new(&path).await.unwrap();
     store.close().await;
 }
 
@@ -410,7 +417,7 @@ async fn incompatible_schema_is_rejected_without_wal_or_database_changes() {
         .unwrap();
         connection.close().await.unwrap();
         let before = tokio::fs::read(&path).await.unwrap();
-        let error = SqliteThreadStore::new(&path).await.err().unwrap();
+        let error = SqliteThreadStore::try_new(&path).await.err().unwrap();
         match error.downcast_ref::<WorkspaceError>().unwrap() {
             WorkspaceError::UnsupportedDatabaseSchema => assert_eq!(version, 0),
             WorkspaceError::UnsupportedSchemaVersion { found, supported } => {
@@ -462,7 +469,7 @@ async fn read_only_open_never_creates_an_initialization_lock() {
         .unwrap();
     store.close().await;
     assert_eq!(tokio::fs::read(&path).await.unwrap(), before);
-    assert!(!schema_lock_path(&path).await.unwrap().exists());
+    assert!(!super::schema_lock_path(&path).await.unwrap().exists());
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
 }
 
@@ -476,24 +483,33 @@ async fn canonical_database_and_symlink_aliases_share_one_lock_inode() {
     symlink(directory.path(), aliases.path().join("directory")).unwrap();
     let path = directory.path().join("aliased.db");
     let cold_alias = aliases.path().join("directory/aliased.db");
-    let held = lock_schema_open(&path, Duration::ZERO).await.unwrap();
-    let lock_path = schema_lock_path(&path).await.unwrap();
+    let held = super::lock_schema_open(&path, Duration::ZERO)
+        .await
+        .unwrap();
+    let lock_path = super::schema_lock_path(&path).await.unwrap();
     let inode = std::fs::metadata(&lock_path).unwrap().ino();
-    assert!(lock_schema_open(&cold_alias, Duration::ZERO).await.is_err());
+    assert!(super::lock_schema_open(&cold_alias, Duration::ZERO)
+        .await
+        .is_err());
     drop(held);
     let (first, second) = tokio::join!(
-        SqliteThreadStore::new(&path),
-        SqliteThreadStore::new(&cold_alias)
+        SqliteThreadStore::try_new(&path),
+        SqliteThreadStore::try_new(&cold_alias)
     );
     first.unwrap().close().await;
     second.unwrap().close().await;
     let existing_alias = aliases.path().join("existing.db");
     symlink(&path, &existing_alias).unwrap();
-    assert_eq!(schema_lock_path(&existing_alias).await.unwrap(), lock_path);
+    assert_eq!(
+        super::schema_lock_path(&existing_alias).await.unwrap(),
+        lock_path
+    );
     let held = probe_initialization_lock_release(&existing_alias)
         .await
         .unwrap();
-    assert!(lock_schema_open(&path, Duration::ZERO).await.is_err());
+    assert!(super::lock_schema_open(&path, Duration::ZERO)
+        .await
+        .is_err());
     drop(held);
     assert_eq!(std::fs::metadata(&lock_path).unwrap().ino(), inode);
     assert!(!aliases.path().join("existing.db.schema-lock").exists());
@@ -546,9 +562,11 @@ fn initialization_lock_child_process() {
 async fn exited_process_releases_initialization_lock_for_retry() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("exited-holder.db");
-    let held = lock_schema_open(&path, Duration::ZERO).await.unwrap();
+    let held = super::lock_schema_open(&path, Duration::ZERO)
+        .await
+        .unwrap();
     drop(held);
-    let lock_path = schema_lock_path(&path).await.unwrap();
+    let lock_path = super::schema_lock_path(&path).await.unwrap();
     let ready_path = directory.path().join("child.ready");
     let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
         .args([
@@ -569,7 +587,7 @@ async fn exited_process_releases_initialization_lock_for_retry() {
     })
     .await
     .unwrap();
-    let error = lock_schema_open(&path, Duration::from_millis(40))
+    let error = super::lock_schema_open(&path, Duration::from_millis(40))
         .await
         .unwrap_err();
     assert_eq!(
@@ -580,7 +598,7 @@ async fn exited_process_releases_initialization_lock_for_retry() {
     child.wait().await.unwrap();
     // 外层超时必须宽于生产锁预算 SCHEMA_OPEN_LOCK_TIMEOUT，让真实缺陷以 TimedOut 暴露。
     // 曾用 1s，CI 负载下外层先到期误报（run 38145652592）。
-    let store = tokio::time::timeout(Duration::from_secs(10), SqliteThreadStore::new(&path))
+    let store = tokio::time::timeout(Duration::from_secs(10), SqliteThreadStore::try_new(&path))
         .await
         .unwrap()
         .unwrap();
@@ -647,10 +665,10 @@ async fn release_probe_waits_out_an_external_holder() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("external-holder.db");
     // 侧车文件先由本进程建立；随后的持有者在进程之外。
-    let held = lock_schema_open(&path, Duration::from_secs(1))
+    let held = super::lock_schema_open(&path, Duration::from_secs(1))
         .await
         .unwrap();
-    let lock_path = schema_lock_path(&path).await.unwrap();
+    let lock_path = super::schema_lock_path(&path).await.unwrap();
     drop(held);
     let ready_path = directory.path().join("holder.ready");
     let release_path = directory.path().join("holder.release");
@@ -676,7 +694,7 @@ async fn release_probe_waits_out_an_external_holder() {
     .expect("holder child never acquired the initialization lock");
 
     // 步骤 2：受控首次 WouldBlock——持有者未收到放行信号。
-    assert_initialization_lock_busy(lock_schema_open(&path, Duration::ZERO).await);
+    assert_initialization_lock_busy(super::lock_schema_open(&path, Duration::ZERO).await);
 
     // 步骤 3：判别断言。持锁期间探测只能在预算耗尽后放弃；下界是独立常量
     // （`PROBE_WAIT_FLOOR`），把预算调小不会让这条断言变成恒真。
@@ -691,7 +709,7 @@ async fn release_probe_waits_out_an_external_holder() {
     );
 
     // 步骤 4：锁整段调用都被持有。
-    assert_initialization_lock_busy(lock_schema_open(&path, Duration::ZERO).await);
+    assert_initialization_lock_busy(super::lock_schema_open(&path, Duration::ZERO).await);
 
     // 步骤 5：放行后同一入口必须取得锁。
     tokio::fs::write(&release_path, b"release").await.unwrap();

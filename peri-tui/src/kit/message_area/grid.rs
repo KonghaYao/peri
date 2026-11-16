@@ -156,22 +156,26 @@ impl GridSpec {
     }
 
     /// content 列宽（usize 形式，渲染层主要使用）。
+    #[must_use]
     pub fn content_width(&self) -> usize {
         self.content as usize
     }
 
     /// 块首行前缀总宽度 = outer + accent + gap（符号 + gap 前的 1 列 outer 空 cell）。
+    #[must_use]
     pub fn first_prefix_width(&self) -> usize {
         (self.outer + self.accent + self.gap) as usize
     }
 
     /// 续行前缀总宽度（outer 空 cell + dim 竖线 + gap）。
+    #[must_use]
     pub fn cont_prefix_width(&self) -> usize {
         (self.outer + self.accent + self.gap) as usize
     }
 
     /// 过程区正文可用宽度 = `content - indent`（下限 1）——
     /// 右移量从左缘让出，右缘不动（§8）。
+    #[must_use]
     pub fn process_content_width(&self) -> usize {
         self.content.saturating_sub(self.indent).max(1) as usize
     }
@@ -180,6 +184,7 @@ impl GridSpec {
     /// 竖线的落点：accent 标记列右移 `indent` 格（col1 的文本竖线投影位让给
     /// 台阶在转场处接管）。`indent == 0`（Compact/Narrow）标记留在 accent 列，
     /// 与 [`Self::first_prefix`] 回退形态逐列一致（§9）。
+    #[must_use]
     pub fn process_marker_col(&self) -> u16 {
         self.outer + self.indent
     }
@@ -197,16 +202,19 @@ impl GridSpec {
     ///
     /// 这是 metadata 右对齐的落点，也是渲染换行宽度——`Paragraph` 换行宽度、
     /// slot wrap_map 与选区列映射必须同取此值，否则 metadata 行会在视觉行计数上二次折行。
+    #[must_use]
     pub fn line_width(&self) -> u16 {
         self.band_width.saturating_sub(1)
     }
 
     /// Narrow 断点：accent 符号退化为 bullet（§11）。
+    #[must_use]
     pub fn is_narrow(&self) -> bool {
         self.bp == Breakpoint::Narrow
     }
 
     /// Wide 断点：metadata 可右对齐。
+    #[must_use]
     pub fn is_wide(&self) -> bool {
         self.bp == Breakpoint::Wide
     }

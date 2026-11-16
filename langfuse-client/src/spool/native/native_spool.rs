@@ -1,0 +1,480 @@
+use super::{
+    fs, io, native_object, native_quota, native_scan, sealed, Arc, CleanupRegistration, File,
+    FileExt, ObjectClaim, ObjectId, ObjectKind, ObjectMeta, OpenOptions, PageCursor, Path, PathBuf,
+    QuotaReservation, RouteFingerprint, SpoolError, SpoolPage, SpoolReader, SpoolResult,
+    SpoolStore, SpoolUsage, SystemTime, TemporaryObject, UNIX_EPOCH,
+};
+
+/// 固定布局前缀（契约 §3.2：`peri/telemetry-spool/v1/<route>`）。
+pub(super) const LAYOUT_PREFIX: &str = "peri/telemetry-spool/v1";
+
+/// 描述信息格式版本；未知版本一律隔离，不做兼容猜测。
+pub(crate) const DESCRIPTOR_VERSION: u16 = 1;
+
+/// 描述信息字节上限（契约 §4：单对象最多 4 KiB）。
+pub(crate) const MAX_DESCRIPTOR_BYTES: u64 = 4 * 1024;
+
+/// 单页元数据条数上限（契约 §4：每页 64 条、页 buffer 256 KiB）。
+pub(crate) const MAX_PAGE_LIMIT: usize = 64;
+
+/// 对象目录分桶数（按 [`ObjectId`] 首字节分桶，避免一次 `read_dir` 全收集排序）。
+pub(crate) const OBJECT_BUCKETS: u16 = 256;
+
+/// 正文摘要/拷贝的块大小（契约 §4：读写各 64 KiB 工作区账单）。
+pub(crate) const IO_CHUNK_BYTES: usize = 64 * 1024;
+
+/// native 文件暂存：共享同一 [`NativeInner`] 的句柄可同时存在，语义等价。
+#[derive(Debug)]
+pub struct NativeSpool {
+    pub(super) inner: Arc<NativeInner>,
+}
+
+/// 适配器的不可变身份：route 目录、隔离摘要与 quota 预算。
+#[derive(Debug)]
+pub(crate) struct NativeInner {
+    pub(super) route_dir: PathBuf,
+    pub(super) route: RouteFingerprint,
+    pub(super) quota_bytes: u64,
+}
+
+impl NativeSpool {
+    /// 在本机私有应用数据根下打开；根无法确定或缺失时显式 [`SpoolError::Unavailable`]，
+    /// **不回退 cwd**（契约 §3.2）。
+    pub fn open_default(route: RouteFingerprint, quota_bytes: u64) -> SpoolResult<Self> {
+        let root = private_app_data_root().ok_or(SpoolError::Unavailable)?;
+        Self::open_at(root, route, quota_bytes)
+    }
+
+    /// 在调用方给定的根下打开 `<root>/peri/telemetry-spool/v1/<route>`；测试只用临时目录。
+    pub fn open_at(root: PathBuf, route: RouteFingerprint, quota_bytes: u64) -> SpoolResult<Self> {
+        let route_dir = root.join(LAYOUT_PREFIX).join(hex(route.as_bytes()));
+        let inner = Arc::new(NativeInner {
+            route_dir,
+            route,
+            quota_bytes,
+        });
+        ensure_layout(&inner)?;
+        probe_durable_io(&inner)?;
+        // 启动恢复顺序固定：先清扫崩溃 writer 的临时产物，再重建 quota 账本。
+        native_quota::sweep_startup_residue(&inner)?;
+        native_quota::rebuild(&inner)?;
+        Ok(Self { inner })
+    }
+}
+
+impl sealed::Sealed for NativeSpool {}
+
+impl SpoolStore for NativeSpool {
+    fn reserve(&self, bytes: u64) -> SpoolResult<Box<dyn QuotaReservation>> {
+        native_quota::reserve(&self.inner, bytes)
+    }
+
+    fn create(
+        &self,
+        quota: Box<dyn QuotaReservation>,
+        kind: ObjectKind,
+        cleanup: CleanupRegistration,
+    ) -> SpoolResult<Box<dyn TemporaryObject>> {
+        native_object::create(&self.inner, quota, kind, cleanup)
+    }
+
+    fn inspect(&self, id: ObjectId) -> SpoolResult<ObjectMeta> {
+        native_object::inspect(&self.inner, id)
+    }
+
+    fn open(&self, id: ObjectId) -> SpoolResult<SpoolReader> {
+        native_object::open_body(&self.inner, id)
+    }
+
+    fn list(&self, after: Option<PageCursor>, limit: usize) -> SpoolResult<SpoolPage> {
+        native_scan::list(&self.inner, after, limit)
+    }
+
+    fn claim(&self, id: ObjectId) -> SpoolResult<Option<Box<dyn ObjectClaim>>> {
+        native_object::claim(&self.inner, id)
+    }
+
+    fn delete(&self, id: ObjectId) -> SpoolResult<()> {
+        native_object::delete_if_present(&self.inner, id)
+    }
+
+    fn usage(&self) -> SpoolResult<SpoolUsage> {
+        native_quota::usage(&self.inner)
+    }
+}
+
+impl NativeInner {
+    pub(crate) fn route(&self) -> RouteFingerprint {
+        self.route
+    }
+
+    pub(crate) fn quota_bytes(&self) -> u64 {
+        self.quota_bytes
+    }
+
+    pub(crate) fn route_dir(&self) -> &Path {
+        &self.route_dir
+    }
+
+    pub(crate) fn domain_lock_path(&self) -> PathBuf {
+        self.route_dir.join("domain.lock")
+    }
+
+    pub(crate) fn quota_state_path(&self) -> PathBuf {
+        self.route_dir.join("quota").join("state.json")
+    }
+
+    pub(crate) fn quota_lock_path(&self, reservation: &str) -> PathBuf {
+        self.route_dir.join("quota").join("locks").join(reservation)
+    }
+
+    pub(crate) fn objects_dir(&self) -> PathBuf {
+        self.route_dir.join("objects")
+    }
+
+    /// 分桶目录：`objects/<id 首字节 hex>`。
+    pub(crate) fn bucket_dir(&self, bucket: u8) -> PathBuf {
+        self.objects_dir().join(format!("{bucket:02x}"))
+    }
+
+    pub(crate) fn bucket_of(id: ObjectId) -> u8 {
+        id.as_bytes()[0]
+    }
+
+    pub(crate) fn object_dir(&self, id: ObjectId) -> PathBuf {
+        self.bucket_dir(Self::bucket_of(id)).join(id_hex(id))
+    }
+
+    pub(crate) fn object_meta_path(&self, id: ObjectId) -> PathBuf {
+        self.object_dir(id).join("meta")
+    }
+
+    pub(crate) fn object_body_path(&self, id: ObjectId) -> PathBuf {
+        self.object_dir(id).join("body")
+    }
+
+    pub(crate) fn object_lock_path(&self, id: ObjectId) -> PathBuf {
+        self.object_dir(id).join("lock")
+    }
+
+    pub(crate) fn tmp_dir(&self) -> PathBuf {
+        self.route_dir.join("tmp")
+    }
+
+    pub(crate) fn writer_lock_path(&self, id: ObjectId) -> PathBuf {
+        self.tmp_dir().join(format!("{}.lock", id_hex(id)))
+    }
+
+    pub(crate) fn writer_part_path(&self, id: ObjectId) -> PathBuf {
+        self.tmp_dir().join(format!("{}.part", id_hex(id)))
+    }
+}
+
+/// 私有应用数据根；无法确定或不存在时返回 `None`（调用方转 [`SpoolError::Unavailable`]）。
+pub(super) fn private_app_data_root() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME")?;
+        existing_dir(PathBuf::from(home).join("Library/Application Support"))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+            let candidate = PathBuf::from(xdg);
+            // XDG 规范要求绝对路径；相对值不可信，直接忽略而不是按 cwd 解释。
+            if candidate.is_absolute() {
+                if let Some(dir) = existing_dir(candidate) {
+                    return Some(dir);
+                }
+            }
+        }
+        let home = std::env::var_os("HOME")?;
+        existing_dir(PathBuf::from(home).join(".local/share"))
+    }
+    #[cfg(windows)]
+    {
+        let appdata = std::env::var_os("APPDATA")?;
+        existing_dir(PathBuf::from(appdata))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
+}
+
+pub(super) fn existing_dir(path: PathBuf) -> Option<PathBuf> {
+    path.is_dir().then_some(path)
+}
+
+/// 创建布局目录与锁文件；目录 0700、文件 0600（其他平台等价 ACL 由宿主提供）。
+pub(super) fn ensure_layout(inner: &NativeInner) -> SpoolResult<()> {
+    for dir in [
+        inner.route_dir().to_path_buf(),
+        inner.tmp_dir(),
+        inner.objects_dir(),
+        inner.route_dir().join("quota"),
+        inner.route_dir().join("quota").join("locks"),
+    ] {
+        create_private_dir_all(&dir)
+            .map_err(|source| io_error("create spool directory", source))?;
+    }
+    Ok(())
+}
+
+/// fsync 与 advisory lock 能力探针：不支持即 [`SpoolError::Unavailable`]，不宣称崩溃持久性。
+///
+/// 探针不阻塞：对端持锁说明卷支持 advisory lock，只是此刻被同部署的其他 owner 持有
+/// （契约 §5.2 的跨进程竞争，平台错误形态见 [`is_lock_contention`]），不能降级成「不可用」
+/// ——紧随其后的启动重建会按 domain 锁排队。
+pub(super) fn probe_durable_io(inner: &NativeInner) -> SpoolResult<()> {
+    let probe =
+        create_private_file(&inner.domain_lock_path()).map_err(|_| SpoolError::Unavailable)?;
+    match FileExt::try_lock(&probe) {
+        Ok(()) => {}
+        Err(error) => {
+            if !is_lock_contention(&io::Error::from(error)) {
+                return Err(SpoolError::Unavailable);
+            }
+        }
+    }
+    probe.sync_all().map_err(|_| SpoolError::Unavailable)?;
+    let _ = FileExt::unlock(&probe);
+    Ok(())
+}
+
+/// 目录 0700 递归创建。
+pub(crate) fn create_private_dir_all(path: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
+/// 文件 0600 创建/截断。
+pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// 只读打开，不跟随可疑状态；调用方按错误分类。
+pub(crate) fn open_read_only(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
+/// 目录 fsync（Unix）；其他平台不宣称目录项持久性。
+pub(crate) fn fsync_dir(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        File::open(path)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+/// 同文件系统原子发布：临时文件 fsync 后 rename，再 fsync 父目录。
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+
+    let tmp = path.with_extension("tmp");
+    {
+        let mut file = create_private_file(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp, path)?;
+    if let Some(parent) = path.parent() {
+        fsync_dir(parent)?;
+    }
+    Ok(())
+}
+
+/// 锁文件尝试结果：把「条目已被并发删除」与真实 IO 故障分开（契约 §5.2）。
+///
+/// 并发删除下 `open(2)` 会报 `ENOENT`（Linux）、`EINVAL`（macOS 实测）或
+/// `ERROR_ACCESS_DENIED`（Windows 实测）：都只说明条目目录已经不在了，调用方应把该条目当作
+/// 不存在，而不是把正常清理竞争升级为扫描失败。
+/// 判定只看这次 `open` 的错误本身，见 [`is_concurrent_dir_removal`]。
+#[derive(Debug)]
+pub(crate) enum LockAttempt {
+    /// 取得独占锁；句柄存活期间其他 owner 无法领取或删除该条目。
+    Free(File),
+    /// 其他 owner 已持锁。
+    Held,
+    /// 条目目录已不存在或正被删除：条目不可领取，不是 IO 故障。
+    Gone,
+}
+
+/// 同一文件的独占锁尝试（契约 §3.2）。
+pub(crate) fn try_lock_file(path: &Path) -> io::Result<LockAttempt> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        // 条目目录被并发删除：条目不可领取，不是 IO 故障。
+        Err(error) if is_concurrent_dir_removal(&error) => return Ok(LockAttempt::Gone),
+        Err(error) => return Err(error),
+    };
+    match FileExt::try_lock(&file) {
+        Ok(()) => Ok(LockAttempt::Free(file)),
+        Err(error) => {
+            let error = io::Error::from(error);
+            if is_lock_contention(&error) {
+                Ok(LockAttempt::Held)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+/// 对端持锁在平台上的错误形态。
+///
+/// Unix 是 `WouldBlock`（`EWOULDBLOCK`/`EAGAIN`）；Windows 的 `LockFileEx` 报
+/// `ERROR_LOCK_VIOLATION`（33），当前 Rust 尚未把它映射成 `WouldBlock`。两者都只说明锁被
+/// 另一个 owner 持有，属契约 §5.2 的跨进程竞争，不是 IO 故障。
+pub(super) fn is_lock_contention(error: &io::Error) -> bool {
+    #[cfg(windows)]
+    const CONTENTION_OS_ERROR: Option<i32> = Some(33);
+    #[cfg(not(windows))]
+    const CONTENTION_OS_ERROR: Option<i32> = None;
+
+    error.kind() == io::ErrorKind::WouldBlock
+        || CONTENTION_OS_ERROR.is_some_and(|code| error.raw_os_error() == Some(code))
+}
+
+/// `open(2)` 失败是否只说明「锁文件所在条目目录已被并发删除」（契约 §5.2）。
+///
+/// - `ENOENT`：路径中的目录组件已不存在，Linux/macOS 的并发删除形态；Windows 的
+///   `ERROR_FILE_NOT_FOUND` / `ERROR_PATH_NOT_FOUND` 同样映射到 `NotFound`。
+/// - `EINVAL`：macOS 实测 `open(O_CREAT)` 撞上正在被删除的目录；Linux 不产生该形态，Windows 的
+///   `InvalidInput` 是 `ERROR_INVALID_PARAMETER`（语义不同），故只在非 Windows 平台并入。
+/// - `ERROR_ACCESS_DENIED`（`os error 5`）：Windows 实测（CI run 38398854149 的 Windows job）
+///   删除中的目录 / 条目（delete-pending）让 `open(O_CREAT)` 报「拒绝访问」。Windows 无法从错误面
+///   把该形态与真实 ACL 拒绝区分；spool 目录是进程私有目录、不产生 ACL 拒绝，故按并发删除并入
+///   （残余与移除条件见实施报告 §13，其余平台 `EACCES` 照常上抛）。
+///
+/// 判定只看**本次 `open` 的错误本身**，不做事后探测：探测发生在失败之后，两次系统调用之间目录
+/// 状态可以再变——CI（ubuntu）里逃逸成整页扫描失败的 `ENOENT`，只可能来自「`open` 报 `ENOENT`
+/// 而失败后探测仍看见该目录」这一 TOCTOU 形态。本函数的 flags 与 mode 固定且合法、目录布局在
+/// `open_at` 校验，因此上面这些错误只可能来自「目录被删」。
+pub(super) fn is_concurrent_dir_removal(error: &io::Error) -> bool {
+    #[cfg(windows)]
+    const ACCESS_DENIED_OS_ERROR: Option<i32> = Some(5);
+    #[cfg(not(windows))]
+    const ACCESS_DENIED_OS_ERROR: Option<i32> = None;
+
+    error.kind() == io::ErrorKind::NotFound
+        || (cfg!(not(windows)) && error.kind() == io::ErrorKind::InvalidInput)
+        || ACCESS_DENIED_OS_ERROR.is_some_and(|code| error.raw_os_error() == Some(code))
+}
+
+/// 静态操作名 + 底层错误；不携带路径与凭据。
+pub(crate) fn io_error(operation: &'static str, source: io::Error) -> SpoolError {
+    SpoolError::Io { operation, source }
+}
+
+/// 当前墙上时钟毫秒；非负。
+pub(crate) fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 小写十六进制编码。
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from_digit((byte >> 4) as u32, 16).expect("nibble"));
+        out.push(char::from_digit((byte & 0x0f) as u32, 16).expect("nibble"));
+    }
+    out
+}
+
+/// 十六进制解码；长度或字符非法返回 `None`。
+pub(crate) fn unhex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(text.len() / 2);
+    let mut high: Option<u8> = None;
+    for ch in text.chars() {
+        let value = ch.to_digit(16)? as u8;
+        match high.take() {
+            None => high = Some(value),
+            Some(previous) => out.push((previous << 4) | value),
+        }
+    }
+    Some(out)
+}
+
+pub(crate) fn id_hex(id: ObjectId) -> String {
+    hex(id.as_bytes())
+}
+
+/// 解析 32 位十六进制的对象 ID；其他长度或非法字符返回 `None`。
+pub(crate) fn parse_id(text: &str) -> Option<ObjectId> {
+    if text.len() != 32 {
+        return None;
+    }
+    let bytes = unhex(text)?;
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&bytes);
+    Some(ObjectId::from_bytes(id))
+}
+
+/// 新对象 ID：进程盐 + 单调序号 + 时间，避免依赖 cwd 上的随机文件与额外依赖。
+pub(crate) fn random_object_id() -> ObjectId {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+
+    static SALT: OnceLock<[u64; 2]> = OnceLock::new();
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    let salt = *SALT.get_or_init(|| {
+        let mut first = RandomState::new().build_hasher();
+        first.write_u64(u64::from(std::process::id()));
+        first.write_u64(now_ms() as u64);
+        let a = first.finish();
+        let mut second = RandomState::new().build_hasher();
+        second.write_u64(a);
+        second.write_u64(now_ms() as u64);
+        let b = second.finish();
+        [a, b]
+    });
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mut head = RandomState::new().build_hasher();
+    head.write_u64(salt[0]);
+    head.write_u64(sequence);
+    head.write_u64(now_ms() as u64);
+    let high = head.finish();
+    let mut tail = RandomState::new().build_hasher();
+    tail.write_u64(salt[1]);
+    tail.write_u64(high);
+    let low = tail.finish();
+
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&high.to_le_bytes());
+    bytes[8..].copy_from_slice(&low.to_le_bytes());
+    ObjectId::from_bytes(bytes)
+}

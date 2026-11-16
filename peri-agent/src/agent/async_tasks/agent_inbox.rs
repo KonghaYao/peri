@@ -1,5 +1,6 @@
 //! Background sub-agent message admission. The existing task entry owns the route.
 
+use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -141,3 +142,12 @@ impl Drop for BackgroundAgentInboxGuard {
 #[cfg(test)]
 #[path = "agent_inbox_test.rs"]
 mod tests;
+
+impl Debug for BackgroundAgentInbox {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BackgroundAgentInbox")
+            .field("thread_id", &self.thread_id)
+            .finish_non_exhaustive()
+    }
+}

@@ -1,10 +1,8 @@
-use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
-    time::Duration,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
@@ -12,13 +10,24 @@ use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::{
-    transport::{HttpBody, HttpRequest, HttpResponse, HttpTransport},
-    ContentBlock, Model, ModelMessage, ModelRequest, ModelResult, ModelRuntimeConfig,
-    ModelStreamEvent, RetryConfig, RetryableErrorClasses, StopReason,
-};
+use crate::transport::HttpBody;
+use crate::transport::HttpRequest;
+use crate::transport::HttpResponse;
+use crate::transport::HttpTransport;
+use crate::ContentBlock;
+use crate::Model;
+use crate::ModelMessage;
+use crate::ModelRequest;
+use crate::ModelResult;
+use crate::ModelRuntimeConfig;
+use crate::ModelStreamEvent;
+use crate::RetryConfig;
+use crate::RetryableErrorClasses;
+use crate::StopReason;
 
-use super::{request::body_for_test, AnthropicConfig, AnthropicModel};
+use super::request;
+use super::AnthropicConfig;
+use super::AnthropicModel;
 
 struct FakeTransport {
     bodies: Mutex<Vec<Value>>,
@@ -160,7 +169,7 @@ async fn stream_response_roundtrip_serializes_tool_use_once() {
         })
         .expect("completed response");
 
-    let body = body_for_test(
+    let body = request::body_for_test(
         &config(),
         &ModelRequest::new(vec![response.message().clone()]),
     );

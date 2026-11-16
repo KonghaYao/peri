@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    BaseMessage, PersistedPayload, SessionResourcesImpl, SqliteThreadStore, ThreadMeta,
+    CURRENT_SCHEMA_VERSION,
+};
+use peri_acp_types::store::ThreadStore;
+
 use peri_acp_types::session_resources::{BindingRecheck, SessionResources};
 use peri_acp_types::workspace::{ScopedThreadQuery, ThreadScope};
 
@@ -6,10 +11,10 @@ use peri_acp_types::workspace::{ScopedThreadQuery, ThreadScope};
 async fn migration_keeps_schema_version_and_existing_history() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
-    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let store = SqliteThreadStore::try_new(&path).await.unwrap();
     let id = store
         .create_thread(ThreadMeta::new_at(
-            absolute_test_path("missing/old-machine"),
+            super::absolute_test_path("missing/old-machine"),
             peri_time::now_wall(),
         ))
         .await
@@ -25,7 +30,7 @@ async fn migration_keeps_schema_version_and_existing_history() {
     assert_eq!(before.0, super::schema::CURRENT_SCHEMA_VERSION);
     let messages = store.load_messages(&id).await.unwrap();
     store.close().await;
-    let reopened = SqliteThreadStore::new(&path).await.unwrap();
+    let reopened = SqliteThreadStore::try_new(&path).await.unwrap();
     let after: (i64,) = sqlx::query_as("PRAGMA user_version")
         .fetch_one(&reopened.database.pool)
         .await
@@ -34,7 +39,7 @@ async fn migration_keeps_schema_version_and_existing_history() {
     assert_eq!(after.0, CURRENT_SCHEMA_VERSION);
     assert_eq!(
         reopened.load_meta(&id).await.unwrap().cwd,
-        absolute_test_path("missing/old-machine")
+        super::absolute_test_path("missing/old-machine")
     );
     assert_eq!(
         serde_json::to_value(reopened.load_messages(&id).await.unwrap()).unwrap(),
@@ -48,7 +53,7 @@ async fn migration_keeps_schema_version_and_existing_history() {
             .unwrap();
     assert_eq!(identity.0, crate::sessions::machine::current().unwrap());
     reopened.close().await;
-    let again = SqliteThreadStore::new(&path).await.unwrap();
+    let again = SqliteThreadStore::try_new(&path).await.unwrap();
     let repeated: (String,) =
         sqlx::query_as("SELECT w.machine_id FROM threads t JOIN workspaces w ON w.id=t.workspace_id WHERE t.id = ?1")
             .bind(id)
@@ -106,7 +111,7 @@ async fn machine_filters_follow_workspace_ownership_and_children_inherit() {
     let (store, facade) = SqliteThreadStore::open_shared(&path).await.unwrap();
     let root = store
         .create_thread(ThreadMeta::new_at(
-            absolute_test_path("same/path"),
+            super::absolute_test_path("same/path"),
             peri_time::now_wall(),
         ))
         .await
@@ -131,7 +136,10 @@ async fn machine_filters_follow_workspace_ownership_and_children_inherit() {
         .execute(&store.database.pool)
         .await
         .unwrap();
-    let mut child = ThreadMeta::new_at(absolute_test_path("same/path"), peri_time::now_wall());
+    let mut child = ThreadMeta::new_at(
+        super::absolute_test_path("same/path"),
+        peri_time::now_wall(),
+    );
     child.parent_thread_id = Some(root.clone());
     let child_id = store.create_thread(child).await.unwrap();
     assert_eq!(
@@ -143,7 +151,7 @@ async fn machine_filters_follow_workspace_ownership_and_children_inherit() {
         Some(another_machine.as_str())
     );
     let mut grandchild = ThreadMeta::new_at(
-        absolute_test_path("missing/child-path"),
+        super::absolute_test_path("missing/child-path"),
         peri_time::now_wall(),
     );
     grandchild.parent_thread_id = Some(child_id.clone());
@@ -158,7 +166,7 @@ async fn machine_filters_follow_workspace_ownership_and_children_inherit() {
     );
     let other = store
         .create_thread(ThreadMeta::new_at(
-            absolute_test_path("same/path"),
+            super::absolute_test_path("same/path"),
             peri_time::now_wall(),
         ))
         .await

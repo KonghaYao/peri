@@ -1,7 +1,32 @@
 use std::time::{Duration, Instant};
 
-use super::*;
+use crate::buffer::EventBuffer;
+use crate::buffer::MAX_READ_BYTES;
+use crate::buffer::MAX_READ_EVENTS;
+use crate::buffer::MAX_TASK_BYTES;
 use crate::buffer::MIN_TASK_BYTES;
+use crate::state::AlertCounters;
+use crate::state::CleanupReport;
+use crate::state::MonitorError;
+use crate::state::MonitorState;
+use crate::state::MonitorStatus;
+use crate::state::MonitorTask;
+use crate::state::StartRequest;
+use crate::state::TaskInner;
+use crate::state::TaskSnapshot;
+use crate::state::TaskState;
+use crate::state::DEFAULT_DEADLINE_MS;
+use crate::state::DEFAULT_MAX_BYTES;
+use crate::state::DEFAULT_MAX_EVENTS;
+use crate::state::DEFAULT_READ_BYTES;
+use crate::state::DEFAULT_READ_LIMIT;
+use crate::state::MAX_ALERT_PATTERN_CHARS;
+use crate::state::MAX_DEADLINE_MS;
+use crate::state::MAX_LABEL_BYTES;
+use crate::state::MAX_REASON_BYTES;
+use parking_lot::Mutex;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 fn temp_cwd() -> String {
     std::env::temp_dir().to_string_lossy().into_owned()
@@ -16,7 +41,7 @@ fn request(command: &str) -> StartRequest {
 
 #[test]
 fn resolve_start_applies_defaults_and_resolves_relative_cwd() {
-    let resolved = resolve_start(
+    let resolved = crate::state::resolve_start(
         &StartRequest {
             command: "  printf hi  ".into(),
             cwd: Some("nested".into()),
@@ -47,11 +72,11 @@ fn resolve_start_applies_defaults_and_resolves_relative_cwd() {
 #[test]
 fn resolve_start_rejects_empty_command_and_out_of_range_limits() {
     assert!(matches!(
-        resolve_start(&request("   "), "/workspace"),
+        crate::state::resolve_start(&request("   "), "/workspace"),
         Err(MonitorError::EmptyCommand)
     ));
     assert!(matches!(
-        resolve_start(
+        crate::state::resolve_start(
             &StartRequest {
                 deadline_ms: Some(0),
                 ..request("true")
@@ -61,7 +86,7 @@ fn resolve_start_rejects_empty_command_and_out_of_range_limits() {
         Err(MonitorError::InvalidDeadline)
     ));
     assert!(matches!(
-        resolve_start(
+        crate::state::resolve_start(
             &StartRequest {
                 deadline_ms: Some(MAX_DEADLINE_MS + 1),
                 ..request("true")
@@ -71,7 +96,7 @@ fn resolve_start_rejects_empty_command_and_out_of_range_limits() {
         Err(MonitorError::InvalidDeadline)
     ));
     assert!(matches!(
-        resolve_start(
+        crate::state::resolve_start(
             &StartRequest {
                 max_events: Some(0),
                 ..request("true")
@@ -81,7 +106,7 @@ fn resolve_start_rejects_empty_command_and_out_of_range_limits() {
         Err(MonitorError::InvalidMaxEvents)
     ));
     assert!(matches!(
-        resolve_start(
+        crate::state::resolve_start(
             &StartRequest {
                 max_bytes: Some(MIN_TASK_BYTES - 1),
                 ..request("true")
@@ -91,7 +116,7 @@ fn resolve_start_rejects_empty_command_and_out_of_range_limits() {
         Err(MonitorError::InvalidMaxBytes)
     ));
     assert!(matches!(
-        resolve_start(
+        crate::state::resolve_start(
             &StartRequest {
                 max_bytes: Some(MAX_TASK_BYTES + 1),
                 ..request("true")
@@ -106,7 +131,7 @@ fn resolve_start_rejects_empty_command_and_out_of_range_limits() {
 fn resolve_start_rejects_oversized_label() {
     let max_label = "x".repeat(MAX_LABEL_BYTES);
     assert!(
-        resolve_start(
+        crate::state::resolve_start(
             &StartRequest {
                 label: Some(max_label),
                 ..request("true")
@@ -118,7 +143,7 @@ fn resolve_start_rejects_oversized_label() {
     );
 
     let oversized = "x".repeat(MAX_LABEL_BYTES + 1);
-    let error = resolve_start(
+    let error = crate::state::resolve_start(
         &StartRequest {
             label: Some(oversized),
             ..request("true")
@@ -140,12 +165,12 @@ fn resolve_start_rejects_oversized_label() {
 
 #[test]
 fn read_limits_are_bounded() {
-    assert!(validate_read_limits(1, 1).is_ok());
-    assert!(validate_read_limits(MAX_READ_EVENTS, MAX_READ_BYTES).is_ok());
-    assert!(validate_read_limits(0, 1).is_err());
-    assert!(validate_read_limits(MAX_READ_EVENTS + 1, 1).is_err());
-    assert!(validate_read_limits(1, 0).is_err());
-    assert!(validate_read_limits(1, MAX_READ_BYTES + 1).is_err());
+    assert!(crate::state::validate_read_limits(1, 1).is_ok());
+    assert!(crate::state::validate_read_limits(MAX_READ_EVENTS, MAX_READ_BYTES).is_ok());
+    assert!(crate::state::validate_read_limits(0, 1).is_err());
+    assert!(crate::state::validate_read_limits(MAX_READ_EVENTS + 1, 1).is_err());
+    assert!(crate::state::validate_read_limits(1, 0).is_err());
+    assert!(crate::state::validate_read_limits(1, MAX_READ_BYTES + 1).is_err());
 }
 
 #[test]
@@ -165,7 +190,7 @@ fn unknown_task_is_reported_for_read_stop_and_snapshot() {
 #[test]
 fn invalid_alert_patterns_are_rejected_before_start() {
     assert!(matches!(
-        resolve_start(
+        crate::state::resolve_start(
             &StartRequest {
                 alert: Some("(".into()),
                 ..request("true")
@@ -176,7 +201,7 @@ fn invalid_alert_patterns_are_rejected_before_start() {
     ));
     let oversized = "x".repeat(MAX_ALERT_PATTERN_CHARS + 1);
     assert!(matches!(
-        resolve_start(
+        crate::state::resolve_start(
             &StartRequest {
                 alert: Some(oversized),
                 ..request("true")
@@ -185,7 +210,7 @@ fn invalid_alert_patterns_are_rejected_before_start() {
         ),
         Err(MonitorError::InvalidAlert(_))
     ));
-    assert!(resolve_start(
+    assert!(crate::state::resolve_start(
         &StartRequest {
             alert: Some("ERROR|WARN".into()),
             ..request("true")

@@ -5,6 +5,8 @@
 //!
 //! 类型均 `Send + Sync`；[`MemoryPermit`]、冻结字节与 [`SnapshotTicket`] 均不可 Clone。
 
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -46,6 +48,14 @@ pub struct SnapshotTicket {
     pub(crate) cell: Arc<SnapshotCell>,
 }
 
+impl Debug for SnapshotTicket {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SnapshotTicket")
+            .finish_non_exhaustive()
+    }
+}
+
 /// 准备任务的共享单元；与各 permit 一样不可伪造地保存 [`MemoryBudget`] 身份。
 pub(crate) struct SnapshotCell {
     pub(crate) budget: Arc<MemoryBudget>,
@@ -64,12 +74,14 @@ pub(crate) enum SnapshotState {
 }
 
 /// 事件中 input/output 的来源：已就绪，或等待准备收敛的票据。
+#[derive(Debug)]
 pub enum InputSource {
     Ready(InputSnapshot),
     Preparing(SnapshotTicket),
 }
 
 /// 进入 Batcher 准入的遥测事件；持有事件原文 permit 与 input/output 来源。
+#[derive(Debug)]
 pub struct TelemetryEvent {
     pub(crate) event: IngestionEvent,
     pub(crate) input: Option<InputSource>,
@@ -102,9 +114,12 @@ impl TelemetryEvent {
                     .into(),
             ));
         }
-        for source in [input.as_ref(), output.as_ref()].into_iter().flatten() {
-            if !source_belongs_to(source, budget) {
-                return Err(LangfuseError::BudgetMismatch);
+        {
+            let snapshot_sources = [input.as_ref(), output.as_ref()].into_iter().flatten();
+            for source in snapshot_sources {
+                if !source_belongs_to(source, budget) {
+                    return Err(LangfuseError::BudgetMismatch);
+                }
             }
         }
         let permit = budget.try_reserve(measure_event(&event)?)?;
@@ -187,6 +202,7 @@ impl io::Write for CountSink {
 /// 借用 `Arc<serde_json::Value>` 的零拷贝 source 适配器。
 ///
 /// 调用方在跨事件保留该 `Arc` 之前必须先经 `Batcher::try_freeze` 完成冻结准入。
+#[must_use]
 pub fn snapshot_value(value: &Arc<serde_json::Value>) -> Arc<dyn SnapshotSource> {
     Arc::new(ValueSource {
         value: Arc::clone(value),

@@ -1,11 +1,23 @@
-use super::super::current_scope;
-use super::*;
-use crate::kit::atoms::{ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER};
-use peri_acp::transport::{
-    AcpTransport,
-    mpsc::mpsc_transport_pair,
-    types::{AcpError, IncomingMessage},
-};
+use super::AcpTuiClient;
+use super::Arc;
+use super::Duration;
+use super::Event;
+use super::KeyCode;
+use super::OPERATION_TIMEOUT;
+use super::OperationOutcome;
+use super::OperationScope;
+use super::OperationState;
+use super::OperationTicket;
+use super::PluginOperation;
+use super::PluginSummary;
+use super::Rect;
+use super::State;
+use super::Value;
+use super::json;
+
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::AcpError;
+use peri_acp::transport::types::IncomingMessage;
 use ratatui_kit::crossterm::event::{
     KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -49,43 +61,46 @@ fn keyboard_and_mouse_select_the_same_semantic_request_for_all_scopes() {
             let mut plugin = plugin(scope);
             plugin.enabled = enabled;
             let actions = crate::kit::panels::plugin::action_list(enabled);
-            for (index, action) in actions.iter().copied().enumerate() {
-                let key = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-                let mouse = Event::Mouse(MouseEvent {
-                    kind: MouseEventKind::Down(MouseButton::Left),
-                    column: area.x + 2,
-                    row: area.y + 1 + 16 + index as u16,
-                    modifiers: KeyModifiers::NONE,
-                });
-                let key_index = detail_action_index(&key, Some(area), &plugin, index).unwrap();
-                let mouse_index = detail_action_index(&mouse, Some(area), &plugin, 0).unwrap();
-                assert_eq!(key_index, mouse_index);
-                assert_eq!(actions[key_index], action);
-                assert_eq!(
-                    PluginOperation::installed(actions[key_index], &plugin),
-                    PluginOperation::installed(actions[mouse_index], &plugin),
-                );
-                if action != "back" {
-                    let operation = PluginOperation::installed(action, &plugin).unwrap();
-                    let (method, expected) = match action {
-                        "enable" | "disable" => (
-                            "plugin/toggle",
-                            json!({
-                                "pluginId": "compiler@tools", "scope": scope, "enable": action == "enable",
-                            }),
-                        ),
-                        "uninstall" => (
-                            "plugin/uninstall",
-                            json!({"pluginId": "compiler@tools", "scope": scope}),
-                        ),
-                        "update" => (
-                            "plugin/update",
-                            json!({"pluginId": "compiler@tools", "scope": scope}),
-                        ),
-                        _ => unreachable!(),
-                    };
-                    assert_eq!(operation.method, method);
-                    assert_eq!(operation.params, expected);
+            {
+                let iteration_items = actions.iter().copied().enumerate();
+                for (index, action) in iteration_items {
+                    let key = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                    let mouse = Event::Mouse(MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: area.x + 2,
+                        row: area.y + 1 + 16 + index as u16,
+                        modifiers: KeyModifiers::NONE,
+                    });
+                    let key_index = super::detail_action_index(&key, Some(area), &plugin, index).expect("keyboard and mouse select the same semantic request for all scopes: the detail_action_index fixture operation uses valid inputs");
+                    let mouse_index = super::detail_action_index(&mouse, Some(area), &plugin, 0).expect("keyboard and mouse select the same semantic request for all scopes: the detail_action_index fixture operation uses valid inputs");
+                    assert_eq!(key_index, mouse_index);
+                    assert_eq!(actions[key_index], action);
+                    assert_eq!(
+                        PluginOperation::installed(actions[key_index], &plugin),
+                        PluginOperation::installed(actions[mouse_index], &plugin),
+                    );
+                    if action != "back" {
+                        let operation = PluginOperation::installed(action, &plugin).expect("keyboard and mouse select the same semantic request for all scopes: the installed fixture operation uses valid inputs");
+                        let (method, expected) = match action {
+                            "enable" | "disable" => (
+                                "plugin/toggle",
+                                json!({
+                                    "pluginId": "compiler@tools", "scope": scope, "enable": action == "enable",
+                                }),
+                            ),
+                            "uninstall" => (
+                                "plugin/uninstall",
+                                json!({"pluginId": "compiler@tools", "scope": scope}),
+                            ),
+                            "update" => (
+                                "plugin/update",
+                                json!({"pluginId": "compiler@tools", "scope": scope}),
+                            ),
+                            _ => unreachable!(),
+                        };
+                        assert_eq!(operation.method, method);
+                        assert_eq!(operation.params, expected);
+                    }
                 }
             }
         }
@@ -96,11 +111,11 @@ fn keyboard_and_mouse_select_the_same_semantic_request_for_all_scopes() {
 fn old_session_completion_cannot_clear_a_new_pending_operation() {
     let mut state = OperationState::default();
     let first = state.begin(
-        PluginOperation::installed("enable", &plugin("local")).unwrap(),
+        PluginOperation::installed("enable", &plugin("local")).expect("old session completion cannot clear a new pending operation: the installed fixture operation uses valid inputs"),
         OperationScope::default(),
     );
     let second = state.begin(
-        PluginOperation::installed("update", &plugin("local")).unwrap(),
+        PluginOperation::installed("update", &plugin("local")).expect("old session completion cannot clear a new pending operation: the installed fixture operation uses valid inputs"),
         OperationScope::new("another-session", 0),
     );
     assert!(!state.complete(
@@ -122,7 +137,7 @@ fn installed_mutations_require_a_writable_scope_and_explicit_capability() {
         summary.install_scope = scope.map(str::to_string);
         for action in ["enable", "disable", "uninstall", "update"] {
             assert_eq!(
-                PluginOperation::installed(action, &summary).unwrap_err(),
+                PluginOperation::installed(action, &summary).expect_err("installed mutations require a writable scope and explicit capability: the invalid fixture must be rejected"),
                 crate::i18n::tr("panel-plugin-management-unsupported"),
             );
         }
@@ -136,7 +151,7 @@ fn installed_mutations_require_a_writable_scope_and_explicit_capability() {
     }
     for scope in ["user", "project", "local"] {
         for action in ["enable", "disable", "uninstall", "update"] {
-            let operation = PluginOperation::installed(action, &plugin(scope)).unwrap();
+            let operation = PluginOperation::installed(action, &plugin(scope)).expect("installed mutations require a writable scope and explicit capability: the installed fixture operation uses valid inputs");
             assert_eq!(operation.params["scope"], scope);
             if matches!(action, "enable" | "disable") {
                 assert_eq!(operation.params["enable"], action == "enable");
@@ -184,14 +199,16 @@ async fn marketplace_requests_preserve_ticket_context_and_surface_backend_failur
         PluginOperation::marketplace_remove("tools".into()),
         PluginOperation::marketplace_refresh("tools".into()),
     ] {
-        let (transport, server) = mpsc_transport_pair();
+        let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
         let (client, notification_tx, _notification_rx) = AcpTuiClient::new(transport);
         client.force_stable_for_test("plugin-operation-session", true);
         client.spawn_pump(notification_tx);
         let state = Arc::new(parking_lot::Mutex::new(OperationState::default()));
-        let ticket = state.lock().begin(operation.clone(), current_scope());
+        let ticket = state
+            .lock()
+            .begin(operation.clone(), super::super::current_scope());
         let complete_state = state.clone();
-        let task = launch(
+        let task = super::launch(
             ticket,
             operation.clone(),
             Some(Arc::new(client)),
@@ -202,8 +219,8 @@ async fn marketplace_requests_preserve_ticket_context_and_surface_backend_failur
         );
         let incoming = tokio::time::timeout(Duration::from_secs(2), server.recv())
             .await
-            .unwrap()
-            .unwrap();
+            .expect("marketplace requests preserve ticket context and surface backend failures: fixture task and request must complete successfully")
+            .expect("marketplace requests preserve ticket context and surface backend failures: fixture task and request must complete successfully");
         let IncomingMessage::Request { id, method, params } = incoming else {
             panic!("expected marketplace request");
         };
@@ -214,18 +231,18 @@ async fn marketplace_requests_preserve_ticket_context_and_surface_backend_failur
         server
             .send_response(id, Err(AcpError::new(-32603, "catalog persistence failed")))
             .await
-            .unwrap();
+            .expect("marketplace requests preserve ticket context and surface backend failures: fixture task and request must complete successfully");
         tokio::time::timeout(Duration::from_secs(2), task)
             .await
-            .unwrap()
-            .unwrap();
+            .expect("marketplace requests preserve ticket context and surface backend failures: fixture task and request must complete successfully")
+            .expect("marketplace requests preserve ticket context and surface backend failures: fixture task and request must complete successfully");
         assert!(state.lock().pending_action().is_none());
         assert!(
             state
                 .lock()
                 .error
                 .as_ref()
-                .unwrap()
+                .expect("marketplace requests preserve ticket context and surface backend failures: the fixture mutex must remain unpoisoned")
                 .contains("catalog persistence failed")
         );
     }
@@ -236,15 +253,17 @@ async fn marketplace_requests_preserve_ticket_context_and_surface_backend_failur
 async fn missing_client_leaves_loading_and_preserves_visible_error() {
     let _guard = SessionGuard::new();
     let state = Arc::new(parking_lot::Mutex::new(OperationState::default()));
-    let operation = PluginOperation::installed("enable", &plugin("user")).unwrap();
-    let ticket = state.lock().begin(operation.clone(), current_scope());
+    let operation = PluginOperation::installed("enable", &plugin("user")).expect("missing client leaves loading and preserves visible error: the installed fixture operation uses valid inputs");
+    let ticket = state
+        .lock()
+        .begin(operation.clone(), super::super::current_scope());
     let complete_state = state.clone();
-    launch(ticket, operation, None, move |ticket, outcome| {
+    super::launch(ticket, operation, None, move |ticket, outcome| {
         complete_state.lock().complete(ticket, outcome);
         None
     })
     .await
-    .unwrap();
+    .expect("missing client leaves loading and preserves visible error: fixture task and request must complete successfully");
     assert!(state.lock().pending_action().is_none());
     assert_eq!(
         state.lock().error.as_deref(),
@@ -253,15 +272,18 @@ async fn missing_client_leaves_loading_and_preserves_visible_error() {
 }
 
 async fn wire_result(response: Result<Value, AcpError>, late: bool) -> Option<String> {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, _notification_rx) = AcpTuiClient::new(transport);
     client.force_stable_for_test("plugin-operation-session", true);
     client.spawn_pump(notification_tx);
     let state = Arc::new(parking_lot::Mutex::new(OperationState::default()));
-    let operation = PluginOperation::installed("disable", &plugin("project")).unwrap();
-    let ticket = state.lock().begin(operation.clone(), current_scope());
+    let operation = PluginOperation::installed("disable", &plugin("project"))
+        .expect("wire result: the installed fixture operation uses valid inputs");
+    let ticket = state
+        .lock()
+        .begin(operation.clone(), super::super::current_scope());
     let complete_state = state.clone();
-    let task = launch(
+    let task = super::launch(
         ticket,
         operation,
         Some(Arc::new(client)),
@@ -272,8 +294,8 @@ async fn wire_result(response: Result<Value, AcpError>, late: bool) -> Option<St
     );
     let incoming = tokio::time::timeout(Duration::from_secs(2), server.recv())
         .await
-        .unwrap()
-        .unwrap();
+        .expect("wire result: fixture task and request must complete successfully")
+        .expect("wire result: fixture task and request must complete successfully");
     let IncomingMessage::Request { id, method, params } = incoming else {
         panic!("expected request");
     };
@@ -283,13 +305,16 @@ async fn wire_result(response: Result<Value, AcpError>, late: bool) -> Option<St
     assert_eq!(params["enable"], false);
     if late {
         BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
-        state.lock().reset_session(current_scope());
+        state.lock().reset_session(super::super::current_scope());
     }
-    server.send_response(id, response).await.unwrap();
+    server
+        .send_response(id, response)
+        .await
+        .expect("wire result: fixture task and request must complete successfully");
     tokio::time::timeout(Duration::from_secs(2), task)
         .await
-        .unwrap()
-        .unwrap();
+        .expect("wire result: fixture task and request must complete successfully")
+        .expect("wire result: fixture task and request must complete successfully");
     assert!(state.lock().pending_action().is_none());
     state.lock().error.clone()
 }
@@ -310,7 +335,7 @@ async fn server_failure_clears_pending_and_exposes_actual_error() {
         false,
     )
     .await
-    .unwrap();
+    .expect("server failure clears pending and exposes actual error: fixture task and request must complete successfully");
     assert!(error.contains("settings permission denied"));
 }
 
@@ -359,7 +384,7 @@ impl MountedPanel {
         use super::super::search_handler;
         search_handler::handle_search_event(
             event,
-            &current_scope(),
+            &super::super::current_scope(),
             None,
             self.active_tab,
             self.discover,
@@ -383,7 +408,7 @@ impl MountedPanel {
         }
         panel_handler::handle_panel_event(
             event,
-            &current_scope(),
+            &super::super::current_scope(),
             None,
             self.selected,
             self.active_tab,
@@ -408,9 +433,9 @@ impl MountedPanel {
         let ticket = self
             .operation
             .write()
-            .begin(operation.clone(), current_scope());
+            .begin(operation.clone(), super::super::current_scope());
         let state = self.operation;
-        let task = launch(
+        let task = super::launch(
             ticket.clone(),
             operation,
             Some(client),
@@ -468,14 +493,14 @@ fn paused_runtime() -> tokio::runtime::Runtime {
         .enable_all()
         .start_paused(true)
         .build()
-        .unwrap()
+        .expect("paused runtime: isolated fixture workspace must remain accessible")
 }
 
 fn controlled_client() -> (
     Arc<AcpTuiClient>,
     peri_acp::transport::mpsc::MpscServerTransport,
 ) {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, _notification_rx) = AcpTuiClient::new(transport);
     client.force_stable_for_test("plugin-operation-session", false);
     client.spawn_pump(notification_tx);
@@ -488,8 +513,8 @@ async fn mutation_request(
 ) -> peri_acp::transport::types::RequestId {
     let incoming = tokio::time::timeout(Duration::from_secs(2), server.recv())
         .await
-        .unwrap()
-        .unwrap();
+        .expect("mutation request: fixture task and request must complete successfully")
+        .expect("mutation request: fixture task and request must complete successfully");
     let IncomingMessage::Request {
         id,
         method: actual,
@@ -509,9 +534,9 @@ fn mounted_mutations_without_responses_timeout_with_unknown_outcome() {
     let _guard = SessionGuard::new();
     crate::i18n::init(Some("en"));
     for operation in [
-        PluginOperation::installed("enable", &plugin("user")).unwrap(),
-        PluginOperation::installed("uninstall", &plugin("user")).unwrap(),
-        PluginOperation::installed("update", &plugin("user")).unwrap(),
+        PluginOperation::installed("enable", &plugin("user")).expect("mounted mutations without responses timeout with unknown outcome: the installed fixture operation uses valid inputs"),
+        PluginOperation::installed("uninstall", &plugin("user")).expect("mounted mutations without responses timeout with unknown outcome: the installed fixture operation uses valid inputs"),
+        PluginOperation::installed("update", &plugin("user")).expect("mounted mutations without responses timeout with unknown outcome: the installed fixture operation uses valid inputs"),
         PluginOperation::install("compiler".into(), "tools".into(), "project"),
         PluginOperation::marketplace_add("owner/tools".into()),
         PluginOperation::marketplace_remove("tools".into()),
@@ -527,7 +552,7 @@ fn mounted_mutations_without_responses_timeout_with_unknown_outcome() {
                     Some(operation.action)
                 );
                 tokio::time::advance(OPERATION_TIMEOUT).await;
-                task.await.unwrap();
+                task.await.expect("mounted mutations without responses timeout with unknown outcome: fixture task and request must complete successfully");
                 assert!(panel.operation.read().pending_action().is_none());
                 assert!(
                     panel
@@ -535,7 +560,7 @@ fn mounted_mutations_without_responses_timeout_with_unknown_outcome() {
                         .read()
                         .error
                         .as_ref()
-                        .unwrap()
+                        .expect("mounted mutations without responses timeout with unknown outcome: the fixture storage and layout must support the requested operation")
                         .contains("outcome unknown")
                 );
                 assert!(
@@ -559,20 +584,20 @@ fn mounted_late_timeout_response_cannot_clear_new_pending_ticket() {
             let (client, server) = controlled_client();
             let (old, old_task) = panel.start(
                 client.clone(),
-                PluginOperation::installed("disable", &plugin("project")).unwrap(),
+                PluginOperation::installed("disable", &plugin("project")).expect("mounted late timeout response cannot clear new pending ticket: the installed fixture operation uses valid inputs"),
             );
             let old_id = mutation_request(&server, "plugin/toggle").await;
             tokio::time::advance(OPERATION_TIMEOUT).await;
-            old_task.await.unwrap();
+            old_task.await.expect("mounted late timeout response cannot clear new pending ticket: fixture task and request must complete successfully");
             let (new, new_task) = panel.start(
                 client,
-                PluginOperation::installed("update", &plugin("project")).unwrap(),
+                PluginOperation::installed("update", &plugin("project")).expect("mounted late timeout response cannot clear new pending ticket: the installed fixture operation uses valid inputs"),
             );
             let new_id = mutation_request(&server, "plugin/update").await;
             server
                 .send_response(old_id, Ok(json!({"success": true})))
                 .await
-                .unwrap();
+                .expect("mounted late timeout response cannot clear new pending ticket: fixture task and request must complete successfully");
             tokio::task::yield_now().await;
             assert!(!panel.operation.write().complete(
                 &old,
@@ -589,8 +614,8 @@ fn mounted_late_timeout_response_cannot_clear_new_pending_ticket() {
             server
                 .send_response(new_id, Ok(json!({"success": true})))
                 .await
-                .unwrap();
-            new_task.await.unwrap();
+                .expect("mounted late timeout response cannot clear new pending ticket: fixture task and request must complete successfully");
+            new_task.await.expect("mounted late timeout response cannot clear new pending ticket: fixture task and request must complete successfully");
             assert!(panel.operation.read().pending_action().is_none());
         });
     });
@@ -616,7 +641,7 @@ fn mounted_escape_cancels_only_client_wait_then_allows_panel_exit() {
                 let (client, server) = controlled_client();
                 let (old, task) = panel.start(
                     client.clone(),
-                    PluginOperation::installed("enable", &plugin("local")).unwrap(),
+                    PluginOperation::installed("enable", &plugin("local")).expect("mounted escape cancels only client wait then allows panel exit: the installed fixture operation uses valid inputs"),
                 );
                 let old_id = mutation_request(&server, "plugin/toggle").await;
                 let escape = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -624,7 +649,7 @@ fn mounted_escape_cancels_only_client_wait_then_allows_panel_exit() {
                     panel.event(escape.clone()),
                     ratatui_kit::EventResult::Consumed
                 ));
-                task.await.unwrap();
+                task.await.expect("mounted escape cancels only client wait then allows panel exit: fixture task and request must complete successfully");
                 assert!(panel.operation.read().pending_action().is_none());
                 assert!(old.is_cancelled());
                 assert!(
@@ -633,7 +658,7 @@ fn mounted_escape_cancels_only_client_wait_then_allows_panel_exit() {
                         .read()
                         .error
                         .as_ref()
-                        .unwrap()
+                        .expect("mounted escape cancels only client wait then allows panel exit: the fixture storage and layout must support the requested operation")
                         .contains("outcome unknown")
                 );
                 assert!(ACTIVE_PANEL.get().is_some());
@@ -644,20 +669,20 @@ fn mounted_escape_cancels_only_client_wait_then_allows_panel_exit() {
                 );
                 let (_, next_task) = panel.start(
                     client,
-                    PluginOperation::installed("update", &plugin("local")).unwrap(),
+                    PluginOperation::installed("update", &plugin("local")).expect("mounted escape cancels only client wait then allows panel exit: the installed fixture operation uses valid inputs"),
                 );
                 let new_id = mutation_request(&server, "plugin/update").await;
                 server
                     .send_response(old_id, Ok(json!({"success": true})))
                     .await
-                    .unwrap();
+                    .expect("mounted escape cancels only client wait then allows panel exit: fixture task and request must complete successfully");
                 tokio::task::yield_now().await;
                 assert_eq!(panel.operation.read().pending_action(), Some("update"));
                 server
                     .send_response(new_id, Ok(json!({"success": true})))
                     .await
-                    .unwrap();
-                next_task.await.unwrap();
+                    .expect("mounted escape cancels only client wait then allows panel exit: fixture task and request must complete successfully");
+                next_task.await.expect("mounted escape cancels only client wait then allows panel exit: fixture task and request must complete successfully");
                 panel.event(escape);
                 assert!(ACTIVE_PANEL.get().is_none());
             });
@@ -672,11 +697,11 @@ fn mounted_same_session_reload_isolates_real_client_generation() {
     mount_panel(|panel| {
         paused_runtime().block_on(async {
             let (client, server) = controlled_client();
-            let original = client.stable_session_identity().unwrap();
+            let original = client.stable_session_identity().expect("mounted same session reload isolates real client generation: the stable_session_identity fixture operation uses valid inputs");
             let reset = BRIDGE_RESET_COUNTER.get();
             let (_, old_task) = panel.start(
                 client.clone(),
-                PluginOperation::installed("disable", &plugin("user")).unwrap(),
+                PluginOperation::installed("disable", &plugin("user")).expect("mounted same session reload isolates real client generation: the installed fixture operation uses valid inputs"),
             );
             let old_id = mutation_request(&server, "plugin/toggle").await;
             let loader = client.clone();
@@ -686,15 +711,15 @@ fn mounted_same_session_reload_isolates_real_client_generation() {
                     .await
             });
             let load_id = mutation_request(&server, "session/load").await;
-            server.send_response(load_id, Ok(json!({}))).await.unwrap();
-            load.await.unwrap().unwrap();
-            assert_ne!(client.stable_session_identity().unwrap(), original);
+            server.send_response(load_id, Ok(json!({}))).await.expect("mounted same session reload isolates real client generation: fixture task and request must complete successfully");
+            load.await.expect("mounted same session reload isolates real client generation: fixture task and request must complete successfully").expect("mounted same session reload isolates real client generation: fixture task and request must complete successfully");
+            assert_ne!(client.stable_session_identity().expect("mounted same session reload isolates real client generation: the stable_session_identity fixture operation uses valid inputs"), original);
             assert_eq!(BRIDGE_RESET_COUNTER.get(), reset);
             server
                 .send_response(old_id, Ok(json!({"success": true})))
                 .await
-                .unwrap();
-            old_task.await.unwrap();
+                .expect("mounted same session reload isolates real client generation: fixture task and request must complete successfully");
+            old_task.await.expect("mounted same session reload isolates real client generation: fixture task and request must complete successfully");
             assert!(panel.operation.read().pending_action().is_none());
             assert!(
                 panel
@@ -702,7 +727,7 @@ fn mounted_same_session_reload_isolates_real_client_generation() {
                     .read()
                     .error
                     .as_ref()
-                    .unwrap()
+                    .expect("mounted same session reload isolates real client generation: the fixture storage and layout must support the requested operation")
                     .contains("outcome unknown")
             );
         });
@@ -718,13 +743,13 @@ fn mounted_missing_client_and_server_failure_remain_visible() {
         let text = mount_panel(move |panel| {
             paused_runtime().block_on(async {
                 let (client, server) = controlled_client();
-                let operation = PluginOperation::installed("enable", &plugin("user")).unwrap();
+                let operation = PluginOperation::installed("enable", &plugin("user")).expect("mounted missing client and server failure remain visible: the installed fixture operation uses valid inputs");
                 let ticket = panel
                     .operation
                     .write()
-                    .begin(operation.clone(), current_scope());
+                    .begin(operation.clone(), super::super::current_scope());
                 let state = panel.operation;
-                let task = launch(
+                let task = super::launch(
                     ticket,
                     operation,
                     (!missing_client).then_some(client),
@@ -738,9 +763,9 @@ fn mounted_missing_client_and_server_failure_remain_visible() {
                     server
                         .send_response(id, Err(AcpError::new(-32603, "settings permission denied")))
                         .await
-                        .unwrap();
+                        .expect("mounted missing client and server failure remain visible: fixture task and request must complete successfully");
                 }
-                task.await.unwrap();
+                task.await.expect("mounted missing client and server failure remain visible: fixture task and request must complete successfully");
                 assert!(panel.operation.read().pending_action().is_none());
             });
         });
@@ -792,9 +817,12 @@ fn mounted_unmanaged_or_ambiguous_mutations_report_reason_without_pending() {
             mount_panel(move |panel| {
                 paused_runtime().block_on(async {
                     let (_client, server) = controlled_client();
-                    let identity = super::super::InstalledIdentity::new(&summary, current_scope());
+                    let identity = super::super::InstalledIdentity::new(
+                        &summary,
+                        super::super::current_scope(),
+                    );
                     *panel.detail_plugin.write() = Some(identity.clone());
-                    installed_action(
+                    super::installed_action(
                         action,
                         &summary,
                         panel.operation,
@@ -859,3 +887,7 @@ fn popup_owns_keyboard_over_discover_search() {
         assert_eq!(ACTIVE_PANEL.get(), panel_before, "Esc 不得关面板");
     });
 }
+
+use crate::kit::atoms::ACTIVE_SESSION_ID;
+
+use crate::kit::atoms::BRIDGE_RESET_COUNTER;

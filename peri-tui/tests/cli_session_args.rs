@@ -17,7 +17,7 @@ fn run_peri(home: &Path, cwd: &Path, args: &[&str]) -> Output {
         .env_remove("PERI_META_TEST_INTERNAL_ERROR")
         .args(args)
         .output()
-        .unwrap()
+        .expect("run peri: isolated fixture workspace must remain accessible")
 }
 
 fn assert_argument_error(output: &Output, fragments: &[&str]) {
@@ -46,8 +46,8 @@ fn assert_no_session_database(home: &Path) {
 
 #[test]
 fn resume_without_value_exits_with_argument_error() {
-    let home = TempDir::new().unwrap();
-    let cwd = TempDir::new().unwrap();
+    let home = TempDir::new().expect("resume without value exits with argument error: fixture parameters must construct a valid value");
+    let cwd = TempDir::new().expect("resume without value exits with argument error: fixture parameters must construct a valid value");
     let output = run_peri(home.path(), cwd.path(), &["-r"]);
     assert_argument_error(&output, &["--resume", "session ID"]);
     assert_no_session_database(home.path());
@@ -55,8 +55,12 @@ fn resume_without_value_exits_with_argument_error() {
 
 #[test]
 fn print_mode_rejects_resume_before_startup() {
-    let home = TempDir::new().unwrap();
-    let cwd = TempDir::new().unwrap();
+    let home = TempDir::new().expect(
+        "print mode rejects resume before startup: fixture parameters must construct a valid value",
+    );
+    let cwd = TempDir::new().expect(
+        "print mode rejects resume before startup: fixture parameters must construct a valid value",
+    );
     let output = run_peri(home.path(), cwd.path(), &["-p", "-r", SESSION_ID]);
     assert_argument_error(&output, &["print", "--resume"]);
     assert_no_session_database(home.path());
@@ -64,8 +68,8 @@ fn print_mode_rejects_resume_before_startup() {
 
 #[test]
 fn continue_and_resume_conflict_exits_with_argument_error() {
-    let home = TempDir::new().unwrap();
-    let cwd = TempDir::new().unwrap();
+    let home = TempDir::new().expect("continue and resume conflict exits with argument error: fixture parameters must construct a valid value");
+    let cwd = TempDir::new().expect("continue and resume conflict exits with argument error: fixture parameters must construct a valid value");
     let output = run_peri(home.path(), cwd.path(), &["-c", "-r", SESSION_ID]);
     assert_argument_error(&output, &["--continue", "--resume"]);
     assert_no_session_database(home.path());

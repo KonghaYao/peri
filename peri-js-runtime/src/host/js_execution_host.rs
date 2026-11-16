@@ -1,0 +1,246 @@
+use super::AsyncReadExt as _;
+use super::{
+    debug, fmt, mpsc, rpc, Arc, BufReader, Child, Command, Debug, Formatter, IncomingMessage,
+    JoinHandle, JsRuntimeError, Mutex, ProcessTree, Result, RpcChannel, Stdio,
+};
+
+pub(super) const DEFAULT_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+
+pub(super) const STDERR_CHUNK_BYTES: usize = 8 * 1024;
+
+pub(super) const STDERR_TAIL_BYTES: usize = 32 * 1024;
+
+#[derive(Clone)]
+pub struct JsProcessSpec {
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub(super) inherit_environment: bool,
+    pub(super) environment: Vec<(String, String)>,
+}
+
+impl JsProcessSpec {
+    #[must_use]
+    pub fn new(program: impl Into<String>, args: Vec<String>) -> Self {
+        Self {
+            program: program.into(),
+            args,
+            cwd: None,
+            inherit_environment: true,
+            environment: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_cwd(mut self, cwd: impl Into<String>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
+    }
+
+    /// 与下面的 `with_environment` 同为进程环境控制的测试门：生产侧只使用
+    /// `new`/`with_cwd`，唯一的调用方是 `#[cfg(all(test, unix))]` 生命周期
+    /// fixture（需要干净环境构造 hermetic Node 子进程）。
+    #[cfg(all(test, unix))]
+    pub(crate) fn without_inherited_environment(mut self) -> Self {
+        self.inherit_environment = false;
+        self
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_environment(
+        mut self,
+        environment: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.environment = environment.into_iter().collect();
+        self
+    }
+}
+
+impl Debug for JsProcessSpec {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JsProcessSpec")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("cwd", &self.cwd)
+            .field("inherit_environment", &self.inherit_environment)
+            .field("environment", &self.environment)
+            .finish()
+    }
+}
+
+pub struct JsExecutionHost {
+    pub(super) child: tokio::sync::Mutex<Child>,
+    pub(super) channel: Arc<RpcChannel>,
+    pub(super) incoming: tokio::sync::Mutex<Option<mpsc::Receiver<IncomingMessage>>>,
+    pub(super) process_tree: ProcessTree,
+    pub(super) stdout_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    pub(super) stderr_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    /// 终止 reader 的显式信号：consumer 缺席时队列满不能靠 receiver drop 解阻塞。
+    pub(super) reader_shutdown: tokio::sync::watch::Sender<bool>,
+    pub(super) stderr_tail: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Debug for JsExecutionHost {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JsExecutionHost")
+            .finish_non_exhaustive()
+    }
+}
+
+impl JsExecutionHost {
+    pub fn spawn(spec: JsProcessSpec) -> Result<Self> {
+        Self::spawn_with_frame_limit(spec, DEFAULT_MAX_FRAME_BYTES)
+    }
+
+    /// 启动 Node 进程，并装配 RPC channel、stdout/stderr reader 与进程树 owner。
+    pub(crate) fn spawn_with_frame_limit(
+        spec: JsProcessSpec,
+        max_frame_bytes: usize,
+    ) -> Result<Self> {
+        let mut command = Command::new(&spec.program);
+        command
+            .args(&spec.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if !spec.inherit_environment {
+            command.env_clear();
+        }
+        command.envs(spec.environment);
+        if let Some(cwd) = spec.cwd {
+            command.current_dir(cwd);
+        }
+
+        let mut process_tree = ProcessTree::try_new()
+            .map_err(|error| JsRuntimeError::SpawnFailed(error.to_string()))?;
+        process_tree.prepare(&mut command);
+        let mut child = command
+            .spawn()
+            .map_err(|error| JsRuntimeError::SpawnFailed(error.to_string()))?;
+        process_tree
+            .attach(&child)
+            .map_err(|error| JsRuntimeError::CleanupFailed(error.to_string()))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| JsRuntimeError::CleanupFailed("no stdin".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| JsRuntimeError::CleanupFailed("no stdout".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| JsRuntimeError::CleanupFailed("no stderr".into()))?;
+
+        let channel = Arc::new(RpcChannel::new(stdin, max_frame_bytes));
+        let (sender, incoming) = mpsc::channel(256);
+        let (reader_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        let stdout_task =
+            rpc::spawn_stdout_reader(stdout, Arc::clone(&channel), sender, shutdown_rx);
+        let stderr_tail = Arc::new(Mutex::new(Vec::new()));
+        let stderr_task = tokio::spawn({
+            let stderr_tail = Arc::clone(&stderr_tail);
+            async move {
+                let mut stderr = BufReader::new(stderr);
+                let mut buffer = vec![0; STDERR_CHUNK_BYTES];
+                while let Ok(bytes) = stderr.read(&mut buffer).await {
+                    if bytes == 0 {
+                        break;
+                    }
+                    if let Ok(mut tail) = stderr_tail.lock() {
+                        tail.extend_from_slice(&buffer[..bytes]);
+                        if tail.len() > STDERR_TAIL_BYTES {
+                            let excess = tail.len() - STDERR_TAIL_BYTES;
+                            tail.drain(..excess);
+                        }
+                    }
+                    debug!(target: "js_runtime:stderr", bytes, "JavaScript stderr received");
+                }
+            }
+        });
+
+        Ok(Self {
+            child: tokio::sync::Mutex::new(child),
+            channel,
+            incoming: tokio::sync::Mutex::new(Some(incoming)),
+            process_tree,
+            stdout_task: tokio::sync::Mutex::new(Some(stdout_task)),
+            stderr_task: tokio::sync::Mutex::new(Some(stderr_task)),
+            reader_shutdown,
+            stderr_tail,
+        })
+    }
+
+    #[must_use]
+    pub fn channel(&self) -> Arc<RpcChannel> {
+        Arc::clone(&self.channel)
+    }
+
+    pub async fn take_incoming(&self) -> Option<mpsc::Receiver<IncomingMessage>> {
+        self.incoming.lock().await.take()
+    }
+
+    /// 只等待 leader（不排空 channel、不等重定向后代），供
+    /// `#[cfg(all(test, unix))]` fixture 在整树清理前断言 leader 已自然退出。
+    #[cfg(all(test, unix))]
+    pub(crate) async fn wait_for_exit(&self) -> Result<std::process::ExitStatus> {
+        self.child.lock().await.wait().await.map_err(Into::into)
+    }
+
+    pub async fn kill(&self) -> Result<()> {
+        self.terminate_and_wait("JavaScript process cancelled")
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn wait(&self) -> Result<std::process::ExitStatus> {
+        let status = self.child.lock().await.wait().await;
+        self.channel.drain_pending("JavaScript process exited");
+        // Redirected descendants can outlive both the leader and reader EOF.
+        // Natural wait keeps their owner until the complete tree has stopped.
+        self.process_tree.wait_for_exit().await;
+        self.join_readers().await;
+        status.map_err(Into::into)
+    }
+
+    pub fn stderr_tail(&self) -> Option<String> {
+        let tail = self.stderr_tail.lock().ok()?;
+        if tail.is_empty() {
+            None
+        } else {
+            Some(String::from_utf8_lossy(&tail).into_owned())
+        }
+    }
+
+    /// 终止进程树并等待整树与 reader 退出；终止清理不依赖入站消费者。
+    pub(crate) async fn terminate_and_wait(
+        &self,
+        reason: &'static str,
+    ) -> Result<std::process::ExitStatus> {
+        self.channel.drain_pending(reason);
+        // 终止路径没有消费者保证：队列满时 reader 停在 send，须显式停止才能 join。
+        self.reader_shutdown.send_replace(true);
+        // A reaped leader can leave descendants holding stdout/stderr open. Close
+        // the owned tree before awaiting reader EOF, even when the leader exited.
+        self.process_tree.terminate();
+        let status = self.child.lock().await.wait().await;
+        self.process_tree.wait_for_exit().await;
+        self.join_readers().await;
+        status.map_err(Into::into)
+    }
+
+    pub(super) async fn join_readers(&self) {
+        for slot in [&self.stdout_task, &self.stderr_task] {
+            let mut slot = slot.lock().await;
+            if let Some(task) = slot.as_mut() {
+                // Cancellation releases the lock but leaves the same handle in
+                // the host, so a later waiter still observes actual completion.
+                let _ = task.await;
+            }
+            let _ = slot.take();
+        }
+    }
+}

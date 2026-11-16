@@ -1,14 +1,23 @@
 //! Tests
 
-use super::*;
+use super::Arc;
+use super::Line;
+use super::Paragraph;
+use super::SlotIndex;
+use super::SlotLines;
+use super::Wrap;
+use super::WrappedLineInfo;
+
 use ratatui_kit::ratatui::text::Span;
 
+#[must_use]
 fn make_line(s: &str) -> Line<'static> {
     Line::from(vec![Span::raw(s.to_string())])
 }
 
 // ── concat_wrap_maps ──
 
+#[must_use]
 fn make_wrap_entry(logical: usize, start: usize, end: usize, slot: usize) -> WrappedLineInfo {
     WrappedLineInfo {
         logical_idx: logical,
@@ -20,7 +29,7 @@ fn make_wrap_entry(logical: usize, start: usize, end: usize, slot: usize) -> Wra
 
 #[test]
 fn test_concat_wrap_maps_empty_input_returns_empty() {
-    let result = concat_wrap_maps(&[]);
+    let result = super::concat_wrap_maps(&[]);
     assert!(result.is_empty());
 }
 
@@ -32,7 +41,7 @@ fn test_concat_wrap_maps_single_slot_preserves_entries() {
         make_wrap_entry(1, 1, 3, 0),
         make_wrap_entry(2, 3, 4, 0),
     ];
-    let result = concat_wrap_maps(&[(&slot, 0, 0)]);
+    let result = super::concat_wrap_maps(&[(&slot, 0, 0)]);
     assert_eq!(
         result,
         vec![
@@ -52,7 +61,7 @@ fn test_concat_wrap_maps_multi_slots_accumulates_offsets() {
     let slot0 = vec![make_wrap_entry(0, 0, 1, 0), make_wrap_entry(1, 1, 2, 0)];
     let slot1 = vec![make_wrap_entry(0, 0, 1, 0)];
     let slot2 = vec![make_wrap_entry(0, 0, 1, 0)];
-    let result = concat_wrap_maps(&[(&slot0, 0, 0), (&slot1, 2, 1), (&slot2, 3, 2)]);
+    let result = super::concat_wrap_maps(&[(&slot0, 0, 0), (&slot1, 2, 1), (&slot2, 3, 2)]);
     assert_eq!(
         result,
         vec![
@@ -72,7 +81,7 @@ fn test_concat_wrap_maps_supports_multi_visual_rows_per_line() {
     // 单条逻辑行 wrap 成多视觉行：分片 1 一条 line 占 visual 0-3
     let slot0 = vec![make_wrap_entry(0, 0, 3, 0)];
     let slot1 = vec![make_wrap_entry(0, 0, 1, 0), make_wrap_entry(1, 1, 2, 0)];
-    let result = concat_wrap_maps(&[(&slot0, 0, 0), (&slot1, 1, 1)]);
+    let result = super::concat_wrap_maps(&[(&slot0, 0, 0), (&slot1, 1, 1)]);
     assert_eq!(
         result,
         vec![
@@ -90,20 +99,20 @@ fn test_concat_wrap_maps_supports_multi_visual_rows_per_line() {
 #[test]
 fn test_wrap_byte_starts_ascii_no_wrap() {
     let line = make_line("abcdef");
-    assert_eq!(wrap_byte_starts(&line, "abcdef", 10), vec![0, 6]);
+    assert_eq!(super::wrap_byte_starts(&line, "abcdef", 10), vec![0, 6]);
 }
 
 #[test]
 fn test_wrap_byte_starts_ascii_wrap() {
     let line = make_line("abcdef");
     // width=3: 行 0="abc", 行 1="def"
-    assert_eq!(wrap_byte_starts(&line, "abcdef", 3), vec![0, 3, 6]);
+    assert_eq!(super::wrap_byte_starts(&line, "abcdef", 3), vec![0, 3, 6]);
 }
 
 #[test]
 fn test_wrap_byte_starts_cjk_no_wrap() {
     let line = make_line("你好");
-    assert_eq!(wrap_byte_starts(&line, "你好", 10), vec![0, 6]);
+    assert_eq!(super::wrap_byte_starts(&line, "你好", 10), vec![0, 6]);
 }
 
 #[test]
@@ -111,7 +120,10 @@ fn test_wrap_byte_starts_mixed_cjk_word_wrap() {
     // ratatui WordWrapper 行为：CJK 整段算一个 word，超宽不拆分
     // plain="abc你好你好" w=5 → 行 0="abc你"(byte 0..6), 行 1="好你好"(byte 6..15, 溢出但保留)
     let line = make_line("abc你好你好");
-    assert_eq!(wrap_byte_starts(&line, "abc你好你好", 5), vec![0, 6, 15]);
+    assert_eq!(
+        super::wrap_byte_starts(&line, "abc你好你好", 5),
+        vec![0, 6, 15]
+    );
 }
 
 #[test]
@@ -119,20 +131,20 @@ fn test_wrap_byte_starts_mixed_cjk_wider() {
     // w=4: 行 0="abc", 行 1="你好"(trim:false 下 WordWrapper 在 word 边界处拆，但 CJK 无空格
     // 整段 word "abc你好你好" 超过 4 列。观察：abc 你好 / 你好
     let line = make_line("abc你好你好");
-    let starts = wrap_byte_starts(&line, "abc你好你好", 4);
+    let starts = super::wrap_byte_starts(&line, "abc你好你好", 4);
     assert_eq!(starts, vec![0, 3, 9, 15]);
 }
 
 #[test]
 fn test_wrap_byte_starts_empty() {
     let line = make_line("");
-    assert_eq!(wrap_byte_starts(&line, "", 10), vec![0]);
+    assert_eq!(super::wrap_byte_starts(&line, "", 10), vec![0]);
 }
 
 #[test]
 fn test_wrap_byte_starts_single_cjk() {
     let line = make_line("你");
-    assert_eq!(wrap_byte_starts(&line, "你", 10), vec![0, 3]);
+    assert_eq!(super::wrap_byte_starts(&line, "你", 10), vec![0, 3]);
 }
 
 #[test]
@@ -152,7 +164,7 @@ fn test_wrap_byte_starts_row_count_matches_ratatui() {
         let line_count = Paragraph::new(ratatui_kit::ratatui::text::Text::from(line.clone()))
             .wrap(Wrap { trim: false })
             .line_count(width);
-        let our_rows = wrap_byte_starts(&line, text, width)
+        let our_rows = super::wrap_byte_starts(&line, text, width)
             .len()
             .saturating_sub(1)
             .max(1);
@@ -171,10 +183,11 @@ fn test_extract_cjk_same_visual_row_double_width_right_half() {
     // ratatui w=5: 行 0="abc你", 行 1="好你好"（WordWrapper 不拆 word，溢出保留）
     // 用户拖 col 0 到 col 3（'你' 右半，含 '你'）→ 期望 "好你"
     let lines = vec![make_line("abc你好你好")];
-    let (_, wrap_map) = build_wrap_map(&lines, 5);
+    let (_, wrap_map) = super::build_wrap_map(&lines, 5);
     let slots = vec![Arc::new(lines)];
     let offsets = vec![0usize];
-    let result = extract_visual_range(&slots, &offsets, &wrap_map, (1, 0), (1, 3), 5, None, None);
+    let result =
+        super::extract_visual_range(&slots, &offsets, &wrap_map, (1, 0), (1, 3), 5, None, None);
     assert_eq!(result.as_deref(), Some("好你"));
 }
 
@@ -182,10 +195,11 @@ fn test_extract_cjk_same_visual_row_double_width_right_half() {
 fn test_extract_cjk_same_visual_row_left_half_excludes_char() {
     // 同 row 1，拖 col 0 到 col 2（'你' 左半，不含 '你'）→ "好"
     let lines = vec![make_line("abc你好你好")];
-    let (_, wrap_map) = build_wrap_map(&lines, 5);
+    let (_, wrap_map) = super::build_wrap_map(&lines, 5);
     let slots = vec![Arc::new(lines)];
     let offsets = vec![0usize];
-    let result = extract_visual_range(&slots, &offsets, &wrap_map, (1, 0), (1, 2), 5, None, None);
+    let result =
+        super::extract_visual_range(&slots, &offsets, &wrap_map, (1, 0), (1, 2), 5, None, None);
     assert_eq!(result.as_deref(), Some("好"));
 }
 
@@ -193,10 +207,11 @@ fn test_extract_cjk_same_visual_row_left_half_excludes_char() {
 fn test_extract_cjk_first_row_partial() {
     // 行 0="abc你"：col 0 到 col 4（'你' 右半，含）→ "abc你"
     let lines = vec![make_line("abc你好你好")];
-    let (_, wrap_map) = build_wrap_map(&lines, 5);
+    let (_, wrap_map) = super::build_wrap_map(&lines, 5);
     let slots = vec![Arc::new(lines)];
     let offsets = vec![0usize];
-    let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 0), (0, 4), 5, None, None);
+    let result =
+        super::extract_visual_range(&slots, &offsets, &wrap_map, (0, 0), (0, 4), 5, None, None);
     assert_eq!(result.as_deref(), Some("abc你"));
 }
 
@@ -206,20 +221,22 @@ fn test_extract_cjk_cross_visual_row() {
     // 行 0 含 '你'，行 1 含 '好'（行 1 第 1 个字符）
     // 期望 '你' + '好' = "你好"
     let lines = vec![make_line("abc你好你好")];
-    let (_, wrap_map) = build_wrap_map(&lines, 5);
+    let (_, wrap_map) = super::build_wrap_map(&lines, 5);
     let slots = vec![Arc::new(lines)];
     let offsets = vec![0usize];
-    let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 4), (1, 1), 5, None, None);
+    let result =
+        super::extract_visual_range(&slots, &offsets, &wrap_map, (0, 4), (1, 1), 5, None, None);
     assert_eq!(result.as_deref(), Some("你好"));
 }
 
 #[test]
 fn test_extract_ascii_same_row() {
     let lines = vec![make_line("abcdef")];
-    let (_, wrap_map) = build_wrap_map(&lines, 10);
+    let (_, wrap_map) = super::build_wrap_map(&lines, 10);
     let slots = vec![Arc::new(lines)];
     let offsets = vec![0usize];
-    let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 1), (0, 3), 10, None, None);
+    let result =
+        super::extract_visual_range(&slots, &offsets, &wrap_map, (0, 1), (0, 3), 10, None, None);
     assert_eq!(result.as_deref(), Some("bc"));
 }
 
@@ -227,10 +244,11 @@ fn test_extract_ascii_same_row() {
 fn test_extract_ascii_cross_visual_row() {
     // 视觉行 0="abc" col 2，视觉行 1="def" col 1 → "cd"
     let lines = vec![make_line("abcdef")];
-    let (_, wrap_map) = build_wrap_map(&lines, 3);
+    let (_, wrap_map) = super::build_wrap_map(&lines, 3);
     let slots = vec![Arc::new(lines)];
     let offsets = vec![0usize];
-    let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 2), (1, 1), 3, None, None);
+    let result =
+        super::extract_visual_range(&slots, &offsets, &wrap_map, (0, 2), (1, 1), 3, None, None);
     assert_eq!(result.as_deref(), Some("cd"));
 }
 
@@ -238,10 +256,11 @@ fn test_extract_ascii_cross_visual_row() {
 fn test_extract_cross_logical_row() {
     // 跨逻辑行：(0,1) → (1,2) = "bc" + "de"（用 \n 连接）
     let lines = vec![make_line("abc"), make_line("def")];
-    let (_, wrap_map) = build_wrap_map(&lines, 10);
+    let (_, wrap_map) = super::build_wrap_map(&lines, 10);
     let slots = vec![Arc::new(lines)];
     let offsets = vec![0usize];
-    let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 1), (1, 2), 10, None, None);
+    let result =
+        super::extract_visual_range(&slots, &offsets, &wrap_map, (0, 1), (1, 2), 10, None, None);
     assert_eq!(result.as_deref(), Some("bc\nde"));
 }
 
@@ -249,10 +268,11 @@ fn test_extract_cross_logical_row() {
 fn test_extract_swapped_start_end_normalizes() {
     // 反向拖拽：vis_start > vis_end 应规范化
     let lines = vec![make_line("abcdef")];
-    let (_, wrap_map) = build_wrap_map(&lines, 10);
+    let (_, wrap_map) = super::build_wrap_map(&lines, 10);
     let slots = vec![Arc::new(lines)];
     let offsets = vec![0usize];
-    let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 3), (0, 1), 10, None, None);
+    let result =
+        super::extract_visual_range(&slots, &offsets, &wrap_map, (0, 3), (0, 1), 10, None, None);
     assert_eq!(result.as_deref(), Some("bc"));
 }
 
@@ -286,7 +306,8 @@ fn test_highlight_ascii_same_row_partial() {
         visual_start: 0,
         visual_end: 1,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 0, 0, 1, 3, 10, test_style());
+    let highlighted =
+        super::highlight_line_in_selection(&line, &entry, 0, 0, 1, 3, 10, test_style());
     assert_eq!(highlighted_text(&highlighted, TEST_BG), "bc");
 }
 
@@ -302,7 +323,8 @@ fn test_highlight_cjk_same_visual_row_double_width_right_half() {
         visual_start: 0,
         visual_end: 2,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 1, 1, 0, 3, 5, test_style());
+    let highlighted =
+        super::highlight_line_in_selection(&line, &entry, 1, 1, 0, 3, 5, test_style());
     assert_eq!(highlighted_text(&highlighted, TEST_BG), "好你");
 }
 
@@ -318,7 +340,8 @@ fn test_highlight_cjk_cross_visual_row_first_and_last_same_logical() {
         visual_start: 0,
         visual_end: 2,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 0, 1, 4, 1, 5, test_style());
+    let highlighted =
+        super::highlight_line_in_selection(&line, &entry, 0, 1, 4, 1, 5, test_style());
     assert_eq!(highlighted_text(&highlighted, TEST_BG), "你好");
 }
 
@@ -333,7 +356,8 @@ fn test_highlight_first_logical_only_partial_to_end() {
         visual_start: 0,
         visual_end: 1,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 0, 1, 1, 2, 10, test_style());
+    let highlighted =
+        super::highlight_line_in_selection(&line, &entry, 0, 1, 1, 2, 10, test_style());
     assert_eq!(highlighted_text(&highlighted, TEST_BG), "bc");
 }
 
@@ -349,7 +373,8 @@ fn test_highlight_last_logical_only_start_to_col() {
         visual_start: 1,
         visual_end: 2,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 0, 1, 1, 2, 10, test_style());
+    let highlighted =
+        super::highlight_line_in_selection(&line, &entry, 0, 1, 1, 2, 10, test_style());
     assert_eq!(highlighted_text(&highlighted, TEST_BG), "de");
 }
 
@@ -364,7 +389,8 @@ fn test_highlight_middle_logical_full_line() {
         visual_start: 1,
         visual_end: 2,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 0, 2, 0, 0, 10, test_style());
+    let highlighted =
+        super::highlight_line_in_selection(&line, &entry, 0, 2, 0, 0, 10, test_style());
     assert_eq!(highlighted_text(&highlighted, TEST_BG), "def");
 }
 
@@ -382,7 +408,8 @@ fn test_highlight_multi_span_partial_overlap_splits_span() {
         visual_start: 0,
         visual_end: 1,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 0, 0, 3, 7, 20, test_style());
+    let highlighted =
+        super::highlight_line_in_selection(&line, &entry, 0, 0, 3, 7, 20, test_style());
     assert_eq!(highlighted_text(&highlighted, TEST_BG), "lowo");
     // 完整文本保留原顺序
     let full: String = highlighted
@@ -404,7 +431,8 @@ fn test_highlight_empty_byte_range_returns_original() {
         visual_start: 0,
         visual_end: 1,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 0, 0, 1, 1, 10, test_style());
+    let highlighted =
+        super::highlight_line_in_selection(&line, &entry, 0, 0, 1, 1, 10, test_style());
     // 无 span 高亮
     assert_eq!(highlighted_text(&highlighted, TEST_BG), "");
     // 完整文本仍为 "abcdef"
@@ -431,7 +459,8 @@ fn test_highlight_preserves_existing_span_style() {
         visual_start: 0,
         visual_end: 1,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 0, 0, 0, 2, 10, test_style());
+    let highlighted =
+        super::highlight_line_in_selection(&line, &entry, 0, 0, 0, 2, 10, test_style());
     // 高亮部分 "ab" 应同时保留 fg=Red + bg=TEST_BG
     let highlighted_span = highlighted
         .spans
@@ -445,7 +474,7 @@ fn test_highlight_preserves_existing_span_style() {
 // ── [D3 §9] 语义复制：extract_visual_range 带 VM 列表时剥离 UI chrome ────
 
 use crate::kit::message_area::grid::GridSpec;
-use crate::kit::message_area::render::vm_to_lines;
+
 use crate::kit::tui_render_unit::{
     TuiAssistantBubble, TuiRenderUnit, TuiToolCard, TuiToolPresentation,
 };
@@ -461,10 +490,10 @@ fn sel_env(
     Vec<WrappedLineInfo>,
     im::Vector<TuiRenderUnit>,
 ) {
-    let lines = vm_to_lines(&vm, grid);
+    let lines = crate::kit::message_area::render::vm_to_lines(&vm, grid);
     // 视宽与生产一致：居中带右缘（line_width，跳过滚动条列）——metadata
     // 右对齐到该列，宽于此值会在 wrap_map 二次折行。
-    let (_, wm) = build_wrap_map(&lines, grid.line_width());
+    let (_, wm) = super::build_wrap_map(&lines, grid.line_width());
     let wm: Vec<WrappedLineInfo> = wm
         .into_iter()
         .map(|mut e| {
@@ -501,7 +530,7 @@ fn test_extract_semantic_plain_middle_line() {
     );
     // 短回复（<120 字）并入过程带 → 行 0 = 前导空行；行 1 = 段落 1；
     // 行 2 = 段间空行；行 3 = 段落 2——完整选择（跨逻辑行选区，中间行）
-    let text = extract_visual_range(
+    let text = super::extract_visual_range(
         &slots,
         &offsets,
         &wm,
@@ -553,7 +582,7 @@ fn test_extract_semantic_tool_card_header_and_command() {
     card.recompute_hash();
     let vm = TuiRenderUnit::TuiToolCard(card);
     let (slots, offsets, wm, vms) = sel_env(vm, &grid);
-    let text = extract_visual_range(
+    let text = super::extract_visual_range(
         &slots,
         &offsets,
         &wm,
@@ -615,7 +644,7 @@ fn test_extract_semantic_diff_strips_gutter_keeps_markers() {
     card.recompute_hash();
     let vm = TuiRenderUnit::TuiToolCard(card);
     let (slots, offsets, wm, vms) = sel_env(vm, &grid);
-    let text = extract_visual_range(
+    let text = super::extract_visual_range(
         &slots,
         &offsets,
         &wm,
@@ -662,7 +691,7 @@ fn test_extract_semantic_partial_row_maps_to_semantic() {
     );
     let (slots, offsets, wm, vms) = sel_env(vm, &grid);
     // 行 0 = leading 空行；行 1 = 正文（cont_prefix）——选区列 [1, 5) → 语义映射
-    let text = extract_visual_range(
+    let text = super::extract_visual_range(
         &slots,
         &offsets,
         &wm,
@@ -697,7 +726,7 @@ fn test_extract_without_view_models_keeps_plain() {
         .into(),
     );
     let (slots, offsets, wm, _vms) = sel_env(vm, &grid);
-    let text = extract_visual_range(
+    let text = super::extract_visual_range(
         &slots,
         &offsets,
         &wm,
@@ -724,7 +753,7 @@ fn slot_index_fixture(slot_count: usize, lines_per_slot: usize) -> SlotIndex {
         let lines: Vec<_> = (0..lines_per_slot)
             .map(|line| make_line(&format!("slot-{slot}-line-{line}-你好-🙂")))
             .collect();
-        let (_, map) = build_wrap_map(&lines, 8);
+        let (_, map) = super::build_wrap_map(&lines, 8);
         slots.push(Arc::new(lines));
         maps.push(Arc::new(map));
     }
@@ -736,17 +765,17 @@ fn test_slot_index_visual_and_logical_lookup_match_flatten_reference() {
     let index = slot_index_fixture(10, 7);
     let maps: Vec<_> = (0..10)
         .map(|slot| {
-            let lines = index.materialize(slot).unwrap();
-            build_wrap_map(
+            let lines = index.materialize(slot).expect("slot index visual and logical lookup match flatten reference: fixture must contain the requested entry");
+            super::build_wrap_map(
                 &(0..7)
-                    .map(|local| lines.line(local).unwrap().clone())
+                    .map(|local| lines.line(local).expect("slot index visual and logical lookup match flatten reference: fixture must contain the requested entry").clone())
                     .collect::<Vec<_>>(),
                 8,
             )
             .1
         })
         .collect();
-    let flattened = concat_wrap_maps(
+    let flattened = super::concat_wrap_maps(
         &(0..10)
             .map(|slot| {
                 let map = maps[slot].as_slice();
@@ -756,14 +785,14 @@ fn test_slot_index_visual_and_logical_lookup_match_flatten_reference() {
     );
 
     assert_eq!(index.total_logical(), flattened.len());
-    assert_eq!(index.total_visual(), flattened.last().unwrap().visual_end);
+    assert_eq!(index.total_visual(), flattened.last().expect("slot index visual and logical lookup match flatten reference: the fixture collection must contain the expected entry").visual_end);
     for entry in &flattened {
-        let by_logical = index.logical_lookup(entry.logical_idx).unwrap();
+        let by_logical = index.logical_lookup(entry.logical_idx).expect("slot index visual and logical lookup match flatten reference: fixture must contain the requested entry");
         assert_eq!(by_logical.slot_index, entry.slot_index);
         assert_eq!(by_logical.global_visual_start, entry.visual_start);
         assert_eq!(by_logical.global_visual_end, entry.visual_end);
         for visual in entry.visual_start..entry.visual_end {
-            let by_visual = index.visual_lookup(visual).unwrap();
+            let by_visual = index.visual_lookup(visual).expect("slot index visual and logical lookup match flatten reference: fixture must contain the requested entry");
             assert_eq!(by_visual.global_logical, entry.logical_idx);
             assert_eq!(by_visual.slot_index, entry.slot_index);
         }
@@ -774,7 +803,7 @@ fn test_slot_index_visual_and_logical_lookup_match_flatten_reference() {
 fn test_wrap_byte_starts_large_line_does_not_truncate_u16_height() {
     let text = "x".repeat(u16::MAX as usize + 2);
     let line = make_line(&text);
-    let starts = wrap_byte_starts(&line, &text, 1);
+    let starts = super::wrap_byte_starts(&line, &text, 1);
 
     assert_eq!(starts.len(), text.len() + 1);
     assert_eq!(starts[u16::MAX as usize + 1], u16::MAX as usize + 1);
@@ -798,7 +827,7 @@ fn test_slot_index_handles_empty_slots_and_large_visual_coordinates() {
     assert_eq!(
         index
             .visual_lookup(u16::MAX as usize + 50)
-            .unwrap()
+            .expect("slot index handles empty slots and large visual coordinates: the visual_lookup fixture operation uses valid inputs")
             .slot_index,
         1
     );
@@ -824,12 +853,12 @@ fn test_slot_index_equivalence_matrix_covers_empty_and_varied_wraps() {
             let lines: Vec<_> = (0..lines_per_slot)
                 .map(|line| make_line(&format!("s{slot}-l{line}-中文🙂-longword")))
                 .collect();
-            let (_, map) = build_wrap_map(&lines, width);
+            let (_, map) = super::build_wrap_map(&lines, width);
             slots.push(Arc::new(lines));
             maps.push(Arc::new(map));
         }
         let index = SlotIndex::new(slots, maps.clone());
-        let flattened = concat_wrap_maps(
+        let flattened = super::concat_wrap_maps(
             &(0..slot_count)
                 .map(|slot| {
                     let map = maps[slot].as_slice();
@@ -839,7 +868,7 @@ fn test_slot_index_equivalence_matrix_covers_empty_and_varied_wraps() {
         );
         assert_eq!(index.total_logical(), flattened.len());
         for entry in flattened {
-            let lookup = index.logical_lookup(entry.logical_idx).unwrap();
+            let lookup = index.logical_lookup(entry.logical_idx).expect("slot index equivalence matrix covers empty and varied wraps: fixture must contain the requested entry");
             assert_eq!(lookup.slot_index, entry.slot_index);
             assert_eq!(lookup.global_visual_start, entry.visual_start);
             assert_eq!(lookup.global_visual_end, entry.visual_end);
@@ -861,7 +890,7 @@ fn test_viewport_offset_preserves_values_above_u16() {
     );
     let (_, _, offset) = index
         .viewport_logical_range(u16::MAX as usize + 100, 20)
-        .unwrap();
+        .expect("viewport offset preserves values above u16: the viewport_logical_range fixture operation uses valid inputs");
     assert_eq!(offset, u16::MAX as usize + 100);
 }
 
@@ -873,13 +902,13 @@ fn test_slot_index_stable_overlay_returns_shared_lines_not_placeholders() {
         make_line("tail"),
     ]);
     let stable = Arc::new(vec![make_line("stable 中文")]);
-    let (_, map) = build_wrap_map(&placeholders, 20);
+    let (_, map) = super::build_wrap_map(&placeholders, 20);
     let index = SlotIndex::new_with_overlays(
         vec![SlotLines::composite(placeholders, 1, vec![stable])],
         vec![Arc::new(map)],
     );
-    assert_eq!(index.line(0, 1).unwrap().to_string(), "stable 中文");
-    assert_eq!(index.line(0, 2).unwrap().to_string(), "tail");
+    assert_eq!(index.line(0, 1).expect("slot index stable overlay returns shared lines not placeholders: the fixture collection must contain the expected entry").to_string(), "stable 中文");
+    assert_eq!(index.line(0, 2).expect("slot index stable overlay returns shared lines not placeholders: the fixture collection must contain the expected entry").to_string(), "tail");
 }
 
 #[test]
@@ -902,9 +931,9 @@ fn test_slot_lines_composite_shares_large_stable_part_without_flattening() {
     assert_eq!(lines.parts.len(), 3, "构造成本按 parts 而非稳定行数增长");
     assert_eq!(Arc::as_ptr(&lines.parts[1].lines), stable_ptr);
     assert_eq!(lines.len(), 10_002);
-    assert_eq!(lines.get(0).unwrap().to_string(), "chrome");
-    assert_eq!(lines.get(10_000).unwrap().to_string(), "stable-9999");
-    assert_eq!(lines.get(10_001).unwrap().to_string(), "tail");
+    assert_eq!(lines.get(0).expect("slot lines composite shares large stable part without flattening: the fixture collection must contain the expected entry").to_string(), "chrome");
+    assert_eq!(lines.get(10_000).expect("slot lines composite shares large stable part without flattening: the fixture collection must contain the expected entry").to_string(), "stable-9999");
+    assert_eq!(lines.get(10_001).expect("slot lines composite shares large stable part without flattening: the fixture collection must contain the expected entry").to_string(), "tail");
 }
 
 #[test]
@@ -932,7 +961,7 @@ fn test_selection_reversed_modifier_survives_no_color_strip() {
         visual_start: 0,
         visual_end: 1,
     };
-    let highlighted = highlight_line_in_selection(
+    let highlighted = super::highlight_line_in_selection(
         &line,
         &entry,
         0,
@@ -952,8 +981,8 @@ fn test_selection_reversed_modifier_survives_no_color_strip() {
     let mut buffer = Buffer::empty(area);
     stripped.render(area, &mut buffer);
     for x in 1..3 {
-        let cell = buffer.cell((x, 0)).unwrap();
-        let expected = "abcdef".chars().nth(x as usize).unwrap().to_string();
+        let cell = buffer.cell((x, 0)).expect("selection reversed modifier survives no color strip: fixture must contain the requested entry");
+        let expected = "abcdef".chars().nth(x as usize).expect("selection reversed modifier survives no color strip: fixture must contain the requested entry").to_string();
         assert_eq!(cell.symbol(), expected);
         assert!(
             cell.modifier.contains(Modifier::REVERSED),
@@ -961,7 +990,7 @@ fn test_selection_reversed_modifier_survives_no_color_strip() {
         );
     }
     for x in [0u16, 3, 4, 5] {
-        let cell = buffer.cell((x, 0)).unwrap();
+        let cell = buffer.cell((x, 0)).expect("selection reversed modifier survives no color strip: fixture must contain the requested entry");
         assert!(!cell.modifier.contains(Modifier::REVERSED), "选区外列 {x}");
     }
 }

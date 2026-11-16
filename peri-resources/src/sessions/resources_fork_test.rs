@@ -1,4 +1,6 @@
-use super::*;
+use super::{Fixture, SessionResourceErrorKind};
+use peri_acp_types::session_resources::ForkSnapshot;
+use peri_acp_types::session_resources::SessionResources;
 
 // ─── fork 的收敛与撤销边界 ───────────────────────────────────────────────────
 
@@ -14,7 +16,7 @@ async fn test_save_fork_converges_when_the_target_was_saved_without_admission() 
             r#"{"v":1,"id":"s-fork-source"}"#,
         ),
         source_id: "s-fork-source".to_owned(),
-        payloads: vec![payload("forked turn")],
+        payloads: vec![super::payload("forked turn")],
         flags: std::collections::HashMap::new(),
     };
     fixture.facade.gate.data().save_fork(&fork).await.unwrap();
@@ -22,7 +24,10 @@ async fn test_save_fork_converges_when_the_target_was_saved_without_admission() 
     assert_eq!(fixture.count_messages("s-fork-target").await, 1);
     fixture
         .facade
-        .append_history(&"s-fork-target".to_owned(), &[payload("continued fork")])
+        .append_history(
+            &"s-fork-target".to_owned(),
+            &[super::payload("continued fork")],
+        )
         .await
         .unwrap();
     let before = fixture
@@ -50,7 +55,7 @@ async fn test_save_fork_converges_when_the_target_was_saved_without_admission() 
         Err(error) => error,
     };
     assert!(matches!(
-        error_kind(&error),
+        super::error_kind(&error),
         SessionResourceErrorKind::Conflict { .. }
     ));
 }
@@ -70,7 +75,7 @@ async fn test_abandon_initialization_deletes_a_fork_target_with_frozen() {
             r#"{"v":1,"id":"s-fork-source"}"#,
         ),
         source_id: "s-fork-source".to_owned(),
-        payloads: vec![payload("forked turn")],
+        payloads: vec![super::payload("forked turn")],
         flags: std::collections::HashMap::new(),
     };
     fixture.facade.save_fork(&fork).await.unwrap();
@@ -92,7 +97,7 @@ async fn test_abandon_initialization_deletes_a_fork_target_with_frozen() {
         .facade
         .append_history(
             &"s-fork-source".to_owned(),
-            &[payload("source remains active")],
+            &[super::payload("source remains active")],
         )
         .await
         .unwrap();
@@ -115,7 +120,7 @@ async fn test_revoke_entry_points_differ_only_by_the_frozen_criterion() {
         .await
         .unwrap_err();
     assert!(matches!(
-        error_kind(&error),
+        super::error_kind(&error),
         SessionResourceErrorKind::Conflict { .. }
     ));
     assert_eq!(fixture.count_threads("s-write-once").await, 1);
@@ -153,14 +158,17 @@ async fn test_revoke_refuses_a_session_that_already_has_children() {
         .await
         .unwrap_err();
     assert!(matches!(
-        error_kind(&error),
+        super::error_kind(&error),
         SessionResourceErrorKind::InvalidInput { .. }
     ));
     assert_eq!(fixture.count_threads("s-revoke-root").await, 1);
     assert_eq!(fixture.count_threads("s-revoke-child").await, 1);
     fixture
         .facade
-        .append_history(&"s-revoke-child".to_owned(), &[payload("still usable")])
+        .append_history(
+            &"s-revoke-child".to_owned(),
+            &[super::payload("still usable")],
+        )
         .await
         .unwrap();
 }

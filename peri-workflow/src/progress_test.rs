@@ -1,5 +1,11 @@
-use super::*;
+use crate::progress::ProgressObserver;
+use crate::progress::RunProgress;
+use crate::progress::WorkflowProgressStore;
 use crate::protocol::{AgentRunResult, ProgressEvent, Usage};
+
+use peri_acp_types::workflow::AgentStatus;
+use peri_acp_types::workflow::RunStatus;
+use std::sync::Arc;
 
 fn make_store() -> WorkflowProgressStore {
     WorkflowProgressStore::new()
@@ -13,7 +19,7 @@ fn test_run_started_creates_run() {
         workflow_name: "test".into(),
         meta: None,
     });
-    let run = store.get_run("r1").expect("run 应存在");
+    let run = store.run_snapshot("r1").expect("run 应存在");
     assert_eq!(run.run_id, "r1");
     assert_eq!(run.workflow_name, "test");
     assert!(matches!(run.status, RunStatus::Running));
@@ -64,7 +70,7 @@ fn test_agent_lifecycle_started_progress_done() {
             duration_ms: None,
         },
     });
-    let run = store.get_run("r1").expect("run 应存在");
+    let run = store.run_snapshot("r1").expect("run 应存在");
     assert_eq!(run.agents.len(), 1);
     let agent = run.agents.get(&0).expect("agent 0 应存在");
     assert_eq!(agent.agent_id, 0);
@@ -154,7 +160,7 @@ fn test_concurrent_agents_no_race() {
         },
     });
 
-    let run = store.get_run("r1").expect("run 应存在");
+    let run = store.run_snapshot("r1").expect("run 应存在");
     assert_eq!(run.agents.len(), 2);
 
     // agent 0：验证精确匹配，不被 LIFO 搞乱
@@ -181,7 +187,10 @@ fn test_run_done_updates_status() {
         meta: None,
     });
     assert!(matches!(
-        store.get_run("r1").unwrap().status,
+        store
+            .run_snapshot("r1")
+            .expect("the run snapshot fixture result is required for this assertion")
+            .status,
         RunStatus::Running
     ));
 
@@ -191,7 +200,9 @@ fn test_run_done_updates_status() {
         return_value: None,
         error: None,
     });
-    let run = store.get_run("r1").unwrap();
+    let run = store
+        .run_snapshot("r1")
+        .expect("the run snapshot fixture result is required for this assertion");
     assert!(matches!(run.status, RunStatus::Completed));
     assert_eq!(
         run.post_processing_status,
@@ -213,7 +224,7 @@ fn test_cleanup_completed_keeps_running_runs() {
     });
     store.cleanup_completed();
     // Running 状态的 run 始终保留
-    assert!(store.get_run("r1").is_some());
+    assert!(store.run_snapshot("r1").is_some());
 }
 
 #[test]
@@ -233,7 +244,7 @@ fn test_cleanup_completed_keeps_recently_completed_runs() {
     });
     store.cleanup_completed();
     // 刚完成的 run 不应被清理（completed_at 在 5 分钟保留期内）
-    assert!(store.get_run("r1").is_some());
+    assert!(store.run_snapshot("r1").is_some());
 }
 
 #[test]
@@ -250,7 +261,7 @@ fn test_run_done_killed_sets_killed_status() {
         return_value: None,
         error: Some("workflow killed by user".into()),
     });
-    let run = store.get_run("r1").expect("run 应存在");
+    let run = store.run_snapshot("r1").expect("run 应存在");
     assert!(matches!(run.status, RunStatus::Killed));
     // Killed 是终态：completed_at 必须设置（否则 cleanup_completed 永不清理）
     assert!(run.completed_at.is_some());
@@ -267,7 +278,10 @@ fn test_run_done_failed_sets_failed_status() {
         meta: None,
     });
     assert!(matches!(
-        store.get_run("r1").unwrap().status,
+        store
+            .run_snapshot("r1")
+            .expect("the run snapshot fixture result is required for this assertion")
+            .status,
         RunStatus::Running
     ));
 
@@ -277,7 +291,7 @@ fn test_run_done_failed_sets_failed_status() {
         return_value: None,
         error: Some("workflow process exited unexpectedly".into()),
     });
-    let run = store.get_run("r1").expect("run 应存在");
+    let run = store.run_snapshot("r1").expect("run 应存在");
     assert!(matches!(run.status, RunStatus::Failed));
     assert_eq!(
         run.delivery_status,
@@ -303,7 +317,7 @@ fn test_cleanup_completed_keeps_recently_killed_runs() {
     });
     store.cleanup_completed();
     // 刚 killed 的 run 不应被清理（completed_at 在 5 分钟保留期内）
-    assert!(store.get_run("r1").is_some());
+    assert!(store.run_snapshot("r1").is_some());
 }
 
 /// [回归测试] cleanup_completed 必须同步清理已回收 run 的执行标记
@@ -342,13 +356,17 @@ fn test_cleanup_completed_purges_started_agents_markers() {
         phase: Some("Run".into()),
     });
 
-    let completed_at = store.get_run("done-run").unwrap().completed_at.unwrap();
+    let completed_at = store
+        .run_snapshot("done-run")
+        .expect("the run snapshot fixture result is required for this assertion")
+        .completed_at
+        .expect("the completed at fixture result is required for this assertion");
     store.cleanup_completed_at(completed_at);
     assert!(store
         .runs
         .read()
         .get("done-run")
-        .unwrap()
+        .expect("the fixture must contain done-run")
         .started_agents
         .contains(&7));
     store.cleanup_completed_at(completed_at + WorkflowProgressStore::COMPLETED_RETENTION);
@@ -358,7 +376,10 @@ fn test_cleanup_completed_purges_started_agents_markers() {
         "过期 run 与自身标记必须共同释放"
     );
     assert!(
-        runs.get("running-run").unwrap().started_agents.contains(&9),
+        runs.get("running-run")
+            .expect("the fixture must contain running-run")
+            .started_agents
+            .contains(&9),
         "运行中标记保留"
     );
 }
@@ -373,7 +394,7 @@ fn test_run_done_unknown_run_is_noop() {
         return_value: None,
         error: None,
     });
-    assert!(store.get_run("missing").is_none());
+    assert!(store.run_snapshot("missing").is_none());
     assert!(store.list_runs().is_empty());
 }
 
@@ -407,12 +428,12 @@ fn test_model_projection_via_progress_and_done() {
         tool_count: None,
     });
     let agent = store
-        .get_run("r1")
-        .unwrap()
+        .run_snapshot("r1")
+        .expect("the run snapshot fixture result is required for this assertion")
         .agents
         .get(&0)
         .cloned()
-        .unwrap();
+        .expect("the cloned fixture result is required for this assertion");
     assert_eq!(agent.model.as_deref(), Some("claude-sonnet-4-5"));
     assert_eq!(agent.model_tier.as_deref(), Some("sonnet"));
     assert!(matches!(agent.status, AgentStatus::Running));
@@ -431,12 +452,12 @@ fn test_model_projection_via_progress_and_done() {
         tool_count: Some(1),
     });
     let agent = store
-        .get_run("r1")
-        .unwrap()
+        .run_snapshot("r1")
+        .expect("the run snapshot fixture result is required for this assertion")
         .agents
         .get(&0)
         .cloned()
-        .unwrap();
+        .expect("the cloned fixture result is required for this assertion");
     assert_eq!(agent.model.as_deref(), Some("claude-sonnet-4-5"));
     // 后续不带 model_tier 的进度事件不得覆盖已设档位
     assert_eq!(agent.model_tier.as_deref(), Some("sonnet"));
@@ -455,12 +476,12 @@ fn test_model_projection_via_progress_and_done() {
         tool_count: None,
     });
     let agent = store
-        .get_run("r1")
-        .unwrap()
+        .run_snapshot("r1")
+        .expect("the run snapshot fixture result is required for this assertion")
         .agents
         .get(&0)
         .cloned()
-        .unwrap();
+        .expect("the cloned fixture result is required for this assertion");
     assert_eq!(agent.token_count, Some(10));
     assert_eq!(agent.tool_count, Some(1));
     // model_tier 缺失不覆盖：重试更新不携带档位时保留首次解析的档位
@@ -483,12 +504,12 @@ fn test_model_projection_via_progress_and_done() {
         },
     });
     let agent = store
-        .get_run("r1")
-        .unwrap()
+        .run_snapshot("r1")
+        .expect("the run snapshot fixture result is required for this assertion")
         .agents
         .get(&0)
         .cloned()
-        .unwrap();
+        .expect("the cloned fixture result is required for this assertion");
     assert_eq!(agent.model.as_deref(), Some("provider-resolved-model"));
     assert!(matches!(agent.status, AgentStatus::Done));
 }
@@ -504,7 +525,8 @@ fn test_agent_progress_model_serde_optional() {
         "tokenCount": 5,
         "toolCount": 1,
     });
-    let event: ProgressEvent = serde_json::from_value(old_json).unwrap();
+    let event: ProgressEvent = serde_json::from_value(old_json)
+        .expect("from_value must accept this test fixture representation");
     match event {
         ProgressEvent::AgentProgress {
             model, model_tier, ..
@@ -525,7 +547,8 @@ fn test_agent_progress_model_serde_optional() {
         token_count: None,
         tool_count: None,
     };
-    let json = serde_json::to_value(&with_model).unwrap();
+    let json = serde_json::to_value(&with_model)
+        .expect("to_value must accept this test fixture representation");
     assert_eq!(json["model"], "claude-sonnet-4-5");
 
     let without_model = ProgressEvent::AgentProgress {
@@ -538,7 +561,8 @@ fn test_agent_progress_model_serde_optional() {
         token_count: Some(0),
         tool_count: Some(0),
     };
-    let json = serde_json::to_value(&without_model).unwrap();
+    let json = serde_json::to_value(&without_model)
+        .expect("to_value must accept this test fixture representation");
     assert!(
         json.get("model").is_none(),
         "None model 应省略，实际: {json}"
@@ -607,18 +631,23 @@ fn test_resume_cache_hit_excludes_historical_usage_and_preserves_phase() {
         },
     });
 
-    let run = store.get_run("resumed").unwrap();
-    let cached = run.agents.get(&2).unwrap();
+    let run = store
+        .run_snapshot("resumed")
+        .expect("the run snapshot fixture result is required for this assertion");
+    let cached = run
+        .agents
+        .get(&2)
+        .expect("run agents fixture must contain the requested entry");
     assert_eq!(cached.phase.as_deref(), Some("Fix"));
     assert_eq!(cached.token_count, None);
     assert_eq!(cached.duration_ms, None);
 
-    let summaries = store.get_phase_summaries("resumed");
+    let summaries = store.phase_summaries("resumed");
     assert_eq!(summaries.len(), 2);
     let fix = summaries
         .iter()
         .find(|summary| summary.name == "Fix")
-        .unwrap();
+        .expect("the find fixture result is required for this assertion");
     assert_eq!(fix.agent_count, 2);
     assert_eq!(fix.token_count, 10);
     assert_eq!(
@@ -628,7 +657,7 @@ fn test_resume_cache_hit_excludes_historical_usage_and_preserves_phase() {
     let fallback = summaries
         .iter()
         .find(|summary| summary.name == "repair")
-        .unwrap();
+        .expect("the find fixture result is required for this assertion");
     assert_eq!(fallback.agent_count, 1);
     assert_eq!(fallback.token_count, 0);
     assert_eq!(fallback.duration_ms, None);
@@ -675,9 +704,14 @@ fn test_completed_cleanup_preserves_phase_usage_until_run_expiration() {
         return_value: None,
         error: None,
     });
-    let before = serde_json::to_value(store.get_run(run_id).unwrap()).unwrap();
+    let before = serde_json::to_value(
+        store
+            .run_snapshot(run_id)
+            .expect("the run snapshot fixture result is required for this assertion"),
+    )
+    .expect("to_value must accept this test fixture representation");
     store.cleanup_completed();
-    let summaries = store.get_phase_summaries(run_id);
+    let summaries = store.phase_summaries(run_id);
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].name, "Review");
     assert_eq!(summaries[0].agent_count, 2);
@@ -690,18 +724,22 @@ fn test_completed_cleanup_preserves_phase_usage_until_run_expiration() {
         "该用例不发相位边界事件：墙钟不可得为 None，不是 agent 时长求和"
     );
     assert_eq!(
-        serde_json::to_value(store.get_run(run_id).unwrap()).unwrap(),
+        serde_json::to_value(store.run_snapshot(run_id).expect("the run snapshot fixture result is required for this assertion")).expect("completed cleanup preserves phase usage until run expiration: the completed fixture operation must provide its result payload"),
         before
     );
-    let completed_at = store.get_run(run_id).unwrap().completed_at.unwrap();
+    let completed_at = store
+        .run_snapshot(run_id)
+        .expect("the run snapshot fixture result is required for this assertion")
+        .completed_at
+        .expect("the completed at fixture result is required for this assertion");
     store.cleanup_completed_at(
         completed_at + WorkflowProgressStore::COMPLETED_RETENTION
             - std::time::Duration::from_nanos(1),
     );
-    assert_eq!(store.get_phase_summaries(run_id)[0].token_count, 20);
+    assert_eq!(store.phase_summaries(run_id)[0].token_count, 20);
     store.cleanup_completed_at(completed_at + WorkflowProgressStore::COMPLETED_RETENTION);
-    assert!(store.get_run(run_id).is_none());
-    assert!(store.get_phase_summaries(run_id).is_empty());
+    assert!(store.run_snapshot(run_id).is_none());
+    assert!(store.phase_summaries(run_id).is_empty());
     assert!(!store.runs.read().contains_key(run_id));
 }
 
@@ -750,7 +788,7 @@ fn test_phase_summary_duration_is_wall_clock_not_agent_sum() {
         phase: "Recon".into(),
     });
 
-    let summaries = store.get_phase_summaries(run_id);
+    let summaries = store.phase_summaries(run_id);
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].agent_count, 2);
     let wall_clock = summaries[0]
@@ -799,7 +837,7 @@ fn test_phase_summaries_follow_engine_phase_order() {
     });
 
     let names: Vec<String> = store
-        .get_phase_summaries(run_id)
+        .phase_summaries(run_id)
         .into_iter()
         .map(|summary| summary.name)
         .collect();
@@ -839,7 +877,7 @@ fn run_index_is_ordered_by_start_time_not_hashmap_iteration() {
         "「最近 N 个 run」= 尾部 N（WorkflowStatus 依赖该约定）"
     );
     let snapshot: Vec<String> = store
-        .get_all_runs_snapshot()
+        .runs_snapshot()
         .into_iter()
         .map(|run| run.run_id)
         .collect();
@@ -856,7 +894,10 @@ fn run_started_records_wall_clock_start_time() {
         meta: None,
     });
     let after = chrono::Utc::now().timestamp_millis();
-    let started = store.get_run("r1").unwrap().started_at_ms;
+    let started = store
+        .run_snapshot("r1")
+        .expect("the run snapshot fixture result is required for this assertion")
+        .started_at_ms;
     assert!(
         (before..=after).contains(&started),
         "started_at_ms 应落在本次调用窗口内，实际 {started}"
@@ -906,7 +947,7 @@ impl ProgressObserver for ProjectionProbe {
     fn on_progress_event(&self, event: &ProgressEvent) {
         if matches!(event, ProgressEvent::RunDone { .. }) {
             let store = self.store.upgrade().expect("store 存活");
-            *self.seen.lock() = store.get_run(event.run_id());
+            *self.seen.lock() = store.run_snapshot(event.run_id());
         }
     }
 }

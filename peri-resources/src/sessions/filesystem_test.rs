@@ -2,8 +2,9 @@
 
 use std::sync::Arc;
 
-use super::*;
-use tempfile::tempdir;
+use super::{
+    AgentStatus, BaseMessage, CompactionChange, FilesystemThreadStore, ThreadMeta, ThreadStore,
+};
 
 fn make_meta(cwd: &str) -> ThreadMeta {
     ThreadMeta::new_at(cwd, peri_time::now_wall())
@@ -11,7 +12,7 @@ fn make_meta(cwd: &str) -> ThreadMeta {
 
 #[tokio::test]
 async fn test_filesystem_store_flush_persistence_makes_append_visible() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn ThreadStore> = Arc::new(FilesystemThreadStore::new(dir.path()));
     let thread_id = store.create_thread(make_meta("/test")).await.unwrap();
 
@@ -30,7 +31,7 @@ async fn test_filesystem_store_flush_persistence_makes_append_visible() {
 
 #[tokio::test]
 async fn test_create_and_load_thread() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());
     let meta = make_meta("/test");
 
@@ -44,7 +45,7 @@ async fn test_create_and_load_thread() {
 
 #[tokio::test]
 async fn test_frozen_snapshot_roundtrip_stays_out_of_thread_index() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());
     let id = store.create_thread(make_meta("/test")).await.unwrap();
     let snapshot = r#"{"version":1,"marker":"frozen-prefix-only"}"#;
@@ -77,7 +78,7 @@ async fn test_frozen_snapshot_roundtrip_stays_out_of_thread_index() {
 
 #[tokio::test]
 async fn test_frozen_snapshot_concurrent_backfill_has_one_winner() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());
     let id = store.create_thread(make_meta("/test")).await.unwrap();
     let first = r#"{"version":1,"candidate":"first"}"#;
@@ -96,7 +97,7 @@ async fn test_frozen_snapshot_concurrent_backfill_has_one_winner() {
 
 #[tokio::test]
 async fn test_append_and_load_messages() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());
     let meta = make_meta("/test");
     let id = store.create_thread(meta).await.unwrap();
@@ -110,7 +111,7 @@ async fn test_append_and_load_messages() {
 
 #[tokio::test]
 async fn test_append_empty_messages_noop() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());
     let meta = make_meta("/test");
     let id = store.create_thread(meta).await.unwrap();
@@ -122,7 +123,7 @@ async fn test_append_empty_messages_noop() {
 
 #[tokio::test]
 async fn test_message_count_updates() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());
     let meta = make_meta("/test");
     let id = store.create_thread(meta).await.unwrap();
@@ -136,7 +137,7 @@ async fn test_message_count_updates() {
 
 #[tokio::test]
 async fn test_concurrent_append_preserves_terminal_status() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn ThreadStore> = Arc::new(FilesystemThreadStore::new(dir.path()));
     let id = store.create_thread(make_meta("/test")).await.unwrap();
     let append_store = Arc::clone(&store);
@@ -162,7 +163,7 @@ async fn test_concurrent_append_preserves_terminal_status() {
 
 #[tokio::test]
 async fn test_title_extracted_from_first_human() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());
     let meta = make_meta("/test");
     let id = store.create_thread(meta).await.unwrap();
@@ -179,7 +180,7 @@ async fn test_title_extracted_from_first_human() {
 
 #[tokio::test]
 async fn test_list_threads_sorted_by_updated_at() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());
 
     let meta1 = make_meta("/a");
@@ -199,7 +200,7 @@ async fn test_list_threads_sorted_by_updated_at() {
 
 #[tokio::test]
 async fn test_delete_thread() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());
     let meta = make_meta("/test");
     let id = store.create_thread(meta).await.unwrap();
@@ -213,7 +214,7 @@ async fn test_delete_thread() {
 /// [M1] delete_thread 必须级联删除 hidden 子 agent 线程树（孤儿数据防护）。
 #[tokio::test]
 async fn test_delete_thread_cascades_child_thread_tree() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());
 
     // 父 → 子 → 孙 三层线程树（子 agent 链，hidden=true）
@@ -247,7 +248,7 @@ async fn test_delete_thread_cascades_child_thread_tree() {
 
 #[tokio::test]
 async fn test_update_meta() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());
     let meta = make_meta("/test");
     let id = store.create_thread(meta).await.unwrap();
@@ -262,7 +263,7 @@ async fn test_update_meta() {
 
 #[tokio::test]
 async fn test_content_size_in_list() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());
     let meta = make_meta("/test");
     let id = store.create_thread(meta).await.unwrap();
@@ -277,7 +278,7 @@ async fn test_content_size_in_list() {
 
 #[tokio::test]
 async fn test_load_messages_nonexistent_thread() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());
     let msgs = store
         .load_messages(&"nonexistent".to_string())
@@ -289,26 +290,26 @@ async fn test_load_messages_nonexistent_thread() {
 #[test]
 fn test_extract_title_from_text() {
     let msgs = vec![BaseMessage::human("Hello world")];
-    assert_eq!(extract_title(&msgs), Some("Hello world".to_string()));
+    assert_eq!(super::extract_title(&msgs), Some("Hello world".to_string()));
 }
 
 #[test]
 fn test_extract_title_truncates_50_chars() {
     let long: String = "a".repeat(100);
     let msgs = vec![BaseMessage::human(long.as_str())];
-    let title = extract_title(&msgs).unwrap();
+    let title = super::extract_title(&msgs).unwrap();
     assert_eq!(title.chars().count(), 50);
 }
 
 #[test]
 fn test_extract_title_empty_messages() {
     let msgs: Vec<BaseMessage> = vec![];
-    assert!(extract_title(&msgs).is_none());
+    assert!(super::extract_title(&msgs).is_none());
 }
 
 #[tokio::test]
 async fn test_delete_messages_removes_exact_ids_and_preserves_ancestor() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());
     let id = store.create_thread(make_meta("/test")).await.unwrap();
     let messages = vec![
@@ -331,7 +332,7 @@ async fn test_delete_messages_removes_exact_ids_and_preserves_ancestor() {
 
 #[tokio::test]
 async fn test_delete_messages_since_truncates_jsonl() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());
     let id = store.create_thread(make_meta("/test")).await.unwrap();
 
@@ -362,7 +363,7 @@ async fn test_delete_messages_since_truncates_jsonl() {
 
 #[tokio::test]
 async fn test_delete_messages_since_unknown_id_is_noop() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());
     let id = store.create_thread(make_meta("/test")).await.unwrap();
 
@@ -380,7 +381,7 @@ async fn test_delete_messages_since_unknown_id_is_noop() {
 
 #[tokio::test]
 async fn test_commit_compaction_lifecycle_is_explicitly_unsupported_without_mutating_filesystem() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());
     let thread_id = store.create_thread(make_meta("/test")).await.unwrap();
     let original_messages = vec![

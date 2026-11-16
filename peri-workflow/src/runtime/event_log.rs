@@ -5,6 +5,7 @@
 //! 重新建立快照（不假装连续）。
 
 use std::collections::VecDeque;
+use std::fmt::{self, Debug, Formatter};
 
 use parking_lot::Mutex;
 
@@ -33,6 +34,7 @@ struct Inner<T> {
 }
 
 impl<T> BoundedEventLog<T> {
+    #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
             inner: Mutex::new(Inner {
@@ -65,19 +67,23 @@ impl<T> BoundedEventLog<T> {
     }
 
     /// 已提交上界（无事件时为 0）。
+    #[must_use]
     pub fn head_sequence(&self) -> u64 {
         self.inner.lock().next.saturating_sub(1)
     }
 
     /// 保留边界：小于它的 sequence 已不可读。
+    #[must_use]
     pub fn truncated_before(&self) -> u64 {
         self.inner.lock().truncated_before
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.inner.lock().entries.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -86,6 +92,7 @@ impl<T> BoundedEventLog<T> {
     ///
     /// `after` 早于保留边界（或为 `None`）时从保留边界起读：页内的
     /// `truncated_before` 让读取方识别「游标已失效」，自行重建快照。
+    #[must_use]
     pub fn page(&self, after: Option<u64>, limit: usize) -> EventLogPage<T>
     where
         T: Clone,
@@ -94,6 +101,7 @@ impl<T> BoundedEventLog<T> {
     }
 
     /// 带谓词的过滤分页（跨 run 聚合日志的单 run 视图）。
+    #[must_use]
     pub fn page_where(
         &self,
         after: Option<u64>,
@@ -131,6 +139,7 @@ impl<T> BoundedEventLog<T> {
     }
 
     /// 保留边界内最新的 `limit` 条（升序返回）。
+    #[must_use]
     pub fn latest(&self, limit: usize) -> Vec<T>
     where
         T: Clone,
@@ -149,3 +158,12 @@ impl<T> BoundedEventLog<T> {
 #[cfg(test)]
 #[path = "event_log_test.rs"]
 mod tests;
+
+impl<T> Debug for BoundedEventLog<T> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BoundedEventLog")
+            .field("capacity", &self.capacity)
+            .finish_non_exhaustive()
+    }
+}

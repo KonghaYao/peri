@@ -1,12 +1,19 @@
 //! 纯历史变换的行为测试：fork 重映射、投影 flag、compaction 批次与 rewind 边界。
 
-use super::*;
+use crate::messages::BaseMessage;
+use crate::messages::MessageId;
+use crate::projection::MessageProjectionDirective;
 use crate::projection::{ProjectionAction, ProjectionActionEntry, ProjectionTarget};
 use crate::session_resources::RewindBoundary;
+use crate::store::history::HistoryError;
+use crate::store::CompactionChange;
+use crate::store::MessageFlags;
+use crate::store::PersistedPayload;
 use crate::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
     ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
 };
+use std::collections::HashMap;
 
 /// 确定性 ID 分配器：同一输入在测试中必然得到同一结果（本模块不产生随机性）。
 fn deterministic_ids() -> impl FnMut() -> MessageId {
@@ -55,7 +62,7 @@ fn directive_referencing(id: MessageId) -> MessageProjectionDirective {
 fn fork_remap_allocates_new_ids_and_keeps_payload_discriminants() {
     let message = PersistedPayload::Message(BaseMessage::human("hello"));
     let source_payloads = vec![message.clone(), reminder_payload()];
-    let forked = remap_fork_history(
+    let forked = crate::store::history::remap_fork_history(
         &"fork-target".into(),
         &source_payloads,
         &HashMap::new(),
@@ -70,7 +77,8 @@ fn fork_remap_allocates_new_ids_and_keeps_payload_discriminants() {
         PersistedPayload::SystemReminder { .. }
     ));
     // 新 ID 必须与 source 不同：SQLite 的 message_id 是全库主键，沿用会让 fork 丢行。
-    for (source, copied) in source_payloads.iter().zip(&forked.payloads) {
+    let paired_copied = source_payloads.iter().zip(&forked.payloads);
+    for (source, copied) in paired_copied {
         assert_ne!(source.id(), copied.id());
     }
 }
@@ -102,7 +110,7 @@ fn fork_remap_rewrites_projection_references_and_drops_foreign_flags() {
     let payloads_before = payload_ids(&source_payloads);
     let flags_before = source_flags.clone();
 
-    let forked = remap_fork_history(
+    let forked = crate::store::history::remap_fork_history(
         &"fork-target".into(),
         &source_payloads,
         &source_flags,
@@ -143,7 +151,7 @@ fn fork_remap_rewrites_superseded_by_to_the_forked_summary() {
         },
     );
 
-    let forked = remap_fork_history(
+    let forked = crate::store::history::remap_fork_history(
         &"fork-target".into(),
         &source_payloads,
         &source_flags,
@@ -171,7 +179,7 @@ fn fork_remap_rewrites_superseded_by_to_the_forked_summary() {
 fn fork_remap_without_source_flags_yields_empty_flags() {
     let source_payloads = vec![PersistedPayload::Message(BaseMessage::human("a"))];
 
-    let forked = remap_fork_history(
+    let forked = crate::store::history::remap_fork_history(
         &"fork-target".into(),
         &source_payloads,
         &HashMap::new(),
@@ -192,7 +200,7 @@ fn projection_flag_rule_marks_truncated_and_keeps_excluded() {
         projection: None,
     };
 
-    let flags = flags_with_projection(&existing, directive_referencing(id));
+    let flags = crate::store::history::flags_with_projection(&existing, directive_referencing(id));
 
     assert!(flags.truncated, "投影与 truncated 是同一规则");
     assert!(flags.excluded, "投影不解除排除标记");
@@ -214,7 +222,7 @@ fn flag_updates_remove_defaults_and_apply_in_order() {
         },
     );
 
-    apply_flag_updates(
+    crate::store::history::apply_flag_updates(
         &mut flags,
         &[
             (first, MessageFlags::default()),
@@ -230,7 +238,7 @@ fn flag_updates_remove_defaults_and_apply_in_order() {
     );
     assert!(!flags.contains_key(&first), "默认 flags 表示无标记");
 
-    apply_flag_updates(
+    crate::store::history::apply_flag_updates(
         &mut flags,
         &[
             (
@@ -256,16 +264,25 @@ fn distinct_ids_reject_batch_duplicates_and_known_ids() {
     let known_id = known.id();
     let fresh = PersistedPayload::Message(BaseMessage::human("fresh"));
 
-    assert!(ensure_distinct_ids(std::slice::from_ref(&fresh), |id| id == known_id).is_ok());
+    assert!(
+        crate::store::history::ensure_distinct_ids(std::slice::from_ref(&fresh), |id| id
+            == known_id)
+        .is_ok()
+    );
 
-    let error = ensure_distinct_ids(&[fresh.clone(), fresh.clone()], |_| false).unwrap_err();
+    let error =
+        crate::store::history::ensure_distinct_ids(&[fresh.clone(), fresh.clone()], |_| false)
+            .unwrap_err();
     assert_eq!(
         error,
         HistoryError::DuplicateId { id: fresh.id() },
         "批次内重复必须失败，不能静默忽略"
     );
 
-    let error = ensure_distinct_ids(std::slice::from_ref(&known), |id| id == known_id).unwrap_err();
+    let error = crate::store::history::ensure_distinct_ids(std::slice::from_ref(&known), |id| {
+        id == known_id
+    })
+    .unwrap_err();
     assert_eq!(error, HistoryError::DuplicateId { id: known_id });
 }
 
@@ -282,11 +299,13 @@ fn rewind_keeps_or_removes_the_target_itself() {
     ];
     let target = payloads[1].id();
 
-    let keep = apply_rewind(&payloads, RewindBoundary::KeepThrough(target)).unwrap();
+    let keep = crate::store::history::apply_rewind(&payloads, RewindBoundary::KeepThrough(target))
+        .unwrap();
     assert_eq!(payload_ids(&keep.kept), payload_ids(&payloads[..2]));
     assert_eq!(keep.removed, vec![payloads[2].id()]);
 
-    let remove = apply_rewind(&payloads, RewindBoundary::RemoveFrom(target)).unwrap();
+    let remove =
+        crate::store::history::apply_rewind(&payloads, RewindBoundary::RemoveFrom(target)).unwrap();
     assert_eq!(payload_ids(&remove.kept), payload_ids(&payloads[..1]));
     assert_eq!(remove.removed, vec![target, payloads[2].id()]);
 }
@@ -297,12 +316,13 @@ fn rewind_missing_target_fails_before_touching_history() {
     let missing = MessageId::new();
     let before = payload_ids(&payloads);
 
-    let error = apply_rewind(&payloads, RewindBoundary::RemoveFrom(missing)).unwrap_err();
+    let error = crate::store::history::apply_rewind(&payloads, RewindBoundary::RemoveFrom(missing))
+        .unwrap_err();
 
     assert_eq!(error, HistoryError::TargetMissing { id: missing });
     assert_eq!(payload_ids(&payloads), before, "失败不产生部分变换");
     assert_eq!(
-        rewind_keep_len(
+        crate::store::history::rewind_keep_len(
             &payload_ids(&payloads),
             RewindBoundary::KeepThrough(missing)
         )
@@ -329,7 +349,7 @@ fn compaction_change_applies_flags_and_appends_messages() {
         appended_messages: vec![appended.clone()],
     };
 
-    apply_compaction_change(&mut payloads, &mut flags, &change).unwrap();
+    crate::store::history::apply_compaction_change(&mut payloads, &mut flags, &change).unwrap();
 
     assert_eq!(payload_ids(&payloads), vec![existing_id, appended.id()]);
     assert!(flags[&existing_id].excluded);
@@ -353,7 +373,8 @@ fn compaction_change_rejects_duplicate_id_without_partial_apply() {
         appended_messages: vec![BaseMessage::ai("summary").with_message_id(existing.id())],
     };
 
-    let error = apply_compaction_change(&mut payloads, &mut flags, &change).unwrap_err();
+    let error = crate::store::history::apply_compaction_change(&mut payloads, &mut flags, &change)
+        .unwrap_err();
 
     assert_eq!(error, HistoryError::DuplicateId { id: existing.id() });
     assert_eq!(payload_ids(&payloads), before, "整体生效或不生效");
@@ -364,7 +385,7 @@ fn compaction_change_rejects_duplicate_id_without_partial_apply() {
 fn appended_payloads_preserve_message_identity() {
     let message = BaseMessage::ai("summary");
 
-    let payloads = appended_payloads(std::slice::from_ref(&message));
+    let payloads = crate::store::history::appended_payloads(std::slice::from_ref(&message));
 
     assert_eq!(payloads.len(), 1);
     assert_eq!(payloads[0].id(), message.id());
@@ -412,8 +433,14 @@ fn rewind_without_any_compaction_clears_nothing() {
     // (a) 没有任何 Full：前缀里不存在 excluded，清零集合为空。
     let entries = vec![flag_entry(1, false, false), flag_entry(2, false, false)];
 
-    assert_eq!(rewind_clear_excluded_ids(&entries, 0), Vec::new());
-    assert_eq!(rewind_clear_excluded_ids(&entries, 2), Vec::new());
+    assert_eq!(
+        crate::store::history::rewind_clear_excluded_ids(&entries, 0),
+        Vec::new()
+    );
+    assert_eq!(
+        crate::store::history::rewind_clear_excluded_ids(&entries, 2),
+        Vec::new()
+    );
 }
 
 #[test]
@@ -427,12 +454,12 @@ fn rewind_inside_the_excluded_block_restores_every_retained_body() {
     ];
 
     assert_eq!(
-        rewind_clear_excluded_ids(&entries, 1),
+        crate::store::history::rewind_clear_excluded_ids(&entries, 1),
         vec![entries[0].0],
         "只保留 A：A 失去依据，必须恢复"
     );
     assert_eq!(
-        rewind_clear_excluded_ids(&entries, 2),
+        crate::store::history::rewind_clear_excluded_ids(&entries, 2),
         vec![entries[0].0, entries[1].0],
         "保留 A、B：两条都失去依据"
     );
@@ -448,7 +475,10 @@ fn rewind_after_the_block_keeps_the_prefix_excluded() {
         flag_entry(3, false, false),
     ];
 
-    assert_eq!(rewind_clear_excluded_ids(&entries, 3), Vec::new());
+    assert_eq!(
+        crate::store::history::rewind_clear_excluded_ids(&entries, 3),
+        Vec::new()
+    );
 }
 
 #[test]
@@ -461,7 +491,10 @@ fn rewind_after_surviving_summary_clears_only_entries_beyond_the_run() {
         flag_entry(4, true, false),
     ];
 
-    assert_eq!(rewind_clear_excluded_ids(&entries, 4), vec![entries[3].0]);
+    assert_eq!(
+        crate::store::history::rewind_clear_excluded_ids(&entries, 4),
+        vec![entries[3].0]
+    );
 }
 
 #[test]
@@ -477,11 +510,11 @@ fn rewind_between_two_fulls_restores_what_the_removed_summary_covered() {
     ];
 
     assert_eq!(
-        rewind_clear_excluded_ids(&entries, 3),
+        crate::store::history::rewind_clear_excluded_ids(&entries, 3),
         vec![entries[0].0, entries[1].0, entries[2].0]
     );
     assert_eq!(
-        rewind_clear_excluded_ids(&entries, 4),
+        crate::store::history::rewind_clear_excluded_ids(&entries, 4),
         vec![entries[0].0, entries[1].0, entries[2].0, entries[3].0]
     );
 }
@@ -497,11 +530,17 @@ fn rewind_after_the_second_full_changes_nothing() {
         flag_entry(5, false, false),
     ];
 
-    assert_eq!(rewind_clear_excluded_ids(&entries, 5), Vec::new());
+    assert_eq!(
+        crate::store::history::rewind_clear_excluded_ids(&entries, 5),
+        Vec::new()
+    );
     // 摘要之后新追加的条目（不被排除）不影响判定。
     let mut extended = entries.clone();
     extended.push(flag_entry(6, false, false));
-    assert_eq!(rewind_clear_excluded_ids(&extended, 6), Vec::new());
+    assert_eq!(
+        crate::store::history::rewind_clear_excluded_ids(&extended, 6),
+        Vec::new()
+    );
 }
 
 #[test]
@@ -514,7 +553,7 @@ fn rewind_counts_the_excluded_run_ignoring_system_entries() {
         flag_entry(4, false, false),
     ];
     assert_eq!(
-        rewind_clear_excluded_ids(&with_summary, 4),
+        crate::store::history::rewind_clear_excluded_ids(&with_summary, 4),
         Vec::new(),
         "跳过 System 后领导段长度为 2，位置 2 的摘要存活"
     );
@@ -525,14 +564,14 @@ fn rewind_counts_the_excluded_run_ignoring_system_entries() {
         flag_entry(3, true, false),
     ];
     assert_eq!(
-        rewind_clear_excluded_ids(&without_summary, 3),
+        crate::store::history::rewind_clear_excluded_ids(&without_summary, 3),
         vec![without_summary[0].0, without_summary[2].0],
         "没有存活摘要时前缀的 non-System excluded 全部清零"
     );
 
     let excluded_system = vec![flag_entry(1, true, false), flag_entry(2, true, true)];
     assert_eq!(
-        rewind_clear_excluded_ids(&excluded_system, 2),
+        crate::store::history::rewind_clear_excluded_ids(&excluded_system, 2),
         vec![excluded_system[0].0],
         "System 条目的 flags 不属于本函数的判定范围"
     );
@@ -547,7 +586,7 @@ fn rewind_clear_ids_stay_within_the_retained_prefix() {
         flag_entry(3, true, false),
     ];
 
-    let clear = rewind_clear_excluded_ids(&entries, 2);
+    let clear = crate::store::history::rewind_clear_excluded_ids(&entries, 2);
     assert_eq!(clear, vec![entries[0].0, entries[1].0]);
     assert_eq!(
         entry_ids(&entries),
@@ -571,7 +610,7 @@ fn rewind_between_two_fulls_keeps_the_batch_whose_summary_survives() {
     ];
 
     assert_eq!(
-        rewind_clear_excluded_ids(&entries, 5),
+        crate::store::history::rewind_clear_excluded_ids(&entries, 5),
         vec![entries[3].0, entries[4].0],
         "只清 C、D：它们的摘要 S2 已被 rewind 删掉"
     );
@@ -590,11 +629,11 @@ fn rewind_dropping_the_summary_clears_the_batch_it_covered() {
     ];
 
     assert_eq!(
-        rewind_clear_excluded_ids(&entries, 2),
+        crate::store::history::rewind_clear_excluded_ids(&entries, 2),
         vec![entries[0].0, entries[1].0]
     );
     assert_eq!(
-        rewind_clear_excluded_ids(&entries, 1),
+        crate::store::history::rewind_clear_excluded_ids(&entries, 1),
         vec![entries[0].0],
         "只保留 A：它的摘要不在保留前缀里"
     );
@@ -612,7 +651,7 @@ fn rewind_judges_recorded_and_unrecorded_entries_by_their_own_evidence() {
     ];
 
     assert_eq!(
-        rewind_clear_excluded_ids(&entries, 3),
+        crate::store::history::rewind_clear_excluded_ids(&entries, 3),
         vec![entries[1].0],
         "旧行走保守回退，带记录的条目走精确判定"
     );

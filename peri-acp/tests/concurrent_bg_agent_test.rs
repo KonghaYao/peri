@@ -90,10 +90,9 @@ async fn test_concurrent_bg_tasks_all_emit_completion() {
 async fn test_bg_event_pump_receives_all_completions() {
     use std::sync::Arc;
 
-    use peri_acp::{
-        session::event_sink::{EventSink, TransportEventSink},
-        transport::mpsc::mpsc_transport_pair,
-    };
+    use peri_acp::session::event_sink::EventSink;
+    use peri_acp::session::event_sink::TransportEventSink;
+    use peri_acp::transport::mpsc::mpsc_transport_pair;
 
     let (client_transport, server_transport) = mpsc_transport_pair();
     let caps_registry = std::sync::Arc::new(dashmap::DashMap::new());

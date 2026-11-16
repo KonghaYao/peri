@@ -1,13 +1,23 @@
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::FeedbackChannel;
+use super::FeedbackLevel;
+use super::HitlPending;
+use super::TuiCommandFeedback;
+use super::TuiRenderUnit;
+use super::TuiTextChunk;
+use super::json;
+use super::serial;
+
 use crate::kit::display_retention::{MAX_BYTES, MAX_ENTRIES};
 use crate::kit::history_window::{
     HistoryEntryView, HistorySource, HistoryWindow, HistoryWindowConfig, PersistentEntryKey,
     ReleasePlan, ReleaseReason, SegmentDraft, SegmentPlacement, WindowIdentity,
 };
-use crate::kit::retained_bytes::{SeenAllocations, retained_units_bytes};
+use crate::kit::retained_bytes::SeenAllocations;
 
 fn state() -> BridgeState {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "retention".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state
@@ -17,7 +27,7 @@ fn state() -> BridgeState {
 }
 
 fn note(state: &mut BridgeState, text: String) {
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         state,
         &AcpEventData::CommandFeedback(TuiCommandFeedback {
             message: text,
@@ -28,7 +38,10 @@ fn note(state: &mut BridgeState, text: String) {
 }
 
 fn retained(state: &BridgeState) -> usize {
-    retained_units_bytes(state.committed.iter(), &mut SeenAllocations::default())
+    crate::kit::retained_bytes::retained_units_bytes(
+        state.committed.iter(),
+        &mut SeenAllocations::default(),
+    )
 }
 
 #[test]
@@ -37,7 +50,7 @@ fn test_display_retention_notes_plateau_across_turns_without_spending_canonical_
     let mut state = state();
     for index in 0..2048 {
         note(&mut state, format!("notice-{index}"));
-        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+        super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     }
     assert_eq!(state.committed.len(), MAX_ENTRIES);
     assert!(retained(&state) <= MAX_BYTES);
@@ -55,7 +68,7 @@ fn test_display_retention_notes_plateau_across_turns_without_spending_canonical_
 #[serial]
 fn test_display_retention_pending_notes_do_not_split_streaming_text() {
     let mut state = state();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "before ".into(),
@@ -66,7 +79,7 @@ fn test_display_retention_pending_notes_do_not_split_streaming_text() {
     for index in 0..1024 {
         note(&mut state, format!("note-{index}: {}", "中".repeat(2048)));
     }
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "after".into(),
@@ -74,7 +87,7 @@ fn test_display_retention_pending_notes_do_not_split_streaming_text() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let texts: Vec<_> = state
         .committed
         .iter()
@@ -90,7 +103,12 @@ fn test_display_retention_pending_notes_do_not_split_streaming_text() {
         .filter(|unit| matches!(unit, TuiRenderUnit::TuiSystemNote(_)))
         .collect();
     assert!(notes.len() < MAX_ENTRIES, "字节预算先于条数预算触发");
-    assert!(retained_units_bytes(notes.into_iter(), &mut SeenAllocations::default()) <= MAX_BYTES);
+    assert!(
+        crate::kit::retained_bytes::retained_units_bytes(
+            notes.into_iter(),
+            &mut SeenAllocations::default()
+        ) <= MAX_BYTES
+    );
 }
 
 #[test]
@@ -112,14 +130,14 @@ fn test_display_retention_completed_approvals_expire_but_pending_owner_still_res
             },
         })
     };
-    dispatch_and_notify(&mut state, &pending(pending_owner.clone()));
+    super::dispatch_and_notify(&mut state, &pending(pending_owner.clone()));
     for token in 0..1024 {
         let owner = crate::acp_client::InteractionOwner {
             token,
             ..Default::default()
         };
-        dispatch_and_notify(&mut state, &pending(owner.clone()));
-        dispatch_and_notify(
+        super::dispatch_and_notify(&mut state, &pending(owner.clone()));
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::InteractionTerminal {
                 owner,
@@ -134,7 +152,7 @@ fn test_display_retention_completed_approvals_expire_but_pending_owner_still_res
         matches!(unit, TuiRenderUnit::TuiAskUserBlock(block)
             if block.pending && block.owner.as_ref() == Some(&pending_owner))
     }));
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::InteractionTerminal {
             owner: pending_owner,
@@ -157,9 +175,9 @@ fn test_display_retention_completed_approvals_expire_but_pending_owner_still_res
 fn test_display_retention_shifts_canonical_ranges_and_preserves_releasable_history() {
     let mut state = state();
     note(&mut state, "local-old".into());
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     note(&mut state, "durable-note".into());
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let key = PersistentEntryKey::own("retention:durable");
     let entry = HistoryEntryView::new(key.clone(), Some(1), 1, 32, 64, Vec::new());
     let segment_key = state
@@ -168,17 +186,17 @@ fn test_display_retention_shifts_canonical_ranges_and_preserves_releasable_histo
             SegmentDraft::new(HistorySource::Own, vec![entry], 32, 64),
             SegmentPlacement::Tail,
         )
-        .unwrap();
+        .expect("display retention shifts canonical ranges and preserves releasable history: fixture parameters must construct a valid value");
     assert!(state.window.mark_existing_display_slot(key.clone(), 1, 1));
     for index in 0..MAX_ENTRIES {
         note(&mut state, format!("new-{index}"));
-        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+        super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     }
     assert_eq!(state.window.displayed_range(&key), Some((0, 1)));
     assert!(
         matches!(&state.committed[0], TuiRenderUnit::TuiSystemNote(note) if note.text == "durable-note")
     );
-    let segment = state.window.segment(segment_key).unwrap().clone();
+    let segment = state.window.segment(segment_key).expect("display retention shifts canonical ranges and preserves releasable history: the segment fixture operation uses valid inputs").clone();
     let plan = ReleasePlan {
         segment: segment_key,
         source: segment.source.clone(),
@@ -208,7 +226,7 @@ fn test_display_retention_shifts_canonical_ranges_and_preserves_releasable_histo
 #[serial]
 fn test_display_retention_disabled_window_keeps_legacy_paging_spans() {
     crate::kit::history_paging::reset_browsing_state();
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "retention-legacy".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::default());
     assert!(!state.window.is_enabled());
@@ -218,7 +236,7 @@ fn test_display_retention_disabled_window_keeps_legacy_paging_spans() {
     crate::kit::history_paging::close_own_entry();
     for index in 0..MAX_ENTRIES + 64 {
         note(&mut state, format!("legacy-note-{index}"));
-        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+        super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     }
     assert!(
         crate::kit::history_paging::with_spans(|spans| spans.contains("legacy:own")),
@@ -233,7 +251,7 @@ fn test_display_retention_disabled_window_keeps_units_inside_legacy_spans() {
     use crate::kit::tui_render_unit::{TuiNoteLevel, TuiSystemNote};
 
     crate::kit::history_paging::reset_browsing_state();
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "retention-legacy-span".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::default());
     assert!(!state.window.is_enabled());
@@ -253,7 +271,7 @@ fn test_display_retention_disabled_window_keeps_units_inside_legacy_spans() {
     assert_eq!(state.committed.len(), 2);
     for index in 0..MAX_ENTRIES + 64 {
         note(&mut state, format!("outside-{index}"));
-        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+        super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     }
     assert_eq!(
         crate::kit::history_paging::legacy_slot_ranges(),
@@ -272,13 +290,15 @@ fn test_display_retention_keeps_latest_oversized_notice_readable_and_bounds_olde
     let mut state = state();
     for index in 0..3 {
         note(&mut state, format!("{index}{}", "x".repeat(MAX_BYTES + 1)));
-        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+        super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     }
     assert_eq!(state.committed.len(), 1);
     assert!(
         matches!(&state.committed[0], TuiRenderUnit::TuiSystemNote(note) if note.text.starts_with('2'))
     );
     note(&mut state, "new small notice".into());
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert!(retained(&state) <= MAX_BYTES);
 }
+
+use crate::kit::atoms::VIEW_MODELS;

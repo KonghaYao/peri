@@ -23,8 +23,9 @@ use std::time::Duration;
 use langfuse_client::client::ExportConfig;
 use langfuse_client::config::{BatcherConfig, Compression, TelemetryConfig};
 use langfuse_client::snapshot::SnapshotSource;
+
 use langfuse_client::spool::native::NativeSpool;
-use langfuse_client::spool::{route_fingerprint, SpoolStore};
+use langfuse_client::spool::SpoolStore;
 use langfuse_client::{
     Batcher, FlushReport, IngestionEvent, InputSource, LangfuseClient, LangfuseError, MemoryBudget,
     TelemetryEvent,
@@ -41,8 +42,6 @@ use crate::langfuse::drop_telemetry::LangfuseDropRegistry;
 use crate::langfuse::session_like::LangfuseSessionLike;
 use crate::langfuse::tracer::LangfuseTracer;
 use crate::langfuse::turn_traces::TurnTraceRegistry;
-
-use super::llm_input_source;
 
 /// OTLP 中承载观测 input 的属性键。
 const INPUT_ATTRIBUTE: &str = "langfuse.observation.input";
@@ -501,7 +500,8 @@ async fn long_call_releases_telemetry_raw_arc_after_publish() {
 async fn spooled_big_input_keeps_end_event_bytes_exact() {
     let server = CaptureServer::start();
     let directory = tempfile::tempdir().expect("spool tempdir");
-    let route = route_fingerprint(&server.url, "pk-input", "sk-input").expect("route");
+    let route = langfuse_client::spool::route_fingerprint(&server.url, "pk-input", "sk-input")
+        .expect("route");
     let spool = Arc::new(
         NativeSpool::open_at(directory.path().to_path_buf(), route, 8 * 1024 * 1024)
             .expect("native spool"),
@@ -603,7 +603,8 @@ async fn request_end_cancel_order_holds_for_parallel_generations() {
 async fn cancel_keeps_terminal_once() {
     let server = CaptureServer::start();
     let directory = tempfile::tempdir().expect("spool tempdir");
-    let route = route_fingerprint(&server.url, "pk-input", "sk-input").expect("route");
+    let route = langfuse_client::spool::route_fingerprint(&server.url, "pk-input", "sk-input")
+        .expect("route");
     let spool = Arc::new(
         NativeSpool::open_at(directory.path().to_path_buf(), route, 8 * 1024 * 1024)
             .expect("native spool"),
@@ -693,7 +694,10 @@ async fn rejected_freeze_never_reports_the_old_fallback() {
 fn borrowed_adapter_matches_baseline_bytes() {
     let messages = big_messages();
     let tools = big_tools();
-    let source = llm_input_source(&Arc::new(messages.clone()), &Arc::new(tools.clone()));
+    let source = crate::langfuse::tracer::input_snapshot::llm_input_source(
+        &Arc::new(messages.clone()),
+        &Arc::new(tools.clone()),
+    );
     let mut bytes = Vec::new();
     source.write_json(&mut bytes).expect("write json");
     assert_eq!(bytes, fallback_baseline(&messages, &tools).into_bytes());
@@ -777,7 +781,8 @@ async fn spooled_large_input_retained_does_not_grow_with_text() {
     for text_bytes in [1024 * 1024, 3 * 1024 * 1024] {
         let server = CaptureServer::start();
         let directory = tempfile::tempdir().expect("spool tempdir");
-        let route = route_fingerprint(&server.url, "pk-input", "sk-input").expect("route");
+        let route = langfuse_client::spool::route_fingerprint(&server.url, "pk-input", "sk-input")
+            .expect("route");
         let spool = Arc::new(
             NativeSpool::open_at(directory.path().to_path_buf(), route, 8 * 1024 * 1024)
                 .expect("native spool"),
@@ -785,7 +790,7 @@ async fn spooled_large_input_retained_does_not_grow_with_text() {
         let session = build_session(&server.url, Some(Arc::clone(&spool) as Arc<dyn SpoolStore>));
         let budget = Arc::clone(session.batcher.memory_budget());
         let baseline = budget.used();
-        let source = llm_input_source(
+        let source = crate::langfuse::tracer::input_snapshot::llm_input_source(
             &Arc::new(vec![BaseMessage::human("b".repeat(text_bytes))]),
             &tools,
         );
@@ -834,7 +839,10 @@ async fn spooled_large_input_retained_does_not_grow_with_text() {
 
 /// 只借用消息列表的来源；工具列表为空。
 fn messages_source(messages: Vec<BaseMessage>) -> Arc<dyn SnapshotSource> {
-    llm_input_source(&Arc::new(messages), &Arc::new(Vec::new()))
+    crate::langfuse::tracer::input_snapshot::llm_input_source(
+        &Arc::new(messages),
+        &Arc::new(Vec::new()),
+    )
 }
 
 /// 预留容量必须计入：正文只有几字节、但 `capacity` 远大于 JSON 时不得按 JSON 长度放行。
@@ -869,10 +877,17 @@ fn provider_replay_snapshot_charges_json_capacity_and_preserves_canonical_bytes(
     let expected = fallback_baseline(std::slice::from_ref(&message), &[]);
     let source = messages_source(vec![message]);
     let mut bytes = Vec::new();
-    source.write_json(&mut bytes).unwrap();
+    source
+        .write_json(&mut bytes)
+        .expect("the write json fixture result is required for this assertion");
     assert_eq!(bytes, expected.as_bytes());
     assert!(bytes.len() < 4096);
-    assert!(source.retained_bytes().unwrap() >= 1024 * 1024);
+    assert!(
+        source
+            .retained_bytes()
+            .expect("the retained bytes fixture result is required for this assertion")
+            >= 1024 * 1024
+    );
 }
 
 /// 计量与真实分配单调一致：正文真实增长多少容量，上界至少增长同样多。

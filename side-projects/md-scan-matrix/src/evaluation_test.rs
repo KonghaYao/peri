@@ -1,4 +1,6 @@
-use super::*;
+use super::Case;
+use super::TokenKind;
+use crate::scanner;
 
 #[test]
 fn test_defined_collision_is_accepted_but_missing_or_extra_tokens_fail() {
@@ -10,21 +12,26 @@ fn test_defined_collision_is_accepted_but_missing_or_extra_tokens_fail() {
         note: "同编号冲突",
         collide: Some(TokenKind::Nul),
     };
-    let expected = evaluate(&case);
+    let expected = super::evaluate(&case);
     assert!(expected.pass(), "精确两次同编号 token 是声明的负面实验");
     assert!(expected.expected_collision);
-    let mut experiment = run();
+    let mut experiment = super::run();
     experiment.matrix = vec![expected];
     assert_eq!(experiment.exit_code(), 0, "预期碰撞不应被当作 scanner 失败");
     assert!(
-        !tokens_match_expectation("token disappeared", 1, TokenKind::Nul, Some(TokenKind::Nul)),
+        !super::tokens_match_expectation(
+            "token disappeared",
+            1,
+            TokenKind::Nul,
+            Some(TokenKind::Nul)
+        ),
         "token 丢失不能通过反转保留断言被误算为预期碰撞"
     );
     let extra = Case {
         md: "\0IMG0\0 \0IMG0\0 ![a](u)",
         ..case
     };
-    experiment.matrix = vec![evaluate(&extra)];
+    experiment.matrix = vec![super::evaluate(&extra)];
     assert!(
         !experiment.matrix[0].nul_retained,
         "第三次重复不属于预期负例"
@@ -41,7 +48,7 @@ fn test_literal_fallback_and_unexpected_missing_image_have_distinct_verdicts() {
         note: "CommonMark 非法 destination 保留文本",
         collide: None,
     };
-    let outcome = evaluate(&fallback);
+    let outcome = super::evaluate(&fallback);
     assert_eq!(outcome.actual_hits, 0);
     assert!(
         outcome.leftover_ok && outcome.pass(),
@@ -51,41 +58,45 @@ fn test_literal_fallback_and_unexpected_missing_image_have_distinct_verdicts() {
         expect_hits: 1,
         ..fallback
     };
-    let mut experiment = run();
-    experiment.matrix = vec![evaluate(&unexpected)];
+    let mut experiment = super::run();
+    experiment.matrix = vec![super::evaluate(&unexpected)];
     assert_eq!(experiment.exit_code(), 1, "预期图片却未命中必须影响退出码");
 }
 
 #[test]
 fn test_shortened_streaming_prefix_fails_without_panicking() {
-    let previous = parse("first\n\nsecond\n\n![a](")
+    let previous = scanner::parse("first\n\nsecond\n\n![a](")
         .iter()
         .map(crate::scanner::shape)
         .collect::<Vec<_>>();
-    let current = parse("first")
+    let current = scanner::parse("first")
         .iter()
         .map(crate::scanner::shape)
         .collect::<Vec<_>>();
-    let check = prefix_check("prefix shrink", &previous, &current);
+    let check = super::prefix_check("prefix shrink", &previous, &current);
     assert!(!check.passed, "当前块少于已闭合前缀必须判失败而不是越界");
-    let mut experiment = run();
+    let mut experiment = super::run();
     experiment.streaming = vec![check];
     assert_eq!(experiment.exit_code(), 1, "F 组前缀失败不能只打印");
 }
 
 #[test]
 fn test_completed_streaming_suffix_preserves_closed_prefix() {
-    let previous = parse("intro\n\n![a](u")
+    let previous = scanner::parse("intro\n\n![a](u")
         .iter()
         .map(crate::scanner::shape)
         .collect::<Vec<_>>();
     let md = "intro\n\n![a](u)";
-    let current = parse(&replace_images(md, &scan_images(md), TokenKind::Nul))
-        .iter()
-        .map(crate::scanner::shape)
-        .collect::<Vec<_>>();
+    let current = scanner::parse(&scanner::replace_images(
+        md,
+        &scanner::scan_images(md),
+        TokenKind::Nul,
+    ))
+    .iter()
+    .map(crate::scanner::shape)
+    .collect::<Vec<_>>();
     assert!(
-        closed_prefix_stable(&previous, &current),
+        super::closed_prefix_stable(&previous, &current),
         "闭合末段图片不能改变前面完整段落"
     );
 }
@@ -93,11 +104,11 @@ fn test_completed_streaming_suffix_preserves_closed_prefix() {
 #[test]
 fn test_collision_resolution_requires_unique_tokens_and_preserved_user_text() {
     let source = "用户 \0IMG0\0 然后 ![a](u) ![b](v)";
-    let hits = scan_images(source);
-    let (fixed, tokens) = replace_collision_free(source, &hits, TokenKind::Nul);
+    let hits = scanner::scan_images(source);
+    let (fixed, tokens) = scanner::replace_collision_free(source, &hits, TokenKind::Nul);
     assert_eq!(tokens.len(), 2);
     assert_ne!(tokens[0], tokens[1], "两张图片必须映射到不同 token");
-    assert!(collision_resolved(
+    assert!(super::collision_resolved(
         source,
         &fixed,
         &tokens,
@@ -105,7 +116,7 @@ fn test_collision_resolution_requires_unique_tokens_and_preserved_user_text() {
         "\0IMG0\0"
     ));
     let corrupted = fixed.replace("\0IMG0\0", "");
-    let check = resolved_collision_check(
+    let check = super::resolved_collision_check(
         "lost user text",
         source,
         &corrupted,
@@ -114,11 +125,11 @@ fn test_collision_resolution_requires_unique_tokens_and_preserved_user_text() {
         "\0IMG0\0",
     );
     assert!(!check.passed, "重编号不能吞掉用户原有 token");
-    let mut experiment = run();
+    let mut experiment = super::run();
     experiment.collisions = vec![check];
     assert_eq!(experiment.exit_code(), 1, "碰撞解决失败必须影响退出码");
     assert!(
-        !collision_resolved(
+        !super::collision_resolved(
             source,
             &fixed,
             &[tokens[0].clone(), tokens[0].clone()],
@@ -131,7 +142,7 @@ fn test_collision_resolution_requires_unique_tokens_and_preserved_user_text() {
 
 #[test]
 fn test_missing_experiment_group_cannot_report_success() {
-    let mut experiment = run();
+    let mut experiment = super::run();
     assert!(
         experiment.references.iter().all(|c| c.passed),
         "定义/未定义 reference 均应符合预期"

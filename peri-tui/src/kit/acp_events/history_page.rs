@@ -406,7 +406,10 @@ pub(super) fn project_items(
             };
             match event {
                 AcpEventData::CommittedAssistantText { text, reasoning } => {
-                    units.push(super::turn::committed_assistant_unit(&text, &reasoning));
+                    units.push(super::turn::committed_assistant_unit(
+                        &text,
+                        reasoning.as_deref(),
+                    ));
                 }
                 AcpEventData::ReplayToolStarted {
                     tool_id,

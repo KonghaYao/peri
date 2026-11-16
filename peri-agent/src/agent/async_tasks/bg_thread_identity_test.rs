@@ -4,10 +4,15 @@
 //! 线程身份，与 `task_id`（`bg-{uuid}`）是两个领域身份，不得由前缀推导；live 执行
 //! 结束后投影仍保留该字段，机器消费者不必依赖到达顺序或历史回执文本去猜。
 
-use super::*;
+use crate::agent::async_tasks::agent_inbox::BackgroundAgentInbox;
+
+use crate::agent::async_tasks::registry::BackgroundTaskRegistry;
 use crate::agent::async_tasks::{BackgroundTask, BackgroundTaskStatus, BgCancelHandle};
+use crate::agent::events::BackgroundTaskResult;
 use peri_acp_types::session::MessageQueue;
+use peri_acp_types::tasks::BgTaskKind;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// 历史样本的真实形态：task id 与 child thread id 独立生成，前段相同、尾段不同。
 const TASK_ID: &str = "bg-01a1407d-c445-7ac3-a7ab-db7f4535cb10";
@@ -70,7 +75,7 @@ async fn agent_task_projection_keeps_child_thread_identity_past_terminal() {
     );
     let ticket = registry
         .register_with_kind(base_task(BgTaskKind::Agent, Some(inbox)))
-        .unwrap();
+        .expect("the register with kind fixture result is required for this assertion");
 
     let live = record(&registry);
     assert_eq!(
@@ -80,7 +85,9 @@ async fn agent_task_projection_keeps_child_thread_identity_past_terminal() {
     );
     assert_ne!(
         live.task_id,
-        live.child_thread_id.clone().unwrap(),
+        live.child_thread_id
+            .clone()
+            .expect("the clone fixture result is required for this assertion"),
         "task 身份与线程身份是两个字段，不得同值改写"
     );
 
@@ -99,7 +106,9 @@ async fn agent_task_projection_keeps_child_thread_identity_past_terminal() {
 async fn non_agent_task_projection_has_no_child_thread_identity() {
     for kind in [BgTaskKind::Shell, BgTaskKind::Workflow, BgTaskKind::Mcp] {
         let registry = BackgroundTaskRegistry::new();
-        registry.register_with_kind(base_task(kind, None)).unwrap();
+        registry
+            .register_with_kind(base_task(kind, None))
+            .expect("the register with kind fixture result is required for this assertion");
         assert!(
             record(&registry).child_thread_id.is_none(),
             "{kind:?} 任务不得携带线程身份"

@@ -1,17 +1,19 @@
-use super::*;
+use super::{AcpNotification, AcpTuiClient};
+
 use peri_acp::event::AcpEvent;
-use peri_acp::transport::{AcpTransport, mpsc::mpsc_transport_pair};
-use peri_acp_types::{
-    event::{ChildEventOrigin, ChildEventStream, ExecutorEvent},
-    identity::AttemptId,
-    session::{ExecutionBinding, TurnId},
-};
+use peri_acp::transport::AcpTransport;
+use peri_acp_types::event::ChildEventOrigin;
+use peri_acp_types::event::ChildEventStream;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::identity::AttemptId;
+use peri_acp_types::session::ExecutionBinding;
+use peri_acp_types::session::TurnId;
 use serde_json::json;
 
 #[tokio::test]
 #[serial_test::serial]
 async fn child_origin_survives_wire_pump_and_notifier_queues() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, tx, rx) = AcpTuiClient::new_interactive(transport);
     client.lifecycle.force_stable("s1", false);
     client.spawn_pump(tx);
@@ -30,12 +32,12 @@ async fn child_origin_survives_wire_pump_and_notifier_queues() {
             parent_tool_call_id: None,
         },
     );
-    let origin = event.child_origin().unwrap().clone();
+    let origin = event.child_origin().expect("child origin survives wire pump and notifier queues: the child_origin fixture operation uses valid inputs").clone();
     server.send_notification("peri/agent_event", json!({
         "sessionId": "s1", "_meta": {"peri": {"childRun": origin}},
         "event": AcpEvent::SubagentStarted { agent_name: "worker".into(), instance_id: "child".into(), is_background: false, parent_tool_call_id: None },
-    })).await.unwrap();
-    let delivered = bridge_rx.recv().await.unwrap();
+    })).await.expect("child origin survives wire pump and notifier queues: fixture task and request must complete successfully");
+    let delivered = bridge_rx.recv().await.expect("child origin survives wire pump and notifier queues: fixture task and request must complete successfully");
     assert_eq!(delivered.child_origin, Some(origin));
     assert_eq!(delivered.active_session_id, "s1");
     assert!(matches!(
@@ -43,13 +45,13 @@ async fn child_origin_survives_wire_pump_and_notifier_queues() {
         crate::kit::acp_types::AcpEventData::SubagentStarted { .. }
     ));
     shutdown.cancel();
-    notifier.await.unwrap();
+    notifier.await.expect("child origin survives wire pump and notifier queues: fixture task and request must complete successfully");
     client.close();
 }
 
 #[tokio::test]
 async fn malformed_child_origin_does_not_fall_back_to_unscoped_event() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, tx, mut rx) = AcpTuiClient::new_interactive(transport);
     client.lifecycle.force_stable("s1", false);
     client.spawn_pump(tx);
@@ -59,14 +61,14 @@ async fn malformed_child_origin_does_not_fall_back_to_unscoped_event() {
             json!({"sessionId":"s1", "_meta":{"peri":{"childRun":{}}}, "test":"invalid"}),
         )
         .await
-        .unwrap();
+        .expect("malformed child origin does not fall back to unscoped event: fixture task and request must complete successfully");
     server
         .send_notification(
             "session/update",
             json!({"sessionId":"s1", "test":"barrier"}),
         )
         .await
-        .unwrap();
+        .expect("malformed child origin does not fall back to unscoped event: fixture task and request must complete successfully");
     assert!(
         matches!(rx.recv().await, Some(AcpNotification::SessionUpdate { params, .. }) if params["test"] == "barrier")
     );
@@ -89,7 +91,7 @@ fn notification_envelope_keeps_capture_epoch_across_local_reset() {
         parent_tool_call_id: None,
     })
     .child_origin()
-    .unwrap()
+    .expect("notification envelope keeps capture epoch across local reset: fixture parameters must construct a valid value")
     .clone();
     let queued = AcpNotification::SessionUpdate {
         session_id: "s1".into(),

@@ -5,13 +5,53 @@
 
 use std::collections::BTreeMap;
 
-use super::*;
+use crate::interaction::AttachmentId;
+use crate::interaction::ConnectionEpoch;
+use crate::mcp_apps::RawResource;
+use crate::mcp_apps::MCP_APPS_FACADE_VERSION;
 use crate::mcp_apps::{
     McpAppsErrorKind, SessionInvocationOutcome, MCP_APPS_ENVELOPE_VERSION, MCP_APPS_HTML_MIME,
     MCP_APPS_PROTOCOL_VERSION,
 };
+use crate::mcp_apps_facade::AppAttachSnapshot;
+use crate::mcp_apps_facade::AppDescriptor;
+use crate::mcp_apps_facade::AppExecutionState;
+use crate::mcp_apps_facade::AppQualification;
+use crate::mcp_apps_facade::AppsAttachResponse;
+use crate::mcp_apps_facade::AppsListResponse;
+use crate::mcp_apps_facade::AppsOperation;
+use crate::mcp_apps_facade::AppsRequestOutcome;
+use crate::mcp_apps_facade::AppsRequestRequest;
+use crate::mcp_apps_facade::AttachmentBinding;
+use crate::mcp_apps_facade::AttachmentSummary;
+use crate::mcp_apps_facade::ClientViewId;
+use crate::mcp_apps_facade::HostNamespace;
+use crate::mcp_apps_facade::McpAppsCapability;
+use crate::mcp_apps_facade::McpAppsFeatures;
+use crate::mcp_apps_facade::McpAppsLimits;
+use crate::mcp_apps_facade::ModelAssociation;
+use crate::mcp_apps_facade::RawResourceDescriptor;
+use crate::mcp_apps_facade::RequestNamespaceId;
+use crate::mcp_apps_facade::RequestSeq;
+use crate::mcp_apps_facade::RequestVerdict;
+use crate::mcp_apps_facade::UiResourceRef;
+use crate::mcp_apps_facade::APP_RETENTION_MS;
+use crate::mcp_apps_facade::DETACH_REATTACH_WINDOW_MS;
+use crate::mcp_apps_facade::MAX_APPS_PER_SESSION;
+use crate::mcp_apps_facade::MAX_ATTACHMENTS_PER_APP;
+use crate::mcp_apps_facade::MAX_ATTACHMENTS_PER_SESSION;
+use crate::mcp_apps_facade::MAX_NAMESPACES_PER_SESSION;
+use crate::mcp_apps_facade::MAX_PENDING_PER_NAMESPACE;
+use crate::mcp_apps_facade::MAX_RESULT_BYTES;
+use crate::mcp_apps_facade::MAX_RETAINED_BYTES;
+use crate::mcp_apps_facade::MAX_RETAINED_RESULTS;
+use crate::mcp_apps_facade::REQUEST_WAIT_TIMEOUT_MS;
+use crate::tool_invocation::InvocationId;
+use crate::tool_invocation::ToolCallId;
 use crate::tool_outcome::RawToolResult as RawCallToolResult;
 use serde_json::json;
+use serde_json::Map;
+use std::collections::HashMap;
 
 fn sample_descriptor() -> AppDescriptor {
     AppDescriptor {

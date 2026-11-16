@@ -1,12 +1,9 @@
-use std::{
-    future::Future,
-    pin::Pin,
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 use rand::RngExt;
@@ -38,26 +35,31 @@ impl Default for RetryableErrorClasses {
 }
 
 impl RetryableErrorClasses {
+    #[must_use]
     pub fn with_transport(mut self, enabled: bool) -> Self {
         self.transport = enabled;
         self
     }
 
+    #[must_use]
     pub fn with_request_timeout(mut self, enabled: bool) -> Self {
         self.request_timeout = enabled;
         self
     }
 
+    #[must_use]
     pub fn with_rate_limited(mut self, enabled: bool) -> Self {
         self.rate_limited = enabled;
         self
     }
 
+    #[must_use]
     pub fn with_server_error(mut self, enabled: bool) -> Self {
         self.server_error = enabled;
         self
     }
 
+    #[must_use]
     pub fn with_protocol(mut self, enabled: bool) -> Self {
         self.protocol = enabled;
         self
@@ -115,35 +117,42 @@ impl Default for RetryConfig {
 }
 
 impl RetryConfig {
+    #[must_use]
     pub fn with_max_attempts(mut self, max_attempts: u32) -> Self {
         self.max_attempts = max_attempts.max(1);
         self
     }
 
+    #[must_use]
     pub fn with_base_delay(mut self, base_delay: Duration) -> Self {
         self.base_delay = base_delay;
         self
     }
 
+    #[must_use]
     pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
         self.max_delay = max_delay;
         self
     }
 
+    #[must_use]
     pub fn with_jitter(mut self, jitter: bool) -> Self {
         self.jitter = jitter;
         self
     }
 
+    #[must_use]
     pub fn with_retryable_error_classes(mut self, retryable: RetryableErrorClasses) -> Self {
         self.retryable = retryable;
         self
     }
 
+    #[must_use]
     pub fn max_attempts(&self) -> u32 {
         self.max_attempts
     }
 
+    #[must_use]
     pub fn delay_for_retry(&self, completed_attempts: u32) -> Duration {
         let multiplier = 1_u32
             .checked_shl(completed_attempts.min(31))
@@ -174,6 +183,7 @@ pub struct RetryObservation {
 }
 
 impl RetryObservation {
+    #[must_use]
     pub fn new(
         attempt: u32,
         max_attempts: u32,
@@ -189,18 +199,22 @@ impl RetryObservation {
         }
     }
 
+    #[must_use]
     pub fn attempt(&self) -> u32 {
         self.attempt
     }
 
+    #[must_use]
     pub fn max_attempts(&self) -> u32 {
         self.max_attempts
     }
 
+    #[must_use]
     pub fn delay(&self) -> Duration {
         self.delay
     }
 
+    #[must_use]
     pub fn error_kind(&self) -> RetryErrorKind {
         self.error_kind
     }

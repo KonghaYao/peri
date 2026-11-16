@@ -30,7 +30,8 @@ use tempfile::TempDir;
 
 use super::inherited_blob::{InheritedFactsRead, InheritedSummaryRead};
 use super::inherited_facts::{LayoutPayload, INHERITED_FACTS_CACHE_CAPACITY};
-use super::*;
+use super::{MessageId, SqliteSessionData, ThreadId, ThreadMeta};
+
 use crate::sessions::sqlite_store::SqliteThreadStore;
 
 const LARGE_ENTRIES: usize = 64;
@@ -86,7 +87,7 @@ async fn child(
 async fn fixture() -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("threads.db");
-    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let store = SqliteThreadStore::try_new(&path).await.unwrap();
     let cwd = tmp.path().to_string_lossy().into_owned();
     let parent = store
         .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
@@ -106,7 +107,9 @@ async fn fixture() -> Fixture {
 }
 
 async fn cold(path: &Path) -> (SqliteThreadStore, SqliteSessionData) {
-    let store = SqliteThreadStore::new(path.to_path_buf()).await.unwrap();
+    let store = SqliteThreadStore::try_new(path.to_path_buf())
+        .await
+        .unwrap();
     let data = SqliteSessionData::new(Arc::clone(&store.database));
     (store, data)
 }

@@ -1,6 +1,6 @@
 //! 面板滚轮仲裁——统一面板区滚轮语义，消除与消息区的速度分裂。
 //!
-//! [Why] 面板的 ratatui-kit ScrollView（框架内置 handler，`Current+Normal`）
+//! \[Why\] 面板的 ratatui-kit ScrollView（框架内置 handler，`Current+Normal`）
 //! 滚轮固定 1 行/事件；消息区为 `SCROLL_LINES` 行/事件。同一物理滚轮跨区域
 //! 滚动速度断层 3 倍。
 //!
@@ -32,7 +32,7 @@ use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::layout::Rect;
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{ACTIVE_PANEL, PANEL_SCROLL_OWNER, POPUP_KIND};
+
 use crate::kit::message_area::scroll::SCROLL_LINES;
 
 // ── 注册表 ──────────────────────────────────────────────────────────────
@@ -329,6 +329,7 @@ fn apply_scroll_to_view(scroll: &mut ScrollViewState, delta: i32) {
 mod tests {
     use super::*;
 
+    #[must_use]
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
         Rect::new(x, y, w, h)
     }
@@ -439,3 +440,9 @@ mod tests {
 #[cfg(test)]
 #[path = "panel_scroll_test.rs"]
 mod virtual_tests;
+
+use crate::kit::atoms::ACTIVE_PANEL;
+
+use crate::kit::atoms::PANEL_SCROLL_OWNER;
+
+use crate::kit::atoms::POPUP_KIND;

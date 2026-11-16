@@ -7,18 +7,14 @@
 //! Task 保持易失投影语义：不持久化，重启不复活。
 
 mod agent_inbox;
-pub(crate) mod delivery;
+pub(crate) mod session_terminal_delivery;
+pub(crate) use session_terminal_delivery as delivery;
 pub(crate) mod handoff;
 mod manager;
 mod registry;
 mod scope;
 mod shell;
 mod shell_executor;
-
-#[cfg(test)]
-use crate::agent::events::BackgroundTaskResult;
-#[cfg(test)]
-use tokio_util::sync::CancellationToken;
 
 pub(crate) use agent_inbox::BackgroundAgentInboxGuard;
 pub use agent_inbox::{BackgroundAgentInbox, QueuedSubagentMessage, SubagentMessageError};

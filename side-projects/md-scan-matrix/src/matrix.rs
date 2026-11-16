@@ -3,6 +3,7 @@
 use crate::scanner::TokenKind;
 
 /// 单个实验 case。
+#[derive(Debug)]
 pub struct Case {
     pub name: &'static str,
     pub md: &'static str,
@@ -15,6 +16,7 @@ pub struct Case {
 
 // ── 实验矩阵定义 ────────────────────────────────────────────────
 
+#[must_use]
 pub fn matrix_a() -> Vec<Case> {
     vec![
         Case {
@@ -83,6 +85,7 @@ pub fn matrix_a() -> Vec<Case> {
     ]
 }
 
+#[must_use]
 pub fn matrix_b() -> Vec<Case> {
     vec![
         Case {
@@ -158,6 +161,7 @@ pub fn matrix_b() -> Vec<Case> {
     ]
 }
 
+#[must_use]
 pub fn matrix_c() -> Vec<Case> {
     vec![
         Case {
@@ -219,6 +223,7 @@ pub fn matrix_c() -> Vec<Case> {
     ]
 }
 
+#[must_use]
 pub fn matrix_d() -> Vec<Case> {
     vec![
         Case {
@@ -287,6 +292,7 @@ pub fn matrix_d() -> Vec<Case> {
     ]
 }
 
+#[must_use]
 pub fn matrix_e() -> Vec<Case> {
     vec![
         Case {
@@ -320,6 +326,7 @@ pub fn matrix_e() -> Vec<Case> {
     ]
 }
 
+#[must_use]
 pub fn matrix_g() -> Vec<Case> {
     vec![
         Case {

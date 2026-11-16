@@ -3,12 +3,13 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock};
 
 use parking_lot::RwLock;
-use ratatui::{
-    style::Style,
-    text::{Line, Span},
-};
+use ratatui::style::Style;
+use ratatui::text::Line;
+use ratatui::text::Span;
 use ratatui_kit_markdown::MarkdownTheme;
-use syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet};
+use syntect::easy::HighlightLines;
+use syntect::highlighting::ThemeSet;
+use syntect::parsing::SyntaxSet;
 
 // ── syntect 全局单例 ───────────────────────────────────────────────
 
@@ -57,6 +58,7 @@ struct HlCache {
 }
 
 impl HlCache {
+    #[must_use]
     fn new() -> Self {
         Self {
             cap: 32,
@@ -205,33 +207,36 @@ fn within_highlight_budget(raw_lines: &[String]) -> bool {
         return false;
     }
     let mut bytes = 0usize;
-    for (index, line) in raw_lines.iter().enumerate() {
-        if line.len() > MAX_HIGHLIGHT_LINE_BYTES {
-            tracing::debug!(
-                event = "skipped-budget",
-                work = "markdown-highlight",
-                cache_work = "bypassed",
-                reason = "line-bytes",
-                input_lines = raw_lines.len(),
-                inspected_lines = index + 1,
-                line_bytes = line.len(),
-                max_line_bytes = MAX_HIGHLIGHT_LINE_BYTES,
-            );
-            return false;
-        }
-        bytes = bytes.saturating_add(line.len());
-        if bytes > MAX_HIGHLIGHT_BYTES {
-            tracing::debug!(
-                event = "skipped-budget",
-                work = "markdown-highlight",
-                cache_work = "bypassed",
-                reason = "block-bytes",
-                input_lines = raw_lines.len(),
-                inspected_lines = index + 1,
-                inspected_bytes = bytes,
-                max_bytes = MAX_HIGHLIGHT_BYTES,
-            );
-            return false;
+    {
+        let iteration_items = raw_lines.iter().enumerate();
+        for (index, line) in iteration_items {
+            if line.len() > MAX_HIGHLIGHT_LINE_BYTES {
+                tracing::debug!(
+                    event = "skipped-budget",
+                    work = "markdown-highlight",
+                    cache_work = "bypassed",
+                    reason = "line-bytes",
+                    input_lines = raw_lines.len(),
+                    inspected_lines = index + 1,
+                    line_bytes = line.len(),
+                    max_line_bytes = MAX_HIGHLIGHT_LINE_BYTES,
+                );
+                return false;
+            }
+            bytes = bytes.saturating_add(line.len());
+            if bytes > MAX_HIGHLIGHT_BYTES {
+                tracing::debug!(
+                    event = "skipped-budget",
+                    work = "markdown-highlight",
+                    cache_work = "bypassed",
+                    reason = "block-bytes",
+                    input_lines = raw_lines.len(),
+                    inspected_lines = index + 1,
+                    inspected_bytes = bytes,
+                    max_bytes = MAX_HIGHLIGHT_BYTES,
+                );
+                return false;
+            }
         }
     }
     true
@@ -307,7 +312,7 @@ fn hash_raw_lines(raw_lines: &[String]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     for line in raw_lines {
         line.hash(&mut h);
-        0xAu8.hash(&mut h);
+        0xau8.hash(&mut h);
     }
     h.finish()
 }

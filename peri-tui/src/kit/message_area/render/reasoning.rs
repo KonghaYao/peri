@@ -1,12 +1,10 @@
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::tui_render_unit::{FoldState, TuiReasoningBlock};
-use crate::truncate::wrap_by_width;
+
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::ratatui::style::{Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
-
-use super::helpers::{place_meta, process_cont_prefix, process_first_prefix};
 
 /// Expanded reasoning 正文的最大行数（防超长推理块撑爆视口）。
 const REASONING_BODY_MAX_LINES: usize = 100;
@@ -31,7 +29,7 @@ const REASONING_BODY_MAX_LINES: usize = 100;
 /// tail / 摘要 N / Expanded 正文共用此序列——渲染行数与滚动高度天然一致。
 fn reasoning_visual_lines(text: &str, width: usize) -> Vec<String> {
     text.lines()
-        .flat_map(|l| wrap_by_width(l, width))
+        .flat_map(|l| crate::truncate::wrap_by_width(l, width))
         .filter(|l| !l.trim().is_empty())
         .collect()
 }
@@ -70,10 +68,13 @@ pub(super) fn render_reasoning_block(
             FoldState::Preview => 4, // §6.3：最近 2–4 个视觉行 tail
             FoldState::Collapsed => 0,
         };
-        for tail in visual_lines.iter().rev().take(tail_max).rev() {
-            let mut spans = process_cont_prefix(grid, sem.accents.reasoning);
-            spans.push(Span::styled(tail.clone(), body_style));
-            lines.push(Line::from(spans));
+        {
+            let iteration_items = visual_lines.iter().rev().take(tail_max).rev();
+            for tail in iteration_items {
+                let mut spans = super::helpers::process_cont_prefix(grid, sem.accents.reasoning);
+                spans.push(Span::styled(tail.clone(), body_style));
+                lines.push(Line::from(spans));
+            }
         }
     } else {
         // Completed：折叠单行 / 展开含正文。
@@ -95,15 +96,23 @@ pub(super) fn render_reasoning_block(
         } else {
             format!("Thought · {} lines", line_count)
         };
-        let mut spans = process_first_prefix(grid, "\u{2502}", Style::default().fg(sem.text.dim));
+        let mut spans = super::helpers::process_first_prefix(
+            grid,
+            "\u{2502}",
+            Style::default().fg(sem.text.dim),
+        );
         spans.push(Span::styled(summary, Style::default().fg(sem.text.dim)));
         lines.push(Line::from(spans));
 
         if reasoning.fold == FoldState::Expanded {
-            for body_line in visual_lines.iter().take(REASONING_BODY_MAX_LINES) {
-                let mut spans = process_cont_prefix(grid, sem.accents.reasoning);
-                spans.push(Span::styled(body_line.clone(), body_style));
-                lines.push(Line::from(spans));
+            {
+                let iteration_items = visual_lines.iter().take(REASONING_BODY_MAX_LINES);
+                for body_line in iteration_items {
+                    let mut spans =
+                        super::helpers::process_cont_prefix(grid, sem.accents.reasoning);
+                    spans.push(Span::styled(body_line.clone(), body_style));
+                    lines.push(Line::from(spans));
+                }
             }
         }
     }
@@ -117,7 +126,11 @@ pub(crate) fn render_running_reasoning_header(
     grid: &GridSpec,
 ) -> Line<'static> {
     let sem = THEME_ATOM.state().read().semantic;
-    let mut spans = process_first_prefix(grid, "\u{2502}", Style::default().fg(sem.status.running));
+    let mut spans = super::helpers::process_first_prefix(
+        grid,
+        "\u{2502}",
+        Style::default().fg(sem.status.running),
+    );
     // 对齐工具卡片语言（§6.4 硬编码英文口径，避免中英混杂）；信息层级
     // 低于工具——label 用 muted（工具 label 为 primary+bold），活动感由
     // ◐（running 色）承担。
@@ -127,7 +140,9 @@ pub(crate) fn render_running_reasoning_header(
     ));
     let used: usize = spans.iter().map(|s| s.content.width()).sum();
     let elapsed = format!("{}s", reasoning.duration_secs());
-    if let Some(meta) = place_meta(grid, used, &elapsed, Style::default().fg(sem.text.dim)) {
+    if let Some(meta) =
+        super::helpers::place_meta(grid, used, &elapsed, Style::default().fg(sem.text.dim))
+    {
         spans.extend(meta);
     }
     Line::from(spans)

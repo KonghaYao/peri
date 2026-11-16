@@ -10,11 +10,17 @@ use super::guards::StartupRestoreGuard;
 impl AcpTuiClient {
     /// 启动恢复失败后保留的目标；存在时下一次 ensure 先重试。
     pub(super) fn startup_retry_target(&self) -> Option<String> {
-        self.startup_restore_target.lock().unwrap().clone()
+        self.startup_restore_target
+            .lock()
+            .expect("startup_restore_target mutex must not be poisoned")
+            .clone()
     }
 
     pub(super) fn clear_startup_restore_target(&self) {
-        *self.startup_restore_target.lock().unwrap() = None;
+        *self
+            .startup_restore_target
+            .lock()
+            .expect("startup_restore_target mutex must not be poisoned") = None;
     }
 
     /// Establish resume/continue ownership before submit consumers can choose a
@@ -35,7 +41,11 @@ impl AcpTuiClient {
     ) -> Result<String, AcpError> {
         let _operation = self.lifecycle.operation_gate().lock().await;
         // 启动恢复失败后仍保留目标：下一次 ensure 先重试同一会话，不静默新建。
-        *self.startup_restore_target.lock().unwrap() = Some(session_id.to_owned());
+        *self
+            .startup_restore_target
+            .lock()
+            .expect("startup_restore_target mutex must not be poisoned") =
+            Some(session_id.to_owned());
         let reservation = StartupRestoreGuard(&self.startup_restore_tx);
         let result = self
             .load_session_under_gate(

@@ -1,8 +1,18 @@
 //! 复审 10：窗口身份切换与展示/索引的原子协调（自 `history_window_page_test` 拆分）。
 
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::TuiRenderUnit;
+use super::WindowIdentity;
+use super::WindowPageItem;
+use super::WindowPagePlacement;
+use super::WindowRequestContext;
+use super::WindowSubItem;
+use super::serial;
+
 use crate::kit::history_window::PersistentEntryKey;
 
+#[must_use]
 fn open_context(
     request_id: &str,
     identity: &WindowIdentity,
@@ -29,11 +39,11 @@ fn dispatch_open(
     items: Vec<WindowPageItem>,
 ) {
     let context = open_context(request_id, &identity, display_generation);
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         state,
         &AcpEventData::HistoryWindowPageLoaded {
             context: Box::new(context),
-            response: Box::new(response(identity, items)),
+            response: Box::new(super::response(identity, items)),
         },
     );
 }
@@ -43,21 +53,21 @@ fn dispatch_open(
 fn reopen_with_new_turn_keeps_live_answer_once() {
     use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble};
 
-    let (mut state, _guard) = state_with_window();
-    load_page(
+    let (mut state, _guard) = super::state_with_window();
+    super::load_page(
         &mut state,
         "r1",
         WindowPagePlacement::Tail,
-        vec![text_item("m1", 10, "one")],
+        vec![super::text_item("m1", 10, "one")],
     );
-    assert_eq!(committed_texts(&state), vec!["one"]);
+    assert_eq!(super::committed_texts(&state), vec!["one"]);
 
     // open 在途：新 turn 已经 flush 到 committed，current_turn 保持为空。
     let display_generation = state.generation;
     state.committed.push_back(TuiRenderUnit::TuiUserBubble(
         TuiUserBubble::new("answer".to_string()).with_message_id("m2"),
     ));
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
 
     let identity = WindowIdentity::new("s1", "gen-2", 8, "snap-2");
     dispatch_open(
@@ -65,11 +75,14 @@ fn reopen_with_new_turn_keeps_live_answer_once() {
         "r-open",
         identity,
         display_generation,
-        vec![text_item("m1", 10, "one"), text_item("m2", 20, "answer")],
+        vec![
+            super::text_item("m1", 10, "one"),
+            super::text_item("m2", 20, "answer"),
+        ],
     );
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
 
-    let texts = committed_texts(&state);
+    let texts = super::committed_texts(&state);
     assert_eq!(
         texts,
         vec!["one", "answer"],
@@ -96,14 +109,14 @@ fn reopen_with_new_turn_keeps_live_answer_once() {
     assert_eq!(state.window.segment_count(), 1);
 
     // 后续翻页重新返回同一持久条目时，adopt 身份必须阻止重复插入。
-    load_page(
+    super::load_page(
         &mut state,
         "r2",
         WindowPagePlacement::BeforeFirst,
-        vec![text_item("m2", 20, "answer")],
+        vec![super::text_item("m2", 20, "answer")],
     );
     assert_eq!(
-        committed_texts(&state)
+        super::committed_texts(&state)
             .iter()
             .filter(|text| text.as_str() == "answer")
             .count(),
@@ -117,14 +130,14 @@ fn reopen_with_new_turn_keeps_live_answer_once() {
 fn reopen_adopts_only_entries_actually_retained_by_live_tail() {
     use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit, TuiUserBubble};
 
-    let (mut state, _guard) = state_with_window();
+    let (mut state, _guard) = super::state_with_window();
     // 旧窗口只驻留 m1；更靠后的 m2 已被预算淘汰——committed 与展示账本都
     // 不再持有它，但它仍会在重开页里返回。
-    load_page(
+    super::load_page(
         &mut state,
         "r1",
         WindowPagePlacement::Tail,
-        vec![text_item("m1", 10, "one")],
+        vec![super::text_item("m1", 10, "one")],
     );
 
     // 新 turn 完成：live 尾部持有 user 投递（input id = m3）与 assistant
@@ -145,7 +158,7 @@ fn reopen_adopts_only_entries_actually_retained_by_live_tail() {
     state
         .committed
         .push_back(TuiRenderUnit::TuiAssistantBubble(answer.into()));
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
 
     let identity = WindowIdentity::new("s1", "gen-2", 8, "snap-2");
     dispatch_open(
@@ -154,16 +167,16 @@ fn reopen_adopts_only_entries_actually_retained_by_live_tail() {
         identity,
         display_generation,
         vec![
-            text_item("m1", 10, "one"),
-            text_item("m2", 20, "evicted page"),
-            text_item("m3", 30, "question"),
-            text_item("m4", 40, "answer"),
+            super::text_item("m1", 10, "one"),
+            super::text_item("m2", 20, "evicted page"),
+            super::text_item("m3", 30, "question"),
+            super::text_item("m4", 40, "answer"),
         ],
     );
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
 
     assert_eq!(
-        committed_texts(&state),
+        super::committed_texts(&state),
         vec!["one", "evicted page", "question", "answer"],
         "被淘汰的历史条目不得因位置高于水位被误判为已展示"
     );
@@ -185,12 +198,12 @@ fn reopen_adopts_only_entries_actually_retained_by_live_tail() {
 fn reopen_while_streaming_still_adopts_committed_entries() {
     use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble};
 
-    let (mut state, _guard) = state_with_window();
-    load_page(
+    let (mut state, _guard) = super::state_with_window();
+    super::load_page(
         &mut state,
         "r1",
         WindowPagePlacement::Tail,
-        vec![text_item("m1", 10, "one")],
+        vec![super::text_item("m1", 10, "one")],
     );
 
     // 上一轮已完成的消息仍在 committed：重开页会再次返回同一持久条目。
@@ -198,7 +211,7 @@ fn reopen_while_streaming_still_adopts_committed_entries() {
     state.committed.push_back(TuiRenderUnit::TuiUserBubble(
         TuiUserBubble::new("held answer".to_string()).with_message_id("m-held"),
     ));
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
     // 新一轮正在流式：live 区域非空。这不应禁用对 committed 已持有条目的
     // adopt，否则重开页会把它们重复插入（复审 CR-2）。
     state.current_turn.append_text("streaming", Some("m-live"));
@@ -210,13 +223,13 @@ fn reopen_while_streaming_still_adopts_committed_entries() {
         identity,
         display_generation,
         vec![
-            text_item("m-fresh", 20, "history"),
-            text_item("m-held", 30, "held answer"),
+            super::text_item("m-fresh", 20, "history"),
+            super::text_item("m-held", 30, "held answer"),
         ],
     );
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
 
-    let texts = committed_texts(&state);
+    let texts = super::committed_texts(&state);
     assert_eq!(
         texts
             .iter()
@@ -246,12 +259,12 @@ fn reopen_while_streaming_still_adopts_committed_entries() {
 fn adopt_only_ledger_survives_next_identity_switch() {
     use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble};
 
-    let (mut state, _guard) = state_with_window();
-    load_page(
+    let (mut state, _guard) = super::state_with_window();
+    super::load_page(
         &mut state,
         "r1",
         WindowPagePlacement::Tail,
-        vec![text_item("m1", 10, "one")],
+        vec![super::text_item("m1", 10, "one")],
     );
 
     // 新 turn 已 flush：live 尾部进入 committed。
@@ -259,7 +272,7 @@ fn adopt_only_ledger_survives_next_identity_switch() {
     state.committed.push_back(TuiRenderUnit::TuiUserBubble(
         TuiUserBubble::new("answer".to_string()).with_message_id("m2"),
     ));
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
 
     // 第二个身份只返回已由 live 尾部展示的条目：adopt-only，不建段。
     let identity = WindowIdentity::new("s1", "gen-2", 8, "snap-2");
@@ -273,9 +286,9 @@ fn adopt_only_ledger_survives_next_identity_switch() {
         "r-open-2",
         identity,
         display_generation,
-        vec![text_item("m2", 20, "answer")],
+        vec![super::text_item("m2", 20, "answer")],
     );
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
     assert_eq!(state.window.displayed_entry_count(), 1);
     assert_eq!(state.window.segment_count(), 0);
     assert_eq!(
@@ -292,7 +305,7 @@ fn adopt_only_ledger_survives_next_identity_switch() {
     state.committed.push_back(TuiRenderUnit::TuiUserBubble(
         TuiUserBubble::new("third".to_string()).with_message_id("m3"),
     ));
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
     let display_generation = state.generation;
     let identity = WindowIdentity::new("s1", "gen-3", 9, "snap-3");
     dispatch_open(
@@ -300,11 +313,14 @@ fn adopt_only_ledger_survives_next_identity_switch() {
         "r-open-3",
         identity,
         display_generation,
-        vec![text_item("m2", 20, "answer"), text_item("m3", 30, "third")],
+        vec![
+            super::text_item("m2", 20, "answer"),
+            super::text_item("m3", 30, "third"),
+        ],
     );
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
 
-    assert_eq!(committed_texts(&state), vec!["answer", "third"]);
+    assert_eq!(super::committed_texts(&state), vec!["answer", "third"]);
     assert_eq!(
         state.window.displayed_entry_count(),
         2,
@@ -318,19 +334,19 @@ fn adopt_only_ledger_survives_next_identity_switch() {
 fn adopt_only_reopen_places_older_history_before_live_tail() {
     use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble};
 
-    let (mut state, _guard) = state_with_window();
-    load_page(
+    let (mut state, _guard) = super::state_with_window();
+    super::load_page(
         &mut state,
         "r1",
         WindowPagePlacement::Tail,
-        vec![text_item("m1", 10, "one")],
+        vec![super::text_item("m1", 10, "one")],
     );
 
     let display_generation = state.generation;
     state.committed.push_back(TuiRenderUnit::TuiUserBubble(
         TuiUserBubble::new("answer".to_string()).with_message_id("m2"),
     ));
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
 
     let identity = WindowIdentity::new("s1", "gen-2", 8, "snap-2");
     dispatch_open(
@@ -338,14 +354,14 @@ fn adopt_only_reopen_places_older_history_before_live_tail() {
         "r-open-2",
         identity,
         display_generation,
-        vec![text_item("m2", 20, "answer")],
+        vec![super::text_item("m2", 20, "answer")],
     );
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
 
     state.committed.push_back(TuiRenderUnit::TuiUserBubble(
         TuiUserBubble::new("third".to_string()).with_message_id("m3"),
     ));
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
     let display_generation = state.generation;
     let identity = WindowIdentity::new("s1", "gen-3", 9, "snap-3");
     dispatch_open(
@@ -354,15 +370,15 @@ fn adopt_only_reopen_places_older_history_before_live_tail() {
         identity,
         display_generation,
         vec![
-            text_item("m1", 10, "one"),
-            text_item("m2", 20, "answer"),
-            text_item("m3", 30, "third"),
+            super::text_item("m1", 10, "one"),
+            super::text_item("m2", 20, "answer"),
+            super::text_item("m3", 30, "third"),
         ],
     );
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
 
     assert_eq!(
-        committed_texts(&state),
+        super::committed_texts(&state),
         vec!["one", "answer", "third"],
         "adopt-only 之后重取的历史必须插到 live 尾部之前"
     );
@@ -375,19 +391,19 @@ fn adopt_only_reopen_places_older_history_before_live_tail() {
 fn streaming_reopen_places_older_history_before_live_tail() {
     use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble};
 
-    let (mut state, _guard) = state_with_window();
-    load_page(
+    let (mut state, _guard) = super::state_with_window();
+    super::load_page(
         &mut state,
         "r1",
         WindowPagePlacement::Tail,
-        vec![text_item("m1", 10, "one")],
+        vec![super::text_item("m1", 10, "one")],
     );
 
     let display_generation = state.generation;
     state.committed.push_back(TuiRenderUnit::TuiUserBubble(
         TuiUserBubble::new("answer".to_string()).with_message_id("m2"),
     ));
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
 
     // adopt-only：window 只登记身份，不建段；committed 保留 live 尾部。
     let identity = WindowIdentity::new("s1", "gen-2", 8, "snap-2");
@@ -396,9 +412,9 @@ fn streaming_reopen_places_older_history_before_live_tail() {
         "r-open-2",
         identity,
         display_generation,
-        vec![text_item("m2", 20, "answer")],
+        vec![super::text_item("m2", 20, "answer")],
     );
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
     assert_eq!(state.window.displayed_entry_count(), 1);
     assert_eq!(state.window.segment_count(), 0);
 
@@ -411,12 +427,12 @@ fn streaming_reopen_places_older_history_before_live_tail() {
         "r-open-3",
         identity,
         display_generation,
-        vec![text_item("m0", 5, "zero")],
+        vec![super::text_item("m0", 5, "zero")],
     );
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
 
     assert_eq!(
-        committed_texts(&state),
+        super::committed_texts(&state),
         vec!["zero", "answer"],
         "更早的历史必须插到 live 尾部之前"
     );
@@ -427,12 +443,12 @@ fn streaming_reopen_places_older_history_before_live_tail() {
 fn reopen_after_streaming_turn_does_not_duplicate_prior_page() {
     use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble};
 
-    let (mut state, _guard) = state_with_window();
-    load_page(
+    let (mut state, _guard) = super::state_with_window();
+    super::load_page(
         &mut state,
         "r1",
         WindowPagePlacement::Tail,
-        vec![text_item("m1", 10, "one")],
+        vec![super::text_item("m1", 10, "one")],
     );
 
     let display_generation = state.generation;
@@ -441,7 +457,7 @@ fn reopen_after_streaming_turn_does_not_duplicate_prior_page() {
         .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
             "new question".to_string(),
         )));
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
     state.current_turn.append_text("streaming", Some("m-live"));
 
     let identity = WindowIdentity::new("s1", "gen-2", 8, "snap-2");
@@ -450,12 +466,12 @@ fn reopen_after_streaming_turn_does_not_duplicate_prior_page() {
         "r-open",
         identity,
         display_generation,
-        vec![text_item("m2", 20, "two")],
+        vec![super::text_item("m2", 20, "two")],
     );
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
 
     assert_eq!(
-        committed_texts(&state),
+        super::committed_texts(&state),
         vec!["two", "new question"],
         "旧窗口页被精确摘除，live 尾部保留，open 页插到 live 之前"
     );
@@ -464,14 +480,14 @@ fn reopen_after_streaming_turn_does_not_duplicate_prior_page() {
         "窗口切换不得改写正在流式的 live 区域"
     );
 
-    load_page(
+    super::load_page(
         &mut state,
         "r-before",
         WindowPagePlacement::BeforeFirst,
-        vec![text_item("m1", 10, "one")],
+        vec![super::text_item("m1", 10, "one")],
     );
     assert_eq!(
-        committed_texts(&state)
+        super::committed_texts(&state)
             .iter()
             .filter(|text| text.as_str() == "one")
             .count(),
@@ -483,12 +499,12 @@ fn reopen_after_streaming_turn_does_not_duplicate_prior_page() {
 #[test]
 #[serial]
 fn same_identity_open_retry_preserves_display_and_dedupes() {
-    let (mut state, _guard) = state_with_window();
-    load_page(
+    let (mut state, _guard) = super::state_with_window();
+    super::load_page(
         &mut state,
         "r1",
         WindowPagePlacement::Tail,
-        vec![text_item("m1", 10, "one")],
+        vec![super::text_item("m1", 10, "one")],
     );
     state.window.set_degraded("cursor expired");
     let identity = state.window.identity().cloned().expect("identity");
@@ -499,11 +515,14 @@ fn same_identity_open_retry_preserves_display_and_dedupes() {
         "r-open-same",
         identity,
         display_generation,
-        vec![text_item("m1", 10, "one"), text_item("m2", 20, "two")],
+        vec![
+            super::text_item("m1", 10, "one"),
+            super::text_item("m2", 20, "two"),
+        ],
     );
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
 
-    assert_eq!(committed_texts(&state), vec!["one", "two"]);
+    assert_eq!(super::committed_texts(&state), vec!["one", "two"]);
     assert_eq!(state.window.displayed_entry_count(), 2);
     assert_eq!(
         state.window.segment_count(),
@@ -550,8 +569,8 @@ fn same_identity_open_retry_does_not_duplicate_tool_cards() {
     use peri_acp_types::messages::MessageId;
     use peri_acp_types::thread::ThreadId;
 
-    let (mut state, _guard) = state_with_window();
-    dispatch_and_notify(
+    let (mut state, _guard) = super::state_with_window();
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "anchor".into(),
@@ -559,10 +578,10 @@ fn same_identity_open_retry_does_not_duplicate_tool_cards() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     // 清掉流式启发式身份：工具卡按无归属正文记账，等待 open 页回填。
     crate::kit::acp_events::live_tool_links::note_turn_boundary("s1");
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
             tool_id: "tool-live".into(),
@@ -574,7 +593,7 @@ fn same_identity_open_retry_does_not_duplicate_tool_cards() {
             origin_readable: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert!(
         state.window.budget().unattributed_live_bytes > 0,
         "无身份工具卡先按未归属记账"
@@ -610,7 +629,7 @@ fn same_identity_open_retry_does_not_duplicate_tool_cards() {
         display_generation,
         vec![page_item()],
     );
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
     assert_eq!(
         state.window.budget().unattributed_live_bytes,
         0,
@@ -637,7 +656,7 @@ fn same_identity_open_retry_does_not_duplicate_tool_cards() {
         retry_generation,
         vec![page_item()],
     );
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
     assert_eq!(
         committed_tool_cards(&state),
         vec!["tool-live"],
@@ -706,8 +725,8 @@ fn same_identity_open_retry_does_not_duplicate_tool_cards() {
 fn same_identity_open_keeps_page_text_around_adopted_tool_card() {
     use crate::kit::history_window::PersistentEntryKey;
 
-    let (mut state, _guard) = state_with_window();
-    dispatch_and_notify(
+    let (mut state, _guard) = super::state_with_window();
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "anchor".into(),
@@ -715,10 +734,10 @@ fn same_identity_open_keeps_page_text_around_adopted_tool_card() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     // 清掉流式启发式身份：工具卡按无归属正文记账，等待 open 页回填。
     crate::kit::acp_events::live_tool_links::note_turn_boundary("s1");
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
             tool_id: "tool-mixed".into(),
@@ -730,7 +749,7 @@ fn same_identity_open_keeps_page_text_around_adopted_tool_card() {
             origin_readable: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
     let identity = state.window.identity().cloned().expect("identity");
     let display_generation = state.generation;
@@ -772,14 +791,14 @@ fn same_identity_open_keeps_page_text_around_adopted_tool_card() {
         display_generation,
         vec![mixed_item],
     );
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
 
     assert_eq!(
         committed_tool_cards(&state),
         vec!["tool-mixed"],
         "被 live 持有的工具子项不得重复插入"
     );
-    let texts = committed_texts(&state);
+    let texts = super::committed_texts(&state);
     assert!(
         texts.contains(&"page text".to_string()),
         "同条目的兄弟文本必须随页插入，不能被整条 adopt 丢弃：{texts:?}"
@@ -803,7 +822,7 @@ fn same_identity_open_keeps_page_text_around_adopted_tool_card() {
 #[test]
 #[serial]
 fn reopen_with_inconsistent_ledger_degrades_without_mutation() {
-    let (mut state, _guard) = state_with_window();
+    let (mut state, _guard) = super::state_with_window();
     // 生产路径上 consumer 先结算在途请求，桥接随后才拒绝这一页。
     let request = crate::kit::history_page_consumer::WindowConsumerRequest::Open {
         request_id: "r-open-broken".into(),
@@ -830,7 +849,7 @@ fn reopen_with_inconsistent_ledger_degrades_without_mutation() {
         "r-open-broken",
         identity,
         display_generation,
-        vec![text_item("m1", 10, "one")],
+        vec![super::text_item("m1", 10, "one")],
     );
 
     assert_eq!(

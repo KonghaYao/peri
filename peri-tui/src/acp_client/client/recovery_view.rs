@@ -3,12 +3,10 @@
 //! 客户端不复制服务端的执行阻断状态；这里只把 `_meta.peri.recovery` 投影成通知。
 //! 真正的执行拒绝以服务端 `-32017` 为准。
 
-use peri_acp_types::event_data::SystemNotification;
 use peri_acp_types::recovery::{RecoveryView, RecoveryViewStatus};
 use serde_json::Value;
 
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
-use crate::kit::atoms::{BRIDGE_RESET_COUNTER, LOCAL_EVENT_TX, NOTIFICATION, Notification};
 
 const RECOVERY_NOTICE_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -88,3 +86,13 @@ pub(super) fn present(session_id: &str, view: &RecoveryView) {
 #[cfg(test)]
 #[path = "recovery_view_test.rs"]
 mod tests;
+
+use peri_acp_types::event_data::SystemNotification;
+
+use crate::kit::atoms::BRIDGE_RESET_COUNTER;
+
+use crate::kit::atoms::LOCAL_EVENT_TX;
+
+use crate::kit::atoms::NOTIFICATION;
+
+use crate::kit::atoms::Notification;

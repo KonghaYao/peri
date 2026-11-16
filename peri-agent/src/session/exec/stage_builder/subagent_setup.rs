@@ -1,22 +1,21 @@
 //! collect_tools 前注入父身份、运行时宿主与同一份冻结快照。
-use super::{BgEventTx, StageBuildInput};
-use crate::{
-    agent::async_tasks::TaskManager,
-    session::{
-        exec::executor::FrozenSessionData,
-        factory::{OnBgCompleteFn, SubAgentMiddlewarePort},
-        subagent::SubagentHost,
-        Session,
-    },
-};
-use peri_acp_types::{frozen::ThreadPersistence, identity::AgentId};
+use crate::agent::async_tasks::TaskManager;
+use crate::session::exec::executor::FrozenSessionData;
+use crate::session::exec::stage_builder::BgEventTx;
+use crate::session::exec::stage_builder::StageBuildInput;
+use crate::session::factory::OnBgCompleteFn;
+use crate::session::factory::SubAgentMiddlewarePort;
+use crate::session::subagent::SubagentHost;
+use crate::session::Session;
+use peri_acp_types::frozen::ThreadPersistence;
+use peri_acp_types::identity::AgentId;
 use std::sync::Arc;
 
-pub(super) struct SubagentDependencies<'a> {
-    pub(super) frozen_session: &'a FrozenSessionData,
-    pub(super) thread_persistence: &'a ThreadPersistence,
-    pub(super) task_manager: &'a Arc<TaskManager>,
-    pub(super) on_bg_complete: &'a Option<OnBgCompleteFn>,
+pub(super) struct SubagentDependencies<'dependencies> {
+    pub(super) frozen_session: &'dependencies FrozenSessionData,
+    pub(super) thread_persistence: &'dependencies ThreadPersistence,
+    pub(super) task_manager: &'dependencies Arc<TaskManager>,
+    pub(super) on_bg_complete: &'dependencies Option<OnBgCompleteFn>,
     pub(super) bg_event_tx: BgEventTx,
 }
 
@@ -24,7 +23,7 @@ pub(super) fn attach_subagent_host(
     input: &StageBuildInput,
     session: &Arc<Session>,
     main_agent_id: AgentId,
-    subagent_mw: &Option<Arc<dyn SubAgentMiddlewarePort>>,
+    subagent_mw: Option<&Arc<dyn SubAgentMiddlewarePort>>,
     dependencies: SubagentDependencies<'_>,
 ) {
     let SubagentDependencies {

@@ -7,13 +7,14 @@
 //! 始终同源。
 
 use crate::i18n;
-use crate::truncate::truncate_by_width;
+
 use fluent_bundle::FluentValue;
 use peri_theme::theme::ThemeDefinition;
-use ratatui_kit::ratatui::{
-    style::{Modifier, Style, Stylize},
-    text::{Line, Span},
-};
+use ratatui_kit::ratatui::style::Modifier;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::style::Stylize;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
 use unicode_width::UnicodeWidthStr;
 
 /// 可渲染表格的最小总宽：边框 3 + 内边距 4 + 两列各至少 1 列。
@@ -37,11 +38,11 @@ pub(super) struct TableRow {
 }
 
 /// 一段表格的完整描述（标题计数与表格行数可能不同，例如订阅）。
-pub(super) struct SectionSpec<'a> {
-    pub(super) label: &'a str,
+pub(super) struct SectionSpec<'rows> {
+    pub(super) label: &'rows str,
     pub(super) count: usize,
-    pub(super) headers: (&'a str, &'a str),
-    pub(super) rows: &'a [TableRow],
+    pub(super) headers: (&'rows str, &'rows str),
+    pub(super) rows: &'rows [TableRow],
     pub(super) more: Option<String>,
 }
 
@@ -96,7 +97,7 @@ fn fit_cell(value: &str, width: usize) -> String {
     let sanitized = sanitize_cell(value);
     let text = if UnicodeWidthStr::width(sanitized.as_str()) > width {
         // truncate_by_width 会追加省略号、可能超出 1 列，故先按 width−1 截断。
-        truncate_by_width(&sanitized, width.saturating_sub(1))
+        crate::truncate::truncate_by_width(&sanitized, width.saturating_sub(1))
     } else {
         sanitized
     };

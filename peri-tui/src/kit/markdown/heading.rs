@@ -4,8 +4,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui_kit_markdown::MarkdownTheme;
 
-use super::span_style::apply_span_styles;
-
 pub(crate) fn heading_line(
     _level: &HeadingLevel,
     line: &Line<'static>,
@@ -18,5 +16,9 @@ pub(crate) fn heading_line(
         .fg(sem.text.primary)
         .add_modifier(Modifier::BOLD);
     // 不渲染 # 前缀，但应用标题样式
-    Line::from(apply_span_styles(&line.spans, theme, Some(heading_style)))
+    Line::from(super::span_style::apply_span_styles(
+        &line.spans,
+        theme,
+        Some(heading_style),
+    ))
 }

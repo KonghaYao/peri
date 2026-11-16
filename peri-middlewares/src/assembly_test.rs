@@ -8,46 +8,53 @@
 //! 链序是行为契约（迁移自 `peri-acp/src/agent/builder.rs`），禁止按名称、
 //! 便利性或局部需求重排——修改本文件的期望序列必须先同步修改蓝本。
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::{stream, TryStreamExt};
 use parking_lot::RwLock;
-use peri_acp_types::workflow::{AgentExecutor, AgentRunParams, AgentRunResult};
+use peri_acp_types::workflow::{AgentRunParams, AgentRunResult};
+use peri_agent::agent::async_tasks::TaskManager;
+use peri_agent::agent::events::AgentEventHandler;
+use peri_agent::agent::events::ExecutorEvent;
+use peri_agent::agent::react::ToolCall;
+use peri_agent::agent::state::AgentState;
 use peri_agent::agent::workflow::WorkflowAgentContext;
+use peri_agent::agent::AgentCancellationToken;
+use peri_agent::goal::GoalController;
+use peri_agent::goal::GoalViewSnapshot;
+use peri_agent::interaction::InteractionContext;
+use peri_agent::interaction::InteractionResponse;
+use peri_agent::interaction::TrustedInteractionOwner;
+use peri_agent::interaction::UserInteractionBroker;
+use peri_agent::middleware::chain::MiddlewareChain;
+use peri_agent::session::factory;
+use peri_agent::session::factory::production_blueprint;
+use peri_agent::session::factory::ChainSlot;
 use peri_agent::session::subagent::SubagentLlmSource;
-use peri_agent::{
-    agent::{
-        async_tasks::TaskManager,
-        events::{AgentEventHandler, ExecutorEvent},
-        react::ToolCall,
-        state::AgentState,
-        AgentCancellationToken,
-    },
-    goal::{GoalController, GoalViewSnapshot},
-    interaction::{
-        InteractionContext, InteractionResponse, TrustedInteractionOwner, UserInteractionBroker,
-    },
-    middleware::chain::MiddlewareChain,
-    session::factory::{build_middleware_chain, production_blueprint, ChainSlot},
-    tools::BaseTool,
-};
+use peri_agent::tools::BaseTool;
 use peri_model::{
     Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult, ModelStream,
     ModelStreamEvent, StopReason,
 };
 
-use crate::{
-    assembly::{
-        default_workflow_middleware_factory, default_workflow_middleware_factory_with_pool,
-        AssemblyContext, OnBgCompleteFn, ProductionChainAssembler, SystemPromptBuilder,
-    },
-    hooks::{HookEvent, HookType, RegisteredHook},
-    mcp::{McpClientHandle, McpClientPool},
-    permission::{PermissionMode, SharedPermissionMode},
-    tool_search::ToolSearchIndex,
-    tools::TodoItem,
-};
+use crate::assembly;
+use crate::assembly::default_workflow_middleware_factory_with_pool;
+use crate::assembly::AssemblyContext;
+use crate::assembly::OnBgCompleteFn;
+use crate::assembly::ProductionChainAssembler;
+use crate::assembly::SystemPromptBuilder;
+use crate::hooks::HookEvent;
+use crate::hooks::HookType;
+use crate::hooks::RegisteredHook;
+use crate::mcp::McpClientHandle;
+use crate::mcp::McpClientPool;
+use crate::permission::PermissionMode;
+use crate::permission::SharedPermissionMode;
+use crate::tool_search::ToolSearchIndex;
+use crate::tools::TodoItem;
 use peri_acp_types::agents::AgentOverrides;
 use peri_acp_types::session_resources::{
     FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
@@ -179,7 +186,7 @@ impl Model for CompletedWorkflowModel {
         _request: ModelRequest,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> ModelResult<ModelStream> {
-        let response = ModelResponse::new(
+        let response = ModelResponse::try_new(
             ModelMessage::assistant_text("workflow done"),
             StopReason::EndTurn,
             None,
@@ -314,7 +321,7 @@ fn base_context() -> AssemblyContext {
 
 /// 装配并返回链上中间件名称序列。
 fn assemble_names(ctx: &AssemblyContext) -> Vec<String> {
-    let out = build_middleware_chain(&ProductionChainAssembler, ctx).expect("assembly");
+    let out = factory::build_middleware_chain(&ProductionChainAssembler, ctx).expect("assembly");
     out.chain.names().into_iter().map(String::from).collect()
 }
 
@@ -437,7 +444,7 @@ fn make_connected_handle(server: &str, tools: Vec<rmcp::model::Tool>) -> Arc<Mcp
 
 /// 装配并返回链上中间件 collect_tools 的工具名集合。
 fn assemble_tool_names(ctx: &AssemblyContext) -> Vec<String> {
-    let out = build_middleware_chain(&ProductionChainAssembler, ctx).expect("assembly");
+    let out = factory::build_middleware_chain(&ProductionChainAssembler, ctx).expect("assembly");
     out.chain
         .collect_tools(&ctx.cwd)
         .into_iter()
@@ -492,7 +499,7 @@ fn workflow_context_with_disabled(disabled: &[&str]) -> WorkflowAgentContext {
         subagent_ctx_builder: None,
         agent_prompt_builder: prompt_builder,
         model_factory,
-        middleware_factory: default_workflow_middleware_factory(),
+        middleware_factory: assembly::default_workflow_middleware_factory(),
         system_prompt_fallback: fallback,
         forwarder_launcher: forwarder,
         publish_hook: None,
@@ -597,7 +604,8 @@ mod workflow;
 #[test]
 fn agent_default_run_in_background_reaches_chain_tool_schema() {
     fn agent_tool_default(ctx: &AssemblyContext) -> serde_json::Value {
-        let out = build_middleware_chain(&ProductionChainAssembler, ctx).expect("assembly");
+        let out =
+            factory::build_middleware_chain(&ProductionChainAssembler, ctx).expect("assembly");
         let tools = out.chain.collect_tools(&ctx.cwd);
         let agent = tools
             .iter()
@@ -637,7 +645,7 @@ struct ForeignToolSearch;
 impl peri_acp_types::ports::ToolSearchPort for ForeignToolSearch {}
 
 fn assert_port_mismatch(ctx: &AssemblyContext, port: &'static str, expected: &'static str) {
-    let error = match build_middleware_chain(&ProductionChainAssembler, ctx) {
+    let error = match factory::build_middleware_chain(&ProductionChainAssembler, ctx) {
         Ok(_) => panic!("端口存在但类型不符必须显式失败，不能静默替换为降级实例"),
         Err(error) => error,
     };
@@ -761,7 +769,7 @@ fn offset_zero_agent_catalog_wrapper_fails_assembly_when_pool_is_present() {
 fn no_mcp_pool_is_a_legal_assembly_path() {
     let ctx = base_context();
     assert!(ctx.mcp_pool.is_none());
-    build_middleware_chain(&ProductionChainAssembler, &ctx).expect("无 MCP 必须可装配");
+    factory::build_middleware_chain(&ProductionChainAssembler, &ctx).expect("无 MCP 必须可装配");
 }
 
 /// 生产注入的具体实例必须被原样还原（装配产物与注入共享同一 `Arc`）。

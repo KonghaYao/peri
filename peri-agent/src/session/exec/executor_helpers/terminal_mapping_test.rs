@@ -1,17 +1,15 @@
-use peri_acp_types::{
-    command::PromptStopReason,
-    error::AgentError,
-    event::{TurnErrorKind, TurnStatus},
-    session::{ExecutionFailureKind, EXECUTION_FAILURE_FALLBACK_MESSAGE},
-};
+use peri_acp_types::command::PromptStopReason;
+use peri_acp_types::error::AgentError;
+use peri_acp_types::event::TurnErrorKind;
+use peri_acp_types::event::TurnStatus;
+use peri_acp_types::session::ExecutionFailureKind;
+use peri_acp_types::session::EXECUTION_FAILURE_FALLBACK_MESSAGE;
 
 use crate::agent::stages::LoopResult;
 
-use super::super::v2_execute::classify_loop_terminal;
-
 #[test]
 fn fatal_llm_error_preserves_original_content() {
-    let terminal = classify_loop_terminal(
+    let terminal = crate::session::exec::executor_helpers::v2_execute::classify_loop_terminal(
         &LoopResult::Error(AgentError::LlmError(
             "provider 500: Authorization: Bearer top-secret-key".to_string(),
         )),
@@ -35,7 +33,10 @@ fn fatal_llm_error_preserves_original_content() {
 
 #[test]
 fn interrupted_maps_to_no_failure() {
-    let terminal = classify_loop_terminal(&LoopResult::Interrupted, false);
+    let terminal = crate::session::exec::executor_helpers::v2_execute::classify_loop_terminal(
+        &LoopResult::Interrupted,
+        false,
+    );
     assert!(!terminal.ok);
     assert_eq!(terminal.stop_reason, PromptStopReason::Cancelled);
     assert_eq!(terminal.turn_status, TurnStatus::Interrupted);
@@ -48,7 +49,10 @@ fn interrupted_maps_to_no_failure() {
 
 #[test]
 fn legacy_error_interrupted_maps_to_interrupted_terminal() {
-    let terminal = classify_loop_terminal(&LoopResult::Error(AgentError::Interrupted), false);
+    let terminal = crate::session::exec::executor_helpers::v2_execute::classify_loop_terminal(
+        &LoopResult::Error(AgentError::Interrupted),
+        false,
+    );
     assert!(!terminal.ok);
     assert_eq!(terminal.stop_reason, PromptStopReason::Cancelled);
     assert_eq!(terminal.turn_status, TurnStatus::Interrupted);
@@ -58,7 +62,7 @@ fn legacy_error_interrupted_maps_to_interrupted_terminal() {
 
 #[test]
 fn cancelled_error_maps_to_no_failure() {
-    let terminal = classify_loop_terminal(
+    let terminal = crate::session::exec::executor_helpers::v2_execute::classify_loop_terminal(
         &LoopResult::Error(AgentError::LlmError("cancelled while failing".to_string())),
         true,
     );
@@ -74,7 +78,7 @@ fn cancelled_error_maps_to_no_failure() {
 
 #[test]
 fn max_iterations_maps_to_no_failure() {
-    let terminal = classify_loop_terminal(
+    let terminal = crate::session::exec::executor_helpers::v2_execute::classify_loop_terminal(
         &LoopResult::Error(AgentError::MaxIterationsExceeded(500)),
         false,
     );
@@ -90,7 +94,7 @@ fn max_iterations_maps_to_no_failure() {
 
 #[test]
 fn output_truncated_maps_to_max_tokens_without_fatal_failure() {
-    let terminal = classify_loop_terminal(
+    let terminal = crate::session::exec::executor_helpers::v2_execute::classify_loop_terminal(
         &LoopResult::Error(AgentError::OutputTruncated { attempts: 3 }),
         false,
     );
@@ -112,7 +116,7 @@ fn output_truncated_maps_to_max_tokens_without_fatal_failure() {
 
 #[test]
 fn cancelled_output_truncation_maps_to_cancelled() {
-    let terminal = classify_loop_terminal(
+    let terminal = crate::session::exec::executor_helpers::v2_execute::classify_loop_terminal(
         &LoopResult::Error(AgentError::OutputTruncated { attempts: 3 }),
         true,
     );
@@ -123,7 +127,7 @@ fn cancelled_output_truncation_maps_to_cancelled() {
 
 #[test]
 fn cancelled_max_iterations_maps_to_interrupted_terminal() {
-    let terminal = classify_loop_terminal(
+    let terminal = crate::session::exec::executor_helpers::v2_execute::classify_loop_terminal(
         &LoopResult::Error(AgentError::MaxIterationsExceeded(500)),
         true,
     );
@@ -136,7 +140,10 @@ fn cancelled_max_iterations_maps_to_interrupted_terminal() {
 
 #[test]
 fn completed_maps_to_success_no_failure() {
-    let terminal = classify_loop_terminal(&LoopResult::Completed, false);
+    let terminal = crate::session::exec::executor_helpers::v2_execute::classify_loop_terminal(
+        &LoopResult::Completed,
+        false,
+    );
     assert!(terminal.ok);
     assert_eq!(terminal.stop_reason, PromptStopReason::EndTurn);
     assert_eq!(terminal.turn_status, TurnStatus::Done);
@@ -146,7 +153,7 @@ fn completed_maps_to_success_no_failure() {
 
 #[test]
 fn hook_stopped_maps_to_success_no_failure() {
-    let terminal = classify_loop_terminal(
+    let terminal = crate::session::exec::executor_helpers::v2_execute::classify_loop_terminal(
         &LoopResult::HookStopped {
             unprocessed_tool_calls: vec!["call-1".into()],
         },
@@ -164,7 +171,7 @@ fn hook_stopped_maps_to_success_no_failure() {
 
 #[test]
 fn settlement_due_is_defensive_failure_not_panic() {
-    let terminal = classify_loop_terminal(
+    let terminal = crate::session::exec::executor_helpers::v2_execute::classify_loop_terminal(
         &LoopResult::SettlementDue {
             unprocessed_tool_calls: Vec::new(),
         },
@@ -181,7 +188,10 @@ fn settlement_due_is_defensive_failure_not_panic() {
 
 #[test]
 fn completed_after_late_cancel_remains_committed_success() {
-    let terminal = classify_loop_terminal(&LoopResult::Completed, true);
+    let terminal = crate::session::exec::executor_helpers::v2_execute::classify_loop_terminal(
+        &LoopResult::Completed,
+        true,
+    );
     assert!(terminal.ok);
     assert_eq!(terminal.stop_reason, PromptStopReason::EndTurn);
     assert_eq!(terminal.turn_status, TurnStatus::Done);
@@ -191,7 +201,7 @@ fn completed_after_late_cancel_remains_committed_success() {
 
 #[test]
 fn llm_http_error_preserves_original_message() {
-    let terminal = classify_loop_terminal(
+    let terminal = crate::session::exec::executor_helpers::v2_execute::classify_loop_terminal(
         &LoopResult::Error(AgentError::LlmHttpError {
             status: 421,
             message: "Misdirected Request token=secret-provider-body".to_string(),

@@ -1,6 +1,7 @@
 //! Read-only transcript formatting; it never touches the active session projection.
 
-use peri_acp_types::{messages::BaseMessage, store::PersistedPayload};
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::store::PersistedPayload;
 
 pub(super) fn text(payloads: &[PersistedPayload]) -> String {
     let mut output = String::new();

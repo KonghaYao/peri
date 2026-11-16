@@ -1,15 +1,16 @@
-use std::{
-    pin::Pin,
-    task::{Context, Poll},
-    time::Duration,
-};
+use std::pin::Pin;
+use std::task::Context;
+use std::task::Poll;
+use std::time::Duration;
 
 use futures::Stream;
 use js_sys::{Array, Promise, Reflect, Uint8Array};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use wasm_bindgen::{prelude::*, JsCast};
-use wasm_bindgen_futures::{spawn_local, JsFuture};
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures;
+use wasm_bindgen_futures::JsFuture;
 
 use super::http::{HttpRequest, HttpResponse};
 use crate::{ModelError, ModelResult, TransportErrorKind};
@@ -162,7 +163,7 @@ pub(super) async fn send(
     let (response_sender, response_receiver) = oneshot::channel();
     let (body_sender, body_receiver) = mpsc::channel(QUEUED_CHUNKS);
     let local_cancellation = cancellation.clone();
-    spawn_local(async move {
+    wasm_bindgen_futures::spawn_local(async move {
         let mut response_sender = Some(response_sender);
         let result = pump(
             request,
@@ -288,7 +289,8 @@ async fn pump(
                     .with_message("Native fetch source chunk exceeds the 1 MiB transport limit"),
             );
         }
-        for offset in (0..chunk.length()).step_by(CHUNK_BYTES) {
+        let chunk_offsets = (0..chunk.length()).step_by(CHUNK_BYTES);
+        for offset in chunk_offsets {
             let bytes = chunk
                 .subarray(offset, (offset + CHUNK_BYTES as u32).min(chunk.length()))
                 .to_vec();

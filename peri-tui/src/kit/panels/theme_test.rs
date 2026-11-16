@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 
-use super::{
-    THEME_LIST, ThemeCatalogTabs, ThemePanel, build_preview, classify_theme_catalog,
-    list_header_rows, refresh_theme_catalog_after_download, resolve_selection,
-};
+use super::THEME_LIST;
+use super::ThemeCatalogTabs;
+use super::ThemePanel;
 use peri_theme::atoms::{PALETTE_ATOM, PERI_COLORS_ATOM, THEME_ATOM};
 use peri_theme::theme::ThemeMode;
 use ratatui_kit::crossterm::event::{
@@ -21,7 +20,7 @@ use serial_test::serial;
 fn downloaded_catalog_replaces_snapshot_and_reclassifies() {
     let mut catalog = vec!["stale-dark".to_string()];
 
-    refresh_theme_catalog_after_download(&mut catalog, 1, || {
+    super::refresh_theme_catalog_after_download(&mut catalog, 1, || {
         vec![
             "downloaded-dark".to_string(),
             "downloaded-light".to_string(),
@@ -38,7 +37,7 @@ fn downloaded_catalog_replaces_snapshot_and_reclassifies() {
         ("downloaded-dark", ThemeMode::Dark),
         ("downloaded-light", ThemeMode::Light),
     ]);
-    let (dark, light) = classify_theme_catalog(&catalog, |name| modes.get(name).copied());
+    let (dark, light) = super::classify_theme_catalog(&catalog, |name| modes.get(name).copied());
 
     assert_eq!(dark, vec!["downloaded-dark"], "新增深色主题应可见");
     assert_eq!(light, vec!["downloaded-light"], "新增浅色主题应可见");
@@ -50,7 +49,7 @@ fn failed_download_does_not_rescan_or_replace_catalog() {
     let mut catalog = vec!["existing-theme".to_string()];
     let mut scan_called = false;
 
-    refresh_theme_catalog_after_download(&mut catalog, 0, || {
+    super::refresh_theme_catalog_after_download(&mut catalog, 0, || {
         scan_called = true;
         vec!["unexpected-theme".to_string()]
     });
@@ -151,7 +150,7 @@ impl MountedPanel {
             .list(*self.tab.read())
             .to_vec();
         let selected_theme = self.selected_theme.read().clone();
-        let selection = resolve_selection(&themes, &selected_theme, *self.last_index.read());
+        let selection = super::resolve_selection(&themes, &selected_theme, *self.last_index.read());
         let original_theme = self.original_theme.read().clone();
         super::handle_theme_event(
             event,
@@ -159,7 +158,7 @@ impl MountedPanel {
                 area: Some(area),
                 tab: self.tab,
                 selected_theme: self.selected_theme,
-                header_rows: list_header_rows(build_preview(&selected_theme).len()),
+                header_rows: super::list_header_rows(super::build_preview(&selected_theme).len()),
                 scroll_start: crate::kit::list_nav::scroll_start_for_selected(
                     selection.index,
                     themes.len(),
@@ -261,7 +260,7 @@ fn click_on_rendered_item_row_selects_that_item() {
     let drawn_header_rows = (second_item_row - 1 - (TEST_AREA.y + 1)) as usize;
     assert_eq!(
         drawn_header_rows,
-        list_header_rows(build_preview("peri-dark").len()) as usize,
+        super::list_header_rows(super::build_preview("peri-dark").len()) as usize,
         "命中布局的 header 行数必须等于绘制出的 header 行数"
     );
 
@@ -286,14 +285,14 @@ fn click_on_rendered_item_row_selects_that_item() {
 /// 预览为空时 header 仍按渲染的一行 `(no preview)` 计入——命中与绘制同源。
 #[test]
 fn empty_preview_counts_one_header_row() {
-    let with_preview = list_header_rows(4);
+    let with_preview = super::list_header_rows(4);
     assert_eq!(
         with_preview,
         super::LIST_HEADER_FIXED_ROWS as u16 + 4,
         "有预览时 header = 固定 5 行 + 预览正文行数"
     );
     assert_eq!(
-        list_header_rows(0),
+        super::list_header_rows(0),
         super::LIST_HEADER_FIXED_ROWS as u16 + 1,
         "预览为空时渲染一行 (no preview)，命中布局必须同样计入"
     );
@@ -439,14 +438,14 @@ fn rendering_frames_leaves_selection_and_tab_untouched() {
 /// 与 `preview_follows_selection` 覆盖）。
 #[test]
 fn render_section_writes_no_state() {
-    let src = include_str!("theme.rs");
+    let src = include_str!("theme/theme_panel.rs");
     let render = src
         .split("// ── 渲染段（只读")
         .nth(1)
         .expect("渲染段标记存在")
-        .split("panel_shell!")
-        .next()
-        .expect("渲染段以 panel_shell 结束");
+        .split_once("panel_shell!")
+        .expect("渲染段以 panel_shell 结束")
+        .0;
     for forbidden in [".write()", ".write_no_update()", ".set(", ".set_no_update("] {
         assert!(
             !render.contains(forbidden),

@@ -1,16 +1,15 @@
-use super::*;
-use async_trait::async_trait;
-use peri_acp_types::messages::MessageId;
-use peri_acp_types::session_resources::{
-    BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot, CloseSettlement, ForkSnapshot,
-    FrozenSnapshotBytes, NewSession, NewSessionDraft, PersistenceRecovery, RewindBoundary,
-    RewindOutcome, SessionAvailability, SessionInitialization, SessionMetaPatch,
-    SessionResourceError, SessionResourceResult, SessionResources, SessionSnapshot,
-};
-use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
-use peri_acp_types::system_reminder::TrustedSystemReminder;
-use peri_acp_types::thread::{ThreadId, ThreadMeta};
-use peri_acp_types::workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery};
+use crate::host::requests::tests::HomeDirGuard;
+use crate::host::requests::tests::MockTransport;
+use crate::provider::LlmProvider;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::store::ThreadStore;
+use peri_acp_types::thread::ThreadMeta;
+use peri_resources::sessions::SqliteThreadStore;
+use serde_json::json;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
 
 /// legacy 原始事实：只有 thread 行与消息，**没有 binding、没有 frozen**。
 ///
@@ -44,9 +43,10 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
         .join("saved-project");
     std::fs::create_dir(&cwd).unwrap();
     std::fs::write(cwd.join("CLAUDE.md"), "LEGACY_PROJECT_INSTRUCTION").unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
-    let (cfg, bridge) = make_server_config_with_bridge(
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "test", "model"),
+    );
+    let (cfg, bridge) = crate::host::requests::tests::make_server_config_with_bridge(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
@@ -55,7 +55,7 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
     let id = old_thread(&bridge, &cwd).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
-    let context = handle_request(
+    let context = crate::host::requests::handle_request(
         "peri/session_context",
         &json!({"sessionId":id}),
         &cfg,
@@ -68,7 +68,7 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
     assert!(context["binding"].is_null());
     assert!(bridge.load_session_binding(&id).await.unwrap().is_none());
     assert!(bridge.load_frozen_snapshot(&id).await.unwrap().is_none());
-    handle_request(
+    crate::host::requests::handle_request(
         "session/load",
         &json!({"sessionId":id,"cwd":cwd}),
         &cfg,
@@ -96,7 +96,7 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
         "零兜底前提：磁盘上的指令文件仍在"
     );
     let frozen = bridge.load_frozen_snapshot(&id).await.unwrap().unwrap();
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId":id}),
         &cfg,
@@ -106,7 +106,7 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
     .await
     .unwrap();
     std::fs::write(cwd.join("CLAUDE.md"), "CHANGED_LATER").unwrap();
-    handle_request(
+    crate::host::requests::handle_request(
         "session/resume",
         &json!({"sessionId":id}),
         &cfg,
@@ -119,7 +119,7 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
         bridge.load_frozen_snapshot(&id).await.unwrap().unwrap(),
         frozen
     );
-    let fork = handle_request(
+    let fork = crate::host::requests::handle_request(
         "session/fork",
         &json!({"sessionId":id}),
         &cfg,
@@ -134,7 +134,7 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
         sessions[fork_id].effective_messages()[0].content(),
         "legacy user message"
     );
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId":fork_id}),
         &cfg,
@@ -143,7 +143,7 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
     )
     .await
     .unwrap();
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId":id}),
         &cfg,
@@ -160,9 +160,10 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
 async fn legacy_history_missing_directory_is_readable_without_adoption() {
     let tmp = tempfile::tempdir().unwrap();
     let _home = HomeDirGuard::set(tmp.path());
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
-    let (cfg, bridge) = make_server_config_with_bridge(
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "test", "model"),
+    );
+    let (cfg, bridge) = crate::host::requests::tests::make_server_config_with_bridge(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
@@ -172,7 +173,7 @@ async fn legacy_history_missing_directory_is_readable_without_adoption() {
     let id = old_thread(&bridge, &saved).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
-    let response = handle_request(
+    let response = crate::host::requests::handle_request(
         "peri/session_history",
         &json!({"sessionId":id}),
         &cfg,
@@ -184,7 +185,7 @@ async fn legacy_history_missing_directory_is_readable_without_adoption() {
     assert_eq!(response["payloads"].as_array().unwrap().len(), 1);
     assert!(response["binding"].is_null());
     for method in ["session/load", "session/resume"] {
-        assert!(handle_request(
+        assert!(crate::host::requests::handle_request(
             method,
             &json!({"sessionId":id,"cwd":tmp.path()}),
             &cfg,
@@ -210,9 +211,10 @@ async fn legacy_history_load_ignores_wrong_directory_and_preserves_saved_cwd() {
     let other = root.join("other");
     std::fs::create_dir(&saved).unwrap();
     std::fs::create_dir(&other).unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
-    let (cfg, bridge) = make_server_config_with_bridge(
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "test", "model"),
+    );
+    let (cfg, bridge) = crate::host::requests::tests::make_server_config_with_bridge(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
@@ -221,7 +223,7 @@ async fn legacy_history_load_ignores_wrong_directory_and_preserves_saved_cwd() {
     let id = old_thread(&bridge, &saved).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
-    handle_request(
+    crate::host::requests::handle_request(
         "session/load",
         &json!({"sessionId":id,"cwd":other}),
         &cfg,
@@ -238,7 +240,7 @@ async fn legacy_history_load_ignores_wrong_directory_and_preserves_saved_cwd() {
     assert_eq!(Path::new(&bridge.load_meta(&id).await.unwrap().cwd), saved);
     assert!(bridge.load_session_binding(&id).await.unwrap().is_some());
     assert!(bridge.load_frozen_snapshot(&id).await.unwrap().is_some());
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId":id}),
         &cfg,
@@ -257,9 +259,10 @@ async fn legacy_history_rejects_bad_frozen_without_adoption() {
     let tmp = tempfile::tempdir().unwrap();
     let _home = HomeDirGuard::set(tmp.path());
     let saved = std::fs::canonicalize(tmp.path()).unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
-    let (cfg, bridge) = make_server_config_with_bridge(
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "test", "model"),
+    );
+    let (cfg, bridge) = crate::host::requests::tests::make_server_config_with_bridge(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
@@ -273,7 +276,7 @@ async fn legacy_history_rejects_bad_frozen_without_adoption() {
             .store_frozen_snapshot_if_absent(&id, snapshot)
             .await
             .unwrap();
-        let error = handle_request(
+        let error = crate::host::requests::handle_request(
             "session/load",
             &json!({"sessionId":id}),
             &cfg,
@@ -302,9 +305,10 @@ async fn legacy_history_rejects_bad_frozen_without_adoption() {
 async fn legacy_history_fix_does_not_rebuild_missing_native_snapshot() {
     let tmp = tempfile::tempdir().unwrap();
     let _home = HomeDirGuard::set(tmp.path());
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
-    let (cfg, bridge) = make_server_config_with_bridge(
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "test", "model"),
+    );
+    let (cfg, bridge) = crate::host::requests::tests::make_server_config_with_bridge(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
@@ -321,7 +325,7 @@ async fn legacy_history_fix_does_not_rebuild_missing_native_snapshot() {
         .unwrap();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
-    let error = handle_request(
+    let error = crate::host::requests::handle_request(
         "session/load",
         &json!({"sessionId":id}),
         &cfg,
@@ -351,7 +355,7 @@ async fn legacy_history_freezes_saved_workspace_configuration_and_plugins() {
         r#"{"config":{"language":"zh-CN","meta_harness":{"01_intro":true,"WebMiddleware":false}}}"#,
     )
     .unwrap();
-    seed_plugin_ecc(tmp.path());
+    crate::host::requests::tests::seed_plugin_ecc(tmp.path());
     let skills = tmp.path().join(".claude/plugins/ecc/skills/legacy-skill");
     std::fs::create_dir_all(&skills).unwrap();
     std::fs::write(
@@ -359,10 +363,11 @@ async fn legacy_history_freezes_saved_workspace_configuration_and_plugins() {
         "---\nname: legacy-skill\ndescription: SAVED_PLUGIN_SKILL\n---\nLegacy plugin skill",
     )
     .unwrap();
-    let mut config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
+    let mut config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "test", "model"),
+    );
     config.config.language = Some("en".into());
-    let (mut cfg, bridge) = make_server_config_with_bridge(
+    let (mut cfg, bridge) = crate::host::requests::tests::make_server_config_with_bridge(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
@@ -380,7 +385,7 @@ async fn legacy_history_freezes_saved_workspace_configuration_and_plugins() {
     let id = old_thread(&bridge, &target).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
-    handle_request(
+    crate::host::requests::handle_request(
         "session/load",
         &json!({"sessionId":id}),
         &cfg,
@@ -423,7 +428,7 @@ async fn legacy_history_freezes_saved_workspace_configuration_and_plugins() {
         "宿主不得从插件根扫描技能目录：{}",
         frozen.skill_summary
     );
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId":id}),
         &cfg,
@@ -453,9 +458,10 @@ async fn legacy_first_adoption_bootstraps_resources_before_atomic_adoption() {
         .join("legacy-face");
     std::fs::create_dir(&cwd).unwrap();
     std::fs::write(cwd.join("CLAUDE.md"), LEGACY_FACE_INSTRUCTION).unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
-    let (mut cfg, bridge) = make_server_config_with_bridge(
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "test", "model"),
+    );
+    let (mut cfg, bridge) = crate::host::requests::tests::make_server_config_with_bridge(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
@@ -472,7 +478,7 @@ async fn legacy_first_adoption_bootstraps_resources_before_atomic_adoption() {
     let id = old_thread(&bridge, &cwd).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
-    handle_request(
+    crate::host::requests::handle_request(
         "session/load",
         &json!({"sessionId":id}),
         &cfg,
@@ -516,9 +522,10 @@ async fn legacy_first_adoption_bootstraps_resources_before_atomic_adoption() {
 async fn legacy_adoption_is_write_once_and_loser_reads_winner() {
     let tmp = tempfile::tempdir().unwrap();
     let _home = HomeDirGuard::set(tmp.path());
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
-    let (cfg, bridge) = make_server_config_with_bridge(
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "test", "model"),
+    );
+    let (cfg, bridge) = crate::host::requests::tests::make_server_config_with_bridge(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
@@ -530,7 +537,7 @@ async fn legacy_adoption_is_write_once_and_loser_reads_winner() {
     // winner 字节：另一条真实创建路径产出的合法 frozen 快照。
     let winner_cwd = std::fs::canonicalize(tmp.path()).unwrap().join("winner");
     std::fs::create_dir(&winner_cwd).unwrap();
-    let winner_response = handle_request(
+    let winner_response = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": winner_cwd}),
         &cfg,
@@ -547,7 +554,7 @@ async fn legacy_adoption_is_write_once_and_loser_reads_winner() {
         .unwrap();
     let loser_cwd = std::fs::canonicalize(tmp.path()).unwrap().join("loser");
     std::fs::create_dir(&loser_cwd).unwrap();
-    let loser_response = handle_request(
+    let loser_response = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": loser_cwd}),
         &cfg,
@@ -604,7 +611,7 @@ async fn legacy_adoption_is_write_once_and_loser_reads_winner() {
     );
 
     // 发布面读取 winner：session/load 后的 live 冻结输入与 winner 字节同源。
-    handle_request(
+    crate::host::requests::handle_request(
         "session/load",
         &json!({"sessionId":legacy_id.clone()}),
         &cfg,
@@ -639,10 +646,11 @@ async fn legacy_read_only_store_does_not_bootstrap_or_adopt() {
         .join("readonly-legacy");
     std::fs::create_dir(&cwd).unwrap();
     std::fs::write(cwd.join("CLAUDE.md"), "READ_ONLY_MUST_NOT_BE_READ").unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "test", "model"),
+    );
     let db_path = tmp.path().join("threads.db");
-    let (writable_cfg, bridge) = make_server_config_with_bridge(
+    let (writable_cfg, bridge) = crate::host::requests::tests::make_server_config_with_bridge(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
@@ -659,7 +667,7 @@ async fn legacy_read_only_store_does_not_bootstrap_or_adopt() {
             .await
             .unwrap(),
     );
-    let read_only_cfg = build_server_config(
+    let read_only_cfg = crate::host::requests::tests::build_server_config(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
@@ -668,7 +676,7 @@ async fn legacy_read_only_store_does_not_bootstrap_or_adopt() {
     .await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let error = handle_request(
+    let error = crate::host::requests::handle_request(
         "session/load",
         &json!({"sessionId":id}),
         &read_only_cfg,
@@ -734,9 +742,10 @@ async fn legacy_bootstrap_applies_request_declared_mcp_servers() {
         .unwrap()
         .join("legacy-servers");
     std::fs::create_dir(&cwd).unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
-    let (mut cfg, bridge) = make_server_config_with_bridge(
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "test", "model"),
+    );
+    let (mut cfg, bridge) = crate::host::requests::tests::make_server_config_with_bridge(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
@@ -805,9 +814,10 @@ async fn unverified_parent_child_session_fails_before_bootstrap() {
         .unwrap()
         .join("legacy-child");
     std::fs::create_dir(&cwd).unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
-    let (mut cfg, bridge) = make_server_config_with_bridge(
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "test", "model"),
+    );
+    let (mut cfg, bridge) = crate::host::requests::tests::make_server_config_with_bridge(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
@@ -835,7 +845,7 @@ async fn unverified_parent_child_session_fails_before_bootstrap() {
     let id = bridge.create_thread(meta).await.unwrap();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
-    let error = handle_request(
+    let error = crate::host::requests::handle_request(
         "session/load",
         &json!({"sessionId": id}),
         &cfg,
@@ -873,9 +883,10 @@ async fn legacy_child_session_inherits_the_verified_parent_binding() {
         .unwrap()
         .join("legacy-tree");
     std::fs::create_dir(&cwd).unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
-    let (mut cfg, bridge) = make_server_config_with_bridge(
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "test", "model"),
+    );
+    let (mut cfg, bridge) = crate::host::requests::tests::make_server_config_with_bridge(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
@@ -904,7 +915,7 @@ async fn legacy_child_session_inherits_the_verified_parent_binding() {
     let mut sessions = HashMap::new();
 
     // 父会话先接纳（无 frozen root 的重链路径）：绑定与 frozen 一次成立。
-    handle_request(
+    crate::host::requests::handle_request(
         "session/load",
         &json!({"sessionId": parent}),
         &cfg,
@@ -917,7 +928,7 @@ async fn legacy_child_session_inherits_the_verified_parent_binding() {
     let parent_frozen = bridge.load_frozen_snapshot(&parent).await.unwrap().unwrap();
 
     // 子会话接纳：没有自己的观测快照与内容读取，绑定与冻结输入都来自父会话。
-    handle_request(
+    crate::host::requests::handle_request(
         "session/load",
         &json!({"sessionId": child}),
         &cfg,

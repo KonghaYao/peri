@@ -1,6 +1,11 @@
 use std::io::BufRead;
+use std::io::{Read, Write};
 
-use super::*;
+use crate::model_auth::store::Store;
+use crate::model_auth::types::AuthError;
+use crate::model_auth::types::StoredAccount;
+use std::fs::OpenOptions;
+use tokio_util::sync::CancellationToken;
 
 #[cfg(unix)]
 #[test]
@@ -12,7 +17,7 @@ fn store_rejects_invalid_account_references_at_final_boundary() {
         "SYNTHETIC_account-42".to_owned(),
         "x".repeat(128),
     ] {
-        assert!(Store::new(root.clone(), account).is_ok());
+        assert!(Store::try_new(root.clone(), account).is_ok());
     }
     for account in [
         "".to_owned(),
@@ -28,12 +33,12 @@ fn store_rejects_invalid_account_references_at_final_boundary() {
         format!("{} ", "x".repeat(128)),
     ] {
         assert!(matches!(
-            Store::new(root.clone(), account),
+            Store::try_new(root.clone(), account),
             Err(AuthError::InvalidReference)
         ));
     }
     assert!(matches!(
-        Store::new("relative".into(), "work".into()),
+        Store::try_new("relative".into(), "work".into()),
         Err(AuthError::InvalidReference)
     ));
 }
@@ -41,7 +46,7 @@ fn store_rejects_invalid_account_references_at_final_boundary() {
 #[tokio::test]
 async fn account_named_host_has_independent_storage_and_persistent_host_id() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::new(dir.path().join("credentials"), "host".into()).unwrap();
+    let store = Store::try_new(dir.path().join("credentials"), "host".into()).unwrap();
     let cancellation = CancellationToken::new();
     let host_id = store.host_id(&cancellation).await.unwrap();
     let lease = store.lease(&cancellation).await.unwrap();
@@ -49,7 +54,7 @@ async fn account_named_host_has_independent_storage_and_persistent_host_id() {
     record.subject = Some("synthetic-subject".into());
     lease.save(record).await.unwrap();
     drop(lease);
-    let restarted = Store::new(dir.path().join("credentials"), "host".into()).unwrap();
+    let restarted = Store::try_new(dir.path().join("credentials"), "host".into()).unwrap();
     assert_eq!(restarted.host_id(&cancellation).await.unwrap(), host_id);
     let loaded = restarted
         .lease(&cancellation)
@@ -65,7 +70,7 @@ async fn account_named_host_has_independent_storage_and_persistent_host_id() {
 #[tokio::test]
 async fn waiting_for_refresh_owner_is_cancelable() {
     let dir = tempfile::tempdir().unwrap();
-    let first = Store::new(dir.path().join("credentials"), "one".into()).unwrap();
+    let first = Store::try_new(dir.path().join("credentials"), "one".into()).unwrap();
     let second = first.clone();
     let cancellation = CancellationToken::new();
     let _lease = first.lease(&CancellationToken::new()).await.unwrap();
@@ -79,13 +84,14 @@ async fn waiting_for_refresh_owner_is_cancelable() {
 #[cfg(unix)]
 #[tokio::test]
 async fn unsafe_permissions_and_symlink_records_fail_closed() {
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs;
+    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::new(dir.path().join("credentials"), "account".into()).unwrap();
+    let store = Store::try_new(dir.path().join("credentials"), "account".into()).unwrap();
     let lease = store.lease(&CancellationToken::new()).await.unwrap();
     let target = dir.path().join("target");
     std::fs::write(&target, b"{}").unwrap();
-    symlink(&target, &lease.path).unwrap();
+    fs::symlink(&target, &lease.path).unwrap();
     assert!(matches!(lease.read().await, Err(AuthError::Storage)));
     std::fs::remove_file(&lease.path).unwrap();
     std::fs::write(&lease.path, b"{}").unwrap();

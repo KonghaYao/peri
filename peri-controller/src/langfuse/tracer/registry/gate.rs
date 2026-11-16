@@ -4,7 +4,10 @@
 //! 也不持有 messages/tools 或请求体原文。逐出与拒绝都立即释放对应来源（permit 归还 /
 //! ticket 置取消位），因此缓存满不会让预算被静默占住（契约 §3.3）。
 
-use super::{GateEvent, IncompleteReason, SubagentRegistry, GATE_CACHE_LIMIT};
+use crate::langfuse::tracer::registry::types::GateEvent;
+use crate::langfuse::tracer::registry::types::IncompleteReason;
+use crate::langfuse::tracer::registry::SubagentRegistry;
+use crate::langfuse::tracer::registry::GATE_CACHE_LIMIT;
 
 impl SubagentRegistry {
     // ── 注册闸门(有界缓存 + 重放) ─────────────────────────────────────────────
@@ -54,7 +57,9 @@ impl SubagentRegistry {
         let mut i = 0;
         while i < self.gate_cache.len() {
             if self.gate_cache[i].0 == child_agent_id {
-                let (_, ev) = self.gate_cache.remove(i).unwrap();
+                let (_, ev) = self.gate_cache.remove(i).expect(
+                    "i is within the gate cache and no entry was removed since the bounds check",
+                );
                 taken.push(ev);
             } else {
                 i += 1;

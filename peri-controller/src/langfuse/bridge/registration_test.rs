@@ -1,4 +1,4 @@
-use super::LangfuseBridge;
+use crate::langfuse::bridge::LangfuseBridge;
 use crate::langfuse::config::LangfuseConfig;
 use crate::langfuse::fake_session::FakeLangfuseSession;
 use crate::langfuse::tracer::LangfuseTracer;

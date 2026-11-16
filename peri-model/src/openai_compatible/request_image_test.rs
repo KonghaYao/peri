@@ -1,4 +1,11 @@
-use super::*;
+use super::json;
+use super::ContentBlock;
+use super::ImageSource;
+use super::ModelMessage;
+use super::ModelRequest;
+use super::OpenAiConfig;
+use super::Url;
+use super::Value;
 use crate::{JsonObject, MediaType, ToolCall, ToolResult};
 
 fn image(data: &str) -> ContentBlock {
@@ -30,7 +37,7 @@ fn result(id: &str, content: Vec<ContentBlock>, is_error: bool) -> ModelMessage 
 }
 
 fn body(messages: Vec<ModelMessage>) -> Value {
-    body_for_test(
+    super::body_for_test(
         &OpenAiConfig::new(
             Url::parse("https://fixture.example/v1/").unwrap(),
             "fixture-key",
@@ -68,12 +75,16 @@ fn test_tool_images_follow_the_complete_parallel_result_batch() {
             .collect::<Vec<_>>(),
         ["assistant", "tool", "tool", "tool", "user"]
     );
-    for (index, id) in ["a", "b", "c"].iter().enumerate() {
-        assert_eq!(messages[index + 1]["tool_call_id"], *id);
-        assert!(
-            messages[index + 1]["content"].is_string(),
-            "tool 角色仅发送文本"
-        );
+    {
+        let payloads = ["a", "b", "c"];
+        let indexed_payloads = payloads.iter().enumerate();
+        for (index, id) in indexed_payloads {
+            assert_eq!(messages[index + 1]["tool_call_id"], *id);
+            assert!(
+                messages[index + 1]["content"].is_string(),
+                "tool 角色仅发送文本"
+            );
+        }
     }
     assert_eq!(messages[1]["content"], "first");
     assert_eq!(messages[2]["content"], "text only");

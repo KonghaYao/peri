@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 pub const CONFIGURATION_METHOD: &str = "config/execute";
 
+/// Operations executed by the scoped configuration service.
+/// Writes carry their own content and optional compare-and-swap expectation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum ConfigurationRequest {
@@ -38,6 +40,7 @@ pub enum ConfigurationRequest {
     },
 }
 
+/// Resolved settings paths; optional home and cwd can be unavailable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigurationPaths {
     pub home: Option<PathBuf>,
@@ -45,6 +48,7 @@ pub struct ConfigurationPaths {
     pub global_settings: PathBuf,
 }
 
+/// Typed outcomes of configuration reads, path queries, and writes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ConfigurationValue {
@@ -57,7 +61,8 @@ pub enum ConfigurationValue {
     Written,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Stable I/O failure categories transported without exposing an OS-specific error type.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationErrorKind {
     NotFound,
@@ -69,12 +74,15 @@ pub enum ConfigurationErrorKind {
     Other,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A configuration failure retaining its category and original diagnostic message.
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
+#[error("{message}")]
 pub struct ConfigurationFailure {
     pub kind: ConfigurationErrorKind,
     pub message: String,
 }
 
+/// The configuration operation result transported by `config/execute`.
 pub type ConfigurationResponse = Result<ConfigurationValue, ConfigurationFailure>;
 
 #[cfg(test)]

@@ -5,10 +5,11 @@ use super::auth::{AuthAction, AuthController};
 use super::auth_render;
 use super::edit_state::{LoginEditState, LoginField, ProviderKind};
 use super::edit_view::{self, EditViewMetrics};
-use ratatui_kit::ratatui::{
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-};
+use ratatui_kit::ratatui::style::Color;
+use ratatui_kit::ratatui::style::Modifier;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
 
 /// Edit 视图的鼠标语义目标。与行构造同一过程产生，绘制与命中不各自推导布局。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,7 @@ pub(super) struct EditLayout {
 }
 
 impl EditLayout {
+    #[must_use]
     pub(super) fn new() -> Self {
         Self {
             lines: Vec::new(),
@@ -79,8 +81,11 @@ impl EditLayout {
         lines: Vec<Line<'static>>,
         focused: bool,
     ) {
-        for (index, line) in lines.into_iter().enumerate() {
-            self.push_hit_flagged(line, EditHit::Field(field), focused && index == 0);
+        {
+            let iteration_items = lines.into_iter().enumerate();
+            for (index, line) in iteration_items {
+                self.push_hit_flagged(line, EditHit::Field(field), focused && index == 0);
+            }
         }
     }
 
@@ -181,6 +186,7 @@ pub(super) struct LoginRenderColors {
 
 impl LoginRenderColors {
     /// 从主题语义令牌派生；分区标题/警告/错误各自有独立角色。
+    #[must_use]
     pub(super) fn from_semantic(semantic: &peri_theme::semantic::SemanticTokens) -> Self {
         Self {
             cursor: semantic.status.warning,
@@ -194,6 +200,7 @@ impl LoginRenderColors {
     }
 
     /// 命中/行数推导只关心几何，颜色不参与。
+    #[must_use]
     pub(super) fn reset() -> Self {
         Self {
             cursor: Color::Reset,
@@ -210,6 +217,7 @@ impl LoginRenderColors {
         Style::default().fg(self.focus).add_modifier(Modifier::BOLD)
     }
 
+    #[must_use]
     pub(super) fn label(&self) -> Style {
         Style::default().fg(self.dim)
     }
@@ -581,15 +589,18 @@ pub(super) fn make_hint_line_for_login(
     accent: ratatui::style::Color,
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
-    for (i, (key, desc)) in items.into_iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled("  ", Style::default()));
+    {
+        let iteration_items = items.into_iter().enumerate();
+        for (i, (key, desc)) in iteration_items {
+            if i > 0 {
+                spans.push(Span::styled("  ", Style::default()));
+            }
+            spans.push(Span::styled(
+                key,
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(format!(" {}", desc), Style::default().fg(dim)));
         }
-        spans.push(Span::styled(
-            key,
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(format!(" {}", desc), Style::default().fg(dim)));
     }
     Line::from(spans)
 }

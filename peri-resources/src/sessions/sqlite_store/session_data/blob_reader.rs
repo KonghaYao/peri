@@ -4,6 +4,12 @@
 //! （及转义余量）相关，不随列总大小增长。JSON 信封结构与 payload 解码由
 //! `inherited_blob` 负责；这里只提供 I/O 与错误分类。
 //!
+//! 当前 SQLx 的安全 Row API 会物化所读列，连接 API 未封装 SQLite 的增量 BLOB 句柄，
+//! 因而这里使用 C API 按窗口读取。调用方 `inherited_blob::blob_scope` 在整个同步读取
+//! 期间持有 `LockedSqliteHandle`，并先销毁 BlobReader 再释放连接句柄。
+//! 内存收益与字节一致性由 `history_window_incremental_test.rs` 的
+//! `incremental_large_body_chunks_stay_bounded_and_exact` 回归测试覆盖。
+//!
 //! 错误分类决定调用方能否回退 SQL：`Unsupported`/`SQLITE_ERROR` 表示该值不可增量读取，
 //! `Transient` 表示并发写或 schema 变化使句柄失效、内容未损坏。
 

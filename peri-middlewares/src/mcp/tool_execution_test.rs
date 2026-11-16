@@ -1,4 +1,7 @@
-use super::*;
+use super::evidence;
+use super::BaseTool;
+use super::RawToolResult;
+use super::ToolExecutionStatus;
 struct Tool {
     builtin: bool,
     name: &'static str,
@@ -35,7 +38,7 @@ fn complete_response_requires_trusted_completion_contract_or_typed_evidence() {
         builtin: true,
         name: "Bash",
     };
-    assert!(complete(&bash, "done".into(), raw.clone())
+    assert!(super::complete(&bash, "done".into(), raw.clone())
         .unwrap()
         .execution
         .is_none());
@@ -44,7 +47,7 @@ fn complete_response_requires_trusted_completion_contract_or_typed_evidence() {
         name: "Read",
     };
     assert_eq!(
-        complete(&read, "started".into(), raw.clone())
+        super::complete(&read, "started".into(), raw.clone())
             .unwrap()
             .execution
             .unwrap()
@@ -53,7 +56,7 @@ fn complete_response_requires_trusted_completion_contract_or_typed_evidence() {
     );
     let mut value = raw.into_value();
     value["_meta"] = serde_json::json!({(peri_acp_types::tools::TOOL_EXECUTION_META_KEY): evidence(ToolExecutionStatus::Running, Some("task".into()))});
-    let output = complete(&bash, "done".into(), RawToolResult::new(value.clone())).unwrap();
+    let output = super::complete(&bash, "done".into(), RawToolResult::new(value.clone())).unwrap();
     assert_eq!(
         output.execution.unwrap().status,
         ToolExecutionStatus::Running
@@ -63,7 +66,7 @@ fn complete_response_requires_trusted_completion_contract_or_typed_evidence() {
         name: "Bash",
     };
     assert!(
-        complete(&external, "done".into(), RawToolResult::new(value))
+        super::complete(&external, "done".into(), RawToolResult::new(value))
             .unwrap()
             .execution
             .is_none()

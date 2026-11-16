@@ -81,7 +81,8 @@ pub struct ExposureLedger {
 impl ExposureLedger {
     pub(crate) fn confirm(&mut self, receipt: &RequestExposure) {
         self.confirm_closed(receipt.synchronous_terminal_calls.iter().cloned());
-        for &(id, digest) in receipt.members.iter().rev() {
+        let paired_items = receipt.members.iter().rev();
+        for &(id, digest) in paired_items {
             if self.messages.insert(id, digest).is_none() {
                 self.order.push_back(id);
             }

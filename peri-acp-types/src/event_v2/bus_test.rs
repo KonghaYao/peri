@@ -1,6 +1,15 @@
 //! 通道收发、饱和和 FIFO 契约。
-use super::*;
-use crate::{identity::AgentId, messages::MessageId, session::TurnId};
+use crate::event_v2::bus::BusHealthSnapshot;
+use crate::event_v2::bus::EmitOutcome;
+use crate::event_v2::bus::EventBus;
+use crate::event_v2::bus::EventBusConfig;
+use crate::event_v2::ObserveEvent;
+use crate::event_v2::RenderEvent;
+use crate::event_v2::StateEvent;
+use crate::identity::AgentId;
+use crate::messages::MessageId;
+use crate::session::TurnId;
+use std::sync::Arc;
 
 fn make_ids() -> (TurnId, AgentId) {
     (TurnId::new(), AgentId::new())

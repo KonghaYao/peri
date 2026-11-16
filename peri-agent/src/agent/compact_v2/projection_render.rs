@@ -10,10 +10,11 @@ use std::collections::{HashMap, HashSet};
 use crate::error::AgentResult;
 use crate::messages::{BaseMessage, ContentBlock, MessageContent, MessageId, ToolCallRequest};
 
-use super::{
-    effective_tool_result_action, head_tail_geometry, invalid, ProjectionAction,
-    ProjectionActionEntry, ProjectionTarget, ProviderCapabilities, ProviderProtocol,
-};
+use crate::agent::compact_v2::projection::ProviderCapabilities;
+use crate::agent::compact_v2::projection::ProviderProtocol;
+use peri_acp_types::projection::ProjectionAction;
+use peri_acp_types::projection::ProjectionActionEntry;
+use peri_acp_types::projection::ProjectionTarget;
 
 // ─── project_message_ref ──────────────────────────────────────────────────────
 
@@ -79,7 +80,9 @@ pub(super) fn project_message_ref(
         match action {
             RenderAction::Preview { action, suffix } => {
                 if !matches!(message, BaseMessage::Tool { .. }) {
-                    return Err(invalid("archive read preview requires standalone result"));
+                    return Err(crate::agent::compact_v2::projection::invalid(
+                        "archive read preview requires standalone result",
+                    ));
                 }
                 let content = project_tool_result_content_ref(draft.content(), action);
                 draft.set_content(content);
@@ -103,7 +106,9 @@ pub(super) fn project_message_ref(
             .iter()
             .any(|call| removed.contains(&call.id))
     {
-        return Err(invalid("provider replay unit cannot omit tool calls"));
+        return Err(crate::agent::compact_v2::projection::invalid(
+            "provider replay unit cannot omit tool calls",
+        ));
     }
     if !atomic_replay && !removed.is_empty() && draft.omit(removed, caps)? {
         return Ok(None);
@@ -113,7 +118,7 @@ pub(super) fn project_message_ref(
         && (projected.message_content() != message.message_content()
             || projected.tool_calls() != message.tool_calls())
     {
-        return Err(invalid(
+        return Err(crate::agent::compact_v2::projection::invalid(
             "provider replay unit cannot be partially projected",
         ));
     }
@@ -121,15 +126,15 @@ pub(super) fn project_message_ref(
 }
 
 /// Copy-on-write message body: fields stay borrowed until an action changes them.
-struct MessageDraft<'a> {
-    source: &'a BaseMessage,
+struct MessageDraft<'message> {
+    source: &'message BaseMessage,
     id: Option<MessageId>,
     content: Option<MessageContent>,
     tool_calls: Option<Vec<ToolCallRequest>>,
 }
 
-impl<'a> MessageDraft<'a> {
-    fn new(source: &'a BaseMessage) -> Self {
+impl<'message> MessageDraft<'message> {
+    fn new(source: &'message BaseMessage) -> Self {
         Self {
             source,
             id: None,
@@ -186,7 +191,8 @@ impl<'a> MessageDraft<'a> {
                 // Message 与 block 0 是同一逻辑 ToolResult 文本；重复或冲突时
                 // fail-closed，不执行任何投影。estimator 复用同一选择函数。
                 let content_action =
-                    effective_tool_result_action(entries).unwrap_or(&ProjectionAction::Keep);
+                    crate::agent::compact_v2::projection::effective_tool_result_action(entries)
+                        .unwrap_or(&ProjectionAction::Keep);
                 if matches!(content_action, ProjectionAction::CompactToolResult { .. }) {
                     let projected = project_tool_result_content_ref(self.content(), content_action);
                     self.set_content(projected);
@@ -230,11 +236,23 @@ impl<'a> MessageDraft<'a> {
                         *id = Some(receipt_id.as_uuid().to_string());
                         *content = vec![ContentBlock::Text { text }];
                     }
-                    _ => return Err(invalid("receipt target is not a tool result")),
+                    _ => {
+                        return Err(crate::agent::compact_v2::projection::invalid(
+                            "receipt target is not a tool result",
+                        ))
+                    }
                 },
-                _ => return Err(invalid("unsupported receipt target")),
+                _ => {
+                    return Err(crate::agent::compact_v2::projection::invalid(
+                        "unsupported receipt target",
+                    ))
+                }
             },
-            _ => return Err(invalid("unsupported receipt target")),
+            _ => {
+                return Err(crate::agent::compact_v2::projection::invalid(
+                    "unsupported receipt target",
+                ))
+            }
         }
         Ok(())
     }
@@ -251,7 +269,7 @@ impl<'a> MessageDraft<'a> {
                     text: suffix.into(),
                 }),
                 MessageContent::Raw(_) => {
-                    return Err(invalid(
+                    return Err(crate::agent::compact_v2::projection::invalid(
                         "cannot attach recovery handle to unknown raw content",
                     ))
                 }
@@ -266,11 +284,23 @@ impl<'a> MessageDraft<'a> {
                             text: suffix.into(),
                         })
                     }
-                    _ => return Err(invalid("recovery handle target is not a tool result")),
+                    _ => {
+                        return Err(crate::agent::compact_v2::projection::invalid(
+                            "recovery handle target is not a tool result",
+                        ))
+                    }
                 },
-                _ => return Err(invalid("unsupported recovery handle target")),
+                _ => {
+                    return Err(crate::agent::compact_v2::projection::invalid(
+                        "unsupported recovery handle target",
+                    ))
+                }
             },
-            _ => return Err(invalid("unsupported recovery handle target")),
+            _ => {
+                return Err(crate::agent::compact_v2::projection::invalid(
+                    "unsupported recovery handle target",
+                ))
+            }
         }
         Ok(())
     }
@@ -301,7 +331,11 @@ impl<'a> MessageDraft<'a> {
                 }
             }
             BaseMessage::Human { .. } => 0,
-            BaseMessage::System { .. } => return Err(invalid("cannot omit system data")),
+            BaseMessage::System { .. } => {
+                return Err(crate::agent::compact_v2::projection::invalid(
+                    "cannot omit system data",
+                ))
+            }
         };
 
         self.retain_content(removed, remaining_calls, caps)?;
@@ -399,7 +433,9 @@ fn validate_block_omission(
         .iter()
         .any(|block| matches!(block, ContentBlock::Unknown(_)))
     {
-        return Err(invalid("unknown protocol dependency"));
+        return Err(crate::agent::compact_v2::projection::invalid(
+            "unknown protocol dependency",
+        ));
     }
     let signed = blocks.iter().any(|block| {
         matches!(
@@ -411,7 +447,9 @@ fn validate_block_omission(
         )
     });
     if signed && (remaining_calls > 0 || caps.protocol == ProviderProtocol::Generic) {
-        return Err(invalid("signed reasoning closure cannot be split"));
+        return Err(crate::agent::compact_v2::projection::invalid(
+            "signed reasoning closure cannot be split",
+        ));
     }
     Ok(())
 }
@@ -434,7 +472,9 @@ fn validate_raw_omission(blocks: &[serde_json::Value]) -> AgentResult<()> {
             Some("text" | "tool_use" | "tool_result")
         )
     }) {
-        return Err(invalid("unrecognized raw protocol dependency"));
+        return Err(crate::agent::compact_v2::projection::invalid(
+            "unrecognized raw protocol dependency",
+        ));
     }
     Ok(())
 }
@@ -467,7 +507,7 @@ fn legacy_result_content(
         keep_head,
         keep_tail,
         ..
-    } = effective_tool_result_action(entries)?
+    } = crate::agent::compact_v2::projection::effective_tool_result_action(entries)?
     else {
         return None;
     };
@@ -487,11 +527,11 @@ fn legacy_result_content(
 /// 对 MessageContent 中的每个 ContentBlock 应用对应 action。
 ///
 /// 借用入口：没有命中 action 时返回 `Cow::Borrowed`，正文只在需要输出时复制一次。
-fn project_content_ref<'a>(
-    content: &'a MessageContent,
+fn project_content_ref<'message>(
+    content: &'message MessageContent,
     block_actions: &HashMap<usize, &ProjectionActionEntry>,
     caps: &ProviderCapabilities,
-) -> Cow<'a, MessageContent> {
+) -> Cow<'message, MessageContent> {
     if block_actions.is_empty() {
         return Cow::Borrowed(content);
     }
@@ -714,7 +754,8 @@ fn project_block(
 /// 仅当截断后的文本确实更短时返回 Some，避免省略标记使短文本膨胀。
 pub(super) fn apply_head_tail(text: &str, head_chars: usize, tail_chars: usize) -> Option<String> {
     let total: usize = text.chars().count();
-    let (_, projected) = head_tail_geometry(total, head_chars, tail_chars)?;
+    let (_, projected) =
+        crate::agent::compact_v2::projection::head_tail_geometry(total, head_chars, tail_chars)?;
 
     let head: String = text.chars().take(head_chars).collect();
     let tail: String = text

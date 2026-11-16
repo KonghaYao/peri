@@ -1,4 +1,16 @@
-use super::*;
+use super::ContentBlock;
+use super::MessageContent;
+use super::PendingAttachment;
+use super::SteerCommand;
+use super::SteerCommandKind;
+use super::SteerItemState;
+use super::SteerQueueAction;
+use super::SteerState;
+use super::UserInput;
+use super::UserInputQueueReceipt;
+use super::UserInputQueueSnapshot;
+use super::UserInputState;
+
 use peri_acp_types::session::{UserInputQueueItem, UserInputQueueTerminalItem};
 
 #[path = "steer_state_projection_test.rs"]
@@ -201,7 +213,7 @@ fn test_steer_takeback_waits_for_receipt_and_preserves_raw_draft() {
             taken_back: Some(make_input("a")),
         },
     );
-    let recovered = state.recover("s", 1, true).unwrap();
+    let recovered = state.recover("s", 1, true).expect("steer takeback waits for receipt and preserves raw draft: the recover fixture operation uses valid inputs");
     assert_eq!(
         recovered.original_draft, "  中文\n@image /tmp/test.png\n",
         "空白、多行和图片引用应原样返回"
@@ -267,7 +279,7 @@ fn test_steer_takeback_discard_keeps_rejected_enqueue_recoverable() {
     assert!(state.recover("s", 1, false).is_none());
     assert_eq!(state.pending_recovery_ids("s"), vec!["b"]);
     assert_eq!(
-        state.recover("s", 1, true).unwrap().input_id,
+        state.recover("s", 1, true).expect("steer takeback discard keeps rejected enqueue recoverable: the recover fixture operation uses valid inputs").input_id,
         "b",
         "提交失败仍须保留原稿"
     );
@@ -309,7 +321,7 @@ fn test_steer_rejected_enqueue_keeps_draft_for_safe_recovery() {
         "明确拒绝后保留完整原稿"
     );
     assert_eq!(
-        state.recover("s", 1, true).unwrap().input_id,
+        state.recover("s", 1, true).expect("steer rejected enqueue keeps draft for safe recovery: the recover fixture operation uses valid inputs").input_id,
         "b",
         "取回身份不得变换"
     );
@@ -333,8 +345,8 @@ fn test_steer_attachment_content_survives_roundtrip() {
         media_type: "image/png".to_owned(),
         base64_data: "AQID".to_owned(),
     }];
-    let content = content_with_attachments("  image\n", &attachments);
-    let recovered = attachments_from_content(&content);
+    let content = super::content_with_attachments("  image\n", &attachments);
+    let recovered = super::attachments_from_content(&content);
     assert_eq!(
         content.text_content(),
         "  image\n",
@@ -374,7 +386,7 @@ fn test_steer_confirmed_takeback_survives_session_reload() {
         "原会话重载后仍须能访问已确认取回的原稿"
     );
     assert_eq!(
-        state.recover("s", 3, true).unwrap().original_draft,
+        state.recover("s", 3, true).expect("steer confirmed takeback survives session reload: the recover fixture operation uses valid inputs").original_draft,
         make_input("a").original_draft,
         "已从服务端移除的原稿不能被旧 epoch 过滤丢失"
     );
@@ -402,7 +414,7 @@ fn test_steer_takeback_receipt_after_reload_remains_recoverable() {
     );
     assert!(state.snapshot("s", 2).is_none(), "旧快照仍不能跨重载绑定");
     assert_eq!(
-        state.recover("s", 2, true).unwrap().input_id,
+        state.recover("s", 2, true).expect("steer takeback receipt after reload remains recoverable: the recover fixture operation uses valid inputs").input_id,
         "a",
         "确定取回的原稿归属原会话并继续可恢复"
     );
@@ -435,12 +447,12 @@ fn test_steer_late_takeback_after_instance_change_recovers_without_replacing_sna
         },
     );
 
-    let current = state.snapshot("s", 2).unwrap();
+    let current = state.snapshot("s", 2).expect("steer late takeback after instance change recovers without replacing snapshot: the snapshot fixture operation uses valid inputs");
     assert_eq!(current.generation, snapshot.generation);
     assert_eq!(current.revision, snapshot.revision);
     assert!(current.items.is_empty());
     assert!(state.pending_command("s", &command.command_id).is_none());
-    assert_eq!(state.recover("s", 2, true).unwrap().input_id, "a");
+    assert_eq!(state.recover("s", 2, true).expect("steer late takeback after instance change recovers without replacing snapshot: the recover fixture operation uses valid inputs").input_id, "a");
     assert!(state.recover("s", 2, true).is_none());
 }
 
@@ -514,7 +526,10 @@ fn test_steer_idle_submission_skips_queue_until_delivery() {
 fn input_with_attachment(id: &str, draft: &str) -> UserInput {
     UserInput {
         input_id: id.to_owned(),
-        content: content_with_attachments(draft, &[PendingAttachment::image("image/png", "AQID")]),
+        content: super::content_with_attachments(
+            draft,
+            &[PendingAttachment::image("image/png", "AQID")],
+        ),
         original_draft: draft.to_owned(),
     }
 }
@@ -544,7 +559,7 @@ fn fatal_execution_failure_restores_unsent_input_as_draft() {
         vec![input.input_id.clone()],
         "已恢复草稿等待回填输入框"
     );
-    assert!(state.sessions.get("s").unwrap().unsettled.is_empty());
+    assert!(state.sessions.get("s").expect("fatal execution failure restores unsent input as draft: the fixture collection must contain the expected entry").unsettled.is_empty());
 
     let recovered = state.recover("s", 1, true).expect("未发出的输入必须可恢复");
     assert_eq!(recovered.input_id, input.input_id);
@@ -567,7 +582,7 @@ fn fatal_execution_failure_keeps_unknown_input_full_request_visible() {
     assert_eq!(report.uncertain[0].original_draft, input.original_draft);
     assert_eq!(report.uncertain[0].content.content_blocks().len(), 2);
 
-    let session = state.sessions.get("s").unwrap();
+    let session = state.sessions.get("s").expect("fatal execution failure keeps unknown input full request visible: fixture must contain the requested entry");
     assert!(session.pending.is_empty(), "命令身份转入未知账本");
     assert_eq!(session.unsettled.len(), 1);
     assert_eq!(session.unsettled[0].command_id, command.command_id);
@@ -593,7 +608,7 @@ fn fatal_execution_failure_keeps_unknown_input_full_request_visible() {
 #[test]
 fn fatal_failure_keeps_concurrent_submission_with_attachment_and_dedupes_delivery() {
     let mut state = make_state();
-    let mut running = state.snapshot("s", 1).unwrap().clone();
+    let mut running = state.snapshot("s", 1).expect("fatal failure keeps concurrent submission with attachment and dedupes delivery: the snapshot fixture operation uses valid inputs").clone();
     running.revision += 1;
     running.active_request_id = Some("run".into());
     state.accept_snapshot(running, 1, false);
@@ -618,7 +633,7 @@ fn fatal_failure_keeps_concurrent_submission_with_attachment_and_dedupes_deliver
         .rows("s")
         .into_iter()
         .find(|row| row.id == "b")
-        .unwrap();
+        .expect("fatal failure keeps concurrent submission with attachment and dedupes delivery: fixture must contain the searched item");
     assert_eq!(b_row.state, SteerItemState::Uncertain);
     assert_eq!(b_row.text, b.original_draft);
     assert!(
@@ -661,9 +676,9 @@ fn fatal_execution_failure_never_turns_missing_snapshot_into_delivery() {
     snapshot.items.clear();
     state.accept_snapshot(snapshot, 1, true);
 
-    assert_eq!(state.sessions.get("s").unwrap().unsettled.len(), 1);
+    assert_eq!(state.sessions.get("s").expect("fatal execution failure never turns missing snapshot into delivery: the fixture collection must contain the expected entry").unsettled.len(), 1);
     assert_eq!(state.rows("s")[0].state, SteerItemState::Uncertain);
-    let session = state.sessions.get("s").unwrap();
+    let session = state.sessions.get("s").expect("fatal execution failure never turns missing snapshot into delivery: fixture must contain the requested entry");
     assert!(!session.delivered.contains(&input.input_id));
     assert!(!state.pending_recovery_ids("s").contains(&input.input_id));
 }
@@ -684,13 +699,13 @@ fn terminal_delivered_reconciles_uncertain_input_without_synthesizing_bubble() {
     }];
     state.accept_snapshot(terminal, 1, true);
 
-    assert!(state.sessions.get("s").unwrap().unsettled.is_empty());
+    assert!(state.sessions.get("s").expect("terminal delivered reconciles uncertain input without synthesizing bubble: the fixture collection must contain the expected entry").unsettled.is_empty());
     assert!(state.rows("s").is_empty());
     assert!(
         !state
             .sessions
             .get("s")
-            .unwrap()
+            .expect("terminal delivered reconciles uncertain input without synthesizing bubble: the fixture collection must contain the expected entry")
             .delivered
             .contains(&input.input_id),
         "终态快照不得伪造气泡"
@@ -713,12 +728,12 @@ fn terminal_withdrawn_clears_uncertain_input_as_not_executed() {
     }];
     state.accept_snapshot(terminal, 1, true);
 
-    assert!(state.sessions.get("s").unwrap().unsettled.is_empty());
+    assert!(state.sessions.get("s").expect("terminal withdrawn clears uncertain input as not executed: the fixture collection must contain the expected entry").unsettled.is_empty());
     assert!(
         !state
             .sessions
             .get("s")
-            .unwrap()
+            .expect("terminal withdrawn clears uncertain input as not executed: the fixture collection must contain the expected entry")
             .delivered
             .contains(&input.input_id)
     );
@@ -737,7 +752,7 @@ fn session_reset_preserves_uncertain_input() {
     snapshot.items.clear();
     state.accept_snapshot(snapshot, 2, true);
 
-    assert_eq!(state.sessions.get("s").unwrap().unsettled.len(), 1);
+    assert_eq!(state.sessions.get("s").expect("session reset preserves uncertain input: the fixture collection must contain the expected entry").unsettled.len(), 1);
     let row = state
         .rows("s")
         .into_iter()
@@ -812,15 +827,15 @@ fn definite_reject_after_fatal_failure_upgrades_unknown_to_recoverable_draft() {
 
     state.reject(&command, false);
     assert_eq!(
-        state.sessions.get("s").unwrap().unsettled.len(),
+        state.sessions.get("s").expect("definite reject after fatal failure upgrades unknown to recoverable draft: the fixture collection must contain the expected entry").unsettled.len(),
         1,
         "未知回执不得清除未知账本"
     );
 
     state.reject(&command, true);
-    assert!(state.sessions.get("s").unwrap().unsettled.is_empty());
-    assert_eq!(state.sessions.get("s").unwrap().recovered.len(), 1);
-    let recovered = state.recover("s", 1, true).unwrap();
+    assert!(state.sessions.get("s").expect("definite reject after fatal failure upgrades unknown to recoverable draft: the fixture collection must contain the expected entry").unsettled.is_empty());
+    assert_eq!(state.sessions.get("s").expect("definite reject after fatal failure upgrades unknown to recoverable draft: the fixture collection must contain the expected entry").recovered.len(), 1);
+    let recovered = state.recover("s", 1, true).expect("definite reject after fatal failure upgrades unknown to recoverable draft: the recover fixture operation uses valid inputs");
     assert_eq!(recovered.input_id, input.input_id);
     assert_eq!(recovered.content.content_blocks().len(), 2);
 }
@@ -834,11 +849,11 @@ fn definite_reject_after_not_sent_fatal_settlement_does_not_duplicate_draft() {
     command.generation = None;
     state.begin(command.clone());
     state.fail_session_submissions("s");
-    assert_eq!(state.sessions.get("s").unwrap().recovered.len(), 1);
+    assert_eq!(state.sessions.get("s").expect("definite reject after not sent fatal settlement does not duplicate draft: the fixture collection must contain the expected entry").recovered.len(), 1);
 
     state.reject(&command, true);
     assert_eq!(
-        state.sessions.get("s").unwrap().recovered.len(),
+        state.sessions.get("s").expect("definite reject after not sent fatal settlement does not duplicate draft: the fixture collection must contain the expected entry").recovered.len(),
         1,
         "同一 input_id 只能有一份恢复稿"
     );
@@ -846,7 +861,7 @@ fn definite_reject_after_not_sent_fatal_settlement_does_not_duplicate_draft() {
         state.pending_recovery_ids("s"),
         vec![input.input_id.clone()]
     );
-    let recovered = state.recover("s", 1, true).unwrap();
+    let recovered = state.recover("s", 1, true).expect("definite reject after not sent fatal settlement does not duplicate draft: the recover fixture operation uses valid inputs");
     assert_eq!(recovered.input_id, input.input_id);
     assert!(state.recover("s", 1, true).is_none(), "不得恢复第二份草稿");
 }
@@ -869,7 +884,7 @@ fn test_steer_terminal_delivered_snapshot_does_not_synthesize_a_bubble() {
 
     assert!(!state.direct_submitting("s", 1), "终态必须撤掉提交中");
     assert!(state.rows("s").is_empty(), "终态不应继续留在待发送区");
-    let session = state.sessions.get("s").unwrap();
+    let session = state.sessions.get("s").expect("steer terminal delivered snapshot does not synthesize a bubble: fixture must contain the requested entry");
     assert!(
         !session.delivered.contains(&input.input_id),
         "终态快照不得伪造 Delivered；气泡由事件泵按序推送"
@@ -897,7 +912,7 @@ fn test_steer_terminal_withdrawn_snapshot_clears_submission_without_delivery() {
     assert!(state.accept_snapshot(terminal, 1, true));
 
     assert!(!state.direct_submitting("s", 1));
-    let session = state.sessions.get("s").unwrap();
+    let session = state.sessions.get("s").expect("steer terminal withdrawn snapshot clears submission without delivery: fixture must contain the requested entry");
     assert!(
         !session.delivered.contains(&input.input_id),
         "撤回不能触发交付确认"
@@ -924,13 +939,13 @@ fn test_steer_missing_input_does_not_assume_delivery() {
 #[test]
 fn test_attachment_only_content_has_no_empty_text_block() {
     let attachments = vec![PendingAttachment::image("image/png", "AQID")];
-    let content = content_with_attachments("", &attachments);
+    let content = super::content_with_attachments("", &attachments);
 
     let blocks = content.content_blocks();
     assert_eq!(blocks.len(), 1, "空文本不得产出 text 块: {blocks:?}");
     assert!(matches!(blocks[0], ContentBlock::Image { .. }));
     assert_eq!(
-        attachments_from_content(&content)[0].base64_data,
+        super::attachments_from_content(&content)[0].base64_data,
         "AQID",
         "附件数据须完整可恢复"
     );
@@ -939,7 +954,7 @@ fn test_attachment_only_content_has_no_empty_text_block() {
 /// 无附件时 content 形态与旧路径逐字一致（纯文本，不是单元素 block 数组）。
 #[test]
 fn test_content_without_attachments_stays_plain_text() {
-    let content = content_with_attachments("hello", &[]);
+    let content = super::content_with_attachments("hello", &[]);
     assert_eq!(content, MessageContent::text("hello"));
 }
 
@@ -950,10 +965,10 @@ fn test_attachment_displays_from_content_matches_submit_path() {
         PendingAttachment::image("image/png", "AQID"),
         PendingAttachment::image("image/png", "AQI="),
     ];
-    let content = content_with_attachments("两张图", &attachments);
+    let content = super::content_with_attachments("两张图", &attachments);
 
-    let from_submit = attachment_displays(&attachments);
-    let from_content = attachment_displays_from_content(&content);
+    let from_submit = super::attachment_displays(&attachments);
+    let from_content = super::attachment_displays_from_content(&content);
     assert_eq!(from_submit, from_content, "两条路径的展示记录必须一致");
     assert_eq!(
         from_submit.iter().map(|a| a.bytes).collect::<Vec<_>>(),
@@ -962,6 +977,6 @@ fn test_attachment_displays_from_content_matches_submit_path() {
     );
 
     // 纯文本内容没有附件记录。
-    assert!(attachment_displays_from_content(&MessageContent::text("hello")).is_empty());
-    assert!(attachment_displays(&[]).is_empty());
+    assert!(super::attachment_displays_from_content(&MessageContent::text("hello")).is_empty());
+    assert!(super::attachment_displays(&[]).is_empty());
 }

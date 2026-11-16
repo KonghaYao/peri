@@ -1,4 +1,8 @@
-use super::*;
+use crate::host::mcp_v4_wave2::FixtureDirs;
+use serde_json::json;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// wave 3 遗留任务 U5 的补验。原判定「第二个 session 的注入会得 `AlreadyInjected`」
 /// 在 **1:N 形态**（`session_resources = true` 的会话环境装配面，可作 server root）下
@@ -32,7 +36,7 @@ async fn wave3_one_to_n_root_never_injects_per_session_workspace_input() {
     // 宿主不可见——A33）。
     let root_manager: Arc<dyn peri_acp_types::tasks::TaskManager> =
         Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
-    let cfg = assemble_host_with_workspace_input(
+    let cfg = crate::host::mcp_v4_wave2::assemble_host_with_workspace_input(
         &dirs,
         false,
         Some(peri_mcp_workspace::WorkspaceInstanceInput {
@@ -57,7 +61,8 @@ async fn wave3_one_to_n_root_never_injects_per_session_workspace_input() {
     let first_cwd = dirs.workspace.clone();
     let second_cwd = dirs.second_workspace();
     let cwds = [&first_cwd, &second_cwd];
-    for (index, cwd) in cwds.iter().enumerate() {
+    let enumerated_cwd = cwds.iter().enumerate();
+    for (index, cwd) in enumerated_cwd {
         let cwd = cwd.to_string_lossy().into_owned();
         let assembled = crate::host::workspace::SessionEnvironment::assemble(
             &cfg,
@@ -79,7 +84,7 @@ async fn wave3_one_to_n_root_never_injects_per_session_workspace_input() {
 
     // ③ 跨 session 单一部署单元：两个不同 cwd 的 session 都成功、都不报错。
     let mut sessions = HashMap::new();
-    let transport = idle_transport();
+    let transport = crate::host::mcp_v4_wave2::idle_transport();
     let mut created = Vec::new();
     for cwd in cwds {
         let response = crate::host::requests::handle_request(

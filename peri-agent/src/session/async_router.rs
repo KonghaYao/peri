@@ -26,9 +26,8 @@ use peri_acp_types::system_reminder::{
 use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::workflow::{PhaseSummary, WorkflowTaskResult};
 use serde_json::json;
+use std::fmt::{self, Debug, Formatter};
 use tracing::debug;
-
-use crate::session::producer_reminders::{trusted_reminder, try_trusted_reminder};
 
 /// Shared projection for inbox routing and the queue-only executor path.
 pub(crate) fn background_result_reminder(
@@ -36,7 +35,7 @@ pub(crate) fn background_result_reminder(
     kind: BgTaskKind,
 ) -> TrustedSystemReminder {
     let reminder_source = kind.reminder_source();
-    try_trusted_reminder(
+    crate::session::producer_reminders::try_trusted_reminder(
         ReminderCategory::Task,
         reminder_source,
         if result.success {
@@ -75,7 +74,7 @@ pub(crate) fn background_result_reminder(
         // bounded identity and execution facts; registry still receives
         // the original result, independently of notification delivery.
         let task_id: String = result.task_id.chars().take(80).collect();
-        trusted_reminder(
+        crate::session::producer_reminders::trusted_reminder(
             ReminderCategory::Task,
             reminder_source,
             "notification_failed",
@@ -100,6 +99,7 @@ pub struct AsyncRouter {
 }
 
 impl AsyncRouter {
+    #[must_use]
     pub fn for_queue(queue: &MessageQueue) -> Self {
         Self::new(SessionInbox::new(std::sync::Arc::new(queue.clone())).handle())
     }
@@ -108,6 +108,7 @@ impl AsyncRouter {
     ///
     /// The handle is typically obtained from `SessionInbox::handle()` during
     /// session initialization.
+    #[must_use]
     pub fn new(inbox: InboxHandle) -> Self {
         Self { inbox }
     }
@@ -306,7 +307,7 @@ impl AsyncRouter {
             "killed" => "cancelled",
             _ => "failed",
         };
-        let reminder = trusted_reminder(
+        let reminder = crate::session::producer_reminders::trusted_reminder(
             ReminderCategory::Task,
             "workflow",
             kind,
@@ -339,8 +340,8 @@ impl AsyncRouter {
     }
 }
 
-impl std::fmt::Debug for AsyncRouter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for AsyncRouter {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("AsyncRouter").finish()
     }
 }

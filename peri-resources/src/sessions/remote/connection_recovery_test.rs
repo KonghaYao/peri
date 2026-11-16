@@ -23,9 +23,9 @@ use peri_acp_types::session_resources::{BindingState, SessionResourceErrorKind};
 use peri_acp_types::thread::ThreadId;
 
 use super::mutation::StoreAccess;
-use super::recovery_fixture_tests::{
-    abandon_read, abandon_write, ledger_sql, Hang, Harness, ABANDON_AFTER,
-};
+use super::recovery_fixture_tests::Hang;
+use super::recovery_fixture_tests::Harness;
+use super::recovery_fixture_tests::ABANDON_AFTER;
 use super::schema;
 use crate::sessions::data::SessionDataPort;
 
@@ -38,7 +38,7 @@ async fn an_abandoned_read_is_answered_correctly_on_the_same_instance() {
 
     // 远端没有这个会话：正确答案是 NotFound，不是「连接不可用」。
     harness.backend.session_row.store(false, Ordering::SeqCst);
-    abandon_read(&harness, &id).await;
+    super::recovery_fixture_tests::abandon_read(&harness, &id).await;
     assert_eq!(
         harness.backend.connections(),
         1,
@@ -62,7 +62,7 @@ async fn an_abandoned_read_is_answered_correctly_on_the_same_instance() {
 
     // 远端有这个会话：正确答案是它真实的分类（没有绑定行的既有会话）。
     harness.backend.session_row.store(true, Ordering::SeqCst);
-    abandon_read(&harness, &id).await;
+    super::recovery_fixture_tests::abandon_read(&harness, &id).await;
     let state = harness
         .adapter
         .load_binding(&id)
@@ -82,7 +82,7 @@ async fn an_abandoned_write_that_never_committed_is_not_re_sent() {
 
     // 批到达远端但没有提交（结果未知）：被丢弃的是**写**。后续访问只重建那条连接，
     // 没有任何一层会替调用方重发这条无法证明终态的写。
-    abandon_write(&harness, &id, false).await;
+    super::recovery_fixture_tests::abandon_write(&harness, &id, false).await;
 
     let state = harness
         .adapter
@@ -96,7 +96,7 @@ async fn an_abandoned_write_that_never_committed_is_not_re_sent() {
         "the abandoned batch never applied"
     );
 
-    let sql = ledger_sql();
+    let sql = super::recovery_fixture_tests::ledger_sql();
     let log = harness.backend.issued();
     let qualification = log
         .iter()
@@ -117,7 +117,7 @@ async fn an_abandoned_write_that_committed_is_not_re_sent() {
     harness.backend.session_row.store(true, Ordering::SeqCst);
 
     // 批真的提交了、响应丢失：后续访问重建连接，但那份已经落下的效果**不再发一次**。
-    abandon_write(&harness, &id, true).await;
+    super::recovery_fixture_tests::abandon_write(&harness, &id, true).await;
 
     let state = harness
         .adapter
@@ -126,7 +126,7 @@ async fn an_abandoned_write_that_committed_is_not_re_sent() {
         .expect("the next access rebuilds the connection and answers");
     assert!(matches!(state, BindingState::Missing));
 
-    let sql = ledger_sql();
+    let sql = super::recovery_fixture_tests::ledger_sql();
     let log = harness.backend.issued();
     let qualification = log
         .iter()
@@ -148,7 +148,7 @@ async fn a_late_invalidation_leaves_the_new_connection_alone() {
     let harness = Harness::open(StoreAccess::ReadWrite).await;
     let id: ThreadId = "session-under-test".to_owned();
     harness.backend.session_row.store(true, Ordering::SeqCst);
-    abandon_read(&harness, &id).await;
+    super::recovery_fixture_tests::abandon_read(&harness, &id).await;
     harness
         .adapter
         .load_binding(&id)
@@ -187,7 +187,7 @@ async fn a_stale_invalidation_does_not_revive_an_invalidated_connection() {
     harness.backend.session_row.store(true, Ordering::SeqCst);
 
     // 第 1 代被放弃（失效）→ 下一次访问重建出第 2 代并正常服务。
-    abandon_read(&harness, &id).await;
+    super::recovery_fixture_tests::abandon_read(&harness, &id).await;
     harness
         .adapter
         .load_binding(&id)
@@ -196,7 +196,7 @@ async fn a_stale_invalidation_does_not_revive_an_invalidated_connection() {
     assert_eq!(harness.backend.connections(), 2);
 
     // 第 2 代也被放弃：这一代的失效事实落下。
-    abandon_read(&harness, &id).await;
+    super::recovery_fixture_tests::abandon_read(&harness, &id).await;
 
     // 迟到的第 1 代失效（同一份旧守卫在更晚的时刻被丢弃）不能撤销第 2 代的失效事实。
     let late = harness.gate.lease(1);
@@ -233,7 +233,7 @@ async fn a_failed_replacement_does_not_retire_the_connection_that_took_over() {
     harness.backend.session_row.store(true, Ordering::SeqCst);
 
     // 第 1 代失效；随后一次重建在**重核实**阶段被丢弃：替换连接没有装回槽位。
-    abandon_read(&harness, &id).await;
+    super::recovery_fixture_tests::abandon_read(&harness, &id).await;
     harness.backend.hang_next(Hang::Read);
     let abandoned = tokio::time::timeout(ABANDON_AFTER, harness.adapter.load_binding(&id)).await;
     assert!(
@@ -284,7 +284,7 @@ async fn concurrent_rebuilds_install_exactly_one_connection_and_keep_it_healthy(
     let harness = Harness::open(StoreAccess::ReadWrite).await;
     let id: ThreadId = "session-under-test".to_owned();
     harness.backend.session_row.store(true, Ordering::SeqCst);
-    abandon_read(&harness, &id).await;
+    super::recovery_fixture_tests::abandon_read(&harness, &id).await;
 
     // 挂起下一次读取，让两个重建尝试真正交叠：先到者挂在重核实里（它的替换连接不会装槽），
     // 后到者建立自己的连接并装进槽位。
@@ -326,7 +326,7 @@ async fn a_read_only_reconnect_writes_nothing() {
     let harness = Harness::open(StoreAccess::ReadOnly).await;
     let id: ThreadId = "session-under-test".to_owned();
     harness.backend.session_row.store(true, Ordering::SeqCst);
-    abandon_read(&harness, &id).await;
+    super::recovery_fixture_tests::abandon_read(&harness, &id).await;
     let state = harness
         .adapter
         .load_binding(&id)
@@ -335,7 +335,7 @@ async fn a_read_only_reconnect_writes_nothing() {
     assert!(matches!(state, BindingState::Missing));
     assert_eq!(harness.backend.connections(), 2);
 
-    let sql = ledger_sql();
+    let sql = super::recovery_fixture_tests::ledger_sql();
     let log = harness.backend.issued();
     assert!(
         log.iter().all(|(_, sql_text, _)| *sql_text != sql.qualify
@@ -362,7 +362,7 @@ async fn a_generation_retired_before_the_guard_is_taken_fails_without_sending() 
 
     // 第 1 代被放弃（失效）→ 下一次访问会重建。让重建连接的**重核实读取**顺手把新铸的那一代
     // 记为失效：这就是那个空窗（另一条在途调用在同一刻被放弃，落下同一个事实）。
-    abandon_read(&harness, &id).await;
+    super::recovery_fixture_tests::abandon_read(&harness, &id).await;
     harness.backend.retire_generation_on_next_read(2);
 
     let refused = harness

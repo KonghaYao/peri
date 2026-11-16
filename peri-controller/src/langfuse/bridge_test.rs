@@ -27,7 +27,7 @@ use peri_agent::agent::events_v2::{ObserveEvent, RenderEvent};
 use peri_agent::agent::LangfuseBridgeLike;
 use peri_agent::session::turn::TurnId;
 
-use super::*;
+use crate::langfuse::bridge::LangfuseBridge;
 use crate::langfuse::config::LangfuseConfig;
 use crate::langfuse::fake_session::FakeLangfuseSession;
 use crate::langfuse::tracer::LangfuseTracer;

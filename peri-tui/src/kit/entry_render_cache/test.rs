@@ -1,5 +1,14 @@
-use super::*;
-use crate::kit::acp_bridge::{perf_counters, reset_perf_counters};
+use super::Arc;
+use super::EntryInvalidation;
+use super::EntryRenderCache;
+use super::EntryRenderContext;
+use super::EntrySurface;
+use super::GridSpec;
+use super::Line;
+use super::MarkdownLineCache;
+use super::TuiRenderUnit;
+use super::ZoneTransition;
+
 use crate::kit::message_area::grid::TextLineSource;
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldState, TuiAssistantBubble, TuiNoteLevel, TuiReasoningBlock, TuiSystemNote,
@@ -47,14 +56,17 @@ fn unchanged_entry_has_no_parse_or_wrap_work() {
         EntryInvalidation::Content
     );
     let lines = Arc::clone(cache.lines());
-    reset_perf_counters();
+    crate::kit::acp_bridge::reset_perf_counters();
     assert_eq!(
         cache.ensure(&vm, &grid, context, 100, ZoneTransition::None),
         EntryInvalidation::None
     );
     assert!(Arc::ptr_eq(&lines, cache.lines()));
-    assert_eq!(perf_counters().full_parses, 0);
-    assert_eq!(perf_counters().wrap_recalculated_lines, 0);
+    assert_eq!(crate::kit::acp_bridge::perf_counters().full_parses, 0);
+    assert_eq!(
+        crate::kit::acp_bridge::perf_counters().wrap_recalculated_lines,
+        0
+    );
 }
 
 #[test]
@@ -229,14 +241,17 @@ fn reasoning_animation_only_refreshes_header_without_markdown_or_wrap() {
     let grid = GridSpec::with_content(60);
     cache.ensure(&vm, &grid, context.clone(), 0, ZoneTransition::None);
     let body = cache.lines()[1..].to_vec();
-    reset_perf_counters();
+    crate::kit::acp_bridge::reset_perf_counters();
     assert_eq!(
         cache.ensure(&vm, &grid, context, 10, ZoneTransition::None),
         EntryInvalidation::Animation
     );
     assert_eq!(&cache.lines()[1..], body.as_slice());
-    assert_eq!(perf_counters().full_parses, 0);
-    assert_eq!(perf_counters().wrap_recalculated_lines, 0);
+    assert_eq!(crate::kit::acp_bridge::perf_counters().full_parses, 0);
+    assert_eq!(
+        crate::kit::acp_bridge::perf_counters().wrap_recalculated_lines,
+        0
+    );
 }
 
 #[test]
@@ -260,7 +275,10 @@ fn stable_chunks_use_visible_line_access_and_resize_reuses_parsed_blocks() {
     );
     let parsed = cache.markdown.stable_parsed_blocks();
     assert!(parsed > 0);
-    let start = cache.markdown_lines.stable_start.unwrap();
+    let start = cache
+        .markdown_lines
+        .stable_start
+        .expect("preparing stable markdown records its overlay start");
     assert_eq!(
         cache.line(start),
         cache.markdown_lines.stable[0].lines.first()
@@ -309,6 +327,6 @@ fn test_stable_markdown_wrap_uses_requested_viewport_width() {
     let mut cache = MarkdownLineCache::default();
     cache.retain_and_wrap(80, vec![(1, lines.clone())]);
     cache.stable_start = Some(0);
-    let expected = build_wrap_map(&lines, 25);
+    let expected = super::build_wrap_map(&lines, 25);
     assert_eq!(cache.build_slot_wrap_map(&[Line::default()], 25), expected);
 }

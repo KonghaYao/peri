@@ -93,44 +93,50 @@ impl CurrentTurn {
         let mut bytes: usize = self.subagents.iter().map(|s| s.preview_reserved()).sum();
         // Prefer stopped previews, then older running previews. This never changes execution.
         for running in [false, true] {
-            for child in self
-                .subagents
-                .iter_mut()
-                .filter(|s| s.is_running == running)
             {
-                if bytes <= STORE_BYTES {
-                    break;
+                let iteration_items = self
+                    .subagents
+                    .iter_mut()
+                    .filter(|s| s.is_running == running);
+                for child in iteration_items {
+                    if bytes <= STORE_BYTES {
+                        break;
+                    }
+                    let before = child.preview_reserved();
+                    child.release_preview();
+                    bytes = bytes
+                        .saturating_sub(before)
+                        .saturating_add(child.preview_reserved());
+                    changed = true;
                 }
-                let before = child.preview_reserved();
-                child.release_preview();
-                bytes = bytes
-                    .saturating_sub(before)
-                    .saturating_add(child.preview_reserved());
-                changed = true;
             }
         }
         let mut keep = vec![true; self.subagents.len()];
         let (mut count, mut terminal_bytes) = (0usize, 0usize);
-        for (index, child) in self.subagents.iter().enumerate().rev() {
-            if child.is_running {
-                continue;
-            }
-            let size = std::mem::size_of_val(child)
-                + child.instance_id.capacity()
-                + child.agent_id.capacity()
-                + child.agent_name.capacity()
-                + child
-                    .execution
-                    .as_ref()
-                    .map_or(0, |execution| execution.attempt_id.as_str().len())
-                + child.error_reason.as_ref().map_or(0, String::capacity)
-                + child.preview_reserved();
-            if count >= TERMINAL_ENTRIES || terminal_bytes.saturating_add(size) > TERMINAL_BYTES {
-                keep[index] = false;
-                changed = true;
-            } else {
-                count += 1;
-                terminal_bytes += size;
+        {
+            let iteration_items = self.subagents.iter().enumerate().rev();
+            for (index, child) in iteration_items {
+                if child.is_running {
+                    continue;
+                }
+                let size = std::mem::size_of_val(child)
+                    + child.instance_id.capacity()
+                    + child.agent_id.capacity()
+                    + child.agent_name.capacity()
+                    + child
+                        .execution
+                        .as_ref()
+                        .map_or(0, |execution| execution.attempt_id.as_str().len())
+                    + child.error_reason.as_ref().map_or(0, String::capacity)
+                    + child.preview_reserved();
+                if count >= TERMINAL_ENTRIES || terminal_bytes.saturating_add(size) > TERMINAL_BYTES
+                {
+                    keep[index] = false;
+                    changed = true;
+                } else {
+                    count += 1;
+                    terminal_bytes += size;
+                }
             }
         }
         retired.extend(self.retain_subagent_previews(&keep));
@@ -170,12 +176,15 @@ impl CurrentTurn {
         let old = std::mem::take(&mut self.subagents);
         let mut remap = vec![None; old.len()];
         let mut retired = Vec::new();
-        for (index, child) in old.into_iter().enumerate() {
-            if keep[index] {
-                remap[index] = Some(self.subagents.len());
-                self.subagents.push(child);
-            } else {
-                retired.push(child.instance_id);
+        {
+            let iteration_items = old.into_iter().enumerate();
+            for (index, child) in iteration_items {
+                if keep[index] {
+                    remap[index] = Some(self.subagents.len());
+                    self.subagents.push(child);
+                } else {
+                    retired.push(child.instance_id);
+                }
             }
         }
         self.segments = std::mem::take(&mut self.segments)

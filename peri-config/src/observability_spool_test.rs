@@ -11,9 +11,11 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
-use crate::observability::{
-    resolve, ConfigValueSource, LangfuseCompression, LangfuseConfig, LangfuseConfigError,
-};
+use crate::observability;
+use crate::observability::ConfigValueSource;
+use crate::observability::LangfuseCompression;
+use crate::observability::LangfuseConfig;
+use crate::observability::LangfuseConfigError;
 use crate::source::ConfigurationSource;
 use crate::{
     ConfigurationError, ConfigurationInputs, ConfigurationScope, ConfigurationSystem,
@@ -24,7 +26,7 @@ fn resolve_ok(
     settings: &serde_json::Value,
     environment: &BTreeMap<String, String>,
 ) -> LangfuseConfig {
-    resolve(settings, environment).expect("测试配置必须解析成功")
+    observability::resolve(settings, environment).expect("测试配置必须解析成功")
 }
 
 #[test]
@@ -151,7 +153,8 @@ fn new_integer_keys_reject_zero_negative_float_overflow_and_blank() {
         "18446744073709551616",
     ] {
         let environment = BTreeMap::from([("LANGFUSE_SPOOL_TTL_SECS".to_string(), text.into())]);
-        let error = resolve(&json!({}), &environment).expect_err("非法整数不得回退默认值");
+        let error =
+            observability::resolve(&json!({}), &environment).expect_err("非法整数不得回退默认值");
         assert!(
             matches!(
                 error,
@@ -174,7 +177,8 @@ fn new_integer_keys_reject_zero_negative_float_overflow_and_blank() {
         json!(true),
     ] {
         let settings = json!({"langfuse": {"stream_chunk_bytes": value}});
-        let error = resolve(&settings, &BTreeMap::new()).expect_err("非法 settings 整数必须拒绝");
+        let error = observability::resolve(&settings, &BTreeMap::new())
+            .expect_err("非法 settings 整数必须拒绝");
         assert!(
             matches!(
                 error,
@@ -216,7 +220,8 @@ fn invalid_winning_value_rejects_every_new_key() {
         ("LANGFUSE_SHUTDOWN_GRACE_SECS", "60s"),
     ] {
         let environment = BTreeMap::from([(key.to_string(), value.to_string())]);
-        let error = resolve(&json!({}), &environment).expect_err("胜出非法值必须拒绝");
+        let error =
+            observability::resolve(&json!({}), &environment).expect_err("胜出非法值必须拒绝");
         assert!(
             matches!(
                 error,
@@ -226,13 +231,13 @@ fn invalid_winning_value_rejects_every_new_key() {
         );
     }
     // 错误只由静态原因构成，不携带凭据或原配置值。
-    let error = resolve(
+    let error = observability::resolve(
         &json!({"langfuse": {"spool_enabled": "settings-secret-token"}}),
         &BTreeMap::new(),
     )
     .unwrap_err();
     assert!(!format!("{error}").contains("settings-secret-token"));
-    let error = resolve(
+    let error = observability::resolve(
         &json!({}),
         &BTreeMap::from([(
             "LANGFUSE_COMPRESSION".to_string(),
@@ -249,7 +254,8 @@ fn invalid_winning_value_rejects_every_new_key() {
         ("memory_budget_bytes", json!("1024")),
     ] {
         let settings = json!({"langfuse": {key: value}});
-        let error = resolve(&settings, &BTreeMap::new()).expect_err("settings 非法值必须拒绝");
+        let error = observability::resolve(&settings, &BTreeMap::new())
+            .expect_err("settings 非法值必须拒绝");
         assert!(
             matches!(
                 error,
@@ -288,7 +294,7 @@ fn disabled_spool_preserves_old_files() {
 #[test]
 fn invalid_winning_value_rejects_snapshot() {
     let temp = tempfile::tempdir().expect("临时目录");
-    let scope = ConfigurationScope::new(
+    let scope = ConfigurationScope::try_new(
         temp.path().join("project"),
         temp.path().join("global/settings.json"),
     )

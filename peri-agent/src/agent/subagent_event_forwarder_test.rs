@@ -1,6 +1,8 @@
 //! 从 subagent_event_forwarder.rs 分离的测试模块
 
-use super::*;
+use crate::agent::events::AgentEventHandler;
+use crate::agent::langfuse_bridge::LangfuseBridgeLike;
+use std::sync::Arc;
 
 use crate::agent::events::ExecutorEvent;
 use crate::agent::events_v2::{EventBus, EventBusConfig, ObserveEvent, RenderEvent, StateEvent};
@@ -50,8 +52,12 @@ async fn test_forwarder_injects_source_agent_id_for_tool_events() {
     });
     let child_thread_id = "subagent_test_id_123".to_string();
 
-    let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), None, child_thread_id.clone());
+    let _forwarder = crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
+        handles,
+        Some(handler),
+        None,
+        child_thread_id.clone(),
+    );
 
     // emit ToolStarted（注意 v2 agent_id 与 child_thread_id 不同）
     let (turn_id, agent_id) = ids();
@@ -96,8 +102,12 @@ async fn test_forwarder_injects_source_agent_id_for_text_chunk() {
         events: Arc::clone(&captured),
     });
 
-    let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), None, "child_abc".to_string());
+    let _forwarder = crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
+        handles,
+        Some(handler),
+        None,
+        "child_abc".to_string(),
+    );
 
     let (turn_id, agent_id) = ids();
     bus.emit_render(RenderEvent::TextChunk {
@@ -132,8 +142,12 @@ async fn test_forwarder_injects_source_agent_id_for_reasoning_chunk() {
         events: Arc::clone(&captured),
     });
 
-    let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), None, "child_reasoning".to_string());
+    let _forwarder = crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
+        handles,
+        Some(handler),
+        None,
+        "child_reasoning".to_string(),
+    );
 
     let (turn_id, agent_id) = ids();
     bus.emit_render(RenderEvent::ThinkingChunk {
@@ -171,8 +185,12 @@ async fn test_forwarder_injects_source_agent_id_for_llm_usage() {
     let handler = Arc::new(CapturingHandler {
         events: Arc::clone(&captured),
     });
-    let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), None, "child-usage".into());
+    let _forwarder = crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
+        handles,
+        Some(handler),
+        None,
+        "child-usage".into(),
+    );
     let (turn_id, agent_id) = ids();
     bus.emit_observe(ObserveEvent::LlmCallEnd {
         turn_id,
@@ -204,8 +222,12 @@ async fn test_forwarder_propagates_all_event_layers() {
         events: Arc::clone(&captured),
     });
 
-    let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), None, "test_id".to_string());
+    let _forwarder = crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
+        handles,
+        Some(handler),
+        None,
+        "test_id".to_string(),
+    );
 
     // Render layer
     let (turn_id, agent_id) = ids();
@@ -267,7 +289,12 @@ async fn test_forwarder_exits_when_channels_closed() {
     let (_bus, handles) = EventBus::new(EventBusConfig::default());
     let handler: Option<Arc<dyn AgentEventHandler>> = None;
 
-    let forwarder = spawn_subagent_event_forwarder(handles, handler, None, "test".to_string());
+    let forwarder = crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
+        handles,
+        handler,
+        None,
+        "test".to_string(),
+    );
 
     // _bus drop 后，render/state tx 关闭；observe_rx 没有 sender 也无法 recv
     // 由于 select! else 分支处理 None，task 应该退出
@@ -295,7 +322,7 @@ async fn test_forwarder_handles_observe_lagged() {
     }
     let handler = Arc::new(CountingHandler(Arc::clone(&counter)));
 
-    let _forwarder = spawn_subagent_event_forwarder(
+    let _forwarder = crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
         handles,
         Some(handler as Arc<dyn AgentEventHandler>),
         None,
@@ -336,7 +363,12 @@ async fn test_forwarder_no_handler_does_not_panic() {
     // event_handler = None 时不应该 panic，事件被消费后丢弃
     let (bus, handles) = EventBus::new(EventBusConfig::default());
 
-    let _forwarder = spawn_subagent_event_forwarder(handles, None, None, "test".to_string());
+    let _forwarder = crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
+        handles,
+        None,
+        None,
+        "test".to_string(),
+    );
 
     let (turn_id, agent_id) = ids();
     bus.emit_render(RenderEvent::ToolStarted {
@@ -366,8 +398,12 @@ async fn test_forwarder_filters_turn_committed() {
         events: Arc::clone(&captured),
     });
 
-    let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), None, "test".to_string());
+    let _forwarder = crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
+        handles,
+        Some(handler),
+        None,
+        "test".to_string(),
+    );
 
     // 发送 TurnCompleted（在 Render 层）→ 应被过滤
     let (turn_id, agent_id) = ids();
@@ -445,8 +481,12 @@ async fn test_forwarder_biased_consumes_render_before_state_when_both_ready() {
         events: Arc::clone(&captured),
     });
 
-    let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), None, "test".to_string());
+    let _forwarder = crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
+        handles,
+        Some(handler),
+        None,
+        "test".to_string(),
+    );
 
     // 给 forwarder 一点启动时间
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -547,8 +587,12 @@ async fn test_forwarder_observes_before_render_when_both_ready() {
         events: Arc::clone(&captured),
     });
 
-    let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), None, "test".to_string());
+    let _forwarder = crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
+        handles,
+        Some(handler),
+        None,
+        "test".to_string(),
+    );
 
     // 给 forwarder 一点启动时间
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -635,8 +679,12 @@ async fn test_forwarder_filters_v2_subagent_start_stop() {
         observes: Arc::clone(&observes),
     }) as Arc<dyn LangfuseBridgeLike>;
 
-    let forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), Some(bridge), "test".to_string());
+    let forwarder = crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
+        handles,
+        Some(handler),
+        Some(bridge),
+        "test".to_string(),
+    );
 
     let (turn_id, agent_id) = ids();
     let child_agent_id = AgentId::from_uuid(uuid::Uuid::now_v7());
@@ -660,7 +708,9 @@ async fn test_forwarder_filters_v2_subagent_start_stop() {
 
     // Stop 在所有 producer 关闭、缓冲事件排空后才送到 bridge。
     drop(bus);
-    forwarder.await.unwrap();
+    forwarder
+        .await
+        .expect("the forwarder fixture result is required for this assertion");
 
     // 1. bridge 收到两个事件（Langfuse 链路不丢）
     let bridge_events = observes.lock().clone();
@@ -702,7 +752,7 @@ async fn test_forwarder_injects_source_agent_id_for_system_reminder() {
         events: Arc::clone(&captured),
     });
 
-    let _forwarder = spawn_subagent_event_forwarder(
+    let _forwarder = crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
         handles,
         Some(handler),
         None,
@@ -791,12 +841,16 @@ async fn test_forwarder_drains_buffered_render_and_state_after_producer_drop() {
     });
     // 生产端先退出，消费者尚未运行；无需 sleep 即可固定三个通道同时关闭。
     drop(bus);
-    let forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), None, "child-instance".into());
+    let forwarder = crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
+        handles,
+        Some(handler),
+        None,
+        "child-instance".into(),
+    );
     tokio::time::timeout(std::time::Duration::from_secs(2), forwarder)
         .await
         .expect("排空缓冲后 forwarder 应结束")
-        .unwrap();
+        .expect("the expect fixture result is required for this assertion");
     let events = captured.lock();
     assert_eq!(
         events.len(),

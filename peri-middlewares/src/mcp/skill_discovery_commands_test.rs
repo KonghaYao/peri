@@ -1,4 +1,18 @@
-use super::*;
+use super::Arc;
+use super::PathBuf;
+use super::RespondRule;
+use super::RoleClient;
+use super::SkillMetadata;
+use super::SkillOrigin;
+use super::SkillSource;
+use super::SpecSkill;
+use peri_acp_types::command::command_route::CommandEntryKind;
+use peri_acp_types::command::command_route::CommandLifecycle;
+use peri_acp_types::command::command_route::CommandSource;
+use peri_acp_types::command_registry::CommandRegistry;
+use peri_acp_types::mcp_skills::HandleToken;
+use peri_acp_types::mcp_skills::McpSkillRegistry;
+use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 // ─── mcp_route_entries（决策 1 命令面转换）─────────────────────────────────
 
@@ -38,7 +52,7 @@ fn mcp_route_entries_converts_skills() {
             frontmatter: None,
         },
     ];
-    let entries = mcp_route_entries(&registry, "demo", &skills);
+    let entries = crate::mcp::skill_discovery::mcp_route_entries(&registry, "demo", &skills);
     assert_eq!(entries.len(), 2, "全部转换");
     let e = &entries[0];
     assert_eq!(e.fullname, "demo:alphaskill", "fullname 小写归一");
@@ -77,7 +91,8 @@ fn mcp_route_entries_plugin_server_takes_last_segment() {
         resources: vec![],
         frontmatter: None,
     }];
-    let entries = mcp_route_entries(&registry, "plugin:p1:demosrv", &skills);
+    let entries =
+        crate::mcp::skill_discovery::mcp_route_entries(&registry, "plugin:p1:demosrv", &skills);
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].fullname, "demosrv:beta");
     assert_eq!(
@@ -94,12 +109,15 @@ fn mcp_route_entries_plugin_server_takes_last_segment() {
 #[test]
 fn mcp_source_key_matches_route_entry_namespace() {
     // 纯 server 名：键 = demo（不变）
-    assert_eq!(mcp_source_key("demo"), "demo");
+    assert_eq!(crate::mcp::skill_discovery::mcp_source_key("demo"), "demo");
     // plugin server key：键 = demosrv（末段，非原名）
-    assert_eq!(mcp_source_key("plugin:p1:demosrv"), "demosrv");
+    assert_eq!(
+        crate::mcp::skill_discovery::mcp_source_key("plugin:p1:demosrv"),
+        "demosrv"
+    );
     // 键与条目 fullname 前缀一致（注销前缀 `{键}:` 命中 fullname）
     let registry = Arc::new(McpSkillRegistry::new());
-    let entries = mcp_route_entries(
+    let entries = crate::mcp::skill_discovery::mcp_route_entries(
         &registry,
         "plugin:p1:demosrv",
         &[SkillMetadata {
@@ -109,7 +127,7 @@ fn mcp_source_key_matches_route_entry_namespace() {
             ..SkillMetadata::default()
         }],
     );
-    let key = mcp_source_key("plugin:p1:demosrv");
+    let key = crate::mcp::skill_discovery::mcp_source_key("plugin:p1:demosrv");
     for e in &entries {
         assert!(
             e.fullname.starts_with(&format!("{key}:")),
@@ -118,7 +136,10 @@ fn mcp_source_key_matches_route_entry_namespace() {
         );
     }
     // 大小写归一同源：大写 server 名同样派生小写键（与词法键一致）
-    assert_eq!(mcp_source_key("Plugin:P1:DemoSrv"), "demosrv");
+    assert_eq!(
+        crate::mcp::skill_discovery::mcp_source_key("Plugin:P1:DemoSrv"),
+        "demosrv"
+    );
 }
 
 /// 审查 B1 防线 1：保留词法域 server 不进命令面——来源键派生标记 +
@@ -127,14 +148,18 @@ fn mcp_source_key_matches_route_entry_namespace() {
 fn mcp_source_key_reserved_domain_skipped() {
     for reserved in ["core", "ui", "plugin", "user", "mcp"] {
         assert!(
-            mcp_namespace_reserved(reserved),
+            crate::mcp::skill_discovery::mcp_namespace_reserved(reserved),
             "{reserved} 应判定为保留域"
         );
         // 纯 server 名末段命中保留域也判定（plugin:pa:core → core）。
-        assert!(mcp_namespace_reserved(&format!("plugin:pa:{reserved}")));
+        assert!(crate::mcp::skill_discovery::mcp_namespace_reserved(
+            &format!("plugin:pa:{reserved}")
+        ));
     }
-    assert!(!mcp_namespace_reserved("demo"));
-    assert!(!mcp_namespace_reserved("plugin:pa:demosrv"));
+    assert!(!crate::mcp::skill_discovery::mcp_namespace_reserved("demo"));
+    assert!(!crate::mcp::skill_discovery::mcp_namespace_reserved(
+        "plugin:pa:demosrv"
+    ));
 
     // finish_command_source：保留域 server 不产生任何命令面条目。
     let command_registry = Arc::new(CommandRegistry::new());
@@ -147,8 +172,8 @@ fn mcp_source_key_reserved_domain_skipped() {
     }];
     let token_core: HandleToken = Arc::new(101u32);
     command_registry.mark_source_started("core", token_core.clone());
-    finish_command_source(
-        &Some(command_registry.clone()),
+    crate::mcp::skill_discovery::finish_command_source(
+        (Some(command_registry.clone())).as_ref(),
         &meta_registry,
         "core",
         token_core,
@@ -167,8 +192,8 @@ fn mcp_source_key_reserved_domain_skipped() {
     }];
     let token_demo: HandleToken = Arc::new(102u32);
     command_registry.mark_source_started("demo", token_demo.clone());
-    finish_command_source(
-        &Some(command_registry.clone()),
+    crate::mcp::skill_discovery::finish_command_source(
+        (Some(command_registry.clone())).as_ref(),
         &meta_registry,
         "demo",
         token_demo,
@@ -186,8 +211,8 @@ fn external_workspace_name_keeps_prefixed_skill_command() {
     let registry = Arc::new(McpSkillRegistry::new());
     let token: HandleToken = Arc::new(103u32);
     command_registry.mark_source_started("workspace", token.clone());
-    finish_command_source(
-        &Some(Arc::clone(&command_registry)),
+    crate::mcp::skill_discovery::finish_command_source(
+        (Some(Arc::clone(&command_registry))).as_ref(),
         &registry,
         "workspace",
         token,
@@ -217,7 +242,7 @@ fn mcp_route_entries_skips_unprefixed_name() {
         resources: vec![],
         frontmatter: None,
     }];
-    let entries = mcp_route_entries(&registry, "demo", &skills);
+    let entries = crate::mcp::skill_discovery::mcp_route_entries(&registry, "demo", &skills);
     assert!(entries.is_empty(), "缺前缀条目跳过");
 }
 
@@ -227,7 +252,7 @@ fn mcp_route_entries_skips_unprefixed_name() {
 async fn run_discovery_writes_command_registry() {
     let ok_text = "---\nname: alpha\ndescription: Alpha skill\n---\n\n# Alpha\n";
     let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(spec_skill_server(
+    tokio::spawn(super::spec_skill_server(
         server_io,
         vec![SpecSkill {
             uri: "skill://alpha/SKILL.md",
@@ -248,14 +273,14 @@ async fn run_discovery_writes_command_registry() {
         client_io,
         None::<rmcp::model::ServerPeerInfo>,
     );
-    let handle = make_spec_handle(&running);
+    let handle = super::make_spec_handle(&running);
     let reg = Arc::new(McpSkillRegistry::new());
     let cmd_reg = Arc::new(CommandRegistry::new());
     let token: HandleToken = Arc::new(9u32);
     reg.mark_discovery_started("srv", token.clone());
     cmd_reg.mark_source_started("srv", token.clone());
     let cancel = AgentCancellationToken::new();
-    run_discovery(
+    crate::mcp::skill_discovery::run_discovery(
         reg.clone(),
         Some(cmd_reg.clone()),
         handle,
@@ -287,7 +312,7 @@ async fn run_discovery_cancel_clears_command_source_started() {
     let token: HandleToken = Arc::new(10u32);
     let (client_io, server_io) = tokio::io::duplex(8192);
     let first_done = Arc::new(tokio::sync::Notify::new());
-    tokio::spawn(raw_skill_server(
+    tokio::spawn(super::raw_skill_server(
         server_io,
         vec![RespondRule {
             segment: "alpha",
@@ -302,17 +327,17 @@ async fn run_discovery_cancel_clears_command_source_started() {
         client_io,
         None::<rmcp::model::ServerPeerInfo>,
     );
-    let handle = make_discovery_handle(
+    let handle = super::make_discovery_handle(
         &running,
         vec![
-            resource("skill://srv/zebra/SKILL.md"),
-            resource("skill://srv/alpha/SKILL.md"),
+            super::resource("skill://srv/zebra/SKILL.md"),
+            super::resource("skill://srv/alpha/SKILL.md"),
         ],
     );
     reg.mark_discovery_started("srv", token.clone());
     cmd_reg.mark_source_started("srv", token.clone());
     let cancel = AgentCancellationToken::new();
-    let discovery = tokio::spawn(run_discovery(
+    let discovery = tokio::spawn(crate::mcp::skill_discovery::run_discovery(
         reg.clone(),
         Some(cmd_reg.clone()),
         handle,

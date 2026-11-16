@@ -1,8 +1,9 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use chrono::{DateTime, FixedOffset};
 
-use crate::plugin::config::plugins_dir;
+use crate::plugin::config;
 
 const INSTALL_COUNTS_URL: &str = "https://raw.githubusercontent.com/anthropics/claude-plugins-official/refs/heads/stats/stats/plugin-installs.json";
 const CACHE_FILE: &str = "install-counts-cache.json";
@@ -30,7 +31,7 @@ enum CacheFormat {
 }
 
 fn cache_path() -> PathBuf {
-    plugins_dir().join(CACHE_FILE)
+    config::plugins_dir().join(CACHE_FILE)
 }
 
 /// 从磁盘加载缓存的安装量数据（兼容 Claude Code 缓存格式）。
@@ -56,6 +57,7 @@ pub fn load_install_counts() -> Option<HashMap<String, u64>> {
 }
 
 /// 检查缓存是否存在且未过期
+#[must_use]
 pub fn is_install_counts_cache_valid() -> bool {
     let path = cache_path();
     let data = match std::fs::read_to_string(&path) {
@@ -108,7 +110,7 @@ pub async fn fetch_install_counts() -> Option<HashMap<String, u64>> {
     };
 
     // 原样写入缓存（保留 fetchedAt 时间戳）
-    let dir = plugins_dir();
+    let dir = config::plugins_dir();
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::write(cache_path(), &body);
 
@@ -120,6 +122,7 @@ pub async fn fetch_install_counts() -> Option<HashMap<String, u64>> {
 /// - <1000 → 原数字（如 "42"）
 /// - >=1000 → K 后缀（如 "1.2K"）
 /// - >=1000000 → M 后缀（如 "1.5M"）
+#[must_use]
 pub fn format_install_count(count: u64) -> String {
     if count < 1000 {
         count.to_string()

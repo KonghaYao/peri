@@ -1,5 +1,6 @@
-use super::*;
+use crate::session::session_activation::SessionActivation;
 use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::session::MessageQueue;
 use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
 
 async fn enqueue(queue: &MessageQueue, kind: MessageKind) {

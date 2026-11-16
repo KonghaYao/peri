@@ -3,14 +3,15 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use peri_acp_types::{
-    event::{AgentEventHandler, ExecutorEvent, FnEventHandler},
-    workflow::{AgentRunParams, ProgressEvent},
-};
+use peri_acp_types::event::AgentEventHandler;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::event::FnEventHandler;
+use peri_acp_types::workflow::AgentRunParams;
+use peri_acp_types::workflow::ProgressEvent;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, warn};
 
-use super::WorkflowLangfuseEventHandler;
+use crate::agent::workflow::agent::WorkflowLangfuseEventHandler;
 
 #[derive(Clone, Default)]
 pub(super) struct RunStats {
@@ -28,6 +29,7 @@ pub(super) struct WorkflowObservation {
 }
 
 impl WorkflowObservation {
+    #[must_use]
     pub fn new(
         params: &AgentRunParams,
         progress_tx: Option<UnboundedSender<ProgressEvent>>,
@@ -42,11 +44,13 @@ impl WorkflowObservation {
         })
     }
 
+    #[must_use]
     pub fn handler(self: &Arc<Self>) -> Arc<dyn AgentEventHandler> {
         let observation = self.clone();
         Arc::new(FnEventHandler(move |event| observation.on_event(event)))
     }
 
+    #[must_use]
     pub fn snapshot(&self) -> RunStats {
         self.stats.lock().clone()
     }

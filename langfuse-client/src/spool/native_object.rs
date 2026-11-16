@@ -25,12 +25,11 @@ use crate::spool::types::{
 };
 use crate::spool::{CleanupRegistration, SpoolReader, SpoolResult};
 
-use super::native_quota::{self, accounted_bytes};
+use super::native_quota;
 use super::native_scan;
-use super::{
-    create_private_dir_all, create_private_file, fsync_dir, id_hex, io_error, open_read_only,
-    random_object_id, try_lock_file, write_atomic, LockAttempt, NativeInner, IO_CHUNK_BYTES,
-};
+use super::LockAttempt;
+use super::NativeInner;
+use super::IO_CHUNK_BYTES;
 
 /// 正文实际长度；缺失视为损坏（发布单元必须完整）。
 pub(crate) fn stored_len(inner: &NativeInner, id: ObjectId) -> SpoolResult<u64> {
@@ -40,7 +39,7 @@ pub(crate) fn stored_len(inner: &NativeInner, id: ObjectId) -> SpoolResult<u64> 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             Err(SpoolError::Corrupt { id })
         }
-        Err(error) => Err(io_error("stat spool body", error)),
+        Err(error) => Err(super::io_error("stat spool body", error)),
     }
 }
 
@@ -50,14 +49,14 @@ pub(crate) fn verify_digest(
     id: ObjectId,
     expected: &[u8; 32],
 ) -> SpoolResult<()> {
-    let mut file = open_read_only(&inner.object_body_path(id))
-        .map_err(|error| io_error("read spool body", error))?;
+    let mut file = super::open_read_only(&inner.object_body_path(id))
+        .map_err(|error| super::io_error("read spool body", error))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; IO_CHUNK_BYTES];
     loop {
         let read = file
             .read(&mut buffer)
-            .map_err(|error| io_error("read spool body", error))?;
+            .map_err(|error| super::io_error("read spool body", error))?;
         if read == 0 {
             break;
         }
@@ -81,18 +80,18 @@ fn remove_file_if_exists(path: &Path) -> std::io::Result<()> {
 
 /// 持锁删除对象目录并扣回已写空间；幂等，账本更新失败只告警（重建时以磁盘为准）。
 pub(crate) fn remove_object(inner: &NativeInner, id: ObjectId, dir: &Path) -> SpoolResult<()> {
-    let accounted = match accounted_bytes(dir) {
+    let accounted = match native_quota::accounted_bytes(dir) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(io_error("account spool object", error)),
+        Err(error) => return Err(super::io_error("account spool object", error)),
     };
     if let Err(error) = fs::remove_dir_all(dir) {
         if error.kind() != std::io::ErrorKind::NotFound {
-            return Err(io_error("remove spool object", error));
+            return Err(super::io_error("remove spool object", error));
         }
     }
     if let Err(error) = native_quota::record_deleted(inner, accounted) {
-        warn!(object = %id_hex(id), error = %error, "telemetry spool quota ledger not updated after delete");
+        warn!(object = %super::id_hex(id), error = %error, "telemetry spool quota ledger not updated after delete");
     }
     Ok(())
 }
@@ -115,8 +114,8 @@ pub(crate) fn inspect(inner: &NativeInner, id: ObjectId) -> SpoolResult<ObjectMe
 
 pub(crate) fn open_body(inner: &NativeInner, id: ObjectId) -> SpoolResult<SpoolReader> {
     load_validated(inner, id)?;
-    let file = open_read_only(&inner.object_body_path(id))
-        .map_err(|error| io_error("open spool body", error))?;
+    let file = super::open_read_only(&inner.object_body_path(id))
+        .map_err(|error| super::io_error("open spool body", error))?;
     Ok(Box::new(BufReader::with_capacity(IO_CHUNK_BYTES, file)))
 }
 
@@ -129,8 +128,8 @@ pub(crate) fn claim(
     if !dir.is_dir() {
         return Err(SpoolError::NotFound);
     }
-    let lock = match try_lock_file(&inner.object_lock_path(id))
-        .map_err(|error| io_error("lock spool object", error))?
+    let lock = match super::try_lock_file(&inner.object_lock_path(id))
+        .map_err(|error| super::io_error("lock spool object", error))?
     {
         LockAttempt::Free(lock) => lock,
         LockAttempt::Held => return Ok(None),
@@ -144,12 +143,12 @@ pub(crate) fn claim(
         Err(error) => {
             match remove_object(inner, id, &dir) {
                 Ok(()) => warn!(
-                    object = %id_hex(id),
+                    object = %super::id_hex(id),
                     reason = %error,
                     "telemetry spool discarded corrupt object"
                 ),
                 Err(error) => warn!(
-                    object = %id_hex(id),
+                    object = %super::id_hex(id),
                     error = %error,
                     "telemetry spool corrupt object not removed"
                 ),
@@ -173,8 +172,8 @@ pub(crate) fn delete_if_present(inner: &NativeInner, id: ObjectId) -> SpoolResul
     if !dir.exists() {
         return Ok(());
     }
-    match try_lock_file(&inner.object_lock_path(id))
-        .map_err(|error| io_error("lock spool object", error))?
+    match super::try_lock_file(&inner.object_lock_path(id))
+        .map_err(|error| super::io_error("lock spool object", error))?
     {
         LockAttempt::Free(_lock) => remove_object(inner, id, &dir),
         LockAttempt::Held => Err(SpoolError::Busy),
@@ -190,25 +189,25 @@ pub(crate) fn create(
     kind: ObjectKind,
     cleanup: CleanupRegistration,
 ) -> SpoolResult<Box<dyn TemporaryObject>> {
-    let id = random_object_id();
+    let id = super::random_object_id();
     let reserved = quota.bytes();
     // 先绑定槽再写第一个字节：句柄必须与「本次写入的 id + 已登记配额」同代，publish 才能核验身份。
     cleanup.slot.bind(id, reserved)?;
-    let lock = match try_lock_file(&inner.writer_lock_path(id))
-        .map_err(|error| io_error("lock spool writer", error))?
+    let lock = match super::try_lock_file(&inner.writer_lock_path(id))
+        .map_err(|error| super::io_error("lock spool writer", error))?
     {
         LockAttempt::Free(lock) => lock,
         LockAttempt::Held => return Err(SpoolError::Busy),
         // 创建路径上 `tmp/` 是本次写入前必须存在的布局目录：缺失是环境漂移，不是并发竞争。
         LockAttempt::Gone => {
-            return Err(io_error(
+            return Err(super::io_error(
                 "create spool temporary object",
                 io::Error::from(io::ErrorKind::NotFound),
             ))
         }
     };
-    let part = create_private_file(&inner.writer_part_path(id))
-        .map_err(|error| io_error("create spool temporary object", error))?;
+    let part = super::create_private_file(&inner.writer_part_path(id))
+        .map_err(|error| super::io_error("create spool temporary object", error))?;
     Ok(Box::new(NativeTemporaryObject {
         inner: Arc::clone(inner),
         id,
@@ -293,10 +292,10 @@ impl NativeTemporaryObject {
         }
         // 1. 完成编码收尾并 fsync，然后核对实测长度与摘要（writer 不得写超预留）。
         if let Err(error) = self.writer.flush() {
-            return Err(self.failure(io_error("flush spool temporary object", error)));
+            return Err(self.failure(super::io_error("flush spool temporary object", error)));
         }
         if let Err(error) = self.writer.get_ref().sync_all() {
-            return Err(self.failure(io_error("sync spool temporary object", error)));
+            return Err(self.failure(super::io_error("sync spool temporary object", error)));
         }
         let digest: [u8; 32] = self.hasher.clone().finalize().into();
         if self.written != meta.stored_len || digest != meta.sha256 {
@@ -307,10 +306,10 @@ impl NativeTemporaryObject {
         if dir.exists() {
             return Err(self.failure(SpoolError::Corrupt { id: self.id }));
         }
-        if let Err(error) = create_private_dir_all(&dir) {
-            return Err(self.failure(io_error("create spool object directory", error)));
+        if let Err(error) = super::create_private_dir_all(&dir) {
+            return Err(self.failure(super::io_error("create spool object directory", error)));
         }
-        let lock = match try_lock_file(&self.inner.object_lock_path(self.id)) {
+        let lock = match super::try_lock_file(&self.inner.object_lock_path(self.id)) {
             Ok(LockAttempt::Free(lock)) => lock,
             Ok(LockAttempt::Held) | Ok(LockAttempt::Gone) => {
                 self.remove_own_object_dir();
@@ -318,23 +317,25 @@ impl NativeTemporaryObject {
             }
             Err(error) => {
                 self.remove_own_object_dir();
-                return Err(self.failure(io_error("lock spool object", error)));
+                return Err(self.failure(super::io_error("lock spool object", error)));
             }
         };
         let published = fs::rename(
             self.inner.writer_part_path(self.id),
             self.inner.object_body_path(self.id),
         )
-        .map_err(|error| io_error("publish spool body", error))
-        .and_then(|()| fsync_dir(&dir).map_err(|error| io_error("sync spool object", error)))
+        .map_err(|error| super::io_error("publish spool body", error))
         .and_then(|()| {
-            fsync_dir(&self.inner.bucket_dir(NativeInner::bucket_of(self.id)))
-                .map_err(|error| io_error("sync spool bucket", error))
+            super::fsync_dir(&dir).map_err(|error| super::io_error("sync spool object", error))
+        })
+        .and_then(|()| {
+            super::fsync_dir(&self.inner.bucket_dir(NativeInner::bucket_of(self.id)))
+                .map_err(|error| super::io_error("sync spool bucket", error))
         })
         .and_then(|()| {
             let bytes = native_scan::descriptor_bytes(&meta)?;
-            write_atomic(&self.inner.object_meta_path(self.id), &bytes)
-                .map_err(|error| io_error("publish spool descriptor", error))
+            super::write_atomic(&self.inner.object_meta_path(self.id), &bytes)
+                .map_err(|error| super::io_error("publish spool descriptor", error))
         });
         if let Err(error) = published {
             self.remove_own_object_dir();
@@ -342,10 +343,10 @@ impl NativeTemporaryObject {
         }
         // 3. 描述信息已持久：正文与描述成为可恢复单元，writer 存活锁不再需要。
         let _ = remove_file_if_exists(&self.inner.writer_lock_path(self.id));
-        let accounted = accounted_bytes(&dir).unwrap_or(0);
+        let accounted = native_quota::accounted_bytes(&dir).unwrap_or(0);
         if let Err(error) = native_quota::record_stored(&self.inner, accounted) {
             // 对象已持久，不能因账本缓存失败丢弃已落盘数据；缓存由重建/reserve 自愈。
-            warn!(object = %id_hex(self.id), error = %error, "telemetry spool quota ledger not updated after publish");
+            warn!(object = %super::id_hex(self.id), error = %error, "telemetry spool quota ledger not updated after publish");
         }
         // 4. 预留转实际存储：释放预留存活锁后回收账本条目，避免双计。
         drop(self.quota.take());
@@ -409,7 +410,7 @@ impl TemporaryObject for NativeTemporaryObject {
         self.finished = true;
         let discarded = self.discard_temp();
         if self.settle_unpublished(self.dir_residue || discarded.is_err()) {
-            return Err(io_error(
+            return Err(super::io_error(
                 "discard spool temporary object",
                 discarded.err().unwrap_or_else(|| {
                     std::io::Error::other("telemetry spool temporary object residue")
@@ -427,7 +428,7 @@ impl Drop for NativeTemporaryObject {
         }
         let discarded = self.discard_temp();
         if self.settle_unpublished(self.dir_residue || discarded.is_err()) {
-            warn!(object = %id_hex(self.id), "telemetry spool temporary object left for startup sweep");
+            warn!(object = %super::id_hex(self.id), "telemetry spool temporary object left for startup sweep");
         }
     }
 }
@@ -469,8 +470,8 @@ impl ObjectClaim for NativeClaim {
         }
         native_scan::validate_meta(&self.inner, &meta)?;
         let bytes = native_scan::descriptor_bytes(&meta)?;
-        write_atomic(&self.inner.object_meta_path(self.id), &bytes)
-            .map_err(|error| io_error("checkpoint spool descriptor", error))?;
+        super::write_atomic(&self.inner.object_meta_path(self.id), &bytes)
+            .map_err(|error| super::io_error("checkpoint spool descriptor", error))?;
         self.meta = meta;
         Ok(())
     }

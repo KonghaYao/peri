@@ -7,6 +7,7 @@ use crate::hooks::types::{
 /// 对齐 Claude Code parseHookOutput + processHookJSONOutput:
 /// - 不以 `{` 开头 → 纯文本输出，视为 Allow
 /// - 以 `{` 开头 → 解析并校验实际事件，无效或未知输出拒绝执行
+#[must_use]
 pub fn parse_command_hook_output(event: &HookEvent, stdout: &str) -> HookAction {
     let trimmed = stdout.trim();
 
@@ -27,6 +28,7 @@ pub fn parse_command_hook_output(event: &HookEvent, stdout: &str) -> HookAction 
 /// 对齐 Claude Code parseHttpHookOutput：
 /// - 空 body → 视为 {}（有效 JSON）
 /// - 不以 `{` 开头 → 非法（HTTP hook 必须返回 JSON）
+#[must_use]
 pub fn parse_http_hook_response(event: &HookEvent, body: &str) -> HookAction {
     let trimmed = body.trim();
 

@@ -1,26 +1,23 @@
 //! Stdio subprocesses remain owned by the session pool through handshake cancellation and close.
 use peri_process::ProcessTree;
-use rmcp::{
-    service::{RxJsonRpcMessage, TxJsonRpcMessage},
-    transport::{async_rw::AsyncRwTransport, Transport},
-    RoleClient,
-};
-use std::{
-    collections::HashMap,
-    future::Future,
-    io,
-    path::Path,
-    process::Stdio,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-};
-use tokio::{
-    process::{Child, ChildStdin, ChildStdout},
-    sync::Mutex,
-    task::JoinHandle,
-};
+use rmcp::service::RxJsonRpcMessage;
+use rmcp::service::TxJsonRpcMessage;
+use rmcp::transport::async_rw::AsyncRwTransport;
+use rmcp::transport::Transport;
+use rmcp::RoleClient;
+use std::collections::HashMap;
+use std::future::Future;
+use std::io;
+use std::path::Path;
+use std::process::Stdio;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use tokio::process::Child;
+use tokio::process::ChildStdin;
+use tokio::process::ChildStdout;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
 pub(crate) struct McpProcessOwner {
     tree: Arc<ProcessTree>,
@@ -140,7 +137,7 @@ impl super::McpClientPool {
             } else {
                 Stdio::null()
             });
-        let mut tree = ProcessTree::new()?;
+        let mut tree = ProcessTree::try_new()?;
         tree.prepare(&mut cmd);
         let mut child = cmd.spawn()?;
         let attached = tree.attach(&child);

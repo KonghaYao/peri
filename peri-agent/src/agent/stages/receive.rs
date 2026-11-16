@@ -14,11 +14,13 @@ use peri_acp_types::store::PersistedPayload;
 // ─── Receive 阶段类型 ────────────────────────────────────────────────────────
 
 /// Receive 阶段输入
+#[derive(Debug)]
 pub struct ReceiveInput {
     pub context: StageContext,
 }
 
 /// Receive 阶段输出
+#[derive(Debug)]
 pub struct ReceiveOutput {
     /// 本轮消费的消息数量（含不唤醒循环的 Info）
     pub consumed_count: usize,

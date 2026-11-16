@@ -1,5 +1,6 @@
 use super::*;
 
+#[must_use]
 fn make_lc() -> LcRegistry {
     LcRegistry::new(None)
 }
@@ -47,7 +48,10 @@ fn test_lc_registry_tr_missing_key_fallback() {
 #[test]
 fn test_lc_registry_tr_args() {
     let lc = make_lc_zh();
-    let result = lc.tr_args("test-greeting", &[("name".into(), FluentValue::from("Alice"))]);
+    let result = lc.tr_args(
+        "test-greeting",
+        &[("name".into(), FluentValue::from("Alice"))],
+    );
     assert_eq!(result, "你好，Alice！");
 }
 
@@ -75,7 +79,8 @@ fn test_lc_registry_available_langs() {
 #[test]
 fn test_lc_registry_cross_lang_fallback() {
     let mut lc = make_lc_zh();
-    lc.switch("zh-CN").unwrap();
+    lc.switch("zh-CN")
+        .expect("lc registry cross lang fallback: the switch fixture operation uses valid inputs");
     let result = lc.tr("nonexistent-key");
     assert_eq!(result, "nonexistent-key");
 }

@@ -1,4 +1,6 @@
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::collections::BTreeMap;
+use std::fmt;
+use std::sync::Arc;
 
 use serde::{Serialize, Serializer};
 use serde_json::Value;
@@ -69,6 +71,7 @@ impl ModelRuntimeConfig {
     /// 显式允许完整普通内容进入观测投影。
     ///
     /// 敏感键、非 ASCII 键和 data URI 始终脱敏；此选项只移除普通字段的长度限制。
+    #[must_use]
     pub fn with_full_observation() -> Self {
         Self {
             observation: ObservationConfig::full_content(),
@@ -78,21 +81,25 @@ impl ModelRuntimeConfig {
         }
     }
 
+    #[must_use]
     pub fn with_retry(mut self, retry: RetryConfig) -> Self {
         self.retry = retry;
         self
     }
 
     /// 注册 protocol-neutral 的 retry observer。该 observer 不会接收请求、响应或认证信息。
+    #[must_use]
     pub fn with_retry_observer(mut self, observer: Arc<dyn RetryObserver>) -> Self {
         self.retry_observer = Some(observer);
         self
     }
 
+    #[must_use]
     pub fn retry(&self) -> &RetryConfig {
         &self.retry
     }
 
+    #[must_use]
     pub fn with_transport_route(mut self, route: ModelTransportRoute) -> Self {
         self.transport_route = Some(route);
         self
@@ -111,6 +118,7 @@ impl ModelRuntimeConfig {
 pub struct ObservedProviderBody(Value);
 
 impl ObservedProviderBody {
+    #[must_use]
     pub fn as_value(&self) -> &Value {
         &self.0
     }
@@ -207,26 +215,32 @@ impl PreparedModelRequest {
         })
     }
 
+    #[must_use]
     pub fn protocol(&self) -> &ProviderProtocol {
         &self.protocol
     }
 
+    #[must_use]
     pub fn model_id(&self) -> &str {
         &self.model_id
     }
 
+    #[must_use]
     pub fn endpoint(&self) -> &Url {
         &self.endpoint
     }
 
+    #[must_use]
     pub fn body(&self) -> &ObservedProviderBody {
         &self.body
     }
 
+    #[must_use]
     pub fn metadata(&self) -> &BTreeMap<String, Value> {
         &self.metadata
     }
 
+    #[must_use]
     pub fn truncated_paths(&self) -> &[String] {
         &self.truncated_paths
     }

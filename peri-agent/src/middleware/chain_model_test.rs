@@ -1,6 +1,11 @@
-use super::*;
+use crate::agent::react::Reasoning;
+use crate::agent::react::ToolCall;
 use crate::agent::state::AgentState;
+use crate::error::AgentError;
+use crate::error::AgentResult;
 use crate::messages::{BaseMessage, ContentBlock, MessageId};
+use crate::middleware::capabilities as hook_state;
+use crate::middleware::chain::MiddlewareChain;
 use crate::middleware::r#trait::{Middleware, NoopMiddleware};
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
@@ -25,7 +30,7 @@ async fn test_before_model_sequential_order() {
         ) -> AgentResult<()> {
             self.log
                 .lock()
-                .unwrap()
+                .expect("self log mutex must remain unpoisoned throughout the test")
                 .push(format!("{}.before_model", self.name));
             Ok(())
         }
@@ -45,10 +50,15 @@ async fn test_before_model_sequential_order() {
     }));
 
     let mut state = AgentState::new("/tmp");
-    chain.run_before_model(&mut state).await.unwrap();
+    chain
+        .run_before_model(&mut state)
+        .await
+        .expect("the run before model fixture result is required for this assertion");
 
     assert_eq!(
-        log.lock().unwrap().clone(),
+        log.lock()
+            .expect("log lock mutex must remain unpoisoned throughout the test")
+            .clone(),
         vec!["A.before_model", "B.before_model", "C.before_model"]
     );
 }
@@ -90,7 +100,7 @@ async fn test_before_model_error_short_circuits() {
         ) -> AgentResult<()> {
             self.log
                 .lock()
-                .unwrap()
+                .expect("self log mutex must remain unpoisoned throughout the test")
                 .push(format!("{}.before_model", self.name));
             Ok(())
         }
@@ -110,7 +120,12 @@ async fn test_before_model_error_short_circuits() {
     let result = chain.run_before_model(&mut state).await;
 
     assert!(result.is_err());
-    assert_eq!(log.lock().unwrap().clone(), vec!["A.before_model"]);
+    assert_eq!(
+        log.lock()
+            .expect("log lock mutex must remain unpoisoned throughout the test")
+            .clone(),
+        vec!["A.before_model"]
+    );
 }
 
 #[tokio::test]
@@ -134,7 +149,7 @@ async fn test_after_model_sequential_order() {
         ) -> AgentResult<()> {
             self.log
                 .lock()
-                .unwrap()
+                .expect("self log mutex must remain unpoisoned throughout the test")
                 .push(format!("{}.after_model", self.name));
             Ok(())
         }
@@ -162,10 +177,15 @@ async fn test_after_model_sequential_order() {
         stream_interruption: None,
         stop_reason: peri_model::StopReason::EndTurn,
     };
-    chain.run_after_model(&mut state, &reasoning).await.unwrap();
+    chain
+        .run_after_model(&mut state, &reasoning)
+        .await
+        .expect("the run after model fixture result is required for this assertion");
 
     assert_eq!(
-        log.lock().unwrap().clone(),
+        log.lock()
+            .expect("log lock mutex must remain unpoisoned throughout the test")
+            .clone(),
         vec!["A.after_model", "B.after_model"]
     );
 }
@@ -209,7 +229,7 @@ async fn test_after_model_error_short_circuits() {
         ) -> AgentResult<()> {
             self.log
                 .lock()
-                .unwrap()
+                .expect("self log mutex must remain unpoisoned throughout the test")
                 .push(format!("{}.after_model", self.name));
             Ok(())
         }
@@ -241,7 +261,12 @@ async fn test_after_model_error_short_circuits() {
     let result = chain.run_after_model(&mut state, &reasoning).await;
 
     assert!(result.is_err());
-    assert_eq!(log.lock().unwrap().clone(), vec!["A.after_model"]);
+    assert_eq!(
+        log.lock()
+            .expect("log lock mutex must remain unpoisoned throughout the test")
+            .clone(),
+        vec!["A.after_model"]
+    );
 }
 
 #[tokio::test]
@@ -277,7 +302,10 @@ async fn test_new_hooks_default_noop() {
     chain.add(Box::new(NoopMiddleware::new("noop")));
     let mut state = AgentState::new("/tmp");
 
-    chain.run_before_model(&mut state).await.unwrap();
+    chain
+        .run_before_model(&mut state)
+        .await
+        .expect("the run before model fixture result is required for this assertion");
 
     let reasoning = Reasoning {
         thought: String::new(),
@@ -291,7 +319,10 @@ async fn test_new_hooks_default_noop() {
         stream_interruption: None,
         stop_reason: peri_model::StopReason::EndTurn,
     };
-    chain.run_after_model(&mut state, &reasoning).await.unwrap();
+    chain
+        .run_after_model(&mut state, &reasoning)
+        .await
+        .expect("the run after model fixture result is required for this assertion");
 }
 
 /// 验证 before_model 和 after_model 在同一链中独立执行：
@@ -315,7 +346,10 @@ async fn test_mixed_before_and_after_model_in_same_chain() {
             &self,
             _state: &mut dyn hook_state::BeforeModelState,
         ) -> AgentResult<()> {
-            self.log.lock().unwrap().push("A.before_model".into());
+            self.log
+                .lock()
+                .expect("self log mutex must remain unpoisoned throughout the test")
+                .push("A.before_model".into());
             Ok(())
         }
         async fn after_model(
@@ -323,7 +357,10 @@ async fn test_mixed_before_and_after_model_in_same_chain() {
             _state: &mut dyn hook_state::StateView,
             _r: &Reasoning,
         ) -> AgentResult<()> {
-            self.log.lock().unwrap().push("A.after_model".into());
+            self.log
+                .lock()
+                .expect("self log mutex must remain unpoisoned throughout the test")
+                .push("A.after_model".into());
             Ok(())
         }
     }
@@ -341,7 +378,10 @@ async fn test_mixed_before_and_after_model_in_same_chain() {
             &self,
             _state: &mut dyn hook_state::BeforeModelState,
         ) -> AgentResult<()> {
-            self.log.lock().unwrap().push("B.before_model".into());
+            self.log
+                .lock()
+                .expect("self log mutex must remain unpoisoned throughout the test")
+                .push("B.before_model".into());
             Ok(())
         }
     }
@@ -360,7 +400,10 @@ async fn test_mixed_before_and_after_model_in_same_chain() {
             _state: &mut dyn hook_state::StateView,
             _r: &Reasoning,
         ) -> AgentResult<()> {
-            self.log.lock().unwrap().push("C.after_model".into());
+            self.log
+                .lock()
+                .expect("self log mutex must remain unpoisoned throughout the test")
+                .push("C.after_model".into());
             Ok(())
         }
     }
@@ -379,15 +422,24 @@ async fn test_mixed_before_and_after_model_in_same_chain() {
     let mut state = AgentState::new("/tmp");
 
     // run_before_model: A + B 执行，C 不执行
-    log.lock().unwrap().clear();
-    chain.run_before_model(&mut state).await.unwrap();
+    log.lock()
+        .expect("log lock mutex must remain unpoisoned throughout the test")
+        .clear();
+    chain
+        .run_before_model(&mut state)
+        .await
+        .expect("the run before model fixture result is required for this assertion");
     assert_eq!(
-        log.lock().unwrap().clone(),
+        log.lock()
+            .expect("log lock mutex must remain unpoisoned throughout the test")
+            .clone(),
         vec!["A.before_model", "B.before_model"]
     );
 
     // run_after_model: A + C 执行，B 不执行
-    log.lock().unwrap().clear();
+    log.lock()
+        .expect("log lock mutex must remain unpoisoned throughout the test")
+        .clear();
     let reasoning = Reasoning {
         thought: "test".into(),
         final_answer: None,
@@ -400,9 +452,14 @@ async fn test_mixed_before_and_after_model_in_same_chain() {
         stream_interruption: None,
         stop_reason: peri_model::StopReason::EndTurn,
     };
-    chain.run_after_model(&mut state, &reasoning).await.unwrap();
+    chain
+        .run_after_model(&mut state, &reasoning)
+        .await
+        .expect("the run after model fixture result is required for this assertion");
     assert_eq!(
-        log.lock().unwrap().clone(),
+        log.lock()
+            .expect("log lock mutex must remain unpoisoned throughout the test")
+            .clone(),
         vec!["A.after_model", "C.after_model"]
     );
 }
@@ -428,7 +485,11 @@ async fn test_state_mutation_visible_across_hooks() {
                 BaseMessage::system(vec![ContentBlock::text("marker written by before_model")]);
             let id = msg.id();
             state.add_message(msg);
-            *self.marker_id.lock().unwrap() = Some(id);
+            *self
+                .marker_id
+                .lock()
+                .expect("self marker id mutex must remain unpoisoned throughout the test") =
+                Some(id);
             Ok(())
         }
     }
@@ -446,7 +507,13 @@ async fn test_state_mutation_visible_across_hooks() {
             state: &mut dyn hook_state::StateView,
             _r: &Reasoning,
         ) -> AgentResult<()> {
-            let expected_id = self.marker_id.lock().unwrap().unwrap();
+            let expected_id = self
+                .marker_id
+                .lock()
+                .expect("self marker id mutex must remain unpoisoned throughout the test")
+                .expect(
+                    "after model: the completed fixture operation must provide its result payload",
+                );
             let found = state.messages().iter().any(|m| m.id() == expected_id);
             assert!(found, "after_model 应能看到 before_model 写入的消息");
             Ok(())
@@ -462,7 +529,10 @@ async fn test_state_mutation_visible_across_hooks() {
     }));
 
     let mut state = AgentState::new("/tmp");
-    chain.run_before_model(&mut state).await.unwrap();
+    chain
+        .run_before_model(&mut state)
+        .await
+        .expect("the run before model fixture result is required for this assertion");
 
     let reasoning = Reasoning {
         thought: String::new(),
@@ -476,7 +546,10 @@ async fn test_state_mutation_visible_across_hooks() {
         stream_interruption: None,
         stop_reason: peri_model::StopReason::EndTurn,
     };
-    chain.run_after_model(&mut state, &reasoning).await.unwrap();
+    chain
+        .run_after_model(&mut state, &reasoning)
+        .await
+        .expect("the run after model fixture result is required for this assertion");
 }
 
 /// 验证 after_model 可接收含工具调用的 Reasoning（非空 vec![]）。
@@ -499,11 +572,11 @@ async fn test_after_model_with_tool_calls() {
         ) -> AgentResult<()> {
             self.log
                 .lock()
-                .unwrap()
+                .expect("self log mutex must remain unpoisoned throughout the test")
                 .push(format!("tool_count={}", r.tool_calls.len()));
             self.log
                 .lock()
-                .unwrap()
+                .expect("self log mutex must remain unpoisoned throughout the test")
                 .push(format!("has_answer={}", r.final_answer.is_some()));
             Ok(())
         }
@@ -530,9 +603,15 @@ async fn test_after_model_with_tool_calls() {
         stream_interruption: None,
         stop_reason: peri_model::StopReason::ToolUse,
     };
-    chain.run_after_model(&mut state, &reasoning).await.unwrap();
+    chain
+        .run_after_model(&mut state, &reasoning)
+        .await
+        .expect("the run after model fixture result is required for this assertion");
 
-    let captured = log.lock().unwrap().clone();
+    let captured = log
+        .lock()
+        .expect("log lock mutex must remain unpoisoned throughout the test")
+        .clone();
     assert!(captured.contains(&"tool_count=2".to_string()));
     assert!(captured.contains(&"has_answer=true".to_string()));
 }

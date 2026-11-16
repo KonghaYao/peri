@@ -1,7 +1,15 @@
-use super::*;
 use crate::identity::AttemptId;
+use crate::messages::BaseMessage;
+use crate::session::message_queue::message_queue::MessageQueue;
+use crate::session::message_queue::queued_message::MessageKind;
+use crate::session::message_queue::queued_message::MessageSource;
+use crate::session::message_queue::queued_message::QueuedMessage;
+#[cfg(test)]
+use crate::session::ExecutionBinding;
 use crate::session::{MqReceivePurpose, SessionInbox, TurnId};
-use std::future::{poll_fn, Future};
+use std::future::Future;
+#[cfg(test)]
+use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -70,7 +78,7 @@ async fn direct_queue_publication_wakes_registered_inbox() {
         let inbox = SessionInbox::new(Arc::clone(&queue));
         let waiting = inbox.await_wake();
         tokio::pin!(waiting);
-        poll_fn(|context| {
+        std::future::poll_fn(|context| {
             assert!(waiting.as_mut().poll(context).is_pending());
             Poll::Ready(())
         })
@@ -92,7 +100,7 @@ async fn shared_queue_inboxes_wake_all_registered_observers() {
     let first_waiting = first.await_wake();
     let second_waiting = second.await_wake();
     tokio::pin!(first_waiting, second_waiting);
-    poll_fn(|context| {
+    std::future::poll_fn(|context| {
         assert!(first_waiting.as_mut().poll(context).is_pending());
         assert!(second_waiting.as_mut().poll(context).is_pending());
         Poll::Ready(())
@@ -118,7 +126,7 @@ async fn batch_publication_wakes_registered_inbox() {
     let inbox = SessionInbox::new(Arc::clone(&queue));
     let waiting = inbox.await_wake();
     tokio::pin!(waiting);
-    poll_fn(|context| {
+    std::future::poll_fn(|context| {
         assert!(waiting.as_mut().poll(context).is_pending());
         Poll::Ready(())
     })
@@ -142,7 +150,7 @@ async fn passive_publication_and_empty_batch_do_not_wake() {
     let inbox = SessionInbox::new(Arc::clone(&queue));
     let waiting = inbox.await_wake();
     tokio::pin!(waiting);
-    poll_fn(|context| {
+    std::future::poll_fn(|context| {
         assert!(waiting.as_mut().poll(context).is_pending());
         Poll::Ready(())
     })
@@ -153,7 +161,7 @@ async fn passive_publication_and_empty_batch_do_not_wake() {
         .await
         .unwrap();
     queue.enqueue_batch(vec![]).await.unwrap();
-    poll_fn(|context| {
+    std::future::poll_fn(|context| {
         assert!(waiting.as_mut().poll(context).is_pending());
         Poll::Ready(())
     })
@@ -170,7 +178,7 @@ async fn consumed_work_does_not_leave_a_ready_waiter() {
     receive_all(&queue).await;
     let waiting = inbox.await_wake();
     tokio::pin!(waiting);
-    poll_fn(|context| {
+    std::future::poll_fn(|context| {
         assert!(waiting.as_mut().poll(context).is_pending());
         Poll::Ready(())
     })

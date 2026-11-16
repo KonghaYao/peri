@@ -21,17 +21,21 @@
 //! Consumed 后 root handler 不再执行，避免 close 在 send 之前清空 id。
 //! 其他 popup（AskUser/Rewind/OAuth）仍用 Normal，依赖 root handler 关闭。
 
-use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
-    prelude::*,
-    ratatui::{style::Stylize, text::Line},
-};
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::KeyCode;
+use ratatui_kit::crossterm::event::KeyEventKind;
+use ratatui_kit::crossterm::event::KeyModifiers;
+use ratatui_kit::crossterm::event::MouseButton;
+use ratatui_kit::crossterm::event::MouseEventKind;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::style::Stylize;
+use ratatui_kit::ratatui::text::Line;
 
 use crate::i18n;
-use crate::kit::atoms::{HITL_PENDING, HITL_RESPONSE_TX, LANG_VERSION};
+
 use crate::kit::hitl_response::HitlResponseAction;
 use crate::kit::panel_mouse::AreaTracker;
-use crate::kit::popup_overlay::close_hitl_popup_for_owner;
+
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
@@ -60,7 +64,7 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 owner: snapshot.owner.clone(),
                 request_id_str: snapshot.request_id_json.clone(),
             });
-            close_hitl_popup_for_owner(&snapshot.owner);
+            crate::kit::popup_overlay::close_hitl_popup_for_owner(&snapshot.owner);
         }
     };
     let reject = move || {
@@ -71,7 +75,7 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 owner: snapshot.owner.clone(),
                 request_id_str: snapshot.request_id_json.clone(),
             });
-            close_hitl_popup_for_owner(&snapshot.owner);
+            crate::kit::popup_overlay::close_hitl_popup_for_owner(&snapshot.owner);
         }
     };
 
@@ -156,8 +160,11 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 truncated_str
             };
 
-            for line in display_str.lines().take(8) {
-                lines.push(Line::from(format!("    {}", line)).fg(semantic.text.primary));
+            {
+                let iteration_items = display_str.lines().take(8);
+                for line in iteration_items {
+                    lines.push(Line::from(format!("    {}", line)).fg(semantic.text.primary));
+                }
             }
             if display_str.lines().count() > 8 || char_count > max_chars {
                 lines.push(
@@ -181,17 +188,20 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     ))
                     .fg(semantic.status.warning),
                 );
-                for tp in batch.iter().take(4) {
-                    lines.push(
-                        Line::from(i18n::tr_args(
-                            "popup-hitl-batch-item",
-                            &[
-                                ("name".to_string(), FluentValue::from(tp.tool_name.as_str())),
-                                ("input".to_string(), FluentValue::from(tp.tool_id.as_str())),
-                            ],
-                        ))
-                        .fg(semantic.text.muted),
-                    );
+                {
+                    let iteration_items = batch.iter().take(4);
+                    for tp in iteration_items {
+                        lines.push(
+                            Line::from(i18n::tr_args(
+                                "popup-hitl-batch-item",
+                                &[
+                                    ("name".to_string(), FluentValue::from(tp.tool_name.as_str())),
+                                    ("input".to_string(), FluentValue::from(tp.tool_id.as_str())),
+                                ],
+                            ))
+                            .fg(semantic.text.muted),
+                        );
+                    }
                 }
                 if batch.len() > 4 {
                     lines.push(
@@ -214,3 +224,9 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     popup_text_shell!(i18n::tr("popup-hitl-title"), semantic.status.warning, lines)
 }
+
+use crate::kit::atoms::HITL_PENDING;
+
+use crate::kit::atoms::HITL_RESPONSE_TX;
+
+use crate::kit::atoms::LANG_VERSION;

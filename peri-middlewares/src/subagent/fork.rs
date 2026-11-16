@@ -63,6 +63,7 @@ const CHILD_ABSENT_BUILTIN_INSTANCES: [&str; 2] = ["cron", "workflow"];
 /// `build_parent_tools`（其只桥接 builtin 实例），不会经继承进入子执行——不新增
 /// 按名字猜插件的第二份名单。名字匹配对用户 MCP 同名工具是 fail-closed 的过度
 /// 过滤，不是放行。
+#[must_use]
 pub fn child_inheritance_filter() -> peri_agent::session::tool_catalog::ToolFilter {
     std::sync::Arc::new(|tool: &dyn BaseTool| {
         let excluded = tool.name() == TOOL_AGENT
@@ -74,6 +75,7 @@ pub fn child_inheritance_filter() -> peri_agent::session::tool_catalog::ToolFilt
     })
 }
 
+#[must_use]
 pub fn canonical_tool_filter(
     allowed: &ToolsValue,
     disallowed: &ToolsValue,
@@ -109,6 +111,7 @@ pub fn canonical_tool_filter(
 ///
 /// Matching is case-insensitive. Explicit builtin allowlists also check the bound
 /// tool source, so an external MCP tool named `Read` cannot enter a read-only agent.
+#[must_use]
 pub fn filter_tools(
     parent_tools: &[Arc<dyn BaseTool>],
     allowed: &ToolsValue,
@@ -131,9 +134,9 @@ pub fn filter_tools(
 /// PersonaDomain 层；不可替换层（安全/工程/能力/运行时边界）始终渲染。
 pub fn overrides_from_agent_def(
     system_prompt: &str,
-    tone: &Option<String>,
-    proactiveness: &Option<String>,
-    mode: &Option<String>,
+    tone: Option<&str>,
+    proactiveness: Option<&str>,
+    mode: Option<&str>,
 ) -> Option<AgentOverrides> {
     let persona = if system_prompt.is_empty() {
         None
@@ -142,9 +145,9 @@ pub fn overrides_from_agent_def(
     };
     let overrides = AgentOverrides {
         persona,
-        tone: tone.clone(),
-        proactiveness: proactiveness.clone(),
-        mode: mode.clone(),
+        tone: tone.map(str::to_owned),
+        proactiveness: proactiveness.map(str::to_owned),
+        mode: mode.map(str::to_owned),
     };
     if overrides.is_empty() {
         None

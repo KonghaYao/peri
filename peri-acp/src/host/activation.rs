@@ -1,4 +1,5 @@
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use peri_acp_types::session::{MessageQueue, MessageSource};
 use peri_acp_types::tasks::BgTaskKind;

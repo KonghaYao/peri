@@ -1,17 +1,20 @@
 //! 循环/转发终态到 workflow 结果与遥测的投影；不管理任务或事件通道。
 
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
+use std::time::Instant;
 
-use peri_acp_types::{
-    command::PromptStopReason,
-    session::{ExecutionFailure, TurnTelemetryOutcome},
-    thread::AgentStatus,
-    workflow::{AgentRunParams, AgentRunResult, Usage},
-};
+use peri_acp_types::command::PromptStopReason;
+use peri_acp_types::session::ExecutionFailure;
+use peri_acp_types::session::TurnTelemetryOutcome;
+use peri_acp_types::thread::AgentStatus;
+use peri_acp_types::workflow::AgentRunParams;
+use peri_acp_types::workflow::AgentRunResult;
+use peri_acp_types::workflow::Usage;
 use tracing::{debug, warn};
 
-use super::observation::{RunStats, WorkflowObservation};
-use crate::{agent::stages::LoopResult, session::Session};
+use crate::agent::stages::LoopResult;
+use crate::agent::workflow::agent::observation::{RunStats, WorkflowObservation};
+use crate::session::Session;
 
 pub(super) struct ProjectedResult {
     pub result: AgentRunResult,
@@ -19,6 +22,7 @@ pub(super) struct ProjectedResult {
 }
 
 impl ProjectedResult {
+    #[must_use]
     pub fn telemetry_outcome(&self) -> TurnTelemetryOutcome {
         match &self.result {
             AgentRunResult::Dead { reason, .. } if reason.as_deref() == Some("interrupted") => {
@@ -333,7 +337,8 @@ fn validate_schema_value(
             let raw_items = raw.and_then(|raw| {
                 serde_json::from_str::<Vec<Box<serde_json::value::RawValue>>>(raw.get()).ok()
             });
-            for (index, item) in items.iter().enumerate() {
+            let paired_items = items.iter().enumerate();
+            for (index, item) in paired_items {
                 let item_path = field_path
                     .map(|parent| format!("{parent}[{index}]"))
                     .unwrap_or_else(|| format!("[{index}]"));

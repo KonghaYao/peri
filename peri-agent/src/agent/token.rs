@@ -153,6 +153,7 @@ impl TokenTracker {
     /// 当次调用的缓存命中率（基于 last_usage）
     ///
     /// 返回最近一次 LLM 调用的缓存效率，当无缓存数据时返回 0.0。
+    #[must_use]
     pub fn cache_hit_rate(&self) -> f64 {
         self.last_usage
             .as_ref()
@@ -325,6 +326,7 @@ pub struct RequestRecord {
 }
 
 impl RequestRecord {
+    #[must_use]
     pub fn from_usage(usage: &TokenUsage) -> Self {
         Self {
             input_tokens: usage.input_tokens,
@@ -335,6 +337,7 @@ impl RequestRecord {
     }
 
     /// 当次请求的缓存命中率
+    #[must_use]
     pub fn cache_hit_rate(&self) -> f64 {
         if self.input_tokens == 0 {
             return 0.0;
@@ -361,6 +364,7 @@ impl ContextBudget {
     pub const DEFAULT_AUTO_COMPACT_THRESHOLD: f64 = 0.85;
     pub const DEFAULT_WARNING_THRESHOLD: f64 = 0.70;
 
+    #[must_use]
     pub fn new(context_window: u32) -> Self {
         Self {
             context_window,
@@ -370,6 +374,7 @@ impl ContextBudget {
         }
     }
 
+    #[must_use]
     pub fn should_auto_compact(&self, tracker: &TokenTracker) -> bool {
         match tracker.context_usage_percent(self.context_window) {
             Some(pct) => pct / 100.0 >= self.auto_compact_threshold,
@@ -377,6 +382,7 @@ impl ContextBudget {
         }
     }
 
+    #[must_use]
     pub fn should_warn(&self, tracker: &TokenTracker) -> bool {
         match tracker.context_usage_percent(self.context_window) {
             Some(pct) => pct / 100.0 >= self.warning_threshold,
@@ -384,11 +390,13 @@ impl ContextBudget {
         }
     }
 
+    #[must_use]
     pub fn with_auto_compact_threshold(mut self, threshold: f64) -> Self {
         self.auto_compact_threshold = threshold;
         self
     }
 
+    #[must_use]
     pub fn with_warning_threshold(mut self, threshold: f64) -> Self {
         self.warning_threshold = threshold;
         self

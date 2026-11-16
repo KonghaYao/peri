@@ -1,6 +1,15 @@
-use super::*;
 use crate::event::AcpEvent;
+use crate::host::requests::tests::activation_tests::ActivationHarness;
+use crate::host::requests::tests::MockTransport;
+use crate::transport::types::AcpError;
+use crate::transport::types::IncomingMessage;
+use crate::transport::types::RequestId;
+use async_trait::async_trait;
 use peri_acp_types::permission::PermissionMode;
+use serde_json::json;
+use serde_json::Value;
+use serial_test::serial;
+use std::sync::Arc;
 
 fn execution_identity(events: &[(String, Value)]) -> String {
     let starts = events

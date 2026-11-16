@@ -1,4 +1,13 @@
-use super::*;
+use crate::protocol::JournalEntry;
+use crate::protocol::WorkflowDoneParams;
+use crate::protocol::WorkflowKillParams;
+use crate::protocol::WorkflowStartParams;
+use peri_acp_types::workflow::AgentRunParams;
+use peri_acp_types::workflow::AgentRunResult;
+use peri_acp_types::workflow::AttemptDisposition;
+use peri_acp_types::workflow::ProgressEvent;
+use peri_acp_types::workflow::RecoveredAttempt;
+use peri_acp_types::workflow::WorkflowAttempt;
 
 #[test]
 fn test_workflow_start_params_serializes_camel_case() {
@@ -13,7 +22,8 @@ fn test_workflow_start_params_serializes_camel_case() {
         resume: None,
         cwd: "/tmp".into(),
     };
-    let json = serde_json::to_value(&params).unwrap();
+    let json = serde_json::to_value(&params)
+        .expect("to_value must accept this test fixture representation");
     assert!(json.get("runId").is_some(), "runId 应存在，实际: {json}");
     assert!(json.get("maxConcurrency").is_some());
     assert!(json.get("budgetTotal").is_none());
@@ -35,7 +45,8 @@ fn test_workflow_start_params_preserves_budget_total() {
         cwd: "/tmp".into(),
     };
 
-    let json = serde_json::to_value(&params).unwrap();
+    let json = serde_json::to_value(&params)
+        .expect("to_value must accept this test fixture representation");
 
     assert_eq!(json["budgetTotal"], 9_007_199_254_740_991_u64);
 }
@@ -51,7 +62,8 @@ fn test_agent_run_params_deserializes_camel_case() {
         "agentType": "general-purpose",
         "allowedTools": ["Read", "Grep"],
     });
-    let params: AgentRunParams = serde_json::from_value(json).unwrap();
+    let params: AgentRunParams = serde_json::from_value(json)
+        .expect("from_value must accept this test fixture representation");
     assert_eq!(params.run_id, "r1");
     assert_eq!(params.agent_id, 0);
     assert_eq!(params.model.as_deref(), Some("haiku"));
@@ -66,7 +78,8 @@ fn test_progress_event_run_started_camel_case() {
         "runId": "r1",
         "workflowName": "test",
     });
-    let event: ProgressEvent = serde_json::from_value(json).unwrap();
+    let event: ProgressEvent = serde_json::from_value(json)
+        .expect("from_value must accept this test fixture representation");
     match event {
         ProgressEvent::RunStarted {
             run_id,
@@ -88,7 +101,8 @@ fn test_progress_event_agent_started_camel_case() {
         "agentId": 3,
         "label": "coder",
     });
-    let event: ProgressEvent = serde_json::from_value(json).unwrap();
+    let event: ProgressEvent = serde_json::from_value(json)
+        .expect("from_value must accept this test fixture representation");
     match event {
         ProgressEvent::AgentStarted {
             run_id,
@@ -111,7 +125,8 @@ fn test_workflow_done_params_camel_case() {
         "status": "completed",
         "returnValue": {"ok": true},
     });
-    let done: WorkflowDoneParams = serde_json::from_value(json).unwrap();
+    let done: WorkflowDoneParams = serde_json::from_value(json)
+        .expect("from_value must accept this test fixture representation");
     assert_eq!(done.run_id, "r1");
     assert_eq!(done.status, "completed");
     assert!(done.return_value.is_some());
@@ -124,7 +139,7 @@ fn test_journal_attempt_round_trip_and_legacy_default() {
         "seq": 7,
         "result": {"kind": "skipped"}
     }))
-    .unwrap();
+    .expect("from_value must accept this test fixture representation");
     assert!(legacy.attempt.is_none());
 
     let entry = JournalEntry {
@@ -144,7 +159,8 @@ fn test_journal_attempt_round_trip_and_legacy_default() {
             disposition: AttemptDisposition::Recovered,
         }),
     };
-    let json = serde_json::to_value(&entry).unwrap();
+    let json = serde_json::to_value(&entry)
+        .expect("to_value must accept this test fixture representation");
     assert_eq!(json["attempt"]["runId"], "019-run");
     assert_eq!(json["attempt"]["agentId"], 42);
     assert_eq!(json["attempt"]["journalSeq"], 7);
@@ -154,6 +170,7 @@ fn test_journal_attempt_round_trip_and_legacy_default() {
 #[test]
 fn test_workflow_kill_params_camel_case() {
     let json = serde_json::json!({"runId": "r1"});
-    let kill: WorkflowKillParams = serde_json::from_value(json).unwrap();
+    let kill: WorkflowKillParams = serde_json::from_value(json)
+        .expect("from_value must accept this test fixture representation");
     assert_eq!(kill.run_id, "r1");
 }

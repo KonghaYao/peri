@@ -86,8 +86,12 @@ fn expand_alternates(pattern: &str, out: &mut Vec<String>) -> Result<(), String>
         let head = &candidate[..group.open];
         let tail = &candidate[group.close + 1..];
         // 逆序入栈：栈是后进先出，出栈顺序与书写顺序一致，展开结果顺序稳定。
-        for alternative in group.alternatives(&candidate).iter().rev() {
-            pending.push((format!("{head}{alternative}{tail}"), chain + 1));
+        {
+            let alternatives = group.alternatives(&candidate);
+            let reversed_alternatives = alternatives.iter().rev();
+            for alternative in reversed_alternatives {
+                pending.push((format!("{head}{alternative}{tail}"), chain + 1));
+            }
         }
     }
     Ok(())

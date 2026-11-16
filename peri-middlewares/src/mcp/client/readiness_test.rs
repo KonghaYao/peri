@@ -6,15 +6,22 @@
 //! 在 initialize / reconnect / OAuth 路径上的提交点。每个用例按
 //! pool begin-close → shutdown → join 假 server 收尾，不留 orphan task。
 
-use super::super::serve_client_auto;
-use super::*;
+use super::{
+    AgentCancellationToken, Arc, ClientStatus, DiscoveryEvidence, Duration, McpClientHandle,
+    McpClientPool, McpServerConfig, NegotiatedSystemMcp, OAuthStatus, SystemMcpManifest,
+    SystemReadinessError, SystemToolError,
+};
 use crate::mcp::apps::McpCapabilityProfile;
 use peri_agent::error::AgentError;
-use rmcp::{service::RoleClient, transport::async_rw::AsyncRwTransport};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf},
-    task::JoinHandle,
-};
+use rmcp::service::RoleClient;
+use rmcp::transport::async_rw::AsyncRwTransport;
+use tokio::io::AsyncBufReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::io::BufReader;
+use tokio::io::DuplexStream;
+use tokio::io::ReadHalf;
+use tokio::io::WriteHalf;
+use tokio::task::JoinHandle;
 
 // ─── fixtures ─────────────────────────────────────────────────────────────────
 
@@ -156,7 +163,7 @@ impl SystemFixture {
         let (client, server) = tokio::io::duplex(4096);
         self.servers
             .push(spawn_fake_peer(server, FakeInitialize::Legacy));
-        let service = serve_client_auto(
+        let service = super::super::serve_client_auto(
             fixture_transport(client),
             &McpCapabilityProfile::default(),
             Duration::from_secs(5),
@@ -190,7 +197,7 @@ impl SystemFixture {
         let (client, server) = tokio::io::duplex(4096);
         self.servers
             .push(spawn_fake_peer(server, FakeInitialize::Error));
-        let outcome = serve_client_auto(
+        let outcome = super::super::serve_client_auto(
             fixture_transport(client),
             &McpCapabilityProfile::default(),
             Duration::from_secs(5),
@@ -201,7 +208,7 @@ impl SystemFixture {
             "fixture initialize 必须真实失败"
         );
         McpClientPool::insert_failed(self.pool(), name, "fixture: initialize failed".to_string());
-        let handle = self.pool.get_client(name).expect("失败句柄必须落表");
+        let handle = self.pool.client(name).expect("失败句柄必须落表");
         let generation = self.pool.handle_generation(&handle);
         self.commit_evidence(name, DiscoveryEvidence::initialize_failed(generation));
     }
@@ -502,10 +509,7 @@ async fn system_ready_reports_generation_change_after_proven_readiness() {
 
     // 重连式换代：提交新代句柄 → 失效旧证据。已证明完成过的 server 换代后不再
     // 重试（不无限等待），交回调用方重试本次输入。
-    let previous = fixture
-        .pool()
-        .get_client("sys-a")
-        .expect("旧代句柄必须存在");
+    let previous = fixture.pool().client("sys-a").expect("旧代句柄必须存在");
     let replacement = SystemFixture::handle("sys-a", previous.peer.clone());
     let service = fixture
         .pool()

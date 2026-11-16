@@ -1,6 +1,9 @@
-use super::*;
-use crate::filesystem::transaction::{replace_if_unchanged, with_target_lock, RewindCommitError};
+use crate::filesystem::transaction;
+use crate::filesystem::transaction::RewindCommitError;
 use crate::rewind_snapshot::{RewindSnapshots, Snapshot};
+use rmcp::model::CustomRequest;
+use std::path::Path;
+use std::path::PathBuf;
 
 fn request(changes: serde_json::Value) -> CustomRequest {
     CustomRequest::new(
@@ -54,7 +57,7 @@ async fn test_rewind_write_restores_untracked_pre_image() {
         "content": "agent output",
         "tool_call_id": "call-1",
     }]);
-    rewind_files(
+    crate::file_rewind::rewind_files(
         remote.path().to_str().unwrap(),
         &snapshots,
         None,
@@ -127,7 +130,7 @@ async fn test_rewind_write_restores_dirty_tracked_working_tree() {
         "content": "agent output",
         "tool_call_id": "call-2",
     }]);
-    rewind_files(root.to_str().unwrap(), &snapshots, None, request(changes))
+    crate::file_rewind::rewind_files(root.to_str().unwrap(), &snapshots, None, request(changes))
         .await
         .unwrap();
     assert_eq!(
@@ -159,7 +162,7 @@ async fn test_rewind_write_created_file_is_removed() {
         "content": "agent output",
         "tool_call_id": "call-3",
     }]);
-    rewind_files(
+    crate::file_rewind::rewind_files(
         remote.path().to_str().unwrap(),
         &snapshots,
         None,
@@ -193,7 +196,7 @@ async fn test_rewind_write_append_restores_pre_append_content() {
         "content": "appended",
         "tool_call_id": "call-4",
     }]);
-    rewind_files(
+    crate::file_rewind::rewind_files(
         remote.path().to_str().unwrap(),
         &snapshots,
         None,
@@ -233,7 +236,7 @@ async fn test_rewind_write_uses_workspace_root_and_checks_external_change() {
         "content": "written remotely",
         "tool_call_id": "call-5",
     }]);
-    rewind_files(
+    crate::file_rewind::rewind_files(
         remote.path().to_str().unwrap(),
         &snapshots,
         None,
@@ -256,7 +259,7 @@ async fn test_rewind_write_uses_workspace_root_and_checks_external_change() {
     tokio::fs::write(remote.path().join("same.txt"), "externally edited")
         .await
         .unwrap();
-    let error = rewind_files(
+    let error = crate::file_rewind::rewind_files(
         remote.path().to_str().unwrap(),
         &snapshots,
         None,
@@ -303,7 +306,7 @@ async fn test_rewind_batch_preflight_failure_keeps_prior_file_and_rejects_escape
         {"kind":"write","path":"b.txt","content":"expected-b","tool_call_id":"call-b"},
         {"kind":"write","path":"a.txt","content":"new-a","tool_call_id":"call-a"}
     ]);
-    assert!(rewind_files(
+    assert!(crate::file_rewind::rewind_files(
         remote.path().to_str().unwrap(),
         &snapshots,
         None,
@@ -318,7 +321,7 @@ async fn test_rewind_batch_preflight_failure_keeps_prior_file_and_rejects_escape
         "new-a"
     );
     let escape = serde_json::json!([{"kind":"edit","path":"../elsewhere","old_string":"a","new_string":"b","tool_call_id":"call-x"}]);
-    assert!(rewind_files(
+    assert!(crate::file_rewind::rewind_files(
         remote.path().to_str().unwrap(),
         &snapshots,
         None,
@@ -349,7 +352,7 @@ async fn test_rewind_edit_uses_snapshot_for_replace_all() {
         "new_string": "x",
         "tool_call_id": "call-6",
     }]);
-    rewind_files(
+    crate::file_rewind::rewind_files(
         remote.path().to_str().unwrap(),
         &snapshots,
         None,
@@ -374,7 +377,7 @@ async fn test_rewind_edit_without_snapshot_reverses_multibyte_content() {
         "new_string": "新",
         "tool_call_id": "call-legacy",
     }]);
-    rewind_files(
+    crate::file_rewind::rewind_files(
         remote.path().to_str().unwrap(),
         &snapshots,
         None,
@@ -402,7 +405,7 @@ async fn test_rewind_write_without_pre_image_refuses_without_mutation() {
         "content": "current",
         "tool_call_id": "call-unknown",
     }]);
-    let error = rewind_files(
+    let error = crate::file_rewind::rewind_files(
         remote.path().to_str().unwrap(),
         &snapshots,
         None,
@@ -421,7 +424,7 @@ async fn test_rewind_write_without_call_identity_refuses() {
     tokio::fs::write(&file, "current").await.unwrap();
     let snapshots = RewindSnapshots::default();
     let changes = serde_json::json!([{"kind":"write","path":"legacy.txt","content":"current"}]);
-    let error = rewind_files(
+    let error = crate::file_rewind::rewind_files(
         remote.path().to_str().unwrap(),
         &snapshots,
         None,
@@ -453,7 +456,7 @@ async fn test_rewind_write_payload_mismatch_refuses() {
         "content": "current",
         "tool_call_id": "call-7",
     }]);
-    let error = rewind_files(
+    let error = crate::file_rewind::rewind_files(
         remote.path().to_str().unwrap(),
         &snapshots,
         None,
@@ -472,7 +475,8 @@ fn replace_if_unchanged_refuses_stale_plan() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("race.txt");
     std::fs::write(&file, "actual").unwrap();
-    let error = replace_if_unchanged(&file, Some(b"expected"), Some(b"restored")).unwrap_err();
+    let error =
+        transaction::replace_if_unchanged(&file, Some(b"expected"), Some(b"restored")).unwrap_err();
     assert!(matches!(error, RewindCommitError::ChangedSinceValidation));
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "actual");
 }
@@ -482,9 +486,9 @@ fn replace_if_unchanged_replaces_and_removes() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("apply.txt");
     std::fs::write(&file, "actual").unwrap();
-    replace_if_unchanged(&file, Some(b"actual"), Some(b"restored")).unwrap();
+    transaction::replace_if_unchanged(&file, Some(b"actual"), Some(b"restored")).unwrap();
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "restored");
-    replace_if_unchanged(&file, Some(b"restored"), None).unwrap();
+    transaction::replace_if_unchanged(&file, Some(b"restored"), None).unwrap();
     assert!(!file.exists());
 }
 
@@ -494,7 +498,7 @@ fn replace_if_unchanged_restores_sentinel_pre_image() {
     let file = dir.path().join("sentinel.txt");
     std::fs::write(&file, "agent output").unwrap();
     let pre = "... [12 字符已省略] ...\nuser content";
-    replace_if_unchanged(&file, Some(b"agent output"), Some(pre.as_bytes())).unwrap();
+    transaction::replace_if_unchanged(&file, Some(b"agent output"), Some(pre.as_bytes())).unwrap();
     assert_eq!(std::fs::read_to_string(&file).unwrap(), pre);
 }
 
@@ -507,7 +511,7 @@ fn replace_if_unchanged_shares_the_write_target_lock() {
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let holder_path = file.clone();
     let holder = std::thread::spawn(move || {
-        with_target_lock(&holder_path, |_| {
+        transaction::with_target_lock(&holder_path, |_| {
             locked_tx.send(()).unwrap();
             release_rx.recv().unwrap();
         });
@@ -515,7 +519,7 @@ fn replace_if_unchanged_shares_the_write_target_lock() {
     locked_rx.recv().unwrap();
     let applier_path = file.clone();
     let applier = std::thread::spawn(move || {
-        replace_if_unchanged(&applier_path, Some(b"actual"), Some(b"restored"))
+        transaction::replace_if_unchanged(&applier_path, Some(b"actual"), Some(b"restored"))
     });
     std::thread::sleep(std::time::Duration::from_millis(50));
     assert!(
@@ -548,7 +552,7 @@ async fn test_rewind_snapshot_is_session_scoped() {
         "content": "agent output",
         "tool_call_id": "call-8",
     }]);
-    let error = rewind_files(
+    let error = crate::file_rewind::rewind_files(
         remote.path().to_str().unwrap(),
         &snapshots,
         Some("session-b"),
@@ -557,7 +561,7 @@ async fn test_rewind_snapshot_is_session_scoped() {
     .await
     .unwrap_err();
     assert!(error.to_string().contains("pre-image unavailable"));
-    rewind_files(
+    crate::file_rewind::rewind_files(
         remote.path().to_str().unwrap(),
         &snapshots,
         Some("session-a"),

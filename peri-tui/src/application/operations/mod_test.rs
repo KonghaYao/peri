@@ -7,6 +7,7 @@ use super::gate::CompletionGate;
 use super::outcome::{OperationOutcome, OutcomeUnknownReason};
 use super::scope::OperationScope;
 
+#[must_use]
 fn scope(session_id: &str, reset: u64) -> OperationScope {
     OperationScope::new(session_id, reset)
 }

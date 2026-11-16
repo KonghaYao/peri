@@ -1,9 +1,16 @@
 //! Tests for mpsc
 
-use super::*;
+use crate::transport::mpsc::ChannelMessage;
+use crate::transport::mpsc::TRANSPORT_BACKPRESSURE_CODE;
+use crate::transport::router::RequestRouter;
+use crate::transport::types::AcpError;
+use crate::transport::types::IncomingMessage;
+use crate::transport::types::RequestId;
+use crate::transport::AcpTransport;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 fn assert_transport_closed(error: AcpError) {
     assert_eq!(error.code, -32603);
@@ -13,7 +20,7 @@ fn assert_transport_closed(error: AcpError) {
 
 #[tokio::test]
 async fn test_request_response() {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
 
     // Server side: echo back the params
     let server_handle = tokio::spawn(async move {
@@ -39,7 +46,7 @@ async fn test_request_response() {
 
 #[tokio::test]
 async fn test_notification() {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
 
     client
         .send_notification("test/notify", json!({"msg": "ping"}))
@@ -64,7 +71,7 @@ async fn test_notification() {
 /// 必测矩阵「capability 未协商的 fatal」）。
 #[tokio::test]
 async fn test_error_response_roundtrip_preserves_code_message_data() {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
 
     let server_handle = tokio::spawn(async move {
         if let Some(IncomingMessage::Request { id, method, .. }) = server.recv().await {
@@ -104,7 +111,7 @@ async fn test_error_response_roundtrip_preserves_code_message_data() {
 
 #[tokio::test]
 async fn test_bidirectional_server_notification_to_client() {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
 
     // Server sends a notification to client
     server
@@ -124,7 +131,7 @@ async fn test_bidirectional_server_notification_to_client() {
 /// [回归测试] 任一 MPSC 方向终止后，两个方向的 pending 请求都必须结算。
 #[tokio::test]
 async fn test_peer_drop_settles_pending_requests_in_both_directions() {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
     let client = Arc::new(client);
     let client_request = tokio::spawn({
         let client = Arc::clone(&client);
@@ -165,7 +172,7 @@ async fn test_peer_drop_settles_pending_requests_in_both_directions() {
             .unwrap_err(),
     );
 
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
     let server = Arc::new(server);
     let server_request = tokio::spawn({
         let server = Arc::clone(&server);
@@ -183,7 +190,7 @@ async fn test_peer_drop_settles_pending_requests_in_both_directions() {
 
 #[tokio::test]
 async fn test_response_before_peer_drop_wins() {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
     let request = tokio::spawn(async move { client.send_request("race", json!({})).await });
     let IncomingMessage::Request { id, .. } = server.recv().await.unwrap() else {
         panic!("expected request");
@@ -199,7 +206,7 @@ async fn test_response_before_peer_drop_wins() {
 /// [回归测试] caller abort 后 RAII handle 同步注销，迟到响应必须成为 unmatched 消息。
 #[tokio::test]
 async fn test_cancelled_request_unregisters_before_late_response() {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
     let client = Arc::new(client);
     let task = tokio::spawn({
         let client = Arc::clone(&client);
@@ -230,7 +237,7 @@ async fn test_cancelled_request_unregisters_before_late_response() {
 /// 已由 pump 转发的消息必须在逻辑连接终止后按顺序排空，再返回 None。
 #[tokio::test]
 async fn test_peer_drop_preserves_forwarded_incoming_queue() {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
     client
         .send_notification("queued/one", json!({"n": 1}))
         .await
@@ -261,7 +268,7 @@ async fn test_peer_drop_preserves_forwarded_incoming_queue() {
 
 #[tokio::test]
 async fn test_explicit_close_rejects_both_pending_directions_and_delivers_eof() {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
     let client = Arc::new(client);
     let server = Arc::new(server);
     let outbound = tokio::spawn({
@@ -308,7 +315,7 @@ async fn test_send_or_close_times_out_and_closes_connection_when_peer_stalls() {
     .await
     .unwrap();
 
-    let error = send_or_close(
+    let error = crate::transport::mpsc::send_or_close(
         &tx,
         &router,
         ChannelMessage::Notification {
@@ -336,7 +343,7 @@ async fn test_send_or_close_times_out_and_closes_connection_when_peer_stalls() {
 /// 阻塞后续输入（镜像 ACP SDK 的 drop-time cancellation）。
 #[tokio::test]
 async fn test_abandoned_server_request_sends_cancel_notification() {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
     let request = tokio::spawn(async move {
         server
             .send_request("elicitation/create", json!({"sessionId": "s1"}))
@@ -365,7 +372,7 @@ async fn test_abandoned_server_request_sends_cancel_notification() {
 /// 正常完成的请求不得发送取消通知（drop guard 只在放弃等待时生效）。
 #[tokio::test]
 async fn test_completed_server_request_sends_no_cancel_notification() {
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
     let request = tokio::spawn(async move { server.send_request("test/echo", json!({})).await });
 
     let IncomingMessage::Request { id, .. } = client.recv().await.unwrap() else {

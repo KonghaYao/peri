@@ -1,5 +1,13 @@
-use super::*;
+use super::Arc;
+use super::McpClientHandle;
+use super::McpClientPool;
+use super::McpToolBridge;
+use super::Tool;
+use super::ToolCallError;
+use super::MAX_TOOL_DESCRIPTION_BYTES;
+use super::TOOL_CALL_TIMEOUT;
 use crate::mcp::client::ClientStatus;
+use peri_agent::tools::BaseTool as _;
 use rmcp::handler::server::ServerHandler;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -53,7 +61,7 @@ fn remote_workspace_direct_promotion_preserves_app_only_visibility() {
     pool.clients
         .write()
         .insert("workspace".to_string(), Arc::new(handle));
-    let bridges = build_typed_tool_bridges(&pool);
+    let bridges = super::build_typed_tool_bridges(&pool);
     let hidden = bridges
         .iter()
         .find(|bridge| bridge.name() == "app_only")
@@ -143,7 +151,7 @@ async fn test_invoke_not_connected() {
 #[test]
 fn test_format_content_text_only() {
     let contents = vec![rmcp::model::ContentBlock::text("hello")];
-    assert_eq!(format_contents(&contents), "hello");
+    assert_eq!(super::format_contents(&contents), "hello");
 }
 
 #[test]
@@ -152,7 +160,7 @@ fn test_format_content_mixed() {
         rmcp::model::ContentBlock::text("line1"),
         rmcp::model::ContentBlock::text("line2"),
     ];
-    assert_eq!(format_contents(&contents), "line1\nline2");
+    assert_eq!(super::format_contents(&contents), "line1\nline2");
 }
 
 struct CatalogDispatcher(Vec<peri_acp_types::tools::EffectiveToolDefinition>);
@@ -172,7 +180,7 @@ impl peri_acp_types::tools::EffectiveToolDispatcher for CatalogDispatcher {
     }
 
     fn admitted_mcp_tool_name(&self, server_name: &str, wire_tool_name: &str) -> Option<String> {
-        let name = effective_mcp_tool_name(server_name, wire_tool_name);
+        let name = super::effective_mcp_tool_name(server_name, wire_tool_name);
         self.0
             .iter()
             .find(|tool| tool.name == name)
@@ -210,7 +218,7 @@ fn app_allowed_tools_intersects_resource_visibility_and_canonical_catalog() {
     ]);
 
     assert_eq!(
-        app_allowed_tools("server", "ui://app", &tools, &dispatcher),
+        super::app_allowed_tools("server", "ui://app", &tools, &dispatcher),
         std::collections::HashMap::from([("app_only".into(), "mcp__server__app_only".into())])
     );
 }
@@ -245,7 +253,7 @@ fn app_allowed_tools_uses_admitted_binding_when_raw_names_collide() {
     }))
     .unwrap();
     assert_eq!(
-        app_allowed_tools(
+        super::app_allowed_tools(
             "alpha",
             "ui://app",
             std::slice::from_ref(&tool),
@@ -253,7 +261,7 @@ fn app_allowed_tools_uses_admitted_binding_when_raw_names_collide() {
         ),
         std::collections::HashMap::from([("Read".into(), "Read".into())])
     );
-    assert!(app_allowed_tools("zulu", "ui://app", &[tool], &BoundDispatcher).is_empty());
+    assert!(super::app_allowed_tools("zulu", "ui://app", &[tool], &BoundDispatcher).is_empty());
 }
 
 #[test]
@@ -285,7 +293,7 @@ fn test_build_tool_bridges_filters_app_only_tool_from_model_catalog() {
             skills_capable: false,
         }),
     );
-    let bridges = build_tool_bridges(&pool);
+    let bridges = super::build_tool_bridges(&pool);
     assert_eq!(bridges.len(), 1);
     assert!(!bridges[0].visible_to_model());
 }
@@ -293,7 +301,7 @@ fn test_build_tool_bridges_filters_app_only_tool_from_model_catalog() {
 #[test]
 fn test_build_tool_bridges_empty_pool() {
     let pool = Arc::new(McpClientPool::new_empty());
-    let bridges = build_tool_bridges(&pool);
+    let bridges = super::build_tool_bridges(&pool);
     assert!(bridges.is_empty());
 }
 
@@ -350,8 +358,8 @@ fn typed_bridges_apply_declared_direct_only_for_builtin_instances() {
         ),
     );
 
-    let typed = build_typed_tool_bridges(&pool);
-    let boxed = build_tool_bridges(&pool);
+    let typed = super::build_typed_tool_bridges(&pool);
+    let boxed = super::build_tool_bridges(&pool);
     assert_eq!(boxed.len(), typed.len());
 
     let direct_of = |name: &str| {
@@ -382,8 +390,8 @@ fn typed_and_deferred_builders_differ_only_in_direct_flag() {
         .write()
         .insert("web".to_string(), Arc::clone(&handle));
 
-    let mut direct = build_typed_tool_bridges(&pool);
-    let mut deferred = build_deferred_tool_bridges(&pool);
+    let mut direct = super::build_typed_tool_bridges(&pool);
+    let mut deferred = super::build_deferred_tool_bridges(&pool);
     assert_eq!(direct.len(), 1);
     assert_eq!(deferred.len(), 1);
     assert!(direct[0].is_direct());
@@ -399,9 +407,12 @@ fn typed_and_deferred_builders_differ_only_in_direct_flag() {
     assert_eq!(direct[0].parameters(), deferred[0].parameters());
     assert_eq!(direct[0].visible_to_model(), deferred[0].visible_to_model());
     // generation 与 binding leases 传递不得因提取 deferred 版本而丢失。
-    for bridge in direct.iter_mut().chain(deferred.iter_mut()) {
-        assert_eq!(bridge.server_generation, pool.handle_generation(&handle));
-        assert!(bridge.binding_leases.is_some());
+    {
+        let combined_direct = direct.iter_mut().chain(deferred.iter_mut());
+        for bridge in combined_direct {
+            assert_eq!(bridge.server_generation, pool.handle_generation(&handle));
+            assert!(bridge.binding_leases.is_some());
+        }
     }
 }
 
@@ -936,56 +947,4 @@ async fn successful_result_carries_raw_without_inferring_failure_from_text() {
     converge_raw_result_fixture(transport, service).await;
 }
 
-// ── M7：单项工具 description 字节预算 ────────────────────────────────────────
-
-/// 外部 server 的巨型 description 必须被截到预算内，且截断标记计入预算。
-#[test]
-fn oversized_tool_description_is_bounded_within_budget() {
-    let raw = "d".repeat(MAX_TOOL_DESCRIPTION_BYTES * 3 + 7);
-    let tool = make_tool("huge", Some(raw.as_str()));
-    let handle = make_disconnected_handle("fs");
-    let bridge = McpToolBridge::new("fs", &tool, handle);
-    let description = bridge.description();
-    assert!(
-        description.len() <= MAX_TOOL_DESCRIPTION_BYTES,
-        "description 必须落在预算内: {} > {}",
-        description.len(),
-        MAX_TOOL_DESCRIPTION_BYTES
-    );
-    assert!(
-        description.ends_with(&format!(
-            "… [description truncated: {} bytes total]",
-            raw.len() + "[MCP:fs] ".len()
-        )),
-        "截断标记必须给出总长度: {}",
-        &description[description.len().saturating_sub(80)..]
-    );
-    assert!(description.starts_with("[MCP:fs] ddd"));
-}
-
-/// 多字节 description 的截断必须落在 UTF-8 边界上。
-#[test]
-fn oversized_multibyte_description_truncates_on_char_boundary() {
-    let raw = "描".repeat(MAX_TOOL_DESCRIPTION_BYTES);
-    let tool = make_tool("huge", Some(raw.as_str()));
-    let handle = make_disconnected_handle("fs");
-    let bridge = McpToolBridge::new("fs", &tool, handle);
-    let description = bridge.description();
-    assert!(description.len() <= MAX_TOOL_DESCRIPTION_BYTES);
-    assert!(!description.contains('\u{FFFD}'));
-    let marker_at = description.find('…').unwrap();
-    assert_eq!(
-        &description[..marker_at].len() % 3,
-        0,
-        "正文截断必须落在 3 字节字符边界"
-    );
-}
-
-/// 预算内的 description 逐字保持既有格式。
-#[test]
-fn small_tool_description_is_unchanged() {
-    let tool = make_tool("read_file", Some("Read a file"));
-    let handle = make_disconnected_handle("fs");
-    let bridge = McpToolBridge::new("fs", &tool, handle);
-    assert_eq!(bridge.description(), "[MCP:fs] Read a file");
-}
+include!("tool_bridge_test/description_budgets.rs");

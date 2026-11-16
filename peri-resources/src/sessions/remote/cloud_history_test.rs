@@ -23,10 +23,7 @@ use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::session_resources::{RewindBoundary, SessionResourceErrorKind};
 use peri_acp_types::store::{CompactionChange, PersistedPayload};
 
-use super::cloud_tests::{
-    check, failure, session_input, synth_binding, synth_flags, synth_thread, unique_run_label,
-    with_cleanup, CloudTarget,
-};
+use super::cloud_tests::CloudTarget;
 use super::mutation::StoreAccess;
 use crate::sessions::data::SessionDataPort;
 
@@ -35,12 +32,12 @@ use crate::sessions::data::SessionDataPort;
 #[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
 async fn cloud_history_behaviors_round_trip() {
     let target = CloudTarget::load();
-    let run = unique_run_label("peri-hist");
+    let run = super::cloud_tests::unique_run_label("peri-hist");
     let mut out = target.out();
     out.push("experiment=history".to_owned());
     out.push(format!("run_prefix_len={}", run.len()));
     out.flush();
-    let result = with_cleanup(&target, &run, || async {
+    let result = super::cloud_tests::with_cleanup(&target, &run, || async {
         history_flow(&target, &run).await
     })
     .await;
@@ -58,26 +55,27 @@ async fn history_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
     let writer = target
         .session_data(StoreAccess::ReadWrite)
         .await
-        .map_err(failure)?;
-    let root = synth_thread(&format!("{run}-hist"));
+        .map_err(super::cloud_tests::failure)?;
+    let root = super::cloud_tests::synth_thread(&format!("{run}-hist"));
     let created_at = chrono::Utc::now().to_rfc3339();
     let frozen = format!("{{\"frozen\":\"{run}\"}}");
-    let binding = synth_binding();
+    let binding = super::cloud_tests::synth_binding();
 
     // 标题故意留空：自动标题规则只在 `title IS NULL` 时补一次。
-    let mut new_session = session_input(root.as_str(), &created_at, &binding, &frozen, None);
+    let mut new_session =
+        super::cloud_tests::session_input(root.as_str(), &created_at, &binding, &frozen, None);
     new_session.meta.title = None;
     writer
         .save_new_session(&new_session)
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
 
     let first = PersistedPayload::Message(BaseMessage::human("first question"));
     let second = PersistedPayload::Message(BaseMessage::ai("second answer"));
     writer
         .append_history(&root, &[first.clone(), second.clone()])
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
 
     // 批内重复 id：发请求前就拒绝（同一文案），不落任何行。
     let repeated = PersistedPayload::Message(BaseMessage::human("repeated"));
@@ -85,7 +83,7 @@ async fn history_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
         .append_history(&root, &[repeated.clone(), repeated.clone()])
         .await
         .expect_err("a batch that repeats a message id must fail");
-    check(
+    super::cloud_tests::check(
         matches!(
             duplicate.kind(),
             SessionResourceErrorKind::InvalidInput { .. }
@@ -99,7 +97,7 @@ async fn history_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
         .append_history(&root, &[must_not_land.clone(), first.clone()])
         .await
         .expect_err("a batch that conflicts with an existing primary key must fail");
-    check(
+    super::cloud_tests::check(
         matches!(
             conflict.kind(),
             SessionResourceErrorKind::InvalidInput { .. }
@@ -114,15 +112,18 @@ async fn history_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
     writer
         .append_history(&root, &[repeat_one.clone(), repeat_two.clone()])
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
 
     // 重连（只读）复核：四条、顺序稳定、计数重数、自动标题已补。
     let reader = target
         .session_data(StoreAccess::ReadOnly)
         .await
-        .map_err(failure)?;
-    let snapshot = reader.load_snapshot(&root).await.map_err(failure)?;
-    check(
+        .map_err(super::cloud_tests::failure)?;
+    let snapshot = reader
+        .load_snapshot(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         snapshot
             .payloads
             .iter()
@@ -131,38 +132,44 @@ async fn history_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
             == vec![first.id(), second.id(), repeat_one.id(), repeat_two.id()],
         "appended payloads are missing, reordered, or partially landed",
     )?;
-    check(
+    super::cloud_tests::check(
         !snapshot
             .payloads
             .iter()
             .any(|payload| payload.id() == must_not_land.id()),
         "a rolled-back batch left a row behind",
     )?;
-    check(
+    super::cloud_tests::check(
         snapshot.meta.message_count == 4,
         "message_count is not the recount of the stored rows",
     )?;
-    check(
+    super::cloud_tests::check(
         snapshot.meta.title.as_deref() == Some("first question"),
         "automatic title was not filled from the first human message",
     )?;
-    check(
+    super::cloud_tests::check(
         snapshot.flags.is_empty(),
         "default flags must not be reported as a derived view",
     )?;
 
     // 投影：定向 flags。
     writer
-        .apply_message_projections(&root, &[(first.id(), synth_flags(true, false))])
+        .apply_message_projections(
+            &root,
+            &[(first.id(), super::cloud_tests::synth_flags(true, false))],
+        )
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     // 目标不属于本会话：拒绝，且不改动已经生效的那一条。
     let foreign = PersistedPayload::Message(BaseMessage::human("foreign"));
     let missing = writer
-        .apply_message_projections(&root, &[(foreign.id(), synth_flags(true, true))])
+        .apply_message_projections(
+            &root,
+            &[(foreign.id(), super::cloud_tests::synth_flags(true, true))],
+        )
         .await
         .expect_err("a projection target outside this session must fail");
-    check(
+    super::cloud_tests::check(
         matches!(
             missing.kind(),
             SessionResourceErrorKind::InvalidInput { .. }
@@ -177,46 +184,49 @@ async fn history_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
         .apply_compaction(
             &root,
             &CompactionChange {
-                flag_updates: vec![(second.id(), synth_flags(false, true))],
+                flag_updates: vec![(second.id(), super::cloud_tests::synth_flags(false, true))],
                 appended_messages: vec![summary.clone()],
             },
         )
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     // 第二次 compact：摘要正文相同但消息 id 不同，同样必须落地（不能被当成重放跳过）。
     writer
         .apply_compaction(
             &root,
             &CompactionChange {
-                flag_updates: vec![(second.id(), synth_flags(false, true))],
+                flag_updates: vec![(second.id(), super::cloud_tests::synth_flags(false, true))],
                 appended_messages: vec![repeated_summary.clone()],
             },
         )
         .await
-        .map_err(failure)?;
-    let compacted = reader.load_snapshot(&root).await.map_err(failure)?;
-    check(
+        .map_err(super::cloud_tests::failure)?;
+    let compacted = reader
+        .load_snapshot(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         compacted
             .flags
             .get(&first.id())
             .is_some_and(|f| f.truncated),
         "projection flag is not visible after reconnect",
     )?;
-    check(
+    super::cloud_tests::check(
         compacted
             .flags
             .get(&second.id())
             .is_some_and(|f| f.excluded),
         "compaction flag update is not visible after reconnect",
     )?;
-    check(
+    super::cloud_tests::check(
         compacted
             .payloads
             .iter()
             .any(|payload| payload.id() == repeated_summary.id()),
         "a repeated compaction summary was dropped as a replay",
     )?;
-    check(
+    super::cloud_tests::check(
         compacted.payloads.len() == 6 && compacted.meta.message_count == 6,
         "compaction appended message or recount did not land",
     )?;
@@ -225,9 +235,12 @@ async fn history_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
     writer
         .rewind_history(&root, RewindBoundary::KeepThrough(second.id()), &[])
         .await
-        .map_err(failure)?;
-    let kept = reader.load_snapshot(&root).await.map_err(failure)?;
-    check(
+        .map_err(super::cloud_tests::failure)?;
+    let kept = reader
+        .load_snapshot(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         kept.payloads
             .iter()
             .map(PersistedPayload::id)
@@ -241,9 +254,12 @@ async fn history_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
     writer
         .rewind_history(&root, RewindBoundary::KeepThrough(foreign.id()), &[])
         .await
-        .map_err(failure)?;
-    let unchanged = reader.load_snapshot(&root).await.map_err(failure)?;
-    check(
+        .map_err(super::cloud_tests::failure)?;
+    let unchanged = reader
+        .load_snapshot(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         unchanged.payloads.len() == 2 && unchanged.meta.message_count == 2,
         "rewind with an unknown boundary must not change anything",
     )?;
@@ -252,9 +268,12 @@ async fn history_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
     writer
         .rewind_history(&root, RewindBoundary::RemoveFrom(second.id()), &[])
         .await
-        .map_err(failure)?;
-    let removed = reader.load_snapshot(&root).await.map_err(failure)?;
-    check(
+        .map_err(super::cloud_tests::failure)?;
+    let removed = reader
+        .load_snapshot(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         removed
             .payloads
             .iter()
@@ -268,21 +287,24 @@ async fn history_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
     writer
         .remove_history_entries(&root, &[first.id()])
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     writer
         .remove_history_entries(&root, &[first.id()])
         .await
-        .map_err(failure)?;
-    let empty = reader.load_snapshot(&root).await.map_err(failure)?;
-    check(
+        .map_err(super::cloud_tests::failure)?;
+    let empty = reader
+        .load_snapshot(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         empty.payloads.is_empty() && empty.meta.message_count == 0,
         "exact removal did not clear the history and its count",
     )?;
 
     // 跨会话条目：拒绝，且不删别的会话的行。
-    let other = synth_thread(&format!("{run}-other"));
+    let other = super::cloud_tests::synth_thread(&format!("{run}-other"));
     writer
-        .save_new_session(&session_input(
+        .save_new_session(&super::cloud_tests::session_input(
             other.as_str(),
             &created_at,
             &binding,
@@ -290,25 +312,28 @@ async fn history_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
             None,
         ))
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let other_message = PersistedPayload::Message(BaseMessage::human("other session entry"));
     writer
         .append_history(&other, std::slice::from_ref(&other_message))
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let cross = writer
         .remove_history_entries(&root, &[other_message.id()])
         .await
         .expect_err("removing another session's entry must fail");
-    check(
+    super::cloud_tests::check(
         matches!(cross.kind(), SessionResourceErrorKind::InvalidInput { .. }),
         "cross-session removal must be InvalidInput",
     )?;
-    let other_kept = reader.load_snapshot(&other).await.map_err(failure)?;
-    check(
+    let other_kept = reader
+        .load_snapshot(&other)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         other_kept.payloads.len() == 1,
         "cross-session removal touched the other session",
     )?;
 
-    writer.close().await.map_err(failure)
+    writer.close().await.map_err(super::cloud_tests::failure)
 }

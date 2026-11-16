@@ -2,10 +2,18 @@ use std::mem::size_of;
 
 use ratatui::text::{Line, Span};
 
-use super::*;
+use super::Arc;
+use super::Color;
+use super::Cow;
+use super::MarkdownRenderCache;
+use super::MarkdownSegment;
+use super::Palette;
+use super::ParsedBlock;
+use super::TableData;
 
 fn cache_for_source(source: &str) -> MarkdownRenderCache {
-    let (segments, blocks) = parse_markdown_piece(source, 80, Palette::default(), Color::Reset);
+    let (segments, blocks) =
+        super::parse_markdown_piece(source, 80, Palette::default(), Color::Reset);
     MarkdownRenderCache {
         chunk_source: source.to_owned(),
         stable_chunk_blocks: vec![blocks],

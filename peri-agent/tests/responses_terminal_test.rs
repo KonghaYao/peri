@@ -1,34 +1,37 @@
 //! Real HTTP/SSE -> Responses codec -> Agent bridge -> RCRA terminal semantics.
 
-use std::{
-    collections::BTreeMap,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::collections::BTreeMap;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 
-use peri_agent::{
-    agent::{
-        events_v2::{EventBus, ObserveEvent, RenderEvent},
-        model_bridge::AgentModelBridge,
-        react::AgentOutput,
-        stages::{run_react_loop, LoopResult, StageContext},
-    },
-    error::{AgentError, AgentResult},
-    messages::BaseMessage,
-    middleware::{capabilities::AfterAgentState, Middleware, MiddlewareChain},
-    session::{FrozenContext, MessageSource, QueuedMessage, Session},
-    tools::{BaseTool, ToolContext},
-};
+use peri_agent::agent::events_v2::EventBus;
+use peri_agent::agent::events_v2::ObserveEvent;
+use peri_agent::agent::events_v2::RenderEvent;
+use peri_agent::agent::model_bridge::AgentModelBridge;
+use peri_agent::agent::react::AgentOutput;
+
+use peri_agent::agent::stages::LoopResult;
+use peri_agent::agent::stages::StageContext;
+use peri_agent::error::AgentError;
+use peri_agent::error::AgentResult;
+use peri_agent::messages::BaseMessage;
+use peri_agent::middleware::capabilities::AfterAgentState;
+use peri_agent::middleware::Middleware;
+use peri_agent::middleware::MiddlewareChain;
+use peri_agent::session::FrozenContext;
+use peri_agent::session::MessageSource;
+use peri_agent::session::QueuedMessage;
+use peri_agent::session::Session;
+use peri_agent::tools::BaseTool;
+use peri_agent::tools::ToolContext;
 use peri_model::{ModelRuntimeConfig, ResponsesConfig, ResponsesModel, RetryConfig};
 use serde_json::{json, Value};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    time::timeout,
-};
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
+use tokio::net::TcpStream;
 
 const PARTIAL: &str = "已保留的部分回答";
 
@@ -117,7 +120,10 @@ async fn read_request(socket: &mut TcpStream) -> Value {
     let mut bytes = Vec::new();
     loop {
         let mut chunk = [0_u8; 4096];
-        let read = socket.read(&mut chunk).await.unwrap();
+        let read = socket
+            .read(&mut chunk)
+            .await
+            .expect("the local HTTP fixture connection must yield its request bytes");
         assert_ne!(read, 0, "HTTP request must contain its full body");
         bytes.extend_from_slice(&chunk[..read]);
         assert!(
@@ -127,19 +133,21 @@ async fn read_request(socket: &mut TcpStream) -> Value {
         let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") else {
             continue;
         };
-        let headers = std::str::from_utf8(&bytes[..end]).unwrap();
+        let headers =
+            std::str::from_utf8(&bytes[..end]).expect("the fixture text must be valid UTF-8");
         assert!(headers.starts_with("POST /v1/responses HTTP/1.1"));
         let length: usize = headers
             .lines()
             .filter_map(|line| line.split_once(':'))
             .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-            .unwrap()
+            .expect("the find fixture result is required for this assertion")
             .1
             .trim()
             .parse()
-            .unwrap();
+            .expect("the parse fixture result is required for this assertion");
         if bytes.len() >= end + 4 + length {
-            return serde_json::from_slice(&bytes[end + 4..end + 4 + length]).unwrap();
+            return serde_json::from_slice(&bytes[end + 4..end + 4 + length])
+                .expect("from_slice must accept this test fixture representation");
         }
     }
 }
@@ -156,8 +164,15 @@ struct Evidence {
 }
 
 async fn run_script(responses: Vec<String>) -> Evidence {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}/v1/", listener.local_addr().unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("the bind fixture result is required for this assertion");
+    let endpoint = format!(
+        "http://{}/v1/",
+        listener
+            .local_addr()
+            .expect("the local addr fixture result is required for this assertion")
+    );
     let runtime = ModelRuntimeConfig::default().with_retry(
         RetryConfig::default()
             .with_max_attempts(3)
@@ -165,12 +180,23 @@ async fn run_script(responses: Vec<String>) -> Evidence {
             .with_jitter(false),
     );
     let model = ResponsesModel::new(
-        ResponsesConfig::new(endpoint.parse().unwrap(), "fixture-key", "fixture-model")
-            .with_runtime(runtime),
+        ResponsesConfig::new(
+            endpoint
+                .parse()
+                .expect("the parse fixture result is required for this assertion"),
+            "fixture-key",
+            "fixture-model",
+        )
+        .with_runtime(runtime),
     );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("the temporary test directory must be available");
     let session = Session::new(
-        Arc::from(directory.path().to_str().unwrap()),
+        Arc::from(
+            directory
+                .path()
+                .to_str()
+                .expect("the fixture text must be valid UTF-8"),
+        ),
         FrozenContext::builder().build(),
         None,
     );
@@ -196,20 +222,20 @@ async fn run_script(responses: Vec<String>) -> Evidence {
         BaseMessage::human("Count once, then finish"),
     ));
     let mut requests = Vec::new();
-    let result = timeout(Duration::from_secs(5), async {
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
         let serve = async {
             loop {
-                let (mut socket, _) = listener.accept().await.unwrap();
+                let (mut socket, _) = listener.accept().await.expect("the accept fixture result is required for this assertion");
                 requests.push(read_request(&mut socket).await);
                 let body = &responses[(requests.len() - 1).min(responses.len() - 1)];
                 let header = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
-                socket.write_all(header.as_bytes()).await.unwrap();
-                socket.write_all(body.as_bytes()).await.unwrap();
-                socket.shutdown().await.unwrap();
+                socket.write_all(header.as_bytes()).await.expect("the write all fixture result is required for this assertion");
+                socket.write_all(body.as_bytes()).await.expect("the write all fixture result is required for this assertion");
+                socket.shutdown().await.expect("the shutdown fixture result is required for this assertion");
             }
         };
         tokio::select! {
-            result = run_react_loop(context.clone(), 4) => result,
+            result = peri_agent::agent::stages::run_react_loop(context.clone(), 4) => result,
             _ = serve => unreachable!("fixture serves until the Agent finishes"),
         }
     }).await.expect("terminal handling must finish without another model request");
@@ -318,7 +344,9 @@ async fn max_output_tokens_preserves_usage_and_continues_without_partial_tool_ov
     assert_eq!(evidence.executions, 0);
     assert_eq!(evidence.completions, 1, "截断不触发完成 hook");
     assert_discarded_tool_closed(&evidence.events);
-    let input = evidence.requests[1]["input"].as_array().unwrap();
+    let input = evidence.requests[1]["input"]
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     assert!(!input
         .iter()
         .any(|item| item["type"] == "function_call" || item["type"] == "function_call_output"));
@@ -349,11 +377,11 @@ async fn max_output_tokens_preserves_usage_and_continues_without_partial_tool_ov
         .observations
         .iter()
         .find(|event| matches!(event, ObserveEvent::LlmCallEnd { .. }))
-        .unwrap();
+        .expect("the find fixture result is required for this assertion");
     assert!(matches!(first_end, ObserveEvent::LlmCallEnd {
         input_tokens:30, output_tokens:8, cache_read_input_tokens:Some(12),
         cache_creation_input_tokens:Some(3), output, ..
-    } if serde_json::from_str::<Value>(output).unwrap()["stop_reason"] == "max_tokens"));
+    } if serde_json::from_str::<Value>(output).expect("the output fixture result is required for this assertion")["stop_reason"] == "max_tokens"));
 }
 
 #[tokio::test]
@@ -394,7 +422,7 @@ async fn repeated_max_output_tokens_exhausts_existing_budget_over_real_http() {
     for request in &evidence.requests {
         assert!(!request["input"]
             .as_array()
-            .unwrap()
+            .expect("the as array fixture result is required for this assertion")
             .iter()
             .any(|item| item["type"] == "function_call"));
     }
@@ -451,7 +479,9 @@ async fn incomplete_retains_complete_tool_but_closes_discarded_tool_over_real_ht
             .count(),
         1
     );
-    let input = evidence.requests[1]["input"].as_array().unwrap();
+    let input = evidence.requests[1]["input"]
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     assert!(!input.iter().any(|item| item["call_id"] == "call_execute"));
     assert_eq!(
         input
@@ -524,7 +554,7 @@ async fn incomplete_without_text_drops_partial_reasoning_and_tools_over_real_htt
     assert_discarded_tool_closed(&evidence.events);
     assert!(!evidence.requests[1]["input"]
         .as_array()
-        .unwrap()
+        .expect("the as array fixture result is required for this assertion")
         .iter()
         .any(|item| item["role"] == "assistant"
             || item["type"] == "reasoning"
@@ -569,7 +599,9 @@ async fn completed_tool_executes_once_and_reaches_followup_over_real_http() {
     assert_eq!(evidence.executions, 1);
     assert_eq!(evidence.completions, 1);
     assert_eq!(evidence.requests.len(), 2);
-    let input = evidence.requests[1]["input"].as_array().unwrap();
+    let input = evidence.requests[1]["input"]
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     assert_eq!(
         input
             .iter()

@@ -1,19 +1,20 @@
 //! Tests for install_counts
 
-use super::*;
+use super::CacheFormat;
+use super::CACHE_FILE;
 
 #[test]
 fn test_format_install_count() {
-    assert_eq!(format_install_count(0), "0");
-    assert_eq!(format_install_count(42), "42");
-    assert_eq!(format_install_count(999), "999");
-    assert_eq!(format_install_count(1000), "1K");
-    assert_eq!(format_install_count(1200), "1.2K");
-    assert_eq!(format_install_count(36200), "36.2K");
-    assert_eq!(format_install_count(998_999), "999K");
-    assert_eq!(format_install_count(999_999), "1M");
-    assert_eq!(format_install_count(1_000_000), "1M");
-    assert_eq!(format_install_count(1_500_000), "1.5M");
+    assert_eq!(super::format_install_count(0), "0");
+    assert_eq!(super::format_install_count(42), "42");
+    assert_eq!(super::format_install_count(999), "999");
+    assert_eq!(super::format_install_count(1000), "1K");
+    assert_eq!(super::format_install_count(1200), "1.2K");
+    assert_eq!(super::format_install_count(36200), "36.2K");
+    assert_eq!(super::format_install_count(998_999), "999K");
+    assert_eq!(super::format_install_count(999_999), "1M");
+    assert_eq!(super::format_install_count(1_000_000), "1M");
+    assert_eq!(super::format_install_count(1_500_000), "1.5M");
 }
 
 #[test]

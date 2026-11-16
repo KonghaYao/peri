@@ -5,8 +5,7 @@
 //! （由会话冻结模板继承，policy 里的 `base_prompt` / `language` 表达继承面，
 //! 不是子链声明）。
 
-use super::*;
-use crate::prompt_policy::subagent_chain_capabilities;
+use crate::prompt_policy;
 use crate::subagent::SubAgentMiddlewareConfig;
 use peri_agent::middleware::chain::MiddlewareChain;
 use peri_agent::middleware::prompt_sections::SectionCapabilities;
@@ -26,12 +25,12 @@ fn subagent_capability_policy_matches_real_assembly() {
             ..SubAgentMiddlewareConfig::for_fork("/tmp/parity")
         };
         let mut chain = MiddlewareChain::new();
-        for middleware in build_subagent_middlewares(config) {
+        for middleware in crate::subagent::tool::build_subagent_middlewares(config) {
             chain.add(middleware);
         }
 
         let facts = SectionCapabilities::from_sections(&chain.collect_prompt_sections());
-        let expected = subagent_chain_capabilities(&set);
+        let expected = prompt_policy::subagent_chain_capabilities(&set);
         assert_eq!(facts.approval, expected.approval, "disabled={disabled:?}");
         assert_eq!(facts.ask_user, expected.ask_user, "disabled={disabled:?}");
         assert_eq!(facts.subagent, expected.subagent, "disabled={disabled:?}");

@@ -1,8 +1,9 @@
 //! Snapshot the live session's confirmed consumption and the published tool policy.
-use super::StageContext;
 use crate::agent::compact_v2::planner::{ArchivePlanningScope, MicroPlanningFacts};
+use crate::agent::stages::context::StageContext;
 use crate::error::AgentResult;
-use crate::session::{async_result_mailbox::ProtectedResults, MessageTranscript};
+use crate::session::async_result_mailbox::ProtectedResults;
+use crate::session::MessageTranscript;
 use peri_acp_types::context_archive::ArchiveMetadataQuery;
 use peri_acp_types::session_resources::SessionResourceErrorKind;
 
@@ -39,7 +40,7 @@ pub(super) async fn snapshot(
     };
     if !tools
         .iter()
-        .any(|tool| super::archive_capability::available(tool.as_ref()))
+        .any(|tool| crate::agent::stages::archive_capability::available(tool.as_ref()))
     {
         return Ok(facts);
     }

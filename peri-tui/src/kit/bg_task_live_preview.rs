@@ -150,7 +150,9 @@ pub(super) fn enforce(map: &mut HashMap<String, BgLiveDetail>) {
             })
             .map(|(id, _)| id.clone());
         let Some(id) = candidate else { break };
-        let detail = map.get_mut(&id).unwrap();
+        let detail = map
+            .get_mut(&id)
+            .expect("the preview identifier came from this map while its write guard is held");
         bytes = bytes.saturating_sub(detail.preview_reserved());
         clear_body(detail);
     }

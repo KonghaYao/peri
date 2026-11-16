@@ -1,6 +1,7 @@
 //! Tests for edit
 
-use super::*;
+use crate::filesystem::edit::EditFileTool;
+use peri_agent::tools::BaseTool;
 
 #[tokio::test]
 async fn test_edit_file_single_replace() {
@@ -327,7 +328,7 @@ async fn test_edit_rejects_sentinel_joined_by_replacement() {
         .await
         .unwrap_err()
         .to_string();
-    assert_eq!(err, super::SENTINEL_REJECTION);
+    assert_eq!(err, crate::filesystem::transaction::SENTINEL_REJECTION);
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
         "... [TOKEN 字符已省略] ..."

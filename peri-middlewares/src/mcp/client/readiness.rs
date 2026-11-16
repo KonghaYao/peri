@@ -18,7 +18,11 @@
 //! - 证据只描述提交时刻的事实；是否属于**当前代**由读取方核对，旧代 Arc 永远
 //!   不被接受。
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::collections::HashMap;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
+use std::sync::Arc;
+use std::time::Duration;
 
 use peri_acp_types::plugin::McpServerConfig;
 use peri_agent::agent::AgentCancellationToken;
@@ -138,8 +142,8 @@ pub(crate) struct NegotiatedSystemMcp {
     pub generation: u64,
 }
 
-impl std::fmt::Debug for NegotiatedSystemMcp {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for NegotiatedSystemMcp {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("NegotiatedSystemMcp")
             .field("server", &self.requirement.server)
@@ -303,7 +307,7 @@ impl SystemReadinessTracker {
 
 /// 当前登记代际；句柄不在表中时返回 `None`（`0` 是「未登记」哨兵，不算身份）。
 fn current_generation(pool: &McpClientPool, server: &str) -> Option<u64> {
-    pool.get_client(server)
+    pool.client(server)
         .map(|handle| pool.handle_generation(&handle))
 }
 
@@ -472,7 +476,7 @@ impl McpClientPool {
             });
         }
         // 短临界区取出句柄快照后不再持锁，避免与提交路径的锁序交错。
-        let Some(handle) = self.get_client(server) else {
+        let Some(handle) = self.client(server) else {
             return Ok(None);
         };
         match &handle.status {

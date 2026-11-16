@@ -1,13 +1,14 @@
 //! Act 阶段 — 工具执行或回答
 //!
 //! 根据 Reason 结果决定：
-//! - 有 tool_calls → 通过 `tool_dispatch::dispatch_tools` 并发执行 + 写入 transcript
+//! - 有 tool_calls → 通过 `crate::agent::stages::tool_dispatch::dispatch_tools` 并发执行 + 写入 transcript
 //! - 无 tool_calls → 提交响应；截断响应不触发完成 hook，由 loop 决定有界续跑
 
-use super::middleware_runner::run_after_agent;
-use super::tool_dispatch::dispatch_tools;
-use super::{ActInput, ActOutput, StageContext};
 use crate::agent::events_v2::{RenderEvent, StateEvent};
+use crate::agent::stages::context::StageContext;
+
+use crate::agent::stages::ActInput;
+use crate::agent::stages::ActOutput;
 use crate::error::AgentResult;
 
 /// emit TurnCompleted（迭代边界提交信号）：从 transcript 读快照，供成功/失败路径共用，
@@ -136,7 +137,14 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
     if has_tool_calls {
         // 工具调用路径：dispatch_tools 处理审批 + 并发执行 + 写入 transcript
         let cancel = ctx.session.turn.cancel_token.clone();
-        let outcome = match dispatch_tools(ctx, &input.reasoning, &input.catalog, &cancel).await {
+        let outcome = match crate::agent::stages::tool_dispatch::dispatch_tools(
+            ctx,
+            &input.reasoning,
+            &input.catalog,
+            &cancel,
+        )
+        .await
+        {
             Ok(outcome) => outcome,
             Err(e) => {
                 // 镜像修复（S5.3）：dispatch 失败（cancel / middleware 错误）时
@@ -243,17 +251,18 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
             })
             .collect();
 
-        let output_after = match run_after_agent(ctx, output).await {
-            Ok(output) => output,
-            Err(e) => {
-                // S5.3：最终回答已 append 到 transcript（:97），先 emit TurnCompleted
-                // （从 transcript 读快照，RwLock 无死锁风险——append 已释放锁），
-                // 再传播错误，避免 TUI committed 视图与 transcript/持久化不一致。
-                emit_turn_completed(ctx).await;
-                emit_goal_snapshot(ctx);
-                return Err(e);
-            }
-        };
+        let output_after =
+            match crate::agent::stages::middleware_runner::run_after_agent(ctx, output).await {
+                Ok(output) => output,
+                Err(e) => {
+                    // S5.3：最终回答已 append 到 transcript（:97），先 emit TurnCompleted
+                    // （从 transcript 读快照，RwLock 无死锁风险——append 已释放锁），
+                    // 再传播错误，避免 TUI committed 视图与 transcript/持久化不一致。
+                    emit_turn_completed(ctx).await;
+                    emit_goal_snapshot(ctx);
+                    return Err(e);
+                }
+            };
 
         // 迭代边界提交信号：emit TurnCompleted 携带 transcript 快照（含本轮最终回答）
         //

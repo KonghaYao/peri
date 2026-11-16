@@ -2,7 +2,10 @@
 //! 数组形态）、缺省字段默认值、四类 kind、externally tagged wire 形态锁定、
 //! skip_serializing_if 生效、snake_case 键名稳定。
 
-use super::*;
+use crate::command::args_schema::ArgKind;
+use crate::command::args_schema::ArgSpec;
+use crate::command::args_schema::ArgsSchema;
+use crate::command::args_schema::FlagSpec;
 
 /// 完整形状 fixture：positionals×1 + named×2 + flags×1 混合。
 fn full_schema() -> ArgsSchema {

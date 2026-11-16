@@ -1,7 +1,26 @@
-use super::*;
 use crate::session::test_resources::mock::MockSessionResources;
+
+use crate::session::user_input_mailbox::window::TERMINAL_CAPACITY;
+use crate::session::user_input_mailbox::UserInputAttemptOutcome;
+use crate::session::user_input_mailbox::UserInputMailbox;
+use crate::session::user_input_mailbox::UserInputQueueError;
 use peri_acp_types::identity::{AttemptId, SessionSeq};
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::DispatchUserInputsRequest;
+use peri_acp_types::session::EnqueueUserInputRequest;
+use peri_acp_types::session::MessageSource;
+use peri_acp_types::session::MqCancelOutcome;
+use peri_acp_types::session::SessionInbox;
+use peri_acp_types::session::TakeBackUserInputRequest;
+use peri_acp_types::session::TurnId;
+
+use peri_acp_types::session::UserInputState;
 use peri_acp_types::session::{ExecutionBinding, MessageQueue, MqReceivePurpose};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 #[path = "user_input_mailbox_terminal_test.rs"]
 mod terminal_tests;
@@ -67,9 +86,11 @@ fn test_mailbox_running_enqueue_never_wakes_consumption_queue() {
     let (mailbox, inbox) = make_mailbox();
     mailbox
         .attach_external_attempt_sync(CancellationToken::new(), false)
-        .unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
     let input = make_input(&mailbox, "等待下一次 idle");
-    let receipt = mailbox.enqueue_sync(&input).unwrap();
+    let receipt = mailbox
+        .enqueue_sync(&input)
+        .expect("the enqueue sync fixture result is required for this assertion");
     assert_eq!(
         receipt.results[0].state,
         UserInputState::Queued,
@@ -89,15 +110,21 @@ fn test_mailbox_running_enqueue_never_wakes_consumption_queue() {
 fn test_mailbox_idle_input_handoff_is_once_and_keeps_message_identity() {
     let (mailbox, inbox) = make_mailbox();
     let input = make_input(&mailbox, "空闲时立即处理");
-    mailbox.enqueue_sync(&input).unwrap();
+    mailbox
+        .enqueue_sync(&input)
+        .expect("the enqueue sync fixture result is required for this assertion");
     let second = make_input(&mailbox, "预留前的后续输入");
-    let receipt = mailbox.enqueue_sync(&second).unwrap();
+    let receipt = mailbox
+        .enqueue_sync(&second)
+        .expect("the enqueue sync fixture result is required for this assertion");
     assert_eq!(
         receipt.results[0].state,
         UserInputState::Queued,
         "尚未 reserve 也不能批量释放第二条普通输入"
     );
-    let ticket = mailbox.reserve_run().unwrap();
+    let ticket = mailbox
+        .reserve_run()
+        .expect("the reserve run fixture result is required for this assertion");
     assert!(
         mailbox.snapshot_sync().active_request_id.is_none(),
         "预留阶段还没有客户端执行身份"
@@ -123,7 +150,12 @@ fn test_mailbox_idle_input_handoff_is_once_and_keeps_message_identity() {
     let messages = inbox.queue_for_test().drain_all_sync();
     assert_eq!(messages.len(), 1, "相同输入只交接一次");
     assert_eq!(
-        messages[0].message().unwrap().id().as_uuid().to_string(),
+        messages[0]
+            .message()
+            .expect("the fixture entry must contain a message payload")
+            .id()
+            .as_uuid()
+            .to_string(),
         input.input_id,
         "canonical 消息保留准入身份"
     );
@@ -133,8 +165,12 @@ fn test_mailbox_idle_input_handoff_is_once_and_keeps_message_identity() {
 fn test_mailbox_failed_attached_attempt_recovers_unclaimed_and_clears_active_identity() {
     let (mailbox, inbox) = make_mailbox();
     let input = make_input(&mailbox, "装配失败");
-    mailbox.enqueue_sync(&input).unwrap();
-    let ticket = mailbox.reserve_run().unwrap();
+    mailbox
+        .enqueue_sync(&input)
+        .expect("the enqueue sync fixture result is required for this assertion");
+    let ticket = mailbox
+        .reserve_run()
+        .expect("the reserve run fixture result is required for this assertion");
     let cancel = CancellationToken::new();
     mailbox.attach_attempt_sync(&ticket, cancel.clone());
     assert!(
@@ -168,16 +204,18 @@ fn test_mailbox_single_dispatch_preserves_ordinary_queue_until_natural_completio
     let cancel = CancellationToken::new();
     let first = mailbox
         .attach_external_attempt_sync(cancel.clone(), false)
-        .unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
     let a = make_input(&mailbox, "A");
     let b = make_input(&mailbox, "B");
     let c = make_input(&mailbox, "C");
     for input in [&a, &b, &c] {
-        mailbox.enqueue_sync(input).unwrap();
+        mailbox
+            .enqueue_sync(input)
+            .expect("the enqueue sync fixture result is required for this assertion");
     }
     mailbox
         .dispatch_sync(&make_dispatch(&mailbox, &[&b]))
-        .unwrap();
+        .expect("the dispatch sync fixture result is required for this assertion");
     assert!(cancel.is_cancelled(), "单发请求中断真实执行");
     assert_eq!(
         mailbox
@@ -190,20 +228,30 @@ fn test_mailbox_single_dispatch_preserves_ordinary_queue_until_natural_completio
         "发送选择已提交，但 Receive 尚未领取"
     );
     mailbox.finish_attempt_sync(&first, UserInputAttemptOutcome::Interrupted);
-    let next = mailbox.reserve_run().unwrap();
+    let next = mailbox
+        .reserve_run()
+        .expect("the reserve run fixture result is required for this assertion");
     mailbox.attach_attempt_sync(&next, CancellationToken::new());
     let received = inbox.queue_for_test().drain_all_sync();
     assert_eq!(
         received
             .iter()
-            .map(|message| message.message().unwrap().content())
+            .map(|message| message
+                .message()
+                .expect("the fixture entry must contain a message payload")
+                .content())
             .collect::<Vec<_>>(),
         ["B"],
         "单发只交接选中 B"
     );
     let ids: Vec<_> = received
         .iter()
-        .map(|message| message.message().unwrap().id())
+        .map(|message| {
+            message
+                .message()
+                .expect("the fixture entry must contain a message payload")
+                .id()
+        })
         .collect();
     mailbox.mark_claimed_sync(&ids);
     mailbox.mark_delivered_sync(&ids);
@@ -219,18 +267,26 @@ fn test_mailbox_single_dispatch_preserves_ordinary_queue_until_natural_completio
     );
     mailbox.record_attempt_outcome(&next, UserInputAttemptOutcome::Completed);
     mailbox.finish_attempt_sync(&next, UserInputAttemptOutcome::Failed);
-    let last = mailbox.reserve_run().unwrap();
+    let last = mailbox
+        .reserve_run()
+        .expect("the reserve run fixture result is required for this assertion");
     mailbox.attach_attempt_sync(&last, CancellationToken::new());
     let received = inbox.queue_for_test().drain_all_sync();
     assert_eq!(
         received
             .iter()
-            .map(|message| message.message().unwrap().content())
+            .map(|message| message
+                .message()
+                .expect("the fixture entry must contain a message payload")
+                .content())
             .collect::<Vec<_>>(),
         ["A"],
         "自然成功只释放第一条普通待办"
     );
-    let id = received[0].message().unwrap().id();
+    let id = received[0]
+        .message()
+        .expect("the fixture entry must contain a message payload")
+        .id();
     mailbox.mark_claimed_sync(&[id]);
     mailbox.mark_delivered_sync(&[id]);
     assert_eq!(
@@ -238,12 +294,17 @@ fn test_mailbox_single_dispatch_preserves_ordinary_queue_until_natural_completio
         UserInputState::Queued
     );
     mailbox.finish_attempt_sync(&last, UserInputAttemptOutcome::Completed);
-    let next = mailbox.reserve_run().unwrap();
+    let next = mailbox
+        .reserve_run()
+        .expect("the reserve run fixture result is required for this assertion");
     mailbox.attach_attempt_sync(&next, CancellationToken::new());
     let received = inbox.queue_for_test().drain_all_sync();
     assert_eq!(received.len(), 1);
     assert_eq!(
-        received[0].message().unwrap().content(),
+        received[0]
+            .message()
+            .expect("the fixture entry must contain a message payload")
+            .content(),
         "C",
         "A 完成后才自动发送 C"
     );
@@ -254,39 +315,53 @@ fn test_mailbox_dispatch_snapshot_and_consecutive_commands_preserve_acceptance_o
     let (mailbox, inbox) = make_mailbox();
     let current = mailbox
         .attach_external_attempt_sync(CancellationToken::new(), false)
-        .unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
     let inputs: Vec<_> = ["A", "B", "C", "D"]
         .into_iter()
         .map(|text| make_input(&mailbox, text))
         .collect();
     for input in &inputs[..3] {
-        mailbox.enqueue_sync(input).unwrap();
+        mailbox
+            .enqueue_sync(input)
+            .expect("the enqueue sync fixture result is required for this assertion");
     }
     mailbox
         .dispatch_sync(&make_dispatch(&mailbox, &[&inputs[1]]))
-        .unwrap();
+        .expect("the dispatch sync fixture result is required for this assertion");
     mailbox
         .dispatch_sync(&make_dispatch(
             &mailbox,
             &[&inputs[2], &inputs[0], &inputs[1]],
         ))
-        .unwrap();
-    mailbox.enqueue_sync(&inputs[3]).unwrap();
+        .expect("the dispatch sync fixture result is required for this assertion");
+    mailbox
+        .enqueue_sync(&inputs[3])
+        .expect("the enqueue sync fixture result is required for this assertion");
     mailbox.finish_attempt_sync(&current, UserInputAttemptOutcome::Interrupted);
-    let next = mailbox.reserve_run().unwrap();
+    let next = mailbox
+        .reserve_run()
+        .expect("the reserve run fixture result is required for this assertion");
     mailbox.attach_attempt_sync(&next, CancellationToken::new());
     assert_eq!(
         inbox
             .queue_for_test()
             .drain_all_sync()
             .iter()
-            .map(|message| message.message().unwrap().content())
+            .map(|message| message
+                .message()
+                .expect("the fixture entry must contain a message payload")
+                .content())
             .collect::<Vec<_>>(),
         ["A", "B", "C"],
         "Receive 按服务端 (enqueued_at,id) 排序，发送选择不另建排序"
     );
     assert_eq!(
-        mailbox.snapshot_sync().items.last().unwrap().state,
+        mailbox
+            .snapshot_sync()
+            .items
+            .last()
+            .expect("mailbox snapshot sync fixture must contain the expected element")
+            .state,
         UserInputState::Queued,
         "快照点击后新 D 不加入 ALL"
     );
@@ -299,12 +374,17 @@ fn test_mailbox_snapshot_exposes_terminal_states_and_deduplicates_delivery() {
     let (mailbox, inbox) = make_mailbox();
     mailbox
         .attach_external_attempt_sync(CancellationToken::new(), false)
-        .unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
     let delivered_input = make_input(&mailbox, "已交付");
-    mailbox.enqueue_sync(&delivered_input).unwrap();
+    mailbox
+        .enqueue_sync(&delivered_input)
+        .expect("the enqueue sync fixture result is required for this assertion");
     mailbox.enter_idle_sync();
     let messages = inbox.queue_for_test().drain_all_sync();
-    let delivered_id = messages[0].message().unwrap().id();
+    let delivered_id = messages[0]
+        .message()
+        .expect("the fixture entry must contain a message payload")
+        .id();
     mailbox.mark_claimed_sync(&[delivered_id]);
     assert_eq!(mailbox.mark_delivered_sync(&[delivered_id]).len(), 1);
     assert!(
@@ -313,7 +393,9 @@ fn test_mailbox_snapshot_exposes_terminal_states_and_deduplicates_delivery() {
     );
 
     let withdrawn_input = make_input(&mailbox, "已撤回");
-    mailbox.enqueue_sync(&withdrawn_input).unwrap();
+    mailbox
+        .enqueue_sync(&withdrawn_input)
+        .expect("the enqueue sync fixture result is required for this assertion");
     mailbox
         .take_back_sync(&TakeBackUserInputRequest {
             session_id: "session".into(),
@@ -321,7 +403,7 @@ fn test_mailbox_snapshot_exposes_terminal_states_and_deduplicates_delivery() {
             command_id: "withdraw-terminal".into(),
             input_id: withdrawn_input.input_id.clone(),
         })
-        .unwrap();
+        .expect("the take back sync fixture result is required for this assertion");
 
     let snapshot = mailbox.snapshot_sync();
     assert!(snapshot.items.is_empty(), "终态不应继续出现在待发列表");
@@ -339,12 +421,17 @@ fn test_bind_delivery_sequence_orders_journal_and_is_idempotent() {
     let (mailbox, inbox) = make_mailbox();
     mailbox
         .attach_external_attempt_sync(CancellationToken::new(), false)
-        .unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
     let input = make_input(&mailbox, "带序号交付");
-    mailbox.enqueue_sync(&input).unwrap();
+    mailbox
+        .enqueue_sync(&input)
+        .expect("the enqueue sync fixture result is required for this assertion");
     mailbox.enter_idle_sync();
     let messages = inbox.queue_for_test().drain_all_sync();
-    let id = messages[0].message().unwrap().id();
+    let id = messages[0]
+        .message()
+        .expect("the fixture entry must contain a message payload")
+        .id();
     mailbox.mark_claimed_sync(&[id]);
     mailbox.mark_delivered_sync(&[id]);
 
@@ -376,14 +463,19 @@ fn test_mailbox_terminal_snapshot_is_bounded() {
     let (mailbox, inbox) = make_mailbox();
     mailbox
         .attach_external_attempt_sync(CancellationToken::new(), false)
-        .unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
     for index in 0..(TERMINAL_CAPACITY + 2) {
         let input = make_input(&mailbox, &format!("终态输入 {index}"));
-        mailbox.enqueue_sync(&input).unwrap();
+        mailbox
+            .enqueue_sync(&input)
+            .expect("the enqueue sync fixture result is required for this assertion");
         mailbox.enter_idle_sync();
         let messages = inbox.queue_for_test().drain_all_sync();
         assert_eq!(messages.len(), 1);
-        let id = messages[0].message().unwrap().id();
+        let id = messages[0]
+            .message()
+            .expect("the fixture entry must contain a message payload")
+            .id();
         mailbox.mark_claimed_sync(&[id]);
         mailbox.mark_delivered_sync(&[id]);
         // 本测试只验证终态展示有界；模拟事件泵立即确认交付日志。
@@ -405,7 +497,7 @@ async fn refresh_keeps_records_enqueued_while_its_mq_query_is_in_flight() {
     let (mailbox, inbox) = make_mailbox();
     mailbox
         .attach_external_attempt_sync(CancellationToken::new(), false)
-        .unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
     let (entered, release) = inbox.queue_for_test().gate_next_query();
 
     let refresh = tokio::spawn({
@@ -414,10 +506,16 @@ async fn refresh_keeps_records_enqueued_while_its_mq_query_is_in_flight() {
     });
     entered.await.expect("refresh MQ query must start");
     let input = make_input(&mailbox, "查询期间入队");
-    let receipt = mailbox.enqueue(&input).await.unwrap();
+    let receipt = mailbox
+        .enqueue(&input)
+        .await
+        .expect("the enqueue fixture result is required for this assertion");
     release.send(()).expect("release refresh query");
 
-    refresh.await.unwrap().expect("refresh must succeed");
+    refresh
+        .await
+        .expect("the refresh fixture result is required for this assertion")
+        .expect("refresh must succeed");
     let fresh = mailbox.snapshot().await;
     let item = fresh
         .items
@@ -451,7 +549,7 @@ async fn bound_queue_forwards_query_gate_to_the_store() {
         .expect("query gate must reach the bound store")
         .expect("query gate sender dropped");
     release.send(()).expect("release bound query");
-    query.await.unwrap().unwrap();
+    query.await.expect("the query fixture result is required for this assertion").expect("bound queue forwards query gate to the store: the completed fixture operation must provide its result payload");
 }
 
 /// [回归] 历史查询无法回答时，`Unknown` 不是「不存在」：待发记录必须保留。
@@ -462,12 +560,21 @@ async fn unknown_send_result_keeps_the_input_dispatching() {
     mailbox
         .attach_external_attempt(CancellationToken::new(), false)
         .await
-        .unwrap();
+        .expect("the attach external attempt fixture result is required for this assertion");
     let input = make_input(&mailbox, "无法确认是否移交");
-    mailbox.enqueue(&input).await.unwrap();
-    let id = MessageId::from(uuid::Uuid::parse_str(&input.input_id).unwrap());
+    mailbox
+        .enqueue(&input)
+        .await
+        .expect("the enqueue fixture result is required for this assertion");
+    let id = MessageId::from(
+        uuid::Uuid::parse_str(&input.input_id)
+            .expect("the parse str fixture result is required for this assertion"),
+    );
     assert!(matches!(
-        queue.cancel_user_input(&id).await.unwrap(),
+        queue
+            .cancel_user_input(&id)
+            .await
+            .expect("the cancel user input fixture result is required for this assertion"),
         MqCancelOutcome::Cancelled(_)
     ));
     resources.fail_mq_history_lookup();
@@ -482,7 +589,9 @@ async fn unknown_send_result_keeps_the_input_dispatching() {
     assert!(!handed_off, "Unknown 不能宣称已移交");
     mailbox.reclaim().await;
     assert_eq!(
-        record_state(&mailbox, &input.input_id).unwrap().0,
+        record_state(&mailbox, &input.input_id)
+            .expect("the input id fixture result is required for this assertion")
+            .0,
         UserInputState::Dispatching,
         "MQ 缺失不证明发送未生效，收尾不能把未知记录重置成 Queued"
     );
@@ -496,12 +605,21 @@ async fn unknown_error_response_keeps_record_and_retry_dispatches() {
     mailbox
         .attach_external_attempt(CancellationToken::new(), false)
         .await
-        .unwrap();
+        .expect("the attach external attempt fixture result is required for this assertion");
     let input = make_input(&mailbox, "错误响应后重试");
-    mailbox.enqueue(&input).await.unwrap();
-    let id = MessageId::from(uuid::Uuid::parse_str(&input.input_id).unwrap());
+    mailbox
+        .enqueue(&input)
+        .await
+        .expect("the enqueue fixture result is required for this assertion");
+    let id = MessageId::from(
+        uuid::Uuid::parse_str(&input.input_id)
+            .expect("the parse str fixture result is required for this assertion"),
+    );
     assert!(matches!(
-        queue.cancel_user_input(&id).await.unwrap(),
+        queue
+            .cancel_user_input(&id)
+            .await
+            .expect("the cancel user input fixture result is required for this assertion"),
         MqCancelOutcome::Cancelled(_)
     ));
     resources.fail_mq_history_lookup();
@@ -536,7 +654,10 @@ async fn unknown_error_response_keeps_record_and_retry_dispatches() {
     )
     .with_original_draft(input.original_draft.clone())
     .with_policy(peri_acp_types::session::MessagePolicy::ensure_processing());
-    queue.enqueue(message).await.unwrap();
+    queue
+        .enqueue(message)
+        .await
+        .expect("the enqueue fixture result is required for this assertion");
 
     let receipt = mailbox
         .dispatch(&make_dispatch(&mailbox, &[&input]))
@@ -556,14 +677,26 @@ async fn refresh_prunes_only_confirmed_mq_absence() {
     mailbox
         .attach_external_attempt(CancellationToken::new(), false)
         .await
-        .unwrap();
+        .expect("the attach external attempt fixture result is required for this assertion");
     let kept = make_input(&mailbox, "仍在 MQ");
     let removed = make_input(&mailbox, "已从 MQ 消失");
-    mailbox.enqueue(&kept).await.unwrap();
-    mailbox.enqueue(&removed).await.unwrap();
-    let removed_id = MessageId::from(uuid::Uuid::parse_str(&removed.input_id).unwrap());
+    mailbox
+        .enqueue(&kept)
+        .await
+        .expect("the enqueue fixture result is required for this assertion");
+    mailbox
+        .enqueue(&removed)
+        .await
+        .expect("the enqueue fixture result is required for this assertion");
+    let removed_id = MessageId::from(
+        uuid::Uuid::parse_str(&removed.input_id)
+            .expect("the parse str fixture result is required for this assertion"),
+    );
     assert!(matches!(
-        queue.cancel_user_input(&removed_id).await.unwrap(),
+        queue
+            .cancel_user_input(&removed_id)
+            .await
+            .expect("the cancel user input fixture result is required for this assertion"),
         MqCancelOutcome::Cancelled(_)
     ));
 
@@ -596,9 +729,12 @@ async fn refresh_query_failure_keeps_state_and_returns_error() {
     mailbox
         .attach_external_attempt(CancellationToken::new(), false)
         .await
-        .unwrap();
+        .expect("the attach external attempt fixture result is required for this assertion");
     let input = make_input(&mailbox, "查询失败");
-    mailbox.enqueue(&input).await.unwrap();
+    mailbox
+        .enqueue(&input)
+        .await
+        .expect("the enqueue fixture result is required for this assertion");
     let before = mailbox.snapshot().await;
 
     resources.fail_next_mq_queries(1);
@@ -640,12 +776,21 @@ async fn send_ready_ids_does_not_claim_handoff_for_unknown() {
     mailbox
         .attach_external_attempt(CancellationToken::new(), false)
         .await
-        .unwrap();
+        .expect("the attach external attempt fixture result is required for this assertion");
     let input = make_input(&mailbox, "idle 无法确认");
-    mailbox.enqueue(&input).await.unwrap();
-    let id = MessageId::from(uuid::Uuid::parse_str(&input.input_id).unwrap());
+    mailbox
+        .enqueue(&input)
+        .await
+        .expect("the enqueue fixture result is required for this assertion");
+    let id = MessageId::from(
+        uuid::Uuid::parse_str(&input.input_id)
+            .expect("the parse str fixture result is required for this assertion"),
+    );
     assert!(matches!(
-        queue.cancel_user_input(&id).await.unwrap(),
+        queue
+            .cancel_user_input(&id)
+            .await
+            .expect("the cancel user input fixture result is required for this assertion"),
         MqCancelOutcome::Cancelled(_)
     ));
     resources.fail_mq_history_lookup();
@@ -671,8 +816,11 @@ async fn dispatch_confirms_handoff_on_an_idle_session() {
     mailbox
         .attach_external_attempt(CancellationToken::new(), false)
         .await
-        .unwrap();
-    mailbox.enqueue(&input).await.unwrap();
+        .expect("the attach external attempt fixture result is required for this assertion");
+    mailbox
+        .enqueue(&input)
+        .await
+        .expect("the enqueue fixture result is required for this assertion");
     mailbox.stop().await;
 
     // 真实 Receive：选中后停在提交门，由独立任务放行，模拟空闲会话的移交。
@@ -688,9 +836,15 @@ async fn dispatch_confirms_handoff_on_an_idle_session() {
                     attempt_id: AttemptId::new(),
                 },
             );
-            let items = owner.select_for_receive(&permit).await.unwrap();
+            let items = owner
+                .select_for_receive(&permit)
+                .await
+                .expect("the select for receive fixture result is required for this assertion");
             if !items.is_empty() {
-                return owner.receive(permit, items).await.unwrap();
+                return owner
+                    .receive(permit, items)
+                    .await
+                    .expect("the receive fixture result is required for this assertion");
             }
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
@@ -704,14 +858,20 @@ async fn dispatch_confirms_handoff_on_an_idle_session() {
     let receipt = mailbox
         .dispatch(&make_dispatch(&mailbox, &[&input]))
         .await
-        .unwrap();
+        .expect("the dispatch fixture result is required for this assertion");
     assert_eq!(receipt.results[0].state, UserInputState::Dispatching);
     assert!(
-        queue.snapshot().await.unwrap().is_empty(),
+        queue
+            .snapshot()
+            .await
+            .expect("the snapshot fixture result is required for this assertion")
+            .is_empty(),
         "dispatch 返回时必须已完成移交"
     );
     assert!(
-        record_state(&mailbox, &input.input_id).unwrap().1,
+        record_state(&mailbox, &input.input_id)
+            .expect("the input id fixture result is required for this assertion")
+            .1,
         "确认移交后记录必须标记 handed_off"
     );
 
@@ -719,5 +879,7 @@ async fn dispatch_confirms_handoff_on_an_idle_session() {
         .await
         .expect("receive worker must finish")
         .expect("receive worker panicked");
-    releaser.await.unwrap();
+    releaser
+        .await
+        .expect("the releaser fixture result is required for this assertion");
 }

@@ -26,16 +26,19 @@ use peri_acp_types::session_resources::{
     MutationOutcome, SessionResourceErrorKind, SessionResourceResult,
 };
 
-use super::mutation::{
-    classify_batch_failure, existing_identity_from_read, initialization_evidence, BatchFailure,
-    InitializationEvidence, StoreAccess,
-};
-use super::schema::{
-    identity_read_plan, initialization_plan, inserted_meta_row, interpret_identity_read, StoreId,
-    StoreIdentityOutcome, StoreIdentityRead, StoreShapeRead, StoreSnapshot, META_INSERT_INDEX,
-    REMOTE_SCHEMA_VERSION, STORE_CONTRACT,
-};
-use super::session_data::{open_step, open_verdict, OpenStep, StoreInitialization};
+use super::mutation::BatchFailure;
+use super::mutation::InitializationEvidence;
+use super::mutation::StoreAccess;
+use super::schema::StoreId;
+use super::schema::StoreIdentityOutcome;
+use super::schema::StoreIdentityRead;
+use super::schema::StoreShapeRead;
+use super::schema::StoreSnapshot;
+use super::schema::META_INSERT_INDEX;
+use super::schema::REMOTE_SCHEMA_VERSION;
+use super::schema::STORE_CONTRACT;
+use super::session_data::OpenStep;
+use super::session_data::StoreInitialization;
 use super::sql::StatementSpec;
 use super::RemoteFailureClass;
 
@@ -61,7 +64,8 @@ async fn run_plan(
 ) -> Result<Vec<u64>, BatchFailure> {
     let mut counts = Vec::with_capacity(plan.len());
     let mut transaction = conn.begin_with("BEGIN IMMEDIATE").await.expect("begin");
-    for (index, statement) in plan.iter().enumerate() {
+    let indexed_entries = plan.iter().enumerate();
+    for (index, statement) in indexed_entries {
         match execute(&mut transaction, statement).await {
             Ok(affected) => counts.push(affected),
             Err(error) => {
@@ -109,7 +113,7 @@ fn batch_failure_of_local_engine(index: usize, error: &sqlx::Error) -> BatchFail
     } else {
         SdkError::Error("local engine rejected the statement".to_owned())
     };
-    classify_batch_failure(&SdkError::BatchStatementFailed {
+    super::mutation::classify_batch_failure(&SdkError::BatchStatementFailed {
         index,
         error: Box::new(inner),
         results: Vec::new(),
@@ -118,12 +122,12 @@ fn batch_failure_of_local_engine(index: usize, error: &sqlx::Error) -> BatchFail
 
 /// 只读身份读取：生产同一条读取计划 + 同一处形状判定。
 async fn read_identity(conn: &mut SqliteConnection) -> StoreIdentityRead {
-    let plan = identity_read_plan();
+    let plan = super::schema::identity_read_plan();
     if fetch_rows(conn, &plan[0]).await.is_empty() {
-        return interpret_identity_read(false, None);
+        return super::schema::interpret_identity_read(false, None);
     }
     let row = fetch_rows(conn, &plan[1]).await.into_iter().next();
-    interpret_identity_read(true, row.as_deref())
+    super::schema::interpret_identity_read(true, row.as_deref())
 }
 
 /// 生产 `RemoteStore::initialize_store` 的引擎等价物：铸造身份 → 跑真实初始化 SQL →
@@ -132,14 +136,14 @@ async fn initialize(
     conn: &mut SqliteConnection,
 ) -> SessionResourceResult<(StoreId, StoreIdentityOutcome)> {
     let minted = StoreId::mint();
-    let plan = initialization_plan(&minted, "2026-09-26T00:00:00+00:00");
-    let evidence = initialization_evidence(&run_plan(conn, &plan).await);
+    let plan = super::schema::initialization_plan(&minted, "2026-09-26T00:00:00+00:00");
+    let evidence = super::mutation::initialization_evidence(&run_plan(conn, &plan).await);
     let outcome = match evidence {
         InitializationEvidence::Created => StoreIdentityOutcome::Created(minted.clone()),
         // 没有建立身份：既有身份必须读回（与生产 `initialize_store` 同一条分支）。
-        InitializationEvidence::Existing => {
-            StoreIdentityOutcome::Existing(existing_identity_from_read(read_identity(conn).await)?)
-        }
+        InitializationEvidence::Existing => StoreIdentityOutcome::Existing(
+            super::mutation::existing_identity_from_read(read_identity(conn).await)?,
+        ),
         // 确定未生效或无法证明：不发身份（与生产同一条分支）。
         InitializationEvidence::Failed(class) => return Err(class.into_session_resource_error()),
     };
@@ -217,7 +221,7 @@ async fn only_the_winner_of_the_identity_race_creates_the_identity() {
         StoreIdentityRead::Uninitialized
     );
     // 空库上的只读打开在建任何东西之前就被拒绝（未初始化：没有可探的形状）。
-    let refusal = open_step(
+    let refusal = super::session_data::open_step(
         StoreIdentityRead::Uninitialized,
         None,
         StoreAccess::ReadOnly,
@@ -240,8 +244,8 @@ async fn only_the_winner_of_the_identity_race_creates_the_identity() {
         .expect("loser reads back the winner");
     assert_eq!(loser, StoreIdentityOutcome::Existing(winner_minted.clone()));
 
-    let (winner_id, winner_initialization) = open_verdict(winner);
-    let (loser_id, loser_initialization) = open_verdict(loser);
+    let (winner_id, winner_initialization) = super::session_data::open_verdict(winner);
+    let (loser_id, loser_initialization) = super::session_data::open_verdict(loser);
     assert_eq!(winner_id, winner_minted);
     assert_eq!(loser_id, winner_minted, "败方用的仍是胜者建立的权威身份");
     assert_ne!(
@@ -268,14 +272,15 @@ async fn a_store_that_already_has_an_identity_is_never_rebuilt() {
     // 后来者读到的是已经存在的身份：本次打开没有建立任何东西。会话表还没建（本夹具只建了
     // 身份与账本）：写打开照旧补齐，只读打开拒绝（见 `session_open::accept_shape`）。
     let mut later = connect(&store_path).await;
-    let decision = open_step(
+    let decision = super::session_data::open_step(
         read_identity(&mut later).await,
         Some(StoreShapeRead::Unbuilt),
         StoreAccess::ReadWrite,
     )
     .expect("existing store is readable");
     assert_eq!(decision, OpenStep::Existing(minted.clone()));
-    let (id, initialization) = open_verdict(StoreIdentityOutcome::Existing(minted.clone()));
+    let (id, initialization) =
+        super::session_data::open_verdict(StoreIdentityOutcome::Existing(minted.clone()));
     assert_eq!(id, minted);
     assert_eq!(
         initialization,
@@ -305,7 +310,7 @@ fn unproven_results_never_create_an_identity() {
         RemoteFailureClass::Unknown,
     ] {
         assert_eq!(
-            initialization_evidence(&Err(BatchFailure::Unknown { class })),
+            super::mutation::initialization_evidence(&Err(BatchFailure::Unknown { class })),
             InitializationEvidence::Failed(class)
         );
         // 生产路径把未知结果映射成领域失败（打开失败，不给身份、不给执行资格）；
@@ -315,7 +320,7 @@ fn unproven_results_never_create_an_identity() {
     }
     // 确定未生效：同样不发身份。
     assert_eq!(
-        initialization_evidence(&Err(BatchFailure::NotApplied {
+        super::mutation::initialization_evidence(&Err(BatchFailure::NotApplied {
             class: RemoteFailureClass::Timeout,
             index: None,
         })),
@@ -323,12 +328,12 @@ fn unproven_results_never_create_an_identity() {
     );
     // 批成功却没有插入证据（受影响 0 行）：不认领创建，只能读回既有身份。
     assert_eq!(
-        initialization_evidence(&Ok(vec![0; META_INSERT_INDEX + 2])),
+        super::mutation::initialization_evidence(&Ok(vec![0; META_INSERT_INDEX + 2])),
         InitializationEvidence::Existing
     );
     // 唯一键冲突：既有身份必须读回，不能拿本次铸造的候选值冒充。
     assert_eq!(
-        initialization_evidence(&Err(BatchFailure::NotApplied {
+        super::mutation::initialization_evidence(&Err(BatchFailure::NotApplied {
             class: RemoteFailureClass::Constraint,
             index: Some(META_INSERT_INDEX),
         })),
@@ -337,14 +342,16 @@ fn unproven_results_never_create_an_identity() {
     // 创建的唯一证据是本事务在元数据 INSERT 上确切影响一行。
     let mut created = vec![0; META_INSERT_INDEX + 2];
     created[META_INSERT_INDEX] = 1;
-    assert!(inserted_meta_row(&created));
+    assert!(super::schema::inserted_meta_row(&created));
     assert_eq!(
-        initialization_evidence(&Ok(created)),
+        super::mutation::initialization_evidence(&Ok(created)),
         InitializationEvidence::Created
     );
-    assert!(!inserted_meta_row(&[0; META_INSERT_INDEX + 2]));
+    assert!(!super::schema::inserted_meta_row(
+        &[0; META_INSERT_INDEX + 2]
+    ));
     assert!(
-        !inserted_meta_row(&[1, 1, 0, 0]),
+        !super::schema::inserted_meta_row(&[1, 1, 0, 0]),
         "别的语句影响行数不算插入证据"
     );
 }
@@ -352,15 +359,18 @@ fn unproven_results_never_create_an_identity() {
 /// 读不回既有身份时拒绝读回：不猜、不覆盖，也不把「读懂了但没有身份」当成空库可用。
 #[test]
 fn readback_refuses_identities_it_cannot_interpret() {
-    assert!(existing_identity_from_read(StoreIdentityRead::Uninitialized).is_err());
-    assert!(existing_identity_from_read(StoreIdentityRead::Malformed).is_err());
+    assert!(
+        super::mutation::existing_identity_from_read(StoreIdentityRead::Uninitialized).is_err()
+    );
+    assert!(super::mutation::existing_identity_from_read(StoreIdentityRead::Malformed).is_err());
     let unrecognized = StoreSnapshot {
         store_id: StoreId::mint(),
         schema_version: REMOTE_SCHEMA_VERSION,
         contract: "peri.session.store/v1".to_owned(),
     };
-    let error = existing_identity_from_read(StoreIdentityRead::Present(unrecognized))
-        .expect_err("foreign contract is refused");
+    let error =
+        super::mutation::existing_identity_from_read(StoreIdentityRead::Present(unrecognized))
+            .expect_err("foreign contract is refused");
     assert!(matches!(
         error.kind(),
         SessionResourceErrorKind::Unsupported
@@ -377,15 +387,18 @@ fn readback_refuses_identities_it_cannot_interpret() {
 #[test]
 fn identity_read_shape_rules_are_shared() {
     assert_eq!(
-        interpret_identity_read(false, None),
+        super::schema::interpret_identity_read(false, None),
         StoreIdentityRead::Uninitialized
     );
     assert_eq!(
-        interpret_identity_read(true, None),
+        super::schema::interpret_identity_read(true, None),
         StoreIdentityRead::Uninitialized
     );
     assert_eq!(
-        interpret_identity_read(true, Some(&[Value::Null, Value::Null, Value::Null])),
+        super::schema::interpret_identity_read(
+            true,
+            Some(&[Value::Null, Value::Null, Value::Null])
+        ),
         StoreIdentityRead::Malformed
     );
     let store_id = StoreId::mint();
@@ -395,7 +408,7 @@ fn identity_read_shape_rules_are_shared() {
         Value::Text(STORE_CONTRACT.to_owned()),
     ];
     assert_eq!(
-        interpret_identity_read(true, Some(&row)),
+        super::schema::interpret_identity_read(true, Some(&row)),
         StoreIdentityRead::Present(StoreSnapshot {
             store_id,
             schema_version: REMOTE_SCHEMA_VERSION,

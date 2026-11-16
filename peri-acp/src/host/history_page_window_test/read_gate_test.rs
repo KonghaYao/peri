@@ -4,8 +4,11 @@
 //! Store。只读放行不等于解除写入约束：`closing`、rewind 在途与会话不存在仍在进入
 //! 存储前拒绝。
 
-use super::*;
-
+use crate::host::requests::tests::history_page_wire_tests::PageFixture;
+use crate::transport::AcpTransport;
+use serde_json::json;
+use serial_test::serial;
+use std::sync::Arc;
 #[tokio::test]
 #[serial]
 async fn handed_off_and_reload_required_allow_read_only_window() {
@@ -15,14 +18,22 @@ async fn handed_off_and_reload_required_allow_read_only_window() {
     let own = fixture.own_ids().await;
     let anchor_entry = peri_acp_types::history_window::HistoryEntryId::new(&sid, own[1]).encode();
     let cfg = Arc::clone(&fixture.cfg);
-    let (client, sessions, task) = spawn_loop(cfg, fixture.sessions, Some(window_caps())).await;
+    let (client, sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            cfg,
+            fixture.sessions,
+            Some(
+                crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
+            ),
+        )
+        .await;
 
     // 执行上下文移交给在途 prompt 不等于历史不可读：Store 是固定事实，窗口只做读取。
     {
         let mut states = sessions.lock().await;
         states.get_mut(&sid).unwrap().context_ownership = crate::host::ContextOwnership::HandedOff;
     }
-    let handed_off = open(
+    let handed_off = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({ "kind": "open", "direction": "before", "limit": 2 }),
@@ -30,7 +41,7 @@ async fn handed_off_and_reload_required_allow_read_only_window() {
     .await
     .expect("HandedOff must allow read-only open");
     assert_eq!(handed_off["items"].as_array().unwrap().len(), 2);
-    let fetched = page(
+    let fetched = crate::host::requests::tests::history_page_wire_tests::window_tests::page(
         &client,
         &sid,
         &handed_off["snapshotToken"],
@@ -67,7 +78,7 @@ async fn handed_off_and_reload_required_allow_read_only_window() {
         states.get_mut(&sid).unwrap().context_ownership =
             crate::host::ContextOwnership::ReloadRequired;
     }
-    let reload = open(
+    let reload = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({ "kind": "open", "direction": "before", "limit": 2 }),
@@ -75,7 +86,7 @@ async fn handed_off_and_reload_required_allow_read_only_window() {
     .await
     .expect("ReloadRequired must allow read-only open");
     assert!(!reload["items"].as_array().unwrap().is_empty());
-    page(
+    crate::host::requests::tests::history_page_wire_tests::window_tests::page(
         &client,
         &sid,
         &reload["snapshotToken"],
@@ -109,7 +120,7 @@ async fn handed_off_and_reload_required_allow_read_only_window() {
         let mut states = sessions.lock().await;
         states.get_mut(&sid).unwrap().closing = true;
     }
-    let closing = open(
+    let closing = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({ "kind": "open", "direction": "before", "limit": 1 }),
@@ -123,7 +134,7 @@ async fn handed_off_and_reload_required_allow_read_only_window() {
         state.closing = false;
         state.history_window.begin_rewind();
     }
-    let rewinding = open(
+    let rewinding = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({ "kind": "open", "direction": "before", "limit": 1 }),
@@ -135,7 +146,7 @@ async fn handed_off_and_reload_required_allow_read_only_window() {
         "rewind 在途必须拒绝只读: {rewinding}"
     );
     sessions.lock().await.remove(&sid);
-    let missing = open(
+    let missing = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({ "kind": "open", "direction": "before", "limit": 1 }),

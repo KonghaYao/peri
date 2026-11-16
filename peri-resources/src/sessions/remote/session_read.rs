@@ -12,16 +12,24 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use peri_acp_types::history_page::{
-    message_id_of, resolve_browsing_range, HistoryCursor, HistoryCursorError, HistoryForwardCursor,
-    HistoryPage, HistoryPageBounds, HistoryPageCandidate, HistoryPagePlan, HistoryPageRow,
-    HistorySegment, HistorySegmentPlan,
-};
+use peri_acp_types::history_page::HistoryCursor;
+use peri_acp_types::history_page::HistoryCursorError;
+use peri_acp_types::history_page::HistoryForwardCursor;
+use peri_acp_types::history_page::HistoryPage;
+use peri_acp_types::history_page::HistoryPageBounds;
+use peri_acp_types::history_page::HistoryPageCandidate;
+use peri_acp_types::history_page::HistoryPagePlan;
+use peri_acp_types::history_page::HistoryPageRow;
+use peri_acp_types::history_page::HistorySegment;
+use peri_acp_types::history_page::HistorySegmentPlan;
 use peri_acp_types::messages::MessageId;
-use peri_acp_types::session_resources::{
-    rewind_candidate, ActiveSessionSnapshot, BindingState, FrozenSnapshotBytes, FrozenState,
-    RewindCandidate, SessionResourceResult, SessionSnapshot,
-};
+use peri_acp_types::session_resources::ActiveSessionSnapshot;
+use peri_acp_types::session_resources::BindingState;
+use peri_acp_types::session_resources::FrozenSnapshotBytes;
+use peri_acp_types::session_resources::FrozenState;
+use peri_acp_types::session_resources::RewindCandidate;
+use peri_acp_types::session_resources::SessionResourceResult;
+use peri_acp_types::session_resources::SessionSnapshot;
 use peri_acp_types::store::{InheritedContext, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{ThreadId, ThreadListEntry, ThreadMeta};
 use peri_acp_types::workspace::{
@@ -29,11 +37,9 @@ use peri_acp_types::workspace::{
 };
 use turso_serverless::Value;
 
-use super::mutation::{incomplete_reply, sole_row};
 use super::session_codec as codec;
-use super::session_data::{not_found, RemoteSessionData};
+use super::session_data::RemoteSessionData;
 use super::session_sql::{self, PAGE_BINDING_VERSION};
-use super::sql::{int_at, text_at};
 
 impl RemoteSessionData {
     /// 一致读取：会话事实行与自有 payload 在同一只读事务里取出。
@@ -48,7 +54,7 @@ impl RemoteSessionData {
                 session_sql::select_messages_statement(id),
             )
             .await?;
-        let facts = sole_row(facts)?.ok_or_else(not_found)?;
+        let facts = super::mutation::sole_row(facts)?.ok_or_else(super::session_data::not_found)?;
         let facts = decode_session_facts(&facts)?;
         let (payloads, flags) = decode_history(&messages)?;
         Ok(SessionSnapshot {
@@ -74,7 +80,7 @@ impl RemoteSessionData {
                 session_sql::select_active_messages_statement(id),
             )
             .await?;
-        let facts = sole_row(facts)?.ok_or_else(not_found)?;
+        let facts = super::mutation::sole_row(facts)?.ok_or_else(super::session_data::not_found)?;
         let facts = decode_session_facts(&facts)?;
         let (payloads, flags) = decode_history(&messages)?;
         Ok(ActiveSessionSnapshot {
@@ -99,9 +105,9 @@ impl RemoteSessionData {
             .into_iter();
         let rows = batches
             .next()
-            .ok_or_else(|| incomplete_reply("expected 1 result set, got 0"))?;
-        let row = sole_row(rows)?.ok_or_else(not_found)?;
-        Ok(match text_at(&row, 0) {
+            .ok_or_else(|| super::mutation::incomplete_reply("expected 1 result set, got 0"))?;
+        let row = super::mutation::sole_row(rows)?.ok_or_else(super::session_data::not_found)?;
+        Ok(match super::sql::text_at(&row, 0) {
             Some(bytes) => FrozenState::Present(FrozenSnapshotBytes::new(bytes)),
             None => FrozenState::LegacyAbsent,
         })
@@ -130,7 +136,8 @@ impl RemoteSessionData {
             .collect();
         let results = store.read_batch(statements).await?;
         let mut flags = HashMap::new();
-        for (requested, rows) in ids.iter().zip(results) {
+        let paired_entries = ids.iter().zip(results);
+        for (requested, rows) in paired_entries {
             for row in &rows {
                 let (row_id, row_flags) = codec::decode_flag_row(row)?;
                 if row_id != *requested {
@@ -154,7 +161,7 @@ impl RemoteSessionData {
                 self.meta_projection(),
             ))
             .await?
-            .ok_or_else(not_found)?;
+            .ok_or_else(super::session_data::not_found)?;
         let binding = codec::decode_binding(&facts, session_sql::FACT_BINDING_VERSION)?;
         Ok(classify_binding(binding, &facts))
     }
@@ -172,8 +179,9 @@ impl RemoteSessionData {
                 session_sql::select_messages_statement(id),
             )
             .await?;
-        let facts = sole_row(facts)?.ok_or_else(not_found)?;
-        let inherited = codec::decode_inherited(text_at(&facts, session_sql::FACT_INHERITED))?;
+        let facts = super::mutation::sole_row(facts)?.ok_or_else(super::session_data::not_found)?;
+        let inherited =
+            codec::decode_inherited(super::sql::text_at(&facts, session_sql::FACT_INHERITED))?;
         let (own, _) = decode_history(&messages)?;
         let mut payloads = inherited.payloads;
         payloads.extend(own);
@@ -208,16 +216,16 @@ impl RemoteSessionData {
                 .into_iter();
             let rows = batches
                 .next()
-                .ok_or_else(|| incomplete_reply("expected 1 result set, got 0"))?;
+                .ok_or_else(|| super::mutation::incomplete_reply("expected 1 result set, got 0"))?;
             if rows.is_empty() {
                 break;
             }
             let exhausted = rows.len() < SCAN_BATCH as usize;
             let mut identities = Vec::with_capacity(rows.len());
             for row in &rows {
-                let message_id = text_at(row, 0)
+                let message_id = super::sql::text_at(row, 0)
                     .ok_or_else(|| codec::corrupt("rewind candidate row has no id"))?;
-                let rowid = int_at(row, 1)
+                let rowid = super::sql::int_at(row, 1)
                     .ok_or_else(|| codec::corrupt("rewind candidate row has no position"))?;
                 identities.push((message_id.to_owned(), rowid));
             }
@@ -230,14 +238,17 @@ impl RemoteSessionData {
                 })
                 .collect::<Vec<_>>();
             let bodies = store.read_batch(body_statements).await?;
-            for ((expected_id, _), batch) in identities.iter().zip(bodies) {
-                let row = sole_row(batch)?
+            let paired_entries = identities.iter().zip(bodies);
+            for ((expected_id, _), batch) in paired_entries {
+                let row = super::mutation::sole_row(batch)?
                     .ok_or_else(|| codec::corrupt("rewind candidate body is missing"))?;
-                let content = text_at(&row, 0)
+                let content = super::sql::text_at(&row, 0)
                     .ok_or_else(|| codec::corrupt("rewind candidate body has no content"))?;
                 // 行身份与正文身份一致由解码处复核（不把 role 列当权威身份）。
                 let payload = codec::decode_payload_text(content, expected_id)?;
-                if let Some(candidate) = rewind_candidate(&payload) {
+                if let Some(candidate) =
+                    peri_acp_types::session_resources::rewind_candidate(&payload)
+                {
                     candidates.push(candidate);
                     if candidates.len() == limit {
                         break 'scan;
@@ -256,12 +267,16 @@ impl RemoteSessionData {
                 .into_iter();
             let facts = batches
                 .next()
-                .ok_or_else(|| incomplete_reply("expected 1 result set, got 0"))?;
+                .ok_or_else(|| super::mutation::incomplete_reply("expected 1 result set, got 0"))?;
             // 没有会话行：与只读快照同一分类（会话不存在），不是「没有继承区」。
-            let facts = sole_row(facts)?.ok_or_else(not_found)?;
-            let inherited = codec::decode_inherited(text_at(&facts, 0))?;
-            for payload in inherited.payloads.iter().rev() {
-                if let Some(candidate) = rewind_candidate(payload) {
+            let facts =
+                super::mutation::sole_row(facts)?.ok_or_else(super::session_data::not_found)?;
+            let inherited = codec::decode_inherited(super::sql::text_at(&facts, 0))?;
+            let selected_entries = inherited.payloads.iter().rev();
+            for payload in selected_entries {
+                if let Some(candidate) =
+                    peri_acp_types::session_resources::rewind_candidate(payload)
+                {
                     candidates.push(candidate);
                     if candidates.len() == limit {
                         break;
@@ -316,16 +331,21 @@ impl RemoteSessionData {
             .into_iter();
         let bounds = batches
             .next()
-            .ok_or_else(|| incomplete_reply("expected 2 result sets, got 1"))?;
+            .ok_or_else(|| super::mutation::incomplete_reply("expected 2 result sets, got 1"))?;
         let rows = batches
             .next()
-            .ok_or_else(|| incomplete_reply("expected 2 result sets, got 1"))?;
+            .ok_or_else(|| super::mutation::incomplete_reply("expected 2 result sets, got 1"))?;
         // 会话不存在：边界语句一行都没有（与只读快照同一分类）。
-        let bounds = sole_row(bounds)?.ok_or_else(not_found)?;
+        let bounds =
+            super::mutation::sole_row(bounds)?.ok_or_else(super::session_data::not_found)?;
         // 锚点行在不在：rowid 只作存在性判据，游标身份始终是 message_id（游标身份规则见
         // [`resolve_browsing_range`]）。
         let (range_head, anchor_present) = decode_page_bounds(&bounds);
-        let range_token = resolve_browsing_range(cursor, range_head, anchor_present)?;
+        let range_token = peri_acp_types::history_page::resolve_browsing_range(
+            cursor,
+            range_head,
+            anchor_present,
+        )?;
         let candidates = rows
             .iter()
             .map(|row| decode_page_row(row))
@@ -388,20 +408,23 @@ impl RemoteSessionData {
                     ])
                     .await?
                     .into_iter();
-                let tail = batches
-                    .next()
-                    .ok_or_else(|| incomplete_reply("expected 3 result sets, got 2"))?;
-                let rows = batches
-                    .next()
-                    .ok_or_else(|| incomplete_reply("expected 3 result sets, got 2"))?;
-                let inherited = batches
-                    .next()
-                    .ok_or_else(|| incomplete_reply("expected 3 result sets, got 2"))?;
+                let tail = batches.next().ok_or_else(|| {
+                    super::mutation::incomplete_reply("expected 3 result sets, got 2")
+                })?;
+                let rows = batches.next().ok_or_else(|| {
+                    super::mutation::incomplete_reply("expected 3 result sets, got 2")
+                })?;
+                let inherited = batches.next().ok_or_else(|| {
+                    super::mutation::incomplete_reply("expected 3 result sets, got 2")
+                })?;
                 // 会话不存在：边界语句一行都没有（与只读快照同一分类）。
-                let tail = sole_row(tail)?.ok_or_else(not_found)?;
-                let tail = int_at(&tail, 0);
-                let inherited = sole_row(inherited)?.ok_or_else(not_found)?;
-                let inherited = codec::decode_inherited(text_at(&inherited, 0))?.payloads;
+                let tail =
+                    super::mutation::sole_row(tail)?.ok_or_else(super::session_data::not_found)?;
+                let tail = super::sql::int_at(&tail, 0);
+                let inherited = super::mutation::sole_row(inherited)?
+                    .ok_or_else(super::session_data::not_found)?;
+                let inherited =
+                    codec::decode_inherited(super::sql::text_at(&inherited, 0))?.payloads;
                 let candidates = rows
                     .iter()
                     .map(|row| decode_page_row(row))
@@ -421,14 +444,15 @@ impl RemoteSessionData {
                     ])
                     .await?
                     .into_iter();
-                let anchor = batches
-                    .next()
-                    .ok_or_else(|| incomplete_reply("expected 2 result sets, got 1"))?;
-                let rows = batches
-                    .next()
-                    .ok_or_else(|| incomplete_reply("expected 2 result sets, got 1"))?;
-                let anchor = sole_row(anchor)?.ok_or_else(not_found)?;
-                if int_at(&anchor, 0).is_none() {
+                let anchor = batches.next().ok_or_else(|| {
+                    super::mutation::incomplete_reply("expected 2 result sets, got 1")
+                })?;
+                let rows = batches.next().ok_or_else(|| {
+                    super::mutation::incomplete_reply("expected 2 result sets, got 1")
+                })?;
+                let anchor = super::mutation::sole_row(anchor)?
+                    .ok_or_else(super::session_data::not_found)?;
+                if super::sql::int_at(&anchor, 0).is_none() {
                     return Err(HistoryCursorError::Expired {
                         thread_id: id.clone(),
                     }
@@ -487,9 +511,10 @@ impl RemoteSessionData {
                 None,
             ))
             .await?;
-        let bounds = sole_row(bounds)?.ok_or_else(not_found)?;
+        let bounds =
+            super::mutation::sole_row(bounds)?.ok_or_else(super::session_data::not_found)?;
         let (range_head, _) = decode_page_bounds(&bounds);
-        HistoryPageBounds::new(range_head.as_deref())
+        HistoryPageBounds::try_new(range_head.as_deref())
     }
 
     /// 自有**有效**条目的存储序键（`message_id → rowid`）：一次有界读取，**不读正文**。
@@ -522,7 +547,7 @@ impl RemoteSessionData {
                 self.meta_projection(),
             ))
             .await?
-            .ok_or_else(not_found)?;
+            .ok_or_else(super::session_data::not_found)?;
         codec::decode_meta(&row)
     }
 
@@ -642,8 +667,8 @@ impl RemoteSessionData {
                 self.meta_projection(),
             ))
             .await?
-            .ok_or_else(not_found)?;
-        Ok(text_at(&facts, session_sql::FACT_FROZEN).map(str::to_owned))
+            .ok_or_else(super::session_data::not_found)?;
+        Ok(super::sql::text_at(&facts, session_sql::FACT_FROZEN).map(str::to_owned))
     }
 
     /// 会话的不可变绑定（用于 child 与父会话绑定一致性核对）。
@@ -658,7 +683,7 @@ impl RemoteSessionData {
                 self.meta_projection(),
             ))
             .await?
-            .ok_or_else(not_found)?;
+            .ok_or_else(super::session_data::not_found)?;
         codec::decode_binding(&facts, session_sql::FACT_BINDING_VERSION)
     }
 
@@ -668,7 +693,10 @@ impl RemoteSessionData {
         let row = store
             .fetch_row(&session_sql::select_root_statement(id))
             .await?;
-        match row.as_deref().and_then(|values| text_at(values, 0)) {
+        match row
+            .as_deref()
+            .and_then(|values| super::sql::text_at(values, 0))
+        {
             Some(root) => Ok(root.to_owned()),
             // 链上没有根：父行缺失或出现环，事实不完整，不猜一个根出来。
             None => Err(codec::corrupt("session parent chain has no root")),
@@ -692,12 +720,15 @@ fn decode_session_facts(facts: &[Value]) -> SessionResourceResult<SessionFacts> 
             let binding = codec::decode_binding(facts, session_sql::FACT_BINDING_VERSION)?;
             classify_binding(binding, facts)
         },
-        frozen: match text_at(facts, session_sql::FACT_FROZEN) {
+        frozen: match super::sql::text_at(facts, session_sql::FACT_FROZEN) {
             Some(bytes) => FrozenState::Present(FrozenSnapshotBytes::new(bytes)),
             // 远端没有 legacy 历史：没有快照就是没有，不猜来源。
             None => FrozenState::LegacyAbsent,
         },
-        inherited: codec::decode_inherited(text_at(facts, session_sql::FACT_INHERITED))?,
+        inherited: codec::decode_inherited(super::sql::text_at(
+            facts,
+            session_sql::FACT_INHERITED,
+        ))?,
     })
 }
 
@@ -725,12 +756,13 @@ fn decode_history(
 /// 三列都必须存在：少一列即回复形状不符——用默认值兜底会把「少读了一列」变成
 /// 「这一页的长度未知」，页预算就失去了依据。
 fn decode_page_row(row: &[Value]) -> SessionResourceResult<HistoryPageCandidate> {
-    let message_id = text_at(row, 0).ok_or_else(|| codec::corrupt("history page row has no id"))?;
-    let position =
-        int_at(row, 1).ok_or_else(|| codec::corrupt("history page row has no position"))?;
-    let encoded_bytes =
-        int_at(row, 2).ok_or_else(|| codec::corrupt("history page row has no length"))?;
-    HistoryPageCandidate::new(message_id, position, encoded_bytes)
+    let message_id =
+        super::sql::text_at(row, 0).ok_or_else(|| codec::corrupt("history page row has no id"))?;
+    let position = super::sql::int_at(row, 1)
+        .ok_or_else(|| codec::corrupt("history page row has no position"))?;
+    let encoded_bytes = super::sql::int_at(row, 2)
+        .ok_or_else(|| codec::corrupt("history page row has no length"))?;
+    HistoryPageCandidate::try_new(message_id, position, encoded_bytes)
 }
 
 /// 阶段二正文回复的解码：请求了几个 id 就要**恰好**几行，且行内正文与原 id 对应。
@@ -742,12 +774,13 @@ fn decode_page_bodies(
     bodies: Vec<Vec<Vec<Value>>>,
 ) -> SessionResourceResult<Vec<HistoryPageRow>> {
     let mut rows = Vec::with_capacity(ids.len());
-    for (message_id, batch) in ids.iter().zip(bodies) {
-        let content =
-            sole_row(batch)?.ok_or_else(|| codec::corrupt("history page body is missing"))?;
-        let content = text_at(&content, 0)
+    let paired_entries = ids.iter().zip(bodies);
+    for (message_id, batch) in paired_entries {
+        let content = super::mutation::sole_row(batch)?
+            .ok_or_else(|| codec::corrupt("history page body is missing"))?;
+        let content = super::sql::text_at(&content, 0)
             .ok_or_else(|| codec::corrupt("history page body has no content"))?;
-        rows.push(HistoryPageRow::new(
+        rows.push(HistoryPageRow::try_new(
             &message_id.as_uuid().to_string(),
             content.to_owned(),
         )?);
@@ -757,10 +790,12 @@ fn decode_page_bodies(
 
 /// 存储序键一行的解码：id + `rowid` 两列都必须存在（少一列即回复形状不符）。
 fn decode_entry_position(row: &[Value]) -> SessionResourceResult<(MessageId, u64)> {
-    let message_id = text_at(row, 0).ok_or_else(|| codec::corrupt("history row has no id"))?;
-    let position = int_at(row, 1).ok_or_else(|| codec::corrupt("history row has no position"))?;
+    let message_id =
+        super::sql::text_at(row, 0).ok_or_else(|| codec::corrupt("history row has no id"))?;
+    let position =
+        super::sql::int_at(row, 1).ok_or_else(|| codec::corrupt("history row has no position"))?;
     Ok((
-        message_id_of(message_id)?,
+        peri_acp_types::history_page::message_id_of(message_id)?,
         u64::try_from(position).map_err(|_| codec::corrupt("history row position is negative"))?,
     ))
 }
@@ -771,8 +806,8 @@ fn decode_entry_position(row: &[Value]) -> SessionResourceResult<(MessageId, u64
 /// 缺失即 `false`，由调用方按游标规则判 `Expired`。
 fn decode_page_bounds(bounds: &[Value]) -> (Option<String>, bool) {
     (
-        text_at(bounds, 0).map(str::to_owned),
-        int_at(bounds, 1).is_some(),
+        super::sql::text_at(bounds, 0).map(str::to_owned),
+        super::sql::int_at(bounds, 1).is_some(),
     )
 }
 
@@ -785,7 +820,7 @@ fn classify_binding(binding: Option<SessionBinding>, facts: &[Value]) -> Binding
     match binding {
         Some(binding) => BindingState::Bound(binding),
         // 子会话没有绑定行：与本机同一分类（不得当作 legacy 自动接纳）。
-        None if text_at(facts, session_sql::META_PARENT).is_some() => {
+        None if super::sql::text_at(facts, session_sql::META_PARENT).is_some() => {
             BindingState::ExternalOrUnregistered
         }
         None => BindingState::Missing,

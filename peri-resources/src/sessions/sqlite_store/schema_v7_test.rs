@@ -5,11 +5,16 @@
 //! 真实本机数据库。
 
 use super::schema::CURRENT_SCHEMA_VERSION;
-use super::*;
+use super::{Arc, BaseMessage, SqliteSessionData, SqliteThreadStore};
+
 use crate::sessions::data::SessionDataPort;
-use peri_acp_types::store::{serialize_persisted_payload, PersistedPayload, ThreadStore};
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::store::ThreadStore;
 use peri_acp_types::workspace::WorkspaceError;
-use sqlx::{sqlite::SqliteConnectOptions, AssertSqlSafe, Connection, SqliteConnection};
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::AssertSqlSafe;
+use sqlx::Connection;
+use sqlx::SqliteConnection;
 use std::path::Path;
 
 /// v6 库的完整形状（含 execution_runs 的 threads 外键与旧 registration 约束）。
@@ -76,7 +81,10 @@ async fn v6_database(path: &Path) -> SqliteConnection {
 async fn populated_v6(path: &Path) -> Vec<u8> {
     let mut connection = v6_database(path).await;
     let message = BaseMessage::human("history before v7");
-    let content = serialize_persisted_payload(&PersistedPayload::Message(message.clone())).unwrap();
+    let content = peri_acp_types::store::serialize_persisted_payload(&PersistedPayload::Message(
+        message.clone(),
+    ))
+    .unwrap();
     sqlx::query(
         "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count, frozen_context)
          VALUES ('old-root', '旧会话', '/old/worktree', '2026-09-01T00:00:00Z', '2026-09-02T00:00:00Z', 1, '{\"version\":1}')",
@@ -133,7 +141,7 @@ async fn test_v6_upgrade_removes_execution_state_and_keeps_history() {
     let path = directory.path().join("threads.db");
     populated_v6(&path).await;
 
-    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let store = SqliteThreadStore::try_new(&path).await.unwrap();
     let mut connection = SqliteConnection::connect_with(
         &SqliteConnectOptions::new().filename(&path).read_only(true),
     )
@@ -209,7 +217,7 @@ async fn test_v6_upgrade_failure_rolls_back_version_structure_and_rows() {
             .unwrap();
     connection.close().await.unwrap();
 
-    let error = SqliteThreadStore::new(&path).await.err().unwrap();
+    let error = SqliteThreadStore::try_new(&path).await.err().unwrap();
     assert!(matches!(
         error.downcast_ref::<WorkspaceError>(),
         Some(WorkspaceError::UnsupportedDatabaseSchema)
@@ -309,7 +317,7 @@ async fn test_read_only_open_accepts_v6_v7_and_future_shapes_without_migrating()
     reader.close().await;
 
     // 同一份未来版本库：写打开拒绝、不降级、不改动文件。
-    let error = SqliteThreadStore::new(&future).await.err().unwrap();
+    let error = SqliteThreadStore::try_new(&future).await.err().unwrap();
     assert!(matches!(
         error.downcast_ref::<WorkspaceError>(),
         Some(WorkspaceError::UnsupportedSchemaVersion { found, .. }) if *found == future_version
@@ -323,9 +331,9 @@ async fn test_upgraded_database_reopens_without_second_migration() {
     let path = directory.path().join("threads.db");
     populated_v6(&path).await;
 
-    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let store = SqliteThreadStore::try_new(&path).await.unwrap();
     store.close().await;
-    let reopened = SqliteThreadStore::new(&path).await.unwrap();
+    let reopened = SqliteThreadStore::try_new(&path).await.unwrap();
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
         .fetch_one(&reopened.database.pool)
         .await

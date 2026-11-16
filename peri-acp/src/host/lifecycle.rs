@@ -2,15 +2,17 @@
 
 use peri_acp_types::ports::McpTaskOwnerPort;
 use peri_controller::langfuse::LangfuseShutdownReport;
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    connection::ConnectionContext,
-    task_scope::{HostTaskOwner, HostTerminalShutdownReport},
-    AcpServerConfig, PromptLocks, SharedSessions,
-};
+use super::connection::ConnectionContext;
+use super::task_scope::HostTaskOwner;
+use super::task_scope::HostTerminalShutdownReport;
+use super::AcpServerConfig;
+use super::PromptLocks;
+use super::SharedSessions;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcpHostShutdownReport {
@@ -21,6 +23,7 @@ pub enum AcpHostShutdownReport {
 }
 
 impl AcpHostShutdownReport {
+    #[must_use]
     pub fn is_complete(&self) -> bool {
         matches!(self, Self::Complete)
     }
@@ -52,7 +55,7 @@ pub(super) fn spawn_with_sessions(
 ) -> AcpHostHandle {
     AcpHostHandle {
         task: Some(tokio::spawn(async move {
-            super::run_acp_server_inner(transport, cfg, sessions)
+            crate::host::acp_server_config::run_acp_server_inner(transport, cfg, sessions)
                 .await
                 .finish()
                 .await

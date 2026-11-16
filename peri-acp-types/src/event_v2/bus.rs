@@ -1,10 +1,10 @@
 //! 通道与发送/接收句柄；保持各层现有容量、丢弃和 lagging 行为。
 
 use super::{ObserveEvent, RenderEvent, StateEvent};
-use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 

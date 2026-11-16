@@ -1,14 +1,13 @@
 //! Tests for prompt
 
-use super::*;
-
 #[test]
 fn test_extract_prompt_params_basic() {
     let params = serde_json::json!({
         "sessionId": "s1",
         "message": { "content": "hello" }
     });
-    let (sid, content, attachments) = extract_prompt_params(&params).unwrap();
+    let (sid, content, attachments) =
+        crate::dispatch::prompt::extract_prompt_params(&params).unwrap();
     assert_eq!(sid, "s1");
     assert_eq!(content.text_content(), "hello");
     assert!(attachments.is_none());
@@ -21,7 +20,8 @@ fn test_extract_prompt_params_with_attachments() {
         "message": { "content": "look at this" },
         "attachments": [{"type": "image", "mimeType": "image/png", "data": "abc"}]
     });
-    let (sid, content, attachments) = extract_prompt_params(&params).unwrap();
+    let (sid, content, attachments) =
+        crate::dispatch::prompt::extract_prompt_params(&params).unwrap();
     assert_eq!(sid, "s2");
     assert_eq!(content.text_content(), "look at this");
     assert!(attachments.is_some());
@@ -42,7 +42,7 @@ fn test_extract_prompt_params_missing_session_id() {
     let params = serde_json::json!({
         "message": { "content": "hello" }
     });
-    let err = extract_prompt_params(&params).unwrap_err();
+    let err = crate::dispatch::prompt::extract_prompt_params(&params).unwrap_err();
     assert_eq!(err.code, -32602);
 }
 
@@ -51,7 +51,8 @@ fn test_extract_prompt_params_defaults_empty_content_without_body_keys() {
     let params = serde_json::json!({
         "sessionId": "s1"
     });
-    let (sid, content, attachments) = extract_prompt_params(&params).unwrap();
+    let (sid, content, attachments) =
+        crate::dispatch::prompt::extract_prompt_params(&params).unwrap();
     assert_eq!(sid, "s1");
     // extract 不报错；`missing message` 由 validate_run_prompt_body / run_prompt 管道负责
     assert_eq!(content.text_content(), "");
@@ -64,7 +65,7 @@ fn test_handle_prompt_success() {
         "sessionId": "existing",
         "message": { "content": "hello" }
     });
-    let result = handle_prompt(&params, |sid| sid == "existing").unwrap();
+    let result = crate::dispatch::prompt::handle_prompt(&params, |sid| sid == "existing").unwrap();
     assert_eq!(result, serde_json::json!({}));
 }
 
@@ -74,7 +75,7 @@ fn test_handle_prompt_session_not_found() {
         "sessionId": "missing",
         "message": { "content": "hello" }
     });
-    let err = handle_prompt(&params, |_sid| false).unwrap_err();
+    let err = crate::dispatch::prompt::handle_prompt(&params, |_sid| false).unwrap_err();
     assert_eq!(err.code, -32602);
     assert!(err.message.contains("session not found"));
 }
@@ -84,7 +85,7 @@ fn test_handle_prompt_missing_session_id() {
     let params = serde_json::json!({
         "message": { "content": "hello" }
     });
-    let err = handle_prompt(&params, |_sid| true).unwrap_err();
+    let err = crate::dispatch::prompt::handle_prompt(&params, |_sid| true).unwrap_err();
     assert_eq!(err.code, -32602);
 }
 
@@ -101,7 +102,8 @@ fn test_extract_prompt_params_stdio_prompt_text_blocks() {
             { "type": "text", "text": ", world" }
         ]
     });
-    let (sid, content, attachments) = extract_prompt_params(&params).unwrap();
+    let (sid, content, attachments) =
+        crate::dispatch::prompt::extract_prompt_params(&params).unwrap();
     assert_eq!(sid, "s-io");
     assert_eq!(
         content.text_content(),
@@ -172,7 +174,7 @@ fn test_extract_prompt_params_message_takes_priority_over_prompt() {
         "message": { "content": "from message" },
         "prompt": [ { "type": "text", "text": "from prompt" } ]
     });
-    let (_, content, _) = extract_prompt_params(&params).unwrap();
+    let (_, content, _) = crate::dispatch::prompt::extract_prompt_params(&params).unwrap();
     assert_eq!(content.text_content(), "from message");
 }
 
@@ -184,7 +186,8 @@ fn test_extract_prompt_params_stdio_prompt_with_attachments_image() {
         "prompt": [{ "type": "text", "text": "describe" }],
         "attachments": [{ "type": "image", "mimeType": "image/png", "data": "aGk=" }]
     });
-    let (_, content, attachments) = extract_prompt_params(&params).unwrap();
+    let (_, content, attachments) =
+        crate::dispatch::prompt::extract_prompt_params(&params).unwrap();
     assert!(attachments.is_some());
     let blocks = content.content_blocks();
     assert_eq!(blocks.len(), 2);
@@ -205,7 +208,7 @@ fn test_extract_prompt_params_attachments_only() {
         "sessionId": "s-only-att",
         "attachments": [{ "type": "image", "mimeType": "image/png", "data": "abc" }]
     });
-    let (_, content, _) = extract_prompt_params(&params).unwrap();
+    let (_, content, _) = crate::dispatch::prompt::extract_prompt_params(&params).unwrap();
     let blocks = content.content_blocks();
     assert_eq!(blocks.len(), 1);
     assert!(matches!(
@@ -218,7 +221,7 @@ fn test_extract_prompt_params_attachments_only() {
 fn test_validate_run_prompt_body_missing_message_when_no_keys_and_empty() {
     let params = serde_json::json!({ "sessionId": "s1" });
     let content = peri_acp_types::messages::MessageContent::text("");
-    let err = validate_run_prompt_body(&params, &content).unwrap_err();
+    let err = crate::dispatch::prompt::validate_run_prompt_body(&params, &content).unwrap_err();
     assert_eq!(err.code, -32602);
     assert_eq!(err.message, "missing message");
 }
@@ -230,7 +233,7 @@ fn test_validate_run_prompt_body_allows_empty_prompt_array() {
         "prompt": []
     });
     let content = peri_acp_types::messages::MessageContent::text("");
-    validate_run_prompt_body(&params, &content).unwrap();
+    crate::dispatch::prompt::validate_run_prompt_body(&params, &content).unwrap();
 }
 
 #[test]
@@ -239,8 +242,10 @@ fn test_validate_run_prompt_body_allows_attachments_only() {
         "sessionId": "s1",
         "attachments": [{ "type": "image", "mimeType": "image/png", "data": "x" }]
     });
-    let content = extract_prompt_params(&params).unwrap().1;
-    validate_run_prompt_body(&params, &content).unwrap();
+    let content = crate::dispatch::prompt::extract_prompt_params(&params)
+        .unwrap()
+        .1;
+    crate::dispatch::prompt::validate_run_prompt_body(&params, &content).unwrap();
 }
 
 #[test]
@@ -250,7 +255,7 @@ fn test_validate_run_prompt_body_rejects_non_array_prompt() {
         "prompt": "not-an-array"
     });
     let content = peri_acp_types::messages::MessageContent::text("");
-    let err = validate_run_prompt_body(&params, &content).unwrap_err();
+    let err = crate::dispatch::prompt::validate_run_prompt_body(&params, &content).unwrap_err();
     assert_eq!(err.message, "missing message");
 }
 
@@ -258,7 +263,7 @@ fn test_validate_run_prompt_body_rejects_non_array_prompt() {
 #[test]
 fn test_extract_and_validate_run_prompt_params_missing_message() {
     let params = serde_json::json!({ "sessionId": "s1" });
-    let err = extract_and_validate_run_prompt_params(&params).unwrap_err();
+    let err = crate::dispatch::prompt::extract_and_validate_run_prompt_params(&params).unwrap_err();
     assert_eq!(err.code, -32602);
     assert_eq!(err.message, "missing message");
 }
@@ -269,7 +274,8 @@ fn test_extract_and_validate_run_prompt_params_attachments_only() {
         "sessionId": "s1",
         "attachments": [{ "type": "image", "mimeType": "image/png", "data": "abc" }]
     });
-    let (sid, content, _) = extract_and_validate_run_prompt_params(&params).unwrap();
+    let (sid, content, _) =
+        crate::dispatch::prompt::extract_and_validate_run_prompt_params(&params).unwrap();
     assert_eq!(sid, "s1");
     assert_eq!(content.content_blocks().len(), 1);
 }

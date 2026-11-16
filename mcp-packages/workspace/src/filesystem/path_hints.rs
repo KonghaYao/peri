@@ -1,7 +1,7 @@
 //! 目标路径不存在时的模型诊断：收集同目录与 cwd 一层子目录的条目，
 //! 模糊匹配给出 did-you-mean 候选；无候选时保持原文本（保守语义，不产生噪声建议）。
 
-use crate::fuzzy::fuzzy_filter;
+use crate::fuzzy;
 use std::path::{Path, PathBuf};
 
 /// 同目录候选少于该值时，追加 cwd 一层子目录的条目作为兜底候选。
@@ -29,12 +29,12 @@ fn did_you_mean(cwd: &str, target: &Path) -> Option<String> {
     // 先用完整文件名 fuzzy；不命中时回退扩展名 stem，再回退编辑距离
     // （容错拼错如 maiin -> main：Skim 子序列匹配对重复字符不命中，
     // 需要 stem + 编辑距离两级回退）。
-    let mut matched = fuzzy_filter(&candidates, &target_name);
+    let mut matched = fuzzy::fuzzy_filter(&candidates, &target_name);
     if matched.is_empty() {
         if let Some(stem) = Path::new(&target_name).file_stem() {
             let stem = stem.to_string_lossy();
             if !stem.is_empty() {
-                matched = fuzzy_filter(&candidates, &stem);
+                matched = fuzzy::fuzzy_filter(&candidates, &stem);
             }
         }
     }
@@ -132,13 +132,19 @@ fn levenshtein(a: &str, b: &str) -> usize {
         return a_len;
     }
     let mut prev = (0..=b_len).collect::<Vec<_>>();
-    for (i, ca) in a.chars().enumerate() {
-        let mut cur = vec![i + 1];
-        for (j, cb) in b.chars().enumerate() {
-            let cost = if ca == cb { 0 } else { 1 };
-            cur.push((prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost));
+    {
+        let indexed_a = a.chars().enumerate();
+        for (i, ca) in indexed_a {
+            let mut cur = vec![i + 1];
+            {
+                let indexed_pattern_chars = b.chars().enumerate();
+                for (j, cb) in indexed_pattern_chars {
+                    let cost = if ca == cb { 0 } else { 1 };
+                    cur.push((prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost));
+                }
+            }
+            prev = cur;
         }
-        prev = cur;
     }
     prev[b_len]
 }

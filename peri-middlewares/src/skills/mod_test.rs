@@ -9,10 +9,17 @@
 //! 错误——技能内容与目录现在都经 MCP 侧，见 `crate::mcp::skill_discovery_test`
 //! 与 `peri-acp` 的会话端到端用例。
 
-use peri_agent::{agent::state::AgentState, middleware::r#trait::Middleware};
-use tempfile::tempdir;
+use peri_agent::agent::state::AgentState;
+use peri_agent::middleware::r#trait::Middleware;
+use tempfile;
 
-use super::*;
+use super::Arc;
+use super::McpSkillRegistry;
+use super::PromptSectionZone;
+use super::SkillMetadata;
+use super::SkillOrigin;
+use super::SkillSource;
+use super::SkillsMiddleware;
 
 /// Helper: call prompt_contribution with concrete State type for testing.
 fn contribution(mw: &SkillsMiddleware) -> Option<String> {
@@ -52,7 +59,7 @@ fn registry_with(server: &str, skills: Vec<SkillMetadata>) -> Arc<McpSkillRegist
 fn test_annotation_keeps_source_without_fabricating_tool_prefix() {
     for server in ["workspace", "plugin:foo.bar"] {
         let meta = fake_skill(server, "project", "hello");
-        let annotated = annotate_mcp_content(&meta, "# Body");
+        let annotated = super::annotate_mcp_content(&meta, "# Body");
         assert_eq!(
             annotated.lines().next().unwrap(),
             format!(
@@ -129,7 +136,7 @@ fn source_label_falls_back_to_mcp_for_foreign_uri_shapes() {
 async fn without_registry_cache_and_contribution_stay_empty() {
     // 未装配技能面：没有摘要，也不回落任何本地来源（J5）；工具面在调用时
     // 读取 registry，未装配 ⇒ 目录不可用的稳定错误（见 tools_test）。
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mw = SkillsMiddleware::new();
     let mut state = AgentState::new(dir.path().to_str().unwrap());
     mw.before_agent(&mut state).await.unwrap();
@@ -194,7 +201,7 @@ async fn tool_face_reflects_catalog_changes() {
 /// 外部 origin 保持既有延迟发现语义（不进 prompt）。
 #[tokio::test]
 async fn unfrozen_contribution_uses_system_origins_only() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let reg = registry_with(
         "workspace",
         vec![fake_skill("workspace", "project", "local-skill")],
@@ -226,7 +233,7 @@ async fn unfrozen_contribution_uses_system_origins_only() {
 /// 冻结摘要优先：会话内不再按当轮投影重渲染（ARC-FROZEN-001 的投递面）。
 #[tokio::test]
 async fn frozen_summary_wins_over_current_projection() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let reg = registry_with(
         "workspace",
         vec![fake_skill("workspace", "project", "appeared-later")],
@@ -307,7 +314,7 @@ fn skills_section_declaration_shape() {
 
 #[test]
 fn discovery_protocol_describes_mcp_sources_without_local_paths() {
-    let text = format_discovery_protocol();
+    let text = super::format_discovery_protocol();
     assert!(
         text.contains("MCP"),
         "协议文本应说明技能经 MCP 提供: {text}"

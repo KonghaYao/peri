@@ -1,6 +1,6 @@
 //! 段落能力策略测试（H2）：能力事实 ↔ 段落集合，以及各执行面投影的行为。
 
-use super::*;
+use super::PromptSection;
 use peri_acp_types::meta_harness::MetaHarnessState;
 use peri_agent::middleware::prompt_sections::SectionCapabilities;
 
@@ -19,7 +19,7 @@ fn ids(sections: &[PromptSection]) -> Vec<&'static str> {
 #[test]
 fn main_chain_capabilities_collect_all_sections() {
     let state = MetaHarnessState::default();
-    let capabilities = main_chain_capabilities(&state.disabled_middlewares);
+    let capabilities = super::main_chain_capabilities(&state.disabled_middlewares);
     assert_eq!(
         capabilities,
         SectionCapabilities {
@@ -31,7 +31,7 @@ fn main_chain_capabilities_collect_all_sections() {
             skills: true,
         }
     );
-    let collected = collect_prompt_sections(&state, None, None, &capabilities);
+    let collected = super::collect_prompt_sections(&state, None, None, &capabilities);
     let collected_ids = ids(&collected);
     for id in [
         "01_intro",
@@ -58,13 +58,13 @@ fn disabled_holders_remove_capabilities_and_sections() {
         "SubAgentMiddleware",
         "SkillsMiddleware",
     ]);
-    let capabilities = main_chain_capabilities(&state.disabled_middlewares);
+    let capabilities = super::main_chain_capabilities(&state.disabled_middlewares);
     assert!(!capabilities.approval);
     assert!(!capabilities.ask_user);
     assert!(!capabilities.subagent);
     assert!(!capabilities.skills);
 
-    let collected = collect_prompt_sections(&state, None, None, &capabilities);
+    let collected = super::collect_prompt_sections(&state, None, None, &capabilities);
     let collected_ids = ids(&collected);
     for id in ["10_hitl", "11_subagent", "12_ask_user", "13_skills"] {
         assert!(
@@ -81,7 +81,7 @@ fn disabled_holders_remove_capabilities_and_sections() {
 #[test]
 fn subagent_capabilities_do_not_declare_absent_abilities() {
     let state = MetaHarnessState::default();
-    let capabilities = subagent_chain_capabilities(&state.disabled_middlewares);
+    let capabilities = super::subagent_chain_capabilities(&state.disabled_middlewares);
     assert!(capabilities.base_prompt, "基础段由冻结模板继承");
     assert!(capabilities.language);
     assert!(!capabilities.approval);
@@ -89,7 +89,7 @@ fn subagent_capabilities_do_not_declare_absent_abilities() {
     assert!(!capabilities.subagent);
     assert!(capabilities.skills);
 
-    let collected = collect_prompt_sections(&state, None, None, &capabilities);
+    let collected = super::collect_prompt_sections(&state, None, None, &capabilities);
     let collected_ids = ids(&collected);
     assert!(collected_ids.contains(&"01_intro"));
     assert!(collected_ids.contains(&"07_runtime"));
@@ -109,7 +109,7 @@ fn workflow_capabilities_follow_effective_modes() {
     let state = MetaHarnessState::default();
 
     let disabled_permission =
-        workflow_chain_capabilities(&state.disabled_middlewares, false, false);
+        super::workflow_chain_capabilities(&state.disabled_middlewares, false, false);
     assert!(!disabled_permission.approval, "disabled 实例不声明审批");
     assert!(!disabled_permission.ask_user);
     assert!(
@@ -117,11 +117,11 @@ fn workflow_capabilities_follow_effective_modes() {
         "workflow 链不装配子代理持有者"
     );
 
-    let active = workflow_chain_capabilities(&state.disabled_middlewares, true, true);
+    let active = super::workflow_chain_capabilities(&state.disabled_middlewares, true, true);
     assert!(active.approval, "broker + mode 齐备 ⇒ 审批有效");
     assert!(active.ask_user, "broker 存在 ⇒ 提问通道装配");
 
-    let broker_only = workflow_chain_capabilities(&state.disabled_middlewares, true, false);
+    let broker_only = super::workflow_chain_capabilities(&state.disabled_middlewares, true, false);
     assert!(!broker_only.approval, "仅有 broker 不构成有效审批模式");
 }
 
@@ -129,24 +129,24 @@ fn workflow_capabilities_follow_effective_modes() {
 #[test]
 fn capabilities_derive_from_assembled_sections() {
     let state = MetaHarnessState::default();
-    let declared = collect_prompt_sections(
+    let declared = super::collect_prompt_sections(
         &state,
         None,
         None,
-        &main_chain_capabilities(&state.disabled_middlewares),
+        &super::main_chain_capabilities(&state.disabled_middlewares),
     );
     let derived = SectionCapabilities::from_sections(&declared);
     assert_eq!(
         derived,
-        main_chain_capabilities(&state.disabled_middlewares)
+        super::main_chain_capabilities(&state.disabled_middlewares)
     );
 
     // 只有 Skills 持有者的装配面（子链形状）：派生事实与子链投影一致
-    let skills_only = collect_prompt_sections(
+    let skills_only = super::collect_prompt_sections(
         &state,
         None,
         None,
-        &subagent_chain_capabilities(&state.disabled_middlewares),
+        &super::subagent_chain_capabilities(&state.disabled_middlewares),
     );
     let derived = SectionCapabilities::from_sections(&skills_only);
     assert!(derived.skills);

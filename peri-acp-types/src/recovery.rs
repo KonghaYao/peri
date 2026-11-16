@@ -53,6 +53,7 @@ pub struct InterruptedThread {
 
 impl RecoveryScope {
     /// 空范围：根自身就是全部，没有候选。
+    #[must_use]
     pub fn idle(root_thread_id: ThreadId) -> Self {
         Self {
             root_thread_id,
@@ -169,6 +170,7 @@ impl RecoveryErrorKind {
     ///
     /// `Unavailable` / `Superseded` 仍可由用户显式继续或下一次进入重试；
     /// `Unsupported` 只表示后端不提供恢复查询，不等于不可执行。
+    #[must_use]
     pub fn blocks_execution(self) -> bool {
         matches!(self, Self::Corrupt | Self::ReadOnly | Self::NotFound)
     }
@@ -189,6 +191,7 @@ pub struct RecoveryError {
 }
 
 impl RecoveryError {
+    #[must_use]
     pub fn new(
         kind: RecoveryErrorKind,
         thread_id: Option<ThreadId>,
@@ -212,6 +215,7 @@ impl RecoveryError {
         )
     }
 
+    #[must_use]
     pub fn kind(&self) -> RecoveryErrorKind {
         self.kind
     }
@@ -220,6 +224,7 @@ impl RecoveryError {
         self.thread_id.as_ref()
     }
 
+    #[must_use]
     pub fn source(&self) -> &SessionResourceError {
         &self.source
     }

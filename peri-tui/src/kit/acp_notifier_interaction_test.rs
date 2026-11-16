@@ -1,4 +1,9 @@
-use super::*;
+use super::AcpEventData;
+use super::AcpEventWithEpoch;
+use super::AcpNotification;
+use super::CancellationToken;
+use super::mpsc;
+
 use serde_json::json;
 use serial_test::serial;
 fn spawn_test_notifier() -> (
@@ -10,7 +15,7 @@ fn spawn_test_notifier() -> (
         mpsc::channel(crate::acp_client::client::NOTIFICATION_QUEUE_CAPACITY);
     let (bridge_tx, bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let shutdown = CancellationToken::new();
-    let _handle = spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
+    let _handle = super::spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
     (notif_tx, bridge_rx, shutdown)
 }
 
@@ -35,7 +40,7 @@ async fn test_request_permission_forwards_hitl_pending_event() {
             }),
         })
         .await
-        .unwrap();
+        .expect("request permission forwards hitl pending event: fixture task and request must complete successfully");
 
     let bridge_event = bridge_rx.recv().await.expect("bridge 应收到 HitlPending");
     match bridge_event.event {
@@ -64,7 +69,7 @@ async fn test_request_permission_queued_events_keep_number_and_string_ids_atomic
         notif_tx
             .send(AcpNotification::RequestPermission {
                 owner: Default::default(),
-                request_id_json: serde_json::to_string(&id).unwrap(),
+                request_id_json: serde_json::to_string(&id).expect("request permission queued events keep number and string ids atomic: fixture must serialize to JSON"),
                 params: json!({
                     "sessionId": "s1",
                     "toolCall": {"title": title, "rawInput": {"marker": title}},
@@ -72,7 +77,7 @@ async fn test_request_permission_queued_events_keep_number_and_string_ids_atomic
                 }),
             })
             .await
-            .unwrap();
+            .expect("request permission queued events keep number and string ids atomic: fixture must serialize to JSON");
     }
     let a = bridge_rx.recv().await.expect("应收到 A");
     let b = bridge_rx.recv().await.expect("应收到 B");
@@ -110,7 +115,7 @@ async fn test_elicitation_queued_events_keep_number_and_string_ids_atomic() {
                     kind: crate::acp_client::ReverseInteractionKind::Elicitation,
                     ..Default::default()
                 },
-                request_id_json: serde_json::to_string(&id).unwrap(),
+                request_id_json: serde_json::to_string(&id).expect("elicitation queued events keep number and string ids atomic: fixture must serialize to JSON"),
                 params: json!({
                     "sessionId": "s1",
                     "requestedSchema": {"type": "object", "properties": {
@@ -119,7 +124,7 @@ async fn test_elicitation_queued_events_keep_number_and_string_ids_atomic() {
                 }),
             })
             .await
-            .unwrap();
+            .expect("elicitation queued events keep number and string ids atomic: fixture must serialize to JSON");
     }
     let a = bridge_rx.recv().await.expect("应收到 A");
     let b = bridge_rx.recv().await.expect("应收到 B");
@@ -176,7 +181,7 @@ async fn test_interaction_notifier_has_no_pending_atom_side_effect() {
             params: json!({"sessionId":"s1","toolCall":{"title":"new","rawInput":null}}),
         })
         .await
-        .unwrap();
+        .expect("interaction notifier has no pending atom side effect: fixture task and request must complete successfully");
     bridge_rx.recv().await.expect("应完成 notifier conversion");
     notif_tx
         .send(AcpNotification::Elicitation {
@@ -188,7 +193,7 @@ async fn test_interaction_notifier_has_no_pending_atom_side_effect() {
             params: json!({"sessionId":"s1","requestedSchema":{"type":"object","properties":{}}}),
         })
         .await
-        .unwrap();
+        .expect("interaction notifier has no pending atom side effect: fixture task and request must complete successfully");
     bridge_rx
         .recv()
         .await
@@ -198,7 +203,7 @@ async fn test_interaction_notifier_has_no_pending_atom_side_effect() {
             .state()
             .read()
             .as_ref()
-            .unwrap()
+            .expect("interaction notifier has no pending atom side effect: the fixture storage and layout must support the requested operation")
             .request_id_json,
         "\"sentinel-hitl\""
     );
@@ -207,7 +212,7 @@ async fn test_interaction_notifier_has_no_pending_atom_side_effect() {
             .state()
             .read()
             .as_ref()
-            .unwrap()
+            .expect("interaction notifier has no pending atom side effect: the fixture storage and layout must support the requested operation")
             .request_id_json,
         "\"sentinel-ask\""
     );

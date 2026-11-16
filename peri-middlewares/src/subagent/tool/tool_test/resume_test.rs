@@ -1,4 +1,13 @@
-use super::*;
+use super::mock_model;
+use super::AgentStatus;
+use super::Arc;
+use super::BaseMessage;
+use super::BaseTool;
+use super::HostFixture;
+use super::SessionFixture;
+use super::SubAgentTool;
+use super::SubagentLlmSource;
+use super::ThreadMeta;
 
 // ─── Slice 6:Agent 工具 resume_thread_id 参数（tool 层） ──────────────────────
 
@@ -48,11 +57,11 @@ fn test_resume_thread_id_parse_is_three_way() {
 /// 空串 resume_thread_id（LLM 表达「省略」的常见形式）→ 等同未填，走新建路径。
 #[tokio::test]
 async fn test_resume_thread_id_empty_string_spawns_new() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
+    let dir = tempfile::tempdir().unwrap();
+    super::write_test_agent(&dir);
     let _fixture = SessionFixture::open_in(dir.path()).await;
     let host = HostFixture::open_in(dir.path(), "fixture-resume-empty").await;
-    let t = host.bind(with_agent_face(make_subagent_tool(vec![]), dir.path()).await);
+    let t = host.bind(super::with_agent_face(super::make_subagent_tool(vec![]), dir.path()).await);
     let result = t
         .invoke(
             serde_json::json!({
@@ -89,11 +98,11 @@ async fn test_resume_thread_id_empty_string_spawns_new() {
 /// subagent_type / prompt 就转入新建路径，重复执行同一任务并造成工作区竞争。
 #[tokio::test]
 async fn test_resume_thread_id_non_uuid_is_rejected_without_spawning() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
+    let dir = tempfile::tempdir().unwrap();
+    super::write_test_agent(&dir);
     let _fixture = SessionFixture::open_in(dir.path()).await;
     let host = HostFixture::open_in(dir.path(), "fixture-resume-non-uuid").await;
-    let t = host.bind(with_agent_face(make_subagent_tool(vec![]), dir.path()).await);
+    let t = host.bind(super::with_agent_face(super::make_subagent_tool(vec![]), dir.path()).await);
 
     let task_id = format!("bg-{}", uuid::Uuid::now_v7());
     for bad in ["new", task_id.as_str()] {
@@ -149,8 +158,8 @@ async fn test_resume_thread_id_non_uuid_is_rejected_without_spawning() {
 /// R-M2 容错：resume_thread_id 与 fork 同传 → fork 被忽略，恢复成功（不报错）
 #[tokio::test]
 async fn test_resume_thread_id_ignores_fork_field() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
+    let dir = tempfile::tempdir().unwrap();
+    super::write_test_agent(&dir);
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
@@ -163,9 +172,9 @@ async fn test_resume_thread_id_ignores_fork_field() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
-    install_parent_host(&store, &parent);
+    super::install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(
+    super::preset_resumable_thread(
         &store,
         &id,
         "test-agent",
@@ -174,7 +183,7 @@ async fn test_resume_thread_id_ignores_fork_field() {
     )
     .await;
 
-    let t = with_agent_face(make_subagent_tool(vec![]), dir.path())
+    let t = super::with_agent_face(super::make_subagent_tool(vec![]), dir.path())
         .await
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
@@ -186,7 +195,7 @@ async fn test_resume_thread_id_ignores_fork_field() {
                 "fork": true,
                 "cwd": cwd.clone(),
             }),
-            preset_child_ctx(&id, "."),
+            super::preset_child_ctx(&id, "."),
         )
         .await
         .expect("resume+fork 应容错恢复而非报互斥错误");
@@ -201,8 +210,8 @@ async fn test_resume_thread_id_ignores_fork_field() {
 /// 恢复成功（不报错）
 #[tokio::test]
 async fn test_resume_thread_id_ignores_subagent_type_field() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
+    let dir = tempfile::tempdir().unwrap();
+    super::write_test_agent(&dir);
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
@@ -215,9 +224,9 @@ async fn test_resume_thread_id_ignores_subagent_type_field() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
-    install_parent_host(&store, &parent);
+    super::install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(
+    super::preset_resumable_thread(
         &store,
         &id,
         "test-agent",
@@ -226,7 +235,7 @@ async fn test_resume_thread_id_ignores_subagent_type_field() {
     )
     .await;
 
-    let t = with_agent_face(make_subagent_tool(vec![]), dir.path())
+    let t = super::with_agent_face(super::make_subagent_tool(vec![]), dir.path())
         .await
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
@@ -238,7 +247,7 @@ async fn test_resume_thread_id_ignores_subagent_type_field() {
                 "subagent_type": "test-agent",
                 "cwd": cwd.clone(),
             }),
-            preset_child_ctx(&id, "."),
+            super::preset_child_ctx(&id, "."),
         )
         .await
         .expect("resume+subagent_type 应容错恢复而非报互斥错误");
@@ -252,7 +261,7 @@ async fn test_resume_thread_id_ignores_subagent_type_field() {
 /// 校验：thread 不存在 → Err（thread not found，agent 层统一前缀）
 #[tokio::test]
 async fn test_resume_thread_id_not_found() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let fixture = SessionFixture::open_in(dir.path()).await;
     let cwd = fixture.workspace_cwd();
     let parent_id = fixture
@@ -265,7 +274,7 @@ async fn test_resume_thread_id_not_found() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
-    let t = make_subagent_tool(vec![])
+    let t = super::make_subagent_tool(vec![])
         .with_session_resources(fixture.facade())
         .with_parent_thread_id(parent_id.clone())
         .with_parent_session(parent.clone());
@@ -302,7 +311,7 @@ async fn test_resume_thread_id_not_found() {
 
 #[tokio::test]
 async fn test_resume_missing_resources_is_a_typed_preflight_rejection() {
-    let tool = make_subagent_tool(vec![]);
+    let tool = super::make_subagent_tool(vec![]);
     let error = tool
         .invoke_resume(
             uuid::Uuid::now_v7().to_string(),
@@ -326,9 +335,9 @@ async fn test_resume_missing_resources_is_a_typed_preflight_rejection() {
 
 #[tokio::test]
 async fn test_resume_invalid_identity_is_a_typed_preflight_rejection() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let fixture = SessionFixture::open_in(dir.path()).await;
-    let tool = make_subagent_tool(vec![]).with_session_resources(fixture.facade());
+    let tool = super::make_subagent_tool(vec![]).with_session_resources(fixture.facade());
     let error = tool
         .invoke_resume(
             "../invalid".into(),
@@ -354,7 +363,7 @@ async fn test_resume_invalid_identity_is_a_typed_preflight_rejection() {
 /// title 用 "fork"——fork 路径不依赖 agent_def，可先于 resume 校验触达
 #[tokio::test]
 async fn test_resume_thread_id_active_rejected() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
@@ -372,7 +381,7 @@ async fn test_resume_thread_id_active_rejected() {
     meta.id = id.clone();
     meta.title = Some("fork".to_string());
     store.create_thread(meta).await.unwrap(); // ThreadMeta 默认 agent_status = Active
-    let t = make_subagent_tool(vec![])
+    let t = super::make_subagent_tool(vec![])
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
         .with_parent_session(parent.clone());
@@ -381,7 +390,7 @@ async fn test_resume_thread_id_active_rejected() {
             serde_json::json!({
                 "resume_thread_id": id,
             }),
-            preset_child_ctx(&id, "."),
+            super::preset_child_ctx(&id, "."),
         )
         .await;
     let error = result.unwrap_err();
@@ -406,8 +415,8 @@ async fn test_resume_thread_id_active_rejected() {
 /// 显式 resume 只加载历史并开始新 run，不恢复旧执行，也不因持有 child ID 获权。
 #[tokio::test]
 async fn test_resume_thread_id_parent_mismatch_is_rejected_by_root_ownership() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
+    let dir = tempfile::tempdir().unwrap();
+    super::write_test_agent(&dir);
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     // 另一个真实根会话：child 挂在它下面，祖先链可解析但执行根不同。
@@ -416,7 +425,7 @@ async fn test_resume_thread_id_parent_mismatch_is_rejected_by_root_ownership() {
         .await
         .expect("建立另一根会话失败");
     let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(
+    super::preset_resumable_thread(
         &store,
         &id,
         "test-agent",
@@ -435,11 +444,11 @@ async fn test_resume_thread_id_parent_mismatch_is_rejected_by_root_ownership() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
-    install_parent_host(&store, &parent);
+    super::install_parent_host(&store, &parent);
     let history_before = store.resources.load_session_history(&id).await.unwrap();
     let model = mock_model::RecordingModel::new("must not run across roots");
     let child_model = Arc::clone(&model);
-    let t = with_agent_face(
+    let t = super::with_agent_face(
         SubAgentTool::new(
             Arc::new(vec![]),
             None,
@@ -458,7 +467,7 @@ async fn test_resume_thread_id_parent_mismatch_is_rejected_by_root_ownership() {
                 "resume_thread_id": id.clone(),
                 "cwd": cwd.clone(),
             }),
-            preset_child_ctx(&id, "."),
+            super::preset_child_ctx(&id, "."),
         )
         .await
         .expect_err("跨根恢复必须被拒绝");
@@ -501,7 +510,7 @@ async fn test_resume_thread_id_background_combination() {
     use peri_agent::agent::events::ExecutorEvent;
     use tokio::sync::mpsc;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
@@ -515,7 +524,7 @@ async fn test_resume_thread_id_background_combination() {
         Some(parent_id.clone()),
     );
     let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(&store, &id, "fork", Some(parent_id.as_str()), Vec::new()).await;
+    super::preset_resumable_thread(&store, &id, "fork", Some(parent_id.as_str()), Vec::new()).await;
 
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
@@ -529,7 +538,7 @@ async fn test_resume_thread_id_background_combination() {
         )),
         ..Default::default()
     });
-    let t = make_subagent_tool(vec![])
+    let t = super::make_subagent_tool(vec![])
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
         .with_parent_session(parent.clone());
@@ -540,7 +549,7 @@ async fn test_resume_thread_id_background_combination() {
                 "resume_thread_id": id.clone(),
                 "run_in_background": true,
             }),
-            preset_child_ctx(&id, "."),
+            super::preset_child_ctx(&id, "."),
         )
         .await
         .expect("resume+bg 应启动后台任务");
@@ -613,7 +622,7 @@ async fn test_resume_thread_id_background_forced() {
     use peri_agent::agent::events::ExecutorEvent;
     use tokio::sync::mpsc;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
@@ -626,7 +635,7 @@ async fn test_resume_thread_id_background_forced() {
         Some(parent_id.clone()),
     );
     let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(&store, &id, "fork", Some(parent_id.as_str()), Vec::new()).await;
+    super::preset_resumable_thread(&store, &id, "fork", Some(parent_id.as_str()), Vec::new()).await;
 
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
@@ -640,7 +649,7 @@ async fn test_resume_thread_id_background_forced() {
         )),
         ..Default::default()
     });
-    let t = make_subagent_tool(vec![])
+    let t = super::make_subagent_tool(vec![])
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
         .with_parent_session(parent.clone())
@@ -650,7 +659,7 @@ async fn test_resume_thread_id_background_forced() {
     let result = t
         .invoke(
             serde_json::json!({ "resume_thread_id": id.clone() }),
-            preset_child_ctx(&id, "."),
+            super::preset_child_ctx(&id, "."),
         )
         .await
         .expect("强制后台下 resume 应启动后台任务");
@@ -688,7 +697,7 @@ async fn test_resume_thread_id_background_forced() {
 
     // 显式 false 也不能落回同步：强制后台对 resume 同样生效。
     let explicit_false_id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(
+    super::preset_resumable_thread(
         &store,
         &explicit_false_id,
         "fork",
@@ -702,7 +711,7 @@ async fn test_resume_thread_id_background_forced() {
                 "resume_thread_id": explicit_false_id.clone(),
                 "run_in_background": false,
             }),
-            preset_child_ctx(&explicit_false_id, "."),
+            super::preset_child_ctx(&explicit_false_id, "."),
         )
         .await
         .expect("强制后台下 resume 显式 false 应启动后台任务");
@@ -733,8 +742,8 @@ async fn test_resume_thread_id_background_forced() {
 /// child_thread_id + 结果（旧 transcript 重放；prompt 缺省 → 隐式 continue）
 #[tokio::test]
 async fn test_resume_thread_id_success_replays_and_completes() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
+    let dir = tempfile::tempdir().unwrap();
+    super::write_test_agent(&dir);
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
@@ -747,9 +756,9 @@ async fn test_resume_thread_id_success_replays_and_completes() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
-    install_parent_host(&store, &parent);
+    super::install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(
+    super::preset_resumable_thread(
         &store,
         &id,
         "test-agent",
@@ -758,7 +767,7 @@ async fn test_resume_thread_id_success_replays_and_completes() {
     )
     .await;
 
-    let t = with_agent_face(make_subagent_tool(vec![]), dir.path())
+    let t = super::with_agent_face(super::make_subagent_tool(vec![]), dir.path())
         .await
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
@@ -769,7 +778,7 @@ async fn test_resume_thread_id_success_replays_and_completes() {
                 "resume_thread_id": id.clone(),
                 "cwd": cwd.clone(),
             }),
-            preset_child_ctx(&id, "."),
+            super::preset_child_ctx(&id, "."),
         )
         .await
         .expect("resume 应成功");
@@ -788,7 +797,7 @@ async fn test_resume_thread_id_success_replays_and_completes() {
 /// 每轮改为有效工具及唯一调用身份，并核对 typed 失败原因，避免只按模型调用数猜测预算。
 #[tokio::test]
 async fn test_resume_thread_id_fork_title_uses_parent_tools_and_default_iterations() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
@@ -801,9 +810,9 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_default_iteratio
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
-    install_parent_host(&store, &parent);
+    super::install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(
+    super::preset_resumable_thread(
         &store,
         &id,
         "fork",
@@ -829,15 +838,15 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_default_iteratio
             request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let _ = &cancellation;
-            let _messages = base_messages(&request);
-            let defined = defined_tools(&request);
+            let _messages = test_support::base_messages(&request);
+            let defined = test_support::defined_tools(&request);
             let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             let call_index = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *self.captured.lock().unwrap() = tools.iter().map(|t| t.name().to_string()).collect();
-            tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
+            test_support::tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
                 format!("fork-resume-{call_index}"),
                 "Read",
                 serde_json::json!({}),
@@ -846,7 +855,7 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_default_iteratio
     }
     crate::subagent::test_support::fixture_model_impl!(ForkLoopLLM);
 
-    let parent_tools = vec![make_tool("Read"), make_tool("Agent")];
+    let parent_tools = vec![super::make_tool("Read"), super::make_tool("Agent")];
     let t = SubAgentTool::new(
         Arc::new(parent_tools),
         None,
@@ -870,7 +879,7 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_default_iteratio
             serde_json::json!({
                 "resume_thread_id": id.clone(),
             }),
-            preset_child_ctx(&id, "."),
+            super::preset_child_ctx(&id, "."),
         )
         .await;
     // 迭代上限耗尽 → MaxIterationsExceeded 错误（fork resume 上限 = DEFAULT_SUBAGENT_MAX_ITERATIONS）
@@ -906,164 +915,4 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_default_iteratio
     );
 }
 
-/// agent-def resume：title == agent_id → load_agent_def 重新应用过滤
-/// （tools 白名单 + Agent 恒排除；与 fork resume 的"父工具集无过滤"区分；
-/// build_result 的 skill_names / system_prompt 被 resume_config_base 丢弃——
-/// R-H1 / F4，不重复注入）
-#[tokio::test]
-async fn test_resume_thread_id_agent_def_refilters_tools() {
-    let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(
-        agents_dir.join("resume-agent.md"),
-        "---\nname: resume-agent\ndescription: Resume filter test\ntools:\n  - Read\n---\n\nYou are resumable.\n",
-    )
-    .unwrap();
-
-    let store = SessionFixture::open_in(dir.path()).await;
-    let cwd = store.workspace_cwd();
-    let parent_id = store
-        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
-        .await
-        .expect("建立父会话失败");
-    // 父会话句柄：resume 路径经它校验「owning parent session」
-    let parent = peri_agent::session::Session::new(
-        std::sync::Arc::from(cwd.as_str()),
-        peri_agent::session::FrozenContext::builder().build(),
-        Some(parent_id.clone()),
-    );
-    install_parent_host(&store, &parent);
-    let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(
-        &store,
-        &id,
-        "resume-agent",
-        Some(parent_id.as_str()),
-        Vec::new(),
-    )
-    .await;
-
-    let tools_capture: Arc<std::sync::Mutex<Vec<String>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-    let tools_capture_clone = Arc::clone(&tools_capture);
-    #[derive(Clone)]
-    struct ResumeFilterLLM {
-        captured: Arc<std::sync::Mutex<Vec<String>>>,
-    }
-    impl ResumeFilterLLM {
-        async fn respond(
-            &self,
-            request: peri_model::ModelRequest,
-            cancellation: tokio_util::sync::CancellationToken,
-        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
-            let _ = &cancellation;
-            let _messages = base_messages(&request);
-            let defined = defined_tools(&request);
-            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
-
-            *self.captured.lock().unwrap() = tools.iter().map(|t| t.name().to_string()).collect();
-            text_events("resume-filter-done")
-        }
-    }
-    crate::subagent::test_support::fixture_model_impl!(ResumeFilterLLM);
-
-    let parent_tools = vec![make_tool("Read"), make_tool("Write"), make_tool("Agent")];
-    let t = SubAgentTool::new(
-        Arc::new(parent_tools),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            crate::subagent::test_support::fixture_source(
-                std::sync::Arc::new(ResumeFilterLLM {
-                    captured: Arc::clone(&tools_capture_clone),
-                }),
-                "fixture-scripted",
-            )
-        }),
-        "/tmp".to_string(),
-    )
-    .with_session_resources(store.facade())
-    .with_parent_thread_id(parent_id.clone())
-    .with_parent_session(parent.clone());
-    let t = with_agent_face(t, dir.path()).await;
-
-    let result = t
-        .invoke(
-            serde_json::json!({
-                "resume_thread_id": id.clone(),
-                "cwd": cwd.clone(),
-            }),
-            preset_child_ctx(&id, "."),
-        )
-        .await
-        .expect("agent-def resume 应成功");
-    assert!(
-        result.contains(&format!("child_thread_id: {}", id)),
-        "完成文本应带 child_thread_id: {}",
-        result
-    );
-    assert!(
-        result.contains("resume-filter-done"),
-        "agent-def resume 应执行完成: {}",
-        result
-    );
-    let captured = tools_capture.lock().unwrap();
-    assert_eq!(
-        captured.as_slice(),
-        &["Read"],
-        "agent-def resume 必须按 tools 白名单重新过滤（含 Agent 排除）: {:?}",
-        *captured
-    );
-}
-
-/// UUID 两侧空格和多余分支字段不能改变恢复优先级；非字符串 prompt 视为缺省。
-#[tokio::test]
-async fn test_resume_trimmed_id_wins_over_mcp_fork_and_invalid_model() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
-    let store = SessionFixture::open_in(dir.path()).await;
-    let cwd = store.workspace_cwd();
-    let parent_id = store
-        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
-        .await
-        .expect("建立父会话失败");
-    // 父会话句柄：resume 路径经它校验「owning parent session」
-    let parent = peri_agent::session::Session::new(
-        std::sync::Arc::from(cwd.as_str()),
-        peri_agent::session::FrozenContext::builder().build(),
-        Some(parent_id.clone()),
-    );
-    install_parent_host(&store, &parent);
-    let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(&store, &id, "test-agent", Some(parent_id.as_str()), vec![]).await;
-    let tool = with_agent_face(make_subagent_tool(vec![]), dir.path())
-        .await
-        .with_session_resources(store.facade())
-        .with_parent_thread_id(parent_id.clone())
-        .with_parent_session(parent.clone());
-    let result = tool
-        .invoke(
-            serde_json::json!({
-                "resume_thread_id": format!("  {id}\n"),
-                "subagent_type": "mcp__missing__agent",
-                "fork": true,
-                "model": "invalid-model",
-                "prompt": null,
-                "cwd": cwd.clone()
-            }),
-            preset_child_ctx(&id, "."),
-        )
-        .await
-        .unwrap();
-    assert!(result.starts_with(&format!("child_thread_id: {id}\n")));
-    assert!(result.contains("Continue your previous task where you left off."));
-    // 恢复线程为 hidden；按真实根 ID 查询包含隐藏线程的会话树。
-    let session_threads = store.list_session_threads(&id).await.unwrap();
-    assert_eq!(session_threads.len(), 1, "恢复不得 fork 子线程");
-    assert_eq!(session_threads[0].id, id);
-    assert_eq!(
-        store.load_meta(&id).await.unwrap().agent_status,
-        peri_agent::thread::AgentStatus::Done
-    );
-}
+include!("resume_test/resumed_agent_definition.rs");

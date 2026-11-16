@@ -1,4 +1,13 @@
-use super::*;
+use super::AgentCancellationToken;
+use super::AgentState;
+use super::Arc;
+use super::HandleToken;
+use super::McpClientHandle;
+use super::McpMiddleware;
+use super::McpSkillRegistry;
+use super::Middleware;
+use super::ServerDiscoveryState;
+use peri_acp_types::command_registry::CommandRegistry;
 
 async fn wait_failed(registry: &McpSkillRegistry, token: &HandleToken) {
     for _ in 0..200 {
@@ -15,10 +24,10 @@ async fn wait_failed(registry: &McpSkillRegistry, token: &HandleToken) {
 /// [回归测试] 无 peer 因而无 cache 的当前连接仍须完成发现并暴露 Failed。
 #[tokio::test]
 async fn before_agent_missing_peer_without_cache_finishes_failed() {
-    let (_mcp_owner,pool) = owned_discovery_pool();
-    let empty = insert_skill_handle(&pool, "srv", vec![]);
+    let (_mcp_owner, pool) = super::owned_discovery_pool();
+    let empty = super::insert_skill_handle(&pool, "srv", vec![]);
     let handle = Arc::new(McpClientHandle {
-                call_gate: Default::default(),
+        call_gate: Default::default(),
         peer: None,
         ..empty.as_ref().clone()
     });
@@ -54,10 +63,10 @@ async fn before_agent_missing_peer_without_cache_finishes_failed() {
 /// [回归测试] 投影后、spawn 前换代时不得把新 handle 搭配旧 token 发起发现。
 #[tokio::test]
 async fn before_agent_rejects_replaced_handle_before_discovery_spawn() {
-    let (_mcp_owner,pool) = owned_discovery_pool();
-    let empty = insert_skill_handle(&pool, "srv", vec![]);
+    let (_mcp_owner, pool) = super::owned_discovery_pool();
+    let empty = super::insert_skill_handle(&pool, "srv", vec![]);
     let replacement = Arc::new(McpClientHandle {
-                call_gate: Default::default(),
+        call_gate: Default::default(),
         peer: None,
         ..empty.as_ref().clone()
     });
@@ -78,7 +87,7 @@ async fn before_agent_rejects_replaced_handle_before_discovery_spawn() {
     Middleware::before_agent(&middleware, &mut state)
         .await
         .unwrap();
-    assert!(Arc::ptr_eq(&pool.get_client("srv").unwrap(), &replacement));
+    assert!(Arc::ptr_eq(&pool.client("srv").unwrap(), &replacement));
     assert!(
         registry.discovery_state("srv").is_none(),
         "旧代 Started 必须清理而非 spawn"

@@ -1,10 +1,10 @@
 //! Active expiration of terminal records without retaining the monitor instance.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Weak},
-    time::{Duration, Instant},
-};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Weak;
+use std::time::Duration;
+use std::time::Instant;
 
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;

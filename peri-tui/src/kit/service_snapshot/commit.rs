@@ -6,16 +6,6 @@
 //! 相同值不会产生 atom 更新通知。
 
 use crate::acp_client::AcpTuiClient;
-use crate::kit::atoms::ServiceSnapshot;
-use crate::kit::atoms::{
-    ACTIVE_EXECUTION_CWD, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, CRON_JOBS,
-    CURRENT_SESSION_TITLE, FILE_LIST, HOOK_LIST, Handle, MCP_SERVERS, MEMORY_LIST,
-    McpServerSummary, MemoryEntry, PLUGIN_LIST, PROVIDER_LIST, PluginSummary, ProviderSummary,
-    SERVICE_PROJECTION_ERROR, SERVICE_SNAPSHOT, THREAD_BROWSER_ARCHIVED, THREAD_BROWSER_SCOPE,
-    THREAD_LIST, THREAD_LIST_ERROR, THREAD_LIST_HAS_MORE, THREAD_LIST_PAGE_COUNT,
-    ThreadBrowserScope, ThreadSummary,
-};
-use crate::kit::atoms::{CronJobSummary, HookSummary, McpStatusSnapshot};
 
 /// 一批查询开始时捕获的会话与列表视图身份。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,6 +137,7 @@ fn apply_session_fields(snapshot: &mut ServiceSnapshot, update: &SessionFieldUpd
 }
 
 impl SnapshotPatch {
+    #[must_use]
     fn matches(&self, snapshot: &ServiceSnapshot) -> bool {
         match self {
             Self::Cwd(cwd) => snapshot.cwd == *cwd,
@@ -319,3 +310,63 @@ where
 #[cfg(test)]
 #[path = "commit_test.rs"]
 mod tests;
+
+use crate::kit::atoms::ServiceSnapshot;
+
+use crate::kit::atoms::ACTIVE_EXECUTION_CWD;
+
+use crate::kit::atoms::ACTIVE_SESSION_ID;
+
+use crate::kit::atoms::BRIDGE_RESET_COUNTER;
+
+use crate::kit::atoms::CRON_JOBS;
+
+use crate::kit::atoms::CURRENT_SESSION_TITLE;
+
+use crate::kit::atoms::FILE_LIST;
+
+use crate::kit::atoms::HOOK_LIST;
+
+use crate::kit::atoms::Handle;
+
+use crate::kit::atoms::MCP_SERVERS;
+
+use crate::kit::atoms::MEMORY_LIST;
+
+use crate::kit::atoms::McpServerSummary;
+
+use crate::kit::atoms::MemoryEntry;
+
+use crate::kit::atoms::PLUGIN_LIST;
+
+use crate::kit::atoms::PROVIDER_LIST;
+
+use crate::kit::atoms::PluginSummary;
+
+use crate::kit::atoms::ProviderSummary;
+
+use crate::kit::atoms::SERVICE_PROJECTION_ERROR;
+
+use crate::kit::atoms::SERVICE_SNAPSHOT;
+
+use crate::kit::atoms::THREAD_BROWSER_ARCHIVED;
+
+use crate::kit::atoms::THREAD_BROWSER_SCOPE;
+
+use crate::kit::atoms::THREAD_LIST;
+
+use crate::kit::atoms::THREAD_LIST_ERROR;
+
+use crate::kit::atoms::THREAD_LIST_HAS_MORE;
+
+use crate::kit::atoms::THREAD_LIST_PAGE_COUNT;
+
+use crate::kit::atoms::ThreadBrowserScope;
+
+use crate::kit::atoms::ThreadSummary;
+
+use crate::kit::atoms::CronJobSummary;
+
+use crate::kit::atoms::HookSummary;
+
+use crate::kit::atoms::McpStatusSnapshot;

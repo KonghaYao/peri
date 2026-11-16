@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::session::executor::FrozenSessionData;
 use peri_agent::session::exec::executor_helpers::StageBuildRequest;
 
-use super::executor_flow_tests::{make_session_context, make_stage_build};
+use super::executor_flow_tests;
 
 /// 最小事件处理器（装配只要求类型在场）。
 struct NoopEventHandler;
@@ -51,7 +51,7 @@ fn frozen_with_beta_flag(enabled: bool) -> FrozenSessionData {
 /// 会话冻结的 flag 值必须到达链上 `Agent` 工具的 `run_in_background.default`。
 #[tokio::test]
 async fn frozen_beta_flag_reaches_agent_tool_schema() {
-    let ctx = make_session_context("beta-flag-agent-schema").await;
+    let ctx = executor_flow_tests::make_session_context("beta-flag-agent-schema").await;
     for (enabled, expected) in [(false, false), (true, true)] {
         let request = StageBuildRequest {
             cached_llm: None,
@@ -66,7 +66,8 @@ async fn frozen_beta_flag_reaches_agent_tool_schema() {
             task_manager: None,
             on_bg_complete: None,
         };
-        let (out, _) = make_stage_build(&ctx)(request).expect("stage 装配必须成功");
+        let (out, _) =
+            executor_flow_tests::make_stage_build(&ctx)(request).expect("stage 装配必须成功");
         let tools = out.context.runtime.tools.read();
         let agent = tools
             .values()

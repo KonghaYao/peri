@@ -1,4 +1,18 @@
-use super::*;
+use super::AgentCancellationToken;
+use super::AgentState;
+use super::Arc;
+use super::ClientStatus;
+use super::CommandEntryKind;
+use super::CommandLifecycle;
+use super::CommandProvenance;
+use super::CommandSource;
+use super::HandleToken;
+use super::McpMiddleware;
+use super::McpSkillRegistry;
+use super::Middleware;
+use super::SkillMetadata;
+use crate::mcp::middleware;
+use peri_acp_types::command_registry::CommandRegistry;
 
 // ─── 命令面投影（决策 1：双注册表）───────────────────────────────────────
 
@@ -6,8 +20,8 @@ use super::*;
 /// 断连 → 命令面按前缀批量注销（removed_any → on_change）。
 #[tokio::test]
 async fn before_agent_command_registry_projection_and_disconnect() {
-    let (_mcp_owner,pool) = owned_discovery_pool();
-    insert_skill_handle(&pool, "srv", vec![]);
+    let (_mcp_owner, pool) = super::owned_discovery_pool();
+    super::insert_skill_handle(&pool, "srv", vec![]);
     let reg = Arc::new(McpSkillRegistry::new());
     let cmd_reg = Arc::new(CommandRegistry::new());
     let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -46,8 +60,8 @@ async fn before_agent_command_registry_projection_and_disconnect() {
 /// with_command_registry 未装配（默认 new()）→ 命令面零动作（兼容既有行为）。
 #[tokio::test]
 async fn before_agent_without_command_registry_noop() {
-    let (_mcp_owner,pool) = owned_discovery_pool();
-    insert_skill_handle(&pool, "srv", vec![]);
+    let (_mcp_owner, pool) = super::owned_discovery_pool();
+    super::insert_skill_handle(&pool, "srv", vec![]);
     let cmd_reg = Arc::new(CommandRegistry::new());
     let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let cb_counter = Arc::clone(&counter);
@@ -80,8 +94,8 @@ async fn before_agent_without_command_registry_noop() {
 /// spawn 的空回写落定再手动回写，避免空回写注销覆盖。
 #[tokio::test]
 async fn before_agent_command_registry_disconnect_removes_namespace_and_fires_on_change() {
-    let (_mcp_owner,pool) = owned_discovery_pool();
-    let h1 = insert_skill_handle(&pool, "srv", vec![]);
+    let (_mcp_owner, pool) = super::owned_discovery_pool();
+    let h1 = super::insert_skill_handle(&pool, "srv", vec![]);
     let reg = Arc::new(McpSkillRegistry::new());
     let cmd_reg = Arc::new(CommandRegistry::new());
     let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -96,7 +110,7 @@ async fn before_agent_command_registry_disconnect_removes_namespace_and_fires_on
 
     // 连接 → 命令面 Started；发现任务（真实空清单 peer）空回写落定
     Middleware::before_agent(&mw, &mut state).await.unwrap();
-    wait_discovered(&reg, "srv").await;
+    super::wait_discovered(&reg, "srv").await;
 
     // 发现完成回写（A3 转换点同构）：srv:hello 入投影
     let token: HandleToken = h1.clone();
@@ -142,8 +156,8 @@ async fn before_agent_command_registry_disconnect_removes_namespace_and_fires_on
 /// 条目；重复预热（Started/Discovered 去重）零动作、不触发 on_change。
 #[tokio::test]
 async fn prewarm_discovery_triggers_idempotent_discovery() {
-    let (_mcp_owner,pool) = owned_discovery_pool();
-    let h1 = insert_skill_handle(&pool, "srv", vec![]);
+    let (_mcp_owner, pool) = super::owned_discovery_pool();
+    let h1 = super::insert_skill_handle(&pool, "srv", vec![]);
     let reg = Arc::new(McpSkillRegistry::new());
     let cmd_reg = Arc::new(CommandRegistry::new());
     let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -154,14 +168,14 @@ async fn prewarm_discovery_triggers_idempotent_discovery() {
 
     // 模拟 session/new 路径（无 middleware 实例）：预热 → 发现任务
     // （真实空清单 peer）空回写落定。
-    prewarm_discovery(
+    middleware::prewarm_discovery(
         &pool,
         &reg,
         &cmd_reg,
         "sess-1",
         &AgentCancellationToken::new(),
     );
-    wait_discovered(&reg, "srv").await;
+    super::wait_discovered(&reg, "srv").await;
 
     // 完成回写（A3 转换点同构）：srv:hello 入投影
     let token: HandleToken = h1.clone();
@@ -187,14 +201,14 @@ async fn prewarm_discovery_triggers_idempotent_discovery() {
     let after_first = counter.load(std::sync::atomic::Ordering::SeqCst);
 
     // 重复预热幂等：已 Discovered → 不重扫、不触发 on_change。
-    prewarm_discovery(
+    middleware::prewarm_discovery(
         &pool,
         &reg,
         &cmd_reg,
         "sess-1",
         &AgentCancellationToken::new(),
     );
-    prewarm_discovery(
+    middleware::prewarm_discovery(
         &pool,
         &reg,
         &cmd_reg,
@@ -213,10 +227,10 @@ async fn prewarm_discovery_triggers_idempotent_discovery() {
 /// 补偿（无 chain、无 before_agent）。notify_tx=None 仅发现触发。
 #[tokio::test]
 async fn attach_connection_notifier_triggers_discovery_on_connected() {
-    let (_mcp_owner,pool) = owned_discovery_pool();
+    let (_mcp_owner, pool) = super::owned_discovery_pool();
     let reg = Arc::new(McpSkillRegistry::new());
     let cmd_reg = Arc::new(CommandRegistry::new());
-    attach_connection_notifier(
+    middleware::attach_connection_notifier(
         &pool,
         Some(&reg),
         Some(&cmd_reg),
@@ -229,9 +243,9 @@ async fn attach_connection_notifier_triggers_discovery_on_connected() {
     // 注意 record_status_change 要求 initialized + old 为 Some 且状态
     // 确实变化（client.rs:854-869），故插入 Connected 前先置旧态。
     pool.mark_initialized();
-    let h1 = insert_skill_handle(&pool, "srv", vec![]);
+    let h1 = super::insert_skill_handle(&pool, "srv", vec![]);
     pool.record_status_change("srv", Some(&ClientStatus::Disconnected));
-    wait_discovered(&reg, "srv").await;
+    super::wait_discovered(&reg, "srv").await;
 
     // 完成回写（A3 转换点同构）：连接事件补偿路径下命令面直接可得。
     let token: HandleToken = h1.clone();
@@ -258,12 +272,12 @@ async fn attach_connection_notifier_triggers_discovery_on_connected() {
 
 #[test]
 fn test_connection_notifier_does_not_strongly_retain_pool() {
-    let (_mcp_owner,pool) = owned_discovery_pool();
+    let (_mcp_owner, pool) = super::owned_discovery_pool();
     let pool_weak = Arc::downgrade(&pool);
     let registry = Arc::new(McpSkillRegistry::new());
     let registry_weak = Arc::downgrade(&registry);
     let commands = Arc::new(CommandRegistry::new());
-    attach_connection_notifier(
+    middleware::attach_connection_notifier(
         &pool,
         Some(&registry),
         Some(&commands),
@@ -286,10 +300,10 @@ fn test_connection_notifier_does_not_strongly_retain_pool() {
 /// 需靠收口补发驱动「刚进入、未说话」时的 skill 发现。
 #[tokio::test]
 async fn notify_initial_connections_triggers_discovery_on_startup() {
-    let (_mcp_owner,pool) = owned_discovery_pool();
+    let (_mcp_owner, pool) = super::owned_discovery_pool();
     let reg = Arc::new(McpSkillRegistry::new());
     let cmd_reg = Arc::new(CommandRegistry::new());
-    attach_connection_notifier(
+    middleware::attach_connection_notifier(
         &pool,
         Some(&reg),
         Some(&cmd_reg),
@@ -299,9 +313,9 @@ async fn notify_initial_connections_triggers_discovery_on_startup() {
 
     // 模拟 run_initialize：直接插入 Connected handle（不调用
     // record_status_change——初始连接事件不产生通知）。
-    let h1 = insert_skill_handle(&pool, "srv", vec![]);
+    let h1 = super::insert_skill_handle(&pool, "srv", vec![]);
     pool.notify_initial_connections();
-    wait_discovered(&reg, "srv").await;
+    super::wait_discovered(&reg, "srv").await;
 
     // 完成回写（A3 转换点同构）：补发路径下命令面直接可得。
     let token: HandleToken = h1.clone();
@@ -338,7 +352,7 @@ async fn notify_initial_connections_triggers_discovery_on_startup() {
 /// 条目）；每轮先 `wait_discovered` 让 spawn 空回写落定再手动回写。
 #[tokio::test]
 async fn before_agent_command_registry_reconnect_sequence_no_aba() {
-    let (_mcp_owner,pool) = owned_discovery_pool();
+    let (_mcp_owner, pool) = super::owned_discovery_pool();
     let reg = Arc::new(McpSkillRegistry::new());
     let cmd_reg = Arc::new(CommandRegistry::new());
     let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -368,10 +382,10 @@ async fn before_agent_command_registry_reconnect_sequence_no_aba() {
         |reg: &CommandRegistry| reg.snapshot().iter().any(|e| e.fullname == "demo:hello");
 
     // 1) 连接 → 命令面 Started；发现任务（真实空清单 peer）空回写落定
-    let h1 = insert_skill_handle(&pool, "demo", vec![]);
+    let h1 = super::insert_skill_handle(&pool, "demo", vec![]);
     let token1: HandleToken = h1.clone();
     Middleware::before_agent(&mw, &mut state).await.unwrap();
-    wait_discovered(&reg, "demo").await;
+    super::wait_discovered(&reg, "demo").await;
 
     // 2) 发现完成回写 → 投影含 demo:hello；resolve 路由一致
     assert_eq!(
@@ -406,7 +420,7 @@ async fn before_agent_command_registry_reconnect_sequence_no_aba() {
 
     // 4) 重连（新 Arc handle → token 变化）→ 重扫完成前投影不含新条目
     //    （Started → Discovered 不占位；current_thread：spawn 尚未调度）
-    let h2 = insert_skill_handle(&pool, "demo", vec![]);
+    let h2 = super::insert_skill_handle(&pool, "demo", vec![]);
     let token2: HandleToken = h2.clone();
     Middleware::before_agent(&mw, &mut state).await.unwrap();
     assert!(
@@ -419,7 +433,7 @@ async fn before_agent_command_registry_reconnect_sequence_no_aba() {
     );
 
     // 5) 重扫（真实空清单 peer 空回写）落定后，新 handle 回写 → 投影复现 + 路由一致
-    wait_discovered(&reg, "demo").await;
+    super::wait_discovered(&reg, "demo").await;
     assert_eq!(
         cmd_reg.mark_source_completed("demo", token2.clone(), route_entries()),
         1,
@@ -457,7 +471,7 @@ async fn before_agent_command_registry_reconnect_sequence_no_aba() {
 /// Conflict（验收 :414/:415 在 plugin server 形态下成立）。
 #[tokio::test]
 async fn before_agent_command_registry_plugin_server_disconnect_reconnect() {
-    let (_mcp_owner,pool) = owned_discovery_pool();
+    let (_mcp_owner, pool) = super::owned_discovery_pool();
     let reg = Arc::new(McpSkillRegistry::new());
     let cmd_reg = Arc::new(CommandRegistry::new());
     let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -496,10 +510,10 @@ async fn before_agent_command_registry_plugin_server_disconnect_reconnect() {
         |reg: &CommandRegistry| reg.snapshot().iter().any(|e| e.fullname == "demosrv:beta");
 
     // 1) 连接 → 命令面以末段来源键置 Started；发现任务（真实空清单 peer）空回写落定
-    let h1 = insert_skill_handle(&pool, server, vec![]);
+    let h1 = super::insert_skill_handle(&pool, server, vec![]);
     let token1: HandleToken = h1.clone();
     Middleware::before_agent(&mw, &mut state).await.unwrap();
-    wait_discovered(&reg, server).await;
+    super::wait_discovered(&reg, server).await;
 
     // 2) 完成回写（A3 转换点同构，来源键 = demosrv）→ 投影含条目
     assert_eq!(
@@ -526,10 +540,10 @@ async fn before_agent_command_registry_plugin_server_disconnect_reconnect() {
 
     // 4) 重连（新 Arc handle → token 变化）→ 重扫落定 → 新 token 回写复现
     //    （幽灵条目残留时同键重注册 → Conflict 纯拒绝 → added=0）
-    let h2 = insert_skill_handle(&pool, server, vec![]);
+    let h2 = super::insert_skill_handle(&pool, server, vec![]);
     let token2: HandleToken = h2.clone();
     Middleware::before_agent(&mw, &mut state).await.unwrap();
-    wait_discovered(&reg, server).await;
+    super::wait_discovered(&reg, server).await;
     assert_eq!(
         cmd_reg.mark_source_completed(
             &crate::mcp::skill_discovery::mcp_source_key(server),

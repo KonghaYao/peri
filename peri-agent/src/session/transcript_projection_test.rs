@@ -6,7 +6,9 @@
 //! 从 `transcript_test.rs` 按职责拆出（STD-SIZE-001）：本文件只放投影出口
 //! 相关断言，持久化 / 索引 / staging / 标记 / 边界用例留在原文件。
 
-use super::*;
+use crate::messages::BaseMessage;
+
+use crate::session::transcript::MessageTranscript;
 
 /// [回归测试] 内部 Compact 文本仅在模型出口包装，数据库原始内容和 ID 保持不变。
 #[test]
@@ -14,13 +16,25 @@ fn test_legacy_compact_model_projection_preserves_storage() {
     let text = "[最近读取的文件: /a.rs]\nfn main() { /* </system-reminder> */ }";
     let mut transcript = MessageTranscript::new();
     let id = transcript.append(BaseMessage::human(text));
-    let view = transcript.visible_model_messages().unwrap();
+    let view = transcript
+        .visible_model_messages()
+        .expect("the visible model messages fixture result is required for this assertion");
     assert_eq!(view[0].id(), id);
     assert!(view[0].content().starts_with("<system-reminder>"));
     assert!(view[0].content().contains("&lt;/system-reminder&gt;"));
-    assert_eq!(transcript.get(id).unwrap().message().content(), text);
+    assert_eq!(
+        transcript
+            .get(id)
+            .expect("transcript get fixture must contain the requested entry")
+            .message()
+            .content(),
+        text
+    );
     transcript.set_excluded(id, true);
-    assert!(transcript.visible_model_messages().unwrap().is_empty());
+    assert!(transcript
+        .visible_model_messages()
+        .expect("the visible model messages fixture result is required for this assertion")
+        .is_empty());
 }
 
 #[test]
@@ -42,24 +56,41 @@ fn reminder_entry_preserves_stable_identity_without_placeholder_state() {
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap();
+        .expect("the construct fixture result is required for this assertion");
     let mut transcript = MessageTranscript::new();
     let id = transcript.append_system_reminder(reminder);
-    let entry = transcript.get(id).unwrap();
+    let entry = transcript
+        .get(id)
+        .expect("transcript get fixture must contain the requested entry");
 
     assert_eq!(entry.id(), id);
     assert!(entry.as_message().is_none());
-    assert_eq!(entry.project_message().unwrap().id(), id);
-    assert!(!entry.project_message().unwrap().content().is_empty());
+    assert_eq!(
+        entry
+            .project_message()
+            .expect("the project message fixture result is required for this assertion")
+            .id(),
+        id
+    );
+    assert!(!entry
+        .project_message()
+        .expect("the project message fixture result is required for this assertion")
+        .content()
+        .is_empty());
 }
 
 #[test]
 fn test_system_reminder_projects_once_as_human() {
-    use peri_acp_types::system_reminder::{
-        encode_system_reminder, ReminderAudience, ReminderAudiences, ReminderCategory,
-        ReminderDelivery, ReminderSeverity, ReminderSource, SystemReminder,
-        TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
-    };
+    use peri_acp_types::system_reminder;
+    use peri_acp_types::system_reminder::ReminderAudience;
+    use peri_acp_types::system_reminder::ReminderAudiences;
+    use peri_acp_types::system_reminder::ReminderCategory;
+    use peri_acp_types::system_reminder::ReminderDelivery;
+    use peri_acp_types::system_reminder::ReminderSeverity;
+    use peri_acp_types::system_reminder::ReminderSource;
+    use peri_acp_types::system_reminder::SystemReminder;
+    use peri_acp_types::system_reminder::TrustedSystemReminderFactory;
+    use peri_acp_types::system_reminder::SYSTEM_REMINDER_VERSION;
 
     let reminder = TrustedSystemReminderFactory::for_producer()
         .construct(SystemReminder {
@@ -74,12 +105,15 @@ fn test_system_reminder_projects_once_as_human() {
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap();
-    let expected = encode_system_reminder(&reminder).unwrap();
+        .expect("the construct fixture result is required for this assertion");
+    let expected = system_reminder::encode_system_reminder(&reminder)
+        .expect("the encode system reminder fixture result is required for this assertion");
     let mut transcript = MessageTranscript::new();
     transcript.append_system_reminder(reminder);
 
-    let projected = transcript.visible_model_messages().unwrap();
+    let projected = transcript
+        .visible_model_messages()
+        .expect("the visible model messages fixture result is required for this assertion");
     assert!(matches!(&projected[0], BaseMessage::Human { .. }));
     assert_eq!(projected[0].content(), expected);
     assert_eq!(

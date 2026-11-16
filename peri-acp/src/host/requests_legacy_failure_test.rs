@@ -1,5 +1,42 @@
-use super::*;
+use crate::host::requests::tests::HomeDirGuard;
+use crate::host::requests::tests::MockTransport;
+use crate::provider::LlmProvider;
+use async_trait::async_trait;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session_resources::BindingRecheck;
+use peri_acp_types::session_resources::BindingState;
+use peri_acp_types::session_resources::ChildResumeClaim;
+use peri_acp_types::session_resources::ChildSnapshot;
+use peri_acp_types::session_resources::CloseSettlement;
+use peri_acp_types::session_resources::ForkSnapshot;
+use peri_acp_types::session_resources::FrozenSnapshotBytes;
 use peri_acp_types::session_resources::FrozenState;
+use peri_acp_types::session_resources::NewSession;
+use peri_acp_types::session_resources::NewSessionDraft;
+use peri_acp_types::session_resources::PersistenceRecovery;
+use peri_acp_types::session_resources::RewindBoundary;
+use peri_acp_types::session_resources::RewindOutcome;
+use peri_acp_types::session_resources::SessionAvailability;
+use peri_acp_types::session_resources::SessionInitialization;
+use peri_acp_types::session_resources::SessionMetaPatch;
+use peri_acp_types::session_resources::SessionResourceError;
+use peri_acp_types::session_resources::SessionResourceResult;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::session_resources::SessionSnapshot;
+use peri_acp_types::store::CompactionChange;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::store::ThreadStore;
+use peri_acp_types::system_reminder::TrustedSystemReminder;
+use peri_acp_types::thread::ThreadId;
+use peri_acp_types::thread::ThreadMeta;
+use peri_acp_types::workspace::ResolvedWorkspace;
+use peri_acp_types::workspace::ScopedThreadPage;
+use peri_acp_types::workspace::ScopedThreadQuery;
+use serde_json::json;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// M5 缺陷 2：接纳成功但后续 load（history 读取）失败时，也必须排空已激活环境；
 /// 写一次接纳本身不回滚。
@@ -12,9 +49,10 @@ async fn legacy_post_adoption_load_failure_drains_environment_without_rollback()
         .unwrap()
         .join("legacy-post-adoption");
     std::fs::create_dir(&cwd).unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
-    let (mut cfg, bridge) = make_server_config_with_bridge(
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "test", "model"),
+    );
+    let (mut cfg, bridge) = crate::host::requests::tests::make_server_config_with_bridge(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
@@ -33,10 +71,10 @@ async fn legacy_post_adoption_load_failure_drains_environment_without_rollback()
         inner: Arc::clone(&cfg.session_resources),
     });
     cfg.controller = Arc::new(peri_controller::Controller::new(failing));
-    let id = old_thread(&bridge, &cwd).await;
+    let id = crate::host::requests::tests::legacy_tests::old_thread(&bridge, &cwd).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
-    let error = handle_request(
+    let error = crate::host::requests::handle_request(
         "session/load",
         &json!({"sessionId": id}),
         &cfg,

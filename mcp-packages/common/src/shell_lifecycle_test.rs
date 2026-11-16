@@ -1,6 +1,8 @@
-use super::*;
+use crate::shell::ShellExecutionGuard;
 use peri_acp_types::tasks::{TaskManager as TaskManagerPort, TaskShutdownReport};
-use peri_agent::agent::async_tasks::*;
+use peri_agent::agent::async_tasks::{
+    BackgroundTaskRegistry, BgRegistryEvent, BgTaskKind, BgTaskRegistration,
+};
 #[cfg(unix)]
 use std::sync::Arc;
 
@@ -95,7 +97,7 @@ async fn test_failed_shell_spawn_with_full_registry_returns_error() {
         manager.cancel(ticket.task_id()).unwrap();
         manager.confirm_external_execution_stopped(&ticket);
         manager.finalize_bg_shell(
-            &None,
+            None,
             ticket,
             "capacity fixture".into(),
             false,
@@ -244,7 +246,7 @@ async fn pending_shell_delivery_survives_terminal_display_eviction() {
             .unwrap();
         manager.confirm_external_execution_stopped(&ticket);
         manager.finalize_bg_shell(
-            &None,
+            None,
             ticket,
             "completed fixture".into(),
             true,
@@ -294,13 +296,15 @@ async fn test_shell_guard_detaches_session_before_command_execution() {
     let manager = crate::create_local_task_manager();
     let mut execution =
         ShellExecutionGuard::new(Some(manager.begin_external_execution("workspace").unwrap()));
-    let mut command = shell_command("printf isolated", &[]);
+    let mut command = crate::shell::shell_command("printf isolated", &[]);
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     execution.prepare(&mut command).unwrap();
+    // SAFETY: The numeric process ID is only queried; this syscall accepts missing processes and reports an error.
     let host_session = unsafe { libc::getsid(0) };
+    // SAFETY: The post-fork callback uses only async-signal-safe session/group syscalls and constructs errors from numeric codes.
     unsafe {
         command.as_std_mut().pre_exec(move || {
             let session = libc::getsid(0);
@@ -327,7 +331,7 @@ async fn test_shutdown_reaps_child_owned_by_dropped_shell_guard() {
     let manager = crate::create_local_task_manager();
     let mut execution =
         ShellExecutionGuard::new(Some(manager.begin_external_execution("workspace").unwrap()));
-    let mut command = shell_command("exec sleep 60", &[]);
+    let mut command = crate::shell::shell_command("exec sleep 60", &[]);
     execution.prepare(&mut command).unwrap();
     let child = command.spawn().unwrap();
     let pid = i32::try_from(child.id().unwrap()).unwrap();
@@ -359,7 +363,7 @@ async fn test_rejected_promoted_task_settles_registered_process_after_cleanup() 
     let manager = Arc::new(crate::create_local_task_manager());
     let mut execution =
         ShellExecutionGuard::new(Some(manager.begin_external_execution("workspace").unwrap()));
-    let mut command = shell_command("sleep 60", &[]);
+    let mut command = crate::shell::shell_command("sleep 60", &[]);
     command.kill_on_drop(true);
     execution.prepare(&mut command).unwrap();
     let mut child = command.spawn().unwrap();
@@ -385,7 +389,7 @@ async fn test_rejected_promoted_task_settles_registered_process_after_cleanup() 
     // The failed handoff is returned synchronously to the tool caller. Only
     // its delivery obligation closes here; the guard must still prove cleanup.
     manager.finalize_bg_shell(
-        &None,
+        None,
         ticket,
         "shell".into(),
         false,

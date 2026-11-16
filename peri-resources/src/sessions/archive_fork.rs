@@ -3,21 +3,20 @@
 //! grants is never copied, and recovered bodies stay outside the active view.
 use std::collections::{HashMap, HashSet};
 
-use peri_acp_types::{
-    context_archive::{
-        content_digest, ArchiveCatalog, ArchiveChunkQuery, ArchiveMetadataQuery, ArchiveRoot,
-        ARCHIVE_CHUNK_BYTES,
-    },
-    messages::MessageId,
-    projection::MessageProjectionDirective,
-    session_resources::{
-        SessionResourceError, SessionResourceResult, SessionResources, SessionSnapshot,
-    },
-    store::{
-        deserialize_persisted_payload, serialize_persisted_payload, MessageFlags, PersistedPayload,
-    },
-    thread::ThreadId,
-};
+use peri_acp_types::context_archive::ArchiveCatalog;
+use peri_acp_types::context_archive::ArchiveChunkQuery;
+use peri_acp_types::context_archive::ArchiveMetadataQuery;
+use peri_acp_types::context_archive::ArchiveRoot;
+use peri_acp_types::context_archive::ARCHIVE_CHUNK_BYTES;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::projection::MessageProjectionDirective;
+use peri_acp_types::session_resources::SessionResourceError;
+use peri_acp_types::session_resources::SessionResourceResult;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::session_resources::SessionSnapshot;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::thread::ThreadId;
 
 fn conflict(detail: impl Into<String>) -> SessionResourceError {
     SessionResourceError::conflict(detail)
@@ -75,9 +74,11 @@ pub(super) async fn expand(
             for member in &catalog.members {
                 required.insert(member.message_id);
                 if let Some(existing) = known.get(&member.message_id) {
-                    let bytes = serialize_persisted_payload(existing)
+                    let bytes = peri_acp_types::store::serialize_persisted_payload(existing)
                         .map_err(|error| conflict(error.to_string()))?;
-                    if content_digest(bytes.as_bytes()) != member.content_digest {
+                    if peri_acp_types::context_archive::content_digest(bytes.as_bytes())
+                        != member.content_digest
+                    {
                         return Err(conflict(
                             "frozen fork member differs from its authorized catalog",
                         ));
@@ -85,7 +86,8 @@ pub(super) async fn expand(
                     continue;
                 }
                 let mut bytes = Vec::new();
-                for (index, digest) in member.chunk_digests.iter().enumerate() {
+                let indexed_entries = member.chunk_digests.iter().enumerate();
+                for (index, digest) in indexed_entries {
                     let chunk = resources
                         .read_archive_chunk(
                             &root.source_thread_id,
@@ -98,18 +100,19 @@ pub(super) async fn expand(
                         )
                         .await?;
                     if chunk.total_bytes != member.canonical_bytes
-                        || content_digest(&chunk.bytes) != *digest
+                        || peri_acp_types::context_archive::content_digest(&chunk.bytes) != *digest
                     {
                         return Err(conflict("fork archive member digest mismatch"));
                     }
                     bytes.extend(chunk.bytes);
                 }
-                if content_digest(&bytes) != member.content_digest {
+                if peri_acp_types::context_archive::content_digest(&bytes) != member.content_digest
+                {
                     return Err(conflict("fork archive member digest mismatch"));
                 }
                 let text = std::str::from_utf8(&bytes)
                     .map_err(|_| conflict("fork archive canonical payload is not UTF-8"))?;
-                let payload = deserialize_persisted_payload(text)
+                let payload = peri_acp_types::store::deserialize_persisted_payload(text)
                     .map_err(|error| conflict(error.to_string()))?;
                 if payload.id() != member.message_id {
                     return Err(conflict("fork archive member identity mismatch"));

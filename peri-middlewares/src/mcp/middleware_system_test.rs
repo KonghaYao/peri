@@ -1,4 +1,19 @@
-use super::*;
+use super::AgentCancellationToken;
+use super::AgentState;
+use super::Arc;
+use super::BaseTool;
+use super::ClientStatus;
+use super::McpClientHandle;
+use super::McpClientPool;
+use super::McpMiddleware;
+use super::McpSkillRegistry;
+use super::Middleware;
+use super::OAuthStatus;
+use super::Resource;
+use super::ServerDiscoveryState;
+use crate::mcp::client::SystemMcpManifest;
+use peri_agent::middleware::capabilities as hook_state;
+use std::collections::BTreeSet;
 
 // ─── System MCP 启动闸门（before_react_start，IF-M3 / IF-M4）──────────────────
 //
@@ -17,7 +32,8 @@ use crate::mcp::client::DiscoveryEvidence;
 use peri_acp_types::plugin::McpServerConfig;
 // 准入 candidate 的 DTO 由 `mcp::admission` 拥有（不再经 `super::*` 透出）。
 use peri_agent::session::tool_catalog::{StartupRequiredTool, StartupToolUpdate};
-use rmcp::{service::RoleClient, transport::async_rw::AsyncRwTransport};
+use rmcp::service::RoleClient;
+use rmcp::transport::async_rw::AsyncRwTransport;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf};
 
@@ -695,13 +711,13 @@ async fn collect_tools_waits_for_zero_tool_system_server_discovery() {
 /// 也不自行触发发现；`before_agent` 仍按原语义触发（幂等增量挂点保留）。
 #[tokio::test]
 async fn successful_gate_preserves_discovery_and_status_notifications() {
-    let (mut owner, pool) = owned_discovery_pool();
-    insert_skill_handle(
+    let (mut owner, pool) = super::owned_discovery_pool();
+    super::insert_skill_handle(
         &pool,
         "srv",
         vec![Resource::new("skill://demo/SKILL.md", "d")],
     );
-    insert_skill_handle(&pool, "status", vec![]);
+    super::insert_skill_handle(&pool, "status", vec![]);
     pool.publish_system_manifest(SystemMcpManifest::Loaded);
     let reg = Arc::new(McpSkillRegistry::new());
     let mw = McpMiddleware::new(Arc::clone(&pool))
@@ -738,7 +754,7 @@ async fn successful_gate_preserves_discovery_and_status_notifications() {
         ),
         "既有 before_agent 发现行为保留"
     );
-    wait_discovered(&reg, "srv").await;
+    super::wait_discovered(&reg, "srv").await;
     assert!(
         reg.all_skills().is_empty(),
         "真实空目录 peer 必须收尾为合法空目录"

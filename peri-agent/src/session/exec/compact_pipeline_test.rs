@@ -26,7 +26,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::compact_v2::CompactConfig;
 use crate::messages::BaseMessage;
-use crate::session::exec::compact_pipeline::execute_compact;
 
 struct Fixture {
     resources: Arc<dyn SessionResources>,
@@ -43,11 +42,18 @@ struct Fixture {
 
 impl Fixture {
     async fn open() -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory =
+            tempfile::tempdir().expect("the temporary test directory must be available");
         let db_path = directory.path().join("compact-inherited.db");
-        let resources: Arc<dyn SessionResources> =
-            Arc::new(SessionResourcesImpl::open(&db_path).await.unwrap());
-        let workspace = resources.resolve_workspace(directory.path()).await.unwrap();
+        let resources: Arc<dyn SessionResources> = Arc::new(
+            SessionResourcesImpl::open(&db_path)
+                .await
+                .expect("the open fixture result is required for this assertion"),
+        );
+        let workspace = resources
+            .resolve_workspace(directory.path())
+            .await
+            .expect("the resolve workspace fixture result is required for this assertion");
         let cwd = workspace.cwd.to_string_lossy().into_owned();
         let frozen = FrozenSnapshotBytes::new("{\"version\":1,\"root\":true}");
         let parent_id = uuid::Uuid::now_v7().to_string();
@@ -67,7 +73,7 @@ impl Fixture {
                 frozen: frozen.clone(),
             })
             .await
-            .unwrap();
+            .expect("the create session fixture result is required for this assertion");
 
         let inherited_active = vec![
             BaseMessage::human("inherited active task"),
@@ -85,7 +91,7 @@ impl Fixture {
                 ],
             )
             .await
-            .unwrap();
+            .expect("the append history fixture result is required for this assertion");
         resources
             .apply_message_projections(
                 &parent_id,
@@ -98,7 +104,7 @@ impl Fixture {
                 )],
             )
             .await
-            .unwrap();
+            .expect("the apply message projections fixture result is required for this assertion");
 
         let child_id = uuid::Uuid::now_v7().to_string();
         resources
@@ -135,7 +141,7 @@ impl Fixture {
                 },
             })
             .await
-            .unwrap();
+            .expect("the save child fixture result is required for this assertion");
 
         let own = vec![
             BaseMessage::human("child resumed request"),
@@ -150,7 +156,7 @@ impl Fixture {
                     .collect::<Vec<_>>(),
             )
             .await
-            .unwrap();
+            .expect("the append history fixture result is required for this assertion");
 
         Self {
             resources,
@@ -184,7 +190,7 @@ impl Fixture {
         ctx.auxiliary_model = Some(Arc::new(SummaryModel));
         ctx.session_resources = Some(self.resources.clone());
         ctx.thread_id = Some(self.child_id.clone());
-        execute_compact(ctx).await
+        crate::session::exec::compact_pipeline::execute_compact(ctx).await
     }
 }
 
@@ -201,7 +207,7 @@ impl Model for SummaryModel {
     }
 
     async fn complete(&self, _: ModelRequest, _: CancellationToken) -> ModelResult<ModelResponse> {
-        ModelResponse::new(
+        ModelResponse::try_new(
             ModelMessage::assistant_text("<summary>child inherited summary</summary>"),
             StopReason::EndTurn,
             None,
@@ -277,7 +283,7 @@ async fn test_compact_accepts_excluded_inherited_in_effective_projection() {
         .resources
         .load_session_snapshot(&fixture.child_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     // 继承区仍是一份冻结快照，既不裁正文也不复制成 own。
     let inherited_ids: Vec<_> = snapshot
         .inherited
@@ -314,7 +320,7 @@ async fn test_compact_accepts_excluded_inherited_in_effective_projection() {
         .resources
         .load_session_history(&fixture.child_id)
         .await
-        .unwrap()
+        .expect("the load session history fixture result is required for this assertion")
         .iter()
         .map(PersistedPayload::id)
         .collect();
@@ -342,7 +348,7 @@ async fn test_compact_accepts_excluded_inherited_in_effective_projection() {
         .resources
         .load_active_snapshot(&fixture.child_id)
         .await
-        .unwrap();
+        .expect("the load active snapshot fixture result is required for this assertion");
     assert_eq!(
         active
             .payloads
@@ -399,7 +405,7 @@ async fn test_compact_rejects_tampered_effective_sequence() {
         .resources
         .load_session_snapshot(&fixture.child_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert_eq!(
         snapshot
             .payloads

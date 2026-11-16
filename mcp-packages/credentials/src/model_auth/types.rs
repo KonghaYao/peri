@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 
 pub type AuthResult<T> = Result<T, AuthError>;
 
@@ -56,13 +58,14 @@ pub struct PendingLogin {
 }
 
 impl PendingLogin {
+    #[must_use]
     pub fn authorization_url(&self) -> &str {
         &self.authorization_url
     }
 }
 
-impl std::fmt::Debug for PendingLogin {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for PendingLogin {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("PendingLogin").finish_non_exhaustive()
     }
 }
@@ -135,6 +138,7 @@ pub(super) struct StoredAccount {
 }
 
 impl StoredAccount {
+    #[must_use]
     pub fn new(host_id: String) -> Self {
         Self {
             schema_version: 1,

@@ -1,8 +1,8 @@
+use peri_acp_types::system_reminder;
 use peri_acp_types::system_reminder::{
-    decode_system_reminder_json, encode_system_reminder, ReminderAudience, ReminderAudiences,
-    ReminderCategory, ReminderDelivery, ReminderFilter, ReminderSeverity, ReminderSource,
-    SystemReminder, TrustedReminderProvenance, TrustedSystemReminderFactory,
-    SYSTEM_REMINDER_VERSION,
+    ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderFilter,
+    ReminderSeverity, ReminderSource, SystemReminder, TrustedReminderProvenance,
+    TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
 };
 use serde_json::json;
 
@@ -29,7 +29,7 @@ fn downstream_producer_can_explicitly_assert_provenance_and_use_control_apis() {
 
     assert_eq!(trusted.provenance(), TrustedReminderProvenance::Producer);
     assert!(ReminderFilter::default().allows(&trusted, ReminderAudience::Model));
-    assert!(encode_system_reminder(&trusted).is_ok());
+    assert!(system_reminder::encode_system_reminder(&trusted).is_ok());
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn downstream_recovery_can_explicitly_assert_recovery_provenance() {
 #[test]
 fn wire_decode_returns_only_untrusted_protocol_data() {
     let wire = serde_json::to_vec(&sample()).unwrap();
-    let decoded: SystemReminder = decode_system_reminder_json(&wire).unwrap();
+    let decoded: SystemReminder = system_reminder::decode_system_reminder_json(&wire).unwrap();
 
     assert_eq!(decoded, sample());
     assert!(serde_json::to_value(decoded)

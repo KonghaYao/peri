@@ -1,4 +1,5 @@
-use super::*;
+use super::CallbackError;
+use super::OAuthCallbackServer;
 
 #[test]
 fn test_bind_failed_error_format() {
@@ -18,7 +19,7 @@ fn test_bind_returns_valid_redirect_uri() {
 
 #[test]
 fn test_parse_callback_url_valid() {
-    let result = parse_callback_url("/callback?code=abc123&state=mystate");
+    let result = super::parse_callback_url("/callback?code=abc123&state=mystate");
     assert!(result.is_ok());
     let (code, state) = result.unwrap();
     assert_eq!(code, "abc123");
@@ -27,19 +28,19 @@ fn test_parse_callback_url_valid() {
 
 #[test]
 fn test_parse_callback_url_missing_code() {
-    let result = parse_callback_url("/callback?state=mystate");
+    let result = super::parse_callback_url("/callback?state=mystate");
     assert!(result.is_err());
 }
 
 #[test]
 fn test_parse_callback_url_missing_state() {
-    let result = parse_callback_url("/callback?code=abc123");
+    let result = super::parse_callback_url("/callback?code=abc123");
     assert!(result.is_err());
 }
 
 #[test]
 fn test_parse_callback_url_invalid_path() {
-    let result = parse_callback_url("not-a-url");
+    let result = super::parse_callback_url("not-a-url");
     assert!(result.is_err());
 }
 
@@ -52,7 +53,7 @@ fn test_parse_callback_url_invalid_path() {
 #[test]
 fn test_parse_callback_url_does_not_validate_csrf() {
     // 任意 state（包括看起来「错误」的）都应原样返回
-    let result = parse_callback_url("/callback?code=abc&state=any_value");
+    let result = super::parse_callback_url("/callback?code=abc&state=any_value");
     assert!(result.is_ok());
     let (code, state) = result.unwrap();
     assert_eq!(code, "abc");
@@ -61,7 +62,7 @@ fn test_parse_callback_url_does_not_validate_csrf() {
 
 #[test]
 fn test_parse_code_from_url_valid() {
-    let result = parse_code_from_url("http://localhost:12345/callback?code=xyz&state=s");
+    let result = super::parse_code_from_url("http://localhost:12345/callback?code=xyz&state=s");
     assert!(result.is_ok());
 }
 

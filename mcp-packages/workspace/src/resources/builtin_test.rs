@@ -1,8 +1,11 @@
 //! `resources::builtin` 证据：注册表与 frontmatter 一致性、入口字节 digest、
 //! `disable_bundled` 是**调用方**（catalog）的过滤位。
 
-use super::*;
-use peri_acp_types::workspace_resources::digest_bytes;
+use crate::resources::builtin::BUILTIN_SKILLS;
+use crate::resources::ResourceBudget;
+use peri_acp_types::workspace_resources;
+use peri_acp_types::workspace_resources::ResourceScope;
+use peri_acp_types::workspace_resources::SKILL_ENTRY_FILE;
 
 #[test]
 fn builtin_registry_names_match_frontmatter() {
@@ -27,24 +30,28 @@ fn builtin_registry_names_match_frontmatter() {
 #[test]
 fn builtin_skill_records_expose_entry_bytes_and_index() {
     let budget = ResourceBudget::default();
-    let records = builtin_skill_records(&budget);
+    let records = crate::resources::builtin::builtin_skill_records(&budget);
     assert_eq!(records.len(), BUILTIN_SKILLS.len());
-    for (index, record) in records.iter().enumerate() {
-        assert_eq!(record.scope, ResourceScope::Builtin);
-        assert_eq!(record.files.len(), 1, "builtin 只有 SKILL.md 一个文件");
-        assert_eq!(record.files[0].relative_path, SKILL_ENTRY_FILE);
-        assert!(record.files[0].text);
-        let bytes = builtin_skill_bytes(index).expect("索引必须命中");
-        assert_eq!(
-            record.files[0].digest,
-            digest_bytes(bytes),
-            "digest 必须按嵌入字节计算"
-        );
-        // 注册的顺序与 index 对应：读回的字节必须就是该条目的内容。
-        assert_eq!(bytes, BUILTIN_SKILLS[index].content.as_bytes());
+    {
+        let indexed_records = records.iter().enumerate();
+        for (index, record) in indexed_records {
+            assert_eq!(record.scope, ResourceScope::Builtin);
+            assert_eq!(record.files.len(), 1, "builtin 只有 SKILL.md 一个文件");
+            assert_eq!(record.files[0].relative_path, SKILL_ENTRY_FILE);
+            assert!(record.files[0].text);
+            let bytes =
+                crate::resources::builtin::builtin_skill_bytes(index).expect("索引必须命中");
+            assert_eq!(
+                record.files[0].digest,
+                workspace_resources::digest_bytes(bytes),
+                "digest 必须按嵌入字节计算"
+            );
+            // 注册的顺序与 index 对应：读回的字节必须就是该条目的内容。
+            assert_eq!(bytes, BUILTIN_SKILLS[index].content.as_bytes());
+        }
     }
     assert!(
-        builtin_skill_bytes(BUILTIN_SKILLS.len()).is_none(),
+        crate::resources::builtin::builtin_skill_bytes(BUILTIN_SKILLS.len()).is_none(),
         "越界索引无字节"
     );
 }
@@ -56,7 +63,7 @@ fn builtin_records_respect_file_budget() {
         ..ResourceBudget::default()
     };
     assert!(
-        builtin_skill_records(&tiny).is_empty(),
+        crate::resources::builtin::builtin_skill_records(&tiny).is_empty(),
         "所有 builtin 技能都超过 16 字节时必须全部跳过"
     );
 }

@@ -1,4 +1,10 @@
-use super::*;
+use crate::terminal::BashTool;
+use peri_acp_types::event::BackgroundTaskResult;
+use peri_acp_types::tasks::TaskManager;
+use peri_agent::tools::BaseTool;
+use peri_agent::tools::ToolExecutionStatus;
+use std::sync::Arc;
+use std::time::Duration;
 
 // ── 后台任务超时语义（issue 2026-08-02-background-task-15s-timeout-kills-and-misreports）──
 // parse_timeout / bg_shell_task_id 纯函数测试已随实现迁至
@@ -484,7 +490,7 @@ async fn test_sync_timeout_with_rejected_promotion_falls_back_to_killing_the_gro
         manager.cancel(ticket.task_id()).expect("占位条目可取消");
         manager.confirm_external_execution_stopped(&ticket);
         manager.finalize_bg_shell(
-            &None,
+            None,
             ticket,
             "capacity fixture".into(),
             false,

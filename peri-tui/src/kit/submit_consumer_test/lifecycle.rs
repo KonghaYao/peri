@@ -1,17 +1,24 @@
 //! 消费者退出、取消与视图辅助回归。
 
-use super::super::*;
-use super::support::*;
+use super::super::AcpEventData;
+use super::super::AcpEventWithEpoch;
+use super::super::CancellationToken;
+use super::super::ExportMode;
+use super::super::LOCAL_EVENT_TX;
+use super::super::Line;
+use super::super::NOTIFICATION;
+use super::super::SubmitRequest;
+use super::super::ViewActionRequest;
+use super::super::mpsc;
 
-use crate::kit::atoms::ACP_STATE;
 use serial_test::serial;
 
 #[tokio::test]
 async fn test_shutdown_exits_loop() {
-    let (client, _server_transport) = make_client_without_pump();
+    let (client, _server_transport) = super::support::make_client_without_pump();
     let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
     let shutdown = CancellationToken::new();
-    let handle = spawn_submit_consumer(client, rx, ".".into(), shutdown.clone());
+    let handle = super::super::spawn_submit_consumer(client, rx, ".".into(), shutdown.clone());
 
     shutdown.cancel();
     // 任务应在合理时间内退出
@@ -22,10 +29,10 @@ async fn test_shutdown_exits_loop() {
 
 #[tokio::test]
 async fn test_dropped_tx_exits_loop() {
-    let (client, _server_transport) = make_client_without_pump();
+    let (client, _server_transport) = super::support::make_client_without_pump();
     let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
     let shutdown = CancellationToken::new();
-    let handle = spawn_submit_consumer(client, rx, ".".into(), shutdown);
+    let handle = super::super::spawn_submit_consumer(client, rx, ".".into(), shutdown);
 
     drop(tx);
     let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
@@ -41,12 +48,12 @@ async fn test_cancel_consumer_failure_does_not_claim_execution_stopped() {
         let mut acp = ref_guard.write();
         acp.is_loading = true;
     }
-    let (client, _server_transport) = make_client_without_pump();
+    let (client, _server_transport) = super::support::make_client_without_pump();
     let (tx, rx) = mpsc::unbounded_channel::<()>();
     let shutdown = CancellationToken::new();
-    let _handle = spawn_cancel_consumer(client, rx, shutdown.clone());
+    let _handle = super::super::spawn_cancel_consumer(client, rx, shutdown.clone());
 
-    tx.send(()).unwrap();
+    tx.send(()).expect("cancel consumer failure does not claim execution stopped: fixture channel must deliver its expected message");
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(
         ACP_STATE.state().read().is_loading,
@@ -72,7 +79,7 @@ fn test_clear_loading_state_emits_loading_reset_event() {
         let mut acp = ref_guard.write();
         acp.is_loading = true;
     }
-    clear_loading_state();
+    super::super::clear_loading_state();
 
     assert!(
         !ACP_STATE.state().read().is_loading,
@@ -107,14 +114,22 @@ fn test_lines_to_plain_text_joins_spans_and_lines() {
         ]),
         Line::from("next"),
     ];
-    assert_eq!(lines_to_plain_text(&lines), "hello world\nnext\n");
+    assert_eq!(
+        super::super::lines_to_plain_text(&lines),
+        "hello world\nnext\n"
+    );
 }
 
 #[test]
 fn test_debug_export_path_uses_cwd_and_timestamp_prefix() {
-    let path = debug_export_path("/tmp/peri-export-test");
+    let path = super::super::debug_export_path("/tmp/peri-export-test");
     assert!(path.starts_with("/tmp/peri-export-test"));
-    let name = path.file_name().unwrap().to_string_lossy();
+    let name = path
+        .file_name()
+        .expect(
+            "debug export path uses cwd and timestamp prefix: the fixture path must name a file",
+        )
+        .to_string_lossy();
     assert!(name.starts_with("peri-debug-export-"));
     assert!(name.ends_with(".txt"));
 }
@@ -123,10 +138,12 @@ fn test_debug_export_path_uses_cwd_and_timestamp_prefix() {
 async fn test_execute_view_action_export_text_writes_notification() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     *NOTIFICATION.state().write() = None;
-    execute_view_action(
+    super::super::execute_view_action(
         ViewActionRequest::ExportText(ExportMode::All),
-        &make_client_without_pump().0,
+        &super::support::make_client_without_pump().0,
         tempdir.path().to_str().expect("utf8 path"),
     );
     assert!(NOTIFICATION.state().read().is_some());
 }
+
+use crate::kit::atoms::ACP_STATE;

@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use super::*;
+use super::{
+    AgentError, Arc, BaseMessage, HashMap, HookAction, HookEvent, HookInput, HookMiddleware,
+    HookType, Middleware, ReactLLM, RegisteredHook, ToolCall,
+};
 use crate::permission::{PermissionMode, SharedPermissionMode};
 
 fn make_registered(event: HookEvent, hook: HookType) -> RegisteredHook {
@@ -814,7 +817,8 @@ async fn test_post_tool_batch_block_stops() {
 
 #[tokio::test]
 async fn test_stop_block_continue_sets_block_continue_field() {
-    use peri_agent::agent::{agent_context::AgentContext, stages::StageContext};
+    use peri_agent::agent::agent_context::AgentContext;
+    use peri_agent::agent::stages::StageContext;
     use peri_agent::session::{FrozenContext, Session};
 
     // Hook that returns Block via exit code 2

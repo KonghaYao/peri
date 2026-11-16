@@ -1,7 +1,13 @@
-use super::*;
+use super::AcpEventData;
+use super::AcpEventWithEpoch;
+use super::AcpNotification;
+use super::CancellationToken;
+use super::mpsc;
+use super::session_update;
+
 use crate::kit::acp_types::{FeedbackChannel, FeedbackLevel};
 use peri_acp::event::AcpEvent;
-use peri_acp_types::event_data::PredictionAction;
+
 use serde_json::json;
 use serial_test::serial;
 fn spawn_test_notifier() -> (
@@ -13,7 +19,7 @@ fn spawn_test_notifier() -> (
         mpsc::channel(crate::acp_client::client::NOTIFICATION_QUEUE_CAPACITY);
     let (bridge_tx, bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let shutdown = CancellationToken::new();
-    let _handle = spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
+    let _handle = super::spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
     (notif_tx, bridge_rx, shutdown)
 }
 
@@ -34,7 +40,7 @@ async fn test_agent_event_forwards_subagent_started() {
             },
         })
         .await
-        .unwrap();
+        .expect("agent event forwards subagent started: fixture task and request must complete successfully");
 
     let bridge_event = bridge_rx
         .recv()
@@ -78,7 +84,7 @@ async fn test_agent_event_forwards_llm_retrying() {
             },
         })
         .await
-        .unwrap();
+        .expect("agent event forwards llm retrying: fixture task and request must complete successfully");
 
     let bridge_event = bridge_rx.recv().await.expect("bridge 应收到 LlmRetrying");
     match bridge_event.event {
@@ -119,7 +125,7 @@ async fn test_agent_event_forwards_subagent_stopped() {
             },
         })
         .await
-        .unwrap();
+        .expect("agent event forwards subagent stopped: fixture task and request must complete successfully");
     let bridge_event = bridge_rx
         .recv()
         .await
@@ -150,7 +156,7 @@ async fn test_agent_event_forwards_subagent_stopped() {
             },
         })
         .await
-        .unwrap();
+        .expect("agent event forwards subagent stopped: fixture task and request must complete successfully");
     let bridge_event = bridge_rx
         .recv()
         .await
@@ -189,7 +195,7 @@ async fn test_agent_event_unknown_variant_dropped() {
             },
         })
         .await
-        .unwrap();
+        .expect("agent event unknown variant dropped: fixture task and request must complete successfully");
 
     notif_tx
         .send(AcpNotification::AgentDone {
@@ -198,7 +204,7 @@ async fn test_agent_event_unknown_variant_dropped() {
             request_id: None,
         })
         .await
-        .unwrap();
+        .expect("agent event unknown variant dropped: fixture task and request must complete successfully");
     let event = tokio::time::timeout(std::time::Duration::from_secs(2), bridge_rx.recv())
         .await
         .expect("notifier must process the barrier")
@@ -231,7 +237,7 @@ async fn test_goal_snapshot_forwards_to_session_owned_bridge() {
             },
         })
         .await
-        .unwrap();
+        .expect("goal snapshot forwards to session owned bridge: fixture task and request must complete successfully");
 
     let bridge_event = bridge_rx.recv().await.expect("bridge should receive goal");
     assert_eq!(bridge_event.active_session_id, "s1");
@@ -267,7 +273,7 @@ async fn test_agent_event_forwards_system_notification() {
             },
         })
         .await
-        .unwrap();
+        .expect("agent event forwards system notification: fixture task and request must complete successfully");
 
     let bridge_event = bridge_rx
         .recv()
@@ -302,7 +308,7 @@ async fn test_agent_event_parses_command_feedback() {
             },
         })
         .await
-        .unwrap();
+        .expect("agent event parses command feedback: fixture task and request must complete successfully");
 
     let bridge_event = bridge_rx
         .recv()
@@ -336,7 +342,7 @@ async fn test_agent_event_command_feedback_session_channel_and_fallback() {
             },
         })
         .await
-        .unwrap();
+        .expect("agent event command feedback session channel and fallback: fixture task and request must complete successfully");
 
     let bridge_event = bridge_rx
         .recv()
@@ -361,7 +367,7 @@ async fn test_agent_event_command_feedback_session_channel_and_fallback() {
             },
         })
         .await
-        .unwrap();
+        .expect("agent event command feedback session channel and fallback: fixture task and request must complete successfully");
 
     let bridge_event = bridge_rx
         .recv()
@@ -398,7 +404,7 @@ async fn test_prediction_ready_forwards_prediction_event() {
             }],
         })
         .await
-        .unwrap();
+        .expect("prediction ready forwards prediction event: fixture task and request must complete successfully");
 
     let bridge_event = bridge_rx.recv().await.expect("bridge 应收到 Prediction");
     match bridge_event.event {
@@ -419,7 +425,7 @@ async fn test_prediction_ready_forwards_prediction_event() {
 #[test]
 fn test_user_input_notifier_retains_delivered_identity_and_content() {
     let content = peri_acp_types::messages::MessageContent::text("  中文\n");
-    let event = convert_agent_event(AcpEvent::UserInputDelivered {
+    let event = super::convert_agent_event(AcpEvent::UserInputDelivered {
         generation: "g".into(),
         input_id: "i".into(),
         content: content.clone(),
@@ -433,7 +439,7 @@ fn test_user_input_notifier_retains_delivered_identity_and_content() {
 
 #[test]
 fn test_user_input_notifier_opens_existing_prompt_lifecycle() {
-    let event = convert_agent_event(AcpEvent::UserInputRunStarted {
+    let event = super::convert_agent_event(AcpEvent::UserInputRunStarted {
         generation: "g".into(),
         request_id: "run".into(),
     });
@@ -453,11 +459,11 @@ fn test_user_input_notifier_preserves_queue_snapshot_revision() {
         items: vec![],
         terminal_items: vec![],
     };
-    let event = convert_agent_event(AcpEvent::UserInputQueueChanged {
+    let event = super::convert_agent_event(AcpEvent::UserInputQueueChanged {
         snapshot: snapshot.clone(),
     });
     assert!(
-        matches!(event, Some(AcpEventData::UserInputQueueChanged { snapshot:received }) if serde_json::to_value(&received).unwrap() == serde_json::to_value(&snapshot).unwrap()),
+        matches!(event, Some(AcpEventData::UserInputQueueChanged { snapshot:received }) if serde_json::to_value(&received).expect("user input notifier preserves queue snapshot revision: fixture data must serialize to JSON") == serde_json::to_value(&snapshot).expect("user input notifier preserves queue snapshot revision: fixture data must serialize to JSON")),
         "队列通知必须保留完整权威快照"
     );
 }
@@ -479,3 +485,5 @@ fn test_user_input_replay_keeps_message_id_for_canonical_dedup() {
         "重放原用户气泡时必须保存 messageId，供迟到 Delivered 去重"
     );
 }
+
+use peri_acp_types::event_data::PredictionAction;

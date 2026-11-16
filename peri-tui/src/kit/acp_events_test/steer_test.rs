@@ -1,4 +1,12 @@
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::SessionPhase;
+use super::TuiRenderUnit;
+use super::TuiTextChunk;
+use super::TuiToolEnded;
+use super::TuiToolStarted;
+use super::serial;
+
 use crate::kit::steer_state::{STEERS, SteerState};
 use peri_acp_types::messages::MessageContent;
 use peri_acp_types::session::{UserInputQueueItem, UserInputQueueSnapshot, UserInputState};
@@ -13,7 +21,7 @@ impl Drop for RestoreSteers {
 fn make_steer_bridge() -> (BridgeState, RestoreSteers) {
     let guard = RestoreSteers(STEERS.state().read().clone());
     STEERS.set(SteerState::default());
-    let mut bridge = make_fold_test_state();
+    let mut bridge = super::make_fold_test_state();
     bridge.active_session_id = "steer-session".into();
     let epoch = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();
     let atom = STEERS.state();
@@ -52,7 +60,7 @@ fn delivered() -> AcpEventData {
 #[serial]
 fn input_delivery_without_a_current_run_does_not_start_loading() {
     let (mut state, _restore) = make_steer_bridge();
-    dispatch_and_notify(&mut state, &delivered());
+    super::dispatch_and_notify(&mut state, &delivered());
     assert_eq!(state.committed.len(), 1);
     assert_eq!(state.phase, SessionPhase::Idle);
     assert!(!crate::kit::atoms::ACP_STATE.state().read().is_loading);
@@ -62,13 +70,13 @@ fn input_delivery_without_a_current_run_does_not_start_loading() {
 #[serial]
 fn input_delivery_preserves_loading_from_a_current_run_start() {
     let (mut state, _restore) = make_steer_bridge();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("current-run".into()),
         },
     );
-    dispatch_and_notify(&mut state, &delivered());
+    super::dispatch_and_notify(&mut state, &delivered());
     assert_eq!(state.phase, SessionPhase::PromptRunning);
     assert!(crate::kit::atoms::ACP_STATE.state().read().is_loading);
 }
@@ -77,7 +85,7 @@ fn input_delivery_preserves_loading_from_a_current_run_start() {
 #[serial]
 fn test_steer_delivered_reuses_chat_bubble_between_assistant_turns() {
     let (mut state, _restore) = make_steer_bridge();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "旧回答".into(),
@@ -85,8 +93,8 @@ fn test_steer_delivered_reuses_chat_bubble_between_assistant_turns() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(&mut state, &delivered());
-    dispatch_and_notify(
+    super::dispatch_and_notify(&mut state, &delivered());
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "新回答".into(),
@@ -94,7 +102,7 @@ fn test_steer_delivered_reuses_chat_bubble_between_assistant_turns() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert_eq!(
         state.committed.len(),
         3,
@@ -121,7 +129,7 @@ fn test_steer_delivered_reuses_chat_bubble_between_assistant_turns() {
 #[serial]
 fn p0_delivered_prompt_follows_output_with_running_background_child() {
     let (mut state, _restore) = make_steer_bridge();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "旧回答".into(),
@@ -129,7 +137,7 @@ fn p0_delivered_prompt_follows_output_with_running_background_child() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "child".into(),
@@ -138,22 +146,22 @@ fn p0_delivered_prompt_follows_output_with_running_background_child() {
             parent_tool_call_id: None,
         },
     );
-    dispatch_and_notify(&mut state, &delivered());
+    super::dispatch_and_notify(&mut state, &delivered());
 
     let snapshot = VIEW_MODELS.state().read().clone();
     let items = &snapshot.items;
     let answer = items
         .iter()
         .position(|vm| matches!(vm, TuiRenderUnit::TuiAssistantBubble(b) if b.text == "旧回答"))
-        .unwrap();
+        .expect("p0 delivered prompt follows output with running background child: fixture must contain the searched item");
     let group = items
         .iter()
         .position(|vm| matches!(vm, TuiRenderUnit::TuiSubAgentGroup(_)))
-        .unwrap();
+        .expect("p0 delivered prompt follows output with running background child: fixture must contain the searched item");
     let prompt = items
         .iter()
         .position(|vm| matches!(vm, TuiRenderUnit::TuiUserBubble(b) if b.text == "新的输入"))
-        .unwrap();
+        .expect("p0 delivered prompt follows output with running background child: fixture must contain the searched item");
     assert!(
         answer < group && group < prompt,
         "delivered prompt must follow existing output"
@@ -170,7 +178,7 @@ fn p0_delivered_prompt_follows_output_with_running_background_child() {
         "运行中的后台分组随父消息一起归档，顺序不得丢失"
     );
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "新回答".into(),
@@ -178,7 +186,7 @@ fn p0_delivered_prompt_follows_output_with_running_background_child() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "child".into(),
@@ -186,18 +194,18 @@ fn p0_delivered_prompt_follows_output_with_running_background_child() {
             is_error: false,
         },
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let archived = VIEW_MODELS.state().read().clone();
     let prompt = archived
         .items
         .iter()
         .position(|vm| matches!(vm, TuiRenderUnit::TuiUserBubble(b) if b.text == "新的输入"))
-        .unwrap();
+        .expect("p0 delivered prompt follows output with running background child: fixture must contain the searched item");
     let newer_answer = archived
         .items
         .iter()
         .position(|vm| matches!(vm, TuiRenderUnit::TuiAssistantBubble(b) if b.text == "新回答"))
-        .unwrap();
+        .expect("p0 delivered prompt follows output with running background child: fixture must contain the searched item");
     assert!(
         prompt < newer_answer,
         "archived answer must remain after delivered prompt"
@@ -210,7 +218,7 @@ fn p0_delivered_prompt_follows_output_with_running_background_child() {
 #[serial]
 fn p0_delivered_prompt_preserves_running_tool_result() {
     let (mut state, _restore) = make_steer_bridge();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
             tool_id: "tool-1".into(),
@@ -222,8 +230,8 @@ fn p0_delivered_prompt_preserves_running_tool_result() {
             origin_readable: None,
         }),
     );
-    dispatch_and_notify(&mut state, &delivered());
-    dispatch_and_notify(
+    super::dispatch_and_notify(&mut state, &delivered());
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             tool_id: "tool-1".into(),
@@ -253,8 +261,8 @@ fn p0_delivered_prompt_preserves_running_tool_result() {
 #[serial]
 fn test_steer_delivered_duplicate_only_adds_one_user_bubble() {
     let (mut state, _restore) = make_steer_bridge();
-    dispatch_and_notify(&mut state, &delivered());
-    dispatch_and_notify(&mut state, &delivered());
+    super::dispatch_and_notify(&mut state, &delivered());
+    super::dispatch_and_notify(&mut state, &delivered());
     assert_eq!(
         state.committed.len(),
         1,
@@ -266,14 +274,14 @@ fn test_steer_delivered_duplicate_only_adds_one_user_bubble() {
 #[serial]
 fn test_steer_replay_message_id_deduplicates_late_delivery() {
     let (mut state, _restore) = make_steer_bridge();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ReplayedUserBubble {
             input_id: "accepted".into(),
             text: "新的输入".into(),
         },
     );
-    dispatch_and_notify(&mut state, &delivered());
+    super::dispatch_and_notify(&mut state, &delivered());
     assert_eq!(
         state.committed.len(),
         1,
@@ -285,8 +293,8 @@ fn test_steer_replay_message_id_deduplicates_late_delivery() {
 #[serial]
 fn test_steer_stop_keeps_canonical_bubble_and_server_queue() {
     let (mut state, _restore) = make_steer_bridge();
-    dispatch_and_notify(&mut state, &delivered());
-    dispatch_and_notify(
+    super::dispatch_and_notify(&mut state, &delivered());
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "cancelled".into(),
@@ -321,11 +329,11 @@ fn test_steer_idle_input_goes_directly_to_chat_on_delivery() {
         .state()
         .read()
         .snapshot(&state.active_session_id, epoch)
-        .unwrap()
+        .expect("steer idle input goes directly to chat on delivery: isolated fixture workspace must remain accessible")
         .clone();
     snapshot.revision += 1;
     snapshot.items.clear();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::UserInputQueueChanged { snapshot },
     );
@@ -349,8 +357,8 @@ fn test_steer_idle_input_goes_directly_to_chat_on_delivery() {
         "直接提交不显示队列行"
     );
     assert!(state.committed.is_empty(), "尚未确认不能伪造正式消息");
-    dispatch_and_notify(&mut state, &delivered());
-    dispatch_and_notify(&mut state, &delivered());
+    super::dispatch_and_notify(&mut state, &delivered());
+    super::dispatch_and_notify(&mut state, &delivered());
     assert_eq!(state.committed.len(), 1);
     assert!(
         matches!(&state.committed[0], TuiRenderUnit::TuiUserBubble(bubble) if bubble.text == "新的输入")
@@ -363,3 +371,5 @@ fn test_steer_idle_input_goes_directly_to_chat_on_delivery() {
             .is_empty()
     );
 }
+
+use crate::kit::atoms::VIEW_MODELS;

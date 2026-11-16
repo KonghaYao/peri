@@ -1,11 +1,26 @@
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::provider::LlmProvider;
+use crate::provider::PeriConfig;
+use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn test_update_config_切换provider后cfg_provider更新() {
     // Arrange: 构造两个 provider（a=openai, b=anthropic），初始 sonnet profile 绑定 "a"
     let tmp = tempfile::TempDir::new().unwrap();
-    let provider_a = make_provider_config("a", "openai", "sk-openai-test", "gpt-4o");
-    let provider_b = make_provider_config("b", "anthropic", "sk-ant-test", "claude-sonnet-4-6");
+    let provider_a = crate::host::requests::tests::make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    );
+    let provider_b = crate::host::requests::tests::make_provider_config(
+        "b",
+        "anthropic",
+        "sk-ant-test",
+        "claude-sonnet-4-6",
+    );
 
     let mut peri_config = PeriConfig::default();
     peri_config
@@ -23,7 +38,12 @@ async fn test_update_config_切换provider后cfg_provider更新() {
         "初始 provider 应为 OpenAI"
     );
 
-    let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(
+        peri_config.clone(),
+        initial_provider,
+        &tmp,
+    )
+    .await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
@@ -42,7 +62,7 @@ async fn test_update_config_切换provider后cfg_provider更新() {
     });
 
     // Act: 调用 handle_request
-    let result = handle_request(
+    let result = crate::host::requests::handle_request(
         "session/update_config",
         &params,
         &cfg,
@@ -77,7 +97,12 @@ async fn test_update_config_切换provider后cfg_provider更新() {
 #[tokio::test]
 async fn test_update_config_空providers返回错误() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let provider_a = make_provider_config("a", "openai", "sk-openai-test", "gpt-4o");
+    let provider_a = crate::host::requests::tests::make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    );
 
     let mut peri_config = PeriConfig::default();
     peri_config.config.active_alias = "sonnet".to_string();
@@ -90,7 +115,12 @@ async fn test_update_config_空providers返回错误() {
     peri_config.config.providers = vec![provider_a];
 
     let initial_provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(
+        peri_config.clone(),
+        initial_provider,
+        &tmp,
+    )
+    .await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
@@ -103,7 +133,7 @@ async fn test_update_config_空providers返回错误() {
         "config": bad_config,
     });
 
-    let result = handle_request(
+    let result = crate::host::requests::handle_request(
         "session/update_config",
         &params,
         &cfg,
@@ -125,7 +155,12 @@ async fn test_update_config_空providers返回错误() {
 #[tokio::test]
 async fn test_update_config_不存在的provider_id返回错误() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let provider_a = make_provider_config("a", "openai", "sk-openai-test", "gpt-4o");
+    let provider_a = crate::host::requests::tests::make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    );
 
     let mut peri_config = PeriConfig::default();
     peri_config.config.active_alias = "sonnet".to_string();
@@ -138,7 +173,12 @@ async fn test_update_config_不存在的provider_id返回错误() {
     peri_config.config.providers = vec![provider_a];
 
     let initial_provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(
+        peri_config.clone(),
+        initial_provider,
+        &tmp,
+    )
+    .await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
@@ -150,7 +190,7 @@ async fn test_update_config_不存在的provider_id返回错误() {
         .get_mut("sonnet")
         .unwrap()
         .provider = "nonexistent".to_string();
-    bad_config.config.providers = vec![make_provider_config(
+    bad_config.config.providers = vec![crate::host::requests::tests::make_provider_config(
         "a",
         "openai",
         "sk-openai-test",
@@ -162,7 +202,7 @@ async fn test_update_config_不存在的provider_id返回错误() {
         "config": bad_config,
     });
 
-    let result = handle_request(
+    let result = crate::host::requests::handle_request(
         "session/update_config",
         &params,
         &cfg,

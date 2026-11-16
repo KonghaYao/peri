@@ -65,73 +65,33 @@ pub use viewport::{
     update_window_viewport_follow,
 };
 
-use self::budget::INITIAL_CHECKPOINT_HISTORY;
-
-/// 窗口配置。默认关闭，初始预算见 [`WindowLimits`]；这些数字是实施初值，不是性能结论。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct HistoryWindowConfig {
-    pub history_window_v1: bool,
-    pub limits: WindowLimits,
-}
-
-impl HistoryWindowConfig {
-    /// 显式启用（测试与后续设置接入使用）；预算仍取初始值。
-    pub fn enabled() -> Self {
-        Self {
-            history_window_v1: true,
-            ..Self::default()
-        }
-    }
-
-    /// 检查点去重集合容量。
-    pub fn checkpoint_history(&self) -> usize {
-        INITIAL_CHECKPOINT_HISTORY
-    }
-}
+mod history_window_config;
+pub use history_window_config::HistoryWindowConfig;
 
 #[cfg(test)]
 #[path = "admission_test.rs"]
 mod admission_test;
+
 #[cfg(test)]
 #[path = "anchor_test.rs"]
 mod anchor_test;
+
 #[cfg(test)]
 #[path = "commit_test.rs"]
 mod commit_test;
+
+mod beta;
 #[cfg(test)]
 #[path = "index_test.rs"]
 mod index_test;
-/// 从配置文档读取 TUI 本地 beta（kebab-case `history-window-v1`）。
-///
-/// 未配置视为**开启**：发布启用绑定 S7，本地投影默认开启；只有用户显式配置
-/// `false` 才关闭。`BetasConfig::get` 保留「未配置」与「显式 false」的区别。
-pub fn history_window_beta_enabled(config: &crate::config::PeriConfig) -> bool {
-    config
-        .config
-        .betas
-        .get(peri_config::betas::HISTORY_WINDOW_V1)
-        .unwrap_or(true)
-}
-
-/// 从合并快照的 beta 投影读取与 [`history_window_beta_enabled`] 相同的语义。
-///
-/// 未覆盖（`BetaFlags::value` 返回 `None`）= 开启；
-/// 显式 `false` = 关闭。启动路径的快照投影与回退配置读取必须共用这一默认值
-/// （发布启用绑定 S7）。
-pub fn history_window_beta_enabled_from_flags(flags: &peri_config::betas::BetaFlags) -> bool {
-    flags
-        .value(peri_config::betas::HISTORY_WINDOW_V1)
-        .is_none_or(|value| value.enabled)
-}
-
-/// 启动时把 beta 配置写入运行开关（只写一次；无热重载）。
-pub fn apply_history_window_beta(enabled: bool) {
-    crate::kit::atoms::HISTORY_WINDOW_V1.set(enabled);
-}
+pub use beta::{
+    apply_history_window_beta, history_window_beta_enabled, history_window_beta_enabled_from_flags,
+};
 
 #[cfg(test)]
 #[path = "model_test.rs"]
 mod model_test;
+
 #[cfg(test)]
 #[path = "test_support.rs"]
 mod test_support;

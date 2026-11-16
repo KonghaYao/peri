@@ -14,7 +14,12 @@
 //! 要跨 prompt 存活必须是 session 级 once 状态（跨 ACP 装配面），且需同时
 //! 覆盖主 hook 路径，属于本轮范围外的语义扩容。
 
-use super::*;
+use super::Arc;
+use super::HookEvent;
+use super::HookType;
+use super::PathBuf;
+use super::ProductionChainAssembler;
+use super::RegisteredHook;
 
 use crate::hooks::{HookInput, HookMiddleware};
 use crate::subagent::SubAgentMiddleware;
@@ -76,14 +81,16 @@ async fn once_scope_is_per_assembled_chain_not_session() {
     let subagent_hook = once_command_hook(HookEvent::SubagentStart, &subagent_log);
     let pretooluse_hook = once_command_hook(HookEvent::PreToolUse, &pretooluse_log);
 
-    let mut ctx = base_context();
+    let mut ctx = super::base_context();
     // hook 命令以 ctx.cwd 为工作目录执行：目录必须真实存在，否则 shell 起不来。
     ctx.cwd = dir.path().to_str().unwrap().to_owned();
     ctx.hook_groups = vec![vec![subagent_hook.clone(), pretooluse_hook.clone()]];
 
     // 两次"prompt"：生产路径每轮 prompt 调 `build_agent` → `assemble` 一次。
     for prompt in 0..2 {
-        let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
+        let out =
+            peri_agent::session::factory::build_middleware_chain(&ProductionChainAssembler, &ctx)
+                .expect("assembly");
         assert!(
             out.chain.names().contains(&"SubAgentMiddleware"),
             "第 {prompt} 轮装配链上必须有 SubAgentMiddleware"
@@ -172,7 +179,7 @@ async fn once_scope_is_stable_within_one_assembled_chain() {
         .unwrap();
     let subagent_log = dir.path().join("subagent-once.log");
 
-    let mut ctx = base_context();
+    let mut ctx = super::base_context();
     // hook 命令以 ctx.cwd 为工作目录执行：目录必须真实存在，否则 shell 起不来。
     ctx.cwd = dir.path().to_str().unwrap().to_owned();
     ctx.hook_groups = vec![vec![once_command_hook(
@@ -180,7 +187,8 @@ async fn once_scope_is_stable_within_one_assembled_chain() {
         &subagent_log,
     )]];
 
-    let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
+    let out = peri_agent::session::factory::build_middleware_chain(&ProductionChainAssembler, &ctx)
+        .expect("assembly");
     let subagent_mw = Arc::clone(out.subagent_mw.as_ref().expect("SubAgentMiddleware"))
         .downcast_arc::<SubAgentMiddleware>()
         .ok()

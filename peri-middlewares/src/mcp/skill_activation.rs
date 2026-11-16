@@ -27,18 +27,18 @@
 //! 由本模块的统一 activation 保证（见 `trusted_origin_still_verifies_content_binding` 用例）。
 //! skill 级内容绑定批准属 W3/W4 范围（需先有面），本波不新造批准面。
 
-use peri_acp_types::{
-    mcp_skills::{HandleToken, McpSkillRegistry, ServerDiscoveryState},
-    skills::{SkillMetadata, SkillOrigin},
-};
-use rmcp::{service::Peer, RoleClient};
+use peri_acp_types::mcp_skills::HandleToken;
+use peri_acp_types::mcp_skills::McpSkillRegistry;
+use peri_acp_types::mcp_skills::ServerDiscoveryState;
+use peri_acp_types::skills::SkillMetadata;
+use peri_acp_types::skills::SkillOrigin;
+use rmcp::service::Peer;
+use rmcp::RoleClient;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use super::client::{ClientStatus, McpClientHandle};
-use super::skill_discovery::{
-    frontmatter_maps_equal, parse_skill_frontmatter_map, read_skill_resource_text,
-    recover_entry_via_skills_get, uri_eq_ignore_scheme_case, verify_digest, SkillResourceRead,
-};
+use super::skill_discovery;
+use super::skill_discovery::SkillResourceRead;
 
 /// 激活失败原因（调用方据此决定文案/降级；不含主机绝对路径与正文）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,7 +133,7 @@ pub(crate) async fn activate(
     let binding = meta
         .resources
         .iter()
-        .find(|resource| uri_eq_ignore_scheme_case(&resource.uri, uri));
+        .find(|resource| skill_discovery::uri_eq_ignore_scheme_case(&resource.uri, uri));
     let Some(binding) = binding else {
         if !meta.resources.is_empty() {
             return Err(ActivationError::MissingBinding);
@@ -170,7 +170,8 @@ async fn refresh_after_digest_mismatch(
     handle: &HandleToken,
     cancel: Option<&AgentCancellationToken>,
 ) -> Result<String, ActivationError> {
-    let Some(refreshed) = recover_entry_via_skills_get(peer, server, uri).await else {
+    let Some(refreshed) = skill_discovery::recover_entry_via_skills_get(peer, server, uri).await
+    else {
         return Err(ActivationError::DigestMismatch);
     };
     if cancel.is_some_and(|token| token.is_cancelled()) {
@@ -181,7 +182,7 @@ async fn refresh_after_digest_mismatch(
     let binding = refreshed
         .resources
         .iter()
-        .find(|resource| uri_eq_ignore_scheme_case(&resource.uri, uri))
+        .find(|resource| skill_discovery::uri_eq_ignore_scheme_case(&resource.uri, uri))
         .ok_or(ActivationError::MissingBinding)?;
     let expected_fm = refreshed
         .frontmatter
@@ -199,7 +200,7 @@ async fn read_text(
     server: &str,
     uri: &str,
 ) -> Result<String, ActivationError> {
-    match read_skill_resource_text(peer, server, uri).await {
+    match skill_discovery::read_skill_resource_text(peer, server, uri).await {
         SkillResourceRead::Text(text, ..) => Ok(text),
         SkillResourceRead::NotText => Err(ActivationError::NotText),
         SkillResourceRead::Failed => Err(ActivationError::ReadFailed),
@@ -212,13 +213,13 @@ fn verify_body(
     expected_digest: &str,
     expected_fm: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), ActivationError> {
-    if !verify_digest(text, expected_digest) {
+    if !skill_discovery::verify_digest(text, expected_digest) {
         return Err(ActivationError::DigestMismatch);
     }
-    let Some(actual_fm) = parse_skill_frontmatter_map(text) else {
+    let Some(actual_fm) = skill_discovery::parse_skill_frontmatter_map(text) else {
         return Err(ActivationError::FrontmatterMismatch);
     };
-    if !frontmatter_maps_equal(&actual_fm, expected_fm) {
+    if !skill_discovery::frontmatter_maps_equal(&actual_fm, expected_fm) {
         return Err(ActivationError::FrontmatterMismatch);
     }
     Ok(())

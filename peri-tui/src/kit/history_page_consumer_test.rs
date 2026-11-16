@@ -3,24 +3,30 @@
 //! 覆盖：并发合并判据、RPC 参数与响应解码、空页续读、失效错误码（-32011/-32012）
 //! 标记、游标链中途换快照身份时丢弃、以及在发 RPC **之前**就丢掉过期浏览身份的页。
 
-#[cfg(test)]
-use super::*;
-use peri_acp::transport::{
-    AcpTransport,
-    mpsc::{MpscClientTransport, MpscServerTransport, mpsc_transport_pair},
-    types::{AcpError, IncomingMessage},
-};
+use super::AcpEventData;
+use super::AcpTuiClient;
+use super::HistoryPageRequest;
+use super::PAGE_FETCH_TIMEOUT;
+use super::atoms;
+use super::history_paging;
+
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::mpsc::MpscClientTransport;
+use peri_acp::transport::mpsc::MpscServerTransport;
+use peri_acp::transport::types::AcpError;
+use peri_acp::transport::types::IncomingMessage;
 use serde_json::{Value, json};
 use serial_test::serial;
 use std::time::Duration;
 
 fn make_client() -> (AcpTuiClient, MpscServerTransport) {
     let (client_transport, server_transport): (MpscClientTransport, MpscServerTransport) =
-        mpsc_transport_pair();
+        peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
     (client, server_transport)
 }
 
+#[must_use]
 fn request(cursor: &str) -> HistoryPageRequest {
     HistoryPageRequest {
         session_id: "s1".to_string(),
@@ -68,23 +74,23 @@ async fn serve_one(server: &MpscServerTransport, result: Result<Value, AcpError>
 #[test]
 fn test_is_duplicate_of_merges_only_same_cursor_and_limit() {
     let in_flight = request("c1").identity();
-    assert!(is_duplicate_of(&request("c1"), &in_flight));
+    assert!(super::is_duplicate_of(&request("c1"), &in_flight));
 
     let mut other_cursor = request("c2");
     other_cursor.limit = in_flight.limit;
-    assert!(!is_duplicate_of(&other_cursor, &in_flight));
+    assert!(!super::is_duplicate_of(&other_cursor, &in_flight));
 
     let mut other_limit = request("c1");
     other_limit.limit = in_flight.limit + 1;
-    assert!(!is_duplicate_of(&other_limit, &in_flight));
+    assert!(!super::is_duplicate_of(&other_limit, &in_flight));
 
     let mut other_session = request("c1");
     other_session.session_id = "s2".to_string();
-    assert!(!is_duplicate_of(&other_session, &in_flight));
+    assert!(!super::is_duplicate_of(&other_session, &in_flight));
 
     let mut other_snapshot = request("c1");
     other_snapshot.snapshot_token = "tok-2".to_string();
-    assert!(!is_duplicate_of(&other_snapshot, &in_flight));
+    assert!(!super::is_duplicate_of(&other_snapshot, &in_flight));
 }
 
 #[tokio::test]
@@ -101,7 +107,9 @@ async fn test_fetch_page_sends_cursor_and_decodes_items() {
         .await
     });
 
-    let fetched = fetch_page(&client, &request("c1")).await.expect("page");
+    let fetched = super::fetch_page(&client, &request("c1"))
+        .await
+        .expect("page");
     let params = handle.await.expect("server task");
     let response = fetched.response;
     let origin = fetched.origin.expect("origin");
@@ -139,7 +147,9 @@ async fn test_fetch_page_skips_empty_pages_until_content() {
         (first, second)
     });
 
-    let fetched = fetch_page(&client, &request("c1")).await.expect("page");
+    let fetched = super::fetch_page(&client, &request("c1"))
+        .await
+        .expect("page");
     let (first, second) = handle.await.expect("server task");
     let response = fetched.response;
 
@@ -166,7 +176,7 @@ async fn test_fetch_page_flags_range_invalidating_errors() {
         serve_one(&server, Err(AcpError::new(-32012, "cursor range expired"))).await
     });
 
-    let error = fetch_page(&client, &request("c1"))
+    let error = super::fetch_page(&client, &request("c1"))
         .await
         .expect_err("range expired must fail");
     let _ = handle.await.expect("server task");
@@ -186,7 +196,7 @@ async fn test_fetch_page_flags_cross_session_errors() {
         .await
     });
 
-    let error = fetch_page(&client, &request("c1"))
+    let error = super::fetch_page(&client, &request("c1"))
         .await
         .expect_err("cross session must fail");
     let _ = handle.await.expect("server task");
@@ -211,7 +221,7 @@ async fn test_fetch_page_drops_page_with_changed_snapshot_token() {
         .await
     });
 
-    let error = fetch_page(&client, &request("c1"))
+    let error = super::fetch_page(&client, &request("c1"))
         .await
         .expect_err("changed snapshot token must drop the page");
     let _ = handle.await.expect("server task");
@@ -232,7 +242,7 @@ async fn test_fetch_page_times_out_on_silent_server() {
     // 而不是让测试挂死到 harness 超时。
     let outcome = tokio::time::timeout(
         PAGE_FETCH_TIMEOUT + Duration::from_secs(2),
-        fetch_page(&client, &request("c1")),
+        super::fetch_page(&client, &request("c1")),
     )
     .await
     .expect("取页必须有有限预算：静默服务端不得让 fetch_page 无限等待");
@@ -262,7 +272,7 @@ async fn test_handle_request_releases_in_flight_on_timeout() {
     // 同上层护栏：没有有限预算时本用例失败而不是挂死。
     tokio::time::timeout(
         PAGE_FETCH_TIMEOUT + Duration::from_secs(2),
-        handle_request(&client, &current, identity),
+        super::handle_request(&client, &current, identity),
     )
     .await
     .expect("handle_request 必须在有限预算内失败");
@@ -306,7 +316,7 @@ async fn test_handle_request_drops_stale_browsing_before_rpc() {
         limit: 50,
     };
     let identity = stale.identity();
-    handle_request(&client, &stale, identity).await;
+    super::handle_request(&client, &stale, identity).await;
 
     assert!(
         tokio::time::timeout(Duration::from_millis(200), server.recv())
@@ -340,7 +350,7 @@ async fn test_handle_request_injects_page_and_advances_cursor() {
         )
         .await
     });
-    handle_request(&client, &current, identity).await;
+    super::handle_request(&client, &current, identity).await;
     let _ = handle.await.expect("server task");
 
     if owns_local_tx {
@@ -383,7 +393,7 @@ async fn test_handle_request_invalidates_browsing_on_range_error() {
     let handle = tokio::spawn(async move {
         serve_one(&server, Err(AcpError::new(-32012, "cursor range expired"))).await
     });
-    handle_request(&client, &current, identity).await;
+    super::handle_request(&client, &current, identity).await;
     let _ = handle.await.expect("server task");
 
     let state = atoms::HISTORY_PAGING.state().read().clone();

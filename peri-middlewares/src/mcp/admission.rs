@@ -17,23 +17,23 @@
 //! - 复用 `system_tools::prepare_system_tools`（纯函数）与
 //!   `McpClientPool::await_system_connections`（pool 级 readiness 事实）。
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::sync::Arc;
 
-use peri_agent::{
-    agent::AgentCancellationToken,
-    error::AgentError,
-    session::tool_catalog::{StartupRequiredTool, StartupToolUpdate},
-    tools::BaseTool,
-};
+use peri_agent::agent::AgentCancellationToken;
+use peri_agent::error::AgentError;
+use peri_agent::session::tool_catalog::StartupRequiredTool;
+use peri_agent::session::tool_catalog::StartupToolUpdate;
+use peri_agent::tools::BaseTool;
 
-use super::{
-    client::{McpClientPool, NegotiatedSystemMcp, SystemReadinessError},
-    system_tools::{prepare_system_tools, SystemToolError},
-    tool_bridge::{build_typed_tool_bridges_visible_to, McpToolBridge},
-};
+use super::client::McpClientPool;
+use super::client::NegotiatedSystemMcp;
+use super::client::SystemReadinessError;
+use super::system_tools;
+use super::system_tools::SystemToolError;
+use super::tool_bridge;
+use super::tool_bridge::McpToolBridge;
 
 /// 启动准入错误归属的链槽名。
 ///
@@ -240,7 +240,7 @@ impl McpAdmissionPreparation {
             })
             .collect();
         let typed = self.open_typed_bridges();
-        let bridges = prepare_system_tools(typed, &required)
+        let bridges = system_tools::prepare_system_tools(typed, &required)
             .map_err(|source| SystemReadinessError::RequiredTools { source })?;
         // `prepare_system_tools` 是同步校验，不 yield：返回后必须重新核对代际 /
         // pool 开闭 / 取消 / deadline，避免用旧代快照发布 ready。
@@ -258,10 +258,13 @@ impl McpAdmissionPreparation {
     /// 关闭实例的 bridge 既不得进入 deferred 目录（面②），也不得被提升为
     /// direct（面①）；过滤只走 `closed_instances` / `is_closed`，不硬编码实例名。
     pub(crate) fn open_typed_bridges(&self) -> Vec<McpToolBridge> {
-        build_typed_tool_bridges_visible_to(&self.tool_pool, self.session_id.as_deref())
-            .into_iter()
-            .filter(|bridge| !self.is_bridge_closed(bridge))
-            .collect()
+        tool_bridge::build_typed_tool_bridges_visible_to(
+            &self.tool_pool,
+            self.session_id.as_deref(),
+        )
+        .into_iter()
+        .filter(|bridge| !self.is_bridge_closed(bridge))
+        .collect()
     }
 
     /// 提交前复核：任何一项不成立都不得发布 ready。
@@ -281,7 +284,7 @@ impl McpAdmissionPreparation {
             let server = item.requirement.server.as_str();
             let current = self
                 .tool_pool
-                .get_client(server)
+                .client(server)
                 .map(|handle| self.tool_pool.handle_generation(&handle));
             if current != Some(item.generation) {
                 return Err(SystemReadinessError::ConnectionChanged {

@@ -5,13 +5,20 @@
 
 use std::hash::{Hash, Hasher};
 
-use peri_acp_types::{
-    messages::{BaseMessage, MessageContent, MessageId},
-    session::{MqEntry, UserInput, UserInputItemResult, UserInputState},
-    store::PersistedPayload,
-};
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::MqEntry;
+use peri_acp_types::session::UserInput;
+use peri_acp_types::session::UserInputItemResult;
+use peri_acp_types::session::UserInputState;
+use peri_acp_types::store::PersistedPayload;
 
-use super::{CommandReceipt, InputRecord, MailboxState, UserInputQueueError, UserInputRunTicket};
+use crate::session::user_input_mailbox::CommandReceipt;
+use crate::session::user_input_mailbox::InputRecord;
+use crate::session::user_input_mailbox::MailboxState;
+use crate::session::user_input_mailbox::UserInputQueueError;
+use crate::session::user_input_mailbox::UserInputRunTicket;
 
 impl MailboxState {
     pub(super) fn next_record_seq(&mut self) -> u64 {

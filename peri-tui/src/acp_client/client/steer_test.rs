@@ -1,5 +1,9 @@
-use super::*;
-use peri_acp::transport::{mpsc::mpsc_transport_pair, types::IncomingMessage};
+use super::{
+    AcpEvent, AcpNotification, AcpTuiClient, DispatchUserInputsRequest, EnqueueUserInputRequest,
+    Ordering,
+};
+
+use peri_acp::transport::types::IncomingMessage;
 use serde_json::json;
 
 fn make_snapshot() -> serde_json::Value {
@@ -9,11 +13,11 @@ fn make_snapshot() -> serde_json::Value {
 #[tokio::test]
 #[serial_test::serial]
 async fn test_user_input_capability_requires_explicit_server_support() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, _) = AcpTuiClient::new(client_transport);
     client.spawn_pump(notification_tx);
     let server = tokio::spawn(async move {
-        let IncomingMessage::Request { id, method, .. } = server_transport.recv().await.unwrap()
+        let IncomingMessage::Request { id, method, .. } = server_transport.recv().await.expect("user input capability requires explicit server support: fixture task and request must complete successfully")
         else {
             panic!("应收到 initialize");
         };
@@ -24,50 +28,50 @@ async fn test_user_input_capability_requires_explicit_server_support() {
                 Ok(json!({"agentCapabilities":{"_meta":{"peri.userInputQueue":true}}})),
             )
             .await
-            .unwrap();
+            .expect("user input capability requires explicit server support: fixture task and request must complete successfully");
     });
-    client.register_ui_commands(&[]).await.unwrap();
+    client.register_ui_commands(&[]).await.expect("user input capability requires explicit server support: fixture task and request must complete successfully");
     assert!(
         client.supports_user_input_queue(),
         "只有服务端明确支持才启用新队列"
     );
-    server.await.unwrap();
+    server.await.expect("user input capability requires explicit server support: fixture task and request must complete successfully");
     client.close();
 }
 
 #[tokio::test]
 #[serial_test::serial]
 async fn test_user_input_old_server_keeps_legacy_path() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, _) = AcpTuiClient::new(client_transport);
     client.spawn_pump(notification_tx);
     let server = tokio::spawn(async move {
-        let IncomingMessage::Request { id, .. } = server_transport.recv().await.unwrap() else {
+        let IncomingMessage::Request { id, .. } = server_transport.recv().await.expect("user input old server keeps legacy path: fixture task and request must complete successfully") else {
             panic!("应收到 initialize");
         };
         server_transport
             .send_response(id, Ok(json!({"agentCapabilities":{}})))
             .await
-            .unwrap();
+            .expect("user input old server keeps legacy path: fixture task and request must complete successfully");
     });
-    client.register_ui_commands(&[]).await.unwrap();
+    client.register_ui_commands(&[]).await.expect("user input old server keeps legacy path: fixture task and request must complete successfully");
     assert!(
         !client.supports_user_input_queue(),
         "缺少能力不能猜测支持或双发"
     );
-    server.await.unwrap();
+    server.await.expect("user input old server keeps legacy path: fixture task and request must complete successfully");
     client.close();
 }
 
 #[tokio::test]
 async fn test_user_input_enqueue_preserves_wire_identity_and_raw_draft() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, _) = AcpTuiClient::new(client_transport);
     client.force_stable_for_test("s", false);
     client.spawn_pump(notification_tx);
     let server = tokio::spawn(async move {
         let IncomingMessage::Request { id, method, params } =
-            server_transport.recv().await.unwrap()
+            server_transport.recv().await.expect("user input enqueue preserves wire identity and raw draft: fixture task and request must complete successfully")
         else {
             panic!("应收到 enqueue");
         };
@@ -79,7 +83,7 @@ async fn test_user_input_enqueue_preserves_wire_identity_and_raw_draft() {
             params["originalDraft"], "  中文\n@image /tmp/a.png\n",
             "原稿不能 trim"
         );
-        server_transport.send_response(id, Ok(json!({"snapshot":make_snapshot(),"results":[{"inputId":"i","state":"queued"}]}))).await.unwrap();
+        server_transport.send_response(id, Ok(json!({"snapshot":make_snapshot(),"results":[{"inputId":"i","state":"queued"}]}))).await.expect("user input enqueue preserves wire identity and raw draft: fixture task and request must complete successfully");
     });
     let receipt = client
         .enqueue_user_input(&EnqueueUserInputRequest {
@@ -91,15 +95,15 @@ async fn test_user_input_enqueue_preserves_wire_identity_and_raw_draft() {
             original_draft: "  中文\n@image /tmp/a.png\n".into(),
         })
         .await
-        .unwrap();
+        .expect("user input enqueue preserves wire identity and raw draft: fixture task and request must complete successfully");
     assert_eq!(receipt.results[0].input_id, "i", "回执应保留输入身份");
-    server.await.unwrap();
+    server.await.expect("user input enqueue preserves wire identity and raw draft: fixture task and request must complete successfully");
     client.close();
 }
 
 #[tokio::test]
 async fn test_user_input_control_does_not_wait_for_long_prompt() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, _) = AcpTuiClient::new(client_transport);
     client.force_stable_for_test("s", false);
     client.spawn_pump(notification_tx);
@@ -116,14 +120,14 @@ async fn test_user_input_control_does_not_wait_for_long_prompt() {
         id: prompt_id,
         method,
         ..
-    } = server_transport.recv().await.unwrap()
+    } = server_transport.recv().await.expect("user input control does not wait for long prompt: fixture task and request must complete successfully")
     else {
         panic!("应收到 prompt");
     };
     assert_eq!(method, "session/prompt", "先保持现有 prompt 在途");
     let server = tokio::spawn(async move {
         let IncomingMessage::Request { id, method, params } =
-            server_transport.recv().await.unwrap()
+            server_transport.recv().await.expect("user input control does not wait for long prompt: fixture task and request must complete successfully")
         else {
             panic!("应收到 dispatch");
         };
@@ -135,11 +139,11 @@ async fn test_user_input_control_does_not_wait_for_long_prompt() {
         server_transport
             .send_response(id, Ok(json!({"snapshot":make_snapshot(),"results":[]})))
             .await
-            .unwrap();
+            .expect("user input control does not wait for long prompt: fixture task and request must complete successfully");
         server_transport
             .send_response(prompt_id, Ok(json!({})))
             .await
-            .unwrap();
+            .expect("user input control does not wait for long prompt: fixture task and request must complete successfully");
     });
     let request = DispatchUserInputsRequest {
         session_id: "s".into(),
@@ -153,18 +157,20 @@ async fn test_user_input_control_does_not_wait_for_long_prompt() {
     )
     .await
     .expect("控制请求应在 prompt 完成前响应")
-    .unwrap();
-    prompt.await.unwrap().unwrap();
-    server.await.unwrap();
+    .expect("user input control does not wait for long prompt: fixture task and request must complete successfully");
+    prompt.await.expect("user input control does not wait for long prompt: fixture task and request must complete successfully").expect("user input control does not wait for long prompt: fixture task and request must complete successfully");
+    server.await.expect("user input control does not wait for long prompt: fixture task and request must complete successfully");
     client.close();
 }
 
 #[tokio::test]
 async fn test_user_input_command_does_not_migrate_to_new_session() {
-    let (client_transport, _server_transport) = mpsc_transport_pair();
+    let (client_transport, _server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(client_transport);
     client.force_stable_for_test("new", false);
-    let error = client.user_input_snapshot("old").await.unwrap_err();
+    let error = client.user_input_snapshot("old").await.expect_err(
+        "user input command does not migrate to new session: the invalid fixture must be rejected",
+    );
     assert_eq!(error.code, -32602, "会话切换后旧命令必须明确拒绝");
     client.close();
 }
@@ -172,25 +178,25 @@ async fn test_user_input_command_does_not_migrate_to_new_session() {
 #[tokio::test]
 #[serial_test::serial]
 async fn test_user_input_load_binds_snapshot_before_live_delivery() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, mut notifications) = AcpTuiClient::new(client_transport);
     client.user_input_queue.store(true, Ordering::Release);
     client.spawn_pump(notification_tx);
     let loader = client.clone();
     let loading = tokio::spawn(async move { loader.load_session("s", "/tmp", None).await });
-    let IncomingMessage::Request { id, method, .. } = server_transport.recv().await.unwrap() else {
+    let IncomingMessage::Request { id, method, .. } = server_transport.recv().await.expect("user input load binds snapshot before live delivery: fixture task and request must complete successfully") else {
         panic!("应收到 load");
     };
     assert_eq!(method, "session/load", "先加载同一会话");
     server_transport
         .send_response(id, Ok(json!({})))
         .await
-        .unwrap();
+        .expect("user input load binds snapshot before live delivery: fixture task and request must complete successfully");
     let IncomingMessage::Request {
         id: snapshot_id,
         method,
         ..
-    } = server_transport.recv().await.unwrap()
+    } = server_transport.recv().await.expect("user input load binds snapshot before live delivery: fixture task and request must complete successfully")
     else {
         panic!("load 必须在释放边界前查询实例");
     };
@@ -205,11 +211,11 @@ async fn test_user_input_load_binds_snapshot_before_live_delivery() {
                 "sessionId":"s", "event_json":serde_json::to_string(&AcpEvent::UserInputDelivered {
                     generation:"g".into(), input_id:"a".into(),
                     content:peri_acp_types::messages::MessageContent::text("queued"),
-                }).unwrap()
+                }).expect("user input load binds snapshot before live delivery: fixture data must serialize to JSON")
             }),
         )
         .await
-        .unwrap();
+        .expect("user input load binds snapshot before live delivery: fixture must serialize to JSON");
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(30), notifications.recv())
             .await
@@ -221,24 +227,24 @@ async fn test_user_input_load_binds_snapshot_before_live_delivery() {
     server_transport
         .send_response(snapshot_id, Ok(snapshot))
         .await
-        .unwrap();
+        .expect("user input load binds snapshot before live delivery: fixture task and request must complete successfully");
     assert_eq!(
-        loading.await.unwrap().unwrap(),
+        loading.await.expect("user input load binds snapshot before live delivery: the fixture operation must finish without an inner failure").expect("user input load binds snapshot before live delivery: the fixture operation must finish without an inner failure"),
         "s",
         "受信绑定后才完成 load"
     );
     let first = tokio::time::timeout(std::time::Duration::from_secs(2), notifications.recv())
         .await
-        .unwrap()
-        .unwrap();
+        .expect("user input load binds snapshot before live delivery: fixture task and request must complete successfully")
+        .expect("user input load binds snapshot before live delivery: fixture task and request must complete successfully");
     assert!(
         matches!(first, AcpNotification::AgentEvent { event:AcpEvent::UserInputRunStarted { request_id, .. }, .. } if request_id == "run"),
         "必须先恢复运行 owner，再允许实时消息通过"
     );
     let second = tokio::time::timeout(std::time::Duration::from_secs(2), notifications.recv())
         .await
-        .unwrap()
-        .unwrap();
+        .expect("user input load binds snapshot before live delivery: fixture task and request must complete successfully")
+        .expect("user input load binds snapshot before live delivery: fixture task and request must complete successfully");
     assert!(
         matches!(second, AcpNotification::AgentEvent { event:AcpEvent::UserInputDelivered { input_id, .. }, .. } if input_id == "a"),
         "绑定期间到达的 canonical 消息不能丢失"
@@ -248,11 +254,11 @@ async fn test_user_input_load_binds_snapshot_before_live_delivery() {
 
 #[tokio::test]
 async fn test_user_input_stop_preserves_managed_run_identity_on_wire() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(client_transport);
     client.force_stable_for_test("s", false);
     client.user_input_queue.store(true, Ordering::Release);
-    let (_, local_generation) = client.lifecycle.stable_identity().unwrap();
+    let (_, local_generation) = client.lifecycle.stable_identity().expect("user input stop preserves managed run identity on wire: the stable_identity fixture operation uses valid inputs");
     assert!(
         client
             .lifecycle
@@ -266,8 +272,8 @@ async fn test_user_input_stop_preserves_managed_run_identity_on_wire() {
             .is_some(),
         "应打开实际执行标记"
     );
-    client.cancel().await.unwrap();
-    let IncomingMessage::Notification { method, params } = server_transport.recv().await.unwrap()
+    client.cancel().await.expect("user input stop preserves managed run identity on wire: fixture task and request must complete successfully");
+    let IncomingMessage::Notification { method, params } = server_transport.recv().await.expect("user input stop preserves managed run identity on wire: fixture task and request must complete successfully")
     else {
         panic!("应收到 cancel 通知");
     };
@@ -283,3 +289,5 @@ async fn test_user_input_stop_preserves_managed_run_identity_on_wire() {
     );
     client.close();
 }
+
+use peri_acp::transport::AcpTransport;

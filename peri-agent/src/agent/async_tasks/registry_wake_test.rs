@@ -1,4 +1,11 @@
-use super::*;
+use crate::agent::async_tasks::registry::BackgroundRegistryError;
+use crate::agent::async_tasks::registry::BackgroundTask;
+use crate::agent::async_tasks::registry::BackgroundTaskRegistry;
+use crate::agent::async_tasks::registry::BackgroundTaskStatus;
+use crate::agent::async_tasks::registry::BgCancelHandle;
+use crate::agent::events::BackgroundTaskResult;
+use peri_acp_types::tasks::BgRegistryEvent;
+use peri_acp_types::tasks::BgTaskKind;
 
 fn make_task(id: &str) -> BackgroundTask {
     BackgroundTask {
@@ -42,29 +49,42 @@ async fn test_registry_activity_signal_reports_register_and_complete_once() {
     let mut activity = registry.subscribe_activity();
     assert_eq!(*activity.borrow(), 0);
 
-    let ticket = registry.register_with_kind(make_task("bg-1")).unwrap();
-    assert!(activity.has_changed().unwrap());
+    let ticket = registry
+        .register_with_kind(make_task("bg-1"))
+        .expect("the register with kind fixture result is required for this assertion");
+    assert!(activity
+        .has_changed()
+        .expect("the has changed fixture result is required for this assertion"));
     assert_eq!(*activity.borrow_and_update(), 1);
     assert_eq!(registry.active_count(), 1);
 
     assert!(registry.complete(&ticket, result("bg-1")));
-    assert!(activity.has_changed().unwrap());
+    assert!(activity
+        .has_changed()
+        .expect("the has changed fixture result is required for this assertion"));
     assert_eq!(*activity.borrow_and_update(), 2);
     assert_eq!(registry.active_count(), 0);
-    assert!(!activity.has_changed().unwrap());
+    assert!(!activity
+        .has_changed()
+        .expect("the has changed fixture result is required for this assertion"));
 }
 
 #[tokio::test]
 async fn test_registry_activity_signal_is_observable_after_wait_registration_race() {
     let registry = BackgroundTaskRegistry::new();
-    let ticket = registry.register_with_kind(make_task("bg-1")).unwrap();
+    let ticket = registry
+        .register_with_kind(make_task("bg-1"))
+        .expect("the register with kind fixture result is required for this assertion");
     let mut activity = registry.subscribe_activity();
     assert_eq!(*activity.borrow(), 1);
 
     // A terminal transition may happen before the waiter reaches changed().
     // watch retains the new version, so this cannot become a lost wakeup.
     assert!(registry.complete(&ticket, result("bg-1")));
-    activity.changed().await.unwrap();
+    activity
+        .changed()
+        .await
+        .expect("activity changed producer must deliver the expected test event before closing");
     assert_eq!(*activity.borrow(), 2);
     assert_eq!(registry.active_count(), 0);
 }
@@ -73,11 +93,18 @@ async fn test_registry_activity_signal_is_observable_after_wait_registration_rac
 async fn test_registry_activity_signal_wakes_when_cancel_removes_task() {
     let registry = BackgroundTaskRegistry::new();
     let mut activity = registry.subscribe_activity();
-    registry.register_with_kind(make_task("bg-1")).unwrap();
+    registry
+        .register_with_kind(make_task("bg-1"))
+        .expect("the register with kind fixture result is required for this assertion");
     activity.borrow_and_update();
 
-    registry.cancel("bg-1").unwrap();
-    activity.changed().await.unwrap();
+    registry
+        .cancel("bg-1")
+        .expect("the cancel fixture result is required for this assertion");
+    activity
+        .changed()
+        .await
+        .expect("activity changed producer must deliver the expected test event before closing");
     assert_eq!(*activity.borrow(), 2);
     assert_eq!(registry.active_count(), 0);
 }
@@ -90,9 +117,13 @@ async fn test_registry_completion_claim_wins_cancel_and_duplicate_claim() {
     // Agent 类不限额：用仍有独立上限的 Workflow 类验证「Completing 仍占用 kind 槽位」
     let mut claimed = make_task("bg-claim");
     claimed.kind = BgTaskKind::Workflow;
-    let ticket = registry.register_with_kind(claimed).unwrap();
+    let ticket = registry
+        .register_with_kind(claimed)
+        .expect("the register with kind fixture result is required for this assertion");
     assert!(matches!(
-        events.try_recv().unwrap(),
+        events
+            .try_recv()
+            .expect("events try recv producer must deliver the expected test event before closing"),
         BgRegistryEvent::Started { .. }
     ));
 
@@ -116,7 +147,9 @@ async fn test_registry_completion_claim_wins_cancel_and_duplicate_claim() {
     for index in 1..BackgroundTaskRegistry::WORKFLOW_LIMIT {
         let mut task = make_task(&format!("bg-wf-{index}"));
         task.kind = BgTaskKind::Workflow;
-        registry.register_with_kind(task).unwrap();
+        registry
+            .register_with_kind(task)
+            .expect("the register with kind fixture result is required for this assertion");
     }
     let mut over = make_task("bg-wf-over");
     over.kind = BgTaskKind::Workflow;
@@ -133,10 +166,14 @@ async fn test_registry_cancel_wins_completion_claim_and_suppresses_late_complete
     let registry = BackgroundTaskRegistry::new();
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     registry.set_event_sender(tx, "cancel-test".to_string());
-    let ticket = registry.register_with_kind(make_task("bg-cancel")).unwrap();
+    let ticket = registry
+        .register_with_kind(make_task("bg-cancel"))
+        .expect("the register with kind fixture result is required for this assertion");
     let _ = events.try_recv();
 
-    registry.cancel("bg-cancel").unwrap();
+    registry
+        .cancel("bg-cancel")
+        .expect("the cancel fixture result is required for this assertion");
     assert!(!registry.claim_completion(&ticket));
     assert!(!registry.complete(&ticket, result("bg-cancel")));
     assert_eq!(registry.active_count(), 0);
@@ -154,15 +191,23 @@ async fn test_registry_cancel_wins_completion_claim_and_suppresses_late_complete
 async fn snapshot_and_events_join_without_missing_a_fast_completion() {
     let registry = BackgroundTaskRegistry::new();
     let mut changes = registry.subscribe_events();
-    let ticket = registry.register_with_kind(make_task("fast")).unwrap();
+    let ticket = registry
+        .register_with_kind(make_task("fast"))
+        .expect("the register with kind fixture result is required for this assertion");
     assert!(registry.complete(&ticket, result("fast")));
     let snapshot = registry.snapshot();
     assert_eq!(snapshot.revision, 2);
     assert_eq!(snapshot.tasks.len(), 1);
     assert_eq!(snapshot.tasks[0].status, "completed");
     assert_eq!(registry.active_count(), 0);
-    let started = changes.recv().await.unwrap();
-    let completed = changes.recv().await.unwrap();
+    let started = changes
+        .recv()
+        .await
+        .expect("changes recv producer must deliver the expected test event before closing");
+    let completed = changes
+        .recv()
+        .await
+        .expect("changes recv producer must deliver the expected test event before closing");
     assert!(
         matches!(completed.event, BgRegistryEvent::Completed { .. }),
         "第二次事件应是终态 Completed"
@@ -175,8 +220,13 @@ async fn snapshot_and_events_join_without_missing_a_fast_completion() {
     );
     assert!(started.revision < snapshot.revision);
 
-    registry.register_with_kind(make_task("later")).unwrap();
-    let change = changes.recv().await.unwrap();
+    registry
+        .register_with_kind(make_task("later"))
+        .expect("the register with kind fixture result is required for this assertion");
+    let change = changes
+        .recv()
+        .await
+        .expect("changes recv producer must deliver the expected test event before closing");
     assert!(change.revision > snapshot.revision);
     assert!(matches!(change.event, BgRegistryEvent::Started { .. }));
 }

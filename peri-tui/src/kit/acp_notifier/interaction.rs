@@ -1,7 +1,7 @@
 //! Reverse-request wire parsing and atomic owner/payload envelopes.
 
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch, PendingInteraction};
-use peri_acp_types::event_data::{AskUser, HitlPending, Question, QuestionOption};
+
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -211,3 +211,11 @@ fn extract_options_from_oneof(prop: &Value, key: &str, nested: bool) -> Vec<Ques
         })
         .collect()
 }
+
+use peri_acp_types::event_data::AskUser;
+
+use peri_acp_types::event_data::HitlPending;
+
+use peri_acp_types::event_data::Question;
+
+use peri_acp_types::event_data::QuestionOption;

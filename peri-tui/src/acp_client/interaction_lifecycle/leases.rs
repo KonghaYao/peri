@@ -8,11 +8,18 @@ use super::{ClaimCause, ClaimedInteraction, InteractionLifecycle, PromptMarker};
 
 impl InteractionLifecycle {
     pub fn install_drop_settlement_sender(&self, tx: mpsc::UnboundedSender<ClaimedInteraction>) {
-        *self.drop_settlement_tx.lock().unwrap() = Some(tx);
+        *self
+            .drop_settlement_tx
+            .lock()
+            .expect("drop_settlement_tx mutex must not be poisoned") = Some(tx);
     }
 
     fn enqueue_drop_claims(&self, claims: Vec<ClaimedInteraction>) {
-        let tx = self.drop_settlement_tx.lock().unwrap().clone();
+        let tx = self
+            .drop_settlement_tx
+            .lock()
+            .expect("drop_settlement_tx mutex must not be poisoned")
+            .clone();
         if let Some(tx) = tx {
             for claim in claims {
                 let _ = tx.send(claim);
@@ -23,6 +30,7 @@ impl InteractionLifecycle {
     /// Arm an already-owned batch before the first transport await. If the
     /// caller future is dropped, both the in-flight claim and every unstarted
     /// claim are handed to the cancellation-safe settlement worker.
+    #[must_use]
     pub fn arm_claimed_batch(&self, claims: Vec<ClaimedInteraction>) -> ClaimedBatchLease {
         ClaimedBatchLease {
             lifecycle: self.clone(),
@@ -109,6 +117,7 @@ impl Drop for TransitionLease {
 }
 
 impl PromptLease {
+    #[must_use]
     pub fn marker(&self) -> &PromptMarker {
         &self.marker
     }

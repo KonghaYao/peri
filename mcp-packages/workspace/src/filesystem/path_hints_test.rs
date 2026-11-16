@@ -1,5 +1,5 @@
-use super::*;
 use std::fs;
+use std::path::Path;
 
 /// [候选] 拼错文件名（maiin.rs）走编辑距离回退命中 main.rs。
 #[test]
@@ -8,7 +8,7 @@ fn test_typo_candidate_via_edit_distance() {
     let base = dir.path();
     fs::write(base.join("main.rs"), "").unwrap();
     fs::write(base.join("lib.rs"), "").unwrap();
-    let hint = with_path_hint(
+    let hint = crate::filesystem::path_hints::with_path_hint(
         "File not found.",
         base.to_str().unwrap(),
         &base.join("maiin.rs"),
@@ -24,7 +24,7 @@ fn test_relative_path_resolves_against_cwd() {
     let base = dir.path();
     fs::create_dir_all(base.join("src")).unwrap();
     fs::write(base.join("src").join("lib.rs"), "").unwrap();
-    let hint = with_path_hint(
+    let hint = crate::filesystem::path_hints::with_path_hint(
         "File not found.",
         base.to_str().unwrap(),
         Path::new("src/lb.rs"),
@@ -39,7 +39,7 @@ fn test_fallback_scans_cwd_subdirs() {
     let base = dir.path();
     fs::create_dir_all(base.join("module")).unwrap();
     fs::write(base.join("module").join("helper.rs"), "").unwrap();
-    let hint = with_path_hint(
+    let hint = crate::filesystem::path_hints::with_path_hint(
         "File not found.",
         base.to_str().unwrap(),
         &base.join("module").join("help.rs"),
@@ -53,7 +53,7 @@ fn test_fallback_scans_cwd_subdirs() {
 fn test_no_candidates_keeps_base_text() {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path();
-    let hint = with_path_hint(
+    let hint = crate::filesystem::path_hints::with_path_hint(
         "File not found.",
         base.to_str().unwrap(),
         &base.join("totally_different.xyz"),
@@ -71,7 +71,7 @@ fn test_perf_under_50ms_in_large_dir() {
         fs::write(base.join(format!("file_{i:03}.rs")), "").unwrap();
     }
     let start = Instant::now();
-    let hint = with_path_hint(
+    let hint = crate::filesystem::path_hints::with_path_hint(
         "File not found.",
         base.to_str().unwrap(),
         &base.join("fle_100.rs"),

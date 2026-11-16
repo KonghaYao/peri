@@ -1,4 +1,10 @@
-use super::*;
+use super::BatchLimits;
+use super::BatchWindow;
+use super::EventMeasure;
+use super::LangfuseError;
+use super::OversizeReason;
+use super::PreparedEvent;
+use super::SplitPlan;
 
 /// 测试限额：单条原文 512、单批原文 4096、单批编码 2500、条数 10。
 fn limits() -> BatchLimits {
@@ -44,7 +50,7 @@ fn covered_indices(plan: &SplitPlan) -> Vec<usize> {
 
 #[test]
 fn empty_input_plans_nothing() {
-    let plan = split(&[], &limits()).unwrap();
+    let plan = super::split(&[], &limits()).unwrap();
     assert!(plan.batches.is_empty());
     assert!(plan.rejected.is_empty());
     assert_eq!(plan.deferred, None);
@@ -55,7 +61,7 @@ fn empty_input_plans_nothing() {
 #[test]
 fn single_event_exactly_at_the_limits_stays_a_batch_of_one() {
     // 原文恰好等于 max_event_bytes、编码恰好等于 max_encoded_bytes：上限含等号。
-    let plan = split(&[measured(512, 2500)], &limits()).unwrap();
+    let plan = super::split(&[measured(512, 2500)], &limits()).unwrap();
     assert_eq!(plan.batches.len(), 1);
     assert_eq!(plan.batches[0].range, 0..1);
     assert_eq!(plan.batches[0].raw_bytes, 512);
@@ -64,7 +70,7 @@ fn single_event_exactly_at_the_limits_stays_a_batch_of_one() {
     assert_eq!(plan.accounted_len(), 1);
 
     // 再加一条即拆批：前一批保持在上限内，不越限吸收。
-    let plan = split(&[measured(512, 2500), measured(1, 1)], &limits()).unwrap();
+    let plan = super::split(&[measured(512, 2500), measured(1, 1)], &limits()).unwrap();
     assert_eq!(plan.batches.len(), 2);
     assert_eq!(plan.batches[0].range, 0..1);
     assert_eq!(plan.batches[1].range, 1..2);
@@ -80,7 +86,7 @@ fn encoded_expansion_splits_without_losing_events() {
     // 每条独立编码 1212 字节（信封 12 + 元素 1200），原文只有 600：
     // 按原文 6 条合计 3600 ≤ 4096 本可成一批，编码合计 7272 > 2500 必须拆批。
     let prepared = vec![measured(600, 1212); 6];
-    let plan = split(&prepared, &limits).unwrap();
+    let plan = super::split(&prepared, &limits).unwrap();
 
     assert_eq!(plan.batches.len(), 3);
     assert_eq!(covered_indices(&plan), (0..6).collect::<Vec<_>>());
@@ -115,7 +121,7 @@ fn oversized_encoded_span_is_rejected_while_the_rest_continues() {
         },
         measured(100, 1000),
     ];
-    let plan = split(&prepared, &limits()).unwrap();
+    let plan = super::split(&prepared, &limits()).unwrap();
 
     assert_eq!(plan.batches.len(), 2);
     assert_eq!(plan.batches[0].range, 0..1);
@@ -147,7 +153,7 @@ fn oversized_raw_span_maps_to_the_frozen_error() {
         },
         measured(10, 10),
     ];
-    let plan = split(&prepared, &limits()).unwrap();
+    let plan = super::split(&prepared, &limits()).unwrap();
     assert_eq!(plan.batches[0].range, 1..2);
     assert!(matches!(
         plan.rejected[0].error(),
@@ -160,7 +166,7 @@ fn oversized_raw_span_maps_to_the_frozen_error() {
 fn event_count_limit_splits_batches() {
     let mut limits = limits();
     limits.max_events = 2;
-    let plan = split(&[measured(1, 1); 5], &limits).unwrap();
+    let plan = super::split(&[measured(1, 1); 5], &limits).unwrap();
     let ranges: Vec<_> = plan.batches.iter().map(|b| b.range.clone()).collect();
     assert_eq!(ranges, vec![0..2, 2..4, 4..5]);
     assert_eq!(plan.accounted_len(), 5);
@@ -171,7 +177,7 @@ fn raw_batch_limit_splits_before_the_encoded_limit() {
     let mut limits = limits();
     limits.max_batch_bytes = 1000;
     limits.max_encoded_bytes = 100_000;
-    let plan = split(
+    let plan = super::split(
         &[measured(400, 10), measured(400, 10), measured(400, 10)],
         &limits,
     )
@@ -188,7 +194,7 @@ fn waiting_event_defers_the_remaining_input() {
         PreparedEvent::Waiting,
         measured(100, 100),
     ];
-    let plan = split(&prepared, &limits()).unwrap();
+    let plan = super::split(&prepared, &limits()).unwrap();
     assert_eq!(plan.deferred, Some(1));
     assert_eq!(plan.planned_len(3), 1);
     assert_eq!(plan.accounted_len(), 1);
@@ -201,7 +207,7 @@ fn waiting_event_defers_the_remaining_input() {
 fn measured_item_over_the_encoded_limit_is_rejected_not_batched() {
     // 第二条用满足信封模型的计量（encoded ≥ ENVELOPE），使精确正文断言有实际内容。
     let prepared = vec![measured(100, 2501), measured(100, 1200)];
-    let plan = split(&prepared, &limits()).unwrap();
+    let plan = super::split(&prepared, &limits()).unwrap();
     assert_eq!(plan.rejected.len(), 1);
     assert_eq!(plan.rejected[0].index, 0);
     assert_eq!(
@@ -222,7 +228,7 @@ fn inconsistent_limits_are_config_errors() {
         ..limits()
     };
     assert!(matches!(
-        split(&[], &no_events),
+        super::split(&[], &no_events),
         Err(LangfuseError::Config(_))
     ));
 
@@ -231,7 +237,7 @@ fn inconsistent_limits_are_config_errors() {
         ..limits()
     };
     assert!(matches!(
-        split(&[], &no_encoded),
+        super::split(&[], &no_encoded),
         Err(LangfuseError::Config(_))
     ));
 
@@ -240,7 +246,7 @@ fn inconsistent_limits_are_config_errors() {
         ..limits()
     };
     assert!(matches!(
-        split(&[], &narrow_batch),
+        super::split(&[], &narrow_batch),
         Err(LangfuseError::Config(_))
     ));
 }

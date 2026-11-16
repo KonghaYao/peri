@@ -2,15 +2,18 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use peri_acp_types::{
-    command::{CommandContext, DependencyBag, FeedbackLevel},
-    event::{EventSink, ExecutorEvent},
-    messages::BaseMessage,
-    session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources},
-    store::PersistedPayload,
-    workspace::SessionBinding,
-};
-use peri_agent::session::exec::compact_pipeline::execute_compact;
+use peri_acp_types::command::CommandContext;
+use peri_acp_types::command::DependencyBag;
+use peri_acp_types::command::FeedbackLevel;
+use peri_acp_types::event::EventSink;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::session_resources::FrozenSnapshotBytes;
+use peri_acp_types::session_resources::NewSession;
+use peri_acp_types::session_resources::NewSessionMeta;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::workspace::SessionBinding;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
@@ -125,7 +128,7 @@ impl peri_model::Model for SummaryModel {
         _: peri_model::ModelRequest,
         _: CancellationToken,
     ) -> peri_model::ModelResult<peri_model::ModelResponse> {
-        peri_model::ModelResponse::new(
+        peri_model::ModelResponse::try_new(
             peri_model::ModelMessage::assistant_text("<summary>AUDIT_SUMMARY</summary>"),
             peri_model::StopReason::EndTurn,
             None,
@@ -189,7 +192,8 @@ async fn test_compact_again_using_host_canonical_history() {
         ctx.thread_id = Some(thread_id.clone());
         ctx
     };
-    let first = execute_compact(context(initial)).await;
+    let first =
+        peri_agent::session::exec::compact_pipeline::execute_compact(context(initial)).await;
     assert_eq!(first.feedback.as_ref().unwrap().level, FeedbackLevel::Info);
     let snapshot = resources.load_session_snapshot(&thread_id).await.unwrap();
     assert_eq!(snapshot.payloads.len(), 3);
@@ -208,7 +212,8 @@ async fn test_compact_again_using_host_canonical_history() {
         .iter()
         .filter_map(|payload| payload.as_message().cloned())
         .collect();
-    let second = execute_compact(context(next_history)).await;
+    let second =
+        peri_agent::session::exec::compact_pipeline::execute_compact(context(next_history)).await;
     let after = resources.load_session_snapshot(&thread_id).await.unwrap();
     let completions = sink
         .0

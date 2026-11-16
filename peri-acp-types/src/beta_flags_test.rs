@@ -1,6 +1,10 @@
 //! `beta_flags` 模块测试：注册表约束与投影语义。
 
-use super::*;
+use crate::beta_flags::BetaFlagOrigin;
+use crate::beta_flags::BetaFlagValue;
+use crate::beta_flags::BetaFlags;
+use crate::beta_flags::BETA_FLAGS;
+use crate::beta_flags::FULL_ASYNC_TOOLS;
 
 /// id 必须唯一且为 kebab-case（发布后不得改名，settings 键身份）。
 #[test]
@@ -45,11 +49,11 @@ fn test_registry_declares_full_async_tools_first() {
 /// 查找命中/未命中。
 #[test]
 fn test_find_hit_and_miss() {
-    let found = find(FULL_ASYNC_TOOLS).expect("注册表条目必须可查");
+    let found = crate::beta_flags::find(FULL_ASYNC_TOOLS).expect("注册表条目必须可查");
     assert_eq!(found.id, FULL_ASYNC_TOOLS);
     assert_eq!(found.description, BETA_FLAGS[0].description);
-    assert!(find("not-a-flag").is_none());
-    assert!(find("").is_none());
+    assert!(crate::beta_flags::find("not-a-flag").is_none());
+    assert!(crate::beta_flags::find("").is_none());
 }
 
 /// 未覆盖与未知 id 一律 false（快照缺失/配置面不可用不得意外开启能力）。

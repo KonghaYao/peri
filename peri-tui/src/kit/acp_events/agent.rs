@@ -1,6 +1,7 @@
 //! Agent event handlers — AgentExecutionFailed, BackgroundTaskCompleted.
 
-use super::*;
+use super::{BridgeState, SessionPhase};
+
 use crate::i18n;
 use crate::kit::atoms;
 use crate::kit::tui_render_unit::TuiNoteLevel;

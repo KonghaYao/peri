@@ -1,23 +1,25 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex},
-};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use serde_json::Value;
 
-use crate::{
-    runtime::stream::{SseDecoderFactory, SseDecoders},
-    transport::SseEvent,
-    ModelError, ModelMessage, ModelResponse, ModelResult, ModelStreamEvent, ProtocolErrorKind,
-    StopReason,
-};
+use crate::runtime::stream::SseDecoderFactory;
+use crate::runtime::stream::SseDecoders;
+use crate::transport::SseEvent;
+use crate::ModelError;
+use crate::ModelMessage;
+use crate::ModelResponse;
+use crate::ModelResult;
+use crate::ModelStreamEvent;
+use crate::ProtocolErrorKind;
+use crate::StopReason;
 
-use super::{
-    replay::ReplayBinding,
-    request::invalid,
-    response::{self, required_array, required_string, required_string_allow_empty},
-    stream_item::StreamItem,
-};
+use super::replay::ReplayBinding;
+use super::request;
+use super::response;
+use super::stream_item::StreamItem;
 
 pub(super) fn decoders(binding: ReplayBinding, tools: BTreeSet<String>) -> SseDecoderFactory {
     Arc::new(move || {
@@ -32,13 +34,13 @@ pub(super) fn decoders(binding: ReplayBinding, tools: BTreeSet<String>) -> SseDe
         let decode = Arc::new(move |event: SseEvent, request_id: Option<String>| {
             decode_state
                 .lock()
-                .map_err(|_| invalid("Responses stream state lock poisoned"))?
+                .map_err(|_| request::invalid("Responses stream state lock poisoned"))?
                 .decode(event, request_id)
         });
         let complete = Arc::new(move || {
             let state = state
                 .lock()
-                .map_err(|_| invalid("Responses stream state lock poisoned"))?;
+                .map_err(|_| request::invalid("Responses stream state lock poisoned"))?;
             if state.completed {
                 Ok(Vec::new())
             } else {
@@ -68,20 +70,24 @@ impl ResponsesStream {
         request_id: Option<String>,
     ) -> ModelResult<Vec<ModelStreamEvent>> {
         let value: Value = serde_json::from_str(&event.data).map_err(|error| {
-            invalid("Malformed Responses SSE JSON")
+            request::invalid("Malformed Responses SSE JSON")
                 .with_error(&error)
                 .with_body(&event.data)
         })?;
-        let kind = required_string(&value, "type")?;
+        let kind = response::required_string(&value, "type")?;
         if event
             .event
             .as_deref()
             .is_some_and(|name| !name.is_empty() && name != kind && name != "message")
         {
-            return Err(invalid("Responses SSE event and JSON type disagree"));
+            return Err(request::invalid(
+                "Responses SSE event and JSON type disagree",
+            ));
         }
         if self.completed {
-            return Err(invalid("Responses event arrived after response.completed"));
+            return Err(request::invalid(
+                "Responses event arrived after response.completed",
+            ));
         }
         match kind {
             "response.created" | "response.in_progress" => {
@@ -100,7 +106,7 @@ impl ResponsesStream {
             "response.output_item.done" => {
                 let item_id = value["item"]
                     .get("id")
-                    .map(|_| required_string(&value["item"], "id"))
+                    .map(|_| response::required_string(&value["item"], "id"))
                     .transpose()?;
                 let index = match value.get("output_index") {
                     Some(_) => index(&value, "output_index")?,
@@ -145,7 +151,7 @@ impl ResponsesStream {
                 self.item(&value)?.part_delta(
                     part_index,
                     part_kind,
-                    required_string_allow_empty(&value, "delta")?,
+                    response::required_string_allow_empty(&value, "delta")?,
                 )
             }
             "response.output_text.done"
@@ -172,15 +178,15 @@ impl ResponsesStream {
                 self.item(&value)?.part_done(
                     part_index,
                     part_kind,
-                    required_string_allow_empty(&value, field)?,
+                    response::required_string_allow_empty(&value, field)?,
                 )
             }
             "response.function_call_arguments.delta" => self
                 .item(&value)?
-                .arguments_delta(required_string_allow_empty(&value, "delta")?),
+                .arguments_delta(response::required_string_allow_empty(&value, "delta")?),
             "response.function_call_arguments.done" => self
                 .item(&value)?
-                .arguments_done(required_string_allow_empty(&value, "arguments")?),
+                .arguments_done(response::required_string_allow_empty(&value, "arguments")?),
             "response.content_part.added"
             | "response.content_part.done"
             | "response.reasoning_summary_part.added"
@@ -196,10 +202,10 @@ impl ResponsesStream {
             {
                 self.truncate(&value["response"], request_id)
             }
-            "response.failed" | "response.incomplete" | "error" => {
-                Err(invalid(&format!("OpenAI Responses terminal event: {kind}"))
-                    .with_body(event.data))
-            }
+            "response.failed" | "response.incomplete" | "error" => Err(request::invalid(&format!(
+                "OpenAI Responses terminal event: {kind}"
+            ))
+            .with_body(event.data)),
             // Output annotations do not change the normalized text. Their full
             // content remains in the completed native item for exact replay.
             "response.output_text.annotation.added" => {
@@ -215,7 +221,7 @@ impl ResponsesStream {
                 || kind.starts_with("response.reasoning_")
                 || kind.starts_with("response.custom_tool_") =>
             {
-                Err(invalid(&format!(
+                Err(request::invalid(&format!(
                     "Unsupported Responses SSE output event: {kind}"
                 )))
             }
@@ -224,13 +230,13 @@ impl ResponsesStream {
     }
 
     fn set_response_id(&mut self, response: &Value) -> ModelResult<()> {
-        let id = required_string(response, "id")?;
+        let id = response::required_string(response, "id")?;
         if self
             .response_id
             .as_deref()
             .is_some_and(|previous| previous != id)
         {
-            return Err(invalid("Responses stream changed response ID"));
+            return Err(request::invalid("Responses stream changed response ID"));
         }
         self.response_id = Some(id.to_owned());
         Ok(())
@@ -238,21 +244,23 @@ impl ResponsesStream {
 
     fn add_item(&mut self, index: usize, value: &Value) -> ModelResult<Vec<ModelStreamEvent>> {
         if index >= 100_000 {
-            return Err(invalid(
+            return Err(request::invalid(
                 "Responses output_index exceeds the supported bound",
             ));
         }
         if self.items.contains_key(&index) {
-            return Err(invalid("Responses output_index was added twice"));
+            return Err(request::invalid("Responses output_index was added twice"));
         }
         let id = value
             .get("id")
-            .map(|_| required_string(value, "id"))
+            .map(|_| response::required_string(value, "id"))
             .transpose()?;
         if id.is_some() && self.items.values().any(|item| item.id() == id) {
-            return Err(invalid("Responses item ID belongs to two output indices"));
+            return Err(request::invalid(
+                "Responses item ID belongs to two output indices",
+            ));
         }
-        let (item, events) = StreamItem::new(index, value, self.binding.profile, &self.tools)?;
+        let (item, events) = StreamItem::try_new(index, value, self.binding.profile, &self.tools)?;
         self.items.insert(index, item);
         Ok(events)
     }
@@ -262,7 +270,7 @@ impl ResponsesStream {
         let item = self
             .items
             .get_mut(&index)
-            .ok_or_else(|| invalid("Responses delta has no matching output item"))?;
+            .ok_or_else(|| request::invalid("Responses delta has no matching output item"))?;
         item.check_id(event)?;
         Ok(item)
     }
@@ -276,7 +284,7 @@ impl ResponsesStream {
             .get("status")
             .is_some_and(|status| status.as_str() != Some("incomplete"))
         {
-            return Err(invalid(
+            return Err(request::invalid(
                 "response.incomplete carried a non-incomplete status",
             ));
         }
@@ -288,7 +296,7 @@ impl ResponsesStream {
             .transpose()?;
         let output = response
             .get("output")
-            .map(|_| required_array(response, "output"))
+            .map(|_| response::required_array(response, "output"))
             .transpose()?;
         let compacted = output.is_none()
             || self
@@ -297,39 +305,49 @@ impl ResponsesStream {
                 .any(|index| *index >= output.map_or(0, Vec::len));
         let mut supplied = BTreeSet::new();
         let mut events = Vec::new();
-        for (position, value) in output.into_iter().flatten().enumerate() {
-            let index = if compacted {
-                let id = required_string(value, "id")?;
-                self.items
-                    .iter()
-                    .find(|(_, item)| item.id() == Some(id))
-                    .map(|(&index, _)| index)
-                    .ok_or_else(|| {
-                        invalid("response.incomplete mixed omitted and untracked output items")
-                    })?
-            } else {
-                position
-            };
-            if !supplied.insert(index) {
-                return Err(invalid("response.incomplete repeated an output item"));
+        {
+            let indexed_output = output.into_iter().flatten().enumerate();
+            for (position, value) in indexed_output {
+                let index = if compacted {
+                    let id = response::required_string(value, "id")?;
+                    self.items
+                        .iter()
+                        .find(|(_, item)| item.id() == Some(id))
+                        .map(|(&index, _)| index)
+                        .ok_or_else(|| {
+                            request::invalid(
+                                "response.incomplete mixed omitted and untracked output items",
+                            )
+                        })?
+                } else {
+                    position
+                };
+                if !supplied.insert(index) {
+                    return Err(request::invalid(
+                        "response.incomplete repeated an output item",
+                    ));
+                }
+                if !self.items.contains_key(&index) {
+                    events.extend(self.add_item(index, value)?);
+                }
+                events.extend(
+                    self.items
+                        .get_mut(&index)
+                        .expect("item inserted")
+                        .truncate(value)?,
+                );
             }
-            if !self.items.contains_key(&index) {
-                events.extend(self.add_item(index, value)?);
-            }
-            events.extend(
-                self.items
-                    .get_mut(&index)
-                    .expect("item inserted")
-                    .truncate(value)?,
-            );
         }
         // 丢弃半截工具不能掩盖重复调用身份，否则提前工具事件会配到另一调用。
         let mut call_ids = BTreeSet::new();
-        for call_id in self.items.values().filter_map(StreamItem::call_id) {
-            if !call_ids.insert(call_id) {
-                return Err(invalid(
-                    "Responses output contains duplicate call_id values",
-                ));
+        {
+            let matching_items = self.items.values().filter_map(StreamItem::call_id);
+            for call_id in matching_items {
+                if !call_ids.insert(call_id) {
+                    return Err(request::invalid(
+                        "Responses output contains duplicate call_id values",
+                    ));
+                }
             }
         }
         let items = self
@@ -350,7 +368,7 @@ impl ResponsesStream {
         } else {
             StopReason::ToolUse
         };
-        let result = ModelResponse::new(
+        let result = ModelResponse::try_new(
             ModelMessage::assistant(content, calls),
             reason,
             usage,
@@ -372,7 +390,7 @@ impl ResponsesStream {
         self.set_response_id(response)?;
         let output = response
             .get("output")
-            .map(|_| required_array(response, "output"))
+            .map(|_| response::required_array(response, "output"))
             .transpose()?;
         let missing_output = output.is_none();
         let empty = Vec::new();
@@ -383,15 +401,17 @@ impl ResponsesStream {
             let mut items = Vec::with_capacity(self.items.len());
             let mut supplied = BTreeSet::new();
             for value in output {
-                let id = required_string(value, "id")?;
+                let id = response::required_string(value, "id")?;
                 let Some((&index, _)) = self.items.iter().find(|(_, item)| item.id() == Some(id))
                 else {
-                    return Err(invalid(
+                    return Err(request::invalid(
                         "response.completed mixed omitted and untracked output items",
                     ));
                 };
                 if !supplied.insert(index) {
-                    return Err(invalid("response.completed repeated an output item"));
+                    return Err(request::invalid(
+                        "response.completed repeated an output item",
+                    ));
                 }
             }
             for (&index, item) in &self.items {
@@ -402,7 +422,7 @@ impl ResponsesStream {
                         .expect("matched item")
                 } else {
                     item.finished_snapshot().ok_or_else(|| {
-                        invalid("response.completed omitted an unfinished output item")
+                        request::invalid("response.completed omitted an unfinished output item")
                     })?
                 };
                 items.push(value.clone());
@@ -410,7 +430,7 @@ impl ResponsesStream {
             let mut snapshot = response.clone();
             snapshot
                 .as_object_mut()
-                .ok_or_else(|| invalid("response.completed response must be an object"))?
+                .ok_or_else(|| request::invalid("response.completed response must be an object"))?
                 .insert("output".to_owned(), Value::Array(items));
             recovered = Some(snapshot);
         }
@@ -421,23 +441,26 @@ impl ResponsesStream {
             &self.tools,
             request_id.or_else(|| self.response_id.clone()),
         )?;
-        let output = required_array(response, "output")?;
+        let output = response::required_array(response, "output")?;
         let mut events = Vec::new();
         let indices: Vec<usize> = if compacted {
             self.items.keys().copied().collect()
         } else {
             (0..output.len()).collect()
         };
-        for (index, value) in indices.into_iter().zip(output) {
-            if !self.items.contains_key(&index) {
-                events.extend(self.add_item(index, value)?);
+        {
+            let paired_indices = indices.into_iter().zip(output);
+            for (index, value) in paired_indices {
+                if !self.items.contains_key(&index) {
+                    events.extend(self.add_item(index, value)?);
+                }
+                events.extend(
+                    self.items
+                        .get_mut(&index)
+                        .expect("item inserted")
+                        .finish(value)?,
+                );
             }
-            events.extend(
-                self.items
-                    .get_mut(&index)
-                    .expect("item inserted")
-                    .finish(value)?,
-            );
         }
         if let Some(usage) = result.usage() {
             events.push(ModelStreamEvent::Usage(usage.clone()));
@@ -455,7 +478,7 @@ fn index(value: &Value, field: &str) -> ModelResult<usize> {
         .and_then(|value| usize::try_from(value).ok())
         .filter(|index| *index < 100_000)
         .ok_or_else(|| {
-            invalid(&format!(
+            request::invalid(&format!(
                 "Responses field {field} must be a bounded nonnegative index"
             ))
         })

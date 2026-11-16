@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::CloseGate;
+use crate::runtime::close_gate::CloseGate;
 
 #[test]
 fn admits_are_shared_until_closed() {

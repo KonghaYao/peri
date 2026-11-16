@@ -10,10 +10,14 @@
 //! 日志与"4 passed"的文字声明对不上。
 
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use super::*;
+use super::{
+    HookAction, HookEvent, HookInput, HookMiddleware, HookType, PermissionDecision, ReactLLM,
+    RegisteredHook,
+};
 use crate::permission::{PermissionMode, SharedPermissionMode};
 
 /// 只捕获 WARN 事件（同 `mcp/initialize_test.rs` 既有形态）。
@@ -33,7 +37,7 @@ impl tracing::Subscriber for WarnCaptureSubscriber {
     fn event(&self, event: &tracing::Event<'_>) {
         struct Fields(String);
         impl tracing::field::Visit for Fields {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn Debug) {
                 if !self.0.is_empty() {
                     self.0.push(' ');
                 }
@@ -206,7 +210,7 @@ async fn async_hook_without_output_completes_without_warn_noise() {
 /// 分类器：决策与未投递字段同时存在时都必须记录（不互相吞并），且无输出保持空摘要。
 #[test]
 fn async_output_summary_keeps_decision_and_undelivered_fields_together() {
-    use crate::hooks::dispatcher::async_hook_output_summary;
+    use crate::hooks::dispatcher;
 
     let combined = HookAction::PermissionOverride {
         decision: PermissionDecision::Deny,
@@ -215,7 +219,7 @@ fn async_output_summary_keeps_decision_and_undelivered_fields_together() {
         additional_context: Some("abcd".to_string()),
         system_message: Some("xy".to_string()),
     };
-    let summary = async_hook_output_summary(&combined);
+    let summary = dispatcher::async_hook_output_summary(&combined);
     assert_eq!(summary.decision, Some("permission_override"));
     assert_eq!(
         summary.undelivered,
@@ -224,19 +228,19 @@ fn async_output_summary_keeps_decision_and_undelivered_fields_together() {
     );
     assert_eq!(summary.undelivered_bytes, 6, "只记录长度，不记录正文");
 
-    let none = async_hook_output_summary(&HookAction::Allow);
+    let none = dispatcher::async_hook_output_summary(&HookAction::Allow);
     assert_eq!(
         none,
         crate::hooks::dispatcher::AsyncHookOutputSummary::default()
     );
 
-    let block = async_hook_output_summary(&HookAction::Block {
+    let block = dispatcher::async_hook_output_summary(&HookAction::Block {
         reason: "r".to_string(),
     });
     assert_eq!(block.decision, Some("block"));
     assert!(block.undelivered.is_empty());
 
-    let context = async_hook_output_summary(&HookAction::AdditionalContext {
+    let context = dispatcher::async_hook_output_summary(&HookAction::AdditionalContext {
         context: "ctx".to_string(),
     });
     assert_eq!(context.decision, None);

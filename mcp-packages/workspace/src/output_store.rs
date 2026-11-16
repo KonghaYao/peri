@@ -1,14 +1,23 @@
-use std::{collections::HashMap, io::Write, path::PathBuf};
+use std::collections::HashMap;
+use std::io::Write;
+use std::path::PathBuf;
 
 use parking_lot::Mutex;
 use peri_acp_types::workspace_output::{StoreOutputRequest, StoredOutput};
-use rmcp::{model::CustomResult, ErrorData as McpError};
+use rmcp::model::CustomResult;
+use rmcp::ErrorData as McpError;
 use uuid::Uuid;
 
 pub(crate) struct OutputStore {
     authority: Uuid,
     directory: PathBuf,
     artifacts: Mutex<HashMap<String, PathBuf>>,
+}
+
+impl Default for OutputStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OutputStore {

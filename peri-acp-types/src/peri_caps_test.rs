@@ -1,4 +1,4 @@
-use super::{default_ui_commands, PeriCaps};
+use super::PeriCaps;
 
 #[test]
 fn test_session_workspace_v1_requires_explicit_negotiation() {
@@ -165,7 +165,7 @@ fn test_all_enabled() {
     assert!(caps.plan_entry_active_form);
     assert!(caps.rewind);
     // ui_commands 填默认 11 条明细（数据迁移自 dispatch/commands.rs UI_COMMANDS）
-    assert_eq!(caps.ui_commands, default_ui_commands());
+    assert_eq!(caps.ui_commands, super::default_ui_commands());
     assert_eq!(caps.ui_commands.len(), 11);
     let names: Vec<&str> = caps.ui_commands.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
@@ -188,7 +188,7 @@ fn test_ui_commands_roundtrip() {
     // 旧客户端 bool true → 退化为默认 11 条明细（等价现状行为）
     let meta = serde_json::json!({ "peri.uiCommands": true });
     let caps = PeriCaps::from_client_meta(meta.as_object().unwrap());
-    assert_eq!(caps.ui_commands, default_ui_commands());
+    assert_eq!(caps.ui_commands, super::default_ui_commands());
     // bool false → 空
     let meta = serde_json::json!({ "peri.uiCommands": false });
     let caps = PeriCaps::from_client_meta(meta.as_object().unwrap());

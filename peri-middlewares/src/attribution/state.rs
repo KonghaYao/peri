@@ -5,9 +5,10 @@
 
 use std::collections::HashMap;
 
-use super::model_email::get_attribution_email;
+use super::model_email;
 
 /// 单个文件的贡献信息
+#[derive(Debug)]
 pub struct FileContribution {
     /// 累积贡献字符数
     pub claude_chars: usize,
@@ -16,6 +17,7 @@ pub struct FileContribution {
 }
 
 /// Git attribution 追踪状态
+#[derive(Debug)]
 pub struct AttributionState {
     /// 相对路径 → 贡献信息
     pub contributions: HashMap<String, FileContribution>,
@@ -26,8 +28,9 @@ pub struct AttributionState {
 }
 
 impl AttributionState {
+    #[must_use]
     pub fn new(model_name: String) -> Self {
-        let email = get_attribution_email(&model_name).to_string();
+        let email = model_email::attribution_email(&model_name).to_string();
         Self {
             contributions: HashMap::new(),
             model_name,
@@ -78,6 +81,7 @@ impl AttributionState {
     }
 
     /// 生成 Co-Authored-By trailer 文本
+    #[must_use]
     pub fn co_authored_by(&self) -> String {
         format!("Co-Authored-By: {} <{}>", self.model_name, self.email)
     }

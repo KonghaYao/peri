@@ -10,18 +10,19 @@
 //! - logout cancel only stops the remote revocation wait, the same ticket stays
 //!   current so the local-clear outcome is still delivered.
 
+use parking_lot::{Mutex, MutexGuard};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 
 use peri_acp::provider::auth::{AccountStatus, AuthError, AuthResult, LogoutOutcome};
 
 use crate::application::operations::{CompletionGate, OperationTicket, OutcomeUnknownReason};
-use crate::chatgpt_auth::{
-    AuthIdentityDraft, AuthTarget, ChatGptAuthBackend, ChatGptAuthSession, default_backend,
-};
-use crate::kit::atoms::AUTH_EVENT_REVISION;
+use crate::chatgpt_auth::AuthIdentityDraft;
+use crate::chatgpt_auth::AuthTarget;
+use crate::chatgpt_auth::ChatGptAuthBackend;
+use crate::chatgpt_auth::ChatGptAuthSession;
 
 /// Host-scoped request identity: config authority + frozen credentials target.
 ///
@@ -35,6 +36,7 @@ pub(crate) struct HostConfigAuthScope {
 }
 
 impl HostConfigAuthScope {
+    #[must_use]
     pub(crate) fn new(source: impl Into<String>, target: AuthTarget) -> Self {
         Self {
             source: source.into(),
@@ -70,6 +72,7 @@ pub(crate) enum AuthFailure {
 }
 
 impl AuthFailure {
+    #[must_use]
     pub(crate) fn i18n_key(self) -> &'static str {
         match self {
             Self::Storage => "login-auth-error-storage",
@@ -124,6 +127,7 @@ pub(crate) enum AuthViewState {
 impl AuthViewState {
     /// Credential-mutating operation in flight. Status checks do not block a
     /// configuration save.
+    #[must_use]
     pub(crate) fn blocks_config_save(&self) -> bool {
         matches!(
             self,
@@ -154,6 +158,7 @@ pub(crate) enum AuthAction {
 }
 
 impl AuthAction {
+    #[must_use]
     pub(crate) fn i18n_key(self) -> &'static str {
         match self {
             Self::Login => "login-auth-login",
@@ -174,6 +179,7 @@ pub(crate) enum DetailAction {
 }
 
 impl DetailAction {
+    #[must_use]
     pub(crate) fn i18n_key(self) -> &'static str {
         match self {
             Self::OpenBrowser => "login-auth-open-browser",
@@ -184,6 +190,7 @@ impl DetailAction {
 }
 
 impl DetailAction {
+    #[must_use]
     fn cycle(self, forward: bool) -> Self {
         match (self, forward) {
             (Self::OpenBrowser, true) => Self::CopyUrl,
@@ -234,6 +241,8 @@ pub(crate) enum AuthEvent {
     LoggedOut(AuthResult<LogoutOutcome>),
 }
 
+// Only Vec push/take/clear happens while locked; auth effects run after releasing the inbox.
+// A non-poisoning mutex preserves terminal-event delivery after an unrelated task unwind.
 type Inbox = Arc<Mutex<Vec<(OperationTicket<HostConfigAuthScope>, AuthEvent)>>>;
 
 /// Prepared async request; the panel dispatches it so tests can intercept.
@@ -260,10 +269,12 @@ pub(crate) struct AuthController {
 }
 
 impl AuthController {
+    #[must_use]
     pub(crate) fn new() -> Self {
-        Self::with_backend(default_backend())
+        Self::with_backend(crate::chatgpt_auth::default_backend())
     }
 
+    #[must_use]
     pub(crate) fn with_backend(backend: Arc<dyn ChatGptAuthBackend>) -> Self {
         Self {
             backend,
@@ -281,14 +292,17 @@ impl AuthController {
         }
     }
 
+    #[must_use]
     pub(crate) fn view(&self) -> &AuthViewState {
         &self.view
     }
 
+    #[must_use]
     pub(crate) fn scope(&self) -> &HostConfigAuthScope {
         &self.scope
     }
 
+    #[must_use]
     pub(crate) fn login_succeeded(&self) -> bool {
         self.login_succeeded
     }
@@ -297,6 +311,7 @@ impl AuthController {
         self.view.blocks_config_save()
     }
 
+    #[must_use]
     pub(crate) fn outcome_unknown(&self) -> bool {
         matches!(self.view, AuthViewState::OutcomeUnknown(_))
     }
@@ -333,6 +348,7 @@ impl AuthController {
     }
 
     /// No status result for the frozen target yet.
+    #[must_use]
     pub(crate) fn needs_status_query(&self) -> bool {
         matches!(self.view, AuthViewState::Unchecked)
     }
@@ -810,10 +826,8 @@ impl AuthController {
 
 fn lock_inbox(
     inbox: &Inbox,
-) -> std::sync::MutexGuard<'_, Vec<(OperationTicket<HostConfigAuthScope>, AuthEvent)>> {
-    inbox
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+) -> MutexGuard<'_, Vec<(OperationTicket<HostConfigAuthScope>, AuthEvent)>> {
+    inbox.lock()
 }
 
 impl Drop for AuthController {
@@ -850,3 +864,5 @@ pub(super) fn runtime_handle() -> Option<tokio::runtime::Handle> {
 #[cfg(test)]
 #[path = "controller_test.rs"]
 mod tests;
+
+use crate::kit::atoms::AUTH_EVENT_REVISION;

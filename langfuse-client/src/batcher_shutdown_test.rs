@@ -1,8 +1,13 @@
 //! 真实 HTTP 背压、flush 屏障与关闭 owner 的排空/join 生命周期回归。
 
-use std::{collections::HashMap, io::Read, time::Duration};
+use std::collections::HashMap;
+use std::io::Read;
+use std::time::Duration;
 
-use super::*;
+use super::{
+    oneshot, Arc, BackpressurePolicy, Batcher, BatcherConfig, IngestionEvent, LangfuseClient,
+    LangfuseError, ShutdownReport, WorkerOwner,
+};
 use crate::config::TelemetryConfig;
 use crate::types::TraceBody;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -71,47 +76,50 @@ async fn gated_ingestion_at(statuses: Vec<u16>, gate_index: usize) -> GatedInges
     let worker = tokio::spawn(async move {
         let mut first_gate = Some((started_tx, release_rx));
         let mut bodies = Vec::new();
-        for (index, status) in statuses.into_iter().enumerate() {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut headers = HashMap::new();
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            assert!(line.starts_with("POST /api/public/otel/v1/traces "));
-            loop {
-                line.clear();
-                assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
-                if line == "\r\n" {
-                    break;
+        {
+            let indexed_statuses = statuses.into_iter().enumerate();
+            for (index, status) in indexed_statuses {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut headers = HashMap::new();
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                assert!(line.starts_with("POST /api/public/otel/v1/traces "));
+                loop {
+                    line.clear();
+                    assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((key, value)) = line.split_once(':') {
+                        headers.insert(key.to_ascii_lowercase(), value.trim().to_string());
+                    }
                 }
-                if let Some((key, value)) = line.split_once(':') {
-                    headers.insert(key.to_ascii_lowercase(), value.trim().to_string());
+                let length = headers["content-length"].parse::<usize>().unwrap();
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).await.unwrap();
+                bodies.push(request_body(&body));
+                if index == gate_index {
+                    let (started, release) = first_gate.take().expect("one controlled HTTP gate");
+                    started.send(()).unwrap();
+                    release.await.unwrap();
                 }
-            }
-            let length = headers["content-length"].parse::<usize>().unwrap();
-            let mut body = vec![0; length];
-            reader.read_exact(&mut body).await.unwrap();
-            bodies.push(request_body(&body));
-            if index == gate_index {
-                let (started, release) = first_gate.take().expect("one controlled HTTP gate");
-                started.send(()).unwrap();
-                release.await.unwrap();
-            }
-            let body = if status == 200 {
-                "{}"
-            } else {
-                "private-response-marker"
-            };
-            let response = format!(
+                let body = if status == 200 {
+                    "{}"
+                } else {
+                    "private-response-marker"
+                };
+                let response = format!(
                 "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
-            reader
-                .get_mut()
-                .write_all(response.as_bytes())
-                .await
-                .unwrap();
-            reader.get_mut().shutdown().await.unwrap();
+                reader
+                    .get_mut()
+                    .write_all(response.as_bytes())
+                    .await
+                    .unwrap();
+                reader.get_mut().shutdown().await.unwrap();
+            }
         }
         bodies
     });

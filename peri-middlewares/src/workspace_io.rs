@@ -1,10 +1,16 @@
-use std::{path::Path, sync::Arc, time::Duration};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use rmcp::{
-    model::{CancelledNotificationParam, ClientRequest, CustomRequest, RequestId, ServerResult},
-    service::{Peer, PeerRequestOptions, RoleClient},
-};
+use rmcp::model::CancelledNotificationParam;
+use rmcp::model::ClientRequest;
+use rmcp::model::CustomRequest;
+use rmcp::model::RequestId;
+use rmcp::model::ServerResult;
+use rmcp::service::Peer;
+use rmcp::service::PeerRequestOptions;
+use rmcp::service::RoleClient;
 
 use crate::mcp::{ClientStatus, McpClientPool};
 
@@ -92,7 +98,7 @@ impl McpWorkspaceFileReader {
         Self {
             pool: pool.filter(|pool| {
                 let source = pool
-                    .get_client("workspace")
+                    .client("workspace")
                     .and_then(|handle| handle.source.clone());
                 !crate::mcp::builtin::is_closed_source("workspace", source.as_ref(), &closed)
             }),
@@ -110,7 +116,7 @@ impl McpWorkspaceFileReader {
             .filter(|pool| !workspace_closed(pool))
             .ok_or(WorkspaceReadError::Unavailable)?;
         let handle = pool
-            .get_client_visible_to("workspace", self.session_id.as_deref())
+            .client_visible_to("workspace", self.session_id.as_deref())
             .filter(|handle| matches!(handle.status, ClientStatus::Connected))
             .filter(|handle| crate::mcp::builtin::is_workspace_source(handle.source.as_ref()))
             .ok_or(WorkspaceReadError::Unavailable)?;
@@ -144,7 +150,7 @@ impl McpWorkspaceFileReader {
         if workspace_closed(pool)
             || pool.acp_owners.read().get("workspace").cloned() != owner
             || !pool
-                .get_client_visible_to("workspace", self.session_id.as_deref())
+                .client_visible_to("workspace", self.session_id.as_deref())
                 .is_some_and(|current| {
                     Arc::ptr_eq(&current, &handle)
                         && matches!(current.status, ClientStatus::Connected)
@@ -212,7 +218,7 @@ fn workspace_closed(pool: &McpClientPool) -> bool {
     !pool.is_open()
         || pool.builtin_instance_context().is_some_and(|context| {
             let source = pool
-                .get_client("workspace")
+                .client("workspace")
                 .and_then(|handle| handle.source.clone());
             crate::mcp::builtin::is_closed_source("workspace", source.as_ref(), &context.closed)
         })

@@ -1,4 +1,5 @@
-use super::*;
+use crate::langfuse::tracer::middleware::MiddlewareSpanHandle;
+use crate::langfuse::tracer::middleware::MiddlewareTracer;
 use peri_agent::agent::events::{MiddlewareHook, StageStatus};
 
 #[test]
@@ -45,6 +46,6 @@ fn test_on_end_with_error_keeps_only_error_state() {
     let h = m.on_start("FailingMW", MiddlewareHook::AfterTool);
     let end = m
         .on_end(&h, StageStatus::Error, Some("sentinel-secret".into()))
-        .unwrap();
+        .expect("the on end fixture result is required for this assertion");
     assert!(end.is_error);
 }

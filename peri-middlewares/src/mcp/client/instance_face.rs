@@ -12,9 +12,10 @@
 //! - **订阅是唤醒信号**（design `workflow-mcp` §4.3）：通知不携带正文、缓冲满即
 //!   丢弃；消费方收到后经 [`McpClientPool::read_instance_resource`] 补读。
 
-use super::*;
+use super::{Arc, ClientStatus, McpClientHandle, McpClientPool, SUBSCRIPTION_LISTEN_TIMEOUT};
 use crate::mcp::resource_tool::{ResourceError, RESOURCE_READ_TIMEOUT};
-use crate::mcp::tool_bridge::{format_contents, TOOL_CALL_TIMEOUT};
+use crate::mcp::tool_bridge;
+use crate::mcp::tool_bridge::TOOL_CALL_TIMEOUT;
 use crate::mcp::ToolCallError;
 use peri_acp_types::ports::{LiveTask, McpResourceSubscription, PeripheralTasks};
 use rmcp::model::{
@@ -73,7 +74,7 @@ impl McpClientPool {
     /// 未知实例 / 未连接 / 无 peer 都是调用方按错误处理的明确事实：不返回空结果、
     /// 不回落其它实例。句柄保持 `Arc`（连接换代时旧句柄的 peer 由关闭路径收口）。
     fn instance_handle(&self, instance: &str) -> Result<Arc<McpClientHandle>, String> {
-        let handle = self.get_client(instance).ok_or_else(|| {
+        let handle = self.client(instance).ok_or_else(|| {
             ResourceError::ServerNotFound {
                 server: instance.to_string(),
             }
@@ -138,7 +139,7 @@ impl McpClientPool {
             .expect("instance_handle 已确认 peer 存在");
         match crate::mcp::tool_request::call_tool(peer, request, Some(TOOL_CALL_TIMEOUT)).await {
             Ok(CallToolResponse::Complete(result)) => {
-                let text = format_contents(&result.content);
+                let text = tool_bridge::format_contents(&result.content);
                 if result.is_error == Some(true) {
                     Err(text)
                 } else {

@@ -1,4 +1,17 @@
-use super::*;
+use super::json;
+use super::mpsc;
+use super::AcpBridgeTransport;
+use super::AcpMcpError;
+use super::AcpMcpGatewayPort;
+use super::Arc;
+use super::CancellationToken;
+use super::Duration;
+use super::ErrorCode;
+use super::Future;
+use super::RequestId;
+use super::RoleClient;
+use super::Value;
+use rmcp::transport::Transport as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::oneshot;
 
@@ -80,7 +93,7 @@ async fn ping(transport: &mut AcpBridgeTransport, id: i64) {
 #[tokio::test]
 async fn cancellation_maps_to_acp_request_and_close_joins_all_forwarders() {
     let (gateway, mut calls, mut cancelled) = gateway();
-    let (mut transport, handle) = create_bridge(gateway.clone(), "server".into());
+    let (mut transport, handle) = super::create_bridge(gateway.clone(), "server".into());
     ping(&mut transport, 1).await;
     let call = bounded(calls.recv()).await.unwrap();
     assert_eq!(call.params["requestId"], "peri-1");
@@ -117,7 +130,7 @@ async fn cancellation_maps_to_acp_request_and_close_joins_all_forwarders() {
 async fn subscription_ack_reaches_real_rmcp_waiter_and_late_ack_is_rejected() {
     use rmcp::model::{ServerConfig, SubscriptionFilter};
     let (gateway, mut calls, _cancelled) = gateway();
-    let (transport, handle) = create_bridge(gateway, "server".into());
+    let (transport, handle) = super::create_bridge(gateway, "server".into());
     let info = ServerConfig::default()
         .with_protocol_version(serde_json::from_value(json!("2026-07-28")).unwrap());
     let client =
@@ -171,7 +184,7 @@ async fn subscription_ack_reaches_real_rmcp_waiter_and_late_ack_is_rejected() {
 #[tokio::test]
 async fn close_settles_real_rmcp_pending_request_with_error() {
     let (gateway, mut calls, _cancelled) = gateway();
-    let (transport, handle) = create_bridge(gateway.clone(), "server".into());
+    let (transport, handle) = super::create_bridge(gateway.clone(), "server".into());
     let client = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
         (),
         transport,
@@ -189,20 +202,22 @@ async fn close_settles_real_rmcp_pending_request_with_error() {
 #[test]
 fn response_uses_schema_result_precedence_and_rejects_missing_outcome() {
     assert_eq!(
-        parse_message_response(json!({"result": {}, "error": null})).unwrap(),
+        super::parse_message_response(json!({"result": {}, "error": null})).unwrap(),
         json!({})
     );
     assert_eq!(
-        parse_message_response(json!({"result": {}, "error": {"code": -1, "message": "ignored"}}))
-            .unwrap(),
+        super::parse_message_response(
+            json!({"result": {}, "error": {"code": -1, "message": "ignored"}})
+        )
+        .unwrap(),
         json!({})
     );
-    assert!(parse_message_response(json!({})).is_err());
+    assert!(super::parse_message_response(json!({})).is_err());
     assert_eq!(
-        parse_message_response(json!({"result": null})).unwrap(),
+        super::parse_message_response(json!({"result": null})).unwrap(),
         Value::Null
     );
-    let error = parse_message_response(
+    let error = super::parse_message_response(
         json!({"error": {"code": -32601, "message": "missing", "data": {"detail": 1}}}),
     )
     .unwrap_err();
@@ -210,9 +225,11 @@ fn response_uses_schema_result_precedence_and_rejects_missing_outcome() {
     assert_eq!(error.message, "missing");
     assert_eq!(error.data, Some(json!({"detail": 1})));
     assert_eq!(
-        parse_message_response(json!({"error": {"code": -1, "message": "null", "data": null}}))
-            .unwrap_err()
-            .data,
+        super::parse_message_response(
+            json!({"error": {"code": -1, "message": "null", "data": null}})
+        )
+        .unwrap_err()
+        .data,
         Some(Value::Null)
     );
 }
@@ -220,11 +237,11 @@ fn response_uses_schema_result_precedence_and_rejects_missing_outcome() {
 #[test]
 fn associated_ids_translate_without_modifying_application_data() {
     let mut value = json!({"requestId": "peri-2", "_meta": {"io.modelcontextprotocol/subscriptionId": "peri-2"}, "data": {"requestId": "user-data"}});
-    translate_ids(&mut value, "peri-2", &RequestId::Number(1)).unwrap();
+    super::translate_ids(&mut value, "peri-2", &RequestId::Number(1)).unwrap();
     assert_eq!(value["requestId"], 1);
     assert_eq!(value["_meta"]["io.modelcontextprotocol/subscriptionId"], 1);
     assert_eq!(value["data"]["requestId"], "user-data");
-    assert!(translate_ids(
+    assert!(super::translate_ids(
         &mut json!({"requestId": "other"}),
         "peri-2",
         &RequestId::Number(1)

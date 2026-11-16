@@ -3,8 +3,9 @@
 //! 渲染输出本身不测（testing.md「不测 TUI 渲染输出」）；这里锁行模型派生、
 //! 切换写入的候选快照与保存失败回滚。
 
-use super::*;
-use crate::kit::atoms::{NOTIFICATION, PERI_CONFIG_HANDLE};
+use super::CONFIG_ROWS;
+use super::ConfigRow;
+
 use peri_acp_types::beta_flags::{BETA_FLAGS, BetaFlag, FULL_ASYNC_TOOLS};
 
 /// 确保配置句柄存在（OnceLock：其他用例可能已建立，此处只保证非空）。
@@ -19,21 +20,27 @@ pub(super) fn ensure_config_handle()
 /// 行模型 = 基础行 + 区块标题行 + 注册表条目（顺序即注册表顺序）。
 #[test]
 fn test_row_model_appends_registry_driven_section() {
-    let rows = config_rows();
+    let rows = super::config_rows();
     assert_eq!(rows.len(), CONFIG_ROWS.len() + 1 + BETA_FLAGS.len());
-    for (index, row) in rows.iter().take(CONFIG_ROWS.len()).enumerate() {
-        assert_eq!(*row, ConfigRow::Base(index), "基础行顺序必须保持");
+    {
+        let iteration_items = rows.iter().take(CONFIG_ROWS.len()).enumerate();
+        for (index, row) in iteration_items {
+            assert_eq!(*row, ConfigRow::Base(index), "基础行顺序必须保持");
+        }
     }
     assert_eq!(rows[CONFIG_ROWS.len()], ConfigRow::BetaSection);
-    for (offset, flag) in BETA_FLAGS.iter().enumerate() {
-        let row = rows[CONFIG_ROWS.len() + 1 + offset];
-        let ConfigRow::BetaFlag(index) = row else {
-            panic!("beta 区块必须逐条渲染 flag 行：{row:?}");
-        };
-        assert_eq!(BETA_FLAGS[index].id, flag.id, "区块顺序 = 注册表顺序");
+    {
+        let iteration_items = BETA_FLAGS.iter().enumerate();
+        for (offset, flag) in iteration_items {
+            let row = rows[CONFIG_ROWS.len() + 1 + offset];
+            let ConfigRow::BetaFlag(index) = row else {
+                panic!("beta 区块必须逐条渲染 flag 行：{row:?}");
+            };
+            assert_eq!(BETA_FLAGS[index].id, flag.id, "区块顺序 = 注册表顺序");
+        }
     }
     // 鼠标命中与上下键导航都以行数为界：行数 = 行模型长度。
-    assert_eq!(config_rows().len(), rows.len());
+    assert_eq!(super::config_rows().len(), rows.len());
 }
 
 /// 区块标题行不可激活（光标/点击不改变任何配置）。
@@ -43,10 +50,10 @@ fn test_activate_section_row_is_inert() {
     let handle = ensure_config_handle();
     let before = handle.read().clone();
     let section_index = CONFIG_ROWS.len();
-    activate_row(section_index, true);
+    super::activate_row(section_index, true);
     assert_eq!(*handle.read(), before, "区块标题行不得改写任何配置字段");
     // 越界行同样无副作用。
-    activate_row(config_rows().len() + 10, true);
+    super::activate_row(super::config_rows().len() + 10, true);
     assert_eq!(*handle.read(), before);
 }
 
@@ -58,13 +65,13 @@ fn test_activate_section_row_is_inert() {
 #[test]
 fn test_beta_description_falls_back_to_canonical() {
     assert_eq!(
-        beta_description("definitely-missing-flag", "canonical text"),
+        super::beta_description("definitely-missing-flag", "canonical text"),
         "canonical text",
         "未命中 i18n key 时必须原样回退 canonical 文本"
     );
     // 注册表条目的 id 必须能作为 key 参与查找（不得 panic / 不得返回空）。
     let flag: &BetaFlag = &BETA_FLAGS[0];
-    assert!(!beta_description(flag.id, flag.description).is_empty());
+    assert!(!super::beta_description(flag.id, flag.description).is_empty());
 }
 
 /// 面板显示生效层覆盖值：未设置与显式 false 均显示为关闭。
@@ -73,16 +80,25 @@ fn test_beta_description_falls_back_to_canonical() {
 fn test_read_beta_toggle_reads_effective_layer_override() {
     let handle = ensure_config_handle();
     handle.write().config.betas.set(FULL_ASYNC_TOOLS, false);
-    assert!(!read_beta_toggle(FULL_ASYNC_TOOLS), "显式 false 显示为关闭");
+    assert!(
+        !super::read_beta_toggle(FULL_ASYNC_TOOLS),
+        "显式 false 显示为关闭"
+    );
     handle
         .write()
         .config
         .betas
         .overrides
         .remove(FULL_ASYNC_TOOLS);
-    assert!(!read_beta_toggle(FULL_ASYNC_TOOLS), "未设置显示为关闭");
+    assert!(
+        !super::read_beta_toggle(FULL_ASYNC_TOOLS),
+        "未设置显示为关闭"
+    );
     handle.write().config.betas.set(FULL_ASYNC_TOOLS, true);
-    assert!(read_beta_toggle(FULL_ASYNC_TOOLS), "覆盖 true 显示为开启");
+    assert!(
+        super::read_beta_toggle(FULL_ASYNC_TOOLS),
+        "覆盖 true 显示为开启"
+    );
 }
 
 /// 切换：候选快照写入生效层键，经注入的保存入口持久化；成功后内存视图保持新值。
@@ -99,7 +115,7 @@ fn test_toggle_beta_flag_persists_candidate_snapshot() {
 
     let saved = std::sync::Arc::new(parking_lot::Mutex::new(None));
     let captured = std::sync::Arc::clone(&saved);
-    toggle_beta_flag_with(
+    super::toggle_beta_flag_with(
         PERI_CONFIG_HANDLE.get(),
         FULL_ASYNC_TOOLS,
         move |candidate| {
@@ -119,7 +135,10 @@ fn test_toggle_beta_flag_persists_candidate_snapshot() {
         Some(true),
         "保存入口必须收到写入了 config.betas[id] 的候选快照"
     );
-    assert!(read_beta_toggle(FULL_ASYNC_TOOLS), "成功后内存视图保持新值");
+    assert!(
+        super::read_beta_toggle(FULL_ASYNC_TOOLS),
+        "成功后内存视图保持新值"
+    );
 }
 
 /// 保存失败路径：内存视图回滚到切换前的值，并留下保存失败提示。
@@ -129,12 +148,12 @@ fn test_toggle_beta_flag_save_failure_rolls_back_memory_view() {
     let handle = ensure_config_handle();
     handle.write().config.betas.set(FULL_ASYNC_TOOLS, false);
 
-    toggle_beta_flag_with(PERI_CONFIG_HANDLE.get(), FULL_ASYNC_TOOLS, |_| {
+    super::toggle_beta_flag_with(PERI_CONFIG_HANDLE.get(), FULL_ASYNC_TOOLS, |_| {
         Err(anyhow::anyhow!("configuration revision conflict"))
     });
 
     assert!(
-        !read_beta_toggle(FULL_ASYNC_TOOLS),
+        !super::read_beta_toggle(FULL_ASYNC_TOOLS),
         "保存失败必须保持内存视图不变（回滚本次写入）"
     );
     let notification = {
@@ -154,3 +173,7 @@ fn test_toggle_beta_flag_save_failure_rolls_back_memory_view() {
         "提示必须携带失败原因：{notification}"
     );
 }
+
+use crate::kit::atoms::NOTIFICATION;
+
+use crate::kit::atoms::PERI_CONFIG_HANDLE;

@@ -7,7 +7,9 @@ use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
 use peri_agent::agent::compact_v2::CompactConfig;
 use peri_agent::agent::events_v2::{EventBus, EventHandles, ObserveEvent};
 use peri_agent::agent::react::{ReactLLM, Reasoning, StreamingContext};
-use peri_agent::agent::stages::{run_react_loop, LoopResult, StageContext};
+
+use peri_agent::agent::stages::LoopResult;
+use peri_agent::agent::stages::StageContext;
 use peri_agent::agent::token::ContextBudget;
 use peri_agent::error::{AgentError, AgentResult};
 use peri_agent::messages::{BaseMessage, ToolCallRequest};
@@ -18,10 +20,9 @@ use peri_model::{
     StopReason, TokenUsage,
 };
 use peri_resources::sessions::SessionResourcesImpl;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 #[path = "compact_failure_adversarial_test/archive_tool.rs"]
@@ -36,7 +37,7 @@ struct BoundSession {
 
 impl BoundSession {
     async fn open() -> Self {
-        let repo = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().expect("the temporary test directory must be available");
         for args in [
             vec!["init", "-q"],
             vec![
@@ -61,16 +62,19 @@ impl BoundSession {
                 .arg(repo.path())
                 .args(args)
                 .output()
-                .unwrap();
+                .expect("the output fixture result is required for this assertion");
             assert!(result.status.success(), "临时工作区创建失败");
         }
-        let db = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().expect("the temporary test directory must be available");
         let resources: Arc<dyn SessionResources> = Arc::new(
             SessionResourcesImpl::open(db.path().join("threads.db"))
                 .await
-                .unwrap(),
+                .expect("the temporary session store fixture must open successfully"),
         );
-        let workspace = resources.resolve_workspace(repo.path()).await.unwrap();
+        let workspace = resources
+            .resolve_workspace(repo.path())
+            .await
+            .expect("the resolve workspace fixture result is required for this assertion");
         let thread_id = uuid::Uuid::now_v7().to_string();
         resources
             .create_session(&NewSession {
@@ -94,7 +98,7 @@ impl BoundSession {
                 frozen: FrozenSnapshotBytes::new("{\"version\":1,\"test\":true}"),
             })
             .await
-            .unwrap();
+            .expect("the create session fixture result is required for this assertion");
         Self {
             resources,
             thread_id,
@@ -178,7 +182,9 @@ impl peri_model::Model for SummaryModel {
             }
             Failure::ProviderRetryExhausted => {
                 return Err(
-                    ModelError::retry_exhausted(3, peri_model::RetryErrorKind::HttpStatus).unwrap(),
+                    ModelError::retry_exhausted(3, peri_model::RetryErrorKind::HttpStatus).expect(
+                        "the retry exhausted fixture result is required for this assertion",
+                    ),
                 )
             }
             Failure::MaxTokens if call == 1 => ("<summary>incomplete task", StopReason::MaxTokens),
@@ -196,7 +202,7 @@ impl peri_model::Model for SummaryModel {
             }
             Failure::Success => ("<summary>RECOVERED task</summary>", StopReason::EndTurn),
         };
-        ModelResponse::new(ModelMessage::assistant_text(text), reason, None, None)
+        ModelResponse::try_new(ModelMessage::assistant_text(text), reason, None, None)
     }
 }
 
@@ -224,7 +230,7 @@ impl peri_model::Model for SummaryText {
         _: ModelRequest,
         _: CancellationToken,
     ) -> peri_model::ModelResult<ModelResponse> {
-        ModelResponse::new(
+        ModelResponse::try_new(
             ModelMessage::assistant_text(self.0),
             StopReason::EndTurn,
             None,
@@ -254,14 +260,17 @@ impl ReactLLM for ReasonModel {
         let messages =
             serde_json::from_value::<Vec<BaseMessage>>(prepared.checkpoint()["messages"].clone())
                 .map_err(|error| AgentError::LlmError(error.to_string()))?;
-        prepared
-            .start(
-                streaming
-                    .as_ref()
-                    .map(|context| context.cancel.clone())
-                    .unwrap_or_default(),
-            )
-            .map_err(AgentError::ModelError)?;
+        // This fixture records the start and supplies reasoning without polling the empty stream.
+        drop(
+            prepared
+                .start(
+                    streaming
+                        .as_ref()
+                        .map(|context| context.cancel.clone())
+                        .unwrap_or_default(),
+                )
+                .map_err(AgentError::ModelError)?,
+        );
         self.generate_reasoning(&messages, &[], streaming).await
     }
 
@@ -356,16 +365,19 @@ async fn make_case(
 async fn assert_unusable_summary_blocks_reason(failure: Failure) {
     let (bound, ctx, reason, summary, mut handles) =
         make_case(failure, usize::MAX, false, None).await;
-    let result = run_react_loop(ctx.clone(), 4).await;
+    let result = peri_agent::agent::stages::run_react_loop(ctx.clone(), 4).await;
     let transcript = std::mem::take(&mut *ctx.session.transcript.write());
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let reopened = SessionResourcesImpl::open(bound.db.path().join("threads.db"))
         .await
-        .unwrap();
+        .expect("the temporary session store fixture must open successfully");
     let snapshot = reopened
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(
         snapshot.payloads.iter().any(|payload| payload
             .as_message()
@@ -392,18 +404,33 @@ async fn assert_unusable_summary_blocks_reason(failure: Failure) {
         Failure::Http => {
             assert!(matches!(error, AgentError::ModelError(_)));
             assert_eq!(public.http_status, Some(503));
-            assert_eq!(public.diagnostic.unwrap().status(), Some(503));
+            assert_eq!(
+                public
+                    .diagnostic
+                    .expect("the diagnostic fixture result is required for this assertion")
+                    .status(),
+                Some(503)
+            );
         }
         Failure::Transport => {
             assert!(matches!(error, AgentError::ModelError(_)));
             assert_eq!(
-                public.diagnostic.unwrap().transport(),
+                public
+                    .diagnostic
+                    .expect("the diagnostic fixture result is required for this assertion")
+                    .transport(),
                 Some(peri_model::TransportErrorKind::Timeout)
             );
         }
         Failure::ProviderRetryExhausted => {
             assert!(matches!(error, AgentError::ModelError(_)));
-            assert_eq!(public.diagnostic.unwrap().retry_attempts(), Some(3));
+            assert_eq!(
+                public
+                    .diagnostic
+                    .expect("the diagnostic fixture result is required for this assertion")
+                    .retry_attempts(),
+                Some(3)
+            );
         }
         Failure::ToolUse => assert!(matches!(
             error,
@@ -471,7 +498,7 @@ async fn test_provider_retry_exhaustion_blocks_reason() {
 async fn test_max_tokens_summary_exhausts_budget_without_committing() {
     let (bound, ctx, reason, summary, _) =
         make_case(Failure::MaxTokens, usize::MAX, false, None).await;
-    let result = run_react_loop(ctx.clone(), 4).await;
+    let result = peri_agent::agent::stages::run_react_loop(ctx.clone(), 4).await;
     assert!(
         matches!(
             result,
@@ -492,21 +519,30 @@ async fn test_max_tokens_summary_exhausts_budget_without_committing() {
         let requests = summary.requests.lock();
         assert_eq!(requests.len(), 3);
         // 已有片段按原顺序各回填一次，不重复、不插入分隔符。
-        let latest = serde_json::to_string(&requests[2]).unwrap();
+        let latest = serde_json::to_string(&requests[2])
+            .expect("to_string must accept this test fixture representation");
         assert_eq!(latest.matches("incomplete task").count(), 1, "{latest}");
         assert_eq!(latest.matches("still pending").count(), 1, "{latest}");
         assert!(
-            latest.find("incomplete task").unwrap() < latest.find("still pending").unwrap(),
+            latest
+                .find("incomplete task")
+                .expect("the find fixture result is required for this assertion")
+                < latest
+                    .find("still pending")
+                    .expect("the find fixture result is required for this assertion"),
             "{latest}"
         );
     }
     let transcript = std::mem::take(&mut *ctx.session.transcript.write());
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let stored = bound
         .resources
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(stored.flags.values().all(|flags| !flags.excluded));
     assert_eq!(stored.payloads.len(), 2, "半截摘要不得写入 canonical 历史");
 }
@@ -515,7 +551,7 @@ async fn test_max_tokens_summary_exhausts_budget_without_committing() {
 #[tokio::test]
 async fn test_max_tokens_summary_continuation_resumes_reason_with_complete_summary() {
     let (_bound, ctx, reason, summary, _) = make_case(Failure::MaxTokens, 1, false, None).await;
-    let result = run_react_loop(ctx, 4).await;
+    let result = peri_agent::agent::stages::run_react_loop(ctx, 4).await;
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
     assert_eq!(summary.calls.load(Ordering::SeqCst), 2);
     let requests = reason.requests.lock();
@@ -533,17 +569,20 @@ async fn test_max_tokens_summary_continuation_resumes_reason_with_complete_summa
 async fn test_cancel_before_summary_continuation_preserves_history() {
     let (bound, ctx, reason, summary, _) =
         make_case(Failure::MaxTokens, usize::MAX, false, Some(1)).await;
-    let result = run_react_loop(ctx.clone(), 4).await;
+    let result = peri_agent::agent::stages::run_react_loop(ctx.clone(), 4).await;
     assert!(matches!(result, LoopResult::Interrupted), "{result:?}");
     assert_eq!(summary.calls.load(Ordering::SeqCst), 1);
     assert!(reason.requests.lock().is_empty());
     let transcript = std::mem::take(&mut *ctx.session.transcript.write());
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let stored = bound
         .resources
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(stored.flags.values().all(|flags| !flags.excluded));
     assert_eq!(stored.payloads.len(), 2, "只有原始 task 和本轮输入");
 }
@@ -563,7 +602,7 @@ async fn test_analysis_only_exhaustion_blocks_reason() {
 #[tokio::test]
 async fn test_analysis_only_recovers_after_regeneration_and_preserves_canonical() {
     let (bound, ctx, reason, summary, _) = make_case(Failure::AnalysisOnly, 1, false, None).await;
-    let result = run_react_loop(ctx.clone(), 4).await;
+    let result = peri_agent::agent::stages::run_react_loop(ctx.clone(), 4).await;
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
     assert_eq!(summary.calls.load(Ordering::SeqCst), 2);
     assert_eq!(reason.requests.lock().len(), 1);
@@ -571,14 +610,17 @@ async fn test_analysis_only_recovers_after_regeneration_and_preserves_canonical(
         .iter()
         .any(|message| message.content().contains("RECOVERED")));
     let transcript = std::mem::take(&mut *ctx.session.transcript.write());
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let reopened = SessionResourcesImpl::open(bound.db.path().join("threads.db"))
         .await
-        .unwrap();
+        .expect("the temporary session store fixture must open successfully");
     let snapshot = reopened
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     let original = snapshot
         .payloads
         .iter()
@@ -587,7 +629,7 @@ async fn test_analysis_only_recovers_after_regeneration_and_preserves_canonical(
                 .as_message()
                 .filter(|message| message.content() == "original task")
         })
-        .unwrap();
+        .expect("the find map fixture result is required for this assertion");
     assert!(
         snapshot.flags[&original.id()].excluded,
         "成功摘要应隐藏原文但保留磁盘历史"
@@ -599,7 +641,7 @@ async fn test_cancel_on_last_empty_attempt_wins_over_exhaustion() {
     // 重新生成是预算内最后一次生成；此时取消必须优先于恢复耗尽。
     let (_bound, ctx, reason, summary, _) =
         make_case(Failure::AnalysisOnly, usize::MAX, false, Some(2)).await;
-    let result = run_react_loop(ctx, 4).await;
+    let result = peri_agent::agent::stages::run_react_loop(ctx, 4).await;
     assert!(
         matches!(result, LoopResult::Interrupted),
         "取消应优先于摘要耗尽：{result:?}"
@@ -613,7 +655,7 @@ async fn test_full_failure_leaves_no_hidden_micro_projection() {
     // 新契约：达到 Full 条件而收益不足时直接 Full；Full 失败不得留下本轮 Micro 提交。
     let (bound, ctx, reason, summary, _) =
         make_case(Failure::AnalysisOnly, usize::MAX, true, None).await;
-    let result = run_react_loop(ctx.clone(), 4).await;
+    let result = peri_agent::agent::stages::run_react_loop(ctx.clone(), 4).await;
     assert!(
         matches!(
             result,
@@ -624,14 +666,17 @@ async fn test_full_failure_leaves_no_hidden_micro_projection() {
     assert_eq!(summary.calls.load(Ordering::SeqCst), 2);
     assert!(reason.requests.lock().is_empty());
     let transcript = std::mem::take(&mut *ctx.session.transcript.write());
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let reopened = SessionResourcesImpl::open(bound.db.path().join("threads.db"))
         .await
-        .unwrap();
+        .expect("the temporary session store fixture must open successfully");
     let snapshot = reopened
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(
         snapshot
             .flags
@@ -655,17 +700,20 @@ async fn test_cancel_before_full_commit_leaves_no_micro_projection() {
     // 新契约：提交前取消不得留下本轮 Micro，也不得伪造 MessagesCompacted。
     let (bound, ctx, reason, summary, mut handles) =
         make_case(Failure::AnalysisOnly, usize::MAX, true, Some(1)).await;
-    let result = run_react_loop(ctx.clone(), 4).await;
+    let result = peri_agent::agent::stages::run_react_loop(ctx.clone(), 4).await;
     assert!(matches!(result, LoopResult::Interrupted), "{result:?}");
     assert_eq!(summary.calls.load(Ordering::SeqCst), 1);
     assert!(reason.requests.lock().is_empty());
     let transcript = std::mem::take(&mut *ctx.session.transcript.write());
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let snapshot = bound
         .resources
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(
         snapshot
             .flags
@@ -705,7 +753,7 @@ async fn test_cancel_before_full_commit_leaves_no_micro_projection() {
 async fn test_missing_summary_model_blocks_high_pressure_reason() {
     let (_bound, mut ctx, reason, summary, _) = make_case(Failure::Success, 0, false, None).await;
     ctx.compact.compact_llm = None;
-    let result = run_react_loop(ctx, 4).await;
+    let result = peri_agent::agent::stages::run_react_loop(ctx, 4).await;
     assert!(
         matches!(result, LoopResult::Error(AgentError::CompactNoLlm)),
         "{result:?}"
@@ -721,9 +769,9 @@ async fn test_shadow_empty_micro_plan_never_calls_full_at_high_pressure() {
     ctx.compact
         .compact_config
         .as_mut()
-        .unwrap()
+        .expect("the as mut fixture result is required for this assertion")
         .shadow_mode_enabled = true;
-    let result = run_react_loop(ctx.clone(), 4).await;
+    let result = peri_agent::agent::stages::run_react_loop(ctx.clone(), 4).await;
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
     assert_eq!(
         summary.calls.load(Ordering::SeqCst),
@@ -732,12 +780,15 @@ async fn test_shadow_empty_micro_plan_never_calls_full_at_high_pressure() {
     );
     assert_eq!(reason.requests.lock().len(), 1);
     let transcript = std::mem::take(&mut *ctx.session.transcript.write());
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let snapshot = bound
         .resources
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(snapshot.flags.values().all(|flags| !flags.excluded));
     assert_eq!(
         std::iter::from_fn(|| handles.try_observe())
@@ -753,14 +804,17 @@ async fn test_manual_force_still_applies_full_when_shadow_enabled() {
     ctx.compact
         .compact_config
         .as_mut()
-        .unwrap()
+        .expect("the as mut fixture result is required for this assertion")
         .shadow_mode_enabled = true;
     let mut transcript = std::mem::take(&mut *ctx.session.transcript.write());
     let mut failures = 0;
     let result = peri_agent::agent::compact_v2::run_compact(
         &mut transcript,
         Some(summary.as_ref()),
-        ctx.compact.compact_config.as_ref().unwrap(),
+        ctx.compact
+            .compact_config
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion"),
         &peri_agent::agent::compact_v2::ContextPressure {
             estimated_tokens: 109_000,
             context_window: 100_000,
@@ -771,7 +825,11 @@ async fn test_manual_force_still_applies_full_when_shadow_enabled() {
         },
         true,
         &mut failures,
-        bound.repo.path().to_str().unwrap(),
+        bound
+            .repo
+            .path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
         None,
     )
     .await;
@@ -785,17 +843,20 @@ async fn test_cancel_on_provider_failure_leaves_no_micro_projection() {
     // 新契约：Full provider 调用期间取消，本轮 Micro 从未提交，取消优先。
     let (bound, ctx, reason, summary, _) =
         make_case(Failure::Http, usize::MAX, true, Some(1)).await;
-    let result = run_react_loop(ctx.clone(), 4).await;
+    let result = peri_agent::agent::stages::run_react_loop(ctx.clone(), 4).await;
     assert!(matches!(result, LoopResult::Interrupted), "{result:?}");
     assert!(reason.requests.lock().is_empty());
     assert_eq!(summary.calls.load(Ordering::SeqCst), 1);
     let transcript = std::mem::take(&mut *ctx.session.transcript.write());
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let snapshot = bound
         .resources
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert_eq!(snapshot.payloads.len(), 27);
     assert!(
         snapshot
@@ -813,14 +874,17 @@ async fn test_force_with_zero_retry_budget_reports_exhaustion_without_model_call
     ctx.compact
         .compact_config
         .as_mut()
-        .unwrap()
+        .expect("the as mut fixture result is required for this assertion")
         .max_consecutive_failures = 0;
     let mut transcript = std::mem::take(&mut *ctx.session.transcript.write());
     let mut failures = 0;
     let result = peri_agent::agent::compact_v2::run_compact(
         &mut transcript,
         Some(summary.as_ref()),
-        ctx.compact.compact_config.as_ref().unwrap(),
+        ctx.compact
+            .compact_config
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion"),
         &peri_agent::agent::compact_v2::ContextPressure {
             estimated_tokens: 0,
             context_window: u32::MAX,
@@ -831,7 +895,11 @@ async fn test_force_with_zero_retry_budget_reports_exhaustion_without_model_call
         },
         true,
         &mut failures,
-        bound.repo.path().to_str().unwrap(),
+        bound
+            .repo
+            .path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
         None,
     )
     .await;
@@ -873,7 +941,11 @@ async fn test_exhausted_full_budget_does_not_fail_low_pressure_disabled_or_shado
             },
             false,
             &mut failures,
-            bound.repo.path().to_str().unwrap(),
+            bound
+                .repo
+                .path()
+                .to_str()
+                .expect("the fixture text must be valid UTF-8"),
             None,
         )
         .await;
@@ -886,98 +958,4 @@ async fn test_exhausted_full_budget_does_not_fail_low_pressure_disabled_or_shado
     assert_eq!(summary.calls.load(Ordering::SeqCst), 0);
     assert_eq!(transcript.visible_messages().len(), 1);
 }
-
-/// [回归测试] 讨论解析器时，闭合摘要中的思考标签字面量必须进入下一次 Reason。
-#[tokio::test]
-async fn test_closed_summary_preserves_literal_reasoning_tags() {
-    let (bound, mut ctx, reason, _, _) = make_case(Failure::Success, 0, false, None).await;
-    ctx.compact.compact_llm = Some(Arc::new(SummaryText(
-        "<summary>parser strips <think> and </analysis> tags</summary>",
-    )));
-    let result = run_react_loop(ctx.clone(), 4).await;
-    assert!(
-        matches!(result, LoopResult::Completed),
-        "有效正文不得被误判为空摘要：{result:?}"
-    );
-    assert_eq!(reason.requests.lock().len(), 1);
-    let request_text = reason.requests.lock()[0]
-        .iter()
-        .map(|message| message.content())
-        .collect::<Vec<_>>()
-        .join("\n");
-    // Reason 使用既有 system-reminder XML 转义；canonical 摘要仍保存原始字面量。
-    assert!(
-        request_text.contains("parser strips &lt;think&gt; and &lt;/analysis&gt; tags"),
-        "{request_text}"
-    );
-    let transcript = std::mem::take(&mut *ctx.session.transcript.write());
-    transcript.flush_persistence().await.unwrap();
-    let stored = bound
-        .resources
-        .load_session_snapshot(&bound.thread_id)
-        .await
-        .unwrap();
-    let original = stored
-        .payloads
-        .iter()
-        .find_map(|payload| {
-            payload
-                .as_message()
-                .filter(|message| message.content() == "original task")
-        })
-        .unwrap();
-    assert!(stored.flags[&original.id()].excluded);
-    assert!(stored
-        .payloads
-        .iter()
-        .any(|payload| payload.as_message().is_some_and(|message| message
-            .content()
-            .contains("parser strips <think> and </analysis> tags"))));
-}
-
-/// [回归测试] 思考块内的闭合 summary 是草稿，不能提交并替代历史。
-#[tokio::test]
-async fn test_summary_inside_reasoning_cannot_replace_history() {
-    let (bound, mut ctx, reason, _, _) = make_case(Failure::Success, 0, false, None).await;
-    ctx.compact.compact_llm = Some(Arc::new(SummaryText(
-        "<analysis><summary>draft</summary></analysis>",
-    )));
-    let result = run_react_loop(ctx.clone(), 4).await;
-    assert!(
-        matches!(
-            result,
-            LoopResult::Error(AgentError::CompactRecoveryExhausted { attempts: 2, .. })
-        ),
-        "思考草稿不得成为摘要：{result:?}"
-    );
-    assert!(reason.requests.lock().is_empty());
-    let transcript = std::mem::take(&mut *ctx.session.transcript.write());
-    transcript.flush_persistence().await.unwrap();
-    let stored = bound
-        .resources
-        .load_session_snapshot(&bound.thread_id)
-        .await
-        .unwrap();
-    assert!(stored.flags.values().all(|flags| !flags.excluded));
-    assert_eq!(stored.payloads.len(), 2, "只保留原始任务与本次继续输入");
-}
-
-/// [回归测试] 外层闭合摘要正文是普通文本，内部标签和外围尾部均不能污染它。
-#[tokio::test]
-async fn test_closed_summary_after_reasoning_preserves_body_and_ignores_draft() {
-    let (_bound, mut ctx, reason, _, _) = make_case(Failure::Success, 0, false, None).await;
-    ctx.compact.compact_llm = Some(Arc::new(SummaryText("<analysis><thinking><summary>draft</summary></thinking></analysis><summary>literal <analysis> </thinking> <think> </analysis> <thinking> </think> tags</summary></analysis>")));
-    let result = run_react_loop(ctx, 4).await;
-    assert!(
-        matches!(result, LoopResult::Completed),
-        "闭合正文必须优先于尾部标签：{result:?}"
-    );
-    let requests = reason.requests.lock();
-    assert_eq!(requests.len(), 1);
-    assert!(requests[0].iter().any(|message| message
-        .content()
-        .contains("literal &lt;analysis&gt; &lt;/thinking&gt; &lt;think&gt; &lt;/analysis&gt; &lt;thinking&gt; &lt;/think&gt; tags")));
-    assert!(requests[0]
-        .iter()
-        .all(|message| !message.content().contains("draft")));
-}
+include!("compact_failure_adversarial/summary_text_cases.rs");

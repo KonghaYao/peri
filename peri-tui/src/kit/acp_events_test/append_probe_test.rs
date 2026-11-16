@@ -31,6 +31,7 @@ fn make_unit(i: usize) -> TuiRenderUnit {
     })
 }
 
+#[must_use]
 fn base(n: usize) -> im::Vector<TuiRenderUnit> {
     (0..n).map(make_unit).collect()
 }

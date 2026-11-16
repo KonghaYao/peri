@@ -1,15 +1,15 @@
 //! `/compact` 命令 — 手动触发上下文压缩。
 //!
 //! 移植自 `peri-tui/src/acp_server/compact.rs`，
-//! 改为接收 [`CommandContext`]、返回 [`CommandResult`]。
+//! 改为接收 [`CommandContext`]、返回 [`super::CommandResult`]。
 //!
 //! ## 模块组织（Facade + Module-per-Feature）
 //!
 //! - [`CompactCommand`] 是对外 public 类型，仅做 Pipeline 编排（Orchestration）。
-//! - [`pipeline`] 子模块实现各阶段：validate → resolve_model → run_full_compact
+//! - `pipeline` 子模块实现各阶段：validate → resolve_model → run_full_compact
 //!   → re_inject → assemble_messages，每阶段一个纯函数 + 显式输入输出类型。
 //!
-//! [TRAP] Immediate 命令路径绕过 agent event pump，必须手动调用 `sink.push_done()`。
+//! `[TRAP]` Immediate 命令路径绕过 agent event pump，必须手动调用 `sink.push_done()`。
 //! CompactCommand 自身不调用 push_done（由 executor.rs 的 Immediate 路径负责）。
 //! （详见 spec/global/domains/agent.md#issue_2026-05-29-immediate-command-missing-push-done）
 

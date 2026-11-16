@@ -1,12 +1,18 @@
 use peri_acp::transport::types::RequestId;
 use serde_json::json;
 
-use super::*;
+use super::{
+    AcpNotification, ClaimCause, InteractionLifecycle, NEW_SESSION_EVENT_BUFFER_CAPACITY,
+    OrdinaryDecision, PromptLease, RegisterDecision, RegisteredReverseRequest,
+    ReverseInteractionKind, TransitionKind,
+};
 
 fn started() -> (InteractionLifecycle, PromptLease) {
     let lifecycle = InteractionLifecycle::new();
     lifecycle.force_stable("s1", false);
-    let lease = lifecycle.open_prompt(Some("p1".into())).unwrap();
+    let lease = lifecycle
+        .open_prompt(Some("p1".into()))
+        .expect("started: the open_prompt fixture operation uses valid inputs");
     (lifecycle, lease)
 }
 
@@ -114,9 +120,9 @@ fn test_same_request_id_in_new_generation_has_distinct_owner() {
     drop(lease);
     let start = lifecycle
         .begin_transition(TransitionKind::Load, Some("s1".into()))
-        .unwrap();
+        .expect("same request id in new generation has distinct owner: the begin_transition fixture operation uses valid inputs");
     lifecycle.commit_stable(start.generation, "s1".into());
-    let _lease = lifecycle.open_prompt(Some("p2".into())).unwrap();
+    let _lease = lifecycle.open_prompt(Some("p2".into())).expect("same request id in new generation has distinct owner: the open_prompt fixture operation uses valid inputs");
     let second = register(&lifecycle, RequestId::Number(1));
     assert_ne!(first.owner, second.owner);
 }
@@ -147,7 +153,7 @@ fn test_turn_terminal_closes_acceptance_and_next_prompt_reopens() {
         ),
         RegisterDecision::Settle { .. }
     ));
-    let _next = lifecycle.open_prompt(Some("p2".into())).unwrap();
+    let _next = lifecycle.open_prompt(Some("p2".into())).expect("turn terminal closes acceptance and next prompt reopens: the open_prompt fixture operation uses valid inputs");
     let second = register(&lifecycle, RequestId::Number(3));
     assert!(second.owner.prompt_epoch > first.owner.prompt_epoch);
 }
@@ -157,7 +163,7 @@ fn test_cancel_closes_prompt_without_changing_generation_and_next_prompt_reopens
     let (lifecycle, _lease) = started();
     let first = register(&lifecycle, RequestId::Number(1));
     assert_eq!(lifecycle.cancel_active_prompt().len(), 1);
-    let _next = lifecycle.open_prompt(Some("p2".into())).unwrap();
+    let _next = lifecycle.open_prompt(Some("p2".into())).expect("cancel closes prompt without changing generation and next prompt reopens: the open_prompt fixture operation uses valid inputs");
     let second = register(&lifecycle, RequestId::Number(2));
     assert_eq!(first.owner.generation, second.owner.generation);
     assert!(second.owner.prompt_epoch > first.owner.prompt_epoch);
@@ -169,7 +175,7 @@ fn test_load_transition_routes_target_replay_but_rejects_reverse() {
     lifecycle.force_stable("old", false);
     lifecycle
         .begin_transition(TransitionKind::Load, Some("new".into()))
-        .unwrap();
+        .expect("load transition routes target replay but rejects reverse: the begin_transition fixture operation uses valid inputs");
     assert!(matches!(
         lifecycle.route_ordinary(
             "new".into(),
@@ -196,7 +202,7 @@ fn test_new_transition_buffers_only_bounded_ordinary_notifications_fifo() {
     lifecycle.force_stable("old", false);
     let start = lifecycle
         .begin_transition(TransitionKind::New, None)
-        .unwrap();
+        .expect("new transition buffers only bounded ordinary notifications fifo: the begin_transition fixture operation uses valid inputs");
     for index in 0..(NEW_SESSION_EVENT_BUFFER_CAPACITY + 1) {
         assert!(matches!(
             ordinary(&lifecycle, &index.to_string()),
@@ -208,11 +214,14 @@ fn test_new_transition_buffers_only_bounded_ordinary_notifications_fifo() {
         .take_buffered_batch()
         .expect("commit 保留的缓存应在 flush 时取出");
     assert_eq!(buffered.len(), NEW_SESSION_EVENT_BUFFER_CAPACITY);
-    for (index, notification) in buffered.into_iter().enumerate() {
-        let AcpNotification::Other { msg } = notification else {
-            panic!()
-        };
-        assert_eq!(msg, index.to_string());
+    {
+        let iteration_items = buffered.into_iter().enumerate();
+        for (index, notification) in iteration_items {
+            let AcpNotification::Other { msg } = notification else {
+                panic!()
+            };
+            assert_eq!(msg, index.to_string());
+        }
     }
     assert!(lifecycle.take_buffered_batch().is_none());
 }
@@ -224,7 +233,7 @@ fn test_commit_stable_keeps_buffering_until_flush_in_wire_order() {
     lifecycle.force_stable("old", false);
     let start = lifecycle
         .begin_transition(TransitionKind::New, None)
-        .unwrap();
+        .expect("commit stable keeps buffering until flush in wire order: the begin_transition fixture operation uses valid inputs");
     assert!(matches!(
         ordinary(&lifecycle, "old-1"),
         OrdinaryDecision::Buffered
@@ -262,7 +271,7 @@ fn test_fail_transition_clears_buffer_and_pending() {
     lifecycle.force_stable("old", false);
     let start = lifecycle
         .begin_transition(TransitionKind::New, None)
-        .unwrap();
+        .expect("fail transition clears buffer and pending: the begin_transition fixture operation uses valid inputs");
     assert!(matches!(
         ordinary(&lifecycle, "stale"),
         OrdinaryDecision::Buffered
@@ -284,7 +293,7 @@ fn test_no_session_does_not_restore_bootstrap_wildcard() {
     lifecycle.force_stable("old", false);
     let start = lifecycle
         .begin_transition(TransitionKind::New, None)
-        .unwrap();
+        .expect("no session does not restore bootstrap wildcard: the begin_transition fixture operation uses valid inputs");
     lifecycle.fail_transition(start.generation);
     assert!(matches!(
         lifecycle.route_ordinary("old".into(), AcpNotification::Other { msg: "old".into() }),
@@ -309,7 +318,7 @@ fn cancelled_execution_closes_interactions_but_waits_for_one_terminal() {
         assert!(lifecycle.bind_user_input_generation("s1", 1, "g1"));
         lifecycle
             .open_execution("s1", "g1", "run-1", managed)
-            .unwrap();
+            .expect("cancelled execution closes interactions but waits for one terminal: the open_execution fixture operation uses valid inputs");
         let request = register(&lifecycle, RequestId::Number(1));
         assert_eq!(lifecycle.cancel_active_prompt().len(), 1);
         assert!(!lifecycle.is_pending_owner(&request.owner));
@@ -330,9 +339,9 @@ fn cancelled_old_execution_terminal_cannot_end_the_next_execution() {
     let lifecycle = InteractionLifecycle::new();
     lifecycle.force_stable("s1", false);
     assert!(lifecycle.bind_user_input_generation("s1", 1, "g1"));
-    lifecycle.open_execution("s1", "g1", "run-1", true).unwrap();
+    lifecycle.open_execution("s1", "g1", "run-1", true).expect("cancelled old execution terminal cannot end the next execution: the open_execution fixture operation uses valid inputs");
     lifecycle.cancel_active_prompt();
-    lifecycle.open_execution("s1", "g1", "run-2", true).unwrap();
+    lifecycle.open_execution("s1", "g1", "run-2", true).expect("cancelled old execution terminal cannot end the next execution: the open_execution fixture operation uses valid inputs");
     assert!(!lifecycle.should_forward_prompt_terminal("s1", Some("run-1")));
     lifecycle.cancel_active_prompt();
     assert!(!lifecycle.should_forward_prompt_terminal("s1", Some("run-1")));
@@ -346,7 +355,7 @@ fn repeated_cancel_does_not_discard_the_pending_terminal() {
     let lifecycle = InteractionLifecycle::new();
     lifecycle.force_stable("s1", false);
     assert!(lifecycle.bind_user_input_generation("s1", 1, "g1"));
-    lifecycle.open_execution("s1", "g1", "run-1", true).unwrap();
+    lifecycle.open_execution("s1", "g1", "run-1", true).expect("repeated cancel does not discard the pending terminal: the open_execution fixture operation uses valid inputs");
     lifecycle.cancel_active_prompt();
     lifecycle.cancel_active_prompt();
     assert!(lifecycle.should_forward_prompt_terminal("s1", Some("run-1")));
@@ -358,7 +367,7 @@ fn repeated_cancel_does_not_discard_the_pending_terminal() {
 fn cancelled_local_prompt_lease_does_not_acknowledge_the_execution_terminal() {
     let lifecycle = InteractionLifecycle::new();
     lifecycle.force_stable("s1", false);
-    let lease = lifecycle.open_prompt(Some("run-1".into())).unwrap();
+    let lease = lifecycle.open_prompt(Some("run-1".into())).expect("cancelled local prompt lease does not acknowledge the execution terminal: the open_prompt fixture operation uses valid inputs");
     assert!(lifecycle.bind_user_input_generation("s1", 1, "g1"));
     assert!(
         lifecycle

@@ -7,7 +7,8 @@ use peri_acp_types::ports::{
 };
 use serde_json::Value;
 
-use super::super::{connection::ConnectionFacts, AcpServerConfig};
+use super::super::connection::ConnectionFacts;
+use super::super::AcpServerConfig;
 use crate::transport::types::AcpError;
 
 pub(super) fn handle_list(

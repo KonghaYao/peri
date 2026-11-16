@@ -12,16 +12,15 @@
 //! 断言落在「wire 调用次数 + 工具名 + 判决/outcome 形状 + 审批帧数」上：判决必须
 //! 按键可区分，未执行不得伪装成用户拒绝，同 key 不得二次执行。
 
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex as StdMutex,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 
 use async_trait::async_trait;
 use peri_acp_types::mcp_apps::McpAppsRelayPort;
 use peri_acp_types::mcp_apps_facade::{
-    AppQualification, AppsAttachResponse, AppsRequestResponse, CancelVerdict, CloseVerdict,
-    DetachVerdict, McpAppsFeatures, McpAppsLimits, RequestVerdict,
+    AppsAttachResponse, AppsRequestResponse, CancelVerdict, RequestVerdict,
 };
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use peri_acp_types::session_authorization::SessionAuthorizationPort;
@@ -38,10 +37,19 @@ use rmcp::model::{
 };
 use serde_json::{json, Value};
 
-use super::*;
+use crate::host::apps_facade::session_apps_facade::SessionAppsFacade;
 use crate::host::connection::ConnectionContext;
+use crate::host::interaction_router::SessionInteractionRouter;
+use crate::transport::types::AcpError;
 use crate::transport::types::{IncomingMessage, RequestId};
 use crate::transport::AcpTransport;
+use peri_acp_types::mcp_apps::McpAppsErrorKind;
+use peri_acp_types::mcp_apps::SessionInvocationOutcome;
+use peri_acp_types::mcp_apps_facade::AppsDetachResponse;
+use peri_acp_types::mcp_apps_facade::AppsRequestOutcome;
+use peri_acp_types::mcp_apps_facade::AttachmentBinding;
+use peri_acp_types::mcp_apps_facade::RequestNamespaceId;
+use peri_acp_types::mcp_apps_facade::RequestSeq;
 
 const SESSION: &str = "facade-session";
 const SERVER: &str = "cursor-canvas";

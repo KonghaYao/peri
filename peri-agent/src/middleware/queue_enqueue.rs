@@ -2,7 +2,7 @@
 
 use peri_acp_types::session::QueuedMessage;
 
-use super::capabilities::QueueState;
+use crate::middleware::capabilities::QueueState;
 
 /// 发布到会话级 mailbox，保留消息类型的调度语义。
 pub fn enqueue_v2_message(state: &dyn QueueState, msg: QueuedMessage) {

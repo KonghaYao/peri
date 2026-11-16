@@ -1,11 +1,14 @@
-use super::*;
+use super::{Arc, ThreadMeta};
+use crate::sessions::SqliteThreadStore;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::store::ThreadStore;
 
 /// [回归测试] writer 已持连接时不得为绑定重验再次向同一五连接池取连接。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_worktree_concurrent_creation_exceeds_pool_capacity_without_nested_acquisition() {
     const CONCURRENCY: usize = 8;
-    let repo = repository();
-    let (store, _db) = store().await;
+    let repo = super::repository();
+    let (store, _db) = super::store().await;
     let workspace = store.resolve_workspace(repo.path()).await.unwrap();
     let store = Arc::new(store);
     let barrier = Arc::new(tokio::sync::Barrier::new(CONCURRENCY + 1));
@@ -40,10 +43,10 @@ async fn test_worktree_concurrent_creation_exceeds_pool_capacity_without_nested_
 
 #[tokio::test]
 async fn independent_handles_write_without_execution_registration() {
-    let repo = repository();
-    let (store, database) = store().await;
-    let (id, _) = bound(&store, repo.path()).await;
-    let second = SqliteThreadStore::new(database.path().join("threads.db"))
+    let repo = super::repository();
+    let (store, database) = super::store().await;
+    let (id, _) = super::bound(&store, repo.path()).await;
+    let second = SqliteThreadStore::try_new(database.path().join("threads.db"))
         .await
         .unwrap();
     store
@@ -60,9 +63,9 @@ async fn independent_handles_write_without_execution_registration() {
 
 #[tokio::test]
 async fn readonly_store_rejects_mutation_without_execution_registration() {
-    let repo = repository();
-    let (store, database) = store().await;
-    let (id, _) = bound(&store, repo.path()).await;
+    let repo = super::repository();
+    let (store, database) = super::store().await;
+    let (id, _) = super::bound(&store, repo.path()).await;
     let reader = SqliteThreadStore::open_existing_read_only(database.path().join("threads.db"))
         .await
         .unwrap();

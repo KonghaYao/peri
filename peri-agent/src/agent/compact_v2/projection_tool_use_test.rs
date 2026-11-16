@@ -1,7 +1,9 @@
-use super::projection::{
-    render_llm_view, MicroCompactPlan, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
-    ProviderCapabilities, PROJECTION_POLICY_VERSION,
-};
+use crate::agent::compact_v2::projection::MicroCompactPlan;
+use crate::agent::compact_v2::projection::ProjectionAction;
+use crate::agent::compact_v2::projection::ProjectionActionEntry;
+use crate::agent::compact_v2::projection::ProjectionTarget;
+use crate::agent::compact_v2::projection::ProviderCapabilities;
+use crate::agent::compact_v2::projection::PROJECTION_POLICY_VERSION;
 use crate::messages::{BaseMessage, ContentBlock, MessageContent};
 use crate::session::transcript::MessageTranscript;
 #[test]
@@ -47,8 +49,12 @@ fn test_renderer_preserves_tool_use_for_illegal_block_actions() {
         ..Default::default()
     };
 
-    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
-        .expect("非法组合应防御性 no-op");
+    let projected = crate::agent::compact_v2::projection::render_llm_view(
+        &transcript,
+        &plan.actions,
+        &ProviderCapabilities::default(),
+    )
+    .expect("非法组合应防御性 no-op");
     let BaseMessage::Ai {
         content,
         tool_calls,

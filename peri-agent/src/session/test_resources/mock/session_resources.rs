@@ -1,7 +1,46 @@
 //! `SessionResources` 门面替身：实现契约语义，未覆盖的行为按 `Unsupported` 拒绝而不是静默 no-op。
 
-use super::*;
+use crate::session::test_resources::mock::MockResumeClaim;
+use crate::session::test_resources::mock::MockSessionResources;
+use async_trait::async_trait;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageId;
 use peri_acp_types::session::{MqEnqueueOutcome, MqInput, ThreadMqStore as _};
+use peri_acp_types::session_resources::AccessMode;
+use peri_acp_types::session_resources::BindingRecheck;
+use peri_acp_types::session_resources::BindingState;
+use peri_acp_types::session_resources::ChildResumeClaim;
+use peri_acp_types::session_resources::ChildSnapshot;
+use peri_acp_types::session_resources::DataCapabilities;
+use peri_acp_types::session_resources::ForkSnapshot;
+use peri_acp_types::session_resources::FrozenSnapshotBytes;
+use peri_acp_types::session_resources::FrozenState;
+use peri_acp_types::session_resources::NewSession;
+use peri_acp_types::session_resources::PersistenceRecovery;
+use peri_acp_types::session_resources::RewindBoundary;
+use peri_acp_types::session_resources::RewindOutcome;
+use peri_acp_types::session_resources::SessionAvailability;
+use peri_acp_types::session_resources::SessionMetaPatch;
+use peri_acp_types::session_resources::SessionResourceError;
+use peri_acp_types::session_resources::SessionResourceErrorKind;
+use peri_acp_types::session_resources::SessionResourceResult;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::session_resources::SessionSnapshot;
+use peri_acp_types::session_resources::TerminalSettlementOutcome;
+use peri_acp_types::store::CompactionChange;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::thread::AgentStatus;
+use peri_acp_types::thread::ThreadId;
+use peri_acp_types::thread::ThreadMeta;
+use peri_acp_types::thread::WorkState;
+use peri_acp_types::workspace::ResolvedWorkspace;
+use peri_acp_types::workspace::ScopedThreadPage;
+use peri_acp_types::workspace::ScopedThreadQuery;
+use peri_acp_types::workspace::WorkspaceError;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 /// 替身的工作区投影：按保存路径造一个自洽的 `ResolvedWorkspace`。
 ///
@@ -33,7 +72,11 @@ impl SessionResources for MockSessionResources {
         _session: &ThreadId,
         _query: &peri_acp_types::context_archive::ArchiveMetadataQuery,
     ) -> SessionResourceResult<peri_acp_types::context_archive::ArchiveMetadataPage> {
-        let gate = self.archive_probe_gate.lock().unwrap().take();
+        let gate = self
+            .archive_probe_gate
+            .lock()
+            .expect("self archive probe gate mutex must remain unpoisoned throughout the test")
+            .take();
         if let Some(gate) = gate {
             gate.wait().await;
             return Err(unsupported("injected archive probe failure"));
@@ -75,7 +118,10 @@ impl SessionResources for MockSessionResources {
 
     async fn finish_close(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.ensure_writable()?;
-        self.closing.lock().unwrap().remove(id);
+        self.closing
+            .lock()
+            .expect("self closing mutex must remain unpoisoned throughout the test")
+            .remove(id);
         Ok(())
     }
 
@@ -83,11 +129,18 @@ impl SessionResources for MockSessionResources {
         &self,
         id: &ThreadId,
     ) -> SessionResourceResult<peri_acp_types::session_resources::CloseSettlement> {
-        Ok(if self.closing.lock().unwrap().contains(id) {
-            peri_acp_types::session_resources::CloseSettlement::Pending
-        } else {
-            peri_acp_types::session_resources::CloseSettlement::Finished
-        })
+        Ok(
+            if self
+                .closing
+                .lock()
+                .expect("self closing mutex must remain unpoisoned throughout the test")
+                .contains(id)
+            {
+                peri_acp_types::session_resources::CloseSettlement::Pending
+            } else {
+                peri_acp_types::session_resources::CloseSettlement::Finished
+            },
+        )
     }
 
     async fn create_session(&self, _input: &NewSession) -> SessionResourceResult<()> {
@@ -142,7 +195,9 @@ impl SessionResources for MockSessionResources {
             ));
         };
         Ok(SessionSnapshot {
-            meta: region.meta.unwrap_or_else(|| default_meta_for(id)),
+            meta: region
+                .meta
+                .unwrap_or_else(|| crate::session::test_resources::mock::default_meta_for(id)),
             binding: match region.binding {
                 Some(binding) => BindingState::Bound(binding),
                 None => BindingState::Missing,
@@ -161,7 +216,10 @@ impl SessionResources for MockSessionResources {
         // 与生产门面同口径：绑定只来自记录的 binding 区；无 binding 但有父会话
         // 的 region 归为外部/未注册，其余未登记会话仍按真实语义报 `NotFound`。
         // 直接读区数据，不经过 `region()`：预检契约不含历史，不能在这里克隆 payload。
-        let regions = self.regions.lock().unwrap();
+        let regions = self
+            .regions
+            .lock()
+            .expect("self regions mutex must remain unpoisoned throughout the test");
         let Some(region) = regions.get(id) else {
             return Err(SessionResourceError::new(
                 SessionResourceErrorKind::NotFound,
@@ -245,11 +303,18 @@ impl SessionResources for MockSessionResources {
                 SessionResourceErrorKind::ReadOnlyStore,
             ));
         }
-        let gate = self.append_gate.lock().unwrap().take();
+        let gate = self
+            .append_gate
+            .lock()
+            .expect("self append gate mutex must remain unpoisoned throughout the test")
+            .take();
         if let Some(gate) = gate {
             gate.wait().await;
         }
-        self.injection.lock().unwrap().append_calls += 1;
+        self.injection
+            .lock()
+            .expect("self injection mutex must remain unpoisoned throughout the test")
+            .append_calls += 1;
         for payload in payloads {
             self.with_region(id, |region| region.payloads.push(payload.clone()));
         }
@@ -277,7 +342,10 @@ impl SessionResources for MockSessionResources {
                 .any(|payload| payload.id() == input.id)
         });
         if handed_off {
-            let mut clock = self.mq_clock.lock().unwrap();
+            let mut clock = self
+                .mq_clock
+                .lock()
+                .expect("self mq clock mutex must remain unpoisoned throughout the test");
             *clock += 1;
             let enqueued_at = format!("1970-01-01T00:00:00.{:06}Z", *clock);
             return Ok(peri_acp_types::session::MqEnqueueOutcome {
@@ -416,19 +484,30 @@ impl SessionResources for MockSessionResources {
 
     async fn mark_session_closing(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.ensure_writable()?;
-        self.closing.lock().unwrap().insert(id.clone());
+        self.closing
+            .lock()
+            .expect("self closing mutex must remain unpoisoned throughout the test")
+            .insert(id.clone());
         Ok(())
     }
 
     async fn is_session_closing(&self, id: &ThreadId) -> SessionResourceResult<bool> {
-        Ok(self.closing.lock().unwrap().contains(id))
+        Ok(self
+            .closing
+            .lock()
+            .expect("self closing mutex must remain unpoisoned throughout the test")
+            .contains(id))
     }
 
     async fn save_fork(&self, fork: &ForkSnapshot) -> SessionResourceResult<()> {
         self.ensure_writable()?;
         let target = &fork.target;
         self.with_region(&target.thread_id, |region| {
-            region.meta = Some(child_meta(&target.thread_id, &target.meta, false));
+            region.meta = Some(crate::session::test_resources::mock::child_meta(
+                &target.thread_id,
+                &target.meta,
+                false,
+            ));
             region.binding = Some(target.binding.clone());
             region.frozen = Some(target.frozen.as_str().to_owned());
             region.payloads = fork.payloads.clone();
@@ -443,7 +522,11 @@ impl SessionResources for MockSessionResources {
         // 与真实门面同构：child 的 frozen 逐字节取自 root 已保存快照、绑定继承父会话、
         // 继承区来自调用方；这里不做 SQL 层校验，但保留「一次写入成立」的形状。
         self.with_region(&target.thread_id, |region| {
-            region.meta = Some(child_meta(&target.thread_id, &target.meta, true));
+            region.meta = Some(crate::session::test_resources::mock::child_meta(
+                &target.thread_id,
+                &target.meta,
+                true,
+            ));
             region.binding = Some(target.binding.clone());
             region.frozen = Some(target.frozen.as_str().to_owned());
             region.inherited = child.inherited.clone();
@@ -472,7 +555,10 @@ impl SessionResources for MockSessionResources {
         }
         self.write_status(child, AgentStatus::Active);
         let claim_nonce = {
-            let mut ledger = self.claim_ledger.lock().unwrap();
+            let mut ledger = self
+                .claim_ledger
+                .lock()
+                .expect("self claim ledger mutex must remain unpoisoned throughout the test");
             ledger.next += 1;
             let nonce = ledger.next;
             ledger.current.insert(child.clone(), nonce);
@@ -501,7 +587,10 @@ impl SessionResources for MockSessionResources {
         change: &CompactionChange,
     ) -> SessionResourceResult<()> {
         self.ensure_writable()?;
-        let mut injection = self.injection.lock().unwrap();
+        let mut injection = self
+            .injection
+            .lock()
+            .expect("self injection mutex must remain unpoisoned throughout the test");
         injection.compaction_calls += 1;
         if injection.uncertain_compaction {
             return Err(SessionResourceError::persistence_uncertain(Some(
@@ -527,7 +616,12 @@ impl SessionResources for MockSessionResources {
                     .push(PersistedPayload::Message(message.clone()));
             }
         });
-        if let Some(hook) = self.compaction_applied_hook.lock().unwrap().take() {
+        if let Some(hook) = self
+            .compaction_applied_hook
+            .lock()
+            .expect("self compaction applied hook mutex must remain unpoisoned throughout the test")
+            .take()
+        {
             hook();
         }
         Ok(())
@@ -555,7 +649,10 @@ impl SessionResources for MockSessionResources {
         clear_excluded: &[MessageId],
     ) -> SessionResourceResult<RewindOutcome> {
         self.ensure_writable()?;
-        self.injection.lock().unwrap().rewind_calls += 1;
+        self.injection
+            .lock()
+            .expect("self injection mutex must remain unpoisoned throughout the test")
+            .rewind_calls += 1;
         let target = boundary.message_id();
         let Some(region) = self.region(id) else {
             return Err(SessionResourceError::new(
@@ -673,7 +770,7 @@ impl SessionResources for MockSessionResources {
         self.finalize_attempts.fetch_add(1, Ordering::SeqCst);
         self.finalize_message_ids
             .lock()
-            .unwrap()
+            .expect("self finalize message ids mutex must remain unpoisoned throughout the test")
             .push(message.payload.id());
         if self
             .finalize_failures

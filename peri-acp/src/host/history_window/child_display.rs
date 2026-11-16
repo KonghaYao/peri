@@ -623,19 +623,19 @@ impl<R: Read> Parser<R> {
                     }
                     b'u' => {
                         let first = self.hex4(&mut raw[2..6])?;
-                        let (scalar, raw_len) = if (0xD800..=0xDBFF).contains(&first) {
+                        let (scalar, raw_len) = if (0xd800..=0xdbff).contains(&first) {
                             raw[6] = self.byte()?;
                             raw[7] = self.byte()?;
                             if &raw[6..8] != b"\\u" {
                                 return Err(bad("missing low surrogate"));
                             }
                             let second = self.hex4(&mut raw[8..12])?;
-                            if !(0xDC00..=0xDFFF).contains(&second) {
+                            if !(0xdc00..=0xdfff).contains(&second) {
                                 return Err(bad("invalid low surrogate"));
                             }
                             (
-                                0x10000 + ((u32::from(first) - 0xD800) << 10) + u32::from(second)
-                                    - 0xDC00,
+                                0x10000 + ((u32::from(first) - 0xd800) << 10) + u32::from(second)
+                                    - 0xdc00,
                                 12,
                             )
                         } else {
@@ -654,13 +654,14 @@ impl<R: Read> Parser<R> {
                     return Err(bad("unescaped JSON control character"));
                 }
                 let len = match byte {
-                    0..=0x7F => 1,
-                    0xC2..=0xDF => 2,
-                    0xE0..=0xEF => 3,
-                    0xF0..=0xF4 => 4,
+                    0..=0x7f => 1,
+                    0xc2..=0xdf => 2,
+                    0xe0..=0xef => 3,
+                    0xf0..=0xf4 => 4,
                     _ => return Err(bad("invalid UTF-8 string")),
                 };
-                for slot in raw.iter_mut().take(len).skip(1) {
+                let remaining_slot = raw.iter_mut().take(len).skip(1);
+                for slot in remaining_slot {
                     *slot = self.byte()?;
                 }
                 std::str::from_utf8(&raw[..len]).map_err(|_| bad("invalid UTF-8 string"))?;
@@ -725,7 +726,11 @@ impl<R: Read> Parser<R> {
     }
 
     fn reminder_probe(&mut self, depth: usize) -> io::Result<bool> {
-        use peri_acp_types::system_reminder::*;
+        use peri_acp_types::system_reminder;
+        use peri_acp_types::system_reminder::{
+            ReminderAudience, SystemReminder, TrustedSystemReminderFactory,
+            MAX_REMINDER_BODY_BYTES, MAX_REMINDER_SUMMARY_BYTES,
+        };
         self.expect(b'{')?;
         let mut policy = serde_json::Map::new();
         let mut body = false;
@@ -844,7 +849,10 @@ impl<R: Read> Parser<R> {
             .construct(dto)
             .ok()
             .is_some_and(|reminder| {
-                reminder_egress_allowed(reminder.as_reminder(), ReminderAudience::Tui)
+                system_reminder::reminder_egress_allowed(
+                    reminder.as_reminder(),
+                    ReminderAudience::Tui,
+                )
             }))
     }
 }

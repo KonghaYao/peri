@@ -1,5 +1,8 @@
-use super::*;
-use crate::kit::message_area::render::{vm_to_lines, vm_to_lines_cached};
+use super::GridSpec;
+use super::TuiNoteLevel;
+use super::TuiRenderUnit;
+use unicode_width::UnicodeWidthStr;
+
 use crate::kit::tui_render_unit::{FoldState, TuiSubAgentGroup, TuiSystemNote, TuiToolCard};
 
 fn note(text: &str, level: TuiNoteLevel) -> TuiRenderUnit {
@@ -49,35 +52,35 @@ fn group(children: Vec<TuiRenderUnit>, reason: Option<&str>) -> TuiRenderUnit {
 #[test]
 fn error_preview_wraps_instead_of_truncating_first_line() {
     assert_eq!(
-        preview_lines("abcdefghijkl", 4, 3),
+        super::preview_lines("abcdefghijkl", 4, 3),
         ["abcd", "efgh", "ijkl"]
     );
 }
 
 #[test]
 fn error_preview_limits_rows_with_an_ellipsis() {
-    let lines = preview_lines(&"long error ".repeat(10_000), 10, 3);
+    let lines = super::preview_lines(&"long error ".repeat(10_000), 10, 3);
     assert_eq!(lines.len(), 3);
-    assert!(lines.last().unwrap().ends_with('…'));
+    assert!(lines.last().expect("error preview limits rows with an ellipsis: the fixture collection must contain the expected entry").ends_with('…'));
     assert!(lines.iter().all(|line| line.width() <= 10));
 }
 
 #[test]
 fn error_preview_preserves_graphemes_and_explicit_newlines() {
     assert_eq!(
-        preview_lines("界界\n👩‍💻e\u{301}", 4, 3),
+        super::preview_lines("界界\n👩‍💻e\u{301}", 4, 3),
         ["界界", "👩‍💻e\u{301}"]
     );
     assert_eq!(
-        preview_lines("one\r\ntwo\r\nthree\r\n", 8, 3),
+        super::preview_lines("one\r\ntwo\r\nthree\r\n", 8, 3),
         ["one", "two", "three"]
     );
     assert_eq!(
-        preview_lines("one\ntwo\nthree\nfour", 8, 3),
+        super::preview_lines("one\ntwo\nthree\nfour", 8, 3),
         ["one", "two", "three…"]
     );
     assert!(
-        preview_lines("界界", 1, 3)
+        super::preview_lines("界界", 1, 3)
             .iter()
             .all(|line| line.width() <= 1)
     );
@@ -85,9 +88,9 @@ fn error_preview_preserves_graphemes_and_explicit_newlines() {
 
 #[test]
 fn error_preview_handles_zero_width_and_empty_text() {
-    assert!(preview_lines("error", 0, 3).is_empty());
-    assert!(preview_lines("error", 10, 0).is_empty());
-    assert_eq!(preview_lines("", 10, 3), [""]);
+    assert!(super::preview_lines("error", 0, 3).is_empty());
+    assert!(super::preview_lines("error", 10, 0).is_empty());
+    assert_eq!(super::preview_lines("", 10, 3), [""]);
 }
 
 #[test]
@@ -97,14 +100,15 @@ fn system_error_icon_is_a_copy_target_even_on_narrow_terminals() {
     for width in [12, 30, 80, 120] {
         let grid = GridSpec::grid_for(width);
         let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-        let (lines, button, _, _) = vm_to_lines_cached(&vm, &grid, &mut cache, true);
+        let (lines, button, _, _) =
+            crate::kit::message_area::render::vm_to_lines_cached(&vm, &grid, &mut cache, true);
         assert_eq!(lines.len(), 3);
         assert!(
             lines
                 .iter()
                 .all(|line| line.width() <= grid.first_prefix_width() + grid.content_width())
         );
-        let button = button.unwrap();
+        let button = button.expect("system error icon is a copy target even on narrow terminals: the unwrap fixture operation uses valid inputs");
         assert_eq!(button.logical_idx, 0);
         // 命中列 = 渲染行里错误符号的实际列：≥60 列符号排在过程区左缘标记列
         // （col3 = `process_marker_col`），<60 列前缀回退基准形态、符号占 accent 列
@@ -129,7 +133,7 @@ fn system_error_icon_is_a_copy_target_even_on_narrow_terminals() {
             "width={width}: 命中列与渲染符号列一致"
         );
         assert_eq!(
-            copy_text_at(&vm, button.logical_idx).as_deref(),
+            super::copy_text_at(&vm, button.logical_idx).as_deref(),
             Some(text.as_str())
         );
     }
@@ -139,12 +143,17 @@ fn system_error_icon_is_a_copy_target_even_on_narrow_terminals() {
 fn warning_and_info_notes_are_not_copy_targets() {
     for level in [TuiNoteLevel::Warning, TuiNoteLevel::Info] {
         let vm = note("not an error", level);
-        assert!(copy_text_at(&vm, 0).is_none());
+        assert!(super::copy_text_at(&vm, 0).is_none());
         let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
         assert!(
-            vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true)
-                .1
-                .is_none()
+            crate::kit::message_area::render::vm_to_lines_cached(
+                &vm,
+                &GridSpec::grid_for(80),
+                &mut cache,
+                true
+            )
+            .1
+            .is_none()
         );
     }
 }
@@ -154,9 +163,9 @@ fn tool_error_preview_is_three_rows_and_copy_is_not_clipped() {
     let text = "first line\n".to_owned() + &"detailed error ".repeat(50);
     let vm = tool(&text);
     let grid = GridSpec::grid_for(80);
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = crate::kit::message_area::render::vm_to_lines(&vm, &grid);
     assert_eq!(lines.len(), 3);
-    assert_eq!(copy_text_at(&vm, 0).as_deref(), Some(text.as_str()));
+    assert_eq!(super::copy_text_at(&vm, 0).as_deref(), Some(text.as_str()));
 }
 
 #[test]
@@ -166,31 +175,34 @@ fn subagent_error_icons_copy_their_own_complete_error() {
     let parent = "parent failure\n".to_owned() + &"cause ".repeat(40);
     let vm = group(vec![tool(&first), tool(&second)], Some(&parent));
     let grid = GridSpec::grid_for(80);
-    let buttons = subagent_error_buttons(&vm, &grid);
+    let buttons = super::subagent_error_buttons(&vm, &grid);
     assert_eq!(buttons.len(), 3);
     assert_eq!(
-        copy_text_at(&vm, buttons[0].logical_idx).as_deref(),
+        super::copy_text_at(&vm, buttons[0].logical_idx).as_deref(),
         Some(second.as_str())
     );
     assert_eq!(
-        copy_text_at(&vm, buttons[1].logical_idx).as_deref(),
+        super::copy_text_at(&vm, buttons[1].logical_idx).as_deref(),
         Some(first.as_str())
     );
     assert_eq!(
-        copy_text_at(&vm, buttons[2].logical_idx).as_deref(),
+        super::copy_text_at(&vm, buttons[2].logical_idx).as_deref(),
         Some(parent.as_str())
     );
-    assert_eq!(vm_to_lines(&vm, &grid).len(), 5);
+    assert_eq!(
+        crate::kit::message_area::render::vm_to_lines(&vm, &grid).len(),
+        5
+    );
 }
 
 #[test]
 fn subagent_fallback_keeps_the_entire_error_for_copy() {
     let text = "first error line\nsecond error line\nthird error line\nfourth";
     let vm = group(vec![tool(text)], None);
-    let buttons = subagent_error_buttons(&vm, &GridSpec::grid_for(80));
+    let buttons = super::subagent_error_buttons(&vm, &GridSpec::grid_for(80));
     assert_eq!(buttons.len(), 2);
     assert_eq!(
-        copy_text_at(&vm, buttons[1].logical_idx).as_deref(),
+        super::copy_text_at(&vm, buttons[1].logical_idx).as_deref(),
         Some(text)
     );
 }
@@ -202,9 +214,12 @@ fn successful_subagent_keeps_child_error_local_and_ignores_stale_parent_reason()
         data.is_error = false;
     }
     let grid = GridSpec::grid_for(80);
-    let buttons = subagent_error_buttons(&vm, &grid);
+    let buttons = super::subagent_error_buttons(&vm, &grid);
     assert_eq!(buttons.len(), 1);
-    assert_eq!(vm_to_lines(&vm, &grid).len(), 1);
-    assert_eq!(copy_text_at(&vm, 0).as_deref(), Some("child error"));
-    assert!(copy_text_at(&vm, 1).is_none());
+    assert_eq!(
+        crate::kit::message_area::render::vm_to_lines(&vm, &grid).len(),
+        1
+    );
+    assert_eq!(super::copy_text_at(&vm, 0).as_deref(), Some("child error"));
+    assert!(super::copy_text_at(&vm, 1).is_none());
 }

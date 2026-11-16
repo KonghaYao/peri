@@ -1,10 +1,12 @@
 // ─── build_subagent_middlewares 单元测试 ───────────────────────────────────
 
-use super::{build_subagent_middlewares, SubAgentMiddlewareConfig};
+use crate::subagent::SubAgentMiddlewareConfig;
 
 #[test]
 fn test_build_middleware_fork_config_无_skill_preload() {
-    let middlewares = build_subagent_middlewares(SubAgentMiddlewareConfig::for_fork("/tmp"));
+    let middlewares = crate::subagent::tool::build_subagent_middlewares(
+        SubAgentMiddlewareConfig::for_fork("/tmp"),
+    );
     assert_eq!(middlewares.len(), 4);
     let names: Vec<&str> = middlewares.iter().map(|m| m.name()).collect();
     assert_eq!(
@@ -20,8 +22,9 @@ fn test_build_middleware_fork_config_无_skill_preload() {
 
 #[test]
 fn test_build_middleware_agent_def_空技能_无_skill_preload() {
-    let middlewares =
-        build_subagent_middlewares(SubAgentMiddlewareConfig::for_agent_def(vec![], "/tmp"));
+    let middlewares = crate::subagent::tool::build_subagent_middlewares(
+        SubAgentMiddlewareConfig::for_agent_def(vec![], "/tmp"),
+    );
     assert_eq!(middlewares.len(), 4);
     assert!(!middlewares
         .iter()
@@ -30,10 +33,9 @@ fn test_build_middleware_agent_def_空技能_无_skill_preload() {
 
 #[test]
 fn test_build_middleware_agent_def_有技能_包含_skill_preload() {
-    let middlewares = build_subagent_middlewares(SubAgentMiddlewareConfig::for_agent_def(
-        vec!["test-skill".to_string()],
-        "/tmp",
-    ));
+    let middlewares = crate::subagent::tool::build_subagent_middlewares(
+        SubAgentMiddlewareConfig::for_agent_def(vec!["test-skill".to_string()], "/tmp"),
+    );
     assert_eq!(middlewares.len(), 5);
     let names: Vec<&str> = middlewares.iter().map(|m| m.name()).collect();
     assert_eq!(
@@ -51,10 +53,9 @@ fn test_build_middleware_agent_def_有技能_包含_skill_preload() {
 #[test]
 fn test_build_middleware_顺序固定() {
     // 有 skills 时验证完整顺序
-    let middlewares = build_subagent_middlewares(SubAgentMiddlewareConfig::for_agent_def(
-        vec!["a".to_string()],
-        "/tmp",
-    ));
+    let middlewares = crate::subagent::tool::build_subagent_middlewares(
+        SubAgentMiddlewareConfig::for_agent_def(vec!["a".to_string()], "/tmp"),
+    );
     let names: Vec<&str> = middlewares.iter().map(|m| m.name()).collect();
     assert_eq!(
         names,
@@ -73,7 +74,7 @@ fn test_build_middleware_顺序固定() {
 /// 子链独立装配：关闭的 middleware 不进子链，未禁用项保持原相对顺序。
 #[test]
 fn test_build_middleware_meta_harness_disabled_filters_chain() {
-    let baseline: Vec<String> = build_subagent_middlewares(
+    let baseline: Vec<String> = crate::subagent::tool::build_subagent_middlewares(
         SubAgentMiddlewareConfig::for_agent_def(vec!["a".to_string()], "/tmp"),
     )
     .iter()
@@ -100,7 +101,7 @@ fn test_build_middleware_meta_harness_disabled_filters_chain() {
     for mw in cases {
         let mut disabled = std::collections::HashSet::new();
         disabled.insert(mw.to_string());
-        let names: Vec<String> = build_subagent_middlewares(
+        let names: Vec<String> = crate::subagent::tool::build_subagent_middlewares(
             SubAgentMiddlewareConfig::for_agent_def(vec!["a".to_string()], "/tmp")
                 .with_meta_harness_disabled(disabled),
         )
@@ -121,7 +122,7 @@ fn test_build_middleware_meta_harness_disabled_filters_chain() {
 fn test_build_middleware_meta_harness_disabled_skill_preload_suppresses_declared_skills() {
     let mut disabled = std::collections::HashSet::new();
     disabled.insert("SkillPreloadMiddleware".to_string());
-    let middlewares = build_subagent_middlewares(
+    let middlewares = crate::subagent::tool::build_subagent_middlewares(
         SubAgentMiddlewareConfig::for_agent_def(vec!["declared-skill".to_string()], "/tmp")
             .with_meta_harness_disabled(disabled),
     );
@@ -140,7 +141,9 @@ fn test_build_middleware_meta_harness_disabled_skill_preload_suppresses_declared
 /// 空 disabled 集合（默认）下子链与原行为完全一致（for_fork 3 件套）。
 #[test]
 fn test_build_middleware_meta_harness_default_empty_unchanged() {
-    let middlewares = build_subagent_middlewares(SubAgentMiddlewareConfig::for_fork("/tmp"));
+    let middlewares = crate::subagent::tool::build_subagent_middlewares(
+        SubAgentMiddlewareConfig::for_fork("/tmp"),
+    );
     let names: Vec<&str> = middlewares.iter().map(|m| m.name()).collect();
     assert_eq!(
         names,
@@ -178,7 +181,7 @@ async fn test_subagent_中间件链_注入_frozen_claude_md() {
     );
 
     // Act: 构造中间件链，模拟 SubAgent spawn
-    let middlewares = build_subagent_middlewares(config);
+    let middlewares = crate::subagent::tool::build_subagent_middlewares(config);
     let _state = AgentState::new(&cwd);
 
     // 找到 AgentsMdMiddleware（v2 通过 prompt_contribution 声明贡献，不再 prepend_message）
@@ -207,7 +210,7 @@ async fn test_subagent_中间件链_无_frozen_回退磁盘() {
     let cwd = tmp.path().to_str().unwrap().to_string();
 
     let config = SubAgentMiddlewareConfig::for_fork(&cwd);
-    let middlewares = build_subagent_middlewares(config);
+    let middlewares = crate::subagent::tool::build_subagent_middlewares(config);
     let mut state = AgentState::new(&cwd);
 
     let agents_md = middlewares

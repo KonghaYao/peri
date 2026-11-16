@@ -14,7 +14,7 @@ impl InteractionLifecycle {
     /// 入队，下一批因此保持 wire 顺序。只有再次加锁发现队列为空时，才在同一临界区
     /// 清除 pending 并返回 `None`；此后通知恢复即时 Forward。
     pub fn take_buffered_batch(&self) -> Option<Vec<AcpNotification>> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         if !state.new_flush_pending {
             return None;
         }
@@ -46,7 +46,7 @@ impl InteractionLifecycle {
         if session_id.is_empty() {
             return OrdinaryDecision::Forward(Box::new(notification));
         }
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         if state.deleted_session_ids.contains(&session_id) {
             return OrdinaryDecision::Drop;
         }

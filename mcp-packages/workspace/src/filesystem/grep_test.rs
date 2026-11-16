@@ -1,5 +1,3 @@
-use super::*;
-
 #[path = "grep_basic_test.rs"]
 mod basic_tests;
 

@@ -1,11 +1,9 @@
-use super::super::*;
-use peri_acp_types::workspace::*;
-#[cfg(unix)]
-use std::io::Read;
+use crate::sessions::SqliteThreadStore;
+use peri_acp_types::store::ThreadStore;
+use peri_acp_types::thread::{ThreadId, ThreadMeta};
+use peri_acp_types::workspace::ResolvedWorkspace;
 use std::path::Path;
 use std::sync::Arc;
-#[cfg(unix)]
-use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 fn git(root: &Path, args: &[&str]) {
@@ -49,7 +47,7 @@ fn repository() -> TempDir {
 
 async fn store() -> (SqliteThreadStore, TempDir) {
     let directory = tempfile::tempdir().unwrap();
-    let store = SqliteThreadStore::new(directory.path().join("threads.db"))
+    let store = SqliteThreadStore::try_new(directory.path().join("threads.db"))
         .await
         .unwrap();
     (store, directory)

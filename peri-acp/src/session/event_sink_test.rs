@@ -1,10 +1,20 @@
 //! ACP sink wire、capability 与来源投影回归测试。
 
-use super::*;
 use crate::event::AcpEvent;
+use crate::session::event_sink::transport_event_sink::TransportEventSink;
 use crate::transport::types::{AcpError, IncomingMessage, RequestId};
+use crate::transport::AcpTransport;
+use agent_client_protocol::schema::v1::SessionId as SdkSessionId;
+use agent_client_protocol::schema::v1::SessionNotification;
+use agent_client_protocol::schema::v1::SessionUpdate;
+use async_trait::async_trait;
+use dashmap::DashMap;
+use peri_acp_types::event::EventSink;
+use peri_acp_types::event::ExecutorEvent;
 use peri_acp_types::messages::{BaseMessage, MessageContent, MessageId};
+use peri_acp_types::PeriCaps;
 use serde_json::Value;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 /// Mock transport：记录 send_notification 调用，供断言。
@@ -621,8 +631,11 @@ fn session_notification_preserves_source_identity_through_typed_roundtrip() {
     let update = SessionUpdate::ToolCall(agent_client_protocol::schema::v1::ToolCall::new(
         "call-1", "Read",
     ));
-    let notification =
-        session_notification(SdkSessionId::from("s1"), update, Some("child-agent-1"));
+    let notification = crate::session::event_sink::stdio::session_notification(
+        SdkSessionId::from("s1"),
+        update,
+        Some("child-agent-1"),
+    );
 
     let wire = serde_json::to_value(notification).unwrap();
     let decoded: SessionNotification = serde_json::from_value(wire).unwrap();

@@ -1,22 +1,22 @@
-use tempfile::tempdir;
+use tempfile;
 
-use super::*;
+use super::InstalledPlugins;
 use crate::plugin::types::{
     InstallScope, InstalledPlugin, KnownMarketplace, MarketplaceSource, PluginOrigin,
 };
 
 #[test]
 fn test_load_installed_plugins_nonexistent() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nonexistent.json");
-    let result = load_installed_plugins(Some(&path)).unwrap();
+    let result = super::load_installed_plugins(Some(&path)).unwrap();
     assert_eq!(result.version, 2);
     assert!(result.plugins.is_empty());
 }
 
 #[test]
 fn test_save_and_load_installed_plugins() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("installed_plugins.json");
     let plugins = InstalledPlugins {
         version: 2,
@@ -31,8 +31,8 @@ fn test_save_and_load_installed_plugins() {
             origin: PluginOrigin::PeriInstalled,
         }],
     };
-    save_installed_plugins(&plugins, Some(&path)).unwrap();
-    let loaded = load_installed_plugins(Some(&path)).unwrap();
+    super::save_installed_plugins(&plugins, Some(&path)).unwrap();
+    let loaded = super::load_installed_plugins(Some(&path)).unwrap();
     assert_eq!(loaded.version, 2);
     assert_eq!(loaded.plugins.len(), 1);
     assert_eq!(loaded.plugins[0].id, "test-id");
@@ -41,15 +41,15 @@ fn test_save_and_load_installed_plugins() {
 
 #[test]
 fn test_load_known_marketplaces_nonexistent() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nonexistent.json");
-    let result = load_known_marketplaces(Some(&path)).unwrap();
+    let result = super::load_known_marketplaces(Some(&path)).unwrap();
     assert!(result.is_empty());
 }
 
 #[test]
 fn test_save_and_load_known_marketplaces() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("marketplaces.json");
     let marketplaces = vec![KnownMarketplace {
         source: MarketplaceSource::GitHub {
@@ -59,23 +59,23 @@ fn test_save_and_load_known_marketplaces() {
         auto_update: true,
         last_updated: "2025-01-01".into(),
     }];
-    save_known_marketplaces(&marketplaces, Some(&path)).unwrap();
-    let loaded = load_known_marketplaces(Some(&path)).unwrap();
+    super::save_known_marketplaces(&marketplaces, Some(&path)).unwrap();
+    let loaded = super::load_known_marketplaces(Some(&path)).unwrap();
     assert_eq!(loaded.len(), 1);
 }
 
 #[test]
 fn test_load_claude_settings_nonexistent() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nonexistent.json");
-    let result = load_claude_settings(Some(&path)).unwrap();
+    let result = super::load_claude_settings(Some(&path)).unwrap();
     assert!(result.enabled_plugins.is_empty());
     assert!(result.extra_known_marketplaces.is_empty());
 }
 
 #[test]
 fn test_load_claude_settings_with_plugins() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
     let json = r#"{
             "enabledPlugins": ["plugin-a", "plugin-b"],
@@ -84,14 +84,14 @@ fn test_load_claude_settings_with_plugins() {
             ]
         }"#;
     std::fs::write(&path, json).unwrap();
-    let settings = load_claude_settings(Some(&path)).unwrap();
+    let settings = super::load_claude_settings(Some(&path)).unwrap();
     assert_eq!(settings.enabled_plugins, vec!["plugin-a", "plugin-b"]);
     assert_eq!(settings.extra_known_marketplaces.len(), 1);
 }
 
 #[test]
 fn test_load_claude_settings_extra_marketplaces_object_format() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
     let json = r#"{
             "enabledPlugins": [],
@@ -102,13 +102,13 @@ fn test_load_claude_settings_extra_marketplaces_object_format() {
             }
         }"#;
     std::fs::write(&path, json).unwrap();
-    let settings = load_claude_settings(Some(&path)).unwrap();
+    let settings = super::load_claude_settings(Some(&path)).unwrap();
     assert_eq!(settings.extra_known_marketplaces.len(), 1);
 }
 
 #[test]
 fn test_load_claude_settings_enabled_plugins_object_format() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
     let json = r#"{
             "enabledPlugins": {
@@ -118,7 +118,7 @@ fn test_load_claude_settings_enabled_plugins_object_format() {
             }
         }"#;
     std::fs::write(&path, json).unwrap();
-    let settings = load_claude_settings(Some(&path)).unwrap();
+    let settings = super::load_claude_settings(Some(&path)).unwrap();
     assert_eq!(
         settings.enabled_plugins,
         vec!["plugin-a@marketplace", "plugin-b@marketplace"]
@@ -127,7 +127,7 @@ fn test_load_claude_settings_enabled_plugins_object_format() {
 
 #[test]
 fn test_load_claude_settings_enabled_plugins_mixed_with_other_fields() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
     let json = r#"{
             "env": {"KEY": "value"},
@@ -138,7 +138,7 @@ fn test_load_claude_settings_enabled_plugins_mixed_with_other_fields() {
             "model": "opus"
         }"#;
     std::fs::write(&path, json).unwrap();
-    let settings = load_claude_settings(Some(&path)).unwrap();
+    let settings = super::load_claude_settings(Some(&path)).unwrap();
     assert_eq!(settings.enabled_plugins.len(), 2);
     assert!(settings
         .enabled_plugins
@@ -147,7 +147,7 @@ fn test_load_claude_settings_enabled_plugins_mixed_with_other_fields() {
 
 #[test]
 fn test_load_claude_settings_ignores_unknown_fields() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
     let json = r#"{
             "otherKey": 42,
@@ -155,18 +155,18 @@ fn test_load_claude_settings_ignores_unknown_fields() {
             "unknownNested": {"a": 1}
         }"#;
     std::fs::write(&path, json).unwrap();
-    let settings = load_claude_settings(Some(&path)).unwrap();
+    let settings = super::load_claude_settings(Some(&path)).unwrap();
     assert_eq!(settings.enabled_plugins, vec!["plugin-a"]);
 }
 
 #[test]
 fn test_load_plugin_manifest_success() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let plugin_dir = dir.path().join(".claude-plugin");
     std::fs::create_dir_all(&plugin_dir).unwrap();
     let json = r#"{"name":"test-plugin","version":"1.0.0","description":"A test plugin"}"#;
     std::fs::write(plugin_dir.join("plugin.json"), json).unwrap();
-    let manifest = load_plugin_manifest(dir.path()).unwrap();
+    let manifest = super::load_plugin_manifest(dir.path()).unwrap();
     assert_eq!(manifest.name, "test-plugin");
     assert_eq!(manifest.version, "1.0.0");
     assert_eq!(manifest.description, "A test plugin");
@@ -174,31 +174,31 @@ fn test_load_plugin_manifest_success() {
 
 #[test]
 fn test_load_plugin_manifest_missing_name_ok() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let plugin_dir = dir.path().join(".claude-plugin");
     std::fs::create_dir_all(&plugin_dir).unwrap();
     let json = r#"{"version":"1.0.0"}"#;
     std::fs::write(plugin_dir.join("plugin.json"), json).unwrap();
-    let manifest = load_plugin_manifest(dir.path()).unwrap();
+    let manifest = super::load_plugin_manifest(dir.path()).unwrap();
     assert!(manifest.name.is_empty());
     assert_eq!(manifest.version, "1.0.0");
 }
 
 #[test]
 fn test_load_plugin_manifest_missing_version_ok() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let plugin_dir = dir.path().join(".claude-plugin");
     std::fs::create_dir_all(&plugin_dir).unwrap();
     let json = r#"{"name":"test"}"#;
     std::fs::write(plugin_dir.join("plugin.json"), json).unwrap();
-    let manifest = load_plugin_manifest(dir.path()).unwrap();
+    let manifest = super::load_plugin_manifest(dir.path()).unwrap();
     assert_eq!(manifest.name, "test");
     assert!(manifest.version.is_empty());
 }
 
 #[test]
 fn test_save_claude_settings_enabled_plugins_preserves_other_fields() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
     // 写入包含 enabledPlugins 和其他字段的 JSON
     let json = r#"{
@@ -208,7 +208,7 @@ fn test_save_claude_settings_enabled_plugins_preserves_other_fields() {
         }"#;
     std::fs::write(&path, json).unwrap();
 
-    save_claude_settings_enabled_plugins(
+    super::save_claude_settings_enabled_plugins(
         &[("a@m".into(), true), ("c@m".into(), false)],
         Some(&path),
     )
@@ -228,10 +228,10 @@ fn test_save_claude_settings_enabled_plugins_preserves_other_fields() {
 
 #[test]
 fn test_save_claude_settings_enabled_plugins_new_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
 
-    save_claude_settings_enabled_plugins(&[("x@m".into(), false)], Some(&path)).unwrap();
+    super::save_claude_settings_enabled_plugins(&[("x@m".into(), false)], Some(&path)).unwrap();
 
     let content = std::fs::read_to_string(&path).unwrap();
     let value: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -242,12 +242,12 @@ fn test_save_claude_settings_enabled_plugins_new_file() {
 
 #[test]
 fn test_save_claude_settings_enabled_plugins_empty_list() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
     let json = r#"{"enabledPlugins": {"a@m": true}}"#;
     std::fs::write(&path, json).unwrap();
 
-    save_claude_settings_enabled_plugins(&[], Some(&path)).unwrap();
+    super::save_claude_settings_enabled_plugins(&[], Some(&path)).unwrap();
 
     let content = std::fs::read_to_string(&path).unwrap();
     let value: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -256,7 +256,7 @@ fn test_save_claude_settings_enabled_plugins_empty_list() {
 
 #[test]
 fn test_plugins_dir_uses_claude_home() {
-    let path = plugins_dir();
+    let path = super::plugins_dir();
     let path_str = path.to_string_lossy();
     assert!(path_str.contains(".claude"));
     assert!(path_str.contains("plugins"));
@@ -269,10 +269,10 @@ fn test_plugins_dir_uses_claude_home() {
 #[test]
 fn test_claude_home_prefers_absolute_home_env() {
     let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
-    let home = tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
     let previous = std::env::var_os("HOME");
     std::env::set_var("HOME", home.path());
-    let resolved = claude_home();
+    let resolved = super::claude_home();
     match previous {
         Some(value) => std::env::set_var("HOME", value),
         None => std::env::remove_var("HOME"),
@@ -288,9 +288,9 @@ fn test_ensure_plugin_dirs_creates_missing_dirs() {
     // 注意：ensure_plugin_dirs() 操作的是真实 claude_home，
     // 这里只验证函数不 panic 且目标目录结构合理
     // 实际目录创建由 CI/本地 ~/.claude/ 验证
-    let plugins = plugins_dir();
-    let marketplaces = marketplaces_cache_dir();
-    let cache = plugin_cache_dir();
+    let plugins = super::plugins_dir();
+    let marketplaces = super::marketplaces_cache_dir();
+    let cache = super::plugin_cache_dir();
 
     // 验证路径层级关系
     assert!(marketplaces.starts_with(&plugins));

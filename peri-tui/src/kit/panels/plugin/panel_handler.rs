@@ -1,13 +1,11 @@
 use crate::components::textarea::TextAreaState;
-use crate::kit::atoms::{PLUGIN_LIST, PluginViewTab};
-use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
-use crate::kit::panel_mouse::{ListLayout, hit_item, hit_row, is_scrollbar_column};
+
+use crate::kit::panel_mouse::ListLayout;
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui_kit::prelude::{EventResult, State};
 use ratatui_kit::ratatui::layout::Rect;
 
-use super::data::get_marketplace_cache;
-use super::{VISIBLE_ITEMS, action_list, cycle_backward, cycle_forward};
+use super::VISIBLE_ITEMS;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_panel_event(
@@ -45,7 +43,7 @@ pub(super) fn handle_panel_event(
     // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
     if let Event::Mouse(mouse) = event {
         if let Some(area) = area
-            && !is_scrollbar_column(&mouse, area)
+            && !crate::kit::panel_mouse::is_scrollbar_column(&mouse, area)
         {
             // ── 确认模式（uninstall / delete_marketplace）：点击 = 确认（Enter @L625）──
             let confirmation = confirm_action.read().clone();
@@ -81,7 +79,7 @@ pub(super) fn handle_panel_event(
             // 同上：提取为 bool，避免 if-let scrutinee guard 存活到块内
             let in_marketplace_detail = marketplace_detail.read().is_some();
             if in_marketplace_detail
-                && let Some(idx) = hit_item(
+                && let Some(idx) = crate::kit::panel_mouse::hit_item(
                     &mouse,
                     area,
                     ListLayout {
@@ -96,7 +94,7 @@ pub(super) fn handle_panel_event(
             {
                 *marketplace_detail_action.write() = idx;
                 let identity = marketplace_detail.read().clone();
-                let entries = get_marketplace_cache();
+                let entries = super::data::get_marketplace_cache();
                 if let Some(entry) = identity
                     .as_ref()
                     .and_then(|key| key.resolve(&entries, event_scope))
@@ -136,7 +134,7 @@ pub(super) fn handle_panel_event(
                 )
             {
                 *action_index.write() = idx;
-                let actions = action_list(detail_p.enabled);
+                let actions = super::action_list(detail_p.enabled);
                 if let Some(action) = actions.get(idx) {
                     super::operation::installed_action(
                         action,
@@ -152,9 +150,12 @@ pub(super) fn handle_panel_event(
             match *active_tab.read() {
                 PluginViewTab::Installed => {
                     let count = PLUGIN_LIST.state().read().len();
-                    let scroll_start =
-                        scroll_start_for_selected(*selected.read(), count, VISIBLE_ITEMS);
-                    if let Some(idx) = hit_item(
+                    let scroll_start = crate::kit::list_nav::scroll_start_for_selected(
+                        *selected.read(),
+                        count,
+                        VISIBLE_ITEMS,
+                    );
+                    if let Some(idx) = crate::kit::panel_mouse::hit_item(
                         &mouse,
                         area,
                         ListLayout {
@@ -176,9 +177,9 @@ pub(super) fn handle_panel_event(
                     }
                 }
                 PluginViewTab::Marketplaces => {
-                    let entries_len = get_marketplace_cache().len();
+                    let entries_len = super::data::get_marketplace_cache().len();
                     // Add 行（内容行 3）单独命中：激活 add 输入（Enter @L722）
-                    if hit_row(
+                    if crate::kit::panel_mouse::hit_row(
                         mouse.row,
                         area,
                         ListLayout {
@@ -198,7 +199,7 @@ pub(super) fn handle_panel_event(
                         return EventResult::Consumed;
                     }
                     // 条目（内容行 5 起，每项 3 行）：点击 = 进详情（Enter @L726）
-                    if let Some(idx) = hit_item(
+                    if let Some(idx) = crate::kit::panel_mouse::hit_item(
                         &mouse,
                         area,
                         ListLayout {
@@ -212,7 +213,7 @@ pub(super) fn handle_panel_event(
                     ) {
                         let s = idx + 1;
                         *selected.write() = s;
-                        *marketplace_detail.write() = get_marketplace_cache()
+                        *marketplace_detail.write() = super::data::get_marketplace_cache()
                             .get(s.saturating_sub(1))
                             .map(|entry| {
                                 super::MarketplaceIdentity::new(entry, event_scope.clone())
@@ -255,7 +256,7 @@ pub(super) fn handle_panel_event(
             }
             KeyCode::Enter => {
                 let identity = marketplace_detail.read().clone();
-                let entries = get_marketplace_cache();
+                let entries = super::data::get_marketplace_cache();
                 if let Some(entry) = identity
                     .as_ref()
                     .and_then(|key| key.resolve(&entries, event_scope))
@@ -327,13 +328,13 @@ pub(super) fn handle_panel_event(
         // ── Tab/Shift+Tab 切换视图 ──
         (false, false, KeyCode::Tab) => {
             let mut tab = active_tab.write();
-            *tab = cycle_forward(*tab);
+            *tab = super::cycle_forward(*tab);
             *selected.write() = 0;
             discover.write().selected = 0;
         }
         (false, false, KeyCode::BackTab) => {
             let mut tab = active_tab.write();
-            *tab = cycle_backward(*tab);
+            *tab = super::cycle_backward(*tab);
             *selected.write() = 0;
             discover.write().selected = 0;
         }
@@ -354,14 +355,14 @@ pub(super) fn handle_panel_event(
                 // Fall through for Discover tab
             } else if *active_tab.read() == PluginViewTab::Marketplaces {
                 let s = *selected.read();
-                let entries = get_marketplace_cache(); // 非阻塞缓存读取
+                let entries = super::data::get_marketplace_cache(); // 非阻塞缓存读取
                 if s == 0 {
                     // "Add Marketplace" — activate text input
                     *add_marketplace_active.write() = true;
                     *add_marketplace_input.write() = TextAreaState::default();
                 } else if entries.get(s.saturating_sub(1)).is_some() {
                     // Enter marketplace detail
-                    *marketplace_detail.write() = get_marketplace_cache()
+                    *marketplace_detail.write() = super::data::get_marketplace_cache()
                         .get(s.saturating_sub(1))
                         .map(|entry| super::MarketplaceIdentity::new(entry, event_scope.clone()));
                     *marketplace_detail_action.write() = 0;
@@ -380,7 +381,7 @@ pub(super) fn handle_panel_event(
                 .as_ref()
                 .and_then(|key| key.resolve(&plugins, event_scope))
             {
-                let actions = action_list(p.enabled);
+                let actions = super::action_list(p.enabled);
                 let ai =
                     super::operation::detail_action_index(&event, area, p, *action_index.read());
                 if let Some(action) = ai.and_then(|index| actions.get(index)) {
@@ -402,7 +403,7 @@ pub(super) fn handle_panel_event(
                 .as_ref()
                 .and_then(|key| key.resolve(&plugins, event_scope))
             {
-                let actions = action_list(p.enabled);
+                let actions = super::action_list(p.enabled);
                 let ai = *action_index.read();
                 *action_index.write() = if ai == 0 {
                     actions.len().saturating_sub(1)
@@ -418,7 +419,7 @@ pub(super) fn handle_panel_event(
                 .as_ref()
                 .and_then(|key| key.resolve(&plugins, event_scope))
             {
-                let actions = action_list(p.enabled);
+                let actions = super::action_list(p.enabled);
                 let ai = *action_index.read();
                 *action_index.write() = if ai + 1 >= actions.len() { 0 } else { ai + 1 };
             }
@@ -426,23 +427,23 @@ pub(super) fn handle_panel_event(
         // ── List: ←/→/↑/↓ ──
         (false, false, KeyCode::Left) => {
             let mut tab = active_tab.write();
-            *tab = cycle_backward(*tab);
+            *tab = super::cycle_backward(*tab);
             *selected.write() = 0;
             discover.write().selected = 0;
         }
         (false, false, KeyCode::Right) => {
             let mut tab = active_tab.write();
-            *tab = cycle_forward(*tab);
+            *tab = super::cycle_forward(*tab);
             *selected.write() = 0;
             discover.write().selected = 0;
         }
         (false, false, KeyCode::Up) => {
             if *active_tab.read() == PluginViewTab::Installed {
                 let mut s = selected.write();
-                *s = previous_selection(*s);
+                *s = crate::kit::list_nav::previous_selection(*s);
             } else if *active_tab.read() == PluginViewTab::Marketplaces {
                 let mut s = selected.write();
-                *s = previous_selection(*s);
+                *s = crate::kit::list_nav::previous_selection(*s);
             }
         }
         (false, false, KeyCode::Down) => {
@@ -450,13 +451,13 @@ pub(super) fn handle_panel_event(
                 let mut s = selected.write();
                 let c = PLUGIN_LIST.state().read().len();
                 if c > 0 {
-                    *s = next_selection(*s, c);
+                    *s = crate::kit::list_nav::next_selection(*s, c);
                 }
             } else if *active_tab.read() == PluginViewTab::Marketplaces {
                 let mut s = selected.write();
-                let c = get_marketplace_cache().len() + 1; // +1 for Add，非阻塞缓存读取
+                let c = super::data::get_marketplace_cache().len() + 1; // +1 for Add，非阻塞缓存读取
                 if c > 0 {
-                    *s = next_selection(*s, c);
+                    *s = crate::kit::list_nav::next_selection(*s, c);
                 }
             }
         }
@@ -464,3 +465,7 @@ pub(super) fn handle_panel_event(
     }
     EventResult::Consumed
 }
+
+use crate::kit::atoms::PLUGIN_LIST;
+
+use crate::kit::atoms::PluginViewTab;

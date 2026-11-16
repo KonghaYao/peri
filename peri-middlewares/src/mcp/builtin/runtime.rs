@@ -9,25 +9,24 @@
 //!   复制判定（映射在 `mcp/initialize.rs` 的 `connect_timeout` / `transport_label`）。
 //! - 每个实例一条**独立** duplex 与一个**独立** task（隔离契约：不得共用 transport）。
 
-use std::{
-    pin::Pin,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    task::{Context, Poll},
-};
+use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::task::Context;
+use std::task::Poll;
 
-use rmcp::{
-    serve_server,
-    service::{QuitReason, ServerInitializeError},
-    ServerHandler,
-};
+use rmcp;
+use rmcp::service::QuitReason;
+use rmcp::service::ServerInitializeError;
+use rmcp::ServerHandler;
 use thiserror::Error;
-use tokio::{
-    io::{AsyncRead, DuplexStream, ReadBuf, ReadHalf, WriteHalf},
-    task::JoinHandle,
-};
+use tokio::io::AsyncRead;
+use tokio::io::DuplexStream;
+use tokio::io::ReadBuf;
+use tokio::io::ReadHalf;
+use tokio::io::WriteHalf;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::context::BuiltinInstanceContext;
@@ -459,7 +458,7 @@ where
     let server_read = ObservedRead::new(server_read, Arc::clone(&saw_inbound));
     let task_instance = instance.to_string();
     let handle = tokio::spawn(async move {
-        match serve_server(handler, (server_read, server_write)).await {
+        match rmcp::serve_server(handler, (server_read, server_write)).await {
             // `waiting()` 消费 running service；输入流 EOF / 对端关闭即返回 QuitReason。
             Ok(running) => match running.waiting().await {
                 Ok(reason) => BuiltinServerExit::Quit(reason),

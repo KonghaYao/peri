@@ -1,11 +1,14 @@
 //! Remote store opening verdict and legacy-shape probe.
 
-use super::super::{
-    mutation::{incomplete_reply, RemoteStore, StoreAccess},
-    schema::{self, StoreId, StoreIdentityOutcome, StoreIdentityRead, StoreShapeRead},
-    sql::{int_at, StatementSpec},
-};
-use super::{unsupported_behavior, StoreInitialization};
+use super::super::mutation::RemoteStore;
+use super::super::mutation::StoreAccess;
+use super::super::schema;
+use super::super::schema::StoreId;
+use super::super::schema::StoreIdentityOutcome;
+use super::super::schema::StoreIdentityRead;
+use super::super::schema::StoreShapeRead;
+use super::super::sql::StatementSpec;
+use super::StoreInitialization;
 use peri_acp_types::session_resources::{
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
@@ -63,14 +66,14 @@ pub(in crate::sessions::remote) fn open_step(
                 StoreAccess::ReadWrite => Ok(OpenStep::Upgrade(snapshot)),
             }
         }
-        StoreIdentityRead::Present(_) => {
-            Err(unsupported_behavior("unrecognized remote store schema"))
-        }
+        StoreIdentityRead::Present(_) => Err(super::unsupported_behavior(
+            "unrecognized remote store schema",
+        )),
         StoreIdentityRead::Malformed => Err(super::super::session_codec::corrupt(
             "remote session store metadata is not interpretable",
         )),
         StoreIdentityRead::Uninitialized => match access {
-            StoreAccess::ReadOnly => Err(unsupported_behavior(
+            StoreAccess::ReadOnly => Err(super::unsupported_behavior(
                 "read-only open of an uninitialized remote store",
             )),
             StoreAccess::ReadWrite => Ok(OpenStep::NeedsInitialization),
@@ -86,7 +89,7 @@ pub(in crate::sessions::remote) fn verify_legacy_open_identity(
     if initial == final_read {
         Ok(())
     } else {
-        Err(unsupported_behavior(
+        Err(super::unsupported_behavior(
             "remote store schema changed during read-only open",
         ))
     }
@@ -114,7 +117,11 @@ pub(in crate::sessions::remote) async fn probe_shape(
         .map(|table| {
             schema::ShapeProbe::pragma_table_xinfo(table)
                 .map(StatementSpec::bare)
-                .ok_or_else(|| incomplete_reply("remote shape probe table is not supported"))
+                .ok_or_else(|| {
+                    super::super::mutation::incomplete_reply(
+                        "remote shape probe table is not supported",
+                    )
+                })
         })
         .collect::<SessionResourceResult<_>>()?;
     if probe == schema::ShapeProbe::Current {
@@ -126,14 +133,17 @@ pub(in crate::sessions::remote) async fn probe_shape(
     for table in tables {
         let rows = results
             .next()
-            .ok_or_else(|| incomplete_reply("missing shape result set"))?;
+            .ok_or_else(|| super::super::mutation::incomplete_reply("missing shape result set"))?;
         if table == "session_close_intents" && rows.is_empty() {
             missing_close_intents = true;
         }
-        for (index, row) in rows.into_iter().enumerate() {
-            if row.len() != 7 || int_at(&row, 0) != Some(index as i64) || int_at(&row, 6) != Some(0)
+        let indexed_entries = rows.into_iter().enumerate();
+        for (index, row) in indexed_entries {
+            if row.len() != 7
+                || super::super::sql::int_at(&row, 0) != Some(index as i64)
+                || super::super::sql::int_at(&row, 6) != Some(0)
             {
-                return Err(incomplete_reply(
+                return Err(super::super::mutation::incomplete_reply(
                     "session shape pragma returned invalid columns",
                 ));
             }
@@ -149,12 +159,12 @@ pub(in crate::sessions::remote) async fn probe_shape(
     if shape == StoreShapeRead::Consistent && probe == schema::ShapeProbe::Current {
         let indexes = results
             .next()
-            .ok_or_else(|| incomplete_reply("missing index result set"))?;
+            .ok_or_else(|| super::super::mutation::incomplete_reply("missing index result set"))?;
         if indexes
             .iter()
             .any(|row| row.len() != 3 || !row.iter().all(|value| matches!(value, Value::Text(_))))
         {
-            return Err(incomplete_reply(
+            return Err(super::super::mutation::incomplete_reply(
                 "session index probe returned invalid columns",
             ));
         }
@@ -186,7 +196,7 @@ fn accept_shape(shape: Option<StoreShapeRead>, access: StoreAccess) -> SessionRe
         Some(StoreShapeRead::Consistent) => Ok(()),
         Some(StoreShapeRead::NeedsCurrentRepair { .. }) => Ok(()),
         Some(StoreShapeRead::Unbuilt) if access == StoreAccess::ReadWrite => Ok(()),
-        Some(StoreShapeRead::Unbuilt) => Err(unsupported_behavior(
+        Some(StoreShapeRead::Unbuilt) => Err(super::unsupported_behavior(
             "read-only open of a remote store without its session tables",
         )),
         Some(StoreShapeRead::Drifted(detail)) => Err(refuse_drifted_shape(&detail)),
@@ -246,10 +256,12 @@ pub(super) async fn refuse_legacy_shape(store: &RemoteStore) -> SessionResourceR
     // 读不到计数不是「没有旧表」：形状不完整的读取按未决上报，不放行初始化。
     let count = row
         .as_ref()
-        .and_then(|values| int_at(values, 0))
-        .ok_or_else(|| incomplete_reply("legacy shape probe returned no count"))?;
+        .and_then(|values| super::super::sql::int_at(values, 0))
+        .ok_or_else(|| {
+            super::super::mutation::incomplete_reply("legacy shape probe returned no count")
+        })?;
     if count > 0 {
-        return Err(unsupported_behavior(
+        return Err(super::unsupported_behavior(
             "remote store has the pre-unification session tables; it is not migrated automatically",
         ));
     }

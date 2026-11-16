@@ -1,38 +1,39 @@
-use super::*;
-use crate::kit::atoms::PENDING_ATTACHMENTS;
+use super::MAX_PASTE_CHARS;
+use super::PasteGate;
+use super::PasteOutcome;
 
 /// 粘贴上限按字符计：恰好在上限内原样借用，超 1 字符才截断并回报原始字符数。
 #[test]
 fn cap_paste_chars_truncates_at_char_boundary() {
     let at_limit = "a".repeat(MAX_PASTE_CHARS);
-    let (bounded, original) = cap_paste_chars(&at_limit);
+    let (bounded, original) = super::cap_paste_chars(&at_limit);
     assert!(matches!(bounded, std::borrow::Cow::Borrowed(_)));
     assert_eq!(original, None);
     assert_eq!(bounded.as_ref(), at_limit.as_str());
 
     let over = format!("{}b", "a".repeat(MAX_PASTE_CHARS));
-    let (bounded, original) = cap_paste_chars(&over);
+    let (bounded, original) = super::cap_paste_chars(&over);
     assert_eq!(original, Some(MAX_PASTE_CHARS + 1));
     assert_eq!(bounded.chars().count(), MAX_PASTE_CHARS);
     assert_eq!(bounded, "a".repeat(MAX_PASTE_CHARS));
 
     // CJK 按字符而非字节截断：每条 3 字节仍只保留 10_000 字符。
     let cjk = "界".repeat(MAX_PASTE_CHARS + 5);
-    let (bounded, original) = cap_paste_chars(&cjk);
+    let (bounded, original) = super::cap_paste_chars(&cjk);
     assert_eq!(original, Some(MAX_PASTE_CHARS + 5));
     assert_eq!(bounded.chars().count(), MAX_PASTE_CHARS);
 }
 
 #[test]
 fn normalize_paste_newlines_handles_crlf_and_cr() {
-    assert_eq!(normalize_paste_newlines("a\r\nb\rc"), "a\nb\nc");
-    assert_eq!(normalize_paste_newlines("a\r\n\r\nb"), "a\n\nb");
+    assert_eq!(super::normalize_paste_newlines("a\r\nb\rc"), "a\nb\nc");
+    assert_eq!(super::normalize_paste_newlines("a\r\n\r\nb"), "a\n\nb");
 }
 
 #[test]
 fn paste_gate_rejects_overlap_and_releases_on_return() {
     let gate = PasteGate::default();
-    let permit = gate.try_acquire().unwrap();
+    let permit = gate.try_acquire().expect("paste gate rejects overlap and releases on return: the try_acquire fixture operation uses valid inputs");
     assert!(gate.clone().try_acquire().is_none());
     drop(permit);
     assert!(gate.try_acquire().is_some());
@@ -43,7 +44,9 @@ fn paste_gate_releases_on_panic() {
     let gate = PasteGate::default();
     let worker_gate = gate.clone();
     let result = std::thread::spawn(move || {
-        let _permit = worker_gate.try_acquire().unwrap();
+        let _permit = worker_gate.try_acquire().expect(
+            "paste gate releases on panic: the try_acquire fixture operation uses valid inputs",
+        );
         panic!("simulated clipboard failure");
     })
     .join();
@@ -58,7 +61,7 @@ fn attach_image_stores_base64_payload_without_reencoding() {
     crate::kit::atoms::init_atoms();
     PENDING_ATTACHMENTS.state().write().clear();
 
-    attach_image(vec![0x89, 0x50, 0x4E, 0x47], "image/png");
+    super::attach_image(vec![0x89, 0x50, 0x4e, 0x47], "image/png");
 
     let state = PENDING_ATTACHMENTS.state();
     let pending = state.read();
@@ -67,7 +70,7 @@ fn attach_image_stores_base64_payload_without_reencoding() {
     assert_eq!(
         base64::engine::general_purpose::STANDARD
             .decode(&pending[0].base64_data)
-            .unwrap(),
+            .expect("attach image stores base64 payload without reencoding: the decode fixture operation uses valid inputs"),
         vec![0x89, 0x50, 0x4E, 0x47]
     );
     drop(pending);
@@ -78,12 +81,21 @@ fn attach_image_stores_base64_payload_without_reencoding() {
 #[test]
 fn terminal_paste_hint_covers_remote_only() {
     assert_eq!(
-        terminal_paste_hint(PasteOutcome::Unavailable, false),
+        super::terminal_paste_hint(PasteOutcome::Unavailable, false),
         Some("paste-terminal-hint")
     );
-    assert_eq!(terminal_paste_hint(PasteOutcome::Unavailable, true), None);
-    assert_eq!(terminal_paste_hint(PasteOutcome::Pasted, false), None);
-    assert_eq!(terminal_paste_hint(PasteOutcome::Notified, false), None);
+    assert_eq!(
+        super::terminal_paste_hint(PasteOutcome::Unavailable, true),
+        None
+    );
+    assert_eq!(
+        super::terminal_paste_hint(PasteOutcome::Pasted, false),
+        None
+    );
+    assert_eq!(
+        super::terminal_paste_hint(PasteOutcome::Notified, false),
+        None
+    );
 }
 
 /// 引导文案两种语言都落地，且说清用终端自己的粘贴键。
@@ -98,7 +110,7 @@ fn terminal_paste_hint_key_is_localized() {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::*;
+    use super::super::pasteboard_png_bytes;
     use image::ImageEncoder;
     use objc2_app_kit::{NSPasteboard, NSPasteboardTypePNG};
     use objc2_foundation::{NSData, NSString};
@@ -136,23 +148,24 @@ mod macos {
                 seed as u8
             })
             .collect();
-        crate::kit::input_area::image::png_encode_bytes(&pixels, width, height, usize::MAX).unwrap()
+        crate::kit::input_area::image::png_encode_bytes(&pixels, width, height, usize::MAX)
+            .expect("png bytes: the png_encode_bytes fixture operation uses valid inputs")
     }
 
     #[test]
     fn clipboard_png_reads_byte_for_byte_without_pixel_conversion() {
         objc2::rc::autoreleasepool(|_| {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempfile::tempdir().expect("clipboard png reads byte for byte without pixel conversion: isolated fixture workspace must remain accessible");
             let source = dir.path().join("source.png");
             let pixels = [17u8, 33, 65, 128];
             let encoder =
-                image::codecs::png::PngEncoder::new(std::fs::File::create(&source).unwrap());
+                image::codecs::png::PngEncoder::new(std::fs::File::create(&source).expect("clipboard png reads byte for byte without pixel conversion: the fixture storage and layout must support the requested operation"));
             encoder
                 .write_image(&pixels, 1, 1, image::ExtendedColorType::Rgba8)
-                .unwrap();
-            let bytes = std::fs::read(source).unwrap();
+                .expect("clipboard png reads byte for byte without pixel conversion: the write_image fixture operation uses valid inputs");
+            let bytes = std::fs::read(source).expect("clipboard png reads byte for byte without pixel conversion: isolated fixture workspace must remain accessible");
             let board = TestPasteboard::new(Some(&bytes));
-            let read = pasteboard_png_bytes(&board.0).unwrap().unwrap();
+            let read = pasteboard_png_bytes(&board.0).expect("clipboard png reads byte for byte without pixel conversion: the pasteboard_png_bytes fixture operation uses valid inputs").expect("clipboard png reads byte for byte without pixel conversion: the pasteboard_png_bytes fixture operation uses valid inputs");
             assert_eq!(read, bytes, "剪贴板 PNG 必须原样上传（不重编码）");
         });
     }
@@ -161,7 +174,7 @@ mod macos {
     fn clipboard_without_png_allows_legacy_fallback() {
         objc2::rc::autoreleasepool(|_| {
             let board = TestPasteboard::new(None);
-            assert!(pasteboard_png_bytes(&board.0).unwrap().is_none());
+            assert!(pasteboard_png_bytes(&board.0).expect("clipboard without png allows legacy fallback: the pasteboard_png_bytes fixture operation uses valid inputs").is_none());
         });
     }
 
@@ -199,6 +212,7 @@ mod macos {
                             let name = board.0.name().to_string();
                             barrier.wait();
                             let data = NSData::with_bytes(&bytes);
+                            // SAFETY: Each worker owns a live named pasteboard and NSData with the framework PNG type.
                             let written = unsafe {
                                 board.0.setData_forType(Some(&data), NSPasteboardTypePNG)
                             };
@@ -208,7 +222,7 @@ mod macos {
                             // 读取全部完成前不 Drop，避免清理干扰其他 worker 的证据。
                             barrier.wait();
                             assert!(written);
-                            assert_eq!(read.unwrap().unwrap(), bytes, "剪贴板 {name}");
+                            assert_eq!(read.expect("concurrent clipboards keep independent names and png bytes: the pasteboard_png_bytes fixture operation uses valid inputs").expect("concurrent clipboards keep independent names and png bytes: the unwrap fixture operation uses valid inputs"), bytes, "剪贴板 {name}");
                             name
                         })
                     })
@@ -216,7 +230,7 @@ mod macos {
                 .collect();
             workers
                 .into_iter()
-                .map(|worker| worker.join().unwrap())
+                .map(|worker| worker.join().expect("concurrent clipboards keep independent names and png bytes: the join fixture operation uses valid inputs"))
                 .collect::<Vec<_>>()
         });
         let unique: std::collections::HashSet<_> = names.iter().collect();
@@ -250,15 +264,15 @@ mod macos {
                     height as u32,
                     image::ExtendedColorType::Rgba8,
                 )
-                .unwrap();
+                .expect("clipboard png performance comparison: fixture parameters must construct a valid value");
             let png =
                 crate::kit::input_area::image::png_encode_bytes(&pixels, width, height, usize::MAX)
-                    .unwrap();
+                    .expect("clipboard png performance comparison: the png_encode_bytes fixture operation uses valid inputs");
             let board = TestPasteboard::new(Some(&png));
             let start = std::time::Instant::now();
             let decoded =
                 image::load_from_memory_with_format(tiff.get_ref(), image::ImageFormat::Tiff)
-                    .unwrap()
+                    .expect("clipboard png performance comparison: the load_from_memory_with_format fixture operation uses valid inputs")
                     .into_rgba8();
             let legacy_png = crate::kit::input_area::image::png_encode_bytes(
                 decoded.as_raw(),
@@ -266,10 +280,10 @@ mod macos {
                 height,
                 usize::MAX,
             )
-            .unwrap();
+            .expect("clipboard png performance comparison: fixture must have the expected variant");
             let legacy = start.elapsed();
             let start = std::time::Instant::now();
-            let native = pasteboard_png_bytes(&board.0).unwrap().unwrap();
+            let native = pasteboard_png_bytes(&board.0).expect("clipboard png performance comparison: the pasteboard_png_bytes fixture operation uses valid inputs").expect("clipboard png performance comparison: the pasteboard_png_bytes fixture operation uses valid inputs");
             let native_elapsed = start.elapsed();
             assert_eq!(native, png);
             assert!(!legacy_png.is_empty());
@@ -283,3 +297,5 @@ mod macos {
         });
     }
 }
+
+use crate::kit::atoms::PENDING_ATTACHMENTS;

@@ -1,13 +1,13 @@
 //! run_compact 新触发流程测试
 
 use crate::agent::compact_v2::config::CompactConfig;
-use crate::agent::compact_v2::planner::{
-    plan_micro_call_count, reset_plan_micro_calls, ArchivePlanningScope, ContextPressure,
-    FullEscalationReason, MicroPlanningFacts,
-};
-use crate::agent::compact_v2::{
-    determine_compact_action, run_compact, run_compact_with_facts, CompactAction, CompactOutcome,
-};
+
+use crate::agent::compact_v2::planner::ArchivePlanningScope;
+use crate::agent::compact_v2::planner::ContextPressure;
+use crate::agent::compact_v2::planner::FullEscalationReason;
+use crate::agent::compact_v2::planner::MicroPlanningFacts;
+use crate::agent::compact_v2::CompactAction;
+use crate::agent::compact_v2::CompactOutcome;
 use crate::agent::events::CompactStrategy;
 use crate::messages::{BaseMessage, MessageContent};
 use crate::session::test_resources::mock::MockSessionResources;
@@ -56,7 +56,8 @@ fn exposed_facts(transcript: &MessageTranscript, session_id: &str) -> MicroPlann
             }),
         ..Default::default()
     };
-    for entry in transcript.entries().iter().skip(transcript.ancestor_len()) {
+    let entry_items = transcript.entries().iter().skip(transcript.ancestor_len());
+    for entry in entry_items {
         facts.exposed_message_ids.insert(entry.id());
         if let Some(message) = entry.as_message() {
             for call in message.tool_calls() {
@@ -98,7 +99,7 @@ impl Model for MockSummaryModel {
         _request: ModelRequest,
         _cancellation: CancellationToken,
     ) -> ModelResult<ModelResponse> {
-        Ok(ModelResponse::new(
+        Ok(ModelResponse::try_new(
             ModelMessage::assistant_text("<summary>compact summary</summary>"),
             StopReason::EndTurn,
             None,
@@ -125,7 +126,7 @@ fn pressure_from_budget(budget_pct: f64) -> ContextPressure {
 /// 断言本轮 run_compact 只规划了一次 Micro 计划（dry-run 计划被 apply 复用）。
 fn assert_planned_once() {
     assert_eq!(
-        plan_micro_call_count(),
+        crate::agent::compact_v2::planner::plan_micro_call_count(),
         1,
         "Micro/Smart 计划每轮只应规划一次，应用必须复用 dry-run 计划"
     );
@@ -136,7 +137,10 @@ fn assert_planned_once() {
 #[test]
 fn test_determine_compact_action_below_threshold() {
     let config = CompactConfig::default();
-    assert_eq!(determine_compact_action(0.50, &config), CompactAction::Skip);
+    assert_eq!(
+        crate::agent::compact_v2::determine_compact_action(0.50, &config),
+        CompactAction::Skip
+    );
 }
 
 #[test]
@@ -144,7 +148,7 @@ fn test_determine_compact_action_above_threshold() {
     let config = CompactConfig::default();
     // 默认 smart_compact_enabled = false → 应返回 Micro
     assert_eq!(
-        determine_compact_action(0.80, &config),
+        crate::agent::compact_v2::determine_compact_action(0.80, &config),
         CompactAction::Micro
     );
 }
@@ -156,7 +160,7 @@ fn test_determine_compact_action_smart_enabled() {
         ..Default::default()
     };
     assert_eq!(
-        determine_compact_action(0.80, &config),
+        crate::agent::compact_v2::determine_compact_action(0.80, &config),
         CompactAction::Smart
     );
 }
@@ -178,9 +182,9 @@ async fn test_micro_effective_no_full_overlay() {
     let config = CompactConfig::default();
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.80);
-    reset_plan_micro_calls();
+    crate::agent::compact_v2::planner::reset_plan_micro_calls();
     let facts = exposed_facts(&t, &bound.thread_id);
-    let result = run_compact_with_facts(
+    let result = crate::agent::compact_v2::run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -219,9 +223,9 @@ async fn test_micro_below_gain_gate_defers_without_writes() {
     };
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.80);
-    reset_plan_micro_calls();
+    crate::agent::compact_v2::planner::reset_plan_micro_calls();
     let facts = exposed_facts(&t, &bound.thread_id);
-    let result = run_compact_with_facts(
+    let result = crate::agent::compact_v2::run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -279,9 +283,9 @@ async fn test_full_condition_does_not_commit_micro_before_full() {
     let mut failures = 0u32;
     // budget=0.98 (196000 tokens) 且 R 很大 → G < max(M, R) → 直接 Full（无 LLM 失败）
     let pressure = pressure_from_budget(0.98);
-    reset_plan_micro_calls();
+    crate::agent::compact_v2::planner::reset_plan_micro_calls();
     let facts = exposed_facts(&t, &bound.thread_id);
-    let result = run_compact_with_facts(
+    let result = crate::agent::compact_v2::run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -330,7 +334,7 @@ async fn test_micro_then_full_success_does_not_double_count_affected_messages() 
     let mut failures = 0u32;
 
     let facts = exposed_facts(&t, &bound.thread_id);
-    let result = run_compact_with_facts(
+    let result = crate::agent::compact_v2::run_compact_with_facts(
         &mut t,
         Some(&MockSummaryModel),
         &CompactConfig::default(),
@@ -395,7 +399,7 @@ async fn test_force_full_failure_preserves_persistent_excluded_flags_after_prior
         ..Default::default()
     };
     let mut consecutive_failures = 1;
-    let result = run_compact(
+    let result = crate::agent::compact_v2::run_compact(
         &mut transcript,
         None,
         &config,
@@ -433,7 +437,7 @@ async fn test_force_triggers_full_directly() {
     let mut failures = 0u32;
     // force=true + 无 LLM → Full 降级
     let pressure = pressure_from_budget(0.50);
-    let result = run_compact(
+    let result = crate::agent::compact_v2::run_compact(
         &mut t,
         None,
         &config,
@@ -472,7 +476,7 @@ async fn test_full_without_llm_fails_no_panic() {
     // budget=0.80 → Micro 执行，不升级 Full（因为 budget < threshold）
     let pressure = pressure_from_budget(0.80);
     let facts = exposed_facts(&t, &bound.thread_id);
-    let result = run_compact_with_facts(
+    let result = crate::agent::compact_v2::run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -515,7 +519,7 @@ async fn test_full_failure_before_commit_leaves_no_hidden_micro_commit() {
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.98);
     let facts = exposed_facts(&t, &bound.thread_id);
-    let result = run_compact_with_facts(
+    let result = crate::agent::compact_v2::run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -578,7 +582,7 @@ async fn test_estimated_tokens_saved_reflected_in_result() {
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.80);
     let facts = exposed_facts(&t, &bound.thread_id);
-    let result = run_compact_with_facts(
+    let result = crate::agent::compact_v2::run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -633,7 +637,7 @@ async fn test_estimated_tokens_saved_increases_with_more_rounds() {
         let mut failures = 0u32;
         let pressure = pressure_from_budget(0.80);
         let facts = exposed_facts(&t, &bound.thread_id);
-        run_compact_with_facts(
+        crate::agent::compact_v2::run_compact_with_facts(
             &mut t,
             None,
             &config,
@@ -679,9 +683,9 @@ async fn test_run_compact_smart_uses_same_admission_and_never_precommits() {
         ..Default::default()
     };
     let mut failures = 0u32;
-    reset_plan_micro_calls();
+    crate::agent::compact_v2::planner::reset_plan_micro_calls();
     let facts = exposed_facts(&t, &bound.thread_id);
-    let result = run_compact_with_facts(
+    let result = crate::agent::compact_v2::run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -744,7 +748,7 @@ async fn test_smart_full_success_has_no_precommitted_micro_metrics() {
     };
     let mut failures = 0u32;
     let facts = exposed_facts(&t, &bound.thread_id);
-    let result = run_compact_with_facts(
+    let result = crate::agent::compact_v2::run_compact_with_facts(
         &mut t,
         Some(&MockSummaryModel),
         &config,
@@ -780,7 +784,7 @@ async fn test_run_compact_failure_limit_returns_explicit_full_failure() {
         ..Default::default()
     };
     let mut failures = config.max_consecutive_failures;
-    let result = run_compact(
+    let result = crate::agent::compact_v2::run_compact(
         &mut t,
         None,
         &config,
@@ -834,9 +838,9 @@ async fn test_run_compact_micro_shadow_mode_returns_shadowed_without_changes() {
         ..Default::default()
     };
     let mut failures = 0u32;
-    reset_plan_micro_calls();
+    crate::agent::compact_v2::planner::reset_plan_micro_calls();
     let facts = exposed_facts(&t, &bound.thread_id);
-    let result = run_compact_with_facts(
+    let result = crate::agent::compact_v2::run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -884,9 +888,9 @@ async fn test_run_compact_smart_shadow_mode_returns_shadowed_without_changes() {
         ..Default::default()
     };
     let mut failures = 0u32;
-    reset_plan_micro_calls();
+    crate::agent::compact_v2::planner::reset_plan_micro_calls();
     let facts = exposed_facts(&t, &bound.thread_id);
-    let result = run_compact_with_facts(
+    let result = crate::agent::compact_v2::run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -940,9 +944,9 @@ async fn test_micro_satisfied_reclaim_applies_once_from_dry_run_plan() {
     };
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.80);
-    reset_plan_micro_calls();
+    crate::agent::compact_v2::planner::reset_plan_micro_calls();
     let facts = exposed_facts(&t, &bound.thread_id);
-    let result = run_compact_with_facts(
+    let result = crate::agent::compact_v2::run_compact_with_facts(
         &mut t,
         None,
         &config,

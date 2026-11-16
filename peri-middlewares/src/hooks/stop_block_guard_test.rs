@@ -3,9 +3,10 @@
 //! Block reason 会作为 system-reminder 反馈投给模型（既有设计），但诊断日志
 //! 不得携带正文——日志可能落到客户端/磁盘，hook 自述文本不属于日志内容。
 
+use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 
-use super::*;
+use super::{GuardDecision, StopBlockGuard};
 
 /// 捕获 INFO / WARN 事件字段。
 struct LevelCaptureSubscriber {
@@ -27,7 +28,7 @@ impl tracing::Subscriber for LevelCaptureSubscriber {
     fn event(&self, event: &tracing::Event<'_>) {
         struct Fields(String);
         impl tracing::field::Visit for Fields {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn Debug) {
                 if !self.0.is_empty() {
                     self.0.push(' ');
                 }

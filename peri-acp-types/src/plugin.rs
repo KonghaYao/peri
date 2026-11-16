@@ -5,10 +5,9 @@
 //! 加载/安装/卸载逻辑留在 middlewares；ACP 协议面经 [`PluginManagerPort`]
 //! 装配注入访问（波 2）。
 
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -45,7 +44,7 @@ pub enum ConfigSource {
 
 /// 单个 MCP 服务器配置
 ///
-/// `Deserialize` 由手写实现提供（见 [`McpServerConfigWire`]）：System 三个字段
+/// `Deserialize` 由手写实现提供（见 `McpServerConfigWire`）：System 三个字段
 /// 拒绝显式 `null`，非法组合在解析期即按 [`McpServerConfigValidationError`] 拒绝。
 #[derive(Debug, Clone, Serialize)]
 pub struct McpServerConfig {
@@ -299,6 +298,7 @@ impl McpSubscriptionsConfig {
     }
 }
 
+// Serde passes the complete optional field to its skip_serializing_if callback.
 fn is_false(v: &Option<bool>) -> bool {
     !v.unwrap_or(false)
 }
@@ -501,7 +501,7 @@ pub enum PluginOrigin {
     /// 用户级 ~/.claude/plugins/（CLI 安装）
     #[serde(rename = "claude-user")]
     UserClaude,
-    /// 项目级 <project>/.claude/plugins/（CLI 安装）
+    /// 项目级 `<project>/.claude/plugins/`（CLI 安装）
     #[serde(rename = "claude-project")]
     ProjectClaude,
 }

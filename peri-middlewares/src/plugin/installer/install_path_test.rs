@@ -1,6 +1,10 @@
-use tempfile::tempdir;
+use tempfile;
 
-use super::*;
+use super::InstallScope;
+use super::InstalledPlugin;
+use super::InstalledPlugins;
+use super::InstallerError;
+use super::Path;
 use crate::plugin::PluginOrigin;
 
 // ── #198：外部清单字段不得逃出插件缓存根 ──────────────────────────────
@@ -62,8 +66,8 @@ fn assert_rejected(result: Result<InstalledPlugin, InstallerError>, field: &str)
 #[tokio::test]
 async fn test_install_plugin_rejects_unsafe_version_segments() {
     for version in ["../../../../sentinel", "..", ".", "nested/1.0.0"] {
-        let claude_dir = tempdir().unwrap();
-        let cache_dir = tempdir().unwrap();
+        let claude_dir = tempfile::tempdir().unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
         setup_marketplace_plugin(cache_dir.path(), "evil-plugin", version);
 
         // version 为 ../../../../sentinel 时，旧实现会把该目录整个删除再写入。
@@ -81,7 +85,7 @@ async fn test_install_plugin_rejects_unsafe_version_segments() {
         std::fs::create_dir_all(&sentinel).unwrap();
         std::fs::write(sentinel.join("keep.txt"), "keep").unwrap();
 
-        let result = install_plugin(
+        let result = super::install_plugin(
             "evil-plugin",
             "test-mkt",
             InstallScope::User,
@@ -102,15 +106,15 @@ async fn test_install_plugin_rejects_unsafe_version_segments() {
 
 #[tokio::test]
 async fn test_install_plugin_rejects_absolute_version() {
-    let claude_dir = tempdir().unwrap();
-    let cache_dir = tempdir().unwrap();
+    let claude_dir = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
     let sentinel = claude_dir.path().join("absolute-sentinel");
     std::fs::create_dir_all(&sentinel).unwrap();
     std::fs::write(sentinel.join("keep.txt"), "keep").unwrap();
     let version = sentinel.to_str().unwrap();
     setup_marketplace_plugin(cache_dir.path(), "evil-plugin", version);
 
-    let result = install_plugin(
+    let result = super::install_plugin(
         "evil-plugin",
         "test-mkt",
         InstallScope::User,
@@ -130,8 +134,8 @@ async fn test_install_plugin_rejects_absolute_version() {
 
 #[tokio::test]
 async fn test_install_plugin_rejects_unsafe_name() {
-    let claude_dir = tempdir().unwrap();
-    let cache_dir = tempdir().unwrap();
+    let claude_dir = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
     let name = "../../../sentinel";
     setup_marketplace_plugin(cache_dir.path(), name, "1.0.0");
     // 让 cache/test-mkt 存在，旧实现的 join 才会解析 .. 并命中 remove_dir_all。
@@ -147,7 +151,7 @@ async fn test_install_plugin_rejects_unsafe_name() {
     std::fs::create_dir_all(&sentinel_target).unwrap();
     std::fs::write(sentinel_target.join("keep.txt"), "keep").unwrap();
 
-    let result = install_plugin(
+    let result = super::install_plugin(
         name,
         "test-mkt",
         InstallScope::User,
@@ -167,10 +171,10 @@ async fn test_install_plugin_rejects_unsafe_name() {
 
 #[tokio::test]
 async fn test_install_plugin_rejects_unsafe_marketplace() {
-    let claude_dir = tempdir().unwrap();
-    let cache_dir = tempdir().unwrap();
+    let claude_dir = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
 
-    let result = install_plugin(
+    let result = super::install_plugin(
         "evil-plugin",
         "../outside",
         InstallScope::User,
@@ -185,11 +189,11 @@ async fn test_install_plugin_rejects_unsafe_marketplace() {
 
 #[tokio::test]
 async fn test_install_plugin_accepts_version_without_sha() {
-    let claude_dir = tempdir().unwrap();
-    let cache_dir = tempdir().unwrap();
+    let claude_dir = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
     setup_marketplace_plugin(cache_dir.path(), "evil-plugin", "1.2.3-beta.1");
 
-    let installed = install_plugin(
+    let installed = super::install_plugin(
         "evil-plugin",
         "test-mkt",
         InstallScope::User,
@@ -209,11 +213,11 @@ async fn test_install_plugin_accepts_version_without_sha() {
 
 #[tokio::test]
 async fn test_update_plugin_rejects_unsafe_version_before_uninstall() {
-    let claude_dir = tempdir().unwrap();
-    let cache_dir = tempdir().unwrap();
+    let claude_dir = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
     setup_marketplace_plugin(cache_dir.path(), "evil-plugin", "1.0.0");
 
-    let installed = install_plugin(
+    let installed = super::install_plugin(
         "evil-plugin",
         "test-mkt",
         InstallScope::User,
@@ -229,7 +233,7 @@ async fn test_update_plugin_rejects_unsafe_version_before_uninstall() {
     std::fs::create_dir_all(&sentinel).unwrap();
     std::fs::write(sentinel.join("keep.txt"), "keep").unwrap();
 
-    let result = update_plugin(
+    let result = super::update_plugin(
         "evil-plugin@test-mkt",
         InstallScope::User,
         cache_dir.path(),
@@ -246,7 +250,7 @@ async fn test_update_plugin_rejects_unsafe_version_before_uninstall() {
     );
 
     // 校验必须发生在卸载旧版本之前，原安装记录仍需保留。
-    let records = load_installed_plugins(Some(
+    let records = super::load_installed_plugins(Some(
         &claude_dir
             .path()
             .join("plugins")
@@ -266,11 +270,11 @@ fn assert_timestamp_version(version: &str) {
 }
 
 async fn assert_versionless_install_then_update(version: Option<&str>) {
-    let claude_dir = tempdir().unwrap();
-    let cache_dir = tempdir().unwrap();
+    let claude_dir = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
     setup_marketplace_plugin_with_version(cache_dir.path(), "evil-plugin", version);
 
-    let installed = install_plugin(
+    let installed = super::install_plugin(
         "evil-plugin",
         "test-mkt",
         InstallScope::User,
@@ -283,7 +287,7 @@ async fn assert_versionless_install_then_update(version: Option<&str>) {
     assert_timestamp_version(&installed.version);
     assert!(installed.install_path.is_dir());
 
-    let updated = update_plugin(
+    let updated = super::update_plugin(
         "evil-plugin@test-mkt",
         InstallScope::User,
         cache_dir.path(),
@@ -295,7 +299,7 @@ async fn assert_versionless_install_then_update(version: Option<&str>) {
     assert_timestamp_version(&updated.version);
     assert_eq!(updated.id, installed.id);
 
-    let records = load_installed_plugins(Some(
+    let records = super::load_installed_plugins(Some(
         &claude_dir
             .path()
             .join("plugins")
@@ -319,11 +323,11 @@ async fn test_empty_version_installs_then_updates() {
 
 #[tokio::test]
 async fn test_missing_version_update_reinstalls_under_new_timestamp() {
-    let claude_dir = tempdir().unwrap();
-    let cache_dir = tempdir().unwrap();
+    let claude_dir = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
     setup_marketplace_plugin_with_version(cache_dir.path(), "evil-plugin", None);
 
-    let installed = install_plugin(
+    let installed = super::install_plugin(
         "evil-plugin",
         "test-mkt",
         InstallScope::User,
@@ -340,11 +344,11 @@ async fn test_missing_version_update_reinstalls_under_new_timestamp() {
         .path()
         .join("plugins")
         .join("installed_plugins.json");
-    let mut records = load_installed_plugins(Some(&plugins_path)).unwrap();
+    let mut records = super::load_installed_plugins(Some(&plugins_path)).unwrap();
     records.plugins[0].version = "20000101000000".into();
-    save_installed_plugins(&records, Some(&plugins_path)).unwrap();
+    super::save_installed_plugins(&records, Some(&plugins_path)).unwrap();
 
-    let reinstalled = update_plugin(
+    let reinstalled = super::update_plugin(
         "evil-plugin@test-mkt",
         InstallScope::User,
         cache_dir.path(),
@@ -357,7 +361,7 @@ async fn test_missing_version_update_reinstalls_under_new_timestamp() {
     assert_ne!(reinstalled.version, "20000101000000");
     assert!(reinstalled.install_path.is_dir());
 
-    let records = load_installed_plugins(Some(&plugins_path)).unwrap();
+    let records = super::load_installed_plugins(Some(&plugins_path)).unwrap();
     assert_eq!(records.plugins.len(), 1);
     assert_eq!(records.plugins[0].version, reinstalled.version);
     assert_eq!(records.plugins[0].install_path, reinstalled.install_path);
@@ -365,7 +369,7 @@ async fn test_missing_version_update_reinstalls_under_new_timestamp() {
 
 #[tokio::test]
 async fn test_check_updates_skips_versionless_marketplace_entry() {
-    let cache_dir = tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
     setup_marketplace_plugin_with_version(cache_dir.path(), "evil-plugin", None);
 
     let installed = InstalledPlugins {
@@ -382,7 +386,7 @@ async fn test_check_updates_skips_versionless_marketplace_entry() {
         }],
     };
 
-    let updates = check_updates(&installed, cache_dir.path()).await;
+    let updates = super::check_updates(&installed, cache_dir.path()).await;
     assert!(
         updates.is_empty(),
         "未声明版本的条目无法比较，不应报告更新: {updates:?}"

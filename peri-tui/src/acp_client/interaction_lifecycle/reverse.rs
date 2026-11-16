@@ -17,7 +17,7 @@ impl InteractionLifecycle {
         session_id: Option<&str>,
         params: Value,
     ) -> RegisterDecision {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         let Some(session_id) = session_id else {
             return RegisterDecision::Settle { kind, id };
         };
@@ -63,17 +63,18 @@ impl InteractionLifecycle {
         })
     }
 
+    #[must_use]
     pub fn is_pending_owner(&self, owner: &InteractionOwner) -> bool {
         self.state
             .lock()
-            .unwrap()
+            .expect("state mutex must not be poisoned")
             .pending
             .get(&owner.token)
             .is_some_and(|entry| entry.owner == *owner)
     }
 
     pub fn claim(&self, owner: &InteractionOwner, cause: ClaimCause) -> Option<ClaimedInteraction> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         let matches = state
             .pending
             .get(&owner.token)
@@ -81,7 +82,10 @@ impl InteractionLifecycle {
         if !matches {
             return None;
         }
-        let entry = state.pending.remove(&owner.token).unwrap();
+        let entry = state
+            .pending
+            .remove(&owner.token)
+            .expect("the matching interaction owner was found while holding the registry lock");
         Some(ClaimedInteraction {
             owner: entry.owner,
             request_id: entry.request_id,
@@ -96,7 +100,7 @@ impl InteractionLifecycle {
         request_id: &RequestId,
         cause: ClaimCause,
     ) -> Option<ClaimedInteraction> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         let token = state
             .pending
             .iter()
@@ -111,7 +115,7 @@ impl InteractionLifecycle {
     }
 
     pub fn transport_terminal(&self) -> Vec<ClaimedInteraction> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         if let SessionRoute::Stable {
             accepting_reverse, ..
         } = &mut state.route

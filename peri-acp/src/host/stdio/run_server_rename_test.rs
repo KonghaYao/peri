@@ -1,4 +1,8 @@
-use super::*;
+use crate::host;
+use crate::transport::AcpTransport;
+use serde_json::json;
+use serde_json::Value;
+use std::sync::Arc;
 
 /// `session/rename` 经 stdio wire 完整链路：initialize → session/new →
 /// session/rename。通知先于响应（`handle_rename` 中
@@ -9,17 +13,22 @@ use super::*;
 #[tokio::test]
 async fn test_rename_over_stdio_transport() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config(&tmp).await;
+    let cfg = crate::host::stdio::run_server_integration_tests::test_config(&tmp).await;
     let session_resources = Arc::clone(&cfg.session_resources);
-    let (transport, mut input_write, mut output_read) = duplex_transport();
+    let (transport, mut input_write, mut output_read) =
+        crate::host::stdio::run_server_integration_tests::duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
     let server_task = tokio::spawn(host::run_acp_server(transport, cfg));
 
-    send_initialize(&mut input_write, &mut output_read).await;
+    crate::host::stdio::run_server_integration_tests::send_initialize(
+        &mut input_write,
+        &mut output_read,
+    )
+    .await;
 
     // ── session/new ──
     let cwd = tmp.path().to_str().unwrap();
-    write_line(
+    crate::host::stdio::run_server_integration_tests::write_line(
         &mut input_write,
         &json!({
             "jsonrpc": "2.0",
@@ -30,7 +39,7 @@ async fn test_rename_over_stdio_transport() {
         .to_string(),
     )
     .await;
-    let line = read_line(&mut output_read).await;
+    let line = crate::host::stdio::run_server_integration_tests::read_line(&mut output_read).await;
     let resp: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(resp["id"], 2, "session/new RequestId 往返: {resp}");
     assert!(resp.get("error").is_none(), "session/new 不应报错: {resp}");
@@ -41,7 +50,8 @@ async fn test_rename_over_stdio_transport() {
     // 其他异步通知可以先到；等待本会话的命令目录更新。
     let mut commands_updated = false;
     for _ in 0..8 {
-        let line = read_line(&mut output_read).await;
+        let line =
+            crate::host::stdio::run_server_integration_tests::read_line(&mut output_read).await;
         let notif: Value = serde_json::from_str(&line).unwrap();
         assert!(
             notif.get("id").is_none(),
@@ -57,7 +67,7 @@ async fn test_rename_over_stdio_transport() {
     assert!(commands_updated, "session/new 须发布命令目录更新");
 
     // ── session/rename ──
-    write_line(
+    crate::host::stdio::run_server_integration_tests::write_line(
         &mut input_write,
         &json!({
             "jsonrpc": "2.0",
@@ -72,7 +82,8 @@ async fn test_rename_over_stdio_transport() {
     // 通知先于响应（handle_rename 在返回前推送 SessionInfoUpdate）
     let mut rename_notice = None;
     for _ in 0..8 {
-        let line = read_line(&mut output_read).await;
+        let line =
+            crate::host::stdio::run_server_integration_tests::read_line(&mut output_read).await;
         let notif: Value = serde_json::from_str(&line).unwrap();
         assert!(
             notif.get("id").is_none(),
@@ -98,7 +109,7 @@ async fn test_rename_over_stdio_transport() {
     assert_eq!(notif["params"]["update"]["title"], "stdio 命名会话");
 
     // 响应往返 {sessionId, title}
-    let line = read_line(&mut output_read).await;
+    let line = crate::host::stdio::run_server_integration_tests::read_line(&mut output_read).await;
     let resp: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(resp["id"], 3, "rename RequestId 往返: {resp}");
     assert!(resp.get("error").is_none(), "rename 不应报错: {resp}");

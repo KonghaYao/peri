@@ -1,15 +1,20 @@
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::provider::LlmProvider;
+use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn storage_v2_machine_and_archive_requests_round_trip() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let provider_config = make_provider_config("test", "openai", "key", "model");
-    let peri_config = make_peri_config_with_provider(provider_config);
+    let provider_config =
+        crate::host::requests::tests::make_provider_config("test", "openai", "key", "model");
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(provider_config);
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": tmp.path()}),
         &cfg,
@@ -19,8 +24,8 @@ async fn storage_v2_machine_and_archive_requests_round_trip() {
     .await
     .unwrap();
     let session_id = created["sessionId"].as_str().unwrap();
-    append_human_message(&cfg, session_id, "archivable").await;
-    let machines = handle_request(
+    crate::host::requests::tests::append_human_message(&cfg, session_id, "archivable").await;
+    let machines = crate::host::requests::handle_request(
         "peri/machines/list",
         &json!({}),
         &cfg,
@@ -36,7 +41,7 @@ async fn storage_v2_machine_and_archive_requests_round_trip() {
         .find(|machine| machine["is_current"] == true)
         .unwrap();
     let machine_id = current["id"].as_str().unwrap();
-    let workspaces = handle_request(
+    let workspaces = crate::host::requests::handle_request(
         "peri/workspaces/list",
         &json!({"machineId": machine_id}),
         &cfg,
@@ -47,11 +52,17 @@ async fn storage_v2_machine_and_archive_requests_round_trip() {
     .unwrap();
     let workspace_id = workspaces["workspaces"][0]["id"].as_str().unwrap();
     let query = json!({"_meta":{"peri.sessionWorkspaceV1":{"scope":{"kind":"workspace","value":workspace_id}}}});
-    let before = handle_request("session/list", &query, &cfg, &mut sessions, &transport)
-        .await
-        .unwrap();
+    let before = crate::host::requests::handle_request(
+        "session/list",
+        &query,
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
     assert_eq!(before["sessions"].as_array().unwrap().len(), 1);
-    handle_request(
+    crate::host::requests::handle_request(
         "peri/session/archive",
         &json!({"sessionId":session_id,"archived":true}),
         &cfg,
@@ -60,13 +71,19 @@ async fn storage_v2_machine_and_archive_requests_round_trip() {
     )
     .await
     .unwrap();
-    let regular = handle_request("session/list", &query, &cfg, &mut sessions, &transport)
-        .await
-        .unwrap();
+    let regular = crate::host::requests::handle_request(
+        "session/list",
+        &query,
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
     assert!(regular["sessions"].as_array().unwrap().is_empty());
     let mut archive_query = query;
     archive_query["_meta"]["peri.sessionWorkspaceV1"]["archived"] = json!(true);
-    let archived = handle_request(
+    let archived = crate::host::requests::handle_request(
         "session/list",
         &archive_query,
         &cfg,
@@ -76,7 +93,7 @@ async fn storage_v2_machine_and_archive_requests_round_trip() {
     .await
     .unwrap();
     assert_eq!(archived["sessions"].as_array().unwrap().len(), 1);
-    handle_request(
+    crate::host::requests::handle_request(
         "peri/session/archive",
         &json!({"sessionId":session_id,"archived":false}),
         &cfg,
@@ -90,14 +107,15 @@ async fn storage_v2_machine_and_archive_requests_round_trip() {
 #[tokio::test]
 async fn archive_request_requires_session_workspace_capability() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let provider_config = make_provider_config("test", "openai", "key", "model");
-    let peri_config = make_peri_config_with_provider(provider_config);
+    let provider_config =
+        crate::host::requests::tests::make_provider_config("test", "openai", "key", "model");
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(provider_config);
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     cfg.session_manager
         .set_pending_caps(peri_acp_types::PeriCaps::default());
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let error = handle_request(
+    let error = crate::host::requests::handle_request(
         "peri/session/archive",
         &json!({"sessionId":"00000000-0000-0000-0000-000000000001","archived":true}),
         &cfg,

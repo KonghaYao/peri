@@ -1,6 +1,15 @@
 //! Model 面板视口、命中/绘制同源与 hook 顺序回归。
 
-use super::*;
+use super::Arc;
+use super::EventResult;
+use super::ModelPanelGuard;
+use super::PROFILE_KEYS;
+use super::Rc;
+use super::Rect;
+use super::SHORT_AREA;
+use super::TEST_AREA;
+use super::serial;
+use super::switched;
 
 // ── 视口随面板高度变化 ──────────────────────────────────────────────────────
 
@@ -11,7 +20,7 @@ fn rendered_profiles_follow_panel_height() {
     let guard = ModelPanelGuard::install();
     guard.set_active_alias("fable");
 
-    let short = buffer_text(&mount_panel_frames(SHORT_AREA, 2, |_, _| {}));
+    let short = super::buffer_text(&super::mount_panel_frames(SHORT_AREA, 2, |_, _| {}));
     assert!(short.contains("fable ·"), "矮面板至少渲染第一档：{short}");
     assert!(short.contains("opus ·"), "内容区 10 行放得下 2 档：{short}");
     assert!(
@@ -19,7 +28,7 @@ fn rendered_profiles_follow_panel_height() {
         "内容区 10 行（2+2×3+1）只放得下 2 档，不应渲染第三档：{short}"
     );
 
-    let tall = buffer_text(&mount_panel_frames(TEST_AREA, 2, |_, _| {}));
+    let tall = super::buffer_text(&super::mount_panel_frames(TEST_AREA, 2, |_, _| {}));
     assert!(
         tall.contains("haiku ·"),
         "面板变高后必须渲染全部四档，而不是停在矮面板的 2 档：{tall}"
@@ -36,14 +45,14 @@ fn click_on_rendered_profile_card_switches_that_profile() {
     guard.set_active_alias("fable");
     let handle = Arc::clone(&guard.handle);
 
-    let buf = mount_panel_frames(TEST_AREA, 2, |_, _| {});
-    let (row, _) = rendered_line_of(&buf, "haiku ·");
+    let buf = super::mount_panel_frames(TEST_AREA, 2, |_, _| {});
+    let (row, _) = super::rendered_line_of(&buf, "haiku ·");
 
     let switched = switched();
     let clicked = Rc::clone(&switched);
-    let buf = mount_panel_frames(TEST_AREA, 3, move |frame, panel| {
+    let buf = super::mount_panel_frames(TEST_AREA, 3, move |frame, panel| {
         if frame == 0 {
-            let result = panel.event(left_down(row, 5), TEST_AREA, &clicked);
+            let result = panel.event(super::left_down(row, 5), TEST_AREA, &clicked);
             assert_eq!(result, EventResult::Consumed);
             // 复现「切换落盘成功」后的内存效果：真实动作写的就是这一档
             let idx = clicked.borrow().expect("点击必须触发档位切换");
@@ -56,13 +65,13 @@ fn click_on_rendered_profile_card_switches_that_profile() {
         Some(3),
         "点击必须切换被点的那一档（haiku）"
     );
-    let text = buffer_text(&buf);
-    let (_, haiku_line) = rendered_line_of(&buf, "haiku ·");
+    let text = super::buffer_text(&buf);
+    let (_, haiku_line) = super::rendered_line_of(&buf, "haiku ·");
     assert!(
         haiku_line.trim_start().starts_with('●'),
         "被点中的档位必须在下一帧渲染为当前档位：\n{text}"
     );
-    let (_, fable_line) = rendered_line_of(&buf, "fable ·");
+    let (_, fable_line) = super::rendered_line_of(&buf, "fable ·");
     assert!(
         fable_line.trim_start().starts_with('○'),
         "未选中的档位必须渲染为普通项：\n{text}"
@@ -77,8 +86,8 @@ fn short_panel_hit_matches_scrolled_window() {
     let guard = ModelPanelGuard::install();
     guard.set_active_alias("sonnet");
 
-    let buf = mount_panel_frames(SHORT_AREA, 2, |_, _| {});
-    let text = buffer_text(&buf);
+    let buf = super::mount_panel_frames(SHORT_AREA, 2, |_, _| {});
+    let text = super::buffer_text(&buf);
     assert!(
         text.contains("sonnet ·") && text.contains("haiku ·"),
         "窗口必须滚到当前档位所在的末尾 2 档：{text}"
@@ -87,13 +96,13 @@ fn short_panel_hit_matches_scrolled_window() {
         !text.contains("fable ·"),
         "内容区 10 行只放得下 2 档，窗口外的档位不得渲染：{text}"
     );
-    let (last_row, _) = rendered_line_of(&buf, "haiku ·");
-    let (active_row, _) = rendered_line_of(&buf, "sonnet ·");
+    let (last_row, _) = super::rendered_line_of(&buf, "haiku ·");
+    let (active_row, _) = super::rendered_line_of(&buf, "sonnet ·");
 
     let switched = switched();
-    mount_panel_frames(SHORT_AREA, 2, move |frame, panel| {
+    super::mount_panel_frames(SHORT_AREA, 2, move |frame, panel| {
         if frame == 0 {
-            let result = panel.event(left_down(last_row, 5), SHORT_AREA, &switched);
+            let result = panel.event(super::left_down(last_row, 5), SHORT_AREA, &switched);
             assert_eq!(result, EventResult::Consumed);
             assert_eq!(
                 *switched.borrow(),
@@ -101,7 +110,7 @@ fn short_panel_hit_matches_scrolled_window() {
                 "点击渲染出的 haiku 卡片必须切换 haiku"
             );
             *switched.borrow_mut() = None;
-            panel.event(left_down(active_row, 5), SHORT_AREA, &switched);
+            panel.event(super::left_down(active_row, 5), SHORT_AREA, &switched);
             assert_eq!(
                 *switched.borrow(),
                 Some(2),
@@ -117,12 +126,12 @@ fn short_panel_hit_matches_scrolled_window() {
 fn click_on_scrollbar_column_does_not_switch() {
     let _guard = ModelPanelGuard::install();
     let switched = switched();
-    mount_panel_frames(SHORT_AREA, 2, {
+    super::mount_panel_frames(SHORT_AREA, 2, {
         let switched = Rc::clone(&switched);
         move |_, panel| {
             // 左栏右边界列 = 其 ScrollView 的滚动条列（命中判定按 `< end` 排除）
             let column = super::super::panel_input::left_column_end(SHORT_AREA);
-            let result = panel.event(left_down(6, column), SHORT_AREA, &switched);
+            let result = panel.event(super::left_down(6, column), SHORT_AREA, &switched);
             assert_eq!(result, EventResult::Consumed, "区域内左键点击仍消费防穿透");
         }
     });
@@ -136,11 +145,11 @@ fn click_on_scrollbar_column_does_not_switch() {
 fn scroll_areas_come_from_measured_panel_rect() {
     let _guard = ModelPanelGuard::install();
 
-    mount_panel_frames(TEST_AREA, 2, |frame, _panel| {
+    super::mount_panel_frames(TEST_AREA, 2, |frame, _panel| {
         if frame == 1 {
             // 帧 0 组件尚未测量自身区域，注册 0 尺寸而不是猜测的尺寸
             assert_eq!(
-                registered_scroll_areas(),
+                super::registered_scroll_areas(),
                 vec![Rect::default(), Rect::default()]
             );
         }
@@ -148,7 +157,7 @@ fn scroll_areas_come_from_measured_panel_rect() {
 
     let (left, right) = crate::kit::panel_scroll::split_vertical(TEST_AREA, 45);
     assert_eq!(
-        registered_scroll_areas(),
+        super::registered_scroll_areas(),
         vec![left, right],
         "注册区域必须是 AreaTracker 的实测区域（与鼠标命中同源）"
     );
@@ -163,13 +172,13 @@ fn scroll_areas_come_from_measured_panel_rect() {
 fn hooks_stay_stable_across_frames() {
     let _guard = ModelPanelGuard::install();
     for area in [TEST_AREA, SHORT_AREA, Rect::new(0, 0, 80, 40)] {
-        let buf = mount_panel_frames(area, 3, |frame, panel| {
+        let buf = super::mount_panel_frames(area, 3, |frame, panel| {
             // 每帧切换焦点与字段光标：走不同的渲染分支
             *panel.right_focus.write() = frame % 2 == 1;
             *panel.right_cursor.write() = frame;
         });
         assert!(
-            buffer_text(&buf).contains("Provider"),
+            super::buffer_text(&buf).contains("Provider"),
             "每个尺寸/焦点组合都必须渲染出右栏字段"
         );
     }
@@ -179,12 +188,11 @@ fn hooks_stay_stable_across_frames() {
 /// 注册之前没有任何提前 `return`——hook 数量与顺序不可能随渲染路径变化。
 #[test]
 fn model_hooks_precede_event_registration_and_returns() {
-    let src = include_str!("../model.rs");
-    let body = src
-        .split("#[path = \"model_test.rs\"]")
-        .next()
-        .expect("组件模块体");
-    let component = body.split("pub fn ModelPanel").nth(1).expect("组件函数体");
+    let src = include_str!("model_panel.rs").replace("\r\n", "\n");
+    let component = src
+        .split_once("pub fn ModelPanel")
+        .and_then(|(_, rest)| rest.split_once("\n}\n").map(|(body, _)| body))
+        .expect("组件函数体完整");
     let handler = component
         .find("hooks.use_event_handler_with_options")
         .expect("事件注册存在");

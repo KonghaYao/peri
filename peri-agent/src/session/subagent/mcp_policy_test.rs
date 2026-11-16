@@ -1,20 +1,35 @@
 //! 父冻结 MCP 关闭策略在子初始化、spawn/resume 与 Reason 刷新中保持收敛。
-use super::*;
-use std::{
-    collections::BTreeSet,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use crate::agent::stages::NullReactLLM;
+use crate::middleware::chain::MiddlewareChain;
+use crate::session::subagent::types::SubagentChainAssembler;
+use crate::session::subagent::types::SubagentChainContext;
+use crate::session::subagent::types::SubagentHost;
+use crate::session::subagent::types::SubagentLlmSource;
+use crate::session::subagent::v2_bridge::V2SubagentContext;
+use crate::session::subagent::SessionFactory;
+use crate::session::subagent::SubagentCancelPolicy;
+use crate::session::subagent::SubagentRunMode;
+use crate::session::subagent::SubagentSpawnConfig;
+use crate::session::test_resources::mock::MockSessionResources;
+use crate::session::FrozenContext;
+use crate::session::Session;
+use parking_lot::RwLock;
+use std::collections::BTreeSet;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::AgentResult;
-use crate::middleware::{capabilities, r#trait::Middleware};
+use crate::middleware::capabilities;
+use crate::middleware::r#trait::Middleware;
 use crate::session::tool_catalog::{
     SessionToolCatalog, StartupToolUpdate, ToolFilter, ToolFilterPolicy,
 };
 use crate::tools::{BaseTool, ToolContext};
-use peri_acp_types::{
-    mcp_control::SessionMcpCatalogSnapshot, meta_harness::MetaHarnessState,
-    ports::SessionMcpCatalogPort,
-};
+use peri_acp_types::mcp_control::SessionMcpCatalogSnapshot;
+use peri_acp_types::meta_harness::MetaHarnessState;
+use peri_acp_types::ports::SessionMcpCatalogPort;
 
 struct SourceTool {
     name: &'static str,
@@ -195,7 +210,7 @@ fn direct_context(
     wildcard: bool,
     source: Arc<dyn SessionMcpCatalogPort>,
 ) -> V2SubagentContext {
-    build_v2_subagent_context(
+    crate::session::subagent::build_v2_subagent_context(
         Some(policy_session(policy)),
         Box::new(NullReactLLM),
         Arc::new(MiddlewareChain::new()),
@@ -245,7 +260,7 @@ fn frozen_mcp_policy_filters_direct_context_initial_view_and_refresh() {
             assert_eq!(
                 catalog
                     .refresh()
-                    .unwrap()
+                    .expect("the refresh fixture result is required for this assertion")
                     .tools
                     .keys()
                     .cloned()
@@ -270,7 +285,12 @@ impl SessionMcpCatalogPort for UnreadableCatalog {
 #[test]
 fn disabled_mcp_does_not_query_failed_source_or_block_core_tools() {
     let built = direct_context("McpMiddleware", true, Arc::new(UnreadableCatalog));
-    let snapshot = built.context.runtime.tool_catalog.refresh().unwrap();
+    let snapshot = built
+        .context
+        .runtime
+        .tool_catalog
+        .refresh()
+        .expect("the refresh fixture result is required for this assertion");
     assert_eq!(snapshot.tools.keys().cloned().collect::<Vec<_>>(), ["Read"]);
     assert!(built.context.runtime.tools.read().contains_key("Read"));
 }
@@ -284,7 +304,7 @@ fn closed_mcp_candidate_does_not_replace_same_named_core_during_initial_merge() 
             server: Some("workspace"),
             builtin: Some("workspace"),
         });
-        let built = build_v2_subagent_context(
+        let built = crate::session::subagent::build_v2_subagent_context(
             Some(policy_session(policy)),
             Box::new(NullReactLLM),
             Arc::new(MiddlewareChain::new()),
@@ -304,7 +324,14 @@ fn closed_mcp_candidate_does_not_replace_same_named_core_during_initial_merge() 
             &core
         ));
         assert!(Arc::ptr_eq(
-            &built.context.runtime.tool_catalog.refresh().unwrap().tools["Read"].tool,
+            &built
+                .context
+                .runtime
+                .tool_catalog
+                .refresh()
+                .expect("the refresh fixture result is required for this assertion")
+                .tools["Read"]
+                .tool,
             &core
         ));
     }
@@ -345,7 +372,9 @@ fn closed_builtin_does_not_shadow_allowed_remote_in_catalog_generations() {
         generation: 2,
         tools: vec![closed, refreshed_remote.clone()],
     });
-    let refreshed = catalog.refresh().unwrap();
+    let refreshed = catalog
+        .refresh()
+        .expect("the refresh fixture result is required for this assertion");
     assert!(Arc::ptr_eq(
         &refreshed.tools["WebSearch"].tool,
         &refreshed_remote
@@ -379,14 +408,14 @@ fn startup_merge_ignores_closed_candidates_and_preserves_allowed_same_name() {
             tools: vec![closed.clone(), remote.clone()],
             required: vec![],
         })
-        .unwrap();
+        .expect("the replace static mcp tools fixture result is required for this assertion");
     assert!(Arc::ptr_eq(&snapshot.tools["WebSearch"].tool, &remote));
     let snapshot = catalog
         .replace_static_mcp_tools(StartupToolUpdate {
             tools: vec![closed],
             required: vec![],
         })
-        .unwrap();
+        .expect("the replace static mcp tools fixture result is required for this assertion");
     assert!(Arc::ptr_eq(&snapshot.tools["WebSearch"].tool, &remote));
 }
 
@@ -409,7 +438,7 @@ impl Middleware for CatalogProbe {
         self.initial.write().push(
             state
                 .local_tools()
-                .unwrap()
+                .expect("the local tools fixture result is required for this assertion")
                 .read()
                 .keys()
                 .cloned()
@@ -424,7 +453,7 @@ impl Middleware for CatalogProbe {
         self.reasons.write().push(
             state
                 .local_tools()
-                .unwrap()
+                .expect("the local tools fixture result is required for this assertion")
                 .read()
                 .keys()
                 .cloned()
@@ -474,7 +503,7 @@ impl RefreshModel {
             return crate::session::test_resources::mock::model::text_events("done");
         }
         self.source.publish_next_generation();
-        let response = peri_model::ModelResponse::new(
+        let response = peri_model::ModelResponse::try_new(
             peri_model::ModelMessage::assistant(
                 vec![],
                 vec![peri_model::ToolCall::new(
@@ -487,7 +516,7 @@ impl RefreshModel {
             None,
             None,
         )
-        .unwrap();
+        .expect("the try new fixture result is required for this assertion");
         vec![Ok(peri_model::ModelStreamEvent::Completed(response))]
     }
 }
@@ -561,7 +590,12 @@ async fn spawn_and_resume_keep_parent_mcp_policy_through_reason_refresh() {
                     requests: requests.clone(),
                 };
                 let spawned = if resume {
-                    let mut config = resume_config(store.clone(), child_id.clone().unwrap());
+                    let mut config = crate::session::subagent::tests::resume_config(
+                        store.clone(),
+                        child_id
+                            .clone()
+                            .expect("the clone fixture result is required for this assertion"),
+                    );
                     config.prompt = Some("refresh again".into());
                     config.max_iterations = 3;
                     config.llm = SubagentLlmSource::model(Arc::new(model), "policy-fixture");
@@ -570,14 +604,14 @@ async fn spawn_and_resume_keep_parent_mcp_policy_through_reason_refresh() {
                     config.tool_filter = child_filter(wildcard);
                     SessionFactory::resume_subagent(Some(&parent), config)
                         .await
-                        .unwrap()
+                        .expect("the resume subagent fixture result is required for this assertion")
                 } else {
                     SessionFactory::spawn_subagent(
                         Some(&parent),
                         spawn_config(store.clone(), model, probe.clone(), wildcard),
                     )
                     .await
-                    .unwrap()
+                    .expect("the spawn subagent fixture result is required for this assertion")
                 };
                 child_id = Some(spawned.child_thread_id);
                 assert!(!spawned.interrupted);

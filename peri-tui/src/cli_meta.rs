@@ -5,7 +5,7 @@ use peri_acp_types::session_store::SessionStoreDeployment;
 use peri_acp_types::thread::{ThreadId, ThreadMeta};
 use peri_acp_types::workspace::MachineIdentityKind;
 use peri_acp_types::workspace::{MachineInfo, WorkspaceInfo};
-use peri_resources::{StoreOpenFailure, classify_open_failure};
+use peri_resources::StoreOpenFailure;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -68,6 +68,7 @@ pub(crate) async fn run_machine_adopt(
 
 const SCHEMA_VERSION: u8 = 1;
 
+#[derive(Debug)]
 pub(crate) struct MetaCommandOutcome {
     pub(crate) stdout: Option<String>,
     pub(crate) stderr: Option<String>,
@@ -224,6 +225,7 @@ enum MetaErrorKind {
 }
 
 impl MetaErrorKind {
+    #[must_use]
     fn name(self) -> &'static str {
         match self {
             Self::InvalidArgument => "invalid_argument",
@@ -239,6 +241,7 @@ impl MetaErrorKind {
         }
     }
 
+    #[must_use]
     fn message(self) -> &'static str {
         match self {
             Self::InvalidArgument => "invalid Meta command arguments",
@@ -254,6 +257,7 @@ impl MetaErrorKind {
         }
     }
 
+    #[must_use]
     fn exit_code(self) -> u8 {
         match self {
             Self::InternalError => 1,
@@ -333,7 +337,7 @@ fn map_resource_error(error: &SessionResourceError) -> MetaErrorKind {
 }
 
 fn map_open_error(error: &anyhow::Error) -> MetaErrorKind {
-    match classify_open_failure(error) {
+    match peri_resources::classify_open_failure(error) {
         StoreOpenFailure::NotConfigured => MetaErrorKind::StoreNotConfigured,
         StoreOpenFailure::NotFound => MetaErrorKind::DatabaseNotFound,
         StoreOpenFailure::Unreadable => MetaErrorKind::DatabaseUnreadable,
@@ -396,6 +400,7 @@ fn error_outcome_with_message(
     }
 }
 
+#[must_use]
 fn render_human(dto: &SessionMetaDtoV1) -> String {
     format!(
         "Schema version: {}\nID: {}\nTitle: {}\nCWD: {}\nCreated at: {}\nUpdated at: {}\nMessage count: {}\nParent thread ID: {}\nPersisted agent status: {}",

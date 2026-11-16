@@ -8,7 +8,10 @@
 //! durable 事实。读取失败时保留旧窗口元数据并记录日志，不把已提交的 turn 解释为
 //! 失败。
 
-use super::*;
+use crate::host::SharedSessions;
+use peri_acp_types::session_resources::SessionResourceError;
+use peri_acp_types::thread::ThreadId;
+use std::sync::Arc;
 
 /// Host 侧 Full Compact 提交观察者：在 `CompactCompleted` 产生时立即读取 Store
 /// 的精确边界并通知已打开的窗口，不等待 prompt 收尾。
@@ -103,7 +106,7 @@ pub(crate) async fn publish_committed_from_store(
             );
             return Ok(false);
         }
-        publish_commit(
+        crate::host::history_window::history_window_coordinator::publish_commit(
             state,
             bounds.checkpoint.as_ref(),
             bounds.own_latest.as_ref(),
@@ -111,7 +114,10 @@ pub(crate) async fn publish_committed_from_store(
         true
     };
     if published {
-        notify_commit_if_open(sessions, session_id).await;
+        crate::host::history_window::history_window_coordinator::notify_commit_if_open(
+            sessions, session_id,
+        )
+        .await;
     }
     Ok(published)
 }

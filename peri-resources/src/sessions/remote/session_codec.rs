@@ -17,10 +17,9 @@ use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
-use peri_acp_types::store::{
-    deserialize_persisted_payload, serialize_persisted_payload, InheritedContext, MessageFlags,
-    PersistedPayload,
-};
+use peri_acp_types::store::InheritedContext;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::thread::{AgentStatus, CancelPolicy, ThreadMeta, WorkState};
 use peri_acp_types::workspace::{ProjectId, SessionBinding, WorkspaceId};
 use turso_serverless::Value;
@@ -30,7 +29,7 @@ use super::session_sql::{
     META_CONTEXT_USAGE_TOKENS, META_CREATED_AT, META_CWD, META_HIDDEN, META_ID, META_MESSAGE_COUNT,
     META_PARENT, META_SNAPSHOT_AT, META_TITLE, META_UPDATED_AT, META_WORK_STATE,
 };
-use super::sql::{int_at, text_at};
+
 use crate::sessions::canonical;
 
 // ─── 写侧编码 ─────────────────────────────────────────────────────────────────
@@ -68,7 +67,7 @@ pub(super) fn payload_params(
         Value::Text(thread_id.to_owned()),
         Value::Text(canonical::payload_role(payload).to_owned()),
         Value::Text(
-            serialize_persisted_payload(payload)
+            peri_acp_types::store::serialize_persisted_payload(payload)
                 .map_err(|_| corrupt("history entry is not serializable"))?,
         ),
         int_value(i64::from(flags.truncated)),
@@ -147,16 +146,16 @@ pub(super) fn decode_binding(
     if !present {
         return Ok(None);
     }
-    let version = int_at(values, base)
+    let version = super::sql::int_at(values, base)
         .and_then(|value| u16::try_from(value).ok())
         .filter(|value| *value > 0)
         .ok_or_else(|| corrupt("session binding version is not a positive integer"))?;
-    let project =
-        text_at(values, base + 1).ok_or_else(|| corrupt("session binding row is incomplete"))?;
-    let workspace =
-        text_at(values, base + 2).ok_or_else(|| corrupt("session binding row is incomplete"))?;
-    let relative =
-        text_at(values, base + 3).ok_or_else(|| corrupt("session binding row is incomplete"))?;
+    let project = super::sql::text_at(values, base + 1)
+        .ok_or_else(|| corrupt("session binding row is incomplete"))?;
+    let workspace = super::sql::text_at(values, base + 2)
+        .ok_or_else(|| corrupt("session binding row is incomplete"))?;
+    let relative = super::sql::text_at(values, base + 3)
+        .ok_or_else(|| corrupt("session binding row is incomplete"))?;
     let project = ProjectId::from_str(project)
         .map_err(|_| corrupt("session binding project id is unreadable"))?;
     let workspace = WorkspaceId::from_str(workspace)
@@ -203,7 +202,7 @@ pub(super) fn decode_payload_text(
     content: &str,
     row_id: &str,
 ) -> SessionResourceResult<PersistedPayload> {
-    let payload = deserialize_persisted_payload(content)
+    let payload = peri_acp_types::store::deserialize_persisted_payload(content)
         .map_err(|_| corrupt("history entry is not a readable persisted payload"))?;
     if payload.id().as_uuid().to_string() != row_id {
         return Err(corrupt(
@@ -233,7 +232,7 @@ fn decode_flags(
     excluded: usize,
     projection: usize,
 ) -> SessionResourceResult<MessageFlags> {
-    let projection = match text_at(values, projection) {
+    let projection = match super::sql::text_at(values, projection) {
         Some(json) => Some(
             serde_json::from_str(json)
                 .map_err(|_| corrupt("message projection is not a readable directive"))?,
@@ -254,21 +253,22 @@ pub(super) fn corrupt(detail: &str) -> SessionResourceError {
 }
 
 fn text_field(values: &[Value], index: usize, what: &str) -> SessionResourceResult<String> {
-    text_at(values, index)
+    super::sql::text_at(values, index)
         .map(str::to_owned)
         .ok_or_else(|| corrupt(&format!("{what} is missing or not text")))
 }
 
 fn optional_text_field(values: &[Value], index: usize) -> Option<String> {
-    text_at(values, index).map(str::to_owned)
+    super::sql::text_at(values, index).map(str::to_owned)
 }
 
 fn int_field(values: &[Value], index: usize, what: &str) -> SessionResourceResult<i64> {
-    int_at(values, index).ok_or_else(|| corrupt(&format!("{what} is missing or not an integer")))
+    super::sql::int_at(values, index)
+        .ok_or_else(|| corrupt(&format!("{what} is missing or not an integer")))
 }
 
 fn bool_field(values: &[Value], index: usize, what: &str) -> SessionResourceResult<bool> {
-    match int_at(values, index) {
+    match super::sql::int_at(values, index) {
         Some(0) => Ok(false),
         Some(1) => Ok(true),
         _ => Err(corrupt(&format!("{what} is not a boolean flag"))),
@@ -280,7 +280,7 @@ fn timestamp_field(
     index: usize,
     what: &str,
 ) -> SessionResourceResult<DateTime<Utc>> {
-    text_at(values, index)
+    super::sql::text_at(values, index)
         .and_then(|text| text.parse::<DateTime<Utc>>().ok())
         .ok_or_else(|| corrupt(&format!("{what} is not an RFC3339 timestamp")))
 }

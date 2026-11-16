@@ -1,4 +1,12 @@
-use super::*;
+use crate::host::requests::tests::HomeDirGuard;
+use crate::host::requests::tests::MockPluginManager;
+use crate::host::requests::tests::MockTransport;
+use crate::provider::LlmProvider;
+
+use serde_json::json;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 等待 `session/update` 通知达到目标条数（on_change 经 tokio::spawn
 /// 异步发送 → 轮询短等待，对齐 A5 重发测试先例）。仅计数 session/update：
@@ -44,22 +52,25 @@ async fn test_plugin_install_refreshes_plugin_domain_and_pushes_once() {
     let home = tmp.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     let _home_guard = HomeDirGuard::set(&home);
-    seed_plugin_ecc(&home);
+    crate::host::requests::tests::seed_plugin_ecc(&home);
 
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
+    let mut cfg =
+        crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     cfg.plugin_manager = Arc::new(MockPluginManager::install_ok("ecc"));
     let mut sessions = HashMap::new();
     let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
     let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
 
-    let result = handle_request(
+    let result = crate::host::requests::handle_request(
         "session/new",
         &json!({ "cwd": tmp.path().to_str().unwrap() }),
         &cfg,
@@ -69,7 +80,7 @@ async fn test_plugin_install_refreshes_plugin_domain_and_pushes_once() {
     .await
     .unwrap();
     let sid = result["sessionId"].as_str().unwrap().to_string();
-    super::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
+    crate::host::requests::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
     assert_eq!(
         transport.notifications().len(),
         1,
@@ -85,7 +96,7 @@ async fn test_plugin_install_refreshes_plugin_domain_and_pushes_once() {
     );
 
     // Act：plugin/install（mock 成功）
-    let resp = handle_request(
+    let resp = crate::host::requests::handle_request(
         "plugin/install",
         &json!({
             "sessionId": sid,
@@ -160,20 +171,23 @@ async fn test_plugin_install_reload_failure_keeps_domain_empty_and_does_not_bloc
     )
     .unwrap();
 
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
+    let mut cfg =
+        crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     cfg.plugin_manager = Arc::new(MockPluginManager::install_ok("ecc"));
     let mut sessions = HashMap::new();
     let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
     let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
 
-    let result = handle_request(
+    let result = crate::host::requests::handle_request(
         "session/new",
         &json!({ "cwd": tmp.path().to_str().unwrap() }),
         &cfg,
@@ -183,14 +197,14 @@ async fn test_plugin_install_reload_failure_keeps_domain_empty_and_does_not_bloc
     .await
     .unwrap();
     let sid = result["sessionId"].as_str().unwrap().to_string();
-    super::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
+    crate::host::requests::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
     let registry = cfg
         .session_manager
         .command_registry_for(&sid)
         .expect("session 应持有命令注册表");
 
     // Act：plugin/install —— 重载失败不得阻塞回包
-    let resp = handle_request(
+    let resp = crate::host::requests::handle_request(
         "plugin/install",
         &json!({
             "sessionId": sid,
@@ -231,22 +245,25 @@ async fn test_plugin_uninstall_removes_stale_plugin_entries() {
     let home = tmp.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     let _home_guard = HomeDirGuard::set(&home);
-    seed_plugin_ecc(&home);
+    crate::host::requests::tests::seed_plugin_ecc(&home);
 
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
+    let mut cfg =
+        crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     cfg.plugin_manager = Arc::new(MockPluginManager::install_ok("ecc"));
     let mut sessions = HashMap::new();
     let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
     let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
 
-    let result = handle_request(
+    let result = crate::host::requests::handle_request(
         "session/new",
         &json!({ "cwd": tmp.path().to_str().unwrap() }),
         &cfg,
@@ -256,14 +273,14 @@ async fn test_plugin_uninstall_removes_stale_plugin_entries() {
     .await
     .unwrap();
     let sid = result["sessionId"].as_str().unwrap().to_string();
-    super::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
+    crate::host::requests::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
     let registry = cfg
         .session_manager
         .command_registry_for(&sid)
         .expect("session 应持有命令注册表");
 
     // 预置：install 成功 → plugin 域含 plugin:ecc:deploy
-    handle_request(
+    crate::host::requests::handle_request(
         "plugin/install",
         &json!({
             "sessionId": sid,
@@ -290,7 +307,7 @@ async fn test_plugin_uninstall_removes_stale_plugin_entries() {
     .unwrap();
 
     // Act：plugin/uninstall（mock 成功）
-    let resp = handle_request(
+    let resp = crate::host::requests::handle_request(
         "plugin/uninstall",
         &json!({
             "sessionId": sid,
@@ -331,23 +348,26 @@ async fn closed_plugin_face_keeps_the_command_registry_empty_across_plugin_rpcs(
     let home = tmp.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     let _home_guard = HomeDirGuard::set(&home);
-    seed_plugin_ecc(&home);
+    crate::host::requests::tests::seed_plugin_ecc(&home);
 
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
+    let mut cfg =
+        crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     cfg.plugin_manager = Arc::new(MockPluginManager::install_ok("ecc"));
     cfg.plugin_face_closed = true;
     let mut sessions = HashMap::new();
     let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
     let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
 
-    let result = handle_request(
+    let result = crate::host::requests::handle_request(
         "session/new",
         &json!({ "cwd": tmp.path().to_str().unwrap() }),
         &cfg,
@@ -357,7 +377,7 @@ async fn closed_plugin_face_keeps_the_command_registry_empty_across_plugin_rpcs(
     .await
     .unwrap();
     let sid = result["sessionId"].as_str().unwrap().to_string();
-    super::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
+    crate::host::requests::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
     let registry = cfg
         .session_manager
         .command_registry_for(&sid)
@@ -368,7 +388,7 @@ async fn closed_plugin_face_keeps_the_command_registry_empty_across_plugin_rpcs(
     );
 
     // install：RPC 仍成功（管理面保留），但命令域不得出现可执行插件命令。
-    let resp = handle_request(
+    let resp = crate::host::requests::handle_request(
         "plugin/install",
         &json!({ "sessionId": sid, "name": "ecc", "marketplace": "test-mkt" }),
         &cfg,
@@ -385,7 +405,7 @@ async fn closed_plugin_face_keeps_the_command_registry_empty_across_plugin_rpcs(
     );
 
     // uninstall：同样不得注册（只允许注销 stale）。
-    let resp = handle_request(
+    let resp = crate::host::requests::handle_request(
         "plugin/uninstall",
         &json!({
             "sessionId": sid,

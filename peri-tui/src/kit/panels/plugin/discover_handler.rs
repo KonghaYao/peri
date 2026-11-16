@@ -1,11 +1,11 @@
 //! Discover input decisions and their UI/RPC effects share one selected identity.
 
+use super::DiscoverDetailAction;
 use super::PluginSearchResultItem;
+use super::VISIBLE_ITEMS;
 use super::discover::DiscoverState;
-use super::{DiscoverDetailAction, VISIBLE_ITEMS, close_panel, data::get_discover_cache};
-use crate::kit::atoms::ACP_CLIENT_HANDLE;
-use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
-use crate::kit::panel_mouse::{ListLayout, hit_item, is_scrollbar_column};
+
+use crate::kit::panel_mouse::ListLayout;
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui_kit::prelude::{EventResult, State};
 use ratatui_kit::ratatui::layout::Rect;
@@ -59,11 +59,11 @@ pub(super) fn decide(
             let Some(area) = area else {
                 return SearchAction::Pass;
             };
-            if is_scrollbar_column(mouse, area) {
+            if crate::kit::panel_mouse::is_scrollbar_column(mouse, area) {
                 return SearchAction::Pass;
             }
             if state.detail.is_some() {
-                return hit_item(
+                return crate::kit::panel_mouse::hit_item(
                     mouse,
                     area,
                     ListLayout {
@@ -78,7 +78,7 @@ pub(super) fn decide(
                 .map(SearchAction::DetailAction)
                 .unwrap_or(SearchAction::Consume);
             }
-            if hit_item(
+            if crate::kit::panel_mouse::hit_item(
                 mouse,
                 area,
                 ListLayout {
@@ -102,7 +102,7 @@ pub(super) fn decide(
                 return SearchAction::Consume;
             }
             let count = state.visible_items(local).len();
-            hit_item(
+            crate::kit::panel_mouse::hit_item(
                 mouse,
                 area,
                 ListLayout {
@@ -110,7 +110,11 @@ pub(super) fn decide(
                     item_rows: 3,
                     footer_rows: 0,
                     visible_items: VISIBLE_ITEMS as u16,
-                    scroll_start: scroll_start_for_selected(state.selected, count, VISIBLE_ITEMS),
+                    scroll_start: crate::kit::list_nav::scroll_start_for_selected(
+                        state.selected,
+                        count,
+                        VISIBLE_ITEMS,
+                    ),
                     item_count: count,
                 },
             )
@@ -149,24 +153,29 @@ pub(super) fn apply(
         SearchAction::Submit => return SearchEffect::Submit,
         SearchAction::Open(index) => state.open_selected(index, local),
         SearchAction::Up if state.detail.is_some() => {
-            state.detail_action = previous_selection(state.detail_action)
+            state.detail_action = crate::kit::list_nav::previous_selection(state.detail_action)
         }
         SearchAction::Down if state.detail.is_some() => {
-            state.detail_action =
-                next_selection(state.detail_action, DiscoverDetailAction::ALL.len())
+            state.detail_action = crate::kit::list_nav::next_selection(
+                state.detail_action,
+                DiscoverDetailAction::ALL.len(),
+            )
         }
         SearchAction::Up => {
             if state.selected == 0 {
                 state.focused = true;
             } else {
-                state.selected = previous_selection(state.selected);
+                state.selected = crate::kit::list_nav::previous_selection(state.selected);
             }
         }
         SearchAction::Down => {
             if state.focused {
                 state.focused = false;
             } else {
-                state.selected = next_selection(state.selected, state.visible_items(local).len());
+                state.selected = crate::kit::list_nav::next_selection(
+                    state.selected,
+                    state.visible_items(local).len(),
+                );
             }
         }
         SearchAction::Escape => {
@@ -208,7 +217,7 @@ pub(super) fn handle_event(
     discover: State<DiscoverState>,
     operation: State<super::operation::OperationState>,
 ) -> EventResult {
-    let local = get_discover_cache();
+    let local = super::data::get_discover_cache();
     let action = decide(&event, area, &discover.read(), &local);
     if action == SearchAction::Pass {
         return EventResult::Ignored;
@@ -217,7 +226,7 @@ pub(super) fn handle_event(
     match effect {
         SearchEffect::Pass => return EventResult::Ignored,
         SearchEffect::Consumed => {}
-        SearchEffect::ClosePanel => close_panel(),
+        SearchEffect::ClosePanel => super::close_panel(),
         SearchEffect::Submit => {
             let query = discover.read().editor.text.clone();
             let ticket = discover.write().begin_search(super::current_scope());
@@ -248,3 +257,5 @@ pub(super) fn handle_event(
     }
     EventResult::Consumed
 }
+
+use crate::kit::atoms::ACP_CLIENT_HANDLE;

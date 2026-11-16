@@ -10,20 +10,25 @@ use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms;
 use crate::kit::mouse_router;
-use crate::kit::panel_registry::open_panel;
-use crate::kit::popup_overlay::open_popup;
+
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
-use ratatui_kit::{
-    crossterm::event::{Event, MouseButton, MouseEventKind},
-    prelude::*,
-    ratatui::{
-        layout::{Alignment, Constraint, Direction, Flex, Rect},
-        style::{Modifier, Style, Stylize},
-        text::{Line, Span},
-        widgets::{Paragraph, Wrap},
-    },
-};
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::MouseButton;
+use ratatui_kit::crossterm::event::MouseEventKind;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Alignment;
+use ratatui_kit::ratatui::layout::Constraint;
+use ratatui_kit::ratatui::layout::Direction;
+use ratatui_kit::ratatui::layout::Flex;
+use ratatui_kit::ratatui::layout::Rect;
+use ratatui_kit::ratatui::style::Modifier;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::style::Stylize;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
+use ratatui_kit::ratatui::widgets::Paragraph;
+use ratatui_kit::ratatui::widgets::Wrap;
 use std::time::Duration;
 
 /// 状态栏第 1 行：权限模式 · cwd · provider/model · bg tasks
@@ -82,7 +87,9 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let (head, effort_part) =
             if model_parts.len() >= 2 && model_parts.last().is_some_and(|p| p == &snap.effort) {
                 let mut h = model_parts.clone();
-                let e = h.pop().unwrap();
+                let e = h
+                    .pop()
+                    .expect("model parts contains the effort suffix after the length check");
                 (h, Some(e))
             } else {
                 (model_parts, None)
@@ -205,7 +212,7 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 // 锚点 = 模型段起点屏幕坐标——小弹窗定位在该点上方
                 *atoms::MODEL_SWITCH_ANCHOR.state().write() =
                     Some((area.x.saturating_add(x_start), mouse.row));
-                open_popup(atoms::PopupKind::ModelQuickSwitch);
+                crate::kit::popup_overlay::open_popup(atoms::PopupKind::ModelQuickSwitch);
                 return EventResult::Consumed;
             }
             if let Some(area) = row1_area
@@ -215,7 +222,7 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         && mouse.column < area.x.saturating_add(xe)
                 })
             {
-                open_panel(PanelKind::Goal);
+                crate::kit::panel_registry::open_panel(PanelKind::Goal);
                 return EventResult::Consumed;
             }
         }
@@ -469,25 +476,28 @@ fn model_click_areas(
     let mut cur_cw_last = 0usize;
     let mut cur_model = false;
     let mut in_word = false;
-    for (span_idx, s) in spans.iter().enumerate() {
-        let in_model = span_idx >= model_start && span_idx < model_end;
-        for c in s.content.chars() {
-            if c.is_whitespace() {
-                if in_word {
-                    words.push((cur_model, cur_ws, cur_w, cur_cw_last));
-                    in_word = false;
-                    cur_ws = 0;
+    {
+        let iteration_items = spans.iter().enumerate();
+        for (span_idx, s) in iteration_items {
+            let in_model = span_idx >= model_start && span_idx < model_end;
+            for c in s.content.chars() {
+                if c.is_whitespace() {
+                    if in_word {
+                        words.push((cur_model, cur_ws, cur_w, cur_cw_last));
+                        in_word = false;
+                        cur_ws = 0;
+                    }
+                    cur_ws += char_width(c);
+                } else {
+                    if !in_word {
+                        in_word = true;
+                        cur_model = in_model;
+                        cur_w = 0;
+                    }
+                    let w = char_width(c);
+                    cur_w += w;
+                    cur_cw_last = w;
                 }
-                cur_ws += char_width(c);
-            } else {
-                if !in_word {
-                    in_word = true;
-                    cur_model = in_model;
-                    cur_w = 0;
-                }
-                let w = char_width(c);
-                cur_w += w;
-                cur_cw_last = w;
             }
         }
     }
@@ -525,6 +535,7 @@ fn model_click_areas(
 }
 
 /// 单个字符的终端显示宽度（UnicodeWidthChar 语义：CJK/全角=2、零宽=0）。
+#[must_use]
 fn char_width(c: char) -> usize {
     unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
 }

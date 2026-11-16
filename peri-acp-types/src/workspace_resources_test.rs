@@ -2,7 +2,16 @@
 //! plugin 组合规则、wire DTO 形状（camelCase / verbatim frontmatter / 省略语义）
 //! 与 digest 格式。
 
-use super::*;
+use crate::workspace_resources::InstructionDocument;
+use crate::workspace_resources::ResourceScope;
+use crate::workspace_resources::SkillEntry;
+use crate::workspace_resources::SkillGetResponse;
+use crate::workspace_resources::SkillResourceRef;
+use crate::workspace_resources::SkillsListResponse;
+use crate::workspace_resources::INSTRUCTION_INDEX_URI;
+use crate::workspace_resources::INSTRUCTION_LOCAL_URI;
+use crate::workspace_resources::INSTRUCTION_MAIN_URI;
+use crate::workspace_resources::SKILL_ENTRY_FILE;
 use serde_json::json;
 
 // ─── scope ───────────────────────────────────────────────────────────────────
@@ -29,9 +38,10 @@ fn skill_uri_round_trips_for_every_scope() {
         (ResourceScope::Plugin, Some("my-plugin"), "alpha"),
     ];
     for (scope, plugin, name) in cases {
-        let uri = skill_uri(scope, plugin, name, SKILL_ENTRY_FILE)
+        let uri = crate::workspace_resources::skill_uri(scope, plugin, name, SKILL_ENTRY_FILE)
             .unwrap_or_else(|| panic!("合法组合必须构造成功: {scope:?}"));
-        let parsed = parse_skill_uri(&uri).unwrap_or_else(|| panic!("必须可解析: {uri}"));
+        let parsed = crate::workspace_resources::parse_skill_uri(&uri)
+            .unwrap_or_else(|| panic!("必须可解析: {uri}"));
         assert_eq!(parsed.scope, scope);
         assert_eq!(parsed.plugin_name.as_deref(), plugin);
         assert_eq!(parsed.name, name);
@@ -42,19 +52,25 @@ fn skill_uri_round_trips_for_every_scope() {
 #[test]
 fn skill_uri_keeps_colon_in_name_verbatim() {
     // X3：wire frontmatter 不改写——含 `:` 的名称原样进 URI（CLI 别名由宿主派生）。
-    let uri = skill_uri(ResourceScope::User, None, "team:review", SKILL_ENTRY_FILE)
-        .expect("含 `:` 的名称必须可构造");
+    let uri = crate::workspace_resources::skill_uri(
+        ResourceScope::User,
+        None,
+        "team:review",
+        SKILL_ENTRY_FILE,
+    )
+    .expect("含 `:` 的名称必须可构造");
     assert_eq!(uri, "skill://user/team:review/SKILL.md");
-    let parsed = parse_skill_uri(&uri).expect("必须可解析");
+    let parsed = crate::workspace_resources::parse_skill_uri(&uri).expect("必须可解析");
     assert_eq!(parsed.name, "team:review");
 }
 
 #[test]
 fn skill_uri_attachment_paths_are_relative_segments() {
-    let uri = skill_uri(ResourceScope::User, None, "alpha", "scripts/run.sh")
-        .expect("多层附件路径必须可构造");
+    let uri =
+        crate::workspace_resources::skill_uri(ResourceScope::User, None, "alpha", "scripts/run.sh")
+            .expect("多层附件路径必须可构造");
     assert_eq!(uri, "skill://user/alpha/scripts/run.sh");
-    let parsed = parse_skill_uri(&uri).expect("必须可解析");
+    let parsed = crate::workspace_resources::parse_skill_uri(&uri).expect("必须可解析");
     assert_eq!(parsed.relative_path, "scripts/run.sh");
 }
 
@@ -85,7 +101,8 @@ fn skill_uri_rejects_illegal_segments() {
     ];
     for (name, relative) in cases {
         assert!(
-            skill_uri(ResourceScope::User, None, name, relative).is_none(),
+            crate::workspace_resources::skill_uri(ResourceScope::User, None, name, relative)
+                .is_none(),
             "非法组合必须拒绝: name={name:?} relative={relative:?}"
         );
     }
@@ -94,9 +111,21 @@ fn skill_uri_rejects_illegal_segments() {
 #[test]
 fn skill_uri_enforces_plugin_combination_rules() {
     // plugin scope 必须带 plugin_name；其余 scope 必须不带。
-    assert!(skill_uri(ResourceScope::Plugin, None, "alpha", SKILL_ENTRY_FILE).is_none());
-    assert!(skill_uri(ResourceScope::User, Some("plug"), "alpha", SKILL_ENTRY_FILE).is_none());
-    assert!(skill_uri(
+    assert!(crate::workspace_resources::skill_uri(
+        ResourceScope::Plugin,
+        None,
+        "alpha",
+        SKILL_ENTRY_FILE
+    )
+    .is_none());
+    assert!(crate::workspace_resources::skill_uri(
+        ResourceScope::User,
+        Some("plug"),
+        "alpha",
+        SKILL_ENTRY_FILE
+    )
+    .is_none());
+    assert!(crate::workspace_resources::skill_uri(
         ResourceScope::Builtin,
         Some("plug"),
         "alpha",
@@ -104,14 +133,20 @@ fn skill_uri_enforces_plugin_combination_rules() {
     )
     .is_none());
     // plugin 名同样受段校验约束。
-    assert!(skill_uri(
+    assert!(crate::workspace_resources::skill_uri(
         ResourceScope::Plugin,
         Some("a/b"),
         "alpha",
         SKILL_ENTRY_FILE
     )
     .is_none());
-    assert!(skill_uri(ResourceScope::Plugin, Some(".."), "alpha", SKILL_ENTRY_FILE).is_none());
+    assert!(crate::workspace_resources::skill_uri(
+        ResourceScope::Plugin,
+        Some(".."),
+        "alpha",
+        SKILL_ENTRY_FILE
+    )
+    .is_none());
 }
 
 #[test]
@@ -135,13 +170,17 @@ fn parse_skill_uri_rejects_foreign_shapes() {
         "skill://user/alpha/SKILL.md#frag",
     ];
     for uri in bogus {
-        assert!(parse_skill_uri(uri).is_none(), "必须拒绝: {uri}");
+        assert!(
+            crate::workspace_resources::parse_skill_uri(uri).is_none(),
+            "必须拒绝: {uri}"
+        );
     }
 }
 
 #[test]
 fn parse_skill_uri_is_scheme_case_insensitive() {
-    let parsed = parse_skill_uri("SKILL://user/alpha/SKILL.md").expect("scheme 大小写不敏感");
+    let parsed = crate::workspace_resources::parse_skill_uri("SKILL://user/alpha/SKILL.md")
+        .expect("scheme 大小写不敏感");
     assert_eq!(parsed.scope, ResourceScope::User);
     assert_eq!(parsed.name, "alpha");
 }
@@ -150,22 +189,27 @@ fn parse_skill_uri_is_scheme_case_insensitive() {
 
 #[test]
 fn agent_uri_round_trips_and_pins_entry_file() {
-    let uri = agent_uri(ResourceScope::Project, None, "coder").expect("合法组合");
+    let uri = crate::workspace_resources::agent_uri(ResourceScope::Project, None, "coder")
+        .expect("合法组合");
     assert_eq!(uri, "agent://project/coder/agent.md");
-    let parsed = parse_agent_uri(&uri).expect("必须可解析");
+    let parsed = crate::workspace_resources::parse_agent_uri(&uri).expect("必须可解析");
     assert_eq!(parsed.scope, ResourceScope::Project);
     assert_eq!(parsed.plugin_name, None);
     assert_eq!(parsed.name, "coder");
 
-    let plugin_uri = agent_uri(ResourceScope::Plugin, Some("plug"), "coder").expect("合法组合");
+    let plugin_uri =
+        crate::workspace_resources::agent_uri(ResourceScope::Plugin, Some("plug"), "coder")
+            .expect("合法组合");
     assert_eq!(plugin_uri, "agent://plugin/plug/coder/agent.md");
-    let parsed = parse_agent_uri(&plugin_uri).expect("必须可解析");
+    let parsed = crate::workspace_resources::parse_agent_uri(&plugin_uri).expect("必须可解析");
     assert_eq!(parsed.plugin_name.as_deref(), Some("plug"));
 
     // entry 文件名固定：其他尾段不接受。
-    assert!(parse_agent_uri("agent://user/coder/agent.txt").is_none());
-    assert!(parse_agent_uri("agent://user/coder/extra/agent.md").is_none());
-    assert!(parse_agent_uri("skill://user/coder/agent.md").is_none());
+    assert!(crate::workspace_resources::parse_agent_uri("agent://user/coder/agent.txt").is_none());
+    assert!(
+        crate::workspace_resources::parse_agent_uri("agent://user/coder/extra/agent.md").is_none()
+    );
+    assert!(crate::workspace_resources::parse_agent_uri("skill://user/coder/agent.md").is_none());
 }
 
 // ─── instruction URI ─────────────────────────────────────────────────────────
@@ -177,7 +221,10 @@ fn instruction_uris_parse_to_documents() {
         (INSTRUCTION_LOCAL_URI, InstructionDocument::Local),
         (INSTRUCTION_INDEX_URI, InstructionDocument::Index),
     ] {
-        assert_eq!(parse_instruction_uri(uri), Some(expected));
+        assert_eq!(
+            crate::workspace_resources::parse_instruction_uri(uri),
+            Some(expected)
+        );
         assert_eq!(expected.uri(), uri);
     }
 }
@@ -193,7 +240,11 @@ fn instruction_parser_rejects_foreign_shapes() {
         "redis://workspace/main",
     ];
     for uri in bogus {
-        assert_eq!(parse_instruction_uri(uri), None, "必须拒绝: {uri}");
+        assert_eq!(
+            crate::workspace_resources::parse_instruction_uri(uri),
+            None,
+            "必须拒绝: {uri}"
+        );
     }
 }
 
@@ -201,24 +252,30 @@ fn instruction_parser_rejects_foreign_shapes() {
 
 #[test]
 fn meta_uri_round_trips_and_keeps_section_id_verbatim() {
-    let uri = meta_uri("01_intro").expect("合法段落 ID 必须可构造");
+    let uri = crate::workspace_resources::meta_uri("01_intro").expect("合法段落 ID 必须可构造");
     assert_eq!(uri, "peri-meta://workspace/01_intro");
-    let parsed = parse_meta_uri(&uri).expect("必须可解析");
+    let parsed = crate::workspace_resources::parse_meta_uri(&uri).expect("必须可解析");
     assert_eq!(parsed.section_id, "01_intro");
 
     // 不在 SECTION_IDS 中的 stem 仍是合法 URI（provider 逐字保留 scanner 的列出
     // 语义；是否消费由宿主按配置与 SECTION_IDS 决定）。
-    let unknown = meta_uri("not_a_section").expect("未知段落 ID 仍可构造");
+    let unknown =
+        crate::workspace_resources::meta_uri("not_a_section").expect("未知段落 ID 仍可构造");
     assert_eq!(
-        parse_meta_uri(&unknown).expect("必须可解析").section_id,
+        crate::workspace_resources::parse_meta_uri(&unknown)
+            .expect("必须可解析")
+            .section_id,
         "not_a_section"
     );
 
     // `:` 合法（与 skill 名称同口径：wire 不改写文件 stem）。
-    let colon = meta_uri("team:intro").expect("含 `:` 的段落 ID 必须可构造");
+    let colon =
+        crate::workspace_resources::meta_uri("team:intro").expect("含 `:` 的段落 ID 必须可构造");
     assert_eq!(colon, "peri-meta://workspace/team:intro");
     assert_eq!(
-        parse_meta_uri(&colon).expect("必须可解析").section_id,
+        crate::workspace_resources::parse_meta_uri(&colon)
+            .expect("必须可解析")
+            .section_id,
         "team:intro"
     );
 }
@@ -239,7 +296,7 @@ fn meta_uri_rejects_illegal_sections_and_foreign_shapes() {
         "a\u{7}b",
     ] {
         assert!(
-            meta_uri(section).is_none(),
+            crate::workspace_resources::meta_uri(section).is_none(),
             "非法段落 ID 必须拒绝构造: {section:?}"
         );
     }
@@ -259,16 +316,20 @@ fn meta_uri_rejects_illegal_sections_and_foreign_shapes() {
         "peri-instruction://workspace/01_intro",
         "skill://workspace/01_intro",
     ] {
-        assert!(parse_meta_uri(uri).is_none(), "必须拒绝: {uri}");
+        assert!(
+            crate::workspace_resources::parse_meta_uri(uri).is_none(),
+            "必须拒绝: {uri}"
+        );
     }
 }
 
 #[test]
 fn meta_uri_parser_is_scheme_case_insensitive() {
-    let parsed = parse_meta_uri("PERI-META://workspace/01_intro").expect("scheme 大小写不敏感");
+    let parsed = crate::workspace_resources::parse_meta_uri("PERI-META://workspace/01_intro")
+        .expect("scheme 大小写不敏感");
     assert_eq!(parsed.section_id, "01_intro");
     // authority 不做大小写宽松（`workspace` 是固定字面值）。
-    assert!(parse_meta_uri("PERI-META://WorkSpace/01_intro").is_none());
+    assert!(crate::workspace_resources::parse_meta_uri("PERI-META://WorkSpace/01_intro").is_none());
 }
 
 // ─── digest ──────────────────────────────────────────────────────────────────
@@ -277,11 +338,11 @@ fn meta_uri_parser_is_scheme_case_insensitive() {
 fn digest_bytes_matches_known_sha256_vector() {
     // 空串与 "abc" 的 sha256 是公开测试向量（不是实现自证）。
     assert_eq!(
-        digest_bytes(b""),
+        crate::workspace_resources::digest_bytes(b""),
         "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     );
     assert_eq!(
-        digest_bytes(b"abc"),
+        crate::workspace_resources::digest_bytes(b"abc"),
         "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
 }
@@ -302,7 +363,7 @@ fn skills_list_response_serializes_camel_case_and_omits_absent_fields() {
         .clone(),
         resources: Some(vec![SkillResourceRef {
             uri: "skill://user/alpha/SKILL.md".to_string(),
-            digest: digest_bytes(b"body"),
+            digest: crate::workspace_resources::digest_bytes(b"body"),
         }]),
     };
     let response = SkillsListResponse {
@@ -324,7 +385,7 @@ fn skills_list_response_serializes_camel_case_and_omits_absent_fields() {
                 },
                 "resources": [{
                     "uri": "skill://user/alpha/SKILL.md",
-                    "digest": digest_bytes(b"body")
+                    "digest": crate::workspace_resources::digest_bytes(b"body")
                 }]
             }]
         }),

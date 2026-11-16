@@ -93,6 +93,7 @@ impl AcpMcpError {
     /// 服务不可用（会话已关闭、连接不可建立、池已关闭）。
     pub const CODE_UNAVAILABLE: i64 = -32002;
 
+    #[must_use]
     pub fn not_found(message: impl Into<String>) -> Self {
         Self {
             code: Self::CODE_NOT_FOUND,
@@ -100,6 +101,7 @@ impl AcpMcpError {
         }
     }
 
+    #[must_use]
     pub fn unavailable(message: impl Into<String>) -> Self {
         Self {
             code: Self::CODE_UNAVAILABLE,

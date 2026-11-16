@@ -8,18 +8,24 @@
 use std::time::Duration;
 
 use base64::Engine as _;
-use peri_acp_types::workspace_resources::{
-    digest_bytes, ResourceScope, SkillsListResponse, META_KEY_DIGEST, META_KEY_SCOPE,
-    SKILL_ENTRY_FILE,
-};
-use rmcp::{
-    model::{
-        CustomRequest, ErrorCode, PaginatedRequestParams, ReadResourceRequestParams,
-        ReadResourceResult, ResourceContents, ServerResult,
-    },
-    service::{Peer, QuitReason, RunningService},
-    ClientLifecycleMode, RoleClient,
-};
+use peri_acp_types::workspace_resources;
+use peri_acp_types::workspace_resources::ResourceScope;
+use peri_acp_types::workspace_resources::SkillsListResponse;
+use peri_acp_types::workspace_resources::META_KEY_DIGEST;
+use peri_acp_types::workspace_resources::META_KEY_SCOPE;
+use peri_acp_types::workspace_resources::SKILL_ENTRY_FILE;
+use rmcp::model::CustomRequest;
+use rmcp::model::ErrorCode;
+use rmcp::model::PaginatedRequestParams;
+use rmcp::model::ReadResourceRequestParams;
+use rmcp::model::ReadResourceResult;
+use rmcp::model::ResourceContents;
+use rmcp::model::ServerResult;
+use rmcp::service::Peer;
+use rmcp::service::QuitReason;
+use rmcp::service::RunningService;
+use rmcp::ClientLifecycleMode;
+use rmcp::RoleClient;
 
 use crate::resources::{
     ResourceBudget, ResourceRoot, WorkspaceResourceProvider, WorkspaceResourcesInput,
@@ -378,7 +384,7 @@ async fn wire_meta_sections_list_and_read_verbatim() {
             );
             assert_eq!(
                 meta.get(META_KEY_DIGEST).and_then(|value| value.as_str()),
-                Some(digest_bytes(verbatim.as_bytes()).as_str())
+                Some(workspace_resources::digest_bytes(verbatim.as_bytes()).as_str())
             );
         }
         other => panic!("段落覆盖必须是文本内容：{other:?}"),

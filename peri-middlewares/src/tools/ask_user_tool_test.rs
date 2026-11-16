@@ -1,8 +1,9 @@
 //! Tests for ask_user_tool
 
+use peri_agent::tools::BaseTool as _;
 use std::sync::Arc;
 
-use super::*;
+use super::AskUserTool;
 use peri_agent::interaction::{
     InteractionContext, InteractionResponse, QuestionAnswer, TrustedInteractionOwner,
     UnansweredCause, UserInteractionBroker,

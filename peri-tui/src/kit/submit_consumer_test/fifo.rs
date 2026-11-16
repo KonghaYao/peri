@@ -1,7 +1,10 @@
 //! FIFO 与首次建会话时序回归。
 
-use super::super::*;
-use super::support::*;
+use super::super::CancellationToken;
+use super::super::LaneKey;
+use super::super::SubmitRequest;
+use super::super::admission_probe;
+use super::super::mpsc;
 
 use peri_acp::transport::AcpTransport;
 use peri_acp::transport::types::AcpError;
@@ -15,29 +18,29 @@ use std::time::Duration;
 /// 取走，单线程 runtime 掩盖了并发提交的乱序窗口。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_drained_input_buffer_prompts_preserve_fifo() {
-    let (client, server) = make_client_without_pump();
+    let (client, server) = super::support::make_client_without_pump();
     client.force_stable_for_test("fifo-session", false);
     let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
     let shutdown = CancellationToken::new();
-    let consumer = spawn_submit_consumer(client, rx, ".".into(), shutdown.clone());
+    let consumer = super::super::spawn_submit_consumer(client, rx, ".".into(), shutdown.clone());
 
     for index in 0..10 {
         tx.send(SubmitRequest::AgentText {
             text: format!("m{index}"),
             attachments: Vec::new(),
         })
-        .unwrap();
+        .expect("drained input buffer prompts preserve fifo: fixture channel must deliver its expected message");
     }
 
     let received = tokio::time::timeout(Duration::from_secs(5), async {
         let mut texts = Vec::new();
         for _ in 0..10 {
-            let (id, _, text) = expect_prompt(&server).await;
+            let (id, _, text) = super::support::expect_prompt(&server).await;
             texts.push(text);
             server
                 .send_response(id, Ok(json!({"stopReason": "end_turn"})))
                 .await
-                .unwrap();
+                .expect("drained input buffer prompts preserve fifo: fixture task and request must complete successfully");
         }
         texts
     })
@@ -53,36 +56,36 @@ async fn test_drained_input_buffer_prompts_preserve_fifo() {
 /// [回归 #210] 前一条 prompt RPC 失败不得吞掉后续消息。
 #[tokio::test]
 async fn test_failed_prompt_does_not_block_following_prompts() {
-    let (client, server) = make_client_without_pump();
+    let (client, server) = super::support::make_client_without_pump();
     client.force_stable_for_test("fifo-session", false);
     let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
     let shutdown = CancellationToken::new();
-    let consumer = spawn_submit_consumer(client, rx, ".".into(), shutdown.clone());
+    let consumer = super::super::spawn_submit_consumer(client, rx, ".".into(), shutdown.clone());
 
     for index in 0..3 {
         tx.send(SubmitRequest::AgentText {
             text: format!("m{index}"),
             attachments: Vec::new(),
         })
-        .unwrap();
+        .expect("failed prompt does not block following prompts: fixture channel must deliver its expected message");
     }
 
-    let (first_id, _, first_text) = expect_prompt(&server).await;
+    let (first_id, _, first_text) = super::support::expect_prompt(&server).await;
     assert_eq!(first_text, "m0");
     server
         .send_response(first_id, Err(AcpError::new(-32000, "boom")))
         .await
-        .unwrap();
+        .expect("failed prompt does not block following prompts: fixture task and request must complete successfully");
 
     let received = tokio::time::timeout(Duration::from_secs(5), async {
         let mut texts = Vec::new();
         for _ in 0..2 {
-            let (id, _, text) = expect_prompt(&server).await;
+            let (id, _, text) = super::support::expect_prompt(&server).await;
             texts.push(text);
             server
                 .send_response(id, Ok(json!({"stopReason": "end_turn"})))
                 .await
-                .unwrap();
+                .expect("failed prompt does not block following prompts: fixture task and request must complete successfully");
         }
         texts
     })
@@ -97,21 +100,21 @@ async fn test_failed_prompt_does_not_block_following_prompts() {
 /// [回归 #210] 第一条 prompt 未返回时，同会话第二条不得越过它提交。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_pending_prompt_blocks_same_session_successor() {
-    let (client, server) = make_client_without_pump();
+    let (client, server) = super::support::make_client_without_pump();
     client.force_stable_for_test("fifo-session", false);
     let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
     let shutdown = CancellationToken::new();
-    let consumer = spawn_submit_consumer(client, rx, ".".into(), shutdown.clone());
+    let consumer = super::super::spawn_submit_consumer(client, rx, ".".into(), shutdown.clone());
 
     for index in 0..2 {
         tx.send(SubmitRequest::AgentText {
             text: format!("m{index}"),
             attachments: Vec::new(),
         })
-        .unwrap();
+        .expect("pending prompt blocks same session successor: fixture channel must deliver its expected message");
     }
 
-    let (first_id, _, first_text) = expect_prompt(&server).await;
+    let (first_id, _, first_text) = super::support::expect_prompt(&server).await;
     assert_eq!(first_text, "m0");
     let early = tokio::time::timeout(Duration::from_millis(300), server.recv()).await;
     assert!(
@@ -122,13 +125,13 @@ async fn test_pending_prompt_blocks_same_session_successor() {
     server
         .send_response(first_id, Ok(json!({"stopReason": "end_turn"})))
         .await
-        .unwrap();
-    let (second_id, _, second_text) = expect_prompt(&server).await;
+        .expect("pending prompt blocks same session successor: fixture task and request must complete successfully");
+    let (second_id, _, second_text) = super::support::expect_prompt(&server).await;
     assert_eq!(second_text, "m1");
     server
         .send_response(second_id, Ok(json!({"stopReason": "end_turn"})))
         .await
-        .unwrap();
+        .expect("pending prompt blocks same session successor: fixture task and request must complete successfully");
     shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_millis(500), consumer).await;
 }
@@ -136,18 +139,19 @@ async fn test_pending_prompt_blocks_same_session_successor() {
 /// [回归 #210] 旧会话的 prompt 未返回时，新会话的提交不得被拖住。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_pending_prompt_does_not_block_another_session() {
-    let (client, server) = make_client_without_pump();
+    let (client, server) = super::support::make_client_without_pump();
     client.force_stable_for_test("session-a", false);
     let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
     let shutdown = CancellationToken::new();
-    let consumer = spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
+    let consumer =
+        super::super::spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
 
     tx.send(SubmitRequest::AgentText {
         text: "a".to_string(),
         attachments: Vec::new(),
     })
-    .unwrap();
-    let (first_id, first_session, first_text) = expect_prompt(&server).await;
+    .expect("pending prompt does not block another session: fixture channel must deliver its expected message");
+    let (first_id, first_session, first_text) = super::support::expect_prompt(&server).await;
     assert_eq!(first_session, "session-a");
     assert_eq!(first_text, "a");
 
@@ -157,22 +161,24 @@ async fn test_pending_prompt_does_not_block_another_session() {
         text: "b".to_string(),
         attachments: Vec::new(),
     })
-    .unwrap();
-    let (second_id, second_session, second_text) =
-        tokio::time::timeout(Duration::from_secs(2), expect_prompt(&server))
-            .await
-            .expect("新会话的 prompt 不得等待旧会话 turn 结束");
+    .expect("pending prompt does not block another session: fixture channel must deliver its expected message");
+    let (second_id, second_session, second_text) = tokio::time::timeout(
+        Duration::from_secs(2),
+        super::support::expect_prompt(&server),
+    )
+    .await
+    .expect("新会话的 prompt 不得等待旧会话 turn 结束");
     assert_eq!(second_session, "session-b");
     assert_eq!(second_text, "b");
 
     server
         .send_response(second_id, Ok(json!({"stopReason": "end_turn"})))
         .await
-        .unwrap();
+        .expect("pending prompt does not block another session: fixture task and request must complete successfully");
     server
         .send_response(first_id, Ok(json!({"stopReason": "end_turn"})))
         .await
-        .unwrap();
+        .expect("pending prompt does not block another session: fixture task and request must complete successfully");
     shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_millis(500), consumer).await;
 }
@@ -183,25 +189,26 @@ async fn test_pending_prompt_does_not_block_another_session() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_initializing_lane_keeps_fifo_after_session_created() {
-    let (client, server) = make_client_without_pump();
+    let (client, server) = super::support::make_client_without_pump();
     let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
     let shutdown = CancellationToken::new();
-    let consumer = spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
+    let consumer =
+        super::super::spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
 
-    tx.send(agent_text("m0")).unwrap();
-    tx.send(agent_text("m1")).unwrap();
+    tx.send(super::support::agent_text("m0")).expect("initializing lane keeps fifo after session created: fixture channel must deliver its expected message");
+    tx.send(super::support::agent_text("m1")).expect("initializing lane keeps fifo after session created: fixture channel must deliver its expected message");
 
     // 初始化挂起：m0/m1 都已入队，但会话尚未建立。
-    let (new_id, _) = expect_request(&server, "session/new").await;
+    let (new_id, _) = super::support::expect_request(&server, "session/new").await;
     server
         .send_response(new_id, Ok(json!({"sessionId": "session-s"})))
         .await
-        .unwrap();
-    wait_for_session(&client, "session-s").await;
+        .expect("initializing lane keeps fifo after session created: fixture task and request must complete successfully");
+    super::support::wait_for_session(&client, "session-s").await;
     // 建好后第三条入队：必须继续排在 m1 之后。
-    tx.send(agent_text("m2")).unwrap();
+    tx.send(super::support::agent_text("m2")).expect("initializing lane keeps fifo after session created: fixture channel must deliver its expected message");
 
-    let (first_id, first_session, first_text) = expect_prompt(&server).await;
+    let (first_id, first_session, first_text) = super::support::expect_prompt(&server).await;
     assert_eq!(
         (first_session.as_str(), first_text.as_str()),
         ("session-s", "m0")
@@ -214,9 +221,9 @@ async fn test_initializing_lane_keeps_fifo_after_session_created() {
     server
         .send_response(first_id, Ok(json!({"stopReason": "end_turn"})))
         .await
-        .unwrap();
+        .expect("initializing lane keeps fifo after session created: fixture task and request must complete successfully");
 
-    let (second_id, second_session, second_text) = expect_prompt(&server).await;
+    let (second_id, second_session, second_text) = super::support::expect_prompt(&server).await;
     assert_eq!(
         (second_session.as_str(), second_text.as_str()),
         ("session-s", "m1")
@@ -226,9 +233,9 @@ async fn test_initializing_lane_keeps_fifo_after_session_created() {
     server
         .send_response(second_id, Ok(json!({"stopReason": "end_turn"})))
         .await
-        .unwrap();
+        .expect("initializing lane keeps fifo after session created: fixture task and request must complete successfully");
 
-    let (third_id, third_session, third_text) = expect_prompt(&server).await;
+    let (third_id, third_session, third_text) = super::support::expect_prompt(&server).await;
     assert_eq!(
         (third_session.as_str(), third_text.as_str()),
         ("session-s", "m2")
@@ -236,7 +243,7 @@ async fn test_initializing_lane_keeps_fifo_after_session_created() {
     server
         .send_response(third_id, Ok(json!({"stopReason": "end_turn"})))
         .await
-        .unwrap();
+        .expect("initializing lane keeps fifo after session created: fixture task and request must complete successfully");
 
     shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_millis(500), consumer).await;
@@ -250,19 +257,20 @@ async fn test_initializing_lane_keeps_fifo_after_session_created() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_establishment_keeps_single_lane_while_transitioning() {
-    let (client, server) = make_client_without_pump();
+    let (client, server) = super::support::make_client_without_pump();
     let (registration_tx, mut registration_rx) = mpsc::unbounded_channel();
     admission_probe::install_registration_probe(registration_tx);
 
     let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
     let shutdown = CancellationToken::new();
-    let consumer = spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
+    let consumer =
+        super::super::spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
 
-    tx.send(agent_text("establish-m0")).unwrap();
-    let (new_id, _) = expect_request(&server, "session/new").await;
+    tx.send(super::support::agent_text("establish-m0")).expect("establishment keeps single lane while transitioning: fixture channel must deliver its expected message");
+    let (new_id, _) = super::support::expect_request(&server, "session/new").await;
 
     // route 已是 Transitioning(g+1)：m1 到达 consumer 后必须并入 m0 的车道。
-    tx.send(agent_text("establish-m1")).unwrap();
+    tx.send(super::support::agent_text("establish-m1")).expect("establishment keeps single lane while transitioning: fixture channel must deliver its expected message");
     let m0_lane = next_registration(&mut registration_rx, "establish-m0").await;
     let m1_lane = next_registration(&mut registration_rx, "establish-m1").await;
     assert_eq!(m0_lane, m1_lane, "同一次建立必须在单一有序车道上");
@@ -270,8 +278,8 @@ async fn test_establishment_keeps_single_lane_while_transitioning() {
     server
         .send_response(new_id, Ok(json!({"sessionId": "session-s"})))
         .await
-        .unwrap();
-    let (m0_id, m0_session, m0_text) = expect_prompt(&server).await;
+        .expect("establishment keeps single lane while transitioning: fixture task and request must complete successfully");
+    let (m0_id, m0_session, m0_text) = super::support::expect_prompt(&server).await;
     assert_eq!(
         (m0_session.as_str(), m0_text.as_str()),
         ("session-s", "establish-m0")
@@ -287,8 +295,8 @@ async fn test_establishment_keeps_single_lane_while_transitioning() {
     server
         .send_response(m0_id, Ok(json!({"stopReason": "end_turn"})))
         .await
-        .unwrap();
-    let (m1_id, m1_session, m1_text) = expect_prompt(&server).await;
+        .expect("establishment keeps single lane while transitioning: fixture task and request must complete successfully");
+    let (m1_id, m1_session, m1_text) = super::support::expect_prompt(&server).await;
     assert_eq!(
         (m1_session.as_str(), m1_text.as_str()),
         ("session-s", "establish-m1")
@@ -296,7 +304,7 @@ async fn test_establishment_keeps_single_lane_while_transitioning() {
     server
         .send_response(m1_id, Ok(json!({"stopReason": "end_turn"})))
         .await
-        .unwrap();
+        .expect("establishment keeps single lane while transitioning: fixture task and request must complete successfully");
 
     admission_probe::clear_registration_probe();
     shutdown.cancel();

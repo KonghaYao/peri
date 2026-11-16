@@ -5,7 +5,6 @@
 // 内容级语义已随读盘整体归 provider（`mcp-packages/workspace/src/resources/
 // instructions_test.rs` 覆盖）；本文件的职责边界是「给定冻结正文 → 贡献文本」。
 
-
 #[test]
 fn no_frozen_content_contributes_nothing() {
     let mw = AgentsMdMiddleware::new();
@@ -64,8 +63,7 @@ fn unavailable_main_with_local_contributes_local_only() {
 #[test]
 fn explicit_empty_snapshot_contributes_nothing() {
     // None（不可得）与 Some("")（显式空快照）都不贡献；空值不是重新扫描的授权。
-    let mw = AgentsMdMiddleware::new()
-        .with_frozen_parts(Some(String::new()), Some(String::new()));
+    let mw = AgentsMdMiddleware::new().with_frozen_parts(Some(String::new()), Some(String::new()));
     assert_eq!(contribution(&mw), None);
 }
 

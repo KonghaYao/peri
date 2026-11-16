@@ -1,10 +1,19 @@
-use peri_acp_types::builtin_mcp::{original_tool_name_of_effective, BUILTIN_MCP_INSTANCES};
-use peri_agent::{
-    agent::state::AgentState, messages::BaseMessage, middleware::r#trait::Middleware, session,
-};
+use peri_acp_types::builtin_mcp;
+use peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES;
+use peri_agent::agent::state::AgentState;
+use peri_agent::messages::BaseMessage;
+use peri_agent::middleware::r#trait::Middleware;
+use peri_agent::session;
 
-use super::*;
-use peri_mcp_core::agent_definition::parse_agent_file;
+use super::AgentCancellationToken;
+use super::AgentCapability;
+use super::Arc;
+use super::BaseTool;
+use super::InvalidModelTier;
+use super::PromptSectionZone;
+use super::RwLock;
+use super::SubAgentMiddleware;
+use peri_mcp_core::agent_definition;
 
 #[derive(Clone)]
 struct EchoLLM;
@@ -15,14 +24,14 @@ impl EchoLLM {
         request: peri_model::ModelRequest,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-        use crate::subagent::test_support::*;
+        use crate::subagent::test_support;
         let _ = &cancellation;
-        let messages = base_messages(&request);
-        let defined = defined_tools(&request);
+        let messages = test_support::base_messages(&request);
+        let defined = test_support::defined_tools(&request);
         let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
         let last = messages.last().map(|m| m.content()).unwrap_or_default();
-        text_events(format!("echo: {}", last))
+        test_support::text_events(format!("echo: {}", last))
     }
 }
 crate::subagent::test_support::fixture_model_impl!(EchoLLM);
@@ -81,8 +90,8 @@ fn test_build_tool_returns_subagent_tool() {
 
 #[tokio::test]
 async fn test_before_agent_no_longer_injects_summary() {
-    use tempfile::tempdir;
-    let dir = tempdir().unwrap();
+    use tempfile;
+    let dir = tempfile::tempdir().unwrap();
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -199,10 +208,11 @@ fn test_build_tool_receives_parent_messages() {
 /// 同步执行，BgTaskArea 无运行条目。
 #[test]
 fn test_build_tool_after_set_parent_session_reads_runtime_host() {
-    use peri_agent::{
-        agent::async_tasks::TaskManager,
-        session::{subagent::SubagentHost, FrozenContext, MessageQueue, Session},
-    };
+    use peri_agent::agent::async_tasks::TaskManager;
+    use peri_agent::session::subagent::SubagentHost;
+    use peri_agent::session::FrozenContext;
+    use peri_agent::session::MessageQueue;
+    use peri_agent::session::Session;
 
     // 构造带运行时 host 的父 session（模拟 build_stage_context 注入点）
     let session = Session::new_with_cancel_and_queue(
@@ -318,8 +328,8 @@ fn make_session() -> std::sync::Arc<session::Session> {
 /// 从 YAML frontmatter 构造 agent 并推断能力画像（走真实 parse_agent_file 路径）
 fn capability_from_yaml(yaml: &str) -> AgentCapability {
     let content = format!("---\n{}\n---\n\nbody", yaml);
-    let agent = parse_agent_file(&content).expect("agent frontmatter 应能解析");
-    infer_agent_capability(&agent.frontmatter).expect("夹具档位必须合法")
+    let agent = agent_definition::parse_agent_file(&content).expect("agent frontmatter 应能解析");
+    super::infer_agent_capability(&agent.frontmatter).expect("夹具档位必须合法")
 }
 
 /// [回归测试] D5：omitted tools（继承父工具）+ 仅 disallow Write/Edit，
@@ -423,8 +433,8 @@ fn test_capability_whitelist_execute_extra_tool_is_writes() {
 fn test_explorer_readonly_allowlist_resolves_to_read_tools() {
     let content =
         include_str!("../../../mcp-packages/workspace/src/resources/builtin/agents/explorer.md");
-    let agent = parse_agent_file(content).expect("explorer fixture 必须可解析");
-    let capability = infer_agent_capability(&agent.frontmatter).expect("档位合法");
+    let agent = agent_definition::parse_agent_file(content).expect("explorer fixture 必须可解析");
+    let capability = super::infer_agent_capability(&agent.frontmatter).expect("档位合法");
     assert!(!capability.can_mutate, "只读白名单必须标 readonly");
 
     let parent_tools: Vec<_> = [
@@ -506,8 +516,8 @@ fn mutation_tool_matches_original_name_policy_for_builtin_names() {
         for tool in instance.tools {
             declared += 1;
             assert_eq!(
-                is_mutation_tool(tool.effective_name),
-                is_mutation_tool(tool.original_name),
+                super::is_mutation_tool(tool.effective_name),
+                super::is_mutation_tool(tool.original_name),
                 "`{}` 的 mutation 判定必须等于原始名 `{}`（IF-D6 ③）",
                 tool.effective_name,
                 tool.original_name
@@ -529,9 +539,9 @@ fn mutation_tool_matches_original_name_policy_for_builtin_names() {
 
     // wave 1 冻结结果（IF-G2 第 2 条）：两个 Web 工具不再因 `mcp__` 前缀被算 mutation；
     // artifact 迁移前就是裸名且不在 mutation 集合内，判定不变。
-    assert!(!is_mutation_tool("mcp__web__WebSearch"));
-    assert!(!is_mutation_tool("mcp__web__WebFetch"));
-    assert!(!is_mutation_tool("mcp__artifact__artifact"));
+    assert!(!super::is_mutation_tool("mcp__web__WebSearch"));
+    assert!(!super::is_mutation_tool("mcp__web__WebFetch"));
+    assert!(!super::is_mutation_tool("mcp__artifact__artifact"));
 
     // wave 2 冻结结果（IF-P3-11）：`cron_register` 两种名字形态都必须判 mutation
     // （可定时触发任意 prompt，等价委派执行权）；`cron_list` / `cron_remove`
@@ -551,7 +561,7 @@ fn mutation_tool_matches_original_name_policy_for_builtin_names() {
             .unwrap_or_else(|| panic!("声明表应含 `{instance}` 的原始工具名 `{original}`"));
         for name in [original, tool.effective_name] {
             assert_eq!(
-                is_mutation_tool(name),
+                super::is_mutation_tool(name),
                 mutation,
                 "`{name}` 的 mutation 判定应为 {mutation}（wave 2 冻结）"
             );
@@ -578,7 +588,7 @@ fn mutation_tool_matches_original_name_policy_for_builtin_names() {
             .unwrap_or_else(|| panic!("声明表应含 workspace 的原始工具名 `{original}`"));
         for name in [original, tool.effective_name] {
             assert_eq!(
-                is_mutation_tool(name),
+                super::is_mutation_tool(name),
                 mutation,
                 "`{name}` 的 mutation 判定应为 {mutation}（wave 3 冻结）"
             );
@@ -589,14 +599,17 @@ fn mutation_tool_matches_original_name_policy_for_builtin_names() {
 /// 反证（IF-D6 冻结约束 3）：未知 / 外部 `mcp__*` 仍保守算 mutation。
 #[test]
 fn unknown_mcp_prefix_still_mutates() {
-    assert!(is_mutation_tool("mcp__filesystem__write_file"));
-    assert!(is_mutation_tool("mcp__anything"));
+    assert!(super::is_mutation_tool("mcp__filesystem__write_file"));
+    assert!(super::is_mutation_tool("mcp__anything"));
     // 与 effective name 仅差大小写 ⇒ 未命中归一表 ⇒ 走既有的 `mcp__` 前缀保守路径
-    assert_eq!(original_tool_name_of_effective("mcp__web__fetch"), None);
-    assert!(is_mutation_tool("mcp__web__fetch"));
+    assert_eq!(
+        builtin_mcp::original_tool_name_of_effective("mcp__web__fetch"),
+        None
+    );
+    assert!(super::is_mutation_tool("mcp__web__fetch"));
     // 非 builtin 名字的判定逐位不变
-    assert!(is_mutation_tool("Bash"));
-    assert!(!is_mutation_tool("Read"));
+    assert!(super::is_mutation_tool("Bash"));
+    assert!(!super::is_mutation_tool("Read"));
 }
 
 /// 归一的可见后果（IF-G2 第 2 条）：白名单只含 builtin Web 工具的 agent 由
@@ -739,9 +752,9 @@ fn subagent_section_declaration_shape() {
 #[test]
 fn test_capability_rejects_unknown_model_tier() {
     let content = "---\nname: a\ndescription: d\nmodel: turbo\n---\n\nbody";
-    let agent = parse_agent_file(content).expect("agent frontmatter 应能解析");
+    let agent = agent_definition::parse_agent_file(content).expect("agent frontmatter 应能解析");
     assert_eq!(
-        infer_agent_capability(&agent.frontmatter).unwrap_err(),
+        super::infer_agent_capability(&agent.frontmatter).unwrap_err(),
         InvalidModelTier,
         "未知档位必须 typed 拒绝"
     );

@@ -23,7 +23,8 @@ pub fn projection_sentinel_counts_v1(text: &str) -> ProjectionSentinelCountsV1 {
     let bytes = text.as_bytes();
     let mut line_start = 0;
 
-    for (index, byte) in bytes.iter().enumerate() {
+    let enumerated_byte = bytes.iter().enumerate();
+    for (index, byte) in enumerated_byte {
         if *byte != b'\n' {
             continue;
         }

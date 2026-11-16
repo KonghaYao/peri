@@ -3,7 +3,7 @@ use agent_client_protocol_schema::v1::{
     Content, ContentBlock, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
     ToolCallUpdateFields, ToolKind,
 };
-use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
+use peri_acp_types::builtin_mcp;
 use peri_acp_types::error::SafeSubagentFailure;
 use serde_json::Value;
 
@@ -45,7 +45,7 @@ const TOOL_FAILED_FALLBACK: &str = "Tool execution failed";
 
 /// 工具结果的标准展示 `content` 投影（单个 Text block）。
 ///
-/// 失败且底层文本为空白时使用 [`TOOL_FAILED_FALLBACK`]，保证客户端
+/// 失败且底层文本为空白时使用 `TOOL_FAILED_FALLBACK`，保证客户端
 /// 不会因空串静默丢弃失败；成功路径保持底层文本原样（可能为空）。
 /// live mapper 与 session replay 共用此规则，避免两种路径的协议形态漂移。
 pub fn tool_result_content(output: &str, is_error: bool) -> Vec<ToolCallContent> {
@@ -71,7 +71,7 @@ pub fn tool_result_content(output: &str, is_error: bool) -> Vec<ToolCallContent>
 /// `mcp__web__fetch`）时保持原样 ⇒ 分类结果与迁移前逐位一致（仍为 `Other`）。
 /// 投影真值（`ToolCall` 载荷上的 name）**不**被归一改写：仍是 effective name。
 fn infer_tool_kind(name: &str) -> ToolKind {
-    let name = original_tool_name_of_effective(name).unwrap_or(name);
+    let name = builtin_mcp::original_tool_name_of_effective(name).unwrap_or(name);
     match name {
         "Read" => ToolKind::Read,
         "Write" | "Edit" | "folder_operations" => ToolKind::Edit,

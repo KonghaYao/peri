@@ -1,14 +1,25 @@
-use super::*;
+use super::{
+    database, frozen, payloads, session, workspace, AgentStatus, Arc, BaseMessage, ChildSnapshot,
+    CompactionChange, FrozenState, MessageFlags, PersistedPayload, PersistenceRecovery,
+    RewindBoundary, SessionMetaPatch, SqliteSessionData, SqliteThreadStore,
+};
+use crate::sessions::data::SessionDataPort;
+use peri_acp_types::store::ThreadStore;
 
 #[tokio::test]
 async fn test_projection_and_compaction_maintain_derived_views_in_the_same_write() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-compact", &cwd, &workspace, frozen("compact")))
-        .await
-        .unwrap();
-    let history = payloads(3);
+    data.save_new_session(&super::session(
+        "s-compact",
+        &cwd,
+        &workspace,
+        super::frozen("compact"),
+    ))
+    .await
+    .unwrap();
+    let history = super::payloads(3);
     data.append_history(&"s-compact".to_owned(), &history)
         .await
         .unwrap();
@@ -129,13 +140,18 @@ async fn test_projection_and_compaction_maintain_derived_views_in_the_same_write
 
 #[tokio::test]
 async fn test_rewind_boundaries_are_distinct_and_unknown_cutoffs_change_nothing() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-rewind", &cwd, &workspace, frozen("rewind")))
-        .await
-        .unwrap();
-    let history = payloads(4);
+    data.save_new_session(&super::session(
+        "s-rewind",
+        &cwd,
+        &workspace,
+        super::frozen("rewind"),
+    ))
+    .await
+    .unwrap();
+    let history = super::payloads(4);
     data.append_history(&"s-rewind".to_owned(), &history)
         .await
         .unwrap();
@@ -198,17 +214,27 @@ async fn test_rewind_boundaries_are_distinct_and_unknown_cutoffs_change_nothing(
 
 #[tokio::test]
 async fn test_remove_history_entries_is_exact_and_idempotent() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-remove", &cwd, &workspace, frozen("remove")))
-        .await
-        .unwrap();
-    data.save_new_session(&session("s-other", &cwd, &workspace, frozen("other")))
-        .await
-        .unwrap();
-    let history = payloads(2);
-    let other = payloads(1);
+    data.save_new_session(&super::session(
+        "s-remove",
+        &cwd,
+        &workspace,
+        super::frozen("remove"),
+    ))
+    .await
+    .unwrap();
+    data.save_new_session(&super::session(
+        "s-other",
+        &cwd,
+        &workspace,
+        super::frozen("other"),
+    ))
+    .await
+    .unwrap();
+    let history = super::payloads(2);
+    let other = super::payloads(1);
     data.append_history(&"s-remove".to_owned(), &history)
         .await
         .unwrap();
@@ -255,12 +281,17 @@ async fn test_remove_history_entries_is_exact_and_idempotent() {
 
 #[tokio::test]
 async fn test_update_meta_applies_only_requested_fields() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-meta", &cwd, &workspace, frozen("meta")))
-        .await
-        .unwrap();
+    data.save_new_session(&super::session(
+        "s-meta",
+        &cwd,
+        &workspace,
+        super::frozen("meta"),
+    ))
+    .await
+    .unwrap();
     let before = data.load_meta(&"s-meta".to_owned()).await.unwrap();
 
     // 空 patch：不改任何字段，也不刷新时间戳。
@@ -328,13 +359,18 @@ async fn test_update_meta_applies_only_requested_fields() {
 
 #[tokio::test]
 async fn test_child_resume_record_round_trip() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-resume", &cwd, &workspace, frozen("resume")))
-        .await
-        .unwrap();
-    let mut child = session("s-resume-child", &cwd, &workspace, frozen("resume"));
+    data.save_new_session(&super::session(
+        "s-resume",
+        &cwd,
+        &workspace,
+        super::frozen("resume"),
+    ))
+    .await
+    .unwrap();
+    let mut child = super::session("s-resume-child", &cwd, &workspace, super::frozen("resume"));
     child.meta.parent_thread_id = Some("s-resume".to_owned());
     data.save_child(&ChildSnapshot {
         target: child,
@@ -373,12 +409,17 @@ async fn test_child_resume_record_round_trip() {
 
 #[tokio::test]
 async fn test_read_only_store_serves_reads_and_refuses_every_mutation() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-ro", &cwd, &workspace, frozen("ro")))
-        .await
-        .unwrap();
+    data.save_new_session(&super::session(
+        "s-ro",
+        &cwd,
+        &workspace,
+        super::frozen("ro"),
+    ))
+    .await
+    .unwrap();
     let path = directory.path().join("threads.db");
     store.close().await;
     let reader = SqliteThreadStore::open_existing_read_only(&path)
@@ -388,7 +429,12 @@ async fn test_read_only_store_serves_reads_and_refuses_every_mutation() {
 
     assert!(read_only.load_snapshot(&"s-ro".to_owned()).await.is_ok());
     let error = read_only
-        .save_new_session(&session("s-ro-2", &cwd, &workspace, frozen("ro")))
+        .save_new_session(&super::session(
+            "s-ro-2",
+            &cwd,
+            &workspace,
+            super::frozen("ro"),
+        ))
         .await
         .unwrap_err();
     assert!(matches!(
@@ -396,7 +442,7 @@ async fn test_read_only_store_serves_reads_and_refuses_every_mutation() {
         peri_acp_types::session_resources::SessionResourceErrorKind::ReadOnlyStore
     ));
     let error = read_only
-        .append_history(&"s-ro".to_owned(), &payloads(1))
+        .append_history(&"s-ro".to_owned(), &super::payloads(1))
         .await
         .unwrap_err();
     assert!(matches!(
@@ -420,16 +466,21 @@ async fn test_read_only_store_serves_reads_and_refuses_every_mutation() {
 
 #[tokio::test]
 async fn test_close_stops_writes_and_keeps_history_readable() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-close", &cwd, &workspace, frozen("close")))
-        .await
-        .unwrap();
+    data.save_new_session(&super::session(
+        "s-close",
+        &cwd,
+        &workspace,
+        super::frozen("close"),
+    ))
+    .await
+    .unwrap();
 
     data.close().await.unwrap();
     let error = data
-        .append_history(&"s-close".to_owned(), &payloads(1))
+        .append_history(&"s-close".to_owned(), &super::payloads(1))
         .await
         .unwrap_err();
     assert!(
@@ -444,15 +495,20 @@ async fn test_close_stops_writes_and_keeps_history_readable() {
 
 #[tokio::test]
 async fn test_restart_preserves_canonical_snapshot_and_history() {
-    let (_store, data, directory) = database().await;
-    let store = SqliteThreadStore::new(directory.path().join("threads.db"))
+    let (_store, data, directory) = super::database().await;
+    let store = SqliteThreadStore::try_new(directory.path().join("threads.db"))
         .await
         .unwrap();
-    let workspace = workspace(&store, directory.path()).await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-dirty", &cwd, &workspace, frozen("dirty")))
-        .await
-        .unwrap();
+    data.save_new_session(&super::session(
+        "s-dirty",
+        &cwd,
+        &workspace,
+        super::frozen("dirty"),
+    ))
+    .await
+    .unwrap();
     store
         .append_message(
             &"s-dirty".to_owned(),
@@ -464,15 +520,15 @@ async fn test_restart_preserves_canonical_snapshot_and_history() {
     drop(store);
     assert!(data.load_snapshot(&"s-dirty".to_owned()).await.is_ok());
 
-    let reopened = SqliteThreadStore::new(directory.path().join("threads.db"))
+    let reopened = SqliteThreadStore::try_new(directory.path().join("threads.db"))
         .await
         .unwrap();
     let after = data.load_snapshot(&"s-dirty".to_owned()).await.unwrap();
     assert_eq!(after.binding, before.binding);
     assert_eq!(after.frozen, before.frozen);
     assert_eq!(
-        payload_bytes(&after.payloads),
-        payload_bytes(&before.payloads)
+        super::payload_bytes(&after.payloads),
+        super::payload_bytes(&before.payloads)
     );
     reopened
         .append_message(
@@ -495,13 +551,18 @@ async fn test_restart_preserves_canonical_snapshot_and_history() {
 
 #[tokio::test]
 async fn test_active_snapshot_reads_only_unexcluded_entries() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-active", &cwd, &workspace, frozen("active")))
-        .await
-        .unwrap();
-    let history = payloads(3);
+    data.save_new_session(&super::session(
+        "s-active",
+        &cwd,
+        &workspace,
+        super::frozen("active"),
+    ))
+    .await
+    .unwrap();
+    let history = super::payloads(3);
     data.append_history(&"s-active".to_owned(), &history)
         .await
         .unwrap();
@@ -564,22 +625,27 @@ async fn test_active_snapshot_reads_only_unexcluded_entries() {
 
 #[tokio::test]
 async fn test_message_flags_read_is_bounded_to_the_given_ids() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-flags", &cwd, &workspace, frozen("flags")))
-        .await
-        .unwrap();
-    data.save_new_session(&session(
-        "s-flags-other",
+    data.save_new_session(&super::session(
+        "s-flags",
         &cwd,
         &workspace,
-        frozen("flags-other"),
+        super::frozen("flags"),
     ))
     .await
     .unwrap();
-    let history = payloads(3);
-    let other = payloads(1);
+    data.save_new_session(&super::session(
+        "s-flags-other",
+        &cwd,
+        &workspace,
+        super::frozen("flags-other"),
+    ))
+    .await
+    .unwrap();
+    let history = super::payloads(3);
+    let other = super::payloads(1);
     data.append_history(&"s-flags".to_owned(), &history)
         .await
         .unwrap();
@@ -640,11 +706,11 @@ async fn test_message_flags_read_is_bounded_to_the_given_ids() {
 
 #[tokio::test]
 async fn frozen_state_is_a_single_fact_read_for_restore_admission() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
-    let bytes = frozen("restore");
-    data.save_new_session(&session("s-frozen", &cwd, &workspace, bytes.clone()))
+    let bytes = super::frozen("restore");
+    data.save_new_session(&super::session("s-frozen", &cwd, &workspace, bytes.clone()))
         .await
         .unwrap();
 

@@ -1,17 +1,25 @@
+use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tracing::{field::Visit, span, Event, Metadata, Subscriber};
+use tracing::field::Visit;
+use tracing::span;
+use tracing::Event;
+use tracing::Metadata;
+use tracing::Subscriber;
 
-use langfuse_client::{
-    client::ExportConfig, types::TraceBody, Batcher, BatcherConfig, IngestionEvent, LangfuseClient,
-};
+use langfuse_client::client::ExportConfig;
+use langfuse_client::types::TraceBody;
+use langfuse_client::Batcher;
+use langfuse_client::BatcherConfig;
+use langfuse_client::IngestionEvent;
+use langfuse_client::LangfuseClient;
 
 #[derive(Clone, Default)]
 struct LogCapture(Arc<Mutex<String>>);
 
 impl Visit for LogCapture {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn Debug) {
         use std::fmt::Write;
         write!(self.0.lock().unwrap(), " {}={value:?}", field.name()).unwrap();
     }

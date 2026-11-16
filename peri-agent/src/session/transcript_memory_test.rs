@@ -1,7 +1,11 @@
 //! 内存模型行为：构造与寻址、Staging 两阶段写入、标记与投影、祖先只读边界、
 //! rewind、rebuild、set_flags_batch。
 
-use super::*;
+use crate::messages::BaseMessage;
+use crate::messages::MessageId;
+use crate::session::transcript::MessageTranscript;
+
+use peri_acp_types::store::MessageFlags;
 
 use std::collections::HashMap;
 
@@ -53,8 +57,8 @@ fn test_new_transcript_is_empty() {
 
 #[test]
 fn test_with_ancestor_sets_boundary() {
-    let a1 = make_human("ancestor-1");
-    let a2 = make_human("ancestor-2");
+    let a1 = crate::session::transcript::tests::make_human("ancestor-1");
+    let a2 = crate::session::transcript::tests::make_human("ancestor-2");
     let t = MessageTranscript::new().with_ancestor(vec![a1.clone(), a2.clone()]);
 
     assert_eq!(t.len(), 2);
@@ -66,8 +70,12 @@ fn test_with_ancestor_sets_boundary() {
 #[test]
 fn test_loaded_root_history_remains_in_compactable_own_region() {
     let history = vec![
-        PersistedPayload::Message(make_human("previous question")),
-        PersistedPayload::Message(make_ai("previous answer")),
+        PersistedPayload::Message(crate::session::transcript::tests::make_human(
+            "previous question",
+        )),
+        PersistedPayload::Message(crate::session::transcript::tests::make_ai(
+            "previous answer",
+        )),
     ];
 
     // Mirrors the main-agent Phase 5 history seeding path.
@@ -86,9 +94,9 @@ fn test_loaded_root_history_remains_in_compactable_own_region() {
 #[test]
 fn test_id_indexing_o1_lookup() {
     let mut t = MessageTranscript::new();
-    let m1 = make_human("msg-1");
-    let m2 = make_human("msg-2");
-    let m3 = make_human("msg-3");
+    let m1 = crate::session::transcript::tests::make_human("msg-1");
+    let m2 = crate::session::transcript::tests::make_human("msg-2");
+    let m3 = crate::session::transcript::tests::make_human("msg-3");
 
     let id1 = t.append(m1);
     let id2 = t.append(m2);
@@ -107,16 +115,26 @@ fn test_id_indexing_o1_lookup() {
 #[test]
 fn test_append_returns_correct_id() {
     let mut t = MessageTranscript::new();
-    let msg = make_human("hello");
+    let msg = crate::session::transcript::tests::make_human("hello");
     let id = t.append(msg);
     // 返回的 id 应与消息内部 id 一致
-    assert_eq!(t.get(id).unwrap().message().id(), id);
+    assert_eq!(
+        t.get(id)
+            .expect("t get fixture must contain the requested entry")
+            .message()
+            .id(),
+        id
+    );
 }
 
 #[test]
 fn test_append_batch() {
     let mut t = MessageTranscript::new();
-    let msgs = vec![make_human("a"), make_human("b"), make_human("c")];
+    let msgs = vec![
+        crate::session::transcript::tests::make_human("a"),
+        crate::session::transcript::tests::make_human("b"),
+        crate::session::transcript::tests::make_human("c"),
+    ];
     let ids = t.append_batch(msgs);
 
     assert_eq!(ids.len(), 3);
@@ -133,18 +151,24 @@ fn test_append_batch() {
 fn test_staging_commit_atomic() {
     let mut t = MessageTranscript::new();
     // 先追加一条用户消息
-    t.append(make_human("user question"));
+    t.append(crate::session::transcript::tests::make_human(
+        "user question",
+    ));
 
     // Stage AI 消息
-    let ai_msg = make_ai("thinking...");
+    let ai_msg = crate::session::transcript::tests::make_ai("thinking...");
     t.stage_ai_message(ai_msg);
     assert!(t.has_staged());
     // Staging 期间主列表不变
     assert_eq!(t.len(), 1);
 
     // Stage ToolResult
-    t.stage_tool_result(make_tool_result("call_1", "result-1"));
-    t.stage_tool_result(make_tool_result("call_2", "result-2"));
+    t.stage_tool_result(crate::session::transcript::tests::make_tool_result(
+        "call_1", "result-1",
+    ));
+    t.stage_tool_result(crate::session::transcript::tests::make_tool_result(
+        "call_2", "result-2",
+    ));
 
     // Commit
     t.commit_staged();
@@ -160,11 +184,16 @@ fn test_staging_commit_atomic() {
 #[test]
 fn test_staging_discard() {
     let mut t = MessageTranscript::new();
-    t.append(make_human("user question"));
+    t.append(crate::session::transcript::tests::make_human(
+        "user question",
+    ));
 
-    let ai_msg = make_ai("will be discarded");
+    let ai_msg = crate::session::transcript::tests::make_ai("will be discarded");
     t.stage_ai_message(ai_msg);
-    t.stage_tool_result(make_tool_result("call_1", "also discarded"));
+    t.stage_tool_result(crate::session::transcript::tests::make_tool_result(
+        "call_1",
+        "also discarded",
+    ));
     assert!(t.has_staged());
 
     t.discard_staged();
@@ -176,7 +205,9 @@ fn test_staging_discard() {
 #[test]
 fn test_stage_tool_result_without_ai_message_is_noop() {
     let mut t = MessageTranscript::new();
-    t.stage_tool_result(make_tool_result("call_1", "ignored"));
+    t.stage_tool_result(crate::session::transcript::tests::make_tool_result(
+        "call_1", "ignored",
+    ));
     assert!(!t.has_staged(), "无 AI 消息时 tool_result 应被忽略");
 }
 
@@ -184,15 +215,21 @@ fn test_stage_tool_result_without_ai_message_is_noop() {
 fn test_stage_ai_message_overwrites_previous_staging() {
     let mut t = MessageTranscript::new();
 
-    let ai1 = make_ai("first ai");
+    let ai1 = crate::session::transcript::tests::make_ai("first ai");
     t.stage_ai_message(ai1);
-    t.stage_tool_result(make_tool_result("call_1", "result for first"));
+    t.stage_tool_result(crate::session::transcript::tests::make_tool_result(
+        "call_1",
+        "result for first",
+    ));
 
     // 新的 AI 消息覆盖旧的 staging
-    let ai2 = make_ai("second ai");
+    let ai2 = crate::session::transcript::tests::make_ai("second ai");
     t.stage_ai_message(ai2);
     // 旧的 tool_results 被丢弃
-    t.stage_tool_result(make_tool_result("call_2", "result for second"));
+    t.stage_tool_result(crate::session::transcript::tests::make_tool_result(
+        "call_2",
+        "result for second",
+    ));
 
     t.commit_staged();
     assert_eq!(t.len(), 2, "只有 ai2 + tool2，ai1 和 tool1 被丢弃");
@@ -203,7 +240,7 @@ fn test_stage_ai_message_overwrites_previous_staging() {
 #[test]
 fn test_commit_without_staging_is_noop() {
     let mut t = MessageTranscript::new();
-    t.append(make_human("existing"));
+    t.append(crate::session::transcript::tests::make_human("existing"));
     t.commit_staged(); // 无 staging，不应 panic
     assert_eq!(t.len(), 1);
 }
@@ -213,7 +250,7 @@ fn test_commit_without_staging_is_noop() {
 #[test]
 fn test_truncated_flag() {
     let mut t = MessageTranscript::new();
-    let id = t.append(make_human("truncatable"));
+    let id = t.append(crate::session::transcript::tests::make_human("truncatable"));
     assert_eq!(t.flags(id), MessageFlags::default());
     assert!(!t.flags(id).truncated);
 
@@ -228,7 +265,7 @@ fn test_truncated_flag() {
 #[test]
 fn test_excluded_flag() {
     let mut t = MessageTranscript::new();
-    let id = t.append(make_human("excludable"));
+    let id = t.append(crate::session::transcript::tests::make_human("excludable"));
 
     t.set_excluded(id, true);
     assert!(t.flags(id).excluded);
@@ -238,7 +275,7 @@ fn test_excluded_flag() {
 #[test]
 fn test_clear_flags() {
     let mut t = MessageTranscript::new();
-    let id = t.append(make_human("flagged"));
+    let id = t.append(crate::session::transcript::tests::make_human("flagged"));
     t.set_truncated(id, true);
     t.set_excluded(id, true);
 
@@ -251,9 +288,11 @@ fn test_clear_flags() {
 #[test]
 fn test_visible_messages_skips_excluded() {
     let mut t = MessageTranscript::new();
-    let id1 = t.append(make_human("visible-1"));
-    let id2 = t.append(make_human("will-be-excluded"));
-    let id3 = t.append(make_human("visible-2"));
+    let id1 = t.append(crate::session::transcript::tests::make_human("visible-1"));
+    let id2 = t.append(crate::session::transcript::tests::make_human(
+        "will-be-excluded",
+    ));
+    let id3 = t.append(crate::session::transcript::tests::make_human("visible-2"));
 
     t.set_excluded(id2, true);
 
@@ -266,7 +305,9 @@ fn test_visible_messages_skips_excluded() {
 #[test]
 fn test_visible_messages_keeps_truncated() {
     let mut t = MessageTranscript::new();
-    let id = t.append(make_human("truncated but visible"));
+    let id = t.append(crate::session::transcript::tests::make_human(
+        "truncated but visible",
+    ));
     t.set_truncated(id, true);
 
     let visible = t.visible_messages();
@@ -279,10 +320,17 @@ fn test_visible_messages_keeps_truncated() {
 fn test_visible_messages_filters_excluded() {
     // visible_messages() 过滤 excluded=true 的消息，保留 truncated/excluded=false
     let mut t = MessageTranscript::new();
-    let id1 = t.append(make_human("visible human"));
-    let id2 = t.append(make_ai("excluded ai"));
-    let id3 = t.append(make_tool_result("call_1", "excluded tool result"));
-    let id4 = t.append(make_human("visible again"));
+    let id1 = t.append(crate::session::transcript::tests::make_human(
+        "visible human",
+    ));
+    let id2 = t.append(crate::session::transcript::tests::make_ai("excluded ai"));
+    let id3 = t.append(crate::session::transcript::tests::make_tool_result(
+        "call_1",
+        "excluded tool result",
+    ));
+    let id4 = t.append(crate::session::transcript::tests::make_human(
+        "visible again",
+    ));
 
     // 标记 id2 和 id3 为 excluded
     t.set_excluded(id2, true);
@@ -304,8 +352,8 @@ fn test_visible_messages_filters_excluded() {
 
 #[test]
 fn test_ancestor_boundary_is_readonly_concept() {
-    let a1 = make_human("ancestor");
-    let own = make_human("own message");
+    let a1 = crate::session::transcript::tests::make_human("ancestor");
+    let own = crate::session::transcript::tests::make_human("own message");
     let mut t = MessageTranscript::new().with_ancestor(vec![a1]);
 
     t.append(own);
@@ -318,12 +366,18 @@ fn test_ancestor_boundary_is_readonly_concept() {
 #[tokio::test]
 async fn test_rewind_to_truncates_correctly() {
     let mut t = MessageTranscript::new();
-    let id1 = t.append(make_human("keep-1"));
-    let id2 = t.append(make_human("keep-2"));
-    let _id3 = t.append(make_human("will-remove-1"));
-    let _id4 = t.append(make_human("will-remove-2"));
+    let id1 = t.append(crate::session::transcript::tests::make_human("keep-1"));
+    let id2 = t.append(crate::session::transcript::tests::make_human("keep-2"));
+    let _id3 = t.append(crate::session::transcript::tests::make_human(
+        "will-remove-1",
+    ));
+    let _id4 = t.append(crate::session::transcript::tests::make_human(
+        "will-remove-2",
+    ));
 
-    t.rewind_to(id2).await.unwrap();
+    t.rewind_to(id2)
+        .await
+        .expect("the rewind to fixture result is required for this assertion");
     assert_eq!(t.len(), 2, "rewind 后应只保留 id1 + id2");
     assert!(t.get(id1).is_some());
     assert!(t.get(id2).is_some());
@@ -332,13 +386,15 @@ async fn test_rewind_to_truncates_correctly() {
 #[tokio::test]
 async fn test_rewind_clears_staging() {
     let mut t = MessageTranscript::new();
-    let id = t.append(make_human("target"));
-    t.append(make_human("after"));
+    let id = t.append(crate::session::transcript::tests::make_human("target"));
+    t.append(crate::session::transcript::tests::make_human("after"));
 
-    t.stage_ai_message(make_ai("staged ai"));
+    t.stage_ai_message(crate::session::transcript::tests::make_ai("staged ai"));
     assert!(t.has_staged());
 
-    t.rewind_to(id).await.unwrap();
+    t.rewind_to(id)
+        .await
+        .expect("the rewind to fixture result is required for this assertion");
     assert!(!t.has_staged(), "rewind 应清空 staging");
     assert_eq!(t.len(), 1);
 }
@@ -346,7 +402,7 @@ async fn test_rewind_clears_staging() {
 #[tokio::test]
 async fn test_rewind_nonexistent_id_returns_error() {
     let mut t = MessageTranscript::new();
-    t.append(make_human("only msg"));
+    t.append(crate::session::transcript::tests::make_human("only msg"));
     let ghost_id = MessageId::new();
 
     let result = t.rewind_to(ghost_id).await;
@@ -355,9 +411,9 @@ async fn test_rewind_nonexistent_id_returns_error() {
 
 #[tokio::test]
 async fn test_rewind_into_ancestor_returns_error() {
-    let a1 = make_human("ancestor");
+    let a1 = crate::session::transcript::tests::make_human("ancestor");
     let mut t = MessageTranscript::new().with_ancestor(vec![a1.clone()]);
-    t.append(make_human("own"));
+    t.append(crate::session::transcript::tests::make_human("own"));
 
     let result = t.rewind_to(a1.id()).await;
     assert!(result.is_err(), "rewind 到祖先区域应返回错误");
@@ -368,8 +424,8 @@ async fn test_rewind_into_ancestor_returns_error() {
 #[test]
 fn test_rebuild_preserves_flags() {
     let mut t = MessageTranscript::new();
-    let id1 = t.append(make_human("msg-1"));
-    let id2 = t.append(make_human("msg-2"));
+    let id1 = t.append(crate::session::transcript::tests::make_human("msg-1"));
+    let id2 = t.append(crate::session::transcript::tests::make_human("msg-2"));
     t.set_excluded(id1, true);
 
     // 重建：保留 id1 的 excluded 标记
@@ -392,9 +448,11 @@ fn test_rebuild_preserves_flags() {
 
 #[test]
 fn test_rebuild_preserves_ancestor_and_persistence() {
-    let mut t = MessageTranscript::new().with_ancestor(vec![make_human("ancestor")]);
-    t.append(make_human("own-1"));
-    t.append(make_human("own-2"));
+    let mut t = MessageTranscript::new().with_ancestor(vec![
+        crate::session::transcript::tests::make_human("ancestor"),
+    ]);
+    t.append(crate::session::transcript::tests::make_human("own-1"));
+    t.append(crate::session::transcript::tests::make_human("own-2"));
 
     let entries: Vec<(BaseMessage, MessageFlags)> = t
         .entries()
@@ -410,8 +468,8 @@ fn test_rebuild_preserves_ancestor_and_persistence() {
 #[test]
 fn test_rebuild_clears_staging() {
     let mut t = MessageTranscript::new();
-    t.append(make_human("msg"));
-    t.stage_ai_message(make_ai("staged"));
+    t.append(crate::session::transcript::tests::make_human("msg"));
+    t.stage_ai_message(crate::session::transcript::tests::make_ai("staged"));
 
     let entries = vec![(t.entries()[0].message().clone(), MessageFlags::default())];
     let t2 = t.rebuild(entries);
@@ -423,9 +481,9 @@ fn test_rebuild_clears_staging() {
 #[test]
 fn test_set_flags_batch() {
     let mut t = MessageTranscript::new();
-    let id1 = t.append(make_human("msg-1"));
-    let id2 = t.append(make_human("msg-2"));
-    let id3 = t.append(make_human("msg-3"));
+    let id1 = t.append(crate::session::transcript::tests::make_human("msg-1"));
+    let id2 = t.append(crate::session::transcript::tests::make_human("msg-2"));
+    let id3 = t.append(crate::session::transcript::tests::make_human("msg-3"));
 
     let mut batch = std::collections::HashMap::new();
     batch.insert(
@@ -466,7 +524,7 @@ fn test_set_flags_batch() {
 #[test]
 fn test_set_flags_batch_ignores_default() {
     let mut t = MessageTranscript::new();
-    let id = t.append(make_human("msg"));
+    let id = t.append(crate::session::transcript::tests::make_human("msg"));
 
     let mut batch = std::collections::HashMap::new();
     batch.insert(id, MessageFlags::default());
@@ -486,7 +544,9 @@ fn test_projection_directive_persists_roundtrip() {
     use std::collections::HashMap;
 
     let mut t = MessageTranscript::new();
-    let id = t.append(make_human("message with projection"));
+    let id = t.append(crate::session::transcript::tests::make_human(
+        "message with projection",
+    ));
 
     // 设置 projection directive（通过 set_flags_batch 批量设置）
     let directive = MessageProjectionDirective {
@@ -516,7 +576,10 @@ fn test_projection_directive_persists_roundtrip() {
     assert!(flags.truncated);
     assert!(!flags.excluded);
     assert!(flags.projection.is_some(), "projection 应被设置");
-    let proj = flags.projection.as_ref().unwrap();
+    let proj = flags
+        .projection
+        .as_ref()
+        .expect("the as ref fixture result is required for this assertion");
     assert_eq!(proj.policy_version, 2);
     assert_eq!(proj.entries.len(), 1);
     assert_eq!(
@@ -542,14 +605,23 @@ fn test_projection_directive_persists_roundtrip() {
     let flags2 = t2.flags(id);
     assert!(flags2.truncated);
     assert!(flags2.projection.is_some(), "rebuild 后 projection 应保留");
-    assert_eq!(flags2.projection.as_ref().unwrap().policy_version, 2);
+    assert_eq!(
+        flags2
+            .projection
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion")
+            .policy_version,
+        2
+    );
 }
 
 #[test]
 fn test_projection_directive_none_when_not_set() {
     // 旧行为：不设置 projection 应为 None
     let mut t = MessageTranscript::new();
-    let id = t.append(make_human("plain message"));
+    let id = t.append(crate::session::transcript::tests::make_human(
+        "plain message",
+    ));
 
     t.set_truncated(id, true);
 
@@ -559,7 +631,8 @@ fn test_projection_directive_none_when_not_set() {
     assert!(flags.projection.is_none(), "未设置 projection 应为 None");
 
     // 序列化为 JSON 验证向后兼容
-    let json = serde_json::to_string(&flags).unwrap();
+    let json = serde_json::to_string(&flags)
+        .expect("to_string must accept this test fixture representation");
     assert!(
         !json.contains("projection"),
         "JSON 应不含 projection 字段（skip_serializing_if）"

@@ -1,8 +1,8 @@
 //! 从 inbox.rs 分离的测试模块
 
-use super::*;
 use crate::messages::{BaseMessage, MessageContent};
 use crate::session::{MessageQueue, MessageSource, QueuedMessage};
+use peri_acp_types::session::SessionInbox;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -144,7 +144,8 @@ async fn test_await_wake_blocks_until_prompt() {
         .await
         .expect("await_wake should return after push");
 
-    h.await.unwrap();
+    h.await
+        .expect("the h fixture result is required for this assertion");
 }
 
 #[tokio::test]
@@ -169,7 +170,8 @@ async fn test_await_wake_ignores_info_only() {
         .await
         .expect("await_wake should return after Prompt, not Info");
 
-    h.await.unwrap();
+    h.await
+        .expect("the h fixture result is required for this assertion");
 }
 
 #[tokio::test]

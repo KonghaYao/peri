@@ -1,4 +1,4 @@
-//! 弹窗组件集合 —— ratatui-kit #[component] 版本。
+//! 弹窗组件集合 —— ratatui-kit `#[component]` 版本。
 macro_rules! popup_text_shell {
     ($title:expr, $title_fg:expr, $lines:expr) => {{
         let popup_block = ratatui_kit::ratatui::widgets::Block::default()

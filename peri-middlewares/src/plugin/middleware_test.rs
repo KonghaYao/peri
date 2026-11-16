@@ -1,18 +1,20 @@
 //! Tests for mid_plugin
 
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
-use peri_agent::{agent::state::AgentState, middleware::r#trait::Middleware};
+use peri_agent::agent::state::AgentState;
+use peri_agent::middleware::r#trait::Middleware;
 
-use super::*;
-use crate::plugin::loader::tests::{make_manifest_with_commands, test_plugin_scope};
+use super::{LoadedPlugin, PluginMiddleware};
+use crate::plugin::loader::tests as tests_functions;
 
 fn make_loaded_plugin(name: &str) -> LoadedPlugin {
     LoadedPlugin {
         name: name.into(),
         version: "1.0.0".into(),
         install_path: PathBuf::new(),
-        manifest: make_manifest_with_commands(vec![]),
+        manifest: tests_functions::make_manifest_with_commands(vec![]),
         commands: vec![],
         skills_roots: vec![],
         agents_dirs: vec![],
@@ -20,7 +22,7 @@ fn make_loaded_plugin(name: &str) -> LoadedPlugin {
         data_path: PathBuf::new(),
         hooks_config: None,
         marketplace: String::new(),
-        scope: test_plugin_scope(),
+        scope: tests_functions::test_plugin_scope(),
     }
 }
 

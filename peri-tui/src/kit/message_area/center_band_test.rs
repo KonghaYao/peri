@@ -1,10 +1,12 @@
 //! 居中带鼠标命中回归（P1）：渲染列与 `CopyButtonHit` 屏幕列必须同源于 band。
 
-use super::*;
-use crate::kit::layout::{CenterBand, center_band_area};
+use super::CopyButtonHit;
+use crate::kit::layout::CenterBand;
 use crate::kit::message_area::grid::GridSpec;
-use ratatui_kit::ratatui::{layout::Rect, style::Style};
-use ratatui_kit::test_util::render_frame;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Rect;
+use ratatui_kit::ratatui::style::Style;
+
 use std::sync::{Arc, Mutex};
 
 #[derive(Default, Props)]
@@ -28,12 +30,12 @@ struct ButtonProbeHook {
 
 impl Hook for ButtonProbeHook {
     fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
-        *self.sink.lock().unwrap() = Some(drawer.area);
+        *self.sink.lock().expect("sink mutex must not be poisoned") = Some(drawer.area);
     }
 }
 
 impl Component for ButtonProbe {
-    type Props<'a> = ButtonProbeProps;
+    type Props<'children> = ButtonProbeProps;
 
     fn new(_props: &Self::Props<'_>) -> Self {
         Self {
@@ -72,9 +74,9 @@ impl Component for ButtonProbe {
 fn copy_button_hit_column_matches_rendered_button_in_center_band() {
     const BTN_X_START: u16 = 62;
     let grid = GridSpec::grid_for(140);
-    let band = center_band_area(Rect::new(0, 0, 140, 5), grid);
+    let band = crate::kit::layout::center_band_area(Rect::new(0, 0, 140, 5), grid);
     let sink = Arc::new(Mutex::new(None));
-    let buf = render_frame(
+    let buf = ratatui_kit::test_util::render_frame(
         element!(CenterBand(grid: grid) {
             ButtonProbe(text: "COPY", x_start: BTN_X_START, sink: sink.clone())
         }),
@@ -84,7 +86,7 @@ fn copy_button_hit_column_matches_rendered_button_in_center_band() {
 
     let area = sink
         .lock()
-        .unwrap()
+        .expect("sink mutex must not be poisoned")
         .expect("pre_component_draw 应记录 band");
     assert_eq!(area, band, "tracker 记录的必须是带矩形");
 

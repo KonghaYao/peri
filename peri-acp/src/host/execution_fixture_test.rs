@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
 use crate::session::executor::{PromptResult, SessionContext, TurnInput};
-use peri_acp_types::{
-    session::{MessageQueue, SessionAccessPort, SessionInbox},
-    session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources},
-    workspace::SessionBinding,
-};
+use peri_acp_types::session::MessageQueue;
+use peri_acp_types::session::SessionAccessPort;
+use peri_acp_types::session::SessionInbox;
+use peri_acp_types::session_resources::FrozenSnapshotBytes;
+use peri_acp_types::session_resources::NewSession;
+use peri_acp_types::session_resources::NewSessionMeta;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::workspace::SessionBinding;
 use peri_agent::session::user_input_mailbox::{UserInputAttemptOutcome, UserInputMailbox};
 
 pub(in crate::host) async fn run_session_loop(

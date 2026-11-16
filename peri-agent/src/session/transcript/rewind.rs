@@ -4,7 +4,10 @@ use std::sync::atomic::Ordering;
 use anyhow::anyhow;
 use peri_acp_types::session_resources::{MutationOutcome, RewindBoundary, RewindOutcome};
 
-use super::{history, BaseMessage, MessageId, MessageTranscript};
+use crate::messages::BaseMessage;
+use crate::messages::MessageId;
+use crate::session::transcript::MessageTranscript;
+use peri_acp_types::store::history;
 
 impl MessageTranscript {
     /// Keep the target and revoke incomplete archive groups in the same durable operation.

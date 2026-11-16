@@ -14,9 +14,7 @@ use ratatui_image::Image;
 fn main() {
     let img: DynamicImage =
         ImageBuffer::<Rgba<u8>, _>::from_pixel(8, 8, Rgba([255, 0, 0, 255])).into();
-    let proto = Protocol::Kitty(
-        Kitty::new(img, Size::new(8, 8), 1, false).expect("kitty proto"),
-    );
+    let proto = Protocol::Kitty(Kitty::new(img, Size::new(8, 8), 1, false).expect("kitty proto"));
     let mut term = Terminal::new(TestBackend::new(20, 10)).unwrap();
     term.draw(|f| f.render_widget(Image::new(&proto), Rect::new(0, 0, 8, 8)))
         .unwrap();
@@ -31,8 +29,11 @@ fn main() {
     println!("非空 cell 索引: {non_empty:?}");
     let first = &buf.content()[non_empty[0]];
     println!("--- 首行首 cell symbol（{} 字节）---", first.symbol().len());
-    for b in first.symbol().as_bytes() {
-        print!("{b:02x} ");
+    {
+        let iterated_first = first.symbol().as_bytes();
+        for b in iterated_first {
+            print!("{b:02x} ");
+        }
     }
     println!();
 }

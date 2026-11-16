@@ -1,6 +1,6 @@
-use super::event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
-use super::stages::MAIN_AGENT_KEY;
-use super::LangfuseTracer;
+use crate::langfuse::tracer::event_builder::VERSION;
+use crate::langfuse::tracer::stages::MAIN_AGENT_KEY;
+use crate::langfuse::tracer::LangfuseTracer;
 use langfuse_client::types::ObservationLevel;
 use langfuse_client::{IngestionEvent, SpanBody};
 use peri_agent::agent::events::{
@@ -35,7 +35,7 @@ impl LangfuseTracer {
             None => return,
         };
 
-        let end_time = now_rfc3339();
+        let end_time = crate::langfuse::tracer::event_builder::now_rfc3339();
         let duration_ms = calculate_duration_ms(&ctx.start_time, &end_time);
 
         // 0ms compact span 不上报
@@ -99,12 +99,17 @@ impl LangfuseTracer {
             session_id: Some(self.session_id.clone()),
         };
         let event = IngestionEvent::SpanCreate {
-            id: new_uuid(),
+            id: crate::langfuse::tracer::event_builder::new_uuid(),
             timestamp: end_time,
             body: span_body,
             metadata: None,
         };
-        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Compact SpanCreate");
+        crate::langfuse::tracer::event_builder::try_add_or_warn_via_session(
+            &*self.session,
+            event,
+            &self.trace_id,
+            "Compact SpanCreate",
+        );
     }
 
     // ── Stage 5 阶段 Span 事件 ──────────────────────────────────────────────
@@ -225,7 +230,7 @@ impl LangfuseTracer {
             return;
         }
 
-        let end_time = now_rfc3339();
+        let end_time = crate::langfuse::tracer::event_builder::now_rfc3339();
         let duration_ms = calculate_duration_ms(&handle.start_time, &end_time);
 
         // v2 条件上报：0ms 不做 Span，跳过
@@ -258,12 +263,17 @@ impl LangfuseTracer {
             session_id: Some(self.session_id.clone()),
         };
         let event = IngestionEvent::SpanCreate {
-            id: new_uuid(),
+            id: crate::langfuse::tracer::event_builder::new_uuid(),
             timestamp: end_time,
             body: span_body,
             metadata: None,
         };
-        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Stage SpanCreate");
+        crate::langfuse::tracer::event_builder::try_add_or_warn_via_session(
+            &*self.session,
+            event,
+            &self.trace_id,
+            "Stage SpanCreate",
+        );
     }
 
     /// 消息队列排空（Receive 阶段）
@@ -280,7 +290,7 @@ impl LangfuseTracer {
         }
         self.stages.on_mq_drained(
             agent_id,
-            super::stages::MqDrainedStats {
+            crate::langfuse::tracer::stages::MqDrainedStats {
                 prompt,
                 defer,
                 info,
@@ -317,10 +327,10 @@ impl LangfuseTracer {
 
     fn emit_workflow_span(
         &self,
-        record: super::stages::WorkflowStartRecord,
+        record: crate::langfuse::tracer::stages::WorkflowStartRecord,
         stats: Option<(usize, usize)>,
     ) {
-        let end_time = now_rfc3339();
+        let end_time = crate::langfuse::tracer::event_builder::now_rfc3339();
         let incomplete = stats.is_none();
         let output = match stats {
             Some((agents_spawned, tool_calls)) => serde_json::json!({
@@ -351,12 +361,17 @@ impl LangfuseTracer {
             session_id: Some(self.session_id.clone()),
         };
         let event = IngestionEvent::SpanCreate {
-            id: new_uuid(),
+            id: crate::langfuse::tracer::event_builder::new_uuid(),
             timestamp: end_time,
             body: span_body,
             metadata: None,
         };
-        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Workflow SpanCreate");
+        crate::langfuse::tracer::event_builder::try_add_or_warn_via_session(
+            &*self.session,
+            event,
+            &self.trace_id,
+            "Workflow SpanCreate",
+        );
     }
 
     // ── 中间件链事件 ────────────────────────────────────────────────────────
@@ -386,7 +401,7 @@ impl LangfuseTracer {
             None => return,
         };
 
-        let end_time = now_rfc3339();
+        let end_time = crate::langfuse::tracer::event_builder::now_rfc3339();
         let duration_ms = calculate_duration_ms(&record.start_time, &end_time);
 
         // 0ms middleware span 不上报（绝大多数中间件 < 1ms）
@@ -421,12 +436,12 @@ impl LangfuseTracer {
             session_id: Some(self.session_id.clone()),
         };
         let event = IngestionEvent::SpanCreate {
-            id: new_uuid(),
+            id: crate::langfuse::tracer::event_builder::new_uuid(),
             timestamp: end_time,
             body: span_body,
             metadata: None,
         };
-        try_add_or_warn_via_session(
+        crate::langfuse::tracer::event_builder::try_add_or_warn_via_session(
             &*self.session,
             event,
             &self.trace_id,
@@ -439,10 +454,20 @@ impl LangfuseTracer {
 /// parse 失败时返回 0（保守：不上报 0ms span）。
 fn calculate_duration_ms(start: &str, end: &str) -> u64 {
     use chrono::TimeZone;
-    let s = chrono::DateTime::parse_from_rfc3339(start)
-        .unwrap_or_else(|_| chrono::Utc.timestamp_opt(0, 0).unwrap().into());
-    let e = chrono::DateTime::parse_from_rfc3339(end)
-        .unwrap_or_else(|_| chrono::Utc.timestamp_opt(0, 0).unwrap().into());
+    let s = chrono::DateTime::parse_from_rfc3339(start).unwrap_or_else(|_| {
+        chrono::Utc
+            .timestamp_opt(0, 0)
+            .single()
+            .expect("the Unix epoch is a valid UTC timestamp")
+            .into()
+    });
+    let e = chrono::DateTime::parse_from_rfc3339(end).unwrap_or_else(|_| {
+        chrono::Utc
+            .timestamp_opt(0, 0)
+            .single()
+            .expect("the Unix epoch is a valid UTC timestamp")
+            .into()
+    });
     let dur = e.signed_duration_since(s);
     dur.num_milliseconds().max(0) as u64
 }

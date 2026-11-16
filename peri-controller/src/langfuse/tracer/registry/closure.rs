@@ -1,10 +1,13 @@
 //! Stop/ToolEnded 双信号回收与 turn 结束兜底；异常诊断不抹去关闭义务。
 
-use super::super::tool_batch::{ToolBatch, ToolsBatchFlush};
-use super::{
-    ActiveSubagent, ClosedSubagent, IncompleteReason, StartPending, SubagentRegistry,
-    SubagentStatus, SubagentStopInfo,
-};
+use crate::langfuse::tracer::registry::types::ClosedSubagent;
+use crate::langfuse::tracer::registry::types::IncompleteReason;
+use crate::langfuse::tracer::registry::types::StartPending;
+use crate::langfuse::tracer::registry::types::SubagentStatus;
+use crate::langfuse::tracer::registry::types::SubagentStopInfo;
+use crate::langfuse::tracer::registry::ActiveSubagent;
+use crate::langfuse::tracer::registry::SubagentRegistry;
+use crate::langfuse::tracer::tool_batch::{ToolBatch, ToolsBatchFlush};
 
 impl SubagentRegistry {
     /// 父 ToolEnded:结束 invocation(不关闭 AGENT obs)。两信号齐备(Stop 已到)
@@ -179,7 +182,7 @@ impl SubagentRegistry {
                 .map(|sa| std::mem::replace(&mut sa.tool_batch, ToolBatch::new()).flush())
                 .unwrap_or_else(|| ToolBatch::new().flush());
             let (key, deferred) = {
-                let sa = self.by_agent_id.get(&agent).unwrap();
+                let sa = self.by_agent_id.get(&agent).expect("active observation IDs originate from this registry and remain registered during closure");
                 let deferred = match &sa.invocation_key {
                     Some(k) => self
                         .invocations
@@ -189,7 +192,9 @@ impl SubagentRegistry {
                 };
                 (sa.invocation_key.clone(), deferred)
             };
-            let sa = self.by_agent_id.get_mut(&agent).unwrap();
+            let sa = self.by_agent_id.get_mut(&agent).expect(
+                "closing an observation must retain its registry entry until closure completes",
+            );
             let reason = match &sa.status {
                 SubagentStatus::Incomplete(reason) => reason.clone(),
                 _ => IncompleteReason::MissingStop,

@@ -1,7 +1,9 @@
 //! Turn telemetry hooks and the event forwarder share one tracer.
 use crate::session::executor;
 use peri_agent::session::exec::executor_helpers::ForwarderLauncherFn;
-use peri_controller::langfuse::{bridge::LangfuseBridge, tracer::LangfuseTracer, LangfuseSession};
+use peri_controller::langfuse::bridge::LangfuseBridge;
+use peri_controller::langfuse::tracer::LangfuseTracer;
+use peri_controller::langfuse::LangfuseSession;
 use std::sync::Arc;
 
 pub(super) fn build_langfuse_hooks(

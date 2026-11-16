@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use peri_acp_types::error::AgentError;
 
-use super::GoalController;
+use crate::goal::controller::GoalController;
 
 /// 返回可恢复错误的稳定标签；`None` 表示该错误不应触发 goal 自动恢复。
 ///

@@ -29,7 +29,10 @@ pub(super) fn get_discover_cache() -> Vec<PluginSearchResultItem> {
     if guard.is_none() {
         *guard = Some(data);
     }
-    guard.as_ref().unwrap().clone()
+    guard
+        .as_ref()
+        .expect("the cache is populated before reading under the retained guard")
+        .clone()
 }
 
 pub(super) fn refresh_discover_cache(is_current: &impl Fn() -> bool) {
@@ -79,8 +82,14 @@ pub(super) fn empty_catalog_for_test() -> EmptyCatalogGuard {
 #[cfg(test)]
 impl Drop for EmptyCatalogGuard {
     fn drop(&mut self) {
-        *DISCOVER_CACHE.get().unwrap().lock() = self.discover.take();
-        *MARKETPLACE_CACHE.get().unwrap().lock() = self.marketplaces.take();
+        *DISCOVER_CACHE
+            .get()
+            .expect("the discovery cache OnceLock was initialized before access")
+            .lock() = self.discover.take();
+        *MARKETPLACE_CACHE
+            .get()
+            .expect("the marketplace cache OnceLock was initialized before access")
+            .lock() = self.marketplaces.take();
     }
 }
 
@@ -105,7 +114,10 @@ pub(super) fn get_marketplace_cache() -> Vec<MsEntry> {
     if guard.is_none() {
         *guard = Some(data);
     }
-    guard.as_ref().unwrap().clone()
+    guard
+        .as_ref()
+        .expect("the cache is populated before reading under the retained guard")
+        .clone()
 }
 
 pub(super) fn refresh_marketplace_cache(is_current: &impl Fn() -> bool) {

@@ -1,20 +1,23 @@
-use std::{future::Future, sync::atomic::Ordering, task::Poll};
+use std::future::Future;
+use std::sync::atomic::Ordering;
+use std::task::Poll;
 
-use peri_acp::{
-    event::AcpEvent,
-    transport::{AcpTransport, types::AcpError},
-};
+use peri_acp::event::AcpEvent;
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::AcpError;
 use peri_acp_types::session::{
     DispatchUserInputsRequest, EnqueueUserInputRequest, TakeBackUserInputRequest,
     UserInputQueueReceipt, UserInputQueueSnapshot, UserInputQueueSnapshotRequest,
 };
-use serde::{Serialize, de::DeserializeOwned};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use super::{AcpNotification, AcpTuiClient};
 
 impl AcpTuiClient {
     pub(crate) const USER_INPUT_RECEIPT_TIMEOUT: std::time::Duration =
         std::time::Duration::from_secs(10);
+    /// Whether the negotiated server capabilities include the queued user-input protocol.
     pub fn supports_user_input_queue(&self) -> bool {
         self.user_input_queue.load(Ordering::Acquire)
     }
@@ -101,6 +104,10 @@ impl AcpTuiClient {
             .map_err(|error| AcpError::new(-32603, format!("invalid user input receipt: {error}")))
     }
 
+    /// Fetch the active queue and accept it only while its session and generation still match.
+    ///
+    /// # Errors
+    /// Returns transport, timeout, malformed receipt, or changed-owner errors.
     pub async fn user_input_snapshot(
         &self,
         session_id: &str,
@@ -218,6 +225,10 @@ impl AcpTuiClient {
         Ok(snapshot)
     }
 
+    /// Enqueue input for the bound session and reject receipts belonging to another queue generation.
+    ///
+    /// # Errors
+    /// Returns request failures or a receipt whose session or generation does not match.
     pub async fn enqueue_user_input(
         &self,
         request: &EnqueueUserInputRequest,
@@ -228,6 +239,10 @@ impl AcpTuiClient {
         validate_receipt(receipt, &request.session_id, &request.generation)
     }
 
+    /// Request delivery of queued inputs and validate the returned queue identity.
+    ///
+    /// # Errors
+    /// Returns request failures or a receipt whose session or generation does not match.
     pub async fn dispatch_user_inputs(
         &self,
         request: &DispatchUserInputsRequest,
@@ -238,6 +253,10 @@ impl AcpTuiClient {
         validate_receipt(receipt, &request.session_id, &request.generation)
     }
 
+    /// Return a queued item to the editor after validating the server receipt identity.
+    ///
+    /// # Errors
+    /// Returns request failures or a receipt whose session or generation does not match.
     pub async fn take_back_user_input(
         &self,
         request: &TakeBackUserInputRequest,

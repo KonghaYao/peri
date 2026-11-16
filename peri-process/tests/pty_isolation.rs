@@ -75,6 +75,7 @@ fn run_host(api: &str, broker: bool) {
         .env("PATH", "/usr/bin:/bin")
         .env("TERM", "dumb")
         .env("LANG", "C");
+    // SAFETY: The post-fork callback uses only async-signal-safe session/group syscalls and constructs errors from numeric codes.
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1 {
@@ -121,6 +122,7 @@ impl ReapedChild {
 impl Drop for ReapedChild {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
+            // SAFETY: The checked nonzero process-group ID belongs to this execution; the syscall uses no pointers and errors are handled by the caller.
             unsafe {
                 libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
             }
@@ -174,7 +176,9 @@ impl Terminal {
             "openpty: {}",
             std::io::Error::last_os_error()
         );
+        // SAFETY: openpty returned this fresh descriptor successfully, and ownership is transferred exactly once to OwnedFd.
         let master = unsafe { OwnedFd::from_raw_fd(master) };
+        // SAFETY: openpty returned this fresh descriptor successfully, and ownership is transferred exactly once to OwnedFd.
         let slave = unsafe { OwnedFd::from_raw_fd(slave) };
         for descriptor in [&master, &slave] {
             assert_eq!(
@@ -182,6 +186,7 @@ impl Terminal {
                 0
             );
         }
+        // SAFETY: The isolated test process installs only the POSIX SIG_IGN sentinel and does not supply a Rust signal callback.
         unsafe {
             libc::signal(libc::SIGHUP, libc::SIG_IGN);
             libc::signal(libc::SIGTTOU, libc::SIG_IGN);
@@ -192,6 +197,7 @@ impl Terminal {
             "TIOCSCTTY: {}",
             std::io::Error::last_os_error()
         );
+        // SAFETY: This process-group query has no pointer or ownership preconditions.
         let foreground = unsafe { libc::getpgrp() };
         assert_eq!(unsafe { libc::getsid(0) }, unsafe { libc::getpid() });
         assert_eq!(unsafe { libc::tcsetpgrp(slave.as_raw_fd(), foreground) }, 0);
@@ -252,6 +258,7 @@ fn probe_fixture() {
     }
     let controlling_tty = OpenOptions::new().read(true).write(true).open("/dev/tty");
     if let Ok(terminal) = &controlling_tty {
+        // SAFETY: The isolated test process installs only the POSIX SIG_IGN sentinel and does not supply a Rust signal callback.
         unsafe {
             libc::signal(libc::SIGTTOU, libc::SIG_IGN);
         }
@@ -268,6 +275,7 @@ fn probe_fixture() {
         controlling_tty.unwrap_err().raw_os_error(),
         Some(libc::ENXIO)
     );
+    // SAFETY: The numeric process ID is only queried; this syscall accepts missing processes and reports an error.
     let session = unsafe { libc::getsid(0) };
     assert_ne!(
         session, host_session,
@@ -285,6 +293,7 @@ fn host_fixture() {
     let api = std::env::var(API).unwrap();
     let broker = std::env::var(BROKER).unwrap() == "yes";
     let mut probe = fixture_command("probe");
+    // SAFETY: The numeric process ID is only queried; this syscall accepts missing processes and reports an error.
     probe.env(HOST_SESSION, unsafe { libc::getsid(0) }.to_string());
     let output = execute(probe, &api, broker);
     terminal.assert_readable();
@@ -322,9 +331,10 @@ fn assert_success(output: Output, context: &str) {
 
 fn execute(mut command: Command, api: &str, supervised: bool) -> Output {
     let broker = supervised.then(TestBroker::start);
-    let mut tree = ProcessTree::new().unwrap();
+    let mut tree = ProcessTree::try_new().unwrap();
     let output = if api == "std" {
         tree.prepare_std(&mut command);
+        // SAFETY: The post-fork callback only invokes async-signal-safe alarm and returns without allocating or locking.
         unsafe {
             command.pre_exec(|| {
                 libc::alarm(5);
@@ -349,6 +359,7 @@ fn execute(mut command: Command, api: &str, supervised: bool) -> Output {
         runtime.block_on(async {
             let mut command = tokio::process::Command::from(command);
             tree.prepare(&mut command);
+            // SAFETY: The post-fork callback only invokes async-signal-safe alarm and returns without allocating or locking.
             unsafe {
                 command.pre_exec(|| {
                     libc::alarm(5);
@@ -386,6 +397,7 @@ impl TestBroker {
         listener.set_nonblocking(true).unwrap();
         std::env::set_var("PERI_PROCESS_BROKER_SOCKET", &socket);
         std::env::set_var("PERI_PROCESS_BROKER_TOKEN", TOKEN);
+        // SAFETY: The numeric process ID is only queried; this syscall accepts missing processes and reports an error.
         let host_session = unsafe { libc::getsid(0) };
         let worker = std::thread::spawn(move || {
             let deadline = Instant::now() + LIMIT;
@@ -412,6 +424,7 @@ impl TestBroker {
             assert_eq!(registration[0], b'P');
             let leader = u32::from_le_bytes(registration[1..].try_into().unwrap()) as libc::pid_t;
             assert_eq!(unsafe { libc::getpgid(leader) }, leader);
+            // SAFETY: The numeric process ID is only queried; this syscall accepts missing processes and reports an error.
             let session = unsafe { libc::getsid(leader) };
             assert_ne!(
                 session, host_session,

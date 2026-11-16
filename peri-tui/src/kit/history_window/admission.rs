@@ -7,7 +7,6 @@
 
 use std::collections::HashSet;
 
-use super::anchor::merge_adjacent_gaps;
 use super::model::{
     GapId, GapPlaceholder, HistoryGap, HistoryWindow, PageReservation, PendingMerge,
     PersistentEntryKey, PinReason, RegionKey, ReleasePlan, SegmentDraft, SegmentKey,
@@ -185,6 +184,7 @@ impl HistoryWindow {
         Some(reservation)
     }
 
+    #[must_use]
     pub fn pending_merge_bytes(&self) -> usize {
         self.budget.pending_merge_bytes
     }
@@ -591,7 +591,7 @@ impl HistoryWindow {
         );
         self.layout.insert(position, super::RegionKey::Gap(gap_id));
         self.gaps.insert(gap_id, gap);
-        merge_adjacent_gaps(&mut self.layout, &mut self.gaps);
+        super::anchor::merge_adjacent_gaps(&mut self.layout, &mut self.gaps);
         self.rebuild_slots();
         let evicted_bytes = self
             .stats()

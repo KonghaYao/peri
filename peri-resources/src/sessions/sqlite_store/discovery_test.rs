@@ -1,9 +1,11 @@
-use super::*;
+use super::{Command, Path, PathBuf, WorkspaceError};
 
 #[tokio::test]
 async fn test_worktree_discovery_output_is_bounded_before_eof() {
     // This source never reaches EOF; reading one byte beyond the budget must stop it.
-    let error = bounded_output(tokio::io::repeat(b'x')).await.unwrap_err();
+    let error = super::bounded_output(tokio::io::repeat(b'x'))
+        .await
+        .unwrap_err();
     assert!(
         matches!(error.downcast_ref::<WorkspaceError>(), Some(WorkspaceError::DiscoveryError(message)) if message.contains("bound"))
     );
@@ -12,7 +14,7 @@ async fn test_worktree_discovery_output_is_bounded_before_eof() {
 #[tokio::test]
 async fn test_worktree_discovery_finite_output_is_preserved() {
     let bytes = b"worktree /tmp/path with spaces\0HEAD hash\0";
-    assert_eq!(bounded_output(&bytes[..]).await.unwrap(), bytes);
+    assert_eq!(super::bounded_output(&bytes[..]).await.unwrap(), bytes);
 }
 
 /// [回归测试] 未安装 Git 时仍可建立并复核目录工作区，不把父目录猜作项目根。
@@ -22,7 +24,7 @@ async fn test_worktree_missing_git_uses_exact_directory() {
     let nested = directory.path().join("nested space");
     tokio::fs::create_dir(&nested).await.unwrap();
     let missing = directory.path().join("missing-git");
-    let (cwd, observed) = observe_with_git(&nested, missing.as_os_str())
+    let (cwd, observed) = super::observe_with_git(&nested, missing.as_os_str())
         .await
         .unwrap();
     // Git 未回答：目录模式观测不完整，登记层不得据此改写已登记的 Git 布局。
@@ -44,7 +46,7 @@ async fn test_worktree_missing_git_uses_exact_directory() {
 #[tokio::test]
 async fn test_worktree_missing_git_does_not_hide_unavailable_directory() {
     let directory = tempfile::tempdir().unwrap();
-    let error = observe_with_git(
+    let error = super::observe_with_git(
         &directory.path().join("missing-directory"),
         directory.path().join("missing-git").as_os_str(),
     )
@@ -71,7 +73,7 @@ async fn test_worktree_git_availability_change_does_not_block_binding() {
         .await
         .unwrap();
     assert!(output.status.success(), "Git fixture 创建失败: {output:?}");
-    let (cwd, repository) = observe(directory.path()).await.unwrap();
+    let (cwd, repository) = super::observe(directory.path()).await.unwrap();
     let missing = directory.path().join("missing-git");
     // Git 不可用、布局未刷新：cwd 仍在，恢复准入继续。
     repository
@@ -79,7 +81,7 @@ async fn test_worktree_git_availability_change_does_not_block_binding() {
         .revalidate_with_git(&cwd, missing.as_os_str())
         .await
         .unwrap();
-    let (_, plain) = observe_with_git(directory.path(), missing.as_os_str())
+    let (_, plain) = super::observe_with_git(directory.path(), missing.as_os_str())
         .await
         .unwrap();
     assert!(!plain.git_answered);
@@ -97,7 +99,7 @@ async fn test_worktree_git_permission_denied_is_not_directory_mode() {
     let program = directory.path().join("git");
     std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let error = observe_with_git(directory.path(), program.as_os_str())
+    let error = super::observe_with_git(directory.path(), program.as_os_str())
         .await
         .unwrap_err();
     assert!(matches!(
@@ -128,7 +130,7 @@ async fn test_worktree_git_spawn_failure_recovers_within_retries() {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         std::fs::set_permissions(&late, std::fs::Permissions::from_mode(0o755)).unwrap();
     });
-    let (cwd, observed) = observe_with_git(directory.path(), program.as_os_str())
+    let (cwd, observed) = super::observe_with_git(directory.path(), program.as_os_str())
         .await
         .expect("启动失败必须在同一次发现里退让重试");
     opener.await.unwrap();
@@ -150,7 +152,7 @@ async fn test_worktree_git_rejection_is_not_directory_mode() {
     )
     .unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let error = observe_with_git(directory.path(), program.as_os_str())
+    let error = super::observe_with_git(directory.path(), program.as_os_str())
         .await
         .unwrap_err();
     assert!(matches!(
@@ -184,7 +186,7 @@ async fn test_worktree_legacy_not_a_repository_wording_is_directory_mode() {
         )
         .unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let (cwd, observed) = observe_with_git(directory.path(), program.as_os_str())
+        let (cwd, observed) = super::observe_with_git(directory.path(), program.as_os_str())
             .await
             .unwrap_or_else(|error| panic!("旧版文案 {message:?} 不应报错：{error:?}"));
         assert!(observed.git_answered, "Git 给了明确回答：{message:?}");
@@ -209,7 +211,7 @@ async fn test_worktree_hanging_git_ends_within_the_call_budget() {
     std::fs::write(&program, "#!/bin/sh\nexec sleep 600\n").unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
     let started = std::time::Instant::now();
-    let error = observe_with_git(directory.path(), program.as_os_str())
+    let error = super::observe_with_git(directory.path(), program.as_os_str())
         .await
         .unwrap_err();
     let measured = started.elapsed();
@@ -249,7 +251,7 @@ async fn test_worktree_reassertion_requires_existing_cwd() {
         .await
         .unwrap();
     assert!(output.status.success(), "Git fixture 创建失败: {output:?}");
-    let (cwd, observed) = observe(&repository).await.unwrap();
+    let (cwd, observed) = super::observe(&repository).await.unwrap();
     observed.discovery.reassert_key_objects(&cwd).await.unwrap();
 
     // Git 位置消失：cwd 仍在，准入通过（快照只作诊断）。
@@ -281,7 +283,7 @@ async fn test_worktree_reassertion_requires_existing_cwd() {
 #[tokio::test]
 async fn test_worktree_git_missing_mid_discovery_is_not_directory_mode() {
     let directory = tempfile::tempdir().unwrap();
-    let error = git_paths(
+    let error = super::git_paths(
         directory.path().join("missing-git").as_os_str(),
         directory.path(),
         &["rev-parse", "--show-toplevel"],
@@ -308,7 +310,7 @@ async fn test_worktree_location_failure_preserves_git_diagnostic() {
     .unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
 
-    let error = git_paths(
+    let error = super::git_paths(
         program.as_os_str(),
         directory.path(),
         &["rev-parse", "--show-toplevel"],
@@ -423,7 +425,7 @@ async fn test_worktree_common_dir_matches_git_reported_locations() {
     .await;
 
     for cwd in [&repository, &nested, &linked] {
-        let (_, observed) = observe(cwd).await.unwrap();
+        let (_, observed) = super::observe(cwd).await.unwrap();
         let (root, common, private) = git_reported_locations(cwd, home.path()).await;
         assert_eq!(
             observed.discovery.root, root,
@@ -442,7 +444,7 @@ async fn test_worktree_common_dir_matches_git_reported_locations() {
     }
 
     // linked worktree 的两个位置确实不同，否则上面的比较没有覆盖到关键分支。
-    let (_, linked_observed) = observe(&linked).await.unwrap();
+    let (_, linked_observed) = super::observe(&linked).await.unwrap();
     assert_ne!(
         linked_observed.discovery.common_dir, linked_observed.discovery.private_dir,
         "linked worktree 的 common / private 位置必须分开解析"
@@ -480,7 +482,7 @@ async fn test_worktree_submodule_checkout_is_discoverable() {
     let checkout = tokio::fs::canonicalize(superproject.join("prototypes/p0/turso"))
         .await
         .unwrap();
-    let (cwd, observed) = observe(&checkout).await.unwrap();
+    let (cwd, observed) = super::observe(&checkout).await.unwrap();
     assert_eq!(cwd, checkout);
     assert_eq!(observed.discovery.root, checkout);
     let (root, common, private) = git_reported_locations(&checkout, home.path()).await;
@@ -524,7 +526,7 @@ async fn test_worktree_relocated_linked_worktree_stays_inconsistent() {
     let moved = home.path().join("moved tree");
     std::fs::rename(&linked, &moved).unwrap();
 
-    let error = observe(&moved).await.unwrap_err();
+    let error = super::observe(&moved).await.unwrap_err();
     assert!(matches!(
         error.downcast_ref::<WorkspaceError>(),
         Some(WorkspaceError::DiscoveryError(message)) if message == "Git worktree membership is inconsistent"
@@ -561,7 +563,7 @@ async fn test_worktree_relocated_linked_worktree_of_bare_repository_stays_incons
     .await;
     // 未换位时本来就该可发现：排除 `bare` 项不得把这条路一起收紧。
     let linked_canonical = tokio::fs::canonicalize(&linked).await.unwrap();
-    let (cwd, observed) = observe(&linked).await.unwrap();
+    let (cwd, observed) = super::observe(&linked).await.unwrap();
     assert_eq!(cwd, linked_canonical);
     assert_eq!(observed.discovery.root, linked_canonical);
     // 用例必须真的落在「列表里有一条路径等于 common directory 的 bare 项」的布局上，
@@ -583,7 +585,7 @@ async fn test_worktree_relocated_linked_worktree_of_bare_repository_stays_incons
     let moved = home.path().join("moved tree");
     std::fs::rename(&linked, &moved).unwrap();
 
-    let error = observe(&moved).await.unwrap_err();
+    let error = super::observe(&moved).await.unwrap_err();
     assert!(matches!(
         error.downcast_ref::<WorkspaceError>(),
         Some(WorkspaceError::DiscoveryError(message)) if message == "Git worktree membership is inconsistent"
@@ -603,7 +605,7 @@ async fn test_worktree_path_discovery_rejects_unknown_option_echoes() {
     let program = directory.path().join("echoing-git");
     std::fs::write(&program, "#!/bin/sh\nprintf '/tmp\\n--git-dir\\n'\n").unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let error = git_paths(
+    let error = super::git_paths(
         program.as_os_str(),
         directory.path(),
         &["rev-parse", "--show-toplevel", "--git-dir"],
@@ -659,8 +661,10 @@ esac"#;
     let program = git_shim(home.path(), "ancient-git", preamble, &log);
 
     for cwd in [&repository, &nested, &linked] {
-        let (_, ancient) = observe_with_git(cwd, program.as_os_str()).await.unwrap();
-        let (_, real) = observe(cwd).await.unwrap();
+        let (_, ancient) = super::observe_with_git(cwd, program.as_os_str())
+            .await
+            .unwrap();
+        let (_, real) = super::observe(cwd).await.unwrap();
         assert!(
             ancient.git_answered,
             "旧版 Git 回答了发现，必须按仓库模式观测：{cwd:?}"
@@ -766,20 +770,20 @@ async fn test_worktree_legacy_git_discovers_repository_without_version_options()
     tokio::fs::create_dir(&nested).await.unwrap();
 
     // 独立 oracle：同一批目录由真实 Git 得到的观测。
-    let (_, main) = observe(&repository).await.unwrap();
-    let (_, linked_real) = observe(&linked).await.unwrap();
-    let (_, nested_real) = observe(&nested).await.unwrap();
+    let (_, main) = super::observe(&repository).await.unwrap();
+    let (_, linked_real) = super::observe(&linked).await.unwrap();
+    let (_, nested_real) = super::observe(&nested).await.unwrap();
 
     let log = directory.path().join("legacy-git.log");
     let preamble = "for arg in \"$@\"; do\n  case \"$arg\" in\n    --path-format=*|-z)\n      echo \"error: unknown option $arg\" >&2\n      echo usage: git >&2\n      exit 129;;\n  esac\ndone";
     let program = git_shim(directory.path(), "legacy-git", preamble, &log);
-    let (_, main_legacy) = observe_with_git(&repository, program.as_os_str())
+    let (_, main_legacy) = super::observe_with_git(&repository, program.as_os_str())
         .await
         .unwrap();
-    let (_, linked_legacy) = observe_with_git(&linked, program.as_os_str())
+    let (_, linked_legacy) = super::observe_with_git(&linked, program.as_os_str())
         .await
         .unwrap();
-    let (_, nested_legacy) = observe_with_git(&nested, program.as_os_str())
+    let (_, nested_legacy) = super::observe_with_git(&nested, program.as_os_str())
         .await
         .unwrap();
 
@@ -836,8 +840,8 @@ async fn test_worktree_git_paths_resolve_relative_output_against_cwd() {
     let root = tokio::fs::canonicalize(&repository).await.unwrap();
     let git_dir = root.join(".git");
 
-    let (_, from_root) = observe(&repository).await.unwrap();
-    let (_, from_nested) = observe(&nested).await.unwrap();
+    let (_, from_root) = super::observe(&repository).await.unwrap();
+    let (_, from_nested) = super::observe(&nested).await.unwrap();
     assert_eq!(
         from_nested.discovery, from_root.discovery,
         "子目录与仓库根必须观测到同一份布局"
@@ -866,7 +870,7 @@ async fn test_worktree_listing_failure_is_not_retried_as_legacy_git() {
     let log = directory.path().join("failing-git.log");
     let preamble = "case \"$*\" in\n  *\"worktree list\"*) echo \"fatal: could not read worktrees\" >&2; exit 128;;\nesac";
     let program = git_shim(directory.path(), "failing-git", preamble, &log);
-    let error = observe_with_git(&repository, program.as_os_str())
+    let error = super::observe_with_git(&repository, program.as_os_str())
         .await
         .unwrap_err();
     assert!(matches!(

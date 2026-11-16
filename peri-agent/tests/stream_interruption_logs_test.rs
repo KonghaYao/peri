@@ -1,24 +1,25 @@
 //! HTTP body 中断的日志保真契约；独立 integration target 隔离 tracing callsite 捕获。
 
-use peri_agent::{
-    agent::{
-        events_v2::EventBus,
-        model_bridge::AgentModelBridge,
-        stages::{run_react_loop, LoopResult, StageContext},
-    },
-    error::AgentError,
-    messages::BaseMessage,
-    middleware::MiddlewareChain,
-    session::{FrozenContext, MessageSource, QueuedMessage, Session},
-};
+use peri_agent::agent::events_v2::EventBus;
+use peri_agent::agent::model_bridge::AgentModelBridge;
+
+use peri_agent::agent::stages::LoopResult;
+use peri_agent::agent::stages::StageContext;
+use peri_agent::error::AgentError;
+use peri_agent::messages::BaseMessage;
+use peri_agent::middleware::MiddlewareChain;
+use peri_agent::session::FrozenContext;
+use peri_agent::session::MessageSource;
+use peri_agent::session::QueuedMessage;
+use peri_agent::session::Session;
 use peri_model::{OpenAiConfig, OpenAiModel, RetryObservation, RetryObserver};
 use serde_json::Value;
-use std::{sync::Arc, time::Duration};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    time::timeout,
-};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
+use tokio::net::TcpStream;
 
 const PARTIAL: &str =
     "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n";
@@ -37,7 +38,10 @@ impl RetryObserver for RecordingObserver {
     }
 
     fn on_interrupted(&self, observation: RetryObservation) -> bool {
-        self.observations.lock().unwrap().push(observation.clone());
+        self.observations
+            .lock()
+            .expect("self observations mutex must remain unpoisoned throughout the test")
+            .push(observation.clone());
         self.downstream
             .as_ref()
             .is_some_and(|observer| observer.on_interrupted(observation))
@@ -49,7 +53,10 @@ struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
 
 impl std::io::Write for LogBuffer {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
+        self.0
+            .lock()
+            .expect("self lock mutex must remain unpoisoned throughout the test")
+            .extend_from_slice(bytes);
         Ok(bytes.len())
     }
 
@@ -70,27 +77,28 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
 #[test]
 fn interrupted_logs_preserve_observed_transport_diagnostics_once_per_exit() {
     use peri_acp_types::event::FnEventHandler;
-    use peri_agent::session::retry_events::{retry_observer_for, RetryEventForwarder};
+    use peri_agent::session::retry_events;
+    use peri_agent::session::retry_events::RetryEventForwarder;
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap();
+        .expect("the build fixture result is required for this assertion");
     let handler = Arc::new(FnEventHandler(|_| {}));
     let forwarder = RetryEventForwarder::new();
     forwarder.set(Some(handler.clone()));
     let observers: Vec<Option<Arc<dyn peri_model::RetryObserver>>> = vec![
         None,
         Some(Arc::new(|_: peri_model::RetryObservation| {})),
-        Some(retry_observer_for(handler)),
+        Some(retry_events::retry_observer_for(handler)),
         Some(forwarder.as_retry_observer()),
         Some(RetryEventForwarder::new().as_retry_observer()),
     ];
-    for (observer, record_observations) in observers
+    let paired_items = observers
         .into_iter()
         .map(|observer| (observer, true))
-        .chain(std::iter::once((None, false)))
-    {
+        .chain(std::iter::once((None, false)));
+    for (observer, record_observations) in paired_items {
         for exhausted in [false, true] {
             let observations = Arc::new(std::sync::Mutex::new(Vec::new()));
             let recording = Arc::new(RecordingObserver {
@@ -123,7 +131,14 @@ fn interrupted_logs_preserve_observed_transport_diagnostics_once_per_exit() {
             } else {
                 assert!(matches!(evidence, LoopResult::Completed));
             }
-            let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+            let logs = String::from_utf8(
+                buffer
+                    .0
+                    .lock()
+                    .expect("buffer lock mutex must remain unpoisoned throughout the test")
+                    .clone(),
+            )
+            .expect("the fixture text must be valid UTF-8");
             let lines: Vec<_> = logs
                 .lines()
                 .filter(|line| line.contains("模型流中断"))
@@ -146,12 +161,15 @@ fn interrupted_logs_preserve_observed_transport_diagnostics_once_per_exit() {
                     assert!(line.contains(field), "missing diagnostic field: {logs}");
                 }
             }
-            let observations = observations.lock().unwrap();
+            let observations = observations
+                .lock()
+                .expect("observations lock mutex must remain unpoisoned throughout the test");
             assert_eq!(
                 observations.len(),
                 if record_observations { lines.len() } else { 0 }
             );
-            for (line, observation) in lines.iter().zip(observations.iter()) {
+            let paired_items_2 = lines.iter().zip(observations.iter());
+            for (line, observation) in paired_items_2 {
                 let diagnostic = observation
                     .diagnostic()
                     .expect("interruption has a diagnostic");
@@ -161,10 +179,20 @@ fn interrupted_logs_preserve_observed_transport_diagnostics_once_per_exit() {
                 assert!(line.contains(&category), "{logs}");
                 let transport = format!(
                     "transport={:?}",
-                    diagnostic.transport().unwrap().to_string()
+                    diagnostic
+                        .transport()
+                        .expect("the transport fixture result is required for this assertion")
+                        .to_string()
                 );
                 assert!(line.contains(&transport), "{logs}");
-                assert!(line.contains(diagnostic.message().unwrap()), "{logs}");
+                assert!(
+                    line.contains(
+                        diagnostic
+                            .message()
+                            .expect("the fixture entry must contain a message payload")
+                    ),
+                    "{logs}"
+                );
                 assert!(!diagnostic.causes().is_empty());
                 for cause in diagnostic.causes() {
                     assert!(line.contains(cause), "missing diagnostic cause: {logs}");
@@ -189,13 +217,17 @@ async fn read_request(socket: &mut TcpStream) -> Value {
     let mut bytes = Vec::new();
     loop {
         let mut chunk = [0_u8; 4096];
-        let read = socket.read(&mut chunk).await.unwrap();
+        let read = socket
+            .read(&mut chunk)
+            .await
+            .expect("the local HTTP fixture connection must yield its request bytes");
         assert_ne!(read, 0, "请求体必须完整送达");
         bytes.extend_from_slice(&chunk[..read]);
         let Some(header_end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") else {
             continue;
         };
-        let headers = std::str::from_utf8(&bytes[..header_end]).unwrap();
+        let headers = std::str::from_utf8(&bytes[..header_end])
+            .expect("the fixture text must be valid UTF-8");
         let length: usize = headers
             .lines()
             .filter_map(|line| line.split_once(':'))
@@ -204,10 +236,11 @@ async fn read_request(socket: &mut TcpStream) -> Value {
             .1
             .trim()
             .parse()
-            .unwrap();
+            .expect("the parse fixture result is required for this assertion");
         let start = header_end + 4;
         if bytes.len() >= start + length {
-            return serde_json::from_slice(&bytes[start..start + length]).unwrap();
+            return serde_json::from_slice(&bytes[start..start + length])
+                .expect("from_slice must accept this test fixture representation");
         }
     }
 }
@@ -216,8 +249,15 @@ async fn run_log_script(
     responses: Vec<Vec<u8>>,
     observer: Option<Arc<dyn RetryObserver>>,
 ) -> LoopResult {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}/v1/", listener.local_addr().unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("the bind fixture result is required for this assertion");
+    let endpoint = format!(
+        "http://{}/v1/",
+        listener
+            .local_addr()
+            .expect("the local addr fixture result is required for this assertion")
+    );
     let mut runtime = peri_model::ModelRuntimeConfig::default().with_retry(
         peri_model::RetryConfig::default()
             .with_max_attempts(2)
@@ -228,12 +268,23 @@ async fn run_log_script(
         runtime = runtime.with_retry_observer(observer);
     }
     let model = OpenAiModel::new(
-        OpenAiConfig::new(endpoint.parse().unwrap(), "fixture-key", "fixture-model")
-            .with_runtime(runtime),
+        OpenAiConfig::new(
+            endpoint
+                .parse()
+                .expect("the parse fixture result is required for this assertion"),
+            "fixture-key",
+            "fixture-model",
+        )
+        .with_runtime(runtime),
     );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("the temporary test directory must be available");
     let session = Session::new(
-        Arc::from(directory.path().to_str().unwrap()),
+        Arc::from(
+            directory
+                .path()
+                .to_str()
+                .expect("the fixture text must be valid UTF-8"),
+        ),
         FrozenContext::builder().build(),
         None,
     );
@@ -255,7 +306,10 @@ async fn run_log_script(
     let serve = async move {
         let mut requests = Vec::new();
         for body in responses {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("the accept fixture result is required for this assertion");
             requests.push(read_request(&mut socket).await);
             let header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -264,14 +318,20 @@ async fn run_log_script(
             socket
                 .write_all(&[header.as_bytes(), &body].concat())
                 .await
-                .unwrap();
-            socket.shutdown().await.unwrap();
+                .expect("the write all fixture result is required for this assertion");
+            socket
+                .shutdown()
+                .await
+                .expect("the shutdown fixture result is required for this assertion");
         }
         requests
     };
     // 同一作用域驱动客户端和服务端，超时会同时释放两端，不留下后台任务。
-    let (result, _requests) = timeout(Duration::from_secs(5), async {
-        tokio::join!(run_react_loop(ctx.clone(), 4), serve)
+    let (result, _requests) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            peri_agent::agent::stages::run_react_loop(ctx.clone(), 4),
+            serve
+        )
     })
     .await
     .expect("必须在有界时间内完成续跑及 HTTP fixture");

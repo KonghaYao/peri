@@ -71,17 +71,17 @@ const REASON_RANGE: &str = "exceeds the supported integer range";
 
 /// 胜出来源携带的原始值：环境是字符串，settings 是 JSON 值。
 #[derive(Clone, Copy)]
-enum Raw<'a> {
-    Text(&'a str),
-    Json(&'a Value),
+enum Raw<'source> {
+    Text(&'source str),
+    Json(&'source Value),
 }
 
 /// 逐键选择胜出来源；环境存在该键时不再回看 settings。
-fn winning<'a>(
-    environment: &'a BTreeMap<String, String>,
-    settings: Option<&'a Value>,
+fn winning<'source>(
+    environment: &'source BTreeMap<String, String>,
+    settings: Option<&'source Value>,
     key: Key,
-) -> Option<(ConfigValueSource, &'static str, Raw<'a>)> {
+) -> Option<(ConfigValueSource, &'static str, Raw<'source>)> {
     if let Some(value) = environment.get(key.environment) {
         return Some((
             ConfigValueSource::Environment,

@@ -25,7 +25,7 @@ use super::AcpMcpService;
 use crate::mcp::apps::McpCapabilityProfile;
 use crate::mcp::client::{ClientStatus, McpClientPool};
 use crate::mcp::task_scope::McpTaskOwner;
-use crate::mcp::tool_bridge::build_tool_bridges_visible_to;
+use crate::mcp::tool_bridge;
 
 /// 假件观测到的协议调用。
 #[derive(Default)]
@@ -183,14 +183,14 @@ async fn attach_connects_in_background_and_stays_session_scoped() {
         .unwrap();
 
     // attach 本身是同步返回的：此处尚未有任何连接证据。
-    assert!(pool.get_all_clients_visible_to(Some("s1")).is_empty());
+    assert!(pool.clients_visible_to(Some("s1")).is_empty());
     wait_until("acp 连接进池", || {
-        pool.get_client_visible_to("acp-srv", Some("s1")).is_some()
+        pool.client_visible_to("acp-srv", Some("s1")).is_some()
     })
     .await;
 
     let handle = pool
-        .get_client_visible_to("acp-srv", Some("s1"))
+        .client_visible_to("acp-srv", Some("s1"))
         .expect("归属会话应看到连接");
     assert!(matches!(handle.status, ClientStatus::Connected));
     assert_eq!(handle.source, Some(ConfigSource::Acp));
@@ -217,16 +217,19 @@ async fn attach_connects_in_background_and_stays_session_scoped() {
 
     // 另一个会话：工具面、状态面、发现面都看不到这条连接。
     assert!(!pool.is_visible_to_session("acp-srv", "s2"));
-    assert!(pool.get_client_visible_to("acp-srv", Some("s2")).is_none());
-    assert!(pool.get_all_clients_visible_to(Some("s2")).is_empty());
-    assert!(build_tool_bridges_visible_to(&pool, Some("s2")).is_empty());
+    assert!(pool.client_visible_to("acp-srv", Some("s2")).is_none());
+    assert!(pool.clients_visible_to(Some("s2")).is_empty());
+    assert!(tool_bridge::build_tool_bridges_visible_to(&pool, Some("s2")).is_empty());
     assert!(pool
         .all_server_infos_visible_to(Some("s2"))
         .iter()
         .all(|info| info.name != "acp-srv"));
     // 部署面（`None`）不做归属过滤，仍能看到池内的真实连接。
-    assert!(pool.get_client_visible_to("acp-srv", None).is_some());
-    assert_eq!(build_tool_bridges_visible_to(&pool, Some("s1")).len(), 1);
+    assert!(pool.client_visible_to("acp-srv", None).is_some());
+    assert_eq!(
+        tool_bridge::build_tool_bridges_visible_to(&pool, Some("s1")).len(),
+        1
+    );
 }
 
 /// 契约 1 续：client 经 `mcp/message` 反向下发的通知打到内层 MCP 连接。
@@ -243,7 +246,7 @@ async fn inbound_notification_rejects_finished_requests_and_unknown_servers() {
         .unwrap();
     let pool = Arc::clone(&fixture.pool);
     wait_until("acp 连接进池", || {
-        pool.get_client_visible_to("acp-srv", Some("s1")).is_some()
+        pool.client_visible_to("acp-srv", Some("s1")).is_some()
     })
     .await;
 
@@ -302,7 +305,7 @@ async fn attach_is_idempotent_and_cross_session_names_do_not_collide() {
         .unwrap();
     let pool = Arc::clone(&fixture.pool);
     wait_until("首个连接进池", || {
-        pool.get_client_visible_to("acp-srv", Some("s1")).is_some()
+        pool.client_visible_to("acp-srv", Some("s1")).is_some()
     })
     .await;
     assert_eq!(fixture.gateway.discovery_count(), 1, "重复声明不得重复发现");
@@ -317,18 +320,24 @@ async fn attach_is_idempotent_and_cross_session_names_do_not_collide() {
         )
         .unwrap();
     wait_until("第二会话连接进池", || {
-        pool.get_all_clients_visible_to(Some("s2")).len() == 1
+        pool.clients_visible_to(Some("s2")).len() == 1
     })
     .await;
     let second = pool
-        .get_all_clients_visible_to(Some("s2"))
+        .clients_visible_to(Some("s2"))
         .pop()
         .expect("第二会话应有自己的连接");
     assert_eq!(second.name, "acp-srv_2");
     assert!(matches!(second.status, ClientStatus::Connected));
     // 归属不变：各自只看得到自己那条。
-    assert_eq!(build_tool_bridges_visible_to(&pool, Some("s1")).len(), 1);
-    assert_eq!(build_tool_bridges_visible_to(&pool, Some("s2")).len(), 1);
+    assert_eq!(
+        tool_bridge::build_tool_bridges_visible_to(&pool, Some("s1")).len(),
+        1
+    );
+    assert_eq!(
+        tool_bridge::build_tool_bridges_visible_to(&pool, Some("s2")).len(),
+        1
+    );
     assert_eq!(fixture.gateway.discovery_count(), 2);
 }
 
@@ -413,8 +422,8 @@ async fn connect_failure_is_recorded_in_the_pool_state_face() {
         .iter()
         .all(|info| info.name != "acp-srv"));
     // 失败条目没有连接（peer / tools 为空），因此不进工具面。
-    assert!(build_tool_bridges_visible_to(&pool, Some("s1")).is_empty());
-    assert!(pool.get_client_visible_to("acp-srv", Some("s2")).is_none());
+    assert!(tool_bridge::build_tool_bridges_visible_to(&pool, Some("s1")).is_empty());
+    assert!(pool.client_visible_to("acp-srv", Some("s2")).is_none());
     assert!(!service.owns_server("srv-1"));
     drop(owner);
 }
@@ -442,14 +451,14 @@ async fn close_session_removes_only_that_sessions_declarations() {
         )
         .unwrap();
     wait_until("两条连接进池", || {
-        pool.get_all_clients_visible_to(Some("s1")).len() == 1
-            && pool.get_all_clients_visible_to(Some("s2")).len() == 1
+        pool.clients_visible_to(Some("s1")).len() == 1
+            && pool.clients_visible_to(Some("s2")).len() == 1
     })
     .await;
 
     fixture.service.close_session("s1").await;
 
-    assert!(pool.get_client_visible_to("acp-srv", Some("s1")).is_none());
+    assert!(pool.client_visible_to("acp-srv", Some("s1")).is_none());
     assert!(pool.all_server_infos_visible_to(Some("s1")).is_empty());
     assert!(!fixture.service.owns_server("srv-1"));
     // 关闭后的入站通知按「资源不存在」拒绝。
@@ -465,7 +474,7 @@ async fn close_session_removes_only_that_sessions_declarations() {
         .expect_err("会话关闭后不得再接受该 server 的入站通知");
     assert_eq!(missing.code, AcpMcpError::CODE_NOT_FOUND);
     // s2 的连接仍在，且仍是自己的。
-    assert_eq!(pool.get_all_clients_visible_to(Some("s2")).len(), 1);
+    assert_eq!(pool.clients_visible_to(Some("s2")).len(), 1);
     assert!(fixture.service.owns_server("srv-2"));
     // 幂等：重复关闭不产生额外发现。
     fixture.service.close_session("s1").await;
@@ -512,14 +521,8 @@ async fn separate_session_services_share_connection_registry_and_reject_conflict
         )
         .unwrap();
     wait_until("独立会话池都就绪", || {
-        first
-            .pool
-            .get_client_visible_to("one", Some("s1"))
-            .is_some()
-            && second
-                .pool
-                .get_client_visible_to("two", Some("s2"))
-                .is_some()
+        first.pool.client_visible_to("one", Some("s1")).is_some()
+            && second.pool.client_visible_to("two", Some("s2")).is_some()
     })
     .await;
     assert_eq!(first.gateway.discovery_count(), 1);
@@ -561,7 +564,7 @@ async fn close_session_aborts_inflight_connect_without_committing() {
     tokio::time::sleep(Duration::from_millis(400)).await;
 
     assert!(
-        pool.get_client_visible_to("acp-srv", Some("s1")).is_none(),
+        pool.client_visible_to("acp-srv", Some("s1")).is_none(),
         "会话关闭后在建连接不得提交进池"
     );
     assert!(

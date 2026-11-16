@@ -1,10 +1,13 @@
 //! 跨 server 控制与连接提交的锁顺序回归；同步闩锁在失败断言前释放。
-use super::*;
+use super::Arc;
+use super::ClientStatus;
+use super::McpControlRequest;
+use super::McpControlStatus;
+use super::McpServiceWrapper;
 use crate::mcp::client::McpClientHandle;
-use std::{
-    sync::mpsc,
-    time::{Duration, Instant},
-};
+use std::sync::mpsc;
+use std::time::Duration;
+use std::time::Instant;
 
 const LOCK_WAIT: Duration = Duration::from_secs(5);
 
@@ -33,8 +36,8 @@ fn control_and_commit_at_service_handoff(action: &str) {
         .enable_all()
         .build()
         .unwrap();
-    let (mut owner, pool, _cwd) = pool_fixture();
-    let McpControlRequest::Register { config, .. } = wire_registration("controlled") else {
+    let (mut owner, pool, _cwd) = super::pool_fixture();
+    let McpControlRequest::Register { config, .. } = super::wire_registration("controlled") else {
         unreachable!()
     };
     pool.configs
@@ -52,7 +55,7 @@ fn control_and_commit_at_service_handoff(action: &str) {
     // owner 登记后、slot 保留前暂停：旧 if-let 实现会跨此停点持 services 锁。
     let retention_latch = slot.services.lock();
     let control_pool = pool.clone();
-    let control_request = request(action, "controlled");
+    let control_request = super::request(action, "controlled");
     let (control_tx, control_rx) = mpsc::channel();
     let control_task = runtime.spawn(async move {
         let result = control_pool.control_mcp(control_request).await;
@@ -88,8 +91,8 @@ fn control_and_commit_at_service_handoff(action: &str) {
         Err(_) => commit_rx.recv_timeout(LOCK_WAIT).ok(),
     };
     let control_result = control_rx.recv_timeout(Duration::from_secs(20));
-    let current = pool.get_client("controlled");
-    let unrelated = pool.get_client("other");
+    let current = pool.client("controlled");
+    let unrelated = pool.client("other");
     let old_gate_closed = !old_handle.call_gate.is_open();
     let current_gate_open = current.as_ref().is_some_and(|h| h.call_gate.is_open());
     let joined = runtime.block_on(async {

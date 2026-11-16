@@ -1,5 +1,3 @@
-use super::*;
-
 // libtest uses System; an ordinary Vec does not exercise jemalloc here.
 // The fixture only exists where jemalloc is the global allocator (Linux/Unix).
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -9,7 +7,8 @@ struct Allocation(*mut u8, std::alloc::Layout);
 impl Allocation {
     fn new(size: usize) -> Self {
         use std::alloc::GlobalAlloc;
-        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        let layout = std::alloc::Layout::from_size_align(size, 8)
+            .expect("new: the fixture storage and layout must support the requested operation");
         // SAFETY: layout is nonzero and valid; Drop uses the same allocator
         // and layout, and no references escape this fixture.
         let ptr = unsafe { tikv_jemallocator::Jemalloc.alloc_zeroed(layout) };
@@ -33,16 +32,20 @@ fn test_init_alloc_conf_does_not_overwrite() {
     const CHILD: &str = "PERI_ALLOC_CONF_TEST_CHILD";
     let sentinel = "dirty_decay_ms:9999";
     if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "alloc_config::tests::test_init_alloc_conf_does_not_overwrite",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .env("MALLOC_CONF", sentinel)
-            .output()
-            .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().expect(
+            "init alloc conf does not overwrite: isolated fixture workspace must remain accessible",
+        ))
+        .args([
+            "--exact",
+            "alloc_config::tests::test_init_alloc_conf_does_not_overwrite",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env("MALLOC_CONF", sentinel)
+        .output()
+        .expect(
+            "init alloc conf does not overwrite: isolated fixture workspace must remain accessible",
+        );
         assert!(
             output.status.success(),
             "isolated allocator init test failed: {}\n{}",
@@ -52,11 +55,12 @@ fn test_init_alloc_conf_does_not_overwrite() {
         return;
     }
 
-    init_alloc_conf();
+    // SAFETY: The child launcher sets MALLOC_CONF, so this call performs no environment mutation.
+    unsafe { super::init_alloc_conf() };
 
     // 预设值不应被覆盖
     assert_eq!(
-        std::env::var("MALLOC_CONF").unwrap(),
+        std::env::var("MALLOC_CONF").expect("init alloc conf does not overwrite: the isolated fixture environment must contain its configured value"),
         sentinel,
         "不应覆盖用户设置的 MALLOC_CONF"
     );
@@ -65,9 +69,9 @@ fn test_init_alloc_conf_does_not_overwrite() {
 #[test]
 fn test_alloc_collect_does_not_panic() {
     // alloc_collect 应可安全多次调用
-    alloc_collect();
-    alloc_collect();
-    alloc_collect();
+    super::alloc_collect();
+    super::alloc_collect();
+    super::alloc_collect();
 }
 
 /// 分配器统计查询在所有非 Windows 平台有效（Windows stub 返回 None）；
@@ -75,7 +79,7 @@ fn test_alloc_collect_does_not_panic() {
 #[cfg(not(target_os = "windows"))]
 #[test]
 fn test_query_stats_returns_valid_data() {
-    let stats = query_stats().expect("query_stats 应返回数据");
+    let stats = super::query_stats().expect("query_stats 应返回数据");
     assert!(stats.current_rss > 0, "RSS 应大于 0");
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     assert!(stats.current_allocated > 0, "jemalloc allocated 应大于 0");
@@ -91,11 +95,11 @@ fn test_query_stats_returns_valid_data() {
 #[cfg(not(target_os = "windows"))]
 #[test]
 fn test_rss_unit_contract_preserves_sysinfo_bytes_and_converts_to_mib() {
-    let rss_bytes = process_rss_bytes().expect("current process RSS");
-    let stats = stats_with_rss(usize::try_from(rss_bytes).unwrap());
+    let rss_bytes = super::process_rss_bytes().expect("current process RSS");
+    let stats = super::stats_with_rss(usize::try_from(rss_bytes).expect("rss unit contract preserves sysinfo bytes and converts to mib: the fixture value must satisfy its target representation"));
     assert_eq!(stats.current_rss as u64, rss_bytes);
-    assert_eq!(bytes_to_mib(7 * 1024 * 1024 + 1023), 7);
-    assert_eq!(bytes_to_mib(1024 * 1024 - 1), 0);
+    assert_eq!(super::bytes_to_mib(7 * 1024 * 1024 + 1023), 7);
+    assert_eq!(super::bytes_to_mib(1024 * 1024 - 1), 0);
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -119,14 +123,14 @@ fn test_concurrent_epoch_refresh_preserves_breakdown_invariants() {
                     // the real allocations stable while all readers sample them.
                     start.wait();
                     match (worker, round % 12) {
-                        (0, 0) => alloc_collect(),
+                        (0, 0) => super::alloc_collect(),
                         (1, 0) => {
-                            rss_snapshots.push(query_stats());
+                            rss_snapshots.push(super::query_stats());
                         }
-                        (2, 0) if round == 0 => dump_stats(),
+                        (2, 0) if round == 0 => super::dump_stats(),
                         _ => {}
                     }
-                    snapshots.push(query_breakdown());
+                    snapshots.push(super::query_breakdown());
                     // No worker may free or replace an allocation before every
                     // snapshot in this round completes. Assert after all joins so
                     // a failed assertion cannot strand a peer at this barrier.
@@ -142,7 +146,7 @@ fn test_concurrent_epoch_refresh_preserves_breakdown_invariants() {
         .map(std::thread::JoinHandle::join)
         .collect();
     for outcome in outcomes {
-        let (snapshots, rss_snapshots) = outcome.unwrap();
+        let (snapshots, rss_snapshots) = outcome.expect("concurrent epoch refresh preserves breakdown invariants: the fixture establishes outcome before this assertion");
         for rss in rss_snapshots {
             assert!(rss.expect("RSS and allocator snapshot").current_rss > 0);
         }
@@ -170,15 +174,15 @@ fn test_breakdown_refreshes_after_allocation_and_release() {
     // allocation bypasses the default small-object thread cache on both targets.
     const BYTES: usize = 4 * 1024 * 1024;
     drop(Allocation::new(BYTES));
-    let before = query_breakdown().expect("初始统计");
+    let before = super::query_breakdown().expect("初始统计");
     let allocation = Allocation::new(BYTES);
-    let live = query_breakdown().expect("分配后统计");
+    let live = super::query_breakdown().expect("分配后统计");
     assert!(
         live.allocated >= before.allocated + BYTES,
         "新分配必须出现在统计中: before={before:?}, live={live:?}"
     );
     drop(allocation);
-    let released = query_breakdown().expect("释放后统计");
+    let released = super::query_breakdown().expect("释放后统计");
     assert!(
         released.allocated + BYTES <= live.allocated,
         "释放必须出现在统计中: live={live:?}, released={released:?}"
@@ -193,15 +197,18 @@ fn run_isolated_stats_test(name: &str) -> bool {
     if std::env::var(CHILD).as_deref() == Ok(name) {
         return false;
     }
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            &format!("alloc_config::tests::{name}"),
-            "--nocapture",
-        ])
-        .env(CHILD, name)
-        .output()
-        .unwrap();
+    let output = std::process::Command::new(
+        std::env::current_exe()
+            .expect("run isolated stats test: isolated fixture workspace must remain accessible"),
+    )
+    .args([
+        "--exact",
+        &format!("alloc_config::tests::{name}"),
+        "--nocapture",
+    ])
+    .env(CHILD, name)
+    .output()
+    .expect("run isolated stats test: isolated fixture workspace must remain accessible");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success() && stdout.contains("1 passed;"),
@@ -219,7 +226,7 @@ fn test_breakdown_shows_fragmentation() {
         return;
     }
     let _allocation = Allocation::new(129 * 1024);
-    let bd = query_breakdown().expect("query_breakdown 应返回数据");
+    let bd = super::query_breakdown().expect("query_breakdown 应返回数据");
     assert!(bd.allocated >= 129 * 1024, "必须包含真实分配: {bd:?}");
     eprintln!("jemalloc breakdown:");
     eprintln!("  allocated: {} bytes", bd.allocated);
@@ -257,6 +264,6 @@ fn test_dump_stats() {
     // libtest 默认的 System 分配器不会出现在 jemalloc 统计里。
     let _allocation = Allocation::new(2 * 1024 * 1024);
     eprintln!("=== jemalloc full stats ===");
-    dump_stats();
+    super::dump_stats();
     eprintln!("=== end ===");
 }

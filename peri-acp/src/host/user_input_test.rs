@@ -1,6 +1,16 @@
 //! 用户队列的控制请求、执行准入与 MPSC/stdio 契约。
 
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::host::SessionState;
+use crate::provider::LlmProvider;
+
+#[cfg(test)]
+use peri_acp_types::PeriCaps;
+use serde_json::json;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[path = "session_io_test.rs"]
 mod session_io_tests;
@@ -11,17 +21,23 @@ mod lag_tests;
 async fn make_user_input_session(
     tmp: &tempfile::TempDir,
 ) -> (AcpServerConfig, HashMap<String, SessionState>, String) {
-    let config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "unused-test-key",
-        "gpt-4o",
-    ));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "unused-test-key",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let cfg = make_server_config(config, provider, tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(config, provider, tmp).await;
     let mut sessions = HashMap::new();
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
     cfg.session_manager
         .ensure_session(&sid, tmp.path().to_str().unwrap());
     cfg.session_manager.ensure_session_caps(&sid);
@@ -53,7 +69,7 @@ async fn test_user_input_methods_require_capability() {
         "session/input/takeback",
         "session/input/snapshot",
     ] {
-        let error = handle_request(
+        let error = crate::host::requests::handle_request(
             method,
             &json!({"sessionId": sid}),
             &cfg,
@@ -75,7 +91,7 @@ async fn test_user_input_takeback_and_dispatch_share_server_state() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let initial = handle_request(
+    let initial = crate::host::requests::handle_request(
         "session/input/snapshot",
         &json!({"sessionId": sid}),
         &cfg,
@@ -93,7 +109,7 @@ async fn test_user_input_takeback_and_dispatch_share_server_state() {
     let first_id = "00000000-0000-0000-0000-000000000001";
     let second_id = "00000000-0000-0000-0000-000000000002";
     for (id, text) in [(first_id, "第一行\n第二行"), (second_id, "稍后处理")] {
-        handle_request(
+        crate::host::requests::handle_request(
             "session/input/enqueue",
             &make_user_input_request(&sid, generation, id, text),
             &cfg,
@@ -103,7 +119,7 @@ async fn test_user_input_takeback_and_dispatch_share_server_state() {
         .await
         .unwrap();
     }
-    let sent = handle_request(
+    let sent = crate::host::requests::handle_request(
         "session/input/dispatch",
         &json!({
             "sessionId": sid,
@@ -117,7 +133,7 @@ async fn test_user_input_takeback_and_dispatch_share_server_state() {
     )
     .await
     .unwrap();
-    let taken = handle_request(
+    let taken = crate::host::requests::handle_request(
         "session/input/takeback",
         &json!({
             "sessionId": sid,
@@ -164,7 +180,7 @@ async fn test_user_input_generation_invalidation_rejects_old_command() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let old = handle_request(
+    let old = crate::host::requests::handle_request(
         "session/input/snapshot",
         &json!({"sessionId": sid}),
         &cfg,
@@ -180,7 +196,7 @@ async fn test_user_input_generation_invalidation_rejects_old_command() {
         "00000000-0000-0000-0000-000000000001",
         "旧请求",
     );
-    let error = handle_request(
+    let error = crate::host::requests::handle_request(
         "session/input/enqueue",
         &request,
         &cfg,
@@ -207,7 +223,7 @@ async fn test_user_input_stop_revokes_ticket_before_cancel_token_registration() 
     let tmp = tempfile::TempDir::new().unwrap();
     let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let snapshot = handle_request(
+    let snapshot = crate::host::requests::handle_request(
         "session/input/snapshot",
         &json!({"sessionId":sid}),
         &cfg,
@@ -216,7 +232,7 @@ async fn test_user_input_stop_revokes_ticket_before_cancel_token_registration() 
     )
     .await
     .unwrap();
-    handle_request(
+    crate::host::requests::handle_request(
         "session/input/enqueue",
         &make_user_input_request(
             &sid,
@@ -291,7 +307,7 @@ async fn test_user_input_wire_control_responds_while_prompt_lock_is_held() {
             crate::host::connection::ConnectionContext::new(false),
         ));
         let cancellation = CancellationToken::new();
-        let recovery = recovery_for(&cfg, &states, &cont_tx);
+        let recovery = crate::host::requests::tests::recovery_for(&cfg, &states, &cont_tx);
         crate::host::server_loop::ServerLoop {
             transport: &server,
             cfg: &cfg,
@@ -352,7 +368,7 @@ async fn test_user_input_run_started_is_delivered_before_execution_can_continue(
     let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;
     let transport = Arc::new(MockTransport::default());
     let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
-    let initial = handle_request(
+    let initial = crate::host::requests::handle_request(
         "session/input/snapshot",
         &json!({"sessionId":sid}),
         &cfg,
@@ -361,7 +377,7 @@ async fn test_user_input_run_started_is_delivered_before_execution_can_continue(
     )
     .await
     .unwrap();
-    handle_request(
+    crate::host::requests::handle_request(
         "session/input/enqueue",
         &make_user_input_request(
             &sid,
@@ -443,7 +459,7 @@ async fn test_user_input_stdio_uses_same_short_control_requests() {
             crate::host::connection::ConnectionContext::new(false),
         ));
         let cancellation = CancellationToken::new();
-        let recovery = recovery_for(&cfg, &states, &cont_tx);
+        let recovery = crate::host::requests::tests::recovery_for(&cfg, &states, &cont_tx);
         crate::host::server_loop::ServerLoop {
             transport: &server,
             cfg: &cfg,
@@ -511,7 +527,7 @@ async fn test_user_input_cancel_rejects_stale_ticket_without_cancelling_current_
     let tmp = tempfile::TempDir::new().unwrap();
     let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let initial = handle_request(
+    let initial = crate::host::requests::handle_request(
         "session/input/snapshot",
         &json!({"sessionId":sid}),
         &cfg,
@@ -522,7 +538,7 @@ async fn test_user_input_cancel_rejects_stale_ticket_without_cancelling_current_
     .unwrap();
     let generation = initial["generation"].as_str().unwrap();
     let input_id = "00000000-0000-0000-0000-000000000001";
-    handle_request(
+    crate::host::requests::handle_request(
         "session/input/enqueue",
         &make_user_input_request(&sid, generation, input_id, "继续这条"),
         &cfg,
@@ -538,7 +554,7 @@ async fn test_user_input_cancel_rejects_stale_ticket_without_cancelling_current_
     mailbox
         .finish_attempt(&old, UserInputAttemptOutcome::Interrupted)
         .await;
-    handle_request(
+    crate::host::requests::handle_request(
         "session/input/dispatch",
         &json!({
             "sessionId": sid,
@@ -590,7 +606,7 @@ async fn test_user_input_error_response_does_not_prune_or_bump_revision() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let initial = handle_request(
+    let initial = crate::host::requests::handle_request(
         "session/input/snapshot",
         &json!({"sessionId": sid}),
         &cfg,
@@ -606,7 +622,7 @@ async fn test_user_input_error_response_does_not_prune_or_bump_revision() {
         .await
         .unwrap();
     let input_id = "00000000-0000-0000-0000-000000000009";
-    handle_request(
+    crate::host::requests::handle_request(
         "session/input/enqueue",
         &make_user_input_request(&sid, &generation, input_id, "错误响应"),
         &cfg,
@@ -631,7 +647,7 @@ async fn test_user_input_error_response_does_not_prune_or_bump_revision() {
         "待发记录必须存在"
     );
 
-    let error = handle_request(
+    let error = crate::host::requests::handle_request(
         "session/input/dispatch",
         &json!({
             "sessionId": sid,

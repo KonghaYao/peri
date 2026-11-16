@@ -1,10 +1,12 @@
 //! MCP-only cron event consumption shared by session and one-shot clients.
-use peri_acp_types::{cron::CronTrigger, ports::McpPoolPort};
+use peri_acp_types::cron::CronTrigger;
+use peri_acp_types::ports::McpPoolPort;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// The server retains each firing until delivery succeeds and tools/call acknowledges it.
 /// Retry failed acknowledgements without duplicating an already accepted local delivery.
+/// Dropping the returned handle detaches the task; `shutdown` controls its lifetime.
 pub fn forward_cron_triggers(
     pool: Arc<dyn McpPoolPort>,
     shutdown: CancellationToken,

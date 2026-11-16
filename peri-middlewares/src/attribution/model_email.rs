@@ -24,7 +24,8 @@ const MODEL_EMAIL_MAP: &[(&[&str], &str)] = &[
 /// 根据模型名称查找对应的 attribution 邮箱。
 /// 匹配不区分大小写，匹配第一个命中的关键词条目。
 /// 无匹配时回退到 Anthropic 邮箱。
-pub fn get_attribution_email(model_name: &str) -> &str {
+#[must_use]
+pub fn attribution_email(model_name: &str) -> &str {
     let lower = model_name.to_lowercase();
     for (keywords, email) in MODEL_EMAIL_MAP {
         if keywords.iter().any(|kw| lower.contains(kw)) {

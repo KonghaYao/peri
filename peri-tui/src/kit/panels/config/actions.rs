@@ -12,19 +12,25 @@
 
 use crate::config::{PeriConfig, TuiConfig};
 use crate::i18n;
-use crate::kit::atoms::{NOTIFICATION, Notification, PERI_CONFIG_HANDLE, TUI_CONFIG_HANDLE};
+
 use fluent_bundle::FluentValue;
 use peri_acp_types::beta_flags::BETA_FLAGS;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::rows::{
-    CONFIG_ROWS, ConfigRow, ROW_1M_CONTEXT, ROW_ACTIVE_ALIAS, ROW_CACHE_WARN, ROW_LANGUAGE,
-    ROW_PERMISSION_MODE, ROW_SCROLL_FPS, ROW_SHOW_DIFF, ROW_STREAMING, RowType, config_rows,
-    parse_permission_mode, permission_mode_label, read_cycle_idx,
-};
+use super::rows::CONFIG_ROWS;
+use super::rows::ConfigRow;
+use super::rows::ROW_1M_CONTEXT;
+use super::rows::ROW_ACTIVE_ALIAS;
+use super::rows::ROW_CACHE_WARN;
+use super::rows::ROW_LANGUAGE;
+use super::rows::ROW_PERMISSION_MODE;
+use super::rows::ROW_SCROLL_FPS;
+use super::rows::ROW_SHOW_DIFF;
+use super::rows::ROW_STREAMING;
+use super::rows::RowType;
 
-/// 宿主配置句柄（`App::new` 建立一次，全进程共享）。
+/// 宿主配置句柄（`App::try_new` 建立一次，全进程共享）。
 pub(super) type PeriHandle = Arc<parking_lot::RwLock<PeriConfig>>;
 /// TUI 渲染配置句柄（只承载 UI 字段）。
 pub(super) type TuiHandle = Arc<parking_lot::RwLock<TuiConfig>>;
@@ -46,7 +52,7 @@ fn notify(message: String, ttl: Duration) {
 
 /// 取一次性初始化的句柄：缺失时留下**可见**的失败记录并返回 `None`。
 ///
-/// 正常生命周期内句柄在 `App::new` 之后必然存在；缺失意味着进程初始化不完整，
+/// 正常生命周期内句柄在 `App::try_new` 之后必然存在；缺失意味着进程初始化不完整，
 /// 此时静默返回会让用户以为操作已生效。
 fn require_handle<'a, T>(handle: Option<&'a T>, name: &str) -> Option<&'a T> {
     if handle.is_none() {
@@ -157,7 +163,7 @@ pub(super) fn activate_row_with(
     let Some(handle) = require_handle(handle, PERI_HANDLE) else {
         return;
     };
-    match config_rows().get(row) {
+    match super::rows::config_rows().get(row) {
         Some(ConfigRow::BetaFlag(flag_index)) => {
             toggle_beta_flag_with(Some(handle), BETA_FLAGS[*flag_index].id, save);
         }
@@ -211,7 +217,7 @@ fn activate_base_row_with(
             }
         },
         RowType::Cycle(options) => {
-            let cur_idx = read_cycle_idx(row, options);
+            let cur_idx = super::rows::read_cycle_idx(row, options);
             let next = if forward {
                 (cur_idx + 1) % options.len()
             } else {
@@ -236,8 +242,10 @@ fn activate_base_row_with(
                 }
                 // 权限模式改的是当前会话运行权限（session/set_mode），不写宿主持久配置。
                 ROW_PERMISSION_MODE => {
-                    if let Some(mode) = parse_permission_mode(new_val) {
-                        crate::kit::permission_mode::request(permission_mode_label(mode));
+                    if let Some(mode) = super::rows::parse_permission_mode(new_val) {
+                        crate::kit::permission_mode::request(super::rows::permission_mode_label(
+                            mode,
+                        ));
                     }
                     return;
                 }
@@ -282,3 +290,11 @@ pub(super) fn toggle_beta_flag_with(
     candidate.peri.config.betas.set(id, !current);
     candidate.save(handle, save);
 }
+
+use crate::kit::atoms::NOTIFICATION;
+
+use crate::kit::atoms::Notification;
+
+use crate::kit::atoms::PERI_CONFIG_HANDLE;
+
+use crate::kit::atoms::TUI_CONFIG_HANDLE;

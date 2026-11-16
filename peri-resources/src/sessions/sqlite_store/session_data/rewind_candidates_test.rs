@@ -7,16 +7,18 @@
 //! 关键证据：Ai/Tool 行写成**不可解码**的正文。任何「先全量读回再过滤」的实现都会在
 //! 解码处失败；本接口必须只返回 user 候选且成功。
 
-use super::*;
+use super::SqliteSessionData;
+use std::sync::Arc;
+
 use crate::sessions::data::SessionDataPort;
 use crate::sessions::sqlite_store::SqliteThreadStore;
 use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::session_resources::{
     FrozenSnapshotBytes, NewSession, NewSessionMeta, RewindCandidate,
 };
-use peri_acp_types::store::{
-    serialize_persisted_payload, InheritedContext, PersistedPayload, ThreadStore,
-};
+use peri_acp_types::store::InheritedContext;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::store::ThreadStore;
 use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -27,7 +29,7 @@ const LIMIT: usize = 64;
 
 async fn database() -> (SqliteThreadStore, SqliteSessionData, TempDir) {
     let directory = tempfile::tempdir().unwrap();
-    let store = SqliteThreadStore::new(directory.path().join("threads.db"))
+    let store = SqliteThreadStore::try_new(directory.path().join("threads.db"))
         .await
         .unwrap();
     let data = SqliteSessionData::new(Arc::clone(&store.database));
@@ -95,7 +97,7 @@ async fn insert_payload(pool: &SqlitePool, payload: &PersistedPayload, excluded:
     .bind(payload.id().as_uuid().to_string())
     .bind(SESSION)
     .bind(role)
-    .bind(serialize_persisted_payload(payload).unwrap())
+    .bind(peri_acp_types::store::serialize_persisted_payload(payload).unwrap())
     .bind(if excluded { 1_i64 } else { 0_i64 })
     .execute(pool)
     .await
@@ -252,7 +254,9 @@ async fn limit_zero_returns_no_candidates() {
 /// 计划必须按索引定位、不得出现 `messages` 全表扫描（不新增索引，结论只报告）。
 #[tokio::test]
 async fn candidate_rows_sql_is_user_filtered_bounded_and_index_located() {
-    use super::rewind_candidates::{REWIND_CANDIDATE_BODY_SQL, REWIND_CANDIDATE_ROWS_SQL};
+    use crate::sessions::sqlite_store::session_data::rewind_candidates::{
+        REWIND_CANDIDATE_BODY_SQL, REWIND_CANDIDATE_ROWS_SQL,
+    };
 
     assert!(
         REWIND_CANDIDATE_ROWS_SQL.contains("role = 'user'"),

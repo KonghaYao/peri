@@ -3,10 +3,9 @@
 use crate::thread::{ThreadId, ThreadListEntry};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::{
-    path::{Path, PathBuf},
-    str::FromStr,
-};
+use std::path::Path;
+use std::path::PathBuf;
+use std::str::FromStr;
 use uuid::Uuid;
 
 macro_rules! opaque_id {
@@ -97,6 +96,7 @@ impl SessionBinding {
     ///
     /// 版本与 revision 由契约固定，调用方只能提供已解析的 workspace——创建入口
     /// （门面 `create_session`）不接受调用方自行拼装的绑定字段。
+    #[must_use]
     pub fn from_workspace(workspace: &ResolvedWorkspace) -> Self {
         Self {
             schema_version: SESSION_BINDING_VERSION,
@@ -152,6 +152,7 @@ impl ResolvedWorkspace {
     ///
     /// `discovery_snapshot` 是诊断与兼容数据（含 device/inode），会随容器重启、目录
     /// 重建或观测刷新而变化，不能参与准入是否通过的判定。
+    #[must_use]
     pub fn same_execution_binding(&self, other: &Self) -> bool {
         self.workspace_id == other.workspace_id
             && self.project_id == other.project_id

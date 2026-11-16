@@ -1,6 +1,7 @@
 use serial_test::serial;
 
-use super::*;
+use super::PanelKind;
+use super::atoms;
 
 #[test]
 #[serial]
@@ -10,7 +11,7 @@ fn test_session_boundary_clears_both_interaction_surfaces() {
     let old_ask = atoms::ASK_USER_PENDING.state().read().clone();
     let old_focus = atoms::FOCUSED_ENTRY.state().read().clone();
     *atoms::FOCUSED_ENTRY.state().write() = Some(atoms::FocusedEntry { slot: 7, key: None });
-    project_session_boundary(Some("target"));
+    super::project_session_boundary(Some("target"));
     assert_eq!(atoms::ACTIVE_SESSION_ID.state().read().as_str(), "target");
     assert!(atoms::HITL_PENDING.state().read().is_none());
     assert!(atoms::ASK_USER_PENDING.state().read().is_none());
@@ -41,7 +42,7 @@ fn test_session_boundary_clears_goal_projection_and_panel() {
     *atoms::OPEN_PANELS.state().write() = vec![PanelKind::Goal];
     *atoms::ACTIVE_PANEL.state().write() = Some(PanelKind::Goal);
 
-    project_session_boundary(Some("next"));
+    super::project_session_boundary(Some("next"));
 
     assert!(atoms::GOAL_SNAPSHOT.state().read().is_none());
     assert!(!atoms::OPEN_PANELS.state().read().contains(&PanelKind::Goal));
@@ -96,7 +97,7 @@ fn session_switch_removes_previous_session_background_tasks() {
         .insert("previous-shell".into(), BgLiveDetail::default());
     *atoms::SELECTED_BG_TASK_ID.state().write() = Some("previous-shell".into());
 
-    project_session_boundary(Some("next-session"));
+    super::project_session_boundary(Some("next-session"));
 
     assert!(atoms::BG_TASKS.state().read().is_empty());
     assert!(atoms::BG_DISPLAY.state().read().is_empty());
@@ -131,7 +132,7 @@ fn same_session_replay_keeps_running_background_task() {
         child_thread_id: None,
     });
 
-    project_session_boundary(Some("current"));
+    super::project_session_boundary(Some("current"));
 
     assert!(
         atoms::BG_TASKS
@@ -153,7 +154,7 @@ fn session_boundary_resets_stale_program_status() {
     let old_status = *atoms::PROGRAM_STATUS.state().read();
     atoms::PROGRAM_STATUS.set(crate::kit::program_status::ProgramStatus::Done);
 
-    project_session_boundary(Some("next-status"));
+    super::project_session_boundary(Some("next-status"));
 
     assert_eq!(
         *atoms::PROGRAM_STATUS.state().read(),

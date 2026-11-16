@@ -1,8 +1,28 @@
-use super::*;
+use crate::agent::async_tasks::handoff::BoundedWait;
+use crate::agent::async_tasks::handoff::ChildSettlementWindow;
+use crate::agent::async_tasks::handoff::HandoffCommit;
+use crate::agent::async_tasks::handoff::HandoffCommitError;
+use crate::agent::async_tasks::handoff::PendingHandoff;
+use crate::agent::async_tasks::handoff::PendingHandoffTask;
+use crate::agent::async_tasks::handoff::HANDOFF_REMINDER_KIND;
+use crate::agent::stages::SessionHandle;
+use crate::session::transcript::MessageTranscript;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::store::{MessageFlags, PersistedPayload};
+use peri_acp_types::system_reminder::ReminderAudience;
+use peri_acp_types::system_reminder::ReminderAudiences;
+use peri_acp_types::system_reminder::ReminderCategory;
+use peri_acp_types::system_reminder::ReminderDelivery;
+use peri_acp_types::system_reminder::ReminderSeverity;
+use peri_acp_types::system_reminder::ReminderSource as CanonicalReminderSource;
+use peri_acp_types::system_reminder::SystemReminder;
+use peri_acp_types::system_reminder::TrustedSystemReminder;
+use peri_acp_types::system_reminder::TrustedSystemReminderFactory;
+use peri_acp_types::system_reminder::SYSTEM_REMINDER_VERSION;
 use peri_acp_types::tasks::BgTaskKind;
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::session::test_resources::TestSession;
 
@@ -47,13 +67,19 @@ fn handoff(tasks: Vec<PendingHandoffTask>, waited_ms: u64) -> PendingHandoff {
 }
 
 fn canonical_payload(tasks: &[PendingHandoffTask]) -> Vec<u8> {
-    let normalized = normalized_pending_tasks(tasks);
-    canonical_handoff_payload(&handoff_reminder(&normalized).expect("canonical reminder"))
-        .expect("canonical payload")
+    let normalized = crate::agent::async_tasks::handoff::normalized_pending_tasks(tasks);
+    crate::agent::async_tasks::handoff::canonical_handoff_payload(
+        &crate::agent::async_tasks::handoff::handoff_reminder(&normalized)
+            .expect("canonical reminder"),
+    )
+    .expect("canonical payload")
 }
 
 fn delivery_id_for(tasks: &[PendingHandoffTask], thread: &str) -> MessageId {
-    handoff_delivery_id(&thread.to_owned(), &canonical_payload(tasks))
+    crate::agent::async_tasks::handoff::handoff_delivery_id(
+        &thread.to_owned(),
+        &canonical_payload(tasks),
+    )
 }
 
 /// 用真实 SQLite 门面构造一个只含 transcript 的会话句柄（交接只读 transcript 端口）。
@@ -117,7 +143,7 @@ fn legacy_v1_reminder(tasks: &[PendingHandoffTask], waited_ms: u64) -> TrustedSy
                 "waited_ms": waited_ms,
             }),
         })
-        .unwrap()
+        .expect("the construct fixture result is required for this assertion")
 }
 
 /// 同 ID 异内容：模拟另一个写入者占用了本次将使用的交付 ID。
@@ -135,7 +161,7 @@ fn conflicting_reminder() -> TrustedSystemReminder {
             summary: None,
             metadata: serde_json::json!({"pending": 1}),
         })
-        .unwrap()
+        .expect("the construct fixture result is required for this assertion")
 }
 
 fn digest_to_message_id(digest: &[u8]) -> MessageId {
@@ -173,7 +199,8 @@ fn test_bounded_wait_resets_when_work_settles() {
 #[test]
 fn test_handoff_reminder_records_pending_tasks_and_scope_owner() {
     let tasks = vec![task("mcp-aaa", Some("root-a")), task("bg-bbb", None)];
-    let reminder = handoff_reminder(&tasks).unwrap();
+    let reminder = crate::agent::async_tasks::handoff::handoff_reminder(&tasks)
+        .expect("the handoff reminder fixture result is required for this assertion");
     let body = &reminder.as_reminder().body;
     assert!(body.starts_with("pending: 2"), "{body}");
     assert!(body.contains("mcp-aaa"), "{body}");
@@ -272,7 +299,7 @@ async fn test_pending_handoff_snapshot_carries_owner_identity() {
             cancel: std::sync::Arc::new(|| Box::pin(async { Ok(()) })),
             on_terminal: std::sync::Arc::new(|_, _| Box::pin(async { Ok(()) })),
         })
-        .unwrap();
+        .expect("the register external fixture result is required for this assertion");
     let pending = manager.pending_handoff_tasks();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].task_id, task_id.task_id());
@@ -297,12 +324,18 @@ async fn test_repeated_handoff_converges_in_the_local_store() {
     let handle = session_handle(fixture.resources(), &thread_id);
     let tasks = task_set();
 
-    let first = write_pending_handoff(&handle, &handoff(tasks.clone(), 120_001))
-        .await
-        .expect("第一次交接必须成功");
-    let second = write_pending_handoff(&handle, &handoff(tasks, 120_002))
-        .await
-        .expect("等待耗时变化不得让同一集合的第二次交接失败");
+    let first = crate::agent::async_tasks::handoff::write_pending_handoff(
+        &handle,
+        &handoff(tasks.clone(), 120_001),
+    )
+    .await
+    .expect("第一次交接必须成功");
+    let second = crate::agent::async_tasks::handoff::write_pending_handoff(
+        &handle,
+        &handoff(tasks, 120_002),
+    )
+    .await
+    .expect("等待耗时变化不得让同一集合的第二次交接失败");
     assert_eq!(first, second, "同一 pending 集合必须收敛到同一投递 ID");
     let HandoffCommit::Committed(delivery_id) = first else {
         panic!("存在未结任务时必须写成交接");
@@ -312,7 +345,7 @@ async fn test_repeated_handoff_converges_in_the_local_store() {
         .resources()
         .load_session_snapshot(&fixture.thread_id())
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     let reminders = reminder_payloads(&snapshot.payloads);
     assert_eq!(reminders.len(), 1, "重复交接不得新增第二条记录");
     assert_eq!(reminders[0].0, delivery_id);
@@ -336,26 +369,32 @@ async fn test_legacy_v1_handoff_row_does_not_block_the_canonical_contract() {
         .resources()
         .append_reminder_if_absent(&thread_id, legacy_id, &legacy)
         .await
-        .unwrap());
+        .expect("the append reminder if absent fixture result is required for this assertion"));
 
     let handle = session_handle(fixture.resources(), &thread_id);
-    let first = write_pending_handoff(&handle, &handoff(tasks.clone(), 120_002))
-        .await
-        .expect("v1 旧行不得阻塞 v2 首次交接");
+    let first = crate::agent::async_tasks::handoff::write_pending_handoff(
+        &handle,
+        &handoff(tasks.clone(), 120_002),
+    )
+    .await
+    .expect("v1 旧行不得阻塞 v2 首次交接");
     let HandoffCommit::Committed(delivery_id) = first else {
         panic!("存在未结任务时必须写成交接");
     };
     assert_ne!(delivery_id, legacy_id, "v2 必须与旧身份隔离");
-    let replay = write_pending_handoff(&handle, &handoff(tasks, 120_003))
-        .await
-        .expect("v2 重放必须成功");
+    let replay = crate::agent::async_tasks::handoff::write_pending_handoff(
+        &handle,
+        &handoff(tasks, 120_003),
+    )
+    .await
+    .expect("v2 重放必须成功");
     assert_eq!(replay, HandoffCommit::Committed(delivery_id));
 
     let snapshot = fixture
         .resources()
         .load_session_snapshot(&fixture.thread_id())
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     let reminders = reminder_payloads(&snapshot.payloads);
     assert_eq!(reminders.len(), 2, "v1 原行保留，v2 只新增一条");
     let legacy_row = reminders
@@ -376,9 +415,12 @@ async fn test_excluded_handoff_replays_without_refilling_the_hot_view() {
     let thread_id = fixture.thread_id();
     let tasks = task_set();
     let first_handle = session_handle(fixture.resources(), &thread_id);
-    let first = write_pending_handoff(&first_handle, &handoff(tasks.clone(), 120_001))
-        .await
-        .unwrap();
+    let first = crate::agent::async_tasks::handoff::write_pending_handoff(
+        &first_handle,
+        &handoff(tasks.clone(), 120_001),
+    )
+    .await
+    .expect("the write pending handoff fixture result is required for this assertion");
     let HandoffCommit::Committed(delivery_id) = first else {
         panic!("存在未结任务时必须写成交接");
     };
@@ -395,13 +437,16 @@ async fn test_excluded_handoff_replays_without_refilling_the_hot_view() {
             )],
         )
         .await
-        .unwrap();
+        .expect("the apply message projections fixture result is required for this assertion");
 
     // Full Compact 后热态已释放该条目：用同一 store 的新热态重放。
     let handle = session_handle(fixture.resources(), &thread_id);
-    let replayed = write_pending_handoff(&handle, &handoff(tasks, 120_002))
-        .await
-        .expect("已排除的规范消息不得让重复交接失败");
+    let replayed = crate::agent::async_tasks::handoff::write_pending_handoff(
+        &handle,
+        &handoff(tasks, 120_002),
+    )
+    .await
+    .expect("已排除的规范消息不得让重复交接失败");
     assert_eq!(replayed, HandoffCommit::Committed(delivery_id));
     assert!(
         handle.transcript.read().get(delivery_id).is_none(),
@@ -420,12 +465,15 @@ async fn test_conflicting_handoff_payload_still_fails_explicitly() {
         .resources()
         .append_reminder_if_absent(&thread_id, delivery_id, &conflicting_reminder())
         .await
-        .unwrap());
+        .expect("the append reminder if absent fixture result is required for this assertion"));
 
     let handle = session_handle(fixture.resources(), &thread_id);
-    let error = write_pending_handoff(&handle, &handoff(tasks, 120_001))
-        .await
-        .expect_err("同 ID 异内容必须失败");
+    let error = crate::agent::async_tasks::handoff::write_pending_handoff(
+        &handle,
+        &handoff(tasks, 120_001),
+    )
+    .await
+    .expect_err("同 ID 异内容必须失败");
     assert!(
         matches!(error, HandoffCommitError::Persistence(_)),
         "必须保持显式持久化失败语义，实际 {error:?}"
@@ -435,7 +483,7 @@ async fn test_conflicting_handoff_payload_still_fails_explicitly() {
         .resources()
         .load_session_snapshot(&fixture.thread_id())
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     let reminders = reminder_payloads(&snapshot.payloads);
     assert_eq!(reminders.len(), 1);
     assert_eq!(reminders[0].0, delivery_id);

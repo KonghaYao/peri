@@ -32,11 +32,15 @@ async fn read_request(socket: &mut TcpStream) -> Value {
     let mut bytes = Vec::new();
     let (body_start, body_len) = loop {
         let mut chunk = [0; 4096];
-        let count = socket.read(&mut chunk).await.unwrap();
+        let count = socket
+            .read(&mut chunk)
+            .await
+            .expect("read request: fixture task and request must complete successfully");
         assert_ne!(count, 0, "模型请求不应提前结束");
         bytes.extend_from_slice(&chunk[..count]);
         if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
-            let headers = std::str::from_utf8(&bytes[..end]).unwrap();
+            let headers = std::str::from_utf8(&bytes[..end])
+                .expect("read request: fixture paths and protocol text must be valid UTF-8");
             assert!(
                 headers.starts_with("POST /v1/messages "),
                 "模型端点只接受 anthropic 协议：{headers}"
@@ -45,21 +49,25 @@ async fn read_request(socket: &mut TcpStream) -> Value {
                 .lines()
                 .filter_map(|line| line.split_once(':'))
                 .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                .unwrap()
+                .expect("read request: fixture must contain the searched item")
                 .1
                 .trim()
                 .parse::<usize>()
-                .unwrap();
+                .expect("read request: fixture must contain the searched item");
             break (end + 4, length);
         }
     };
     while bytes.len() < body_start + body_len {
         let mut chunk = [0; 4096];
-        let count = socket.read(&mut chunk).await.unwrap();
+        let count = socket
+            .read(&mut chunk)
+            .await
+            .expect("read request: fixture task and request must complete successfully");
         assert_ne!(count, 0, "模型请求 body 不应被截断");
         bytes.extend_from_slice(&chunk[..count]);
     }
-    serde_json::from_slice(&bytes[body_start..body_start + body_len]).unwrap()
+    serde_json::from_slice(&bytes[body_start..body_start + body_len])
+        .expect("read request: fixture JSON must match the expected schema")
 }
 
 /// anthropic 流式响应：一段文本后正常收尾。
@@ -97,8 +105,11 @@ async fn respond_text(socket: &mut TcpStream, text: &str) {
             .as_bytes(),
         )
         .await
-        .unwrap();
-    socket.shutdown().await.unwrap();
+        .expect("respond text: fixture task and request must complete successfully");
+    socket
+        .shutdown()
+        .await
+        .expect("respond text: fixture task and request must complete successfully");
 }
 
 /// 记录型模型端点：每次请求体都交给测试线程；第 `hold_first` 次请求故意不回应，
@@ -140,7 +151,8 @@ struct AcpProcess {
 
 impl AcpProcess {
     fn spawn(root: &Path, db_path: &Path, stderr_log: &Path) -> Self {
-        let stderr = std::fs::File::create(stderr_log).unwrap();
+        let stderr = std::fs::File::create(stderr_log)
+            .expect("spawn: the fixture storage and layout must support the requested operation");
         let mut child = Command::new(env!("CARGO_BIN_EXE_peri"))
             .env_clear()
             .env("HOME", root)
@@ -158,8 +170,14 @@ impl AcpProcess {
             .kill_on_drop(true)
             .spawn()
             .expect("peri acp 必须能启动");
-        let stdin = child.stdin.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
+        let stdin = child
+            .stdin
+            .take()
+            .expect("spawn: the fixture process was launched with piped standard input");
+        let stdout = child
+            .stdout
+            .take()
+            .expect("spawn: the fixture process outcome must include the expected output stream");
         Self {
             child,
             stdin,
@@ -176,8 +194,11 @@ impl AcpProcess {
         self.stdin
             .write_all(format!("{line}\n").as_bytes())
             .await
-            .unwrap();
-        self.stdin.flush().await.unwrap();
+            .expect("request: fixture task and request must complete successfully");
+        self.stdin
+            .flush()
+            .await
+            .expect("request: fixture task and request must complete successfully");
         id
     }
 
@@ -187,7 +208,7 @@ impl AcpProcess {
             let line = tokio::time::timeout(TURN_TIMEOUT, self.lines.next_line())
                 .await
                 .expect("ACP 响应超时")
-                .unwrap()
+                .expect("response: fixture task and request must complete successfully")
                 .expect("ACP 子进程提前退出");
             let value: Value = serde_json::from_str(&line).expect("ACP 输出必须是 JSON");
             if value.get("id").and_then(Value::as_i64) != Some(id) {
@@ -247,23 +268,24 @@ async fn wait_for_request(
 }
 
 fn write_settings(root: &Path, address: std::net::SocketAddr) {
-    std::fs::create_dir_all(root.join(".peri")).unwrap();
+    std::fs::create_dir_all(root.join(".peri"))
+        .expect("write settings: isolated fixture workspace must remain accessible");
     std::fs::write(
         root.join(".peri/settings.json"),
         json!({"config":{"providers":[{"id":"fixture", "type":"anthropic", "apiKey":"test-only", "baseUrl":format!("http://{address}"), "models":{"opus":"fixture-model"}}]}})
             .to_string(),
     )
-    .unwrap();
+    .expect("write settings: isolated fixture workspace must remain accessible");
 }
 
 #[tokio::test]
 async fn crash_mid_turn_then_load_in_a_new_process_recovers_exactly_once() {
     // 用 `keep()` 保留现场：失败时子进程日志仍在，成功后再显式清理。
-    let sandbox = tempfile::tempdir().unwrap();
-    let root = sandbox.keep().canonicalize().unwrap();
+    let sandbox = tempfile::tempdir().expect("crash mid turn then load in a new process recovers exactly once: isolated fixture workspace must remain accessible");
+    let root = sandbox.keep().canonicalize().expect("crash mid turn then load in a new process recovers exactly once: isolated fixture workspace must remain accessible");
     let db_path = root.join("threads.db");
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    write_settings(&root, listener.local_addr().unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("crash mid turn then load in a new process recovers exactly once: fixture task and request must complete successfully");
+    write_settings(&root, listener.local_addr().expect("crash mid turn then load in a new process recovers exactly once: the fixture listener must expose its bound local address"));
 
     let (arrive_tx, mut arrive_rx) = mpsc::unbounded_channel();
     let held = Arc::new(AtomicUsize::new(0));
@@ -274,13 +296,13 @@ async fn crash_mid_turn_then_load_in_a_new_process_recovers_exactly_once() {
     let mut crashed = AcpProcess::spawn(&root, &db_path, &crashed_log);
     crashed.initialize().await;
     let new_id = crashed
-        .request("session/new", json!({"cwd": root.to_str().unwrap()}))
+        .request("session/new", json!({"cwd": root.to_str().expect("crash mid turn then load in a new process recovers exactly once: fixture paths and protocol text must be valid UTF-8")}))
         .await;
     let created = crashed
         .response(new_id)
         .await
         .expect("session/new 必须成功");
-    let session_id = created["sessionId"].as_str().unwrap().to_owned();
+    let session_id = created["sessionId"].as_str().expect("crash mid turn then load in a new process recovers exactly once: fixture must have the expected variant").to_owned();
     let prompt_id = crashed
         .request(
             "session/prompt",
@@ -305,7 +327,7 @@ async fn crash_mid_turn_then_load_in_a_new_process_recovers_exactly_once() {
     let load_id = resumed
         .request(
             "session/load",
-            json!({"sessionId": session_id, "cwd": root.to_str().unwrap()}),
+            json!({"sessionId": session_id, "cwd": root.to_str().expect("crash mid turn then load in a new process recovers exactly once: fixture paths and protocol text must be valid UTF-8")}),
         )
         .await;
     resumed
@@ -327,7 +349,7 @@ async fn crash_mid_turn_then_load_in_a_new_process_recovers_exactly_once() {
     let reenter_id = resumed
         .request(
             "session/load",
-            json!({"sessionId": session_id, "cwd": root.to_str().unwrap()}),
+            json!({"sessionId": session_id, "cwd": root.to_str().expect("crash mid turn then load in a new process recovers exactly once: fixture paths and protocol text must be valid UTF-8")}),
         )
         .await;
     let _ = resumed.response(reenter_id).await;
@@ -354,11 +376,11 @@ async fn crash_mid_turn_then_load_in_a_new_process_recovers_exactly_once() {
 #[tokio::test]
 async fn pending_user_input_does_not_supersede_the_recovery_turn() {
     const PENDING: &str = "pending input survives the crash";
-    let sandbox = tempfile::tempdir().unwrap();
-    let root = sandbox.keep().canonicalize().unwrap();
+    let sandbox = tempfile::tempdir().expect("pending user input does not supersede the recovery turn: isolated fixture workspace must remain accessible");
+    let root = sandbox.keep().canonicalize().expect("pending user input does not supersede the recovery turn: isolated fixture workspace must remain accessible");
     let db_path = root.join("threads.db");
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    write_settings(&root, listener.local_addr().unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("pending user input does not supersede the recovery turn: fixture task and request must complete successfully");
+    write_settings(&root, listener.local_addr().expect("pending user input does not supersede the recovery turn: the fixture listener must expose its bound local address"));
 
     let (arrive_tx, mut arrive_rx) = mpsc::unbounded_channel();
     let held = Arc::new(AtomicUsize::new(0));
@@ -371,13 +393,13 @@ async fn pending_user_input_does_not_supersede_the_recovery_turn() {
         .initialize_with_meta(json!({"peri.userInputQueue": true}))
         .await;
     let new_id = crashed
-        .request("session/new", json!({"cwd": root.to_str().unwrap()}))
+        .request("session/new", json!({"cwd": root.to_str().expect("pending user input does not supersede the recovery turn: fixture paths and protocol text must be valid UTF-8")}))
         .await;
     let created = crashed
         .response(new_id)
         .await
         .expect("session/new 必须成功");
-    let session_id = created["sessionId"].as_str().unwrap().to_owned();
+    let session_id = created["sessionId"].as_str().expect("pending user input does not supersede the recovery turn: fixture must have the expected variant").to_owned();
     let snapshot_id = crashed
         .request("session/input/snapshot", json!({"sessionId": session_id}))
         .await;
@@ -385,7 +407,7 @@ async fn pending_user_input_does_not_supersede_the_recovery_turn() {
         .response(snapshot_id)
         .await
         .expect("用户输入队列快照必须成功");
-    let generation = snapshot["generation"].as_str().unwrap().to_owned();
+    let generation = snapshot["generation"].as_str().expect("pending user input does not supersede the recovery turn: fixture must have the expected variant").to_owned();
     let prompt_id = crashed
         .request(
             "session/prompt",
@@ -433,7 +455,7 @@ async fn pending_user_input_does_not_supersede_the_recovery_turn() {
     let load_id = resumed
         .request(
             "session/load",
-            json!({"sessionId": session_id, "cwd": root.to_str().unwrap()}),
+            json!({"sessionId": session_id, "cwd": root.to_str().expect("pending user input does not supersede the recovery turn: fixture paths and protocol text must be valid UTF-8")}),
         )
         .await;
     resumed

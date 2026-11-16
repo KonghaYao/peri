@@ -1,3 +1,4 @@
+use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
 use peri_acp_types::session::ExecutionBinding;
@@ -10,7 +11,7 @@ use crate::session::async_result_mailbox::AsyncResultMailbox;
 use crate::session::transcript::PersistOp;
 use crate::session::{MessageQueue, MessageTranscript};
 
-use super::ChildHandoffReceipt;
+use crate::session::subagent::types::ChildHandoffReceipt;
 
 #[cfg(test)]
 #[path = "resource_owner_test.rs"]
@@ -177,6 +178,7 @@ impl ParkedChildOwner {
     }
 
     /// 用于状态提交后判断 owner 是否仍有未确认的委托义务。
+    #[must_use]
     pub async fn has_unsettled_obligations(&self) -> bool {
         let unconfirmed = {
             let state = self.state.lock();
@@ -189,12 +191,14 @@ impl ParkedChildOwner {
 
     /// 仅测试：同步适配同一 async 判定。
     #[cfg(test)]
+    #[must_use]
     pub fn has_unsettled_obligations_sync(&self) -> bool {
         futures::executor::block_on(self.has_unsettled_obligations())
     }
 
     /// 仅测试：下一次 close 在关闸后、结算读取前暂停；返回（进入通知，放行信号）。
     #[cfg(test)]
+    #[must_use]
     pub fn gate_next_close_settlement(
         &self,
     ) -> (
@@ -298,7 +302,8 @@ impl ParkedChildOwner {
                 .await?;
         }
         let external = self.manager.external_task_ids();
-        for task in peri_acp_types::tasks::TaskManager::snapshot(self.manager.as_ref()).tasks {
+        let task_items = peri_acp_types::tasks::TaskManager::snapshot(self.manager.as_ref()).tasks;
+        for task in task_items {
             if task.kind == peri_acp_types::tasks::BgTaskKind::Shell
                 && task.status == "running"
                 && !external.contains(&task.task_id)
@@ -548,5 +553,34 @@ impl Drop for ChildExecutionPermit {
                 tracing::error!(child_thread_id = %self.owner.child_thread_id, "child resource owner retained unconfirmed execution");
             }
         }
+    }
+}
+
+impl Debug for ParkedChildOwner {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ParkedChildOwner")
+            .field("child_thread_id", &self.child_thread_id)
+            .field("parent_thread_id", &self.parent_thread_id)
+            .field("resources_present", &self.resources.is_some())
+            .field("pool_present", &self.pool.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Debug for ChildPreparationPermit {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChildPreparationPermit")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Debug for ChildExecutionPermit {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChildExecutionPermit")
+            .field("finished", &self.finished)
+            .finish_non_exhaustive()
     }
 }

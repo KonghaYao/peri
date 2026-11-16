@@ -4,16 +4,14 @@
 //! 调用方（一致 snapshot、事务内复核）使用；`impl SqliteSessionDatabase` 上的方法
 //! 自行取一条连接，供单条读取使用。
 
-use super::{
-    database::SqliteSessionDatabase,
-    row_mapping::{meta_from_row, ThreadRow},
-};
+use super::database::SqliteSessionDatabase;
+use super::row_mapping::ThreadRow;
 use anyhow::Result;
-use peri_acp_types::{
-    messages::BaseMessage,
-    store::{deserialize_persisted_payload, InheritedContext, PersistedPayload},
-    thread::{ThreadId, ThreadMeta},
-};
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::store::InheritedContext;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::thread::ThreadId;
+use peri_acp_types::thread::ThreadMeta;
 use sqlx::{AssertSqlSafe, SqliteConnection};
 use std::collections::HashSet;
 
@@ -89,7 +87,7 @@ impl SqliteSessionDatabase {
 fn decode_meta_rows(rows: Vec<ThreadRow>) -> Result<Vec<ThreadMeta>> {
     rows.into_iter()
         .map(|row| {
-            meta_from_row(
+            super::row_mapping::meta_from_row(
                 row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
                 row.11, row.12, row.13, row.14,
             )
@@ -115,7 +113,7 @@ pub(super) async fn load_meta_on(
         .bind(id.as_str())
         .fetch_one(&mut *connection)
         .await?;
-    meta_from_row(
+    super::row_mapping::meta_from_row(
         row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11,
         row.12, row.13, row.14,
     )
@@ -156,7 +154,7 @@ pub(super) async fn load_active_payloads_on(
 fn decode_payload_rows(rows: Vec<(String, String)>) -> Result<Vec<PersistedPayload>> {
     rows.into_iter()
         .map(|(row_id, content)| {
-            let payload = deserialize_persisted_payload(&content)?;
+            let payload = peri_acp_types::store::deserialize_persisted_payload(&content)?;
             if payload.id().as_uuid().to_string() != row_id {
                 anyhow::bail!("persisted payload message id mismatch");
             }
@@ -202,7 +200,8 @@ pub(super) async fn load_inherited_context_on(
     let mut context = InheritedContext::default();
     // Each edge's cutoff belongs to its child. A stored snapshot replaces all
     // inherited state, so later parent compaction/rewind cannot change it.
-    for (index, tid) in chain.iter().enumerate() {
+    let indexed_entries = chain.iter().enumerate();
+    for (index, tid) in indexed_entries {
         let stored: (Option<String>,) = sqlx::query_as(INHERITED_CONTEXT_SQL)
             .bind(tid)
             .fetch_one(&mut *connection)
@@ -302,7 +301,7 @@ async fn load_payloads_up_to_on(
     .await?;
     rows.into_iter()
         .map(|(row_id, content)| {
-            let payload = deserialize_persisted_payload(&content)?;
+            let payload = peri_acp_types::store::deserialize_persisted_payload(&content)?;
             if payload.id().as_uuid().to_string() != row_id {
                 anyhow::bail!("persisted payload message id mismatch");
             }

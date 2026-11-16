@@ -1,5 +1,3 @@
-use super::*;
-
 #[test]
 fn local_plugin_selection_overrides_project_without_changing_user_selection() {
     let home = tempfile::tempdir().unwrap();
@@ -35,14 +33,14 @@ fn local_plugin_selection_overrides_project_without_changing_user_selection() {
         r#"{"enabledPlugins":{"local":true}}"#,
     )
     .unwrap();
-    let local = select_enabled_plugins(home.path(), Some(project.path())).unwrap();
+    let local = super::select_enabled_plugins(home.path(), Some(project.path())).unwrap();
     assert_eq!(local.plugins.len(), 1);
     assert_eq!(local.plugins[0].id, "local");
-    let user = select_enabled_plugins(home.path(), None).unwrap();
+    let user = super::select_enabled_plugins(home.path(), None).unwrap();
     assert_eq!(user.plugins.len(), 1);
     assert_eq!(user.plugins[0].id, "user");
     std::fs::remove_file(project.path().join(".claude/settings.local.json")).unwrap();
-    let inherited = select_enabled_plugins(home.path(), Some(project.path())).unwrap();
+    let inherited = super::select_enabled_plugins(home.path(), Some(project.path())).unwrap();
     assert_eq!(inherited.plugins.len(), 1);
     assert_eq!(inherited.plugins[0].id, "project");
 }
@@ -63,5 +61,5 @@ fn invalid_local_settings_are_reported_instead_of_using_another_scope() {
         "{invalid",
     )
     .unwrap();
-    assert!(select_enabled_plugins(home.path(), Some(project.path())).is_err());
+    assert!(super::select_enabled_plugins(home.path(), Some(project.path())).is_err());
 }

@@ -4,16 +4,14 @@ use anyhow::{Context, Result};
 use peri_acp_types::workspace::WorkspaceError;
 use peri_process::ProcessTree;
 use serde::{Deserialize, Serialize};
-use std::{
-    ffi::OsStr,
-    io::ErrorKind,
-    path::{Path, PathBuf},
-    time::Duration,
-};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    process::Command,
-};
+use std::ffi::OsStr;
+use std::io::ErrorKind;
+use std::path::Path;
+use std::path::PathBuf;
+use std::time::Duration;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
 
 /// 一次目录发现得到的路径布局。
 ///
@@ -153,7 +151,7 @@ async fn git(program: &OsStr, cwd: &Path, args: &[&str]) -> Result<Option<std::p
             command.env_remove(name);
         }
     }
-    let mut tree = ProcessTree::new().context("Git discovery process ownership unavailable")?;
+    let mut tree = ProcessTree::try_new().context("Git discovery process ownership unavailable")?;
     tree.prepare(&mut command);
     let Some(mut child) = spawn_git(&mut command).await? else {
         return Ok(None);
@@ -535,6 +533,8 @@ impl Discovery {
         ensure_cwd_available(cwd).await.map(|_| ())
     }
 
+    /// Uses the shared Git directory for linked worktrees, otherwise the observed root.
+    #[must_use]
     pub fn project_locator(&self) -> &Path {
         self.common_dir.as_deref().unwrap_or(&self.root)
     }

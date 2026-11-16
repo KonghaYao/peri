@@ -68,6 +68,7 @@ pub struct PageQuery {
     pub limit: usize,
 }
 
+#[must_use]
 pub fn parse_page_query(uri: &str) -> PageQuery {
     let mut query = PageQuery {
         after: None,
@@ -188,6 +189,7 @@ pub fn read_payload(runtime: &WorkflowRuntime, uri: &str) -> Result<Value, Resou
 }
 
 /// 订阅唤醒对应的**规范** URI（分页参数不参与订阅身份）。
+#[must_use]
 pub fn update_uri(update: &WorkflowResourceUpdate) -> String {
     match update {
         WorkflowResourceUpdate::RunsIndex => RUNS_URI.to_string(),

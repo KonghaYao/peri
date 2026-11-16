@@ -9,7 +9,23 @@
 //! 不读连接状态，因此这些 fixture **不构成「协议 ready」证据**，也不能被读成
 //! 「System MCP 启动完成」。
 
-use super::*;
+use super::BTreeMap;
+use super::McpToolBridge;
+use super::SystemToolError;
+use super::RULE_BOOLEAN;
+use super::RULE_ENUM;
+use super::RULE_INTEGER;
+use super::RULE_LIST;
+use super::RULE_MAP;
+use super::RULE_NODE;
+use super::RULE_NUMBER;
+use super::RULE_REQUIRED;
+use super::RULE_REQUIRED_ITEM;
+use super::RULE_ROOT_OBJECT;
+use super::RULE_ROOT_TYPE;
+use super::RULE_STRING;
+use super::RULE_TYPE;
+use peri_agent::tools::BaseTool as _;
 use std::sync::Arc;
 
 use rmcp::model::Tool;
@@ -108,7 +124,7 @@ fn expect_ok(
     bridges: Vec<McpToolBridge>,
     required: &BTreeMap<String, Vec<String>>,
 ) -> Vec<McpToolBridge> {
-    match prepare_system_tools(bridges, required) {
+    match super::prepare_system_tools(bridges, required) {
         Ok(prepared) => prepared,
         Err(error) => panic!("期望 Ok，实际返回 {error}"),
     }
@@ -118,7 +134,7 @@ fn expect_error(
     bridges: Vec<McpToolBridge>,
     required: &BTreeMap<String, Vec<String>>,
 ) -> SystemToolError {
-    match prepare_system_tools(bridges, required) {
+    match super::prepare_system_tools(bridges, required) {
         Ok(_) => panic!("期望 Err（all-or-nothing），实际返回 Ok"),
         Err(error) => error,
     }
@@ -420,20 +436,23 @@ fn test_system_invalid_schema_returns_explicit_error() {
 #[test]
 fn test_system_schema_root_must_be_object() {
     for schema in [json!([]), json!("oops"), json!(42), json!(true)] {
-        let reason = validate_input_schema(&schema).expect_err("根非 object 必须失败");
+        let reason = super::validate_input_schema(&schema).expect_err("根非 object 必须失败");
         assert!(reason.starts_with(RULE_ROOT_OBJECT), "{reason}");
         assert!(reason.ends_with(" at /"), "{reason}");
     }
 
     // `{}` 是未声明约束的 object schema，合法。
-    assert_eq!(validate_input_schema(&json!({})), Ok(()));
+    assert_eq!(super::validate_input_schema(&json!({})), Ok(()));
 
     // 根 `type` 若存在必须是 "object"。
     for schema in [json!({ "type": "array" }), json!({ "type": ["object"] })] {
-        let reason = validate_input_schema(&schema).expect_err("根 type 非 object 必须失败");
+        let reason = super::validate_input_schema(&schema).expect_err("根 type 非 object 必须失败");
         assert!(reason.contains(RULE_ROOT_TYPE), "{reason}");
     }
-    assert_eq!(validate_input_schema(&json!({ "type": "object" })), Ok(()));
+    assert_eq!(
+        super::validate_input_schema(&json!({ "type": "object" })),
+        Ok(())
+    );
 }
 
 #[test]

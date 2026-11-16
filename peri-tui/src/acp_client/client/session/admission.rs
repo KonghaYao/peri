@@ -27,6 +27,7 @@ pub(crate) struct AdmissionGuard {
 }
 
 impl AdmissionGuard {
+    #[must_use]
     pub(crate) fn new(switch_seq: u64, allow_create: bool) -> Self {
         Self {
             switch_seq,
@@ -42,6 +43,7 @@ impl AdmissionGuard {
 }
 
 /// cohort 已登记身份时沿用；没有 cohort 的直接调用接续当前待定身份。
+#[must_use]
 fn operation_of(operation: Option<SessionOperationId>) -> TransitionOperation {
     operation.map_or(
         TransitionOperation::AdoptPending,
@@ -80,7 +82,11 @@ impl AcpTuiClient {
     /// 观察到「已认领但路由仍是旧 Stable」的撕裂组合。`unclaimed_load` 暴露的是
     /// 最新未认领预约的操作身份，路由切换不再由「存在未认领预约」预测代际。
     pub(crate) fn session_admission_snapshot(&self) -> SessionAdmissionSnapshot {
-        let reservations = self.session_load_reservations.reservations.lock().unwrap();
+        let reservations = self
+            .session_load_reservations
+            .reservations
+            .lock()
+            .expect("session_load_reservations.reservations mutex must not be poisoned");
         let pending_load = reservations.pending() > 0;
         let unclaimed_load = reservations.newest_unclaimed();
         let switch_seq = self.current_session_switch_seq();
@@ -128,7 +134,10 @@ impl AcpTuiClient {
             let operation = self.lifecycle.operation_gate().lock().await;
             let (pending_load, stable_session) = {
                 let _ = *load_epoch_rx.borrow_and_update();
-                let reservations = self.session_load_reservations.reservations.lock().unwrap();
+                let reservations =
+                    self.session_load_reservations.reservations.lock().expect(
+                        "session_load_reservations.reservations mutex must not be poisoned",
+                    );
                 // 决策序号与预约计数同锁读取：reserve_session_load 在同一临界区
                 // 递增两者，因此这里不会读到「新预约 + 旧决策」的撕裂组合。
                 if admission.as_ref().is_some_and(|admission| {

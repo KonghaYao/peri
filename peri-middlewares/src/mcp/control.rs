@@ -1,20 +1,24 @@
 //! Pool-owned server control. Operations share the ordinary transport and task owner.
-use super::{
-    client::{McpConnectionKey, McpServiceOwner, McpServiceWrapper, SHUTDOWN_TIMEOUT},
-    task_scope::McpTaskKey,
-    ClientStatus, McpClientPool, OAuthStatus,
+use super::client::McpConnectionKey;
+use super::client::McpServiceOwner;
+use super::client::McpServiceWrapper;
+use super::client::SHUTDOWN_TIMEOUT;
+use super::task_scope::McpTaskKey;
+use super::ClientStatus;
+use super::McpClientPool;
+use super::OAuthStatus;
+use peri_acp_types::command_registry::CommandRegistry;
+use peri_acp_types::mcp_control::{
+    McpControlAction, McpControlError, McpControlRequest, McpControlResponse, McpControlStatus,
+    McpRegistrationConfig, McpServerControl, SessionMcpCatalogPort, SessionMcpCatalogSnapshot,
 };
+use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::tools::BaseTool;
-use peri_acp_types::{
-    command_registry::CommandRegistry, mcp_control::*, mcp_skills::McpSkillRegistry,
-};
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Weak,
-    },
-};
+use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Weak;
 
 #[derive(Default)]
 pub(crate) struct PoolControl {
@@ -91,7 +95,7 @@ impl McpClientPool {
             .collect();
         for (registry, commands, session) in projections {
             let connected: Vec<_> = self
-                .get_all_clients_visible_to(session.as_deref())
+                .clients_visible_to(session.as_deref())
                 .into_iter()
                 .map(|h| (h.name.clone(), h as peri_acp_types::mcp_skills::HandleToken))
                 .collect();
@@ -108,10 +112,9 @@ impl McpClientPool {
     pub(crate) fn control_descriptor(&self, name: &str) -> McpServerControl {
         let configs = self.configs.read();
         let config = configs.get(name);
-        let source = config.and_then(|c| c.source.clone()).or_else(|| {
-            self.get_client(name)
-                .and_then(|handle| handle.source.clone())
-        });
+        let source = config
+            .and_then(|c| c.source.clone())
+            .or_else(|| self.client(name).and_then(|handle| handle.source.clone()));
         let reason = match source.as_ref() {
             Some(super::config::ConfigSource::Builtin { .. }) => Some("builtin"),
             Some(super::config::ConfigSource::WorkspaceRemote) => Some("workspace_remote"),
@@ -131,7 +134,7 @@ impl McpClientPool {
     ) -> Result<(), McpControlError> {
         let slot = self.server_slot(name);
         slot.stopped.store(true, Ordering::Release);
-        let handle = self.get_client(name);
+        let handle = self.client(name);
         if let Some(handle) = &handle {
             handle.call_gate.revoke();
         }
@@ -327,7 +330,7 @@ impl McpClientPool {
             self.close_server_connection(&name, true).await?;
             slot.stopped.store(false, Ordering::Release);
             let result = self.reconnect_managed(&name, None, false).await;
-            match self.get_client(&name) {
+            match self.client(&name) {
                 Some(h) if h.oauth_status == OAuthStatus::NeedsAuthorization => {
                     McpControlStatus::NeedsAuthorization
                 }
@@ -340,7 +343,7 @@ impl McpClientPool {
                         .map(|e| e.to_string())
                         .unwrap_or_else(|| "MCP connection did not become ready".into());
                     tracing::error!(server=%name,%error,"MCP control failed");
-                    if self.is_open() && self.get_client(&name).is_none() {
+                    if self.is_open() && self.client(&name).is_none() {
                         McpClientPool::insert_failed(&self, &name, error.clone());
                     }
                     return Err(McpControlError::new(-32603, "connection_failed", error));
@@ -382,7 +385,7 @@ impl SessionMcpCatalogPort for PoolCatalog {
                 .into_iter()
                 .filter(|r| {
                     self.pool
-                        .get_client(&r.server)
+                        .client(&r.server)
                         .is_some_and(|h| h.status == ClientStatus::Connected)
                 })
                 .map(|r| (r.server, r.required_tools))

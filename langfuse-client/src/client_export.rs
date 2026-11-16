@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::config::Compression;
-use crate::encoding::json_string::write_failure;
+use crate::encoding::json_string;
 use crate::encoding::{BudgetedWriter, SinkFailure};
 use crate::error::LangfuseError;
 use crate::snapshot::TelemetryEvent;
@@ -162,7 +162,7 @@ pub(crate) fn encode_gzip(
     };
     let outcome = match (outcome, encoder.finish()) {
         (Ok(counted), Ok(_)) => Ok(counted),
-        (Ok(_), Err(error)) => Err(write_failure(error)),
+        (Ok(_), Err(error)) => Err(json_string::write_failure(error)),
         (Err(error), _) => Err(error),
     };
     match outcome {
@@ -185,15 +185,15 @@ fn classify(
 }
 
 /// 解压前（raw）字节上限守卫：与 writer 的线包上限各自独立生效。
-struct RawLimitWriter<'a> {
-    inner: &'a mut dyn Write,
+struct RawLimitWriter<'output> {
+    inner: &'output mut dyn Write,
     limit: usize,
     written: usize,
     failure: Option<SinkFailure>,
 }
 
-impl<'a> RawLimitWriter<'a> {
-    fn new(inner: &'a mut dyn Write, limit: usize) -> Self {
+impl<'output> RawLimitWriter<'output> {
+    fn new(inner: &'output mut dyn Write, limit: usize) -> Self {
         Self {
             inner,
             limit,

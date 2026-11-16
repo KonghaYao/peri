@@ -42,7 +42,7 @@ impl VisibilityCache {
         let key = (entry_id, digest(prefix));
         match self.state.entries.lock() {
             Ok(entries) => entries.get(&key).copied(),
-            Err(poisoned) => poisoned.into_inner().get(&key).copied(),
+            Err(_) => panic!("visibility cache mutex must remain unpoisoned"),
         }
     }
 
@@ -51,7 +51,7 @@ impl VisibilityCache {
         let key = (entry_id, digest(prefix));
         let mut entries = match self.state.entries.lock() {
             Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
+            Err(_) => panic!("visibility cache mutex must remain unpoisoned"),
         };
         if entries.len() >= MAX_ENTRIES {
             entries.clear();

@@ -11,10 +11,9 @@
 //!
 //! 判据仍只有一条：同一个可见单元在屏幕上的行号不变（`slot_visual_start − offset`）。
 
-use super::*;
-use crate::kit::acp_events::{
-    BridgeState, acp_events_test::make_fold_test_state, dispatch_and_notify,
-};
+use super::PrependRelocation;
+
+use crate::kit::acp_events::BridgeState;
 use crate::kit::acp_types::AcpEventData;
 use crate::kit::entry_render_cache::{EntryRenderContext, EntrySurface};
 use crate::kit::history_paging::{self, HistoryPageItem, HistoryPageResponse, HistorySubItem};
@@ -38,6 +37,7 @@ fn context() -> EntryRenderContext {
     }
 }
 
+#[must_use]
 fn sub(position: u64, update: serde_json::Value) -> HistorySubItem {
     HistorySubItem {
         position,
@@ -98,7 +98,7 @@ fn browsing_state(token: &str) -> BridgeState {
     crate::kit::atoms::init_atoms();
     history_paging::reset_browsing_state();
     *crate::kit::atoms::ACTIVE_SESSION_ID.state().write() = "s1".to_string();
-    let mut state = make_fold_test_state();
+    let mut state = crate::kit::acp_events::acp_events_test::make_fold_test_state();
     state.active_session_id = "s1".to_string();
     history_paging::note_initial_cursor(
         "s1",
@@ -111,7 +111,7 @@ fn browsing_state(token: &str) -> BridgeState {
 /// 首屏自有条目：回放标记（登记 position）+ 一条 user 气泡（进 committed）。
 fn seed_own_entry(state: &mut BridgeState, entry_id: &str, position: u64, text: &str) {
     seed_own_entry_via(state, entry_id, position, |state| {
-        dispatch_and_notify(
+        crate::kit::acp_events::dispatch_and_notify(
             state,
             &AcpEventData::ReplayedUserBubble {
                 input_id: format!("input-{entry_id}"),
@@ -131,7 +131,7 @@ fn seed_own_entry_via(
     position: u64,
     push_unit: impl FnOnce(&mut BridgeState),
 ) {
-    dispatch_and_notify(
+    crate::kit::acp_events::dispatch_and_notify(
         state,
         &AcpEventData::ReplayEntryMarked {
             entry_id: entry_id.to_string(),
@@ -164,7 +164,7 @@ fn dispatch_landing_page(state: &mut BridgeState, token: &str, response: History
             .accepts("s1", token),
         "浏览身份在派发前被并行用例改写（测试间共享 atom 干扰）"
     );
-    dispatch_and_notify(
+    crate::kit::acp_events::dispatch_and_notify(
         state,
         &AcpEventData::HistoryPageLoaded {
             response: Box::new(response),
@@ -422,7 +422,7 @@ fn a20_e2e_group_split_keeps_the_anchored_unit_screen_row() {
     let mut state = browsing_state("tok");
     // 首屏两条自有工具条目（各一条成功卡）+ 一条自有气泡；两张卡相邻 → 渲染侧成组。
     seed_own_entry_via(&mut state, "s1:c1", 10, |state| {
-        dispatch_and_notify(
+        crate::kit::acp_events::dispatch_and_notify(
             state,
             &AcpEventData::ReplayToolStarted {
                 tool_id: "t1".to_string(),
@@ -431,7 +431,7 @@ fn a20_e2e_group_split_keeps_the_anchored_unit_screen_row() {
                 raw_input: json!({"file_path": "a.rs"}),
             },
         );
-        dispatch_and_notify(
+        crate::kit::acp_events::dispatch_and_notify(
             state,
             &AcpEventData::ReplayToolEnded {
                 tool_id: "t1".to_string(),
@@ -441,7 +441,7 @@ fn a20_e2e_group_split_keeps_the_anchored_unit_screen_row() {
         );
     });
     seed_own_entry_via(&mut state, "s1:c2", 20, |state| {
-        dispatch_and_notify(
+        crate::kit::acp_events::dispatch_and_notify(
             state,
             &AcpEventData::ReplayToolStarted {
                 tool_id: "t2".to_string(),
@@ -450,7 +450,7 @@ fn a20_e2e_group_split_keeps_the_anchored_unit_screen_row() {
                 raw_input: json!({"pattern": "b"}),
             },
         );
-        dispatch_and_notify(
+        crate::kit::acp_events::dispatch_and_notify(
             state,
             &AcpEventData::ReplayToolEnded {
                 tool_id: "t2".to_string(),

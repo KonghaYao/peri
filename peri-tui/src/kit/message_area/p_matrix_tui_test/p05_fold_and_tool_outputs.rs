@@ -1,11 +1,22 @@
 //! P05：频繁折叠 + 长工具输出 + 跨页工具配对（自 `p_matrix_tui_test` 拆分）。
 
-use super::*;
+use super::FOLD_OVERRIDES;
+use super::HistorySource;
+use super::RenderProbe;
+use super::SESSION;
+use super::Transcript;
+use super::WindowLimits;
+use super::WindowPageItem;
+use super::WindowPagePlacement;
+use super::WindowSubItem;
+use super::json;
+use super::serial;
 
-use crate::kit::history_window::{
-    PENDING_TOOL_ENDS_BYTES_MAX, PENDING_TOOL_ENDS_LIMIT, PersistentEntryKey, ReleasePlan,
-    ReleaseReason, release_window_plans,
-};
+use crate::kit::history_window::PENDING_TOOL_ENDS_BYTES_MAX;
+use crate::kit::history_window::PENDING_TOOL_ENDS_LIMIT;
+use crate::kit::history_window::PersistentEntryKey;
+use crate::kit::history_window::ReleasePlan;
+use crate::kit::history_window::ReleaseReason;
 use crate::kit::tui_render_unit::{FoldKey, FoldState};
 
 fn tool_start_item(entry_id: &str, position: u64, tool_id: &str) -> WindowPageItem {
@@ -62,7 +73,7 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
         page_target_bytes: 256 * 1024,
         ..Default::default()
     };
-    let (mut state, _guard) = setup_window(window_limits);
+    let (mut state, _guard) = super::setup_window(window_limits);
     let mut render = RenderProbe::new();
     let (render_budget, _) = Transcript::render_cache_budgets();
 
@@ -77,7 +88,7 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
     let mut rows = Vec::new();
 
     println!("== P05 环境 ==");
-    print_process("process(start)");
+    super::print_process("process(start)");
     println!(
         "  pages={P05_PAGES} tool_output={P05_TOOL_OUTPUT}B body_limit={P05_BODY_LIMIT}B \
          pending_tool_budget={P05_PENDING_TOOL_BYTES}B/{P05_PENDING_TOOL_RESULTS}条 \
@@ -111,14 +122,14 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
                 &output,
             ),
         ];
-        let context = page_context(
+        let context = super::page_context(
             &format!("p05-req-{page_index:03}"),
             256 * 1024,
             WindowPagePlacement::Tail,
             state.window.generation(),
         );
-        dispatch_page(&mut state, &context, response(items));
-        push_view_models(&mut state);
+        super::dispatch_page(&mut state, &context, super::response(items));
+        crate::kit::acp_events::push_view_models(&mut state);
 
         // 频繁折叠：在自动折叠与用户覆盖之间来回切换同一驻留工具卡。
         {
@@ -133,7 +144,7 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
                 },
             );
         }
-        push_view_models(&mut state);
+        crate::kit::acp_events::push_view_models(&mut state);
 
         let bridge = state.memory_snapshot();
         let (render_bytes, _slots, _units) = render.measure();
@@ -146,18 +157,18 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
             .max()
             .unwrap_or(0);
 
-        assert_budget(
+        super::assert_budget(
             "resident_body",
             state.window.budget().resident_body_bytes,
             P05_BODY_LIMIT,
         );
-        assert_budget("render_cache", render_bytes, render_budget);
-        assert_budget(
+        super::assert_budget("render_cache", render_bytes, render_budget);
+        super::assert_budget(
             "pending_tool_entries",
             pending_entries,
             P05_PENDING_TOOL_RESULTS,
         );
-        assert_budget("pending_tool_bytes", pending_bytes, P05_PENDING_TOOL_BYTES);
+        super::assert_budget("pending_tool_bytes", pending_bytes, P05_PENDING_TOOL_BYTES);
 
         max_resident = max_resident.max(state.window.budget().resident_body_bytes);
         max_committed = max_committed.max(bridge.committed_body_bytes);
@@ -189,12 +200,12 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
     }
     let (stress_entries, stress_bytes) =
         crate::kit::acp_events::history_window::pending_tool_ends_fingerprint();
-    assert_budget(
+    super::assert_budget(
         "stress_pending_entries",
         stress_entries,
         P05_PENDING_TOOL_RESULTS,
     );
-    assert_budget("stress_pending_bytes", stress_bytes, P05_PENDING_TOOL_BYTES);
+    super::assert_budget("stress_pending_bytes", stress_bytes, P05_PENDING_TOOL_BYTES);
     println!(
         "P05 未配对终点压力：entries={stress_entries} bytes={stress_bytes}B \
          (caps {P05_PENDING_TOOL_RESULTS} / {P05_PENDING_TOOL_BYTES}B)"
@@ -202,21 +213,21 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
 
     let text_items: Vec<WindowPageItem> = (0..2)
         .map(|slot| {
-            text_item(
+            super::text_item(
                 &format!("final-{slot}"),
                 90_000 + slot as u64,
                 &format!("FINAL-{slot}-{}", "f".repeat(300 * 1024)),
             )
         })
         .collect();
-    let context = page_context(
+    let context = super::page_context(
         "p05-final",
         512 * 1024,
         WindowPagePlacement::Tail,
         state.window.generation(),
     );
-    dispatch_page(&mut state, &context, response(text_items));
-    push_view_models(&mut state);
+    super::dispatch_page(&mut state, &context, super::response(text_items));
+    crate::kit::acp_events::push_view_models(&mut state);
     // 无论最后一次接纳是否因“单页过大”被阻塞，都走同一条统一释放事务移除一个
     // 驻留段（真实业务路径，不是测试后门）。释放只清理该段条目对应的暂存终点，
     // 其他段/未驻留条目的终点必须保留。
@@ -248,7 +259,11 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
             before_cursor: None,
             after_cursor: None,
         };
-        let outcome = release_window_plans(&mut state, vec![plan], ReleaseReason::BudgetPressure);
+        let outcome = crate::kit::history_window::release_window_plans(
+            &mut state,
+            vec![plan],
+            ReleaseReason::BudgetPressure,
+        );
         assert!(outcome.released_entries > 0, "统一释放事务必须释放驻留段");
         assert!(
             crate::kit::acp_events::history_window::pending_tool_end_entry_for_tests(
@@ -257,7 +272,7 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
             .is_none(),
             "被释放段的暂存终点必须精准清理"
         );
-        push_view_models(&mut state);
+        crate::kit::acp_events::push_view_models(&mut state);
     }
     let (pending_after_release_entries, pending_after_release_bytes) =
         crate::kit::acp_events::history_window::pending_tool_ends_fingerprint();
@@ -268,12 +283,15 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
     let resident_after_release = state.window.budget().resident_body_bytes;
 
     println!("== P05 采样（每 10 页；峰值另列） ==");
-    for row in rows.iter().filter(|row| row.0 % 10 == 0) {
-        println!(
-            "  page={:03} resident={}B committed_body={}B folded_body={}B \
+    {
+        let iteration_items = rows.iter().filter(|row| row.0 % 10 == 0);
+        for row in iteration_items {
+            println!(
+                "  page={:03} resident={}B committed_body={}B folded_body={}B \
              render_cache={}B pending_tool={}条/{}B",
-            row.0, row.1, row.2, row.3, row.4, row.5, row.6
-        );
+                row.0, row.1, row.2, row.3, row.4, row.5, row.6
+            );
+        }
     }
     let stats = state.window.stats();
     println!(
@@ -281,12 +299,12 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
          max_folded={}B max_render={}B({:.2}MiB) max_structural_cache={} \
          max_pending_tool={}条/{}B after_release={}条/{}B resident_after_release={}B \
          evicted_segments={} evicted_bytes={}",
-        fmib(total_tool_bytes),
+        super::fmib(total_tool_bytes),
         max_resident,
         max_committed,
         max_folded,
         max_render,
-        fmib(max_render),
+        super::fmib(max_render),
         max_structural_caches,
         max_pending_entries,
         max_pending_bytes,
@@ -302,29 +320,29 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
         "夹具必须真实超过窗口预算"
     );
     assert!(stats.evicted_segments > 0, "长工具输出浏览必须触发释放");
-    assert_budget("max_resident", max_resident, P05_BODY_LIMIT);
-    assert_budget("max_render", max_render, render_budget);
-    assert_budget(
+    super::assert_budget("max_resident", max_resident, P05_BODY_LIMIT);
+    super::assert_budget("max_render", max_render, render_budget);
+    super::assert_budget(
         "max_pending_tool_entries",
         max_pending_entries,
         P05_PENDING_TOOL_RESULTS,
     );
-    assert_budget(
+    super::assert_budget(
         "max_pending_tool_bytes",
         max_pending_bytes,
         P05_PENDING_TOOL_BYTES,
     );
-    assert_budget(
+    super::assert_budget(
         "pending_after_release_entries",
         pending_after_release_entries,
         P05_PENDING_TOOL_RESULTS,
     );
-    assert_budget(
+    super::assert_budget(
         "pending_after_release_bytes",
         pending_after_release_bytes,
         P05_PENDING_TOOL_BYTES,
     );
-    assert_budget(
+    super::assert_budget(
         "resident_after_release",
         resident_after_release,
         P05_BODY_LIMIT,
@@ -344,8 +362,8 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
         .map(|row| row.4)
         .max()
         .unwrap_or(0);
-    assert_budget("tail_resident", tail_max_resident, P05_BODY_LIMIT);
-    assert_budget("tail_render", tail_max_render, render_budget);
+    super::assert_budget("tail_resident", tail_max_resident, P05_BODY_LIMIT);
+    super::assert_budget("tail_render", tail_max_render, render_budget);
 
-    print_process("process(end)");
+    super::print_process("process(end)");
 }

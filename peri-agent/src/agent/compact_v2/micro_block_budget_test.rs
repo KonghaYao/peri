@@ -1,10 +1,15 @@
-use super::*;
 use crate::context_archive::ContextArchiveReader;
-use peri_acp_types::context_archive::{
-    content_digest, ArchiveReadRequest, ContextArchiveReadPort, ARCHIVE_MAX_TOKENS,
-};
+use crate::messages::BaseMessage;
+use crate::messages::ToolCallRequest;
+use crate::session::test_resources::TestSession;
+use crate::session::transcript::MessageTranscript;
+
+use peri_acp_types::context_archive::ArchiveReadRequest;
+use peri_acp_types::context_archive::ContextArchiveReadPort;
+use peri_acp_types::context_archive::ARCHIVE_MAX_TOKENS;
 use peri_acp_types::messages::{ContentBlock, MessageContent};
-use peri_acp_types::store::{serialize_persisted_payload, PersistedPayload};
+
+use peri_acp_types::store::PersistedPayload;
 
 /// [回归测试] 大量同类型 block 曾使归档响应仅元数据就超过最大预算。
 #[tokio::test]
@@ -41,8 +46,8 @@ async fn test_micro_many_blocks_commit_and_recover_every_canonical_byte() {
         }
         transcript.append(result);
     }
-    let original = original.unwrap();
-    let plan = exposed_plan(&transcript, bound.thread_id());
+    let original = original.expect("the original fixture result is required for this assertion");
+    let plan = crate::agent::compact_v2::micro::tests::exposed_plan(&transcript, bound.thread_id());
     let catalog = plan
         .catalogs
         .iter()
@@ -57,11 +62,18 @@ async fn test_micro_many_blocks_commit_and_recover_every_canonical_byte() {
         .members
         .iter()
         .position(|m| m.message_id == original.id())
-        .unwrap();
+        .expect("the position fixture result is required for this assertion");
     assert_eq!(catalog.members[index].block_types, vec!["text"]);
-    let reference = catalog.member_ref(index).unwrap();
+    let reference = catalog
+        .member_ref(index)
+        .expect("the member ref fixture result is required for this assertion");
     let expected_digest = catalog.members[index].content_digest.clone();
-    assert!(apply_micro_plan(&mut transcript, &plan).await.unwrap() > 0);
+    assert!(
+        crate::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
+            .await
+            .expect("the apply micro plan fixture result is required for this assertion")
+            > 0
+    );
     let reader = ContextArchiveReader::new(bound.read_only_resources().await, bound.thread_id());
     let mut recovered = Vec::new();
     let mut cursor = None;
@@ -74,8 +86,13 @@ async fn test_micro_many_blocks_commit_and_recover_every_canonical_byte() {
                 budget_tokens: Some(ARCHIVE_MAX_TOKENS),
             })
             .await
-            .unwrap();
-        assert!(serde_json::to_vec(&page).unwrap().len() <= ARCHIVE_MAX_TOKENS as usize * 4);
+            .expect("the archive fixture must be readable through the canonical recovery port");
+        assert!(
+            serde_json::to_vec(&page)
+                .expect("to_vec must accept this test fixture representation")
+                .len()
+                <= ARCHIVE_MAX_TOKENS as usize * 4
+        );
         for entry in page.entries {
             assert_eq!(entry.offset, recovered.len() as u64);
             assert_eq!(entry.block_types, vec!["text"]);
@@ -92,7 +109,12 @@ async fn test_micro_many_blocks_commit_and_recover_every_canonical_byte() {
     assert!(pages > 1);
     assert_eq!(
         recovered,
-        serialize_persisted_payload(&original).unwrap().as_bytes()
+        peri_acp_types::store::serialize_persisted_payload(&original)
+            .expect("the serialize persisted payload fixture result is required for this assertion")
+            .as_bytes()
     );
-    assert_eq!(content_digest(&recovered), expected_digest);
+    assert_eq!(
+        peri_acp_types::context_archive::content_digest(&recovered),
+        expected_digest
+    );
 }

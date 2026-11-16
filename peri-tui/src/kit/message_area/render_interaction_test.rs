@@ -1,4 +1,9 @@
-use super::*;
+use super::FoldState;
+use crate::kit::message_area::grid::GridSpec;
+use crate::kit::message_area::render;
+use unicode_width::UnicodeWidthStr;
+
+use super::TuiRenderUnit;
 
 // ── [Slice 4 §6.8] Interaction block 渲染 ──
 
@@ -6,12 +11,12 @@ use super::*;
 #[test]
 fn test_interaction_pending_permission_layout() {
     crate::i18n::init(Some("en"));
-    let vm = TuiRenderUnit::TuiAskUserBlock(pending_permission_block());
+    let vm = TuiRenderUnit::TuiAskUserBlock(super::pending_permission_block());
     let grid = GridSpec::grid_for(80); // Standard，横向选项
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, _, layout, _) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+    let (lines, _, layout, _) = render::vm_to_lines_cached(&vm, &grid, &mut cache, true);
 
-    let text = all_text(&lines);
+    let text = super::all_text(&lines);
     assert!(text.contains("Approval required"), "标题行应含 FTL 文案");
     assert!(
         text.contains("Bash wants to run: cargo test"),
@@ -35,12 +40,12 @@ fn test_interaction_pending_permission_layout() {
 #[test]
 fn test_interaction_pending_narrow_vertical_options() {
     crate::i18n::init(Some("en"));
-    let vm = TuiRenderUnit::TuiAskUserBlock(pending_permission_block());
+    let vm = TuiRenderUnit::TuiAskUserBlock(super::pending_permission_block());
     let grid = GridSpec::grid_for(30); // Narrow
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, _, layout, _) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+    let (lines, _, layout, _) = render::vm_to_lines_cached(&vm, &grid, &mut cache, true);
 
-    let text = all_text(&lines);
+    let text = super::all_text(&lines);
     assert!(text.contains("[Allow once]"), "垂直排列第一项");
     assert!(text.contains("[Deny]"), "垂直排列第二项");
     // 不在同一行（垂直）→ 不包含双选项拼接文本
@@ -60,12 +65,12 @@ fn test_interaction_pending_narrow_vertical_options() {
 #[test]
 fn test_interaction_completed_single_line_result() {
     crate::i18n::init(Some("en"));
-    let vm = TuiRenderUnit::TuiAskUserBlock(completed_block("Allowed once"));
+    let vm = TuiRenderUnit::TuiAskUserBlock(super::completed_block("Allowed once"));
     let grid = GridSpec::grid_for(80);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, _, layout, _) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+    let (lines, _, layout, _) = render::vm_to_lines_cached(&vm, &grid, &mut cache, true);
 
-    let text = all_text(&lines);
+    let text = super::all_text(&lines);
     assert!(text.contains("Allowed once"), "结果行含 result 文案");
     assert!(
         !text.contains("Bash wants to run"),
@@ -81,14 +86,14 @@ fn test_interaction_completed_single_line_result() {
 #[test]
 fn test_interaction_completed_expanded_shows_question() {
     crate::i18n::init(Some("en"));
-    let mut b = completed_block("Deny"); // result 与选项 "Deny" 精确匹配 → 选中标记
+    let mut b = super::completed_block("Deny"); // result 与选项 "Deny" 精确匹配 → 选中标记
     b.fold = FoldState::Expanded;
     let vm = TuiRenderUnit::TuiAskUserBlock(b);
     let grid = GridSpec::grid_for(80);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, _, _, _) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+    let (lines, _, _, _) = render::vm_to_lines_cached(&vm, &grid, &mut cache, true);
 
-    let text = all_text(&lines);
+    let text = super::all_text(&lines);
     assert!(text.contains("Deny"), "结果行");
     assert!(
         text.contains("Bash wants to run: cargo test"),
@@ -105,7 +110,7 @@ fn test_interaction_completed_expanded_shows_question() {
 #[test]
 fn test_interaction_option_cols_follow_process_prefix_width() {
     crate::i18n::init(Some("en"));
-    let vm = TuiRenderUnit::TuiAskUserBlock(pending_permission_block());
+    let vm = TuiRenderUnit::TuiAskUserBlock(super::pending_permission_block());
     for term in [80u16, 59] {
         let grid = GridSpec::grid_for(term);
         let expected_col = if grid.indent == 0 {
@@ -114,7 +119,7 @@ fn test_interaction_option_cols_follow_process_prefix_width() {
             grid.process_prefix_width()
         };
         let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-        let (lines, _, layout, _) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+        let (lines, _, layout, _) = render::vm_to_lines_cached(&vm, &grid, &mut cache, true);
         let layout = layout.expect("pending 态返回选项布局");
         assert_eq!(layout.option_rows.len(), 1, "term={term}: 横向共享一行");
         let row = layout.option_rows[0];

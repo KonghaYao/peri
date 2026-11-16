@@ -1,5 +1,15 @@
-use super::*;
-use peri_acp::transport::{AcpTransport, mpsc::mpsc_transport_pair, types::IncomingMessage};
+use super::AcpError;
+use super::AcpTuiClient;
+use super::ControlAction;
+use super::ControlState;
+use super::Duration;
+use super::OperationOutcome;
+use super::OperationScope;
+use super::OutcomeUnknownReason;
+use super::json;
+
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::IncomingMessage;
 
 #[test]
 fn test_same_server_restart_and_stop_share_one_inflight_gate() {
@@ -7,7 +17,7 @@ fn test_same_server_restart_and_stop_share_one_inflight_gate() {
     let scope = OperationScope::new("session-a", 1);
     let ticket = state
         .begin("plugin:docs", ControlAction::Restart, scope.clone())
-        .unwrap();
+        .expect("same server restart and stop share one inflight gate: the begin fixture operation uses valid inputs");
     assert!(
         state
             .begin("plugin:docs", ControlAction::Stop, scope.clone())
@@ -31,7 +41,7 @@ fn test_session_reset_cancels_old_ticket_and_rejects_late_completion() {
             ControlAction::Stop,
             OperationScope::new("session-a", 1),
         )
-        .unwrap();
+        .expect("session reset cancels old ticket and rejects late completion: fixture parameters must construct a valid value");
     state.reset_scope(OperationScope::new("session-a", 2));
     assert!(ticket.is_cancelled());
     assert!(!state.complete(
@@ -52,7 +62,7 @@ fn test_cancel_wait_keeps_unknown_result_and_rejects_late_success() {
             ControlAction::Restart,
             OperationScope::new("session-a", 1),
         )
-        .unwrap();
+        .expect("cancel wait keeps unknown result and rejects late success: fixture parameters must construct a valid value");
     assert!(state.cancel_wait("docs"));
     assert_eq!(
         state.servers["docs"].outcome,
@@ -71,10 +81,10 @@ fn test_cancel_wait_keeps_unknown_result_and_rejects_late_success() {
 
 #[tokio::test]
 async fn test_control_wire_keeps_session_server_and_action_identity() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("session-a", false);
-    let identity = client.stable_session_identity().unwrap();
+    let identity = client.stable_session_identity().expect("control wire keeps session server and action identity: the stable_session_identity fixture operation uses valid inputs");
     let server_task = tokio::spawn(async move {
         for (action, status) in [
             ("restart", "connected"),
@@ -89,7 +99,7 @@ async fn test_control_wire_keeps_session_server_and_action_identity() {
                 params,
                 json!({"sessionId":"session-a", "serverName":"plugin:docs", "action":action})
             );
-            server.send_response(id, Ok(json!({"sessionId":"session-a", "serverName":"plugin:docs", "action":action, "status":status}))).await.unwrap();
+            server.send_response(id, Ok(json!({"sessionId":"session-a", "serverName":"plugin:docs", "action":action, "status":status}))).await.expect("control wire keeps session server and action identity: fixture task and request must complete successfully");
         }
     });
     for (action, status) in [
@@ -98,13 +108,13 @@ async fn test_control_wire_keeps_session_server_and_action_identity() {
         (ControlAction::Restart, "needsAuthorization"),
     ] {
         assert_eq!(
-            request(&client, &identity, "plugin:docs", action)
+            super::request(&client, &identity, "plugin:docs", action)
                 .await
-                .unwrap(),
+                .expect("control wire keeps session server and action identity: the fixture operation must finish without an inner failure"),
             status
         );
     }
-    server_task.await.unwrap();
+    server_task.await.expect("control wire keeps session server and action identity: fixture task and request must complete successfully");
 }
 
 #[tokio::test(start_paused = true)]
@@ -113,11 +123,12 @@ async fn test_control_request_accepts_response_after_twelve_seconds() {
         (ControlAction::Restart, "connected"),
         (ControlAction::Stop, "stopped"),
     ] {
-        let (transport, server) = mpsc_transport_pair();
+        let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
         let (client, _, _) = AcpTuiClient::new(transport);
         client.force_stable_for_test("session-a", false);
-        let identity = client.stable_session_identity().unwrap();
-        let task = tokio::spawn(async move { request(&client, &identity, "docs", action).await });
+        let identity = client.stable_session_identity().expect("control request accepts response after twelve seconds: the stable_session_identity fixture operation uses valid inputs");
+        let task =
+            tokio::spawn(async move { super::request(&client, &identity, "docs", action).await });
         let Some(IncomingMessage::Request { id, method, params }) = server.recv().await else {
             panic!("control request was not sent")
         };
@@ -141,8 +152,8 @@ async fn test_control_request_accepts_response_after_twelve_seconds() {
                 })),
             )
             .await
-            .unwrap();
-        assert_eq!(task.await.unwrap().unwrap(), status);
+            .expect("control request accepts response after twelve seconds: fixture task and request must complete successfully");
+        assert_eq!(task.await.expect("control request accepts response after twelve seconds: the fixture operation must finish without an inner failure").expect("control request accepts response after twelve seconds: the fixture operation must finish without an inner failure"), status);
         assert_eq!(sent_at.elapsed(), Duration::from_secs(12));
     }
 }
@@ -150,11 +161,12 @@ async fn test_control_request_accepts_response_after_twelve_seconds() {
 #[tokio::test(start_paused = true)]
 async fn test_control_request_times_out_at_sixty_seconds_with_unknown_outcome() {
     for action in [ControlAction::Restart, ControlAction::Stop] {
-        let (transport, server) = mpsc_transport_pair();
+        let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
         let (client, _, _) = AcpTuiClient::new(transport);
         client.force_stable_for_test("session-a", false);
-        let identity = client.stable_session_identity().unwrap();
-        let task = tokio::spawn(async move { request(&client, &identity, "docs", action).await });
+        let identity = client.stable_session_identity().expect("control request times out at sixty seconds with unknown outcome: the stable_session_identity fixture operation uses valid inputs");
+        let task =
+            tokio::spawn(async move { super::request(&client, &identity, "docs", action).await });
         let Some(IncomingMessage::Request { .. }) = server.recv().await else {
             panic!("control request was not sent")
         };
@@ -169,10 +181,10 @@ async fn test_control_request_times_out_at_sixty_seconds_with_unknown_outcome() 
         let error = tokio::time::timeout(Duration::from_millis(1), task)
             .await
             .expect("control RPC must expire at its sixty-second deadline")
-            .unwrap()
-            .unwrap_err();
+            .expect("control request times out at sixty seconds with unknown outcome: fixture task and request must complete successfully")
+            .expect_err("control request times out at sixty seconds with unknown outcome: the invalid fixture must be rejected");
         assert_eq!(
-            classify_error(error),
+            super::classify_error(error),
             OperationOutcome::OutcomeUnknown {
                 reason: OutcomeUnknownReason::TimedOut
             }
@@ -182,33 +194,35 @@ async fn test_control_request_times_out_at_sixty_seconds_with_unknown_outcome() 
 
 #[tokio::test]
 async fn test_control_rejects_mismatched_server_success() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("session-a", false);
-    let identity = client.stable_session_identity().unwrap();
+    let identity = client.stable_session_identity().expect("control rejects mismatched server success: the stable_session_identity fixture operation uses valid inputs");
     let server_task = tokio::spawn(async move {
         let Some(IncomingMessage::Request { id, .. }) = server.recv().await else {
             panic!("应收到控制请求");
         };
-        server.send_response(id, Ok(json!({"sessionId":"session-a", "serverName":"different", "action":"stop", "status":"stopped"}))).await.unwrap();
+        server.send_response(id, Ok(json!({"sessionId":"session-a", "serverName":"different", "action":"stop", "status":"stopped"}))).await.expect("control rejects mismatched server success: fixture task and request must complete successfully");
     });
-    let error = request(&client, &identity, "docs", ControlAction::Stop)
+    let error = super::request(&client, &identity, "docs", ControlAction::Stop)
         .await
-        .unwrap_err();
-    assert_eq!(error.data.unwrap()["kind"], "invalid_response");
-    server_task.await.unwrap();
+        .expect_err(
+            "control rejects mismatched server success: the invalid fixture must be rejected",
+        );
+    assert_eq!(error.data.expect("control rejects mismatched server success: the fixture establishes error.data before this assertion")["kind"], "invalid_response");
+    server_task.await.expect("control rejects mismatched server success: fixture task and request must complete successfully");
 }
 
 #[test]
 fn test_transport_loss_is_unknown_but_server_rejection_is_failed() {
     assert_eq!(
-        classify_error(AcpError::new(-32603, "Transport closed")),
+        super::classify_error(AcpError::new(-32603, "Transport closed")),
         OperationOutcome::OutcomeUnknown {
             reason: OutcomeUnknownReason::ObserverGone
         }
     );
     assert_eq!(
-        classify_error(
+        super::classify_error(
             AcpError::new(-32603, "close incomplete")
                 .with_data(json!({"kind":"shutdown_incomplete"}))
         ),

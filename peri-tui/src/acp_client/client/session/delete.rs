@@ -1,6 +1,7 @@
 //! Session deletion and its local identity cleanup.
 
-use peri_acp::transport::{AcpTransport, types::AcpError};
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::AcpError;
 use serde_json::json;
 
 use crate::acp_client::client::{AcpTuiClient, ClientProjectionMode};

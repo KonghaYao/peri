@@ -2,14 +2,16 @@
 
 use std::path::PathBuf;
 
-use gray_matter::{engine::YAML, Matter};
-use peri_acp_types::{
-    mcp_skills::mcp_skill_name,
-    skills::{SkillMetadata, SkillOrigin, SkillResource, SkillSource},
-};
+use gray_matter::engine::YAML;
+use gray_matter::Matter;
+use peri_acp_types::mcp_skills;
+use peri_acp_types::skills::SkillMetadata;
+use peri_acp_types::skills::SkillOrigin;
+use peri_acp_types::skills::SkillResource;
+use peri_acp_types::skills::SkillSource;
 use sha2::{Digest, Sha256};
 
-use super::legacy_scan::is_skill_scheme;
+use super::legacy_scan;
 
 /// 纯函数：gray_matter 解析 frontmatter 为 verbatim JSON map（loader.rs
 /// 同款；YAML→JSON 值渲染由 serde_norway 完成——数字 42 → Number、字符串
@@ -86,9 +88,17 @@ pub(super) fn number_eq(a: &serde_json::Number, b: &serde_json::Number) -> bool 
     // （兜底正是舍入误判来源）。
     if a.is_f64() != b.is_f64() {
         let (f, int) = if a.is_f64() {
-            (a.as_f64().unwrap(), b)
+            (
+                a.as_f64()
+                    .expect("a JSON number reporting is_f64 must contain an f64 representation"),
+                b,
+            )
         } else {
-            (b.as_f64().unwrap(), a)
+            (
+                b.as_f64()
+                    .expect("a JSON number reporting is_f64 must contain an f64 representation"),
+                a,
+            )
         };
         return float_vs_int(f, int);
     }
@@ -119,7 +129,7 @@ fn float_vs_int(f: f64, int: &serde_json::Number) -> bool {
 /// "/SKILL.md")`，按 `/` 拆分；至少 1 段）。非 `skill://` scheme 或结构
 /// 非法 → None。
 fn uri_skill_segments(uri: &str) -> Option<Vec<String>> {
-    if !is_skill_scheme(uri) {
+    if !legacy_scan::is_skill_scheme(uri) {
         return None;
     }
     let path = uri.get(8..)?.strip_suffix("/SKILL.md")?;
@@ -203,7 +213,7 @@ pub(super) fn build_metadata(
         return None;
     }
     Some(SkillMetadata {
-        name: mcp_skill_name(server, &sanitize_name(name)),
+        name: mcp_skills::mcp_skill_name(server, &sanitize_name(name)),
         aliases: Vec::new(),
         description: description.trim().to_string(),
         path: PathBuf::new(),
@@ -238,8 +248,11 @@ pub(super) fn disambiguate_names(
     mut entries: Vec<SkillMetadata>,
 ) -> Vec<SkillMetadata> {
     let mut groups: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
-    for (i, entry) in entries.iter().enumerate() {
-        groups.entry(entry.name.clone()).or_default().push(i);
+    {
+        let indexed_entries = entries.iter().enumerate();
+        for (i, entry) in indexed_entries {
+            groups.entry(entry.name.clone()).or_default().push(i);
+        }
     }
     for (_, indices) in groups {
         if indices.len() < 2 {
@@ -260,7 +273,7 @@ pub(super) fn disambiguate_names(
                         .join("_")
                 });
             match path_name {
-                Some(path) => entries[i].name = mcp_skill_name(server, &path),
+                Some(path) => entries[i].name = mcp_skills::mcp_skill_name(server, &path),
                 None => tracing::warn!(
                     server,
                     skill = %entries[i].name,

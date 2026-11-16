@@ -1,11 +1,23 @@
-use super::*;
+use crate::agent::async_tasks::TaskManager;
+use crate::agent::events::BackgroundTaskResult;
+
 use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::thread::{AgentStatus, WorkState};
 
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
+
 #[tokio::test(start_paused = true)]
 async fn background_child_hands_off_reports_failure() {
-    let (child, manager, built, _, _ticket) = child_with_shell_task(false);
-    let child_id = child.store().thread_id.clone().unwrap();
+    let (child, manager, built, _, _ticket) =
+        crate::session::subagent::child_runner::tests::child_with_shell_task(false);
+    let child_id = child
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
     let parent_manager = Arc::new(TaskManager::new());
     let (tx, rx) = tokio::sync::oneshot::channel();
     let tx = parking_lot::Mutex::new(Some(tx));
@@ -43,11 +55,11 @@ async fn background_child_hands_off_reports_failure() {
         None,
     )
     .await
-    .unwrap();
+    .expect("the spawn background subagent fixture result is required for this assertion");
     let result = tokio::time::timeout(Duration::from_secs(125), rx)
         .await
         .expect("background child must hand off at D")
-        .unwrap();
+        .expect("the expect fixture result is required for this assertion");
     assert!(!result.success);
     assert!(!result.timed_out);
     assert_eq!(result.child_thread_id.as_deref(), Some(child_id.as_str()));
@@ -59,8 +71,13 @@ async fn background_child_hands_off_reports_failure() {
 /// 后台在 D 前完成：成功结果与正常 Stop。
 #[tokio::test(start_paused = true)]
 async fn background_child_settles_before_deadline_reports_success() {
-    let (child, manager, built, initial_calls, result_calls, ticket) = child_with_nested_task();
-    let child_id = child.store().thread_id.clone().unwrap();
+    let (child, manager, built, initial_calls, result_calls, ticket) =
+        crate::session::subagent::child_runner::tests::child_with_nested_task();
+    let child_id = child
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
     // 成功结果需要终态可持久化；无 SessionResources 时后台路径按未结算失败收口。
     let store = crate::session::test_resources::mock::MockSessionResources::new();
     store.register_bound_session(&child_id, "/tmp");
@@ -102,19 +119,22 @@ async fn background_child_settles_before_deadline_reports_success() {
         None,
     )
     .await
-    .unwrap();
+    .expect("the spawn background subagent fixture result is required for this assertion");
     tokio::time::advance(Duration::from_secs(1)).await;
-    settle_nested_task(&child, &manager, &ticket);
+    crate::session::subagent::child_runner::tests::settle_nested_task(&child, &manager, &ticket);
     let result = tokio::time::timeout(Duration::from_secs(10), rx)
         .await
         .expect("settled background child must report")
-        .unwrap();
+        .expect("the expect fixture result is required for this assertion");
     assert!(result.success);
     assert!(result.output.contains("processed nested result"));
     assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
     assert_eq!(result_calls.load(Ordering::SeqCst), 1);
     assert_eq!(stops.load(Ordering::SeqCst), 1);
-    let meta = store.load_session_meta(&child_id).await.unwrap();
+    let meta = store
+        .load_session_meta(&child_id)
+        .await
+        .expect("the load session meta fixture result is required for this assertion");
     assert_eq!(meta.agent_status, AgentStatus::Done);
     assert_eq!(meta.work_state, WorkState::Idle);
 }
@@ -122,8 +142,13 @@ async fn background_child_settles_before_deadline_reports_success() {
 /// 后台协作取消：原身份终态一次，失败语义不伪装成功。
 #[tokio::test(start_paused = true)]
 async fn background_child_cancellation_reports_interrupted_terminal() {
-    let (child, manager, built, _, ticket) = child_with_shell_task(false);
-    let child_id = child.store().thread_id.clone().unwrap();
+    let (child, manager, built, _, ticket) =
+        crate::session::subagent::child_runner::tests::child_with_shell_task(false);
+    let child_id = child
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
     let parent_manager = Arc::new(TaskManager::new());
     let (tx, rx) = tokio::sync::oneshot::channel();
     let tx = parking_lot::Mutex::new(Some(tx));
@@ -165,19 +190,19 @@ async fn background_child_cancellation_reports_interrupted_terminal() {
         None,
     )
     .await
-    .unwrap();
+    .expect("the spawn background subagent fixture result is required for this assertion");
     while started.load(Ordering::SeqCst) == 0 {
         tokio::task::yield_now().await;
     }
     tokio::time::advance(Duration::from_secs(1)).await;
     child.config().cancel_token.cancel();
-    let mut shell_result = nested_result();
+    let mut shell_result = crate::session::subagent::child_runner::tests::nested_result();
     shell_result.task_id = "shell-task".into();
     assert!(manager.complete(&ticket, shell_result));
     let result = tokio::time::timeout(Duration::from_secs(10), rx)
         .await
         .expect("cancelled background child must report")
-        .unwrap();
+        .expect("the expect fixture result is required for this assertion");
     assert!(!result.success);
     assert!(!result.timed_out);
     assert_eq!(result.child_thread_id.as_deref(), Some(child_id.as_str()));
@@ -203,8 +228,13 @@ impl crate::agent::LangfuseBridgeLike for PanicOnStopBridge {
 /// 后台排空失败必须进入 owner 准入，阻止 resume，而不是只改结果文本。
 #[tokio::test(start_paused = true)]
 async fn background_drain_failure_blocks_resume() {
-    let (child, _manager, built, _, _ticket) = child_with_shell_task(true);
-    let child_id = child.store().thread_id.clone().unwrap();
+    let (child, _manager, built, _, _ticket) =
+        crate::session::subagent::child_runner::tests::child_with_shell_task(true);
+    let child_id = child
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
     let parent_manager = Arc::new(TaskManager::new());
     let (tx, rx) = tokio::sync::oneshot::channel();
     let tx = parking_lot::Mutex::new(Some(tx));
@@ -237,11 +267,11 @@ async fn background_drain_failure_blocks_resume() {
         None,
     )
     .await
-    .unwrap();
+    .expect("the spawn background subagent fixture result is required for this assertion");
     let result = tokio::time::timeout(Duration::from_secs(10), rx)
         .await
         .expect("background child must settle")
-        .unwrap();
+        .expect("the expect fixture result is required for this assertion");
     assert!(
         !result.success,
         "drain failure must fail the parent result; output={:?} failure={:?}",
@@ -275,7 +305,7 @@ fn sync_handoff_routes_late_events_to_background_pump() {
         Some(sender),
         Arc::clone(&handed_off),
     )
-    .unwrap();
+    .expect("the handoff event handler fixture result is required for this assertion");
     let event = || ExecutorEvent::SubagentStarted {
         agent_name: "fixture".into(),
         instance_id: "child".into(),

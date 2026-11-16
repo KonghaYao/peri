@@ -1,4 +1,12 @@
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::CacheUsageSample;
+use super::CurrentTurn;
+use super::SessionPhase;
+use super::SubmitRequest;
+use super::TuiRenderUnit;
+use super::mpsc;
+use super::serial;
 
 /// 竞态防护（Issue 2026-08-05）：新提交（LocalUserBubble）先入队后，
 /// stale TurnInterrupted（旧 turn）到达时跳过零产出回滚——不删新气泡、
@@ -17,7 +25,7 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
     }
     // 确保 SUBMIT_TX 已初始化（stale 分支 drain 依赖）；若本次成功安装
     // 可观察 channel，则顺带验证提交消息确实发出。
-    let mut drain_rx = ensure_submit_tx_observable();
+    let mut drain_rx = super::ensure_submit_tx_observable();
 
     // turn A：LocalUserBubble + PromptSubmitted（gen=1, last_prompt=1）
     let mut state = BridgeState {
@@ -45,21 +53,21 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
         folded_history: Default::default(),
         window: Default::default(),
     };
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "A".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted { request_id: None },
     );
 
     // 竞态：用户提交 B——LocalUserBubble 已到达（gen=2），
     // PromptSubmitted 尚未发出（B 排队中或 submit_consumer 仍在等 A 的 RPC）。
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "B".into(),
@@ -80,7 +88,7 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
     let committed_before = state.committed.len(); // A + B 两个气泡
 
     // stale TurnInterrupted（turn A 的取消事件晚到）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "user cancelled".into(),
@@ -137,7 +145,7 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
         state
             .pending_cache_usage
             .as_ref()
-            .unwrap()
+            .expect("stale turn interrupted does not rollback new turn: the fixture must retain its expected variant")
             .request_id
             .as_deref(),
         Some("new-turn"),
@@ -158,7 +166,7 @@ fn test_turn_interrupted_zero_output_rollback_still_works() {
     }
     // 确保 SUBMIT_TX 已初始化（drain 依赖）；若本次成功安装可观察 channel，
     // 则顺带验证排队项确实被提交。
-    let mut drain_rx = ensure_submit_tx_observable();
+    let mut drain_rx = super::ensure_submit_tx_observable();
 
     let mut state = BridgeState {
         child_runs: Default::default(),
@@ -185,14 +193,14 @@ fn test_turn_interrupted_zero_output_rollback_still_works() {
         folded_history: Default::default(),
         window: Default::default(),
     };
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "A".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted { request_id: None },
     );
@@ -208,7 +216,7 @@ fn test_turn_interrupted_zero_output_rollback_still_works() {
     assert_eq!(state.committed.len(), 1);
 
     // 无新提交 → 非 stale → 正常回滚
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "user cancelled".into(),
@@ -255,7 +263,7 @@ fn test_turn_interrupted_archive_branch_drains_input_buffer() {
     crate::kit::atoms::init_atoms();
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     INPUT_BUFFER.state().write().clear();
-    let mut drain_rx = ensure_submit_tx_observable();
+    let mut drain_rx = super::ensure_submit_tx_observable();
 
     let mut state = BridgeState {
         child_runs: Default::default(),
@@ -282,19 +290,19 @@ fn test_turn_interrupted_archive_branch_drains_input_buffer() {
         folded_history: Default::default(),
         window: Default::default(),
     };
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "A".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted { request_id: None },
     );
     // A 已产出部分内容
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "partial".into(),
@@ -307,7 +315,7 @@ fn test_turn_interrupted_archive_branch_drains_input_buffer() {
         .write()
         .push_back(BufferedInput::text("queued"));
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "user cancelled".into(),
@@ -374,28 +382,28 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
         window: Default::default(),
     };
     // turn A：LocalUserBubble + PromptSubmitted(A1)
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "A".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("A1".into()),
         },
     );
     // turn B：LocalUserBubble + PromptSubmitted(B1)——B 走完整 RPC 路径（主导排序）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "B".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("B1".into()),
@@ -414,7 +422,7 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
     let committed_before = state.committed.len(); // A + B 两个气泡
 
     // stale TurnInterrupted（turn A 的取消事件晚到，服务器往返数百 ms）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "user cancelled".into(),
@@ -474,7 +482,7 @@ fn test_stale_turn_interrupted_queued_branch_still_stale() {
     }
     // 确保 SUBMIT_TX 已初始化（stale 分支 drain 依赖）；若本次成功安装
     // 可观察 channel，则顺带验证提交消息确实发出。
-    let mut drain_rx = ensure_submit_tx_observable();
+    let mut drain_rx = super::ensure_submit_tx_observable();
 
     let mut state = BridgeState {
         child_runs: Default::default(),
@@ -501,21 +509,21 @@ fn test_stale_turn_interrupted_queued_branch_still_stale() {
         folded_history: Default::default(),
         window: Default::default(),
     };
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "A".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("A1".into()),
         },
     );
     // B 排队中：仅 LocalUserBubble，无 PromptSubmitted（is_loading gate 阻断 RPC）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "B".into(),
@@ -535,7 +543,7 @@ fn test_stale_turn_interrupted_queued_branch_still_stale() {
     assert_eq!(state.last_prompt_generation, 1);
     let committed_before = state.committed.len(); // A + B 两个气泡
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "user cancelled".into(),
@@ -572,7 +580,7 @@ fn test_stale_turn_interrupted_drain_is_idempotent() {
     crate::kit::atoms::init_atoms();
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     INPUT_BUFFER.state().write().clear();
-    let drain_rx = ensure_submit_tx_observable();
+    let drain_rx = super::ensure_submit_tx_observable();
 
     let mut state = BridgeState {
         child_runs: Default::default(),
@@ -600,21 +608,21 @@ fn test_stale_turn_interrupted_drain_is_idempotent() {
         window: Default::default(),
     };
     // turn A 运行中
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "A".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("A1".into()),
         },
     );
     // B 排队中（仅 LocalUserBubble，无 RPC）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "B".into(),
@@ -627,7 +635,7 @@ fn test_stale_turn_interrupted_drain_is_idempotent() {
         .push_back(BufferedInput::text("B"));
 
     // 第一个 stale 事件（A 的取消晚到）→ 复位 + drain
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "user cancelled".into(),
@@ -641,7 +649,7 @@ fn test_stale_turn_interrupted_drain_is_idempotent() {
 
     // 第二个 stale 事件（更旧 turn 的取消，id 仍不匹配）→ drain no-op
     let committed_before = state.committed.len();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "user cancelled".into(),
@@ -684,7 +692,7 @@ fn test_turn_interrupted_current_request_id_rollback() {
     if let Some(mu) = crate::kit::atoms::INPUT_RESTORE_TEXT.get() {
         mu.lock().take();
     }
-    let mut drain_rx = ensure_submit_tx_observable();
+    let mut drain_rx = super::ensure_submit_tx_observable();
 
     let mut state = BridgeState {
         child_runs: Default::default(),
@@ -711,14 +719,14 @@ fn test_turn_interrupted_current_request_id_rollback() {
         folded_history: Default::default(),
         window: Default::default(),
     };
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "A".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("A1".into()),
@@ -730,7 +738,7 @@ fn test_turn_interrupted_current_request_id_rollback() {
         .push_back(BufferedInput::text("queued"));
     assert_eq!(state.committed.len(), 1);
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "user cancelled".into(),
@@ -802,21 +810,21 @@ fn test_turn_interrupted_none_request_id_falls_back() {
         folded_history: Default::default(),
         window: Default::default(),
     };
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "A".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("A1".into()),
         },
     );
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "user cancelled".into(),
@@ -879,28 +887,28 @@ fn test_double_cancel_request_id_pairs() {
         window: Default::default(),
     };
     // A 提交并运行
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "A".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("A1".into()),
         },
     );
     // A 被取消后用户提交 B（完整 RPC 路径）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "B".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("B1".into()),
@@ -908,7 +916,7 @@ fn test_double_cancel_request_id_pairs() {
     );
 
     // 第一个晚到事件：A 的取消（A1 ≠ 当前 B1）→ stale，B 保留
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "user cancelled".into(),
@@ -925,7 +933,7 @@ fn test_double_cancel_request_id_pairs() {
     );
 
     // 随后 B 的取消（B1 == B1）→ 非 stale → 正常回滚 B
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "user cancelled".into(),
@@ -951,3 +959,5 @@ fn test_double_cancel_request_id_pairs() {
     );
     assert_eq!(state.phase, SessionPhase::Idle);
 }
+
+use crate::kit::atoms::{BufferedInput, INPUT_BUFFER, VIEW_MODELS, ViewModelsSnapshot};

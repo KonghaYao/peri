@@ -3,12 +3,11 @@
 use std::sync::Arc;
 
 use peri_acp::event::AcpEvent;
-use peri_acp::transport::{
-    AcpTransport,
-    mpsc::MpscClientTransport,
-    types::{IncomingMessage, RequestId},
-};
-use peri_acp_types::event_data::PredictionAction;
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::mpsc::MpscClientTransport;
+use peri_acp::transport::types::IncomingMessage;
+use peri_acp::transport::types::RequestId;
+
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
@@ -18,10 +17,7 @@ use super::super::interaction_lifecycle::{
     InteractionOwner, InteractionUiOutcome, OrdinaryDecision, RegisterDecision,
     ReverseInteractionKind,
 };
-use super::super::interaction_response::{
-    elicitation_cancel_response, permission_cancelled_response,
-};
-use super::super::interaction_settlement::expiry_for_cause;
+
 use super::{AcpNotification, AcpTuiClient};
 
 impl ReverseInteractionKind {
@@ -33,6 +29,7 @@ impl ReverseInteractionKind {
         }
     }
 
+    #[must_use]
     fn notification(
         self,
         owner: InteractionOwner,
@@ -55,11 +52,12 @@ impl ReverseInteractionKind {
 
     fn cancellation_response(self) -> Value {
         match self {
-            Self::Permission => permission_cancelled_response(),
-            Self::Elicitation => elicitation_cancel_response(),
+            Self::Permission => super::super::interaction_response::permission_cancelled_response(),
+            Self::Elicitation => super::super::interaction_response::elicitation_cancel_response(),
         }
     }
 
+    #[must_use]
     fn method(self) -> &'static str {
         match self {
             Self::Permission => "session/request_permission",
@@ -140,7 +138,11 @@ impl AcpTuiClient {
         let transport = self.transport.clone();
         let lifecycle = self.lifecycle.clone();
         let user_input_queue = self.user_input_queue.clone();
-        *self.notification_weak.lock().unwrap() = Some(notification_tx.downgrade());
+        *self
+            .notification_weak
+            .lock()
+            .expect("notification_weak mutex must not be poisoned") =
+            Some(notification_tx.downgrade());
         tokio::spawn(async move {
             Self::run_pump(transport, notification_tx, lifecycle, user_input_queue).await;
         });
@@ -603,15 +605,19 @@ impl AcpTuiClient {
     ) {
         for claim in claims {
             let response = match claim.owner.kind {
-                ReverseInteractionKind::Permission => permission_cancelled_response(),
-                ReverseInteractionKind::Elicitation => elicitation_cancel_response(),
+                ReverseInteractionKind::Permission => {
+                    super::super::interaction_response::permission_cancelled_response()
+                }
+                ReverseInteractionKind::Elicitation => {
+                    super::super::interaction_response::elicitation_cancel_response()
+                }
             };
             let outcome = match transport
                 .send_response(claim.request_id, Ok(response))
                 .await
             {
                 Ok(()) => InteractionUiOutcome::Expired {
-                    reason: expiry_for_cause(claim.cause),
+                    reason: super::super::interaction_settlement::expiry_for_cause(claim.cause),
                 },
                 Err(error) => {
                     warn!(error = %error, "failed to settle claimed reverse interaction");
@@ -633,7 +639,11 @@ impl AcpTuiClient {
 
     /// 立即投递客户端自己合成、不经过 wire 路由的通知。
     pub(super) fn deliver_immediate(&self, notification: AcpNotification) {
-        let weak = self.notification_weak.lock().unwrap().clone();
+        let weak = self
+            .notification_weak
+            .lock()
+            .expect("notification_weak mutex must not be poisoned")
+            .clone();
         if let Some(weak) = weak
             && let Some(tx) = weak.upgrade()
         {
@@ -646,7 +656,11 @@ impl AcpTuiClient {
     /// 取批与 pending 清除由 [`InteractionLifecycle::take_buffered_batch`] 在同一
     /// 临界区完成：投递当前批时到达的新通知会进入下一批，因而不会插到旧帧之前。
     pub(super) fn flush_buffered(&self) {
-        let weak = self.notification_weak.lock().unwrap().clone();
+        let weak = self
+            .notification_weak
+            .lock()
+            .expect("notification_weak mutex must not be poisoned")
+            .clone();
         let tx = weak.and_then(|weak| weak.upgrade());
         while let Some(notifications) = self.lifecycle.take_buffered_batch() {
             let Some(tx) = tx.as_ref() else {
@@ -664,3 +678,5 @@ impl AcpTuiClient {
 #[cfg(test)]
 #[path = "user_input_run_test.rs"]
 mod user_input_run_tests;
+
+use peri_acp_types::event_data::PredictionAction;

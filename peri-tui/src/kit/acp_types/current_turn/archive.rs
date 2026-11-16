@@ -16,25 +16,28 @@ impl CurrentTurn {
     /// - 尚未与父 Agent 卡片配对的子分组（迟到的卡片会把它插入到卡片之后，
     ///   提前归档会固定错误顺序）。
     pub(crate) fn archivable_prefix_len(&self) -> usize {
-        for (index, segment) in self.segments.iter().enumerate() {
-            match segment {
-                TurnSegment::Tool { tool_idx } => match self.tool_cards.get(*tool_idx) {
-                    Some(card) if card.output_summary.is_some() => {}
-                    _ => return index,
-                },
-                TurnSegment::SubAgent { subagent_idx } => {
-                    let Some(subagent) = self.subagents.get(*subagent_idx) else {
-                        return index;
-                    };
-                    let pending = self
-                        .pending_subagent_groups
-                        .iter()
-                        .any(|group| group.subagent_idx == *subagent_idx);
-                    if subagent.is_running || pending {
-                        return index;
+        {
+            let iteration_items = self.segments.iter().enumerate();
+            for (index, segment) in iteration_items {
+                match segment {
+                    TurnSegment::Tool { tool_idx } => match self.tool_cards.get(*tool_idx) {
+                        Some(card) if card.output_summary.is_some() => {}
+                        _ => return index,
+                    },
+                    TurnSegment::SubAgent { subagent_idx } => {
+                        let Some(subagent) = self.subagents.get(*subagent_idx) else {
+                            return index;
+                        };
+                        let pending = self
+                            .pending_subagent_groups
+                            .iter()
+                            .any(|group| group.subagent_idx == *subagent_idx);
+                        if subagent.is_running || pending {
+                            return index;
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
         self.segments.len()
@@ -129,14 +132,16 @@ impl CurrentTurn {
             }
         }
         let mut kept_tools: Vec<Option<_>> = (0..next_tool).map(|_| None).collect();
-        for (index, card) in std::mem::take(&mut self.tool_cards).into_iter().enumerate() {
+        let indexed_tool_cards = std::mem::take(&mut self.tool_cards).into_iter().enumerate();
+        for (index, card) in indexed_tool_cards {
             if let Some(new_index) = tool_remap[index] {
                 kept_tools[new_index] = Some(card);
             }
         }
         self.tool_cards = kept_tools.into_iter().flatten().collect();
         let mut kept_subagents: Vec<Option<_>> = (0..next_subagent).map(|_| None).collect();
-        for (index, subagent) in std::mem::take(&mut self.subagents).into_iter().enumerate() {
+        let indexed_subagents = std::mem::take(&mut self.subagents).into_iter().enumerate();
+        for (index, subagent) in indexed_subagents {
             if let Some(new_index) = subagent_remap[index] {
                 kept_subagents[new_index] = Some(subagent);
             }

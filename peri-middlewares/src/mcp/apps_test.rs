@@ -1,4 +1,27 @@
-use super::*;
+use super::AppQualification;
+use super::Arc;
+use super::AttachmentId;
+use super::AttachmentRoute;
+use super::ClientViewId;
+use super::Duration;
+use super::EntitlementState;
+use super::HashMap;
+use super::IssueRejection;
+use super::Map;
+use super::McpAppBindingRegistry;
+use super::McpAppRecord;
+use super::McpAppRecordSpec;
+use super::McpCapabilityProfile;
+use super::RecordState;
+use super::RequestNamespaceId;
+use super::ToolCallId;
+use super::ToolVisibility;
+use super::Value;
+use super::APP_RETENTION_MS;
+use super::MAX_APPS_PER_SESSION;
+use super::MAX_APP_RECORDS;
+use super::MAX_ATTACHMENTS_PER_APP;
+use super::MCP_APP_MIME_TYPE;
 use peri_acp_types::interaction::ConnectionEpoch;
 use peri_acp_types::tool_invocation::InvocationId;
 use peri_acp_types::tool_outcome::RawToolResult;
@@ -396,8 +419,8 @@ fn detach_connection_keeps_the_record_and_other_attachments_alive() {
 
 #[test]
 fn deployment_presence_enables_apps_regardless_of_value() {
-    assert!(deployment_profile(true).apps_enabled());
-    assert!(!deployment_profile(false).apps_enabled());
+    assert!(super::deployment_profile(true).apps_enabled());
+    assert!(!super::deployment_profile(false).apps_enabled());
 }
 
 #[test]
@@ -480,14 +503,14 @@ fn conflicting_resource_uri_fails_closed() {
         "ui": {"resourceUri": "ui://canonical"},
         "ui/resourceUri": "ui://legacy"
     });
-    assert_eq!(canonical_resource_uri(Some(&meta)), None);
+    assert_eq!(super::canonical_resource_uri(Some(&meta)), None);
 }
 
 #[test]
 fn legacy_resource_uri_is_canonicalized() {
     let meta = serde_json::json!({"ui/resourceUri": "ui://app/index.html"});
     assert_eq!(
-        canonical_resource_uri(Some(&meta)).as_deref(),
+        super::canonical_resource_uri(Some(&meta)).as_deref(),
         Some("ui://app/index.html")
     );
 }

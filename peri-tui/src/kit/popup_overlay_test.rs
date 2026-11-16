@@ -1,7 +1,8 @@
 //! Tests for popup_overlay
 
-#[cfg(test)]
-use super::*;
+use super::PopupKind;
+use super::atoms;
+
 #[cfg(test)]
 use serial_test::serial;
 
@@ -16,18 +17,18 @@ fn setup_atoms() {
 #[serial]
 fn test_open_popup_sets_atom() {
     setup_atoms();
-    open_popup(PopupKind::Hitl);
+    super::open_popup(PopupKind::Hitl);
     assert_eq!(*atoms::POPUP_KIND.state().read(), Some(PopupKind::Hitl));
     // 清理——避免全局 OnceLock atom 在测试间残留 POPUP_KIND 状态
-    close_popup();
+    super::close_popup();
 }
 
 #[test]
 #[serial]
 fn test_close_popup_returns_previous() {
     setup_atoms();
-    open_popup(PopupKind::AskUser);
-    let closed = close_popup();
+    super::open_popup(PopupKind::AskUser);
+    let closed = super::close_popup();
     assert_eq!(closed, Some(PopupKind::AskUser));
     assert_eq!(*atoms::POPUP_KIND.state().read(), None);
 }
@@ -36,18 +37,18 @@ fn test_close_popup_returns_previous() {
 #[serial]
 fn test_close_popup_when_empty_returns_none() {
     setup_atoms();
-    assert_eq!(close_popup(), None);
+    assert_eq!(super::close_popup(), None);
 }
 
 #[test]
 #[serial]
 fn test_is_popup_active() {
     setup_atoms();
-    assert!(!is_popup_active());
-    open_popup(PopupKind::Rewind);
-    assert!(is_popup_active());
-    close_popup();
-    assert!(!is_popup_active());
+    assert!(!super::is_popup_active());
+    super::open_popup(PopupKind::Rewind);
+    assert!(super::is_popup_active());
+    super::close_popup();
+    assert!(!super::is_popup_active());
 }
 
 /// 编译期断言：PopupKind 实现 Copy（atom 读取需要 Copy）。
@@ -100,26 +101,26 @@ fn test_close_popup_clears_payload_atoms() {
     });
 
     // 逐一关闭每种 popup，验证对应 atom 被清空
-    open_popup(PopupKind::Hitl);
-    close_popup();
+    super::open_popup(PopupKind::Hitl);
+    super::close_popup();
     assert!(
         atoms::HITL_PENDING.state().read().is_none(),
         "HITL_PENDING should be cleared after close_popup"
     );
 
-    open_popup(PopupKind::AskUser);
-    close_popup();
+    super::open_popup(PopupKind::AskUser);
+    super::close_popup();
     assert!(
         atoms::ASK_USER_PENDING.state().read().is_none(),
         "ASK_USER_PENDING should be cleared after close_popup"
     );
 
-    open_popup(PopupKind::Rewind);
+    super::open_popup(PopupKind::Rewind);
     // 预置预算/目标/错误（close_popup 应清空）
     *atoms::REWIND_TARGET_TEXT.state().write() = Some("t".to_string());
     *atoms::REWIND_BUDGET_STATE.state().write() = atoms::RewindBudgetState::Executing;
     *atoms::REWIND_QUERY_ERROR.state().write() = Some("e".to_string());
-    close_popup();
+    super::close_popup();
     assert!(
         atoms::REWIND_PREVIEW.state().read().is_some(),
         "REWIND_PREVIEW should NOT be cleared after close_popup — 候选跟随会话生命周期"
@@ -131,8 +132,8 @@ fn test_close_popup_clears_payload_atoms() {
         "close_popup 应清空预算/目标/查询错误"
     );
 
-    open_popup(PopupKind::OAuth);
-    close_popup();
+    super::open_popup(PopupKind::OAuth);
+    super::close_popup();
     assert!(
         atoms::OAUTH_INFO.state().read().is_none(),
         "OAUTH_INFO should be cleared after close_popup"

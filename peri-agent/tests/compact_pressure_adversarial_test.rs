@@ -11,7 +11,9 @@ use peri_acp_types::thread::CancelPolicy;
 use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
 use peri_agent::agent::compact_v2::CompactConfig;
 use peri_agent::agent::react::{ReactLLM, Reasoning, StreamingContext, ToolCall};
-use peri_agent::agent::stages::{run_react_loop, LoopResult, StageContext};
+
+use peri_agent::agent::stages::LoopResult;
+use peri_agent::agent::stages::StageContext;
 use peri_agent::agent::token::ContextBudget;
 use peri_agent::error::{AgentError, AgentResult};
 use peri_agent::messages::BaseMessage;
@@ -23,10 +25,9 @@ use peri_model::{
     ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelStream, TokenUsage,
 };
 use peri_resources::sessions::SessionResourcesImpl;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy)]
@@ -157,7 +158,7 @@ impl BaseTool for GrowthTool {
                         summary: None,
                         metadata: serde_json::json!({}),
                     })
-                    .unwrap();
+                    .expect("the construct fixture result is required for this assertion");
                 self.queue
                     .push_async(QueuedMessage::system_reminder(
                         MessageKind::Defer,
@@ -196,7 +197,7 @@ impl peri_model::Model for SummaryModel {
         _: CancellationToken,
     ) -> peri_model::ModelResult<ModelResponse> {
         self.0.fetch_add(1, Ordering::SeqCst);
-        ModelResponse::new(
+        ModelResponse::try_new(
             ModelMessage::assistant_text(
                 "<summary>Original task and current progress preserved; continue.</summary>",
             ),
@@ -216,7 +217,7 @@ struct BoundSession {
 }
 
 async fn make_bound_session() -> BoundSession {
-    let repo = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().expect("the temporary test directory must be available");
     for args in [
         vec!["init", "-q"],
         vec![
@@ -241,16 +242,19 @@ async fn make_bound_session() -> BoundSession {
             .arg(repo.path())
             .args(args)
             .status()
-            .unwrap();
+            .expect("the status fixture result is required for this assertion");
         assert!(status.success());
     }
-    let db = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().expect("the temporary test directory must be available");
     let resources: Arc<dyn SessionResources> = Arc::new(
         SessionResourcesImpl::open(db.path().join("threads.db"))
             .await
-            .unwrap(),
+            .expect("the temporary session store fixture must open successfully"),
     );
-    let workspace = resources.resolve_workspace(repo.path()).await.unwrap();
+    let workspace = resources
+        .resolve_workspace(repo.path())
+        .await
+        .expect("the resolve workspace fixture result is required for this assertion");
     let cwd = workspace.cwd.to_string_lossy().into_owned();
     let thread_id = uuid::Uuid::now_v7().to_string();
     resources
@@ -275,7 +279,7 @@ async fn make_bound_session() -> BoundSession {
             frozen: FrozenSnapshotBytes::new("{\"version\":1,\"test\":true}"),
         })
         .await
-        .unwrap();
+        .expect("the create session fixture result is required for this assertion");
     let session = Session::new_with_cancel_and_queue(
         Arc::from(cwd.as_str()),
         FrozenContext::builder().build(),
@@ -335,7 +339,7 @@ async fn assert_growth_compacted_before_next_reason(growth: Growth) {
             BaseMessage::human("log ".repeat(90_000)),
         ))
         .await;
-    let result = run_react_loop(ctx.clone(), 5).await;
+    let result = peri_agent::agent::stages::run_react_loop(ctx.clone(), 5).await;
     assert!(matches!(result, LoopResult::Completed), "下一次 Reason 前应压缩；result={result:?}, real_request_tokens={:?}, tracker={:?}, summary_calls={}", *model.request_tokens.lock(), ctx.compact.token_tracker.read().estimated_context_tokens(), summary.0.load(Ordering::SeqCst));
     assert_eq!(
         summary.0.load(Ordering::SeqCst),
@@ -352,7 +356,10 @@ async fn assert_growth_compacted_before_next_reason(growth: Growth) {
         );
     }
     let transcript = std::mem::take(&mut *ctx.session.transcript.write());
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
 }
 
 /// [回归测试] 最近 assistant 的可见正文 8k + 工具 4k 将输入从 90k 推到 102k。
@@ -411,9 +418,12 @@ async fn assert_usable_summary_commits(raw: &'static str) {
             has_tool_calls: false,
         })
         .await
-        .unwrap();
+        .expect("the run compact fixture result is required for this assertion");
     let transcript = std::mem::take(&mut *ctx.session.transcript.write());
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     assert!(result.compacted);
     // Full 提交成功后热态已释放被排除原文（D1 shrink），canonical 原文与其标记
     // 只能从存储读取——热态不得再留副本。
@@ -422,7 +432,7 @@ async fn assert_usable_summary_commits(raw: &'static str) {
         .resources
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(snapshot.flags[&id].excluded, "有效摘要允许替换旧模型视图");
     assert!(
         snapshot.payloads.iter().any(|payload| payload.id() == id),
@@ -499,14 +509,16 @@ async fn assert_binary_attachment_reaches_first_reason(cold_document: bool) {
             .write()
             .append(attachment.clone());
         let old = std::mem::take(&mut *bound.session.transcript().write());
-        old.flush_persistence().await.unwrap();
+        old.flush_persistence()
+            .await
+            .expect("the flush persistence fixture result is required for this assertion");
         let reopened = SessionResourcesImpl::open(bound._db.path().join("threads.db"))
             .await
-            .unwrap();
+            .expect("the temporary session store fixture must open successfully");
         let snapshot = reopened
             .load_session_snapshot(&bound.thread_id)
             .await
-            .unwrap();
+            .expect("the load session snapshot fixture result is required for this assertion");
         let restored = Session::new_with_cancel_and_queue(
             Arc::from(bound._repo.path().to_string_lossy().as_ref()),
             FrozenContext::builder().build(),
@@ -553,7 +565,7 @@ async fn assert_binary_attachment_reaches_first_reason(cold_document: bool) {
     .with_context_budget(ContextBudget::new(100_000))
     .with_compact_config(CompactConfig::default())
     .build();
-    let result = run_react_loop(ctx.clone(), 3).await;
+    let result = peri_agent::agent::stages::run_react_loop(ctx.clone(), 3).await;
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
     assert_eq!(
         summary.0.load(Ordering::SeqCst),
@@ -579,7 +591,10 @@ async fn assert_binary_attachment_reaches_first_reason(cold_document: bool) {
             .excluded
     );
     let transcript = std::mem::take(&mut *ctx.session.transcript.write());
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
 }
 
 /// [回归测试] 约500KB截图不能按base64字符估出175k输入而在首次Reason前被压缩。
@@ -611,7 +626,7 @@ impl peri_model::Model for ScriptedMarkupSummary {
         _: ModelRequest,
         _: CancellationToken,
     ) -> peri_model::ModelResult<ModelResponse> {
-        ModelResponse::new(
+        ModelResponse::try_new(
             ModelMessage::assistant_text(self.0),
             peri_model::StopReason::EndTurn,
             None,

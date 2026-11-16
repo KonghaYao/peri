@@ -1,4 +1,15 @@
-use super::*;
+use crate::provider::LlmProvider;
+use crate::provider::PeriConfig;
+use crate::provider::ProfileConfig;
+use crate::provider::Profiles;
+use crate::provider::ProviderConfig;
+use crate::provider::ProviderModels;
+use crate::session::SessionManager;
+use peri_acp_types::permission::PermissionMode;
+use peri_acp_types::permission::SharedPermissionMode;
+use peri_middlewares::host_ports::AgentCatalogProvider;
+use serial_test::serial;
+use std::sync::Arc;
 
 // ── FrozenSessionData 渲染测试（L5：渲染面留 ACP，经 build_frozen_data）───
 

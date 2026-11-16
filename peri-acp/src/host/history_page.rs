@@ -87,7 +87,7 @@ use peri_acp_types::PeriCaps;
 use crate::dispatch::{self, LoadGeneration, ProjectedUpdate};
 use crate::transport::types::AcpError;
 
-use super::history_window::window_error;
+use super::history_window;
 use super::{AcpServerConfig, SharedSessions};
 
 /// 单页默认条数（REQ-H03：每页 50 条、最大 100 条，按完整展示封装计）。
@@ -138,13 +138,13 @@ pub(crate) fn classify(
     // 「没有 history」处理。它与旧顶层 cursor/limit/setup 字段互斥。
     if let Some(raw) = params.get("history") {
         if !window_v1 {
-            return Err(window_error(
+            return Err(history_window::window_error(
                 peri_acp_types::history_window::HistoryWindowError::NotNegotiated,
             ));
         }
         for key in ["cursor", "limit", "loadGeneration", "cwd", "mcpServers"] {
             if params.get(key).is_some() {
-                return Err(window_error(
+                return Err(history_window::window_error(
                     peri_acp_types::history_window::HistoryWindowError::invalid_request(format!(
                         "{key} is mutually exclusive with history"
                     )),
@@ -152,7 +152,7 @@ pub(crate) fn classify(
             }
         }
         let session_id = session_id(params)?;
-        let request = HistoryWindowRequest::decode(raw).map_err(window_error)?;
+        let request = HistoryWindowRequest::decode(raw).map_err(history_window::window_error)?;
         return Ok(SessionLoadMode::HistoryWindow {
             session_id,
             request,

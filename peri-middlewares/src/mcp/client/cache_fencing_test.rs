@@ -1,13 +1,18 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
-use rmcp::{
-    model::{CustomRequest, CustomResult, ReadResourceRequestParams, ReadResourceResponse},
-    service::{RequestContext, RoleServer},
-    ServerHandler,
-};
+use rmcp::model::CustomRequest;
+use rmcp::model::CustomResult;
+use rmcp::model::ReadResourceRequestParams;
+use rmcp::model::ReadResourceResponse;
+use rmcp::service::RequestContext;
+use rmcp::service::RoleServer;
+use rmcp::ServerHandler;
 use tokio::sync::Notify;
 
-use super::super::{output_store::tests::Wire, AcpConnectionDeclaration, McpClientPool};
+use super::super::output_store::tests::Wire;
+use super::super::AcpConnectionDeclaration;
+use super::super::McpClientPool;
 
 /// 与 `read_resource` 返回的正文一致：rmcp 3.9.0 校验 manifest 必须包含自身
 /// `SKILL.md`，activation 也按该内容校验 digest。
@@ -210,7 +215,7 @@ async fn scoped_skill_and_legacy_cache_rejects_old_tickets_and_keeps_same_genera
     .await;
     let pool = Arc::new(McpClientPool::new_empty());
     install_acp(&wire, &pool, "first");
-    let handle = pool.get_client("server").unwrap();
+    let handle = pool.client("server").unwrap();
     let (cache, origin) = pool.resource_cache_for_handle(&handle).unwrap();
     for method in ["skills/list", "skills/legacy-read"] {
         let ticket = cache.ticket(&origin, method, "null").await.unwrap();
@@ -294,7 +299,7 @@ async fn delayed_skill_and_legacy_discovery_cannot_publish_or_cache_a_retired_co
             handle.skills_capable = skills_capable;
             handle.resources = vec![rmcp::model::Resource::new("skill://old/SKILL.md", "old")];
         }
-        let handle = pool.get_client("server").unwrap();
+        let handle = pool.client("server").unwrap();
         pool.advance_handle_generation(&handle);
         let cache = pool.resource_cache_for_handle(&handle).unwrap();
         let old_origin = cache.1.clone();

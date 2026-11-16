@@ -1,12 +1,26 @@
-use super::*;
+use crate::agent::async_tasks::TaskManager;
+use crate::agent::events::AgentEventHandler;
+use crate::agent::events::ExecutorEvent;
+use crate::agent::events::FnEventHandler;
+use crate::session::queue::MessageSource;
+use crate::session::queue::QueuedMessage;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::thread::WorkState;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// 阻塞在模型调用中的同步子任务：父调用 future 被 drop（生产侧 cancel 分支）
 /// 后，子执行仍须走完既有收尾并恰好发射一次 SubagentStopped。
 #[tokio::test]
 async fn cancelled_sync_child_emits_stopped_after_caller_future_dropped() {
     let manager = Arc::new(TaskManager::new());
-    let (session, _owner, store) = bound_child_with_store(manager.clone());
-    let child_id = session.store().thread_id.clone().unwrap();
+    let (session, _owner, store) =
+        crate::session::subagent::run_sync::tests::bound_child_with_store(manager.clone());
+    let child_id = session
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
     store.register_bound_session(&child_id, "/tmp");
     session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
@@ -14,7 +28,11 @@ async fn cancelled_sync_child_emits_stopped_after_caller_future_dropped() {
     ));
     let entered = Arc::new(tokio::sync::Notify::new());
     let gate = Arc::new(tokio::sync::Notify::new());
-    let built = blocking_context(&session, entered.clone(), gate.clone());
+    let built = crate::session::subagent::run_sync::tests::blocking_context(
+        &session,
+        entered.clone(),
+        gate.clone(),
+    );
 
     let events: Arc<parking_lot::Mutex<Vec<ExecutorEvent>>> = Arc::default();
     let capture = events.clone();
@@ -29,16 +47,16 @@ async fn cancelled_sync_child_emits_stopped_after_caller_future_dropped() {
     let run_handler = handler.clone();
     // 与生产同形的父工具调用 future：cancel 分支命中时整块 wrapper 被 drop。
     let caller = tokio::spawn(async move {
-        let wrapper = run_sync_with_registered_handoff(
+        let wrapper = crate::session::subagent::run_sync::run_sync_with_registered_handoff(
             run_session.clone(),
             run_id.clone(),
             "fixture".into(),
             None,
-            Some(new_sync_task_id()),
+            Some(crate::session::subagent::run_sync::new_sync_task_id()),
             Some(Arc::new(|_, _| Ok(()))),
             None,
             move |handoff, _| async move {
-                run_sync_subagent(
+                crate::session::subagent::run_sync::run_sync_subagent(
                     &run_id,
                     "fixture",
                     "/tmp",
@@ -89,7 +107,9 @@ async fn cancelled_sync_child_emits_stopped_after_caller_future_dropped() {
         .await
         .expect("child model call must be in flight before cancellation");
     cancel.cancel();
-    caller.await.unwrap();
+    caller
+        .await
+        .expect("the caller fixture result is required for this assertion");
 
     let stopped = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -124,7 +144,10 @@ async fn cancelled_sync_child_emits_stopped_after_caller_future_dropped() {
         Some("cancelled"),
         "真实取消必须持久化为 Cancelled"
     );
-    let meta = store.load_session_meta(&child_id).await.unwrap();
+    let meta = store
+        .load_session_meta(&child_id)
+        .await
+        .expect("the load session meta fixture result is required for this assertion");
     assert_eq!(meta.work_state, WorkState::Stopped, "取消必须写 Stopped");
     assert_eq!(manager.active_count(), 0);
 
@@ -152,13 +175,13 @@ async fn cancelled_sync_child_emits_stopped_after_caller_future_dropped() {
 #[tokio::test]
 async fn explicit_close_reports_failed_sync_delivery() {
     let manager = Arc::new(TaskManager::new());
-    let session = child(manager.clone());
+    let session = crate::session::subagent::run_sync::tests::child(manager.clone());
     session
         .subagent_host()
-        .unwrap()
+        .expect("the subagent host fixture result is required for this assertion")
         .close_state
         .record_sync_delivery_failure("sync-broken", "callback rejected");
-    let error = super::super::super::close::close_subagent_session_scope(session)
+    let error = crate::session::subagent::close::close_subagent_session_scope(session)
         .await
         .unwrap_err();
     assert!(error.contains("callback rejected"), "{error}");

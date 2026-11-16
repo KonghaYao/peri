@@ -1,24 +1,33 @@
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Mutex,
-    },
-};
+use sha2::Digest;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use serde_json::json;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-    sync::Notify,
-};
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
+use tokio::sync::Notify;
 
-use super::*;
-use crate::model_auth::{
-    types::{StoredAccount, TokenSet},
-    RESOURCE,
-};
+use crate::model_auth::client::ChatGptAuthManager;
+use crate::model_auth::oauth::OAuth;
+use crate::model_auth::types::AccountStatus;
+use crate::model_auth::types::AuthError;
+use crate::model_auth::types::AuthResult;
+use crate::model_auth::types::PendingLogin;
+use crate::model_auth::types::StoredAccount;
+use crate::model_auth::types::TokenSet;
+use crate::model_auth::RESOURCE;
+use peri_model::ModelResult;
+use peri_model::RequestAuth;
+use peri_model::RequestCredential;
+use sha2::Sha256;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 #[path = "client_trace_test.rs"]
 mod trace_tests;
@@ -158,7 +167,7 @@ impl MockIssuer {
 
     fn manager(&self, dir: &std::path::Path, account: &str) -> ChatGptAuthManager {
         let mut manager =
-            ChatGptAuthManager::new(dir.join("credentials"), account.to_owned()).unwrap();
+            ChatGptAuthManager::try_new(dir.join("credentials"), account.to_owned()).unwrap();
         let server = Arc::get_mut(&mut manager.server).unwrap();
         server.oauth = OAuth::for_test(self.base.clone());
         server.clock = Arc::new(|| 1000);
@@ -650,16 +659,16 @@ async fn cancelling_remote_revocation_after_start_preserves_local_logout() {
 #[test]
 fn credential_identity_is_stable_and_endpoint_policy_is_independent_of_profile() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = ChatGptAuthManager::new(dir.path().to_owned(), "one".into())
+    let manager = ChatGptAuthManager::try_new(dir.path().to_owned(), "one".into())
         .unwrap()
         .with_expected_identity("subject".into(), "client".into());
     assert_eq!(
         manager.credential_ref(),
-        chatgpt_credential_ref("subject", "client")
+        crate::model_auth::client::chatgpt_credential_ref("subject", "client")
     );
     assert_ne!(
         manager.credential_ref(),
-        chatgpt_credential_ref("different", "client")
+        crate::model_auth::client::chatgpt_credential_ref("different", "client")
     );
     assert!(manager
         .validate_endpoint(&"https://api.openai.com/v1/responses".parse().unwrap())
@@ -758,10 +767,13 @@ async fn inference_server(
 
 #[tokio::test]
 async fn real_http_401_refresh_replays_frozen_body_with_rotated_bearer() {
-    use peri_model::{
-        openai_responses::{ResponsesConfig, ResponsesModel},
-        Model, ModelMessage, ModelRequest, ModelRuntimeConfig, RetryConfig,
-    };
+    use peri_model::openai_responses::ResponsesConfig;
+    use peri_model::openai_responses::ResponsesModel;
+    use peri_model::Model;
+    use peri_model::ModelMessage;
+    use peri_model::ModelRequest;
+    use peri_model::ModelRuntimeConfig;
+    use peri_model::RetryConfig;
     let mock = MockIssuer::start().await;
     let dir = tempfile::tempdir().unwrap();
     let manager = mock.manager(dir.path(), "one");
@@ -803,10 +815,12 @@ async fn real_http_401_refresh_replays_frozen_body_with_rotated_bearer() {
 
 #[tokio::test]
 async fn second_real_http_401_is_terminal_and_refresh_does_not_expand_attempt_budget() {
-    use peri_model::{
-        openai_responses::{ResponsesConfig, ResponsesModel},
-        Model, ModelRequest, ModelRuntimeConfig, RetryConfig,
-    };
+    use peri_model::openai_responses::ResponsesConfig;
+    use peri_model::openai_responses::ResponsesModel;
+    use peri_model::Model;
+    use peri_model::ModelRequest;
+    use peri_model::ModelRuntimeConfig;
+    use peri_model::RetryConfig;
     for (attempts, statuses) in [(1, vec![401]), (4, vec![401, 401])] {
         let mock = MockIssuer::start().await;
         let dir = tempfile::tempdir().unwrap();
@@ -844,7 +858,7 @@ async fn second_real_http_401_is_terminal_and_refresh_does_not_expand_attempt_bu
 async fn cancelled_begin_login_releases_the_account_lock() {
     let dir = tempfile::tempdir().unwrap();
     let manager =
-        ChatGptAuthManager::new(dir.path().join("credentials"), "default".into()).unwrap();
+        ChatGptAuthManager::try_new(dir.path().join("credentials"), "default".into()).unwrap();
     let cancellation = CancellationToken::new();
     cancellation.cancel();
     assert_eq!(
@@ -862,7 +876,7 @@ async fn cancelled_begin_login_releases_the_account_lock() {
 async fn cancelled_status_while_lock_is_held_can_retry_after_release() {
     let dir = tempfile::tempdir().unwrap();
     let manager =
-        ChatGptAuthManager::new(dir.path().join("credentials"), "default".into()).unwrap();
+        ChatGptAuthManager::try_new(dir.path().join("credentials"), "default".into()).unwrap();
     let lease = manager
         .server
         .store
@@ -887,7 +901,7 @@ async fn cancelled_status_while_lock_is_held_can_retry_after_release() {
 async fn cancelled_begin_login_while_lock_is_held_does_not_poison_retry() {
     let dir = tempfile::tempdir().unwrap();
     let manager =
-        ChatGptAuthManager::new(dir.path().join("credentials"), "default".into()).unwrap();
+        ChatGptAuthManager::try_new(dir.path().join("credentials"), "default".into()).unwrap();
     let lease = manager
         .server
         .store
@@ -908,7 +922,7 @@ async fn cancelled_begin_login_while_lock_is_held_does_not_poison_retry() {
 async fn cancelling_finish_login_releases_the_loopback_port() {
     let dir = tempfile::tempdir().unwrap();
     let manager =
-        ChatGptAuthManager::new(dir.path().join("credentials"), "default".into()).unwrap();
+        ChatGptAuthManager::try_new(dir.path().join("credentials"), "default".into()).unwrap();
     let pending = manager.begin_login(CancellationToken::new()).await.unwrap();
     let authorize = url::Url::parse(pending.authorization_url()).unwrap();
     let query: HashMap<_, _> = authorize.query_pairs().into_owned().collect();

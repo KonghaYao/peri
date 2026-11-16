@@ -1,4 +1,4 @@
-use super::*;
+use super::{Arc, McpClientHandle};
 use crate::mcp::client::{ConnectionResourceCache, McpClientPool};
 use crate::mcp::config::McpCachePolicy;
 use crate::mcp::resource_cache::McpResourceCache;

@@ -1,27 +1,32 @@
-use std::{
-    collections::VecDeque,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
-    task::Poll,
-    time::Duration,
-};
+use std::collections::VecDeque;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::task::Poll;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
-use tokio::{sync::Notify, time::timeout};
+use tokio::sync::Notify;
+use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    retrying_http_sse_stream, runtime_http_sse_stream, SseCompletionDecoder, SseDecoder,
-    SseDecoderFactory,
-};
-use crate::{
-    transport::{HttpBody, HttpRequest, HttpResponse, HttpTransport, SseEvent},
-    ModelError, ModelResult, ModelRuntimeConfig, ModelStreamEvent, RetryConfig, RetryObservation,
-    TransportErrorKind,
-};
+use super::SseCompletionDecoder;
+use super::SseDecoder;
+use super::SseDecoderFactory;
+use crate::transport::HttpBody;
+use crate::transport::HttpRequest;
+use crate::transport::HttpResponse;
+use crate::transport::HttpTransport;
+use crate::transport::SseEvent;
+use crate::ModelError;
+use crate::ModelResult;
+use crate::ModelRuntimeConfig;
+use crate::ModelStreamEvent;
+use crate::RetryConfig;
+use crate::RetryObservation;
+use crate::TransportErrorKind;
 
 #[derive(Clone)]
 enum Response {
@@ -172,7 +177,7 @@ fn stream_for(
     cancellation: CancellationToken,
     config: RetryConfig,
 ) -> crate::ModelStream {
-    retrying_http_sse_stream(
+    super::retrying_http_sse_stream(
         config,
         cancellation,
         None,
@@ -191,7 +196,7 @@ async fn abort_cancels_only_model_stream_child() {
         parent.clone(),
     ));
     stream.abort();
-    let error = timeout(Duration::from_millis(100), stream.next())
+    let error = time::timeout(Duration::from_millis(100), stream.next())
         .await
         .expect("abort must wake pending consumer")
         .expect("cancelled event")
@@ -208,7 +213,7 @@ async fn external_cancellation_wakes_pending_stream() {
         parent.clone(),
     ));
     parent.cancel();
-    let error = timeout(Duration::from_millis(100), stream.next())
+    let error = time::timeout(Duration::from_millis(100), stream.next())
         .await
         .expect("external cancellation must wake consumer")
         .expect("cancelled event")
@@ -315,7 +320,7 @@ async fn runtime_config_forwards_safe_retry_observations_to_registered_observer(
             chunks: vec![Ok(b"data: hello\n\n".to_vec())],
         },
     ]));
-    let mut stream = Box::pin(runtime_http_sse_stream(
+    let mut stream = Box::pin(super::runtime_http_sse_stream(
         &runtime,
         CancellationToken::new(),
         transport,
@@ -347,7 +352,7 @@ async fn test_sse_completed_response_ignores_malformed_tail() {
         let decoder: SseDecoder = Arc::new(|event, _| {
             assert_eq!(event.data, "complete", "完成后的事件不得再交给 decoder");
             Ok(vec![ModelStreamEvent::Completed(
-                crate::ModelResponse::new(
+                crate::ModelResponse::try_new(
                     crate::ModelMessage::assistant_text("done"),
                     crate::StopReason::EndTurn,
                     None,
@@ -357,7 +362,7 @@ async fn test_sse_completed_response_ignores_malformed_tail() {
         });
         (decoder, completion_decoder())
     });
-    let events = retrying_http_sse_stream(
+    let events = super::retrying_http_sse_stream(
         config(),
         CancellationToken::new(),
         None,
@@ -389,7 +394,7 @@ async fn external_cancellation_stops_fake_transport_connect() {
 
     tokio::task::yield_now().await;
     cancellation.cancel();
-    let error = timeout(Duration::from_millis(100), stream.next())
+    let error = time::timeout(Duration::from_millis(100), stream.next())
         .await
         .expect("connect cancellation must resolve")
         .expect("cancelled event")
@@ -413,7 +418,7 @@ async fn external_cancellation_stops_fake_sse_body_read() {
 
     tokio::task::yield_now().await;
     cancellation.cancel();
-    let error = timeout(Duration::from_millis(100), stream.next())
+    let error = time::timeout(Duration::from_millis(100), stream.next())
         .await
         .expect("SSE read cancellation must resolve")
         .expect("cancelled event")
@@ -438,18 +443,18 @@ async fn test_external_cancellation_stops_sse_after_first_bytes_before_delta() {
         cancellation.clone(),
         config(),
     ));
-    timeout(Duration::from_secs(1), waiting.notified())
+    time::timeout(Duration::from_secs(1), waiting.notified())
         .await
         .expect("首段字节已读入 parser，开始等待后续 body");
     cancellation.cancel();
-    let error = timeout(Duration::from_secs(1), stream.next())
+    let error = time::timeout(Duration::from_secs(1), stream.next())
         .await
         .expect("取消必须唤醒消费方")
         .expect("应返回取消错误，不能产生未完整解码的 delta")
         .unwrap_err();
     assert!(error.is_cancelled(), "取消不得被误报为重试或中途断流");
     assert!(stream.next().await.is_none(), "取消后流应终止");
-    timeout(Duration::from_secs(1), dropped.notified())
+    time::timeout(Duration::from_secs(1), dropped.notified())
         .await
         .expect("取消必须释放仍在等待的 body");
     assert_eq!(transport.calls(), 1, "取消后不得发起重试");
@@ -470,7 +475,7 @@ async fn external_cancellation_stops_fake_transport_backoff() {
 
     tokio::task::yield_now().await;
     cancellation.cancel();
-    let error = timeout(Duration::from_millis(100), stream.next())
+    let error = time::timeout(Duration::from_millis(100), stream.next())
         .await
         .expect("backoff cancellation must resolve")
         .expect("cancelled event")
@@ -490,14 +495,14 @@ async fn abort_stops_fake_transport_connect_without_cancelling_parent() {
     }]));
     let mut stream = Box::pin(stream_for(transport.clone(), parent.clone(), config()));
 
-    timeout(Duration::from_millis(100), connect_started.notified())
+    time::timeout(Duration::from_millis(100), connect_started.notified())
         .await
         .expect("fake transport connect must begin before abort");
     stream.abort();
-    timeout(Duration::from_millis(100), connect_cancelled.notified())
+    time::timeout(Duration::from_millis(100), connect_cancelled.notified())
         .await
         .expect("abort must cancel fake transport connect");
-    let error = timeout(Duration::from_millis(100), stream.next())
+    let error = time::timeout(Duration::from_millis(100), stream.next())
         .await
         .expect("abort must wake consumer")
         .expect("cancelled event")
@@ -519,14 +524,14 @@ async fn abort_stops_fake_sse_body_read_without_cancelling_parent() {
     }]));
     let mut stream = Box::pin(stream_for(transport.clone(), parent.clone(), config()));
 
-    timeout(Duration::from_millis(100), body_started.notified())
+    time::timeout(Duration::from_millis(100), body_started.notified())
         .await
         .expect("fake SSE body read must begin before abort");
     stream.abort();
-    timeout(Duration::from_millis(100), body_cancelled.notified())
+    time::timeout(Duration::from_millis(100), body_cancelled.notified())
         .await
         .expect("abort must cancel fake SSE body read");
-    let error = timeout(Duration::from_millis(100), stream.next())
+    let error = time::timeout(Duration::from_millis(100), stream.next())
         .await
         .expect("abort must wake consumer")
         .expect("cancelled event")
@@ -550,21 +555,21 @@ async fn test_abort_stops_sse_after_decoded_delta_without_cancelling_parent() {
     }]));
     let mut stream = Box::pin(stream_for(transport.clone(), parent.clone(), config()));
     assert!(matches!(
-        timeout(Duration::from_secs(1), stream.next()).await.expect("应收到首个 delta"),
+        time::timeout(Duration::from_secs(1), stream.next()).await.expect("应收到首个 delta"),
         Some(Ok(ModelStreamEvent::TextDelta { text })) if text == "partial"
     ));
-    timeout(Duration::from_secs(1), waiting.notified())
+    time::timeout(Duration::from_secs(1), waiting.notified())
         .await
         .expect("已解码首个 delta，开始等待后续 body");
     stream.abort();
-    let error = timeout(Duration::from_secs(1), stream.next())
+    let error = time::timeout(Duration::from_secs(1), stream.next())
         .await
         .expect("abort 必须唤醒消费方")
         .expect("应返回取消错误")
         .unwrap_err();
     assert!(error.is_cancelled(), "abort 不得被误报为中途断流");
     assert!(stream.next().await.is_none(), "取消后流应终止");
-    timeout(Duration::from_secs(1), dropped.notified())
+    time::timeout(Duration::from_secs(1), dropped.notified())
         .await
         .expect("abort 必须释放仍在等待的 body");
     assert_eq!(transport.calls(), 1, "已发出 delta 后不得重试");
@@ -587,7 +592,7 @@ async fn abort_stops_fake_transport_backoff_without_cancelling_parent() {
         .with_max_attempts(2)
         .with_base_delay(Duration::from_secs(60))
         .with_jitter(false);
-    let mut stream = Box::pin(retrying_http_sse_stream(
+    let mut stream = Box::pin(super::retrying_http_sse_stream(
         retry,
         parent.clone(),
         Some(observer),
@@ -597,11 +602,11 @@ async fn abort_stops_fake_transport_backoff_without_cancelling_parent() {
         decoders(),
     ));
 
-    timeout(Duration::from_millis(100), backoff_started.notified())
+    time::timeout(Duration::from_millis(100), backoff_started.notified())
         .await
         .expect("fake transport must enter retry backoff before abort");
     stream.abort();
-    let error = timeout(Duration::from_millis(100), stream.next())
+    let error = time::timeout(Duration::from_millis(100), stream.next())
         .await
         .expect("abort must wake consumer")
         .expect("cancelled event")
@@ -623,11 +628,11 @@ async fn drop_stops_fake_transport_connect_without_cancelling_parent() {
     }]));
     let stream = stream_for(transport.clone(), parent.clone(), config());
 
-    timeout(Duration::from_millis(100), connect_started.notified())
+    time::timeout(Duration::from_millis(100), connect_started.notified())
         .await
         .expect("fake transport connect must begin before drop");
     drop(stream);
-    timeout(Duration::from_millis(100), connect_cancelled.notified())
+    time::timeout(Duration::from_millis(100), connect_cancelled.notified())
         .await
         .expect("drop must release fake transport connect");
     assert_eq!(transport.calls(), 1);
@@ -645,11 +650,11 @@ async fn drop_stops_fake_sse_body_read_without_cancelling_parent() {
     }]));
     let stream = stream_for(transport.clone(), parent.clone(), config());
 
-    timeout(Duration::from_millis(100), body_started.notified())
+    time::timeout(Duration::from_millis(100), body_started.notified())
         .await
         .expect("fake SSE body read must begin before drop");
     drop(stream);
-    timeout(Duration::from_millis(100), body_cancelled.notified())
+    time::timeout(Duration::from_millis(100), body_cancelled.notified())
         .await
         .expect("drop must release fake SSE body read");
     assert_eq!(transport.calls(), 1);
@@ -672,7 +677,7 @@ async fn drop_stops_fake_transport_backoff_without_cancelling_parent() {
         .with_max_attempts(2)
         .with_base_delay(Duration::from_secs(60))
         .with_jitter(false);
-    let stream = retrying_http_sse_stream(
+    let stream = super::retrying_http_sse_stream(
         retry,
         parent.clone(),
         Some(observer),
@@ -682,7 +687,7 @@ async fn drop_stops_fake_transport_backoff_without_cancelling_parent() {
         decoders(),
     );
 
-    timeout(Duration::from_millis(100), backoff_started.notified())
+    time::timeout(Duration::from_millis(100), backoff_started.notified())
         .await
         .expect("fake transport must enter retry backoff before drop");
     drop(stream);

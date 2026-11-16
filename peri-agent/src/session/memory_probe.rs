@@ -3,9 +3,9 @@
 //! 本模块只回答「进程内仍然被哪些对象引用、按容量计大约保留了多少分配」，
 //! 不是分配器统计，也不把正文长度冒充堆总量：
 //!
-//! - [`ObjectBytes::body`] 是已使用的正文/槽位字节（`String::len`、`Vec::len *
+//! - [`ObjectBytes::body`](crate::session::memory_probe::ObjectBytes::body) 是已使用的正文/槽位字节（`String::len`、`Vec::len *
 //!   size_of`），用于比较“可回收逻辑正文”的多少；
-//! - [`ObjectBytes::reserved`] 是 `String::capacity` / `Vec::capacity` 给出的
+//! - [`ObjectBytes::reserved`](crate::session::memory_probe::ObjectBytes::reserved) 是 `String::capacity` / `Vec::capacity` 给出的
 //!   保留量下界，不含分配器元数据、`im` 共享节点、`HashMap` 桶开销与页粒度；
 //! - 每个快照独立计量。跨快照比较只能说明“这些所有者不再引用这些正文”，
 //!   不能单独证明分配器已经归还 RSS。
@@ -25,7 +25,8 @@ use serde_json::Value;
 
 use crate::messages::MessageId;
 
-use super::transcript::{StagedData, TranscriptEntry};
+use crate::session::transcript::StagedData;
+use crate::session::transcript::TranscriptEntry;
 
 // ─── 基础字节口径 ─────────────────────────────────────────────────────────────
 
@@ -64,6 +65,7 @@ impl std::ops::AddAssign for ObjectBytes {
 }
 
 /// 单个 `String` 的正文与容量。
+#[must_use]
 pub fn string_bytes(value: &String) -> ObjectBytes {
     ObjectBytes {
         body: value.len(),
@@ -87,8 +89,8 @@ fn vec_slots<T>(values: &Vec<T>) -> ObjectBytes {
     }
 }
 
-fn option_string_bytes(value: &Option<String>) -> ObjectBytes {
-    value.as_ref().map(string_bytes).unwrap_or_default()
+fn option_string_bytes(value: Option<&String>) -> ObjectBytes {
+    value.map(string_bytes).unwrap_or_default()
 }
 
 // ─── 消息 / reminder / payload ───────────────────────────────────────────────
@@ -141,7 +143,7 @@ fn content_block_bytes(block: &ContentBlock) -> ObjectBytes {
         ContentBlock::Text { text } => string_bytes(text),
         ContentBlock::Image { source } => image_source_bytes(source),
         ContentBlock::Document { source, title } => {
-            document_source_bytes(source) + option_string_bytes(title)
+            document_source_bytes(source) + option_string_bytes(title.as_ref())
         }
         ContentBlock::ToolUse { id, name, input } => {
             string_bytes(id) + string_bytes(name) + json_bytes(input)
@@ -153,14 +155,14 @@ fn content_block_bytes(block: &ContentBlock) -> ObjectBytes {
             ..
         } => {
             let mut bytes =
-                option_string_bytes(id) + string_bytes(tool_use_id) + vec_slots(content);
+                option_string_bytes(id.as_ref()) + string_bytes(tool_use_id) + vec_slots(content);
             for child in content {
                 bytes += content_block_bytes(child);
             }
             bytes
         }
         ContentBlock::Reasoning { text, signature } => {
-            string_bytes(text) + option_string_bytes(signature)
+            string_bytes(text) + option_string_bytes(signature.as_ref())
         }
         ContentBlock::ProviderState { provider, data } => string_bytes(provider) + json_bytes(data),
         ContentBlock::Unknown(value) => json_bytes(value),
@@ -188,6 +190,7 @@ fn message_content_bytes(content: &MessageContent) -> ObjectBytes {
 }
 
 /// 单条 `BaseMessage` 的正文与容量保留量。
+#[must_use]
 pub fn message_bytes(message: &BaseMessage) -> ObjectBytes {
     match message {
         BaseMessage::Human { content, .. } | BaseMessage::System { content, .. } => {
@@ -215,8 +218,8 @@ pub fn message_bytes(message: &BaseMessage) -> ObjectBytes {
         } => {
             let mut bytes = string_bytes(tool_call_id) + message_content_bytes(content);
             if let Some(execution) = execution {
-                bytes += option_string_bytes(&execution.output_ref);
-                bytes += option_string_bytes(&execution.task_id);
+                bytes += option_string_bytes(execution.output_ref.as_ref());
+                bytes += option_string_bytes(execution.task_id.as_ref());
             }
             if let Some(failure) = subagent_failure {
                 // 访问器只提供 `&str`；容量不可见，使用正文长度作保留量下界。
@@ -233,17 +236,19 @@ pub fn message_bytes(message: &BaseMessage) -> ObjectBytes {
 }
 
 /// canonical reminder 的正文与容量保留量。
+#[must_use]
 pub fn reminder_bytes(reminder: &TrustedSystemReminder) -> ObjectBytes {
     let reminder = reminder.as_reminder();
     string_bytes(&reminder.body)
         + string_bytes(&reminder.source.0)
         + string_bytes(&reminder.kind)
-        + option_string_bytes(&reminder.summary)
+        + option_string_bytes(reminder.summary.as_ref())
         + json_bytes(&reminder.metadata)
         + vec_slots(&reminder.audiences.0)
 }
 
 /// 单条持久化载荷的正文与容量保留量。
+#[must_use]
 pub fn payload_bytes(payload: &PersistedPayload) -> ObjectBytes {
     match payload {
         PersistedPayload::Message(message) => message_bytes(message),
@@ -275,6 +280,7 @@ pub struct PayloadSetSnapshot {
 ///
 /// `capacity` 由持有 `Vec` 的调用方传入；只持有切片时传 `slice.len()` 作为
 /// 容量下界。
+#[must_use]
 pub fn payload_set_snapshot(payloads: &[PersistedPayload], capacity: usize) -> PayloadSetSnapshot {
     let mut snapshot = PayloadSetSnapshot {
         entries: payloads.len(),
@@ -299,6 +305,7 @@ pub struct MessageSetSnapshot {
     pub container_bytes: usize,
 }
 
+#[must_use]
 pub fn message_set_snapshot(messages: &[BaseMessage], capacity: usize) -> MessageSetSnapshot {
     let mut snapshot = MessageSetSnapshot {
         entries: messages.len(),
@@ -337,6 +344,7 @@ pub struct TranscriptMemorySnapshot {
 /// `ancestor_len` 之前的条目属于冻结继承区；容器容量由 transcript 自身传入，
 /// 因为这里只拿到切片。
 #[allow(clippy::too_many_arguments)]
+#[must_use]
 pub fn transcript_snapshot(
     entries: &[TranscriptEntry],
     ancestor_len: usize,
@@ -356,7 +364,8 @@ pub fn transcript_snapshot(
         flags_capacity_bytes: flags_capacity * std::mem::size_of::<(MessageId, MessageFlags)>(),
         ..Default::default()
     };
-    for (index, entry) in entries.iter().enumerate() {
+    let paired_items = entries.iter().enumerate();
+    for (index, entry) in paired_items {
         let bytes = transcript_entry_bytes(entry);
         if index < ancestor_len {
             snapshot.inherited_entries += 1;
@@ -383,6 +392,7 @@ pub fn transcript_snapshot(
 // ─── 采样 ────────────────────────────────────────────────────────────────────
 
 /// 统一 debug target；关闭 DEBUG 时调用方先经本函数短路，避免构造快照。
+#[must_use]
 pub fn observations_enabled() -> bool {
     tracing::enabled!(target: "peri_memory", tracing::Level::DEBUG)
 }
@@ -485,7 +495,13 @@ pub fn log_message_set(stage: &'static str, origin: &str, snapshot: &MessageSetS
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::session::memory_probe::payload_set_snapshot;
+    use crate::session::memory_probe::transcript_snapshot;
+    use crate::session::transcript::TranscriptEntry;
+    use peri_acp_types::messages::BaseMessage;
+    use peri_acp_types::store::MessageFlags;
+    use peri_acp_types::store::PersistedPayload;
+    use std::collections::HashMap;
 
     #[test]
     fn payload_snapshot_separates_body_from_capacity() {

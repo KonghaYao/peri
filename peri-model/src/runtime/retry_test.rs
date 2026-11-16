@@ -1,21 +1,21 @@
-use std::{
-    collections::VecDeque,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
-    task::Poll,
-    time::Duration,
-};
+use std::collections::VecDeque;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::task::Poll;
+use std::time::Duration;
 
 use futures::{stream, StreamExt};
-use tokio::{sync::Notify, time::timeout};
+use tokio::sync::Notify;
+use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    retrying_stream, RetryConfig, RetryObservation, RetryableErrorClasses, StreamAttempt,
-    EVENT_CHANNEL_CAPACITY,
-};
+use super::RetryConfig;
+use super::RetryObservation;
+use super::RetryableErrorClasses;
+use super::StreamAttempt;
+use super::EVENT_CHANNEL_CAPACITY;
 use crate::{
     ModelError, ModelResult, ModelRuntimeConfig, ModelStream, ModelStreamEvent, TransportErrorKind,
 };
@@ -93,7 +93,7 @@ async fn interrupted_observation_covers_all_suppressed_exits() {
                 text: "partial".into(),
             })];
             events.extend(tail.clone());
-            let events = retrying_stream(
+            let events = super::retrying_stream(
                 config(),
                 CancellationToken::new(),
                 with_observer.then(|| observer.clone() as Arc<dyn super::RetryObserver>),
@@ -165,7 +165,7 @@ async fn retries_before_first_visible_event() {
         ],
         calls.clone(),
     );
-    let mut stream = Box::pin(retrying_stream(
+    let mut stream = Box::pin(super::retrying_stream(
         config(),
         CancellationToken::new(),
         None,
@@ -189,7 +189,7 @@ async fn retries_configured_status_classes_before_visible_event() {
             ],
             calls.clone(),
         );
-        let mut stream = Box::pin(retrying_stream(
+        let mut stream = Box::pin(super::retrying_stream(
             config(),
             CancellationToken::new(),
             None,
@@ -212,7 +212,7 @@ async fn configured_retry_class_can_disable_rate_limit_retries() {
     );
     let config = config()
         .with_retryable_error_classes(RetryableErrorClasses::default().with_rate_limited(false));
-    let mut stream = Box::pin(retrying_stream(
+    let mut stream = Box::pin(super::retrying_stream(
         config,
         CancellationToken::new(),
         None,
@@ -244,7 +244,7 @@ async fn retry_observation_contains_only_safe_retry_fields() {
             observed.lock().expect("observation lock").push(observation);
         })
     };
-    let mut stream = Box::pin(retrying_stream(
+    let mut stream = Box::pin(super::retrying_stream(
         config(),
         CancellationToken::new(),
         Some(observer),
@@ -289,7 +289,7 @@ async fn never_retries_after_visible_delta() {
             ])],
             calls.clone(),
         );
-        let mut stream = Box::pin(retrying_stream(
+        let mut stream = Box::pin(super::retrying_stream(
             config(),
             CancellationToken::new(),
             None,
@@ -319,7 +319,7 @@ async fn visible_delta_preserves_protocol_error_without_retry() {
         ])],
         calls.clone(),
     );
-    let events = retrying_stream(config(), CancellationToken::new(), None, attempt)
+    let events = super::retrying_stream(config(), CancellationToken::new(), None, attempt)
         .collect::<Vec<_>>()
         .await;
     assert!(
@@ -345,7 +345,7 @@ async fn retry_discards_provisional_usage_from_failed_attempt() {
         ],
         calls.clone(),
     );
-    let events = retrying_stream(config(), CancellationToken::new(), None, attempt)
+    let events = super::retrying_stream(config(), CancellationToken::new(), None, attempt)
         .collect::<Vec<_>>()
         .await;
     assert!(events.iter().all(ModelResult::is_ok));
@@ -372,7 +372,7 @@ async fn usage_before_visible_event_does_not_stop_retrying() {
         ],
         calls.clone(),
     );
-    let events = retrying_stream(config(), CancellationToken::new(), None, attempt)
+    let events = super::retrying_stream(config(), CancellationToken::new(), None, attempt)
         .collect::<Vec<_>>()
         .await;
     assert!(events.iter().all(ModelResult::is_ok));
@@ -399,7 +399,7 @@ async fn usage_after_visible_event_preserves_protocol_error_without_retry() {
         ])],
         calls.clone(),
     );
-    let events = retrying_stream(config(), CancellationToken::new(), None, attempt)
+    let events = super::retrying_stream(config(), CancellationToken::new(), None, attempt)
         .collect::<Vec<_>>()
         .await;
     assert!(
@@ -428,7 +428,7 @@ async fn usage_after_visible_event_maps_transport_error_to_stream_interrupted() 
         ])],
         calls.clone(),
     );
-    let events = retrying_stream(config(), CancellationToken::new(), None, attempt)
+    let events = super::retrying_stream(config(), CancellationToken::new(), None, attempt)
         .collect::<Vec<_>>()
         .await;
     assert!(
@@ -454,7 +454,7 @@ async fn usage_then_eof_retries_stream_ended_without_completed() {
         ],
         calls.clone(),
     );
-    let events = retrying_stream(config(), CancellationToken::new(), None, attempt)
+    let events = super::retrying_stream(config(), CancellationToken::new(), None, attempt)
         .collect::<Vec<_>>()
         .await;
     assert!(events.iter().all(ModelResult::is_ok));
@@ -477,7 +477,7 @@ async fn retries_protocol_provider_error_before_visible_event() {
         ],
         calls.clone(),
     );
-    let mut stream = Box::pin(retrying_stream(
+    let mut stream = Box::pin(super::retrying_stream(
         config(),
         CancellationToken::new(),
         None,
@@ -502,7 +502,7 @@ async fn retries_invalid_json_object_error() {
         ],
         calls.clone(),
     );
-    let mut stream = Box::pin(retrying_stream(
+    let mut stream = Box::pin(super::retrying_stream(
         config(),
         CancellationToken::new(),
         None,
@@ -525,7 +525,7 @@ async fn retries_stream_ended_without_completed_via_eof() {
         ],
         calls.clone(),
     );
-    let mut stream = Box::pin(retrying_stream(
+    let mut stream = Box::pin(super::retrying_stream(
         config(),
         CancellationToken::new(),
         None,
@@ -551,7 +551,7 @@ async fn does_not_retry_non_transient_protocol_errors() {
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let attempt = scripted_attempt(vec![Err(ModelError::protocol(kind))], calls.clone());
-        let mut stream = Box::pin(retrying_stream(
+        let mut stream = Box::pin(super::retrying_stream(
             config(),
             CancellationToken::new(),
             None,
@@ -577,7 +577,7 @@ async fn authentication_refresh_uses_the_existing_attempt_budget() {
             ],
             calls.clone(),
         );
-        let events = retrying_stream(
+        let events = super::retrying_stream(
             config().with_max_attempts(budget),
             CancellationToken::new(),
             None,
@@ -612,7 +612,7 @@ async fn terminal_failure_after_visible_output_is_preserved_without_retry() {
         ])],
         calls.clone(),
     );
-    let events = retrying_stream(config(), CancellationToken::new(), None, attempt)
+    let events = super::retrying_stream(config(), CancellationToken::new(), None, attempt)
         .collect::<Vec<_>>()
         .await;
     assert!(
@@ -636,7 +636,7 @@ async fn configured_retry_class_can_disable_protocol_retries() {
     );
     let config = config()
         .with_retryable_error_classes(RetryableErrorClasses::default().with_protocol(false));
-    let mut stream = Box::pin(retrying_stream(
+    let mut stream = Box::pin(super::retrying_stream(
         config,
         CancellationToken::new(),
         None,
@@ -659,7 +659,7 @@ async fn retry_exhausted_reports_protocol_kind() {
         ],
         calls.clone(),
     );
-    let mut stream = Box::pin(retrying_stream(
+    let mut stream = Box::pin(super::retrying_stream(
         config(),
         CancellationToken::new(),
         None,
@@ -688,7 +688,7 @@ async fn retry_observation_reports_protocol_kind() {
             observed.lock().expect("observation lock").push(observation);
         })
     };
-    let mut stream = Box::pin(retrying_stream(
+    let mut stream = Box::pin(super::retrying_stream(
         config(),
         CancellationToken::new(),
         Some(observer),
@@ -713,7 +713,7 @@ async fn does_not_retry_non_retryable_http_statuses() {
             vec![Err(ModelError::http_status(status, "openai", None::<&str>))],
             calls.clone(),
         );
-        let mut stream = Box::pin(retrying_stream(
+        let mut stream = Box::pin(super::retrying_stream(
             config(),
             CancellationToken::new(),
             None,
@@ -737,7 +737,7 @@ async fn retry_exhaustion_keeps_last_http_diagnostic() {
         ],
         calls.clone(),
     );
-    let mut stream = Box::pin(retrying_stream(
+    let mut stream = Box::pin(super::retrying_stream(
         config(),
         CancellationToken::new(),
         None,
@@ -778,7 +778,7 @@ async fn abort_stops_pending_connect_without_starting_another_attempt() {
             Box::pin(futures::future::pending())
         })
     };
-    let mut stream = Box::pin(retrying_stream(
+    let mut stream = Box::pin(super::retrying_stream(
         config(),
         CancellationToken::new(),
         None,
@@ -786,7 +786,7 @@ async fn abort_stops_pending_connect_without_starting_another_attempt() {
     ));
     tokio::task::yield_now().await;
     stream.abort();
-    let error = timeout(Duration::from_millis(100), stream.next())
+    let error = time::timeout(Duration::from_millis(100), stream.next())
         .await
         .expect("abort must interrupt connect")
         .expect("cancelled event")
@@ -810,7 +810,7 @@ async fn abort_stops_pending_sse_read_without_starting_another_attempt() {
             })
         })
     };
-    let mut stream = Box::pin(retrying_stream(
+    let mut stream = Box::pin(super::retrying_stream(
         config(),
         CancellationToken::new(),
         None,
@@ -818,7 +818,7 @@ async fn abort_stops_pending_sse_read_without_starting_another_attempt() {
     ));
     tokio::task::yield_now().await;
     stream.abort();
-    let error = timeout(Duration::from_millis(100), stream.next())
+    let error = time::timeout(Duration::from_millis(100), stream.next())
         .await
         .expect("abort must interrupt SSE read")
         .expect("cancelled event")
@@ -847,10 +847,10 @@ async fn abort_stops_connect_read_and_backoff() {
         .with_max_attempts(3)
         .with_base_delay(Duration::from_secs(60))
         .with_jitter(false);
-    let mut stream = Box::pin(retrying_stream(config, cancellation, None, attempt));
+    let mut stream = Box::pin(super::retrying_stream(config, cancellation, None, attempt));
     tokio::task::yield_now().await;
     stream.abort();
-    let error = timeout(Duration::from_millis(100), stream.next())
+    let error = time::timeout(Duration::from_millis(100), stream.next())
         .await
         .expect("abort must interrupt backoff")
         .expect("cancelled event")
@@ -885,14 +885,14 @@ async fn bounded_event_channel_blocks_producer_until_consumer_receives() {
             })
         })
     };
-    let mut stream = Box::pin(retrying_stream(
+    let mut stream = Box::pin(super::retrying_stream(
         config(),
         CancellationToken::new(),
         None,
         attempt,
     ));
 
-    timeout(Duration::from_millis(100), started.notified())
+    time::timeout(Duration::from_millis(100), started.notified())
         .await
         .expect("producer must start");
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -905,7 +905,7 @@ async fn bounded_event_channel_blocks_producer_until_consumer_receives() {
         stream.next().await,
         Some(Ok(ModelStreamEvent::TextDelta { .. }))
     ));
-    timeout(Duration::from_millis(100), async {
+    time::timeout(Duration::from_millis(100), async {
         loop {
             if produced.load(Ordering::SeqCst) > buffered_and_in_flight {
                 return;
@@ -956,9 +956,14 @@ async fn cancellation_releases_producer_blocked_on_bounded_send() {
             })
         })
     };
-    let mut stream = Box::pin(retrying_stream(config(), parent.clone(), None, attempt));
+    let mut stream = Box::pin(super::retrying_stream(
+        config(),
+        parent.clone(),
+        None,
+        attempt,
+    ));
 
-    timeout(Duration::from_millis(100), started.notified())
+    time::timeout(Duration::from_millis(100), started.notified())
         .await
         .expect("producer must fill event channel");
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -968,10 +973,10 @@ async fn cancellation_releases_producer_blocked_on_bounded_send() {
         "producer must be blocked waiting for channel capacity"
     );
     parent.cancel();
-    timeout(Duration::from_millis(100), dropped.notified())
+    time::timeout(Duration::from_millis(100), dropped.notified())
         .await
         .expect("cancellation must release blocked producer transport");
-    let error = timeout(Duration::from_millis(100), stream.next())
+    let error = time::timeout(Duration::from_millis(100), stream.next())
         .await
         .expect("cancellation must wake consumer")
         .expect("cancelled event")
@@ -981,7 +986,7 @@ async fn cancellation_releases_producer_blocked_on_bounded_send() {
 }
 
 fn completed() -> crate::ModelResponse {
-    crate::ModelResponse::new(
+    crate::ModelResponse::try_new(
         crate::ModelMessage::assistant_text("ok"),
         crate::StopReason::EndTurn,
         None,

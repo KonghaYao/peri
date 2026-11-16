@@ -11,10 +11,10 @@
 //! | Shift+Tab（BackTab） | 权限模式循环 |
 //! | Esc    | 关闭 popup / 面板 / mention / slash |
 
-use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind},
-    prelude::*,
-};
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::KeyCode;
+use ratatui_kit::crossterm::event::KeyEventKind;
+use ratatui_kit::prelude::*;
 
 use super::atoms::{
     ACP_STATE, CANCEL_TX, INPUT_AREA_ESC_PREFIX, LAST_CTRL_C_PROCESSED, LAST_ESC_TIME,
@@ -24,14 +24,10 @@ use super::atoms::{
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::ask_user_action::AskUserResponseAction;
-use crate::kit::atoms::{
-    ACTIVE_PANEL, ASK_USER_PENDING, ASK_USER_RESPONSE_TX, Notification, POPUP_KIND, PopupKind,
-};
-use crate::kit::focus_router::{
-    FocusLayer, GlobalShortcut, active_layer, classify_global_shortcut,
-};
-use crate::kit::panel_registry::close_active_panel;
-use crate::kit::popup_overlay::{close_popup, open_popup};
+
+use crate::kit::focus_router::FocusLayer;
+use crate::kit::focus_router::GlobalShortcut;
+
 use tracing::info;
 
 /// Ctrl+C 的行为由状态纯函数决定，确保可测试。
@@ -86,7 +82,7 @@ pub fn register_global_handlers(hooks: &mut Hooks, mut exit: Handler<'static, ()
             return EventResult::Ignored;
         }
 
-        match classify_global_shortcut(&key) {
+        match crate::kit::focus_router::classify_global_shortcut(&key) {
             Some(GlobalShortcut::Quit) => {
                 // 防重入：同一 Ctrl+C 事件在 200ms 内只能处理一次。
                 // ratatui-kit 在事件处理中写 atom 后可能触发重渲染并二次分发同一事件，
@@ -159,7 +155,7 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
             return EventResult::Ignored;
         }
 
-        match classify_global_shortcut(&key) {
+        match crate::kit::focus_router::classify_global_shortcut(&key) {
             Some(GlobalShortcut::CyclePermissionMode) => {
                 *MODE_HIGHLIGHT_UNTIL.state().write() =
                     Some(peri_time::monotonic_now() + std::time::Duration::from_secs(2));
@@ -177,9 +173,9 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
                         return EventResult::Ignored;
                     }
 
-                    match active_layer() {
+                    match crate::kit::focus_router::active_layer() {
                         FocusLayer::Popup(_) => {
-                            close_popup();
+                            crate::kit::popup_overlay::close_popup();
                             return EventResult::Consumed;
                         }
                         FocusLayer::InlineCompletion => return EventResult::Ignored,
@@ -199,7 +195,7 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
                                     &snapshot.owner,
                                 );
                             } else {
-                                close_active_panel();
+                                crate::kit::panel_registry::close_active_panel();
                             }
                             return EventResult::Consumed;
                         }
@@ -218,7 +214,7 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
                         // Rewind v2：打开面板 + 实时查询候选（查询响应写 REWIND_PREVIEW atom，
                         // 弹窗订阅渲染；查询失败写 REWIND_QUERY_ERROR）。
                         crate::kit::rewind_candidates::spawn_candidates_query();
-                        open_popup(PopupKind::Rewind);
+                        crate::kit::popup_overlay::open_popup(PopupKind::Rewind);
                         return EventResult::Consumed;
                     }
 
@@ -240,3 +236,15 @@ fn show_cancel_notification(now: std::time::Instant) {
 #[cfg(test)]
 #[path = "event_handlers_test.rs"]
 mod tests;
+
+use crate::kit::atoms::ACTIVE_PANEL;
+
+use crate::kit::atoms::ASK_USER_PENDING;
+
+use crate::kit::atoms::ASK_USER_RESPONSE_TX;
+
+use crate::kit::atoms::Notification;
+
+use crate::kit::atoms::POPUP_KIND;
+
+use crate::kit::atoms::PopupKind;

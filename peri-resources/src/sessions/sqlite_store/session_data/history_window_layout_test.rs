@@ -4,7 +4,8 @@
 //! 各用例文档。分配口径：`sqlite3_memory_highwater`（SQLite 自身分配，不含 Rust Vec），
 //! 与审查报告一致；测试串行执行（`--test-threads=1`）。
 
-use super::*;
+use super::{Arc, SqliteSessionData};
+
 use crate::sessions::data::SessionDataPort;
 use crate::sessions::sqlite_store::SqliteThreadStore;
 use peri_acp_types::history_window::{
@@ -15,9 +16,9 @@ use peri_acp_types::session_resources::{
     FrozenSnapshotBytes, HistoryWindowEntry, HistoryWindowPagePlan, HistoryWindowReadIntent,
     HistoryWindowTailExpectation, InheritedHistoryEntry, NewSession, NewSessionMeta,
 };
-use peri_acp_types::store::{
-    serialize_persisted_payload, InheritedContext, PersistedPayload, ThreadStore,
-};
+use peri_acp_types::store::InheritedContext;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::store::ThreadStore;
 use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding};
 use std::collections::HashMap;
 use tempfile::TempDir;
@@ -34,6 +35,8 @@ extern "C" {
 fn sqlite_peak_reset() -> i64 {
     // SAFETY: SQLite 的全局分配计数；测试串行执行。
     let before = unsafe { sqlite3_memory_used() };
+    // SAFETY: SQLite exposes this process-wide counter only through its C API;
+    // resetting the counter does not access a connection or borrow its storage.
     unsafe {
         sqlite3_memory_highwater(1);
     }
@@ -48,7 +51,7 @@ fn sqlite_peak_extra(before: i64) -> i64 {
 
 async fn database() -> (SqliteThreadStore, SqliteSessionData, TempDir) {
     let directory = tempfile::tempdir().unwrap();
-    let store = SqliteThreadStore::new(directory.path().join("threads.db"))
+    let store = SqliteThreadStore::try_new(directory.path().join("threads.db"))
         .await
         .unwrap();
     let data = SqliteSessionData::new(Arc::clone(&store.database));
@@ -158,7 +161,7 @@ fn inherited_source(
 #[ignore = "16 MiB 夹具与分配测量；显式运行，见用例文档"]
 async fn own_large_body_chunks_stay_bounded_and_exact() {
     let large = PersistedPayload::Message(BaseMessage::human("C".repeat(LARGE_BYTES)));
-    let expected = serialize_persisted_payload(&large).unwrap();
+    let expected = peri_acp_types::store::serialize_persisted_payload(&large).unwrap();
     let (_store, data, _directory, id) = session_with_own(std::slice::from_ref(&large)).await;
     let tail = data
         .history_window_bounds(&id)
@@ -267,8 +270,8 @@ async fn own_page_candidate_lengths_avoid_materializing_oversize_rows() {
     const BUDGET: usize = 512 * 1024;
     let large = PersistedPayload::Message(BaseMessage::human("D".repeat(LARGE_BYTES)));
     let small = PersistedPayload::Message(BaseMessage::human("small own body"));
-    let expected_large = serialize_persisted_payload(&large).unwrap();
-    let expected_small = serialize_persisted_payload(&small).unwrap();
+    let expected_large = peri_acp_types::store::serialize_persisted_payload(&large).unwrap();
+    let expected_small = peri_acp_types::store::serialize_persisted_payload(&small).unwrap();
     let (_store, data, _directory, id) = session_with_own(&[small.clone(), large.clone()]).await;
     let tail = data
         .history_window_bounds(&id)
@@ -328,7 +331,7 @@ async fn own_page_candidate_lengths_avoid_materializing_oversize_rows() {
         unreachable!()
     };
     assert_eq!(
-        serialize_persisted_payload(&item.payload).unwrap(),
+        peri_acp_types::store::serialize_persisted_payload(&item.payload).unwrap(),
         expected_small
     );
 
@@ -380,7 +383,7 @@ async fn inherited_page_candidates_use_layout_and_stay_bounded() {
     const BUDGET: usize = 512 * 1024;
     let large = PersistedPayload::Message(BaseMessage::human("E".repeat(LARGE_BYTES)));
     let tail = PersistedPayload::Message(BaseMessage::human("inherited tail"));
-    let expected_large = serialize_persisted_payload(&large).unwrap();
+    let expected_large = peri_acp_types::store::serialize_persisted_payload(&large).unwrap();
     let (_store, data, _directory, id) =
         session_with_inherited(&[large.clone(), tail], "parent").await;
     let snapshot = data

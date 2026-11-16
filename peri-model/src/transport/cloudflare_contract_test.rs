@@ -22,7 +22,10 @@ mod contracts {
     use tokio_util::sync::CancellationToken;
     use wasm_bindgen::prelude::*;
 
-    use super::{cloudflare, http::HttpRequest, ModelError, TransportErrorKind};
+    use super::cloudflare;
+    use super::http::HttpRequest;
+    use super::ModelError;
+    use super::TransportErrorKind;
 
     #[wasm_bindgen(inline_js = r#"
 let original;

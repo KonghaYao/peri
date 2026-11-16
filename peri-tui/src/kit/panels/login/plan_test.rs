@@ -28,13 +28,13 @@ fn responses_config() -> peri_acp::provider::config::PeriConfig {
             "haiku":{"provider":"resp", "contextWindow":4000}
         }
     }}))
-    .unwrap()
+    .expect("responses config: fixture JSON must match the expected schema")
 }
 
 #[test]
 fn plan_mode_writes_tagged_auth_with_empty_api_key_and_official_endpoint() {
     let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("plan mode writes tagged auth with empty api key and official endpoint: the edit_provider fixture operation uses valid inputs");
     edit.cycle_auth_mode();
     edit.plan.store = plan_store();
     edit.plan.account = "work".into();
@@ -42,13 +42,13 @@ fn plan_mode_writes_tagged_auth_with_empty_api_key_and_official_endpoint() {
     edit.plan.client_id = "client-one".into();
     edit.base_url = "https://custom.invalid/v1/responses".into();
 
-    let candidate = edit.build_candidate().unwrap();
+    let candidate = edit.build_candidate().expect("plan mode writes tagged auth with empty api key and official endpoint: the build_candidate fixture operation uses valid inputs");
     let provider = candidate
         .config
         .providers
         .iter()
         .find(|provider| provider.id == "resp")
-        .unwrap();
+        .expect("plan mode writes tagged auth with empty api key and official endpoint: fixture must contain the searched item");
     match &provider.auth {
         Some(peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan {
             store,
@@ -76,16 +76,16 @@ fn plan_mode_writes_tagged_auth_with_empty_api_key_and_official_endpoint() {
 #[test]
 fn plan_mode_rejects_relative_store_and_missing_identity() {
     let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("plan mode rejects relative store and missing identity: the edit_provider fixture operation uses valid inputs");
     edit.cycle_auth_mode();
     edit.plan.store = "relative/store".into();
     edit.plan.account = "work".into();
-    let error = edit.build_candidate().unwrap_err();
+    let error = edit.build_candidate().expect_err("plan mode rejects relative store and missing identity: the invalid fixture must be rejected");
     assert_eq!(error.field, LoginField::PlanStore);
 
     edit.plan.store = plan_store();
     edit.plan.subject.clear();
-    let error = edit.build_candidate().unwrap_err();
+    let error = edit.build_candidate().expect_err("plan mode rejects relative store and missing identity: the invalid fixture must be rejected");
     assert_eq!(error.field, LoginField::AuthActions);
 
     edit.plan.subject = "subject".into();
@@ -96,13 +96,15 @@ fn plan_mode_rejects_relative_store_and_missing_identity() {
 #[test]
 fn plan_mode_rejects_invalid_account_reference() {
     let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("plan mode rejects invalid account reference: the edit_provider fixture operation uses valid inputs");
     edit.cycle_auth_mode();
     edit.plan.store = plan_store();
     edit.plan.account = "work/slash".into();
     edit.plan.subject = "subject".into();
     edit.plan.client_id = "client".into();
-    let error = edit.build_candidate().unwrap_err();
+    let error = edit.build_candidate().expect_err(
+        "plan mode rejects invalid account reference: the invalid fixture must be rejected",
+    );
     assert_eq!(error.field, LoginField::AuthActions);
     assert_eq!(
         error.message,
@@ -113,7 +115,7 @@ fn plan_mode_rejects_invalid_account_reference() {
 #[test]
 fn plan_account_uses_unmodified_shared_reference_rules() {
     let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("plan account uses unmodified shared reference rules: the edit_provider fixture operation uses valid inputs");
     edit.cycle_auth_mode();
     edit.plan.store = plan_store();
     edit.plan.subject = "subject".into();
@@ -125,13 +127,13 @@ fn plan_account_uses_unmodified_shared_reference_rules() {
         "x".repeat(128),
     ] {
         edit.plan.account = input.clone();
-        let candidate = edit.build_candidate().unwrap();
+        let candidate = edit.build_candidate().expect("plan account uses unmodified shared reference rules: the build_candidate fixture operation uses valid inputs");
         assert!(matches!(
             &candidate.config.providers[0].auth,
             Some(peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan { account, .. })
                 if account == &input
         ));
-        let target = super::edit_handler::auth_scope(&edit).target().unwrap();
+        let target = super::edit_handler::auth_scope(&edit).target().expect("plan account uses unmodified shared reference rules: the auth_scope fixture operation uses valid inputs");
         assert_eq!(target.account, input);
     }
     for input in [
@@ -149,7 +151,7 @@ fn plan_account_uses_unmodified_shared_reference_rules() {
     ] {
         edit.plan.account = input;
         assert!(super::edit_handler::auth_scope(&edit).target().is_none());
-        let error = edit.build_candidate().unwrap_err();
+        let error = edit.build_candidate().expect_err("plan account uses unmodified shared reference rules: the invalid fixture must be rejected");
         assert_eq!(error.field, LoginField::AuthActions);
         assert_eq!(
             error.message,
@@ -161,7 +163,7 @@ fn plan_account_uses_unmodified_shared_reference_rules() {
 #[test]
 fn switching_back_to_api_key_drops_plan_reference() {
     let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("switching back to api key drops plan reference: the edit_provider fixture operation uses valid inputs");
     edit.cycle_auth_mode();
     edit.plan.store = plan_store();
     edit.plan.account = "work".into();
@@ -172,13 +174,13 @@ fn switching_back_to_api_key_drops_plan_reference() {
     edit.api_key = "api-mode-key".into();
     edit.base_url = "https://api.openai.com/v1/responses".into();
 
-    let candidate = edit.build_candidate().unwrap();
+    let candidate = edit.build_candidate().expect("switching back to api key drops plan reference: the build_candidate fixture operation uses valid inputs");
     let provider = candidate
         .config
         .providers
         .iter()
         .find(|provider| provider.id == "resp")
-        .unwrap();
+        .expect("switching back to api key drops plan reference: fixture must contain the searched item");
     assert!(!matches!(
         provider.auth,
         Some(peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan { .. })
@@ -189,7 +191,9 @@ fn switching_back_to_api_key_drops_plan_reference() {
 #[test]
 fn auth_mode_cycle_keeps_both_drafts() {
     let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).expect(
+        "auth mode cycle keeps both drafts: the edit_provider fixture operation uses valid inputs",
+    );
     edit.api_key = "api-key-draft".into();
     edit.cycle_auth_mode();
     edit.plan.store = plan_store();
@@ -203,7 +207,7 @@ fn auth_mode_cycle_keeps_both_drafts() {
 #[test]
 fn plan_defaults_only_fill_empty_fields() {
     let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("plan defaults only fill empty fields: the edit_provider fixture operation uses valid inputs");
     edit.cycle_auth_mode();
     edit.plan.store = "/custom/store".into();
     edit.plan.account = "custom".into();
@@ -225,7 +229,7 @@ fn plan_defaults_only_fill_empty_fields() {
 #[test]
 fn plan_mode_navigation_uses_plan_fields_and_never_api_key() {
     let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).expect("plan mode navigation uses plan fields and never api key: the edit_provider fixture operation uses valid inputs");
     edit.cycle_auth_mode();
     edit.ensure_plan_defaults(Some(default_store()));
     let fields = edit.visible_fields();

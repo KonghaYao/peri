@@ -1,28 +1,34 @@
 use peri_agent::middleware::capabilities as hook_state;
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[cfg(unix)]
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
-use peri_agent::{
-    agent::{
-        react::{Reasoning, ToolCall},
-        stages::{tool_dispatch::dispatch_tools, SharedToolMap, StageContext},
-    },
-    middleware::{r#trait::Middleware, MiddlewareChain},
-    session::{tool_catalog::SessionToolCatalog, FrozenContext, Session},
-    tools::{BaseTool, ToolContext},
-};
+use peri_agent::agent::react::Reasoning;
+use peri_agent::agent::react::ToolCall;
+use peri_agent::agent::stages::tool_dispatch;
+use peri_agent::agent::stages::SharedToolMap;
+use peri_agent::agent::stages::StageContext;
+use peri_agent::middleware::r#trait::Middleware;
+use peri_agent::middleware::MiddlewareChain;
+use peri_agent::session::tool_catalog::SessionToolCatalog;
+use peri_agent::session::FrozenContext;
+use peri_agent::session::Session;
+use peri_agent::tools::BaseTool;
+use peri_agent::tools::ToolContext;
 #[cfg(unix)]
 use peri_middlewares::hooks::{HookEvent, HookMiddleware, HookType, RegisteredHook};
-use peri_middlewares::{
-    permission::{
-        default_requires_approval, PermissionMiddleware, PermissionMode, SharedPermissionMode,
-    },
-    ExecuteExtraToolResolver, EXECUTE_EXTRA_TOOL_NAME,
-};
+use peri_middlewares::permission::default_requires_approval;
+use peri_middlewares::permission::PermissionMiddleware;
+use peri_middlewares::permission::PermissionMode;
+use peri_middlewares::permission::SharedPermissionMode;
+use peri_middlewares::ExecuteExtraToolResolver;
+use peri_middlewares::EXECUTE_EXTRA_TOOL_NAME;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
@@ -135,7 +141,7 @@ async fn wrapper_policy_event_and_result_project_canonical_target() {
         )],
     );
 
-    let outcome = dispatch_tools(
+    let outcome = tool_dispatch::dispatch_tools(
         &context,
         &reasoning,
         &context.runtime.tool_catalog.snapshot(),
@@ -204,7 +210,7 @@ async fn grep_path_parameter_is_preserved_not_renamed_to_file_path() {
             json!({"tool_name": "Grep", "params": {"pattern": "tokio|serde", "path": "/tmp/a"}}),
         )],
     );
-    let outcome = dispatch_tools(
+    let outcome = tool_dispatch::dispatch_tools(
         &context,
         &reasoning,
         &context.runtime.tool_catalog.snapshot(),
@@ -223,7 +229,7 @@ async fn grep_path_parameter_is_preserved_not_renamed_to_file_path() {
             json!({"pattern": "tokio", "path": "/tmp/a"}),
         )],
     );
-    let outcome = dispatch_tools(
+    let outcome = tool_dispatch::dispatch_tools(
         &context,
         &reasoning,
         &context.runtime.tool_catalog.snapshot(),
@@ -294,7 +300,7 @@ async fn malformed_unknown_and_ambiguous_wrapper_targets_have_no_policy_or_invok
         ],
     );
 
-    let outcome = dispatch_tools(
+    let outcome = tool_dispatch::dispatch_tools(
         &context,
         &reasoning,
         &context.runtime.tool_catalog.snapshot(),
@@ -354,7 +360,7 @@ async fn hook_receives_canonical_alias_identity() {
         vec![ToolCall::new("shell", "SHELL", json!({"command": "true"}))],
     );
 
-    let outcome = dispatch_tools(
+    let outcome = tool_dispatch::dispatch_tools(
         &context,
         &reasoning,
         &context.runtime.tool_catalog.snapshot(),
@@ -428,7 +434,7 @@ async fn accept_edit_applies_to_wrapper_write_and_edit_but_not_bash_or_mcp() {
         ],
     );
 
-    let outcome = dispatch_tools(
+    let outcome = tool_dispatch::dispatch_tools(
         &context,
         &reasoning,
         &context.runtime.tool_catalog.snapshot(),

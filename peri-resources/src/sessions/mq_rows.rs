@@ -11,9 +11,6 @@ use peri_acp_types::session::{
     MqEntry, MqFilter, MqHeader, MqReceiveItemOutcome, MqReceiveStatus, MqWatermark,
 };
 use peri_acp_types::session_resources::SessionResourceResult;
-use peri_acp_types::store::{deserialize_persisted_payload, serialize_persisted_payload};
-
-use super::failure::corrupt;
 
 /// 按 thread 读取全部 MQ 行：`ORDER BY (enqueued_at, id)` 就是消费顺序。
 ///
@@ -102,7 +99,7 @@ pub(in crate::sessions) fn kind_token(
     serde_json::to_value(kind)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
-        .ok_or_else(|| corrupt("message kind is not representable"))
+        .ok_or_else(|| super::failure::corrupt("message kind is not representable"))
 }
 
 /// `MessageSource` 的序列化 token。
@@ -112,48 +109,49 @@ pub(in crate::sessions) fn source_token(
     serde_json::to_value(source)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
-        .ok_or_else(|| corrupt("message source is not representable"))
+        .ok_or_else(|| super::failure::corrupt("message source is not representable"))
 }
 
 pub(in crate::sessions) fn payload_json(
     payload: &peri_acp_types::store::PersistedPayload,
 ) -> SessionResourceResult<String> {
-    serialize_persisted_payload(payload).map_err(|_| corrupt("MQ payload is not serializable"))
+    peri_acp_types::store::serialize_persisted_payload(payload)
+        .map_err(|_| super::failure::corrupt("MQ payload is not serializable"))
 }
 
 /// 一行 MQ 事实的原样文本形态（两种执行器读回后共用的形状）。
-pub(in crate::sessions) struct RawMqRow<'a> {
-    pub id: &'a str,
-    pub enqueued_at: &'a str,
-    pub kind: &'a str,
-    pub source: &'a str,
-    pub policy_json: &'a str,
-    pub payload_json: &'a str,
-    pub original_draft: Option<&'a str>,
+pub(in crate::sessions) struct RawMqRow<'row> {
+    pub id: &'row str,
+    pub enqueued_at: &'row str,
+    pub kind: &'row str,
+    pub source: &'row str,
+    pub policy_json: &'row str,
+    pub payload_json: &'row str,
+    pub original_draft: Option<&'row str>,
 }
 
 /// 控制面行的文本形态：没有正文列。
-pub(in crate::sessions) struct RawMqHeader<'a> {
-    pub id: &'a str,
-    pub enqueued_at: &'a str,
-    pub kind: &'a str,
-    pub source: &'a str,
-    pub policy_json: &'a str,
+pub(in crate::sessions) struct RawMqHeader<'row> {
+    pub id: &'row str,
+    pub enqueued_at: &'row str,
+    pub kind: &'row str,
+    pub source: &'row str,
+    pub policy_json: &'row str,
 }
 
 /// 文本行 → 控制面事实；不接触 `payload_json`。
 pub(in crate::sessions) fn decode_header(row: RawMqHeader<'_>) -> SessionResourceResult<MqHeader> {
     let kind = serde_json::from_value(serde_json::Value::String(row.kind.to_owned()))
-        .map_err(|_| corrupt("MQ row has an unknown message kind"))?;
+        .map_err(|_| super::failure::corrupt("MQ row has an unknown message kind"))?;
     let source = serde_json::from_value(serde_json::Value::String(row.source.to_owned()))
-        .map_err(|_| corrupt("MQ row has an unknown message source"))?;
+        .map_err(|_| super::failure::corrupt("MQ row has an unknown message source"))?;
     let policy = serde_json::from_str(row.policy_json)
-        .map_err(|_| corrupt("MQ row has an unreadable message policy"))?;
+        .map_err(|_| super::failure::corrupt("MQ row has an unreadable message policy"))?;
     let id = row
         .id
         .parse::<uuid::Uuid>()
         .map(peri_acp_types::messages::MessageId::from)
-        .map_err(|_| corrupt("MQ row has an invalid message id"))?;
+        .map_err(|_| super::failure::corrupt("MQ row has an invalid message id"))?;
     Ok(MqHeader {
         id,
         enqueued_at: row.enqueued_at.to_owned(),
@@ -167,18 +165,18 @@ pub(in crate::sessions) fn decode_header(row: RawMqHeader<'_>) -> SessionResourc
 /// 读不懂的行不能当成空队列或空正文。
 pub(in crate::sessions) fn decode_entry(row: RawMqRow<'_>) -> SessionResourceResult<MqEntry> {
     let kind = serde_json::from_value(serde_json::Value::String(row.kind.to_owned()))
-        .map_err(|_| corrupt("MQ row has an unknown message kind"))?;
+        .map_err(|_| super::failure::corrupt("MQ row has an unknown message kind"))?;
     let source = serde_json::from_value(serde_json::Value::String(row.source.to_owned()))
-        .map_err(|_| corrupt("MQ row has an unknown message source"))?;
+        .map_err(|_| super::failure::corrupt("MQ row has an unknown message source"))?;
     let policy = serde_json::from_str(row.policy_json)
-        .map_err(|_| corrupt("MQ row has an unreadable message policy"))?;
-    let payload = deserialize_persisted_payload(row.payload_json)
-        .map_err(|_| corrupt("MQ row has an unreadable payload"))?;
+        .map_err(|_| super::failure::corrupt("MQ row has an unreadable message policy"))?;
+    let payload = peri_acp_types::store::deserialize_persisted_payload(row.payload_json)
+        .map_err(|_| super::failure::corrupt("MQ row has an unreadable payload"))?;
     let id = row
         .id
         .parse::<uuid::Uuid>()
         .map(peri_acp_types::messages::MessageId::from)
-        .map_err(|_| corrupt("MQ row has an invalid message id"))?;
+        .map_err(|_| super::failure::corrupt("MQ row has an invalid message id"))?;
     Ok(MqEntry {
         id,
         enqueued_at: row.enqueued_at.to_owned(),
@@ -198,7 +196,7 @@ pub(in crate::sessions) fn policy_ensures_processing(
 ) -> SessionResourceResult<bool> {
     serde_json::from_str::<peri_acp_types::session::MessagePolicy>(policy_json)
         .map(|policy| policy.ensures_processing())
-        .map_err(|_| corrupt("MQ row has an unreadable message policy"))
+        .map_err(|_| super::failure::corrupt("MQ row has an unreadable message policy"))
 }
 
 /// 投影过滤：输入必须已按 `(enqueued_at, id)` 升序（SQL 负责），这里只做收敛。
@@ -240,9 +238,9 @@ pub(in crate::sessions) fn filter_entries(
 /// 删除 MQ 行且不写历史，宁可失败关闭也不重复追加。
 pub(in crate::sessions) fn same_payload(left: &str, right: &str) -> bool {
     let normalize = |text: &str| {
-        deserialize_persisted_payload(text)
+        peri_acp_types::store::deserialize_persisted_payload(text)
             .ok()
-            .and_then(|payload| serialize_persisted_payload(&payload).ok())
+            .and_then(|payload| peri_acp_types::store::serialize_persisted_payload(&payload).ok())
     };
     match (normalize(left), normalize(right)) {
         (Some(left), Some(right)) => left == right,

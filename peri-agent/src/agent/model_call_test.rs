@@ -4,15 +4,25 @@ use peri_acp_types::identity::AgentId;
 use peri_model::{ModelMessage, ModelResponse, ModelStreamEvent, StopReason};
 use tokio::sync::Barrier;
 
-use super::*;
 use crate::agent::events_v2::EventBus;
 use crate::agent::model_bridge::AgentModelBridge;
+use crate::agent::model_call::ScopedModel;
 use crate::agent::react::{ReactLLM, StreamingContext};
 use crate::agent::stages::StageContext;
 use crate::messages::BaseMessage;
 use crate::session::store::FrozenContext;
 use crate::session::turn::TurnId;
 use crate::session::Session;
+use async_trait::async_trait;
+use peri_model::Model;
+use peri_model::ModelCallContext;
+use peri_model::ModelCallParent;
+use peri_model::ModelCapabilities;
+use peri_model::ModelRequest;
+use peri_model::ModelResult;
+use peri_model::ModelStream;
+use peri_model::PreparedModelCall;
+use tokio_util::sync::CancellationToken;
 
 fn parent(tool_call: &str) -> ModelCallParent {
     ModelCallParent {
@@ -43,48 +53,52 @@ async fn concurrent_tool_parent_scopes_do_not_cross_or_leak() {
     let read = |expected: ModelCallParent| async move {
         barrier.wait().await;
         tokio::task::yield_now().await;
-        let captured = capture_tool_parent(Some(&expected.tool_call));
+        let captured = crate::agent::model_call::capture_tool_parent(Some(&expected.tool_call));
         assert_eq!(captured, Some(expected));
-        assert!(capture_tool_parent(Some("unrelated-tool")).is_none());
+        assert!(crate::agent::model_call::capture_tool_parent(Some("unrelated-tool")).is_none());
         captured
     };
 
     let (left, right) = tokio::join!(
-        scope_tool_parent(Some(first.clone()), read(first.clone())),
-        scope_tool_parent(Some(second.clone()), read(second.clone())),
+        crate::agent::model_call::scope_tool_parent(Some(first.clone()), read(first.clone())),
+        crate::agent::model_call::scope_tool_parent(Some(second.clone()), read(second.clone())),
     );
     assert_eq!(left, Some(first));
     assert_eq!(right, Some(second));
-    assert!(capture_tool_parent(Some("first-tool")).is_none());
-    assert!(capture_tool_parent(Some("second-tool")).is_none());
+    assert!(crate::agent::model_call::capture_tool_parent(Some("first-tool")).is_none());
+    assert!(crate::agent::model_call::capture_tool_parent(Some("second-tool")).is_none());
 }
 
 #[tokio::test]
 async fn child_task_requires_explicit_parent_capture_and_empty_scope_masks_outer() {
     let expected = parent("spawn-tool");
-    scope_tool_parent(Some(expected.clone()), async {
-        let auxiliary = tool_model_call_context("goal-verify").unwrap();
+    crate::agent::model_call::scope_tool_parent(Some(expected.clone()), async {
+        let auxiliary = crate::agent::model_call::tool_model_call_context("goal-verify")
+            .expect("the tool model call context fixture result is required for this assertion");
         assert_eq!(auxiliary.owner, expected.owner);
         assert_eq!(auxiliary.execution, expected.execution);
         assert_eq!(auxiliary.call, "goal-verify:reason:2:spawn-tool");
         assert!(auxiliary.parent.is_none());
-        let copied = capture_tool_parent(Some("spawn-tool"));
+        let copied = crate::agent::model_call::capture_tool_parent(Some("spawn-tool"));
         let inherited = tokio::spawn(async move {
-            assert!(capture_tool_parent(Some("spawn-tool")).is_none());
+            assert!(crate::agent::model_call::capture_tool_parent(Some("spawn-tool")).is_none());
             copied
         })
         .await
-        .unwrap();
+        .expect("the spawn fixture result is required for this assertion");
         assert_eq!(inherited, Some(expected.clone()));
-        scope_tool_parent(None, async {
-            assert!(capture_tool_parent(Some("spawn-tool")).is_none());
+        crate::agent::model_call::scope_tool_parent(None, async {
+            assert!(crate::agent::model_call::capture_tool_parent(Some("spawn-tool")).is_none());
         })
         .await;
-        assert_eq!(capture_tool_parent(Some("spawn-tool")), Some(expected));
+        assert_eq!(
+            crate::agent::model_call::capture_tool_parent(Some("spawn-tool")),
+            Some(expected)
+        );
     })
     .await;
-    assert!(capture_tool_parent(Some("spawn-tool")).is_none());
-    assert!(tool_model_call_context("goal-verify").is_none());
+    assert!(crate::agent::model_call::capture_tool_parent(Some("spawn-tool")).is_none());
+    assert!(crate::agent::model_call::tool_model_call_context("goal-verify").is_none());
 }
 
 #[derive(Default)]
@@ -103,8 +117,11 @@ impl Model for CaptureModel {
     ) -> ModelResult<ModelStream> {
         // Allow another owner to enter this same provider before capturing the request.
         tokio::task::yield_now().await;
-        self.0.lock().unwrap().push(request);
-        let response = ModelResponse::new(
+        self.0
+            .lock()
+            .expect("self lock mutex must remain unpoisoned throughout the test")
+            .push(request);
+        let response = ModelResponse::try_new(
             ModelMessage::assistant_text("done"),
             StopReason::EndTurn,
             None,
@@ -138,9 +155,12 @@ async fn identical_concurrent_bridge_requests_keep_request_owned_contexts() {
         bridge.generate_reasoning(&messages, &[], Some(streaming(first.clone()))),
         bridge.generate_reasoning(&messages, &[], Some(streaming(second.clone()))),
     );
-    left.unwrap();
-    right.unwrap();
-    let requests = model.0.lock().unwrap();
+    left.expect("the left fixture result is required for this assertion");
+    right.expect("the right fixture result is required for this assertion");
+    let requests = model
+        .0
+        .lock()
+        .expect("model lock mutex must remain unpoisoned throughout the test");
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].messages, requests[1].messages);
     let contexts: Vec<_> = requests.iter().map(|r| r.call_context.clone()).collect();
@@ -170,17 +190,22 @@ async fn auxiliary_call_sequences_are_local_to_the_operation() {
         left.complete(ModelRequest::default(), CancellationToken::new()),
         right.complete(ModelRequest::default(), CancellationToken::new()),
     );
-    a.unwrap();
-    b.unwrap();
+    a.expect("the a fixture result is required for this assertion");
+    b.expect("the b fixture result is required for this assertion");
     left.complete(ModelRequest::default(), CancellationToken::new())
         .await
-        .unwrap();
+        .expect("the complete fixture result is required for this assertion");
     let contexts: Vec<_> = provider
         .0
         .lock()
-        .unwrap()
+        .expect("provider lock mutex must remain unpoisoned throughout the test")
         .iter()
-        .map(|request| request.call_context.clone().unwrap())
+        .map(|request| {
+            request
+                .call_context
+                .clone()
+                .expect("the clone fixture result is required for this assertion")
+        })
         .collect();
     let mut actual: Vec<_> = contexts
         .iter()
@@ -221,8 +246,11 @@ async fn scoped_model_preserves_complete_override_and_binds_identity_once() {
             request: ModelRequest,
             _cancellation: CancellationToken,
         ) -> ModelResult<ModelResponse> {
-            self.0.lock().unwrap().push(request);
-            ModelResponse::new(
+            self.0
+                .lock()
+                .expect("self lock mutex must remain unpoisoned throughout the test")
+                .push(request);
+            ModelResponse::try_new(
                 ModelMessage::assistant_text("complete override"),
                 StopReason::EndTurn,
                 None,
@@ -236,14 +264,20 @@ async fn scoped_model_preserves_complete_override_and_binds_identity_once() {
     let response = model
         .complete(ModelRequest::default(), CancellationToken::new())
         .await
-        .unwrap();
+        .expect("the complete fixture result is required for this assertion");
     assert_eq!(
         response.assistant_text().as_deref(),
         Some("complete override")
     );
-    let requests = provider.0.lock().unwrap();
+    let requests = provider
+        .0
+        .lock()
+        .expect("provider lock mutex must remain unpoisoned throughout the test");
     assert_eq!(requests.len(), 1);
-    let identity = requests[0].call_context.as_ref().unwrap();
+    let identity = requests[0]
+        .call_context
+        .as_ref()
+        .expect("the as ref fixture result is required for this assertion");
     assert_eq!(identity.owner, "session-a");
     assert_eq!(identity.call, "compact:0:0");
 }
@@ -263,14 +297,17 @@ fn reason_identity_uses_real_execution_and_requires_a_session_owner() {
         .session_context
         .write()
         .insert("session_id".into(), "session-a".into());
-    let first = ctx.model_call_context("reason", "reason:0".into()).unwrap();
+    let first = ctx
+        .model_call_context("reason", "reason:0".into())
+        .expect("the model call context fixture result is required for this assertion");
     assert_eq!(
         first.execution,
         ctx.session.turn.execution_binding().attempt_id.to_string()
     );
     assert_eq!(
         first,
-        ctx.model_call_context("reason", "reason:0".into()).unwrap()
+        ctx.model_call_context("reason", "reason:0".into())
+            .expect("the into fixture result is required for this assertion")
     );
     ctx.session.turn.advance_step();
     let continuation = ctx
@@ -278,11 +315,13 @@ fn reason_identity_uses_real_execution_and_requires_a_session_owner() {
             "reason",
             format!("reason:{}", ctx.session.turn.current_step()),
         )
-        .unwrap();
+        .expect("the model call context fixture result is required for this assertion");
     assert_eq!(continuation.execution, first.execution);
     assert_ne!(continuation.call, first.call);
     ctx.session.turn = Arc::new(session.start_turn());
-    let next = ctx.model_call_context("reason", "reason:0".into()).unwrap();
+    let next = ctx
+        .model_call_context("reason", "reason:0".into())
+        .expect("the model call context fixture result is required for this assertion");
     assert_eq!(next.owner, first.owner);
     assert_ne!(next.execution, first.execution);
 }

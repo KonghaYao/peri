@@ -1,9 +1,10 @@
 //! 后台 child 终态结算：终态、工作意图与结果接纳在同一次存储提交里。
 
-use super::*;
-use crate::agent::async_tasks::delivery::terminal_delivery_id;
 use crate::agent::events::BackgroundTaskResult;
+use crate::session::subagent::terminal_settlement::TerminalMqRoute;
+use crate::session::subagent::terminal_settlement::TerminalOwnership;
 use crate::session::test_resources::TestSession;
+
 use peri_acp_types::thread::{AgentStatus, WorkState};
 
 fn result(task_id: &str) -> BackgroundTaskResult {
@@ -86,30 +87,48 @@ async fn settle_commits_terminal_work_state_and_result_together() {
         .resources()
         .set_work_state(&child, WorkState::Working)
         .await
-        .unwrap();
+        .expect("the set work state fixture result is required for this assertion");
     let route = route(&session, child.clone());
 
     route
         .settle(&child, AgentStatus::Done, &result("task-1"))
         .await
-        .unwrap();
+        .expect("the settle fixture result is required for this assertion");
 
-    let meta = session.resources().load_session_meta(&child).await.unwrap();
+    let meta = session
+        .resources()
+        .load_session_meta(&child)
+        .await
+        .expect("the load session meta fixture result is required for this assertion");
     assert_eq!(meta.agent_status, AgentStatus::Done);
     assert_eq!(meta.work_state, WorkState::Idle);
-    let entries = session.queue().snapshot().await.unwrap();
+    let entries = session
+        .queue()
+        .snapshot()
+        .await
+        .expect("the snapshot fixture result is required for this assertion");
     assert_eq!(entries.len(), 1);
     assert_eq!(
         entries[0].delivery_id,
-        Some(terminal_delivery_id("task-1", "terminal"))
+        Some(crate::agent::async_tasks::delivery::terminal_delivery_id(
+            "task-1", "terminal"
+        ))
     );
 
     // 重放同一结果身份：存储已有同一条，不新增第二行、不改终态。
     route
         .settle(&child, AgentStatus::Done, &result("task-1"))
         .await
-        .unwrap();
-    assert_eq!(session.queue().snapshot().await.unwrap().len(), 1);
+        .expect("the settle fixture result is required for this assertion");
+    assert_eq!(
+        session
+            .queue()
+            .snapshot()
+            .await
+            .expect("the snapshot fixture result is required for this assertion")
+            .len(),
+        1
+    );
 }
 
 /// [回归] 正常终态已写库后执行才 panic：panic 兜底以同一 task_id 再结算一次
@@ -123,7 +142,7 @@ async fn settle_is_final_after_the_first_terminal() {
     route
         .settle(&child, AgentStatus::Done, &result("task-panic"))
         .await
-        .unwrap();
+        .expect("the settle fixture result is required for this assertion");
 
     let mut panicked = result("task-panic");
     panicked.success = false;
@@ -133,14 +152,23 @@ async fn settle_is_final_after_the_first_terminal() {
         .await
         .expect("panic 兜底的重复结算不得传播冲突");
 
-    let meta = session.resources().load_session_meta(&child).await.unwrap();
+    let meta = session
+        .resources()
+        .load_session_meta(&child)
+        .await
+        .expect("the load session meta fixture result is required for this assertion");
     assert_eq!(
         meta.agent_status,
         AgentStatus::Done,
         "已写下的终态不得被 panic 改写"
     );
     assert_eq!(
-        session.queue().snapshot().await.unwrap().len(),
+        session
+            .queue()
+            .snapshot()
+            .await
+            .expect("the snapshot fixture result is required for this assertion")
+            .len(),
         1,
         "不得新增结果行"
     );
@@ -157,7 +185,7 @@ async fn settle_leaves_terminal_untouched_when_the_target_is_missing() {
         .resources()
         .set_work_state(&child, WorkState::Working)
         .await
-        .unwrap();
+        .expect("the set work state fixture result is required for this assertion");
     let missing: peri_acp_types::thread::ThreadId =
         "00000000-0000-7000-8000-000000000000".to_owned();
     let route = route(&session, missing);
@@ -168,7 +196,11 @@ async fn settle_leaves_terminal_untouched_when_the_target_is_missing() {
         .expect_err("目标 thread 不存在必须如实失败");
     assert!(!error.is_empty());
 
-    let meta = session.resources().load_session_meta(&child).await.unwrap();
+    let meta = session
+        .resources()
+        .load_session_meta(&child)
+        .await
+        .expect("the load session meta fixture result is required for this assertion");
     assert_eq!(
         meta.agent_status,
         AgentStatus::Active,
@@ -180,7 +212,12 @@ async fn settle_leaves_terminal_untouched_when_the_target_is_missing() {
         "续跑意图保持最后提交的值"
     );
     assert!(
-        session.queue().snapshot().await.unwrap().is_empty(),
+        session
+            .queue()
+            .snapshot()
+            .await
+            .expect("the snapshot fixture result is required for this assertion")
+            .is_empty(),
         "MQ 不得留下半条结果"
     );
 }

@@ -6,16 +6,23 @@
 //! `get` / `ticket` / `put` / `invalidate` 临界区由进程内 mutex 与跨进程
 //! advisory file lock 串行化，避免失效通知与迟到响应重新激活旧缓存。
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    fs::{self, OpenOptions},
-    path::PathBuf,
-    sync::{Arc, OnceLock, Weak},
-    time::{Duration, UNIX_EPOCH},
-};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+#[cfg(not(target_os = "emscripten"))]
+use std::fs;
+#[cfg(not(target_os = "emscripten"))]
+use std::fs::OpenOptions;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::Weak;
+use std::time::Duration;
+use std::time::UNIX_EPOCH;
 
 use peri_acp_types::plugin::McpServerConfig;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 const CACHE_NAMESPACE: &str = "peri:mcp-cache:v2";
@@ -72,6 +79,12 @@ pub(crate) struct McpResourceCache {
     active_versions: Arc<SharedVersions>,
     #[cfg(any(test, feature = "test-support"))]
     test_root: Option<Arc<tempfile::TempDir>>,
+}
+
+impl Default for McpResourceCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Clone)]

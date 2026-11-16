@@ -1,10 +1,16 @@
 //! Frozen MetaHarness state and prompt behavior tests.
 
-use super::*;
-
 // ─── MetaHarness 冻结状态（设计 §2.3）───────────────────────────────────────
 
+use crate::provider::LlmProvider;
+use crate::provider::PeriConfig;
+use crate::provider::ProfileConfig;
+use crate::provider::Profiles;
+use crate::session::SessionManager;
+use peri_middlewares::prelude::PermissionMode;
+use peri_middlewares::prelude::SharedPermissionMode;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 fn mh_cfg(entries: &[(&str, bool)]) -> HashMap<String, bool> {
     entries.iter().map(|(k, v)| (k.to_string(), *v)).collect()
@@ -128,7 +134,7 @@ async fn test_build_frozen_data_applies_meta_harness_state() {
             .unwrap();
     let mut peri_config = PeriConfig::default();
     peri_config.config.active_alias = "sonnet".to_string();
-    peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
+    peri_config.config.providers = vec![crate::session::tests::make_provider_config("a", "gpt-4o")];
     peri_config.config.profiles = Profiles {
         sonnet: ProfileConfig {
             provider: "a".to_string(),
@@ -221,7 +227,7 @@ async fn test_frozen_data_does_not_reread_meta_docs() {
             .unwrap();
     let mut peri_config = PeriConfig::default();
     peri_config.config.active_alias = "sonnet".to_string();
-    peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
+    peri_config.config.providers = vec![crate::session::tests::make_provider_config("a", "gpt-4o")];
     peri_config.config.profiles = Profiles {
         sonnet: ProfileConfig {
             provider: "a".to_string(),

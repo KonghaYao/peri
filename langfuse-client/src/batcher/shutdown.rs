@@ -1,19 +1,25 @@
 //! Worker 生命周期的收敛：唯一 owner 的句柄保留、准备任务派发与收敛、关闭排空、清理收敛与移交。
 
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use super::{
-    admission::{CommandReceiver, PrepareRequest},
-    failure::{DeliveryLedger, ShutdownSnapshot},
-    freeze::{freeze_snapshot, InputSpool},
-    recovery::{self, HandOff, RetryEntry, RetryQueue, Submission},
-    stats::Counters,
-    worker::BatchWorker,
-    FlushBoundary,
-};
+use super::admission::CommandReceiver;
+use super::admission::PrepareRequest;
+use super::failure::DeliveryLedger;
+use super::failure::ShutdownSnapshot;
+use super::freeze;
+use super::freeze::InputSpool;
+use super::recovery;
+use super::recovery::HandOff;
+use super::recovery::RetryEntry;
+use super::recovery::RetryQueue;
+use super::recovery::Submission;
+use super::stats::Counters;
+use super::worker::BatchWorker;
+use super::FlushBoundary;
 use crate::client::LangfuseClient;
 use crate::config::TelemetryConfig;
 use crate::error::LangfuseError;
@@ -212,14 +218,17 @@ impl BatchWorker {
                     }),
                     Err(error) => Err(error),
                 }
-                .and_then(|spool| freeze_snapshot(&source, allowance, spool))
+                .and_then(|spool| freeze::freeze_snapshot(&source, allowance, spool))
             };
             // 源 retained 额度在内容转成快照字节/失败后立即归还。
             drop(retained);
             if outcome.is_err() {
                 ledger.record_prepare_failure(prepare_seq);
             }
-            let mut state = cell.state.lock().unwrap_or_else(|p| p.into_inner());
+            let mut state = cell
+                .state
+                .lock()
+                .expect("snapshot state must remain consistent after preparation");
             *state = match outcome {
                 Ok(snapshot) => SnapshotState::Ready(snapshot),
                 Err(error) => SnapshotState::Failed(error),

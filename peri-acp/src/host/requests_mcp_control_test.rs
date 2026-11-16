@@ -1,10 +1,27 @@
 //! Exercise control through real session admission and the host receive loop.
-use super::*;
-use peri_acp_types::{
-    mcp_control::{McpControlRequest, McpControlResponse, McpControlStatus},
-    ports::{McpPoolPort, McpPoolShutdownReport},
-};
-use std::{collections::VecDeque, sync::atomic::AtomicUsize};
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::host::SessionState;
+use crate::provider::LlmProvider;
+use crate::transport::types::AcpError;
+use crate::transport::types::IncomingMessage;
+use crate::transport::types::RequestId;
+use async_trait::async_trait;
+use peri_acp_types::mcp_control::McpControlRequest;
+use peri_acp_types::mcp_control::McpControlResponse;
+use peri_acp_types::mcp_control::McpControlStatus;
+use peri_acp_types::ports::McpPoolPort;
+use peri_acp_types::ports::McpPoolShutdownReport;
+#[cfg(test)]
+use peri_acp_types::PeriCaps;
+use serde_json::json;
+use serde_json::Value;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 #[derive(Default)]
 struct BlockingPool {
@@ -52,14 +69,16 @@ async fn fixture(
     String,
     Arc<BlockingPool>,
 ) {
-    let config = make_peri_config_with_provider(make_provider_config(
-        "test",
-        "openai",
-        "synthetic-key",
-        "model",
-    ));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "test",
+            "openai",
+            "synthetic-key",
+            "model",
+        ),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, tmp).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(config, provider, tmp).await;
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd: tmp
             .path()
@@ -74,7 +93,7 @@ async fn fixture(
     });
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd":tmp.path()}),
         &cfg,
@@ -108,7 +127,7 @@ async fn control_rejects_unnegotiated_invalid_unknown_and_closing_without_backen
     let (cfg, mut sessions, id, pool) = fixture(&tmp).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let request = json!({"sessionId":id,"action":"stop","serverName":"plugin:example:docs"});
-    let failure = handle_request(
+    let failure = crate::host::requests::handle_request(
         "peri/mcp/control",
         &request,
         &cfg,
@@ -127,7 +146,7 @@ async fn control_rejects_unnegotiated_invalid_unknown_and_closing_without_backen
         crate::host::connection::ConnectionFacts::unnegotiated(),
         closed.facts(),
     ] {
-        let failure = handle_request_for_connection(
+        let failure = crate::host::requests::handle_request_for_connection(
             "mcp/list",
             &json!({"sessionId":id}),
             &cfg,
@@ -150,7 +169,7 @@ async fn control_rejects_unnegotiated_invalid_unknown_and_closing_without_backen
             "session_not_found",
         ),
     ] {
-        let failure = handle_request_for_connection(
+        let failure = crate::host::requests::handle_request_for_connection(
             "peri/mcp/control",
             &params,
             &cfg,
@@ -162,7 +181,7 @@ async fn control_rejects_unnegotiated_invalid_unknown_and_closing_without_backen
         .unwrap_err();
         assert_eq!(failure.data.unwrap()["kind"], kind);
     }
-    let failure = handle_request_for_connection(
+    let failure = crate::host::requests::handle_request_for_connection(
         "mcp/list",
         &json!({"sessionId":"unknown"}),
         &cfg,
@@ -174,7 +193,7 @@ async fn control_rejects_unnegotiated_invalid_unknown_and_closing_without_backen
     .unwrap_err();
     assert_eq!(failure.data.unwrap()["kind"], "session_not_found");
     sessions.get_mut(&id).unwrap().closing = true;
-    let failure = handle_request_for_connection(
+    let failure = crate::host::requests::handle_request_for_connection(
         "peri/mcp/control",
         &request,
         &cfg,
@@ -254,7 +273,7 @@ async fn slow_control_keeps_server_loop_and_new_capability_list_responsive() {
         crate::host::connection::ConnectionContext::new(false),
     ));
     let cancellation = tokio_util::sync::CancellationToken::new();
-    let recovery = recovery_for(&cfg, &sessions, &tx);
+    let recovery = crate::host::requests::tests::recovery_for(&cfg, &sessions, &tx);
     crate::host::server_loop::ServerLoop {
         transport: &erased,
         cfg: &cfg,

@@ -1,8 +1,11 @@
-use super::*;
 use crate::agent::async_tasks::delivery::SessionTerminalDelivery;
+use crate::agent::events::BackgroundTaskResult;
+use crate::session::factory::OnBgCompleteFn;
 use peri_acp_types::session::MessageQueue;
+use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::tasks::{BgTaskRegistration, TaskManager as _, TaskTerminalDelivery};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 fn shell_result(task_id: &str) -> BackgroundTaskResult {
     BackgroundTaskResult {
@@ -41,25 +44,32 @@ impl peri_acp_types::tasks::TaskTerminalDelivery for FailedDelivery {
     }
 }
 fn failed_terminal_callback() -> OnBgCompleteFn {
-    task_bg_complete_callback(Arc::new(FailedDelivery))
+    crate::session::bg_complete::task_bg_complete_callback(Arc::new(FailedDelivery))
 }
 
 #[test]
 fn current_terminal_delivery_is_accepted_once_without_a_ledger() {
     let queue = MessageQueue::new();
-    let callback = task_bg_complete_callback(SessionTerminalDelivery::for_queue(queue.clone()));
+    let callback = crate::session::bg_complete::task_bg_complete_callback(
+        SessionTerminalDelivery::for_queue(queue.clone()),
+    );
     let result = shell_result("shell-current");
-    callback(&result, BgTaskKind::Shell).unwrap();
-    callback(&result, BgTaskKind::Shell).unwrap();
+    callback(&result, BgTaskKind::Shell)
+        .expect("the callback fixture result is required for this assertion");
+    callback(&result, BgTaskKind::Shell)
+        .expect("the callback fixture result is required for this assertion");
     assert_eq!(queue.drain_batch_sync(64).len(), 1);
 }
 
 #[test]
 fn same_terminal_identity_cannot_acknowledge_changed_payload() {
     let queue = MessageQueue::new();
-    let callback = task_bg_complete_callback(SessionTerminalDelivery::for_queue(queue.clone()));
+    let callback = crate::session::bg_complete::task_bg_complete_callback(
+        SessionTerminalDelivery::for_queue(queue.clone()),
+    );
     let mut result = shell_result("shell-conflict");
-    callback(&result, BgTaskKind::Shell).unwrap();
+    callback(&result, BgTaskKind::Shell)
+        .expect("the callback fixture result is required for this assertion");
     result.output = "changed".into();
     assert!(callback(&result, BgTaskKind::Shell)
         .unwrap_err()
@@ -73,7 +83,9 @@ fn same_terminal_identity_cannot_acknowledge_changed_payload() {
 fn publication_fingerprint_is_bounded_and_content_sensitive() {
     let mut result = shell_result("shell-fingerprint");
     result.output = "first-result-".repeat(8);
-    let fingerprint = publication_fingerprint(&result, BgTaskKind::Shell).expect("fingerprint");
+    let fingerprint =
+        crate::session::bg_complete::publication_fingerprint(&result, BgTaskKind::Shell)
+            .expect("fingerprint");
 
     assert_eq!(fingerprint.len(), 64, "Sha256 十六进制摘要长度固定");
     assert!(
@@ -81,21 +93,24 @@ fn publication_fingerprint_is_bounded_and_content_sensitive() {
         "指纹不得保留通知正文: {fingerprint}"
     );
     assert_eq!(
-        publication_fingerprint(&result, BgTaskKind::Shell).expect("fingerprint"),
+        crate::session::bg_complete::publication_fingerprint(&result, BgTaskKind::Shell)
+            .expect("fingerprint"),
         fingerprint,
         "相同内容必须稳定"
     );
 
     result.output = "second-result-".repeat(8);
     assert_ne!(
-        publication_fingerprint(&result, BgTaskKind::Shell).expect("fingerprint"),
+        crate::session::bg_complete::publication_fingerprint(&result, BgTaskKind::Shell)
+            .expect("fingerprint"),
         fingerprint,
         "内容变化必须改变指纹，冲突检测不能失效"
     );
 
     result.output = "first-result-".repeat(8);
     assert_ne!(
-        publication_fingerprint(&result, BgTaskKind::Agent).expect("fingerprint"),
+        crate::session::bg_complete::publication_fingerprint(&result, BgTaskKind::Agent)
+            .expect("fingerprint"),
         fingerprint,
         "类别变化必须改变指纹，不能把不同来源当成重复"
     );
@@ -105,12 +120,16 @@ fn publication_fingerprint_is_bounded_and_content_sensitive() {
 #[test]
 fn large_output_dedup_is_idempotent_and_still_detects_conflicts() {
     let queue = MessageQueue::new();
-    let callback = task_bg_complete_callback(SessionTerminalDelivery::for_queue(queue.clone()));
+    let callback = crate::session::bg_complete::task_bg_complete_callback(
+        SessionTerminalDelivery::for_queue(queue.clone()),
+    );
     let mut result = shell_result("shell-large-output");
     // 指纹基于完整结果对象；1 MiB 输出仍应幂等，且内容变化必须冲突。
     result.output = "y".repeat(1024 * 1024);
-    callback(&result, BgTaskKind::Shell).unwrap();
-    callback(&result, BgTaskKind::Shell).unwrap();
+    callback(&result, BgTaskKind::Shell)
+        .expect("the callback fixture result is required for this assertion");
+    callback(&result, BgTaskKind::Shell)
+        .expect("the callback fixture result is required for this assertion");
     assert_eq!(
         queue.drain_batch_sync(64).len(),
         1,
@@ -142,19 +161,21 @@ fn registered_manager(
             pid: None,
             kill: Some(Box::new(|| {})),
         })
-        .unwrap();
+        .expect("the register fixture result is required for this assertion");
     (manager, ticket)
 }
 
 #[test]
 fn accepted_queue_delivery_settles_task_without_another_run() {
     let queue = MessageQueue::new();
-    let callback = task_bg_complete_callback(SessionTerminalDelivery::for_queue(queue.clone()));
+    let callback = crate::session::bg_complete::task_bg_complete_callback(
+        SessionTerminalDelivery::for_queue(queue.clone()),
+    );
     let result = shell_result("accepted-task");
     let (manager, ticket) = registered_manager(&result.task_id);
     assert!(manager
         .settle_completed(&ticket, result.clone(), callback.clone())
-        .unwrap());
+        .expect("the clone fixture result is required for this assertion"));
     assert_eq!(manager.active_count(), 0);
     // 完成投递不等于进程/执行资源已停止；producer 仍须单独确认 cleanup。
     manager.confirm_external_execution_stopped(&ticket);
@@ -162,10 +183,11 @@ fn accepted_queue_delivery_settles_task_without_another_run() {
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
     assert!(queue.has_wake_up_sync());
     assert_eq!(queue.len_sync(), 1);
-    callback(&result, BgTaskKind::Agent).unwrap();
+    callback(&result, BgTaskKind::Agent)
+        .expect("the callback fixture result is required for this assertion");
     assert!(!manager
         .settle_completed(&ticket, result.clone(), callback)
-        .unwrap());
+        .expect("the clone fixture result is required for this assertion"));
     assert_eq!(manager.retry_pending_deliveries(), 0);
     assert_eq!(queue.len_sync(), 1);
 }
@@ -205,7 +227,7 @@ fn refused_queue_delivery_retains_task_and_retries_original_once() {
         route: SessionTerminalDelivery::for_queue(queue.clone()),
         attempts: AtomicUsize::new(0),
     });
-    let callback = task_bg_complete_callback(route.clone());
+    let callback = crate::session::bg_complete::task_bg_complete_callback(route.clone());
     let result = shell_result("refused-task");
     let (manager, ticket) = registered_manager(&result.task_id);
     let error = manager
@@ -221,7 +243,8 @@ fn refused_queue_delivery_retains_task_and_retries_original_once() {
     manager.confirm_external_execution_stopped(&ticket);
     assert!(manager.is_execution_idle());
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
-    callback(&result, BgTaskKind::Agent).unwrap();
+    callback(&result, BgTaskKind::Agent)
+        .expect("the callback fixture result is required for this assertion");
     assert_eq!(manager.retry_pending_deliveries(), 0);
     assert_eq!(route.attempts.load(Ordering::SeqCst), 2);
     let accepted = queue.drain_all_sync();
@@ -252,14 +275,15 @@ impl TaskTerminalDelivery for AsyncDelivery {
 #[tokio::test]
 async fn asynchronous_route_requires_its_owner_to_await_delivery() {
     let route = Arc::new(AsyncDelivery(AtomicUsize::new(0)));
-    let callback = task_bg_complete_callback(route.clone());
+    let callback = crate::session::bg_complete::task_bg_complete_callback(route.clone());
     let result = shell_result("async-task");
     assert!(callback(&result, BgTaskKind::Shell)
         .unwrap_err()
         .contains("owner-awaited asynchronous delivery"));
     tokio::task::yield_now().await;
     assert_eq!(route.0.load(Ordering::SeqCst), 0);
-    let reminder = background_result_reminder(&result, BgTaskKind::Shell);
+    let reminder =
+        crate::session::async_router::background_result_reminder(&result, BgTaskKind::Shell);
     route
         .deliver(
             crate::agent::async_tasks::delivery::terminal_delivery_id(&result.task_id, "terminal"),
@@ -267,7 +291,7 @@ async fn asynchronous_route_requires_its_owner_to_await_delivery() {
             peri_acp_types::session::MessageSource::ShellComplete,
         )
         .await
-        .unwrap();
+        .expect("the deliver fixture result is required for this assertion");
     assert_eq!(route.0.load(Ordering::SeqCst), 1);
 }
 

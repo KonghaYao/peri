@@ -1,6 +1,14 @@
 use async_trait::async_trait;
 use peri_agent::middleware::capabilities as hook_state;
-use peri_agent::prelude::*;
+
+use peri_agent::prelude::AgentOutput;
+use peri_agent::prelude::AgentResult;
+use peri_agent::prelude::AgentState;
+use peri_agent::prelude::LoggingMiddleware;
+use peri_agent::prelude::Middleware;
+use peri_agent::prelude::MiddlewareChain;
+use peri_agent::prelude::NoopMiddleware;
+use peri_agent::prelude::ToolCall;
 
 // ── 辅助 ──────────────────────────────────────────────────────────────────────
 
@@ -28,7 +36,7 @@ impl Middleware for OrderTracker {
     async fn before_agent(&self, _state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         self.log
             .lock()
-            .unwrap()
+            .expect("self log mutex must remain unpoisoned throughout the test")
             .push(format!("{}.before_agent", self.name));
         Ok(())
     }
@@ -40,7 +48,7 @@ impl Middleware for OrderTracker {
     ) -> AgentResult<AgentOutput> {
         self.log
             .lock()
-            .unwrap()
+            .expect("self log mutex must remain unpoisoned throughout the test")
             .push(format!("{}.after_agent", self.name));
         Ok(output.clone())
     }
@@ -58,9 +66,15 @@ async fn test_middleware_order() {
 
     let mut state = AgentState::new("/test");
 
-    chain.run_before_agent(&mut state).await.unwrap();
+    chain
+        .run_before_agent(&mut state)
+        .await
+        .expect("the run before agent fixture result is required for this assertion");
 
-    let calls = log.lock().unwrap().clone();
+    let calls = log
+        .lock()
+        .expect("log lock mutex must remain unpoisoned throughout the test")
+        .clone();
     assert_eq!(calls, vec!["first.before_agent", "second.before_agent"]);
 }
 
@@ -75,7 +89,7 @@ async fn test_noop_middleware() {
     // before_tool 应透传 tool_call
     let result = <NoopMiddleware as Middleware>::before_tool(&noop, &mut state, &tool_call)
         .await
-        .unwrap();
+        .expect("the before tool fixture result is required for this assertion");
     assert_eq!(result.name, "my_tool");
 }
 
@@ -87,7 +101,7 @@ async fn test_logging_middleware() {
     // 不应 panic
     <LoggingMiddleware as Middleware>::before_agent(&mw, &mut state)
         .await
-        .unwrap();
+        .expect("the before agent fixture result is required for this assertion");
 }
 
 #[tokio::test]
@@ -118,7 +132,10 @@ async fn test_chain_before_tool_modifies_call() {
 
     let mut state = AgentState::new("/test");
     let call = ToolCall::new("orig", "tool", serde_json::json!({}));
-    let modified = chain.run_before_tool(&mut state, call).await.unwrap();
+    let modified = chain
+        .run_before_tool(&mut state, call)
+        .await
+        .expect("the run before tool fixture result is required for this assertion");
 
     assert_eq!(modified.id, "prefixed_orig");
 }

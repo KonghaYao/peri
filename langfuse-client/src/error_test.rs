@@ -1,4 +1,4 @@
-use super::*;
+use super::LangfuseError;
 
 #[test]
 fn test_error_display_ingestion_api() {

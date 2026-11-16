@@ -2,7 +2,7 @@
 //!
 //! 命令契约已迁入 `peri-acp-types::command`，compact 执行体迁入 Agent 层；本模块保留组合根：注册表本体在契约层
 //! （[`CommandRegistry`]，扁平 HashMap + alias 索引，设计 §63），本模块只做
-//! 内置命令装配（[`register_builtins`]）——旧契约（[`AgentCommand`]）已随
+//! 内置命令装配（[`register_builtins`]）——旧契约（`AgentCommand`）已随
 //! Phase 5 Step 6 整体删除，命令全部以 [`CommandHandler`] 直接注册。
 //!
 //! 执行方式由 [`CommandOutcome`] 承载：内置命令走 `Done`；`Inject` /
@@ -18,7 +18,8 @@ use peri_acp_types::command::command_route::{
 };
 use peri_acp_types::command::{ArgsSchema, CommandHandler, CommandOutcome};
 
-pub mod clear;
+pub mod clear_command;
+pub use clear_command as clear;
 pub mod compact;
 pub mod rewind;
 

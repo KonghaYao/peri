@@ -12,14 +12,16 @@ use peri_acp_types::session::{MessageQueue, SessionAccessPort};
 use peri_acp_types::tasks::{BgTaskKind, TaskTerminalDelivery};
 
 use crate::agent::events::BackgroundTaskResult;
-use crate::session::async_router::background_result_reminder;
+
 use crate::session::factory::OnBgCompleteFn;
 
+#[must_use]
 pub fn queue_terminal_delivery(queue: MessageQueue) -> Arc<dyn TaskTerminalDelivery> {
     crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(queue)
 }
 
 /// 绑定会话级结果处理责任 owner 的终态投递路由。
+#[must_use]
 pub fn queue_terminal_delivery_with_mailbox(
     queue: MessageQueue,
     mailbox: Arc<crate::session::async_result_mailbox::AsyncResultMailbox>,
@@ -33,6 +35,7 @@ pub fn queue_terminal_delivery_with_mailbox(
 ///
 /// 构造时冻结可靠投递路由；缺失路由不得转到未来生命周期。
 /// 同步接纳失败返回 Err，owner 保留原结果并重试；接纳成功立即返回 Ok。
+#[must_use]
 pub fn session_bg_complete_callback(
     session_access: Arc<dyn SessionAccessPort>,
     session_id: String,
@@ -45,6 +48,7 @@ pub fn session_bg_complete_callback(
     }))
 }
 
+#[must_use]
 pub fn task_bg_complete_callback(
     delivery: Arc<dyn peri_acp_types::tasks::TaskTerminalDelivery>,
 ) -> OnBgCompleteFn {
@@ -109,7 +113,7 @@ fn publication_callback(resolve: DeliveryResolver) -> OnBgCompleteFn {
         let delivery_id =
             crate::agent::async_tasks::delivery::terminal_delivery_id(&result.task_id, "terminal");
         let identity = delivery_id.as_uuid().to_string();
-        let reminder = background_result_reminder(result, kind);
+        let reminder = crate::session::async_router::background_result_reminder(result, kind);
         // 去重表只保存摘要指纹，不保存结果正文。
         let fingerprint = publication_fingerprint(result, kind)?;
         let mut state = publications.lock();

@@ -1,17 +1,22 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
+use std::sync::Arc;
 
 use rmcp::transport::auth::{AuthError, OAuthState};
 use thiserror::Error;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
-use super::{
-    auth_store::{static_credential_key, OAuthCredentialClient, PerServerCredentialStore},
-    callback_server::{CallbackError, OAuthCallbackServer},
-    config::OAuthConfig,
-};
+use super::auth_store;
+use super::auth_store::OAuthCredentialClient;
+use super::auth_store::PerServerCredentialStore;
+use super::callback_server::CallbackError;
+use super::callback_server::OAuthCallbackServer;
+use super::config::OAuthConfig;
 
 /// OAuth 回调结果（从 TUI 传回后台 OAuth 流程）
+#[derive(Debug)]
 pub struct OAuthCallbackResult {
     /// 授权码
     pub code: String,
@@ -72,6 +77,28 @@ pub enum OAuthFlowEvent {
     },
 }
 
+impl Debug for OAuthFlowEvent {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AuthorizationNeeded { .. } => formatter
+                .debug_struct("OAuthFlowEvent::AuthorizationNeeded")
+                .finish_non_exhaustive(),
+            Self::AuthorizationCompleted { .. } => formatter
+                .debug_struct("OAuthFlowEvent::AuthorizationCompleted")
+                .finish_non_exhaustive(),
+            Self::AuthorizationFailed { .. } => formatter
+                .debug_struct("OAuthFlowEvent::AuthorizationFailed")
+                .finish_non_exhaustive(),
+            Self::AuthorizationCancelled { .. } => formatter
+                .debug_struct("OAuthFlowEvent::AuthorizationCancelled")
+                .finish_non_exhaustive(),
+            Self::AuthorizationRestored { .. } => formatter
+                .debug_struct("OAuthFlowEvent::AuthorizationRestored")
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
 /// 对外可安全降维的 OAuth 失败分类。原始错误仅用于本进程诊断。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OAuthFailureKind {
@@ -95,11 +122,20 @@ pub struct OAuthFlowManager {
     event_callback: Arc<dyn Fn(OAuthFlowEvent) + Send + Sync>,
 }
 
+impl Debug for OAuthFlowManager {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OAuthFlowManager")
+            .finish_non_exhaustive()
+    }
+}
+
 impl OAuthFlowManager {
     /// 创建 OAuth 流程管理器
     ///
     /// `token_store`: 宿主注入的 MCP 凭据客户端
     /// `event_callback`: 事件回调函数，用于将 OAuth 事件转发给 TUI
+    #[must_use]
     pub fn new<F>(token_store: OAuthCredentialClient, event_callback: F) -> Self
     where
         F: Fn(OAuthFlowEvent) + Send + Sync + 'static,
@@ -112,6 +148,7 @@ impl OAuthFlowManager {
     }
 
     /// 创建 OAuth 流程管理器（Arc 回调版本：跨任务共享的 `Arc<dyn Fn>` 回调）。
+    #[must_use]
     pub fn new_with_arc(
         token_store: OAuthCredentialClient,
         event_callback: Arc<dyn Fn(OAuthFlowEvent) + Send + Sync>,
@@ -143,7 +180,8 @@ impl OAuthFlowManager {
         server_url: &str,
         oauth_config: &OAuthConfig,
     ) -> Result<(), OAuthFlowError> {
-        let credential_key = static_credential_key(server_name, server_url, oauth_config);
+        let credential_key =
+            auth_store::static_credential_key(server_name, server_url, oauth_config);
         self.run_oauth_flow_with_key(
             flow_id,
             server_name,
@@ -199,7 +237,7 @@ impl OAuthFlowManager {
         server_url: &str,
         oauth_config: &OAuthConfig,
     ) -> Result<(), OAuthFlowError> {
-        let key = static_credential_key(server_name, server_url, oauth_config);
+        let key = auth_store::static_credential_key(server_name, server_url, oauth_config);
         self.run_oauth_flow_inner(flow_id, server_name, &key, server_url, oauth_config, false)
             .await
     }
@@ -339,7 +377,7 @@ impl OAuthFlowManager {
     ///
     /// 同时接受 Authorized（刚完成授权）和 Unauthorized（从存储恢复凭证）两种状态，
     /// 因为 Unauthorized 的 manager 可能已通过 `initialize_from_store` 加载了有效凭证。
-    pub fn get_authorization_manager(
+    pub fn authorization_manager(
         &mut self,
         server_name: &str,
     ) -> Option<rmcp::transport::auth::AuthorizationManager> {
@@ -357,6 +395,7 @@ impl OAuthFlowManager {
     }
 
     /// 判断指定服务器是否已完成 OAuth 授权
+    #[must_use]
     pub fn is_authorized(&self, server_name: &str) -> bool {
         matches!(
             self.states.get(server_name),
@@ -365,6 +404,7 @@ impl OAuthFlowManager {
     }
 
     /// 获取共享的 Token 存储引用
+    #[must_use]
     pub fn token_store(&self) -> &OAuthCredentialClient {
         &self.token_store
     }

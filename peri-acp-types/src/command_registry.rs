@@ -117,6 +117,7 @@ pub struct SourceProjection {
 ///   n>0 / 生命周期撤旧）锁内取回调克隆、锁外调用（防死锁；`McpSkillRegistry`
 ///   先例）。锁序固定：sources → entries → alias_index → on_change（生命周期
 ///   方法在单次写锁内完成状态 + 主表变更，原子可见）。
+#[derive(Default)]
 pub struct CommandRegistry {
     entries: RwLock<HashMap<String, Arc<RouteEntry>>>,
     alias_index: RwLock<HashMap<String, String>>,
@@ -125,6 +126,7 @@ pub struct CommandRegistry {
 }
 
 impl CommandRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
@@ -251,7 +253,7 @@ impl CommandRegistry {
     ///
     /// 决策 1 扩展：`namespace` 传空串表示「无 namespace 段的来源」（Mcp
     /// server 名即词法首段域），传参前缀 = `{domain}`（无冒号，由
-    /// `unregister_prefix_locked` 内部补 `:`，与 [`mcp_source_key`] 形态
+    /// `unregister_prefix_locked` 内部补 `:`，与 `mcp_source_key` 形态
     /// 同构）；非空 namespace 传 `{domain}:{namespace}`（plugin/user，
     /// 内部同样补冒号）。
     pub fn unregister_namespace(&self, domain: &str, namespace: &str) -> usize {
@@ -595,12 +597,6 @@ impl CommandRegistry {
         if matches {
             sources.remove(prefix);
         }
-    }
-}
-
-impl Default for CommandRegistry {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

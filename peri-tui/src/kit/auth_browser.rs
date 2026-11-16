@@ -15,6 +15,7 @@ const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Build the platform launcher and its arguments.
 ///
 /// Arguments are passed directly to the program (no shell interpolation).
+#[must_use]
 pub(crate) fn browser_command_for(os: &str, url: &str) -> (&'static str, Vec<String>) {
     match os {
         "macos" => ("open", vec![url.to_owned()]),

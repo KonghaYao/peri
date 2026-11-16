@@ -93,7 +93,7 @@ impl BudgetedWriter {
     ///
     /// `max_wire_bytes` 是压缩后正文上限，必须非零；`spool` 为 `None` 时正文全部驻留内存，
     /// 前缀容量以 wire 上限为上界（契约 §4）。暂存开销在真正跨阈值时才预留。
-    pub(crate) fn new(
+    pub(crate) fn try_new(
         config: &TelemetryConfig,
         budget: Arc<MemoryBudget>,
         spool: Option<Arc<dyn SpoolStore>>,
@@ -180,7 +180,7 @@ impl BudgetedWriter {
             None => {
                 let permit = self.permit.take().ok_or(LangfuseError::BudgetMismatch)?;
                 let bytes = Bytes::from(std::mem::take(&mut self.memory));
-                PayloadBody::Memory(BudgetedBytes::new(bytes, permit)?)
+                PayloadBody::Memory(BudgetedBytes::try_new(bytes, permit)?)
             }
         };
         Ok(ExportPayload {

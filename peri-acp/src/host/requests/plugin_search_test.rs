@@ -1,15 +1,26 @@
 //! Real request dispatch against temporary marketplace cache files.
-use super::*;
+use crate::host::requests::tests::MockPluginManager;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::provider::LlmProvider;
+
+use serde_json::json;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
 
 async fn search_config(tmp: &tempfile::TempDir) -> AcpServerConfig {
-    let config = make_peri_config_with_provider(make_provider_config(
-        "fixture",
-        "openai",
-        "fixture-unused",
-        "fixture-model",
-    ));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "fixture",
+            "openai",
+            "fixture-unused",
+            "fixture-model",
+        ),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, tmp).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(config, provider, tmp).await;
     let mut manager = MockPluginManager::install_ok("unused");
     manager.cache_dir = tmp.path().join("marketplaces");
     cfg.plugin_manager = Arc::new(manager);
@@ -40,7 +51,7 @@ fn write_search_catalog(cache: &Path, marketplace: &str, nested: bool) {
 
 async fn request_search(cfg: &AcpServerConfig, query: &str) -> Value {
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    handle_request(
+    crate::host::requests::handle_request(
         "plugin/search",
         &json!({"query": query}),
         cfg,

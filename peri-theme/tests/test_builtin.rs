@@ -1,13 +1,13 @@
 //! 验证 dark/light 内置主题字段完整性。
 
 use peri_theme::bridge::ThemeDefinitionExt;
-use peri_theme::builtin::{dark_theme, light_theme};
+use peri_theme::builtin;
 use peri_theme::theme::ThemeMode;
 use ratatui::style::Color;
 
 #[test]
 fn test_dark_theme_fields() {
-    let theme = dark_theme();
+    let theme = builtin::dark_theme();
     assert_eq!(theme.name, "peri-dark");
     assert_eq!(theme.mode, ThemeMode::Dark);
 
@@ -63,7 +63,7 @@ fn test_dark_theme_fields() {
 
 #[test]
 fn test_light_theme_fields() {
-    let theme = light_theme();
+    let theme = builtin::light_theme();
     assert_eq!(theme.name, "peri-light");
     assert_eq!(theme.mode, ThemeMode::Light);
 
@@ -85,7 +85,7 @@ fn test_light_theme_fields() {
 
 #[test]
 fn test_dark_palette_mapping() {
-    let theme = dark_theme();
+    let theme = builtin::dark_theme();
     let palette = theme.to_palette();
 
     assert_eq!(palette.fg, Color::Rgb(255, 255, 255));
@@ -101,7 +101,7 @@ fn test_dark_palette_mapping() {
 
 #[test]
 fn test_dark_peri_colors_mapping() {
-    let theme = dark_theme();
+    let theme = builtin::dark_theme();
     let peri = theme.to_peri_colors();
 
     assert_eq!(peri.surface_user, Color::Rgb(55, 55, 55));

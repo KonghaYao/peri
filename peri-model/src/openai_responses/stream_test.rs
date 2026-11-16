@@ -1,7 +1,6 @@
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-};
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -9,16 +8,22 @@ use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::{
-    transport::{HttpRequest, HttpResponse, HttpTransport, SseEvent},
-    Model, ModelError, ModelMessage, ModelRequest, ModelResult, ModelStreamEvent, ToolResult,
-};
+use crate::transport::HttpRequest;
+use crate::transport::HttpResponse;
+use crate::transport::HttpTransport;
+use crate::transport::SseEvent;
+use crate::Model;
+use crate::ModelError;
+use crate::ModelMessage;
+use crate::ModelRequest;
+use crate::ModelResult;
+use crate::ModelStreamEvent;
+use crate::ToolResult;
 
-use super::{
-    request::build_request,
-    request_test::{output_items, tool},
-    ResponsesConfig, ResponsesModel,
-};
+use super::request;
+use super::request_test;
+use super::ResponsesConfig;
+use super::ResponsesModel;
 
 fn config() -> ResponsesConfig {
     ResponsesConfig::new(
@@ -38,8 +43,11 @@ fn completed(items: Vec<Value>) -> Value {
 }
 
 fn decoder() -> crate::runtime::stream::SseDecoders {
-    let built =
-        build_request(&config(), &ModelRequest::default().with_tools(vec![tool()])).unwrap();
+    let built = request::build_request(
+        &config(),
+        &ModelRequest::default().with_tools(vec![request_test::tool()]),
+    )
+    .unwrap();
     super::stream::decoders(built.binding, built.tool_names)()
 }
 
@@ -436,7 +444,7 @@ fn fragmented(event: Value) -> Vec<Vec<u8>> {
 
 #[tokio::test]
 async fn two_turn_tool_roundtrip_reuses_transport_and_exact_ordered_native_items() {
-    let items = output_items();
+    let items = request_test::output_items();
     let final_item = json!({"id":"msg_final","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"完成"}]});
     let transport = Arc::new(QueueTransport {
         responses: Mutex::new(VecDeque::from([
@@ -446,8 +454,8 @@ async fn two_turn_tool_roundtrip_reuses_transport_and_exact_ordered_native_items
         requests: Mutex::new(Vec::new()),
     });
     let model = ResponsesModel::with_transport(config(), transport.clone());
-    let mut request =
-        ModelRequest::new(vec![ModelMessage::user_text("read a.txt")]).with_tools(vec![tool()]);
+    let mut request = ModelRequest::new(vec![ModelMessage::user_text("read a.txt")])
+        .with_tools(vec![request_test::tool()]);
     let first = model
         .complete(request.clone(), CancellationToken::new())
         .await
@@ -483,7 +491,7 @@ async fn prepared_observation_checkpoint_and_execution_share_the_frozen_body() {
         ModelMessage::system_text("developer"),
         ModelMessage::user_text("hello"),
     ])
-    .with_tools(vec![tool()]);
+    .with_tools(vec![request_test::tool()]);
     let observation = model.prepare_request(&request).unwrap();
     let call = model.prepare_stream(request).unwrap();
     let checkpoint = call.checkpoint().clone();
@@ -698,7 +706,11 @@ fn absent_namespace_and_explicit_null_are_the_same_identity() {
 #[test]
 fn plan_function_namespace_maps_to_original_tool_name_and_is_preserved_for_replay() {
     let config = config().with_profile(super::ResponsesProfile::ChatGptPlan);
-    let built = build_request(&config, &ModelRequest::default().with_tools(vec![tool()])).unwrap();
+    let built = request::build_request(
+        &config,
+        &ModelRequest::default().with_tools(vec![request_test::tool()]),
+    )
+    .unwrap();
     let factory = super::stream::decoders(built.binding, built.tool_names);
     let item = json!({"id":"fc_plan","type":"function_call","call_id":"call_plan","name":"read_file","namespace":"peri","arguments":"{}"});
     let (decode, _) = factory();
@@ -711,7 +723,7 @@ fn plan_function_namespace_maps_to_original_tool_name_and_is_preserved_for_repla
     };
     assert_eq!(tool_calls[0].name(), "read_file");
     assert_eq!(tool_calls[0].id(), "call_plan");
-    let replayed = build_request(
+    let replayed = request::build_request(
         &config,
         &ModelRequest::new(vec![response.message().clone()]),
     )

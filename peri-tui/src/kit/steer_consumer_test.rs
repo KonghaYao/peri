@@ -1,14 +1,25 @@
-use super::*;
+use super::AcpError;
+use super::AcpTuiClient;
+use super::AdmitOutcome;
+use super::CancellationToken;
+use super::Duration;
+use super::FAILURE_NOTICE_DURATION;
+use super::STEERS;
+use super::SteerCommand;
+use super::SteerCommandKind;
+use super::SteerFailure;
+use super::SteerStage;
+use super::VecDeque;
+use super::atoms;
+
 use crate::kit::steer_state::SteerState;
-use peri_acp::transport::{
-    AcpTransport,
-    mpsc::{MpscServerTransport, mpsc_transport_pair},
-    types::{IncomingMessage, RequestId},
-};
-use peri_acp_types::{
-    messages::MessageContent,
-    session::{UserInput, UserInputQueueSnapshot},
-};
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::mpsc::MpscServerTransport;
+use peri_acp::transport::types::IncomingMessage;
+use peri_acp::transport::types::RequestId;
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::session::UserInput;
+use peri_acp_types::session::UserInputQueueSnapshot;
 use serde_json::json;
 
 pub(super) const RECEIPT_TIMEOUT: Duration = AcpTuiClient::USER_INPUT_RECEIPT_TIMEOUT;
@@ -19,8 +30,8 @@ async fn expect_rpc(
 ) -> (RequestId, serde_json::Value) {
     let incoming = tokio::time::timeout(Duration::from_secs(2), server.recv())
         .await
-        .unwrap()
-        .unwrap();
+        .expect("expect rpc: fixture task and request must complete successfully")
+        .expect("expect rpc: fixture task and request must complete successfully");
     let IncomingMessage::Request { id, method, params } = incoming else {
         panic!("expected {expected}, got {incoming:?}");
     };
@@ -56,7 +67,7 @@ async fn test_slow_refresh_does_not_queue_new_enqueue() {
     let enqueue = first_input_command(7, "command", "input", "synthetic input");
     state.begin(enqueue.clone());
     STEERS.set(state);
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("s", false);
     let binding_client = client.clone();
@@ -70,11 +81,12 @@ async fn test_slow_refresh_does_not_queue_new_enqueue() {
             })),
         )
         .await
-        .unwrap();
-    binding.await.unwrap().unwrap();
+        .expect("slow refresh does not queue new enqueue: fixture task and request must complete successfully");
+    binding.await.expect("slow refresh does not queue new enqueue: fixture task and request must complete successfully").expect("slow refresh does not queue new enqueue: fixture task and request must complete successfully");
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
-    let consumer = spawn_steer_consumer(client.clone(), receiver, "/tmp".into(), shutdown.clone());
+    let consumer =
+        super::spawn_steer_consumer(client.clone(), receiver, "/tmp".into(), shutdown.clone());
     sender
         .send(SteerCommand {
             session_id: "s".into(),
@@ -83,9 +95,9 @@ async fn test_slow_refresh_does_not_queue_new_enqueue() {
             generation: None,
             kind: SteerCommandKind::Refresh,
         })
-        .unwrap();
+        .expect("slow refresh does not queue new enqueue: fixture channel must deliver its expected message");
     let (snapshot_id, _) = expect_rpc(&server, "session/input/snapshot").await;
-    sender.send(enqueue).unwrap();
+    sender.send(enqueue).expect("slow refresh does not queue new enqueue: fixture channel must deliver its expected message");
     let (enqueue_id, params) = expect_rpc(&server, "session/input/enqueue").await;
     assert_eq!(params["commandId"], "command");
     assert_eq!(params["inputId"], "input");
@@ -101,7 +113,7 @@ async fn test_slow_refresh_does_not_queue_new_enqueue() {
             })),
         )
         .await
-        .unwrap();
+        .expect("slow refresh does not queue new enqueue: fixture task and request must complete successfully");
     tokio::time::timeout(Duration::from_secs(2), async {
         while STEERS
             .state()
@@ -113,9 +125,9 @@ async fn test_slow_refresh_does_not_queue_new_enqueue() {
         }
     })
     .await
-    .unwrap();
+    .expect("slow refresh does not queue new enqueue: fixture task and request must complete successfully");
     assert_eq!(
-        STEERS.state().read().snapshot("s", 7).unwrap().revision,
+        STEERS.state().read().snapshot("s", 7).expect("slow refresh does not queue new enqueue: the fixture storage and layout must support the requested operation").revision,
         2,
         "刷新未回包时输入必须已经受理"
     );
@@ -127,9 +139,9 @@ async fn test_slow_refresh_does_not_queue_new_enqueue() {
             })),
         )
         .await
-        .unwrap();
+        .expect("slow refresh does not queue new enqueue: fixture task and request must complete successfully");
     shutdown.cancel();
-    consumer.await.unwrap();
+    consumer.await.expect("slow refresh does not queue new enqueue: fixture task and request must complete successfully");
     client.close();
 }
 
@@ -184,7 +196,7 @@ async fn test_steer_uncertain_receipt_retries_identical_command_and_input() {
     };
     projection.begin(command.clone());
     STEERS.set(projection);
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notifications, _) = AcpTuiClient::new(client_transport);
     client.force_stable_for_test("s", false);
     client.spawn_pump(notifications);
@@ -193,7 +205,7 @@ async fn test_steer_uncertain_receipt_retries_identical_command_and_input() {
             id,
             method,
             params: original,
-        } = server_transport.recv().await.unwrap()
+        } = server_transport.recv().await.expect("steer uncertain receipt retries identical command and input: fixture task and request must complete successfully")
         else {
             panic!("应收到首次 enqueue");
         };
@@ -204,12 +216,12 @@ async fn test_steer_uncertain_receipt_retries_identical_command_and_input() {
         server_transport
             .send_response(id, Err(AcpError::new(-32603, "lost receipt")))
             .await
-            .unwrap();
+            .expect("steer uncertain receipt retries identical command and input: fixture task and request must complete successfully");
         let IncomingMessage::Request {
             id,
             method,
             params: retry,
-        } = server_transport.recv().await.unwrap()
+        } = server_transport.recv().await.expect("steer uncertain receipt retries identical command and input: fixture task and request must complete successfully")
         else {
             panic!("应收到同身份重试");
         };
@@ -232,9 +244,9 @@ async fn test_steer_uncertain_receipt_retries_identical_command_and_input() {
                 })),
             )
             .await
-            .unwrap();
+            .expect("steer uncertain receipt retries identical command and input: fixture task and request must complete successfully");
     });
-    let SteerFailure { error, stage } = execute(&client, &mut command, "/tmp").await.unwrap_err();
+    let SteerFailure { error, stage } = super::execute(&client, &mut command, "/tmp").await.expect_err("steer uncertain receipt retries identical command and input: the invalid fixture must be rejected");
     assert_eq!(error.code, -32603, "首次回执结果不明确");
     assert_eq!(stage, SteerStage::Admit, "会话已建立，失败属于入队阶段");
     STEERS.state().write().reject(&command, false);
@@ -266,7 +278,7 @@ async fn test_steer_uncertain_receipt_retries_identical_command_and_input() {
             "重载重试不可更换命令身份"
         );
     }
-    execute(&client, &mut command, "/tmp").await.unwrap();
+    super::execute(&client, &mut command, "/tmp").await.expect("steer uncertain receipt retries identical command and input: fixture task and request must complete successfully");
     let rows = STEERS.state().read().rows("s");
     assert_eq!(rows.len(), 1, "确认重试后只保留一个权威队列项");
     assert_eq!(
@@ -274,7 +286,7 @@ async fn test_steer_uncertain_receipt_retries_identical_command_and_input() {
         crate::kit::steer_queue::SteerItemState::Queued,
         "确认后才开放动作"
     );
-    server.await.unwrap();
+    server.await.expect("steer uncertain receipt retries identical command and input: fixture task and request must complete successfully");
     client.close();
 }
 
@@ -338,9 +350,9 @@ async fn fatal_failure_keeps_queued_b_recoverable_with_attachments_and_does_not_
     assert_eq!(report.uncertain.len(), 1, "A 可能已发出，应保留待对账");
     STEERS.set(projection);
 
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(client_transport);
-    let outcome = execute(&client, &mut b_command, "/tmp").await.unwrap();
+    let outcome = super::execute(&client, &mut b_command, "/tmp").await.expect("fatal failure keeps queued b recoverable with attachments and does not resend: fixture task and request must complete successfully");
     assert_eq!(
         outcome,
         AdmitOutcome::AlreadySettled,
@@ -397,11 +409,11 @@ async fn initial_session_failure_recovers_draft(snapshot_failure: bool) {
         }),
     };
     STEERS.state().write().begin(command.clone());
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notifications, _) = AcpTuiClient::new_interactive(client_transport);
     client.spawn_pump(notifications);
     let server = tokio::spawn(async move {
-        let IncomingMessage::Request { id, method, .. } = server_transport.recv().await.unwrap()
+        let IncomingMessage::Request { id, method, .. } = server_transport.recv().await.expect("initial session failure recovers draft: fixture task and request must complete successfully")
         else {
             panic!("应协商能力");
         };
@@ -412,8 +424,8 @@ async fn initial_session_failure_recovers_draft(snapshot_failure: bool) {
                 Ok(json!({"agentCapabilities":{"_meta":{"peri.userInputQueue":true}}})),
             )
             .await
-            .unwrap();
-        let IncomingMessage::Request { id, method, .. } = server_transport.recv().await.unwrap()
+            .expect("initial session failure recovers draft: fixture task and request must complete successfully");
+        let IncomingMessage::Request { id, method, .. } = server_transport.recv().await.expect("initial session failure recovers draft: fixture task and request must complete successfully")
         else {
             panic!("应创建首会话");
         };
@@ -422,9 +434,9 @@ async fn initial_session_failure_recovers_draft(snapshot_failure: bool) {
             server_transport
                 .send_response(id, Ok(json!({"sessionId":"new"})))
                 .await
-                .unwrap();
+                .expect("initial session failure recovers draft: fixture task and request must complete successfully");
             let IncomingMessage::Request { id, method, .. } =
-                server_transport.recv().await.unwrap()
+                server_transport.recv().await.expect("initial session failure recovers draft: fixture task and request must complete successfully")
             else {
                 panic!("应查询实例");
             };
@@ -432,9 +444,9 @@ async fn initial_session_failure_recovers_draft(snapshot_failure: bool) {
             server_transport
                 .send_response(id, Err(AcpError::new(-32603, "snapshot failed")))
                 .await
-                .unwrap();
+                .expect("initial session failure recovers draft: fixture task and request must complete successfully");
             let IncomingMessage::Request { id, method, params } =
-                server_transport.recv().await.unwrap()
+                server_transport.recv().await.expect("initial session failure recovers draft: fixture task and request must complete successfully")
             else {
                 panic!("初始化失败必须关闭已创建的会话");
             };
@@ -443,12 +455,12 @@ async fn initial_session_failure_recovers_draft(snapshot_failure: bool) {
             server_transport
                 .send_response(id, Ok(json!({})))
                 .await
-                .unwrap();
+                .expect("initial session failure recovers draft: fixture task and request must complete successfully");
         } else {
             server_transport
                 .send_response(id, Err(AcpError::new(-32603, "session unavailable")))
                 .await
-                .unwrap();
+                .expect("initial session failure recovers draft: fixture task and request must complete successfully");
         }
         assert!(
             tokio::time::timeout(Duration::from_millis(30), server_transport.recv())
@@ -457,8 +469,10 @@ async fn initial_session_failure_recovers_draft(snapshot_failure: bool) {
             "准备失败时不能发出 enqueue 或 fallback prompt"
         );
     });
-    client.register_ui_commands(&[]).await.unwrap();
-    let failure = execute(&client, &mut command, "/tmp").await.unwrap_err();
+    client.register_ui_commands(&[]).await.expect("initial session failure recovers draft: fixture task and request must complete successfully");
+    let failure = super::execute(&client, &mut command, "/tmp")
+        .await
+        .expect_err("initial session failure recovers draft: the invalid fixture must be rejected");
     assert!(!client.has_session(), "失败不能留下可发送输入的会话");
     assert!(atoms::ACTIVE_SESSION_ID.state().read().is_empty());
     assert!(client.current_execution_cwd().is_none());
@@ -471,9 +485,9 @@ async fn initial_session_failure_recovers_draft(snapshot_failure: bool) {
         SteerStage::Prepare,
         "会话建立（含其初始化）期间的失败都属于准备阶段"
     );
-    let rejected = reject_command(&mut command, &failure.error);
+    let rejected = super::reject_command(&mut command, &failure.error);
     assert!(rejected, "入队之前的失败应确认为未受理");
-    let notice = failure_notice(failure.stage, rejected, &failure.error);
+    let notice = super::failure_notice(failure.stage, rejected, &failure.error);
     let reason = if snapshot_failure {
         "snapshot failed"
     } else {
@@ -498,12 +512,12 @@ async fn initial_session_failure_recovers_draft(snapshot_failure: bool) {
             .state()
             .write()
             .recover(&session_id, epoch, true)
-            .unwrap()
+            .expect("initial session failure recovers draft: the state fixture operation uses valid inputs")
             .original_draft,
         raw,
         "首会话准备失败仍须完整恢复多行及图片引用"
     );
-    server.await.unwrap();
+    server.await.expect("initial session failure recovers draft: fixture task and request must complete successfully");
     client.close();
 }
 
@@ -517,18 +531,18 @@ async fn test_steer_initial_new_session_failure_recovers_unsubmitted_draft() {
 fn test_failure_notice_distinguishes_preparation_from_admission() {
     let reason = "session directory changed";
     let error = AcpError::new(-32010, reason);
-    let prepared = failure_notice(SteerStage::Prepare, true, &error);
+    let prepared = super::failure_notice(SteerStage::Prepare, true, &error);
     assert!(
         prepared.contains(reason),
         "准备失败必须复述服务端给出的原因：{prepared}"
     );
     assert_eq!(
-        failure_notice(SteerStage::Admit, true, &error),
+        super::failure_notice(SteerStage::Admit, true, &error),
         crate::i18n::tr("steer-input-rejected"),
         "入队被拒沿用原结论"
     );
     assert_eq!(
-        failure_notice(SteerStage::Admit, false, &error),
+        super::failure_notice(SteerStage::Admit, false, &error),
         crate::i18n::tr("steer-input-uncertain"),
         "未知回执沿用原结论"
     );
@@ -589,14 +603,14 @@ async fn test_steer_queued_retry_never_replays_into_a_new_server_generation() {
     };
     projection.begin(command.clone());
     STEERS.set(projection);
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let server_transport = std::sync::Arc::new(server_transport);
     let (client, notifications, _) = AcpTuiClient::new(client_transport);
     client.force_stable_for_test("s", false);
     client.spawn_pump(notifications);
     let first_server = server_transport.clone();
     let first_response = tokio::spawn(async move {
-        let IncomingMessage::Request { id, method, params } = first_server.recv().await.unwrap()
+        let IncomingMessage::Request { id, method, params } = first_server.recv().await.expect("steer queued retry never replays into a new server generation: fixture task and request must complete successfully")
         else {
             panic!("应收到首次 enqueue");
         };
@@ -605,14 +619,14 @@ async fn test_steer_queued_retry_never_replays_into_a_new_server_generation() {
         first_server
             .send_response(id, Err(AcpError::new(-32603, "receipt unavailable")))
             .await
-            .unwrap();
+            .expect("steer queued retry never replays into a new server generation: fixture task and request must complete successfully");
     });
-    let SteerFailure { error, .. } = execute(&client, &mut command, "/tmp").await.unwrap_err();
+    let SteerFailure { error, .. } = super::execute(&client, &mut command, "/tmp").await.expect_err("steer queued retry never replays into a new server generation: the invalid fixture must be rejected");
     assert!(
-        !reject_command(&mut command, &error),
+        !super::reject_command(&mut command, &error),
         "在途请求失败仍是未知结果"
     );
-    first_response.await.unwrap();
+    first_response.await.expect("steer queued retry never replays into a new server generation: fixture task and request must complete successfully");
     let mut retries = VecDeque::from([command]);
 
     atoms::BRIDGE_RESET_COUNTER.set(8);
@@ -626,20 +640,22 @@ async fn test_steer_queued_retry_never_replays_into_a_new_server_generation() {
             "新实例不能主动恢复旧请求"
         );
     }
-    let mut old_retry = retries.pop_front().unwrap();
-    let (result, unexpected_method) =
-        tokio::join!(execute(&client, &mut old_retry, "/tmp"), async {
+    let mut old_retry = retries.pop_front().expect("steer queued retry never replays into a new server generation: the pop_front fixture operation uses valid inputs");
+    let (result, unexpected_method) = tokio::join!(
+        super::execute(&client, &mut old_retry, "/tmp"),
+        async {
             match tokio::time::timeout(Duration::from_millis(30), server_transport.recv()).await {
                 Ok(Some(IncomingMessage::Request { id, method, .. })) => {
                     server_transport
                         .send_response(id, Err(AcpError::new(-32602, "stale generation")))
                         .await
-                        .unwrap();
+                        .expect("steer queued retry never replays into a new server generation: the fixture operation must finish without an inner failure");
                     Some(method)
                 }
                 _ => None,
             }
-        });
+        }
+    );
     assert!(result.is_ok(), "旧重试应保留未知结果，而不是转成明确未受理");
     assert!(
         unexpected_method.is_none(),
@@ -667,7 +683,11 @@ async fn test_steer_queued_retry_never_replays_into_a_new_server_generation() {
 
 /// 应答能力协商；返回后 `ensure_session` 才会发起 `session/new`。
 pub(super) async fn answer_initialize(server: &MpscServerTransport) {
-    let IncomingMessage::Request { id, method, .. } = server.recv().await.unwrap() else {
+    let IncomingMessage::Request { id, method, .. } = server
+        .recv()
+        .await
+        .expect("answer initialize: fixture task and request must complete successfully")
+    else {
         panic!("应协商能力");
     };
     assert_eq!(method, "initialize", "首会话之前协商");
@@ -677,12 +697,16 @@ pub(super) async fn answer_initialize(server: &MpscServerTransport) {
             Ok(json!({"agentCapabilities":{"_meta":{"peri.userInputQueue":true}}})),
         )
         .await
-        .unwrap();
+        .expect("answer initialize: fixture task and request must complete successfully");
 }
 
 /// 接收 `session/new`；应答时机由调用方决定（慢应答或不应答）。
 pub(super) async fn expect_session_new(server: &MpscServerTransport) -> RequestId {
-    let IncomingMessage::Request { id, method, .. } = server.recv().await.unwrap() else {
+    let IncomingMessage::Request { id, method, .. } = server
+        .recv()
+        .await
+        .expect("expect session new: fixture task and request must complete successfully")
+    else {
         panic!("应创建首会话");
     };
     assert_eq!(method, "session/new", "入队前准备真实会话");
@@ -699,7 +723,7 @@ pub(super) fn start_consumer(
 ) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
-    let handle = spawn_steer_consumer(client.clone(), rx, "/tmp".into(), shutdown.clone());
+    let handle = super::spawn_steer_consumer(client.clone(), rx, "/tmp".into(), shutdown.clone());
     (tx, shutdown, handle)
 }
 
@@ -768,7 +792,7 @@ async fn test_slow_session_preparation_is_not_capped_by_receipt_deadline() {
     let command = first_input_command(31, "slow-prepare", &input_id, "慢准备的输入");
     STEERS.state().write().begin(command.clone());
 
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notifications, _) = AcpTuiClient::new_interactive(client_transport);
     client.spawn_pump(notifications);
     let enqueued = input_id.clone();
@@ -785,7 +809,7 @@ async fn test_slow_session_preparation_is_not_capped_by_receipt_deadline() {
         server_transport
             .send_response(create, Ok(json!({"sessionId":"slow"})))
             .await
-            .unwrap();
+            .expect("slow session preparation is not capped by receipt deadline: fixture task and request must complete successfully");
         // 服务端快照必须自洽：核对刷新拿到空队列会抹掉已确认的待发项。
         let mut admitted: Option<serde_json::Value> = None;
         loop {
@@ -805,7 +829,7 @@ async fn test_slow_session_preparation_is_not_capped_by_receipt_deadline() {
                     server_transport
                         .send_response(id, Ok(snapshot))
                         .await
-                        .unwrap();
+                        .expect("slow session preparation is not capped by receipt deadline: fixture task and request must complete successfully");
                 }
                 "session/input/enqueue" => {
                     assert_eq!(params["inputId"], enqueued, "入队必须复用原输入身份");
@@ -828,7 +852,7 @@ async fn test_slow_session_preparation_is_not_capped_by_receipt_deadline() {
                             })),
                         )
                         .await
-                        .unwrap();
+                        .expect("slow session preparation is not capped by receipt deadline: fixture task and request must complete successfully");
                     // 之后只允许核对快照的实例刷新；再次投递同一输入才是重复执行。
                     let duplicate =
                         tokio::time::timeout(RECEIPT_TIMEOUT + Duration::from_secs(1), async {
@@ -838,9 +862,9 @@ async fn test_slow_session_preparation_is_not_capped_by_receipt_deadline() {
                                         return Some(method);
                                     }
                                     server_transport
-                                        .send_response(id, Ok(admitted.clone().unwrap()))
+                                        .send_response(id, Ok(admitted.clone().expect("slow session preparation is not capped by receipt deadline: the clone fixture operation uses valid inputs")))
                                         .await
-                                        .unwrap();
+                                        .expect("slow session preparation is not capped by receipt deadline: fixture task and request must complete successfully");
                                 }
                             }
                             None
@@ -855,10 +879,10 @@ async fn test_slow_session_preparation_is_not_capped_by_receipt_deadline() {
             }
         }
     });
-    client.register_ui_commands(&[]).await.unwrap();
+    client.register_ui_commands(&[]).await.expect("slow session preparation is not capped by receipt deadline: fixture task and request must complete successfully");
     let (tx, shutdown, handle) = start_consumer(&client);
-    tx.send(command).unwrap();
-    server.await.unwrap();
+    tx.send(command).expect("slow session preparation is not capped by receipt deadline: fixture channel must deliver its expected message");
+    server.await.expect("slow session preparation is not capped by receipt deadline: fixture task and request must complete successfully");
 
     assert_eq!(
         notice_text(),
@@ -883,7 +907,7 @@ async fn test_slow_session_preparation_is_not_capped_by_receipt_deadline() {
         "落定后不得留在未决命令里"
     );
     shutdown.cancel();
-    handle.await.unwrap();
+    handle.await.expect("slow session preparation is not capped by receipt deadline: fixture task and request must complete successfully");
     restore_notice(previous_notice);
     client.close();
 }
@@ -911,7 +935,7 @@ fn test_recovery_blocked_is_a_definitive_rejection() {
         "Session execution is blocked by a failed recovery: corrupt: missing parent",
     );
     assert!(
-        reject_command(&mut command, &error),
+        super::reject_command(&mut command, &error),
         "服务端恢复阻断必须确认为确定性拒绝"
     );
     assert_eq!(
@@ -923,7 +947,7 @@ fn test_recovery_blocked_is_a_definitive_rejection() {
             .original_draft,
         "保留的原稿"
     );
-    let notice = failure_notice(SteerStage::Admit, true, &error);
+    let notice = super::failure_notice(SteerStage::Admit, true, &error);
     assert!(
         notice.contains("missing parent"),
         "提示必须附服务端原因：{notice}"

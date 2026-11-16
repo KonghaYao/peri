@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 
 use serial_test::serial;
 
-use super::{run, run_prepared, validate_args};
 use crate::runner::WorkflowCommand;
 
 /// 合成引擎入口：`--help` 退出 0，`validate` 退出 3（用于验证 CLI 包装层的退出码传播，
@@ -14,7 +13,7 @@ fn stub_command(dir: &Path) -> WorkflowCommand {
         &entry,
         "process.exit(process.argv[2] === 'validate' ? 3 : 0)\n",
     )
-    .unwrap();
+    .expect("the test fixture file must be writable");
     WorkflowCommand {
         program: "node".into(),
         args: vec![entry.to_string_lossy().into_owned()],
@@ -26,35 +25,39 @@ fn workflow_cli_accepts_stable_subcommands() {
     for command in [
         "read", "list", "validate", "boundary", "adlc", "help", "--help",
     ] {
-        validate_args(&[OsString::from(command)]).unwrap();
+        crate::cli::validate_args(&[OsString::from(command)])
+            .expect("the validate args fixture result is required for this assertion");
     }
 }
 
 #[test]
 fn workflow_cli_rejects_empty_and_unknown_subcommands() {
-    assert!(validate_args(&[]).is_err());
-    assert!(validate_args(&[OsString::from("run")]).is_err());
+    assert!(crate::cli::validate_args(&[]).is_err());
+    assert!(crate::cli::validate_args(&[OsString::from("run")]).is_err());
 }
 
 #[tokio::test]
 async fn workflow_cli_spawns_prepared_artifact_for_help() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let exit_code = run_prepared(&stub_command(tmp.path()), &[OsString::from("--help")])
-        .await
-        .unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
+    let exit_code =
+        crate::cli::run_prepared(&stub_command(tmp.path()), &[OsString::from("--help")])
+            .await
+            .expect("the run prepared fixture result is required for this assertion");
     assert_eq!(exit_code, 0);
 }
 
 #[tokio::test]
 async fn workflow_cli_propagates_validate_failure() {
-    let tmp = tempfile::TempDir::new().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
     let missing = tmp.path().join("missing-script.mjs");
-    let exit_code = run_prepared(
+    let exit_code = crate::cli::run_prepared(
         &stub_command(tmp.path()),
         &[OsString::from("validate"), missing.into_os_string()],
     )
     .await
-    .unwrap();
+    .expect("the run prepared fixture result is required for this assertion");
     assert_ne!(exit_code, 0);
 }
 
@@ -64,14 +67,16 @@ async fn workflow_cli_propagates_validate_failure() {
 #[tokio::test]
 #[serial]
 async fn workflow_cli_fails_closed_without_any_validated_artifact() {
-    let tmp = tempfile::TempDir::new().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
     let invalid = tmp.path().join("not-a-workflow-package");
-    std::fs::create_dir_all(&invalid).unwrap();
+    std::fs::create_dir_all(&invalid)
+        .expect("the create dir all fixture result is required for this assertion");
     let previous_home = std::env::var_os("HOME");
     std::env::set_var("HOME", tmp.path());
     std::env::set_var("PERI_WORKFLOW_ARTIFACT_DIR", &invalid);
 
-    let result = run(&[OsString::from("--help")]).await;
+    let result = crate::cli::run(&[OsString::from("--help")]).await;
 
     match previous_home {
         Some(value) => std::env::set_var("HOME", value),
@@ -89,7 +94,8 @@ async fn workflow_cli_fails_closed_without_any_validated_artifact() {
 /// 合成入口的路径必须真实存在才可能被 spawn（防夹具失真）。
 #[test]
 fn stub_engine_entry_exists() {
-    let tmp = tempfile::TempDir::new().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
     let command = stub_command(tmp.path());
     assert!(PathBuf::from(&command.args[0]).is_file());
 }

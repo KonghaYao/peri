@@ -7,7 +7,9 @@ use peri_agent::middleware::r#trait::Middleware;
 use peri_agent::session::MessageKind;
 use tokio::sync::mpsc;
 
-use super::*;
+use super::{
+    AgentError, Arc, MessageSource, Mutex, TodoItem, TodoMiddleware, TodoState, TodoStatus,
+};
 
 async fn make_mw_with_items(
     items: Vec<TodoItem>,
@@ -28,10 +30,10 @@ async fn make_mw_with_items(
 #[tokio::test]
 async fn test_after_agent_background_tasks_suppress_and_resume_todo() {
     use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager as _};
-    use peri_agent::agent::{
-        agent_context::AgentContext, async_tasks::TaskManager, events::BackgroundTaskResult,
-        stages::StageContext,
-    };
+    use peri_agent::agent::agent_context::AgentContext;
+    use peri_agent::agent::async_tasks::TaskManager;
+    use peri_agent::agent::events::BackgroundTaskResult;
+    use peri_agent::agent::stages::StageContext;
     use peri_agent::session::{FrozenContext, Session};
     for kind in [BgTaskKind::Agent, BgTaskKind::Workflow, BgTaskKind::Shell] {
         for success in [true, false] {
@@ -151,7 +153,8 @@ fn test_render_steering_包含当前todo状态() {
 
 #[tokio::test]
 async fn test_after_agent_未完成_注入_steering_并设_block_continue() {
-    use peri_agent::agent::{agent_context::AgentContext, stages::StageContext};
+    use peri_agent::agent::agent_context::AgentContext;
+    use peri_agent::agent::stages::StageContext;
     use peri_agent::session::{FrozenContext, Session};
     let (mw, _state) = make_mw_with_items(
         vec![TodoItem {
@@ -307,7 +310,8 @@ async fn test_after_agent_已有block_continue_不干预() {
 
 #[tokio::test]
 async fn test_after_agent_steering_解除后_不再拦截() {
-    use peri_agent::agent::{agent_context::AgentContext, stages::StageContext};
+    use peri_agent::agent::agent_context::AgentContext;
+    use peri_agent::agent::stages::StageContext;
     use peri_agent::session::{FrozenContext, Session};
     // 模拟完整生命周期：创建（标记开启）→ 全部标记完成 → 停止轮放行
     let (tx, _rx) = mpsc::channel(8);

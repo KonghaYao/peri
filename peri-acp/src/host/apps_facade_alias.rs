@@ -8,7 +8,20 @@
 //! 纪律（§A 运行中裁决 + 裁决 D1）：别名只做字段映射；准入、判决、执行全部走同一
 //! facade / ledger / canonical 入口，别名不复制业务规则、不持有状态。
 
-use super::*;
+use crate::host::apps_facade::session_apps_facade::AliasRecordFacts;
+use crate::host::apps_facade::session_apps_facade::SessionAppsFacade;
+use crate::transport::types::AcpError;
+use peri_acp_types::interaction::AttachmentId;
+use peri_acp_types::mcp_apps::McpAppsErrorKind;
+
+use peri_acp_types::mcp_apps_facade::AppsOperation;
+use peri_acp_types::mcp_apps_facade::AppsRequestOutcome;
+use peri_acp_types::mcp_apps_facade::AppsRequestRequest;
+use peri_acp_types::mcp_apps_facade::AppsRequestResponse;
+use peri_acp_types::mcp_apps_facade::RequestVerdict;
+use peri_acp_types::mcp_apps_facade::REQUEST_WAIT_TIMEOUT_MS;
+
+use std::sync::Arc;
 
 impl SessionAppsFacade {
     // ── 旧别名（`peri/mcp/{open,app,resource}`）的落地入口 ──────────────────────
@@ -74,7 +87,11 @@ impl SessionAppsFacade {
         // 旧信封的 `appSessionId` 语义 = `attachment_id`（§A 运行中裁决：旧客户端
         // 视为不透明句柄）；record 身份由 router 的权威值导出，客户端字段不参与。
         let Some(attachment) = self.router.lookup(attachment_id) else {
-            return Err(verdict_error(RequestVerdict::UnknownNamespace));
+            return Err(
+                crate::host::apps_facade::session_apps_facade::verdict_error(
+                    RequestVerdict::UnknownNamespace,
+                ),
+            );
         };
         let attachment_id = attachment.attachment_id().clone();
         let namespace = attachment.namespace().clone();

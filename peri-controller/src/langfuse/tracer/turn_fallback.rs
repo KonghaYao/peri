@@ -1,30 +1,28 @@
 //! Turn 结束时按 parent 先于 child 的顺序收束遗留 stage 与 generation。
 
-use super::event_builder::{
-    new_uuid, now_rfc3339, try_add_or_warn_via_session, try_add_prepared_or_warn_via_session,
-    VERSION,
-};
-use super::input_snapshot::mark_rejected_input;
-use super::stages::StageHandle;
-use super::turn_error::failure_error_class;
-use super::{usage, LangfuseTracer};
+use crate::langfuse::tracer::event_builder::VERSION;
+
+use crate::langfuse::tracer::stages::StageHandle;
+
+use crate::langfuse::tracer::usage;
+use crate::langfuse::tracer::LangfuseTracer;
 use langfuse_client::types::ObservationLevel;
 use langfuse_client::{GenerationBody, IngestionEvent};
 use peri_acp_types::command::PromptStopReason;
 use peri_acp_types::session::{ExecutionFailure, TurnTelemetryOutcome};
 use peri_agent::agent::events::StageStatus;
 
-pub(super) struct GenerationFallbackStatus<'a> {
+pub(super) struct GenerationFallbackStatus<'generation> {
     pub(super) error_class: String,
     pub(super) level: ObservationLevel,
-    pub(super) failure: Option<&'a ExecutionFailure>,
+    pub(super) failure: Option<&'generation ExecutionFailure>,
 }
 
-impl<'a> GenerationFallbackStatus<'a> {
-    pub(super) fn for_outcome(outcome: &'a TurnTelemetryOutcome) -> Self {
+impl<'generation> GenerationFallbackStatus<'generation> {
+    pub(super) fn for_outcome(outcome: &'generation TurnTelemetryOutcome) -> Self {
         match outcome {
             TurnTelemetryOutcome::Failed { failure } => GenerationFallbackStatus {
-                error_class: failure_error_class(failure),
+                error_class: crate::langfuse::tracer::turn_error::failure_error_class(failure),
                 level: ObservationLevel::Error,
                 failure: Some(failure.as_ref()),
             },
@@ -92,16 +90,15 @@ impl LangfuseTracer {
             let terminal = abandoned.terminal.as_ref();
             let lifecycle_incomplete = terminal.is_none();
             let input = abandoned.input;
-            let first_reasoning_ms = abandoned
-                .completion_start_time
-                .as_deref()
-                .and_then(|at| super::llm_events::elapsed_ms(&abandoned.start_time, at));
+            let first_reasoning_ms = abandoned.completion_start_time.as_deref().and_then(|at| {
+                crate::langfuse::tracer::llm_events::elapsed_ms(&abandoned.start_time, at)
+            });
             let mut metadata = abandoned
                 .retry_metadata
                 .unwrap_or_else(|| serde_json::json!({}));
             if input.is_rejected() {
                 // 输入冻结被拒：只留标记，不用旧 fallback 冒充实际请求（契约 §3.6）
-                mark_rejected_input(&mut metadata);
+                crate::langfuse::tracer::input_snapshot::mark_rejected_input(&mut metadata);
             }
             if let Some(object) = metadata.as_object_mut() {
                 object.insert(
@@ -158,30 +155,34 @@ impl LangfuseTracer {
                     object.insert("http_status".to_string(), serde_json::json!(status));
                 }
             }
-            let (output, level, status_message, model, usage_details) = if let Some(terminal) =
-                terminal
-            {
-                (
-                    Some(safe_generation_output(&terminal.output)),
-                    None,
-                    Some("ownership_unresolved".to_string()),
-                    Some(terminal.model.clone()),
-                    terminal.usage.as_ref().map(usage::build_usage_details),
-                )
-            } else {
-                (
-                    Some(
-                        failure
-                            .map(|failure| super::turn_error::failure_output(failure, error_class))
-                            .unwrap_or_else(|| serde_json::json!({"error_class": error_class})),
-                    ),
-                    Some(fallback_status.level.clone()),
-                    Some(error_class.to_string()),
-                    None,
-                    None,
-                )
-            };
-            let end_time = now_rfc3339();
+            let (output, level, status_message, model, usage_details) =
+                if let Some(terminal) = terminal {
+                    (
+                        Some(safe_generation_output(&terminal.output)),
+                        None,
+                        Some("ownership_unresolved".to_string()),
+                        Some(terminal.model.clone()),
+                        terminal.usage.as_ref().map(usage::build_usage_details),
+                    )
+                } else {
+                    (
+                        Some(
+                            failure
+                                .map(|failure| {
+                                    crate::langfuse::tracer::turn_error::failure_output(
+                                        failure,
+                                        error_class,
+                                    )
+                                })
+                                .unwrap_or_else(|| serde_json::json!({"error_class": error_class})),
+                        ),
+                        Some(fallback_status.level.clone()),
+                        Some(error_class.to_string()),
+                        None,
+                        None,
+                    )
+                };
+            let end_time = crate::langfuse::tracer::event_builder::now_rfc3339();
             let body = GenerationBody {
                 id: Some(abandoned.gen_id),
                 trace_id: Some(self.trace_id.clone()),
@@ -204,21 +205,23 @@ impl LangfuseTracer {
             // 冻结被拒（`Rejected`）时事件不带来源，是直接事件，与 live 结束路径同一分派：
             // 携带来源才用 `try_add_prepared`，否则走同一准入的直接入口。
             let event = IngestionEvent::GenerationCreate {
-                id: new_uuid(),
+                id: crate::langfuse::tracer::event_builder::new_uuid(),
                 timestamp: end_time,
                 body,
                 metadata: None,
             };
             match input.into_source() {
-                Some(source) => try_add_prepared_or_warn_via_session(
-                    &*self.session,
-                    event,
-                    Some(source),
-                    None,
-                    &self.trace_id,
-                    "incomplete LLM GenerationCreate",
-                ),
-                None => try_add_or_warn_via_session(
+                Some(source) => {
+                    crate::langfuse::tracer::event_builder::try_add_prepared_or_warn_via_session(
+                        &*self.session,
+                        event,
+                        Some(source),
+                        None,
+                        &self.trace_id,
+                        "incomplete LLM GenerationCreate",
+                    )
+                }
+                None => crate::langfuse::tracer::event_builder::try_add_or_warn_via_session(
                     &*self.session,
                     event,
                     &self.trace_id,

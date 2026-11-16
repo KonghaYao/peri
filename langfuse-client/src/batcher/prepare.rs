@@ -12,8 +12,11 @@ use std::slice;
 use crate::error::LangfuseError;
 use crate::snapshot::{InputSource, TelemetryEvent};
 
-use super::budget::event_bytes;
-use super::split::{oversize_reason, BatchLimits, EventMeasure, PreparedEvent};
+use super::budget;
+use super::split;
+use super::split::BatchLimits;
+use super::split::EventMeasure;
+use super::split::PreparedEvent;
 
 /// OTLP 编码计量端口（契约 §3.4 `measure_otlp`）。
 ///
@@ -50,7 +53,7 @@ pub(crate) fn prepare_event(
         raw_bytes: measure_raw(event)?,
         encoded_bytes: meter.measure(slice::from_ref(event), usize::MAX)?,
     };
-    Ok(match oversize_reason(&measure, limits) {
+    Ok(match split::oversize_reason(&measure, limits) {
         Some(reason) => PreparedEvent::Oversized { measure, reason },
         None => PreparedEvent::Measured(measure),
     })
@@ -68,7 +71,7 @@ fn is_waiting(event: &TelemetryEvent) -> bool {
 ///
 /// 无上限计量：需要精确字节数用于单条超限报告；上限判定统一由 [`oversize_reason`] 完成。
 fn measure_raw(event: &TelemetryEvent) -> Result<u64, LangfuseError> {
-    Ok(event_bytes(&event.event, usize::MAX)? as u64)
+    Ok(budget::event_bytes(&event.event, usize::MAX)? as u64)
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
-use super::*;
+use crate::agent::state::AgentState;
+use crate::messages::BaseMessage;
 
 #[test]
 fn test_agent_state_new() {
@@ -22,8 +23,8 @@ fn test_agent_state_context() {
     let state = AgentState::new("/workspace")
         .with_context("key1", "value1")
         .with_context("key2", "value2");
-    assert_eq!(state.get_context("key1"), Some("value1"));
-    assert_eq!(state.get_context("missing"), None);
+    assert_eq!(state.context("key1"), Some("value1"));
+    assert_eq!(state.context("missing"), None);
 }
 
 #[test]
@@ -75,13 +76,15 @@ fn test_recall_not_persisted() {
     let mut state = AgentState::new("/workspace");
     state.push_recall("some event".to_string());
     // 序列化后不应包含 recall_buffer 字段
-    let json = serde_json::to_string(&state).unwrap();
+    let json = serde_json::to_string(&state)
+        .expect("to_string must accept this test fixture representation");
     assert!(
         !json.contains("recall_buffer"),
         "recall_buffer 不应出现在序列化结果中"
     );
     // 反序列化后 recall buffer 为空
-    let mut restored: AgentState = serde_json::from_str(&json).unwrap();
+    let mut restored: AgentState =
+        serde_json::from_str(&json).expect("from_str must accept this test fixture representation");
     assert!(
         restored.drain_recall().is_empty(),
         "反序列化后 recall 应为空"

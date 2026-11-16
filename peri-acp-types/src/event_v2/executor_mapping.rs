@@ -7,10 +7,9 @@
 //! SubagentStart/Stop 的 child_agent_id 透传为 instance_id。
 
 use super::{ObserveEvent, RenderEvent, StateEvent};
-use crate::{
-    event::{CompactTrigger, ExecutorEvent},
-    messages::MessageId,
-};
+use crate::event::CompactTrigger;
+use crate::event::ExecutorEvent;
+use crate::messages::MessageId;
 
 /// 将 v2 `RenderEvent` 转换为 0 或 1 个 `ExecutorEvent`（穷尽匹配）。
 pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {

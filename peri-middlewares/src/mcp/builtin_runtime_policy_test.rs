@@ -1,4 +1,22 @@
-use super::*;
+use super::Arc;
+use super::HashSet;
+use super::McpInitStatus;
+use super::McpMiddleware;
+use super::Wave3Fixture;
+use super::Wave3Spec;
+use super::MW_BOUND;
+use crate::mcp::builtin::runtime::BuiltinServerExit;
+use crate::mcp::builtin::runtime::TickCloseOutcome;
+use crate::mcp::builtin::runtime::BUILTIN_CONVERGE_TIMEOUT;
+use crate::mcp::builtin_runtime_tests::invocation_fixture;
+use crate::mcp::builtin_runtime_tests::StartupProbe;
+use crate::mcp::builtin_runtime_tests::CLOSE_TIMEOUT;
+use crate::mcp::builtin_runtime_tests::HANDSHAKE_TIMEOUT;
+use crate::mcp::ClientStatus;
+use peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES;
+use peri_agent::middleware::r#trait::Middleware;
+use peri_agent::tools::BaseTool as _;
+use serde_json::json;
 
 // ─── 用例 1：策略关闭四维（Cron 开/关 = 2 格）────────────────────────────────────
 
@@ -46,11 +64,11 @@ async fn policy_close_dimensions() {
         "前置：tick_enabled=true ⇒ cron 代必须有**运行中**的 tick（TickGuard 未结束）"
     );
     let cron_task = fixture.register_cron_task("0 3 * * *", "mw-policy-close");
-    let cron_handle_before = pool.get_client("cron").expect("cron 必须已连接");
+    let cron_handle_before = pool.client("cron").expect("cron 必须已连接");
     // 期望的可见性计数一律**从注册表派生**（不硬编码名字 / 条数）：注册表增删工具时本用例自动跟随。
-    let cron_declared = mw_declared_tool_count("cron");
-    let web_declared = mw_declared_tool_count("web");
-    let artifact_declared = mw_declared_tool_count("artifact");
+    let cron_declared = super::mw_declared_tool_count("cron");
+    let web_declared = super::mw_declared_tool_count("web");
+    let artifact_declared = super::mw_declared_tool_count("artifact");
     assert_eq!(cron_declared, 4, "cron 包含启停工具");
 
     let mut cells = 0usize;
@@ -61,24 +79,24 @@ async fn policy_close_dimensions() {
             disabled.insert("CronMiddleware".to_string());
         }
         let disabled_list: Vec<&str> = disabled.iter().map(String::as_str).collect();
-        let closed = closed_instances(&disabled);
+        let closed = crate::mcp::builtin::closed_instances(&disabled);
         let label = format!("cron_key={cron_open}");
 
         // ── 维①：工具可见性（每 turn 投影）────────────────────────────────────────
         let projection = fixture.projections(&disabled_list);
-        let cron_tools = mw_instance_tools(&projection, "cron");
+        let cron_tools = super::mw_instance_tools(&projection, "cron");
         assert_eq!(
             cron_tools.len(),
             if cron_open { cron_declared } else { 0 },
             "[{label}] cron 工具可见性必须随 CronMiddleware 键变化: {cron_tools:?}"
         );
         assert_eq!(
-            mw_instance_tools(&projection, "web").len(),
+            super::mw_instance_tools(&projection, "web").len(),
             web_declared,
             "[{label}] 其它 builtin 实例不得受 Cron 策略键影响"
         );
         assert_eq!(
-            mw_instance_tools(&projection, "artifact").len(),
+            super::mw_instance_tools(&projection, "artifact").len(),
             artifact_declared,
             "[{label}] artifact 不得受策略键影响"
         );
@@ -124,7 +142,7 @@ async fn policy_close_dimensions() {
             pool.init_status.read()
         );
         let handle = pool
-            .get_client("cron")
+            .client("cron")
             .unwrap_or_else(|| panic!("[{label}] cron 必须仍已连接"));
         assert!(
             matches!(handle.status, ClientStatus::Connected),
@@ -157,7 +175,7 @@ async fn policy_close_dimensions() {
         assert!(
             Arc::ptr_eq(
                 &cron_handle_before,
-                &pool.get_client("cron").expect("cron 必须仍在池中")
+                &pool.client("cron").expect("cron 必须仍在池中")
             ),
             "[{label}] cron 句柄必须仍是同一份 Arc（不重连、不销毁）"
         );
@@ -192,10 +210,11 @@ async fn policy_close_dimensions() {
             !supervisor.tick_is_finished(),
             "生产 spawn 点必须为 tick_enabled=true 的 cron 代挂上**运行中**的 tick（TickGuard 未结束）"
         );
-        let mut extra_service = serve_client_auto(io, &pool.capability_profile, HANDSHAKE_TIMEOUT)
-            .await
-            .expect("附加代的 builtin 握手不得超时")
-            .expect("附加代的 builtin 握手不得失败");
+        let mut extra_service =
+            crate::mcp::client::serve_client_auto(io, &pool.capability_profile, HANDSHAKE_TIMEOUT)
+                .await
+                .expect("附加代的 builtin 握手不得超时")
+                .expect("附加代的 builtin 握手不得失败");
         let _ = extra_service.close_with_timeout(CLOSE_TIMEOUT).await;
         let outcome = supervisor.close(BUILTIN_CONVERGE_TIMEOUT).await;
         assert!(
@@ -219,7 +238,7 @@ async fn policy_close_dimensions() {
     let cron_off = ["CronMiddleware"];
     let projection = fixture.projections(&cron_off);
     assert!(
-        mw_instance_tools(&projection, "cron").is_empty(),
+        super::mw_instance_tools(&projection, "cron").is_empty(),
         "实例键关闭后 cron 工具必须从投影中消失"
     );
     let invocation_fixture =

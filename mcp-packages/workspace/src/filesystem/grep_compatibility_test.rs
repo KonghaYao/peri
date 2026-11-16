@@ -1,4 +1,5 @@
-use super::*;
+use crate::filesystem::grep::GrepTool;
+use peri_agent::tools::BaseTool;
 
 // === Task 5: multi_line 兼容性验证 ===
 

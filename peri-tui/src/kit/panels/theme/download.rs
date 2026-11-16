@@ -1,26 +1,18 @@
 //! One admitted theme download owns progress until all terminal effects finish.
 //! The popup's resettable display is a projection, never task admission state.
 
-use std::{
-    path::Path,
-    sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
-};
+use std::path::Path;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use anyhow::Context;
 use fluent_bundle::FluentValue;
 use peri_theme::loader::list_available_themes;
 use tokio::task::JoinHandle;
 
-use super::{THEME_LIST, refresh_theme_catalog_after_download};
+use super::THEME_LIST;
 use crate::i18n;
-use crate::kit::{
-    atoms::{
-        DOWNLOAD_PROGRESS, DownloadItem, DownloadProgressPayload, FileDownloadStatus, NOTIFICATION,
-        Notification, PopupKind,
-    },
-    popup_overlay::open_popup,
-};
 
 static DOWNLOAD_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -53,7 +45,7 @@ pub(super) fn trigger_download_themes_with(
     request: impl FnOnce() -> DownloadRequest + Send + 'static,
 ) -> Option<JoinHandle<()>> {
     let mut run = DownloadRun::try_claim()?;
-    open_popup(PopupKind::Download);
+    crate::kit::popup_overlay::open_popup(PopupKind::Download);
     Some(tokio::spawn(async move {
         let result = run_download(request(), &mut run).await;
         run.finish(result);
@@ -215,7 +207,7 @@ async fn run_download(request: DownloadRequest, run: &mut DownloadRun) -> anyhow
     if run.progress.success_count > 0 {
         let theme_catalog = THEME_LIST.state();
         let mut catalog = theme_catalog.write();
-        refresh_theme_catalog_after_download(
+        super::refresh_theme_catalog_after_download(
             &mut catalog,
             run.progress.success_count,
             request.scan_catalog,
@@ -237,3 +229,17 @@ async fn download_file(client: &reqwest::Client, url: &str, path: &Path) -> Resu
         .map_err(|error| format!("read error: {error}"))?;
     std::fs::write(path, body).map_err(|error| format!("write error: {error}"))
 }
+
+use crate::kit::atoms::DOWNLOAD_PROGRESS;
+
+use crate::kit::atoms::DownloadItem;
+
+use crate::kit::atoms::DownloadProgressPayload;
+
+use crate::kit::atoms::FileDownloadStatus;
+
+use crate::kit::atoms::NOTIFICATION;
+
+use crate::kit::atoms::Notification;
+
+use crate::kit::atoms::PopupKind;

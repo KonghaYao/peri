@@ -6,11 +6,12 @@ use peri_acp_types::store::{InheritedContext, PersistedPayload};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use super::super::types::{
+use crate::agent::{CompactConfig, ContextBudget};
+use crate::session::subagent::types::{
     SubagentChainAssembler, SubagentChainContext, SubagentHost, SubagentLlmSource,
 };
-use super::super::v2_bridge::{build_v2_subagent_context, V2SubagentContext};
-use crate::agent::{CompactConfig, ContextBudget};
+
+use crate::session::subagent::v2_bridge::V2SubagentContext;
 use crate::session::tool_catalog::ToolFilterPolicy;
 use crate::session::{FrozenContext, MessageQueue, Session};
 use crate::tools::{BaseTool, ToolInvocationResolver};
@@ -117,7 +118,7 @@ pub(super) async fn build_subagent_session_v2(
                     .parent_thread_id
                     .clone()
                     .unwrap_or_else(|| child_thread_id.clone());
-                let owner = super::super::resource_owner::ParkedChildOwner::new(
+                let owner = crate::session::subagent::resource_owner::ParkedChildOwner::new(
                     child_thread_id.clone(),
                     parent_id,
                     manager.clone(),
@@ -242,7 +243,7 @@ pub(super) async fn build_subagent_session_v2(
         .into_iter()
         .filter(|tool| tool_filter(tool.as_ref()))
         .collect();
-    let v2_ctx = build_v2_subagent_context(
+    let v2_ctx = crate::session::subagent::v2_bridge::build_v2_subagent_context(
         Some(session.clone()),
         llm,
         Arc::clone(&chain),
@@ -271,9 +272,9 @@ pub(super) async fn build_subagent_session_v2(
 pub(super) fn inherited_frozen_context(
     parent: Option<&Arc<Session>>,
     identity_system: Option<&str>,
-    frozen_claude_md: &Option<String>,
-    frozen_skill_summary: &Option<String>,
-    frozen_date: &Option<String>,
+    frozen_claude_md: Option<&str>,
+    frozen_skill_summary: Option<&str>,
+    frozen_date: Option<&str>,
 ) -> FrozenContext {
     FrozenContext {
         system_prompt: identity_system.map(Arc::from).unwrap_or_default(),
@@ -282,18 +283,9 @@ pub(super) fn inherited_frozen_context(
         legacy_embedded_environment: false,
         legacy_embedded_instructions: parent
             .is_some_and(|p| p.store().frozen.legacy_embedded_instructions),
-        claude_md: frozen_claude_md
-            .as_ref()
-            .map(|s| Arc::from(s.as_str()))
-            .unwrap_or_default(),
-        skill_summary: frozen_skill_summary
-            .as_ref()
-            .map(|s| Arc::from(s.as_str()))
-            .unwrap_or_default(),
-        date: frozen_date
-            .as_ref()
-            .map(|s| Arc::from(s.as_str()))
-            .unwrap_or_default(),
+        claude_md: frozen_claude_md.map(Arc::from).unwrap_or_default(),
+        skill_summary: frozen_skill_summary.map(Arc::from).unwrap_or_default(),
+        date: frozen_date.map(Arc::from).unwrap_or_default(),
         language: parent.and_then(|p| p.store().frozen.language.clone()),
         // MetaHarness 冻结状态随父 session 复制（ARC-FROZEN-001：不重读配置/磁盘）
         meta_harness: parent

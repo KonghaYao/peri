@@ -1,4 +1,10 @@
-use super::*;
+use super::Arc;
+use super::BaseMessage;
+use super::BaseTool;
+use super::ExecutorEvent;
+use super::HostFixture;
+use super::Reasoning;
+use super::SubAgentTool;
 use peri_agent::agent::async_tasks::TaskManager;
 use peri_agent::agent::react::ToolCall;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,19 +24,19 @@ impl GatedMessageLlm {
         request: peri_model::ModelRequest,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-        use crate::subagent::test_support::*;
+        use crate::subagent::test_support;
         let _ = &cancellation;
-        let messages = base_messages(&request);
-        let defined = defined_tools(&request);
+        let messages = test_support::base_messages(&request);
+        let defined = test_support::defined_tools(&request);
         let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         self.snapshots.send(messages.to_vec()).unwrap();
         if call == 0 {
             self.release.acquire().await.unwrap().forget();
-            return events_from_reasoning(self.first_answer.clone());
+            return test_support::events_from_reasoning(self.first_answer.clone());
         }
-        text_events("finished")
+        test_support::text_events("finished")
     }
 }
 crate::subagent::test_support::fixture_model_impl!(GatedMessageLlm);
@@ -49,8 +55,8 @@ struct MessageFixture {
 
 impl MessageFixture {
     async fn new(first_answer: Reasoning) -> Self {
-        let dir = tempdir().unwrap();
-        write_test_agent(&dir);
+        let dir = tempfile::tempdir().unwrap();
+        super::write_test_agent(&dir);
         let manager = Arc::new(TaskManager::new());
         let calls = Arc::new(AtomicUsize::new(0));
         let factories = Arc::new(AtomicUsize::new(0));
@@ -70,7 +76,7 @@ impl MessageFixture {
             })
             .await;
         let tool = SubAgentTool::new(
-            Arc::new(vec![make_tool("Probe")]),
+            Arc::new(vec![super::make_tool("Probe")]),
             None,
             Arc::new(move |_| {
                 factory_calls.fetch_add(1, Ordering::SeqCst);
@@ -91,7 +97,7 @@ impl MessageFixture {
             None,
             Some(Arc::new(String::new())),
         );
-        let tool = host.bind(with_agent_face(tool, dir.path()).await);
+        let tool = host.bind(super::with_agent_face(tool, dir.path()).await);
         Self {
             dir,
             host,
@@ -386,7 +392,7 @@ async fn test_send_only_still_rejects_foreign_cwd_before_delivery() {
     let id = fixture
         .start(serde_json::json!({"subagent_type": "test-agent"}))
         .await;
-    let foreign = tempdir().unwrap();
+    let foreign = tempfile::tempdir().unwrap();
     let error = fixture
         .invoke(serde_json::json!({
             "send_only": true,
@@ -455,7 +461,7 @@ async fn test_active_message_resumed_background_execution_accepts_defer() {
     .await;
     let id = uuid::Uuid::now_v7().to_string();
     // 被恢复的 thread 必须属于夹具父会话的同一执行根，否则 resume 会被归属校验拒绝。
-    preset_resumable_thread(
+    super::preset_resumable_thread(
         &fixture.host.fixture,
         &id,
         "fork",
@@ -519,7 +525,7 @@ async fn test_active_message_cross_session_is_rejected_without_spawning() {
     // 而不是缺父身份——否则测不到 cross-session 拒绝本身。
     let stranger_host = HostFixture::open_in(fixture.dir.path(), "fixture-active-stranger").await;
     let _ = &fixture;
-    let stranger = stranger_host.bind(make_subagent_tool(Vec::new()));
+    let stranger = stranger_host.bind(super::make_subagent_tool(Vec::new()));
     let mut stranger_ctx = peri_agent::tools::ToolContext::new(&[], ".");
     let stranger_tool_call = stranger_host.fresh_tool_call_id("stranger");
     stranger_ctx.invocation_id = Some(stranger_tool_call.clone().into());
@@ -560,17 +566,17 @@ async fn test_active_message_panic_revokes_before_runtime_deregistration() {
             request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let _ = &cancellation;
-            let _messages = base_messages(&request);
-            let defined = defined_tools(&request);
+            let _messages = test_support::base_messages(&request);
+            let defined = test_support::defined_tools(&request);
             let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             panic!("模拟后台执行崩溃");
         }
     }
     crate::subagent::test_support::fixture_model_impl!(PanicLlm);
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let manager = Arc::new(TaskManager::new());
     let (tx, mut rx) = mpsc::unbounded_channel();
     let cleanup_manager = manager.clone();

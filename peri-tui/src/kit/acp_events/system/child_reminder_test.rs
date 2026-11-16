@@ -1,10 +1,9 @@
-use super::*;
-use crate::kit::acp_events::acp_events_test::make_fold_test_state;
+use super::BridgeState;
+use super::TuiRenderUnit;
+use super::TuiSystemReminder;
+
 use crate::kit::acp_types::subagent_preview::{DETAIL_BYTES, FIELD_BYTES, STORE_BYTES};
-use crate::kit::atoms::{
-    BG_AGENT_IDS, BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_IDENTITY, BG_TASK_REVISION, BG_TASKS,
-    BgDisplayEntry, BgLiveDetail, BgTaskIdentity,
-};
+
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
     ReminderSource, SYSTEM_REMINDER_VERSION, SystemReminder,
@@ -34,9 +33,9 @@ fn reminder() -> SystemReminder {
 
 fn deliver(state: &mut BridgeState, value: &SystemReminder, child: Option<&str>, trusted: bool) {
     if trusted {
-        handle_trusted_system_reminder(state, value.clone(), child);
+        super::handle_trusted_system_reminder(state, value.clone(), child);
     } else {
-        handle_system_reminder(state, value, child);
+        super::handle_system_reminder(state, value, child);
     }
 }
 
@@ -45,7 +44,7 @@ fn deliver(state: &mut BridgeState, value: &SystemReminder, child: Option<&str>,
 fn child_reminder_ingress_bounds_only_the_display_copy_and_preserves_policy() {
     let original = reminder();
     for trusted in [false, true] {
-        let mut state = make_fold_test_state();
+        let mut state = crate::kit::acp_events::acp_events_test::make_fold_test_state();
         let _restore = RestoreBackground::empty();
         state.current_turn.append_text("parent output", None);
         state
@@ -65,8 +64,8 @@ fn child_reminder_ingress_bounds_only_the_display_copy_and_preserves_policy() {
         };
         assert_eq!(preview.body.len(), FIELD_BYTES);
         assert_eq!(preview.required, trusted);
-        assert_eq!(preview.wire.as_ref().unwrap().audiences, original.audiences);
-        assert_eq!(preview.relay.as_ref().unwrap().label(), "coder");
+        assert_eq!(preview.wire.as_ref().expect("child reminder ingress bounds only the display copy and preserves policy: the fixture must retain its expected variant").audiences, original.audiences);
+        assert_eq!(preview.relay.as_ref().expect("child reminder ingress bounds only the display copy and preserves policy: the fixture must retain its expected variant").label(), "coder");
         let reserved = crate::kit::retained_bytes::retained_reminder_bytes(preview);
         assert!(reserved >= preview.body.capacity() * 2 + 8 * 1024);
         drop(group);
@@ -81,7 +80,7 @@ fn child_reminder_ingress_bounds_only_the_display_copy_and_preserves_policy() {
     assert_eq!(original.body.len(), 64 * 1024);
     assert_eq!(original.delivery, ReminderDelivery::Required);
 
-    let mut root = make_fold_test_state();
+    let mut root = crate::kit::acp_events::acp_events_test::make_fold_test_state();
     deliver(&mut root, &original, None, true);
     let TuiRenderUnit::TuiSystemReminder(root_reminder) = &root.committed[0] else {
         unreachable!()
@@ -95,7 +94,7 @@ fn child_reminder_ingress_bounds_only_the_display_copy_and_preserves_policy() {
 #[test]
 #[serial]
 fn child_reminder_rejects_unknown_stopped_invalid_and_non_tui_inputs() {
-    let mut state = make_fold_test_state();
+    let mut state = crate::kit::acp_events::acp_events_test::make_fold_test_state();
     let _restore = RestoreBackground::empty();
     let mut value = reminder();
     for trusted in [false, true] {
@@ -128,7 +127,7 @@ fn child_reminder_rejects_unknown_stopped_invalid_and_non_tui_inputs() {
 #[test]
 #[serial]
 fn child_reminder_long_parent_and_repeated_terminals_do_not_accumulate() {
-    let mut state = make_fold_test_state();
+    let mut state = crate::kit::acp_events::acp_events_test::make_fold_test_state();
     let _restore = RestoreBackground::empty();
     let value = reminder();
     let mut first_body = None;
@@ -146,7 +145,7 @@ fn child_reminder_long_parent_and_repeated_terminals_do_not_accumulate() {
             .subagents
             .iter_mut()
             .find(|child| child.agent_id == id)
-            .unwrap();
+            .expect("child reminder long parent and repeated terminals do not accumulate: fixture must contain the searched item");
         let TuiRenderUnit::TuiSubAgentGroup(group) = child.view_model() else {
             unreachable!()
         };
@@ -192,7 +191,7 @@ fn child_reminder_long_parent_and_repeated_terminals_do_not_accumulate() {
             .sum::<usize>()
             <= STORE_BYTES
     );
-    assert!(first_body.unwrap().upgrade().is_none());
+    assert!(first_body.expect("child reminder long parent and repeated terminals do not accumulate: the fixture establishes first_body before this assertion").upgrade().is_none());
     assert!(state.memory_snapshot().unique_reserved_bytes < 2 * 1024 * 1024);
     crate::kit::acp_events::push_view_models_for_reset();
 }
@@ -200,7 +199,7 @@ fn child_reminder_long_parent_and_repeated_terminals_do_not_accumulate() {
 #[test]
 #[serial]
 fn publication_enforces_each_child_limit_even_without_an_append_helper() {
-    let mut state = make_fold_test_state();
+    let mut state = crate::kit::acp_events::acp_events_test::make_fold_test_state();
     let _restore = RestoreBackground::empty();
     state
         .current_turn
@@ -208,7 +207,7 @@ fn publication_enforces_each_child_limit_even_without_an_append_helper() {
     for _ in 0..4 {
         state.current_turn.subagents[0]
             .child_turn
-            .push_system_reminder(TuiSystemReminder::from_wire(reminder()).unwrap());
+            .push_system_reminder(TuiSystemReminder::from_wire(reminder()).expect("publication enforces each child limit even without an append helper: the from_wire fixture operation uses valid inputs"));
     }
     assert!(state.current_turn.subagents[0].preview_reserved() > DETAIL_BYTES);
     assert!(state.current_turn.subagents[0].preview_reserved() < STORE_BYTES);
@@ -253,10 +252,10 @@ impl Drop for RestoreBackground {
 #[test]
 #[serial]
 fn background_child_reminder_uses_its_detail_budget_and_keeps_independent_shell() {
-    let mut state = make_fold_test_state();
+    let mut state = crate::kit::acp_events::acp_events_test::make_fold_test_state();
     let _restore = RestoreBackground::empty();
     for (id, kind) in [("bg-agent-task", "agent"), ("independent-shell", "shell")] {
-        handle_bg_task_started(
+        super::handle_bg_task_started(
             &mut state,
             &crate::kit::acp_types::BgTaskEntry {
                 task_id: id.into(),
@@ -277,7 +276,7 @@ fn background_child_reminder_uses_its_detail_budget_and_keeps_independent_shell(
         .state()
         .write()
         .get_mut("independent-shell")
-        .unwrap()
+        .expect("background child reminder uses its detail budget and keeps independent shell: fixture must contain the requested entry")
         .output_preview = Some("shell output".into());
     crate::kit::bg_task_live::append_bg_text_chunk(
         "bg-child",
@@ -351,3 +350,21 @@ fn background_child_reminder_uses_its_detail_budget_and_keeps_independent_shell(
         Some("shell output")
     );
 }
+
+use crate::kit::atoms::BG_AGENT_IDS;
+
+use crate::kit::atoms::BG_DISPLAY;
+
+use crate::kit::atoms::BG_LIVE_DETAIL;
+
+use crate::kit::atoms::BG_TASK_IDENTITY;
+
+use crate::kit::atoms::BG_TASK_REVISION;
+
+use crate::kit::atoms::BG_TASKS;
+
+use crate::kit::atoms::BgDisplayEntry;
+
+use crate::kit::atoms::BgLiveDetail;
+
+use crate::kit::atoms::BgTaskIdentity;

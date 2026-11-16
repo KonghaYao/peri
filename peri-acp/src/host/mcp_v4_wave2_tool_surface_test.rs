@@ -1,4 +1,6 @@
-use super::*;
+use crate::host::mcp_v4_wave2::BuiltinHostFixture;
+use crate::host::mcp_v4_wave2::FixtureDirs;
+use serial_test::serial;
 
 /// 主 plan §8 第 3 行（A4/A6/A20）的终态断言：cron 工具 `direct: false`，
 /// deferred 目录按有效配置出现。
@@ -27,7 +29,7 @@ async fn wave2_final_first_request_and_deferred_summary() {
     for instance in ["web", "artifact", "cron"] {
         fixture.assert_instance_connected(instance);
     }
-    let faces = probe_tool_faces(
+    let faces = crate::host::mcp_v4_wave2::probe_tool_faces(
         "cron",
         fixture
             .session_context("mcp-v4-wave2-final-configured")

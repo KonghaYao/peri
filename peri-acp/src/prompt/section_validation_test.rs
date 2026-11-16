@@ -1,9 +1,16 @@
 //! 段落覆盖准入校验（L3）与 Cached / 装配冲突（M11）测试。
 
-use super::section_validation::*;
-use super::*;
+use super::section_validation;
+use super::section_validation::{OverrideRejection, MAX_SECTION_OVERRIDE_BYTES};
+use crate::prompt::prompt_template::PromptEnv;
+use crate::prompt::prompt_template::PromptTemplate;
+use crate::prompt::prompt_template::KNOWN_PLACEHOLDERS;
 use peri_acp_types::meta_harness::MetaHarnessState;
+use peri_acp_types::model::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
+use peri_agent::middleware::PromptSection;
+use peri_agent::middleware::PromptSectionZone;
 use peri_middlewares::host_ports::AgentCatalogProvider;
+use std::sync::Arc;
 
 fn section(
     id: &'static str,
@@ -28,7 +35,7 @@ fn state_with_override(id: &str, content: &str) -> MetaHarnessState {
 fn empty_override_is_rejected() {
     for text in ["", "   ", "\n\t "] {
         assert_eq!(
-            validate_section_override(PromptSectionZone::Uncached, text),
+            section_validation::validate_section_override(PromptSectionZone::Uncached, text),
             Err(OverrideRejection::Empty),
             "空白覆盖必须显式拒绝并保留内置段"
         );
@@ -38,11 +45,14 @@ fn empty_override_is_rejected() {
 #[test]
 fn oversized_override_is_rejected_and_limit_boundary_accepted() {
     let at_limit = "a".repeat(MAX_SECTION_OVERRIDE_BYTES);
-    assert!(validate_section_override(PromptSectionZone::Uncached, &at_limit).is_ok());
+    assert!(
+        section_validation::validate_section_override(PromptSectionZone::Uncached, &at_limit)
+            .is_ok()
+    );
 
     let over = "a".repeat(MAX_SECTION_OVERRIDE_BYTES + 1);
     assert_eq!(
-        validate_section_override(PromptSectionZone::Uncached, &over),
+        section_validation::validate_section_override(PromptSectionZone::Uncached, &over),
         Err(OverrideRejection::TooLarge {
             bytes: MAX_SECTION_OVERRIDE_BYTES + 1,
             limit: MAX_SECTION_OVERRIDE_BYTES,
@@ -54,7 +64,7 @@ fn oversized_override_is_rejected_and_limit_boundary_accepted() {
 fn reserved_boundary_token_is_rejected() {
     let text = format!("前置 {SYSTEM_PROMPT_DYNAMIC_BOUNDARY} 后置");
     assert_eq!(
-        validate_section_override(PromptSectionZone::Uncached, &text),
+        section_validation::validate_section_override(PromptSectionZone::Uncached, &text),
         Err(OverrideRejection::ReservedBoundaryToken)
     );
 }
@@ -62,13 +72,19 @@ fn reserved_boundary_token_is_rejected() {
 #[test]
 fn unknown_placeholder_is_rejected_known_one_accepted_in_uncached() {
     assert_eq!(
-        validate_section_override(PromptSectionZone::Uncached, "{{unknown_name}}"),
+        section_validation::validate_section_override(
+            PromptSectionZone::Uncached,
+            "{{unknown_name}}"
+        ),
         Err(OverrideRejection::UnknownPlaceholder(
             "unknown_name".to_string()
         ))
     );
     assert_eq!(
-        validate_section_override(PromptSectionZone::Uncached, "{{unterminated"),
+        section_validation::validate_section_override(
+            PromptSectionZone::Uncached,
+            "{{unterminated"
+        ),
         Err(OverrideRejection::UnknownPlaceholder(
             "<unterminated>".to_string()
         ))
@@ -76,7 +92,8 @@ fn unknown_placeholder_is_rejected_known_one_accepted_in_uncached() {
     for known in KNOWN_PLACEHOLDERS {
         let text = format!("value: {{{{{known}}}}}");
         assert!(
-            validate_section_override(PromptSectionZone::Uncached, &text).is_ok(),
+            section_validation::validate_section_override(PromptSectionZone::Uncached, &text)
+                .is_ok(),
             "已知占位符 {known} 应被接受（Uncached）"
         );
     }
@@ -86,20 +103,23 @@ fn unknown_placeholder_is_rejected_known_one_accepted_in_uncached() {
 fn cached_section_rejects_dynamic_placeholders() {
     let text = "date={{date}}".to_string();
     assert_eq!(
-        validate_section_override(PromptSectionZone::Cached, &text),
+        section_validation::validate_section_override(PromptSectionZone::Cached, &text),
         Err(OverrideRejection::CachedDynamicPlaceholder(
             "date".to_string()
         ))
     );
     // Cached 段没有占位符时正常接受
-    assert!(validate_section_override(PromptSectionZone::Cached, "纯静态文本").is_ok());
+    assert!(
+        section_validation::validate_section_override(PromptSectionZone::Cached, "纯静态文本")
+            .is_ok()
+    );
 }
 
 #[test]
 fn escaped_literal_braces_are_not_placeholders() {
     let text = "字面量 \\{{cwd}} 与 \\{{whatever}}";
     assert!(
-        validate_section_override(PromptSectionZone::Cached, text).is_ok(),
+        section_validation::validate_section_override(PromptSectionZone::Cached, text).is_ok(),
         "转义后的花括号是字面量，不参与模板校验"
     );
 }
@@ -128,7 +148,7 @@ fn sanitize_rejects_absent_target_and_bad_sections_keeps_valid() {
         .section_overrides
         .insert("99_unknown".to_string(), Arc::from("inert"));
 
-    let mut rejected = sanitize_section_overrides(&mut state, &sections);
+    let mut rejected = section_validation::sanitize_section_overrides(&mut state, &sections);
     rejected.sort_by(|left, right| left.0.cmp(&right.0));
     assert_eq!(
         rejected,
@@ -159,7 +179,7 @@ fn sanitize_enforces_total_budget_deterministically() {
             .insert(id.to_string(), Arc::from(chunk.as_str()));
     }
 
-    let rejected = sanitize_section_overrides(&mut state, &sections);
+    let rejected = section_validation::sanitize_section_overrides(&mut state, &sections);
     assert_eq!(rejected.len(), 1, "只是超总预算的那个被拒绝");
     assert_eq!(rejected[0].0, "s4", "按 id 排序确定性地拒绝最后一个");
     assert_eq!(rejected[0].1.category(), "total-budget");

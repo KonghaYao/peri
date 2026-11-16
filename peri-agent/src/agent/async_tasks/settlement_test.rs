@@ -1,12 +1,17 @@
-use super::*;
+use crate::agent::async_tasks::registry::BackgroundRegistryError;
+use crate::agent::async_tasks::registry::BackgroundTaskRegistry;
 use crate::agent::async_tasks::{BackgroundTask, BackgroundTaskStatus, BgCancelHandle};
+use crate::agent::events::BackgroundTaskResult;
 use peri_acp_types::session::{
     MessageKind, MessageQueue, MessageSource, QueuedMessage, SessionInbox,
 };
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use peri_acp_types::tasks::BgRegistryEvent;
+use peri_acp_types::tasks::BgTaskKind;
+use peri_acp_types::tasks::OnBgCompleteFn;
+use peri_acp_types::tasks::TaskRegistrationTicket;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 fn registered(kind: BgTaskKind) -> (Arc<BackgroundTaskRegistry>, TaskRegistrationTicket) {
     let registry = Arc::new(BackgroundTaskRegistry::new());
@@ -28,7 +33,7 @@ fn registered(kind: BgTaskKind) -> (Arc<BackgroundTaskRegistry>, TaskRegistratio
             owner_session_id: None,
             owner_identity: None,
         })
-        .unwrap();
+        .expect("the register with kind fixture result is required for this assertion");
     // 此夹具没有外部进程；真实资源证明由专门生命周期用例覆盖。
     registry.confirm_external_stopped(&ticket);
     (registry, ticket)
@@ -69,7 +74,13 @@ async fn all_owned_kinds_publish_before_terminal_and_wake_idle_consumer() {
         let output = Arc::clone(&queue);
         let delivery: OnBgCompleteFn = Arc::new(move |result, actual_kind| {
             assert_eq!(actual_kind, kind);
-            assert_eq!(owner.upgrade().unwrap().active_count(), 1);
+            assert_eq!(
+                owner
+                    .upgrade()
+                    .expect("the upgrade fixture result is required for this assertion")
+                    .active_count(),
+                1
+            );
             output.push_sync(QueuedMessage::new(
                 MessageKind::Defer,
                 MessageSource::SystemInjected,
@@ -79,10 +90,10 @@ async fn all_owned_kinds_publish_before_terminal_and_wake_idle_consumer() {
         });
         assert!(registry
             .settle_completed(&ticket, result(), delivery)
-            .unwrap());
+            .expect("the settle completed fixture result is required for this assertion"));
         tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
             .await
-            .unwrap();
+            .expect("the timeout fixture result is required for this assertion");
         assert_eq!(registry.active_count(), 0);
         assert_eq!(queue.len_sync(), 1);
     }
@@ -118,7 +129,7 @@ fn rejected_delivery_is_visible_retained_and_retried_once() {
     assert_eq!(registry.snapshot().tasks[0].status, "completed");
     assert!(!registry
         .settle_completed(&ticket, result(), delivery)
-        .unwrap());
+        .expect("the settle completed fixture result is required for this assertion"));
     assert_eq!(registry.retry_pending_deliveries(), 0);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
@@ -145,7 +156,9 @@ fn delivery_panic_keeps_terminal_unpublished_until_retry() {
 #[test]
 fn cancelled_shell_cleanup_is_delivered_without_ghost_completion() {
     let (registry, ticket) = registered(BgTaskKind::Shell);
-    registry.cancel("task").unwrap();
+    registry
+        .cancel("task")
+        .expect("the cancel fixture result is required for this assertion");
     let attempts = Arc::new(AtomicUsize::new(0));
     let called = Arc::clone(&attempts);
     let delivery: OnBgCompleteFn = Arc::new(move |result, kind| {
@@ -156,10 +169,10 @@ fn cancelled_shell_cleanup_is_delivered_without_ghost_completion() {
     });
     assert!(!registry
         .settle_completed(&ticket, result(), Arc::clone(&delivery))
-        .unwrap());
+        .expect("the clone fixture result is required for this assertion"));
     assert!(!registry
         .settle_completed(&ticket, result(), delivery)
-        .unwrap());
+        .expect("the settle completed fixture result is required for this assertion"));
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
     assert_eq!(registry.snapshot().tasks[0].status, "cancelled");
 }
@@ -178,13 +191,18 @@ fn unknown_task_does_not_call_delivery() {
 #[test]
 fn cancelled_cleanup_retry_cannot_report_idle_while_delivery_is_in_flight() {
     let (registry, ticket) = registered(BgTaskKind::Shell);
-    registry.cancel("task").unwrap();
+    registry
+        .cancel("task")
+        .expect("the cancel fixture result is required for this assertion");
     registry.confirm_external_stopped(&ticket);
     let owner = Arc::downgrade(&registry);
     let attempts = Arc::new(AtomicUsize::new(0));
     let called = Arc::clone(&attempts);
     let delivery: OnBgCompleteFn = Arc::new(move |_, _| {
-        assert!(!owner.upgrade().unwrap().external_settled());
+        assert!(!owner
+            .upgrade()
+            .expect("the upgrade fixture result is required for this assertion")
+            .external_settled());
         if called.fetch_add(1, Ordering::SeqCst) == 0 {
             Err("temporarily unavailable".into())
         } else {
@@ -265,8 +283,17 @@ async fn concurrent_manual_retry_does_not_reenter_or_strand_delivery() {
         Arc::new(move |_, _| match called.fetch_add(1, Ordering::SeqCst) {
             0 => Err("first failure".into()),
             1 => {
-                entered_tx.lock().take().unwrap().send(()).unwrap();
-                release_rx.lock().recv().unwrap();
+                entered_tx
+                    .lock()
+                    .take()
+                    .expect("entered tx lock fixture must provide its pending value exactly once")
+                    .send(())
+                    .expect(
+                        "entered tx lock test receiver must remain available for this delivery",
+                    );
+                release_rx.lock().recv().expect(
+                    "release rx lock producer must deliver the expected test event before closing",
+                );
                 Err("manual retry also failed".into())
             }
             2 => Ok(()),
@@ -277,19 +304,28 @@ async fn concurrent_manual_retry_does_not_reenter_or_strand_delivery() {
         .is_err());
     let retry_owner = registry.clone();
     let manual = std::thread::spawn(move || retry_owner.retry_pending_deliveries());
-    entered_rx.await.unwrap();
+    entered_rx
+        .await
+        .expect("the entered rx fixture result is required for this assertion");
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert_eq!(registry.active_count(), 1);
-    release_tx.send(()).unwrap();
-    assert_eq!(manual.join().unwrap(), 0);
+    release_tx
+        .send(())
+        .expect("release tx send test receiver must remain available for this delivery");
+    assert_eq!(
+        manual
+            .join()
+            .expect("manual join test worker must complete without panicking"),
+        0
+    );
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while registry.active_count() != 0 {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
-    .unwrap();
+    .expect("the timeout fixture result is required for this assertion");
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
     registry.scope.close();
     assert!(registry.scope.wait().await);
@@ -300,10 +336,16 @@ async fn concurrent_manual_retry_does_not_reenter_or_strand_delivery() {
 async fn shutdown_retries_pending_delivery_once_and_reports_remaining_failure() {
     use peri_acp_types::tasks::{TaskManager as _, TaskShutdownReport};
     for recover in [true, false] {
-        let manager = super::super::super::TaskManager::new();
+        let manager = crate::agent::async_tasks::manager::TaskManager::new();
         let (fixture, _) = registered(BgTaskKind::Agent);
-        let task = fixture.tasks.lock().remove("task").unwrap();
-        let ticket = manager.register_with_kind(task).unwrap();
+        let task = fixture
+            .tasks
+            .lock()
+            .remove("task")
+            .expect("the remove fixture result is required for this assertion");
+        let ticket = manager
+            .register_with_kind(task)
+            .expect("the register with kind fixture result is required for this assertion");
         // Moving this no-resource fixture creates a new cleanup receipt.
         manager.confirm_external_execution_stopped(&ticket);
         let attempts = Arc::new(AtomicUsize::new(0));
@@ -403,13 +445,17 @@ async fn automatic_retry_uses_original_delivery_identity_without_duplicate_queue
         .settle_completed(&ticket, result(), delivery)
         .is_err());
     assert_eq!(queue.len_sync(), 1);
-    assert!(wake.has_changed().unwrap());
+    assert!(wake
+        .has_changed()
+        .expect("the has changed fixture result is required for this assertion"));
     wake.borrow_and_update();
     assert_eq!(queue.drain_batch_sync(64).len(), 1);
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     assert_eq!(registry.active_count(), 0);
     assert_eq!(queue.len_sync(), 0);
-    assert!(!wake.has_changed().unwrap());
+    assert!(!wake
+        .has_changed()
+        .expect("the has changed fixture result is required for this assertion"));
     let ids = route.ids.lock();
     assert_eq!(ids.len(), 2);
     assert_eq!(ids[0], ids[1]);
@@ -431,12 +477,12 @@ fn frozen_queue_route_rejects_conflicting_payload_or_source_without_waking() {
         crate::session::async_router::background_result_reminder(&original, BgTaskKind::Agent);
     route
         .accept(delivery_id, &reminder, MessageSource::SubAgentComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     wake.borrow_and_update();
     assert_eq!(queue.drain_batch_sync(64).len(), 1);
     route
         .accept(delivery_id, &reminder, MessageSource::SubAgentComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     let mut changed = original;
     changed.output = "changed payload".into();
     let changed_reminder =
@@ -454,7 +500,9 @@ fn frozen_queue_route_rejects_conflicting_payload_or_source_without_waking() {
         .unwrap_err()
         .contains("conflicting"));
     assert_eq!(queue.len_sync(), 0);
-    assert!(!wake.has_changed().unwrap());
+    assert!(!wake
+        .has_changed()
+        .expect("the has changed fixture result is required for this assertion"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -482,7 +530,9 @@ async fn cooperative_agent_cancellation_retries_original_delivery_without_new_te
         .scope
         .spawn(async move {
             execution_cancel.cancelled().await;
-            let registry = owner.upgrade().unwrap();
+            let registry = owner
+                .upgrade()
+                .expect("the upgrade fixture result is required for this assertion");
             let mut cancelled = result();
             cancelled.success = false;
             cancelled.output = "Background sub-agent was interrupted".into();
@@ -499,25 +549,32 @@ async fn cooperative_agent_cancellation_retries_original_delivery_without_new_te
                 "pending delivery is not acceptance"
             );
         })
-        .unwrap();
+        .expect("the spawn fixture result is required for this assertion");
     {
         let mut tasks = registry.tasks.lock();
-        let task = tasks.get_mut("task").unwrap();
+        let task = tasks
+            .get_mut("task")
+            .expect("the fixture must contain task");
         task.cancel_handle = BgCancelHandle::Abort(handle);
         task.cancel_token = Some(cancel);
     }
     registry.confirm_external_stopped(&ticket);
     let mut events = registry.subscribe_events();
-    registry.cancel("task").unwrap();
+    registry
+        .cancel("task")
+        .expect("the cancel fixture result is required for this assertion");
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert_eq!(registry.snapshot().tasks[0].status, "cancelled");
     assert!(!registry
         .settle_completed(&ticket, result(), delivery)
-        .unwrap());
+        .expect("the settle completed fixture result is required for this assertion"));
     assert_eq!(registry.retry_pending_deliveries(), 0);
     assert!(matches!(
-        events.try_recv().unwrap().event,
+        events
+            .try_recv()
+            .expect("events try recv producer must deliver the expected test event before closing")
+            .event,
         BgRegistryEvent::Cancelled { .. }
     ));
     assert!(events.try_recv().is_err());
@@ -547,20 +604,24 @@ async fn aborted_agent_does_not_fabricate_cleanup_delivery() {
                             Ok(())
                         }),
                     )
-                    .unwrap();
+                    .expect("the settle completed fixture result is required for this assertion");
             }
         })
-        .unwrap();
+        .expect("the spawn fixture result is required for this assertion");
     let abort = handle.abort_handle();
     let cancel = tokio_util::sync::CancellationToken::new();
     {
         let mut tasks = registry.tasks.lock();
-        let task = tasks.get_mut("task").unwrap();
+        let task = tasks
+            .get_mut("task")
+            .expect("the fixture must contain task");
         task.cancel_handle = BgCancelHandle::Abort(handle);
         task.cancel_token = Some(cancel.clone());
     }
     registry.confirm_external_stopped(&ticket);
-    registry.cancel("task").unwrap();
+    registry
+        .cancel("task")
+        .expect("the cancel fixture result is required for this assertion");
     assert!(cancel.is_cancelled());
     tokio::task::yield_now().await;
     tokio::time::advance(std::time::Duration::from_millis(2999)).await;

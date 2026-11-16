@@ -9,7 +9,7 @@ use super::{
     FIELD_CONTEXT_1M, FIELD_EFFORT, FIELD_MAX_TOKENS, FIELD_MODEL, FIELD_PROVIDER, PROFILE_KEYS,
 };
 use crate::config::PeriConfig;
-use crate::kit::atoms::{ACP_CLIENT_HANDLE, MODEL_HIGHLIGHT_UNTIL, PERI_CONFIG_HANDLE};
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -72,7 +72,7 @@ pub(super) fn provider_switch_candidate(
         .providers
         .iter()
         .find(|provider| provider.id == next)
-        .and_then(|provider| provider.models.get_model(alias))
+        .and_then(|provider| provider.models.model(alias))
         .map(str::to_string)
         .filter(|model| !model.is_empty());
     let mut candidate = cfg.clone();
@@ -130,7 +130,7 @@ pub(super) fn edit_field(alias: String, field: usize, forward: bool) {
                 .providers
                 .iter()
                 .find(|p| p.id == profile_provider)
-                .and_then(|p| p.models.get_model(&alias))
+                .and_then(|p| p.models.model(&alias))
                 .map(str::to_string)
         })
         .unwrap_or_default();
@@ -363,9 +363,15 @@ fn resolve_model_name_for_alias(app_config: &crate::config::AppConfig, alias: &s
         .and_then(|pf| pf.model.clone().filter(|m| !m.is_empty()))
         .or_else(|| {
             provider
-                .and_then(|p| p.models.get_model(alias))
+                .and_then(|p| p.models.model(alias))
                 .map(str::to_string)
         })
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| alias.to_string())
 }
+
+use crate::kit::atoms::ACP_CLIENT_HANDLE;
+
+use crate::kit::atoms::MODEL_HIGHLIGHT_UNTIL;
+
+use crate::kit::atoms::PERI_CONFIG_HANDLE;

@@ -1,8 +1,17 @@
 //! Tests
-use super::*;
-use crate::kit::history_paging::tests::{drain_pages_channel, pages_channel};
+use super::DragAction;
+use super::GesturePending;
+use super::Rect;
+use super::SCROLL_LINES;
+use super::SCROLL_PADDING;
+use super::ScrollPos;
+use super::ScrollbarDragState;
+use super::ScrollbarFields;
+use super::WrappedLineInfo;
+
+use super::event;
+
 use ratatui_kit::crossterm::event::{MouseButton, MouseEventKind};
-use serial_test::serial;
 
 // ── ScrollPos（usize 滚动状态）测试 ───────────────────────────────────
 
@@ -113,10 +122,10 @@ fn test_proximity_content_smaller_than_viewport_at_bottom() {
 #[test]
 fn test_follow_at_bottom_after_scroll() {
     // 滚到真正底部（offset == max_scroll）→ 恢复跟随
-    assert!(should_follow_after_user_scroll(80, 80));
+    assert!(super::should_follow_after_user_scroll(80, 80));
     // Down 溢出到底（offset > max_scroll，含 End 的 usize::MAX 哨兵）→ 跟随
-    assert!(should_follow_after_user_scroll(80, 81));
-    assert!(should_follow_after_user_scroll(80, usize::MAX));
+    assert!(super::should_follow_after_user_scroll(80, 81));
+    assert!(super::should_follow_after_user_scroll(80, usize::MAX));
 }
 
 #[test]
@@ -124,44 +133,50 @@ fn test_follow_at_visual_bottom_with_padding() {
     // [Fix padding] max_scroll 含 mod.rs 的 +SCROLL_PADDING 滚动缓冲：用户滚到
     // 视觉底部（真实内容底 = max_scroll - SCROLL_PADDING）时即恢复跟随，
     // 不再恒差 2 行导致吸底永不恢复。
-    assert!(should_follow_after_user_scroll(80, 80 - SCROLL_PADDING));
-    assert!(should_follow_after_user_scroll(80, 80 - SCROLL_PADDING + 1));
+    assert!(super::should_follow_after_user_scroll(
+        80,
+        80 - SCROLL_PADDING
+    ));
+    assert!(super::should_follow_after_user_scroll(
+        80,
+        80 - SCROLL_PADDING + 1
+    ));
 }
 
 #[test]
 fn test_no_follow_when_scrolled_up() {
     // 一向上滚动离开视觉底部（offset < max_scroll - SCROLL_PADDING）→ 退出跟随（浏览模式）
-    assert!(!should_follow_after_user_scroll(
+    assert!(!super::should_follow_after_user_scroll(
         80,
         80 - SCROLL_PADDING - 1
     ));
-    assert!(!should_follow_after_user_scroll(80, 0));
+    assert!(!super::should_follow_after_user_scroll(80, 0));
 }
 
 #[test]
 fn test_follow_when_content_fits_viewport() {
     // 内容不满一屏（max_scroll = 0）：offset 只能为 0，视为在底部 → 跟随
-    assert!(should_follow_after_user_scroll(0, 0));
+    assert!(super::should_follow_after_user_scroll(0, 0));
     // 短内容（max_scroll ≤ padding）：0 即底部 → 跟随
-    assert!(should_follow_after_user_scroll(1, 0));
+    assert!(super::should_follow_after_user_scroll(1, 0));
 }
 
 #[test]
 fn test_reset_force_bottom_sentinel_is_consumed_once() {
     let mut prev_items_len = 0;
-    assert!(consume_reset_force_bottom(&mut prev_items_len, 100));
+    assert!(super::consume_reset_force_bottom(&mut prev_items_len, 100));
     assert_eq!(prev_items_len, 100);
 
-    assert!(!consume_reset_force_bottom(&mut prev_items_len, 200));
+    assert!(!super::consume_reset_force_bottom(&mut prev_items_len, 200));
     assert_eq!(prev_items_len, 200);
 }
 
 #[test]
 fn test_empty_replay_snapshot_keeps_sentinel_armed() {
     let mut prev_items_len = 0;
-    assert!(!consume_reset_force_bottom(&mut prev_items_len, 0));
+    assert!(!super::consume_reset_force_bottom(&mut prev_items_len, 0));
     assert_eq!(prev_items_len, 0);
-    assert!(consume_reset_force_bottom(&mut prev_items_len, 25));
+    assert!(super::consume_reset_force_bottom(&mut prev_items_len, 25));
 }
 
 // ── 滚动落地：逐事件位置转换（纯函数） ─────────────────────────────────
@@ -174,9 +189,9 @@ fn test_empty_replay_snapshot_keeps_sentinel_armed() {
 fn test_two_wheel_events_land_two_steps_not_one_merged_jump() {
     let max_scroll = 100;
     let mut offset = 10;
-    offset = land_scroll_delta(offset, SCROLL_LINES as i32, max_scroll);
+    offset = super::land_scroll_delta(offset, SCROLL_LINES as i32, max_scroll);
     assert_eq!(offset, 10 + SCROLL_LINES as usize, "第一个事件立即落地");
-    offset = land_scroll_delta(offset, SCROLL_LINES as i32, max_scroll);
+    offset = super::land_scroll_delta(offset, SCROLL_LINES as i32, max_scroll);
     assert_eq!(
         offset,
         10 + 2 * SCROLL_LINES as usize,
@@ -187,22 +202,23 @@ fn test_two_wheel_events_land_two_steps_not_one_merged_jump() {
 #[test]
 fn test_land_scroll_delta_normalizes_bottom_sentinel() {
     // 跟随态 offset 是 usize::MAX 哨兵：上滚先归一化到当帧底部，不"滚空气"。
-    assert_eq!(land_scroll_delta(usize::MAX, -3, 80), 77);
+    assert_eq!(super::land_scroll_delta(usize::MAX, -3, 80), 77);
 }
 
 #[test]
 fn test_apply_delta_to_offset_clamps() {
     // 向下不超过 max_scroll（原 scroll_down 无限递增、渲染侧才 clamp）
-    assert_eq!(apply_delta_to_offset(10, 3, 12), 12);
-    assert_eq!(apply_delta_to_offset(10, 3, 100), 13);
+    assert_eq!(super::apply_delta_to_offset(10, 3, 12), 12);
+    assert_eq!(super::apply_delta_to_offset(10, 3, 100), 13);
     // 向上不低于 0
-    assert_eq!(apply_delta_to_offset(1, -3, 100), 0);
+    assert_eq!(super::apply_delta_to_offset(1, -3, 100), 0);
     // 从底部向上滚动
-    assert_eq!(apply_delta_to_offset(100, -3, 100), 97);
+    assert_eq!(super::apply_delta_to_offset(100, -3, 100), 97);
 }
 
 // ── 滚动条几何 / 反推公式测试 ────────────────────────────────────────
 
+#[must_use]
 fn make_rect(x: u16, y: u16, width: u16, height: u16) -> Rect {
     Rect::new(x, y, width, height)
 }
@@ -211,15 +227,15 @@ fn make_rect(x: u16, y: u16, width: u16, height: u16) -> Rect {
 fn test_is_scrollbar_column_rightmost() {
     // area: x=10, width=80 → scrollbar 列 = 10 + 80 - 1 = 89
     let area = make_rect(10, 0, 80, 24);
-    assert!(is_scrollbar_column(89, area));
+    assert!(super::is_scrollbar_column(89, area));
 }
 
 #[test]
 fn test_is_scrollbar_column_text_area() {
     let area = make_rect(10, 0, 80, 24);
-    assert!(!is_scrollbar_column(10, area));
-    assert!(!is_scrollbar_column(50, area));
-    assert!(!is_scrollbar_column(88, area));
+    assert!(!super::is_scrollbar_column(10, area));
+    assert!(!super::is_scrollbar_column(50, area));
+    assert!(!super::is_scrollbar_column(88, area));
 }
 
 #[test]
@@ -230,7 +246,7 @@ fn test_compute_thumb_geometry_no_overflow_returns_none() {
         viewport_length: 60,
     };
     let area = make_rect(0, 0, 80, 24);
-    assert!(compute_thumb_geometry(&fields, area).is_none());
+    assert!(super::compute_thumb_geometry(&fields, area).is_none());
 }
 
 #[test]
@@ -241,7 +257,7 @@ fn test_compute_thumb_geometry_thumb_length_clamped_to_one() {
         viewport_length: 10,
     };
     let area = make_rect(0, 0, 80, 24);
-    let geo = compute_thumb_geometry(&fields, area).expect("应有溢出");
+    let geo = super::compute_thumb_geometry(&fields, area).expect("应有溢出");
     assert!(geo.thumb_length >= 1);
     assert!(geo.thumb_length <= geo.track_length);
     // content=1000, viewport=10, track=22 → thumb ≈ round(10*22/1009) = round(0.218) = 0 → clamp 到 1
@@ -256,7 +272,7 @@ fn test_compute_thumb_geometry_track_length_minus_two() {
         viewport_length: 20,
     };
     let area = make_rect(0, 0, 80, 24);
-    let geo = compute_thumb_geometry(&fields, area).expect("应有溢出");
+    let geo = super::compute_thumb_geometry(&fields, area).expect("应有溢出");
     assert_eq!(geo.track_length, 22); // 24 - 2
 }
 
@@ -268,8 +284,8 @@ fn test_thumb_start_to_position_at_top() {
         viewport_length: 20,
     };
     let area = make_rect(0, 0, 80, 24);
-    let geo = compute_thumb_geometry(&fields, area).expect("应有溢出");
-    let pos = thumb_start_to_position(0, &geo);
+    let geo = super::compute_thumb_geometry(&fields, area).expect("应有溢出");
+    let pos = super::thumb_start_to_position(0, &geo);
     assert_eq!(pos, 0);
 }
 
@@ -281,9 +297,9 @@ fn test_thumb_start_to_position_at_bottom() {
         viewport_length: 20,
     };
     let area = make_rect(0, 0, 80, 24);
-    let geo = compute_thumb_geometry(&fields, area).expect("应有溢出");
+    let geo = super::compute_thumb_geometry(&fields, area).expect("应有溢出");
     let max_thumb_start = geo.track_length - geo.thumb_length;
-    let pos = thumb_start_to_position(max_thumb_start, &geo);
+    let pos = super::thumb_start_to_position(max_thumb_start, &geo);
     // thumb 到底 → position 应接近 max_position（=199），允许 ±2 舍入误差
     assert!(
         pos >= geo.max_position.saturating_sub(2),
@@ -301,17 +317,17 @@ fn test_thumb_start_to_position_clamps_to_max() {
         viewport_length: 10,
     };
     let area = make_rect(0, 0, 80, 24);
-    let geo = compute_thumb_geometry(&fields, area).expect("应有溢出");
-    let pos = thumb_start_to_position(usize::MAX, &geo);
+    let geo = super::compute_thumb_geometry(&fields, area).expect("应有溢出");
+    let pos = super::thumb_start_to_position(usize::MAX, &geo);
     assert_eq!(pos, geo.max_position);
 }
 
 #[test]
 fn test_round_divide_basic() {
-    assert_eq!(round_divide(10, 4), 3); // (10+2)/4 = 3
-    assert_eq!(round_divide(8, 4), 2); // (8+2)/4 = 2
-    assert_eq!(round_divide(7, 0), 0);
-    assert_eq!(round_divide(0, 5), 0);
+    assert_eq!(super::round_divide(10, 4), 3); // (10+2)/4 = 3
+    assert_eq!(super::round_divide(8, 4), 2); // (8+2)/4 = 2
+    assert_eq!(super::round_divide(7, 0), 0);
+    assert_eq!(super::round_divide(0, 5), 0);
 }
 
 #[test]
@@ -325,11 +341,11 @@ fn test_scrollbar_drag_state_default() {
 fn test_position_to_scroll_y_linear() {
     // max_position=99, max_scroll=90（content=100, viewport=10）
     // position=0 → scroll_y=0
-    assert_eq!(position_to_scroll_y(0, 99, 90), 0);
+    assert_eq!(super::position_to_scroll_y(0, 99, 90), 0);
     // position=99 → scroll_y=99*90/99 = 90
-    assert_eq!(position_to_scroll_y(99, 99, 90), 90);
+    assert_eq!(super::position_to_scroll_y(99, 99, 90), 90);
     // position=50 → ceil(50*90/99) = ceil(45.45) = 46（ceil 反推，与正向 floor 互逆）
-    assert_eq!(position_to_scroll_y(50, 99, 90), 46);
+    assert_eq!(super::position_to_scroll_y(50, 99, 90), 46);
 }
 
 #[test]
@@ -338,26 +354,26 @@ fn test_position_to_scroll_y_ceil_hits_bottom() {
     // 而不是必须恰好拖到 max_position。例如 max_scroll=2, max_position=9 时，
     // position=8（89%）应映射到 scroll_y=2（到底）
     // ceil(8*2/9) = ceil(1.78) = 2
-    assert_eq!(position_to_scroll_y(8, 9, 2), 2);
+    assert_eq!(super::position_to_scroll_y(8, 9, 2), 2);
     // ceil(7*2/9) = ceil(1.56) = 2
-    assert_eq!(position_to_scroll_y(7, 9, 2), 2);
+    assert_eq!(super::position_to_scroll_y(7, 9, 2), 2);
     // ceil(6*2/9) = ceil(1.33) = 2
-    assert_eq!(position_to_scroll_y(6, 9, 2), 2);
+    assert_eq!(super::position_to_scroll_y(6, 9, 2), 2);
     // ceil(4*2/9) = ceil(0.89) = 1
-    assert_eq!(position_to_scroll_y(4, 9, 2), 1);
+    assert_eq!(super::position_to_scroll_y(4, 9, 2), 1);
 }
 
 #[test]
 fn test_position_to_scroll_y_zero_max_position() {
     // max_position=0（content=1）→ 总是 0
-    assert_eq!(position_to_scroll_y(0, 0, 0), 0);
-    assert_eq!(position_to_scroll_y(5, 0, 10), 0);
+    assert_eq!(super::position_to_scroll_y(0, 0, 0), 0);
+    assert_eq!(super::position_to_scroll_y(5, 0, 10), 0);
 }
 
 #[test]
 fn test_position_to_scroll_y_zero_max_scroll() {
     // max_scroll=0（content <= viewport）→ 总是 0
-    assert_eq!(position_to_scroll_y(5, 100, 0), 0);
+    assert_eq!(super::position_to_scroll_y(5, 100, 0), 0);
 }
 
 // ── §8.1 `↓ New output` 指示器（Slice 2）────────────────────────────────
@@ -365,28 +381,28 @@ fn test_position_to_scroll_y_zero_max_scroll() {
 #[test]
 fn test_new_output_indicator_browsing_with_new_content() {
     // 浏览态（follow=false）且视口未到真实内容底 → 显示
-    assert!(new_output_indicator_active(false, 5, 20, 40));
+    assert!(super::new_output_indicator_active(false, 5, 20, 40));
 }
 
 #[test]
 fn test_new_output_indicator_following_hides() {
     // 跟随态恒不显示（滚底由 auto_follow 处理，无需指示）
-    assert!(!new_output_indicator_active(true, 5, 20, 40));
-    assert!(!new_output_indicator_active(true, 0, 20, 40));
+    assert!(!super::new_output_indicator_active(true, 5, 20, 40));
+    assert!(!super::new_output_indicator_active(true, 0, 20, 40));
 }
 
 #[test]
 fn test_new_output_indicator_at_bottom_hides() {
     // 视口底 == 内容底（scroll_y + vis == content_bottom）→ 不显示
-    assert!(!new_output_indicator_active(false, 20, 20, 40));
+    assert!(!super::new_output_indicator_active(false, 20, 20, 40));
     // 超出底部（padding 缓冲区域）→ 不显示
-    assert!(!new_output_indicator_active(false, 22, 20, 40));
+    assert!(!super::new_output_indicator_active(false, 22, 20, 40));
 }
 
 #[test]
 fn test_new_output_indicator_boundary_last_row() {
     // 视口恰好露出内容末行（scroll_y + vis == content_bottom - 1）→ 显示
-    assert!(new_output_indicator_active(false, 19, 20, 40));
+    assert!(super::new_output_indicator_active(false, 19, 20, 40));
 }
 
 #[test]
@@ -404,11 +420,16 @@ fn test_new_output_indicator_content_bottom_excludes_padding() {
         "视觉底部 = scroll_y + vis_height == content_bottom"
     );
     assert!(
-        !new_output_indicator_active(false, visual_bottom_scroll, vis_height, content_bottom),
+        !super::new_output_indicator_active(
+            false,
+            visual_bottom_scroll,
+            vis_height,
+            content_bottom
+        ),
         "滚到视觉底部即消失（缓冲行不可见，不算内容）"
     );
     // 上滚 1 行 → 显示
-    assert!(new_output_indicator_active(
+    assert!(super::new_output_indicator_active(
         false,
         visual_bottom_scroll - 1,
         vis_height,
@@ -463,6 +484,7 @@ fn test_anchor_scroll_target_none_semantics() {
 
 // ── entry 单击展开（header 行命中 + 手抖容差）────────────────────────────
 
+#[must_use]
 fn wm_entry(logical: usize, vstart: usize, vend: usize, slot: usize) -> WrappedLineInfo {
     WrappedLineInfo {
         logical_idx: logical,
@@ -478,14 +500,14 @@ fn wm_entry(logical: usize, vstart: usize, vend: usize, slot: usize) -> WrappedL
 #[test]
 fn test_is_click_tolerance_matrix() {
     let down = (20u16, 10u16); // (column, row)
-    assert!(is_click(down, (20, 10)), "原地 = 单击");
-    assert!(is_click(down, (20, 11)), "+1 行");
-    assert!(is_click(down, (20, 9)), "-1 行");
-    assert!(is_click(down, (22, 10)), "+2 列");
-    assert!(is_click(down, (18, 10)), "-2 列");
-    assert!(!is_click(down, (20, 12)), "2 行 = 拖拽意图");
-    assert!(!is_click(down, (23, 10)), "3 列 = 拖拽意图");
-    assert!(!is_click(down, (17, 9)), "组合超差");
+    assert!(super::is_click(down, (20, 10)), "原地 = 单击");
+    assert!(super::is_click(down, (20, 11)), "+1 行");
+    assert!(super::is_click(down, (20, 9)), "-1 行");
+    assert!(super::is_click(down, (22, 10)), "+2 列");
+    assert!(super::is_click(down, (18, 10)), "-2 列");
+    assert!(!super::is_click(down, (20, 12)), "2 行 = 拖拽意图");
+    assert!(!super::is_click(down, (23, 10)), "3 列 = 拖拽意图");
+    assert!(!super::is_click(down, (17, 9)), "组合超差");
 }
 
 /// [F1] 正文没有单击动作：1 列 / 1 行位移都必须升级为选区；header 保留手抖容差。
@@ -496,11 +518,11 @@ fn test_click_policy_depends_on_entry_action() {
         visual: (5, 4),
         entry_hit: None,
     };
-    assert!(is_click_for(&body, (20, 10)), "正文原地 = 单击");
-    assert!(!is_click_for(&body, (21, 10)), "正文 +1 列 = 拖拽");
-    assert!(!is_click_for(&body, (20, 11)), "正文 +1 行 = 拖拽");
+    assert!(super::is_click_for(&body, (20, 10)), "正文原地 = 单击");
+    assert!(!super::is_click_for(&body, (21, 10)), "正文 +1 列 = 拖拽");
+    assert!(!super::is_click_for(&body, (20, 11)), "正文 +1 行 = 拖拽");
     assert_eq!(
-        drag_step(Some(body), (21, 10), true),
+        super::drag_step(Some(body), (21, 10), true),
         DragAction::Upgrade(body),
         "节流窗口内 1 列短拖也必须升级"
     );
@@ -509,10 +531,16 @@ fn test_click_policy_depends_on_entry_action() {
         entry_hit: Some((3, 0)),
         ..body
     };
-    assert!(is_click_for(&header, (22, 11)), "header 保留手抖容差");
-    assert!(!is_click_for(&header, (23, 10)), "header 超容差 = 拖拽");
+    assert!(
+        super::is_click_for(&header, (22, 11)),
+        "header 保留手抖容差"
+    );
+    assert!(
+        !super::is_click_for(&header, (23, 10)),
+        "header 超容差 = 拖拽"
+    );
     assert_eq!(
-        drag_step(Some(header), (21, 10), false),
+        super::drag_step(Some(header), (21, 10), false),
         DragAction::KeepPending,
         "header 容差内保持 Pending（单击结算）"
     );
@@ -527,15 +555,21 @@ fn test_release_upgrades_body_on_final_displacement() {
         visual: (5, 4),
         entry_hit: None,
     };
-    assert!(release_upgrades(&body, (21, 10)), "正文 +1 列");
-    assert!(release_upgrades(&body, (20, 11)), "正文 +1 行");
-    assert!(!release_upgrades(&body, (20, 10)), "正文未移动 = 单击");
+    assert!(super::release_upgrades(&body, (21, 10)), "正文 +1 列");
+    assert!(super::release_upgrades(&body, (20, 11)), "正文 +1 行");
+    assert!(
+        !super::release_upgrades(&body, (20, 10)),
+        "正文未移动 = 单击"
+    );
 
     let header = GesturePending {
         entry_hit: Some((3, 0)),
         ..body
     };
-    assert!(!release_upgrades(&header, (30, 20)), "header Up 不算拖选");
+    assert!(
+        !super::release_upgrades(&header, (30, 20)),
+        "header Up 不算拖选"
+    );
 }
 
 /// [F2] Down 接收收窄前的外框（留白可起拖）；其余事件需要文本带或已捕获指针。
@@ -545,20 +579,28 @@ fn test_text_selection_pointer_acceptance() {
     let drag = MouseEventKind::Drag(MouseButton::Left);
     let up = MouseEventKind::Up(MouseButton::Left);
 
-    assert!(text_selection_accepts_pointer(true, true, false, down));
+    assert!(super::text_selection_accepts_pointer(
+        true, true, false, down
+    ));
     assert!(
-        text_selection_accepts_pointer(false, true, false, down),
+        super::text_selection_accepts_pointer(false, true, false, down),
         "留白 Down"
     );
-    assert!(!text_selection_accepts_pointer(false, false, false, down));
-    assert!(!text_selection_accepts_pointer(false, true, false, drag));
-    assert!(text_selection_accepts_pointer(true, true, false, drag));
+    assert!(!super::text_selection_accepts_pointer(
+        false, false, false, down
+    ));
+    assert!(!super::text_selection_accepts_pointer(
+        false, true, false, drag
+    ));
+    assert!(super::text_selection_accepts_pointer(
+        true, true, false, drag
+    ));
     assert!(
-        text_selection_accepts_pointer(false, false, true, drag),
+        super::text_selection_accepts_pointer(false, false, true, drag),
         "已捕获"
     );
     assert!(
-        text_selection_accepts_pointer(false, false, true, up),
+        super::text_selection_accepts_pointer(false, false, true, up),
         "已捕获"
     );
 }
@@ -578,7 +620,7 @@ fn test_is_click_same_screen_pos_with_scroll_offset() {
     let down = (mouse_col, mouse_row);
     let cur = (mouse_col, mouse_row);
     assert!(
-        is_click(down, cur),
+        super::is_click(down, cur),
         "原地 Drag/Up 必须判定为单击：down={down:?} cur={cur:?}（滚动/网格前缀下坐标空间不一致）"
     );
     // 旧实现 Down 锚点以视觉坐标换算（bug 特征）——若视觉坐标被误当屏幕
@@ -589,7 +631,7 @@ fn test_is_click_same_screen_pos_with_scroll_offset() {
         mouse_col.saturating_sub(area.x),
     );
     assert!(
-        !is_click((visual_down.1, visual_down.0 as u16), cur),
+        !super::is_click((visual_down.1, visual_down.0 as u16), cur),
         "视觉坐标误当屏幕坐标比较必须判为拖拽意图（这是被修复的 bug 特征）"
     );
 }
@@ -607,23 +649,31 @@ fn test_entry_click_target_header_line_only() {
     ];
     let offsets = vec![0usize, 2usize];
     assert_eq!(
-        entry_click_target(&wm, &offsets, 0),
+        super::entry_click_target(&wm, &offsets, 0),
         Some((0, 0)),
         "slot0 header"
     );
-    assert_eq!(entry_click_target(&wm, &offsets, 1), None, "slot0 正文行");
     assert_eq!(
-        entry_click_target(&wm, &offsets, 2),
+        super::entry_click_target(&wm, &offsets, 1),
+        None,
+        "slot0 正文行"
+    );
+    assert_eq!(
+        super::entry_click_target(&wm, &offsets, 2),
         None,
         "slot0 正文 wrap 续行"
     );
     assert_eq!(
-        entry_click_target(&wm, &offsets, 3),
+        super::entry_click_target(&wm, &offsets, 3),
         Some((1, 0)),
         "slot1 header"
     );
-    assert_eq!(entry_click_target(&wm, &offsets, 4), None, "footer 区域");
-    assert_eq!(entry_click_target(&[], &[], 0), None, "空 wrap_map");
+    assert_eq!(
+        super::entry_click_target(&wm, &offsets, 4),
+        None,
+        "footer 区域"
+    );
+    assert_eq!(super::entry_click_target(&[], &[], 0), None, "空 wrap_map");
 }
 
 /// header 换行成多视觉行：所属视觉行全部命中首行（都属于 header）。
@@ -631,8 +681,8 @@ fn test_entry_click_target_header_line_only() {
 fn test_entry_click_target_wrapped_header_all_visual_rows_hit() {
     let wm = vec![wm_entry(0, 0, 2, 0)];
     let offsets = vec![0usize];
-    assert_eq!(entry_click_target(&wm, &offsets, 0), Some((0, 0)));
-    assert_eq!(entry_click_target(&wm, &offsets, 1), Some((0, 0)));
+    assert_eq!(super::entry_click_target(&wm, &offsets, 0), Some((0, 0)));
+    assert_eq!(super::entry_click_target(&wm, &offsets, 1), Some((0, 0)));
 }
 
 // ── 手势状态机：Down 冻结 → Drag 升级判定 → Up 结算（纯函数层）────────
@@ -671,7 +721,7 @@ fn test_gesture_down_freeze_with_scroll_and_prefix() {
     let (wm, offsets) = slot_wrap_map();
     // 消息区含网格前缀：area.x = 6（outer+accent+gap），已滚动 10 行；
     // 屏幕 (col=10, row=6) → visual_row = 6 - 1 + 10 = 15，visual_col = 10 - 6 = 4
-    let p = freeze_down((10, 6), (15, 4), &wm, &offsets);
+    let p = super::freeze_down((10, 6), (15, 4), &wm, &offsets);
     assert_eq!(p.screen, (10, 6), "screen = 按下点屏幕坐标 (col, row)");
     assert_eq!(
         p.visual,
@@ -680,7 +730,7 @@ fn test_gesture_down_freeze_with_scroll_and_prefix() {
     );
     assert_eq!(p.entry_hit, Some((3, 0)), "slot3 header 在视觉行 15");
     // 正文行（visual 16 = slot3 第 2 行）不命中——展开动作只挂 header
-    let p2 = freeze_down((10, 7), (16, 4), &wm, &offsets);
+    let p2 = super::freeze_down((10, 7), (16, 4), &wm, &offsets);
     assert_eq!(p2.entry_hit, None, "正文行不命中");
 }
 
@@ -694,12 +744,21 @@ fn test_drag_step_within_tolerance_keeps_pending() {
         entry_hit: Some((3, 0)),
     };
     // 容差内（+1 列）：Pending 原样保留（handle_event 中不触碰 text_sel/gesture）
-    assert_eq!(drag_step(Some(p), (11, 5), false), DragAction::KeepPending);
+    assert_eq!(
+        super::drag_step(Some(p), (11, 5), false),
+        DragAction::KeepPending
+    );
     // 节流窗口内且容差内：同样零副作用（节流照常）
-    assert_eq!(drag_step(Some(p), (11, 5), true), DragAction::Throttled);
+    assert_eq!(
+        super::drag_step(Some(p), (11, 5), true),
+        DragAction::Throttled
+    );
     // 无 Down 记录（事件丢失）：update_drag 空转（现状行为）
-    assert_eq!(drag_step(None, (11, 5), false), DragAction::UpdateOnly);
-    assert_eq!(drag_step(None, (11, 5), true), DragAction::Throttled);
+    assert_eq!(
+        super::drag_step(None, (11, 5), false),
+        DragAction::UpdateOnly
+    );
+    assert_eq!(super::drag_step(None, (11, 5), true), DragAction::Throttled);
 }
 
 /// Drag 超容差（>1 行 / >2 列）：升级为拖拽（Armed）——升级结果携带
@@ -712,7 +771,7 @@ fn test_drag_step_beyond_tolerance_upgrades() {
         entry_hit: None,
     };
     // +5 行（超容差）
-    let DragAction::Upgrade(got) = drag_step(Some(p), (10, 10), false) else {
+    let DragAction::Upgrade(got) = super::drag_step(Some(p), (10, 10), false) else {
         panic!("超容差 Drag 必须升级为拖拽");
     };
     assert_eq!(got.visual, (4, 4), "start 必须是 Down 冻结的 visual");
@@ -730,7 +789,7 @@ fn test_drag_step_upgrade_within_throttle_window() {
         entry_hit: None,
     };
     assert_eq!(
-        drag_step(Some(p), (10, 10), true),
+        super::drag_step(Some(p), (10, 10), true),
         DragAction::Upgrade(p),
         "节流窗口内越容差 Drag 必须升级（升级判定先于节流）"
     );
@@ -742,12 +801,12 @@ fn test_drag_step_upgrade_within_throttle_window() {
 #[test]
 fn test_gesture_up_settle_decision() {
     // Armed：复制流程——gesture 不在此复位
-    assert!(!settle_up(true, true));
-    assert!(!settle_up(true, false));
+    assert!(!super::settle_up(true, true));
+    assert!(!super::settle_up(true, false));
     // Pending 未命中：复位 gesture
-    assert!(settle_up(false, true));
+    assert!(super::settle_up(false, true));
     // 两者都无：无需复位，现状 return Consumed
-    assert!(!settle_up(false, false));
+    assert!(!super::settle_up(false, false));
 }
 
 // ── [REQ-C01-1] 历史翻页触发（滚动事件路径）─────────────────────────────
@@ -757,216 +816,6 @@ fn test_gesture_up_settle_decision() {
 // `use_effect` 不重跑（ratatui-kit 0.10.3 `hooks/use_effect.rs`：deps 相等即跳过），
 // 于是完全没有触发源。滚轮在事件派发前已逐事件落地，事件路径直接读当帧视口事实。
 
-/// 滚动事件路径的决策层：视口贴向已载入窗口顶端 → 必须派发取页，
-/// 且请求带冻结的会话身份与游标（走真实 `HISTORY_PAGES_TX` 通道观察）。
-#[test]
-#[serial]
-fn test_scroll_lands_at_top_dispatches_older_page_request() {
-    crate::kit::atoms::init_atoms();
-    crate::kit::history_paging::reset_browsing_state();
-    drain_pages_channel();
-    crate::kit::history_paging::note_initial_cursor(
-        "s1",
-        Some("tok".to_string()),
-        Some("c1".to_string()),
-    );
-    let rx = pages_channel();
-
-    // 离顶端 5 行：未贴边，不派发。
-    assert!(!event::request_older_page_at_scroll_facts(
-        false, 5, 100, 20
-    ));
-    assert!(rx.lock().try_recv().is_err(), "未贴边不派发任何请求");
-
-    // 滚轮落地后 offset=0：贴向前边界，必须派发一次。
-    assert!(
-        event::request_older_page_at_scroll_facts(false, 0, 100, 20),
-        "贴向前边界 → 派发取页"
-    );
-    let request = rx.lock().try_recv().expect("one dispatched request");
-    assert_eq!(request.session_id, "s1");
-    assert_eq!(request.snapshot_token, "tok");
-    assert_eq!(request.cursor, "c1");
-    assert_eq!(request.limit, crate::kit::history_paging::PAGE_LIMIT);
-    // 相同 cursor 已在途 → 后续滚动事件合并为 no-op（REQ-C01-2）。
-    assert!(!event::request_older_page_at_scroll_facts(
-        false, 0, 100, 20
-    ));
-    assert!(rx.lock().try_recv().is_err(), "在途请求只派发一次");
-}
-
-/// 离开向前边界时不触发（避免滚动事件路径无谓发请求）。
-/// 向下滚动到最底部：窗口模式派发 after 页；到达末尾/在途时停止。
-#[test]
-#[serial]
-fn test_scroll_at_bottom_dispatches_window_after_page_and_stops() {
-    use crate::kit::history_page_consumer::WindowConsumerRequest;
-    use crate::kit::history_paging::WindowPageCursor;
-    use crate::kit::history_window::WindowIdentity;
-
-    crate::kit::atoms::init_atoms();
-    crate::kit::atoms::HISTORY_WINDOW_V1.set(true);
-    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(true);
-    crate::kit::history_page_consumer::reset_window_paging_state();
-    crate::kit::atoms::HISTORY_WINDOW_GENERATION.set(1);
-    {
-        let handle = crate::kit::atoms::HISTORY_WINDOW_PAGING.state();
-        let mut state = handle.write();
-        state.session_id = "s1".into();
-        state.identity = Some(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
-        state.window_generation = 1;
-        state.read_ticket = Some("ticket-1".into());
-        state.after_cursor = Some("after-1".into());
-    }
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    assert!(crate::kit::atoms::HISTORY_WINDOW_TX.set(tx).is_ok());
-
-    assert!(event::request_newer_page_at_scroll_facts(
-        false, 80, 100, 20
-    ));
-    let request = rx.try_recv().expect("after page request");
-    let request_id = match &request {
-        WindowConsumerRequest::Page {
-            context, cursor, ..
-        } => {
-            assert_eq!(cursor, &WindowPageCursor::After("after-1".into()));
-            context.request_id.clone()
-        }
-        other => panic!("expected after page, got {other:?}"),
-    };
-    assert!(
-        !event::request_newer_page_at_scroll_facts(false, 80, 100, 20),
-        "same in-flight window page must merge"
-    );
-    assert!(rx.try_recv().is_err());
-
-    crate::kit::history_page_consumer::fail_window_request(&request_id, "test done", false);
-    crate::kit::atoms::HISTORY_WINDOW_PAGING
-        .state()
-        .write()
-        .after_cursor = None;
-    assert!(!event::request_newer_page_at_scroll_facts(
-        false, 80, 100, 20
-    ));
-
-    // 视口无锚点 + 桥接发布 gap 目标：滚动触发 seek，内容返回前不跳底。
-    crate::kit::atoms::WINDOW_VIEWPORT.set(None);
-    crate::kit::atoms::WINDOW_GAP_REQUEST.set(vec![
-        crate::kit::history_paging::WindowGapRequest::Seek {
-            gap_id: crate::kit::history_window::GapId(1),
-            anchor: crate::kit::history_window::PersistentEntryKey::own("s1:missing"),
-        },
-    ]);
-    assert!(event::request_gap_page_after_scroll(None));
-    let gap_request = rx.try_recv().expect("gap request");
-    assert!(matches!(
-        &gap_request,
-        WindowConsumerRequest::Seek { anchor, .. }
-            if anchor == &crate::kit::history_window::PersistentEntryKey::own("s1:missing")
-    ));
-    assert!(
-        crate::kit::atoms::WINDOW_GAP_REQUEST
-            .state()
-            .read()
-            .is_empty()
-    );
-
-    // 双向缺口候选：向下滚只消费 Page(After)，向上滚消费 Page(Before)。
-    crate::kit::history_page_consumer::fail_window_request(
-        match &gap_request {
-            WindowConsumerRequest::Seek { context, .. } => &context.request_id,
-            other => panic!("expected seek, got {other:?}"),
-        },
-        "test done",
-        false,
-    );
-    crate::kit::atoms::WINDOW_GAP_REQUEST.set(vec![
-        crate::kit::history_paging::WindowGapRequest::Page {
-            gap_id: crate::kit::history_window::GapId(2),
-            cursor: WindowPageCursor::Before("before-gap".into()),
-        },
-        crate::kit::history_paging::WindowGapRequest::Page {
-            gap_id: crate::kit::history_window::GapId(2),
-            cursor: WindowPageCursor::After("after-gap".into()),
-        },
-    ]);
-    assert!(event::request_gap_page_after_scroll(Some(
-        crate::kit::history_window::GapSeekDirection::After
-    )));
-    let after_request = rx.try_recv().expect("after gap request");
-    let after_request_id = match &after_request {
-        WindowConsumerRequest::Page {
-            context, cursor, ..
-        } => {
-            assert_eq!(cursor, &WindowPageCursor::After("after-gap".into()));
-            context.request_id.clone()
-        }
-        other => panic!("expected after gap page, got {other:?}"),
-    };
-    assert!(
-        crate::kit::atoms::WINDOW_GAP_REQUEST
-            .state()
-            .read()
-            .iter()
-            .all(|request| request
-                .matches_direction(Some(crate::kit::history_window::GapSeekDirection::Before))),
-        "consuming one direction must keep the other candidate"
-    );
-
-    crate::kit::history_page_consumer::fail_window_request(&after_request_id, "test done", false);
-    assert!(event::request_gap_page_after_scroll(Some(
-        crate::kit::history_window::GapSeekDirection::Before
-    )));
-    let before_request = rx.try_recv().expect("before gap request");
-    assert!(matches!(
-        before_request,
-        WindowConsumerRequest::Page {
-            cursor: WindowPageCursor::Before(ref cursor),
-            ..
-        } if cursor == "before-gap"
-    ));
-    assert!(
-        crate::kit::atoms::WINDOW_GAP_REQUEST
-            .state()
-            .read()
-            .is_empty()
-    );
-
-    crate::kit::atoms::HISTORY_WINDOW_V1.set(false);
-    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(false);
-    crate::kit::history_page_consumer::reset_window_paging_state();
-}
-
-#[test]
-#[serial]
-fn test_scroll_away_from_top_does_not_dispatch() {
-    crate::kit::atoms::init_atoms();
-    crate::kit::history_paging::reset_browsing_state();
-    drain_pages_channel();
-    crate::kit::history_paging::note_initial_cursor(
-        "s1",
-        Some("tok".to_string()),
-        Some("c1".to_string()),
-    );
-
-    // 浏览态、视口离顶端很远 → 不派发。
-    assert!(!event::request_older_page_at_scroll_facts(
-        false, 40, 200, 20
-    ));
-    // 跟随态且内容超一屏（看的是尾部）→ 不派发。
-    assert!(!event::request_older_page_at_scroll_facts(
-        true, 180, 200, 20
-    ));
-    assert!(pages_channel().lock().try_recv().is_err(), "不派发任何请求");
-    assert!(
-        crate::kit::atoms::HISTORY_PAGING
-            .state()
-            .read()
-            .in_flight
-            .is_none()
-    );
-}
-
 // ── [REQ-C01-3 / A20] 阅读锚点不跳动 ────────────────────────────────────
 //
 // 用例不在这里：锚点补偿已由「桥接槽位包络 + 高度差」改为**渲染侧身份重定位**
@@ -975,3 +824,6 @@ fn test_scroll_away_from_top_does_not_dispatch() {
 //   - `viewport_anchor_test.rs`：捕获 / 重定位 / 单元内位移 / 认不出身份的安全方向；
 //   - `viewport_anchor_e2e_test.rs`：真实发布路径（`handle_history_page_loaded` →
 //     `push_view_models` → `Transcript::prepare`），含折叠组导致的槽位数变化形状。
+
+#[path = "scroll_test/paging_triggers.rs"]
+mod paging_triggers;

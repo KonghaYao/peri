@@ -1,10 +1,19 @@
-use super::*;
+use crate::agent::react::ToolCall;
+use crate::agent::stages::tool_dispatch::effective_dispatcher::StageEffectiveToolDispatcher;
 use crate::agent::stages::{ExecutionEntryOrigin, InvocationContext, StageContext};
+use crate::messages::BaseMessage;
 use crate::middleware::{capabilities as hook_state, Middleware, MiddlewareChain};
-use crate::session::{queue::MessageQueue, transcript::MessageTranscript, turn::TurnContext};
+use crate::session::queue::MessageQueue;
+use crate::session::transcript::MessageTranscript;
+use crate::session::turn::TurnContext;
 use crate::tools::BaseTool;
+use crate::tools::EffectiveToolCall;
 use crate::tools::InvocationOrigin;
+use peri_acp_types::tools::EffectiveToolDispatcher as _;
+
 use serde_json::json;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn nested_dispatch_keeps_pinned_target_and_does_not_commit_outer_batch() {
@@ -93,7 +102,7 @@ async fn nested_dispatch_keeps_pinned_target_and_does_not_commit_outer_batch() {
         .runtime
         .tool_catalog
         .pin_working_tools(&ctx.runtime.tools.read())
-        .unwrap();
+        .expect("the pin working tools fixture result is required for this assertion");
     let invocation = InvocationContext::from_stage(
         &ctx,
         ExecutionEntryOrigin::ModelBatch,
@@ -131,7 +140,7 @@ async fn nested_dispatch_keeps_pinned_target_and_does_not_commit_outer_batch() {
             CancellationToken::new(),
         )
         .await
-        .unwrap();
+        .expect("the dispatch fixture result is required for this assertion");
 
     assert_eq!(output.text, "pinned");
     assert_eq!(*trace.lock(), vec![("after_tool", 1)]);
@@ -224,7 +233,7 @@ async fn reported_in_band_result_keeps_raw_fact_instead_of_protocol_error() {
         .runtime
         .tool_catalog
         .pin_working_tools(&ctx.runtime.tools.read())
-        .unwrap();
+        .expect("the pin working tools fixture result is required for this assertion");
     let invocation = InvocationContext::from_stage(
         &ctx,
         ExecutionEntryOrigin::ModelBatch,
@@ -305,7 +314,7 @@ async fn nested_synthetic_ai_uses_owned_fallback_not_outer_batch_tail() {
         .runtime
         .tool_catalog
         .pin_working_tools(&ctx.runtime.tools.read())
-        .unwrap();
+        .expect("the pin working tools fixture result is required for this assertion");
     let outer_batch = BaseMessage::ai("outer batch");
     let invocation = InvocationContext::from_stage(
         &ctx,
@@ -328,7 +337,7 @@ async fn nested_synthetic_ai_uses_owned_fallback_not_outer_batch_tail() {
             CancellationToken::new(),
         )
         .await
-        .unwrap();
+        .expect("the dispatch fixture result is required for this assertion");
 
     let seen = seen.lock();
     assert_eq!(seen.len(), 1);

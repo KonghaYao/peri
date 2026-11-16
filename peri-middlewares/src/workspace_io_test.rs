@@ -1,15 +1,24 @@
+use crate::workspace_io::WorkspaceFileReader as _;
 use std::sync::Arc;
 
-use rmcp::{
-    model::{CustomRequest, CustomResult},
-    service::{RequestContext, RoleServer, RunningService},
-    RoleClient, ServerHandler, ServiceExt,
-};
+use rmcp::model::CustomRequest;
+use rmcp::model::CustomResult;
+use rmcp::service::RequestContext;
+use rmcp::service::RoleServer;
+use rmcp::service::RunningService;
+use rmcp::RoleClient;
+use rmcp::ServerHandler;
+use rmcp::ServiceExt;
 use tokio::sync::Notify;
 
-use crate::mcp::{config::ConfigSource, McpClientHandle, OAuthStatus};
+use crate::mcp::config::ConfigSource;
+use crate::mcp::McpClientHandle;
+use crate::mcp::OAuthStatus;
 
-use super::*;
+use super::{
+    ClientStatus, Duration, McpClientPool, McpWorkspaceFileReader, Path, WorkspaceMentionContent,
+    WorkspaceReadError,
+};
 
 struct DelayedReader {
     entered: Arc<Notify>,
@@ -289,7 +298,7 @@ async fn reconnected_workspace_response_is_rejected() {
     tokio::time::timeout(Duration::from_secs(1), fixture.entered.notified())
         .await
         .unwrap();
-    let current = fixture.pool.get_client("workspace").unwrap();
+    let current = fixture.pool.client("workspace").unwrap();
     let replacement = Arc::new((*current).clone());
     fixture.pool.advance_handle_generation(&replacement);
     fixture
@@ -357,7 +366,7 @@ async fn branch_reconnected_workspace_response_is_rejected() {
     tokio::time::timeout(Duration::from_secs(1), fixture.entered.notified())
         .await
         .unwrap();
-    let current = fixture.pool.get_client("workspace").unwrap();
+    let current = fixture.pool.client("workspace").unwrap();
     let replacement = Arc::new((*current).clone());
     fixture.pool.advance_handle_generation(&replacement);
     fixture

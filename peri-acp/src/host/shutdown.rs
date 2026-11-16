@@ -6,9 +6,11 @@ use std::sync::Arc;
 use peri_acp_types::ports::McpTaskOwnerPort;
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    connection::ConnectionContext, task_scope, AcpServerConfig, PromptLocks, SharedSessions,
-};
+use super::connection::ConnectionContext;
+use super::task_scope;
+use super::AcpServerConfig;
+use super::PromptLocks;
+use super::SharedSessions;
 
 /// 当前全部会话环境（连接关闭时逐个收口的输入）。
 async fn session_environments(

@@ -29,19 +29,17 @@ use peri_acp_types::session_resources::{
     RewindBoundary, RewindOutcome, SessionResourceError, SessionResourceErrorKind,
     SessionResourceResult,
 };
-use peri_acp_types::store::{
-    deserialize_persisted_payload, serialize_persisted_payload, CompactionChange, MessageFlags,
-    PersistedPayload,
-};
+use peri_acp_types::store::CompactionChange;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::thread::ThreadId;
 use turso_serverless::Value;
 
 use super::session_codec as codec;
-use super::session_data::{invalid_input, not_found, RemoteSessionData};
-use super::sql::{int_at, StatementSpec};
+use super::session_data::RemoteSessionData;
+use super::sql::StatementSpec;
 use crate::sessions::canonical;
-use crate::sessions::canonical::role_of as role_of_message;
 
 // ─── 批内守卫 ─────────────────────────────────────────────────────────────────
 
@@ -173,7 +171,9 @@ impl RemoteSessionData {
         let mut seen = HashSet::with_capacity(payloads.len());
         for payload in payloads {
             if !seen.insert(payload.id()) {
-                return Err(invalid_input("history batch repeats a message id"));
+                return Err(super::session_data::invalid_input(
+                    "history batch repeats a message id",
+                ));
             }
         }
         let contents = payloads
@@ -189,7 +189,8 @@ impl RemoteSessionData {
         // 会话缺失必须在效果前中止：追加行不触碰会话行，只看受影响行数无法区分
         // 「会话不存在」与「写入成功」。
         effects.push(guard_session_statement(id));
-        for (payload, (message, content)) in payloads.iter().zip(&entries) {
+        let paired_entries = payloads.iter().zip(&entries);
+        for (payload, (message, content)) in paired_entries {
             effects.push(append_statement(
                 id,
                 *message,
@@ -214,7 +215,7 @@ impl RemoteSessionData {
                 if matches!(error.kind(), SessionResourceErrorKind::InvalidInput { .. })
                     && !self.exists(id).await.unwrap_or(true)
                 {
-                    return Err(not_found());
+                    return Err(super::session_data::not_found());
                 }
                 Err(error)
             }
@@ -241,7 +242,7 @@ impl RemoteSessionData {
             .await?
             .is_empty()
         {
-            return Err(invalid_input(
+            return Err(super::session_data::invalid_input(
                 "projection target is not a history entry of this session",
             ));
         }
@@ -303,12 +304,13 @@ impl RemoteSessionData {
             .zip(&appended)
             .map(|(message, content)| (message.id(), content.clone()))
             .collect::<Vec<_>>();
-        for (message, (message_id, content)) in change.appended_messages.iter().zip(&entries) {
+        let paired_entries = change.appended_messages.iter().zip(&entries);
+        for (message, (message_id, content)) in paired_entries {
             effects.push(append_statement(
                 id,
                 *message_id,
                 content,
-                role_of_message(message),
+                crate::sessions::canonical::role_of(message),
             ));
         }
         for (message, flags) in &change.flag_updates {
@@ -364,7 +366,7 @@ impl RemoteSessionData {
             .filter(|message| seen.insert(*message))
             .collect::<Vec<_>>();
         if !self.missing_session_messages(id, &unique).await?.is_empty() {
-            return Err(invalid_input(
+            return Err(super::session_data::invalid_input(
                 "rewind flag target is not a history entry of this session",
             ));
         }
@@ -390,7 +392,7 @@ impl RemoteSessionData {
             .collect::<SessionResourceResult<Vec<_>>>()?;
         let kept_ids: HashSet<_> = retained.iter().map(|(id, _, _)| *id).collect();
         if unique.iter().any(|id| !kept_ids.contains(id)) {
-            return Err(invalid_input(
+            return Err(super::session_data::invalid_input(
                 "rewind flag target is outside the retained prefix",
             ));
         }
@@ -499,9 +501,12 @@ impl RemoteSessionData {
             .filter(|message| seen.insert(*message))
             .collect::<Vec<_>>();
         let owners = self.message_owners(&unique).await?;
-        for (_, owner) in unique.iter().zip(&owners) {
+        let paired_entries = unique.iter().zip(&owners);
+        for (_, owner) in paired_entries {
             if owner.as_deref().is_some_and(|owner| owner != id.as_str()) {
-                return Err(invalid_input("history entry belongs to another session"));
+                return Err(super::session_data::invalid_input(
+                    "history entry belongs to another session",
+                ));
             }
         }
         let mut effects = Vec::with_capacity(unique.len() * 2 + 1);
@@ -592,7 +597,7 @@ impl RemoteSessionData {
                 ],
             ))
             .await?;
-        Ok(row.and_then(|values| int_at(&values, 0)))
+        Ok(row.and_then(|values| super::sql::int_at(&values, 0)))
     }
 }
 
@@ -605,7 +610,7 @@ pub(super) fn check_reminder_row(
     if existing.0 == id.as_str() && existing.1 == content {
         Ok(())
     } else {
-        Err(invalid_input(&format!(
+        Err(super::session_data::invalid_input(&format!(
             "reminder id {} conflicts with another history entry",
             message_id.as_uuid()
         )))
@@ -692,13 +697,13 @@ fn title_statement(id: &ThreadId, payloads: &[PersistedPayload]) -> Option<State
 
 /// 追加内容的持久化形态：复用 `peri_acp_types::store` 的 envelope，远端不另写格式。
 fn payload_content(payload: &PersistedPayload) -> SessionResourceResult<String> {
-    serialize_persisted_payload(payload).map_err(|_| corrupt_payload())
+    peri_acp_types::store::serialize_persisted_payload(payload).map_err(|_| corrupt_payload())
 }
 
 /// compact 追加的是领域消息：先按同一 envelope 定型，读不回来就在发请求前拒绝。
 fn appended_content(message: &BaseMessage) -> SessionResourceResult<String> {
     let json = serde_json::to_string(message).map_err(|_| corrupt_payload())?;
-    deserialize_persisted_payload(&json).map_err(|_| corrupt_payload())?;
+    peri_acp_types::store::deserialize_persisted_payload(&json).map_err(|_| corrupt_payload())?;
     Ok(json)
 }
 

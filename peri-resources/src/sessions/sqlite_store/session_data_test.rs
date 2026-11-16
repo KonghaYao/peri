@@ -2,16 +2,20 @@
 //!
 //! 断言以可观察结果为准：一次保存后的完整事实、冲突是否失败以及级联删除的后置条件。
 
-use super::*;
+use super::{
+    serialize_persisted_payload, AgentStatus, Arc, MessageFlags, SqliteSessionData,
+    SqliteThreadStore,
+};
+
 use crate::sessions::data::SessionDataPort;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::session_resources::{
     BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, FrozenState, NewSession,
     NewSessionMeta, PersistenceRecovery, RewindBoundary, SessionMetaPatch,
 };
-use peri_acp_types::store::{
-    serialize_persisted_payload, CompactionChange, PersistedPayload, ThreadStore,
-};
+use peri_acp_types::store::CompactionChange;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::store::ThreadStore;
 use peri_acp_types::workspace::ResolvedWorkspace;
 use sqlx::Connection;
 use std::collections::HashMap;
@@ -19,7 +23,7 @@ use tempfile::TempDir;
 
 async fn database() -> (SqliteThreadStore, SqliteSessionData, TempDir) {
     let directory = tempfile::tempdir().unwrap();
-    let store = SqliteThreadStore::new(directory.path().join("threads.db"))
+    let store = SqliteThreadStore::try_new(directory.path().join("threads.db"))
         .await
         .unwrap();
     let data = SqliteSessionData::new(Arc::clone(&store.database));
@@ -69,7 +73,7 @@ fn payloads(count: usize) -> Vec<PersistedPayload> {
 fn payload_bytes(payloads: &[PersistedPayload]) -> Vec<String> {
     payloads
         .iter()
-        .map(|payload| serialize_persisted_payload(payload).unwrap())
+        .map(|payload| peri_acp_types::store::serialize_persisted_payload(payload).unwrap())
         .collect()
 }
 
@@ -194,7 +198,7 @@ async fn test_save_new_session_persists_complete_snapshot_in_one_write() {
 #[tokio::test]
 async fn test_save_new_session_requires_a_registered_workspace() {
     let (_store, data, directory) = database().await;
-    let store = SqliteThreadStore::new(directory.path().join("threads.db"))
+    let store = SqliteThreadStore::try_new(directory.path().join("threads.db"))
         .await
         .unwrap();
     let workspace = workspace(&store, directory.path()).await;
@@ -221,7 +225,7 @@ async fn test_save_new_session_requires_a_registered_workspace() {
 #[tokio::test]
 async fn test_save_new_session_requires_a_registered_project() {
     let (_store, data, directory) = database().await;
-    let store = SqliteThreadStore::new(directory.path().join("threads.db"))
+    let store = SqliteThreadStore::try_new(directory.path().join("threads.db"))
         .await
         .unwrap();
     let workspace = workspace(&store, directory.path()).await;
@@ -486,7 +490,7 @@ async fn test_append_history_preserves_order_across_insert_chunks() {
     data.save_new_session(&session("s-chunk", &cwd, &workspace, frozen("chunk")))
         .await
         .unwrap();
-    let batch = payloads(message_insert_chunk_rows() * 2 + 3);
+    let batch = payloads(super::message_insert_chunk_rows() * 2 + 3);
 
     data.append_history(&"s-chunk".to_owned(), &batch)
         .await
@@ -518,7 +522,7 @@ async fn test_append_history_rolls_back_earlier_chunks_on_late_conflict() {
         .unwrap();
 
     // 既有行排在新行之后：第一条 INSERT 成功，第二条撞全局主键。
-    let mut batch = payloads(message_insert_chunk_rows() + 5);
+    let mut batch = payloads(super::message_insert_chunk_rows() + 5);
     batch.push(existing[0].clone());
     let error = data
         .append_history(&"s-chunk".to_owned(), &batch)
@@ -818,7 +822,7 @@ async fn close_intent_survives_reopen_and_finishes_without_execution_owner() {
     );
     store.close().await;
 
-    let reopened = SqliteThreadStore::new(directory.path().join("threads.db"))
+    let reopened = SqliteThreadStore::try_new(directory.path().join("threads.db"))
         .await
         .unwrap();
     let successor = SqliteSessionData::new(Arc::clone(&reopened.database));

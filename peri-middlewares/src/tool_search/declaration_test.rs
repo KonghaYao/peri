@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::*;
+use super::BaseTool;
 
 /// 局部测试工具：可配置 prompt_declaration / namespace / title。
 struct DeclaringTool {
@@ -86,7 +86,7 @@ fn test_render_known_placeholders_no_residue() {
                 "Read a file → `{{name}}` ({{title}}) in [{{namespace}}]. {{description}}",
             ),
     );
-    let rendered = collect_declarations(&[t]).unwrap();
+    let rendered = super::collect_declarations(&[t]).unwrap();
     assert!(
         !rendered.contains("{{"),
         "合法模板渲染后不得残留占位符：{rendered}"
@@ -100,7 +100,7 @@ fn test_render_known_placeholders_no_residue() {
 fn test_render_unknown_placeholder_preserved() {
     let t =
         tool(DeclaringTool::new("Read", "desc").with_declaration("Use `{{name}}` via {{unknown}}"));
-    let rendered = collect_declarations(&[t]).unwrap();
+    let rendered = super::collect_declarations(&[t]).unwrap();
     assert_eq!(rendered, "Use `Read` via {{unknown}}");
 }
 
@@ -115,7 +115,7 @@ fn test_render_description_literal_braces_not_double_replaced() {
         DeclaringTool::new("Write", "JSON example: `{{x}}`; generic: `{{description}}`")
             .with_declaration("Use `{{name}}` — {{description}}"),
     );
-    let rendered = collect_declarations(&[t]).unwrap();
+    let rendered = super::collect_declarations(&[t]).unwrap();
     assert_eq!(
         rendered, "Use `Write` — JSON example: `{{x}}`; generic: `{{description}}`",
         "description 内的字面 {{x}}/{{description}} 必须原样保留；仅模板层占位符被替换"
@@ -126,7 +126,7 @@ fn test_render_description_literal_braces_not_double_replaced() {
 #[test]
 fn test_render_unclosed_placeholder_preserved() {
     let t = tool(DeclaringTool::new("Read", "desc").with_declaration("Use `{{name}}` and {{oops"));
-    let rendered = collect_declarations(&[t]).unwrap();
+    let rendered = super::collect_declarations(&[t]).unwrap();
     assert_eq!(rendered, "Use `Read` and {{oops");
 }
 
@@ -158,7 +158,7 @@ fn test_collect_declarations_sorted_by_namespace_then_name() {
                 .with_declaration("{{name}}:fs"),
         ),
     ];
-    let rendered = collect_declarations(&tools).unwrap();
+    let rendered = super::collect_declarations(&tools).unwrap();
     assert_eq!(
         rendered, "Agent:none\nGlob:fs\nGrep:fs\nBash:web\nRead:web",
         "namespace 字典序（None 最前）→ 组内 name 字典序"
@@ -182,8 +182,8 @@ fn test_collect_declarations_stable_across_calls() {
                 .with_declaration("{{name}} ({{title}})"),
         ),
     ];
-    let first = collect_declarations(&tools).unwrap();
-    let second = collect_declarations(&tools).unwrap();
+    let first = super::collect_declarations(&tools).unwrap();
+    let second = super::collect_declarations(&tools).unwrap();
     assert_eq!(first, second);
 }
 
@@ -193,15 +193,15 @@ fn test_collect_declarations_stable_across_calls() {
 #[test]
 fn test_collect_declarations_empty_returns_none() {
     let no_decl = tool(DeclaringTool::new("Read", "d"));
-    assert_eq!(collect_declarations(&[no_decl]), None);
-    assert_eq!(collect_declarations(&[]), None);
+    assert_eq!(super::collect_declarations(&[no_decl]), None);
+    assert_eq!(super::collect_declarations(&[]), None);
 }
 
 /// [回归测试] 原名 MCP 工具可与 builtin 同名；声明模板只属于实际 builtin bridge。
 #[test]
 fn test_external_raw_builtin_name_does_not_inherit_builtin_declaration() {
     let external = tool(DeclaringTool::new("WebSearch", "external search"));
-    assert_eq!(collect_declarations(&[external]), None);
+    assert_eq!(super::collect_declarations(&[external]), None);
 }
 
 // -- 全量渲染守护（design v2 §2.5.5/2.5.6：全量迁移完成态） ---------------------
@@ -394,7 +394,7 @@ fn test_all_real_tool_declarations_render_without_placeholder_residue() {
             .unwrap_or_else(|| panic!("direct 工具集缺少 {name}"));
         assert!(
             tool.prompt_declaration().is_some()
-                || declaration_template(tool.as_ref(), name).is_some(),
+                || super::declaration_template(tool.as_ref(), name).is_some(),
             "{name} 必须有声明模板（工具实现或 builtin 声明表，全量迁移完成）"
         );
     }
@@ -407,7 +407,7 @@ fn test_all_real_tool_declarations_render_without_placeholder_residue() {
         );
     }
 
-    let rendered = collect_declarations(&tools).expect("真实工具集声明段非空");
+    let rendered = super::collect_declarations(&tools).expect("真实工具集声明段非空");
     assert!(
         !rendered.contains("{{"),
         "声明段不得残留占位符（含 {{ 未闭合）：\n{rendered}"
@@ -567,7 +567,7 @@ fn wave2_has_no_prompt_declaration() {
             tool.original_name
         );
         assert!(
-            builtin_declaration(instance, tool.original_name).is_none(),
+            super::builtin_declaration(instance, tool.original_name).is_none(),
             "{}: 声明段的渲染查表必须为 None（贡献 0）",
             tool.effective_name
         );
@@ -590,7 +590,7 @@ fn wave2_has_no_prompt_declaration() {
         wave2.iter().all(|bridge| !bridge.is_direct()),
         "wave 2 桥必须保持 deferred（A4）"
     );
-    let added = collect_declarations(&wave2);
+    let added = super::collect_declarations(&wave2);
     assert!(
         added.is_none(),
         "wave 2 工具对声明段的新增贡献必须为 0；实际: {added:?}"
@@ -598,10 +598,12 @@ fn wave2_has_no_prompt_declaration() {
 
     // ③ 加法形态：把真实 wave 2 桥追加到真实 direct 工具面，声明段逐字节不变。
     let direct = build_real_direct_tools();
-    let wave1_rendered = collect_declarations(&direct).expect("真实 direct 工具集声明段非空");
+    let wave1_rendered =
+        super::collect_declarations(&direct).expect("真实 direct 工具集声明段非空");
     let mut extended = build_real_direct_tools();
     extended.extend(wave2.iter().map(Arc::clone));
-    let extended_rendered = collect_declarations(&extended).expect("追加 wave 2 后声明段仍非空");
+    let extended_rendered =
+        super::collect_declarations(&extended).expect("追加 wave 2 后声明段仍非空");
     assert_eq!(
         extended_rendered, wave1_rendered,
         "追加 wave 2 工具不得改变声明段任何字节"
@@ -642,8 +644,8 @@ fn wave2_has_no_prompt_declaration() {
 #[test]
 fn test_all_real_tool_declarations_byte_stable_across_calls() {
     let tools = build_real_direct_tools();
-    let first = collect_declarations(&tools).unwrap();
-    let second = collect_declarations(&tools).unwrap();
+    let first = super::collect_declarations(&tools).unwrap();
+    let second = super::collect_declarations(&tools).unwrap();
     assert_eq!(first, second);
 }
 
@@ -668,7 +670,7 @@ fn test_declarations_no_verbatim_line_overlap_with_05() {
         "05 不应残留 Read 手写条目（全量迁移完成）"
     );
 
-    let rendered = collect_declarations(&build_real_direct_tools()).unwrap();
+    let rendered = super::collect_declarations(&build_real_direct_tools()).unwrap();
     let decl_lines: Vec<&str> = rendered.lines().map(str::trim).collect();
     for line in SECTION_05.lines() {
         let trimmed = line.trim();

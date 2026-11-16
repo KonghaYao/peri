@@ -3,7 +3,9 @@
 //! 断言以可观察事实为准：版本号、列声明与约束、旧行读到的默认值，以及升级前后
 //! `threads` / `messages` / `thread_mq` 的行内容。夹具一律是临时文件，不解析真实库路径。
 
-use super::*;
+use super::{SqliteConnectOptions, SqliteThreadStore, ThreadMeta};
+use peri_acp_types::store::ThreadStore;
+
 use crate::sessions::canonical::{
     CREATE_THREAD_MQ_ORDER_INDEX_SQL, CURRENT_SCHEMA_VERSION, THREADS_V14_COLUMNS,
 };
@@ -46,7 +48,7 @@ async fn close(store: SqliteThreadStore) {
 async fn seeded_database() -> (tempfile::TempDir, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
-    close(SqliteThreadStore::new(path.clone()).await.unwrap()).await;
+    close(SqliteThreadStore::try_new(path.clone()).await.unwrap()).await;
     let mut connection = connect(&path).await;
     // v15 的迁移以 `foreign_key_check` 为前置守卫，夹具因此必须给出真实的引用链。
     sqlx::raw_sql(
@@ -136,7 +138,7 @@ pub(super) async fn downgrade(path: &Path, version: i64, drop_derived: bool) {
 async fn fresh_database_declares_the_work_snapshot_columns() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
-    close(SqliteThreadStore::new(path.clone()).await.unwrap()).await;
+    close(SqliteThreadStore::try_new(path.clone()).await.unwrap()).await;
 
     let mut connection = connect(&path).await;
     assert_eq!(user_version(&mut connection).await, CURRENT_SCHEMA_VERSION);
@@ -201,7 +203,7 @@ async fn fresh_database_declares_the_work_snapshot_columns() {
 async fn upgrading_from_v13_adds_the_columns_without_touching_history() {
     let (_directory, path) = seeded_database().await;
     downgrade(&path, 13, false).await;
-    close(SqliteThreadStore::new(path.clone()).await.unwrap()).await;
+    close(SqliteThreadStore::try_new(path.clone()).await.unwrap()).await;
 
     let mut connection = connect(&path).await;
     assert_eq!(user_version(&mut connection).await, CURRENT_SCHEMA_VERSION);
@@ -235,7 +237,7 @@ async fn upgrading_from_v13_adds_the_columns_without_touching_history() {
 async fn upgrading_from_v12_creates_thread_mq_and_the_columns() {
     let (_directory, path) = seeded_database().await;
     downgrade(&path, 12, false).await;
-    close(SqliteThreadStore::new(path.clone()).await.unwrap()).await;
+    close(SqliteThreadStore::try_new(path.clone()).await.unwrap()).await;
 
     let mut connection = connect(&path).await;
     assert_eq!(user_version(&mut connection).await, CURRENT_SCHEMA_VERSION);
@@ -269,7 +271,7 @@ async fn upgrading_from_v12_creates_thread_mq_and_the_columns() {
 async fn upgrading_from_v11_restores_derived_objects_and_the_columns() {
     let (_directory, path) = seeded_database().await;
     downgrade(&path, 11, true).await;
-    close(SqliteThreadStore::new(path.clone()).await.unwrap()).await;
+    close(SqliteThreadStore::try_new(path.clone()).await.unwrap()).await;
 
     let mut connection = connect(&path).await;
     assert_eq!(user_version(&mut connection).await, CURRENT_SCHEMA_VERSION);
@@ -306,7 +308,7 @@ async fn upgrading_from_v11_restores_derived_objects_and_the_columns() {
 async fn work_state_and_context_usage_round_trip_through_the_store() {
     let directory = tempfile::tempdir().unwrap();
     let cwd = std::fs::canonicalize(directory.path()).unwrap();
-    let store = SqliteThreadStore::new(directory.path().join("threads.db"))
+    let store = SqliteThreadStore::try_new(directory.path().join("threads.db"))
         .await
         .unwrap();
     store.resolve_workspace(&cwd).await.unwrap();

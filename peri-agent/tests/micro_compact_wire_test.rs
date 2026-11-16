@@ -8,16 +8,19 @@ use peri_acp_types::session_resources::{
 use peri_acp_types::store::MessageFlags;
 use peri_acp_types::thread::CancelPolicy;
 use peri_acp_types::workspace::SessionBinding;
-use peri_agent::agent::compact_v2::{
-    micro::apply_micro_plan,
-    planner::{plan_micro_with_facts, ArchivePlanningScope, MicroPlanningFacts},
-    projection::{
-        render_persisted_llm_view, MessageProjectionDirective, ProjectionAction,
-        ProjectionActionEntry, ProjectionTarget,
-    },
-    CompactConfig, ContextPressure, ProviderCapabilities,
-};
-use peri_agent::agent::{model_bridge::AgentModelBridge, ReactLLM};
+
+use peri_agent::agent::compact_v2::planner::ArchivePlanningScope;
+use peri_agent::agent::compact_v2::planner::MicroPlanningFacts;
+
+use peri_agent::agent::compact_v2::projection::MessageProjectionDirective;
+use peri_agent::agent::compact_v2::projection::ProjectionAction;
+use peri_agent::agent::compact_v2::projection::ProjectionActionEntry;
+use peri_agent::agent::compact_v2::projection::ProjectionTarget;
+use peri_agent::agent::compact_v2::CompactConfig;
+use peri_agent::agent::compact_v2::ContextPressure;
+use peri_agent::agent::compact_v2::ProviderCapabilities;
+use peri_agent::agent::model_bridge::AgentModelBridge;
+use peri_agent::agent::ReactLLM;
 use peri_agent::messages::{BaseMessage, ContentBlock, MessageContent, MessageId, ToolCallRequest};
 use peri_agent::session::MessageTranscript;
 use peri_agent::tools::ContextRetention;
@@ -32,13 +35,17 @@ struct Fixture {
 }
 impl Fixture {
     async fn open() -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory =
+            tempfile::tempdir().expect("the temporary test directory must be available");
         let resources: Arc<dyn SessionResources> = Arc::new(
             SessionResourcesImpl::open(directory.path().join("wire.db"))
                 .await
-                .unwrap(),
+                .expect("the temporary session store fixture must open successfully"),
         );
-        let workspace = resources.resolve_workspace(directory.path()).await.unwrap();
+        let workspace = resources
+            .resolve_workspace(directory.path())
+            .await
+            .expect("the resolve workspace fixture result is required for this assertion");
         let id = uuid::Uuid::now_v7().to_string();
         resources
             .create_session(&NewSession {
@@ -56,7 +63,7 @@ impl Fixture {
                 frozen: FrozenSnapshotBytes::new("{\"version\":1}"),
             })
             .await
-            .unwrap();
+            .expect("the create session fixture result is required for this assertion");
         Self {
             resources,
             id,
@@ -70,8 +77,11 @@ impl Fixture {
         let fresh =
             SessionResourcesImpl::open_existing_read_only(self.directory.path().join("wire.db"))
                 .await
-                .unwrap();
-        let snapshot = fresh.load_session_snapshot(&self.id).await.unwrap();
+                .expect("the temporary session store fixture must open successfully");
+        let snapshot = fresh
+            .load_session_snapshot(&self.id)
+            .await
+            .expect("the load session snapshot fixture result is required for this assertion");
         let mut transcript = MessageTranscript::new().with_own_payloads(snapshot.payloads);
         transcript.set_flags_batch(snapshot.flags);
         transcript
@@ -79,7 +89,9 @@ impl Fixture {
 }
 
 fn model(anthropic: bool) -> (AgentModelBridge, ProviderCapabilities) {
-    let endpoint = "http://127.0.0.1:9/no-network".parse().unwrap();
+    let endpoint = "http://127.0.0.1:9/no-network"
+        .parse()
+        .expect("the parse fixture result is required for this assertion");
     let (model, caps): (Arc<dyn Model>, _) = if anthropic {
         (
             Arc::new(AnthropicModel::new(
@@ -105,7 +117,9 @@ fn model(anthropic: bool) -> (AgentModelBridge, ProviderCapabilities) {
 }
 
 fn adaptive_model() -> (AgentModelBridge, ProviderCapabilities) {
-    let endpoint = "http://127.0.0.1:9/no-network".parse().unwrap();
+    let endpoint = "http://127.0.0.1:9/no-network"
+        .parse()
+        .expect("the parse fixture result is required for this assertion");
     let model = Arc::new(AnthropicModel::new(
         AnthropicConfig::new(endpoint, "fixture", "claude-sonnet-5-5")
             .without_cache()
@@ -118,7 +132,9 @@ fn adaptive_model() -> (AgentModelBridge, ProviderCapabilities) {
 }
 
 fn deepseek_model() -> (AgentModelBridge, ProviderCapabilities) {
-    let endpoint = "https://api.deepseek.com/anthropic".parse().unwrap();
+    let endpoint = "https://api.deepseek.com/anthropic"
+        .parse()
+        .expect("the parse fixture result is required for this assertion");
     let model = Arc::new(AnthropicModel::new(
         AnthropicConfig::new(endpoint, "fixture", "deepseek-v4-flash")
             .without_cache()
@@ -191,7 +207,11 @@ fn facts(
         )]),
         archive_scope: Some(ArchivePlanningScope {
             thread_id: id.into(),
-            committed_tail: transcript.entries().last().unwrap().id(),
+            committed_tail: transcript
+                .entries()
+                .last()
+                .expect("transcript entries fixture must contain the expected element")
+                .id(),
         }),
         ..Default::default()
     }
@@ -213,28 +233,49 @@ fn wire(
     transcript: &MessageTranscript,
     caps: &ProviderCapabilities,
 ) -> Value {
-    let messages = render_persisted_llm_view(transcript, caps).unwrap();
+    let messages =
+        peri_agent::agent::compact_v2::projection::render_persisted_llm_view(transcript, caps)
+            .expect("the render persisted llm view fixture result is required for this assertion");
     bridge
         .prepare_reasoning(&messages, &[])
-        .unwrap()
+        .expect("the prepare reasoning fixture result is required for this assertion")
         .checkpoint()["body"]
         .clone()
 }
 
 fn calls(body: &Value, anthropic: bool) -> Vec<(String, Value)> {
     let mut calls = Vec::new();
-    for message in body["messages"].as_array().unwrap() {
+    let message_items = body["messages"]
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
+    for message in message_items {
         if anthropic {
-            for block in message["content"].as_array().into_iter().flatten() {
+            let block_items = message["content"].as_array().into_iter().flatten();
+            for block in block_items {
                 if block["type"] == "tool_use" {
-                    calls.push((block["id"].as_str().unwrap().into(), block["input"].clone()));
+                    calls.push((
+                        block["id"]
+                            .as_str()
+                            .expect("the as str fixture result is required for this assertion")
+                            .into(),
+                        block["input"].clone(),
+                    ));
                 }
             }
         } else {
-            for call in message["tool_calls"].as_array().into_iter().flatten() {
+            let call_items = message["tool_calls"].as_array().into_iter().flatten();
+            for call in call_items {
                 calls.push((
-                    call["id"].as_str().unwrap().into(),
-                    serde_json::from_str(call["function"]["arguments"].as_str().unwrap()).unwrap(),
+                    call["id"]
+                        .as_str()
+                        .expect("the as str fixture result is required for this assertion")
+                        .into(),
+                    serde_json::from_str(
+                        call["function"]["arguments"]
+                            .as_str()
+                            .expect("the as str fixture result is required for this assertion"),
+                    )
+                    .expect("from_str must accept this test fixture representation"),
                 ));
             }
         }
@@ -244,15 +285,29 @@ fn calls(body: &Value, anthropic: bool) -> Vec<(String, Value)> {
 
 fn results(body: &Value, anthropic: bool) -> Vec<String> {
     let mut ids = Vec::new();
-    for message in body["messages"].as_array().unwrap() {
+    let message_items_2 = body["messages"]
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
+    for message in message_items_2 {
         if anthropic {
-            for block in message["content"].as_array().into_iter().flatten() {
+            let block_items_2 = message["content"].as_array().into_iter().flatten();
+            for block in block_items_2 {
                 if block["type"] == "tool_result" {
-                    ids.push(block["tool_use_id"].as_str().unwrap().into());
+                    ids.push(
+                        block["tool_use_id"]
+                            .as_str()
+                            .expect("the as str fixture result is required for this assertion")
+                            .into(),
+                    );
                 }
             }
         } else if message["role"] == "tool" {
-            ids.push(message["tool_call_id"].as_str().unwrap().into());
+            ids.push(
+                message["tool_call_id"]
+                    .as_str()
+                    .expect("the as str fixture result is required for this assertion")
+                    .into(),
+            );
         }
     }
     ids
@@ -264,7 +319,7 @@ async fn mixed_wire_contract(anthropic: bool) {
     transcript.append(BaseMessage::human("Do this task without changing the API."));
     let (ai, done) = mixed_step(&mut transcript, false);
     let (bridge, caps) = model(anthropic);
-    let plan = plan_micro_with_facts(
+    let plan = peri_agent::agent::compact_v2::planner::plan_micro_with_facts(
         &transcript,
         &CompactConfig {
             micro_compact_stale_steps: 0,
@@ -274,14 +329,16 @@ async fn mixed_wire_contract(anthropic: bool) {
         &facts(&transcript, &fixture.id, ai, done),
         &caps,
     )
-    .unwrap();
+    .expect("the plan micro with facts fixture result is required for this assertion");
     assert!(
         plan.actions
             .iter()
             .any(|entry| matches!(entry.action, ProjectionAction::OmitToolExchange { .. })),
         "真实planner必须生成整组退场"
     );
-    apply_micro_plan(&mut transcript, &plan).await.unwrap();
+    peri_agent::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
+        .await
+        .expect("the apply micro plan fixture result is required for this assertion");
     let body = wire(&bridge, &fixture.restore().await, &caps);
     assert_eq!(
         calls(&body, anthropic),
@@ -301,7 +358,7 @@ async fn mixed_wire_contract(anthropic: bool) {
     } else {
         body["messages"]
             .as_array()
-            .unwrap()
+            .expect("the as array fixture result is required for this assertion")
             .iter()
             .filter(|m| m["role"] == "system")
             .map(Value::to_string)
@@ -329,7 +386,7 @@ async fn test_signed_mixed_batch_stays_protocol_complete_for_both_adapters() {
         transcript.append(BaseMessage::human("Keep the signed dependent batch."));
         let (ai, done) = mixed_step(&mut transcript, true);
         let (bridge, caps) = model(anthropic);
-        let plan = plan_micro_with_facts(
+        let plan = peri_agent::agent::compact_v2::planner::plan_micro_with_facts(
             &transcript,
             &CompactConfig {
                 micro_compact_stale_steps: 0,
@@ -339,7 +396,7 @@ async fn test_signed_mixed_batch_stays_protocol_complete_for_both_adapters() {
             &facts(&transcript, &fixture.id, ai, done),
             &caps,
         )
-        .unwrap();
+        .expect("the plan micro with facts fixture result is required for this assertion");
         assert!(
             !plan
                 .actions
@@ -347,13 +404,22 @@ async fn test_signed_mixed_batch_stays_protocol_complete_for_both_adapters() {
                 .any(|entry| matches!(entry.action, ProjectionAction::OmitToolExchange { .. })),
             "未结同批依赖禁止拆签名"
         );
-        apply_micro_plan(&mut transcript, &plan).await.unwrap();
-        transcript.flush_persistence().await.unwrap();
+        peri_agent::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
+            .await
+            .expect("the apply micro plan fixture result is required for this assertion");
+        transcript
+            .flush_persistence()
+            .await
+            .expect("the flush persistence fixture result is required for this assertion");
         let body = wire(&bridge, &fixture.restore().await, &caps);
         let calls = calls(&body, anthropic);
         assert_eq!(calls.len(), 2);
         assert_eq!(
-            calls.iter().find(|(id, _)| id == "pending").unwrap().1,
+            calls
+                .iter()
+                .find(|(id, _)| id == "pending")
+                .expect("the find fixture result is required for this assertion")
+                .1,
             pending_arguments()
         );
         assert_eq!(
@@ -363,11 +429,11 @@ async fn test_signed_mixed_batch_stays_protocol_complete_for_both_adapters() {
         if anthropic {
             let thinking = body["messages"]
                 .as_array()
-                .unwrap()
+                .expect("the as array fixture result is required for this assertion")
                 .iter()
                 .flat_map(|m| m["content"].as_array().into_iter().flatten())
                 .find(|b| b["type"] == "thinking")
-                .unwrap();
+                .expect("the find fixture result is required for this assertion");
             assert_eq!(thinking["signature"], "EXACT_SIGNATURE");
             assert_eq!(
                 thinking["thinking"],
@@ -387,7 +453,7 @@ async fn test_final_wire_keeps_receipt_before_a_later_user_task() {
         // 新用户任务出现在旧工具步骤之后：派生收据不得越过它成为最新历史。
         transcript.append(BaseMessage::human("NEW TASK after the old step."));
         let (bridge, caps) = model(anthropic);
-        let plan = plan_micro_with_facts(
+        let plan = peri_agent::agent::compact_v2::planner::plan_micro_with_facts(
             &transcript,
             &CompactConfig {
                 micro_compact_stale_steps: 0,
@@ -404,16 +470,20 @@ async fn test_final_wire_keeps_receipt_before_a_later_user_task() {
             &facts(&transcript, &fixture.id, ai, done),
             &caps,
         )
-        .unwrap();
+        .expect("the plan micro with facts fixture result is required for this assertion");
         assert!(
             plan.actions
                 .iter()
                 .any(|entry| matches!(entry.action, ProjectionAction::OmitToolExchange { .. })),
             "真实 planner 必须生成整组退场"
         );
-        apply_micro_plan(&mut transcript, &plan).await.unwrap();
+        peri_agent::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
+            .await
+            .expect("the apply micro plan fixture result is required for this assertion");
         let body = wire(&bridge, &fixture.restore().await, &caps);
-        let messages = body["messages"].as_array().unwrap();
+        let messages = body["messages"]
+            .as_array()
+            .expect("the as array fixture result is required for this assertion");
         let position = |needle: &str| {
             messages
                 .iter()
@@ -441,7 +511,10 @@ async fn test_v2_restores_then_upgrades_and_unknown_version_blocks_wire() {
         let mut transcript = fixture.transcript();
         transcript.append(BaseMessage::human("User requirements"));
         let (ai, done) = mixed_step(&mut transcript, false);
-        transcript.flush_persistence().await.unwrap();
+        transcript
+            .flush_persistence()
+            .await
+            .expect("the flush persistence fixture result is required for this assertion");
         let old = MessageFlags {
             truncated: true,
             projection: Some(MessageProjectionDirective {
@@ -463,7 +536,7 @@ async fn test_v2_restores_then_upgrades_and_unknown_version_blocks_wire() {
             .resources
             .apply_message_projections(&fixture.id, &[(done, old)])
             .await
-            .unwrap();
+            .expect("the apply message projections fixture result is required for this assertion");
         let mut restored = fixture
             .restore()
             .await
@@ -471,7 +544,7 @@ async fn test_v2_restores_then_upgrades_and_unknown_version_blocks_wire() {
         let (bridge, caps) = model(anthropic);
         let old_wire = wire(&bridge, &restored, &caps);
         assert_eq!(calls(&old_wire, anthropic).len(), 2);
-        let plan = plan_micro_with_facts(
+        let plan = peri_agent::agent::compact_v2::planner::plan_micro_with_facts(
             &restored,
             &CompactConfig {
                 micro_compact_stale_steps: 0,
@@ -481,20 +554,30 @@ async fn test_v2_restores_then_upgrades_and_unknown_version_blocks_wire() {
             &facts(&restored, &fixture.id, ai, done),
             &caps,
         )
-        .unwrap();
-        apply_micro_plan(&mut restored, &plan).await.unwrap();
+        .expect("the plan micro with facts fixture result is required for this assertion");
+        peri_agent::agent::compact_v2::micro::apply_micro_plan(&mut restored, &plan)
+            .await
+            .expect("the apply micro plan fixture result is required for this assertion");
         assert_eq!(
             calls(&wire(&bridge, &fixture.restore().await, &caps), anthropic).len(),
             1
         );
         let mut corrupted = restored.flags(done);
-        corrupted.projection.as_mut().unwrap().policy_version = 999;
+        corrupted
+            .projection
+            .as_mut()
+            .expect("the as mut fixture result is required for this assertion")
+            .policy_version = 999;
         fixture
             .resources
             .apply_message_projections(&fixture.id, &[(done, corrupted)])
             .await
-            .unwrap();
-        let error = render_persisted_llm_view(&fixture.restore().await, &caps).unwrap_err();
+            .expect("the apply message projections fixture result is required for this assertion");
+        let error = peri_agent::agent::compact_v2::projection::render_persisted_llm_view(
+            &fixture.restore().await,
+            &caps,
+        )
+        .unwrap_err();
         assert!(
             error.to_string().contains("projection"),
             "未知版本应明确拒绝，不全文回灌再发送: {error}"
@@ -547,7 +630,7 @@ async fn micro_compacted_wire_contract(mode: CompactThinkingMode) {
         CompactThinkingMode::Adaptive => adaptive_model(),
         CompactThinkingMode::DeepSeek => deepseek_model(),
     };
-    let plan = plan_micro_with_facts(
+    let plan = peri_agent::agent::compact_v2::planner::plan_micro_with_facts(
         &transcript,
         &CompactConfig {
             micro_compact_stale_steps: 0,
@@ -557,15 +640,20 @@ async fn micro_compacted_wire_contract(mode: CompactThinkingMode) {
         &facts(&transcript, &fixture.id, ai, done),
         &caps,
     )
-    .unwrap();
+    .expect("the plan micro with facts fixture result is required for this assertion");
     assert!(
         plan.actions
             .iter()
             .any(|entry| matches!(entry.action, ProjectionAction::OmitToolExchange { .. })),
         "全部调用已关闭时必须整组退场"
     );
-    apply_micro_plan(&mut transcript, &plan).await.unwrap();
-    transcript.flush_persistence().await.unwrap();
+    peri_agent::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
+        .await
+        .expect("the apply micro plan fixture result is required for this assertion");
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let body = wire(&bridge, &fixture.restore().await, &caps);
     let encoded = body.to_string();
     assert!(encoded.contains("Independent conclusion must remain."));
@@ -574,7 +662,10 @@ async fn micro_compacted_wire_contract(mode: CompactThinkingMode) {
         "不能回填空签名 thinking"
     );
     if matches!(mode, CompactThinkingMode::DeepSeek) {
-        for message in body["messages"].as_array().unwrap() {
+        let message_items_3 = body["messages"]
+            .as_array()
+            .expect("the as array fixture result is required for this assertion");
+        for message in message_items_3 {
             if message["role"] == "assistant" {
                 assert_eq!(
                     message["content"][0],
@@ -590,7 +681,7 @@ async fn micro_compacted_wire_contract(mode: CompactThinkingMode) {
         assert!(
             !body["messages"]
                 .as_array()
-                .unwrap()
+                .expect("the as array fixture result is required for this assertion")
                 .iter()
                 .flat_map(|message| message["content"].as_array().into_iter().flatten())
                 .any(|block| block["type"] == "thinking"),

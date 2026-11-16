@@ -1,11 +1,11 @@
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use peri_acp_types::tasks::{BgTaskKind, TaskRegistrationReceipt, TaskRegistrationTicket};
 
-use super::{BackgroundRegistryError, BackgroundTaskRegistry};
+use crate::agent::async_tasks::registry::BackgroundRegistryError;
+use crate::agent::async_tasks::registry::BackgroundTaskRegistry;
 
 pub(super) struct RegistrationReceipt {
     task_id: String,
@@ -24,7 +24,7 @@ impl RegistrationReceipt {
         task_id: String,
         owner_id: uuid::Uuid,
         source_identity: Option<String>,
-        task: &super::BackgroundTask,
+        task: &crate::agent::async_tasks::registry::BackgroundTask,
         started: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -71,9 +71,12 @@ impl BackgroundTaskRegistry {
         let tasks = self.tasks.lock();
         self.validate_ticket(ticket)?;
         if ticket.is_settled()
-            || !tasks
-                .get(ticket.task_id())
-                .is_some_and(|task| matches!(task.status, super::BackgroundTaskStatus::Running))
+            || !tasks.get(ticket.task_id()).is_some_and(|task| {
+                matches!(
+                    task.status,
+                    crate::agent::async_tasks::registry::BackgroundTaskStatus::Running
+                )
+            })
         {
             return Err(BackgroundRegistryError::TaskNotFound(
                 ticket.task_id().into(),

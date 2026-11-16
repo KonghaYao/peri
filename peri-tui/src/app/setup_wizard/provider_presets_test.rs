@@ -1,11 +1,11 @@
 //! Tests for provider_presets
-use super::*;
+use super::{PROVIDER_PRESETS, ProviderType};
 
 #[test]
 fn test_presets_are_complete_and_free_service_is_last() {
     assert_eq!(PROVIDER_PRESETS.len(), 9, "预设表条目数");
     assert_eq!(
-        PROVIDER_PRESETS.last().unwrap().name,
+        PROVIDER_PRESETS.last().expect("presets are complete and free service is last: the fixture collection must contain the expected entry").name,
         "Peri Code 免费服务",
         "免密钥网关固定在末位"
     );
@@ -31,10 +31,10 @@ fn test_preset_identity_fields_are_filled() {
 #[test]
 fn test_preset_model_tiers_are_filled() {
     for preset in PROVIDER_PRESETS {
-        for (tier, model) in ["fable", "opus", "sonnet", "haiku"]
+        let tier_models = ["fable", "opus", "sonnet", "haiku"]
             .iter()
-            .zip(preset.models)
-        {
+            .zip(preset.models);
+        for (tier, model) in tier_models {
             assert!(
                 !model.trim().is_empty(),
                 "{} 的 {tier} 档模型为空",

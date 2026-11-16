@@ -10,12 +10,13 @@
 //! 端口替身只用于观察「宿主何时调用」；关闭本身的真实语义（结清判定、重复检查、只有
 //! 确认关闭才幂等成功）由 peri-resources 的门面测试覆盖。
 
-use super::*;
+use crate::host::AcpServerConfig;
 use peri_acp_types::session_resources::{
     SessionResourceError, SessionResourceResult, SessionStoreShutdownPort,
 };
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// 关闭权替身：记录调用次数，可按首次必失败注入「未确认的关闭」。
 struct RecordingShutdown {
@@ -61,7 +62,7 @@ async fn config_with_gated_task(
     tokio::sync::oneshot::Sender<()>,
     tokio::sync::oneshot::Receiver<()>,
 ) {
-    let mut cfg = test_config(tmp).await;
+    let mut cfg = crate::host::stdio::run_server_integration_tests::test_config(tmp).await;
     cfg.session_store_shutdown = Some(Box::new(RecordingShutdownPort(Arc::clone(&shutdown))));
     let cancellation = cfg.host_task_spawner.shutdown_token();
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
@@ -85,7 +86,8 @@ async fn test_store_shutdown_runs_only_after_host_tasks_drain() {
     let tmp = tempfile::TempDir::new().unwrap();
     let shutdown = RecordingShutdown::new(false);
     let (cfg, release_tx, started_rx) = config_with_gated_task(&tmp, Arc::clone(&shutdown)).await;
-    let (transport, input, _output) = duplex_transport();
+    let (transport, input, _output) =
+        crate::host::stdio::run_server_integration_tests::duplex_transport();
     let mut host = crate::host::spawn_acp_server(Arc::new(transport), cfg);
     started_rx.await.unwrap();
     // 传输 EOF：宿主开始关闭，但被门控的宿主任务还没结束。
@@ -120,11 +122,12 @@ async fn test_unconfirmed_store_shutdown_is_incomplete_and_retry_rechecks() {
     let tmp = tempfile::TempDir::new().unwrap();
     let shutdown = RecordingShutdown::new(true);
     let cfg = {
-        let mut cfg = test_config(&tmp).await;
+        let mut cfg = crate::host::stdio::run_server_integration_tests::test_config(&tmp).await;
         cfg.session_store_shutdown = Some(Box::new(RecordingShutdownPort(Arc::clone(&shutdown))));
         cfg
     };
-    let (transport, input, _output) = duplex_transport();
+    let (transport, input, _output) =
+        crate::host::stdio::run_server_integration_tests::duplex_transport();
     let mut host = crate::host::spawn_acp_server(Arc::new(transport), cfg);
     drop(input);
 
