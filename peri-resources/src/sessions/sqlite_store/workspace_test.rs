@@ -4,8 +4,6 @@ use peri_acp_types::thread::{ThreadId, ThreadMeta};
 use peri_acp_types::workspace::ResolvedWorkspace;
 use std::path::Path;
 use std::sync::Arc;
-#[cfg(unix)]
-use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 fn git(root: &Path, args: &[&str]) {
