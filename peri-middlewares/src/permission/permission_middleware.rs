@@ -258,9 +258,7 @@ pub fn format_sensitive_tools_for_disabled(disabled: &std::collections::HashSet<
             !peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
                 .iter()
                 .any(|capability| {
-                    let closed = disabled.contains(capability.name)
-                        || disabled.contains(capability.legacy_policy_key);
-                    closed
+                    disabled.contains(capability.name)
                         && capability
                             .tools
                             .iter()

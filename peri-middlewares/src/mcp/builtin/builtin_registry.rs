@@ -181,11 +181,11 @@ pub(crate) fn is_declared_model_hidden(server_name: &str, original_tool: &str) -
     })
 }
 
-/// IF-D10 的唯一判定入口：能力开关（v5 能力名或迁移期旧键）命中即关闭对应能力。
+/// IF-D10 的唯一判定入口：v5 能力名命中即关闭对应能力。
 ///
 /// `disabled_middlewares` 同时承载链槽位键与其他 middleware 键；本函数只接受能
-/// 映射到 builtin 能力的键（`capability_of_switch`），其余键静默跳过。旧键不是
-/// 第二套开关：两者都经同一能力表映射，输出仍是 v4 实例名供迁移期面消费。
+/// 精确命中 builtin 能力的键（`capability`），其余键静默跳过。旧
+/// `*Middleware` key 已于 M4 退役，不再映射为能力开关。
 pub(crate) fn closed_instances(disabled_middlewares: &HashSet<String>) -> BTreeSet<String> {
     closed_capabilities(disabled_middlewares)
         .into_iter()
@@ -204,7 +204,7 @@ pub(crate) fn closed_capabilities(
 ) -> BTreeSet<&'static str> {
     disabled_middlewares
         .iter()
-        .filter_map(|key| builtin_mcp::capability_of_switch(key).ok())
+        .filter_map(|key| builtin_mcp::capability(key))
         .map(|capability| capability.name)
         .collect()
 }

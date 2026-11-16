@@ -69,7 +69,7 @@ fn constructors_keep_inputs_and_closed_set_verbatim() {
             .expect("夹具必须带 bg 完成回调"),
     );
     // 关闭集用 A24 唯一派生入口生成：能力开关（旧键或 v5 能力名）→ 实例名。
-    let closed = builtin::closed_instances(&HashSet::from(["CronMiddleware".to_string()]));
+    let closed = builtin::closed_instances(&HashSet::from(["cron".to_string()]));
     assert_eq!(
         closed,
         BTreeSet::from(["cron".to_string()]),

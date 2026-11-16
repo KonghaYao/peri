@@ -126,15 +126,10 @@ impl ToolFilterPolicy {
                         if peri_acp_types::builtin_mcp::is_v5_server_name(instance) {
                             tool.mcp_tool_name()
                                 .and_then(peri_acp_types::builtin_mcp::capability_of_original_tool)
-                                .is_some_and(|(capability, _)| {
-                                    disabled.contains(capability.name)
-                                        || disabled.contains(capability.legacy_policy_key)
-                                })
+                                .is_some_and(|(capability, _)| disabled.contains(capability.name))
                         } else {
-                            peri_acp_types::builtin_mcp::find(instance).is_some_and(|declared| {
-                                disabled.contains(declared.name)
-                                    || disabled.contains(declared.legacy_policy_key)
-                            })
+                            peri_acp_types::builtin_mcp::find(instance)
+                                .is_some_and(|declared| disabled.contains(declared.name))
                         }
                     }))
             {

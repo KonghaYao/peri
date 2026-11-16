@@ -11,7 +11,7 @@ fn make_frozen() -> FrozenSessionData {
     let mut section_overrides = HashMap::new();
     section_overrides.insert("persona".to_string(), Arc::<str>::from("custom persona"));
     let mut disabled_middlewares = HashSet::new();
-    disabled_middlewares.insert("WebMiddleware".to_string());
+    disabled_middlewares.insert("web".to_string());
     let context = peri_agent::session::FrozenContext {
         system_prompt: Arc::from("system-v1"),
         external_instructions: None,

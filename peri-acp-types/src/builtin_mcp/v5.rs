@@ -5,7 +5,7 @@
 //! 派生，没有第二份字面量。
 //!
 //! 状态：默认注入仍走 v4 六实例兼容路径，router / 代理尚未接线；迁移期由父模块
-//! 把能力表投影成实例视图。`legacy_instance` / `legacy_policy_key` / `legacy_name`
+//! 把能力表投影成实例视图。`legacy_instance` / `legacy_name`
 //! 只服务该兼容路径与旧历史归一，M4 清理时与 v4 路径一并删除。
 //!
 //! 三层命名（不要混淆）：
@@ -162,8 +162,6 @@ pub struct BuiltinCapability {
     pub name: &'static str,
     /// 迁移期旧实例身份；确定性映射与旧名归一只索引这张表。
     pub legacy_instance: &'static str,
-    /// 迁移期旧 middleware 关闭键；只用于识别旧键，不承担 v5 能力开关。
-    pub legacy_policy_key: &'static str,
     /// 能力依赖：被依赖能力关闭时，本能力必须同步关闭或安全失败。
     pub dependencies: &'static [&'static str],
     /// 工具表（非空；原始名与模型面名全局唯一）。
@@ -202,12 +200,6 @@ pub enum CapabilityNameError {
     /// 未知迁移期旧实例。
     #[error("unknown legacy instance: {instance}")]
     UnknownLegacyInstance { instance: String },
-    /// 未知迁移期旧关闭键。
-    #[error("unknown legacy builtin policy key: {key}")]
-    UnknownPolicyKey { key: String },
-    /// 未知 v5 能力开关。
-    #[error("unknown capability switch: {key}")]
-    UnknownSwitch { key: String },
     /// 资源 URI 无归属能力。
     #[error("no capability owns resource URI: {uri}")]
     UnknownResourceUri { uri: String },
@@ -267,7 +259,6 @@ pub const BUILTIN_V5_CAPABILITIES: &[BuiltinCapability] = &[
     BuiltinCapability {
         name: "workspace",
         legacy_instance: "workspace",
-        legacy_policy_key: "WorkspaceMiddleware",
         dependencies: &[],
         tools: WORKSPACE_CAPABILITY_TOOLS,
         resources: CapabilityResourceSurface {
@@ -322,7 +313,6 @@ pub const BUILTIN_V5_CAPABILITIES: &[BuiltinCapability] = &[
     BuiltinCapability {
         name: "web",
         legacy_instance: "web",
-        legacy_policy_key: "WebMiddleware",
         dependencies: &[],
         tools: WEB_CAPABILITY_TOOLS,
         resources: NO_RESOURCES,
@@ -342,7 +332,6 @@ pub const BUILTIN_V5_CAPABILITIES: &[BuiltinCapability] = &[
     BuiltinCapability {
         name: "artifact",
         legacy_instance: "artifact",
-        legacy_policy_key: "ArtifactMiddleware",
         dependencies: &[],
         tools: ARTIFACT_CAPABILITY_TOOLS,
         resources: NO_RESOURCES,
@@ -357,7 +346,6 @@ pub const BUILTIN_V5_CAPABILITIES: &[BuiltinCapability] = &[
     BuiltinCapability {
         name: "cron",
         legacy_instance: "cron",
-        legacy_policy_key: "CronMiddleware",
         dependencies: &[],
         tools: CRON_CAPABILITY_TOOLS,
         resources: CapabilityResourceSurface {
@@ -377,7 +365,6 @@ pub const BUILTIN_V5_CAPABILITIES: &[BuiltinCapability] = &[
     BuiltinCapability {
         name: "monitor",
         legacy_instance: "monitor",
-        legacy_policy_key: "MonitorMiddleware",
         dependencies: &[],
         tools: MONITOR_CAPABILITY_TOOLS,
         resources: NO_RESOURCES,
@@ -397,7 +384,6 @@ pub const BUILTIN_V5_CAPABILITIES: &[BuiltinCapability] = &[
     BuiltinCapability {
         name: "workflow",
         legacy_instance: "workflow",
-        legacy_policy_key: "WorkflowMiddleware",
         dependencies: &[],
         tools: WORKFLOW_CAPABILITY_TOOLS,
         resources: CapabilityResourceSurface {
@@ -446,39 +432,6 @@ pub fn capability_of_legacy_instance(
         .ok_or_else(|| CapabilityNameError::UnknownLegacyInstance {
             instance: instance.to_owned(),
         })
-}
-
-/// 迁移期旧 middleware 关闭键 → 能力。旧键只做确定性映射，不再承担开关语义。
-pub fn capability_of_legacy_policy_key(
-    key: &str,
-) -> Result<&'static BuiltinCapability, CapabilityNameError> {
-    BUILTIN_V5_CAPABILITIES
-        .iter()
-        .find(|candidate| candidate.legacy_policy_key == key)
-        .ok_or_else(|| CapabilityNameError::UnknownPolicyKey {
-            key: key.to_owned(),
-        })
-}
-
-/// 能力开关：接受 v5 能力名或迁移期旧关闭键；两者映射到同一能力。
-///
-/// 这是运行时关闭集与配置投影的唯一入口；不得按 server 名或工具名反推能力。
-pub fn capability_of_switch(
-    switch: &str,
-) -> Result<&'static BuiltinCapability, CapabilityNameError> {
-    if let Some(capability) = capability(switch) {
-        return Ok(capability);
-    }
-    capability_of_legacy_policy_key(switch).map_err(|_| CapabilityNameError::UnknownSwitch {
-        key: switch.to_owned(),
-    })
-}
-
-/// 全部迁移期旧关闭键（顺序即声明表顺序）。
-pub fn legacy_policy_keys() -> impl Iterator<Item = &'static str> + Clone {
-    BUILTIN_V5_CAPABILITIES
-        .iter()
-        .map(|capability| capability.legacy_policy_key)
 }
 
 /// 资源 URI → 归属能力（按已声明前缀唯一判定）。

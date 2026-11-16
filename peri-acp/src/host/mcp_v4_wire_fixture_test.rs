@@ -175,7 +175,9 @@ rl.on('line', (line) => {
 /// 临时 HOME，避免启动开发者本机的 MCP server / 读入真实凭据（§9 规则 7）。
 struct WireHomeRedirect {
     _lock: MutexGuard<'static, ()>,
-    previous: Option<OsString>,
+    previous_home: Option<OsString>,
+    previous_builtin: Option<OsString>,
+    builtin_applied: bool,
 }
 
 impl WireHomeRedirect {
@@ -183,20 +185,35 @@ impl WireHomeRedirect {
         static HOME_LOCK: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
         // 一个用例 panic 不得毒化 HOME 重定向，使后续用例连带失败。
         let lock = HOME_LOCK.get_or_init(|| parking_lot::Mutex::new(())).lock();
-        let previous = std::env::var_os("HOME");
+        let previous_home = std::env::var_os("HOME");
+        let previous_builtin = std::env::var_os("PERI_MCP_BUILTIN");
         std::env::set_var("HOME", home);
+        // 本文件是 v4 six-instance wire 基线；默认装配已经是 v5 单出口。
+        // 显式 off 用例由自己的 guard 先设置，不能被这里覆盖。
+        let builtin_applied = previous_builtin.is_none();
+        if builtin_applied {
+            std::env::set_var("PERI_MCP_BUILTIN", "legacy");
+        }
         Self {
             _lock: lock,
-            previous,
+            previous_home,
+            previous_builtin,
+            builtin_applied,
         }
     }
 }
 
 impl Drop for WireHomeRedirect {
     fn drop(&mut self) {
-        match self.previous.take() {
+        match self.previous_home.take() {
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
+        }
+        if self.builtin_applied {
+            match self.previous_builtin.take() {
+                Some(value) => std::env::set_var("PERI_MCP_BUILTIN", value),
+                None => std::env::remove_var("PERI_MCP_BUILTIN"),
+            }
         }
     }
 }

@@ -1,7 +1,8 @@
 # MCP v5：builtin 单出口目标设计
 
 > 状态：已批准目标设计（2026-11-15，Issue #409）。v5 单出口 `peri` 已是宿主默认装配；
-> 六个独立 builtin server 仅在 `PERI_MCP_BUILTIN=legacy` 回滚路径保留到 M4。
+> 旧 policy 键与 CLI 单实例 serving 路径已退役，六个独立 builtin server 仅在
+> `PERI_MCP_BUILTIN=legacy` 回滚路径保留到 M4 截止决定。
 > Sandbox workspace 的宿主内代理接线仍是兼容路径（见 active spec 未验证项）。
 > 运行时代码、协议测试与迁移状态以代码、契约测试和
 > [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md) 为准。
@@ -129,12 +130,12 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 2. 不新造顶层 `capabilities` 对象；MCP 的 `capabilities` 是 `initialize` 协议字段，复用会混淆配置与协议协商。
 3. 能力选择优先放在 `mcp-start` 参数。若必须持久化到 `.mcp.json`，只能放在该 server 条目的命名空间扩展下，且标准客户端忽略它不影响连接。扩展键名在实现前按 MCP 生态复核后裁决，本文不预占。
 4. 未知能力名、非法组合、能力子配置冲突是加载期 typed error，不 warning 后忽略。
-5. 旧 middleware 策略键（`WebMiddleware` 等）不再作为能力开关；出现时必须确定性映射到 capability 开关或显式 typed error，不得 silent no-op。
+5. 旧 middleware 策略键（`WebMiddleware` 等）已在 M4 退役，不再作为能力开关；加载期按未知 MetaHarness 键告警并丢弃。v4 逐实例 `.mcp.json` 条目仍由配置 adapter 确定性映射为 capability 开关。
 6. `PERI_MCP_BUILTIN` 只保留为部署级 kill switch（全部 builtin 关闭），不承担逐能力配置。
 7. v4 的逐实例 `.mcp.json` 条目在迁移期由 adapter 确定性映射为单出口能力开关；新会话不得写回六条目。
 8. 宿主内的 builtin 单出口条目由宿主注入，能力开关以 `mcp-start` 参数为准；standalone 与宿主共用能力注册表，但不重新绑定整个 settings 装配。
 
-状态说明：`mcp-start` 的 `--capability` 参数语法已实现；`.mcp.json` 扩展键名仍未裁决。宿主默认装配仍是 v4 六实例，验收矩阵见 active spec 的配置组合维度。
+状态说明：`mcp-start` 的 `--capability` 参数语法已实现；`.mcp.json` 扩展键名仍未裁决。宿主默认装配已切换为单出口 `peri`，`PERI_MCP_BUILTIN=legacy` 保留六实例回滚（M4 截止）；旧 `*Middleware` 策略键已退役。验收矩阵见 active spec 的配置组合维度。
 
 ## 4. 能力关闭矩阵
 

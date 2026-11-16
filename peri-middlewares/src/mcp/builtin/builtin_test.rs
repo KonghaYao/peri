@@ -261,34 +261,27 @@ fn closed_instances_maps_capability_switches() {
         "空关闭集 ⇒ 无实例关闭"
     );
 
-    let web: HashSet<String> = HashSet::from(["WebMiddleware".to_string()]);
+    let web: HashSet<String> = HashSet::from(["web".to_string()]);
     assert_eq!(
         super::closed_instances(&web),
         BTreeSet::from(["web".to_string()])
     );
 
-    let artifact: HashSet<String> = HashSet::from(["ArtifactMiddleware".to_string()]);
+    let artifact: HashSet<String> = HashSet::from(["artifact".to_string()]);
     assert_eq!(
         super::closed_instances(&artifact),
         BTreeSet::from(["artifact".to_string()])
     );
 
-    let cron: HashSet<String> = HashSet::from(["CronMiddleware".to_string()]);
+    let cron: HashSet<String> = HashSet::from(["cron".to_string()]);
     assert_eq!(
         super::closed_instances(&cron),
         BTreeSet::from(["cron".to_string()])
     );
 
-    // v5 能力名是新的开关身份；旧键必须映射到同一实例。
+    // v5 能力名是唯一开关身份。
     for capability in peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES.iter() {
         let by_capability: HashSet<String> = HashSet::from([capability.name.to_string()]);
-        let by_legacy: HashSet<String> = HashSet::from([capability.legacy_policy_key.to_string()]);
-        assert_eq!(
-            super::closed_instances(&by_capability),
-            super::closed_instances(&by_legacy),
-            "{} 与旧键必须关闭同一实例",
-            capability.name
-        );
         assert_eq!(
             super::closed_instances(&by_capability),
             BTreeSet::from([capability.legacy_instance.to_string()]),
@@ -297,10 +290,7 @@ fn closed_instances_maps_capability_switches() {
         );
     }
 
-    let both: HashSet<String> = HashSet::from([
-        "WebMiddleware".to_string(),
-        "ArtifactMiddleware".to_string(),
-    ]);
+    let both: HashSet<String> = HashSet::from(["web".to_string(), "artifact".to_string()]);
     assert_eq!(
         super::closed_instances(&both),
         BTreeSet::from(["artifact".to_string(), "web".to_string()])
@@ -319,7 +309,7 @@ fn closed_instances_maps_capability_switches() {
 #[test]
 fn closed_capabilities_returns_v5_identity() {
     let mixed: HashSet<String> = HashSet::from([
-        "WebMiddleware".to_string(),
+        "web".to_string(),
         "cron".to_string(),
         "McpMiddleware".to_string(),
     ]);

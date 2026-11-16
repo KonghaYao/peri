@@ -340,12 +340,9 @@ async fn closure_matrix_four_faces_on_real_builtin_pool() {
         .collect();
 
     let cases: Vec<Vec<String>> = vec![
-        vec!["WebMiddleware".to_string()],
-        vec!["ArtifactMiddleware".to_string()],
-        vec![
-            "WebMiddleware".to_string(),
-            "ArtifactMiddleware".to_string(),
-        ],
+        vec!["web".to_string()],
+        vec!["artifact".to_string()],
+        vec!["web".to_string(), "artifact".to_string()],
     ];
     for disabled_list in cases {
         let disabled: HashSet<String> = disabled_list.iter().cloned().collect();
@@ -588,7 +585,7 @@ async fn closing_web_keeps_artifact_capability_and_real_call() {
     let fixture = StartupFixture::start().await;
     let pool = Arc::clone(&fixture.pool);
     let cwd = fixture.project.to_string_lossy().into_owned();
-    let disabled: HashSet<String> = ["WebMiddleware".to_string()].into_iter().collect();
+    let disabled: HashSet<String> = ["web".to_string()].into_iter().collect();
     let closed = super::closed_instances(&disabled);
     assert_eq!(
         closed,

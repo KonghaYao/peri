@@ -40,29 +40,20 @@ const fn test_capability(
     legacy_instance: &'static str,
     tools: &'static [CapabilityTool],
 ) -> BuiltinCapability {
-    test_capability_with_key(name, legacy_instance, "TestMiddleware", tools)
+    test_capability_with_key(name, legacy_instance, tools)
 }
 
 const fn test_capability_with_key(
     name: &'static str,
     legacy_instance: &'static str,
-    legacy_policy_key: &'static str,
     tools: &'static [CapabilityTool],
 ) -> BuiltinCapability {
-    test_capability_full(
-        name,
-        legacy_instance,
-        legacy_policy_key,
-        &[],
-        tools,
-        NO_RESOURCES,
-    )
+    test_capability_full(name, legacy_instance, &[], tools, NO_RESOURCES)
 }
 
 const fn test_capability_full(
     name: &'static str,
     legacy_instance: &'static str,
-    legacy_policy_key: &'static str,
     dependencies: &'static [&'static str],
     tools: &'static [CapabilityTool],
     resources: CapabilityResourceSurface,
@@ -70,7 +61,6 @@ const fn test_capability_full(
     BuiltinCapability {
         name,
         legacy_instance,
-        legacy_policy_key,
         dependencies,
         tools,
         resources,
@@ -83,18 +73,10 @@ const fn test_capability_full(
 const fn test_capability_with_resources(
     name: &'static str,
     legacy_instance: &'static str,
-    legacy_policy_key: &'static str,
     tools: &'static [CapabilityTool],
     resources: CapabilityResourceSurface,
 ) -> BuiltinCapability {
-    test_capability_full(
-        name,
-        legacy_instance,
-        legacy_policy_key,
-        &[],
-        tools,
-        resources,
-    )
+    test_capability_full(name, legacy_instance, &[], tools, resources)
 }
 
 const TOOL_A_DIRECT: &[CapabilityTool] = &[test_tool("ToolA", "ToolA", "ToolA", true)];
@@ -162,7 +144,6 @@ fn v4_compat_view_is_derived_from_capability_table() {
     for (view, capability) in instances.iter().zip(BUILTIN_V5_CAPABILITIES) {
         assert_eq!(view.name, capability.name);
         assert_eq!(view.instance, capability.legacy_instance);
-        assert_eq!(view.legacy_policy_key, capability.legacy_policy_key);
         assert_eq!(
             view.task_owner_scoped, capability.host_injection.task_owner_scoped,
             "能力 {} 的 task owner 作用域漂移",

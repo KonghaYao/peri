@@ -26,7 +26,8 @@ pub(crate) fn builtin_policy(
     configured_enabled: bool,
 ) -> crate::mcp::builtin::BuiltinInjectionPolicy {
     if IN_PROCESS_BUILTINS && configured_enabled {
-        crate::mcp::builtin::BuiltinInjectionPolicy::all()
+        // Snapshot 只冻结 on/off；`legacy` 回滚值仍由唯一 env 解析点解释。
+        crate::mcp::builtin::builtin_injection_policy_from_env()
     } else {
         crate::mcp::builtin::BuiltinInjectionPolicy::none()
     }

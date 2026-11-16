@@ -16,20 +16,20 @@ middleware 关闭与内置 Agent 定义策略。
     "meta_harness": {
       "01_intro": true,
       "05_using_tools": true,
-      "WebMiddleware": false
+      "web": false
     }
   }
 }
 ```
 
 创建 `.peri/meta/01_intro.md` 与 `.peri/meta/05_using_tools.md`，分别写入完整替换正文。
-配置中的 `WebMiddleware: false` 关闭本会话的内置 Web 工具能力。
+配置中的 `web: false` 关闭本会话的内置 Web 工具能力。
 
 | 配置项 | 用法 | 事实源 |
 | --- | --- | --- |
 | 段落 ID = `true` | 用 `.peri/meta/<ID>.md` 整段替换；空正文移除该段 | `peri-acp-types/src/meta_harness.rs::SECTION_IDS` |
 | middleware 名 = `false` | 不装配该 middleware，工具、hook 与提示词贡献随之移除 | 同文件 `MIDDLEWARE_NAMES` |
-| builtin 实例策略键 = `false` | 关闭该会话的实例能力面；具体关闭范围按设计约束 | `peri-acp-types/src/builtin_mcp/v5.rs` 的 `legacy_policy_key`（经 `capability_of_switch` 映射） |
+| builtin 能力名 = `false` | 关闭该会话的能力面；具体关闭范围按设计约束 | `peri-acp-types/src/builtin_mcp/v5.rs` 的 `BUILTIN_V5_CAPABILITIES` |
 | `BuiltInSubagents` = bool | 控制编译时内置 Agent 定义，默认开启 | [MetaHarness 设计](design/meta-harness.md) |
 
 `BuiltInSubagents: false` 不关闭项目/plugin agents、fork/resume 或 Agent 工具。
@@ -52,7 +52,7 @@ MetaHarness 管理会话内的能力使用策略。安装外部 MCP、连接/授
 
 | 需求 | 配置入口 |
 | --- | --- |
-| 关闭内置能力的会话注入 | 对应 builtin 实例策略键，如 `WebMiddleware: false` |
+| 关闭内置能力的会话注入 | 对应 builtin 能力名，如 `web: false` |
 | 在配置层禁用内置 MCP | 对应 MCP 配置片段，如 `{"web": {"disabled": true}}` |
 | 全局关闭内置 MCP 注入 | `PERI_MCP_BUILTIN=off` |
 | 关闭 MCP 响应缓存 | `mcpCache` 或 `PERI_MCP_CACHE`，见 [缓存设计](design/mcp-cache.md) |

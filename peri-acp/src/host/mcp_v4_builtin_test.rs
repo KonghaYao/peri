@@ -278,7 +278,7 @@ async fn builtin_instances_expose_frozen_effective_names_on_first_model_request(
     // 换成 原始工具名（7 项均由 system_mcp_tools 选中）。
     // 期望值从注册表**派生**，不写第二份名单 —— 注册表是唯一的名字权威。
     let workspace = builtin_mcp::find("workspace").expect("workspace 必须在已实现实例注册表内");
-    for tool in workspace.tools {
+    for tool in workspace.tools.iter().filter(|tool| tool.advertised) {
         assert!(
             names.iter().any(|name| name == tool.original_name),
             "首个 LLM 请求必须直接含 `{}` 的 system MCP 原名 `{}`: {names:?}",
@@ -379,9 +379,9 @@ async fn builtin_instance_closure_changes_only_the_first_model_request_surface()
     // (disabled_middlewares, Web 两工具可见, artifact 可见)
     let cases: [(&[&str], bool, bool); 4] = [
         (&[], true, true),
-        (&["WebMiddleware"], false, true),
-        (&["ArtifactMiddleware"], true, false),
-        (&["WebMiddleware", "ArtifactMiddleware"], false, false),
+        (&["web"], false, true),
+        (&["artifact"], true, false),
+        (&["web", "artifact"], false, false),
     ];
     let web_tools = ["WebSearch", "WebFetch"];
 
@@ -552,7 +552,7 @@ async fn closed_web_tool_call_never_reaches_approval_or_wire() {
         ctx,
         &sink,
         &model,
-        Some(frozen_with_disabled(&["WebMiddleware"])),
+        Some(frozen_with_disabled(&["web"])),
     )
     .await;
 

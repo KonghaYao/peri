@@ -291,19 +291,18 @@ pub(crate) fn build_collected_sections_with_capabilities(
 /// - middleware + false → `disabled_middlewares`；
 /// - middleware + true → 不放入 disabled（显式恢复）。
 ///
-/// **v4-part-2（A7）**：`false` 键的判定面是「链槽位名 ∪ builtin 能力旧键」两表并集
-/// （`MIDDLEWARE_NAMES` 只含链槽位名，builtin 旧键由能力表 `legacy_policy_key` 派生）。
-/// 只读其中一张表会让 `"WebMiddleware": false`
-/// 退化为「键存在但无效果」——`disabled_middlewares` 既被链装配消费（关闭槽位），
-/// 也被 builtin 关闭集消费（`closed_instances`，IF-D10），漏项即能力闭合退化
+/// **v5**：`false` 键的判定面是「链槽位名 ∪ v5 能力名」并集。旧
+/// `*Middleware` key 在 M4 退役，不再进入 `disabled_middlewares`；解析期按未知键
+/// 告警丢弃，不出现「键存在但无效果」的静默路径。
+/// `disabled_middlewares` 既被链装配消费（关闭槽位），也被 builtin 关闭集消费
+/// （`closed_instances`，IF-D10），漏项即能力闭合退化
 /// （ARC-CAPABILITY-CLOSURE-001）。
 pub(crate) fn build_meta_harness_state(
     config: Option<&HashMap<String, bool>>,
     docs: HashMap<String, String>,
 ) -> peri_acp_types::meta_harness::MetaHarnessState {
     use peri_acp_types::meta_harness::{
-        MetaHarnessState, BUILTIN_INSTANCE_POLICY_KEYS, BUILT_IN_SUBAGENTS_KEY, MIDDLEWARE_NAMES,
-        SECTION_IDS,
+        MetaHarnessState, BUILT_IN_SUBAGENTS_KEY, MIDDLEWARE_NAMES, SECTION_IDS,
     };
 
     let mut state = MetaHarnessState::default();
@@ -332,7 +331,6 @@ pub(crate) fn build_meta_harness_state(
         } else if key == BUILT_IN_SUBAGENTS_KEY {
             state.built_in_subagents_enabled = *enabled;
         } else if (MIDDLEWARE_NAMES.contains(&key.as_str())
-            || BUILTIN_INSTANCE_POLICY_KEYS.contains(&key.as_str())
             || peri_acp_types::builtin_mcp::capability(key).is_some())
             && !*enabled
         {

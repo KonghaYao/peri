@@ -132,14 +132,9 @@ struct LoaderEnvGuard {
 }
 
 impl LoaderEnvGuard {
-    fn redirect(home: &Path) -> Self {
-        Self::redirect_with_builtin_env(home, None)
-    }
-
-    /// 同 [`Self::redirect`]，但 `PERI_MCP_BUILTIN` 取显式值（`None` = 移除该变量）。
+    /// 重定向 `HOME`，`PERI_MCP_BUILTIN` 取显式值（`None` = 移除该变量）。
     ///
-    /// 既有 `redirect` 逐位不变（委托到本函数、`builtin_env = None`）；WP-MW 的
-    /// `PERI_MCP_BUILTIN=off` 零注入用例需要这一份取值。
+    /// v5 默认路径用 `None`；回滚与零注入用例分别传 `"legacy"` / `"off"`。
     fn redirect_with_builtin_env(home: &Path, builtin_env: Option<&str>) -> Self {
         let lock = peri_mcp_common::process_env::lock().expect("进程环境锁");
         let home = home.to_string_lossy().into_owned();

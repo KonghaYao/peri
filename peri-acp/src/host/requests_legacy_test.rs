@@ -352,7 +352,7 @@ async fn legacy_history_freezes_saved_workspace_configuration_and_plugins() {
     std::fs::write(target.join(".peri/meta/01_intro.md"), "SAVED_META_HARNESS").unwrap();
     std::fs::write(
         target.join(".peri/settings.json"),
-        r#"{"config":{"language":"zh-CN","meta_harness":{"01_intro":true,"WebMiddleware":false}}}"#,
+        r#"{"config":{"language":"zh-CN","meta_harness":{"01_intro":true,"web":false}}}"#,
     )
     .unwrap();
     crate::host::requests::tests::seed_plugin_ecc(tmp.path());
@@ -408,10 +408,7 @@ async fn legacy_history_freezes_saved_workspace_configuration_and_plugins() {
         Some("SAVED_META_HARNESS".to_string()),
         "覆盖文档必须经资源面进入冻结输入"
     );
-    assert!(frozen
-        .meta_harness
-        .disabled_middlewares
-        .contains("WebMiddleware"));
+    assert!(frozen.meta_harness.disabled_middlewares.contains("web"));
     // W4b（F3/J5）：技能摘要同样只在内容准入期（P4）从 system 来源取；
     // legacy 首次接纳先于执行环境 ⇒ 无资源面 ⇒ 摘要为空。插件技能根在盘上
     // 存在也不得被宿主读取（宿主已无技能扫描点）。
@@ -419,7 +416,7 @@ async fn legacy_history_freezes_saved_workspace_configuration_and_plugins() {
     // 摘要必须包含该实例声明的技能，且**不得**出现宿主机扫盘才会发现的插件技能
     // （`plugin_skill_roots` 为空 ⇒ 插件根不进入资源面）。
     assert!(
-        frozen.skill_summary.contains("mcp__workspace__cron"),
+        frozen.skill_summary.contains("mcp__peri__cron"),
         "技能摘要必须来自资源面的技能目录：{}",
         frozen.skill_summary
     );

@@ -119,9 +119,7 @@ fn test_frozen_context_builder_meta_harness_full() {
     state
         .section_overrides
         .insert("01_intro".to_string(), Arc::from("custom intro"));
-    state
-        .disabled_middlewares
-        .insert("WebMiddleware".to_string());
+    state.disabled_middlewares.insert("web".to_string());
     let ctx = FrozenContext::builder()
         .system_prompt("prompt")
         .meta_harness(state.clone())

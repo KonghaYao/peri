@@ -226,7 +226,7 @@ async fn four_close_sources_are_distinct() {
     .await;
     let pool = Arc::clone(&fixture.pool);
     let cron_task = fixture.register_cron_task("0 3 * * *", "mw-four-sources");
-    let policy_disabled = ["CronMiddleware"];
+    let policy_disabled = ["cron"];
     {
         // ② 投影归零，但 handler / pool / tick / readiness 全部保留。
         let projection = fixture.projections(&policy_disabled);

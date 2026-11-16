@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::LazyLock;
 
 /// 冻结期构建的 MetaHarness 状态，随冻结载体（`FrozenContext`）传播；
 /// 会话内不可变（ARC-FROZEN-001）。
@@ -88,24 +87,21 @@ pub const SECTION_IDS: &[&str] = &[
 /// `"HumanInTheLoopMiddleware": false` 语义随之从"关审批"漂移为"关提问"
 /// （纯破坏性改名，见 `spec/issues/2026-08-15-permission-hitl-split.md`）。
 ///
-/// **v4-part-2（A7）：本表只含链槽位名**。`WebMiddleware` /
-/// `ArtifactMiddleware` 已不是链槽位（Web / Artifact 迁移为 builtin MCP 实例，
-/// 链槽位与挂载点删除），它们的 MetaHarness 关闭键改由
-/// [`BUILTIN_INSTANCE_POLICY_KEYS`] 承载——两表并集才是「已知 MetaHarness 键
-/// 全集」（`assembly_test.rs` 与 `provider/config.rs` 都按该并集判定）。
+/// **v5：本表只含链槽位名**。builtin 能力不再有独立的 MetaHarness 旧键；
+/// 能力开关使用 v5 能力名（`"web": false`），由 builtin 关闭集直接消费。
+/// 旧 `*Middleware` key 在 M4 退役，解析期按未知键告警丢弃。
 ///
 /// **v4-part-4（W3-C1）：`FilesystemMiddleware` / `TerminalMiddleware` 摘除**。7 个
 /// 文件/终端工具（Read / Write / Edit / Glob / Grep / folder_operations / Bash）迁为
 /// builtin `workspace` 实例后，两者的链槽位（`ChainSlot::Filesystem` /
-/// `ChainSlot::Terminal`）与其 middleware 类型一并删除，关闭键改由
-/// `"WorkspaceMiddleware"`（落 [`BUILTIN_INSTANCE_POLICY_KEYS`]）承载——与
-/// Web / Artifact / cron 的既有形态一致。
+/// `ChainSlot::Terminal`）与其 middleware 类型一并删除，关闭键改用 v5 能力名
+/// `"workspace": false`——与 Web / Artifact / cron 一致。
 ///
 /// **v4 wave 4（Git Watch 下沉）：`GitWatchMiddleware` 摘除**。git ref 变化改由
 /// builtin `workspace` 实例的 `workspace://git/ref` 资源 + MCP 2026-07-28 订阅回传
 /// （宿主的提醒映射内置，无配置面）。本键因此成为**未知键**：解析期 warn + 忽略
 /// （既有判例，同 `FilesystemMiddleware` / `TerminalMiddleware`）；关闭该能力的办法是
-/// `"WorkspaceMiddleware": false`（关实例）或实例配置的 `subscriptions` 覆盖（关订阅）。
+/// `"workspace": false`（关能力）或实例配置的 `subscriptions` 覆盖（关订阅）。
 pub const MIDDLEWARE_NAMES: &[&str] = &[
     "DefaultSystemPromptMiddleware",
     "LangMiddleware",
@@ -125,19 +121,6 @@ pub const MIDDLEWARE_NAMES: &[&str] = &[
     "ToolSearch",
     "GoalMiddleware",
 ];
-
-/// 迁移期 builtin 旧 MetaHarness 关闭键（**兼容期专用**）。
-///
-/// 由 [`crate::builtin_mcp::v5::BUILTIN_V5_CAPABILITIES`] 的 `legacy_policy_key`
-/// 派生；不再手写字面量，也不承担 v5 能力开关语义。运行时经
-/// `builtin_mcp::capability_of_switch` 做确定性映射；M4 清理时删除。
-///
-/// - 解析期校验（`peri-config/src/app.rs::validate_meta_harness`）的「已知键」
-///   集合 = [`SECTION_IDS`] ∪ [`MIDDLEWARE_NAMES`] ∪ 本表 ∪
-///   [`BUILT_IN_SUBAGENTS_KEY`] ∪ v5 能力名；
-/// - 「全部 middleware 关闭」保险丝的判定面 = [`MIDDLEWARE_NAMES`] ∪ 本表。
-pub static BUILTIN_INSTANCE_POLICY_KEYS: LazyLock<Vec<&'static str>> =
-    LazyLock::new(|| crate::builtin_mcp::legacy_policy_keys().collect());
 
 /// 段落 → 持有 middleware 名映射表（设计 §3.1.1 拆分持有契约 3）。
 ///
@@ -187,8 +170,7 @@ pub const SECTION_HOLDER_MIDDLEWARE: &[(&str, &str)] = &[
 /// 清单内是正确状态。后果（必须显式记录，见 `build_session_tool_view` 文档）：
 /// 若非 middleware 路径（plugin / 外部注册）往共享表写入这三个裸名，本防御面
 /// **不再**剔除它们——这正是「剔除面只覆盖 middleware 静态工具」的应有语义。
-/// builtin 能力的关闭由 builtin 关闭集（`BUILTIN_INSTANCE_POLICY_KEYS`）在装配期
-/// 过滤，与本清单无关。
+/// builtin 能力的关闭由 builtin 关闭集（v5 能力名）在装配期过滤，与本清单无关。
 ///
 /// **v4-part-4（W3-C1）：已删除 7 个 workspace 裸名**（`Read` / `Write` / `Edit` /
 /// `Glob` / `Grep` / `folder_operations` / `Bash`）。7 个工具迁为 builtin `workspace`
@@ -197,8 +179,8 @@ pub const SECTION_HOLDER_MIDDLEWARE: &[(&str, &str)] = &[
 /// `chain.collect_tools()` 进入本地视图，**从不**进入共享 registry，因此不在本
 /// 清单内是正确状态（与上一段 Web / Artifact 三个裸名同构）。后果同样必须显式
 /// 记录：若**非 middleware 路径**（plugin / 外部注册）往共享表写入这 7 个裸名，
-/// 本防御面**不再**剔除它们；builtin 能力的关闭由 `BUILTIN_INSTANCE_POLICY_KEYS`
-/// 的 `"WorkspaceMiddleware"` 在装配期过滤，与本清单无关。
+/// 本防御面**不再**剔除它们；builtin 能力的关闭由 v5 能力名 `"workspace"` 在
+/// 装配期过滤，与本清单无关。
 pub const MIDDLEWARE_TOOL_NAMES: &[&str] = &[
     // SkillsMiddleware
     "SkillTool",
@@ -238,63 +220,6 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for name in MIDDLEWARE_NAMES {
             assert!(seen.insert(*name), "duplicate middleware name: {name}");
-        }
-    }
-
-    /// 旧关闭键必须由能力表派生（手写常量或声明表漂移即红）。
-    #[test]
-    fn builtin_policy_keys_are_derived_from_capabilities() {
-        let declared: std::collections::HashSet<&str> = crate::builtin_mcp::BUILTIN_V5_CAPABILITIES
-            .iter()
-            .map(|capability| capability.legacy_policy_key)
-            .collect();
-        let derived: std::collections::HashSet<&str> =
-            BUILTIN_INSTANCE_POLICY_KEYS.iter().copied().collect();
-        assert_eq!(
-            derived.len(),
-            BUILTIN_INSTANCE_POLICY_KEYS.len(),
-            "旧关闭键不得重复: {BUILTIN_INSTANCE_POLICY_KEYS:?}"
-        );
-        assert_eq!(
-            derived, declared,
-            "旧关闭键表必须由能力表 legacy_policy_key 派生"
-        );
-    }
-
-    /// A7 两表语义不重叠：槽位名表与 builtin 策略键表交集为空（并集即「已知键全集」）。
-    ///
-    /// 交集非空意味着同一个键有两条语义（既关槽位又关实例），关闭面无法判定。
-    /// workflow as MCP P5 原子切换后旧链槽位已删除，本断言恢复**严格零交集**
-    /// （不再有逐键豁免表）。
-    #[test]
-    fn middleware_names_and_builtin_policy_keys_are_disjoint() {
-        let overlap: std::collections::HashSet<&str> = MIDDLEWARE_NAMES
-            .iter()
-            .copied()
-            .filter(|key| BUILTIN_INSTANCE_POLICY_KEYS.contains(key))
-            .collect();
-        assert!(
-            overlap.is_empty(),
-            "两表交集必须为空（同一键不得既关槽位又关实例）：{overlap:?}"
-        );
-    }
-
-    /// A7 关闭语义不降级：两表并集必须覆盖 builtin 实例的关闭键，
-    /// 即 `"WebMiddleware": false` 之类的键仍是「已知键」（解析期不被当未知键丢弃）。
-    #[test]
-    fn known_key_union_covers_builtin_policy_keys() {
-        let union: std::collections::HashSet<&str> = MIDDLEWARE_NAMES
-            .iter()
-            .chain(BUILTIN_INSTANCE_POLICY_KEYS.iter())
-            .copied()
-            .collect();
-        for capability in crate::builtin_mcp::BUILTIN_V5_CAPABILITIES.iter() {
-            assert!(
-                union.contains(capability.legacy_policy_key),
-                "能力 {} 的旧关闭键 {} 必须落在「已知键全集」内",
-                capability.name,
-                capability.legacy_policy_key
-            );
         }
     }
 

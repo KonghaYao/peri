@@ -1,8 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use peri_acp_types::meta_harness::{
-    BUILTIN_INSTANCE_POLICY_KEYS, BUILT_IN_SUBAGENTS_KEY, MIDDLEWARE_NAMES, SECTION_IDS,
-};
+use peri_acp_types::meta_harness::{BUILT_IN_SUBAGENTS_KEY, MIDDLEWARE_NAMES, SECTION_IDS};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -427,10 +425,9 @@ impl AppConfig {
         let known: HashSet<&str> = SECTION_IDS
             .iter()
             .chain(MIDDLEWARE_NAMES.iter())
-            .chain(BUILTIN_INSTANCE_POLICY_KEYS.iter())
             .copied()
             .chain(std::iter::once(BUILT_IN_SUBAGENTS_KEY))
-            // v5 能力名与旧键等价：运行时关闭集统一经 `capability_of_switch` 映射。
+            // v5 能力名是 builtin 能力的唯一开关身份（旧 middleware 键已于 M4 退役）。
             .chain(
                 peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
                     .iter()
@@ -445,13 +442,17 @@ impl AppConfig {
                 false
             }
         });
+        let capability_names = peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
+            .iter()
+            .map(|capability| capability.name);
         let all_disabled = MIDDLEWARE_NAMES
             .iter()
-            .chain(BUILTIN_INSTANCE_POLICY_KEYS.iter())
-            .all(|name| map.get(*name).copied() == Some(false));
+            .copied()
+            .chain(capability_names.clone())
+            .all(|name| map.get(name).copied() == Some(false));
         if all_disabled {
             tracing::warn!(
-                middleware_count = MIDDLEWARE_NAMES.len() + BUILTIN_INSTANCE_POLICY_KEYS.len(),
+                middleware_count = MIDDLEWARE_NAMES.len() + capability_names.count(),
                 "meta_harness: ALL middleware disabled — every tool/hook/section holder \
                  will be unavailable; if this was not intentional, remove the meta_harness \
                  keys from settings.json"

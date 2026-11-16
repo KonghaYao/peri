@@ -29,8 +29,6 @@ pub struct BuiltinMcpInstance {
     pub name: &'static str,
     /// `TransportConfig::Builtin.instance` 身份（迁移期等于能力名）。
     pub instance: &'static str,
-    /// 旧 MetaHarness 关闭键；只做确定性映射，不再是能力开关事实源。
-    pub legacy_policy_key: &'static str,
     /// 是否按直接发起会话隔离后台任务与资源。
     pub task_owner_scoped: bool,
     /// 能力工具表（含 host-only 工具；v4 消费方按 `advertised` 过滤）。
@@ -47,7 +45,6 @@ pub static BUILTIN_MCP_INSTANCES: LazyLock<Vec<BuiltinMcpInstance>> = LazyLock::
         .map(|capability| BuiltinMcpInstance {
             name: capability.name,
             instance: capability.legacy_instance,
-            legacy_policy_key: capability.legacy_policy_key,
             task_owner_scoped: capability.host_injection.task_owner_scoped,
             tools: capability.tools,
         })
@@ -79,10 +76,9 @@ pub fn is_reserved_instance_name(name: &str) -> bool {
 }
 
 pub use v5::{
-    capability, capability_of_legacy_instance, capability_of_legacy_policy_key,
-    capability_of_original_tool, capability_of_resource_uri, capability_of_switch, capability_tool,
-    is_reserved_server_name, is_v5_server_name, legacy_policy_keys, BUILTIN_V5_CAPABILITIES,
-    BUILTIN_V5_CAPABILITIES_ENV, BUILTIN_V5_SERVER_NAME,
+    capability, capability_of_legacy_instance, capability_of_original_tool,
+    capability_of_resource_uri, capability_tool, is_reserved_server_name, is_v5_server_name,
+    BUILTIN_V5_CAPABILITIES, BUILTIN_V5_CAPABILITIES_ENV, BUILTIN_V5_SERVER_NAME,
 };
 
 /// 名字是否为 builtin server（迁移期六实例或 v5 单出口 `peri`）。

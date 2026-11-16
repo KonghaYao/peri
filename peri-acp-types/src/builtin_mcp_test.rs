@@ -158,11 +158,6 @@ fn names_and_identities_are_legal_components() {
             "非法实例身份: {}",
             instance.instance
         );
-        assert!(
-            is_legal_component(instance.legacy_policy_key),
-            "非法关闭键: {}",
-            instance.legacy_policy_key
-        );
         for tool in instance.tools {
             assert!(
                 is_legal_component(tool.original_name),
@@ -232,35 +227,6 @@ fn task_owner_scoping_is_a_registry_field() {
         scoped,
         HashSet::from(["monitor", "workspace"]),
         "只有 monitor 与 workspace 按发起会话隔离任务"
-    );
-}
-
-#[test]
-fn legacy_policy_keys_are_unique_and_frozen_for_migration() {
-    let keys: HashSet<&str> = BUILTIN_MCP_INSTANCES
-        .iter()
-        .map(|instance| instance.legacy_policy_key)
-        .collect();
-    assert_eq!(
-        keys.len(),
-        BUILTIN_MCP_INSTANCES.len(),
-        "旧关闭键必须逐能力唯一"
-    );
-    // 兼容期契约：旧键集合冻结，运行时经 `capability_of_switch` 映射到能力。
-    // `"WorkflowMiddleware"` 沿用旧链槽位名，旧链已删除，见 `docs/design/workflow-mcp.md`。
-    let expected: HashSet<&str> = [
-        "WebMiddleware",
-        "ArtifactMiddleware",
-        "CronMiddleware",
-        "MonitorMiddleware",
-        "WorkspaceMiddleware",
-        "WorkflowMiddleware",
-    ]
-    .into_iter()
-    .collect();
-    assert_eq!(
-        keys, expected,
-        "旧关闭键集合必须保持迁移期兼容；v5 权威是能力表"
     );
 }
 
