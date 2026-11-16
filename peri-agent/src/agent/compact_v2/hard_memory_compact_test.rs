@@ -166,6 +166,55 @@ async fn full_compact_appends_soft_then_hard_memory_with_runtime_ids() {
 }
 
 #[tokio::test]
+async fn second_compaction_keeps_prior_hard_memory_out_of_summary_request() {
+    let log = Arc::new(OrderLog::default());
+    let model = RecordingModel {
+        log,
+        requests: Mutex::new(Vec::new()),
+    };
+    let source = FixedSource {
+        log: Arc::new(OrderLog::default()),
+        snapshot: HardMemorySnapshot {
+            tasks: vec![shell_task()],
+            goal: None,
+        },
+    };
+    let (_session, mut transcript) = history().await;
+
+    for _ in 0..2 {
+        let _ = crate::agent::compact_v2::full::full_compact_inner_with_hard_memory(
+            &mut transcript,
+            Some(&model),
+            &CompactConfig::default(),
+            "/tmp",
+            &crate::session::async_result_mailbox::ProtectedResults::default(),
+            Some(&source),
+        )
+        .await
+        .expect("full compact must apply");
+    }
+
+    let requests = model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        !requests[1].contains(HARD_MEMORY_HEADER),
+        "第二次 Full 的摘要请求不得包含上一次的硬记忆"
+    );
+    assert!(
+        !requests[1].contains("shell-runtime-01"),
+        "旧运行时 id 不得进入摘要输入"
+    );
+
+    let visible = transcript.visible_messages();
+    assert_eq!(visible.len(), 2, "旧摘要与硬记忆被归档，新两段重新生成");
+    assert!(peri_acp_types::compact::is_continuation_hint(
+        &visible[0].content()
+    ));
+    assert!(visible[1].content().starts_with(HARD_MEMORY_HEADER));
+    assert!(visible[1].content().contains("shell-runtime-01"));
+}
+
+#[tokio::test]
 async fn empty_runtime_keeps_single_summary_message() {
     let log = Arc::new(OrderLog::default());
     let model = RecordingModel {

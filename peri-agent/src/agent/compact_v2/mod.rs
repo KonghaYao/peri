@@ -33,8 +33,8 @@ pub use config::{CompactConfig, CONTINUATION_HINT};
 pub use decision::min_micro_gain_tokens;
 pub use full::{extract_file_info, extract_skill_names};
 pub use hard_memory::{
-    from_parts, snapshot_from_runtime, HardMemoryGoal, HardMemorySnapshot, HardMemorySource,
-    HardMemoryTask, RuntimeHardMemory, HARD_MEMORY_HEADER,
+    from_parts, is_hard_memory_content, snapshot_from_runtime, HardMemoryGoal, HardMemorySnapshot,
+    HardMemorySource, HardMemoryTask, RuntimeHardMemory, HARD_MEMORY_HEADER,
 };
 pub use micro::micro_compact;
 pub use planner::{

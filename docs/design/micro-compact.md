@@ -175,7 +175,7 @@ SQLite 与远端 Turso adapter 使用同一有界读取规则。未实现这些�
 
 Full 从与 Reason 相同的已提交模型视图生成摘要；摘要生成与取消/失败预算遵守 [ARC-COMPACT-001](../standards/architecture-contracts.md)。未消费后台结果依旧受 [异步任务设计](session-async-tasks.md) 保护，摘要模型不承担消费确认。
 
-Full 提交两段 Human 消息。第一段是软记忆：LLM 按提取提示词生成、带 `CONTINUATION_HINT` 的摘要。第二段是硬记忆：摘要完成后由 Harness 从会话 `TaskManager` 与 `GoalController` 读取活跃 shell / background agent / workflow / MCP（含 monitor）任务和 Active goal，使用运行时真实 id，并为每类附查看、恢复或取消 helper。硬记忆不进入摘要请求，不消耗摘要模型输出；终态任务与终态 goal 不列入；快照为空时不追加第二段，保持旧单摘要输出。旧版本只识别第一段的续接标记，第二段按普通 Human 历史兼容；手动 `/compact` 与自动路径都读取会话任务注册表和 goal，来源缺失时降级为空快照。
+Full 提交两段 Human 消息。第一段是软记忆：LLM 按提取提示词生成、带 `CONTINUATION_HINT` 的摘要。第二段是硬记忆：摘要完成后由 Harness 从会话 `TaskManager` 与 `GoalController` 读取活跃 shell / background agent / workflow / MCP（含 monitor）任务和 Active goal，使用运行时真实 id，并为每类附查看、恢复或取消 helper。硬记忆不进入摘要请求，不消耗摘要模型输出；再次 Full 时旧硬记忆按普通历史归档，但会从新摘要请求中排除，由本次快照重新生成。终态任务与终态 goal 不列入；快照为空时不追加第二段，保持旧单摘要输出。旧版本只识别第一段的续接标记，第二段按普通 Human 历史兼容；手动 `/compact` 与自动路径都读取会话任务注册表和 goal，来源缺失时降级为空快照。
 
 Full 清除被取代的渲染动作，同时保留旧锚点的目录及组链接。原锚点即使变成 excluded，授权的点查仍可访问。目录根按来源合并范围，随新摘要与 excluded transitions 同事务提交，不复制所有旧成员 ID。renderer 从摘要元数据确定性渲染入口，摘要正文无需复述任何引用。
 
