@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use peri_acp_types::builtin_mcp::BUILTIN_RESERVED_INSTANCE_NAMES;
+use peri_middlewares::mcp::standalone::Target;
 
 use super::{Args, display_path, resolve_options, run};
 
@@ -101,7 +102,7 @@ fn allowed_host_requires_http() {
 
 #[test]
 fn every_reserved_instance_parses() {
-    for name in BUILTIN_RESERVED_INSTANCE_NAMES {
+    for name in BUILTIN_RESERVED_INSTANCE_NAMES.iter() {
         let args = parse(&[*name, "--stdio"]);
         assert_eq!(args.instance.as_deref(), Some(*name));
         assert!(args.stdio);
@@ -154,7 +155,7 @@ fn legacy_instance_does_not_read_mcp_file() {
         workspace_arg(dir.path()),
     ]))
     .unwrap();
-    assert_eq!(options.instance, "web");
+    assert_eq!(options.target, Target::Instance("web".to_owned()));
 }
 
 #[test]
@@ -170,7 +171,10 @@ fn capability_mode_reads_extension_from_mcp_file() {
         workspace_arg(dir.path()),
     ]))
     .unwrap();
-    assert_eq!(options.instance, "cron");
+    assert_eq!(
+        options.target,
+        Target::Capabilities(vec!["cron".to_owned()])
+    );
 }
 
 #[test]
@@ -188,7 +192,10 @@ fn cli_capability_overrides_mcp_file() {
         workspace_arg(dir.path()),
     ]))
     .unwrap();
-    assert_eq!(options.instance, "cron");
+    assert_eq!(
+        options.target,
+        Target::Capabilities(vec!["cron".to_owned()])
+    );
 }
 
 #[test]
@@ -211,23 +218,38 @@ fn legacy_six_entries_map_to_caps_in_mcp_file() {
         workspace_arg(dir.path()),
     ]))
     .unwrap();
-    assert_eq!(options.instance, "monitor");
+    assert_eq!(
+        options.target,
+        Target::Capabilities(vec!["monitor".to_owned()])
+    );
 }
 
 #[test]
-fn no_selection_defaults_to_all_and_fails_until_router_lands() {
+fn no_selection_defaults_to_all_capabilities() {
     let dir = tempfile::tempdir().unwrap();
-    let error = resolve_options(parse(&[
+    let options = resolve_options(parse(&[
         "--stdio",
         "--workspace",
         workspace_arg(dir.path()),
     ]))
-    .unwrap_err()
-    .to_string();
-    assert!(error.contains("router is not implemented"), "{error}");
-    for name in BUILTIN_RESERVED_INSTANCE_NAMES {
-        assert!(error.contains(name), "error should list {name}: {error}");
+    .unwrap();
+    let Target::Capabilities(capabilities) = options.target else {
+        panic!("default selection must use the router");
+    };
+    for name in [
+        "workspace",
+        "web",
+        "artifact",
+        "cron",
+        "monitor",
+        "workflow",
+    ] {
+        assert!(
+            capabilities.iter().any(|capability| capability == name),
+            "missing {name}: {capabilities:?}"
+        );
     }
+    assert_eq!(capabilities.len(), 6);
 }
 
 #[test]
@@ -258,15 +280,20 @@ fn duplicate_capability_is_a_load_error() {
 }
 
 #[test]
-fn all_is_parsed_but_rejected_until_router_lands() {
-    let error = run(&[
-        OsString::from("--capability"),
-        OsString::from("all"),
-        OsString::from("--stdio"),
-    ])
-    .unwrap_err()
-    .to_string();
-    assert!(error.contains("router is not implemented"), "{error}");
+fn all_is_parsed_as_every_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = resolve_options(parse(&[
+        "--capability",
+        "all",
+        "--stdio",
+        "--workspace",
+        workspace_arg(dir.path()),
+    ]))
+    .unwrap();
+    let Target::Capabilities(capabilities) = options.target else {
+        panic!("all must use the router");
+    };
+    assert_eq!(capabilities.len(), 6);
 }
 
 #[test]

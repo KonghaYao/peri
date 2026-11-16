@@ -2,12 +2,9 @@
 //!
 //! Legacy form (`peri mcp-start <instance>`) is kept for the v5 migration
 //! window. The v5 form selects capabilities with `--capability` or
-//! `mcpServers.peri.x-peri.capabilities` in `<workspace>/.mcp.json`; until the
-//! capability router lands, exactly one selected capability is served through
-//! the legacy instance path. Multi-capability selection fails with a typed
-//! explanation instead of silently serving one capability.
-//!
-//! Dispatched before Peri configuration or Agent startup, so the standalone
+//! `mcpServers.peri.x-peri.capabilities` in `<workspace>/.mcp.json` and serves
+//! them through the single `peri` capability router. Capability selection is
+//! resolved here, before Peri configuration or Agent startup, so the standalone
 //! service consumes no Peri settings and needs no sibling worker binary.
 
 use std::ffi::OsString;
@@ -21,7 +18,7 @@ use peri_config::mcp_capabilities::{
     CapabilitySource, McpCapabilityFile, parse_capability_tokens, parse_mcp_file_capabilities,
     resolve_capabilities,
 };
-use peri_middlewares::mcp::standalone::{self, Options, Transport};
+use peri_middlewares::mcp::standalone::{self, Options, Target, Transport};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -39,7 +36,7 @@ struct Args {
     /// Omit when selecting capabilities with --capability or .mcp.json.
     instance: Option<String>,
     /// Capability to serve; repeatable or comma-separated. Accepts all/none.
-    /// A single capability currently maps to its legacy instance until the router lands.
+    /// Selected capabilities are served by the single `peri` router.
     #[arg(long = "capability", value_name = "NAME")]
     capability: Vec<String>,
     /// Serve MCP over stdin/stdout.
@@ -106,7 +103,7 @@ fn resolve_options(args: Args) -> Result<Options> {
             allowed_hosts: args.allowed_host,
         }
     };
-    let instance = match args.instance {
+    let target = match args.instance {
         Some(instance) => {
             if !BUILTIN_RESERVED_INSTANCE_NAMES.contains(&instance.as_str()) {
                 bail!(
@@ -115,21 +112,23 @@ fn resolve_options(args: Args) -> Result<Options> {
                     BUILTIN_RESERVED_INSTANCE_NAMES.join(", ")
                 );
             }
-            instance
+            Target::Instance(instance)
         }
-        None => resolve_capability_instance(&args.capability, &workspace)?,
+        None => Target::Capabilities(resolve_capability_selection(&args.capability, &workspace)?),
     };
     Ok(Options {
-        instance,
+        target,
         transport,
         workspace,
     })
 }
 
-/// Resolve the v5 capability selection to the one legacy instance that this
-/// process can serve today. Returns a typed error for unknown, duplicate,
-/// empty or conflicting selections.
-fn resolve_capability_instance(capability_args: &[String], workspace: &Path) -> Result<String> {
+/// Resolve the v5 capability selection into the router's enabled set. Returns a
+/// typed error for unknown, duplicate, empty or conflicting selections.
+fn resolve_capability_selection(
+    capability_args: &[String],
+    workspace: &Path,
+) -> Result<Vec<String>> {
     let cli = if capability_args.is_empty() {
         None
     } else {
@@ -151,20 +150,13 @@ fn resolve_capability_instance(capability_args: &[String], workspace: &Path) -> 
         );
     }
     let enabled = resolved.enabled_names();
-    match enabled.as_slice() {
-        [instance] => Ok((*instance).to_string()),
-        [] => bail!(
+    if enabled.is_empty() {
+        bail!(
             "no builtin MCP capability is enabled; pass --capability or configure \
              mcpServers.peri.x-peri.capabilities"
-        ),
-        _ => bail!(
-            "v5 single-exit capability router is not implemented; exactly one capability can be \
-             served per process, but {} were selected: {}. Use `peri mcp-start <instance> \
-             --stdio|--http` or select one capability.",
-            enabled.len(),
-            enabled.join(", ")
-        ),
+        );
     }
+    Ok(enabled.into_iter().map(str::to_owned).collect())
 }
 
 fn read_mcp_capability_file(workspace: &Path) -> Result<Option<McpCapabilityFile>> {
