@@ -17,7 +17,7 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 1. workflow 以 **builtin MCP 实例**（`workflow`，per-session 池内、同进程 `rmcp::serve_server`）接入；工具、资源、订阅、关闭全部走标准 MCP 面。该形态是 v4 兼容期路径；v5 目标为单出口内的 `workflow` capability。
 2. agent 回调改为 **MCPP Channel 语义**：agent 任务作为 outbound 资源（event-log）发布，宿主消费者发现并执行，经 inbound 工具回填结果。不新增私有 JSON-RPC method 或 vendor capability。
 3. 删除 `ChainSlot::Workflow`、`WorkflowMiddlewarePort`、`WorkflowMiddlewareAdaptor`、`SessionState.workflow_middleware` 与 `peri-resources/src/workflow.rs` 门面。旧槽位、端口、旧 middleware 目录与 Resources 门面均已删除；workflow 接入归 builtin MCP 实例。
-4. 能力开关使用 v5 能力名 `"workflow": false`；旧 `"WorkflowMiddleware"` 键已于 M4 退役（加载期告警丢弃）。ACP 方法名（`workflow/*`）与 TUI 交互不变，能力开关以单出口配置为准。
+4. 能力开关使用 v5 能力名 `"workflow": false`；旧 `"WorkflowMiddleware"` 键保留为确定性映射 adapter（M4 删除）。ACP 方法名（`workflow/*`）与 TUI 交互不变，能力开关以单出口配置为准。
 
 ### 2.2 非目标
 
@@ -124,7 +124,7 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 
 ### 4.4 关闭
 
-- 关闭键为 v5 能力名 `"workflow"`；`closed_instances` 命中时实例不 spawn、桥接不建、宿主消费者不启动（与 workspace 同构）。工具、`workflow://` 资源与订阅、继承面、消费者与宿主任务必须同时消失；旧键已于 M4 退役。
+- 关闭键为 v5 能力名 `"workflow"`；`closed_instances` 命中时实例不 spawn、桥接不建、宿主消费者不启动（与 workspace 同构）。工具、`workflow://` 资源与订阅、继承面、消费者与宿主任务必须同时消失；旧键保留为确定性映射 adapter（M4 删除）。
 - `MIDDLEWARE_NAMES` 不含该键，`MIDDLEWARE_TOOL_NAMES` 不含 `"Workflow"`；两表零交集由装配测试断言。
 - 工具归一/过滤面（`tool_catalog`、`permission`）按实例身份自动生效（`mcp__workflow__*`）。
 - 子 Agent 按实例身份整体排除 `workflow`（`CHILD_ABSENT_BUILTIN_INSTANCES`），不另立逐工具名单。

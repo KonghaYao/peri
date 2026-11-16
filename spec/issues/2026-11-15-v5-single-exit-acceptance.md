@@ -1,6 +1,6 @@
 # v5 builtin 单出口：设计门槛与验收（#409）
 
-> 状态：v5 单出口已是宿主默认装配并有宿主级 in-process wire 回归（`mcp::builtin_runtime_tests::wave3::v5_*`）；旧 policy 键与 CLI 单实例 serving 路径已退役，`PERI_MCP_BUILTIN=legacy` 与旧 `.mcp.json` 条目映射作为回滚 adapter 保留到 M4 截止决定。Sandbox workspace 代理端到端、真实首个模型请求、E2E replay 与跨进程 owner 验收仍未执行。
+> 状态：v5 单出口已是宿主默认装配并有宿主级 in-process wire 回归（`mcp::builtin_runtime_tests::wave3::v5_*`）；CLI 单实例 serving 路径已收敛为能力映射 adapter，旧 policy 键保留为确定性映射 adapter（M4 删除），`PERI_MCP_BUILTIN=legacy` 与旧 `.mcp.json` 条目映射作为回滚 adapter 保留到 M4 截止决定。Sandbox workspace 代理端到端、真实首个模型请求、E2E replay 与跨进程 owner 验收仍未执行。
 >
 > 基线：`origin/main` `fa297dd7b`（#428 v5 async 默认已并入）之上的收尾分支；裁决 [#409](https://github.com/KonghaYao/peri/issues/409)；静态审计见 [2026-11-15-v5-builtin-single-exit-audit.md](2026-11-15-v5-builtin-single-exit-audit.md)。
 >
@@ -26,7 +26,7 @@
 1. v4 目标设计中「builtin 实例最小隔离单位」的长期目标已标记为被 v5 取代；v4 六实例保留为兼容期路径。
 2. `ARC-CAPABILITY-CLOSURE-001` 已增加 v5 目标段；现行六实例规则仍描述兼容期行为，不把目标写成现状。
 3. `ARC-TOOLS-001` 已增加 v5 命名与 `(capability, original_name)` 授权目标；外部 MCP 的 `mcp__<server>__<tool>` 规则不变。
-4. `configuration-authority.md` 已增加 v5 双入口、优先级、扩展键占位与旧键退役规则；术语使用 `McpConfigFile` / `ConfigurationSnapshot`。
+4. `configuration-authority.md` 已增加 v5 双入口、优先级、扩展键占位与旧键映射规则；术语使用 `McpConfigFile` / `ConfigurationSnapshot`。
 5. `acp-mcp-control.md`、`middleware-system.md`、`workflow-mcp.md` 已注明 v5 关系与不变边界。
 
 ## 3. 验收矩阵
@@ -35,12 +35,12 @@
 
 | ID | 维度 | 必须观察的行为 | 证据要求 | 状态 |
 | --- | --- | --- | --- | --- |
-| V5-C | 六种能力逐一开/关 | `workspace` / `web` / `artifact` / `cron` / `monitor` / `workflow` 分别在 enabled、disabled、degraded 三态下检查：`tools/list`、direct/deferred、资源/订阅、静态提示、ToolSearch、子 Agent/workflow 继承、宿主任务、runtime authorization 一致；disabled/degraded 时各面不可发现且无法绕过服务端授权调用。 | 逐能力 presence/absence 测试或真实 wire 记录；首个模型请求工具面；面板/诊断快照。 | 部分：`v5_closure_matrix_covers_every_capability` 覆盖六能力关闭后的 wire 工具、required 工具、typed bridge 与运行时拒绝；宿主任务面与真实首个模型请求未执行 |
-| V5-G | 配置组合 | CLI > `.mcp.json` > 默认；未知能力、冲突扩展、旧 middleware 键、旧逐实例配置、外部同名 server 的成功映射或 typed error 可解释来源；旧键不得 silent no-op。 | 配置解析单测 + 首请求能力面；错误包含来源与键名。 | 部分：`peri-config` 解析、六条目映射与旧 policy 键退役告警测试通过；真实首请求能力面未执行 |
+| V5-C | 六种能力逐一开/关 | `workspace` / `web` / `artifact` / `cron` / `monitor` / `workflow` 分别在 enabled、disabled、degraded 三态下检查：`tools/list`、direct/deferred、资源/订阅、静态提示、ToolSearch、子 Agent/workflow 继承、宿主任务、runtime authorization 一致；disabled/degraded 时各面不可发现且无法绕过服务端授权调用。 | 逐能力 presence/absence 测试或真实 wire 记录；首个模型请求工具面；面板/诊断快照。 | 部分：`v5_closure_matrix_covers_every_capability` 覆盖六能力关闭后的 wire 工具、required 工具、typed bridge 与运行时拒绝；`router_test` 覆盖资源拒绝；cron tick/monitor/workflow 的 v5 宿主任务面未单独执行；真实首个模型请求未执行 |
+| V5-G | 配置组合 | CLI > `.mcp.json` > 默认；未知能力、冲突扩展、旧 middleware 键、旧逐实例配置、外部同名 server 的成功映射或 typed error 可解释来源；旧键不得 silent no-op。 | 配置解析单测 + 首请求能力面；错误包含来源与键名。 | 部分：`peri-config`/`peri-tui` 覆盖优先级、六条目映射、旧 policy 键确定性映射与 typed error；真实首请求能力面未执行 |
 | V5-W | 代理 wire | 并发 request id 不串线；取消、进度 token、任务 id/owner、通知、资源订阅与读取、`skills/list`、`skills/get`、`image/read` 透传；上游断线不拖垮其他能力；重连不误接旧任务；资源 URI 保持原名。 | wire-level 测试，不得只用 `tools/list` 通过代替；覆盖并发、取消、断线、重连与三个 workspace 扩展方法。 | 部分：`UpstreamProxy` mock-peer wire 与 router 代理测试通过；Sandbox upstream 端到端与宿主代理接线未验证 |
 | V5-L | 降级与生命周期 | 单能力初始化失败仍保留其他能力；readiness、授权、目录与诊断使用同一运行时能力投影；warning 在会话诊断与 MCP 面板/快照可见；全部能力失败才 fail-closed；能力 panic 不终止 transport；关闭有界收敛且无遗留任务或订阅。 | 故障注入测试 + 诊断/面板投影断言 + 关闭后任务表/订阅表检查。 | 部分：router 降级/panic/全失败 fail-closed 与宿主关闭收敛有 crate 测试；面板/诊断投影与故障注入未全量执行 |
 | V5-N | 命名、审批与历史 | 新 deferred 名为 `mcp__peri__*`；direct 保持原名；旧 transcript 名只做非执行归一；审批按 `(capability, original_name)`；v5 路由不执行 builtin 的 `mcp__<capability>__*` 旧名，v4 路径（`PERI_MCP_BUILTIN=legacy`）继续执行其旧名直到 M4；外部 server 的同形名称不受影响；同出口原始名冲突/跨能力重名/`peri` 被用户抢占在加载期拒绝。 | 工具桥、ToolSearch、审批与历史加载测试；v5 路由负向调用 builtin 旧名必须失败，v4 路径旧名仍可执行，外部同形名称照常可调用。 | 部分：工具桥、ToolSearch、审批与加载期保留名单测通过；真实 transcript 与外部同形 server wire 未执行 |
-| V5-M | 迁移与回滚 | 六实例旧会话行为不变；新会话可在影子/默认路径间独立选择；外部 stdio/HTTP/ACP MCP 不受影响；切换前后首个模型请求、冻结配置能力集与运行时能力投影可对账；回滚只影响新会话，不热切换已冻结会话。 | 新旧会话对照记录；冻结配置能力集与运行时投影快照；回滚后旧会话 transcript 与工具面不变。 | 部分：默认切换与 `PERI_MCP_BUILTIN=legacy` 回滚路径有测试；新旧会话对照、观察窗口与外部路径全量回归未执行 |
+| V5-M | 迁移与回滚 | 六实例旧会话行为不变；新会话可在影子/默认路径间独立选择；外部 stdio/HTTP/ACP MCP 不受影响；切换前后首个模型请求、冻结配置能力集与运行时能力投影可对账；回滚只影响新会话，不热切换已冻结会话。 | 新旧会话对照记录；冻结配置能力集与运行时投影快照；回滚后旧会话 transcript 与工具面不变。 | 部分：默认切换与 `PERI_MCP_BUILTIN=legacy` 回滚路径有测试；未引入按会话选择的 beta flag（回滚是部署级），新旧会话对照、观察窗口与外部路径全量回归未执行 |
 
 ### 3.1 逐能力 presence/absence 明细
 
@@ -62,7 +62,7 @@
 1. **双入口**：`.mcp.json` 的 `mcpServers.peri` 与 `peri mcp-start` 参数都是一等入口；standalone 不读取完整 Peri settings 装配。
 2. **优先级**：命令行 > `.mcp.json` > 内置默认；冲突来源必须可解释。
 3. **扩展键**：只允许 server 条目的命名空间扩展；键名未裁决，本阶段不编码、不预占。顶层 `capabilities` 不得用作配置键。
-4. **旧键**：旧 middleware 能力键已退役；加载期告警丢弃，不得 silent no-op。旧逐实例 `.mcp.json` 条目仍确定性映射为能力开关。
+4. **旧键**：旧 middleware 能力键保留为确定性映射 adapter（`false` 关闭对应能力；M4 删除），不得 silent no-op；能力名是开关身份。旧逐实例 `.mcp.json` 条目同样确定性映射为能力开关。
 5. **保留名**：`peri` 是宿主 builtin 保留名；用户配置不得用 `command`/`url` 覆盖宿主 builtin 身份并继承其审批白名单。standalone 的 `.mcp.json` `mcpServers.peri` 是客户端启动条目，不是宿主覆盖。
 6. **路由**：执行与授权按 `(capability, original_name)`；模型面名字只用于入口解析；旧名不得作为执行别名。
 7. **观测身份**：事件、日志、工具回执与 Standard Observation 必须保留 capability 来源，不能只保留 `peri` server 名。
@@ -75,28 +75,28 @@
 | --- | --- | --- |
 | M1 设计门槛 | 取代关系、配置权威、关闭矩阵、命名/授权、故障域与验收矩阵落入设计/spec | 完成（仅文档） |
 | M2 代理与影子 | 先完成 workspace 代理 wire 测试与 capability router；v4 六实例保留，回滚开关只对新会话开启 v5 | 完成：router、能力开关/降级、task 归属、workspace 代理接缝与宿主 `build_host_router` 已接线 |
-| M3 切换 | 单出口成为新会话默认；v4 注入降级为兼容 adapter；旧 transcript 归一；旧键映射或报错 | 完成：默认注入 `peri`；`PERI_MCP_BUILTIN=legacy` 保留六实例回滚（M4 截止）；旧 `.mcp.json` 逐实例条目映射为能力开关；旧 policy 键退役 |
-| M4 清理 | 进入条件：观察窗口通过、回滚支持正式截止。内容：删除六实例注入、独立 runtime/client 条目与旧 policy 键；保留外部 MCP/ACP 路径。删除前须确认无仍需冷恢复的 v4 会话，否则保留只读 v4 adapter。M4 后不再承诺 v4 装配或旧名执行 | 部分完成：旧 policy 键删除、CLI 单实例 serving 路径删除；六实例注入与 `PERI_MCP_BUILTIN=legacy` 作为回滚 adapter 保留（截止点见 §5.1） |
+| M3 切换 | 单出口成为新会话默认；v4 注入降级为兼容 adapter；旧 transcript 归一；旧键映射或报错 | 完成：默认注入 `peri`；`PERI_MCP_BUILTIN=legacy` 保留六实例回滚（M4 截止）；旧 `.mcp.json` 逐实例条目与旧 policy 键均确定性映射为能力开关；`mcp-start <instance>` 只保留能力映射 adapter |
+| M4 清理 | 进入条件：观察窗口通过、回滚支持正式截止。内容：删除六实例注入、独立 runtime/client 条目与旧 policy 键；保留外部 MCP/ACP 路径。删除前须确认无仍需冷恢复的 v4 会话，否则保留只读 v4 adapter。M4 后不再承诺 v4 装配或旧名执行 | 未开始：六实例注入、`PERI_MCP_BUILTIN=legacy`、旧 policy 键映射与旧 transcript 归一均保留到 M4 截止决定 |
 
 M4 是回滚支持截止点：M4 开始前必须记录截止决定并确认旧会话处置；若仍有需要冷恢复的 v4 会话，保留只读 v4 adapter，不得删除。M4 后 flag-off 回滚路径与旧名执行为退役状态。
 
-### 5.1 已退役项与保留 adapter（2026-11-16）
+### 5.1 保留的兼容 adapter 与截止点（2026-11-16）
 
-已退役（本分支）：
+已收敛（本分支）：
 
-1. 旧 MetaHarness 能力键（`WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` / `MonitorMiddleware` / `WorkspaceMiddleware` / `WorkflowMiddleware`）：加载期按未知键告警丢弃，不再映射为能力开关；能力名是唯一开关身份。
-2. `peri mcp-start <instance>` 的独立单实例 serving 路径：只保留 CLI adapter，把实例名映射到同一单出口能力并告警；`mcp-start peri --capability ...` 是规范形式。
+1. `peri mcp-start <instance>` 的独立单实例 serving 路径：只保留 CLI adapter，把实例名映射到同一单出口能力并告警；`mcp-start peri --capability ...` 是规范形式。
 
 保留的兼容 adapter（截止点均为 M4 截止决定）：
 
 1. `PERI_MCP_BUILTIN=legacy` 六实例注入：回滚与旧会话观察窗口所需，默认路径不经过。
 2. 旧 `.mcp.json` 逐实例条目 → 能力开关映射：配置 adapter；新会话不写回六条目。
-3. 旧 transcript 工具名归一：只用于展示/匹配，不是执行别名。
-4. `mcp-start <instance>` 命令行映射：不启动独立 server，只解析为 capability 选择。
+3. 旧 policy 键（`WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` / `MonitorMiddleware` / `WorkspaceMiddleware` / `WorkflowMiddleware`）→ 能力开关映射：配置与 runtime 关闭集共用 `capability_of_switch`；加载期告警，M4 删除。
+4. 旧 transcript 工具名归一：只用于展示/匹配，不是执行别名。
+5. `mcp-start <instance>` 命令行映射：不启动独立 server，只解析为 capability 选择。
 
 迁移与回滚验收项：
 
-1. **beta flag**：v5 新装配只对新会话生效，flag 关闭时走 v4 六实例兼容路径（仅到 M4 前）；flag id 与注册表条目在实现期按 `beta-flags.md` 引入，本阶段不预占。
+1. **回滚开关（偏差记录）**：没有引入专用 beta flag；v5 已是默认，回滚由部署级 `PERI_MCP_BUILTIN=legacy` 选择，因此无法在同一个进程内按新会话逐个选择影子/默认路径。该偏差使 V5-M 的「新会话独立选择」与观察窗口不能宣称完成；M4 前需裁决是否补 beta flag 或接受部署级回滚。
 2. **能力集模型**：新会话冻结配置能力集并记录来源 revision 供诊断；运行时能力投影由该集合减去失败能力派生，用于目录、ToolSearch、资源/订阅、继承面、宿主任务、readiness、诊断与 runtime authorization；恢复只通过显式重连、新会话或冷恢复，冷恢复不持久化降级状态；子 Agent 复用；冷加载/恢复不重新解析、不隐式换身份。
 3. **旧配置 adapter**：v4 逐实例 `.mcp.json` 条目确定性映射为能力开关；映射失败为 typed error；新会话不写回六条目。
 4. **旧 transcript**：v5 路由只把旧名用于展示/匹配归一；`original_tool_name_of_effective` 不用于执行路由；归一失败报错。v4 路径继续执行其 `mcp__<instance>__<tool>` 名，直到 M4。
@@ -111,7 +111,7 @@ M4 是回滚支持截止点：M4 开始前必须记录截止决定并确认旧�
 
 1. 单出口 router、能力开关/降级、task 归属与 workspace 代理接缝已实现并有 crate 级测试；已接入宿主默认装配，宿主 in-process wire 覆盖六能力聚合与逐能力关闭；未验证真实 Sandbox 上游与首个模型请求。
 2. 代理的 mock-peer wire 测试已覆盖并发 request id、取消透传、progress token、task id 映射、资源读取/订阅与断线降级；未运行 Sandbox upstream 或 router + host 端到端 MCP wire 实验，断线清理与重连后的订阅恢复仍未验证。
-3. 未验证新旧会话隔离、观察窗口与回滚截止决定；`PERI_MCP_BUILTIN=legacy` 回滚路径有 crate 测试。
+3. 未验证新旧会话隔离与观察窗口；没有按会话选择的 beta flag，回滚只能由部署级 `PERI_MCP_BUILTIN=legacy` 完成，`legacy` 路径有 crate 测试。M4 截止决定未记录。
 4. 未验证跨进程 `taskOwner`、task id 归属或 workspace 上游重连。
 5. 未验证能力级降级在首个模型请求、面板、诊断三处的一致性。
 
@@ -124,16 +124,31 @@ M4 是回滚支持截止点：M4 开始前必须记录截止决定并确认旧�
 | 聚合 handler 的 crate 落点 | 已裁决（实现期） | `peri-middlewares::mcp::builtin::router`；复用现有 builtin dispatch 与 `UpstreamProxy` |
 | workspace upstream descriptor 来源、授权与生命周期 | 未裁决 | wire 门槛验证；Sandbox actor 拥有生命周期 |
 | task id 编码 | 未裁决 | 全局唯一或稳定能力前缀；出口内可唯一判定 |
-| beta flag id 与注册表条目 | 实现期裁决 | 按 `beta-flags.md` 引入并记录 |
+| beta flag id 与注册表条目 | 未实现（偏差） | 若仍需按会话选择影子/默认路径，按 `beta-flags.md` 引入；否则在 M4 前记录接受部署级回滚 |
 | 观察窗口参数 | 实现期裁决 | 切换默认前写入本 spec |
 | 代理重连/超时/重试策略 | 未裁决 | 首阶段不做自动热恢复；验证断线清理与旧任务隔离 |
 
 ## 7. 关闭条件
 
 本 spec 只有在以下条件全部满足后才能关闭或压缩为历史：
-
 1. §3 的 V5-C / V5-G / V5-W / V5-L / V5-N / V5-M 均有运行证据，且证据覆盖首个模型请求、ToolSearch、资源、订阅、继承面、宿主任务与授权面。
 2. 每个能力的 enabled / disabled / degraded 三态均有 presence/absence 记录；不存在「列表隐藏但可调用」的中间态。
 3. 旧名只能做非执行归一；旧配置与旧 middleware 键均确定性映射或 typed error。
 4. 迁移期新旧会话隔离、冻结配置能力集、运行时能力投影与回滚均有记录；外部 MCP/ACP 路径未受影响。
 5. 清理期完成后再按 `DOC-HISTORY-001` 更新稳定事实源并删除过程文档；未完成项不得提前删除本 spec。
+
+## 8. 本轮验收记录（2026-11-16）
+
+命令与结果（worktree `v5-single-exit-default`，head 以 PR #431 为准）：
+
+| 检查 | 命令 | 结果 |
+| --- | --- | --- |
+| 契约与配置解析 | `cargo test -p peri-acp-types --lib` | 783 passed；含旧键集合冻结、`capability_of_switch` 映射 |
+| 配置组合 | `cargo test -p peri-config --lib` | 218 passed / 1 ignored；含 `mcpServers` 六条目映射、旧 policy 键映射、未知键丢弃 |
+| 宿主/关闭矩阵 | `cargo test -p peri-middlewares --lib mcp::builtin` | 115 passed；含 `v5_default_injects_single_exit_and_aggregates_capabilities`、`v5_closure_matrix_covers_every_capability`、`v5_workspace_closure_drops_default_subscriptions`、router 资源/任务/降级用例 |
+| standalone CLI | `cargo test -p peri-tui --bin peri cli_mcp_start` | 25 passed；含 `peri mcp-start peri --capability`、六实例名映射、旧键映射、未知能力 typed error |
+| TUI print 后台任务 | `cargo test -p peri-tui --test print_background_exit` | 3 passed（bare / explicit / timeout promotion）；单出口 task owner 经 live `peri` client 与配置双路径解析 |
+| 编译与 lint | `bash scripts/verify-async.sh start` + `read` | check 通过、clippy 通过（0 warnings）；本轮修复了 `Target::Instance` 删除后测试中的不可达 `let-else` |
+| E2E / Sandbox | 未执行 | 真实 Sandbox upstream、首个模型请求、面板/诊断与 e2e replay 未在本轮运行；跨仓状态见 PR 说明 |
+
+逐能力 presence/absence 证据来自 `v5_closure_matrix_covers_every_capability`（六能力逐一关闭后的 wire 工具、required 工具、typed bridge、运行时拒绝）与 `router_test` 的 `disabled_capability_is_absent_and_unauthorized` / `disabled_capability_resources_are_not_readable`。未覆盖：cron tick / monitor 轮询 / workflow 消费者的 v5 宿主任务面、首个模型请求的工具面、诊断/面板投影快照。

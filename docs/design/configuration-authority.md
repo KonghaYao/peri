@@ -67,11 +67,11 @@ Middleware；它们把输入交给 core，不能复制 global/project/环境优�
 
 1. **双入口**：`.mcp.json` 顶层 `mcpServers.peri` 与 `peri mcp-start` 参数都是一等入口。`.mcp.json` 使用 MCP 标准字段（`command` / `args` / `env` / `url` / `headers`），既有 `disabled` 语义不变；`mcp-start` 只解析自己的参数与 `.mcp.json` 片段，不绑定整个 Peri settings 装配，也不控制整个 `peri` 进程。
 2. **优先级**：命令行 > `.mcp.json` > 内置默认；冲突必须能解释来源。能力选择优先放在 `mcp-start` 参数；若持久化到 `.mcp.json`，只能放在该 server 条目的命名空间扩展下，标准客户端忽略它不影响连接。扩展键名在实现前按 MCP 生态复核后裁决，本设计不预占；不得新造顶层 `capabilities` 配置对象。
-3. **旧键**：`WebMiddleware` 等 middleware 策略键已在 M4 退役，不再是能力开关，也不做隐式映射；加载期按未知 MetaHarness 键告警并丢弃（非 silent no-op）。v4 逐实例 `.mcp.json` 条目作为配置 adapter 继续确定性映射为能力开关；新会话不写回六条目。
+3. **旧键**：`WebMiddleware` 等 middleware 策略键不再是能力开关身份，但保留为兼容 adapter：出现时确定性映射到 capability 开关（`false` 关闭），M4 清理时删除；不得 silent no-op。v4 逐实例 `.mcp.json` 条目由迁移 adapter 确定性映射；新会话不写回六条目。
 4. **开关边界**：`PERI_MCP_BUILTIN` 缺省 / `on` / `v5` 走单出口，`legacy` / `v4` 走六实例回滚（M4 截止），`off` / `0` 是部署级 kill switch；它不承担逐能力配置。逐能力选择由 `.mcp.json` 旧条目映射或 `mcp-start --capability` 决定。未知能力、非法组合与能力子配置冲突是加载期 typed error。
 5. **宿主与 standalone**：宿主内 builtin 单出口条目由宿主注入，能力开关以 `mcp-start` 参数为准；standalone 与宿主共用能力注册表，但不重新引入完整配置装配。
 
-状态：`mcp-start` 已在配置加载前分派，`peri mcp-start peri --capability ...` 交给单出口 router；legacy 单 instance 形式作为 CLI adapter 映射到同一能力（M4 截止），不再启动独立实例。standalone 仍不读取 settings。宿主默认装配已注入单出口 `peri`，旧逐实例 `.mcp.json` 条目在加载期确定性映射为能力开关（`disabled: true` → 能力关闭），`PERI_MCP_BUILTIN=legacy` 保留六实例回滚（M4 截止）。旧 `*Middleware` 策略键已退役。目标契约与验收见 [MCP v5 单出口目标设计](mcp-v5-single-exit.md) 与 [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md)。
+状态：`mcp-start` 已在配置加载前分派，`peri mcp-start peri --capability ...` 交给单出口 router；legacy 单 instance 形式作为 CLI adapter 映射到同一能力（M4 截止），不再启动独立实例。standalone 仍不读取 settings。宿主默认装配已注入单出口 `peri`，旧逐实例 `.mcp.json` 条目在加载期确定性映射为能力开关（`disabled: true` → 能力关闭），`PERI_MCP_BUILTIN=legacy` 保留六实例回滚（M4 截止）。旧 `*Middleware` 策略键保留为能力映射 adapter，M4 删除。目标契约与验收见 [MCP v5 单出口目标设计](mcp-v5-single-exit.md) 与 [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md)。
 
 revision 由 scope 和输入内容确定，包含文件正文与具名环境；它是内容版本身份，
 不是时间戳、递增全局序号或访问令牌。`ConfigurationSystem` 按 scope 管理 current

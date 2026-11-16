@@ -14,7 +14,7 @@ MetaHarness 一个 kv 字段承载三项能力，key 类型决定动作：
 | key 类型 | value | 动作 |
 | --- | --- | --- |
 | 段落 ID | `true` | **覆盖系统提示词**（第一能力） |
-| middleware 名 / builtin 能力名 | `false` | **关闭能力**（第二能力）：链槽位名 ⇒ 该 middleware 不进链；builtin 能力名（`workspace` / `web` / `artifact` / `cron` / `monitor` / `workflow`）⇒ 该能力的工具面关闭。旧 `*Middleware` 键已于 M4 退役，加载期告警丢弃 |
+| middleware 名 / builtin 能力名 | `false` | **关闭能力**（第二能力）：链槽位名 ⇒ 该 middleware 不进链；builtin 能力名（`workspace` / `web` / `artifact` / `cron` / `monitor` / `workflow`）⇒ 该能力的工具面关闭。旧 `*Middleware` 键保留为确定性映射 adapter（M4 删除），加载期告警 |
 | `BuiltInSubagents` | `true` / `false` | 启用 / 屏蔽 compile-time built-in subagent definitions（默认启用） |
 
 `BuiltInSubagents` 只控制 built-in definition provider，不关闭 `SubAgentMiddleware`；

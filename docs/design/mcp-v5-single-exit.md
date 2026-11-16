@@ -1,8 +1,9 @@
 # MCP v5：builtin 单出口目标设计
 
 > 状态：已批准目标设计（2026-11-15，Issue #409）。v5 单出口 `peri` 已是宿主默认装配；
-> 旧 policy 键与 CLI 单实例 serving 路径已退役，六个独立 builtin server 仅在
-> `PERI_MCP_BUILTIN=legacy` 回滚路径保留到 M4 截止决定。
+> CLI 单实例 serving 路径已收敛为能力映射 adapter，六个独立 builtin server 仅在
+> `PERI_MCP_BUILTIN=legacy` 回滚路径保留到 M4 截止决定。旧 `*Middleware` 策略键
+> 仍确定性映射为能力开关（兼容 adapter，M4 删除），不能 silent no-op。
 > Sandbox workspace 的宿主内代理接线仍是兼容路径（见 active spec 未验证项）。
 > 运行时代码、协议测试与迁移状态以代码、契约测试和
 > [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md) 为准。
@@ -130,12 +131,12 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 2. 不新造顶层 `capabilities` 对象；MCP 的 `capabilities` 是 `initialize` 协议字段，复用会混淆配置与协议协商。
 3. 能力选择优先放在 `mcp-start` 参数。若必须持久化到 `.mcp.json`，只能放在该 server 条目的命名空间扩展下，且标准客户端忽略它不影响连接。扩展键名在实现前按 MCP 生态复核后裁决，本文不预占。
 4. 未知能力名、非法组合、能力子配置冲突是加载期 typed error，不 warning 后忽略。
-5. 旧 middleware 策略键（`WebMiddleware` 等）已在 M4 退役，不再作为能力开关；加载期按未知 MetaHarness 键告警并丢弃。v4 逐实例 `.mcp.json` 条目仍由配置 adapter 确定性映射为 capability 开关。
-6. `PERI_MCP_BUILTIN` 只保留为部署级 kill switch（全部 builtin 关闭），不承担逐能力配置。
+5. 旧 middleware 策略键（`WebMiddleware` 等）不再是能力开关身份，但保留为确定性映射 adapter：出现时映射到对应能力（`false` 关闭），M4 清理时删除；不得 silent no-op。v4 逐实例 `.mcp.json` 条目同样由配置 adapter 确定性映射为 capability 开关。
+6. `PERI_MCP_BUILTIN` 是部署级开关：缺省 / `on` / `v5` 走单出口，`legacy` / `v4` 走六实例回滚（M4 截止），`off` / `0` 零注入；不承担逐能力配置。
 7. v4 的逐实例 `.mcp.json` 条目在迁移期由 adapter 确定性映射为单出口能力开关；新会话不得写回六条目。
 8. 宿主内的 builtin 单出口条目由宿主注入，能力开关以 `mcp-start` 参数为准；standalone 与宿主共用能力注册表，但不重新绑定整个 settings 装配。
 
-状态说明：`mcp-start` 的 `--capability` 参数语法已实现；`.mcp.json` 扩展键名仍未裁决。宿主默认装配已切换为单出口 `peri`，`PERI_MCP_BUILTIN=legacy` 保留六实例回滚（M4 截止）；旧 `*Middleware` 策略键已退役。验收矩阵见 active spec 的配置组合维度。
+状态说明：`mcp-start` 的 `--capability` 参数语法已实现；`.mcp.json` 扩展键名仍未裁决。宿主默认装配已切换为单出口 `peri`，`PERI_MCP_BUILTIN=legacy` 保留六实例回滚（M4 截止）；旧 `*Middleware` 策略键保留为确定性映射 adapter。验收矩阵见 active spec 的配置组合维度。
 
 ## 4. 能力关闭矩阵
 
@@ -196,18 +197,18 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 
 迁移阶段、批次、观察窗口与验收勾选只写 [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md)，不回填设计。设计冻结以下语义：
 
-1. 迁移期 v4 六实例路径必须保留，可被新会话选择；它是兼容期与回滚路径，不是目标设计。
+1. 迁移期 v4 六实例路径必须保留，可由部署级 `PERI_MCP_BUILTIN=legacy` 为新会话选择；它是兼容期与回滚路径，不是目标设计。
 2. 默认装配已切换为 v5 单出口；v4 路径由 `PERI_MCP_BUILTIN=legacy` 显式选择（部署级回滚），M4 截止。
 3. 切换后旧配置必须可确定性映射或 typed error；旧 transcript 名只做非执行归一。
 4. 清理期（M4）只能在观察窗口与验收完成后开始；M4 启动即回滚支持结束，之后不得再承诺 v4 装配或旧名执行。清理前必须确认无仍需冷恢复的 v4 会话；否则保留只读 v4 adapter，不得删除。清理不得改变已冻结会话，也不得删除外部 MCP/ACP 路径。
 
 ### 7.2 回滚开关、冻结配置集与运行时投影
 
-1. 默认（`PERI_MCP_BUILTIN` 未设置 / `on` / `v5`）走单出口；`legacy` / `v4` 走 v4 六实例兼容路径；`off` / `0` 是零注入 kill switch。回滚开关只影响**新会话装配**，不做会话内热生效。
+1. 默认（`PERI_MCP_BUILTIN` 未设置 / `on` / `v5`）走单出口；`legacy` / `v4` 走 v4 六实例兼容路径；`off` / `0` 是零注入 kill switch。开关是进程级部署选择，只影响**新会话装配**，不做会话内热生效；同一进程内不能按会话逐个选择。
 2. v4 路径持续到回滚支持截止（M4 清理前），M4 后与旧名执行一并退役。
 3. 新会话冻结其**配置能力集**，并记录来源 revision 供诊断；同一会话及其子 Agent 复用冻结集合，不在 turn 中途重新解析。运行期失败由该集合派生运行时能力投影。
 4. 冷加载/恢复复用已冻结的配置能力集，并按启动结果重新建立运行时能力投影。冷恢复是允许的恢复事件：不持久化降级状态、不恢复旧执行状态、不改变会话身份或历史；不得因当前配置变化隐式换身份、重写历史或热替换 pool。
-5. 已存在的 v4 会话保持原装配与原模型名，不回写；回滚只改变新会话的选择，不改变已冻结会话。
+5. 已存在的 v4 会话保持原装配与原模型名，不回写；回滚只改变新会话的装配选择（进程级），不改变已冻结会话。
 
 ### 7.3 旧配置 adapter 与旧名称
 
