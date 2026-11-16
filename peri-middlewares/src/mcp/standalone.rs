@@ -22,6 +22,7 @@ use super::builtin::router::RouterTemplate;
 #[cfg(not(target_os = "emscripten"))]
 use super::builtin::standalone::StandaloneFactory;
 
+#[cfg(not(target_os = "emscripten"))]
 pub use super::builtin::router::{CapabilityReadiness, CapabilityStatus, RouterReadiness};
 
 /// What the standalone process serves.
