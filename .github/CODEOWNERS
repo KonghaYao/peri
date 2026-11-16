@@ -1,0 +1,6 @@
+# peri-e2e pin 与机器人工作流由维护者复核。
+# 强制生效需要在 main 的 ruleset 中启用 “Require review from Code Owners”。
+/.github/CODEOWNERS @KonghaYao
+/.github/peri-e2e.rev @KonghaYao
+/.github/workflows/e2e-pin-bump.yml @KonghaYao
+/scripts/e2e-pin-bump.sh @KonghaYao

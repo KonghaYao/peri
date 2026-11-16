@@ -1,0 +1,41 @@
+name: E2E pin bump
+
+on:
+    schedule:
+        # UTC；每 6 小时检查一次 e2e main，避开整点调度拥塞。
+        - cron: "17 */6 * * *"
+    workflow_dispatch:
+        inputs:
+            dry_run:
+                description: 只打印计划，不创建分支或 PR
+                type: boolean
+                default: false
+
+# 只写机器人分支，不直接 push main。创建 PR 还需要仓库启用
+# “Allow GitHub Actions to create and approve pull requests”。
+permissions:
+    contents: write
+    pull-requests: write
+
+concurrency:
+    group: e2e-pin-bump
+    cancel-in-progress: false
+
+jobs:
+    bump:
+        name: Bump peri-e2e pin
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+
+            - name: Bump pin
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  GITHUB_REPOSITORY: ${{ github.repository }}
+                  E2E_REPOSITORY: KonghaYao/peri-e2e
+                  DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+              run: bash scripts/e2e-pin-bump.sh

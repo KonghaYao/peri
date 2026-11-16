@@ -250,7 +250,7 @@ jobs:
     # 离线录放业务回归：真实 Peri/ACP/工具/TUI，模型上游由持久 cassette 回放，
     # 不访问线上模型。仅在 Linux 跑（PTY 与 @xterm/headless 的验收环境）。
     # 套件本体在公开仓 KonghaYao/peri-e2e，由 .github/peri-e2e.rev 固定到 40 位 commit；
-    # 升级套件 = 更新 pin，本 job 不跟随该仓分支漂移。
+    # 升级套件 = 更新 pin（由 e2e-pin-bump.yml 机器人创建单行 PR），本 job 不跟随该仓分支漂移。
     # 固定 24.04：fixture 录制基线为 Ubuntu 24.04；系统提示只绑定 OS 版本行，不随镜像迁移漂移。
     e2e-replay:
         name: E2E replay (Linux)

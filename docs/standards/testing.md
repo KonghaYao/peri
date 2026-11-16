@@ -365,9 +365,24 @@ npm --prefix ../peri-e2e run e2e:replay:record     # 显式重录，仅本地；
 `results/replay-v2/`。
 
 升级契约：改 world 映射 leaf（skills、Agent description/schema、compact summary）时，在
-`peri-e2e` 运行 `e2e:replay:world-sync` 并提交，再 bump `.github/peri-e2e.rev`；改未映射 leaf
-（如 `block1.prefix`、单条消息）须重录受影响场景或受控 re-anchor，`verify` 归零后再 bump pin。
-不得为过门禁修改 fixture 而不更新 pin。
+`peri-e2e` 运行 `e2e:replay:world-sync` 并提交；改未映射 leaf（如 `block1.prefix`、
+单条消息）须重录受影响场景或受控 re-anchor，`verify` 归零后再合并。不得为过门禁修改
+fixture 而不更新 pin。
+
+`.github/peri-e2e.rev` 由 `.github/workflows/e2e-pin-bump.yml` 机器人维护：每 6 小时及手动
+dispatch 解析 `KonghaYao/peri-e2e` 的 main SHA，与 pin 不同时更新固定分支
+`chore/e2e-pin-bump` 并创建/更新单行 PR（base `main`），不直接 push main。特性 PR 不手改
+pin；e2e 先合并，等 pin bump PR 合并后再把特性 PR rebase 到含新 pin 的 main。手动触发：
+
+```bash
+gh workflow run e2e-pin-bump.yml -f dry_run=true   # 只打印计划
+gh workflow run e2e-pin-bump.yml                   # 创建/更新 PR
+```
+
+机器人只使用 `GITHUB_TOKEN` 的 `contents:write` 与 `pull-requests:write`，不新增 secret。
+仓库需启用 “Allow GitHub Actions to create and approve pull requests”；`GITHUB_TOKEN` 创建的
+PR 不会触发 `pull_request` workflows，合并前由维护者 close/reopen 该 PR 触发 CI，或本地验证。
+`.github/CODEOWNERS` 的约束需要 main 的 ruleset 启用 “Require review from Code Owners” 才强制。
 
 自主委派评测需要真实模型，默认跳过：
 `PERI_E2E_AUTONOMY=1 npm --prefix ../peri-e2e run e2e -- --file tests/subagent/autonomous-delegation.test.ts --serial --retry 0`。
