@@ -4,6 +4,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+/// 快照往返测试用的合成 flag id（与注册表解耦）。
+const SNAPSHOT_FLAG: &str = "snapshot-flag";
+
 fn make_frozen() -> FrozenSessionData {
     let mut section_overrides = HashMap::new();
     section_overrides.insert("persona".to_string(), Arc::<str>::from("custom persona"));
@@ -24,9 +27,9 @@ fn make_frozen() -> FrozenSessionData {
             disabled_middlewares,
             built_in_subagents_enabled: false,
         },
-        // beta flag 冻结值（设计 §消费契约）：随快照持久化，恢复后不重读配置。
+        // beta flag 冻结值：随快照持久化，恢复后不重读配置（用合成 id 锁往返语义）。
         beta_flags: peri_acp_types::beta_flags::BetaFlags::from_values([(
-            peri_acp_types::beta_flags::FULL_ASYNC_TOOLS.to_string(),
+            SNAPSHOT_FLAG.to_string(),
             peri_acp_types::beta_flags::BetaFlagValue {
                 enabled: true,
                 origin: peri_acp_types::beta_flags::BetaFlagOrigin::Workspace,
@@ -71,10 +74,7 @@ fn test_frozen_snapshot_roundtrip_preserves_all_fields() {
         restored.v2_frozen().beta_flags,
         original.v2_frozen().beta_flags
     );
-    assert!(restored
-        .v2_frozen()
-        .beta_flags
-        .is_enabled(peri_acp_types::beta_flags::FULL_ASYNC_TOOLS));
+    assert!(restored.v2_frozen().beta_flags.is_enabled(SNAPSHOT_FLAG));
     // H3：运行环境快照逐字段往返（platform / os_version / is_git_repo）。
     assert_eq!(restored.runtime_env(), original.runtime_env());
     assert_eq!(
@@ -165,10 +165,7 @@ fn test_frozen_snapshot_v1_without_runtime_env_decodes_as_unavailable() {
     assert_eq!(restored.system_prompt(), "system-v1");
     // V1 旧 blob 缺 beta_flags 键 → 空投影（一切按 false），不按当前配置重建。
     assert!(restored.v2_frozen().beta_flags.is_empty());
-    assert!(!restored
-        .v2_frozen()
-        .beta_flags
-        .is_enabled(peri_acp_types::beta_flags::FULL_ASYNC_TOOLS));
+    assert!(!restored.v2_frozen().beta_flags.is_enabled(SNAPSHOT_FLAG));
 }
 
 #[test]

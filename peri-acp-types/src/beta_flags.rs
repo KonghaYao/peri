@@ -2,8 +2,8 @@
 //!
 //! 设计单一事实源：`docs/design/beta-flags.md`。flag **存在性**的唯一权威是本模块
 //! 的 [`BETA_FLAGS`]（与 MetaHarness 常量表同址，集中声明）：settings 校验、装配方
-//! （`peri-middlewares` / `peri-mcp-workspace`）与 TUI 都从本表取值，消费方**不写
-//! 字符串字面量**。
+//! 与 TUI 都从本表取值，消费方**不写字符串字面量**。当前注册表为空：首个 flag
+//! `full-async-tools` 已转正为 Agent 常态语义并删除条目；新增 flag 仍按本契约接入。
 //!
 //! 边界（设计 §定位）：
 //! - flag 不是通用配置：常态能力参数用各自领域的 typed 字段表达；
@@ -30,19 +30,11 @@ pub struct BetaFlag {
     pub description: &'static str,
 }
 
-/// `full-async-tools`：`Bash` 在调用未显式给出 `run_in_background` 时缺省走后台
-/// （显式 `false` 仍前台）；`Agent` 则强制后台——省略与显式 `false` 都后台，
-/// MCP Agent 仍只支持同步激活。
-///
-/// 消费方引用本常量，不写 `"full-async-tools"` 字面量。
-pub const FULL_ASYNC_TOOLS: &str = "full-async-tools";
-
 /// Beta flag 清单（顺序即 TUI 面板区块顺序，发布后保持稳定）。
-pub const BETA_FLAGS: &[BetaFlag] = &[BetaFlag {
-    id: FULL_ASYNC_TOOLS,
-    description:
-        "Bash defaults to background execution when the call omits run_in_background; Agent always runs in the background (explicit false is ignored; MCP Agents stay synchronous)",
-}];
+///
+/// 当前没有 ACP beta flag：`full-async-tools` 已转正为 Agent 的常态语义并删除条目。
+/// 注册表保留为空清单，TUI 不渲染空区块；新增 flag 时在此按发布顺序追加。
+pub const BETA_FLAGS: &[BetaFlag] = &[];
 
 /// 按 id 查注册表条目；未命中返回 `None`（未知 id 不是错误，按未覆盖处理）。
 pub fn find(id: &str) -> Option<&'static BetaFlag> {

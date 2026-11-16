@@ -3,7 +3,6 @@
 use super::BetaFlagOrigin;
 use super::HISTORY_WINDOW_V1;
 use crate::app::PeriConfig;
-use peri_acp_types::beta_flags::FULL_ASYNC_TOOLS;
 
 fn config_with(betas: &[(&str, bool)]) -> PeriConfig {
     let mut config = PeriConfig::default();
@@ -16,11 +15,11 @@ fn config_with(betas: &[(&str, bool)]) -> PeriConfig {
 /// global 独有键（或与 global 同值）标注 Global。
 #[test]
 fn test_resolve_marks_global_origin() {
-    let global = config_with(&[(FULL_ASYNC_TOOLS, true)]);
+    let global = config_with(&[(HISTORY_WINDOW_V1, true)]);
     let flags = super::resolve(&global, &global.clone());
-    assert!(flags.is_enabled(FULL_ASYNC_TOOLS));
+    assert!(flags.is_enabled(HISTORY_WINDOW_V1));
     assert_eq!(
-        flags.value(FULL_ASYNC_TOOLS).map(|value| value.origin),
+        flags.value(HISTORY_WINDOW_V1).map(|value| value.origin),
         Some(BetaFlagOrigin::Global)
     );
 }
@@ -28,16 +27,16 @@ fn test_resolve_marks_global_origin() {
 /// workspace 覆盖（含显式 false 关闭 global true）标注 Workspace。
 #[test]
 fn test_resolve_marks_workspace_origin_and_false_override() {
-    let global = config_with(&[(FULL_ASYNC_TOOLS, true)]);
+    let global = config_with(&[(HISTORY_WINDOW_V1, true)]);
     let mut merged = global.clone();
-    merged.config.betas.set(FULL_ASYNC_TOOLS, false);
+    merged.config.betas.set(HISTORY_WINDOW_V1, false);
     let flags = super::resolve(&global, &merged);
     assert!(
-        !flags.is_enabled(FULL_ASYNC_TOOLS),
+        !flags.is_enabled(HISTORY_WINDOW_V1),
         "workspace 显式 false 关闭 global true"
     );
     assert_eq!(
-        flags.value(FULL_ASYNC_TOOLS).map(|value| value.origin),
+        flags.value(HISTORY_WINDOW_V1).map(|value| value.origin),
         Some(BetaFlagOrigin::Workspace)
     );
 }
@@ -48,8 +47,8 @@ fn test_resolve_without_overrides_is_all_false() {
     let global = PeriConfig::default();
     let flags = super::resolve(&global, &global.clone());
     assert!(flags.is_empty());
-    assert!(!flags.is_enabled(FULL_ASYNC_TOOLS));
-    assert!(flags.value(FULL_ASYNC_TOOLS).is_none());
+    assert!(!flags.is_enabled(HISTORY_WINDOW_V1));
+    assert!(flags.value(HISTORY_WINDOW_V1).is_none());
 }
 
 /// TUI 本地 beta：默认 false；显式 true 进入投影，且键被 validate 接受。

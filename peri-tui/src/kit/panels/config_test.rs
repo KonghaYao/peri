@@ -53,12 +53,6 @@ const SHORT_AREA: Rect = Rect {
     height: 10,
 };
 
-/// beta 区块标题行在行模型中的下标：不可激活（点击只改选中项，不写配置）。
-#[must_use]
-fn beta_section_row() -> usize {
-    super::CONFIG_ROWS.len()
-}
-
 /// 行模型末行（beta flag 行）。
 fn last_row() -> usize {
     super::config_rows().len() - 1
@@ -243,8 +237,8 @@ fn rendered_rows_follow_panel_height() {
 
     let tall = buffer_text(&mount_panel_frames(TEST_AREA, 2, |_, _| {}));
     assert!(
-        tall.contains(&i18n::tr("config-beta-section")),
-        "面板变高后必须渲染 beta 区块，而不是停在矮面板的 4 行：{tall}"
+        tall.contains(&i18n::tr("config-field-scroll-fps")),
+        "面板变高后必须渲染更多基础行，而不是停在矮面板的 4 行：{tall}"
     );
 }
 
@@ -255,7 +249,7 @@ fn rendered_rows_follow_panel_height() {
 #[serial]
 fn click_on_rendered_row_highlights_that_row() {
     let _atoms = PanelAtomsGuard::install();
-    let section = i18n::tr("config-beta-section");
+    let section = i18n::tr("config-field-scroll-fps");
 
     let buf = mount_panel_frames(TEST_AREA, 2, |_, _| {});
     let row = rendered_row_of(&buf, &section);
@@ -266,7 +260,7 @@ fn click_on_rendered_row_highlights_that_row() {
             assert_eq!(result, EventResult::Consumed);
             assert_eq!(
                 *panel.cursor.read(),
-                beta_section_row(),
+                super::ROW_SCROLL_FPS,
                 "点击必须选中被点的那一行"
             );
         }
@@ -284,7 +278,11 @@ fn click_on_rendered_row_highlights_that_row() {
 #[serial]
 fn short_panel_hit_matches_scrolled_window() {
     let _atoms = PanelAtomsGuard::install();
-    let section = i18n::tr("config-beta-section");
+    let (section, expected_row) = if peri_acp_types::beta_flags::BETA_FLAGS.is_empty() {
+        (i18n::tr("config-field-scroll-fps"), super::ROW_SCROLL_FPS)
+    } else {
+        (i18n::tr("config-beta-section"), super::CONFIG_ROWS.len())
+    };
     let last = last_row();
 
     let buf = mount_panel_frames(SHORT_AREA, 2, move |_, panel| {
@@ -292,7 +290,7 @@ fn short_panel_hit_matches_scrolled_window() {
     });
     assert!(
         buffer_text(&buf).contains(&section),
-        "选中末行时窗口必须滚到末尾 4 行（含 beta 区块）：\n{}",
+        "选中末行时窗口必须滚到末尾 4 行（含末行内容）：\n{}",
         buffer_text(&buf)
     );
     let row = rendered_row_of(&buf, &section);
@@ -308,7 +306,7 @@ fn short_panel_hit_matches_scrolled_window() {
             assert_eq!(result, EventResult::Consumed);
             assert_eq!(
                 *panel.cursor.read(),
-                beta_section_row(),
+                expected_row,
                 "点击窗口内的行必须选中同一行"
             );
         }
@@ -509,9 +507,7 @@ fn beta_flag_without_handle_reports_failure() {
     let handle = super::beta_tests::ensure_config_handle();
     let before = handle.read().clone();
 
-    super::toggle_beta_flag_with(None, peri_acp_types::beta_flags::FULL_ASYNC_TOOLS, |_| {
-        Ok(())
-    });
+    super::toggle_beta_flag_with(None, peri_config::betas::HISTORY_WINDOW_V1, |_| Ok(()));
 
     assert_eq!(*handle.read(), before, "句柄缺失不得改动 beta 覆盖");
     assert!(
