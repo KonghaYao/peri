@@ -74,7 +74,10 @@ impl McpClientPool {
     /// 未知实例 / 未连接 / 无 peer 都是调用方按错误处理的明确事实：不返回空结果、
     /// 不回落其它实例。句柄保持 `Arc`（连接换代时旧句柄的 peer 由关闭路径收口）。
     fn instance_handle(&self, instance: &str) -> Result<Arc<McpClientHandle>, String> {
-        let handle = self.client(instance).ok_or_else(|| {
+        let server = self
+            .capability_server_name(instance)
+            .unwrap_or_else(|| instance.to_string());
+        let handle = self.client(&server).ok_or_else(|| {
             ResourceError::ServerNotFound {
                 server: instance.to_string(),
             }
@@ -93,6 +96,32 @@ impl McpClientPool {
             .to_string());
         }
         Ok(handle)
+    }
+
+    /// 能力是否可用：连接存在、已连接，且（v5）能力未关闭并至少发布一个工具。
+    ///
+    /// 迁移期六实例保持「连接存在」的既有判定；外部 server 名同样退化为该判定。
+    pub(crate) fn capability_available(&self, capability: &str) -> bool {
+        let Some(handle) = self.capability_client(capability) else {
+            return false;
+        };
+        if !matches!(handle.status, ClientStatus::Connected) {
+            return false;
+        }
+        if !peri_acp_types::builtin_mcp::is_v5_server_name(&handle.name) {
+            return true;
+        }
+        let closed = self
+            .builtin_instance_context()
+            .map(|context| context.closed.clone())
+            .unwrap_or_default();
+        if super::super::builtin::capability_closed(capability, &closed) {
+            return false;
+        }
+        handle.tools.iter().any(|tool| {
+            peri_acp_types::builtin_mcp::capability_of_original_tool(&tool.name)
+                .is_some_and(|(declared, _)| declared.name == capability)
+        })
     }
 
     /// 对池内某实例执行 `tools/call`（含 request `_meta`）。
@@ -121,7 +150,16 @@ impl McpClientPool {
                 .to_string());
             }
         };
-        let mut request = CallToolRequestParams::new(tool.to_string()).with_arguments(arguments);
+        // v5 单出口按模型面名字路由；宿主按 `(capability, original_name)` 消费，
+        // 因此在这里做一次声明表翻译（未知名字原样发送，由服务端确定性拒绝）。
+        let wire_tool = if peri_acp_types::builtin_mcp::is_v5_server_name(&handle.name) {
+            peri_acp_types::builtin_mcp::capability_tool(instance, tool)
+                .map(|declared| declared.model_name.to_string())
+                .unwrap_or_else(|_| tool.to_string())
+        } else {
+            tool.to_string()
+        };
+        let mut request = CallToolRequestParams::new(wire_tool).with_arguments(arguments);
         if let Some(meta) = request_meta {
             let map = meta.as_object().ok_or_else(|| {
                 ToolCallError::CallFailed {
@@ -293,7 +331,7 @@ impl McpClientPool {
         let _permit = handle.call_gate.try_acquire().map_err(str::to_owned)?;
         // A24 关闭语义覆盖订阅面（订阅是能力的外部副作用；与 initialize /
         // reconnect 的配置订阅同门）：命中关闭集的 builtin 实例不建立长流。
-        if !self.subscription_allowed(instance) {
+        if !self.subscription_allowed_for_uri(&handle.name, uri) {
             return Err(ResourceError::ReadFailed {
                 server: instance.to_string(),
                 reason: "instance is closed by session policy; no subscription is established"

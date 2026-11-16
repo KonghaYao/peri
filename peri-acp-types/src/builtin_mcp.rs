@@ -33,7 +33,7 @@ pub struct BuiltinMcpInstance {
     pub legacy_policy_key: &'static str,
     /// 是否按直接发起会话隔离后台任务与资源。
     pub task_owner_scoped: bool,
-    /// 能力工具表。
+    /// 能力工具表（含 host-only 工具；v4 消费方按 `advertised` 过滤）。
     pub tools: &'static [BuiltinMcpTool],
 }
 
@@ -80,9 +80,15 @@ pub fn is_reserved_instance_name(name: &str) -> bool {
 
 pub use v5::{
     capability, capability_of_legacy_instance, capability_of_legacy_policy_key,
-    capability_of_resource_uri, capability_of_switch, is_reserved_server_name, legacy_policy_keys,
-    BUILTIN_V5_CAPABILITIES,
+    capability_of_original_tool, capability_of_resource_uri, capability_of_switch, capability_tool,
+    is_reserved_server_name, is_v5_server_name, legacy_policy_keys, BUILTIN_V5_CAPABILITIES,
+    BUILTIN_V5_CAPABILITIES_ENV, BUILTIN_V5_SERVER_NAME,
 };
+
+/// 名字是否为 builtin server（迁移期六实例或 v5 单出口 `peri`）。
+pub fn is_builtin_server_name(name: &str) -> bool {
+    is_v5_server_name(name) || find(name).is_some()
+}
 
 /// 旧模型面名字 → 原始工具名（纯查表）：**只用于展示 / 过滤匹配，不是执行别名**。
 ///

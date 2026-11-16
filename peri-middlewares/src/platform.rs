@@ -18,7 +18,7 @@ pub(crate) const STDIO_UNAVAILABLE: &str = "stdio subprocesses are unavailable i
 
 /// 该 builtin 实例在本部署能否装配（注册表内 + 平台支持）。
 pub(crate) fn builtin_instance_supported(instance: &str) -> bool {
-    IN_PROCESS_BUILTINS && peri_acp_types::builtin_mcp::find(instance).is_some()
+    IN_PROCESS_BUILTINS && peri_acp_types::builtin_mcp::is_builtin_server_name(instance)
 }
 
 /// 从配置启用位派生默认层注入策略：部署不支持托管时恒为 `none`。
@@ -27,6 +27,17 @@ pub(crate) fn builtin_policy(
 ) -> crate::mcp::builtin::BuiltinInjectionPolicy {
     if IN_PROCESS_BUILTINS && configured_enabled {
         crate::mcp::builtin::BuiltinInjectionPolicy::all()
+    } else {
+        crate::mcp::builtin::BuiltinInjectionPolicy::none()
+    }
+}
+
+/// bare 配置的 builtin 策略：v5 单出口只保留 `workspace` 能力。
+pub(crate) fn builtin_workspace_policy(
+    configured_enabled: bool,
+) -> crate::mcp::builtin::BuiltinInjectionPolicy {
+    if IN_PROCESS_BUILTINS && configured_enabled {
+        crate::mcp::builtin::BuiltinInjectionPolicy::capabilities(&["workspace"])
     } else {
         crate::mcp::builtin::BuiltinInjectionPolicy::none()
     }

@@ -46,6 +46,13 @@ pub const THREAD_OWNER_META_KEY: &str = "peri/threadOwner";
 /// 宿主消费者令牌键；仅 workflow 回填通道接收。
 pub const WORKFLOW_CONSUMER_META_KEY: &str = "peri/workflowConsumer";
 
+/// 宿主注入的**运行时**能力选择标记（`peri` 条目 env，不来自用户配置）。
+///
+/// 值是以逗号分隔的能力名，按 [`BUILTIN_V5_CAPABILITIES`] 声明顺序写出。
+/// 它是配置加载期把 `.mcp.json` 旧逐实例条目确定性映射到能力开关的唯一载体；
+/// overlay 每次注入都覆盖该键，用户配置不能扩大能力集。
+pub const BUILTIN_V5_CAPABILITIES_ENV: &str = "PERI_MCP_V5_CAPABILITIES";
+
 /// 能力执行绑定（v5 §4.3.5）：绑定是实现字段，不改变能力身份。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityExecutionBinding {
@@ -135,6 +142,11 @@ pub struct CapabilityTool {
     pub direct: bool,
     /// 模型可见性：`false` 表示 host-only（不进桥接、ToolSearch 与 LLM tools）。
     pub model_visible: bool,
+    /// 是否进入 wire `tools/list`。
+    ///
+    /// v4 兼容视图只投影 advertised 工具；`false` 表示仅由 handler 的
+    /// `tools/call` 直接应答（如 workspace `shell_task_list`）。
+    pub advertised: bool,
     /// 提示词层声明模板；`{{name}}` / `{{title}}` 的渲染仍归消费方。
     pub prompt_declaration: Option<&'static str>,
     /// 上下文保留策略。
@@ -504,6 +516,27 @@ pub fn capability_tool(
             capability: capability_name.to_owned(),
             original_name: original_name.to_owned(),
         })
+}
+
+/// 原始工具名 → 唯一能力与工具声明。
+///
+/// 单出口内原始名全局唯一（`validate_registry` 冻结）；本函数只做查表，
+/// 不承担校验。未登记返回 `None`。
+pub fn capability_of_original_tool(
+    original_name: &str,
+) -> Option<(&'static BuiltinCapability, &'static CapabilityTool)> {
+    BUILTIN_V5_CAPABILITIES.iter().find_map(|capability| {
+        capability
+            .tools
+            .iter()
+            .find(|tool| tool.original_name == original_name)
+            .map(|tool| (capability, tool))
+    })
+}
+
+/// 名字是否为 v5 单出口 server 身份。
+pub fn is_v5_server_name(name: &str) -> bool {
+    name == BUILTIN_V5_SERVER_NAME
 }
 
 /// 用户自定义 MCP server 名校验：空名与 builtin 保留名都是加载期 typed error。

@@ -61,7 +61,7 @@ pub(super) async fn read_image(
         return Err(unavailable());
     }
     let client = pool
-        .client_visible_to("workspace", Some(session_id))
+        .capability_client_visible_to("workspace", Some(session_id))
         .ok_or_else(unavailable)?;
     if !matches!(client.status, ClientStatus::Connected)
         || !crate::mcp::builtin::is_workspace_source(client.source.as_ref())
@@ -136,10 +136,8 @@ pub(super) async fn read_image(
 
 fn workspace_closed(pool: &McpClientPool) -> bool {
     pool.builtin_instance_context().is_some_and(|context| {
-        let source = pool
-            .client("workspace")
-            .and_then(|handle| handle.source.clone());
-        crate::mcp::builtin::is_closed_source("workspace", source.as_ref(), &context.closed)
+        let source = pool.capability_source("workspace");
+        crate::mcp::builtin::is_capability_closed("workspace", source.as_ref(), &context.closed)
     })
 }
 

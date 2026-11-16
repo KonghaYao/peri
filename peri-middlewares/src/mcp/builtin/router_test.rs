@@ -101,15 +101,18 @@ async fn tools_aggregate_with_v5_names_and_direct_names() {
     assert!(names.contains(&"Read".to_owned()), "{names:?}");
     assert!(names.contains(&"Bash".to_owned()), "{names:?}");
     assert!(
-        names.contains(&"mcp__peri__cron_list".to_owned()),
+        names.contains(&"cron_list".to_owned()),
+        "wire 目录保留原始名（模型面 mcp__peri__* 由工具桥生成）: {names:?}"
+    );
+    assert!(
+        !names.contains(&"mcp__peri__cron_list".to_owned()),
         "{names:?}"
     );
-    assert!(!names.contains(&"cron_list".to_owned()), "{names:?}");
 
     let response = client
         .peer()
         .call_tool_once(
-            CallToolRequestParams::new("mcp__peri__cron_list")
+            CallToolRequestParams::new("cron_list")
                 .with_arguments(call_arguments(serde_json::json!({}))),
         )
         .await

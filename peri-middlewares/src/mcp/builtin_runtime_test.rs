@@ -618,7 +618,9 @@ impl StartupFixture {
         let project = fixture.path().join("project");
         std::fs::create_dir_all(&home).expect("home 可创建");
         std::fs::create_dir_all(&project).expect("project 可创建");
-        let env = LoaderEnvGuard::redirect(&home);
+        // v5 单出口默认路径由 `v5_single_exit_*` 用例覆盖；本夹具保留 v4 六实例
+        // 回滚路径，供逐实例隔离 / 关闭矩阵的既有断言继续有效。
+        let env = LoaderEnvGuard::redirect_with_builtin_env(&home, Some("legacy"));
         let cwd = project.to_string_lossy().to_string();
 
         let pool = Arc::new(McpClientPool::new_pending());

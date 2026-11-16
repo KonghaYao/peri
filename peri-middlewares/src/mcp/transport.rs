@@ -67,7 +67,7 @@ pub enum TransportError {
 ///
 /// 未注册的实例名不得建立传输、不得静默降级成其它形态。
 pub(crate) fn require_known_builtin_instance(instance: &str) -> Result<(), TransportError> {
-    if peri_acp_types::builtin_mcp::find(instance).is_some() {
+    if peri_acp_types::builtin_mcp::is_builtin_server_name(instance) {
         Ok(())
     } else {
         Err(TransportError::UnknownBuiltinInstance {

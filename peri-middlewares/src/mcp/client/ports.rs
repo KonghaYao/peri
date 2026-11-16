@@ -69,6 +69,11 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
     }
 
     fn has_instance(&self, instance: &str) -> bool {
+        if self.v5_single_exit_configured()
+            && peri_acp_types::builtin_mcp::capability(instance).is_some()
+        {
+            return self.capability_available(instance);
+        }
         McpClientPool::client(self, instance).is_some()
     }
 
@@ -269,7 +274,13 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
     }
 
     fn builtin_workspace_state(&self) -> McpBuiltinWorkspaceState {
-        match McpClientPool::client(self, "workspace") {
+        if self
+            .builtin_instance_context()
+            .is_some_and(|context| context.closed.contains("workspace"))
+        {
+            return McpBuiltinWorkspaceState::NotConnected;
+        }
+        match McpClientPool::capability_client(self, "workspace") {
             None => McpBuiltinWorkspaceState::Absent,
             Some(handle) if matches!(handle.status, ClientStatus::Connected) => {
                 McpBuiltinWorkspaceState::Connected

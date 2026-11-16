@@ -536,10 +536,12 @@ impl McpClientPool {
                 let timeout = connect_timeout(kind);
                 let is_http = matches!(kind, TransportKind::Http);
                 // lifecycle 统一自动协商；subscriptions 只负责连接后订阅。
+                // v5：订阅按会话关闭集过滤（workspace 关闭时不再订阅 git ref）。
                 let subscriptions = server_config
                     .subscriptions
                     .as_ref()
-                    .filter(|s| !s.is_empty());
+                    .filter(|s| !s.is_empty())
+                    .and_then(|subscriptions| pool.filter_subscriptions(name, subscriptions));
 
                 let connect_result = match transport_config {
                     // builtin 分支：同进程链路（duplex + 真实 `rmcp::serve_server`）。它与 stdio
@@ -699,7 +701,7 @@ impl McpClientPool {
                         // 副作用；`WorkspaceMiddleware: false` ⇒ 零 git 调用）。
                         if let Some(sub) = subscriptions {
                             if pool.subscription_allowed(name) {
-                                client::setup_subscription(&pool, &rs, name, sub).await;
+                                client::setup_subscription(&pool, &rs, name, &sub).await;
                             } else {
                                 tracing::info!(
                                     server = %name,

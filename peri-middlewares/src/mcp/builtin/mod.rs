@@ -59,17 +59,24 @@ mod dispatch;
 mod builtin_registry;
 pub(crate) use builtin_registry::apply_builtin_overlay;
 pub(crate) use builtin_registry::builtin_injection_policy_from_env;
+pub(crate) use builtin_registry::capability_closed;
 pub(crate) use builtin_registry::closed_capabilities;
 pub(crate) use builtin_registry::closed_instances;
 #[cfg(target_os = "emscripten")]
 pub(crate) use builtin_registry::default_subscriptions_for;
+pub(crate) use builtin_registry::enabled_capabilities;
+pub(crate) use builtin_registry::is_capability_closed;
 pub(crate) use builtin_registry::is_closed;
 pub(crate) use builtin_registry::is_closed_builtin_source;
 pub(crate) use builtin_registry::is_closed_source;
 pub(crate) use builtin_registry::is_declared_direct;
 pub(crate) use builtin_registry::is_declared_model_hidden;
 pub(crate) use builtin_registry::is_local_resource_source;
+pub(crate) use builtin_registry::is_resource_closed;
+pub(crate) use builtin_registry::is_tool_closed;
 pub(crate) use builtin_registry::is_workspace_source;
+pub(crate) use builtin_registry::visible_required_tools;
+pub(crate) use builtin_registry::visible_subscription_resources;
 pub(crate) use builtin_registry::BuiltinInjectionPolicy;
 pub(crate) use builtin_registry::BuiltinOverlayError;
 #[cfg(test)]

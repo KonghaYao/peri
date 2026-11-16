@@ -317,8 +317,17 @@ fn snapshot_loader_process_probe() {
         ]),
     );
     let enabled_bare = super::load_bare_config_from_snapshot(&enabled_snapshot).unwrap();
-    assert!(enabled_bare.mcp_servers.contains_key("workspace"));
+    assert!(enabled_bare.mcp_servers.contains_key("peri"));
     assert_eq!(enabled_bare.mcp_servers.len(), 1);
+    assert_eq!(
+        enabled_bare.mcp_servers["peri"]
+            .env
+            .as_ref()
+            .and_then(|env| env.get("PERI_MCP_V5_CAPABILITIES"))
+            .map(String::as_str),
+        Some("workspace"),
+        "bare 只启用 workspace 能力"
+    );
 }
 
 /// M6：插件来源闭合位在 MCP 合并路径上的真实回归。

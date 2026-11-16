@@ -20,6 +20,104 @@ impl McpClientPool {
     pub fn client(&self, name: &str) -> Option<Arc<McpClientHandle>> {
         self.clients.read().get(name).cloned()
     }
+
+    /// 池内是否配置了 v5 单出口 `peri`（会话声明优先；未连接也算配置事实）。
+    pub(crate) fn v5_single_exit_configured(&self) -> bool {
+        let is_peri = |config: &peri_acp_types::plugin::McpServerConfig| {
+            matches!(
+                &config.source,
+                Some(peri_acp_types::plugin::ConfigSource::Builtin { instance })
+                    if peri_acp_types::builtin_mcp::is_v5_server_name(instance)
+            )
+        };
+        if let Some(servers) = self.session_servers.get() {
+            if let Some(config) = servers.get(peri_acp_types::builtin_mcp::BUILTIN_V5_SERVER_NAME) {
+                return is_peri(config);
+            }
+        }
+        self.configs
+            .read()
+            .get(peri_acp_types::builtin_mcp::BUILTIN_V5_SERVER_NAME)
+            .is_some_and(is_peri)
+    }
+
+    /// 能力实际落点的 server 名：v5 单出口为 `peri`，迁移期为同名实例。
+    ///
+    /// `None` = 该能力没有已配置的 server（能力不可用），不是「未连接」。
+    pub(crate) fn capability_server_name(&self, capability: &str) -> Option<String> {
+        // 远端 Workspace 是宿主任命的外部执行环境；v5 迁移期仍以 `workspace`
+        // 独立条目存在，不并入 `peri`（代理接线见 active spec 的未验证项）。
+        if capability == "workspace" {
+            let source = self
+                .session_servers
+                .get()
+                .and_then(|servers| servers.get("workspace"))
+                .and_then(|config| config.source.clone())
+                .or_else(|| {
+                    self.configs
+                        .read()
+                        .get("workspace")
+                        .and_then(|config| config.source.clone())
+                });
+            if matches!(
+                source,
+                Some(peri_acp_types::plugin::ConfigSource::WorkspaceRemote)
+            ) {
+                return Some("workspace".to_string());
+            }
+        }
+        if self.v5_single_exit_configured() {
+            return Some(peri_acp_types::builtin_mcp::BUILTIN_V5_SERVER_NAME.to_string());
+        }
+        let configured = self
+            .session_servers
+            .get()
+            .is_some_and(|servers| servers.contains_key(capability))
+            || self.configs.read().contains_key(capability);
+        if configured || self.client(capability).is_some() {
+            Some(capability.to_string())
+        } else {
+            None
+        }
+    }
+
+    /// 能力落点的连接句柄（v5 单出口 / 迁移期同名实例）。
+    pub(crate) fn capability_client(&self, capability: &str) -> Option<Arc<McpClientHandle>> {
+        self.capability_server_name(capability)
+            .and_then(|server| self.client(&server))
+    }
+
+    /// 能力落点的会话可见句柄。
+    pub(crate) fn capability_client_visible_to(
+        &self,
+        capability: &str,
+        session_id: Option<&str>,
+    ) -> Option<Arc<McpClientHandle>> {
+        let server = self.capability_server_name(capability)?;
+        self.client_visible_to(&server, session_id)
+    }
+
+    /// 能力落点的来源身份（未连接也可读；用于执行环境判定）。
+    pub(crate) fn capability_source(
+        &self,
+        capability: &str,
+    ) -> Option<peri_acp_types::plugin::ConfigSource> {
+        let server = self.capability_server_name(capability)?;
+        if let Some(servers) = self.session_servers.get() {
+            if let Some(config) = servers.get(&server) {
+                return config.source.clone();
+            }
+        }
+        self.configs
+            .read()
+            .get(&server)
+            .and_then(|config| config.source.clone())
+            .or_else(|| {
+                self.client(&server)
+                    .and_then(|handle| handle.source.clone())
+            })
+    }
+
     /// 会话可见的连接句柄（[`Self::client`] 的 ACP 归属过滤版）。
     pub fn client_visible_to(
         &self,

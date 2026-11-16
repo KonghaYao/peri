@@ -90,8 +90,8 @@ fn cache_only_files_are_merged_without_changing_builtin_overlay() {
             )
             .unwrap();
             assert_eq!(config.mcp_cache, Some(global && project));
-            assert!(config.mcp_servers.contains_key("workspace"));
-            assert!(config.mcp_servers.contains_key("web"));
+            assert!(config.mcp_servers.contains_key("peri"));
+            assert!(!config.mcp_servers.contains_key("workspace"));
         }
     }
 }

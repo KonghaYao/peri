@@ -23,9 +23,16 @@ use peri_acp_types::plugin::McpSubscriptionsConfig;
 /// 实例名 → 默认订阅；无默认订阅的实例返回 `None`（不建立订阅）。
 ///
 /// 订阅清单的唯一声明源是能力表的 `CapabilityResourceSurface::default_subscriptions`；
-/// 本函数只把声明投影成 typed 配置，不再持有实例名字面量。
+/// 本函数只把声明投影成 typed 配置，不再持有实例名字面量。v5 单出口 `peri`
+/// 代理 workspace 能力，默认订阅与 `workspace` 相同（workspace 关闭时 overlay
+/// 不写该订阅）。
 pub(crate) fn default_subscriptions_for(instance: &str) -> Option<McpSubscriptionsConfig> {
-    let subscriptions = capability(instance)?.resources.default_subscriptions;
+    let capability_name = if peri_acp_types::builtin_mcp::is_v5_server_name(instance) {
+        "workspace"
+    } else {
+        instance
+    };
+    let subscriptions = capability(capability_name)?.resources.default_subscriptions;
     if subscriptions.is_empty() {
         return None;
     }

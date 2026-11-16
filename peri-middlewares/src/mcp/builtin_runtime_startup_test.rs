@@ -68,12 +68,15 @@ async fn production_startup_path_connects_both_builtin_instances() {
             instance.name
         );
 
+        let served: Vec<&str> = handle.tools.iter().map(|tool| tool.name.as_ref()).collect();
         let declared: Vec<&str> = instance
             .tools
             .iter()
+            // host-only 工具可以不在 wire 目录中（如 workspace 的 shell_task_list：
+            // 仅由 handler 直接应答，不进入 tools/list）。
+            .filter(|tool| tool.model_visible || served.contains(&tool.original_name))
             .map(|tool| tool.original_name)
             .collect();
-        let served: Vec<&str> = handle.tools.iter().map(|tool| tool.name.as_ref()).collect();
         assert_eq!(
             served, declared,
             "{} 的 live tools/list 必须按声明顺序返回注册表工具",
@@ -83,7 +86,8 @@ async fn production_startup_path_connects_both_builtin_instances() {
             .into_iter()
             .filter(|tool| tool.builtin_mcp_instance() == Some(instance.name))
             .collect();
-        assert_eq!(bridges.len(), instance.tools.len());
+        // host-only 且不在 wire 目录中的工具没有 bridge（如 shell_task_list）。
+        assert_eq!(bridges.len(), served.len());
         for bridge in bridges {
             let declaration = instance
                 .tools

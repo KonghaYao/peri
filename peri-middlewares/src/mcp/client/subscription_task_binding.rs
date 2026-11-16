@@ -236,9 +236,8 @@ impl McpClientPool {
                     .upgrade()
                     .ok_or_else(|| "MCP pool unavailable".to_owned())?;
                 let peer = pool
-                    .clients
-                    .read()
-                    .get(&server)
+                    .capability_server_name(&server)
+                    .and_then(|resolved| pool.clients.read().get(&resolved).cloned())
                     .and_then(|client| client.peer.clone())
                     .ok_or_else(|| "MCP task owner disconnected".to_owned())?;
                 let mut params = CancelTaskParams::new(raw_id);

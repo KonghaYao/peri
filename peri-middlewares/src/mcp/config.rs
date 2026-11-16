@@ -346,7 +346,7 @@ pub(crate) fn load_merged_config_full_with_capabilities(
 /// Bare 保留本地文件/终端能力，不读取用户、插件或项目 MCP 配置。
 /// 显式运维关闭仍生效；工具声明和校验复用普通配置路径的同一实现。
 pub(crate) fn load_bare_config() -> Result<McpConfigFile, McpConfigError> {
-    let policy = super::builtin::builtin_injection_policy_from_env();
+    let policy = crate::platform::builtin_workspace_policy(true);
     let environment = cache_environment_input()?;
     let mut config = peri_config::mcp::resolve_from_files(
         &McpConfigFile::default(),
@@ -357,7 +357,9 @@ pub(crate) fn load_bare_config() -> Result<McpConfigFile, McpConfigError> {
     .map_err(|error| map_core_error(error, Path::new("<environment>")))?;
     super::builtin::apply_builtin_overlay(&mut config.mcp_servers, &policy)
         .map_err(builtin_overlay_error)?;
-    config.mcp_servers.retain(|name, _| name == "workspace");
+    config.mcp_servers.retain(|name, _| {
+        name == "workspace" || peri_acp_types::builtin_mcp::is_v5_server_name(name)
+    });
     validate_config(&config)?;
     Ok(config)
 }
@@ -494,10 +496,12 @@ pub(crate) fn load_bare_config_from_snapshot(
     snapshot: &peri_config::ConfigurationSnapshot,
 ) -> Result<McpConfigFile, McpConfigError> {
     let mut config = snapshot.bare_mcp()?;
-    let policy = crate::platform::builtin_policy(snapshot.builtin_mcp_enabled());
+    let policy = crate::platform::builtin_workspace_policy(snapshot.builtin_mcp_enabled());
     super::builtin::apply_builtin_overlay(&mut config.mcp_servers, &policy)
         .map_err(builtin_overlay_error)?;
-    config.mcp_servers.retain(|name, _| name == "workspace");
+    config.mcp_servers.retain(|name, _| {
+        name == "workspace" || peri_acp_types::builtin_mcp::is_v5_server_name(name)
+    });
     validate_config(&config)?;
     Ok(config)
 }

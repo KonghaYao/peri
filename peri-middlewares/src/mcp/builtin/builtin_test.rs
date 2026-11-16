@@ -207,13 +207,27 @@ fn builtin_prompt_declaration_matches_registry() {
         for tool in instance.tools {
             let template = builtin_prompt_declaration(instance.name, tool.original_name);
             match instance.name {
-                "web" | "artifact" | "workspace" => {
+                "web" | "artifact" => {
                     let template = template.expect("这些工具都必须有声明模板（A9 / Q3）");
                     assert_eq!(template, tool.prompt_declaration.unwrap());
                     assert!(
                         template.contains("{{name}}"),
                         "模板必须含占位符: {template}"
                     );
+                }
+                // workspace 的模型面工具必须有模板；host-only 恢复工具同形为 None。
+                "workspace" => {
+                    if tool.model_visible {
+                        let template = template.expect("workspace 模型面工具必须有声明模板");
+                        assert_eq!(template, tool.prompt_declaration.unwrap());
+                        assert!(
+                            template.contains("{{name}}"),
+                            "模板必须含占位符: {template}"
+                        );
+                    } else {
+                        assert_eq!(template, None);
+                        assert_eq!(template, tool.prompt_declaration);
+                    }
                 }
                 // wave 2：cron 冻结 `None`（A4：声明段零变化）。
                 // monitor 六个工具同形（无 `BaseTool::prompt_declaration()` 文本）。
@@ -447,6 +461,7 @@ fn effective_tool_names(instance: &str) -> BTreeSet<String> {
             instance
                 .tools
                 .iter()
+                .filter(|tool| tool.advertised)
                 .filter_map(|tool| effective_tool_name(instance.name, tool.original_name))
                 .collect()
         })

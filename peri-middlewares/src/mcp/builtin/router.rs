@@ -9,7 +9,7 @@
 //! 自己；全部失败时 [`RouterTemplate::create`] 返回错误（fail-closed），不启动空出口。
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
 };
@@ -18,10 +18,10 @@ use futures::FutureExt;
 use peri_acp_types::{
     builtin_mcp::{
         v5::{
-            capability as find_capability, capability_of_resource_uri, resolve_model_tool,
-            BuiltinCapability,
+            capability as find_capability, capability_of_original_tool, capability_of_resource_uri,
+            resolve_model_tool, BuiltinCapability, RoutedTool,
         },
-        BUILTIN_V5_CAPABILITIES,
+        BUILTIN_V5_CAPABILITIES, BUILTIN_V5_CAPABILITIES_ENV,
     },
     skills::SKILLS_EXTENSION_ID,
 };
@@ -45,7 +45,8 @@ use rmcp::{
 use thiserror::Error;
 
 use self::router_handler::CapabilityHandler;
-use super::dispatch::BuiltinServerHandler;
+use super::context::BuiltinInstanceContext;
+use super::dispatch::{builtin_server_handler_with_env, BuiltinServerHandler};
 use super::standalone::StandaloneFactory;
 use crate::mcp::upstream_proxy::UpstreamProxy;
 
@@ -179,6 +180,36 @@ impl RouterTemplate {
         Self::build(enabled, workspace, None)
     }
 
+    /// 宿主路径的能力集：配置标记 ∩ 会话关闭集；缺失标记时退回全部能力。
+    pub(crate) fn host_capabilities(
+        env: &HashMap<String, String>,
+        closed: &BTreeSet<String>,
+    ) -> Vec<String> {
+        let configured = env
+            .get(BUILTIN_V5_CAPABILITIES_ENV)
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| {
+                super::enabled_capabilities(closed)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect()
+            });
+        configured
+            .into_iter()
+            .filter(|name| {
+                find_capability(name)
+                    .is_none_or(|capability| !closed.contains(capability.legacy_instance))
+            })
+            .collect()
+    }
+
     /// workspace 能力改由上游代理提供（Sandbox MCP descriptor 路径）。
     /// 宿主装配接入前只由 router 测试消费。
     #[allow(dead_code)]
@@ -240,8 +271,25 @@ impl RouterTemplate {
 
     /// 会话 handler；全部能力不可用时 fail-closed。
     pub(crate) fn create(&self) -> Result<BuiltinRouter, RouterBuildError> {
+        self.create_with_workspace().map(|(router, _)| router)
+    }
+
+    /// 会话 handler 与 workspace shell 任务句柄。
+    ///
+    /// 宿主 transport 的监督者需要在关闭时收敛 workspace shell 任务；句柄只在
+    /// workspace 能力真的装配成功时存在。
+    pub(crate) fn create_with_workspace(
+        &self,
+    ) -> Result<
+        (
+            BuiltinRouter,
+            Option<peri_mcp_workspace::WorkspaceMcpServer>,
+        ),
+        RouterBuildError,
+    > {
         let mut entries = Vec::new();
         let mut degraded: Vec<(&'static str, String)> = Vec::new();
+        let workspace_handle = self.workspace.clone();
         for selection in &self.selections {
             match &selection.source {
                 SelectionSource::Builtin(factory) => match create_handler(factory) {
@@ -284,18 +332,95 @@ impl RouterTemplate {
                 "builtin capability router started with degraded capabilities"
             );
         }
-        Ok(BuiltinRouter {
-            entries,
-            disabled: self.disabled.clone(),
-            degraded,
-            tasks: TaskRoutes::default(),
-        })
+        Ok((
+            BuiltinRouter {
+                entries,
+                disabled: self.disabled.clone(),
+                degraded,
+                tasks: TaskRoutes::default(),
+            },
+            workspace_handle,
+        ))
     }
 
     /// workspace shell 任务清理句柄（跨会话共享）。
     pub(crate) fn workspace_handle(&self) -> Option<WorkspaceMcpServer> {
         self.workspace.clone()
     }
+}
+
+/// 宿主会话的单出口装配：从已注入的实例上下文构造每个能力的 in-process handler。
+///
+/// 与 standalone 模板的区别：不需要跨连接复用工厂；每次 transport spawn 构造一套
+/// handler（与迁移期逐实例 spawn 的会话语义一致）。单能力构造失败只降级自己，
+/// 全部失败返回 [`RouterBuildError::NoCapabilities`]（fail-closed）。
+pub(crate) fn build_host_router(
+    context: &BuiltinInstanceContext,
+    env: &HashMap<String, String>,
+) -> Result<
+    (
+        BuiltinRouter,
+        Option<peri_mcp_workspace::WorkspaceMcpServer>,
+    ),
+    RouterBuildError,
+> {
+    let enabled = RouterTemplate::host_capabilities(env, &context.closed);
+    let selected = selected_capabilities(&enabled)?;
+    let requested: BTreeSet<&'static str> =
+        selected.iter().map(|capability| capability.name).collect();
+    let mut entries = Vec::new();
+    let mut degraded: Vec<(&'static str, String)> = Vec::new();
+    let mut workspace_handle = None;
+    for declared in selected {
+        let instance = declared.legacy_instance;
+        match catch_build(declared.name, || {
+            builtin_server_handler_with_env(instance, context, env)
+                .ok_or_else(|| format!("handler not wired for capability {instance}"))
+        }) {
+            Ok(handler) => {
+                if let BuiltinServerHandler::Workspace(server) = &handler {
+                    workspace_handle = Some(server.clone());
+                }
+                entries.push(RouterEntry {
+                    declared,
+                    handler: CapabilityHandler::InProcess(Box::new(handler)),
+                });
+            }
+            Err(reason) => {
+                degrade(declared, &reason);
+                degraded.push((declared.name, reason));
+            }
+        }
+    }
+    let degraded_reasons: Vec<String> = degraded
+        .iter()
+        .map(|(name, reason)| format!("{name}: {reason}"))
+        .collect();
+    if !entries.iter().any(RouterEntry::is_ready) {
+        return Err(RouterBuildError::NoCapabilities {
+            degraded: degraded_reasons,
+        });
+    }
+    if !degraded.is_empty() {
+        tracing::warn!(
+            degraded = %degraded_reasons.join(", "),
+            "builtin capability router started with degraded capabilities"
+        );
+    }
+    let disabled = BUILTIN_V5_CAPABILITIES
+        .iter()
+        .filter(|capability| !requested.contains(capability.name))
+        .map(|capability| capability.name)
+        .collect();
+    Ok((
+        BuiltinRouter {
+            entries,
+            disabled,
+            degraded,
+            tasks: TaskRoutes::default(),
+        },
+        workspace_handle,
+    ))
 }
 
 fn build_factory(
@@ -676,7 +801,9 @@ impl ServerHandler for BuiltinRouter {
                 if !declared.model_visible {
                     continue;
                 }
-                tool.name = declared.model_name.into();
+                // wire 目录保留**原始名**：模型面 `mcp__peri__*` 由 Peri 的工具桥
+                // 统一生成（单出口协议层不冒充客户端命名空间）。
+                tool.name = declared.original_name.into();
                 tools.push(tool);
             }
         }
@@ -689,8 +816,18 @@ impl ServerHandler for BuiltinRouter {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         self.require_any_ready()?;
-        let routed = resolve_model_tool(&request.name)
-            .map_err(|error| McpError::new(ErrorCode::METHOD_NOT_FOUND, error.to_string(), None))?;
+        // 执行身份是 `(capability, original_name)`；wire 目录与工具桥都使用原始名。
+        // 同时接受 v5 模型面名字（`mcp__peri__*`），便于直接使用协议名的客户端；
+        // 迁移期旧名仍由 `resolve_model_tool` 显式拒绝。
+        let routed = match capability_of_original_tool(&request.name) {
+            Some((capability, tool)) => RoutedTool {
+                capability: capability.name,
+                tool,
+            },
+            None => resolve_model_tool(&request.name).map_err(|error| {
+                McpError::new(ErrorCode::METHOD_NOT_FOUND, error.to_string(), None)
+            })?,
+        };
         let entry = self.require_ready(routed.capability)?;
         let mut request = request;
         request.name = routed.tool.original_name.into();

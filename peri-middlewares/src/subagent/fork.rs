@@ -68,9 +68,18 @@ pub fn child_inheritance_filter() -> peri_agent::session::tool_catalog::ToolFilt
     std::sync::Arc::new(|tool: &dyn BaseTool| {
         let excluded = tool.name() == TOOL_AGENT
             || tool.name() == TOOL_ASK_USER
-            || tool
-                .builtin_mcp_instance()
-                .is_some_and(|instance| CHILD_ABSENT_BUILTIN_INSTANCES.contains(&instance));
+            || tool.builtin_mcp_instance().is_some_and(|instance| {
+                if peri_acp_types::builtin_mcp::is_v5_server_name(instance) {
+                    // 单出口按工具所属能力排除（不按出口名整体排除）。
+                    tool.mcp_tool_name()
+                        .and_then(peri_acp_types::builtin_mcp::capability_of_original_tool)
+                        .is_some_and(|(capability, _)| {
+                            CHILD_ABSENT_BUILTIN_INSTANCES.contains(&capability.legacy_instance)
+                        })
+                } else {
+                    CHILD_ABSENT_BUILTIN_INSTANCES.contains(&instance)
+                }
+            });
         !excluded
     })
 }

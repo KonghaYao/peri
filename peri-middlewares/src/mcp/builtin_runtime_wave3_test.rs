@@ -45,10 +45,12 @@ const MW_TICK_WINDOW: Duration = Duration::from_millis(2400);
 struct Wave3Spec {
     /// 宿主 `drive_cron_tick` 投影：true ⇒ pool 的唯一 spawn 点为 cron 代挂 tick。
     tick_enabled: bool,
-    /// `{cwd}/.mcp.json` 原文（None = 不写文件 ⇒ 四实例全部由默认层注入）。
+    /// `{cwd}/.mcp.json` 原文（None = 不写文件 ⇒ 默认层注入）。
     project_mcp_json: Option<&'static str>,
-    /// `PERI_MCP_BUILTIN` 取值（None = 移除该变量 = 缺省语义 = 注入全部）。
+    /// `PERI_MCP_BUILTIN` 取值（None = 移除该变量 = 缺省语义）。
     builtin_env: Option<&'static str>,
+    /// 会话冻结关闭集（迁移期实例名；v5 单出口按能力身份消费）。
+    closed_instances: Vec<&'static str>,
 }
 
 /// 真宿主装配形态的 pool + cron 驱动观测面。
@@ -70,7 +72,10 @@ impl Wave3Fixture {
         if let Some(body) = spec.project_mcp_json {
             std::fs::write(project.join(".mcp.json"), body).expect("项目级 .mcp.json 可写");
         }
-        let env = LoaderEnvGuard::redirect_with_builtin_env(&home, spec.builtin_env);
+        // 本夹具的既有断言按 v4 六实例逐实例观测；缺省 token 固定为回滚路径，
+        // v5 默认路径由 `builtin_v5_single_exit_*` 用例显式覆盖。
+        let env =
+            LoaderEnvGuard::redirect_with_builtin_env(&home, spec.builtin_env.or(Some("legacy")));
         let cwd = project.to_string_lossy().to_string();
 
         let pool = Arc::new(McpClientPool::new_pending());
@@ -86,7 +91,13 @@ impl Wave3Fixture {
                     scheduler: Arc::clone(&scheduler),
                     tick_enabled: spec.tick_enabled,
                 })
-                .with_workflow(WorkflowInstanceInput::slot()),
+                .with_workflow(WorkflowInstanceInput::slot())
+                .with_closed(
+                    spec.closed_instances
+                        .iter()
+                        .map(|instance| (*instance).to_string())
+                        .collect(),
+                ),
         ))
         .expect("夹具首次注入上下文必须成功");
         let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
@@ -206,3 +217,182 @@ mod policy;
 
 #[path = "builtin_runtime_closure_test.rs"]
 mod closure;
+
+// ─── v5 单出口默认路径（宿主装配 + 真实 transport）─────────────────────────────
+
+/// 默认装配只产生一个 builtin server `peri`：能力工具 / 资源 / 宿主调用都经出口聚合。
+#[tokio::test]
+async fn v5_default_injects_single_exit_and_aggregates_capabilities() {
+    let fixture = Wave3Fixture::start(Wave3Spec {
+        builtin_env: Some("v5"),
+        ..Wave3Spec::default()
+    })
+    .await;
+    let pool = Arc::clone(&fixture.pool);
+
+    assert_eq!(
+        pool.builtin_task_count(),
+        1,
+        "v5 默认路径只允许一个 builtin transport / server task"
+    );
+    let handle = pool.client("peri").expect("单出口 peri 必须已连接");
+    assert!(matches!(handle.status, super::ClientStatus::Connected));
+    for legacy in super::BUILTIN_MCP_INSTANCES.iter() {
+        assert!(
+            pool.client(legacy.name).is_none(),
+            "{} 不得再作为独立 builtin server 出现",
+            legacy.name
+        );
+    }
+
+    let served: HashSet<String> = pool
+        .tools_for_server("peri")
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    for capability in peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES {
+        for tool in capability.tools.iter().filter(|tool| tool.model_visible) {
+            assert!(
+                served.contains(tool.original_name),
+                "{} 的 wire 工具 {} 必须由单出口列出",
+                capability.name,
+                tool.original_name
+            );
+        }
+    }
+    assert!(served.contains("Bash"), "workspace direct 工具保持原名");
+    assert!(
+        served.contains("cron_list"),
+        "deferred 工具在 wire 目录保留原始名"
+    );
+    let bridges = crate::mcp::tool_bridge::build_typed_tool_bridges(&pool);
+    assert!(
+        bridges.iter().any(|bridge| {
+            bridge.mcp_server_name() == Some("peri") && bridge.name() == "mcp__peri__cron_list"
+        }),
+        "deferred 工具的模型面名字必须由工具桥生成"
+    );
+
+    let resources: HashSet<String> = pool
+        .resources_for_server("peri")
+        .into_iter()
+        .map(|resource| resource.uri.to_string())
+        .collect();
+    for uri in ["workspace://git/ref", "cron://jobs", "workflow://runs"] {
+        assert!(resources.contains(uri), "资源 {uri} 必须由单出口聚合");
+    }
+
+    // 宿主按 (capability, original_name) 消费：出口内翻译到模型面名字后路由。
+    pool.call_instance_tool("cron", "cron_list", super::json!({}), None)
+        .await
+        .expect("cron_list 必须经单出口执行");
+    // 夹具只给 workflow 空槽（与会话装配同形）：资源读取必须到达 workflow 能力，
+    // 并以「运行时尚未绑定」拒绝，而不是 -32601 / 未知资源。
+    let error = pool
+        .read_instance_resource("workflow", "workflow://runs")
+        .await
+        .expect_err("未绑定运行时必须拒绝");
+    assert!(
+        error.contains("workflow runtime is not bound"),
+        "资源必须路由到 workflow 能力: {error}"
+    );
+
+    let bash = bridges
+        .iter()
+        .find(|bridge| {
+            bridge.mcp_server_name() == Some("peri") && bridge.original_tool_name() == "Bash"
+        })
+        .expect("Bash bridge 必须存在");
+    assert!(bash.is_direct(), "workspace direct 工具必须保持 direct");
+    let cron = bridges
+        .iter()
+        .find(|bridge| {
+            bridge.mcp_server_name() == Some("peri") && bridge.original_tool_name() == "cron_list"
+        })
+        .expect("cron_list bridge 必须存在");
+    assert!(!cron.is_direct(), "deferred 工具不得提升为 direct");
+
+    fixture.shutdown().await;
+}
+
+/// 关闭一个能力时，单出口的工具、direct 提升、必需工具与宿主调用同步消失。
+#[tokio::test]
+async fn v5_capability_closure_hides_all_faces() {
+    let fixture = Wave3Fixture::start(Wave3Spec {
+        builtin_env: Some("v5"),
+        closed_instances: vec!["web"],
+        ..Wave3Spec::default()
+    })
+    .await;
+    let pool = Arc::clone(&fixture.pool);
+
+    let served: HashSet<String> = pool
+        .tools_for_server("peri")
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    assert!(
+        !served.contains("WebSearch"),
+        "关闭 web 后不得列出 WebSearch"
+    );
+    assert!(!served.contains("WebFetch"), "关闭 web 后不得列出 WebFetch");
+    assert!(served.contains("Bash"), "其他能力不受影响");
+
+    let closed: HashSet<String> = HashSet::from(["web".to_string()]);
+    let requirement = pool
+        .system_requirements()
+        .into_iter()
+        .find(|requirement| requirement.server == "peri")
+        .expect("peri 必须进入 system 依赖");
+    let visible_required = crate::mcp::builtin::visible_required_tools(
+        "peri",
+        &requirement.required_tools,
+        &closed
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<std::collections::BTreeSet<_>>(),
+    );
+    assert!(!visible_required.iter().any(|tool| tool == "WebSearch"));
+    assert!(!visible_required.iter().any(|tool| tool == "WebFetch"));
+    assert!(visible_required.iter().any(|tool| tool == "Bash"));
+
+    let bridges = crate::mcp::tool_bridge::build_typed_tool_bridges(&pool);
+    assert!(
+        !bridges.iter().any(|bridge| {
+            bridge.mcp_server_name() == Some("peri") && bridge.original_tool_name() == "WebSearch"
+        }),
+        "关闭能力的工具不得进入 bridge 集合"
+    );
+
+    assert!(
+        pool.call_instance_tool("web", "WebSearch", super::json!({"query":"x"}), None)
+            .await
+            .is_err(),
+        "关闭能力必须由服务端拒绝执行，而不是只隐藏目录"
+    );
+
+    fixture.shutdown().await;
+}
+
+/// 关闭 workspace 时默认订阅同步消失（git ref 不再建立）。
+#[tokio::test]
+async fn v5_workspace_closure_drops_default_subscriptions() {
+    let fixture = Wave3Fixture::start(Wave3Spec {
+        builtin_env: Some("v5"),
+        closed_instances: vec!["workspace"],
+        ..Wave3Spec::default()
+    })
+    .await;
+    let pool = Arc::clone(&fixture.pool);
+    let subscriptions = peri_acp_types::plugin::McpSubscriptionsConfig {
+        resources: vec!["workspace://git/ref".to_string()],
+        tools_list_changed: false,
+        prompts_list_changed: false,
+        resources_list_changed: false,
+    };
+    assert!(
+        pool.filter_subscriptions("peri", &subscriptions).is_none(),
+        "workspace 关闭时不得再订阅 workspace 资源"
+    );
+    fixture.shutdown().await;
+}

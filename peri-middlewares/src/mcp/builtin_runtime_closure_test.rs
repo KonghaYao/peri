@@ -64,6 +64,7 @@ async fn four_close_sources_are_distinct() {
         tick_enabled: true,
         project_mcp_json: Some(r#"{"mcpServers":{"artifact":{"disabled":true}}}"#),
         builtin_env: None,
+        ..Wave3Spec::default()
     })
     .await;
     {
@@ -181,6 +182,7 @@ async fn four_close_sources_are_distinct() {
             r#"{"mcpServers":{"artifact":{"disabled":true,"system_mcp":true}}}"#,
         ),
         builtin_env: None,
+        ..Wave3Spec::default()
     })
     .await;
     {
