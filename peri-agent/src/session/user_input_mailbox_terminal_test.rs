@@ -308,3 +308,43 @@ fn withdrawn_identity_survives_record_pruned_before_settle() {
         "已撤回的 ID 不能重新进入待发投影"
     );
 }
+
+#[tokio::test]
+async fn enqueue_racing_with_withdrawal_does_not_resurrect_input() {
+    let (mailbox, inbox) = make_mailbox();
+    let input = make_input(&mailbox, "撤回竞态");
+    let (entered, release) = inbox.queue_for_test().gate_next_enqueue();
+    let enqueue_mailbox = mailbox.clone();
+    let enqueue_input = input.clone();
+    let task = tokio::spawn(async move { enqueue_mailbox.enqueue(&enqueue_input).await });
+    entered.await.expect("enqueue reaches the MQ gate");
+    // 模拟 take_back 在 enqueue 等待 MQ 期间完成：Queued 记录被清理，终态身份已写入。
+    let fingerprint = super::super::state::fingerprint_for(
+        &input.input_id,
+        &input.content,
+        &input.original_draft,
+    );
+    super::super::window::retain_terminal(
+        &mut mailbox.state.lock(),
+        &input.input_id,
+        Some((fingerprint, UserInputState::Withdrawn)),
+    );
+    release.send(()).expect("release the enqueue gate");
+
+    let receipt = task
+        .await
+        .expect("enqueue task joins")
+        .expect("enqueue reports the terminal identity");
+    assert_eq!(receipt.results[0].state, UserInputState::Withdrawn);
+    assert!(receipt.snapshot.items.is_empty());
+    assert!(mailbox
+        .state
+        .lock()
+        .records
+        .iter()
+        .all(|record| record.input_id != input.input_id));
+    assert!(
+        inbox.queue_for_test().is_empty_sync(),
+        "the MQ row inserted by the racing enqueue must be cancelled"
+    );
+}

@@ -394,7 +394,7 @@ fn readiness_matches_effective_capability_set() {
             CapabilityReadiness {
                 capability: "workflow",
                 status: CapabilityStatus::Disabled,
-                tools: 9,
+                tools: 3,
                 resources: 6,
             },
         ]
@@ -581,4 +581,54 @@ fn router_without_workspace_has_no_cleanup_handle() {
     assert!(template.workspace_handle().is_none());
     let router = template.create().expect("web-only router");
     assert_eq!(router.effective_capabilities(), vec!["web"]);
+}
+
+#[test]
+fn initialization_failure_is_reported_as_degraded() {
+    let (workspace, _) = TestCapability::new("workspace", TestMode::Normal);
+    let mut router = router_with(
+        vec![("workspace", workspace)],
+        &["web", "artifact", "monitor", "workflow"],
+    );
+    router.mark_degraded("cron", "cron scheduler failed");
+    let readiness = router.readiness();
+    assert!(readiness.ready);
+    assert_eq!(readiness.effective, vec!["workspace"]);
+    let cron = readiness
+        .capabilities
+        .iter()
+        .find(|entry| entry.capability == "cron")
+        .expect("degraded capability stays in diagnostics");
+    assert_eq!(
+        cron.status,
+        CapabilityStatus::Degraded {
+            reason: "cron scheduler failed".to_owned()
+        }
+    );
+    assert_eq!(cron.tools, 4);
+    assert_eq!(cron.resources, 2);
+}
+
+#[tokio::test]
+async fn degraded_capability_is_rejected_as_unavailable() {
+    let (workspace, _) = TestCapability::new("workspace", TestMode::Normal);
+    let mut router = router_with(
+        vec![("workspace", workspace)],
+        &["web", "artifact", "monitor", "workflow"],
+    );
+    router.mark_degraded("cron", "cron scheduler failed");
+    let client = serve_router(router).await;
+    let error = mcp_error(
+        client
+            .peer()
+            .call_tool_once(CallToolRequestParams::new("mcp__peri__cron_list"))
+            .await
+            .expect_err("degraded capability must be rejected"),
+    );
+    assert!(error.message.contains("unavailable"), "{}", error.message);
+    assert!(
+        error.message.contains("cron scheduler failed"),
+        "{}",
+        error.message
+    );
 }

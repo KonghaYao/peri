@@ -241,7 +241,7 @@ impl RouterTemplate {
     /// 会话 handler；全部能力不可用时 fail-closed。
     pub(crate) fn create(&self) -> Result<BuiltinRouter, RouterBuildError> {
         let mut entries = Vec::new();
-        let mut degraded = Vec::new();
+        let mut degraded: Vec<(&'static str, String)> = Vec::new();
         for selection in &self.selections {
             match &selection.source {
                 SelectionSource::Builtin(factory) => match create_handler(factory) {
@@ -251,7 +251,7 @@ impl RouterTemplate {
                     }),
                     Err(reason) => {
                         degrade(selection.declared, &reason);
-                        degraded.push(format!("{}: {reason}", selection.declared.name));
+                        degraded.push((selection.declared.name, reason));
                     }
                 },
                 SelectionSource::Upstream(proxy) => entries.push(RouterEntry {
@@ -259,26 +259,35 @@ impl RouterTemplate {
                     handler: CapabilityHandler::Upstream(proxy.clone()),
                 }),
                 SelectionSource::Failed(reason) => {
-                    degraded.push(format!("{}: {reason}", selection.declared.name));
+                    degraded.push((selection.declared.name, reason.clone()));
                 }
             }
         }
+        let degraded_reasons: Vec<String> = degraded
+            .iter()
+            .map(|(name, reason)| format!("{name}: {reason}"))
+            .collect();
         if entries.len() + degraded.len() != self.selections.len() {
             // 不可达：每个 selection 恰好落入 entries 或 degraded。
-            return Err(RouterBuildError::NoCapabilities { degraded });
+            return Err(RouterBuildError::NoCapabilities {
+                degraded: degraded_reasons,
+            });
         }
         if !entries.iter().any(RouterEntry::is_ready) {
-            return Err(RouterBuildError::NoCapabilities { degraded });
+            return Err(RouterBuildError::NoCapabilities {
+                degraded: degraded_reasons,
+            });
         }
         if !degraded.is_empty() {
             tracing::warn!(
-                degraded = %degraded.join(", "),
+                degraded = %degraded_reasons.join(", "),
                 "builtin capability router started with degraded capabilities"
             );
         }
         Ok(BuiltinRouter {
             entries,
             disabled: self.disabled.clone(),
+            degraded,
             tasks: TaskRoutes::default(),
         })
     }
@@ -334,10 +343,34 @@ fn degrade(capability: &BuiltinCapability, reason: &str) {
 pub(crate) struct BuiltinRouter {
     entries: Vec<RouterEntry>,
     disabled: Vec<&'static str>,
+    /// 已启用但初始化失败的能力；readiness 必须以 `Degraded` 暴露，不能退化为
+    /// “未选择”。
+    degraded: Vec<(&'static str, String)>,
     tasks: TaskRoutes,
 }
 
+fn disabled_readiness(name: &'static str) -> CapabilityReadiness {
+    let declared = find_capability(name).expect("capability names come from the registry");
+    CapabilityReadiness {
+        capability: name,
+        status: CapabilityStatus::Disabled,
+        tools: declared
+            .tools
+            .iter()
+            .filter(|tool| tool.model_visible)
+            .count(),
+        resources: declared.resources.static_resources.len()
+            + declared.resources.resource_templates.len(),
+    }
+}
+
 impl BuiltinRouter {
+    /// 测试钩子：注入一个“已启用但初始化失败”的能力状态。
+    #[cfg(test)]
+    pub(crate) fn mark_degraded(&mut self, capability: &'static str, reason: &str) {
+        self.degraded.push((capability, reason.to_owned()));
+    }
+
     /// 测试装配：绕过 in-process 工厂，直接注入能力 handler。
     #[cfg(test)]
     pub(crate) fn for_test(
@@ -366,6 +399,7 @@ impl BuiltinRouter {
         Ok(Self {
             entries,
             disabled: disabled.to_vec(),
+            degraded: Vec::new(),
             tasks: TaskRoutes::default(),
         })
     }
@@ -386,14 +420,14 @@ impl BuiltinRouter {
         let mut capabilities: Vec<CapabilityReadiness> =
             self.entries.iter().map(RouterEntry::readiness).collect();
         for name in &self.disabled {
-            let declared = find_capability(name).expect("disabled names come from the registry");
-            capabilities.push(CapabilityReadiness {
-                capability: name,
-                status: CapabilityStatus::Disabled,
-                tools: declared.tools.len(),
-                resources: declared.resources.static_resources.len()
-                    + declared.resources.resource_templates.len(),
-            });
+            capabilities.push(disabled_readiness(name));
+        }
+        for (name, reason) in &self.degraded {
+            let mut readiness = disabled_readiness(name);
+            readiness.status = CapabilityStatus::Degraded {
+                reason: reason.clone(),
+            };
+            capabilities.push(readiness);
         }
         capabilities.sort_by_key(|readiness| {
             BUILTIN_V5_CAPABILITIES
@@ -431,11 +465,17 @@ impl BuiltinRouter {
                 ),
                 None,
             )),
-            None => Err(McpError::new(
-                ErrorCode::INVALID_PARAMS,
-                format!("capability `{capability}` is disabled"),
-                None,
-            )),
+            None => match self.degraded.iter().find(|(name, _)| *name == capability) {
+                Some((_, reason)) => Err(McpError::internal_error(
+                    format!("capability `{capability}` is unavailable: {reason}"),
+                    None,
+                )),
+                None => Err(McpError::new(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("capability `{capability}` is disabled"),
+                    None,
+                )),
+            },
         }
     }
 

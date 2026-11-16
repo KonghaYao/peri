@@ -1275,6 +1275,21 @@ impl MessageQueue {
         (entered_rx, release_tx)
     }
 
+    /// 仅测试：下一次 enqueue 在写入前暂停；返回（进入通知，放行信号）。
+    pub fn gate_next_enqueue(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        self.inner
+            .store
+            .install_enqueue_gate((entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
     /// 仅测试：下一次 MQ 查询在读取前暂停；返回（进入通知，放行信号）。
     pub fn gate_next_query(
         &self,
