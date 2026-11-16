@@ -1,7 +1,17 @@
 //! 夹具便利方法：镜像迁移前 `ThreadStore` 的常用测试调用形态，让既有测试的构造与断言逐字保留；
 //! 生产代码不再有这些方法，只有测试替身提供。
 
-use super::*;
+use crate::session::test_resources::mock::MockSessionResources;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session_resources::SessionMetaPatch;
+use peri_acp_types::session_resources::SessionResources as _;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
+
+use peri_acp_types::thread::ThreadId;
+use peri_acp_types::thread::ThreadMeta;
+use std::collections::HashMap;
 
 /// 便利方法：镜像迁移前 `ThreadStore` 的常用测试调用形态，让既有测试的构造与断言
 /// 逐字保留（生产代码不再有这些方法，只有测试替身提供）。
@@ -40,7 +50,12 @@ impl MockSessionResources {
     /// 补齐父链占位行（未登记时才写，已有记录不覆盖）。
     fn ensure_parent_placeholder(&self, parent: &str, cwd: &str) {
         let parent = parent.to_owned();
-        if self.regions.lock().unwrap().contains_key(&parent) {
+        if self
+            .regions
+            .lock()
+            .expect("self regions mutex must remain unpoisoned throughout the test")
+            .contains_key(&parent)
+        {
             return;
         }
         let mut meta = ThreadMeta::new_at(cwd, peri_time::now_wall());

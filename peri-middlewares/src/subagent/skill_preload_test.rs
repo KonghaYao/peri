@@ -9,17 +9,22 @@
 //! `extra_dirs`/plugin roots、`mcp__` 前缀防误注入回归（本地来源已不存在，
 //! 该分支无从触发）、`<ns>:<name>` 的磁盘回退。
 
-use peri_agent::{agent::state::AgentState, middleware::r#trait::Middleware};
-use tempfile::tempdir;
+use peri_agent::agent::state::AgentState;
+use peri_agent::middleware::r#trait::Middleware;
+use tempfile;
 
-use super::*;
+use super::BaseMessage;
+use super::SkillPreloadMiddleware;
+use super::MAX_PRELOAD_ITEM_BYTES;
 
 use std::sync::Arc;
 
-use peri_acp_types::{
-    mcp_skills::{mcp_skill_name, HandleToken, McpSkillRegistry},
-    skills::{SkillMetadata, SkillOrigin, SkillSource},
-};
+use peri_acp_types::mcp_skills;
+use peri_acp_types::mcp_skills::HandleToken;
+use peri_acp_types::mcp_skills::McpSkillRegistry;
+use peri_acp_types::skills::SkillMetadata;
+use peri_acp_types::skills::SkillOrigin;
+use peri_acp_types::skills::SkillSource;
 
 /// 测试用批次适配器：`AgentState` + 本批输入身份。
 ///
@@ -122,7 +127,7 @@ fn seed_registry_with_skills(server: &str, skills: &[&str]) -> Arc<McpSkillRegis
     let metas = skills
         .iter()
         .map(|skill| SkillMetadata {
-            name: mcp_skill_name(server, skill),
+            name: mcp_skills::mcp_skill_name(server, skill),
             aliases: Vec::new(),
             description: format!("MCP skill {skill}"),
             path: std::path::PathBuf::new(),
@@ -157,7 +162,7 @@ fn middleware(reg: Arc<McpSkillRegistry>) -> SkillPreloadMiddleware {
 #[test]
 fn test_extract_skill_names_basic() {
     assert_eq!(
-        extract_skill_names_from_text("/brainstorming"),
+        super::extract_skill_names_from_text("/brainstorming"),
         vec!["brainstorming"]
     );
 }
@@ -165,7 +170,7 @@ fn test_extract_skill_names_basic() {
 #[test]
 fn test_extract_skill_names_multiple() {
     assert_eq!(
-        extract_skill_names_from_text("/skill-a /skill-b"),
+        super::extract_skill_names_from_text("/skill-a /skill-b"),
         vec!["skill-a", "skill-b"]
     );
 }
@@ -173,32 +178,32 @@ fn test_extract_skill_names_multiple() {
 #[test]
 fn test_extract_skill_names_in_sentence() {
     assert_eq!(
-        extract_skill_names_from_text("please use /code-review now"),
+        super::extract_skill_names_from_text("please use /code-review now"),
         vec!["code-review"]
     );
 }
 
 #[test]
 fn test_extract_skill_names_no_match() {
-    assert!(extract_skill_names_from_text("no slash tokens here").is_empty());
+    assert!(super::extract_skill_names_from_text("no slash tokens here").is_empty());
 }
 
 #[test]
 fn test_extract_skill_names_slash_only() {
-    assert!(extract_skill_names_from_text("/").is_empty());
+    assert!(super::extract_skill_names_from_text("/").is_empty());
 }
 
 #[test]
 fn test_extract_skill_names_rejects_path_like() {
     // 路径片段（含 `/`）不是 skill token
-    assert!(extract_skill_names_from_text("a/b/c").is_empty());
+    assert!(super::extract_skill_names_from_text("a/b/c").is_empty());
 }
 
 // ─── 注入结构 ─────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn test_no_op_when_empty_names_and_no_token() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mw = middleware(seed_registry_with_skill("demo", "hello"));
     let mut state = BatchState::new(
         dir.path().to_str().unwrap(),
@@ -212,7 +217,7 @@ async fn test_no_op_when_empty_names_and_no_token() {
 
 #[tokio::test]
 async fn test_no_op_when_no_human_message() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mw = middleware(seed_registry_with_skill("demo", "hello"));
     let mut state = BatchState::new(dir.path().to_str().unwrap(), vec![]);
 
@@ -225,7 +230,7 @@ async fn test_no_op_when_no_human_message() {
 /// 正文带来源标注（与 SkillTool / 命令面同源）。
 #[tokio::test]
 async fn test_preload_mcp_skill_injects_annotated_content() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mw = middleware(seed_registry_with_skill("demo", "hello"));
     let mut state = BatchState::new(
         dir.path().to_str().unwrap(),
@@ -254,7 +259,7 @@ async fn test_preload_mcp_skill_injects_annotated_content() {
 /// 裸名 `/hello`（`/skill-name` UX）：registry origin 感知查找的裸名分支。
 #[tokio::test]
 async fn test_preload_bare_name_hits_registry() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mw = middleware(seed_registry_with_skill("workspace", "brainstorming"));
     let mut state = BatchState::new(
         dir.path().to_str().unwrap(),
@@ -271,7 +276,7 @@ async fn test_preload_bare_name_hits_registry() {
 
 #[tokio::test]
 async fn test_system_skill_old_prefixed_token_is_not_auto_preloaded() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let reg = seed_registry_with_skill("workspace", "brainstorming");
     reg.mark_system_origins(&["workspace".to_string()]);
     let mw = middleware(Arc::clone(&reg));
@@ -287,7 +292,7 @@ async fn test_system_skill_old_prefixed_token_is_not_auto_preloaded() {
 
 #[tokio::test]
 async fn test_explicit_system_skill_name_keeps_preload_semantics() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let reg = seed_registry_with_skill("workspace", "brainstorming");
     reg.mark_system_origins(&["workspace".to_string()]);
     let mw = SkillPreloadMiddleware::new(vec!["workspace:brainstorming".to_string()])
@@ -302,7 +307,7 @@ async fn test_explicit_system_skill_name_keeps_preload_semantics() {
 
 #[tokio::test]
 async fn test_preload_injects_multiple_skills_in_input_order() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let reg = Arc::new(McpSkillRegistry::new());
     let handle = connected_token("demo");
     reg.mark_discovery_started("demo", handle.clone());
@@ -312,7 +317,7 @@ async fn test_preload_injects_multiple_skills_in_input_order() {
         ["alpha", "beta"]
             .into_iter()
             .map(|skill| SkillMetadata {
-                name: mcp_skill_name("demo", skill),
+                name: mcp_skills::mcp_skill_name("demo", skill),
                 aliases: Vec::new(),
                 description: format!("MCP skill {skill}"),
                 path: std::path::PathBuf::new(),
@@ -350,7 +355,7 @@ async fn test_preload_injects_multiple_skills_in_input_order() {
 /// miss 夹在命中之间：注入顺序仍等于用户输入顺序（miss 不占槽位）。
 #[tokio::test]
 async fn test_preload_preserves_input_order_with_miss_in_between() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mw = middleware(seed_registry_with_skill("demo", "hello"));
     let mut state = BatchState::new(
         dir.path().to_str().unwrap(),
@@ -372,7 +377,7 @@ async fn test_preload_preserves_input_order_with_miss_in_between() {
 
 #[tokio::test]
 async fn test_preload_mcp_skill_by_alias() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mw = middleware(seed_registry_with_skill("demo", "hello"));
     let mut state = BatchState::new(
         dir.path().to_str().unwrap(),
@@ -389,7 +394,7 @@ async fn test_preload_mcp_skill_by_alias() {
 /// 按 server 名末段命中（与命令面 fullname 派生同构）。
 #[tokio::test]
 async fn test_preload_plugin_server_via_trailing_segment() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mw = middleware(seed_registry_with_skill("plugin:p1:demosrv", "beta"));
     let mut state = BatchState::new(
         dir.path().to_str().unwrap(),
@@ -412,7 +417,7 @@ async fn test_preload_plugin_server_via_trailing_segment() {
 /// 未装配 registry：缺口报告，不注入、不读任何路径（J5）。
 #[tokio::test]
 async fn test_missing_registry_reports_gap_without_injection() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mw = SkillPreloadMiddleware::new(vec![]);
     let mut state = BatchState::new(
         dir.path().to_str().unwrap(),
@@ -427,7 +432,7 @@ async fn test_missing_registry_reports_gap_without_injection() {
 /// registry miss：缺口语义（不注入、不回落磁盘）。
 #[tokio::test]
 async fn test_registry_miss_injects_nothing() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mw = middleware(seed_registry_with_skill("demo", "hello"));
     let mut state = BatchState::new(
         dir.path().to_str().unwrap(),
@@ -442,12 +447,12 @@ async fn test_registry_miss_injects_nothing() {
 /// 同名跨 origin（末段 server 名相同）→ 显式拒绝注入，不静默取首个。
 #[tokio::test]
 async fn test_preload_ambiguous_origin_rejects_injection() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let reg = Arc::new(McpSkillRegistry::new());
     for server in ["a:srv", "b:srv"] {
         let handle = connected_token(server);
         let meta = SkillMetadata {
-            name: mcp_skill_name(server, "beta"),
+            name: mcp_skills::mcp_skill_name(server, "beta"),
             aliases: Vec::new(),
             description: "Beta skill".to_string(),
             path: std::path::PathBuf::new(),
@@ -482,7 +487,7 @@ async fn test_preload_ambiguous_origin_rejects_injection() {
 /// 宿主显式名单路径（显式 `skill_names`）：与主链同一条 registry 查找路径。
 #[tokio::test]
 async fn test_explicit_skill_names_path_uses_registry() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mw = SkillPreloadMiddleware::new(vec!["brainstorming".to_string()])
         .with_mcp_registry(Some(seed_registry_with_skill("workspace", "brainstorming")));
     let mut state = AgentState::new(dir.path().to_str().unwrap());
@@ -518,7 +523,7 @@ fn tool_receipts(state: &AgentState) -> Vec<(String, String, bool)> {
 /// ToolUse/tool_error（按声明顺序）。
 #[tokio::test]
 async fn test_explicit_list_path_unwired_registry_injects_gap_receipts() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mw = SkillPreloadMiddleware::new(vec!["alpha".to_string(), "beta".to_string()]);
     let mut state = AgentState::new(dir.path().to_str().unwrap());
     state.add_message(BaseMessage::human("普通消息（无 token）"));
@@ -552,7 +557,7 @@ async fn test_explicit_list_path_unwired_registry_injects_gap_receipts() {
 /// 显式名单路径 + registry 未命中：tool_error 携带 not found 产品串。
 #[tokio::test]
 async fn test_explicit_list_path_miss_injects_not_found_receipt() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mw = SkillPreloadMiddleware::new(vec!["missing-skill-x".to_string()])
         .with_mcp_registry(Some(seed_registry_with_skill("demo", "hello")));
     let mut state = AgentState::new(dir.path().to_str().unwrap());
@@ -576,12 +581,12 @@ async fn test_explicit_list_path_miss_injects_not_found_receipt() {
 /// 显式名单路径 + 跨 origin 歧义：回执与 `SkillTool` 歧义文案同构（含候选清单）。
 #[tokio::test]
 async fn test_explicit_list_path_ambiguous_receipt_lists_candidates() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let reg = Arc::new(McpSkillRegistry::new());
     for server in ["a:srv", "b:srv"] {
         let handle = connected_token(server);
         let meta = SkillMetadata {
-            name: mcp_skill_name(server, "beta"),
+            name: mcp_skills::mcp_skill_name(server, "beta"),
             aliases: Vec::new(),
             description: "Beta skill".to_string(),
             path: std::path::PathBuf::new(),
@@ -623,7 +628,7 @@ async fn test_explicit_list_path_ambiguous_receipt_lists_candidates() {
 /// 显式名单路径命中与缺口混合：顺序 = 声明顺序，配对与 is_error 分类正确。
 #[tokio::test]
 async fn test_explicit_list_path_mixed_hits_and_gaps_keep_declaration_order() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mw = SkillPreloadMiddleware::new(vec![
         "beta".to_string(),
         "missing-x".to_string(),
@@ -661,11 +666,11 @@ async fn test_explicit_list_path_mixed_hits_and_gaps_keep_declaration_order() {
 /// 显式名单路径 + activation 失败（条目无内容绑定）：回执携带原因文本。
 #[tokio::test]
 async fn test_explicit_list_path_activation_failure_receipt_carries_reason() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let reg = Arc::new(McpSkillRegistry::new());
     let handle = connected_token("demo");
     let meta = SkillMetadata {
-        name: mcp_skill_name("demo", "detached"),
+        name: mcp_skills::mcp_skill_name("demo", "detached"),
         aliases: Vec::new(),
         description: "Detached skill".to_string(),
         path: std::path::PathBuf::new(),
@@ -704,11 +709,11 @@ async fn test_explicit_list_path_activation_failure_receipt_carries_reason() {
 /// 同一 canonical skill（全名 + 别名）批内只加载一次，保持首次出现顺序。
 #[tokio::test]
 async fn test_explicit_list_path_dedupes_same_canonical_skill() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let reg = Arc::new(McpSkillRegistry::new());
     let handle = connected_token("demo");
     let meta = SkillMetadata {
-        name: mcp_skill_name("demo", "alpha"),
+        name: mcp_skills::mcp_skill_name("demo", "alpha"),
         aliases: vec!["alpha".to_string()],
         description: "Alpha skill".to_string(),
         path: std::path::PathBuf::new(),
@@ -745,7 +750,7 @@ async fn test_explicit_list_path_dedupes_same_canonical_skill() {
 /// 条数超限：超出部分**不读正文**，改为一一配对的缺口回执（不静默丢弃）。
 #[tokio::test]
 async fn test_explicit_list_path_item_budget_yields_paired_gap_receipts() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let skills: Vec<String> = (0..18).map(|index| format!("s{index:02}")).collect();
     let refs: Vec<&str> = skills.iter().map(String::as_str).collect();
     let mw = SkillPreloadMiddleware::new(skills.clone())
@@ -774,11 +779,11 @@ async fn test_explicit_list_path_item_budget_yields_paired_gap_receipts() {
 /// 单项字节超预算：不加载截断正文冒充完整指令，改为缺口回执。
 #[tokio::test]
 async fn test_explicit_list_path_item_bytes_yield_gap_receipt() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let reg = Arc::new(McpSkillRegistry::new());
     let handle = connected_token("demo");
     let meta = SkillMetadata {
-        name: mcp_skill_name("demo", "huge"),
+        name: mcp_skills::mcp_skill_name("demo", "huge"),
         aliases: Vec::new(),
         description: "Huge skill".to_string(),
         path: std::path::PathBuf::new(),
@@ -818,7 +823,7 @@ async fn test_explicit_list_path_item_bytes_yield_gap_receipt() {
 /// 未识别 token 仍零注入（不制造未知技能错误）。
 #[tokio::test]
 async fn test_heuristic_path_reports_budget_gaps_but_not_unknown_tokens() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let skills: Vec<String> = (0..18).map(|index| format!("h{index:02}")).collect();
     let refs: Vec<&str> = skills.iter().map(String::as_str).collect();
     let mut tokens: Vec<String> = skills.iter().map(|name| format!("/{name}")).collect();

@@ -12,10 +12,12 @@ pub enum HistorySource {
 }
 
 impl HistorySource {
+    #[must_use]
     pub fn own() -> Self {
         Self::Own
     }
 
+    #[must_use]
     pub fn inherited(frozen_snapshot_id: impl Into<String>) -> Self {
         Self::Inherited {
             frozen_snapshot_id: frozen_snapshot_id.into(),
@@ -23,6 +25,7 @@ impl HistorySource {
         }
     }
 
+    #[must_use]
     pub fn inherited_with_ancestor(
         frozen_snapshot_id: impl Into<String>,
         ancestor_thread_id: Option<String>,
@@ -33,6 +36,7 @@ impl HistorySource {
         }
     }
 
+    #[must_use]
     pub fn is_own(&self) -> bool {
         matches!(self, Self::Own)
     }
@@ -64,6 +68,7 @@ pub struct PersistentEntryKey {
 }
 
 impl PersistentEntryKey {
+    #[must_use]
     pub fn new(source: HistorySource, entry_id: impl Into<String>) -> Self {
         Self {
             source,
@@ -71,6 +76,7 @@ impl PersistentEntryKey {
         }
     }
 
+    #[must_use]
     pub fn own(entry_id: impl Into<String>) -> Self {
         Self::new(HistorySource::Own, entry_id)
     }
@@ -91,6 +97,7 @@ pub struct PersistentSubItemKey {
 }
 
 impl PersistentSubItemKey {
+    #[must_use]
     pub fn new(entry: PersistentEntryKey, sub_item: u32) -> Self {
         Self { entry, sub_item }
     }

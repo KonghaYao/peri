@@ -1,8 +1,11 @@
-use super::*;
+use crate::filesystem::edit::EditFileTool;
+use crate::filesystem::read::ReadFileTool;
+use crate::filesystem::write::WriteFileTool;
 #[cfg(unix)]
 use peri_agent::tools::{BaseTool, ToolContext};
 #[cfg(unix)]
 use serde_json::json;
+use std::path::PathBuf;
 
 #[cfg(unix)]
 fn make_symlink_workspace() -> (tempfile::TempDir, PathBuf, PathBuf) {
@@ -23,7 +26,7 @@ fn make_symlink_workspace() -> (tempfile::TempDir, PathBuf, PathBuf) {
 #[test]
 fn test_resolve_path_resolves_symlink_before_dotdot() {
     let (_directory, workspace, other) = make_symlink_workspace();
-    let resolved = resolve_path(workspace.to_str().unwrap(), "link/../a.txt");
+    let resolved = crate::filesystem::resolve_path(workspace.to_str().unwrap(), "link/../a.txt");
     assert_eq!(resolved, other.join("a.txt").canonicalize().unwrap());
     assert_eq!(std::fs::read_to_string(resolved).unwrap(), "target\n");
 }
@@ -33,7 +36,7 @@ fn test_resolve_path_resolves_symlink_before_dotdot() {
 fn test_resolve_path_new_file_under_symlink_parent() {
     let (_directory, workspace, other) = make_symlink_workspace();
     assert_eq!(
-        resolve_path(workspace.to_str().unwrap(), "link/../new.txt"),
+        crate::filesystem::resolve_path(workspace.to_str().unwrap(), "link/../new.txt"),
         other.join("new.txt")
     );
 }
@@ -44,7 +47,7 @@ fn test_resolve_path_new_file_under_symlink_parent() {
 fn test_resolve_path_nested_missing_dirs_under_symlink_parent() {
     let (_directory, workspace, other) = make_symlink_workspace();
     assert_eq!(
-        resolve_path(
+        crate::filesystem::resolve_path(
             workspace.to_str().unwrap(),
             "link/../missing/nested/new.txt"
         ),
@@ -193,7 +196,7 @@ async fn test_parent_directory_symlink_without_dotdot_is_stable() {
 #[test]
 fn test_resolve_path_relative() {
     let directory = tempfile::tempdir().unwrap();
-    let result = resolve_path(directory.path().to_str().unwrap(), "new.txt");
+    let result = crate::filesystem::resolve_path(directory.path().to_str().unwrap(), "new.txt");
     assert_eq!(
         result,
         directory.path().canonicalize().unwrap().join("new.txt")
@@ -205,7 +208,8 @@ fn test_resolve_path_absolute() {
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("absolute.txt");
     std::fs::write(&file, "preserved content").unwrap();
-    let result = resolve_path(directory.path().to_str().unwrap(), file.to_str().unwrap());
+    let result =
+        crate::filesystem::resolve_path(directory.path().to_str().unwrap(), file.to_str().unwrap());
     assert_eq!(result, file.canonicalize().unwrap());
     assert_eq!(
         std::fs::read_to_string(result).unwrap(),
@@ -218,7 +222,7 @@ fn test_resolve_path_traversal_canonicalized() {
     let directory = tempfile::tempdir().unwrap();
     let child = directory.path().join("child");
     std::fs::create_dir(&child).unwrap();
-    let result = resolve_path(child.to_str().unwrap(), "../new.txt");
+    let result = crate::filesystem::resolve_path(child.to_str().unwrap(), "../new.txt");
     assert_eq!(
         result,
         directory.path().canonicalize().unwrap().join("new.txt")

@@ -129,6 +129,7 @@ impl RequestNamespaceId {
         Self(uuid::Uuid::now_v7().to_string())
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -169,15 +170,18 @@ impl std::fmt::Display for RequestNamespaceId {
 pub struct RequestSeq(u64);
 
 impl RequestSeq {
+    #[must_use]
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
+    #[must_use]
     pub const fn get(self) -> u64 {
         self.0
     }
 
     /// 下一个序号（`last_accepted + 1`）。饱和递增，不回绕。
+    #[must_use]
     pub const fn next(self) -> Self {
         Self(self.0.saturating_add(1))
     }
@@ -196,10 +200,12 @@ impl std::fmt::Display for RequestSeq {
 pub struct ClientViewId(String);
 
 impl ClientViewId {
+    #[must_use]
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -215,7 +221,7 @@ impl std::fmt::Display for ClientViewId {
 
 /// App record 的**资格**：它能不能回调工具。
 ///
-/// 展示资格、工具调用资格、资源读取资格**分别判断**（设计 §3.1 [P4]）：
+/// 展示资格、工具调用资格、资源读取资格**分别判断**（设计 §3.1 `[P4]`）：
 /// - `Interactive` 只承诺「本 App 可经 canonical 入口回调这些工具」，不承诺任何
 ///   目标仍然有效（每次调用仍要做会话目录 / 撤销 / 世代复核）；
 /// - `DisplayOnly` 只承诺「可显示」，**零 callback 资格**（裁决 D5）。
@@ -339,6 +345,7 @@ pub struct AttachmentBinding {
 
 impl AttachmentBinding {
     /// 用**当前** ledger 序号重建绑定（附着快照与 attach 响应用同一权威）。
+    #[must_use]
     pub fn with_next_seq(&self, next_seq: RequestSeq) -> Self {
         Self {
             attachment_id: self.attachment_id.clone(),
@@ -402,6 +409,7 @@ pub struct McpAppsFeatures {
 
 impl McpAppsFeatures {
     /// 已实现能力的**唯一权威**。
+    #[must_use]
     pub const fn implemented() -> Self {
         Self {
             tools_call: true,
@@ -417,18 +425,22 @@ impl McpAppsFeatures {
         }
     }
 
+    #[must_use]
     pub const fn tool_list_changed(&self) -> bool {
         self.tool_list_changed
     }
 
+    #[must_use]
     pub const fn resource_subscriptions(&self) -> bool {
         self.resource_subscriptions
     }
 
+    #[must_use]
     pub const fn sampling(&self) -> bool {
         self.sampling
     }
 
+    #[must_use]
     pub const fn logging(&self) -> bool {
         self.logging
     }
@@ -463,6 +475,7 @@ pub struct McpAppsLimits {
 impl McpAppsLimits {
     /// 实际值：直接取 §4.3 常量（**契约事实，非测量结果**；改值前须补测量，
     /// 见常量块头注释与实现日志「4b 批 H」）。
+    #[must_use]
     pub const fn conservative() -> Self {
         Self {
             max_apps_per_session: MAX_APPS_PER_SESSION,
@@ -542,6 +555,7 @@ pub enum RequestVerdict {
 
 impl RequestVerdict {
     /// 判决是否允许执行（`Accepted` 之外一律不执行）。
+    #[must_use]
     pub const fn is_admitted(&self) -> bool {
         matches!(self, Self::Accepted)
     }

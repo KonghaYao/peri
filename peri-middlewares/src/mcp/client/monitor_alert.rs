@@ -14,9 +14,9 @@
 
 use std::time::{Duration, Instant};
 
-use peri_acp_types::monitor::{
-    monitor_alert_delivery_id, monitor_alert_reminder, MonitorAlertMeta, MONITOR_META_KEY,
-};
+use peri_acp_types::monitor;
+use peri_acp_types::monitor::MonitorAlertMeta;
+use peri_acp_types::monitor::MONITOR_META_KEY;
 use peri_acp_types::session::{MessageKind, MessageSource};
 use rmcp::model::MetaObject;
 
@@ -139,7 +139,7 @@ pub(crate) async fn push_monitor_alert(
         );
         return false;
     };
-    let reminder = match monitor_alert_reminder(
+    let reminder = match monitor::monitor_alert_reminder(
         raw_monitor_id,
         meta.label.as_deref(),
         hits,
@@ -162,7 +162,7 @@ pub(crate) async fn push_monitor_alert(
             MessageKind::Defer,
             MessageSource::McpNotification,
             reminder,
-            monitor_alert_delivery_id(raw_monitor_id, hits),
+            monitor::monitor_alert_delivery_id(raw_monitor_id, hits),
         )
         .await;
     if let Err(error) = outcome {

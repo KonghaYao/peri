@@ -1,7 +1,17 @@
 //! 手动 Full 的完整 payload 恢复、报告排除与冷加载。
-use super::*;
+use crate::session::command::compact::tests::BoundSession;
+use crate::session::command::compact::tests::MockEventSink;
+use crate::session::command::compact::CompactCommand;
+use async_trait::async_trait;
+use peri_acp_types::command::FeedbackLevel;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session_resources::NewSession;
+use peri_acp_types::session_resources::NewSessionMeta;
+use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::session_resources::{BindingState, ChildSnapshot, FrozenState};
 use peri_acp_types::store::InheritedContext;
+use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
     ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
@@ -11,6 +21,9 @@ use peri_model::{
     Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult, ModelStream,
     StopReason,
 };
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 fn report(body: &str) -> PersistedPayload {
@@ -52,7 +65,7 @@ impl Model for CapturingSummary {
         _: CancellationToken,
     ) -> ModelResult<ModelResponse> {
         self.requests.lock().unwrap().push(request);
-        ModelResponse::new(
+        ModelResponse::try_new(
             ModelMessage::assistant_text("<summary>REPORT_DECISION</summary>"),
             StopReason::EndTurn,
             None,
@@ -77,9 +90,9 @@ async fn test_compact_report_manual_full_and_cold_reload() {
         .await
         .unwrap();
     let model = Arc::new(CapturingSummary::default());
-    let first = execute_compact(
+    let first = crate::session::command::compact::tests::execute_compact(
         &CompactCommand,
-        make_ctx_with_model_and_thread(
+        crate::session::command::compact::tests::make_ctx_with_model_and_thread(
             Arc::new(MockEventSink::new()),
             history,
             session.cwd.clone(),
@@ -92,9 +105,9 @@ async fn test_compact_report_manual_full_and_cold_reload() {
     assert_eq!(first.feedback.as_ref().unwrap().level, FeedbackLevel::Info);
     assert!(first.messages[0].content().contains("REPORT_DECISION"));
     assert!(session.stored_flags().await[&payload.id()].excluded);
-    let second = execute_compact(
+    let second = crate::session::command::compact::tests::execute_compact(
         &CompactCommand,
-        make_ctx_with_model_and_thread(
+        crate::session::command::compact::tests::make_ctx_with_model_and_thread(
             Arc::new(MockEventSink::new()),
             session.stored_messages().await,
             session.cwd.clone(),
@@ -151,9 +164,9 @@ async fn test_compact_report_only_persisted_reminders() {
         .await
         .unwrap();
     let model = Arc::new(CapturingSummary::default());
-    let result = execute_compact(
+    let result = crate::session::command::compact::tests::execute_compact(
         &CompactCommand,
-        make_ctx_with_model_and_thread(
+        crate::session::command::compact::tests::make_ctx_with_model_and_thread(
             Arc::new(MockEventSink::new()),
             vec![],
             session.cwd.clone(),
@@ -224,9 +237,9 @@ async fn test_compact_report_manual_child_preserves_parent_flags() {
         .await
         .unwrap();
     let model = Arc::new(CapturingSummary::default());
-    let result = execute_compact(
+    let result = crate::session::command::compact::tests::execute_compact(
         &CompactCommand,
-        make_ctx_with_model_and_thread(
+        crate::session::command::compact::tests::make_ctx_with_model_and_thread(
             Arc::new(MockEventSink::new()),
             vec![parent_message],
             session.cwd.clone(),

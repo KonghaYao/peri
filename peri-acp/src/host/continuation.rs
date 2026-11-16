@@ -35,9 +35,10 @@
 use std::sync::Arc;
 
 use crate::session::executor::ContinuationRequest;
-use peri_acp_types::cron::{
-    cron_trigger_reminder, CronContinuationRequest, CronTrigger, CronTriggerReminderError,
-};
+use peri_acp_types::cron;
+use peri_acp_types::cron::CronContinuationRequest;
+use peri_acp_types::cron::CronTrigger;
+use peri_acp_types::cron::CronTriggerReminderError;
 use peri_acp_types::session::{MessageKind, MessageQueue, MessageSource, QueuedMessage};
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
@@ -50,11 +51,13 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use super::{
-    dispatch_prompt_turn,
-    task_scope::{HostTaskKind, HostTaskOwnerKind, HostTaskSpawner},
-    AcpServerConfig, PromptLocks, SessionState, SharedSessions,
-};
+use super::task_scope::HostTaskKind;
+use super::task_scope::HostTaskOwnerKind;
+use super::task_scope::HostTaskSpawner;
+use super::AcpServerConfig;
+use super::PromptLocks;
+use super::SessionState;
+use super::SharedSessions;
 
 /// 判定并**原子 take** session 的 continuation 标记（每 session coalesce）。
 ///
@@ -240,7 +243,7 @@ pub(crate) async fn run_cron_continuation_scheduler(
                     state.continuation_mq_steering_pending = true;
                     state.continuation_epoch
                 };
-                let result = dispatch_prompt_turn(
+                let result = super::dispatch_prompt_turn(
                     continuation_params(&req.session_id),
                     super::PromptOrigin::Scheduled,
                     Some(epoch),
@@ -319,7 +322,7 @@ pub(super) async fn enqueue_cron_trigger(
     queue: &MessageQueue,
     trigger: &CronTrigger,
 ) -> CronTriggerAdmission {
-    match cron_trigger_reminder(&trigger.task_id, &trigger.firing_id, &trigger.prompt) {
+    match cron::cron_trigger_reminder(&trigger.task_id, &trigger.firing_id, &trigger.prompt) {
         Ok(reminder) => {
             let delivery_id =
                 peri_acp_types::cron::cron_firing_delivery_id(&trigger.task_id, &trigger.firing_id);
@@ -497,7 +500,7 @@ pub(crate) async fn run_continuation_scheduler(
                 // dispatch_prompt_turn 在获取同一把 prompt lock 后校验 epoch 和
                 // SubAgentComplete Defer，避免本处预先持锁后再次获取导致死锁。
                 let params = continuation_params(&session_id);
-                let result = dispatch_prompt_turn(
+                let result = super::dispatch_prompt_turn(
                     params,
                     super::PromptOrigin::Continuation {
                         mq_steering: req.mq_steering,

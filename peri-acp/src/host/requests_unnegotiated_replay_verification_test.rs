@@ -1,4 +1,14 @@
-use super::*;
+use crate::host::requests::tests::unnegotiated_replay_tests::ReplayFixture;
+use crate::host::requests::tests::unnegotiated_replay_tests::SpyMode;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::ContentBlock;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::messages::ToolCallRequest;
+
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::PeriCaps;
+use serde_json::json;
+use serde_json::Value;
 
 // ── S9-verification：独立复核用例（复核者加入，非实现者用例）─────────────────────
 
@@ -40,7 +50,11 @@ async fn s9_verification_unnegotiated_replay_equals_canonical_history_for_mixed_
     let canonical = fixture.canonical().await;
     assert_eq!(canonical.len(), 8, "夹具前提：8 条持久化载荷");
     // 交错的归档段（工具调用 + 工具结果 + 一条 human），不是前缀。
-    fixture.archive(&payload_ids(&canonical)[1..4]).await;
+    fixture
+        .archive(
+            &crate::host::requests::tests::unnegotiated_replay_tests::payload_ids(&canonical)[1..4],
+        )
+        .await;
     fixture.set_caps(PeriCaps::default());
 
     let effective = fixture.effective().await;
@@ -52,7 +66,10 @@ async fn s9_verification_unnegotiated_replay_equals_canonical_history_for_mixed_
     assert_eq!(
         canonical
             .iter()
-            .filter(|p| payload_text(p).starts_with("归档"))
+            .filter(
+                |p| crate::host::requests::tests::unnegotiated_replay_tests::payload_text(p)
+                    .starts_with("归档")
+            )
             .count(),
         3,
         "夹具前提：canonical 读取含三条归档原文"
@@ -70,8 +87,10 @@ async fn s9_verification_unnegotiated_replay_equals_canonical_history_for_mixed_
     assert_eq!(fixture.spy.full_reads(), 0, "流式路径不读全量");
 
     // 无私有语义：响应与全部通知里不得出现分页 / 代次私有字段（默认 caps 连接）。
-    let response_keys = all_keys(&response);
-    let notification_keys = replay_keys(&fixture);
+    let response_keys =
+        crate::host::requests::tests::unnegotiated_replay_tests::all_keys(&response);
+    let notification_keys =
+        crate::host::requests::tests::unnegotiated_replay_tests::replay_keys(&fixture);
     let private: Vec<&str> = response_keys
         .iter()
         .chain(notification_keys.iter())
@@ -144,7 +163,9 @@ async fn s9_verification_negotiated_connection_still_carries_the_entry_marks() {
         ])
         .await;
     let canonical = fixture.canonical().await;
-    let archived: Vec<MessageId> = payload_ids(&canonical)[..3].to_vec();
+    let archived: Vec<MessageId> =
+        crate::host::requests::tests::unnegotiated_replay_tests::payload_ids(&canonical)[..3]
+            .to_vec();
     fixture.archive(&archived).await;
     fixture.set_connection_caps(PeriCaps {
         replay: true,
@@ -167,7 +188,8 @@ async fn s9_verification_negotiated_connection_still_carries_the_entry_marks() {
     );
     let updates = fixture.updates();
     assert_eq!(updates.len(), 2, "有效集合只有两条可展示条目");
-    for (params, payload) in updates.iter().zip(&canonical[3..]) {
+    let paired_payload = updates.iter().zip(&canonical[3..]);
+    for (params, payload) in paired_payload {
         let meta = &params["update"]["_meta"];
         assert_eq!(meta["periReplay"], Value::Bool(true));
         assert_eq!(

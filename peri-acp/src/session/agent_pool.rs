@@ -10,7 +10,8 @@
 //! | `cached_llm` | provider configuration fingerprint | `auxiliary_model` + `auto_classifier_model` | Validated per-prompt via `has_valid_cache()` |
 //! | `subagent_llm_cache` | provider configuration fingerprint | `Arc<dyn Model>` (shared `reqwest::Client`) | Held until `invalidate()` or session close |
 
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::provider::LlmProvider;
 use crate::session::retry_events::RetryEventForwarder;
@@ -27,6 +28,7 @@ pub use peri_agent::session::exec::stage_builder::CachedLlmInstances;
 ///
 /// Populated on first prompt, reused on subsequent prompts.
 /// Invalidated when provider changes (model switch via `session/set_model`).
+#[derive(Default)]
 pub struct AgentPool {
     /// Cached LLM instances (biggest allocation win).
     cached_llm: Option<CachedLlmInstances>,
@@ -44,13 +46,9 @@ pub struct AgentPool {
     pub(crate) retry_events: RetryEventForwarder,
 }
 
-impl Default for AgentPool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl AgentPool {
+    /// Starts an empty pool; cached clients remain scoped to this session.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             cached_llm: None,
@@ -73,7 +71,7 @@ impl AgentPool {
     }
 
     /// Get cached LLM instances (returns `None` if cache empty or invalid).
-    pub fn get_cached_llm(&self) -> Option<&CachedLlmInstances> {
+    pub fn cached_llm(&self) -> Option<&CachedLlmInstances> {
         self.cached_llm.as_ref()
     }
 
@@ -85,6 +83,7 @@ impl AgentPool {
     }
 
     /// Current fingerprint (empty if no cache).
+    #[must_use]
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
     }

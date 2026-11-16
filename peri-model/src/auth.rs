@@ -14,14 +14,17 @@ pub struct RequestCredential {
 }
 
 impl RequestCredential {
+    #[must_use]
     pub fn new(bearer: String, version: String) -> Self {
         Self { bearer, version }
     }
 
+    #[must_use]
     pub fn bearer(&self) -> &str {
         &self.bearer
     }
 
+    #[must_use]
     pub fn version(&self) -> &str {
         &self.version
     }

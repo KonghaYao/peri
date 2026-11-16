@@ -1,4 +1,5 @@
-use super::*;
+use super::InstallScope;
+use super::Path;
 
 #[test]
 fn scope_writes_are_isolated_and_preserve_sibling_fields() {
@@ -19,13 +20,15 @@ fn scope_writes_are_isolated_and_preserve_sibling_fields() {
         std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
         std::fs::write(settings_path, r#"{"theme":"keep","enabledPlugins":{}}"#).unwrap();
         let plugin_id = format!("scope-{scope:?}");
-        update_enabled_plugins(&plugin_id, *scope, home.path(), Some(project.path())).unwrap();
+        super::update_enabled_plugins(&plugin_id, *scope, home.path(), Some(project.path()))
+            .unwrap();
         let settings: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(settings_path).unwrap()).unwrap();
         assert_eq!(settings["theme"], "keep");
         assert_eq!(settings["enabledPlugins"][&plugin_id], true);
         assert_eq!(settings["enabledPlugins"].as_object().unwrap().len(), 1);
-        remove_from_enabled_plugins(&plugin_id, scope, home.path(), Some(project.path())).unwrap();
+        super::remove_from_enabled_plugins(&plugin_id, scope, home.path(), Some(project.path()))
+            .unwrap();
         let settings: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(settings_path).unwrap()).unwrap();
         assert_eq!(settings["theme"], "keep");
@@ -37,8 +40,8 @@ fn scope_writes_are_isolated_and_preserve_sibling_fields() {
 fn scoped_toggle_without_session_never_falls_back_to_user_settings() {
     let home = tempfile::tempdir().unwrap();
     for scope in [InstallScope::Project, InstallScope::Local] {
-        assert!(update_enabled_plugins("plugin", scope, home.path(), None).is_err());
-        assert!(remove_from_enabled_plugins("plugin", &scope, home.path(), None).is_err());
+        assert!(super::update_enabled_plugins("plugin", scope, home.path(), None).is_err());
+        assert!(super::remove_from_enabled_plugins("plugin", &scope, home.path(), None).is_err());
     }
     assert!(!home.path().join("settings.json").exists());
 }
@@ -49,7 +52,9 @@ fn malformed_settings_are_not_overwritten_on_enable() {
     let settings_path = home.path().join("settings.json");
     for content in ["{malformed", "[]", "null"] {
         std::fs::write(&settings_path, content).unwrap();
-        assert!(update_enabled_plugins("plugin", InstallScope::User, home.path(), None).is_err());
+        assert!(
+            super::update_enabled_plugins("plugin", InstallScope::User, home.path(), None).is_err()
+        );
         assert_eq!(std::fs::read_to_string(&settings_path).unwrap(), content);
     }
 }
@@ -101,7 +106,7 @@ async fn production_port_scoped_install_update_uninstall_preserves_user_settings
         assert_eq!(installed.scope, scope);
         assert_eq!(installed.project_path.as_deref(), project.path().to_str());
         let scoped_settings =
-            enabled_plugins_settings_path(scope, home.path(), Some(project.path())).unwrap();
+            super::enabled_plugins_settings_path(scope, home.path(), Some(project.path())).unwrap();
         let value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&scoped_settings).unwrap()).unwrap();
         assert_eq!(value["enabledPlugins"]["scoped@scope-market"], true);
@@ -122,9 +127,10 @@ async fn production_port_scoped_install_update_uninstall_preserves_user_settings
             .uninstall(&installed.id, scope, home.path(), Some(project.path()))
             .await
             .unwrap();
-        let records =
-            load_installed_plugins(Some(&home.path().join("plugins/installed_plugins.json")))
-                .unwrap();
+        let records = super::load_installed_plugins(Some(
+            &home.path().join("plugins/installed_plugins.json"),
+        ))
+        .unwrap();
         assert!(records.plugins.is_empty());
         let value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&scoped_settings).unwrap()).unwrap();
@@ -188,12 +194,12 @@ async fn production_port_user_install_uninstall_needs_no_session() {
         .uninstall(&installed.id, InstallScope::User, home.path(), None)
         .await
         .unwrap();
-    assert!(
-        load_installed_plugins(Some(&home.path().join("plugins/installed_plugins.json")))
-            .unwrap()
-            .plugins
-            .is_empty()
-    );
+    assert!(super::load_installed_plugins(Some(
+        &home.path().join("plugins/installed_plugins.json")
+    ))
+    .unwrap()
+    .plugins
+    .is_empty());
 }
 
 #[tokio::test]
@@ -272,12 +278,12 @@ async fn production_port_user_scope_does_not_acquire_session_identity() {
         )
         .await
         .unwrap();
-    assert!(
-        load_installed_plugins(Some(&home.path().join("plugins/installed_plugins.json")))
-            .unwrap()
-            .plugins
-            .is_empty()
-    );
+    assert!(super::load_installed_plugins(Some(
+        &home.path().join("plugins/installed_plugins.json")
+    ))
+    .unwrap()
+    .plugins
+    .is_empty());
 }
 
 #[tokio::test]
@@ -302,7 +308,7 @@ async fn production_port_ambiguous_scopes_fail_without_mutation() {
             .unwrap();
     }
     let path = home.path().join("plugins/installed_plugins.json");
-    let mut records = load_installed_plugins(Some(&path)).unwrap();
+    let mut records = super::load_installed_plugins(Some(&path)).unwrap();
     let duplicate = records
         .plugins
         .iter()
@@ -310,7 +316,7 @@ async fn production_port_ambiguous_scopes_fail_without_mutation() {
         .unwrap()
         .clone();
     records.plugins.push(duplicate);
-    save_installed_plugins(&records, Some(&path)).unwrap();
+    super::save_installed_plugins(&records, Some(&path)).unwrap();
     let original = std::fs::read(&path).unwrap();
     let loaded = crate::plugin::load_enabled_plugins(home.path(), Some(project.path())).unwrap();
     assert!(manager

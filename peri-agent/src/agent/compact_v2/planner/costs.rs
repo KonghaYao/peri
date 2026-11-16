@@ -1,6 +1,6 @@
 //! One cost scan per current result block. IDs survive earlier sibling omissions.
-use super::index::ResultContent;
-use crate::agent::token::{estimate_block_chars, estimate_request_tokens};
+use crate::agent::compact_v2::planner::index::ResultContent;
+
 use crate::messages::{BaseMessage, ContentBlock, MessageContent};
 use std::collections::HashMap;
 
@@ -17,7 +17,10 @@ pub(super) fn result_costs(messages: &[BaseMessage]) -> HashMap<String, (usize, 
                 tool_call_id.clone(),
                 (
                     ResultContent::Message(content).text_chars(),
-                    estimate_request_tokens(std::slice::from_ref(message), &[]),
+                    crate::agent::token::estimate_request_tokens(
+                        std::slice::from_ref(message),
+                        &[],
+                    ),
                 ),
             );
             continue;
@@ -35,7 +38,7 @@ pub(super) fn result_costs(messages: &[BaseMessage]) -> HashMap<String, (usize, 
                             tool_use_id.clone(),
                             (
                                 ResultContent::Blocks(content).text_chars(),
-                                estimate_block_chars(block, &[]).div_ceil(4),
+                                crate::agent::token::estimate_block_chars(block, &[]).div_ceil(4),
                             ),
                         );
                     }
@@ -51,7 +54,7 @@ pub(super) fn result_costs(messages: &[BaseMessage]) -> HashMap<String, (usize, 
                     };
                     let chars = serde_json::from_value::<ContentBlock>(value.clone()).map_or_else(
                         |_| value.to_string().chars().count() as u64,
-                        |block| estimate_block_chars(&block, &[]),
+                        |block| crate::agent::token::estimate_block_chars(&block, &[]),
                     );
                     costs.insert(
                         id.to_string(),

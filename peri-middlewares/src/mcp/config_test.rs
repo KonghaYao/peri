@@ -2,7 +2,12 @@ use std::path::PathBuf;
 
 use tempfile::NamedTempFile;
 
-use super::*;
+use super::HashMap;
+use super::McpConfigError;
+use super::McpConfigFile;
+use super::McpServerConfig;
+use super::OAuthConfig;
+use super::Path;
 use crate::mcp::builtin::BuiltinInjectionPolicy;
 use crate::plugin::PluginOrigin;
 
@@ -61,7 +66,7 @@ fn install_enabled_plugin(claude_home: &Path, name: &str, mcp_servers_json: &str
 
 #[test]
 fn test_load_from_nonexistent_path() {
-    let result = load_from_path(Path::new("/nonexistent/path/file.json"));
+    let result = super::load_from_path(Path::new("/nonexistent/path/file.json"));
     assert!(result.is_ok());
     assert!(result.unwrap().mcp_servers.is_empty());
 }
@@ -74,7 +79,7 @@ fn test_load_from_valid_json() {
         br#"{"mcpServers":{"fs":{"command":"npx","args":["-y","@mcp/filesystem"]}}}"#,
     )
     .unwrap();
-    let config = load_from_path(f.path()).unwrap();
+    let config = super::load_from_path(f.path()).unwrap();
     assert_eq!(config.mcp_servers.len(), 1);
     assert_eq!(config.mcp_servers["fs"].command.as_deref(), Some("npx"));
     assert_eq!(config.mcp_servers["fs"].args.as_ref().unwrap().len(), 2);
@@ -89,7 +94,7 @@ fn test_removed_protocol_version_is_ignored_by_config() {
     )
     .unwrap();
 
-    let config = load_from_path(f.path()).unwrap();
+    let config = super::load_from_path(f.path()).unwrap();
     let server = &config.mcp_servers["next"];
     assert_eq!(server.url.as_deref(), Some("https://example.com/mcp"));
     let encoded = serde_json::to_value(server).unwrap();
@@ -100,7 +105,7 @@ fn test_removed_protocol_version_is_ignored_by_config() {
 fn test_load_from_invalid_json() {
     let mut f = NamedTempFile::new().unwrap();
     std::io::Write::write_all(&mut f, b"{invalid json}").unwrap();
-    let result = load_from_path(f.path());
+    let result = super::load_from_path(f.path());
     assert!(matches!(result, Err(McpConfigError::ParseError { .. })));
 }
 
@@ -112,7 +117,7 @@ fn test_load_global_config() {
         br#"{"config":{"mcpServers":{"gh":{"url":"https://api.github.com"}}}}"#,
     )
     .unwrap();
-    let config = load_global_config(f.path()).unwrap();
+    let config = super::load_global_config(f.path()).unwrap();
     assert_eq!(config.mcp_servers.len(), 1);
     assert_eq!(
         config.mcp_servers["gh"].url.as_deref(),
@@ -124,7 +129,7 @@ fn test_load_global_config() {
 fn test_load_global_config_top_level() {
     let mut f = NamedTempFile::new().unwrap();
     std::io::Write::write_all(&mut f, br#"{"mcpServers":{"gh":{"command":"npx"}}}"#).unwrap();
-    let config = load_global_config(f.path()).unwrap();
+    let config = super::load_global_config(f.path()).unwrap();
     assert_eq!(config.mcp_servers.len(), 1);
     assert_eq!(config.mcp_servers["gh"].command.as_deref(), Some("npx"));
 }
@@ -132,20 +137,20 @@ fn test_load_global_config_top_level() {
 #[test]
 fn test_expand_env_vars() {
     std::env::set_var("TEST_MCP_VAR", "hello");
-    let result = expand_env_vars("prefix_${TEST_MCP_VAR}_suffix");
+    let result = super::expand_env_vars("prefix_${TEST_MCP_VAR}_suffix");
     assert_eq!(result, "prefix_hello_suffix");
     std::env::remove_var("TEST_MCP_VAR");
 }
 
 #[test]
 fn test_expand_env_vars_missing() {
-    let result = expand_env_vars("${NONEXISTENT_MCP_VAR_12345}");
+    let result = super::expand_env_vars("${NONEXISTENT_MCP_VAR_12345}");
     assert_eq!(result, "");
 }
 
 #[test]
 fn test_expand_env_vars_no_braces() {
-    let result = expand_env_vars("$NO_BRACE");
+    let result = super::expand_env_vars("$NO_BRACE");
     assert_eq!(result, "$NO_BRACE");
 }
 
@@ -207,9 +212,9 @@ fn test_expand_server_config_oauth_client_secret() {
             client_secret: Some("${TEST_OAUTH_SECRET}".into()),
             ..Default::default()
         }),
-        ..test_config()
+        ..super::test_config()
     };
-    let expanded = expand_server_config(&config);
+    let expanded = super::expand_server_config(&config);
     assert_eq!(
         expanded.oauth.unwrap().client_secret.as_deref(),
         Some("secret123")
@@ -224,7 +229,7 @@ fn test_merge_project_overrides_global() {
         "fs".to_string(),
         McpServerConfig {
             command: Some("npx".into()),
-            ..test_config()
+            ..super::test_config()
         },
     );
     let mut project = McpConfigFile::default();
@@ -232,7 +237,7 @@ fn test_merge_project_overrides_global() {
         "fs".to_string(),
         McpServerConfig {
             command: Some("uvx".into()),
-            ..test_config()
+            ..super::test_config()
         },
     );
     let mut merged = global;
@@ -249,7 +254,7 @@ fn test_merge_project_adds_new_server() {
         "fs".to_string(),
         McpServerConfig {
             command: Some("npx".into()),
-            ..test_config()
+            ..super::test_config()
         },
     );
     let mut project = McpConfigFile::default();
@@ -257,7 +262,7 @@ fn test_merge_project_adds_new_server() {
         "gh".to_string(),
         McpServerConfig {
             url: Some("https://api.github.com".into()),
-            ..test_config()
+            ..super::test_config()
         },
     );
     let mut merged = global;
@@ -279,8 +284,12 @@ fn test_remove_server_from_project_config() {
     )
     .unwrap();
 
-    remove_server_from_config_with_paths(dir.path(), &missing_global_path(dir.path()), "server-a")
-        .unwrap();
+    super::remove_server_from_config_with_paths(
+        dir.path(),
+        &missing_global_path(dir.path()),
+        "server-a",
+    )
+    .unwrap();
 
     let content = std::fs::read_to_string(&mcp_path).unwrap();
     let config: McpConfigFile = serde_json::from_str(&content).unwrap();
@@ -302,7 +311,7 @@ fn test_remove_server_from_global_config_nested() {
 
     let empty_cwd = dir.path().join("empty_project");
     std::fs::create_dir_all(&empty_cwd).unwrap();
-    remove_server_from_config_with_paths(&empty_cwd, &settings_path, "gh").unwrap();
+    super::remove_server_from_config_with_paths(&empty_cwd, &settings_path, "gh").unwrap();
 
     let content = std::fs::read_to_string(&settings_path).unwrap();
     let value: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -327,7 +336,7 @@ fn test_remove_server_from_global_config_top_level() {
 
     let empty_cwd = dir.path().join("empty_project");
     std::fs::create_dir_all(&empty_cwd).unwrap();
-    remove_server_from_config_with_paths(&empty_cwd, &settings_path, "fs").unwrap();
+    super::remove_server_from_config_with_paths(&empty_cwd, &settings_path, "fs").unwrap();
 
     let content = std::fs::read_to_string(&settings_path).unwrap();
     let value: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -343,7 +352,7 @@ fn test_remove_server_nonexistent_is_idempotent() {
     std::fs::create_dir_all(&settings_dir).unwrap();
     std::fs::write(settings_dir.join("settings.json"), r#"{}"#).unwrap();
 
-    assert!(remove_server_from_config_with_paths(
+    assert!(super::remove_server_from_config_with_paths(
         dir.path(),
         &settings_dir.join("settings.json"),
         "nonexistent",
@@ -360,10 +369,10 @@ fn test_server_config_hash_deterministic() {
         command: Some("node".into()),
         args: Some(vec!["server.js".into()]),
         env: Some(HashMap::from([("KEY".into(), "val".into())])),
-        ..test_config()
+        ..super::test_config()
     };
-    let h1 = server_config_hash(&cfg);
-    let h2 = server_config_hash(&cfg);
+    let h1 = super::server_config_hash(&cfg);
+    let h2 = super::server_config_hash(&cfg);
     assert_eq!(h1, h2);
 }
 
@@ -371,13 +380,13 @@ fn test_server_config_hash_deterministic() {
 fn test_server_config_hash_differs_on_command() {
     let a = McpServerConfig {
         command: Some("node".into()),
-        ..test_config()
+        ..super::test_config()
     };
     let b = McpServerConfig {
         command: Some("python".into()),
-        ..test_config()
+        ..super::test_config()
     };
-    assert_ne!(server_config_hash(&a), server_config_hash(&b));
+    assert_ne!(super::server_config_hash(&a), super::server_config_hash(&b));
 }
 
 #[test]
@@ -385,19 +394,19 @@ fn test_server_config_hash_differs_on_args() {
     let a = McpServerConfig {
         command: Some("node".into()),
         args: Some(vec!["a.js".into()]),
-        ..test_config()
+        ..super::test_config()
     };
     let b = McpServerConfig {
         command: Some("node".into()),
         args: Some(vec!["b.js".into()]),
-        ..test_config()
+        ..super::test_config()
     };
-    assert_ne!(server_config_hash(&a), server_config_hash(&b));
+    assert_ne!(super::server_config_hash(&a), super::server_config_hash(&b));
 }
 
 #[test]
 fn test_expand_env_vars_with_context_plugin_root() {
-    let result = expand_env_vars_with_context(
+    let result = super::expand_env_vars_with_context(
         "${CLAUDE_PLUGIN_ROOT}/server.js",
         Some(Path::new("/plugins/my-plugin")),
         None,
@@ -408,7 +417,7 @@ fn test_expand_env_vars_with_context_plugin_root() {
 
 #[test]
 fn test_expand_env_vars_with_context_plugin_data() {
-    let result = expand_env_vars_with_context(
+    let result = super::expand_env_vars_with_context(
         "${CLAUDE_PLUGIN_DATA}/cache",
         None,
         Some(Path::new("/plugins/my-plugin/.claude-plugin/data")),
@@ -420,14 +429,15 @@ fn test_expand_env_vars_with_context_plugin_data() {
 #[test]
 fn test_expand_env_vars_with_context_user_config() {
     let uc = HashMap::from([("apiKey".into(), "sk-123".into())]);
-    let result = expand_env_vars_with_context("${user_config.apiKey}", None, None, Some(&uc));
+    let result =
+        super::expand_env_vars_with_context("${user_config.apiKey}", None, None, Some(&uc));
     assert_eq!(result, "sk-123");
 }
 
 #[test]
 fn test_expand_env_vars_with_context_fallback_to_env() {
     std::env::set_var("TEST_MCP_CTX_VAR", "hello");
-    let result = expand_env_vars_with_context("${TEST_MCP_CTX_VAR}", None, None, None);
+    let result = super::expand_env_vars_with_context("${TEST_MCP_CTX_VAR}", None, None, None);
     assert_eq!(result, "hello");
     std::env::remove_var("TEST_MCP_CTX_VAR");
 }
@@ -436,7 +446,7 @@ fn test_expand_env_vars_with_context_fallback_to_env() {
 fn test_load_merged_config_full_no_plugins() {
     let dir = tempfile::tempdir().unwrap();
     // 没有 settings.json，没有插件目录（显式全局路径 seam：不读真实 home）
-    let (config, plugin_sources) = load_merged_config_full_with_paths(
+    let (config, plugin_sources) = super::load_merged_config_full_with_paths(
         dir.path(),
         dir.path(),
         &missing_global_path(dir.path()),
@@ -505,7 +515,7 @@ fn test_load_merged_config_full_with_plugin() {
     )
     .unwrap();
 
-    let (config, plugin_sources) = load_merged_config_full_with_paths(
+    let (config, plugin_sources) = super::load_merged_config_full_with_paths(
         &cwd,
         &claude_home,
         &missing_global_path(dir.path()),
@@ -623,7 +633,7 @@ fn test_load_merged_config_full_multiple_plugins() {
     )
     .unwrap();
 
-    let (_config, plugin_sources) = load_merged_config_full_with_paths(
+    let (_config, plugin_sources) = super::load_merged_config_full_with_paths(
         &cwd,
         &claude_home,
         &missing_global_path(dir.path()),
@@ -710,7 +720,7 @@ fn test_load_merged_config_full_plugin_env_preserves_existing() {
     )
     .unwrap();
 
-    let (config, _plugin_sources) = load_merged_config_full_with_paths(
+    let (config, _plugin_sources) = super::load_merged_config_full_with_paths(
         &cwd,
         &claude_home,
         &missing_global_path(dir.path()),

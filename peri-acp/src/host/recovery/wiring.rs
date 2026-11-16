@@ -10,7 +10,7 @@ use peri_acp_types::thread::ThreadId;
 use serde_json::Value;
 
 use super::super::connection::ConnectionContext;
-use super::super::session_endpoint::register_session_endpoint;
+use super::super::session_endpoint;
 use super::super::{AcpServerConfig, SharedSessions};
 use super::{EnteredRecovery, HostSessionRecovery};
 use crate::transport::types::AcpError;
@@ -153,6 +153,7 @@ pub(crate) async fn bind_recovered_sessions(
         };
         let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
         crate::host::requests::bind_session_tasks(&session_id, local, transport);
-        register_session_endpoint(sessions, &session_id, connection, transport).await;
+        session_endpoint::register_session_endpoint(sessions, &session_id, connection, transport)
+            .await;
     }
 }

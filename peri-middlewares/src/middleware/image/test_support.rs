@@ -1,10 +1,16 @@
-use std::{path::Path, sync::Arc, time::Duration};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
-use rmcp::{service::RunningService, ClientLifecycleMode, RoleClient};
+use rmcp::service::RunningService;
+use rmcp::ClientLifecycleMode;
+use rmcp::RoleClient;
 
-use crate::mcp::{
-    client::McpClientHandle, config::ConfigSource, ClientStatus, McpClientPool, OAuthStatus,
-};
+use crate::mcp::client::McpClientHandle;
+use crate::mcp::config::ConfigSource;
+use crate::mcp::ClientStatus;
+use crate::mcp::McpClientPool;
+use crate::mcp::OAuthStatus;
 
 pub(super) struct ImageFixture {
     pub pool: Arc<McpClientPool>,
@@ -66,6 +72,7 @@ impl ImageFixture {
         }
     }
 
+    #[must_use]
     pub fn middleware(&self) -> super::ImageMiddleware {
         super::ImageMiddleware::new().with_mcp_pool(
             self.pool.clone(),

@@ -1,5 +1,9 @@
-use super::test_support::*;
-use super::*;
+use super::{
+    CommitOutcome, HistoryCommitInfo, HistoryEntryView, HistorySource, HistoryWindow,
+    HistoryWindowConfig, PersistentEntryKey, PinReason, SegmentDraft, SegmentOrigin,
+    SegmentPlacement, WindowAnchor, WindowAnchorOffset, WindowIdentity, WindowLimits,
+};
+
 use peri_acp_types::history_window::HistoryCommittedTail;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::thread::ThreadId;
@@ -28,7 +32,7 @@ fn commit_info(
 
 #[test]
 fn live_seal_without_position_stays_unsealed_until_page_promotes_it() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let key = PersistentEntryKey::own("s1:live");
     let segment_key = window
         .register_segment(
@@ -54,25 +58,25 @@ fn live_seal_without_position_stays_unsealed_until_page_promotes_it() {
         window.apply_commit(&commit_info("cp-before-position", 10, "gen-1", 7)),
         CommitOutcome::Applied { sealed_segments: 0 }
     );
-    assert!(!window.segment(segment_key).unwrap().sealed);
-    assert!(!window.segment(segment_key).unwrap().durable);
+    assert!(!window.segment(segment_key).expect("live seal without position stays unsealed until page promotes it: the segment fixture operation uses valid inputs").sealed);
+    assert!(!window.segment(segment_key).expect("live seal without position stays unsealed until page promotes it: the segment fixture operation uses valid inputs").durable);
     assert!(
         window
             .segment(segment_key)
-            .unwrap()
+            .expect("live seal without position stays unsealed until page promotes it: the segment fixture operation uses valid inputs")
             .pins
             .contains(PinReason::Unpersisted)
     );
     assert!(window.promote_live_seal_position(&key, 10));
     assert_eq!(
-        window.segment(segment_key).unwrap().entries[0].position,
+        window.segment(segment_key).expect("live seal without position stays unsealed until page promotes it: the segment fixture operation uses valid inputs").entries[0].position,
         Some(10)
     );
     assert_eq!(
         window.apply_commit(&commit_info("cp-live", 10, "gen-1", 7)),
         CommitOutcome::Applied { sealed_segments: 1 }
     );
-    let segment = window.segment(segment_key).unwrap();
+    let segment = window.segment(segment_key).expect("live seal without position stays unsealed until page promotes it: the segment fixture operation uses valid inputs");
     assert!(segment.sealed);
     assert!(segment.durable);
     assert!(!segment.pins.contains(PinReason::Unpersisted));
@@ -80,7 +84,7 @@ fn live_seal_without_position_stays_unsealed_until_page_promotes_it() {
 
 #[test]
 fn commit_tail_promotes_matching_live_entry_without_page() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let message_id = MessageId::new();
     let key = PersistentEntryKey::own(format!("s1:{}", message_id.as_uuid()));
     let segment_key = window
@@ -117,7 +121,7 @@ fn commit_tail_promotes_matching_live_entry_without_page() {
         window.apply_commit(&info),
         CommitOutcome::Applied { sealed_segments: 1 }
     );
-    let segment = window.segment(segment_key).unwrap();
+    let segment = window.segment(segment_key).expect("commit tail promotes matching live entry without page: the segment fixture operation uses valid inputs");
     assert!(segment.sealed);
     assert!(segment.durable);
     assert!(!segment.pins.contains(PinReason::Unpersisted));
@@ -125,7 +129,7 @@ fn commit_tail_promotes_matching_live_entry_without_page() {
 
 #[test]
 fn same_checkpoint_seals_after_late_position_promotion() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let message_id = MessageId::new();
     let key = PersistentEntryKey::own(format!("s1:{}", message_id.as_uuid()));
     let segment_key = window
@@ -165,7 +169,7 @@ fn same_checkpoint_seals_after_late_position_promotion() {
         window.apply_commit(&info),
         CommitOutcome::Applied { sealed_segments: 0 }
     );
-    assert!(!window.segment(segment_key).unwrap().sealed);
+    assert!(!window.segment(segment_key).expect("same checkpoint seals after late position promotion: the segment fixture operation uses valid inputs").sealed);
 
     // 2. 页响应随后补齐 position（真实路径由 handle_window_page_loaded 完成）。
     window.promote_live_seal_position(&key, 10);
@@ -175,7 +179,7 @@ fn same_checkpoint_seals_after_late_position_promotion() {
         window.apply_commit(&info),
         CommitOutcome::Applied { sealed_segments: 1 }
     );
-    let segment = window.segment(segment_key).unwrap();
+    let segment = window.segment(segment_key).expect("same checkpoint seals after late position promotion: the segment fixture operation uses valid inputs");
     assert!(segment.sealed);
     assert!(segment.durable);
     assert!(!segment.pins.contains(PinReason::Unpersisted));
@@ -186,7 +190,7 @@ fn same_checkpoint_seals_after_late_position_promotion() {
 
 #[test]
 fn live_seal_promotion_ignores_unknown_identity() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let key = PersistentEntryKey::own("s1:live");
     let segment_key = window
         .register_segment(
@@ -203,13 +207,13 @@ fn live_seal_promotion_ignores_unknown_identity() {
         .expect("live seal");
     assert!(!window.promote_live_seal_position(&PersistentEntryKey::own("s1:missing"), 10));
     assert_eq!(
-        window.segment(segment_key).unwrap().entries[0].position,
+        window.segment(segment_key).expect("live seal promotion ignores unknown identity: the segment fixture operation uses valid inputs").entries[0].position,
         None
     );
 }
 #[test]
 fn commit_marks_only_segments_at_or_below_committed_tail() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let sealed_page = window
         .register_segment(segment("page", 5, 10, 20), SegmentPlacement::Tail)
         .expect("page");
@@ -229,7 +233,7 @@ fn commit_marks_only_segments_at_or_below_committed_tail() {
         .register_segment(
             SegmentDraft::new(
                 HistorySource::Own,
-                vec![entry("unmarked", None, 1, 10, 20)],
+                vec![super::test_support::entry("unmarked", None, 1, 10, 20)],
                 10,
                 20,
             )
@@ -241,26 +245,26 @@ fn commit_marks_only_segments_at_or_below_committed_tail() {
     let info = commit_info("cp-1", 10, "gen-1", 7);
     let outcome = window.apply_commit(&info);
     assert_eq!(outcome, CommitOutcome::Applied { sealed_segments: 2 });
-    assert!(window.segment(sealed_page).unwrap().sealed);
-    assert!(window.segment(sealed_live).unwrap().sealed);
-    assert!(window.segment(sealed_live).unwrap().durable);
+    assert!(window.segment(sealed_page).expect("commit marks only segments at or below committed tail: the segment fixture operation uses valid inputs").sealed);
+    assert!(window.segment(sealed_live).expect("commit marks only segments at or below committed tail: the segment fixture operation uses valid inputs").sealed);
+    assert!(window.segment(sealed_live).expect("commit marks only segments at or below committed tail: the segment fixture operation uses valid inputs").durable);
     assert!(
         !window
             .segment(sealed_live)
-            .unwrap()
+            .expect("commit marks only segments at or below committed tail: the segment fixture operation uses valid inputs")
             .pins
             .contains(PinReason::Unpersisted)
     );
-    assert!(!window.segment(pending_live).unwrap().sealed);
-    assert!(!window.segment(pending_live).unwrap().durable);
-    assert!(!window.segment(unmarked).unwrap().sealed);
+    assert!(!window.segment(pending_live).expect("commit marks only segments at or below committed tail: the segment fixture operation uses valid inputs").sealed);
+    assert!(!window.segment(pending_live).expect("commit marks only segments at or below committed tail: the segment fixture operation uses valid inputs").durable);
+    assert!(!window.segment(unmarked).expect("commit marks only segments at or below committed tail: the segment fixture operation uses valid inputs").sealed);
     assert_eq!(window.sealed_segment_count(), 2);
     assert_eq!(
-        window.durable_watermark().unwrap().checkpoint_id.as_deref(),
+        window.durable_watermark().expect("commit marks only segments at or below committed tail: the durable_watermark fixture operation uses valid inputs").checkpoint_id.as_deref(),
         Some("cp-1")
     );
     assert_eq!(
-        window.durable_watermark().unwrap().committed_tail,
+        window.durable_watermark().expect("commit marks only segments at or below committed tail: the durable_watermark fixture operation uses valid inputs").committed_tail,
         Some(info.committed_tail.clone())
     );
     assert!(window.budget().pinned_body_bytes < 40);
@@ -268,7 +272,7 @@ fn commit_marks_only_segments_at_or_below_committed_tail() {
 
 #[test]
 fn commit_is_idempotent_by_checkpoint() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     window
         .register_segment(segment("a", 10, 10, 20), SegmentPlacement::Tail)
         .expect("segment");
@@ -283,7 +287,7 @@ fn commit_is_idempotent_by_checkpoint() {
 
 #[test]
 fn stale_generation_or_structure_is_dropped_without_marking_checkpoint() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     window
         .register_segment(segment("a", 10, 10, 20), SegmentPlacement::Tail)
         .expect("segment");
@@ -300,7 +304,7 @@ fn stale_generation_or_structure_is_dropped_without_marking_checkpoint() {
 
 #[test]
 fn invalid_tail_does_not_burn_the_checkpoint() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     window
         .register_segment(segment("a", 10, 10, 20), SegmentPlacement::Tail)
         .expect("segment");
@@ -326,7 +330,7 @@ fn commit_without_open_window_is_ignored() {
 
 #[test]
 fn retention_plan_keeps_viewport_and_one_adjacent_segment() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let a = window
         .register_segment(segment("a", 5, 10, 20), SegmentPlacement::Tail)
         .expect("a");
@@ -343,7 +347,7 @@ fn retention_plan_keeps_viewport_and_one_adjacent_segment() {
         window.apply_commit(&commit_info("cp-1", 15, "gen-1", 7)),
         CommitOutcome::Applied { sealed_segments: 3 }
     );
-    let a_entry = window.segment(a).unwrap().entries[0].key.clone();
+    let a_entry = window.segment(a).expect("retention plan keeps viewport and one adjacent segment: the segment fixture operation uses valid inputs").entries[0].key.clone();
     window.set_anchor(Some(WindowAnchor::new(
         a_entry,
         None,
@@ -358,7 +362,7 @@ fn retention_plan_keeps_viewport_and_one_adjacent_segment() {
 
 #[test]
 fn open_after_lost_commit_notification_realigns_window() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     window
         .register_segment(segment("a", 10, 10, 20), SegmentPlacement::Tail)
         .expect("segment");
@@ -391,3 +395,5 @@ fn commit_info_decodes_the_s4_notification_shape() {
         crate::kit::acp_types::AcpEventData::HistoryCommitted(_)
     ));
 }
+
+use super::test_support::segment;

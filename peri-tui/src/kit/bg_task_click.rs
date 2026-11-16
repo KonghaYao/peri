@@ -2,12 +2,7 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{
-    BgDisplayEntry, NOTIFICATION, Notification, SELECTED_BG_TASK_ID, SELECTED_SUBAGENT_ID,
-    SELECTED_WORKFLOW_RUN_ID,
-};
-use crate::kit::bg_task_identity::resolve_subagent_id_for_display;
-use crate::kit::panel_registry::open_panel;
+
 use ratatui_kit::ratatui::layout::Rect;
 use std::time::{Duration, Instant};
 
@@ -95,8 +90,8 @@ pub fn hit_test_bg_task_line(
 pub fn route_bg_task_click(entry: &BgDisplayEntry) -> BgTaskClickRoute {
     match entry.agent_type.as_str() {
         "agent" => {
-            let subagent_id =
-                resolve_subagent_id_for_display(entry).unwrap_or_else(|| entry.id.clone());
+            let subagent_id = crate::kit::bg_task_identity::resolve_subagent_id_for_display(entry)
+                .unwrap_or_else(|| entry.id.clone());
             BgTaskClickRoute::SubAgent { subagent_id }
         }
         "shell" => BgTaskClickRoute::Shell {
@@ -114,15 +109,15 @@ pub fn apply_bg_task_click_route(route: BgTaskClickRoute) {
     match route {
         BgTaskClickRoute::SubAgent { subagent_id } => {
             *SELECTED_SUBAGENT_ID.state().write() = Some(subagent_id);
-            open_panel(PanelKind::SubAgentDetail);
+            crate::kit::panel_registry::open_panel(PanelKind::SubAgentDetail);
         }
         BgTaskClickRoute::Shell { task_id } => {
             *SELECTED_BG_TASK_ID.state().write() = Some(task_id);
-            open_panel(PanelKind::ShellDetail);
+            crate::kit::panel_registry::open_panel(PanelKind::ShellDetail);
         }
         BgTaskClickRoute::Workflow { run_id } => {
             *SELECTED_WORKFLOW_RUN_ID.state().write() = Some(run_id);
-            open_panel(PanelKind::Workflow);
+            crate::kit::panel_registry::open_panel(PanelKind::Workflow);
         }
         BgTaskClickRoute::UnknownKind => {
             *NOTIFICATION.state().write() = Some(Notification {
@@ -146,3 +141,15 @@ pub fn route_bg_task_click_at_index(
 #[cfg(test)]
 #[path = "bg_task_click_test.rs"]
 mod tests;
+
+use crate::kit::atoms::BgDisplayEntry;
+
+use crate::kit::atoms::NOTIFICATION;
+
+use crate::kit::atoms::Notification;
+
+use crate::kit::atoms::SELECTED_BG_TASK_ID;
+
+use crate::kit::atoms::SELECTED_SUBAGENT_ID;
+
+use crate::kit::atoms::SELECTED_WORKFLOW_RUN_ID;

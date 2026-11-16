@@ -11,24 +11,30 @@
 //! `DeliveryIncomplete` 会优先于该摘要返回。不共享 `recovery_test` 的夹具：本用例只需要一个
 //! 门控/可切状态的服务端与一个真实临时根。
 
-use std::{
-    collections::VecDeque,
-    io::Read,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::collections::VecDeque;
+use std::io::Read;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
 
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
 
-use super::{stats::SpoolFallbackReason, Batcher, BatcherConfig, FlushReport, ShutdownReport};
+use super::stats::SpoolFallbackReason;
+use super::Batcher;
+use super::BatcherConfig;
+use super::FlushReport;
+use super::ShutdownReport;
 use crate::client::{ExportConfig, LangfuseClient};
 use crate::config::{Compression, TelemetryConfig};
 use crate::error::LangfuseError;
+use crate::spool;
 use crate::spool::native::NativeSpool;
-use crate::spool::{route_fingerprint, SpoolStore};
+use crate::spool::SpoolStore;
 use crate::types::{IngestionEvent, TraceBody};
 
 const PUBLIC_KEY: &str = "pk-test";
@@ -68,7 +74,7 @@ async fn wait_until(what: &str, deadline: Duration, mut ready: impl FnMut() -> b
 /// 真实临时根上的 native 端口与 batcher：端口 route 与同一凭据/端点的导出 route 一致。
 fn spool_batcher(url: &str, quota: u64) -> (tempfile::TempDir, Arc<dyn SpoolStore>, Batcher) {
     let root = tempfile::tempdir().expect("temporary spool root");
-    let route = route_fingerprint(url, PUBLIC_KEY, SECRET_KEY).expect("route fingerprint");
+    let route = spool::route_fingerprint(url, PUBLIC_KEY, SECRET_KEY).expect("route fingerprint");
     let store: Arc<dyn SpoolStore> = Arc::new(
         NativeSpool::open_at(root.path().to_path_buf(), route, quota).expect("native spool"),
     );
@@ -467,7 +473,8 @@ async fn delete_failure_stays_pending_until_the_next_shutdown_retries_it() {
     let server = Server::start(&[200]).await;
     server.hold();
     let root = tempfile::tempdir().expect("temporary spool root");
-    let route = route_fingerprint(&server.url, PUBLIC_KEY, SECRET_KEY).expect("route fingerprint");
+    let route =
+        spool::route_fingerprint(&server.url, PUBLIC_KEY, SECRET_KEY).expect("route fingerprint");
     let store: Arc<dyn SpoolStore> = Arc::new(
         NativeSpool::open_at(root.path().to_path_buf(), route, OBJECT_QUOTA_BYTES * 2)
             .expect("native spool"),

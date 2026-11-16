@@ -1,11 +1,15 @@
 //! Full 报告替换：真实请求边界、长历史、失败与继承所有权。
-use super::*;
+use crate::agent::compact_v2::config::CompactConfig;
+
+use crate::agent::model_bridge::AgentModelBridge;
 use crate::agent::stages::{compact, reason, CompactInput, ReasonInput, StageContext};
 use crate::agent::token::ContextBudget;
 use crate::error::AgentError;
+use crate::messages::BaseMessage;
 use crate::messages::{MessageId, ToolCallRequest};
 use crate::session::store::FrozenContext;
 use crate::session::test_resources::TestSession;
+use crate::session::transcript::MessageTranscript;
 use crate::session::{MessageKind, MessageQueue, MessageSource, QueuedMessage, Session};
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::system_reminder::{
@@ -13,10 +17,13 @@ use peri_acp_types::system_reminder::{
     ReminderSource, SystemReminder, TrustedSystemReminder, TrustedSystemReminderFactory,
     SYSTEM_REMINDER_VERSION,
 };
+use peri_model::ModelMessage;
+use peri_model::ModelRequest;
 use peri_model::{
     Model, ModelCapabilities, ModelResponse, ModelResult, ModelStream, ModelStreamEvent, StopReason,
 };
 use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 fn report(body: impl Into<String>) -> TrustedSystemReminder {
     TrustedSystemReminderFactory::for_producer()
@@ -32,7 +39,7 @@ fn report(body: impl Into<String>) -> TrustedSystemReminder {
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap()
+        .expect("the construct fixture result is required for this assertion")
 }
 
 struct ReportModel {
@@ -67,7 +74,10 @@ impl Model for ReportModel {
         request: ModelRequest,
         _: CancellationToken,
     ) -> ModelResult<ModelResponse> {
-        self.requests.lock().unwrap().push(request);
+        self.requests
+            .lock()
+            .expect("self requests mutex must remain unpoisoned throughout the test")
+            .push(request);
         if let Some(queue) = &self.incoming {
             queue.push_sync(QueuedMessage::system_reminder(
                 MessageKind::Defer,
@@ -75,7 +85,7 @@ impl Model for ReportModel {
                 report("REPORT_ARRIVED_DURING_FULL"),
             ));
         }
-        ModelResponse::new(
+        ModelResponse::try_new(
             ModelMessage::assistant_text(self.summary),
             self.stop.clone(),
             None,
@@ -88,8 +98,11 @@ impl Model for ReportModel {
         request: ModelRequest,
         cancellation: CancellationToken,
     ) -> ModelResult<ModelStream> {
-        self.requests.lock().unwrap().push(request);
-        let response = ModelResponse::new(
+        self.requests
+            .lock()
+            .expect("self requests mutex must remain unpoisoned throughout the test")
+            .push(request);
+        let response = ModelResponse::try_new(
             ModelMessage::assistant_text("continue"),
             StopReason::EndTurn,
             None,
@@ -131,7 +144,7 @@ async fn test_full_report_long_session_releases_reports_before_next_reason_reque
         .resources
         .append_history(&bound.thread_id, &payloads)
         .await
-        .unwrap();
+        .expect("the append history fixture result is required for this assertion");
     let session = Session::new(
         Arc::from("/tmp"),
         FrozenContext::builder().build(),
@@ -168,7 +181,7 @@ async fn test_full_report_long_session_releases_reports_before_next_reason_reque
             has_tool_calls: false
         })
         .await
-        .unwrap()
+        .expect("the clone fixture result is required for this assertion")
         .compacted
     );
     reason::run_reason(ReasonInput {
@@ -176,11 +189,15 @@ async fn test_full_report_long_session_releases_reports_before_next_reason_reque
         has_tool_calls: false,
     })
     .await
-    .unwrap();
+    .expect("the run reason fixture result is required for this assertion");
     {
-        let requests = model.requests.lock().unwrap();
+        let requests = model
+            .requests
+            .lock()
+            .expect("model requests mutex must remain unpoisoned throughout the test");
         assert_eq!(requests.len(), 2);
-        let summary_request = serde_json::to_string(&requests[0]).unwrap();
+        let summary_request = serde_json::to_string(&requests[0])
+            .expect("to_string must accept this test fixture representation");
         for index in 0..23 {
             assert!(
                 summary_request.contains(&format!("REPORT_TAIL_{index}")),
@@ -191,7 +208,8 @@ async fn test_full_report_long_session_releases_reports_before_next_reason_reque
             summary_request.matches("source=\\\"subagent\\\"").count(),
             23
         );
-        let next_request = serde_json::to_string(&requests[1]).unwrap();
+        let next_request = serde_json::to_string(&requests[1])
+            .expect("to_string must accept this test fixture representation");
         assert!(next_request.contains("REPORT_DECISION"));
         assert!(next_request.contains("fixed instruction"));
         assert!(!next_request.contains("REPORT_TAIL_"));
@@ -202,7 +220,7 @@ async fn test_full_report_long_session_releases_reports_before_next_reason_reque
         .resources
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert_eq!(
         stored.payloads.len(),
         3001,
@@ -220,9 +238,14 @@ async fn test_full_report_only_history_and_successive_snapshots() {
     let first = transcript.append_system_reminder(report("FIRST_REPORT"));
     let model = ReportModel::new();
     let config = CompactConfig::default();
-    let result = full_compact_inner(&mut transcript, Some(&model), &config, "/tmp")
-        .await
-        .unwrap();
+    let result = crate::agent::compact_v2::full::full_compact_inner(
+        &mut transcript,
+        Some(&model),
+        &config,
+        "/tmp",
+    )
+    .await
+    .expect("the full compact inner fixture result is required for this assertion");
     assert_eq!(result.affected_count, 1);
     assert_eq!(
         (result.before_visible_len, result.after_visible_len),
@@ -232,17 +255,26 @@ async fn test_full_report_only_history_and_successive_snapshots() {
     assert!(!transcript.flags(later).excluded);
     assert!(transcript
         .visible_model_messages()
-        .unwrap()
+        .expect("the visible model messages fixture result is required for this assertion")
         .iter()
         .any(|m| m.id() == later));
-    full_compact_inner(&mut transcript, Some(&model), &config, "/tmp")
-        .await
-        .unwrap();
-    let requests = model.requests.lock().unwrap();
+    let _ = crate::agent::compact_v2::full::full_compact_inner(
+        &mut transcript,
+        Some(&model),
+        &config,
+        "/tmp",
+    )
+    .await
+    .expect("the full compact inner fixture result is required for this assertion");
+    let requests = model
+        .requests
+        .lock()
+        .expect("model requests mutex must remain unpoisoned throughout the test");
     assert!(serde_json::to_string(&requests[0])
-        .unwrap()
+        .expect("to_string must accept this test fixture representation")
         .contains("FIRST_REPORT"));
-    let second = serde_json::to_string(&requests[1]).unwrap();
+    let second = serde_json::to_string(&requests[1])
+        .expect("to_string must accept this test fixture representation");
     assert!(!second.contains("FIRST_REPORT"));
     assert!(second.contains("LATER_REPORT"));
     assert!(second.contains("REPORT_DECISION"));
@@ -250,7 +282,13 @@ async fn test_full_report_only_history_and_successive_snapshots() {
         transcript.get(first).is_none() && transcript.get(later).is_none(),
         "Full 提交后已排除报告必须从热态释放（持久化事实仍带 excluded）"
     );
-    assert_eq!(transcript.visible_model_messages().unwrap().len(), 1);
+    assert_eq!(
+        transcript
+            .visible_model_messages()
+            .expect("the visible model messages fixture result is required for this assertion")
+            .len(),
+        1
+    );
 }
 
 /// [回归测试] 摘要须保留完整工具参数、结果和消息角色，不再按字段或前三行预览。
@@ -273,15 +311,18 @@ async fn test_full_report_request_preserves_structured_tool_history() {
         "first\nsecond\nthird\nfourth\nRESULT_TAIL",
     ));
     let model = ReportModel::new();
-    full_compact_inner(
+    let _ = crate::agent::compact_v2::full::full_compact_inner(
         &mut transcript,
         Some(&model),
         &CompactConfig::default(),
         "/tmp",
     )
     .await
-    .unwrap();
-    let requests = model.requests.lock().unwrap();
+    .expect("the full compact inner fixture result is required for this assertion");
+    let requests = model
+        .requests
+        .lock()
+        .expect("model requests mutex must remain unpoisoned throughout the test");
     let request = &requests[0];
     assert!(matches!(
         request.messages[2],
@@ -291,7 +332,8 @@ async fn test_full_report_request_preserves_structured_tool_history() {
         request.messages[3],
         ModelMessage::ToolResult { .. }
     ));
-    let body = serde_json::to_string(request).unwrap();
+    let body = serde_json::to_string(request)
+        .expect("to_string must accept this test fixture representation");
     assert!(body.contains("ARGUMENT_TAIL") && body.contains("RESULT_TAIL"));
     assert!(request.tools.is_empty(), "摘要请求不得开放工具执行");
 }
@@ -307,13 +349,16 @@ async fn test_full_report_invalid_summary_preserves_original_history() {
         let mut transcript =
             MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
         let id = transcript.append_system_reminder(report("REPORT_MUST_SURVIVE_FAILURE"));
-        transcript.flush_persistence().await.unwrap();
+        transcript
+            .flush_persistence()
+            .await
+            .expect("the flush persistence fixture result is required for this assertion");
         let model = ReportModel {
             summary,
             stop,
             ..ReportModel::new()
         };
-        let error = full_compact_inner(
+        let error = crate::agent::compact_v2::full::full_compact_inner(
             &mut transcript,
             Some(&model),
             &CompactConfig::default(),
@@ -332,14 +377,27 @@ async fn test_full_report_invalid_summary_preserves_original_history() {
             ),
             "{error:?}"
         );
-        assert_eq!(model.requests.lock().unwrap().len(), 2);
+        assert_eq!(
+            model
+                .requests
+                .lock()
+                .expect("model requests mutex must remain unpoisoned throughout the test")
+                .len(),
+            2
+        );
         assert!(!transcript.flags(id).excluded);
-        assert_eq!(transcript.visible_model_messages().unwrap().len(), 1);
+        assert_eq!(
+            transcript
+                .visible_model_messages()
+                .expect("the visible model messages fixture result is required for this assertion")
+                .len(),
+            1
+        );
         let stored = bound
             .resources
             .load_session_snapshot(&bound.thread_id)
             .await
-            .unwrap();
+            .expect("the load session snapshot fixture result is required for this assertion");
         assert_eq!(stored.payloads.len(), 1);
         assert!(stored.flags.is_empty());
     }
@@ -357,15 +415,19 @@ async fn test_full_report_inherited_only_skips_summary_model() {
         }])
         .with_persistence(bound.resources(), bound.thread_id.clone());
     let model = ReportModel::new();
-    let result = full_compact_inner(
+    let result = crate::agent::compact_v2::full::full_compact_inner(
         &mut transcript,
         Some(&model),
         &CompactConfig::default(),
         "/tmp",
     )
     .await
-    .unwrap();
-    assert!(model.requests.lock().unwrap().is_empty());
+    .expect("the full compact inner fixture result is required for this assertion");
+    assert!(model
+        .requests
+        .lock()
+        .expect("model requests mutex must remain unpoisoned throughout the test")
+        .is_empty());
     assert_eq!(result.affected_count, 0);
     assert_eq!(
         result.summary.as_deref(),
@@ -376,12 +438,12 @@ async fn test_full_report_inherited_only_skips_summary_model() {
         .resources
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(stored.flags.is_empty());
     assert_eq!(stored.payloads.len(), 1);
     assert!(stored.payloads[0]
         .as_message()
-        .unwrap()
+        .expect("the as message fixture result is required for this assertion")
         .content()
         .contains("No conversation history to compact."));
 }
@@ -399,15 +461,21 @@ async fn test_full_report_inherited_context_preserves_ancestor_ownership() {
         .with_persistence(bound.resources(), bound.thread_id.clone());
     let own = transcript.append_system_reminder(report("OWN_REPORT"));
     let model = ReportModel::new();
-    full_compact_inner(
+    let _ = crate::agent::compact_v2::full::full_compact_inner(
         &mut transcript,
         Some(&model),
         &CompactConfig::default(),
         "/tmp",
     )
     .await
-    .unwrap();
-    let body = serde_json::to_string(&model.requests.lock().unwrap()[0]).unwrap();
+    .expect("the full compact inner fixture result is required for this assertion");
+    let body = serde_json::to_string(
+        &model
+            .requests
+            .lock()
+            .expect("model requests mutex must remain unpoisoned throughout the test")[0],
+    )
+    .expect("to_string must accept this test fixture representation");
     assert!(body.contains("ANCESTOR_REPORT") && body.contains("OWN_REPORT"));
     assert!(!transcript.flags(ancestor).excluded);
     assert!(
@@ -418,7 +486,7 @@ async fn test_full_report_inherited_context_preserves_ancestor_ownership() {
         .resources
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(!stored.flags.contains_key(&ancestor));
     assert!(stored.flags[&own].excluded);
 }
@@ -435,15 +503,21 @@ async fn test_full_report_arriving_during_summary_stays_available() {
         incoming: Some(queue.clone()),
         ..ReportModel::new()
     };
-    full_compact_inner(
+    let _ = crate::agent::compact_v2::full::full_compact_inner(
         &mut transcript,
         Some(&model),
         &CompactConfig::default(),
         "/tmp",
     )
     .await
-    .unwrap();
-    let request = serde_json::to_string(&model.requests.lock().unwrap()[0]).unwrap();
+    .expect("the full compact inner fixture result is required for this assertion");
+    let request = serde_json::to_string(
+        &model
+            .requests
+            .lock()
+            .expect("model requests mutex must remain unpoisoned throughout the test")[0],
+    )
+    .expect("to_string must accept this test fixture representation");
     assert!(request.contains("OLD_REPORT"));
     assert!(!request.contains("REPORT_ARRIVED_DURING_FULL"));
     let arrived = queue.drain_all_sync().pop().expect("报告必须留在 MQ");
@@ -453,12 +527,17 @@ async fn test_full_report_arriving_during_summary_stays_available() {
         panic!("expected a system reminder payload");
     };
     transcript.append_system_reminder(reminder);
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     assert!(
         transcript.get(old).is_none(),
         "Full 已排除的旧报告必须从热态释放"
     );
-    let visible = transcript.visible_model_messages().unwrap();
+    let visible = transcript
+        .visible_model_messages()
+        .expect("the visible model messages fixture result is required for this assertion");
     assert_eq!(visible.len(), 2);
     assert!(visible[0].content().contains("REPORT_DECISION"));
     assert!(visible[1].content().contains("REPORT_ARRIVED_DURING_FULL"));
@@ -466,7 +545,7 @@ async fn test_full_report_arriving_during_summary_stays_available() {
         .resources
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(!stored
         .flags
         .get(&visible[1].id())
@@ -494,13 +573,18 @@ async fn test_full_report_uses_committed_micro_view() {
     }
     transcript.append_system_reminder(report("UNTRUNCATED_REPORT"));
     let config = CompactConfig::default();
-    use crate::agent::compact_v2::planner::{
-        plan_micro_with_facts, ArchivePlanningScope, ContextPressure, MicroPlanningFacts,
-    };
+    use crate::agent::compact_v2::planner;
+    use crate::agent::compact_v2::planner::ArchivePlanningScope;
+    use crate::agent::compact_v2::planner::ContextPressure;
+    use crate::agent::compact_v2::planner::MicroPlanningFacts;
     let mut facts = MicroPlanningFacts {
         archive_scope: Some(ArchivePlanningScope {
             thread_id: bound.thread_id.clone(),
-            committed_tail: transcript.entries().last().unwrap().id(),
+            committed_tail: transcript
+                .entries()
+                .last()
+                .expect("transcript entries fixture must contain the expected element")
+                .id(),
         }),
         ..Default::default()
     };
@@ -516,7 +600,7 @@ async fn test_full_report_uses_committed_micro_view() {
             }
         }
     }
-    let plan = plan_micro_with_facts(
+    let plan = planner::plan_micro_with_facts(
         &transcript,
         &config,
         &ContextPressure {
@@ -528,32 +612,43 @@ async fn test_full_report_uses_committed_micro_view() {
             cache_hit_rate: 0.0,
         },
         &facts,
-        &super::super::projection::ProviderCapabilities::default(),
+        &crate::agent::compact_v2::projection::ProviderCapabilities::default(),
     )
-    .unwrap();
+    .expect("the plan micro with facts fixture result is required for this assertion");
     assert!(
         crate::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
             .await
-            .unwrap()
+            .expect("the apply micro plan fixture result is required for this assertion")
             > 0
     );
-    let view = super::super::projection::render_persisted_llm_view(
+    let view = crate::agent::compact_v2::projection::render_persisted_llm_view(
         &transcript,
-        &super::super::projection::ProviderCapabilities::default(),
+        &crate::agent::compact_v2::projection::ProviderCapabilities::default(),
     )
-    .unwrap();
-    let expected = AgentModelBridge::convert_messages(&view).unwrap();
+    .expect("the render persisted llm view fixture result is required for this assertion");
+    let expected = AgentModelBridge::convert_messages(&view)
+        .expect("the convert messages fixture result is required for this assertion");
     let model = ReportModel::new();
-    full_compact_inner(&mut transcript, Some(&model), &config, "/tmp")
-        .await
-        .unwrap();
-    let requests = model.requests.lock().unwrap();
+    let _ = crate::agent::compact_v2::full::full_compact_inner(
+        &mut transcript,
+        Some(&model),
+        &config,
+        "/tmp",
+    )
+    .await
+    .expect("the full compact inner fixture result is required for this assertion");
+    let requests = model
+        .requests
+        .lock()
+        .expect("model requests mutex must remain unpoisoned throughout the test");
     let messages = &requests[0].messages;
     assert_eq!(
-        serde_json::to_value(&messages[1..messages.len() - 1]).unwrap(),
-        serde_json::to_value(expected).unwrap()
+        serde_json::to_value(&messages[1..messages.len() - 1])
+            .expect("the len fixture result is required for this assertion"),
+        serde_json::to_value(expected)
+            .expect("to_value must accept this test fixture representation")
     );
     assert!(serde_json::to_string(&messages)
-        .unwrap()
+        .expect("to_string must accept this test fixture representation")
         .contains("UNTRUNCATED_REPORT"));
 }

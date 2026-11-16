@@ -1,24 +1,31 @@
-use super::*;
+use super::Color;
+use super::Cow;
+use super::MarkdownRenderCache;
+use super::Palette;
+use super::scan;
 
 fn assert_streaming_matches_terminal(source: &str) {
     let palette = Palette::default();
     let mut cache = MarkdownRenderCache::default();
     IMAGE_SCANNED_BYTES.with(|count| count.set(0));
-    for end in source
-        .match_indices('\n')
-        .map(|(offset, _)| offset + 1)
-        .step_by(128)
-        .chain(std::iter::once(source.len()))
     {
-        let input = &source[..end];
-        let streaming = parse_markdown_chunks_cached(input, 80, palette, Color::Reset, &mut cache);
-        let reference = parse_markdown(input, 80, palette, Color::Reset);
-        assert_eq!(streaming.segments().cloned().collect::<Vec<_>>(), reference);
+        let iteration_items = source
+            .match_indices('\n')
+            .map(|(offset, _)| offset + 1)
+            .step_by(128)
+            .chain(std::iter::once(source.len()));
+        for end in iteration_items {
+            let input = &source[..end];
+            let streaming =
+                super::parse_markdown_chunks_cached(input, 80, palette, Color::Reset, &mut cache);
+            let reference = super::parse_markdown(input, 80, palette, Color::Reset);
+            assert_eq!(streaming.segments().cloned().collect::<Vec<_>>(), reference);
+        }
     }
-    let terminal = parse_markdown_terminal(source, 80, palette, Color::Reset, &mut cache);
+    let terminal = super::parse_markdown_terminal(source, 80, palette, Color::Reset, &mut cache);
     assert_eq!(
         terminal.tail,
-        parse_markdown(source, 80, palette, Color::Reset)
+        super::parse_markdown(source, 80, palette, Color::Reset)
     );
     assert!(cache.chunk_source.is_empty());
     IMAGE_SCANNED_BYTES.with(|count| assert_eq!(count.get(), 0));
@@ -59,7 +66,7 @@ fn lat09_image_free_preprocessing_borrows_original_source() {
         format!("```rust\n{}", "fn main() {}\n".repeat(1024)),
     ] {
         IMAGE_SCANNED_BYTES.with(|count| count.set(0));
-        let (placeholder, images) = preprocess_images(&source);
+        let (placeholder, images) = super::preprocess_images(&source);
         assert!(matches!(placeholder, Cow::Borrowed(_)));
         assert_eq!(placeholder.as_ptr(), source.as_ptr());
         assert!(images.is_empty());
@@ -76,10 +83,10 @@ fn lat09_image_candidates_keep_reference_and_code_fence_semantics() {
         "```text\n![code](https://example.com/a.png)\n```",
         "unfinished ![alt](",
     ] {
-        let sanitized = ensure_closed_code_fences(source);
+        let sanitized = super::ensure_closed_code_fences(source);
         let (expected_source, expected_images) =
             scan::replace_images(&sanitized, &scan::scan_images(&sanitized));
-        let (placeholder, images) = preprocess_images(&sanitized);
+        let (placeholder, images) = super::preprocess_images(&sanitized);
         assert_eq!(placeholder, expected_source);
         assert_eq!(images, expected_images);
         if images.is_empty() {
@@ -89,3 +96,5 @@ fn lat09_image_candidates_keep_reference_and_code_fence_semantics() {
         }
     }
 }
+
+use super::parser::IMAGE_SCANNED_BYTES;

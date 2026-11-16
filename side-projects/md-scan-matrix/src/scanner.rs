@@ -5,7 +5,8 @@
 
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::text::Span;
-use ratatui_kit_markdown::{ParsedBlock, parse_markdown};
+use ratatui_kit_markdown;
+use ratatui_kit_markdown::ParsedBlock;
 
 // ── 1. 前置扫描 ─────────────────────────────────────────────────
 
@@ -27,6 +28,7 @@ pub struct ImageHit {
 /// 与 ratatui-kit-markdown 0.3.0 `parse_markdown`（parser.rs:448）完全一致的 Options。
 /// 前置扫描与 rk_parse 的 Options 必须一致，否则同一段文本会被两种解析器
 /// 判定为不同结构（§3.5 风险）。
+#[must_use]
 pub fn md_options() -> Options {
     Options::all() - Options::ENABLE_SMART_PUNCTUATION
 }
@@ -36,13 +38,17 @@ pub fn md_options() -> Options {
 /// 事件流顺序（OffsetIter 先序遍历）：`Start(Tag::Image)` → inner 事件
 /// （alt 的 `Text`/`Code`）→ `End(TagEnd::Image)`；用栈记录当前活跃图片，
 /// 嵌套图片（alt 内再嵌图片）也能正确归属。
+#[must_use]
 pub fn scan_images(src: &str) -> Vec<ImageHit> {
     let mut hits: Vec<ImageHit> = Vec::new();
     let mut active: Vec<usize> = Vec::new();
     for (event, range) in Parser::new_ext(src, md_options()).into_offset_iter() {
         match event {
             Event::Start(Tag::Image {
-                dest_url, title, id, ..
+                dest_url,
+                title,
+                id,
+                ..
             }) => {
                 let idx = hits.len();
                 hits.push(ImageHit {
@@ -86,6 +92,7 @@ pub enum TokenKind {
     Plain,
 }
 
+#[must_use]
 pub fn token(kind: TokenKind, idx: usize) -> String {
     match kind {
         TokenKind::Nul => format!("\u{0}IMG{idx}\u{0}"),
@@ -95,38 +102,51 @@ pub fn token(kind: TokenKind, idx: usize) -> String {
 }
 
 /// 逆序替换：区间基于原始文本，从后往前替换避免字节位移。
+#[must_use]
 pub fn replace_images(src: &str, hits: &[ImageHit], kind: TokenKind) -> String {
     let mut out = src.to_string();
-    for (i, h) in hits.iter().enumerate().rev() {
-        out.replace_range(h.byte_start..h.byte_end, &token(kind, i));
+    {
+        let indexed_hits = hits.iter().enumerate().rev();
+        for (i, h) in indexed_hits {
+            out.replace_range(h.byte_start..h.byte_end, &token(kind, i));
+        }
     }
     out
 }
 
 /// 碰撞感知编号：为每张图片选择「源文本中尚未出现」的 token 编号，
 /// 替换后 token 出现次数 == 图片数，渲染侧查表无歧义。
-pub fn replace_collision_free(src: &str, hits: &[ImageHit], kind: TokenKind) -> (String, Vec<String>) {
+#[must_use]
+pub fn replace_collision_free(
+    src: &str,
+    hits: &[ImageHit],
+    kind: TokenKind,
+) -> (String, Vec<String>) {
     let mut used: Vec<usize> = Vec::new();
     let mut tokens: Vec<String> = Vec::new();
     let mut out = src.to_string();
-    for h in hits.iter().rev() {
-        let mut n = 0;
-        loop {
-            if !used.contains(&n) && !src.contains(&token(kind, n)) {
-                used.push(n);
-                break;
+    {
+        let iterated_hits = hits.iter().rev();
+        for h in iterated_hits {
+            let mut n = 0;
+            loop {
+                if !used.contains(&n) && !src.contains(&token(kind, n)) {
+                    used.push(n);
+                    break;
+                }
+                n += 1;
             }
-            n += 1;
+            let t = token(kind, n);
+            tokens.push(t.clone());
+            out.replace_range(h.byte_start..h.byte_end, &t);
         }
-        let t = token(kind, n);
-        tokens.push(t.clone());
-        out.replace_range(h.byte_start..h.byte_end, &t);
     }
     tokens.reverse();
     (out, tokens)
 }
 
 /// 统计 token 在文本中的出现次数。
+#[must_use]
 pub fn count_occurrences(text: &str, t: &str) -> usize {
     text.matches(t).count()
 }
@@ -135,12 +155,14 @@ pub fn count_occurrences(text: &str, t: &str) -> usize {
 
 /// 单个 span 的投影：`内容[样式修饰符]`。样式继承关系（token 在强调内应
 /// 带 ITALIC）由此可见。
+#[must_use]
 pub fn span_sig(s: &Span<'_>) -> String {
     format!("{}[{:?}]", s.content, s.style.add_modifier)
 }
 
 /// 把 ParsedBlock 投影为 (块种类, 行列表)；每行是 span 投影的列表。
 /// Table 的 cell 内部用「‖」连接（cell 本身是 span 列表）。
+#[must_use]
 pub fn block_rows(b: &ParsedBlock) -> (String, Vec<Vec<String>>) {
     match b {
         ParsedBlock::Heading(lvl, line) => (
@@ -149,7 +171,10 @@ pub fn block_rows(b: &ParsedBlock) -> (String, Vec<Vec<String>>) {
         ),
         ParsedBlock::Paragraph(lines) => (
             "Paragraph".into(),
-            lines.iter().map(|l| l.spans.iter().map(span_sig).collect()).collect(),
+            lines
+                .iter()
+                .map(|l| l.spans.iter().map(span_sig).collect())
+                .collect(),
         ),
         ParsedBlock::CodeBlock(lang, lines) => (
             format!("CodeBlock(lang={lang:?})"),
@@ -182,12 +207,14 @@ pub fn block_rows(b: &ParsedBlock) -> (String, Vec<Vec<String>>) {
 
 /// 结构形状：块种类 + 每行 span 数。**忽略文本内容**，用于断言
 /// 「替换不破坏块结构」。
+#[must_use]
 pub fn shape(b: &ParsedBlock) -> (String, Vec<usize>) {
     let (k, rows) = block_rows(b);
     (k, rows.iter().map(|r| r.len()).collect())
 }
 
 /// 解析 markdown 并返回 blocks。
+#[must_use]
 pub fn parse(md: &str) -> Vec<ParsedBlock> {
-    parse_markdown(md).blocks
+    ratatui_kit_markdown::parse_markdown(md).blocks
 }

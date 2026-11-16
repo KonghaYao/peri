@@ -1,12 +1,12 @@
 use std::borrow::Cow;
 
-use ratatui::{
-    style::{Modifier, Style},
-    text::Span,
-};
+use ratatui::style::Modifier;
+use ratatui::style::Style;
+use ratatui::text::Span;
 use ratatui_kit_markdown::MarkdownTheme;
 
 /// 检测 span 内容是否被 backtick 包裹（parser 产出的行内代码 span）。
+#[must_use]
 fn is_inline_code_span(text: &str) -> bool {
     text.len() >= 2 && text.starts_with('`') && text.ends_with('`')
 }

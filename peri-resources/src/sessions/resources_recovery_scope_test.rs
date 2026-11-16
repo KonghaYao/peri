@@ -2,9 +2,13 @@
 //!
 //! 夹具一律是临时文件 + 真实 SQLite；断言以读回的事实为准，不解析真实库路径。
 
+use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::thread::WorkState;
 
-use super::*;
+use super::{
+    ChildSnapshot, Fixture, FrozenSnapshotBytes, FrozenState, NewSession, NewSessionMeta,
+    ResolvedWorkspace, SessionBinding, SessionResourceErrorKind, SessionResourcesImpl,
+};
 
 /// 在指定父之下建 child（frozen 逐字节取自根的已保存快照）。
 async fn save_child(

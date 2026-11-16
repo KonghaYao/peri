@@ -1,6 +1,6 @@
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::PendingAttachment;
-use crate::kit::ui_command::{UiCommandAction, resolve_ui_command};
+
+use crate::kit::ui_command::UiCommandAction;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitRequest {
@@ -83,7 +83,7 @@ pub fn parse_submit_request(input: &str) -> Option<SubmitRequest> {
     // ui 域本地拦截：裸名（level 1 快捷形态）与 `ui:` 前缀显式形态均由
     // resolve_ui_command 归一化；命中即本地执行，不发 ACP。
     if command.starts_with('/')
-        && let Some(action) = resolve_ui_command(&command[1..])
+        && let Some(action) = crate::kit::ui_command::resolve_ui_command(&command[1..])
     {
         return Some(match action {
             UiCommandAction::OpenPanel(kind) => SubmitRequest::OpenPanel(kind),
@@ -99,14 +99,17 @@ pub fn parse_submit_request(input: &str) -> Option<SubmitRequest> {
     })
 }
 
+#[must_use]
 fn is_clear_command(command: &str) -> bool {
     matches!(command, "/clear" | "/cls" | "/reset")
 }
 
+#[must_use]
 fn is_rewind_or_undo_command(command: &str) -> bool {
     matches!(command, "/rewind" | "/undo")
 }
 
+#[must_use]
 fn is_setup_command(command: &str) -> bool {
     matches!(command, "/setup")
 }
@@ -131,6 +134,7 @@ fn parse_rewind_args(input: &str) -> RewindRequest {
     }
 }
 
+#[must_use]
 fn parse_export_mode(input: &str) -> ExportMode {
     match input.split_whitespace().nth(1) {
         Some("screen") => ExportMode::Screen,
@@ -141,3 +145,5 @@ fn parse_export_mode(input: &str) -> ExportMode {
 #[cfg(test)]
 #[path = "submit_request_test.rs"]
 mod tests;
+
+use crate::kit::atoms::PendingAttachment;

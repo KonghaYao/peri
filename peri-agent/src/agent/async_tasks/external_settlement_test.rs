@@ -1,7 +1,14 @@
-use super::*;
+use crate::agent::async_tasks::manager::TaskManager;
+use crate::agent::async_tasks::registry::BackgroundRegistryError;
+use crate::agent::async_tasks::registry::BackgroundTaskRegistry;
+use crate::agent::events::BackgroundTaskResult;
+use peri_acp_types::tasks::BgTaskKind;
+use peri_acp_types::tasks::ExternalTaskRegistration;
+use peri_acp_types::tasks::TaskSnapshot;
 use peri_acp_types::tasks::{
     ExternalNotifyFn, TaskManager as TaskManagerPort, TaskRegistrationTicket,
 };
+use std::sync::Arc;
 
 fn make_result() -> BackgroundTaskResult {
     BackgroundTaskResult {
@@ -57,7 +64,7 @@ async fn test_missing_external_task_reports_unconfirmed_delivery() {
     let other = TaskManager::new();
     let ticket = other
         .register_external(make_registration(ok_notify()))
-        .unwrap();
+        .expect("the register external fixture result is required for this assertion");
     let error = manager
         .settle_external(&ticket, "terminal", make_result())
         .await
@@ -77,9 +84,14 @@ async fn test_competing_external_settlement_does_not_acknowledge_failed_delivery
     let receipt = Arc::new(std::sync::OnceLock::<TaskRegistrationTicket>::new());
     let callback_receipt = receipt.clone();
     let request = make_registration(Arc::new(move |result, _| {
-        let manager = weak.upgrade().unwrap();
+        let manager = weak
+            .upgrade()
+            .expect("the upgrade fixture result is required for this assertion");
         let result = result.clone();
-        let ticket = callback_receipt.get().unwrap().clone();
+        let ticket = callback_receipt
+            .get()
+            .expect("callback receipt get fixture must contain the requested entry")
+            .clone();
         Box::pin(async move {
             let error = manager
                 .settle_external(&ticket, "terminal", result.clone())
@@ -89,8 +101,12 @@ async fn test_competing_external_settlement_does_not_acknowledge_failed_delivery
             Err("提交失败".into())
         })
     }));
-    let ticket = manager.register_external(request).unwrap();
-    receipt.set(ticket.clone()).unwrap();
+    let ticket = manager
+        .register_external(request)
+        .expect("the register external fixture result is required for this assertion");
+    receipt
+        .set(ticket.clone())
+        .expect("the set fixture result is required for this assertion");
     assert_eq!(
         manager
             .settle_external(&ticket, "terminal", make_result())
@@ -100,16 +116,16 @@ async fn test_competing_external_settlement_does_not_acknowledge_failed_delivery
     assert_eq!(manager.active_count(), 1);
     manager
         .refresh_external(&ticket, make_registration(ok_notify()))
-        .unwrap();
+        .expect("the refresh external fixture result is required for this assertion");
     assert!(manager
         .settle_external(&ticket, "terminal", make_result())
         .await
-        .unwrap());
+        .expect("the settle external fixture result is required for this assertion"));
     assert_eq!(manager.active_count(), 0);
     assert!(!manager
         .settle_external(&ticket, "terminal", make_result())
         .await
-        .unwrap());
+        .expect("the settle external fixture result is required for this assertion"));
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
 }
 
@@ -119,7 +135,7 @@ async fn test_restoration_preserves_pending_settlement() {
     let manager = TaskManager::new();
     let ticket = manager
         .register_external(make_registration(ok_notify()))
-        .unwrap();
+        .expect("the register external fixture result is required for this assertion");
     assert!(manager.registry.claim_completion(&ticket));
     let error = reconcile_terminal(
         &manager,
@@ -141,11 +157,11 @@ async fn test_abandon_external_settles_with_terminal_record() {
     let manager = TaskManager::new();
     let ticket = manager
         .register_external(make_registration(ok_notify()))
-        .unwrap();
+        .expect("the register external fixture result is required for this assertion");
     assert!(manager
         .abandon_external(&ticket, "owner unreachable")
         .await
-        .unwrap());
+        .expect("the abandon external fixture result is required for this assertion"));
     assert_eq!(manager.active_count(), 0);
     let snapshot = manager.snapshot();
     assert_eq!(snapshot.tasks[0].status, "failed");
@@ -160,8 +176,10 @@ fn child_registration(on_terminal: ExternalNotifyFn) -> ExternalTaskRegistration
 
 fn assert_snapshot_unchanged(manager: &TaskManager, before: &TaskSnapshot) {
     assert_eq!(
-        serde_json::to_value(manager.snapshot()).unwrap(),
-        serde_json::to_value(before).unwrap()
+        serde_json::to_value(manager.snapshot())
+            .expect("the snapshot fixture result is required for this assertion"),
+        serde_json::to_value(before)
+            .expect("to_value must accept this test fixture representation")
     );
 }
 
@@ -171,7 +189,7 @@ async fn test_register_external_rejects_conflicting_initiator_before_mutation() 
     let original_notify = ok_notify();
     let ticket = manager
         .register_external(child_registration(Arc::clone(&original_notify)))
-        .unwrap();
+        .expect("the register external fixture result is required for this assertion");
     let before = manager.snapshot();
     let mut conflict = make_registration(ok_notify());
     conflict.summary = "conflicting metadata".into();
@@ -187,13 +205,16 @@ async fn test_register_external_rejects_conflicting_initiator_before_mutation() 
     ));
     assert_snapshot_unchanged(&manager, &before);
     assert!(Arc::ptr_eq(
-        &manager.registry.external_notify(ticket.task_id()).unwrap(),
+        &manager
+            .registry
+            .external_notify(ticket.task_id())
+            .expect("the task id fixture result is required for this assertion"),
         &original_notify
     ));
     assert!(manager
         .settle_external(&ticket, "terminal", make_result())
         .await
-        .unwrap());
+        .expect("the settle external fixture result is required for this assertion"));
     assert_eq!(
         manager.snapshot().tasks[0].output_preview.as_deref(),
         Some("done")
@@ -205,16 +226,19 @@ async fn test_register_external_matching_initiator_refreshes_callbacks() {
     let manager = TaskManager::new();
     let ticket = manager
         .register_external(child_registration(ok_notify()))
-        .unwrap();
+        .expect("the register external fixture result is required for this assertion");
     let before = manager.snapshot();
     let replay_notify = ok_notify();
     manager
         .refresh_external(&ticket, child_registration(Arc::clone(&replay_notify)))
-        .unwrap();
+        .expect("the refresh external fixture result is required for this assertion");
     assert_eq!(manager.snapshot().tasks[0].task_id, ticket.task_id());
     assert_snapshot_unchanged(&manager, &before);
     assert!(Arc::ptr_eq(
-        &manager.registry.external_notify(ticket.task_id()).unwrap(),
+        &manager
+            .registry
+            .external_notify(ticket.task_id())
+            .expect("the task id fixture result is required for this assertion"),
         &replay_notify
     ));
 }
@@ -225,15 +249,20 @@ async fn test_register_external_discovery_preserves_known_child_route() {
     let original_notify = ok_notify();
     let ticket = manager
         .register_external(child_registration(Arc::clone(&original_notify)))
-        .unwrap();
+        .expect("the register external fixture result is required for this assertion");
     let before = manager.snapshot();
     let mut discovery = make_registration(ok_notify());
     discovery.initiator_session_id = None;
-    manager.refresh_external(&ticket, discovery).unwrap();
+    manager
+        .refresh_external(&ticket, discovery)
+        .expect("the refresh external fixture result is required for this assertion");
     assert_eq!(manager.snapshot().tasks[0].task_id, ticket.task_id());
     assert_snapshot_unchanged(&manager, &before);
     assert!(Arc::ptr_eq(
-        &manager.registry.external_notify(ticket.task_id()).unwrap(),
+        &manager
+            .registry
+            .external_notify(ticket.task_id())
+            .expect("the task id fixture result is required for this assertion"),
         &original_notify
     ));
 }
@@ -244,7 +273,7 @@ async fn test_restore_external_rejects_conflicting_initiator_before_settlement()
     let original_notify = ok_notify();
     let ticket = manager
         .register_external(child_registration(Arc::clone(&original_notify)))
-        .unwrap();
+        .expect("the register external fixture result is required for this assertion");
     let before = manager.snapshot();
     let conflicting_notify: ExternalNotifyFn =
         Arc::new(|_, _| panic!("conflicting initiator must not receive a terminal result"));
@@ -260,13 +289,16 @@ async fn test_restore_external_rejects_conflicting_initiator_before_settlement()
     assert!(error.contains("initiator conflict"), "{error}");
     assert_snapshot_unchanged(&manager, &before);
     assert!(Arc::ptr_eq(
-        &manager.registry.external_notify(ticket.task_id()).unwrap(),
+        &manager
+            .registry
+            .external_notify(ticket.task_id())
+            .expect("the task id fixture result is required for this assertion"),
         &original_notify
     ));
     assert!(manager
         .settle_external(&ticket, "terminal", make_result())
         .await
-        .unwrap());
+        .expect("the settle external fixture result is required for this assertion"));
 }
 
 #[tokio::test]
@@ -276,7 +308,7 @@ async fn test_restore_external_matching_initiator_uses_replayed_route() {
         Arc::new(|_, _| panic!("matching initiator replay should refresh the callback"));
     let ticket = manager
         .register_external(child_registration(original_notify))
-        .unwrap();
+        .expect("the register external fixture result is required for this assertion");
     let delivered = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let received = Arc::clone(&delivered);
     let replay_notify: ExternalNotifyFn = Arc::new(move |result, _| {
@@ -291,7 +323,7 @@ async fn test_restore_external_matching_initiator_uses_replayed_route() {
         make_result()
     )
     .await
-    .unwrap());
+    .expect("the make result fixture result is required for this assertion"));
     assert_eq!(manager.snapshot().tasks[0].task_id, ticket.task_id());
     assert_eq!(*delivered.lock(), vec!["done"]);
     let snapshot = manager.snapshot();
@@ -313,7 +345,7 @@ async fn test_restore_external_discovery_delivers_to_known_child() {
     });
     let ticket = manager
         .register_external(child_registration(child_notify))
-        .unwrap();
+        .expect("the register external fixture result is required for this assertion");
     let fallback_notify: ExternalNotifyFn =
         Arc::new(|_, _| panic!("discovery must not reroute a known child's terminal result"));
     let mut discovery = make_registration(fallback_notify);
@@ -321,7 +353,7 @@ async fn test_restore_external_discovery_delivers_to_known_child() {
     assert!(
         reconcile_terminal(&manager, &ticket, discovery, "terminal", make_result())
             .await
-            .unwrap()
+            .expect("the make result fixture result is required for this assertion")
     );
     assert_eq!(manager.snapshot().tasks[0].task_id, ticket.task_id());
     assert_eq!(*delivered.lock(), vec!["done"]);
@@ -338,11 +370,11 @@ async fn test_register_external_rejects_conflict_with_restored_terminal_record()
     let manager = TaskManager::new();
     let ticket = manager
         .register_external_terminal(child_registration(ok_notify()))
-        .unwrap();
+        .expect("the register external terminal fixture result is required for this assertion");
     assert!(manager
         .settle_external(&ticket, "terminal", make_result())
         .await
-        .unwrap());
+        .expect("the settle external fixture result is required for this assertion"));
     let before = manager.snapshot();
     assert!(matches!(
         manager.refresh_external(&ticket, make_registration(ok_notify())),
@@ -357,11 +389,11 @@ async fn test_restore_external_rejects_conflict_with_terminal_record() {
     let manager = TaskManager::new();
     let ticket = manager
         .register_external_terminal(child_registration(ok_notify()))
-        .unwrap();
+        .expect("the register external terminal fixture result is required for this assertion");
     assert!(manager
         .settle_external(&ticket, "terminal", make_result())
         .await
-        .unwrap());
+        .expect("the settle external fixture result is required for this assertion"));
     let before = manager.snapshot();
     let mut conflicting_result = make_result();
     conflicting_result.success = false;
@@ -384,11 +416,11 @@ async fn test_restore_external_matching_terminal_replay_is_idempotent() {
     let manager = TaskManager::new();
     let ticket = manager
         .register_external_terminal(child_registration(ok_notify()))
-        .unwrap();
+        .expect("the register external terminal fixture result is required for this assertion");
     assert!(manager
         .settle_external(&ticket, "terminal", make_result())
         .await
-        .unwrap());
+        .expect("the settle external fixture result is required for this assertion"));
     let before = manager.snapshot();
     let replay_notify: ExternalNotifyFn =
         Arc::new(|_, _| panic!("terminal replay must not redeliver"));
@@ -400,7 +432,7 @@ async fn test_restore_external_matching_terminal_replay_is_idempotent() {
         make_result()
     )
     .await
-    .unwrap());
+    .expect("the make result fixture result is required for this assertion"));
     assert_eq!(manager.snapshot().tasks[0].task_id, ticket.task_id());
     assert_snapshot_unchanged(&manager, &before);
 }
@@ -432,7 +464,9 @@ async fn test_cold_restore_reserves_initiator_before_concurrent_registration() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let request = child_registration(paused_notify(Arc::clone(&entered), Arc::clone(&release)));
-    let ticket = manager.register_external_terminal(request).unwrap();
+    let ticket = manager
+        .register_external_terminal(request)
+        .expect("the register external terminal fixture result is required for this assertion");
     let pending_ticket = ticket.clone();
     let restoring = Arc::clone(&manager);
     let restore = tokio::spawn(async move {
@@ -451,7 +485,7 @@ async fn test_cold_restore_reserves_initiator_before_concurrent_registration() {
     ));
     assert_snapshot_unchanged(&manager, &before);
     release.notify_one();
-    assert!(restore.await.unwrap().unwrap());
+    assert!(restore.await.expect("the restore fixture result is required for this assertion").expect("cold restore reserves initiator before concurrent registration: the completed fixture operation must provide its result payload"));
     assert_eq!(manager.snapshot().tasks[0].task_id, ticket.task_id());
     let snapshot = manager.snapshot();
     assert_eq!(snapshot.tasks.len(), 1);
@@ -470,7 +504,9 @@ async fn test_cold_restore_rejects_concurrent_conflicting_restoration() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let request = child_registration(paused_notify(Arc::clone(&entered), Arc::clone(&release)));
-    let ticket = manager.register_external_terminal(request).unwrap();
+    let ticket = manager
+        .register_external_terminal(request)
+        .expect("the register external terminal fixture result is required for this assertion");
     let pending_ticket = ticket.clone();
     let restoring = Arc::clone(&manager);
     let restore = tokio::spawn(async move {
@@ -497,7 +533,7 @@ async fn test_cold_restore_rejects_concurrent_conflicting_restoration() {
     assert!(error.contains("initiator conflict"), "{error}");
     assert_snapshot_unchanged(&manager, &before);
     release.notify_one();
-    restore.await.unwrap().unwrap();
+    restore.await.expect("the restore fixture result is required for this assertion").expect("cold restore rejects concurrent conflicting restoration: the completed fixture operation must provide its result payload");
     assert_eq!(
         manager.snapshot().tasks[0].output_preview.as_deref(),
         Some("done")
@@ -511,7 +547,9 @@ async fn test_cold_restore_matching_and_discovery_replays_preserve_inflight_deli
     let release = Arc::new(tokio::sync::Notify::new());
     let original_notify = paused_notify(Arc::clone(&entered), Arc::clone(&release));
     let request = child_registration(Arc::clone(&original_notify));
-    let ticket = manager.register_external_terminal(request).unwrap();
+    let ticket = manager
+        .register_external_terminal(request)
+        .expect("the register external terminal fixture result is required for this assertion");
     let pending_ticket = ticket.clone();
     let restoring = Arc::clone(&manager);
     let restore = tokio::spawn(async move {
@@ -523,11 +561,13 @@ async fn test_cold_restore_matching_and_discovery_replays_preserve_inflight_deli
     let before = manager.snapshot();
     manager
         .refresh_external(&ticket, child_registration(ok_notify()))
-        .unwrap();
+        .expect("the refresh external fixture result is required for this assertion");
     assert_eq!(manager.snapshot().tasks[0].task_id, ticket.task_id());
     let mut discovery = make_registration(ok_notify());
     discovery.initiator_session_id = None;
-    manager.refresh_external(&ticket, discovery).unwrap();
+    manager
+        .refresh_external(&ticket, discovery)
+        .expect("the refresh external fixture result is required for this assertion");
     assert_eq!(manager.snapshot().tasks[0].task_id, ticket.task_id());
     let error = reconcile_terminal(
         &manager,
@@ -540,12 +580,15 @@ async fn test_cold_restore_matching_and_discovery_replays_preserve_inflight_deli
     .unwrap_err();
     assert!(error.contains("settlement is still pending"), "{error}");
     assert!(Arc::ptr_eq(
-        &manager.registry.external_notify(ticket.task_id()).unwrap(),
+        &manager
+            .registry
+            .external_notify(ticket.task_id())
+            .expect("the task id fixture result is required for this assertion"),
         &original_notify
     ));
     assert_snapshot_unchanged(&manager, &before);
     release.notify_one();
-    restore.await.unwrap().unwrap();
+    restore.await.expect("the restore fixture result is required for this assertion").expect("cold restore matching and discovery replays preserve inflight delivery: the completed fixture operation must provide its result payload");
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
 }
 
@@ -559,7 +602,9 @@ async fn test_cold_restore_delivery_failure_retains_initiator_and_allows_retry()
         Box::pin(async { Err("delivery rejected".into()) })
     });
     let request = child_registration(failed_notify);
-    let ticket = manager.register_external_terminal(request).unwrap();
+    let ticket = manager
+        .register_external_terminal(request)
+        .expect("the register external terminal fixture result is required for this assertion");
     assert_eq!(
         manager
             .settle_external(&ticket, "terminal", make_result())
@@ -587,7 +632,7 @@ async fn test_cold_restore_delivery_failure_retains_initiator_and_allows_retry()
         make_result()
     )
     .await
-    .unwrap());
+    .expect("the make result fixture result is required for this assertion"));
     assert_eq!(manager.snapshot().tasks[0].task_id, ticket.task_id());
     let deliveries = deliveries.lock();
     assert_eq!(deliveries.len(), 2);
@@ -604,7 +649,9 @@ async fn test_cold_restore_aborted_delivery_can_retry_without_losing_initiator()
         Arc::clone(&entered),
         Arc::new(tokio::sync::Notify::new()),
     ));
-    let ticket = manager.register_external_terminal(request).unwrap();
+    let ticket = manager
+        .register_external_terminal(request)
+        .expect("the register external terminal fixture result is required for this assertion");
     let pending_ticket = ticket.clone();
     let restoring = Arc::clone(&manager);
     let restore = tokio::spawn(async move {
@@ -628,7 +675,7 @@ async fn test_cold_restore_aborted_delivery_can_retry_without_losing_initiator()
         make_result(),
     )
     .await
-    .unwrap();
+    .expect("the reconcile terminal fixture result is required for this assertion");
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
 }
 
@@ -638,11 +685,11 @@ async fn test_cold_restore_can_reconcile_after_execution_scope_closes() {
     manager.registry.scope.close();
     let ticket = manager
         .register_external_terminal(child_registration(ok_notify()))
-        .unwrap();
+        .expect("the register external terminal fixture result is required for this assertion");
     assert!(manager
         .settle_external(&ticket, "terminal", make_result())
         .await
-        .unwrap());
+        .expect("the settle external fixture result is required for this assertion"));
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
     assert_eq!(manager.active_count(), 0);
 }
@@ -654,15 +701,19 @@ async fn test_cold_restore_is_not_blocked_by_execution_concurrency_limit() {
         let mut running = child_registration(ok_notify());
         running.kind = BgTaskKind::Shell;
         running.owner_task_id = format!("running-{task_index}");
-        manager.register_external(running).unwrap();
+        manager
+            .register_external(running)
+            .expect("the register external fixture result is required for this assertion");
     }
     let mut restored = child_registration(ok_notify());
     restored.kind = BgTaskKind::Shell;
-    let ticket = manager.register_external_terminal(restored).unwrap();
+    let ticket = manager
+        .register_external_terminal(restored)
+        .expect("the register external terminal fixture result is required for this assertion");
     assert!(manager
         .settle_external(&ticket, "terminal", make_result())
         .await
-        .unwrap());
+        .expect("the settle external fixture result is required for this assertion"));
     let snapshot = manager.snapshot();
     assert_eq!(
         snapshot.tasks.len(),

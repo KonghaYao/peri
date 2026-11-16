@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 /// v2 ObserveEvent 路径使用事件自带的 agent_id 字符串。
 pub(crate) const MAIN_AGENT_KEY: &str = "main";
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StageHandle {
     pub span_id: String,
     pub stage: Stage,
@@ -206,7 +206,7 @@ impl StageSpans {
                     span_id: format!("span_{}", uuid::Uuid::now_v7()),
                     stage_span_id: active.handle.span_id.clone(),
                     trace_id: active.handle.trace_id.clone(),
-                    start_time: super::event_builder::now_rfc3339(),
+                    start_time: crate::langfuse::tracer::event_builder::now_rfc3339(),
                     plan: plan.to_string(),
                     parent_observation_id: active.handle.parent_observation_id.clone(),
                 }),

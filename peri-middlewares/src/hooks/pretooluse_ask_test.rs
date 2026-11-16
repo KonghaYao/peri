@@ -1,7 +1,13 @@
+use peri_agent::middleware::Middleware as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use super::*;
+use super::AgentError;
+use super::HookEvent;
+use super::HookMiddleware;
+use super::HookType;
+use super::RegisteredHook;
+use super::ToolCall;
 use crate::permission::{PermissionMode, SharedPermissionMode};
 use peri_acp_types::error::ToolRejectionCause;
 use peri_agent::interaction::{
@@ -85,7 +91,7 @@ fn make_middleware_with_broker(
     let broker: Arc<dyn UserInteractionBroker> = broker;
     HookMiddleware::new(
         hooks,
-        make_llm_factory(),
+        super::make_llm_factory(),
         std::env::temp_dir().to_str().unwrap(),
         "test-session",
         "/test/transcript.json",
@@ -103,7 +109,7 @@ fn pretooluse_command_hook(json: &str) -> RegisteredHook {
         "command": command
     }))
     .unwrap();
-    make_registered(HookEvent::PreToolUse, hook)
+    super::make_registered(HookEvent::PreToolUse, hook)
 }
 
 fn bash_call(input: serde_json::Value) -> ToolCall {
@@ -181,7 +187,7 @@ async fn test_pretooluse_ask_without_broker_is_rejected_not_allowed() {
     let hook = pretooluse_command_hook(
         r#"{"hook_specific_output":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}"#,
     );
-    let mw = make_middleware_with_mode(vec![hook], PermissionMode::Bypass);
+    let mw = super::make_middleware_with_mode(vec![hook], PermissionMode::Bypass);
 
     let result = mw
         .before_tool(
@@ -253,7 +259,7 @@ async fn test_pretooluse_ask_broker_timeout_is_rejected() {
     let broker_dyn: Arc<dyn UserInteractionBroker> = broker.clone();
     let mw = HookMiddleware::new(
         vec![hook],
-        make_llm_factory(),
+        super::make_llm_factory(),
         std::env::temp_dir().to_str().unwrap(),
         "test-session",
         "/test/transcript.json",

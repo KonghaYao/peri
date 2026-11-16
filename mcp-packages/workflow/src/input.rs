@@ -1,3 +1,5 @@
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, OnceLock};
 
 use peri_workflow::runtime::WorkflowRuntime;
@@ -19,6 +21,14 @@ pub struct WorkflowInstanceInput {
     runtime: Arc<OnceLock<Arc<WorkflowRuntime>>>,
 }
 
+impl Debug for WorkflowInstanceInput {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowInstanceInput")
+            .finish_non_exhaustive()
+    }
+}
+
 /// 槽位绑定结果：让调用方区分「首次 / 幂等重复 / 实例冲突」，而不是共用 `false`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindOutcome {
@@ -32,6 +42,7 @@ pub enum BindOutcome {
 
 impl WorkflowInstanceInput {
     /// 空槽：等待 [`Self::bind`] 绑定运行时（会话装配期的唯一生产形态）。
+    #[must_use]
     pub fn slot() -> Self {
         Self {
             runtime: Arc::new(OnceLock::new()),
@@ -39,6 +50,7 @@ impl WorkflowInstanceInput {
     }
 
     /// 立即绑定的输入（便利构造：测试夹具与已就绪路径，跳过槽位等待）。
+    #[must_use]
     pub fn new(runtime: Arc<WorkflowRuntime>) -> Self {
         let input = Self::slot();
         let outcome = input.bind(runtime);

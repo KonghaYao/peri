@@ -22,11 +22,4 @@
 
 mod subscriber;
 
-pub use subscriber::TracingGuard;
-
-/// 初始化 tracing
-///
-/// 返回的 `TracingGuard` 必须保持存活直到程序退出（通常绑定到 `main` 的局部变量）。
-pub fn init_tracing(service_name: &str) -> TracingGuard {
-    subscriber::init_tracing(service_name)
-}
+pub use subscriber::{init_tracing, TracingGuard};

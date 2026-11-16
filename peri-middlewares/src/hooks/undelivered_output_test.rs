@@ -6,10 +6,11 @@
 //! 诊断，也不得把正文写进日志。
 
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use super::*;
+use super::{HookEvent, HookInput, HookMiddleware, HookType, ReactLLM, RegisteredHook};
 use crate::permission::{PermissionMode, SharedPermissionMode};
 
 /// 捕获 DEBUG 事件字段（正文只以字段名 + 字节数出现）。
@@ -29,7 +30,7 @@ impl tracing::Subscriber for DebugCaptureSubscriber {
     fn event(&self, event: &tracing::Event<'_>) {
         struct Fields(String);
         impl tracing::field::Visit for Fields {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn Debug) {
                 if !self.0.is_empty() {
                     self.0.push(' ');
                 }

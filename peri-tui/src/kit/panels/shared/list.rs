@@ -11,9 +11,7 @@
 
 use ratatui_kit::ratatui::layout::Rect;
 
-use crate::kit::list_nav::{clamp_selection, scroll_start_for_selected};
 use crate::kit::panel_mouse::ListLayout;
-use crate::kit::panel_overlay::panel_content_rows;
 
 /// 列表内容的固定行度量。
 ///
@@ -27,6 +25,7 @@ pub(crate) struct ListMetrics {
 }
 
 impl ListMetrics {
+    #[must_use]
     pub(crate) const fn new(header_rows: u16, item_rows: u16, footer_rows: u16) -> Self {
         Self {
             header_rows,
@@ -61,8 +60,9 @@ impl ListViewport {
         let item_rows = metrics.item_rows.max(1);
         let usable = content_rows.saturating_sub(metrics.header_rows + metrics.footer_rows);
         let visible_items = (usable / item_rows) as usize;
-        let selected = clamp_selection(selected, item_count);
-        let scroll_start = scroll_start_for_selected(selected, item_count, visible_items);
+        let selected = crate::kit::list_nav::clamp_selection(selected, item_count);
+        let scroll_start =
+            crate::kit::list_nav::scroll_start_for_selected(selected, item_count, visible_items);
         Self {
             metrics,
             item_count,
@@ -85,6 +85,7 @@ impl ListViewport {
     }
 
     /// 鼠标命中布局——与 `window()` 同源，供 `panel_mouse::hit_item` 使用。
+    #[must_use]
     pub(crate) fn hit_layout(&self) -> ListLayout {
         ListLayout {
             header_rows: self.metrics.header_rows,
@@ -106,7 +107,7 @@ pub(crate) fn content_rows(measured: Option<Rect>, term_h: u16) -> u16 {
     match measured {
         // 上下边框各占 1 行（`panel_shell!` 的 TOP|BOTTOM），高度不足 3 行按未测量处理
         Some(rect) if rect.height >= 3 => rect.height - 2,
-        _ => panel_content_rows(term_h),
+        _ => crate::kit::panel_overlay::panel_content_rows(term_h),
     }
 }
 

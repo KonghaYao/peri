@@ -1,6 +1,22 @@
-use super::*;
+use super::async_trait;
+use super::default_requires_approval;
+use super::hook_state;
+use super::AgentError;
+use super::ApprovalDecision;
+use super::Arc;
+use super::AutoClassifier;
+use super::Classification;
+use super::InteractionContext;
+use super::InteractionResponse;
+use super::PermissionMiddleware;
+use super::PermissionMode;
+use super::SharedPermissionMode;
+use super::ToolCall;
+use super::TrustedInteractionOwner;
+use super::UserInteractionBroker;
 use peri_agent::messages::BaseMessage;
 use peri_agent::middleware::capabilities::{BeforeToolState, BoundToolOrigin, StateView};
+use peri_agent::middleware::Middleware as _;
 use std::sync::Mutex;
 
 struct RejectBroker;
@@ -208,15 +224,15 @@ fn classifier_context_uses_explicit_approval_facts_and_tool_identity() {
         step: Some(3),
     };
     let call = make_tool_call("Shell");
-    let context = classifier_context(&facts, &call).unwrap();
+    let context = super::classifier_context(&facts, &call).unwrap();
     assert_eq!(context.owner, "session-a");
     assert_eq!(context.execution, facts.binding.attempt_id.to_string());
     assert_eq!(context.call, "auto-classify:3:test-id");
     facts.step = None;
-    assert!(classifier_context(&facts, &call).is_none());
+    assert!(super::classifier_context(&facts, &call).is_none());
     facts.step = Some(3);
     facts.session = None;
-    assert!(classifier_context(&facts, &call).is_none());
+    assert!(super::classifier_context(&facts, &call).is_none());
 }
 
 #[async_trait]

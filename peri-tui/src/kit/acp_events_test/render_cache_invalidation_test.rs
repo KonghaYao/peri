@@ -1,6 +1,7 @@
 //! S6.4：结构性释放使 TOOL_GROUP_CACHE / 投影缓存同步失效。
 
-use super::*;
+use super::TuiRenderUnit;
+
 use crate::kit::tui_render_unit::TuiToolCard;
 use serial_test::serial;
 

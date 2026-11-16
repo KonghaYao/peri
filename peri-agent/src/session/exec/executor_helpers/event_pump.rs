@@ -1,12 +1,16 @@
+use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
-use peri_acp_types::{
-    command::PromptStopReason,
-    event::{EventSink, EventSinkError, EventSubscriber, ExecutorEvent, SubscriptionError},
-    event_v2::{BusHealth, EmitOutcome},
-    identity::SessionSeq,
-    session::TurnTelemetryOutcome,
-};
+use peri_acp_types::command::PromptStopReason;
+use peri_acp_types::event::EventSink;
+use peri_acp_types::event::EventSinkError;
+use peri_acp_types::event::EventSubscriber;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::event::SubscriptionError;
+use peri_acp_types::event_v2::BusHealth;
+use peri_acp_types::event_v2::EmitOutcome;
+use peri_acp_types::identity::SessionSeq;
+use peri_acp_types::session::TurnTelemetryOutcome;
 use tokio::sync::oneshot;
 use tracing::debug;
 
@@ -98,11 +102,11 @@ impl DeliveryCutoff {
 }
 
 /// 事件泵推送 sink 所需的固定上下文（避免逐层传递同组参数）。
-struct PumpSinkContext<'a> {
-    sink: &'a Arc<dyn EventSink>,
-    session_id: &'a str,
+struct PumpSinkContext<'sink> {
+    sink: &'sink Arc<dyn EventSink>,
+    session_id: &'sink str,
     effective_context_window: u32,
-    delivery_journal: Option<&'a UserInputMailbox>,
+    delivery_journal: Option<&'sink UserInputMailbox>,
 }
 
 /// 在推送当前事件之前排空交付日志。锁只在复制快照时持有，等待 sink 期间不持锁。
@@ -357,7 +361,7 @@ async fn recover_lag(ctx: &PumpSinkContext<'_>, health: &BusHealth, skipped: u64
 
 /// 启动主事件泵任务。
 ///
-/// 任务循环（事件三层化：发射点 → [`EventPublisher`] → 本泵订阅）：
+/// 任务循环（事件三层化：发射点 → [`EventPublisher`](peri_acp_types::event::EventPublisher) → 本泵订阅）：
 /// 1. trace_start → 订阅事件流（按 session_id 过滤）→ 协议化推送 sink
 /// 2. 发射点全部结束（`event_rx.closed()`）→ drain 广播在途事件 → 退出事件循环
 /// 3. trace_end + push_done → signal pump completion（在 Langfuse flush 之前）
@@ -511,7 +515,7 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
             .as_ref()
             .and_then(|f| f(telemetry_outcome));
 
-        let stop_reason_str = super::done_stop_reason(stop_reason);
+        let stop_reason_str = crate::session::exec::executor_helpers::done_stop_reason(stop_reason);
         if !delivery_failed {
             sink.push_done(&session_id, stop_reason_str, request_id.as_deref())
                 .await;
@@ -539,4 +543,30 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
     });
 
     PumpHandle { pump_done_rx }
+}
+
+impl Debug for SpawnPumpRequest {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SpawnPumpRequest")
+            .field("session_id", &self.session_id)
+            .field("effective_context_window", &self.effective_context_window)
+            .field(
+                "langfuse_on_turn_start_present",
+                &self.langfuse_on_turn_start.is_some(),
+            )
+            .field(
+                "langfuse_on_turn_end_present",
+                &self.langfuse_on_turn_end.is_some(),
+            )
+            .field("request_id_present", &self.request_id.is_some())
+            .field("delivery_journal_present", &self.delivery_journal.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Debug for PumpHandle {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("PumpHandle").finish_non_exhaustive()
+    }
 }

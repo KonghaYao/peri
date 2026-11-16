@@ -3,8 +3,23 @@
 //! 从 `mod_test.rs` 拆出以控制单文件行数；挂载在 `tests` 下，测试过滤路径为
 //! `permission::tests::workflow::...`。
 
-use super::super::*;
-use super::{approval_state, make_tool_call, registry_effective_name};
+use super::super::async_trait;
+use super::super::default_requires_approval;
+use super::super::AgentError;
+use super::super::ApprovalDecision;
+use super::super::Arc;
+use super::super::AutoClassifier;
+use super::super::Classification;
+use super::super::InteractionContext;
+use super::super::InteractionResponse;
+use super::super::PermissionMiddleware;
+use super::super::PermissionMode;
+use super::super::SharedPermissionMode;
+use super::super::ToolCall;
+use super::super::ToolRejectionCause;
+use super::super::TrustedInteractionOwner;
+use super::super::UserInteractionBroker;
+use peri_agent::middleware::Middleware as _;
 
 // ─── Workflow 启动入口审批（真实 `before_tool` 路径）──────────────────────
 //
@@ -107,7 +122,7 @@ fn mw_with_mode_and_broker(
 fn workflow_start_call() -> ToolCall {
     ToolCall {
         id: "workflow-start".to_string(),
-        name: registry_effective_name("workflow", "Workflow").to_string(),
+        name: super::registry_effective_name("workflow", "Workflow").to_string(),
         input: serde_json::json!({"script": "..."}),
     }
 }
@@ -115,7 +130,7 @@ fn workflow_start_call() -> ToolCall {
 fn workflow_tool_call(original: &str, input: serde_json::Value) -> ToolCall {
     ToolCall {
         id: format!("workflow-{original}"),
-        name: registry_effective_name("workflow", original).to_string(),
+        name: super::registry_effective_name("workflow", original).to_string(),
         input,
     }
 }
@@ -124,7 +139,7 @@ fn workflow_tool_call(original: &str, input: serde_json::Value) -> ToolCall {
 async fn workflow_start_requires_approval_in_default_mode() {
     let broker = RecordingBroker::new(true);
     let mw = mw_with_mode_and_broker(PermissionMode::Default, broker.clone(), None);
-    let mut state = approval_state();
+    let mut state = super::approval_state();
     let tc = workflow_start_call();
 
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
@@ -141,7 +156,7 @@ async fn workflow_start_requires_approval_in_default_mode() {
 async fn workflow_start_rejection_blocks_execution_without_partial_start() {
     let broker = RecordingBroker::new(false);
     let mw = mw_with_mode_and_broker(PermissionMode::Default, broker.clone(), None);
-    let mut state = approval_state();
+    let mut state = super::approval_state();
     let tc = workflow_start_call();
 
     let result = mw.before_tool(&mut state, &tc).await;
@@ -172,10 +187,10 @@ async fn workflow_start_rejection_blocks_execution_without_partial_start() {
 async fn workflow_start_requires_approval_in_accept_edits_mode() {
     let broker = RecordingBroker::new(true);
     let mw = mw_with_mode_and_broker(PermissionMode::AcceptEdit, broker.clone(), None);
-    let mut state = approval_state();
+    let mut state = super::approval_state();
 
     // 对照：AcceptEdits 下 Write 仍免审批（编辑工具自动放行）。
-    let write = make_tool_call(registry_effective_name("workspace", "Write"));
+    let write = super::make_tool_call(super::registry_effective_name("workspace", "Write"));
     mw.before_tool(&mut state, &write).await.unwrap();
     assert!(
         broker.requested_tools().is_empty(),
@@ -198,7 +213,7 @@ async fn workflow_start_auto_mode_deny_does_not_prompt_or_execute() {
         broker.clone(),
         Some(classifier.clone()),
     );
-    let mut state = approval_state();
+    let mut state = super::approval_state();
     let tc = workflow_start_call();
 
     let result = mw.before_tool(&mut state, &tc).await;
@@ -230,7 +245,7 @@ async fn workflow_start_auto_mode_unsure_falls_back_to_single_approval() {
         broker.clone(),
         Some(classifier.clone()),
     );
-    let mut state = approval_state();
+    let mut state = super::approval_state();
     let tc = workflow_start_call();
 
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
@@ -253,7 +268,7 @@ async fn workflow_start_auto_mode_allow_does_not_prompt() {
         broker.clone(),
         Some(classifier.clone()),
     );
-    let mut state = approval_state();
+    let mut state = super::approval_state();
     let tc = workflow_start_call();
 
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
@@ -272,24 +287,26 @@ async fn workflow_start_auto_mode_allow_does_not_prompt() {
 async fn workflow_non_start_tools_do_not_enter_approval() {
     let broker = RecordingBroker::new(false);
     let mw = mw_with_mode_and_broker(PermissionMode::Default, broker.clone(), None);
-    let mut state = approval_state();
+    let mut state = super::approval_state();
 
     let declared = peri_acp_types::builtin_mcp::find("workflow").expect("workflow 实例应有声明");
     let mut checked = 0;
-    for tool in declared
-        .tools
-        .iter()
-        .filter(|tool| tool.original_name != "Workflow")
     {
-        let tc = workflow_tool_call(tool.original_name, serde_json::json!({}));
-        let result = mw.before_tool(&mut state, &tc).await;
-        assert!(
-            result.is_ok(),
-            "`{}` 不应触发审批，实际: {result:?}",
-            tool.effective_name
-        );
-        assert_eq!(result.unwrap().name, tc.name);
-        checked += 1;
+        let matching_tools = declared
+            .tools
+            .iter()
+            .filter(|tool| tool.original_name != "Workflow");
+        for tool in matching_tools {
+            let tc = workflow_tool_call(tool.original_name, serde_json::json!({}));
+            let result = mw.before_tool(&mut state, &tc).await;
+            assert!(
+                result.is_ok(),
+                "`{}` 不应触发审批，实际: {result:?}",
+                tool.effective_name
+            );
+            assert_eq!(result.unwrap().name, tc.name);
+            checked += 1;
+        }
     }
     assert_eq!(
         checked,
@@ -307,8 +324,8 @@ async fn workflow_non_start_tools_do_not_enter_approval() {
 async fn workflow_start_via_execute_extra_tool_requires_approval() {
     let broker = RecordingBroker::new(false);
     let mw = mw_with_mode_and_broker(PermissionMode::Default, broker.clone(), None);
-    let mut state = approval_state();
-    let target = registry_effective_name("workflow", "Workflow");
+    let mut state = super::approval_state();
+    let target = super::registry_effective_name("workflow", "Workflow");
     let tc = ToolCall {
         id: "workflow-extra".to_string(),
         name: "ExecuteExtraTool".to_string(),
@@ -338,7 +355,7 @@ async fn workflow_start_via_execute_extra_tool_requires_approval() {
 #[tokio::test]
 async fn disabled_permission_middleware_keeps_workflow_chain_semantics() {
     let mw = PermissionMiddleware::disabled();
-    let mut state = approval_state();
+    let mut state = super::approval_state();
     let tc = workflow_start_call();
 
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
@@ -351,7 +368,7 @@ async fn disabled_permission_middleware_keeps_workflow_chain_semantics() {
 async fn workflow_start_rejection_in_batch_keeps_control_tools_result() {
     let broker = RecordingBroker::new(false);
     let mw = mw_with_mode_and_broker(PermissionMode::Default, broker.clone(), None);
-    let mut state = approval_state();
+    let mut state = super::approval_state();
     let start = workflow_start_call();
     let status = workflow_tool_call("WorkflowStatus", serde_json::json!({}));
 
@@ -385,7 +402,7 @@ async fn workflow_start_rejection_in_batch_keeps_control_tools_result() {
 /// 「助手退回裸名」这种回归与断言同向变化而无法失败。
 #[test]
 fn cron_sensitive_markdown_uses_registry_effective_name() {
-    let rendered = format_sensitive_tools();
+    let rendered = super::super::format_sensitive_tools();
     let lines: Vec<&str> = rendered.lines().collect();
     assert_eq!(lines.len(), 13, "敏感工具完整列表应逐项渲染");
 
@@ -468,7 +485,7 @@ fn deployment_closed_builtin_is_omitted_from_prompt_without_weakening_approval()
         "WorkflowMiddleware".to_owned(),
         "WorkspaceMiddleware".to_owned(),
     ]);
-    let visible = format_sensitive_tools_for_disabled(&disabled);
+    let visible = super::super::format_sensitive_tools_for_disabled(&disabled);
     assert!(!visible.contains("mcp__cron__cron_register"));
     assert!(!visible.contains("mcp__monitor__monitor_start"));
     assert!(!visible
@@ -476,9 +493,11 @@ fn deployment_closed_builtin_is_omitted_from_prompt_without_weakening_approval()
         .any(|line| line.starts_with("- `mcp__workflow__Workflow`")));
     assert!(!visible.lines().any(|line| line.starts_with("- `Bash`")));
     assert!(visible.lines().any(|line| line.starts_with("- `WebFetch`")));
-    assert!(default_requires_approval("cron_register"));
-    assert!(default_requires_approval("monitor_start"));
+    assert!(super::super::default_requires_approval("cron_register"));
+    assert!(super::super::default_requires_approval("monitor_start"));
     // 关闭实例只影响提示词清单，不削弱运行时判定（仍保守审批）。
-    assert!(default_requires_approval("mcp__workflow__Workflow"));
-    assert_eq!(format_sensitive_tools().lines().count(), 13);
+    assert!(super::super::default_requires_approval(
+        "mcp__workflow__Workflow"
+    ));
+    assert_eq!(super::super::format_sensitive_tools().lines().count(), 13);
 }

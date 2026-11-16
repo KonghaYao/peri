@@ -1,4 +1,10 @@
-use super::*;
+use super::AcpEventData;
+use super::AcpEventWithEpoch;
+use super::AskUser;
+use super::CancellationToken;
+use super::PendingInteraction;
+use super::mpsc;
+use super::serial;
 
 /// [回归测试] production bridge 在 session gate 前不发布 AskUser UI state。
 #[tokio::test]
@@ -26,7 +32,7 @@ async fn test_ask_user_bridge_drops_unowned_events_before_all_side_effects() {
     let (tx, rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
-    let handle = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
+    let handle = super::spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
     tx.send(AcpEventWithEpoch {
         child_origin: None,
         view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
@@ -34,7 +40,7 @@ async fn test_ask_user_bridge_drops_unowned_events_before_all_side_effects() {
         active_session_id: String::new(),
     })
     .await
-    .unwrap();
+    .expect("ask user bridge drops unowned events before all side effects: fixture task and request must complete successfully");
     assert_eq!(observed_rx.recv().await, Some(true));
     *ASK_USER_PENDING.state().write() = Some(PendingInteraction {
         owner: Default::default(),
@@ -47,18 +53,18 @@ async fn test_ask_user_bridge_drops_unowned_events_before_all_side_effects() {
     tx.send(AcpEventWithEpoch {
         child_origin: None,
         view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
-        event: ask_user(),
+        event: super::ask_user(),
         active_session_id: "s1".into(),
     })
     .await
-    .unwrap();
+    .expect("ask user bridge drops unowned events before all side effects: fixture task and request must complete successfully");
     assert_eq!(observed_rx.recv().await, Some(false));
     assert_eq!(
         ASK_USER_PENDING
             .state()
             .read()
             .as_ref()
-            .unwrap()
+            .expect("ask user bridge drops unowned events before all side effects: the fixture storage and layout must support the requested operation")
             .request_id_json,
         "\"sentinel\""
     );
@@ -76,7 +82,7 @@ async fn test_ask_user_bridge_drops_unowned_events_before_all_side_effects() {
         active_session_id: "s1".into(),
     })
     .await
-    .unwrap();
+    .expect("ask user bridge drops unowned events before all side effects: fixture task and request must complete successfully");
     assert_eq!(observed_rx.recv().await, Some(true));
     *ASK_USER_PENDING.state().write() = Some(PendingInteraction {
         owner: Default::default(),
@@ -88,18 +94,18 @@ async fn test_ask_user_bridge_drops_unowned_events_before_all_side_effects() {
     tx.send(AcpEventWithEpoch {
         child_origin: None,
         view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
-        event: ask_user(),
+        event: super::ask_user(),
         active_session_id: "stale".into(),
     })
     .await
-    .unwrap();
+    .expect("ask user bridge drops unowned events before all side effects: fixture task and request must complete successfully");
     assert_eq!(observed_rx.recv().await, Some(false));
     assert_eq!(
         ASK_USER_PENDING
             .state()
             .read()
             .as_ref()
-            .unwrap()
+            .expect("ask user bridge drops unowned events before all side effects: the fixture storage and layout must support the requested operation")
             .request_id_json,
         "\"sentinel\""
     );
@@ -107,25 +113,25 @@ async fn test_ask_user_bridge_drops_unowned_events_before_all_side_effects() {
     tx.send(AcpEventWithEpoch {
         child_origin: None,
         view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
-        event: ask_user(),
+        event: super::ask_user(),
         active_session_id: "s1".into(),
     })
     .await
-    .unwrap();
+    .expect("ask user bridge drops unowned events before all side effects: fixture task and request must complete successfully");
     assert_eq!(observed_rx.recv().await, Some(true));
     assert_eq!(
         ASK_USER_PENDING
             .state()
             .read()
             .as_ref()
-            .unwrap()
+            .expect("ask user bridge drops unowned events before all side effects: the fixture storage and layout must support the requested operation")
             .request_id_json,
         "\"a\""
     );
     assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::AskUser));
     shutdown.cancel();
     drop(tx);
-    handle.await.unwrap();
+    handle.await.expect("ask user bridge drops unowned events before all side effects: fixture task and request must complete successfully");
     *ACP_STATE.state().write() = old_acp_state;
     *ACTIVE_SESSION_ID.state().write() = old_active_session;
     BRIDGE_RESET_COUNTER.set(old_reset);

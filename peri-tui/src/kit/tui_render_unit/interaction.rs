@@ -1,5 +1,5 @@
-use super::fold::{FoldState, fold_state_code};
-use super::hash::{tui_hash_combine, tui_hash_str};
+use super::fold::FoldState;
+
 use crate::acp_client::InteractionOwner;
 
 /// AskUser question-answer block — rendered after user responds to AskUserQuestion tool.
@@ -59,7 +59,8 @@ pub enum InteractionKind {
     AskUser,
 }
 
-/// [G1] InteractionKind 对 hash 的确定性贡献。
+/// \[G1\] InteractionKind 对 hash 的确定性贡献。
+#[must_use]
 pub fn interaction_kind_code(k: &InteractionKind) -> u64 {
     match k {
         InteractionKind::Permission => 1,
@@ -68,29 +69,29 @@ pub fn interaction_kind_code(k: &InteractionKind) -> u64 {
 }
 
 impl TuiAskUserBlock {
-    /// [G1] 内容哈希公式单点——生产创建点 / 结果回写 / 折叠 pass 共用。
+    /// \[G1\] 内容哈希公式单点——生产创建点 / 结果回写 / 折叠 pass 共用。
     /// 包含 kind/pending/verb/question/options/result + fold/is_error/user_modified；
     /// `request_id` 是身份字段不参与（同 message_id 先例）。result 秒级稳定
     /// （提交后定型），pending 翻转与选项变化必须触发按 hash 分片的缓存重建。
     pub fn recompute_hash(&mut self) {
-        let mut h = tui_hash_combine(0, interaction_kind_code(&self.kind));
-        h = tui_hash_combine(h, u64::from(self.pending));
-        h = tui_hash_combine(h, tui_hash_str(&self.verb));
-        h = tui_hash_combine(h, tui_hash_str(&self.question));
+        let mut h = super::hash::tui_hash_combine(0, interaction_kind_code(&self.kind));
+        h = super::hash::tui_hash_combine(h, u64::from(self.pending));
+        h = super::hash::tui_hash_combine(h, super::hash::tui_hash_str(&self.verb));
+        h = super::hash::tui_hash_combine(h, super::hash::tui_hash_str(&self.question));
         for opt in &self.options {
-            h = tui_hash_combine(h, tui_hash_str(opt));
+            h = super::hash::tui_hash_combine(h, super::hash::tui_hash_str(opt));
         }
-        h = tui_hash_combine(h, self.options.len() as u64);
-        h = tui_hash_combine(
+        h = super::hash::tui_hash_combine(h, self.options.len() as u64);
+        h = super::hash::tui_hash_combine(
             h,
             match &self.result {
-                Some(r) => tui_hash_str(r),
+                Some(r) => super::hash::tui_hash_str(r),
                 None => 0,
             },
         );
-        h = tui_hash_combine(h, fold_state_code(self.fold));
-        h = tui_hash_combine(h, u64::from(self.is_error));
-        h = tui_hash_combine(h, u64::from(self.user_modified));
+        h = super::hash::tui_hash_combine(h, super::fold::fold_state_code(self.fold));
+        h = super::hash::tui_hash_combine(h, u64::from(self.is_error));
+        h = super::hash::tui_hash_combine(h, u64::from(self.user_modified));
         self.content_hash = h;
     }
 }

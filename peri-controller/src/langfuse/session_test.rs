@@ -1,4 +1,15 @@
-use super::*;
+use crate::langfuse::config::LangfuseConfig;
+use crate::langfuse::session::LangfuseSession;
+use crate::langfuse::session::LangfuseShutdownReport;
+use crate::langfuse::session_like::LangfuseSessionLike;
+use langfuse_client::DeliveryCounts;
+use langfuse_client::IngestionEvent;
+use langfuse_client::LangfuseError;
+use langfuse_client::ShutdownReport;
+use langfuse_client::SnapshotSource;
+use langfuse_client::TelemetryEvent;
+use peri_config::observability::LangfuseCompression;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn test_invalid_batcher_config_disables_session_without_worker_panic() {
@@ -92,7 +103,7 @@ async fn test_session_delegates_freeze_prepared_and_budget_to_one_deployment() {
     let report = session.shutdown().await;
     assert_eq!(
         report,
-        map_shutdown(deployment),
+        crate::langfuse::session::map_shutdown(deployment),
         "关闭报告必须与部署终态逐一对应，不得落 UnexpectedFailure"
     );
 }
@@ -109,42 +120,46 @@ fn test_shutdown_mapping_covers_every_deployment_terminal_state() {
         active_tasks: 1,
     };
     assert_eq!(
-        map_shutdown(Ok(ShutdownReport::Complete)),
+        crate::langfuse::session::map_shutdown(Ok(ShutdownReport::Complete)),
         LangfuseShutdownReport::Complete
     );
     assert_eq!(
-        map_shutdown(Err(LangfuseError::Pending { counts })),
+        crate::langfuse::session::map_shutdown(Err(LangfuseError::Pending { counts })),
         LangfuseShutdownReport::Pending { counts }
     );
     assert_eq!(
-        map_shutdown(Err(LangfuseError::PersistedPending { counts })),
+        crate::langfuse::session::map_shutdown(Err(LangfuseError::PersistedPending { counts })),
         LangfuseShutdownReport::PersistedPending { counts }
     );
     assert_eq!(
-        map_shutdown(Err(LangfuseError::DeliveryIncomplete { counts })),
+        crate::langfuse::session::map_shutdown(Err(LangfuseError::DeliveryIncomplete { counts })),
         LangfuseShutdownReport::DeliveryIncomplete { counts }
     );
     // 准备失败没有事件级身份：按计数旁路报告，不伪造 failed_events。
     assert_eq!(
-        map_shutdown(Err(LangfuseError::SnapshotPreparationFailed {
+        crate::langfuse::session::map_shutdown(Err(LangfuseError::SnapshotPreparationFailed {
             failed_snapshots: 2,
             counts,
         })),
         LangfuseShutdownReport::DeliveryIncomplete { counts }
     );
     assert_eq!(
-        map_shutdown(Err(LangfuseError::IngestionApi("delivery failed".into()))),
+        crate::langfuse::session::map_shutdown(Err(LangfuseError::IngestionApi(
+            "delivery failed".into()
+        ))),
         LangfuseShutdownReport::DeliveryFailed {
             summary: "delivery failed".into(),
         }
     );
     assert_eq!(
-        map_shutdown(Err(LangfuseError::WorkerJoinFailed { cancelled: true })),
+        crate::langfuse::session::map_shutdown(Err(LangfuseError::WorkerJoinFailed {
+            cancelled: true
+        })),
         LangfuseShutdownReport::WorkerFailed { cancelled: true }
     );
     // 其余终态不得冒充完成或成功。
     assert_eq!(
-        map_shutdown(Err(LangfuseError::BudgetMismatch)),
+        crate::langfuse::session::map_shutdown(Err(LangfuseError::BudgetMismatch)),
         LangfuseShutdownReport::UnexpectedFailure
     );
 }

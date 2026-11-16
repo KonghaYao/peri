@@ -1,9 +1,8 @@
 //! SQLite adapter assembly and read-only fallback for native deployments.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use peri_acp_types::workspace::WorkspaceError;

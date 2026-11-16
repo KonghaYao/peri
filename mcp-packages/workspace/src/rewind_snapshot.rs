@@ -7,11 +7,10 @@
 //! a Workspace that lost them (restart, reconnect) must refuse the reversal
 //! rather than guess a replacement.
 
-use std::{
-    collections::{HashMap, VecDeque},
-    path::PathBuf,
-    sync::Arc,
-};
+use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 

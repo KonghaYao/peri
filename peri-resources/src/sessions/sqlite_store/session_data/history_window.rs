@@ -3,17 +3,27 @@
 //! SQL 原文与旧分页/段读取同处 `session_data/history.rs`；本文件只做解码、事务编排与
 //! 失败分类。任何读取都不得退化成「先全量取回再过滤」。
 
-use super::blob_reader::{is_transient_blob_error, BlobReadError};
-use super::history::{
-    read_content_lengths, HISTORY_WINDOW_AFTER_SQL, HISTORY_WINDOW_ANCHOR_SQL,
-    HISTORY_WINDOW_BEFORE_SQL, HISTORY_WINDOW_BODY_ROWID_SQL, HISTORY_WINDOW_BOUNDS_SQL,
-    HISTORY_WINDOW_CHECKPOINT_FAST_SQL, HISTORY_WINDOW_CHECKPOINT_SQL,
-    HISTORY_WINDOW_INHERITED_ROWID_SQL, HISTORY_WINDOW_LATEST_SQL, HISTORY_WINDOW_NEWER_EXISTS_SQL,
-    HISTORY_WINDOW_OLDER_EXISTS_SQL, HISTORY_WINDOW_TAIL_CHECK_SQL,
-};
-use super::inherited_blob::{map_inherited_blob_error, InheritedFactsRead, InheritedSummaryRead};
+use super::blob_reader::BlobReadError;
+use super::history::HISTORY_WINDOW_AFTER_SQL;
+use super::history::HISTORY_WINDOW_ANCHOR_SQL;
+use super::history::HISTORY_WINDOW_BEFORE_SQL;
+use super::history::HISTORY_WINDOW_BODY_ROWID_SQL;
+use super::history::HISTORY_WINDOW_BOUNDS_SQL;
+use super::history::HISTORY_WINDOW_CHECKPOINT_FAST_SQL;
+use super::history::HISTORY_WINDOW_CHECKPOINT_SQL;
+use super::history::HISTORY_WINDOW_INHERITED_ROWID_SQL;
+use super::history::HISTORY_WINDOW_LATEST_SQL;
+use super::history::HISTORY_WINDOW_NEWER_EXISTS_SQL;
+use super::history::HISTORY_WINDOW_OLDER_EXISTS_SQL;
+use super::history::HISTORY_WINDOW_TAIL_CHECK_SQL;
+use super::inherited_blob::InheritedFactsRead;
+use super::inherited_blob::InheritedSummaryRead;
 use super::inherited_facts::{InheritedLayout, InheritedSummary};
-use super::*;
+use super::{
+    HistoryPage, HistoryPageCandidate, HistoryPagePlan, MessageId, SessionResourceError,
+    SessionResourceResult, SqliteConnection, SqliteSessionData, ThreadId,
+};
+
 use peri_acp_types::history_window::{
     HistoryBodyChunk, HistoryCheckpoint, HistoryCommittedTail, HistoryEntryId,
     HistoryInheritedSnapshot, HistoryInheritedWindow, HistoryReadTicket, HistorySource,
@@ -67,7 +77,7 @@ impl SqliteSessionData {
             .pool
             .acquire()
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         // inherited 是 write-once 冻结列：bounds 只需要轻量摘要（首尾身份/计数/字节），
         // 不构造全量布局。非 canonical 信封回退原 SQL 路径。
         let inherited_snapshot = match self
@@ -81,19 +91,19 @@ impl SqliteSessionData {
         };
         let mut tx = sqlx::Connection::begin(&mut *connection)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         self.require_session(&mut tx, id).await?;
         let row: Option<HistoryWindowBoundsRow> = sqlx::query_as(HISTORY_WINDOW_BOUNDS_SQL)
             .bind(id.as_str())
             .fetch_optional(&mut *tx)
             .await
-            .map_err(|error| map_sqlx(&error))?;
-        let (oldest, latest, latest_position) = row.ok_or_else(not_found)?;
+            .map_err(|error| super::map_sqlx(&error))?;
+        let (oldest, latest, latest_position) = row.ok_or_else(super::not_found)?;
         let checkpoint: Option<(String, i64)> = sqlx::query_as(HISTORY_WINDOW_CHECKPOINT_FAST_SQL)
             .bind(id.as_str())
             .fetch_optional(&mut *tx)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         // 快路径只读最新归档行；它给不出有效指针时（legacy/悬挂/损坏）才回到全归档推导。
         let checkpoint = match checkpoint {
             Some(row) => Some(row),
@@ -101,26 +111,26 @@ impl SqliteSessionData {
                 .bind(id.as_str())
                 .fetch_optional(&mut *tx)
                 .await
-                .map_err(|error| map_sqlx(&error))?,
+                .map_err(|error| super::map_sqlx(&error))?,
         };
-        tx.commit().await.map_err(|error| map_sqlx(&error))?;
+        tx.commit().await.map_err(|error| super::map_sqlx(&error))?;
 
-        let own_oldest = oldest.as_deref().map(message_id_of).transpose()?;
+        let own_oldest = oldest.as_deref().map(super::message_id_of).transpose()?;
         let own_latest = match (latest.as_deref(), latest_position) {
             (Some(entry), Some(position)) => Some(HistoryCommittedTail::new(
                 id,
-                message_id_of(entry)?,
+                super::message_id_of(entry)?,
                 u64::try_from(position)
-                    .map_err(|_| corrupt("history window tail position is negative"))?,
+                    .map_err(|_| super::corrupt("history window tail position is negative"))?,
             )),
             (None, None) => None,
-            _ => return Err(corrupt("history window bounds are inconsistent")),
+            _ => return Err(super::corrupt("history window bounds are inconsistent")),
         };
         let checkpoint = checkpoint
             .map(|(entry, position)| {
-                let message_id = message_id_of(&entry)?;
+                let message_id = super::message_id_of(&entry)?;
                 let position = u64::try_from(position)
-                    .map_err(|_| corrupt("history checkpoint position is negative"))?;
+                    .map_err(|_| super::corrupt("history checkpoint position is negative"))?;
                 Ok::<_, SessionResourceError>(HistoryCheckpoint {
                     checkpoint_id: HistoryEntryId::new(id, message_id).encode(),
                     summary_entry_id: Some(message_id),
@@ -156,10 +166,10 @@ impl SqliteSessionData {
             .pool
             .acquire()
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let mut tx = sqlx::Connection::begin(&mut *connection)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         self.require_session(&mut tx, id).await?;
 
         let tail = match &plan.tail {
@@ -177,11 +187,11 @@ impl SqliteSessionData {
                     .bind(id.as_str())
                     .bind(expected.entry_id.as_uuid().to_string())
                     .bind(i64::try_from(expected.position).map_err(|_| {
-                        corrupt("history window tail position exceeds the supported range")
+                        super::corrupt("history window tail position exceeds the supported range")
                     })?)
                     .fetch_optional(&mut *tx)
                     .await
-                    .map_err(|error| map_sqlx(&error))?;
+                    .map_err(|error| super::map_sqlx(&error))?;
                 if exists.is_none() {
                     return Err(HistoryWindowError::window_invalidated(
                         "committed tail no longer matches the snapshot",
@@ -192,7 +202,7 @@ impl SqliteSessionData {
             }
         };
         let Some(tail) = tail else {
-            tx.commit().await.map_err(|error| map_sqlx(&error))?;
+            tx.commit().await.map_err(|error| super::map_sqlx(&error))?;
             return Ok(HistoryWindowRows {
                 committed_tail: None,
                 entries: Vec::new(),
@@ -202,8 +212,9 @@ impl SqliteSessionData {
                 after_cursor_anchor: None,
             });
         };
-        let tail_position = i64::try_from(tail.position)
-            .map_err(|_| corrupt("history window tail position exceeds the supported range"))?;
+        let tail_position = i64::try_from(tail.position).map_err(|_| {
+            super::corrupt("history window tail position exceeds the supported range")
+        })?;
 
         let anchor_position = match plan.anchor {
             Some(anchor) => {
@@ -212,7 +223,7 @@ impl SqliteSessionData {
                     .bind(anchor.as_uuid().to_string())
                     .fetch_optional(&mut *tx)
                     .await
-                    .map_err(|error| map_sqlx(&error))?;
+                    .map_err(|error| super::map_sqlx(&error))?;
                 let Some((position,)) = row else {
                     return Err(window_anchor_failure(
                         plan,
@@ -221,7 +232,7 @@ impl SqliteSessionData {
                     .into());
                 };
                 let position = u64::try_from(position)
-                    .map_err(|_| corrupt("history anchor position is negative"))?;
+                    .map_err(|_| super::corrupt("history anchor position is negative"))?;
                 if position > tail.position {
                     return Err(window_anchor_failure(
                         plan,
@@ -236,8 +247,9 @@ impl SqliteSessionData {
 
         let anchor_position_i64 = anchor_position
             .map(|position| {
-                i64::try_from(position)
-                    .map_err(|_| corrupt("history anchor position exceeds the supported range"))
+                i64::try_from(position).map_err(|_| {
+                    super::corrupt("history anchor position exceeds the supported range")
+                })
             })
             .transpose()?;
 
@@ -252,8 +264,8 @@ impl SqliteSessionData {
                 .bind((plan.before_limit + 1) as i64)
                 .fetch_all(&mut *tx)
                 .await
-                .map_err(|error| map_sqlx(&error))?;
-            let candidates = read_content_lengths(&mut tx, candidates).await?;
+                .map_err(|error| super::map_sqlx(&error))?;
+            let candidates = super::history::read_content_lengths(&mut tx, candidates).await?;
             let candidates = decode_window_candidates(candidates)?;
             Some(HistoryPagePlan::plan(
                 id,
@@ -284,8 +296,8 @@ impl SqliteSessionData {
                     .bind((limit + 1) as i64)
                     .fetch_all(&mut *tx)
                     .await
-                    .map_err(|error| map_sqlx(&error))?;
-                let candidates = read_content_lengths(&mut tx, candidates).await?;
+                    .map_err(|error| super::map_sqlx(&error))?;
+                let candidates = super::history::read_content_lengths(&mut tx, candidates).await?;
                 let candidates = decode_window_candidates(candidates)?;
                 Some(HistoryPagePlan::plan_after(
                     id,
@@ -312,7 +324,7 @@ impl SqliteSessionData {
         let after_body_ids = window_body_ids(after_plan.as_ref());
         let before_rows = Self::read_page_bodies(&mut tx, id, &before_body_ids).await?;
         let after_rows = Self::read_page_bodies(&mut tx, id, &after_body_ids).await?;
-        tx.commit().await.map_err(|error| map_sqlx(&error))?;
+        tx.commit().await.map_err(|error| super::map_sqlx(&error))?;
 
         let (before_page, before_oversized) = match before_plan {
             Some(plan) => plan.materialize_omitting_oversize(before_rows)?,
@@ -383,27 +395,28 @@ impl SqliteSessionData {
         let committed_tail = committed_tail.ok_or_else(|| {
             HistoryWindowError::invalid_request("own history body requires a committed tail")
         })?;
-        let tail_position = i64::try_from(committed_tail.position)
-            .map_err(|_| corrupt("history window tail position exceeds the supported range"))?;
+        let tail_position = i64::try_from(committed_tail.position).map_err(|_| {
+            super::corrupt("history window tail position exceeds the supported range")
+        })?;
         let expected = entry_id.as_uuid().to_string();
         let mut connection = self
             .database
             .pool
             .acquire()
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let mut retried = false;
         let (total, bytes) = loop {
             let mut tx = sqlx::Connection::begin(&mut *connection)
                 .await
-                .map_err(|error| map_sqlx(&error))?;
+                .map_err(|error| super::map_sqlx(&error))?;
             let row: Option<(i64,)> = sqlx::query_as(HISTORY_WINDOW_BODY_ROWID_SQL)
                 .bind(id.as_str())
                 .bind(&expected)
                 .bind(tail_position)
                 .fetch_optional(&mut *tx)
                 .await
-                .map_err(|error| map_sqlx(&error))?;
+                .map_err(|error| super::map_sqlx(&error))?;
             let Some((rowid,)) = row else {
                 return Err(HistoryWindowError::anchor_unavailable(
                     "history body entry is not present in this session",
@@ -414,14 +427,14 @@ impl SqliteSessionData {
                 Ok((reader.total(), reader.read(offset, max_bytes as usize)?))
             })
             .await?;
-            tx.commit().await.map_err(|error| map_sqlx(&error))?;
+            tx.commit().await.map_err(|error| super::map_sqlx(&error))?;
             match read {
                 Ok(read) => break read,
                 // 并发更新可能让句柄失效；重开一次，不把瞬态竞争当持久损坏。
-                Err(error) if !retried && is_transient_blob_error(&error) => {
+                Err(error) if !retried && super::blob_reader::is_transient_blob_error(&error) => {
                     retried = true;
                 }
-                Err(error) => return Err(map_inherited_blob_error(error)),
+                Err(error) => return Err(super::inherited_blob::map_inherited_blob_error(error)),
             }
         };
         if offset > total {
@@ -459,13 +472,13 @@ impl SqliteSessionData {
             .bind(id.as_str())
             .fetch_optional(&mut *connection)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         row.map(|(entry, position)| {
             Ok(HistoryCommittedTail::new(
                 id,
-                message_id_of(&entry)?,
+                super::message_id_of(&entry)?,
                 u64::try_from(position)
-                    .map_err(|_| corrupt("history window tail position is negative"))?,
+                    .map_err(|_| super::corrupt("history window tail position is negative"))?,
             ))
         })
         .transpose()
@@ -507,7 +520,7 @@ fn decode_window_candidates(
     candidates
         .into_iter()
         .map(|(message_id, position, encoded_bytes)| {
-            HistoryPageCandidate::new(&message_id, position, encoded_bytes)
+            HistoryPageCandidate::try_new(&message_id, position, encoded_bytes)
         })
         .collect()
 }
@@ -526,11 +539,11 @@ async fn window_boundary_cursors(
 ) -> SessionResourceResult<(Option<MessageId>, Option<MessageId>)> {
     let mut oldest: Option<(u64, MessageId)> = None;
     let mut newest: Option<(u64, MessageId)> = None;
-    for entry in before_plan
+    let selected_entries = before_plan
         .into_iter()
         .flat_map(HistoryPagePlan::entries)
-        .chain(after_plan.into_iter().flat_map(HistoryPagePlan::entries))
-    {
+        .chain(after_plan.into_iter().flat_map(HistoryPagePlan::entries));
+    for entry in selected_entries {
         if oldest.is_none_or(|(position, _)| entry.position < position) {
             oldest = Some((entry.position, entry.message_id));
         }
@@ -543,22 +556,22 @@ async fn window_boundary_cursors(
         return Ok((None, None));
     };
     let oldest_position = i64::try_from(oldest_position)
-        .map_err(|_| corrupt("history window position exceeds the supported range"))?;
+        .map_err(|_| super::corrupt("history window position exceeds the supported range"))?;
     let newest_position = i64::try_from(newest_position)
-        .map_err(|_| corrupt("history window position exceeds the supported range"))?;
+        .map_err(|_| super::corrupt("history window position exceeds the supported range"))?;
     let has_older: Option<(i64,)> = sqlx::query_as(HISTORY_WINDOW_OLDER_EXISTS_SQL)
         .bind(id.as_str())
         .bind(oldest_position)
         .fetch_optional(&mut *connection)
         .await
-        .map_err(|error| map_sqlx(&error))?;
+        .map_err(|error| super::map_sqlx(&error))?;
     let has_newer: Option<(i64,)> = sqlx::query_as(HISTORY_WINDOW_NEWER_EXISTS_SQL)
         .bind(id.as_str())
         .bind(newest_position)
         .bind(tail_position)
         .fetch_optional(&mut *connection)
         .await
-        .map_err(|error| map_sqlx(&error))?;
+        .map_err(|error| super::map_sqlx(&error))?;
     Ok((
         has_older.is_some().then_some(oldest_id),
         has_newer.is_some().then_some(newest_id),
@@ -620,7 +633,7 @@ impl SqliteSessionData {
             .pool
             .acquire()
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let read = self
             .read_inherited_layout_cached(&mut connection, id)
             .await?;
@@ -664,7 +677,7 @@ impl SqliteSessionData {
                     )
                 })?;
                 let blob_offset = u64::try_from(offset)
-                    .map_err(|_| corrupt("inherited history body offset is negative"))?;
+                    .map_err(|_| super::corrupt("inherited history body offset is negative"))?;
                 let chunk = Self::read_inherited_chunk_blob(
                     &mut connection,
                     id,
@@ -678,7 +691,7 @@ impl SqliteSessionData {
                     Ok(chunk) => chunk,
                     // 并发更新可能让 blob 句柄失效；用 SQL 语义重读，避免把瞬态竞争
                     // 当成持久损坏。
-                    Err(error) if is_transient_blob_error(&error) => {
+                    Err(error) if super::blob_reader::is_transient_blob_error(&error) => {
                         return self
                             .read_inherited_body_chunk_sql(
                                 &mut connection,
@@ -691,7 +704,9 @@ impl SqliteSessionData {
                             )
                             .await;
                     }
-                    Err(error) => return Err(map_inherited_blob_error(error)),
+                    Err(error) => {
+                        return Err(super::inherited_blob::map_inherited_blob_error(error))
+                    }
                 };
                 Ok(HistoryBodyChunk {
                     entry_id: HistoryEntryId::new(id, entry_id).encode(),
@@ -704,7 +719,7 @@ impl SqliteSessionData {
             InheritedFactsRead::Facts {
                 snapshot: Some(_),
                 layout: None,
-            } => Err(corrupt("inherited layout is missing")),
+            } => Err(super::corrupt("inherited layout is missing")),
         }
     }
 
@@ -722,9 +737,9 @@ impl SqliteSessionData {
             .bind(id.as_str())
             .fetch_optional(&mut *connection)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let Some((rowid,)) = row else {
-            return Err(not_found());
+            return Err(super::not_found());
         };
         Self::inherited_blob_scope(connection, rowid, |reader| {
             layout.read_chunk(reader, index, offset, max_bytes)

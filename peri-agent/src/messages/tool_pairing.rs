@@ -40,7 +40,8 @@ fn repair(mut messages: Vec<BaseMessage>) -> AgentResult<Vec<BaseMessage>> {
     let mut results = HashMap::new();
     let mut inline_results = HashMap::new();
     let mut inline_result_only = HashMap::new();
-    for (index, message) in messages.iter_mut().enumerate() {
+    let paired_items = messages.iter_mut().enumerate();
+    for (index, message) in paired_items {
         if let BaseMessage::Ai {
             content,
             tool_calls,
@@ -217,7 +218,8 @@ fn repair(mut messages: Vec<BaseMessage>) -> AgentResult<Vec<BaseMessage>> {
     let inline_positions: HashSet<usize> = inline_results.values().copied().collect();
     let mut inline_messages = HashMap::new();
     let mut ordinary = Vec::with_capacity(messages.len());
-    for (index, message) in messages.into_iter().enumerate() {
+    let paired_items_2 = messages.into_iter().enumerate();
+    for (index, message) in paired_items_2 {
         if inline_positions.contains(&index) {
             inline_messages.insert(index, message);
             continue;

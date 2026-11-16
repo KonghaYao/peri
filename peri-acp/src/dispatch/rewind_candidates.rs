@@ -14,8 +14,10 @@
 //! `.take(REWIND_CANDIDATE_LIMIT)` 仍保留为 capability boundary：存储返回超界时
 //! 只读选择器也不能变成无界响应。
 
-use peri_acp_types::messages::{strip_system_reminders, BaseMessage};
-use peri_acp_types::session_resources::{rewind_candidate_text, RewindCandidate};
+use peri_acp_types::messages;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::session_resources::history;
+use peri_acp_types::session_resources::RewindCandidate;
 use serde_json::{json, Value};
 
 use crate::transport::types::AcpError;
@@ -33,7 +35,7 @@ pub fn rewind_candidate_response(candidates: &[RewindCandidate]) -> Value {
         .filter_map(|candidate| {
             // 剥离 system-reminder 注入块：Bypass 权限通知/recall 等不应进入
             // 候选预览与输入框回填。
-            let preview = strip_system_reminders(&candidate.text);
+            let preview = messages::strip_system_reminders(&candidate.text);
             let preview = preview.trim();
             (!preview.is_empty()).then(|| {
                 json!({
@@ -56,7 +58,7 @@ pub fn rewind_candidates(session_history: &[BaseMessage]) -> Result<Value, AcpEr
         .iter()
         .rev() // 最新在前——弹窗第一条 = 最近一次 user 消息 = 回退一步
         .filter_map(|message| {
-            rewind_candidate_text(message).map(|text| RewindCandidate {
+            history::rewind_candidate_text(message).map(|text| RewindCandidate {
                 message_id: message.id(),
                 text,
             })

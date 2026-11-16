@@ -1,5 +1,8 @@
-use super::*;
 use crate::agent::state::AgentState;
+use crate::error::AgentError;
+use crate::error::AgentResult;
+use crate::middleware::capabilities as hook_state;
+use crate::middleware::chain::MiddlewareChain;
 use crate::middleware::r#trait::{Middleware, NoopMiddleware};
 use async_trait::async_trait;
 /// 提供 first_turn_reminder 贡献的中间件（Some/None 均可配置）
@@ -61,7 +64,10 @@ async fn test_first_turn_reminders_collects_in_order() {
     chain.add(Box::new(ReminderMw::new("D", Some("second notice"))));
 
     let mut state = AgentState::new("/tmp");
-    let reminders = chain.run_first_turn_reminders(&mut state).await.unwrap();
+    let reminders = chain
+        .run_first_turn_reminders(&mut state)
+        .await
+        .expect("the run first turn reminders fixture result is required for this assertion");
     assert_eq!(
         reminders,
         vec!["mcp overview".to_string(), "second notice".to_string()]
@@ -73,13 +79,19 @@ async fn test_first_turn_reminders_collects_in_order() {
 async fn test_first_turn_reminders_none_skipped() {
     let chain = MiddlewareChain::new();
     let mut state = AgentState::new("/tmp");
-    let reminders = chain.run_first_turn_reminders(&mut state).await.unwrap();
+    let reminders = chain
+        .run_first_turn_reminders(&mut state)
+        .await
+        .expect("the run first turn reminders fixture result is required for this assertion");
     assert!(reminders.is_empty());
 
     let mut chain2 = MiddlewareChain::new();
     chain2.add(Box::new(ReminderMw::new("A", None)));
     chain2.add(Box::new(ReminderMw::new("B", None)));
-    let reminders = chain2.run_first_turn_reminders(&mut state).await.unwrap();
+    let reminders = chain2
+        .run_first_turn_reminders(&mut state)
+        .await
+        .expect("the run first turn reminders fixture result is required for this assertion");
     assert!(reminders.is_empty());
 }
 
@@ -89,7 +101,10 @@ async fn test_first_turn_reminder_default_none() {
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(NoopMiddleware::new("A")));
     let mut state = AgentState::new("/tmp");
-    let reminders = chain.run_first_turn_reminders(&mut state).await.unwrap();
+    let reminders = chain
+        .run_first_turn_reminders(&mut state)
+        .await
+        .expect("the run first turn reminders fixture result is required for this assertion");
     assert!(reminders.is_empty());
 }
 

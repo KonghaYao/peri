@@ -6,7 +6,17 @@
 //! 不可安装的进程级 `OnceLock`，真实删除路径（配置改写 + 落盘 + ACP 推送）不在
 //! 单测覆盖范围内。
 
-use super::*;
+use super::KeyCode;
+use super::KeyModifiers;
+use super::LoginEditState;
+use super::LoginField;
+use super::LoginPanel;
+use super::LoginPanelMode;
+use super::NOTIFICATION;
+use super::Notification;
+use super::ProviderSummary;
+use super::auth;
+use super::render;
 
 #[path = "login/commit_test.rs"]
 mod commit;
@@ -14,7 +24,7 @@ mod commit;
 use super::config_store::delete_candidate;
 use super::edit_state::ProviderKind;
 use crate::config::ProviderConfig;
-use crate::kit::atoms::PROVIDER_LIST;
+
 use ratatui_kit::crossterm::event::{Event, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui_kit::prelude::{EventResult, State, element};
 use ratatui_kit::ratatui::buffer::Buffer;
@@ -29,6 +39,7 @@ const TEST_AREA: Rect = Rect {
     height: 24,
 };
 
+#[must_use]
 fn provider(id: &str) -> ProviderSummary {
     ProviderSummary {
         id: id.to_string(),
@@ -216,7 +227,7 @@ fn login_config() -> crate::config::PeriConfig {
             "haiku":{"provider":"resp", "contextWindow":4000}
         }
     }}))
-    .unwrap()
+    .expect("login config: fixture JSON must match the expected schema")
 }
 
 fn mount_edit_state(
@@ -320,6 +331,7 @@ fn type_change_semantic_row(panel: &MountedPanel, hit: super::render::EditHit) -
         .unwrap_or_else(|| panic!("类型确认命中区必须包含目标"))
 }
 
+#[must_use]
 fn tall_area() -> Rect {
     Rect {
         x: 0,
@@ -369,3 +381,7 @@ mod auth_ui;
 
 #[path = "login/flow_test.rs"]
 mod flow;
+
+use crate::kit::atoms::PROVIDER_LIST;
+
+use super::edit_handler;

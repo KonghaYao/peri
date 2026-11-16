@@ -1,5 +1,27 @@
-use super::*;
+use super::EntryStatus;
+use super::FoldState;
+use super::Line;
+use super::TuiAskUserBlock;
+use super::TuiAssistantBubble;
+use super::TuiCollapsedGroup;
+use super::TuiDivider;
+use super::TuiNoteLevel;
+use super::TuiReasoningBlock;
+use super::TuiRenderUnit;
+use super::TuiSubAgentGroup;
+use super::TuiSystemNote;
+use super::TuiSystemReminder;
+use super::TuiTodoSummary;
+use super::TuiToolCard;
+use crate::kit::message_area::grid::GridSpec;
+use crate::kit::message_area::render;
+use peri_theme::atoms::THEME_ATOM;
+use ratatui_kit::ratatui::style::Style;
+use unicode_width::UnicodeWidthStr;
+
 use crate::kit::message_area::grid::TextLineSource;
+use crate::kit::message_area::grid::ZoneTransition;
+use crate::kit::message_area::render::helpers;
 
 // ── 宽度 1 不 panic（回归）──────────────────────────────────────────────
 
@@ -89,7 +111,7 @@ fn test_vm_to_lines_all_variants_width_1() {
         instance_id: "instance-test-agent".to_string(),
         agent_id: "test-agent".to_string(),
         agent_name: "Test Agent".to_string(),
-        view_models: im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
+        view_models: im::Vector::from(vec![TuiRenderUnit::TuiToolCard(super::tool_card(
             "Bash",
             "bash test",
             false,
@@ -120,7 +142,7 @@ fn test_vm_to_lines_all_variants_width_1() {
     for term in [1u16, 2, 3, 5, 12] {
         let grid = GridSpec::grid_for(term);
         for (_label, vm) in &all_variants {
-            let _lines = vm_to_lines(vm, &grid);
+            let _lines = render::vm_to_lines(vm, &grid);
             // 只要不 panic 就算通过
         }
     }
@@ -139,7 +161,7 @@ fn test_build_wrap_map_width_1_no_panic() {
         ),
     ];
     for width in [1u16, 2, 3, 5, 10] {
-        let _ = build_wrap_map(&lines, width);
+        let _ = super::build_wrap_map(&lines, width);
     }
 }
 
@@ -159,7 +181,7 @@ fn test_empty_assistant_bubble_returns_zero_lines() {
         }
         .into(),
     );
-    let lines = vm_to_lines(&vm, &GridSpec::grid_for(80));
+    let lines = render::vm_to_lines(&vm, &GridSpec::grid_for(80));
     assert!(lines.is_empty(), "空 AssistantBubble 应返回 0 行");
 }
 
@@ -181,8 +203,8 @@ fn prefix_col(line: &Line<'static>, n: usize) -> usize {
 #[test]
 fn test_prefix_structure_first_and_continuation() {
     let grid = GridSpec::grid_for(80); // Standard: outer=1 accent=1 gap=2 indent=2 content=74
-    let vm = TuiRenderUnit::TuiToolCard(tool_card("Read", "src/main.rs", false, false));
-    let lines = vm_to_lines(&vm, &grid);
+    let vm = TuiRenderUnit::TuiToolCard(super::tool_card("Read", "src/main.rs", false, false));
+    let lines = render::vm_to_lines(&vm, &grid);
 
     let first = &lines[0];
     assert_eq!(
@@ -211,9 +233,9 @@ fn test_prefix_structure_first_and_continuation() {
     let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
         fold: FoldState::Expanded,
         output_summary: "line1\nline2".into(),
-        ..tool_card("Read", "src/main.rs", false, false)
+        ..super::tool_card("Read", "src/main.rs", false, false)
     });
-    let lines = vm_to_lines(&tool, &grid);
+    let lines = render::vm_to_lines(&tool, &grid);
     let cont = lines
         .iter()
         .find(|l| {
@@ -245,10 +267,10 @@ fn test_process_prefix_equal_width_and_duration_flush_right() {
     let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
         fold: FoldState::Expanded,
         output_summary: "out1\nout2".into(),
-        ..tool_card("Read", "src/main.rs", false, false)
+        ..super::tool_card("Read", "src/main.rs", false, false)
     });
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_cached_with_layout(
         &tool,
         &grid,
         &mut cache,
@@ -257,8 +279,8 @@ fn test_process_prefix_equal_width_and_duration_flush_right() {
         ZoneTransition::EnterProcess(TextLineSource::User),
     );
     // 入口台阶：` ╰─╮`（col1 `╰` 接上方文本竖线 / col3 `╮` 接过程区标记列）
-    assert!(super::is_step_row(&lines[0]), "首行应是入口台阶");
-    assert_eq!(line_text(&lines[0]), " \u{2570}\u{2500}\u{256e}");
+    assert!(render::is_step_row(&lines[0]), "首行应是入口台阶");
+    assert_eq!(super::line_text(&lines[0]), " \u{2570}\u{2500}\u{256e}");
     assert_eq!(lines[0].width(), 4, "台阶行宽 4（不含内容）");
     let first = &lines[1];
     // 展开态首行标记 = 折叠符（`▾`），落在过程区左缘标记列（0 起 col3）
@@ -293,18 +315,21 @@ fn test_process_prefix_equal_width_and_duration_flush_right() {
         "右对齐铺满带右缘"
     );
     assert_eq!(
-        first.spans.last().unwrap().content.as_ref(),
+        first.spans.last().expect("process prefix equal width and duration flush right: the fixture collection must contain the expected entry").content.as_ref(),
         "0.4s",
         "duration 落在右缘"
     );
-    assert!(line_text(first).contains("Read"), "标签仍在 col6 之后");
+    assert!(
+        super::line_text(first).contains("Read"),
+        "标签仍在 col6 之后"
+    );
 }
 
 /// Compact/Narrow（<60 列）过程区前缀回退基准形态（§9）：无缩进、无台阶，
 /// 逐列与改动前一致。
 #[test]
 fn test_compact_and_narrow_process_prefix_falls_back_to_baseline() {
-    use super::helpers::{cont_prefix, first_prefix, process_cont_prefix, process_first_prefix};
+    use helpers::{cont_prefix, first_prefix, process_cont_prefix, process_first_prefix};
     let dim = THEME_ATOM.state().read().semantic.text.dim;
     for term in [59u16, 39] {
         let grid = GridSpec::grid_for(term);
@@ -321,23 +346,23 @@ fn test_compact_and_narrow_process_prefix_falls_back_to_baseline() {
             "term={term}: 续行前缀恒回退"
         );
 
-        let vm = TuiRenderUnit::TuiToolCard(tool_card("Read", "src/main.rs", false, false));
-        let lines = vm_to_lines(&vm, &grid);
+        let vm = TuiRenderUnit::TuiToolCard(super::tool_card("Read", "src/main.rs", false, false));
+        let lines = render::vm_to_lines(&vm, &grid);
         let first = &lines[0];
         assert_eq!(
             first.spans[..3]
                 .iter()
                 .map(|s| s.content.as_ref())
                 .collect::<Vec<_>>(),
-            first_prefix(&grid, super::helpers::sym().success, style)
+            first_prefix(&grid, helpers::sym().success, style)
                 .iter()
                 .map(|s| s.content.as_ref())
                 .collect::<Vec<_>>(),
             "term={term}: 渲染首行前缀 = 基准形态（outer / 符号 / gap）"
         );
-        let text = line_text(first);
+        let text = super::line_text(first);
         assert!(
-            !text.contains('\u{2500}') && !super::is_step_row(first),
+            !text.contains('\u{2500}') && !render::is_step_row(first),
             "term={term}: 无台阶字形，实际 {text:?}"
         );
         assert_eq!(
@@ -365,10 +390,10 @@ fn test_compact_and_narrow_process_prefix_falls_back_to_baseline() {
             }
             .into(),
         );
-        let brief_lines = vm_to_lines(&brief, &grid);
+        let brief_lines = render::vm_to_lines(&brief, &grid);
         let brief_body = brief_lines
             .iter()
-            .find(|l| line_text(l).contains("reply"))
+            .find(|l| super::line_text(l).contains("reply"))
             .expect("短回复正文行");
         assert_eq!(
             prefix_col(brief_body, 3),
@@ -384,7 +409,7 @@ fn test_compact_and_narrow_process_prefix_falls_back_to_baseline() {
         // 转场形态存在也不落台阶（§9：Compact/Narrow 无缩进即无台阶）——逐列
         // 与改动前一致，仅前缀回退形态。
         let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-        let (transited, ..) = super::vm_to_lines_cached_with_layout(
+        let (transited, ..) = render::vm_to_lines_cached_with_layout(
             &vm,
             &grid,
             &mut cache,
@@ -398,7 +423,7 @@ fn test_compact_and_narrow_process_prefix_falls_back_to_baseline() {
             "term={term}: 台阶不占行（无缩进不画台阶）"
         );
         assert!(
-            transited.iter().all(|l| !super::is_step_row(l)),
+            transited.iter().all(|l| !render::is_step_row(l)),
             "term={term}: 回退形态不出现台阶行"
         );
     }
@@ -411,7 +436,7 @@ fn test_message_line_colors_follow_role_tokens() {
     let grid = GridSpec::grid_for(80);
     let sem = THEME_ATOM.state().read().semantic;
 
-    let user = vm_to_lines(
+    let user = render::vm_to_lines(
         &TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new(
             "user message".into(),
         )),
@@ -421,7 +446,7 @@ fn test_message_line_colors_follow_role_tokens() {
     assert_eq!(user[0].spans[1].style.fg, Some(sem.text.secondary));
 
     // 长回复（≥120 字）留在文本区：竖线在 accent 列（spans[1]）
-    let assistant = vm_to_lines(
+    let assistant = render::vm_to_lines(
         &TuiRenderUnit::TuiAssistantBubble(
             TuiAssistantBubble {
                 started_at: None,
@@ -439,7 +464,7 @@ fn test_message_line_colors_follow_role_tokens() {
     assert_eq!(assistant[0].spans[1].style.fg, Some(sem.accent));
 
     // 短回复（<120 字）并入过程带：正文前有 1 空行，竖线在过程区标记列（spans[2]），同色 accent
-    let brief = vm_to_lines(
+    let brief = render::vm_to_lines(
         &TuiRenderUnit::TuiAssistantBubble(
             TuiAssistantBubble {
                 started_at: None,
@@ -461,8 +486,8 @@ fn test_message_line_colors_follow_role_tokens() {
 #[test]
 fn test_narrow_accent_bullet() {
     let grid = GridSpec::grid_for(30); // Narrow
-    let vm = TuiRenderUnit::TuiToolCard(tool_card("Read", "src/main.rs", false, false));
-    let lines = vm_to_lines(&vm, &grid);
+    let vm = TuiRenderUnit::TuiToolCard(super::tool_card("Read", "src/main.rs", false, false));
+    let lines = render::vm_to_lines(&vm, &grid);
     assert_eq!(
         lines[0].spans[1].content.as_ref(),
         "\u{b7}",
@@ -479,17 +504,17 @@ fn test_text_zone_baseline_and_process_zone_indent_columns() {
     let process_col = grid.process_prefix_width();
     assert_eq!((text_col, process_col), (4, 6), "基准列 4 / 过程区列 6");
 
-    let user = vm_to_lines(
+    let user = render::vm_to_lines(
         &TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new(
             "你好世界".into(),
         )),
         &grid,
     );
-    let tool = vm_to_lines(
-        &TuiRenderUnit::TuiToolCard(tool_card("Read", "src/main.rs", false, false)),
+    let tool = render::vm_to_lines(
+        &TuiRenderUnit::TuiToolCard(super::tool_card("Read", "src/main.rs", false, false)),
         &grid,
     );
-    let assistant = vm_to_lines(
+    let assistant = render::vm_to_lines(
         &TuiRenderUnit::TuiAssistantBubble(
             TuiAssistantBubble {
                 // [Slice 1] 正文时长（§6.2 `12.4s`）：测试构造默认无起点/冻结值。
@@ -505,7 +530,7 @@ fn test_text_zone_baseline_and_process_zone_indent_columns() {
         ),
         &grid,
     );
-    let brief = vm_to_lines(
+    let brief = render::vm_to_lines(
         &TuiRenderUnit::TuiAssistantBubble(
             TuiAssistantBubble {
                 started_at: None,
@@ -522,20 +547,20 @@ fn test_text_zone_baseline_and_process_zone_indent_columns() {
 
     // user / assistant 长正文：文本区前缀 3 段（outer / 竖线 / gap）→ col4
     assert_eq!(prefix_col(&user[0], 3), text_col, "user 正文起点");
-    assert!(line_text(&user[0]).contains("你好世界"));
+    assert!(super::line_text(&user[0]).contains("你好世界"));
     assert_eq!(
         prefix_col(&assistant[0], 3),
         text_col,
         "assistant 长正文起点"
     );
-    assert!(line_text(&assistant[0]).contains("hello"));
+    assert!(super::line_text(&assistant[0]).contains("hello"));
     // 工具卡首行：过程区前缀 4 段（outer / indent 留空 / 标记 / gap）→ col6
     assert_eq!(prefix_col(&tool[0], 4), process_col, "tool 首行标签起点");
     assert!(tool[0].spans[4].content.contains("Read"));
     // 短回复正文：同过程区前缀 4 段 → col6（行 0 = 前导空行，行 1 = 正文）
-    assert!(is_rail_blank(&brief[0]), "短回复前保留 1 空行");
+    assert!(super::is_rail_blank(&brief[0]), "短回复前保留 1 空行");
     assert_eq!(prefix_col(&brief[1], 4), process_col, "短回复正文起点");
-    assert!(line_text(&brief[1]).contains("hello"));
+    assert!(super::line_text(&brief[1]).contains("hello"));
 }
 
 // ── 转场台阶线色（§6）──────────────────────────────────────────────────
@@ -548,10 +573,10 @@ fn test_text_zone_baseline_and_process_zone_indent_columns() {
 fn test_step_line_color_follows_text_line() {
     let grid = GridSpec::grid_for(80);
     let sem = THEME_ATOM.state().read().semantic;
-    let tool = TuiRenderUnit::TuiToolCard(tool_card("Read", "src/main.rs", false, false));
+    let tool = TuiRenderUnit::TuiToolCard(super::tool_card("Read", "src/main.rs", false, false));
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
 
-    let (user_step, ..) = super::vm_to_lines_cached_with_layout(
+    let (user_step, ..) = render::vm_to_lines_cached_with_layout(
         &tool,
         &grid,
         &mut cache,
@@ -559,14 +584,14 @@ fn test_step_line_color_follows_text_line() {
         false,
         ZoneTransition::EnterProcess(TextLineSource::User),
     );
-    assert!(super::is_step_row(&user_step[0]), "首行应是入口台阶");
+    assert!(render::is_step_row(&user_step[0]), "首行应是入口台阶");
     assert_eq!(
         user_step[0].spans[0].style.fg,
         Some(sem.text.secondary),
         "进入台阶线色 = user 文本竖线色"
     );
 
-    let (assistant_step, ..) = super::vm_to_lines_cached_with_layout(
+    let (assistant_step, ..) = render::vm_to_lines_cached_with_layout(
         &tool,
         &grid,
         &mut cache,
@@ -592,7 +617,7 @@ fn test_step_line_color_follows_text_line() {
         }
         .into(),
     );
-    let (exit_step, ..) = super::vm_to_lines_cached_with_layout(
+    let (exit_step, ..) = render::vm_to_lines_cached_with_layout(
         &answer,
         &grid,
         &mut cache,
@@ -600,7 +625,7 @@ fn test_step_line_color_follows_text_line() {
         false,
         ZoneTransition::ExitProcess(TextLineSource::Assistant),
     );
-    assert!(super::is_step_row(&exit_step[0]), "首行应是退出台阶");
+    assert!(render::is_step_row(&exit_step[0]), "首行应是退出台阶");
     assert_eq!(
         exit_step[0].spans[0].style.fg,
         Some(sem.accent),
@@ -626,7 +651,7 @@ fn test_step_line_color_follows_text_line() {
         }
         .into(),
     );
-    let (mixed_lines, ..) = super::vm_to_lines_cached_with_layout(
+    let (mixed_lines, ..) = render::vm_to_lines_cached_with_layout(
         &mixed,
         &grid,
         &mut cache,
@@ -636,7 +661,7 @@ fn test_step_line_color_follows_text_line() {
     );
     let inner_step = mixed_lines
         .iter()
-        .find(|line| super::is_step_row(line))
+        .find(|line| render::is_step_row(line))
         .expect("reasoning → 正文间应画内部退出台阶");
     assert_eq!(
         inner_step.spans[0].style.fg,
@@ -664,7 +689,7 @@ fn test_step_line_color_follows_text_line() {
         }
         .into(),
     );
-    let (brief_mixed_lines, ..) = super::vm_to_lines_cached_with_layout(
+    let (brief_mixed_lines, ..) = render::vm_to_lines_cached_with_layout(
         &brief_mixed,
         &grid,
         &mut cache,
@@ -673,7 +698,7 @@ fn test_step_line_color_follows_text_line() {
         ZoneTransition::None,
     );
     assert!(
-        !brief_mixed_lines.iter().any(super::is_step_row),
+        !brief_mixed_lines.iter().any(render::is_step_row),
         "短回复不画内部/入口台阶"
     );
     // 按正文文本定位（首尾另有过程带空行，`last()` 会取到尾随空行）
@@ -693,7 +718,7 @@ fn test_step_line_color_follows_text_line() {
         label: None,
         content_hash: 11,
     });
-    let (divider_exit, ..) = super::vm_to_lines_cached_with_layout(
+    let (divider_exit, ..) = render::vm_to_lines_cached_with_layout(
         &divider,
         &grid,
         &mut cache,
@@ -702,7 +727,7 @@ fn test_step_line_color_follows_text_line() {
         ZoneTransition::ExitProcess(TextLineSource::Divider),
     );
     assert!(
-        super::is_step_row(&divider_exit[0]),
+        render::is_step_row(&divider_exit[0]),
         "divider 前应是退出台阶"
     );
     assert_eq!(
@@ -711,7 +736,7 @@ fn test_step_line_color_follows_text_line() {
         "退出台阶线色 = divider 左侧线色"
     );
 
-    let (divider_enter, ..) = super::vm_to_lines_cached_with_layout(
+    let (divider_enter, ..) = render::vm_to_lines_cached_with_layout(
         &tool,
         &grid,
         &mut cache,
@@ -740,7 +765,7 @@ fn test_system_reminder_renders_in_process_zone() {
 
     let grid = GridSpec::grid_for(80);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_cached_with_layout(
         &vm,
         &grid,
         &mut cache,
@@ -748,12 +773,12 @@ fn test_system_reminder_renders_in_process_zone() {
         false,
         ZoneTransition::EnterProcess(TextLineSource::User),
     );
-    assert!(super::is_step_row(&lines[0]), "首行应是入口台阶");
-    assert_eq!(line_text(&lines[0]), " \u{2570}\u{2500}\u{256e}");
+    assert!(render::is_step_row(&lines[0]), "首行应是入口台阶");
+    assert_eq!(super::line_text(&lines[0]), " \u{2570}\u{2500}\u{256e}");
     let first = &lines[1];
     assert_eq!(
         first.spans[2].content.as_ref(),
-        super::helpers::sym().expanded,
+        helpers::sym().expanded,
         "折叠标记占左缘标记列"
     );
     assert_eq!(
@@ -763,7 +788,7 @@ fn test_system_reminder_renders_in_process_zone() {
     );
     let body = lines
         .iter()
-        .find(|line| line_text(line).contains("first line"))
+        .find(|line| super::line_text(line).contains("first line"))
         .expect("展开提醒应显示正文");
     assert_eq!(body.spans[2].content.as_ref(), "\u{2502}", "续行竖线");
     assert_eq!(body.spans[1].content.as_ref(), "  ", "indent 格留空");
@@ -776,7 +801,7 @@ fn test_system_reminder_renders_in_process_zone() {
     // <60 列：前缀回退基准形态（符号回 accent 列、无台阶）——逐列与改动前一致
     let narrow = GridSpec::grid_for(59);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_cached_with_layout(
         &vm,
         &narrow,
         &mut cache,
@@ -786,13 +811,13 @@ fn test_system_reminder_renders_in_process_zone() {
     );
     let first = &lines[0];
     assert!(
-        !super::is_step_row(first),
+        !render::is_step_row(first),
         "回退形态不插台阶（无缩进即无台阶）"
     );
     assert_eq!(first.spans[0].content.as_ref(), " ", "outer 空列");
     assert_eq!(
         first.spans[1].content.as_ref(),
-        super::helpers::sym().expanded,
+        helpers::sym().expanded,
         "符号回到 accent 列"
     );
     assert_eq!(
@@ -800,7 +825,7 @@ fn test_system_reminder_renders_in_process_zone() {
         narrow.first_prefix_width(),
         "正文回基准列"
     );
-    let text = line_text(first);
+    let text = super::line_text(first);
     assert!(!text.contains('\u{2500}'), "无台阶字形，实际 {text:?}");
 }
 
@@ -819,14 +844,14 @@ fn test_summary_fit_keeps_duration_intact_and_flush_right() {
     let grid = GridSpec::grid_for(80);
     for summary_len in [60usize, 61, 62] {
         let summary = "x".repeat(summary_len);
-        let mut card = tool_card("Read", &summary, false, false);
+        let mut card = super::tool_card("Read", &summary, false, false);
         card.output_summary.clear(); // 去掉 ` — N lines` 后缀，隔离正文与 duration 两段
         assert_eq!(
             card.completed_duration_ms,
             Some(400),
             "duration span = 0.4s"
         );
-        let lines = vm_to_lines(&TuiRenderUnit::TuiToolCard(card), &grid);
+        let lines = render::vm_to_lines(&TuiRenderUnit::TuiToolCard(card), &grid);
         let first = &lines[0];
         assert_eq!(
             first.width(),
@@ -834,7 +859,7 @@ fn test_summary_fit_keeps_duration_intact_and_flush_right() {
             "summary={summary_len}: duration 仍右对齐带右缘"
         );
         assert_eq!(
-            first.spans.last().unwrap().content.as_ref(),
+            first.spans.last().expect("summary fit keeps duration intact and flush right: the fixture collection must contain the expected entry").content.as_ref(),
             "0.4s",
             "summary={summary_len}: duration 不应被正文裁剪波及"
         );

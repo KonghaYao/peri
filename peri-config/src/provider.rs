@@ -93,6 +93,7 @@ pub enum ResolvedProvider {
 }
 
 impl ResolvedProvider {
+    #[must_use]
     pub fn effective_context_window(&self) -> u32 {
         match self {
             Self::Responses { context_window, .. }
@@ -279,7 +280,7 @@ fn resolve_for_provider_alias(
     };
     let Some(model) = provider
         .models
-        .get_model(alias)
+        .model(alias)
         .filter(|model| !model.is_empty())
     else {
         return Ok(None);
@@ -442,7 +443,7 @@ fn resolve_model_name(provider: &ProviderConfig, alias: &str, profile: &ProfileC
     }
     provider
         .models
-        .get_model(alias)
+        .model(alias)
         .filter(|model| !model.is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| default_model_name(&provider.provider_type).to_owned())

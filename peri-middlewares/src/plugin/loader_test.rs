@@ -1,9 +1,26 @@
-use tempfile::tempdir;
+use tempfile;
 
-use super::*;
+use super::Arc;
+use super::CommandContext;
+use super::CommandEntry;
+use super::CommandEntryKind;
+use super::CommandLifecycle;
+use super::CommandOutcome;
+use super::CommandSource;
+use super::HashMap;
+use super::InstalledPlugins;
+use super::LoadedPlugin;
+use super::LoaderError;
+use super::McpServerConfig;
+use super::McpServerEntry;
+use super::Path;
+use super::PathBuf;
+use super::PluginManifest;
+use super::RouteCommandSource;
 use crate::plugin::types::{
     InstallScope, InstalledPlugin, PluginAgent, PluginCommand, PluginCommandEntry, PluginOrigin,
 };
+use crate::skills::SkillSource;
 
 /// M6 测试夹具：来源作用域身份（安装记录事实；测试不关心具体取值）。
 pub(crate) fn test_plugin_scope() -> peri_acp_types::plugin::PluginScope {
@@ -41,24 +58,24 @@ pub(crate) fn make_manifest_with_commands(commands: Vec<PluginCommand>) -> Plugi
 
 #[test]
 fn test_parse_command_md_with_shell() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("cmd.md");
     std::fs::write(&path, "---\nshell: echo hello\n---\nBody content").unwrap();
-    let (fm, body) = parse_command_md(&path).unwrap();
+    let (fm, body) = super::parse_command_md(&path).unwrap();
     assert_eq!(fm.shell.as_deref(), Some("echo hello"));
     assert_eq!(body.trim(), "Body content");
 }
 
 #[test]
 fn test_parse_command_md_with_all_fields() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("cmd.md");
     std::fs::write(
             &path,
             "---\nshell: echo hi\neffort: low\nmodel: opus\ndescription: Test cmd\nargs:\n  - foo\n---\nBody",
         )
         .unwrap();
-    let (fm, _) = parse_command_md(&path).unwrap();
+    let (fm, _) = super::parse_command_md(&path).unwrap();
     assert_eq!(fm.shell.as_deref(), Some("echo hi"));
     assert_eq!(fm.effort.as_deref(), Some("low"));
     assert_eq!(fm.model.as_deref(), Some("opus"));
@@ -68,23 +85,23 @@ fn test_parse_command_md_with_all_fields() {
 
 #[test]
 fn test_parse_command_md_no_frontmatter() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("cmd.md");
     std::fs::write(&path, "Just plain markdown").unwrap();
-    let (fm, body) = parse_command_md(&path).unwrap();
+    let (fm, body) = super::parse_command_md(&path).unwrap();
     assert!(fm.shell.is_none());
     assert_eq!(body, "Just plain markdown");
 }
 
 #[test]
 fn test_parse_command_md_file_not_found() {
-    let result = parse_command_md(Path::new("/nonexistent/cmd.md"));
+    let result = super::parse_command_md(Path::new("/nonexistent/cmd.md"));
     assert!(result.is_none());
 }
 
 #[test]
 fn test_extract_commands_single() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("commands")).unwrap();
     std::fs::write(dir.path().join("commands/test.md"), "---\n---\nContent").unwrap();
 
@@ -94,14 +111,14 @@ fn test_extract_commands_single() {
         description: None,
     }]);
 
-    let entries = extract_commands(&manifest, dir.path(), "my-plugin");
+    let entries = super::extract_commands(&manifest, dir.path(), "my-plugin");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "plugin:my-plugin:test");
 }
 
 #[test]
 fn test_extract_commands_multiple() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("commands")).unwrap();
     std::fs::write(dir.path().join("commands/a.md"), "---\n---\nA").unwrap();
     std::fs::write(dir.path().join("commands/b.md"), "---\n---\nB").unwrap();
@@ -119,7 +136,7 @@ fn test_extract_commands_multiple() {
         },
     ]);
 
-    let entries = extract_commands(&manifest, dir.path(), "p");
+    let entries = super::extract_commands(&manifest, dir.path(), "p");
     assert_eq!(entries.len(), 2);
 }
 
@@ -130,13 +147,13 @@ fn test_extract_commands_missing_file() {
         name: None,
         description: None,
     }]);
-    let entries = extract_commands(&manifest, Path::new("/tmp"), "p");
+    let entries = super::extract_commands(&manifest, Path::new("/tmp"), "p");
     assert!(entries.is_empty());
 }
 
 #[test]
 fn test_extract_commands_explicit_name() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("commands")).unwrap();
     std::fs::write(dir.path().join("commands/x.md"), "---\n---\nX").unwrap();
 
@@ -146,20 +163,20 @@ fn test_extract_commands_explicit_name() {
         description: None,
     }]);
 
-    let entries = extract_commands(&manifest, dir.path(), "p");
+    let entries = super::extract_commands(&manifest, dir.path(), "p");
     assert_eq!(entries[0].name, "plugin:p:my-cmd");
 }
 
 #[test]
 fn test_extract_commands_none() {
     let manifest = make_manifest_with_commands(vec![]);
-    let entries = extract_commands(&manifest, Path::new("/tmp"), "p");
+    let entries = super::extract_commands(&manifest, Path::new("/tmp"), "p");
     assert!(entries.is_empty());
 }
 
 #[test]
 fn test_extract_commands_frontmatter_description() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("commands")).unwrap();
     std::fs::write(
         dir.path().join("commands/x.md"),
@@ -173,7 +190,7 @@ fn test_extract_commands_frontmatter_description() {
         description: Some("manifest desc".into()),
     }]);
 
-    let entries = extract_commands(&manifest, dir.path(), "p");
+    let entries = super::extract_commands(&manifest, dir.path(), "p");
     assert_eq!(entries[0].description, "FM desc");
 }
 
@@ -208,7 +225,7 @@ fn test_plugin_route_entries_full() {
             path: PathBuf::from("/tmp/ecc/deploy.md"),
         },
     }];
-    let routes = plugin_route_entries(&entries);
+    let routes = super::plugin_route_entries(&entries);
     assert_eq!(routes.len(), 1);
     let r = &routes[0];
     // fullname 原样使用（三层形态 `plugin:{plugin}:{cmd}`）
@@ -244,7 +261,7 @@ async fn test_plugin_route_entries_handler_injects_original_text() {
         description: String::new(),
         source: CommandSource::Builtin,
     }];
-    let routes = plugin_route_entries(&entries);
+    let routes = super::plugin_route_entries(&entries);
     let raw = "/plugin:ecc:deploy --env prod";
     let mut ctx = CommandContext::new(
         "test-session".into(),
@@ -295,7 +312,7 @@ fn test_plugin_route_entries_skips_lexically_abnormal() {
             source: CommandSource::Builtin,
         },
     ];
-    let routes = plugin_route_entries(&entries);
+    let routes = super::plugin_route_entries(&entries);
     assert_eq!(routes.len(), 1, "词法异常 name 应跳过，仅合法条目产出");
     assert_eq!(routes[0].fullname, "plugin:p:standalone");
     assert_eq!(
@@ -307,7 +324,7 @@ fn test_plugin_route_entries_skips_lexically_abnormal() {
 
 #[test]
 fn test_extract_skills_paths() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("skills").join("code-review")).unwrap();
     // 函数要求 SKILL.md 存在于技能目录中
     std::fs::write(
@@ -322,7 +339,7 @@ fn test_extract_skills_paths() {
     let mut manifest = make_manifest_with_commands(vec![]);
     manifest.skills = Some(vec!["skills/code-review".into()]);
 
-    let paths = extract_skills_paths(&manifest, dir.path(), "test-plugin");
+    let paths = super::extract_skills_paths(&manifest, dir.path(), "test-plugin");
     assert_eq!(paths.len(), 1);
     assert!(paths[0].path.ends_with("code-review"));
     assert_eq!(paths[0].source, SkillSource::Plugin);
@@ -334,22 +351,22 @@ fn test_extract_skills_paths_missing_dir() {
     let mut manifest = make_manifest_with_commands(vec![]);
     manifest.skills = Some(vec!["nonexistent".into()]);
 
-    let paths = extract_skills_paths(&manifest, Path::new("/tmp"), "test-plugin");
+    let paths = super::extract_skills_paths(&manifest, Path::new("/tmp"), "test-plugin");
     assert!(paths.is_empty());
 }
 
 #[test]
 fn test_extract_skills_paths_none() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let manifest = make_manifest_with_commands(vec![]);
     // no skills dir at all → fallback finds nothing
-    let paths = extract_skills_paths(&manifest, dir.path(), "test-plugin");
+    let paths = super::extract_skills_paths(&manifest, dir.path(), "test-plugin");
     assert!(paths.is_empty());
 }
 
 #[test]
 fn test_extract_skills_paths_fallback_returns_container_root() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let skill_dir = dir.path().join("skills").join("my-skill");
     std::fs::create_dir_all(&skill_dir).unwrap();
     std::fs::write(skill_dir.join("SKILL.md"), "---\nname: my-skill\n---\nbody").unwrap();
@@ -357,7 +374,7 @@ fn test_extract_skills_paths_fallback_returns_container_root() {
     // manifest has no skills field → fallback returns base_dir/skills/ as a single root;
     // provider 会递归发现其中的 my-skill（宿主侧扫描已删除）。
     let manifest = make_manifest_with_commands(vec![]);
-    let paths = extract_skills_paths(&manifest, dir.path(), "test-plugin");
+    let paths = super::extract_skills_paths(&manifest, dir.path(), "test-plugin");
     assert_eq!(paths.len(), 1);
     assert!(paths[0].path.ends_with("skills"));
     assert_eq!(paths[0].source, SkillSource::Plugin);
@@ -365,14 +382,14 @@ fn test_extract_skills_paths_fallback_returns_container_root() {
 
 #[test]
 fn test_extract_skills_paths_fallback_returns_root_even_without_skill_md() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let skill_dir = dir.path().join("skills").join("incomplete");
     std::fs::create_dir_all(&skill_dir).unwrap();
     // no SKILL.md inside, but fallback still returns the container root;
     // provider 在其中不会发现任何 skill（宿主侧扫描已删除）。
 
     let manifest = make_manifest_with_commands(vec![]);
-    let paths = extract_skills_paths(&manifest, dir.path(), "test-plugin");
+    let paths = super::extract_skills_paths(&manifest, dir.path(), "test-plugin");
     assert_eq!(
         paths.len(),
         1,
@@ -383,7 +400,7 @@ fn test_extract_skills_paths_fallback_returns_root_even_without_skill_md() {
 
 #[test]
 fn test_extract_agents_paths() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("agents")).unwrap();
     std::fs::write(dir.path().join("agents/reviewer.md"), "content").unwrap();
 
@@ -393,7 +410,7 @@ fn test_extract_agents_paths() {
         name: "reviewer".into(),
     }]);
 
-    let paths = extract_agents_paths(&manifest, dir.path());
+    let paths = super::extract_agents_paths(&manifest, dir.path());
     assert_eq!(paths.len(), 1);
 }
 
@@ -405,14 +422,14 @@ fn test_extract_agents_paths_missing() {
         name: "missing".into(),
     }]);
 
-    let paths = extract_agents_paths(&manifest, Path::new("/tmp"));
+    let paths = super::extract_agents_paths(&manifest, Path::new("/tmp"));
     assert!(paths.is_empty());
 }
 
 #[test]
 fn test_extract_agents_paths_none() {
     let manifest = make_manifest_with_commands(vec![]);
-    let paths = extract_agents_paths(&manifest, Path::new("/tmp"));
+    let paths = super::extract_agents_paths(&manifest, Path::new("/tmp"));
     assert!(paths.is_empty());
 }
 
@@ -439,7 +456,7 @@ fn test_extract_mcp_servers() {
     );
     manifest.mcp_servers = Some(servers);
 
-    let result = extract_mcp_servers(&manifest, Path::new("/tmp")).unwrap();
+    let result = super::extract_mcp_servers(&manifest, Path::new("/tmp")).unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains_key("s1"));
 }
@@ -447,13 +464,13 @@ fn test_extract_mcp_servers() {
 #[test]
 fn test_extract_mcp_servers_none() {
     let manifest = make_manifest_with_commands(vec![]);
-    let result = extract_mcp_servers(&manifest, Path::new("/tmp")).unwrap();
+    let result = super::extract_mcp_servers(&manifest, Path::new("/tmp")).unwrap();
     assert!(result.is_empty());
 }
 
 #[test]
 fn test_extract_mcp_servers_file_path_ref() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let plugin_dir = dir.path().join("my-plugin");
     let servers_dir = plugin_dir.join("servers");
     std::fs::create_dir_all(&servers_dir).unwrap();
@@ -470,7 +487,7 @@ fn test_extract_mcp_servers_file_path_ref() {
     );
     manifest.mcp_servers = Some(servers);
 
-    let result = extract_mcp_servers(&manifest, &plugin_dir).unwrap();
+    let result = super::extract_mcp_servers(&manifest, &plugin_dir).unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains_key("db"));
     assert_eq!(result["db"].command.as_deref(), Some("sqlite3"));
@@ -478,7 +495,7 @@ fn test_extract_mcp_servers_file_path_ref() {
 
 #[test]
 fn test_extract_mcp_servers_file_path_not_found() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mut manifest = make_manifest_with_commands(vec![]);
     let mut servers = HashMap::new();
     servers.insert(
@@ -488,13 +505,13 @@ fn test_extract_mcp_servers_file_path_not_found() {
     manifest.mcp_servers = Some(servers);
 
     // 被引用的文件缺失是「未声明」，不是非法配置；非法的 *内容* 才失败。
-    let result = extract_mcp_servers(&manifest, dir.path()).unwrap();
+    let result = super::extract_mcp_servers(&manifest, dir.path()).unwrap();
     assert!(result.is_empty());
 }
 
 #[test]
 fn test_extract_mcp_servers_fallback_mcp_json_standard_format() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     // No mcpServers in manifest → should fall back to .mcp.json at plugin root
     std::fs::write(
         dir.path().join(".mcp.json"),
@@ -503,7 +520,7 @@ fn test_extract_mcp_servers_fallback_mcp_json_standard_format() {
     .unwrap();
 
     let manifest = make_manifest_with_commands(vec![]);
-    let result = extract_mcp_servers(&manifest, dir.path()).unwrap();
+    let result = super::extract_mcp_servers(&manifest, dir.path()).unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains_key("srv"));
     assert_eq!(result["srv"].command.as_deref(), Some("npx"));
@@ -511,7 +528,7 @@ fn test_extract_mcp_servers_fallback_mcp_json_standard_format() {
 
 #[test]
 fn test_extract_mcp_servers_fallback_mcp_json_flat_format() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     // Flat format like context7: {"serverName": {...}} without mcpServers wrapper
     std::fs::write(
         dir.path().join(".mcp.json"),
@@ -520,7 +537,7 @@ fn test_extract_mcp_servers_fallback_mcp_json_flat_format() {
     .unwrap();
 
     let manifest = make_manifest_with_commands(vec![]);
-    let result = extract_mcp_servers(&manifest, dir.path()).unwrap();
+    let result = super::extract_mcp_servers(&manifest, dir.path()).unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains_key("context7"));
     assert_eq!(result["context7"].command.as_deref(), Some("npx"));
@@ -532,7 +549,7 @@ fn test_extract_mcp_servers_fallback_mcp_json_flat_format() {
 
 #[test]
 fn test_extract_mcp_servers_manifest_has_priority_over_fallback() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     // manifest has mcpServers → fallback should NOT be used
     std::fs::write(
         dir.path().join(".mcp.json"),
@@ -561,7 +578,7 @@ fn test_extract_mcp_servers_manifest_has_priority_over_fallback() {
     );
     manifest.mcp_servers = Some(servers);
 
-    let result = extract_mcp_servers(&manifest, dir.path()).unwrap();
+    let result = super::extract_mcp_servers(&manifest, dir.path()).unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains_key("inline"));
     assert_eq!(result["inline"].command.as_deref(), Some("inline-cmd"));
@@ -569,7 +586,7 @@ fn test_extract_mcp_servers_manifest_has_priority_over_fallback() {
 
 #[test]
 fn test_load_mcp_json_file_flat_format_multiple_servers() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mcp_json_path = dir.path().join("test.mcp.json");
     std::fs::write(
         &mcp_json_path,
@@ -585,7 +602,7 @@ fn test_load_mcp_json_file_flat_format_multiple_servers() {
 
 #[test]
 fn test_load_mcp_json_file_standard_format() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mcp_json_path = dir.path().join("test.mcp.json");
     std::fs::write(
         &mcp_json_path,
@@ -606,7 +623,7 @@ fn test_load_mcp_json_file_nonexistent() {
 
 #[test]
 fn test_load_mcp_json_file_invalid_json() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mcp_json_path = dir.path().join("bad.mcp.json");
     std::fs::write(&mcp_json_path, b"not json").unwrap();
     let error =
@@ -684,7 +701,7 @@ fn test_merge_plugin_mcp_servers() {
         },
     );
 
-    let merged = merge_plugin_mcp_servers(&[p1, p2]);
+    let merged = super::merge_plugin_mcp_servers(&[p1, p2]);
     assert_eq!(merged.len(), 2);
     assert!(merged.contains_key("plugin:plugin-a:db"));
     assert!(merged.contains_key("plugin:plugin-b:db"));
@@ -692,7 +709,7 @@ fn test_merge_plugin_mcp_servers() {
 
 #[test]
 fn test_load_plugins_success() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let plugin_dir = dir.path().join("my-plugin");
     std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
     std::fs::write(
@@ -715,7 +732,7 @@ fn test_load_plugins_success() {
         }],
     };
 
-    let loaded = load_plugins(&installed).unwrap();
+    let loaded = super::load_plugins(&installed).unwrap();
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].name, "my-plugin");
 }
@@ -723,13 +740,13 @@ fn test_load_plugins_success() {
 #[test]
 fn test_load_plugins_empty() {
     let installed = InstalledPlugins::default();
-    let loaded = load_plugins(&installed).unwrap();
+    let loaded = super::load_plugins(&installed).unwrap();
     assert!(loaded.is_empty());
 }
 
 #[test]
 fn test_load_plugins_invalid_manifest() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let installed = InstalledPlugins {
         version: 2,
         plugins: vec![InstalledPlugin {
@@ -744,13 +761,13 @@ fn test_load_plugins_invalid_manifest() {
         }],
     };
 
-    let loaded = load_plugins(&installed).unwrap();
+    let loaded = super::load_plugins(&installed).unwrap();
     assert!(loaded.is_empty());
 }
 
 #[test]
 fn test_load_plugins_synthetic_manifest_fallback() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
 
     // 创建插件缓存目录（无 plugin.json）
     let plugin_install_path = dir
@@ -764,8 +781,11 @@ fn test_load_plugins_synthetic_manifest_fallback() {
     // marketplaces_cache_dir() 读取的是 ~/.claude/plugins/marketplaces，
     // 测试中无法覆盖。直接测试 try_generate_synthetic_manifest_fallback 函数，
     // 验证当 marketplace 缓存不在默认路径时返回 false。
-    let result =
-        try_generate_synthetic_manifest_fallback(&plugin_install_path, "some-plugin", "test-mkt");
+    let result = super::try_generate_synthetic_manifest_fallback(
+        &plugin_install_path,
+        "some-plugin",
+        "test-mkt",
+    );
 
     // 由于 marketplace 缓存不在默认路径，fallback 应该返回 false
     assert!(!result);
@@ -773,17 +793,17 @@ fn test_load_plugins_synthetic_manifest_fallback() {
 
 #[test]
 fn test_try_generate_synthetic_manifest_fallback_no_marketplace() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let plugin_path = dir.path().join("some-plugin");
 
     // marketplace 为空时应该返回 false
-    let result = try_generate_synthetic_manifest_fallback(&plugin_path, "some-plugin", "");
+    let result = super::try_generate_synthetic_manifest_fallback(&plugin_path, "some-plugin", "");
     assert!(!result);
 }
 
 #[test]
 fn test_try_generate_synthetic_manifest_fallback_already_has_manifest() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let plugin_path = dir.path().join("has-manifest");
     std::fs::create_dir_all(plugin_path.join(".claude-plugin")).unwrap();
     std::fs::write(
@@ -793,7 +813,8 @@ fn test_try_generate_synthetic_manifest_fallback_already_has_manifest() {
     .unwrap();
 
     // 已有 plugin.json 时不应覆盖
-    let result = try_generate_synthetic_manifest_fallback(&plugin_path, "has-manifest", "test-mkt");
+    let result =
+        super::try_generate_synthetic_manifest_fallback(&plugin_path, "has-manifest", "test-mkt");
     assert!(!result);
 
     // 原有内容保持不变
@@ -804,7 +825,7 @@ fn test_try_generate_synthetic_manifest_fallback_already_has_manifest() {
 
 #[test]
 fn test_load_enabled_plugins() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let plugin_dir = dir.path().join("my-plugin");
     std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
     std::fs::write(
@@ -837,13 +858,13 @@ fn test_load_enabled_plugins() {
     let settings = r#"{"enabledPlugins":["my-plugin@test"]}"#;
     std::fs::write(dir.path().join("settings.json"), settings).unwrap();
 
-    let loaded = load_enabled_plugins(dir.path(), None).unwrap();
+    let loaded = super::load_enabled_plugins(dir.path(), None).unwrap();
     assert_eq!(loaded.len(), 1);
 }
 
 #[test]
 fn test_load_enabled_plugins_disabled() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("plugins")).unwrap();
     let installed_json = serde_json::to_string(&InstalledPlugins {
         version: 2,
@@ -868,7 +889,7 @@ fn test_load_enabled_plugins_disabled() {
     let settings = r#"{"enabledPlugins":[]}"#;
     std::fs::write(dir.path().join("settings.json"), settings).unwrap();
 
-    let loaded = load_enabled_plugins(dir.path(), None).unwrap();
+    let loaded = super::load_enabled_plugins(dir.path(), None).unwrap();
     assert!(loaded.is_empty());
 }
 
@@ -877,7 +898,7 @@ mod catalog;
 
 #[test]
 fn retired_channels_do_not_become_command_frontmatter() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("command.md");
     std::fs::write(
         &path,
@@ -885,7 +906,7 @@ fn retired_channels_do_not_become_command_frontmatter() {
     )
     .unwrap();
 
-    let (frontmatter, body) = parse_command_md(&path).unwrap();
+    let (frontmatter, body) = super::parse_command_md(&path).unwrap();
     assert_eq!(frontmatter.description.as_deref(), Some("normal command"));
     assert!(frontmatter.shell.is_none());
     assert!(frontmatter.args.is_none());

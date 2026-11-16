@@ -1,6 +1,10 @@
-use super::*;
+use crate::server::MonitorMcpServer;
 use crate::state::CleanupReport;
+use crate::state::MonitorStatus;
+use crate::state::TaskSnapshot;
+use rmcp::model::TaskPayload;
 use rmcp::model::TaskStatus;
+use rmcp::ServerHandler;
 
 fn snapshot(status: MonitorStatus, message: &str) -> TaskSnapshot {
     TaskSnapshot {
@@ -33,7 +37,7 @@ fn server_advertises_tasks_extension_and_tools() {
 
 #[test]
 fn seed_task_carries_deadline_metadata() {
-    let result = seed_task(
+    let result = crate::server::seed_task(
         crate::state::StartedMonitor {
             task_id: "monitor-1".into(),
             status: "working",
@@ -59,7 +63,7 @@ fn seed_task_carries_deadline_metadata() {
 
 #[test]
 fn detailed_task_maps_terminal_statuses_and_payloads() {
-    let completed = detailed_task(
+    let completed = crate::server::detailed_task(
         snapshot(MonitorStatus::Completed, "Command exited."),
         301_000,
     );
@@ -67,22 +71,25 @@ fn detailed_task_maps_terminal_statuses_and_payloads() {
     assert_eq!(completed.task.ttl_ms, Some(301_000));
     assert!(matches!(completed.payload, TaskPayload::Completed { .. }));
 
-    let failed = detailed_task(snapshot(MonitorStatus::Failed, "Command failed."), 301_000);
+    let failed =
+        crate::server::detailed_task(snapshot(MonitorStatus::Failed, "Command failed."), 301_000);
     assert_eq!(failed.task.status, TaskStatus::Failed);
     assert!(matches!(failed.payload, TaskPayload::Failed { .. }));
 
-    let cancelled = detailed_task(snapshot(MonitorStatus::Cancelled, "Stopped."), 301_000);
+    let cancelled =
+        crate::server::detailed_task(snapshot(MonitorStatus::Cancelled, "Stopped."), 301_000);
     assert_eq!(cancelled.task.status, TaskStatus::Cancelled);
     assert!(matches!(cancelled.payload, TaskPayload::Cancelled));
 
-    let working = detailed_task(snapshot(MonitorStatus::Working, "Running."), 3_900_000);
+    let working =
+        crate::server::detailed_task(snapshot(MonitorStatus::Working, "Running."), 3_900_000);
     assert_eq!(working.task.status, TaskStatus::Working);
     assert!(matches!(working.payload, TaskPayload::Working));
 }
 
 #[test]
 fn unknown_task_error_is_shared_for_missing_and_foreign_ids() {
-    let error = unknown_task(crate::state::MonitorError::UnknownTask);
+    let error = crate::server::unknown_task(crate::state::MonitorError::UnknownTask);
     assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     assert_eq!(error.message, "unknown task");
 }

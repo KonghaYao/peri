@@ -3,7 +3,9 @@
 //! 断言以调用方能观察到的东西为准：页内顺序与内容、游标是否存在、错误分类。
 //! 真实云端往返见 `remote/cloud_history_test.rs`（默认 `#[ignore]`）。
 
-use super::*;
+use super::{BaseMessage, PersistedPayload, SqliteSessionData, SqliteThreadStore, TempDir};
+use crate::sessions::data::SessionDataPort;
+
 use peri_acp_types::history_page::{
     HistoryCursor, HistoryCursorError, HistoryPage, HistoryPageCandidate, HistoryPagePlan,
     HistoryPageRow,
@@ -56,13 +58,13 @@ fn model_only_reminder() -> PersistedPayload {
 async fn session_with_history(
     history: &[PersistedPayload],
 ) -> (SqliteThreadStore, SqliteSessionData, TempDir) {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
-    data.save_new_session(&session(
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
+    data.save_new_session(&super::session(
         PAGE_SESSION,
         workspace.cwd.to_str().unwrap(),
         &workspace,
-        frozen("history-page"),
+        super::frozen("history-page"),
     ))
     .await
     .unwrap();
@@ -187,13 +189,13 @@ async fn non_displayable_rows_advance_the_position_without_faking_the_end() {
 /// 以损坏失败。本页必须原样读出，游标照常前进。
 #[tokio::test]
 async fn the_candidate_row_beyond_the_page_never_leaves_storage() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
-    data.save_new_session(&session(
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
+    data.save_new_session(&super::session(
         PAGE_SESSION,
         workspace.cwd.to_str().unwrap(),
         &workspace,
-        frozen("history-page"),
+        super::frozen("history-page"),
     ))
     .await
     .unwrap();
@@ -434,7 +436,7 @@ async fn the_local_backend_agrees_with_the_shared_page_assembly_on_the_same_rows
         &head.0,
         rows.into_iter()
             .map(|(message_id, position, encoded_bytes)| {
-                HistoryPageCandidate::new(&message_id, position, encoded_bytes).unwrap()
+                HistoryPageCandidate::try_new(&message_id, position, encoded_bytes).unwrap()
             })
             .collect(),
         3,
@@ -451,7 +453,7 @@ async fn the_local_backend_agrees_with_the_shared_page_assembly_on_the_same_rows
         .fetch_one(&store.database.pool)
         .await
         .unwrap();
-        bodies.push(HistoryPageRow::new(&expected, content).unwrap());
+        bodies.push(HistoryPageRow::try_new(&expected, content).unwrap());
     }
     let expected = plan.materialize(bodies).unwrap();
 

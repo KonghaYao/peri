@@ -1,4 +1,4 @@
-use super::*;
+use super::{LegacyRegistration, LegacySession, Path, PathBuf, WorkspaceId, WorkspacePathSource};
 
 fn session(
     id: &str,
@@ -45,7 +45,7 @@ fn same_worktree_merges_and_children_inherit_without_losing_cwd() {
         session("root-b", None, "machine-a", "/repo/src", Some(old_b)),
         session("child", Some("root-b"), "machine-a", "/repo/src", None),
     ];
-    let plan = plan_local_workspaces(&sessions, &roots).unwrap();
+    let plan = super::plan_local_workspaces(&sessions, &roots).unwrap();
     assert_eq!(plan.workspaces.len(), 1);
     assert_eq!(plan.workspaces[0].path, PathBuf::from("/repo"));
     assert_eq!(
@@ -66,7 +66,7 @@ fn old_workspace_id_shared_across_machines_is_split() {
         session("a", None, "machine-a", "/repo", Some(old)),
         session("b", None, "machine-b", "/repo", Some(old)),
     ];
-    let plan = plan_local_workspaces(&sessions, &roots).unwrap();
+    let plan = super::plan_local_workspaces(&sessions, &roots).unwrap();
     assert_eq!(plan.workspaces.len(), 2);
     assert_ne!(
         plan.session_workspace_ids["a"],
@@ -79,33 +79,33 @@ fn old_workspace_id_shared_across_machines_is_split() {
 fn damaged_parent_relation_and_relative_cwd_fail_instead_of_reassigning() {
     let no_registrations = [];
     let invalid = [session("a", None, "machine-a", "relative", None)];
-    assert!(plan_local_workspaces(&invalid, &no_registrations).is_err());
+    assert!(super::plan_local_workspaces(&invalid, &no_registrations).is_err());
 
     let conflicting = [
         session("root", None, "machine-a", "/repo", None),
         session("child", Some("root"), "machine-b", "/repo", None),
     ];
-    assert!(plan_local_workspaces(&conflicting, &no_registrations).is_err());
+    assert!(super::plan_local_workspaces(&conflicting, &no_registrations).is_err());
 
     let cycle = [
         session("a", Some("b"), "machine-a", "/repo", None),
         session("b", Some("a"), "machine-a", "/repo", None),
     ];
-    assert!(plan_local_workspaces(&cycle, &no_registrations).is_err());
+    assert!(super::plan_local_workspaces(&cycle, &no_registrations).is_err());
 }
 
 #[test]
 fn remote_root_inversion_preserves_posix_and_windows_saved_paths() {
     assert_eq!(
-        derive_remote_root("/repo/src/lib", "src/lib").unwrap(),
+        super::derive_remote_root("/repo/src/lib", "src/lib").unwrap(),
         PathBuf::from("/repo")
     );
     assert_eq!(
-        derive_remote_root("C:\\repo\\src", "src").unwrap(),
+        super::derive_remote_root("C:\\repo\\src", "src").unwrap(),
         PathBuf::from("C:\\repo")
     );
-    assert!(derive_remote_root("/other/src", "repo/src").is_err());
-    assert!(derive_remote_root("/repo/src", "../src").is_err());
+    assert!(super::derive_remote_root("/other/src", "repo/src").is_err());
+    assert!(super::derive_remote_root("/repo/src", "../src").is_err());
 }
 
 #[test]
@@ -117,11 +117,11 @@ fn saved_paths_accept_foreign_absolute_formats_but_reject_relative_paths() {
         r"C:\repo",
         r"\\server\share\repo",
     ] {
-        validate_saved_cwd(Path::new(saved)).unwrap();
+        super::validate_saved_cwd(Path::new(saved)).unwrap();
     }
     for saved in ["", "repo/src", "C:repo", r"\repo", r"\\server"] {
         assert_eq!(
-            validate_saved_cwd(Path::new(saved))
+            super::validate_saved_cwd(Path::new(saved))
                 .unwrap_err()
                 .to_string(),
             "legacy session path is not absolute"
@@ -131,7 +131,8 @@ fn saved_paths_accept_foreign_absolute_formats_but_reject_relative_paths() {
 
 #[tokio::test]
 async fn reads_existing_local_registration_and_environment_without_git_probe() {
-    use sqlx::{sqlite::SqliteConnectOptions, Connection};
+    use sqlx::sqlite::SqliteConnectOptions;
+    use sqlx::Connection;
 
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
@@ -145,10 +146,10 @@ async fn reads_existing_local_registration_and_environment_without_git_probe() {
     )
     .await
     .unwrap();
-    for statement in crate::sessions::canonical::V10_CREATE_TABLES
+    let schema_statements = crate::sessions::canonical::V10_CREATE_TABLES
         .iter()
-        .chain(crate::sessions::canonical::V10_CREATE_INDEXES)
-    {
+        .chain(crate::sessions::canonical::V10_CREATE_INDEXES);
+    for statement in schema_statements {
         sqlx::query(*statement)
             .execute(&mut connection)
             .await
@@ -202,7 +203,7 @@ async fn reads_existing_local_registration_and_environment_without_git_probe() {
         .execute(&mut connection)
         .await
         .unwrap();
-    let input = read_local_plan(&mut connection).await.unwrap();
+    let input = super::read_local_plan(&mut connection).await.unwrap();
     assert_eq!(input.plan.workspaces.len(), 1);
     assert_eq!(input.plan.workspaces[0].path, worktree);
     assert_eq!(input.plan.session_workspace_ids[&id], registration);

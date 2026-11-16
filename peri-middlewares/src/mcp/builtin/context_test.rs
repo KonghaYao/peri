@@ -10,20 +10,18 @@
 //!   session 级，缺输入 = 可见但退化而非不可装配，判定不为它增加 arm）；未注册名字
 //!   （表外名）一律不齐备（实例解析由 `runtime` 先行收口 `UnknownInstance`）。
 
-use std::{
-    collections::{BTreeSet, HashSet},
-    sync::Arc,
-};
+use std::collections::BTreeSet;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use parking_lot::Mutex;
-use peri_acp_types::{
-    event::BackgroundTaskResult,
-    tasks::{BgTaskKind, TaskManager},
-};
+use peri_acp_types::event::BackgroundTaskResult;
+use peri_acp_types::tasks::BgTaskKind;
+use peri_acp_types::tasks::TaskManager;
 use peri_agent::agent::async_tasks::TaskManager as ConcreteTaskManager;
 
 use super::{BuiltinInstanceContext, CronInstanceInput};
-use crate::mcp::builtin::closed_instances;
+use crate::mcp::builtin;
 use peri_mcp_cron::{CronScheduler, CronTrigger};
 use peri_mcp_workspace::WorkspaceInstanceInput;
 
@@ -71,7 +69,7 @@ fn constructors_keep_inputs_and_closed_set_verbatim() {
             .expect("夹具必须带 bg 完成回调"),
     );
     // 关闭集用 A24 唯一派生入口生成：`policy_key ∈ disabled_middlewares` → 实例名。
-    let closed = closed_instances(&HashSet::from(["CronMiddleware".to_string()]));
+    let closed = builtin::closed_instances(&HashSet::from(["CronMiddleware".to_string()]));
     assert_eq!(
         closed,
         BTreeSet::from(["cron".to_string()]),

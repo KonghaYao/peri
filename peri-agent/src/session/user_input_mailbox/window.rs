@@ -8,7 +8,8 @@ use peri_acp_types::identity::SessionSeq;
 use peri_acp_types::messages::MessageContent;
 use peri_acp_types::session::UserInputState;
 
-use super::{MailboxState, UserInputMailbox};
+use crate::session::user_input_mailbox::MailboxState;
+use crate::session::user_input_mailbox::UserInputMailbox;
 
 pub(super) const TERMINAL_CAPACITY: usize = 128;
 pub(super) const DELIVERY_JOURNAL_CAPACITY: usize = 128;

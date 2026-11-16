@@ -1,11 +1,6 @@
 //! Sub-agent event handlers — SubagentStarted, SubagentStopped.
 
-use super::*;
-use crate::kit::atoms::{BG_AGENT_IDS, BG_TASKS};
-use crate::kit::bg_task_identity::{bind_linked_agent_on_subagent_started, task_id_for_agent_id};
-use crate::kit::bg_task_live::{
-    handle_bg_subagent_stopped, init_agent_live_detail, init_pending_agent_live_detail,
-};
+use super::{BridgeState, SessionPhase};
 
 pub(super) fn handle_subagent_started(
     state: &mut BridgeState,
@@ -38,14 +33,25 @@ pub(super) fn handle_subagent_started(
             .current_turn
             .subagent_instance_id(agent_id)
             .map(str::to_string);
-        if let Some(task_id) =
-            bind_linked_agent_on_subagent_started(agent_id, agent_name, instance_id.as_deref())
-        {
-            init_agent_live_detail(&task_id, agent_id, agent_name, instance_id.as_deref());
+        if let Some(task_id) = crate::kit::bg_task_identity::bind_linked_agent_on_subagent_started(
+            agent_id,
+            agent_name,
+            instance_id.as_deref(),
+        ) {
+            crate::kit::bg_task_live::init_agent_live_detail(
+                &task_id,
+                agent_id,
+                agent_name,
+                instance_id.as_deref(),
+            );
         } else {
             // SubagentStarted 与 BgTaskStarted 走不同通道，任务行可能晚到：
             // 先建立占位 owner，迟到文本/工具/终态才有归属。
-            init_pending_agent_live_detail(agent_id, agent_name, instance_id.as_deref());
+            crate::kit::bg_task_live::init_pending_agent_live_detail(
+                agent_id,
+                agent_name,
+                instance_id.as_deref(),
+            );
         }
     }
     state.variant = 1;
@@ -69,9 +75,9 @@ pub(super) fn handle_subagent_stopped(
         "SubagentStopped: marking SubAgentGroup as done"
     );
     state.current_turn.stop_subagent(agent_id, is_error, result);
-    let task_id = task_id_for_agent_id(agent_id);
+    let task_id = crate::kit::bg_task_identity::task_id_for_agent_id(agent_id);
     if BG_AGENT_IDS.state().read().contains(agent_id) {
-        handle_bg_subagent_stopped(agent_id, result, is_error);
+        crate::kit::bg_task_live::handle_bg_subagent_stopped(agent_id, result, is_error);
         if let Some(task_id) = task_id.as_deref() {
             BG_TASKS
                 .state()
@@ -87,3 +93,7 @@ pub(super) fn handle_subagent_stopped(
     state.publish_barrier();
     super::render::push_acp_state(state);
 }
+
+use crate::kit::atoms::BG_AGENT_IDS;
+
+use crate::kit::atoms::BG_TASKS;

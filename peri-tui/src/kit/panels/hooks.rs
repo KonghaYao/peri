@@ -4,23 +4,27 @@
 //! service_snapshot 从 plugin_data.all_hooks 派生）。只读面板——hooks 在
 //! 插件 hooks/<event>.json 中声明，UI 不修改。
 
-use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
-    prelude::*,
-    ratatui::{
-        layout::{Constraint, Rect},
-        style::{Style, Stylize},
-        text::{Line, Span},
-        widgets::Paragraph,
-    },
-};
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::KeyCode;
+use ratatui_kit::crossterm::event::KeyEventKind;
+use ratatui_kit::crossterm::event::KeyModifiers;
+use ratatui_kit::crossterm::event::MouseButton;
+use ratatui_kit::crossterm::event::MouseEventKind;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Constraint;
+use ratatui_kit::ratatui::layout::Rect;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::style::Stylize;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
+use ratatui_kit::ratatui::widgets::Paragraph;
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{HOOK_LIST, HookSummary, LANG_VERSION};
-use crate::kit::list_nav::{next_selection, previous_selection};
-use crate::kit::panel_mouse::{AreaTracker, hit_item, is_scrollbar_column};
-use crate::kit::panels::shared::list::{ListMetrics, ListViewport, content_rows};
+
+use crate::kit::panel_mouse::AreaTracker;
+use crate::kit::panels::shared::list::ListMetrics;
+use crate::kit::panels::shared::list::ListViewport;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
@@ -63,7 +67,7 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let (_term_w, term_h) = hooks.use_terminal_size();
     let area = hooks.use_hook(AreaTracker::new).rect;
     let viewport = ListViewport::for_content_rows(
-        content_rows(area, term_h),
+        crate::kit::panels::shared::list::content_rows(area, term_h),
         // header 3 行（统计、只读提示、空行）+ 每项 3 行（名称行、matcher 行、命令行）+ footer 2 行
         ListMetrics::new(3, 3, 2),
         hook_list.len(),
@@ -201,8 +205,9 @@ fn handle_hooks_event(
     // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
     if let Event::Mouse(mouse) = event {
         if let Some(area) = area
-            && !is_scrollbar_column(&mouse, area)
-            && let Some(idx) = hit_item(&mouse, area, viewport.hit_layout())
+            && !crate::kit::panel_mouse::is_scrollbar_column(&mouse, area)
+            && let Some(idx) =
+                crate::kit::panel_mouse::hit_item(&mouse, area, viewport.hit_layout())
         {
             *selected.write() = idx;
             close_panel();
@@ -228,13 +233,13 @@ fn handle_hooks_event(
         }
         KeyCode::Up => {
             let mut s = selected.write();
-            *s = previous_selection(*s);
+            *s = crate::kit::list_nav::previous_selection(*s);
         }
         KeyCode::Down => {
             let mut s = selected.write();
             let count = HOOK_LIST.state().read().len();
             if count > 0 {
-                *s = next_selection(*s, count);
+                *s = crate::kit::list_nav::next_selection(*s, count);
             }
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -248,3 +253,9 @@ fn handle_hooks_event(
 #[cfg(test)]
 #[path = "hooks_test.rs"]
 mod tests;
+
+use crate::kit::atoms::HOOK_LIST;
+
+use crate::kit::atoms::HookSummary;
+
+use crate::kit::atoms::LANG_VERSION;

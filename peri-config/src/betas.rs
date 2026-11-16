@@ -19,6 +19,7 @@ pub use peri_acp_types::beta_flags::{BetaFlagOrigin, BetaFlagValue, BetaFlags};
 pub const HISTORY_WINDOW_V1: &str = "history-window-v1";
 
 /// beta 键是否被接受：ACP 注册表 + 本 crate 的 TUI 本地 beta。
+#[must_use]
 pub fn is_known(id: &str) -> bool {
     id == HISTORY_WINDOW_V1 || peri_acp_types::beta_flags::find(id).is_some()
 }
@@ -50,6 +51,7 @@ pub(crate) fn resolve(global: &PeriConfig, merged: &PeriConfig) -> BetaFlags {
 /// [`BetaFlagOrigin::Global`] 标注——它只出现在无来源层对照的遗留/测试构造路径，
 /// 不影响有效值与消费语义。生产新建会话走 [`crate::settings::ConfigSource::beta_flags`]
 /// （由快照投影，来源层可判）。
+#[must_use]
 pub fn from_merged(merged: &PeriConfig) -> BetaFlags {
     resolve(merged, merged)
 }

@@ -1,13 +1,16 @@
 //! MCP 终态交付的接收、去重与历史回灌契约。
-use super::*;
 use crate::agent::events_v2::EventHandles;
+use crate::agent::events_v2::StateEvent;
+use crate::agent::stages::receive::ReceiveInput;
 use crate::agent::stages::StageContext;
 use crate::messages::BaseMessage;
 use crate::session::queue::MessageSource;
 use crate::session::store::FrozenContext;
 use crate::session::test_resources::TestSession;
 use crate::session::transcript::MessageTranscript;
+use crate::session::MessageKind;
 use crate::session::{QueuedMessage, Session};
+use peri_acp_types::event::ExecutorEvent;
 use peri_acp_types::session::MqEnqueueDisposition;
 use std::sync::Arc;
 
@@ -74,7 +77,7 @@ async fn stable_terminal_delivery_id_is_recorded_once_across_receive_runs() {
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap();
+        .expect("the construct fixture result is required for this assertion");
     let context = make_context();
     let delivery_id = crate::messages::MessageId::new();
     let queue = context.session.queue.clone();
@@ -91,13 +94,13 @@ async fn stable_terminal_delivery_id_is_recorded_once_across_receive_runs() {
                 delivery_id,
             ))
             .await
-            .unwrap();
+            .expect("the enqueue fixture result is required for this assertion");
         assert_eq!(outcome.disposition, expected);
-        run_receive(ReceiveInput {
+        crate::agent::stages::receive::run_receive(ReceiveInput {
             context: context.clone(),
         })
         .await
-        .unwrap();
+        .expect("the run receive fixture result is required for this assertion");
     }
     {
         let transcript = context.session.transcript.read();
@@ -108,7 +111,7 @@ async fn stable_terminal_delivery_id_is_recorded_once_across_receive_runs() {
     conflicting.body = "different terminal".into();
     let conflicting = TrustedSystemReminderFactory::for_producer()
         .construct(conflicting)
-        .unwrap();
+        .expect("the construct fixture result is required for this assertion");
     let outcome = queue
         .enqueue(QueuedMessage::system_reminder_with_delivery_id(
             MessageKind::Defer,
@@ -117,17 +120,17 @@ async fn stable_terminal_delivery_id_is_recorded_once_across_receive_runs() {
             delivery_id,
         ))
         .await
-        .unwrap();
+        .expect("the enqueue fixture result is required for this assertion");
     assert_eq!(
         outcome.disposition,
         MqEnqueueDisposition::AlreadyHandedOff,
         "已移交的稳定 ID 不接纳替换正文，也不制造新的处理轮次"
     );
-    run_receive(ReceiveInput {
+    crate::agent::stages::receive::run_receive(ReceiveInput {
         context: context.clone(),
     })
     .await
-    .unwrap();
+    .expect("the run receive fixture result is required for this assertion");
     assert_eq!(context.session.transcript.read().active_payloads().len(), 1);
 }
 
@@ -150,7 +153,7 @@ async fn identity_conflict_is_rejected_at_enqueue_without_blocking_later_inputs(
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap();
+        .expect("the construct fixture result is required for this assertion");
     let context = make_context();
     let queue = context.session.queue.clone();
     let delivery_id = crate::messages::MessageId::new();
@@ -164,7 +167,7 @@ async fn identity_conflict_is_rejected_at_enqueue_without_blocking_later_inputs(
             delivery_id,
         ))
         .await
-        .unwrap();
+        .expect("the enqueue fixture result is required for this assertion");
     let conflict = queue
         .enqueue(QueuedMessage::system_reminder_with_delivery_id(
             MessageKind::Defer,
@@ -175,11 +178,11 @@ async fn identity_conflict_is_rejected_at_enqueue_without_blocking_later_inputs(
         .await;
     assert!(conflict.is_err(), "身份冲突必须显式报错");
     // 冲突没有阻塞后续输入：原始那一行仍可正常移交。
-    run_receive(ReceiveInput {
+    crate::agent::stages::receive::run_receive(ReceiveInput {
         context: context.clone(),
     })
     .await
-    .unwrap();
+    .expect("the run receive fixture result is required for this assertion");
     assert_eq!(context.session.transcript.read().active_payloads().len(), 1);
     // 同一 ID 同内容重放复用接纳结果；已移交后不再制造新行。
     let replay = queue
@@ -190,13 +193,13 @@ async fn identity_conflict_is_rejected_at_enqueue_without_blocking_later_inputs(
             delivery_id,
         ))
         .await
-        .unwrap();
+        .expect("the enqueue fixture result is required for this assertion");
     assert_eq!(replay.disposition, MqEnqueueDisposition::AlreadyHandedOff);
-    run_receive(ReceiveInput {
+    crate::agent::stages::receive::run_receive(ReceiveInput {
         context: context.clone(),
     })
     .await
-    .unwrap();
+    .expect("the run receive fixture result is required for this assertion");
     assert_eq!(context.session.transcript.read().active_payloads().len(), 1);
 }
 
@@ -221,7 +224,7 @@ async fn durable_terminal_delivery_preserves_order_and_dedups_after_exclusion() 
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap();
+        .expect("the construct fixture result is required for this assertion");
     let first = BaseMessage::human("prior input");
     let first_id = first.id();
     let delivery_id = crate::messages::MessageId::new();
@@ -240,16 +243,16 @@ async fn durable_terminal_delivery_preserves_order_and_dedups_after_exclusion() 
             delivery_id,
         ))
         .await;
-    run_receive(ReceiveInput {
+    crate::agent::stages::receive::run_receive(ReceiveInput {
         context: context.clone(),
     })
     .await
-    .unwrap();
+    .expect("the run receive fixture result is required for this assertion");
     let history = bound
         .resources()
         .load_session_history(&bound.thread_id())
         .await
-        .unwrap();
+        .expect("the load session history fixture result is required for this assertion");
     assert_eq!(
         history.iter().map(|item| item.id()).collect::<Vec<_>>(),
         vec![first_id, delivery_id]
@@ -272,13 +275,13 @@ async fn durable_terminal_delivery_preserves_order_and_dedups_after_exclusion() 
             delivery_id,
         ))
         .await
-        .unwrap();
+        .expect("the enqueue fixture result is required for this assertion");
     assert_eq!(replay.disposition, MqEnqueueDisposition::AlreadyHandedOff);
-    let output = run_receive(ReceiveInput {
+    let output = crate::agent::stages::receive::run_receive(ReceiveInput {
         context: context.clone(),
     })
     .await
-    .unwrap();
+    .expect("the run receive fixture result is required for this assertion");
     assert_eq!(output.wake_up_count, 0, "已移交的重试不再驱动模型调用");
     // 断言「没有追加第三条条目」：这里数的是热态全部条目（含被排除的 delivery），
     // 不是 `active_payloads` 的有效集合——已排除条目仍然留在 transcript 里用于查重。
@@ -287,7 +290,7 @@ async fn durable_terminal_delivery_preserves_order_and_dedups_after_exclusion() 
         .resources()
         .load_session_history(&bound.thread_id())
         .await
-        .unwrap();
+        .expect("the load session history fixture result is required for this assertion");
     assert_eq!(history.len(), 2);
 }
 
@@ -319,7 +322,7 @@ async fn committed_delivery_missing_from_hot_state_is_restored_without_reemittin
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap();
+        .expect("the construct fixture result is required for this assertion");
     let delivery_id = crate::messages::MessageId::new();
     let (bus, mut handles) = EventBus::new(Default::default());
     context.runtime.event_bus = Arc::new(bus);
@@ -333,21 +336,21 @@ async fn committed_delivery_missing_from_hot_state_is_restored_without_reemittin
             delivery_id,
         ))
         .await
-        .unwrap();
+        .expect("the enqueue fixture result is required for this assertion");
     assert!(
         bound
             .resources()
             .append_reminder_if_absent(&bound.thread_id(), delivery_id, &reminder)
             .await
-            .unwrap(),
+            .expect("the thread id fixture result is required for this assertion"),
         "先提交历史事实，模拟旧写入路径留下的 MQ 行"
     );
 
-    let output = run_receive(ReceiveInput {
+    let output = crate::agent::stages::receive::run_receive(ReceiveInput {
         context: context.clone(),
     })
     .await
-    .unwrap();
+    .expect("the run receive fixture result is required for this assertion");
     assert_eq!(output.wake_up_count, 1, "已提交提醒仍驱动一次模型调用");
     assert!(
         context.session.transcript.read().get(delivery_id).is_some(),
@@ -367,7 +370,7 @@ async fn committed_delivery_missing_from_hot_state_is_restored_without_reemittin
         .resources()
         .load_session_history(&bound.thread_id())
         .await
-        .unwrap();
+        .expect("the load session history fixture result is required for this assertion");
     assert_eq!(history.len(), 1, "存储不重复入账");
 }
 
@@ -396,7 +399,7 @@ async fn excluded_committed_delivery_is_neither_restored_nor_reemitted() {
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap();
+        .expect("the construct fixture result is required for this assertion");
     let delivery_id = crate::messages::MessageId::new();
     let (bus, mut handles) = EventBus::new(Default::default());
     context.runtime.event_bus = Arc::new(bus);
@@ -410,13 +413,13 @@ async fn excluded_committed_delivery_is_neither_restored_nor_reemitted() {
             delivery_id,
         ))
         .await
-        .unwrap();
+        .expect("the enqueue fixture result is required for this assertion");
     assert!(
         bound
             .resources()
             .append_reminder_if_absent(&bound.thread_id(), delivery_id, &reminder)
             .await
-            .unwrap(),
+            .expect("the thread id fixture result is required for this assertion"),
         "先提交历史事实，模拟旧写入路径留下的 MQ 行"
     );
 
@@ -428,13 +431,15 @@ async fn excluded_committed_delivery_is_neither_restored_nor_reemitted() {
         hot.persist_tx_handle()
     };
     if let Some(tx) = persist_tx {
-        MessageTranscript::flush_via_tx(&tx).await.unwrap();
+        MessageTranscript::flush_via_tx(&tx)
+            .await
+            .expect("the flush via tx fixture result is required for this assertion");
     }
     let flags = bound
         .resources()
         .load_message_flags(&bound.thread_id(), &[delivery_id])
         .await
-        .unwrap();
+        .expect("the load message flags fixture result is required for this assertion");
     assert!(
         flags.get(&delivery_id).is_some_and(|flags| flags.excluded),
         "排除事实必须已落库"
@@ -443,7 +448,7 @@ async fn excluded_committed_delivery_is_neither_restored_nor_reemitted() {
         .resources()
         .load_active_snapshot(&bound.thread_id())
         .await
-        .unwrap();
+        .expect("the load active snapshot fixture result is required for this assertion");
     assert!(
         active
             .payloads
@@ -453,11 +458,11 @@ async fn excluded_committed_delivery_is_neither_restored_nor_reemitted() {
     );
     // 模拟收缩释放热态条目：同一存储上换一份空热态。
     rebind_empty_transcript(&context, &bound);
-    let output = run_receive(ReceiveInput {
+    let output = crate::agent::stages::receive::run_receive(ReceiveInput {
         context: context.clone(),
     })
     .await
-    .unwrap();
+    .expect("the run receive fixture result is required for this assertion");
     assert_eq!(output.wake_up_count, 1, "已提交交付仍被消费一次");
     assert!(
         context.session.transcript.read().get(delivery_id).is_none(),
@@ -472,6 +477,6 @@ async fn excluded_committed_delivery_is_neither_restored_nor_reemitted() {
         .resources()
         .load_session_history(&bound.thread_id())
         .await
-        .unwrap();
+        .expect("the load session history fixture result is required for this assertion");
     assert_eq!(history.len(), 1, "存储不重复入账");
 }

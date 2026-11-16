@@ -1,4 +1,6 @@
-use super::*;
+use crate::filesystem::folder::FolderOperationsTool;
+use peri_agent::tools::BaseTool;
+use peri_mcp_common::failure::ToolFailure;
 
 #[tokio::test]
 async fn test_folder_create() {
@@ -314,7 +316,7 @@ fn test_deep_scan_preserves_sibling_connectors_across_subtrees() {
     std::fs::create_dir_all(dir.path().join("a/nested")).unwrap();
     std::fs::write(dir.path().join("a/nested/leaf"), "").unwrap();
     std::fs::write(dir.path().join("z.txt"), "").unwrap();
-    let output = deep_scan_folder(dir.path(), 3).unwrap();
+    let output = crate::filesystem::folder::deep_scan_folder(dir.path(), 3).unwrap();
     let branches: Vec<_> = output
         .lines()
         .filter_map(|line| line.split_once(" (").map(|(entry, _)| entry))
@@ -340,7 +342,7 @@ fn test_deep_scan_marks_symlinks_without_following_them() {
     std::fs::write(outside.path().join("outside-marker"), "").unwrap();
     std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).unwrap();
     std::os::unix::fs::symlink("missing", dir.path().join("dangling")).unwrap();
-    let output = deep_scan_folder(dir.path(), 3).unwrap();
+    let output = crate::filesystem::folder::deep_scan_folder(dir.path(), 3).unwrap();
     for name in ["linked", "dangling"] {
         let line = output.lines().find(|line| line.contains(name)).unwrap();
         assert!(line.contains("🔗") && line.contains("symlink"), "{output}");
@@ -359,7 +361,7 @@ fn test_folder_list_sorts_names_within_groups() {
     for name in ["z.txt", "b.txt", "a.txt"] {
         std::fs::write(dir.path().join(name), "").unwrap();
     }
-    let output = list_folder(dir.path()).unwrap();
+    let output = crate::filesystem::folder::list_folder(dir.path()).unwrap();
     let entries: Vec<_> = output
         .lines()
         .filter(|line| line.starts_with("  "))
@@ -389,14 +391,14 @@ fn test_folder_truncation_reports_actual_displayed_entries() {
     for i in 0..5 {
         std::fs::write(dir.path().join(format!("f{i}")), "").unwrap();
     }
-    let list = list_folder(dir.path()).unwrap();
+    let list = crate::filesystem::folder::list_folder(dir.path()).unwrap();
     assert_eq!(
         list.lines().filter(|line| line.starts_with("  ")).count(),
         500,
         "应充分使用显示预算并保留文件"
     );
     assert!(list.contains("605 total entries, showing 500"));
-    let tree = deep_scan_folder(dir.path(), 1).unwrap();
+    let tree = crate::filesystem::folder::deep_scan_folder(dir.path(), 1).unwrap();
     assert_eq!(
         tree.lines()
             .filter(|line| line.starts_with("├──") || line.starts_with("└──"))
@@ -411,7 +413,8 @@ fn test_folder_truncation_reports_actual_displayed_entries() {
 #[test]
 fn test_deep_scan_incomplete_enumeration_reports_unknown_total() {
     let dir = tempfile::tempdir().unwrap();
-    let output = deep_scan_folder(&dir.path().join("disappeared"), 2).unwrap();
+    let output =
+        crate::filesystem::folder::deep_scan_folder(&dir.path().join("disappeared"), 2).unwrap();
     assert!(
         output.contains("Collected: 0 entries; total unknown"),
         "{output}"

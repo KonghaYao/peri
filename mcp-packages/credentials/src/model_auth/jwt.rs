@@ -1,4 +1,5 @@
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use serde::Deserialize;
 
 use super::types::{AuthError, AuthResult};

@@ -1,7 +1,6 @@
-use ratatui::{
-    style::Style,
-    text::{Line, Span},
-};
+use ratatui::style::Style;
+use ratatui::text::Line;
+use ratatui::text::Span;
 use unicode_width::UnicodeWidthChar;
 
 /// 计算字符串前 char_idx 个字符的显示列宽度（CJK 字符占 2 列）。
@@ -52,84 +51,87 @@ pub fn wrap_text(text: &str, cursor: usize, max_width: usize) -> WrapResult {
     let mut cursor_visual_col = 0usize;
     let mut global_char = 0usize;
 
-    for (source_line, logical_line) in text.split('\n').enumerate() {
-        let logical_start = global_char;
-        let mut line_char_offset = 0usize; // 本逻辑行内字符偏移
+    {
+        let iteration_items = text.split('\n').enumerate();
+        for (source_line, logical_line) in iteration_items {
+            let logical_start = global_char;
+            let mut line_char_offset = 0usize; // 本逻辑行内字符偏移
 
-        // 空逻辑行仍然产生一个空视觉行
-        if logical_line.is_empty() {
-            // 只在 global_char 精确匹配时设置光标（不在 +1 处——避免覆盖依赖）
-            if cursor == global_char {
-                cursor_visual_row = visual_lines.len();
-                cursor_visual_col = 0;
-            }
-            visual_lines.push(VisualLine {
-                source_line,
-                text: String::new(),
-                char_range: (global_char, global_char),
-            });
-            global_char += 1; // for \n
-            continue;
-        }
-
-        let mut current_text = String::new();
-        let mut current_width = 0usize;
-        let mut segment_char_start = line_char_offset;
-
-        for ch in logical_line.chars() {
-            let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0);
-
-            // 当前行已有内容，加下一个字会超出 → 断行
-            if current_width > 0 && current_width + ch_w > max_width {
+            // 空逻辑行仍然产生一个空视觉行
+            if logical_line.is_empty() {
+                // 只在 global_char 精确匹配时设置光标（不在 +1 处——避免覆盖依赖）
+                if cursor == global_char {
+                    cursor_visual_row = visual_lines.len();
+                    cursor_visual_col = 0;
+                }
                 visual_lines.push(VisualLine {
                     source_line,
-                    text: std::mem::take(&mut current_text),
+                    text: String::new(),
+                    char_range: (global_char, global_char),
+                });
+                global_char += 1; // for \n
+                continue;
+            }
+
+            let mut current_text = String::new();
+            let mut current_width = 0usize;
+            let mut segment_char_start = line_char_offset;
+
+            for ch in logical_line.chars() {
+                let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0);
+
+                // 当前行已有内容，加下一个字会超出 → 断行
+                if current_width > 0 && current_width + ch_w > max_width {
+                    visual_lines.push(VisualLine {
+                        source_line,
+                        text: std::mem::take(&mut current_text),
+                        char_range: (
+                            logical_start + segment_char_start,
+                            logical_start + line_char_offset,
+                        ),
+                    });
+                    current_width = 0;
+                    segment_char_start = line_char_offset;
+                }
+
+                current_text.push(ch);
+                current_width += ch_w;
+
+                // 光标检查：在视觉行构建过程中匹配全局坐标
+                let char_global = logical_start + line_char_offset;
+                if cursor == char_global {
+                    cursor_visual_row = visual_lines.len();
+                    cursor_visual_col = current_width - ch_w; // 此字符之前
+                } else if cursor == char_global + 1 {
+                    // 光标在这个字符之后
+                    cursor_visual_row = visual_lines.len();
+                    cursor_visual_col = current_width;
+                }
+
+                line_char_offset += 1;
+            }
+
+            // 该行剩余部分
+            if !current_text.is_empty() || logical_line.is_empty() {
+                // 再次检查光标（可能在行尾）
+                let char_global = logical_start + line_char_offset;
+                if cursor == char_global {
+                    cursor_visual_row = visual_lines.len();
+                    cursor_visual_col = current_width;
+                }
+
+                visual_lines.push(VisualLine {
+                    source_line,
+                    text: current_text,
                     char_range: (
                         logical_start + segment_char_start,
                         logical_start + line_char_offset,
                     ),
                 });
-                current_width = 0;
-                segment_char_start = line_char_offset;
             }
 
-            current_text.push(ch);
-            current_width += ch_w;
-
-            // 光标检查：在视觉行构建过程中匹配全局坐标
-            let char_global = logical_start + line_char_offset;
-            if cursor == char_global {
-                cursor_visual_row = visual_lines.len();
-                cursor_visual_col = current_width - ch_w; // 此字符之前
-            } else if cursor == char_global + 1 {
-                // 光标在这个字符之后
-                cursor_visual_row = visual_lines.len();
-                cursor_visual_col = current_width;
-            }
-
-            line_char_offset += 1;
+            global_char += logical_line.chars().count() + 1; // +1 for \n
         }
-
-        // 该行剩余部分
-        if !current_text.is_empty() || logical_line.is_empty() {
-            // 再次检查光标（可能在行尾）
-            let char_global = logical_start + line_char_offset;
-            if cursor == char_global {
-                cursor_visual_row = visual_lines.len();
-                cursor_visual_col = current_width;
-            }
-
-            visual_lines.push(VisualLine {
-                source_line,
-                text: current_text,
-                char_range: (
-                    logical_start + segment_char_start,
-                    logical_start + line_char_offset,
-                ),
-            });
-        }
-
-        global_char += logical_line.chars().count() + 1; // +1 for \n
     }
 
     // 光标可能在文本末尾（超出所有字符）

@@ -1,6 +1,8 @@
 //! Stage/middleware 句柄配对和旁路指标；不持有第二套观测归属状态。
 
-use super::{LangfuseBridge, LangfuseTracer, StageHandle};
+use crate::langfuse::bridge::LangfuseBridge;
+use crate::langfuse::tracer::stages::StageHandle;
+use crate::langfuse::tracer::LangfuseTracer;
 use peri_agent::agent::events::{MiddlewareHook, Stage, StageStatus};
 use std::collections::{HashMap, HashSet};
 
@@ -26,7 +28,7 @@ impl LangfuseBridge {
         mw_name: &str,
         hook: MiddlewareHook,
         status: StageStatus,
-        error: &Option<String>,
+        error: Option<&str>,
     ) {
         // 先释放 MutexGuard，查询活跃 middleware span
         let span_id = {
@@ -41,7 +43,7 @@ impl LangfuseBridge {
             };
             self.tracer
                 .lock()
-                .on_middleware_end(&handle, status, error.clone());
+                .on_middleware_end(&handle, status, error.map(str::to_owned));
         } else {
             tracing::warn!(
                 target: "langfuse::forward",

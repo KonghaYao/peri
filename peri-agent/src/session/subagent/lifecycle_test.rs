@@ -1,4 +1,9 @@
-use super::*;
+use crate::agent::events_v2::EventBus;
+use peri_acp_types::identity::AgentId;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::thread::AgentStatus;
+use peri_acp_types::thread::ThreadId;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn ordinary_history_flush_failure_is_an_execution_error() {
@@ -16,7 +21,11 @@ async fn ordinary_history_flush_failure_is_an_execution_error() {
         .transcript()
         .write()
         .append(crate::messages::BaseMessage::human("not committed"));
-    assert!(flush_session_history(&session).await.is_err());
+    assert!(
+        crate::session::subagent::lifecycle::flush_session_history(&session)
+            .await
+            .is_err()
+    );
     assert!(session.transcript().read().has_persistence_failure());
 }
 use crate::session::turn::TurnId;
@@ -27,7 +36,11 @@ async fn test_drain_subagent_events_abort_cancels_forwarder() {
     struct Dropped(Option<tokio::sync::oneshot::Sender<()>>);
     impl Drop for Dropped {
         fn drop(&mut self) {
-            let _ = self.0.take().unwrap().send(());
+            let _ = self
+                .0
+                .take()
+                .expect("self take fixture must provide its pending value exactly once")
+                .send(());
         }
     }
     let (bus, _handles) = EventBus::new(Default::default());
@@ -35,17 +48,25 @@ async fn test_drain_subagent_events_abort_cancels_forwarder() {
     let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
     let forwarder = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         let _dropped = Dropped(Some(dropped_tx));
-        entered_tx.send(()).unwrap();
+        entered_tx
+            .send(())
+            .expect("entered tx send test receiver must remain available for this delivery");
         std::future::pending::<Option<crate::agent::events_v2::ObserveEvent>>().await
     }));
-    let owner = tokio::spawn(drain_subagent_events(Arc::new(bus), forwarder, None));
-    entered_rx.await.unwrap();
+    let owner = tokio::spawn(crate::session::subagent::lifecycle::drain_subagent_events(
+        Arc::new(bus),
+        forwarder,
+        None,
+    ));
+    entered_rx
+        .await
+        .expect("the entered rx fixture result is required for this assertion");
     owner.abort();
     assert!(owner.await.unwrap_err().is_cancelled());
     tokio::time::timeout(std::time::Duration::from_secs(5), dropped_rx)
         .await
         .expect("owner 被 abort 后 forwarder 必须销毁，不能继续 detached 执行")
-        .unwrap();
+        .expect("the expect fixture result is required for this assertion");
 }
 
 /// [回归测试] handler 同步阻塞期间强制 abort，恢复后不能由 forwarder 补发成功 Stop。
@@ -60,8 +81,15 @@ async fn test_drain_subagent_events_abort_during_handler_does_not_publish_stop()
     }
     impl crate::agent::LangfuseBridgeLike for GatedBridge {
         fn process_render_event(&self, _event: &RenderEvent) {
-            self.entered.lock().take().unwrap().send(()).unwrap();
-            self.release.lock().recv().unwrap();
+            self.entered
+                .lock()
+                .take()
+                .expect("self entered fixture must provide its pending value exactly once")
+                .send(())
+                .expect("self entered test receiver must remain available for this delivery");
+            self.release.lock().recv().expect(
+                "self release producer must deliver the expected test event before closing",
+            );
         }
         fn process_observe_event(&self, event: &ObserveEvent) {
             if matches!(event, ObserveEvent::SubagentStop { .. }) {
@@ -71,7 +99,11 @@ async fn test_drain_subagent_events_abort_during_handler_does_not_publish_stop()
     }
     impl Drop for GatedBridge {
         fn drop(&mut self) {
-            let _ = self.dropped.take().unwrap().send(());
+            let _ = self
+                .dropped
+                .take()
+                .expect("self dropped fixture must provide its pending value exactly once")
+                .send(());
         }
     }
     let (bus, handles) = EventBus::new(Default::default());
@@ -93,7 +125,7 @@ async fn test_drain_subagent_events_abort_during_handler_does_not_publish_stop()
         message_id: peri_acp_types::messages::MessageId::new(),
         chunk: "tail".into(),
     });
-    bus.emit_observe(build_subagent_stop_v2(
+    bus.emit_observe(crate::session::subagent::v2_bridge::build_subagent_stop_v2(
         turn_id,
         Some(agent_id),
         agent_id,
@@ -108,20 +140,24 @@ async fn test_drain_subagent_events_abort_during_handler_does_not_publish_stop()
             Some(bridge.clone()),
             "fixture".into(),
         );
-    let owner = tokio::spawn(drain_subagent_events(
+    let owner = tokio::spawn(crate::session::subagent::lifecycle::drain_subagent_events(
         Arc::new(bus),
         forwarder,
         Some(bridge.clone()),
     ));
-    entered_rx.await.unwrap();
+    entered_rx
+        .await
+        .expect("the entered rx fixture result is required for this assertion");
     owner.abort();
     assert!(owner.await.unwrap_err().is_cancelled());
-    release_tx.send(()).unwrap();
+    release_tx
+        .send(())
+        .expect("release tx send test receiver must remain available for this delivery");
     drop(bridge);
     tokio::time::timeout(std::time::Duration::from_secs(5), dropped_rx)
         .await
         .expect("forwarder 退出后必须释放最后的 bridge owner")
-        .unwrap();
+        .expect("the expect fixture result is required for this assertion");
     assert_eq!(
         stops.load(std::sync::atomic::Ordering::SeqCst),
         0,
@@ -146,10 +182,10 @@ async fn stop_handler_writes_status_with_terminal_work_state() {
         resources
             .set_work_state(&ThreadId::from(id.clone()), WorkState::Working)
             .await
-            .unwrap();
-        on_subagent_stop_handler(
-            &None,
-            &Some(Arc::clone(&store)),
+            .expect("the set work state fixture result is required for this assertion");
+        crate::session::subagent::lifecycle::on_subagent_stop_handler(
+            None,
+            Some(&store),
             "fixture",
             &id,
             "done",
@@ -157,8 +193,11 @@ async fn stop_handler_writes_status_with_terminal_work_state() {
             "/tmp",
         )
         .await
-        .unwrap();
-        let meta = resources.load_session_meta(&id).await.unwrap();
+        .expect("the on subagent stop handler fixture result is required for this assertion");
+        let meta = resources
+            .load_session_meta(&id)
+            .await
+            .expect("the load session meta fixture result is required for this assertion");
         assert_eq!(meta.agent_status, status);
         assert_eq!(meta.work_state, expected_work_state);
     }
@@ -175,13 +214,13 @@ async fn stop_handler_failure_never_leaves_done_working() {
     resources
         .set_work_state(&ThreadId::from(id.clone()), WorkState::Working)
         .await
-        .unwrap();
+        .expect("the set work state fixture result is required for this assertion");
     resources.fail_next_terminal_status_writes(1);
     let store: Arc<dyn SessionResources> = resources.clone();
 
-    on_subagent_stop_handler(
-        &None,
-        &Some(Arc::clone(&store)),
+    crate::session::subagent::lifecycle::on_subagent_stop_handler(
+        None,
+        Some(&store),
         "fixture",
         &id,
         "done",
@@ -190,7 +229,10 @@ async fn stop_handler_failure_never_leaves_done_working() {
     )
     .await
     .unwrap_err();
-    let meta = resources.load_session_meta(&id).await.unwrap();
+    let meta = resources
+        .load_session_meta(&id)
+        .await
+        .expect("the load session meta fixture result is required for this assertion");
     assert_eq!(
         meta.agent_status,
         AgentStatus::Active,
@@ -198,9 +240,9 @@ async fn stop_handler_failure_never_leaves_done_working() {
     );
     assert_eq!(meta.work_state, WorkState::Idle);
 
-    on_subagent_stop_handler(
-        &None,
-        &Some(store),
+    crate::session::subagent::lifecycle::on_subagent_stop_handler(
+        None,
+        Some(&store),
         "fixture",
         &id,
         "done",
@@ -208,8 +250,11 @@ async fn stop_handler_failure_never_leaves_done_working() {
         "/tmp",
     )
     .await
-    .unwrap();
-    let meta = resources.load_session_meta(&id).await.unwrap();
+    .expect("the on subagent stop handler fixture result is required for this assertion");
+    let meta = resources
+        .load_session_meta(&id)
+        .await
+        .expect("the load session meta fixture result is required for this assertion");
     assert_eq!(meta.agent_status, AgentStatus::Done);
     assert_eq!(meta.work_state, WorkState::Idle);
 }
@@ -223,9 +268,9 @@ async fn repeated_terminal_settlement_does_not_overwrite() {
     resources.register_bound_session(&id, "/tmp");
     let store: Arc<dyn SessionResources> = resources.clone();
 
-    on_subagent_stop_handler(
-        &None,
-        &Some(Arc::clone(&store)),
+    crate::session::subagent::lifecycle::on_subagent_stop_handler(
+        None,
+        Some(&store),
         "fixture",
         &id,
         "done",
@@ -233,10 +278,10 @@ async fn repeated_terminal_settlement_does_not_overwrite() {
         "/tmp",
     )
     .await
-    .unwrap();
-    on_subagent_stop_handler(
-        &None,
-        &Some(store),
+    .expect("the on subagent stop handler fixture result is required for this assertion");
+    crate::session::subagent::lifecycle::on_subagent_stop_handler(
+        None,
+        Some(&store),
         "fixture",
         &id,
         "late failure",
@@ -244,9 +289,12 @@ async fn repeated_terminal_settlement_does_not_overwrite() {
         "/tmp",
     )
     .await
-    .unwrap();
+    .expect("the on subagent stop handler fixture result is required for this assertion");
 
-    let meta = resources.load_session_meta(&id).await.unwrap();
+    let meta = resources
+        .load_session_meta(&id)
+        .await
+        .expect("the load session meta fixture result is required for this assertion");
     assert_eq!(meta.agent_status, AgentStatus::Done);
     assert_eq!(meta.work_state, WorkState::Idle);
 }

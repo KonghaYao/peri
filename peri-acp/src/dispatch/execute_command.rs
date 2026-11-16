@@ -3,7 +3,7 @@
 //! Accepts a slash command string and delegates to the registered
 //! [`CommandRegistry`] entries in [`crate::session::command`].
 //! This mirrors the in-process interception done by
-//! [`crate::session::executor::intercept_immediate_command`] but exposes
+//! [`peri_agent::session::exec::executor_helpers::intercept_immediate_command`] but exposes
 //! it as a standalone ACP JSON-RPC method so that external clients (IDE,
 //! stdio transport) can execute slash commands without going through
 //! the full `session/prompt` pipeline.
@@ -13,12 +13,14 @@ use serde_json::Value;
 use peri_acp_types::command::{
     CommandFeedback, CommandLevel, CommandOutcome, FeedbackChannel, FeedbackLevel,
 };
-use peri_agent::session::exec::executor_helpers::emit_command_feedback;
+use peri_agent::session::exec::executor_helpers;
 use peri_controller::Controller;
 
-use crate::session::command::{
-    register_builtins, CommandContext, CommandRegistry, CommandResult, RouteEntry,
-};
+use crate::session::command;
+use crate::session::command::CommandContext;
+use crate::session::command::CommandRegistry;
+use crate::session::command::CommandResult;
+use crate::session::command::RouteEntry;
 use crate::session::executor::PromptStopReason;
 use crate::transport::types::AcpError;
 use peri_acp_types::command::command_route::CommandSource;
@@ -108,7 +110,7 @@ pub async fn execute_command(
     // 设计 §55）；RPC 路径无 agent 管线可注入，未命中显式报错（与 prompt
     // 路径的 fall-through 语义不同）。
     let registry = CommandRegistry::new();
-    register_builtins(&registry);
+    command::register_builtins(&registry);
     let resolved = registry
         .resolve(command_str)
         .ok_or_else(|| AcpError::new(-32602, format!("unknown command: {command_str}")))?;
@@ -158,7 +160,7 @@ pub async fn execute_command(
                         channel: FeedbackChannel::UiOnly,
                     }),
                 };
-                emit_command_feedback(event_sink, &session_id, &mut result).await;
+                executor_helpers::emit_command_feedback(event_sink, &session_id, &mut result).await;
                 event_sink.push_done(&session_id, "end_turn", None).await;
                 let messages_json: Vec<Value> = result
                     .messages
@@ -237,7 +239,7 @@ pub async fn execute_command(
             // 反馈统一出口：与 executor_helpers 拦截处同源（复用同一 helper），
             // handler.execute 之后、push_done 之前发射 CommandFeedback 事件
             // （channel=Session 额外追加系统消息）。[P2-1] 占位日志退役。
-            emit_command_feedback(event_sink, &session_id, &mut result).await;
+            executor_helpers::emit_command_feedback(event_sink, &session_id, &mut result).await;
             (result.messages, result.stop_reason)
         }
         CommandOutcome::Inject(_) | CommandOutcome::Delegate(_) => {

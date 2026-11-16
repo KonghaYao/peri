@@ -8,15 +8,17 @@ use std::time::Duration;
 
 use rmcp::model::CallToolRequestParams;
 use serde_json::{json, Value};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream},
-    task::JoinHandle,
-};
+use tokio::io::AsyncBufReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::io::BufReader;
+use tokio::io::DuplexStream;
+use tokio::task::JoinHandle;
 
-use super::{
-    pending_notification_reminder, MAX_NOTIFICATION_PAYLOAD_BYTES, MAX_PENDING_NOTIFICATIONS,
-};
-use crate::mcp::client::{serve_client_auto_for_server, McpClientPool, McpServiceWrapper};
+use super::MAX_NOTIFICATION_PAYLOAD_BYTES;
+use super::MAX_PENDING_NOTIFICATIONS;
+use crate::mcp::client;
+use crate::mcp::client::McpClientPool;
+use crate::mcp::client::McpServiceWrapper;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderCategory, ReminderDelivery, ReminderSeverity,
 };
@@ -102,10 +104,11 @@ impl Fixture {
         let (client_io, server_io) = tokio::io::duplex(16 * 1024);
         let server_task = spawn_fake_server(server_io, frames);
         let pool = Arc::new(McpClientPool::new_pending());
-        let service = serve_client_auto_for_server(client_io, &pool, SERVER, HANDSHAKE_TIMEOUT)
-            .await
-            .expect("握手不得超时")
-            .expect("握手不得失败");
+        let service =
+            client::serve_client_auto_for_server(client_io, &pool, SERVER, HANDSHAKE_TIMEOUT)
+                .await
+                .expect("握手不得超时")
+                .expect("握手不得失败");
         Self {
             pool,
             service,
@@ -154,7 +157,7 @@ async fn t1_custom_notification_on_tool_response_stream_is_buffered() {
         notification.payload
     );
 
-    let trusted = pending_notification_reminder(notification);
+    let trusted = super::pending_notification_reminder(notification);
     let reminder = trusted.as_reminder();
     assert_eq!(reminder.category, ReminderCategory::Diagnostic);
     assert_eq!(reminder.source.0, "mcp");
@@ -322,6 +325,6 @@ fn oversized_notification_payload_is_truncated_on_utf8_boundary() {
     assert!(stored.ends_with("…（已截断）"), "截断必须留标记: {stored}");
     assert!(stored.is_char_boundary(stored.len()));
 
-    let trusted = pending_notification_reminder(&pending[0]);
+    let trusted = super::pending_notification_reminder(&pending[0]);
     assert!(trusted.as_reminder().body.len() <= 4 * 1024);
 }

@@ -6,7 +6,38 @@
 
 use serde::Deserialize;
 
-use super::*;
+use crate::host::history_window::history_window_coordinator;
+use crate::host::history_window::history_window_coordinator::HistoryWindowCoordinator;
+use crate::host::history_window::history_window_coordinator::IssuedWindowTicket;
+use crate::host::history_window::history_window_coordinator::WindowConnection;
+
+use crate::host::history_window::inherited;
+
+use crate::host::history_window::state;
+use crate::host::history_window::wire;
+use crate::host::AcpServerConfig;
+use crate::host::SessionState;
+use crate::host::SharedSessions;
+use crate::transport::types::AcpError;
+use peri_acp_types::history_window::HistoryCommittedTail;
+use peri_acp_types::history_window::HistoryEntryId;
+use peri_acp_types::history_window::HistoryReadTicket;
+use peri_acp_types::history_window::HistorySource;
+use peri_acp_types::history_window::HistoryWindowCursor;
+use peri_acp_types::history_window::HistoryWindowDirection;
+use peri_acp_types::history_window::HistoryWindowError;
+use peri_acp_types::history_window::HistoryWindowMetadata;
+use peri_acp_types::history_window::HistoryWindowOpenRequest;
+use peri_acp_types::history_window::HistoryWindowRequest;
+use peri_acp_types::history_window::HISTORY_WINDOW_DEFAULT_CHUNK_SIZE;
+use peri_acp_types::history_window::HISTORY_WINDOW_MAX_CHUNK_SIZE;
+use peri_acp_types::session_resources::HistoryWindowPagePlan;
+use peri_acp_types::session_resources::HistoryWindowReadIntent;
+use peri_acp_types::session_resources::HistoryWindowRows;
+use peri_acp_types::session_resources::HistoryWindowTailExpectation;
+use peri_acp_types::PeriCaps;
+use serde_json::json;
+use serde_json::Value;
 
 const MAX_ANCESTOR_HOPS: usize = 64;
 
@@ -64,12 +95,18 @@ struct BodyParams {
 
 fn validate_ids(parent: &str, child: &str) -> Result<(), AcpError> {
     if parent.is_empty() || child.is_empty() || parent.len() > 256 || child.len() > 256 {
-        return Err(invalid(
-            "parentSessionId and childThreadId must be bounded, nonempty IDs",
-        ));
+        return Err(
+            crate::host::history_window::history_window_coordinator::invalid(
+                "parentSessionId and childThreadId must be bounded, nonempty IDs",
+            ),
+        );
     }
     if parent == child {
-        return Err(invalid("child history requires a distinct child thread"));
+        return Err(
+            crate::host::history_window::history_window_coordinator::invalid(
+                "child history requires a distinct child thread",
+            ),
+        );
     }
     Ok(())
 }
@@ -78,9 +115,11 @@ fn own_source(source: &HistorySource) -> Result<(), AcpError> {
     if source.is_own() {
         Ok(())
     } else {
-        Err(invalid(
-            "child history currently supports only the child's own timeline",
-        ))
+        Err(
+            crate::host::history_window::history_window_coordinator::invalid(
+                "child history currently supports only the child's own timeline",
+            ),
+        )
     }
 }
 
@@ -93,9 +132,11 @@ fn owner_stamp(
     let child_live = if states.contains_key(child) {
         let live = state::readable_state(states, child)?;
         if live.thread_id != child {
-            return Err(invalidated(
-                "child session no longer names the requested thread",
-            ));
+            return Err(
+                crate::host::history_window::history_window_coordinator::invalidated(
+                    "child session no longer names the requested thread",
+                ),
+            );
         }
         Some(ChildLiveStamp {
             generation: live.session_generation,
@@ -119,27 +160,41 @@ async fn authorize(cfg: &AcpServerConfig, owner: &OwnerStamp, child: &str) -> Re
     let mut visited = std::collections::HashSet::new();
     for _ in 0..MAX_ANCESTOR_HOPS {
         if current.is_empty() || current.len() > 256 || !visited.insert(current.clone()) {
-            return Err(ticket_invalid("child ancestry is malformed or cyclic"));
+            return Err(
+                crate::host::history_window::history_window_coordinator::ticket_invalid(
+                    "child ancestry is malformed or cyclic",
+                ),
+            );
         }
         let meta = cfg
             .session_resources
             .load_session_meta(&current)
             .await
-            .map_err(resource_window_error)?;
+            .map_err(history_window_coordinator::resource_window_error)?;
         if meta.id != current {
-            return Err(ticket_invalid("child ancestry returned a different thread"));
+            return Err(
+                crate::host::history_window::history_window_coordinator::ticket_invalid(
+                    "child ancestry returned a different thread",
+                ),
+            );
         }
         match meta.parent_thread_id {
             Some(parent) if parent == owner.parent_thread_id => return Ok(()),
             Some(parent) => current = parent,
             None => {
-                return Err(ticket_invalid(
-                    "requested thread is outside the parent tree",
-                ))
+                return Err(
+                    crate::host::history_window::history_window_coordinator::ticket_invalid(
+                        "requested thread is outside the parent tree",
+                    ),
+                )
             }
         }
     }
-    Err(ticket_invalid("child ancestry exceeds the read limit"))
+    Err(
+        crate::host::history_window::history_window_coordinator::ticket_invalid(
+            "child ancestry exceeds the read limit",
+        ),
+    )
 }
 
 /// The connection capability is checked by ServerLoop before entering this route.
@@ -150,10 +205,14 @@ pub(crate) async fn handle(
     params: &Value,
     connection: &WindowConnection,
 ) -> Result<Value, AcpError> {
-    let params: WindowParams = serde_json::from_value(params.clone())
-        .map_err(|_| invalid("invalid child history request"))?;
+    let params: WindowParams = serde_json::from_value(params.clone()).map_err(|_| {
+        crate::host::history_window::history_window_coordinator::invalid(
+            "invalid child history request",
+        )
+    })?;
     validate_ids(&params.parent_session_id, &params.child_thread_id)?;
-    let request = HistoryWindowRequest::decode(&params.history).map_err(window_error)?;
+    let request = HistoryWindowRequest::decode(&params.history)
+        .map_err(crate::host::history_window::history_window_coordinator::window_error)?;
     match request {
         HistoryWindowRequest::Open(request) => {
             open(cfg, sessions, caps, &params, request, connection).await
@@ -170,7 +229,9 @@ async fn open(
     request: HistoryWindowOpenRequest,
     connection: &WindowConnection,
 ) -> Result<Value, AcpError> {
-    let plan = request.validate().map_err(window_error)?;
+    let plan = request
+        .validate()
+        .map_err(crate::host::history_window::history_window_coordinator::window_error)?;
     let child = &params.child_thread_id;
     let anchor = match &plan.anchor {
         peri_acp_types::history_window::HistoryWindowAnchor::Latest => None,
@@ -192,7 +253,7 @@ async fn open(
         .session_resources
         .history_window_bounds(child)
         .await
-        .map_err(resource_window_error)?;
+        .map_err(history_window_coordinator::resource_window_error)?;
     let metadata = HistoryWindowMetadata {
         session_id: child.clone(),
         session_generation: owner.generation.to_string(),
@@ -226,21 +287,29 @@ async fn open(
         .session_resources
         .load_history_window_page(child, &page_plan)
         .await
-        .map_err(resource_window_error);
+        .map_err(history_window_coordinator::resource_window_error);
     let rows = filter_rows(cfg, child, &prepared.opaque, rows).await?;
     let oversize = wire::oversize_descriptors(Some(&rows));
     authorize(cfg, &owner, child).await?;
     let scope = {
         let mut states = sessions.lock().await;
         if owner_stamp(&states, &params.parent_session_id, child)? != owner {
-            return Err(invalidated("parent or child changed while opening history"));
+            return Err(
+                crate::host::history_window::history_window_coordinator::invalidated(
+                    "parent or child changed while opening history",
+                ),
+            );
         }
         let coordinator = &mut states
             .get_mut(&params.parent_session_id)
-            .unwrap()
+            .expect("the validated owner stamp requires a live parent session")
             .history_window;
         if coordinator.child_ticket_epoch != epoch {
-            return Err(ticket_invalid("child history window changed while opening"));
+            return Err(
+                crate::host::history_window::history_window_coordinator::ticket_invalid(
+                    "child history window changed while opening",
+                ),
+            );
         }
         coordinator.child_ticket_epoch = epoch.saturating_add(1);
         let issued = prepared.issue(coordinator.child_ticket_epoch);
@@ -271,25 +340,37 @@ async fn prepare_read(
         .history_window
         .child_scope
         .as_ref()
-        .ok_or_else(|| ticket_invalid("child history scope was revoked or replaced"))?;
+        .ok_or_else(|| {
+            crate::host::history_window::history_window_coordinator::ticket_invalid(
+                "child history scope was revoked or replaced",
+            )
+        })?;
     if scope.child_thread_id != child || scope.owner != owner {
-        return Err(invalidated(
-            "child history scope no longer matches the live parent or child",
-        ));
+        return Err(
+            crate::host::history_window::history_window_coordinator::invalidated(
+                "child history scope no longer matches the live parent or child",
+            ),
+        );
     }
     if scope.issued.binding.connection_id != connection_id
         || scope.issued.opaque.as_str() != ticket
         || scope.issued.metadata.snapshot_token != snapshot
     {
-        return Err(ticket_invalid(
-            "child history ticket does not match this connection and snapshot",
-        ));
+        return Err(
+            crate::host::history_window::history_window_coordinator::ticket_invalid(
+                "child history ticket does not match this connection and snapshot",
+            ),
+        );
     }
     scope
         .issued
         .binding
-        .validate_at(now_unix_ms(), &scope.issued.metadata, &HistorySource::Own)
-        .map_err(window_error)?;
+        .validate_at(
+            crate::host::history_window::history_window_coordinator::now_unix_ms(),
+            &scope.issued.metadata,
+            &HistorySource::Own,
+        )
+        .map_err(crate::host::history_window::history_window_coordinator::window_error)?;
     Ok(scope.clone())
 }
 
@@ -311,9 +392,11 @@ async fn finalize_read(
     )
     .await?;
     if current.issued.ticket_epoch != scope.issued.ticket_epoch {
-        return Err(ticket_invalid(
-            "child history scope changed during the read",
-        ));
+        return Err(
+            crate::host::history_window::history_window_coordinator::ticket_invalid(
+                "child history scope changed during the read",
+            ),
+        );
     }
     current.issued.remember_oversize(oversize);
     Ok(())
@@ -331,7 +414,9 @@ async fn read_window(
     let child = &params.child_thread_id;
     let (scope, plan) = match request {
         HistoryWindowRequest::Page(request) => {
-            let direction = request.validate().map_err(window_error)?;
+            let direction = request
+                .validate()
+                .map_err(crate::host::history_window::history_window_coordinator::window_error)?;
             let scope = prepare_read(
                 sessions,
                 parent,
@@ -346,14 +431,23 @@ async fn read_window(
             } else {
                 request.after_cursor
             }
-            .ok_or_else(|| invalid("exactly one cursor is required"))?;
-            let cursor = HistoryWindowCursor::decode(&raw, child).map_err(window_error)?;
+            .ok_or_else(|| {
+                crate::host::history_window::history_window_coordinator::invalid(
+                    "exactly one cursor is required",
+                )
+            })?;
+            let cursor = HistoryWindowCursor::decode(&raw, child)
+                .map_err(crate::host::history_window::history_window_coordinator::window_error)?;
             if cursor.direction != direction {
-                return Err(invalid("cursor direction does not match the request"));
+                return Err(
+                    crate::host::history_window::history_window_coordinator::invalid(
+                        "cursor direction does not match the request",
+                    ),
+                );
             }
             cursor
                 .verify_against(&scope.issued.metadata, &HistorySource::Own)
-                .map_err(window_error)?;
+                .map_err(crate::host::history_window::history_window_coordinator::window_error)?;
             let plan = HistoryWindowPagePlan::page(
                 HistorySource::Own,
                 cursor.anchor,
@@ -365,7 +459,9 @@ async fn read_window(
             (scope, plan)
         }
         HistoryWindowRequest::Seek(request) => {
-            let (before_limit, after_limit) = request.validate().map_err(window_error)?;
+            let (before_limit, after_limit) = request
+                .validate()
+                .map_err(crate::host::history_window::history_window_coordinator::window_error)?;
             own_source(&request.anchor.source)?;
             let anchor = state::parse_anchor(&request.anchor.entry_id, child)?;
             let scope = prepare_read(
@@ -392,14 +488,20 @@ async fn read_window(
             };
             (scope, plan)
         }
-        HistoryWindowRequest::Open(_) => return Err(invalid("open must create a new child scope")),
+        HistoryWindowRequest::Open(_) => {
+            return Err(
+                crate::host::history_window::history_window_coordinator::invalid(
+                    "open must create a new child scope",
+                ),
+            )
+        }
     };
     authorize(cfg, &scope.owner, child).await?;
     let rows = cfg
         .session_resources
         .load_history_window_page(child, &plan)
         .await
-        .map_err(resource_window_error);
+        .map_err(history_window_coordinator::resource_window_error);
     let rows = filter_rows(cfg, child, &scope.issued.opaque, rows).await?;
     let oversize = wire::oversize_descriptors(Some(&rows));
     finalize_read(cfg, sessions, parent, &scope, &oversize).await?;
@@ -432,14 +534,21 @@ pub(crate) async fn handle_body(
     params: &Value,
     connection_id: &str,
 ) -> Result<Value, AcpError> {
-    let params: BodyParams = serde_json::from_value(params.clone())
-        .map_err(|_| invalid("invalid child history body request"))?;
+    let params: BodyParams = serde_json::from_value(params.clone()).map_err(|_| {
+        crate::host::history_window::history_window_coordinator::invalid(
+            "invalid child history body request",
+        )
+    })?;
     validate_ids(&params.parent_session_id, &params.child_thread_id)?;
     if let Some(source) = &params.source {
         own_source(source)?;
     }
     if !(4..=HISTORY_WINDOW_MAX_CHUNK_SIZE).contains(&params.max_bytes) {
-        return Err(invalid("maxBytes is out of range"));
+        return Err(
+            crate::host::history_window::history_window_coordinator::invalid(
+                "maxBytes is out of range",
+            ),
+        );
     }
     let entry = state::parse_anchor(&params.entry_id, &params.child_thread_id)?;
     let scope = prepare_read(
@@ -455,14 +564,18 @@ pub(crate) async fn handle_body(
     let issued = &scope.issued;
     let tail = issued.binding.committed_tail.as_ref();
     if tail.is_none() || !issued.remembers_oversize(entry) {
-        return Err(anchor_unavailable(
-            "entry is not an oversize descriptor of this snapshot",
-        ));
+        return Err(
+            crate::host::history_window::history_window_coordinator::anchor_unavailable(
+                "entry is not an oversize descriptor of this snapshot",
+            ),
+        );
     }
     if issued.oversize_overflowed() && !is_oversize_descriptor(cfg, &scope, entry).await? {
-        return Err(anchor_unavailable(
-            "entry is not an oversize descriptor of this snapshot",
-        ));
+        return Err(
+            crate::host::history_window::history_window_coordinator::anchor_unavailable(
+                "entry is not an oversize descriptor of this snapshot",
+            ),
+        );
     }
     if !stream_row(
         cfg,
@@ -474,7 +587,11 @@ pub(crate) async fn handle_body(
     )
     .await?
     {
-        return Err(anchor_unavailable("entry is not visible to this client"));
+        return Err(
+            crate::host::history_window::history_window_coordinator::anchor_unavailable(
+                "entry is not visible to this client",
+            ),
+        );
     }
     let chunk = stream_row(
         cfg,
@@ -526,7 +643,7 @@ async fn is_oversize_descriptor(
         .session_resources
         .load_history_window_page(&scope.child_thread_id, &plan)
         .await
-        .map_err(resource_window_error)?;
+        .map_err(history_window_coordinator::resource_window_error)?;
     inherited::validate_rows(&HistorySource::Own, &rows)?;
     Ok(rows.entries.iter().any(|entry| {
         matches!(entry,
@@ -589,7 +706,7 @@ async fn stream_row<T: Send + 'static>(
                 ticket,
             )
             .await
-            .map_err(resource_window_error);
+            .map_err(history_window_coordinator::resource_window_error);
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(error) => {
@@ -599,7 +716,8 @@ async fn stream_row<T: Send + 'static>(
         };
         if let Err(error) = chunk.validate(&expected, raw_offset, HISTORY_WINDOW_DEFAULT_CHUNK_SIZE)
         {
-            failure = Some(window_error(error));
+            failure =
+                Some(crate::host::history_window::history_window_coordinator::window_error(error));
             break;
         }
         let next = chunk.next_offset;
@@ -612,21 +730,25 @@ async fn stream_row<T: Send + 'static>(
         }
     }
     drop(sender);
-    let result = parsing
-        .await
-        .map_err(|_| anchor_unavailable("child display projection failed"))?;
+    let result = parsing.await.map_err(|_| {
+        crate::host::history_window::history_window_coordinator::anchor_unavailable(
+            "child display projection failed",
+        )
+    })?;
     if let Some(error) = failure {
         return Err(error);
     }
     result.map_err(|error| {
-        window_error(HistoryWindowError::ReadFailed {
-            detail: if error.kind() == std::io::ErrorKind::Unsupported {
-                "child display projection unsupported for this payload"
-            } else {
-                "child display projection is malformed or its offset is invalid"
-            }
-            .into(),
-        })
+        crate::host::history_window::history_window_coordinator::window_error(
+            HistoryWindowError::ReadFailed {
+                detail: if error.kind() == std::io::ErrorKind::Unsupported {
+                    "child display projection unsupported for this payload"
+                } else {
+                    "child display projection is malformed or its offset is invalid"
+                }
+                .into(),
+            },
+        )
     })
 }
 

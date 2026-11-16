@@ -29,7 +29,8 @@ fn additive_upgrade_plan_only_extends_the_shape_and_advances_the_version() {
         let sql: Vec<&str> = plan.iter().map(|statement| statement.sql).collect();
         assert_eq!(sql[0], schema_upgrade::GUARD_META_SQL);
         assert_eq!(sql[1], CREATE_THREAD_MQ_TABLE_SQL);
-        for (statement, (name, _)) in sql[2..].iter().zip(THREADS_V14_COLUMNS) {
+        let added_columns = sql[2..].iter().zip(THREADS_V14_COLUMNS);
+        for (statement, (name, _)) in added_columns {
             assert!(
                 statement.starts_with(&format!("ALTER TABLE threads ADD COLUMN {name} ")),
                 "{statement} 必须是 {name} 的增量列"

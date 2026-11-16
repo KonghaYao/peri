@@ -1,6 +1,10 @@
-use super::*;
-use crate::agent::compact_v2::projection::{render_persisted_llm_view, ProviderCapabilities};
+use crate::agent::compact_v2::projection::ProviderCapabilities;
 use crate::agent::model_bridge::AgentModelBridge;
+use crate::messages::tool_pairing::MISSING_RESULT;
+use crate::messages::BaseMessage;
+use crate::messages::ContentBlock;
+use crate::messages::MessageContent;
+use crate::messages::ToolCallRequest;
 use crate::session::transcript::MessageTranscript;
 use serde_json::json;
 
@@ -29,10 +33,22 @@ async fn rewind_cannot_repair_partial_replay_unit_with_invented_result() {
     let assistant_id = transcript.append(replay_assistant());
     transcript.append(BaseMessage::tool_result("replay", "actual evidence"));
     transcript.append(BaseMessage::human("continue"));
-    assert!(render_persisted_llm_view(&transcript, &ProviderCapabilities::openai()).is_ok());
-    transcript.rewind_to(assistant_id).await.unwrap();
-    let error =
-        render_persisted_llm_view(&transcript, &ProviderCapabilities::openai()).unwrap_err();
+    assert!(
+        crate::agent::compact_v2::projection::render_persisted_llm_view(
+            &transcript,
+            &ProviderCapabilities::openai()
+        )
+        .is_ok()
+    );
+    transcript
+        .rewind_to(assistant_id)
+        .await
+        .expect("the rewind to fixture result is required for this assertion");
+    let error = crate::agent::compact_v2::projection::render_persisted_llm_view(
+        &transcript,
+        &ProviderCapabilities::openai(),
+    )
+    .unwrap_err();
     assert!(error
         .to_string()
         .contains("incomplete provider replay unit"));
@@ -48,17 +64,29 @@ fn fork_keeps_complete_replay_unit_and_rejects_partial_ancestor() {
         replay_assistant(),
         BaseMessage::tool_result("replay", "actual evidence"),
     ];
-    let saved = serde_json::to_vec(&original).unwrap();
-    let restored: Vec<BaseMessage> = serde_json::from_slice(&saved).unwrap();
+    let saved =
+        serde_json::to_vec(&original).expect("to_vec must accept this test fixture representation");
+    let restored: Vec<BaseMessage> = serde_json::from_slice(&saved)
+        .expect("from_slice must accept this test fixture representation");
     let complete = MessageTranscript::new().with_ancestor(restored.clone());
-    let view = render_persisted_llm_view(&complete, &ProviderCapabilities::openai()).unwrap();
+    let view = crate::agent::compact_v2::projection::render_persisted_llm_view(
+        &complete,
+        &ProviderCapabilities::openai(),
+    )
+    .expect("the render persisted llm view fixture result is required for this assertion");
     assert_eq!(serialized(&view), serialized(&original));
     let partial = MessageTranscript::new().with_ancestor(vec![restored[0].clone()]);
-    assert!(render_persisted_llm_view(&partial, &ProviderCapabilities::openai()).is_err());
+    assert!(
+        crate::agent::compact_v2::projection::render_persisted_llm_view(
+            &partial,
+            &ProviderCapabilities::openai()
+        )
+        .is_err()
+    );
 }
 
 fn serialized(messages: &[BaseMessage]) -> serde_json::Value {
-    serde_json::to_value(messages).unwrap()
+    serde_json::to_value(messages).expect("to_value must accept this test fixture representation")
 }
 
 /// [回归测试] 隐藏 AgentResult 不应改变历史调用身份、结果或顺序。
@@ -77,18 +105,19 @@ fn test_historical_agent_result_pairing_is_preserved() {
         BaseMessage::human("继续"),
     ];
     let expected = serialized(&messages);
-    let repaired = repair_model_tool_pairing(messages).unwrap();
+    let repaired = crate::messages::tool_pairing::repair_model_tool_pairing(messages)
+        .expect("the repair model tool pairing fixture result is required for this assertion");
     assert_eq!(serialized(&repaired), expected);
     assert!(AgentModelBridge::convert_messages(&repaired).is_ok());
 }
 
 #[test]
 fn missing_result_precedes_new_input_and_does_not_claim_execution_failure() {
-    let repaired = repair_model_tool_pairing(vec![
+    let repaired = crate::messages::tool_pairing::repair_model_tool_pairing(vec![
         assistant(&["call-missing"]),
         BaseMessage::human("continue"),
     ])
-    .unwrap();
+    .expect("the repair model tool pairing fixture result is required for this assertion");
     assert_eq!(repaired.len(), 3);
     match &repaired[1] {
         BaseMessage::Tool {
@@ -126,7 +155,11 @@ fn valid_parallel_results_and_signed_content_are_unchanged() {
     ];
     let expected = serialized(&messages);
     assert_eq!(
-        serialized(&repair_model_tool_pairing(messages).unwrap()),
+        serialized(
+            &crate::messages::tool_pairing::repair_model_tool_pairing(messages).expect(
+                "the repair model tool pairing fixture result is required for this assertion"
+            )
+        ),
         expected
     );
 }
@@ -135,14 +168,20 @@ fn valid_parallel_results_and_signed_content_are_unchanged() {
 fn partial_parallel_results_keep_actual_evidence_and_fill_only_missing_ids() {
     let actual = BaseMessage::tool_result("second", "actual output");
     let expected = serialized(std::slice::from_ref(&actual));
-    let repaired =
-        repair_model_tool_pairing(vec![assistant(&["first", "second"]), actual]).unwrap();
+    let repaired = crate::messages::tool_pairing::repair_model_tool_pairing(vec![
+        assistant(&["first", "second"]),
+        actual,
+    ])
+    .expect("the repair model tool pairing fixture result is required for this assertion");
     assert_eq!(serialized(&repaired[1..2]), expected);
     assert!(
         matches!(&repaired[2], BaseMessage::Tool { tool_call_id, is_error: true, .. } if tool_call_id == "first")
     );
     assert_eq!(
-        serialized(&repair_model_tool_pairing(repaired.clone()).unwrap()),
+        serialized(
+            &crate::messages::tool_pairing::repair_model_tool_pairing(repaired.clone())
+                .expect("the clone fixture result is required for this assertion")
+        ),
         serialized(&repaired)
     );
 }
@@ -151,12 +190,12 @@ fn partial_parallel_results_keep_actual_evidence_and_fill_only_missing_ids() {
 fn misplaced_result_is_relocated_only_in_model_view_without_losing_content() {
     let actual = BaseMessage::tool_result("first", "actual output");
     let expected = serialized(std::slice::from_ref(&actual));
-    let repaired = repair_model_tool_pairing(vec![
+    let repaired = crate::messages::tool_pairing::repair_model_tool_pairing(vec![
         assistant(&["first"]),
         BaseMessage::human("continue"),
         actual,
     ])
-    .unwrap();
+    .expect("the repair model tool pairing fixture result is required for this assertion");
     assert_eq!(serialized(&repaired[1..2]), expected);
     assert!(matches!(repaired[2], BaseMessage::Human { .. }));
 }
@@ -177,7 +216,7 @@ fn ambiguous_or_orphan_history_fails_before_send() {
             assistant(&["early"]),
         ],
     ] {
-        assert!(repair_model_tool_pairing(messages).is_err());
+        assert!(crate::messages::tool_pairing::repair_model_tool_pairing(messages).is_err());
     }
 }
 
@@ -188,8 +227,9 @@ fn legacy_block_only_call_is_paired_and_cached_for_model_bridge() {
         "id": crate::messages::MessageId::new(),
         "content": [{"type": "tool_use", "id": "legacy", "name": "Read", "input": {}}]
     }))
-    .unwrap();
-    let repaired = repair_model_tool_pairing(vec![message]).unwrap();
+    .expect("from_value must accept this test fixture representation");
+    let repaired = crate::messages::tool_pairing::repair_model_tool_pairing(vec![message])
+        .expect("the repair model tool pairing fixture result is required for this assertion");
     assert_eq!(repaired[0].tool_calls()[0].id, "legacy");
     assert_eq!(repaired.len(), 2);
     assert!(AgentModelBridge::convert_messages(&repaired).is_ok());
@@ -204,16 +244,26 @@ fn loaded_history_projection_does_not_modify_canonical_history() {
             .map(peri_acp_types::store::PersistedPayload::Message)
             .collect(),
     );
-    let before = serialized(&transcript.visible_model_messages().unwrap());
+    let before = serialized(
+        &transcript
+            .visible_model_messages()
+            .expect("the visible model messages fixture result is required for this assertion"),
+    );
     for capabilities in [
         ProviderCapabilities::anthropic(),
         ProviderCapabilities::openai(),
     ] {
-        let view = render_persisted_llm_view(&transcript, &capabilities).unwrap();
+        let view = crate::agent::compact_v2::projection::render_persisted_llm_view(
+            &transcript,
+            &capabilities,
+        )
+        .expect("the render persisted llm view fixture result is required for this assertion");
         assert_eq!(view.len(), 3);
         assert!(AgentModelBridge::convert_messages(&view).is_ok());
         assert_eq!(
-            serialized(&transcript.visible_model_messages().unwrap()),
+            serialized(&transcript.visible_model_messages().expect(
+                "the visible model messages fixture result is required for this assertion"
+            )),
             before
         );
     }
@@ -230,37 +280,66 @@ fn anthropic_request_has_all_tool_results_immediately_after_each_call() {
         BaseMessage::tool_result("second", "real output"),
         BaseMessage::human("continue again"),
     ]);
-    let before = serialized(&transcript.visible_model_messages().unwrap());
-    let view = render_persisted_llm_view(&transcript, &ProviderCapabilities::anthropic()).unwrap();
+    let before = serialized(
+        &transcript
+            .visible_model_messages()
+            .expect("the visible model messages fixture result is required for this assertion"),
+    );
+    let view = crate::agent::compact_v2::projection::render_persisted_llm_view(
+        &transcript,
+        &ProviderCapabilities::anthropic(),
+    )
+    .expect("the render persisted llm view fixture result is required for this assertion");
     let model = AnthropicModel::new(
         AnthropicConfig::new(
-            "https://example.test/".parse().unwrap(),
+            "https://example.test/"
+                .parse()
+                .expect("the parse fixture result is required for this assertion"),
             "test",
             "claude-test",
         )
         .with_runtime(ModelRuntimeConfig::with_full_observation()),
     );
-    let request = ModelRequest::new(AgentModelBridge::convert_messages(&view).unwrap());
-    let prepared = model.prepare_request(&request).unwrap();
-    let messages = prepared.body().as_value()["messages"].as_array().unwrap();
+    let request = ModelRequest::new(
+        AgentModelBridge::convert_messages(&view)
+            .expect("the convert messages fixture result is required for this assertion"),
+    );
+    let prepared = model
+        .prepare_request(&request)
+        .expect("the prepare request fixture result is required for this assertion");
+    let messages = prepared.body().as_value()["messages"]
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     let mut checked_calls = 0;
-    for (index, message) in messages.iter().enumerate() {
+    let paired_items = messages.iter().enumerate();
+    for (index, message) in paired_items {
         if message["role"] != "assistant" {
             continue;
         }
-        let content = message["content"].as_array().unwrap();
-        for block in content.iter().filter(|block| block["type"] == "tool_use") {
+        let content = message["content"]
+            .as_array()
+            .expect("the as array fixture result is required for this assertion");
+        let block_items = content.iter().filter(|block| block["type"] == "tool_use");
+        for block in block_items {
             let next = &messages[index + 1];
             assert_eq!(next["role"], "user");
-            assert!(next["content"].as_array().unwrap().iter().any(|result| {
-                result["type"] == "tool_result" && result["tool_use_id"] == block["id"]
-            }));
+            assert!(next["content"]
+                .as_array()
+                .expect("the as array fixture result is required for this assertion")
+                .iter()
+                .any(|result| {
+                    result["type"] == "tool_result" && result["tool_use_id"] == block["id"]
+                }));
             checked_calls += 1;
         }
     }
     assert_eq!(checked_calls, 3);
     assert_eq!(
-        serialized(&transcript.visible_model_messages().unwrap()),
+        serialized(
+            &transcript
+                .visible_model_messages()
+                .expect("the visible model messages fixture result is required for this assertion")
+        ),
         before
     );
 }
@@ -271,7 +350,7 @@ fn conflicting_call_cache_fails_without_overwriting_original_content() {
         MessageContent::blocks(vec![ContentBlock::tool_use("same", "Write", json!({}))]),
         vec![ToolCallRequest::new("same", "Read", json!({}))],
     );
-    assert!(repair_model_tool_pairing(vec![message]).is_err());
+    assert!(crate::messages::tool_pairing::repair_model_tool_pairing(vec![message]).is_err());
 }
 
 #[test]
@@ -283,7 +362,7 @@ fn duplicate_content_calls_are_rejected_even_when_cache_has_only_one() {
         ]),
         vec![ToolCallRequest::new("same", "Read", json!({}))],
     );
-    assert!(repair_model_tool_pairing(vec![message]).is_err());
+    assert!(crate::messages::tool_pairing::repair_model_tool_pairing(vec![message]).is_err());
 }
 
 #[test]
@@ -299,17 +378,27 @@ fn adjacent_inline_results_are_not_duplicated() {
         )])),
     ];
     let expected = serialized(&messages);
-    let repaired = repair_model_tool_pairing(messages).unwrap();
+    let repaired = crate::messages::tool_pairing::repair_model_tool_pairing(messages)
+        .expect("the repair model tool pairing fixture result is required for this assertion");
     assert_eq!(serialized(&repaired), expected);
     let model = AnthropicModel::new(AnthropicConfig::new(
-        "https://example.test/".parse().unwrap(),
+        "https://example.test/"
+            .parse()
+            .expect("the parse fixture result is required for this assertion"),
         "test",
         "claude-test",
     ));
-    let request = ModelRequest::new(AgentModelBridge::convert_messages(&repaired).unwrap());
-    let prepared = model.prepare_request(&request).unwrap();
+    let request = ModelRequest::new(
+        AgentModelBridge::convert_messages(&repaired)
+            .expect("the convert messages fixture result is required for this assertion"),
+    );
+    let prepared = model
+        .prepare_request(&request)
+        .expect("the prepare request fixture result is required for this assertion");
     let body = prepared.body().as_value();
-    let blocks = body["messages"][1]["content"].as_array().unwrap();
+    let blocks = body["messages"][1]["content"]
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0]["tool_use_id"], "inline");
 }
@@ -328,22 +417,41 @@ fn inline_result_precedes_text_only_in_anthropic_request_view() {
             ]),
         )),
     ]);
-    let canonical = serialized(&transcript.visible_model_messages().unwrap());
-    let view = render_persisted_llm_view(&transcript, &ProviderCapabilities::anthropic()).unwrap();
+    let canonical = serialized(
+        &transcript
+            .visible_model_messages()
+            .expect("the visible model messages fixture result is required for this assertion"),
+    );
+    let view = crate::agent::compact_v2::projection::render_persisted_llm_view(
+        &transcript,
+        &ProviderCapabilities::anthropic(),
+    )
+    .expect("the render persisted llm view fixture result is required for this assertion");
     assert_eq!(
-        serialized(&transcript.visible_model_messages().unwrap()),
+        serialized(
+            &transcript
+                .visible_model_messages()
+                .expect("the visible model messages fixture result is required for this assertion")
+        ),
         canonical
     );
     let model = AnthropicModel::new(AnthropicConfig::new(
-        "https://example.test/".parse().unwrap(),
+        "https://example.test/"
+            .parse()
+            .expect("the parse fixture result is required for this assertion"),
         "test",
         "claude-test",
     ));
-    let request = ModelRequest::new(AgentModelBridge::convert_messages(&view).unwrap());
-    let prepared = model.prepare_request(&request).unwrap();
+    let request = ModelRequest::new(
+        AgentModelBridge::convert_messages(&view)
+            .expect("the convert messages fixture result is required for this assertion"),
+    );
+    let prepared = model
+        .prepare_request(&request)
+        .expect("the prepare request fixture result is required for this assertion");
     let blocks = prepared.body().as_value()["messages"][1]["content"]
         .as_array()
-        .unwrap();
+        .expect("the as array fixture result is required for this assertion");
     assert_eq!(blocks.len(), 3);
     assert_eq!(blocks[0]["tool_use_id"], "inline");
     assert_eq!(blocks[1]["text"], "before");
@@ -358,7 +466,9 @@ fn raw_inline_result_cannot_reach_anthropic_request() {
         "content": [{"type": "text", "text": "real output"}],
         "is_error": false
     })]));
-    let view = repair_model_tool_pairing(vec![assistant(&["raw"]), raw]).unwrap();
+    let view =
+        crate::messages::tool_pairing::repair_model_tool_pairing(vec![assistant(&["raw"]), raw])
+            .expect("the repair model tool pairing fixture result is required for this assertion");
     let error = AgentModelBridge::convert_messages(&view).unwrap_err();
     assert!(error.to_string().contains("raw provider content"));
 }
@@ -380,7 +490,7 @@ fn incomplete_or_duplicate_inline_results_fail_before_send() {
             BaseMessage::tool_result("first", "again"),
         ],
     ] {
-        assert!(repair_model_tool_pairing(messages).is_err());
+        assert!(crate::messages::tool_pairing::repair_model_tool_pairing(messages).is_err());
     }
 }
 
@@ -414,14 +524,26 @@ fn fork_and_compaction_keep_visible_ancestor_gap_without_reviving_excluded_pair(
         ),
     ]));
     transcript.append(BaseMessage::human("summary and new input"));
-    let canonical = serialized(&transcript.visible_model_messages().unwrap());
-    let view = render_persisted_llm_view(&transcript, &ProviderCapabilities::anthropic()).unwrap();
+    let canonical = serialized(
+        &transcript
+            .visible_model_messages()
+            .expect("the visible model messages fixture result is required for this assertion"),
+    );
+    let view = crate::agent::compact_v2::projection::render_persisted_llm_view(
+        &transcript,
+        &ProviderCapabilities::anthropic(),
+    )
+    .expect("the render persisted llm view fixture result is required for this assertion");
     assert_eq!(view.len(), 3);
     assert!(
         matches!(&view[1], BaseMessage::Tool { tool_call_id, is_error: true, .. } if tool_call_id == "inherited")
     );
     assert_eq!(
-        serialized(&transcript.visible_model_messages().unwrap()),
+        serialized(
+            &transcript
+                .visible_model_messages()
+                .expect("the visible model messages fixture result is required for this assertion")
+        ),
         canonical
     );
     assert!(AgentModelBridge::convert_messages(&view).is_ok());
@@ -459,7 +581,11 @@ fn persisted_result_projection_and_interrupted_tail_share_the_repaired_view() {
         },
     );
     transcript.append(BaseMessage::human("continue"));
-    let view = render_persisted_llm_view(&transcript, &ProviderCapabilities::anthropic()).unwrap();
+    let view = crate::agent::compact_v2::projection::render_persisted_llm_view(
+        &transcript,
+        &ProviderCapabilities::anthropic(),
+    )
+    .expect("the render persisted llm view fixture result is required for this assertion");
     assert_eq!(view.len(), 5);
     assert!(view[1].content().len() < 1_200);
     assert!(
@@ -482,7 +608,8 @@ fn test_raw_inline_results_do_not_create_missing_result_placeholders() {
         json!({"type":"tool_result","id":"native-result-id","tool_use_id":"raw","content":[{"type":"text","text":"actual"}]}),
     ]));
     let result_id = result.id();
-    let view = repair_model_tool_pairing(vec![ai, result]).unwrap();
+    let view = crate::messages::tool_pairing::repair_model_tool_pairing(vec![ai, result])
+        .expect("the repair model tool pairing fixture result is required for this assertion");
     assert_eq!(view.len(), 2);
     assert_eq!(view[1].id(), result_id);
     assert_eq!(view[0].tool_calls()[0].id, "raw");
@@ -499,7 +626,12 @@ fn test_raw_result_only_batch_can_cross_human_interjection_without_identity_loss
         json!({"type":"tool_result","tool_use_id":"raw","content":"actual"}),
     ]));
     let result_id = result.id();
-    let view = repair_model_tool_pairing(vec![assistant(&["raw"]), user, result]).unwrap();
+    let view = crate::messages::tool_pairing::repair_model_tool_pairing(vec![
+        assistant(&["raw"]),
+        user,
+        result,
+    ])
+    .expect("the repair model tool pairing fixture result is required for this assertion");
     assert_eq!(view.len(), 3);
     assert_eq!(view[1].id(), result_id);
     assert_eq!(view[2].id(), user_id);
@@ -514,7 +646,7 @@ fn test_mixed_inline_relocation_is_explicit_protocol_dependency() {
         json!({"type":"tool_result","tool_use_id":"raw","content":"actual"}),
         json!({"type":"text","text":"newer user constraint"}),
     ]));
-    let error = repair_model_tool_pairing(vec![
+    let error = crate::messages::tool_pairing::repair_model_tool_pairing(vec![
         assistant(&["raw"]),
         BaseMessage::human("earlier user constraint"),
         result,
@@ -529,7 +661,7 @@ fn test_raw_and_standalone_duplicate_result_is_rejected() {
     let inline = BaseMessage::human(MessageContent::raw(vec![
         json!({"type":"tool_result","tool_use_id":"raw","content":"actual"}),
     ]));
-    let error = repair_model_tool_pairing(vec![
+    let error = crate::messages::tool_pairing::repair_model_tool_pairing(vec![
         assistant(&["raw"]),
         inline,
         BaseMessage::tool_result("raw", "duplicate"),
@@ -546,10 +678,13 @@ fn inline_result_message_cannot_be_moved_across_its_other_call_batch() {
     ];
     let typed = raw
         .iter()
-        .map(|value| serde_json::from_value(value.clone()).unwrap())
+        .map(|value| {
+            serde_json::from_value(value.clone())
+                .expect("from_value must accept this test fixture representation")
+        })
         .collect();
     for content in [MessageContent::Raw(raw), MessageContent::Blocks(typed)] {
-        let error = repair_model_tool_pairing(vec![
+        let error = crate::messages::tool_pairing::repair_model_tool_pairing(vec![
             assistant(&["a"]),
             assistant(&["b"]),
             BaseMessage::human(content),

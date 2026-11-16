@@ -1,4 +1,10 @@
-use super::*;
+use super::Arc;
+use super::ClientStatus;
+use super::McpClientPool;
+use super::McpInitStatus;
+use super::OAuthConfig;
+use super::OAuthStatus;
+use super::Path;
 use crate::mcp::config::McpConfigFile;
 use rmcp::transport::auth::StoredCredentials;
 
@@ -50,7 +56,7 @@ impl OAuthCredentialPort for MemoryOAuthCredentialPort {
 }
 
 fn memory_client() -> crate::mcp::auth_store::OAuthCredentialClient {
-    crate::mcp::auth_store::OAuthCredentialClient::new(std::sync::Arc::new(
+    crate::mcp::auth_store::OAuthCredentialClient::try_new(std::sync::Arc::new(
         MemoryOAuthCredentialPort::default(),
     ))
     .unwrap()
@@ -69,7 +75,7 @@ async fn explicit_oauth_without_credentials_reports_failure_and_seals_injection(
         None,
     )
     .await;
-    let handle = pool.get_client("server").unwrap();
+    let handle = pool.client("server").unwrap();
     assert!(
         matches!(&handle.status, ClientStatus::Failed(reason) if reason.contains("not injected"))
     );
@@ -111,7 +117,7 @@ async fn anonymous_http_without_credentials_attempts_connection() {
     .await;
     assert!(observed.await.unwrap());
     assert!(matches!(
-        &pool.get_client("server").unwrap().status,
+        &pool.client("server").unwrap().status,
         ClientStatus::Failed(_)
     ));
 }
@@ -204,7 +210,7 @@ async fn anonymous_http_without_credentials_discovers_live_tools() {
     )
     .await
     .unwrap();
-    let handle = pool.get_client("server").unwrap();
+    let handle = pool.client("server").unwrap();
     assert!(matches!(handle.status, ClientStatus::Connected));
     assert_eq!(
         handle
@@ -238,7 +244,7 @@ async fn stdio_absence_is_reported_without_starting_process() {
     )
     .await;
     assert!(
-        matches!(&pool.get_client("server").unwrap().status, ClientStatus::Failed(reason) if reason.contains("unavailable"))
+        matches!(&pool.client("server").unwrap().status, ClientStatus::Failed(reason) if reason.contains("unavailable"))
     );
     let error = pool.reconnect("server", None).await.unwrap_err();
     assert!(error.to_string().contains("unavailable"));
@@ -255,7 +261,7 @@ async fn initialization_discovers_stored_oauth_via_injected_port_without_startin
     ] {
         let pool = Arc::new(McpClientPool::new_pending());
         let client = memory_client();
-        let key = static_credential_key(
+        let key = crate::mcp::auth_store::static_credential_key(
             "server",
             "https://example/mcp",
             &oauth.clone().unwrap_or_default(),
@@ -280,7 +286,7 @@ async fn initialization_discovers_stored_oauth_via_injected_port_without_startin
             })),
         )
         .await;
-        let handle = pool.get_client("server").unwrap();
+        let handle = pool.client("server").unwrap();
         assert!(matches!(
             handle.oauth_status,
             OAuthStatus::NeedsAuthorization

@@ -1,6 +1,9 @@
 //! `_meta.peri.recovery` 解码与通知投影的纯客户端行为。
 
-use super::*;
+use super::NOTIFICATION;
+use super::Notification;
+use super::RecoveryView;
+
 use peri_acp_types::recovery::RecoveryViewStatus;
 
 fn failure_view(blocked: bool) -> RecoveryView {
@@ -25,17 +28,20 @@ fn failure_view(blocked: bool) -> RecoveryView {
 #[test]
 fn decode_reads_the_flat_recovery_key() {
     let value = serde_json::json!({"_meta": {"peri.recovery": failure_view(true)}});
-    let view = decode(&value).expect("恢复字段必须可解码");
+    let view = super::decode(&value).expect("恢复字段必须可解码");
     assert_eq!(view.status, RecoveryViewStatus::Failed);
     assert!(view.execution_blocked);
-    assert_eq!(view.error.unwrap().detail, "missing parent");
+    assert_eq!(view.error.expect("decode reads the flat recovery key: the fixture establishes view.error before this assertion").detail, "missing parent");
 }
 
 #[test]
 fn decode_ignores_malformed_or_missing_meta() {
-    assert!(decode(&serde_json::json!({})).is_none());
-    assert!(decode(&serde_json::json!({"_meta": {"peri.recovery": "broken"}})).is_none());
-    assert!(decode(&serde_json::json!({"_meta": {"peri.recovery": {"status": "nope"}}})).is_none());
+    assert!(super::decode(&serde_json::json!({})).is_none());
+    assert!(super::decode(&serde_json::json!({"_meta": {"peri.recovery": "broken"}})).is_none());
+    assert!(
+        super::decode(&serde_json::json!({"_meta": {"peri.recovery": {"status": "nope"}}}))
+            .is_none()
+    );
 }
 
 struct NotificationGuard(Option<String>);
@@ -61,7 +67,7 @@ impl Drop for NotificationGuard {
 #[serial_test::serial]
 fn failed_blocked_view_sets_notification_with_reason() {
     let _notification = NotificationGuard::capture();
-    present("session-a", &failure_view(true));
+    super::present("session-a", &failure_view(true));
     let state = NOTIFICATION.state();
     let notice = state.read();
     let notice = notice.as_ref().expect("失败恢复必须有通知");
@@ -99,7 +105,7 @@ fn partial_view(count: usize) -> RecoveryView {
 fn partial_notice_asks_for_explicit_resume_and_counts_child_threads() {
     let _notification = NotificationGuard::capture();
     crate::i18n::init(Some("en"));
-    present("session-a", &partial_view(121));
+    super::present("session-a", &partial_view(121));
     let state = NOTIFICATION.state();
     let notice = state.read();
     let message = notice.as_ref().expect("部分恢复必须有通知").message.clone();
@@ -109,7 +115,7 @@ fn partial_notice_asks_for_explicit_resume_and_counts_child_threads() {
     assert!(!message.contains("could not be recovered"), "{message}");
 
     crate::i18n::init(Some("zh-CN"));
-    present("session-a", &partial_view(2));
+    super::present("session-a", &partial_view(2));
     let state = NOTIFICATION.state();
     let notice = state.read();
     let message = notice.as_ref().expect("部分恢复必须有通知").message.clone();
@@ -129,6 +135,6 @@ fn ok_view_produces_no_notification() {
         status: RecoveryViewStatus::Ok,
         ..failure_view(false)
     };
-    present("session-a", &view);
+    super::present("session-a", &view);
     assert!(NOTIFICATION.state().read().is_none());
 }

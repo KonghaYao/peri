@@ -43,21 +43,28 @@
 //! 3. [`WireScriptedModel::first_request_system_text`]：首个请求的系统消息文本，供
 //!    「三个冻结 effective name 不得同时算作 deferred」断言使用。
 
-use std::{
-    ffi::OsString,
-    io::{BufRead, BufReader, Write},
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        mpsc, Arc, Mutex, MutexGuard, OnceLock,
-    },
-    time::{Duration, Instant},
-};
+use parking_lot::MutexGuard;
+use std::ffi::OsString;
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::Write;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::Command;
+use std::process::Stdio;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::time::Duration;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
-use peri_acp_types::{messages::MessageContent, ports::McpPoolPort};
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::ports::McpPoolPort;
 use peri_middlewares::assembly::{
     BuiltinInstanceContext, CronInstanceInput, WorkflowInstanceInput,
 };
@@ -69,10 +76,10 @@ use peri_model::{
 use serial_test::serial;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
-use super::executor_flow_tests::execution_fixture::run_session_loop;
-use super::executor_flow_tests::{
-    make_session_context, make_stage_build, make_turn_input, MockEventSink, SessionTaskBindings,
-};
+use super::executor_flow_tests;
+use super::executor_flow_tests::execution_fixture;
+use super::executor_flow_tests::MockEventSink;
+use super::executor_flow_tests::SessionTaskBindings;
 use crate::session::executor::{FrozenSessionData, PromptResult, SessionContext};
 
 /// 夹具 server 名。**异名**：A3 规定 `web` / `artifact`（及预留 `cron` /
@@ -173,12 +180,9 @@ struct WireHomeRedirect {
 
 impl WireHomeRedirect {
     fn set(home: &Path) -> Self {
-        static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        static HOME_LOCK: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
         // 一个用例 panic 不得毒化 HOME 重定向，使后续用例连带失败。
-        let lock = HOME_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let lock = HOME_LOCK.get_or_init(|| parking_lot::Mutex::new(())).lock();
         let previous = std::env::var_os("HOME");
         std::env::set_var("HOME", home);
         Self {
@@ -357,7 +361,7 @@ impl WireFixtureHarness {
     /// 同时按生产语义绑定本会话的任务管理器（`bind_session_tasks` 的会话侧一半）：
     /// 本节用例经 `run_wire_prompt` 直连 `run_session_loop`，未经 host 请求路径。
     pub(super) async fn session_context(&self, session_id: &str) -> SessionContext {
-        let mut ctx = make_session_context(session_id).await;
+        let mut ctx = executor_flow_tests::make_session_context(session_id).await;
         ctx.mcp_pool = Some(Arc::clone(&self.pool) as Arc<dyn McpPoolPort>);
         self.session_tasks.bind(&self.pool, &ctx);
         ctx
@@ -367,7 +371,7 @@ impl WireFixtureHarness {
     pub(super) async fn await_connected(&self, server: &str) {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
-            if let Some(handle) = self.pool.get_client(server) {
+            if let Some(handle) = self.pool.client(server) {
                 if matches!(handle.status, ClientStatus::Connected) {
                     return;
                 }
@@ -519,7 +523,7 @@ impl Model for WireScriptedModel {
                     name: Some(scripted.name.clone()),
                     arguments_delta: scripted.arguments.to_string(),
                 });
-                ModelResponse::new(
+                ModelResponse::try_new(
                     ModelMessage::assistant(
                         vec![],
                         vec![ToolCall::new(
@@ -537,7 +541,7 @@ impl Model for WireScriptedModel {
                 events.push(ModelStreamEvent::TextDelta {
                     text: self.end_text.clone(),
                 });
-                ModelResponse::new(
+                ModelResponse::try_new(
                     ModelMessage::assistant_text(self.end_text.clone()),
                     StopReason::EndTurn,
                     None,
@@ -580,17 +584,20 @@ pub(super) async fn run_wire_prompt_with_frozen(
     let model = Arc::clone(model);
     let mut ctx = ctx;
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model) as Arc<dyn Model>));
-    let mut turn = make_turn_input(
+    let mut turn = executor_flow_tests::make_turn_input(
         Arc::clone(sink) as Arc<dyn crate::session::event_sink::EventSink>,
         MessageContent::text("wire fixture probe"),
         false,
         vec![],
-        make_stage_build(&ctx),
+        executor_flow_tests::make_stage_build(&ctx),
     );
     turn.frozen = frozen;
-    tokio::time::timeout(Duration::from_secs(30), run_session_loop(ctx, turn))
-        .await
-        .expect("prompt 不得挂起")
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        execution_fixture::run_session_loop(ctx, turn),
+    )
+    .await
+    .expect("prompt 不得挂起")
 }
 
 // ── 夹具自检 1：node 脚本的 wire 日志与 tools/call 分支 ─────────────────────
@@ -620,7 +627,8 @@ fn wire_fixture_script_logs_wire_and_answers_tools_call() {
     let stdout = child.stdout.take().expect("stdout");
     let (tx, rx) = mpsc::channel::<String>();
     let reader = std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        let parsed_line = BufReader::new(stdout).lines().map_while(Result::ok);
+        for line in parsed_line {
             let _ = tx.send(line);
         }
     });

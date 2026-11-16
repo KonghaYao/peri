@@ -18,7 +18,16 @@
 //!
 //! `#[serial]`：builtin 注入开关是进程级 env（与 `requests_agent_catalog_test` 同因）。
 
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::provider::LlmProvider;
+use crate::transport::types::AcpError;
+
+use serde_json::json;
+use serde_json::Value;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 会话 cwd：真实目录（装配期要读它）。
 fn idle_lifetime_fixture() -> (tempfile::TempDir, String) {
@@ -34,10 +43,11 @@ async fn idle_lifetime_server_config(
     tmp: &tempfile::TempDir,
     startup_cwd: String,
 ) -> AcpServerConfig {
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "key", "model"),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, tmp).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(config, provider, tmp).await;
     // 生产 stdio 装配**不注入** entitlement 身份层 ⇒ `apps/*` 默认拒绝（R4 方案 b）；
     // 本用例走生产装配链路验证 apps 面，故注入「部署侧已接入身份层」的测试端口。
     cfg.session_authorization = crate::host::apps_facade::entitlement::test_support::allow_all();
@@ -60,7 +70,7 @@ async fn session_new_keeps_idle_invocation_cancel_parent_live_until_close() {
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
 
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": target}),
         &cfg,
@@ -90,7 +100,7 @@ async fn session_new_keeps_idle_invocation_cancel_parent_live_until_close() {
          invoke 全不可用"
     );
 
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": id}),
         &cfg,
@@ -320,7 +330,7 @@ async fn session_new_assembled_facade_runs_app_callback_end_to_end() {
         Arc::clone(&transport) as Arc<dyn crate::transport::AcpTransport>;
     let mut sessions = HashMap::new();
 
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": target}),
         &cfg,
@@ -503,7 +513,7 @@ async fn session_new_assembled_facade_runs_app_callback_end_to_end() {
         Some(ASSEMBLY_TOOL)
     );
 
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": id}),
         &cfg,

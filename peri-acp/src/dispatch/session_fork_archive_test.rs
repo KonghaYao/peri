@@ -1,22 +1,40 @@
 //! Independent forks own the original bytes of frozen inherited archives.
-use super::*;
-use peri_acp_types::{
-    context_archive::{
-        build_catalog, ArchiveError, ArchiveReadRequest, ArchiveRoot, ContextArchiveReadPort,
-    },
-    session_resources::{BindingState, ChildSnapshot, FrozenState},
-    store::InheritedContext,
-};
+use crate::dispatch::session_fork_test::SOURCE;
+use peri_acp_types::context_archive;
+use peri_acp_types::context_archive::ArchiveError;
+use peri_acp_types::context_archive::ArchiveReadRequest;
+use peri_acp_types::context_archive::ArchiveRoot;
+use peri_acp_types::context_archive::ContextArchiveReadPort;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::ToolCallRequest;
+use peri_acp_types::projection::MessageProjectionDirective;
+use peri_acp_types::session_resources::BindingState;
+use peri_acp_types::session_resources::ChildSnapshot;
+use peri_acp_types::session_resources::FrozenState;
+use peri_acp_types::session_resources::NewSession;
+use peri_acp_types::session_resources::NewSessionMeta;
+use peri_acp_types::session_resources::SessionResourceErrorKind;
+
+use peri_acp_types::store::CompactionChange;
+use peri_acp_types::store::InheritedContext;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::thread::CancelPolicy;
 use peri_agent::context_archive::ContextArchiveReader;
 
 #[tokio::test]
 async fn own_fork_rejects_unknown_catalog_or_changed_body_without_creating_target() {
     let temp = tempfile::tempdir().unwrap();
-    let resources = open_facade(&temp).await;
+    let resources = crate::dispatch::session_fork_test::open_facade(&temp).await;
     let workspace = resources.resolve_workspace(temp.path()).await.unwrap();
     for corruption in ["version", "body", "valid"] {
         let source_id = format!("own-archive-{corruption}");
-        create_source(&resources, &source_id, &temp.path().to_string_lossy()).await;
+        crate::dispatch::session_fork_test::create_source(
+            &resources,
+            &source_id,
+            &temp.path().to_string_lossy(),
+        )
+        .await;
         let mut pair = vec![
             PersistedPayload::Message(BaseMessage::ai_with_tool_calls(
                 "",
@@ -29,7 +47,7 @@ async fn own_fork_rejects_unknown_catalog_or_changed_body_without_creating_targe
             PersistedPayload::Message(BaseMessage::tool_result("read", "original canonical")),
         ];
         let anchor = pair[1].id();
-        let mut catalog = build_catalog(
+        let mut catalog = context_archive::build_catalog(
             source_id.clone(),
             "own-group".into(),
             anchor,
@@ -65,9 +83,11 @@ async fn own_fork_rejects_unknown_catalog_or_changed_body_without_creating_targe
             )
             .await
             .unwrap();
-        let source = load_fork_source(&resources, &source_id).await.unwrap();
-        let before = session_ids(&resources).await;
-        let result = fork_bound_session(
+        let source = crate::dispatch::load_fork_source(&resources, &source_id)
+            .await
+            .unwrap();
+        let before = crate::dispatch::session_fork_test::session_ids(&resources).await;
+        let result = crate::dispatch::fork_bound_session(
             &resources,
             &source,
             &workspace,
@@ -90,7 +110,7 @@ async fn own_fork_rejects_unknown_catalog_or_changed_body_without_creating_targe
                 .to_string()
                 .contains("archive dependencies"));
             assert_eq!(
-                session_ids(&resources).await,
+                crate::dispatch::session_fork_test::session_ids(&resources).await,
                 before,
                 "{corruption}: no target saved"
             );
@@ -129,8 +149,13 @@ async fn child_full_fork_result_preview_survives_cold_rewind_and_refork() {
 
 async fn child_archive_fork_lifecycle(mode: &str) {
     let temp = tempfile::tempdir().unwrap();
-    let resources = open_facade(&temp).await;
-    create_source(&resources, SOURCE, &temp.path().to_string_lossy()).await;
+    let resources = crate::dispatch::session_fork_test::open_facade(&temp).await;
+    crate::dispatch::session_fork_test::create_source(
+        &resources,
+        SOURCE,
+        &temp.path().to_string_lossy(),
+    )
+    .await;
     let source_id = SOURCE.to_string();
     let mut pair = vec![
         PersistedPayload::Message(BaseMessage::ai_with_tool_calls(
@@ -166,7 +191,7 @@ async fn child_archive_fork_lifecycle(mode: &str) {
     } else {
         &pair[..2]
     };
-    let catalog = build_catalog(
+    let catalog = context_archive::build_catalog(
         source_id.clone(),
         "parent-group".into(),
         anchor,
@@ -325,9 +350,11 @@ async fn child_archive_fork_lifecycle(mode: &str) {
         .append_history(&source_id, &[secret])
         .await
         .unwrap();
-    let source = load_fork_source(&resources, &child).await.unwrap();
+    let source = crate::dispatch::load_fork_source(&resources, &child)
+        .await
+        .unwrap();
     let workspace = resources.resolve_workspace(temp.path()).await.unwrap();
-    let (target, active) = fork_bound_session(
+    let (target, active) = crate::dispatch::fork_bound_session(
         &resources,
         &source,
         &workspace,
@@ -409,7 +436,7 @@ async fn child_archive_fork_lifecycle(mode: &str) {
     assert_executable_view(&fork);
     drop(reader);
     drop(resources);
-    let resources = open_facade(&temp).await;
+    let resources = crate::dispatch::session_fork_test::open_facade(&temp).await;
     let cold = resources.load_session_snapshot(&target).await.unwrap();
     assert_executable_view(&cold);
     // 第二次 Full 只能替代有效历史，不能改变仅恢复副本的所有权。
@@ -538,9 +565,11 @@ async fn child_archive_fork_lifecycle(mode: &str) {
         .entries
         .iter()
         .any(|entry| entry.data.contains(expected_fragment)));
-    let source = load_fork_source(&resources, &target).await.unwrap();
+    let source = crate::dispatch::load_fork_source(&resources, &target)
+        .await
+        .unwrap();
     let workspace = resources.resolve_workspace(temp.path()).await.unwrap();
-    let (reforked, active) = fork_bound_session(
+    let (reforked, active) = crate::dispatch::fork_bound_session(
         &resources,
         &source,
         &workspace,
@@ -572,13 +601,13 @@ async fn child_archive_fork_lifecycle(mode: &str) {
 }
 
 fn assert_executable_view(snapshot: &peri_acp_types::session_resources::SessionSnapshot) {
-    use peri_agent::{
-        agent::compact_v2::projection::{render_persisted_llm_view, ProviderCapabilities},
-        session::MessageTranscript,
-    };
+    use peri_agent::agent::compact_v2::projection;
+    use peri_agent::agent::compact_v2::projection::ProviderCapabilities;
+    use peri_agent::session::MessageTranscript;
     let mut transcript = MessageTranscript::new().with_own_payloads(snapshot.payloads.clone());
     transcript.set_flags_batch(snapshot.flags.clone());
-    let view = render_persisted_llm_view(&transcript, &ProviderCapabilities::openai()).unwrap();
+    let view = projection::render_persisted_llm_view(&transcript, &ProviderCapabilities::openai())
+        .unwrap();
     assert!(
         view.iter().all(|message| message.tool_calls().is_empty()
             && !matches!(message, BaseMessage::Tool { .. })),

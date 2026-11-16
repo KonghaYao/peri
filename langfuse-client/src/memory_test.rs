@@ -8,7 +8,8 @@ use std::sync::Arc;
 use crate::client::ExportConfig;
 use crate::config::BatcherConfig;
 use crate::error::LangfuseError;
-use crate::memory::{slot_capacity, MemoryBudget};
+use crate::memory;
+use crate::memory::MemoryBudget;
 
 fn deployment(config: &BatcherConfig) -> Arc<MemoryBudget> {
     MemoryBudget::for_batcher(config, &ExportConfig::default()).expect("deployment budget")
@@ -27,7 +28,7 @@ fn config() -> BatcherConfig {
 
 #[test]
 fn reserve_before_retain_and_release_once() {
-    let budget = MemoryBudget::new(1024).expect("budget");
+    let budget = MemoryBudget::try_new(1024).expect("budget");
     let permit = budget.try_reserve(600).expect("first reservation fits");
     assert_eq!(permit.bytes(), 600);
     assert_eq!(budget.used(), 600);
@@ -120,7 +121,7 @@ fn workspace_pools_are_exclusive_and_return_leases() {
 #[test]
 fn zero_and_below_progress_budgets_are_config_errors() {
     assert!(matches!(
-        MemoryBudget::new(0),
+        MemoryBudget::try_new(0),
         Err(LangfuseError::Config(_))
     ));
 
@@ -155,7 +156,7 @@ fn used_includes_isolated_progress_partition_exactly_once() {
 fn slot_capacity_follows_contract_formula_and_rejects_overflow() {
     let config = BatcherConfig::default();
     assert_eq!(
-        slot_capacity(&config).expect("capacity"),
+        memory::slot_capacity(&config).expect("capacity"),
         3 * config.queue_capacity
             + config.telemetry.prepare_max_in_flight
             + config.max_in_flight
@@ -167,7 +168,7 @@ fn slot_capacity_follows_contract_formula_and_rejects_overflow() {
         ..BatcherConfig::default()
     };
     assert!(matches!(
-        slot_capacity(&overflowing),
+        memory::slot_capacity(&overflowing),
         Err(LangfuseError::Config(_))
     ));
 }

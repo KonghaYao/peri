@@ -28,6 +28,7 @@ impl Default for ScrollbarDragState {
 // ── 滚动条几何 + 反推 ─────────────────────────────────────────────────────
 
 /// 判断鼠标列是否落在滚动条列（drawer.area 最右 1 列）。
+#[must_use]
 pub(in crate::kit::message_area) fn is_scrollbar_column(mouse_col: u16, area: Rect) -> bool {
     mouse_col == area.x.saturating_add(area.width).saturating_sub(1)
 }

@@ -1,4 +1,4 @@
-//! 面板组件集合 —— ratatui-kit #[component] 版本。
+//! 面板组件集合 —— ratatui-kit `#[component]` 版本。
 macro_rules! panel_shell {
     ($kind:expr, { $($children:tt)* }) => {{
         ratatui_kit::element!(

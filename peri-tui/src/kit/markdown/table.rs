@@ -1,10 +1,10 @@
 use pulldown_cmark_012::Alignment;
-use ratatui::{
-    buffer::Buffer,
-    layout::{Alignment as RAlignment, Rect},
-    style::Style,
-    text::{Line, Span},
-};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Alignment as RAlignment;
+use ratatui::layout::Rect;
+use ratatui::style::Style;
+use ratatui::text::Line;
+use ratatui::text::Span;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::types::TableData;
@@ -29,13 +29,19 @@ pub(crate) fn compute_table_col_widths(
 
     // 1. 自然宽度：每列取 header + 所有数据单元格的最宽值
     let mut col_widths = vec![0usize; col_count];
-    for (i, cell) in headers.iter().enumerate() {
-        col_widths[i] = col_widths[i].max(span_width(cell));
+    {
+        let iteration_items = headers.iter().enumerate();
+        for (i, cell) in iteration_items {
+            col_widths[i] = col_widths[i].max(span_width(cell));
+        }
     }
     for row in rows {
-        for (i, cell) in row.iter().enumerate() {
-            if i < col_count {
-                col_widths[i] = col_widths[i].max(span_width(cell));
+        {
+            let iteration_items = row.iter().enumerate();
+            for (i, cell) in iteration_items {
+                if i < col_count {
+                    col_widths[i] = col_widths[i].max(span_width(cell));
+                }
             }
         }
     }
@@ -50,23 +56,29 @@ pub(crate) fn compute_table_col_widths(
         // 每列最小宽度 = 该列最长不可断词（智能断词保证的单词边界）。
         // 例如 "Catherine"、"$145,000"、"EMP-1001" 各自是不可断整体。
         let mut min_col_widths = vec![1usize; col_count];
-        for (i, cell) in headers.iter().enumerate() {
-            if i >= col_count {
-                break;
-            }
-            let text = span_plain(cell);
-            for (s, e) in cell_words(&text) {
-                min_col_widths[i] = min_col_widths[i].max(text[s..e].width());
-            }
-        }
-        for row in rows {
-            for (i, cell) in row.iter().enumerate() {
+        {
+            let iteration_items = headers.iter().enumerate();
+            for (i, cell) in iteration_items {
                 if i >= col_count {
                     break;
                 }
                 let text = span_plain(cell);
                 for (s, e) in cell_words(&text) {
                     min_col_widths[i] = min_col_widths[i].max(text[s..e].width());
+                }
+            }
+        }
+        for row in rows {
+            {
+                let iteration_items = row.iter().enumerate();
+                for (i, cell) in iteration_items {
+                    if i >= col_count {
+                        break;
+                    }
+                    let text = span_plain(cell);
+                    for (s, e) in cell_words(&text) {
+                        min_col_widths[i] = min_col_widths[i].max(text[s..e].width());
+                    }
                 }
             }
         }
@@ -84,10 +96,13 @@ pub(crate) fn compute_table_col_widths(
         let mut new_widths = min_col_widths.clone();
         if total_extra_want > 0 && extra_budget > 0 {
             // 按需求量比例分配（floor）
-            for (i, &want) in extra_wants.iter().enumerate() {
-                let share =
-                    (want as f64 * extra_budget as f64 / total_extra_want as f64).floor() as usize;
-                new_widths[i] += share;
+            {
+                let iteration_items = extra_wants.iter().enumerate();
+                for (i, &want) in iteration_items {
+                    let share = (want as f64 * extra_budget as f64 / total_extra_want as f64)
+                        .floor() as usize;
+                    new_widths[i] += share;
+                }
             }
 
             // floor 舍入的余量：优先补给「未满足需求」最大的列，不超自然宽度
@@ -191,7 +206,10 @@ fn cell_words(text: &str) -> Vec<(usize, usize)> {
         let mut ranges = Vec::new();
         let mut pos = 0usize;
         for token in text.split_whitespace() {
-            let start = text[pos..].find(token).unwrap() + pos;
+            let start = text[pos..]
+                .find(token)
+                .expect("split_whitespace yields tokens present in the remaining source suffix")
+                + pos;
             let end = start + token.len();
             if token.contains("://") {
                 ranges.push((start, end));
@@ -210,28 +228,31 @@ fn cell_words(text: &str) -> Vec<(usize, usize)> {
     let mut split_positions: Vec<usize> = Vec::with_capacity(breaks.len());
     {
         let len = text.len();
-        for (i, &(attach_left, attach_right)) in breaks.iter().enumerate() {
-            if attach_left == attach_right {
-                split_positions.push(attach_left);
-                continue;
-            }
-            let seg_start = if i == 0 { 0 } else { split_positions[i - 1] };
-            let seg_end = if i + 1 < breaks.len() {
-                breaks[i + 1].0
-            } else {
-                len
-            };
+        {
+            let iteration_items = breaks.iter().enumerate();
+            for (i, &(attach_left, attach_right)) in iteration_items {
+                if attach_left == attach_right {
+                    split_positions.push(attach_left);
+                    continue;
+                }
+                let seg_start = if i == 0 { 0 } else { split_positions[i - 1] };
+                let seg_end = if i + 1 < breaks.len() {
+                    breaks[i + 1].0
+                } else {
+                    len
+                };
 
-            let max_attach_left = text[seg_start..attach_left]
-                .width()
-                .max(text[attach_left..seg_end].width());
-            let max_attach_right = text[seg_start..attach_right]
-                .width()
-                .max(text[attach_right..seg_end].width());
-            if max_attach_right < max_attach_left {
-                split_positions.push(attach_right);
-            } else {
-                split_positions.push(attach_left);
+                let max_attach_left = text[seg_start..attach_left]
+                    .width()
+                    .max(text[attach_left..seg_end].width());
+                let max_attach_right = text[seg_start..attach_right]
+                    .width()
+                    .max(text[attach_right..seg_end].width());
+                if max_attach_right < max_attach_left {
+                    split_positions.push(attach_right);
+                } else {
+                    split_positions.push(attach_left);
+                }
             }
         }
     }
@@ -312,7 +333,12 @@ fn wrap_text_ranges(text: &str, width: usize) -> Vec<(usize, usize)> {
         }
         let sep = if cur_start.is_some() { 1 } else { 0 };
         if cur_start.is_some() && cur_width + sep + w > width {
-            lines.push((cur_start.take().unwrap(), cur_end));
+            lines.push((
+                cur_start
+                    .take()
+                    .expect("an open table span has a start before it is flushed"),
+                cur_end,
+            ));
             cur_width = w;
             cur_end = e;
             cur_start = Some(s);
@@ -411,6 +437,7 @@ struct RenderedRow {
 }
 
 impl RenderedRow {
+    #[must_use]
     fn separator(style: Style) -> Self {
         Self {
             cells: vec![],
@@ -455,33 +482,36 @@ fn render_table_to_buffer(
         cell_pad,
     );
     y += 1;
-    for (ri, row) in rows.iter().enumerate() {
-        if y >= area.bottom() {
-            break;
-        }
-        if row.is_separator {
-            if ri > 0 && ri < rows.len() - 1 {
-                render_hline(
-                    buf,
-                    area.x,
-                    y,
-                    col_widths,
-                    '├',
-                    '┼',
-                    '┤',
-                    border_style,
-                    cell_pad,
-                );
-                y += 1;
-            }
-            continue;
-        }
-        for li in 0..row.height() {
+    {
+        let iteration_items = rows.iter().enumerate();
+        for (ri, row) in iteration_items {
             if y >= area.bottom() {
                 break;
             }
-            render_row_line(buf, area.x, y, row, li, col_widths, border_style, cell_pad);
-            y += 1;
+            if row.is_separator {
+                if ri > 0 && ri < rows.len() - 1 {
+                    render_hline(
+                        buf,
+                        area.x,
+                        y,
+                        col_widths,
+                        '├',
+                        '┼',
+                        '┤',
+                        border_style,
+                        cell_pad,
+                    );
+                    y += 1;
+                }
+                continue;
+            }
+            for li in 0..row.height() {
+                if y >= area.bottom() {
+                    break;
+                }
+                render_row_line(buf, area.x, y, row, li, col_widths, border_style, cell_pad);
+                y += 1;
+            }
         }
     }
     if y < area.bottom() {
@@ -514,14 +544,17 @@ fn render_hline(
     let mut cx = x;
     put(buf, cx, y, l, s);
     cx += 1;
-    for (i, &w) in widths.iter().enumerate() {
-        for _ in 0..w + pad * 2 {
-            put(buf, cx, y, '─', s);
-            cx += 1;
-        }
-        if i + 1 < widths.len() {
-            put(buf, cx, y, m, s);
-            cx += 1;
+    {
+        let iteration_items = widths.iter().enumerate();
+        for (i, &w) in iteration_items {
+            for _ in 0..w + pad * 2 {
+                put(buf, cx, y, '─', s);
+                cx += 1;
+            }
+            if i + 1 < widths.len() {
+                put(buf, cx, y, m, s);
+                cx += 1;
+            }
         }
     }
     put(buf, cx, y, r, s);
@@ -541,26 +574,29 @@ fn render_row_line(
     let mut cx = x;
     put(buf, cx, y, '│', bs);
     cx += 1;
-    for (i, &w) in widths.iter().enumerate() {
-        for _ in 0..pad {
-            put(buf, cx, y, ' ', row.style);
-            cx += 1;
-        }
-        let cl = row
-            .cells
-            .get(i)
-            .and_then(|c| c.lines.get(li as usize))
-            .cloned()
-            .unwrap_or_default();
-        render_cell_line(buf, cx, y, w, cl, row.style);
-        cx += w;
-        for _ in 0..pad {
-            put(buf, cx, y, ' ', row.style);
-            cx += 1;
-        }
-        if i + 1 < widths.len() {
-            put(buf, cx, y, '│', bs);
-            cx += 1;
+    {
+        let iteration_items = widths.iter().enumerate();
+        for (i, &w) in iteration_items {
+            for _ in 0..pad {
+                put(buf, cx, y, ' ', row.style);
+                cx += 1;
+            }
+            let cl = row
+                .cells
+                .get(i)
+                .and_then(|c| c.lines.get(li as usize))
+                .cloned()
+                .unwrap_or_default();
+            render_cell_line(buf, cx, y, w, cl, row.style);
+            cx += w;
+            for _ in 0..pad {
+                put(buf, cx, y, ' ', row.style);
+                cx += 1;
+            }
+            if i + 1 < widths.len() {
+                put(buf, cx, y, '│', bs);
+                cx += 1;
+            }
         }
     }
     put(buf, cx, y, '│', bs);
@@ -720,23 +756,26 @@ pub fn table_data_to_lines(
         rows.push(RenderedRow::separator(theme.border_style));
     }
 
-    for (i, row) in data.rows.iter().enumerate() {
-        let cells: Vec<RenderedCell> = (0..n)
-            .map(|i| {
-                let spans = row.get(i).cloned().unwrap_or_default();
-                RenderedCell {
-                    lines: wrap_cell_line(Line::from(spans), wa_usize[i], ha(i)),
-                }
-            })
-            .collect();
-        rows.push(RenderedRow {
-            cells,
-            style: theme.row_style,
-            is_separator: false,
-        });
-        // 数据行之间的横向分隔线（最后一行之后不画）
-        if i + 1 < data.rows.len() {
-            rows.push(RenderedRow::separator(theme.border_style));
+    {
+        let iteration_items = data.rows.iter().enumerate();
+        for (i, row) in iteration_items {
+            let cells: Vec<RenderedCell> = (0..n)
+                .map(|i| {
+                    let spans = row.get(i).cloned().unwrap_or_default();
+                    RenderedCell {
+                        lines: wrap_cell_line(Line::from(spans), wa_usize[i], ha(i)),
+                    }
+                })
+                .collect();
+            rows.push(RenderedRow {
+                cells,
+                style: theme.row_style,
+                is_separator: false,
+            });
+            // 数据行之间的横向分隔线（最后一行之后不画）
+            if i + 1 < data.rows.len() {
+                rows.push(RenderedRow::separator(theme.border_style));
+            }
         }
     }
 

@@ -1,10 +1,20 @@
 //! Shared admission for every consumer of a concrete MCP connection.
 use parking_lot::Mutex;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use tokio::sync::Notify;
 #[derive(Clone)]
 pub struct McpCallGate {
     inner: Arc<Inner>,
+}
+
+impl Debug for McpCallGate {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpCallGate")
+            .finish_non_exhaustive()
+    }
 }
 struct Inner {
     state: Mutex<(bool, usize)>,
@@ -21,6 +31,7 @@ impl Default for McpCallGate {
     }
 }
 impl McpCallGate {
+    #[must_use]
     pub fn is_open(&self) -> bool {
         self.inner.state.lock().0
     }
@@ -50,6 +61,14 @@ impl McpCallGate {
 }
 pub struct McpCallPermit {
     inner: Arc<Inner>,
+}
+
+impl Debug for McpCallPermit {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpCallPermit")
+            .finish_non_exhaustive()
+    }
 }
 impl Drop for McpCallPermit {
     fn drop(&mut self) {

@@ -3,7 +3,8 @@
 use serde_json::Value;
 
 use super::ServerLoop;
-use crate::host::{extract_session_id, handle_notification, requests};
+use crate::host;
+use crate::host::requests;
 
 impl ServerLoop<'_> {
     pub(super) async fn dispatch_notification(&self, method: String, params: Value) {
@@ -45,13 +46,13 @@ impl ServerLoop<'_> {
         // 锁外发送 continuation，避免 notification 路径持会话锁触碰 scheduler。
         let outcome = {
             let mut sessions = sessions.lock().await;
-            handle_notification(&method, &params, &mut sessions, cfg).await
+            host::handle_notification(&method, &params, &mut sessions, cfg).await
         };
         if let Some(req) = outcome.continuation {
             if cont_tx.send(req).is_err() {
                 tracing::warn!(
                     method,
-                    session_id = extract_session_id(&params, ""),
+                    session_id = host::extract_session_id(&params, ""),
                     "ACP continuation scheduling failed: channel closed"
                 );
             }

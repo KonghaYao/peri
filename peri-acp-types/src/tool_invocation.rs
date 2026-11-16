@@ -32,14 +32,17 @@ pub struct InvocationId(String);
 
 impl InvocationId {
     /// 生成新的执行身份（UUID v7，时间有序）。
+    #[must_use]
     pub fn generate() -> Self {
         Self(Uuid::now_v7().to_string())
     }
 
+    #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -86,10 +89,12 @@ impl AsRef<str> for InvocationId {
 pub struct ToolCallId(String);
 
 impl ToolCallId {
+    #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -159,7 +164,7 @@ pub enum InvocationOrigin {
         /// 附件身份由 `SessionInteractionRouter` 分配（阶段 4a），与 record 身份
         /// **分离**：删除旧 lease 权威（`AppSessionBinding`）后，两者不再同源。
         attachment_id: Option<crate::interaction::AttachmentId>,
-        /// 该 Attachment 的连接纪元；与 [`Self::attachment_id`] 同生共死
+        /// 该 Attachment 的连接纪元；与 `attachment_id` 同生共死
         /// （`None` = 尚未附着）。
         connection_epoch: Option<crate::interaction::ConnectionEpoch>,
         /// 服务端世代：服务端重连/重启后递增，用于拒绝陈旧 record 发起的执行。
@@ -194,6 +199,7 @@ impl InvocationOrigin {
     }
 
     /// 是否由 MCP App 发起（取代字符串前缀判定）。
+    #[must_use]
     pub fn is_app(&self) -> bool {
         matches!(self, Self::App { .. })
     }

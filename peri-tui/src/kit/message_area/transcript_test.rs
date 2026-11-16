@@ -1,6 +1,15 @@
-use super::*;
+use super::Arc;
+use super::EntryRenderContext;
+use super::GridSpec;
+use super::TextLineSource;
+use super::Transcript;
+use super::TranscriptPublication;
+use super::TuiRenderUnit;
+use super::ViewModelsSnapshot;
+use super::ZoneTransition;
+
 use crate::kit::entry_render_cache::EntrySurface;
-use crate::kit::message_area::selection::extract_visual_range_index;
+
 use crate::kit::tui_render_unit::{EntryStatus, FoldState, TuiToolCard};
 use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiReasoningBlock, TuiUserBubble};
 use peri_theme::atoms::THEME_ATOM;
@@ -86,7 +95,7 @@ fn skipped_publications_do_not_rebuild_evicted_unchanged_history() {
     // 其余淘汰历史保持未重建。
     assert!(caches[2..128].iter().all(|cache| cache.lines.is_none()));
     assert!(caches[129..255].iter().all(|cache| cache.lines.is_none()));
-    let copied = extract_visual_range_index(
+    let copied = crate::kit::message_area::selection::extract_visual_range_index(
         &index,
         (0, 0),
         (index.total_visual().saturating_sub(1), 80),
@@ -94,7 +103,7 @@ fn skipped_publications_do_not_rebuild_evicted_unchanged_history() {
         Some(&snapshot.items),
         Some(grid),
     )
-    .unwrap();
+    .expect("skipped publications do not rebuild evicted unchanged history: the extract_visual_range_index fixture operation uses valid inputs");
     assert!(copied.contains("row-129 中文🙂"));
     assert!(copied.contains("changed in skipped generation"));
     assert!(copied.contains("latest 中文🙂"));
@@ -159,7 +168,7 @@ fn cold_history_layout_changes_match_fresh_height_and_semantic_copy() {
         );
         assert_eq!(current.total_visual(), expected.total_visual());
         assert_eq!(current.total_logical(), expected.total_logical());
-        let copied = extract_visual_range_index(
+        let copied = crate::kit::message_area::selection::extract_visual_range_index(
             &current,
             (0, 0),
             (current.total_visual().saturating_sub(1), 80),
@@ -167,7 +176,7 @@ fn cold_history_layout_changes_match_fresh_height_and_semantic_copy() {
             Some(&snapshot.items),
             Some(grid),
         );
-        let expected_copy = extract_visual_range_index(
+        let expected_copy = crate::kit::message_area::selection::extract_visual_range_index(
             &expected,
             (0, 0),
             (expected.total_visual().saturating_sub(1), 80),
@@ -176,7 +185,7 @@ fn cold_history_layout_changes_match_fresh_height_and_semantic_copy() {
             Some(grid),
         );
         assert_eq!(copied, expected_copy);
-        assert!(copied.unwrap().contains("布局 中文🙂"));
+        assert!(copied.expect("cold history layout changes match fresh height and semantic copy: the extract_visual_range_index fixture operation uses valid inputs").contains("布局 中文🙂"));
     }
 }
 
@@ -226,7 +235,7 @@ fn immutable_render_snapshot_allows_publication_before_derivation() {
             )));
         push_view_models(&mut bridge);
     });
-    writer.join().unwrap();
+    writer.join().expect("immutable render snapshot allows publication before derivation: the join fixture operation uses valid inputs");
     let (current, current_publication) = read_render_snapshot();
     assert_eq!(captured.generation, publication.generation);
     assert_eq!(captured.items.len(), 127);
@@ -323,7 +332,7 @@ fn local_publication_and_same_length_replacement_keep_old_version() {
         12,
         0,
     );
-    let old_text = old.materialize(127).unwrap().line(0).unwrap().to_string();
+    let old_text = old.materialize(127).expect("local publication and same length replacement keep old version: fixture must contain the requested entry").line(0).expect("local publication and same length replacement keep old version: fixture must contain the requested entry").to_string();
     snapshot.items.set(
         127,
         TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("replacement".into())),
@@ -349,15 +358,15 @@ fn local_publication_and_same_length_replacement_keep_old_version() {
     );
     assert_eq!(transcript.scanned_slots, 1);
     assert_eq!(
-        old.materialize(127).unwrap().line(0).unwrap().to_string(),
+        old.materialize(127).expect("local publication and same length replacement keep old version: the materialize fixture operation uses valid inputs").line(0).expect("local publication and same length replacement keep old version: the fixture collection must contain the expected entry").to_string(),
         old_text
     );
     assert!(
         current
             .materialize(127)
-            .unwrap()
+            .expect("local publication and same length replacement keep old version: the materialize fixture operation uses valid inputs")
             .line(0)
-            .unwrap()
+            .expect("local publication and same length replacement keep old version: the fixture collection must contain the expected entry")
             .to_string()
             .contains("replacement")
     );
@@ -472,7 +481,7 @@ fn bridge_publication_after_local_fold_updates_resident_and_appended_entries() {
             0,
         );
         assert_eq!(index.slot_count(), published.items.len());
-        let copied = extract_visual_range_index(
+        let copied = crate::kit::message_area::selection::extract_visual_range_index(
             &index,
             (0, 0),
             (index.total_visual().saturating_sub(1), 80),
@@ -521,9 +530,9 @@ fn eviction_releases_old_frame_payload_and_cold_unicode_copy_matches_warm() {
         4,
         0,
     );
-    let old_lines = Arc::downgrade(caches[0].lines.as_ref().unwrap());
+    let old_lines = Arc::downgrade(caches[0].lines.as_ref().expect("eviction releases old frame payload and cold unicode copy matches warm: fixture must have the expected variant"));
     let end = index.total_visual().saturating_sub(1);
-    let warm = extract_visual_range_index(
+    let warm = crate::kit::message_area::selection::extract_visual_range_index(
         &index,
         (0, 0),
         (end, 60),
@@ -538,7 +547,7 @@ fn eviction_releases_old_frame_payload_and_cold_unicode_copy_matches_warm() {
     );
     assert_eq!(transcript.retained_bytes, 0);
     assert!(caches[0].wrap_map.is_empty());
-    let cold = extract_visual_range_index(
+    let cold = crate::kit::message_area::selection::extract_visual_range_index(
         &index,
         (0, 0),
         (end, 60),
@@ -837,26 +846,26 @@ fn zone_transition_matrix_skips_zero_line_entries() {
 
     // 首个 entry 起点即过程区 → None（不画悬空台阶）
     let items = im::Vector::from(vec![tool_entry("Read")]);
-    assert_eq!(zone_transition(&items, 0), ZoneTransition::None);
+    assert_eq!(super::zone_transition(&items, 0), ZoneTransition::None);
 
     // 文本区 → 过程区 → 过程区：进入处台阶（线色随上方 user 文本），区内接续
     let items = im::Vector::from(vec![user(), tool_entry("Read"), tool_entry("Grep")]);
     assert_eq!(
-        zone_transition(&items, 1),
+        super::zone_transition(&items, 1),
         ZoneTransition::EnterProcess(TextLineSource::User)
     );
-    assert_eq!(zone_transition(&items, 2), ZoneTransition::None);
+    assert_eq!(super::zone_transition(&items, 2), ZoneTransition::None);
 
     // 过程区 → 文本区：长正文退出台阶（线色随下方 assistant 正文）
     let items = im::Vector::from(vec![tool_entry("Read"), long_answer()]);
     assert_eq!(
-        zone_transition(&items, 1),
+        super::zone_transition(&items, 1),
         ZoneTransition::ExitProcess(TextLineSource::Assistant)
     );
 
     // 短回复终点仍在过程区：与前置过程 entry 接续，不画退出台阶
     let items = im::Vector::from(vec![tool_entry("Read"), brief_answer()]);
-    assert_eq!(zone_transition(&items, 1), ZoneTransition::None);
+    assert_eq!(super::zone_transition(&items, 1), ZoneTransition::None);
 
     // 0 行 entry 夹在中间：不参与相邻判定，跨过它看前一个产出行 entry
     let items = im::Vector::from(vec![
@@ -865,24 +874,24 @@ fn zone_transition_matrix_skips_zero_line_entries() {
         tool_entry("Read"),
     ]);
     assert_eq!(
-        zone_transition(&items, 2),
+        super::zone_transition(&items, 2),
         ZoneTransition::EnterProcess(TextLineSource::User)
     );
 
     // 纯 reasoning 气泡（起点过程 / 终点过程）→ 后接过程 entry 不画台阶
     let items = im::Vector::from(vec![user(), reasoning_only(), tool_entry("Read")]);
-    assert_eq!(zone_transition(&items, 2), ZoneTransition::None);
+    assert_eq!(super::zone_transition(&items, 2), ZoneTransition::None);
 
     // 长正文气泡终点在文本区 → 后接过程 entry 画进入台阶（线色随上方 assistant 正文）
     let items = im::Vector::from(vec![user(), long_answer(), tool_entry("Read")]);
     assert_eq!(
-        zone_transition(&items, 2),
+        super::zone_transition(&items, 2),
         ZoneTransition::EnterProcess(TextLineSource::Assistant)
     );
 
     // 短回复气泡终点仍在过程区 → 后接过程 entry 接续，不画进入台阶
     let items = im::Vector::from(vec![user(), brief_answer(), tool_entry("Read")]);
-    assert_eq!(zone_transition(&items, 2), ZoneTransition::None);
+    assert_eq!(super::zone_transition(&items, 2), ZoneTransition::None);
 
     // turn 边界 Divider（文本区装饰）：进出两向台阶线色都随它自身（text.secondary）
     let divider = || {
@@ -893,12 +902,12 @@ fn zone_transition_matrix_skips_zero_line_entries() {
     };
     let items = im::Vector::from(vec![tool_entry("Read"), divider()]);
     assert_eq!(
-        zone_transition(&items, 1),
+        super::zone_transition(&items, 1),
         ZoneTransition::ExitProcess(TextLineSource::Divider)
     );
     let items = im::Vector::from(vec![divider(), tool_entry("Read")]);
     assert_eq!(
-        zone_transition(&items, 1),
+        super::zone_transition(&items, 1),
         ZoneTransition::EnterProcess(TextLineSource::Divider)
     );
 }

@@ -37,7 +37,8 @@ fn project_message_refs(messages: &[&BaseMessage]) -> Vec<BaseMessage> {
     let mut latest_declarations: BTreeMap<&str, usize> = BTreeMap::new();
     let mut result_owners: BTreeMap<usize, usize> = BTreeMap::new();
     let mut batch_results: BTreeMap<usize, BTreeMap<&str, usize>> = BTreeMap::new();
-    for (index, message) in messages.iter().enumerate() {
+    let enumerated_message = messages.iter().enumerate();
+    for (index, message) in enumerated_message {
         if message.has_tool_calls() {
             for call in message.tool_calls() {
                 latest_declarations.insert(call.id.as_str(), index);

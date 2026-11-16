@@ -6,14 +6,13 @@
 //! 本模块只读取句柄；写入与保存边界见 `actions`。
 
 use crate::i18n;
-use crate::kit::atoms::{PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE, TUI_CONFIG_HANDLE};
+
 use peri_acp_types::beta_flags::BETA_FLAGS;
 use peri_acp_types::permission::PermissionMode;
 use peri_theme::theme::ThemeDefinition;
-use ratatui_kit::ratatui::{
-    style::Style,
-    text::{Line, Span},
-};
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
 
 // ---------------------------------------------------------------------------
 // 行类型与基础行表
@@ -163,21 +162,24 @@ pub(super) fn build_row_line(
                         Span::styled(cursor_mark, Style::new().fg(theme.component.panel.title)),
                         Span::styled(format!("{:<22}", i18n::tr(label)), label_style),
                     ];
-                    for (j, opt) in options.iter().enumerate() {
-                        let label = cycle_display_label(opt);
-                        if j == idx {
-                            spans.push(Span::styled(
-                                format!("[{}]", label),
-                                Style::new().fg(theme.semantic.status.success).bold(),
-                            ));
-                        } else {
-                            spans.push(Span::styled(
-                                format!(" {}", label),
-                                Style::new().fg(theme.semantic.text.muted),
-                            ));
-                        }
-                        if j < options.len() - 1 {
-                            spans.push(Span::styled(" ", Style::new()));
+                    {
+                        let iteration_items = options.iter().enumerate();
+                        for (j, opt) in iteration_items {
+                            let label = cycle_display_label(opt);
+                            if j == idx {
+                                spans.push(Span::styled(
+                                    format!("[{}]", label),
+                                    Style::new().fg(theme.semantic.status.success).bold(),
+                                ));
+                            } else {
+                                spans.push(Span::styled(
+                                    format!(" {}", label),
+                                    Style::new().fg(theme.semantic.text.muted),
+                                ));
+                            }
+                            if j < options.len() - 1 {
+                                spans.push(Span::styled(" ", Style::new()));
+                            }
                         }
                     }
                     Line::from(spans)
@@ -355,6 +357,7 @@ pub(super) fn parse_permission_mode(s: &str) -> Option<PermissionMode> {
     }
 }
 
+#[must_use]
 pub(super) fn permission_mode_label(m: PermissionMode) -> &'static str {
     match m {
         PermissionMode::Default => "default",
@@ -363,3 +366,9 @@ pub(super) fn permission_mode_label(m: PermissionMode) -> &'static str {
         PermissionMode::Bypass => "bypass",
     }
 }
+
+use crate::kit::atoms::PERI_CONFIG_HANDLE;
+
+use crate::kit::atoms::PERMISSION_MODE_HANDLE;
+
+use crate::kit::atoms::TUI_CONFIG_HANDLE;

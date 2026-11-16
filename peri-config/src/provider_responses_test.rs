@@ -1,4 +1,11 @@
-use super::*;
+use super::BTreeMap;
+use super::PeriConfig;
+use super::ProviderAuthConfig;
+use super::ProviderConfig;
+use super::ProviderError;
+use super::ResolvedProvider;
+use super::ResponsesAuthentication;
+use super::DEFAULT_RESPONSES_URL;
 use serde_json::json;
 
 fn subscription_store() -> std::path::PathBuf {
@@ -27,7 +34,7 @@ fn test_responses_profile_selection_owns_model_capacity_and_parameters() {
         max_tokens,
         endpoint,
         ..
-    }) = try_resolve_for_alias(&settings, "haiku").unwrap()
+    }) = super::try_resolve_for_alias(&settings, "haiku").unwrap()
     else {
         panic!("应选择 Responses");
     };
@@ -56,7 +63,7 @@ fn test_subscription_reference_roundtrips_without_api_key() {
     let decoded: PeriConfig = serde_json::from_value(encoded).unwrap();
     assert_eq!(decoded, settings);
     assert!(
-        matches!(try_resolve(&decoded, &BTreeMap::new()).unwrap(), Some(
+        matches!(super::try_resolve(&decoded, &BTreeMap::new()).unwrap(), Some(
         ResolvedProvider::Responses {auth: ResponsesAuthentication::ChatGptPlan {account, ..}, ..}
     ) if account == "work")
     );
@@ -72,7 +79,7 @@ fn test_subscription_never_falls_back_to_configured_api_key() {
         client_id: "issued-client-test".into(),
     });
     assert!(matches!(
-        try_resolve(&settings, &BTreeMap::new()),
+        super::try_resolve(&settings, &BTreeMap::new()),
         Err(ProviderError::InvalidSubscriptionReference)
     ));
 }
@@ -83,12 +90,12 @@ fn test_responses_requires_explicit_capacity_even_with_legacy_1m_flag() {
     settings.config.profiles.opus.context_window = None;
     settings.config.profiles.opus.context_1m = true;
     assert!(matches!(
-        try_resolve(&settings, &BTreeMap::new()),
+        super::try_resolve(&settings, &BTreeMap::new()),
         Err(ProviderError::MissingModelCapacity)
     ));
     settings.config.profiles.opus.context_window = Some(0);
     assert!(matches!(
-        try_resolve(&settings, &BTreeMap::new()),
+        super::try_resolve(&settings, &BTreeMap::new()),
         Err(ProviderError::MissingModelCapacity)
     ));
 }
@@ -108,7 +115,7 @@ fn test_known_chatgpt_plan_models_default_to_one_million() {
     for model in ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna", "gpt-6-astra"] {
         settings.config.providers[0].models.opus = model.into();
         assert!(matches!(
-            try_resolve(&settings, &BTreeMap::new()).unwrap(),
+            super::try_resolve(&settings, &BTreeMap::new()).unwrap(),
             Some(ResolvedProvider::Responses {
                 context_window: 1_000_000,
                 ..
@@ -117,7 +124,7 @@ fn test_known_chatgpt_plan_models_default_to_one_million() {
     }
     settings.config.profiles.opus.context_window = Some(128_000);
     assert!(matches!(
-        try_resolve_for_alias(&settings, "opus").unwrap(),
+        super::try_resolve_for_alias(&settings, "opus").unwrap(),
         Some(ResolvedProvider::Responses {
             context_window: 128_000,
             ..
@@ -125,20 +132,20 @@ fn test_known_chatgpt_plan_models_default_to_one_million() {
     ));
     settings.config.profiles.opus.context_window = Some(0);
     assert!(matches!(
-        try_resolve_for_alias(&settings, "opus"),
+        super::try_resolve_for_alias(&settings, "opus"),
         Err(ProviderError::MissingModelCapacity)
     ));
     settings.config.profiles.opus.context_window = None;
     settings.config.providers[0].models.opus = "unknown-model".into();
     assert!(matches!(
-        try_resolve_for_alias(&settings, "opus"),
+        super::try_resolve_for_alias(&settings, "opus"),
         Err(ProviderError::MissingModelCapacity)
     ));
     settings.config.providers[0].models.opus = "gpt-6.1-sol".into();
     settings.config.providers[0].auth = None;
     settings.config.providers[0].api_key = "fixture-key".into();
     assert!(matches!(
-        try_resolve_for_alias(&settings, "opus"),
+        super::try_resolve_for_alias(&settings, "opus"),
         Err(ProviderError::MissingModelCapacity)
     ));
 }
@@ -148,10 +155,10 @@ fn test_unknown_provider_type_does_not_select_chat_completions() {
     let mut settings = settings();
     settings.config.providers[0].provider_type = "openai_reponses".into();
     assert!(matches!(
-        try_resolve(&settings, &BTreeMap::new()),
+        super::try_resolve(&settings, &BTreeMap::new()),
         Err(ProviderError::UnknownType)
     ));
-    assert_eq!(resolve(&settings, &BTreeMap::new()), None);
+    assert_eq!(super::resolve(&settings, &BTreeMap::new()), None);
 }
 
 #[test]
@@ -159,7 +166,7 @@ fn test_bad_endpoint_does_not_fall_back_to_public_api() {
     let mut settings = settings();
     settings.config.providers[0].base_url = "not-a-url".into();
     assert!(matches!(
-        try_resolve(&settings, &BTreeMap::new()),
+        super::try_resolve(&settings, &BTreeMap::new()),
         Err(ProviderError::InvalidEndpoint)
     ));
 }
@@ -177,7 +184,7 @@ fn test_subscription_cannot_send_credentials_to_custom_endpoint() {
     });
     provider.base_url = "https://example.invalid/v1/responses".into();
     assert!(matches!(
-        try_resolve(&settings, &BTreeMap::new()),
+        super::try_resolve(&settings, &BTreeMap::new()),
         Err(ProviderError::InvalidSubscriptionEndpoint)
     ));
 }
@@ -207,11 +214,11 @@ fn test_snapshot_resolution_tolerates_missing_capacity_on_effective_profile() {
     let mut settings = settings();
     settings.config.profiles.opus.context_window = None;
     assert!(matches!(
-        try_resolve(&settings, &BTreeMap::new()),
+        super::try_resolve(&settings, &BTreeMap::new()),
         Err(ProviderError::MissingModelCapacity)
     ));
     assert_eq!(
-        try_resolve_snapshot(&settings, &BTreeMap::new()).unwrap(),
+        super::try_resolve_snapshot(&settings, &BTreeMap::new()).unwrap(),
         None,
         "未完成绑定只让 provider 不可用，不拒绝配置文档"
     );
@@ -236,7 +243,7 @@ fn test_snapshot_resolution_tolerates_auxiliary_capacity_gap() {
     settings.config.profiles.opus.context_window = None;
     settings.config.profiles.haiku.context_window = None;
 
-    let resolved = try_resolve_snapshot(&settings, &BTreeMap::new()).unwrap();
+    let resolved = super::try_resolve_snapshot(&settings, &BTreeMap::new()).unwrap();
     assert!(
         matches!(resolved, Some(ResolvedProvider::OpenAi { ref model, .. }) if model == "grok-4.6"),
         "生效档位必须仍按自身绑定解析：{resolved:?}"
@@ -253,10 +260,13 @@ fn test_snapshot_resolution_tolerates_capacity_gap_for_environment_selection() {
         ("MODEL_TYPE".to_owned(), "sonnet".to_owned()),
     ]);
     assert!(matches!(
-        try_resolve(&settings, &selection),
+        super::try_resolve(&settings, &selection),
         Err(ProviderError::MissingModelCapacity)
     ));
-    assert_eq!(try_resolve_snapshot(&settings, &selection).unwrap(), None);
+    assert_eq!(
+        super::try_resolve_snapshot(&settings, &selection).unwrap(),
+        None
+    );
 }
 
 /// provider 级错误（缺 API key）即使同时缺容量也必须拒绝持久化，容量缺失不得掩盖它。
@@ -274,7 +284,7 @@ fn test_snapshot_resolution_rejects_auxiliary_provider_error_hidden_by_missing_c
     settings.config.profiles.haiku.context_window = None;
     settings.config.providers[0].api_key.clear();
     assert!(matches!(
-        try_resolve_snapshot(&settings, &BTreeMap::new()),
+        super::try_resolve_snapshot(&settings, &BTreeMap::new()),
         Err(ProviderError::MissingApiKey)
     ));
 }
@@ -286,7 +296,7 @@ fn test_snapshot_resolution_rejects_effective_provider_error() {
     settings.config.profiles.haiku.context_window = None;
     settings.config.providers[0].api_key.clear();
     assert!(matches!(
-        try_resolve_snapshot(&settings, &BTreeMap::new()),
+        super::try_resolve_snapshot(&settings, &BTreeMap::new()),
         Err(ProviderError::MissingApiKey)
     ));
 }
@@ -339,7 +349,7 @@ fn test_snapshot_resolution_rejects_unbound_responses_provider_errors() {
         provider.id = "unbound".into();
         provider.models = Default::default();
         settings.config.providers.push(provider);
-        let result = try_resolve_snapshot(&settings, &BTreeMap::new());
+        let result = super::try_resolve_snapshot(&settings, &BTreeMap::new());
         assert!(
             matches!(&result, Err(error) if std::mem::discriminant(error) == std::mem::discriminant(&expected)),
             "{case}: {result:?}"
@@ -357,7 +367,7 @@ fn test_snapshot_resolution_rejects_unbound_non_responses_provider_errors() {
         ..Default::default()
     });
     assert!(matches!(
-        try_resolve_snapshot(&settings, &BTreeMap::new()),
+        super::try_resolve_snapshot(&settings, &BTreeMap::new()),
         Err(ProviderError::UnknownType)
     ));
 
@@ -365,7 +375,7 @@ fn test_snapshot_resolution_rejects_unbound_non_responses_provider_errors() {
     unbound.provider_type = "openai".into();
     unbound.auth = Some(ProviderAuthConfig::ApiKey);
     assert!(matches!(
-        try_resolve_snapshot(&settings, &BTreeMap::new()),
+        super::try_resolve_snapshot(&settings, &BTreeMap::new()),
         Err(ProviderError::UnexpectedAuth)
     ));
 }
@@ -378,7 +388,7 @@ fn test_snapshot_resolution_accepts_valid_unbound_responses_provider() {
     provider.models = Default::default();
     settings.config.providers.push(provider);
     assert!(matches!(
-        try_resolve_snapshot(&settings, &BTreeMap::new()),
+        super::try_resolve_snapshot(&settings, &BTreeMap::new()),
         Ok(Some(ResolvedProvider::Responses { .. }))
     ));
 }
@@ -389,13 +399,13 @@ fn test_snapshot_resolution_accepts_valid_unbound_responses_provider() {
 fn test_auxiliary_profile_missing_capacity_does_not_reject_snapshot_resolution() {
     let mut settings = settings();
     settings.config.profiles.haiku.context_window = None;
-    let resolved = try_resolve(&settings, &BTreeMap::new()).unwrap();
+    let resolved = super::try_resolve(&settings, &BTreeMap::new()).unwrap();
     assert!(resolved.is_some(), "当前生效档位仍应解析成功");
 
     settings.config.profiles.opus.context_window = None;
     settings.config.active_alias = "opus".into();
     assert!(matches!(
-        try_resolve(&settings, &BTreeMap::new()),
+        super::try_resolve(&settings, &BTreeMap::new()),
         Err(ProviderError::MissingModelCapacity)
     ));
 }
@@ -415,7 +425,7 @@ fn test_auxiliary_provider_level_error_still_rejects_snapshot_resolution() {
     settings.config.profiles.opus.provider = "other".into();
     settings.config.providers[0].api_key.clear();
     assert!(matches!(
-        try_resolve(&settings, &BTreeMap::new()),
+        super::try_resolve(&settings, &BTreeMap::new()),
         Err(ProviderError::MissingApiKey)
     ));
 }
@@ -425,7 +435,7 @@ fn test_missing_responses_api_key_is_an_error_not_a_factory_fallback() {
     let mut settings = settings();
     settings.config.providers[0].api_key.clear();
     assert!(matches!(
-        try_resolve(&settings, &BTreeMap::new()),
+        super::try_resolve(&settings, &BTreeMap::new()),
         Err(ProviderError::MissingApiKey)
     ));
 }
@@ -433,7 +443,7 @@ fn test_missing_responses_api_key_is_an_error_not_a_factory_fallback() {
 #[test]
 fn provider_level_responses_validation_is_reusable_without_profiles() {
     let settings = settings();
-    let access = validate_responses_provider(&settings.config.providers[0]).unwrap();
+    let access = super::validate_responses_provider(&settings.config.providers[0]).unwrap();
     assert_eq!(access.endpoint.as_str(), DEFAULT_RESPONSES_URL);
     assert_eq!(
         access.auth,
@@ -445,14 +455,14 @@ fn provider_level_responses_validation_is_reusable_without_profiles() {
     let mut missing_key = settings.config.providers[0].clone();
     missing_key.api_key.clear();
     assert!(matches!(
-        validate_responses_provider(&missing_key),
+        super::validate_responses_provider(&missing_key),
         Err(ProviderError::MissingApiKey)
     ));
 
     let mut bad_endpoint = settings.config.providers[0].clone();
     bad_endpoint.base_url = "not-a-url".into();
     assert!(matches!(
-        validate_responses_provider(&bad_endpoint),
+        super::validate_responses_provider(&bad_endpoint),
         Err(ProviderError::InvalidEndpoint)
     ));
 }
@@ -468,7 +478,7 @@ fn provider_level_subscription_validation_matches_resolver_contract() {
         subject: "subject-test".into(),
         client_id: "issued-client-test".into(),
     });
-    let access = validate_responses_provider(&provider).unwrap();
+    let access = super::validate_responses_provider(&provider).unwrap();
     assert!(matches!(
         access.auth,
         ResponsesAuthentication::ChatGptPlan { .. }
@@ -479,14 +489,14 @@ fn provider_level_subscription_validation_matches_resolver_contract() {
         *store = "relative/store".into();
     }
     assert!(matches!(
-        validate_responses_provider(&relative_store),
+        super::validate_responses_provider(&relative_store),
         Err(ProviderError::InvalidSubscriptionReference)
     ));
 
     let mut custom_endpoint = provider;
     custom_endpoint.base_url = "https://example.invalid/v1/responses".into();
     assert!(matches!(
-        validate_responses_provider(&custom_endpoint),
+        super::validate_responses_provider(&custom_endpoint),
         Err(ProviderError::InvalidSubscriptionEndpoint)
     ));
 }
@@ -523,9 +533,9 @@ fn subscription_account_reference_obeys_shared_boundaries() {
         {
             *target = account;
         }
-        let result = validate_responses_provider(&settings.config.providers[0]);
-        let runtime = try_resolve(&settings, &BTreeMap::new());
-        let snapshot = try_resolve_snapshot(&settings, &BTreeMap::new());
+        let result = super::validate_responses_provider(&settings.config.providers[0]);
+        let runtime = super::try_resolve(&settings, &BTreeMap::new());
+        let snapshot = super::try_resolve_snapshot(&settings, &BTreeMap::new());
         if accepted {
             assert!(result.is_ok());
             assert!(matches!(runtime, Ok(Some(_))));
@@ -556,17 +566,23 @@ fn resolution_policies_differ_only_at_unbound_and_effective_capacity_boundaries(
         provider_type: "unknown".into(),
         ..Default::default()
     });
-    assert!(matches!(try_resolve(&settings, &environment), Ok(Some(_))));
     assert!(matches!(
-        try_resolve_snapshot(&settings, &environment),
+        super::try_resolve(&settings, &environment),
+        Ok(Some(_))
+    ));
+    assert!(matches!(
+        super::try_resolve_snapshot(&settings, &environment),
         Err(ProviderError::UnknownType)
     ));
     settings.config.providers.pop();
 
     settings.config.profiles.haiku.context_window = None;
-    assert!(matches!(try_resolve(&settings, &environment), Ok(Some(_))));
     assert!(matches!(
-        try_resolve_snapshot(&settings, &environment),
+        super::try_resolve(&settings, &environment),
+        Ok(Some(_))
+    ));
+    assert!(matches!(
+        super::try_resolve_snapshot(&settings, &environment),
         Ok(Some(_))
     ));
     let mut bad_auxiliary = settings.config.providers[0].clone();
@@ -575,32 +591,32 @@ fn resolution_policies_differ_only_at_unbound_and_effective_capacity_boundaries(
     settings.config.providers.push(bad_auxiliary);
     settings.config.profiles.haiku.provider = "bad-auxiliary".into();
     assert!(matches!(
-        try_resolve(&settings, &environment),
+        super::try_resolve(&settings, &environment),
         Err(ProviderError::MissingApiKey)
     ));
     assert!(matches!(
-        try_resolve_snapshot(&settings, &environment),
+        super::try_resolve_snapshot(&settings, &environment),
         Err(ProviderError::MissingApiKey)
     ));
     settings.config.providers.pop();
     settings.config.profiles.haiku.provider = "responses".into();
     settings.config.profiles.opus.context_window = None;
     assert!(matches!(
-        try_resolve(&settings, &environment),
+        super::try_resolve(&settings, &environment),
         Err(ProviderError::MissingModelCapacity)
     ));
     assert!(matches!(
-        try_resolve_snapshot(&settings, &environment),
+        super::try_resolve_snapshot(&settings, &environment),
         Ok(None)
     ));
 
     settings.config.providers[0].api_key.clear();
     assert!(matches!(
-        try_resolve(&settings, &environment),
+        super::try_resolve(&settings, &environment),
         Err(ProviderError::MissingApiKey)
     ));
     assert!(matches!(
-        try_resolve_snapshot(&settings, &environment),
+        super::try_resolve_snapshot(&settings, &environment),
         Err(ProviderError::MissingApiKey)
     ));
 }
@@ -612,9 +628,12 @@ fn missing_environment_model_mapping_still_returns_none_under_both_policies() {
         ("MODEL_PROVIDER".to_owned(), "responses".to_owned()),
         ("MODEL_TYPE".to_owned(), "sonnet".to_owned()),
     ]);
-    assert!(matches!(try_resolve(&settings, &environment), Ok(None)));
     assert!(matches!(
-        try_resolve_snapshot(&settings, &environment),
+        super::try_resolve(&settings, &environment),
+        Ok(None)
+    ));
+    assert!(matches!(
+        super::try_resolve_snapshot(&settings, &environment),
         Ok(None)
     ));
 }
@@ -622,18 +641,18 @@ fn missing_environment_model_mapping_still_returns_none_under_both_policies() {
 #[test]
 fn provider_level_validation_does_not_change_profile_capacity_contract() {
     let mut settings = settings();
-    let access = validate_responses_provider(&settings.config.providers[0]).unwrap();
+    let access = super::validate_responses_provider(&settings.config.providers[0]).unwrap();
     assert_eq!(access.endpoint.as_str(), DEFAULT_RESPONSES_URL);
 
     // Provider-level validation intentionally ignores profiles; the resolver still owns
     // the profile capacity requirement.
     settings.config.profiles.opus.context_window = Some(0);
     assert!(
-        validate_responses_provider(&settings.config.providers[0]).is_ok(),
+        super::validate_responses_provider(&settings.config.providers[0]).is_ok(),
         "provider-level validation has no profile input"
     );
     assert!(matches!(
-        try_resolve_for_alias(&settings, "opus"),
+        super::try_resolve_for_alias(&settings, "opus"),
         Err(ProviderError::MissingModelCapacity)
     ));
 }

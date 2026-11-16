@@ -1,21 +1,30 @@
 //! Shared cron test fixtures and observations for wave 2 test modules.
 
-use super::*;
-use peri_acp_types::{
-    cron::CronSchedulerPort,
-    event::ExecutorEvent,
-    interaction::{
-        ApprovalDecision, InteractionContext, InteractionResponse, TrustedInteractionOwner,
-        UserInteractionBroker,
-    },
-    ports::McpTaskOwnerPort,
-};
+use crate::host::executor_flow_tests::MockEventSink;
+use crate::host::executor_flow_tests::SessionTaskBindings;
+use crate::host::mcp_v4_wave2::FixtureDirs;
+use crate::host::AcpServerConfig;
+use crate::session::executor::SessionContext;
+use crate::transport::AcpTransport;
+use peri_acp_types::cron::CronSchedulerPort;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::interaction::ApprovalDecision;
+use peri_acp_types::interaction::InteractionContext;
+use peri_acp_types::interaction::InteractionResponse;
+use peri_acp_types::interaction::TrustedInteractionOwner;
+use peri_acp_types::interaction::UserInteractionBroker;
+use peri_acp_types::ports::McpPoolPort;
+use peri_acp_types::ports::McpTaskOwnerPort;
+
 use peri_mcp_cron::{CronScheduler, CronSchedulerPortHandle, CronTrigger};
+use peri_middlewares::mcp::ClientStatus;
+use peri_middlewares::mcp::McpClientPool;
 use peri_model::{
     Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult, ModelStream,
     ModelStreamEvent, StopReason,
 };
 use serde_json::json;
+use std::sync::Arc;
 
 pub(super) async fn collect_triggers(
     triggers: &mut tokio::sync::mpsc::UnboundedReceiver<peri_mcp_cron::CronTrigger>,
@@ -152,7 +161,8 @@ pub(super) struct AssembledHostFixture {
 
 impl AssembledHostFixture {
     pub(super) async fn start(dirs: FixtureDirs, drive_cron_tick: bool) -> Self {
-        let mut cfg = assemble_host_with_tick(&dirs, drive_cron_tick).await;
+        let mut cfg =
+            crate::host::mcp_v4_wave2::assemble_host_with_tick(&dirs, drive_cron_tick).await;
         // 装配产出的唯一 MCP task owner：夹具必须持有到用例结束（task 归属在它手上）。
         let owner = cfg
             .mcp_task_owner
@@ -228,8 +238,8 @@ impl AssembledHostFixture {
 
     pub(super) fn assert_all_ready(&self) {
         for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
-            let expected = declared_tool_names(instance.name);
-            assert_instance_ready(&self.pool, instance.name, &expected);
+            let expected = crate::host::mcp_v4_wave2::declared_tool_names(instance.name);
+            crate::host::mcp_v4_wave2::assert_instance_ready(&self.pool, instance.name, &expected);
         }
     }
 
@@ -458,7 +468,7 @@ impl Model for TurnRecordingModel {
         let mut events = vec![ModelStreamEvent::TextDelta {
             text: end.to_string(),
         }];
-        let response = ModelResponse::new(
+        let response = ModelResponse::try_new(
             ModelMessage::assistant_text(end.to_string()),
             StopReason::EndTurn,
             None,

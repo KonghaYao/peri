@@ -1,8 +1,18 @@
 //! AgentPanel 面板测试：hook 顺序（挂载帧）、cursor 越界收敛与鼠标命中同源。
 
-use super::*;
+use super::AgentEventCtx;
+use super::Event;
+use super::ItemSpan;
+use super::KeyCode;
+use super::Line;
+use super::META_ROWS;
+use super::Rect;
+use super::SERVICE_SNAPSHOT;
+use super::TuiRenderUnit;
+use super::VIEW_MODELS;
+use super::i18n;
+use ratatui_kit::prelude::*;
 
-use crate::kit::atoms::{ServiceSnapshot, ViewModelsSnapshot};
 use crate::kit::tui_render_unit::{TuiCollapsedGroup, TuiSubAgentGroup, TuiUserBubble};
 use ratatui_kit::crossterm::event::{
     KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -20,6 +30,7 @@ const TEST_AREA: Rect = Rect {
     height: 18,
 };
 
+#[must_use]
 fn make_subagent(id: &str, name: &str) -> TuiSubAgentGroup {
     TuiSubAgentGroup {
         instance_id: format!("instance-{id}"),
@@ -40,7 +51,7 @@ fn make_subagent(id: &str, name: &str) -> TuiSubAgentGroup {
 #[test]
 fn test_agent_wrapped_content_fills_scroll_buffer_to_last_row() {
     let lines = vec![ratatui_kit::ratatui::text::Line::from("你好世界abcd")];
-    let content_height = wrapped_content_height(&lines, 5);
+    let content_height = super::wrapped_content_height(&lines, 5);
     let viewport_height = 2u16;
     let bottom_offset = content_height.saturating_sub(viewport_height);
 
@@ -52,7 +63,7 @@ fn test_agent_wrapped_content_fills_scroll_buffer_to_last_row() {
 #[test]
 fn test_collect_subagents_empty_snapshot() {
     let snap = ViewModelsSnapshot::default();
-    assert!(collect_subagents(&snap).is_empty());
+    assert!(super::collect_subagents(&snap).is_empty());
 }
 
 #[test]
@@ -68,7 +79,7 @@ fn test_collect_subagents_only_user_bubbles() {
         })]),
         generation: 0,
     };
-    assert!(collect_subagents(&snap).is_empty());
+    assert!(super::collect_subagents(&snap).is_empty());
 }
 
 #[test]
@@ -81,7 +92,7 @@ fn test_collect_subagents_dedup_across_committed_and_current() {
         ]),
         generation: 0,
     };
-    let result = collect_subagents(&snap);
+    let result = super::collect_subagents(&snap);
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].agent_id, "researcher");
 }
@@ -96,7 +107,7 @@ fn test_collect_subagents_preserves_insertion_order() {
         ]),
         generation: 0,
     };
-    let result = collect_subagents(&snap);
+    let result = super::collect_subagents(&snap);
     let ids: Vec<_> = result.iter().map(|s| s.agent_id.as_str()).collect();
     assert_eq!(ids, vec!["alpha", "beta", "gamma"]);
 }
@@ -118,7 +129,7 @@ fn test_collect_subagents_recurses_into_collapsed_group() {
         items: im::Vector::from(vec![TuiRenderUnit::TuiCollapsedGroup(collapsed)]),
         generation: 0,
     };
-    let result = collect_subagents(&snap);
+    let result = super::collect_subagents(&snap);
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].agent_id, "hidden");
 }
@@ -135,7 +146,7 @@ fn test_collect_subagents_recurses_into_nested_subagent() {
         items: im::Vector::from(vec![TuiRenderUnit::TuiSubAgentGroup(outer)]),
         generation: 0,
     };
-    let result = collect_subagents(&snap);
+    let result = super::collect_subagents(&snap);
     assert_eq!(result.len(), 2);
     assert_eq!(result[0].agent_id, "outer");
     assert_eq!(result[1].agent_id, "inner");
@@ -248,8 +259,8 @@ pub(super) struct MountedPanel {
 impl MountedPanel {
     /// 走真实事件入口：区域取面板实测区域，可选行数与组件同源（元信息行 + SubAgent 行）。
     fn event(&self, event: Event) -> EventResult {
-        let item_count = META_ROWS + collect_subagents(&VIEW_MODELS.state().read()).len();
-        handle_agent_event(
+        let item_count = META_ROWS + super::collect_subagents(&VIEW_MODELS.state().read()).len();
+        super::handle_agent_event(
             event,
             &AgentEventCtx {
                 area: Some(TEST_AREA),
@@ -355,13 +366,16 @@ fn per_line_heights_sum_to_whole_content_height() {
         Line::from("  ----------------------"),
     ];
     let width = 12u16;
-    let sum: u16 = lines.iter().map(|line| line_height(line, width)).sum();
+    let sum: u16 = lines
+        .iter()
+        .map(|line| super::line_height(line, width))
+        .sum();
     assert_eq!(
         sum,
-        wrapped_content_height(&lines, width),
+        super::wrapped_content_height(&lines, width),
         "逐行实测之和必须等于整段实测（ratatui 逐行换行）"
     );
-    assert_eq!(line_height(&Line::from(""), width), 1, "空行占 1 行");
+    assert_eq!(super::line_height(&Line::from(""), width), 1, "空行占 1 行");
 }
 
 /// hook 顺序（TUI-HOOK-001）：空态与非空态在同一实例内逐帧切换，hook 序列必须稳定
@@ -675,3 +689,7 @@ fn click_after_scroll_uses_the_scroll_offset() {
         assert_eq!(*panel.cursor.read(), 3, "滚动偏移必须加回内容行号");
     });
 }
+
+use crate::kit::atoms::ServiceSnapshot;
+
+use crate::kit::atoms::ViewModelsSnapshot;

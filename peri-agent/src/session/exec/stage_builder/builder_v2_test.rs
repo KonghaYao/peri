@@ -1,5 +1,11 @@
-use super::*;
+use crate::agent::stages::StageContext;
+
 use crate::session::FrozenContext;
+use crate::session::Session;
+use crate::tools::BaseTool;
+use parking_lot::RwLock;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[test]
 fn test_v2_context_has_null_llm_by_default() {
@@ -58,7 +64,10 @@ fn test_build_session_tool_view_isolates_disabled_sessions() {
 
     // disabled session：当前链无 Skills/提问工具 → 视图不得含残留条目
     let middleware_tools: Vec<Box<dyn BaseTool>> = vec![];
-    let view = build_session_tool_view(&base, middleware_tools);
+    let view = crate::session::exec::stage_builder::tools::build_session_tool_view(
+        &base,
+        middleware_tools,
+    );
     let view_map = view.read();
     assert!(!view_map.contains_key("SkillTool"), "残留 SkillTool 泄漏");
     assert!(
@@ -77,7 +86,10 @@ fn test_build_session_tool_view_isolates_disabled_sessions() {
         Box::new(NamedTool("SkillTool")),
         Box::new(NamedTool("AskUserQuestion")),
     ];
-    let view = build_session_tool_view(&base, middleware_tools);
+    let view = crate::session::exec::stage_builder::tools::build_session_tool_view(
+        &base,
+        middleware_tools,
+    );
     assert!(view.read().contains_key("SkillTool"));
     assert!(view.read().contains_key("AskUserQuestion"));
 

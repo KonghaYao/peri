@@ -1,20 +1,20 @@
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::Engine as _;
-use peri_acp_types::{
-    mcp_skills::{HandleToken, McpSkillRegistry, ServerDiscoveryState},
-    skills::{SkillMetadata, SkillOrigin},
-};
+use peri_acp_types::mcp_skills::HandleToken;
+use peri_acp_types::mcp_skills::McpSkillRegistry;
+use peri_acp_types::mcp_skills::ServerDiscoveryState;
+use peri_acp_types::skills::SkillMetadata;
+use peri_acp_types::skills::SkillOrigin;
 use peri_agent::tools::BaseTool;
 use thiserror::Error;
 
-use super::client::output_store::format_output;
+use super::client::output_store;
 use super::client::{ClientStatus, McpClientPool};
-use super::skill_discovery::{
-    is_skill_scheme, refresh_entry_and_content, uri_eq_ignore_scheme_case, verify_digest,
-    verify_digest_bytes,
-};
+use super::skill_discovery;
 
 /// 资源读取工具错误
 #[derive(Debug, Error)]
@@ -51,7 +51,18 @@ pub struct McpResourceTool {
     cached_description: String,
 }
 
+impl Debug for McpResourceTool {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpResourceTool")
+            .field("session_id", &self.session_id)
+            .field("cached_description", &self.cached_description)
+            .finish_non_exhaustive()
+    }
+}
+
 impl McpResourceTool {
+    #[must_use]
     pub fn new(client_pool: Arc<McpClientPool>, registry: Arc<McpSkillRegistry>) -> Self {
         let summary = client_pool.resource_summary();
         let cached_description = if summary.is_empty() {
@@ -71,13 +82,14 @@ impl McpResourceTool {
     }
 
     /// 注入会话 id：读不到其他会话声明的 ACP server 的资源。
+    #[must_use]
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
         self
     }
 
     async fn format_recovered_content(&self, content: &str, mime: Option<&str>) -> String {
-        format_output(
+        output_store::format_output(
             Some(&self.client_pool),
             self.session_id.as_deref(),
             format!("[text/{}]\n{content}", mime.unwrap_or("plain")),
@@ -118,7 +130,8 @@ impl McpResourceTool {
             None => return None, // locate_skill_binding 保证 Mcp origin，防御
         };
         let (meta, content, mime) =
-            refresh_entry_and_content(peer, server_name, &entry_uri, request_uri).await?;
+            skill_discovery::refresh_entry_and_content(peer, server_name, &entry_uri, request_uri)
+                .await?;
         // 回写：按 origin.uri 定位原条目并**保留其原 name**（刷新
         // description/content/resources——恢复内容是同一技能的当前快照，
         // 不重跑 disambiguate_names；若直接替换为新条目的 name，会绕过消歧
@@ -209,7 +222,7 @@ impl BaseTool for McpResourceTool {
         // 2. 获取客户端句柄
         let handle = self
             .client_pool
-            .get_client_visible_to(server_name, self.session_id.as_deref())
+            .client_visible_to(server_name, self.session_id.as_deref())
             .ok_or_else(|| ResourceError::ServerNotFound {
                 server: server_name.to_string(),
             })?
@@ -249,7 +262,7 @@ impl BaseTool for McpResourceTool {
                 || self.client_pool.acp_owners.read().get(server_name).cloned() != owner
                 || !self
                     .client_pool
-                    .get_client_visible_to(server_name, self.session_id.as_deref())
+                    .client_visible_to(server_name, self.session_id.as_deref())
                     .is_some_and(|current| {
                         Arc::ptr_eq(&current, &handle)
                             && matches!(current.status, ClientStatus::Connected)
@@ -279,7 +292,7 @@ impl BaseTool for McpResourceTool {
         //      （新条目可能已列出该 uri）；
         //    - Listed → 读后逐内容 digest 校验，失败走热更新恢复。
         let entries = self.registry.skills_of(server_name);
-        let binding = if is_skill_scheme(uri) {
+        let binding = if skill_discovery::is_skill_scheme(uri) {
             locate_skill_binding(&entries, uri)
         } else {
             None
@@ -334,7 +347,7 @@ impl BaseTool for McpResourceTool {
                                 rmcp::model::ResourceContents::TextResourceContents {
                                     text,
                                     ..
-                                } => verify_digest(text, digest),
+                                } => skill_discovery::verify_digest(text, digest),
                                 rmcp::model::ResourceContents::BlobResourceContents {
                                     blob,
                                     ..
@@ -390,7 +403,7 @@ impl BaseTool for McpResourceTool {
                     }
                 }
                 let formatted = output.join("\n");
-                Ok(format_output(
+                Ok(output_store::format_output(
                     Some(&self.client_pool),
                     self.session_id.as_deref(),
                     formatted,
@@ -412,9 +425,9 @@ impl BaseTool for McpResourceTool {
 
 /// skill:// 完整性绑定的定位结果（[`locate_skill_binding`]）。
 #[derive(Debug, Copy, Clone)]
-enum SkillBinding<'a> {
+enum SkillBinding<'digest> {
     /// uri 已列入条目 resources → 期望 digest（读后 sha256 校验）
-    Listed(&'a str),
+    Listed(&'digest str),
     /// 条目覆盖该 uri 但未列入 resources → 验证失败（规范 MUST）
     Unlisted,
     /// 条目 resources 为空（动态生成技能，规范 MAY 省略）→ 不校验
@@ -426,7 +439,7 @@ enum SkillBinding<'a> {
 /// "skill://ab/..."）。scheme 大小写不敏感比较复用 skill_discovery 的
 /// `uri_eq_ignore_scheme_case`（读取面与发现侧恢复路径共用）。
 fn uri_under_skill_root(uri: &str, root: &str) -> bool {
-    if uri_eq_ignore_scheme_case(uri, root) {
+    if skill_discovery::uri_eq_ignore_scheme_case(uri, root) {
         return true;
     }
     uri.len() > root.len()
@@ -447,14 +460,14 @@ fn uri_under_skill_root(uri: &str, root: &str) -> bool {
 /// - 多条目覆盖（嵌套技能：祖先与子孙 SKILL.md 的根都包含该 uri）→ 取
 ///   root **最长**的（更具体的条目；根边界以 "/" 为界——"skill://a" 不
 ///   覆盖 "skill://ab/..."）。
-fn locate_skill_binding<'a>(
-    entries: &'a [SkillMetadata],
+fn locate_skill_binding<'digest>(
+    entries: &'digest [SkillMetadata],
     uri: &str,
-) -> Option<(&'a SkillMetadata, SkillBinding<'a>)> {
-    if !is_skill_scheme(uri) {
+) -> Option<(&'digest SkillMetadata, SkillBinding<'digest>)> {
+    if !skill_discovery::is_skill_scheme(uri) {
         return None;
     }
-    let mut best: Option<(&'a SkillMetadata, usize)> = None;
+    let mut best: Option<(&'digest SkillMetadata, usize)> = None;
     for entry in entries {
         let Some(SkillOrigin::Mcp { uri: entry_uri, .. }) = &entry.origin else {
             continue;
@@ -474,7 +487,7 @@ fn locate_skill_binding<'a>(
     } else if let Some(r) = entry
         .resources
         .iter()
-        .find(|r| uri_eq_ignore_scheme_case(&r.uri, uri))
+        .find(|r| skill_discovery::uri_eq_ignore_scheme_case(&r.uri, uri))
     {
         SkillBinding::Listed(r.digest.as_str())
     } else {
@@ -488,7 +501,7 @@ fn locate_skill_binding<'a>(
 /// 字节一致）。非法 base64 → 无法校验，视为不匹配（MUST NOT use）。
 fn verify_blob_digest(blob: &str, expected: &str) -> bool {
     match base64::engine::general_purpose::STANDARD.decode(blob) {
-        Ok(bytes) => verify_digest_bytes(&bytes, expected),
+        Ok(bytes) => skill_discovery::verify_digest_bytes(&bytes, expected),
         Err(_) => false,
     }
 }

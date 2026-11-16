@@ -1,9 +1,10 @@
 //! Streaming event handlers — TextChunk, ReasoningChunk.
 
-use super::*;
-use crate::kit::atoms::BG_AGENT_IDS;
-use crate::kit::bg_task_live::{append_bg_reasoning_chunk, append_bg_text_chunk};
-use crate::kit::stream_data::{TuiReasoningChunk, TuiTextChunk};
+use super::BridgeState;
+use super::PublicationIntent;
+use super::SessionPhase;
+use super::StreamingMode;
+use super::live_tool_links;
 
 /// 路由失败的 chunk 是否属于仍在运行的 bg subagent（BG_AGENT_IDS 已注册）。
 ///
@@ -54,7 +55,7 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) -> P
             .as_deref()
             .is_some_and(|id| BG_AGENT_IDS.state().read().contains(id));
         if is_bg && let Some(agent_id) = tc.agent_id.as_deref() {
-            append_bg_text_chunk(agent_id, tc);
+            crate::kit::bg_task_live::append_bg_text_chunk(agent_id, tc);
         }
         if !is_bg {
             state.phase = SessionPhase::PromptRunning;
@@ -65,7 +66,7 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) -> P
         .is_some_and(is_bg_agent_without_group)
     {
         if let Some(agent_id) = tc.agent_id.as_deref() {
-            append_bg_text_chunk(agent_id, tc);
+            crate::kit::bg_task_live::append_bg_text_chunk(agent_id, tc);
         }
         state.variant = 1;
         super::render::push_acp_state(state);
@@ -117,7 +118,7 @@ pub(super) fn handle_reasoning_chunk(
             .as_deref()
             .is_some_and(|id| BG_AGENT_IDS.state().read().contains(id));
         if is_bg && let Some(agent_id) = rc.agent_id.as_deref() {
-            append_bg_reasoning_chunk(agent_id, rc);
+            crate::kit::bg_task_live::append_bg_reasoning_chunk(agent_id, rc);
         }
         if !is_bg {
             state.phase = SessionPhase::PromptRunning;
@@ -128,7 +129,7 @@ pub(super) fn handle_reasoning_chunk(
         .is_some_and(is_bg_agent_without_group)
     {
         if let Some(agent_id) = rc.agent_id.as_deref() {
-            append_bg_reasoning_chunk(agent_id, rc);
+            crate::kit::bg_task_live::append_bg_reasoning_chunk(agent_id, rc);
         }
         state.variant = 1;
         super::render::push_acp_state(state);
@@ -185,7 +186,7 @@ fn stream_intent(
     reasoning: bool,
     chunk_len: usize,
 ) -> PublicationIntent {
-    let mode = current_streaming_mode();
+    let mode = super::current_streaming_mode();
     if mode != StreamingMode::Block {
         state.last_pushed_text_len = 0;
         state.last_pushed_reasoning_len = 0;
@@ -215,7 +216,11 @@ fn stream_intent(
             } else {
                 (&state.current_turn.text, &mut state.last_pushed_text_len)
             };
-            if has_md_block_boundary_since(text, *pushed, text.len().saturating_sub(chunk_len)) {
+            if super::has_md_block_boundary_since(
+                text,
+                *pushed,
+                text.len().saturating_sub(chunk_len),
+            ) {
                 *pushed = text.len();
                 PublicationIntent::Immediate
             } else {
@@ -224,3 +229,9 @@ fn stream_intent(
         }
     }
 }
+
+use crate::kit::atoms::BG_AGENT_IDS;
+
+use crate::kit::stream_data::TuiReasoningChunk;
+
+use crate::kit::stream_data::TuiTextChunk;

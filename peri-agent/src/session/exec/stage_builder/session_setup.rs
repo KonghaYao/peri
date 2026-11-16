@@ -1,10 +1,11 @@
 //! 主 Session 的冻结数据、持久化与 async owner 装配。
-use super::StageBuildInput;
-use crate::session::{exec::executor::FrozenSessionData, Session};
-use peri_acp_types::{
-    cron::CronSchedulerPort,
-    session::{CronOwner, MessageQueue, SessionInbox},
-};
+use crate::session::exec::executor::FrozenSessionData;
+use crate::session::exec::stage_builder::StageBuildInput;
+use crate::session::Session;
+use peri_acp_types::cron::CronSchedulerPort;
+use peri_acp_types::session::CronOwner;
+use peri_acp_types::session::MessageQueue;
+use peri_acp_types::session::SessionInbox;
 use std::sync::Arc;
 
 pub(super) fn build_session(
@@ -14,7 +15,7 @@ pub(super) fn build_session(
     session_id: &str,
     cancel_arc: &Arc<tokio_util::sync::CancellationToken>,
     shared_queue: &MessageQueue,
-    cron_scheduler: &Option<Arc<dyn CronSchedulerPort>>,
+    cron_scheduler: Option<&Arc<dyn CronSchedulerPort>>,
 ) -> Arc<Session> {
     // 构造 v2 Session（复用外部 cancel token + 会话级共享 MessageQueue）
     let cwd_arc: Arc<str> = Arc::from(cwd);

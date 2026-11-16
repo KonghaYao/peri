@@ -1,10 +1,10 @@
 //! ACP session MCP control and the current pool catalog contract.
-use crate::{
-    plugin::{McpServerConfig, OAuthConfig},
-    tools::BaseTool,
-};
+use crate::plugin::McpServerConfig;
+use crate::plugin::OAuthConfig;
+use crate::tools::BaseTool;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
@@ -29,6 +29,7 @@ pub enum McpControlRequest {
     },
 }
 impl McpControlRequest {
+    #[must_use]
     pub fn session_id(&self) -> &str {
         match self {
             Self::Register { session_id, .. }
@@ -36,6 +37,7 @@ impl McpControlRequest {
             | Self::Stop { session_id, .. } => session_id,
         }
     }
+    #[must_use]
     pub fn server_name(&self) -> &str {
         match self {
             Self::Register { server_name, .. }
@@ -197,6 +199,7 @@ pub struct McpControlError {
     pub message: String,
 }
 impl McpControlError {
+    #[must_use]
     pub fn new(code: i32, kind: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -204,9 +207,11 @@ impl McpControlError {
             message: message.into(),
         }
     }
+    #[must_use]
     pub fn invalid(message: impl Into<String>) -> Self {
         Self::new(-32602, "invalid_request", message)
     }
+    #[must_use]
     pub fn unsupported() -> Self {
         Self::new(-32000, "unsupported", "MCP server control is unavailable")
     }
@@ -219,6 +224,7 @@ pub struct McpServerControl {
     pub unavailable_reason: Option<String>,
 }
 impl McpServerControl {
+    #[must_use]
     pub fn available() -> Self {
         Self {
             restart: true,
@@ -226,6 +232,7 @@ impl McpServerControl {
             unavailable_reason: None,
         }
     }
+    #[must_use]
     pub fn unavailable(reason: impl Into<String>) -> Self {
         Self {
             restart: false,
@@ -239,11 +246,13 @@ impl Default for McpServerControl {
         Self::unavailable("unavailable")
     }
 }
+/// The session's published MCP tool catalog at one generation.
 #[derive(Clone, Default)]
 pub struct SessionMcpCatalogSnapshot {
     pub generation: u64,
     pub tools: Vec<Arc<dyn BaseTool>>,
 }
+/// Reads the published catalog without retaining a mutable registry guard.
 pub trait SessionMcpCatalogPort: Send + Sync {
     fn snapshot(&self) -> Arc<SessionMcpCatalogSnapshot>;
 }

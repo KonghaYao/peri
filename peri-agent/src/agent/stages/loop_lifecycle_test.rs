@@ -1,9 +1,20 @@
 //! 循环完成、取消及 idle 用户消息交接。
-use super::super::*;
+use crate::agent::events::Stage;
+use crate::agent::events::StageStatus;
+
+use crate::agent::events_v2::ObserveEvent;
+use crate::agent::react::ReactLLM;
+
+use crate::agent::stages::context::StageContext;
+use crate::agent::stages::LoopResult;
+use crate::messages::BaseMessage;
 use crate::messages::MessageContent;
 use crate::session::queue::MessageSource;
 use crate::session::store::FrozenContext;
+use crate::session::QueuedMessage;
 use crate::session::Session;
+
+use std::sync::Arc;
 
 /// 构造测试用 StageContext
 fn make_stage_context() -> StageContext {
@@ -51,7 +62,12 @@ impl ReactLLM for InterruptibleReasonLLM {
         _tools: &[&dyn crate::tools::BaseTool],
         _streaming: Option<crate::agent::react::StreamingContext>,
     ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
-        if let Some(entered) = self.entered.lock().unwrap().take() {
+        if let Some(entered) = self
+            .entered
+            .lock()
+            .expect("self entered mutex must remain unpoisoned throughout the test")
+            .take()
+        {
             let _ = entered.send(());
         }
         std::future::pending().await
@@ -77,7 +93,7 @@ async fn test_e2e_final_answer_no_tools() {
         BaseMessage::human(MessageContent::text("do the task")),
     ));
 
-    let result = run_react_loop(ctx.clone(), 10).await;
+    let result = crate::agent::stages::run_react_loop(ctx.clone(), 10).await;
     assert!(
         matches!(result, LoopResult::Completed),
         "expected Completed, got {:?}",
@@ -124,7 +140,9 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
             );
             let entered = self.entered.lock().take();
             if let Some(entered) = entered {
-                entered.send(()).unwrap();
+                entered
+                    .send(())
+                    .expect("entered send test receiver must remain available for this delivery");
                 self.resume.notified().await;
             }
             Ok(crate::agent::react::Reasoning::with_answer("", "完成"))
@@ -135,7 +153,7 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
     let mailbox = UserInputMailbox::new("session".into(), inbox.clone(), Arc::new(|_| {}));
     mailbox
         .attach_external_attempt_sync(context.session.turn.cancel_token.as_ref().clone(), false)
-        .unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let resume = Arc::new(tokio::sync::Notify::new());
     let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -156,11 +174,11 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
         MessageSource::UserInput,
         BaseMessage::human("初始任务"),
     ));
-    let task = tokio::spawn(run_react_loop(context, 3));
+    let task = tokio::spawn(crate::agent::stages::run_react_loop(context, 3));
     tokio::time::timeout(std::time::Duration::from_secs(1), entered_rx)
         .await
         .expect("初始模型调用必须开始")
-        .unwrap();
+        .expect("the expect fixture result is required for this assertion");
     let mut input_ids = Vec::new();
     for text in ["A", "B"] {
         let input_id = uuid::Uuid::now_v7().to_string();
@@ -173,7 +191,7 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
                 content: MessageContent::text(text),
                 original_draft: text.into(),
             })
-            .unwrap();
+            .expect("the enqueue sync fixture result is required for this assertion");
         assert_eq!(receipt.results[0].state, UserInputState::Queued);
         input_ids.push(input_id);
     }
@@ -185,7 +203,7 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
     let result = tokio::time::timeout(std::time::Duration::from_secs(1), task)
         .await
         .expect("已有队列必须在 idle 自动继续，无需再次提交或等待后台结果")
-        .unwrap();
+        .expect("the expect fixture result is required for this assertion");
     assert!(matches!(result, LoopResult::Completed));
     assert_eq!(
         *seen.lock(),
@@ -232,7 +250,7 @@ async fn test_e2e_cancel_before_loop() {
     // 立即 cancel
     ctx.session.turn.cancel_token.cancel();
 
-    let result = run_react_loop(ctx, 10).await;
+    let result = crate::agent::stages::run_react_loop(ctx, 10).await;
     assert!(
         matches!(result, LoopResult::Interrupted),
         "expected Interrupted, got {:?}",
@@ -263,7 +281,8 @@ async fn test_run_react_loop_cancel_during_reason_is_interrupted() {
         BaseMessage::human("cancel while reasoning"),
     ));
     let loop_ctx = ctx.clone();
-    let task = tokio::spawn(async move { run_react_loop(loop_ctx, 10).await });
+    let task =
+        tokio::spawn(async move { crate::agent::stages::run_react_loop(loop_ctx, 10).await });
     entered_rx.await.expect("Reason LLM 必须进入调用");
 
     ctx.session.turn.cancel_token.cancel();
@@ -306,7 +325,7 @@ async fn test_e2e_empty_queue_completes_immediately() {
         .build();
 
     // 不推入 Prompt，直接跑循环（首轮 Receive consumed=0 → 直接退出）
-    let result = run_react_loop(ctx.clone(), 0).await;
+    let result = crate::agent::stages::run_react_loop(ctx.clone(), 0).await;
     assert!(
         matches!(result, LoopResult::Completed),
         "expected Completed, got {:?}",
@@ -338,7 +357,7 @@ async fn idle_suspension_waits_for_render_capacity() {
         turn_id: context.turn_id(),
         agent_id: context.session.agent_id,
     });
-    let running = run_react_loop(context, 1);
+    let running = crate::agent::stages::run_react_loop(context, 1);
     tokio::pin!(running);
     assert!(
         std::future::poll_fn(|cx| {
@@ -347,7 +366,11 @@ async fn idle_suspension_waits_for_render_capacity() {
         .await
     );
     assert!(!bus.health().dirty);
-    handles.render_rx.recv().await.unwrap();
+    handles
+        .render_rx
+        .recv()
+        .await
+        .expect("handles render rx producer must deliver the expected test event before closing");
     assert!(
         std::future::poll_fn(|cx| {
             std::task::Poll::Ready(std::future::Future::poll(running.as_mut(), cx).is_pending())
@@ -362,6 +385,6 @@ async fn idle_suspension_waits_for_render_capacity() {
     cancel.cancel();
     let result = tokio::time::timeout(std::time::Duration::from_secs(1), running)
         .await
-        .unwrap();
+        .expect("the timeout fixture result is required for this assertion");
     assert!(matches!(result, LoopResult::Interrupted));
 }

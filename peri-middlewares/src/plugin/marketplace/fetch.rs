@@ -3,7 +3,7 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use tracing::warn;
 
-use super::{find_marketplace_json, read_manifest_from_path, MarketplaceError};
+use super::MarketplaceError;
 use crate::plugin::types::MarketplaceManifest;
 
 pub(crate) async fn fetch_github(
@@ -65,11 +65,12 @@ pub(crate) async fn fetch_git(
         }
     }
 
-    let manifest_path =
-        find_marketplace_json(&cache_dir).ok_or_else(|| MarketplaceError::ManifestNotFound {
+    let manifest_path = super::find_marketplace_json(&cache_dir).ok_or_else(|| {
+        MarketplaceError::ManifestNotFound {
             path: cache_dir.display().to_string(),
-        })?;
-    read_manifest_from_path(&manifest_path)
+        }
+    })?;
+    super::read_manifest_from_path(&manifest_path)
 }
 
 #[cfg(target_os = "emscripten")]
@@ -113,7 +114,7 @@ pub(crate) async fn fetch_url(
 
     match result {
         Ok(response) => match response.status().as_u16() {
-            304 => read_manifest_from_path(&cache_file),
+            304 => super::read_manifest_from_path(&cache_file),
             200 => {
                 let body = response
                     .text()
@@ -131,7 +132,7 @@ pub(crate) async fn fetch_url(
         Err(e) => {
             if cache_file.exists() {
                 warn!("URL 拉取失败 '{}', 回退到缓存: {}", url, e);
-                read_manifest_from_path(&cache_file)
+                super::read_manifest_from_path(&cache_file)
             } else {
                 Err(MarketplaceError::HttpFailed(e.to_string()))
             }
@@ -140,15 +141,15 @@ pub(crate) async fn fetch_url(
 }
 
 pub(crate) fn read_file(path: &Path) -> Result<MarketplaceManifest, MarketplaceError> {
-    read_manifest_from_path(path)
+    super::read_manifest_from_path(path)
 }
 
 pub(crate) fn read_directory(path: &Path) -> Result<MarketplaceManifest, MarketplaceError> {
     let manifest_path =
-        find_marketplace_json(path).ok_or_else(|| MarketplaceError::ManifestNotFound {
+        super::find_marketplace_json(path).ok_or_else(|| MarketplaceError::ManifestNotFound {
             path: path.display().to_string(),
         })?;
-    read_manifest_from_path(&manifest_path)
+    super::read_manifest_from_path(&manifest_path)
 }
 
 #[cfg(not(target_os = "emscripten"))]
@@ -159,8 +160,8 @@ pub(crate) async fn fetch_npm(
 ) -> Result<MarketplaceManifest, MarketplaceError> {
     let cache_dir = cache_base.join(name);
 
-    if let Some(manifest_path) = find_marketplace_json(&cache_dir) {
-        return read_manifest_from_path(&manifest_path);
+    if let Some(manifest_path) = super::find_marketplace_json(&cache_dir) {
+        return super::read_manifest_from_path(&manifest_path);
     }
 
     let tmp_dir = std::env::temp_dir().join(format!("npm-pack-{package}-{}", uuid::Uuid::new_v4()));
@@ -209,11 +210,12 @@ pub(crate) async fn fetch_npm(
     std::fs::create_dir_all(&cache_dir)?;
     archive.unpack(&cache_dir)?;
 
-    let manifest_path =
-        find_marketplace_json(&cache_dir).ok_or_else(|| MarketplaceError::ManifestNotFound {
+    let manifest_path = super::find_marketplace_json(&cache_dir).ok_or_else(|| {
+        MarketplaceError::ManifestNotFound {
             path: cache_dir.display().to_string(),
-        })?;
-    read_manifest_from_path(&manifest_path)
+        }
+    })?;
+    super::read_manifest_from_path(&manifest_path)
 }
 
 #[cfg(target_os = "emscripten")]

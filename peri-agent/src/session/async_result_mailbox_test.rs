@@ -3,8 +3,14 @@
 //! 这些用例只验证处理责任状态机；跨阶段行为（Reason 快照 → Act 提交、Full Compact
 //! 保护、激活）由 `peri-agent/src/agent/stages/` 下的 `async_result_*` 集成测试覆盖。
 
-use super::*;
+use crate::messages::MessageId;
+use crate::session::async_result_mailbox::AcceptOutcome;
+use crate::session::async_result_mailbox::AsyncResultMailbox;
+use crate::session::async_result_mailbox::AsyncResultState;
+use crate::session::async_result_mailbox::ResultScope;
+use crate::session::async_result_mailbox::DIAGNOSTIC_MAX_CHARS;
 use peri_acp_types::session::MessageSource;
+use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
     ReminderSource as CanonicalSource, SystemReminder, TrustedSystemReminderFactory,
@@ -28,7 +34,7 @@ fn reminder(task_id: &str, body: &str) -> TrustedSystemReminder {
                 "remote_task_id": format!("remote-{task_id}"),
             }),
         })
-        .unwrap()
+        .expect("the construct fixture result is required for this assertion")
 }
 
 fn mailbox() -> AsyncResultMailbox {
@@ -38,21 +44,27 @@ fn mailbox() -> AsyncResultMailbox {
 /// 长驻 monitor 会话：ALERT 被覆盖后不得留下逐条增长的指纹回执。
 #[test]
 fn monitor_alert_coverage_does_not_retain_receipts() {
-    use peri_acp_types::monitor::{monitor_alert_delivery_id, monitor_alert_reminder};
+    use peri_acp_types::monitor;
 
     let mailbox = mailbox();
     for hits in 1..=1_000_u64 {
-        let id = monitor_alert_delivery_id("monitor-long-lived", hits);
+        let id = monitor::monitor_alert_delivery_id("monitor-long-lived", hits);
         let reminder =
-            monitor_alert_reminder("monitor-long-lived", Some("webots"), hits, Some(hits)).unwrap();
+            monitor::monitor_alert_reminder("monitor-long-lived", Some("webots"), hits, Some(hits))
+                .expect("the monitor alert reminder fixture result is required for this assertion");
         assert_eq!(reminder.as_reminder().kind, "alert_matched");
         mailbox
             .mark_canonical_ready(id, &reminder, MessageSource::McpNotification, None)
-            .unwrap();
+            .expect("the mark canonical ready fixture result is required for this assertion");
         let receipt = mailbox
             .capture_request("attempt", "request", &[id])
-            .unwrap();
-        assert_eq!(mailbox.cover_after_commit(&receipt, None).unwrap(), 1);
+            .expect("the capture request fixture result is required for this assertion");
+        assert_eq!(
+            mailbox
+                .cover_after_commit(&receipt, None)
+                .expect("the cover after commit fixture result is required for this assertion"),
+            1
+        );
         assert_eq!(mailbox.pending_count(), 0);
         assert!(mailbox.protected_snapshot().is_empty());
     }
@@ -70,14 +82,19 @@ fn non_monitor_results_keep_covered_receipts() {
     let terminal = reminder("shell-covered", "done");
     mailbox
         .accept(id, &terminal, MessageSource::ShellComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     mailbox
         .mark_canonical_ready(id, &terminal, MessageSource::ShellComplete, None)
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
     let receipt = mailbox
         .capture_request("attempt", "request", &[id])
-        .unwrap();
-    assert_eq!(mailbox.cover_after_commit(&receipt, None).unwrap(), 1);
+        .expect("the capture request fixture result is required for this assertion");
+    assert_eq!(
+        mailbox
+            .cover_after_commit(&receipt, None)
+            .expect("the cover after commit fixture result is required for this assertion"),
+        1
+    );
     assert!(
         !mailbox.covered_is_empty(),
         "non-monitor terminal results still retain their covered receipt"
@@ -136,10 +153,10 @@ fn async_result_canonical_ready_requires_commit_and_protects() {
 
     mailbox
         .accept(id, &result, MessageSource::ShellComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     mailbox
         .mark_canonical_ready(id, &result, MessageSource::ShellComplete, Some(7))
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
 
     let snapshot = mailbox.protected_snapshot();
     assert_eq!(snapshot.items.len(), 1);
@@ -161,14 +178,15 @@ fn async_result_canonical_ready_requires_commit_and_protects() {
 fn async_result_protected_snapshot_keeps_admission_order() {
     let mailbox = mailbox();
     let ids = [MessageId::new(), MessageId::new(), MessageId::new()];
-    for (index, id) in ids.iter().enumerate() {
+    let paired_items = ids.iter().enumerate();
+    for (index, id) in paired_items {
         mailbox
             .accept(
                 *id,
                 &reminder(&format!("shell-{index}"), "done"),
                 MessageSource::ShellComplete,
             )
-            .unwrap();
+            .expect("the accept fixture result is required for this assertion");
     }
     // 乱序提交：保护投影仍按接纳顺序，且每个 ID 只出现一次。
     for index in [2usize, 0, 1] {
@@ -179,7 +197,7 @@ fn async_result_protected_snapshot_keeps_admission_order() {
                 MessageSource::ShellComplete,
                 None,
             )
-            .unwrap();
+            .expect("the mark canonical ready fixture result is required for this assertion");
     }
 
     let snapshot = mailbox.protected_snapshot();
@@ -197,10 +215,10 @@ fn async_result_capture_request_only_includes_projected_ids() {
         let result = reminder(task, "done");
         mailbox
             .accept(id, &result, MessageSource::ShellComplete)
-            .unwrap();
+            .expect("the accept fixture result is required for this assertion");
         mailbox
             .mark_canonical_ready(id, &result, MessageSource::ShellComplete, None)
-            .unwrap();
+            .expect("the mark canonical ready fixture result is required for this assertion");
     }
 
     assert!(
@@ -232,13 +250,13 @@ fn async_result_cover_requires_a_valid_attempt_bound_commit() {
     let result = reminder("shell-1", "done");
     mailbox
         .accept(id, &result, MessageSource::ShellComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     mailbox
         .mark_canonical_ready(id, &result, MessageSource::ShellComplete, None)
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
     let receipt = mailbox
         .capture_request("attempt-1", "request-1", &[id])
-        .unwrap();
+        .expect("the capture request fixture result is required for this assertion");
 
     assert_eq!(mailbox.cover_after_commit(&receipt, Some(id)), Ok(1));
     assert_eq!(
@@ -259,13 +277,13 @@ fn async_result_failed_stage_blocks_without_self_activation() {
     let result = reminder("shell-1", "done");
     mailbox
         .accept(id, &result, MessageSource::ShellComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     mailbox
         .mark_canonical_ready(id, &result, MessageSource::ShellComplete, None)
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
     let receipt = mailbox
         .capture_request("attempt-1", "request-1", &[id])
-        .unwrap();
+        .expect("the capture request fixture result is required for this assertion");
 
     mailbox.block_attempt(&receipt, "act", "stream interrupted before commit");
 
@@ -274,7 +292,10 @@ fn async_result_failed_stage_blocks_without_self_activation() {
     assert!(mailbox.retains_body(&id));
     let snapshot = mailbox.protected_snapshot();
     assert_eq!(snapshot.items.len(), 1);
-    let diagnostic = snapshot.items[0].diagnostic.as_ref().unwrap();
+    let diagnostic = snapshot.items[0]
+        .diagnostic
+        .as_ref()
+        .expect("the as ref fixture result is required for this assertion");
     assert_eq!(diagnostic.stage, "act");
     assert!(!diagnostic.auto_recovery_allowed);
 
@@ -288,7 +309,7 @@ fn async_result_failed_stage_blocks_without_self_activation() {
         mailbox.protected_snapshot().items[0]
             .diagnostic
             .as_ref()
-            .unwrap()
+            .expect("the as ref fixture result is required for this assertion")
             .stage,
         "act"
     );
@@ -303,7 +324,7 @@ fn async_result_suspend_preserves_commit_state_for_resume() {
     let queued_result = reminder("shell-2", "done");
     mailbox
         .accept(committed, &committed_result, MessageSource::ShellComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     mailbox
         .mark_canonical_ready(
             committed,
@@ -311,10 +332,10 @@ fn async_result_suspend_preserves_commit_state_for_resume() {
             MessageSource::ShellComplete,
             None,
         )
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
     mailbox
         .accept(queued, &queued_result, MessageSource::ShellComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
 
     mailbox.suspend_scope("cancelled");
     assert_eq!(
@@ -345,10 +366,10 @@ fn async_result_scope_suspension_covers_late_canonical_commit() {
     let result = reminder("shell-late", "done after stop");
     mailbox
         .accept(id, &result, MessageSource::ShellComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     mailbox
         .mark_canonical_ready(id, &result, MessageSource::ShellComplete, None)
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
 
     assert_eq!(mailbox.state_of(&id), Some(AsyncResultState::Suspended));
     assert!(!mailbox.has_ready());
@@ -366,13 +387,13 @@ fn async_result_suspension_invalidates_in_flight_receipt() {
     let result = reminder("shell-1", "done");
     mailbox
         .accept(id, &result, MessageSource::ShellComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     mailbox
         .mark_canonical_ready(id, &result, MessageSource::ShellComplete, None)
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
     let receipt = mailbox
         .capture_request("attempt-1", "request-1", &[id])
-        .unwrap();
+        .expect("the capture request fixture result is required for this assertion");
 
     mailbox.suspend_scope("cancelled");
     assert!(
@@ -393,13 +414,13 @@ fn async_result_covered_rejects_conflicting_redelivery() {
     let result = reminder("shell-1", "done");
     mailbox
         .accept(id, &result, MessageSource::ShellComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     mailbox
         .mark_canonical_ready(id, &result, MessageSource::ShellComplete, None)
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
     let receipt = mailbox
         .capture_request("attempt-1", "request-1", &[id])
-        .unwrap();
+        .expect("the capture request fixture result is required for this assertion");
     assert_eq!(mailbox.cover_after_commit(&receipt, None), Ok(1));
 
     // 同 ID 同内容的重放（恢复场景）幂等；不同内容仍冲突。
@@ -431,10 +452,10 @@ fn async_result_watch_signal_is_retained_across_missed_changes() {
     let result = reminder("shell-1", "done");
     mailbox
         .accept(id, &result, MessageSource::ShellComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     mailbox
         .mark_canonical_ready(id, &result, MessageSource::ShellComplete, None)
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
 
     // 订阅发生在变化之后：保留式版本仍可观察，配合 has_ready 不会丢唤醒。
     let receiver = mailbox.subscribe_state();
@@ -454,7 +475,7 @@ fn async_result_scope_isolates_sessions_and_threads() {
         &reminder("shell-1", "done"),
         MessageSource::ShellComplete,
     )
-    .unwrap();
+    .expect("the accept fixture result is required for this assertion");
 
     assert_eq!(root.pending_count(), 1);
     assert_eq!(child.pending_count(), 0);
@@ -468,14 +489,18 @@ fn async_result_diagnostics_are_bounded() {
     let result = reminder("shell-1", "done");
     mailbox
         .accept(id, &result, MessageSource::ShellComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     mailbox
         .mark_canonical_ready(id, &result, MessageSource::ShellComplete, None)
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
 
     mailbox.block_uncovered("compact", &"x".repeat(1024));
     let snapshot = mailbox.protected_snapshot();
-    let summary = &snapshot.items[0].diagnostic.as_ref().unwrap().summary;
+    let summary = &snapshot.items[0]
+        .diagnostic
+        .as_ref()
+        .expect("the as ref fixture result is required for this assertion")
+        .summary;
     assert_eq!(summary.chars().count(), DIAGNOSTIC_MAX_CHARS + 1);
     assert!(summary.ends_with('…'));
 }
@@ -491,10 +516,10 @@ fn async_result_commit_covers_only_the_requested_snapshot() {
     let result_b = reminder("shell-b", "B done");
     mailbox
         .accept(a, &result_a, MessageSource::ShellComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     mailbox
         .mark_canonical_ready(a, &result_a, MessageSource::ShellComplete, None)
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
 
     let receipt = mailbox
         .capture_request("attempt-a", "request-a", &[a])
@@ -503,10 +528,10 @@ fn async_result_commit_covers_only_the_requested_snapshot() {
     // 推理期间 B 完成并规范提交。
     mailbox
         .accept(b, &result_b, MessageSource::ShellComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     mailbox
         .mark_canonical_ready(b, &result_b, MessageSource::ShellComplete, None)
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
 
     assert_eq!(mailbox.cover_after_commit(&receipt, Some(a)), Ok(1));
     assert_eq!(mailbox.state_of(&a), None, "A 已被有效响应覆盖");
@@ -528,10 +553,10 @@ fn async_result_compact_failure_blocks_with_diagnostic() {
     let result = reminder("shell-1", "terminal fact");
     mailbox
         .accept(id, &result, MessageSource::ShellComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     mailbox
         .mark_canonical_ready(id, &result, MessageSource::ShellComplete, None)
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
 
     mailbox.block_uncovered(
         "compact",
@@ -541,7 +566,10 @@ fn async_result_compact_failure_blocks_with_diagnostic() {
     assert_eq!(mailbox.state_of(&id), Some(AsyncResultState::Blocked));
     assert!(!mailbox.has_ready());
     let snapshot = mailbox.protected_snapshot();
-    let diagnostic = snapshot.items[0].diagnostic.as_ref().unwrap();
+    let diagnostic = snapshot.items[0]
+        .diagnostic
+        .as_ref()
+        .expect("the as ref fixture result is required for this assertion");
     assert_eq!(diagnostic.stage, "compact");
     assert!(!diagnostic.auto_recovery_allowed);
     assert!(
@@ -561,14 +589,16 @@ fn async_result_trace_links_delivery_to_coverage() {
     let result = reminder("shell-trace", "trace coverage");
     mailbox
         .accept(id, &result, MessageSource::ShellComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     mailbox
         .mark_canonical_ready(id, &result, MessageSource::ShellComplete, None)
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
     let receipt = mailbox
         .capture_request("attempt-trace", "request-trace", &[id])
-        .unwrap();
-    mailbox.cover_after_commit(&receipt, Some(id)).unwrap();
+        .expect("the capture request fixture result is required for this assertion");
+    mailbox
+        .cover_after_commit(&receipt, Some(id))
+        .expect("the cover after commit fixture result is required for this assertion");
 
     let events = mailbox.trace_events();
     let text = events.join("\n");
@@ -598,7 +628,7 @@ fn async_result_canonical_rebuild_keeps_identity_and_scope() {
     // 不先 accept：模拟新 prompt 重建 transcript 后，历史已有提醒但 mailbox 暂无记录。
     mailbox
         .mark_canonical_ready(id, &result, MessageSource::ShellComplete, None)
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
     assert_eq!(mailbox.state_of(&id), Some(AsyncResultState::Ready));
     assert_eq!(mailbox.protected_snapshot().ids(), vec![id]);
 

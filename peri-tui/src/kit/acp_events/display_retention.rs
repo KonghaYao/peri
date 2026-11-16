@@ -1,8 +1,8 @@
 //! Expire local display records without treating them as reloadable history.
 
 use super::{BridgeState, TuiRenderUnit};
-use crate::kit::display_retention::{DisplayBudget, is_disposable};
-use crate::kit::retained_bytes::{SeenAllocations, retained_unit_bytes};
+use crate::kit::display_retention::DisplayBudget;
+use crate::kit::retained_bytes::SeenAllocations;
 
 pub(super) fn enforce(state: &mut BridgeState) {
     let mut budget = DisplayBudget::default();
@@ -17,16 +17,22 @@ pub(super) fn enforce(state: &mut BridgeState) {
             .any(|(start, len)| slot >= *start && slot < start.saturating_add(*len))
     };
     let mut remove = Vec::new();
-    for (slot, unit) in state.committed.iter().enumerate().rev() {
-        if !is_disposable(unit)
-            || !state.window.display_slot_available(slot)
-            || in_legacy_span(slot)
-            || matches!(unit, TuiRenderUnit::TuiAskUserBlock(block) if block.pending)
-        {
-            continue;
-        }
-        if !budget.retain(retained_unit_bytes(unit, &mut SeenAllocations::default())) {
-            remove.push(slot);
+    {
+        let iteration_items = state.committed.iter().enumerate().rev();
+        for (slot, unit) in iteration_items {
+            if !crate::kit::display_retention::is_disposable(unit)
+                || !state.window.display_slot_available(slot)
+                || in_legacy_span(slot)
+                || matches!(unit, TuiRenderUnit::TuiAskUserBlock(block) if block.pending)
+            {
+                continue;
+            }
+            if !budget.retain(crate::kit::retained_bytes::retained_unit_bytes(
+                unit,
+                &mut SeenAllocations::default(),
+            )) {
+                remove.push(slot);
+            }
         }
     }
     let mut committed_changed = false;

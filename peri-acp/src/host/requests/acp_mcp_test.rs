@@ -19,8 +19,11 @@ use peri_acp_types::acp_mcp::AcpMcpError;
 use peri_acp_types::ports::AcpMcpGatewayPort;
 use serde_json::{json, Value};
 
-use super::*;
+use crate::host::requests::acp_mcp::AcpTransportGateway;
 use crate::transport::types::{AcpError, IncomingMessage, RequestId};
+use crate::transport::AcpTransport;
+use peri_acp_types::acp_mcp::AcpMcpRegistry;
+use peri_acp_types::acp_mcp::AcpMcpServerSpec;
 
 /// 声明方的 wire 形状就是契约本身：这里由 SDK 的类型序列化产出，测试只断言
 /// 解析器认的是这个形状（形状一旦漂移，解析器必须跟着改）。
@@ -53,7 +56,7 @@ fn acp_declarations_are_parsed_and_other_transports_ignored() {
     });
 
     assert_eq!(
-        parse_acp_servers(&params, "s1"),
+        crate::host::requests::acp_mcp::parse_acp_servers(&params, "s1"),
         vec![AcpMcpServerSpec {
             session_id: "s1".to_string(),
             name: "fixture".to_string(),
@@ -79,7 +82,7 @@ fn malformed_declaration_drops_only_that_entry() {
     });
 
     assert_eq!(
-        parse_acp_servers(&params, "s1"),
+        crate::host::requests::acp_mcp::parse_acp_servers(&params, "s1"),
         vec![AcpMcpServerSpec {
             session_id: "s1".to_string(),
             name: "fixture".to_string(),
@@ -90,10 +93,22 @@ fn malformed_declaration_drops_only_that_entry() {
 
 #[test]
 fn absent_or_non_array_declarations_are_no_declarations() {
-    assert!(parse_acp_servers(&json!({"cwd": "/tmp"}), "s1").is_empty());
-    assert!(parse_acp_servers(&json!({"mcpServers": null}), "s1").is_empty());
-    assert!(parse_acp_servers(&json!({"mcpServers": "oops"}), "s1").is_empty());
-    assert!(parse_acp_servers(&json!({"mcpServers": []}), "s1").is_empty());
+    assert!(
+        crate::host::requests::acp_mcp::parse_acp_servers(&json!({"cwd": "/tmp"}), "s1").is_empty()
+    );
+    assert!(
+        crate::host::requests::acp_mcp::parse_acp_servers(&json!({"mcpServers": null}), "s1")
+            .is_empty()
+    );
+    assert!(crate::host::requests::acp_mcp::parse_acp_servers(
+        &json!({"mcpServers": "oops"}),
+        "s1"
+    )
+    .is_empty());
+    assert!(
+        crate::host::requests::acp_mcp::parse_acp_servers(&json!({"mcpServers": []}), "s1")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -103,7 +118,7 @@ fn connection_registry_rejects_conflicts_and_releases_only_owner() {
     registry.claim("shared-server", "s1").unwrap();
     let params = json!({"mcpServers": [acp_declaration("fixture", "shared-server")]});
     assert_eq!(
-        validate_declarations(&registry, &params, "s2")
+        crate::host::requests::acp_mcp::validate_declarations(&registry, &params, "s2")
             .unwrap_err()
             .code,
         AcpMcpError::CODE_UNAVAILABLE
@@ -124,8 +139,11 @@ fn connection_registry_rejects_conflicts_and_releases_only_owner() {
 #[test]
 fn inbound_routing_rejects_malformed_and_unknown_servers() {
     let sessions = HashMap::new();
-    let reject = |params: &Value| match route_inbound(&AcpMcpRegistry::default(), &sessions, params)
-    {
+    let reject = |params: &Value| match crate::host::requests::acp_mcp::route_inbound(
+        &AcpMcpRegistry::default(),
+        &sessions,
+        params,
+    ) {
         Err(error) => error,
         Ok(_) => panic!("非法的 mcp/message 载荷不得路由成功: {params}"),
     };
@@ -218,11 +236,11 @@ async fn gateway_forwards_mcp_message_requests() {
 
 #[tokio::test]
 async fn acp_mcp_gateway_cancel_targets_outer_request_and_settles_without_reply() {
-    use crate::transport::mpsc::mpsc_transport_pair;
+    use crate::transport::mpsc;
     use agent_client_protocol_schema::v1::{
         CancelRequestNotification, PROTOCOL_LEVEL_METHOD_NAMES,
     };
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = mpsc::mpsc_transport_pair();
     let gateway = AcpTransportGateway::new(Arc::new(server));
     let cancellation = tokio_util::sync::CancellationToken::new();
     let request_cancel = cancellation.clone();

@@ -46,6 +46,7 @@ pub enum McpPoolShutdownReport {
 }
 
 impl McpPoolShutdownReport {
+    #[must_use]
     pub fn is_complete(self) -> bool {
         matches!(self, Self::Complete { .. })
     }
@@ -184,6 +185,7 @@ pub struct McpResourceSubscription {
 
 impl McpResourceSubscription {
     /// 由实现方构造：`updates` 为通知转发通道，`cancel` 触发注销。
+    #[must_use]
     pub fn new(updates: tokio::sync::mpsc::Receiver<String>, cancel: CancellationToken) -> Self {
         Self { updates, cancel }
     }
@@ -227,6 +229,7 @@ pub enum PeripheralTasks {
 
 impl PeripheralTasks {
     /// Query was not answered; `detail` keeps the diagnostic cause.
+    #[must_use]
     pub fn unknown(detail: impl Into<String>) -> Self {
         Self::Unknown {
             detail: detail.into(),

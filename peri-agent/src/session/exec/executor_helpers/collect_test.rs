@@ -8,21 +8,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use peri_acp_types::{
-    command::PromptStopReason,
-    event::{
-        EventMessage, EventSink, EventSinkError, EventSubscriber, ExecutorEvent, SubscriptionError,
-    },
-    messages::MessageId,
-    session::{ExecutionFailure, TurnTelemetryOutcome},
-};
+use peri_acp_types::command::PromptStopReason;
+use peri_acp_types::event::EventMessage;
+use peri_acp_types::event::EventSink;
+use peri_acp_types::event::EventSinkError;
+use peri_acp_types::event::EventSubscriber;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::event::SubscriptionError;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::ExecutionFailure;
+use peri_acp_types::session::TurnTelemetryOutcome;
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::agent::state::AgentState;
 
-use super::{
-    collect_result, spawn_event_pump, CollectRequest, ExecOutcome, PumpHandle, SpawnPumpRequest,
-};
+use crate::session::exec::executor_helpers::collect::CollectRequest;
+use crate::session::exec::executor_helpers::event_pump::PumpHandle;
+use crate::session::exec::executor_helpers::event_pump::SpawnPumpRequest;
+use crate::session::exec::executor_helpers::ExecOutcome;
 
 type EventTx = Arc<parking_lot::Mutex<Option<mpsc::UnboundedSender<ExecutorEvent>>>>;
 
@@ -94,7 +97,7 @@ impl EventSink for BlockingSink {
 fn start_pump(sink: Arc<dyn EventSink>) -> (EventTx, PumpHandle) {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (stop_tx, stop_rx) = oneshot::channel();
-    let handle = spawn_event_pump(SpawnPumpRequest {
+    let handle = crate::session::exec::executor_helpers::spawn_event_pump(SpawnPumpRequest {
         subscription: Box::new(PendingSubscriber),
         event_rx,
         stop_reason_rx: stop_rx,
@@ -171,7 +174,7 @@ async fn completed_pump_keeps_success_result() {
     .execution_binding();
     let mut outcome = exec_outcome(true);
     outcome.execution_binding = Some(binding.clone());
-    let result = collect_result(CollectRequest {
+    let result = crate::session::exec::executor_helpers::collect_result(CollectRequest {
         event_tx: &event_tx,
         pump_handle: pump,
         session_id: "test-session",
@@ -194,7 +197,7 @@ async fn pump_signal_channel_closed_without_done_cannot_return_success() {
     let (done_tx, done_rx) = oneshot::channel();
     drop(done_tx);
 
-    let result = collect_result(CollectRequest {
+    let result = crate::session::exec::executor_helpers::collect_result(CollectRequest {
         event_tx: &event_tx,
         pump_handle: PumpHandle {
             pump_done_rx: done_rx,
@@ -220,7 +223,7 @@ async fn stalled_pump_beyond_ten_seconds_cannot_return_success() {
     let (sink, event_tx, pump) = start_stalled_pump().await;
 
     let started = tokio::time::Instant::now();
-    let result = collect_result(CollectRequest {
+    let result = crate::session::exec::executor_helpers::collect_result(CollectRequest {
         event_tx: &event_tx,
         pump_handle: pump,
         session_id: "test-session",
@@ -262,7 +265,7 @@ async fn stalled_pump_preserves_existing_failure_and_records_delivery_gap() {
     let mut outcome = exec_outcome(false);
     outcome.failure = Some(ExecutionFailure::internal("original execution failure"));
 
-    let result = collect_result(CollectRequest {
+    let result = crate::session::exec::executor_helpers::collect_result(CollectRequest {
         event_tx: &event_tx,
         pump_handle: pump,
         session_id: "test-session",

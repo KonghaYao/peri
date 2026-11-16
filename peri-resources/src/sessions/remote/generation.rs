@@ -22,7 +22,7 @@ use async_trait::async_trait;
 
 use peri_acp_types::session_resources::SessionResourceResult;
 
-use super::connection::{connect_sdk, SdkTransport};
+use super::connection::SdkTransport;
 use super::credentials::SessionStoreCredential;
 use super::endpoint::RemoteEndpoint;
 use super::mutation::{RemoteStore, StoreAccess};
@@ -81,8 +81,8 @@ impl ConnectionGate {
 /// 外层任务取消、调用方放弃，都在那里同步落定。因此失效事实由 `Drop` 落下——
 /// 「调用方已经不管这条连接了」与「这条连接被记为失效」之间没有时间窗。
 #[derive(Debug)]
-pub(super) struct GenerationLease<'a> {
-    gate: &'a ConnectionGate,
+pub(super) struct GenerationLease<'gate> {
+    gate: &'gate ConnectionGate,
     generation: u64,
     armed: bool,
 }
@@ -151,7 +151,7 @@ impl RemoteConnectionFactory {
 #[async_trait]
 impl ConnectionFactory for RemoteConnectionFactory {
     async fn connect(&self) -> SessionResourceResult<RemoteStore> {
-        let connection = connect_sdk(&self.endpoint, &self.credential).await?;
+        let connection = super::connection::connect_sdk(&self.endpoint, &self.credential).await?;
         Ok(RemoteStore::new(
             Arc::new(SdkTransport::new(connection)),
             self.access,

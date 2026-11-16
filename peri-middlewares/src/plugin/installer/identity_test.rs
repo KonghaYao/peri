@@ -1,4 +1,5 @@
-use super::*;
+use super::InstallScope;
+use super::Path;
 use peri_acp_types::plugin::PluginManagerPort;
 
 fn seed_identity_marketplace(cache: &Path, version: &str) {
@@ -64,9 +65,12 @@ async fn production_port_explicit_identity_never_mutates_other_scope_root() {
         let untouched_record = serde_json::to_value(untouched).unwrap();
         let manifest = untouched.install_path.join(".claude-plugin/plugin.json");
         let original_manifest = std::fs::read(&manifest).unwrap();
-        let settings =
-            enabled_plugins_settings_path(untouched.scope, home.path(), Some(project.path()))
-                .unwrap();
+        let settings = super::enabled_plugins_settings_path(
+            untouched.scope,
+            home.path(),
+            Some(project.path()),
+        )
+        .unwrap();
         let original_settings = std::fs::read(&settings).unwrap();
         seed_identity_marketplace(cache.path(), "3.0.0");
         let updated = manager
@@ -82,7 +86,7 @@ async fn production_port_explicit_identity_never_mutates_other_scope_root() {
         assert_eq!(updated.scope, selected);
         assert_eq!(updated.version, "3.0.0");
         let records_path = home.path().join("plugins/installed_plugins.json");
-        let records = load_installed_plugins(Some(&records_path)).unwrap();
+        let records = super::load_installed_plugins(Some(&records_path)).unwrap();
         assert_eq!(records.plugins.len(), 2);
         assert_eq!(
             serde_json::to_value(
@@ -101,7 +105,7 @@ async fn production_port_explicit_identity_never_mutates_other_scope_root() {
             .uninstall(&user.id, selected, home.path(), Some(project.path()))
             .await
             .unwrap();
-        let records = load_installed_plugins(Some(&records_path)).unwrap();
+        let records = super::load_installed_plugins(Some(&records_path)).unwrap();
         assert_eq!(records.plugins.len(), 1);
         assert_eq!(
             serde_json::to_value(&records.plugins[0]).unwrap(),

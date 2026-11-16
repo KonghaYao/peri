@@ -1,7 +1,10 @@
 //! 会话操作身份与认领原子性回归。
 
-use super::super::*;
-use super::support::*;
+use super::super::CancellationToken;
+use super::super::LaneKey;
+use super::super::SubmitRequest;
+use super::super::admission_probe;
+use super::super::mpsc;
 
 use peri_acp::transport::AcpTransport;
 use serde_json::json;
@@ -15,7 +18,7 @@ use std::time::Duration;
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_two_reserved_loads_keep_single_lane() {
-    let (client, server) = make_client_without_pump();
+    let (client, server) = super::support::make_client_without_pump();
     client.force_stable_for_test("session-a", false);
     let reservation_b = Arc::new(client.reserve_session_load());
     let reservation_c = Arc::new(client.reserve_session_load());
@@ -25,10 +28,13 @@ async fn test_two_reserved_loads_keep_single_lane() {
 
     let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
     let shutdown = CancellationToken::new();
-    let consumer = spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
+    let consumer =
+        super::super::spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
 
     // 两次预约都还未开始：m0 必须等用户最新的决定 C，而不是预测 B 的代际。
-    tx.send(agent_text("reserved-m0")).unwrap();
+    tx.send(super::support::agent_text("reserved-m0")).expect(
+        "two reserved loads keep single lane: fixture channel must deliver its expected message",
+    );
     let m0_lane = next_registration(&mut registration_rx, "reserved-m0").await;
 
     // B 的 load 先完成并释放预约。
@@ -39,18 +45,20 @@ async fn test_two_reserved_loads_keep_single_lane() {
             .load_reserved_session(held_b.as_ref(), "session-b", ".", None)
             .await
     });
-    let (close_a, close_a_params) = expect_request(&server, "session/close").await;
+    let (close_a, close_a_params) = super::support::expect_request(&server, "session/close").await;
     assert_eq!(close_a_params["sessionId"], "session-a");
-    server.send_response(close_a, Ok(json!({}))).await.unwrap();
-    let (load_b_id, load_b_params) = expect_request(&server, "session/load").await;
+    server.send_response(close_a, Ok(json!({}))).await.expect(
+        "two reserved loads keep single lane: fixture task and request must complete successfully",
+    );
+    let (load_b_id, load_b_params) = super::support::expect_request(&server, "session/load").await;
     assert_eq!(load_b_params["sessionId"], "session-b");
     server
         .send_response(load_b_id, Ok(json!({"sessionId": "session-b"})))
         .await
-        .unwrap();
-    load_b.await.unwrap().unwrap();
+        .expect("two reserved loads keep single lane: fixture task and request must complete successfully");
+    load_b.await.expect("two reserved loads keep single lane: fixture task and request must complete successfully").expect("two reserved loads keep single lane: fixture task and request must complete successfully");
     drop(reservation_b);
-    wait_for_session(&client, "session-b").await;
+    super::support::wait_for_session(&client, "session-b").await;
 
     // C 的 load 只进入 Transitioning：此时 m1 入队。
     let loader_c = client.clone();
@@ -60,13 +68,17 @@ async fn test_two_reserved_loads_keep_single_lane() {
             .load_reserved_session(held_c.as_ref(), "session-c", ".", None)
             .await
     });
-    let (close_b, close_b_params) = expect_request(&server, "session/close").await;
+    let (close_b, close_b_params) = super::support::expect_request(&server, "session/close").await;
     assert_eq!(close_b_params["sessionId"], "session-b");
-    server.send_response(close_b, Ok(json!({}))).await.unwrap();
-    let (load_c_id, load_c_params) = expect_request(&server, "session/load").await;
+    server.send_response(close_b, Ok(json!({}))).await.expect(
+        "two reserved loads keep single lane: fixture task and request must complete successfully",
+    );
+    let (load_c_id, load_c_params) = super::support::expect_request(&server, "session/load").await;
     assert_eq!(load_c_params["sessionId"], "session-c");
 
-    tx.send(agent_text("reserved-m1")).unwrap();
+    tx.send(super::support::agent_text("reserved-m1")).expect(
+        "two reserved loads keep single lane: fixture channel must deliver its expected message",
+    );
     let m1_lane = next_registration(&mut registration_rx, "reserved-m1").await;
     assert_eq!(
         m0_lane, m1_lane,
@@ -77,12 +89,12 @@ async fn test_two_reserved_loads_keep_single_lane() {
     server
         .send_response(load_c_id, Ok(json!({"sessionId": "session-c"})))
         .await
-        .unwrap();
-    load_c.await.unwrap().unwrap();
+        .expect("two reserved loads keep single lane: fixture task and request must complete successfully");
+    load_c.await.expect("two reserved loads keep single lane: fixture task and request must complete successfully").expect("two reserved loads keep single lane: fixture task and request must complete successfully");
     drop(reservation_c);
-    wait_for_session(&client, "session-c").await;
+    super::support::wait_for_session(&client, "session-c").await;
 
-    let (m0_id, m0_session, m0_text) = expect_prompt(&server).await;
+    let (m0_id, m0_session, m0_text) = super::support::expect_prompt(&server).await;
     assert_eq!(
         (m0_session.as_str(), m0_text.as_str()),
         ("session-c", "reserved-m0")
@@ -95,8 +107,8 @@ async fn test_two_reserved_loads_keep_single_lane() {
     server
         .send_response(m0_id, Ok(json!({"stopReason": "end_turn"})))
         .await
-        .unwrap();
-    let (m1_id, m1_session, m1_text) = expect_prompt(&server).await;
+        .expect("two reserved loads keep single lane: fixture task and request must complete successfully");
+    let (m1_id, m1_session, m1_text) = super::support::expect_prompt(&server).await;
     assert_eq!(
         (m1_session.as_str(), m1_text.as_str()),
         ("session-c", "reserved-m1")
@@ -104,7 +116,7 @@ async fn test_two_reserved_loads_keep_single_lane() {
     server
         .send_response(m1_id, Ok(json!({"stopReason": "end_turn"})))
         .await
-        .unwrap();
+        .expect("two reserved loads keep single lane: fixture task and request must complete successfully");
 
     admission_probe::clear_registration_probe();
     shutdown.cancel();
@@ -119,7 +131,7 @@ async fn test_two_reserved_loads_keep_single_lane() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_claimed_reservation_is_atomic_with_route_switch() {
-    let (client, server) = make_client_without_pump();
+    let (client, server) = super::support::make_client_without_pump();
     client.force_stable_for_test("session-a", false);
     let reservation = Arc::new(client.reserve_session_load());
 
@@ -141,10 +153,11 @@ async fn test_claimed_reservation_is_atomic_with_route_switch() {
     admission_probe::install_registration_probe(registration_tx);
     let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
     let shutdown = CancellationToken::new();
-    let consumer = spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
+    let consumer =
+        super::super::spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
 
     // 屏障期间提交：旧实现会立刻完成分道并绑定 Stable A。
-    tx.send(agent_text("atomic-m0")).unwrap();
+    tx.send(super::support::agent_text("atomic-m0")).expect("claimed reservation is atomic with route switch: fixture channel must deliver its expected message");
     let early = registration_within(
         &mut registration_rx,
         "atomic-m0",
@@ -156,7 +169,7 @@ async fn test_claimed_reservation_is_atomic_with_route_switch() {
         "认领后的准入快照必须与路由切换原子: {early:?}"
     );
 
-    release.send(()).unwrap();
+    release.send(()).expect("claimed reservation is atomic with route switch: fixture channel must deliver its expected message");
     let m0_lane = next_registration(&mut registration_rx, "atomic-m0").await;
     assert!(
         matches!(m0_lane, LaneKey::Cohort(_)),
@@ -164,20 +177,20 @@ async fn test_claimed_reservation_is_atomic_with_route_switch() {
     );
 
     // 放行切换：close A → load B。
-    let (close_id, close_params) = expect_request(&server, "session/close").await;
+    let (close_id, close_params) = super::support::expect_request(&server, "session/close").await;
     assert_eq!(close_params["sessionId"], "session-a");
-    server.send_response(close_id, Ok(json!({}))).await.unwrap();
-    let (load_id, load_params) = expect_request(&server, "session/load").await;
+    server.send_response(close_id, Ok(json!({}))).await.expect("claimed reservation is atomic with route switch: fixture task and request must complete successfully");
+    let (load_id, load_params) = super::support::expect_request(&server, "session/load").await;
     assert_eq!(load_params["sessionId"], "session-b");
     server
         .send_response(load_id, Ok(json!({"sessionId": "session-b"})))
         .await
-        .unwrap();
-    load.await.unwrap().unwrap();
+        .expect("claimed reservation is atomic with route switch: fixture task and request must complete successfully");
+    load.await.expect("claimed reservation is atomic with route switch: fixture task and request must complete successfully").expect("claimed reservation is atomic with route switch: fixture task and request must complete successfully");
     drop(reservation);
-    wait_for_session(&client, "session-b").await;
+    super::support::wait_for_session(&client, "session-b").await;
 
-    let (m0_id, m0_session, m0_text) = expect_prompt(&server).await;
+    let (m0_id, m0_session, m0_text) = super::support::expect_prompt(&server).await;
     assert_eq!(
         (m0_session.as_str(), m0_text.as_str()),
         ("session-b", "atomic-m0"),
@@ -186,7 +199,7 @@ async fn test_claimed_reservation_is_atomic_with_route_switch() {
     server
         .send_response(m0_id, Ok(json!({"stopReason": "end_turn"})))
         .await
-        .unwrap();
+        .expect("claimed reservation is atomic with route switch: fixture task and request must complete successfully");
 
     admission_probe::clear_registration_probe();
     shutdown.cancel();

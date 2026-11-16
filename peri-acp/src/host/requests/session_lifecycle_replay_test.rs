@@ -1,7 +1,12 @@
 use super::TuiReplaySender;
-use crate::dispatch::{replay_persisted_session_history, LoadGeneration};
-use crate::transport::{mpsc::mpsc_transport_pair, stdio::StdioTransport, AcpTransport};
-use peri_acp_types::{messages::BaseMessage, store::PersistedPayload, PeriCaps};
+use crate::dispatch;
+use crate::dispatch::LoadGeneration;
+use crate::transport::mpsc;
+use crate::transport::stdio::StdioTransport;
+use crate::transport::AcpTransport;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::PeriCaps;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 fn history() -> Vec<PersistedPayload> {
@@ -34,7 +39,7 @@ fn assert_reminder(params: &serde_json::Value, canonical: bool, body: &str) {
 #[tokio::test]
 async fn test_compact_reminder_replay_mpsc_wire() {
     for canonical in [true, false] {
-        let (client, server) = mpsc_transport_pair();
+        let (client, server) = mpsc::mpsc_transport_pair();
         let sender = TuiReplaySender { transport: &server };
         let caps = PeriCaps {
             system_reminder: canonical,
@@ -46,9 +51,15 @@ async fn test_compact_reminder_replay_mpsc_wire() {
         // 位置表留空：本条用例只验证通知出口的字段与受众规则（存储序位置由历史分页用例覆盖）。
         let positions = std::collections::HashMap::new();
         let marks = crate::dispatch::ReplayMarks::new(&generation, "replay-test", &positions);
-        replay_persisted_session_history("replay-test", &history(), &sender, &caps, &marks)
-            .await
-            .unwrap();
+        dispatch::replay_persisted_session_history(
+            "replay-test",
+            &history(),
+            &sender,
+            &caps,
+            &marks,
+        )
+        .await
+        .unwrap();
         for index in 0..3 {
             let notification =
                 tokio::time::timeout(std::time::Duration::from_secs(2), client.recv())
@@ -95,9 +106,15 @@ async fn test_compact_reminder_replay_stdio_wire() {
         // 位置表留空：本条用例只验证通知出口的字段与受众规则（存储序位置由历史分页用例覆盖）。
         let positions = std::collections::HashMap::new();
         let marks = crate::dispatch::ReplayMarks::new(&generation, "replay-test", &positions);
-        replay_persisted_session_history("replay-test", &history(), &sender, &caps, &marks)
-            .await
-            .unwrap();
+        dispatch::replay_persisted_session_history(
+            "replay-test",
+            &history(),
+            &sender,
+            &caps,
+            &marks,
+        )
+        .await
+        .unwrap();
         let mut lines = BufReader::new(output_reader).lines();
         for index in 0..3 {
             let line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())

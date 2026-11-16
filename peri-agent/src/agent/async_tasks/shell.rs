@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
-use super::registry::BackgroundTaskRegistry;
+use crate::agent::async_tasks::registry::BackgroundTaskRegistry;
 use crate::agent::events::BackgroundTaskResult;
 
+#[must_use]
 pub fn truncate_bytes(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
@@ -24,6 +25,7 @@ pub fn truncate_bytes(s: &str, max_bytes: usize) -> String {
 /// 注册（Started 事件重复、cancel 句柄丢失），且首个 `complete()` 的 retain
 /// 清理后其余 `complete()` 因 existed=false 静默跳过，TUI 残留任务条目。
 /// 与 bg agent（`bg-{完整 UUID}`）保持一致，用完整 UUID（122 位熵）。
+#[must_use]
 pub fn bg_shell_task_id() -> String {
     format!("shell-{}", uuid::Uuid::now_v7())
 }
@@ -123,7 +125,7 @@ pub fn parse_background_timeout(
 #[allow(clippy::type_complexity)]
 pub fn finalize_bg_shell(
     registry: &Arc<BackgroundTaskRegistry>,
-    on_bg_complete: &Option<peri_acp_types::tasks::OnBgCompleteFn>,
+    on_bg_complete: Option<&peri_acp_types::tasks::OnBgCompleteFn>,
     ticket: peri_acp_types::tasks::TaskRegistrationTicket,
     prompt_summary: String,
     success: bool,
@@ -183,7 +185,7 @@ pub fn finalize_bg_shell(
 
 #[cfg(test)]
 mod tests {
-    use super::finalize_bg_shell;
+
     use crate::agent::async_tasks::{
         BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle,
     };
@@ -234,9 +236,9 @@ mod tests {
             }
             Ok(())
         });
-        finalize_bg_shell(
+        crate::agent::async_tasks::shell::finalize_bg_shell(
             &registry,
-            &Some(Arc::clone(&callback)),
+            Some(&callback),
             ticket.clone(),
             "test".into(),
             true,
@@ -247,7 +249,9 @@ mod tests {
         );
         assert_eq!(registry.active_count(), 1);
         assert!(matches!(
-            events.try_recv().unwrap(),
+            events.try_recv().expect(
+                "events try recv producer must deliver the expected test event before closing"
+            ),
             peri_acp_types::tasks::BgRegistryEvent::Updated { .. }
         ));
         assert_eq!(registry.retry_pending_deliveries(), 1);
@@ -269,7 +273,9 @@ mod tests {
     fn cancelled_shell_reports_owner_cleanup_once_without_second_registry_terminal() {
         let (registry, ticket) = registered_shell();
         let mut changes = registry.subscribe_events();
-        registry.cancel("shell-panic").unwrap();
+        registry
+            .cancel("shell-panic")
+            .expect("the cancel fixture result is required for this assertion");
         let called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let callback_called = Arc::clone(&called);
         let callback: peri_acp_types::tasks::OnBgCompleteFn = Arc::new(move |result, _| {
@@ -277,9 +283,9 @@ mod tests {
             callback_called.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         });
-        finalize_bg_shell(
+        crate::agent::async_tasks::shell::finalize_bg_shell(
             &registry,
-            &Some(Arc::clone(&callback)),
+            Some(&callback),
             ticket.clone(),
             "test".into(),
             true,
@@ -288,9 +294,9 @@ mod tests {
             false,
             None,
         );
-        finalize_bg_shell(
+        crate::agent::async_tasks::shell::finalize_bg_shell(
             &registry,
-            &Some(callback),
+            Some(&callback),
             ticket.clone(),
             "test".into(),
             true,
@@ -302,7 +308,12 @@ mod tests {
         assert_eq!(called.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(registry.active_count(), 0);
         assert!(matches!(
-            changes.try_recv().unwrap().event,
+            changes
+                .try_recv()
+                .expect(
+                    "changes try recv producer must deliver the expected test event before closing"
+                )
+                .event,
             peri_acp_types::tasks::BgRegistryEvent::Cancelled { .. }
         ));
         assert!(changes.try_recv().is_err());

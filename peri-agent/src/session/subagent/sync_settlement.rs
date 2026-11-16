@@ -9,9 +9,9 @@ use peri_acp_types::event::BackgroundTaskResult;
 use peri_acp_types::session::MqInput;
 use peri_acp_types::thread::AgentStatus;
 
-use super::terminal_settlement::TerminalMqRoute;
-use super::types::{ChildRunOutcome, SubagentFailure};
-use super::util::{extract_last_ai_text, format_handoff_notice};
+use crate::session::subagent::terminal_settlement::TerminalMqRoute;
+use crate::session::subagent::types::{ChildRunOutcome, SubagentFailure};
+
 use crate::session::Session;
 
 pub(super) type SyncExecutionResult =
@@ -88,7 +88,7 @@ pub(super) fn parent_result(
     agent_name: &str,
     child_thread_id: &str,
 ) -> BackgroundTaskResult {
-    let produced = extract_last_ai_text(session);
+    let produced = crate::session::subagent::util::extract_last_ai_text(session);
     let (success, output, subagent_failure) = match outcome {
         Ok(ChildRunOutcome::Settled) => (true, produced, None),
         Ok(ChildRunOutcome::Interrupted) => (
@@ -101,7 +101,10 @@ pub(super) fn parent_result(
                 SubagentFailure::handed_off(&receipt.child_thread_id, agent_name, receipt.clone());
             (
                 false,
-                format!("{produced}\n\n{}", format_handoff_notice(receipt)),
+                format!(
+                    "{produced}\n\n{}",
+                    crate::session::subagent::util::format_handoff_notice(receipt)
+                ),
                 failure.safe_failure(),
             )
         }
@@ -114,7 +117,10 @@ pub(super) fn parent_result(
                     error.user_facing_message(),
                     residual
                         .as_ref()
-                        .map(|receipt| format!("\n\n{}", format_handoff_notice(receipt)))
+                        .map(|receipt| format!(
+                            "\n\n{}",
+                            crate::session::subagent::util::format_handoff_notice(receipt)
+                        ))
                         .unwrap_or_default()
                 ),
                 failure,
@@ -128,7 +134,7 @@ pub(super) fn parent_result(
             }
             output.push_str(&format!(
                 "{}: {}",
-                super::types::handoff_failure_label(failure),
+                crate::session::subagent::types::handoff_failure_label(failure),
                 failure.error
             ));
             if let Some(flush) = &failure.flush_error {
@@ -136,12 +142,15 @@ pub(super) fn parent_result(
             }
             if let Some(receipt) = &failure.receipt {
                 output.push_str("\n\n");
-                output.push_str(&format_handoff_notice(receipt));
+                output.push_str(&crate::session::subagent::util::format_handoff_notice(
+                    receipt,
+                ));
             }
             let safe = match cause {
                 Some(cause) => SubagentFailure::safe_failure_from_error(child_thread_id, cause),
                 None => {
-                    let error = super::types::handoff_failure_agent_error(failure);
+                    let error =
+                        crate::session::subagent::types::handoff_failure_agent_error(failure);
                     SubagentFailure::safe_failure_from_error(child_thread_id, &error)
                 }
             };
@@ -154,7 +163,7 @@ pub(super) fn parent_result(
             let residual = error
                 .downcast_ref::<SubagentFailure>()
                 .and_then(|failure| failure.handoff())
-                .map(format_handoff_notice)
+                .map(crate::session::subagent::util::format_handoff_notice)
                 .unwrap_or_default();
             (
                 false,
@@ -169,7 +178,7 @@ pub(super) fn parent_result(
         prompt_summary: "synchronous sub-agent handoff".into(),
         success,
         output,
-        tool_calls_count: super::util::count_tool_calls_from_session(session),
+        tool_calls_count: crate::session::subagent::util::count_tool_calls_from_session(session),
         duration_ms: 0,
         timed_out: false,
         child_thread_id: Some(child_thread_id.to_string()),

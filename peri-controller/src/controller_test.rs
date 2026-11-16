@@ -20,7 +20,9 @@ use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::thread::CancelPolicy;
 use peri_runtime::{Runtime, SessionHandle, UnstampedEvent};
 
-use super::{AgentRef, Controller, LiteParams};
+use crate::controller::AgentRef;
+use crate::controller::Controller;
+use crate::controller::LiteParams;
 
 /// 记录型 mock 句柄：记录 run/cancel/submit_input 调用与销毁阶段顺序。
 struct MockHandle {
@@ -45,64 +47,113 @@ impl MockHandle {
     /// 带 drain 事件构造（销毁路径断言事件投递用）。
     fn with_drained(drained: Vec<UnstampedEvent>) -> Arc<Self> {
         let handle = Self::new();
-        *handle.drained.lock().unwrap() = drained.into();
+        *handle
+            .drained
+            .lock()
+            .expect("handle drained mutex must remain unpoisoned throughout the test") =
+            drained.into();
         handle
     }
 
     fn run_count(&self) -> usize {
-        *self.runs.lock().unwrap()
+        *self
+            .runs
+            .lock()
+            .expect("self runs mutex must remain unpoisoned throughout the test")
     }
 
     fn last_cancel(&self) -> Option<CancelRequest> {
-        self.last_cancel.lock().unwrap().clone()
+        self.last_cancel
+            .lock()
+            .expect("self last cancel mutex must remain unpoisoned throughout the test")
+            .clone()
     }
 
     fn last_input(&self) -> Option<MessageContent> {
-        self.last_input.lock().unwrap().clone()
+        self.last_input
+            .lock()
+            .expect("self last input mutex must remain unpoisoned throughout the test")
+            .clone()
     }
 
     /// 销毁阶段调用顺序（stop_accepting/cancel_owned/join/abort/persist/drain）。
     fn destroy_sequence(&self) -> Vec<&'static str> {
-        self.calls.lock().unwrap().clone()
+        self.calls
+            .lock()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
+            .clone()
     }
 }
 
 #[async_trait::async_trait]
 impl SessionHandle for MockHandle {
     async fn run(&self) -> Result<(), anyhow::Error> {
-        *self.runs.lock().unwrap() += 1;
+        *self
+            .runs
+            .lock()
+            .expect("self runs mutex must remain unpoisoned throughout the test") += 1;
         Ok(())
     }
 
     fn cancel(&self, request: &CancelRequest) {
-        *self.last_cancel.lock().unwrap() = Some(request.clone());
+        *self
+            .last_cancel
+            .lock()
+            .expect("self last cancel mutex must remain unpoisoned throughout the test") =
+            Some(request.clone());
     }
 
     fn submit_input(&self, input: MessageContent) -> Result<(), anyhow::Error> {
-        *self.last_input.lock().unwrap() = Some(input);
+        *self
+            .last_input
+            .lock()
+            .expect("self last input mutex must remain unpoisoned throughout the test") =
+            Some(input);
         Ok(())
     }
 
     fn stop_accepting(&self) {
-        self.calls.lock().unwrap().push("stop_accepting");
+        self.calls
+            .lock()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
+            .push("stop_accepting");
     }
     fn cancel_owned(&self) {
-        self.calls.lock().unwrap().push("cancel_owned");
+        self.calls
+            .lock()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
+            .push("cancel_owned");
     }
     async fn join(&self, _deadline: Duration) -> bool {
-        self.calls.lock().unwrap().push("join");
+        self.calls
+            .lock()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
+            .push("join");
         true
     }
     fn abort(&self) {
-        self.calls.lock().unwrap().push("abort");
+        self.calls
+            .lock()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
+            .push("abort");
     }
     async fn persist(&self) -> Result<(), anyhow::Error> {
-        self.calls.lock().unwrap().push("persist");
+        self.calls
+            .lock()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
+            .push("persist");
         Ok(())
     }
     fn drain(&self) -> Vec<UnstampedEvent> {
-        self.calls.lock().unwrap().push("drain");
-        self.drained.lock().unwrap().drain(..).collect()
+        self.calls
+            .lock()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
+            .push("drain");
+        self.drained
+            .lock()
+            .expect("self drained mutex must remain unpoisoned throughout the test")
+            .drain(..)
+            .collect()
     }
 }
 
@@ -118,11 +169,11 @@ fn ev(turn_id: &str, agent_id: &str) -> UnstampedEvent {
 
 /// 门面夹具：临时目录里的真实 SQLite 门面（Controller 只转发句柄，不解释存储语义）。
 async fn temp_facade() -> Arc<dyn SessionResources> {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().expect("the temporary test directory must be available");
     let facade =
         peri_resources::sessions::SessionResourcesImpl::open(tmp.path().join("threads.db"))
             .await
-            .unwrap();
+            .expect("the temporary session store fixture must open successfully");
     Arc::new(facade)
 }
 
@@ -182,10 +233,15 @@ async fn pick_runtime_injection_replaces_default() {
 async fn run_session_forwards_via_runtime_to_handle() {
     let handle = MockHandle::new();
     let runtime = Arc::new(Runtime::new());
-    runtime.register("s1", Arc::clone(&handle)).unwrap();
+    runtime
+        .register("s1", Arc::clone(&handle))
+        .expect("the register fixture result is required for this assertion");
     let controller = Controller::new(temp_facade().await).with_runtime(runtime);
 
-    controller.run_session("s1").await.unwrap();
+    controller
+        .run_session("s1")
+        .await
+        .expect("the run session fixture result is required for this assertion");
 
     assert_eq!(handle.run_count(), 1, "run Session 经 Runtime 映射直达句柄");
 }
@@ -195,7 +251,7 @@ async fn run_session_unknown_session_typed_error() {
     let controller = Controller::new(temp_facade().await);
     let err = controller.run_session("missing").await.unwrap_err();
     assert!(
-        matches!(&err, super::ControllerError::RunFailed(s, _) if s == "missing"),
+        matches!(&err, crate::error::ControllerError::RunFailed(s, _) if s == "missing"),
         "未注册 session 包 context 为 RunFailed: {err}"
     );
 }
@@ -206,14 +262,18 @@ async fn run_session_unknown_session_typed_error() {
 async fn cancel_forwards_triple_to_handle() {
     let handle = MockHandle::new();
     let runtime = Arc::new(Runtime::new());
-    runtime.register("s1", Arc::clone(&handle)).unwrap();
+    runtime
+        .register("s1", Arc::clone(&handle))
+        .expect("the register fixture result is required for this assertion");
     let controller = Controller::new(temp_facade().await).with_runtime(runtime);
 
     let req = CancelRequest::new(
         AttemptIdentity::new("s1", SessionEpoch::initial(), "turn-7", AttemptId::new()),
         CancelPolicy::Cascade,
     );
-    controller.cancel(&req).unwrap();
+    controller
+        .cancel(&req)
+        .expect("the cancel fixture result is required for this assertion");
 
     let received = handle.last_cancel().expect("cancel 请求应到达句柄");
     assert_eq!(
@@ -238,7 +298,7 @@ async fn cancel_unknown_session_typed_error() {
     );
     let err = controller.cancel(&req).unwrap_err();
     assert!(
-        matches!(&err, super::ControllerError::CancelFailed(s, _) if s == "missing"),
+        matches!(&err, crate::error::ControllerError::CancelFailed(s, _) if s == "missing"),
         "未注册 session 包 context 为 CancelFailed: {err}"
     );
 }
@@ -270,9 +330,15 @@ async fn publish_and_subscribe_events() {
     controller.publish(e2.clone());
 
     // 订阅分支：订阅者按投递序收到事件（ACP 协议化输入）
-    let received = sub.recv().await.unwrap();
+    let received = sub
+        .recv()
+        .await
+        .expect("sub recv producer must deliver the expected test event before closing");
     assert_eq!(received.envelope, e1);
-    let received = sub.recv().await.unwrap();
+    let received = sub
+        .recv()
+        .await
+        .expect("sub recv producer must deliver the expected test event before closing");
     assert_eq!(received.envelope, e2);
 }
 
@@ -294,12 +360,19 @@ async fn bypass_consumer_subscribes_same_branch() {
     controller.publish(env.clone());
 
     assert_eq!(
-        acp.recv().await.unwrap().envelope,
+        acp.recv()
+            .await
+            .expect("acp recv producer must deliver the expected test event before closing")
+            .envelope,
         env,
         "ACP 订阅者收到事件"
     );
     assert_eq!(
-        observer.recv().await.unwrap().envelope,
+        observer
+            .recv()
+            .await
+            .expect("observer recv producer must deliver the expected test event before closing")
+            .envelope,
         env,
         "旁路消费者（观测）收到同一事件"
     );
@@ -348,8 +421,12 @@ async fn sessions_channel_preserved() {
 #[tokio::test]
 async fn session_enumeration_reflects_runtime_map() {
     let runtime = Arc::new(Runtime::new());
-    runtime.register("s1", MockHandle::new()).unwrap();
-    runtime.register("s2", MockHandle::new()).unwrap();
+    runtime
+        .register("s1", MockHandle::new())
+        .expect("the register fixture result is required for this assertion");
+    runtime
+        .register("s2", MockHandle::new())
+        .expect("the register fixture result is required for this assertion");
     let controller = Controller::new(temp_facade().await).with_runtime(runtime);
 
     let mut ids = controller.session_ids();
@@ -362,7 +439,7 @@ async fn session_enumeration_reflects_runtime_map() {
     controller
         .destroy_session("s1", Duration::from_secs(5))
         .await
-        .unwrap();
+        .expect("the destroy session fixture result is required for this assertion");
     assert_eq!(controller.session_ids(), vec!["s2".to_string()]);
 }
 
@@ -370,14 +447,16 @@ async fn session_enumeration_reflects_runtime_map() {
 async fn join_session_forwards_deadline_result() {
     let handle = MockHandle::new();
     let runtime = Arc::new(Runtime::new());
-    runtime.register("s1", Arc::clone(&handle)).unwrap();
+    runtime
+        .register("s1", Arc::clone(&handle))
+        .expect("the register fixture result is required for this assertion");
     let controller = Controller::new(temp_facade().await).with_runtime(runtime);
 
     assert!(
         controller
             .join_session("s1", Duration::from_secs(5))
             .await
-            .unwrap(),
+            .expect("the from secs fixture result is required for this assertion"),
         "deadline 内结束返回 true"
     );
     assert_eq!(handle.destroy_sequence(), vec!["join"]);
@@ -388,7 +467,7 @@ async fn join_session_forwards_deadline_result() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&err, super::ControllerError::JoinFailed(s, _) if s == "missing"),
+        matches!(&err, crate::error::ControllerError::JoinFailed(s, _) if s == "missing"),
         "未注册 session 包 context 为 JoinFailed: {err}"
     );
 }
@@ -397,14 +476,16 @@ async fn join_session_forwards_deadline_result() {
 async fn destroy_session_orchestrates_phases_and_publishes_drained() {
     let handle = MockHandle::with_drained(vec![ev("t1", "a1"), ev("t2", "a1")]);
     let runtime = Arc::new(Runtime::new());
-    runtime.register("s1", Arc::clone(&handle)).unwrap();
+    runtime
+        .register("s1", Arc::clone(&handle))
+        .expect("the register fixture result is required for this assertion");
     let controller = Controller::new(temp_facade().await).with_runtime(runtime);
     let mut sub = controller.subscribe();
 
     let drained = controller
         .destroy_session("s1", Duration::from_secs(5))
         .await
-        .unwrap();
+        .expect("the destroy session fixture result is required for this assertion");
 
     // §9 六阶段编排顺序（经 Runtime::destroy 固定：停收 → 取消 owned → join →
     // 未超时无 abort → 持久化 → drain）
@@ -420,11 +501,20 @@ async fn destroy_session_orchestrates_phases_and_publishes_drained() {
     assert_eq!(drained[0].session_id, "s1");
     assert_eq!(drained[0].session_seq, SessionSeq::initial());
     assert_eq!(
-        sub.recv().await.unwrap().envelope,
+        sub.recv()
+            .await
+            .expect("sub recv producer must deliver the expected test event before closing")
+            .envelope,
         drained[0],
         "drain 事件进入订阅分支"
     );
-    assert_eq!(sub.recv().await.unwrap().envelope, drained[1]);
+    assert_eq!(
+        sub.recv()
+            .await
+            .expect("sub recv producer must deliver the expected test event before closing")
+            .envelope,
+        drained[1]
+    );
 }
 
 #[tokio::test]
@@ -435,7 +525,7 @@ async fn destroy_session_unknown_typed_error() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&err, super::ControllerError::DestroyFailed(s, _) if s == "missing"),
+        matches!(&err, crate::error::ControllerError::DestroyFailed(s, _) if s == "missing"),
         "未注册 session 包 context 为 DestroyFailed: {err}"
     );
 }
@@ -446,12 +536,14 @@ async fn destroy_session_unknown_typed_error() {
 async fn submit_input_forwards_via_runtime_to_handle() {
     let handle = MockHandle::new();
     let runtime = Arc::new(Runtime::new());
-    runtime.register("s1", Arc::clone(&handle)).unwrap();
+    runtime
+        .register("s1", Arc::clone(&handle))
+        .expect("the register fixture result is required for this assertion");
     let controller = Controller::new(temp_facade().await).with_runtime(runtime);
 
     controller
         .submit_input("s1", MessageContent::text("hi"))
-        .unwrap();
+        .expect("the submit input fixture result is required for this assertion");
     assert_eq!(
         handle.last_input(),
         Some(MessageContent::text("hi")),
@@ -463,7 +555,7 @@ async fn submit_input_forwards_via_runtime_to_handle() {
         .submit_input("missing", MessageContent::text("hi"))
         .unwrap_err();
     assert!(
-        matches!(&err, super::ControllerError::InjectFailed(s, _) if s == "missing"),
+        matches!(&err, crate::error::ControllerError::InjectFailed(s, _) if s == "missing"),
         "未注册 session 包 context 为 InjectFailed: {err}"
     );
 }
@@ -485,7 +577,14 @@ async fn subscription_register_and_unsubscribe() {
         EventDeliveryClass::Critical,
     );
     controller.publish(e1.clone());
-    assert_eq!(sub.recv().await.unwrap().envelope, e1, "注册订阅者收到事件");
+    assert_eq!(
+        sub.recv()
+            .await
+            .expect("sub recv producer must deliver the expected test event before closing")
+            .envelope,
+        e1,
+        "注册订阅者收到事件"
+    );
 
     // 显式退订：drop 接收端；不影响其他订阅者（broadcast 语义）
     let mut observer = controller.subscribe();
@@ -500,7 +599,11 @@ async fn subscription_register_and_unsubscribe() {
     );
     controller.publish(e2.clone());
     assert_eq!(
-        observer.recv().await.unwrap().envelope,
+        observer
+            .recv()
+            .await
+            .expect("observer recv producer must deliver the expected test event before closing")
+            .envelope,
         e2,
         "退订不影响其他订阅者"
     );
@@ -519,12 +622,12 @@ async fn slow_subscriber_sees_lagged_instead_of_silent_drop() {
         SessionSeq::initial(),
         EventDeliveryClass::Critical,
     );
-    for _ in 0..=super::EVENT_BROADCAST_CAPACITY {
+    for _ in 0..=crate::controller::EVENT_BROADCAST_CAPACITY {
         controller.publish(env.clone());
     }
     let err = sub.recv().await.unwrap_err();
     assert!(
-        matches!(err, super::SubscriptionError::Lagged(skipped) if skipped > 0),
+        matches!(err, crate::error::SubscriptionError::Lagged(skipped) if skipped > 0),
         "慢消费者必须显式收到 Lagged: {err:?}"
     );
 }

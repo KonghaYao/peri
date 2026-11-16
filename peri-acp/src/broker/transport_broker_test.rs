@@ -11,7 +11,16 @@ use peri_acp_types::interaction::{
 };
 use serde_json::json;
 
-use super::*;
+use crate::broker::transport_broker::AcpTransportBroker;
+use agent_client_protocol::schema::v1::RequestPermissionResponse;
+use agent_client_protocol::schema::v1::SessionId;
+use peri_acp_types::interaction::ApprovalDecision;
+use peri_acp_types::interaction::ApprovalItem;
+use peri_acp_types::interaction::InteractionContext;
+use peri_acp_types::interaction::TrustedInteractionOwner;
+use peri_acp_types::interaction::UserInteractionBroker;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// 测试用 session-owned 交互门：与生产同语义（session 持有、broker 借用）。
 fn interaction_gate() -> Arc<tokio::sync::Mutex<()>> {
@@ -79,7 +88,10 @@ fn sample_questions() -> Vec<QuestionItem> {
 
 #[test]
 fn test_build_elicitation_params_single_select_form() {
-    let params = build_elicitation_params(&sample_questions(), SessionId::new("s1"));
+    let params = crate::broker::transport_broker::build_elicitation_params(
+        &sample_questions(),
+        SessionId::new("s1"),
+    );
 
     // 顶层协议形状：mode=form + sessionId scope + message
     assert_eq!(params["mode"], "form");
@@ -102,7 +114,10 @@ fn test_build_elicitation_params_single_select_form() {
 
 #[test]
 fn test_build_elicitation_params_multi_select_and_free_text() {
-    let params = build_elicitation_params(&sample_questions(), SessionId::new("s1"));
+    let params = crate::broker::transport_broker::build_elicitation_params(
+        &sample_questions(),
+        SessionId::new("s1"),
+    );
     let props = &params["requestedSchema"]["properties"];
 
     // 多选：type=array + items.anyOf，option description 注入 items 层
@@ -123,7 +138,8 @@ fn test_build_elicitation_params_multi_select_and_free_text() {
 
 #[test]
 fn test_build_elicitation_params_empty_questions() {
-    let params = build_elicitation_params(&[], SessionId::new("s1"));
+    let params =
+        crate::broker::transport_broker::build_elicitation_params(&[], SessionId::new("s1"));
     assert_eq!(params["mode"], "form");
     assert_eq!(params["sessionId"], "s1");
     assert_eq!(
@@ -137,7 +153,7 @@ fn test_build_elicitation_params_empty_questions() {
 
 #[test]
 fn test_parse_accept_maps_text_and_selected() {
-    let response = parse_elicitation_response(
+    let response = crate::broker::transport_broker::parse_elicitation_response(
         json!({
             "action": "accept",
             "content": {
@@ -167,7 +183,7 @@ fn test_parse_accept_maps_text_and_selected() {
 #[test]
 fn test_parse_accept_boolean_and_integer_to_text() {
     // map_elicitation_answer 的 Boolean/Integer 分支 → text（字符串化）。
-    let response = parse_elicitation_response(
+    let response = crate::broker::transport_broker::parse_elicitation_response(
         json!({
             "action": "accept",
             "content": { "choice": true, "text": 42 }
@@ -184,7 +200,10 @@ fn test_parse_accept_boolean_and_integer_to_text() {
 #[test]
 fn test_parse_accept_missing_content_keeps_none() {
     // content 缺失/缺 q_id → text=None（不兜底空串，区别于 cancel）。
-    let response = parse_elicitation_response(json!({ "action": "accept" }), sample_questions());
+    let response = crate::broker::transport_broker::parse_elicitation_response(
+        json!({ "action": "accept" }),
+        sample_questions(),
+    );
     let InteractionResponse::Answers(answers) = response else {
         panic!("accept 应返回 Answers: {response:?}");
     };
@@ -198,7 +217,10 @@ fn test_parse_accept_missing_content_keeps_none() {
 
 #[test]
 fn test_parse_decline_rejected() {
-    let response = parse_elicitation_response(json!({ "action": "decline" }), sample_questions());
+    let response = crate::broker::transport_broker::parse_elicitation_response(
+        json!({ "action": "decline" }),
+        sample_questions(),
+    );
     assert!(
         matches!(response, InteractionResponse::Rejected),
         "decline 应返回 Rejected: {response:?}"
@@ -207,7 +229,10 @@ fn test_parse_decline_rejected() {
 
 #[test]
 fn test_parse_cancel_empty_answers() {
-    let response = parse_elicitation_response(json!({ "action": "cancel" }), sample_questions());
+    let response = crate::broker::transport_broker::parse_elicitation_response(
+        json!({ "action": "cancel" }),
+        sample_questions(),
+    );
     let InteractionResponse::Answers(answers) = response else {
         panic!("cancel 应返回 Answers: {response:?}");
     };
@@ -233,7 +258,10 @@ fn test_parse_cancel_with_unanswered_cause() {
             json!({ "action": "cancel", "_meta": { "peri.elicitationUnanswered": cause_value } }),
             json!({ "action": "cancel", "_meta": { "peri.elicitationUnanswered": cause_value, "other": 1 } }),
         ] {
-            let response = parse_elicitation_response(wire.clone(), sample_questions());
+            let response = crate::broker::transport_broker::parse_elicitation_response(
+                wire.clone(),
+                sample_questions(),
+            );
             assert!(
                 matches!(response, InteractionResponse::Unanswered { .. }),
                 "{label} 的 cancel 不得退化为空 Answers: {wire} → {response:?}"
@@ -246,7 +274,7 @@ fn test_parse_cancel_with_unanswered_cause() {
 /// 自由文本原样转述给模型。
 #[test]
 fn test_parse_cancel_unanswered_cause_values() {
-    let known = parse_elicitation_response(
+    let known = crate::broker::transport_broker::parse_elicitation_response(
         json!({
             "action": "cancel",
             "_meta": { "peri.elicitationUnanswered": "non_interactive_client" }
@@ -263,7 +291,7 @@ fn test_parse_cancel_unanswered_cause_values() {
         "wire 字面值 non_interactive_client 必须映射到已知原因: {known:?}"
     );
 
-    let unknown = parse_elicitation_response(
+    let unknown = crate::broker::transport_broker::parse_elicitation_response(
         json!({
             "action": "cancel",
             "_meta": { "peri.elicitationUnanswered": "no_free_text_ever" }
@@ -311,7 +339,10 @@ fn test_parse_does_not_infer_unanswered_without_declaration() {
         ("响应体畸形", json!({ "action": 7 })),
     ];
     for (label, wire) in cases {
-        let response = parse_elicitation_response(wire.clone(), sample_questions());
+        let response = crate::broker::transport_broker::parse_elicitation_response(
+            wire.clone(),
+            sample_questions(),
+        );
         assert!(
             !matches!(response, InteractionResponse::Unanswered { .. }),
             "{label} 不得产出 Unanswered: {wire} → {response:?}"
@@ -324,7 +355,7 @@ fn test_parse_does_not_infer_unanswered_without_declaration() {
 /// 的裸 cancel 同形，不得被升级成 `Unanswered`。
 #[test]
 fn test_parse_cancel_without_declaration_keeps_legacy_empty_answers() {
-    let response = parse_elicitation_response(
+    let response = crate::broker::transport_broker::parse_elicitation_response(
         json!({ "action": "cancel", "_meta": { "peri.other": true } }),
         sample_questions(),
     );
@@ -344,7 +375,7 @@ fn test_parse_permission_cancelled_maps_to_cancel_reject() {
         "outcome": { "outcome": "cancelled" }
     }))
     .unwrap();
-    let decision = map_permission_response(response);
+    let decision = crate::broker::transport_broker::map_permission_response(response);
     let ApprovalDecision::Reject { reason, source } = decision else {
         panic!("cancelled permission 应映射为 Reject")
     };
@@ -355,7 +386,10 @@ fn test_parse_permission_cancelled_maps_to_cancel_reject() {
 #[test]
 fn test_parse_unknown_action_empty_answers() {
     // 未知 action（Other 变体）→ 空 Answers 兜底。
-    let response = parse_elicitation_response(json!({ "action": "mystery" }), sample_questions());
+    let response = crate::broker::transport_broker::parse_elicitation_response(
+        json!({ "action": "mystery" }),
+        sample_questions(),
+    );
     let InteractionResponse::Answers(answers) = response else {
         panic!("未知 action 应返回空 Answers: {response:?}");
     };
@@ -366,7 +400,10 @@ fn test_parse_unknown_action_empty_answers() {
 #[test]
 fn test_parse_invalid_response_empty_answers() {
     // 响应解析失败 → 空 Answers 兜底（不 panic）。
-    let response = parse_elicitation_response(json!({ "not": "a response" }), sample_questions());
+    let response = crate::broker::transport_broker::parse_elicitation_response(
+        json!({ "not": "a response" }),
+        sample_questions(),
+    );
     let InteractionResponse::Answers(answers) = response else {
         panic!("解析失败应返回空 Answers: {response:?}");
     };
@@ -376,11 +413,9 @@ fn test_parse_invalid_response_empty_answers() {
 
 // ─── AcpTransportBroker 行为：ApprovalMode / timeout（mock transport） ───
 
-use std::{
-    future::{poll_fn, Future},
-    sync::Mutex,
-    task::Poll,
-};
+use std::future::Future;
+use std::sync::Mutex;
+use std::task::Poll;
 
 use crate::transport::types::AcpError;
 use crate::transport::RequestTransport;
@@ -524,7 +559,7 @@ async fn request_with_first_pending_marker(
     let request = broker.request(owner(), context);
     tokio::pin!(request);
     let mut marker = Some(marker);
-    poll_fn(|cx| match request.as_mut().poll(cx) {
+    std::future::poll_fn(|cx| match request.as_mut().poll(cx) {
         Poll::Pending => {
             if let Some(marker) = marker.take() {
                 let _ = marker.send(());
@@ -703,7 +738,7 @@ async fn test_auto_approve_bypasses_busy_transport_gate() {
 
     let approval = broker.request(owner(), approval_context_with_items(2));
     tokio::pin!(approval);
-    let first_poll = poll_fn(|cx| Poll::Ready(approval.as_mut().poll(cx))).await;
+    let first_poll = std::future::poll_fn(|cx| Poll::Ready(approval.as_mut().poll(cx))).await;
     let Poll::Ready(InteractionResponse::Decisions(decisions)) = first_poll else {
         panic!("AutoApprove must be Ready on its first poll while the transport gate is busy");
     };
@@ -815,11 +850,11 @@ async fn test_questions_timeout_returns_rejected() {
 async fn test_questions_timeout_notifies_client_cancel_request() {
     // 回归：超时放弃 elicitation 后必须通知客户端撤销，否则 TUI 面板会永久
     // pending，后续输入无法作为普通 prompt 发出。
-    use crate::transport::mpsc::mpsc_transport_pair;
+    use crate::transport::mpsc as mpsc_functions;
     use crate::transport::types::{IncomingMessage, RequestId};
     use crate::transport::{AcpRequestBridge, AcpTransport};
 
-    let (client, server) = mpsc_transport_pair();
+    let (client, server) = mpsc_functions::mpsc_transport_pair();
     let broker = AcpTransportBroker::new(
         Arc::new(AcpRequestBridge(Arc::new(server))),
         SessionId::new("s1"),
@@ -895,31 +930,35 @@ async fn test_questions_transport_error_returns_empty_answers() {
 #[test]
 fn test_parse_ask_user_timeout_env_values() {
     assert_eq!(
-        parse_ask_user_timeout(None),
+        crate::broker::transport_broker::parse_ask_user_timeout(None),
         Some(Duration::from_secs(300)),
         "缺失 → 默认 300"
     );
     assert_eq!(
-        parse_ask_user_timeout(Some("300")),
+        crate::broker::transport_broker::parse_ask_user_timeout(Some("300")),
         Some(Duration::from_secs(300))
     );
     assert_eq!(
-        parse_ask_user_timeout(Some("1")),
+        crate::broker::transport_broker::parse_ask_user_timeout(Some("1")),
         Some(Duration::from_secs(1))
     );
-    assert_eq!(parse_ask_user_timeout(Some("0")), None, "0 → 不超时");
     assert_eq!(
-        parse_ask_user_timeout(Some("abc")),
+        crate::broker::transport_broker::parse_ask_user_timeout(Some("0")),
+        None,
+        "0 → 不超时"
+    );
+    assert_eq!(
+        crate::broker::transport_broker::parse_ask_user_timeout(Some("abc")),
         Some(Duration::from_secs(300)),
         "非法值回落 300"
     );
     assert_eq!(
-        parse_ask_user_timeout(Some("-5")),
+        crate::broker::transport_broker::parse_ask_user_timeout(Some("-5")),
         Some(Duration::from_secs(300)),
         "负数解析失败回落 300"
     );
     assert_eq!(
-        parse_ask_user_timeout(Some("")),
+        crate::broker::transport_broker::parse_ask_user_timeout(Some("")),
         Some(Duration::from_secs(300))
     );
 }
@@ -929,9 +968,15 @@ fn test_parse_ask_user_timeout_env_values() {
 #[test]
 fn test_ask_user_timeout_reads_env() {
     std::env::set_var("PERI_ASK_USER_TIMEOUT_SECS", "0");
-    assert_eq!(ask_user_timeout(), None);
+    assert_eq!(crate::broker::transport_broker::ask_user_timeout(), None);
     std::env::set_var("PERI_ASK_USER_TIMEOUT_SECS", "42");
-    assert_eq!(ask_user_timeout(), Some(Duration::from_secs(42)));
+    assert_eq!(
+        crate::broker::transport_broker::ask_user_timeout(),
+        Some(Duration::from_secs(42))
+    );
     std::env::remove_var("PERI_ASK_USER_TIMEOUT_SECS");
-    assert_eq!(ask_user_timeout(), Some(Duration::from_secs(300)));
+    assert_eq!(
+        crate::broker::transport_broker::ask_user_timeout(),
+        Some(Duration::from_secs(300))
+    );
 }

@@ -8,31 +8,26 @@ use tokio::sync::oneshot;
 
 use peri_acp_types::identity::AgentId;
 
-use super::factory::ResumeClaim;
-use super::lifecycle::drain_subagent_events;
-use super::sync_settlement::{
-    parent_result, settle_with_retry, terminal_status, terminal_status_for_outcome,
-    SyncExecutionResult,
-};
-use super::terminal_settlement::{
-    settle_terminal_without_result, TerminalMqRoute, TerminalOwnership,
-};
-use super::types::{
+use crate::agent::async_tasks::TaskManager;
+use crate::agent::events::{AgentEventHandler, ExecutorEvent, FnEventHandler};
+
+use crate::agent::LangfuseBridgeLike;
+use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
+use crate::session::subagent::factory::ResumeClaim;
+
+use crate::session::subagent::lifecycle::DeregisterGuard;
+
+use crate::session::subagent::sync_settlement::SyncExecutionResult;
+
+use crate::session::subagent::terminal_settlement::TerminalMqRoute;
+use crate::session::subagent::terminal_settlement::TerminalOwnership;
+use crate::session::subagent::types::{
     ChildHandoffReason, ChildHandoffReceipt, ChildRunOutcome, SubagentFailure,
     SubagentLifecycleStart, SubagentLifecycleStop,
 };
-use super::util::extract_last_ai_text;
-use super::v2_bridge::{forward_subagent_start_v1, forward_subagent_stop_v1, V2SubagentContext};
-use super::{
-    build_subagent_start_v2, build_subagent_stop_v2_with_failure, emit_subagent_start_v2,
-    emit_subagent_stop_v2_with_failure, on_subagent_stop_handler, DeregisterGuard,
-    SubagentStopV2Input,
-};
-use crate::agent::async_tasks::TaskManager;
-use crate::agent::events::{AgentEventHandler, ExecutorEvent, FnEventHandler};
-use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder_for_completion;
-use crate::agent::LangfuseBridgeLike;
-use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
+
+use crate::session::subagent::v2_bridge::SubagentStopV2Input;
+use crate::session::subagent::v2_bridge::V2SubagentContext;
 use crate::session::Session;
 use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::thread::{ThreadId, WorkState};
@@ -243,13 +238,15 @@ where
         let outcome = await_execution(execution).await;
         if owns_terminal {
             if let Some(store) = settlement_store.as_deref() {
-                let status = terminal_status(&outcome, &session);
-                if let Err(error) = settle_terminal_without_result(
-                    store,
-                    &ThreadId::from(child_thread_id.clone()),
-                    status,
-                )
-                .await
+                let status =
+                    crate::session::subagent::sync_settlement::terminal_status(&outcome, &session);
+                if let Err(error) =
+                    crate::session::subagent::terminal_settlement::settle_terminal_without_result(
+                        store,
+                        &ThreadId::from(child_thread_id.clone()),
+                        status,
+                    )
+                    .await
                 {
                     tracing::error!(%child_thread_id, %error, "sync child terminal write failed without detach");
                 }
@@ -308,8 +305,8 @@ where
             let outcome = await_execution(execution).await;
             // The child task has joined; only this producer can prove its resources stopped.
             manager.confirm_external_execution_stopped(&registration);
-            let status = terminal_status(&outcome, &worker_session);
-            let result = parent_result(
+            let status = crate::session::subagent::sync_settlement::terminal_status(&outcome, &worker_session);
+            let result = crate::session::subagent::sync_settlement::parent_result(
                 &outcome,
                 &worker_session,
                 &worker_task_id,
@@ -333,7 +330,7 @@ where
             // finalize 失败时用同一 ID 与正文重试；改写 payload 会让重试变成 Conflict，
             // registry 交付因此永久 pending。稳定 ID 的重复提交是幂等 Existing。
             if let Err(error) =
-                settle_with_retry(&worker_terminal_route, &worker_thread_id, status, &message).await
+                crate::session::subagent::sync_settlement::settle_with_retry(&worker_terminal_route, &worker_thread_id, status, &message).await
             {
                 tracing::error!(
                     %worker_thread_id,
@@ -390,13 +387,15 @@ where
         let outcome =
             await_execution(execution.expect("rejected factory leaves execution owned")).await;
         if terminal_ownership.reclaim_abandoned_handoff() {
-            let status = terminal_status(&outcome, &session);
-            if let Err(error) = settle_terminal_without_result(
-                terminal_route.store.as_ref(),
-                &ThreadId::from(child_thread_id.clone()),
-                status,
-            )
-            .await
+            let status =
+                crate::session::subagent::sync_settlement::terminal_status(&outcome, &session);
+            if let Err(error) =
+                crate::session::subagent::terminal_settlement::settle_terminal_without_result(
+                    terminal_route.store.as_ref(),
+                    &ThreadId::from(child_thread_id.clone()),
+                    status,
+                )
+                .await
             {
                 tracing::error!(%child_thread_id, %error, "sync child terminal write failed after rejected handoff");
             }
@@ -513,7 +512,7 @@ pub(super) async fn run_sync_subagent(
     if let Some(on_start) = &on_subagent_start {
         on_start(child_thread_id, &agent_name, &cwd);
     }
-    emit_subagent_start_v2(
+    crate::session::subagent::emit_subagent_start_v2(
         &v2_ctx.event_bus,
         v2_ctx.context.turn_id(),
         parent_agent_id,
@@ -522,9 +521,9 @@ pub(super) async fn run_sync_subagent(
         false,
         parent_tool_call_id.clone(),
     );
-    forward_subagent_start_v1(
+    crate::session::subagent::v2_bridge::forward_subagent_start_v1(
         event_handler.as_ref(),
-        build_subagent_start_v2(
+        crate::session::subagent::build_subagent_start_v2(
             v2_ctx.context.turn_id(),
             parent_agent_id,
             v2_ctx.agent_id,
@@ -535,19 +534,20 @@ pub(super) async fn run_sync_subagent(
     );
 
     // v2 事件转发器：子 EventBus → 父事件 handler（TUI 可见子 agent 工具调用/AI 文本）
-    let forwarder_handle = spawn_subagent_event_forwarder_for_completion(
-        v2_ctx.event_handles,
-        event_handler.clone(),
-        langfuse_bridge.clone(),
-        child_thread_id.to_string(),
-    );
+    let forwarder_handle =
+        crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder_for_completion(
+            v2_ctx.event_handles,
+            event_handler.clone(),
+            langfuse_bridge.clone(),
+            child_thread_id.to_string(),
+        );
     let child_agent_id = v2_ctx.agent_id;
     let event_bus = v2_ctx.event_bus;
 
     // 运行 v2 ReAct 循环
     let execution_turn = v2_ctx.context.session.turn.clone();
     let mut outcome = std::panic::AssertUnwindSafe(
-        super::child_runner::run_child_with_handoff_signal(
+        crate::session::subagent::child_runner::run_child_with_handoff_signal(
             v2_ctx.context,
             max_iterations,
             &session,
@@ -562,7 +562,7 @@ pub(super) async fn run_sync_subagent(
     });
     // 已提交的交接不能替代后续 history flush 的确认。
     let mut history_flush_failed = false;
-    if let Err(error) = super::lifecycle::flush_session_history(&session).await {
+    if let Err(error) = crate::session::subagent::lifecycle::flush_session_history(&session).await {
         history_flush_failed = true;
         outcome = match outcome {
             ChildRunOutcome::HandedOff { receipt } => ChildRunOutcome::Failed {
@@ -632,7 +632,7 @@ pub(super) async fn run_sync_subagent(
             permit.finish(Ok(()));
         }
     }
-    let close_error = super::close::settle_explicit_close(&session, interrupted)
+    let close_error = crate::session::subagent::close::settle_explicit_close(&session, interrupted)
         .await
         .err();
     if let Some(error) = &close_error {
@@ -673,7 +673,8 @@ pub(super) async fn run_sync_subagent(
     // 终态与工作意图共用同一个映射：真实取消 → Cancelled + Stopped；其余中断/失败
     // → Error + Idle；只有 Settled 才是 Done。写入推迟到事件排空之后：排空失败要把
     // 本次执行收口为 Error，不能先写 Done 再改写既有终态。
-    let mut terminal_status_value = terminal_status_for_outcome(&outcome, &session);
+    let mut terminal_status_value =
+        crate::session::subagent::sync_settlement::terminal_status_for_outcome(&outcome, &session);
     if let Some(error) = &close_error {
         let error: crate::error::AgentError =
             anyhow::anyhow!("child close incomplete: {error}").into();
@@ -682,9 +683,9 @@ pub(super) async fn run_sync_subagent(
         stop_failure = SubagentFailure::safe_failure_from_error(child_thread_id, &error);
     }
     // 这里只触发 SubagentStop hook；终态写入在排空结果确定后执行一次。
-    let mut settlement_error = on_subagent_stop_handler(
-        &on_subagent_stop,
-        &None,
+    let mut settlement_error = crate::session::subagent::on_subagent_stop_handler(
+        on_subagent_stop.as_ref(),
+        None,
         &agent_name,
         child_thread_id,
         &stop_result,
@@ -706,7 +707,7 @@ pub(super) async fn run_sync_subagent(
         stop_failure = SubagentFailure::safe_failure_from_error(child_thread_id, error);
     }
     if let Some(subagent_turn_id) = subagent_turn_id {
-        emit_subagent_stop_v2_with_failure(
+        crate::session::subagent::emit_subagent_stop_v2_with_failure(
             &event_bus,
             SubagentStopV2Input {
                 turn_id: subagent_turn_id,
@@ -722,7 +723,13 @@ pub(super) async fn run_sync_subagent(
     // Close the child producer after the terminal v2 event. Awaiting the
     // forwarder drains queued render/observe events (including visible deltas)
     // before the synchronous v1 stop reaches the parent handler.
-    if let Err(error) = drain_subagent_events(event_bus, forwarder_handle, langfuse_bridge).await {
+    if let Err(error) = crate::session::subagent::lifecycle::drain_subagent_events(
+        event_bus,
+        forwarder_handle,
+        langfuse_bridge,
+    )
+    .await
+    {
         tracing::error!(thread_id = %child_thread_id, error = %error.user_facing_message(), causes = ?error.cause_chain(), "sync child event forwarding barrier incomplete");
         settlement_error = Some(anyhow::anyhow!("child event drain failed: {error}").into());
         // 关闭失败时即使 drain 也失败，仍不得写终态：资源未释放的事实必须保持
@@ -796,12 +803,13 @@ pub(super) async fn run_sync_subagent(
     // close_failed / handoff 让位 / resume 认领都不会进入这里：`stop_resources`
     // 已按同一组条件在写终态前收敛为 None。
     if let Some(store) = stop_resources.as_deref() {
-        if let Err(error) = settle_terminal_without_result(
-            store,
-            &ThreadId::from(child_thread_id),
-            terminal_status_value,
-        )
-        .await
+        if let Err(error) =
+            crate::session::subagent::terminal_settlement::settle_terminal_without_result(
+                store,
+                &ThreadId::from(child_thread_id),
+                terminal_status_value,
+            )
+            .await
         {
             tracing::error!(thread_id = %child_thread_id, %error, "terminal_status_persist_failed");
             terminal_write_failed = true;
@@ -820,9 +828,9 @@ pub(super) async fn run_sync_subagent(
     // observe_event_to_executor 同步映射），保证 Stopped 在 turn 收尾前到达
     // 父协议化链路（TUI 容器销毁 / depth 配对）。
     if let Some(subagent_turn_id) = subagent_turn_id {
-        forward_subagent_stop_v1(
+        crate::session::subagent::v2_bridge::forward_subagent_stop_v1(
             event_handler.as_ref(),
-            build_subagent_stop_v2_with_failure(
+            crate::session::subagent::build_subagent_stop_v2_with_failure(
                 subagent_turn_id,
                 parent_agent_id,
                 child_agent_id,
@@ -858,7 +866,7 @@ pub(super) async fn run_sync_subagent(
     let parked_inbox = permit_result.is_ok() && !explicit_close;
     // 先注销再释放执行准入，避免 resume 重新注册后被本次停驻覆盖。
     if parked_inbox {
-        super::lifecycle::park_child_inbox(&session, child_thread_id, &outcome);
+        crate::session::subagent::lifecycle::park_child_inbox(&session, child_thread_id, &outcome);
     }
     if let Some(permit) = permit.take() {
         permit.finish(permit_result);
@@ -902,7 +910,10 @@ fn stop_projection(
 ) {
     match outcome {
         ChildRunOutcome::Settled => (
-            extract_last_ai_text(session).chars().take(500).collect(),
+            crate::session::subagent::util::extract_last_ai_text(session)
+                .chars()
+                .take(500)
+                .collect(),
             false,
             None,
         ),
@@ -931,7 +942,7 @@ fn stop_projection(
             SubagentFailure::safe_failure_from_error(child_thread_id, error),
         ),
         ChildRunOutcome::HandoffFailed { cause, failure } => {
-            let label = super::types::handoff_failure_label(failure);
+            let label = crate::session::subagent::types::handoff_failure_label(failure);
             let flush = failure
                 .flush_error
                 .as_ref()
@@ -948,7 +959,8 @@ fn stop_projection(
             let safe = match cause {
                 Some(cause) => SubagentFailure::safe_failure_from_error(child_thread_id, cause),
                 None => {
-                    let error = super::types::handoff_failure_agent_error(failure);
+                    let error =
+                        crate::session::subagent::types::handoff_failure_agent_error(failure);
                     SubagentFailure::safe_failure_from_error(child_thread_id, &error)
                 }
             };

@@ -12,11 +12,12 @@ use peri_acp_types::store::MessageFlags;
 use crate::messages::MessageId;
 use crate::thread::ThreadId;
 
-use super::persistence::{self, PersistenceBudget, Reservation};
-use super::{
-    MessageTranscript, PersistOp, TranscriptEntry, DEFAULT_PENDING_MAX_BYTES,
-    DEFAULT_PENDING_MAX_ITEMS,
-};
+use crate::session::transcript::entry::TranscriptEntry;
+use crate::session::transcript::persistence::{self, PersistenceBudget, Reservation};
+use crate::session::transcript::MessageTranscript;
+use crate::session::transcript::PersistOp;
+use crate::session::transcript::DEFAULT_PENDING_MAX_BYTES;
+use crate::session::transcript::DEFAULT_PENDING_MAX_ITEMS;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum FlushError {
@@ -35,12 +36,14 @@ impl MessageTranscript {
     /// 积压有界性由 [`PersistenceBudget`] 保证：追加在持锁时同步预留，writer 在
     /// 效果确定后归还；预留失败即 sticky 失败（[`Self::persistence_failure`]），
     /// 调用方据此停止后续工作并重载会话。
+    #[must_use]
     pub fn with_persistence(self, store: Arc<dyn SessionResources>, thread_id: ThreadId) -> Self {
         let budget = PersistenceBudget::new(DEFAULT_PENDING_MAX_ITEMS, DEFAULT_PENDING_MAX_BYTES);
         self.bind_persistence(store, thread_id, budget)
     }
 
     /// 绑定持久化后端并显式指定待持久化预算（测试与阈值测量入口）。
+    #[must_use]
     pub fn with_persistence_budget(
         self,
         store: Arc<dyn SessionResources>,
@@ -77,6 +80,7 @@ impl MessageTranscript {
     }
 
     /// 是否已进入 sticky 持久化失败。
+    #[must_use]
     pub fn has_persistence_failure(&self) -> bool {
         self.persistence_failure().is_some()
     }
@@ -102,7 +106,7 @@ impl MessageTranscript {
     /// 同步取出持久化 writer 通道句柄（owned `Arc<Sender>`，Send）。
     ///
     /// 用途：调用方持有 `Arc<RwLock<MessageTranscript>>` 时，先在 guard 作用域内
-    /// 同步提取句柄、释放 guard，再调用 [`flush_via_tx`] 异步等待——避免
+    /// 同步提取句柄、释放 guard，再调用 [`flush_via_tx`](Self::flush_via_tx) 异步等待——避免
     /// parking_lot guard 跨 await 存活（`!Send`，会令整个调用链 future 不满足
     /// `Send`，`tokio::spawn` 编译失败）。
     pub fn persist_tx_handle(&self) -> Option<Arc<tokio::sync::mpsc::UnboundedSender<PersistOp>>> {

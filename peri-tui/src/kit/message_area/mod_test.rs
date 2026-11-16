@@ -1,7 +1,20 @@
 //! Tests
 
-use super::*;
-use crate::kit::atoms::{FOLD_OVERRIDES, IMAGE_HOVER, IMAGE_PREVIEW_HOVER};
+use super::FocusedEntry;
+use super::FoldKey;
+use super::FoldState;
+use super::GesturePending;
+use super::ImageHoverState;
+use super::ImageLineHit;
+use super::ImagePreviewHoverGate;
+use super::KeepGoingLayout;
+use super::TuiRenderUnit;
+#[cfg(target_os = "macos")]
+use crate::kit::message_area::image_action::OpenImageError;
+
+use super::scroll;
+use ratatui_kit::prelude::*;
+
 use crate::kit::tui_render_unit::{
     InteractionKind, TuiCollapsedGroup, TuiSystemReminder, TuiToolCard, TuiToolPresentation,
     TuiUserBubble,
@@ -42,7 +55,7 @@ fn test_total_visual_rows_exceeds_u16_max() {
     let footer_rows = 3;
 
     assert_eq!(
-        total_visual_rows(core_rows, footer_rows, false),
+        super::total_visual_rows(core_rows, footer_rows, false),
         core_rows + footer_rows + scroll::SCROLL_PADDING,
         "长消息的可滚动高度不得在 u16::MAX 处截断"
     );
@@ -73,15 +86,18 @@ fn test_strip_line_colors_removes_all_colors_keeps_modifiers() {
                 .underline_color(Color::Rgb(1, 2, 3)),
         ),
     ]);
-    let stripped = strip_line_colors(&line);
+    let stripped = super::no_color::strip_line_colors(&line);
 
     assert_eq!(stripped.spans.len(), 3, "span 结构保持不变");
     // 颜色全部剥离（前景/背景/下划线），文本与符号原样保留
-    for (orig, s) in line.spans.iter().zip(stripped.spans.iter()) {
-        assert_eq!(orig.content, s.content, "文本/符号不得被剥离");
-        assert_eq!(s.style.fg, None, "前景色必须剥离");
-        assert_eq!(s.style.bg, None, "背景色必须剥离");
-        assert_eq!(s.style.underline_color, None, "下划线色必须剥离");
+    {
+        let iteration_items = line.spans.iter().zip(stripped.spans.iter());
+        for (orig, s) in iteration_items {
+            assert_eq!(orig.content, s.content, "文本/符号不得被剥离");
+            assert_eq!(s.style.fg, None, "前景色必须剥离");
+            assert_eq!(s.style.bg, None, "背景色必须剥离");
+            assert_eq!(s.style.underline_color, None, "下划线色必须剥离");
+        }
     }
     // modifier 保留（NO_COLOR 下状态仍需可辨认）
     assert!(
@@ -105,7 +121,7 @@ fn test_strip_line_colors_keeps_unicode_symbols() {
         Span::styled("✓", Style::default().fg(Color::Rgb(78, 186, 101))),
         Span::styled(" 完成", Style::default().fg(Color::Rgb(200, 200, 200))),
     ]);
-    let stripped = strip_line_colors(&line);
+    let stripped = super::no_color::strip_line_colors(&line);
     assert_eq!(stripped.spans[0].content, "✓");
     assert_eq!(stripped.spans[1].content, " 完成");
 }
@@ -121,7 +137,7 @@ fn test_strip_line_colors_preserves_alignment() {
         alignment: Some(Alignment::Center),
         style: Style::default().fg(Color::Rgb(9, 9, 9)),
     };
-    let stripped = strip_line_colors(&line);
+    let stripped = super::no_color::strip_line_colors(&line);
     assert_eq!(stripped.alignment, Some(Alignment::Center));
     // Line 级 style 的颜色同样剥离，modifier 保留
     assert_eq!(stripped.style.fg, None);
@@ -133,11 +149,12 @@ fn test_strip_line_colors_preserves_alignment() {
 fn test_strip_line_colors_plain_style_unchanged_content() {
     // 无颜色的 span：剥离后内容与结构不变
     let line = Line::from(vec![Span::raw("plain")]);
-    let stripped = strip_line_colors(&line);
+    let stripped = super::no_color::strip_line_colors(&line);
     assert_eq!(stripped.spans[0].content, "plain");
     assert_eq!(stripped.spans[0].style, Style::default());
 }
 
+#[must_use]
 fn layout_at(line_index: usize, start_col: u16, width: u16) -> KeepGoingLayout {
     KeepGoingLayout {
         line_index,
@@ -149,7 +166,7 @@ fn layout_at(line_index: usize, start_col: u16, width: u16) -> KeepGoingLayout {
 #[test]
 fn test_keepgoing_rect_visible_in_viewport() {
     // core 3 行 + footer line_index 2（两个空行 + summary 行）→ 屏幕 y = 2 + 3 + 2 - 0 = 7
-    let rect = compute_keepgoing_rect(
+    let rect = super::hits::compute_keepgoing_rect(
         false,
         Some(Rect::new(0, 2, 100, 20)),
         Some(layout_at(2, 18, 13)),
@@ -163,7 +180,7 @@ fn test_keepgoing_rect_visible_in_viewport() {
 #[test]
 fn test_keepgoing_rect_follows_scroll() {
     // scroll_y = 3 → 按钮行随内容上移：2 + 3 + 2 - 3 = 4
-    let rect = compute_keepgoing_rect(
+    let rect = super::hits::compute_keepgoing_rect(
         false,
         Some(Rect::new(0, 2, 100, 20)),
         Some(layout_at(2, 18, 13)),
@@ -182,6 +199,7 @@ fn test_keepgoing_rect_follows_scroll() {
 const TINY_PNG: &[u8] =
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x00IEND\xaeB\x60\x82";
 
+#[must_use]
 fn hit_at(row: u16, x_start: u16, x_end: u16) -> ImageLineHit {
     ImageLineHit {
         row,
@@ -201,11 +219,11 @@ fn hit_at(row: u16, x_start: u16, x_end: u16) -> ImageLineHit {
 #[test]
 #[cfg(target_os = "macos")]
 fn test_build_open_command_parametrized_no_shell() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("build open command parametrized no shell: isolated fixture workspace must remain accessible");
     let file = dir.path().join("a b.png"); // 空格路径——shell 拼接会断裂
-    std::fs::write(&file, TINY_PNG).unwrap();
+    std::fs::write(&file, TINY_PNG).expect("build open command parametrized no shell: isolated fixture workspace must remain accessible");
     let cmd =
-        build_open_command(file.to_str().unwrap()).expect("合法 PNG + .png 扩展名应通过 T5 校验");
+        super::build_open_command(file.to_str().expect("build open command parametrized no shell: fixture paths and protocol text must be valid UTF-8")).expect("合法 PNG + .png 扩展名应通过 T5 校验");
     assert_eq!(cmd.get_program(), "open", "macOS 用 open");
     let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
     assert_eq!(
@@ -223,7 +241,7 @@ fn test_build_open_command_parametrized_no_shell() {
 #[cfg(target_os = "macos")]
 fn test_build_open_command_missing_file_rejected() {
     assert!(matches!(
-        build_open_command("/nonexistent/path/x.png"),
+        super::build_open_command("/nonexistent/path/x.png"),
         Err(OpenImageError::ValidationFailed)
     ));
 }
@@ -232,11 +250,11 @@ fn test_build_open_command_missing_file_rejected() {
 #[test]
 #[cfg(target_os = "macos")]
 fn test_build_open_command_bad_extension_rejected() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("build open command bad extension rejected: isolated fixture workspace must remain accessible");
     let f = dir.path().join("note.txt");
-    std::fs::write(&f, "hello").unwrap();
+    std::fs::write(&f, "hello").expect("build open command bad extension rejected: isolated fixture workspace must remain accessible");
     assert!(matches!(
-        build_open_command(f.to_str().unwrap()),
+        super::build_open_command(f.to_str().expect("build open command bad extension rejected: fixture paths and protocol text must be valid UTF-8")),
         Err(OpenImageError::ValidationFailed)
     ));
 }
@@ -246,10 +264,14 @@ fn test_build_open_command_bad_extension_rejected() {
 #[test]
 #[cfg(target_os = "macos")]
 fn test_build_open_command_success_spawns() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect(
+        "build open command success spawns: isolated fixture workspace must remain accessible",
+    );
     let file = dir.path().join("a.png");
-    std::fs::write(&file, TINY_PNG).unwrap();
-    let mut cmd = build_open_command_with(file.to_str().unwrap(), "/bin/echo")
+    std::fs::write(&file, TINY_PNG).expect(
+        "build open command success spawns: isolated fixture workspace must remain accessible",
+    );
+    let mut cmd = super::build_open_command_with(file.to_str().expect("build open command success spawns: fixture paths and protocol text must be valid UTF-8"), "/bin/echo")
         .expect("合法 PNG 应通过 T5 校验并构造命令");
     let status = cmd
         .spawn()
@@ -262,31 +284,35 @@ fn test_build_open_command_success_spawns() {
 #[test]
 fn test_hover_target_for() {
     let hits = vec![hit_at(10, 2, 20), hit_at(11, 2, 20)];
-    let st = hover_target_for(&hits, 5, 10, false).expect("命中行 10");
+    let st = super::hover_target_for(&hits, 5, 10, false).expect("命中行 10");
     assert_eq!(st.row, 10);
     assert_eq!(st.logical_idx, 1);
     assert_eq!(st.path, "/tmp/a.png");
     assert_eq!(st.size_text, "45 B");
 
     assert!(
-        hover_target_for(&hits, 5, 11, false).is_some(),
+        super::hover_target_for(&hits, 5, 11, false).is_some(),
         "命中第二行"
     );
-    assert!(hover_target_for(&hits, 5, 9, false).is_none(), "行不匹配");
     assert!(
-        hover_target_for(&hits, 1, 10, false).is_none(),
+        super::hover_target_for(&hits, 5, 9, false).is_none(),
+        "行不匹配"
+    );
+    assert!(
+        super::hover_target_for(&hits, 1, 10, false).is_none(),
         "x_start 之前"
     );
     assert!(
-        hover_target_for(&hits, 20, 10, false).is_none(),
+        super::hover_target_for(&hits, 20, 10, false).is_none(),
         "x_end 不含（半开区间）"
     );
     assert!(
-        hover_target_for(&hits, 5, 10, true).is_none(),
+        super::hover_target_for(&hits, 5, 10, true).is_none(),
         "遮挡时不响应"
     );
 }
 
+#[must_use]
 fn hover_state(path: &str, row: u16) -> ImageHoverState {
     ImageHoverState {
         row,
@@ -310,7 +336,7 @@ async fn image_preview_hover_requires_stable_dwell_and_cancels_on_exit() {
     let target = hover_state("/tmp/a.png", 10);
 
     *IMAGE_HOVER.state().write() = Some(target.clone());
-    schedule_image_preview_hover(
+    super::schedule_image_preview_hover(
         Arc::clone(&gate),
         Some(target.clone()),
         Duration::from_millis(20),
@@ -321,7 +347,7 @@ async fn image_preview_hover_requires_stable_dwell_and_cancels_on_exit() {
     );
 
     *IMAGE_HOVER.state().write() = None;
-    schedule_image_preview_hover(Arc::clone(&gate), None, Duration::from_millis(20));
+    super::schedule_image_preview_hover(Arc::clone(&gate), None, Duration::from_millis(20));
     tokio::time::sleep(Duration::from_millis(40)).await;
     assert!(
         IMAGE_PREVIEW_HOVER.state().read().is_none(),
@@ -329,7 +355,7 @@ async fn image_preview_hover_requires_stable_dwell_and_cancels_on_exit() {
     );
 
     *IMAGE_HOVER.state().write() = Some(target.clone());
-    schedule_image_preview_hover(
+    super::schedule_image_preview_hover(
         Arc::clone(&gate),
         Some(target.clone()),
         Duration::from_millis(20),
@@ -342,7 +368,7 @@ async fn image_preview_hover_requires_stable_dwell_and_cancels_on_exit() {
     );
 
     *IMAGE_HOVER.state().write() = None;
-    schedule_image_preview_hover(gate, None, Duration::from_millis(20));
+    super::schedule_image_preview_hover(gate, None, Duration::from_millis(20));
 }
 
 /// try_open_image 校验失败分支：NOTIFICATION 提示（paste-truncated 通知模式），
@@ -353,7 +379,7 @@ fn test_try_open_image_validation_failure_notifies() {
     crate::i18n::init(Some("en"));
     // 清空遗留通知（测试间原子污染防御）
     *crate::kit::atoms::NOTIFICATION.state().write() = None;
-    let ok = try_open_image("/nonexistent/path/x.png");
+    let ok = super::try_open_image("/nonexistent/path/x.png");
     assert!(!ok, "校验失败不 spawn");
     // [TRAP] Notification 非 Clone——guard 内提取 message 字段后 drop。
     let msg = crate::kit::atoms::NOTIFICATION
@@ -371,7 +397,7 @@ fn test_try_open_image_validation_failure_notifies() {
 #[test]
 fn test_keepgoing_rect_scrolled_out_returns_none() {
     // scroll_y = 10 → 按钮行 2 + 3 + 2 - 10 = -3 < area.y(2) → 滚出视口
-    let rect = compute_keepgoing_rect(
+    let rect = super::hits::compute_keepgoing_rect(
         false,
         Some(Rect::new(0, 2, 100, 20)),
         Some(layout_at(2, 18, 13)),
@@ -385,14 +411,15 @@ fn test_keepgoing_rect_scrolled_out_returns_none() {
 #[test]
 fn test_keepgoing_rect_empty_layout_returns_none() {
     // 无按钮渲染（loading 中 / 无 summary）→ 不注册点击区域
-    let rect = compute_keepgoing_rect(false, Some(Rect::new(0, 2, 100, 20)), None, 3, 0, 20);
+    let rect =
+        super::hits::compute_keepgoing_rect(false, Some(Rect::new(0, 2, 100, 20)), None, 3, 0, 20);
     assert_eq!(rect, None);
 }
 
 #[test]
 fn test_keepgoing_rect_welcome_layout_returns_none() {
     // empty 分支：Welcome 布局行位置模型不同，按钮可见但不可点击
-    let rect = compute_keepgoing_rect(
+    let rect = super::hits::compute_keepgoing_rect(
         true,
         Some(Rect::new(0, 2, 100, 20)),
         Some(layout_at(2, 18, 13)),
@@ -439,13 +466,13 @@ fn ask_user_block(pending: bool, rid: Option<&str>) -> TuiRenderUnit {
 #[test]
 fn test_fold_key_of_interaction_block() {
     let vm = ask_user_block(true, Some("rid-1"));
-    let (k, f) = fold_key_of(&vm).expect("有 request_id 时应可折叠");
+    let (k, f) = super::fold_key_of(&vm).expect("有 request_id 时应可折叠");
     assert_eq!(k, FoldKey::Interaction("rid-1".into()));
     assert_eq!(f, FoldState::Expanded);
 
     let vm_noid = ask_user_block(true, None);
     assert!(
-        fold_key_of(&vm_noid).is_none(),
+        super::fold_key_of(&vm_noid).is_none(),
         "无 request_id → 不可折叠键控"
     );
 }
@@ -458,7 +485,7 @@ fn test_apply_fold_override_interaction_block() {
         unreachable!()
     };
     let hash_before = block.content_hash;
-    apply_fold_override(&mut vm, FoldState::Expanded);
+    super::apply_fold_override(&mut vm, FoldState::Expanded);
     let TuiRenderUnit::TuiAskUserBlock(block) = &vm else {
         unreachable!("vm 恒为 AskUserBlock")
     };
@@ -474,8 +501,8 @@ fn test_apply_fold_override_interaction_block() {
 /// completed 结果行与其余 VM 类型返回 None。
 #[test]
 fn test_pending_interaction_of_matches_only_pending() {
-    assert!(pending_interaction_of(&ask_user_block(true, None)).is_some());
-    assert!(pending_interaction_of(&ask_user_block(false, None)).is_none());
+    assert!(super::pending_interaction_of(&ask_user_block(true, None)).is_some());
+    assert!(super::pending_interaction_of(&ask_user_block(false, None)).is_none());
     let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
         tool_id: "t1".into(),
         tool_name: "Bash".into(),
@@ -492,7 +519,7 @@ fn test_pending_interaction_of_matches_only_pending() {
         content_hash: 0,
         tool_calls_count: 0,
     });
-    assert!(pending_interaction_of(&tool).is_none());
+    assert!(super::pending_interaction_of(&tool).is_none());
 }
 
 /// [Slice 4 §6.8] interaction option 导航矩阵：Tab/← 后退、→ 前进，首末循环
@@ -500,18 +527,18 @@ fn test_pending_interaction_of_matches_only_pending() {
 #[test]
 fn test_cycle_interaction_option_wraps_around() {
     // → 前进：末项回绕到首项
-    assert_eq!(cycle_interaction_option(0, 2, false), 1);
-    assert_eq!(cycle_interaction_option(1, 2, false), 0);
-    assert_eq!(cycle_interaction_option(2, 3, false), 0);
+    assert_eq!(super::cycle_interaction_option(0, 2, false), 1);
+    assert_eq!(super::cycle_interaction_option(1, 2, false), 0);
+    assert_eq!(super::cycle_interaction_option(2, 3, false), 0);
     // Tab/← 后退：首项回绕到末项（saturating_sub 不回绕的回归锁定——
     // 首项后退不得卡死在 0）
-    assert_eq!(cycle_interaction_option(0, 2, true), 1);
-    assert_eq!(cycle_interaction_option(1, 2, true), 0);
-    assert_eq!(cycle_interaction_option(0, 3, true), 2);
-    assert_eq!(cycle_interaction_option(2, 3, true), 1);
+    assert_eq!(super::cycle_interaction_option(0, 2, true), 1);
+    assert_eq!(super::cycle_interaction_option(1, 2, true), 0);
+    assert_eq!(super::cycle_interaction_option(0, 3, true), 2);
+    assert_eq!(super::cycle_interaction_option(2, 3, true), 1);
     // 单选项恒 0（count 归一化 ≥1 后）
-    assert_eq!(cycle_interaction_option(0, 1, true), 0);
-    assert_eq!(cycle_interaction_option(0, 1, false), 0);
+    assert_eq!(super::cycle_interaction_option(0, 1, true), 0);
+    assert_eq!(super::cycle_interaction_option(0, 1, false), 0);
 }
 
 #[test]
@@ -557,7 +584,7 @@ fn test_permission_inline_a_response_preserves_active_b_popup() {
             .state()
             .read()
             .as_ref()
-            .unwrap()
+            .expect("permission inline a response preserves active b popup: the fixture storage and layout must support the requested operation")
             .request_id_json,
         "B"
     );
@@ -604,7 +631,7 @@ fn test_ask_user_inline_a_response_preserves_active_b_panel() {
             .state()
             .read()
             .as_ref()
-            .unwrap()
+            .expect("ask user inline a response preserves active b panel: the fixture storage and layout must support the requested operation")
             .request_id_json,
         "B"
     );
@@ -644,7 +671,7 @@ fn test_apply_fold_toggle_subagent_opens_detail_panel() {
         items: im::Vector::from(vec![sub]),
         generation: 0,
     };
-    let r = apply_fold_toggle(&mut snapshot, 0, false);
+    let r = super::apply_fold_toggle(&mut snapshot, 0, false);
     assert_eq!(r, EventResult::Consumed);
     assert_eq!(
         *crate::kit::atoms::SELECTED_SUBAGENT_ID.state().read(),
@@ -682,7 +709,7 @@ fn test_apply_fold_toggle_tool_writes_override() {
         items: im::Vector::from(vec![tool]),
         generation: 0,
     };
-    let r = apply_fold_toggle(&mut snapshot, 0, false);
+    let r = super::apply_fold_toggle(&mut snapshot, 0, false);
     assert_eq!(r, EventResult::Consumed);
     match &snapshot.items[0] {
         TuiRenderUnit::TuiToolCard(t) => {
@@ -714,7 +741,7 @@ fn test_apply_fold_toggle_system_reminder_writes_override() {
     };
 
     assert_eq!(
-        apply_fold_toggle(&mut snapshot, 0, false),
+        super::apply_fold_toggle(&mut snapshot, 0, false),
         EventResult::Consumed
     );
     match &snapshot.items[0] {
@@ -747,10 +774,19 @@ fn test_entry_click_decision_pending_header_hit_returns_slot() {
         visual: (15, 4),
         entry_hit: Some((3, 0)),
     };
-    assert_eq!(entry_click_decision(Some(&p), 6, area, false), Some(3));
+    assert_eq!(
+        super::entry_click_decision(Some(&p), 6, area, false),
+        Some(3)
+    );
     // 边界行有效：顶行（area.y）与底行（area.y + height - 1）都在 area 内
-    assert_eq!(entry_click_decision(Some(&p), 1, area, false), Some(3));
-    assert_eq!(entry_click_decision(Some(&p), 24, area, false), Some(3));
+    assert_eq!(
+        super::entry_click_decision(Some(&p), 1, area, false),
+        Some(3)
+    );
+    assert_eq!(
+        super::entry_click_decision(Some(&p), 24, area, false),
+        Some(3)
+    );
 }
 
 /// Up 结算三态：
@@ -765,21 +801,27 @@ fn test_entry_click_decision_up_settle_states() {
     // （handle_event 内 drag_step Upgrade 分支，不可注入测试）保证——判定函数
     // 结构上无法区分"Idle"与"Armed 但 gesture 未复位"；此处仅锁定
     // Idle/Pending 两态 + 命中/正文行分流（S3 review L1 修正）。
-    assert_eq!(entry_click_decision(None, 5, area, false), None);
+    assert_eq!(super::entry_click_decision(None, 5, area, false), None);
     // Pending + 命中 header → 结算为单击
     let hit = GesturePending {
         screen: (10, 5),
         visual: (5, 4),
         entry_hit: Some((1, 0)),
     };
-    assert_eq!(entry_click_decision(Some(&hit), 5, area, false), Some(1));
+    assert_eq!(
+        super::entry_click_decision(Some(&hit), 5, area, false),
+        Some(1)
+    );
     // Pending + 正文行（冻结 entry_hit 为 None）→ 不结算为 entry 单击
     let body = GesturePending {
         screen: (10, 6),
         visual: (6, 4),
         entry_hit: None,
     };
-    assert_eq!(entry_click_decision(Some(&body), 6, area, false), None);
+    assert_eq!(
+        super::entry_click_decision(Some(&body), 6, area, false),
+        None
+    );
 }
 
 /// [D3/M3 权衡锁定] 无 Drag 事件超容差 Up = 单击：Down（gesture=Some
@@ -799,7 +841,7 @@ fn test_entry_click_decision_no_drag_overtolerance_up_is_click() {
     };
     // Up：row 16（与 Down 差 10 行，超容差），但无 Drag 事件 → 仍判单击
     assert_eq!(
-        entry_click_decision(Some(&p), 16, area, false),
+        super::entry_click_decision(Some(&p), 16, area, false),
         Some(1),
         "无 Drag 事件的超容差 Up 必须判单击（升级判定唯一时机是 Drag 事件）"
     );
@@ -815,12 +857,12 @@ fn test_entry_click_decision_row_outside_area_returns_none() {
         entry_hit: Some((3, 0)),
     };
     assert_eq!(
-        entry_click_decision(Some(&p), 0, area, false),
+        super::entry_click_decision(Some(&p), 0, area, false),
         None,
         "area 上方"
     );
     assert_eq!(
-        entry_click_decision(Some(&p), 25, area, false),
+        super::entry_click_decision(Some(&p), 25, area, false),
         None,
         "area 下方"
     );
@@ -836,7 +878,7 @@ fn test_entry_click_decision_scrollbar_col_returns_none() {
         visual: (15, 4),
         entry_hit: Some((3, 0)),
     };
-    assert_eq!(entry_click_decision(Some(&p), 6, area, true), None);
+    assert_eq!(super::entry_click_decision(Some(&p), 6, area, true), None);
 }
 
 // ── [S3, S2 review Low L2] set_entry_focus 的 key 派生 ────────────────────
@@ -853,7 +895,7 @@ fn test_set_entry_focus_key_none_for_non_foldable_entry() {
         items: im::Vector::from(vec![user]),
         generation: 0,
     };
-    set_entry_focus(&snapshot, 0);
+    super::set_entry_focus(&snapshot, 0);
     assert_eq!(
         *crate::kit::atoms::FOCUSED_ENTRY.state().read(),
         Some(FocusedEntry { slot: 0, key: None }),
@@ -888,7 +930,7 @@ fn test_set_entry_focus_derives_key_for_foldable_entry() {
         items: im::Vector::from(vec![tool]),
         generation: 0,
     };
-    set_entry_focus(&snapshot, 0);
+    super::set_entry_focus(&snapshot, 0);
     assert_eq!(
         *crate::kit::atoms::FOCUSED_ENTRY.state().read(),
         Some(FocusedEntry {
@@ -900,3 +942,9 @@ fn test_set_entry_focus_derives_key_for_foldable_entry() {
 
 #[path = "entry_nav_test.rs"]
 mod entry_nav_tests;
+
+use crate::kit::atoms::FOLD_OVERRIDES;
+
+use crate::kit::atoms::IMAGE_HOVER;
+
+use crate::kit::atoms::IMAGE_PREVIEW_HOVER;

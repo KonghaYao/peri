@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use peri_agent::middleware::r#trait::Middleware;
 
-use crate::mcp::builtin::closed_instances;
+use crate::mcp::builtin;
 use crate::mcp::{ClientStatus, McpClientHandle, McpClientPool, McpMiddleware, Tool};
 
 /// 构造一个「已连接」的假 MCP client（工具名按传入列表）。
@@ -118,8 +118,8 @@ fn pool_with_builtin_instances() -> Arc<McpClientPool> {
 fn collected_tool_names(pool: &Arc<McpClientPool>, disabled: &[&str]) -> Vec<String> {
     let disabled: std::collections::HashSet<String> =
         disabled.iter().map(|name| name.to_string()).collect();
-    let middleware =
-        McpMiddleware::new(Arc::clone(pool)).with_builtin_closures(closed_instances(&disabled));
+    let middleware = McpMiddleware::new(Arc::clone(pool))
+        .with_builtin_closures(builtin::closed_instances(&disabled));
     middleware
         .collect_tools("/tmp/contract-test")
         .into_iter()
@@ -134,8 +134,8 @@ fn collected_tool_names(pool: &Arc<McpClientPool>, disabled: &[&str]) -> Vec<Str
 fn builtin_tools_are_collected_with_declared_direct() {
     let pool = pool_with_builtin_instances();
     let disabled: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let middleware =
-        McpMiddleware::new(Arc::clone(&pool)).with_builtin_closures(closed_instances(&disabled));
+    let middleware = McpMiddleware::new(Arc::clone(&pool))
+        .with_builtin_closures(builtin::closed_instances(&disabled));
     let tools = middleware.collect_tools("/tmp/contract-test");
 
     let direct_of = |name: &str| -> Option<bool> {

@@ -6,17 +6,35 @@
 //! owner 是直接发起会话的 session id，因此对 builtin workspace 与远端
 //! `WorkspaceRemote` 都断言 `_meta["peri/taskOwner"]` 的值。
 
-use super::super::*;
+use super::super::async_trait;
+use super::super::stream;
+use super::super::AgentRunResult;
+use super::super::Arc;
+use super::super::McpClientPool;
+use super::super::Model;
+use super::super::ModelCapabilities;
+use super::super::ModelMessage;
+use super::super::ModelRequest;
+use super::super::ModelResponse;
+use super::super::ModelResult;
+use super::super::ModelStream;
+use super::super::ModelStreamEvent;
+use super::super::StopReason;
+use super::super::TaskManager;
+use super::super::WorkflowExecutionFixture;
 use peri_acp_types::tasks::TaskManager as TaskManagerPort;
+use peri_acp_types::workflow::AgentExecutor as _;
 use peri_agent::agent::workflow::{WorkflowAgentExecutor, WorkflowModel};
 use peri_mcp_common::task_owner::TASK_OWNER_META_KEY;
-use rmcp::{
-    model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, RequestMetaObject,
-    },
-    service::{RequestContext, RoleServer},
-    ServerHandler, ServiceExt,
-};
+use rmcp::model::CallToolRequestParams;
+use rmcp::model::CallToolResponse;
+use rmcp::model::CallToolResult;
+use rmcp::model::ContentBlock;
+use rmcp::model::RequestMetaObject;
+use rmcp::service::RequestContext;
+use rmcp::service::RoleServer;
+use rmcp::ServerHandler;
+use rmcp::ServiceExt;
 use serde_json::json;
 use std::time::Duration;
 
@@ -78,7 +96,7 @@ impl Model for ToolThenEchoModel {
     }
 
     fn prepare_stream(&self, request: ModelRequest) -> ModelResult<peri_model::PreparedModelCall> {
-        prepared_workflow_model_call(self.clone(), request)
+        super::super::prepared_workflow_model_call(self.clone(), request)
     }
 
     async fn stream(
@@ -113,7 +131,7 @@ impl Model for ToolThenEchoModel {
                 StopReason::ToolUse,
             ),
         };
-        let response = ModelResponse::new(message, reason, None, None)?;
+        let response = ModelResponse::try_new(message, reason, None, None)?;
         Ok(ModelStream::with_parent_cancellation(
             stream::iter(vec![Ok(ModelStreamEvent::Completed(response))]),
             cancellation,
@@ -122,16 +140,16 @@ impl Model for ToolThenEchoModel {
 }
 
 /// 一次 workflow MCP 运行的外部输入。
-struct Scenario<'a> {
-    server: &'a str,
+struct Scenario<'scenario> {
+    server: &'scenario str,
     /// 模型可见工具名：builtin 声明直连为原名；远端 workspace 带 `mcp__<server>__` 前缀。
-    tool: &'a str,
+    tool: &'scenario str,
     /// true = 远端 Workspace owner（可信连接能力，可解码）；false = 本进程 builtin 实例。
     workspace_remote: bool,
     /// 写入 `WorkflowAgentContext.session_id` 的调用方关联，不拥有 Agent 的工具任务。
-    ctx_root: Option<&'a str>,
+    ctx_root: Option<&'scenario str>,
     /// 任务池中注册 TaskManager 的 session（可信绑定；含诱饵时模型自称也「有效」）。
-    bound_sessions: &'a [&'a str],
+    bound_sessions: &'scenario [&'scenario str],
 }
 
 struct Outcome {
@@ -185,7 +203,7 @@ async fn run_workflow_mcp(scenario: Scenario<'_>) -> Outcome {
     .serve(client_io)
     .await
     .unwrap();
-    let mut handle = make_connected_handle(
+    let mut handle = super::super::make_connected_handle(
         server,
         vec![serde_json::from_value(json!({
             "name": tool,
@@ -218,7 +236,7 @@ async fn run_workflow_mcp(scenario: Scenario<'_>) -> Outcome {
                 .map(|owner| ((*session).to_string(), owner))
         })
         .collect();
-    let mut ctx = workflow_context_with_disabled(&[
+    let mut ctx = super::super::workflow_context_with_disabled(&[
         "AgentsMdMiddleware",
         "SkillsMiddleware",
         "SkillPreloadMiddleware",
@@ -229,7 +247,8 @@ async fn run_workflow_mcp(scenario: Scenario<'_>) -> Outcome {
         WorkflowExecutionFixture::new(ctx_root.unwrap_or("workflow-unbound-parent")).await;
     execution_fixture.bind(&mut ctx);
     ctx.system_prompt = Some("执行一次工具调用，然后逐字返回工具结果。".into());
-    ctx.middleware_factory = default_workflow_middleware_factory_with_pool(Some(pool.clone()));
+    ctx.middleware_factory =
+        super::super::default_workflow_middleware_factory_with_pool(Some(pool.clone()));
     let tool_name = tool.to_owned();
     ctx.model_factory = Arc::new(move |_, _, _| WorkflowModel {
         model: Arc::new(ToolThenEchoModel {

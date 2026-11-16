@@ -8,7 +8,13 @@ use peri_acp_types::workspace_resources::{
     META_KEY_SCOPE, MIME_MARKDOWN,
 };
 
-use super::*;
+use crate::resources::ResourceBody;
+use crate::resources::ResourceBudget;
+use crate::resources::ResourceError;
+use crate::resources::ResourceRoot;
+use crate::resources::WorkspaceResourceProvider;
+use crate::resources::WorkspaceResourcesInput;
+use peri_acp_types::workspace_resources::INSTRUCTION_LOCAL_URI;
 
 fn tempdir() -> tempfile::TempDir {
     tempfile::tempdir().expect("临时目录夹具必须可创建")
@@ -367,13 +373,13 @@ fn list_skills_uses_single_scan_snapshot_and_survives_later_removal() {
         budget: ResourceBudget::default(),
     };
     let budget = input.budget;
-    let catalog = super::skills::scan_catalog(&input, &budget);
+    let catalog = crate::resources::skills::scan_catalog(&input, &budget);
     assert_eq!(catalog.len(), 2);
 
     std::fs::remove_dir_all(skills.path().join("beta")).expect("删除 beta");
     let typed = catalog
         .iter()
-        .map(super::typed_skill_from_record)
+        .map(crate::resources::typed_skill_from_record)
         .collect::<Result<Vec<_>, _>>()
         .expect("快照转换不再回查磁盘");
     assert_eq!(typed.len(), 2);

@@ -14,7 +14,10 @@
 
 use std::sync::Arc;
 
-use super::*;
+use crate::session::command::CommandContext;
+use crate::session::command::CommandRegistry;
+use crate::session::command::RouteEntry;
+use peri_acp_types::command::CommandOutcome;
 use peri_acp_types::event::{EventSink, EventSinkError, ExecutorEvent};
 use peri_acp_types::plugin::{CommandEntry, CommandSource as PluginCommandSource};
 
@@ -99,7 +102,8 @@ async fn plugin_command_is_rejected_by_the_rpc_route_without_fake_success() {
         .next()
         .expect("fixture 必然产出一条 plugin 路由");
 
-    let error = check_immediate_level(&entry).expect_err("plugin 条目必须被 RPC 路由拒绝");
+    let error = crate::dispatch::execute_command::check_immediate_level(&entry)
+        .expect_err("plugin 条目必须被 RPC 路由拒绝");
     assert_eq!(error.code, -32602, "拒绝必须是显式参数错误: {error:?}");
     assert!(
         error.message.contains("非 Immediate"),

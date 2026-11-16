@@ -1,10 +1,14 @@
 //! 父工具 invocation 与子 agent Start 的 FIFO 关联及 parent 冻结。
 
-use super::super::tool_batch::ToolBatch;
-use super::{
-    ActiveSubagent, AgentObsStart, IncompleteReason, StartPending, SubagentInvocation,
-    SubagentRegistry, SubagentStartOutcome, SubagentStatus,
-};
+use crate::langfuse::tracer::registry::types::AgentObsStart;
+use crate::langfuse::tracer::registry::types::IncompleteReason;
+use crate::langfuse::tracer::registry::types::StartPending;
+use crate::langfuse::tracer::registry::types::SubagentInvocation;
+use crate::langfuse::tracer::registry::types::SubagentStartOutcome;
+use crate::langfuse::tracer::registry::types::SubagentStatus;
+use crate::langfuse::tracer::registry::ActiveSubagent;
+use crate::langfuse::tracer::registry::SubagentRegistry;
+use crate::langfuse::tracer::tool_batch::ToolBatch;
 
 impl SubagentRegistry {
     // ── invocation 注册与 join ───────────────────────────────────────────────
@@ -142,7 +146,10 @@ impl SubagentRegistry {
             return None; // 无未绑定匹配:保持 pending,不跨 parent/不取已绑定项
         };
         // 找到后才正式移除 pending 与 unbounded 索引
-        let sp = self.pending_starts.remove(sp_pos).unwrap();
+        let sp = self
+            .pending_starts
+            .remove(sp_pos)
+            .expect("sp_pos identifies a pending start selected before any removal");
         let mut inv = self.invocations.get_mut(&key)?.clone();
         inv.bound_child = Some(sp.child_agent_id.clone());
         inv.stop_received = self
@@ -164,7 +171,9 @@ impl SubagentRegistry {
             agent_name: sp.agent_name.clone(),
             input: input.clone(),
         };
-        let sa = self.by_agent_id.get_mut(&sp.child_agent_id).unwrap();
+        let sa = self.by_agent_id.get_mut(&sp.child_agent_id).expect(
+            "a pending start must retain its child registry entry until registration completes",
+        );
         sa.observation_id = obs.observation_id.clone();
         sa.parent_observation_id = obs.parent_observation_id.clone();
         sa.start_time = obs.start_time.clone();

@@ -19,7 +19,6 @@
 //! `Read (peri-model/src/protocol/mod.rs)`），减少超长绝对路径对头行的占用。
 //! 非 cwd 前缀的路径保持原样。cwd 由 `set_display_cwd` 在启动时设置一次。
 
-use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 use std::sync::OnceLock;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -140,13 +139,16 @@ fn prefix_by_width(s: &str, max_width: usize) -> String {
 fn suffix_by_width(s: &str, max_width: usize) -> String {
     let mut width = 0usize;
     let mut parts: Vec<&str> = Vec::new();
-    for g in s.graphemes(true).rev() {
-        let w = g.width();
-        if width + w > max_width {
-            break;
+    {
+        let iteration_items = s.graphemes(true).rev();
+        for g in iteration_items {
+            let w = g.width();
+            if width + w > max_width {
+                break;
+            }
+            parts.push(g);
+            width += w;
         }
-        parts.push(g);
-        width += w;
     }
     parts.into_iter().rev().collect()
 }
@@ -193,7 +195,7 @@ pub fn wrap_by_width(s: &str, max_width: usize) -> Vec<String> {
 ///
 /// builtin 一等工具的 effective name（`mcp__<实例>__<原始名>`）与迁移前的裸名映射到同一
 /// 分支：**匹配型归一**（IF-D6 ④ / A8）先按传入名匹配，未命中再用 IF-D15 的
-/// [`original_tool_name_of_effective`] 取原始工具名重试一次。
+/// [`original_tool_name_of_effective`](peri_acp_types::builtin_mcp::original_tool_name_of_effective) 取原始工具名重试一次。
 pub fn summarize_input(name: &str, input: &serde_json::Value) -> String {
     // 优先按 Object 提取，非 Object 走 truncate 兜底（与 view_mapper 一致）
     let obj = match input {
@@ -205,7 +207,7 @@ pub fn summarize_input(name: &str, input: &serde_json::Value) -> String {
     if let Some(summary) = summarize_input_by_name(name, obj) {
         return summary;
     }
-    if let Some(original) = original_tool_name_of_effective(name)
+    if let Some(original) = peri_acp_types::builtin_mcp::original_tool_name_of_effective(name)
         && let Some(summary) = summarize_input_by_name(original, obj)
     {
         return summary;
@@ -345,7 +347,7 @@ fn summarize_input_generic(obj: &serde_json::Map<String, serde_json::Value>) -> 
 ///
 /// builtin 一等工具的 effective name（`mcp__<实例>__<原始名>`）与迁移前的裸名映射到同一
 /// 分支：**匹配型归一**（IF-D6 ④ / A8）先按传入名匹配，未命中再用 IF-D15 的
-/// [`original_tool_name_of_effective`] 取原始工具名重试一次。
+/// [`original_tool_name_of_effective`](peri_acp_types::builtin_mcp::original_tool_name_of_effective) 取原始工具名重试一次。
 pub fn summarize_output(name: &str, output: &str) -> String {
     let trimmed = output.trim();
     if trimmed.is_empty() {
@@ -355,7 +357,7 @@ pub fn summarize_output(name: &str, output: &str) -> String {
     if let Some(summary) = summarize_output_by_name(name, output) {
         return summary;
     }
-    if let Some(original) = original_tool_name_of_effective(name)
+    if let Some(original) = peri_acp_types::builtin_mcp::original_tool_name_of_effective(name)
         && let Some(summary) = summarize_output_by_name(original, output)
     {
         return summary;

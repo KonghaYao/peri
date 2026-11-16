@@ -137,7 +137,8 @@ pub fn validate_resume_only_input(input: &Value) -> Result<(), String> {
     if input.get("strictPreflight").and_then(Value::as_bool) == Some(true) {
         return Err(STRICT_PREFLIGHT_UNAVAILABLE.into());
     }
-    for (key, value) in input.as_object().into_iter().flatten() {
+    let paired_items = input.as_object().into_iter().flatten();
+    for (key, value) in paired_items {
         if value.is_null() || key == "resumeFromRunId" || key == "strictPreflight" {
             continue;
         }
@@ -263,8 +264,7 @@ fn extract_workflow_name(script: &str) -> String {
     if let Some(pos) = script.find("name:") {
         let after = &script[pos + 5..];
         let trimmed = after.trim_start();
-        if trimmed.starts_with('\'') || trimmed.starts_with('"') {
-            let quote = trimmed.chars().next().unwrap();
+        if let Some(quote @ ('\'' | '"')) = trimmed.chars().next() {
             let start = 1;
             if let Some(end) = trimmed[1..].find(quote) {
                 return trimmed[start..start + end].to_string();

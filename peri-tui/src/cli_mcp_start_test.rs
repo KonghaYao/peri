@@ -4,18 +4,20 @@ use std::path::PathBuf;
 use clap::Parser;
 use peri_acp_types::builtin_mcp::BUILTIN_RESERVED_INSTANCE_NAMES;
 
-use super::{Args, run};
+use super::Args;
 
 #[test]
 fn instance_is_required() {
-    let error = run(&[]).unwrap_err().to_string();
+    let error = super::run(&[])
+        .expect_err("instance is required: the invalid fixture must be rejected")
+        .to_string();
     assert!(error.contains("<INSTANCE>"), "{error}");
 }
 
 #[test]
 fn unknown_instance_is_rejected() {
-    let error = run(&[OsString::from("sandbox"), OsString::from("--stdio")])
-        .unwrap_err()
+    let error = super::run(&[OsString::from("sandbox"), OsString::from("--stdio")])
+        .expect_err("unknown instance is rejected: the invalid fixture must be rejected")
         .to_string();
     assert!(error.contains("unknown builtin MCP instance: sandbox"));
     for name in BUILTIN_RESERVED_INSTANCE_NAMES {
@@ -26,19 +28,20 @@ fn unknown_instance_is_rejected() {
 #[test]
 fn transport_is_required_and_exclusive() {
     let missing = Args::try_parse_from(["peri mcp-start", "workspace"])
-        .unwrap_err()
+        .expect_err("transport is required and exclusive: the invalid fixture must be rejected")
         .to_string();
     assert!(missing.contains("--stdio"), "{missing}");
     assert!(missing.contains("--http"), "{missing}");
     let both = Args::try_parse_from(["peri mcp-start", "workspace", "--stdio", "--http"])
-        .unwrap_err()
+        .expect_err("transport is required and exclusive: the invalid fixture must be rejected")
         .to_string();
     assert!(both.contains("cannot be used with"), "{both}");
 }
 
 #[test]
 fn http_defaults_to_loopback_8765() {
-    let args = Args::try_parse_from(["peri mcp-start", "web", "--http"]).unwrap();
+    let args = Args::try_parse_from(["peri mcp-start", "web", "--http"])
+        .expect("http defaults to loopback 8765: the fixture command-line arguments must parse");
     assert_eq!(args.instance, "web");
     assert!(args.http);
     assert!(!args.stdio);
@@ -60,7 +63,7 @@ fn http_accepts_host_port_and_workspace() {
         "--workspace",
         "/tmp/project",
     ])
-    .unwrap();
+    .expect("http accepts host port and workspace: the fixture command-line arguments must parse");
     assert_eq!(args.host, "0.0.0.0");
     assert_eq!(args.port, 9000);
     assert_eq!(args.workspace, Some(PathBuf::from("/tmp/project")));
@@ -77,19 +80,19 @@ fn allowed_host_parses_repeatedly() {
         "--allowed-host",
         "sandbox.local:8765",
     ])
-    .unwrap();
+    .expect("allowed host parses repeatedly: the fixture command-line arguments must parse");
     assert_eq!(args.allowed_host, ["sandbox.local", "sandbox.local:8765"]);
 }
 
 #[test]
 fn allowed_host_requires_http() {
-    let error = run(&[
+    let error = super::run(&[
         OsString::from("web"),
         OsString::from("--stdio"),
         OsString::from("--allowed-host"),
         OsString::from("sandbox.local"),
     ])
-    .unwrap_err()
+    .expect_err("allowed host requires http: the invalid fixture must be rejected")
     .to_string();
     assert!(error.contains("--allowed-host requires --http"), "{error}");
 }

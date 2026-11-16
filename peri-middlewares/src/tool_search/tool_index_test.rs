@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use super::*;
+use super::{Arc, BaseTool, ToolSearchIndex, MAX_DEFERRED_LIST_BYTES};
 
 struct MockTool {
     name_str: String,
@@ -156,8 +156,8 @@ fn test_get_tool() {
     let tools = make_mock_tools();
     index.build(tools);
 
-    assert!(index.get_tool("CronRegister").is_some());
-    assert!(index.get_tool("NonExistent").is_none());
+    assert!(index.tool("CronRegister").is_some());
+    assert!(index.tool("NonExistent").is_none());
 }
 
 #[test]
@@ -232,7 +232,7 @@ fn test_duplicate_name_overwrites() {
 
     // 验证 get_tool 返回后注册的实例（Version B）
     let tool = index
-        .get_tool("CronRegister")
+        .tool("CronRegister")
         .expect("get_tool 应能查找到 CronRegister");
     assert_eq!(
         tool.description(),
@@ -434,15 +434,18 @@ fn deferred_list_stays_within_budget_and_reports_omissions() {
         "被省略的工具必须给出替代发现路径"
     );
     // 每条进入列表的条目都是完整的（参数段结尾完整），不存在半截条目。
-    for entry in list.split("\n- ").skip(1) {
-        if entry.starts_with("…") {
-            continue;
+    {
+        let selected_list = list.split("\n- ").skip(1);
+        for entry in selected_list {
+            if entry.starts_with("…") {
+                continue;
+            }
+            assert!(
+                entry.contains("Parameters:") || entry.starts_with("Tool"),
+                "条目必须完整: {}",
+                &entry[..entry.len().min(80)]
+            );
         }
-        assert!(
-            entry.contains("Parameters:") || entry.starts_with("Tool"),
-            "条目必须完整: {}",
-            &entry[..entry.len().min(80)]
-        );
     }
 }
 

@@ -16,24 +16,29 @@
 //!   rmcp 原生 Auto lifecycle client；`tools/list` 与 `tools/call` 两个方向都经真实 wire——覆写 `discover` 会让
 //!   同一连接上的 `list_all_tools` 被会话层拒绝，这正是本文件保留 wire 用例的理由。
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use peri_agent::tools::{BaseTool, ToolContext};
-use rmcp::{
-    model::{CallToolRequestParams, CallToolResponse, CallToolResult, ErrorCode},
-    service::{Peer, QuitReason, RunningService},
-    ClientLifecycleMode, RoleClient, ServerHandler,
-};
+use rmcp::model::CallToolRequestParams;
+use rmcp::model::CallToolResponse;
+use rmcp::model::CallToolResult;
+use rmcp::model::ErrorCode;
+use rmcp::service::Peer;
+use rmcp::service::QuitReason;
+use rmcp::service::RunningService;
+use rmcp::ClientLifecycleMode;
+use rmcp::RoleClient;
+use rmcp::ServerHandler;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use super::CronMcpServer;
+use crate::server::CronMcpServer;
 use crate::{
     CronListTool, CronRegisterTool, CronRemoveTool, CronScheduler, CronToggleTool, CronTrigger,
 };
-use peri_mcp_common::{invoke_tool_call, list_tools_of};
 
 /// 门禁用例的注册参数（`cron_register` 的必填两项）。
 const REGISTER_EXPRESSION: &str = "*/5 * * * *";
@@ -92,7 +97,7 @@ fn scheduler_fixture() -> (Arc<Mutex<CronScheduler>>, Triggers) {
 
 /// `handler.call_tool` 的同一路径（`invoke_tool_call(server.tools(), "", request)`）。
 async fn route(server: &CronMcpServer, name: &str, arguments: Value) -> CallToolResponse {
-    invoke_tool_call(server.tools(), "", &call(name, arguments))
+    peri_mcp_common::invoke_tool_call(server.tools(), "", &call(name, arguments))
         .await
         .expect("工具存在时必须返回 Ok(CallToolResponse)")
 }
@@ -294,31 +299,34 @@ fn list_tools_uses_existing_cron_definitions() {
         ))),
     ];
 
-    let listed = list_tools_of(server.tools());
+    let listed = peri_mcp_common::list_tools_of(server.tools());
     assert_eq!(
         listed.tools.len(),
         expected.len(),
         "handler 必须恰好声明全部工具"
     );
-    for (mapped, tool) in listed.tools.iter().zip(expected.iter()) {
-        let definition = tool.definition();
-        assert_eq!(
-            mapped.name.as_ref(),
-            definition.name.as_str(),
-            "name 必须逐字映射"
-        );
-        assert_eq!(
-            mapped.description.as_deref(),
-            Some(definition.description.as_str()),
-            "{}: description 必须逐字映射",
-            definition.name
-        );
-        assert_eq!(
-            Value::Object(mapped.input_schema.as_ref().clone()),
-            definition.parameters,
-            "{}: input_schema 必须逐字等于既有工具的 parameters()",
-            definition.name
-        );
+    {
+        let paired_tools = listed.tools.iter().zip(expected.iter());
+        for (mapped, tool) in paired_tools {
+            let definition = tool.definition();
+            assert_eq!(
+                mapped.name.as_ref(),
+                definition.name.as_str(),
+                "name 必须逐字映射"
+            );
+            assert_eq!(
+                mapped.description.as_deref(),
+                Some(definition.description.as_str()),
+                "{}: description 必须逐字映射",
+                definition.name
+            );
+            assert_eq!(
+                Value::Object(mapped.input_schema.as_ref().clone()),
+                definition.parameters,
+                "{}: input_schema 必须逐字等于既有工具的 parameters()",
+                definition.name
+            );
+        }
     }
 }
 
@@ -433,7 +441,7 @@ async fn cron_server_maps_three_tools_without_tick() {
     );
     assert_eq!(removed.is_error, Some(false));
     assert!(
-        scheduler.lock().get_task(&task_id).is_none(),
+        scheduler.lock().task(&task_id).is_none(),
         "cron_remove 必须删掉 handler 持有的那份 scheduler 上的任务"
     );
     let after_remove = first_text(&complete(
@@ -484,7 +492,7 @@ async fn call_tool_routes_each_name_to_shared_base_tool() {
     );
     let written = scheduler
         .lock()
-        .get_task(&task_id)
+        .task(&task_id)
         .map(|task| (task.expression.clone(), task.prompt.clone()));
     assert_eq!(
         written,
@@ -504,14 +512,15 @@ async fn call_tool_routes_each_name_to_shared_base_tool() {
     let removed = complete(route(&server, "cron_remove", json!({ "id": task_id.clone() })).await);
     assert_eq!(removed.is_error, Some(false));
     assert!(
-        scheduler.lock().get_task(&task_id).is_none(),
+        scheduler.lock().task(&task_id).is_none(),
         "cron_remove 必须删掉同一 scheduler 上的任务"
     );
 
     // 未知工具名 → 协议错误（IF-D14 第一条分支）
-    let error = invoke_tool_call(server.tools(), "", &call("cron_pause", json!({})))
-        .await
-        .expect_err("未知工具名必须是协议错误（invalid_params）");
+    let error =
+        peri_mcp_common::invoke_tool_call(server.tools(), "", &call("cron_pause", json!({})))
+            .await
+            .expect_err("未知工具名必须是协议错误（invalid_params）");
     assert_eq!(error.code.0, ErrorCode::INVALID_PARAMS.0);
     assert!(
         error.message.contains("unknown tool: cron_pause"),
@@ -529,7 +538,7 @@ async fn call_tool_uses_if_d14_error_mapping() {
 
     let stub: Vec<Arc<dyn BaseTool>> = vec![Arc::new(FailingStubTool)];
     let reference = complete(
-        invoke_tool_call(&stub, "", &call("cron_register", json!({})))
+        peri_mcp_common::invoke_tool_call(&stub, "", &call("cron_register", json!({})))
             .await
             .expect("工具级失败必须是 Ok(Complete(error 结果))，不是 Err"),
     );
@@ -541,7 +550,7 @@ async fn call_tool_uses_if_d14_error_mapping() {
     );
 
     let missing = complete(
-        invoke_tool_call(
+        peri_mcp_common::invoke_tool_call(
             server.tools(),
             "",
             &call("cron_register", json!({ "prompt": LEAK_PROMPT })),
@@ -562,7 +571,7 @@ async fn call_tool_uses_if_d14_error_mapping() {
     );
 
     let invalid = complete(
-        invoke_tool_call(
+        peri_mcp_common::invoke_tool_call(
             server.tools(),
             "",
             &call(
@@ -589,7 +598,7 @@ async fn call_tool_uses_if_d14_error_mapping() {
     );
 
     let not_found = complete(
-        invoke_tool_call(
+        peri_mcp_common::invoke_tool_call(
             server.tools(),
             "",
             &call("cron_remove", json!({ "id": LEAK_PATH })),
@@ -632,7 +641,7 @@ async fn tick_disabled_has_no_driver_but_tools_work() {
     let server = CronMcpServer::new(Arc::clone(&scheduler));
 
     // ① 声明面照常：全部工具。
-    let listed = list_tools_of(server.tools());
+    let listed = peri_mcp_common::list_tools_of(server.tools());
     assert_eq!(
         listed.tools.len(),
         5,
@@ -694,7 +703,7 @@ async fn tick_disabled_has_no_driver_but_tools_work() {
     let removed = complete(route(&server, "cron_remove", json!({ "id": task_id.clone() })).await);
     assert_eq!(removed.is_error, Some(false));
     assert!(
-        scheduler.lock().get_task(&task_id).is_none(),
+        scheduler.lock().task(&task_id).is_none(),
         "cron_remove 必须删掉同一 scheduler 上的任务"
     );
 }

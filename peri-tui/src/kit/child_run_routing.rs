@@ -24,6 +24,7 @@ pub(crate) struct ChildRunRouting {
 }
 
 /// Business task settlement uses its own registry ownership, not preview lifetime.
+#[must_use]
 pub(crate) fn is_child_preview_event(event: &AcpEventData) -> bool {
     matches!(
         event,

@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 #[cfg(not(target_os = "emscripten"))]
-use peri_mcp_common::standalone::{serve_http, serve_stdio};
+use peri_mcp_common::standalone;
 
 #[cfg(not(target_os = "emscripten"))]
 use super::builtin::standalone::StandaloneFactory;
@@ -42,15 +42,15 @@ pub struct Options {
 /// Serve `options.instance` until the transport closes.
 #[cfg(not(target_os = "emscripten"))]
 pub async fn run(options: Options) -> Result<()> {
-    let factory = StandaloneFactory::new(&options.instance, options.workspace)?;
+    let factory = StandaloneFactory::try_new(&options.instance, options.workspace)?;
     let workspace = factory.workspace_handle();
     let served = match options.transport {
-        Transport::Stdio => serve_stdio(factory.create()?).await,
+        Transport::Stdio => standalone::serve_stdio(factory.create()?).await,
         Transport::Http {
             host,
             port,
             allowed_hosts,
-        } => serve_http(move || factory.create(), &host, port, &allowed_hosts).await,
+        } => standalone::serve_http(move || factory.create(), &host, port, &allowed_hosts).await,
     };
     let cleanup = match workspace {
         Some(server) => server.shutdown_shell_tasks().await,

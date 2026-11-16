@@ -3,7 +3,6 @@
 //! 夹具**手写压缩前形状（V10）的 DDL**（不引用 `canonical::V10_CREATE_*`）：这些语句是历史
 //! 形状的快照，升级实现改动时它们不该跟着漂移，否则「从上一版升级」这件事就没有被验证。
 
-use super::*;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Connection, SqliteConnection};
 
@@ -259,7 +258,7 @@ async fn upgrades_the_registration_shape_preserving_execution_evidence() {
     .await
     .unwrap();
 
-    migrate_local_v11(&mut connection).await.unwrap();
+    super::migrate_local_v11(&mut connection).await.unwrap();
 
     assert_eq!(
         version_of(&mut connection).await,
@@ -368,7 +367,7 @@ async fn merges_registrations_of_one_path_and_keeps_per_binding_snapshots() {
     )
     .await;
 
-    migrate_local_v11(&mut connection).await.unwrap();
+    super::migrate_local_v11(&mut connection).await.unwrap();
 
     let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspaces")
         .fetch_one(&mut connection)
@@ -412,7 +411,7 @@ async fn keeps_a_registration_that_no_session_references() {
     )
     .await;
 
-    migrate_local_v11(&mut connection).await.unwrap();
+    super::migrate_local_v11(&mut connection).await.unwrap();
 
     let row: (String, String, String, String) =
         sqlx::query_as("SELECT id, machine_id, path, path_source FROM workspaces")
@@ -462,7 +461,7 @@ async fn refuses_a_binding_referencing_a_missing_registration() {
         .await
         .unwrap();
 
-    let error = migrate_local_v11(&mut connection).await.unwrap_err();
+    let error = super::migrate_local_v11(&mut connection).await.unwrap_err();
 
     assert!(
         error
@@ -518,7 +517,7 @@ async fn refuses_a_binding_without_a_session_workspace_owner() {
         .await
         .unwrap();
 
-    let error = migrate_local_v11(&mut connection).await.unwrap_err();
+    let error = super::migrate_local_v11(&mut connection).await.unwrap_err();
 
     assert!(
         error
@@ -556,7 +555,7 @@ async fn released_schema_10_database_upgrades_through_the_store_once() {
     .await;
     connection.close().await.unwrap();
 
-    let store = crate::sessions::sqlite_store::SqliteThreadStore::new(&fixture.path)
+    let store = crate::sessions::sqlite_store::SqliteThreadStore::try_new(&fixture.path)
         .await
         .unwrap();
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
@@ -584,7 +583,7 @@ async fn released_schema_10_database_upgrades_through_the_store_once() {
     assert_eq!(row.2, r#"{"root":"/repo"}"#, "v15 起绑定证据是最小执行根");
     store.close().await;
 
-    let reopened = crate::sessions::sqlite_store::SqliteThreadStore::new(&fixture.path)
+    let reopened = crate::sessions::sqlite_store::SqliteThreadStore::try_new(&fixture.path)
         .await
         .unwrap();
     let (reopened_cookie,): (i64,) = sqlx::query_as("PRAGMA schema_version")

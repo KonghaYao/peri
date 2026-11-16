@@ -3,18 +3,17 @@
 //! 对应 spec/global/domains/tui/tui-rendering.md §2.4.2 的工具名映射表和参数摘要规则。
 
 use crate::i18n;
-use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 
 /// 将原始 `tool_name` 映射为用户友好的显示名。
 ///
 /// **匹配型归一（IF-D6 ④ / A8）**：builtin 一等工具的模型面名字是 effective name
-/// （如 `mcp__workspace__Bash`），判定先经 [`original_tool_name_of_effective`]
+/// （如 `mcp__workspace__Bash`），判定先经 [`original_tool_name_of_effective`](peri_acp_types::builtin_mcp::original_tool_name_of_effective)
 /// （IF-D15 唯一归一入口）换回原始工具名，使别名分支（`Bash` / `folder_operations`）
 /// 对迁移后的名字继续命中。别名分支**未命中**时回落传入名原样——既包括归一表
 /// 未命中（未知 / 外部 `mcp__*`），也包括无别名的 builtin 名字（`Read` 等显示
 /// 模型面原名）：两种情况都与「不新增 effective name 分支」同一口径。
 pub fn format_tool_name(raw: &str) -> String {
-    match original_tool_name_of_effective(raw).unwrap_or(raw) {
+    match peri_acp_types::builtin_mcp::original_tool_name_of_effective(raw).unwrap_or(raw) {
         "Bash" => i18n::tr("tool-name-shell"),
         "folder_operations" => i18n::tr("tool-name-folder"),
         _ => raw.to_string(),
@@ -29,13 +28,13 @@ pub fn format_tool_name(raw: &str) -> String {
 ///
 /// builtin 一等工具的 effective name（`mcp__<实例>__<原始名>`）与迁移前的裸名映射到
 /// 同一分支：**匹配型归一**（IF-D6 ④ / A8）先按传入名匹配，未命中再用 IF-D15 的
-/// [`original_tool_name_of_effective`] 取原始工具名重试一次。
+/// [`original_tool_name_of_effective`](peri_acp_types::builtin_mcp::original_tool_name_of_effective) 取原始工具名重试一次。
 pub fn format_tool_args(tool_name: &str, args: &serde_json::Value) -> String {
     // 原样优先：未知 / 外部 `mcp__*` 两次都不命中 ⇒ 空串，与迁移前逐位一致。
     if let Some(summary) = format_tool_args_by_name(tool_name, args) {
         return summary;
     }
-    if let Some(original) = original_tool_name_of_effective(tool_name)
+    if let Some(original) = peri_acp_types::builtin_mcp::original_tool_name_of_effective(tool_name)
         && let Some(summary) = format_tool_args_by_name(original, args)
     {
         return summary;

@@ -71,14 +71,17 @@ pub enum PersistenceRecovery {
 pub struct FrozenSnapshotBytes(String);
 
 impl FrozenSnapshotBytes {
+    #[must_use]
     pub fn new(bytes: impl Into<String>) -> Self {
         Self(bytes.into())
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }
@@ -159,7 +162,7 @@ pub struct ChildSnapshot {
 /// 会话的执行绑定分类。
 ///
 /// `None` 不再同时表达 legacy、不支持和损坏：损坏与版本不支持是错误
-/// （[`SessionResourceError`]），不是状态。
+/// （[`super::SessionResourceError`]），不是状态。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BindingState {
     /// 已按本机 workspace 绑定。

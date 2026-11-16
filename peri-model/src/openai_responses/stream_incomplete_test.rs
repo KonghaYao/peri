@@ -1,13 +1,19 @@
 use serde_json::{json, Value};
 use url::Url;
 
-use crate::{
-    runtime::stream::{SseDecoder, SseDecoders},
-    transport::SseEvent,
-    ContentBlock, ModelMessage, ModelRequest, ModelResult, ModelStreamEvent, StopReason,
-};
+use crate::runtime::stream::SseDecoder;
+use crate::runtime::stream::SseDecoders;
+use crate::transport::SseEvent;
+use crate::ContentBlock;
+use crate::ModelMessage;
+use crate::ModelRequest;
+use crate::ModelResult;
+use crate::ModelStreamEvent;
+use crate::StopReason;
 
-use super::{request::build_request, request_test::tool, ResponsesConfig};
+use super::request;
+use super::request_test;
+use super::ResponsesConfig;
 
 fn config() -> ResponsesConfig {
     ResponsesConfig::new(
@@ -19,8 +25,11 @@ fn config() -> ResponsesConfig {
 }
 
 fn decoder() -> SseDecoders {
-    let built =
-        build_request(&config(), &ModelRequest::default().with_tools(vec![tool()])).unwrap();
+    let built = request::build_request(
+        &config(),
+        &ModelRequest::default().with_tools(vec![request_test::tool()]),
+    )
+    .unwrap();
     super::stream::decoders(built.binding, built.tool_names)()
 }
 
@@ -81,7 +90,7 @@ fn max_output_tokens_keeps_usage_partial_text_and_safe_replay() {
     assert_eq!(usage.cache_read_input_tokens, Some(12));
     assert_eq!(usage.cache_creation_input_tokens, Some(3));
     assert!(matches!(&events[events.len()-2], ModelStreamEvent::Usage(value) if value == usage));
-    let built = build_request(
+    let built = request::build_request(
         &config(),
         &ModelRequest::new(vec![response.message().clone()]),
     )
@@ -159,12 +168,23 @@ fn other_or_missing_incomplete_reason_is_terminal() {
 fn truncated_tools_and_reasoning_never_enter_projection_or_replay() {
     for done in [false, true] {
         let (decode, eof) = decoder();
-        for (index, item) in [message("正文"), call("incomplete", "{\"path\":"),
+        {
+            let indexed_incomplete_items = [message("正文"), call("incomplete", "{\"path\":"),
             json!({"id":"rs_a","type":"reasoning","status":"incomplete",
                 "summary":[{"type":"summary_text","text":"半截思考"}],"encrypted_content":"partial"})]
-            .into_iter().enumerate() {
-            let kind = if done { "response.output_item.done" } else { "response.output_item.added" };
-            feed(&decode, json!({"type":kind,"output_index":index,"item":item})).unwrap();
+            .into_iter().enumerate();
+            for (index, item) in indexed_incomplete_items {
+                let kind = if done {
+                    "response.output_item.done"
+                } else {
+                    "response.output_item.added"
+                };
+                feed(
+                    &decode,
+                    json!({"type":kind,"output_index":index,"item":item}),
+                )
+                .unwrap();
+            }
         }
         let events = feed(&decode, incomplete()).unwrap();
         let ModelStreamEvent::Completed(response) = events.last().unwrap() else {
@@ -182,7 +202,7 @@ fn truncated_tools_and_reasoning_never_enter_projection_or_replay() {
         assert!(!content
             .iter()
             .any(|block| matches!(block, ContentBlock::Reasoning { .. })));
-        let built = build_request(
+        let built = request::build_request(
             &config(),
             &ModelRequest::new(vec![response.message().clone()]),
         )

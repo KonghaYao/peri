@@ -31,10 +31,7 @@ use peri_acp_types::thread::AgentStatus;
 use peri_acp_types::workspace::ResolvedWorkspace;
 use turso_serverless::Value;
 
-use super::cloud_tests::{
-    check, failure, run_counts, session_input, synth_binding, synth_thread, unique_run_label,
-    with_cleanup, CloudTarget,
-};
+use super::cloud_tests::CloudTarget;
 use super::ledger::{OperationId, OperationIdentity};
 use super::mutation::{MutationOutcome, QualifiedMutation, RemoteStore, StoreAccess};
 use super::session_history::{GUARD_MESSAGE_NOT_IN_SESSION_SQL, UPDATE_FLAGS_SQL};
@@ -52,11 +49,11 @@ const SELECT_TRUNCATED_SQL: &str =
 #[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
 async fn cloud_lifecycle_round_trip() {
     let target = CloudTarget::load();
-    let run = unique_run_label("peri-life");
+    let run = super::cloud_tests::unique_run_label("peri-life");
     let mut out = target.out();
     out.push("experiment=lifecycle".to_owned());
     out.flush();
-    let result = with_cleanup(&target, &run, || async {
+    let result = super::cloud_tests::with_cleanup(&target, &run, || async {
         lifecycle_flow(&target, &run).await
     })
     .await;
@@ -74,18 +71,18 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
     let writer = target
         .session_data(StoreAccess::ReadWrite)
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let created_at = chrono::Utc::now().to_rfc3339();
     let frozen = format!("{{\"frozen\":\"{run}\"}}");
-    let binding = synth_binding();
-    let root = synth_thread(&format!("{run}-lc-root"));
-    let child = synth_thread(&format!("{run}-lc-child"));
-    let parent = synth_thread(&format!("{run}-lc-parent"));
-    let nested = synth_thread(&format!("{run}-lc-nested"));
+    let binding = super::cloud_tests::synth_binding();
+    let root = super::cloud_tests::synth_thread(&format!("{run}-lc-root"));
+    let child = super::cloud_tests::synth_thread(&format!("{run}-lc-child"));
+    let parent = super::cloud_tests::synth_thread(&format!("{run}-lc-parent"));
+    let nested = super::cloud_tests::synth_thread(&format!("{run}-lc-nested"));
 
     for session in [&root, &parent] {
         writer
-            .save_new_session(&session_input(
+            .save_new_session(&super::cloud_tests::session_input(
                 session.as_str(),
                 &created_at,
                 &binding,
@@ -93,11 +90,11 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
                 None,
             ))
             .await
-            .map_err(failure)?;
+            .map_err(super::cloud_tests::failure)?;
     }
     writer
         .save_child(&ChildSnapshot {
-            target: session_input(
+            target: super::cloud_tests::session_input(
                 child.as_str(),
                 &created_at,
                 &binding,
@@ -112,10 +109,10 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
             },
         })
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     writer
         .save_child(&ChildSnapshot {
-            target: session_input(
+            target: super::cloud_tests::session_input(
                 nested.as_str(),
                 &created_at,
                 &binding,
@@ -130,7 +127,7 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
             },
         })
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
 
     // child resume 认领事实：由状态派生，不是独立字段。
     writer
@@ -142,12 +139,12 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
             },
         )
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let claimed = writer
         .load_child_resume_record(&child)
         .await
-        .map_err(failure)?;
-    check(
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         claimed.status == AgentStatus::Active && claimed.claimed,
         "active status must read back as claimed",
     )?;
@@ -160,12 +157,12 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
             },
         )
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let released = writer
         .load_child_resume_record(&child)
         .await
-        .map_err(failure)?;
-    check(
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         released.status == AgentStatus::Done && !released.claimed,
         "terminal status must read back as not claimed",
     )?;
@@ -188,24 +185,30 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
         )
         .await
         .expect_err("remote legacy adoption must remain read-only");
-    check(
+    super::cloud_tests::check(
         matches!(rejected.kind(), SessionResourceErrorKind::Unsupported),
         "remote legacy adoption must be unsupported",
     )?;
-    let preserved = writer.load_snapshot(&root).await.map_err(failure)?;
-    check(
+    let preserved = writer
+        .load_snapshot(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         matches!(&preserved.frozen, FrozenState::Present(bytes) if bytes.as_str() == frozen),
         "rejected adoption must preserve the existing frozen snapshot",
     )?;
 
     // 删树：整棵子树（含根）消失；根不存在时是 NotFound，不是「成功但没删」。
-    writer.delete_tree(&root).await.map_err(failure)?;
+    writer
+        .delete_tree(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
     for gone in [&root, &child] {
         let missing = writer
             .load_meta(gone)
             .await
             .expect_err("deleted session must be gone");
-        check(
+        super::cloud_tests::check(
             matches!(missing.kind(), SessionResourceErrorKind::NotFound),
             "deleted session must read back as NotFound",
         )?;
@@ -214,7 +217,7 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
         .delete_tree(&root)
         .await
         .expect_err("deleting an absent session must fail");
-    check(
+    super::cloud_tests::check(
         matches!(second_delete.kind(), SessionResourceErrorKind::NotFound),
         "deleting an absent session must be NotFound, not a silent success",
     )?;
@@ -223,30 +226,39 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
         .revoke_unpublished_session(&parent)
         .await
         .expect_err("revoking a session with published children must fail");
-    check(
+    super::cloud_tests::check(
         matches!(
             published.kind(),
             SessionResourceErrorKind::InvalidInput { .. }
         ),
         "revoking a session with children must be InvalidInput",
     )?;
-    writer.load_meta(&parent).await.map_err(failure)?;
-    writer.load_meta(&nested).await.map_err(failure)?;
-    writer.delete_tree(&nested).await.map_err(failure)?;
+    writer
+        .load_meta(&parent)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    writer
+        .load_meta(&nested)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    writer
+        .delete_tree(&nested)
+        .await
+        .map_err(super::cloud_tests::failure)?;
     writer
         .revoke_unpublished_session(&parent)
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let revoked = writer
         .load_meta(&parent)
         .await
         .expect_err("revoked session must be gone");
-    check(
+    super::cloud_tests::check(
         matches!(revoked.kind(), SessionResourceErrorKind::NotFound),
         "revoked session must read back as NotFound",
     )?;
 
-    writer.close().await.map_err(failure)
+    writer.close().await.map_err(super::cloud_tests::failure)
 }
 
 /// 实验二：批内守卫在真引擎上的两条分支。
@@ -261,11 +273,14 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
 #[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
 async fn cloud_batch_guard_holds_on_real_engine() {
     let target = CloudTarget::load();
-    let run = unique_run_label("peri-guard");
+    let run = super::cloud_tests::unique_run_label("peri-guard");
     let mut out = target.out();
     out.push("experiment=batch_guard".to_owned());
     out.flush();
-    let result = with_cleanup(&target, &run, || async { guard_flow(&target, &run).await }).await;
+    let result = super::cloud_tests::with_cleanup(&target, &run, || async {
+        guard_flow(&target, &run).await
+    })
+    .await;
     match result {
         Ok(()) => {
             let mut out = target.out();
@@ -277,7 +292,7 @@ async fn cloud_batch_guard_holds_on_real_engine() {
 }
 
 async fn guard_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
-    let root = synth_thread(&format!("{run}-guard"));
+    let root = super::cloud_tests::synth_thread(&format!("{run}-guard"));
     let created_at = chrono::Utc::now().to_rfc3339();
     let frozen = format!("{{\"frozen\":\"{run}\"}}");
 
@@ -285,28 +300,28 @@ async fn guard_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
     let writer = target
         .session_data(StoreAccess::ReadWrite)
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     writer
-        .save_new_session(&session_input(
+        .save_new_session(&super::cloud_tests::session_input(
             root.as_str(),
             &created_at,
-            &synth_binding(),
+            &super::cloud_tests::synth_binding(),
             &frozen,
             None,
         ))
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let entry = PersistedPayload::Message(BaseMessage::human("guarded entry"));
     writer
         .append_history(&root, std::slice::from_ref(&entry))
         .await
-        .map_err(failure)?;
-    writer.close().await.map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
+    writer.close().await.map_err(super::cloud_tests::failure)?;
 
     let store = target
         .store(StoreAccess::ReadWrite)
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let root_id = Value::Text(root.as_str().to_owned());
     let entry_id = Value::Text(entry.id().as_uuid().to_string());
     let absent_id = Value::Text(uuid::Uuid::nil().to_string());
@@ -316,16 +331,16 @@ async fn guard_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
 
     // 健康分支：守卫谓词不成立（条目确实在本会话）→ 不插行、批提交、效果落地。
     let healthy = guard_batch(&store, run, "guard_healthy", &root_id, &entry_id, true).await?;
-    check(
+    super::cloud_tests::check(
         matches!(healthy, MutationOutcome::Applied { .. }),
         "a healthy guard batch must commit",
     )?;
-    check(
+    super::cloud_tests::check(
         scalar(&store, COUNT_META_ROWS_SQL, Vec::new()).await? == 1,
         "the guard inserted a row on the healthy branch",
     )?;
     let healthy_ledger = ledger_rows(&store, run).await?;
-    check(
+    super::cloud_tests::check(
         healthy_ledger == ledger_baseline + 1,
         &format!(
             "the healthy guard batch changed the ledger row count from {ledger_baseline} to {healthy_ledger}"
@@ -337,20 +352,20 @@ async fn guard_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
         vec![root_id.clone(), entry_id.clone()],
     )
     .await?;
-    check(applied == 1, "the healthy batch effect did not land")?;
+    super::cloud_tests::check(applied == 1, "the healthy batch effect did not land")?;
 
     // 守卫分支：谓词成立（目标不在本会话）→ 主键冲突中止整批。
     let fired = guard_batch(&store, run, "guard_fired", &root_id, &absent_id, false).await?;
-    check(
+    super::cloud_tests::check(
         matches!(fired, MutationOutcome::NotApplied { .. }),
         "a fired guard must be reported as not applied, never as success",
     )?;
-    check(
+    super::cloud_tests::check(
         scalar(&store, COUNT_META_ROWS_SQL, Vec::new()).await? == 1,
         "a fired guard left a row in the single-row table",
     )?;
     let fired_ledger = ledger_rows(&store, run).await?;
-    check(
+    super::cloud_tests::check(
         fired_ledger == healthy_ledger,
         &format!(
             "a rolled-back batch changed the ledger row count from {healthy_ledger} to {fired_ledger}"
@@ -362,31 +377,34 @@ async fn guard_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
         vec![root_id.clone(), entry_id.clone()],
     )
     .await?;
-    check(
+    super::cloud_tests::check(
         rolled_back == 1,
         "a rolled-back batch still changed the effect row",
     )?;
 
     // 重连复核：中止的批不得在半状态上留下任何痕迹。
-    store.close().await.map_err(failure)?;
+    store.close().await.map_err(super::cloud_tests::failure)?;
     let reader = target
         .session_data(StoreAccess::ReadOnly)
         .await
-        .map_err(failure)?;
-    let snapshot = reader.load_snapshot(&root).await.map_err(failure)?;
-    check(
+        .map_err(super::cloud_tests::failure)?;
+    let snapshot = reader
+        .load_snapshot(&root)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         snapshot.payloads.len() == 1 && snapshot.meta.message_count == 1,
         "the aborted batch changed the visible session state",
     )?;
-    reader.close().await.map_err(failure)?;
+    reader.close().await.map_err(super::cloud_tests::failure)?;
 
     let store = target
         .store(StoreAccess::ReadWrite)
         .await
-        .map_err(failure)?;
-    let counts = run_counts(&store, run).await?;
-    store.close().await.map_err(failure)?;
-    check(
+        .map_err(super::cloud_tests::failure)?;
+    let counts = super::cloud_tests::run_counts(&store, run).await?;
+    store.close().await.map_err(super::cloud_tests::failure)?;
+    super::cloud_tests::check(
         counts.sessions == 1 && counts.messages == 1 && counts.ledger == ledger_baseline + 1,
         &format!(
             "guard probe left {} sessions / {} messages / {} ledger rows",
@@ -426,7 +444,7 @@ async fn guard_batch(
             ],
         })
         .await
-        .map_err(failure)
+        .map_err(super::cloud_tests::failure)
 }
 
 /// 本轮命名空间里的账本行数（含适配器自己的写入资格行）。
@@ -444,7 +462,7 @@ async fn scalar(store: &RemoteStore, sql: &'static str, params: Vec<Value>) -> R
     let batches = store
         .read_batch(vec![StatementSpec::new(sql, params)])
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let mut batches = batches.into_iter();
     let mut rows = batches
         .next()

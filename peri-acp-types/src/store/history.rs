@@ -10,10 +10,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::context_archive::{content_digest, validate_projection_metadata, ARCHIVE_CHUNK_BYTES};
-#[path = "history_projection.rs"]
-mod projection_lifecycle;
-pub use projection_lifecycle::rewind_projection_updates;
+use crate::context_archive;
+use crate::context_archive::ARCHIVE_CHUNK_BYTES;
+pub use crate::history_projection::rewind_projection_updates;
 
 use crate::messages::{BaseMessage, MessageId};
 use crate::projection::{MessageProjectionDirective, ProjectionAction};
@@ -149,12 +148,12 @@ fn validate_fork_archive_sources(
             let canonical = super::serialize_persisted_payload(payload).map_err(|_| invalid())?;
             let bytes = canonical.as_bytes();
             if member.canonical_bytes != bytes.len() as u64
-                || member.content_digest != content_digest(bytes)
+                || member.content_digest != context_archive::content_digest(bytes)
                 || !member
                     .chunk_digests
                     .iter()
                     .zip(bytes.chunks(ARCHIVE_CHUNK_BYTES))
-                    .all(|(expected, chunk)| *expected == content_digest(chunk))
+                    .all(|(expected, chunk)| *expected == context_archive::content_digest(chunk))
             {
                 return Err(invalid());
             }
@@ -425,8 +424,10 @@ fn remap_projection_references(
             || projection.archive_group.is_some()
             || !projection.archive_roots.is_empty()
         {
-            validate_projection_metadata(projection).map_err(|_| HistoryError::InvalidArchive {
-                id: target_message_id,
+            context_archive::validate_projection_metadata(projection).map_err(|_| {
+                HistoryError::InvalidArchive {
+                    id: target_message_id,
+                }
             })?;
         }
     }

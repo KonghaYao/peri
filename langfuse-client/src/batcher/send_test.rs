@@ -15,8 +15,9 @@ use crate::batcher::{Batcher, BatcherConfig};
 use crate::config::TelemetryConfig;
 use crate::error::LangfuseError;
 use crate::snapshot::{InputSource, SnapshotSource, TelemetryEvent};
+use crate::spool;
 use crate::spool::native::NativeSpool;
-use crate::spool::{route_fingerprint, SpoolStore};
+use crate::spool::SpoolStore;
 use crate::types::{IngestionEvent, SpanBody, TraceBody};
 use crate::LangfuseClient;
 
@@ -122,7 +123,7 @@ fn spooled_config(threshold: usize) -> BatcherConfig {
 /// 真实临时根上的 native 暂存；route 必须与同一凭据/端点派生出的导出 route 一致，
 /// 否则描述符写入即被端口按身份不符拒绝。
 fn native_spool(root: &Path, url: &str) -> Arc<dyn SpoolStore> {
-    let route = route_fingerprint(url, PUBLIC_KEY, SECRET_KEY).expect("route");
+    let route = spool::route_fingerprint(url, PUBLIC_KEY, SECRET_KEY).expect("route");
     Arc::new(NativeSpool::open_at(root.to_path_buf(), route, SPOOL_QUOTA_BYTES).expect("native"))
 }
 

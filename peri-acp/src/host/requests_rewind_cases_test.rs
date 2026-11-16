@@ -1,4 +1,6 @@
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::host::SessionState;
 use async_trait::async_trait;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
@@ -7,10 +9,16 @@ use peri_acp_types::session_resources::{
     RewindBoundary, RewindOutcome, SessionAvailability, SessionInitialization, SessionMetaPatch,
     SessionResourceError, SessionResourceResult, SessionResources, SessionSnapshot,
 };
-use peri_acp_types::store::{CompactionChange, InheritedContext, MessageFlags, PersistedPayload};
+
+use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::thread::{ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery};
+#[cfg(test)]
+use peri_acp_types::PeriCaps;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 // ── R2：rewind 以存储为事实源 ─────────────────────────────────────────────────
 

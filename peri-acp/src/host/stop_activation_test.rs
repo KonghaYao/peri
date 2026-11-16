@@ -1,6 +1,18 @@
-use super::*;
+use crate::host::requests::tests::activation_tests::ActivationHarness;
+use crate::host::SessionState;
+use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::messages::MessageContent;
+
+use peri_acp_types::session::MessageSource;
+use peri_acp_types::session::QueuedMessage;
 use peri_acp_types::session::{DispatchUserInputsRequest, EnqueueUserInputRequest, UserInputState};
+
+use peri_acp_types::tasks::BgTaskKind;
+use peri_acp_types::tasks::BgTaskRegistration;
+use serde_json::json;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 

@@ -1,4 +1,13 @@
-use super::*;
+use super::{
+    Arc, ChildSnapshot, CloseSettlement, FrozenSnapshotBytes, FrozenState, NewSession,
+    NewSessionMeta, ResolvedWorkspace, SessionBinding, SessionResourcesImpl, TempDir,
+};
+use crate::sessions::resources::SessionDataHome;
+use crate::sessions::sqlite_store::LocalExecution;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session_resources::BindingState;
+use peri_acp_types::session_resources::ExecutionAvailability;
+use peri_acp_types::session_resources::SessionResources;
 
 #[tokio::test]
 async fn terminal_reminder_replay_has_one_canonical_history_entry() {
@@ -102,7 +111,7 @@ async fn test_double_db_reopen_preserves_data_plane_snapshot() {
     );
     fixture
         .facade
-        .append_history(&id, &[payload("first turn")])
+        .append_history(&id, &[super::payload("first turn")])
         .await
         .unwrap();
     assert_eq!(fixture.data_rows(&id).await, (1, 1, 1));
@@ -130,7 +139,7 @@ async fn test_double_db_reopen_preserves_data_plane_snapshot() {
     assert_eq!(after.frozen, before.frozen);
     assert_eq!(after.payloads.len(), before.payloads.len());
     reopened
-        .append_history(&id, &[payload("reopened instance")])
+        .append_history(&id, &[super::payload("reopened instance")])
         .await
         .unwrap();
     assert_eq!(fixture.data_rows(&id).await, (1, 1, 2));
@@ -191,7 +200,7 @@ struct DoubleDbFixture {
 
 impl DoubleDbFixture {
     async fn new() -> Self {
-        let repo = repository();
+        let repo = super::repository();
         let data_dir = tempfile::tempdir().unwrap();
         let local_dir = tempfile::tempdir().unwrap();
         let data = LocalExecution::open(data_dir.path().join("remote.db"))
@@ -433,7 +442,7 @@ async fn test_double_db_child_mutation_uses_data_plane_root_gate() {
     drop(fixture.facade.gate.admit(&root).await.unwrap());
     assert!(fixture
         .facade
-        .append_history(&child, &[payload("blocked")])
+        .append_history(&child, &[super::payload("blocked")])
         .await
         .is_err());
     fixture
@@ -443,7 +452,7 @@ async fn test_double_db_child_mutation_uses_data_plane_root_gate() {
         .unwrap();
     fixture
         .facade
-        .append_history(&child, &[payload("child turn")])
+        .append_history(&child, &[super::payload("child turn")])
         .await
         .unwrap();
     assert_eq!(fixture.data_rows(&child).await, (1, 1, 1));

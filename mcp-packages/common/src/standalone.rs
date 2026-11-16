@@ -6,12 +6,11 @@
 use std::io;
 
 use anyhow::{Context, Result};
-use rmcp::{
-    transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
-    },
-    ServerHandler, ServiceExt,
-};
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::StreamableHttpServerConfig;
+use rmcp::transport::streamable_http_server::StreamableHttpService;
+use rmcp::ServerHandler;
+use rmcp::ServiceExt;
 use tokio_util::sync::CancellationToken;
 
 /// Serve `server` over stdin/stdout until the peer closes the transport.

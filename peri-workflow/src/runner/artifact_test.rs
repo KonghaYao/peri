@@ -5,12 +5,15 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{
-    artifact_id, network_fetch_allowed_from, prepare_workflow_command_with, publish_to_cache_in,
-    resolve_artifact, sha256_hex, ArtifactOrigin, ArtifactSources, EntryPin, WORKFLOW_BUILD_ID,
-    WORKFLOW_ENTRY, WORKFLOW_ENTRY_SHA256, WORKFLOW_NPM_VERSION, WORKFLOW_PACKAGE_NAME,
-    WORKFLOW_PROTOCOL_VERSION,
-};
+use crate::runner::artifact::ArtifactOrigin;
+use crate::runner::artifact::ArtifactSources;
+use crate::runner::artifact::EntryPin;
+use crate::runner::artifact::WORKFLOW_BUILD_ID;
+use crate::runner::artifact::WORKFLOW_ENTRY;
+use crate::runner::artifact::WORKFLOW_ENTRY_SHA256;
+use crate::runner::artifact::WORKFLOW_NPM_VERSION;
+use crate::runner::artifact::WORKFLOW_PACKAGE_NAME;
+use crate::runner::artifact::WORKFLOW_PROTOCOL_VERSION;
 
 /// 合成入口字节：可被 `node` 直接执行的最小脚本（内容任意，摘要由测试内计算）。
 fn synthetic_entry(seed: &str) -> Vec<u8> {
@@ -19,8 +22,10 @@ fn synthetic_entry(seed: &str) -> Vec<u8> {
 
 /// 按给定元数据与入口字节写入包目录（身份字段取编译期常量，仅 `version`/`main` 可调）。
 fn write_package(package: &Path, entry_bytes: &[u8], version: &str, main: &str) {
-    std::fs::create_dir_all(package.join("dist")).unwrap();
-    std::fs::write(package.join(WORKFLOW_ENTRY), entry_bytes).unwrap();
+    std::fs::create_dir_all(package.join("dist"))
+        .expect("the test fixture directory must be creatable");
+    std::fs::write(package.join(WORKFLOW_ENTRY), entry_bytes)
+        .expect("the test fixture file must be writable");
     std::fs::write(
         package.join("package.json"),
         serde_json::json!({
@@ -32,7 +37,7 @@ fn write_package(package: &Path, entry_bytes: &[u8], version: &str, main: &str) 
         })
         .to_string(),
     )
-    .unwrap();
+    .expect("the test fixture file must be writable");
 }
 
 /// 身份合法且摘要与 `entry_bytes` 一致的合成包目录。
@@ -51,7 +56,7 @@ fn valid_package(parent: &Path, name: &str, seed: &str) -> PathBuf {
 fn sources_for(package: &Path, seed: &str) -> ArtifactSources {
     ArtifactSources {
         override_dir: Some(package.to_path_buf()),
-        entry_pin: EntryPin(sha256_hex(&synthetic_entry(seed))),
+        entry_pin: EntryPin(crate::runner::artifact::sha256_hex(&synthetic_entry(seed))),
         ..ArtifactSources::default()
     }
 }
@@ -64,24 +69,25 @@ fn entry_pin_defaults_to_the_compiled_constant() {
 #[test]
 fn resolve_reports_missing_when_no_source_is_available() {
     let sources = ArtifactSources::default();
-    assert!(resolve_artifact(&sources).is_none());
+    assert!(crate::runner::artifact::resolve_artifact(&sources).is_none());
 }
 
 #[test]
 fn resolve_prefers_override_then_cache_then_sidecar() {
-    let tmp = tempfile::TempDir::new().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
     let seed = "precedence";
     let entry_bytes = synthetic_entry(seed);
-    let pin = EntryPin(sha256_hex(&entry_bytes));
+    let pin = EntryPin(crate::runner::artifact::sha256_hex(&entry_bytes));
 
     let override_dir = valid_package(tmp.path(), "override", seed);
     // 缓存包目录 = `<前缀>/<内容身份>`，与 `publish_to_cache_in` 的发布目标一致。
     let cache_prefix = tmp.path().join("cache");
-    let cached = cache_prefix.join(artifact_id());
+    let cached = cache_prefix.join(crate::runner::artifact::artifact_id());
     write_package(&cached, &entry_bytes, WORKFLOW_NPM_VERSION, WORKFLOW_ENTRY);
     let sidecar = valid_package(tmp.path(), "sidecar", seed);
 
-    let resolved = resolve_artifact(&ArtifactSources {
+    let resolved = crate::runner::artifact::resolve_artifact(&ArtifactSources {
         override_dir: Some(override_dir.clone()),
         sidecar_dirs: vec![sidecar.clone()],
         cache_prefix: Some(cache_prefix.clone()),
@@ -92,7 +98,7 @@ fn resolve_prefers_override_then_cache_then_sidecar() {
     assert_eq!(resolved.package_dir, override_dir);
     assert_eq!(resolved.entry, override_dir.join(WORKFLOW_ENTRY));
 
-    let resolved = resolve_artifact(&ArtifactSources {
+    let resolved = crate::runner::artifact::resolve_artifact(&ArtifactSources {
         override_dir: None,
         sidecar_dirs: vec![sidecar.clone()],
         cache_prefix: Some(cache_prefix),
@@ -102,7 +108,7 @@ fn resolve_prefers_override_then_cache_then_sidecar() {
     assert_eq!(resolved.origin, ArtifactOrigin::Cache);
     assert_eq!(resolved.package_dir, cached);
 
-    let resolved = resolve_artifact(&ArtifactSources {
+    let resolved = crate::runner::artifact::resolve_artifact(&ArtifactSources {
         override_dir: None,
         sidecar_dirs: vec![sidecar.clone()],
         cache_prefix: None,
@@ -115,7 +121,8 @@ fn resolve_prefers_override_then_cache_then_sidecar() {
 
 #[test]
 fn resolve_rejects_wrong_version() {
-    let tmp = tempfile::TempDir::new().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
     let seed = "wrong-version";
     let entry_bytes = synthetic_entry(seed);
     let package = tmp.path().join("package");
@@ -124,19 +131,22 @@ fn resolve_rejects_wrong_version() {
 
     let sources = sources_for(&package, seed);
     assert!(
-        resolve_artifact(&sources).is_none(),
+        crate::runner::artifact::resolve_artifact(&sources).is_none(),
         "版本与期望不符必须拒绝"
     );
 }
 
 #[test]
 fn resolve_rejects_escaping_entry() {
-    let tmp = tempfile::TempDir::new().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
     let seed = "escaping";
     let entry_bytes = synthetic_entry(seed);
     let package = tmp.path().join("package");
-    std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(tmp.path().join("outside.js"), &entry_bytes).unwrap();
+    std::fs::create_dir_all(&package)
+        .expect("the create dir all fixture result is required for this assertion");
+    std::fs::write(tmp.path().join("outside.js"), &entry_bytes)
+        .expect("the test fixture file must be writable");
     // `main` 逃出包目录；入口内容与 pin 一致，隔离路径越界断言。
     write_package(
         &package,
@@ -146,12 +156,16 @@ fn resolve_rejects_escaping_entry() {
     );
 
     let sources = sources_for(&package, seed);
-    assert!(resolve_artifact(&sources).is_none(), "入口路径越界必须拒绝");
+    assert!(
+        crate::runner::artifact::resolve_artifact(&sources).is_none(),
+        "入口路径越界必须拒绝"
+    );
 }
 
 #[test]
 fn resolve_rejects_tampered_entry_with_correct_metadata() {
-    let tmp = tempfile::TempDir::new().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
     let package = tmp.path().join("package");
     let original = synthetic_entry("tamper-original");
     let mut tampered = synthetic_entry("tamper-original");
@@ -160,47 +174,49 @@ fn resolve_rejects_tampered_entry_with_correct_metadata() {
     // 元数据、路径、版本全部合法，只有入口内容与期望摘要不符。
     write_package(&package, &tampered, WORKFLOW_NPM_VERSION, WORKFLOW_ENTRY);
     let sources = ArtifactSources {
-        entry_pin: EntryPin(sha256_hex(&original)),
+        entry_pin: EntryPin(crate::runner::artifact::sha256_hex(&original)),
         ..sources_for(&package, "tamper-original")
     };
     assert!(
-        resolve_artifact(&sources).is_none(),
+        crate::runner::artifact::resolve_artifact(&sources).is_none(),
         "入口摘要不匹配必须拒绝，不能让被篡改的 bundle 进入执行路径"
     );
 
     // 正对照：同一包在 pin 取自身摘要时被接受（证明拒绝来自摘要而非其他校验）。
     let accepted = ArtifactSources {
-        entry_pin: EntryPin(sha256_hex(&tampered)),
+        entry_pin: EntryPin(crate::runner::artifact::sha256_hex(&tampered)),
         ..sources_for(&package, "tamper-original")
     };
-    assert!(resolve_artifact(&accepted).is_some());
+    assert!(crate::runner::artifact::resolve_artifact(&accepted).is_some());
 }
 
 #[test]
 fn resolve_rejects_synthetic_package_against_production_pin() {
     // 生产口径（默认 pin = 编译期常量）只接受与 pin 一致的发布产物：
     // 合成夹具的摘要必然不同，必须拒绝。
-    let tmp = tempfile::TempDir::new().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
     let package = valid_package(tmp.path(), "package", "not-the-published-bundle");
     let sources = ArtifactSources {
         override_dir: Some(package),
         ..ArtifactSources::default()
     };
-    assert!(resolve_artifact(&sources).is_none());
+    assert!(crate::runner::artifact::resolve_artifact(&sources).is_none());
 }
 
 #[tokio::test]
 async fn offline_first_use_publishes_sidecar_into_cache() {
-    let tmp = tempfile::TempDir::new().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
     let seed = "publish";
     let sidecar = valid_package(tmp.path(), "sidecar", seed);
-    let pin = EntryPin(sha256_hex(&synthetic_entry(seed)));
+    let pin = EntryPin(crate::runner::artifact::sha256_hex(&synthetic_entry(seed)));
     // 缓存前缀等价于 `~/.peri/workflow/<version>`，全程不触网。
     let cache_prefix = tmp
         .path()
         .join(format!("home/.peri/workflow/{WORKFLOW_NPM_VERSION}"));
 
-    let resolved = resolve_artifact(&ArtifactSources {
+    let resolved = crate::runner::artifact::resolve_artifact(&ArtifactSources {
         override_dir: None,
         sidecar_dirs: vec![sidecar.clone()],
         cache_prefix: Some(cache_prefix.clone()),
@@ -209,16 +225,23 @@ async fn offline_first_use_publishes_sidecar_into_cache() {
     .expect("随包 sidecar 应可离线解析");
     assert_eq!(resolved.origin, ArtifactOrigin::Sidecar);
 
-    let published = publish_to_cache_in(&cache_prefix, &sidecar, &resolved.entry, pin.0.as_str())
-        .await
-        .unwrap();
+    let published = crate::runner::artifact::publish_to_cache_in(
+        &cache_prefix,
+        &sidecar,
+        &resolved.entry,
+        pin.0.as_str(),
+    )
+    .await
+    .expect("the publish to cache in fixture result is required for this assertion");
     assert_eq!(
         published,
-        cache_prefix.join(artifact_id()).join(WORKFLOW_ENTRY)
+        cache_prefix
+            .join(crate::runner::artifact::artifact_id())
+            .join(WORKFLOW_ENTRY)
     );
 
     // 首次使用后仅凭缓存即可解析（离线复用），且不再依赖 sidecar。
-    let cached = resolve_artifact(&ArtifactSources {
+    let cached = crate::runner::artifact::resolve_artifact(&ArtifactSources {
         override_dir: None,
         sidecar_dirs: Vec::new(),
         cache_prefix: Some(cache_prefix.clone()),
@@ -229,22 +252,37 @@ async fn offline_first_use_publishes_sidecar_into_cache() {
     assert_eq!(cached.entry, published);
 
     // 重复发布幂等：命中既有缓存，不产生额外内容目录。
-    let again = publish_to_cache_in(&cache_prefix, &sidecar, &resolved.entry, pin.0.as_str())
-        .await
-        .unwrap();
+    let again = crate::runner::artifact::publish_to_cache_in(
+        &cache_prefix,
+        &sidecar,
+        &resolved.entry,
+        pin.0.as_str(),
+    )
+    .await
+    .expect("the publish to cache in fixture result is required for this assertion");
     assert_eq!(again, published);
     let mut dirs = std::fs::read_dir(&cache_prefix)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .expect("the read dir fixture result is required for this assertion")
+        .map(|entry| {
+            entry
+                .expect("the entry fixture result is required for this assertion")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect::<Vec<_>>();
     dirs.sort();
-    assert_eq!(dirs, vec![artifact_id().to_string()]);
+    assert_eq!(
+        dirs,
+        vec![crate::runner::artifact::artifact_id().to_string()]
+    );
 }
 
 /// 离线首次使用（空缓存 + 仅随包 sidecar + 不触网）：解析 → 发布 → 真实执行。
 #[tokio::test]
 async fn first_use_with_empty_cache_runs_published_sidecar() {
-    let tmp = tempfile::TempDir::new().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
     let seed = "first-use";
     let sidecar = valid_package(tmp.path(), "sidecar", seed);
     let cache_prefix = tmp
@@ -254,16 +292,16 @@ async fn first_use_with_empty_cache_runs_published_sidecar() {
         override_dir: None,
         sidecar_dirs: vec![sidecar],
         cache_prefix: Some(cache_prefix.clone()),
-        entry_pin: EntryPin(sha256_hex(&synthetic_entry(seed))),
+        entry_pin: EntryPin(crate::runner::artifact::sha256_hex(&synthetic_entry(seed))),
     };
 
-    let command = prepare_workflow_command_with(&sources)
+    let command = crate::runner::artifact::prepare_workflow_command_with(&sources)
         .await
         .expect("首次离线使用必须由随包 sidecar 满足");
     assert_eq!(
         command.args,
         vec![cache_prefix
-            .join(artifact_id())
+            .join(crate::runner::artifact::artifact_id())
             .join(WORKFLOW_ENTRY)
             .to_string_lossy()
             .into_owned()],
@@ -272,7 +310,7 @@ async fn first_use_with_empty_cache_runs_published_sidecar() {
 
     let exit_code = crate::cli::run_prepared(&command, &[std::ffi::OsString::from("--help")])
         .await
-        .unwrap();
+        .expect("the run prepared fixture result is required for this assertion");
     assert_eq!(
         exit_code, 0,
         "随包 sidecar 必须能在无网络、无仓库 dist 的环境下真实执行"
@@ -281,12 +319,15 @@ async fn first_use_with_empty_cache_runs_published_sidecar() {
 
 #[tokio::test]
 async fn prepare_fails_closed_without_artifact_and_without_opt_in() {
-    let error = prepare_workflow_command_with(&ArtifactSources::default())
+    let error = crate::runner::artifact::prepare_workflow_command_with(&ArtifactSources::default())
         .await
         .expect_err("无 sidecar、无缓存且未 opt-in 时必须 fail closed");
     let message = error.to_string();
     assert!(
-        message.contains(&format!("peri-resources/workflow/{}", artifact_id())),
+        message.contains(&format!(
+            "peri-resources/workflow/{}",
+            crate::runner::artifact::artifact_id()
+        )),
         "错误须指出随包 sidecar 位置: {message}"
     );
     assert!(
@@ -298,8 +339,14 @@ async fn prepare_fails_closed_without_artifact_and_without_opt_in() {
 #[test]
 fn network_fetch_requires_explicit_opt_in_value() {
     use std::ffi::OsStr;
-    assert!(!network_fetch_allowed_from(None));
-    assert!(!network_fetch_allowed_from(Some(OsStr::new("0"))));
-    assert!(!network_fetch_allowed_from(Some(OsStr::new("true"))));
-    assert!(network_fetch_allowed_from(Some(OsStr::new("1"))));
+    assert!(!crate::runner::artifact::network_fetch_allowed_from(None));
+    assert!(!crate::runner::artifact::network_fetch_allowed_from(Some(
+        OsStr::new("0")
+    )));
+    assert!(!crate::runner::artifact::network_fetch_allowed_from(Some(
+        OsStr::new("true")
+    )));
+    assert!(crate::runner::artifact::network_fetch_allowed_from(Some(
+        OsStr::new("1")
+    )));
 }

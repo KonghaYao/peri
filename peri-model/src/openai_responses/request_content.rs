@@ -1,15 +1,19 @@
 use serde_json::{json, Value};
 
-use crate::{
-    prompt_cache::strip_system_prompt_dynamic_boundaries, ContentBlock, DocumentSource,
-    ImageSource, ModelMessage, ModelResult, ToolCall, ToolResult,
-};
+use crate::prompt_cache;
+use crate::ContentBlock;
+use crate::DocumentSource;
+use crate::ImageSource;
+use crate::ModelMessage;
+use crate::ModelResult;
+use crate::ToolCall;
+use crate::ToolResult;
 
-use super::{
-    replay::{self, ReplayBinding},
-    request::{invalid, valid_tool_name},
-    ResponsesProfile, TOOL_NAMESPACE,
-};
+use super::replay;
+use super::replay::ReplayBinding;
+use super::request;
+use super::ResponsesProfile;
+use super::TOOL_NAMESPACE;
 
 pub(super) fn messages_to_input(
     messages: &[ModelMessage],
@@ -22,8 +26,8 @@ pub(super) fn messages_to_input(
                 let mut parts = Vec::new();
                 for block in content {
                     match block {
-                        ContentBlock::Text { text } => parts.push(json!({"type": "input_text", "text": strip_system_prompt_dynamic_boundaries(text)})),
-                        _ => return Err(invalid("Responses developer messages only support text")),
+                        ContentBlock::Text { text } => parts.push(json!({"type": "input_text", "text": prompt_cache::strip_system_prompt_dynamic_boundaries(text)})),
+                        _ => return Err(request::invalid("Responses developer messages only support text")),
                     }
                 }
                 if !parts.is_empty() {
@@ -63,7 +67,7 @@ pub(super) fn messages_to_input(
                             embedded_calls.push(tool_call.clone())
                         }
                         _ => {
-                            return Err(invalid(
+                            return Err(request::invalid(
                                 "Responses assistant history supports text, reasoning and function calls only",
                             ));
                         }
@@ -76,7 +80,9 @@ pub(super) fn messages_to_input(
                     &embedded_calls
                 } else {
                     if !embedded_calls.is_empty() && embedded_calls != *tool_calls {
-                        return Err(invalid("Assistant content and tool_calls disagree"));
+                        return Err(request::invalid(
+                            "Assistant content and tool_calls disagree",
+                        ));
                     }
                     tool_calls
                 };
@@ -105,15 +111,17 @@ fn input_content(content: &[ContentBlock]) -> ModelResult<Vec<Value>> {
             DocumentSource::Base64 { media_type, data } => Ok(json!({"type": "input_file", "filename": title.as_deref().unwrap_or("document"), "file_data": format!("data:{};base64,{data}", media_type.as_str())})),
             DocumentSource::Text { text } => Ok(json!({"type": "input_text", "text": text})),
         },
-        _ => Err(invalid("Responses user/tool content contains an unsupported block")),
+        _ => Err(request::invalid("Responses user/tool content contains an unsupported block")),
     }).collect()
 }
 
 fn function_call(call: &ToolCall, profile: ResponsesProfile) -> ModelResult<Value> {
-    if call.id().is_empty() || !valid_tool_name(call.name()) {
-        return Err(invalid("Invalid function call identity in history"));
+    if call.id().is_empty() || !request::valid_tool_name(call.name()) {
+        return Err(request::invalid(
+            "Invalid function call identity in history",
+        ));
     }
-    let mut item = json!({"type": "function_call", "call_id": call.id(), "name": call.name(), "arguments": serde_json::to_string(call.arguments()).map_err(|_| invalid("Cannot serialize function arguments"))?});
+    let mut item = json!({"type": "function_call", "call_id": call.id(), "name": call.name(), "arguments": serde_json::to_string(call.arguments()).map_err(|_| request::invalid("Cannot serialize function arguments"))?});
     if profile == ResponsesProfile::ChatGptPlan {
         item["namespace"] = json!(TOOL_NAMESPACE);
     }
@@ -122,7 +130,7 @@ fn function_call(call: &ToolCall, profile: ResponsesProfile) -> ModelResult<Valu
 
 fn function_output(result: &ToolResult) -> ModelResult<Value> {
     if result.tool_call_id.is_empty() {
-        return Err(invalid("Function result is missing call_id"));
+        return Err(request::invalid("Function result is missing call_id"));
     }
     let mut content = input_content(&result.content)?;
     if result.is_error {

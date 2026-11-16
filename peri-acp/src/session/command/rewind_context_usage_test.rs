@@ -7,13 +7,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use peri_acp_types::{
-    event::ExecutorEvent,
-    messages::BaseMessage,
-    session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources},
-    thread::{CancelPolicy, ThreadId},
-    workspace::SessionBinding,
-};
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::session_resources::FrozenSnapshotBytes;
+use peri_acp_types::session_resources::NewSession;
+use peri_acp_types::session_resources::NewSessionMeta;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::thread::CancelPolicy;
+use peri_acp_types::thread::ThreadId;
+use peri_acp_types::workspace::SessionBinding;
 
 use super::super::{
     CommandContext, CommandHandler, CommandOutcome, CommandResult, FeedbackChannel, FeedbackLevel,

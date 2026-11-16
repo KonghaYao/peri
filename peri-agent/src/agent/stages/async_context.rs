@@ -1,6 +1,8 @@
-use std::sync::{atomic::AtomicBool, Arc};
+use std::fmt::{self, Debug, Formatter};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
-use super::StageContextBuilder;
+use crate::agent::stages::context::StageContextBuilder;
 
 /// 异步传输控制（run_react_loop idle 等待及完成提醒的只读后台活动判断）
 #[derive(Clone)]
@@ -36,11 +38,13 @@ pub struct AsyncContext {
 }
 
 impl StageContextBuilder {
+    #[must_use]
     pub fn with_idle_waiting(mut self) -> Self {
         self.async_ctx.idle_wait_enabled = true;
         self
     }
 
+    #[must_use]
     pub fn with_idle_registry(mut self, receiver: tokio::sync::watch::Receiver<u64>) -> Self {
         self.async_ctx.idle_registry = Some(receiver);
         self
@@ -49,12 +53,14 @@ impl StageContextBuilder {
     /// 设置 idle 时是否应该 await_wake 的判断 closure。
     /// 返回 true → 主 agent 有未完成异步任务，需要 await_wake 等结果续跑。
     /// 返回 false → 直接退出 loop，避免正常对话 loading 卡死。
+    #[must_use]
     pub fn with_idle_should_wait(mut self, probe: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
         self.async_ctx.idle_should_wait = Some(probe);
         self
     }
 
     /// 有界等待到期时的交接快照探针（见 [`AsyncContext::pending_handoff`]）。
+    #[must_use]
     pub fn with_pending_handoff(
         mut self,
         probe: Arc<
@@ -66,6 +72,7 @@ impl StageContextBuilder {
     }
 
     /// 有界等待窗口的截止时刻探针（idle 挂起据此设置定时器）。
+    #[must_use]
     pub fn with_handoff_deadline(
         mut self,
         probe: Arc<dyn Fn() -> Option<tokio::time::Instant> + Send + Sync>,
@@ -76,8 +83,31 @@ impl StageContextBuilder {
 
     /// 设置会话级 idle-suspended 标志（await_wake 挂起期间置 true；宿主
     /// `dispatch_prompt_turn` 据此把挂起期间到达的用户 prompt 注入 inbox）。
+    #[must_use]
     pub fn with_idle_suspended_flag(mut self, flag: Arc<AtomicBool>) -> Self {
         self.async_ctx.idle_suspended_flag = Some(flag);
         self
+    }
+}
+
+impl Debug for AsyncContext {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AsyncContext")
+            .field("child_settlement_present", &self.child_settlement.is_some())
+            .field("idle_wait_enabled", &self.idle_wait_enabled)
+            .field("idle_should_wait_present", &self.idle_should_wait.is_some())
+            .field("pending_handoff_present", &self.pending_handoff.is_some())
+            .field("handoff_deadline_present", &self.handoff_deadline.is_some())
+            .field("idle_registry_present", &self.idle_registry.is_some())
+            .field(
+                "idle_suspended_flag_present",
+                &self.idle_suspended_flag.is_some(),
+            )
+            .field(
+                "hook_stop_requested_present",
+                &self.hook_stop_requested.is_some(),
+            )
+            .finish_non_exhaustive()
     }
 }

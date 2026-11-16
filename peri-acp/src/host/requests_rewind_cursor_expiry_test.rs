@@ -1,4 +1,12 @@
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::provider::LlmProvider;
+
+use peri_acp_types::store::PersistedPayload;
+#[cfg(test)]
+use peri_acp_types::PeriCaps;
+use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 回归（S6c / 验收 A19「旧 cursor 失效」）：rewind 提交成功后，已发出的历史分页游标
 /// **在进入存储之前**被拒（结构版本），且与「锚点被删」得到同一个可区分错误。
@@ -11,25 +19,37 @@ async fn test_rewind_expires_previously_issued_history_cursors() {
     use peri_acp_types::history_page::HistoryCursorEnvelope;
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let shared: crate::host::SharedSessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let sid = {
         let mut sessions = shared.lock().await;
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await
+        crate::host::requests::tests::register_session_with_history(
+            &mut sessions,
+            tmp.path().to_str().unwrap(),
+            &cfg,
+        )
+        .await
     };
     let (_h1, _a1, anchor) = {
         let mut sessions = shared.lock().await;
-        archive_prefix_in_storage(&mut sessions, &cfg, &sid).await
+        crate::host::requests::tests::rewind_cases::archive_prefix_in_storage(
+            &mut sessions,
+            &cfg,
+            &sid,
+        )
+        .await
     };
-    enable_rewind_cap(&cfg, &sid);
+    crate::host::requests::tests::rewind_cases::enable_rewind_cap(&cfg, &sid);
     // 更晚的一条自有消息：回退到它，锚点（摘要）在提交后仍然存活。
     let tail = peri_acp_types::messages::BaseMessage::human("第三轮用户问题");
     cfg.session_resources
@@ -67,7 +87,7 @@ async fn test_rewind_expires_previously_issued_history_cursors() {
     let target = tail.id().as_uuid().to_string();
     let preview = {
         let mut sessions = shared.lock().await;
-        handle_request(
+        crate::host::requests::handle_request(
             "session/rewind-preview",
             &json!({ "sessionId": sid, "target_message_id": target }),
             &cfg,
@@ -80,7 +100,7 @@ async fn test_rewind_expires_previously_issued_history_cursors() {
     let fingerprint = preview["preview_fingerprint"].as_str().unwrap().to_string();
     {
         let mut sessions = shared.lock().await;
-        handle_request(
+        crate::host::requests::handle_request(
             "session/rewind",
             &json!({
                 "sessionId": sid,

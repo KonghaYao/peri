@@ -1,10 +1,12 @@
 //! 客户端句柄、状态与 scoped connection identity；由 client 保持原导出路径。
 
 use crate::mcp::config::ConfigSource;
-use rmcp::{
-    model::{Resource, Tool},
-    service::{Peer, RoleClient},
-};
+use rmcp::model::Resource;
+use rmcp::model::Tool;
+use rmcp::service::Peer;
+use rmcp::service::RoleClient;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use thiserror::Error;
 
 /// MCP 客户端连接状态
@@ -116,6 +118,21 @@ pub struct McpClientHandle {
     /// extension (SEP-2640)：true 时 skill 发现走 `skills/list` + digest 校验，
     /// false 时回退 legacy `skill://` resources 扫描兜底。
     pub skills_capable: bool,
+}
+
+impl Debug for McpClientHandle {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpClientHandle")
+            .field("name", &self.name)
+            .field("version", &self.version)
+            .field("cache_version", &self.cache_version)
+            .field("connected_at", &self.connected_at)
+            .field("protocol_version", &self.protocol_version)
+            .field("url", &self.url)
+            .field("skills_capable", &self.skills_capable)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

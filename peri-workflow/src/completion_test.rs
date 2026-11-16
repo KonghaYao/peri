@@ -1,6 +1,7 @@
 //! 终态覆写失败必须可观测：读/写 `state.json` 失败时不得静默遗留
 //! "磁盘 completed + 结果 failed"，且 progress 收敛不得依赖读成功。
 
+use std::fmt::Debug;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -8,7 +9,7 @@ use tracing::field::{Field, Visit};
 use tracing::span;
 use tracing::{Event, Metadata, Subscriber};
 
-use super::RunCompletion;
+use crate::completion::RunCompletion;
 use crate::journal::{RunState, WorkflowJournalStore};
 use crate::progress::{RunStatus, WorkflowProgressStore};
 use crate::protocol::{ProgressEvent, WorkflowLimits};
@@ -43,7 +44,7 @@ struct CaptureSubscriber {
 struct RenderedFields(String);
 
 impl Visit for RenderedFields {
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
         if !self.0.is_empty() {
             self.0.push(' ');
         }
@@ -115,7 +116,7 @@ fn start_tracking(progress: &WorkflowProgressStore, run_id: &str) {
         meta: None,
     });
     assert!(matches!(
-        progress.get_run(run_id).expect("run 应存在").status,
+        progress.run_snapshot(run_id).expect("run 应存在").status,
         RunStatus::Running
     ));
 }
@@ -133,8 +134,12 @@ fn assert_failed_result(result: &crate::runner::WorkflowResult, error: &str) {
 /// 收敛（RunDone{failed}）不得依赖读成功。
 #[test]
 fn read_state_failure_is_logged_and_progress_still_converges() {
-    let tmp = tempfile::tempdir().unwrap();
-    let journal = Arc::new(WorkflowJournalStore::new(tmp.path().to_str().unwrap()));
+    let tmp = tempfile::tempdir().expect("the temporary test directory must be available");
+    let journal = Arc::new(WorkflowJournalStore::new(
+        tmp.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    ));
     let progress = Arc::new(WorkflowProgressStore::new());
     let run_id = "run-read-fail";
     start_tracking(&progress, run_id);
@@ -165,7 +170,7 @@ fn read_state_failure_is_logged_and_progress_still_converges() {
         "日志必须明确声明磁盘态与上报结果可能不一致，实际: {text:?}"
     );
 
-    let run = progress.get_run(run_id).expect("run 应存在");
+    let run = progress.run_snapshot(run_id).expect("run 应存在");
     assert!(
         matches!(run.status, RunStatus::Failed),
         "progress 不得停留 Running"
@@ -177,13 +182,19 @@ fn read_state_failure_is_logged_and_progress_still_converges() {
 /// 但日志必须显式声明该不一致，且 progress 收敛。
 #[test]
 fn write_state_failure_is_logged_and_declares_stale_disk_state() {
-    let tmp = tempfile::tempdir().unwrap();
-    let journal = Arc::new(WorkflowJournalStore::new(tmp.path().to_str().unwrap()));
+    let tmp = tempfile::tempdir().expect("the temporary test directory must be available");
+    let journal = Arc::new(WorkflowJournalStore::new(
+        tmp.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    ));
     let progress = Arc::new(WorkflowProgressStore::new());
     let run_id = "run-write-fail";
     start_tracking(&progress, run_id);
 
-    journal.init_run(run_id, "return null").unwrap();
+    journal
+        .init_run(run_id, "return null")
+        .expect("the init run fixture result is required for this assertion");
     let completed = RunState {
         run_id: run_id.to_string(),
         workflow_name: "test-workflow".into(),
@@ -204,9 +215,12 @@ fn write_state_failure_is_logged_and_declares_stale_disk_state() {
         finished_at: Some("2026-10-06T00:01:00Z".into()),
         error: None,
     };
-    journal.write_state(run_id, &completed).unwrap();
+    journal
+        .write_state(run_id, &completed)
+        .expect("the write state fixture result is required for this assertion");
     // state.json.tmp 被目录占用 → write_state 的 fs::write 失败，read_state 仍可用
-    std::fs::create_dir(journal.run_dir(run_id).join("state.json.tmp")).unwrap();
+    std::fs::create_dir(journal.run_dir(run_id).join("state.json.tmp"))
+        .expect("the test fixture directory must be creatable");
 
     let completion = make_completion(&journal, &progress, run_id);
     let capture = LogCapture::default();
@@ -217,7 +231,10 @@ fn write_state_failure_is_logged_and_declares_stale_disk_state() {
 
     assert_failed_result(&result, "cleanup failed after success");
     assert_eq!(
-        journal.read_state(run_id).unwrap().status,
+        journal
+            .read_state(run_id)
+            .expect("the read state fixture result is required for this assertion")
+            .status,
         "completed",
         "测试前提：写失败后磁盘仍为 expired 成功态"
     );
@@ -237,7 +254,7 @@ fn write_state_failure_is_logged_and_declares_stale_disk_state() {
         "日志必须明确声明磁盘态与上报结果不一致，实际: {text:?}"
     );
 
-    let run = progress.get_run(run_id).expect("run 应存在");
+    let run = progress.run_snapshot(run_id).expect("run 应存在");
     assert!(
         matches!(run.status, RunStatus::Failed),
         "progress 不得停留 Running"

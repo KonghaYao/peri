@@ -13,7 +13,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
-use super::{retire, settle, AttemptCheckpoint, BodyTaskOwner, FileCheckpoint, SendOutcome};
+use super::AttemptCheckpoint;
+use super::BodyTaskOwner;
+use super::FileCheckpoint;
+use super::SendOutcome;
 use crate::client::{ExportConfig, LangfuseClient};
 use crate::config::{BatcherConfig, Compression, TelemetryConfig};
 use crate::encoding::STREAM_CHUNK_BYTES;
@@ -365,7 +368,7 @@ fn memory_payload(budget: &Arc<MemoryBudget>, bytes: &[u8]) -> ExportPayload {
     let permit = budget.try_reserve(bytes.len()).expect("permit");
     ExportPayload {
         body: PayloadBody::Memory(
-            BudgetedBytes::new(Bytes::copy_from_slice(bytes), permit).expect("budgeted bytes"),
+            BudgetedBytes::try_new(Bytes::copy_from_slice(bytes), permit).expect("budgeted bytes"),
         ),
         encoding: Compression::None,
         raw_len: bytes.len() as u64,
@@ -486,7 +489,7 @@ async fn settle_reports_an_unconfirmed_pump_at_the_deadline() {
     owner.arm(&payload).expect("文件正文可 arm");
     pump_reaches_gated_read(&store.gate()).await;
 
-    let settled = settle(&mut owner, peri_time::monotonic_now()).await;
+    let settled = super::settle(&mut owner, peri_time::monotonic_now()).await;
     match settled {
         Err(LangfuseError::IngestionApi(message)) => {
             assert!(
@@ -554,7 +557,7 @@ async fn retired_owner_hands_the_blocked_pump_to_the_reaper() {
     owner.arm(&payload).expect("文件正文可 arm");
     pump_reaches_gated_read(&store.gate()).await;
 
-    retire(&mut owner, peri_time::monotonic_now()).await;
+    super::retire(&mut owner, peri_time::monotonic_now()).await;
     assert_eq!(store.closes(), 0, "收口不得等待阻塞读返回");
     assert!(
         budget.try_http_workspace().is_err(),

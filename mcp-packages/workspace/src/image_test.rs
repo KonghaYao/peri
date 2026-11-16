@@ -1,4 +1,10 @@
-use super::*;
+use crate::image::ImageReadError;
+use crate::image::ReadImageRequest;
+use crate::image::ReadImageResponse;
+use crate::image::MAX_IMAGE_BYTES;
+use crate::image::READ_IMAGE_METHOD;
+use base64::Engine;
+use rmcp::model::CustomRequest;
 
 fn request(path: &str, max_size: usize) -> ReadImageRequest {
     ReadImageRequest {
@@ -15,7 +21,9 @@ fn image_reads_magic_not_extension_and_resolves_workspace_cwd() {
     image
         .save_with_format(&path, image::ImageFormat::Png)
         .unwrap();
-    let result = load_image(dir.path().to_str().unwrap(), request("photo.data", 1024)).unwrap();
+    let result =
+        crate::image::load_image(dir.path().to_str().unwrap(), request("photo.data", 1024))
+            .unwrap();
     assert_eq!(result.media_type, "image/png");
     assert_eq!(
         base64::engine::general_purpose::STANDARD
@@ -29,7 +37,7 @@ fn image_reads_magic_not_extension_and_resolves_workspace_cwd() {
 fn image_missing_file_is_a_safe_typed_failure() {
     let dir = tempfile::tempdir().unwrap();
     assert!(matches!(
-        load_image(
+        crate::image::load_image(
             dir.path().to_str().unwrap(),
             request("private/missing.png", 1024)
         ),
@@ -41,7 +49,7 @@ fn image_missing_file_is_a_safe_typed_failure() {
 fn image_directory_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     assert!(matches!(
-        load_image(dir.path().to_str().unwrap(), request(".", 1024)),
+        crate::image::load_image(dir.path().to_str().unwrap(), request(".", 1024)),
         Err(ImageReadError::NotFile)
     ));
 }
@@ -51,7 +59,7 @@ fn image_size_limit_never_returns_truncated_image_data() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("large.png"), [0; 128]).unwrap();
     assert!(matches!(
-        load_image(dir.path().to_str().unwrap(), request("large.png", 127)),
+        crate::image::load_image(dir.path().to_str().unwrap(), request("large.png", 127)),
         Err(ImageReadError::TooLarge)
     ));
 }
@@ -64,7 +72,7 @@ fn image_caller_cannot_raise_provider_ceiling() {
         .set_len(MAX_IMAGE_BYTES as u64 + 1)
         .unwrap();
     assert!(matches!(
-        load_image(
+        crate::image::load_image(
             dir.path().to_str().unwrap(),
             request("large.png", usize::MAX)
         ),
@@ -77,7 +85,7 @@ fn image_text_disguised_as_png_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("fake.png"), "not an image").unwrap();
     assert!(matches!(
-        load_image(dir.path().to_str().unwrap(), request("fake.png", 1024)),
+        crate::image::load_image(dir.path().to_str().unwrap(), request("fake.png", 1024)),
         Err(ImageReadError::NotImage)
     ));
 }
@@ -92,22 +100,22 @@ fn image_supported_mime_types_preserve_existing_allowlist() {
         (b"RIFF\0\0\0\0WEBP".as_slice(), "image/webp"),
     ] {
         std::fs::write(dir.path().join("image"), data).unwrap();
-        let response = load_image(dir.path().to_str().unwrap(), request("image", 1024)).unwrap();
+        let response =
+            crate::image::load_image(dir.path().to_str().unwrap(), request("image", 1024)).unwrap();
         assert_eq!(response.media_type, mime);
     }
     std::fs::write(dir.path().join("image"), b"BM").unwrap();
     assert!(matches!(
-        load_image(dir.path().to_str().unwrap(), request("image", 1024)),
+        crate::image::load_image(dir.path().to_str().unwrap(), request("image", 1024)),
         Err(ImageReadError::NotImage)
     ));
 }
 
 #[tokio::test]
 async fn image_custom_request_uses_wire_without_adding_model_tools() {
-    use rmcp::{
-        model::{ClientRequest, ServerResult},
-        ClientLifecycleMode,
-    };
+    use rmcp::model::ClientRequest;
+    use rmcp::model::ServerResult;
+    use rmcp::ClientLifecycleMode;
     use std::time::Duration;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("image.png");

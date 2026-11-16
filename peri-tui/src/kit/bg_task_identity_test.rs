@@ -1,7 +1,6 @@
-use super::*;
-use crate::kit::atoms::{
-    BG_AGENT_IDS, BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_IDENTITY, BG_TASKS, BgDisplayEntry,
-};
+use super::BgLiveStatus;
+use super::METADATA_TEXT_BYTES;
+
 use serial_test::serial;
 
 fn reset_bg_atoms() {
@@ -29,8 +28,8 @@ fn test_bind_linked_agent_id_on_bg_subagent_started() {
         created_at: std::time::Instant::now(),
         completed_at: None,
     });
-    upsert_identity_from_started("task-1", "agent", "job", None);
-    let bound = bind_linked_agent_on_subagent_started("agent-99", "coder", Some("run"));
+    super::upsert_identity_from_started("task-1", "agent", "job", None);
+    let bound = super::bind_linked_agent_on_subagent_started("agent-99", "coder", Some("run"));
     assert_eq!(bound.as_deref(), Some("task-1"));
     assert_eq!(
         BG_DISPLAY.state().read()[0].linked_agent_id.as_deref(),
@@ -55,7 +54,7 @@ fn test_resolve_selected_id_keeps_clicked_task_identity() {
         completed_at: None,
     };
     assert_eq!(
-        resolve_subagent_id_for_display(&entry).as_deref(),
+        super::resolve_subagent_id_for_display(&entry).as_deref(),
         Some("task-1")
     );
 }
@@ -78,7 +77,7 @@ fn test_resolve_unbound_agent_row_uses_task_id() {
         completed_at: None,
     };
     assert_eq!(
-        resolve_subagent_id_for_display(&entry).as_deref(),
+        super::resolve_subagent_id_for_display(&entry).as_deref(),
         Some("task-1")
     );
 }
@@ -102,7 +101,7 @@ fn test_resolve_unbound_uses_task_id_even_with_multiple_agents() {
         completed_at: None,
     };
     assert_eq!(
-        resolve_subagent_id_for_display(&entry).as_deref(),
+        super::resolve_subagent_id_for_display(&entry).as_deref(),
         Some("task-1")
     );
 }
@@ -144,7 +143,7 @@ fn resumed_agent_events_update_latest_background_run() {
     crate::kit::bg_task_live::publish_pending_streams();
 
     assert_eq!(
-        task_id_for_agent_id("shared-agent").as_deref(),
+        super::task_id_for_agent_id("shared-agent").as_deref(),
         Some("new-task")
     );
     let live = BG_LIVE_DETAIL.state();
@@ -172,16 +171,18 @@ fn identity_refresh_and_duplicate_bind_preserve_the_current_agent_mapping() {
             created_at: now,
             completed_at: None,
         });
-        upsert_identity_from_started(id, "agent", "task", None);
+        super::upsert_identity_from_started(id, "agent", "task", None);
     }
     assert_eq!(
-        bind_linked_agent_on_subagent_started("child", "coder", Some("first-run")).as_deref(),
+        super::bind_linked_agent_on_subagent_started("child", "coder", Some("first-run"))
+            .as_deref(),
         Some("other")
     );
     crate::kit::bg_task_live::init_agent_live_detail("other", "child", "coder", Some("first-run"));
-    upsert_identity_from_started("other", "agent", &"工作🙂".repeat(8192), None);
+    super::upsert_identity_from_started("other", "agent", &"工作🙂".repeat(8192), None);
     assert_eq!(
-        bind_linked_agent_on_subagent_started("child", "coder", Some("first-run")).as_deref(),
+        super::bind_linked_agent_on_subagent_started("child", "coder", Some("first-run"))
+            .as_deref(),
         Some("other")
     );
     let identities = BG_TASK_IDENTITY.state();
@@ -212,9 +213,9 @@ fn resumed_child_binds_new_task_before_the_previous_bg_completion_arrives() {
         completed_at: None,
     };
     BG_DISPLAY.state().write().push(row("old-task"));
-    upsert_identity_from_started("old-task", "agent", "old", None);
+    super::upsert_identity_from_started("old-task", "agent", "old", None);
     assert_eq!(
-        bind_linked_agent_on_subagent_started("child", "coder", Some("old-run")).as_deref(),
+        super::bind_linked_agent_on_subagent_started("child", "coder", Some("old-run")).as_deref(),
         Some("old-task")
     );
     crate::kit::bg_task_live::init_agent_live_detail("old-task", "child", "coder", Some("old-run"));
@@ -222,13 +223,16 @@ fn resumed_child_binds_new_task_before_the_previous_bg_completion_arrives() {
     assert!(BG_DISPLAY.state().read()[0].is_active);
 
     BG_DISPLAY.state().write().push(row("new-task"));
-    upsert_identity_from_started("new-task", "agent", "new", None);
+    super::upsert_identity_from_started("new-task", "agent", "new", None);
     assert_eq!(
-        bind_linked_agent_on_subagent_started("child", "coder", Some("new-run")).as_deref(),
+        super::bind_linked_agent_on_subagent_started("child", "coder", Some("new-run")).as_deref(),
         Some("new-task")
     );
     crate::kit::bg_task_live::init_agent_live_detail("new-task", "child", "coder", Some("new-run"));
-    assert_eq!(task_id_for_agent_id("child").as_deref(), Some("new-task"));
+    assert_eq!(
+        super::task_id_for_agent_id("child").as_deref(),
+        Some("new-task")
+    );
     assert_eq!(
         BG_LIVE_DETAIL.state().read()["old-task"].status,
         BgLiveStatus::Succeeded
@@ -238,3 +242,15 @@ fn resumed_child_binds_new_task_before_the_previous_bg_completion_arrives() {
         BgLiveStatus::Running
     );
 }
+
+use crate::kit::atoms::BG_AGENT_IDS;
+
+use crate::kit::atoms::BG_DISPLAY;
+
+use crate::kit::atoms::BG_LIVE_DETAIL;
+
+use crate::kit::atoms::BG_TASK_IDENTITY;
+
+use crate::kit::atoms::BG_TASKS;
+
+use crate::kit::atoms::BgDisplayEntry;

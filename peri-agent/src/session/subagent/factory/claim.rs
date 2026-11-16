@@ -250,11 +250,14 @@ async fn own_claim(
             // 资源关闭可能因未确认交接返回 Incomplete；此时仍须先结清认领并
             // 写入 Cancelled，避免线程永久停留 Active。真实资源关闭失败则保留
             // Active，由资源和持久层继续暴露未结清事实。
-            let close_result = super::super::close::close_subagent_session_scope(session).await;
+            let close_result =
+                crate::session::subagent::close::close_subagent_session_scope(session).await;
             let finalize = match &close_result {
                 Ok(()) => true,
                 Err(error) => {
-                    super::super::close::close_failure_allows_terminal_finalization(error)
+                    crate::session::subagent::close::close_failure_allows_terminal_finalization(
+                        error,
+                    )
                 }
             };
             if finalize {
@@ -289,7 +292,7 @@ async fn validate_thread(
     store: &dyn SessionResources,
     thread_id: &str,
 ) -> Result<ThreadMeta, Box<dyn std::error::Error + Send + Sync>> {
-    super::validate_thread_id_format(thread_id).map_err(|error| {
+    crate::session::subagent::factory::validate_thread_id_format(thread_id).map_err(|error| {
         EffectiveToolError::new(EffectiveToolErrorCode::InvalidInput, error.to_string())
     })?;
     let meta = match store.load_session_meta(&thread_id.to_owned()).await {

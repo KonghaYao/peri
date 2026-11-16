@@ -12,15 +12,17 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use peri_acp_types::{
-    event::ExecutorEvent,
-    messages::{BaseMessage, ContentBlock, MessageContent, ToolCallRequest},
-};
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::ContentBlock;
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::messages::ToolCallRequest;
 
 use super::super::{
     CommandContext, CommandHandler, CommandOutcome, CommandResult, FeedbackChannel, FeedbackLevel,
 };
-use super::{extract_file_changes, validate_tool_pairing, FileChange, RewindCommand};
+use super::FileChange;
+use super::RewindCommand;
 use crate::session::executor::PromptStopReason;
 
 // ── Mock EventSink ────────────────────────────────────────────────────────
@@ -168,7 +170,7 @@ async fn execute_rewind_cmd(cmd: &RewindCommand, ctx: CommandContext) -> Command
 /// pre-image（两种消息格式同一契约）。
 #[test]
 fn test_extract_file_changes_carries_tool_call_id() {
-    let changes = extract_file_changes(&[
+    let changes = super::extract_file_changes(&[
         make_ai_write_call("a.txt", "hello"),
         make_ai_edit_call("b.txt", "old", "new"),
     ]);
@@ -178,7 +180,7 @@ fn test_extract_file_changes_carries_tool_call_id() {
     assert_eq!(json[1]["kind"], "edit");
     assert_eq!(json[1]["tool_call_id"], "call_edit_1");
 
-    let block_changes = extract_file_changes(&[make_ai_write_block("c.txt", "hello")]);
+    let block_changes = super::extract_file_changes(&[make_ai_write_block("c.txt", "hello")]);
     let json = serde_json::to_value(&block_changes).unwrap();
     assert_eq!(json[0]["tool_call_id"], "toolu_write_1");
 }
@@ -191,7 +193,7 @@ fn test_extract_file_changes_openai_write_format() {
     let msgs = vec![make_ai_write_call("a.txt", "hello")];
 
     // Act
-    let changes = extract_file_changes(&msgs);
+    let changes = super::extract_file_changes(&msgs);
 
     // Assert: 提取出 1 个 Write 变更
     assert_eq!(changes.len(), 1, "应提取出 1 个 Write 变更");
@@ -203,7 +205,7 @@ fn test_extract_file_changes_openai_edit_format() {
     let msgs = vec![make_ai_edit_call("a.txt", "old", "new")];
 
     // Act
-    let changes = extract_file_changes(&msgs);
+    let changes = super::extract_file_changes(&msgs);
 
     // Assert: 提取出 1 个 Edit 变更
     assert_eq!(changes.len(), 1, "应提取出 1 个 Edit 变更");
@@ -218,7 +220,7 @@ fn test_extract_file_changes_anthropic_write_format() {
     let msgs = vec![make_ai_write_block("a.txt", "hello")];
 
     // Act
-    let changes = extract_file_changes(&msgs);
+    let changes = super::extract_file_changes(&msgs);
 
     // Assert: 修复后同一变更只计一次（按 ToolUse id 去重）
     assert_eq!(
@@ -235,7 +237,7 @@ fn test_extract_file_changes_anthropic_edit_format() {
     let msgs = vec![make_ai_edit_block("a.txt", "old", "new")];
 
     // Act
-    let changes = extract_file_changes(&msgs);
+    let changes = super::extract_file_changes(&msgs);
 
     // Assert: 修复后同一变更只计一次（按 ToolUse id 去重）
     assert_eq!(
@@ -255,7 +257,7 @@ fn test_extract_file_changes_ignores_non_ai_messages() {
     ];
 
     // Act
-    let changes = extract_file_changes(&msgs);
+    let changes = super::extract_file_changes(&msgs);
 
     // Assert: 不应提取任何变更
     assert!(changes.is_empty(), "非 AI 消息不应被提取");
@@ -275,7 +277,7 @@ fn test_extract_file_changes_multiple_calls_in_one_message() {
     );
 
     // Act
-    let changes = extract_file_changes(&[msg]);
+    let changes = super::extract_file_changes(&[msg]);
 
     // Assert: 提取出 2 个变更
     assert_eq!(changes.len(), 2, "同一条消息的两个工具调用都应被提取");
@@ -291,7 +293,7 @@ fn test_extract_file_changes_ignores_non_write_edit_tools() {
     );
 
     // Act
-    let changes = extract_file_changes(&[msg]);
+    let changes = super::extract_file_changes(&[msg]);
 
     // Assert
     assert!(changes.is_empty(), "Bash 工具调用不应被提取");
@@ -306,7 +308,7 @@ fn test_extract_file_changes_deduplicates_by_id() {
         make_ai_write_block("a.txt", "hello"),
         make_ai_edit_call("b.txt", "old", "new"), // ai_with_tool_calls：仅 tool_calls 路径
     ];
-    let changes = extract_file_changes(&msgs);
+    let changes = super::extract_file_changes(&msgs);
     assert_eq!(changes.len(), 2, "两个不同 id 的调用各计一次");
 }
 
@@ -331,7 +333,7 @@ fn rewind_collects_workspace_effective_write_and_edit() {
     );
 
     // Act
-    let openai_changes = extract_file_changes(&[openai_msg]);
+    let openai_changes = super::extract_file_changes(&[openai_msg]);
 
     // Assert: 归一命中 ⇒ 收集为 Write，file_path 逐字保留
     assert_eq!(
@@ -362,7 +364,7 @@ fn rewind_collects_workspace_effective_write_and_edit() {
     )]));
 
     // Act
-    let anthropic_changes = extract_file_changes(&[anthropic_msg]);
+    let anthropic_changes = super::extract_file_changes(&[anthropic_msg]);
 
     // Assert: 归一命中 ⇒ 收集为 Edit（仅 ToolUse 路径，产出 1 条），old/new 保留
     assert_eq!(
@@ -394,7 +396,7 @@ fn rewind_ignores_unknown_effective_names() {
             "推理中...",
             vec![ToolCallRequest::new("call_unknown", name, args.clone())],
         );
-        let changes = extract_file_changes(&[openai_msg]);
+        let changes = super::extract_file_changes(&[openai_msg]);
         assert!(
             changes.is_empty(),
             "`{name}` 未命中归一表，不得被收集（保守语义）"
@@ -407,7 +409,7 @@ fn rewind_ignores_unknown_effective_names() {
             name,
             args.clone(),
         )]));
-        let changes = extract_file_changes(&[anthropic_msg]);
+        let changes = super::extract_file_changes(&[anthropic_msg]);
         assert!(
             changes.is_empty(),
             "`{name}`（ToolUse 路径）未命中归一表，不得被收集"
@@ -426,7 +428,7 @@ fn test_validate_tool_pairing_empty_messages_no_panic() {
     let msgs: Vec<BaseMessage> = vec![];
 
     // Act: 不应 panic
-    validate_tool_pairing(&msgs);
+    crate::session::command::rewind::rewind_command::validate_tool_pairing(&msgs);
 }
 
 #[test]
@@ -444,7 +446,7 @@ fn test_validate_tool_pairing_paired_openai_format_no_panic() {
     let msgs = vec![ai_msg, tool_msg];
 
     // Act: 不应 panic
-    validate_tool_pairing(&msgs);
+    crate::session::command::rewind::rewind_command::validate_tool_pairing(&msgs);
 }
 
 #[test]
@@ -461,7 +463,7 @@ fn test_validate_tool_pairing_orphan_tool_use_no_panic() {
     let msgs = vec![ai_msg];
 
     // Act: 仅 warn，不应 panic
-    validate_tool_pairing(&msgs);
+    crate::session::command::rewind::rewind_command::validate_tool_pairing(&msgs);
 }
 
 #[test]
@@ -471,7 +473,7 @@ fn test_validate_tool_pairing_orphan_tool_result_no_panic() {
     let msgs = vec![tool_msg];
 
     // Act: 仅 warn，不应 panic
-    validate_tool_pairing(&msgs);
+    crate::session::command::rewind::rewind_command::validate_tool_pairing(&msgs);
 }
 
 #[test]
@@ -486,7 +488,7 @@ fn test_validate_tool_pairing_anthropic_format_no_panic() {
     let msgs = vec![ai_msg, tool_msg];
 
     // Act: 不应 panic
-    validate_tool_pairing(&msgs);
+    crate::session::command::rewind::rewind_command::validate_tool_pairing(&msgs);
 }
 
 #[test]
@@ -500,7 +502,7 @@ fn test_validate_tool_pairing_mixed_message_types_no_panic() {
     ];
 
     // Act: 不应 panic
-    validate_tool_pairing(&msgs);
+    crate::session::command::rewind::rewind_command::validate_tool_pairing(&msgs);
 }
 
 // ── execute 测试 ──────────────────────────────────────────────────────────

@@ -1,11 +1,10 @@
-use std::{
-    sync::atomic::{AtomicUsize, Ordering},
-    time::Duration,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
-use tokio::time::timeout;
+use tokio::time;
 use tokio_util::sync::CancellationToken;
 
 use crate::ProtocolErrorKind;
@@ -104,7 +103,7 @@ fn request() -> ModelRequest {
 }
 
 fn assistant_response(text: &str) -> ModelResponse {
-    ModelResponse::new(
+    ModelResponse::try_new(
         ModelMessage::assistant_text(text),
         StopReason::EndTurn,
         None,
@@ -154,7 +153,7 @@ async fn test_complete_aggregates_all_standard_stream_events() {
         },
         ModelStreamEvent::Usage(TokenUsage::new(1, 2)),
         ModelStreamEvent::Completed(
-            ModelResponse::new(
+            ModelResponse::try_new(
                 ModelMessage::assistant(Vec::new(), Vec::new()),
                 StopReason::ToolUse,
                 None,
@@ -203,7 +202,7 @@ async fn test_complete_aggregates_all_standard_stream_events() {
 
 #[tokio::test]
 async fn test_complete_preserves_completed_response_fields() {
-    let completed = ModelResponse::new(
+    let completed = ModelResponse::try_new(
         ModelMessage::assistant(
             vec![
                 ContentBlock::text("provider text"),
@@ -361,7 +360,7 @@ async fn test_complete_cancels_pending_stream_with_caller_token() {
     assert!(futures::poll!(completion.as_mut()).is_pending());
     cancellation.cancel();
 
-    let error = timeout(Duration::from_millis(100), completion)
+    let error = time::timeout(Duration::from_millis(100), completion)
         .await
         .expect("caller cancellation must wake complete")
         .unwrap_err();
@@ -381,7 +380,7 @@ async fn test_model_stream_abort_is_scoped_to_stream_child_token() {
 
     aborted_stream.abort();
 
-    let error = timeout(Duration::from_millis(100), aborted_stream.next())
+    let error = time::timeout(Duration::from_millis(100), aborted_stream.next())
         .await
         .expect("stream abort must wake a pending consumer")
         .expect("cancelled stream must produce an item")
@@ -401,7 +400,7 @@ async fn test_model_stream_abort_is_scoped_to_stream_child_token() {
 
     caller_cancellation.cancel();
 
-    let error = timeout(Duration::from_millis(100), next)
+    let error = time::timeout(Duration::from_millis(100), next)
         .await
         .expect("caller cancellation must wake a pending consumer")
         .expect("cancelled stream must produce an item")

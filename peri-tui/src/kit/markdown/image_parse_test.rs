@@ -1,4 +1,8 @@
-use super::*;
+use super::Color;
+use super::MarkdownRenderCache;
+use super::MarkdownSegment;
+use super::Palette;
+
 use unicode_width::UnicodeWidthStr;
 
 const TEST_BASE_FG: Color = Color::White;
@@ -41,14 +45,23 @@ fn segments_to_text(segments: &[MarkdownSegment]) -> String {
 fn test_cached_parse_image_streaming_closure() {
     let mut cache = MarkdownRenderCache::default();
     let steps = ["!", "![alt]", "![alt](", "![alt](url", "![alt](url)"];
-    for (i, text) in steps.iter().enumerate() {
-        let cached = parse_markdown_cached(text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-        let full = parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
-        assert_eq!(
-            segments_to_text(&cached),
-            segments_to_text(&full),
-            "step {i}（{text:?}）cached 应与全量一致"
-        );
+    {
+        let iteration_items = steps.iter().enumerate();
+        for (i, text) in iteration_items {
+            let cached = super::parse_markdown_cached(
+                text,
+                80,
+                Palette::default(),
+                TEST_BASE_FG,
+                &mut cache,
+            );
+            let full = super::parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
+            assert_eq!(
+                segments_to_text(&cached),
+                segments_to_text(&full),
+                "step {i}（{text:?}）cached 应与全量一致"
+            );
+        }
     }
 }
 
@@ -60,8 +73,8 @@ fn test_cached_parse_image_unclosed_blank_line_boundary() {
     let mut cache = MarkdownRenderCache::default();
 
     let t1 = "![alt](\n\n";
-    let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full1 = parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
+    let r1 = super::parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full1 = super::parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r1),
         segments_to_text(&full1),
@@ -69,8 +82,8 @@ fn test_cached_parse_image_unclosed_blank_line_boundary() {
     );
 
     let t2 = "![alt](\n\nurl)";
-    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    let r2 = super::parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = super::parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r2),
         segments_to_text(&full2),
@@ -88,15 +101,24 @@ fn test_cached_parse_image_in_table() {
         "| ![a](u) | b |\n|---|---|",
         "| ![a](u) | b |\n|---|---|\n| 1 | 2 |",
     ];
-    for (i, text) in steps.iter().enumerate() {
-        let cached = parse_markdown_cached(text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-        let full = parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
-        assert_eq!(
-            segments_to_text(&cached),
-            segments_to_text(&full),
-            "step {i} 表格行内图片 cached 应与全量一致"
-        );
-        assert_eq!(cached.len(), full.len(), "step {i} 段数应一致（含 Table）");
+    {
+        let iteration_items = steps.iter().enumerate();
+        for (i, text) in iteration_items {
+            let cached = super::parse_markdown_cached(
+                text,
+                80,
+                Palette::default(),
+                TEST_BASE_FG,
+                &mut cache,
+            );
+            let full = super::parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
+            assert_eq!(
+                segments_to_text(&cached),
+                segments_to_text(&full),
+                "step {i} 表格行内图片 cached 应与全量一致"
+            );
+            assert_eq!(cached.len(), full.len(), "step {i} 段数应一致（含 Table）");
+        }
     }
 }
 
@@ -107,18 +129,27 @@ fn test_cached_parse_image_in_table() {
 fn test_cached_parse_image_in_list() {
     let mut cache = MarkdownRenderCache::default();
     let steps = ["- ![a](u)", "- ![a](u)\n- ![b](v)"];
-    for (i, text) in steps.iter().enumerate() {
-        let cached = parse_markdown_cached(text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-        let full = parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
-        assert_eq!(
-            segments_to_text(&cached),
-            segments_to_text(&full),
-            "step {i} 列表项内图片 cached 应与全量一致"
-        );
-        assert!(
-            segments_to_text(&cached).contains("[Image: a] (u)"),
-            "step {i} 列表项内图片必须渲染降级文案（P0-1，不得丢失）"
-        );
+    {
+        let iteration_items = steps.iter().enumerate();
+        for (i, text) in iteration_items {
+            let cached = super::parse_markdown_cached(
+                text,
+                80,
+                Palette::default(),
+                TEST_BASE_FG,
+                &mut cache,
+            );
+            let full = super::parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
+            assert_eq!(
+                segments_to_text(&cached),
+                segments_to_text(&full),
+                "step {i} 列表项内图片 cached 应与全量一致"
+            );
+            assert!(
+                segments_to_text(&cached).contains("[Image: a] (u)"),
+                "step {i} 列表项内图片必须渲染降级文案（P0-1，不得丢失）"
+            );
+        }
     }
 }
 
@@ -126,14 +157,14 @@ fn test_cached_parse_image_in_list() {
 /// 空行、列表项只剩 `• `。修复后必须显示降级文案（span 层替换，不拆段）。
 #[test]
 fn test_image_in_heading_and_list_item_renders_degraded_text() {
-    let heading = parse_markdown("# ![a](u)", 80, Palette::default(), TEST_BASE_FG);
+    let heading = super::parse_markdown("# ![a](u)", 80, Palette::default(), TEST_BASE_FG);
     let text = segments_to_text(&heading);
     assert!(
         text.contains("[Image: a] (u)"),
         "标题内图片应显示降级文案（P0-1），实际: {text:?}"
     );
 
-    let list = parse_markdown("- ![a](u)", 80, Palette::default(), TEST_BASE_FG);
+    let list = super::parse_markdown("- ![a](u)", 80, Palette::default(), TEST_BASE_FG);
     let text = segments_to_text(&list);
     assert!(
         text.contains("[Image: a] (u)"),
@@ -142,7 +173,7 @@ fn test_image_in_heading_and_list_item_renders_degraded_text() {
     assert!(text.contains('•'), "列表项标记应保留，实际: {text:?}");
 
     // 嵌套上下文（blockquote > list > image，P2-3 同源）。
-    let nested = parse_markdown("> - ![a](u)", 80, Palette::default(), TEST_BASE_FG);
+    let nested = super::parse_markdown("> - ![a](u)", 80, Palette::default(), TEST_BASE_FG);
     assert!(
         segments_to_text(&nested).contains("[Image: a] (u)"),
         "blockquote 列表项内图片应显示降级文案"
@@ -156,8 +187,8 @@ fn test_cached_parse_image_in_code_block_not_detected() {
     let mut cache = MarkdownRenderCache::default();
 
     let t1 = "```\n![a](u)";
-    let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full1 = parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
+    let r1 = super::parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full1 = super::parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r1),
         segments_to_text(&full1),
@@ -165,8 +196,8 @@ fn test_cached_parse_image_in_code_block_not_detected() {
     );
 
     let t2 = "```\n![a](u)\n```\n\nafter ![b](v)";
-    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    let r2 = super::parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = super::parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r2),
         segments_to_text(&full2),
@@ -213,7 +244,7 @@ fn test_image_segment_degraded_text_forms() {
         ),
     ];
     for (input, expected, is_remote, standalone) in cases {
-        let segments = parse_markdown(input, 80, Palette::default(), TEST_BASE_FG);
+        let segments = super::parse_markdown(input, 80, Palette::default(), TEST_BASE_FG);
         assert_eq!(segments.len(), 1, "{input:?} 应解析为单个 Image segment");
         let MarkdownSegment::Image(img) = &segments[0] else {
             panic!("{input:?} 应产生 Image segment");
@@ -232,7 +263,7 @@ fn test_image_segment_degraded_text_forms() {
             &input[img.byte_start..img.byte_end]
                 .chars()
                 .next()
-                .unwrap()
+                .expect("image segment degraded text forms: the fixture collection must contain the expected entry")
                 .to_string(),
             "!"
         );
@@ -249,7 +280,8 @@ fn test_image_segment_degraded_text_forms() {
 /// （§3.4-1 行内拆段 + §3.5 间隙规则）。
 #[test]
 fn test_image_inline_split_no_gap() {
-    let segments = parse_markdown("before ![a](u) after", 80, Palette::default(), TEST_BASE_FG);
+    let segments =
+        super::parse_markdown("before ![a](u) after", 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(segments.len(), 3, "行内图片应拆为 3 段");
     assert!(matches!(&segments[0], MarkdownSegment::Text(_)));
     assert!(matches!(&segments[2], MarkdownSegment::Text(_)));
@@ -274,7 +306,7 @@ fn test_image_inline_split_no_gap() {
 /// 无空行）——与跨段独立图片区分（见 [`test_image_cross_paragraph_gap`]）。
 #[test]
 fn test_image_standalone_segments() {
-    let segments = parse_markdown(
+    let segments = super::parse_markdown(
         "before\n\n![a](u)\n\nafter",
         80,
         Palette::default(),
@@ -289,7 +321,7 @@ fn test_image_standalone_segments() {
     assert!(img.standalone, "独占段落 standalone 应为 true");
 
     // 同段多图：`![a](u) ![b](v)` → 单个 Image 段（P1-1 合并），两降级行连续
-    let multi = parse_markdown("![a](u) ![b](v)", 80, Palette::default(), TEST_BASE_FG);
+    let multi = super::parse_markdown("![a](u) ![b](v)", 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(multi.len(), 1, "同段多图应合并为 1 个 Image segment");
     let MarkdownSegment::Image(multi_img) = &multi[0] else {
         panic!("同段多图应为 Image segment");
@@ -308,7 +340,8 @@ fn test_image_standalone_segments() {
 /// （见 render_test.rs `test_image_cross_paragraph_rendering`）。
 #[test]
 fn test_image_cross_paragraph_keeps_separate_segments() {
-    let segments = parse_markdown("![a](u)\n\n![b](v)", 80, Palette::default(), TEST_BASE_FG);
+    let segments =
+        super::parse_markdown("![a](u)\n\n![b](v)", 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(segments.len(), 2, "跨段两图应为 2 个独立 Image segment");
     for s in &segments {
         let MarkdownSegment::Image(img) = s else {
@@ -333,26 +366,35 @@ fn test_image_cross_paragraph_keeps_separate_segments() {
 fn test_cached_image_streaming_closure_yields_image_segment() {
     let mut cache = MarkdownRenderCache::default();
     let steps = ["![alt](url", "![alt](url)"];
-    for (i, text) in steps.iter().enumerate() {
-        let cached = parse_markdown_cached(text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-        let full = parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
-        assert_eq!(
-            segments_to_text(&cached),
-            segments_to_text(&full),
-            "step {i} cached 应与全量一致"
-        );
-        // 未闭合阶段：无 Image 段（字面文本）；闭合瞬间：Image 段出现
-        let has_image = cached
-            .iter()
-            .any(|s| matches!(s, MarkdownSegment::Image(_)));
-        assert_eq!(has_image, i == 1, "step {i} Image 段出现时机");
+    {
+        let iteration_items = steps.iter().enumerate();
+        for (i, text) in iteration_items {
+            let cached = super::parse_markdown_cached(
+                text,
+                80,
+                Palette::default(),
+                TEST_BASE_FG,
+                &mut cache,
+            );
+            let full = super::parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
+            assert_eq!(
+                segments_to_text(&cached),
+                segments_to_text(&full),
+                "step {i} cached 应与全量一致"
+            );
+            // 未闭合阶段：无 Image 段（字面文本）；闭合瞬间：Image 段出现
+            let has_image = cached
+                .iter()
+                .any(|s| matches!(s, MarkdownSegment::Image(_)));
+            assert_eq!(has_image, i == 1, "step {i} Image 段出现时机");
+        }
     }
 }
 
 /// 代码块内 `![a](u)` → 原样文本，无 Image 段（S3 E1）。
 #[test]
 fn test_image_inside_code_block_literal() {
-    let segments = parse_markdown("```\n![a](u)\n```", 80, Palette::default(), TEST_BASE_FG);
+    let segments = super::parse_markdown("```\n![a](u)\n```", 80, Palette::default(), TEST_BASE_FG);
     assert!(
         !segments
             .iter()
@@ -369,7 +411,7 @@ fn test_image_inside_code_block_literal() {
 /// P0 不拆段、span 样式层替换）。
 #[test]
 fn test_image_in_table_cell() {
-    let segments = parse_markdown(
+    let segments = super::parse_markdown(
         "| ![a](u) | b |\n|---|---|\n| ![c](v) | d |",
         80,
         Palette::default(),
@@ -402,7 +444,7 @@ fn test_image_in_table_cell() {
 fn test_image_degraded_line_wrap() {
     let url = format!("https://example.com/{}", "x".repeat(60));
     let input = format!("![a]({url})");
-    let segments = parse_markdown(&input, 20, Palette::default(), TEST_BASE_FG);
+    let segments = super::parse_markdown(&input, 20, Palette::default(), TEST_BASE_FG);
     let MarkdownSegment::Image(img) = &segments[0] else {
         panic!("应产生 Image segment");
     };
@@ -424,7 +466,7 @@ fn test_image_degraded_line_wrap() {
 #[test]
 fn test_image_segment_sanitization_and_truncation() {
     // alt 含 NUL 控制字符 → 剥离（sanitize_for_terminal）
-    let segments = parse_markdown("![a\u{0}b](u)", 80, Palette::default(), TEST_BASE_FG);
+    let segments = super::parse_markdown("![a\u{0}b](u)", 80, Palette::default(), TEST_BASE_FG);
     let MarkdownSegment::Image(img) = &segments[0] else {
         panic!("应产生 Image segment");
     };
@@ -433,7 +475,7 @@ fn test_image_segment_sanitization_and_truncation() {
     assert_eq!(line_text(&img.lines[0]), "[Image: ab] (u)");
 
     // title 字段透传（有 title 时）
-    let segments = parse_markdown("![a](u \"t\")", 80, Palette::default(), TEST_BASE_FG);
+    let segments = super::parse_markdown("![a](u \"t\")", 80, Palette::default(), TEST_BASE_FG);
     let MarkdownSegment::Image(img) = &segments[0] else {
         panic!("应产生 Image segment");
     };
@@ -441,7 +483,7 @@ fn test_image_segment_sanitization_and_truncation() {
 
     // alt 超 64 字符 → 截断 + …
     let long_alt = "a".repeat(100);
-    let segments = parse_markdown(
+    let segments = super::parse_markdown(
         &format!("![{long_alt}](u)"),
         80,
         Palette::default(),
@@ -455,7 +497,7 @@ fn test_image_segment_sanitization_and_truncation() {
 
     // url 超 200 字符 → 截断 + …（is_remote 仍按原始 url 判定）
     let long_url = format!("https://example.com/{}", "y".repeat(220));
-    let segments = parse_markdown(
+    let segments = super::parse_markdown(
         &format!("![a]({long_url})"),
         80,
         Palette::default(),
@@ -475,12 +517,12 @@ fn test_image_segment_sanitization_and_truncation() {
 fn test_cached_image_block_append_keeps_image_segment() {
     let mut cache = MarkdownRenderCache::default();
     let t1 = "![a](u)\n\n";
-    let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let r1 = super::parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
     assert!(r1.iter().any(|s| matches!(s, MarkdownSegment::Image(_))));
 
     let t2 = "![a](u)\n\nafter";
-    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    let r2 = super::parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = super::parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r2),
         segments_to_text(&full2),
@@ -494,12 +536,12 @@ fn test_cached_image_block_append_keeps_image_segment() {
 fn test_cached_inline_image_append_keeps_image_segment() {
     let mut cache = MarkdownRenderCache::default();
     let t1 = "x ![a](u) y";
-    let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let r1 = super::parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
     assert!(r1.iter().any(|s| matches!(s, MarkdownSegment::Image(_))));
 
     let t2 = "x ![a](u) y\n\nmore";
-    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
-    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    let r2 = super::parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = super::parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
     assert_eq!(
         segments_to_text(&r2),
         segments_to_text(&full2),
@@ -514,7 +556,7 @@ fn test_cached_inline_image_append_keeps_image_segment() {
 #[test]
 fn test_image_reference_with_definition_renders_degraded() {
     let src = "![a][ref]\n\n[ref]: https://example.com/x";
-    let segments = parse_markdown(src, 80, Palette::default(), TEST_BASE_FG);
+    let segments = super::parse_markdown(src, 80, Palette::default(), TEST_BASE_FG);
     let text = segments_to_text(&segments);
     assert!(
         text.contains("[Remote image: a] (https://example.com/x)"),
@@ -527,7 +569,7 @@ fn test_image_reference_with_definition_renders_degraded() {
 /// 覆盖；scan 侧命中断言在 scan.rs `scan_blockquote`）。
 #[test]
 fn test_image_in_blockquote_renders_degraded() {
-    let q = parse_markdown("> ![a](u)", 80, Palette::default(), TEST_BASE_FG);
+    let q = super::parse_markdown("> ![a](u)", 80, Palette::default(), TEST_BASE_FG);
     assert!(
         segments_to_text(&q).contains("[Image: a] (u)"),
         "blockquote 内图片应显示降级文案"

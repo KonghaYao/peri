@@ -15,24 +15,27 @@ pub async fn smart_compact(
 ) -> AgentResult<(usize, u64)> {
     tracing::warn!("Smart Compact is deprecated; using the unified Micro admission decision");
     // 兼容入口没有可失败调用方：规划错误按空计划处理（保持历史），不伪装为收益不足。
-    let plan = super::planner::plan_micro(transcript, config, true);
-    let decision = super::decision::decide_auto_compact(
+    let plan = crate::agent::compact_v2::planner::plan_micro(transcript, config, true);
+    let decision = crate::agent::compact_v2::decision::decide_auto_compact(
         pressure,
         config,
         plan.estimated_tokens_saved,
         plan.has_changes(),
     );
-    if decision != super::decision::GainDecision::Micro {
+    if decision != crate::agent::compact_v2::decision::GainDecision::Micro {
         return Ok((0, 0));
     }
-    let affected = super::micro::apply_micro_plan(transcript, &plan).await?;
+    let affected = crate::agent::compact_v2::micro::apply_micro_plan(transcript, &plan).await?;
     Ok((affected, plan.estimated_tokens_saved))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::agent::compact_v2::config::CompactConfig;
+    use crate::agent::compact_v2::planner::ContextPressure;
+    use crate::agent::compact_v2::smart::smart_compact;
     use crate::messages::BaseMessage;
+    use crate::session::transcript::MessageTranscript;
 
     fn pressure() -> ContextPressure {
         ContextPressure {
@@ -59,7 +62,7 @@ mod tests {
         assert_eq!(
             smart_compact(&mut transcript, &CompactConfig::default(), &pressure())
                 .await
-                .unwrap(),
+                .expect("the default fixture result is required for this assertion"),
             (0, 0)
         );
         assert_eq!(transcript.view_revision(), revision);
@@ -85,7 +88,7 @@ mod tests {
         assert_eq!(
             smart_compact(&mut transcript, &config, &pressure())
                 .await
-                .unwrap(),
+                .expect("the pressure fixture result is required for this assertion"),
             (0, 0)
         );
         assert_eq!(transcript.view_revision(), revision);

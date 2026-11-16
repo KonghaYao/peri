@@ -62,6 +62,7 @@ pub enum WindowDirection {
 }
 
 impl WindowDirection {
+    #[must_use]
     fn as_wire(self) -> &'static str {
         match self {
             Self::Around => "around",
@@ -154,6 +155,7 @@ impl WindowRequest {
     }
 
     /// 编码为 S4 wire 形状（camelCase + `kind` 判别）。
+    #[must_use]
     pub(crate) fn to_value(&self) -> Value {
         match self {
             Self::Open(request) => {
@@ -288,11 +290,13 @@ pub struct WindowPageItem {
 }
 
 impl WindowPageItem {
+    #[must_use]
     pub(crate) fn persistent_key(&self) -> PersistentEntryKey {
         PersistentEntryKey::new(self.source.clone(), self.entry_id.clone())
     }
 
     /// 构造窗口条目身份。`body_bytes`/`reserved_bytes` 由装配方按实际展示单元计量。
+    #[must_use]
     pub(crate) fn to_entry_view(
         &self,
         unit_count: usize,
@@ -623,6 +627,7 @@ impl HistoryBodyRequest {
         Ok(())
     }
 
+    #[must_use]
     pub(crate) fn to_value(&self) -> Value {
         json!({
             "entryId": self.entry_id,
@@ -652,6 +657,7 @@ pub(crate) struct WindowGeneration {
 impl WindowGeneration {
     /// 同时校验 wire 身份与本地窗口代次。`requestId` 不在响应中，由调用方把待结算
     /// 请求与该身份一起保存并单独比对。
+    #[must_use]
     pub(crate) fn accepts(
         &self,
         response: &WindowPageResponse,

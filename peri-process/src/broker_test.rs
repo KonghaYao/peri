@@ -1,5 +1,7 @@
-use super::*;
+use super::{io, Duration, Registration, ACK};
+use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
+use std::os::unix::process::CommandExt;
 use tokio::process::Command;
 
 #[tokio::test]
@@ -45,6 +47,7 @@ fn supervised_tree() -> (crate::ProcessTree, std::thread::JoinHandle<u32>) {
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("broker.sock");
     let listener = UnixListener::bind(&socket).unwrap();
+    // SAFETY: The numeric process ID is only queried; this syscall accepts missing processes and reports an error.
     let host_session = unsafe { libc::getsid(0) };
     let server = std::thread::spawn(move || {
         let _directory = directory;
@@ -72,12 +75,13 @@ fn supervised_tree() -> (crate::ProcessTree, std::thread::JoinHandle<u32>) {
         pid
     });
     let registration = Registration::connect(&socket, &"a".repeat(64)).unwrap();
-    let mut tree = crate::ProcessTree::new().unwrap();
+    let mut tree = crate::ProcessTree::try_new().unwrap();
     tree.broker = Some(registration);
     (tree, server)
 }
 
 fn check_anchor_session(command: &mut std::process::Command) {
+    // SAFETY: The post-fork callback uses only async-signal-safe session/group syscalls and constructs errors from numeric codes.
     unsafe {
         command.pre_exec(|| {
             let group = libc::getpgrp();

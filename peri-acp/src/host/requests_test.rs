@@ -1,9 +1,8 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
-    sync::Arc,
-};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::provider::{PeriConfig, ProviderConfig, ProviderModels};
 use crate::transport::types::{AcpError, IncomingMessage, RequestId};
@@ -13,16 +12,17 @@ use peri_acp_types::plugin::{InstallScope, InstalledPlugin, PluginManagerPort, P
 use peri_acp_types::session_resources::{
     BindingState, FrozenSnapshotBytes, FrozenState, NewSession, NewSessionMeta, SessionResources,
 };
-use peri_acp_types::store::{PersistedPayload, ThreadStore};
+use peri_acp_types::store::PersistedPayload;
+
 use peri_acp_types::tasks::BgTaskKind;
-use peri_acp_types::thread::ThreadMeta;
 use peri_acp_types::workspace::SessionBinding;
 use peri_middlewares::permission::shared_mode::{PermissionMode, SharedPermissionMode};
 use peri_resources::sessions::SqliteThreadStore;
 use serde_json::{json, Value};
 use serial_test::serial;
 
-use super::*;
+use crate::host::AcpServerConfig;
+use crate::host::SessionState;
 use crate::provider::LlmProvider;
 
 #[path = "requests_history_lifecycle_test.rs"]
@@ -68,7 +68,7 @@ fn task_snapshot_value_preserves_child_thread_identity() {
             child_thread_id: Some("child-1".into()),
         }],
     };
-    let value = task_snapshot_value(snapshot);
+    let value = crate::host::requests::task_snapshot_value(snapshot);
     assert_eq!(value["revision"], 7);
     assert_eq!(value["tasks"][0]["task_id"], "bg-1");
     assert_eq!(value["tasks"][0]["child_thread_id"], "child-1");

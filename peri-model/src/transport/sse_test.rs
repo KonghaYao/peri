@@ -1,4 +1,4 @@
-use super::*;
+use super::{SseEvent, SseParser};
 use crate::ModelResult;
 
 fn push(parser: &mut SseParser, bytes: &[u8]) -> ModelResult<Vec<SseEvent>> {

@@ -1,7 +1,14 @@
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::SessionPhase;
+use super::TuiRenderUnit;
+use super::TuiToolEnded;
+use super::TuiToolStarted;
+use super::json;
+use super::serial;
 
 fn replay_start(state: &mut BridgeState, tool_id: &str) {
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         state,
         &AcpEventData::ReplayToolStarted {
             tool_id: tool_id.into(),
@@ -26,7 +33,7 @@ fn history_card(state: &BridgeState, tool_id: &str) -> crate::kit::tui_render_un
 #[test]
 #[serial]
 fn history_without_result_is_static_and_does_not_claim_success() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.phase = SessionPhase::Idle;
     replay_start(&mut state, "history-missing");
 
@@ -56,11 +63,11 @@ fn history_without_result_is_static_and_does_not_claim_success() {
 #[serial]
 fn history_result_updates_static_card_for_success_and_error() {
     for is_error in [false, true] {
-        let mut state = make_fold_test_state();
+        let mut state = super::make_fold_test_state();
         state.phase = SessionPhase::Idle;
         replay_start(&mut state, "history-result");
         let before = history_card(&state, "history-result");
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ReplayToolEnded {
                 tool_id: "history-result".into(),
@@ -82,11 +89,11 @@ fn history_result_updates_static_card_for_success_and_error() {
 #[test]
 #[serial]
 fn history_unknown_result_does_not_change_other_cards() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.phase = SessionPhase::Idle;
     replay_start(&mut state, "history-missing");
     let before = history_card(&state, "history-missing");
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ReplayToolEnded {
             tool_id: "unknown-tool".into(),
@@ -103,16 +110,16 @@ fn history_unknown_result_does_not_change_other_cards() {
 #[test]
 #[serial]
 fn live_tool_still_runs_after_history_replay() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.phase = SessionPhase::Idle;
     replay_start(&mut state, "history-missing");
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("live-request".into()),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
             tool_id: "live-tool".into(),
@@ -127,7 +134,7 @@ fn live_tool_still_runs_after_history_replay() {
     assert_eq!(state.phase, SessionPhase::PromptRunning);
     assert!(state.current_turn.view_models().iter().any(|unit| matches!(unit, TuiRenderUnit::TuiToolCard(card) if card.tool_id == "live-tool" && card.is_running)));
     assert!(!history_card(&state, "history-missing").is_running);
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             tool_id: "live-tool".into(),
@@ -138,3 +145,5 @@ fn live_tool_still_runs_after_history_replay() {
     );
     assert!(state.current_turn.view_models().iter().any(|unit| matches!(unit, TuiRenderUnit::TuiToolCard(card) if card.tool_id == "live-tool" && !card.is_running && card.output_summary == "live result")));
 }
+
+use crate::kit::atoms::VIEW_MODELS;

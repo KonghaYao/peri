@@ -346,10 +346,10 @@ pub(crate) fn plan_local_workspaces(
     // 每个根会话先形成候选键；同机同路径归组，跨机器即使旧 UUID 相同也拆开。
     let mut groups: BTreeMap<(String, PathBuf), Vec<&LegacySession>> = BTreeMap::new();
     let mut roots = HashMap::new();
-    for session in sessions
+    let matching_entries = sessions
         .iter()
-        .filter(|session| session.parent_id.is_none())
-    {
+        .filter(|session| session.parent_id.is_none());
+    for session in matching_entries {
         let (path, source) = match session.execution_workspace_id {
             Some(id) => match registration_by_id.get(&id) {
                 Some(registration) => (registration.root.clone(), registration.path_source),
@@ -429,10 +429,10 @@ pub(crate) fn plan_local_workspaces(
         });
     }
 
-    for session in sessions
+    let matching_entries = sessions
         .iter()
-        .filter(|session| session.parent_id.is_some())
-    {
+        .filter(|session| session.parent_id.is_some());
+    for session in matching_entries {
         let mut visited = HashSet::new();
         let mut cursor = session;
         while let Some(parent_id) = &cursor.parent_id {

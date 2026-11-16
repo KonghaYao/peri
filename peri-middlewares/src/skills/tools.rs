@@ -15,10 +15,13 @@
 //! - **Ready(empty)**：合法空目录——`DiscoverSkillsTool` 返回 `[]`；
 //! - **Ready(nonempty)**：正常投影。
 
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use peri_acp_types::mcp_skills::{mcp_skill_name, McpSkillRegistry};
+use peri_acp_types::mcp_skills;
+use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::skills::SkillOrigin;
 use peri_agent::tools::{BaseTool, ToolContext};
 use serde_json::{json, Value};
@@ -40,7 +43,14 @@ pub struct SkillTool {
     mcp_registry: Option<Arc<McpSkillRegistry>>,
 }
 
+impl Debug for SkillTool {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("SkillTool").finish_non_exhaustive()
+    }
+}
+
 impl SkillTool {
+    #[must_use]
     pub fn new(mcp_registry: Option<Arc<McpSkillRegistry>>) -> Self {
         Self { mcp_registry }
     }
@@ -148,7 +158,16 @@ pub struct DiscoverSkillsTool {
     mcp_registry: Option<Arc<McpSkillRegistry>>,
 }
 
+impl Debug for DiscoverSkillsTool {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DiscoverSkillsTool")
+            .finish_non_exhaustive()
+    }
+}
+
 impl DiscoverSkillsTool {
+    #[must_use]
     pub fn new(mcp_registry: Option<Arc<McpSkillRegistry>>) -> Self {
         Self { mcp_registry }
     }
@@ -295,7 +314,7 @@ fn find_skill<'a>(
     if let Some((prefix, suffix)) = skill_name.rsplit_once(':') {
         if !suffix.is_empty() {
             let prefix = prefix.to_lowercase();
-            let mcp_full = mcp_skill_name(&prefix, suffix).to_lowercase();
+            let mcp_full = mcp_skills::mcp_skill_name(&prefix, suffix).to_lowercase();
             let by_full_name: Vec<&SkillMetadata> = skills
                 .iter()
                 .filter(|s| s.name.to_lowercase() == mcp_full)
@@ -315,7 +334,7 @@ fn find_skill<'a>(
                             .to_lowercase();
                         (trail == prefix || server.to_lowercase() == prefix)
                             && s.name.to_lowercase()
-                                == mcp_skill_name(server, &want_skill).to_lowercase()
+                                == mcp_skills::mcp_skill_name(server, &want_skill).to_lowercase()
                     }
                     _ => false,
                 })

@@ -1,7 +1,7 @@
 //! Bounded Todo comparison inputs. Missing previews never mean an empty baseline.
 
 use super::BridgeState;
-use crate::kit::retained_bytes::json_value_bytes;
+
 use crate::kit::tool_semantics::TodoSnapshot;
 use serde_json::Value;
 
@@ -12,6 +12,7 @@ const CACHE_ENTRIES: usize = 128;
 impl BridgeState {
     /// No snapshot and no frontier means initial; a frontier without a snapshot
     /// means comparison data was lost and must not produce an initial Todo card.
+    #[must_use]
     pub(crate) fn todo_baseline_unknown(&self) -> bool {
         self.last_successful_todos.is_none() && self.todo_baseline_sequence.is_some()
     }
@@ -37,7 +38,8 @@ impl BridgeState {
         let sequence = self.next_todo_sequence;
         self.next_todo_sequence = self.next_todo_sequence.saturating_add(1);
         if raw_input.is_null()
-            || json_value_bytes(raw_input).reserved > input_limit.min(INPUT_BYTES)
+            || crate::kit::retained_bytes::json_value_bytes(raw_input).reserved
+                > input_limit.min(INPUT_BYTES)
         {
             self.todo_call_inputs.remove(&tool_id);
             self.invalidate_todo_baseline(sequence);
@@ -49,7 +51,9 @@ impl BridgeState {
             || self
                 .todo_call_inputs
                 .iter()
-                .map(|(id, (_, value))| id.capacity() + json_value_bytes(value).reserved)
+                .map(|(id, (_, value))| {
+                    id.capacity() + crate::kit::retained_bytes::json_value_bytes(value).reserved
+                })
                 .sum::<usize>()
                 > CACHE_BYTES
         {

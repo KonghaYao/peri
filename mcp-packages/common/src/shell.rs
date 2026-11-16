@@ -1,9 +1,11 @@
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 #[cfg(windows)]
 use std::process::Stdio;
 use std::sync::Arc;
 
 use peri_acp_types::tasks::TaskRegistrationTicket;
-use peri_agent::agent::async_tasks::truncate_bytes;
+use peri_agent::agent::async_tasks;
 use tokio::io::AsyncReadExt;
 
 use super::shell_output::{ShellOutputCapture, ShellOutputWriter};
@@ -21,7 +23,18 @@ pub struct ShellExecutionGuard {
     )>,
 }
 
+impl Debug for ShellExecutionGuard {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ShellExecutionGuard")
+            .field("stopped", &self.stopped)
+            .field("pid", &self.pid)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ShellExecutionGuard {
+    #[must_use]
     pub fn new(ownership: Option<Box<dyn peri_acp_types::tasks::ExternalExecutionGuard>>) -> Self {
         Self {
             ownership,
@@ -35,7 +48,7 @@ impl ShellExecutionGuard {
 
     /// Establish OS process-tree ownership before the command can execute.
     pub fn prepare(&mut self, command: &mut tokio::process::Command) -> std::io::Result<()> {
-        let tree = peri_process::ProcessTree::new()?;
+        let tree = peri_process::ProcessTree::try_new()?;
         tree.prepare(command);
         self.tree = Some(Arc::new(tree));
         Ok(())
@@ -109,6 +122,7 @@ impl ShellExecutionGuard {
         }
     }
 
+    #[must_use]
     pub fn is_stopped(&self) -> bool {
         self.tree.as_ref().is_none_or(|tree| tree.is_stopped())
     }
@@ -211,6 +225,7 @@ fn process_group_stopped(pid: u32) -> bool {
             return false;
         }
         // Probe only. ESRCH proves that no process remains in this owned group.
+        // SAFETY: The checked nonzero process-group ID belongs to this execution; the syscall uses no pointers and errors are handled by the caller.
         let result = unsafe { libc::kill(-pid, 0) };
         result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
     }
@@ -253,6 +268,7 @@ pub fn kill_process_group(pid: u32, signal: &str) {
             _ => return,
         };
         // A direct syscall leaves no detached helper process after session drain.
+        // SAFETY: The checked nonzero process-group ID belongs to this execution; the syscall uses no pointers and errors are handled by the caller.
         unsafe {
             libc::kill(-pid, signal);
         }
@@ -323,6 +339,7 @@ fn escape_powershell_arg(arg: &str) -> String {
 ///
 /// Returns the `Command` object so callers can add custom configuration
 /// (env, current_dir, stdin/stdout/stderr, kill_on_drop, etc.).
+#[must_use]
 pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
     if cfg!(target_os = "windows") {
         // command 直接作为 PowerShell 脚本拼接（与 bash -c / cmd /C 一致），
@@ -363,6 +380,7 @@ pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
 /// 当输出被截断时，将完整内容写入临时文件。
 /// 返回追加到截断信息后的提示字符串。
 /// 文件落在进程私有的 0700 目录内，文件权限 0600。
+#[must_use]
 pub fn persist_truncated_output(full_content: &str) -> String {
     let (hint, _) = persist_truncated_output_with_ref(full_content);
     hint
@@ -371,6 +389,7 @@ pub fn persist_truncated_output(full_content: &str) -> String {
 /// Persist a full output and return both the display hint and durable path.
 /// The caller should carry the path as typed evidence instead of recovering it
 /// from rendered text.
+#[must_use]
 pub fn persist_truncated_output_with_ref(full_content: &str) -> (String, Option<String>) {
     match persist_private_output(full_content) {
         Ok(file_path) => (
@@ -433,7 +452,7 @@ pub async fn tee_pipe_with_output(
         output.write_chunk(&chunk[..n]).await;
         let mut guard = match buf.lock() {
             Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
+            Err(_) => panic!("shell preview mutex must remain consistent after a panic"),
         };
         append_preview(&mut guard, &chunk[..n]);
     }
@@ -446,7 +465,7 @@ fn append_preview(preview: &mut String, bytes: &[u8]) {
     }
     let remaining = MAX_PARTIAL_CAPTURE_BYTES - preview.len();
     let text = String::from_utf8_lossy(bytes);
-    preview.push_str(&truncate_bytes(&text, remaining));
+    preview.push_str(&async_tasks::truncate_bytes(&text, remaining));
 }
 
 #[cfg(test)]

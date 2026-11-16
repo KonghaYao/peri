@@ -7,7 +7,9 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::{atomic::AtomicUsize, Arc, Mutex};
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -17,7 +19,9 @@ use peri_acp_types::event::{
 };
 use peri_acp_types::event_v2::{ObserveEvent, RenderEvent};
 use peri_acp_types::identity::AgentId;
-use peri_agent::agent::stages::{run_react_loop, LoopResult, StageContext};
+use peri_agent::agent::stages;
+use peri_agent::agent::stages::LoopResult;
+use peri_agent::agent::stages::StageContext;
 use peri_agent::messages::BaseMessage;
 use peri_agent::session::queue::{MessageSource, QueuedMessage};
 use peri_agent::session::store::FrozenContext;
@@ -187,21 +191,21 @@ impl ParentDriver {
         request: peri_model::ModelRequest,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-        use crate::subagent::test_support::*;
+        use crate::subagent::test_support;
         let _ = &cancellation;
-        let messages = base_messages(&request);
-        let defined = defined_tools(&request);
+        let messages = test_support::base_messages(&request);
+        let defined = test_support::defined_tools(&request);
         let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
         self.seen.lock().unwrap().push(messages.to_vec());
         if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-            tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
+            test_support::tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
                 "parent-agent-call",
                 "Agent",
                 self.input.clone(),
             )])
         } else {
-            text_events("parent completed")
+            test_support::text_events("parent completed")
         }
     }
 }
@@ -287,7 +291,7 @@ async fn run_sync_fixture(fixture: FailureFixture, status: Option<u16>) -> SyncF
     ));
 
     assert!(matches!(
-        run_react_loop(context.clone(), 3).await,
+        stages::run_react_loop(context.clone(), 3).await,
         LoopResult::Completed
     ));
     // HTTP 400 不可重试：单次请求即失败。其余场景走满 `RetryConfig::max_attempts`

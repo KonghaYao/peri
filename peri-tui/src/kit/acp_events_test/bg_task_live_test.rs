@@ -1,7 +1,9 @@
-use super::*;
+use super::BridgeState;
+use super::CurrentTurn;
+use super::SessionPhase;
+
 use crate::kit::acp_types::{AcpEventData, BgTaskSnapshotSource};
-use crate::kit::atoms::{BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_REVISION, BgLiveStatus};
-use crate::kit::stream_data::{TuiTextChunk, TuiToolEnded, TuiToolStarted};
+
 use crate::kit::tui_render_unit::TuiRenderUnit;
 use serial_test::serial;
 
@@ -50,7 +52,7 @@ impl Drop for RestoreSnapshotAtoms {
 #[serial]
 fn missing_old_stop_does_not_bind_a_new_background_occurrence_to_the_old_task() {
     let _restore = RestoreSnapshotAtoms::empty();
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     let execution = || peri_acp_types::session::ExecutionBinding {
         turn_id: peri_acp_types::session::TurnId::new(),
         attempt_id: peri_acp_types::identity::AttemptId::new(),
@@ -61,7 +63,7 @@ fn missing_old_stop_does_not_bind_a_new_background_occurrence_to_the_old_task() 
         ("old-bg-task", &old_execution, "old body"),
         ("new-bg-task", &new_execution, "new body"),
     ] {
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
                 task_id: task_id.into(),
@@ -78,7 +80,7 @@ fn missing_old_stop_does_not_bind_a_new_background_occurrence_to_the_old_task() 
         state
             .current_turn
             .prepare_subagent_execution("same-child", binding);
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::SubagentStarted {
                 agent_id: "same-child".into(),
@@ -90,7 +92,7 @@ fn missing_old_stop_does_not_bind_a_new_background_occurrence_to_the_old_task() 
         state
             .current_turn
             .bind_subagent_execution("same-child", binding);
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::TextChunk(TuiTextChunk {
                 text: body.into(),
@@ -187,8 +189,8 @@ fn pending_owner_resets_stream_when_occurrence_changes() {
 #[serial]
 fn background_started_does_not_restore_parent_loading() {
     let _restore = RestoreSnapshotAtoms::empty();
-    let mut state = make_fold_test_state();
-    dispatch_and_notify(
+    let mut state = super::make_fold_test_state();
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "background-observed".into(),
@@ -199,13 +201,13 @@ fn background_started_does_not_restore_parent_loading() {
     );
     assert_eq!(state.phase, SessionPhase::Idle);
     assert!(!ACP_STATE.state().read().is_loading);
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("live-parent".into()),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "second-background-observed".into(),
@@ -222,8 +224,8 @@ fn background_started_does_not_restore_parent_loading() {
 #[serial]
 fn live_lost_update_hides_activity_until_authoritative_running_snapshot() {
     let _restore = RestoreSnapshotAtoms::empty();
-    let mut state = make_fold_test_state();
-    dispatch_and_notify(
+    let mut state = super::make_fold_test_state();
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
             task_id: "lost-worker".into(),
@@ -335,7 +337,7 @@ fn live_running_snapshot_recovers_activity_without_started_event() {
 #[serial]
 fn historical_nonterminal_snapshots_do_not_create_live_activity() {
     let _restore = RestoreSnapshotAtoms::empty();
-    for (revision, status) in [
+    let indexed_statuses = [
         Some("running"),
         Some("lost"),
         Some("reconciling"),
@@ -344,8 +346,8 @@ fn historical_nonterminal_snapshots_do_not_create_live_activity() {
         None,
     ]
     .into_iter()
-    .enumerate()
-    {
+    .enumerate();
+    for (revision, status) in indexed_statuses {
         let task = crate::kit::acp_types::BgTaskEntry {
             task_id: "historical-agent".into(),
             kind: "agent".into(),
@@ -377,7 +379,7 @@ fn historical_nonterminal_snapshots_do_not_create_live_activity() {
 #[serial]
 fn historical_snapshot_cannot_resurrect_lost_task_but_live_snapshot_can() {
     let _restore = RestoreSnapshotAtoms::empty();
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     let mut task = crate::kit::acp_types::BgTaskEntry {
         task_id: "observed-shell".into(),
         kind: "shell".into(),
@@ -395,13 +397,13 @@ fn historical_snapshot_cannot_resurrect_lost_task_but_live_snapshot_can() {
     ));
     assert!(BG_DISPLAY.state().read().is_empty());
     task.revision = Some(2);
-    dispatch_and_notify(&mut state, &AcpEventData::BgTaskStarted(task.clone()));
+    super::dispatch_and_notify(&mut state, &AcpEventData::BgTaskStarted(task.clone()));
     let started_at = BG_DISPLAY.state().read()[0].created_at;
     BG_LIVE_DETAIL
         .state()
         .write()
         .get_mut(&task.task_id)
-        .unwrap()
+        .expect("historical snapshot cannot resurrect lost task but live snapshot can: fixture must contain the requested entry")
         .tool_cards
         .push(crate::kit::acp_types::ToolCardAccumulator::with_input(
             "unconfirmed-read".into(),
@@ -611,7 +613,7 @@ fn test_mcp_shell_task_events_update_bottom_task_area() {
     crate::kit::atoms::init_atoms();
     BG_DISPLAY.state().write().clear();
     let mut state = make_state();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
             task_id: "shell-mcp".into(),
@@ -631,7 +633,7 @@ fn test_mcp_shell_task_events_update_bottom_task_area() {
     assert!(running[0].is_active);
     drop(running);
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::BgTaskCompleted {
             task_id: "shell-mcp".into(),
@@ -655,7 +657,7 @@ fn snapshot_watermark_rejects_late_started_event() {
     crate::kit::atoms::BG_TASKS.state().write().clear();
     BG_DISPLAY.state().write().clear();
     let mut state = make_state();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::BgTaskSnapshot {
             revision: Some(3),
@@ -663,7 +665,7 @@ fn snapshot_watermark_rejects_late_started_event() {
             source: BgTaskSnapshotSource::Live,
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
             task_id: "already-finished".into(),
@@ -687,7 +689,7 @@ fn snapshot_watermark_rejects_late_started_event() {
 fn test_bg_task_cancelled_persists_reason_on_live_detail() {
     crate::kit::atoms::init_atoms();
     BG_LIVE_DETAIL.state().write().clear();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut make_state(),
         &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
             task_id: "task-shell".into(),
@@ -700,7 +702,7 @@ fn test_bg_task_cancelled_persists_reason_on_live_detail() {
             child_thread_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut make_state(),
         &AcpEventData::BgTaskCancelled {
             task_id: "task-shell".into(),
@@ -722,7 +724,7 @@ fn test_bg_text_chunk_appends_live_detail_not_view_models() {
     BG_DISPLAY.state().write().clear();
     BG_LIVE_DETAIL.state().write().clear();
     let mut state = make_state();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
             task_id: "task-1".into(),
@@ -735,7 +737,7 @@ fn test_bg_text_chunk_appends_live_detail_not_view_models() {
             child_thread_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "bg-agent".into(),
@@ -744,8 +746,8 @@ fn test_bg_text_chunk_appends_live_detail_not_view_models() {
             parent_tool_call_id: None,
         },
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
-    dispatch_and_notify(
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "live line".into(),
@@ -846,7 +848,7 @@ fn test_bg_group_frozen_in_view_models_after_turn_suspended() {
     BG_LIVE_DETAIL.state().write().clear();
     crate::kit::atoms::BG_AGENT_IDS.state().write().clear();
     let mut state = make_state();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
             task_id: "task-1".into(),
@@ -859,7 +861,7 @@ fn test_bg_group_frozen_in_view_models_after_turn_suspended() {
             child_thread_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "bg-agent".into(),
@@ -868,7 +870,7 @@ fn test_bg_group_frozen_in_view_models_after_turn_suspended() {
             parent_tool_call_id: None,
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "first".into(),
@@ -876,8 +878,8 @@ fn test_bg_group_frozen_in_view_models_after_turn_suspended() {
             agent_id: Some("bg-agent".into()),
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
-    dispatch_and_notify(
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "+second".into(),
@@ -937,6 +939,7 @@ fn test_bg_group_frozen_in_view_models_after_turn_suspended() {
     );
 }
 
+#[must_use]
 fn make_state() -> BridgeState {
     BridgeState {
         child_runs: Default::default(),
@@ -964,3 +967,19 @@ fn make_state() -> BridgeState {
         window: Default::default(),
     }
 }
+
+use crate::kit::atoms::BG_DISPLAY;
+
+use crate::kit::atoms::BG_LIVE_DETAIL;
+
+use crate::kit::atoms::BG_TASK_REVISION;
+
+use crate::kit::atoms::BgLiveStatus;
+
+use crate::kit::stream_data::TuiTextChunk;
+
+use crate::kit::stream_data::TuiToolEnded;
+
+use crate::kit::stream_data::TuiToolStarted;
+
+use crate::kit::atoms::{ACP_STATE, VIEW_MODELS, ViewModelsSnapshot};

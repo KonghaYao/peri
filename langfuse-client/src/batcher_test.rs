@@ -2,7 +2,10 @@
 
 use std::time::Duration;
 
-use super::*;
+use super::{
+    oneshot, BackpressurePolicy, Batcher, BatcherConfig, FlushReport, IngestionEvent,
+    LangfuseClient, LangfuseError,
+};
 use crate::types::TraceBody;
 
 fn create_test_client(server_url: &str) -> LangfuseClient {

@@ -2,8 +2,8 @@
 
 use peri_agent::agent::events::Stage;
 
-use super::super::input_snapshot::GenerationInput;
-use super::super::tool_batch::ToolsBatchFlush;
+use crate::langfuse::tracer::input_snapshot::GenerationInput;
+use crate::langfuse::tracer::tool_batch::ToolsBatchFlush;
 
 /// incomplete 诊断原因(终态,不再变化)
 #[derive(Debug, Clone, PartialEq, Eq)]

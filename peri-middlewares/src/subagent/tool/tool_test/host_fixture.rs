@@ -1,4 +1,9 @@
-use super::*;
+use super::Arc;
+use super::BaseMessage;
+use super::SessionFixture;
+use super::SubAgentTool;
+use super::ThreadId;
+use super::ThreadMeta;
 
 /// 宿主夹具：真门面（SQLite） + 已绑定/frozen 的父会话 + 生产 `SubagentHost`。
 ///
@@ -83,7 +88,7 @@ impl HostFixture {
 
     /// 临时目录宿主（目录由夹具持有）。`label` 只写入父会话 title。
     pub(crate) async fn open(label: &str) -> Self {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let fixture = SessionFixture::open_in(dir.path()).await;
         Self::assemble(fixture, label, Some(dir)).await
     }

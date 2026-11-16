@@ -869,10 +869,10 @@ pub(super) fn inherited_retirement_plan(
     tables: &HashMap<String, Vec<ActualColumn>>,
 ) -> Result<Vec<&'static str>, String> {
     let mut plan = Vec::new();
-    for table in DROPPED_TABLES
+    let matching_entries = DROPPED_TABLES
         .iter()
-        .filter(|table| table.shape.name.starts_with("inherited_"))
-    {
+        .filter(|table| table.shape.name.starts_with("inherited_"));
+    for table in matching_entries {
         let actual = tables
             .get(table.shape.name)
             .map(Vec::as_slice)

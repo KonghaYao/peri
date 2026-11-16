@@ -1,5 +1,9 @@
-use super::*;
 use crate::messages::{BaseMessage, MessageContent};
+use peri_acp_types::session::MessageKind;
+use peri_acp_types::session::MessageQueue;
+use peri_acp_types::session::MessageSource;
+use peri_acp_types::session::QueuedMessage;
+use peri_acp_types::session::QueuedPayload;
 use peri_acp_types::system_reminder::{
     ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
     ReminderSource as CanonicalSource, SystemReminder, TrustedSystemReminder,
@@ -23,7 +27,7 @@ fn make_reminder() -> TrustedSystemReminder {
             summary: None,
             metadata: json!({"id": 1}),
         })
-        .unwrap()
+        .expect("the construct fixture result is required for this assertion")
 }
 
 fn make_msg(text: &str) -> BaseMessage {

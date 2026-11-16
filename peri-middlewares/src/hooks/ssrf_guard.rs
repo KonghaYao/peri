@@ -69,12 +69,24 @@ fn is_blocked_ipv4(ip: Ipv4Addr) -> bool {
 
     use ipnet::Ipv4Net;
     let blocked_ranges: &[Ipv4Net] = &[
-        "0.0.0.0/8".parse().unwrap(),      // "this" network
-        "10.0.0.0/8".parse().unwrap(),     // private
-        "100.64.0.0/10".parse().unwrap(),  // CGNAT / shared address space
-        "169.254.0.0/16".parse().unwrap(), // link-local（云 metadata）
-        "172.16.0.0/12".parse().unwrap(),  // private
-        "192.168.0.0/16".parse().unwrap(), // private
+        "0.0.0.0/8"
+            .parse()
+            .expect("hardcoded SSRF CIDR range must be syntactically valid"), // "this" network
+        "10.0.0.0/8"
+            .parse()
+            .expect("hardcoded SSRF CIDR range must be syntactically valid"), // private
+        "100.64.0.0/10"
+            .parse()
+            .expect("hardcoded SSRF CIDR range must be syntactically valid"), // CGNAT / shared address space
+        "169.254.0.0/16"
+            .parse()
+            .expect("hardcoded SSRF CIDR range must be syntactically valid"), // link-local（云 metadata）
+        "172.16.0.0/12"
+            .parse()
+            .expect("hardcoded SSRF CIDR range must be syntactically valid"), // private
+        "192.168.0.0/16"
+            .parse()
+            .expect("hardcoded SSRF CIDR range must be syntactically valid"), // private
     ];
 
     blocked_ranges.iter().any(|range| range.contains(&ip))
@@ -94,8 +106,12 @@ fn is_blocked_ipv6(ip: Ipv6Addr) -> bool {
 
     use ipnet::Ipv6Net;
     let blocked_ranges: &[Ipv6Net] = &[
-        "fc00::/7".parse().unwrap(),  // unique local
-        "fe80::/10".parse().unwrap(), // link-local
+        "fc00::/7"
+            .parse()
+            .expect("hardcoded SSRF CIDR range must be syntactically valid"), // unique local
+        "fe80::/10"
+            .parse()
+            .expect("hardcoded SSRF CIDR range must be syntactically valid"), // link-local
     ];
 
     // :: (unspecified) — checked via is_unspecified()

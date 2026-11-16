@@ -1,7 +1,9 @@
-use std::{process::Stdio, time::Duration};
+use std::process::Stdio;
+use std::time::Duration;
 
 use peri_mcp_common::shell::ShellExecutionGuard;
-use rmcp::{model::CustomResult, ErrorData as McpError};
+use rmcp::model::CustomResult;
+use rmcp::ErrorData as McpError;
 use tokio::io::AsyncReadExt;
 
 const GIT_BRANCH_TIMEOUT: Duration = Duration::from_secs(1);

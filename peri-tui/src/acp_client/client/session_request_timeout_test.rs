@@ -1,13 +1,14 @@
-use super::*;
-use peri_acp::transport::{mpsc::mpsc_transport_pair, types::IncomingMessage};
+use super::{AcpTuiClient, json};
+
+use peri_acp::transport::types::IncomingMessage;
 use std::time::Duration;
 
 #[tokio::test(start_paused = true)]
 async fn session_request_default_timeout_is_ten_seconds() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("session-a", false);
-    let identity = client.stable_session_identity().unwrap();
+    let identity = client.stable_session_identity().expect("session request default timeout is ten seconds: the stable_session_identity fixture operation uses valid inputs");
     let task = tokio::spawn(async move {
         client
             .send_session_request(&identity, "cron/list", json!({"sessionId":"session-a"}))
@@ -27,18 +28,18 @@ async fn session_request_default_timeout_is_ten_seconds() {
     let error = tokio::time::timeout(Duration::from_millis(1), task)
         .await
         .expect("ordinary RPC must expire at its ten-second deadline")
-        .unwrap()
-        .unwrap_err();
+        .expect("session request default timeout is ten seconds: fixture task and request must complete successfully")
+        .expect_err("session request default timeout is ten seconds: the invalid fixture must be rejected");
     assert_eq!(error.code, -32603);
-    assert_eq!(error.data.unwrap()["kind"], "request_timeout");
+    assert_eq!(error.data.expect("session request default timeout is ten seconds: the fixture establishes error.data before this assertion")["kind"], "request_timeout");
 }
 
 #[tokio::test(start_paused = true)]
 async fn session_request_custom_timeout_bounds_operation_gate_wait() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("session-a", false);
-    let identity = client.stable_session_identity().unwrap();
+    let identity = client.stable_session_identity().expect("session request custom timeout bounds operation gate wait: the stable_session_identity fixture operation uses valid inputs");
     let gate = client.lifecycle.operation_gate();
     let operation = gate.lock().await;
     let requester = client.clone();
@@ -60,9 +61,9 @@ async fn session_request_custom_timeout_bounds_operation_gate_wait() {
     let error = tokio::time::timeout(Duration::from_millis(1), task)
         .await
         .expect("gate admission must not outlive the sixty-second deadline")
-        .unwrap()
-        .unwrap_err();
-    assert_eq!(error.data.unwrap()["kind"], "request_timeout");
+        .expect("session request custom timeout bounds operation gate wait: fixture task and request must complete successfully")
+        .expect_err("session request custom timeout bounds operation gate wait: the invalid fixture must be rejected");
+    assert_eq!(error.data.expect("session request custom timeout bounds operation gate wait: the fixture establishes error.data before this assertion")["kind"], "request_timeout");
     drop(operation);
     assert!(
         tokio::time::timeout(Duration::from_millis(1), server.recv())
@@ -74,10 +75,10 @@ async fn session_request_custom_timeout_bounds_operation_gate_wait() {
 
 #[tokio::test(start_paused = true)]
 async fn session_request_custom_timeout_is_shared_by_admission_and_wire_wait() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("session-a", false);
-    let identity = client.stable_session_identity().unwrap();
+    let identity = client.stable_session_identity().expect("session request custom timeout is shared by admission and wire wait: the stable_session_identity fixture operation uses valid inputs");
     let gate = client.lifecycle.operation_gate();
     let operation = gate.lock().await;
     let requester = client.clone();
@@ -106,7 +107,9 @@ async fn session_request_custom_timeout_is_shared_by_admission_and_wire_wait() {
     let error = tokio::time::timeout(Duration::from_millis(1), task)
         .await
         .expect("wire wait must share the original admission deadline")
-        .unwrap()
-        .unwrap_err();
-    assert_eq!(error.data.unwrap()["kind"], "request_timeout");
+        .expect("session request custom timeout is shared by admission and wire wait: fixture task and request must complete successfully")
+        .expect_err("session request custom timeout is shared by admission and wire wait: the invalid fixture must be rejected");
+    assert_eq!(error.data.expect("session request custom timeout is shared by admission and wire wait: the fixture establishes error.data before this assertion")["kind"], "request_timeout");
 }
+
+use peri_acp::transport::AcpTransport;

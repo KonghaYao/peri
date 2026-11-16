@@ -15,16 +15,15 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::chatgpt_auth::AccountStatus;
 use crate::i18n;
-use crate::kit::image_safety::sanitize_for_terminal;
+
 use crate::kit::panels::login::auth::{
     AuthController, AuthFailure, AuthViewState, DetailAction, LogoutConfirm, LogoutFocus,
 };
 use crate::kit::panels::login::auth_policy;
-use crate::kit::panels::login::edit_handler::auth_scope;
+
 use crate::kit::panels::login::edit_state::{LoginEditState, LoginField};
 use crate::kit::panels::login::edit_view::{self, EditViewMetrics, StatusEntry, StatusTone};
 use crate::kit::panels::login::render::{EditLayout, LoginRenderColors};
-use crate::truncate::{middle_truncate_by_width, wrap_by_width};
 
 /// Authorization sub-view geometry.
 pub(super) struct AuthDetailLayout {
@@ -147,7 +146,10 @@ fn status_entries(es: &LoginEditState, auth: &AuthController) -> Vec<StatusEntry
                 StatusTone::Muted,
             )];
             // 已有完整引用时保存不阻断，但运行时一定会失败：给出非阻断警告。
-            if es.is_plan_mode() && !es.plan.needs_identity() && auth.scope() == &auth_scope(es) {
+            if es.is_plan_mode()
+                && !es.plan.needs_identity()
+                && auth.scope() == &crate::kit::panels::login::edit_handler::auth_scope(es)
+            {
                 entries.push(StatusEntry::new(
                     i18n::tr("login-auth-credentials-missing"),
                     StatusTone::Warning,
@@ -209,7 +211,7 @@ fn signed_in_entries(es: &LoginEditState, status: &AccountStatus) -> Vec<StatusE
     let email = status
         .email
         .as_deref()
-        .map(sanitize_for_terminal)
+        .map(crate::kit::image_safety::sanitize_for_terminal)
         .map(|email| email.into_owned())
         .filter(|email| !email.trim().is_empty());
     let mut entries = vec![match email {
@@ -300,7 +302,10 @@ pub(super) fn build_auth_detail_layout(
                 colors.label(),
             )]));
             let content_width = (width.saturating_sub(4) as usize).max(16);
-            for chunk in wrap_by_width(&sanitize_for_terminal(url), content_width) {
+            for chunk in crate::truncate::wrap_by_width(
+                &crate::kit::image_safety::sanitize_for_terminal(url),
+                content_width,
+            ) {
                 lines.push(Line::from(vec![Span::styled(
                     format!("    {chunk}"),
                     Style::default().fg(colors.text),
@@ -321,14 +326,14 @@ pub(super) fn build_auth_detail_layout(
     if let Some(scope) = auth.scope().target() {
         let label = i18n::tr("login-field-store");
         let display = scope.store.display().to_string();
-        let path = sanitize_for_terminal(&display);
+        let path = crate::kit::image_safety::sanitize_for_terminal(&display);
         let budget = usize::from(width)
             .saturating_sub(2 + label.width() + 2)
             .max(1);
         lines.push(Line::from(vec![
             Span::styled(format!("  {label}: "), Style::default().fg(colors.dim)),
             Span::styled(
-                middle_truncate_by_width(&path, budget),
+                crate::truncate::middle_truncate_by_width(&path, budget),
                 Style::default().fg(colors.dim),
             ),
         ]));

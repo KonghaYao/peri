@@ -8,36 +8,43 @@
 //!
 //! Mock 命名约定：`make_` 前缀（函数），`Mock` 前缀（结构体）。
 
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
-use peri_acp_types::{
-    event::{
-        EventMessage, EventPublisher, EventSink, EventSubscriber, ExecutorEvent, SubscriptionError,
-    },
-    interaction::{
-        InteractionContext, InteractionResponse, TrustedInteractionOwner, UserInteractionBroker,
-    },
-    messages::{BaseMessage, ContentBlock, ImageSource, MessageContent},
-    permission::{PermissionMode, SharedPermissionMode},
-    ports::{AgentCatalogPort, ToolSearchPort},
-    runtime::UnstampedEvent,
-};
+use peri_acp_types::event::EventMessage;
+use peri_acp_types::event::EventPublisher;
+use peri_acp_types::event::EventSink;
+use peri_acp_types::event::EventSubscriber;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::event::SubscriptionError;
+use peri_acp_types::interaction::InteractionContext;
+use peri_acp_types::interaction::InteractionResponse;
+use peri_acp_types::interaction::TrustedInteractionOwner;
+use peri_acp_types::interaction::UserInteractionBroker;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::ContentBlock;
+use peri_acp_types::messages::ImageSource;
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::permission::PermissionMode;
+use peri_acp_types::permission::SharedPermissionMode;
+use peri_acp_types::ports::AgentCatalogPort;
+use peri_acp_types::ports::ToolSearchPort;
+use peri_acp_types::runtime::UnstampedEvent;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use peri_acp_types::event::BackgroundTaskResult;
 use peri_acp_types::session::{MessageQueue, SessionAccessPort, SessionInbox};
 
-use super::{
-    is_keepgoing, run_session_loop, FrozenSessionData, PromptStopReason, SessionContext, TurnInput,
-};
-use crate::{
-    session::exec::executor_helpers::{ForwarderLauncherFn, StageBuildFn},
-    tools::DirectToolInvocationResolver,
-};
+use crate::session::exec::executor::context::FrozenSessionData;
+use crate::session::exec::executor::context::SessionContext;
+use crate::session::exec::executor::context::TurnInput;
+use crate::session::exec::executor_helpers::ForwarderLauncherFn;
+use crate::session::exec::executor_helpers::StageBuildFn;
+use crate::tools::DirectToolInvocationResolver;
+use peri_acp_types::command::PromptStopReason;
 
 // ── Mock EventSink ─────────────────────────────────────────────────────────
 
@@ -60,20 +67,27 @@ impl MockEventSink {
     }
 
     fn push_done_count(&self) -> usize {
-        *self.push_done_count.lock().unwrap()
+        *self
+            .push_done_count
+            .lock()
+            .expect("self push done count mutex must remain unpoisoned throughout the test")
     }
 
     fn last_push_done_request_id(&self) -> Option<String> {
         self.push_done_request_ids
             .lock()
-            .unwrap()
+            .expect("self push done request ids mutex must remain unpoisoned throughout the test")
             .last()
             .cloned()
             .flatten()
     }
 
     fn last_push_done_stop_reason(&self) -> Option<String> {
-        self.push_done_stop_reasons.lock().unwrap().last().cloned()
+        self.push_done_stop_reasons
+            .lock()
+            .expect("self push done stop reasons mutex must remain unpoisoned throughout the test")
+            .last()
+            .cloned()
     }
 }
 
@@ -86,19 +100,25 @@ impl EventSink for MockEventSink {
         _context_window: u32,
     ) -> Result<(), peri_acp_types::event::EventSinkError> {
         let json = serde_json::to_string(event).unwrap_or_default();
-        self.pushed_events.lock().unwrap().push(json);
+        self.pushed_events
+            .lock()
+            .expect("self pushed events mutex must remain unpoisoned throughout the test")
+            .push(json);
         Ok(())
     }
 
     async fn push_done(&self, _session_id: &str, stop_reason: &str, request_id: Option<&str>) {
-        *self.push_done_count.lock().unwrap() += 1;
+        *self
+            .push_done_count
+            .lock()
+            .expect("self push done count mutex must remain unpoisoned throughout the test") += 1;
         self.push_done_request_ids
             .lock()
-            .unwrap()
+            .expect("self push done request ids mutex must remain unpoisoned throughout the test")
             .push(request_id.map(String::from));
         self.push_done_stop_reasons
             .lock()
-            .unwrap()
+            .expect("self push done stop reasons mutex must remain unpoisoned throughout the test")
             .push(stop_reason.to_string());
     }
 }
@@ -184,7 +204,10 @@ fn make_recording_cancelled_stage(
 
     Arc::new(move |sbr| {
         calls.fetch_add(1, Ordering::SeqCst);
-        *recorded.lock().unwrap() = Some(sbr.frozen_session.clone());
+        *recorded
+            .lock()
+            .expect("recorded lock mutex must remain unpoisoned throughout the test") =
+            Some(sbr.frozen_session.clone());
         let session = Session::new(
             Arc::from("/tmp"),
             sbr.frozen_session.v2_frozen().clone(),
@@ -371,7 +394,7 @@ async fn bg_result_injection_failure_fails_the_turn() {
         shell_output: None,
     }];
 
-    let result = run_session_loop(ctx, turn).await;
+    let result = crate::session::exec::executor::run_session_loop(ctx, turn).await;
 
     assert!(!result.ok, "注入失败不得静默成功");
     let failure = result.failure.expect("本轮必须携带失败事实");
@@ -422,14 +445,14 @@ async fn test_missing_frozen_builder_snapshot_reaches_cancelled_stage_once() {
     turn.stage_build =
         make_recording_cancelled_stage(Arc::clone(&stage_calls), Arc::clone(&recorded));
 
-    let result = run_session_loop(ctx, turn).await;
+    let result = crate::session::exec::executor::run_session_loop(ctx, turn).await;
 
     assert_eq!(result.stop_reason, PromptStopReason::Cancelled);
     assert_eq!(builder_calls.load(Ordering::SeqCst), 1);
     assert_eq!(stage_calls.load(Ordering::SeqCst), 1);
     let snapshot = recorded
         .lock()
-        .unwrap()
+        .expect("recorded lock mutex must remain unpoisoned throughout the test")
         .clone()
         .expect("stage 收到 snapshot");
     assert_eq!(snapshot.system_prompt(), "fallback-system");
@@ -463,13 +486,13 @@ async fn test_missing_frozen_without_builder_builds_complete_snapshot_for_cancel
     turn.stage_build =
         make_recording_cancelled_stage(Arc::clone(&stage_calls), Arc::clone(&recorded));
 
-    let result = run_session_loop(ctx, turn).await;
+    let result = crate::session::exec::executor::run_session_loop(ctx, turn).await;
 
     assert_eq!(result.stop_reason, PromptStopReason::Cancelled);
     assert_eq!(stage_calls.load(Ordering::SeqCst), 1);
     let snapshot = recorded
         .lock()
-        .unwrap()
+        .expect("recorded lock mutex must remain unpoisoned throughout the test")
         .clone()
         .expect("stage 收到 snapshot");
     assert_eq!(snapshot.system_prompt(), "");
@@ -504,11 +527,11 @@ async fn test_user_input_keepgoing_with_empty_history_reaches_stage_for_resumed_
             content: MessageContent::text("首条输入尚未领取"),
             original_draft: "首条输入尚未领取".into(),
         })
-        .unwrap();
+        .expect("the enqueue sync fixture result is required for this assertion");
     mailbox.stop_sync();
     mailbox
         .attach_external_attempt_sync(AgentCancellationToken::new(), true)
-        .unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
     context.user_input_mailbox = Some(mailbox);
     let sink = Arc::new(MockEventSink::new());
     let mut turn = make_turn_input(
@@ -518,7 +541,7 @@ async fn test_user_input_keepgoing_with_empty_history_reaches_stage_for_resumed_
         vec![],
     );
     turn.stage_build = make_recording_cancelled_stage(stage_calls.clone(), recorded);
-    let result = run_session_loop(context, turn).await;
+    let result = crate::session::exec::executor::run_session_loop(context, turn).await;
     assert_eq!(
         stage_calls.load(Ordering::SeqCst),
         1,
@@ -530,111 +553,7 @@ async fn test_user_input_keepgoing_with_empty_history_reaches_stage_for_resumed_
         "应进入已设置取消的真实 stage，而不是假成功"
     );
 }
-
-// ── is_keepgoing: 跨层判空契约测试 ───────────────────────────────────────
-//
-// 与 peri-agent stages_test 的
-// `test_append_messages_empty_prompt_skipped` / `test_append_messages_whitespace_prompt_kept`
-// 成对，双侧锁定 ARC-KEEPGOING-001 的判空语义（`MessageContent::is_empty()`）。
-
-/// 空文本 → keepgoing（TUI keepgoing 按钮的真实 payload 是 `text("")`）
-#[test]
-fn test_is_keepgoing_empty_text() {
-    assert!(is_keepgoing(&MessageContent::text("")));
-}
-
-/// 纯空白文本不算空 content block → 非 keepgoing（用户输入空格应正常跑 loop）
-#[test]
-fn test_is_keepgoing_whitespace_text_not_keepgoing() {
-    assert!(!is_keepgoing(&MessageContent::text("   ")));
-}
-
-/// 纯附件消息（Blocks([Image])）不是空 → 非 keepgoing（trim 判空会把图片误判）
-#[test]
-fn test_is_keepgoing_image_block_not_keepgoing() {
-    let content = MessageContent::blocks(vec![ContentBlock::Image {
-        source: ImageSource::Base64 {
-            media_type: "image/png".to_string(),
-            data: "fake".to_string(),
-        },
-    }]);
-    assert!(!is_keepgoing(&content));
-}
-
-// ── run_session_loop: keepgoing 短路路径 TRAP 验证 ────────────────────────
-
-/// [TRAP] keepgoing 短路路径（空历史 + 空 prompt）必须调用 `push_done`，
-/// 否则 TUI 依赖 AgentDone→TurnDone 退出 loading 的机制失效，界面永久卡在
-/// loading（ARC-EVENT-001 / ARC-KEEPGOING-001）。
-#[tokio::test]
-async fn test_run_session_loop_keepgoing_short_circuit_calls_push_done() {
-    // Arrange
-    let mock_sink = Arc::new(MockEventSink::new());
-    let ctx = make_session_context("test-session");
-    let turn = make_turn_input(
-        Arc::clone(&mock_sink) as Arc<dyn EventSink>,
-        MessageContent::text(""),
-        false,
-        vec![],
-    );
-    let turn = TurnInput {
-        // keepgoing 语义：不注入 recall（否则 recall 拼进 user 消息使其非空）
-        incoming_recalls: vec!["should-be-skipped".to_string()],
-        ..turn
-    };
-
-    // Act
-    let result = run_session_loop(ctx, turn).await;
-
-    // Assert
-    assert!(result.ok);
-    assert_eq!(
-        result.stop_reason,
-        PromptStopReason::EndTurn,
-        "短路返回的 stop_reason 必须为 EndTurn"
-    );
-    assert!(
-        result.recall_items.is_empty(),
-        "keepgoing 短路不应产生 recall items"
-    );
-    assert_eq!(
-        mock_sink.push_done_count(),
-        1,
-        "keepgoing 短路路径必须调用 push_done 一次（TRAP: TUI 永久 loading）"
-    );
-    assert_eq!(
-        mock_sink.last_push_done_stop_reason().as_deref(),
-        Some("end_turn"),
-        "keepgoing 短路的协议出口终态必须唯一且为 end_turn"
-    );
-}
-
-/// Issue 2026-08-05 返工链路验证：keepgoing 短路路径的 push_done 必须透传
-/// SessionContext.request_id（服务器回带 → TUI stale TurnInterrupted 配对）。
-#[tokio::test]
-async fn test_run_session_loop_keepgoing_short_circuit_forwards_request_id() {
-    // Arrange
-    let mock_sink = Arc::new(MockEventSink::new());
-    let mut ctx = make_session_context("test-session");
-    ctx.request_id = Some("req-1".to_string());
-    let turn = make_turn_input(
-        Arc::clone(&mock_sink) as Arc<dyn EventSink>,
-        MessageContent::text(""),
-        false,
-        vec![],
-    );
-
-    // Act
-    let result = run_session_loop(ctx, turn).await;
-
-    // Assert
-    assert!(result.ok);
-    assert_eq!(
-        mock_sink.last_push_done_request_id().as_deref(),
-        Some("req-1"),
-        "push_done 必须透传 SessionContext.request_id"
-    );
-}
+include!("executor_keepgoing_cases_test.rs");
 
 // ── run_session_loop: 命令拦截三态分发（Phase 5 Step 6）─────────────────────
 //
@@ -644,7 +563,7 @@ async fn test_run_session_loop_keepgoing_short_circuit_forwards_request_id() {
 // 验证的短路分支；noop_stage_build 被调用即 panic——见 noop_stage_build 注释）。
 
 /// 构造「命中 Done handler」的 command_lookup（/compact 形态，恒 Done）。
-fn done_command_lookup() -> super::CommandLookupFn {
+fn done_command_lookup() -> crate::session::exec::executor_helpers::CommandLookupFn {
     use peri_acp_types::command::command_route::{
         CommandEntryKind, CommandLifecycle, CommandProvenance, CommandSource, RouteEntry,
     };
@@ -701,7 +620,7 @@ async fn test_run_session_loop_intercept_handled_short_circuits() {
     );
 
     // Act
-    let result = run_session_loop(ctx, turn).await;
+    let result = crate::session::exec::executor::run_session_loop(ctx, turn).await;
 
     // Assert：短路返回，agent 不构建
     assert!(result.ok, "Handled 分发应 ok=true");
@@ -734,7 +653,7 @@ async fn test_run_session_loop_intercept_cancel_returns_cancelled() {
             unreachable!("pending 永不返回");
         }
     }
-    let lookup: super::CommandLookupFn = Arc::new(|text: &str| {
+    let lookup: crate::session::exec::executor_helpers::CommandLookupFn = Arc::new(|text: &str| {
         if text == "compact" {
             Some(ResolvedCommand {
                 entry: Arc::new(RouteEntry {
@@ -769,7 +688,7 @@ async fn test_run_session_loop_intercept_cancel_returns_cancelled() {
     );
 
     // Act
-    let result = run_session_loop(ctx, turn).await;
+    let result = crate::session::exec::executor::run_session_loop(ctx, turn).await;
 
     // Assert：cancel 分支 → Cancelled + history 原样 + push_done
     assert!(result.ok);
@@ -811,7 +730,7 @@ async fn test_run_session_loop_intercept_inject_enters_agent_pipeline() {
             CommandOutcome::Inject("/skill tdd".to_string())
         }
     }
-    let lookup: super::CommandLookupFn = Arc::new(|text: &str| {
+    let lookup: crate::session::exec::executor_helpers::CommandLookupFn = Arc::new(|text: &str| {
         if text == "inject" {
             Some(ResolvedCommand {
                 entry: Arc::new(RouteEntry {
@@ -841,7 +760,9 @@ async fn test_run_session_loop_intercept_inject_enters_agent_pipeline() {
     let session_for_build = Session::new(Arc::from("/tmp"), FrozenContext::builder().build(), None);
     let session_arc = Arc::clone(&session_for_build);
     let stage_build: StageBuildFn = Arc::new(move |_sbr| {
-        *build_calls.lock().unwrap() += 1;
+        *build_calls
+            .lock()
+            .expect("build calls lock mutex must remain unpoisoned throughout the test") += 1;
         let turn = session_for_build.start_turn();
         turn.cancel_token.cancel(); // 首轮 is_cancelled() → 立即 Interrupted
         let (bus, handles) = EventBus::new(Default::default());
@@ -878,20 +799,25 @@ async fn test_run_session_loop_intercept_inject_enters_agent_pipeline() {
     turn.stage_build = stage_build;
 
     // Act
-    let result = run_session_loop(ctx, turn).await;
+    let result = crate::session::exec::executor::run_session_loop(ctx, turn).await;
 
     // Assert：Inject 不短路——agent 管线被构建，注入文本进 v2 queue。
     assert_eq!(
-        *stage_build_calls.lock().unwrap(),
+        *stage_build_calls
+            .lock()
+            .expect("stage build calls lock mutex must remain unpoisoned throughout the test"),
         1,
         "Inject 分发必须构建 agent 管线（stage_build 被调用一次）"
     );
     let queued = session_arc.queue().drain_all_sync();
     let injected = queued.iter().find(|q| q.kind == MessageKind::Prompt);
     assert!(
-        matches!(injected, Some(q) if q.message().unwrap().content().contains("/skill tdd")),
+        matches!(injected, Some(q) if q.message().expect("the fixture entry must contain a message payload").content().contains("/skill tdd")),
         "注入文本必须经 AgentInput::blocks 进入 agent 管线，实际: {:?}",
-        injected.map(|q| q.message().unwrap().content())
+        injected.map(|q| q
+            .message()
+            .expect("the fixture entry must contain a message payload")
+            .content())
     );
     assert!(
         matches!(injected, Some(q) if q.source == V2MessageSource::UserInput),
@@ -951,7 +877,11 @@ async fn test_main_agent_history_is_seeded_as_compactable_own_region() {
     );
     turn.stage_build = stage_build;
 
-    let result = run_session_loop(make_session_context("root-history-own-region"), turn).await;
+    let result = crate::session::exec::executor::run_session_loop(
+        make_session_context("root-history-own-region"),
+        turn,
+    )
+    .await;
 
     assert!(!result.ok, "预取消 stage 应以 Interrupted 结束");
     let transcript = inspected_session.transcript();

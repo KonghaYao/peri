@@ -12,21 +12,26 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::super::middleware_runner::{
-    run_after_tool, run_before_bound_tools_batch, run_invocation_on_error,
-};
-use super::super::{InvocationContext, ModelTurnFacts};
-use super::effective_dispatcher::StageEffectiveToolDispatcher;
 use crate::agent::events_v2::RenderEvent;
 use crate::agent::react::{ToolCall, ToolResult};
+use crate::agent::stages::invocation_context::InvocationContext;
+use crate::agent::stages::invocation_context::ModelTurnFacts;
+
+use crate::agent::stages::tool_dispatch::effective_dispatcher::StageEffectiveToolDispatcher;
 use crate::error::{AgentError, AgentResult};
 use crate::messages::{BaseMessage, ContentBlock, MessageContent, MessageId};
 use crate::session::subagent::SubagentFailure;
 use crate::session::tool_catalog::SessionToolCatalogSnapshot;
-use crate::tools::{
-    normalize_params, BaseTool, EffectiveToolError, EffectiveToolErrorCode, InvocationId,
-    ToolCallId, ToolExecutionEvidence, ToolExecutionStatus, ToolOutcome, ToolOutput,
-};
+
+use crate::tools::BaseTool;
+use crate::tools::EffectiveToolError;
+use crate::tools::EffectiveToolErrorCode;
+use crate::tools::InvocationId;
+use crate::tools::ToolCallId;
+use crate::tools::ToolExecutionEvidence;
+use crate::tools::ToolExecutionStatus;
+use crate::tools::ToolOutcome;
+use crate::tools::ToolOutput;
 
 /// 拒绝原因 → 稳定错误分类（**单一权威**：模型面结算、协议错误面与
 /// [`effective_tool_error`] 共用同一张表，不各自硬编码）。
@@ -340,13 +345,19 @@ async fn run_before_tool_approvals(
     let mut ready_calls: Vec<ToolCall> = Vec::with_capacity(original_calls.len());
     let mut settled_results: Vec<SettledInvocation> = Vec::new();
 
-    let before_results = run_before_bound_tools_batch(ctx, &original_calls, targets).await;
+    let before_results = crate::agent::stages::middleware_runner::run_before_bound_tools_batch(
+        ctx,
+        &original_calls,
+        targets,
+    )
+    .await;
 
     // 事件纽带只在真实 turn 下存在：无 turn 的执行（idle App / Host）一条
     // `RenderEvent` 都不发（也不冒充模型工具调用）。
     let turn_id = turn.map(|turn| turn.turn_id());
 
-    for (tool_call, before_result) in original_calls.iter().zip(before_results) {
+    let paired_items = original_calls.iter().zip(before_results);
+    for (tool_call, before_result) in paired_items {
         if cancel.is_cancelled() {
             // 为已 emit ToolStart 的 ready_calls 补发 ToolEnd（无 turn 的执行没有
             // 事件端口，也没有 turn 事件纽带：按构造零事件）。
@@ -430,7 +441,8 @@ async fn run_before_tool_approvals(
                 ));
             }
             Err(e) => {
-                let _ = run_invocation_on_error(ctx, &e).await;
+                let _ =
+                    crate::agent::stages::middleware_runner::run_invocation_on_error(ctx, &e).await;
                 if let Some(turn_id) = turn_id {
                     for tc in &ready_calls {
                         ctx.emit_render(RenderEvent::ToolEnded {
@@ -502,7 +514,7 @@ async fn dispatch_concurrent(
             let model_tool_call_id = model_tool_call_id.unwrap_or(&raw_call.id).to_owned();
             let tool = all_tools.get(&call.id).cloned();
             let input = match &tool {
-                Some(t) => normalize_params(call.input.clone(), Some(t.as_ref())),
+                Some(t) => crate::tools::normalize_params(call.input.clone(), Some(t.as_ref())),
                 None => call.input.clone(),
             };
             let cancel = cancel.clone();
@@ -612,7 +624,7 @@ async fn dispatch_concurrent(
                             Ok(tool_result) => tool_result,
                             Err(_elapsed) => {
                                 // 安全：Err 分支仅在 timeout_opt 为 Some 时可达
-                                let secs = timeout_opt.unwrap().as_secs();
+                                let secs = timeout_opt.expect("the timeout branch can fail only when a duration was configured").as_secs();
                                 Err(EffectiveToolError::new(
                                     EffectiveToolErrorCode::Timeout,
                                     format!("tool call timed out after {}s", secs),
@@ -698,7 +710,8 @@ async fn settle_results(
     let mut deferred_error: Option<String> = None;
     let mut exec_results: Vec<SettledInvocation> = Vec::with_capacity(ready_calls.len());
 
-    for (modified_call, tool_result) in ready_calls.into_iter().zip(tool_results) {
+    let paired_items_2 = ready_calls.into_iter().zip(tool_results);
+    for (modified_call, tool_result) in paired_items_2 {
         let outcome = match &tool_result {
             Ok(output) => output.outcome.clone(),
             Err(_) => ToolOutcome::Unreported,
@@ -732,8 +745,11 @@ async fn settle_results(
         // ToolEnd 已在 dispatch_concurrent 中 emit（工具完成即刻发射）
         // 此处仅处理 after_tool + 截断等后处理逻辑
 
-        if let Err(e) = run_after_tool(ctx, &modified_call, &result).await {
-            let _ = run_invocation_on_error(ctx, &e).await;
+        if let Err(e) =
+            crate::agent::stages::middleware_runner::run_after_tool(ctx, &modified_call, &result)
+                .await
+        {
+            let _ = crate::agent::stages::middleware_runner::run_invocation_on_error(ctx, &e).await;
             deferred_error = deferred_error.or(Some(e.to_string()));
         }
 

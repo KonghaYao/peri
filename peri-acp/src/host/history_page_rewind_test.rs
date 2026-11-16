@@ -3,7 +3,13 @@
 //! 从 `history_page_wire_test.rs` 按职责拆出（STD-SIZE-001：单文件 ≤1000 行），语义未改动：
 //! 用例体、断言与 helper 逐字节搬移。夹具与跨文件共享 helper 在父模块里，经 `use super::*` 取用。
 
-use super::*;
+use crate::host::requests::tests::history_page_wire_tests::PageFixture;
+use crate::transport::AcpTransport;
+
+use peri_acp_types::PeriCaps;
+use serde_json::json;
+use serial_test::serial;
+use std::sync::Arc;
 
 /// A19 / REQ-T04 末段：**已发出的游标在结构版本前进后失效**——wire 面同样是「拒绝，不是
 /// 初始 load」。
@@ -35,13 +41,18 @@ async fn an_expired_cursor_is_rejected_without_an_initial_load() {
         sid.clone(),
         PeriCaps {
             rewind: true,
-            ..pagination_caps()
+            ..crate::host::requests::tests::history_page_wire_tests::pagination_caps()
         },
     );
 
     let cfg = Arc::clone(&fixture.cfg);
     let (client, sessions, task) =
-        spawn_loop(Arc::clone(&cfg), fixture.sessions, Some(pagination_caps())).await;
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&cfg),
+            fixture.sessions,
+            Some(crate::host::requests::tests::history_page_wire_tests::pagination_caps()),
+        )
+        .await;
 
     // 先决条件：该游标此刻真的可用（拒绝不能来自「游标本就无效」）。
     let page = client
@@ -82,9 +93,10 @@ async fn an_expired_cursor_is_rejected_without_an_initial_load() {
         .await
         .expect("rewind 必须成功");
     // rewind 自己会发通知（RewindCompleted 等），不属于本用例判据：先排空。
-    s9c_drain_notifications(&client).await;
+    crate::host::requests::tests::history_page_wire_tests::s9c_drain_notifications(&client).await;
 
-    let before = session_facts(&sessions, &sid).await;
+    let before =
+        crate::host::requests::tests::history_page_wire_tests::session_facts(&sessions, &sid).await;
     assert_eq!(
         before.2, 1,
         "一次成功的 rewind 恰好推进一次结构版本（否则下面的拒绝判据不成立）"
@@ -104,13 +116,20 @@ async fn an_expired_cursor_is_rejected_without_an_initial_load() {
         .await
         .err()
         .unwrap_or_else(|| panic!("结构版本前进后旧游标必须被拒绝，实际返回了成功响应"));
-    assert_page_rejection(&error, -32012, "expired_cursor", "rewind 之后的旧游标");
+    crate::host::requests::tests::history_page_wire_tests::assert_page_rejection(
+        &error,
+        -32012,
+        "expired_cursor",
+        "rewind 之后的旧游标",
+    );
     assert!(
-        s9c_drain_notifications(&client).await.is_empty(),
+        crate::host::requests::tests::history_page_wire_tests::s9c_drain_notifications(&client)
+            .await
+            .is_empty(),
         "拒绝不得发出任何回放通知（否则客户端会把拒绝当成一次 load）"
     );
     assert_eq!(
-        session_facts(&sessions, &sid).await,
+        crate::host::requests::tests::history_page_wire_tests::session_facts(&sessions, &sid).await,
         before,
         "拒绝不得触发一次初始 load，也不得改动热态"
     );

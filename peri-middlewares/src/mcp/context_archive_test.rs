@@ -1,10 +1,12 @@
-use super::*;
-use peri_acp_types::{
-    context_archive::{build_catalog, ArchiveReadResponse},
-    messages::BaseMessage,
-    projection::MessageProjectionDirective,
-    store::{serialize_persisted_payload, MessageFlags, PersistedPayload},
-};
+use super::{ReadContextArchiveTool, ToolContext};
+use peri_acp_types::context_archive as context_archive_functions;
+use peri_acp_types::context_archive::ArchiveReadResponse;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::projection::MessageProjectionDirective;
+use peri_acp_types::store;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
+use peri_agent::tools::BaseTool as _;
 
 use crate::mcp::current_invocation_fixture as fixture;
 
@@ -25,7 +27,7 @@ async fn archive_model_tool_reads_canonical_content_over_mcp_and_rejects_session
         .append_history(&session, std::slice::from_ref(&payload))
         .await
         .unwrap();
-    let catalog = build_catalog(
+    let catalog = context_archive_functions::build_catalog(
         session.clone(),
         "group".into(),
         payload.id(),
@@ -62,7 +64,7 @@ async fn archive_model_tool_reads_canonical_content_over_mcp_and_rejects_session
     assert!(result.complete);
     assert_eq!(
         result.entries[0].data,
-        serialize_persisted_payload(&payload).unwrap()
+        store::serialize_persisted_payload(&payload).unwrap()
     );
     assert!(tool
         .invoke(input.clone(), ToolContext::new(&[], "."))

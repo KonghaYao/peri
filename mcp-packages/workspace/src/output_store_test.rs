@@ -1,13 +1,13 @@
 use peri_acp_types::workspace_output::{StoreOutputRequest, StoredOutput, STORE_OUTPUT_METHOD};
-use rmcp::{
-    model::{
-        CallToolRequestParams, ClientRequest, CustomRequest, ReadResourceRequestParams,
-        ResourceContents, ServerResult,
-    },
-    ServiceExt,
-};
+use rmcp::model::CallToolRequestParams;
+use rmcp::model::ClientRequest;
+use rmcp::model::CustomRequest;
+use rmcp::model::ReadResourceRequestParams;
+use rmcp::model::ResourceContents;
+use rmcp::model::ServerResult;
+use rmcp::ServiceExt;
 
-use super::OutputStore;
+use crate::output_store::OutputStore;
 use crate::WorkspaceMcpServer;
 
 #[test]

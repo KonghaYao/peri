@@ -33,6 +33,7 @@ pub struct PromptHandle {
 
 impl PromptHandle {
     /// 构造本轮执行句柄。
+    #[must_use]
     pub fn new(ctx: SessionContext, turn: TurnInput) -> Self {
         Self {
             turn: Mutex::new(Some((ctx, turn))),

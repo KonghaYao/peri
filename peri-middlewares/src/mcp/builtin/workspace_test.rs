@@ -19,22 +19,23 @@
 //!   绝对路径可读是当前实现事实，登记为 `UNVERIFIED` 缺口。
 
 use crate::mcp::apps::McpCapabilityProfile;
-use crate::mcp::builtin::runtime::{
-    spawn_builtin_transport_with_handler, BuiltinInstanceSupervisor, BUILTIN_CONVERGE_TIMEOUT,
-};
-use crate::mcp::client::{serve_client_auto, McpServiceWrapper};
-use peri_acp_types::builtin_mcp::find;
+use crate::mcp::builtin::runtime;
+use crate::mcp::builtin::runtime::BuiltinInstanceSupervisor;
+use crate::mcp::builtin::runtime::BUILTIN_CONVERGE_TIMEOUT;
+use crate::mcp::client;
+use crate::mcp::client::McpServiceWrapper;
+use peri_acp_types::builtin_mcp;
 use peri_acp_types::event::BackgroundTaskResult;
 use peri_acp_types::tasks::{BgTaskKind, TaskManager};
-use rmcp::{
-    model::{CallToolRequestParams, CallToolResponse, CallToolResult},
-    service::{Peer, RoleClient},
-};
+use rmcp::model::CallToolRequestParams;
+use rmcp::model::CallToolResponse;
+use rmcp::model::CallToolResult;
+use rmcp::service::Peer;
+use rmcp::service::RoleClient;
 use serde_json::{json, Value};
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 use peri_mcp_workspace::{WorkspaceInstanceInput, WorkspaceMcpServer};
@@ -73,7 +74,8 @@ async fn workspace_handler_handshakes_and_lists_seven_tools_over_wire() {
     // 成员集合本身也由此被钉住（数量与逐项名字）。成员集合的**冻结字面量**断言在
     // package 侧（`resources/wire_test.rs::wire_declares_resources_and_keeps_seven_tools`），
     // 防「注册表与 handler 一起漂移」的那一半由它承担，此处不重复。
-    let declared = find("workspace").expect("`workspace` 必须是已实现实例（注册表 T1）");
+    let declared =
+        builtin_mcp::find("workspace").expect("`workspace` 必须是已实现实例（注册表 T1）");
     let declared_order: Vec<&str> = declared
         .tools
         .iter()
@@ -344,13 +346,16 @@ impl Pair {
 /// `input` 即 AW3-11 的 session 级输入：`None` 是顶层三路径 / 1:N 形态的形态（可见但退化），
 /// 既有五条线路用例都走该形态；后台任务两条用例显式传 `Some` / `None` 各一遍。
 async fn connect(cwd: &str, input: Option<WorkspaceInstanceInput>) -> Pair {
-    let transport =
-        spawn_builtin_transport_with_handler("workspace", WorkspaceMcpServer::new(cwd, input));
+    let transport = runtime::spawn_builtin_transport_with_handler(
+        "workspace",
+        WorkspaceMcpServer::new(cwd, input),
+    );
     let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
-        .await
-        .expect("builtin 握手不得超时（同进程链路）")
-        .expect("builtin 握手不得失败");
+    let service =
+        client::serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+            .await
+            .expect("builtin 握手不得超时（同进程链路）")
+            .expect("builtin 握手不得失败");
     Pair {
         service,
         supervisor,
@@ -376,10 +381,11 @@ async fn bridge_accepts_workspace_owned_task_handle() {
     )
     .expect("builtin Workspace dispatch");
     let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
-        .await
-        .expect("handshake deadline")
-        .expect("handshake");
+    let service =
+        client::serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+            .await
+            .expect("handshake deadline")
+            .expect("handshake");
     let pair = Pair {
         service,
         supervisor,
@@ -531,10 +537,11 @@ async fn builtin_close_cleans_up_workspace_owned_bash() {
     )
     .expect("builtin Workspace dispatch");
     let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
-        .await
-        .expect("handshake deadline")
-        .expect("handshake");
+    let service =
+        client::serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+            .await
+            .expect("handshake deadline")
+            .expect("handshake");
     let pair = Pair {
         service,
         supervisor,
@@ -629,10 +636,11 @@ async fn workspace_dispatch_propagates_bash_default_run_in_background() {
     )
     .expect("内置 Workspace 分派必须成功");
     let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
-        .await
-        .expect("内置链路握手不得超时")
-        .expect("内置链路握手不得失败");
+    let service =
+        client::serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+            .await
+            .expect("内置链路握手不得超时")
+            .expect("内置链路握手不得失败");
     let pair = Pair {
         service,
         supervisor,

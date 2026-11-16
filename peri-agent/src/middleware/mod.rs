@@ -1,9 +1,10 @@
 pub mod base;
 pub mod capabilities;
 pub mod chain;
+pub mod middleware_state;
 pub mod prompt_sections;
 pub mod queue_enqueue;
-pub mod state;
+pub use middleware_state as state;
 pub mod r#trait;
 
 pub use base::{LoggingMiddleware, MetricsMiddleware};

@@ -1,5 +1,5 @@
-use super::fold::{FoldState, fold_state_code};
-use super::hash::{tui_hash_combine, tui_hash_str};
+use super::fold::FoldState;
+
 use super::unit::TuiRenderUnit;
 
 /// System notification -- centered banner for model switches, compact, etc.
@@ -53,30 +53,33 @@ pub struct TuiSubAgentGroup {
 }
 
 impl TuiSubAgentGroup {
-    /// [G1] 内容哈希公式单点——`SubAgentAccumulator::view_model` 构造与折叠 pass
+    /// \[G1\] 内容哈希公式单点——`SubAgentAccumulator::view_model` 构造与折叠 pass
     /// 共用（含 fold + user_modified：状态变化必须触发分片渲染缓存重建）。
     pub fn recompute_hash(&mut self) {
         // 用 u64 组合累加每个 child VM 的 content_hash，确保 child 文本
         // 变化时（即使 view_models.len() 不变）也能触发按 hash 分片的渲染缓存重建。
         let mut child_hash_total: u64 = 0;
         for vm in self.view_models.iter() {
-            child_hash_total = tui_hash_combine(child_hash_total, vm.content_hash());
+            child_hash_total = super::hash::tui_hash_combine(child_hash_total, vm.content_hash());
         }
-        let mut h = tui_hash_combine(0, tui_hash_str(&self.instance_id));
-        h = tui_hash_combine(h, tui_hash_str(&self.agent_id));
-        h = tui_hash_combine(h, tui_hash_str(&self.agent_name));
-        h = tui_hash_combine(h, self.view_models.len() as u64);
-        h = tui_hash_combine(h, u64::from(self.preview_omitted));
-        h = tui_hash_combine(h, 0); // collapsed 恒为 false（详情面板保持展开；消息区折叠由 fold 驱动）
-        h = tui_hash_combine(h, u64::from(self.is_running));
-        h = tui_hash_combine(h, u64::from(self.is_error));
-        h = tui_hash_combine(
+        let mut h = super::hash::tui_hash_combine(0, super::hash::tui_hash_str(&self.instance_id));
+        h = super::hash::tui_hash_combine(h, super::hash::tui_hash_str(&self.agent_id));
+        h = super::hash::tui_hash_combine(h, super::hash::tui_hash_str(&self.agent_name));
+        h = super::hash::tui_hash_combine(h, self.view_models.len() as u64);
+        h = super::hash::tui_hash_combine(h, u64::from(self.preview_omitted));
+        h = super::hash::tui_hash_combine(h, 0); // collapsed 恒为 false（详情面板保持展开；消息区折叠由 fold 驱动）
+        h = super::hash::tui_hash_combine(h, u64::from(self.is_running));
+        h = super::hash::tui_hash_combine(h, u64::from(self.is_error));
+        h = super::hash::tui_hash_combine(
             h,
-            self.error_reason.as_deref().map(tui_hash_str).unwrap_or(0),
+            self.error_reason
+                .as_deref()
+                .map(super::hash::tui_hash_str)
+                .unwrap_or(0),
         );
-        h = tui_hash_combine(h, fold_state_code(self.fold));
-        h = tui_hash_combine(h, u64::from(self.user_modified));
-        h = tui_hash_combine(h, child_hash_total);
+        h = super::hash::tui_hash_combine(h, super::fold::fold_state_code(self.fold));
+        h = super::hash::tui_hash_combine(h, u64::from(self.user_modified));
+        h = super::hash::tui_hash_combine(h, child_hash_total);
         self.content_hash = h;
     }
 }
@@ -102,19 +105,19 @@ pub struct TuiCollapsedGroup {
 }
 
 impl TuiCollapsedGroup {
-    /// [G1] 内容哈希公式单点——`group_successful_tools` 构造时调用。
+    /// \[G1\] 内容哈希公式单点——`group_successful_tools` 构造时调用。
     /// 成员变化（标题/数量/失败数/隐藏 VM）必须触发按 hash 分片的渲染缓存重建。
     pub fn recompute_hash(&mut self) {
         let mut child_hash_total: u64 = 0;
         for vm in self.view_models.iter() {
-            child_hash_total = tui_hash_combine(child_hash_total, vm.content_hash());
+            child_hash_total = super::hash::tui_hash_combine(child_hash_total, vm.content_hash());
         }
-        let mut h = tui_hash_combine(0, tui_hash_str(&self.title));
-        h = tui_hash_combine(h, u64::from(self.count));
-        h = tui_hash_combine(h, u64::from(self.failed_count));
-        h = tui_hash_combine(h, self.view_models.len() as u64);
-        h = tui_hash_combine(h, child_hash_total);
-        h = tui_hash_combine(h, fold_state_code(self.fold));
+        let mut h = super::hash::tui_hash_combine(0, super::hash::tui_hash_str(&self.title));
+        h = super::hash::tui_hash_combine(h, u64::from(self.count));
+        h = super::hash::tui_hash_combine(h, u64::from(self.failed_count));
+        h = super::hash::tui_hash_combine(h, self.view_models.len() as u64);
+        h = super::hash::tui_hash_combine(h, child_hash_total);
+        h = super::hash::tui_hash_combine(h, super::fold::fold_state_code(self.fold));
         self.content_hash = h;
     }
 }
@@ -146,8 +149,9 @@ pub struct TuiTodoSummary {
 
 impl TuiTodoSummary {
     /// 从摘要文本构造（hash = f(text)）。
+    #[must_use]
     pub fn new(text: String) -> Self {
-        let content_hash = tui_hash_str(&text);
+        let content_hash = super::hash::tui_hash_str(&text);
         Self { text, content_hash }
     }
 }

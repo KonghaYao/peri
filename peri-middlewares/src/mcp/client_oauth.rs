@@ -1,18 +1,22 @@
 use std::sync::Arc;
 
-use super::{
-    auth_store::static_credential_key,
-    client::{
-        build_authed_transport, ClientStatus, McpClientHandle, McpClientPool, McpPoolError,
-        McpServiceWrapper, NotificationTap, OAuthStartDisposition, OAuthStatus, PeriClientHandler,
-        HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT,
-    },
-    initialize::{
-        commit_discovery_failure, commit_discovery_success, downgrade_resource_listing,
-        fail_tool_discovery, fail_workspace_resource_discovery, list_discovered_tools,
-    },
-    oauth_flow::{OAuthFailureKind, OAuthFlowEvent, OAuthFlowManager},
-};
+use super::auth_store;
+use super::client;
+use super::client::ClientStatus;
+use super::client::McpClientHandle;
+use super::client::McpClientPool;
+use super::client::McpPoolError;
+use super::client::McpServiceWrapper;
+use super::client::NotificationTap;
+use super::client::OAuthStartDisposition;
+use super::client::OAuthStatus;
+use super::client::PeriClientHandler;
+use super::client::HTTP_CONNECT_TIMEOUT;
+use super::client::SHUTDOWN_TIMEOUT;
+use super::initialize;
+use super::oauth_flow::OAuthFailureKind;
+use super::oauth_flow::OAuthFlowEvent;
+use super::oauth_flow::OAuthFlowManager;
 
 impl McpClientPool {
     /// 异步触发 OAuth 授权流程（不阻塞调用方）。
@@ -31,6 +35,7 @@ impl McpClientPool {
 
     /// 以稳定 identity 启动授权。reservation 在 spawn 前完成，保证同一
     /// server 不会因 Ack 重试并发启动两个 provider flow。
+    #[must_use]
     pub fn spawn_oauth_flow_with_id(
         self: &Arc<Self>,
         server_name: &str,
@@ -168,7 +173,7 @@ impl McpClientPool {
             self.emit_oauth_failure(flow_id, server_name, OAuthFailureKind::Internal, &error);
             error
         })?;
-        let credential_key = static_credential_key(server_name, &url, &oauth_cfg);
+        let credential_key = auth_store::static_credential_key(server_name, &url, &oauth_cfg);
         let event_cb = self
             .oauth_event_callback()
             .unwrap_or_else(|| Arc::new(|_| {}) as Arc<dyn Fn(OAuthFlowEvent) + Send + Sync>);
@@ -193,7 +198,7 @@ impl McpClientPool {
             })?;
 
             // 从 OAuth 流程中提取 AuthorizationManager，用于构建认证传输层
-            let auth_manager = match mgr.get_authorization_manager(server_name) {
+            let auth_manager = match mgr.authorization_manager(server_name) {
                 Some(manager) => manager,
                 None => {
                     let error = McpPoolError::ConnectionFailed {
@@ -233,7 +238,7 @@ impl McpClientPool {
                         super::client::mcpp_client_info_for_profile(&self.capability_profile),
                         Some(Arc::new(NotificationTap::new(self, server_name))),
                     ),
-                    build_authed_transport(&url, &headers, auth_manager),
+                    client::build_authed_transport(&url, &headers, auth_manager),
                 ),
             )
             .await;
@@ -249,26 +254,33 @@ impl McpClientPool {
                     // 严格发现：`tools/list` 的 `Err` 不是「没有工具」。System MCP 走
                     // 本次 live round-trip（不用历史缓存代替健康证据），失败即
                     // ToolDiscoveryFailed，不提交 Connected。
-                    let tools = match list_discovered_tools(self, server_name, &peer, &cfg).await {
-                        Ok(tools) => tools,
-                        Err(source) => {
-                            // 授权成功但 live `tools/list` 失败：不留下「无句柄」的
-                            // 模糊状态，显式记为 Failed + 本代 tools_list_ok = false，
-                            // System 等待方据此立即判定，而不是等满 deadline。
-                            fail_tool_discovery(self, server_name, &source.to_string());
-                            let error = McpPoolError::ToolDiscoveryFailed {
-                                server: server_name.to_string(),
-                                reason: source.to_string(),
-                            };
-                            self.emit_oauth_failure(
-                                flow_id,
-                                server_name,
-                                OAuthFailureKind::ConnectionFailed,
-                                &error,
-                            );
-                            return Err(error);
-                        }
-                    };
+                    let tools =
+                        match initialize::list_discovered_tools(self, server_name, &peer, &cfg)
+                            .await
+                        {
+                            Ok(tools) => tools,
+                            Err(source) => {
+                                // 授权成功但 live `tools/list` 失败：不留下「无句柄」的
+                                // 模糊状态，显式记为 Failed + 本代 tools_list_ok = false，
+                                // System 等待方据此立即判定，而不是等满 deadline。
+                                initialize::fail_tool_discovery(
+                                    self,
+                                    server_name,
+                                    &source.to_string(),
+                                );
+                                let error = McpPoolError::ToolDiscoveryFailed {
+                                    server: server_name.to_string(),
+                                    reason: source.to_string(),
+                                };
+                                self.emit_oauth_failure(
+                                    flow_id,
+                                    server_name,
+                                    OAuthFailureKind::ConnectionFailed,
+                                    &error,
+                                );
+                                return Err(error);
+                            }
+                        };
                     let resources = match self.list_all_resources_cached(server_name, &peer).await {
                         Ok(resources) => resources,
                         Err(error) => {
@@ -278,7 +290,7 @@ impl McpClientPool {
                             ) {
                                 let mut service = service;
                                 let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
-                                fail_workspace_resource_discovery(
+                                initialize::fail_workspace_resource_discovery(
                                     self,
                                     server_name,
                                     &error.to_string(),
@@ -295,7 +307,7 @@ impl McpClientPool {
                                 );
                                 return Err(error);
                             }
-                            downgrade_resource_listing(server_name, &error.to_string());
+                            initialize::downgrade_resource_listing(server_name, &error.to_string());
                             Vec::new()
                         }
                     };
@@ -334,7 +346,7 @@ impl McpClientPool {
                     }
                     self.record_status_change(server_name, old_status.as_ref());
                     // 唯一能提交本代发现证据的位置：live `tools/list` 已成功且句柄已登记代际。
-                    commit_discovery_success(self, server_name, &committed);
+                    initialize::commit_discovery_success(self, server_name, &committed);
                     return Ok(());
                 }
                 Ok(Err(e)) => {
@@ -363,7 +375,7 @@ impl McpClientPool {
                     } else {
                         Self::insert_failed(self, server_name, err_str.clone());
                     }
-                    commit_discovery_failure(self, server_name, false);
+                    initialize::commit_discovery_failure(self, server_name, false);
                     let error = McpPoolError::ConnectionFailed {
                         server: server_name.to_string(),
                         reason: err_str,
@@ -379,7 +391,7 @@ impl McpClientPool {
                 Err(_) => {
                     let msg = "连接超时".to_string();
                     Self::insert_failed(self, server_name, msg.clone());
-                    commit_discovery_failure(self, server_name, false);
+                    initialize::commit_discovery_failure(self, server_name, false);
                     let error = McpPoolError::ConnectionFailed {
                         server: server_name.to_string(),
                         reason: msg,
@@ -429,8 +441,11 @@ impl McpClientPool {
             .oauth
             .filter(|oauth| oauth.is_enabled())
             .unwrap_or_default();
-        let credential_key =
-            static_credential_key(server_name, cfg.url.as_deref().unwrap_or(""), &oauth);
+        let credential_key = auth_store::static_credential_key(
+            server_name,
+            cfg.url.as_deref().unwrap_or(""),
+            &oauth,
+        );
         let store = self
             .oauth_credentials()
             .map_err(|error| McpPoolError::ConnectionFailed {

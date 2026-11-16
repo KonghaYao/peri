@@ -2,16 +2,17 @@
 //! ReplayToolStarted, ReplayToolEnded + update_committed_tool_card helper.
 
 use super::live_tool_links;
-use super::*;
+use super::{BridgeState, SessionPhase};
+
 use crate::kit::acp_types::ToolCardAccumulator;
-use crate::kit::atoms::BG_AGENT_IDS;
-use crate::kit::bg_task_identity::{bounded_label, with_bg_display_for_agent};
-use crate::kit::bg_task_live::{handle_bg_tool_ended, handle_bg_tool_started};
-use crate::kit::retained_bytes::{SeenAllocations, retained_unit_bytes};
-use crate::kit::stream_data::{TuiToolEnded, TuiToolStarted};
-use crate::kit::tui_render_unit::{
-    EntryStatus, FoldTarget, TuiRenderUnit, TuiToolCard, TuiToolPresentation, fold_for_status,
-};
+
+use crate::kit::retained_bytes::SeenAllocations;
+
+use crate::kit::tui_render_unit::EntryStatus;
+use crate::kit::tui_render_unit::FoldTarget;
+use crate::kit::tui_render_unit::TuiRenderUnit;
+use crate::kit::tui_render_unit::TuiToolCard;
+use crate::kit::tui_render_unit::TuiToolPresentation;
 
 pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) {
     if ts
@@ -33,10 +34,11 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
         // bg sub-agent: TurnSuspended 后 SubAgentAccumulator 已被清除，
         // 后续 bg 工具事件仅更新 BG_DISPLAY，不走 start_subagent_tool
         if BG_AGENT_IDS.state().read().contains(agent_id) {
-            with_bg_display_for_agent(agent_id, |entry| {
-                entry.current_tool = Some(bounded_label(&ts.tool_name));
+            crate::kit::bg_task_identity::with_bg_display_for_agent(agent_id, |entry| {
+                entry.current_tool =
+                    Some(crate::kit::bg_task_identity::bounded_label(&ts.tool_name));
             });
-            handle_bg_tool_started(
+            crate::kit::bg_task_live::handle_bg_tool_started(
                 agent_id,
                 ts,
                 state.last_successful_todos.as_ref(),
@@ -120,11 +122,11 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
     let _todo_advanced = if let Some(agent_id) = te.agent_id.as_deref() {
         // bg sub-agent 不生成消息卡片，但仍需在成功结束时推进 Todo 基线。
         if BG_AGENT_IDS.state().read().contains(agent_id) {
-            with_bg_display_for_agent(agent_id, |entry| {
+            crate::kit::bg_task_identity::with_bg_display_for_agent(agent_id, |entry| {
                 entry.current_tool = None;
                 entry.tool_count += 1;
             });
-            handle_bg_tool_ended(agent_id, te);
+            crate::kit::bg_task_live::handle_bg_tool_ended(agent_id, te);
             state.variant = 1;
             // bg 工具事件不触碰 phase（Issue 2026-08-12，同 ToolStarted）。
             state.publish_barrier();
@@ -247,7 +249,7 @@ pub(super) fn replay_tool_started_unit(
         completed_duration_ms: None,
         diff: None,
         presentation,
-        fold: fold_for_status(FoldTarget::Tool, EntryStatus::Error),
+        fold: crate::kit::tui_render_unit::fold_for_status(FoldTarget::Tool, EntryStatus::Error),
         user_modified: false,
         tool_calls_count: 0,
         content_hash: 0,
@@ -320,7 +322,7 @@ pub(super) fn completed_tool_card(
         ),
         presentation: card.presentation.clone(),
         // 基础 fold 跟随终态；用户覆盖仍由派生折叠投影接管。
-        fold: fold_for_status(
+        fold: crate::kit::tui_render_unit::fold_for_status(
             FoldTarget::Tool,
             if is_error {
                 EntryStatus::Error
@@ -358,11 +360,14 @@ fn complete_archived_tool_card(
                 return false;
             }
             let mut seen = SeenAllocations::default();
-            let old_bytes = retained_unit_bytes(&state.committed[slot], &mut seen);
+            let old_bytes =
+                crate::kit::retained_bytes::retained_unit_bytes(&state.committed[slot], &mut seen);
             let updated = completed_tool_card(card, output_summary, is_error);
             let mut seen = SeenAllocations::default();
-            let new_bytes =
-                retained_unit_bytes(&TuiRenderUnit::TuiToolCard(updated.clone()), &mut seen);
+            let new_bytes = crate::kit::retained_bytes::retained_unit_bytes(
+                &TuiRenderUnit::TuiToolCard(updated.clone()),
+                &mut seen,
+            );
             found = Some((slot, updated, old_bytes, new_bytes));
             break;
         }
@@ -397,3 +402,9 @@ fn complete_archived_tool_card(
     }
     true
 }
+
+use crate::kit::atoms::BG_AGENT_IDS;
+
+use crate::kit::stream_data::TuiToolEnded;
+
+use crate::kit::stream_data::TuiToolStarted;

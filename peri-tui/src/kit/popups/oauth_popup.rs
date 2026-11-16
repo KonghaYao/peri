@@ -4,9 +4,9 @@
 //! `OauthNeeded` 事件写入）。交互全部走按钮/导航键，不用快捷键：
 //! - **按钮行**（默认焦点；Tab 切到输入框，←→ 选择，Enter 激活；
 //!   鼠标左键直接点击按钮）：
-//!   - [ 打开浏览器 ]：调用系统 `open` 打开 `auth_url`（best-effort）
-//!   - [ 复制链接 ]：完整授权链接复制到系统剪贴板
-//!   - [ 取消 ]：`mcp/oauth_cancel` RPC + 关闭 popup
+//!   - \[ 打开浏览器 \]：调用系统 `open` 打开 `auth_url`（best-effort）
+//!   - \[ 复制链接 \]：完整授权链接复制到系统剪贴板
+//!   - \[ 取消 \]：`mcp/oauth_cancel` RPC + 关闭 popup
 //! - **授权码输入框**（Tab 切回 / 鼠标点击输入行，终端粘贴授权码）：
 //!   - Enter 提交：`mcp/oauth_callback` RPC 回传后台（手动兜底路径；
 //!     state 由后台从授权 URL 解析，本地不缓存凭据）
@@ -27,21 +27,22 @@
 use std::time::Duration;
 
 use fluent_bundle::FluentValue;
-use peri_acp_types::event_data::OauthNeeded;
-use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
-    prelude::*,
-    ratatui::{
-        style::{Modifier, Style, Stylize},
-        text::{Line, Span},
-    },
-};
+
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::KeyCode;
+use ratatui_kit::crossterm::event::KeyEventKind;
+use ratatui_kit::crossterm::event::KeyModifiers;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::style::Modifier;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::style::Stylize;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
 
 use crate::i18n;
-use crate::kit::atoms::{ACP_CLIENT_HANDLE, LANG_VERSION, OAUTH_INFO};
-use crate::kit::panel_mouse::{AreaTracker, left_down};
-use crate::kit::popup_overlay::close_popup;
-use crate::kit::text_util::wrap_text;
+
+use crate::kit::panel_mouse::AreaTracker;
+
 use peri_theme::atoms::THEME_ATOM;
 
 /// 提交授权码（手动兜底路径）：`mcp/oauth_callback` RPC → host 侧投递到
@@ -68,7 +69,7 @@ fn submit_oauth_callback(server_name: &str, code: String) {
     } else {
         tracing::warn!(target: "oauth-popup", "ACP_CLIENT_HANDLE not set, oauth_callback skipped");
     }
-    close_popup();
+    crate::kit::popup_overlay::close_popup();
 }
 
 /// 取消进行中的授权流程：`mcp/oauth_cancel` RPC（oneshot 通道关闭 →
@@ -104,7 +105,7 @@ fn copy_to_clipboard(text: &str) -> bool {
 /// 内容区行号 0 起：空行、Server、空行、prompt、空行、URL×n、空行、按钮行、
 /// 空行、授权码行、空行、hint → 按钮行 = 6 + n，授权码行 = 8 + n。
 fn content_rows(auth_url: &str) -> (u16, u16) {
-    let n = wrap_text(auth_url, 52).len() as u16;
+    let n = crate::kit::text_util::wrap_text(auth_url, 52).len() as u16;
     (6 + n, 8 + n)
 }
 
@@ -179,13 +180,13 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 _ => {
                     cancel_oauth(&info.server_name);
-                    close_popup();
+                    crate::kit::popup_overlay::close_popup();
                 }
             };
 
             // ── 鼠标：按钮行左键点击 = 激活按钮；授权码行 = 焦点切回输入框 ──
             if let Event::Mouse(mouse) = event {
-                let Some((row, col)) = left_down(&mouse) else {
+                let Some((row, col)) = crate::kit::panel_mouse::left_down(&mouse) else {
                     return EventResult::Ignored;
                 };
                 let Some(area) = area else {
@@ -208,13 +209,16 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         i18n::tr("oauth-btn-cancel"),
                     ];
                     let mut x = area.x;
-                    for (i, label) in labels.iter().enumerate() {
-                        let w = format!("[ {label} ]").chars().count() as u16;
-                        if col >= x && col < x + w {
-                            activate(i, info);
-                            return EventResult::Consumed;
+                    {
+                        let iteration_items = labels.iter().enumerate();
+                        for (i, label) in iteration_items {
+                            let w = format!("[ {label} ]").chars().count() as u16;
+                            if col >= x && col < x + w {
+                                activate(i, info);
+                                return EventResult::Consumed;
+                            }
+                            x = x.saturating_add(w + 2);
                         }
-                        x = x.saturating_add(w + 2);
                     }
                     return EventResult::Consumed;
                 }
@@ -264,7 +268,7 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         if let Some(info) = &info_for_event {
                             cancel_oauth(&info.server_name);
                         }
-                        close_popup();
+                        crate::kit::popup_overlay::close_popup();
                         EventResult::Consumed
                     }
                     _ => EventResult::Ignored,
@@ -287,12 +291,12 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             if let Some(info) = &info_for_event {
                                 submit_oauth_callback(&info.server_name, code);
                             } else {
-                                close_popup();
+                                crate::kit::popup_overlay::close_popup();
                             }
                         } else {
                             // 授权码为空：localhost 回调路径由后台自动收码，
                             // 关闭 popup 等待完成事件。
-                            close_popup();
+                            crate::kit::popup_overlay::close_popup();
                         }
                         EventResult::Consumed
                     }
@@ -300,7 +304,7 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         if let Some(info) = &info_for_event {
                             cancel_oauth(&info.server_name);
                         }
-                        close_popup();
+                        crate::kit::popup_overlay::close_popup();
                         EventResult::Consumed
                     }
                     _ => EventResult::Ignored,
@@ -338,7 +342,7 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(i18n::tr("oauth-prompt")).fg(semantic.text.primary));
             lines.push(Line::from(""));
             // 完整授权链接按宽度换行展示（不截断），可经「复制链接」按钮复制
-            for url_line in wrap_text(&oauth.auth_url, 52) {
+            for url_line in crate::kit::text_util::wrap_text(&oauth.auth_url, 52) {
                 lines.push(Line::from(format!("  {url_line}")).fg(semantic.text.muted));
             }
             lines.push(Line::from(""));
@@ -364,12 +368,15 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 i18n::tr("oauth-btn-cancel"),
             ];
             let mut btn_line: Vec<Span<'_>> = Vec::new();
-            for (i, label) in labels.iter().enumerate() {
-                if i > 0 {
-                    btn_line.push(Span::raw("  "));
+            {
+                let iteration_items = labels.iter().enumerate();
+                for (i, label) in iteration_items {
+                    if i > 0 {
+                        btn_line.push(Span::raw("  "));
+                    }
+                    let text = format!("[ {label} ]");
+                    btn_line.push(Span::styled(text, btn_style(i)));
                 }
-                let text = format!("[ {label} ]");
-                btn_line.push(Span::styled(text, btn_style(i)));
             }
             lines.push(Line::from(btn_line));
             lines.push(Line::from(""));
@@ -434,3 +441,11 @@ fn open_auth_url_in_browser(url: &str) {
         tracing::warn!(%error, "OAuthPopup: 调用系统浏览器失败，用户可复制 URL");
     }
 }
+
+use peri_acp_types::event_data::OauthNeeded;
+
+use crate::kit::atoms::ACP_CLIENT_HANDLE;
+
+use crate::kit::atoms::LANG_VERSION;
+
+use crate::kit::atoms::OAUTH_INFO;

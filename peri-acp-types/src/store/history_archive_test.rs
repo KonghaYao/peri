@@ -1,6 +1,14 @@
-use super::*;
-use crate::context_archive::{build_catalog, ArchiveRoot};
+use crate::context_archive;
+use crate::context_archive::ArchiveRoot;
+use crate::messages::BaseMessage;
+use crate::messages::MessageId;
+use crate::projection::MessageProjectionDirective;
+use crate::projection::ProjectionAction;
 use crate::projection::{ArchiveGroupLink, ProjectionActionEntry, ProjectionTarget};
+use crate::store::history::HistoryError;
+use crate::store::MessageFlags;
+use crate::store::PersistedPayload;
+use std::collections::HashMap;
 
 #[test]
 fn provider_replay_cannot_be_exposed_as_archive_tool_text() {
@@ -16,7 +24,7 @@ fn provider_replay_cannot_be_exposed_as_archive_tool_text() {
     ] {
         let payload = PersistedPayload::Message(BaseMessage::ai(content));
         assert!(matches!(
-            build_catalog(
+            context_archive::build_catalog(
                 "session".into(),
                 "group".into(),
                 payload.id(),
@@ -27,7 +35,7 @@ fn provider_replay_cannot_be_exposed_as_archive_tool_text() {
         ));
     }
     let plain = PersistedPayload::Message(BaseMessage::ai("visible"));
-    let mut catalog = build_catalog(
+    let mut catalog = context_archive::build_catalog(
         "session".into(),
         "group".into(),
         plain.id(),
@@ -42,7 +50,7 @@ fn provider_replay_cannot_be_exposed_as_archive_tool_text() {
 
 #[test]
 fn test_archive_root_upgrade_before_old_anchor_keeps_the_complete_range() {
-    use crate::context_archive::coalesce_archive_roots;
+    use crate::context_archive;
     // IDs deliberately oppose canonical order: UUID comparisons are not history order.
     let first = MessageId::from(uuid::Uuid::from_u128(90));
     let last = MessageId::from(uuid::Uuid::from_u128(10));
@@ -53,13 +61,16 @@ fn test_archive_root_upgrade_before_old_anchor_keeps_the_complete_range() {
         last_anchor: anchor,
         committed_tail: tail,
     };
-    let merged = coalesce_archive_roots(vec![root(last), root(first)], &[first, last, tail]);
+    let merged = context_archive::coalesce_archive_roots(
+        vec![root(last), root(first)],
+        &[first, last, tail],
+    );
     assert_eq!(merged.len(), 1);
     assert_eq!(merged[0].first_anchor, first);
     assert_eq!(merged[0].last_anchor, last);
     assert_eq!(merged[0].committed_tail, tail);
     let next = MessageId::new();
-    let merged = coalesce_archive_roots(
+    let merged = context_archive::coalesce_archive_roots(
         vec![
             merged[0].clone(),
             ArchiveRoot {
@@ -93,7 +104,7 @@ fn archived_history() -> (Vec<PersistedPayload>, HashMap<MessageId, MessageFlags
         PersistedPayload::Message(result),
     ];
     let anchor = payloads[1].id();
-    let catalog = build_catalog(
+    let catalog = context_archive::build_catalog(
         "source".into(),
         "group".into(),
         anchor,
@@ -187,7 +198,13 @@ fn test_archive_fork_rewrites_scope_all_members_and_content_identity() {
         .archive_catalog
         .as_ref()
         .unwrap();
-    let forked = remap_fork_history(&"target".into(), &payloads, &flags, MessageId::new).unwrap();
+    let forked = crate::store::history::remap_fork_history(
+        &"target".into(),
+        &payloads,
+        &flags,
+        MessageId::new,
+    )
+    .unwrap();
     let new_anchor = forked.payloads[1].id();
     let projection = forked.flags[&new_anchor].projection.as_ref().unwrap();
     let catalog = projection.archive_catalog.as_ref().unwrap();
@@ -216,8 +233,13 @@ fn test_archive_fork_rewrites_scope_all_members_and_content_identity() {
 #[test]
 fn test_archive_fork_rejects_missing_canonical_dependencies() {
     let (payloads, flags) = archived_history();
-    let error =
-        remap_fork_history(&"target".into(), &payloads[..1], &flags, MessageId::new).unwrap_err();
+    let error = crate::store::history::remap_fork_history(
+        &"target".into(),
+        &payloads[..1],
+        &flags,
+        MessageId::new,
+    )
+    .unwrap_err();
     assert!(matches!(error, HistoryError::InvalidArchive { .. }));
 }
 
@@ -250,10 +272,11 @@ fn test_archive_fork_rejects_unknown_or_corrupt_source_before_allocating_ids() {
             }
             _ => unreachable!(),
         }
-        let error = remap_fork_history(&"target".into(), &source, &flags, || {
-            panic!("invalid {corruption} must fail before allocating target identities")
-        })
-        .unwrap_err();
+        let error =
+            crate::store::history::remap_fork_history(&"target".into(), &source, &flags, || {
+                panic!("invalid {corruption} must fail before allocating target identities")
+            })
+            .unwrap_err();
         assert!(
             matches!(error, HistoryError::InvalidArchive { id } if id == anchor),
             "{corruption} must not be reissued as a valid target archive"
@@ -263,7 +286,8 @@ fn test_archive_fork_rejects_unknown_or_corrupt_source_before_allocating_ids() {
 
 #[test]
 fn test_archive_fork_rejects_target_scope_that_exceeds_complete_metadata_budget() {
-    use crate::context_archive::{validate_projection_metadata, ARCHIVE_MAX_METADATA_BYTES};
+    use crate::context_archive;
+    use crate::context_archive::ARCHIVE_MAX_METADATA_BYTES;
     let (payloads, mut flags) = archived_history();
     let anchor = payloads[1].id();
     let projection = flags.get_mut(&anchor).unwrap().projection.as_mut().unwrap();
@@ -275,13 +299,23 @@ fn test_archive_fork_rejects_target_scope_that_exceeds_complete_metadata_budget(
         serde_json::to_vec(projection).unwrap().len(),
         ARCHIVE_MAX_METADATA_BYTES
     );
-    validate_projection_metadata(projection).unwrap();
-    let same_size = remap_fork_history(&"target".into(), &payloads, &flags, MessageId::new);
+    context_archive::validate_projection_metadata(projection).unwrap();
+    let same_size = crate::store::history::remap_fork_history(
+        &"target".into(),
+        &payloads,
+        &flags,
+        MessageId::new,
+    );
     assert!(
         same_size.is_ok(),
         "equal-width source/target scopes still fit"
     );
-    let longer = remap_fork_history(&"target".repeat(20), &payloads, &flags, MessageId::new);
+    let longer = crate::store::history::remap_fork_history(
+        &"target".repeat(20),
+        &payloads,
+        &flags,
+        MessageId::new,
+    );
     assert!(
         matches!(longer, Err(HistoryError::InvalidArchive { .. })),
         "target scope must not make the stored complete directive unreadable"
@@ -292,7 +326,7 @@ fn test_archive_fork_rejects_target_scope_that_exceeds_complete_metadata_budget(
 fn test_rewind_removing_anchor_revokes_entire_surviving_exchange() {
     let (payloads, flags) = archived_history();
     let kept = vec![(payloads[0].id(), flags[&payloads[0].id()].clone(), false)];
-    let updates = rewind_projection_updates(&kept, &[]);
+    let updates = crate::history_projection::rewind_projection_updates(&kept, &[]);
     assert_eq!(updates.len(), 1);
     let projection = updates[0].1.projection.as_ref().unwrap();
     assert!(projection.entries.is_empty());
@@ -317,7 +351,7 @@ fn test_rewind_removing_replacement_dependency_revokes_members_and_catalog() {
         .iter()
         .map(|p| (p.id(), flags[&p.id()].clone(), false))
         .collect::<Vec<_>>();
-    let updates = rewind_projection_updates(&kept, &[]);
+    let updates = crate::history_projection::rewind_projection_updates(&kept, &[]);
     assert_eq!(updates.len(), 2);
     for (_, flags) in updates {
         let p = flags.projection.unwrap();
@@ -348,7 +382,8 @@ fn test_rewind_full_exclusion_retains_valid_catalog_identity() {
         .iter()
         .map(|p| (p.id(), flags[&p.id()].clone(), false))
         .collect::<Vec<_>>();
-    let updates = rewind_projection_updates(&kept, &[payloads[0].id(), anchor]);
+    let updates =
+        crate::history_projection::rewind_projection_updates(&kept, &[payloads[0].id(), anchor]);
     let restored = &updates.iter().find(|(id, _)| *id == anchor).unwrap().1;
     assert!(!restored.excluded);
     assert_eq!(
@@ -374,7 +409,7 @@ fn test_rewind_shared_ai_preserves_other_complete_archive_group() {
     ));
     let a = PersistedPayload::Message(BaseMessage::tool_result("a", "a data"));
     let b = PersistedPayload::Message(BaseMessage::tool_result("b", "b data"));
-    let ca = build_catalog(
+    let ca = context_archive::build_catalog(
         "source".into(),
         "a".into(),
         a.id(),
@@ -382,7 +417,7 @@ fn test_rewind_shared_ai_preserves_other_complete_archive_group() {
         "a completed".into(),
     )
     .unwrap();
-    let cb = build_catalog(
+    let cb = context_archive::build_catalog(
         "source".into(),
         "b".into(),
         b.id(),
@@ -435,7 +470,7 @@ fn test_rewind_shared_ai_preserves_other_complete_archive_group() {
             false,
         ),
     ];
-    let updates = rewind_projection_updates(&kept, &[]);
+    let updates = crate::history_projection::rewind_projection_updates(&kept, &[]);
     let ai_restored = updates
         .iter()
         .find(|(id, _)| *id == ai.id())
@@ -465,7 +500,7 @@ fn test_rewind_shared_ai_preserves_other_complete_archive_group() {
             ..Default::default()
         },
     );
-    let complete_fork = remap_fork_history(
+    let complete_fork = crate::store::history::remap_fork_history(
         &"target".into(),
         &[ai.clone(), a.clone(), b.clone()],
         &complete_flags,
@@ -483,7 +518,7 @@ fn test_rewind_shared_ai_preserves_other_complete_archive_group() {
     assert!(
         matches!(&mapped_ai.entries[1].action,ProjectionAction::OmitToolExchange {anchor_message_id,..} if *anchor_message_id==complete_fork.payloads[2].id())
     );
-    let forked = remap_fork_history(
+    let forked = crate::store::history::remap_fork_history(
         &"target".into(),
         &[ai.clone(), a.clone()],
         &kept.iter().map(|(id, f, _)| (*id, f.clone())).collect(),
@@ -510,7 +545,7 @@ fn test_rewind_missing_member_action_revokes_entire_omission_group() {
         .iter()
         .map(|p| (p.id(), flags[&p.id()].clone(), false))
         .collect::<Vec<_>>();
-    let updates = rewind_projection_updates(&kept, &[]);
+    let updates = crate::history_projection::rewind_projection_updates(&kept, &[]);
     assert!(updates
         .iter()
         .all(|(_, f)| f.projection.as_ref().unwrap().entries.is_empty()));
@@ -551,7 +586,7 @@ fn test_fork_clears_typed_archive_read_preview_without_rewriting_canonical_input
             ..Default::default()
         },
     )]);
-    let forked = remap_fork_history(
+    let forked = crate::store::history::remap_fork_history(
         &"target".into(),
         &[PersistedPayload::Message(message)],
         &flags,
@@ -575,11 +610,12 @@ fn test_archive_fork_rejects_active_recovery_only_payload_before_allocating_ids(
         flag.projection.as_mut().unwrap().recovery_only = true;
     }
     let mut allocations = 0;
-    let error = remap_fork_history(&"target".into(), &payloads, &flags, || {
-        allocations += 1;
-        MessageId::new()
-    })
-    .unwrap_err();
+    let error =
+        crate::store::history::remap_fork_history(&"target".into(), &payloads, &flags, || {
+            allocations += 1;
+            MessageId::new()
+        })
+        .unwrap_err();
     assert_eq!(
         error,
         HistoryError::InvalidArchive {

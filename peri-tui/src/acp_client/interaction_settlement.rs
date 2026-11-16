@@ -2,7 +2,8 @@
 
 use std::sync::{Arc, Weak};
 
-use peri_acp::transport::{AcpTransport, mpsc::MpscClientTransport};
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::mpsc::MpscClientTransport;
 use tokio::sync::mpsc;
 
 use super::client::AcpNotification;
@@ -10,7 +11,6 @@ use super::interaction_lifecycle::{
     ClaimCause, ClaimedInteraction, InteractionExpiryReason, InteractionUiOutcome,
     ReverseInteractionKind,
 };
-use super::interaction_response::{elicitation_cancel_response, permission_cancelled_response};
 
 pub fn spawn_settlement_worker(
     transport: Weak<MpscClientTransport>,
@@ -25,8 +25,12 @@ pub fn spawn_settlement_worker(
                 }
             } else if let Some(transport) = transport.upgrade() {
                 let response = match claimed.owner.kind {
-                    ReverseInteractionKind::Permission => permission_cancelled_response(),
-                    ReverseInteractionKind::Elicitation => elicitation_cancel_response(),
+                    ReverseInteractionKind::Permission => {
+                        super::interaction_response::permission_cancelled_response()
+                    }
+                    ReverseInteractionKind::Elicitation => {
+                        super::interaction_response::elicitation_cancel_response()
+                    }
                 };
                 match transport
                     .send_response(claimed.request_id, Ok(response))
@@ -47,7 +51,10 @@ pub fn spawn_settlement_worker(
                     reason: InteractionExpiryReason::TransportTerminal,
                 }
             };
-            if let Some(tx) = notification_tx.lock().unwrap().as_ref()
+            if let Some(tx) = notification_tx
+                .lock()
+                .expect("notification_tx mutex must not be poisoned")
+                .as_ref()
                 && let Some(tx) = tx.upgrade()
             {
                 match tx.try_send(AcpNotification::InteractionTerminal {
@@ -71,6 +78,7 @@ pub fn spawn_settlement_worker(
     });
 }
 
+#[must_use]
 pub fn expiry_for_cause(cause: ClaimCause) -> InteractionExpiryReason {
     match cause {
         ClaimCause::BridgeReject => InteractionExpiryReason::BridgeRejected,

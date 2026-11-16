@@ -1,6 +1,9 @@
 //! inherited source 的 Host 侧身份规范化与返回结果校验。
 
-use super::*;
+use crate::transport::types::AcpError;
+use peri_acp_types::history_window::HistoryInheritedSnapshot;
+use peri_acp_types::history_window::HistorySource;
+use peri_acp_types::session_resources::HistoryWindowRows;
 
 /// 将请求里的 inherited source 与 bounds 的冻结快照对齐；own 原样返回。
 pub(super) fn canonical_source(
@@ -14,20 +17,26 @@ pub(super) fn canonical_source(
             ancestor_thread_id,
         } => {
             let Some(snapshot) = snapshot else {
-                return Err(anchor_unavailable(
-                    "inherited prefix is absent in this frozen session",
-                ));
+                return Err(
+                    crate::host::history_window::history_window_coordinator::anchor_unavailable(
+                        "inherited prefix is absent in this frozen session",
+                    ),
+                );
             };
             if snapshot.snapshot_id != *frozen_snapshot_id {
-                return Err(snapshot_mismatch(
-                    "inherited snapshot id does not match the frozen prefix",
-                ));
+                return Err(
+                    crate::host::history_window::history_window_coordinator::snapshot_mismatch(
+                        "inherited snapshot id does not match the frozen prefix",
+                    ),
+                );
             }
             if let Some(expected) = ancestor_thread_id {
                 if snapshot.ancestor_thread_id.as_ref() != Some(expected) {
-                    return Err(snapshot_mismatch(
-                        "inherited ancestor identity does not match",
-                    ));
+                    return Err(
+                        crate::host::history_window::history_window_coordinator::snapshot_mismatch(
+                            "inherited ancestor identity does not match",
+                        ),
+                    );
                 }
             }
             Ok(HistorySource::inherited_with_ancestor(
@@ -48,14 +57,20 @@ pub(super) fn validate_rows(
             frozen_snapshot_id, ..
         } => {
             if rows.inherited_snapshot_id.as_deref() != Some(frozen_snapshot_id) {
-                return Err(snapshot_mismatch(
-                    "inherited snapshot changed during the window read",
-                ));
+                return Err(
+                    crate::host::history_window::history_window_coordinator::snapshot_mismatch(
+                        "inherited snapshot changed during the window read",
+                    ),
+                );
             }
         }
         HistorySource::Own => {
             if rows.inherited_snapshot_id.is_some() || !rows.inherited_entries.is_empty() {
-                return Err(snapshot_mismatch("own window returned inherited entries"));
+                return Err(
+                    crate::host::history_window::history_window_coordinator::snapshot_mismatch(
+                        "own window returned inherited entries",
+                    ),
+                );
             }
         }
     }

@@ -1,6 +1,12 @@
 //! 真实 handler → intent → scheduler 回归，不使用会强制补发的 dispatch_and_notify。
-use super::*;
-use crate::kit::stream_data::{TuiReasoningChunk, TuiTextChunk};
+use super::AcpEventData;
+use super::BridgeState;
+use super::PUBLICATION_INTERVAL;
+use super::PublicationScheduler;
+use super::SessionPhase;
+use super::acp_events;
+use super::atoms;
+
 use crate::kit::tui_render_unit::{FoldKey, FoldState, TuiRenderUnit};
 use serial_test::serial;
 
@@ -30,7 +36,7 @@ impl ModeGuard {
     fn set(mode: &str) {
         atoms::TUI_CONFIG_HANDLE
             .get()
-            .unwrap()
+            .expect("set: fixture must contain the requested entry")
             .write()
             .streaming_mode = Some(mode.into());
     }
@@ -39,7 +45,7 @@ impl Drop for ModeGuard {
     fn drop(&mut self) {
         atoms::TUI_CONFIG_HANDLE
             .get()
-            .unwrap()
+            .expect("drop: fixture must contain the requested entry")
             .write()
             .streaming_mode = self.mode.take();
         atoms::VIEW_MODELS.set(self.view.clone());
@@ -49,7 +55,7 @@ impl Drop for ModeGuard {
 }
 
 fn state() -> BridgeState {
-    let state = synthetic_scheduler_state();
+    let state = super::synthetic_scheduler_state();
     atoms::FOLD_OVERRIDES.state().write().clear();
     atoms::VIEW_MODELS.set(Default::default());
     state
@@ -90,7 +96,7 @@ fn test_publication_main_stream_survives_projection_read() {
         let mut state = state();
         let mut scheduler = PublicationScheduler::default();
         let now = peri_time::Instant::now();
-        reset_perf_counters();
+        super::reset_perf_counters();
         for _ in 0..100 {
             deliver(
                 &mut state,
@@ -100,7 +106,11 @@ fn test_publication_main_stream_survives_projection_read() {
             );
         }
         assert_eq!(state.generation, 1, "首块之外不得逐 chunk 发布");
-        assert_eq!(perf_counters().projections, 1, "view_count 不应提前物化");
+        assert_eq!(
+            super::perf_counters().projections,
+            1,
+            "view_count 不应提前物化"
+        );
         assert_eq!(
             state.current_turn.view_model_count(),
             state.current_turn.view_models().len()
@@ -115,7 +125,7 @@ fn test_publication_main_stream_survives_projection_read() {
         };
         assert_eq!(
             if reasoning {
-                &b.reasoning.as_ref().unwrap().text
+                &b.reasoning.as_ref().expect("publication main stream survives projection read: the fixture must retain its expected variant").text
             } else {
                 &b.text
             },
@@ -137,7 +147,7 @@ fn test_publication_subagent_stream_and_block_coalesce() {
                 .start_subagent("child".into(), "child".into(), None);
             let mut scheduler = PublicationScheduler::default();
             let now = peri_time::Instant::now();
-            reset_perf_counters();
+            super::reset_perf_counters();
             for _ in 0..100 {
                 deliver(
                     &mut state,
@@ -147,7 +157,7 @@ fn test_publication_subagent_stream_and_block_coalesce() {
                 );
             }
             assert_eq!(state.generation, 1);
-            let first_projection_count = perf_counters().projections;
+            let first_projection_count = super::perf_counters().projections;
             assert_eq!(first_projection_count, 2, "首块仅投影主/子 turn 各一次");
             assert!(scheduler.fire_at(&mut state, now + PUBLICATION_INTERVAL));
             assert_eq!(state.generation, 2);
@@ -160,7 +170,7 @@ fn test_publication_subagent_stream_and_block_coalesce() {
             };
             assert_eq!(
                 if reasoning {
-                    &b.reasoning.as_ref().unwrap().text
+                    &b.reasoning.as_ref().expect("publication subagent stream and block coalesce: the fixture must retain its expected variant").text
                 } else {
                     &b.text
                 },
@@ -242,7 +252,7 @@ fn test_publication_receiver_close_flushes_even_after_explicit_projection() {
     );
     state.current_turn.view_models();
     let mut reset = atoms::BRIDGE_RESET_COUNTER.get();
-    flush_on_receiver_close(&mut state, &mut scheduler, &mut reset);
+    super::flush_on_receiver_close(&mut state, &mut scheduler, &mut reset);
     assert_eq!(state.generation, 1);
     assert!(!scheduler.unpublished);
 }
@@ -270,7 +280,7 @@ fn test_publication_loading_reset_flushes_and_cancels_deadline() {
     let TuiRenderUnit::TuiAssistantBubble(b) = &snapshot.items[0] else {
         panic!("应保留取消前已接收的推理")
     };
-    let reasoning = b.reasoning.as_ref().unwrap();
+    let reasoning = b.reasoning.as_ref().expect("publication loading reset flushes and cancels deadline: fixture must have the expected variant");
     assert_eq!(reasoning.text, "ab");
     assert!(!reasoning.is_running);
     assert!(reasoning.started_at.is_none());
@@ -414,11 +424,11 @@ fn test_publication_stable_replay_history_has_zero_fold_and_hash_work() {
             .write()
             .insert(FoldKey::Tool("tool-0".into()), FoldState::Expanded);
         acp_events::push_view_models(&mut state);
-        reset_perf_counters();
+        super::reset_perf_counters();
         for _ in 0..20 {
             acp_events::push_view_models(&mut state);
         }
-        let counters = perf_counters();
+        let counters = super::perf_counters();
         assert_eq!(
             (
                 counters.fold_pass_writes,
@@ -517,8 +527,8 @@ fn test_publication_archived_duration_is_stable_across_phase_and_override() {
             panic!("应归档回复")
         };
         assert!(old.started_at.is_none());
-        assert!(old.reasoning.as_ref().unwrap().started_at.is_none());
-        assert!(!old.reasoning.as_ref().unwrap().is_running);
+        assert!(old.reasoning.as_ref().expect("publication archived duration is stable across phase and override: the fixture must retain its expected variant").started_at.is_none());
+        assert!(!old.reasoning.as_ref().expect("publication archived duration is stable across phase and override: the fixture must retain its expected variant").is_running);
         state.phase = SessionPhase::PromptRunning;
         atoms::FOLD_OVERRIDES
             .state()
@@ -534,3 +544,7 @@ fn test_publication_archived_duration_is_stable_across_phase_and_override() {
         );
     }
 }
+
+use crate::kit::stream_data::TuiReasoningChunk;
+
+use crate::kit::stream_data::TuiTextChunk;

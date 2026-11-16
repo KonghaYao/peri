@@ -1,7 +1,8 @@
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
-use langfuse_client::types::{session::SessionBody, TraceBody};
+use langfuse_client::types::session::SessionBody;
+use langfuse_client::types::TraceBody;
 use langfuse_client::{GenerationBody, IngestionEvent, LangfuseClient, SpanBody};
 
 /// 默认正文编码是 gzip（契约 §5）：wire 断言针对解压后的标准 OTLP JSON，

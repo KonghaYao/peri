@@ -1,9 +1,12 @@
-use super::*;
+use crate::host::requests::tests::MockTransport;
+
+use std::sync::Arc;
 
 #[tokio::test(flavor = "current_thread")]
 async fn user_input_subscription_lag_republishes_current_snapshot() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let (cfg, _, sid) = make_user_input_session(&tmp).await;
+    let (cfg, _, sid) =
+        crate::host::requests::tests::user_input_tests::make_user_input_session(&tmp).await;
     let transport = Arc::new(MockTransport::default());
     let wire: Arc<dyn crate::transport::AcpTransport> = transport.clone();
     let mailbox = crate::host::user_input::ensure_mailbox(&sid, &cfg, &wire)

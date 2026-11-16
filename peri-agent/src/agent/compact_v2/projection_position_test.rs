@@ -3,9 +3,16 @@
 //! 这些测试直接检查最终渲染数组的角色、顺序与配对：收据是派生历史数据，
 //! 必须留在原步骤附近，不能越过后续真实用户消息。
 
-use super::*;
+use crate::agent::compact_v2::projection::MessageProjectionDirective;
+use crate::agent::compact_v2::projection::ProjectionAction;
+use crate::agent::compact_v2::projection::ProjectionActionEntry;
+use crate::agent::compact_v2::projection::ProjectionTarget;
+use crate::agent::compact_v2::projection::ProviderCapabilities;
 use crate::messages::{BaseMessage, ContentBlock, MessageContent, MessageId, ToolCallRequest};
-use peri_acp_types::context_archive::{build_catalog, ArchiveCatalog, ArchiveRoot};
+use crate::session::transcript::MessageTranscript;
+
+use peri_acp_types::context_archive::ArchiveCatalog;
+use peri_acp_types::context_archive::ArchiveRoot;
 use peri_acp_types::store::PersistedPayload;
 
 fn message_id(value: u128) -> MessageId {
@@ -68,14 +75,14 @@ fn catalog(
         .iter()
         .map(|message| PersistedPayload::Message((*message).clone()))
         .collect::<Vec<_>>();
-    build_catalog(
+    peri_acp_types::context_archive::build_catalog(
         "session".into(),
         group.into(),
         anchor,
         &payloads,
         receipt.into(),
     )
-    .unwrap()
+    .expect("the build catalog fixture result is required for this assertion")
 }
 
 fn directive(
@@ -119,7 +126,8 @@ fn rendered(
     actions: &[ProjectionActionEntry],
     caps: &ProviderCapabilities,
 ) -> Vec<BaseMessage> {
-    render_llm_view(transcript, actions, caps).expect("projection must render")
+    crate::agent::compact_v2::projection::render_llm_view(transcript, actions, caps)
+        .expect("projection must render")
 }
 
 fn receipt_index(messages: &[BaseMessage], marker: &str) -> usize {
@@ -466,9 +474,11 @@ fn cold_restore_and_provider_switch_keep_receipt_positions() {
         .collect::<std::collections::HashMap<_, _>>();
     let mut restored = MessageTranscript::new().with_own_payloads(payloads);
     restored.set_flags_batch(flags);
-    let messages =
-        super::projection::render_persisted_llm_view(&restored, &ProviderCapabilities::openai())
-            .expect("cold restore must render the committed projection");
+    let messages = crate::agent::compact_v2::projection::render_persisted_llm_view(
+        &restored,
+        &ProviderCapabilities::openai(),
+    )
+    .expect("cold restore must render the committed projection");
     assert!(receipt_index(&messages, "restored receipt") < text_index(&messages, "NEW TASK"));
     assert_eq!(
         messages

@@ -1,5 +1,10 @@
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::CurrentTurn;
+use super::SessionPhase;
+use super::serial;
 
+#[must_use]
 fn make_state(phase: SessionPhase, variant: u8) -> BridgeState {
     BridgeState {
         child_runs: Default::default(),
@@ -39,7 +44,7 @@ fn test_subagent_stopped_after_turn_done_does_not_set_loading() {
     let mut state = make_state(SessionPhase::Idle, 0);
 
     // 模拟 TurnDone：归档 + 重置 phase/loading
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert_eq!(
         state.phase,
         SessionPhase::Idle,
@@ -51,7 +56,7 @@ fn test_subagent_stopped_after_turn_done_does_not_set_loading() {
     );
 
     // SubagentStopped 到达——不应重新激活 loading
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "bg-agent-1".into(),
@@ -75,7 +80,7 @@ fn test_subagent_stopped_after_turn_suspended_does_not_set_loading() {
     let mut state = make_state(SessionPhase::Idle, 0);
 
     // 模拟 TurnSuspended：归档 + 重置 phase/loading
-    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
     assert_eq!(
         state.phase,
         SessionPhase::Idle,
@@ -87,7 +92,7 @@ fn test_subagent_stopped_after_turn_suspended_does_not_set_loading() {
     );
 
     // SubagentStopped 到达——不应重新激活 loading
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "bg-agent-2".into(),
@@ -114,7 +119,7 @@ fn test_bg_subagent_chunk_after_turn_suspended_does_not_leak_to_main() {
     let mut state = make_state(SessionPhase::Idle, 0);
 
     // bg subagent 启动（注册 BG_AGENT_IDS + current_turn 组）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "bg-agent-1".into(),
@@ -130,14 +135,14 @@ fn test_bg_subagent_chunk_after_turn_suspended_does_not_leak_to_main() {
 
     // 主 turn 挂起：current_turn.reset() 清除 SubAgentAccumulator（既有语义，
     // flush_current_turn 的 running-subagent 守卫覆盖不到 TurnSuspended）
-    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
     assert!(
         state.current_turn.subagent_ids().is_empty(),
         "TurnSuspended 后 current_turn 组应被清空（前置条件）"
     );
 
     // bg 继续流式输出——不得外溢到主文本/主推理
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "bg leaked text".into(),
@@ -145,7 +150,7 @@ fn test_bg_subagent_chunk_after_turn_suspended_does_not_leak_to_main() {
             agent_id: Some("bg-agent-1".into()),
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ReasoningChunk(crate::kit::stream_data::TuiReasoningChunk {
             text: "bg leaked reasoning".into(),
@@ -165,7 +170,7 @@ fn test_bg_subagent_chunk_after_turn_suspended_does_not_leak_to_main() {
     );
 
     // 对照组：真实根事件没有 child sourceAgentId，仍正常进入主分支。
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "main reply".into(),
@@ -193,7 +198,7 @@ fn test_bg_events_after_turn_suspended_keep_idle_loading() {
     let mut state = make_state(SessionPhase::Idle, 0);
 
     // 前置：bg 启动（注册 BG_AGENT_IDS + SubAgentGroup）→ 主 turn 挂起
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "bg-agent-1".into(),
@@ -202,7 +207,7 @@ fn test_bg_events_after_turn_suspended_keep_idle_loading() {
             parent_tool_call_id: None,
         },
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
     assert_eq!(
         state.phase,
         SessionPhase::Idle,
@@ -210,7 +215,7 @@ fn test_bg_events_after_turn_suspended_keep_idle_loading() {
     );
 
     // bg 运行期流式事件全链路到达——phase 不得离开 Idle，is_loading 保持 false
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "bg text".into(),
@@ -228,7 +233,7 @@ fn test_bg_events_after_turn_suspended_keep_idle_loading() {
         "bg TextChunk 后 is_loading 应保持 false"
     );
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ReasoningChunk(crate::kit::stream_data::TuiReasoningChunk {
             text: "bg reasoning".into(),
@@ -242,7 +247,7 @@ fn test_bg_events_after_turn_suspended_keep_idle_loading() {
         "bg ReasoningChunk 不得把 phase 拉回 PromptRunning"
     );
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
             agent_id: Some("bg-agent-1".into()),
@@ -260,7 +265,7 @@ fn test_bg_events_after_turn_suspended_keep_idle_loading() {
         "bg ToolStarted 不得把 phase 拉回 PromptRunning"
     );
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
             agent_id: Some("bg-agent-1".into()),
@@ -280,7 +285,7 @@ fn test_bg_events_after_turn_suspended_keep_idle_loading() {
     );
 
     // 对照组 1：主 agent 自身 chunk 仍正常点亮 phase（从 Idle → PromptRunning）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "main reply".into(),
@@ -296,7 +301,7 @@ fn test_bg_events_after_turn_suspended_keep_idle_loading() {
 
     // 对照组 2：sync subagent（不在 BG_AGENT_IDS）的 chunk 路由后仍保持
     // PromptRunning——bg 判定不得误伤 sync subagent。
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "sync-1".into(),
@@ -305,7 +310,7 @@ fn test_bg_events_after_turn_suspended_keep_idle_loading() {
             parent_tool_call_id: None,
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "sync text".into(),
@@ -332,7 +337,7 @@ fn test_subagent_stopped_after_subagent_started_keeps_loading() {
     let mut state = make_state(SessionPhase::Idle, 0);
 
     // SubagentStarted 设置 phase=PromptRunning
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "sync-agent-1".into(),
@@ -352,7 +357,7 @@ fn test_subagent_stopped_after_subagent_started_keeps_loading() {
     );
 
     // SubagentStopped 到达——应保持 loading
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "sync-agent-1".into(),
@@ -376,7 +381,7 @@ fn test_prompt_submitted_sets_loading() {
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     let mut state = make_state(SessionPhase::Idle, 0);
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("rid-1".into()),
@@ -404,7 +409,7 @@ fn test_loading_reset_event_resets_phase() {
 
     let mut state = make_state(SessionPhase::Idle, 1);
     // 前置：PromptSubmitted 使 bridge 进入 PromptRunning，ACP_STATE 派生 loading
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("r1".into()),
@@ -416,7 +421,7 @@ fn test_loading_reset_event_resets_phase() {
     );
 
     // 取消：LocalLoadingReset → phase 复位 + is_loading=false
-    dispatch_and_notify(&mut state, &AcpEventData::LocalLoadingReset);
+    super::dispatch_and_notify(&mut state, &AcpEventData::LocalLoadingReset);
 
     assert_eq!(
         state.phase,
@@ -429,7 +434,7 @@ fn test_loading_reset_event_resets_phase() {
     );
 
     // 幂等：phase 已 Idle 时再次 dispatch 无副作用
-    dispatch_and_notify(&mut state, &AcpEventData::LocalLoadingReset);
+    super::dispatch_and_notify(&mut state, &AcpEventData::LocalLoadingReset);
     assert_eq!(state.phase, SessionPhase::Idle, "幂等：phase 保持 Idle");
     assert!(
         !ACP_STATE.state().read().is_loading,
@@ -448,7 +453,7 @@ fn test_loading_reset_then_turn_interrupted_keeps_idle() {
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
 
     let mut state = make_state(SessionPhase::Idle, 1);
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("r1".into()),
@@ -457,11 +462,11 @@ fn test_loading_reset_then_turn_interrupted_keeps_idle() {
     assert!(ACP_STATE.state().read().is_loading);
 
     // 取消：LocalLoadingReset
-    dispatch_and_notify(&mut state, &AcpEventData::LocalLoadingReset);
+    super::dispatch_and_notify(&mut state, &AcpEventData::LocalLoadingReset);
     assert_eq!(state.phase, SessionPhase::Idle);
 
     // 服务端取消收尾：TurnInterrupted（request_id 配对 → 非 stale）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "user-cancelled".into(),
@@ -487,7 +492,7 @@ fn test_turn_suspended_keeps_running_subagent() {
     crate::kit::atoms::init_atoms();
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     let mut state = make_state(SessionPhase::PromptRunning, 0);
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "sync-1".into(),
@@ -498,14 +503,14 @@ fn test_turn_suspended_keeps_running_subagent() {
     );
     assert!(state.current_turn.has_running_subagent());
 
-    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
     assert!(
         state.current_turn.has_running_subagent(),
         "挂起后运行中的 subagent 必须保留"
     );
     assert_eq!(state.current_turn.subagent_ids(), vec!["sync-1"]);
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "sync-1".into(),
@@ -526,7 +531,7 @@ fn test_stale_interrupt_keeps_running_subagent() {
     let mut state = make_state(SessionPhase::PromptRunning, 0);
     state.turn_generation = 2;
     state.last_prompt_generation = 1;
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "sync-1".into(),
@@ -536,7 +541,7 @@ fn test_stale_interrupt_keeps_running_subagent() {
         },
     );
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "stale".into(),
@@ -559,7 +564,7 @@ fn test_cancel_interrupt_keeps_running_subagent() {
     let mut state = make_state(SessionPhase::PromptRunning, 0);
     state.turn_generation = 1;
     state.last_prompt_generation = 1;
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "sync-1".into(),
@@ -569,7 +574,7 @@ fn test_cancel_interrupt_keeps_running_subagent() {
         },
     );
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "user-cancelled".into(),
@@ -582,3 +587,5 @@ fn test_cancel_interrupt_keeps_running_subagent() {
     );
     assert_eq!(state.current_turn.subagent_ids(), vec!["sync-1"]);
 }
+
+use crate::kit::atoms::{ACP_STATE, BG_AGENT_IDS, VIEW_MODELS, ViewModelsSnapshot};

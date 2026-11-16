@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
 
-use super::{LangfuseError, OtelSpan};
+use super::LangfuseError;
+use crate::types::otlp::OtelSpan;
 
 pub(super) fn conversion_error(reason: &'static str) -> LangfuseError {
     LangfuseError::IngestionApi(format!("OTLP conversion: {reason}"))

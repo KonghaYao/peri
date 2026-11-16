@@ -2,10 +2,9 @@
 //! 原子 take、epoch 代际失效（用户新 prompt 清除未运行的续跑）、
 //! cancel race 兜底 eligibility、取消续跑不 arm、dispatch 前 Defer 确认。
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use peri_acp_types::interaction::{
     ApprovalDecision, InteractionContext, InteractionResponse, TrustedInteractionOwner,
@@ -15,11 +14,7 @@ use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use peri_acp_types::tasks::BgTaskKind;
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    cancel_arms_continuation, cancel_should_schedule_continuation, continuation_dispatchable,
-    continuation_still_valid, recv_until_shutdown, restore_continuation_armed,
-    take_continuation_for_request, take_continuation_if_armed, SessionState,
-};
+use super::SessionState;
 use crate::session::executor::ContinuationRequest;
 
 /// Host 程序化审批归属（与生产 `SCHEDULED_TRIGGER_NAMESPACE` 同形）。
@@ -127,7 +122,7 @@ fn test_mq_steering_during_in_flight_sets_pending() {
         recovery: false,
     };
     assert!(
-        take_continuation_for_request(&mut state, &req).is_none(),
+        super::take_continuation_for_request(&mut state, &req).is_none(),
         "in_flight 时不应立即调度"
     );
     assert!(
@@ -143,21 +138,21 @@ fn test_take_only_agent_kind_runs_continuation() {
 
     // shell 完成：即使标记已置位也不触发，标记保持
     assert!(
-        take_continuation_if_armed(&mut state, BgTaskKind::Shell).is_none(),
+        super::take_continuation_if_armed(&mut state, BgTaskKind::Shell).is_none(),
         "bg shell 完成不得触发续跑"
     );
     assert!(state.continuation_armed, "shell 完成不应消费取消标记");
 
     // agent 完成：原子 take，返回 epoch
     assert_eq!(
-        take_continuation_if_armed(&mut state, BgTaskKind::Agent),
+        super::take_continuation_if_armed(&mut state, BgTaskKind::Agent),
         Some(0)
     );
     assert!(!state.continuation_armed, "take 后标记必须清除");
 
     // 同轮次后续 agent 完成：标记已清除，不再重复续跑（每 session coalesce）
     assert!(
-        take_continuation_if_armed(&mut state, BgTaskKind::Agent).is_none(),
+        super::take_continuation_if_armed(&mut state, BgTaskKind::Agent).is_none(),
         "同一取消轮次只运行一次续跑"
     );
 }
@@ -166,7 +161,7 @@ fn test_take_only_agent_kind_runs_continuation() {
 #[test]
 fn test_take_skips_when_not_armed() {
     let mut state = make_session_state(false, 3);
-    assert!(take_continuation_if_armed(&mut state, BgTaskKind::Agent).is_none());
+    assert!(super::take_continuation_if_armed(&mut state, BgTaskKind::Agent).is_none());
     assert!(!state.continuation_armed);
 }
 
@@ -179,7 +174,8 @@ fn test_epoch_invalidation_clears_queued_continuation() {
     let mut state = make_session_state(true, 0);
 
     // scheduler 原子 take（记录 epoch=0）
-    let epoch = take_continuation_if_armed(&mut state, BgTaskKind::Agent).expect("armed 应可 take");
+    let epoch =
+        super::take_continuation_if_armed(&mut state, BgTaskKind::Agent).expect("armed 应可 take");
 
     // 用户显式新 prompt：清除标记 + 递增代际（dispatch_prompt_turn 的行为）
     state.continuation_armed = false;
@@ -187,33 +183,33 @@ fn test_epoch_invalidation_clears_queued_continuation() {
 
     // 续跑执行前校验：代际已变 → 放弃
     assert!(
-        !continuation_still_valid(&state, epoch),
+        !super::continuation_still_valid(&state, epoch),
         "新 prompt 后已排队的续跑必须失效"
     );
 
     // 未变化（无新 prompt）：仍有效
     let mut state2 = make_session_state(true, 5);
-    let epoch2 = take_continuation_if_armed(&mut state2, BgTaskKind::Agent).unwrap();
-    assert!(continuation_still_valid(&state2, epoch2));
+    let epoch2 = super::take_continuation_if_armed(&mut state2, BgTaskKind::Agent).unwrap();
+    assert!(super::continuation_still_valid(&state2, epoch2));
 }
 
 /// epoch 校验只认当前代际：旧代际请求一律失效。
 #[test]
 fn test_stale_epoch_never_valid() {
     let state = make_session_state(false, 7);
-    assert!(!continuation_still_valid(&state, 6));
-    assert!(continuation_still_valid(&state, 7));
+    assert!(!super::continuation_still_valid(&state, 6));
+    assert!(super::continuation_still_valid(&state, 7));
 }
 
 /// 查询失败恢复资格：同代际、未关闭、无续跑在飞时置回 armed。
 #[test]
 fn test_restore_armed_only_within_same_generation() {
     let mut state = make_session_state(false, 7);
-    assert!(restore_continuation_armed(&mut state, 7));
+    assert!(super::restore_continuation_armed(&mut state, 7));
     assert!(state.continuation_armed, "同代际必须恢复一次性资格");
 
     let mut stale = make_session_state(false, 7);
-    assert!(!restore_continuation_armed(&mut stale, 6));
+    assert!(!super::restore_continuation_armed(&mut stale, 6));
     assert!(!stale.continuation_armed, "旧代际不得恢复资格");
 }
 
@@ -222,16 +218,19 @@ fn test_restore_armed_only_within_same_generation() {
 fn test_restore_armed_skips_closing_and_in_flight() {
     let mut closing = make_session_state(false, 7);
     closing.closing = true;
-    assert!(!restore_continuation_armed(&mut closing, 7));
+    assert!(!super::restore_continuation_armed(&mut closing, 7));
     assert!(!closing.continuation_armed);
 
     let mut closing_in_flight = make_session_state(false, 7);
     closing_in_flight.close_in_flight = 1;
-    assert!(!restore_continuation_armed(&mut closing_in_flight, 7));
+    assert!(!super::restore_continuation_armed(
+        &mut closing_in_flight,
+        7
+    ));
 
     let mut running = make_session_state(false, 7);
     running.continuation_in_flight = true;
-    assert!(!restore_continuation_armed(&mut running, 7));
+    assert!(!super::restore_continuation_armed(&mut running, 7));
     assert!(!running.continuation_armed);
 }
 
@@ -239,29 +238,29 @@ fn test_restore_armed_skips_closing_and_in_flight() {
 #[test]
 fn test_restored_armed_does_not_survive_new_generation() {
     let mut state = make_session_state(false, 3);
-    assert!(restore_continuation_armed(&mut state, 3));
+    assert!(super::restore_continuation_armed(&mut state, 3));
 
     // 用户新 prompt：清除 armed 并递增代际（dispatch_prompt_turn 的既有行为）。
     state.continuation_armed = false;
     state.continuation_epoch += 1;
-    assert!(!continuation_still_valid(&state, 3));
-    assert!(!continuation_dispatchable(
+    assert!(!super::continuation_still_valid(&state, 3));
+    assert!(!super::continuation_dispatchable(
         &state, 3, true, false, false, false, false
     ));
     assert_eq!(
-        take_continuation_if_armed(&mut state, BgTaskKind::Agent),
+        super::take_continuation_if_armed(&mut state, BgTaskKind::Agent),
         None,
         "新 prompt 后旧代际不得再 take 出资格"
     );
 
     // 再次 Stop：同样递增代际；即使重新 arm，也只能属于新代际。
     let mut stopped = make_session_state(false, 3);
-    assert!(restore_continuation_armed(&mut stopped, 3));
+    assert!(super::restore_continuation_armed(&mut stopped, 3));
     stopped.continuation_epoch += 1;
     stopped.continuation_armed = true;
-    assert!(!continuation_still_valid(&stopped, 3));
+    assert!(!super::continuation_still_valid(&stopped, 3));
     assert_eq!(
-        take_continuation_if_armed(&mut stopped, BgTaskKind::Agent),
+        super::take_continuation_if_armed(&mut stopped, BgTaskKind::Agent),
         Some(4),
         "再次 Stop 的资格只属于新代际"
     );
@@ -274,11 +273,11 @@ fn test_cancel_does_not_arm_in_flight_continuation() {
     let mut state = make_session_state(false, 1);
     state.continuation_in_flight = true;
     assert!(
-        !cancel_arms_continuation(&state),
+        !super::cancel_arms_continuation(&state),
         "取消续跑本身不得 arm 自动链式续跑"
     );
     // 模拟 notify cancel 分支：in_flight 时不写 armed
-    if cancel_arms_continuation(&state) {
+    if super::cancel_arms_continuation(&state) {
         state.continuation_armed = true;
     }
     assert!(
@@ -288,7 +287,10 @@ fn test_cancel_does_not_arm_in_flight_continuation() {
 
     // 普通 prompt 运行中（非续跑）：cancel 正常 arm
     let state2 = make_session_state(false, 1);
-    assert!(cancel_arms_continuation(&state2), "普通 prompt 取消应 arm");
+    assert!(
+        super::cancel_arms_continuation(&state2),
+        "普通 prompt 取消应 arm"
+    );
 }
 
 /// cancel ↔ bg callback race 兜底的 eligibility（纯逻辑）：
@@ -299,13 +301,13 @@ fn test_cancel_schedule_race_eligibility() {
     // 典型 race：bg 结果已 route（Defer 在队列），cancel 需补发
     let state = make_session_state(false, 1);
     assert!(
-        cancel_should_schedule_continuation(&state, true),
+        super::cancel_should_schedule_continuation(&state, true),
         "cancel 置位前 bg 已完成且 Defer 已入队 → 必须补发"
     );
 
     // 无 pending Defer：bg 尚未完成，等其完成通知即可，不补发
     assert!(
-        !cancel_should_schedule_continuation(&state, false),
+        !super::cancel_should_schedule_continuation(&state, false),
         "队列无 Defer 时补发会导致空跑续跑"
     );
 
@@ -313,10 +315,12 @@ fn test_cancel_schedule_race_eligibility() {
     let mut in_flight = make_session_state(false, 1);
     in_flight.continuation_in_flight = true;
     assert!(
-        !cancel_should_schedule_continuation(&in_flight, true),
+        !super::cancel_should_schedule_continuation(&in_flight, true),
         "取消续跑不得触发补发"
     );
-    assert!(!cancel_should_schedule_continuation(&in_flight, false));
+    assert!(!super::cancel_should_schedule_continuation(
+        &in_flight, false
+    ));
 }
 
 /// dispatch 前确认：代际有效 **且** 队列仍有 SubAgentComplete Defer 才续跑；
@@ -325,15 +329,15 @@ fn test_cancel_schedule_race_eligibility() {
 fn test_continuation_dispatchable_requires_pending_defer() {
     let state = make_session_state(false, 3);
     // 代际有效 + Defer 在队 → 可 dispatch
-    assert!(continuation_dispatchable(
+    assert!(super::continuation_dispatchable(
         &state, 3, true, false, false, false, false
     ));
     // 代际有效但 Defer 已被消费 → 跳过（空跑无意义）
-    assert!(!continuation_dispatchable(
+    assert!(!super::continuation_dispatchable(
         &state, 3, false, false, false, false, false
     ));
     // 代际失效（用户新 prompt）→ 跳过
-    assert!(!continuation_dispatchable(
+    assert!(!super::continuation_dispatchable(
         &state,
         3 + 1,
         true,
@@ -342,7 +346,7 @@ fn test_continuation_dispatchable_requires_pending_defer() {
         false,
         false
     ));
-    assert!(!continuation_dispatchable(
+    assert!(!super::continuation_dispatchable(
         &state,
         3 + 1,
         false,
@@ -359,15 +363,15 @@ fn test_continuation_dispatchable_requires_pending_defer() {
 fn async_result_continuation_requires_ready_result() {
     let state = make_session_state(false, 3);
     // 无 Defer，但 mailbox 有 Ready 结果 → 可续跑一次。
-    assert!(continuation_dispatchable(
+    assert!(super::continuation_dispatchable(
         &state, 3, false, false, false, true, true
     ));
     // 结果已被覆盖 / 从未 Ready → 跳过。
-    assert!(!continuation_dispatchable(
+    assert!(!super::continuation_dispatchable(
         &state, 3, false, false, false, true, false
     ));
     // 用户新 prompt 使代际失效 → 即使有 Ready 结果也不续跑。
-    assert!(!continuation_dispatchable(
+    assert!(!super::continuation_dispatchable(
         &state,
         3 + 1,
         false,
@@ -377,7 +381,7 @@ fn async_result_continuation_requires_ready_result() {
         true
     ));
     // mq_steering 分支优先，结果续跑不能绕过 steering 队列。
-    assert!(!continuation_dispatchable(
+    assert!(!super::continuation_dispatchable(
         &state, 3, false, false, true, true, true
     ));
 }
@@ -390,7 +394,9 @@ async fn test_scheduler_exits_on_host_shutdown_even_if_continuation_ingress_stil
     let shutdown = CancellationToken::new();
     shutdown.cancel();
 
-    assert!(recv_until_shutdown(&mut rx, &shutdown).await.is_none());
+    assert!(super::recv_until_shutdown(&mut rx, &shutdown)
+        .await
+        .is_none());
     assert!(
         !root.is_closed(),
         "kept-alive ingress must not be the exit signal"
@@ -405,9 +411,11 @@ async fn test_scheduler_does_not_own_its_ingress_sender() {
     drop(root);
 
     assert!(scheduler_ingress.upgrade().is_none());
-    assert!(recv_until_shutdown(&mut rx, &CancellationToken::new())
-        .await
-        .is_none());
+    assert!(
+        super::recv_until_shutdown(&mut rx, &CancellationToken::new())
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]

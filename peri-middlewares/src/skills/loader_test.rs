@@ -1,4 +1,5 @@
-use super::{resolve_skill_roots, SkillRoot, SkillSource};
+use super::SkillRoot;
+use super::SkillSource;
 
 #[test]
 #[serial_test::serial]
@@ -12,7 +13,7 @@ fn roots_forward_missing_plugin_path_and_preserve_priority_and_bundled_switch() 
     };
     let cwd = temporary.path().to_str().unwrap();
     for disable_bundled in [false, true] {
-        let roots = resolve_skill_roots(cwd, vec![plugin_root.clone()], disable_bundled);
+        let roots = super::resolve_skill_roots(cwd, vec![plugin_root.clone()], disable_bundled);
         let mut expected = vec![SkillSource::User, SkillSource::Project, SkillSource::Plugin];
         if !disable_bundled {
             expected.push(SkillSource::Builtin);

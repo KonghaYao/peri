@@ -5,7 +5,7 @@
 //!   工具集装载（§6）
 //! - [`Controller::sessions`] / [`Controller::pick_runtime`]：取业务侧会话资源句柄
 //!   与 Runtime 编排器（Controller 只消费业务句柄，不持有部署关闭权）
-//! - [`Controller::run_session`]：经 Runtime 查映射拿 [`SessionHandle`] 发起执行
+//! - [`Controller::run_session`]：经 Runtime 查映射拿 [`SessionHandle`](peri_acp_types::runtime::SessionHandle) 发起执行
 //!   （Controller → Runtime 边，§6 run Session）
 //! - [`Controller::join_session`] / [`Controller::destroy_session`] / [`Controller::session_ids`]：
 //!   会话生命周期面（join 等待自然终止 / §9 六阶段销毁 / 枚举透传 Runtime 映射）
@@ -18,6 +18,7 @@
 //! - [`Controller::cancel`]：按 (session_id, turn_id, attempt_id) 三元组定位并转发
 //!   （§6/§9）；幂等判定与取消语义归 Agent 层，本层只定位与转发
 
+use std::fmt::{self, Debug, Formatter};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,11 +50,13 @@ pub struct AgentRef(String);
 
 impl AgentRef {
     /// 以定义名构造引用。
+    #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
     }
 
     /// 定义名字符串。
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -83,6 +86,7 @@ pub struct LiteParams {
 
 impl LiteParams {
     /// 构造 lite params。
+    #[must_use]
     pub fn new(
         session_id: impl Into<String>,
         agent_ref: AgentRef,
@@ -100,12 +104,14 @@ impl LiteParams {
     }
 
     /// 带初始消息装载构造。
+    #[must_use]
     pub fn with_initial_messages(mut self, messages: Vec<MessageContent>) -> Self {
         self.initial_messages = messages;
         self
     }
 
     /// 带初始工具集装载构造。
+    #[must_use]
     pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
         self.tools = tools;
         self
@@ -185,6 +191,7 @@ impl Controller {
     ///
     /// Runtime / Resources / 装配注入端口由部署装配点（Resources 打开后、
     /// Runtime 建立后）经对应 `with_*` 注入；本构造函数保持既有调用点兼容。
+    #[must_use]
     pub fn new(sessions: Arc<dyn SessionResources>) -> Self {
         let (subscribers, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
         Self {
@@ -198,6 +205,7 @@ impl Controller {
     }
 
     /// 注入 Runtime 编排器（pick Runtime 的目标源；部署装配点调用）。
+    #[must_use]
     pub fn with_runtime(mut self, runtime: Arc<Runtime>) -> Self {
         self.runtime = runtime;
         self
@@ -205,6 +213,7 @@ impl Controller {
 
     /// 注入 MCP 客户端池端口（pick MCP 池的目标源；宿主装配点构造具体
     /// `McpClientPool` 后 upcast 注入）。
+    #[must_use]
     pub fn with_mcp_pool(
         mut self,
         mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
@@ -215,6 +224,7 @@ impl Controller {
 
     /// 注入 Cron 调度器端口（pick cron 调度器的目标源；宿主装配点构造
     /// `CronSchedulerPortHandle` 后注入）。
+    #[must_use]
     pub fn with_cron_scheduler(
         mut self,
         cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
@@ -225,6 +235,7 @@ impl Controller {
 
     /// 注入工具检索索引端口（pick 工具检索索引的目标源；宿主装配点构造
     /// `ToolSearchIndex` 后 upcast 注入）。
+    #[must_use]
     pub fn with_tool_search(
         mut self,
         tool_search: Option<Arc<dyn peri_acp_types::ports::ToolSearchPort>>,
@@ -252,11 +263,13 @@ impl Controller {
     ///
     /// 返回会话资源门面（消费侧唯一的会话行为契约）：Controller 只做转发，不解释
     /// 存储语义、不暴露事务或执行注册表。
+    #[must_use]
     pub fn sessions(&self) -> Arc<dyn SessionResources> {
         Arc::clone(&self.sessions)
     }
 
     /// pick Runtime（控制面第三步）：取注入的 Runtime 编排器引用。
+    #[must_use]
     pub fn pick_runtime(&self) -> Arc<Runtime> {
         Arc::clone(&self.runtime)
     }
@@ -304,11 +317,13 @@ impl Controller {
     ///
     /// 无顺序保证（Runtime 簿记为 HashMap）；list_sessions 需要的元数据
     /// （标题/时间等）经存储通道（[`Controller::sessions`]）合并。
+    #[must_use]
     pub fn session_ids(&self) -> Vec<String> {
         self.runtime.session_ids()
     }
 
     /// 该会话是否已注册（Runtime 映射命中）。
+    #[must_use]
     pub fn contains_session(&self, session_id: &str) -> bool {
         self.runtime.contains(session_id)
     }
@@ -436,6 +451,7 @@ impl Controller {
     ///
     /// 返回显式订阅句柄 [`Subscription`]；退订 = 句柄 drop 或
     /// [`Subscription::unsubscribe`]（broadcast 语义，无 Controller 侧簿记）。
+    #[must_use]
     pub fn subscribe(&self) -> Subscription {
         Subscription {
             receiver: self.subscribers.subscribe(),
@@ -446,3 +462,14 @@ impl Controller {
 #[cfg(test)]
 #[path = "controller_test.rs"]
 mod tests;
+
+impl Debug for Controller {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Controller")
+            .field("mcp_pool_present", &self.mcp_pool.is_some())
+            .field("cron_scheduler_present", &self.cron_scheduler.is_some())
+            .field("tool_search_present", &self.tool_search.is_some())
+            .finish_non_exhaustive()
+    }
+}

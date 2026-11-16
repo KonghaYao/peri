@@ -8,12 +8,12 @@ use peri_acp_types::PeriCaps;
 use serde_json::Value;
 
 use super::super::AcpServerConfig;
-use super::session_lifecycle::initialize_peri_caps;
+use super::session_lifecycle;
 
 /// 客户端声明收敛到当前后端的实际能力。
 pub(crate) fn effective_peri_caps(cfg: &AcpServerConfig, params: &Value) -> PeriCaps {
     apply_backend_caps(
-        initialize_peri_caps(params),
+        session_lifecycle::initialize_peri_caps(params),
         cfg.session_resources.supports_history_window(),
     )
 }

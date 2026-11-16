@@ -5,15 +5,14 @@
 //! the Workspace recorded for that call and refuses when it is missing or the
 //! current content no longer equals the recorded output.
 
-use std::{
-    collections::HashMap,
-    path::{Component, Path, PathBuf},
-};
+use std::collections::HashMap;
+use std::path::Component;
+use std::path::Path;
+use std::path::PathBuf;
 
-use rmcp::{
-    model::{CustomRequest, CustomResult},
-    ErrorData as McpError,
-};
+use rmcp::model::CustomRequest;
+use rmcp::model::CustomResult;
+use rmcp::ErrorData as McpError;
 use serde::Deserialize;
 
 use crate::rewind_snapshot::RewindSnapshots;
@@ -64,68 +63,74 @@ pub(crate) async fn rewind_files(
     let mut order = Vec::new();
     // Validate the complete batch before the first mutation. If any history record
     // no longer matches the current Workspace content, leave every file untouched.
-    for change in changes.into_iter().rev() {
-        let raw = match &change {
-            Change::Write { path, .. } | Change::Edit { path, .. } => path,
-        };
-        let (path, _) = checked_path(&root, raw).await?;
-        let current = match planned.get(&path) {
-            Some(content) => content.clone(),
-            None => read_optional(&path).await?,
-        };
-        let replacement = match change {
-            Change::Write {
-                content,
-                tool_call_id,
-                ..
-            } => {
-                let tool_call_id = tool_call_id
-                    .ok_or_else(|| invalid("Write rewind lacks call identity; rewind refused"))?;
-                let snapshot = snapshots
-                    .get(owner, &tool_call_id)
-                    .ok_or_else(|| invalid("Write pre-image unavailable; rewind refused"))?;
-                if snapshot.path != path {
-                    return Err(invalid("Write pre-image target mismatch; rewind refused"));
-                }
-                if !write_payload_matches(&snapshot, content.as_deref()) {
-                    return Err(invalid(
-                        "Write history does not match recorded pre-image; rewind refused",
-                    ));
-                }
-                if current.as_deref() != Some(snapshot.post.as_slice()) {
-                    return Err(invalid("Write output changed externally; rewind refused"));
-                }
-                snapshot.pre
-            }
-            Change::Edit {
-                old_string,
-                new_string,
-                tool_call_id,
-                ..
-            } => {
-                let recorded = tool_call_id.as_deref().and_then(|id| {
-                    let snapshot = snapshots.get(owner, id)?;
-                    (snapshot.path == path).then_some(snapshot)
-                });
-                match recorded {
-                    Some(snapshot) => {
-                        if current.as_deref() != Some(snapshot.post.as_slice()) {
-                            return Err(invalid("Edit output changed externally; rewind refused"));
-                        }
-                        snapshot.pre
+    {
+        let iterated_changes = changes.into_iter().rev();
+        for change in iterated_changes {
+            let raw = match &change {
+                Change::Write { path, .. } | Change::Edit { path, .. } => path,
+            };
+            let (path, _) = checked_path(&root, raw).await?;
+            let current = match planned.get(&path) {
+                Some(content) => content.clone(),
+                None => read_optional(&path).await?,
+            };
+            let replacement = match change {
+                Change::Write {
+                    content,
+                    tool_call_id,
+                    ..
+                } => {
+                    let tool_call_id = tool_call_id.ok_or_else(|| {
+                        invalid("Write rewind lacks call identity; rewind refused")
+                    })?;
+                    let snapshot = snapshots
+                        .get(owner, &tool_call_id)
+                        .ok_or_else(|| invalid("Write pre-image unavailable; rewind refused"))?;
+                    if snapshot.path != path {
+                        return Err(invalid("Write pre-image target mismatch; rewind refused"));
                     }
-                    // Histories recorded before pre-image capture keep the
-                    // self-contained string reversal: the call itself carries the
-                    // exact old/new pair.
-                    None => reverse_edit(current.as_deref(), &old_string, &new_string)?,
+                    if !write_payload_matches(&snapshot, content.as_deref()) {
+                        return Err(invalid(
+                            "Write history does not match recorded pre-image; rewind refused",
+                        ));
+                    }
+                    if current.as_deref() != Some(snapshot.post.as_slice()) {
+                        return Err(invalid("Write output changed externally; rewind refused"));
+                    }
+                    snapshot.pre
                 }
+                Change::Edit {
+                    old_string,
+                    new_string,
+                    tool_call_id,
+                    ..
+                } => {
+                    let recorded = tool_call_id.as_deref().and_then(|id| {
+                        let snapshot = snapshots.get(owner, id)?;
+                        (snapshot.path == path).then_some(snapshot)
+                    });
+                    match recorded {
+                        Some(snapshot) => {
+                            if current.as_deref() != Some(snapshot.post.as_slice()) {
+                                return Err(invalid(
+                                    "Edit output changed externally; rewind refused",
+                                ));
+                            }
+                            snapshot.pre
+                        }
+                        // Histories recorded before pre-image capture keep the
+                        // self-contained string reversal: the call itself carries the
+                        // exact old/new pair.
+                        None => reverse_edit(current.as_deref(), &old_string, &new_string)?,
+                    }
+                }
+            };
+            if !planned.contains_key(&path) {
+                order.push(path.clone());
+                expected_on_disk.insert(path.clone(), current);
             }
-        };
-        if !planned.contains_key(&path) {
-            order.push(path.clone());
-            expected_on_disk.insert(path.clone(), current);
+            planned.insert(path, replacement);
         }
-        planned.insert(path, replacement);
     }
     for path in order {
         let replacement = planned.remove(&path).expect("planned path");

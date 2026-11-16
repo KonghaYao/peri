@@ -1,6 +1,13 @@
 //! OSC 7501 上报值随 turn / 交互状态变化（AppShell 负责实际写 stdout）。
 
-use super::*;
+use super::AcpEventData;
+use super::AskUser;
+use super::BridgeState;
+use super::HitlPending;
+use super::Question;
+use super::QuestionOption;
+use super::serial;
+
 use crate::kit::acp_types::BgTaskSnapshotSource;
 use crate::kit::program_status::{BlockedKind, ProgramStatus};
 
@@ -11,7 +18,8 @@ fn current() -> ProgramStatus {
 fn hitl_event() -> AcpEventData {
     AcpEventData::HitlPending(crate::kit::acp_types::PendingInteraction {
         owner: Default::default(),
-        request_id_json: serde_json::to_string(&"hitl-1").unwrap(),
+        request_id_json: serde_json::to_string(&"hitl-1")
+            .expect("hitl event: fixture must serialize to JSON"),
         payload: HitlPending {
             tool_name: "Bash".into(),
             tool_input: serde_json::json!({"command": "cargo test"}),
@@ -23,7 +31,8 @@ fn hitl_event() -> AcpEventData {
 fn ask_user_event() -> AcpEventData {
     AcpEventData::AskUser(crate::kit::acp_types::PendingInteraction {
         owner: Default::default(),
-        request_id_json: serde_json::to_string(&"ask-1").unwrap(),
+        request_id_json: serde_json::to_string(&"ask-1")
+            .expect("ask user event: fixture must serialize to JSON"),
         payload: AskUser {
             questions: vec![Question {
                 id: "q1".into(),
@@ -39,6 +48,7 @@ fn ask_user_event() -> AcpEventData {
     })
 }
 
+#[must_use]
 fn interaction_terminal() -> AcpEventData {
     AcpEventData::InteractionTerminal {
         owner: Default::default(),
@@ -53,9 +63,10 @@ fn reset() -> BridgeState {
     crate::kit::atoms::BG_TASKS.set(Vec::new());
     crate::kit::atoms::BG_LIVE_DETAIL.state().write().clear();
     crate::kit::atoms::BG_TASK_REVISION.set(None);
-    make_fold_test_state()
+    super::make_fold_test_state()
 }
 
+#[must_use]
 fn bg_entry(task_id: &str, kind: &str, status: Option<&str>) -> crate::kit::acp_types::BgTaskEntry {
     crate::kit::acp_types::BgTaskEntry {
         task_id: task_id.into(),
@@ -96,6 +107,7 @@ fn bg_completed(task_id: &str, kind: &str, success: bool) -> AcpEventData {
     }
 }
 
+#[must_use]
 fn bg_cancelled(task_id: &str) -> AcpEventData {
     AcpEventData::BgTaskCancelled {
         task_id: task_id.into(),
@@ -117,7 +129,7 @@ fn bg_snapshot(
 }
 
 fn prompt(state: &mut BridgeState, request_id: &str) {
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         state,
         &AcpEventData::PromptSubmitted {
             request_id: Some(request_id.into()),
@@ -130,7 +142,7 @@ fn prompt(state: &mut BridgeState, request_id: &str) {
 fn prompt_lifecycle_reports_working_then_done() {
     let mut state = reset();
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("r1".into()),
@@ -138,7 +150,7 @@ fn prompt_lifecycle_reports_working_then_done() {
     );
     assert_eq!(current(), ProgramStatus::Working);
 
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert_eq!(current(), ProgramStatus::Done);
 }
 
@@ -146,26 +158,26 @@ fn prompt_lifecycle_reports_working_then_done() {
 #[serial]
 fn pending_interactions_report_blocked_and_resume_working() {
     let mut state = reset();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("r1".into()),
         },
     );
 
-    dispatch_and_notify(&mut state, &hitl_event());
+    super::dispatch_and_notify(&mut state, &hitl_event());
     assert_eq!(current(), ProgramStatus::Blocked(BlockedKind::Permission));
 
-    dispatch_and_notify(&mut state, &interaction_terminal());
+    super::dispatch_and_notify(&mut state, &interaction_terminal());
     assert_eq!(current(), ProgramStatus::Working);
 
-    dispatch_and_notify(&mut state, &ask_user_event());
+    super::dispatch_and_notify(&mut state, &ask_user_event());
     assert_eq!(current(), ProgramStatus::Blocked(BlockedKind::Question));
 
-    dispatch_and_notify(&mut state, &interaction_terminal());
+    super::dispatch_and_notify(&mut state, &interaction_terminal());
     assert_eq!(current(), ProgramStatus::Working);
 
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert_eq!(current(), ProgramStatus::Done);
 }
 
@@ -173,13 +185,13 @@ fn pending_interactions_report_blocked_and_resume_working() {
 #[serial]
 fn cancel_reports_idle_and_prompt_failure_reports_error() {
     let mut state = reset();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("r1".into()),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "user cancelled".into(),
@@ -188,13 +200,13 @@ fn cancel_reports_idle_and_prompt_failure_reports_error() {
     );
     assert_eq!(current(), ProgramStatus::Idle);
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("r2".into()),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptFailed {
             request_id: "r2".into(),
@@ -210,7 +222,7 @@ fn turn_done_keeps_working_while_async_agent_runs() {
     set_bg_tasks(vec![bg_entry("agent-1", "agent", Some("running"))]);
 
     prompt(&mut state, "r1");
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
     assert_eq!(current(), ProgramStatus::Working);
 }
@@ -222,7 +234,7 @@ fn turn_done_with_running_shell_reports_done() {
     set_bg_tasks(vec![bg_entry("shell-1", "shell", Some("running"))]);
 
     prompt(&mut state, "r1");
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
     assert_eq!(current(), ProgramStatus::Done);
 }
@@ -234,7 +246,7 @@ fn interrupted_and_suspended_keep_working_while_async_agent_runs() {
     set_bg_tasks(vec![bg_entry("agent-1", "agent", Some("running"))]);
 
     prompt(&mut state, "r1");
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "user cancelled".into(),
@@ -244,7 +256,7 @@ fn interrupted_and_suspended_keep_working_while_async_agent_runs() {
     assert_eq!(current(), ProgramStatus::Working);
 
     prompt(&mut state, "r2");
-    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
     assert_eq!(current(), ProgramStatus::Working);
 }
 
@@ -258,13 +270,13 @@ fn last_async_agent_completion_exits_working_to_done() {
     ]);
 
     prompt(&mut state, "r1");
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert_eq!(current(), ProgramStatus::Working);
 
-    dispatch_and_notify(&mut state, &bg_completed("agent-1", "agent", true));
+    super::dispatch_and_notify(&mut state, &bg_completed("agent-1", "agent", true));
     assert_eq!(current(), ProgramStatus::Working, "仍有 agent 在跑");
 
-    dispatch_and_notify(&mut state, &bg_completed("agent-2", "agent", true));
+    super::dispatch_and_notify(&mut state, &bg_completed("agent-2", "agent", true));
     assert_eq!(current(), ProgramStatus::Done);
 }
 
@@ -275,10 +287,10 @@ fn last_async_agent_cancellation_exits_working_to_idle() {
     set_bg_tasks(vec![bg_entry("agent-1", "agent", Some("running"))]);
 
     prompt(&mut state, "r1");
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert_eq!(current(), ProgramStatus::Working);
 
-    dispatch_and_notify(&mut state, &bg_cancelled("agent-1"));
+    super::dispatch_and_notify(&mut state, &bg_cancelled("agent-1"));
     assert_eq!(current(), ProgramStatus::Idle);
 }
 
@@ -289,16 +301,16 @@ fn agent_completion_while_new_turn_runs_keeps_working() {
     set_bg_tasks(vec![bg_entry("agent-1", "agent", Some("running"))]);
 
     prompt(&mut state, "r1");
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert_eq!(current(), ProgramStatus::Working);
 
     // bg 回调已启动新 turn：完成事件到达时 phase 仍是 PromptRunning，交给该
     // turn 自己结算，不能提前落到 done。
     prompt(&mut state, "r2");
-    dispatch_and_notify(&mut state, &bg_completed("agent-1", "agent", true));
+    super::dispatch_and_notify(&mut state, &bg_completed("agent-1", "agent", true));
     assert_eq!(current(), ProgramStatus::Working);
 
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert_eq!(current(), ProgramStatus::Done);
 }
 
@@ -309,20 +321,20 @@ fn async_agent_does_not_override_blocked_or_error() {
     set_bg_tasks(vec![bg_entry("agent-1", "agent", Some("running"))]);
 
     prompt(&mut state, "r1");
-    dispatch_and_notify(&mut state, &hitl_event());
+    super::dispatch_and_notify(&mut state, &hitl_event());
     assert_eq!(current(), ProgramStatus::Blocked(BlockedKind::Permission));
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert_eq!(current(), ProgramStatus::Blocked(BlockedKind::Permission));
 
     prompt(&mut state, "r2");
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptFailed {
             request_id: "r2".into(),
         },
     );
     assert_eq!(current(), ProgramStatus::Error);
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert_eq!(current(), ProgramStatus::Error);
 }
 
@@ -330,7 +342,7 @@ fn async_agent_does_not_override_blocked_or_error() {
 #[serial]
 fn historical_running_agent_snapshot_does_not_keep_working() {
     let mut state = reset();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &bg_snapshot(
             vec![bg_entry("agent-1", "agent", Some("running"))],
@@ -340,7 +352,7 @@ fn historical_running_agent_snapshot_does_not_keep_working() {
     );
 
     prompt(&mut state, "r1");
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
     assert_eq!(current(), ProgramStatus::Done);
 }
@@ -349,7 +361,7 @@ fn historical_running_agent_snapshot_does_not_keep_working() {
 #[serial]
 fn live_snapshot_removing_last_agent_exits_working_to_done() {
     let mut state = reset();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &bg_snapshot(
             vec![bg_entry("agent-1", "agent", Some("running"))],
@@ -359,10 +371,10 @@ fn live_snapshot_removing_last_agent_exits_working_to_done() {
     );
 
     prompt(&mut state, "r1");
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert_eq!(current(), ProgramStatus::Working);
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &bg_snapshot(Vec::new(), 2, BgTaskSnapshotSource::Live),
     );

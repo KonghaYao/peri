@@ -1,4 +1,5 @@
-use super::*;
+use crate::filesystem::grep::GrepTool;
+use peri_agent::tools::BaseTool;
 
 // ─── P1-3: 语义化别名兼容 ───────────────────────────────────────────────────
 

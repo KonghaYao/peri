@@ -1,4 +1,8 @@
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::provider::LlmProvider;
+use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Records the workspace watcher admitted by `bind_session_tasks`.
 struct WatchRecordingPool {
@@ -51,10 +55,11 @@ async fn session_entry_starts_workspace_watch_once_and_close_stops_it() {
 
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().canonicalize().unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "key", "model"),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, &tmp).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(config, provider, &tmp).await;
     assert!(cfg.mcp_pool.is_none(), "fixture has no host MCP pool");
     let pool = WatchRecordingPool::new();
     cfg.mcp_pool = Some(Arc::clone(&pool) as Arc<dyn McpPoolPort>);
@@ -62,7 +67,7 @@ async fn session_entry_starts_workspace_watch_once_and_close_stops_it() {
     let transport = Arc::new(MockTransport::default());
     let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
     let mut sessions = HashMap::new();
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": cwd}),
         &cfg,
@@ -83,7 +88,7 @@ async fn session_entry_starts_workspace_watch_once_and_close_stops_it() {
     assert_eq!(pool.sessions.lock().as_slice(), [id.to_owned()]);
 
     // Re-entering the same session runtime must not admit a second watcher.
-    bind_session_tasks(id, &cfg, &transport_dyn);
+    crate::host::requests::bind_session_tasks(id, &cfg, &transport_dyn);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert_eq!(
         pool.starts.load(std::sync::atomic::Ordering::SeqCst),
@@ -105,10 +110,11 @@ async fn session_local_workspace_tasks_reach_acp_snapshot_and_live_events() {
 
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().canonicalize().unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "key", "model"),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, &tmp).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(config, provider, &tmp).await;
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd: cwd.to_string_lossy().into_owned(),
         bare: true,
@@ -123,7 +129,7 @@ async fn session_local_workspace_tasks_reach_acp_snapshot_and_live_events() {
     let transport = Arc::new(MockTransport::default());
     let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
     let mut sessions = HashMap::new();
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": cwd}),
         &cfg,
@@ -180,7 +186,7 @@ async fn session_local_workspace_tasks_reach_acp_snapshot_and_live_events() {
         McpPoolPort::has_active_tasks(pool.as_ref(), id),
         "the session MCP pool must hold the same TaskManager as ACP"
     );
-    let snapshot = handle_request(
+    let snapshot = crate::host::requests::handle_request(
         "session/bg-tasks",
         &json!({"sessionId": id}),
         &cfg,

@@ -1,14 +1,17 @@
 //! Fixture-local archive adapter and a real successful request before pressure is raised.
 //! MCP transport is exercised in peri-middlewares; this test owns failure/commit boundaries.
 use peri_acp_types::context_archive::{ArchiveError, ContextArchiveReadPort};
-use peri_agent::{
-    agent::stages::{
-        act::run_act, reason::run_reason, ActInput, ReasonInput, SharedToolMap, StageContext,
-    },
-    context_archive::ContextArchiveReader,
-    tools::{BaseTool, ContextRetention, ToolContext},
-};
-use std::{collections::BTreeMap, sync::Arc};
+
+use peri_agent::agent::stages::ActInput;
+use peri_agent::agent::stages::ReasonInput;
+use peri_agent::agent::stages::SharedToolMap;
+use peri_agent::agent::stages::StageContext;
+use peri_agent::context_archive::ContextArchiveReader;
+use peri_agent::tools::BaseTool;
+use peri_agent::tools::ContextRetention;
+use peri_agent::tools::ToolContext;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 struct ArchiveTool;
 
@@ -55,12 +58,12 @@ pub(super) fn tools() -> SharedToolMap {
 }
 
 pub(super) async fn expose_history(ctx: &StageContext) {
-    let response = run_reason(ReasonInput {
+    let response = peri_agent::agent::stages::reason::run_reason(ReasonInput {
         context: ctx.clone(),
         has_tool_calls: false,
     })
     .await
-    .unwrap();
+    .expect("the run reason fixture result is required for this assertion");
     assert_eq!(response.messages_snapshot.len(), 25);
     {
         let transcript = ctx.session.transcript.read();
@@ -69,7 +72,7 @@ pub(super) async fn expose_history(ctx: &StageContext) {
             .iter()
             .all(|entry| !transcript.is_truncated(entry.id())));
     }
-    let outcome = run_act(ActInput {
+    let outcome = peri_agent::agent::stages::act::run_act(ActInput {
         context: ctx.clone(),
         reasoning: response.reasoning,
         exposure: response.exposure,
@@ -77,6 +80,6 @@ pub(super) async fn expose_history(ctx: &StageContext) {
         receipt: response.receipt,
     })
     .await
-    .unwrap();
+    .expect("the run act fixture result is required for this assertion");
     assert_eq!(outcome.final_answer.as_deref(), Some("done"));
 }

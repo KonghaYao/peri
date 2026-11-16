@@ -1,5 +1,5 @@
 //! Restored archive projections keep their recovery dependency after policy changes.
-use super::StageContext;
+use crate::agent::stages::context::StageContext;
 use crate::error::{AgentError, AgentResult};
 use crate::session::tool_catalog::SessionToolCatalogSnapshot;
 use crate::tools::ContextRetention;

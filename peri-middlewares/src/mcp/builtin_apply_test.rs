@@ -19,11 +19,11 @@ use std::path::{Path, PathBuf};
 use peri_acp_types::builtin_mcp::{BUILTIN_MCP_INSTANCES, BUILTIN_RESERVED_INSTANCE_NAMES};
 use peri_acp_types::plugin::ConfigSource;
 
-use crate::mcp::builtin::{apply_builtin_overlay, BuiltinInjectionPolicy};
-use crate::mcp::config::{
-    load_merged_config_full_with_paths, remove_server_from_config_with_paths,
-    set_server_disabled_with_paths, McpConfigError, McpConfigFile,
-};
+use crate::mcp::builtin;
+use crate::mcp::builtin::BuiltinInjectionPolicy;
+use crate::mcp::config;
+use crate::mcp::config::McpConfigError;
+use crate::mcp::config::McpConfigFile;
 
 /// 测试用显式全局路径（不存在 → 空全局配置）：不读真实 `~/.peri/settings.json`。
 fn missing_global_path(dir: &Path) -> PathBuf {
@@ -52,7 +52,7 @@ fn load(
     global_path: &Path,
     policy: &BuiltinInjectionPolicy,
 ) -> Result<McpConfigFile, McpConfigError> {
-    load_merged_config_full_with_paths(cwd, claude_home, global_path, policy)
+    config::load_merged_config_full_with_paths(cwd, claude_home, global_path, policy)
         .map(|(config, _)| config)
 }
 
@@ -214,7 +214,8 @@ fn empty_user_entry_still_becomes_system_direct_instance() {
 fn workspace_default_subscription_is_injected_by_overlay() {
     let mut map: std::collections::HashMap<String, peri_acp_types::plugin::McpServerConfig> =
         std::collections::HashMap::new();
-    apply_builtin_overlay(&mut map, &BuiltinInjectionPolicy::all()).expect("空配置必须可注入");
+    builtin::apply_builtin_overlay(&mut map, &BuiltinInjectionPolicy::all())
+        .expect("空配置必须可注入");
 
     let workspace = map.get("workspace").expect("workspace 条目必须存在");
     assert_eq!(
@@ -684,7 +685,7 @@ fn write_back_functions_never_persist_builtin_default_entries() {
     );
 
     // 2. 两个写回函数只修改**已存在于磁盘文件中的条目**：用户条目正常写盘。
-    set_server_disabled_with_paths(&cwd, &global_path, "plain", true).unwrap();
+    config::set_server_disabled_with_paths(&cwd, &global_path, "plain", true).unwrap();
     let after_disable = std::fs::read_to_string(&project_path).unwrap();
     let written: serde_json::Value = serde_json::from_str(&after_disable).unwrap();
     assert_eq!(written["mcpServers"]["plain"]["disabled"], true);
@@ -693,7 +694,7 @@ fn write_back_functions_never_persist_builtin_default_entries() {
         "写回不得把 builtin 默认条目写盘: {after_disable}"
     );
 
-    remove_server_from_config_with_paths(&cwd, &global_path, "plain").unwrap();
+    config::remove_server_from_config_with_paths(&cwd, &global_path, "plain").unwrap();
     let after_remove = std::fs::read_to_string(&project_path).unwrap();
     assert!(
         builtin_only_entry_written(&after_remove).is_none(),
@@ -731,8 +732,8 @@ fn write_back_is_noop_for_instance_that_only_exists_in_memory() {
     .unwrap();
     assert!(merged.mcp_servers.contains_key("web"));
 
-    set_server_disabled_with_paths(&cwd, &global_path, "web", true).unwrap();
-    remove_server_from_config_with_paths(&cwd, &global_path, "web").unwrap();
+    config::set_server_disabled_with_paths(&cwd, &global_path, "web", true).unwrap();
+    config::remove_server_from_config_with_paths(&cwd, &global_path, "web").unwrap();
     assert_eq!(
         std::fs::read_to_string(&project_path).unwrap(),
         before,

@@ -6,7 +6,7 @@
 //! 这些数字不改变任何释放/折叠语义。
 
 use super::BridgeState;
-use crate::kit::atoms::{BG_LIVE_DETAIL, FOLD_OVERRIDES};
+
 use crate::kit::bg_task_live::BgLiveMemoryBytes;
 use crate::kit::tui_render_unit::{
     TuiAskUserBlock, TuiCollapsedGroup, TuiDivider, TuiRenderUnit, TuiSubAgentGroup,
@@ -38,6 +38,7 @@ impl std::ops::AddAssign for LayerBytes {
     }
 }
 
+// The owned container reference preserves allocation capacity for retained-memory accounting.
 fn string_layer_bytes(value: &String) -> LayerBytes {
     LayerBytes {
         body: value.len(),
@@ -45,10 +46,13 @@ fn string_layer_bytes(value: &String) -> LayerBytes {
     }
 }
 
-fn option_string_layer_bytes(value: &Option<String>) -> LayerBytes {
-    value.as_ref().map(string_layer_bytes).unwrap_or_default()
+#[must_use]
+// The owned container reference preserves allocation capacity for retained-memory accounting.
+fn option_string_layer_bytes(value: Option<&String>) -> LayerBytes {
+    value.map(string_layer_bytes).unwrap_or_default()
 }
 
+// The owned container reference preserves allocation capacity for retained-memory accounting.
 fn vec_slot_layer_bytes<T>(values: &Vec<T>) -> LayerBytes {
     let element = std::mem::size_of::<T>();
     LayerBytes {
@@ -75,7 +79,7 @@ fn tool_presentation_bytes(presentation: &TuiToolPresentation) -> LayerBytes {
                 vec_slot_layer_bytes(&todo.current_items) + vec_slot_layer_bytes(&todo.changes);
             for item in &todo.current_items {
                 bytes += string_layer_bytes(&item.content);
-                bytes += option_string_layer_bytes(&item.active_form);
+                bytes += option_string_layer_bytes(item.active_form.as_ref());
             }
             for change in &todo.changes {
                 bytes += string_layer_bytes(&change.content);
@@ -85,7 +89,7 @@ fn tool_presentation_bytes(presentation: &TuiToolPresentation) -> LayerBytes {
     }
 }
 
-fn diff_layer_bytes(diff: &Option<crate::kit::tui_render_unit::TuiDiffBlock>) -> LayerBytes {
+fn diff_layer_bytes(diff: Option<&crate::kit::tui_render_unit::TuiDiffBlock>) -> LayerBytes {
     let Some(diff) = diff else {
         return LayerBytes::default();
     };
@@ -124,7 +128,7 @@ fn measure_unit(
             if let Some(reasoning) = &arc.reasoning {
                 bytes += string_layer_bytes(&reasoning.text);
             }
-            bytes += option_string_layer_bytes(&arc.message_id);
+            bytes += option_string_layer_bytes(arc.message_id.as_ref());
             bytes
         }
         TuiRenderUnit::TuiToolCard(card) => tool_card_bytes(card),
@@ -156,7 +160,7 @@ fn tool_card_bytes(card: &TuiToolCard) -> LayerBytes {
         + string_layer_bytes(&card.input_summary)
         + string_layer_bytes(&card.output_summary)
         + tool_presentation_bytes(&card.presentation)
-        + diff_layer_bytes(&card.diff)
+        + diff_layer_bytes(card.diff.as_ref())
 }
 
 fn system_reminder_bytes(reminder: &TuiSystemReminder) -> LayerBytes {
@@ -170,7 +174,7 @@ fn subagent_group_bytes(group: &TuiSubAgentGroup) -> LayerBytes {
     string_layer_bytes(&group.instance_id)
         + string_layer_bytes(&group.agent_id)
         + string_layer_bytes(&group.agent_name)
-        + option_string_layer_bytes(&group.error_reason)
+        + option_string_layer_bytes(group.error_reason.as_ref())
         + im_vector_slot_layer_bytes(&group.view_models)
 }
 
@@ -179,14 +183,14 @@ fn collapsed_group_bytes(group: &TuiCollapsedGroup) -> LayerBytes {
 }
 
 fn divider_bytes(divider: &TuiDivider) -> LayerBytes {
-    option_string_layer_bytes(&divider.label)
+    option_string_layer_bytes(divider.label.as_ref())
 }
 
 fn ask_user_bytes(block: &TuiAskUserBlock) -> LayerBytes {
     let mut bytes = string_layer_bytes(&block.verb)
         + string_layer_bytes(&block.question)
-        + option_string_layer_bytes(&block.result)
-        + option_string_layer_bytes(&block.request_id)
+        + option_string_layer_bytes(block.result.as_ref())
+        + option_string_layer_bytes(block.request_id.as_ref())
         + vec_slot_layer_bytes(&block.options)
         + vec_slot_layer_bytes(&block.items)
         + vec_slot_layer_bytes(&block.question_ids);
@@ -368,3 +372,7 @@ impl BridgeState {
         );
     }
 }
+
+use crate::kit::atoms::BG_LIVE_DETAIL;
+
+use crate::kit::atoms::FOLD_OVERRIDES;

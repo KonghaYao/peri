@@ -4,7 +4,24 @@
 //! App 回调经 canonical 入口（与 `apps/request` façade 同一条链）驱动；Host invoke
 //! 经 relay 的 `invoke_app`（= `peri/mcp/invoke` 的生产路径）。
 
-use super::*;
+use crate::host::mcp_apps_idle_tests::Fixture;
+use crate::host::mcp_apps_idle_tests::FrameTransport;
+use crate::host::mcp_apps_idle_tests::APP_TOOL;
+use crate::host::mcp_apps_idle_tests::SERVER;
+use crate::host::mcp_apps_idle_tests::SESSION;
+use crate::transport::AcpTransport;
+use peri_acp_types::interaction::ConnectionEpoch;
+use peri_acp_types::mcp_apps::McpAppsErrorKind;
+use peri_acp_types::mcp_apps::McpAppsRelayPort;
+use peri_acp_types::mcp_apps::NotExecutedCause;
+use peri_acp_types::mcp_apps::SessionInvocationOutcome;
+use peri_acp_types::mcp_apps::SessionInvocationPort;
+use peri_acp_types::mcp_apps::MCP_APPS_ENVELOPE_VERSION;
+use peri_acp_types::mcp_apps::MCP_APPS_PROTOCOL_VERSION;
+use peri_acp_types::mcp_apps_facade::ClientViewId;
+use serde_json::json;
+use serde_json::Value;
+use std::sync::Arc;
 
 /// [A12] idle App 回调：审批经 session 交互路由送达在线连接（owner = App），
 /// 批准后恰好一次 wire 调用，结果逐字回传。
@@ -67,7 +84,7 @@ async fn no_online_endpoint_is_not_executed_and_never_reported_as_user_rejection
         .app_callback(&view)
         .await
         .expect_err("无在线 endpoint 不得执行");
-    assert_kind(
+    crate::host::mcp_apps_idle_tests::assert_kind(
         kind,
         McpAppsErrorKind::ApprovalUnavailable,
         "必须用独立错误码表达「未获批准」",
@@ -135,7 +152,7 @@ async fn retiring_one_connection_does_not_cancel_dispatched_call_or_other_connec
         .app_callback(&first)
         .await
         .expect_err("路由已 detach ⇒ 未获批准");
-    assert_kind(
+    crate::host::mcp_apps_idle_tests::assert_kind(
         kind,
         McpAppsErrorKind::ApprovalUnavailable,
         "record 必须仍附着（未撤销）",
@@ -209,7 +226,7 @@ async fn user_rejection_is_reported_as_policy_denied_not_approval_unavailable() 
         .app_callback(&view)
         .await
         .expect_err("用户拒绝不得执行");
-    assert_kind(kind, McpAppsErrorKind::PolicyDenied, "用户拒绝");
+    crate::host::mcp_apps_idle_tests::assert_kind(kind, McpAppsErrorKind::PolicyDenied, "用户拒绝");
     assert_eq!(fixture.calls(), 1, "拒绝 ⇒ 零新增 wire 调用");
     assert_eq!(transport.permission_frames().len(), 1, "拒绝来自真实应答帧");
     assert_eq!(
@@ -239,7 +256,11 @@ async fn session_closing_revokes_records_without_rewriting_past_execution() {
         .app_callback(&view)
         .await
         .expect_err("已撤销的 record 不得执行");
-    assert_kind(kind, McpAppsErrorKind::PolicyDenied, "撤销是显式拒绝");
+    crate::host::mcp_apps_idle_tests::assert_kind(
+        kind,
+        McpAppsErrorKind::PolicyDenied,
+        "撤销是显式拒绝",
+    );
     assert_eq!(fixture.calls(), 1, "零新增 wire 调用");
     fixture.shutdown().await;
 }
@@ -337,7 +358,7 @@ async fn multi_view_detach_and_reattach_keeps_epoch_authority() {
         .app_callback(&view_one)
         .await
         .expect_err("已 detach 的 View 不得执行");
-    assert_kind(
+    crate::host::mcp_apps_idle_tests::assert_kind(
         kind,
         McpAppsErrorKind::ApprovalUnavailable,
         "detach ⇒ 未获批准",

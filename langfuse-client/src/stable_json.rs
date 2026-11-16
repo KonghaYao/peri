@@ -17,10 +17,10 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 /// 键按字典序输出的 JSON 值视图；对象递归排序，数组保持原有顺序。
-pub(crate) struct StableJson<'a>(pub(crate) &'a Value);
+pub(crate) struct StableJson<'value>(pub(crate) &'value Value);
 
 /// 键按字典序输出的 map 视图；值与 [`StableJson`] 共用同一递归口径。
-pub(crate) struct StableMap<'a, V: Stable>(pub(crate) &'a HashMap<String, V>);
+pub(crate) struct StableMap<'value, V: Stable>(pub(crate) &'value HashMap<String, V>);
 
 /// 可稳定序列化的 JSON 值：`Value` 递归排序；标量与字符串没有键序问题，直接透传。
 pub(crate) trait Stable {
@@ -89,7 +89,7 @@ impl<V: Stable> Serialize for StableMap<'_, V> {
 }
 
 /// `Stable` 值的 `Serialize` 适配器；map 条目只能传 `&T: Serialize`，这里补上桥接。
-struct StableEntry<'a, V>(&'a V);
+struct StableEntry<'value, V>(&'value V);
 
 impl<V: Stable> Serialize for StableEntry<'_, V> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {

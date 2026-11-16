@@ -1,10 +1,10 @@
 //! 生产装配前的端口还原与父工具投影；所有句柄仍由 assemble 持有。
-use super::{open_builtin_bridges, AssemblyContext};
-use crate::{
-    mcp::{McpClientPool, McpResourceTool},
-    permission::{AutoClassifier, LlmAutoClassifier},
-    tool_search::ToolSearchIndex,
-};
+use super::AssemblyContext;
+use crate::mcp::McpClientPool;
+use crate::mcp::McpResourceTool;
+use crate::permission::AutoClassifier;
+use crate::permission::LlmAutoClassifier;
+use crate::tool_search::ToolSearchIndex;
 use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_agent::session::factory::AssemblyError;
 use peri_agent::tools::BaseTool;
@@ -91,7 +91,7 @@ pub(super) fn resolve_ports(ctx: &AssemblyContext) -> Result<ResolvedPorts, Asse
 
 pub(super) fn build_parent_tools(
     ctx: &AssemblyContext,
-    mcp_pool_concrete: &Option<Arc<McpClientPool>>,
+    mcp_pool_concrete: Option<&Arc<McpClientPool>>,
 ) -> Vec<Box<dyn BaseTool>> {
     let AssemblyContext {
         mcp_skill_registry,
@@ -110,8 +110,8 @@ pub(super) fn build_parent_tools(
     // `WorkspaceMiddleware`（注册表 `policy_key`，与 Web/Artifact 同一条路径）。
     let mut parent_tools: Vec<Box<dyn BaseTool>> = Vec::new();
     if !disabled.contains("McpMiddleware") {
-        if let Some(ref pool) = mcp_pool_concrete {
-            parent_tools.extend(open_builtin_bridges(pool, disabled));
+        if let Some(pool) = mcp_pool_concrete {
+            parent_tools.extend(super::open_builtin_bridges(pool, disabled));
             if pool.has_resources() {
                 parent_tools.push(Box::new(
                     McpResourceTool::new(

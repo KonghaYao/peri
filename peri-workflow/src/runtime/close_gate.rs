@@ -9,18 +9,21 @@
 //! 一律拒绝。只设一个布尔位（先查后注册）会在两者之间留下窗口（对抗审查 F6）。
 
 use parking_lot::{RwLock, RwLockReadGuard};
+use std::fmt::{self, Debug, Formatter};
 
 /// 关闭门（`WorkflowRuntime` 持有，任务表共享同一实例）。
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct CloseGate {
     closed: RwLock<bool>,
 }
 
 impl CloseGate {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    #[must_use]
     pub fn is_closed(&self) -> bool {
         *self.closed.read()
     }
@@ -40,10 +43,18 @@ impl CloseGate {
 }
 
 /// 准入票据：持有期间 `mark_closed` 阻塞。
-pub struct AdmissionTicket<'a> {
-    _guard: RwLockReadGuard<'a, bool>,
+pub struct AdmissionTicket<'gate> {
+    _guard: RwLockReadGuard<'gate, bool>,
 }
 
 #[cfg(test)]
 #[path = "close_gate_test.rs"]
 mod tests;
+
+impl<'gate> Debug for AdmissionTicket<'gate> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AdmissionTicket")
+            .finish_non_exhaustive()
+    }
+}

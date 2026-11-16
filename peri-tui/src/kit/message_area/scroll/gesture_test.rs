@@ -1,8 +1,15 @@
-use super::*;
-use crate::kit::message_area::selection::{build_wrap_map, extract_visual_range_index};
+use super::DragAction;
+use super::GesturePending;
+use super::MouseButton;
+use super::MouseEventKind;
+use super::Rect;
+use super::SlotIndex;
+use super::TextSelection;
+
 use ratatui_kit::ratatui::text::Line;
 use std::sync::Arc;
 
+#[must_use]
 fn pending() -> GesturePending {
     GesturePending {
         screen: (20, 10),
@@ -13,7 +20,7 @@ fn pending() -> GesturePending {
 
 #[test]
 fn pending_selection_captures_drag_outside_message_area() {
-    assert!(selection_captures_pointer(
+    assert!(super::selection_captures_pointer(
         Some(pending()),
         false,
         MouseEventKind::Drag(MouseButton::Left),
@@ -22,7 +29,7 @@ fn pending_selection_captures_drag_outside_message_area() {
 
 #[test]
 fn armed_selection_captures_release_outside_message_area() {
-    assert!(selection_captures_pointer(
+    assert!(super::selection_captures_pointer(
         None,
         true,
         MouseEventKind::Up(MouseButton::Left),
@@ -31,7 +38,7 @@ fn armed_selection_captures_release_outside_message_area() {
 
 #[test]
 fn idle_selection_does_not_capture_pointer() {
-    assert!(!selection_captures_pointer(
+    assert!(!super::selection_captures_pointer(
         None,
         false,
         MouseEventKind::Drag(MouseButton::Left),
@@ -46,14 +53,18 @@ fn selection_does_not_capture_other_gestures() {
         MouseEventKind::ScrollDown,
         MouseEventKind::Moved,
     ] {
-        assert!(!selection_captures_pointer(Some(pending()), true, kind));
+        assert!(!super::selection_captures_pointer(
+            Some(pending()),
+            true,
+            kind
+        ));
     }
 }
 
 #[test]
 fn selection_position_uses_centered_area_and_scroll_offset() {
     assert_eq!(
-        selection_position(Rect::new(10, 5, 40, 10), (25, 8), 70_000),
+        super::selection_position(Rect::new(10, 5, 40, 10), (25, 8), 70_000),
         (70_003, 15),
     );
 }
@@ -66,14 +77,14 @@ fn selection_position_in_center_band_uses_band_relative_columns() {
     let band = crate::kit::layout::center_band_area(Rect::new(0, 0, 140, 40), grid);
     assert_eq!(grid.left_pad, 11);
     assert_eq!(band.x, 11);
-    assert_eq!(selection_position(band, (20, 5), 0), (5, 9));
+    assert_eq!(super::selection_position(band, (20, 5), 0), (5, 9));
 }
 
 #[test]
 fn selection_position_clamps_outside_viewport() {
     let area = Rect::new(10, 5, 40, 10);
-    assert_eq!(selection_position(area, (0, 0), 100), (100, 0));
-    assert_eq!(selection_position(area, (70, 30), 100), (109, 40));
+    assert_eq!(super::selection_position(area, (0, 0), 100), (100, 0));
+    assert_eq!(super::selection_position(area, (70, 30), 100), (109, 40));
 }
 
 #[test]
@@ -81,11 +92,14 @@ fn selection_release_uses_endpoint_even_when_last_drag_was_throttled() {
     let mut selection = TextSelection::new();
     selection.start_drag(105, 10);
     selection.update_drag(105, 15);
-    assert_eq!(drag_step(None, (35, 10), true), DragAction::Throttled);
-
-    let visual = selection_position(Rect::new(10, 5, 40, 10), (35, 10), 100);
     assert_eq!(
-        selection_bounds_on_release(&mut selection, visual),
+        super::drag_step(None, (35, 10), true),
+        DragAction::Throttled
+    );
+
+    let visual = super::selection_position(Rect::new(10, 5, 40, 10), (35, 10), 100);
+    assert_eq!(
+        super::selection_bounds_on_release(&mut selection, visual),
         Some(((105, 10), (105, 25))),
     );
 }
@@ -94,14 +108,14 @@ fn selection_release_uses_endpoint_even_when_last_drag_was_throttled() {
 fn selection_drag_outside_viewport_can_be_released_and_cleared() {
     let pending = pending();
     let screen = (70, 30);
-    let DragAction::Upgrade(pending) = drag_step(Some(pending), screen, true) else {
+    let DragAction::Upgrade(pending) = super::drag_step(Some(pending), screen, true) else {
         panic!("drag outside viewport must upgrade the pending gesture");
     };
     let mut selection = TextSelection::new();
     selection.start_drag(pending.visual.0, pending.visual.1);
-    let visual = selection_position(Rect::new(10, 5, 40, 10), screen, 100);
+    let visual = super::selection_position(Rect::new(10, 5, 40, 10), screen, 100);
     assert_eq!(
-        selection_bounds_on_release(&mut selection, visual),
+        super::selection_bounds_on_release(&mut selection, visual),
         Some(((105, 10), (109, 40))),
     );
     selection.clear();
@@ -115,7 +129,7 @@ fn reverse_selection_release_normalizes_final_endpoint() {
     selection.start_drag(109, 30);
     selection.update_drag(107, 10);
     assert_eq!(
-        selection_bounds_on_release(&mut selection, (100, 0)),
+        super::selection_bounds_on_release(&mut selection, (100, 0)),
         Some(((100, 0), (109, 30))),
     );
 }
@@ -123,23 +137,28 @@ fn reverse_selection_release_normalizes_final_endpoint() {
 #[test]
 fn release_without_drag_does_not_create_selection() {
     let mut selection = TextSelection::new();
-    assert_eq!(selection_bounds_on_release(&mut selection, (105, 10)), None);
+    assert_eq!(
+        super::selection_bounds_on_release(&mut selection, (105, 10)),
+        None
+    );
     assert!(!selection.is_active());
 }
 
 #[test]
 fn fast_selection_copies_through_release_endpoint_with_wide_characters() {
     let lines = vec![Line::from("你好abcdef")];
-    let (_, map) = build_wrap_map(&lines, 20);
+    let (_, map) = crate::kit::message_area::selection::build_wrap_map(&lines, 20);
     let index = SlotIndex::new(vec![Arc::new(lines)], vec![Arc::new(map)]);
     let mut selection = TextSelection::new();
     selection.start_drag(0, 0);
     selection.update_drag(0, 4);
-    let visual = selection_position(Rect::new(10, 5, 20, 2), (20, 5), 0);
-    let (start, end) = selection_bounds_on_release(&mut selection, visual).unwrap();
+    let visual = super::selection_position(Rect::new(10, 5, 20, 2), (20, 5), 0);
+    let (start, end) = super::selection_bounds_on_release(&mut selection, visual).expect("fast selection copies through release endpoint with wide characters: the selection_bounds_on_release fixture operation uses valid inputs");
 
     assert_eq!(
-        extract_visual_range_index(&index, start, end, 20, None, None),
+        crate::kit::message_area::selection::extract_visual_range_index(
+            &index, start, end, 20, None, None
+        ),
         Some("你好abcdef".to_string()),
     );
 }
@@ -147,15 +166,17 @@ fn fast_selection_copies_through_release_endpoint_with_wide_characters() {
 #[test]
 fn selection_released_outside_viewport_copies_visible_lines() {
     let lines = vec![Line::from("你好"), Line::from("abcdef")];
-    let (_, map) = build_wrap_map(&lines, 20);
+    let (_, map) = crate::kit::message_area::selection::build_wrap_map(&lines, 20);
     let index = SlotIndex::new(vec![Arc::new(lines)], vec![Arc::new(map)]);
     let mut selection = TextSelection::new();
     selection.start_drag(0, 0);
-    let visual = selection_position(Rect::new(10, 5, 20, 2), (99, 99), 0);
-    let (start, end) = selection_bounds_on_release(&mut selection, visual).unwrap();
+    let visual = super::selection_position(Rect::new(10, 5, 20, 2), (99, 99), 0);
+    let (start, end) = super::selection_bounds_on_release(&mut selection, visual).expect("selection released outside viewport copies visible lines: the selection_bounds_on_release fixture operation uses valid inputs");
 
     assert_eq!(
-        extract_visual_range_index(&index, start, end, 20, None, None),
+        crate::kit::message_area::selection::extract_visual_range_index(
+            &index, start, end, 20, None, None
+        ),
         Some("你好\nabcdef".to_string()),
     );
 }

@@ -1,12 +1,12 @@
 use std::future::Future;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use peri_acp_types::tasks::ExternalExecutionGuard;
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::{task_tracker::TaskTrackerToken, TaskTracker};
+use tokio_util::task::task_tracker::TaskTrackerToken;
+use tokio_util::task::TaskTracker;
 
 /// Owns completion evidence separately from the user-visible task registry.
 ///

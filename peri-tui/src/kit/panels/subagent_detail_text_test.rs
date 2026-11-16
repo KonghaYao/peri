@@ -1,4 +1,4 @@
-use super::*;
+use super::{Arc, Line, TextLayout};
 
 #[test]
 fn newline_heavy_history_keeps_a_sparse_index_and_only_materializes_visible_rows() {
@@ -9,7 +9,7 @@ fn newline_heavy_history_keeps_a_sparse_index_and_only_materializes_visible_rows
     assert!(layout.checkpoints.capacity() * std::mem::size_of::<usize>() <= 128 * 1024);
     let visible = layout.lines(layout.height() - 10..layout.height());
     assert_eq!(visible.len(), 10);
-    assert_eq!(visible.last().unwrap().to_string(), "last row");
+    assert_eq!(visible.last().expect("newline heavy history keeps a sparse index and only materializes visible rows: the fixture collection must contain the expected entry").to_string(), "last row");
     assert!(layout.lines(layout.height()..usize::MAX).is_empty());
 }
 

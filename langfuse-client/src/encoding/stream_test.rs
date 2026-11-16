@@ -17,7 +17,6 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use serde_json::{json, Value};
 
-use super::{measure_otlp, write_otlp};
 use crate::error::LangfuseError;
 use crate::memory::MemoryBudget;
 use crate::payload::{BudgetedBytes, InputSnapshot};
@@ -139,14 +138,14 @@ const TRACE_ID: &str = "11111111111111111111111111111111";
 const PARENT_ID: &str = "3333333333333333";
 
 fn budget(limit: usize) -> Arc<MemoryBudget> {
-    MemoryBudget::new(limit).expect("budget")
+    MemoryBudget::try_new(limit).expect("budget")
 }
 
 /// 冻结字节的内存来源（低于阈值时的 inline 路径）。
 fn inline_source(budget: &Arc<MemoryBudget>, bytes: &[u8]) -> InputSource {
     let permit = budget.try_reserve(bytes.len()).expect("permit");
     InputSource::Ready(InputSnapshot::Inline(
-        BudgetedBytes::new(Bytes::copy_from_slice(bytes), permit).expect("bytes"),
+        BudgetedBytes::try_new(Bytes::copy_from_slice(bytes), permit).expect("bytes"),
     ))
 }
 
@@ -433,8 +432,11 @@ fn sample(
 /// 浅合并两组对象键（后者覆盖前者），用于把公共字段拼进各 body。
 fn merge(base: &Value, extra: Value) -> Value {
     let mut merged = base.as_object().expect("object").clone();
-    for (key, value) in extra.as_object().expect("object") {
-        merged.insert(key.clone(), value.clone());
+    {
+        let iterated_extra = extra.as_object().expect("object");
+        for (key, value) in iterated_extra {
+            merged.insert(key.clone(), value.clone());
+        }
     }
     Value::Object(merged)
 }
@@ -472,7 +474,7 @@ fn assert_exact(span: &Value, key: &str, baseline: &[u8]) {
 
 fn write_one(event: &TelemetryEvent) -> Vec<u8> {
     let mut body = Vec::new();
-    let written = write_otlp(std::slice::from_ref(event), &mut body).expect("write otlp");
+    let written = super::write_otlp(std::slice::from_ref(event), &mut body).expect("write otlp");
     assert_eq!(written, body.len() as u64, "返回长度必须等于实际字节数");
     body
 }
@@ -530,7 +532,7 @@ fn hundred_boundary_inputs_roundtrip_exact_bytes() {
             .expect("start")
             .is_empty());
         assert_eq!(
-            measure_otlp(std::slice::from_ref(&event), usize::MAX).expect("measure"),
+            super::measure_otlp(std::slice::from_ref(&event), usize::MAX).expect("measure"),
             body.len() as u64
         );
     }
@@ -550,17 +552,21 @@ fn escaped_utf8_across_chunk_boundary() {
         assert_eq!(out, expected, "chunk={chunk} 必须与整块读入逐字节相同");
     }
     // 同一批样本的冻结字节在任意块大小下都必须与 serde 输出一致。
-    for value in sample_values().iter().take(16) {
-        let bytes = serde_json::to_vec(value).expect("frozen bytes");
-        let expected =
-            serde_json::to_vec(&String::from_utf8(bytes.clone()).expect("utf8")).expect("serde");
-        for chunk in [1usize, 3, 64] {
-            let mut buffer = vec![0u8; chunk];
-            let mut out = Vec::new();
-            let mut reader: &[u8] = &bytes;
-            super::json_string::write_json_string(&mut reader, &mut out, &mut buffer)
-                .expect("escape");
-            assert_eq!(out, expected, "chunk={chunk} 保真失败：{value}");
+    {
+        let sample_cases = sample_values();
+        let sampled_values = sample_cases.iter().take(16);
+        for value in sampled_values {
+            let bytes = serde_json::to_vec(value).expect("frozen bytes");
+            let expected = serde_json::to_vec(&String::from_utf8(bytes.clone()).expect("utf8"))
+                .expect("serde");
+            for chunk in [1usize, 3, 64] {
+                let mut buffer = vec![0u8; chunk];
+                let mut out = Vec::new();
+                let mut reader: &[u8] = &bytes;
+                super::json_string::write_json_string(&mut reader, &mut out, &mut buffer)
+                    .expect("escape");
+                assert_eq!(out, expected, "chunk={chunk} 保真失败：{value}");
+            }
         }
     }
 }
@@ -620,7 +626,7 @@ fn preparing_source_is_rejected_instead_of_encoding_empty_body() {
     )
     .expect("telemetry event");
     let mut body = Vec::new();
-    let error = write_otlp(std::slice::from_ref(&event), &mut body).unwrap_err();
+    let error = super::write_otlp(std::slice::from_ref(&event), &mut body).unwrap_err();
     assert!(matches!(error, LangfuseError::IngestionApi(_)));
     // 流式编码在遇到未就绪来源前已写出前缀，但不得写出空 stringValue，也不得收尾成完整正文。
     assert!(
@@ -644,11 +650,11 @@ fn measurement_and_writing_share_one_metering() {
     let written = body.len() as u64;
     for limit in [body.len(), body.len() + 1] {
         assert_eq!(
-            measure_otlp(std::slice::from_ref(&event), limit).unwrap(),
+            super::measure_otlp(std::slice::from_ref(&event), limit).unwrap(),
             written
         );
     }
-    let error = measure_otlp(std::slice::from_ref(&event), body.len() - 1).unwrap_err();
+    let error = super::measure_otlp(std::slice::from_ref(&event), body.len() - 1).unwrap_err();
     assert!(matches!(
         error,
         LangfuseError::PayloadTooLarge { limit_bytes } if limit_bytes == body.len() - 1
@@ -712,7 +718,7 @@ fn write_failure_never_exposes_the_body() {
             "timestamp": "1970-01-01T00:00:00Z"},
     }));
     let event = TelemetryEvent::try_new(event, None, None, &budget).expect("event");
-    let error = write_otlp(std::slice::from_ref(&event), &mut Rejecting).unwrap_err();
+    let error = super::write_otlp(std::slice::from_ref(&event), &mut Rejecting).unwrap_err();
     assert!(matches!(error, LangfuseError::IngestionApi(_)));
     assert!(!error.to_string().contains("SECRET-MARKER"));
 }
@@ -827,7 +833,7 @@ fn frozen_baseline_bytes_are_stable() {
         })
         .collect();
     let mut body = Vec::new();
-    let written = write_otlp(&telemetry, &mut body).expect("write otlp");
+    let written = super::write_otlp(&telemetry, &mut body).expect("write otlp");
     assert_eq!(written, body.len() as u64, "返回长度必须等于实际字节数");
     assert_eq!(
         String::from_utf8(body).expect("utf8"),

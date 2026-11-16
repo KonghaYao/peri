@@ -1,4 +1,9 @@
-use super::*;
+use super::AcpEventData;
+use super::AcpEventWithEpoch;
+use super::AcpNotification;
+use super::CancellationToken;
+use super::mpsc;
+
 use serde_json::json;
 #[tokio::test]
 async fn test_history_committed_notification_forwards_typed_event() {
@@ -18,7 +23,7 @@ async fn test_history_committed_notification_forwards_typed_event() {
         "committedTail": tail,
         "hint": { "kind": "open", "anchor": { "kind": "latest" } }
     });
-    let owner = forward_notification(
+    let owner = super::forward_notification(
         &bridge_tx,
         AcpNotification::HistoryCommitted {
             session_id: "s1".into(),
@@ -45,7 +50,7 @@ fn spawn_test_notifier() -> (
         mpsc::channel(crate::acp_client::client::NOTIFICATION_QUEUE_CAPACITY);
     let (bridge_tx, bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let shutdown = CancellationToken::new();
-    let _handle = spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
+    let _handle = super::spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
     (notif_tx, bridge_rx, shutdown)
 }
 
@@ -60,7 +65,9 @@ async fn assert_notifier_reached_barrier(
             request_id: None,
         })
         .await
-        .unwrap();
+        .expect(
+            "assert notifier reached barrier: fixture task and request must complete successfully",
+        );
     let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
         .await
         .expect("notifier must process the barrier")
@@ -88,7 +95,7 @@ async fn test_session_update_agent_message_chunk_to_text_chunk() {
             }),
         })
         .await
-        .unwrap();
+        .expect("session update agent message chunk to text chunk: fixture task and request must complete successfully");
 
     let ev = bridge_rx.recv().await.expect("expected one event");
     match ev.event {
@@ -123,7 +130,7 @@ async fn interleaved_sessions_keep_stream_identity_and_payload_together() {
                 }),
             })
             .await
-            .unwrap();
+            .expect("interleaved sessions keep stream identity and payload together: fixture task and request must complete successfully");
     }
     for (session, child, text) in inputs {
         let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
@@ -156,7 +163,7 @@ async fn test_session_update_agent_thought_chunk() {
             }),
         })
         .await
-        .unwrap();
+        .expect("session update agent thought chunk: fixture task and request must complete successfully");
 
     let ev = bridge_rx.recv().await.expect("expected one event");
     match ev.event {
@@ -188,7 +195,7 @@ async fn test_session_update_tool_call_to_tool_started() {
             }),
         })
         .await
-        .unwrap();
+        .expect("session update tool call to tool started: fixture task and request must complete successfully");
 
     let ev = bridge_rx.recv().await.expect("expected one event");
     match ev.event {
@@ -237,7 +244,7 @@ async fn test_session_update_tool_call_reads_origin_message_id_from_meta() {
             }),
         })
         .await
-        .unwrap();
+        .expect("session update tool call reads origin message id from meta: fixture task and request must complete successfully");
 
     let ev = bridge_rx.recv().await.expect("expected one event");
     match ev.event {
@@ -283,7 +290,7 @@ async fn test_session_update_tool_call_reads_unreadable_origin_from_meta() {
             }),
         })
         .await
-        .unwrap();
+        .expect("session update tool call reads unreadable origin from meta: fixture task and request must complete successfully");
 
     let ev = bridge_rx.recv().await.expect("expected one event");
     match ev.event {
@@ -322,7 +329,7 @@ async fn test_session_update_tool_call_update_flattened_format() {
             }),
         })
         .await
-        .unwrap();
+        .expect("session update tool call update flattened format: fixture task and request must complete successfully");
 
     let ev = bridge_rx.recv().await.expect("expected one event");
     match ev.event {
@@ -359,7 +366,7 @@ async fn test_session_update_tool_call_update_nested_fields_fallback() {
             }),
         })
         .await
-        .unwrap();
+        .expect("session update tool call update nested fields fallback: fixture task and request must complete successfully");
 
     let ev = bridge_rx.recv().await.expect("expected one event");
     match ev.event {
@@ -391,7 +398,7 @@ async fn test_session_replay_agent_message_chunk_to_committed_assistant_text() {
             }),
         })
         .await
-        .unwrap();
+        .expect("session replay agent message chunk to committed assistant text: fixture task and request must complete successfully");
 
     let ev = bridge_rx.recv().await.expect("expected one event");
     match ev.event {
@@ -419,7 +426,9 @@ async fn test_unstable_event_unknown_dropped() {
             data: json!({"x": 1}),
         })
         .await
-        .unwrap();
+        .expect(
+            "unstable event unknown dropped: fixture task and request must complete successfully",
+        );
 
     assert_notifier_reached_barrier(&notif_tx, &mut bridge_rx).await;
 
@@ -445,7 +454,7 @@ async fn test_session_replay_tool_call_retains_raw_input_for_semantic_card() {
             }),
         })
         .await
-        .unwrap();
+        .expect("session replay tool call retains raw input for semantic card: fixture task and request must complete successfully");
 
     let event = bridge_rx.recv().await.expect("expected replay event");
     match event.event {
@@ -473,7 +482,7 @@ async fn test_non_terminal_tool_update_is_not_forwarded_as_tool_end() {
             }),
         })
         .await
-        .unwrap();
+        .expect("non terminal tool update is not forwarded as tool end: fixture task and request must complete successfully");
 
     assert_notifier_reached_barrier(&notif_tx, &mut bridge_rx).await;
     shutdown.cancel();
@@ -509,7 +518,7 @@ async fn test_unstable_event_reminder_entry_marks_precede_content() {
             }),
         })
         .await
-        .unwrap();
+        .expect("unstable event reminder entry marks precede content: fixture task and request must complete successfully");
 
     let mark = bridge_rx
         .recv()

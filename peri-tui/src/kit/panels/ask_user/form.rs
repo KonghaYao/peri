@@ -3,11 +3,8 @@
 
 use crate::components::textarea::TextAreaState;
 use crate::kit::acp_types::PendingInteraction;
-use crate::kit::list_nav::{
-    ListNavAction, classify_list_nav, cycle_next, cycle_previous, next_selection,
-    previous_selection,
-};
-use peri_acp_types::event_data::AskUser;
+use crate::kit::list_nav::ListNavAction;
+
 use ratatui_kit::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
 
@@ -85,7 +82,7 @@ impl FormState {
     pub fn accepts_key(&self, key: &KeyEvent, pending: Option<&AskUser>) -> bool {
         self.is_typing
             || (key.modifiers, key.code) == (KeyModifiers::NONE, KeyCode::Char(' '))
-            || match classify_list_nav(key) {
+            || match crate::kit::list_nav::classify_list_nav(key) {
                 Some(ListNavAction::CycleForward | ListNavAction::CycleBackward) => {
                     pending.is_some_and(|p| !p.questions.is_empty())
                 }
@@ -113,7 +110,7 @@ impl FormState {
             }
             return FormOutcome::Consumed;
         }
-        self.navigate(classify_list_nav(key), pending)
+        self.navigate(crate::kit::list_nav::classify_list_nav(key), pending)
     }
 
     fn navigate(
@@ -125,7 +122,8 @@ impl FormState {
         match action {
             Some(ListNavAction::MoveUp) => {
                 if !self.is_typing {
-                    self.focused_option = previous_selection(self.focused_option);
+                    self.focused_option =
+                        crate::kit::list_nav::previous_selection(self.focused_option);
                 }
             }
             Some(ListNavAction::MoveDown) => {
@@ -135,7 +133,8 @@ impl FormState {
                         .map(|q| q.options.len() + 1)
                         .unwrap_or(0);
                     if limit > 0 {
-                        self.focused_option = next_selection(self.focused_option, limit);
+                        self.focused_option =
+                            crate::kit::list_nav::next_selection(self.focused_option, limit);
                         if self.focused_option == limit.saturating_sub(1) {
                             self.begin_custom_input(self.focused);
                         }
@@ -145,9 +144,9 @@ impl FormState {
             Some(ListNavAction::CycleForward | ListNavAction::CycleBackward) if count > 0 => {
                 if !self.is_typing {
                     self.focused = if action == Some(ListNavAction::CycleForward) {
-                        cycle_next(self.focused, count)
+                        crate::kit::list_nav::cycle_next(self.focused, count)
                     } else {
-                        cycle_previous(self.focused, count)
+                        crate::kit::list_nav::cycle_previous(self.focused, count)
                     };
                     self.focused_option = self
                         .answers
@@ -224,37 +223,42 @@ pub(super) fn build_answers_map(
 ) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     if let Some(au) = pending {
-        for (i, q) in au.questions.iter().enumerate() {
-            let custom = custom_answers.get(i).cloned().flatten();
-            let selected: Vec<usize> = answers.get(i).cloned().unwrap_or_default();
-            let val = if q.multi_select {
-                // 多选：合并预设选项 labels + 自定义文本
-                let mut labels: Vec<serde_json::Value> = selected
-                    .iter()
-                    .filter_map(|idx| q.options.get(*idx).map(|opt| json!(opt.label)))
-                    .collect();
-                if let Some(custom_text) = custom
-                    && !custom_text.is_empty()
-                {
-                    labels.push(json!(custom_text));
-                }
-                if labels.is_empty() {
-                    json!([])
+        {
+            let iteration_items = au.questions.iter().enumerate();
+            for (i, q) in iteration_items {
+                let custom = custom_answers.get(i).cloned().flatten();
+                let selected: Vec<usize> = answers.get(i).cloned().unwrap_or_default();
+                let val = if q.multi_select {
+                    // 多选：合并预设选项 labels + 自定义文本
+                    let mut labels: Vec<serde_json::Value> = selected
+                        .iter()
+                        .filter_map(|idx| q.options.get(*idx).map(|opt| json!(opt.label)))
+                        .collect();
+                    if let Some(custom_text) = custom
+                        && !custom_text.is_empty()
+                    {
+                        labels.push(json!(custom_text));
+                    }
+                    if labels.is_empty() {
+                        json!([])
+                    } else {
+                        json!(labels)
+                    }
+                } else if let Some(custom_text) = custom {
+                    // 单选：自定义文本优先
+                    json!(custom_text)
                 } else {
-                    json!(labels)
-                }
-            } else if let Some(custom_text) = custom {
-                // 单选：自定义文本优先
-                json!(custom_text)
-            } else {
-                // 单选：仅预设选项
-                selected
-                    .first()
-                    .and_then(|idx| q.options.get(*idx).map(|opt| json!(opt.label)))
-                    .unwrap_or(json!(""))
-            };
-            map.insert(q.id.clone(), val);
+                    // 单选：仅预设选项
+                    selected
+                        .first()
+                        .and_then(|idx| q.options.get(*idx).map(|opt| json!(opt.label)))
+                        .unwrap_or(json!(""))
+                };
+                map.insert(q.id.clone(), val);
+            }
         }
     }
     serde_json::Value::Object(map)
 }
+
+use peri_acp_types::event_data::AskUser;

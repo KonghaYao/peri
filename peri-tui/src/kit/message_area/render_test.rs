@@ -6,9 +6,8 @@
 //!   不折行」（metadata 右对齐到消息区右缘，§6.4）。
 //! - 前缀结构（§3.1）：首行 `[outer 空][accent 符号][gap]`，续行 `[outer 空][│][gap]`。
 
-use super::helpers::sym;
-use super::*;
-use crate::kit::diff_parser::parse_unified_diff;
+use ratatui_kit::ratatui::text::Line;
+
 use crate::kit::message_area::selection::build_wrap_map;
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldState, TuiAskUserBlock, TuiAssistantBubble, TuiCollapsedGroup, TuiDiffBlock,
@@ -18,7 +17,6 @@ use crate::kit::tui_render_unit::{
     TuiToolPresentation, TuiUserBubble,
 };
 use std::time::{Duration, Instant};
-use unicode_width::UnicodeWidthStr;
 
 /// 拼接渲染行全部 span 文本。
 fn line_text(line: &Line<'static>) -> String {
@@ -147,7 +145,7 @@ mod reasoning_tests;
 fn edit_card_with_diff(text: &str) -> TuiToolCard {
     let mut card = tool_card("Edit", "src/main.rs", false, false);
     card.output_summary = text.to_string();
-    card.diff = parse_unified_diff(text, Some("src/main.rs"));
+    card.diff = crate::kit::diff_parser::parse_unified_diff(text, Some("src/main.rs"));
     card.fold = FoldState::Expanded;
     card.recompute_hash();
     card

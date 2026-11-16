@@ -1,7 +1,13 @@
-use super::*;
+use crate::client::OAuthCredentialClient;
+use crate::client::REQUEST_TIMEOUT;
 use async_trait::async_trait;
+use peri_acp_types::oauth_credentials::OAuthCredentialPort;
 use peri_acp_types::oauth_credentials::OAuthCredentialResult;
+use rmcp::transport::auth::StoredCredentials;
 use std::collections::HashMap;
+use std::io;
+use std::sync::mpsc;
+use std::sync::Arc;
 
 #[derive(Default)]
 struct MemoryCredentials(tokio::sync::Mutex<HashMap<String, String>>);
@@ -35,7 +41,8 @@ impl OAuthCredentialPort for MemoryCredentials {
 #[test]
 fn event_loop_worker_without_runtime_returns_unavailable_instead_of_panicking() {
     let (_, receiver) = tokio::sync::mpsc::unbounded_channel();
-    let error = spawn_worker(Arc::new(MemoryCredentials::default()), receiver).unwrap_err();
+    let error =
+        crate::client::spawn_worker(Arc::new(MemoryCredentials::default()), receiver).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::Other);
     assert!(error
         .to_string()
@@ -48,7 +55,7 @@ async fn event_loop_worker_serves_requests_and_joins_after_last_client_drops() {
     let provider = Arc::new(MemoryCredentials::default());
     let weak_provider = Arc::downgrade(&provider);
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-    let worker = spawn_worker(provider, receiver).unwrap();
+    let worker = crate::client::spawn_worker(provider, receiver).unwrap();
     let client = OAuthCredentialClient { sender };
     let clone = client.clone();
     assert!(client.load_server("server").await.unwrap().is_none());
@@ -88,8 +95,11 @@ async fn abandoned_startup_joins_aborted_server_and_releases_provider() {
     let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     let (ready, startup) = mpsc::channel();
     drop(startup);
-    peri_time::timeout(REQUEST_TIMEOUT, run_worker(provider, receiver, Some(ready)))
-        .await
-        .unwrap();
+    peri_time::timeout(
+        REQUEST_TIMEOUT,
+        crate::client::run_worker(provider, receiver, Some(ready)),
+    )
+    .await
+    .unwrap();
     assert!(weak_provider.upgrade().is_none());
 }

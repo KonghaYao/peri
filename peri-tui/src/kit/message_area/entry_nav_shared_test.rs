@@ -1,5 +1,7 @@
-use super::*;
+use super::FoldState;
+use super::TuiRenderUnit;
 use crate::kit::tui_render_unit::{EntryStatus, TuiAssistantBubble, TuiReasoningBlock};
+
 use std::sync::Arc;
 
 #[test]
@@ -23,7 +25,7 @@ fn fold_override_copies_only_changed_payload_and_preserves_published_snapshot() 
         .into(),
     );
     let published = unit.clone();
-    apply_fold_override(&mut unit, FoldState::Expanded);
+    super::apply_fold_override(&mut unit, FoldState::Expanded);
     let TuiRenderUnit::TuiAssistantBubble(original) = &published else {
         panic!("expected original");
     };
@@ -32,15 +34,15 @@ fn fold_override_copies_only_changed_payload_and_preserves_published_snapshot() 
     };
     assert!(!Arc::ptr_eq(original, current));
     assert_eq!(
-        original.reasoning.as_ref().unwrap().fold,
+        original.reasoning.as_ref().expect("fold override copies only changed payload and preserves published snapshot: the fixture must retain its expected variant").fold,
         FoldState::Collapsed
     );
     assert_eq!(
-        current.reasoning.as_ref().unwrap().fold,
+        current.reasoning.as_ref().expect("fold override copies only changed payload and preserves published snapshot: the fixture must retain its expected variant").fold,
         FoldState::Expanded
     );
     let unchanged = unit.clone();
-    apply_fold_override(&mut unit, FoldState::Expanded);
+    super::apply_fold_override(&mut unit, FoldState::Expanded);
     let TuiRenderUnit::TuiAssistantBubble(previous) = &unchanged else {
         panic!("expected previous");
     };

@@ -20,11 +20,12 @@
 //! - `Covered` 只保留 ID + 指纹，释放通知正文与请求快照。
 //! - Stop 不得被自动唤醒绕过；`Blocked` 不能自我激活。
 //!
-//! 本模块不持有 MessageQueue，也不扫描历史提醒：投递方先调用 [`accept`] 建立
+//! 本模块不持有 MessageQueue，也不扫描历史提醒：投递方先调用 [`accept`](AsyncResultMailbox::accept) 建立
 //! 责任，再把消息 push 到队列；Receive 在规范提醒提交成功后调用
-//! [`mark_canonical_ready`]。锁不跨 await，消费者不会反向嵌套队列锁。
+//! [`mark_canonical_ready`](AsyncResultMailbox::mark_canonical_ready)。锁不跨 await，消费者不会反向嵌套队列锁。
 
 use std::collections::HashMap;
+use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -45,6 +46,7 @@ pub struct ResultScope {
 }
 
 impl ResultScope {
+    #[must_use]
     pub fn new(session_id: impl Into<String>, initiator: impl Into<String>) -> Self {
         Self {
             session_id: session_id.into(),
@@ -72,6 +74,7 @@ pub enum AsyncResultState {
 
 impl AsyncResultState {
     /// 是否进入 Full Compact / 模型投影保护集合。
+    #[must_use]
     pub fn is_protected(self) -> bool {
         matches!(
             self,
@@ -93,7 +96,8 @@ const DIAGNOSTIC_MAX_CHARS: usize = 240;
 
 fn bounded(text: &str) -> String {
     let mut out = String::new();
-    for (index, ch) in text.chars().enumerate() {
+    let paired_items = text.chars().enumerate();
+    for (index, ch) in paired_items {
         if index >= DIAGNOSTIC_MAX_CHARS {
             out.push('…');
             break;
@@ -125,10 +129,12 @@ pub struct ProtectedResults {
 }
 
 impl ProtectedResults {
+    #[must_use]
     pub fn ids(&self) -> Vec<MessageId> {
         self.items.iter().map(|item| item.delivery_id).collect()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
@@ -152,14 +158,17 @@ pub struct RequestReceipt {
 }
 
 impl RequestReceipt {
+    #[must_use]
     pub fn attempt_id(&self) -> &str {
         &self.attempt_id
     }
 
+    #[must_use]
     pub fn request_id(&self) -> &str {
         &self.request_id
     }
 
+    #[must_use]
     pub fn included_ids(&self) -> &[MessageId] {
         &self.included_ids
     }
@@ -226,6 +235,7 @@ impl Default for AsyncResultMailbox {
 }
 
 impl AsyncResultMailbox {
+    #[must_use]
     pub fn new(session_id: impl Into<String>, initiator: impl Into<String>) -> Self {
         Self {
             scope: ResultScope::new(session_id, initiator),
@@ -245,6 +255,7 @@ impl AsyncResultMailbox {
         }
     }
 
+    #[must_use]
     pub fn scope(&self) -> &ResultScope {
         &self.scope
     }
@@ -433,6 +444,7 @@ impl AsyncResultMailbox {
     }
 
     /// 当前保护集合（按接收顺序）。
+    #[must_use]
     pub fn protected_snapshot(&self) -> ProtectedResults {
         let state = self.state.lock();
         let items = state
@@ -457,6 +469,7 @@ impl AsyncResultMailbox {
     }
 
     /// 是否存在可运行的 Ready 结果（Blocked/Suspended 不算）。
+    #[must_use]
     pub fn has_ready(&self) -> bool {
         self.state
             .lock()
@@ -469,12 +482,14 @@ impl AsyncResultMailbox {
     ///
     /// 宿主在每次执行尝试开始时记录该值，失败后只用**更新**的 Ready 结果作为
     /// 自动恢复触发来源；旧失败记录不能自我激活。
+    #[must_use]
     pub fn admission_watermark(&self) -> u64 {
         let state = self.state.lock();
         state.next_admission.saturating_sub(1)
     }
 
     /// 是否存在在 `watermark` 之后接纳、且当前可运行的 Ready 结果。
+    #[must_use]
     pub fn has_ready_after(&self, watermark: u64) -> bool {
         self.state.lock().records.values().any(|record| {
             record.state == AsyncResultState::Ready && record.admission_seq > watermark
@@ -482,11 +497,13 @@ impl AsyncResultMailbox {
     }
 
     /// 保留式版本信号；订阅后先检查 [`Self::has_ready`]。
+    #[must_use]
     pub fn subscribe_state(&self) -> watch::Receiver<u64> {
         self.state_version.subscribe()
     }
 
     /// 已记录结果数量（诊断用）。
+    #[must_use]
     pub fn pending_count(&self) -> usize {
         self.state.lock().records.len()
     }
@@ -801,3 +818,11 @@ fn task_identity(reminder: &TrustedSystemReminder) -> (String, Option<String>) {
 #[cfg(test)]
 #[path = "async_result_mailbox_test.rs"]
 mod tests;
+
+impl Debug for AsyncResultMailbox {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AsyncResultMailbox")
+            .finish_non_exhaustive()
+    }
+}

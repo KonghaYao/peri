@@ -1,9 +1,16 @@
 //! Tests for async_router
 
-use super::*;
+use crate::session::async_router::AsyncRouter;
+use peri_acp_types::event::BackgroundTaskResult;
+use peri_acp_types::session::InboxHandle;
+
+use peri_acp_types::session::MessageQueue;
+use peri_acp_types::session::MessageSource;
 use peri_acp_types::session::{QueuedPayload, SessionInbox};
+use peri_acp_types::system_reminder::ReminderSeverity;
 use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::workflow::WorkflowRunStatus;
+use peri_acp_types::workflow::WorkflowTaskResult;
 use std::sync::Arc;
 
 fn make_inbox() -> (SessionInbox, InboxHandle) {
@@ -37,7 +44,7 @@ fn test_route_bg_result_pushes_defer() {
 
     router
         .route_bg_result_blocking(&result, BgTaskKind::Agent)
-        .unwrap();
+        .expect("the route bg result blocking fixture result is required for this assertion");
 
     assert_eq!(inbox.queue_for_test().len_sync(), 1);
     assert!(
@@ -53,16 +60,16 @@ fn retried_terminal_publication_preserves_delivery_identity() {
     let result = make_bg_result("task", "test-agent", "done");
     router
         .route_bg_result_blocking(&result, BgTaskKind::Agent)
-        .unwrap();
+        .expect("the route bg result blocking fixture result is required for this assertion");
     router
         .route_bg_result_blocking(&result, BgTaskKind::Agent)
-        .unwrap();
+        .expect("the route bg result blocking fixture result is required for this assertion");
     router
         .route_bg_result_blocking(
             &make_bg_result("other", "test-agent", "done"),
             BgTaskKind::Agent,
         )
-        .unwrap();
+        .expect("the route bg result blocking fixture result is required for this assertion");
     let messages = inbox.queue_for_test().drain_all_sync();
     // MQ 以稳定投递身份去重：重试不再产生第二行，身份也不变。
     assert_eq!(messages.len(), 2);
@@ -78,7 +85,7 @@ fn test_route_bg_result_uses_subagent_complete_source() {
 
     router
         .route_bg_result_blocking(&result, BgTaskKind::Agent)
-        .unwrap();
+        .expect("the route bg result blocking fixture result is required for this assertion");
 
     let msgs = inbox.queue_for_test().drain_all_sync();
     assert_eq!(msgs.len(), 1);
@@ -93,7 +100,7 @@ fn test_route_bg_result_shell_uses_shell_complete_source() {
 
     router
         .route_bg_result_blocking(&result, BgTaskKind::Shell)
-        .unwrap();
+        .expect("the route bg result blocking fixture result is required for this assertion");
 
     assert!(
         !inbox
@@ -114,7 +121,7 @@ fn test_route_bg_result_workflow_uses_workflow_complete_source() {
 
     router
         .route_bg_result_blocking(&result, BgTaskKind::Workflow)
-        .unwrap();
+        .expect("the route bg result blocking fixture result is required for this assertion");
 
     let msgs = inbox.queue_for_test().drain_all_sync();
     assert_eq!(msgs.len(), 1);
@@ -134,7 +141,9 @@ fn terminal_results_share_ensure_processing_policy_across_task_kinds() {
             let router = AsyncRouter::new(handle);
             let mut result = make_bg_result("typed-terminal", "worker", "done");
             result.success = success;
-            router.route_bg_result_blocking(&result, kind).unwrap();
+            router.route_bg_result_blocking(&result, kind).expect(
+                "the route bg result blocking fixture result is required for this assertion",
+            );
             assert!(inbox.queue_for_test().has_ensure_processing_sync());
             let messages = inbox.queue_for_test().drain_all_sync();
             assert_eq!(messages.len(), 1);
@@ -154,7 +163,7 @@ fn test_route_bg_result_notification_text_contains_task_info() {
 
     router
         .route_bg_result_blocking(&result, BgTaskKind::Agent)
-        .unwrap();
+        .expect("the route bg result blocking fixture result is required for this assertion");
 
     let msgs = inbox.queue_for_test().drain_all_sync();
     let text = match &msgs[0].payload {
@@ -182,7 +191,7 @@ fn test_route_shell_output_only_injects_file_references() {
     }));
     router
         .route_bg_result_blocking(&result, BgTaskKind::Shell)
-        .unwrap();
+        .expect("the route bg result blocking fixture result is required for this assertion");
     assert!(inbox.queue_for_test().has_wake_up_sync());
     let messages = inbox.queue_for_test().drain_all_sync();
     assert_eq!(messages.len(), 1);
@@ -192,7 +201,8 @@ fn test_route_shell_output_only_injects_file_references() {
     };
     let reminder = reminder.as_reminder();
     assert!(reminder.validate().is_ok());
-    let encoded = serde_json::to_string(reminder).unwrap();
+    let encoded = serde_json::to_string(reminder)
+        .expect("to_string must accept this test fixture representation");
     assert!(encoded.len() < 2_048, "通知大小应与原输出大小无关");
     assert!(
         !encoded.contains("私有输出正文"),
@@ -219,7 +229,7 @@ fn test_invalid_background_notification_reports_delivery_failure_without_panicki
     }));
     router
         .route_bg_result_blocking(&result, BgTaskKind::Shell)
-        .unwrap();
+        .expect("the route bg result blocking fixture result is required for this assertion");
     assert!(inbox.queue_for_test().has_wake_up_sync());
     let messages = inbox.queue_for_test().drain_all_sync();
     assert_eq!(messages.len(), 1);
@@ -230,7 +240,8 @@ fn test_invalid_background_notification_reports_delivery_failure_without_panicki
     assert_eq!(reminder.kind, "notification_failed");
     assert_eq!(reminder.metadata["success"], true);
     assert!(reminder.validate().is_ok());
-    let encoded = serde_json::to_string(reminder).unwrap();
+    let encoded = serde_json::to_string(reminder)
+        .expect("to_string must accept this test fixture representation");
     assert!(encoded.len() < 2_048);
     assert!(!encoded.contains("unrepresentable-path"));
     assert!(!encoded.contains("private output"));
@@ -251,7 +262,7 @@ fn test_route_workflow_event_pushes_defer() {
             12,
             &[],
         )
-        .unwrap();
+        .expect("the route workflow event fixture result is required for this assertion");
 
     assert_eq!(inbox.queue_for_test().len_sync(), 1);
     assert!(
@@ -275,7 +286,7 @@ fn test_route_workflow_event_uses_workflow_complete_source() {
             12,
             &[],
         )
-        .unwrap();
+        .expect("the route workflow event fixture result is required for this assertion");
 
     let msgs = inbox.queue_for_test().drain_all_sync();
     assert_eq!(msgs.len(), 1);
@@ -297,7 +308,7 @@ fn test_route_workflow_event_notification_format() {
             12,
             &[],
         )
-        .unwrap();
+        .expect("the route workflow event fixture result is required for this assertion");
 
     let msgs = inbox.queue_for_test().drain_all_sync();
     let text = match &msgs[0].payload {
@@ -326,13 +337,13 @@ fn test_route_workflow_event_status_text_distinguishes_killed_failed() {
 
     router
         .route_workflow_event("wf-killed", "deploy", "killed", 100, 1, 2, &[])
-        .unwrap();
+        .expect("the route workflow event fixture result is required for this assertion");
     router
         .route_workflow_event("wf-failed", "deploy", "failed", 100, 1, 2, &[])
-        .unwrap();
+        .expect("the route workflow event fixture result is required for this assertion");
     router
         .route_workflow_event("wf-ok", "deploy", "completed", 100, 1, 2, &[])
-        .unwrap();
+        .expect("the route workflow event fixture result is required for this assertion");
 
     let msgs = inbox.queue_for_test().drain_all_sync();
     assert_eq!(msgs.len(), 3);
@@ -373,13 +384,13 @@ fn test_multiple_routes_accumulate_in_queue() {
     let result2 = make_bg_result("task-2", "agent-b", "output-b");
     router
         .route_bg_result_blocking(&result1, BgTaskKind::Agent)
-        .unwrap();
+        .expect("the route bg result blocking fixture result is required for this assertion");
     router
         .route_workflow_event("wf-3", "test-wf", "completed", 100, 1, 2, &[])
-        .unwrap();
+        .expect("the route workflow event fixture result is required for this assertion");
     router
         .route_bg_result_blocking(&result2, BgTaskKind::Agent)
-        .unwrap();
+        .expect("the route bg result blocking fixture result is required for this assertion");
 
     assert_eq!(inbox.queue_for_test().len_sync(), 3);
 
@@ -420,8 +431,16 @@ async fn route_bg_result_reports_persistence_failure() {
     writable
         .route_bg_result(&result, BgTaskKind::Agent)
         .await
-        .unwrap();
-    assert_eq!(session.queue().snapshot().await.unwrap().len(), 1);
+        .expect("the route bg result fixture result is required for this assertion");
+    assert_eq!(
+        session
+            .queue()
+            .snapshot()
+            .await
+            .expect("the snapshot fixture result is required for this assertion")
+            .len(),
+        1
+    );
 }
 
 /// [回归] workflow 终态投递同样是终态事实：持久化失败必须返回给调用方。

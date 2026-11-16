@@ -1,7 +1,12 @@
 use chrono::Timelike;
 use tokio::sync::mpsc;
 
-use super::*;
+use crate::scheduler::CronError;
+use crate::scheduler::CronScheduler;
+use crate::scheduler::CronSchedulerPortHandle;
+use chrono::DateTime;
+use chrono::Utc;
+use peri_acp_types::cron::CronTrigger;
 
 fn new_scheduler() -> (CronScheduler, mpsc::UnboundedReceiver<CronTrigger>) {
     let (tx, rx) = mpsc::unbounded_channel();
@@ -13,7 +18,7 @@ fn test_register_valid() {
     let (mut sched, _rx) = new_scheduler();
     let id = sched.register("* * * * *", "test prompt").unwrap();
     assert!(!id.is_empty());
-    let task = sched.get_task(&id).unwrap();
+    let task = sched.task(&id).unwrap();
     assert_eq!(task.expression, "* * * * *");
     assert_eq!(task.prompt, "test prompt");
     assert!(task.enabled);
@@ -34,7 +39,7 @@ fn test_remove() {
     let id = sched.register("* * * * *", "test").unwrap();
     assert!(sched.remove(&id));
     assert!(!sched.remove(&id));
-    assert!(sched.get_task(&id).is_none());
+    assert!(sched.task(&id).is_none());
 }
 
 #[test]
@@ -42,10 +47,10 @@ fn test_toggle() {
     let (mut sched, _rx) = new_scheduler();
     let id = sched.register("* * * * *", "test").unwrap();
     assert!(sched.toggle(&id));
-    let task = sched.get_task(&id).unwrap();
+    let task = sched.task(&id).unwrap();
     assert!(!task.enabled);
     assert!(sched.toggle(&id));
-    let task = sched.get_task(&id).unwrap();
+    let task = sched.task(&id).unwrap();
     assert!(task.enabled);
     assert!(task.next_fire.is_some());
 }
@@ -85,7 +90,7 @@ fn test_tick_fires_trigger() {
     assert_eq!(trigger.prompt, "tick test");
 
     // next_fire should be updated to future
-    let task = sched.get_task(&id).unwrap();
+    let task = sched.task(&id).unwrap();
     assert!(task.next_fire.unwrap() > Utc::now() - chrono::Duration::seconds(5));
 }
 
@@ -184,7 +189,7 @@ fn fixed_after() -> DateTime<Utc> {
 /// 共享 helper 必须开启 `sloppy_ranges` 恢复兼容。
 #[test]
 fn test_parse_cron_accepts_sloppy_step_range() {
-    let cron = parse_cron("5/5 * * * *").expect("5/5 简写步进应可解析");
+    let cron = crate::scheduler::parse_cron("5/5 * * * *").expect("5/5 简写步进应可解析");
     let next = cron
         .iter_after(fixed_after())
         .next()
@@ -204,7 +209,7 @@ fn test_register_accepts_sloppy_step_range() {
     let id = sched
         .register("5/5 * * * *", "sloppy")
         .expect("注册路径应接受 5/5 简写步进");
-    let task = sched.get_task(&id).unwrap();
+    let task = sched.task(&id).unwrap();
     let next = task.next_fire.expect("注册时应计算下次触发");
     assert!(next > Utc::now());
     assert_eq!(next.minute() % 5, 0);
@@ -233,7 +238,8 @@ fn test_parse_cron_standard_expressions_unchanged() {
         ("0 */5 * * * *", "2026-01-01T00:05:00Z"),
     ];
     for (expression, expected) in cases {
-        let cron = parse_cron(expression).unwrap_or_else(|e| panic!("{expression} 应可解析: {e}"));
+        let cron = crate::scheduler::parse_cron(expression)
+            .unwrap_or_else(|e| panic!("{expression} 应可解析: {e}"));
         let next = cron
             .iter_after(fixed_after())
             .next()
@@ -251,9 +257,12 @@ fn test_parse_cron_standard_expressions_unchanged() {
 /// 放宽简写步进不应放行非法表达式。
 #[test]
 fn test_parse_cron_rejects_invalid_expression() {
-    let err = parse_cron("invalid").unwrap_err();
+    let err = crate::scheduler::parse_cron("invalid").unwrap_err();
     assert!(matches!(err, CronError::InvalidExpression(_)));
     assert!(err.to_string().contains("cron 表达式无效"));
 
-    assert!(parse_cron("61 * * * *").is_err(), "越界分钟必须被拒绝");
+    assert!(
+        crate::scheduler::parse_cron("61 * * * *").is_err(),
+        "越界分钟必须被拒绝"
+    );
 }

@@ -1,10 +1,26 @@
 //! 循环语义迭代预算、Receive 唤醒与 idle 重试。
-use super::super::*;
+use crate::agent::events::Stage;
+use crate::agent::events::StageStatus;
+
+use crate::agent::events_v2::ObserveEvent;
+use crate::agent::react::ReactLLM;
+
+use crate::agent::stages::context::StageContext;
+use crate::agent::stages::LoopResult;
+use crate::agent::stages::SharedToolMap;
+use crate::messages::BaseMessage;
 use crate::middleware::capabilities as hook_state;
+
 use crate::session::queue::MessageSource;
 use crate::session::store::FrozenContext;
+
+use crate::session::QueuedMessage;
 use crate::session::Session;
+
+use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 struct CountingFinalAnswerLLM {
     calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -97,7 +113,7 @@ async fn hook_stop_in_budget_boundary_batch_wins_without_followup_activation() {
         }))
         .build();
         assert!(matches!(
-            run_react_loop(context, 1).await,
+            crate::agent::stages::run_react_loop(context, 1).await,
             LoopResult::HookStopped { unprocessed_tool_calls } if unprocessed_tool_calls.is_empty()
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -201,7 +217,7 @@ async fn completion_during_reason_with_prefix(
         passive_prefix,
     }))
     .build();
-    let result = run_react_loop(context, max_iterations).await;
+    let result = crate::agent::stages::run_react_loop(context, max_iterations).await;
     (session, calls, result)
 }
 
@@ -216,7 +232,7 @@ async fn background_completion_at_budget_boundary_retains_followup_eligibility()
     let delivery_id =
         crate::agent::async_tasks::delivery::terminal_delivery_id("bg-budget-boundary", "terminal");
     assert!(session.transcript().read().get(delivery_id).is_none());
-    assert!(session.queue().has_ensure_processing_after_sync(&None));
+    assert!(session.queue().has_ensure_processing_after_sync(None));
     assert!(session
         .queue()
         .has_pending_defer_sync(&MessageSource::SubAgentComplete));
@@ -238,7 +254,7 @@ async fn background_completion_at_budget_boundary_retains_followup_eligibility()
     }))
     .build();
     assert!(matches!(
-        run_react_loop(context, 10).await,
+        crate::agent::stages::run_react_loop(context, 10).await,
         LoopResult::Completed
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -265,14 +281,16 @@ async fn deferred_result_that_reaches_failed_reason_is_not_requeued() {
     .with_llm(Arc::new(FailingFollowupLlm(calls.clone())))
     .build();
     assert!(matches!(
-        run_react_loop(context, 1).await,
+        crate::agent::stages::run_react_loop(context, 1).await,
         LoopResult::Error(crate::error::AgentError::Other(_))
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(session.queue().is_empty_sync());
     // 队列已排空，水位随行消失；「没有新准入」由 after 判定保证。
     assert!(session.queue().admission_watermark_sync().is_none());
-    assert!(!session.queue().has_ensure_processing_after_sync(&watermark));
+    assert!(!session
+        .queue()
+        .has_ensure_processing_after_sync(watermark.as_ref()));
     let context = StageContext::builder(
         session.start_turn(),
         session.transcript(),
@@ -281,7 +299,7 @@ async fn deferred_result_that_reaches_failed_reason_is_not_requeued() {
     .with_llm(Arc::new(FailingFollowupLlm(calls.clone())))
     .build();
     assert!(matches!(
-        run_react_loop(context, 1).await,
+        crate::agent::stages::run_react_loop(context, 1).await,
         LoopResult::Completed
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -310,7 +328,7 @@ async fn background_completion_after_receive_batch_boundary_retains_original_adm
 async fn deferred_result_in_zero_budget_followup_does_not_reactivate_itself() {
     let (session, calls, _) = completion_during_reason_fixture(1).await;
     let watermark = session.queue().admission_watermark_sync();
-    assert!(session.queue().has_ensure_processing_after_sync(&None));
+    assert!(session.queue().has_ensure_processing_after_sync(None));
     let context = StageContext::builder(
         session.start_turn(),
         session.transcript(),
@@ -323,13 +341,15 @@ async fn deferred_result_in_zero_budget_followup_does_not_reactivate_itself() {
     }))
     .build();
     assert!(matches!(
-        run_react_loop(context, 0).await,
+        crate::agent::stages::run_react_loop(context, 0).await,
         LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(0))
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     // 队列已排空，水位随行消失；「没有新准入」由 after 判定保证。
     assert!(session.queue().admission_watermark_sync().is_none());
-    assert!(!session.queue().has_ensure_processing_after_sync(&watermark));
+    assert!(!session
+        .queue()
+        .has_ensure_processing_after_sync(watermark.as_ref()));
     assert!(session.queue().is_empty_sync());
     let context = StageContext::builder(
         session.start_turn(),
@@ -343,7 +363,7 @@ async fn deferred_result_in_zero_budget_followup_does_not_reactivate_itself() {
     }))
     .build();
     assert!(matches!(
-        run_react_loop(context, 1).await,
+        crate::agent::stages::run_react_loop(context, 1).await,
         LoopResult::Completed
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -375,7 +395,7 @@ async fn exhausted_budget_idle_wake_retains_new_required_message() {
     .with_idle_should_wait(Arc::new(|| true))
     .with_idle_suspended_flag(Arc::clone(&suspended))
     .build();
-    let owner = tokio::spawn(run_react_loop(context, 1));
+    let owner = tokio::spawn(crate::agent::stages::run_react_loop(context, 1));
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while !suspended.load(Ordering::Acquire) {
             tokio::task::yield_now().await;
@@ -392,15 +412,21 @@ async fn exhausted_budget_idle_wake_retains_new_required_message() {
     assert!(matches!(
         tokio::time::timeout(std::time::Duration::from_secs(2), owner)
             .await
-            .unwrap()
-            .unwrap(),
+            .expect("the from secs fixture result is required for this assertion")
+            .expect("exhausted budget idle wake retains new required message: the completed fixture operation must provide its result payload"),
         LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(1))
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(session.transcript().read().get(message_id).is_none());
     let pending = session.queue().drain_all_sync();
     assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].message().unwrap().id(), message_id);
+    assert_eq!(
+        pending[0]
+            .message()
+            .expect("the fixture entry must contain a message payload")
+            .id(),
+        message_id
+    );
 }
 
 #[tokio::test]
@@ -429,7 +455,7 @@ async fn loaded_history_never_replays_old_tools_and_new_input_starts_a_fresh_run
     }))
     .build();
     assert!(matches!(
-        run_react_loop(context, 10).await,
+        crate::agent::stages::run_react_loop(context, 10).await,
         LoopResult::Completed
     ));
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -448,7 +474,7 @@ async fn loaded_history_never_replays_old_tools_and_new_input_starts_a_fresh_run
     }))
     .build();
     assert!(matches!(
-        run_react_loop(context, 10).await,
+        crate::agent::stages::run_react_loop(context, 10).await,
         LoopResult::Completed
     ));
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -458,7 +484,7 @@ async fn loaded_history_never_replays_old_tools_and_new_input_starts_a_fresh_run
             .read()
             .visible_messages()
             .last()
-            .unwrap()
+            .expect("session transcript fixture must contain the expected element")
             .content(),
         "fresh answer"
     );
@@ -498,12 +524,15 @@ impl crate::middleware::Middleware for IterationBudgetProbe {
         state: &mut dyn hook_state::BeforeAgentState,
     ) -> crate::error::AgentResult<()> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.prompt_visible.lock().unwrap().push(
-            state
-                .messages()
-                .iter()
-                .any(|message| message.content().contains(self.prompt_marker)),
-        );
+        self.prompt_visible
+            .lock()
+            .expect("self prompt visible mutex must remain unpoisoned throughout the test")
+            .push(
+                state
+                    .messages()
+                    .iter()
+                    .any(|message| message.content().contains(self.prompt_marker)),
+            );
         state.push_recall(self.recall_marker.to_string());
         Ok(())
     }
@@ -605,356 +634,7 @@ fn assert_single_turn_completed(
         .collect();
     assert_eq!(completed_steps, vec![expected_steps]);
 }
-
-/// [回归测试] 最后一轮语义工作产出 final answer 后，下一次 Receive 必须观察正常完成。
-///
-/// 历史背景：旧循环把整个 Receive→Act 外层 `for` 计入预算，limit=1 时 Act 已提交
-/// final answer，却在下一次 Receive 前直接误报 MaxIterationsExceeded。
-#[tokio::test]
-async fn test_run_react_loop_final_answer_at_iteration_limit_completes() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let session = Session::new(
-        Arc::from("/tmp/iteration-budget-final"),
-        FrozenContext::builder().build(),
-        None,
-    );
-    let turn = session.start_turn();
-    let (bus, mut handles) = crate::agent::events_v2::EventBus::new(Default::default());
-    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_llm(Arc::new(CountingFinalAnswerLLM {
-            calls: Arc::clone(&calls),
-            answer: "done at the limit",
-        }))
-        .with_event_bus(Arc::new(bus))
-        .build();
-    context.session.queue.push_sync(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human("final prompt"),
-    ));
-
-    let result = run_react_loop(context.clone(), 1).await;
-
-    assert!(matches!(result, LoopResult::Completed));
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(context.session.turn.current_step(), 1);
-    let events = drain_loop_observe_events(&mut handles);
-    assert_eq!(
-        events.stage_lifecycle,
-        expected_stage_lifecycle(&[
-            Stage::Receive,
-            Stage::Compact,
-            Stage::Reason,
-            Stage::Act,
-            Stage::Receive,
-        ])
-    );
-    assert_eq!(events.llm_start_steps, vec![1]);
-    assert_eq!(events.llm_end_steps, vec![1]);
-    assert_single_turn_completed(&mut handles, 1);
-}
-
-#[tokio::test]
-async fn test_run_react_loop_info_only_does_not_wake_model() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let session = Session::new(
-        Arc::from("/tmp/micro-compact-info-only"),
-        FrozenContext::builder().build(),
-        None,
-    );
-    let turn = session.start_turn();
-    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_llm(Arc::new(CountingFinalAnswerLLM {
-            calls: Arc::clone(&calls),
-            answer: "must not run",
-        }))
-        .build();
-    context.session.queue.push_sync(QueuedMessage::info(
-        MessageSource::SystemInjected,
-        BaseMessage::human("micro compact state update"),
-    ));
-
-    let result = run_react_loop(context.clone(), 1).await;
-
-    assert!(matches!(result, LoopResult::Completed));
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert_eq!(context.session.turn.current_step(), 0);
-    assert!(context.session.transcript.read().entries()[0]
-        .message()
-        .content()
-        .contains("micro compact state update"));
-}
-
-#[tokio::test]
-async fn test_run_react_loop_defer_still_continues_to_model() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let session = Session::new(
-        Arc::from("/tmp/defer-continuation"),
-        FrozenContext::builder().build(),
-        None,
-    );
-    let turn = session.start_turn();
-    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_llm(Arc::new(CountingFinalAnswerLLM {
-            calls: Arc::clone(&calls),
-            answer: "continued",
-        }))
-        .build();
-    context.session.queue.push_sync(QueuedMessage::defer(
-        MessageSource::SubAgentComplete,
-        BaseMessage::human("real deferred result"),
-    ));
-
-    let result = run_react_loop(context.clone(), 1).await;
-
-    assert!(matches!(result, LoopResult::Completed));
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(context.session.turn.current_step(), 1);
-}
-
-/// [回归测试] 零预算仍必须先进入 Receive，空队列由 Receive 唯一判定正常完成。
-///
-/// 历史背景：预算门禁若放在 Receive 前，max_iterations=0 会把无需语义工作的空 turn
-/// 错误分类为超限，并破坏 Receive 作为正常退出唯一入口的架构契约。
-#[tokio::test]
-async fn test_run_react_loop_empty_queue_with_zero_budget_completes_in_receive() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let session = Session::new(
-        Arc::from("/tmp/iteration-budget-empty-zero"),
-        FrozenContext::builder().build(),
-        None,
-    );
-    let turn = session.start_turn();
-    let (bus, mut handles) = crate::agent::events_v2::EventBus::new(Default::default());
-    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_llm(Arc::new(CountingFinalAnswerLLM {
-            calls: Arc::clone(&calls),
-            answer: "must not run",
-        }))
-        .with_event_bus(Arc::new(bus))
-        .build();
-
-    let result = run_react_loop(context.clone(), 0).await;
-
-    assert!(matches!(result, LoopResult::Completed));
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert_eq!(context.session.turn.current_step(), 0);
-    let events = drain_loop_observe_events(&mut handles);
-    assert_eq!(
-        events.stage_lifecycle,
-        expected_stage_lifecycle(&[Stage::Receive])
-    );
-    assert!(events.llm_start_steps.is_empty());
-    assert!(events.llm_end_steps.is_empty());
-}
-
-/// [回归测试] 有待处理 prompt 但语义预算为零时，只允许 Receive 消费消息。
-///
-/// 历史背景：预算检查需要位于 Receive 与语义阶段之间，既不能跳过消息消费，也不能
-/// 推进 step、运行 before_agent、调用模型或工具。
-#[tokio::test]
-async fn test_run_react_loop_prompt_with_zero_budget_returns_max_iterations() {
-    let before_agent_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let prompt_visible = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let llm_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let mut chain = crate::middleware::MiddlewareChain::new();
-    chain.add(Box::new(IterationBudgetProbe {
-        calls: Arc::clone(&before_agent_calls),
-        prompt_visible: Arc::clone(&prompt_visible),
-        prompt_marker: "zero budget prompt",
-        recall_marker: "zero budget recall",
-    }));
-    let tools: SharedToolMap = Arc::new(parking_lot::RwLock::new(BTreeMap::from([(
-        "iteration_budget_tool".to_string(),
-        Arc::new(IterationBudgetTool(Arc::clone(&tool_calls))) as Arc<dyn crate::tools::BaseTool>,
-    )])));
-    let session = Session::new(
-        Arc::from("/tmp/iteration-budget-prompt-zero"),
-        FrozenContext::builder().build(),
-        None,
-    );
-    let turn = session.start_turn();
-    let (bus, mut handles) = crate::agent::events_v2::EventBus::new(Default::default());
-    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_llm(Arc::new(CountingFinalAnswerLLM {
-            calls: Arc::clone(&llm_calls),
-            answer: "must not run",
-        }))
-        .with_tools(tools)
-        .with_middleware_chain(Arc::new(chain))
-        .with_event_bus(Arc::new(bus))
-        .build();
-    context.session.queue.push_sync(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human("zero budget prompt"),
-    ));
-
-    let result = run_react_loop(context.clone(), 0).await;
-
-    assert!(matches!(
-        result,
-        LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(0))
-    ));
-    assert_eq!(llm_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(before_agent_calls.load(Ordering::SeqCst), 0);
-    assert!(prompt_visible.lock().unwrap().is_empty());
-    assert!(context.recall_buffer.read().is_empty());
-    assert_eq!(context.session.turn.current_step(), 0);
-    assert_eq!(context.session.transcript.read().len(), 1);
-    let events = drain_loop_observe_events(&mut handles);
-    assert_eq!(
-        events.stage_lifecycle,
-        expected_stage_lifecycle(&[Stage::Receive])
-    );
-    assert!(events.llm_start_steps.is_empty());
-    assert!(events.llm_end_steps.is_empty());
-}
-
-/// [回归测试] 工具结果确实需要下一次推理时，耗尽的预算必须拒绝新语义迭代。
-///
-/// 历史背景：final answer 的收尾 Receive 可以越过预算，但工具调用后的空 Receive
-/// 仍代表需要继续 Reason，必须精确返回 MaxIterationsExceeded(limit)。
-#[tokio::test]
-async fn test_run_react_loop_required_reason_beyond_limit_returns_max_iterations() {
-    let llm_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let tools: SharedToolMap = Arc::new(parking_lot::RwLock::new(BTreeMap::from([(
-        "iteration_budget_tool".to_string(),
-        Arc::new(IterationBudgetTool(Arc::clone(&tool_calls))) as Arc<dyn crate::tools::BaseTool>,
-    )])));
-    let session = Session::new(
-        Arc::from("/tmp/iteration-budget-tool"),
-        FrozenContext::builder().build(),
-        None,
-    );
-    let turn = session.start_turn();
-    let (bus, mut handles) = crate::agent::events_v2::EventBus::new(Default::default());
-    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_llm(Arc::new(OneToolCallLLM(Arc::clone(&llm_calls))))
-        .with_tools(tools)
-        .with_event_bus(Arc::new(bus))
-        .build();
-    context.session.queue.push_sync(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human("use one tool"),
-    ));
-
-    let result = run_react_loop(context.clone(), 1).await;
-
-    assert!(matches!(
-        result,
-        LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(1))
-    ));
-    assert_eq!(llm_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(tool_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(context.session.turn.current_step(), 1);
-    let events = drain_loop_observe_events(&mut handles);
-    assert_eq!(
-        events.stage_lifecycle,
-        expected_stage_lifecycle(&[
-            Stage::Receive,
-            Stage::Compact,
-            Stage::Reason,
-            Stage::Act,
-            Stage::Receive,
-        ])
-    );
-    assert_eq!(events.llm_start_steps, vec![1]);
-    assert_eq!(events.llm_end_steps, vec![1]);
-    assert_single_turn_completed(&mut handles, 1);
-}
-
-/// [回归测试] idle await_wake 与随后重试的 Receive 不得消耗语义迭代预算。
-///
-/// 历史背景：旧外层 `for` 把首次空 Receive 的 idle 挂起算作一次迭代，limit=1 时
-/// prompt 唤醒后尚未运行 Reason 就误报超限；before_agent 也不得在挂起前提前执行。
-#[tokio::test]
-async fn test_run_react_loop_idle_wake_does_not_consume_iteration_budget() {
-    let before_agent_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let prompt_visible = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let llm_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let should_wait = Arc::new(AtomicBool::new(true));
-    let suspended = Arc::new(AtomicBool::new(false));
-    let mut chain = crate::middleware::MiddlewareChain::new();
-    chain.add(Box::new(IterationBudgetProbe {
-        calls: Arc::clone(&before_agent_calls),
-        prompt_visible: Arc::clone(&prompt_visible),
-        prompt_marker: "idle wake prompt",
-        recall_marker: "idle wake recall",
-    }));
-    let session = Session::new(
-        Arc::from("/tmp/iteration-budget-idle-wake"),
-        FrozenContext::builder().build(),
-        None,
-    );
-    let inbox = Arc::new(crate::agent::session::SessionInbox::new(Arc::new(
-        session.queue().clone(),
-    )));
-    let handle = inbox.handle();
-    let turn = session.start_turn();
-    let (bus, mut handles) = crate::agent::events_v2::EventBus::new(Default::default());
-    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_llm(Arc::new(CountingFinalAnswerLLM {
-            calls: Arc::clone(&llm_calls),
-            answer: "done after wake",
-        }))
-        .with_middleware_chain(Arc::new(chain))
-        .with_event_bus(Arc::new(bus))
-        .with_idle_waiting()
-        .with_idle_should_wait({
-            let should_wait = Arc::clone(&should_wait);
-            Arc::new(move || should_wait.load(Ordering::Acquire))
-        })
-        .with_idle_suspended_flag(Arc::clone(&suspended))
-        .build();
-    let loop_context = context.clone();
-    let loop_task = tokio::spawn(async move { run_react_loop(loop_context, 1).await });
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        while !suspended.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("循环必须进入可观测的 idle suspended 状态");
-    assert_eq!(before_agent_calls.load(Ordering::SeqCst), 0);
-    should_wait.store(false, Ordering::Release);
-    handle.push_prompt_sync(
-        MessageSource::UserInput,
-        BaseMessage::human("idle wake prompt"),
-    );
-
-    let result = tokio::time::timeout(std::time::Duration::from_secs(1), loop_task)
-        .await
-        .expect("唤醒后的循环必须在有界时间内结束")
-        .expect("循环任务不得 panic");
-
-    assert!(matches!(result, LoopResult::Completed));
-    assert_eq!(llm_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(before_agent_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(*prompt_visible.lock().unwrap(), vec![true]);
-    assert_eq!(
-        context.recall_buffer.read().as_slice(),
-        ["idle wake recall"]
-    );
-    assert_eq!(context.session.turn.current_step(), 1);
-    assert!(!suspended.load(Ordering::Acquire));
-    let events = drain_loop_observe_events(&mut handles);
-    assert_eq!(
-        events.stage_lifecycle,
-        expected_stage_lifecycle(&[
-            Stage::Receive,
-            Stage::Receive,
-            Stage::Compact,
-            Stage::Reason,
-            Stage::Act,
-            Stage::Receive,
-        ])
-    );
-    assert_eq!(events.llm_start_steps, vec![1]);
-    assert_eq!(events.llm_end_steps, vec![1]);
-    assert_single_turn_completed(&mut handles, 1);
-}
+include!("loop_iteration_budget_cases_test.rs");
 
 fn async_result_reminder(task_id: &str) -> peri_acp_types::system_reminder::TrustedSystemReminder {
     use peri_acp_types::system_reminder::{
@@ -975,7 +655,7 @@ fn async_result_reminder(task_id: &str) -> peri_acp_types::system_reminder::Trus
             summary: None,
             metadata: serde_json::json!({"task_id": task_id}),
         })
-        .unwrap()
+        .expect("the construct fixture result is required for this assertion")
 }
 
 fn ready_result(context: &StageContext, task_id: &str) -> crate::messages::MessageId {
@@ -988,7 +668,7 @@ fn ready_result(context: &StageContext, task_id: &str) -> crate::messages::Messa
             &reminder,
             peri_acp_types::session::MessageSource::ShellComplete,
         )
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     mailbox
         .mark_canonical_ready(
             id,
@@ -996,7 +676,7 @@ fn ready_result(context: &StageContext, task_id: &str) -> crate::messages::Messa
             peri_acp_types::session::MessageSource::ShellComplete,
             None,
         )
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
     id
 }
 
@@ -1025,7 +705,7 @@ async fn async_result_ready_without_queue_work_runs_followup() {
     assert!(context.session.async_result_mailbox.has_ready());
     assert!(session.queue().is_empty_sync());
 
-    let result = run_react_loop(context.clone(), 5).await;
+    let result = crate::agent::stages::run_react_loop(context.clone(), 5).await;
     assert!(matches!(result, LoopResult::Completed));
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -1067,7 +747,7 @@ async fn async_result_hook_stop_suspends_ready_result() {
         BaseMessage::human("stop"),
     ));
 
-    let result = run_react_loop(context.clone(), 5).await;
+    let result = crate::agent::stages::run_react_loop(context.clone(), 5).await;
     assert!(
         matches!(result, LoopResult::HookStopped { .. }),
         "Hook stop 必须经唯一退出口返回 HookStopped，实际 {result:?}"

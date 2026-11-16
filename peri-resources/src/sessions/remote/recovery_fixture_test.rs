@@ -26,7 +26,7 @@ use super::mutation::{RemoteStore, StoreAccess};
 use super::schema::{self, StoreId, REMOTE_SCHEMA_VERSION, STORE_CONTRACT};
 use super::session_data::RemoteSessionData;
 use super::session_sql;
-use super::sql::{text_at, StatementSpec};
+use super::sql::StatementSpec;
 use crate::sessions::data::SessionDataPort;
 
 pub(super) const ABANDON_AFTER: Duration = Duration::from_millis(50);
@@ -172,9 +172,13 @@ impl FakeBackend {
         let mut effects = 0;
         for spec in statements {
             if spec.sql == sql.qualify {
-                let id = text_at(&spec.params, 0).unwrap_or_default().to_owned();
-                let digest = text_at(&spec.params, 2).unwrap_or_default().to_owned();
-                let receipt = text_at(&spec.params, 3).map(str::to_owned);
+                let id = super::sql::text_at(&spec.params, 0)
+                    .unwrap_or_default()
+                    .to_owned();
+                let digest = super::sql::text_at(&spec.params, 2)
+                    .unwrap_or_default()
+                    .to_owned();
+                let receipt = super::sql::text_at(&spec.params, 3).map(str::to_owned);
                 self.ledger.lock().unwrap().insert(
                     id.clone(),
                     FakeLedgerRow {
@@ -184,8 +188,12 @@ impl FakeBackend {
                     },
                 );
             } else if spec.sql == sql.closure {
-                let id = text_at(&spec.params, 0).unwrap_or_default().to_owned();
-                let digest = text_at(&spec.params, 2).unwrap_or_default().to_owned();
+                let id = super::sql::text_at(&spec.params, 0)
+                    .unwrap_or_default()
+                    .to_owned();
+                let digest = super::sql::text_at(&spec.params, 2)
+                    .unwrap_or_default()
+                    .to_owned();
                 self.ledger.lock().unwrap().insert(
                     id.clone(),
                     FakeLedgerRow {
@@ -226,7 +234,9 @@ impl FakeBackend {
             ]];
         }
         if spec.sql == ledger_sql().resolve {
-            let id = text_at(&spec.params, 0).unwrap_or_default().to_owned();
+            let id = super::sql::text_at(&spec.params, 0)
+                .unwrap_or_default()
+                .to_owned();
             let row = self.ledger.lock().unwrap().get(&id).cloned();
             return match row {
                 Some(row) => vec![vec![
@@ -295,8 +305,8 @@ impl FakeConnection {
 }
 
 /// 被丢弃时把连接记为不可用。
-struct DeadOnDrop<'a> {
-    dead: &'a AtomicBool,
+struct DeadOnDrop<'connection> {
+    dead: &'connection AtomicBool,
 }
 
 impl Drop for DeadOnDrop<'_> {

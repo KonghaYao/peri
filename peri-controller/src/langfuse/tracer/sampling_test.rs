@@ -1,4 +1,4 @@
-use super::*;
+use crate::langfuse::tracer::sampling::SamplingDecider;
 
 #[test]
 fn test_rate_1_0_always_emits() {

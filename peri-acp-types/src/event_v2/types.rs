@@ -1,9 +1,10 @@
 //! 三层事件载荷与身份提取；枚举本身不持有发送端或执行状态。
 
-use crate::{
-    error::SafeSubagentFailure, event::ExecutorEvent, identity::AgentId, messages::BaseMessage,
-    session::TurnId,
-};
+use crate::error::SafeSubagentFailure;
+use crate::event::ExecutorEvent;
+use crate::identity::AgentId;
+use crate::messages::BaseMessage;
+use crate::session::TurnId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

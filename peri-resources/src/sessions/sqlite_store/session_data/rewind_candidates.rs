@@ -14,9 +14,10 @@
 //!
 //! 阶段一/阶段二落在同一个只读事务里：候选身份与取回的正文来自同一快照。
 
-use super::*;
+use super::{context, SessionResourceResult, SqliteSessionData, ThreadId};
+
 use crate::sessions::sqlite_store::row_mapping::THREAD_META_COLUMNS;
-use peri_acp_types::session_resources::{rewind_candidate, RewindCandidate};
+use peri_acp_types::session_resources::RewindCandidate;
 
 /// 阶段一：user 行身份 + 存储序键，keyset 向更早方向，最多 `limit` 行。
 ///
@@ -48,10 +49,10 @@ impl SqliteSessionData {
             .pool
             .acquire()
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let mut tx = sqlx::Connection::begin(&mut *connection)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         self.require_session(&mut tx, id).await?;
 
         let mut candidates = Vec::with_capacity(limit.min(REWIND_CANDIDATE_SCAN_BATCH as usize));
@@ -63,7 +64,7 @@ impl SqliteSessionData {
                 .bind(REWIND_CANDIDATE_SCAN_BATCH)
                 .fetch_all(&mut *tx)
                 .await
-                .map_err(|error| map_sqlx(&error))?;
+                .map_err(|error| super::map_sqlx(&error))?;
             if rows.is_empty() {
                 break;
             }
@@ -76,17 +77,20 @@ impl SqliteSessionData {
                     .bind(message_id)
                     .fetch_optional(&mut *tx)
                     .await
-                    .map_err(|error| map_sqlx(&error))?;
-                let content = content.ok_or_else(|| corrupt("rewind candidate body is missing"))?;
-                let payload = deserialize_persisted_payload(&content)
-                    .map_err(|_| corrupt("rewind candidate body is not decodable"))?;
+                    .map_err(|error| super::map_sqlx(&error))?;
+                let content =
+                    content.ok_or_else(|| super::corrupt("rewind candidate body is missing"))?;
+                let payload = super::deserialize_persisted_payload(&content)
+                    .map_err(|_| super::corrupt("rewind candidate body is not decodable"))?;
                 // 行身份与正文身份必须一致：role 列只是读取条件，不能替代权威 id。
                 if payload.id().as_uuid().to_string() != *message_id {
-                    return Err(corrupt(
+                    return Err(super::corrupt(
                         "rewind candidate id does not match its stored identity",
                     ));
                 }
-                if let Some(candidate) = rewind_candidate(&payload) {
+                if let Some(candidate) =
+                    peri_acp_types::session_resources::rewind_candidate(&payload)
+                {
                     candidates.push(candidate);
                     if candidates.len() == limit {
                         break 'scan;
@@ -101,9 +105,12 @@ impl SqliteSessionData {
         if candidates.len() < limit {
             let inherited = context::load_inherited_context_on(&mut tx, id, THREAD_META_COLUMNS)
                 .await
-                .map_err(read_failure)?;
-            for payload in inherited.payloads.iter().rev() {
-                if let Some(candidate) = rewind_candidate(payload) {
+                .map_err(super::read_failure)?;
+            let selected_entries = inherited.payloads.iter().rev();
+            for payload in selected_entries {
+                if let Some(candidate) =
+                    peri_acp_types::session_resources::rewind_candidate(payload)
+                {
                     candidates.push(candidate);
                     if candidates.len() == limit {
                         break;
@@ -113,7 +120,7 @@ impl SqliteSessionData {
         }
 
         // 只读事务：没有写入效果可以证明，提交失败仍按原因分类。
-        tx.commit().await.map_err(|error| map_sqlx(&error))?;
+        tx.commit().await.map_err(|error| super::map_sqlx(&error))?;
         Ok(candidates)
     }
 }

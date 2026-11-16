@@ -1,8 +1,13 @@
 //! Explicit session close and delete settlement.
 
-use super::*;
-use crate::host::workspace::{resource_error, workspace_error};
+use crate::host::workspace;
+use crate::host::AcpServerConfig;
+use crate::host::SessionState;
+use crate::transport::types::AcpError;
+
 use peri_acp_types::session_resources::{CloseSettlement, SessionResourceErrorKind};
+
+use std::collections::HashMap;
 
 pub(in crate::host::requests) async fn close_session(
     cfg: &AcpServerConfig,
@@ -15,12 +20,12 @@ pub(in crate::host::requests) async fn close_session(
     match resources.load_session_meta(&target).await {
         Err(error) if matches!(error.kind(), SessionResourceErrorKind::NotFound) => {
             if sessions.get(session_id).is_some_and(|state| !state.closing) {
-                return Err(resource_error(error));
+                return Err(workspace::resource_error(error));
             }
             sessions.remove(session_id);
             return Ok(());
         }
-        Err(error) => return Err(resource_error(error)),
+        Err(error) => return Err(workspace::resource_error(error)),
         Ok(_) => {}
     }
     if sessions.get(session_id).is_some_and(|state| state.closing)
@@ -28,12 +33,12 @@ pub(in crate::host::requests) async fn close_session(
         && resources
             .is_session_closing(&target)
             .await
-            .map_err(resource_error)?
+            .map_err(workspace::resource_error)?
     {
         match resources
             .close_settlement(&target)
             .await
-            .map_err(resource_error)?
+            .map_err(workspace::resource_error)?
         {
             CloseSettlement::Finished => {
                 sessions.remove(session_id);
@@ -66,7 +71,7 @@ pub(in crate::host::requests) async fn close_session(
                 if let Some(state) = sessions.get_mut(session_id) {
                     state.closing = was_closing;
                 }
-                return Err(resource_error(error));
+                return Err(workspace::resource_error(error));
             }
             _ => {
                 return Err(AcpError::new(
@@ -123,7 +128,7 @@ pub(in crate::host::requests) async fn close_session(
         .session_manager
         .close_session(session_id)
         .await
-        .map_err(workspace_error)?;
+        .map_err(workspace::workspace_error)?;
     if let Some(environment) = environment.as_ref() {
         if let Some(pool) = environment.cfg.mcp_pool.as_ref() {
             pool.verify_shared_environment_close(session_id)
@@ -142,18 +147,18 @@ pub(in crate::host::requests) async fn close_session(
     resources
         .drain_persistence(&target)
         .await
-        .map_err(resource_error)?;
+        .map_err(workspace::resource_error)?;
     if delete {
         if let Err(error) = resources.delete_session_tree(&target).await {
             match resources.load_session_meta(&target).await {
                 Err(readback) if matches!(readback.kind(), SessionResourceErrorKind::NotFound) => {}
-                _ => return Err(resource_error(error)),
+                _ => return Err(workspace::resource_error(error)),
             }
         }
     } else if let Err(error) = resources.finish_close(&target).await {
         match resources.close_settlement(&target).await {
             Ok(CloseSettlement::Finished) => {}
-            _ => return Err(resource_error(error)),
+            _ => return Err(workspace::resource_error(error)),
         }
     }
     sessions.remove(session_id);

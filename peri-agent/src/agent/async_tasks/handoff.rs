@@ -77,10 +77,12 @@ impl ChildSettlementWindow {
         *self.deadline.lock()
     }
 
+    #[must_use]
     pub fn is_started(&self) -> bool {
         self.deadline.lock().is_some()
     }
 
+    #[must_use]
     pub fn expired(&self) -> bool {
         self.deadline()
             .is_some_and(|deadline| Instant::now() >= deadline)

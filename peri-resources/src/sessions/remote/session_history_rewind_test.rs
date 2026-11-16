@@ -535,7 +535,6 @@ async fn remote_read_only_store_refuses_rewind_with_an_unknown_boundary() {
 
 #[tokio::test]
 async fn remote_rewind_revokes_micro_group_and_keeps_canonical_prefix() {
-    use peri_acp_types::context_archive::build_catalog;
     use peri_acp_types::projection::{
         ArchiveGroupLink, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
     };
@@ -543,7 +542,7 @@ async fn remote_rewind_revokes_micro_group_and_keeps_canonical_prefix() {
     let (_fixture, transport, data) = remote_with_history(&history).await;
     let id: ThreadId = REWIND_SESSION.into();
     let anchor = history[1].id();
-    let catalog = build_catalog(
+    let catalog = peri_acp_types::context_archive::build_catalog(
         id.clone(),
         "group".into(),
         anchor,

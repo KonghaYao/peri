@@ -4,7 +4,8 @@
 //!
 //! 本模块负责 agent_def 解析与工具过滤；thread、取消、事件与运行收尾由 Agent 层统一入口负责。
 
-use peri_agent::{session::subagent::SubagentLlmSource, tools::BaseTool};
+use peri_agent::session::subagent::SubagentLlmSource;
+use peri_agent::tools::BaseTool;
 
 use peri_mcp_core::agent_definition::ClaudeAgent;
 
@@ -132,9 +133,9 @@ impl super::SubAgentTool {
         let system_prompt = if let Some(ref builder) = self.system_builder {
             let overrides = Self::overrides_from_agent_def(
                 &agent_def.system_prompt,
-                &agent_def.frontmatter.tone,
-                &agent_def.frontmatter.proactiveness,
-                &agent_def.frontmatter.prompt_mode,
+                (agent_def.frontmatter.tone).as_deref(),
+                (agent_def.frontmatter.proactiveness).as_deref(),
+                (agent_def.frontmatter.prompt_mode).as_deref(),
             );
             Some(builder(overrides.as_ref(), cwd))
         } else {

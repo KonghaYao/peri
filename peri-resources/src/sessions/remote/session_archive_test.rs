@@ -1,16 +1,23 @@
-use super::*;
-use peri_acp_types::{
-    context_archive::*, projection::MessageProjectionDirective, store::serialize_persisted_payload,
+use super::{
+    Arc, BaseMessage, MessageFlags, PersistedPayload, SessionResourceErrorKind, SqlitePoolOptions,
+    SqliteTransport, PAGE_SESSION,
 };
+use crate::sessions::data::SessionDataPort;
+
+use peri_acp_types::context_archive::{
+    ArchiveChunkBatch, ArchiveChunkQuery, ArchiveMetadataQuery, ARCHIVE_CHUNKS_PER_BATCH,
+    ARCHIVE_CHUNK_BYTES,
+};
+use peri_acp_types::projection::MessageProjectionDirective;
 
 #[tokio::test]
 async fn archive_remote_exact_chunks_and_scoped_catalog_after_exclusion() {
     let history = vec![PersistedPayload::Message(BaseMessage::ai(
         "original code: \"中文\"\n".repeat(1000),
     ))];
-    let (_directory, data) = remote_with_history(&history).await;
+    let (_directory, data) = super::remote_with_history(&history).await;
     let id = PAGE_SESSION.to_owned();
-    let catalog = build_catalog(
+    let catalog = peri_acp_types::context_archive::build_catalog(
         id.clone(),
         "closed-group".into(),
         history[0].id(),
@@ -55,9 +62,10 @@ async fn archive_remote_exact_chunks_and_scoped_catalog_after_exclusion() {
             .unwrap(),
         &catalog
     );
-    let expected = serialize_persisted_payload(&history[0]).unwrap();
+    let expected = peri_acp_types::store::serialize_persisted_payload(&history[0]).unwrap();
     let mut recovered = Vec::new();
-    for offset in (0..expected.len()).step_by(ARCHIVE_CHUNK_BYTES) {
+    let chunk_offsets = (0..expected.len()).step_by(ARCHIVE_CHUNK_BYTES);
+    for offset in chunk_offsets {
         let chunk = data
             .read_archive_chunk(
                 &id,
@@ -120,7 +128,7 @@ async fn archive_remote_reads_32_chunks_in_one_bounded_transaction() {
         .await
         .unwrap();
     let payload = PersistedPayload::Message(BaseMessage::ai("original".repeat(20000)));
-    let original = serialize_persisted_payload(&payload).unwrap();
+    let original = peri_acp_types::store::serialize_persisted_payload(&payload).unwrap();
     sqlx::query("INSERT INTO messages VALUES (?1, ?2, ?3)")
         .bind(PAGE_SESSION)
         .bind(payload.id().as_uuid().to_string())
@@ -129,7 +137,7 @@ async fn archive_remote_reads_32_chunks_in_one_bounded_transaction() {
         .await
         .unwrap();
     let transport = Arc::new(SqliteTransport::for_test(pool));
-    let data = remote_data(&transport);
+    let data = super::remote_data(&transport);
     let queries = (0..ARCHIVE_CHUNKS_PER_BATCH)
         .map(|index| ArchiveChunkQuery {
             message_id: payload.id(),
@@ -138,7 +146,7 @@ async fn archive_remote_reads_32_chunks_in_one_bounded_transaction() {
             max_bytes: ARCHIVE_CHUNK_BYTES as u32,
         })
         .collect();
-    let batch = ArchiveChunkBatch::new(queries).unwrap();
+    let batch = ArchiveChunkBatch::try_new(queries).unwrap();
     let chunks = data
         .read_archive_chunks(&PAGE_SESSION.into(), &batch)
         .await

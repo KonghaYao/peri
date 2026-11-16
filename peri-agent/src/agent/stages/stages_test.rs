@@ -1,9 +1,23 @@
 //! 阶段输入输出与消息入队契约；按职责挂载循环行为测试。
-use super::*;
+use crate::agent::react::ReactLLM;
+use crate::agent::stages::context::StageContext;
+use crate::agent::stages::receive::ReceiveInput;
+use crate::agent::stages::receive::ReceiveOutput;
+use crate::agent::stages::ActInput;
+use crate::agent::stages::ActOutput;
+use crate::agent::stages::CompactInput;
+use crate::agent::stages::CompactOutput;
+use crate::agent::stages::LoopResult;
+use crate::agent::stages::ReasonInput;
+use crate::agent::stages::ReasonOutput;
+use crate::messages::BaseMessage;
 use crate::messages::MessageContent;
 use crate::session::queue::MessageSource;
 use crate::session::store::FrozenContext;
+use crate::session::QueuedMessage;
 use crate::session::Session;
+
+use std::sync::Arc;
 
 /// 构造测试用 StageContext
 fn make_stage_context() -> StageContext {
@@ -146,7 +160,10 @@ fn test_append_messages_prompt_kept_as_is() {
     )];
     {
         let mut transcript = ctx.session.transcript.write();
-        append_messages_to_transcript(&mut transcript, msgs);
+        crate::agent::stages::queue_to_transcript::append_messages_to_transcript(
+            &mut transcript,
+            msgs,
+        );
     }
     let transcript = ctx.session.transcript.read();
     assert_eq!(transcript.len(), 1);
@@ -166,7 +183,10 @@ fn test_append_messages_empty_prompt_skipped() {
     )];
     {
         let mut transcript = ctx.session.transcript.write();
-        append_messages_to_transcript(&mut transcript, msgs);
+        crate::agent::stages::queue_to_transcript::append_messages_to_transcript(
+            &mut transcript,
+            msgs,
+        );
     }
     let transcript = ctx.session.transcript.read();
     assert_eq!(transcript.len(), 0, "空 Prompt 不应写入 transcript");
@@ -184,7 +204,10 @@ fn test_append_messages_whitespace_prompt_kept() {
     )];
     {
         let mut transcript = ctx.session.transcript.write();
-        append_messages_to_transcript(&mut transcript, msgs);
+        crate::agent::stages::queue_to_transcript::append_messages_to_transcript(
+            &mut transcript,
+            msgs,
+        );
     }
     let transcript = ctx.session.transcript.read();
     assert_eq!(transcript.len(), 1, "空白 Prompt 应正常写入 transcript");
@@ -199,7 +222,10 @@ fn test_append_messages_info_kept_as_plain_message() {
     )];
     {
         let mut transcript = ctx.session.transcript.write();
-        append_messages_to_transcript(&mut transcript, msgs);
+        crate::agent::stages::queue_to_transcript::append_messages_to_transcript(
+            &mut transcript,
+            msgs,
+        );
     }
     let transcript = ctx.session.transcript.read();
     assert_eq!(transcript.entries()[0].message().content(), "system info");
@@ -214,7 +240,10 @@ fn test_append_messages_defer_kept_as_plain_message() {
     )];
     {
         let mut transcript = ctx.session.transcript.write();
-        append_messages_to_transcript(&mut transcript, msgs);
+        crate::agent::stages::queue_to_transcript::append_messages_to_transcript(
+            &mut transcript,
+            msgs,
+        );
     }
     let transcript = ctx.session.transcript.read();
     assert_eq!(
@@ -243,7 +272,7 @@ async fn test_e2e_defer_consumed_in_receive() {
         BaseMessage::human(MessageContent::text("bg-result-payload")),
     ));
 
-    let result = run_react_loop(ctx.clone(), 5).await;
+    let result = crate::agent::stages::run_react_loop(ctx.clone(), 5).await;
     assert!(
         matches!(result, LoopResult::Completed),
         "expected Completed, got {:?}",

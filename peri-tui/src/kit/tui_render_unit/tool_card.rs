@@ -1,6 +1,6 @@
-use super::diff::{TuiDiffBlock, diff_change_counts};
+use super::diff::TuiDiffBlock;
 use super::fold::FoldState;
-use super::hash::{tui_hash_combine, tui_hash_str};
+
 use std::fmt::Write;
 use std::hash::Hasher;
 
@@ -108,7 +108,7 @@ pub struct TuiToolCard {
 }
 
 impl TuiToolCard {
-    /// [G1] 内容哈希公式单点——`build_tool_card` / replay 构造 / 折叠 pass 共用。
+    /// \[G1\] 内容哈希公式单点——`build_tool_card` / replay 构造 / 折叠 pass 共用。
     /// 包含 fold + user_modified：折叠状态变化必须触发按 hash 分片的渲染缓存重建。
     /// duration 按秒取整后纳入 hash——避免每毫秒 hash 变化导致分片缓存频繁失效；
     /// 同时保证 duration 文本每秒刷新。completed_duration_ms 是冻结值（秒级稳定）。
@@ -142,7 +142,7 @@ impl TuiToolCard {
         let mut h = hash_input.hasher.finish();
         // [G-Diff] diff 定型于 tool-ended，此后不变——稳定摘要纳入 hash 保证
         // diff 变更（含路径/计数/截断）触发按 hash 分片的渲染缓存重建。
-        h = tui_hash_combine(h, self.diff_code());
+        h = super::hash::tui_hash_combine(h, self.diff_code());
         self.content_hash = h;
     }
 
@@ -152,14 +152,14 @@ impl TuiToolCard {
         let Some(d) = &self.diff else {
             return 0;
         };
-        let (adds, dels) = diff_change_counts(d);
-        let mut h = tui_hash_combine(0, tui_hash_str(&d.path));
-        h = tui_hash_combine(h, adds as u64);
-        h = tui_hash_combine(h, dels as u64);
-        h = tui_hash_combine(h, d.more_change_lines as u64);
-        h = tui_hash_combine(h, u64::from(d.is_binary));
-        h = tui_hash_combine(h, u64::from(d.is_too_large));
-        h = tui_hash_combine(h, u64::from(d.is_new_file));
+        let (adds, dels) = super::diff::diff_change_counts(d);
+        let mut h = super::hash::tui_hash_combine(0, super::hash::tui_hash_str(&d.path));
+        h = super::hash::tui_hash_combine(h, adds as u64);
+        h = super::hash::tui_hash_combine(h, dels as u64);
+        h = super::hash::tui_hash_combine(h, d.more_change_lines as u64);
+        h = super::hash::tui_hash_combine(h, u64::from(d.is_binary));
+        h = super::hash::tui_hash_combine(h, u64::from(d.is_too_large));
+        h = super::hash::tui_hash_combine(h, u64::from(d.is_new_file));
         h
     }
 }

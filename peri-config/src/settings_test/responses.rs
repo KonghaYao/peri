@@ -3,7 +3,7 @@
 //! 从 `settings_test.rs` 拆出的独立测试模块，保持覆盖不变。
 
 use super::super::ConfigSource;
-use super::support::{make_source, revision, write_settings};
+use super::support;
 
 fn write_responses_fixture(tmp: &tempfile::TempDir) {
     let providers = r#"[
@@ -12,7 +12,7 @@ fn write_responses_fixture(tmp: &tempfile::TempDir) {
         {"id":"codex","type":"openai_responses","apiKey":"codex-key",
          "models":{"fable":"gpt-6-astra","opus":"gpt-6-astra","sonnet":"gpt-6.1-sol","haiku":"gpt-6-luna"}}
     ]"#;
-    write_settings(
+    support::write_settings(
         &tmp.path().join("global"),
         &format!(
             r#"{{"config":{{"active_alias":"opus","providers":{providers},
@@ -22,7 +22,7 @@ fn write_responses_fixture(tmp: &tempfile::TempDir) {
             }}}}}}"#
         ),
     );
-    write_settings(
+    support::write_settings(
         &tmp.path().join("ws"),
         &format!(
             r#"{{"config":{{"active_alias":"opus","providers":{providers},
@@ -40,12 +40,12 @@ fn write_responses_fixture(tmp: &tempfile::TempDir) {
 fn workspace_save_tolerates_auxiliary_responses_capacity_gap() {
     let tmp = tempfile::tempdir().unwrap();
     write_responses_fixture(&tmp);
-    let source = make_source(&tmp, Some("ws"));
+    let source = support::make_source(&tmp, Some("ws"));
     let mut candidate = source.loaded_merged();
     candidate.config.profiles.opus.effort = "max".into();
 
     let accepted = source
-        .save(revision(&source), &candidate)
+        .save(support::revision(&source), &candidate)
         .expect("辅助档位缺 contextWindow 不得阻断生效档位保存");
     assert_eq!(accepted.settings().config.profiles.opus.effort, "max");
     assert_eq!(
@@ -68,13 +68,13 @@ fn workspace_save_tolerates_auxiliary_responses_capacity_gap() {
 fn workspace_save_persists_unfinished_effective_responses_binding() {
     let tmp = tempfile::tempdir().unwrap();
     write_responses_fixture(&tmp);
-    let source = make_source(&tmp, Some("ws"));
+    let source = support::make_source(&tmp, Some("ws"));
     let mut candidate = source.loaded_merged();
     candidate.config.profiles.opus.provider = "codex".into();
     candidate.config.profiles.opus.model = Some("gpt-6-astra".into());
 
     let accepted = source
-        .save(revision(&source), &candidate)
+        .save(support::revision(&source), &candidate)
         .expect("未完成绑定必须可保存");
     assert_eq!(accepted.settings().config.profiles.opus.provider, "codex");
     assert_eq!(
@@ -100,7 +100,7 @@ fn workspace_save_persists_unfinished_effective_responses_binding() {
 fn workspace_save_rejects_provider_level_error_on_responses_binding() {
     let tmp = tempfile::tempdir().unwrap();
     write_responses_fixture(&tmp);
-    let source = make_source(&tmp, Some("ws"));
+    let source = support::make_source(&tmp, Some("ws"));
     let workspace_path = source.workspace_path().unwrap().to_owned();
     let before = std::fs::read_to_string(&workspace_path).unwrap();
     let mut candidate = source.loaded_merged();
@@ -113,7 +113,7 @@ fn workspace_save_rejects_provider_level_error_on_responses_binding() {
     });
 
     assert!(
-        source.save(revision(&source), &candidate).is_err(),
+        source.save(support::revision(&source), &candidate).is_err(),
         "无 global 凭据可继承时缺 API key 是 provider 级硬错误"
     );
     assert_eq!(

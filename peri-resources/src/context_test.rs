@@ -1,24 +1,27 @@
 //! context.rs 单元测试：`Resources::open_with` 显式路径语义。
 
 #[cfg(unix)]
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::session_resources::SessionStoreShutdownPort;
 use std::path::PathBuf;
-
-use tempfile::tempdir;
 
 use peri_acp_types::messages::BaseMessage;
 #[cfg(unix)]
 use peri_acp_types::session_resources::AccessMode;
 use peri_acp_types::store::{PersistedPayload, ThreadStore};
 use peri_acp_types::thread::ThreadMeta;
-use sqlx::{sqlite::SqliteConnectOptions, Connection, SqliteConnection};
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::Connection;
+use sqlx::SqliteConnection;
 
-use super::*;
+use super::{Resources, SessionStoreDeployment, StoreOpenFailure};
+
 use crate::sessions::{CredentialError, SqliteThreadStore};
 
 /// [P0] 显式路径打开成功：数据库文件被创建，且同路径二次打开幂等。
 #[tokio::test]
 async fn test_open_with_explicit_path_creates_db() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("custom").join("threads.db");
     let first = Resources::open_with(Some(db_path.clone())).await.unwrap();
     assert!(
@@ -38,7 +41,7 @@ async fn test_open_with_explicit_path_creates_db() {
 /// [P0] 显式路径不可用（父级为普通文件）时直接报错，不 fallback 临时目录，错误携带路径。
 #[tokio::test]
 async fn test_open_with_explicit_path_errors_no_fallback() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("f");
     std::fs::write(&file, "not a directory").unwrap();
     let db_path = file.join("threads.db");
@@ -55,7 +58,7 @@ async fn test_open_with_explicit_path_errors_no_fallback() {
 /// [P0] 显式路径指向目录时直接报错（sqlite 无法以目录为库），错误携带路径。
 #[tokio::test]
 async fn test_open_with_explicit_path_is_directory_errs() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("adir");
     std::fs::create_dir(&db_path).unwrap();
     let err = match Resources::open_with(Some(db_path.clone())).await {
@@ -72,7 +75,7 @@ async fn test_open_with_explicit_path_is_directory_errs() {
 /// 本构建上限——这正是「进入时只看到不支持」的那条链路。
 #[tokio::test]
 async fn test_open_with_explicit_path_reports_unsupported_schema_version() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("threads.db");
     let mut connection = SqliteConnection::connect_with(
         &SqliteConnectOptions::new()
@@ -109,7 +112,7 @@ async fn test_open_with_explicit_path_reports_unsupported_schema_version() {
 #[tokio::test]
 async fn test_open_with_none_uses_default_store() {
     // 复用生产路径选择逻辑，只注入默认存储位置，禁止测试迁移用户真实数据库。
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("default.db");
     let default = db_path.clone();
     let resources = Resources::open_with_default(None, move || Ok(default))
@@ -131,9 +134,9 @@ async fn test_open_with_none_uses_default_store() {
 /// 历史仍可列表读取，写入由只读 store 自己按只读失败。
 #[tokio::test]
 async fn test_open_with_busy_schema_lock_degrades_to_read_only() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("threads.db");
-    let writable = SqliteThreadStore::new(db_path.clone()).await.unwrap();
+    let writable = SqliteThreadStore::try_new(db_path.clone()).await.unwrap();
     let thread = writable
         .create_thread(ThreadMeta::new_at(
             dir.path().join("read-only-degradation").to_str().unwrap(),
@@ -225,7 +228,7 @@ fn git_repository() -> tempfile::TempDir {
 #[tokio::test]
 async fn shared_facade_writes_without_execution_claim() {
     let repo = git_repository();
-    let db_dir = tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
     let (store, facade) =
         crate::sessions::open_store_and_facade_for_tests(db_dir.path().join("threads.db"))
             .await
@@ -261,7 +264,7 @@ async fn shared_facade_writes_without_execution_claim() {
 /// 的新写入被明确拒绝（关闭是真实的，不是形式上的所有权搬运），读取仍然可用。
 #[tokio::test]
 async fn test_into_parts_hands_out_business_handle_and_deployment_close_owner() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("threads.db");
     let resources = Resources::open_with(Some(db_path)).await.unwrap();
     let (business, owner) = resources.into_parts();
@@ -331,7 +334,7 @@ fn test_classify_open_failure_sees_wrapped_credential_errors() {
             "凭证问题必须留在 source chain 上：{wrapped:?}"
         );
         assert_eq!(
-            classify_open_failure(&wrapped),
+            super::classify_open_failure(&wrapped),
             StoreOpenFailure::NotConfigured
         );
     }
@@ -342,7 +345,7 @@ fn test_classify_open_failure_sees_wrapped_credential_errors() {
 fn test_classify_open_failure_keeps_untyped_failures_internal() {
     let unrelated = anyhow::anyhow!("no typed cause here").context("无法打开远程会话存储");
     assert_eq!(
-        classify_open_failure(&unrelated),
+        super::classify_open_failure(&unrelated),
         StoreOpenFailure::Internal
     );
 }
@@ -352,7 +355,7 @@ fn test_classify_open_failure_keeps_untyped_failures_internal() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_missing_remote_credential_fails_before_registry_side_effects() {
-    let home = tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
     let output = tokio::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -405,7 +408,7 @@ async fn test_missing_remote_credential_child_process() {
         Err(error) => error,
     };
     assert_eq!(
-        classify_open_failure(&error),
+        super::classify_open_failure(&error),
         StoreOpenFailure::NotConfigured
     );
     // 错误里只允许出现「来源名」（`CredentialError` 的类型里根本没有凭证值字段，

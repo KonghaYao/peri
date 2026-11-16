@@ -2610,6 +2610,7 @@ dependencies = [
  "fs4",
  "futures",
  "mockito",
+ "parking_lot",
  "peri-time",
  "reqwest",
  "serde",

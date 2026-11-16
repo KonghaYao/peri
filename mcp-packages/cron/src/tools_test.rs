@@ -1,11 +1,14 @@
 //! Tests for tools_cron
 
+use peri_agent::tools::BaseTool;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
-use super::*;
+use crate::tools::CronListTool;
+use crate::tools::CronRegisterTool;
+use crate::tools::CronRemoveTool;
 use crate::CronScheduler;
 
 fn new_tools() -> (CronRegisterTool, CronListTool, CronRemoveTool) {
@@ -125,7 +128,7 @@ async fn register_receipt_reports_scheduler_next_fire() {
     };
     assert!(receipt.contains(&id), "回执必须含完整 ID: {receipt}");
     assert!(
-        receipt.contains(&format_next_fire(next_fire)),
+        receipt.contains(&crate::tools::format_next_fire(next_fire)),
         "回执必须含 scheduler 计算出的下次触发时间: {receipt}"
     );
 }

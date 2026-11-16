@@ -19,8 +19,15 @@
 //! `#[serial]`：builtin 注入开关是进程级 env（`PERI_MCP_BUILTIN`，由关闭 builtin 的
 //! 串行用例改写），本文件必须有 builtin 实例在场。
 
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::host::SessionState;
+use crate::provider::LlmProvider;
 use peri_acp_types::beta_flags::FULL_ASYNC_TOOLS;
+use serde_json::json;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 夹具：`startup`（装配起点）与 `target`（会话 cwd，含 settings）。
 ///
@@ -54,10 +61,11 @@ fn write_betas(target: &std::path::Path, betas: &str) {
 
 /// 生产装配的宿主配置（bare：只建 workspace 池 + 指定启动目录）。
 async fn beta_server_config(tmp: &tempfile::TempDir, startup_cwd: String) -> AcpServerConfig {
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "key", "model"),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, tmp).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(config, provider, tmp).await;
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd,
         bare: true,
@@ -75,7 +83,7 @@ fn workspace_bash_schema(
     let pool = environment?.cfg.mcp_pool.as_ref()?;
     let pool = (pool.as_ref() as &dyn std::any::Any)
         .downcast_ref::<peri_middlewares::mcp::McpClientPool>()?;
-    let handle = pool.get_client("workspace")?;
+    let handle = pool.client("workspace")?;
     let tool = handle
         .tools
         .iter()
@@ -99,7 +107,7 @@ async fn create_session_with_bash_schema(
     let cfg = beta_server_config(tmp, startup).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": target}),
         &cfg,
@@ -172,7 +180,7 @@ async fn restored_session_keeps_frozen_beta_flag() {
     let cfg = beta_server_config(&tmp, startup).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": target}),
         &cfg,
@@ -200,7 +208,7 @@ async fn restored_session_keeps_frozen_beta_flag() {
     // `prepare_existing` 因此走 `Publish` 分支，环境按**持久 blob** 重新装配
     // （活跃表命中只补历史、不重装配，覆盖不到 `Some(frozen)` 分支）。
     let mut restored_sessions = HashMap::new();
-    handle_request(
+    crate::host::requests::handle_request(
         "session/load",
         &json!({"sessionId": id, "cwd": target}),
         &cfg,

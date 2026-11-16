@@ -1,13 +1,19 @@
 //! Mailbox 用户输入沿用上一轮 recall，但不改写可取回的原始输入内容。
 
-use peri_acp_types::{
-    session::{MessageKind, MessageQueue, MessageSource, QueuedMessage},
-    system_reminder::{
-        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
-        ReminderSource, SystemReminder, TrustedSystemReminderFactory, MAX_REMINDER_BODY_BYTES,
-        SYSTEM_REMINDER_VERSION,
-    },
-};
+use peri_acp_types::session::MessageKind;
+use peri_acp_types::session::MessageQueue;
+use peri_acp_types::session::MessageSource;
+use peri_acp_types::session::QueuedMessage;
+use peri_acp_types::system_reminder::ReminderAudience;
+use peri_acp_types::system_reminder::ReminderAudiences;
+use peri_acp_types::system_reminder::ReminderCategory;
+use peri_acp_types::system_reminder::ReminderDelivery;
+use peri_acp_types::system_reminder::ReminderSeverity;
+use peri_acp_types::system_reminder::ReminderSource;
+use peri_acp_types::system_reminder::SystemReminder;
+use peri_acp_types::system_reminder::TrustedSystemReminderFactory;
+use peri_acp_types::system_reminder::MAX_REMINDER_BODY_BYTES;
+use peri_acp_types::system_reminder::SYSTEM_REMINDER_VERSION;
 
 pub(super) async fn push_input_recalls(queue: &MessageQueue, recalls: &[String]) {
     let body = recalls.join("\n");

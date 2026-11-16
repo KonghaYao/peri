@@ -1,4 +1,7 @@
-use super::*;
+use crate::session::store::FrozenContext;
+use crate::session::store::SessionId;
+use crate::session::store::SessionStore;
+use std::sync::Arc;
 
 #[test]
 fn test_session_id_unique_and_ordered() {
@@ -144,12 +147,15 @@ fn test_frozen_context_clone_shares_meta_harness_arcs() {
     let cloned = ctx.clone();
     assert!(
         Arc::ptr_eq(
-            ctx.meta_harness.section_overrides.get("01_intro").unwrap(),
+            ctx.meta_harness
+                .section_overrides
+                .get("01_intro")
+                .expect("the fixture must contain 01_intro"),
             cloned
                 .meta_harness
                 .section_overrides
                 .get("01_intro")
-                .unwrap(),
+                .expect("the cloned fixture must retain the 01_intro override"),
         ),
         "clone 后 override 的 Arc<str> 共享底层分配"
     );

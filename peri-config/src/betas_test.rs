@@ -1,6 +1,7 @@
 //! `betas` 投影测试：来源层标注与默认 false。
 
-use super::*;
+use super::BetaFlagOrigin;
+use super::HISTORY_WINDOW_V1;
 use crate::app::PeriConfig;
 use peri_acp_types::beta_flags::FULL_ASYNC_TOOLS;
 
@@ -16,7 +17,7 @@ fn config_with(betas: &[(&str, bool)]) -> PeriConfig {
 #[test]
 fn test_resolve_marks_global_origin() {
     let global = config_with(&[(FULL_ASYNC_TOOLS, true)]);
-    let flags = resolve(&global, &global.clone());
+    let flags = super::resolve(&global, &global.clone());
     assert!(flags.is_enabled(FULL_ASYNC_TOOLS));
     assert_eq!(
         flags.value(FULL_ASYNC_TOOLS).map(|value| value.origin),
@@ -30,7 +31,7 @@ fn test_resolve_marks_workspace_origin_and_false_override() {
     let global = config_with(&[(FULL_ASYNC_TOOLS, true)]);
     let mut merged = global.clone();
     merged.config.betas.set(FULL_ASYNC_TOOLS, false);
-    let flags = resolve(&global, &merged);
+    let flags = super::resolve(&global, &merged);
     assert!(
         !flags.is_enabled(FULL_ASYNC_TOOLS),
         "workspace 显式 false 关闭 global true"
@@ -45,7 +46,7 @@ fn test_resolve_marks_workspace_origin_and_false_override() {
 #[test]
 fn test_resolve_without_overrides_is_all_false() {
     let global = PeriConfig::default();
-    let flags = resolve(&global, &global.clone());
+    let flags = super::resolve(&global, &global.clone());
     assert!(flags.is_empty());
     assert!(!flags.is_enabled(FULL_ASYNC_TOOLS));
     assert!(flags.value(FULL_ASYNC_TOOLS).is_none());
@@ -55,17 +56,17 @@ fn test_resolve_without_overrides_is_all_false() {
 #[test]
 fn test_history_window_v1_beta_defaults_false_and_accepts_override() {
     let default = PeriConfig::default();
-    assert!(!from_merged(&default).is_enabled(HISTORY_WINDOW_V1));
+    assert!(!super::from_merged(&default).is_enabled(HISTORY_WINDOW_V1));
 
     let mut enabled = PeriConfig::default();
     enabled.config.betas.set(HISTORY_WINDOW_V1, true);
     enabled.config.betas.validate();
     assert_eq!(enabled.config.betas.get(HISTORY_WINDOW_V1), Some(true));
-    assert!(from_merged(&enabled).is_enabled(HISTORY_WINDOW_V1));
-    assert!(is_known(HISTORY_WINDOW_V1));
+    assert!(super::from_merged(&enabled).is_enabled(HISTORY_WINDOW_V1));
+    assert!(super::is_known(HISTORY_WINDOW_V1));
 
     let mut disabled = PeriConfig::default();
     disabled.config.betas.set(HISTORY_WINDOW_V1, false);
     disabled.config.betas.validate();
-    assert!(!from_merged(&disabled).is_enabled(HISTORY_WINDOW_V1));
+    assert!(!super::from_merged(&disabled).is_enabled(HISTORY_WINDOW_V1));
 }

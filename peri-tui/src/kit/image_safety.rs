@@ -132,7 +132,7 @@ pub enum ImageSafetyError {
 
 /// 受管理图片目录根（`~/.peri/images`）。
 ///
-/// [现状] 仅用于给用户手输的 `@image <path>` 路径分级/预览；粘贴图片走上传式附件
+/// \[现状\] 仅用于给用户手输的 `@image <path>` 路径分级/预览；粘贴图片走上传式附件
 /// （base64 直进 `PENDING_ATTACHMENTS`，不落盘，见 `input_area/paste.rs`），
 /// 因此新粘贴的图片不会出现在这里，也没有需要清理的临时文件。
 pub fn managed_images_root() -> PathBuf {
@@ -265,7 +265,7 @@ fn sniff_mime(buf: &[u8]) -> Option<&'static str> {
     if buf.len() >= 12 && &buf[..4] == b"RIFF" && &buf[8..12] == b"WEBP" {
         return Some("image/webp");
     }
-    if buf.starts_with(&[0xFF, 0xD8, 0xFF]) {
+    if buf.starts_with(&[0xff, 0xd8, 0xff]) {
         return Some("image/jpeg");
     }
     None
@@ -310,6 +310,7 @@ pub fn sanitize_for_terminal(s: &str) -> Cow<'_, str> {
 }
 
 /// 该字符是否需要被 [`sanitize_for_terminal`] 处理（与过滤循环保持一致）。
+#[must_use]
 fn needs_sanitization(c: char) -> bool {
     match c {
         '\n' | '\t' => false,

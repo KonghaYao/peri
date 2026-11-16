@@ -23,6 +23,7 @@ impl BgTaskStatus {
     ///
     /// `None` 表示 started 事件尚未携带状态（当前实现即如此），沿用既有口径视为运行中；
     /// 未知值不猜测语义，单独归类为 [`Self::Unknown`]。
+    #[must_use]
     pub(crate) fn classify(status: Option<&str>) -> Self {
         match status {
             None | Some("running") => Self::Running,
@@ -37,6 +38,7 @@ impl BgTaskStatus {
     }
 
     /// i18n key——文本标签的唯一来源。
+    #[must_use]
     pub(crate) fn i18n_key(self) -> &'static str {
         match self {
             Self::Running => "bg-task-status-running",
@@ -51,16 +53,19 @@ impl BgTaskStatus {
     }
 
     /// 用户可见文本标签。
+    #[must_use]
     pub(crate) fn label(self) -> String {
         i18n::tr(self.i18n_key())
     }
 
     /// 终态：不能再请求取消。
+    #[must_use]
     pub(crate) fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
 
     /// 当前执行仍可观察为活动：只有 running（含缺省状态）可以占据活动行。
+    #[must_use]
     pub(crate) fn is_active(self) -> bool {
         matches!(self, Self::Running)
     }

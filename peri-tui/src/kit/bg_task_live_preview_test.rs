@@ -1,4 +1,11 @@
-use super::*;
+use super::BgLiveDetail;
+use super::BgLiveStatus;
+use super::FIELD_BYTES;
+use super::HashMap;
+use super::PREVIEW_BYTES;
+use super::STREAM_BYTES;
+use super::TuiRenderUnit;
+
 use crate::kit::tui_render_unit::TuiAssistantBubble;
 
 fn detail(index: usize, status: BgLiveStatus) -> BgLiveDetail {
@@ -33,7 +40,7 @@ fn active_tasks_share_a_body_budget_without_losing_control_identity() {
             detail(index, BgLiveStatus::Running),
         );
     }
-    enforce(&mut map);
+    super::enforce(&mut map);
     assert_eq!(map.len(), 100);
     assert!(
         map.values()
@@ -65,7 +72,7 @@ fn eviction_does_not_claim_that_a_published_snapshot_has_been_freed() {
             detail(index, BgLiveStatus::Running),
         );
     }
-    enforce(&mut map);
+    super::enforce(&mut map);
     assert!(map["first"].nested_units.is_empty());
     assert!(
         weak.upgrade().is_some(),
@@ -82,22 +89,22 @@ fn eviction_does_not_claim_that_a_published_snapshot_has_been_freed() {
 fn utf8_tail_and_large_input_capacity_are_bounded_before_copying() {
     let mut omitted = false;
     let mut value = "开始".repeat(STREAM_BYTES);
-    append(&mut value, &"尾🙂".repeat(STREAM_BYTES), &mut omitted);
+    super::append(&mut value, &"尾🙂".repeat(STREAM_BYTES), &mut omitted);
     assert!(omitted);
     assert!(value.len() <= STREAM_BYTES);
     assert!(value.capacity() <= STREAM_BYTES);
     assert!(value.ends_with("尾🙂"));
     let mut spare = String::with_capacity(1024 * 1024);
     spare.push_str("short");
-    assert_eq!(text(&spare, FIELD_BYTES, &mut omitted).capacity(), 5);
+    assert_eq!(super::text(&spare, FIELD_BYTES, &mut omitted).capacity(), 5);
 }
 
 #[test]
 fn json_container_storage_is_not_mistaken_for_small_preview_text() {
     let array = serde_json::Value::Array(vec![serde_json::Value::Null; FIELD_BYTES]);
     let mut omitted = false;
-    let copy = raw_input(&array, &mut omitted);
+    let copy = super::raw_input(&array, &mut omitted);
     assert!(copy.is_null());
     assert!(omitted);
-    assert_eq!(array.as_array().unwrap().len(), FIELD_BYTES);
+    assert_eq!(array.as_array().expect("json container storage is not mistaken for small preview text: the fixture must retain its expected variant").len(), FIELD_BYTES);
 }

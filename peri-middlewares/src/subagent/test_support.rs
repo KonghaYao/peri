@@ -131,16 +131,19 @@ pub(crate) fn tool_events(calls: Vec<ToolCallRequest>) -> Vec<ModelResult<ModelS
         })
         .collect::<Vec<_>>();
     let mut events: Vec<ModelResult<ModelStreamEvent>> = Vec::new();
-    for (index, call) in tool_calls.iter().enumerate() {
-        events.push(Ok(ModelStreamEvent::ToolCallDelta {
-            index,
-            id: Some(call.id().to_string()),
-            name: Some(call.name().to_string()),
-            arguments_delta: serde_json::to_string(call.arguments()).unwrap_or_default(),
-        }));
+    {
+        let indexed_tool_calls = tool_calls.iter().enumerate();
+        for (index, call) in indexed_tool_calls {
+            events.push(Ok(ModelStreamEvent::ToolCallDelta {
+                index,
+                id: Some(call.id().to_string()),
+                name: Some(call.name().to_string()),
+                arguments_delta: serde_json::to_string(call.arguments()).unwrap_or_default(),
+            }));
+        }
     }
     events.push(Ok(ModelStreamEvent::Completed(
-        ModelResponse::new(
+        ModelResponse::try_new(
             peri_model::ModelMessage::Assistant {
                 content: Vec::new(),
                 tool_calls,
@@ -186,7 +189,7 @@ pub(crate) fn events_from_reasoning(
         events.push(Ok(ModelStreamEvent::Completed(response_with_text(text))));
     } else {
         events.push(Ok(ModelStreamEvent::Completed(
-            ModelResponse::new(
+            ModelResponse::try_new(
                 peri_model::ModelMessage::Assistant {
                     content: vec![peri_model::ContentBlock::text(text)],
                     tool_calls: reasoning
@@ -212,7 +215,7 @@ pub(crate) fn events_from_reasoning(
 }
 
 pub(crate) fn response_with_text(text: impl Into<String>) -> ModelResponse {
-    ModelResponse::new(
+    ModelResponse::try_new(
         peri_model::ModelMessage::assistant_text(text),
         StopReason::EndTurn,
         None,

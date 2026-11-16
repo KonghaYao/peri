@@ -17,7 +17,6 @@ use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::i18n;
-use crate::truncate::{middle_truncate_by_width, truncate_by_width, wrap_by_width};
 
 use super::render::LoginRenderColors;
 
@@ -82,12 +81,14 @@ impl EditViewMetrics {
     }
 
     /// 极窄屏：值列放不下有意义的内容，降级为上下两行。
+    #[must_use]
     pub(super) fn narrow(&self) -> bool {
         self.value_budget < MIN_VALUE_BUDGET
     }
 }
 
 /// 页面标题：2 列缩进 + focus 色粗体。
+#[must_use]
 pub(super) fn title_line(
     metrics: &EditViewMetrics,
     text: &str,
@@ -241,7 +242,7 @@ pub(super) fn readonly_kv_lines(
         readonly_prefix_spans(metrics, label, colors)
     };
     spans.push(Span::styled(
-        middle_truncate_by_width(value, budget),
+        crate::truncate::middle_truncate_by_width(value, budget),
         Style::default().fg(colors.dim),
     ));
     let mut suffix_line = None;
@@ -306,6 +307,7 @@ pub(super) struct StatusEntry {
 }
 
 impl StatusEntry {
+    #[must_use]
     pub(super) fn new(text: impl Into<String>, tone: StatusTone) -> Self {
         Self {
             text: text.into(),
@@ -376,24 +378,27 @@ fn push_status_entry(
         ),
     };
     let chunks = wrap_limited(&entry.text, budget, entry.max_lines);
-    for (index, chunk) in chunks.iter().enumerate() {
-        let mut spans = if index == 0 {
-            prefix.clone()
-        } else {
-            prefix_spans(
-                if narrow {
-                    ACTION_INDENT + 2
-                } else {
-                    metrics.value_col + 2
-                },
-                Vec::new(),
-            )
-        };
-        if index == 0 {
-            spans.push(Span::styled("● ", dot_style(entry.tone, colors)));
+    {
+        let iteration_items = chunks.iter().enumerate();
+        for (index, chunk) in iteration_items {
+            let mut spans = if index == 0 {
+                prefix.clone()
+            } else {
+                prefix_spans(
+                    if narrow {
+                        ACTION_INDENT + 2
+                    } else {
+                        metrics.value_col + 2
+                    },
+                    Vec::new(),
+                )
+            };
+            if index == 0 {
+                spans.push(Span::styled("● ", dot_style(entry.tone, colors)));
+            }
+            spans.push(Span::styled(chunk.clone(), body_style(entry.tone, colors)));
+            out.push(Line::from(spans));
         }
-        spans.push(Span::styled(chunk.clone(), body_style(entry.tone, colors)));
-        out.push(Line::from(spans));
     }
 }
 
@@ -470,52 +475,55 @@ pub(super) fn action_row(
     }
     let has_right = visible.last().is_some_and(|index| index + 1 < labels.len());
     let mut ranges = Vec::with_capacity(visible.len());
-    for (position, &index) in visible.iter().enumerate() {
-        if position > 0 {
-            spans.push(Span::raw(" ".repeat(gap)));
-            column += gap;
-        }
-        let marker = if selected == Some(index) {
-            if focused { "❯ " } else { "» " }
-        } else {
-            "  "
-        };
-        spans.push(Span::styled(
-            marker,
-            Style::default().fg(if focused && selected == Some(index) {
-                colors.cursor
-            } else {
-                colors.dim
-            }),
-        ));
-        column += ACTION_MARKER;
-        // 单标签也放不下时截断；右侧指示符保留 1 列。
-        let reserve = usize::from(has_right);
-        let max_label = metrics
-            .content_width
-            .saturating_sub(column + reserve)
-            .max(1);
-        let label = fit_value(&format!("[{}]", labels[index]), max_label);
-        let width = label.width();
-        let start = column;
-        let style = if selected == Some(index) {
-            if focused {
-                Style::default()
-                    .fg(colors.focus)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(colors.text)
+    {
+        let iteration_items = visible.iter().enumerate();
+        for (position, &index) in iteration_items {
+            if position > 0 {
+                spans.push(Span::raw(" ".repeat(gap)));
+                column += gap;
             }
-        } else {
-            Style::default().fg(colors.dim)
-        };
-        spans.push(Span::styled(label, style));
-        column += width;
-        ranges.push(ActionSpan {
-            index,
-            start,
-            end: column,
-        });
+            let marker = if selected == Some(index) {
+                if focused { "❯ " } else { "» " }
+            } else {
+                "  "
+            };
+            spans.push(Span::styled(
+                marker,
+                Style::default().fg(if focused && selected == Some(index) {
+                    colors.cursor
+                } else {
+                    colors.dim
+                }),
+            ));
+            column += ACTION_MARKER;
+            // 单标签也放不下时截断；右侧指示符保留 1 列。
+            let reserve = usize::from(has_right);
+            let max_label = metrics
+                .content_width
+                .saturating_sub(column + reserve)
+                .max(1);
+            let label = fit_value(&format!("[{}]", labels[index]), max_label);
+            let width = label.width();
+            let start = column;
+            let style = if selected == Some(index) {
+                if focused {
+                    Style::default()
+                        .fg(colors.focus)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(colors.text)
+                }
+            } else {
+                Style::default().fg(colors.dim)
+            };
+            spans.push(Span::styled(label, style));
+            column += width;
+            ranges.push(ActionSpan {
+                index,
+                start,
+                end: column,
+            });
+        }
     }
     if has_right {
         spans.push(Span::styled("›", colors.label()));
@@ -597,7 +605,7 @@ pub(super) fn error_lines(
 fn marker_lines(metrics: &EditViewMetrics, text: &str, color: Color) -> Vec<Line<'static>> {
     let budget = metrics.content_width.saturating_sub(ACTION_INDENT).max(1);
     let style = Style::default().fg(color);
-    wrap_by_width(text, budget)
+    crate::truncate::wrap_by_width(text, budget)
         .into_iter()
         .enumerate()
         .map(|(index, chunk)| {
@@ -624,7 +632,7 @@ pub(super) fn note_lines(
     colors: &LoginRenderColors,
 ) -> Vec<Line<'static>> {
     let budget = metrics.content_width.saturating_sub(INDENT).max(1);
-    wrap_by_width(text, budget)
+    crate::truncate::wrap_by_width(text, budget)
         .into_iter()
         .map(|chunk| {
             Line::from(prefix_spans(
@@ -636,6 +644,7 @@ pub(super) fn note_lines(
 }
 
 /// 空行。
+#[must_use]
 pub(super) fn blank_line() -> Line<'static> {
     Line::from("")
 }
@@ -801,6 +810,7 @@ fn field_prefix_spans(
     ]
 }
 
+#[must_use]
 fn readonly_prefix_spans(
     metrics: &EditViewMetrics,
     label: &str,
@@ -835,12 +845,12 @@ fn fit_value(value: &str, budget: usize) -> String {
     if value.width() <= budget {
         value.to_string()
     } else {
-        truncate_by_width(value, budget.saturating_sub(1))
+        crate::truncate::truncate_by_width(value, budget.saturating_sub(1))
     }
 }
 
 fn wrap_limited(text: &str, budget: usize, max_lines: Option<usize>) -> Vec<String> {
-    let mut chunks = wrap_by_width(text, budget.max(1));
+    let mut chunks = crate::truncate::wrap_by_width(text, budget.max(1));
     if let Some(max) = max_lines
         && chunks.len() > max
     {

@@ -130,7 +130,7 @@ pub enum HostOAuthEvent {
 }
 
 impl OAuthWireNotification {
-    fn new(
+    fn try_new(
         flow_id: String,
         server_name: String,
         status: OAuthWireStatus,
@@ -158,7 +158,7 @@ impl OAuthWireNotification {
         ) {
             return Err(OAuthWireError::InvalidStatusShape);
         }
-        Self::new(flow_id, server_name, status)
+        Self::try_new(flow_id, server_name, status)
     }
 
     pub fn authorization_needed(
@@ -167,7 +167,7 @@ impl OAuthWireNotification {
         authorization_url: String,
     ) -> Result<Self, OAuthWireError> {
         let mut notification =
-            Self::new(flow_id, server_name, OAuthWireStatus::AuthorizationNeeded)?;
+            Self::try_new(flow_id, server_name, OAuthWireStatus::AuthorizationNeeded)?;
         notification.authorization_url = Some(ValidatedAuthorizationUrl::parse(authorization_url)?);
         Ok(notification)
     }
@@ -178,7 +178,7 @@ impl OAuthWireNotification {
         failure_class: OAuthFailureClass,
         error: String,
     ) -> Result<Self, OAuthWireError> {
-        let mut notification = Self::new(flow_id, server_name, OAuthWireStatus::Failed)?;
+        let mut notification = Self::try_new(flow_id, server_name, OAuthWireStatus::Failed)?;
         notification.failure_class = Some(failure_class);
         notification.error = Some(peri_acp_types::session::bounded_error_message(
             &error, 2_000,

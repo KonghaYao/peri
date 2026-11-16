@@ -12,7 +12,8 @@ async fn test_transport_full_roundtrip() {
 
     // Server: echo back
     let server_handle = tokio::spawn(async move {
-        use peri_acp::transport::{types::IncomingMessage, AcpTransport};
+        use peri_acp::transport::types::IncomingMessage;
+        use peri_acp::transport::AcpTransport;
         if let Some(IncomingMessage::Request { id, params, .. }) = server.recv().await {
             let _ = server.send_response(id, Ok(params)).await;
         }
@@ -33,10 +34,9 @@ async fn test_transport_full_roundtrip() {
 async fn test_broker_approval_flow() {
     use std::sync::Arc;
 
-    use peri_acp::{
-        broker::AcpTransportBroker,
-        transport::{mpsc::mpsc_transport_pair, AcpTransport},
-    };
+    use peri_acp::broker::AcpTransportBroker;
+    use peri_acp::transport::mpsc::mpsc_transport_pair;
+    use peri_acp::transport::AcpTransport;
     use peri_agent::interaction::{
         ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse,
         TrustedInteractionOwner, UserInteractionBroker,
@@ -85,7 +85,8 @@ async fn test_broker_approval_flow() {
 #[tokio::test]
 async fn test_event_mapper_tool_start() {
     use peri_acp::event::map_event;
-    use peri_agent::{agent::events::ExecutorEvent, messages::MessageId};
+    use peri_agent::agent::events::ExecutorEvent;
+    use peri_agent::messages::MessageId;
 
     let event = ExecutorEvent::ToolStart {
         message_id: MessageId::new(),
@@ -112,7 +113,8 @@ async fn test_event_mapper_tool_start() {
 #[tokio::test]
 async fn test_event_mapper_text_chunk() {
     use peri_acp::event::map_event;
-    use peri_agent::{agent::events::ExecutorEvent, messages::MessageId};
+    use peri_agent::agent::events::ExecutorEvent;
+    use peri_agent::messages::MessageId;
 
     let event = ExecutorEvent::TextChunk {
         message_id: MessageId::new(),

@@ -1,6 +1,11 @@
 //! 门面装配：打开本机库、只读打开与组合层端口装配。
 
-use super::*;
+use super::{
+    Arc, Lifecycle, LocalExecutionPort, MutationGate, SessionDataHome, SessionDataPort,
+    SessionResourcesImpl,
+};
+#[cfg(not(target_os = "emscripten"))]
+use super::{LocalExecution, Path, PathBuf, ReadOnlyThreadStoreError};
 
 impl SessionResourcesImpl {
     /// 打开或创建会话库，原地升级已知旧 schema 并保留历史数据。

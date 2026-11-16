@@ -1,11 +1,9 @@
-use std::{
-    collections::VecDeque,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
-    time::Duration,
-};
+use std::collections::VecDeque;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use peri_acp_types::ports::McpPoolShutdownReport;
 use tokio::sync::{oneshot, Barrier};

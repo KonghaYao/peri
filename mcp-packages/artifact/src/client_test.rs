@@ -1,6 +1,10 @@
 //! Tests for artifact_client
 
-use super::*;
+use crate::client::ArtifactClient;
+use crate::client::ArtifactError;
+use crate::client::ArtifactResponse;
+use crate::client::DEFAULT_TOKEN;
+use crate::client::MAX_ERROR_BODY_BYTES;
 
 #[test]
 fn instance_environment_selects_artifact_endpoint_and_token() {

@@ -1,10 +1,10 @@
 //! WorkflowTaskRegistry —— 管理活跃 workflow run，并发限制 + 完成通知。
 
 use std::collections::HashMap;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::fmt::{self, Debug, Formatter};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use peri_acp_types::tasks::TaskRecord;
 use thiserror::Error;
@@ -46,6 +46,7 @@ impl PartialEq for WorkflowRunTicket {
 impl Eq for WorkflowRunTicket {}
 
 impl WorkflowRunTicket {
+    #[must_use]
     pub fn run_id(&self) -> &str {
         &self.0.run_id
     }
@@ -102,6 +103,7 @@ pub struct WorkflowTaskRegistry {
 
 impl WorkflowTaskRegistry {
     /// 创建 registry，默认最大并发 3。
+    #[must_use]
     pub fn new(notification_tx: tokio::sync::broadcast::Sender<WorkflowTaskResult>) -> Self {
         Self {
             runs: parking_lot::Mutex::new(HashMap::new()),
@@ -113,6 +115,7 @@ impl WorkflowTaskRegistry {
     }
 
     /// 设置最大并发数（builder）。
+    #[must_use]
     pub fn with_max_concurrent(mut self, max: usize) -> Self {
         self.max_concurrent = max;
         self
@@ -124,6 +127,7 @@ impl WorkflowTaskRegistry {
     }
 
     /// 当前正在运行的 workflow 数量。
+    #[must_use]
     pub fn active_count(&self) -> usize {
         let runs = self.runs.lock();
         runs.values()
@@ -314,6 +318,7 @@ impl WorkflowTaskRegistry {
     }
 
     /// 列出所有 workflow run 的摘要信息。
+    #[must_use]
     pub fn list_runs(&self) -> Vec<(String, WorkflowRunStatus, String)> {
         let runs = self.runs.lock();
         runs.values()
@@ -325,3 +330,25 @@ impl WorkflowTaskRegistry {
 #[cfg(test)]
 #[path = "registry_test.rs"]
 mod tests;
+
+impl Debug for WorkflowRun {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowRun")
+            .field("run_id", &self.run_id)
+            .field("workflow_name", &self.workflow_name)
+            .field("script_preview", &self.script_preview)
+            .field("child_handle_present", &self.child_handle.is_some())
+            .field("kill_tx_present", &self.kill_tx.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Debug for WorkflowTaskRegistry {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowTaskRegistry")
+            .field("max_concurrent", &self.max_concurrent)
+            .finish_non_exhaustive()
+    }
+}

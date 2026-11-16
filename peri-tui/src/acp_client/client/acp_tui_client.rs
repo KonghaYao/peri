@@ -1,0 +1,264 @@
+//! Thin TUI-side wrapper around [`peri_acp::transport::mpsc::MpscClientTransport`].
+//!
+//! Translates raw [`peri_acp::transport::types::IncomingMessage`]s into [`AcpNotification`]s for the TUI event
+//! loop to consume. The notification pump runs as a background tokio task.
+
+use super::{session, session_load_reservation};
+
+use std::sync::{Arc, Mutex};
+
+use peri_acp::event::AcpEvent;
+use peri_acp::transport::mpsc::MpscClientTransport;
+
+use serde_json::Value;
+use tokio::sync::{mpsc, watch};
+
+use super::super::interaction_lifecycle::{
+    InteractionLifecycle, InteractionOwner, InteractionUiOutcome,
+};
+
+use session_load_reservation::SessionLoadReservationState;
+
+/// Notification events dispatched from the background pump to the TUI event loop.
+#[derive(Debug)]
+pub enum AcpNotification {
+    /// Producer provenance, captured before entering the client notification queue.
+    ChildEvent {
+        origin: peri_acp_types::event::ChildEventOrigin,
+        view_epoch: u64,
+        notification: Box<AcpNotification>,
+    },
+    /// A `notifications/agent_event` notification carrying an AcpEvent DTO.
+    /// The TUI converts this to its own AgentEvent via `map_acp_event`.
+    AgentEvent { session_id: String, event: AcpEvent },
+    /// A `notifications/session_update` notification from the ACP server.
+    SessionUpdate { session_id: String, params: Value },
+    /// A `RequestPermission` request requiring HITL interaction.
+    RequestPermission {
+        owner: InteractionOwner,
+        request_id_json: String,
+        params: Value,
+    },
+    /// An `elicitation/create` request requiring AskUser interaction.
+    Elicitation {
+        owner: InteractionOwner,
+        request_id_json: String,
+        params: Value,
+    },
+    /// Local, owner-qualified terminalization of a previously published interaction.
+    InteractionTerminal {
+        owner: InteractionOwner,
+        outcome: InteractionUiOutcome,
+    },
+    /// An unrecognized notification or request.
+    Other { msg: String },
+    /// Agent execution completed (synthetic notification from ACP server).
+    /// `request_id` 为被结束 turn 的 prompt requestId（服务器回带，可选）——
+    /// TUI 用它识别事件所属 turn（Issue 2026-08-05 stale 判定）。
+    AgentDone {
+        session_id: String,
+        stop_reason: String,
+        request_id: Option<String>,
+    },
+    /// Prediction fork 完成后的建议文本与结构化动作。
+    PredictionReady {
+        session_id: String,
+        text: String,
+        actions: Vec<PredictionAction>,
+    },
+    /// A `notifications/peri/*` custom notification (SubAgent, Compact, etc.)
+    Peri {
+        session_id: String,
+        method: String,
+        params: Value,
+    },
+    /// A `peri/unstable_event` notification carrying v2 state machine events
+    /// (text-chunk, tool-started, view-commit, turn-done, etc.).
+    UnstableEvent {
+        session_id: String,
+        event: String,
+        data: Value,
+    },
+    /// S4 私有通知 `peri/history_committed`（展示提交事实）。
+    HistoryCommitted { session_id: String, params: Value },
+}
+
+/// Select whether protocol events update the interactive UI or remain in the headless client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientProjectionMode {
+    Interactive,
+    Headless,
+}
+
+/// 客户端通知队列容量。TUI 消费落后时内存上限由此固定；pump 使用
+/// `try_send`，满队列视为持续不可消费并显式关闭连接，避免静默丢弃或无限增长。
+pub(crate) const NOTIFICATION_QUEUE_CAPACITY: usize = 4096;
+
+/// TUI-side client that owns the ACP transport and routes notifications.
+///
+/// Uses one mutex-protected routing state so current/deleted decisions are
+/// observed atomically by clones and by the notification pump.
+///
+/// `notification_tx` 刻意不存于此 struct：sender 必须由 pump task 独占持有，
+/// pump 退出时 channel 关闭，notifier 的 recv-None 分支才能触发（Issue 2
+/// 死代码重接）。若未来需要从 client 主动发通知，走显式参数传递，勿加回字段。
+#[derive(Clone)]
+pub struct AcpTuiClient {
+    pub(super) transport: Arc<MpscClientTransport>,
+    pub(super) lifecycle: InteractionLifecycle,
+    pub(super) projection_mode: ClientProjectionMode,
+    pub(super) notification_weak: Arc<Mutex<Option<mpsc::WeakSender<AcpNotification>>>>,
+    /// Startup restore is reserved before submit consumers become reachable.
+    /// `ensure_session` observes this flag under the same operation gate used by
+    /// new/load and waits for the reserved load to settle instead of competing
+    /// with it.
+    pub(super) startup_restore_tx: watch::Sender<bool>,
+    pub(super) session_load_reservations: Arc<SessionLoadReservationState>,
+    /// 用户会话决策序号：`/clear`、历史切换预约各递增一次。
+    ///
+    /// 队列提交在入队时快照该序号，落定身份前重读；变化即表示这份输入已经被
+    /// 新的用户决定取代，只能取消，不得改投新会话。
+    pub(super) session_switch_seq: Arc<std::sync::atomic::AtomicU64>,
+    pub(super) user_input_queue: Arc<std::sync::atomic::AtomicBool>,
+    pub(super) session_workspace: Arc<std::sync::atomic::AtomicBool>,
+    pub(super) mcp_control: Arc<std::sync::atomic::AtomicBool>,
+    pub(super) execution_cwd: watch::Sender<Option<String>>,
+    pub(super) restore_error: Arc<Mutex<Option<String>>>,
+    /// 启动恢复的目标：load 失败后仍保留，下一次 `ensure_session` 先重试同一目标，
+    /// 不静默降级成新会话。交互式切换或 `/clear` 会清除这个意图。
+    pub(super) startup_restore_target: Arc<Mutex<Option<String>>>,
+    /// 关闭旧会话失败（`-32010` incomplete）后仍未完成的切换：旧身份与被打断的
+    /// 加载目标。`fail_transition` 会清掉 lifecycle 里的旧身份，若不在这里留住，
+    /// 下一次建立会话会直接 `session/new`，把服务端仍处于 Closing 的旧会话和用户
+    /// 原本要加载的历史一起丢掉。见 `session::PendingClose`。
+    pub(super) pending_close: Arc<Mutex<Option<session::PendingClose>>>,
+    #[cfg(test)]
+    pub(super) transition_commit_hook:
+        Arc<Mutex<Option<mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>>>,
+    /// 测试用：在「认领预约」之后、「切换路由」之前同步暂停，且仍持有预约锁。
+    #[cfg(test)]
+    pub(super) transition_claim_hook:
+        Arc<Mutex<Option<std::sync::mpsc::Sender<std::sync::mpsc::Sender<()>>>>>,
+}
+
+impl AcpTuiClient {
+    /// 部署退出时显式关闭 transport；不依赖 UI/后台消费者释放所有 client 克隆。
+    pub fn close(&self) {
+        self.mcp_control
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.transport.close();
+    }
+
+    /// Create a new client wrapping an existing `MpscClientTransport`.
+    ///
+    /// Returns `(Self, notification_sender, notification_receiver)`. The caller must:
+    /// 1. Move `notification_sender` into [`AcpTuiClient::spawn_pump`] — the pump
+    ///    task must remain its **sole** holder; when the pump exits (transport
+    ///    closed) the sender drops, the channel closes, and the notifier's
+    ///    recv-None fallback fires (Issue 2).
+    /// 2. Move `notification_receiver` to the TUI event loop (`spawn_kit_notifier`).
+    #[must_use]
+    pub fn new(
+        transport: MpscClientTransport,
+    ) -> (
+        Self,
+        mpsc::Sender<AcpNotification>,
+        mpsc::Receiver<AcpNotification>,
+    ) {
+        Self::new_with_mode(transport, ClientProjectionMode::Headless)
+    }
+
+    /// Create a client whose accepted events may update the active TUI session projection.
+    pub fn new_interactive(
+        transport: MpscClientTransport,
+    ) -> (
+        Self,
+        mpsc::Sender<AcpNotification>,
+        mpsc::Receiver<AcpNotification>,
+    ) {
+        Self::new_with_mode(transport, ClientProjectionMode::Interactive)
+    }
+
+    pub(super) fn new_with_mode(
+        transport: MpscClientTransport,
+        projection_mode: ClientProjectionMode,
+    ) -> (
+        Self,
+        mpsc::Sender<AcpNotification>,
+        mpsc::Receiver<AcpNotification>,
+    ) {
+        let (notification_tx, notification_rx) = mpsc::channel(NOTIFICATION_QUEUE_CAPACITY);
+        let transport = Arc::new(transport);
+        let lifecycle = InteractionLifecycle::new();
+        let notification_weak = Arc::new(Mutex::new(None));
+        let (startup_restore_tx, _startup_restore_rx) = watch::channel(false);
+        let (load_epoch_tx, _load_epoch_rx) = watch::channel(0_u64);
+        let (settlement_tx, settlement_rx) = mpsc::unbounded_channel();
+        lifecycle.install_drop_settlement_sender(settlement_tx);
+        super::super::interaction_settlement::spawn_settlement_worker(
+            Arc::downgrade(&transport),
+            settlement_rx,
+            notification_weak.clone(),
+        );
+        let client = Self {
+            transport,
+            lifecycle,
+            projection_mode,
+            notification_weak,
+            startup_restore_tx,
+            session_load_reservations: Arc::new(SessionLoadReservationState::new(load_epoch_tx)),
+            session_switch_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            user_input_queue: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            session_workspace: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            mcp_control: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            execution_cwd: watch::channel(None).0,
+            restore_error: Arc::new(Mutex::new(None)),
+            startup_restore_target: Arc::new(Mutex::new(None)),
+            pending_close: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            transition_commit_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            transition_claim_hook: Arc::new(Mutex::new(None)),
+        };
+        (client, notification_tx, notification_rx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_stable_for_test(&self, session_id: &str, accepting_reverse: bool) {
+        self.lifecycle.force_stable(session_id, accepting_reverse);
+    }
+}
+
+impl AcpNotification {
+    #[must_use]
+    pub(in super::super) fn with_child_origin(
+        self,
+        origin: Option<peri_acp_types::event::ChildEventOrigin>,
+        view_epoch: u64,
+    ) -> Self {
+        match origin {
+            Some(origin) => Self::ChildEvent {
+                origin,
+                view_epoch,
+                notification: Box::new(self),
+            },
+            None => self,
+        }
+    }
+}
+
+use peri_acp_types::event_data::PredictionAction;
+
+use std::fmt;
+use std::fmt::{Debug, Formatter};
+
+impl Debug for AcpTuiClient {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AcpTuiClient")
+            .field("projection_mode", &self.projection_mode)
+            .field("user_input_queue", &self.user_input_queue)
+            .field("session_workspace", &self.session_workspace)
+            .finish_non_exhaustive()
+    }
+}

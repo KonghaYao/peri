@@ -1,9 +1,16 @@
-use super::*;
+use crate::agent::workflow::agent::observation::WorkflowObservation;
+use crate::agent::workflow::agent::WorkflowLangfuseEventHandler;
+use parking_lot::Mutex;
+use peri_acp_types::event::ExecutorEvent;
 use peri_acp_types::messages::MessageId;
+use peri_acp_types::workflow::AgentRunParams;
+use peri_acp_types::workflow::ProgressEvent;
 use serde_json::json;
+use std::sync::Arc;
 
 fn params() -> AgentRunParams {
-    serde_json::from_value(json!({"runId": "run", "agentId": 7, "prompt": "test"})).unwrap()
+    serde_json::from_value(json!({"runId": "run", "agentId": 7, "prompt": "test"}))
+        .expect("from_value must accept this test fixture representation")
 }
 
 fn llm_end(model: &str, output_tokens: Option<u32>) -> ExecutorEvent {
@@ -25,7 +32,8 @@ fn model_progress_leaves_counts_unspecified_and_preserves_collected_usage() {
     observation
         .handler()
         .on_event(llm_end("provider", Some(12)));
-    rx.try_recv().unwrap();
+    rx.try_recv()
+        .expect("rx try recv producer must deliver the expected test event before closing");
     observation.report_model("effective", Some("haiku".into()));
     let ProgressEvent::AgentProgress {
         run_id,
@@ -35,7 +43,9 @@ fn model_progress_leaves_counts_unspecified_and_preserves_collected_usage() {
         token_count,
         tool_count,
         ..
-    } = rx.try_recv().unwrap()
+    } = rx
+        .try_recv()
+        .expect("rx try recv producer must deliver the expected test event before closing")
     else {
         panic!("expected agent progress")
     };
@@ -98,10 +108,12 @@ fn handler_projects_cumulative_progress_before_langfuse_callback() {
 
 #[tokio::test]
 async fn workflow_forwarder_close_collects_buffered_usage_before_result_snapshot() {
-    use crate::agent::events_v2::{
-        observe_event_to_executor, EventBus, EventBusConfig, ObserveEvent,
-    };
-    use peri_acp_types::{identity::AgentId, session::TurnId};
+    use crate::agent::events_v2;
+    use crate::agent::events_v2::EventBus;
+    use crate::agent::events_v2::EventBusConfig;
+    use crate::agent::events_v2::ObserveEvent;
+    use peri_acp_types::identity::AgentId;
+    use peri_acp_types::session::TurnId;
     let observation = WorkflowObservation::new(&params(), None, None);
     let handler = observation.handler();
     let (bus, mut handles) = EventBus::new(EventBusConfig::default());
@@ -119,14 +131,14 @@ async fn workflow_forwarder_close_collects_buffered_usage_before_result_snapshot
     });
     let forwarder = tokio::spawn(async move {
         while let Ok(event) = handles.observe_rx.recv().await {
-            if let Some(event) = observe_event_to_executor(event) {
+            if let Some(event) = events_v2::observe_event_to_executor(event) {
                 handler.on_event(event);
             }
         }
     });
     tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        super::super::await_workflow_forwarder(Arc::new(bus), forwarder),
+        crate::agent::workflow::agent::await_workflow_forwarder(Arc::new(bus), forwarder),
     )
     .await
     .expect("close must converge")

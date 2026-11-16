@@ -1,6 +1,7 @@
 //! Fullscreen TUI startup and shutdown.
 
-use super::*;
+use super::Result;
+use super::SessionStoreDeployment;
 
 /// TUI 模式启动选项
 pub(super) struct TuiOptions {
@@ -30,7 +31,7 @@ pub(super) fn propagate_tui_result(result: Result<()>) -> Result<()> {
 pub(super) fn run_tui(opts: TuiOptions) -> Result<()> {
     // --settings 覆盖
     if let Some(ref settings_path) = opts.settings {
-        inject_settings_override(settings_path);
+        super::inject_settings_override(settings_path);
     }
 
     // 在创建 tokio runtime 之前初始化 tracing，确保 reqwest::blocking::Client
@@ -39,10 +40,10 @@ pub(super) fn run_tui(opts: TuiOptions) -> Result<()> {
 
     // 安装自定义 panic hook，必须在 enable_raw_mode() 之前，
     // 否则 Rust 默认 panic hook 的 stderr 输出会破坏 TUI 画面。
-    let panic_notify_rx = init_panic_notify();
+    let panic_notify_rx = super::init_panic_notify();
 
     // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
-    let rt = build_runtime()?;
+    let rt = super::cli_args::build_runtime()?;
 
     let result = rt.block_on(async {
         // ratatui-kit fullscreen() 自行管理 raw mode / alternate screen / 事件循环。

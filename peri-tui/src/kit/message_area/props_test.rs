@@ -1,15 +1,19 @@
-use super::*;
+use super::GridSpec;
+use super::MsgAreaTracker;
+use super::Rect;
 use ratatui::backend::TestBackend;
+use ratatui_kit::prelude::*;
 use std::task::{Context, Poll, Waker};
 
 fn draw_tracker(tracker: &mut MsgAreaTracker, area: Rect) {
-    let mut terminal = ratatui::Terminal::new(TestBackend::new(100, 60)).unwrap();
+    let mut terminal = ratatui::Terminal::new(TestBackend::new(100, 60))
+        .expect("draw tracker: fixture parameters must construct a valid value");
     terminal
         .draw(|frame| {
             let mut drawer = ComponentDrawer::new(frame, area);
             tracker.pre_component_draw(&mut drawer);
         })
-        .unwrap();
+        .expect("draw tracker: fixture parameters must construct a valid value");
 }
 
 #[test]
@@ -32,11 +36,11 @@ fn scrollbar_outer_area_restores_terminal_width_from_band() {
     assert_eq!(grid.left_pad, 11);
     // band → 整幅外框：左缘退回留白、宽取终端宽度。
     assert_eq!(
-        scrollbar_outer_area(band, grid, 140),
+        super::scrollbar_outer_area(band, grid, 140),
         Rect::new(0, 2, 140, 20)
     );
     // 尺寸不可用时回退 band，不构造跨屏矩形。
-    assert_eq!(scrollbar_outer_area(band, grid, 0), band);
+    assert_eq!(super::scrollbar_outer_area(band, grid, 0), band);
 }
 
 #[test]

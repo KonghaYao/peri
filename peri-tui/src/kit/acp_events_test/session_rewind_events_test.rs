@@ -1,6 +1,14 @@
 //! RewindCompleted 与跨 turn reasoning 视图用例（会话历史重建）。
 
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::CurrentTurn;
+
+use super::SessionPhase;
+
+use super::TuiRenderUnit;
+use super::TuiUserBubble;
+use super::serial;
 
 /// H3: RewindCompleted 反序列化 messages_json 替换 state.committed，
 /// 并同步重建 REWIND_PREVIEW（支持 rewind 后连续回滚）。
@@ -45,7 +53,7 @@ fn test_rewind_completed_replaces_committed() {
     ])
     .to_string();
 
-    dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
+    super::dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
 
     // committed 应被替换为 2 条（user + assistant）
     assert_eq!(state.committed.len(), 2, "rewind 后 committed 应有 2 条 VM");
@@ -119,7 +127,7 @@ fn test_rewind_completed_rebuild_preview_strips_reminder() {
         },
     ])
     .to_string();
-    dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
+    super::dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
 
     let preview = crate::kit::atoms::REWIND_PREVIEW.state().read().clone();
     let preview = preview.expect("rewind 后 REWIND_PREVIEW 应被重建");
@@ -178,7 +186,7 @@ fn test_rewind_completed_restores_target_text_to_input() {
         {"role": "user", "id": "msg-1", "content": "历史用户消息"},
     ])
     .to_string();
-    dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
+    super::dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
 
     // 回填通道被写入
     let restore = crate::kit::atoms::INPUT_RESTORE_TEXT
@@ -238,7 +246,7 @@ fn test_rewind_completed_without_target_text_no_restore() {
         window: Default::default(),
     };
     let messages_json = serde_json::json!([]).to_string();
-    dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
+    super::dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
 
     let restore = crate::kit::atoms::INPUT_RESTORE_TEXT
         .get()
@@ -279,15 +287,15 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
     };
 
     // === Turn 1: user bubble, reasoning + text → TurnDone ===
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "第一个问题".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(&mut state, &AcpEventData::PromptStarted);
-    dispatch_and_notify(
+    super::dispatch_and_notify(&mut state, &AcpEventData::PromptStarted);
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ReasoningChunk(crate::kit::stream_data::TuiReasoningChunk {
             text: "Turn 1 的思考内容".into(),
@@ -295,7 +303,7 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "Turn 1 的回复".into(),
@@ -303,18 +311,18 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
     // === Turn 2: user bubble, reasoning + text → TurnDone ===
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "第二个问题".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(&mut state, &AcpEventData::PromptStarted);
-    dispatch_and_notify(
+    super::dispatch_and_notify(&mut state, &AcpEventData::PromptStarted);
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ReasoningChunk(crate::kit::stream_data::TuiReasoningChunk {
             text: "Turn 2 的思考内容".into(),
@@ -322,7 +330,7 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "Turn 2 的回复".into(),
@@ -330,7 +338,7 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
     // 验证 committed 有 4 个 VM：User1, Assistant1, User2, Assistant2
     assert_eq!(
@@ -348,7 +356,7 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
     match &state.committed[1] {
         TuiRenderUnit::TuiAssistantBubble(d) => {
             assert!(d.reasoning.is_some(), "Turn 1 Assistant 应有 reasoning 块");
-            assert_eq!(d.reasoning.as_ref().unwrap().text, "Turn 1 的思考内容");
+            assert_eq!(d.reasoning.as_ref().expect("multi turn reasoning preserved in committed: the fixture must retain its expected variant").text, "Turn 1 的思考内容");
         }
         other => panic!("expected TuiAssistantBubble at [1], got {other:?}"),
     }
@@ -362,7 +370,7 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
     match &state.committed[3] {
         TuiRenderUnit::TuiAssistantBubble(d) => {
             assert!(d.reasoning.is_some(), "Turn 2 Assistant 应有 reasoning 块");
-            assert_eq!(d.reasoning.as_ref().unwrap().text, "Turn 2 的思考内容");
+            assert_eq!(d.reasoning.as_ref().expect("multi turn reasoning preserved in committed: the fixture must retain its expected variant").text, "Turn 2 的思考内容");
         }
         other => panic!("expected TuiAssistantBubble at [3], got {other:?}"),
     }
@@ -378,7 +386,7 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
     for (idx, label) in [(1usize, "Turn 1"), (4usize, "Turn 2")] {
         match &snapshot.items[idx] {
             TuiRenderUnit::TuiAssistantBubble(d) => {
-                let r = d.reasoning.as_ref().unwrap();
+                let r = d.reasoning.as_ref().expect("multi turn reasoning preserved in committed: fixture must have the expected variant");
                 assert_eq!(
                     r.status,
                     crate::kit::tui_render_unit::EntryStatus::Completed,
@@ -397,3 +405,5 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
         }
     }
 }
+
+use crate::kit::atoms::{VIEW_MODELS, ViewModelsSnapshot};

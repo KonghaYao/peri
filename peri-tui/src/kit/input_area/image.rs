@@ -85,6 +85,7 @@ struct LimitedWriter {
 }
 
 impl LimitedWriter {
+    #[must_use]
     fn new(limit: usize) -> Self {
         Self {
             buffer: Vec::new(),
@@ -103,6 +104,7 @@ impl LimitedWriter {
         })
     }
 
+    #[must_use]
     fn into_inner(self) -> Vec<u8> {
         self.buffer
     }

@@ -1,4 +1,10 @@
-use super::*;
+use super::{Duration, Instant, Path, ThreadMeta};
+use crate::sessions::SqliteThreadStore;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::store::ThreadStore;
+use peri_acp_types::workspace::ScopedThreadQuery;
+use peri_acp_types::workspace::ThreadScope;
+use std::io::Read;
 
 // ── 外部探测的时机与次数：写事务内不得执行外部进程 ──
 
@@ -106,7 +112,9 @@ async fn test_worktree_registration_admission_child() {
         return;
     };
     let cwd = std::env::var(ADMISSION_CWD).unwrap();
-    let store = SqliteThreadStore::new(Path::new(&database)).await.unwrap();
+    let store = SqliteThreadStore::try_new(Path::new(&database))
+        .await
+        .unwrap();
     let workspace = store.resolve_workspace(Path::new(&cwd)).await.unwrap();
     let thread = store
         .create_bound_thread(
@@ -136,7 +144,9 @@ async fn test_worktree_history_access_child() {
                 .await
                 .unwrap()
         } else {
-            SqliteThreadStore::new(Path::new(&database)).await.unwrap()
+            SqliteThreadStore::try_new(Path::new(&database))
+                .await
+                .unwrap()
         };
         let binding = store
             .load_session_binding(&thread)
@@ -184,7 +194,9 @@ async fn test_worktree_bound_session_validation_child() {
     };
     let thread = std::env::var(VALIDATE_THREAD).unwrap();
     let cwd = std::env::var(VALIDATE_CWD).unwrap();
-    let store = SqliteThreadStore::new(Path::new(&database)).await.unwrap();
+    let store = SqliteThreadStore::try_new(Path::new(&database))
+        .await
+        .unwrap();
     let workspace = store.validate_session_binding(&thread).await.unwrap();
     assert_eq!(workspace.cwd, tokio::fs::canonicalize(&cwd).await.unwrap());
 }
@@ -205,7 +217,7 @@ async fn test_worktree_history_access_never_probes_git() {
     assert!(!recorded.is_empty(), "准入必须先真的调用过假 Git");
     let thread = bound_thread_id(&database).await;
     // 写入一条历史供只读访问读取；这一步在测量之前完成。
-    let store = SqliteThreadStore::new(&database).await.unwrap();
+    let store = SqliteThreadStore::try_new(&database).await.unwrap();
     store
         .append_message(&thread, BaseMessage::human("bound history"))
         .await
@@ -443,7 +455,7 @@ async fn test_worktree_registration_probes_filesystem_outside_write_lock() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_worktree_repository_registration_keeps_git_calls_bounded() {
-    let repository = repository();
+    let repository = super::repository();
     let directory = tempfile::tempdir().unwrap();
     let (recorded, database) = probe_admission(
         directory.path(),
@@ -474,7 +486,7 @@ async fn test_worktree_repository_registration_keeps_git_calls_bounded() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_worktree_bound_session_validation_never_probes_git() {
-    let repository = repository();
+    let repository = super::repository();
     let directory = tempfile::tempdir().unwrap();
     let (recorded, database) = probe_admission(
         directory.path(),
@@ -535,7 +547,7 @@ async fn test_worktree_slow_git_wait_is_measured_per_call_outside_the_write_lock
     const POLL_MS: u64 = 20;
     /// 一轮观测三条命令，准入一轮。
     const CALLS: u64 = 3;
-    let repository = repository();
+    let repository = super::repository();
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("threads.db");
     let shim = write_probe_git(directory.path(), SLEEP_MS, Some(&real_git_path()));
@@ -550,10 +562,10 @@ async fn test_worktree_slow_git_wait_is_measured_per_call_outside_the_write_lock
     // 因此相邻到达的间隔就是上一个阶段真实的 Git 等待。
     let mut timeline: Vec<(Duration, String)> = Vec::new();
     while timeline.len() < CALLS as usize && started.elapsed() < Duration::from_secs(60) {
-        for line in read_probe_log(directory.path())
+        let new_probe_lines = read_probe_log(directory.path())
             .into_iter()
-            .skip(timeline.len())
-        {
+            .skip(timeline.len());
+        for line in new_probe_lines {
             timeline.push((started.elapsed(), line));
         }
         if child.try_wait().unwrap().is_some() {

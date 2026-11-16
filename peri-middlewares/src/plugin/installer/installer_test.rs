@@ -1,6 +1,10 @@
-use tempfile::tempdir;
+use tempfile;
 
-use super::*;
+use super::InstallScope;
+use super::InstalledPlugin;
+use super::InstalledPlugins;
+use super::InstallerError;
+use super::Path;
 use crate::plugin::PluginOrigin;
 
 fn setup_marketplace_cache(cache_dir: &Path) {
@@ -58,11 +62,11 @@ fn setup_marketplace_cache(cache_dir: &Path) {
 
 #[tokio::test]
 async fn test_install_plugin_success() {
-    let claude_dir = tempdir().unwrap();
-    let cache_dir = tempdir().unwrap();
+    let claude_dir = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
     setup_marketplace_cache(cache_dir.path());
 
-    let result = install_plugin(
+    let result = super::install_plugin(
         "test-plugin",
         "test-mkt",
         InstallScope::User,
@@ -78,7 +82,7 @@ async fn test_install_plugin_success() {
     assert_eq!(result.marketplace, "test-mkt");
 
     // Verify installed_plugins.json
-    let installed = load_installed_plugins(Some(
+    let installed = super::load_installed_plugins(Some(
         &claude_dir
             .path()
             .join("plugins")
@@ -116,11 +120,11 @@ async fn test_install_plugin_success() {
 
 #[tokio::test]
 async fn test_install_plugin_not_found() {
-    let claude_dir = tempdir().unwrap();
-    let cache_dir = tempdir().unwrap();
+    let claude_dir = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
     setup_marketplace_cache(cache_dir.path());
 
-    let result = install_plugin(
+    let result = super::install_plugin(
         "nonexistent",
         "test-mkt",
         InstallScope::User,
@@ -139,8 +143,8 @@ async fn test_install_plugin_not_found() {
 
 #[tokio::test]
 async fn test_install_plugin_invalid_manifest() {
-    let claude_dir = tempdir().unwrap();
-    let cache_dir = tempdir().unwrap();
+    let claude_dir = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
     let mkt_dir = cache_dir.path().join("test-mkt");
     std::fs::create_dir_all(mkt_dir.join("bad-plugin").join(".claude-plugin")).unwrap();
     let marketplace_json = r#"{
@@ -157,7 +161,7 @@ async fn test_install_plugin_invalid_manifest() {
     )
     .unwrap();
 
-    let result = install_plugin(
+    let result = super::install_plugin(
         "bad-plugin",
         "test-mkt",
         InstallScope::User,
@@ -172,11 +176,11 @@ async fn test_install_plugin_invalid_manifest() {
 
 #[tokio::test]
 async fn test_install_plugin_reinstall() {
-    let claude_dir = tempdir().unwrap();
-    let cache_dir = tempdir().unwrap();
+    let claude_dir = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
     setup_marketplace_cache(cache_dir.path());
 
-    install_plugin(
+    super::install_plugin(
         "test-plugin",
         "test-mkt",
         InstallScope::User,
@@ -187,7 +191,7 @@ async fn test_install_plugin_reinstall() {
     .await
     .unwrap();
 
-    install_plugin(
+    super::install_plugin(
         "test-plugin",
         "test-mkt",
         InstallScope::User,
@@ -198,7 +202,7 @@ async fn test_install_plugin_reinstall() {
     .await
     .unwrap();
 
-    let installed = load_installed_plugins(Some(
+    let installed = super::load_installed_plugins(Some(
         &claude_dir
             .path()
             .join("plugins")
@@ -210,11 +214,11 @@ async fn test_install_plugin_reinstall() {
 
 #[tokio::test]
 async fn test_uninstall_plugin() {
-    let claude_dir = tempdir().unwrap();
-    let cache_dir = tempdir().unwrap();
+    let claude_dir = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
     setup_marketplace_cache(cache_dir.path());
 
-    install_plugin(
+    super::install_plugin(
         "test-plugin",
         "test-mkt",
         InstallScope::User,
@@ -225,7 +229,7 @@ async fn test_uninstall_plugin() {
     .await
     .unwrap();
 
-    uninstall_plugin(
+    super::uninstall_plugin(
         "test-plugin@test-mkt",
         InstallScope::User,
         claude_dir.path(),
@@ -234,7 +238,7 @@ async fn test_uninstall_plugin() {
     .await
     .unwrap();
 
-    let installed = load_installed_plugins(Some(
+    let installed = super::load_installed_plugins(Some(
         &claude_dir
             .path()
             .join("plugins")
@@ -253,8 +257,8 @@ async fn test_uninstall_plugin() {
 
 #[tokio::test]
 async fn test_uninstall_plugin_not_found() {
-    let claude_dir = tempdir().unwrap();
-    let result = uninstall_plugin(
+    let claude_dir = tempfile::tempdir().unwrap();
+    let result = super::uninstall_plugin(
         "nonexistent@test",
         InstallScope::User,
         claude_dir.path(),
@@ -266,11 +270,11 @@ async fn test_uninstall_plugin_not_found() {
 
 #[tokio::test]
 async fn test_update_plugin_same_version() {
-    let claude_dir = tempdir().unwrap();
-    let cache_dir = tempdir().unwrap();
+    let claude_dir = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
     setup_marketplace_cache(cache_dir.path());
 
-    let installed = install_plugin(
+    let installed = super::install_plugin(
         "test-plugin",
         "test-mkt",
         InstallScope::User,
@@ -281,7 +285,7 @@ async fn test_update_plugin_same_version() {
     .await
     .unwrap();
 
-    let result = update_plugin(
+    let result = super::update_plugin(
         "test-plugin@test-mkt",
         InstallScope::User,
         cache_dir.path(),
@@ -296,8 +300,8 @@ async fn test_update_plugin_same_version() {
 
 #[tokio::test]
 async fn test_check_updates() {
-    let claude_dir = tempdir().unwrap();
-    let cache_dir = tempdir().unwrap();
+    let claude_dir = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
     setup_marketplace_cache(cache_dir.path());
 
     // Install plugin with old version
@@ -324,7 +328,7 @@ async fn test_check_updates() {
         origin: PluginOrigin::PeriInstalled,
     });
 
-    let updates = check_updates(&installed, cache_dir.path()).await;
+    let updates = super::check_updates(&installed, cache_dir.path()).await;
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].plugin_id, "test-plugin@test-mkt");
     assert_eq!(updates[0].latest_version, "abc1234");
@@ -333,8 +337,8 @@ async fn test_check_updates() {
 
 #[test]
 fn test_copy_dir_recursive() {
-    let src = tempdir().unwrap();
-    let dst = tempdir().unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
 
     // Create nested structure
     std::fs::create_dir_all(src.path().join("sub").join("deep")).unwrap();
@@ -350,7 +354,7 @@ fn test_copy_dir_recursive() {
     std::fs::create_dir_all(src.path().join(".git").join("objects")).unwrap();
     std::fs::write(src.path().join(".git").join("config"), "gitconfig").unwrap();
 
-    copy_dir_recursive(src.path(), &dst.path().join("copy")).unwrap();
+    super::copy_dir_recursive(src.path(), &dst.path().join("copy")).unwrap();
 
     assert!(dst.path().join("copy").join("file1.txt").exists());
     assert!(dst
@@ -375,10 +379,10 @@ fn test_copy_dir_recursive() {
 
 #[test]
 fn test_update_enabled_plugins_append() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path();
 
-    update_enabled_plugins("plugin-a", InstallScope::User, claude_dir, None).unwrap();
+    super::update_enabled_plugins("plugin-a", InstallScope::User, claude_dir, None).unwrap();
 
     let settings: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
@@ -394,7 +398,7 @@ fn test_update_enabled_plugins_append() {
 
 #[test]
 fn test_update_enabled_plugins_dedup() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path();
     let settings_path = claude_dir.join("settings.json");
     // 写入数组格式的现有文件
@@ -404,7 +408,7 @@ fn test_update_enabled_plugins_dedup() {
     )
     .unwrap();
 
-    update_enabled_plugins("plugin-a", InstallScope::User, claude_dir, None).unwrap();
+    super::update_enabled_plugins("plugin-a", InstallScope::User, claude_dir, None).unwrap();
 
     let settings: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
@@ -417,7 +421,7 @@ fn test_update_enabled_plugins_dedup() {
 
 #[test]
 fn test_update_enabled_plugins_object_format() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path();
     let settings_path = claude_dir.join("settings.json");
     // 写入对象格式的现有文件（Claude Code 格式）
@@ -427,7 +431,7 @@ fn test_update_enabled_plugins_object_format() {
     )
     .unwrap();
 
-    update_enabled_plugins("plugin-c", InstallScope::User, claude_dir, None).unwrap();
+    super::update_enabled_plugins("plugin-c", InstallScope::User, claude_dir, None).unwrap();
 
     let settings: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
@@ -441,7 +445,7 @@ fn test_update_enabled_plugins_object_format() {
 
 #[test]
 fn test_remove_from_enabled_plugins_array_format() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path();
     let settings_path = claude_dir.join("settings.json");
     std::fs::write(
@@ -450,7 +454,7 @@ fn test_remove_from_enabled_plugins_array_format() {
     )
     .unwrap();
 
-    remove_from_enabled_plugins("plugin-a", &InstallScope::User, claude_dir, None).unwrap();
+    super::remove_from_enabled_plugins("plugin-a", &InstallScope::User, claude_dir, None).unwrap();
 
     let settings: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
@@ -461,7 +465,7 @@ fn test_remove_from_enabled_plugins_array_format() {
 
 #[test]
 fn test_remove_from_enabled_plugins_object_format() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path();
     let settings_path = claude_dir.join("settings.json");
     std::fs::write(
@@ -470,7 +474,7 @@ fn test_remove_from_enabled_plugins_object_format() {
     )
     .unwrap();
 
-    remove_from_enabled_plugins("plugin-a", &InstallScope::User, claude_dir, None).unwrap();
+    super::remove_from_enabled_plugins("plugin-a", &InstallScope::User, claude_dir, None).unwrap();
 
     let settings: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
@@ -486,65 +490,68 @@ fn test_remove_from_enabled_plugins_object_format() {
 
 #[test]
 fn test_sanitize_plugin_id_basic() {
-    assert_eq!(sanitize_plugin_id("my-plugin_v2"), "my-plugin_v2");
+    assert_eq!(super::sanitize_plugin_id("my-plugin_v2"), "my-plugin_v2");
 }
 
 #[test]
 fn test_sanitize_plugin_id_special_chars() {
     assert_eq!(
-        sanitize_plugin_id("plugin@marketplace"),
+        super::sanitize_plugin_id("plugin@marketplace"),
         "plugin-marketplace"
     );
-    assert_eq!(sanitize_plugin_id("a.b/c"), "a-b-c");
-    assert_eq!(sanitize_plugin_id("hello world"), "hello-world");
+    assert_eq!(super::sanitize_plugin_id("a.b/c"), "a-b-c");
+    assert_eq!(super::sanitize_plugin_id("hello world"), "hello-world");
 }
 
 #[test]
 fn test_sanitize_plugin_id_empty() {
-    assert_eq!(sanitize_plugin_id(""), "");
+    assert_eq!(super::sanitize_plugin_id(""), "");
 }
 
 // ── match_project_path tests ──
 
 #[test]
 fn test_match_project_path_both_none() {
-    assert!(match_project_path(&None, None));
+    assert!(super::match_project_path(None, None));
 }
 
 #[test]
 fn test_match_project_path_stored_none_given_some() {
-    assert!(!match_project_path(&None, Some(Path::new("/project"))));
+    assert!(!super::match_project_path(
+        None,
+        Some(Path::new("/project"))
+    ));
 }
 
 #[test]
 fn test_match_project_path_given_none_stored_some() {
-    assert!(!match_project_path(&Some("/project".into()), None));
+    assert!(!super::match_project_path(Some("/project"), None));
 }
 
 #[test]
 fn test_match_project_path_exact_match() {
-    assert!(match_project_path(
-        &Some("/home/user/project".into()),
+    assert!(super::match_project_path(
+        Some("/home/user/project"),
         Some(Path::new("/home/user/project"))
     ));
 }
 
 #[test]
 fn test_match_project_path_rejects_suffix_match() {
-    assert!(!match_project_path(
-        &Some("/home/user/project".into()),
+    assert!(!super::match_project_path(
+        Some("/home/user/project"),
         Some(Path::new("project"))
     ));
-    assert!(!match_project_path(
-        &Some("project".into()),
+    assert!(!super::match_project_path(
+        Some("project"),
         Some(Path::new("/home/user/project"))
     ));
 }
 
 #[test]
 fn test_match_project_path_no_match() {
-    assert!(!match_project_path(
-        &Some("/home/user/project-a".into()),
+    assert!(!super::match_project_path(
+        Some("/home/user/project-a"),
         Some(Path::new("/home/user/project-b"))
     ));
 }
@@ -553,14 +560,14 @@ fn test_match_project_path_no_match() {
 
 #[tokio::test]
 async fn test_cleanup_no_cache_dir() {
-    let dir = tempdir().unwrap();
-    let result = cleanup_orphaned_plugins(dir.path()).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let result = super::cleanup_orphaned_plugins(dir.path()).await.unwrap();
     assert_eq!(result, 0, "no cache dir should return 0");
 }
 
 #[tokio::test]
 async fn test_cleanup_removes_old_orphaned() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path();
 
     // Create cache structure: cache/marketplace/plugin/version/
@@ -588,7 +595,7 @@ async fn test_cleanup_removes_old_orphaned() {
     // No installed plugins → empty installed_plugins.json
     let plugins_dir = claude_dir.join("plugins");
     std::fs::create_dir_all(&plugins_dir).unwrap();
-    save_installed_plugins(
+    super::save_installed_plugins(
         &InstalledPlugins {
             version: 1,
             plugins: vec![],
@@ -597,14 +604,14 @@ async fn test_cleanup_removes_old_orphaned() {
     )
     .unwrap();
 
-    let deleted = cleanup_orphaned_plugins(claude_dir).await.unwrap();
+    let deleted = super::cleanup_orphaned_plugins(claude_dir).await.unwrap();
     assert_eq!(deleted, 1, "should delete 1 old orphaned version");
     assert!(!version_dir.exists(), "old orphaned dir should be removed");
 }
 
 #[tokio::test]
 async fn test_cleanup_preserves_recent_orphaned() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path();
 
     let version_dir = claude_dir
@@ -625,7 +632,7 @@ async fn test_cleanup_preserves_recent_orphaned() {
 
     let plugins_dir = claude_dir.join("plugins");
     std::fs::create_dir_all(&plugins_dir).unwrap();
-    save_installed_plugins(
+    super::save_installed_plugins(
         &InstalledPlugins {
             version: 1,
             plugins: vec![],
@@ -634,7 +641,7 @@ async fn test_cleanup_preserves_recent_orphaned() {
     )
     .unwrap();
 
-    let deleted = cleanup_orphaned_plugins(claude_dir).await.unwrap();
+    let deleted = super::cleanup_orphaned_plugins(claude_dir).await.unwrap();
     assert_eq!(deleted, 0, "recent orphaned should not be deleted");
     assert!(
         version_dir.exists(),
@@ -644,7 +651,7 @@ async fn test_cleanup_preserves_recent_orphaned() {
 
 #[tokio::test]
 async fn test_cleanup_preserves_installed_version() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path();
 
     let version_dir = claude_dir
@@ -670,7 +677,7 @@ async fn test_cleanup_preserves_installed_version() {
     // Register as installed → should be preserved
     let plugins_dir = claude_dir.join("plugins");
     std::fs::create_dir_all(&plugins_dir).unwrap();
-    save_installed_plugins(
+    super::save_installed_plugins(
         &InstalledPlugins {
             version: 1,
             plugins: vec![InstalledPlugin {
@@ -688,7 +695,7 @@ async fn test_cleanup_preserves_installed_version() {
     )
     .unwrap();
 
-    let deleted = cleanup_orphaned_plugins(claude_dir).await.unwrap();
+    let deleted = super::cleanup_orphaned_plugins(claude_dir).await.unwrap();
     assert_eq!(deleted, 0, "installed version should not be deleted");
     assert!(
         version_dir.exists(),
@@ -702,7 +709,7 @@ async fn test_cleanup_preserves_installed_version() {
 
 #[tokio::test]
 async fn test_cleanup_removes_empty_parent_dirs() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path();
 
     // Structure: cache/mkt/plugin/version/
@@ -727,7 +734,7 @@ async fn test_cleanup_removes_empty_parent_dirs() {
 
     let plugins_dir = claude_dir.join("plugins");
     std::fs::create_dir_all(&plugins_dir).unwrap();
-    save_installed_plugins(
+    super::save_installed_plugins(
         &InstalledPlugins {
             version: 1,
             plugins: vec![],
@@ -736,7 +743,7 @@ async fn test_cleanup_removes_empty_parent_dirs() {
     )
     .unwrap();
 
-    let _deleted = cleanup_orphaned_plugins(claude_dir).await.unwrap();
+    let _deleted = super::cleanup_orphaned_plugins(claude_dir).await.unwrap();
 
     let plugin_dir = claude_dir
         .join("plugins")
@@ -750,7 +757,7 @@ async fn test_cleanup_removes_empty_parent_dirs() {
 
 #[tokio::test]
 async fn test_cleanup_orphaned_no_marker_not_deleted() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path();
 
     // Version dir without .orphaned_at marker
@@ -766,7 +773,7 @@ async fn test_cleanup_orphaned_no_marker_not_deleted() {
 
     let plugins_dir = claude_dir.join("plugins");
     std::fs::create_dir_all(&plugins_dir).unwrap();
-    save_installed_plugins(
+    super::save_installed_plugins(
         &InstalledPlugins {
             version: 1,
             plugins: vec![],
@@ -775,7 +782,7 @@ async fn test_cleanup_orphaned_no_marker_not_deleted() {
     )
     .unwrap();
 
-    let deleted = cleanup_orphaned_plugins(claude_dir).await.unwrap();
+    let deleted = super::cleanup_orphaned_plugins(claude_dir).await.unwrap();
     assert_eq!(
         deleted, 0,
         "version without orphaned marker should not be deleted"
@@ -788,7 +795,7 @@ async fn test_cleanup_orphaned_no_marker_not_deleted() {
 
 #[test]
 fn test_generate_synthetic_manifest_with_author() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let plugin = crate::plugin::types::MarketplacePlugin {
         name: "test-plugin".into(),
         description: String::new(),
@@ -805,7 +812,7 @@ fn test_generate_synthetic_manifest_with_author() {
         extra: serde_json::Value::Object(Default::default()),
     };
 
-    generate_synthetic_manifest(dir.path(), &plugin).unwrap();
+    super::generate_synthetic_manifest(dir.path(), &plugin).unwrap();
 
     let content =
         std::fs::read_to_string(dir.path().join(".claude-plugin").join("plugin.json")).unwrap();
@@ -815,7 +822,7 @@ fn test_generate_synthetic_manifest_with_author() {
 
 #[test]
 fn test_generate_synthetic_manifest_no_version() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let plugin = crate::plugin::types::MarketplacePlugin {
         name: "minimal".into(),
         description: "desc".into(),
@@ -829,7 +836,7 @@ fn test_generate_synthetic_manifest_no_version() {
         extra: serde_json::Value::Object(Default::default()),
     };
 
-    generate_synthetic_manifest(dir.path(), &plugin).unwrap();
+    super::generate_synthetic_manifest(dir.path(), &plugin).unwrap();
 
     let content =
         std::fs::read_to_string(dir.path().join(".claude-plugin").join("plugin.json")).unwrap();

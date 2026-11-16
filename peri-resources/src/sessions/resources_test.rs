@@ -1,6 +1,10 @@
 //! 会话资源门面行为测试（本机 SQLite）。
 
-use super::*;
+use super::{
+    Arc, ChildSnapshot, FrozenSnapshotBytes, NewSession, Path, PersistedPayload, ResolvedWorkspace,
+    SessionBinding, SessionResourceError, SessionResourceErrorKind, SessionResourcesImpl,
+};
+
 use crate::sessions::sqlite_store::{commit_failure, write_failure};
 use crate::SessionStoreShutdownOwner;
 use peri_acp_types::session_resources::{

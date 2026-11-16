@@ -31,7 +31,7 @@ pub(crate) fn argv_requests_workflow(args: &[OsString]) -> bool {
 pub(crate) fn run_before_configuration(args: &[OsString]) -> Result<()> {
     let index = workflow_index(args).expect("workflow dispatch requires a workflow argv");
     let workflow_args = &args[index + 1..];
-    let runtime = super::build_runtime()?;
+    let runtime = super::cli_args::build_runtime()?;
     let exit_code = runtime.block_on(cli::run(workflow_args))?;
     if exit_code != 0 {
         std::process::exit(exit_code);

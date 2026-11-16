@@ -1,4 +1,13 @@
-use super::*;
+use super::{
+    FrozenSnapshotBytes, MessageFlags, NewSession, PersistedPayload, SerializedHistoryChunks,
+    SessionBinding, SessionResourceErrorKind, MESSAGE_INSERT_MAX_BYTES,
+};
+use crate::sessions::data::SessionDataPort;
+use crate::sessions::sqlite_store::SqliteSessionData;
+use peri_acp_types::session_resources::ForkSnapshot;
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use crate::sessions::sqlite_store::SqliteThreadStore;
 use peri_acp_types::messages::{BaseMessage, MessageContent};
 use peri_acp_types::session_resources::NewSessionMeta;
@@ -13,7 +22,9 @@ fn payload(index: u128, body: String) -> PersistedPayload {
 
 fn encoded_payload(index: u128, bytes: usize) -> PersistedPayload {
     let empty = payload(index, String::new());
-    let overhead = serialize_persisted_payload(&empty).unwrap().len();
+    let overhead = peri_acp_types::store::serialize_persisted_payload(&empty)
+        .unwrap()
+        .len();
     payload(index, "x".repeat(bytes.checked_sub(overhead).unwrap()))
 }
 
@@ -42,7 +53,7 @@ fn test_serialized_history_chunks_are_lazy_and_bounded_by_encoded_bytes() {
         .collect::<Vec<_>>();
     let expected = payloads
         .iter()
-        .map(|entry| serialize_persisted_payload(entry).unwrap())
+        .map(|entry| peri_acp_types::store::serialize_persisted_payload(entry).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(actual, expected, "边界前后正文与顺序须逐字节保真");
     assert!(chunks.next().is_none());
@@ -73,14 +84,14 @@ fn test_serialized_history_chunks_preserve_exact_limit_and_oversized_entry() {
         .collect::<Vec<_>>();
     let expected = payloads
         .iter()
-        .map(|entry| serialize_persisted_payload(entry).unwrap())
+        .map(|entry| peri_acp_types::store::serialize_persisted_payload(entry).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(actual, expected, "超窗不截断、不跳过，也不与其它条目合批");
 }
 
 #[test]
 fn test_serialized_history_chunks_also_respect_sql_variable_limit() {
-    let count = message_insert_chunk_rows();
+    let count = super::message_insert_chunk_rows();
     let payloads = (0..count + 1)
         .map(|index| payload(index as u128, "small".into()))
         .collect::<Vec<_>>();
@@ -98,7 +109,7 @@ async fn database() -> (
     NewSession,
 ) {
     let directory = tempfile::tempdir().unwrap();
-    let store = SqliteThreadStore::new(directory.path().join("threads.db"))
+    let store = SqliteThreadStore::try_new(directory.path().join("threads.db"))
         .await
         .unwrap();
     let workspace = store.resolve_workspace(directory.path()).await.unwrap();
@@ -138,7 +149,7 @@ async fn test_append_and_fork_preserve_large_entries_across_byte_windows() {
     let bytes = |entries: &[PersistedPayload]| {
         entries
             .iter()
-            .map(|entry| serialize_persisted_payload(entry).unwrap())
+            .map(|entry| peri_acp_types::store::serialize_persisted_payload(entry).unwrap())
             .collect::<Vec<_>>()
     };
     assert_eq!(bytes(&appended.payloads), bytes(&batch));

@@ -1,4 +1,7 @@
-use super::*;
+use crate::agent::token::ContextBudget;
+use crate::agent::token::RequestRecord;
+use crate::agent::token::TokenTracker;
+use crate::agent::token::PROVIDER_REPLAY_ESTIMATED_TOKENS;
 
 fn make_usage(
     input: u32,
@@ -26,8 +29,9 @@ fn replay_budget_uses_nonzero_placeholder_then_authoritative_usage() {
             },
         ]))
     };
-    let small = estimate_request_tokens(&[message("small")], &[]);
-    let large = estimate_request_tokens(&[message(&"opaque".repeat(100_000))], &[]);
+    let small = crate::agent::token::estimate_request_tokens(&[message("small")], &[]);
+    let large =
+        crate::agent::token::estimate_request_tokens(&[message(&"opaque".repeat(100_000))], &[]);
     assert_eq!(small, PROVIDER_REPLAY_ESTIMATED_TOKENS + 1);
     assert_eq!(small, large, "ciphertext bytes are not a tokenizer");
     let mut tracker = TokenTracker::default();
@@ -76,7 +80,9 @@ fn test_zero_usage_keeps_baseline_but_new_visible_growth_rearms_sample() {
     tracker.begin_request(80_000);
     tracker.accumulate(&make_usage(90_000, 0, None, None));
     tracker.refresh_input_estimate(84_000);
-    let first = tracker.pressure_sample_key().unwrap();
+    let first = tracker
+        .pressure_sample_key()
+        .expect("the pressure sample key fixture result is required for this assertion");
     tracker.consume_pressure_sample(first);
     tracker.begin_request(84_000);
     tracker.accumulate(&make_usage(0, 0, None, None));
@@ -92,7 +98,9 @@ fn test_projection_reduction_preserves_authoritative_pressure_and_consumed_sampl
     let mut tracker = TokenTracker::default();
     tracker.begin_request(100_000);
     tracker.accumulate(&make_usage(196_000, 0, None, None));
-    let sample = tracker.pressure_sample_key().unwrap();
+    let sample = tracker
+        .pressure_sample_key()
+        .expect("the pressure sample key fixture result is required for this assertion");
     tracker.consume_pressure_sample(sample);
     assert!(!tracker.refresh_input_estimate(50_000));
     assert_eq!(tracker.estimated_context_tokens(), Some(196_000));
@@ -106,7 +114,9 @@ fn test_growth_after_projection_shrink_still_adds_to_authoritative_usage() {
     let mut tracker = TokenTracker::default();
     tracker.begin_request(40_000);
     tracker.accumulate(&make_usage(90_000, 0, None, None));
-    let old = tracker.pressure_sample_key().unwrap();
+    let old = tracker
+        .pressure_sample_key()
+        .expect("the pressure sample key fixture result is required for this assertion");
     tracker.consume_pressure_sample(old);
     tracker.refresh_input_estimate(2_000);
     assert_eq!(tracker.estimated_context_tokens(), Some(90_000));
@@ -126,7 +136,7 @@ fn test_request_estimate_counts_tool_arguments_once() {
         name: "Write".into(),
         input: serde_json::json!({"content": "abcd".repeat(10_000)}),
     }]);
-    let estimate = estimate_request_tokens(&[message], &[]);
+    let estimate = crate::agent::token::estimate_request_tokens(&[message], &[]);
     assert!(
         (10_000..10_010).contains(&estimate),
         "工具参数应参与估算，但不能同时计 block 与 canonical call：{estimate}"
@@ -144,12 +154,16 @@ fn test_estimate_boundary_counts_unmirrored_ai_tool_blocks() {
     };
     for content in [
         MessageContent::blocks(vec![block.clone()]),
-        MessageContent::raw(vec![serde_json::to_value(&block).unwrap()]),
+        MessageContent::raw(vec![serde_json::to_value(&block)
+            .expect("to_value must accept this test fixture representation")]),
     ] {
         let original = BaseMessage::ai(content);
-        let restored: BaseMessage =
-            serde_json::from_value(serde_json::to_value(&original).unwrap()).unwrap();
-        let estimate = estimate_request_tokens(&[restored], &[]);
+        let restored: BaseMessage = serde_json::from_value(
+            serde_json::to_value(&original)
+                .expect("to_value must accept this test fixture representation"),
+        )
+        .expect("from_value must accept this test fixture representation");
+        let estimate = crate::agent::token::estimate_request_tokens(&[restored], &[]);
         assert!(
             (12_000..12_010).contains(&estimate),
             "无canonical对应的AI ToolUse不能漏计：{estimate}"
@@ -162,7 +176,7 @@ fn test_estimate_boundary_counts_unmirrored_ai_tool_blocks() {
 fn test_estimate_boundary_only_skips_exact_tool_call_mirrors() {
     use crate::messages::{BaseMessage, ContentBlock, MessageContent, ToolCallRequest};
     let canonical = ToolCallRequest::new("call", "Write", serde_json::json!({"content":"small"}));
-    for (id, name, input) in [
+    let paired_items = [
         ("different", "Write", canonical.arguments.clone()),
         ("call", "Different", canonical.arguments.clone()),
         (
@@ -170,7 +184,8 @@ fn test_estimate_boundary_only_skips_exact_tool_call_mirrors() {
             "Write",
             serde_json::json!({"content":"text".repeat(12_000)}),
         ),
-    ] {
+    ];
+    for (id, name, input) in paired_items {
         let extra = ContentBlock::ToolUse {
             id: id.into(),
             name: name.into(),
@@ -190,7 +205,7 @@ fn test_estimate_boundary_only_skips_exact_tool_call_mirrors() {
             + name.chars().count()
             + input.to_string().chars().count();
         assert_eq!(
-            estimate_request_tokens(&[message], &[]),
+            crate::agent::token::estimate_request_tokens(&[message], &[]),
             (expected_chars as u64).div_ceil(4),
             "部分匹配不能让另一条有效工具块消失"
         );
@@ -215,8 +230,10 @@ fn test_estimate_boundary_data_uri_scheme_is_case_insensitive() {
                 title: None,
             },
         ];
-        let estimate =
-            estimate_request_tokens(&[BaseMessage::human(MessageContent::blocks(blocks))], &[]);
+        let estimate = crate::agent::token::estimate_request_tokens(
+            &[BaseMessage::human(MessageContent::blocks(blocks))],
+            &[],
+        );
         assert!(
             (2..=8_192).contains(&estimate),
             "scheme={scheme}不能落回巨量文本估算：{estimate}"
@@ -246,7 +263,7 @@ fn test_binary_media_estimate_is_independent_of_encoded_size() {
                     },
                 }
             };
-            estimate_request_tokens(
+            crate::agent::token::estimate_request_tokens(
                 &[BaseMessage::human(MessageContent::blocks(vec![block]))],
                 &[],
             )
@@ -280,7 +297,10 @@ fn test_document_text_and_remote_urls_keep_text_estimates() {
         },
     ];
     assert_eq!(
-        estimate_request_tokens(&[BaseMessage::human(MessageContent::blocks(blocks))], &[]),
+        crate::agent::token::estimate_request_tokens(
+            &[BaseMessage::human(MessageContent::blocks(blocks))],
+            &[]
+        ),
         ((text.chars().count() + 5 + 2 * url.chars().count()) as u64).div_ceil(4)
     );
 }
@@ -301,12 +321,15 @@ fn test_nested_and_raw_media_use_bounded_estimates() {
         content: vec![image.clone(), ContentBlock::text("caption")],
         is_error: false,
     }]));
-    let raw = BaseMessage::human(MessageContent::raw(vec![
-        serde_json::to_value(image).unwrap()
-    ]));
-    let raw_estimate = estimate_request_tokens(&[raw], &[]);
+    let raw =
+        BaseMessage::human(MessageContent::raw(vec![serde_json::to_value(image)
+            .expect("to_value must accept this test fixture representation")]));
+    let raw_estimate = crate::agent::token::estimate_request_tokens(&[raw], &[]);
     assert!((1..=4_096).contains(&raw_estimate));
-    assert_eq!(estimate_request_tokens(&[nested], &[]), raw_estimate + 2);
+    assert_eq!(
+        crate::agent::token::estimate_request_tokens(&[nested], &[]),
+        raw_estimate + 2
+    );
 }
 
 #[test]
@@ -315,7 +338,7 @@ fn test_unknown_json_text_payload_is_not_treated_as_binary_media() {
     let unknown = serde_json::json!({"type":"custom", "data":"text".repeat(10_000)});
     let message = BaseMessage::human(MessageContent::blocks(vec![ContentBlock::Unknown(unknown)]));
     assert!(
-        estimate_request_tokens(&[message], &[]) >= 10_000,
+        crate::agent::token::estimate_request_tokens(&[message], &[]) >= 10_000,
         "未知JSON不能因字段名data就丢失真实文字预算"
     );
 }
@@ -335,8 +358,10 @@ fn test_inline_media_data_urls_use_bounded_estimates() {
             title: None,
         },
     ];
-    let estimate =
-        estimate_request_tokens(&[BaseMessage::human(MessageContent::blocks(blocks))], &[]);
+    let estimate = crate::agent::token::estimate_request_tokens(
+        &[BaseMessage::human(MessageContent::blocks(blocks))],
+        &[],
+    );
     assert!(
         (2..=8_192).contains(&estimate),
         "data URI需要有界媒体占位：{estimate}"
@@ -414,7 +439,9 @@ fn test_estimated_context_tokens_openai_with_cached_tokens() {
     tracker.accumulate(&make_usage(150_000, 10_000, None, Some(120_000)));
     // estimated_context_tokens 只返回 input_tokens = 150K
     assert_eq!(tracker.estimated_context_tokens(), Some(150_000),);
-    let pct = tracker.context_usage_percent(200_000).unwrap();
+    let pct = tracker
+        .context_usage_percent(200_000)
+        .expect("the context usage percent fixture result is required for this assertion");
     assert!((pct - 75.0).abs() < 0.01, "应为 75%，实际 {}%", pct);
 }
 
@@ -424,7 +451,9 @@ fn test_context_usage_percent() {
     // input 已规范化：raw(50000) + cache(12500) + cache(12500) = 75000
     tracker.accumulate(&make_usage(75000, 25000, Some(12500), Some(12500)));
     // estimated_context_tokens 只返回 input_tokens = 75000 → 37.5%
-    let pct = tracker.context_usage_percent(200_000).unwrap();
+    let pct = tracker
+        .context_usage_percent(200_000)
+        .expect("the context usage percent fixture result is required for this assertion");
     assert!((pct - 37.5).abs() < 0.01);
 }
 
@@ -826,7 +855,9 @@ fn test_zero_usage_preserves_unconfirmed_tool_growth() {
 fn test_pressure_sample_generations_and_reset_are_monotonic() {
     let mut tracker = TokenTracker::default();
     tracker.accumulate(&make_usage(196_000, 100, None, None));
-    let first = tracker.pressure_sample_key().unwrap();
+    let first = tracker
+        .pressure_sample_key()
+        .expect("the pressure sample key fixture result is required for this assertion");
     tracker.consume_pressure_sample(first);
 
     tracker.accumulate(&make_usage(0, 100, None, None));
@@ -834,12 +865,16 @@ fn test_pressure_sample_generations_and_reset_are_monotonic() {
     assert!(tracker.is_pressure_sample_consumed(first));
 
     tracker.accumulate(&make_usage(197_000, 100, None, None));
-    let next_usage = tracker.pressure_sample_key().unwrap();
+    let next_usage = tracker
+        .pressure_sample_key()
+        .expect("the pressure sample key fixture result is required for this assertion");
     assert_ne!(next_usage, first);
 
     tracker.consume_pressure_sample(next_usage);
     tracker.add_estimated_tool_tokens("x");
-    let next_growth = tracker.pressure_sample_key().unwrap();
+    let next_growth = tracker
+        .pressure_sample_key()
+        .expect("the pressure sample key fixture result is required for this assertion");
     assert_ne!(next_growth, next_usage);
 
     tracker.consume_pressure_sample(next_growth);
@@ -853,7 +888,9 @@ fn test_pressure_sample_generations_and_reset_are_monotonic() {
 fn test_empty_tool_output_does_not_advance_pressure_sample() {
     let mut tracker = TokenTracker::default();
     tracker.accumulate(&make_usage(196_000, 100, None, None));
-    let sample = tracker.pressure_sample_key().unwrap();
+    let sample = tracker
+        .pressure_sample_key()
+        .expect("the pressure sample key fixture result is required for this assertion");
 
     tracker.add_estimated_tool_tokens("");
 
@@ -875,7 +912,9 @@ fn test_estimated_tool_tokens_enables_early_compact_warning() {
 
     // 工具结果 ~800K 字符 ≈ 200K token
     tracker.add_estimated_tool_tokens(&"x".repeat(800_000));
-    let estimated = tracker.estimated_context_tokens().unwrap();
+    let estimated = tracker
+        .estimated_context_tokens()
+        .expect("the estimated context tokens fixture result is required for this assertion");
     assert!(
         estimated >= 300_000,
         "估算应 ≥ 300K（120K input + 200K 工具估算），实际 {estimated}"

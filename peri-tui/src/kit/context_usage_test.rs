@@ -1,7 +1,8 @@
 use serde_json::json;
 use serial_test::serial;
 
-use super::*;
+use super::CONTEXT_USAGE;
+use super::ContextUsage;
 
 fn restore(previous: Option<ContextUsage>) {
     *CONTEXT_USAGE.state().write() = previous;
@@ -12,10 +13,10 @@ fn restore(previous: Option<ContextUsage>) {
 #[serial]
 fn saved_value_is_shown_with_the_current_window() {
     let previous = *CONTEXT_USAGE.state().read();
-    let usage = from_load_response(&json!({
+    let usage = super::from_load_response(&json!({
         "_meta": {"peri.contextUsage": {"tokens": 50_000, "window": 200_000}},
     }));
-    establish_session_usage(usage);
+    super::establish_session_usage(usage);
     let shown = (*CONTEXT_USAGE.state().read()).expect("进入会话后必须有展示值");
     assert_eq!(
         shown,
@@ -33,10 +34,10 @@ fn saved_value_is_shown_with_the_current_window() {
 #[serial]
 fn null_saved_value_is_unknown_not_zero() {
     let previous = *CONTEXT_USAGE.state().read();
-    let usage = from_load_response(&json!({
+    let usage = super::from_load_response(&json!({
         "_meta": {"peri.contextUsage": {"tokens": null, "window": 200_000}},
     }));
-    establish_session_usage(usage);
+    super::establish_session_usage(usage);
     let shown = (*CONTEXT_USAGE.state().read()).expect("未知也是明确的展示状态");
     assert_eq!(shown, ContextUsage::Unknown);
     assert_eq!(shown.percent(), None, "未知不得被当成 0%");
@@ -48,7 +49,7 @@ fn null_saved_value_is_unknown_not_zero() {
 #[serial]
 fn percentage_follows_the_current_window() {
     let previous = *CONTEXT_USAGE.state().read();
-    establish_session_usage(ContextUsage::Known {
+    super::establish_session_usage(ContextUsage::Known {
         tokens: 50_000,
         window: 200_000,
     });
@@ -57,7 +58,7 @@ fn percentage_follows_the_current_window() {
         Some(25.0)
     );
 
-    apply_state_snapshot(50_000, true, Some(400_000));
+    super::apply_state_snapshot(50_000, true, Some(400_000));
 
     assert_eq!(
         (*CONTEXT_USAGE.state().read())

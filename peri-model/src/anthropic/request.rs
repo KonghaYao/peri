@@ -279,7 +279,8 @@ fn content_to_anthropic_parts(content: &[ContentBlock], replay: ThinkingReplay) 
             // 的 reasoning 摘要跨协议回放时一律降级为文本，避免泄漏原生状态。
             ContentBlock::Reasoning { text, signature }
                 if foreign_replay
-                    || (replay == ThinkingReplay::Signed && !has_replay_signature(signature)) =>
+                    || (replay == ThinkingReplay::Signed
+                        && !has_replay_signature(signature.as_deref())) =>
             {
                 (!text.is_empty()).then(|| json!({ "type": "text", "text": text }))
             }
@@ -293,10 +294,8 @@ fn uses_adaptive_thinking(model: &str) -> bool {
     model == "claude-sonnet-5-5"
 }
 
-fn has_replay_signature(signature: &Option<String>) -> bool {
-    signature
-        .as_deref()
-        .is_some_and(|signature| !signature.trim().is_empty())
+fn has_replay_signature(signature: Option<&str>) -> bool {
+    signature.is_some_and(|signature| !signature.trim().is_empty())
 }
 
 /// 手动 thinking 要求请求中最后一个 assistant turn 以 thinking 块开始。

@@ -1,6 +1,11 @@
+use peri_agent::tools::BaseTool as _;
 use tokio::sync::{mpsc, Mutex};
 
-use super::*;
+use super::Arc;
+use super::TodoItem;
+use super::TodoState;
+use super::TodoStatus;
+use super::TodoWriteTool;
 
 /// 构造带独立共享状态的 TodoWriteTool（测试辅助）
 fn make_tool() -> (TodoWriteTool, Arc<Mutex<TodoState>>) {
@@ -106,7 +111,7 @@ fn test_summarize_changes_by_index() {
             status: TodoStatus::Pending,
         },
     ];
-    let summary = summarize_changes(&old, &new);
+    let summary = super::summarize_changes(&old, &new);
     assert!(
         summary.contains("[0]→in_progress"),
         "should detect status change at [0]: {summary}"
@@ -129,7 +134,7 @@ fn test_summarize_changes_empty() {
         active_form: None,
         status: TodoStatus::Pending,
     }];
-    let summary = summarize_changes(&old, &new);
+    let summary = super::summarize_changes(&old, &new);
     assert_eq!(summary, "saved");
 }
 
@@ -307,7 +312,7 @@ async fn test_invoke_all_completed_自动解除标记() {
 
 #[test]
 fn test_render_todo_status_包含状态与内容() {
-    let rendered = render_todo_status(&[
+    let rendered = super::render_todo_status(&[
         TodoItem {
             content: "写测试".into(),
             active_form: None,

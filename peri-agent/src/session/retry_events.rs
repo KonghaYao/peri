@@ -8,6 +8,7 @@
 //! 物理迁入本层；池化模型跨 turn 复用时会烘焙本转发器，每次 stage 装配用
 //! 当前 turn 的 `event_handler` 调用 `set`，发射时读取最新 handler。
 
+use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
 use peri_acp_types::event::{AgentEventHandler, ExecutorEvent};
@@ -96,6 +97,7 @@ struct RetryExecutionContext {
 }
 
 impl RetryEventForwarder {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -122,6 +124,7 @@ impl RetryEventForwarder {
         }
     }
 
+    #[must_use]
     pub fn as_retry_observer(&self) -> Arc<dyn RetryObserver> {
         Arc::new(self.clone())
     }
@@ -165,3 +168,11 @@ impl RetryObserver for RetryEventForwarder {
 #[cfg(test)]
 #[path = "retry_events_test.rs"]
 mod tests;
+
+impl Debug for RetryEventForwarder {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RetryEventForwarder")
+            .finish_non_exhaustive()
+    }
+}

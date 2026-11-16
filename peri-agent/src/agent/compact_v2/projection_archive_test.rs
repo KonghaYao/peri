@@ -1,11 +1,14 @@
-use crate::agent::compact_v2::projection::{
-    render_micro_plan, render_persisted_llm_view, MessageProjectionDirective, MicroCompactPlan,
-    ProjectionAction, ProjectionActionEntry, ProjectionTarget, ProviderCapabilities,
-    PROJECTION_POLICY_VERSION,
-};
+use crate::agent::compact_v2::projection::MessageProjectionDirective;
+use crate::agent::compact_v2::projection::MicroCompactPlan;
+use crate::agent::compact_v2::projection::ProjectionAction;
+use crate::agent::compact_v2::projection::ProjectionActionEntry;
+use crate::agent::compact_v2::projection::ProjectionTarget;
+use crate::agent::compact_v2::projection::ProviderCapabilities;
+use crate::agent::compact_v2::projection::PROJECTION_POLICY_VERSION;
 use crate::messages::{BaseMessage, ContentBlock, MessageContent, ToolCallRequest};
 use crate::session::MessageTranscript;
-use peri_acp_types::{context_archive::build_catalog, store::PersistedPayload};
+
+use peri_acp_types::store::PersistedPayload;
 
 fn result(id: &str, text: &str) -> ContentBlock {
     ContentBlock::ToolResult {
@@ -39,15 +42,17 @@ fn test_existing_preview_reference_stays_with_sibling_after_partial_omission() {
     ]));
     let call_id = transcript.append(call.clone());
     let results_id = transcript.append(results.clone());
-    let preview_catalog = build_catalog(
+    let preview_catalog = peri_acp_types::context_archive::build_catalog(
         "session".into(),
         "preview-b".into(),
         results_id,
         &[PersistedPayload::Message(results.clone())],
         "Incomplete historical B response".into(),
     )
-    .unwrap();
-    let preview_ref = preview_catalog.reference().unwrap();
+    .expect("the build catalog fixture result is required for this assertion");
+    let preview_ref = preview_catalog
+        .reference()
+        .expect("the reference fixture result is required for this assertion");
     transcript.set_flags_projection(
         results_id,
         MessageProjectionDirective {
@@ -65,7 +70,7 @@ fn test_existing_preview_reference_stays_with_sibling_after_partial_omission() {
             ..Default::default()
         },
     );
-    let retired = build_catalog(
+    let retired = peri_acp_types::context_archive::build_catalog(
         "session".into(),
         "retire-a".into(),
         call_id,
@@ -75,7 +80,7 @@ fn test_existing_preview_reference_stays_with_sibling_after_partial_omission() {
         ],
         "Historical closed A exchange".into(),
     )
-    .unwrap();
+    .expect("the build catalog fixture result is required for this assertion");
     let actions = [call_id, results_id]
         .into_iter()
         .map(|message_id| ProjectionActionEntry {
@@ -98,7 +103,9 @@ fn test_existing_preview_reference_stays_with_sibling_after_partial_omission() {
         ..Default::default()
     };
     let caps = ProviderCapabilities::anthropic();
-    let candidate = render_micro_plan(&transcript, &plan, &caps).unwrap();
+    let candidate =
+        crate::agent::compact_v2::projection::render_micro_plan(&transcript, &plan, &caps)
+            .expect("the render micro plan fixture result is required for this assertion");
 
     // Restore the combined persisted directives, including B's earlier block-index action.
     for action in actions {
@@ -111,18 +118,26 @@ fn test_existing_preview_reference_stays_with_sibling_after_partial_omission() {
             directive.archive_catalog = Some(retired.clone());
         }
         directive.entries.push(action.clone());
-        let restored = serde_json::from_value(serde_json::to_value(directive).unwrap()).unwrap();
+        let restored = serde_json::from_value(
+            serde_json::to_value(directive)
+                .expect("to_value must accept this test fixture representation"),
+        )
+        .expect("from_value must accept this test fixture representation");
         transcript.set_flags_projection(action.message_id, restored);
     }
-    let restored = render_persisted_llm_view(&transcript, &caps).unwrap();
+    let restored =
+        crate::agent::compact_v2::projection::render_persisted_llm_view(&transcript, &caps)
+            .expect("the render persisted llm view fixture result is required for this assertion");
     assert_eq!(
-        serde_json::to_value(&candidate).unwrap(),
-        serde_json::to_value(&restored).unwrap()
+        serde_json::to_value(&candidate)
+            .expect("to_value must accept this test fixture representation"),
+        serde_json::to_value(&restored)
+            .expect("to_value must accept this test fixture representation")
     );
     let result_blocks = restored
         .iter()
         .find(|message| message.id() == results_id)
-        .unwrap()
+        .expect("the find fixture result is required for this assertion")
         .content_blocks();
     assert_eq!(result_blocks.len(), 3);
     let ContentBlock::ToolResult {
@@ -145,8 +160,15 @@ fn test_existing_preview_reference_stays_with_sibling_after_partial_omission() {
         "retained inputs remain canonical"
     );
     assert_eq!(
-        serde_json::to_value(transcript.get(results_id).unwrap().as_message()).unwrap(),
-        serde_json::to_value(Some(&results)).unwrap()
+        serde_json::to_value(
+            transcript
+                .get(results_id)
+                .expect("transcript get fixture must contain the requested entry")
+                .as_message()
+        )
+        .expect("the as message fixture result is required for this assertion"),
+        serde_json::to_value(Some(&results))
+            .expect("to_value must accept this test fixture representation")
     );
 }
 
@@ -168,7 +190,7 @@ fn persisted_v3_preview_rejects_missing_mismatched_and_unparseable_catalogs() {
         let catalog = match case {
             "missing" => None,
             "identity" => Some(
-                build_catalog(
+                peri_acp_types::context_archive::build_catalog(
                     "session".into(),
                     "other-anchor".into(),
                     call_id,
@@ -178,17 +200,17 @@ fn persisted_v3_preview_rejects_missing_mismatched_and_unparseable_catalogs() {
                     ],
                     "result".into(),
                 )
-                .unwrap(),
+                .expect("the build catalog fixture result is required for this assertion"),
             ),
             "reference" => Some(
-                build_catalog(
+                peri_acp_types::context_archive::build_catalog(
                     "s".repeat(1100),
                     "oversized-reference".into(),
                     id,
                     &[PersistedPayload::Message(output.clone())],
                     "result".into(),
                 )
-                .unwrap(),
+                .expect("the build catalog fixture result is required for this assertion"),
             ),
             _ => unreachable!(),
         };
@@ -209,15 +231,25 @@ fn persisted_v3_preview_rejects_missing_mismatched_and_unparseable_catalogs() {
                 ..Default::default()
             },
         );
-        let error = render_persisted_llm_view(&transcript, &ProviderCapabilities::default())
-            .expect_err("v3 preview cannot succeed without a usable original reference");
+        let error = crate::agent::compact_v2::projection::render_persisted_llm_view(
+            &transcript,
+            &ProviderCapabilities::default(),
+        )
+        .expect_err("v3 preview cannot succeed without a usable original reference");
         assert!(
             error.to_string().contains("invalid context projection"),
             "{case}: {error}"
         );
         assert_eq!(
-            serde_json::to_value(transcript.get(id).unwrap().as_message()).unwrap(),
-            serde_json::to_value(Some(&output)).unwrap(),
+            serde_json::to_value(
+                transcript
+                    .get(id)
+                    .expect("transcript get fixture must contain the requested entry")
+                    .as_message()
+            )
+            .expect("the as message fixture result is required for this assertion"),
+            serde_json::to_value(Some(&output))
+                .expect("to_value must accept this test fixture representation"),
             "rejected projection leaves canonical output unchanged: {case}"
         );
     }
@@ -252,14 +284,18 @@ fn persisted_v2_preview_without_catalog_keeps_legacy_bytes() {
             ..Default::default()
         },
     );
-    let restored =
-        render_persisted_llm_view(&transcript, &ProviderCapabilities::default()).unwrap();
-    let expected = super::super::render::apply_head_tail(&text, 80, 30).unwrap();
+    let restored = crate::agent::compact_v2::projection::render_persisted_llm_view(
+        &transcript,
+        &ProviderCapabilities::default(),
+    )
+    .expect("the render persisted llm view fixture result is required for this assertion");
+    let expected = crate::agent::compact_v2::projection::render::apply_head_tail(&text, 80, 30)
+        .expect("the apply head tail fixture result is required for this assertion");
     assert_eq!(
         restored
             .iter()
             .find(|message| message.id() == id)
-            .unwrap()
+            .expect("the id fixture result is required for this assertion")
             .content(),
         expected
     );
@@ -267,7 +303,7 @@ fn persisted_v2_preview_without_catalog_keeps_legacy_bytes() {
 
 #[test]
 fn persisted_v3_rejects_text_and_media_actions_without_archive_contract() {
-    for (block, action) in [
+    let paired_items = [
         (
             ContentBlock::text("original prose".repeat(100)),
             ProjectionAction::CompactText { max_chars: 1 },
@@ -278,7 +314,8 @@ fn persisted_v3_rejects_text_and_media_actions_without_archive_contract() {
                 placeholder: "gone".into(),
             },
         ),
-    ] {
+    ];
+    for (block, action) in paired_items {
         let mut transcript = MessageTranscript::new();
         let id = transcript.append(BaseMessage::ai_from_blocks(vec![block]));
         transcript.set_flags_projection(
@@ -293,6 +330,12 @@ fn persisted_v3_rejects_text_and_media_actions_without_archive_contract() {
                 ..Default::default()
             },
         );
-        assert!(render_persisted_llm_view(&transcript, &ProviderCapabilities::default()).is_err());
+        assert!(
+            crate::agent::compact_v2::projection::render_persisted_llm_view(
+                &transcript,
+                &ProviderCapabilities::default()
+            )
+            .is_err()
+        );
     }
 }

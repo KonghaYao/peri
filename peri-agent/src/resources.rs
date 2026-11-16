@@ -55,25 +55,24 @@ pub async fn open_session_resources_with(
 
 #[cfg(test)]
 mod tests {
-    use tempfile::tempdir;
 
-    use super::open_session_resources_with;
+    use crate::resources::open_session_resources_with;
 
     /// [P1] 显式路径打开成功。
     #[tokio::test]
     async fn test_open_session_resources_with_explicit_path_ok() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("the temporary test directory must be available");
         open_session_resources_with(Some(dir.path().join("custom/t.db")))
             .await
-            .unwrap();
+            .expect("the temporary session store fixture must open successfully");
     }
 
     /// [P1] 显式路径不可用（父级为普通文件）时报错，不 fallback，错误携带路径。
     #[tokio::test]
     async fn test_open_session_resources_with_invalid_path_errs() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("the temporary test directory must be available");
         let file = dir.path().join("f");
-        std::fs::write(&file, "not a directory").unwrap();
+        std::fs::write(&file, "not a directory").expect("the test fixture file must be writable");
         let err = match open_session_resources_with(Some(file.join("t.db"))).await {
             Ok(_) => panic!("父级为普通文件时应返回错误"),
             Err(e) => e,

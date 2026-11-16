@@ -1,9 +1,9 @@
 //! Turn 生命周期编排；全部观测同步入队后才返回最终 flush 任务。
 
-use super::event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
-use super::turn_error::{failure_error_class, failure_output};
-use super::turn_fallback::GenerationFallbackStatus;
-use super::LangfuseTracer;
+use crate::langfuse::tracer::event_builder::VERSION;
+
+use crate::langfuse::tracer::turn_fallback::GenerationFallbackStatus;
+use crate::langfuse::tracer::LangfuseTracer;
 use langfuse_client::types::TraceBody;
 use langfuse_client::{IngestionEvent, LangfuseError, ObservationBody, ObservationType};
 use peri_acp_types::session::TurnTelemetryOutcome;
@@ -57,7 +57,7 @@ impl LangfuseTracer {
             return;
         }
 
-        let start_time = now_rfc3339();
+        let start_time = crate::langfuse::tracer::event_builder::now_rfc3339();
         tracing::info!(
             trace_id = %self.trace_id,
             agent_obs_id = %self.agent_observation_id,
@@ -74,12 +74,12 @@ impl LangfuseTracer {
             ..Default::default()
         };
         let trace_event = IngestionEvent::TraceCreate {
-            id: new_uuid(),
-            timestamp: now_rfc3339(),
+            id: crate::langfuse::tracer::event_builder::new_uuid(),
+            timestamp: crate::langfuse::tracer::event_builder::now_rfc3339(),
             body: trace_body,
             metadata: None,
         };
-        try_add_or_warn_via_session(
+        crate::langfuse::tracer::event_builder::try_add_or_warn_via_session(
             &*self.session,
             trace_event,
             &self.trace_id,
@@ -94,13 +94,14 @@ impl LangfuseTracer {
 
     /// 对话轮次结束：导出完整 agent-run Observation，并强制 flush。
     ///
-    /// [不变量] 这是 Tracer 唯一的 async 路径（最终 flush）。所有其他事件
+    /// \[不变量\] 这是 Tracer 唯一的 async 路径（最终 flush）。所有其他事件
     /// 均通过 session.try_add() 同步入队，保证顺序。tokio::spawn 使 flush 异步化，
     /// 不阻塞调用方。
     ///
     /// ErrorEvent 机制：当轮次以 error 结束时，始终发送 ErrorTurn event
     /// （即使该轮次未被采样），确保错误可观测。错误是"时点标记"而非一段
     /// 工作区间，故用 Event 类型（无 end_time 语义），不产生误导性的 0ms span。
+    #[must_use]
     pub fn on_turn_end(&mut self, outcome: TurnTelemetryOutcome) -> tokio::task::JoinHandle<()> {
         use std::sync::Arc;
 
@@ -112,7 +113,7 @@ impl LangfuseTracer {
         let fallback_status = GenerationFallbackStatus::for_outcome(&outcome);
         let failure = fallback_status.failure;
         let error_class = failure
-            .map(failure_error_class)
+            .map(crate::langfuse::tracer::turn_error::failure_error_class)
             .or_else(|| {
                 self.last_error_class
                     .take()
@@ -163,7 +164,7 @@ impl LangfuseTracer {
         let trace_id = self.trace_id.clone();
         let agent_observation_id = self.agent_observation_id.clone();
         let output = if is_error {
-            Some(failure_output(
+            Some(crate::langfuse::tracer::turn_error::failure_output(
                 failure.expect("is_error requires failure"),
                 &error_class,
             ))
@@ -182,7 +183,7 @@ impl LangfuseTracer {
         // 一次性送达（Batcher::flush 经 mpsc FIFO，先入队者先发送）。
         // 短生命周期进程（-p/print 模式）在 run_session_loop 返回后调用
         // session.flush()，不依赖 spawn 任务的调度时序，避免 trace 随进程退出丢失。
-        let end_time = now_rfc3339();
+        let end_time = crate::langfuse::tracer::event_builder::now_rfc3339();
         let obs_body = ObservationBody {
             id: Some(agent_observation_id.clone()),
             trace_id: Some(trace_id.clone()),
@@ -198,12 +199,12 @@ impl LangfuseTracer {
             ..Default::default()
         };
         let obs_event = IngestionEvent::ObservationCreate {
-            id: new_uuid(),
+            id: crate::langfuse::tracer::event_builder::new_uuid(),
             timestamp: end_time,
             body: obs_body,
             metadata: None,
         };
-        try_add_or_warn_via_session(
+        crate::langfuse::tracer::event_builder::try_add_or_warn_via_session(
             &*session,
             obs_event,
             &trace_id,

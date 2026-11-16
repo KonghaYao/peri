@@ -1,5 +1,9 @@
-use super::*;
-use crate::kit::acp_bridge::{perf_counters, reset_perf_counters};
+use super::Arc;
+use super::Color;
+use super::MarkdownRenderCache;
+use super::MarkdownSegment;
+use super::Palette;
+use super::boundary;
 
 fn semantic_segments<'a>(
     segments: impl Iterator<Item = &'a MarkdownSegment>,
@@ -22,33 +26,43 @@ fn test_closed_fence_with_blank_lines_shares_body_after_publication() {
     let body = "let value = 42;\n\n".repeat(128);
     let prefix = format!("```rust\n{body}```\n\n");
     let mut cache = MarkdownRenderCache::default();
-    let first =
-        parse_markdown_chunks_cached(&prefix, 80, Palette::default(), Color::Reset, &mut cache);
+    let first = super::parse_markdown_chunks_cached(
+        &prefix,
+        80,
+        Palette::default(),
+        Color::Reset,
+        &mut cache,
+    );
     assert_eq!(cache.stable_source_end, prefix.len());
     assert_eq!(first.stable.len(), 1);
-    reset_perf_counters();
+    crate::kit::acp_bridge::reset_perf_counters();
     boundary::SCANNED_BYTES.with(|count| count.set(0));
     let mut source = prefix.clone();
     let mut expected_bytes = 0;
     for length in 1..=32 {
         source.push('x');
         expected_bytes += length;
-        let rendered =
-            parse_markdown_chunks_cached(&source, 80, Palette::default(), Color::Reset, &mut cache);
+        let rendered = super::parse_markdown_chunks_cached(
+            &source,
+            80,
+            Palette::default(),
+            Color::Reset,
+            &mut cache,
+        );
         assert!(Arc::ptr_eq(&first.stable[0], &rendered.stable[0]));
     }
-    let counters = perf_counters();
+    let counters = crate::kit::acp_bridge::perf_counters();
     assert_eq!(counters.full_parses, 0);
     assert_eq!(counters.tail_parses, 32);
     assert_eq!(counters.tail_parsed_bytes, expected_bytes);
     assert_eq!(counters.materialized_lines, 32);
     boundary::SCANNED_BYTES.with(|count| assert_eq!(count.get(), expected_bytes as usize));
     let terminal =
-        parse_markdown_terminal(&source, 80, Palette::default(), Color::Reset, &mut cache);
-    assert_eq!(perf_counters().full_parses, 1);
+        super::parse_markdown_terminal(&source, 80, Palette::default(), Color::Reset, &mut cache);
+    assert_eq!(crate::kit::acp_bridge::perf_counters().full_parses, 1);
     assert_eq!(
         terminal.tail,
-        parse_markdown(&source, 80, Palette::default(), Color::Reset)
+        super::parse_markdown(&source, 80, Palette::default(), Color::Reset)
     );
 }
 
@@ -62,7 +76,11 @@ fn test_fence_boundaries_handle_markers_lengths_and_false_closers() {
         "```text\n[ref]\n\n![image](url)\n- list\n| a |\n```\n\n",
         "   ```text\nfirst\n\nsecond\n   ```\n\n",
     ] {
-        assert_eq!(stable_chunk_end(source, 0), source.len(), "{source:?}");
+        assert_eq!(
+            super::stable_chunk_end(source, 0),
+            source.len(),
+            "{source:?}"
+        );
     }
     for source in [
         "```\nfirst\n\nsecond\n",
@@ -72,7 +90,7 @@ fn test_fence_boundaries_handle_markers_lengths_and_false_closers() {
         "```\nfirst\n\n    ```\n\n",
         "```\nfirst\n\n \t```\n\n",
     ] {
-        assert_eq!(stable_chunk_end(source, 0), 0, "{source:?}");
+        assert_eq!(super::stable_chunk_end(source, 0), 0, "{source:?}");
     }
 }
 
@@ -100,21 +118,22 @@ fn test_streaming_fence_and_sensitive_tail_match_full_reference() {
             let mut cache = MarkdownRenderCache::default();
             for character in suffix.chars() {
                 source.push(character);
-                let rendered = parse_markdown_chunks_cached(
+                let rendered = super::parse_markdown_chunks_cached(
                     &source,
                     width,
                     Palette::default(),
                     Color::Reset,
                     &mut cache,
                 );
-                let reference = parse_markdown(&source, width, Palette::default(), Color::Reset);
+                let reference =
+                    super::parse_markdown(&source, width, Palette::default(), Color::Reset);
                 assert_eq!(
                     semantic_segments(rendered.segments()),
                     semantic_segments(reference.iter()),
                     "{source:?} width={width}",
                 );
             }
-            let terminal = parse_markdown_terminal(
+            let terminal = super::parse_markdown_terminal(
                 &source,
                 width,
                 Palette::default(),
@@ -123,7 +142,7 @@ fn test_streaming_fence_and_sensitive_tail_match_full_reference() {
             );
             assert_eq!(
                 terminal.tail,
-                parse_markdown(&source, width, Palette::default(), Color::Reset)
+                super::parse_markdown(&source, width, Palette::default(), Color::Reset)
             );
         }
     }
@@ -134,7 +153,7 @@ fn test_streaming_fence_and_sensitive_tail_match_full_reference() {
 fn test_many_blank_lines_scan_once_per_boundary_search() {
     let source = format!("```text\n{}```\n\n", "body\n\n".repeat(1024));
     boundary::SCANNED_BYTES.with(|count| count.set(0));
-    assert_eq!(stable_chunk_end(&source, 0), source.len());
+    assert_eq!(super::stable_chunk_end(&source, 0), source.len());
     boundary::SCANNED_BYTES.with(|count| assert_eq!(count.get(), source.len()));
 }
 
@@ -144,32 +163,52 @@ fn test_fence_closure_promotes_previously_mutable_body() {
     let prefix = "开始\n\n";
     let mut source = format!("{prefix}```text\n第一行\n\n第二行\n");
     let mut cache = MarkdownRenderCache::default();
-    let open =
-        parse_markdown_chunks_cached(&source, 80, Palette::default(), Color::Reset, &mut cache);
+    let open = super::parse_markdown_chunks_cached(
+        &source,
+        80,
+        Palette::default(),
+        Color::Reset,
+        &mut cache,
+    );
     assert_eq!(cache.stable_source_end, prefix.len());
     source.push_str("```\n\n后文");
-    let closed =
-        parse_markdown_chunks_cached(&source, 80, Palette::default(), Color::Reset, &mut cache);
+    let closed = super::parse_markdown_chunks_cached(
+        &source,
+        80,
+        Palette::default(),
+        Color::Reset,
+        &mut cache,
+    );
     assert_eq!(closed.stable.len(), 2);
     assert!(Arc::ptr_eq(&open.stable[0], &closed.stable[0]));
     assert_eq!(cache.stable_source_end, source.len() - "后文".len());
-    let reference = parse_markdown(&source, 80, Palette::default(), Color::Reset);
+    let reference = super::parse_markdown(&source, 80, Palette::default(), Color::Reset);
     assert_eq!(
         semantic_segments(closed.segments()),
         semantic_segments(reference.iter())
     );
-    let resized =
-        parse_markdown_chunks_cached(&source, 24, Palette::default(), Color::Reset, &mut cache);
+    let resized = super::parse_markdown_chunks_cached(
+        &source,
+        24,
+        Palette::default(),
+        Color::Reset,
+        &mut cache,
+    );
     assert!(!Arc::ptr_eq(&closed.stable[1], &resized.stable[1]));
-    let reference = parse_markdown(&source, 24, Palette::default(), Color::Reset);
+    let reference = super::parse_markdown(&source, 24, Palette::default(), Color::Reset);
     assert_eq!(
         semantic_segments(resized.segments()),
         semantic_segments(reference.iter())
     );
     let rewritten = source.replace("第一行", "改写");
-    let rendered =
-        parse_markdown_chunks_cached(&rewritten, 24, Palette::default(), Color::Reset, &mut cache);
-    let reference = parse_markdown(&rewritten, 24, Palette::default(), Color::Reset);
+    let rendered = super::parse_markdown_chunks_cached(
+        &rewritten,
+        24,
+        Palette::default(),
+        Color::Reset,
+        &mut cache,
+    );
+    let reference = super::parse_markdown(&rewritten, 24, Palette::default(), Color::Reset);
     assert_eq!(
         semantic_segments(rendered.segments()),
         semantic_segments(reference.iter())
@@ -191,15 +230,22 @@ fn test_stable_chunks_refresh_text_and_code_background_without_reparse() {
     let source = "paragraph\n\n```text\nfirst\n\nsecond\n```\n\n";
     let mut cache = MarkdownRenderCache::default();
     let first =
-        parse_markdown_chunks_cached(source, 80, Palette::default(), Color::Red, &mut cache);
-    reset_perf_counters();
-    let recolored =
-        parse_markdown_chunks_cached(source, 80, Palette::default(), Color::Green, &mut cache);
+        super::parse_markdown_chunks_cached(source, 80, Palette::default(), Color::Red, &mut cache);
+    crate::kit::acp_bridge::reset_perf_counters();
+    let recolored = super::parse_markdown_chunks_cached(
+        source,
+        80,
+        Palette::default(),
+        Color::Green,
+        &mut cache,
+    );
     assert!(!Arc::ptr_eq(&first.stable[0], &recolored.stable[0]));
-    assert_eq!(perf_counters().tail_parses, 0);
+    assert_eq!(crate::kit::acp_bridge::perf_counters().tail_parses, 0);
     assert_eq!(
         semantic_segments(recolored.segments()),
-        semantic_segments(parse_markdown(source, 80, Palette::default(), Color::Green).iter()),
+        semantic_segments(
+            super::parse_markdown(source, 80, Palette::default(), Color::Green).iter()
+        ),
     );
 
     let mut updated = (*original).clone();
@@ -209,20 +255,32 @@ fn test_stable_chunks_refresh_text_and_code_background_without_reparse() {
         Color::Magenta
     };
     peri_theme::atoms::THEME_ATOM.state().set(Arc::new(updated));
-    reset_perf_counters();
-    let background_changed =
-        parse_markdown_chunks_cached(source, 80, Palette::default(), Color::Green, &mut cache);
+    crate::kit::acp_bridge::reset_perf_counters();
+    let background_changed = super::parse_markdown_chunks_cached(
+        source,
+        80,
+        Palette::default(),
+        Color::Green,
+        &mut cache,
+    );
     assert!(!Arc::ptr_eq(
         &recolored.stable[0],
         &background_changed.stable[0]
     ));
-    assert_eq!(perf_counters().tail_parses, 0);
+    assert_eq!(crate::kit::acp_bridge::perf_counters().tail_parses, 0);
     assert_eq!(
         semantic_segments(background_changed.segments()),
-        semantic_segments(parse_markdown(source, 80, Palette::default(), Color::Green).iter()),
+        semantic_segments(
+            super::parse_markdown(source, 80, Palette::default(), Color::Green).iter()
+        ),
     );
-    let unchanged =
-        parse_markdown_chunks_cached(source, 80, Palette::default(), Color::Green, &mut cache);
+    let unchanged = super::parse_markdown_chunks_cached(
+        source,
+        80,
+        Palette::default(),
+        Color::Green,
+        &mut cache,
+    );
     assert!(Arc::ptr_eq(
         &background_changed.stable[0],
         &unchanged.stable[0]

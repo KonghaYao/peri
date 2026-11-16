@@ -12,9 +12,9 @@ pub fn tui_hash_str(s: &str) -> u64 {
 }
 
 /// 滚动哈希的乘法因子（奇数，保证乘法可逆，避免信息丢失）。
-const HASH_ROLL_MUL: u64 = 0x9E37_79B9_7F4A_7C15;
+const HASH_ROLL_MUL: u64 = 0x9e37_79b9_7f4a_7c15;
 /// 组合哈希的乘法因子——与滚动因子区分，降低结构相关性。
-const HASH_COMBINE_MUL: u64 = 0xC2B2_AE3D_27D4_EB4F;
+const HASH_COMBINE_MUL: u64 = 0xc2b2_ae3d_27d4_eb4f;
 
 /// 对文本按字节做滚动哈希。
 ///

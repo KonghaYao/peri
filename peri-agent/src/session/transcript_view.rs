@@ -14,7 +14,7 @@ use peri_acp_types::system_reminder::ReminderAudience;
 use crate::agent::compact_v2::projection::MessageProjectionDirective;
 use crate::messages::{BaseMessage, MessageId};
 
-use super::MessageTranscript;
+use crate::session::transcript::MessageTranscript;
 
 // ─── TranscriptRevision ───────────────────────────────────────────────────────
 
@@ -41,6 +41,7 @@ pub(super) fn next_instance_id() -> u64 {
 
 impl MessageTranscript {
     /// 内容修订标识（模型视图复用的判定输入）。
+    #[must_use]
     pub fn view_revision(&self) -> TranscriptRevision {
         TranscriptRevision {
             instance: self.view_instance,
@@ -67,6 +68,7 @@ impl MessageTranscript {
     /// **注意**：构建快照时仍会逐条深拷贝消息本体（需要过滤 excluded 并取得
     /// 独立所有权，无法与内部 `entries` 直接共享）；Arc 只保证快照在后续
     /// 事件管道多级传递时不再被重复深拷贝。
+    #[must_use]
     pub fn visible_snapshot(&self) -> Arc<Vec<BaseMessage>> {
         let filtered: Vec<BaseMessage> = self
             .entries
@@ -84,6 +86,7 @@ impl MessageTranscript {
         Arc::new(filtered)
     }
     /// 获取消息标记（无标记时返回默认值）
+    #[must_use]
     pub fn flags(&self, id: MessageId) -> MessageFlags {
         self.flags.get(&id).cloned().unwrap_or_default()
     }
@@ -97,11 +100,13 @@ impl MessageTranscript {
     }
 
     /// 该消息是否被排除在模型视图之外（不克隆 flags）。
+    #[must_use]
     pub fn is_excluded(&self, id: MessageId) -> bool {
         self.flags_ref(id).is_some_and(|flags| flags.excluded)
     }
 
     /// 该消息是否已被 Micro Compact 标记截断（不克隆 flags）。
+    #[must_use]
     pub fn is_truncated(&self, id: MessageId) -> bool {
         self.flags_ref(id).is_some_and(|flags| flags.truncated)
     }
@@ -115,7 +120,7 @@ impl MessageTranscript {
     ///
     /// 与 `flags()` 不同：此方法先确认 id 存在于索引表中，
     /// 不存在则返回 `None`（而非返回默认标记）。
-    pub fn get_flags(&self, id: MessageId) -> Option<MessageFlags> {
+    pub fn message_flags(&self, id: MessageId) -> Option<MessageFlags> {
         self.id_index.get(&id)?;
         Some(self.flags(id))
     }

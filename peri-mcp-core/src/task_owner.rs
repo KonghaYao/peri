@@ -4,7 +4,8 @@
 //! each request; the model cannot set it. A missing owner means generic MCP
 //! mode, where basic tools work without any Peri-specific metadata.
 
-use rmcp::{model::RequestMetaObject, ErrorData as McpError};
+use rmcp::model::RequestMetaObject;
+use rmcp::ErrorData as McpError;
 
 pub const TASK_OWNER_META_KEY: &str = "peri/taskOwner";
 

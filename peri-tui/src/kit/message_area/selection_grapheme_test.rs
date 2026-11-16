@@ -1,9 +1,14 @@
 //! [F7] 字素簇列宽映射与高亮边界。
 
-use super::*;
+use super::Arc;
+use super::Line;
+use super::WrappedLineInfo;
+use super::text_selection;
+
 use ratatui_kit::ratatui::style::{Color, Style};
 use ratatui_kit::ratatui::text::Span;
 
+#[must_use]
 fn make_line(s: &str) -> Line<'static> {
     Line::from(vec![Span::raw(s.to_string())])
 }
@@ -53,9 +58,9 @@ fn test_extract_after_zwj_grapheme_selects_ascii() {
     let lines = vec![make_line(&format!("{FAMILY}abcdef"))];
     let slots = vec![Arc::new(lines.clone())];
     let offsets = vec![0usize];
-    let (_, wrap_map) = build_wrap_map(&lines, 20);
+    let (_, wrap_map) = super::build_wrap_map(&lines, 20);
     assert_eq!(
-        extract_visual_range(&slots, &offsets, &wrap_map, (0, 2), (0, 5), 20, None, None)
+        super::extract_visual_range(&slots, &offsets, &wrap_map, (0, 2), (0, 5), 20, None, None)
             .as_deref(),
         Some("abc"),
         "family emoji 占 2 列，视觉列 2..5 对应 abc"
@@ -70,7 +75,13 @@ fn render_symbols(line: &Line<'static>, width: u16) -> Vec<String> {
     let mut buffer = Buffer::empty(area);
     line.clone().render(area, &mut buffer);
     (0..width)
-        .map(|x| buffer.cell((x, 0)).unwrap().symbol().to_string())
+        .map(|x| {
+            buffer
+                .cell((x, 0))
+                .expect("render symbols: fixture must contain the requested entry")
+                .symbol()
+                .to_string()
+        })
         .collect()
 }
 
@@ -83,7 +94,8 @@ fn test_highlight_does_not_split_zwj_grapheme_or_change_layout() {
         visual_start: 0,
         visual_end: 1,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 0, 0, 2, 5, 20, test_style());
+    let highlighted =
+        super::highlight_line_in_selection(&line, &entry, 0, 0, 2, 5, 20, test_style());
 
     assert_eq!(render_symbols(&line, 10), render_symbols(&highlighted, 10));
     assert_eq!(highlighted_text(&highlighted, TEST_BG), "abc");
@@ -108,7 +120,8 @@ fn test_highlight_combined_marks_and_flags_keep_grapheme_boundaries() {
             visual_start: 0,
             visual_end: 1,
         };
-        let highlighted = highlight_line_in_selection(&line, &entry, 0, 0, 1, 4, 20, test_style());
+        let highlighted =
+            super::highlight_line_in_selection(&line, &entry, 0, 0, 1, 4, 20, test_style());
         assert_eq!(
             render_symbols(&line, 8),
             render_symbols(&highlighted, 8),

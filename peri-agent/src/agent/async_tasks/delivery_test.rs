@@ -5,10 +5,10 @@ use std::sync::Arc;
 use peri_acp_types::session::MessageSource;
 use peri_acp_types::tasks::BgTaskKind;
 
-use super::*;
-use crate::agent::async_tasks::delivery::terminal_delivery_id;
-use crate::session::async_router::background_result_reminder;
+use crate::agent::async_tasks::delivery::SessionTerminalDelivery;
+
 use crate::session::test_resources::TestSession;
+use crate::session::MessageQueue;
 
 fn result(task_id: &str) -> crate::agent::events::BackgroundTaskResult {
     crate::agent::events::BackgroundTaskResult {
@@ -36,8 +36,12 @@ async fn retry_after_failed_enqueue_still_lands_the_result_once() {
     let mailbox = Arc::new(
         crate::session::async_result_mailbox::AsyncResultMailbox::new("session", "thread"),
     );
-    let reminder = background_result_reminder(&result("task-retry"), BgTaskKind::Agent);
-    let delivery_id = terminal_delivery_id("task-retry", "terminal");
+    let reminder = crate::session::async_router::background_result_reminder(
+        &result("task-retry"),
+        BgTaskKind::Agent,
+    );
+    let delivery_id =
+        crate::agent::async_tasks::delivery::terminal_delivery_id("task-retry", "terminal");
 
     let failing = SessionTerminalDelivery::for_queue_with_mailbox(
         MessageQueue::bind(session.read_only_resources().await, session.thread_id()),
@@ -56,7 +60,11 @@ async fn retry_after_failed_enqueue_still_lands_the_result_once() {
         .await
         .expect("重试必须以存储事实为准完成落库");
 
-    let entries = session.queue().snapshot().await.unwrap();
+    let entries = session
+        .queue()
+        .snapshot()
+        .await
+        .expect("the snapshot fixture result is required for this assertion");
     assert_eq!(entries.len(), 1, "结果最终必须落库且只落一条");
     assert_eq!(entries[0].delivery_id, Some(delivery_id));
 
@@ -64,6 +72,14 @@ async fn retry_after_failed_enqueue_still_lands_the_result_once() {
     writable
         .deliver(delivery_id, &reminder, MessageSource::SubAgentComplete)
         .await
-        .unwrap();
-    assert_eq!(session.queue().snapshot().await.unwrap().len(), 1);
+        .expect("the deliver fixture result is required for this assertion");
+    assert_eq!(
+        session
+            .queue()
+            .snapshot()
+            .await
+            .expect("the snapshot fixture result is required for this assertion")
+            .len(),
+        1
+    );
 }

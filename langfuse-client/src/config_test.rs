@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use super::*;
+use super::{BackpressurePolicy, BatcherConfig, ClientConfig, Compression, TelemetryConfig};
 
 #[test]
 fn test_batcher_config_default() {
@@ -314,16 +314,6 @@ fn test_batcher_invalid_config_is_rejected_before_worker_spawn() {
             Batcher::try_new(make_client(), config.clone(), None),
             Err(LangfuseError::Config(_))
         ));
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Batcher::new(make_client(), config, None);
-        }))
-        .expect_err("兼容 new 必须立即 panic，不能返回假就绪对象");
-        let message = panic
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panic.downcast_ref::<&str>().copied())
-            .unwrap();
-        assert!(message.contains("invalid batcher configuration"));
     }
 }
 
@@ -391,4 +381,37 @@ async fn test_batcher_maximum_valid_capacity_constructs_and_shuts_down_without_p
         .await
         .expect("空队列必须及时关闭")
         .expect("正常 join 不应有发送失败");
+}
+
+#[test]
+#[should_panic(expected = "invalid batcher configuration")]
+fn batcher_new_rejects_zero_events_before_spawn() {
+    let client = crate::LangfuseClient::new("pk-test", "sk-test", "http://127.0.0.1:1", 0);
+    let config = BatcherConfig {
+        max_events: 0,
+        ..Default::default()
+    };
+    let _ = crate::Batcher::new(client, config, None);
+}
+
+#[test]
+#[should_panic(expected = "invalid batcher configuration")]
+fn batcher_new_rejects_excessive_permits_before_spawn() {
+    let client = crate::LangfuseClient::new("pk-test", "sk-test", "http://127.0.0.1:1", 0);
+    let config = BatcherConfig {
+        max_events: tokio::sync::Semaphore::MAX_PERMITS + 1,
+        ..Default::default()
+    };
+    let _ = crate::Batcher::new(client, config, None);
+}
+
+#[test]
+#[should_panic(expected = "invalid batcher configuration")]
+fn batcher_new_rejects_zero_interval_before_spawn() {
+    let client = crate::LangfuseClient::new("pk-test", "sk-test", "http://127.0.0.1:1", 0);
+    let config = BatcherConfig {
+        flush_interval: Duration::ZERO,
+        ..Default::default()
+    };
+    let _ = crate::Batcher::new(client, config, None);
 }

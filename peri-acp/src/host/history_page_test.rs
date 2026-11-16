@@ -3,9 +3,19 @@
 //! 这些用例只走 [`classify`]：模式是**请求参数 + 当前连接能力**的函数，
 //! 每一次非法输入都必须得到显式拒绝，而不是退回 [`SessionLoadMode::InitialLoad`]。
 
-use super::*;
+use crate::dispatch;
+use crate::host::history_page::HistoryPageRequest;
+use crate::host::history_page::SessionLoadMode;
+use crate::host::history_page::DEFAULT_PAGE_LIMIT;
+use crate::host::history_page::MAX_PAGE_LIMIT;
+use crate::transport::types::AcpError;
 use peri_acp_types::history_page::HistoryCursor;
+use peri_acp_types::history_page::HistoryCursorEnvelope;
+use peri_acp_types::history_page::HistoryCursorError;
 use peri_acp_types::messages::MessageId;
+use peri_acp_types::thread::ThreadId;
+use serde_json::json;
+use serde_json::Value;
 
 const SESSION: &str = "session-a";
 
@@ -23,7 +33,7 @@ fn cursor_for(thread: &str) -> String {
 }
 
 fn classify_page(params: Value, pagination: bool) -> Result<HistoryPageRequest, AcpError> {
-    match classify(&params, pagination, false) {
+    match crate::host::history_page::classify(&params, pagination, false) {
         Ok(SessionLoadMode::HistoryPage(request)) => Ok(request),
         Ok(SessionLoadMode::InitialLoad | SessionLoadMode::HistoryWindow { .. }) => {
             panic!("request degraded into an initial load")
@@ -56,16 +66,22 @@ fn cursor_with_optional_limit_selects_the_history_page_mode() {
 #[test]
 fn absent_cursor_field_is_an_initial_load_and_limit_alone_is_rejected() {
     assert!(matches!(
-        classify(&json!({ "sessionId": SESSION }), true, false).unwrap(),
+        crate::host::history_page::classify(&json!({ "sessionId": SESSION }), true, false).unwrap(),
         SessionLoadMode::InitialLoad
     ));
     // 未协商分页能力的连接，只要不带分页字段，初始 load 照常（REQ §5.3）。
     assert!(matches!(
-        classify(&json!({ "sessionId": SESSION }), false, false).unwrap(),
+        crate::host::history_page::classify(&json!({ "sessionId": SESSION }), false, false)
+            .unwrap(),
         SessionLoadMode::InitialLoad
     ));
     // limit 只属于历史页：单独出现在初始 load 上是坏请求，不静默忽略。
-    let error = classify(&json!({ "sessionId": SESSION, "limit": 10 }), true, false).unwrap_err();
+    let error = crate::host::history_page::classify(
+        &json!({ "sessionId": SESSION, "limit": 10 }),
+        true,
+        false,
+    )
+    .unwrap_err();
     assert_eq!(error.code, -32602);
 }
 
@@ -129,15 +145,19 @@ fn a_cursor_from_an_earlier_structure_version_expires_before_storage() {
 #[test]
 fn load_generation_is_accepted_only_on_the_initial_load_as_a_non_empty_string() {
     assert_eq!(
-        initial_load_generation(&json!({ "loadGeneration": "gen-1" }))
+        crate::host::history_page::initial_load_generation(&json!({ "loadGeneration": "gen-1" }))
             .unwrap()
             .map(|generation| generation.as_str().to_owned()),
         Some("gen-1".to_string())
     );
-    assert!(initial_load_generation(&json!({})).unwrap().is_none());
+    assert!(
+        crate::host::history_page::initial_load_generation(&json!({}))
+            .unwrap()
+            .is_none()
+    );
 
     for bad in [json!(""), json!(7), json!(null), json!(["gen"])] {
-        let error = classify(
+        let error = crate::host::history_page::classify(
             &json!({ "sessionId": SESSION, "loadGeneration": bad }),
             true,
             false,

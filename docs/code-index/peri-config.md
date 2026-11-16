@@ -23,19 +23,19 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 | 发布、解释与更新 | `system.rs`：`ConfigurationSystem::{resolve,current,explain,update,update_mcp}` | 校验、来源 revision 与目标文件字节 CAS 成功才 publish；失败保留 current |
 | 来源输入 | `source.rs`：`ConfigurationSource`、`McpConfigurationSource`、`read_environment`、`collect_with_layout` | 独立 bootstrap；可注入其他 adapter，不委托 provider 决定领域规则 |
 | settings schema 与合并 | `app.rs`：`PeriConfig`、`AppConfig`、`Profiles`、`ProfileConfig`、`ProviderConfig`、`BetasConfig` | `merge_overrides`、`extract_overrides`；profile 整体替换、MetaHarness 与 beta flag 逐 key 合并 |
-| 固定加载/保存布局 | `settings.rs`：`ConfigSource::{load_at,load_standalone,load_lenient,snapshot,reload_merged,preview}`、`save(expected_revision, &PeriConfig) -> Result<Arc<ConfigurationSnapshot>>` | 编辑开始捕获 revision 随草稿提交；保存返回 accepted snapshot。`preview` 用同一候选解析将发布的 snapshot 但不写目标文件，供提交前校验 accepted 投影；随后 save 仍核对 revision。正常持有 system、同文件不拆层；lenient 临时可读/不可写 |
-| 受信启动器的内存配置 | `settings.rs`：`ConfigSource::load_injected_at`；`source.rs::collect_with_layout_and_global` | 以内部启动帧提供完整 global settings 正文；不读取或写入 global/workspace settings 文件，仍使用同一 typed snapshot 与 provider/MCP 规则；该来源拒绝持久保存 |
-| 单文件 helpers | `settings.rs`：`load_from`、`save_to` | `save_to` 显式路径也用字节 CAS 保留其他顶层领域；不发布 scoped snapshot，不等同于 system revision 更新。lenient source 无 authority 时临时可读、不可写 |
-| 资源配置投影 | `resources.rs`：`ResourceConfiguration`、`resolve`；`system.rs::resources` | global `config.disableBundledSkills` 优先于旧顶层键，默认 false；workspace 资源 consumer 使用 snapshot 开关 |
-| Beta flag 投影 | `betas.rs`：`BetaFlags`（re-export 契约层 `peri_acp_types::beta_flags`）、`resolve`、`from_merged`、`HISTORY_WINDOW_V1`、`is_known`；`system.rs::flags`；`settings.rs::beta_flags` | `config.betas` 稀疏 bool 覆盖表由**合并后 settings** 派生，global→workspace 逐 key 覆盖（workspace 显式 false 可关闭 global true）；未覆盖与未知 id 恒 false；未知键解析后剔除并 warn，非 bool 使该来源解析失败；保存沿用 `ConfigSource::save`（CAS），不新增写路径。TUI 本地键 `history-window-v1` 由 `is_known` 接受但不在 ACP `BETA_FLAGS`，故 ConfigPanel 不列；`peri-tui` 启动读取一次并写 `HISTORY_WINDOW_V1`（未配置视为开启、显式 false 关闭），无热重载，仍需服务端在 initialize 响应中明确回显 `peri.historyWindowV1` |
+| 固定加载/保存布局 | `settings/config_source.rs`：`ConfigSource::{load_at,load_standalone,load_lenient,snapshot,reload_merged,preview}`、`save(expected_revision, &PeriConfig) -> Result<Arc<ConfigurationSnapshot>>` | 编辑开始捕获 revision 随草稿提交；保存返回 accepted snapshot。`preview` 用同一候选解析将发布的 snapshot 但不写目标文件，供提交前校验 accepted 投影；随后 save 仍核对 revision。正常持有 system、同文件不拆层；lenient 临时可读/不可写 |
+| 受信启动器的内存配置 | `settings/config_source.rs`：`ConfigSource::load_injected_at`；`source.rs::collect_with_layout_and_global` | 以内部启动帧提供完整 global settings 正文；不读取或写入 global/workspace settings 文件，仍使用同一 typed snapshot 与 provider/MCP 规则；该来源拒绝持久保存 |
+| 单文件 helpers | `settings/config_source.rs`：`load_from`、`save_to` | `save_to` 显式路径也用字节 CAS 保留其他顶层领域；不发布 scoped snapshot，不等同于 system revision 更新。lenient source 无 authority 时临时可读、不可写 |
+| 资源配置投影 | `resources/resource_configuration.rs`：`ResourceConfiguration`、`resolve`；`system.rs::resources` | global `config.disableBundledSkills` 优先于旧顶层键，默认 false；workspace 资源 consumer 使用 snapshot 开关 |
+| Beta flag 投影 | `betas.rs`：`BetaFlags`（re-export 契约层 `peri_acp_types::beta_flags`）、`resolve`、`from_merged`、`HISTORY_WINDOW_V1`、`is_known`；`system.rs::flags`；`settings/config_source.rs::beta_flags` | `config.betas` 稀疏 bool 覆盖表由**合并后 settings** 派生，global→workspace 逐 key 覆盖（workspace 显式 false 可关闭 global true）；未覆盖与未知 id 恒 false；未知键解析后剔除并 warn，非 bool 使该来源解析失败；保存沿用 `ConfigSource::save`（CAS），不新增写路径。TUI 本地键 `history-window-v1` 由 `is_known` 接受但不在 ACP `BETA_FLAGS`，故 ConfigPanel 不列；`peri-tui` 启动读取一次并写 `HISTORY_WINDOW_V1`（未配置视为开启、显式 false 关闭），无热重载，仍需服务端在 initialize 响应中明确回显 `peri.historyWindowV1` |
 | Provider 解析 | `provider.rs`：`try_resolve`、`try_resolve_snapshot`、`resolve_for_alias`、`validate_responses_provider`、`ResolvedProvider`、`ResponsesAuthentication`、`ENVIRONMENT_KEYS` | `MODEL_PROVIDER` + `MODEL_TYPE` 选择配置的 provider ID 和档位；缺省用 active profile；`openai_responses` 显式协议选择，未知 type 拒绝。Responses 须有模型与正整数窗口；已确认 ChatGPT plan 模型缺窗口时派生 1M，不写回配置；API key 与未知模型仍须显式窗口。typed `ProviderAuthConfig` 只保存 API key 模式或 ChatGPT 账户/subject/clientId 引用。`validate_responses_provider` 独立校验 endpoint 与认证，供 resolver 和 TUI 编辑共用；消费者负责 Model adapter 构造。快照/保存边界用 `try_resolve_snapshot`：provider 级错误仍拒绝文档，真正未完成的 model/window 绑定只让 provider 不可用，不阻断其它配置保存；运行时 `try_resolve` 对生效档位保持严格 |
 | MCP 基础配置 | `mcp.rs`：`parse_global`、`parse_project`、`resolve_from_files`、`validate_config`、`server_config_hash` | global/plugin/project 合并、插件手动去重、typed 准入与 cache 关闭优先 |
 | Builtin 环境策略 | `mcp.rs`：`builtin_enabled` | `PERI_MCP_BUILTIN` 解释规则归 core；builtin adapter 只采集 env，不复制规则 |
 | 快照中的插件/普通/bare 投影 | `system.rs`：`mcp_with_plugins`、`bare_mcp`、`cache_policy`、`builtin_mcp_enabled` | 从冻结原始输入派生；插件发现和执行展开留在 middleware |
-| Langfuse 基础键 | `observability.rs`：`LangfuseConfig`、`resolve`、`ENVIRONMENT_KEYS`、`LangfuseCompression`、`ConfigValueSource` | 旧键保持 clamp/忽略非法值语义，`batch_max_event_bytes` 默认 4 MiB；Debug 保留原始配置；`ENVIRONMENT_KEYS` 由本模块与 `observability_spool` 的常量拼入，不在别处维护第二份清单 |
+| Langfuse 基础键 | `observability/langfuse_config.rs`：`LangfuseConfig`、`resolve`、`ENVIRONMENT_KEYS`、`LangfuseCompression`、`ConfigValueSource` | 旧键保持 clamp/忽略非法值语义，`batch_max_event_bytes` 默认 4 MiB；Debug 保留原始配置；`ENVIRONMENT_KEYS` 由本模块与 `observability_spool` 的常量拼入，不在别处维护第二份清单 |
 | Langfuse spool/编码/预算键 | `observability_spool.rs`：`SPOOL_ENABLED`…`SHUTDOWN_GRACE_SECS`、逐键解析与 `resolve` | spool 键逐键选胜出来源（env > `langfuse.*` settings > default），布尔/压缩/非零十进制规则见[环境变量表](../standards/environment-variables.md)；胜出值非法返回 `LangfuseConfigError`，不回退默认；跨键约束（阈值、块大小与预算）归客户端构造期校验 |
-| Langfuse 配置错误 | `observability.rs`：`LangfuseConfigError::Invalid { key, origin, reason }`；`assembly.rs::resolve` | 错误只带键名、来源与原因，不带原值；按来源映射为 `ConfigurationError::InvalidInput`（settings→GlobalFile，env→Environment），拒绝整份快照的发布 |
-| TUI | `ui.rs`：`TuiConfig::{from_extra,sync_to_extra}` | UI 默认值、typed 字段和 extra 保存规则；视图状态留在 TUI |
+| Langfuse 配置错误 | `observability/langfuse_config.rs`：`LangfuseConfigError::Invalid { key, origin, reason }`；`assembly.rs::resolve` | 错误只带键名、来源与原因，不带原值；按来源映射为 `ConfigurationError::InvalidInput`（settings→GlobalFile，env→Environment），拒绝整份快照的发布 |
+| TUI | `ui/tui_config.rs`：`TuiConfig::{from_extra,sync_to_extra}` | UI 默认值、typed 字段和 extra 保存规则；视图状态留在 TUI |
 
 ## 更新接纳边界
 
@@ -56,7 +56,7 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
   `provider/mod.rs` 将 `ResolvedProvider` 转成 `LlmProvider` 和具体 Model adapter。
 - `peri-acp/src/host/assemble.rs` 将 `ConfigSource::snapshot` 注入新建 MCP pool，
   并从同一 snapshot 获取 host Langfuse 配置。
-- `peri-middlewares/src/mcp/client.rs::set_configuration_snapshot` 在初始化前只写一次，
+- `peri-middlewares/src/mcp/client/mcp_client_pool.rs::set_configuration_snapshot` 在初始化前只写一次，
   `configuration_revision` 可核对绑定版本；`initialize.rs` 选择 snapshot loader。
 - `peri-middlewares/src/mcp/config.rs` 只做插件采集/执行参数展开/builtin overlay；
   基础合并与校验委托 core。snapshot 目录写法不同时，经 `io::same_file` 核对同目录，

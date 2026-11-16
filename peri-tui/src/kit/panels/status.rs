@@ -8,19 +8,19 @@
 //! `return` 一律排在其后——某条分支少调一个 hook，框架就会按下标取到错位的 hook
 //! 而 panic（ratatui-kit `Hooks::use_hook`）。
 
-use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind},
-    prelude::*,
-    ratatui::{
-        style::{Style, Stylize},
-        text::{Line, Span},
-        widgets::Paragraph,
-    },
-};
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::KeyCode;
+use ratatui_kit::crossterm::event::KeyEventKind;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::style::Stylize;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
+use ratatui_kit::ratatui::widgets::Paragraph;
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{LANG_VERSION, SERVICE_SNAPSHOT, VIEW_MODELS};
+
 use crate::kit::tui_render_unit::TuiRenderUnit;
 use peri_theme::atoms::THEME_ATOM;
 
@@ -370,3 +370,9 @@ fn handle_status_event(event: Event, active_tab: State<usize>) -> EventResult {
 #[cfg(test)]
 #[path = "status_test.rs"]
 mod tests;
+
+use crate::kit::atoms::LANG_VERSION;
+
+use crate::kit::atoms::SERVICE_SNAPSHOT;
+
+use crate::kit::atoms::VIEW_MODELS;

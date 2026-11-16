@@ -1,8 +1,7 @@
 //! Bounded, disposable child display data. Never changes model/tool input or history.
 
 use super::{CurrentTurn, SubAgentAccumulator, ToolCardAccumulator};
-use crate::kit::retained_bytes::{SeenAllocations, retained_unit_bytes};
-use crate::kit::stream_data::TuiToolStarted;
+use crate::kit::retained_bytes::SeenAllocations;
 
 pub(crate) const FIELD_BYTES: usize = 16 * 1024;
 pub(crate) const DETAIL_BYTES: usize = 256 * 1024;
@@ -78,7 +77,10 @@ impl SubAgentAccumulator {
     pub(crate) fn preview_reserved(&self) -> usize {
         let mut bytes = self.child_turn.preview_memory_bytes();
         if let Some(vm) = self.cached_view_model.borrow().as_ref() {
-            bytes = bytes.saturating_add(retained_unit_bytes(vm, &mut SeenAllocations::default()));
+            bytes = bytes.saturating_add(crate::kit::retained_bytes::retained_unit_bytes(
+                vm,
+                &mut SeenAllocations::default(),
+            ));
         }
         bytes
     }
@@ -117,3 +119,5 @@ impl SubAgentAccumulator {
         self.bound_preview();
     }
 }
+
+use crate::kit::stream_data::TuiToolStarted;

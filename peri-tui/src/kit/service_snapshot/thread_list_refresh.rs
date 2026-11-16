@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant};
 
 use crate::acp_client::AcpTuiClient;
-use crate::kit::atoms::{THREAD_LIST_PAGE_SIZE, ThreadBrowserScope, ThreadSummary};
+
 use peri_acp_types::workspace::{ResolvedWorkspace, ScopedThreadQuery, ThreadScope};
 
 pub(super) struct ThreadListRefresh {
@@ -152,3 +152,9 @@ impl ThreadListRefresh {
         Ok((entries, cursor.is_some()))
     }
 }
+
+use crate::kit::atoms::THREAD_LIST_PAGE_SIZE;
+
+use crate::kit::atoms::ThreadBrowserScope;
+
+use crate::kit::atoms::ThreadSummary;

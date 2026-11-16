@@ -3,7 +3,16 @@
 
 use std::path::Path;
 
-use super::*;
+use crate::resources::instructions::ReadFailure;
+use crate::resources::instructions::MAIN_CANDIDATES;
+use crate::resources::ResourceBudget;
+use crate::resources::ResourceError;
+use peri_acp_types::workspace_resources::InstructionDocument;
+use peri_acp_types::workspace_resources::INSTRUCTION_LOCAL_URI;
+use peri_acp_types::workspace_resources::INSTRUCTION_MAIN_URI;
+use peri_acp_types::workspace_resources::MIME_JSON;
+use peri_acp_types::workspace_resources::MIME_MARKDOWN;
+use peri_acp_types::workspace_resources::MIME_TEXT;
 
 fn tempdir() -> tempfile::TempDir {
     tempfile::tempdir().expect("临时目录夹具必须可创建")
@@ -25,20 +34,20 @@ fn main_candidate_uses_first_existing_file() {
     let dir = tempdir();
     write(&dir.path().join("CLAUDE.md"), "claude content");
     // AGENTS.md 不存在：选 CLAUDE.md。
-    let bundle = scan(dir.path(), &budget(), &[]);
+    let bundle = crate::resources::instructions::scan(dir.path(), &budget(), &[]);
     assert_eq!(bundle.main.as_ref().expect("main").text, "claude content");
     assert_eq!(bundle.index.selected.as_deref(), Some("CLAUDE.md"));
 
     // AGENTS.md 存在时优先。
     write(&dir.path().join("AGENTS.md"), "agents content");
-    let bundle = scan(dir.path(), &budget(), &[]);
+    let bundle = crate::resources::instructions::scan(dir.path(), &budget(), &[]);
     assert_eq!(bundle.main.as_ref().expect("main").text, "agents content");
     assert_eq!(bundle.index.selected.as_deref(), Some("AGENTS.md"));
 
     // 前两者都不在时选 .claude/AGENTS.md。
     let dir2 = tempdir();
     write(&dir2.path().join(".claude").join("AGENTS.md"), "nested");
-    let bundle = scan(dir2.path(), &budget(), &[]);
+    let bundle = crate::resources::instructions::scan(dir2.path(), &budget(), &[]);
     assert_eq!(bundle.main.as_ref().expect("main").text, "nested");
     assert_eq!(bundle.index.selected.as_deref(), Some(".claude/AGENTS.md"));
 }
@@ -48,7 +57,7 @@ fn first_existing_empty_document_short_circuits_without_fallback() {
     let dir = tempdir();
     write(&dir.path().join("AGENTS.md"), "   \n");
     write(&dir.path().join("CLAUDE.md"), "later candidate");
-    let bundle = scan(dir.path(), &budget(), &[]);
+    let bundle = crate::resources::instructions::scan(dir.path(), &budget(), &[]);
     assert!(bundle.main.is_none(), "首个存在但为空 → main 不存在");
     assert_eq!(
         bundle.index.selected.as_deref(),
@@ -62,7 +71,7 @@ fn local_document_is_independent_resource() {
     let dir = tempdir();
     write(&dir.path().join("CLAUDE.md"), "main");
     write(&dir.path().join("CLAUDE.local.md"), "local overlay");
-    let bundle = scan(dir.path(), &budget(), &[]);
+    let bundle = crate::resources::instructions::scan(dir.path(), &budget(), &[]);
     assert_eq!(bundle.main.as_ref().expect("main").text, "main");
     assert_eq!(bundle.local.as_ref().expect("local").text, "local overlay");
     assert_eq!(
@@ -74,7 +83,7 @@ fn local_document_is_independent_resource() {
     let dir2 = tempdir();
     write(&dir2.path().join("CLAUDE.md"), "main");
     write(&dir2.path().join("CLAUDE.local.md"), "\n");
-    let bundle = scan(dir2.path(), &budget(), &[]);
+    let bundle = crate::resources::instructions::scan(dir2.path(), &budget(), &[]);
     assert!(bundle.local.is_none());
 }
 
@@ -90,7 +99,7 @@ fn imports_expand_for_claude_docs_with_depth_and_cycle_guard() {
         "A\n<!-- @import b.md -->\n",
     );
     write(&dir.path().join("docs").join("b.md"), "B\n");
-    let bundle = scan(dir.path(), &budget(), &[]);
+    let bundle = crate::resources::instructions::scan(dir.path(), &budget(), &[]);
     let main = bundle.main.as_ref().expect("main");
     assert_eq!(
         main.text, "top\nA\nB\n\n\nbottom\n",
@@ -111,7 +120,7 @@ fn imports_expand_for_claude_docs_with_depth_and_cycle_guard() {
         &dir2.path().join("loop.md"),
         "L\n<!-- @import CLAUDE.md -->\n",
     );
-    let bundle = scan(dir2.path(), &budget(), &[]);
+    let bundle = crate::resources::instructions::scan(dir2.path(), &budget(), &[]);
     let text = &bundle.main.as_ref().expect("main").text;
     assert_eq!(
         text, "L\n<!-- @import CLAUDE.md -->\n\n",
@@ -127,7 +136,7 @@ fn import_depth_is_bounded_to_three_levels() {
     write(&dir.path().join("d2.md"), "2<!-- @import d3.md -->\n");
     write(&dir.path().join("d3.md"), "3<!-- @import d4.md -->\n");
     write(&dir.path().join("d4.md"), "4\n");
-    let bundle = scan(dir.path(), &budget(), &[]);
+    let bundle = crate::resources::instructions::scan(dir.path(), &budget(), &[]);
     let text = bundle.main.as_ref().expect("main").text.clone();
     assert!(text.contains('3'), "第 3 层展开：{text}");
     assert!(
@@ -141,7 +150,7 @@ fn agents_md_does_not_resolve_imports() {
     let dir = tempdir();
     write(&dir.path().join("AGENTS.md"), "<!-- @import other.md -->\n");
     write(&dir.path().join("other.md"), "other");
-    let bundle = scan(dir.path(), &budget(), &[]);
+    let bundle = crate::resources::instructions::scan(dir.path(), &budget(), &[]);
     assert_eq!(
         bundle.main.as_ref().expect("main").text,
         "<!-- @import other.md -->\n",
@@ -160,7 +169,7 @@ fn out_of_workspace_import_keeps_placeholder() {
         &dir.path().join("CLAUDE.md"),
         &format!("<!-- @import {}/secret.md -->\n", outside_path.display()),
     );
-    let bundle = scan(dir.path(), &budget(), &[]);
+    let bundle = crate::resources::instructions::scan(dir.path(), &budget(), &[]);
     let text = bundle.main.as_ref().expect("main").text.clone();
     assert!(
         text.contains("<!-- @import "),
@@ -177,7 +186,7 @@ fn missing_import_keeps_placeholder() {
         &dir.path().join("CLAUDE.md"),
         "<!-- @import missing.md -->\n",
     );
-    let bundle = scan(dir.path(), &budget(), &[]);
+    let bundle = crate::resources::instructions::scan(dir.path(), &budget(), &[]);
     assert_eq!(
         bundle.main.as_ref().expect("main").text,
         "<!-- @import missing.md -->\n"
@@ -192,10 +201,11 @@ fn oversized_main_is_treated_as_absent() {
         max_file_bytes: 16,
         ..ResourceBudget::default()
     };
-    let bundle = scan(dir.path(), &tiny, &[]);
+    let bundle = crate::resources::instructions::scan(dir.path(), &tiny, &[]);
     assert!(bundle.main.is_none());
     assert_eq!(
-        read(dir.path(), &tiny, InstructionDocument::Main, &[]).unwrap_err(),
+        crate::resources::instructions::read(dir.path(), &tiny, InstructionDocument::Main, &[])
+            .unwrap_err(),
         ResourceError::NotFound,
         "超预算文档对读取面等同找不到（list 与 read 一致）"
     );
@@ -210,7 +220,7 @@ fn index_manifest_reports_documents_and_imports() {
     );
     write(&dir.path().join("part.md"), "part\n");
     write(&dir.path().join("CLAUDE.local.md"), "local\n");
-    let bundle = scan(dir.path(), &budget(), &[]);
+    let bundle = crate::resources::instructions::scan(dir.path(), &budget(), &[]);
     let index = &bundle.index;
     assert_eq!(index.scope, "workspace");
     assert_eq!(index.candidates, MAIN_CANDIDATES.to_vec());
@@ -224,7 +234,7 @@ fn index_manifest_reports_documents_and_imports() {
     assert_eq!(index.imports[0].relative, "part.md");
     assert_eq!(
         index.imports[0].digest,
-        digest_bytes(b"part\n"),
+        peri_acp_types::workspace_resources::digest_bytes(b"part\n"),
         "import digest 按原始字节计算"
     );
     // 序列化形状（宿主消费面用 camelCase）。
@@ -240,29 +250,64 @@ fn reads_project_expected_mime_and_digest() {
     write(&dir.path().join("CLAUDE.md"), "main\n");
     write(&dir.path().join("CLAUDE.local.md"), "local\n");
 
-    let main = read(dir.path(), &budget(), InstructionDocument::Main, &[]).expect("main");
+    let main =
+        crate::resources::instructions::read(dir.path(), &budget(), InstructionDocument::Main, &[])
+            .expect("main");
     assert_eq!(main.mime, MIME_MARKDOWN);
-    assert_eq!(main.digest, digest_bytes(b"main\n"));
-    let local = read(dir.path(), &budget(), InstructionDocument::Local, &[]).expect("local");
+    assert_eq!(
+        main.digest,
+        peri_acp_types::workspace_resources::digest_bytes(b"main\n")
+    );
+    let local = crate::resources::instructions::read(
+        dir.path(),
+        &budget(),
+        InstructionDocument::Local,
+        &[],
+    )
+    .expect("local");
     assert_eq!(local.mime, MIME_TEXT);
-    let index = read(dir.path(), &budget(), InstructionDocument::Index, &[]).expect("index");
+    let index = crate::resources::instructions::read(
+        dir.path(),
+        &budget(),
+        InstructionDocument::Index,
+        &[],
+    )
+    .expect("index");
     assert_eq!(index.mime, MIME_JSON);
     let parsed: serde_json::Value = serde_json::from_str(&index.text).expect("index 是 JSON");
     assert_eq!(parsed["selected"], "CLAUDE.md");
 
     assert_eq!(
-        read(dir.path(), &budget(), InstructionDocument::Local, &[]).map(|r| r.text),
+        crate::resources::instructions::read(
+            dir.path(),
+            &budget(),
+            InstructionDocument::Local,
+            &[]
+        )
+        .map(|r| r.text),
         Ok("local\n".to_string())
     );
 
     // 无 main 时 read(main) = NotFound。
     let empty = tempdir();
     assert_eq!(
-        read(empty.path(), &budget(), InstructionDocument::Main, &[]).unwrap_err(),
+        crate::resources::instructions::read(
+            empty.path(),
+            &budget(),
+            InstructionDocument::Main,
+            &[]
+        )
+        .unwrap_err(),
         ResourceError::NotFound
     );
     // index 恒可读（空工作区也是合法 manifest）。
-    assert!(read(empty.path(), &budget(), InstructionDocument::Index, &[]).is_ok());
+    assert!(crate::resources::instructions::read(
+        empty.path(),
+        &budget(),
+        InstructionDocument::Index,
+        &[]
+    )
+    .is_ok());
 }
 
 #[test]
@@ -282,14 +327,14 @@ fn claude_symlink_target_is_read() {
             dir.path().join("CLAUDE.md"),
         )
         .expect("建 symlink");
-        let bundle = scan(dir.path(), &budget(), &[]);
+        let bundle = crate::resources::instructions::scan(dir.path(), &budget(), &[]);
         assert_eq!(bundle.main.as_ref().expect("main").text, "shared body\n");
     }
     // 非 Unix 平台的对照：直接写文件（symlink 语义不适用）。
     #[cfg(not(unix))]
     {
         write(&dir.path().join("CLAUDE.md"), "shared body\n");
-        let bundle = scan(dir.path(), &budget(), &[]);
+        let bundle = crate::resources::instructions::scan(dir.path(), &budget(), &[]);
         assert_eq!(bundle.main.as_ref().expect("main").text, "shared body\n");
     }
 }
@@ -304,13 +349,13 @@ fn instruction_excludes_skip_the_matching_main_candidate() {
     let budget = budget();
     let excludes = vec![format!("{}/AGENTS.md", dir.path().display())];
 
-    let bundle = scan(dir.path(), &budget, &excludes);
+    let bundle = crate::resources::instructions::scan(dir.path(), &budget, &excludes);
     let main = bundle.main.expect("回退到 CLAUDE.md");
     assert_eq!(main.source_label, "CLAUDE.md");
     assert_eq!(main.text, "claude body");
 
     // 无 excludes 时仍取首个候选（优先级不因本用例改变）。
-    let bundle = scan(dir.path(), &budget, &[]);
+    let bundle = crate::resources::instructions::scan(dir.path(), &budget, &[]);
     assert_eq!(bundle.main.expect("AGENTS.md").source_label, "AGENTS.md");
 }
 
@@ -323,7 +368,7 @@ fn unknown_frontmatter_fields_are_ignored_and_definition_still_loads() {
         "---\nunknownField: kept-as-is\n---\nbody\n",
     )
     .unwrap();
-    let bundle = scan(dir.path(), &budget(), &[]);
+    let bundle = crate::resources::instructions::scan(dir.path(), &budget(), &[]);
     assert!(bundle.main.is_some(), "未知 frontmatter 字段不得导致拒载");
 }
 
@@ -334,25 +379,25 @@ fn unknown_frontmatter_fields_are_ignored_and_definition_still_loads() {
 fn read_failure_classification_separates_absence_from_errors() {
     let dir = tempdir();
     assert_eq!(
-        read_bounded_text(&dir.path().join("missing.md"), 1024),
+        crate::resources::instructions::read_bounded_text(&dir.path().join("missing.md"), 1024),
         Err(ReadFailure::NotFound),
         "缺失文件是正常不存在，不是读取错误"
     );
     assert_eq!(
-        read_bounded_text(dir.path(), 1024),
+        crate::resources::instructions::read_bounded_text(dir.path(), 1024),
         Err(ReadFailure::NotFound),
         "目录不是文件，按不存在处理"
     );
 
     write(&dir.path().join("big.md"), &"x".repeat(64));
     assert_eq!(
-        read_bounded_text(&dir.path().join("big.md"), 16),
+        crate::resources::instructions::read_bounded_text(&dir.path().join("big.md"), 16),
         Err(ReadFailure::OverBudget)
     );
 
     std::fs::write(dir.path().join("binary.md"), [0xff, 0xfe]).unwrap();
     assert_eq!(
-        read_bounded_text(&dir.path().join("binary.md"), 1024),
+        crate::resources::instructions::read_bounded_text(&dir.path().join("binary.md"), 1024),
         Err(ReadFailure::NotUtf8),
         "非 UTF-8 是编码错误，不是不存在"
     );
@@ -381,7 +426,7 @@ fn import_total_read_budget_is_shared_across_the_expansion_tree() {
         max_instruction_total_bytes: root.len() as u64 + 34,
         ..ResourceBudget::default()
     };
-    let bundle = scan(dir.path(), &tiny, &[]);
+    let bundle = crate::resources::instructions::scan(dir.path(), &tiny, &[]);
     let main = bundle.main.expect("main");
     assert!(
         !main.text.contains("aaa") && !main.text.contains("ccc"),
@@ -412,7 +457,7 @@ fn import_total_read_budget_allows_normal_expansion() {
     let dir = tempdir();
     write(&dir.path().join("CLAUDE.md"), "<!-- @import a.md -->\n");
     write(&dir.path().join("a.md"), "imported body");
-    let bundle = scan(dir.path(), &budget(), &[]);
+    let bundle = crate::resources::instructions::scan(dir.path(), &budget(), &[]);
     assert_eq!(bundle.main.expect("main").text, "imported body\n");
     assert_eq!(bundle.index.imports.len(), 1);
 }
@@ -427,7 +472,7 @@ fn final_text_budget_keeps_bounded_prefix_and_marks_truncation() {
         max_instruction_text_bytes: 256,
         ..ResourceBudget::default()
     };
-    let bundle = scan(dir.path(), &tiny, &[]);
+    let bundle = crate::resources::instructions::scan(dir.path(), &tiny, &[]);
     let main = bundle.main.expect("main");
     assert!(
         main.text.len() < 4096,
@@ -440,7 +485,10 @@ fn final_text_budget_keeps_bounded_prefix_and_marks_truncation() {
         "截断必须有显式说明：{}",
         &main.text[..main.text.len().min(120)]
     );
-    assert_eq!(main.digest, digest_bytes(main.text.as_bytes()));
+    assert_eq!(
+        main.digest,
+        peri_acp_types::workspace_resources::digest_bytes(main.text.as_bytes())
+    );
 }
 
 /// 多字节边界：截断不切断 UTF-8 字符。
@@ -452,7 +500,7 @@ fn final_text_budget_never_splits_a_utf8_character() {
         max_instruction_text_bytes: 101,
         ..ResourceBudget::default()
     };
-    let bundle = scan(dir.path(), &tiny, &[]);
+    let bundle = crate::resources::instructions::scan(dir.path(), &tiny, &[]);
     let main = bundle.main.expect("main");
     // 截断点落在字符边界（字符串本身已是合法 UTF-8；再断言前缀是整字符倍数）。
     let prefix = main.text.split('\n').next().unwrap();
@@ -465,7 +513,7 @@ fn local_document_read_failure_is_isolated_from_main() {
     let dir = tempdir();
     write(&dir.path().join("AGENTS.md"), "main body");
     std::fs::write(dir.path().join("CLAUDE.local.md"), [0xff, 0xfe]).unwrap();
-    let bundle = scan(dir.path(), &budget(), &[]);
+    let bundle = crate::resources::instructions::scan(dir.path(), &budget(), &[]);
     assert_eq!(bundle.main.expect("main").text, "main body");
     assert!(bundle.local.is_none(), "编码非法的 local 不贡献正文");
     assert!(!bundle.index.documents[1].present);

@@ -3,12 +3,18 @@ use std::sync::OnceLock;
 
 fn commit_type_re() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"^(\w+)(\([^)]*\))?!?:\s").unwrap())
+    RE.get_or_init(|| {
+        regex::Regex::new(r"^(\w+)(\([^)]*\))?!?:\s")
+            .expect("hardcoded commit parser regular expression must compile")
+    })
 }
 
 fn co_author_re() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"(?i)^Co-Authored-By:\s*(.+?)\s*<([^>]+)>").unwrap())
+    RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)^Co-Authored-By:\s*(.+?)\s*<([^>]+)>")
+            .expect("hardcoded commit parser regular expression must compile")
+    })
 }
 
 /// Parsed conventional commit type
@@ -24,10 +30,15 @@ pub enum CommitType {
 }
 
 impl CommitType {
+    #[must_use]
     pub fn from_subject(subject: &str) -> Self {
         // Match "type(scope): ..." or "type: ..."
         if let Some(caps) = commit_type_re().captures(subject) {
-            match caps.get(1).unwrap().as_str() {
+            match caps
+                .get(1)
+                .expect("the matched commit expression requires this capturing group")
+                .as_str()
+            {
                 "feat" => CommitType::Feat,
                 "fix" => CommitType::Fix,
                 "refactor" => CommitType::Refactor,
@@ -86,13 +97,24 @@ pub struct ParsedCommit {
 
 /// Extract all Co-Authored-By lines from commit body.
 /// Matches: "Co-Authored-By: Name <email>" (case-insensitive)
+#[must_use]
 pub fn parse_co_authors(body: &str) -> Vec<CoAuthor> {
     let re = co_author_re();
     body.lines()
         .filter_map(|line| {
             re.captures(line).map(|caps| CoAuthor {
-                name: caps.get(1).unwrap().as_str().trim().to_string(),
-                email: caps.get(2).unwrap().as_str().trim().to_string(),
+                name: caps
+                    .get(1)
+                    .expect("the matched commit expression requires this capturing group")
+                    .as_str()
+                    .trim()
+                    .to_string(),
+                email: caps
+                    .get(2)
+                    .expect("the matched commit expression requires this capturing group")
+                    .as_str()
+                    .trim()
+                    .to_string(),
             })
         })
         .collect()
@@ -108,7 +130,10 @@ mod tests {
             CommitType::from_subject("feat(auth): add login"),
             CommitType::Feat
         );
-        assert_eq!(CommitType::from_subject("feat: add login"), CommitType::Feat);
+        assert_eq!(
+            CommitType::from_subject("feat: add login"),
+            CommitType::Feat
+        );
     }
 
     #[test]
@@ -139,8 +164,7 @@ mod tests {
 
     #[test]
     fn test_parse_co_authors_multiple() {
-        let body =
-            "Co-Authored-By: Alice <alice@corp.com>\nCo-authored-by: Bob <bob@corp.com>";
+        let body = "Co-Authored-By: Alice <alice@corp.com>\nCo-authored-by: Bob <bob@corp.com>";
         let result = parse_co_authors(body);
         assert_eq!(result.len(), 2);
     }

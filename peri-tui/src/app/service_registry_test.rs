@@ -1,15 +1,22 @@
 //! 进程内存阈值告警（`peri.mem`）的规则与节流状态回归。
 
-use super::*;
+use super::MEMORY_WARN_REPEAT_INTERVAL;
+use super::MEMORY_WARN_THRESHOLD_MB;
+use super::MemoryWarning;
+use super::ProcessResourceMonitor;
+
 use std::time::{Duration, Instant};
 
 /// 未超阈值（含恰好等于阈值）时不告警，并清除节流状态。
 #[test]
 fn memory_below_or_at_threshold_resets() {
     let now = Instant::now();
-    assert_eq!(memory_warning_action(0, None, now), MemoryWarning::Reset);
     assert_eq!(
-        memory_warning_action(MEMORY_WARN_THRESHOLD_MB, Some(now), now),
+        super::memory_warning_action(0, None, now),
+        MemoryWarning::Reset
+    );
+    assert_eq!(
+        super::memory_warning_action(MEMORY_WARN_THRESHOLD_MB, Some(now), now),
         MemoryWarning::Reset
     );
 }
@@ -19,7 +26,7 @@ fn memory_below_or_at_threshold_resets() {
 fn memory_above_threshold_emits_on_first_sample() {
     let now = Instant::now();
     assert_eq!(
-        memory_warning_action(MEMORY_WARN_THRESHOLD_MB + 1, None, now),
+        super::memory_warning_action(MEMORY_WARN_THRESHOLD_MB + 1, None, now),
         MemoryWarning::Emit
     );
 }
@@ -30,12 +37,12 @@ fn memory_above_threshold_throttles_until_repeat_interval() {
     let now = Instant::now();
     let within_interval = now - (MEMORY_WARN_REPEAT_INTERVAL - Duration::from_secs(1));
     assert_eq!(
-        memory_warning_action(MEMORY_WARN_THRESHOLD_MB + 1, Some(within_interval), now),
+        super::memory_warning_action(MEMORY_WARN_THRESHOLD_MB + 1, Some(within_interval), now),
         MemoryWarning::Throttled
     );
     let at_interval = now - MEMORY_WARN_REPEAT_INTERVAL;
     assert_eq!(
-        memory_warning_action(MEMORY_WARN_THRESHOLD_MB + 1, Some(at_interval), now),
+        super::memory_warning_action(MEMORY_WARN_THRESHOLD_MB + 1, Some(at_interval), now),
         MemoryWarning::Emit
     );
 }

@@ -49,10 +49,12 @@
 pub struct TrustedCallerId(String);
 
 impl TrustedCallerId {
+    #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -100,6 +102,7 @@ pub struct SessionEntitlementRequest {
 }
 
 impl SessionEntitlementRequest {
+    #[must_use]
     pub fn new(
         session_id: impl Into<String>,
         caller: impl Into<TrustedCallerId>,
@@ -126,6 +129,7 @@ pub struct SessionGrant {
 
 impl SessionGrant {
     /// 由可信身份层铸造（仅实现 `SessionAuthorizationPort` 的部署侧调用）。
+    #[must_use]
     pub fn new(
         session_id: impl Into<String>,
         caller: impl Into<TrustedCallerId>,
@@ -138,19 +142,23 @@ impl SessionGrant {
         }
     }
 
+    #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
 
+    #[must_use]
     pub fn caller(&self) -> &TrustedCallerId {
         &self.caller
     }
 
+    #[must_use]
     pub fn capability(&self) -> SessionCapability {
         self.capability
     }
 
     /// 该 grant 是否恰好覆盖本次请求（三元组全等）。
+    #[must_use]
     pub fn covers(&self, request: &SessionEntitlementRequest) -> bool {
         self.session_id == request.session_id
             && self.caller == request.caller

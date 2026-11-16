@@ -1,6 +1,6 @@
-use super::SubagentStatus;
 use crate::langfuse::config::LangfuseConfig;
 use crate::langfuse::fake_session::FakeLangfuseSession;
+use crate::langfuse::tracer::registry::types::SubagentStatus;
 use crate::langfuse::tracer::LangfuseTracer;
 use langfuse_client::types::ObservationType;
 use langfuse_client::IngestionEvent;
@@ -121,7 +121,7 @@ async fn test_parallel_two_subagents_interleaved() {
 
     let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_5")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     t.on_tool_start("main", "call_a", "Agent", &serde_json::json!({}));
     t.on_tool_start("main", "call_b", "Agent", &serde_json::json!({}));
     t.on_subagent_start("main", "child_a", "explorer-a", false);
@@ -129,10 +129,10 @@ async fn test_parallel_two_subagents_interleaved() {
 
     let a_stage = t
         .on_stage_start_gated("child_a", Stage::Reason, "turn_5")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     let b_stage = t
         .on_stage_start_gated("child_b", Stage::Reason, "turn_5")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     // 确保 stage duration > 0(v2 条件上报)
     std::thread::sleep(std::time::Duration::from_millis(2));
     t.on_llm_start("child_a", 0, &[], &[]);
@@ -161,8 +161,14 @@ async fn test_parallel_two_subagents_interleaved() {
         .iter()
         .find(|(id, _, _)| t.subagent.observation_id_of("child_b").as_deref() == Some(id.as_str()));
     assert!(obs_a.is_some() && obs_b.is_some());
-    let obs_a_id = t.subagent.observation_id_of("child_a").unwrap();
-    let obs_b_id = t.subagent.observation_id_of("child_b").unwrap();
+    let obs_a_id = t
+        .subagent
+        .observation_id_of("child_a")
+        .expect("the observation id of fixture result is required for this assertion");
+    let obs_b_id = t
+        .subagent
+        .observation_id_of("child_b")
+        .expect("the observation id of fixture result is required for this assertion");
     assert_ne!(obs_a_id, obs_b_id);
 
     // create 携带父工具 input + metadata(turn_id/is_synthetic/was_sampled)
@@ -282,8 +288,20 @@ async fn test_parallel_two_subagents_interleaved() {
         }
         None
     });
-    assert_eq!(gen_a.as_ref().unwrap().1, Some(a_stage_id.clone()));
-    assert_eq!(gen_b.as_ref().unwrap().1, Some(b_stage_id.clone()));
+    assert_eq!(
+        gen_a
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion")
+            .1,
+        Some(a_stage_id.clone())
+    );
+    assert_eq!(
+        gen_b
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion")
+            .1,
+        Some(b_stage_id.clone())
+    );
 
     // 工具各自 batch:A 的 Bash 挂 A 的 batch(B 的 Grep 挂 B 的 batch)
     let tool_a = events.iter().find_map(|e| {
@@ -325,7 +343,7 @@ async fn test_start_before_tool_start_interleaved() {
 
     let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_5b")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
 
     // ① Start(child_a) 先于任何父 ToolStart:入 pending,无 AGENT obs
     t.on_subagent_start("main", "child_a", "explorer-a", false);
@@ -360,8 +378,14 @@ async fn test_start_before_tool_start_interleaved() {
     let events = session.events_snapshot();
     let creates = agent_obs_creates(&events);
     assert_eq!(creates.len(), 0, "两个 child 的开始记录仅缓存");
-    let obs_a_id = t.subagent.observation_id_of("child_a").unwrap();
-    let obs_b_id = t.subagent.observation_id_of("child_b").unwrap();
+    let obs_a_id = t
+        .subagent
+        .observation_id_of("child_a")
+        .expect("the observation id of fixture result is required for this assertion");
+    let obs_b_id = t
+        .subagent
+        .observation_id_of("child_b")
+        .expect("the observation id of fixture result is required for this assertion");
     assert_ne!(obs_a_id, obs_b_id);
 
     // input 透传:child_a 的 obs input = 所绑 call_b 的工具 input(task=B)
@@ -369,10 +393,10 @@ async fn test_start_before_tool_start_interleaved() {
         .subagent
         .by_agent_id
         .get("child_a")
-        .unwrap()
+        .expect("the fixture must contain child_a")
         .input
         .as_ref()
-        .unwrap();
+        .expect("the as ref fixture result is required for this assertion");
     assert_eq!(
         create_a_input.get("task").and_then(|t| t.as_str()),
         Some("B"),
@@ -382,10 +406,10 @@ async fn test_start_before_tool_start_interleaved() {
     // ⑤ 各自内容事件:parent 指向各自 AGENT obs
     let a_stage = t
         .on_stage_start_gated("child_a", Stage::Reason, "turn_5b")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     let b_stage = t
         .on_stage_start_gated("child_b", Stage::Reason, "turn_5b")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     // 确保 stage duration > 0(v2 条件上报:0ms stage span 不上报)
     std::thread::sleep(std::time::Duration::from_millis(2));
     t.on_llm_start("child_a", 0, &[], &[]);
@@ -449,7 +473,8 @@ async fn test_start_before_tool_start_interleaved() {
             })
             .expect("obs update 应存在")
     };
-    for id in [obs_a_id.as_str(), obs_b_id.as_str()] {
+    let id_items = [obs_a_id.as_str(), obs_b_id.as_str()];
+    for id in id_items {
         assert_eq!(
             update_meta(id).get("incomplete_reason"),
             None,
@@ -502,7 +527,7 @@ async fn test_nested_parent_no_cross_binding() {
 
     let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_5c")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
 
     // ① Start(child_a, parent=main):父 ToolStart 未到,入 pending
     t.on_subagent_start("main", "child_a", "explorer-a", false);
@@ -552,7 +577,7 @@ async fn test_nested_parent_no_cross_binding() {
     // ④ child_a 完整生命周期:obs parent = main 的 stage span,output = Stop result
     let a_stage = t
         .on_stage_start_gated("child_a", Stage::Reason, "turn_5c")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     // 确保 stage duration > 0(v2 条件上报)
     std::thread::sleep(std::time::Duration::from_millis(2));
     t.on_llm_start("child_a", 0, &[], &[]);
@@ -567,7 +592,9 @@ async fn test_nested_parent_no_cross_binding() {
     let (obs_id, end_time, output) = &completions[0];
     assert_eq!(
         obs_id,
-        &t.subagent.observation_id_of("child_a").unwrap(),
+        &t.subagent
+            .observation_id_of("child_a")
+            .expect("the observation id of fixture result is required for this assertion"),
         "关闭的 obs 应为 child_a 的 AGENT obs"
     );
     assert!(end_time.is_some(), "AGENT obs 应正常关闭(end_time 非空)");

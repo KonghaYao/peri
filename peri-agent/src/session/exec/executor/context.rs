@@ -1,15 +1,19 @@
+use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
-use peri_acp_types::{
-    interaction::UserInteractionBroker, messages::MessageContent, session::SessionAccessPort,
-};
+use peri_acp_types::interaction::UserInteractionBroker;
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::session::SessionAccessPort;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use crate::agent::langfuse_bridge::LangfuseBridgeLike;
 use crate::session::exec::stage_builder::CachedLlmInstances;
 use crate::tools::ToolInvocationResolver;
 
-use super::{CommandLookupFn, ContinuationRequest, ForwarderLauncherFn, StageBuildFn};
+use crate::session::exec::executor::ContinuationRequest;
+use crate::session::exec::executor_helpers::CommandLookupFn;
+use crate::session::exec::executor_helpers::ForwarderLauncherFn;
+use crate::session::exec::executor_helpers::StageBuildFn;
 
 /// Session-scoped frozen data that locks system prompt stability.
 ///
@@ -22,7 +26,7 @@ use super::{CommandLookupFn, ContinuationRequest, ForwarderLauncherFn, StageBuil
 /// FrozenSessionData 现在委托给 `crate::session::FrozenContext`
 /// 作为不可变数据存储，同时保留 v1 兼容的 accessor 方法。
 /// 构造时同时产出 `crate::session::FrozenContext` 供 Session::new() 使用。
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FrozenSessionData {
     /// v2 冻结上下文（委托给本 crate session 层）
     v2_frozen: crate::session::FrozenContext,
@@ -36,6 +40,7 @@ impl FrozenSessionData {
     /// prompt 模板 / CLAUDE.md 解析 / skills 摘要扫描留在 ACP——§0 渲染是
     /// ACP 协议面职责；本构造器是类型迁入后的装配入口，供
     /// `SessionManager::build_frozen_data` 与 print mode 调用）。
+    #[must_use]
     pub fn from_frozen_parts(
         v2_frozen: crate::session::FrozenContext,
         claude_local_md: Option<Arc<str>>,
@@ -47,11 +52,13 @@ impl FrozenSessionData {
     }
 
     /// v2 冻结上下文引用（供 Session::new() 使用）
+    #[must_use]
     pub fn v2_frozen(&self) -> &crate::session::FrozenContext {
         &self.v2_frozen
     }
 
     /// 会话内冻结的完整 system prompt 字符串。
+    #[must_use]
     pub fn system_prompt(&self) -> &str {
         &self.v2_frozen.system_prompt
     }
@@ -83,6 +90,7 @@ impl FrozenSessionData {
     }
 
     /// 会话创建日期（YYYY-MM-DD 格式）。
+    #[must_use]
     pub fn date(&self) -> &str {
         &self.v2_frozen.date
     }
@@ -96,6 +104,7 @@ impl FrozenSessionData {
     ///
     /// 单一事实源为 `v2_frozen.meta_harness`——本 accessor 委托存储，不维护
     /// 第二份副本（设计 §2.3；防止双事实源漂移）。
+    #[must_use]
     pub fn meta_harness(&self) -> &peri_acp_types::meta_harness::MetaHarnessState {
         &self.v2_frozen.meta_harness
     }
@@ -124,7 +133,7 @@ pub type AutoClassifierFactory =
     Arc<dyn Fn() -> Arc<tokio::sync::Mutex<Box<dyn peri_model::Model>>> + Send + Sync>;
 /// 子 agent 模型工厂（支持 SubAgent LLM 缓存复用；stage 装配注入面）。
 ///
-/// H1：只产出模型来源（[`SubagentLlmSource`]），不封装 `AgentModelBridge`——
+/// H1：只产出模型来源（[`SubagentLlmSource`](crate::session::subagent::SubagentLlmSource)），不封装 `AgentModelBridge`——
 /// bridge 由有子链可用的一方（Agent 层 session factory）在子链装配点统一装
 /// with_system 身份与请求时 contribution provider。
 pub type SubagentLlmFactory =
@@ -151,7 +160,7 @@ pub struct LangfuseHooks {
 
 /// Session-scoped context shared across all executor pipeline functions.
 ///
-/// Replaces [`PromptExecutionContext`].
+/// Replaces `PromptExecutionContext`.
 /// Fields grouped by subsystem for clarity.
 ///
 /// L5：`Clone` 派生供 stage 装配注入闭包捕获；ACP 特有构造
@@ -177,7 +186,7 @@ pub struct SessionContext {
     /// production stage/render/subagent 必须从 `FrozenSessionData` 派生语言。
     pub language: Option<String>,
     /// Compact 配置（`load_compact_config` 语义：unwrap_or_default + env
-    /// overrides 每轮在宿主构造点应用——[TRAP] env 每轮重读，非 frozen）。
+    /// overrides 每轮在宿主构造点应用——\[TRAP\] env 每轮重读，非 frozen）。
     pub compact_config: peri_acp_types::compact::CompactConfig,
     /// 主 LLM 缓存读取（AgentPool has_valid_cache + get_cached_llm 语义）。
     pub get_cached_llm: Option<Arc<dyn Fn() -> Option<CachedLlmInstances> + Send + Sync>>,
@@ -273,7 +282,7 @@ pub struct SessionContext {
     pub frozen_fallback_builder: Option<FrozenFallbackBuilder>,
 }
 
-/// Per-turn data passed alongside [`SessionContext`] to [`run_session_loop`].
+/// Per-turn data passed alongside [`SessionContext`] to [`run_session_loop`](crate::session::exec::executor::run_session_loop).
 ///
 /// Separated from session-level fields to clarify lifecycle: these values are
 /// specific to a single prompt invocation and are not reused across turns.
@@ -312,4 +321,97 @@ pub struct TurnInput {
     /// EventBus forwarder 启动器（ACP 宿主持有 Langfuse bridge 构造；
     /// 参数 = event_handles / 主 agent_id / 事件消费闭包）。
     pub forwarder_launcher: ForwarderLauncherFn,
+}
+
+impl Debug for LangfuseHooks {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LangfuseHooks")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Debug for SessionContext {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionContext")
+            .field("cwd", &self.cwd)
+            .field("provider_name", &self.provider_name)
+            .field("provider_model_name", &self.provider_model_name)
+            .field("provider_fp", &self.provider_fp)
+            .field("effective_context_window", &self.effective_context_window)
+            .field("language_present", &self.language.is_some())
+            .field("get_cached_llm_present", &self.get_cached_llm.is_some())
+            .field(
+                "fresh_auxiliary_model_present",
+                &self.fresh_auxiliary_model.is_some(),
+            )
+            .field("store_llm_present", &self.store_llm.is_some())
+            .field("retry_events_present", &self.retry_events.is_some())
+            .field(
+                "primary_llm_factory_present",
+                &self.primary_llm_factory.is_some(),
+            )
+            .field(
+                "auto_classifier_factory_present",
+                &self.auto_classifier_factory.is_some(),
+            )
+            .field(
+                "subagent_llm_factory_present",
+                &self.subagent_llm_factory.is_some(),
+            )
+            .field("session_id", &self.session_id)
+            .field(
+                "user_input_mailbox_present",
+                &self.user_input_mailbox.is_some(),
+            )
+            .field(
+                "async_result_mailbox_present",
+                &self.async_result_mailbox.is_some(),
+            )
+            .field("session_access_present", &self.session_access.is_some())
+            .field(
+                "session_resources_present",
+                &self.session_resources.is_some(),
+            )
+            .field("thread_id_present", &self.thread_id.is_some())
+            .field("plugin_skill_roots_len", &self.plugin_skill_roots.len())
+            .field("plugin_loaded_len", &self.plugin_loaded.len())
+            .field("hook_groups_len", &self.hook_groups.len())
+            .field("cron_scheduler_present", &self.cron_scheduler.is_some())
+            .field("mcp_pool_present", &self.mcp_pool.is_some())
+            .field(
+                "session_mcp_catalog_present",
+                &self.session_mcp_catalog.is_some(),
+            )
+            .field(
+                "session_start_source_present",
+                &self.session_start_source.is_some(),
+            )
+            .field("request_id_present", &self.request_id.is_some())
+            .field("allow_await_wake", &self.allow_await_wake)
+            .field(
+                "continuation_notify_present",
+                &self.continuation_notify.is_some(),
+            )
+            .field(
+                "frozen_fallback_builder_present",
+                &self.frozen_fallback_builder.is_some(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl Debug for TurnInput {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TurnInput")
+            .field("continuation", &self.continuation)
+            .field("frozen_present", &self.frozen.is_some())
+            .field("history_payloads_len", &self.history_payloads.len())
+            .field("incoming_recalls_len", &self.incoming_recalls.len())
+            .field("bg_results_len", &self.bg_results.len())
+            .field("langfuse_present", &self.langfuse.is_some())
+            .finish_non_exhaustive()
+    }
 }

@@ -1,6 +1,14 @@
 //! S5.4 consumer 状态机与能力门测试。
 
-use super::*;
+use super::WindowClaim;
+use super::WindowClaimRejection;
+use super::WindowConsumerRequest;
+use super::WindowInFlight;
+use super::WindowPagePlacement;
+use super::WindowPagingStatus;
+use super::WindowRequestContext;
+use super::WindowSettlement;
+
 use crate::kit::atoms;
 use crate::kit::history_paging::{
     WindowBodyDescriptor, WindowDirection, WindowPageItem, WindowPageResponse,
@@ -15,7 +23,7 @@ impl Drop for WindowAtomsGuard {
     fn drop(&mut self) {
         atoms::HISTORY_WINDOW_V1.set(false);
         atoms::HISTORY_WINDOW_CAPABLE.set(false);
-        reset_window_paging_state();
+        super::reset_window_paging_state();
     }
 }
 
@@ -24,8 +32,8 @@ fn reset_atoms() -> WindowAtomsGuard {
     atoms::HISTORY_WINDOW_V1.set(true);
     atoms::HISTORY_WINDOW_CAPABLE.set(true);
     atoms::HISTORY_WINDOW_GENERATION.set(1);
-    reset_window_paging_state();
-    note_window_generation(1);
+    super::reset_window_paging_state();
+    super::note_window_generation(1);
     let handle = atoms::HISTORY_WINDOW_PAGING.state();
     let mut state = handle.write();
     state.session_id = "s1".into();
@@ -65,7 +73,7 @@ fn page_response(snapshot: &str, items: usize) -> WindowPageResponse {
 }
 
 fn page_request() -> WindowConsumerRequest {
-    build_window_page_request(
+    super::build_window_page_request(
         crate::kit::history_paging::WindowPageCursor::Before("before-1".into()),
         20,
     )
@@ -87,17 +95,17 @@ fn newer_page_trigger_stops_at_durable_end_without_repeating_empty_pages() {
     assert!(!request_window_newer_page_if_due());
 
     let _guard2 = reset_atoms();
-    let request = build_window_page_request(
+    let request = super::build_window_page_request(
         crate::kit::history_paging::WindowPageCursor::After("after-1".into()),
         20,
     )
     .expect("after request");
-    let in_flight = match claim_window_request(&request) {
+    let in_flight = match super::claim_window_request(&request) {
         WindowClaim::Granted(in_flight) => in_flight,
         other => panic!("expected grant, got {other:?}"),
     };
     assert_eq!(
-        settle_window_response(&in_flight, &page_response("snap-1", 0)),
+        super::settle_window_response(&in_flight, &page_response("snap-1", 0)),
         WindowSettlement::AcceptedEmpty
     );
     assert!(atoms::HISTORY_WINDOW_PAGING.state().read().newer_exhausted);
@@ -107,7 +115,7 @@ fn newer_page_trigger_stops_at_durable_end_without_repeating_empty_pages() {
 #[serial]
 fn bidirectional_page_requests_keep_placement_and_cursors() {
     let _guard = reset_atoms();
-    let before = build_window_page_request(
+    let before = super::build_window_page_request(
         crate::kit::history_paging::WindowPageCursor::Before("before-1".into()),
         20,
     )
@@ -124,7 +132,7 @@ fn bidirectional_page_requests_keep_placement_and_cursors() {
         }
         other => panic!("expected before page, got {other:?}"),
     }
-    let after = build_window_page_request(
+    let after = super::build_window_page_request(
         crate::kit::history_paging::WindowPageCursor::After("after-1".into()),
         20,
     )
@@ -150,12 +158,12 @@ fn window_path_requires_both_switch_and_connection_capability() {
     crate::kit::atoms::init_atoms();
     atoms::HISTORY_WINDOW_V1.set(false);
     atoms::HISTORY_WINDOW_CAPABLE.set(true);
-    assert!(!window_path_enabled());
+    assert!(!super::window_path_enabled());
     atoms::HISTORY_WINDOW_V1.set(true);
     atoms::HISTORY_WINDOW_CAPABLE.set(false);
-    assert!(!window_path_enabled());
+    assert!(!super::window_path_enabled());
     atoms::HISTORY_WINDOW_CAPABLE.set(true);
-    assert!(window_path_enabled());
+    assert!(super::window_path_enabled());
 }
 
 #[test]
@@ -164,21 +172,21 @@ fn one_in_flight_and_one_pending_merge_are_enforced() {
     let _guard = reset_atoms();
     let first = page_request();
     assert!(matches!(
-        claim_window_request(&first),
+        super::claim_window_request(&first),
         WindowClaim::Granted(_)
     ));
-    assert_eq!(claim_window_request(&first), WindowClaim::Merged);
-    let second = build_window_page_request(
+    assert_eq!(super::claim_window_request(&first), WindowClaim::Merged);
+    let second = super::build_window_page_request(
         crate::kit::history_paging::WindowPageCursor::After("after-1".into()),
         20,
     )
     .expect("second page");
     assert_eq!(
-        claim_window_request(&second),
+        super::claim_window_request(&second),
         WindowClaim::Rejected(WindowClaimRejection::InFlight)
     );
 
-    let in_flight = match claim_window_request(&first) {
+    let in_flight = match super::claim_window_request(&first) {
         WindowClaim::Merged => atoms::HISTORY_WINDOW_PAGING
             .state()
             .read()
@@ -196,7 +204,7 @@ fn one_in_flight_and_one_pending_merge_are_enforced() {
         in_flight.context.request_id
     );
     assert!(matches!(
-        settle_window_response(&in_flight, &page_response("snap-1", 1)),
+        super::settle_window_response(&in_flight, &page_response("snap-1", 1)),
         WindowSettlement::Accepted(_)
     ));
     assert!(
@@ -206,14 +214,14 @@ fn one_in_flight_and_one_pending_merge_are_enforced() {
             .pending_merge
             .is_some()
     );
-    let third = build_window_seek_request(
+    let third = super::build_window_seek_request(
         crate::kit::history_window::PersistentEntryKey::own("s1:m1"),
         10,
         10,
     )
     .expect("seek request");
     assert_eq!(
-        claim_window_request(&third),
+        super::claim_window_request(&third),
         WindowClaim::Rejected(WindowClaimRejection::PendingMerge)
     );
     let request_id = atoms::HISTORY_WINDOW_PAGING
@@ -221,11 +229,11 @@ fn one_in_flight_and_one_pending_merge_are_enforced() {
         .read()
         .pending_merge
         .as_ref()
-        .unwrap()
+        .expect("one in flight and one pending merge are enforced: isolated fixture workspace must remain accessible")
         .context
         .request_id
         .clone();
-    assert!(finish_window_merge(&request_id) > 0);
+    assert!(super::finish_window_merge(&request_id) > 0);
     let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
     assert_eq!(state.reserved_bytes, 0);
     assert!(state.pending_merge.is_none());
@@ -236,12 +244,12 @@ fn one_in_flight_and_one_pending_merge_are_enforced() {
 fn stale_or_late_response_is_dropped_and_reservation_released() {
     let _guard = reset_atoms();
     let request = page_request();
-    let in_flight = match claim_window_request(&request) {
+    let in_flight = match super::claim_window_request(&request) {
         WindowClaim::Granted(in_flight) => in_flight,
         other => panic!("expected grant, got {other:?}"),
     };
     assert_eq!(
-        settle_window_response(&in_flight, &page_response("snap-other", 1)),
+        super::settle_window_response(&in_flight, &page_response("snap-other", 1)),
         WindowSettlement::Stale
     );
     let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
@@ -249,9 +257,9 @@ fn stale_or_late_response_is_dropped_and_reservation_released() {
     assert_eq!(state.reserved_bytes, 0);
 
     // 会话边界清空后，旧页连在途身份都不存在。
-    reset_window_paging_state();
+    super::reset_window_paging_state();
     assert_eq!(
-        settle_window_response(&in_flight, &page_response("snap-1", 1)),
+        super::settle_window_response(&in_flight, &page_response("snap-1", 1)),
         WindowSettlement::Unmatched
     );
 }
@@ -260,28 +268,31 @@ fn stale_or_late_response_is_dropped_and_reservation_released() {
 #[serial]
 fn stale_response_from_another_session_never_restores_window_state() {
     let _guard = reset_atoms();
-    let old_request = build_window_open_request(WindowDirection::Before);
-    let old_in_flight = match claim_window_request(&old_request) {
+    let old_request = super::build_window_open_request(WindowDirection::Before);
+    let old_in_flight = match super::claim_window_request(&old_request) {
         WindowClaim::Granted(in_flight) => in_flight,
         other => panic!("expected old open grant, got {other:?}"),
     };
     // 会话边界同步清空后，新会话的 open 使用新的请求序号。
-    reset_window_paging_state();
+    super::reset_window_paging_state();
     {
         let handle = atoms::HISTORY_WINDOW_PAGING.state();
         let mut state = handle.write();
         state.session_id = "s2".into();
     }
-    let new_request = build_window_open_request(WindowDirection::Before);
+    let new_request = super::build_window_open_request(WindowDirection::Before);
     assert!(
-        matches!(claim_window_request(&new_request), WindowClaim::Granted(_)),
+        matches!(
+            super::claim_window_request(&new_request),
+            WindowClaim::Granted(_)
+        ),
         "new session open must be in flight"
     );
 
     // 旧会话 s1 的响应迟到：请求序号不再复用，既不匹配新请求，也不得清掉新槽位。
     let stale = page_response("snap-old", 1);
     assert_eq!(
-        settle_window_response(&old_in_flight, &stale),
+        super::settle_window_response(&old_in_flight, &stale),
         WindowSettlement::Unmatched
     );
     let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
@@ -299,12 +310,12 @@ fn stale_response_from_another_session_never_restores_window_state() {
 fn empty_page_releases_reservation_without_pending_merge() {
     let _guard = reset_atoms();
     let request = page_request();
-    let in_flight = match claim_window_request(&request) {
+    let in_flight = match super::claim_window_request(&request) {
         WindowClaim::Granted(in_flight) => in_flight,
         other => panic!("expected grant, got {other:?}"),
     };
     assert_eq!(
-        settle_window_response(&in_flight, &page_response("snap-1", 0)),
+        super::settle_window_response(&in_flight, &page_response("snap-1", 0)),
         WindowSettlement::AcceptedEmpty
     );
     let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
@@ -317,14 +328,14 @@ fn empty_page_releases_reservation_without_pending_merge() {
 fn reopen_required_enters_degraded_and_retry_uses_open_not_full_load() {
     let _guard = reset_atoms();
     let request = page_request();
-    let in_flight = match claim_window_request(&request) {
+    let in_flight = match super::claim_window_request(&request) {
         WindowClaim::Granted(in_flight) => in_flight,
         other => panic!("expected grant, got {other:?}"),
     };
     let mut response = page_response("snap-1", 1);
     response.reopen_required = true;
     assert_eq!(
-        settle_window_response(&in_flight, &response),
+        super::settle_window_response(&in_flight, &response),
         WindowSettlement::ReopenRequired
     );
     {
@@ -340,12 +351,12 @@ fn reopen_required_enters_degraded_and_retry_uses_open_not_full_load() {
     let retry = retry_window_open_if_due(Instant::now()).expect("retry request");
     assert!(matches!(retry, WindowConsumerRequest::Open { .. }));
     assert_eq!(retry.session_id(), "s1");
-    let in_flight = match claim_window_request(&retry) {
+    let in_flight = match super::claim_window_request(&retry) {
         WindowClaim::Granted(in_flight) => in_flight,
         other => panic!("degraded open retry must be claimable, got {other:?}"),
     };
     assert!(matches!(
-        settle_window_response(&in_flight, &page_response("snap-reopen", 1)),
+        super::settle_window_response(&in_flight, &page_response("snap-reopen", 1)),
         WindowSettlement::Accepted(_)
     ));
     assert!(!atoms::HISTORY_WINDOW_PAGING.state().read().is_degraded());
@@ -356,11 +367,11 @@ fn reopen_required_enters_degraded_and_retry_uses_open_not_full_load() {
 fn invalidating_failure_degrades_and_non_invalidating_failure_keeps_window() {
     let _guard = reset_atoms();
     let first = page_request();
-    let in_flight = match claim_window_request(&first) {
+    let in_flight = match super::claim_window_request(&first) {
         WindowClaim::Granted(in_flight) => in_flight,
         other => panic!("expected grant, got {other:?}"),
     };
-    fail_window_request(&in_flight.context.request_id, "bad cursor", true);
+    super::fail_window_request(&in_flight.context.request_id, "bad cursor", true);
     assert!(atoms::HISTORY_WINDOW_PAGING.state().read().is_degraded());
     assert_eq!(
         atoms::HISTORY_WINDOW_PAGING.state().read().reserved_bytes,
@@ -369,11 +380,11 @@ fn invalidating_failure_degrades_and_non_invalidating_failure_keeps_window() {
 
     let _guard = reset_atoms();
     let second = page_request();
-    let in_flight = match claim_window_request(&second) {
+    let in_flight = match super::claim_window_request(&second) {
         WindowClaim::Granted(in_flight) => in_flight,
         other => panic!("expected grant, got {other:?}"),
     };
-    fail_window_request(&in_flight.context.request_id, "timeout", false);
+    super::fail_window_request(&in_flight.context.request_id, "timeout", false);
     let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
     assert!(!state.is_degraded());
     assert_eq!(state.last_error.as_deref(), Some("timeout"));
@@ -409,9 +420,9 @@ fn gap_request_uses_stable_identity_seek_and_keeps_window_open() {
                 .expect("segment"),
         );
     }
-    let b_entry = window.segment(keys[1]).unwrap().entries[0].key.clone();
+    let b_entry = window.segment(keys[1]).expect("gap request uses stable identity seek and keeps window open: the segment fixture operation uses valid inputs").entries[0].key.clone();
     let (before, after) = window.neighbor_entries(keys[1]);
-    let segment = window.segment(keys[1]).unwrap().clone();
+    let segment = window.segment(keys[1]).expect("gap request uses stable identity seek and keeps window open: the segment fixture operation uses valid inputs").clone();
     let plan = ReleasePlan {
         segment: keys[1],
         source: segment.source.clone(),
@@ -450,12 +461,12 @@ fn gap_request_uses_stable_identity_seek_and_keeps_window_open() {
 fn page_settlement_only_advances_the_requested_window_cursor() {
     {
         let _guard = reset_atoms();
-        let request = build_window_page_request(
+        let request = super::build_window_page_request(
             crate::kit::history_paging::WindowPageCursor::Before("before-1".into()),
             20,
         )
         .expect("before page");
-        let in_flight = match claim_window_request(&request) {
+        let in_flight = match super::claim_window_request(&request) {
             WindowClaim::Granted(in_flight) => in_flight,
             other => panic!("expected grant, got {other:?}"),
         };
@@ -463,7 +474,7 @@ fn page_settlement_only_advances_the_requested_window_cursor() {
         response.before_cursor = Some("before-2".into());
         response.after_cursor = Some("after-2".into());
         assert!(matches!(
-            settle_window_response(&in_flight, &response),
+            super::settle_window_response(&in_flight, &response),
             WindowSettlement::Accepted(_)
         ));
         let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
@@ -477,12 +488,12 @@ fn page_settlement_only_advances_the_requested_window_cursor() {
 
     {
         let _guard = reset_atoms();
-        let request = build_window_page_request(
+        let request = super::build_window_page_request(
             crate::kit::history_paging::WindowPageCursor::After("after-1".into()),
             20,
         )
         .expect("after page");
-        let in_flight = match claim_window_request(&request) {
+        let in_flight = match super::claim_window_request(&request) {
             WindowClaim::Granted(in_flight) => in_flight,
             other => panic!("expected grant, got {other:?}"),
         };
@@ -490,7 +501,7 @@ fn page_settlement_only_advances_the_requested_window_cursor() {
         response.before_cursor = Some("before-2".into());
         response.after_cursor = Some("after-2".into());
         assert!(matches!(
-            settle_window_response(&in_flight, &response),
+            super::settle_window_response(&in_flight, &response),
             WindowSettlement::Accepted(_)
         ));
         let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
@@ -508,7 +519,7 @@ fn page_settlement_only_advances_the_requested_window_cursor() {
 fn note_window_cursors_recomputes_both_edges_and_reopens_newer_direction() {
     let _guard = reset_atoms();
     atoms::HISTORY_WINDOW_PAGING.state().write().newer_exhausted = true;
-    note_window_cursors(Some("before-edge".into()), Some("after-edge".into()));
+    super::note_window_cursors(Some("before-edge".into()), Some("after-edge".into()));
     let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
     assert_eq!(state.before_cursor.as_deref(), Some("before-edge"));
     assert_eq!(state.after_cursor.as_deref(), Some("after-edge"));
@@ -608,7 +619,7 @@ fn reservation_budget_rejects_before_request_dispatch() {
         limit: 20,
     };
     assert!(matches!(
-        claim_window_request(&request),
+        super::claim_window_request(&request),
         WindowClaim::Rejected(WindowClaimRejection::ReservationBudget { .. })
     ));
 }
@@ -617,17 +628,17 @@ fn reservation_budget_rejects_before_request_dispatch() {
 #[serial]
 fn open_request_skips_prior_snapshot_validation() {
     let _guard = reset_atoms();
-    let request = build_window_open_request(WindowDirection::Before);
-    let in_flight = match claim_window_request(&request) {
+    let request = super::build_window_open_request(WindowDirection::Before);
+    let in_flight = match super::claim_window_request(&request) {
         WindowClaim::Granted(in_flight) => in_flight,
         other => panic!("expected grant, got {other:?}"),
     };
     assert_eq!(
-        settle_window_response(&in_flight, &page_response("new-snap", 1)),
+        super::settle_window_response(&in_flight, &page_response("new-snap", 1)),
         WindowSettlement::Accepted(Box::new(in_flight))
     );
     let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
-    assert_eq!(state.identity.unwrap().snapshot_token, "new-snap");
+    assert_eq!(state.identity.expect("open request skips prior snapshot validation: the fixture establishes state.identity before this assertion").snapshot_token, "new-snap");
 }
 
 fn session_response(session: &str, snapshot: &str, items: usize) -> WindowPageResponse {
@@ -638,14 +649,14 @@ fn session_response(session: &str, snapshot: &str, items: usize) -> WindowPageRe
 }
 
 fn switch_window_session(session_id: &str) {
-    reset_window_paging_state();
+    super::reset_window_paging_state();
     let handle = atoms::HISTORY_WINDOW_PAGING.state();
     let mut state = handle.write();
     state.session_id = session_id.to_string();
 }
 
 fn granted(request: &WindowConsumerRequest) -> WindowInFlight {
-    match claim_window_request(request) {
+    match super::claim_window_request(request) {
         WindowClaim::Granted(in_flight) => in_flight,
         other => panic!("expected grant, got {other:?}"),
     }
@@ -665,11 +676,11 @@ fn queued_open_from_previous_window_is_rejected_after_session_switch() {
     let _guard = reset_atoms();
     let handle = atoms::HISTORY_WINDOW_PAGING.state();
     handle.write().session_id = "s2".into();
-    let stale_open = build_window_open_request(WindowDirection::Before);
+    let stale_open = super::build_window_open_request(WindowDirection::Before);
     switch_window_session("s3");
 
     assert_eq!(
-        claim_window_request(&stale_open),
+        super::claim_window_request(&stale_open),
         WindowClaim::Rejected(WindowClaimRejection::SessionMismatch {
             requested: "s2".into(),
             current: "s3".into(),
@@ -686,21 +697,21 @@ fn queued_open_from_previous_window_is_rejected_after_session_switch() {
 #[serial]
 fn late_open_response_from_previous_window_never_merges_into_current_window() {
     let _guard = reset_atoms();
-    let in_flight_a = granted(&build_window_open_request(WindowDirection::Before));
+    let in_flight_a = granted(&super::build_window_open_request(WindowDirection::Before));
 
     switch_window_session("s2");
-    let in_flight_b = granted(&build_window_open_request(WindowDirection::Before));
+    let in_flight_b = granted(&super::build_window_open_request(WindowDirection::Before));
 
     switch_window_session("s3");
-    let in_flight_c = granted(&build_window_open_request(WindowDirection::Before));
+    let in_flight_c = granted(&super::build_window_open_request(WindowDirection::Before));
 
     // A 与 B 的响应都在会话切走后到达；两者都不能命中 C 的在途槽位。
     assert_eq!(
-        settle_window_response(&in_flight_a, &session_response("s1", "snap-a", 1)),
+        super::settle_window_response(&in_flight_a, &session_response("s1", "snap-a", 1)),
         WindowSettlement::Unmatched
     );
     assert_eq!(
-        settle_window_response(&in_flight_b, &session_response("s2", "snap-b", 1)),
+        super::settle_window_response(&in_flight_b, &session_response("s2", "snap-b", 1)),
         WindowSettlement::Unmatched
     );
     let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
@@ -718,7 +729,7 @@ fn late_open_response_from_previous_window_never_merges_into_current_window() {
 
     // C 自己的响应仍正常结算，并成为唯一的 pending_merge。
     assert!(matches!(
-        settle_window_response(&in_flight_c, &session_response("s3", "snap-c", 1)),
+        super::settle_window_response(&in_flight_c, &session_response("s3", "snap-c", 1)),
         WindowSettlement::Accepted(_)
     ));
     let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
@@ -729,7 +740,7 @@ fn late_open_response_from_previous_window_never_merges_into_current_window() {
             .map(|pending| pending.context.session_id.as_str()),
         Some("s3")
     );
-    assert_eq!(state.identity.unwrap().snapshot_token, "snap-c");
+    assert_eq!(state.identity.expect("late open response from previous window never merges into current window: the fixture establishes state.identity before this assertion").snapshot_token, "snap-c");
 }
 
 /// 当前窗口身份是结算权威：在途槽位若残留旧窗口上下文（防线性场景），
@@ -738,7 +749,7 @@ fn late_open_response_from_previous_window_never_merges_into_current_window() {
 #[serial]
 fn settle_treats_in_flight_from_another_window_as_stale() {
     let _guard = reset_atoms();
-    let in_flight = granted(&build_window_open_request(WindowDirection::Before));
+    let in_flight = granted(&super::build_window_open_request(WindowDirection::Before));
     {
         let handle = atoms::HISTORY_WINDOW_PAGING.state();
         let mut state = handle.write();
@@ -747,7 +758,7 @@ fn settle_treats_in_flight_from_another_window_as_stale() {
     }
 
     assert_eq!(
-        settle_window_response(&in_flight, &session_response("s1", "snap-old", 1)),
+        super::settle_window_response(&in_flight, &session_response("s1", "snap-old", 1)),
         WindowSettlement::Stale
     );
     let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
@@ -763,17 +774,17 @@ fn settle_treats_in_flight_from_another_window_as_stale() {
 #[serial]
 fn seek_settlement_uses_current_window_generation() {
     let _guard = reset_atoms();
-    let seek = build_window_seek_request(
+    let seek = super::build_window_seek_request(
         crate::kit::history_window::PersistentEntryKey::own("s1:m1"),
         10,
         10,
     )
     .expect("seek request");
     let in_flight = granted(&seek);
-    note_window_generation(in_flight.context.window_generation + 1);
+    super::note_window_generation(in_flight.context.window_generation + 1);
 
     assert_eq!(
-        settle_window_response(&in_flight, &session_response("s1", "snap-1", 1)),
+        super::settle_window_response(&in_flight, &session_response("s1", "snap-1", 1)),
         WindowSettlement::Stale
     );
     let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
@@ -787,9 +798,9 @@ fn seek_settlement_uses_current_window_generation() {
 #[serial]
 fn request_ids_are_not_reused_across_session_resets() {
     let _guard = reset_atoms();
-    let first = build_window_open_request(WindowDirection::Before);
+    let first = super::build_window_open_request(WindowDirection::Before);
     switch_window_session("s2");
-    let second = build_window_open_request(WindowDirection::Before);
+    let second = super::build_window_open_request(WindowDirection::Before);
     assert_ne!(open_request_id(&first), open_request_id(&second));
 }
 
@@ -800,7 +811,7 @@ fn failure_for_unknown_request_does_not_touch_current_window() {
     let _guard = reset_atoms();
     let request = page_request();
     let in_flight = granted(&request);
-    fail_window_request("window-retired", "late timeout", true);
+    super::fail_window_request("window-retired", "late timeout", true);
 
     let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
     assert!(!state.is_degraded());
@@ -815,7 +826,7 @@ fn failure_for_unknown_request_does_not_touch_current_window() {
     assert_eq!(state.reserved_bytes, in_flight.reservation.bytes);
 
     // 命中当前请求的失效错误仍应进入 Degraded。
-    fail_window_request(&in_flight.context.request_id, "bad cursor", true);
+    super::fail_window_request(&in_flight.context.request_id, "bad cursor", true);
     assert!(atoms::HISTORY_WINDOW_PAGING.state().read().is_degraded());
 }
 
@@ -824,18 +835,22 @@ fn failure_for_unknown_request_does_not_touch_current_window() {
 #[serial]
 fn abandoned_page_request_releases_pending_merge_reservation() {
     let _guard = reset_atoms();
-    let in_flight = granted(&build_window_open_request(WindowDirection::Before));
+    let in_flight = granted(&super::build_window_open_request(WindowDirection::Before));
     assert!(matches!(
-        settle_window_response(&in_flight, &session_response("s1", "snap-1", 1)),
+        super::settle_window_response(&in_flight, &session_response("s1", "snap-1", 1)),
         WindowSettlement::Accepted(_)
     ));
     let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
     assert!(state.pending_merge.is_some());
     assert!(state.reserved_bytes > 0);
 
-    assert!(abandon_window_request(&in_flight.context.request_id) > 0);
+    assert!(super::abandon_window_request(&in_flight.context.request_id) > 0);
     let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
     assert!(state.pending_merge.is_none());
     assert!(state.in_flight.is_none());
     assert_eq!(state.reserved_bytes, 0);
 }
+
+use super::window::{
+    build_window_gap_request, request_window_newer_page_if_due, retry_window_open_if_due,
+};

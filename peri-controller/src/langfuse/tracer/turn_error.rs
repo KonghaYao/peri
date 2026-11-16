@@ -1,7 +1,7 @@
 //! Turn 错误的稳定分类与完整诊断观测。
 
-use super::event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
-use super::LangfuseTracer;
+use crate::langfuse::tracer::event_builder::VERSION;
+use crate::langfuse::tracer::LangfuseTracer;
 use langfuse_client::types::{EventBody, ObservationLevel, TraceBody};
 use langfuse_client::{IngestionEvent, ObservationBody, ObservationType};
 use peri_acp_types::session::{ExecutionFailure, ExecutionFailureKind};
@@ -40,21 +40,21 @@ impl LangfuseTracer {
                 })),
                 tags: None,
                 environment: None,
-                timestamp: Some(now_rfc3339()),
+                timestamp: Some(crate::langfuse::tracer::event_builder::now_rfc3339()),
             };
             let trace_event = IngestionEvent::TraceCreate {
-                id: new_uuid(),
-                timestamp: now_rfc3339(),
+                id: crate::langfuse::tracer::event_builder::new_uuid(),
+                timestamp: crate::langfuse::tracer::event_builder::now_rfc3339(),
                 body: trace_body,
                 metadata: None,
             };
-            try_add_or_warn_via_session(
+            crate::langfuse::tracer::event_builder::try_add_or_warn_via_session(
                 &*self.session,
                 trace_event,
                 &turn_id,
                 "ErrorTurn synthetic TraceCreate",
             );
-            let parent_time = now_rfc3339();
+            let parent_time = crate::langfuse::tracer::event_builder::now_rfc3339();
             let parent_body = ObservationBody {
                 id: Some(self.agent_observation_id.clone()),
                 trace_id: Some(turn_id.clone()),
@@ -68,10 +68,10 @@ impl LangfuseTracer {
                 version: Some(VERSION.to_string()),
                 ..Default::default()
             };
-            try_add_or_warn_via_session(
+            crate::langfuse::tracer::event_builder::try_add_or_warn_via_session(
                 &*self.session,
                 IngestionEvent::ObservationCreate {
-                    id: new_uuid(),
+                    id: crate::langfuse::tracer::event_builder::new_uuid(),
                     timestamp: parent_time,
                     body: parent_body,
                     metadata: None,
@@ -82,12 +82,12 @@ impl LangfuseTracer {
         }
 
         // Emit ErrorTurn Event(时点标记,非 span)
-        let error_span_id = new_uuid();
+        let error_span_id = crate::langfuse::tracer::event_builder::new_uuid();
         let event_body = EventBody {
             id: Some(error_span_id.clone()),
             trace_id: Some(turn_id.clone()),
             name: Some("ErrorTurn".to_string()),
-            start_time: Some(now_rfc3339()),
+            start_time: Some(crate::langfuse::tracer::event_builder::now_rfc3339()),
             input: None,
             output: Some(error_out),
             metadata: Some(serde_json::json!({
@@ -104,12 +104,12 @@ impl LangfuseTracer {
             parent_observation_id: Some(self.agent_observation_id.clone()),
         };
         let event_event = IngestionEvent::EventCreate {
-            id: new_uuid(),
-            timestamp: now_rfc3339(),
+            id: crate::langfuse::tracer::event_builder::new_uuid(),
+            timestamp: crate::langfuse::tracer::event_builder::now_rfc3339(),
             body: event_body,
             metadata: None,
         };
-        try_add_or_warn_via_session(
+        crate::langfuse::tracer::event_builder::try_add_or_warn_via_session(
             &*self.session,
             event_event,
             &self.trace_id,
@@ -142,7 +142,9 @@ pub(super) fn failure_output(failure: &ExecutionFailure, error_class: &str) -> s
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::langfuse::tracer::turn_error::failure_output;
+    use peri_acp_types::session::ExecutionFailure;
+    use peri_acp_types::session::ExecutionFailureKind;
 
     #[test]
     fn error_output_preserves_non_model_causes() {

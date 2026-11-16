@@ -119,6 +119,7 @@ const ASCII_SYMBOLS: SymbolSet = SymbolSet {
 };
 
 /// 按终端能力选择符号集：unicode 不可用时降级 ASCII（§4.1 降级表）。
+#[must_use]
 pub fn symbols(caps: &TerminalCaps) -> SymbolSet {
     if caps.unicode {
         UNICODE_SYMBOLS

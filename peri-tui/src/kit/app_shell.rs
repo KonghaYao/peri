@@ -15,10 +15,9 @@ use crate::kit::popup_overlay::PopupOverlay;
 use crate::kit::setup_wizard::SetupWizard;
 use crate::kit::status_bar::StatusBar;
 use peri_theme::atoms::PALETTE_ATOM;
-use ratatui_kit::{
-    prelude::*,
-    ratatui::layout::{Constraint, Direction},
-};
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Constraint;
+use ratatui_kit::ratatui::layout::Direction;
 use tracing::info;
 
 #[component]

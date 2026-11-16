@@ -169,46 +169,49 @@ pub(crate) fn split(
         deferred: None,
     };
     let mut current: Option<BatchWindow> = None;
-    for (index, item) in prepared.iter().enumerate() {
-        let measure = match item {
-            PreparedEvent::Waiting => {
-                close(&mut current, &mut plan);
-                plan.deferred = Some(index);
-                break;
-            }
-            PreparedEvent::Oversized { measure, reason } => {
+    {
+        let indexed_prepared = prepared.iter().enumerate();
+        for (index, item) in indexed_prepared {
+            let measure = match item {
+                PreparedEvent::Waiting => {
+                    close(&mut current, &mut plan);
+                    plan.deferred = Some(index);
+                    break;
+                }
+                PreparedEvent::Oversized { measure, reason } => {
+                    close(&mut current, &mut plan);
+                    plan.rejected.push(RejectedEvent {
+                        index,
+                        measure: *measure,
+                        reason: *reason,
+                    });
+                    continue;
+                }
+                PreparedEvent::Measured(measure) => *measure,
+            };
+            // 调用方可能用不同限额分类；单条即无法成批时精确拒收，而不是产出超限批次。
+            if let Some(reason) = oversize_reason(&measure, limits) {
                 close(&mut current, &mut plan);
                 plan.rejected.push(RejectedEvent {
                     index,
-                    measure: *measure,
-                    reason: *reason,
+                    measure,
+                    reason,
                 });
                 continue;
             }
-            PreparedEvent::Measured(measure) => *measure,
-        };
-        // 调用方可能用不同限额分类；单条即无法成批时精确拒收，而不是产出超限批次。
-        if let Some(reason) = oversize_reason(&measure, limits) {
-            close(&mut current, &mut plan);
-            plan.rejected.push(RejectedEvent {
-                index,
-                measure,
-                reason,
-            });
-            continue;
-        }
-        if let Some(batch) = current.as_mut() {
-            if fits(batch, &measure, limits) {
-                extend(batch, index, &measure);
-                continue;
+            if let Some(batch) = current.as_mut() {
+                if fits(batch, &measure, limits) {
+                    extend(batch, index, &measure);
+                    continue;
+                }
             }
+            close(&mut current, &mut plan);
+            current = Some(BatchWindow {
+                range: index..index + 1,
+                raw_bytes: measure.raw_bytes,
+                encoded_bytes: measure.encoded_bytes,
+            });
         }
-        close(&mut current, &mut plan);
-        current = Some(BatchWindow {
-            range: index..index + 1,
-            raw_bytes: measure.raw_bytes,
-            encoded_bytes: measure.encoded_bytes,
-        });
     }
     close(&mut current, &mut plan);
     Ok(plan)

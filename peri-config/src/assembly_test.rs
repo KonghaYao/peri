@@ -1,11 +1,20 @@
 use std::collections::BTreeMap;
 
-use super::*;
+use super::mcp;
+use super::observability;
+use super::provider;
+use super::ConfigurationError;
+use super::ConfigurationField;
+use super::ConfigurationInputs;
+use super::ConfigurationScope;
+use super::SourceIdentity;
+use super::DOMAINS;
 
 #[test]
 fn configuration_errors_preserve_original_parser_causes() {
     use std::error::Error;
-    let error = parse_document(Some("{\n\"token\": "), SourceIdentity::GlobalFile).unwrap_err();
+    let error =
+        super::parse_document(Some("{\n\"token\": "), SourceIdentity::GlobalFile).unwrap_err();
     assert!(error.to_string().contains("line 2"));
     assert!(error.source().unwrap().to_string().contains("EOF"));
 }
@@ -34,14 +43,16 @@ fn every_domain_has_one_shape_and_environment_collection_follows_it() {
         );
     }
     assert_eq!(DOMAINS.len(), fields.len());
-    let keys = environment_keys();
+    let keys = super::environment_keys();
     assert!(keys.contains(&mcp::MCP_CACHE_ENV));
     assert!(keys.contains(&mcp::MCP_BUILTIN_ENV));
-    for key in provider::ENVIRONMENT_KEYS
-        .iter()
-        .chain(observability::ENVIRONMENT_KEYS)
     {
-        assert!(keys.contains(key), "缺少具名环境来源 {key}");
+        let provider_and_observability_keys = provider::ENVIRONMENT_KEYS
+            .iter()
+            .chain(observability::ENVIRONMENT_KEYS);
+        for key in provider_and_observability_keys {
+            assert!(keys.contains(key), "缺少具名环境来源 {key}");
+        }
     }
     assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
 }
@@ -58,7 +69,7 @@ fn provenance_uses_declared_sources_for_each_domain() {
         ]),
     };
     let directory = tempfile::tempdir().unwrap();
-    let scope = ConfigurationScope::new(
+    let scope = ConfigurationScope::try_new(
         directory.path().join("project"),
         directory.path().join("home/settings.json"),
     )
@@ -107,7 +118,7 @@ fn provenance_uses_declared_sources_for_each_domain() {
 fn invalid_observability_settings_value_maps_to_global_file() {
     use crate::observability::{ConfigValueSource, LangfuseConfigError};
     let directory = tempfile::tempdir().unwrap();
-    let scope = ConfigurationScope::new(
+    let scope = ConfigurationScope::try_new(
         directory.path().join("project"),
         directory.path().join("home/settings.json"),
     )

@@ -10,13 +10,16 @@ pub mod events;
 #[doc(hidden)]
 pub mod events_v2;
 #[doc(hidden)]
-pub mod langfuse_bridge;
-pub mod model_bridge;
+pub mod langfuse_bridge_like;
+pub use langfuse_bridge_like as langfuse_bridge;
+pub mod agent_model_bridge;
+pub use agent_model_bridge as model_bridge;
+pub mod agent_state;
 pub mod model_call;
 pub mod react;
 pub mod session;
 pub mod stages;
-pub mod state;
+pub use agent_state as state;
 #[doc(hidden)]
 pub mod subagent_event_forwarder;
 #[doc(hidden)]
@@ -38,3 +41,5 @@ pub use state::AgentState;
 #[doc(hidden)]
 pub use token::{ContextBudget, TokenTracker};
 pub use tokio_util::sync::CancellationToken as AgentCancellationToken;
+
+mod model_message_conversion;

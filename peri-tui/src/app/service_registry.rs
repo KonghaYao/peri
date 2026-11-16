@@ -68,6 +68,7 @@ impl Default for ProcessResourceMonitor {
 }
 
 impl ProcessResourceMonitor {
+    #[must_use]
     pub fn new() -> Self {
         let mut sys = sysinfo::System::new();
         let pid = sysinfo::get_current_pid().expect("failed to get current PID");
@@ -115,10 +116,12 @@ impl ProcessResourceMonitor {
         }
     }
 
+    #[must_use]
     pub fn memory_mb(&self) -> u64 {
         self.memory_mb
     }
 
+    #[must_use]
     pub fn cpu_percent(&self) -> f32 {
         self.cpu_percent
     }
@@ -148,3 +151,16 @@ pub struct ServiceRegistry {
 #[cfg(test)]
 #[path = "service_registry_test.rs"]
 mod tests;
+
+use std::fmt;
+use std::fmt::{Debug, Formatter};
+
+impl Debug for ServiceRegistry {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ServiceRegistry")
+            .field("cwd", &self.cwd)
+            .field("provider_name", &self.provider_name)
+            .finish_non_exhaustive()
+    }
+}

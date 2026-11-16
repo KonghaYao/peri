@@ -1,5 +1,5 @@
-use super::*;
-use crate::kit::acp_bridge::{perf_counters, reset_perf_counters};
+use super::{Arc, TuiAssistantBubble, TuiRenderUnit};
+
 use crate::kit::tui_render_unit::{EntryStatus, FoldState, TuiReasoningBlock, TuiUserBubble};
 
 fn body(unit: &TuiRenderUnit) -> &Arc<TuiAssistantBubble> {
@@ -30,7 +30,7 @@ fn persistent_vector_cow_shares_large_assistant_payloads() {
         .into(),
     );
     let original = im::Vector::from(vec![unit; 128]);
-    reset_perf_counters();
+    crate::kit::acp_bridge::reset_perf_counters();
     for _ in 0..32 {
         let mut published = original.clone();
         published.push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
@@ -43,6 +43,12 @@ fn persistent_vector_cow_shares_large_assistant_payloads() {
         assert!(Arc::ptr_eq(body(&published[0]), body(&original[0])));
         assert!(Arc::ptr_eq(body(&published[127]), body(&original[127])));
     }
-    assert_eq!(perf_counters().assistant_clone_calls, 0);
-    assert_eq!(perf_counters().assistant_clone_bytes, 0);
+    assert_eq!(
+        crate::kit::acp_bridge::perf_counters().assistant_clone_calls,
+        0
+    );
+    assert_eq!(
+        crate::kit::acp_bridge::perf_counters().assistant_clone_bytes,
+        0
+    );
 }

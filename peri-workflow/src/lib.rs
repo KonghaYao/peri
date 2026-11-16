@@ -7,7 +7,8 @@
 
 pub mod cli;
 mod completion;
-pub mod error;
+pub mod workflow_error;
+pub use workflow_error as error;
 pub mod journal;
 mod preflight;
 mod process;
@@ -17,4 +18,5 @@ pub mod registry;
 pub mod rpc;
 pub mod runner;
 pub mod runtime;
-pub mod tool;
+pub mod workflow_tool;
+pub use workflow_tool as tool;

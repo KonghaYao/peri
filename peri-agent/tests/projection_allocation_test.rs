@@ -9,12 +9,13 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use peri_acp_types::context_archive::build_catalog;
 use peri_acp_types::store::PersistedPayload;
-use peri_agent::agent::compact_v2::{
-    render_llm_view, MessageProjectionDirective, ProjectionAction, ProjectionActionEntry,
-    ProjectionTarget, ProviderCapabilities,
-};
+
+use peri_agent::agent::compact_v2::MessageProjectionDirective;
+use peri_agent::agent::compact_v2::ProjectionAction;
+use peri_agent::agent::compact_v2::ProjectionActionEntry;
+use peri_agent::agent::compact_v2::ProjectionTarget;
+use peri_agent::agent::compact_v2::ProviderCapabilities;
 use peri_agent::messages::{BaseMessage, ContentBlock, MessageContent, ToolCallRequest};
 use peri_agent::session::MessageTranscript;
 
@@ -26,29 +27,44 @@ struct CountingAllocator;
 static TRACKING: AtomicBool = AtomicBool::new(false);
 static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 
+// SAFETY: Every allocation operation delegates unchanged to System; the atomics only
+// count requested bytes and never access or change the allocation itself.
 unsafe impl GlobalAlloc for CountingAllocator {
+    /// # Safety
+    /// The caller must provide a valid nonzero allocation layout, as required by GlobalAlloc.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if TRACKING.load(Ordering::Relaxed) {
             ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
         }
+        // SAFETY: The caller supplies the GlobalAlloc invariants, forwarded unchanged to System.
         unsafe { System.alloc(layout) }
     }
 
+    /// # Safety
+    /// The caller must provide a valid nonzero allocation layout, as required by GlobalAlloc.
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         if TRACKING.load(Ordering::Relaxed) {
             ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
         }
+        // SAFETY: The caller supplies the GlobalAlloc invariants, forwarded unchanged to System.
         unsafe { System.alloc_zeroed(layout) }
     }
 
+    /// # Safety
+    /// The pointer must be a live System allocation created with this layout.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: The caller supplies the GlobalAlloc invariants, forwarded unchanged to System.
         unsafe { System.dealloc(ptr, layout) }
     }
 
+    /// # Safety
+    /// The pointer and layout must identify a live System allocation; new_size must be nonzero
+    /// and, rounded up to the layout alignment, must not exceed isize::MAX.
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if TRACKING.load(Ordering::Relaxed) {
             ALLOCATED.fetch_add(new_size, Ordering::Relaxed);
         }
+        // SAFETY: The caller supplies the GlobalAlloc invariants, forwarded unchanged to System.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
@@ -84,8 +100,12 @@ fn measure(source_chars: usize) -> Measured {
 
     ALLOCATED.store(0, Ordering::SeqCst);
     TRACKING.store(true, Ordering::SeqCst);
-    let projected =
-        render_llm_view(&transcript, &actions, &ProviderCapabilities::openai()).expect("render");
+    let projected = peri_agent::agent::compact_v2::render_llm_view(
+        &transcript,
+        &actions,
+        &ProviderCapabilities::openai(),
+    )
+    .expect("render");
     TRACKING.store(false, Ordering::SeqCst);
     let allocated = ALLOCATED.load(Ordering::SeqCst);
     let output_len = serde_json::to_vec(&projected).expect("serialize").len();
@@ -100,7 +120,7 @@ fn measure(source_chars: usize) -> Measured {
 fn compact_projection_allocates_by_output_not_source_payload() {
     let _guard = MEASURE_LOCK
         .lock()
-        .unwrap_or_else(|error| error.into_inner());
+        .expect("measurement serialization mutex must remain unpoisoned");
     let small = measure(4 * 1024 * 1024);
     let large = measure(8 * 1024 * 1024);
 
@@ -134,8 +154,12 @@ fn compact_projection_allocates_by_output_not_source_payload() {
 fn measure_render(transcript: &MessageTranscript, actions: &[ProjectionActionEntry]) -> Measured {
     ALLOCATED.store(0, Ordering::SeqCst);
     TRACKING.store(true, Ordering::SeqCst);
-    let projected =
-        render_llm_view(transcript, actions, &ProviderCapabilities::openai()).expect("render");
+    let projected = peri_agent::agent::compact_v2::render_llm_view(
+        transcript,
+        actions,
+        &ProviderCapabilities::openai(),
+    )
+    .expect("render");
     TRACKING.store(false, Ordering::SeqCst);
     let allocated = ALLOCATED.load(Ordering::SeqCst);
     let output_len = serde_json::to_vec(&projected).expect("serialize").len();
@@ -160,7 +184,7 @@ fn omitted_exchange(source_chars: usize) -> Measured {
     let result_id = transcript.append(result.clone());
     // Catalog metadata is bounded separately (64 KiB); use small stand-ins with the
     // same member ids so this test measures renderer body copies only.
-    let catalog = build_catalog(
+    let catalog = peri_acp_types::context_archive::build_catalog(
         "session".into(),
         "omit-group".into(),
         call_id,
@@ -222,7 +246,7 @@ fn paired_scan(source_chars: usize) -> Measured {
     let mut transcript = MessageTranscript::new();
     let call_id = transcript.append(call.clone());
     let result_id = transcript.append(result.clone());
-    let catalog = build_catalog(
+    let catalog = peri_acp_types::context_archive::build_catalog(
         "session".into(),
         "scan-group".into(),
         call_id,
@@ -299,7 +323,7 @@ fn assert_source_independent(name: &str, measurements: (Measured, Measured)) {
 fn omitted_exchange_does_not_copy_the_source_body() {
     let _guard = MEASURE_LOCK
         .lock()
-        .unwrap_or_else(|error| error.into_inner());
+        .expect("measurement serialization mutex must remain unpoisoned");
     assert_source_independent(
         "OmitToolExchange",
         (
@@ -313,7 +337,7 @@ fn omitted_exchange_does_not_copy_the_source_body() {
 fn pairing_scan_borrows_canonical_bodies() {
     let _guard = MEASURE_LOCK
         .lock()
-        .unwrap_or_else(|error| error.into_inner());
+        .expect("measurement serialization mutex must remain unpoisoned");
     assert_source_independent(
         "Pairing",
         (paired_scan(512 * 1024), paired_scan(1024 * 1024)),

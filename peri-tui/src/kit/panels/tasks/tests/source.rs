@@ -2,19 +2,9 @@
 
 /// 面板组件源码；读入即归一为 LF。
 ///
-/// 源码头扫描必须与检出换行符无关：Windows 检出为 CRLF 时 `"\n}\n"` 切不开组件体，
-/// 断言会越过组件体扫到文件末尾的测试模块（windows-latest 曾因此报 TUI-RENDER-001）。
+/// 归一后按函数的换行边界提取组件，避免 Windows 检出扩大扫描范围。
 fn tasks_source() -> String {
-    include_str!("../../tasks.rs").replace("\r\n", "\n")
-}
-
-/// 组件体：文件末尾的 `mod tests;` 之后只剩测试模块声明。
-fn panel_source() -> String {
-    tasks_source()
-        .split("mod tests;")
-        .next()
-        .expect("tasks 模块体存在")
-        .to_owned()
+    include_str!("../tasks_panel.rs").replace("\r\n", "\n")
 }
 
 /// TUI-HOOK-001：组件内全部 hook 在条件分支与渲染体之前；渲染体不写 atom、不起副作用。
@@ -22,9 +12,8 @@ fn panel_source() -> String {
 fn hooks_precede_conditionals_and_render() {
     let src = tasks_source();
     let body = src
-        .split("pub fn TasksPanel")
-        .nth(1)
-        .and_then(|rest| rest.split("\n}\n").next())
+        .split_once("pub fn TasksPanel")
+        .and_then(|(_, rest)| rest.split_once("\n}\n").map(|(body, _)| body))
         .expect("组件体存在");
     let last_hook = body.rfind("hooks.use_").expect("组件内有 hook 调用");
     let first_branch = [" if ", "match ", "for "]
@@ -55,7 +44,7 @@ fn hooks_precede_conditionals_and_render() {
 
 #[test]
 fn test_tasks_enter_still_cancels_not_open_detail() {
-    let main_src = panel_source();
+    let main_src = tasks_source();
     assert!(
         main_src.contains("cancel_bg_task") || main_src.contains("kill_workflow_run"),
         "Tasks Enter 应取消 bg 任务"
@@ -69,7 +58,7 @@ fn test_tasks_enter_still_cancels_not_open_detail() {
 /// P0-74：底部导航提示必须描述真实动作——后台任务行 Enter 取消，Cron / SubAgent 行 Enter 只关闭。
 #[test]
 fn test_tasks_nav_hint_describes_cancel_not_open() {
-    let main_src = panel_source();
+    let main_src = tasks_source();
     assert!(
         !main_src.contains("common-nav-enter-close"),
         "Tasks 面板不得复用 Enter::open 语义的通用提示"

@@ -1,4 +1,16 @@
-use super::*;
+use super::FoldState;
+use super::TuiRenderUnit;
+use super::TuiSystemReminder;
+use super::TuiUserBubble;
+
+use crate::kit::message_area::grid::GridSpec;
+use crate::kit::message_area::render;
+use crate::kit::message_area::render::helpers;
+use crate::kit::message_area::render::semantic;
+use crate::kit::message_area::render::user;
+use peri_theme::atoms::THEME_ATOM;
+use ratatui_kit::ratatui::style::Modifier;
+use unicode_width::UnicodeWidthStr;
 
 // ── User entry（§6.1）──────────────────────────────────────────────────
 
@@ -12,16 +24,19 @@ fn test_user_long_prompt_capped_at_six_lines() {
         .collect::<Vec<_>>()
         .join("\n");
     let vm = TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new(text));
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
 
     // 6 正文 + 1 `… +6 lines`（Wide 无节拍空行，台阶承担块分隔；无 role label 行）
     assert_eq!(lines.len(), 7, "6 行上限 + 省略行，其余截断");
-    let last = line_text(&lines[lines.len() - 1]);
+    let last = super::line_text(&lines[lines.len() - 1]);
     assert!(
         last.contains("+6 lines"),
         "省略行格式 `… +N lines`，实际 {last:?}"
     );
-    assert!(!all_text(&lines).contains("line 9"), "第 7 行起应被截断");
+    assert!(
+        !super::all_text(&lines).contains("line 9"),
+        "第 7 行起应被截断"
+    );
 
     // 无气泡背景：所有 span bg 均为 None
     for line in &lines {
@@ -30,7 +45,7 @@ fn test_user_long_prompt_capped_at_six_lines() {
         }
     }
     // 不再使用 ❯（§6.1 移除）
-    assert!(!all_text(&lines).contains('\u{276f}'));
+    assert!(!super::all_text(&lines).contains('\u{276f}'));
 }
 
 /// slash/@ 局部强调（§6.1）：token 用 accent.user。
@@ -41,7 +56,7 @@ fn test_user_slash_at_emphasis() {
     let vm = TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new(
         "run /build and ping @matt".into(),
     ));
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
     let body = &lines[0];
     let emphasized = body
         .spans
@@ -63,15 +78,15 @@ fn test_system_reminder_collapsed_shows_only_muted_header() {
     let reminder = TuiSystemReminder::legacy("sensitive reminder body".into());
     let unit = TuiRenderUnit::TuiSystemReminder(reminder);
     let grid = GridSpec::with_content(80);
-    let lines = vm_to_lines(&unit, &grid);
+    let lines = render::vm_to_lines(&unit, &grid);
 
     assert_eq!(lines.len(), 1, "默认折叠时只显示 header");
     assert_eq!(
         lines[0].spans[1].content.as_ref(),
-        sym().collapsed,
+        helpers::sym().collapsed,
         "折叠 header 左侧应显示展开按钮"
     );
-    assert!(!all_text(&lines).contains("sensitive reminder body"));
+    assert!(!super::all_text(&lines).contains("sensitive reminder body"));
     let sem = THEME_ATOM.state().read().semantic;
     for span in &lines[0].spans {
         if !span.content.trim().is_empty() && span.content.as_ref() != "\u{2502}" {
@@ -92,8 +107,8 @@ fn test_compact_continuation_hint_renders_as_simple_system_prompt() {
         peri_acp_types::compact::CONTINUATION_HINT
     );
     let unit = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(text));
-    let lines = vm_to_lines(&unit, &GridSpec::with_content(80));
-    let rendered = all_text(&lines);
+    let lines = render::vm_to_lines(&unit, &GridSpec::with_content(80));
+    let rendered = super::all_text(&lines);
 
     assert_eq!(lines.len(), 1, "compact 控制消息应简洁显示为单行");
     assert!(rendered.contains("System Prompt"));
@@ -108,15 +123,15 @@ fn test_system_reminder_expanded_shows_body() {
     reminder.recompute_hash();
     let unit = TuiRenderUnit::TuiSystemReminder(reminder);
     let grid = GridSpec::with_content(80);
-    let lines = vm_to_lines(&unit, &grid);
+    let lines = render::vm_to_lines(&unit, &grid);
 
     assert_eq!(lines.len(), 3, "展开后显示 header 与完整正文");
     assert_eq!(
         lines[0].spans[1].content.as_ref(),
-        sym().expanded,
+        helpers::sym().expanded,
         "展开 header 左侧应显示收起按钮"
     );
-    let text = all_text(&lines);
+    let text = super::all_text(&lines);
     assert!(text.contains("first line"));
     assert!(text.contains("second line"));
 }
@@ -133,21 +148,27 @@ const TINY_PNG: &[u8] =
 #[test]
 fn test_user_image_line_renders_meta() {
     crate::i18n::init(Some("en"));
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir()
+        .expect("user image line renders meta: isolated fixture workspace must remain accessible");
     let file = dir.path().join("a.png");
-    std::fs::write(&file, TINY_PNG).unwrap();
+    std::fs::write(&file, TINY_PNG)
+        .expect("user image line renders meta: isolated fixture workspace must remain accessible");
     let grid = GridSpec::grid_for(120);
     let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(format!("@image {}", file.display())));
-    let lines = vm_to_lines(&vm, &grid);
-    let text = all_text(&lines);
+    let lines = render::vm_to_lines(&vm, &grid);
+    let text = super::all_text(&lines);
     assert!(
         text.contains("[Image: a.png · "),
         "meta 前缀（文件名 · 大小），实际: {text:?}"
     );
     assert!(text.contains(" B"), "大小跟随 meta（B 档），实际: {text:?}");
-    let abs = file.canonicalize().unwrap();
+    let abs = file
+        .canonicalize()
+        .expect("user image line renders meta: isolated fixture workspace must remain accessible");
     assert!(
-        !text.contains(abs.to_str().unwrap()),
+        !text.contains(abs.to_str().expect(
+            "user image line renders meta: fixture paths and protocol text must be valid UTF-8"
+        )),
         "默认渲染行不暴露绝对路径，实际: {text:?}"
     );
 }
@@ -156,13 +177,17 @@ fn test_user_image_line_renders_meta() {
 #[test]
 fn test_user_image_size_formats() {
     crate::i18n::init(Some("en"));
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir()
+        .expect("user image size formats: isolated fixture workspace must remain accessible");
     let tiny = dir.path().join("tiny.png");
-    std::fs::write(&tiny, TINY_PNG).unwrap();
+    std::fs::write(&tiny, TINY_PNG)
+        .expect("user image size formats: isolated fixture workspace must remain accessible");
     let mid = dir.path().join("mid.png");
-    std::fs::write(&mid, vec![b'x'; 2048]).unwrap(); // 2.0 KB（显示层不校验格式）
+    std::fs::write(&mid, vec![b'x'; 2048])
+        .expect("user image size formats: isolated fixture workspace must remain accessible"); // 2.0 KB（显示层不校验格式）
     let big = dir.path().join("big.png");
-    std::fs::write(&big, vec![b'y'; 3 * 1024 * 1024]).unwrap(); // 3.0 MB
+    std::fs::write(&big, vec![b'y'; 3 * 1024 * 1024])
+        .expect("user image size formats: isolated fixture workspace must remain accessible"); // 3.0 MB
 
     let grid = GridSpec::grid_for(120);
     let text_of = |name: &str| {
@@ -170,7 +195,7 @@ fn test_user_image_size_formats() {
             "@image {}",
             dir.path().join(name).display()
         )));
-        all_text(&vm_to_lines(&vm, &grid))
+        super::all_text(&render::vm_to_lines(&vm, &grid))
     };
     assert!(
         text_of("tiny.png").contains(" · 45 B]"),
@@ -195,8 +220,8 @@ fn test_user_image_missing() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(120);
     let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("@image /no/such/file.png".into()));
-    let lines = vm_to_lines(&vm, &grid);
-    let text = all_text(&lines);
+    let lines = render::vm_to_lines(&vm, &grid);
+    let text = super::all_text(&lines);
     assert!(
         text.contains("file.png · missing"),
         "缺失文案，实际: {text:?}"
@@ -211,18 +236,18 @@ fn test_user_image_line_negative_cases() {
     let grid = GridSpec::grid_for(80);
     for text in ["@image", "@imagefoo", "@image ", " @image "] {
         let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(text.into()));
-        let lines = vm_to_lines(&vm, &grid);
+        let lines = render::vm_to_lines(&vm, &grid);
         // 剥离网格前缀列（outer 空 / │ / gap）后应与输入完全一致——
         // 走原 emphasize_user_line 路径，无 meta 替换。
-        let body = strip_visual_prefix(&lines[0], &line_text(&lines[0]), &grid, 0);
+        let body = semantic::strip_visual_prefix(&lines[0], &super::line_text(&lines[0]), &grid, 0);
         assert_eq!(
             body, text,
             "非图片行原样渲染，实际 {body:?}（输入 {text:?}）"
         );
         assert!(
-            !all_text(&lines).contains("Image:"),
+            !super::all_text(&lines).contains("Image:"),
             "不产生 meta 行，实际: {:?}（输入 {text:?}）",
-            all_text(&lines)
+            super::all_text(&lines)
         );
     }
 }
@@ -232,21 +257,21 @@ fn test_user_image_line_negative_cases() {
 #[test]
 fn test_user_image_managed_and_manual_same_rendering() {
     crate::i18n::init(Some("en"));
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("user image managed and manual same rendering: isolated fixture workspace must remain accessible");
     let managed_root = dir.path().join(".peri").join("images");
-    std::fs::create_dir_all(&managed_root).unwrap();
+    std::fs::create_dir_all(&managed_root).expect("user image managed and manual same rendering: isolated fixture workspace must remain accessible");
     let managed_file = managed_root.join("m.png");
-    std::fs::write(&managed_file, TINY_PNG).unwrap();
+    std::fs::write(&managed_file, TINY_PNG).expect("user image managed and manual same rendering: isolated fixture workspace must remain accessible");
     let manual_dir = dir.path().join("elsewhere");
-    std::fs::create_dir_all(&manual_dir).unwrap();
+    std::fs::create_dir_all(&manual_dir).expect("user image managed and manual same rendering: isolated fixture workspace must remain accessible");
     let manual_file = manual_dir.join("m.png"); // 同名文件
-    std::fs::write(&manual_file, TINY_PNG).unwrap();
+    std::fs::write(&manual_file, TINY_PNG).expect("user image managed and manual same rendering: isolated fixture workspace must remain accessible");
 
     let grid = GridSpec::grid_for(120);
     let render = |path: &std::path::Path| {
         let vm =
             TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(format!("@image {}", path.display())));
-        all_text(&vm_to_lines(&vm, &grid))
+        super::all_text(&render::vm_to_lines(&vm, &grid))
     };
     assert_eq!(
         render(&managed_file),
@@ -260,13 +285,20 @@ fn test_user_image_managed_and_manual_same_rendering() {
 #[test]
 fn test_build_image_meta_info_grading() {
     crate::i18n::init(Some("en"));
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir()
+        .expect("build image meta info grading: isolated fixture workspace must remain accessible");
     let root = dir.path().join(".peri").join("images");
-    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&root)
+        .expect("build image meta info grading: isolated fixture workspace must remain accessible");
     let managed = root.join("a.png");
-    std::fs::write(&managed, TINY_PNG).unwrap();
-    let (display, size, is_managed, meta) =
-        build_image_meta_info(managed.to_str().unwrap(), Some(&root));
+    std::fs::write(&managed, TINY_PNG)
+        .expect("build image meta info grading: isolated fixture workspace must remain accessible");
+    let (display, size, is_managed, meta) = user::build_image_meta_info(
+        managed.to_str().expect(
+            "build image meta info grading: fixture paths and protocol text must be valid UTF-8",
+        ),
+        Some(&root),
+    );
     assert!(is_managed, "受管理目录内 → Managed");
     assert!(meta.contains("a.png"), "meta 含文件名，实际 {meta:?}");
     assert!(size.contains("B"), "大小文案，实际 {size:?}");
@@ -277,12 +309,23 @@ fn test_build_image_meta_info_grading() {
     );
 
     let manual = dir.path().join("b.png");
-    std::fs::write(&manual, TINY_PNG).unwrap();
-    let (_, _, is_managed2, _) = build_image_meta_info(manual.to_str().unwrap(), Some(&root));
+    std::fs::write(&manual, TINY_PNG)
+        .expect("build image meta info grading: isolated fixture workspace must remain accessible");
+    let (_, _, is_managed2, _) = user::build_image_meta_info(
+        manual.to_str().expect(
+            "build image meta info grading: fixture paths and protocol text must be valid UTF-8",
+        ),
+        Some(&root),
+    );
     assert!(!is_managed2, "目录外 → Manual");
 
     let gone = dir.path().join("gone.png");
-    let (_, size3, is_managed3, meta3) = build_image_meta_info(gone.to_str().unwrap(), Some(&root));
+    let (_, size3, is_managed3, meta3) = user::build_image_meta_info(
+        gone.to_str().expect(
+            "build image meta info grading: fixture paths and protocol text must be valid UTF-8",
+        ),
+        Some(&root),
+    );
     assert!(!is_managed3, "不存在 → Other（非 Managed）");
     assert_eq!(size3, "missing");
     assert!(meta3.contains("missing"));
@@ -292,27 +335,31 @@ fn test_build_image_meta_info_grading() {
 #[test]
 fn test_user_image_line_info_collected() {
     crate::i18n::init(Some("en"));
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect(
+        "user image line info collected: isolated fixture workspace must remain accessible",
+    );
     let file = dir.path().join("a.png");
-    std::fs::write(&file, TINY_PNG).unwrap();
+    std::fs::write(&file, TINY_PNG).expect(
+        "user image line info collected: isolated fixture workspace must remain accessible",
+    );
     let grid = GridSpec::grid_for(120);
     let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(format!(
         "@image {}\nhello",
         file.display()
     )));
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, _, _, image_lines) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+    let (lines, _, _, image_lines) = render::vm_to_lines_cached(&vm, &grid, &mut cache, true);
     assert_eq!(image_lines.len(), 1, "仅 @image 行产生映射信息");
     let info = &image_lines[0];
     assert_eq!(info.logical_idx, 0, "Wide 无前导空行，meta 行在索引 0");
     assert_eq!(
         info.path,
-        file.canonicalize().unwrap().to_str().unwrap(),
+        file.canonicalize().expect("user image line info collected: the canonicalize fixture operation uses valid inputs").to_str().expect("user image line info collected: fixture paths and protocol text must be valid UTF-8"),
         "展示路径为 canonicalize 后路径"
     );
     assert!(!info.managed);
     assert!(info.size_text.contains("B"));
-    assert!(all_text(&lines).contains("[Image: a.png ·"));
+    assert!(super::all_text(&lines).contains("[Image: a.png ·"));
 }
 
 /// hover 行渲染：绝对路径 + accent 高亮（sem.accents.user）+ 单行截断。
@@ -329,8 +376,8 @@ fn test_render_image_hover_line_absolute_path_highlight() {
         path: "/long/path/to/very/deep/directory/a.png".into(),
         size_text: "45 B".into(),
     };
-    let line = super::render_image_hover_line(&hover, &grid, &sem);
-    let text = line_text(&line);
+    let line = render::render_image_hover_line(&hover, &grid, &sem);
+    let text = super::line_text(&line);
     assert!(
         text.contains("/long/path/to/very/deep/directory/a.png"),
         "hover 显示绝对路径，实际 {text:?}"
@@ -358,8 +405,8 @@ fn test_render_image_hover_line_truncates() {
         path: "/this/is/a/very/long/absolute/path/with/many/segments/a.png".into(),
         size_text: "45 B".into(),
     };
-    let line = super::render_image_hover_line(&hover, &grid, &sem);
-    let text = line_text(&line);
+    let line = render::render_image_hover_line(&hover, &grid, &sem);
+    let text = super::line_text(&line);
     assert!(
         text.width() <= grid.cont_prefix_width() + grid.content_width() + 1,
         "hover 行截断到 content 宽度（含前缀列；truncate 省略号 +1），实际宽度 {}: {text:?}",
@@ -381,8 +428,8 @@ fn test_user_bubble_renders_attachment_record_with_text() {
         "look at this".into(),
         vec![UserAttachment { bytes: 45 }],
     ));
-    let lines = vm_to_lines(&vm, &grid);
-    let text = all_text(&lines);
+    let lines = render::vm_to_lines(&vm, &grid);
+    let text = super::all_text(&lines);
     assert!(
         text.contains("[Image] Image 1 · 45 B"),
         "附件记录行（标识 · 名称 · 大小），实际: {text:?}"
@@ -399,9 +446,9 @@ fn test_user_bubble_image_only_renders_attachment_record() {
         String::new(),
         vec![UserAttachment { bytes: 2048 }],
     ));
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
     assert_eq!(lines.len(), 1, "Wide 仅附件记录行（无节拍空行）");
-    let text = all_text(&lines);
+    let text = super::all_text(&lines);
     assert!(text.contains("[Image] Image 1 · 2.0 KB"), "实际: {text:?}");
 }
 
@@ -414,7 +461,7 @@ fn test_user_bubble_numbers_multiple_attachments() {
         "two shots".into(),
         vec![UserAttachment { bytes: 45 }, UserAttachment { bytes: 2048 }],
     ));
-    let text = all_text(&vm_to_lines(&vm, &grid));
+    let text = super::all_text(&render::vm_to_lines(&vm, &grid));
     assert!(
         text.contains("[Image] Image 1 · 45 B"),
         "第一张，实际: {text:?}"
@@ -431,7 +478,7 @@ fn test_user_bubble_empty_text_without_attachments_renders_nothing() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(120);
     let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(String::new()));
-    assert!(vm_to_lines(&vm, &grid).is_empty());
+    assert!(render::vm_to_lines(&vm, &grid).is_empty());
 }
 
 /// 非图片的 @文件引用不受影响：正文原样渲染，且不产生附件记录行。
@@ -440,9 +487,9 @@ fn test_user_bubble_file_mention_unaffected_by_attachment_record() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(120);
     let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("read @src/main.rs please".into()));
-    let lines = vm_to_lines(&vm, &grid);
+    let lines = render::vm_to_lines(&vm, &grid);
     assert_eq!(lines.len(), 1, "Wide 仅正文行（无节拍空行）");
-    let text = all_text(&lines);
+    let text = super::all_text(&lines);
     assert!(
         text.contains("@src/main.rs"),
         "文件引用原样，实际: {text:?}"

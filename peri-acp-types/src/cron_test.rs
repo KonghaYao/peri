@@ -1,4 +1,8 @@
-use super::*;
+use crate::cron::CronPromptRejection;
+use crate::cron::CronSchedulerPort;
+use crate::cron::CronTriggerReminderError;
+use crate::cron::MAX_CRON_PROMPT_BYTES;
+use std::sync::Arc;
 
 fn multi_byte_prompt(bytes: usize) -> String {
     // 每个字符 3 字节，确保边界落在多字节序列中间时也不会 panic。
@@ -7,13 +11,13 @@ fn multi_byte_prompt(bytes: usize) -> String {
 
 #[test]
 fn prompt_budget_is_enforced_on_both_ends_without_panicking_at_multi_byte_edges() {
-    assert!(validate_cron_prompt("short task").is_ok());
+    assert!(crate::cron::validate_cron_prompt("short task").is_ok());
     let exact = multi_byte_prompt(MAX_CRON_PROMPT_BYTES);
     assert!(exact.len() <= MAX_CRON_PROMPT_BYTES);
-    assert!(validate_cron_prompt(&exact).is_ok());
+    assert!(crate::cron::validate_cron_prompt(&exact).is_ok());
 
     let over = multi_byte_prompt(MAX_CRON_PROMPT_BYTES + 3);
-    let rejection = validate_cron_prompt(&over).expect_err("超预算必须显式拒绝");
+    let rejection = crate::cron::validate_cron_prompt(&over).expect_err("超预算必须显式拒绝");
     assert_eq!(
         rejection,
         CronPromptRejection::PromptTooLong { actual: over.len() }
@@ -24,17 +28,19 @@ fn prompt_budget_is_enforced_on_both_ends_without_panicking_at_multi_byte_edges(
             .contains(&MAX_CRON_PROMPT_BYTES.to_string()),
         "拒绝必须给出可承载限制"
     );
-    let error = cron_trigger_reminder("task-1", "firing-1", &over).expect_err("构建同样拒绝");
+    let error =
+        crate::cron::cron_trigger_reminder("task-1", "firing-1", &over).expect_err("构建同样拒绝");
     assert!(matches!(error, CronTriggerReminderError::Prompt(_)));
 }
 
 #[test]
 fn trigger_reminder_keeps_prompt_in_body_and_metadata_is_identity_only() {
     let prompt = multi_byte_prompt(300);
-    let reminder = cron_trigger_reminder("task-7", "firing-9", &prompt).expect("可承载预算内");
+    let reminder =
+        crate::cron::cron_trigger_reminder("task-7", "firing-9", &prompt).expect("可承载预算内");
     let dto = reminder.as_reminder();
     assert_eq!(
-        cron_trigger_prompt(dto).as_deref(),
+        crate::cron::cron_trigger_prompt(dto).as_deref(),
         Some(prompt.as_str()),
         "正文是原始指令的唯一权威编码"
     );
@@ -47,7 +53,7 @@ fn trigger_reminder_keeps_prompt_in_body_and_metadata_is_identity_only() {
     );
     assert_eq!(
         dto.body.len(),
-        prompt.len() + cron_trigger_body("task-7", "").len()
+        prompt.len() + crate::cron::cron_trigger_body("task-7", "").len()
     );
     assert!(
         !dto.audiences
@@ -72,29 +78,29 @@ fn prompt_recovery_rejects_unrelated_or_malformed_bodies() {
         summary: None,
         metadata: serde_json::json!({}),
     };
-    assert!(cron_trigger_prompt(&reminder).is_none());
-    reminder.body = cron_trigger_body("task-1", "do the thing") + "trailing";
-    assert!(cron_trigger_prompt(&reminder).is_none());
+    assert!(crate::cron::cron_trigger_prompt(&reminder).is_none());
+    reminder.body = crate::cron::cron_trigger_body("task-1", "do the thing") + "trailing";
+    assert!(crate::cron::cron_trigger_prompt(&reminder).is_none());
     // 正文里出现同类标记时仍按唯一前缀/后缀解出完整指令。
-    let tricky = cron_trigger_body("task-1", "say </goal-message> twice");
+    let tricky = crate::cron::cron_trigger_body("task-1", "say </goal-message> twice");
     reminder.body = tricky;
     assert_eq!(
-        cron_trigger_prompt(&reminder).as_deref(),
+        crate::cron::cron_trigger_prompt(&reminder).as_deref(),
         Some("say </goal-message> twice")
     );
 }
 
 #[test]
 fn firing_identity_is_stable_per_firing_and_new_per_trigger() {
-    let first = cron_firing_delivery_id("task-1", "2026-10-07T00:00:00+00:00");
-    let retry = cron_firing_delivery_id("task-1", "2026-10-07T00:00:00+00:00");
-    let next = cron_firing_delivery_id("task-1", "2026-10-07T00:05:00+00:00");
-    let other_task = cron_firing_delivery_id("task-2", "2026-10-07T00:00:00+00:00");
+    let first = crate::cron::cron_firing_delivery_id("task-1", "2026-10-07T00:00:00+00:00");
+    let retry = crate::cron::cron_firing_delivery_id("task-1", "2026-10-07T00:00:00+00:00");
+    let next = crate::cron::cron_firing_delivery_id("task-1", "2026-10-07T00:05:00+00:00");
+    let other_task = crate::cron::cron_firing_delivery_id("task-2", "2026-10-07T00:00:00+00:00");
     assert_eq!(first, retry, "同一 firing 的重试必须复用同一身份");
     assert_ne!(first, next, "新触发必须是新身份");
     assert_ne!(first, other_task);
     assert!(
-        first != cron_firing_delivery_id("task-1", "2026-10-07T00:00:00+00:00!"),
+        first != crate::cron::cron_firing_delivery_id("task-1", "2026-10-07T00:00:00+00:00!"),
         "身份由来源 + 业务事件键派生，不按正文去重"
     );
 }

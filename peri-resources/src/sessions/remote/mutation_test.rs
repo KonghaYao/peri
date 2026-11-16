@@ -8,10 +8,9 @@ use turso_serverless::Error as SdkError;
 use turso_serverless::Value;
 
 use super::failure::RemoteFailureClass;
-use super::mutation::{
-    classify_batch_failure, ensure_result_sets, sole_row, BatchFailure, MutationOutcome,
-    StoreAccess,
-};
+use super::mutation::BatchFailure;
+use super::mutation::MutationOutcome;
+use super::mutation::StoreAccess;
 
 fn managed_failure(index: usize, error: SdkError) -> SdkError {
     SdkError::BatchStatementFailed {
@@ -41,7 +40,7 @@ fn read_only_access_refuses_before_any_request() {
 
 #[test]
 fn managed_batch_failure_is_determinate_not_applied() {
-    let failure = classify_batch_failure(&managed_failure(
+    let failure = super::mutation::classify_batch_failure(&managed_failure(
         2,
         SdkError::Constraint("unique".to_owned()),
     ));
@@ -54,7 +53,7 @@ fn managed_batch_failure_is_determinate_not_applied() {
     );
 
     // 资格写（第 0 条）自身失败：整批同样回滚，且能指出是哪条被拒。
-    let qualification = classify_batch_failure(&managed_failure(
+    let qualification = super::mutation::classify_batch_failure(&managed_failure(
         0,
         SdkError::Error("no such table".to_owned()),
     ));
@@ -69,14 +68,14 @@ fn managed_batch_failure_is_determinate_not_applied() {
 
 #[test]
 fn qualification_conflict_is_only_recognized_on_the_first_statement() {
-    let conflict = classify_batch_failure(&managed_failure(
+    let conflict = super::mutation::classify_batch_failure(&managed_failure(
         0,
         SdkError::Constraint("primary key".to_owned()),
     ));
     assert_eq!(conflict, BatchFailure::QualificationConflict);
 
     // 效果语句上的唯一键冲突是业务冲突，不是资格占用。
-    let effect = classify_batch_failure(&managed_failure(
+    let effect = super::mutation::classify_batch_failure(&managed_failure(
         1,
         SdkError::Constraint("primary key".to_owned()),
     ));
@@ -91,7 +90,7 @@ fn qualification_conflict_is_only_recognized_on_the_first_statement() {
 
 #[test]
 fn rollback_failure_is_never_reported_as_not_applied() {
-    let failure = classify_batch_failure(&rollback_failure(managed_failure(
+    let failure = super::mutation::classify_batch_failure(&rollback_failure(managed_failure(
         0,
         SdkError::Constraint("primary key".to_owned()),
     )));
@@ -111,7 +110,7 @@ fn transport_busy_and_timeout_stay_unresolved() {
         SdkError::BusySnapshot("snapshot".to_owned()),
         SdkError::Interrupt("interrupted".to_owned()),
     ] {
-        match classify_batch_failure(&error) {
+        match super::mutation::classify_batch_failure(&error) {
             BatchFailure::Unknown { .. } => {}
             other => panic!("expected unresolved for {error:?}, got {other:?}"),
         }
@@ -120,9 +119,9 @@ fn transport_busy_and_timeout_stay_unresolved() {
 
 #[test]
 fn client_side_rejection_is_not_applied() {
-    let failure = classify_batch_failure(&SdkError::ToSqlConversionFailure(Box::new(
-        std::io::Error::other("bad param"),
-    )));
+    let failure = super::mutation::classify_batch_failure(&SdkError::ToSqlConversionFailure(
+        Box::new(std::io::Error::other("bad param")),
+    ));
     assert_eq!(
         failure,
         BatchFailure::NotApplied {
@@ -165,9 +164,9 @@ fn unresolved_mutation_maps_to_persistence_uncertain() {
 /// `NotFound` 那种「确实没有这一行」，也不是 `Corrupt` 那种「记录读不出来」）。
 #[test]
 fn missing_result_set_is_an_error_not_absence() {
-    assert!(ensure_result_sets(2, 2).is_ok());
+    assert!(super::mutation::ensure_result_sets(2, 2).is_ok());
     for (expected, actual) in [(2usize, 1usize), (1, 0), (1, 2)] {
-        let error = ensure_result_sets(expected, actual).unwrap_err();
+        let error = super::mutation::ensure_result_sets(expected, actual).unwrap_err();
         match error.kind() {
             SessionResourceErrorKind::Internal { detail } => {
                 assert!(detail.contains(&expected.to_string()));
@@ -187,12 +186,13 @@ fn missing_result_set_is_an_error_not_absence() {
 /// 主键查询至多一行：多给一行同样是无法解释的回复，不静默取其中一行。
 #[test]
 fn single_row_reads_do_not_pick_a_row_from_many() {
-    assert!(sole_row(Vec::new()).unwrap().is_none());
+    assert!(super::mutation::sole_row(Vec::new()).unwrap().is_none());
 
-    let one = sole_row(vec![vec![Value::Integer(7)]]).unwrap();
+    let one = super::mutation::sole_row(vec![vec![Value::Integer(7)]]).unwrap();
     assert_eq!(one, Some(vec![Value::Integer(7)]));
 
-    let error = sole_row(vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]).unwrap_err();
+    let error = super::mutation::sole_row(vec![vec![Value::Integer(1)], vec![Value::Integer(2)]])
+        .unwrap_err();
     assert!(matches!(
         error.kind(),
         SessionResourceErrorKind::Internal { .. }

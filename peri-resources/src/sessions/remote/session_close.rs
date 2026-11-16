@@ -7,13 +7,13 @@ use peri_acp_types::thread::ThreadId;
 use turso_serverless::Value;
 
 use super::super::mutation::RemoteStore;
-use super::super::sql::{int_at, StatementSpec};
-use super::{not_found, RemoteSessionData};
+use super::super::sql::StatementSpec;
+use super::RemoteSessionData;
 
 impl RemoteSessionData {
     pub(super) async fn finish_session_close(&self, id: &ThreadId) -> SessionResourceResult<()> {
         if !self.exists(id).await? {
-            return Err(not_found());
+            return Err(super::not_found());
         }
         if !self.read_close_intent(id).await? {
             return Err(SessionResourceError::conflict(
@@ -50,7 +50,12 @@ impl RemoteStore {
                 vec![Value::Text(id.clone())],
             ))
             .await?;
-        match row.as_deref().map(|row| (int_at(row, 0), int_at(row, 1))) {
+        match row.as_deref().map(|row| {
+            (
+                super::super::sql::int_at(row, 0),
+                super::super::sql::int_at(row, 1),
+            )
+        }) {
             Some((Some(0), _)) => Ok(CloseSettlement::Unknown),
             Some((Some(1), Some(1))) => Ok(CloseSettlement::Pending),
             Some((Some(1), Some(0))) => Ok(CloseSettlement::Finished),

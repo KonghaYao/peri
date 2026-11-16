@@ -3,16 +3,18 @@
 use std::sync::Arc;
 
 use peri_acp_types::skills::SkillMetadata;
-use rmcp::{
-    model::{ReadResourceRequestParams, Resource, ResourceContents},
-    Peer, RoleClient,
-};
+use rmcp::model::ReadResourceRequestParams;
+use rmcp::model::Resource;
+use rmcp::model::ResourceContents;
+use rmcp::Peer;
+use rmcp::RoleClient;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
-use super::super::client::cache_scope_allows_persistence;
+use super::super::client;
 use super::super::client::ConnectionResourceCache;
-use super::verify::disambiguate_names;
-use super::{parse_mcp_skill_md, READ_CONCURRENCY, RESOURCE_READ_TIMEOUT};
+use super::verify;
+use super::READ_CONCURRENCY;
+use super::RESOURCE_READ_TIMEOUT;
 
 /// 纯函数：`skill://` scheme 前缀判定（RFC 3986 scheme 大小写不敏感；
 /// `Skill://`/`SKILL://` 均命中）。发现侧（resources 扫描 / URI 段解析）与
@@ -143,7 +145,7 @@ pub(crate) async fn collect_skill_entries(
                 if task_cache.as_ref().is_some_and(|(cache, _)| !cache.is_current()) {
                     return None;
                 }
-                if cache_scope_allows_persistence(result.cache_scope)
+                if client::cache_scope_allows_persistence(result.cache_scope)
                     || (result.cache_scope.is_none() && result.ttl_ms.is_some())
                 {
                     if let (Some((cache, _)), Some(ticket)) = (task_cache.as_ref(), ticket) {
@@ -167,7 +169,7 @@ pub(crate) async fn collect_skill_entries(
                 ResourceContents::TextResourceContents { text, .. } => Some(text.clone()),
                 _ => None,
             });
-            text.and_then(|text| parse_mcp_skill_md(&text, &task_server, &uri))
+            text.and_then(|text| super::parse_mcp_skill_md(&text, &task_server, &uri))
         });
     }
 
@@ -185,6 +187,6 @@ pub(crate) async fn collect_skill_entries(
     // JoinSet 完成序非确定：按 name 排序保证输出确定（同一 server 条目名互异，
     // 排序稳定；下游 registry 条目序/commands 列表随之确定）。
     entries.sort_by(|a, b| a.name.cmp(&b.name));
-    let out = disambiguate_names(server, entries);
+    let out = verify::disambiguate_names(server, entries);
     (out.is_empty(), out)
 }

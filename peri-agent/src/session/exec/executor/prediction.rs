@@ -19,7 +19,7 @@ pub enum PredictionError {
 ///
 /// 此函数封装了 TUI 之前在 `acp_server/mod.rs` 内联的 Prediction 构造逻辑
 /// （`AgentModelBridge::new` + `ReactLLM::generate_reasoning` 一次调用），
-/// 避免违反 ARC-BOUNDARY-001 [TRAP]（docs/standards/architecture-contracts.md）：
+/// 避免违反 ARC-BOUNDARY-001 \[TRAP\]（docs/standards/architecture-contracts.md）：
 ///
 /// > Agent 构建和执行统一通过会话编排入口 `run_session_loop()`（ACP 侧经
 /// > 协议化薄壳 re-export）。禁止在 TUI 层直接构建 Agent。
@@ -104,6 +104,7 @@ pub async fn execute_prediction(
 /// 从 agent 执行后的 state 中提取最后一条非空 AI 消息文本。
 ///
 /// 纯函数（不持有 lock、不 await），便于单元测试。文本两侧空白会被裁剪。
+#[must_use]
 pub fn extract_prediction_text(messages: &[BaseMessage]) -> String {
     messages
         .iter()
@@ -135,6 +136,7 @@ const MAX_ACTION_LEN: usize = 200;
 /// - 同名动作后者覆盖前者
 /// - 每个动作内容：剥离控制字符（含换行）、trim、截断 200 字符；空内容跳过
 /// - 无任何标记/解析失败：整段回落为 Placeholder（现有行为）
+#[must_use]
 pub fn parse_prediction_actions(text: &str) -> Vec<PredictionAction> {
     let mut actions: Vec<PredictionAction> = Vec::new();
     let mut plain_parts: Vec<String> = Vec::new();

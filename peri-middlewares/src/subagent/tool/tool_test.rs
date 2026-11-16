@@ -8,20 +8,19 @@ use peri_acp_types::session_resources::{
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::thread::AgentStatus;
 use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding, SESSION_BINDING_VERSION};
-use peri_agent::{
-    agent::{
-        events::ExecutorEvent,
-        events_v2::ObserveEvent,
-        react::{ReactLLM, Reasoning, StreamingContext},
-        AgentCancellationToken,
-    },
-    messages::BaseMessage,
-    thread::{ThreadId, ThreadMeta},
-    tools::BaseTool,
-};
-use tempfile::tempdir;
+use peri_agent::agent::events::ExecutorEvent;
+use peri_agent::agent::events_v2::ObserveEvent;
+use peri_agent::agent::react::ReactLLM;
+use peri_agent::agent::react::Reasoning;
+use peri_agent::agent::react::StreamingContext;
+use peri_agent::agent::AgentCancellationToken;
+use peri_agent::messages::BaseMessage;
+use peri_agent::thread::ThreadId;
+use peri_agent::thread::ThreadMeta;
+use peri_agent::tools::BaseTool;
+use tempfile;
 
-use super::*;
+use super::SubAgentTool;
 use peri_agent::session::subagent::SubagentLlmSource;
 
 // Mock LLM: returns final answer directly
@@ -34,14 +33,14 @@ impl EchoLLM {
         request: peri_model::ModelRequest,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-        use crate::subagent::test_support::*;
+        use crate::subagent::test_support;
         let _ = &cancellation;
-        let messages = base_messages(&request);
-        let defined = defined_tools(&request);
+        let messages = test_support::base_messages(&request);
+        let defined = test_support::defined_tools(&request);
         let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
         let last = messages.last().map(|m| m.content()).unwrap_or_default();
-        text_events(format!("echo: {}", last))
+        test_support::text_events(format!("echo: {}", last))
     }
 }
 crate::subagent::test_support::fixture_model_impl!(EchoLLM);
@@ -268,12 +267,14 @@ pub(crate) fn with_agent_catalog(
     )],
 ) -> SubAgentTool {
     use peri_acp_types::plugin::ConfigSource;
-    use peri_acp_types::workspace_resources::{agent_uri, META_KEY_FRONTMATTER, META_KEY_SCOPE};
+    use peri_acp_types::workspace_resources;
+    use peri_acp_types::workspace_resources::META_KEY_FRONTMATTER;
+    use peri_acp_types::workspace_resources::META_KEY_SCOPE;
     use rmcp::model::{MetaObject, Resource};
 
     let mut resources = Vec::new();
     for (scope, id, frontmatter) in entries {
-        let uri = agent_uri(*scope, None, id).expect("agent uri");
+        let uri = workspace_resources::agent_uri(*scope, None, id).expect("agent uri");
         let mut meta = serde_json::Map::new();
         meta.insert(
             META_KEY_SCOPE.to_string(),
@@ -336,7 +337,7 @@ async fn agent_definition_without_a_resource_face_reports_a_gap() {
 async fn built_in_policy_is_enforced_by_the_registry_catalog() {
     use peri_acp_types::workspace_resources::ResourceScope;
     // 只有 builtin 来源的定义：关闭 built-in policy 时不可加载；resume 放开。
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_str().unwrap();
     let tool = with_agent_catalog(
         tool_with_built_ins_disabled(cwd),
@@ -377,7 +378,7 @@ async fn invoke_resolves_agent_from_argument_cwd_before_starting_factory() {
 
     // W5：Agent 定义来源是会话绑定的资源面；显式 cwd 只能是父目录的等价路径。
     // 本用例保留「失败不启动 factory」断言（锁 failed-before-spawn 顺序）。
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -456,7 +457,7 @@ async fn background_invoke_uses_argument_cwd_for_loader_failure() {
     // W5：Agent 定义来源是**会话绑定的资源面**（builtin `workspace` 实例的
     // project agent 根 = 会话 cwd 的 `.claude/agents`）；`cwd` 参数不再决定
     // 定义来源。本用例锁「定义不可得时后台路径报错且不启动 factory」。
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -542,10 +543,11 @@ async fn background_invoke_uses_argument_cwd_for_loader_failure() {
 
 #[tokio::test]
 async fn mcp_agent_suggestions_require_activation_and_connection() {
-    use crate::mcp::{
-        client::{ClientStatus, McpClientHandle, OAuthStatus},
-        McpAgentRegistry, McpClientPool,
-    };
+    use crate::mcp::client::ClientStatus;
+    use crate::mcp::client::McpClientHandle;
+    use crate::mcp::client::OAuthStatus;
+    use crate::mcp::McpAgentRegistry;
+    use crate::mcp::McpClientPool;
     use rmcp::model::Resource;
 
     let empty_pool = Arc::new(McpClientPool::new_empty());
@@ -894,7 +896,7 @@ mod mcp_activation_owner_test;
 async fn closed_agent_face_hides_and_blocks_activation_without_disk_fallback() {
     use peri_acp_types::workspace_resources::ResourceScope;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(

@@ -1,15 +1,23 @@
 //! Production planner → durable Micro commit → fresh restored model view.
-use super::*;
-use crate::agent::compact_v2::planner::{
-    plan_micro_with_facts, ArchivePlanningScope, ContextPressure, MicroPlanningFacts,
-};
-use crate::agent::compact_v2::projection::{
-    render_persisted_llm_view, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
-    ProviderCapabilities, PROJECTION_POLICY_VERSION,
-};
+use crate::agent::compact_v2::config::CompactConfig;
+
+use crate::agent::compact_v2::planner::ArchivePlanningScope;
+use crate::agent::compact_v2::planner::ContextPressure;
+use crate::agent::compact_v2::planner::MicroPlanningFacts;
+
+use crate::agent::compact_v2::projection::MicroCompactPlan;
+use crate::agent::compact_v2::projection::ProjectionAction;
+use crate::agent::compact_v2::projection::ProjectionActionEntry;
+use crate::agent::compact_v2::projection::ProjectionTarget;
+use crate::agent::compact_v2::projection::ProviderCapabilities;
+use crate::agent::compact_v2::projection::PROJECTION_POLICY_VERSION;
 use crate::messages::{BaseMessage, ToolCallRequest};
-use crate::session::test_resources::{mock::MockSessionResources, TestSession};
+use crate::session::test_resources::mock::MockSessionResources;
+use crate::session::test_resources::TestSession;
+use crate::session::transcript::MessageTranscript;
 use crate::tools::ContextRetention;
+use peri_acp_types::context_archive::ArchiveError;
+use peri_acp_types::store::MessageFlags;
 
 fn append_steps(transcript: &mut MessageTranscript) {
     transcript.append(BaseMessage::human("Keep the public interface unchanged."));
@@ -34,7 +42,11 @@ fn exposed_plan(transcript: &MessageTranscript, session_id: String) -> MicroComp
     let mut facts = MicroPlanningFacts {
         archive_scope: Some(ArchivePlanningScope {
             thread_id: session_id,
-            committed_tail: transcript.entries().last().unwrap().id(),
+            committed_tail: transcript
+                .entries()
+                .last()
+                .expect("transcript entries fixture must contain the expected element")
+                .id(),
         }),
         ..Default::default()
     };
@@ -49,7 +61,7 @@ fn exposed_plan(transcript: &MessageTranscript, session_id: String) -> MicroComp
             }
         }
     }
-    plan_micro_with_facts(
+    crate::agent::compact_v2::planner::plan_micro_with_facts(
         transcript,
         &CompactConfig {
             micro_compact_stale_steps: 0,
@@ -66,7 +78,7 @@ fn exposed_plan(transcript: &MessageTranscript, session_id: String) -> MicroComp
         &facts,
         &ProviderCapabilities::openai(),
     )
-    .unwrap()
+    .expect("the plan micro with facts fixture result is required for this assertion")
 }
 
 #[tokio::test]
@@ -76,9 +88,9 @@ async fn test_micro_cold_history_keeps_every_byte_without_exposure_evidence() {
     append_steps(&mut transcript);
     let revision = transcript.view_revision();
     assert_eq!(
-        micro_compact(&mut transcript, &CompactConfig::default())
+        crate::agent::compact_v2::micro::micro_compact(&mut transcript, &CompactConfig::default())
             .await
-            .unwrap(),
+            .expect("the default fixture result is required for this assertion"),
         0
     );
     assert_eq!(transcript.view_revision(), revision);
@@ -99,22 +111,35 @@ async fn test_micro_planner_commit_and_fresh_restore_share_one_view() {
     assert!(!plan.catalogs.is_empty());
     assert!(plan.estimated_tokens_saved > 0);
     let revision = transcript.view_revision();
-    let changed = apply_micro_plan(&mut transcript, &plan).await.unwrap();
+    let changed = crate::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
+        .await
+        .expect("the apply micro plan fixture result is required for this assertion");
     assert!(changed > 0);
     assert_ne!(transcript.view_revision(), revision);
-    let hot = render_persisted_llm_view(&transcript, &ProviderCapabilities::openai()).unwrap();
+    let hot = crate::agent::compact_v2::projection::render_persisted_llm_view(
+        &transcript,
+        &ProviderCapabilities::openai(),
+    )
+    .expect("the render persisted llm view fixture result is required for this assertion");
     let fresh = bound.read_only_resources().await;
-    let snapshot = fresh.load_session_snapshot(&bound.thread_id).await.unwrap();
+    let snapshot = fresh
+        .load_session_snapshot(&bound.thread_id)
+        .await
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert_eq!(snapshot.payloads.len(), 13, "原始消息不能被Micro删除");
     assert!(snapshot.payloads.iter().any(|p| p
         .as_message()
         .is_some_and(|m| m.content().contains(&"source".repeat(4000)))));
     let mut restored = MessageTranscript::new().with_own_payloads(snapshot.payloads);
     restored.set_flags_batch(snapshot.flags);
-    let cold = render_persisted_llm_view(&restored, &ProviderCapabilities::openai()).unwrap();
+    let cold = crate::agent::compact_v2::projection::render_persisted_llm_view(
+        &restored,
+        &ProviderCapabilities::openai(),
+    )
+    .expect("the render persisted llm view fixture result is required for this assertion");
     assert_eq!(
-        serde_json::to_value(hot).unwrap(),
-        serde_json::to_value(cold).unwrap()
+        serde_json::to_value(hot).expect("to_value must accept this test fixture representation"),
+        serde_json::to_value(cold).expect("to_value must accept this test fixture representation")
     );
 }
 
@@ -127,9 +152,15 @@ async fn test_micro_late_result_is_not_part_of_an_earlier_plan() {
     let plan = exposed_plan(&transcript, bound.thread_id.clone());
     let late = BaseMessage::human("Late result remains a current obligation");
     transcript.append(late.clone());
-    apply_micro_plan(&mut transcript, &plan).await.unwrap();
+    crate::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
+        .await
+        .expect("the apply micro plan fixture result is required for this assertion");
     assert_eq!(transcript.flags(late.id()), MessageFlags::default());
-    let view = render_persisted_llm_view(&transcript, &ProviderCapabilities::openai()).unwrap();
+    let view = crate::agent::compact_v2::projection::render_persisted_llm_view(
+        &transcript,
+        &ProviderCapabilities::openai(),
+    )
+    .expect("the render persisted llm view fixture result is required for this assertion");
     assert!(view.iter().any(|message| message.id() == late.id()));
 }
 
@@ -143,7 +174,9 @@ async fn test_micro_rejects_changed_source_flags_before_any_projection_write() {
     let source = plan.actions[0].message_id;
     transcript.set_excluded(source, true);
     let revision = transcript.view_revision();
-    let error = apply_micro_plan(&mut transcript, &plan).await.unwrap_err();
+    let error = crate::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("source changed"));
     assert_eq!(transcript.view_revision(), revision);
     assert!(transcript.flags(source).excluded);
@@ -163,7 +196,9 @@ async fn test_micro_rejects_replaced_source_content_with_the_same_id() {
     let source = plan.actions[0].message_id;
     transcript.replace_by_id(BaseMessage::ai("replacement content").with_message_id(source));
     let revision = transcript.view_revision();
-    let error = apply_micro_plan(&mut transcript, &plan).await.unwrap_err();
+    let error = crate::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("source changed"));
     assert_eq!(transcript.view_revision(), revision);
     assert!(transcript
@@ -180,17 +215,30 @@ async fn test_micro_rewind_atomically_revokes_the_removed_anchor_in_hot_and_cold
     append_steps(&mut transcript);
     let keep = transcript.entries()[1].id();
     let plan = exposed_plan(&transcript, bound.thread_id.clone());
-    apply_micro_plan(&mut transcript, &plan).await.unwrap();
-    assert!(!transcript.projection_ref(keep).unwrap().entries.is_empty());
-    transcript.rewind_to(keep).await.unwrap();
+    crate::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
+        .await
+        .expect("the apply micro plan fixture result is required for this assertion");
+    assert!(!transcript
+        .projection_ref(keep)
+        .expect("the projection ref fixture result is required for this assertion")
+        .entries
+        .is_empty());
+    transcript
+        .rewind_to(keep)
+        .await
+        .expect("the rewind to fixture result is required for this assertion");
     assert_eq!(transcript.len(), 2);
-    assert!(transcript.projection_ref(keep).unwrap().entries.is_empty());
+    assert!(transcript
+        .projection_ref(keep)
+        .expect("the projection ref fixture result is required for this assertion")
+        .entries
+        .is_empty());
     let snapshot = bound
         .read_only_resources()
         .await
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert_eq!(snapshot.payloads.len(), 2);
     assert_eq!(transcript.flags(keep), snapshot.flags[&keep]);
 }
@@ -203,7 +251,9 @@ async fn test_micro_unreadable_archive_rejects_before_committing_any_member() {
     append_steps(&mut transcript);
     let plan = exposed_plan(&transcript, "unsupported".into());
     let revision = transcript.view_revision();
-    let error = apply_micro_plan(&mut transcript, &plan).await.unwrap_err();
+    let error = crate::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("recovery_unavailable"));
     assert_eq!(transcript.view_revision(), revision);
     assert_eq!(store.compaction_calls(), 0);
@@ -219,7 +269,10 @@ async fn test_micro_known_batch_failure_preserves_previous_revision_and_flags() 
     let mut transcript = MessageTranscript::new().with_persistence(store.clone(), "failure".into());
     let first = transcript.append(BaseMessage::tool_result("a", "long".repeat(1000)));
     let second = transcript.append(BaseMessage::tool_result("b", "long".repeat(1000)));
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let plan = MicroCompactPlan {
         policy_version: PROJECTION_POLICY_VERSION,
         actions: [first, second]
@@ -238,7 +291,9 @@ async fn test_micro_known_batch_failure_preserves_previous_revision_and_flags() 
     };
     let revision = transcript.view_revision();
     store.fail_compaction();
-    let error = apply_micro_plan(&mut transcript, &plan).await.unwrap_err();
+    let error = crate::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("injected compaction failure"));
     assert_eq!(transcript.view_revision(), revision);
     assert_eq!(store.compaction_calls(), 1, "成员必须一次批量提交");
@@ -248,11 +303,14 @@ async fn test_micro_known_batch_failure_preserves_previous_revision_and_flags() 
 
 #[tokio::test]
 async fn test_micro_rejects_full_directive_overflow_without_partial_commit_or_lost_recovery() {
-    use peri_acp_types::context_archive::{
-        build_catalog, ArchiveReadRequest, ArchiveRoot, ContextArchiveReadPort,
-        ARCHIVE_CHUNK_BYTES, ARCHIVE_MAX_METADATA_BYTES,
-    };
-    use peri_acp_types::store::{serialize_persisted_payload, PersistedPayload};
+    use peri_acp_types::context_archive;
+    use peri_acp_types::context_archive::ArchiveReadRequest;
+    use peri_acp_types::context_archive::ArchiveRoot;
+    use peri_acp_types::context_archive::ContextArchiveReadPort;
+    use peri_acp_types::context_archive::ARCHIVE_CHUNK_BYTES;
+    use peri_acp_types::context_archive::ARCHIVE_MAX_METADATA_BYTES;
+    use peri_acp_types::store;
+    use peri_acp_types::store::PersistedPayload;
 
     let bound = TestSession::open().await;
     let mut transcript =
@@ -260,14 +318,14 @@ async fn test_micro_rejects_full_directive_overflow_without_partial_commit_or_lo
     let small = BaseMessage::tool_result("small", "readable original ".repeat(40));
     let small_payload = PersistedPayload::Message(small.clone());
     let small_id = transcript.append(small);
-    let small_catalog = build_catalog(
+    let small_catalog = context_archive::build_catalog(
         bound.thread_id.clone(),
         "small".into(),
         small_id,
         std::slice::from_ref(&small_payload),
         "earlier archived output".into(),
     )
-    .unwrap();
+    .expect("the build catalog fixture result is required for this assertion");
     let action = |message_id, keep_head| ProjectionActionEntry {
         message_id,
         target: ProjectionTarget::Message,
@@ -277,7 +335,7 @@ async fn test_micro_rejects_full_directive_overflow_without_partial_commit_or_lo
             preserve_recovery_handle: true,
         },
     };
-    apply_micro_plan(
+    crate::agent::compact_v2::micro::apply_micro_plan(
         &mut transcript,
         &MicroCompactPlan {
             policy_version: PROJECTION_POLICY_VERSION,
@@ -287,28 +345,37 @@ async fn test_micro_rejects_full_directive_overflow_without_partial_commit_or_lo
         },
     )
     .await
-    .unwrap();
+    .expect("the apply micro plan fixture result is required for this assertion");
 
     let large = BaseMessage::tool_result("large", "x".repeat(ARCHIVE_CHUNK_BYTES * 962));
     let large_payload = PersistedPayload::Message(large.clone());
     let large_id = transcript.append(large);
-    transcript.flush_persistence().await.unwrap();
-    let mut large_catalog = build_catalog(
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
+    let mut large_catalog = context_archive::build_catalog(
         bound.thread_id.clone(),
         "large".into(),
         large_id,
         std::slice::from_ref(&large_payload),
         "historical output".into(),
     )
-    .unwrap();
-    let catalog_bytes = serde_json::to_vec(&large_catalog).unwrap().len();
+    .expect("the build catalog fixture result is required for this assertion");
+    let catalog_bytes = serde_json::to_vec(&large_catalog)
+        .expect("to_vec must accept this test fixture representation")
+        .len();
     assert!(catalog_bytes < ARCHIVE_MAX_METADATA_BYTES - 128);
     large_catalog
         .receipt
         .push_str(&"r".repeat(ARCHIVE_MAX_METADATA_BYTES - 128 - catalog_bytes));
-    large_catalog.validate().unwrap();
+    large_catalog
+        .validate()
+        .expect("the validate fixture result is required for this assertion");
     assert_eq!(
-        serde_json::to_vec(&large_catalog).unwrap().len(),
+        serde_json::to_vec(&large_catalog)
+            .expect("to_vec must accept this test fixture representation")
+            .len(),
         ARCHIVE_MAX_METADATA_BYTES - 128
     );
     let oversized = MicroCompactPlan {
@@ -325,12 +392,12 @@ async fn test_micro_rejects_full_directive_overflow_without_partial_commit_or_lo
         ..Default::default()
     };
     assert!(matches!(
-        validate_plan_metadata(&transcript, &oversized),
+        crate::agent::compact_v2::micro::validate_plan_metadata(&transcript, &oversized),
         Err(ArchiveError::Unsupported)
     ));
     let revision = transcript.view_revision();
     let old_small_flags = transcript.flags(small_id);
-    let error = apply_micro_plan(&mut transcript, &oversized)
+    let error = crate::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &oversized)
         .await
         .unwrap_err();
     assert!(error.to_string().contains("recovery_unavailable"));
@@ -339,36 +406,45 @@ async fn test_micro_rejects_full_directive_overflow_without_partial_commit_or_lo
     assert_eq!(transcript.flags(large_id), MessageFlags::default());
 
     let fresh = bound.read_only_resources().await;
-    let snapshot = fresh.load_session_snapshot(&bound.thread_id).await.unwrap();
+    let snapshot = fresh
+        .load_session_snapshot(&bound.thread_id)
+        .await
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert_eq!(snapshot.flags[&small_id], old_small_flags);
     assert_eq!(
         snapshot.flags.get(&large_id).cloned().unwrap_or_default(),
         MessageFlags::default()
     );
     assert_eq!(
-        serialize_persisted_payload(
+        store::serialize_persisted_payload(
             snapshot
                 .payloads
                 .iter()
                 .find(|payload| payload.id() == large_id)
-                .unwrap()
+                .expect("the id fixture result is required for this assertion")
         )
-        .unwrap(),
-        serialize_persisted_payload(&large_payload).unwrap()
+        .expect("micro rejects full directive overflow without partial commit or lost recovery: the completed fixture operation must provide its result payload"),
+        store::serialize_persisted_payload(&large_payload).expect("the serialize persisted payload fixture result is required for this assertion")
     );
     let recovered =
         crate::context_archive::ContextArchiveReader::new(fresh, bound.thread_id.clone())
             .read(ArchiveReadRequest {
-                archive_ref: small_catalog.member_ref(0).unwrap(),
+                archive_ref: small_catalog
+                    .member_ref(0)
+                    .expect("the member ref fixture result is required for this assertion"),
                 cursor: None,
                 budget_tokens: None,
             })
             .await
-            .unwrap();
+            .expect(
+                "the archived fixture bytes must be recoverable through the canonical read port",
+            );
     assert!(recovered.complete);
     assert_eq!(
         recovered.entries[0].data,
-        serialize_persisted_payload(&small_payload).unwrap()
+        store::serialize_persisted_payload(&small_payload).expect(
+            "the serialize persisted payload fixture result is required for this assertion"
+        )
     );
 }
 

@@ -1,10 +1,11 @@
 use serde_json::json;
 
-use super::*;
+use crate::state::MonitorState;
 use crate::state::{
     DEFAULT_DEADLINE_MS, DEFAULT_MAX_BYTES, DEFAULT_MAX_EVENTS, DEFAULT_READ_BYTES,
     DEFAULT_READ_LIMIT,
 };
+use std::sync::Arc;
 
 fn map(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
     value.as_object().cloned().expect("object")
@@ -12,7 +13,8 @@ fn map(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
 
 #[test]
 fn start_arguments_apply_documented_defaults() {
-    let parsed = parse_start(&map(json!({ "command": "tail -f app.log" }))).expect("valid");
+    let parsed =
+        crate::tools::parse_start(&map(json!({ "command": "tail -f app.log" }))).expect("valid");
     assert_eq!(parsed.command, "tail -f app.log");
     assert!(parsed.cwd.is_none());
     assert!(parsed.label.is_none());
@@ -29,33 +31,38 @@ fn start_arguments_apply_documented_defaults() {
 
 #[test]
 fn start_arguments_reject_missing_command_and_wrong_types() {
-    assert!(parse_start(&map(json!({}))).is_err());
-    assert!(parse_start(&map(json!({ "command": "   " }))).is_err());
-    assert!(parse_start(&map(json!({ "command": "true", "cwd": 3 }))).is_err());
-    assert!(parse_start(&map(json!({ "command": "true", "deadline_ms": "soon" }))).is_err());
-    assert!(parse_start(&map(json!({ "command": "true", "max_events": 1.5 }))).is_err());
+    assert!(crate::tools::parse_start(&map(json!({}))).is_err());
+    assert!(crate::tools::parse_start(&map(json!({ "command": "   " }))).is_err());
+    assert!(crate::tools::parse_start(&map(json!({ "command": "true", "cwd": 3 }))).is_err());
+    assert!(
+        crate::tools::parse_start(&map(json!({ "command": "true", "deadline_ms": "soon" })))
+            .is_err()
+    );
+    assert!(
+        crate::tools::parse_start(&map(json!({ "command": "true", "max_events": 1.5 }))).is_err()
+    );
 }
 
 #[test]
 fn start_arguments_carry_alert() {
-    let parsed = parse_start(&map(json!({
+    let parsed = crate::tools::parse_start(&map(json!({
         "command": "tail -f app.log",
         "alert": "ERROR|WARN"
     })))
     .expect("valid");
     assert_eq!(parsed.alert.as_deref(), Some("ERROR|WARN"));
-    assert!(parse_start(&map(json!({ "command": "true", "alert": 3 }))).is_err());
+    assert!(crate::tools::parse_start(&map(json!({ "command": "true", "alert": 3 }))).is_err());
 }
 
 #[test]
 fn read_arguments_apply_defaults_and_bounds() {
-    let parsed = parse_read(&map(json!({ "task_id": "monitor-1" }))).expect("valid");
+    let parsed = crate::tools::parse_read(&map(json!({ "task_id": "monitor-1" }))).expect("valid");
     assert_eq!(parsed.task_id, "monitor-1");
     assert!(parsed.after_seq.is_none());
     assert_eq!(parsed.limit, DEFAULT_READ_LIMIT);
     assert_eq!(parsed.max_bytes, DEFAULT_READ_BYTES);
 
-    let parsed = parse_read(&map(json!({
+    let parsed = crate::tools::parse_read(&map(json!({
         "task_id": "monitor-1",
         "after_seq": 7,
         "limit": 3,
@@ -66,31 +73,31 @@ fn read_arguments_apply_defaults_and_bounds() {
     assert_eq!(parsed.limit, 3);
     assert_eq!(parsed.max_bytes, 1024);
 
-    assert!(parse_read(&map(json!({ "task_id": "x", "limit": 0 }))).is_err());
-    assert!(parse_read(&map(json!({ "task_id": "x", "limit": 501 }))).is_err());
-    assert!(parse_read(&map(json!({ "task_id": "x", "max_bytes": 0 }))).is_err());
-    assert!(parse_read(&map(json!({ "task_id": "x" , "after_seq": -1 }))).is_err());
+    assert!(crate::tools::parse_read(&map(json!({ "task_id": "x", "limit": 0 }))).is_err());
+    assert!(crate::tools::parse_read(&map(json!({ "task_id": "x", "limit": 501 }))).is_err());
+    assert!(crate::tools::parse_read(&map(json!({ "task_id": "x", "max_bytes": 0 }))).is_err());
+    assert!(crate::tools::parse_read(&map(json!({ "task_id": "x" , "after_seq": -1 }))).is_err());
 }
 
 #[test]
 fn list_arguments_apply_defaults_and_bounds() {
-    let parsed = parse_list(&map(json!({}))).expect("valid");
+    let parsed = crate::tools::parse_list(&map(json!({}))).expect("valid");
     assert!(!parsed.include_ended);
     assert_eq!(parsed.limit, 50);
     assert!(
-        parse_list(&map(json!({ "include_ended": true })))
+        crate::tools::parse_list(&map(json!({ "include_ended": true })))
             .unwrap()
             .include_ended
     );
-    assert!(parse_list(&map(json!({ "limit": 0 }))).is_err());
-    assert!(parse_list(&map(json!({ "limit": 201 }))).is_err());
-    assert!(parse_list(&map(json!({ "include_ended": "yes" }))).is_err());
+    assert!(crate::tools::parse_list(&map(json!({ "limit": 0 }))).is_err());
+    assert!(crate::tools::parse_list(&map(json!({ "limit": 201 }))).is_err());
+    assert!(crate::tools::parse_list(&map(json!({ "include_ended": "yes" }))).is_err());
 }
 
 #[test]
 fn stop_arguments_require_task_id() {
-    assert!(parse_stop(&map(json!({}))).is_err());
-    let parsed = parse_stop(&map(json!({
+    assert!(crate::tools::parse_stop(&map(json!({}))).is_err());
+    let parsed = crate::tools::parse_stop(&map(json!({
         "task_id": "monitor-1",
         "reason": "done"
     })))
@@ -102,7 +109,7 @@ fn stop_arguments_require_task_id() {
 #[test]
 fn declared_tools_are_deferred_and_in_registry_order() {
     let state = Arc::new(MonitorState::new("."));
-    let tools = tools(state);
+    let tools = crate::tools::tools(state);
     let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
     assert_eq!(
         names,

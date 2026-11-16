@@ -1,6 +1,7 @@
 //! Permission controls address the active session through the ACP lifecycle gate.
 
-use crate::{acp_client::AcpTuiClient, kit::atoms};
+use crate::acp_client::AcpTuiClient;
+use crate::kit::atoms;
 
 pub(crate) fn request(mode: &str) {
     if let Some(client) = atoms::ACP_CLIENT_HANDLE.get() {

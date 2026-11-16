@@ -9,43 +9,46 @@
 //!
 //! Mock 命名约定：`make_` 前缀（函数），`Mock` 前缀（结构体）。
 
-use std::{
-    ffi::OsString,
-    sync::{Arc, Mutex, MutexGuard, OnceLock},
-};
-
-#[cfg(not(windows))]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use parking_lot::MutexGuard;
+use std::ffi::OsString;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
 #[cfg(not(windows))]
 use futures::stream;
-use peri_acp_types::{
-    event::ExecutorEvent,
-    interaction::{
-        InteractionContext, InteractionResponse, TrustedInteractionOwner, UserInteractionBroker,
-    },
-    messages::{BaseMessage, MessageContent},
-    permission::{PermissionMode, SharedPermissionMode},
-};
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::interaction::InteractionContext;
+use peri_acp_types::interaction::InteractionResponse;
+use peri_acp_types::interaction::TrustedInteractionOwner;
+use peri_acp_types::interaction::UserInteractionBroker;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::permission::PermissionMode;
+use peri_acp_types::permission::SharedPermissionMode;
 use peri_agent::session::exec::executor_helpers::{
     ForwarderLauncherFn, StageBuildFn, StageBuildRequest,
 };
-use serial_test::serial;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use crate::session::executor::{
-    AutoClassifierFactory, FrozenSessionData, PromptStopReason, SessionContext, SubagentLlmFactory,
-    TurnInput,
+    AutoClassifierFactory, FrozenSessionData, SessionContext, SubagentLlmFactory, TurnInput,
 };
 #[path = "execution_fixture_test.rs"]
 pub(super) mod execution_fixture;
-use crate::{
-    provider::{LlmProvider, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels},
-    session::{agent_pool::AgentPool, event_sink::EventSink, SessionManager},
-};
+use crate::provider::LlmProvider;
+use crate::provider::PeriConfig;
+use crate::provider::ProfileConfig;
+use crate::provider::Profiles;
+use crate::provider::ProviderConfig;
+use crate::provider::ProviderModels;
+use crate::session::agent_pool::AgentPool;
+use crate::session::event_sink::EventSink;
+use crate::session::SessionManager;
 pub(super) use execution_fixture::run_session_loop;
-use peri_middlewares::{host_ports::AgentCatalogProvider, tool_search::ToolSearchIndex};
+use peri_middlewares::host_ports::AgentCatalogProvider;
+use peri_middlewares::tool_search::ToolSearchIndex;
 #[cfg(not(windows))]
 use peri_model::{
     Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult, ModelStream,
@@ -53,7 +56,7 @@ use peri_model::{
 };
 
 #[cfg_attr(windows, allow(dead_code))]
-static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static HOME_LOCK: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
 
 #[cfg_attr(windows, allow(dead_code))]
 struct HomeGuard {
@@ -64,10 +67,7 @@ struct HomeGuard {
 #[cfg_attr(windows, allow(dead_code))]
 impl HomeGuard {
     fn set(home: &std::path::Path) -> Self {
-        let lock = HOME_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lock = HOME_LOCK.get_or_init(|| parking_lot::Mutex::new(())).lock();
         let previous = std::env::var_os("HOME");
         std::env::set_var("HOME", home);
         Self {
@@ -227,7 +227,7 @@ impl Model for UsageModel {
         _request: ModelRequest,
         cancellation: AgentCancellationToken,
     ) -> ModelResult<ModelStream> {
-        let response = ModelResponse::new(
+        let response = ModelResponse::try_new(
             ModelMessage::assistant_text("done"),
             StopReason::EndTurn,
             Some(TokenUsage {
@@ -261,7 +261,7 @@ impl Model for CapturePromptModel {
         cancellation: AgentCancellationToken,
     ) -> ModelResult<ModelStream> {
         self.requests.lock().unwrap().push(request);
-        let response = ModelResponse::new(
+        let response = ModelResponse::try_new(
             ModelMessage::assistant_text("done"),
             StopReason::EndTurn,
             None,

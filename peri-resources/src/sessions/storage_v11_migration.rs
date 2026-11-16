@@ -28,10 +28,7 @@ use sqlx::{Connection, SqliteConnection};
 
 use crate::sessions::canonical;
 use crate::sessions::schema_shape;
-use crate::sessions::storage_v2_plan::{
-    machine_identity, path_source_name, plan_binding_rows, plan_workspace_rows, read_local_plan,
-    LegacyBindingRow,
-};
+use crate::sessions::storage_v2_plan::LegacyBindingRow;
 
 /// 独立入口：库停在 11 且形状是压缩前的登记形状时调用（调用方持有初始化锁）。
 pub(super) async fn migrate_local_v11(connection: &mut SqliteConnection) -> Result<()> {
@@ -97,7 +94,7 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
         .bind(crate::sessions::machine::current()?)
         .execute(&mut *connection)
         .await?;
-    let input = read_local_plan(&mut *connection).await?;
+    let input = crate::sessions::storage_v2_plan::read_local_plan(&mut *connection).await?;
     let bindings = read_legacy_bindings(&mut *connection).await?;
 
     // 旧登记与引用它的绑定表整体换掉：SQLite 不能删约束，只能重建，
@@ -121,7 +118,7 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
         .execute(&mut *connection)
         .await?;
     for machine_id in &machines {
-        let (name, kind) = machine_identity(machine_id);
+        let (name, kind) = crate::sessions::storage_v2_plan::machine_identity(machine_id);
         sqlx::query("INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, ?2, ?3)")
             .bind(machine_id)
             .bind(name)
@@ -132,7 +129,7 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
     sqlx::query(canonical::CREATE_WORKSPACES_TABLE_SQL)
         .execute(&mut *connection)
         .await?;
-    for row in plan_workspace_rows(
+    for row in crate::sessions::storage_v2_plan::plan_workspace_rows(
         &input.plan,
         &input.sessions,
         &input.registrations,
@@ -149,7 +146,9 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
         .bind(row.id.to_string())
         .bind(&row.machine_id)
         .bind(path)
-        .bind(path_source_name(row.path_source))
+        .bind(crate::sessions::storage_v2_plan::path_source_name(
+            row.path_source,
+        ))
         .bind(&row.project_id)
         .bind(&row.discovery)
         .execute(&mut *connection)
@@ -187,7 +186,11 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
     sqlx::query(canonical::CREATE_BINDINGS_TABLE_SQL)
         .execute(&mut *connection)
         .await?;
-    for row in plan_binding_rows(&bindings, &input.plan, &input.registrations)? {
+    for row in crate::sessions::storage_v2_plan::plan_binding_rows(
+        &bindings,
+        &input.plan,
+        &input.registrations,
+    )? {
         sqlx::query(
             "INSERT INTO session_bindings(thread_id, schema_version, project_id, workspace_id, relative_cwd, discovery_snapshot)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",

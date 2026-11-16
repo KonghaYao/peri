@@ -9,10 +9,9 @@
 
 use std::collections::HashSet;
 
-use crate::builtin_mcp::{
-    effective_name_of, find, is_reserved_instance_name, original_tool_name_of_effective,
-    BUILTIN_MCP_INSTANCES, BUILTIN_RESERVED_INSTANCE_NAMES,
-};
+use crate::builtin_mcp;
+use crate::builtin_mcp::BUILTIN_MCP_INSTANCES;
+use crate::builtin_mcp::BUILTIN_RESERVED_INSTANCE_NAMES;
 use crate::plugin::{ConfigSource, McpServerConfig};
 
 /// 名字合法性：与模型面工具名的字符集约束一致（`^[A-Za-z0-9_-]+$`）。
@@ -184,7 +183,7 @@ fn instance_identity_equals_server_name() {
 fn reserved_names_superset_of_implemented_instances() {
     for instance in BUILTIN_MCP_INSTANCES {
         assert!(
-            is_reserved_instance_name(instance.name),
+            builtin_mcp::is_reserved_instance_name(instance.name),
             "已实现实例 {} 必须在保留名表内",
             instance.name
         );
@@ -202,9 +201,9 @@ fn reserved_names_superset_of_implemented_instances() {
             BUILTIN_RESERVED_INSTANCE_NAMES.contains(&reserved),
             "保留名表缺失: {reserved}"
         );
-        assert!(is_reserved_instance_name(reserved));
+        assert!(builtin_mcp::is_reserved_instance_name(reserved));
     }
-    assert!(!is_reserved_instance_name("some-user-server"));
+    assert!(!builtin_mcp::is_reserved_instance_name("some-user-server"));
 }
 
 #[test]
@@ -253,20 +252,20 @@ fn policy_keys_are_unique_and_frozen() {
 
 #[test]
 fn find_hits_only_implemented_instances() {
-    let web = find("web").expect("web 是已实现实例");
+    let web = builtin_mcp::find("web").expect("web 是已实现实例");
     assert_eq!(web.name, "web");
     assert_eq!(web.tools.len(), 2);
-    let artifact = find("artifact").expect("artifact 是已实现实例");
+    let artifact = builtin_mcp::find("artifact").expect("artifact 是已实现实例");
     assert_eq!(artifact.name, "artifact");
     assert_eq!(artifact.tools.len(), 1);
-    let cron = find("cron").expect("cron 是已实现实例");
+    let cron = builtin_mcp::find("cron").expect("cron 是已实现实例");
     assert_eq!(cron.name, "cron");
     assert_eq!(
         cron.tools.len(),
         5,
         "cron_register / cron_list / cron_remove / cron_toggle / cron_acknowledge"
     );
-    let monitor = find("monitor").expect("monitor 是已实现实例");
+    let monitor = builtin_mcp::find("monitor").expect("monitor 是已实现实例");
     assert_eq!(monitor.name, "monitor");
     assert_eq!(
         monitor.tools.len(),
@@ -281,7 +280,7 @@ fn find_hits_only_implemented_instances() {
         monitor.tools.iter().all(|tool| !tool.direct),
         "monitor 工具全部 deferred"
     );
-    let workspace = find("workspace").expect("workspace 是已实现实例（AW3-06）");
+    let workspace = builtin_mcp::find("workspace").expect("workspace 是已实现实例（AW3-06）");
     assert_eq!(workspace.name, "workspace");
     // 工具面成员冻结为迁移前的 7 个本地工具（AW3-03：成员集合零变化）。
     let originals: HashSet<&str> = workspace
@@ -304,47 +303,65 @@ fn find_hits_only_implemented_instances() {
     );
 
     // 未登记的名字：不得被解析（否则会构造出无 runtime 的 transport）。
-    assert!(find("").is_none());
-    assert!(find("Web").is_none(), "实例名匹配区分大小写");
-    assert!(find("WebSearch").is_none());
+    assert!(builtin_mcp::find("").is_none());
+    assert!(builtin_mcp::find("Web").is_none(), "实例名匹配区分大小写");
+    assert!(builtin_mcp::find("WebSearch").is_none());
 }
 
 #[test]
 fn original_tool_name_of_effective_hits_frozen_literals() {
     assert_eq!(
-        original_tool_name_of_effective("WebSearch"),
+        builtin_mcp::original_tool_name_of_effective("WebSearch"),
         Some("WebSearch")
     );
     assert_eq!(
-        original_tool_name_of_effective("WebFetch"),
+        builtin_mcp::original_tool_name_of_effective("WebFetch"),
         Some("WebFetch")
     );
     assert_eq!(
-        original_tool_name_of_effective("artifact"),
+        builtin_mcp::original_tool_name_of_effective("artifact"),
         Some("artifact")
     );
     assert_eq!(
-        original_tool_name_of_effective("mcp__cron__cron_register"),
+        builtin_mcp::original_tool_name_of_effective("mcp__cron__cron_register"),
         Some("cron_register")
     );
     assert_eq!(
-        original_tool_name_of_effective("mcp__cron__cron_list"),
+        builtin_mcp::original_tool_name_of_effective("mcp__cron__cron_list"),
         Some("cron_list")
     );
     assert_eq!(
-        original_tool_name_of_effective("mcp__cron__cron_remove"),
+        builtin_mcp::original_tool_name_of_effective("mcp__cron__cron_remove"),
         Some("cron_remove")
     );
-    assert_eq!(original_tool_name_of_effective("Read"), Some("Read"));
-    assert_eq!(original_tool_name_of_effective("Write"), Some("Write"));
-    assert_eq!(original_tool_name_of_effective("Edit"), Some("Edit"));
-    assert_eq!(original_tool_name_of_effective("Glob"), Some("Glob"));
-    assert_eq!(original_tool_name_of_effective("Grep"), Some("Grep"));
     assert_eq!(
-        original_tool_name_of_effective("folder_operations"),
+        builtin_mcp::original_tool_name_of_effective("Read"),
+        Some("Read")
+    );
+    assert_eq!(
+        builtin_mcp::original_tool_name_of_effective("Write"),
+        Some("Write")
+    );
+    assert_eq!(
+        builtin_mcp::original_tool_name_of_effective("Edit"),
+        Some("Edit")
+    );
+    assert_eq!(
+        builtin_mcp::original_tool_name_of_effective("Glob"),
+        Some("Glob")
+    );
+    assert_eq!(
+        builtin_mcp::original_tool_name_of_effective("Grep"),
+        Some("Grep")
+    );
+    assert_eq!(
+        builtin_mcp::original_tool_name_of_effective("folder_operations"),
         Some("folder_operations")
     );
-    assert_eq!(original_tool_name_of_effective("Bash"), Some("Bash"));
+    assert_eq!(
+        builtin_mcp::original_tool_name_of_effective("Bash"),
+        Some("Bash")
+    );
 }
 
 #[test]
@@ -360,7 +377,7 @@ fn original_tool_name_of_effective_misses_unknown_and_external() {
         "mcp__web__WebSearch::extra",
     ] {
         assert_eq!(
-            original_tool_name_of_effective(unknown),
+            builtin_mcp::original_tool_name_of_effective(unknown),
             None,
             "{unknown} 不得被归一（纯查表 + 区分大小写）"
         );
@@ -374,16 +391,16 @@ fn effective_name_of_hits_frozen_literals_and_is_inverse_of_original_lookup() {
     for instance in BUILTIN_MCP_INSTANCES {
         for tool in instance.tools {
             assert_eq!(
-                effective_name_of(instance.instance, tool.original_name),
+                builtin_mcp::effective_name_of(instance.instance, tool.original_name),
                 Some(tool.effective_name),
                 "实例 {} 的工具 {} 必须按原始名查到冻结的 effective name",
                 instance.name,
                 tool.original_name
             );
-            let original = original_tool_name_of_effective(tool.effective_name)
+            let original = builtin_mcp::original_tool_name_of_effective(tool.effective_name)
                 .expect("effective name 必须可反查原始名");
             assert_eq!(
-                effective_name_of(instance.instance, original),
+                builtin_mcp::effective_name_of(instance.instance, original),
                 Some(tool.effective_name),
                 "两查表必须互逆：{original} → {}",
                 tool.effective_name
@@ -391,8 +408,14 @@ fn effective_name_of_hits_frozen_literals_and_is_inverse_of_original_lookup() {
         }
     }
     // 逐字写死两处哨兵：表驱动断言在同一次改错（改字面量又改期望）下会自洽通过。
-    assert_eq!(effective_name_of("workspace", "Read"), Some("Read"));
-    assert_eq!(effective_name_of("web", "WebFetch"), Some("WebFetch"));
+    assert_eq!(
+        builtin_mcp::effective_name_of("workspace", "Read"),
+        Some("Read")
+    );
+    assert_eq!(
+        builtin_mcp::effective_name_of("web", "WebFetch"),
+        Some("WebFetch")
+    );
 }
 
 #[test]
@@ -400,7 +423,7 @@ fn effective_name_of_misses_unknown_instance_and_unknown_tool() {
     // 未登记实例：未知 / 大小写不同 / 空串一律 None ⇒ 消费点走不含工具名的兜底。
     for instance in ["", "Workspace", "workspace2", "mcp__workspace__"] {
         assert_eq!(
-            effective_name_of(instance, "Read"),
+            builtin_mcp::effective_name_of(instance, "Read"),
             None,
             "未登记实例 {instance} 不得命中"
         );
@@ -408,13 +431,13 @@ fn effective_name_of_misses_unknown_instance_and_unknown_tool() {
     // 已登记实例但无此原始名（纯查表 + 区分大小写，不做 `mcp__` 反拆）。
     for tool in ["", "read", "READ", "ReadFile", "Read::extra"] {
         assert_eq!(
-            effective_name_of("workspace", tool),
+            builtin_mcp::effective_name_of("workspace", tool),
             None,
             "workspace 无原始名 {tool} ⇒ None"
         );
     }
     // 跨实例不得串名：`artifact` 不在 web 实例内。
-    assert_eq!(effective_name_of("web", "artifact"), None);
+    assert_eq!(builtin_mcp::effective_name_of("web", "artifact"), None);
 }
 
 #[test]

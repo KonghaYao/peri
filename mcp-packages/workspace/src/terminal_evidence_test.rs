@@ -1,4 +1,11 @@
-use super::*;
+use crate::terminal::BashTool;
+use peri_agent::messages::BaseMessage;
+use peri_agent::session::MessageTranscript;
+use peri_agent::tools::BaseTool;
+use peri_agent::tools::ToolExecutionStatus;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn test_bash_normal_command() {
@@ -19,7 +26,7 @@ async fn test_bash_typed_evidence_preserves_nonzero_exit() {
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let output = tool
         .invoke_output(
-            serde_json::json!({"command": output_command(0, "tail-failure", 7)}),
+            serde_json::json!({"command": crate::terminal::tests::output_command(0, "tail-failure", 7)}),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
@@ -37,7 +44,7 @@ async fn test_bash_typed_evidence_persists_10k_to_65k_projection() {
     let output = tool
         .invoke_output(
             serde_json::json!({
-                "command": output_command(20000, "", 0)
+                "command": crate::terminal::tests::output_command(20000, "", 0)
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
@@ -135,14 +142,14 @@ async fn test_bash_typed_evidence_marks_promoted_timeout_still_running() {
 #[tokio::test]
 async fn test_production_dispatch_persists_bash_tail_failure_evidence() {
     let fixture = tempfile::tempdir().unwrap();
-    let context = dispatch_context(
+    let context = crate::terminal::tests::dispatch_context(
         fixture.path(),
         BashTool::new(fixture.path().to_string_lossy()),
     );
-    let outcome = dispatch_bash(
+    let outcome = crate::terminal::tests::dispatch_bash(
         &context,
         serde_json::json!({
-            "command": output_command(20000, "TAIL_FAILURE", 7)
+            "command": crate::terminal::tests::output_command(20000, "TAIL_FAILURE", 7)
         }),
         CancellationToken::new(),
     )
@@ -177,20 +184,20 @@ async fn test_production_dispatch_persists_bash_tail_failure_evidence() {
             ..
         }
     ));
-    maybe_export_fixture(std::slice::from_ref(&message));
+    crate::terminal::tests::maybe_export_fixture(std::slice::from_ref(&message));
 }
 
 #[tokio::test]
 async fn test_production_dispatch_persists_bash_success_projection_and_ref() {
     let fixture = tempfile::tempdir().unwrap();
-    let context = dispatch_context(
+    let context = crate::terminal::tests::dispatch_context(
         fixture.path(),
         BashTool::new(fixture.path().to_string_lossy()),
     );
-    let outcome = dispatch_bash(
+    let outcome = crate::terminal::tests::dispatch_bash(
         &context,
         serde_json::json!({
-            "command": output_command(20000, "", 0)
+            "command": crate::terminal::tests::output_command(20000, "", 0)
         }),
         CancellationToken::new(),
     )
@@ -210,14 +217,14 @@ async fn test_production_dispatch_persists_bash_success_projection_and_ref() {
 #[tokio::test]
 async fn test_production_dispatch_live_tool_end_matches_canonical_projection() {
     let fixture = tempfile::tempdir().unwrap();
-    let (context, mut handles) = dispatch_context_with_events(
+    let (context, mut handles) = crate::terminal::tests::dispatch_context_with_events(
         fixture.path(),
         BashTool::new(fixture.path().to_string_lossy()),
     );
-    let outcome = dispatch_bash(
+    let outcome = crate::terminal::tests::dispatch_bash(
         &context,
         serde_json::json!({
-            "command": output_command(20000, "", 7)
+            "command": crate::terminal::tests::output_command(20000, "", 7)
         }),
         CancellationToken::new(),
     )
@@ -247,14 +254,14 @@ async fn test_production_dispatch_live_tool_end_matches_canonical_projection() {
 #[tokio::test]
 async fn test_production_dispatch_near_limit_output_persists_before_metadata_projection() {
     let fixture = tempfile::tempdir().unwrap();
-    let context = dispatch_context(
+    let context = crate::terminal::tests::dispatch_context(
         fixture.path(),
         BashTool::new(fixture.path().to_string_lossy()),
     );
-    let outcome = dispatch_bash(
+    let outcome = crate::terminal::tests::dispatch_bash(
         &context,
         serde_json::json!({
-            "command": output_command(9900, "", 0)
+            "command": crate::terminal::tests::output_command(9900, "", 0)
         }),
         CancellationToken::new(),
     )
@@ -274,11 +281,11 @@ async fn test_production_dispatch_near_limit_output_persists_before_metadata_pro
 async fn test_production_dispatch_persists_promoted_timeout_lifecycle() {
     let fixture = tempfile::tempdir().unwrap();
     let manager = Arc::new(peri_mcp_common::create_local_task_manager());
-    let context = dispatch_context(
+    let context = crate::terminal::tests::dispatch_context(
         fixture.path(),
         BashTool::new(fixture.path().to_string_lossy()).with_task_manager(manager.clone()),
     );
-    let outcome = dispatch_bash(
+    let outcome = crate::terminal::tests::dispatch_bash(
         &context,
         serde_json::json!({"command": "sleep 1", "timeout": 100}),
         CancellationToken::new(),
@@ -303,7 +310,7 @@ async fn test_production_dispatch_persists_outer_cancel_result() {
     let fixture = tempfile::tempdir().unwrap();
     let started = fixture.path().join("started");
     let manager = Arc::new(peri_mcp_common::create_local_task_manager());
-    let context = dispatch_context(
+    let context = crate::terminal::tests::dispatch_context(
         fixture.path(),
         BashTool::new(fixture.path().to_string_lossy()).with_task_manager(manager.clone()),
     );
@@ -311,7 +318,7 @@ async fn test_production_dispatch_persists_outer_cancel_result() {
     let task_context = context.clone();
     let task_cancel = cancel.clone();
     let dispatch = tokio::spawn(async move {
-        dispatch_bash(
+        crate::terminal::tests::dispatch_bash(
             &task_context,
             serde_json::json!({"command": "printf '%s' $$ > started; sleep 2"}),
             task_cancel,

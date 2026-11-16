@@ -7,7 +7,7 @@ use peri_process::ProcessTree;
 use tokio::process::{Child, Command};
 
 pub(super) fn spawn(mut command: Command) -> io::Result<(Child, ProcessTree)> {
-    let mut tree = ProcessTree::new()?;
+    let mut tree = ProcessTree::try_new()?;
     tree.prepare(&mut command);
     let mut child = command.spawn()?;
     if let Err(error) = tree.attach(&child) {

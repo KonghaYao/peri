@@ -18,9 +18,8 @@
 use std::sync::Arc;
 
 use peri_acp_types::session_resources::SessionResourceErrorKind;
-use peri_agent::session::subagent::{
-    extract_last_ai_text, format_subagent_result, SubagentRunMode,
-};
+use peri_agent::session::subagent;
+use peri_agent::session::subagent::SubagentRunMode;
 use peri_agent::tools::{BaseTool, EffectiveToolError, EffectiveToolErrorCode};
 
 fn preflight_rejected(
@@ -296,8 +295,8 @@ impl super::SubAgentTool {
         Ok(format!(
             "child_thread_id: {}\naction: resume\n{}",
             spawned.child_thread_id,
-            format_subagent_result(&peri_agent::agent::react::AgentOutput {
-                text: extract_last_ai_text(&spawned.session),
+            subagent::format_subagent_result(&peri_agent::agent::react::AgentOutput {
+                text: subagent::extract_last_ai_text(&spawned.session),
                 steps: 0,
                 tool_calls: Vec::new(),
                 stop_reason: None,

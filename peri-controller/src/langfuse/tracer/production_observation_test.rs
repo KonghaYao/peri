@@ -10,12 +10,12 @@ use peri_agent::messages::BaseMessage;
 use peri_agent::tools::ToolDefinition;
 use peri_config::observability::LangfuseCompression;
 
-use super::stages::MAIN_AGENT_KEY;
-use super::LangfuseTracer;
 use crate::langfuse::config::LangfuseConfig;
 use crate::langfuse::fake_session::FakeLangfuseSession;
 use crate::langfuse::session::LangfuseSession;
 use crate::langfuse::session_like::LangfuseSessionLike;
+use crate::langfuse::tracer::stages::MAIN_AGENT_KEY;
+use crate::langfuse::tracer::LangfuseTracer;
 
 fn tracer(rate: f64) -> (LangfuseTracer, Arc<FakeLangfuseSession>) {
     let session = FakeLangfuseSession::new("session-observation");
@@ -70,8 +70,18 @@ fn workflow_spans(events: &[IngestionEvent]) -> Vec<&SpanBody> {
 
 fn assert_complete_span(body: &SpanBody, plan: &str) {
     assert!(body.id.as_ref().is_some_and(|id| !id.is_empty()));
-    let start = chrono::DateTime::parse_from_rfc3339(body.start_time.as_deref().unwrap()).unwrap();
-    let end = chrono::DateTime::parse_from_rfc3339(body.end_time.as_deref().unwrap()).unwrap();
+    let start = chrono::DateTime::parse_from_rfc3339(
+        body.start_time
+            .as_deref()
+            .expect("the as deref fixture result is required for this assertion"),
+    )
+    .expect("the parse from rfc3339 fixture result is required for this assertion");
+    let end = chrono::DateTime::parse_from_rfc3339(
+        body.end_time
+            .as_deref()
+            .expect("the as deref fixture result is required for this assertion"),
+    )
+    .expect("the parse from rfc3339 fixture result is required for this assertion");
     assert!(start <= end);
     assert_eq!(body.input, Some(serde_json::json!({"plan": plan})));
     assert!(body.output.is_some());
@@ -92,7 +102,7 @@ async fn workflow_completed_exports_once_with_frozen_start_input_and_parent() {
     tracer
         .on_turn_end(TurnTelemetryOutcome::Completed)
         .await
-        .unwrap();
+        .expect("the on turn end fixture result is required for this assertion");
 
     let events = session.events_snapshot();
     let spans = workflow_spans(&events);
@@ -118,33 +128,50 @@ async fn workflow_stage_overwrite_closes_once_and_ignores_late_ends() {
     let (mut tracer, session) = tracer(1.0);
     tracer.on_turn_start("input");
     tracer.on_stage_start(Stage::Act, "turn");
-    let old_stage = tracer.stages.active_handle(MAIN_AGENT_KEY).unwrap().clone();
+    let old_stage = tracer
+        .stages
+        .active_handle(MAIN_AGENT_KEY)
+        .expect("the active handle fixture result is required for this assertion")
+        .clone();
     tracer.on_workflow_start("wf", "overwritten plan");
     tracer.on_stage_start(Stage::Reason, "turn");
     let new_stage_id = tracer
         .stages
         .active_handle(MAIN_AGENT_KEY)
-        .unwrap()
+        .expect("the active handle fixture result is required for this assertion")
         .span_id
         .clone();
     tracer.on_workflow_end("wf", 8, 12);
     tracer.on_stage_end(MAIN_AGENT_KEY, &old_stage, StageStatus::Error);
     assert_eq!(
-        tracer.stages.active_handle(MAIN_AGENT_KEY).unwrap().span_id,
+        tracer
+            .stages
+            .active_handle(MAIN_AGENT_KEY)
+            .expect("the active handle fixture result is required for this assertion")
+            .span_id,
         new_stage_id
     );
     tracer
         .on_turn_end(TurnTelemetryOutcome::Completed)
         .await
-        .unwrap();
+        .expect("the on turn end fixture result is required for this assertion");
 
     let events = session.events_snapshot();
     let spans = workflow_spans(&events);
     assert_eq!(spans.len(), 1);
     assert_complete_span(spans[0], "overwritten plan");
-    assert_eq!(spans[0].metadata.as_ref().unwrap()["incomplete"], true);
     assert_eq!(
-        spans[0].output.as_ref().unwrap()["error_class"],
+        spans[0]
+            .metadata
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion")["incomplete"],
+        true
+    );
+    assert_eq!(
+        spans[0]
+            .output
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion")["error_class"],
         "lifecycle_incomplete"
     );
 }
@@ -158,7 +185,7 @@ async fn workflow_turn_end_fallback_exports_once_and_late_end_is_ignored() {
     tracer
         .on_turn_end(TurnTelemetryOutcome::Completed)
         .await
-        .unwrap();
+        .expect("the on turn end fixture result is required for this assertion");
     tracer.on_workflow_end("wf", 2, 3);
 
     let events = session.events_snapshot();
@@ -176,7 +203,11 @@ async fn workflow_stage_end_fallback_survives_duplicate_stage_end() {
     let (mut tracer, session) = tracer(1.0);
     tracer.on_turn_start("input");
     tracer.on_stage_start(Stage::Act, "turn");
-    let mut handle = tracer.stages.active_handle(MAIN_AGENT_KEY).unwrap().clone();
+    let mut handle = tracer
+        .stages
+        .active_handle(MAIN_AGENT_KEY)
+        .expect("the active handle fixture result is required for this assertion")
+        .clone();
     handle.start_time = "2026-09-01T00:00:00Z".to_string();
     tracer.on_workflow_start("wf", "stage-end plan");
     tracer.on_stage_end(MAIN_AGENT_KEY, &handle, StageStatus::Done);
@@ -186,7 +217,7 @@ async fn workflow_stage_end_fallback_survives_duplicate_stage_end() {
     tracer
         .on_turn_end(TurnTelemetryOutcome::Completed)
         .await
-        .unwrap();
+        .expect("the on turn end fixture result is required for this assertion");
 
     let events = session.events_snapshot();
     let spans = workflow_spans(&events);
@@ -208,7 +239,7 @@ async fn workflow_end_before_start_and_outside_act_do_not_export() {
     tracer
         .on_turn_end(TurnTelemetryOutcome::Completed)
         .await
-        .unwrap();
+        .expect("the on turn end fixture result is required for this assertion");
     assert!(workflow_spans(&session.events_snapshot()).is_empty());
 }
 
@@ -224,7 +255,7 @@ async fn unsampled_workflow_and_generation_do_not_export() {
     tracer
         .on_turn_end(TurnTelemetryOutcome::Completed)
         .await
-        .unwrap();
+        .expect("the on turn end fixture result is required for this assertion");
     assert!(session.events_snapshot().is_empty());
 }
 
@@ -235,7 +266,7 @@ async fn turn_uses_session_attributes_without_session_create() {
     tracer
         .on_turn_end(TurnTelemetryOutcome::Completed)
         .await
-        .unwrap();
+        .expect("the on turn end fixture result is required for this assertion");
     let events = session.events_snapshot();
     assert!(!events
         .iter()
@@ -265,7 +296,7 @@ async fn abandoned_generation_keeps_full_fallback_messages_and_tools() {
     tracer
         .on_turn_end(TurnTelemetryOutcome::Completed)
         .await
-        .unwrap();
+        .expect("the on turn end fixture result is required for this assertion");
 
     let generations: Vec<_> = server
         .spans()
@@ -305,7 +336,7 @@ async fn abandoned_generation_prefers_complete_raw_request() {
     tracer
         .on_turn_end(TurnTelemetryOutcome::Completed)
         .await
-        .unwrap();
+        .expect("the on turn end fixture result is required for this assertion");
     assert_eq!(
         server.generation_input().as_deref(),
         Some(stable_bytes(&raw).as_str()),
@@ -318,7 +349,7 @@ fn start_subagent(tracer: &mut LangfuseTracer) -> (String, String) {
     tracer.on_turn_start("input");
     let stage = tracer
         .on_stage_start_gated("main", Stage::Act, "turn")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     tracer.on_tool_start(
         "main",
         "invocation",
@@ -327,7 +358,10 @@ fn start_subagent(tracer: &mut LangfuseTracer) -> (String, String) {
     );
     tracer.on_subagent_start("main", "child", "worker", false);
     (
-        tracer.subagent.observation_id_of("child").unwrap(),
+        tracer
+            .subagent
+            .observation_id_of("child")
+            .expect("the observation id of fixture result is required for this assertion"),
         stage.span_id,
     )
 }
@@ -352,8 +386,18 @@ fn assert_completed_subagent(events: &[IngestionEvent], observation_id: &str, pa
     );
     assert_eq!(body.parent_observation_id.as_deref(), Some(parent));
     assert_eq!(body.session_id.as_deref(), Some("session-observation"));
-    let start = chrono::DateTime::parse_from_rfc3339(body.start_time.as_deref().unwrap()).unwrap();
-    let end = chrono::DateTime::parse_from_rfc3339(body.end_time.as_deref().unwrap()).unwrap();
+    let start = chrono::DateTime::parse_from_rfc3339(
+        body.start_time
+            .as_deref()
+            .expect("the as deref fixture result is required for this assertion"),
+    )
+    .expect("the parse from rfc3339 fixture result is required for this assertion");
+    let end = chrono::DateTime::parse_from_rfc3339(
+        body.end_time
+            .as_deref()
+            .expect("the as deref fixture result is required for this assertion"),
+    )
+    .expect("the parse from rfc3339 fixture result is required for this assertion");
     assert!(start <= end);
     assert!(body.output.is_some());
     assert!(!events.iter().any(|event| matches!(
@@ -383,7 +427,7 @@ async fn subagent_exports_complete_immutable_observation_only_after_both_signals
     tracer
         .on_turn_end(TurnTelemetryOutcome::Completed)
         .await
-        .unwrap();
+        .expect("the on turn end fixture result is required for this assertion");
     let events = session.events_snapshot();
     assert_completed_subagent(&events, &observation_id, &parent);
     let body = events
@@ -396,8 +440,13 @@ async fn subagent_exports_complete_immutable_observation_only_after_both_signals
             }
             _ => None,
         })
-        .unwrap();
-    assert_eq!(body.output.as_ref().unwrap()["text"], "complete result🙂");
+        .expect("the find map fixture result is required for this assertion");
+    assert_eq!(
+        body.output
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion")["text"],
+        "complete result🙂"
+    );
 }
 
 #[tokio::test]
@@ -412,7 +461,7 @@ async fn failed_turn_closes_cached_subagent_once_with_full_start_record() {
             )),
         })
         .await
-        .unwrap();
+        .expect("the on turn end fixture result is required for this assertion");
     tracer.on_subagent_stop("main", "child", "late-stop", false);
     let events = session.events_snapshot();
     assert_completed_subagent(&events, &observation_id, &parent);
@@ -426,7 +475,7 @@ async fn failed_turn_closes_cached_subagent_once_with_full_start_record() {
             }
             _ => None,
         })
-        .unwrap();
+        .expect("the find map fixture result is required for this assertion");
     assert_eq!(metadata["incomplete_reason"], "MissingStop");
 }
 
@@ -439,7 +488,7 @@ async fn cancelled_turn_closes_cached_subagent_once() {
             reason: peri_acp_types::command::PromptStopReason::Cancelled,
         })
         .await
-        .unwrap();
+        .expect("the on turn end fixture result is required for this assertion");
     tracer.on_subagent_stop("main", "child", "late-stop", false);
     assert_completed_subagent(&session.events_snapshot(), &observation_id, &parent);
 }
@@ -475,7 +524,7 @@ async fn gated_generation_preserves_raw_request_through_late_subagent_join() {
     tracer
         .on_turn_end(TurnTelemetryOutcome::Completed)
         .await
-        .unwrap();
+        .expect("the on turn end fixture result is required for this assertion");
     let generations: Vec<_> = server
         .spans()
         .into_iter()

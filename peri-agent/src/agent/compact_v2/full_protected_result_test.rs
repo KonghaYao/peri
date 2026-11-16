@@ -9,8 +9,8 @@ use peri_model::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::*;
 use crate::agent::compact_v2::config::CompactConfig;
+
 use crate::messages::{BaseMessage, MessageContent};
 use crate::session::transcript::MessageTranscript;
 use crate::thread::ThreadMeta;
@@ -48,8 +48,11 @@ impl Model for CapturingFullModel {
         request: ModelRequest,
         _cancellation: CancellationToken,
     ) -> ModelResult<ModelResponse> {
-        self.requests.lock().unwrap().push(request);
-        Ok(ModelResponse::new(
+        self.requests
+            .lock()
+            .expect("self requests mutex must remain unpoisoned throughout the test")
+            .push(request);
+        Ok(ModelResponse::try_new(
             ModelMessage::assistant_text("<summary>captured</summary>"),
             StopReason::EndTurn,
             None,
@@ -83,7 +86,7 @@ impl Model for FullLifecycleModel {
         _request: ModelRequest,
         _cancellation: CancellationToken,
     ) -> ModelResult<ModelResponse> {
-        Ok(ModelResponse::new(
+        Ok(ModelResponse::try_new(
             ModelMessage::assistant_text("<summary>FULL_SUMMARY_MARKER</summary>"),
             StopReason::EndTurn,
             None,
@@ -115,7 +118,7 @@ fn terminal_reminder(
             summary: None,
             metadata: serde_json::json!({ "task_id": task_id }),
         })
-        .unwrap()
+        .expect("the construct fixture result is required for this assertion")
 }
 
 fn ready_mailbox(
@@ -126,10 +129,10 @@ fn ready_mailbox(
     let mailbox = crate::session::async_result_mailbox::AsyncResultMailbox::new("s", "t");
     mailbox
         .accept(id, reminder, MessageSource::ShellComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     mailbox
         .mark_canonical_ready(id, reminder, MessageSource::ShellComplete, Some(1))
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
     mailbox
 }
 
@@ -137,12 +140,12 @@ async fn protected_history(
     reminder: &peri_acp_types::system_reminder::TrustedSystemReminder,
     id: crate::messages::MessageId,
 ) -> (tempfile::TempDir, MessageTranscript) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
     let store = MockSessionResources::new();
     let thread_id = store
         .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
         .await
-        .unwrap();
+        .expect("the create thread fixture result is required for this assertion");
     let mut transcript = MessageTranscript::new().with_persistence(store, thread_id);
     transcript.append(make_human("summarize the session"));
     transcript.append(make_ai("previous answer"));
@@ -159,7 +162,7 @@ fn protected_view(
         &crate::agent::model_bridge::AgentModelBridge::projection_capabilities(&FullLifecycleModel),
         protected,
     )
-    .unwrap()
+    .expect("the render persisted llm view with protected fixture result is required for this assertion")
 }
 
 /// [T02] Receive 后立即 Full：摘要模型看不到终态事实（不承担消费确认），
@@ -176,25 +179,30 @@ async fn async_result_full_compact_protects_uncovered_success_fact() {
     let model = CapturingFullModel {
         requests: std::sync::Mutex::new(Vec::new()),
     };
-    let result = full_compact_inner_with_protected(
+    let result = crate::agent::compact_v2::full::full_compact_inner_with_protected(
         &mut transcript,
         Some(&model),
         &CompactConfig::default(),
-        dir.path().to_str().unwrap(),
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
         &mailbox.protected_snapshot(),
     )
     .await
-    .unwrap();
+    .expect("the full compact inner with protected fixture result is required for this assertion");
 
     assert_eq!(
         result.outcome,
         crate::agent::compact_v2::CompactOutcome::FullApplied
     );
-    let requests = model.requests.lock().unwrap();
+    let requests = model
+        .requests
+        .lock()
+        .expect("model requests mutex must remain unpoisoned throughout the test");
     assert_eq!(requests.len(), 1);
     assert!(
         !serde_json::to_string(&requests[0])
-            .unwrap()
+            .expect("to_string must accept this test fixture representation")
             .contains(marker),
         "摘要请求不得包含未覆盖终态事实：摘要模型不承担消费确认"
     );
@@ -253,19 +261,21 @@ async fn async_result_full_compact_preserves_failed_exit_code() {
     let model = CapturingFullModel {
         requests: std::sync::Mutex::new(Vec::new()),
     };
-    full_compact_inner_with_protected(
+    let _ = crate::agent::compact_v2::full::full_compact_inner_with_protected(
         &mut transcript,
         Some(&model),
         &CompactConfig::default(),
-        dir.path().to_str().unwrap(),
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
         &mailbox.protected_snapshot(),
     )
     .await
-    .unwrap();
+    .expect("the full compact inner with protected fixture result is required for this assertion");
 
     assert!(
-        !serde_json::to_string(&model.requests.lock().unwrap()[0])
-            .unwrap()
+        !serde_json::to_string(&model.requests.lock().expect("model requests mutex must remain unpoisoned throughout the test")[0])
+            .expect("async result full compact preserves failed exit code: the completed fixture operation must provide its result payload")
             .contains(marker),
         "失败事实也不得交给摘要模型归档"
     );
@@ -290,7 +300,9 @@ async fn async_result_full_compact_archives_covered_result() {
     let receipt = mailbox
         .capture_request("attempt-t04", "request-t04", &[id])
         .expect("请求必须绑定 receipt");
-    mailbox.cover_after_commit(&receipt, None).unwrap();
+    mailbox
+        .cover_after_commit(&receipt, None)
+        .expect("the cover after commit fixture result is required for this assertion");
     assert!(
         mailbox.protected_snapshot().is_empty(),
         "Covered 结果不再属于保护集合"
@@ -301,15 +313,17 @@ async fn async_result_full_compact_archives_covered_result() {
     );
 
     let (dir, mut transcript) = protected_history(&reminder, id).await;
-    let result = full_compact_inner_with_protected(
+    let result = crate::agent::compact_v2::full::full_compact_inner_with_protected(
         &mut transcript,
         Some(&FullLifecycleModel),
         &CompactConfig::default(),
-        dir.path().to_str().unwrap(),
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
         &mailbox.protected_snapshot(),
     )
     .await
-    .unwrap();
+    .expect("the full compact inner with protected fixture result is required for this assertion");
 
     assert_eq!(
         result.affected_count, 3,
@@ -327,20 +341,26 @@ async fn async_result_full_compact_archives_covered_result() {
 /// monitor ALERT 覆盖后既不受保护，也不留下永久回执；Full Compact 释放正文引用。
 #[tokio::test]
 async fn monitor_alert_full_compact_releases_covered_reminder_without_receipt() {
-    use peri_acp_types::monitor::{monitor_alert_delivery_id, monitor_alert_reminder};
+    use peri_acp_types::monitor;
     use peri_acp_types::session::MessageSource;
 
     let monitor_id = "monitor-T04-full";
-    let id = monitor_alert_delivery_id(monitor_id, 1);
-    let reminder = monitor_alert_reminder(monitor_id, Some("webots"), 1, Some(1)).unwrap();
+    let id = monitor::monitor_alert_delivery_id(monitor_id, 1);
+    let reminder = monitor::monitor_alert_reminder(monitor_id, Some("webots"), 1, Some(1))
+        .expect("the monitor alert reminder fixture result is required for this assertion");
     let mailbox = crate::session::async_result_mailbox::AsyncResultMailbox::new("s", "t");
     mailbox
         .mark_canonical_ready(id, &reminder, MessageSource::McpNotification, None)
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
     let receipt = mailbox
         .capture_request("attempt-monitor", "request-monitor", &[id])
         .expect("请求必须绑定 receipt");
-    assert_eq!(mailbox.cover_after_commit(&receipt, None).unwrap(), 1);
+    assert_eq!(
+        mailbox
+            .cover_after_commit(&receipt, None)
+            .expect("the cover after commit fixture result is required for this assertion"),
+        1
+    );
     assert!(mailbox.protected_snapshot().is_empty());
     assert!(
         mailbox.covered_is_empty(),
@@ -348,15 +368,17 @@ async fn monitor_alert_full_compact_releases_covered_reminder_without_receipt() 
     );
 
     let (dir, mut transcript) = protected_history(&reminder, id).await;
-    let result = full_compact_inner_with_protected(
+    let result = crate::agent::compact_v2::full::full_compact_inner_with_protected(
         &mut transcript,
         Some(&FullLifecycleModel),
         &CompactConfig::default(),
-        dir.path().to_str().unwrap(),
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
         &mailbox.protected_snapshot(),
     )
     .await
-    .unwrap();
+    .expect("the full compact inner with protected fixture result is required for this assertion");
 
     assert_eq!(result.affected_count, 3);
     assert!(
@@ -384,7 +406,7 @@ async fn async_result_full_compact_noop_when_only_protected_facts_remain() {
     let model = CapturingFullModel {
         requests: std::sync::Mutex::new(Vec::new()),
     };
-    let result = full_compact_inner_with_protected(
+    let result = crate::agent::compact_v2::full::full_compact_inner_with_protected(
         &mut transcript,
         Some(&model),
         &CompactConfig::default(),
@@ -392,7 +414,7 @@ async fn async_result_full_compact_noop_when_only_protected_facts_remain() {
         &mailbox.protected_snapshot(),
     )
     .await
-    .unwrap();
+    .expect("the full compact inner with protected fixture result is required for this assertion");
 
     assert_eq!(
         result.outcome,
@@ -400,7 +422,11 @@ async fn async_result_full_compact_noop_when_only_protected_facts_remain() {
     );
     assert!(result.summary.is_none());
     assert!(
-        model.requests.lock().unwrap().is_empty(),
+        model
+            .requests
+            .lock()
+            .expect("model requests mutex must remain unpoisoned throughout the test")
+            .is_empty(),
         "没有可归档历史时不得生成空摘要"
     );
     assert_eq!(
@@ -420,7 +446,8 @@ async fn async_result_full_compact_noop_when_only_protected_facts_remain() {
 /// 未覆盖终态事实既不进摘要，也不被归档；派生视图仍带完整事实。
 #[tokio::test]
 async fn async_result_manual_and_auto_full_share_protection() {
-    use crate::agent::compact_v2::{run_compact_with_protected, ContextPressure};
+    use crate::agent::compact_v2;
+    use crate::agent::compact_v2::ContextPressure;
 
     let marker = "T10_PROTECTED_FACT state: succeeded exit_code: 0";
     let reminder = terminal_reminder("shell-T10", marker);
@@ -441,14 +468,16 @@ async fn async_result_manual_and_auto_full_share_protection() {
             requests: std::sync::Mutex::new(Vec::new()),
         };
         let mut failures = 0;
-        let result = run_compact_with_protected(
+        let result = compact_v2::run_compact_with_protected(
             &mut transcript,
             Some(&model),
             &CompactConfig::default(),
             &pressure,
             force,
             &mut failures,
-            dir.path().to_str().unwrap(),
+            dir.path()
+                .to_str()
+                .expect("the fixture text must be valid UTF-8"),
             None,
             &mailbox.protected_snapshot(),
         )
@@ -459,10 +488,13 @@ async fn async_result_manual_and_auto_full_share_protection() {
             crate::agent::compact_v2::CompactOutcome::FullApplied,
             "force={force}"
         );
-        let requests = model.requests.lock().unwrap();
+        let requests = model
+            .requests
+            .lock()
+            .expect("model requests mutex must remain unpoisoned throughout the test");
         assert!(
             !serde_json::to_string(&requests[0])
-                .unwrap()
+                .expect("to_string must accept this test fixture representation")
                 .contains(marker),
             "force={force}: 手动与自动入口都不得把未覆盖事实交给摘要模型"
         );

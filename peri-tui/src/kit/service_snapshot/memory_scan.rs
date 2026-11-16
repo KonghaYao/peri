@@ -5,8 +5,6 @@
 
 use std::time::{Duration, Instant};
 
-use crate::kit::atoms::MemoryEntry;
-
 pub(super) struct MemoryScan {
     pub(super) next: Instant,
     pub(super) entries: Vec<MemoryEntry>,
@@ -84,3 +82,5 @@ pub(super) fn scan_memory_dir() -> Vec<MemoryEntry> {
     }
     result
 }
+
+use crate::kit::atoms::MemoryEntry;

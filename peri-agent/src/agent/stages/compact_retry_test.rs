@@ -1,9 +1,11 @@
 //! 同一轮工具循环中的 Full 失败恢复，不依赖下一条用户 prompt。
 
-use super::*;
+use crate::agent::compact_v2::config::CompactConfig;
 use crate::agent::events_v2::{EventBus, EventHandles, ObserveEvent};
 use crate::agent::react::{ReactLLM, Reasoning, StreamingContext, ToolCall};
-use crate::agent::stages::{run_react_loop, LoopResult, StageContext};
+
+use crate::agent::stages::LoopResult;
+use crate::agent::stages::StageContext;
 use crate::agent::token::ContextBudget;
 use crate::error::AgentError;
 use crate::messages::BaseMessage;
@@ -12,10 +14,9 @@ use crate::session::test_resources::TestSession;
 use crate::session::{MessageSource, QueuedMessage};
 use crate::tools::{BaseTool, ToolContext};
 use peri_model::{ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelStream};
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 struct LoopModel {
@@ -110,7 +111,7 @@ impl peri_model::Model for SummaryModel {
                 std::future::pending::<()>().await;
             }
         }
-        ModelResponse::new(
+        ModelResponse::try_new(
             ModelMessage::assistant_text(if call < self.failures {
                 "<analysis>no usable summary</analysis>"
             } else {
@@ -176,7 +177,7 @@ async fn make_scenario(
 #[tokio::test]
 async fn test_compact_retry_recovers_inside_tool_loop() {
     let (bound, ctx, model, summary, mut handles) = make_scenario(1, false).await;
-    let result = run_react_loop(ctx.clone(), 10).await;
+    let result = crate::agent::stages::run_react_loop(ctx.clone(), 10).await;
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
     assert_eq!(
         *model.order.lock(),
@@ -198,7 +199,7 @@ async fn test_compact_retry_recovers_inside_tool_loop() {
             "重新生成不得回填空 assistant"
         );
         assert!(serde_json::to_string(&requests[1])
-            .unwrap()
+            .expect("to_string must accept this test fixture representation")
             .contains("original task"));
     }
     assert_eq!(
@@ -208,12 +209,15 @@ async fn test_compact_retry_recovers_inside_tool_loop() {
         1
     );
     let transcript = std::mem::take(&mut *ctx.session.transcript.write());
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let snapshot = bound
         .resources
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     // 热态已释放被排除的旧工作（收缩），因此按持久化事实核对「成功摘要替换旧工作」：
     // 摘要（含 CONTINUATION_HINT）之前的历史必须全部带 excluded；摘要与其后的新工作
     // 不在本次压缩范围内，不得被标记。
@@ -252,7 +256,7 @@ async fn test_compact_retry_recovers_inside_tool_loop() {
 #[tokio::test]
 async fn test_compact_retry_exhaustion_stops_before_next_reason() {
     let (_bound, ctx, model, summary, mut handles) = make_scenario(usize::MAX, false).await;
-    let result = run_react_loop(ctx.clone(), 10).await;
+    let result = crate::agent::stages::run_react_loop(ctx.clone(), 10).await;
     let LoopResult::Error(error) = result else {
         panic!("压缩失败必须显式终止：{result:?}");
     };
@@ -296,7 +300,7 @@ async fn test_compact_retry_exhaustion_stops_before_next_reason() {
 #[tokio::test]
 async fn test_compact_retry_cancel_stops_before_next_reason() {
     let (_bound, ctx, model, summary, _) = make_scenario(usize::MAX, true).await;
-    let result = run_react_loop(ctx.clone(), 10).await;
+    let result = crate::agent::stages::run_react_loop(ctx.clone(), 10).await;
     assert!(matches!(result, LoopResult::Interrupted), "{result:?}");
     assert_eq!(summary.calls.load(Ordering::SeqCst), 2);
     assert_eq!(model.requests.lock().len(), 1);
@@ -319,7 +323,7 @@ async fn test_compact_retry_existing_failure_limit_is_terminal() {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
         });
-    let result = run_react_loop(ctx, 10).await;
+    let result = crate::agent::stages::run_react_loop(ctx, 10).await;
     assert!(
         matches!(
             result,

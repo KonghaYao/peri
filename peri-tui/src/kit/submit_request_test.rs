@@ -1,17 +1,21 @@
 //! Tests for submit_request
 
-#[cfg(test)]
-use super::*;
+use super::ExportMode;
+use super::PanelKind;
+use super::RewindRequest;
+use super::SessionControlRequest;
+use super::SubmitRequest;
+use super::ViewActionRequest;
 
 #[test]
 fn test_parse_submit_request_returns_none_for_empty_input() {
-    assert_eq!(parse_submit_request("   \n\t "), None);
+    assert_eq!(super::parse_submit_request("   \n\t "), None);
 }
 
 #[test]
 fn test_parse_submit_request_treats_plain_text_as_agent_text() {
     assert_eq!(
-        parse_submit_request("hello world"),
+        super::parse_submit_request("hello world"),
         Some(SubmitRequest::AgentText {
             text: "hello world".to_string(),
             attachments: Vec::new(),
@@ -22,7 +26,7 @@ fn test_parse_submit_request_treats_plain_text_as_agent_text() {
 #[test]
 fn test_parse_submit_request_treats_compact_as_agent_text() {
     assert_eq!(
-        parse_submit_request("/compact now"),
+        super::parse_submit_request("/compact now"),
         Some(SubmitRequest::AgentText {
             text: "/compact now".to_string(),
             attachments: Vec::new(),
@@ -33,7 +37,7 @@ fn test_parse_submit_request_treats_compact_as_agent_text() {
 #[test]
 fn test_parse_submit_request_treats_unknown_slash_as_agent_text() {
     assert_eq!(
-        parse_submit_request("/unknown"),
+        super::parse_submit_request("/unknown"),
         Some(SubmitRequest::AgentText {
             text: "/unknown".to_string(),
             attachments: Vec::new(),
@@ -44,7 +48,7 @@ fn test_parse_submit_request_treats_unknown_slash_as_agent_text() {
 #[test]
 fn test_parse_submit_request_opens_model_panel() {
     assert_eq!(
-        parse_submit_request("/model"),
+        super::parse_submit_request("/model"),
         Some(SubmitRequest::OpenPanel(PanelKind::Model))
     );
 }
@@ -52,11 +56,11 @@ fn test_parse_submit_request_opens_model_panel() {
 #[test]
 fn test_parse_submit_request_resolves_history_aliases() {
     assert_eq!(
-        parse_submit_request("/history"),
+        super::parse_submit_request("/history"),
         Some(SubmitRequest::OpenPanel(PanelKind::ThreadBrowser))
     );
     assert_eq!(
-        parse_submit_request("/his"),
+        super::parse_submit_request("/his"),
         Some(SubmitRequest::OpenPanel(PanelKind::ThreadBrowser))
     );
 }
@@ -64,15 +68,15 @@ fn test_parse_submit_request_resolves_history_aliases() {
 #[test]
 fn test_parse_submit_request_matches_clear_aliases() {
     assert_eq!(
-        parse_submit_request("/clear"),
+        super::parse_submit_request("/clear"),
         Some(SubmitRequest::SessionControl(SessionControlRequest::Clear))
     );
     assert_eq!(
-        parse_submit_request("/cls"),
+        super::parse_submit_request("/cls"),
         Some(SubmitRequest::SessionControl(SessionControlRequest::Clear))
     );
     assert_eq!(
-        parse_submit_request("/reset"),
+        super::parse_submit_request("/reset"),
         Some(SubmitRequest::SessionControl(SessionControlRequest::Clear))
     );
 }
@@ -80,14 +84,14 @@ fn test_parse_submit_request_matches_clear_aliases() {
 #[test]
 fn test_parse_submit_request_matches_setup() {
     assert_eq!(
-        parse_submit_request("/setup"),
+        super::parse_submit_request("/setup"),
         Some(SubmitRequest::SessionControl(
             SessionControlRequest::ToggleSetup
         ))
     );
     // /setup 后跟参数也识别
     assert_eq!(
-        parse_submit_request("/setup my-custom-arg"),
+        super::parse_submit_request("/setup my-custom-arg"),
         Some(SubmitRequest::SessionControl(
             SessionControlRequest::ToggleSetup
         ))
@@ -97,7 +101,7 @@ fn test_parse_submit_request_matches_setup() {
 #[test]
 fn test_parse_submit_request_matches_rewind_aliases() {
     assert_eq!(
-        parse_submit_request("/rewind abc --revert-files"),
+        super::parse_submit_request("/rewind abc --revert-files"),
         Some(SubmitRequest::SessionControl(
             SessionControlRequest::Rewind(RewindRequest {
                 target_message_id: "abc".to_string(),
@@ -106,7 +110,7 @@ fn test_parse_submit_request_matches_rewind_aliases() {
         ))
     );
     assert_eq!(
-        parse_submit_request("/undo xyz"),
+        super::parse_submit_request("/undo xyz"),
         Some(SubmitRequest::SessionControl(
             SessionControlRequest::Rewind(RewindRequest {
                 target_message_id: "xyz".to_string(),
@@ -119,33 +123,33 @@ fn test_parse_submit_request_matches_rewind_aliases() {
 #[test]
 fn test_parse_submit_request_matches_view_actions() {
     assert_eq!(
-        parse_submit_request("/provider"),
+        super::parse_submit_request("/provider"),
         Some(SubmitRequest::ViewAction(ViewActionRequest::CycleProvider))
     );
     assert_eq!(
-        parse_submit_request("/mode"),
+        super::parse_submit_request("/mode"),
         Some(SubmitRequest::ViewAction(
             ViewActionRequest::CyclePermissionMode
         ))
     );
     assert_eq!(
-        parse_submit_request("/debug-export-text"),
+        super::parse_submit_request("/debug-export-text"),
         Some(SubmitRequest::ViewAction(ViewActionRequest::ExportText(
             ExportMode::All,
         )))
     );
     assert_eq!(
-        parse_submit_request("/debug-export-text screen"),
+        super::parse_submit_request("/debug-export-text screen"),
         Some(SubmitRequest::ViewAction(ViewActionRequest::ExportText(
             ExportMode::Screen,
         )))
     );
     assert_eq!(
-        parse_submit_request("/exit"),
+        super::parse_submit_request("/exit"),
         Some(SubmitRequest::ViewAction(ViewActionRequest::Exit))
     );
     assert_eq!(
-        parse_submit_request("/quit"),
+        super::parse_submit_request("/quit"),
         Some(SubmitRequest::ViewAction(ViewActionRequest::Exit))
     );
 }
@@ -154,7 +158,7 @@ fn test_parse_submit_request_matches_view_actions() {
 fn test_parse_submit_request_intercepts_ui_domain() {
     // `ui:` 前缀显式形态 → ui 域本地拦截
     assert_eq!(
-        parse_submit_request("/ui:history"),
+        super::parse_submit_request("/ui:history"),
         Some(SubmitRequest::OpenPanel(PanelKind::ThreadBrowser))
     );
 }
@@ -163,7 +167,7 @@ fn test_parse_submit_request_intercepts_ui_domain() {
 fn test_parse_submit_request_ui_bare_name() {
     // 裸名（level 1 快捷形态）→ ui 域本地拦截
     assert_eq!(
-        parse_submit_request("/history"),
+        super::parse_submit_request("/history"),
         Some(SubmitRequest::OpenPanel(PanelKind::ThreadBrowser))
     );
 }
@@ -172,7 +176,7 @@ fn test_parse_submit_request_ui_bare_name() {
 fn test_parse_submit_request_ui_setup_explicit() {
     // `ui:` 前缀显式形态 → ToggleSetup
     assert_eq!(
-        parse_submit_request("/ui:setup"),
+        super::parse_submit_request("/ui:setup"),
         Some(SubmitRequest::SessionControl(
             SessionControlRequest::ToggleSetup
         ))

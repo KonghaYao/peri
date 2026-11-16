@@ -1,4 +1,4 @@
-use super::*;
+use super::{FoldKey, FoldState, HashMap, MAX_ENTRIES, MAX_KEY_BYTES, Retention, key_bytes};
 
 fn retained_keys(values: &HashMap<FoldKey, FoldState>, retention: &Retention) -> usize {
     values.keys().map(key_bytes).sum::<usize>()

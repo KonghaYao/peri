@@ -1,4 +1,14 @@
-use super::*;
+use super::FoldState;
+use super::TuiAssistantBubble;
+use super::TuiCollapsedGroup;
+use super::TuiDivider;
+use super::TuiRenderUnit;
+use super::TuiTodoSummary;
+use crate::kit::message_area::grid::GridSpec;
+use crate::kit::message_area::render;
+use peri_theme::atoms::THEME_ATOM;
+use ratatui_kit::ratatui::style::Modifier;
+use unicode_width::UnicodeWidthStr;
 
 // ── SubAgent 单行（§6.7）───────────────────────────────────────────────
 
@@ -10,14 +20,14 @@ use super::*;
 fn test_subagent_running_shows_recent_tool_lines() {
     let grid = GridSpec::grid_for(80);
     let children = im::Vector::from(vec![
-        TuiRenderUnit::TuiToolCard(tool_card("Read", "file-a.rs", false, false)),
-        TuiRenderUnit::TuiToolCard(tool_card("Glob", "src/**/*.rs", false, false)),
-        TuiRenderUnit::TuiToolCard(tool_card("Bash", "cargo test", false, false)),
+        TuiRenderUnit::TuiToolCard(super::tool_card("Read", "file-a.rs", false, false)),
+        TuiRenderUnit::TuiToolCard(super::tool_card("Glob", "src/**/*.rs", false, false)),
+        TuiRenderUnit::TuiToolCard(super::tool_card("Bash", "cargo test", false, false)),
         // 最新子工具仍在运行
-        TuiRenderUnit::TuiToolCard(tool_card("Read", "file-d.rs", false, true)),
+        TuiRenderUnit::TuiToolCard(super::tool_card("Read", "file-d.rs", false, true)),
     ]);
-    let running = subagent_group(children, true, false, None);
-    let lines = vm_to_lines(&running, &grid);
+    let running = super::subagent_group(children, true, false, None);
+    let lines = render::vm_to_lines(&running, &grid);
 
     // 最多 3 行（SUBAGENT_TOOL_LINES），反向取最近工具，最新在前
     assert_eq!(
@@ -26,7 +36,7 @@ fn test_subagent_running_shows_recent_tool_lines() {
         "最多显示最近 3 个工具行，实际 {}",
         lines.len()
     );
-    let texts: Vec<String> = lines.iter().map(line_text).collect();
+    let texts: Vec<String> = lines.iter().map(super::line_text).collect();
     assert!(
         texts[0].contains("file-d.rs") && texts[0].contains("Read"),
         "最新工具在最前，实际 {texts:?}"
@@ -43,7 +53,7 @@ fn test_subagent_running_shows_recent_tool_lines() {
 
     // running 工具行用动画符号（braille 帧 / ASCII *）
     assert!(
-        is_running_frame(&header_of(&lines)),
+        super::is_running_frame(&super::header_of(&lines)),
         "running 工具行用动画符号，实际 {:?}",
         texts[0]
     );
@@ -97,24 +107,24 @@ fn test_subagent_running_shows_recent_tool_lines() {
 fn test_subagent_without_tools_keeps_detail_entry_across_statuses() {
     let grid = GridSpec::grid_for(80);
     for (running, error) in [(true, false), (false, false), (false, true)] {
-        let group = subagent_group(im::Vector::new(), running, error, None);
-        let lines = vm_to_lines(&group, &grid);
+        let group = super::subagent_group(im::Vector::new(), running, error, None);
+        let lines = render::vm_to_lines(&group, &grid);
         assert_eq!(
             lines.len(),
             1,
             "无工具也须保留一行入口，实际 {:?}",
-            all_text(&lines)
+            super::all_text(&lines)
         );
-        assert!(header_of(&lines).contains("Agent explorer"));
+        assert!(super::header_of(&lines).contains("Agent explorer"));
         let status_visible = if running {
-            is_running_frame(&header_of(&lines))
+            super::is_running_frame(&super::header_of(&lines))
         } else {
-            header_of(&lines).contains(if error { '\u{d7}' } else { '\u{2713}' })
+            super::header_of(&lines).contains(if error { '\u{d7}' } else { '\u{2713}' })
         };
         assert!(
             status_visible,
             "状态符号须可见，实际 {:?}",
-            header_of(&lines)
+            super::header_of(&lines)
         );
         assert!(
             lines[0]
@@ -133,8 +143,8 @@ fn test_subagent_without_tools_keeps_detail_entry_across_statuses() {
 fn test_subagent_tool_line_narrow_omits_symbol() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(30); // Narrow: indent=0 gap=1
-    let running = subagent_group(
-        im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
+    let running = super::subagent_group(
+        im::Vector::from(vec![TuiRenderUnit::TuiToolCard(super::tool_card(
             "Read",
             "src/main.rs",
             false,
@@ -144,16 +154,16 @@ fn test_subagent_tool_line_narrow_omits_symbol() {
         false,
         None,
     );
-    let lines = vm_to_lines(&running, &grid);
+    let lines = render::vm_to_lines(&running, &grid);
     assert_eq!(lines.len(), 1, "1 个工具行，实际 {}", lines.len());
     let s = &lines[0].spans;
     assert_eq!(s[0].content, " ", "outer 空列");
     assert_eq!(s[1].content, "\u{2502}", "续行竖线");
     assert_eq!(s[2].content, " ", "Narrow gap=1（无缩进）");
     assert_eq!(s[3].content, "Read", "符号位省略后直接是 Verb");
-    let text = line_text(&lines[0]);
+    let text = super::line_text(&lines[0]);
     assert!(
-        !is_running_frame(&text) && !text.contains('✓') && !text.contains('×'),
+        !super::is_running_frame(&text) && !text.contains('✓') && !text.contains('×'),
         "Narrow 无符号位，实际 {text:?}"
     );
     assert!(
@@ -176,21 +186,21 @@ fn test_subagent_running_with_failed_tool_shows_reason() {
     let grid = GridSpec::grid_for(80);
     let sem = THEME_ATOM.state().read().semantic;
     let children = im::Vector::from(vec![
-        TuiRenderUnit::TuiToolCard(tool_card("Grep", "src", true, false)),
-        TuiRenderUnit::TuiToolCard(tool_card("Read", "a.rs", false, true)),
+        TuiRenderUnit::TuiToolCard(super::tool_card("Grep", "src", true, false)),
+        TuiRenderUnit::TuiToolCard(super::tool_card("Read", "a.rs", false, true)),
     ]);
-    let running = subagent_group(children, true, false, None);
-    let lines = vm_to_lines(&running, &grid);
+    let running = super::subagent_group(children, true, false, None);
+    let lines = render::vm_to_lines(&running, &grid);
     // 行序：最近工具行（Read running）→ error 工具行（Grep）→ 原因行
     assert_eq!(lines.len(), 3, "工具行 ×2 + 原因行，实际 {}", lines.len());
-    let texts: Vec<String> = lines.iter().map(line_text).collect();
+    let texts: Vec<String> = lines.iter().map(super::line_text).collect();
     assert!(
         texts[2].contains("Error: something went wrong"),
         "失败原因行可见，实际 {texts:?}"
     );
 
     // error 工具行：× 符号 + ` — Failed` 错误词
-    let err_text = line_text(&lines[1]);
+    let err_text = super::line_text(&lines[1]);
     assert!(
         err_text.contains('\u{d7}'),
         "失败工具行用 × 符号，实际 {err_text:?}"
@@ -249,40 +259,40 @@ fn test_subagent_failed_reason_line_and_completed() {
 
     // completed parent（is_error=false）+ 失败 child tool → 工具行（×），
     // 无原因行（completed 成功组不显示 nested error 原因，§6.7 语义）
-    let completed_with_failed_child = subagent_group(
-        im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
+    let completed_with_failed_child = super::subagent_group(
+        im::Vector::from(vec![TuiRenderUnit::TuiToolCard(super::tool_card(
             "Grep", "src", true, false,
         ))]),
         false,
         false,
         None,
     );
-    let lines = vm_to_lines(&completed_with_failed_child, &grid);
+    let lines = render::vm_to_lines(&completed_with_failed_child, &grid);
     assert_eq!(
         lines.len(),
         1,
         "completed + 1 工具 → 1 个工具行，实际 {:?}",
-        all_text(&lines)
+        super::all_text(&lines)
     );
     assert!(
-        header_of(&lines).contains('\u{d7}'),
+        super::header_of(&lines).contains('\u{d7}'),
         "child tool error 符号 ×，实际 {:?}",
-        header_of(&lines)
+        super::header_of(&lines)
     );
 
     // genuine parent error + canonical reason → × + 原因行（canonical 优先，
     // 不显示 child tool 的 last_error）
-    let failed = subagent_group(
-        im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
+    let failed = super::subagent_group(
+        im::Vector::from(vec![TuiRenderUnit::TuiToolCard(super::tool_card(
             "Grep", "src", true, false,
         ))]),
         false,
         true,
         Some("loop failed: llm error"),
     );
-    let lines = vm_to_lines(&failed, &grid);
-    let text = all_text(&lines);
-    assert!(header_of(&lines).contains('\u{d7}'), "failed 符号 ×");
+    let lines = render::vm_to_lines(&failed, &grid);
+    let text = super::all_text(&lines);
+    assert!(super::header_of(&lines).contains('\u{d7}'), "failed 符号 ×");
     assert!(
         text.contains("loop failed: llm error"),
         "canonical 原因行可见，实际 {text:?}"
@@ -306,33 +316,33 @@ fn test_subagent_failed_reason_line_and_completed() {
 
     // genuine parent error 但 canonical reason 为空（error_reason=None）：
     // 回退子工具 last_error 兜底（非空、可读，不渲染空行）
-    let fallback = subagent_group(
-        im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
+    let fallback = super::subagent_group(
+        im::Vector::from(vec![TuiRenderUnit::TuiToolCard(super::tool_card(
             "Grep", "src", true, false,
         ))]),
         false,
         true,
         None,
     );
-    let lines = vm_to_lines(&fallback, &grid);
-    let text = all_text(&lines);
-    assert!(header_of(&lines).contains('\u{d7}'), "failed 符号 ×");
+    let lines = render::vm_to_lines(&fallback, &grid);
+    let text = super::all_text(&lines);
+    assert!(super::header_of(&lines).contains('\u{d7}'), "failed 符号 ×");
     assert!(
         text.contains("Error: something went wrong"),
         "空 canonical reason 回退 child last_error，实际 {text:?}"
     );
 
     // genuine parent error 且无工具、无原因 → 保留带错误状态的入口
-    let no_tool_error = subagent_group(im::Vector::new(), false, true, None);
-    let lines = vm_to_lines(&no_tool_error, &grid);
+    let no_tool_error = super::subagent_group(im::Vector::new(), false, true, None);
+    let lines = render::vm_to_lines(&no_tool_error, &grid);
     assert_eq!(lines.len(), 1);
-    assert!(header_of(&lines).contains("Agent explorer"));
-    assert!(header_of(&lines).contains('\u{d7}'));
+    assert!(super::header_of(&lines).contains("Agent explorer"));
+    assert!(super::header_of(&lines).contains('\u{d7}'));
 
     // completed parent 无失败 → 只渲染工具行（无组头/结果摘要）
-    let completed = subagent_group(
+    let completed = super::subagent_group(
         im::Vector::from(vec![
-            TuiRenderUnit::TuiToolCard(tool_card("Read", "a.rs", false, false)),
+            TuiRenderUnit::TuiToolCard(super::tool_card("Read", "a.rs", false, false)),
             TuiRenderUnit::TuiAssistantBubble(
                 TuiAssistantBubble {
                     // [Slice 1] 正文时长（§6.2 `12.4s`）：测试构造默认无起点/冻结值。
@@ -350,14 +360,14 @@ fn test_subagent_failed_reason_line_and_completed() {
         false,
         None,
     );
-    let lines = vm_to_lines(&completed, &grid);
+    let lines = render::vm_to_lines(&completed, &grid);
     assert_eq!(
         lines.len(),
         1,
         "completed + 1 工具 → 1 个工具行，实际 {}",
         lines.len()
     );
-    let text = all_text(&lines);
+    let text = super::all_text(&lines);
     assert!(
         text.contains("Read") && text.contains("a.rs"),
         "工具行可见，实际 {text:?}"
@@ -383,9 +393,9 @@ fn test_collapsed_group_line() {
         content_hash: 0,
     };
     group.recompute_hash();
-    let lines = vm_to_lines(&TuiRenderUnit::TuiCollapsedGroup(group), &grid);
+    let lines = render::vm_to_lines(&TuiRenderUnit::TuiCollapsedGroup(group), &grid);
     assert_eq!(lines.len(), 1);
-    let text = line_text(&lines[0]);
+    let text = super::line_text(&lines[0]);
     assert!(text.contains("\u{25b8}"), "折叠符号 ▸，实际 {text:?}");
     assert!(text.contains("Read 3 · Glob 2"), "标题含隐藏数");
     assert!(
@@ -402,7 +412,7 @@ fn test_expanded_group_renders_member_tools() {
         title: "Read 1".into(),
         count: 1,
         failed_count: 0,
-        view_models: vec![TuiRenderUnit::TuiToolCard(tool_card(
+        view_models: vec![TuiRenderUnit::TuiToolCard(super::tool_card(
             "Read", "a.rs", false, false,
         ))],
         fold: FoldState::Expanded,
@@ -410,9 +420,9 @@ fn test_expanded_group_renders_member_tools() {
     };
     group.recompute_hash();
 
-    let text = vm_to_lines(&TuiRenderUnit::TuiCollapsedGroup(group), &grid)
+    let text = render::vm_to_lines(&TuiRenderUnit::TuiCollapsedGroup(group), &grid)
         .iter()
-        .map(line_text)
+        .map(super::line_text)
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("a.rs"), "展开后应渲染组内工具，实际 {text:?}");
@@ -431,8 +441,8 @@ fn test_collapsed_group_narrow_hides_whole_hint_within_grid_width() {
     };
     group.recompute_hash();
 
-    let lines = vm_to_lines(&TuiRenderUnit::TuiCollapsedGroup(group), &grid);
-    let text = line_text(&lines[0]);
+    let lines = render::vm_to_lines(&TuiRenderUnit::TuiCollapsedGroup(group), &grid);
+    let text = super::line_text(&lines[0]);
     assert!(
         text.contains("· 3 failed"),
         "失败后缀必须保留，实际 {text:?}"
@@ -462,9 +472,9 @@ fn test_collapsed_group_line_with_failed_count() {
         content_hash: 0,
     };
     group.recompute_hash();
-    let lines = vm_to_lines(&TuiRenderUnit::TuiCollapsedGroup(group), &grid);
+    let lines = render::vm_to_lines(&TuiRenderUnit::TuiCollapsedGroup(group), &grid);
     assert_eq!(lines.len(), 1);
-    let text = line_text(&lines[0]);
+    let text = super::line_text(&lines[0]);
     assert!(text.contains("Read 2"), "标题含隐藏数");
     assert!(text.contains("· 1 failed"), "失败后缀，实际 {text:?}");
     // 失败后缀使用 status.error 色（只染后缀，不染整行）
@@ -487,8 +497,8 @@ fn test_collapsed_group_line_with_failed_count() {
         content_hash: 0,
     };
     group2.recompute_hash();
-    let lines2 = vm_to_lines(&TuiRenderUnit::TuiCollapsedGroup(group2), &narrow);
-    let text2 = line_text(&lines2[0]);
+    let lines2 = render::vm_to_lines(&TuiRenderUnit::TuiCollapsedGroup(group2), &narrow);
+    let text2 = super::line_text(&lines2[0]);
     assert!(
         text2.contains("· 3 failed"),
         "窄屏失败数仍可见，实际 {text2:?}"
@@ -500,14 +510,14 @@ fn test_collapsed_group_line_with_failed_count() {
 fn test_divider_lines() {
     let grid = GridSpec::grid_for(80);
     let sem = THEME_ATOM.state().read().semantic;
-    let plain = vm_to_lines(
+    let plain = render::vm_to_lines(
         &TuiRenderUnit::TuiDivider(TuiDivider {
             label: None,
             content_hash: 0,
         }),
         &grid,
     );
-    let text = line_text(&plain[0]);
+    let text = super::line_text(&plain[0]);
     assert!(
         text.starts_with(" \u{251c}\u{2500}\u{2500}"),
         "实际 {text:?}"
@@ -521,32 +531,32 @@ fn test_divider_lines() {
     );
     assert_eq!(plain.len(), 1);
 
-    let labeled = vm_to_lines(
+    let labeled = render::vm_to_lines(
         &TuiRenderUnit::TuiDivider(TuiDivider {
             label: Some("Round 3".into()),
             content_hash: 1,
         }),
         &grid,
     );
-    let text = line_text(&labeled[0]);
+    let text = super::line_text(&labeled[0]);
     assert!(text.contains("Round 3"), "label 可见");
 
     let compact = GridSpec::grid_for(50);
-    let rule = vm_to_lines(
+    let rule = render::vm_to_lines(
         &TuiRenderUnit::TuiDivider(TuiDivider {
             label: None,
             content_hash: 0,
         }),
         &compact,
     );
-    let prompt = vm_to_lines(
+    let prompt = render::vm_to_lines(
         &TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new(
             "next prompt".into(),
         )),
         &compact,
     );
     assert_eq!(rule.len(), 1, "窄屏横线只占一行");
-    assert!(line_text(&prompt[0]).contains("next prompt"));
+    assert!(super::line_text(&prompt[0]).contains("next prompt"));
     assert_eq!(rule[0].spans[1].style.fg, prompt[0].spans[1].style.fg);
 }
 
@@ -556,8 +566,8 @@ fn test_todo_summary_line() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(80);
     let vm = TuiRenderUnit::TuiTodoSummary(TuiTodoSummary::new("3/7 tasks · Running tests".into()));
-    let lines = vm_to_lines(&vm, &grid);
-    let text = line_text(&lines[0]);
+    let lines = render::vm_to_lines(&vm, &grid);
+    let text = super::line_text(&lines[0]);
     assert!(text.contains("\u{25fc}"), "todo 符号 ◼");
     assert!(text.contains("3/7 tasks · Running tests"));
 }

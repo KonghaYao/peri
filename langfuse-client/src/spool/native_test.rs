@@ -21,10 +21,10 @@ use crate::spool::types::{
 };
 use crate::spool::{CleanupRegistration, RouteFingerprint, SpoolError, SpoolObject, SpoolReader};
 
-use super::{
-    create_private_dir_all, hex, id_hex, native_scan, now_ms, parse_id, unhex, NativeInner,
-    NativeSpool, DESCRIPTOR_VERSION,
-};
+use super::native_scan;
+use super::NativeInner;
+use super::NativeSpool;
+use super::DESCRIPTOR_VERSION;
 
 /// 取锁语义（不可领取判定、并发删除降级、能力探针竞争）单独成文件，保持本文件在自设上限内。
 /// 本文件由 `native.rs` 以 `#[path]` 挂载，子模块同样显式给路径。
@@ -49,7 +49,7 @@ fn id_of(seed: u8) -> ObjectId {
 }
 
 fn route_from_hex(text: &str) -> RouteFingerprint {
-    let bytes = unhex(text).expect("route hex");
+    let bytes = super::unhex(text).expect("route hex");
     let mut route = [0u8; 32];
     route.copy_from_slice(&bytes);
     RouteFingerprint::from_bytes(route)
@@ -70,7 +70,7 @@ impl Fixture {
     fn open(root: PathBuf, route: RouteFingerprint) -> Self {
         let spool = NativeSpool::open_at(root.clone(), route, QUOTA_BYTES).expect("open spool");
         let store: Arc<dyn SpoolStore> = Arc::new(spool);
-        let budget = MemoryBudget::new(1024 * 1024).expect("memory budget");
+        let budget = MemoryBudget::try_new(1024 * 1024).expect("memory budget");
         let registry = CleanupRegistry::new(Arc::clone(&store), budget, 16);
         Self {
             root,
@@ -88,14 +88,14 @@ impl Fixture {
     fn route_dir(&self) -> PathBuf {
         self.root
             .join("peri/telemetry-spool/v1")
-            .join(hex(self.route.as_bytes()))
+            .join(super::hex(self.route.as_bytes()))
     }
 
     fn object_dir(&self, id: ObjectId) -> PathBuf {
         self.route_dir()
             .join("objects")
             .join(format!("{:02x}", NativeInner::bucket_of(id)))
-            .join(id_hex(id))
+            .join(super::id_hex(id))
     }
 
     fn tmp_dir(&self) -> PathBuf {
@@ -112,7 +112,7 @@ impl Fixture {
 
     /// 未压缩元数据：`stored_len == raw_len`，Input 无事件数（契约 §5.2）。
     fn meta_for(&self, id: ObjectId, kind: ObjectKind, body: &[u8]) -> ObjectMeta {
-        let accepted = now_ms();
+        let accepted = super::now_ms();
         ObjectMeta {
             version: DESCRIPTOR_VERSION,
             id,
@@ -158,7 +158,7 @@ impl Fixture {
 /// 就是真实格式。`meta` 允许携带与 fixture 不同的 route，用于隔离域用例。
 fn write_entry(fixture: &Fixture, meta: &ObjectMeta, body: &[u8]) {
     let dir = fixture.object_dir(meta.id);
-    create_private_dir_all(&dir).expect("object directory");
+    super::create_private_dir_all(&dir).expect("object directory");
     fs::write(dir.join("body"), body).expect("object body");
     let bytes = native_scan::descriptor_bytes(meta).expect("descriptor bytes");
     fs::write(dir.join("meta"), bytes).expect("object descriptor");
@@ -227,7 +227,10 @@ fn spawn_child(
         .arg(CHILD_TEST)
         .args(["--exact", "--ignored", "--nocapture", "--test-threads=1"])
         .env("PERI_SPOOL_TEST_ROOT", fixture.root())
-        .env("PERI_SPOOL_TEST_ROUTE", hex(fixture.route.as_bytes()))
+        .env(
+            "PERI_SPOOL_TEST_ROUTE",
+            super::hex(fixture.route.as_bytes()),
+        )
         .env("PERI_SPOOL_TEST_QUOTA", QUOTA_BYTES.to_string())
         .env("PERI_SPOOL_TEST_MODE", mode)
         .env("PERI_SPOOL_TEST_MARKER", marker)
@@ -265,7 +268,7 @@ fn cross_process_helper() {
     let spool = NativeSpool::open_at(PathBuf::from(root), route, quota).expect("child open spool");
     match mode.as_str() {
         "claim" => {
-            let id = parse_id(&std::env::var("PERI_SPOOL_TEST_OBJECT").expect("object id"))
+            let id = super::parse_id(&std::env::var("PERI_SPOOL_TEST_OBJECT").expect("object id"))
                 .expect("object id hex");
             let claim = spool
                 .claim(id)
@@ -375,7 +378,7 @@ fn atomic_publish_never_exposes_partial_body() {
     // writing 阶段：临时正文在 tmp/ 下，对象目录与描述信息都不存在。
     assert!(fixture
         .tmp_dir()
-        .join(format!("{}.part", id_hex(id)))
+        .join(format!("{}.part", super::id_hex(id)))
         .exists());
     assert!(!fixture.object_dir(id).exists());
     assert!(fixture
@@ -398,7 +401,7 @@ fn atomic_publish_never_exposes_partial_body() {
     assert_eq!(object.meta().stored_len, body.len() as u64);
     assert!(!fixture
         .tmp_dir()
-        .join(format!("{}.part", id_hex(id)))
+        .join(format!("{}.part", super::id_hex(id)))
         .exists());
     let page = fixture.store.list(None, 64).expect("list after publish");
     assert_eq!(page.entries.len(), 1);
@@ -447,12 +450,12 @@ async fn quota_includes_writing_and_failed_delete() {
     assert_eq!(fixture.store.usage().expect("usage").reserved_bytes, 4096);
     assert!(fixture
         .tmp_dir()
-        .join(format!("{}.part", id_hex(temp_id)))
+        .join(format!("{}.part", super::id_hex(temp_id)))
         .exists());
     temp.abort().expect("abort writing object");
     assert!(!fixture
         .tmp_dir()
-        .join(format!("{}.part", id_hex(temp_id)))
+        .join(format!("{}.part", super::id_hex(temp_id)))
         .exists());
     assert_eq!(fixture.store.usage().expect("usage").reserved_bytes, 0);
     // 删除失败：对象占用必须仍然可见，不能提前释放额度。
@@ -500,7 +503,7 @@ fn claim_is_exclusive_across_processes() {
         "claim",
         &marker,
         &release,
-        &[("PERI_SPOOL_TEST_OBJECT", id_hex(meta.id))],
+        &[("PERI_SPOOL_TEST_OBJECT", super::id_hex(meta.id))],
     );
     wait_for(&marker, CHILD_WAIT);
     // marker 由子进程在**取到锁之后**写入：它的内容证明锁真的在另一个进程手里。
@@ -597,7 +600,7 @@ fn abort_during_writing_leaves_no_visible_object() {
     aborted.abort().expect("abort writing object");
     assert!(!fixture
         .tmp_dir()
-        .join(format!("{}.part", id_hex(aborted_id)))
+        .join(format!("{}.part", super::id_hex(aborted_id)))
         .exists());
     assert!(matches!(
         fixture.store.claim(aborted_id),
@@ -617,7 +620,7 @@ fn abort_during_writing_leaves_no_visible_object() {
     drop(dropped);
     assert!(!fixture
         .tmp_dir()
-        .join(format!("{}.part", id_hex(dropped_id)))
+        .join(format!("{}.part", super::id_hex(dropped_id)))
         .exists());
     assert!(fixture
         .store
@@ -690,19 +693,23 @@ fn restart_resumes_enumerable_objects_and_sweeps_residue() {
         // 崩溃 writer 的残留：正文与存活锁都在，但没有任何进程持锁。
         let stale = id_of(0x77);
         fs::write(
-            fixture.tmp_dir().join(format!("{}.part", id_hex(stale))),
+            fixture
+                .tmp_dir()
+                .join(format!("{}.part", super::id_hex(stale))),
             b"half written body",
         )
         .expect("stale part");
         fs::write(
-            fixture.tmp_dir().join(format!("{}.lock", id_hex(stale))),
+            fixture
+                .tmp_dir()
+                .join(format!("{}.lock", super::id_hex(stale))),
             b"",
         )
         .expect("stale lock");
         // 发布中途崩溃：对象目录存在但没有描述信息，因此不可见。
         let orphan = id_of(0x78);
         let orphan_dir = fixture.object_dir(orphan);
-        create_private_dir_all(&orphan_dir).expect("orphan directory");
+        super::create_private_dir_all(&orphan_dir).expect("orphan directory");
         fs::write(orphan_dir.join("body"), b"never published").expect("orphan body");
         // 上一轮进程退出（句柄 drop）不删除任何文件，等价于没有显式清理的停机。
     }
@@ -717,11 +724,11 @@ fn restart_resumes_enumerable_objects_and_sweeps_residue() {
     // 无锁 writing 残留与未发布对象目录都被启动清扫回收。
     assert!(!reopened
         .tmp_dir()
-        .join(format!("{}.part", id_hex(id_of(0x77))))
+        .join(format!("{}.part", super::id_hex(id_of(0x77))))
         .exists());
     assert!(!reopened
         .tmp_dir()
-        .join(format!("{}.lock", id_hex(id_of(0x77))))
+        .join(format!("{}.lock", super::id_hex(id_of(0x77))))
         .exists());
     assert!(!reopened.object_dir(id_of(0x78)).exists());
     // 账本以磁盘为准重建：对象数 1，占用等于该对象目录的实际字节数。

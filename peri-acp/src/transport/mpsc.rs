@@ -15,11 +15,12 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use super::{
-    router::{transport_closed_error, RequestRouter},
-    types::{AcpError, IncomingMessage, RequestId},
-    AcpTransport,
-};
+use super::router;
+use super::router::RequestRouter;
+use super::types::AcpError;
+use super::types::IncomingMessage;
+use super::types::RequestId;
+use super::AcpTransport;
 
 /// 进程内传输队列容量。内容与控制共用同一条 FIFO；满时写端只等待有限时间，
 /// 超时后显式关闭连接，避免慢消费者把无界内存增长伪装成“还在运行”。
@@ -171,7 +172,7 @@ async fn send_or_close(
         Ok(Ok(())) => Ok(()),
         Ok(Err(_)) => {
             router.close();
-            Err(transport_closed_error())
+            Err(router::transport_closed_error())
         }
         Err(_) => {
             tracing::warn!(

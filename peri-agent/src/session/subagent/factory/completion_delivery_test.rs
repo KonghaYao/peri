@@ -1,12 +1,14 @@
-use super::*;
 use crate::session::FrozenContext;
+use crate::session::Session;
 use peri_acp_types::event::BackgroundTaskResult;
 use peri_acp_types::tasks::{BgTaskKind, OnBgCompleteFn};
+use std::sync::Arc;
 
 #[tokio::test]
 async fn parent_without_custom_callback_still_receives_terminal_and_wake() {
     let parent = Session::new(Arc::from("/tmp"), FrozenContext::builder().build(), None);
-    let delivery = completion_delivery(Some(&parent), None).unwrap();
+    let delivery = crate::session::subagent::factory::completion_delivery(Some(&parent), None)
+        .expect("the completion delivery fixture result is required for this assertion");
     let waiting = parent.queue().await_wake();
     tokio::pin!(waiting);
     futures::future::poll_fn(|context| {
@@ -31,10 +33,10 @@ async fn parent_without_custom_callback_still_receives_terminal_and_wake() {
         },
         BgTaskKind::Agent,
     )
-    .unwrap();
+    .expect("the delivery fixture result is required for this assertion");
     tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
         .await
-        .unwrap();
+        .expect("the timeout fixture result is required for this assertion");
     assert_eq!(parent.queue().len_sync(), 1);
     assert!(parent.queue().drain_all_sync()[0].delivery_id.is_some());
 }
@@ -44,9 +46,13 @@ fn configured_delivery_is_preserved_and_parentless_can_be_execution_only() {
     let configured: OnBgCompleteFn = Arc::new(|_, _| Ok(()));
     assert!(Arc::ptr_eq(
         &configured,
-        &completion_delivery(None, Some(Arc::clone(&configured))).unwrap(),
+        &crate::session::subagent::factory::completion_delivery(
+            None,
+            Some(Arc::clone(&configured))
+        )
+        .expect("the clone fixture result is required for this assertion"),
     ));
-    assert!(completion_delivery(None, None).is_none());
+    assert!(crate::session::subagent::factory::completion_delivery(None, None).is_none());
 }
 
 #[tokio::test]
@@ -63,16 +69,26 @@ async fn completion_target_follows_known_callback_and_preserves_original_parent(
         ..Default::default()
     });
     assert_eq!(
-        completion_target(Some(&parent), Some(&callback), Some("b".into())).as_deref(),
+        crate::session::subagent::factory::completion_target(
+            Some(&parent),
+            Some(&callback),
+            Some("b".into())
+        )
+        .as_deref(),
         Some("configured-recipient")
     );
     let opaque: OnBgCompleteFn = Arc::new(|_, _| Ok(()));
     assert_eq!(
-        completion_target(Some(&parent), Some(&opaque), Some("b".into())),
+        crate::session::subagent::factory::completion_target(
+            Some(&parent),
+            Some(&opaque),
+            Some("b".into())
+        ),
         None
     );
     assert_eq!(
-        completion_target(Some(&parent), None, Some("b".into())).as_deref(),
+        crate::session::subagent::factory::completion_target(Some(&parent), None, Some("b".into()))
+            .as_deref(),
         Some("b")
     );
 
@@ -80,13 +96,17 @@ async fn completion_target_follows_known_callback_and_preserves_original_parent(
     let store = test.resources();
     let original = test.thread_id();
     let child = test.create_child(&original).await;
-    persist_completion_target(store.as_ref(), &child, Some("b"))
+    crate::session::subagent::factory::persist_completion_target(store.as_ref(), &child, Some("b"))
         .await
-        .unwrap();
-    let meta = store.load_session_meta(&child).await.unwrap();
+        .expect("the persist completion target fixture result is required for this assertion");
+    let meta = store
+        .load_session_meta(&child)
+        .await
+        .expect("the load session meta fixture result is required for this assertion");
     assert_eq!(meta.parent_thread_id.as_ref(), Some(&original));
     assert_eq!(
-        peri_acp_types::thread::completion_target(meta.config.as_deref()).unwrap(),
+        peri_acp_types::thread::completion_target(meta.config.as_deref())
+            .expect("the as deref fixture result is required for this assertion"),
         "b"
     );
 }

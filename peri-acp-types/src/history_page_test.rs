@@ -1,12 +1,25 @@
 //! 历史分页契约的行为测试：游标的三种失败、页的正序与推进规则、字节预算与 oversize。
 
-use super::*;
-use crate::store::serialize_persisted_payload;
+use crate::history_page::HistoryCursor;
+use crate::history_page::HistoryCursorError;
+use crate::history_page::HistoryForwardCursor;
+use crate::history_page::HistoryPage;
+use crate::history_page::HistoryPageBounds;
+use crate::history_page::HistoryPageCandidate;
+use crate::history_page::HistoryPagePlan;
+use crate::history_page::HistoryPageRow;
+use crate::history_page::HistorySegment;
+use crate::history_page::HistorySegmentPlan;
+use crate::messages::MessageId;
+use crate::session_resources::SessionResourceErrorKind;
+use crate::session_resources::SessionResourceResult;
+use crate::store;
 use crate::store::PersistedPayload;
 use crate::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
     ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
 };
+use crate::thread::ThreadId;
 
 fn thread(name: &str) -> ThreadId {
     name.to_owned()
@@ -18,16 +31,16 @@ fn human(text: &str) -> PersistedPayload {
 
 /// 与远端 `(message_id, content)` 两列同形的一行。
 fn row(payload: &PersistedPayload) -> HistoryPageRow {
-    HistoryPageRow::new(
+    HistoryPageRow::try_new(
         &payload.id().as_uuid().to_string(),
-        serialize_persisted_payload(payload).unwrap(),
+        store::serialize_persisted_payload(payload).unwrap(),
     )
     .unwrap()
 }
 
 /// 阶段一的候选行：id 取自 payload，正文只用来算长度（正文本身不进入候选行）。
 fn candidate(payload: &PersistedPayload, position: i64, content: &str) -> HistoryPageCandidate {
-    HistoryPageCandidate::new(
+    HistoryPageCandidate::try_new(
         &payload.id().as_uuid().to_string(),
         position,
         content.len() as i64,
@@ -58,7 +71,7 @@ fn read_page(
                 .iter()
                 .find(|(payload, _)| payload.id() == id)
                 .expect("planned id comes from the candidates");
-            HistoryPageRow::new(&id.as_uuid().to_string(), content.clone()).unwrap()
+            HistoryPageRow::try_new(&id.as_uuid().to_string(), content.clone()).unwrap()
         })
         .collect();
     plan.materialize(rows)
@@ -71,7 +84,7 @@ fn bodies(payloads: &[PersistedPayload]) -> Vec<(PersistedPayload, String)> {
         .map(|payload| {
             (
                 payload.clone(),
-                serialize_persisted_payload(payload).unwrap(),
+                store::serialize_persisted_payload(payload).unwrap(),
             )
         })
         .collect()
@@ -190,7 +203,7 @@ fn the_second_phase_is_asked_for_the_page_rows_only() {
     let candidates = vec![
         (
             visible.clone(),
-            serialize_persisted_payload(&visible).unwrap(),
+            store::serialize_persisted_payload(&visible).unwrap(),
         ),
         unreadable_beyond_the_page,
     ];
@@ -231,8 +244,16 @@ fn the_second_phase_must_return_exactly_the_planned_rows() {
             &thread("s-1"),
             "head",
             vec![
-                candidate(&first, 2, &serialize_persisted_payload(&first).unwrap()),
-                candidate(&second, 1, &serialize_persisted_payload(&second).unwrap()),
+                candidate(
+                    &first,
+                    2,
+                    &store::serialize_persisted_payload(&first).unwrap(),
+                ),
+                candidate(
+                    &second,
+                    1,
+                    &store::serialize_persisted_payload(&second).unwrap(),
+                ),
             ],
             5,
             usize::MAX,
@@ -292,11 +313,14 @@ fn non_displayable_rows_advance_the_position_without_faking_the_end() {
 #[test]
 fn a_body_over_the_remaining_budget_stops_the_page_before_decoding() {
     let first = human("small");
-    let first_size = serialize_persisted_payload(&first).unwrap().len();
+    let first_size = store::serialize_persisted_payload(&first).unwrap().len();
     // 第二条不是可解码的信封：它超预算时必须留在页外（连正文都不取），否则这里会变成 `Corrupt`。
     let undecodable = (human("never read"), "x".repeat(4096));
     let candidates = vec![
-        (first.clone(), serialize_persisted_payload(&first).unwrap()),
+        (
+            first.clone(),
+            store::serialize_persisted_payload(&first).unwrap(),
+        ),
         undecodable,
         (human("older"), "y".repeat(8)),
     ];
@@ -332,9 +356,9 @@ fn a_row_whose_id_does_not_match_its_payload_is_corrupt() {
     let payload = human("m");
     let mismatched = HistoryPageRow {
         message_id: crate::messages::MessageId::new(),
-        content: serialize_persisted_payload(&payload).unwrap(),
+        content: store::serialize_persisted_payload(&payload).unwrap(),
     };
-    let planned = HistoryPageCandidate::new(
+    let planned = HistoryPageCandidate::try_new(
         &mismatched.message_id.as_uuid().to_string(),
         1,
         mismatched.content.len() as i64,
@@ -352,7 +376,8 @@ fn a_row_whose_id_does_not_match_its_payload_is_corrupt() {
 fn a_cursor_is_only_usable_while_its_anchor_and_range_head_survive() {
     let cursor = HistoryCursor::new(thread("s-1"), crate::messages::MessageId::new(), "head");
     assert_eq!(
-        resolve_browsing_range(Some(&cursor), Some("head".to_owned()), true).unwrap(),
+        crate::history_page::resolve_browsing_range(Some(&cursor), Some("head".to_owned()), true)
+            .unwrap(),
         "head"
     );
     // 锚点行被删：失败关闭，不回退到最新一页。
@@ -364,16 +389,19 @@ fn a_cursor_is_only_usable_while_its_anchor_and_range_head_survive() {
     ] {
         assert!(
             matches!(
-                resolve_browsing_range(Some(&cursor), head, anchor_present),
+                crate::history_page::resolve_browsing_range(Some(&cursor), head, anchor_present),
                 Err(HistoryCursorError::Expired { .. })
             ),
             "cursor must expire when head/anchor move"
         );
     }
     // 首屏：空会话没有浏览起点，身份是空串；有内容时起点即范围身份。
-    assert_eq!(resolve_browsing_range(None, None, false).unwrap(), "");
     assert_eq!(
-        resolve_browsing_range(None, Some("head".to_owned()), false).unwrap(),
+        crate::history_page::resolve_browsing_range(None, None, false).unwrap(),
+        ""
+    );
+    assert_eq!(
+        crate::history_page::resolve_browsing_range(None, Some("head".to_owned()), false).unwrap(),
         "head"
     );
 }
@@ -392,7 +420,7 @@ fn client_visibility_follows_the_existing_egress_rule() {
 #[test]
 fn page_bounds_keep_the_stored_id_text_and_reject_non_uuids() {
     let head = "6f9619ff-8b86-d011-b42d-00c04fc964ff";
-    let bounds = HistoryPageBounds::new(Some(head)).unwrap();
+    let bounds = HistoryPageBounds::try_new(Some(head)).unwrap();
     assert_eq!(
         bounds.range_head,
         Some(MessageId::from(uuid::Uuid::parse_str(head).unwrap()))
@@ -401,12 +429,12 @@ fn page_bounds_keep_the_stored_id_text_and_reject_non_uuids() {
     assert_eq!(bounds.range_token, head);
 
     // 空会话：没有起点，也没有范围身份（不是「起点为空串」）。
-    let empty = HistoryPageBounds::new(None).unwrap();
+    let empty = HistoryPageBounds::try_new(None).unwrap();
     assert_eq!(empty.range_head, None);
     assert!(empty.range_token.is_empty());
 
     // id 不可解释即损坏：不降级成空范围。
-    let error = HistoryPageBounds::new(Some("not-a-uuid")).unwrap_err();
+    let error = HistoryPageBounds::try_new(Some("not-a-uuid")).unwrap_err();
     assert!(matches!(
         error.kind(),
         SessionResourceErrorKind::Corrupt { .. }
@@ -451,7 +479,7 @@ fn read_segment(
                 .iter()
                 .find(|(payload, _)| payload.id() == id)
                 .expect("planned id comes from the candidates");
-            HistoryPageRow::new(&id.as_uuid().to_string(), content.clone()).unwrap()
+            HistoryPageRow::try_new(&id.as_uuid().to_string(), content.clone()).unwrap()
         })
         .collect();
     plan.materialize(inherited, tail, rows)
@@ -591,7 +619,7 @@ fn a_history_segment_fails_closed_on_a_partial_reply_or_a_missing_tail() {
     };
     let body_row = |index: usize| {
         let (payload, content) = &rows[index];
-        HistoryPageRow::new(&payload.id().as_uuid().to_string(), content.clone()).unwrap()
+        HistoryPageRow::try_new(&payload.id().as_uuid().to_string(), content.clone()).unwrap()
     };
 
     // 少一行。

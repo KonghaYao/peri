@@ -1,4 +1,5 @@
-use crate::{transport::SseEvent, ProtocolErrorKind};
+use crate::transport::SseEvent;
+use crate::ProtocolErrorKind;
 
 #[test]
 fn decoder_preserves_json_parse_error_and_original_frame() {

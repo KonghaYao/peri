@@ -1,14 +1,17 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use futures::StreamExt;
 use serde_json::{json, Value};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    task::JoinHandle,
-    time::timeout,
-};
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
+use tokio::net::TcpStream;
+use tokio::task::JoinHandle;
+use tokio::time;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -39,7 +42,7 @@ impl Captured {
 }
 
 async fn read_request(socket: &mut TcpStream) -> Captured {
-    timeout(BUDGET, async {
+    time::timeout(BUDGET, async {
         let mut bytes = Vec::new();
         let header_end = loop {
             let mut chunk = [0_u8; 4096];
@@ -103,7 +106,10 @@ async fn serve(replies: Vec<(u16, String)>) -> (Url, JoinHandle<Vec<Captured>>) 
     let task = tokio::spawn(async move {
         let mut captured = Vec::new();
         for (status, body) in replies {
-            let (mut socket, _) = timeout(BUDGET, listener.accept()).await.unwrap().unwrap();
+            let (mut socket, _) = time::timeout(BUDGET, listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
             captured.push(read_request(&mut socket).await);
             respond(&mut socket, status, &body).await;
         }
@@ -114,7 +120,7 @@ async fn serve(replies: Vec<(u16, String)>) -> (Url, JoinHandle<Vec<Captured>>) 
 
 fn runtime(proxy: Url) -> ModelRuntimeConfig {
     ModelRuntimeConfig::default()
-        .with_transport_route(ModelTransportRoute::new(proxy, "run-fixture").unwrap())
+        .with_transport_route(ModelTransportRoute::try_new(proxy, "run-fixture").unwrap())
         .with_retry(
             RetryConfig::default()
                 .with_max_attempts(3)
@@ -203,64 +209,70 @@ async fn transport_route_preserves_all_provider_bodies_and_logical_identities() 
         )),
     ];
     let mut checkpoints = Vec::new();
-    for (index, model) in models.into_iter().enumerate() {
-        let mut input = request(&format!("call-{index}"));
-        input
-            .messages
-            .insert(0, ModelMessage::assistant_text("历史回复"));
-        let encoded = serde_json::to_value(&input).unwrap();
-        assert!(encoded.get("call_context").is_none());
-        let prepared = model.prepare_stream(input.clone()).unwrap();
-        input.call_context.as_mut().unwrap().call = "modified-after-prepare".into();
-        checkpoints.push(prepared.checkpoint().clone());
-        let mut events = prepared.start(CancellationToken::new()).unwrap();
-        let completed = timeout(BUDGET, async {
-            while let Some(event) = events.next().await {
-                if let ModelStreamEvent::Completed(response) = event.unwrap() {
-                    return response;
+    {
+        let indexed_models = models.into_iter().enumerate();
+        for (index, model) in indexed_models {
+            let mut input = request(&format!("call-{index}"));
+            input
+                .messages
+                .insert(0, ModelMessage::assistant_text("历史回复"));
+            let encoded = serde_json::to_value(&input).unwrap();
+            assert!(encoded.get("call_context").is_none());
+            let prepared = model.prepare_stream(input.clone()).unwrap();
+            input.call_context.as_mut().unwrap().call = "modified-after-prepare".into();
+            checkpoints.push(prepared.checkpoint().clone());
+            let mut events = prepared.start(CancellationToken::new()).unwrap();
+            let completed = time::timeout(BUDGET, async {
+                while let Some(event) = events.next().await {
+                    if let ModelStreamEvent::Completed(response) = event.unwrap() {
+                        return response;
+                    }
                 }
-            }
-            panic!("真实 HTTP 必须产生完成事件")
-        })
-        .await
-        .unwrap();
-        if index == 2 {
-            let data = match completed.message() {
-                ModelMessage::Assistant { content, .. } => content,
-                _ => panic!("assistant response expected"),
-            }
-            .iter()
-            .find_map(|block| {
-                if let ContentBlock::ProviderState { data, .. } = block {
-                    Some(data)
-                } else {
-                    None
-                }
+                panic!("真实 HTTP 必须产生完成事件")
             })
-            .expect("Responses 需保留原始 replay binding");
-            assert_eq!(data["binding"]["credential_ref"], "fixture-grant");
-            assert_eq!(data["binding"]["endpoint"], checkpoints[index]["endpoint"]);
+            .await
+            .unwrap();
+            if index == 2 {
+                let data = match completed.message() {
+                    ModelMessage::Assistant { content, .. } => content,
+                    _ => panic!("assistant response expected"),
+                }
+                .iter()
+                .find_map(|block| {
+                    if let ContentBlock::ProviderState { data, .. } = block {
+                        Some(data)
+                    } else {
+                        None
+                    }
+                })
+                .expect("Responses 需保留原始 replay binding");
+                assert_eq!(data["binding"]["credential_ref"], "fixture-grant");
+                assert_eq!(data["binding"]["endpoint"], checkpoints[index]["endpoint"]);
+            }
         }
     }
     let captured = server.await.unwrap();
     assert_eq!(captured.len(), 3);
-    for (index, (sent, checkpoint)) in captured.iter().zip(checkpoints).enumerate() {
-        assert_eq!(sent.body, checkpoint["body"]);
-        assert_eq!(
-            sent.headers["x-peri-replay-target"],
-            checkpoint["endpoint"].as_str().unwrap()
-        );
-        let logical: Url = sent.headers["x-peri-replay-target"].parse().unwrap();
-        let expected_path = match logical.query() {
-            Some(query) => format!("{}?{query}", logical.path()),
-            None => logical.path().to_owned(),
-        };
-        assert_eq!(sent.path, expected_path);
-        let context = sent.context();
-        assert_eq!(context["call"], format!("call-{index}"));
-        assert_eq!(context["attempt"], 1);
-        assert_eq!(context["run"], "run-fixture");
-        assert_eq!(context["parent"]["tool_call"], "tool-call-1");
+    {
+        let indexed_captured = captured.iter().zip(checkpoints).enumerate();
+        for (index, (sent, checkpoint)) in indexed_captured {
+            assert_eq!(sent.body, checkpoint["body"]);
+            assert_eq!(
+                sent.headers["x-peri-replay-target"],
+                checkpoint["endpoint"].as_str().unwrap()
+            );
+            let logical: Url = sent.headers["x-peri-replay-target"].parse().unwrap();
+            let expected_path = match logical.query() {
+                Some(query) => format!("{}?{query}", logical.path()),
+                None => logical.path().to_owned(),
+            };
+            assert_eq!(sent.path, expected_path);
+            let context = sent.context();
+            assert_eq!(context["call"], format!("call-{index}"));
+            assert_eq!(context["attempt"], 1);
+            assert_eq!(context["run"], "run-fixture");
+            assert_eq!(context["parent"]["tool_call"], "tool-call-1");
+        }
     }
     assert_eq!(
         captured[0].body["messages"][0]["content"][0]["type"],
@@ -279,7 +291,7 @@ async fn transport_route_records_each_physical_retry_with_one_logical_call() {
         (200, chat_reply("recovered")),
     ])
     .await;
-    let response = timeout(
+    let response = time::timeout(
         BUDGET,
         chat_model(proxy).complete(request("retry"), CancellationToken::new()),
     )
@@ -289,20 +301,22 @@ async fn transport_route_records_each_physical_retry_with_one_logical_call() {
     assert_eq!(response.assistant_text().unwrap(), "recovered");
     let captured = server.await.unwrap();
     assert_eq!(captured.len(), 3);
-    for (index, wire) in captured.iter().enumerate() {
-        assert_eq!(wire.context()["call"], "retry");
-        assert_eq!(wire.context()["attempt"], index + 1);
-        assert_eq!(wire.body, captured[0].body);
+    {
+        let indexed_captured = captured.iter().enumerate();
+        for (index, wire) in indexed_captured {
+            assert_eq!(wire.context()["call"], "retry");
+            assert_eq!(wire.context()["attempt"], index + 1);
+            assert_eq!(wire.body, captured[0].body);
+        }
     }
 }
 
 #[tokio::test]
 async fn transport_route_auth_preparation_failure_does_not_consume_wire_attempt() {
     use crate::{ModelError, ModelResult, RequestAuth, RequestCredential, TransportErrorKind};
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Mutex,
-    };
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::sync::Mutex;
     struct Auth {
         credentials: AtomicUsize,
         refreshes: AtomicUsize,
@@ -365,7 +379,7 @@ async fn transport_route_auth_preparation_failure_does_not_consume_wire_attempt(
         .with_auth(auth.clone())
         .with_runtime(runtime),
     );
-    timeout(
+    time::timeout(
         BUDGET,
         model.complete(request("auth"), CancellationToken::new()),
     )
@@ -390,9 +404,15 @@ async fn transport_route_auth_preparation_failure_does_not_consume_wire_attempt(
 async fn transport_route_concurrent_identical_requests_keep_separate_contexts() {
     let (listener, proxy) = listener().await;
     let server = tokio::spawn(async move {
-        let (mut first, _) = timeout(BUDGET, listener.accept()).await.unwrap().unwrap();
+        let (mut first, _) = time::timeout(BUDGET, listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
         let first_wire = read_request(&mut first).await;
-        let (mut second, _) = timeout(BUDGET, listener.accept()).await.unwrap().unwrap();
+        let (mut second, _) = time::timeout(BUDGET, listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
         let second_wire = read_request(&mut second).await;
         respond(
             &mut second,
@@ -409,7 +429,7 @@ async fn transport_route_concurrent_identical_requests_keep_separate_contexts() 
         vec![first_wire, second_wire]
     });
     let model = Arc::new(chat_model(proxy));
-    let (a, b) = timeout(BUDGET, async {
+    let (a, b) = time::timeout(BUDGET, async {
         tokio::join!(
             model.complete(request("A"), CancellationToken::new()),
             model.complete(request("B"), CancellationToken::new()),
@@ -432,17 +452,23 @@ async fn transport_route_concurrent_identical_requests_keep_separate_contexts() 
 async fn transport_route_cancel_closes_only_its_stream_without_retry() {
     let (listener, proxy) = listener().await;
     let server = tokio::spawn(async move {
-        let (mut a, _) = timeout(BUDGET, listener.accept()).await.unwrap().unwrap();
+        let (mut a, _) = time::timeout(BUDGET, listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
         let a_wire = read_request(&mut a).await;
         a.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n").await.unwrap();
-        let (mut b, _) = timeout(BUDGET, listener.accept()).await.unwrap().unwrap();
+        let (mut b, _) = time::timeout(BUDGET, listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
         let b_wire = read_request(&mut b).await;
         respond(&mut b, 200, &chat_reply("sibling")).await;
         let mut byte = [0_u8; 1];
-        let closed = timeout(BUDGET, a.read(&mut byte)).await.unwrap();
+        let closed = time::timeout(BUDGET, a.read(&mut byte)).await.unwrap();
         assert!(matches!(closed, Ok(0) | Err(_)), "取消必须关闭对应连接");
         assert!(
-            timeout(Duration::from_millis(100), listener.accept())
+            time::timeout(Duration::from_millis(100), listener.accept())
                 .await
                 .is_err(),
             "可见输出后的取消不能触发重试"
@@ -455,16 +481,16 @@ async fn transport_route_cancel_closes_only_its_stream_without_retry() {
         .await
         .unwrap();
     assert!(
-        matches!(timeout(BUDGET, a.next()).await.unwrap(), Some(Ok(ModelStreamEvent::TextDelta { text })) if text == "partial")
+        matches!(time::timeout(BUDGET, a.next()).await.unwrap(), Some(Ok(ModelStreamEvent::TextDelta { text })) if text == "partial")
     );
     a.abort();
-    let cancelled = timeout(BUDGET, a.next())
+    let cancelled = time::timeout(BUDGET, a.next())
         .await
         .unwrap()
         .unwrap()
         .unwrap_err();
     assert!(cancelled.is_cancelled());
-    let b = timeout(
+    let b = time::timeout(
         BUDGET,
         model.complete(request("B"), CancellationToken::new()),
     )
@@ -485,7 +511,7 @@ async fn transport_route_cancel_closes_only_its_stream_without_retry() {
 #[tokio::test]
 async fn transport_route_missing_context_fails_before_any_http_request() {
     let (listener, proxy) = listener().await;
-    let error = timeout(
+    let error = time::timeout(
         BUDGET,
         chat_model(proxy).complete(
             ModelRequest::new(vec![ModelMessage::user_text("missing context")]),
@@ -496,7 +522,7 @@ async fn transport_route_missing_context_fails_before_any_http_request() {
     .unwrap()
     .unwrap_err();
     assert!(error.to_string().contains("requires a call context"));
-    assert!(timeout(Duration::from_millis(100), listener.accept())
+    assert!(time::timeout(Duration::from_millis(100), listener.accept())
         .await
         .is_err());
 }
@@ -509,7 +535,7 @@ async fn transport_route_disabled_does_not_send_correlation_headers() {
         "synthetic-key",
         "fixture-model",
     ));
-    let response = timeout(
+    let response = time::timeout(
         BUDGET,
         model.complete(request("direct"), CancellationToken::new()),
     )
@@ -534,9 +560,9 @@ fn transport_route_rejects_ambiguous_origins_and_empty_run() {
         "http://localhost/#fragment",
     ] {
         assert!(
-            ModelTransportRoute::new(endpoint.parse().unwrap(), "run").is_err(),
+            ModelTransportRoute::try_new(endpoint.parse().unwrap(), "run").is_err(),
             "必须拒绝非origin路由: {endpoint}"
         );
     }
-    assert!(ModelTransportRoute::new("http://localhost/".parse().unwrap(), " ").is_err());
+    assert!(ModelTransportRoute::try_new("http://localhost/".parse().unwrap(), " ").is_err());
 }

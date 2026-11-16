@@ -1,15 +1,15 @@
 use crate::i18n;
-use crate::kit::atoms::{PLUGIN_LIST, PluginSummary};
-use fluent_bundle::FluentValue;
-use ratatui_kit::ratatui::{
-    style::{Color, Style},
-    text::{Line, Span},
-};
 
-use super::data::get_marketplace_cache;
-use super::{
-    DiscoverDetailAction, MsStatus, PluginSearchResultItem, SearchState, action_label, action_list,
-};
+use fluent_bundle::FluentValue;
+use ratatui_kit::ratatui::style::Color;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
+
+use super::DiscoverDetailAction;
+use super::MsStatus;
+use super::PluginSearchResultItem;
+use super::SearchState;
 
 // ── Render: Installed list ────────────────────────────────────────────
 
@@ -49,93 +49,96 @@ pub(super) fn render_installed(
             muted_style,
         )]));
     } else {
-        for (i, p) in plugins.iter().enumerate().skip(scroll_start).take(visible) {
-            let is_selected = i == sel;
-            let cursor = if is_selected { ">" } else { " " };
-            let name_style = if is_selected {
-                title_style
-            } else {
-                primary_style
-            };
+        {
+            let iteration_items = plugins.iter().enumerate().skip(scroll_start).take(visible);
+            for (i, p) in iteration_items {
+                let is_selected = i == sel;
+                let cursor = if is_selected { ">" } else { " " };
+                let name_style = if is_selected {
+                    title_style
+                } else {
+                    primary_style
+                };
 
-            // Status icon
-            let (icon, icon_color) = if p.load_error.is_some() {
-                ("✗", error_style.fg.unwrap_or_default())
-            } else if !p.enabled {
-                ("◯", muted_style.fg.unwrap_or_default())
-            } else {
-                ("✓", success_color)
-            };
+                // Status icon
+                let (icon, icon_color) = if p.load_error.is_some() {
+                    ("✗", error_style.fg.unwrap_or_default())
+                } else if !p.enabled {
+                    ("◯", muted_style.fg.unwrap_or_default())
+                } else {
+                    ("✓", success_color)
+                };
 
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {} ", cursor), Style::new().fg(title_color)),
-                Span::styled(format!("{} ", icon), Style::new().fg(icon_color)),
-                Span::styled(p.name.clone(), name_style),
-                Span::styled(
-                    format!(
-                        " v{}",
-                        if p.version.is_empty() {
-                            i18n::tr("panel-plugin-version-unknown")
-                        } else {
-                            p.version.clone()
-                        }
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" {} ", cursor), Style::new().fg(title_color)),
+                    Span::styled(format!("{} ", icon), Style::new().fg(icon_color)),
+                    Span::styled(p.name.clone(), name_style),
+                    Span::styled(
+                        format!(
+                            " v{}",
+                            if p.version.is_empty() {
+                                i18n::tr("panel-plugin-version-unknown")
+                            } else {
+                                p.version.clone()
+                            }
+                        ),
+                        muted_style,
                     ),
-                    muted_style,
-                ),
-            ]));
-            if !p.description.is_empty() {
+                ]));
+                if !p.description.is_empty() {
+                    lines.push(Line::from(vec![Span::styled(
+                        format!("     {}", p.description),
+                        dim_style,
+                    )]));
+                } else {
+                    lines.push(Line::from(""));
+                }
+                let root: String = p.root.chars().take(72).collect();
                 lines.push(Line::from(vec![Span::styled(
-                    format!("     {}", p.description),
+                    format!("     {}", root),
                     dim_style,
                 )]));
-            } else {
+                // extras with i18n labels
+                let mut extras: Vec<String> = Vec::new();
+                if p.skills_count > 0 {
+                    extras.push(format!(
+                        "{}:{}",
+                        i18n::tr("panel-plugin-field-skills"),
+                        p.skills_count
+                    ));
+                }
+                if p.commands_count > 0 {
+                    extras.push(format!(
+                        "{}:{}",
+                        i18n::tr("panel-plugin-field-commands"),
+                        p.commands_count
+                    ));
+                }
+                if p.agents_count > 0 {
+                    extras.push(format!(
+                        "{}:{}",
+                        i18n::tr("panel-plugin-field-agents"),
+                        p.agents_count
+                    ));
+                }
+                if p.mcp_count > 0 {
+                    extras.push(format!(
+                        "{}:{}",
+                        i18n::tr("panel-plugin-field-mcp"),
+                        p.mcp_count
+                    ));
+                }
+                let extra = if extras.is_empty() {
+                    String::from("—")
+                } else {
+                    extras.join(" · ")
+                };
+                lines.push(Line::from(vec![Span::styled(
+                    format!("     {}", extra),
+                    dim_style,
+                )]));
                 lines.push(Line::from(""));
             }
-            let root: String = p.root.chars().take(72).collect();
-            lines.push(Line::from(vec![Span::styled(
-                format!("     {}", root),
-                dim_style,
-            )]));
-            // extras with i18n labels
-            let mut extras: Vec<String> = Vec::new();
-            if p.skills_count > 0 {
-                extras.push(format!(
-                    "{}:{}",
-                    i18n::tr("panel-plugin-field-skills"),
-                    p.skills_count
-                ));
-            }
-            if p.commands_count > 0 {
-                extras.push(format!(
-                    "{}:{}",
-                    i18n::tr("panel-plugin-field-commands"),
-                    p.commands_count
-                ));
-            }
-            if p.agents_count > 0 {
-                extras.push(format!(
-                    "{}:{}",
-                    i18n::tr("panel-plugin-field-agents"),
-                    p.agents_count
-                ));
-            }
-            if p.mcp_count > 0 {
-                extras.push(format!(
-                    "{}:{}",
-                    i18n::tr("panel-plugin-field-mcp"),
-                    p.mcp_count
-                ));
-            }
-            let extra = if extras.is_empty() {
-                String::from("—")
-            } else {
-                extras.join(" · ")
-            };
-            lines.push(Line::from(vec![Span::styled(
-                format!("     {}", extra),
-                dim_style,
-            )]));
-            lines.push(Line::from(""));
         }
     }
 }
@@ -261,19 +264,22 @@ pub(super) fn render_detail(
         lines.push(Line::from(""));
     }
 
-    let actions = action_list(p.enabled);
-    for (i, action) in actions.iter().enumerate() {
-        let is_selected = i == action_index;
-        let cursor = if is_selected { ">" } else { " " };
-        let style = if is_selected {
-            title_style
-        } else {
-            primary_style
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {} ", cursor), Style::new().fg(title_color)),
-            Span::styled(format!("    {}", action_label(action)), style),
-        ]));
+    let actions = super::action_list(p.enabled);
+    {
+        let iteration_items = actions.iter().enumerate();
+        for (i, action) in iteration_items {
+            let is_selected = i == action_index;
+            let cursor = if is_selected { ">" } else { " " };
+            let style = if is_selected {
+                title_style
+            } else {
+                primary_style
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", cursor), Style::new().fg(title_color)),
+                Span::styled(format!("    {}", super::action_label(action)), style),
+            ]));
+        }
     }
 }
 
@@ -352,49 +358,52 @@ pub(super) fn render_discover_list(
             )]));
         }
     } else {
-        for (i, item) in items.iter().enumerate().skip(scroll_start).take(visible) {
-            let is_selected = i == sel;
-            let cursor = if is_selected { ">" } else { " " };
-            let name_style = if is_selected {
-                title_style
-            } else {
-                primary_style
-            };
-
-            // 已安装标记
-            let installed_mark = {
-                let store = PLUGIN_LIST.state();
-                let installed_guard = store.read();
-                let installed_ids: std::collections::HashSet<&str> =
-                    installed_guard.iter().map(|p| p.name.as_str()).collect();
-                if installed_ids.contains(item.name.as_str()) {
-                    " \u{2713}"
+        {
+            let iteration_items = items.iter().enumerate().skip(scroll_start).take(visible);
+            for (i, item) in iteration_items {
+                let is_selected = i == sel;
+                let cursor = if is_selected { ">" } else { " " };
+                let name_style = if is_selected {
+                    title_style
                 } else {
-                    ""
-                }
-            };
+                    primary_style
+                };
 
-            // Name + version + marketplace
-            lines.push(Line::from(vec![
-                Span::styled(format!("{} ", cursor), Style::new().fg(title_color)),
-                Span::styled(format!("{} v{}  ", item.name, item.version), name_style),
-                Span::styled(
-                    format!("({}){}", item.marketplace, installed_mark),
+                // 已安装标记
+                let installed_mark = {
+                    let store = PLUGIN_LIST.state();
+                    let installed_guard = store.read();
+                    let installed_ids: std::collections::HashSet<&str> =
+                        installed_guard.iter().map(|p| p.name.as_str()).collect();
+                    if installed_ids.contains(item.name.as_str()) {
+                        " \u{2713}"
+                    } else {
+                        ""
+                    }
+                };
+
+                // Name + version + marketplace
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{} ", cursor), Style::new().fg(title_color)),
+                    Span::styled(format!("{} v{}  ", item.name, item.version), name_style),
+                    Span::styled(
+                        format!("({}){}", item.marketplace, installed_mark),
+                        dim_style,
+                    ),
+                ]));
+
+                // Description (truncated)
+                let desc: String = if item.description.is_empty() {
+                    "—".into()
+                } else {
+                    item.description.chars().take(60).collect()
+                };
+                lines.push(Line::from(vec![Span::styled(
+                    format!("    {}", desc),
                     dim_style,
-                ),
-            ]));
-
-            // Description (truncated)
-            let desc: String = if item.description.is_empty() {
-                "—".into()
-            } else {
-                item.description.chars().take(60).collect()
-            };
-            lines.push(Line::from(vec![Span::styled(
-                format!("    {}", desc),
-                dim_style,
-            )]));
-            lines.push(Line::from(""));
+                )]));
+                lines.push(Line::from(""));
+            }
         }
     }
 }
@@ -459,18 +468,21 @@ pub(super) fn render_discover_detail(
     )]));
     lines.push(Line::from(""));
 
-    for (i, action) in DiscoverDetailAction::ALL.iter().enumerate() {
-        let is_selected = i == action_cursor;
-        let cursor = if is_selected { ">" } else { " " };
-        let style = if is_selected {
-            title_style
-        } else {
-            primary_style
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!("{} ", cursor), Style::new().fg(title_color)),
-            Span::styled(format!("    {}", action.label()), style),
-        ]));
+    {
+        let iteration_items = DiscoverDetailAction::ALL.iter().enumerate();
+        for (i, action) in iteration_items {
+            let is_selected = i == action_cursor;
+            let cursor = if is_selected { ">" } else { " " };
+            let style = if is_selected {
+                title_style
+            } else {
+                primary_style
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", cursor), Style::new().fg(title_color)),
+                Span::styled(format!("    {}", action.label()), style),
+            ]));
+        }
     }
 }
 
@@ -509,7 +521,7 @@ pub(super) fn render_marketplaces(
     lines.push(Line::from(vec![Span::styled("  Marketplaces", bold_style)]));
     lines.push(Line::from(""));
 
-    let entries = get_marketplace_cache();
+    let entries = super::data::get_marketplace_cache();
     let dim_color = muted_style.fg.unwrap_or_default();
 
     // Add Marketplace 行 (item 0)
@@ -545,46 +557,49 @@ pub(super) fn render_marketplaces(
     lines.push(Line::from(""));
 
     // Marketplace 条目
-    for (i, entry) in entries.iter().enumerate() {
-        let item_idx = i + 1;
-        let is_selected = sel == item_idx;
-        let cursor = if is_selected { ">" } else { " " };
-        let name_style = if is_selected { bold_style } else { muted_style };
+    {
+        let iteration_items = entries.iter().enumerate();
+        for (i, entry) in iteration_items {
+            let item_idx = i + 1;
+            let is_selected = sel == item_idx;
+            let cursor = if is_selected { ">" } else { " " };
+            let name_style = if is_selected { bold_style } else { muted_style };
 
-        // 状态图标
-        let (icon, icon_color) = match entry.status {
-            MsStatus::Cached => ("●", success_color),
-            MsStatus::Stale => ("○", dim_color),
-            MsStatus::Failed => ("✗", error_style.fg.unwrap_or_default()),
-            MsStatus::NotFound => ("○", dim_color),
-        };
-        let status_text = match entry.status {
-            MsStatus::Cached => "cached",
-            MsStatus::Stale => "stale",
-            MsStatus::Failed => "failed",
-            MsStatus::NotFound => "not fetched",
-        };
+            // 状态图标
+            let (icon, icon_color) = match entry.status {
+                MsStatus::Cached => ("●", success_color),
+                MsStatus::Stale => ("○", dim_color),
+                MsStatus::Failed => ("✗", error_style.fg.unwrap_or_default()),
+                MsStatus::NotFound => ("○", dim_color),
+            };
+            let status_text = match entry.status {
+                MsStatus::Cached => "cached",
+                MsStatus::Stale => "stale",
+                MsStatus::Failed => "failed",
+                MsStatus::NotFound => "not fetched",
+            };
 
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {} ", cursor), name_style),
-            Span::styled(format!("{} ", icon), Style::new().fg(icon_color)),
-            Span::styled(format!("{} ", entry.name), name_style),
-            Span::styled(format!("({})", status_text), muted_style),
-        ]));
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {} ", cursor), name_style),
+                Span::styled(format!("{} ", icon), Style::new().fg(icon_color)),
+                Span::styled(format!("{} ", entry.name), name_style),
+                Span::styled(format!("({})", status_text), muted_style),
+            ]));
 
-        // 第二行: source + stats
-        let stats = format!(
-            "{}: {}  |  plugins: {}  |  installed: {}",
-            if entry.auto_update { "auto" } else { "manual" },
-            entry.source_label.chars().take(30).collect::<String>(),
-            entry.plugin_count,
-            entry.installed_count,
-        );
-        lines.push(Line::from(vec![Span::styled(
-            format!("     {}", stats),
-            Style::new().fg(dim_color),
-        )]));
-        lines.push(Line::from(""));
+            // 第二行: source + stats
+            let stats = format!(
+                "{}: {}  |  plugins: {}  |  installed: {}",
+                if entry.auto_update { "auto" } else { "manual" },
+                entry.source_label.chars().take(30).collect::<String>(),
+                entry.plugin_count,
+                entry.installed_count,
+            );
+            lines.push(Line::from(vec![Span::styled(
+                format!("     {}", stats),
+                Style::new().fg(dim_color),
+            )]));
+            lines.push(Line::from(""));
+        }
     }
 
     // Footer hints：列表态提示由 PluginPanel 主组件按 tab 统一给出，此处只保留刷新中状态
@@ -639,3 +654,7 @@ pub(super) fn render_errors(
         }
     }
 }
+
+use crate::kit::atoms::PLUGIN_LIST;
+
+use crate::kit::atoms::PluginSummary;

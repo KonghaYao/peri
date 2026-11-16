@@ -1,4 +1,12 @@
-use super::*;
+use crate::prompt::prompt_template::PromptEnv;
+use crate::prompt::prompt_template::PromptTemplate;
+use peri_acp_types::agents::AgentOverrides;
+use peri_acp_types::meta_harness::MetaHarnessState;
+use peri_agent::middleware::PromptSectionZone;
+use peri_middlewares::default_system_prompt::DefaultSystemPromptMiddleware;
+use peri_middlewares::host_ports::AgentCatalogProvider;
+use peri_model::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
+use std::sync::Arc;
 
 #[test]
 fn test_overrides_after_boundary_marker() {
@@ -8,7 +16,7 @@ fn test_overrides_after_boundary_marker() {
         proactiveness: None,
         mode: None,
     };
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         Some(&overrides),
         "/tmp",
@@ -67,7 +75,7 @@ fn test_available_agents_placeholder_replaced() {
         "tester",
         r#"{"name":"tester","description":"A test agent"}"#,
     )]);
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         dir.to_str().unwrap(),
@@ -104,7 +112,7 @@ fn test_available_agents_placeholder_empty_dir() {
         "explorer",
         r#"{"name":"explorer","description":"Explores","model":"haiku","tools":["Read","Grep","Glob"],"disallowedTools":["Agent"]}"#,
     )]);
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         dir.to_str().unwrap(),
@@ -131,7 +139,7 @@ fn test_available_agents_placeholder_empty_dir() {
 fn test_available_agents_replaced_when_subagent_holder_enabled() {
     let dir = tmp_dir("prompt_test_agent_holder");
 
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         dir.to_str().unwrap(),
@@ -158,7 +166,7 @@ fn meta_harness_disabling_holder_removes_section() {
     state
         .disabled_middlewares
         .insert("SubAgentMiddleware".to_string());
-    let result = render_with_state(&state);
+    let result = crate::prompt::tests::render_with_state(&state);
     assert!(
         !result.contains("SubAgent Delegation"),
         "关闭 SubAgentMiddleware 后 11_subagent 段落应消失（盲区闭合）"
@@ -190,7 +198,7 @@ fn format_available_agents_renders_registry_catalog_entries() {
         ),
     ])));
 
-    let result = format_available_agents(&provider, true);
+    let result = crate::prompt::prompt_template::format_available_agents(&provider, true);
     assert!(result.contains("- reviewer [opus] [writes]"), "{result}");
     assert!(result.contains("- explorer [haiku] [readonly]"), "{result}");
     // 描述作为有界检索数据随行渲染，明确标注 untrusted metadata。
@@ -241,7 +249,7 @@ fn format_available_agents_bounds_descriptions_to_one_line() {
         description: long,
     });
 
-    let result = format_available_agents(&port, true);
+    let result = crate::prompt::prompt_template::format_available_agents(&port, true);
     assert!(
         result.contains("- reviewer [inherit] [readonly] | description (untrusted metadata): first line second line"),
         "{result}"
@@ -276,7 +284,7 @@ fn format_available_agents_without_a_face_reports_no_agents() {
     // W5：未绑定 registry（面未装配/被关闭）⇒ 空目录 + 提示；**不扫盘**
     // （X4/J5：任何组件不得回落磁盘）。
     let provider = AgentCatalogProvider::new();
-    let result = format_available_agents(&provider, true);
+    let result = crate::prompt::prompt_template::format_available_agents(&provider, true);
     assert!(
         result.contains("No agents currently configured"),
         "无资源面必须报告空目录：{result}"
@@ -287,7 +295,7 @@ fn format_available_agents_without_a_face_reports_no_agents() {
 
 #[test]
 fn test_language_simplified_chinese_injected() {
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -312,7 +320,7 @@ fn test_language_simplified_chinese_injected() {
 
 #[test]
 fn test_language_none_no_injection() {
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -328,7 +336,7 @@ fn test_language_none_no_injection() {
 
 #[test]
 fn test_language_section_after_dynamic_content() {
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -352,7 +360,7 @@ fn test_language_section_after_dynamic_content() {
 
 #[test]
 fn test_language_zh_maps_to_simplified_chinese() {
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -368,7 +376,7 @@ fn test_language_zh_maps_to_simplified_chinese() {
 
 #[test]
 fn test_language_custom_code_passthrough() {
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -409,7 +417,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
     for language in &language_combos {
         // No overrides
         {
-            let old = build_system_prompt(
+            let old = crate::prompt::tests::build_system_prompt(
                 &MetaHarnessState::default(),
                 no_overrides,
                 cwd,
@@ -433,7 +441,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
         }
         // With non-empty overrides
         {
-            let old = build_system_prompt(
+            let old = crate::prompt::tests::build_system_prompt(
                 &MetaHarnessState::default(),
                 Some(&with_overrides),
                 cwd,
@@ -457,7 +465,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
         }
         // With empty overrides (should behave same as None)
         {
-            let old = build_system_prompt(
+            let old = crate::prompt::tests::build_system_prompt(
                 &MetaHarnessState::default(),
                 Some(&empty_overrides),
                 cwd,
@@ -487,7 +495,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
 /// 输出逐字节一致，并只生成一个 provider 必须消费的 cache boundary token。
 #[test]
 fn test_template_byte_identical_and_one_boundary_marker() {
-    let old = build_system_prompt(
+    let old = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -524,7 +532,7 @@ fn test_render_full_mode_preserves_immutable_layers() {
         proactiveness: None,
         mode: Some("full".into()),
     };
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         Some(&overrides),
         "/tmp",
@@ -564,7 +572,7 @@ fn test_render_full_mode_preserves_secret_policy() {
         proactiveness: None,
         mode: Some("full".into()),
     };
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         Some(&overrides),
         "/tmp",
@@ -590,7 +598,7 @@ fn test_render_full_mode_preserves_git_guardrails() {
         proactiveness: None,
         mode: Some("full".into()),
     };
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         Some(&overrides),
         "/tmp",
@@ -616,7 +624,7 @@ fn test_render_full_mode_preserves_tool_discipline() {
         proactiveness: None,
         mode: Some("full".into()),
     };
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         Some(&overrides),
         "/tmp",
@@ -645,10 +653,10 @@ fn test_render_full_mode_prefix_aligned_with_extend() {
     let cached_prefix: String = {
         let sections = DefaultSystemPromptMiddleware::sections(None);
         let mut parts = Vec::new();
-        for s in sections
+        let filtered_s = sections
             .iter()
-            .filter(|s| s.zone == PromptSectionZone::Cached)
-        {
+            .filter(|s| s.zone == PromptSectionZone::Cached);
+        for s in filtered_s {
             parts.push(s.content.as_str());
         }
         parts.join("\n\n")
@@ -659,7 +667,7 @@ fn test_render_full_mode_prefix_aligned_with_extend() {
         proactiveness: None,
         mode: Some("full".into()),
     };
-    let full = build_system_prompt(
+    let full = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         Some(&full_overrides),
         "/tmp",
@@ -667,7 +675,7 @@ fn test_render_full_mode_prefix_aligned_with_extend() {
         Some("2026-01-01"),
         None,
     );
-    let extend = build_system_prompt(
+    let extend = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -695,7 +703,7 @@ fn test_render_full_mode_prefix_aligned_with_extend() {
 #[test]
 fn test_render_immutable_layer_order() {
     // frozen_date 参数化，避免触发 chrono::Local::now()（testing-standards 4.1 确定性）
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
@@ -759,7 +767,7 @@ fn test_render_extend_mode_unchanged() {
         proactiveness: None,
         mode: Some("extend".into()),
     };
-    let result_none = build_system_prompt(
+    let result_none = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         Some(&overrides_none),
         "/tmp",
@@ -767,7 +775,7 @@ fn test_render_extend_mode_unchanged() {
         Some("2026-01-01"),
         None,
     );
-    let result_extend = build_system_prompt(
+    let result_extend = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         Some(&overrides_extend),
         "/tmp",
@@ -803,11 +811,11 @@ fn test_detect_is_git_repo_in_subdirectory() {
     std::fs::create_dir_all(&sub).unwrap();
 
     assert!(
-        detect_is_git_repo(dir.to_str().unwrap()),
+        crate::prompt::prompt_template::detect_is_git_repo(dir.to_str().unwrap()),
         "仓库根应判定为 Git"
     );
     assert!(
-        detect_is_git_repo(sub.to_str().unwrap()),
+        crate::prompt::prompt_template::detect_is_git_repo(sub.to_str().unwrap()),
         "仓库子目录应向上查找到 .git"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -820,7 +828,7 @@ fn test_detect_is_git_repo_with_git_file_worktree() {
     std::fs::write(dir.join(".git"), "gitdir: /elsewhere/.git/worktrees/x\n").unwrap();
 
     assert!(
-        detect_is_git_repo(dir.to_str().unwrap()),
+        crate::prompt::prompt_template::detect_is_git_repo(dir.to_str().unwrap()),
         ".git 文件（worktree/submodule）也应判定为 Git 仓库"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -834,11 +842,11 @@ fn test_detect_is_git_repo_non_repo() {
     std::fs::create_dir_all(&nested).unwrap();
 
     assert!(
-        !detect_is_git_repo(dir.to_str().unwrap()),
+        !crate::prompt::prompt_template::detect_is_git_repo(dir.to_str().unwrap()),
         "无 .git 的目录不应判定为仓库"
     );
     assert!(
-        !detect_is_git_repo(nested.to_str().unwrap()),
+        !crate::prompt::prompt_template::detect_is_git_repo(nested.to_str().unwrap()),
         "无 .git 的嵌套目录不应判定为仓库"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -911,7 +919,7 @@ fn unbound_catalog_still_replaces_the_placeholder_without_leaking_it() {
     // 且**不得**把 `{{available_agents}}` 原文泄漏进 prompt。
     let dir = tmp_dir("prompt_test_agent_unbound");
 
-    let result = build_system_prompt(
+    let result = crate::prompt::tests::build_system_prompt(
         &MetaHarnessState::default(),
         None,
         dir.to_str().unwrap(),
@@ -963,7 +971,7 @@ fn format_available_agents_bounds_ids_and_rejects_injection_shapes() {
         },
     ]);
 
-    let result = format_available_agents(&port, true);
+    let result = crate::prompt::prompt_template::format_available_agents(&port, true);
     assert!(result.contains("- reviewer [opus] [readonly]"), "{result}");
     assert!(
         !result.contains("injected"),

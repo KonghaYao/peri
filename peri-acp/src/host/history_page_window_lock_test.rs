@@ -3,11 +3,19 @@
 //! 用一个在 `inspect_availability` 处阻塞的资源实现：load 阻塞期间主线程仍能
 //! `try_lock` 成功，证明 load 没有持有全局 sessions 锁。
 
-use super::*;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use crate::host::requests::tests::history_page_wire_tests::PageFixture;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::provider::LlmProvider;
+use crate::transport::AcpTransport;
+use async_trait::async_trait;
+use serde_json::json;
+use serde_json::Value;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use peri_acp_types::session_resources::{
     BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot, CloseSettlement, ForkSnapshot,
@@ -246,17 +254,23 @@ async fn fixture() -> (
     Arc<Notify>,
 ) {
     let tmp = tempfile::TempDir::new().unwrap();
-    let config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "unused-test-key",
-        "gpt-4o",
-    ));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "unused-test-key",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, &tmp).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(config, provider, &tmp).await;
     let mut sessions = HashMap::new();
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     cfg.session_resources = Arc::new(BlockingResources {
@@ -460,14 +474,17 @@ async fn restore_publication_generation_mismatch_keeps_new_state() {
 #[serial]
 async fn restore_cleanup_incomplete_retains_owner_until_explicit_close() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "unused-test-key",
-        "gpt-4o",
-    ));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "unused-test-key",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut raw_cfg = make_server_config(config, provider, &tmp).await;
+    let mut raw_cfg =
+        crate::host::requests::tests::make_server_config(config, provider, &tmp).await;
     let cwd = tmp.path().canonicalize().unwrap();
     raw_cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd: cwd.to_string_lossy().into_owned(),
@@ -478,7 +495,12 @@ async fn restore_cleanup_incomplete_retains_owner_until_explicit_close() {
     });
     let cfg = Arc::new(raw_cfg);
     let mut state_map = HashMap::new();
-    let sid = register_session_with_history(&mut state_map, cwd.to_str().unwrap(), &cfg).await;
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut state_map,
+        cwd.to_str().unwrap(),
+        &cfg,
+    )
+    .await;
     let sessions = Arc::new(tokio::sync::Mutex::new(state_map));
     let mut environment =
         crate::host::workspace::SessionEnvironment::assemble(&cfg, cwd.to_str().unwrap(), &sid)
@@ -543,7 +565,7 @@ async fn restore_cleanup_incomplete_retains_owner_until_explicit_close() {
 
     pool.settled.store(true, Ordering::Release);
     let mut states = sessions.lock().await;
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({ "sessionId": sid }),
         &cfg,

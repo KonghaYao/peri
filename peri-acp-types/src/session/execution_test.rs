@@ -1,5 +1,6 @@
-use super::*;
 use crate::error::AgentError;
+use crate::session::execution::ExecutionFailure;
+use crate::session::execution::ExecutionFailureKind;
 
 #[test]
 fn test_compact_incomplete_response_has_safe_llm_failure() {

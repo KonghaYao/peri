@@ -14,7 +14,12 @@ use ratatui_kit::prelude::{Component, ComponentUpdater, Hooks, Props, State, Use
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-use super::*;
+use super::{
+    AccountStatus, AuthAction, AuthController, AuthError, AuthEvent, AuthFailure,
+    AuthIdentityDraft, AuthResult, AuthTarget, AuthViewState, HostConfigAuthScope, LogoutOutcome,
+    OperationTicket, OutcomeUnknownReason,
+};
+
 use crate::chatgpt_auth::{ChatGptAuthBackend, ChatGptAuthSession};
 #[derive(Clone, Default)]
 struct PlanDraft {
@@ -68,7 +73,10 @@ impl FakeState {
     }
 
     fn finish(&self, result: AuthResult<AccountStatus>) {
-        self.finish_results.lock().unwrap().push_back(result);
+        self.finish_results
+            .lock()
+            .expect("finish_results mutex must not be poisoned")
+            .push_back(result);
         self.finish_signal.add_permits(1);
     }
 }
@@ -82,7 +90,7 @@ impl ChatGptAuthBackend for FakeBackend {
         self.state
             .opened_targets
             .lock()
-            .unwrap()
+            .expect("state .opened_targets mutex must not be poisoned")
             .push(target.clone());
         Ok(Box::new(FakeSession {
             state: self.state.clone(),
@@ -113,7 +121,7 @@ impl ChatGptAuthSession for FakeSession {
                 self.state
                     .finish_results
                     .lock()
-                    .unwrap()
+                    .expect("login: the fixture mutex must remain unpoisoned")
                     .pop_front()
                     .unwrap_or(Err(AuthError::Unavailable))
             }
@@ -128,7 +136,7 @@ impl ChatGptAuthSession for FakeSession {
         self.state
             .status_results
             .lock()
-            .unwrap()
+            .expect("state .status_results mutex must not be poisoned")
             .pop_front()
             .unwrap_or(Ok(None))
     }
@@ -144,10 +152,15 @@ impl ChatGptAuthSession for FakeSession {
                 }
             }
         }
-        self.state.logout_result.lock().unwrap().clone()
+        self.state
+            .logout_result
+            .lock()
+            .expect("state.logout_result mutex must not be poisoned")
+            .clone()
     }
 }
 
+#[must_use]
 fn target() -> AuthTarget {
     AuthTarget::new(PathBuf::from("/tmp/peri-auth-test"), "work")
 }
@@ -156,6 +169,7 @@ fn scope() -> HostConfigAuthScope {
     HostConfigAuthScope::new("/tmp/peri/settings.json", target())
 }
 
+#[must_use]
 fn other_scope() -> HostConfigAuthScope {
     HostConfigAuthScope::new(
         "/tmp/peri/settings.json",
@@ -185,14 +199,12 @@ async fn run_login(
         let on_url = Box::new(move |url: String| {
             url_inbox
                 .lock()
-                .unwrap()
                 .push((url_ticket.clone(), AuthEvent::AuthorizationUrl(url)));
         });
         let token = ticket.token().clone();
         let result = session.login(token, on_url).await;
         inbox
             .lock()
-            .unwrap()
             .push((ticket, AuthEvent::LoginFinished(result)));
     })
 }
@@ -248,7 +260,7 @@ fn authentication_uses_raw_valid_account_and_never_opens_invalid_target() {
             Err(AuthFailure::TargetRequired)
         ));
         assert!(controller.prepare_status(false).is_none());
-        assert!(state.opened_targets.lock().unwrap().is_empty());
+        assert!(state.opened_targets.lock().expect("authentication uses raw valid account and never opens invalid target: the fixture mutex must remain unpoisoned").is_empty());
     }
 
     let (mut controller, state) = controller();
@@ -258,7 +270,10 @@ fn authentication_uses_raw_valid_account_and_never_opens_invalid_target() {
         AuthTarget::new(std::env::temp_dir(), account),
     ));
     assert!(controller.prepare_login().is_ok());
-    let opened = state.opened_targets.lock().unwrap();
+    let opened = state
+        .opened_targets
+        .lock()
+        .expect("state.opened_targets mutex must not be poisoned");
     assert_eq!(opened.len(), 1);
     assert_eq!(opened[0].account, account);
 }
@@ -267,7 +282,7 @@ fn authentication_uses_raw_valid_account_and_never_opens_invalid_target() {
 #[test]
 fn unspawned_request_releases_completion_gate() {
     let (mut controller, _) = controller();
-    controller.prepare_login().unwrap();
+    controller.prepare_login().expect("unspawned request releases completion gate: the prepare_login fixture operation uses valid inputs");
     assert!(controller.gate.is_pending());
 
     controller.abort_unspawned(AuthFailure::Unavailable);
@@ -287,14 +302,14 @@ fn unspawned_request_releases_completion_gate() {
 async fn login_publishes_url_then_signed_in_identity() {
     let (mut controller, state) = controller();
     let mut plan = PlanDraft::default();
-    let request = controller.prepare_login().unwrap();
+    let request = controller.prepare_login().expect("login publishes url then signed in identity: the prepare_login fixture operation uses valid inputs");
     let task = run_login(&mut controller, request.session, request.ticket).await;
 
     wait_until(&mut controller, "authorization URL", |view| {
         view.url().is_some()
     })
     .await;
-    let url = controller.view().url().unwrap().to_owned();
+    let url = controller.view().url().expect("login publishes url then signed in identity: the view fixture operation uses valid inputs").to_owned();
     assert!(url.starts_with("https://auth.example.test/authorize"));
 
     state.finish(Ok(status("subject-one", "client-one", true)));
@@ -316,13 +331,13 @@ async fn login_publishes_url_then_signed_in_identity() {
     );
     assert!(controller.use_account(&mut plan, &scope()));
     assert_eq!(plan.subject, "subject-one");
-    task.await.unwrap();
+    task.await.expect("login publishes url then signed in identity: fixture task and request must complete successfully");
 }
 
 #[tokio::test]
 async fn login_error_can_be_retried_without_stale_identity() {
     let (mut controller, state) = controller();
-    let request = controller.prepare_login().unwrap();
+    let request = controller.prepare_login().expect("login error can be retried without stale identity: the prepare_login fixture operation uses valid inputs");
     let task = run_login(&mut controller, request.session, request.ticket).await;
     wait_until(&mut controller, "authorization URL", |view| {
         view.url().is_some()
@@ -333,9 +348,9 @@ async fn login_error_can_be_retried_without_stale_identity() {
         matches!(view, AuthViewState::Failed(AuthFailure::Unavailable))
     })
     .await;
-    task.await.unwrap();
+    task.await.expect("login error can be retried without stale identity: fixture task and request must complete successfully");
 
-    let request = controller.prepare_login().unwrap();
+    let request = controller.prepare_login().expect("login error can be retried without stale identity: the prepare_login fixture operation uses valid inputs");
     let task = run_login(&mut controller, request.session, request.ticket).await;
     tokio::time::timeout(Duration::from_secs(2), async {
         while state.logins_started.load(Ordering::SeqCst) < 2 {
@@ -353,7 +368,7 @@ async fn login_error_can_be_retried_without_stale_identity() {
         matches!(view, AuthViewState::SignedIn(_))
     })
     .await;
-    task.await.unwrap();
+    task.await.expect("login error can be retried without stale identity: fixture task and request must complete successfully");
     assert_eq!(state.logins_started.load(Ordering::SeqCst), 2);
 }
 
@@ -363,13 +378,13 @@ async fn status_identity_is_explicitly_adoptable_but_never_overwrites() {
     state
         .status_results
         .lock()
-        .unwrap()
+        .expect("state .status_results mutex must not be poisoned")
         .push_back(Ok(Some(status(
             "verified-subject",
             "verified-client",
             true,
         ))));
-    let request = controller.prepare_status(false).unwrap();
+    let request = controller.prepare_status(false).expect("status identity is explicitly adoptable but never overwrites: the prepare_status fixture operation uses valid inputs");
     let token = request.ticket.token().clone();
     let result = request.session.status(token).await;
     controller.receive(request.ticket, AuthEvent::StatusChecked(result));
@@ -397,13 +412,13 @@ async fn use_account_requires_current_scope() {
     state
         .status_results
         .lock()
-        .unwrap()
+        .expect("state .status_results mutex must not be poisoned")
         .push_back(Ok(Some(status(
             "verified-subject",
             "verified-client",
             true,
         ))));
-    let request = controller.prepare_status(false).unwrap();
+    let request = controller.prepare_status(false).expect("use account requires current scope: the prepare_status fixture operation uses valid inputs");
     let token = request.ticket.token().clone();
     let result = request.session.status(token).await;
     controller.receive(request.ticket, AuthEvent::StatusChecked(result));
@@ -423,10 +438,12 @@ async fn use_account_requires_current_scope() {
 #[tokio::test]
 async fn status_none_means_signed_out() {
     let (mut controller, _state) = controller();
-    let request = controller.prepare_status(false).unwrap();
+    let request = controller.prepare_status(false).expect(
+        "status none means signed out: the prepare_status fixture operation uses valid inputs",
+    );
     let token = request.ticket.token().clone();
     let result = request.session.status(token).await;
-    assert!(result.unwrap().is_none());
+    assert!(result.expect("status none means signed out: the fixture operation must finish without an inner failure").is_none());
     controller.receive(request.ticket, AuthEvent::StatusChecked(Ok(None)));
     assert!(matches!(controller.view(), AuthViewState::SignedOut));
 }
@@ -434,7 +451,7 @@ async fn status_none_means_signed_out() {
 #[tokio::test]
 async fn cancelling_login_reconciles_with_a_new_status_ticket_and_rejects_late_result() {
     let (mut controller, state) = controller();
-    let request = controller.prepare_login().unwrap();
+    let request = controller.prepare_login().expect("cancelling login reconciles with a new status ticket and rejects late result: the prepare_login fixture operation uses valid inputs");
     let task = run_login(&mut controller, request.session, request.ticket).await;
     wait_until(&mut controller, "authorization URL", |view| {
         view.url().is_some()
@@ -443,12 +460,12 @@ async fn cancelling_login_reconciles_with_a_new_status_ticket_and_rejects_late_r
 
     assert!(controller.cancel_login());
     assert!(matches!(controller.view(), AuthViewState::Cancelling));
-    let reconcile = controller.prepare_status(true).unwrap();
+    let reconcile = controller.prepare_status(true).expect("cancelling login reconciles with a new status ticket and rejects late result: the prepare_status fixture operation uses valid inputs");
     let token = reconcile.ticket.token().clone();
     state
         .status_results
         .lock()
-        .unwrap()
+        .expect("state .status_results mutex must not be poisoned")
         .push_back(Ok(Some(status("reconciled", "client", true))));
     let result = reconcile.session.status(token).await;
     controller.receive(reconcile.ticket, AuthEvent::StatusChecked(result));
@@ -456,7 +473,7 @@ async fn cancelling_login_reconciles_with_a_new_status_ticket_and_rejects_late_r
 
     // The cancelled login task must finish and its late result is rejected.
     state.finish(Ok(status("late-subject", "late-client", true)));
-    task.await.unwrap();
+    task.await.expect("cancelling login reconciles with a new status ticket and rejects late result: fixture task and request must complete successfully");
     controller.drain();
     let AuthViewState::SignedIn(current) = controller.view() else {
         panic!("expected reconciled status");
@@ -467,14 +484,14 @@ async fn cancelling_login_reconciles_with_a_new_status_ticket_and_rejects_late_r
 #[tokio::test]
 async fn reconciliation_failure_reports_unknown_instead_of_signed_out() {
     let (mut controller, _state) = controller();
-    let request = controller.prepare_login().unwrap();
+    let request = controller.prepare_login().expect("reconciliation failure reports unknown instead of signed out: the prepare_login fixture operation uses valid inputs");
     let task = run_login(&mut controller, request.session, request.ticket).await;
     wait_until(&mut controller, "authorization URL", |view| {
         view.url().is_some()
     })
     .await;
     assert!(controller.cancel_login());
-    let reconcile = controller.prepare_status(true).unwrap();
+    let reconcile = controller.prepare_status(true).expect("reconciliation failure reports unknown instead of signed out: the prepare_status fixture operation uses valid inputs");
     let token = reconcile.ticket.token().clone();
     controller.receive(
         reconcile.ticket,
@@ -485,25 +502,27 @@ async fn reconciliation_failure_reports_unknown_instead_of_signed_out() {
         AuthViewState::OutcomeUnknown(OutcomeUnknownReason::WaitCancelled)
     ));
     let _ = token;
-    task.await.unwrap();
+    task.await.expect("reconciliation failure reports unknown instead of signed out: fixture task and request must complete successfully");
 }
 
 #[tokio::test]
 async fn logout_cancel_keeps_the_same_ticket_and_reports_partial_result() {
     let (mut controller, state) = controller();
-    *state.logout_result.lock().unwrap() = Ok(LogoutOutcome {
+    *state
+        .logout_result
+        .lock()
+        .expect("state.logout_result mutex must not be poisoned") = Ok(LogoutOutcome {
         local_cleared: true,
         remote_revoked: false,
     });
     assert!(controller.open_logout_confirm(target(), vec!["plan".into()]));
-    let request = controller.prepare_logout().unwrap();
+    let request = controller.prepare_logout().expect("logout cancel keeps the same ticket and reports partial result: the prepare_logout fixture operation uses valid inputs");
     let inbox = controller.inbox.clone();
     let task = tokio::spawn(async move {
         let token = request.ticket.token().clone();
         let result = request.session.logout(token).await;
         inbox
             .lock()
-            .unwrap()
             .push((request.ticket, AuthEvent::LoggedOut(result)));
     });
     assert!(controller.cancel_logout_wait());
@@ -519,13 +538,13 @@ async fn logout_cancel_keeps_the_same_ticket_and_reports_partial_result() {
     assert!(outcome.local_cleared);
     assert!(!outcome.remote_revoked);
     assert_eq!(state.logouts_started.load(Ordering::SeqCst), 1);
-    task.await.unwrap();
+    task.await.expect("logout cancel keeps the same ticket and reports partial result: fixture task and request must complete successfully");
 }
 
 #[tokio::test]
 async fn shutdown_cancels_an_in_flight_login_task() {
     let (mut controller, state) = controller();
-    let request = controller.prepare_login().unwrap();
+    let request = controller.prepare_login().expect("shutdown cancels an in flight login task: the prepare_login fixture operation uses valid inputs");
     let task = run_login(&mut controller, request.session, request.ticket).await;
     wait_until(&mut controller, "authorization URL", |view| {
         view.url().is_some()
@@ -535,7 +554,7 @@ async fn shutdown_cancels_an_in_flight_login_task() {
     tokio::time::timeout(Duration::from_secs(2), task)
         .await
         .expect("cancelled login task must finish")
-        .unwrap();
+        .expect("shutdown cancels an in flight login task: fixture task and request must complete successfully");
     assert_eq!(state.logins_started.load(Ordering::SeqCst), 1);
     assert!(matches!(controller.view(), AuthViewState::Unchecked));
 }
@@ -543,7 +562,7 @@ async fn shutdown_cancels_an_in_flight_login_task() {
 #[tokio::test]
 async fn target_change_after_cancel_does_not_accept_old_login_result() {
     let (mut controller, state) = controller();
-    let request = controller.prepare_login().unwrap();
+    let request = controller.prepare_login().expect("target change after cancel does not accept old login result: the prepare_login fixture operation uses valid inputs");
     let task = run_login(&mut controller, request.session, request.ticket).await;
     wait_until(&mut controller, "authorization URL", |view| {
         view.url().is_some()
@@ -557,7 +576,7 @@ async fn target_change_after_cancel_does_not_accept_old_login_result() {
     assert!(matches!(controller.view(), AuthViewState::Unchecked));
 
     state.finish(Ok(status("old-subject", "old-client", true)));
-    task.await.unwrap();
+    task.await.expect("target change after cancel does not accept old login result: fixture task and request must complete successfully");
     controller.drain();
     assert!(
         matches!(controller.view(), AuthViewState::Unchecked),
@@ -571,13 +590,13 @@ async fn action_group_skips_use_account_until_identity_differs() {
     state
         .status_results
         .lock()
-        .unwrap()
+        .expect("state .status_results mutex must not be poisoned")
         .push_back(Ok(Some(status(
             "verified-subject",
             "verified-client",
             false,
         ))));
-    let request = controller.prepare_status(false).unwrap();
+    let request = controller.prepare_status(false).expect("action group skips use account until identity differs: the prepare_status fixture operation uses valid inputs");
     let token = request.ticket.token().clone();
     let result = request.session.status(token).await;
     controller.receive(request.ticket, AuthEvent::StatusChecked(result));
@@ -610,26 +629,26 @@ async fn action_group_skips_use_account_until_identity_differs() {
 #[tokio::test]
 async fn cancelled_login_with_no_visible_credentials_is_still_unknown() {
     let (mut controller, _state) = controller();
-    let request = controller.prepare_login().unwrap();
+    let request = controller.prepare_login().expect("cancelled login with no visible credentials is still unknown: the prepare_login fixture operation uses valid inputs");
     let task = run_login(&mut controller, request.session, request.ticket).await;
     wait_until(&mut controller, "authorization URL", |view| {
         view.url().is_some()
     })
     .await;
     assert!(controller.cancel_login());
-    let reconcile = controller.prepare_status(true).unwrap();
+    let reconcile = controller.prepare_status(true).expect("cancelled login with no visible credentials is still unknown: the prepare_status fixture operation uses valid inputs");
     controller.receive(reconcile.ticket, AuthEvent::StatusChecked(Ok(None)));
     assert!(
         matches!(controller.view(), AuthViewState::OutcomeUnknown(_)),
         "a cancelled finish can still persist credentials later; do not claim signed out"
     );
-    task.await.unwrap();
+    task.await.expect("cancelled login with no visible credentials is still unknown: fixture task and request must complete successfully");
 }
 
 #[tokio::test]
 async fn duplicate_login_or_logout_while_in_flight_is_rejected() {
     let (mut controller, _state) = controller();
-    let _login = controller.prepare_login().unwrap();
+    let _login = controller.prepare_login().expect("duplicate login or logout while in flight is rejected: the prepare_login fixture operation uses valid inputs");
     assert!(
         controller.prepare_login().is_err(),
         "starting a second login must not issue another request"
@@ -644,7 +663,7 @@ async fn duplicate_login_or_logout_while_in_flight_is_rejected() {
 async fn duplicate_logout_while_in_flight_is_rejected() {
     let (mut controller, _state) = controller();
     assert!(controller.open_logout_confirm(target(), vec!["plan".into()]));
-    let _logout = controller.prepare_logout().unwrap();
+    let _logout = controller.prepare_logout().expect("duplicate logout while in flight is rejected: the prepare_logout fixture operation uses valid inputs");
     assert!(
         controller.prepare_logout().is_none(),
         "a second logout while the first is pending must not be sent"
@@ -678,7 +697,7 @@ struct DispatchProbeProps;
 struct DispatchProbe;
 
 impl Component for DispatchProbe {
-    type Props<'a> = DispatchProbeProps;
+    type Props<'request> = DispatchProbeProps;
 
     fn new(_props: &Self::Props<'_>) -> Self {
         Self

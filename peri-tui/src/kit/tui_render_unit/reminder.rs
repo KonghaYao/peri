@@ -5,8 +5,7 @@ use peri_acp_types::system_reminder::{
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::fold::{FoldState, fold_state_code};
-use super::hash::{tui_hash_combine, tui_hash_str};
+use super::fold::FoldState;
 
 static NEXT_REMINDER_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -44,6 +43,7 @@ pub struct ReminderRelay {
 
 impl ReminderRelay {
     /// 展示用标签：子 Agent 名优先，未知时回退 child_thread_id。
+    #[must_use]
     pub fn label(&self) -> &str {
         self.agent_name.as_deref().unwrap_or(&self.agent_id)
     }
@@ -146,20 +146,20 @@ impl TuiSystemReminder {
     }
 
     pub fn recompute_hash(&mut self) {
-        let mut h = tui_hash_str(&self.summary);
-        h = tui_hash_combine(h, tui_hash_str(&self.body));
-        h = tui_hash_combine(h, tui_hash_str(&self.category));
-        h = tui_hash_combine(h, tui_hash_str(&self.source));
-        h = tui_hash_combine(h, self.severity as u64);
-        h = tui_hash_combine(h, u64::from(self.required));
-        h = tui_hash_combine(h, u64::from(self.legacy));
+        let mut h = super::hash::tui_hash_str(&self.summary);
+        h = super::hash::tui_hash_combine(h, super::hash::tui_hash_str(&self.body));
+        h = super::hash::tui_hash_combine(h, super::hash::tui_hash_str(&self.category));
+        h = super::hash::tui_hash_combine(h, super::hash::tui_hash_str(&self.source));
+        h = super::hash::tui_hash_combine(h, self.severity as u64);
+        h = super::hash::tui_hash_combine(h, u64::from(self.required));
+        h = super::hash::tui_hash_combine(h, u64::from(self.legacy));
         if let Some(relay) = &self.relay {
-            h = tui_hash_combine(h, tui_hash_str(&relay.agent_id));
+            h = super::hash::tui_hash_combine(h, super::hash::tui_hash_str(&relay.agent_id));
             if let Some(name) = &relay.agent_name {
-                h = tui_hash_combine(h, tui_hash_str(name));
+                h = super::hash::tui_hash_combine(h, super::hash::tui_hash_str(name));
             }
         }
-        h = tui_hash_combine(h, fold_state_code(self.fold));
+        h = super::hash::tui_hash_combine(h, super::fold::fold_state_code(self.fold));
         self.content_hash = h;
     }
 }
@@ -194,6 +194,7 @@ pub enum ReminderType {
 impl ReminderType {
     /// 中文标签，用于缩略渲染第一行。
     /// 返回 `String` 而非 `&'static str` 是为了 `ChannelMessage` 的动态 source。
+    #[must_use]
     pub fn label(&self) -> String {
         match self {
             ReminderType::ChannelMessage(source) => format!("Channel ({})", source),

@@ -1,17 +1,28 @@
 //! Legacy snapshot environment projection through production stage and child assembly.
-use super::*;
-use crate::session::frozen_snapshot::{decode_frozen_snapshot, encode_frozen_snapshot};
-use peri_acp_types::{agents::AgentOverrides, frozen::FrozenRuntimeEnv};
+use crate::host::executor_flow_tests::dynamic_tests;
+#[cfg(not(windows))]
+use crate::host::executor_flow_tests::CapturePromptModel;
+use crate::session::executor::FrozenSessionData;
+use crate::session::frozen_snapshot;
+use peri_acp_types::agents::AgentOverrides;
+use peri_acp_types::frozen::FrozenRuntimeEnv;
+use peri_acp_types::messages::BaseMessage;
 use peri_agent::session::subagent::{
     ForkDirectiveKind, SessionFactory, SubagentCancelPolicy, SubagentLlmSource, SubagentRunMode,
     SubagentSpawnConfig,
 };
+#[cfg(not(windows))]
+use peri_model::Model;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 const LEGACY_SYSTEM: &str = "OLD_BASE\n<env>\nOriginal environment bytes\n</env>";
 
 /// Decode the historical wire format instead of manufacturing an in-memory legacy flag.
 fn make_legacy(version: u64, runtime: bool, embedded_external: bool) -> FrozenSessionData {
-    let mut context = make_sentinel_frozen().v2_frozen().clone();
+    let mut context = crate::host::executor_flow_tests::make_sentinel_frozen()
+        .v2_frozen()
+        .clone();
     context.system_prompt = Arc::from(if embedded_external {
         "OLD_BASE\n<agent_instructions>legacy client instructions</agent_instructions>"
     } else {
@@ -24,7 +35,7 @@ fn make_legacy(version: u64, runtime: bool, embedded_external: bool) -> FrozenSe
     });
     let frozen = FrozenSessionData::from_frozen_parts(context, Some(Arc::from("FROZEN_LOCAL")));
     let mut wire: serde_json::Value =
-        serde_json::from_str(&encode_frozen_snapshot(&frozen).unwrap()).unwrap();
+        serde_json::from_str(&frozen_snapshot::encode_frozen_snapshot(&frozen).unwrap()).unwrap();
     wire["version"] = serde_json::json!(version);
     wire["data"]
         .as_object_mut()
@@ -36,7 +47,7 @@ fn make_legacy(version: u64, runtime: bool, embedded_external: bool) -> FrozenSe
             .unwrap()
             .remove("external_instructions");
     }
-    decode_frozen_snapshot(&wire.to_string()).unwrap()
+    frozen_snapshot::decode_frozen_snapshot(&wire.to_string()).unwrap()
 }
 
 /// Restoring an old root keeps its original request; only a rebuilt identity gets a suffix.
@@ -48,22 +59,25 @@ async fn legacy_env_main_override_keeps_original_base() {
             let model: Arc<dyn Model> = Arc::new(CapturePromptModel {
                 requests: Arc::clone(&requests),
             });
-            let mut ctx = make_session_context("legacy-main").await;
+            let mut ctx =
+                crate::host::executor_flow_tests::make_session_context("legacy-main").await;
             ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
             let frozen = make_legacy(version, true, false);
             let overrides = override_identity.then(|| AgentOverrides {
                 persona: Some("DERIVED_PERSONA".into()),
                 ..Default::default()
             });
-            let (out, _) =
-                make_stage_build(&ctx)(make_stage_request(frozen.clone(), overrides)).unwrap();
+            let (out, _) = crate::host::executor_flow_tests::make_stage_build(&ctx)(
+                crate::host::executor_flow_tests::make_stage_request(frozen.clone(), overrides),
+            )
+            .unwrap();
             out.context
                 .runtime
                 .llm
                 .generate_reasoning(&[], &[], None)
                 .await
                 .unwrap();
-            let wire = system_text(&requests.lock().unwrap()[0]);
+            let wire = crate::host::executor_flow_tests::system_text(&requests.lock().unwrap()[0]);
             assert_eq!(wire.matches("<env>").count(), 1, "{wire}");
             assert_eq!(
                 out.session.store().frozen.system_prompt.as_ref(),
@@ -83,8 +97,10 @@ async fn legacy_env_main_override_keeps_original_base() {
             // Re-saving and loading the prepared root must retain this distinction.
             let prepared =
                 FrozenSessionData::from_frozen_parts(out.session.store().frozen.clone(), None);
-            let restored =
-                decode_frozen_snapshot(&encode_frozen_snapshot(&prepared).unwrap()).unwrap();
+            let restored = frozen_snapshot::decode_frozen_snapshot(
+                &frozen_snapshot::encode_frozen_snapshot(&prepared).unwrap(),
+            )
+            .unwrap();
             assert_eq!(restored.system_prompt(), LEGACY_SYSTEM);
             assert!(restored.v2_frozen().legacy_embedded_environment);
             assert!(restored.v2_frozen().environment_prompt.is_none());
@@ -96,12 +112,18 @@ async fn legacy_env_main_override_keeps_original_base() {
 #[tokio::test]
 async fn legacy_env_child_and_fork_receive_own_identity() {
     for version in [1, 2] {
-        let mut ctx = make_session_context(&format!("legacy-parent-{version}")).await;
+        let mut ctx = crate::host::executor_flow_tests::make_session_context(&format!(
+            "legacy-parent-{version}"
+        ))
+        .await;
         let frozen = make_legacy(version, true, false);
         let workspace = tempfile::tempdir().unwrap();
         let _resources =
             dynamic_tests::bind_child_fixture_resources(&mut ctx, workspace.path(), &frozen).await;
-        let (parent, _) = make_stage_build(&ctx)(make_stage_request(frozen.clone(), None)).unwrap();
+        let (parent, _) = crate::host::executor_flow_tests::make_stage_build(&ctx)(
+            crate::host::executor_flow_tests::make_stage_request(frozen.clone(), None),
+        )
+        .unwrap();
         for fork in [false, true] {
             let requests = Arc::new(Mutex::new(Vec::new()));
             let model = Arc::new(CapturePromptModel {
@@ -174,7 +196,7 @@ async fn legacy_env_child_and_fork_receive_own_identity() {
             let requests = requests.lock().unwrap();
             assert!(!requests.is_empty());
             for request in requests.iter() {
-                let wire = system_text(request);
+                let wire = crate::host::executor_flow_tests::system_text(request);
                 assert_eq!(wire.matches("<env>").count(), 1, "{wire}");
                 assert!(wire.contains("Platform: frozen-platform"));
                 assert!(wire.contains("Today's date: 1999-12-31"));
@@ -190,7 +212,7 @@ async fn legacy_env_child_and_fork_receive_own_identity() {
 /// Legacy missing facts remain unavailable; modern explicit absence and rejected V1 stay absent.
 #[tokio::test]
 async fn legacy_env_fallback_respects_snapshot_provenance() {
-    let ctx = make_session_context("legacy-provenance").await;
+    let ctx = crate::host::executor_flow_tests::make_session_context("legacy-provenance").await;
     let frozen = make_legacy(2, false, false);
     let prepared =
         crate::session::prepare_derived_environment(&frozen, &ctx.cwd, ctx.agent_catalog.as_ref());
@@ -198,7 +220,10 @@ async fn legacy_env_fallback_respects_snapshot_provenance() {
     assert!(body.contains("unavailable"), "{body}");
     assert!(body.contains("1999-12-31"));
     assert_eq!(prepared.claude_local_md(), Some("FROZEN_LOCAL"));
-    for frozen in [make_sentinel_frozen(), make_legacy(1, true, true)] {
+    for frozen in [
+        crate::host::executor_flow_tests::make_sentinel_frozen(),
+        make_legacy(1, true, true),
+    ] {
         let prepared = crate::session::prepare_derived_environment(
             &frozen,
             &ctx.cwd,
@@ -208,9 +233,13 @@ async fn legacy_env_fallback_respects_snapshot_provenance() {
         assert_eq!(prepared.system_prompt(), frozen.system_prompt());
     }
     let frozen = make_legacy(1, true, true);
-    let (out, _) =
-        make_stage_build(&ctx)(make_stage_request(frozen, Some(AgentOverrides::default())))
-            .unwrap();
+    let (out, _) = crate::host::executor_flow_tests::make_stage_build(&ctx)(
+        crate::host::executor_flow_tests::make_stage_request(
+            frozen,
+            Some(AgentOverrides::default()),
+        ),
+    )
+    .unwrap();
     let error = out
         .context
         .runtime
@@ -227,9 +256,11 @@ async fn legacy_env_fallback_respects_snapshot_provenance() {
 /// Workflow capability projection and the final bridge preserve the legacy frozen environment.
 #[tokio::test]
 async fn legacy_env_workflow_request_appends_current_session_after_external_instructions() {
-    use peri_agent::agent::{model_bridge::AgentModelBridge, react::ReactLLM};
+    use peri_agent::agent::model_bridge::AgentModelBridge;
+    use peri_agent::agent::react::ReactLLM;
     for version in [1, 2] {
-        let ctx = make_session_context("legacy-workflow-parent").await;
+        let ctx =
+            crate::host::executor_flow_tests::make_session_context("legacy-workflow-parent").await;
         let frozen = make_legacy(version, true, false);
         let prepared = crate::session::prepare_derived_environment(
             &frozen,
@@ -257,7 +288,7 @@ async fn legacy_env_workflow_request_appends_current_session_after_external_inst
             .with_session_id("workflow-execution")
             .with_external_instructions(Some(Arc::from("WORKFLOW_EXTERNAL")));
         bridge.generate_reasoning(&[], &[], None).await.unwrap();
-        let wire = system_text(&requests.lock().unwrap()[0]);
+        let wire = crate::host::executor_flow_tests::system_text(&requests.lock().unwrap()[0]);
         assert_eq!(wire.matches("<env>").count(), 1);
         assert!(wire.find("WORKFLOW_EXTERNAL").unwrap() < wire.find("<env>").unwrap());
         assert!(wire.contains("Platform: frozen-platform"));

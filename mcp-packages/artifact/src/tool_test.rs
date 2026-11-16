@@ -1,6 +1,7 @@
 //! Tests for artifact_tool
 
-use super::*;
+use crate::tool::ArtifactTool;
+use peri_agent::tools::BaseTool;
 
 #[test]
 fn test_artifact_tool_name() {

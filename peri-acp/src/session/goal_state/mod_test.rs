@@ -1,4 +1,5 @@
-use super::*;
+use crate::session::goal_state::goal_state::GoalState;
+use peri_acp_types::goal::GoalStatus;
 use peri_acp_types::goal::InMemoryGoalStore;
 use peri_acp_types::session::{
     MessageKind, MessageQueue, MessageSource, QueuedMessage, QueuedPayload,

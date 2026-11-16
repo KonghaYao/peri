@@ -1,6 +1,19 @@
 //! `apps/*` 附着 / 重挂接 / detach 用例（夹具在 `apps_facade_test.rs` 同模块树）。
 
-use super::*;
+use crate::host::apps_facade::tests::Fixture;
+use crate::host::apps_facade::tests::FrameTransport;
+use crate::host::apps_facade::tests::APP_TOOL;
+use crate::host::apps_facade::tests::BROKEN_TOOL;
+use crate::host::apps_facade::tests::RESOURCE_URI;
+use peri_acp_types::mcp_apps::McpAppsErrorKind;
+use peri_acp_types::mcp_apps_facade::AppQualification;
+use peri_acp_types::mcp_apps_facade::DetachVerdict;
+use peri_acp_types::mcp_apps_facade::McpAppsFeatures;
+use peri_acp_types::mcp_apps_facade::McpAppsLimits;
+use peri_acp_types::mcp_apps_facade::RequestSeq;
+use peri_acp_types::mcp_apps_facade::RequestVerdict;
+use serde_json::json;
+use std::sync::Arc;
 
 /// [A5] attach **不调用任何业务工具**；snapshot 携带 effective 输入 + 完整 raw
 /// （多模态 / structuredContent / `_meta`），`isError:true` 的实例化同样可附着。
@@ -132,7 +145,7 @@ async fn reattach_bumps_epoch_and_old_epoch_requests_are_rejected() {
         )
         .await
         .expect_err("旧纪元必须被拒绝");
-    assert_kind(
+    crate::host::apps_facade::tests::assert_kind(
         &stale,
         McpAppsErrorKind::StaleAttachmentEpoch,
         "旧纪元的提交必须被拒绝",

@@ -1,9 +1,13 @@
 //! Hidden child history must retain its inherited boundary at the root executor seam.
-use super::*;
 use crate::agent::stages::StageContext;
+use crate::session::exec::executor::tests::MockEventSink;
+use crate::session::exec::executor_helpers::StageBuildFn;
 use crate::session::exec::stage_builder::V2AgentOutput;
 use crate::session::{FrozenContext, Session};
 use crate::thread::ThreadMeta;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageContent;
+use std::sync::Arc;
 // 测试夹具直接使用 SQLite 具体实现（显式资源测试入口）：本用例断言的是库内的
 // 继承区与 flags 事实，门面不提供逐条 fixture 构造。
 use peri_acp_types::event_v2::EventBus;
@@ -13,22 +17,25 @@ use peri_resources::sessions::SqliteThreadStore;
 
 #[tokio::test]
 async fn test_hidden_child_executor_restores_ancestor_and_own_flags_separately() {
-    let dir = tempfile::tempdir().unwrap();
-    let cwd = dir.path().to_str().unwrap();
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let cwd = dir
+        .path()
+        .to_str()
+        .expect("the fixture text must be valid UTF-8");
     let store = Arc::new(
-        SqliteThreadStore::new(dir.path().join("child.db"))
+        SqliteThreadStore::try_new(dir.path().join("child.db"))
             .await
-            .unwrap(),
+            .expect("the temporary SQLite fixture must initialize its schema"),
     );
     let parent_id = store
         .create_thread(ThreadMeta::new_at(cwd, peri_time::now_wall()))
         .await
-        .unwrap();
+        .expect("the create thread fixture result is required for this assertion");
     let parent = BaseMessage::human("parent snapshot");
     store
         .append_messages(&parent_id, std::slice::from_ref(&parent))
         .await
-        .unwrap();
+        .expect("the append messages fixture result is required for this assertion");
     let parent_flags = MessageFlags {
         excluded: true,
         ..Default::default()
@@ -36,12 +43,15 @@ async fn test_hidden_child_executor_restores_ancestor_and_own_flags_separately()
     store
         .update_message_flags(&parent.id(), &parent_flags)
         .await
-        .unwrap();
+        .expect("the update message flags fixture result is required for this assertion");
     let mut meta = ThreadMeta::new_at(cwd, peri_time::now_wall());
     meta.parent_thread_id = Some(parent_id.clone());
     meta.snapshot_at_message_id = Some(parent.id().as_uuid().to_string());
     meta.hidden = true;
-    let child_id = store.create_thread(meta).await.unwrap();
+    let child_id = store
+        .create_thread(meta)
+        .await
+        .expect("the create thread fixture result is required for this assertion");
     store
         .store_inherited_context(
             &child_id,
@@ -51,12 +61,12 @@ async fn test_hidden_child_executor_restores_ancestor_and_own_flags_separately()
             },
         )
         .await
-        .unwrap();
+        .expect("the store inherited context fixture result is required for this assertion");
     let own = BaseMessage::human("child old history");
     store
         .append_messages(&child_id, std::slice::from_ref(&own))
         .await
-        .unwrap();
+        .expect("the append messages fixture result is required for this assertion");
     let own_flags = MessageFlags {
         truncated: true,
         ..Default::default()
@@ -64,7 +74,7 @@ async fn test_hidden_child_executor_restores_ancestor_and_own_flags_separately()
     store
         .update_message_flags(&own.id(), &own_flags)
         .await
-        .unwrap();
+        .expect("the update message flags fixture result is required for this assertion");
     let session = Session::new(
         Arc::from(cwd),
         FrozenContext::builder().build(),
@@ -91,22 +101,26 @@ async fn test_hidden_child_executor_restores_ancestor_and_own_flags_separately()
             None,
         ))
     });
-    let mut context = make_session_context("hidden-child-provenance");
+    let mut context =
+        crate::session::exec::executor::tests::make_session_context("hidden-child-provenance");
     context.thread_id = Some(child_id.clone());
     // 执行侧的读取入口是门面：同一库文件上的真实实现，继承区与 flags 由它回答。
     context.session_resources = Some(Arc::new(
         peri_resources::sessions::SessionResourcesImpl::open(dir.path().join("child.db"))
             .await
-            .unwrap(),
+            .expect("the temporary session store fixture must open successfully"),
     ));
-    let mut turn = make_turn_input(
+    let mut turn = crate::session::exec::executor::tests::make_turn_input(
         Arc::new(MockEventSink::new()),
         MessageContent::text("continue"),
         false,
-        store.load_context(&child_id).await.unwrap(),
+        store
+            .load_context(&child_id)
+            .await
+            .expect("the load context fixture result is required for this assertion"),
     );
     turn.stage_build = stage_build;
-    let result = run_session_loop(context, turn).await;
+    let result = crate::session::exec::executor::run_session_loop(context, turn).await;
     assert!(!result.ok, "预取消 Stage 应正常以 Interrupted 退出");
     {
         let arc = inspected.transcript();
@@ -124,7 +138,11 @@ async fn test_hidden_child_executor_restores_ancestor_and_own_flags_separately()
         );
     }
     assert_eq!(
-        store.load_message_flags(&parent_id).await.unwrap()[&parent.id()],
+        store
+            .load_message_flags(&parent_id)
+            .await
+            .expect("the load message flags fixture result is required for this assertion")
+            [&parent.id()],
         parent_flags
     );
     store.close().await;

@@ -1,4 +1,12 @@
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::provider::LlmProvider;
+use peri_acp_types::messages::MessageId;
+
+use peri_acp_types::store::PersistedPayload;
+use serde_json::json;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 归档目标（只存在于存储）仍出现在候选里、可预览、可执行。
 ///
@@ -6,23 +14,34 @@ use super::*;
 #[tokio::test]
 async fn test_rewind_reaches_target_archived_by_full_compact() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
-    let (h1, _a1, _h2) = archive_prefix_in_storage(&mut sessions, &cfg, &sid).await;
-    enable_rewind_cap(&cfg, &sid);
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
+    let (h1, _a1, _h2) = crate::host::requests::tests::rewind_cases::archive_prefix_in_storage(
+        &mut sessions,
+        &cfg,
+        &sid,
+    )
+    .await;
+    crate::host::requests::tests::rewind_cases::enable_rewind_cap(&cfg, &sid);
     let target = h1.as_uuid().to_string();
 
-    let candidates = handle_request(
+    let candidates = crate::host::requests::handle_request(
         "session/rewind-candidates",
         &json!({ "sessionId": sid }),
         &cfg,
@@ -42,7 +61,7 @@ async fn test_rewind_reaches_target_archived_by_full_compact() {
         "被 Full 归档的 user 消息必须仍是候选，实际: {ids:?}"
     );
 
-    let preview = handle_request(
+    let preview = crate::host::requests::handle_request(
         "session/rewind-preview",
         &json!({ "sessionId": sid, "target_message_id": target }),
         &cfg,
@@ -53,7 +72,7 @@ async fn test_rewind_reaches_target_archived_by_full_compact() {
     .unwrap();
     let fingerprint = preview["preview_fingerprint"].as_str().unwrap();
 
-    let result = handle_request(
+    let result = crate::host::requests::handle_request(
         "session/rewind",
         &json!({
             "sessionId": sid,
@@ -88,23 +107,34 @@ async fn test_rewind_reaches_target_archived_by_full_compact() {
 #[tokio::test]
 async fn test_rewind_publishes_the_cold_recovery_view() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
-    let (h1, a1, h2) = archive_prefix_in_storage(&mut sessions, &cfg, &sid).await;
-    enable_rewind_cap(&cfg, &sid);
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
+    let (h1, a1, h2) = crate::host::requests::tests::rewind_cases::archive_prefix_in_storage(
+        &mut sessions,
+        &cfg,
+        &sid,
+    )
+    .await;
+    crate::host::requests::tests::rewind_cases::enable_rewind_cap(&cfg, &sid);
     let target = h2.as_uuid().to_string();
 
-    let preview = handle_request(
+    let preview = crate::host::requests::handle_request(
         "session/rewind-preview",
         &json!({ "sessionId": sid, "target_message_id": target }),
         &cfg,
@@ -115,7 +145,7 @@ async fn test_rewind_publishes_the_cold_recovery_view() {
     .unwrap();
     let fingerprint = preview["preview_fingerprint"].as_str().unwrap().to_string();
 
-    handle_request(
+    crate::host::requests::handle_request(
         "session/rewind",
         &json!({
             "sessionId": sid,
@@ -173,24 +203,35 @@ async fn test_rewind_publishes_the_cold_recovery_view() {
 #[tokio::test]
 async fn test_rewind_then_prompt_matches_a_cold_restore_at_the_model_boundary() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
-    let (h1, a1, summary) = archive_prefix_in_storage(&mut sessions, &cfg, &sid).await;
-    enable_rewind_cap(&cfg, &sid);
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
+    let (h1, a1, summary) = crate::host::requests::tests::rewind_cases::archive_prefix_in_storage(
+        &mut sessions,
+        &cfg,
+        &sid,
+    )
+    .await;
+    crate::host::requests::tests::rewind_cases::enable_rewind_cap(&cfg, &sid);
 
     // 回退到摘要本身：摘要被移除 → 它覆盖的原文重新有效（REQ-T04 的边界语义）。
     let target = summary.as_uuid().to_string();
-    let preview = handle_request(
+    let preview = crate::host::requests::handle_request(
         "session/rewind-preview",
         &json!({ "sessionId": sid, "target_message_id": target }),
         &cfg,
@@ -200,7 +241,7 @@ async fn test_rewind_then_prompt_matches_a_cold_restore_at_the_model_boundary() 
     .await
     .unwrap();
     let fingerprint = preview["preview_fingerprint"].as_str().unwrap().to_string();
-    handle_request(
+    crate::host::requests::handle_request(
         "session/rewind",
         &json!({
             "sessionId": sid,
@@ -270,18 +311,24 @@ async fn test_rewind_then_prompt_matches_a_cold_restore_at_the_model_boundary() 
 #[tokio::test]
 async fn test_rewind_keeps_still_covered_bodies_archived() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
     // 追加一轮：目标落在摘要（history[2]）之后，回退不会删掉摘要本身。
     let late = peri_acp_types::messages::BaseMessage::ai("late answer");
     cfg.session_resources
@@ -296,11 +343,16 @@ async fn test_rewind_keeps_still_covered_bodies_archived() {
         .unwrap()
         .history_payloads
         .push(PersistedPayload::Message(late.clone()));
-    let (h1, a1, h2) = archive_prefix_in_storage(&mut sessions, &cfg, &sid).await;
-    enable_rewind_cap(&cfg, &sid);
+    let (h1, a1, h2) = crate::host::requests::tests::rewind_cases::archive_prefix_in_storage(
+        &mut sessions,
+        &cfg,
+        &sid,
+    )
+    .await;
+    crate::host::requests::tests::rewind_cases::enable_rewind_cap(&cfg, &sid);
     let target = late.id().as_uuid().to_string();
 
-    let preview = handle_request(
+    let preview = crate::host::requests::handle_request(
         "session/rewind-preview",
         &json!({ "sessionId": sid, "target_message_id": target }),
         &cfg,
@@ -311,7 +363,7 @@ async fn test_rewind_keeps_still_covered_bodies_archived() {
     .unwrap();
     let fingerprint = preview["preview_fingerprint"].as_str().unwrap().to_string();
 
-    let response = handle_request(
+    let response = crate::host::requests::handle_request(
         "session/rewind",
         &json!({
             "sessionId": sid,
@@ -375,19 +427,25 @@ async fn test_rewind_keeps_still_covered_bodies_archived() {
 #[tokio::test]
 async fn test_rewind_completed_event_carries_the_effective_view() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let mock = Arc::new(MockTransport::default());
     let transport: Arc<dyn crate::transport::AcpTransport> = mock.clone();
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
     // 目标落在摘要之后：摘要活着 → canonical 前缀含被覆盖的正文，有效视图不含。
     let late = peri_acp_types::messages::BaseMessage::ai("late answer");
     cfg.session_resources
@@ -402,11 +460,16 @@ async fn test_rewind_completed_event_carries_the_effective_view() {
         .unwrap()
         .history_payloads
         .push(PersistedPayload::Message(late.clone()));
-    let (h1, a1, h2) = archive_prefix_in_storage(&mut sessions, &cfg, &sid).await;
-    enable_rewind_and_event_caps(&cfg, &sid);
+    let (h1, a1, h2) = crate::host::requests::tests::rewind_cases::archive_prefix_in_storage(
+        &mut sessions,
+        &cfg,
+        &sid,
+    )
+    .await;
+    crate::host::requests::tests::rewind_cases::enable_rewind_and_event_caps(&cfg, &sid);
     let target = late.id().as_uuid().to_string();
 
-    let preview = handle_request(
+    let preview = crate::host::requests::handle_request(
         "session/rewind-preview",
         &json!({ "sessionId": sid, "target_message_id": target }),
         &cfg,
@@ -417,7 +480,7 @@ async fn test_rewind_completed_event_carries_the_effective_view() {
     .unwrap();
     let fingerprint = preview["preview_fingerprint"].as_str().unwrap().to_string();
 
-    let response = handle_request(
+    let response = crate::host::requests::handle_request(
         "session/rewind",
         &json!({
             "sessionId": sid,
@@ -431,7 +494,8 @@ async fn test_rewind_completed_event_carries_the_effective_view() {
     .await
     .unwrap();
 
-    let events = agent_events(&mock, "rewind_completed");
+    let events =
+        crate::host::requests::tests::rewind_cases::agent_events(&mock, "rewind_completed");
     assert_eq!(events.len(), 1, "应恰好发一条重建信号: {events:?}");
     let messages_json = events[0]
         .get("messages_json")
@@ -449,7 +513,10 @@ async fn test_rewind_completed_event_carries_the_effective_view() {
         "事件载荷必须是有效视图：仍被存活摘要覆盖的正文（{h1:?}/{a1:?}）不得出现"
     );
     // 三处同源：事件载荷 = 热态有效集合 = wire `history`。
-    assert_eq!(payload_ids(&sessions, &sid), vec![h2]);
+    assert_eq!(
+        crate::host::requests::tests::rewind_cases::payload_ids(&sessions, &sid),
+        vec![h2]
+    );
     assert_eq!(
         response["history"]
             .as_array()
@@ -466,19 +533,25 @@ async fn test_rewind_completed_event_carries_the_effective_view() {
 #[tokio::test]
 async fn test_rewind_remove_from_drops_the_target_itself() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
-    enable_rewind_cap(&cfg, &sid);
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
+    crate::host::requests::tests::rewind_cases::enable_rewind_cap(&cfg, &sid);
     let (h1, a1, h2) = {
         let s = sessions.get(&sid).unwrap();
         (
@@ -508,7 +581,7 @@ async fn test_rewind_remove_from_drops_the_target_itself() {
     );
 
     let target = h2.as_uuid().to_string();
-    let preview = handle_request(
+    let preview = crate::host::requests::handle_request(
         "session/rewind-preview",
         &json!({ "sessionId": sid, "target_message_id": target }),
         &cfg,
@@ -518,7 +591,7 @@ async fn test_rewind_remove_from_drops_the_target_itself() {
     .await
     .unwrap();
     let fingerprint = preview["preview_fingerprint"].as_str().unwrap().to_string();
-    handle_request(
+    crate::host::requests::handle_request(
         "session/rewind",
         &json!({
             "sessionId": sid,
@@ -543,7 +616,7 @@ async fn test_rewind_remove_from_drops_the_target_itself() {
         .collect();
     assert_eq!(stored, vec![h1, a1], "目标本身必须被移除");
     assert_eq!(
-        history_ids(&sessions, &sid),
+        crate::host::requests::tests::rewind_cases::history_ids(&sessions, &sid),
         vec![h1.as_uuid().to_string(), a1.as_uuid().to_string()]
     );
 }

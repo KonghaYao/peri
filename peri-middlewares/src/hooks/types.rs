@@ -149,7 +149,7 @@ pub enum HookSpecificOutput {
 
 /// 权限决策枚举（用于 PreToolUse hook 的 permissionDecision）
 ///
-/// [TRAP] 未知取值保留为 [`PermissionDecision::Invalid`]，而不是让整份
+/// `[TRAP]` 未知取值保留为 [`PermissionDecision::Invalid`]，而不是让整份
 /// `SyncHookResponse` 反序列化失败：后者会把「写错 decision 的 hook」静默降级为
 /// Allow（fail-open）。消费方必须把 Invalid 按拒绝处理（fail-closed）。
 #[derive(Debug, Clone, PartialEq)]
@@ -164,6 +164,7 @@ pub enum PermissionDecision {
 
 impl PermissionDecision {
     /// 归并优先级：deny 必须压过 updatedInput 与放行；passthrough 最弱。
+    #[must_use]
     pub fn merge_rank(&self) -> u8 {
         match self {
             Self::Deny => 4,
@@ -176,6 +177,7 @@ impl PermissionDecision {
     }
 
     /// deny 或无法识别的判定：必须零工具执行。
+    #[must_use]
     pub fn is_deny_like(&self) -> bool {
         matches!(self, Self::Deny | Self::Invalid(_))
     }
@@ -238,6 +240,7 @@ pub enum HookAction {
 // === HookInput 构造函数（按事件类型）===
 
 impl HookInput {
+    #[must_use]
     pub fn session_start(
         session_id: &str,
         transcript_path: &str,
@@ -267,6 +270,7 @@ impl HookInput {
         }
     }
 
+    #[must_use]
     pub fn tool_call(
         session_id: &str,
         transcript_path: &str,
@@ -299,6 +303,7 @@ impl HookInput {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn tool_result(
         session_id: &str,
         transcript_path: &str,
@@ -335,6 +340,7 @@ impl HookInput {
         }
     }
 
+    #[must_use]
     pub fn user_prompt_submit(
         session_id: &str,
         transcript_path: &str,
@@ -363,6 +369,7 @@ impl HookInput {
         }
     }
 
+    #[must_use]
     pub fn subagent_start(
         session_id: &str,
         transcript_path: &str,
@@ -391,6 +398,7 @@ impl HookInput {
         }
     }
 
+    #[must_use]
     pub fn subagent_stop(
         session_id: &str,
         transcript_path: &str,
@@ -420,6 +428,7 @@ impl HookInput {
         }
     }
 
+    #[must_use]
     pub fn compact(
         session_id: &str,
         transcript_path: &str,

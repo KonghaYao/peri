@@ -1,19 +1,33 @@
-use super::*;
+use crate::host::requests::tests::HomeDirGuard;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::provider::LlmProvider;
+use crate::transport::types::AcpError;
+
+use serde_json::json;
+use serde_json::Value;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 async fn marketplace_config(tmp: &tempfile::TempDir) -> AcpServerConfig {
-    let config = make_peri_config_with_provider(make_provider_config(
-        "fixture",
-        "openai",
-        "fixture-unused",
-        "fixture-model",
-    ));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "fixture",
+            "openai",
+            "fixture-unused",
+            "fixture-model",
+        ),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    make_server_config(config, provider, tmp).await
+    crate::host::requests::tests::make_server_config(config, provider, tmp).await
 }
 
 async fn request(cfg: &AcpServerConfig, method: &str, params: Value) -> Result<Value, AcpError> {
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    handle_request(method, &params, cfg, &mut HashMap::new(), &transport).await
+    crate::host::requests::handle_request(method, &params, cfg, &mut HashMap::new(), &transport)
+        .await
 }
 
 fn write_catalog(tmp: &tempfile::TempDir) -> PathBuf {
@@ -135,7 +149,9 @@ async fn marketplace_mutation_requests_validate_required_fields() {
 #[tokio::test]
 #[serial]
 async fn marketplace_remove_cleans_only_canonical_strict_cache_descendants() {
-    use peri_middlewares::plugin::{save_known_marketplaces, KnownMarketplace, MarketplaceSource};
+    use peri_middlewares::plugin;
+    use peri_middlewares::plugin::KnownMarketplace;
+    use peri_middlewares::plugin::MarketplaceSource;
 
     let tmp = tempfile::tempdir().unwrap();
     let _home = HomeDirGuard::set(tmp.path());
@@ -172,7 +188,7 @@ async fn marketplace_remove_cleans_only_canonical_strict_cache_descendants() {
             }
         };
         let name = peri_middlewares::plugin::MarketplaceManager::extract_name(&source);
-        save_known_marketplaces(
+        plugin::save_known_marketplaces(
             &[KnownMarketplace {
                 source,
                 install_location: location.to_string_lossy().into_owned(),

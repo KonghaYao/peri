@@ -1,40 +1,51 @@
 //! Login typed 草稿、动态字段、类型锁定与四档子区回归。
 
-use super::*;
+use super::Event;
+use super::EventResult;
+use super::KeyCode;
+use super::LoginEditState;
+use super::LoginField;
+use super::LoginPanelMode;
+use super::ProviderKind;
+use super::ProviderListGuard;
+use super::ProviderSummary;
+use super::Rect;
+use super::TEST_AREA;
+use super::serial;
 
 // ── Login typed 草稿 / 动态字段 / 四档子区 ─────────────────────────────────
 
 #[test]
 #[serial]
 fn new_provider_cycles_three_types_without_revealing_profile_fields() {
-    let cfg = login_config();
+    let cfg = super::login_config();
     let mut state = LoginEditState::new_provider(&cfg, None);
     state.provider_id = "new".into();
     state.api_key = "key".into();
     state.models.sonnet = "new-sonnet".into();
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state(state, LoginField::ProviderType, 2, move |index, panel| {
+    super::mount_edit_state(state, LoginField::ProviderType, 2, move |index, panel| {
         if index == 0 {
-            let _ = panel.event(key(KeyCode::Right), TEST_AREA);
+            let _ = panel.event(super::key(KeyCode::Right), TEST_AREA);
             let second = panel.edit_state.read().as_ref().map(|state| state.kind);
-            let _ = panel.event(key(KeyCode::Right), TEST_AREA);
+            let _ = panel.event(super::key(KeyCode::Right), TEST_AREA);
             let responses = panel
                 .edit_state
                 .read()
                 .as_ref()
                 .map(|state| (state.kind, state.visible_fields()));
-            let _ = panel.event(key(KeyCode::Left), TEST_AREA);
+            let _ = panel.event(super::key(KeyCode::Left), TEST_AREA);
             let third = panel.edit_state.read().as_ref().map(|state| state.kind);
-            tx.send((second, responses, third)).unwrap();
+            tx.send((second, responses, third)).expect("new provider cycles three types without revealing profile fields: fixture channel must deliver its expected message");
         }
         frame += 1;
         assert_eq!(frame, index + 1);
     });
 
-    let (second, responses, third) = rx.try_recv().unwrap();
+    let (second, responses, third) = rx.try_recv().expect("new provider cycles three types without revealing profile fields: fixture channel must deliver its expected message");
     assert_eq!(second, Some(Some(ProviderKind::OpenAi)));
-    let (kind, visible) = responses.unwrap();
+    let (kind, visible) = responses.expect("new provider cycles three types without revealing profile fields: the fixture storage and layout must support the requested operation");
     assert_eq!(kind, Some(ProviderKind::OpenAiResponses));
     assert_eq!(
         visible,
@@ -58,30 +69,30 @@ fn new_provider_cycles_three_types_without_revealing_profile_fields() {
 #[test]
 #[serial]
 fn existing_responses_type_is_locked_until_explicit_confirmation() {
-    let cfg = login_config();
-    let state = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let cfg = super::login_config();
+    let state = LoginEditState::edit_provider(&cfg, "resp", None).expect("existing responses type is locked until explicit confirmation: the edit_provider fixture operation uses valid inputs");
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state(state, LoginField::ProviderType, 2, move |index, panel| {
+    super::mount_edit_state(state, LoginField::ProviderType, 2, move |index, panel| {
         if index == 0 {
             for code in [KeyCode::Left, KeyCode::Right, KeyCode::Char(' ')] {
-                let _ = panel.event(key(code), TEST_AREA);
+                let _ = panel.event(super::key(code), TEST_AREA);
             }
             let locked = panel.edit_state.read().as_ref().map(|state| state.kind);
-            let opened = panel.event(key(KeyCode::Enter), TEST_AREA);
+            let opened = panel.event(super::key(KeyCode::Enter), TEST_AREA);
             let mode = *panel.mode.read();
             let candidate = panel
                 .edit_state
                 .read()
                 .as_ref()
                 .and_then(|state| state.type_change_candidate);
-            let right = panel.event(key(KeyCode::Right), TEST_AREA);
+            let right = panel.event(super::key(KeyCode::Right), TEST_AREA);
             let candidate_after = panel
                 .edit_state
                 .read()
                 .as_ref()
                 .and_then(|state| state.type_change_candidate);
-            let esc = panel.event(key(KeyCode::Esc), TEST_AREA);
+            let esc = panel.event(super::key(KeyCode::Esc), TEST_AREA);
             let unchanged = panel.edit_state.read().as_ref().map(|state| state.kind);
             tx.send((
                 locked,
@@ -93,14 +104,14 @@ fn existing_responses_type_is_locked_until_explicit_confirmation() {
                 esc,
                 unchanged,
             ))
-            .unwrap();
+            .expect("existing responses type is locked until explicit confirmation: fixture channel must deliver its expected message");
         }
         frame += 1;
         assert_eq!(frame, index + 1);
     });
 
     let (locked, opened, mode, candidate, right, candidate_after, esc, unchanged) =
-        rx.try_recv().unwrap();
+        rx.try_recv().expect("existing responses type is locked until explicit confirmation: fixture channel must deliver its expected message");
     assert_eq!(locked, Some(Some(ProviderKind::OpenAiResponses)));
     assert_eq!(opened, EventResult::Consumed);
     assert_eq!(mode, LoginPanelMode::ConfirmTypeChange);
@@ -114,13 +125,13 @@ fn existing_responses_type_is_locked_until_explicit_confirmation() {
 #[test]
 #[serial]
 fn navigation_skips_hidden_fields_and_paste_on_choices_is_safe() {
-    let cfg = login_config();
+    let cfg = super::login_config();
     let mut state = LoginEditState::new_provider(&cfg, None);
     state.kind = Some(ProviderKind::OpenAi);
     state.provider_id = "new".into();
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state(state, LoginField::ProviderType, 2, move |index, panel| {
+    super::mount_edit_state(state, LoginField::ProviderType, 2, move |index, panel| {
         if index == 0 {
             let paste_type = panel.event(Event::Paste("evil".into()), TEST_AREA);
             let before = panel
@@ -130,7 +141,7 @@ fn navigation_skips_hidden_fields_and_paste_on_choices_is_safe() {
                 .map(|state| state.field_text(LoginField::ProviderId));
             *panel.edit_focus.write() = LoginField::Confirm;
             let paste_confirm = panel.event(Event::Paste("evil".into()), TEST_AREA);
-            let _ = panel.event(key(KeyCode::Up), TEST_AREA);
+            let _ = panel.event(super::key(KeyCode::Up), TEST_AREA);
             let after_up = *panel.edit_focus.read();
             let visible = panel
                 .edit_state
@@ -138,19 +149,19 @@ fn navigation_skips_hidden_fields_and_paste_on_choices_is_safe() {
                 .as_ref()
                 .map(|state| state.visible_fields());
             tx.send((paste_type, before, paste_confirm, after_up, visible))
-                .unwrap();
+                .expect("navigation skips hidden fields and paste on choices is safe: fixture channel must deliver its expected message");
         }
         frame += 1;
         assert_eq!(frame, index + 1);
     });
 
-    let (paste_type, before, paste_confirm, after_up, visible) = rx.try_recv().unwrap();
+    let (paste_type, before, paste_confirm, after_up, visible) = rx.try_recv().expect("navigation skips hidden fields and paste on choices is safe: fixture channel must deliver its expected message");
     assert_eq!(paste_type, EventResult::Ignored);
     assert_eq!(paste_confirm, EventResult::Ignored);
     assert_eq!(before.as_deref(), Some("new"));
     assert_eq!(after_up, LoginField::HaikuModel);
     assert_eq!(
-        visible.unwrap(),
+        visible.expect("navigation skips hidden fields and paste on choices is safe: the fixture storage and layout must support the requested operation"),
         vec![
             LoginField::ProviderType,
             LoginField::ProviderId,
@@ -168,8 +179,8 @@ fn navigation_skips_hidden_fields_and_paste_on_choices_is_safe() {
 
 #[test]
 fn clean_paste_clears_the_single_line_error() {
-    let cfg = login_config();
-    let mut state = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let cfg = super::login_config();
+    let mut state = LoginEditState::edit_provider(&cfg, "resp", None).expect("clean paste clears the single line error: the edit_provider fixture operation uses valid inputs");
     let mut cursor = 0;
     super::edit_handler::handle_login_paste(&mut cursor, &mut state, LoginField::BaseUrl, "12\n34");
     let error = state
@@ -189,8 +200,8 @@ fn clean_paste_clears_the_single_line_error() {
 #[test]
 #[serial]
 fn plan_provider_hides_api_key_fields_and_browse_does_not_claim_missing_key() {
-    let cfg = login_config();
-    let state = LoginEditState::edit_provider(&cfg, "plan", None).unwrap();
+    let cfg = super::login_config();
+    let state = LoginEditState::edit_provider(&cfg, "plan", None).expect("plan provider hides api key fields and browse does not claim missing key: the edit_provider fixture operation uses valid inputs");
     let visible = state.visible_fields();
     assert!(!visible.contains(&LoginField::BaseUrl));
     assert!(!visible.contains(&LoginField::ApiKey));
@@ -204,7 +215,7 @@ fn plan_provider_hides_api_key_fields_and_browse_does_not_claim_missing_key() {
         has_chatgpt_plan: true,
         base_url: None,
     }]);
-    let text = buffer_text(&mount_panel_at(2, |_| {}));
+    let text = super::buffer_text(&super::mount_panel_at(2, |_| {}));
     assert!(text.contains("ChatGPT plan"), "{text}");
     assert!(!text.contains("api key: missing"), "{text}");
 }
@@ -213,7 +224,7 @@ fn plan_provider_hides_api_key_fields_and_browse_does_not_claim_missing_key() {
 fn focus_row_matches_the_rendered_marker_for_every_visible_field() {
     use super::render::{self, LoginRenderColors};
 
-    let cfg = login_config();
+    let cfg = super::login_config();
     let colors = LoginRenderColors::reset();
 
     let mut new_responses = LoginEditState::new_provider(&cfg, None);
@@ -227,9 +238,9 @@ fn focus_row_matches_the_rendered_marker_for_every_visible_field() {
     new_openai.provider_id = "new".into();
     new_openai.api_key = "key".into();
 
-    let plan = LoginEditState::edit_provider(&cfg, "plan", None).unwrap();
+    let plan = LoginEditState::edit_provider(&cfg, "plan", None).expect("focus row matches the rendered marker for every visible field: the edit_provider fixture operation uses valid inputs");
 
-    let responses = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let responses = LoginEditState::edit_provider(&cfg, "resp", None).expect("focus row matches the rendered marker for every visible field: the edit_provider fixture operation uses valid inputs");
 
     for state in [&new_responses, &new_openai, &plan, &responses] {
         let auth = super::auth::AuthController::new();
@@ -273,16 +284,19 @@ fn focus_row_matches_the_rendered_marker_for_every_visible_field() {
                 "visible field {field:?} must have a mouse hit region"
             );
         }
-        for field in layout.hits.iter().flatten().filter_map(|hit| match hit {
-            render::EditHit::Field(field) => Some(*field),
-            render::EditHit::AuthAction(_)
-            | render::EditHit::TypeChangeCandidate
-            | render::EditHit::TypeChangeConfirm => None,
-        }) {
-            assert!(
-                visible.contains(&field),
-                "mouse hit field {field:?} must be keyboard-visible"
-            );
+        {
+            let iteration_items = layout.hits.iter().flatten().filter_map(|hit| match hit {
+                render::EditHit::Field(field) => Some(*field),
+                render::EditHit::AuthAction(_)
+                | render::EditHit::TypeChangeCandidate
+                | render::EditHit::TypeChangeConfirm => None,
+            });
+            for field in iteration_items {
+                assert!(
+                    visible.contains(&field),
+                    "mouse hit field {field:?} must be keyboard-visible"
+                );
+            }
         }
     }
 }
@@ -292,8 +306,8 @@ fn focus_row_matches_the_rendered_marker_for_every_visible_field() {
 fn tab_order_skips_removed_profile_fields_and_leaves_no_blank_gap() {
     use super::render::{self, LoginRenderColors};
 
-    let cfg = login_config();
-    let state = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let cfg = super::login_config();
+    let state = LoginEditState::edit_provider(&cfg, "resp", None).expect("tab order skips removed profile fields and leaves no blank gap: the edit_provider fixture operation uses valid inputs");
     let expected = state.visible_fields();
     assert_eq!(
         expected,
@@ -340,38 +354,41 @@ fn tab_order_skips_removed_profile_fields_and_leaves_no_blank_gap() {
         );
     }
     let mut blank_run = 0usize;
-    for (row, line) in layout.lines.iter().enumerate() {
-        let line_text: String = line
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect();
-        if line_text.trim().is_empty() {
-            blank_run += 1;
-            assert!(blank_run <= 1, "consecutive blank rows at {row}");
-        } else {
-            blank_run = 0;
+    {
+        let iteration_items = layout.lines.iter().enumerate();
+        for (row, line) in iteration_items {
+            let line_text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            if line_text.trim().is_empty() {
+                blank_run += 1;
+                assert!(blank_run <= 1, "consecutive blank rows at {row}");
+            } else {
+                blank_run = 0;
+            }
         }
     }
 
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
     let expected_for_closure = expected.clone();
-    mount_edit_state(state, LoginField::ProviderType, 2, move |index, panel| {
+    super::mount_edit_state(state, LoginField::ProviderType, 2, move |index, panel| {
         if index == 0 {
             let mut seen = vec![*panel.edit_focus.read()];
             for _ in 1..expected_for_closure.len() {
-                let _ = panel.event(key(KeyCode::Tab), TEST_AREA);
+                let _ = panel.event(super::key(KeyCode::Tab), TEST_AREA);
                 seen.push(*panel.edit_focus.read());
             }
-            let _ = panel.event(key(KeyCode::Tab), TEST_AREA);
-            tx.send((seen, *panel.edit_focus.read())).unwrap();
+            let _ = panel.event(super::key(KeyCode::Tab), TEST_AREA);
+            tx.send((seen, *panel.edit_focus.read())).expect("tab order skips removed profile fields and leaves no blank gap: isolated fixture workspace must remain accessible");
         }
         frame += 1;
         assert_eq!(frame, index + 1);
     });
 
-    let (seen, wrapped) = rx.try_recv().unwrap();
+    let (seen, wrapped) = rx.try_recv().expect("tab order skips removed profile fields and leaves no blank gap: fixture channel must deliver its expected message");
     assert_eq!(seen, expected, "Tab order must equal the visible field set");
     assert_eq!(
         wrapped,
@@ -383,7 +400,7 @@ fn tab_order_skips_removed_profile_fields_and_leaves_no_blank_gap() {
 #[test]
 #[serial]
 fn keyboard_focus_scrolls_into_the_short_panel_viewport() {
-    let cfg = login_config();
+    let cfg = super::login_config();
     let mut state = LoginEditState::new_provider(&cfg, None);
     state.kind = Some(ProviderKind::OpenAiResponses);
     state.provider_id = "new".into();
@@ -398,28 +415,28 @@ fn keyboard_focus_scrolls_into_the_short_panel_viewport() {
     };
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state(state, LoginField::ProviderType, 2, move |index, panel| {
+    super::mount_edit_state(state, LoginField::ProviderType, 2, move |index, panel| {
         if index == 0 {
             for _ in 0..40 {
                 if *panel.edit_focus.read() == LoginField::Confirm {
                     break;
                 }
-                let _ = panel.event(key(KeyCode::Down), short);
+                let _ = panel.event(super::key(KeyCode::Down), short);
             }
             let focus = *panel.edit_focus.read();
             let offset = panel.sv.read().offset().y as usize;
-            let state = panel.edit_state.read().clone().unwrap();
+            let state = panel.edit_state.read().clone().expect("keyboard focus scrolls into the short panel viewport: isolated fixture workspace must remain accessible");
             let auth = panel.auth.read();
             let row = super::render::focus_row(&state, &auth, focus, short.width);
             let total = super::render::line_count(&state, &auth, focus, short.width);
             let height = short.height.saturating_sub(2) as usize;
-            tx.send((focus, offset, row, total, height)).unwrap();
+            tx.send((focus, offset, row, total, height)).expect("keyboard focus scrolls into the short panel viewport: fixture channel must deliver its expected message");
         }
         frame += 1;
         assert_eq!(frame, index + 1);
     });
 
-    let (focus, offset, row, total, height) = rx.try_recv().unwrap();
+    let (focus, offset, row, total, height) = rx.try_recv().expect("keyboard focus scrolls into the short panel viewport: fixture channel must deliver its expected message");
     assert_eq!(focus, LoginField::Confirm);
     assert!(
         total > height,

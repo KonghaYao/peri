@@ -1,9 +1,10 @@
 use std::path::Path;
 
-use crate::{
-    hooks::types::{HookEvent, HookMatchRule, HooksConfig, RegisteredHook},
-    plugin::types::PluginManifest,
-};
+use crate::hooks::types::HookEvent;
+use crate::hooks::types::HookMatchRule;
+use crate::hooks::types::HooksConfig;
+use crate::hooks::types::RegisteredHook;
+use crate::plugin::types::PluginManifest;
 
 /// 宽松解析 hooks JSON 对象。
 ///
@@ -112,6 +113,7 @@ pub(crate) fn extract_hooks(manifest: &PluginManifest, install_path: &Path) -> O
 ///
 /// 目录经配置数据面的 [`peri_config::io::home_dir`] 解析，与
 /// [`is_user_settings_path`] 的排除判定同源。
+#[must_use]
 pub fn load_global_settings_hooks() -> Vec<RegisteredHook> {
     let Some(home) = peri_config::io::home_dir() else {
         tracing::warn!("Cannot resolve user home for global hooks");
@@ -172,10 +174,7 @@ pub fn load_global_settings_hooks() -> Vec<RegisteredHook> {
                 hooks.push(RegisteredHook {
                     hook: hook_def.clone(),
                     event: event.clone(),
-                    matcher: rule
-                        .matcher
-                        .clone()
-                        .or_else(|| hook_def.get_matcher().cloned()),
+                    matcher: rule.matcher.clone().or_else(|| hook_def.matcher().cloned()),
                     plugin_name: "settings.json".to_string(),
                     plugin_id: "settings.global".to_string(),
                     plugin_source: None,
@@ -199,6 +198,7 @@ pub fn load_global_settings_hooks() -> Vec<RegisteredHook> {
 /// Load hooks from `{cwd}/.claude/settings.local.json` `hooks` field.
 ///
 /// Returns a list of `RegisteredHook` with `plugin_name = "settings.local.json"`.
+#[must_use]
 pub fn load_settings_local_hooks(cwd: &str) -> Vec<RegisteredHook> {
     let settings_path = Path::new(cwd).join(".claude").join("settings.local.json");
     let content = match peri_config::io::read_text(&settings_path) {
@@ -237,10 +237,7 @@ pub fn load_settings_local_hooks(cwd: &str) -> Vec<RegisteredHook> {
                 hooks.push(RegisteredHook {
                     hook: hook_def.clone(),
                     event: event.clone(),
-                    matcher: rule
-                        .matcher
-                        .clone()
-                        .or_else(|| hook_def.get_matcher().cloned()),
+                    matcher: rule.matcher.clone().or_else(|| hook_def.matcher().cloned()),
                     plugin_name: "settings.local.json".to_string(),
                     plugin_id: "settings.local".to_string(),
                     plugin_source: None,
@@ -268,6 +265,7 @@ pub fn load_settings_local_hooks(cwd: &str) -> Vec<RegisteredHook> {
 /// cwd 为用户主目录时（在 `~` 下启动 peri），`{cwd}/.claude/settings.json` 就是
 /// 用户级 `~/.claude/settings.json` 本身：该场景不存在「用户级 + 项目级」两层，
 /// 直接跳过——否则同一份 hooks 会注册成 global 与 project 两组而重复执行。
+#[must_use]
 pub fn load_settings_project_hooks(cwd: &str) -> Vec<RegisteredHook> {
     let home = peri_config::io::home_dir();
     load_settings_project_hooks_under(cwd, home.as_deref())
@@ -318,10 +316,7 @@ fn load_settings_project_hooks_under(cwd: &str, home: Option<&Path>) -> Vec<Regi
                 hooks.push(RegisteredHook {
                     hook: hook_def.clone(),
                     event: event.clone(),
-                    matcher: rule
-                        .matcher
-                        .clone()
-                        .or_else(|| hook_def.get_matcher().cloned()),
+                    matcher: rule.matcher.clone().or_else(|| hook_def.matcher().cloned()),
                     plugin_name: "project-settings.json".to_string(),
                     plugin_id: "settings.project".to_string(),
                     plugin_source: None,

@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use super::*;
+use super::{HookMiddleware, ReactLLM};
 use crate::hooks::types::{HookEvent, HookType, RegisteredHook};
 use crate::permission::{PermissionMode, SharedPermissionMode};
 use peri_agent::agent::react::ToolCall;

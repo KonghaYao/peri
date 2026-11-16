@@ -1,9 +1,19 @@
-use super::test_support::*;
-use super::*;
+use super::AdmissionDecision;
+use super::HistoryEntryView;
+use super::HistorySource;
+use super::HistoryWindow;
+use super::PageDraft;
+use super::PagePlacement;
+use super::PersistentEntryKey;
+use super::PersistentSubItemKey;
+use super::PinReason;
+use super::SegmentDraft;
+use super::SegmentPlacement;
+use super::WindowLimits;
 
 #[test]
 fn display_overlap_respects_adjacent_ranges_and_gaps() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     assert!(window.mark_existing_display_slot(PersistentEntryKey::own("a"), 2, 2));
     assert!(window.mark_existing_display_slot(PersistentEntryKey::own("b"), 6, 2));
     for slot in [0, 1, 4, 5, 8, 9] {
@@ -21,7 +31,7 @@ fn display_overlap_respects_adjacent_ranges_and_gaps() {
 
 #[test]
 fn disposable_preview_removal_preserves_canonical_display_ranges() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let first = PersistentEntryKey::own("s1:first");
     let later = PersistentEntryKey::own("s1:later");
     assert!(window.mark_existing_display_slot(first.clone(), 0, 2));
@@ -69,7 +79,7 @@ fn default_window_budget_matches_plan_initial_values() {
 
 #[test]
 fn window_budget_separates_body_reserved_and_pinned() {
-    let mut window = enabled_window(WindowLimits {
+    let mut window = super::test_support::enabled_window(WindowLimits {
         body_bytes: 1_000,
         ..WindowLimits::default()
     });
@@ -87,7 +97,7 @@ fn window_budget_separates_body_reserved_and_pinned() {
 
 #[test]
 fn release_target_uses_watermark_and_remaining_capacity() {
-    let window = enabled_window(WindowLimits {
+    let window = super::test_support::enabled_window(WindowLimits {
         body_bytes: 1_000,
         release_watermark_percent: 75,
         ..WindowLimits::default()
@@ -101,7 +111,7 @@ fn release_target_uses_watermark_and_remaining_capacity() {
 
 #[test]
 fn inherited_segment_is_pinned_and_never_evictable() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let source = HistorySource::inherited("snap-42");
     let entry = HistoryEntryView::new(
         PersistentEntryKey::new(source.clone(), "ancestor:1"),
@@ -124,7 +134,7 @@ fn inherited_segment_is_pinned_and_never_evictable() {
 
 #[test]
 fn checkpoint_history_is_bounded_and_deduplicated() {
-    let mut window = enabled_window(WindowLimits {
+    let mut window = super::test_support::enabled_window(WindowLimits {
         checkpoint_history: 2,
         ..WindowLimits::default()
     });
@@ -142,7 +152,7 @@ fn disabled_window_does_not_admit_pages() {
     let decision = window.admit_page(PageDraft {
         request_id: "r1".into(),
         window_generation: window.generation(),
-        identity: identity(),
+        identity: super::test_support::identity(),
         placement: PagePlacement::Tail,
         segments: vec![segment("a", 1, 10, 20)],
     });
@@ -157,11 +167,11 @@ fn history_window_beta_defaults_true_and_only_explicit_false_disables() {
     let mut config = crate::config::PeriConfig::default();
 
     // 未配置 = 开启（S7 发布启用）：快照投影与回退配置读取必须一致。
-    assert!(history_window_beta_enabled(&config));
-    assert!(history_window_beta_enabled_from_flags(
+    assert!(super::history_window_beta_enabled(&config));
+    assert!(super::history_window_beta_enabled_from_flags(
         &peri_config::betas::from_merged(&config)
     ));
-    apply_history_window_beta(history_window_beta_enabled(&config));
+    super::apply_history_window_beta(super::history_window_beta_enabled(&config));
     assert!(crate::kit::atoms::HISTORY_WINDOW_V1.get());
 
     // 显式 false 仍关闭。
@@ -169,11 +179,11 @@ fn history_window_beta_defaults_true_and_only_explicit_false_disables() {
         .config
         .betas
         .set(peri_config::betas::HISTORY_WINDOW_V1, false);
-    assert!(!history_window_beta_enabled(&config));
-    assert!(!history_window_beta_enabled_from_flags(
+    assert!(!super::history_window_beta_enabled(&config));
+    assert!(!super::history_window_beta_enabled_from_flags(
         &peri_config::betas::from_merged(&config)
     ));
-    apply_history_window_beta(false);
+    super::apply_history_window_beta(false);
     assert!(!crate::kit::atoms::HISTORY_WINDOW_V1.get());
 
     // 显式 true 开启。
@@ -181,16 +191,18 @@ fn history_window_beta_defaults_true_and_only_explicit_false_disables() {
         .config
         .betas
         .set(peri_config::betas::HISTORY_WINDOW_V1, true);
-    assert!(history_window_beta_enabled(&config));
-    assert!(history_window_beta_enabled_from_flags(
+    assert!(super::history_window_beta_enabled(&config));
+    assert!(super::history_window_beta_enabled_from_flags(
         &peri_config::betas::from_merged(&config)
     ));
-    apply_history_window_beta(true);
+    super::apply_history_window_beta(true);
     assert!(crate::kit::atoms::HISTORY_WINDOW_V1.get());
     assert!(
         !(crate::kit::atoms::HISTORY_WINDOW_V1.get()
             && crate::kit::atoms::HISTORY_WINDOW_CAPABLE.get()),
         "local projection alone must not force the window path without server capability"
     );
-    apply_history_window_beta(false);
+    super::apply_history_window_beta(false);
 }
+
+use super::test_support::segment;

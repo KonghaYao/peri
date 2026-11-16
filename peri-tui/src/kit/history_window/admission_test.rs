@@ -1,6 +1,10 @@
-use super::test_support::*;
-use super::*;
+use super::{
+    AdmissionDecision, AdmissionRejection, AdmissionRejectionReason, AnchorRelocation, PageDraft,
+    PagePlacement, PinReason, ReserveOutcome, ReserveRejection, SegmentOrigin, SegmentPlacement,
+    WindowAnchor, WindowAnchorOffset, WindowLimits,
+};
 
+#[must_use]
 fn small_limits(body_bytes: usize) -> WindowLimits {
     WindowLimits {
         body_bytes,
@@ -11,7 +15,7 @@ fn small_limits(body_bytes: usize) -> WindowLimits {
 
 #[test]
 fn page_reservation_counts_reserved_not_body_and_settles_into_actual_bytes() {
-    let mut window = enabled_window(small_limits(10_000));
+    let mut window = super::test_support::enabled_window(small_limits(10_000));
     assert!(matches!(
         window.reserve_page("r1", 800),
         ReserveOutcome::Granted(_)
@@ -22,9 +26,9 @@ fn page_reservation_counts_reserved_not_body_and_settles_into_actual_bytes() {
     let decision = window.admit_page(PageDraft {
         request_id: "r1".into(),
         window_generation: window.generation(),
-        identity: identity(),
+        identity: super::test_support::identity(),
         placement: PagePlacement::Tail,
-        segments: vec![segment("a", 10, 300, 500)],
+        segments: vec![super::test_support::segment("a", 10, 300, 500)],
     });
     assert!(matches!(decision, AdmissionDecision::Accepted { .. }));
     assert_eq!(window.budget().page_reserved_bytes, 0);
@@ -37,26 +41,26 @@ fn page_reservation_counts_reserved_not_body_and_settles_into_actual_bytes() {
 
 #[test]
 fn over_budget_admission_evicts_farthest_segment_first_and_reports_plans() {
-    let mut window = enabled_window(small_limits(1_000));
-    let a = accepted_key(admit_and_settle(
+    let mut window = super::test_support::enabled_window(small_limits(1_000));
+    let a = super::test_support::accepted_key(super::test_support::admit_and_settle(
         &mut window,
         "r1",
-        segment("a", 10, 300, 400),
+        super::test_support::segment("a", 10, 300, 400),
     ));
-    let b = accepted_key(admit_and_settle(
+    let b = super::test_support::accepted_key(super::test_support::admit_and_settle(
         &mut window,
         "r2",
-        segment("b", 20, 300, 400),
+        super::test_support::segment("b", 20, 300, 400),
     ));
-    let c = accepted_key(admit_and_settle(
+    let c = super::test_support::accepted_key(super::test_support::admit_and_settle(
         &mut window,
         "r3",
-        segment("c", 30, 300, 400),
+        super::test_support::segment("c", 30, 300, 400),
     ));
     assert_eq!(window.budget().resident_body_bytes, 900);
     assert_eq!(window.generation(), 1);
 
-    let anchor_entry = window.segment(a).unwrap().entries[0].key.clone();
+    let anchor_entry = window.segment(a).expect("over budget admission evicts farthest segment first and reports plans: the segment fixture operation uses valid inputs").entries[0].key.clone();
     assert!(matches!(
         window.set_anchor(Some(WindowAnchor::new(
             anchor_entry,
@@ -66,10 +70,10 @@ fn over_budget_admission_evicts_farthest_segment_first_and_reports_plans() {
         AnchorRelocation::Resident { segment, .. } if segment == a
     ));
 
-    let decision = admit(
+    let decision = super::test_support::admit(
         &mut window,
         "r4",
-        segment("d", 40, 300, 400),
+        super::test_support::segment("d", 40, 300, 400),
         PagePlacement::Tail,
     );
     let (segments, released) = match decision {
@@ -97,12 +101,12 @@ fn over_budget_admission_evicts_farthest_segment_first_and_reports_plans() {
 /// 转入可释放段，预算压力能生成释放计划并接纳新页。
 #[test]
 fn tool_live_seal_segment_is_evictable_while_unattributed_bytes_are_not() {
-    let mut window = enabled_window(small_limits(1_000));
+    let mut window = super::test_support::enabled_window(small_limits(1_000));
     window.note_unattributed_live_bytes(1_000);
-    let rejected = admit(
+    let rejected = super::test_support::admit(
         &mut window,
         "r1",
-        segment("page-a", 10, 200, 220),
+        super::test_support::segment("page-a", 10, 200, 220),
         PagePlacement::Tail,
     );
     assert!(
@@ -120,15 +124,15 @@ fn tool_live_seal_segment_is_evictable_while_unattributed_bytes_are_not() {
     window.release_unattributed_live_bytes(1_000);
     window
         .register_segment(
-            segment("tool-entry", 5, 900, 940).origin(SegmentOrigin::LiveSeal),
+            super::test_support::segment("tool-entry", 5, 900, 940).origin(SegmentOrigin::LiveSeal),
             SegmentPlacement::Tail,
         )
         .expect("live tool segment");
 
-    let admitted = admit(
+    let admitted = super::test_support::admit(
         &mut window,
         "r2",
-        segment("page-b", 20, 200, 220),
+        super::test_support::segment("page-b", 20, 200, 220),
         PagePlacement::Tail,
     );
     let released = match admitted {
@@ -142,20 +146,20 @@ fn tool_live_seal_segment_is_evictable_while_unattributed_bytes_are_not() {
 
 #[test]
 fn all_pinned_segments_reject_admission_and_report_reasons() {
-    let mut window = enabled_window(small_limits(1_000));
-    let a = accepted_key(admit_and_settle(
+    let mut window = super::test_support::enabled_window(small_limits(1_000));
+    let a = super::test_support::accepted_key(super::test_support::admit_and_settle(
         &mut window,
         "r1",
-        segment("a", 10, 400, 500),
+        super::test_support::segment("a", 10, 400, 500),
     ));
-    let b = accepted_key(admit_and_settle(
+    let b = super::test_support::accepted_key(super::test_support::admit_and_settle(
         &mut window,
         "r2",
-        segment("b", 20, 600, 700),
+        super::test_support::segment("b", 20, 600, 700),
     ));
     assert_eq!(window.budget().resident_body_bytes, 1_000);
 
-    let anchor_entry = window.segment(a).unwrap().entries[0].key.clone();
+    let anchor_entry = window.segment(a).expect("all pinned segments reject admission and report reasons: the segment fixture operation uses valid inputs").entries[0].key.clone();
     window.set_anchor(Some(WindowAnchor::new(
         anchor_entry,
         None,
@@ -163,10 +167,10 @@ fn all_pinned_segments_reject_admission_and_report_reasons() {
     )));
     window.pin(b, PinReason::Running);
 
-    let decision = admit(
+    let decision = super::test_support::admit(
         &mut window,
         "r3",
-        segment("c", 30, 100, 120),
+        super::test_support::segment("c", 30, 100, 120),
         PagePlacement::Tail,
     );
     let rejection = match decision {
@@ -190,7 +194,7 @@ fn all_pinned_segments_reject_admission_and_report_reasons() {
 
 #[test]
 fn stale_page_generation_is_rejected_and_reservation_is_released() {
-    let mut window = enabled_window(small_limits(10_000));
+    let mut window = super::test_support::enabled_window(small_limits(10_000));
     assert!(matches!(
         window.reserve_page("late", 200),
         ReserveOutcome::Granted(_)
@@ -198,9 +202,9 @@ fn stale_page_generation_is_rejected_and_reservation_is_released() {
     let decision = window.admit_page(PageDraft {
         request_id: "late".into(),
         window_generation: window.generation() + 1,
-        identity: identity(),
+        identity: super::test_support::identity(),
         placement: PagePlacement::Tail,
-        segments: vec![segment("a", 10, 200, 300)],
+        segments: vec![super::test_support::segment("a", 10, 200, 300)],
     });
     assert!(matches!(
         decision,
@@ -217,22 +221,22 @@ fn stale_page_generation_is_rejected_and_reservation_is_released() {
 
 #[test]
 fn one_pending_merge_page_blocks_the_next_admission() {
-    let mut window = enabled_window(small_limits(10_000));
+    let mut window = super::test_support::enabled_window(small_limits(10_000));
     assert!(matches!(
-        admit(
+        super::test_support::admit(
             &mut window,
             "r1",
-            segment("a", 10, 100, 120),
+            super::test_support::segment("a", 10, 100, 120),
             PagePlacement::Tail
         ),
         AdmissionDecision::Accepted { .. }
     ));
     assert_eq!(window.pending_merge_bytes(), 100);
 
-    let decision = admit(
+    let decision = super::test_support::admit(
         &mut window,
         "r2",
-        segment("b", 20, 100, 120),
+        super::test_support::segment("b", 20, 100, 120),
         PagePlacement::Tail,
     );
     assert!(matches!(
@@ -250,35 +254,35 @@ fn one_pending_merge_page_blocks_the_next_admission() {
 
 #[test]
 fn low_level_release_plan_cannot_bypass_pins_or_non_durable_segments() {
-    let mut window = enabled_window(small_limits(10_000));
-    let a = accepted_key(admit_and_settle(
+    let mut window = super::test_support::enabled_window(small_limits(10_000));
+    let a = super::test_support::accepted_key(super::test_support::admit_and_settle(
         &mut window,
         "r1",
-        segment("a", 10, 100, 120),
+        super::test_support::segment("a", 10, 100, 120),
     ));
-    let b = accepted_key(admit_and_settle(
+    let b = super::test_support::accepted_key(super::test_support::admit_and_settle(
         &mut window,
         "r2",
-        segment("b", 20, 100, 120),
+        super::test_support::segment("b", 20, 100, 120),
     ));
     window.pin(a, PinReason::Running);
 
-    let pinned_plan = release_plan_for(&window, a);
+    let pinned_plan = super::test_support::release_plan_for(&window, a);
     assert!(window.apply_release_plan(&pinned_plan).is_none());
     assert!(window.segment(a).is_some());
 
-    let unpinned_plan = release_plan_for(&window, b);
+    let unpinned_plan = super::test_support::release_plan_for(&window, b);
     assert!(window.apply_release_plan(&unpinned_plan).is_some());
     assert!(window.segment(b).is_none());
 }
 
 #[test]
 fn degraded_window_stops_eviction_and_rejects_new_pages_but_keeps_segments() {
-    let mut window = enabled_window(small_limits(1_000));
-    let a = accepted_key(admit_and_settle(
+    let mut window = super::test_support::enabled_window(small_limits(1_000));
+    let a = super::test_support::accepted_key(super::test_support::admit_and_settle(
         &mut window,
         "r1",
-        segment("a", 10, 400, 500),
+        super::test_support::segment("a", 10, 400, 500),
     ));
     window.set_degraded("cursor expired");
     assert!(window.is_degraded());
@@ -289,9 +293,9 @@ fn degraded_window_stops_eviction_and_rejects_new_pages_but_keeps_segments() {
     let decision = window.admit_page(PageDraft {
         request_id: "r2".into(),
         window_generation: window.generation(),
-        identity: identity(),
+        identity: super::test_support::identity(),
         placement: PagePlacement::Tail,
-        segments: vec![segment("b", 20, 100, 120)],
+        segments: vec![super::test_support::segment("b", 20, 100, 120)],
     });
     assert!(matches!(
         decision,
@@ -309,7 +313,7 @@ fn degraded_window_stops_eviction_and_rejects_new_pages_but_keeps_segments() {
 
 #[test]
 fn reservation_limits_are_independent_from_body_budget() {
-    let mut window = enabled_window(WindowLimits {
+    let mut window = super::test_support::enabled_window(WindowLimits {
         body_bytes: 10_000,
         reserved_bytes: 1_000,
         max_in_flight_pages: 1,

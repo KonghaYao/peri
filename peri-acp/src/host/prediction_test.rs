@@ -1,9 +1,8 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-
-use super::lock_or_shutdown;
 
 #[test]
 fn prediction_keeps_actual_trigger_execution_and_separate_call_purpose() {
@@ -33,7 +32,11 @@ async fn test_lock_is_abandoned_once_shutdown_begins() {
     let waiter = {
         let sessions = Arc::clone(&sessions);
         let shutdown = shutdown.clone();
-        tokio::spawn(async move { lock_or_shutdown(&sessions, &shutdown).await.is_some() })
+        tokio::spawn(async move {
+            super::lock_or_shutdown(&sessions, &shutdown)
+                .await
+                .is_some()
+        })
     };
     tokio::task::yield_now().await;
     shutdown.cancel();
@@ -48,6 +51,6 @@ async fn test_lock_is_abandoned_once_shutdown_begins() {
 #[tokio::test]
 async fn test_lock_is_taken_while_scope_is_open() {
     let sessions = Mutex::new(7usize);
-    let guard = lock_or_shutdown(&sessions, &CancellationToken::new()).await;
+    let guard = super::lock_or_shutdown(&sessions, &CancellationToken::new()).await;
     assert_eq!(*guard.expect("未关停时应取到锁"), 7);
 }

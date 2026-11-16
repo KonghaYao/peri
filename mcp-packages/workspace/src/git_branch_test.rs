@@ -1,15 +1,13 @@
-use std::{
-    path::{Path, PathBuf},
-    time::{Duration, Instant},
-};
-
-use super::*;
+use std::path::Path;
+use std::path::PathBuf;
+use std::time::Duration;
+use std::time::Instant;
 
 async fn read_branch_over_wire(cwd: &Path) -> serde_json::Value {
-    use rmcp::{
-        model::{ClientRequest, CustomRequest, ServerResult},
-        ServiceExt,
-    };
+    use rmcp::model::ClientRequest;
+    use rmcp::model::CustomRequest;
+    use rmcp::model::ServerResult;
+    use rmcp::ServiceExt;
     let (client_io, server_io) = tokio::io::duplex(8192);
     let server = crate::WorkspaceMcpServer::new(cwd.to_string_lossy().into_owned(), None);
     let server_task = tokio::spawn(async move {
@@ -54,7 +52,9 @@ async fn read_branch_over_wire(cwd: &Path) -> serde_json::Value {
 #[tokio::test]
 async fn non_repository_returns_null_without_paths() {
     let dir = tempfile::tempdir().unwrap();
-    let result = read_branch(dir.path().to_str().unwrap()).await.unwrap();
+    let result = crate::git_branch::read_branch(dir.path().to_str().unwrap())
+        .await
+        .unwrap();
     assert_eq!(result.0, serde_json::json!({"branch": null}));
     assert_eq!(read_branch_over_wire(dir.path()).await, result.0);
 }
@@ -84,7 +84,9 @@ async fn actual_repository_returns_branch() {
             .status
             .success());
     }
-    let result = read_branch(dir.path().to_str().unwrap()).await.unwrap();
+    let result = crate::git_branch::read_branch(dir.path().to_str().unwrap())
+        .await
+        .unwrap();
     assert_eq!(result.0, serde_json::json!({"branch": "workspace-branch"}));
     assert_eq!(read_branch_over_wire(dir.path()).await, result.0);
 }
@@ -100,7 +102,7 @@ async fn failed_command_returns_none() {
     #[cfg(windows)]
     command.args(["/D", "/C", "echo private/path & exit /B 1"]);
     assert_eq!(
-        current_branch_with_command(command, Duration::from_secs(1)).await,
+        crate::git_branch::current_branch_with_command(command, Duration::from_secs(1)).await,
         None
     );
 }
@@ -119,10 +121,10 @@ async fn timeout_kills_descendants_with_common_process_tree_guard() {
         ])
         .env("READY", &ready)
         .env("SENTINEL", &sentinel);
-    let mut guard = spawn_branch_command(command).unwrap();
+    let mut guard = crate::git_branch::spawn_branch_command(command).unwrap();
     wait_for_fixture_ready(guard.child_mut(), &ready).await;
     assert_eq!(
-        current_branch_from_child(guard, Duration::from_millis(100)).await,
+        crate::git_branch::current_branch_from_child(guard, Duration::from_millis(100)).await,
         None
     );
     assert_sentinel_remains_absent(&sentinel).await;
@@ -142,9 +144,12 @@ async fn dropping_branch_future_kills_process_tree() {
         ])
         .env("READY", &ready)
         .env("SENTINEL", &sentinel);
-    let mut guard = spawn_branch_command(command).unwrap();
+    let mut guard = crate::git_branch::spawn_branch_command(command).unwrap();
     wait_for_fixture_ready(guard.child_mut(), &ready).await;
-    let branch = tokio::spawn(current_branch_from_child(guard, Duration::from_secs(30)));
+    let branch = tokio::spawn(crate::git_branch::current_branch_from_child(
+        guard,
+        Duration::from_secs(30),
+    ));
     tokio::task::yield_now().await;
     branch.abort();
     assert!(branch.await.unwrap_err().is_cancelled());
@@ -201,7 +206,10 @@ async fn assert_sentinel_remains_absent(sentinel: &Path) {
 async fn test_current_branch_with_command_trims_successful_output() {
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        current_branch_with_command(successful_branch_command(), Duration::from_secs(1)),
+        crate::git_branch::current_branch_with_command(
+            successful_branch_command(),
+            Duration::from_secs(1),
+        ),
     )
     .await
     .expect("分支命令应在外层测试期限内完成");
@@ -261,10 +269,12 @@ async fn test_current_branch_with_command_timeout_kills_process() {
             .env(FIXTURE_READY_ENV, &ready)
             .env(FIXTURE_RELEASE_ENV, &release)
             .env(FIXTURE_SENTINEL_ENV, &sentinel);
-        let mut child = spawn_branch_command(command).expect("应能启动 fixture 子进程");
+        let mut child =
+            crate::git_branch::spawn_branch_command(command).expect("应能启动 fixture 子进程");
         wait_for_fixture_ready(child.child_mut(), &ready).await;
 
-        let result = current_branch_from_child(child, Duration::from_millis(100)).await;
+        let result =
+            crate::git_branch::current_branch_from_child(child, Duration::from_millis(100)).await;
         assert_eq!(result, None);
         tokio::time::sleep(Duration::from_millis(100)).await;
         std::fs::write(&release, b"release").expect("应能写入 RELEASE");

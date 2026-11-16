@@ -1,4 +1,4 @@
-use super::LangfuseConfig;
+use peri_config::observability::LangfuseConfig;
 
 #[test]
 fn test_reexported_config_uses_core_defaults() {

@@ -1,5 +1,7 @@
-use super::*;
-use crate::mcp::client::output_store::tests::{assert_remote_readback, large_output, Wire};
+use super::{Arc, McpClientPool, McpResourceTool, McpSkillRegistry};
+use crate::mcp::client::output_store::tests as tests_functions;
+use crate::mcp::client::output_store::tests::Wire;
+use peri_agent::tools::BaseTool as _;
 
 #[tokio::test]
 async fn recovered_resource_output_is_stored_over_workspace_wire() {
@@ -14,17 +16,19 @@ async fn recovered_resource_output_is_stored_over_workspace_wire() {
     let tool = McpResourceTool::new(pool.clone(), Arc::new(McpSkillRegistry::new()))
         .with_session_id("session");
     let output = tool
-        .format_recovered_content(&large_output(), Some("text/markdown"))
+        .format_recovered_content(&tests_functions::large_output(), Some("text/markdown"))
         .await;
-    let saved_path = assert_remote_readback(
+    let saved_path = tests_functions::assert_remote_readback(
         wire.client.peer(),
         &output,
-        &format!("[text/text/markdown]\n{}", large_output()),
+        &format!("[text/text/markdown]\n{}", tests_functions::large_output()),
     )
     .await;
     std::fs::remove_file(saved_path).unwrap();
     pool.begin_shutdown();
-    let output = tool.format_recovered_content(&large_output(), None).await;
+    let output = tool
+        .format_recovered_content(&tests_functions::large_output(), None)
+        .await;
     assert!(output.contains("Full output NOT saved"));
     assert!(!output.contains("resource_uri="));
     pool.clients.write().clear();

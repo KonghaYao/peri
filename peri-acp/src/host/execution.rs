@@ -6,7 +6,8 @@ use serde_json::Value;
 
 use super::AcpServerConfig;
 use crate::session::event_sink::TransportEventSink;
-use crate::transport::{types::AcpError, AcpTransport};
+use crate::transport::types::AcpError;
+use crate::transport::AcpTransport;
 
 pub(super) async fn approve_schedule(
     request: &peri_acp_types::cron::CronContinuationRequest,

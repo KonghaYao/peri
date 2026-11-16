@@ -2,7 +2,7 @@
 
 use peri_agent::middleware::r#trait::Middleware;
 
-use super::*;
+use super::AgentsMdMiddleware;
 
 /// Helper: call prompt_contribution with concrete State type for testing.
 fn contribution(mw: &AgentsMdMiddleware) -> Option<String> {

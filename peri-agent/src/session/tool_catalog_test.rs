@@ -1,10 +1,17 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_acp_types::mcp_control::{SessionMcpCatalogPort, SessionMcpCatalogSnapshot};
 use serde_json::json;
 
-use super::*;
+use crate::session::tool_catalog::CatalogRefreshError;
+use crate::session::tool_catalog::SessionToolCatalog;
+use crate::session::tool_catalog::StartupRequiredTool;
+use crate::session::tool_catalog::StartupToolUpdate;
+use crate::session::tool_catalog::ToolFilterPolicy;
+use crate::session::tool_catalog::ToolSource;
+use crate::tools::BaseTool;
 use crate::tools::ToolContext;
 
 struct NamedTool {
@@ -73,6 +80,7 @@ impl SessionMcpCatalogPort for MutableCapability {
 }
 
 #[test]
+#[should_panic(expected = "base tool catalog must not contain conflicting aliases")]
 fn conflicting_base_aliases_are_reported_without_weakening_production_constructor() {
     let first: Arc<dyn BaseTool> = Arc::new(NamedTool::with_alias("first", "shared"));
     let second: Arc<dyn BaseTool> = Arc::new(NamedTool::with_alias("second", "shared"));
@@ -82,10 +90,7 @@ fn conflicting_base_aliases_are_reported_without_weakening_production_constructo
         SessionToolCatalog::try_new(tools.clone(), None),
         Err(CatalogRefreshError::AliasConflict)
     ));
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        SessionToolCatalog::new(tools, None)
-    }))
-    .is_err());
+    let _catalog = SessionToolCatalog::new(tools, None);
 }
 
 #[test]
@@ -100,7 +105,7 @@ fn request_local_tool_binding_does_not_mutate_session_publisher() {
 
     let pinned = catalog
         .pin_working_tools(&BTreeMap::from([("example".to_string(), replacement)]))
-        .unwrap();
+        .expect("the pin working tools fixture result is required for this assertion");
 
     assert_eq!(published.tools["example"].tool.description(), "old");
     assert_eq!(pinned.tools["example"].tool.description(), "new");
@@ -193,12 +198,14 @@ fn pool_catalog_replaces_mcp_entries_and_preserves_pinned_reason() {
     );
     let pinned = catalog
         .pin_working_tools(&catalog.snapshot().tool_map())
-        .unwrap();
+        .expect("the pin working tools fixture result is required for this assertion");
     source.publish(SessionMcpCatalogSnapshot {
         generation: 2,
         tools: vec![],
     });
-    let stopped = catalog.refresh().unwrap();
+    let stopped = catalog
+        .refresh()
+        .expect("the refresh fixture result is required for this assertion");
     assert!(
         stopped.tools.contains_key("Read"),
         "关闭 MCP 不得移除 core 工具"
@@ -215,7 +222,9 @@ fn pool_catalog_replaces_mcp_entries_and_preserves_pinned_reason() {
         generation: 3,
         tools: vec![replacement.clone()],
     });
-    let restarted = catalog.refresh().unwrap();
+    let restarted = catalog
+        .refresh()
+        .expect("the refresh fixture result is required for this assertion");
     assert!(Arc::ptr_eq(
         &restarted.tools[replacement.name()].tool,
         &replacement
@@ -246,7 +255,9 @@ fn pool_catalog_reapplies_child_filter_on_each_generation() {
             Arc::new(BridgeTool::bridge("mcp__docs__write", "docs")),
         ],
     });
-    let published = catalog.refresh().unwrap();
+    let published = catalog
+        .refresh()
+        .expect("the refresh fixture result is required for this assertion");
     assert_eq!(
         published.tools.keys().collect::<Vec<_>>(),
         vec!["mcp__docs__read"]
@@ -255,7 +266,11 @@ fn pool_catalog_reapplies_child_filter_on_each_generation() {
         generation: 3,
         tools: vec![],
     });
-    assert!(catalog.refresh().unwrap().tools.is_empty());
+    assert!(catalog
+        .refresh()
+        .expect("the refresh fixture result is required for this assertion")
+        .tools
+        .is_empty());
 }
 
 #[test]
@@ -289,7 +304,7 @@ fn pool_catalog_rejects_missing_source_without_partial_publication() {
     assert!(
         catalog
             .refresh()
-            .unwrap()
+            .expect("the refresh fixture result is required for this assertion")
             .tools
             .contains_key("mcp__docs__read"),
         "相同代次可重试"
@@ -361,7 +376,7 @@ fn startup_commit_publishes_required_direct_tool_into_static_base() {
             vec![Arc::clone(&prepared)],
             &[("system", "lookup", "mcp__system__lookup")],
         ))
-        .unwrap();
+        .expect("the replace static mcp tools fixture result is required for this assertion");
 
     assert!(
         published
@@ -387,7 +402,7 @@ fn startup_commit_publishes_required_direct_tool_into_static_base() {
     assert!(
         catalog
             .refresh()
-            .unwrap()
+            .expect("the refresh fixture result is required for this assertion")
             .direct_definitions
             .iter()
             .any(|definition| definition.name == "mcp__system__lookup"),
@@ -455,7 +470,7 @@ fn startup_commit_rejects_tool_without_static_mcp_identity() {
             vec![declared_but_core_named],
             &[("system", "Read", "Read")],
         ))
-        .unwrap();
+        .expect("the replace static mcp tools fixture result is required for this assertion");
     assert!(
         !catalog.snapshot().tools["Read"].tool.is_direct(),
         "启动提交不得把 core 工具身份换成 MCP bridge"
@@ -469,7 +484,7 @@ fn startup_commit_skips_cross_server_takeover() {
         Arc::new(BridgeTool::bridge("mcp__system__lookup", "other").direct());
     catalog
         .replace_static_mcp_tools(startup_update(vec![foreign], &[]))
-        .unwrap();
+        .expect("the replace static mcp tools fixture result is required for this assertion");
 
     assert_eq!(
         catalog.snapshot().tools["mcp__system__lookup"].source,
@@ -496,7 +511,7 @@ fn startup_commit_skips_alias_conflict() {
         Arc::new(BridgeTool::bridge("mcp__system__tool", "system").with_alias("shared"));
     catalog
         .replace_static_mcp_tools(startup_update(vec![conflicting], &[]))
-        .unwrap();
+        .expect("the replace static mcp tools fixture result is required for this assertion");
 
     assert!(!catalog.snapshot().tools.contains_key("mcp__system__tool"));
     assert_eq!(
@@ -515,18 +530,18 @@ fn raw_system_names_keep_first_source_across_refresh_and_case_collisions() {
             vec![first.clone(), second.clone()],
             &[("a", "lookup", "lookup"), ("b", "LOOKUP", "LOOKUP")],
         ))
-        .unwrap();
+        .expect("the replace static mcp tools fixture result is required for this assertion");
     assert_eq!(snapshot.tools.len(), 1);
     assert!(Arc::ptr_eq(&snapshot.tools["lookup"].tool, &first));
     let resolved = crate::tools::DirectToolInvocationResolver
         .resolve_target("LOOKUP", &snapshot.tool_map())
-        .unwrap();
+        .expect("the resolve target fixture result is required for this assertion");
     assert!(Arc::ptr_eq(&resolved, &first));
 
     // A later refresh of the losing source cannot take over the existing name.
     let snapshot = catalog
         .replace_static_mcp_tools(startup_update(vec![second], &[("b", "LOOKUP", "LOOKUP")]))
-        .unwrap();
+        .expect("the replace static mcp tools fixture result is required for this assertion");
     assert!(Arc::ptr_eq(&snapshot.tools["lookup"].tool, &first));
     let refreshed: Arc<dyn BaseTool> = Arc::new(BridgeTool::bridge("lookup", "a").direct());
     let snapshot = catalog
@@ -534,7 +549,7 @@ fn raw_system_names_keep_first_source_across_refresh_and_case_collisions() {
             vec![refreshed.clone()],
             &[("a", "lookup", "lookup")],
         ))
-        .unwrap();
+        .expect("the replace static mcp tools fixture result is required for this assertion");
     assert!(Arc::ptr_eq(&snapshot.tools["lookup"].tool, &refreshed));
 }
 
@@ -552,11 +567,11 @@ fn raw_system_required_alias_collision_does_not_fail_startup() {
             vec![second],
             &[("second", "shell", "shell")],
         ))
-        .unwrap();
+        .expect("the replace static mcp tools fixture result is required for this assertion");
     assert_eq!(snapshot.tools.len(), 1);
     let resolved = crate::tools::DirectToolInvocationResolver
         .resolve_target("shell", &snapshot.tool_map())
-        .unwrap();
+        .expect("the resolve target fixture result is required for this assertion");
     assert!(Arc::ptr_eq(&resolved, &first));
 }
 

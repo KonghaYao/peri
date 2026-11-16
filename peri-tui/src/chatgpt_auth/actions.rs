@@ -7,9 +7,6 @@
 use peri_acp::provider::auth::LogoutOutcome;
 
 use crate::i18n;
-use crate::kit::atoms::{NOTIFICATION, Notification};
-
-use super::controller::runtime_handle;
 
 #[cfg(test)]
 thread_local! {
@@ -31,6 +28,7 @@ pub(crate) struct DispatchInterceptDisabled(bool);
 
 #[cfg(test)]
 impl DispatchInterceptDisabled {
+    #[must_use]
     pub(crate) fn new() -> Self {
         let previous = DISPATCH_INTERCEPT_DISABLED.with(|flag| flag.replace(true));
         Self(previous)
@@ -78,7 +76,7 @@ pub(crate) fn open_browser(url: String) {
     if intercept_url_action("open", &url) {
         return;
     }
-    let Some(handle) = runtime_handle() else {
+    let Some(handle) = super::controller::runtime_handle() else {
         notify_key("login-auth-browser-failed", 3);
         return;
     };
@@ -97,7 +95,7 @@ pub(crate) fn copy_url(url: String) {
     if intercept_url_action("copy", &url) {
         return;
     }
-    let Some(handle) = runtime_handle() else {
+    let Some(handle) = super::controller::runtime_handle() else {
         notify_key("login-auth-copy-failed", 3);
         return;
     };
@@ -133,3 +131,7 @@ pub(crate) fn notify_logout_outcome(outcome: &LogoutOutcome) {
     };
     notify_key(key, 3);
 }
+
+use crate::kit::atoms::NOTIFICATION;
+
+use crate::kit::atoms::Notification;

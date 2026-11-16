@@ -27,6 +27,7 @@ enum Channel {
 }
 
 impl Channel {
+    #[must_use]
     fn other(self) -> Self {
         match self {
             Self::Native => Self::Terminal,
@@ -45,7 +46,7 @@ enum Multiplexer {
 }
 
 /// 环境读取面（测试注入用）。
-type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
+type Env<'environment> = &'environment dyn Fn(&str) -> Option<String>;
 
 fn process_env(name: &str) -> Option<String> {
     std::env::var_os(name).map(|value| value.to_string_lossy().into_owned())

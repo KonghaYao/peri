@@ -3,7 +3,21 @@
 //! 从 `history_page_wire_test.rs` 按职责拆出（STD-SIZE-001：单文件 ≤1000 行），语义未改动：
 //! 用例体、断言与 helper 逐字节搬移。夹具与跨文件共享 helper 在父模块里，经 `use super::*` 取用。
 
-use super::*;
+use crate::host::history_page;
+use crate::host::requests::tests::history_page_wire_tests::PageFixture;
+use crate::provider::LlmProvider;
+use crate::transport::AcpTransport;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageId;
+
+use peri_acp_types::store::CompactionChange;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
+use serde_json::json;
+use serde_json::Value;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// A15 / REQ-H01-1：初始游标锚在自有有效区最旧一条，绝不退回首屏第一条。
 #[tokio::test]
@@ -150,14 +164,15 @@ async fn a_failed_initial_replay_fails_the_load_instead_of_answering_a_cursor() 
     let cfg = Arc::clone(&fixture.cfg);
     let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
     let failing: Arc<dyn AcpTransport> = Arc::new(NotificationFailingTransport { inner: server });
-    let (client, sessions, task) = spawn_loop_with_transport(
-        cfg,
-        fixture.sessions.clone(),
-        Some(pagination_caps()),
-        client,
-        failing,
-    )
-    .await;
+    let (client, sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop_with_transport(
+            cfg,
+            fixture.sessions.clone(),
+            Some(crate::host::requests::tests::history_page_wire_tests::pagination_caps()),
+            client,
+            failing,
+        )
+        .await;
     let sid = fixture.sid.clone();
 
     let error = client
@@ -189,14 +204,15 @@ async fn cold_replay_failure_does_not_leave_state_or_manager() {
     let sessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
     let failing: Arc<dyn AcpTransport> = Arc::new(NotificationFailingTransport { inner: server });
-    let (client, sessions, task) = spawn_loop_with_transport(
-        Arc::clone(&fixture.cfg),
-        sessions,
-        Some(pagination_caps()),
-        client,
-        failing,
-    )
-    .await;
+    let (client, sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop_with_transport(
+            Arc::clone(&fixture.cfg),
+            sessions,
+            Some(crate::host::requests::tests::history_page_wire_tests::pagination_caps()),
+            client,
+            failing,
+        )
+        .await;
     let error = client
         .send_request("session/load", json!({ "sessionId": sid }))
         .await
@@ -222,14 +238,17 @@ async fn cold_replay_failure_does_not_leave_state_or_manager() {
 #[serial]
 async fn session_switch_cleanup_incomplete_owner_blocks_switch_until_close() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "unused-test-key",
-        "gpt-4o",
-    ));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "unused-test-key",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut raw_cfg = make_server_config(config, provider, &tmp).await;
+    let mut raw_cfg =
+        crate::host::requests::tests::make_server_config(config, provider, &tmp).await;
     let cwd = tmp.path().canonicalize().unwrap();
     raw_cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd: cwd.to_string_lossy().into_owned(),
@@ -240,7 +259,12 @@ async fn session_switch_cleanup_incomplete_owner_blocks_switch_until_close() {
     });
     let cfg = Arc::new(raw_cfg);
     let mut persisted = HashMap::new();
-    let sid = register_session_with_history(&mut persisted, cwd.to_str().unwrap(), &cfg).await;
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut persisted,
+        cwd.to_str().unwrap(),
+        &cfg,
+    )
+    .await;
     drop(persisted);
     let sessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let pool = Arc::new(WireRetryShutdownPool {
@@ -256,14 +280,15 @@ async fn session_switch_cleanup_incomplete_owner_blocks_switch_until_close() {
     });
     let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
     let failing: Arc<dyn AcpTransport> = Arc::new(NotificationFailingTransport { inner: server });
-    let (client, sessions, task) = spawn_loop_with_transport(
-        Arc::clone(&cfg),
-        sessions,
-        Some(pagination_caps()),
-        client,
-        failing,
-    )
-    .await;
+    let (client, sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop_with_transport(
+            Arc::clone(&cfg),
+            sessions,
+            Some(crate::host::requests::tests::history_page_wire_tests::pagination_caps()),
+            client,
+            failing,
+        )
+        .await;
 
     let cleanup = client
         .send_request("session/load", json!({ "sessionId": sid }))
@@ -329,7 +354,13 @@ async fn a_negotiated_initial_load_marks_the_first_screen_with_page_comparable_i
 
     let cfg = Arc::clone(&fixture.cfg);
     let cold: crate::host::SharedSessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let (client, _sessions, task) = spawn_loop(cfg, cold, Some(pagination_caps())).await;
+    let (client, _sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            cfg,
+            cold,
+            Some(crate::host::requests::tests::history_page_wire_tests::pagination_caps()),
+        )
+        .await;
     let sid = fixture.sid.clone();
 
     let load = {
@@ -406,8 +437,14 @@ async fn a_negotiated_initial_load_marks_the_first_screen_with_page_comparable_i
 
     // 更早的那一段：页给出的身份与归档段逐条对应，且位置严格小于首屏的最低位置——两段不重叠，
     // 合起来正好是全部自有条目。
-    let pages = walk_pages(&client, &sid, &Value::String(cursor), 2).await;
-    assert_page_chain(&pages);
+    let pages = crate::host::requests::tests::history_page_wire_tests::walk_pages(
+        &client,
+        &sid,
+        &Value::String(cursor),
+        2,
+    )
+    .await;
+    crate::host::requests::tests::history_page_wire_tests::assert_page_chain(&pages);
     let mut page_entries: Vec<String> = pages
         .iter()
         .flatten()
@@ -425,7 +462,8 @@ async fn a_negotiated_initial_load_marks_the_first_screen_with_page_comparable_i
         .collect();
     archived_entries.sort();
     assert_eq!(page_entries, archived_entries, "页覆盖的就是归档的那一段");
-    let page_positions = logical_sequence(&pages);
+    let page_positions =
+        crate::host::requests::tests::history_page_wire_tests::logical_sequence(&pages);
     let lowest_first_screen = marks
         .iter()
         .map(|(_, position)| *position)
@@ -460,7 +498,7 @@ async fn a_negotiated_initial_load_marks_the_first_screen_with_page_comparable_i
 async fn the_initial_cursor_anchors_past_non_displayable_own_rows() {
     let tmp = tempfile::TempDir::new().unwrap();
     let fixture = PageFixture::new(&tmp).await;
-    let sid = create_bound_fixture(
+    let sid = crate::host::requests::tests::create_bound_fixture(
         &fixture.cfg,
         tmp.path().to_str().unwrap(),
         Some("a15-system-identity-head"),
@@ -563,7 +601,7 @@ async fn the_initial_cursor_anchors_past_non_displayable_own_rows() {
 async fn an_all_non_displayable_own_region_reports_no_earlier_page() {
     let tmp = tempfile::TempDir::new().unwrap();
     let fixture = PageFixture::new(&tmp).await;
-    let sid = create_bound_fixture(
+    let sid = crate::host::requests::tests::create_bound_fixture(
         &fixture.cfg,
         tmp.path().to_str().unwrap(),
         Some("a15-system-only"),
@@ -594,7 +632,7 @@ async fn an_all_non_displayable_own_region_reports_no_earlier_page() {
 async fn the_fallback_anchor_keeps_an_archived_row_reachable() {
     let tmp = tempfile::TempDir::new().unwrap();
     let fixture = PageFixture::new(&tmp).await;
-    let sid = create_bound_fixture(
+    let sid = crate::host::requests::tests::create_bound_fixture(
         &fixture.cfg,
         tmp.path().to_str().unwrap(),
         Some("a15-fallback-anchor"),

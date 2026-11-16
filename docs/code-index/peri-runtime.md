@@ -25,7 +25,7 @@ crate 仅依赖 `peri-acp-types` 的跨层契约，不依赖具体 Agent 或上�
 | 销毁会话 | `src/runtime.rs` | `destroy` | 捕获登记，按停收、取消、join、超时 abort、persist、drain、移除顺序收尾；只移除捕获的登记，旧事件使用捕获的 clock；同一登记并发销毁等待并仅首次返回事件 |
 | 检查销毁失败与取消 | `src/runtime_test.rs` | `destroy_persist_failure_keeps_mapping`、`old_persist_failure_preserves_replacement`、`cancelled_destroy_can_be_retried` | 持久化失败不 drain 或移除，取消 future 释放串行化锁，重试仍可收尾 |
 | 检查刷新和旧事件竞态 | `src/runtime_test.rs` | `destroy_preserves_replacement_and_continues_shared_sequence`、`destroy_preserves_a_new_registration_of_the_same_handle`、`late_destroy_does_not_consume_a_fresh_registration_sequence`、`concurrent_destroy_drains_once` | 用可控 join 暂停复现替换、同句柄重新登记、删除后重新登记与并发销毁，无计时睡眠 |
-| 修改边界错误 | `src/error.rs` | `RuntimeError` | UnknownSession / SessionAlreadyRegistered / RunFailed / PersistFailed / SubmitFailed |
+| 修改边界错误 | `src/runtime_runtime_error.rs` | `RuntimeError` | UnknownSession / SessionAlreadyRegistered / RunFailed / PersistFailed / SubmitFailed |
 | 修改共享接口 | `peri-acp-types/src/runtime.rs` | `SessionHandle`、`UnstampedEvent` | 契约事实源；本 crate 从 `src/runtime.rs`、`src/lib.rs` re-export |
 
 ## 锁与生命周期

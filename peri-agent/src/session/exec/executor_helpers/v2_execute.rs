@@ -1,37 +1,46 @@
+use super::loop_terminal;
+#[cfg(test)]
+pub(crate) use super::loop_terminal::classify_loop_terminal;
+#[cfg(test)]
+use super::loop_terminal::log_loop_terminal;
 use crate::session::config::DEFAULT_AGENT_MAX_ITERATIONS;
+use std::fmt::{self, Debug, Formatter};
 
 use std::sync::Arc;
 
-use peri_acp_types::{
-    command::PromptStopReason,
-    error::AgentError,
-    event::{AgentEventHandler, EventPublisher, ExecutorEvent, TurnErrorKind, TurnStatus},
-    event_v2::EventHandles,
-    frozen::{ChildHandlerFactory, ThreadPersistence},
-    goal::GoalController,
-    identity::{EventDeliveryClass, SessionSeq},
-    messages::BaseMessage,
-    runtime::UnstampedEvent,
-    session::ExecutionFailure,
-    session_resources::SessionResources,
-    tasks::{BgTaskKind, TaskManager},
-};
+use peri_acp_types::command::PromptStopReason;
+
+use peri_acp_types::event::AgentEventHandler;
+use peri_acp_types::event::EventPublisher;
+use peri_acp_types::event::ExecutorEvent;
+
+use peri_acp_types::event_v2::EventHandles;
+use peri_acp_types::frozen::ChildHandlerFactory;
+use peri_acp_types::frozen::ThreadPersistence;
+use peri_acp_types::goal::GoalController;
+use peri_acp_types::identity::EventDeliveryClass;
+use peri_acp_types::identity::SessionSeq;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::runtime::UnstampedEvent;
+use peri_acp_types::session::ExecutionFailure;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::tasks::BgTaskKind;
+use peri_acp_types::tasks::TaskManager;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
-use crate::agent::{
-    async_tasks::TaskManager as AgentTaskManager,
-    react::AgentInput,
-    stages::{run_react_loop, LoopResult},
-    state::AgentState,
-};
+use crate::agent::async_tasks::TaskManager as AgentTaskManager;
+use crate::agent::react::AgentInput;
+
+use crate::agent::stages::LoopResult;
+use crate::agent::state::AgentState;
 use crate::session::exec::executor::FrozenSessionData;
 use crate::session::exec::stage_builder::{CachedLlmInstances, V2AgentOutput};
 use crate::session::memory_probe;
 use crate::session::user_input_mailbox::UserInputMailbox;
 use crate::session::MessageTranscript;
 
-use super::ExecOutcome;
+use crate::session::exec::executor_helpers::ExecOutcome;
 
 /// 发布 forwarder 收到的一条事件，并把交付事件的发布序号绑定到交付日志。
 ///
@@ -150,7 +159,7 @@ pub struct V2ExecuteRequest {
     >,
 }
 
-/// 通过注入的 stage 装配面构造 StageContext，再由 [`run_react_loop`] 驱动循环
+/// 通过注入的 stage 装配面构造 StageContext，再由 [`run_react_loop`](crate::agent::stages::run_react_loop) 驱动循环
 /// （P5 后的单一执行路径）。
 ///
 /// 关键设计：
@@ -559,7 +568,8 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             },
         );
     }
-    let loop_result = run_react_loop(v2_out.context, DEFAULT_AGENT_MAX_ITERATIONS).await;
+    let loop_result =
+        crate::agent::stages::run_react_loop(v2_out.context, DEFAULT_AGENT_MAX_ITERATIONS).await;
 
     // 终止错误也要让 active goal 有机会恢复：模型/流/compact/工具等失败结束
     // 当前 turn 后，GoalState 按恢复间隔重新投递 Required 消息；用户取消、
@@ -727,8 +737,8 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     let sampled_cancel = req.cancel.is_cancelled();
     let finalization_failed = persistence_failure.is_some() || forwarder_failure.is_some();
     let terminal = match persistence_failure.or(forwarder_failure) {
-        Some(failure) => internal_failure_terminal(failure),
-        None => classify_loop_terminal(&loop_result, sampled_cancel),
+        Some(failure) => loop_terminal::internal_failure_terminal(failure),
+        None => loop_terminal::classify_loop_terminal(&loop_result, sampled_cancel),
     };
     if let (Some(mailbox), Some(ticket)) = (&req.user_input_mailbox, &input_ticket) {
         use crate::session::user_input_mailbox::UserInputAttemptOutcome;
@@ -744,7 +754,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             mailbox.invalidate();
         }
     }
-    log_loop_terminal(
+    loop_terminal::log_loop_terminal(
         &req.session_id,
         &loop_turn_id,
         &loop_result,
@@ -814,146 +824,6 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     }
 }
 
-/// Phase 9 的单一终态分类结果。
-pub(crate) struct LoopTerminal {
-    pub(crate) ok: bool,
-    pub(crate) stop_reason: PromptStopReason,
-    pub(crate) failure: Option<ExecutionFailure>,
-    pub(crate) turn_status: TurnStatus,
-    pub(crate) turn_error_kind: Option<TurnErrorKind>,
-}
-
-fn internal_failure_terminal(failure: ExecutionFailure) -> LoopTerminal {
-    LoopTerminal {
-        ok: false,
-        stop_reason: PromptStopReason::EndTurn,
-        failure: Some(failure),
-        turn_status: TurnStatus::Error,
-        turn_error_kind: Some(TurnErrorKind::Internal),
-    }
-}
-
-/// Phase 9 纯分类器：一次同时决定 Prompt、Turn 和 fatal failure。
-///
-/// 分类契约（spec/history/2026-08.md 2026-08-18 条目 Commit 1）：
-/// - `Completed` / `HookStopped` / 用户 cancel / `Interrupted` /
-///   `MaxIterationsExceeded` → failure 为 `None`（它们已有标准 `StopReason`
-///   表达，不应升级为请求失败）；
-/// - 其他 `LoopResult::Error` → failure 为安全的窄投影：LLM 错误保留脱敏、
-///   限长后的原始含义和可选 HTTP status，其他错误使用安全用户文案。
-///
-/// `HookStopped` 只终止当前 run 的模型请求；主会话与 `Completed` 一样正常
-/// 结束（子 Agent 的交接语义在 runner 消费该结果后已经完成）。
-///
-/// fatal 判定与 `AgentExecutionFailed` 发射条件共享（fatal ↔ 发射私有事件），
-/// public message 由 [`ExecutionFailure::from_agent_error`] 统一生成。
-pub(crate) fn classify_loop_terminal(
-    loop_result: &LoopResult,
-    sampled_cancel: bool,
-) -> LoopTerminal {
-    if matches!(
-        loop_result,
-        LoopResult::Completed | LoopResult::HookStopped { .. }
-    ) {
-        return LoopTerminal {
-            ok: true,
-            stop_reason: PromptStopReason::EndTurn,
-            failure: None,
-            turn_status: TurnStatus::Done,
-            turn_error_kind: None,
-        };
-    }
-    if sampled_cancel
-        || matches!(
-            loop_result,
-            LoopResult::Interrupted | LoopResult::Error(AgentError::Interrupted)
-        )
-    {
-        return LoopTerminal {
-            ok: false,
-            stop_reason: PromptStopReason::Cancelled,
-            failure: None,
-            turn_status: TurnStatus::Interrupted,
-            turn_error_kind: Some(TurnErrorKind::Interrupted),
-        };
-    }
-    if matches!(
-        loop_result,
-        LoopResult::Error(AgentError::MaxIterationsExceeded(_))
-    ) {
-        return LoopTerminal {
-            ok: false,
-            stop_reason: PromptStopReason::MaxTurnRequests,
-            failure: None,
-            turn_status: TurnStatus::Error,
-            turn_error_kind: Some(TurnErrorKind::MaxIterations),
-        };
-    }
-    if matches!(
-        loop_result,
-        LoopResult::Error(AgentError::OutputTruncated { .. })
-    ) {
-        return LoopTerminal {
-            ok: false,
-            stop_reason: PromptStopReason::MaxTokens,
-            failure: None,
-            turn_status: TurnStatus::Error,
-            turn_error_kind: Some(TurnErrorKind::LlmFailure),
-        };
-    }
-    // `SettlementDue` 只应由 child loop 产生并由 child runner 消费；主 executor
-    // 若收到它，说明调用边界被混用。显式失败而不是 panic，也不伪装成正常结束。
-    if matches!(loop_result, LoopResult::SettlementDue { .. }) {
-        return internal_failure_terminal(ExecutionFailure::internal(
-            "child settlement result reached the main executor",
-        ));
-    }
-    let LoopResult::Error(error) = loop_result else {
-        unreachable!("Completed, HookStopped, Interrupted and classified errors were handled above")
-    };
-    LoopTerminal {
-        ok: false,
-        stop_reason: PromptStopReason::EndTurn,
-        failure: Some(ExecutionFailure::from_agent_error(error)),
-        turn_status: TurnStatus::Error,
-        turn_error_kind: Some(TurnErrorKind::LlmFailure),
-    }
-}
-
-fn log_loop_terminal(
-    session_id: &str,
-    turn_id: &str,
-    loop_result: &LoopResult,
-    terminal: &LoopTerminal,
-    finalization_failed: bool,
-) {
-    if let Some(failure) = &terminal.failure {
-        error!(
-            session_id = %session_id,
-            turn_id = %turn_id,
-            diagnostic_origin = "executor_terminal",
-            kind = failure.kind.wire_name(),
-            category = if finalization_failed { Some("execution_finalize") } else { match loop_result { LoopResult::Error(error) => Some(error.category_name()), _ => None } },
-            http_status = failure.http_status,
-            message = %failure.public_message,
-            loop_error_category = match loop_result { LoopResult::Error(error) => Some(error.category_name()), _ => None },
-            loop_error = ?match loop_result { LoopResult::Error(error) => Some(error.user_facing_message()), _ => None },
-            causes = ?match loop_result { LoopResult::Error(error) => error.cause_chain(), _ => Vec::new() },
-            diagnostic = ?failure.diagnostic,
-            "[v2] execution failed"
-        );
-    } else if let LoopResult::Error(error) = loop_result {
-        tracing::debug!(
-            session_id = %session_id,
-            turn_id = %turn_id,
-            stop_reason = ?terminal.stop_reason,
-            category = error.category_name(),
-            causes = ?error.cause_chain(),
-            "[v2] non-fatal loop termination"
-        );
-    }
-}
-
 #[cfg(test)]
 #[path = "terminal_diagnostic_test.rs"]
 mod diagnostic_tests;
@@ -961,3 +831,62 @@ mod diagnostic_tests;
 #[cfg(test)]
 #[path = "v2_execute_test.rs"]
 mod forwarder_tests;
+
+impl Debug for StageBuildRequest {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StageBuildRequest")
+            .field("cached_llm_present", &self.cached_llm.is_some())
+            .field("agent_overrides_present", &self.agent_overrides.is_some())
+            .field("preload_skills_len", &self.preload_skills.len())
+            .field(
+                "child_handler_factory_present",
+                &self.child_handler_factory.is_some(),
+            )
+            .field("auxiliary_model_present", &self.auxiliary_model.is_some())
+            .field("goal_controller_present", &self.goal_controller.is_some())
+            .field("task_manager_present", &self.task_manager.is_some())
+            .field("on_bg_complete_present", &self.on_bg_complete.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Debug for V2ExecuteRequest {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("V2ExecuteRequest")
+            .field("session_id", &self.session_id)
+            .field(
+                "user_input_mailbox_present",
+                &self.user_input_mailbox.is_some(),
+            )
+            .field(
+                "async_result_mailbox_present",
+                &self.async_result_mailbox.is_some(),
+            )
+            .field("cwd", &self.cwd)
+            .field(
+                "session_resources_present",
+                &self.session_resources.is_some(),
+            )
+            .field("thread_id_present", &self.thread_id.is_some())
+            .field("history_payloads_len", &self.history_payloads.len())
+            .field("cached_llm_present", &self.cached_llm.is_some())
+            .field("task_manager_present", &self.task_manager.is_some())
+            .field("continuation", &self.continuation)
+            .field("agent_overrides_present", &self.agent_overrides.is_some())
+            .field("preload_skills_len", &self.preload_skills.len())
+            .field(
+                "child_handler_factory_present",
+                &self.child_handler_factory.is_some(),
+            )
+            .field("auxiliary_model_present", &self.auxiliary_model.is_some())
+            .field("goal_controller_present", &self.goal_controller.is_some())
+            .field("on_bg_complete_present", &self.on_bg_complete.is_some())
+            .field(
+                "continuation_notify_present",
+                &self.continuation_notify.is_some(),
+            )
+            .finish_non_exhaustive()
+    }
+}

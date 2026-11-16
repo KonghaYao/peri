@@ -43,7 +43,8 @@ pub mod transcript;
 #[cfg(test)]
 #[path = "test_resources.rs"]
 pub(crate) mod test_resources;
-pub mod turn;
+pub mod turn_context;
+pub use turn_context as turn;
 pub mod user_input_mailbox;
 
 pub use config::{PermissionMode, SessionConfig, ThinkingConfig};
@@ -61,287 +62,23 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::agent::session::{cron_owner::CronOwner, inbox::SessionInbox};
+use crate::agent::session::cron_owner::CronOwner;
+use crate::agent::session::inbox::SessionInbox;
 use crate::thread::ThreadId;
 
-/// 异步 owner 容器（set-once，RwLock 保护）
-#[allow(dead_code)]
-pub struct AsyncOwners {
-    inbox: SessionInbox,
-    cron_owner: Option<CronOwner>,
-}
+pub use session::AsyncOwners;
 
-/// Session — 会话统一入口
-///
-/// 聚合五个核心实体，提供统一的创建和访问 API。
-/// 通过 `Arc<Self>` 共享，外部通过 `Session::new()` 创建。
-///
-/// 可选持有异步 owner（inbox / cron），用于直接桥接
-/// 异步事件到 executor 的 idle-wake 机制。
-pub struct Session {
-    /// 会话生命周期数据（不可变）
-    store: Arc<SessionStore>,
-    /// 对话笔录（只追加，RwLock 保护内部可变性）
-    transcript: Arc<RwLock<MessageTranscript>>,
-    /// 收件箱（独立于 Transcript，会话内持续可变）
-    queue: MessageQueue,
-    user_input_mailbox: RwLock<Option<Arc<user_input_mailbox::UserInputMailbox>>>,
-    /// 会话级后台结果处理责任 owner；跨 prompt 复用，由宿主装配注入。
-    async_result_mailbox: RwLock<Arc<async_result_mailbox::AsyncResultMailbox>>,
-    compact_exposure:
-        RwLock<Arc<parking_lot::Mutex<crate::agent::compact_v2::exposure::ExposureLedger>>>,
-    /// 可变配置（Arc 共享，外部写入，循环读取）
-    config: Arc<SessionConfig>,
-    /// 异步 owner 容器（set-once，RwLock 保护）。
-    /// None 表示未启用 async owner 路径（TUI polling 路径仍有效）。
-    /// Some(rwlock) 表示 v2 路径已启用，可后续通过 set_async_owners 注入。
-    async_owners: Option<parking_lot::RwLock<Option<AsyncOwners>>>,
-    /// 子 agent 运行时宿主（L3）：executor/builder 在主 session 创建后注入，
-    /// subagent 创建所需的运行时通道（thread_store / task_manager / bg 事件 /
-    /// register / deregister / langfuse / frozen local_md / frozen system_prompt）
-    /// 统一经此读取，SubAgentMiddleware 不再逐字段透传。
-    subagent_host: parking_lot::RwLock<Option<Arc<subagent::SubagentHost>>>,
-}
-
-impl Session {
-    /// 创建新 Session
-    ///
-    /// - `cwd`：工作目录
-    /// - `frozen`：会话级不可变上下文（System Prompt / CLAUDE.md / Skills）
-    /// - `thread_id`：关联的 Thread ID（可选，用于持久化）
-    pub fn new(cwd: Arc<str>, frozen: FrozenContext, thread_id: Option<ThreadId>) -> Arc<Self> {
-        let store = Arc::new(SessionStore::new(cwd, frozen, thread_id));
-        let transcript = Arc::new(RwLock::new(MessageTranscript::new()));
-        let queue = MessageQueue::new();
-        let config = Arc::new(SessionConfig::new());
-        Arc::new(Self {
-            store,
-            transcript,
-            queue,
-            user_input_mailbox: RwLock::new(None),
-            async_result_mailbox: RwLock::new(Arc::new(
-                async_result_mailbox::AsyncResultMailbox::default(),
-            )),
-            compact_exposure: RwLock::new(Arc::default()),
-            config,
-            async_owners: None,
-            subagent_host: parking_lot::RwLock::new(None),
-        })
-    }
-
-    /// 创建新 Session，复用外部 cancel token（v2 路径用）
-    ///
-    /// 与 [`Session::new`] 的差异仅在于 cancel_token：传入的 token 是
-    /// "linked clone"（`CancellationToken::clone()` 创建的关联 token），
-    /// 父 token 取消时本 Session 也能感知。
-    pub fn new_with_cancel(
-        cwd: Arc<str>,
-        frozen: FrozenContext,
-        thread_id: Option<ThreadId>,
-        cancel_token: Arc<tokio_util::sync::CancellationToken>,
-    ) -> Arc<Self> {
-        let store = Arc::new(SessionStore::new(cwd, frozen, thread_id));
-        let transcript = Arc::new(RwLock::new(MessageTranscript::new()));
-        let queue = MessageQueue::new();
-        let mut config = SessionConfig::new();
-        config.cancel_token = cancel_token;
-        let config = Arc::new(config);
-        Arc::new(Self {
-            store,
-            transcript,
-            queue,
-            user_input_mailbox: RwLock::new(None),
-            async_result_mailbox: RwLock::new(Arc::new(
-                async_result_mailbox::AsyncResultMailbox::default(),
-            )),
-            compact_exposure: RwLock::new(Arc::default()),
-            config,
-            async_owners: None,
-            subagent_host: parking_lot::RwLock::new(None),
-        })
-    }
-
-    /// 创建新 Session，复用外部 cancel token + 外部共享 MessageQueue（v2 路径用）
-    ///
-    /// 与 [`Session::new_with_cancel`] 的差异仅在于 queue：传入的 `queue`
-    /// 是会话级共享实例（通常由 ACP `AcpSession.v2_message_queue` 持有），
-    /// 让每个 turn 构造的 v2 Session 都指向**同一个**底层收件箱。
-    ///
-    /// **背景**：`MessageQueue` 内部用 `Arc<Mutex<VecDeque>> + Arc<Notify>` 实现，
-    /// `clone()` 共享底层数据。因此传入 `queue` 后，Session 内的 queue 与外部
-    /// 共享同一份消息流——SubAgent / Hook / GoalSteering 注入的 deferred / info
-    /// 消息可被 main agent 的 ReAct 循环看到。
-    ///
-    /// 不传时（即 [`Session::new_with_cancel`]）每 turn 新建 MessageQueue，
-    /// 跨 turn / 跨组件的消息互不可见。
-    pub fn new_with_cancel_and_queue(
-        cwd: Arc<str>,
-        frozen: FrozenContext,
-        thread_id: Option<ThreadId>,
-        cancel_token: Arc<tokio_util::sync::CancellationToken>,
-        queue: MessageQueue,
-    ) -> Arc<Self> {
-        let store = Arc::new(SessionStore::new(cwd, frozen, thread_id));
-        let transcript = Arc::new(RwLock::new(MessageTranscript::new()));
-        let mut config = SessionConfig::new();
-        config.cancel_token = cancel_token;
-        let config = Arc::new(config);
-        Arc::new(Self {
-            store,
-            transcript,
-            queue,
-            user_input_mailbox: RwLock::new(None),
-            async_result_mailbox: RwLock::new(Arc::new(
-                async_result_mailbox::AsyncResultMailbox::default(),
-            )),
-            compact_exposure: RwLock::new(Arc::default()),
-            config,
-            // v2 路径启用 async owner 容器（RwLock，允许后续 set_async_owners 注入）
-            async_owners: Some(parking_lot::RwLock::new(None)),
-            subagent_host: parking_lot::RwLock::new(None),
-        })
-    }
-
-    /// 会话生命周期数据（不可变）
-    pub fn store(&self) -> &SessionStore {
-        &self.store
-    }
-
-    /// 对话笔录（RwLock 保护）
-    pub fn transcript(&self) -> Arc<RwLock<MessageTranscript>> {
-        self.transcript.clone()
-    }
-
-    /// 收件箱
-    pub fn queue(&self) -> &MessageQueue {
-        &self.queue
-    }
-
-    pub fn set_user_input_mailbox(&self, mailbox: Arc<user_input_mailbox::UserInputMailbox>) {
-        *self.user_input_mailbox.write() = Some(mailbox);
-    }
-
-    /// 绑定会话级结果处理责任 owner（跨 prompt 复用）。
-    pub fn set_async_result_mailbox(&self, mailbox: Arc<async_result_mailbox::AsyncResultMailbox>) {
-        *self.async_result_mailbox.write() = mailbox;
-    }
-
-    /// 会话级结果处理责任 owner。
-    pub fn async_result_mailbox(&self) -> Arc<async_result_mailbox::AsyncResultMailbox> {
-        Arc::clone(&self.async_result_mailbox.read())
-    }
-
-    /// 会话运行期有界消费账本；冷创建不恢复旧执行证据。
-    pub fn compact_exposure(
-        &self,
-    ) -> Arc<parking_lot::Mutex<crate::agent::compact_v2::exposure::ExposureLedger>> {
-        Arc::clone(&self.compact_exposure.read())
-    }
-
-    pub(crate) fn set_compact_exposure(
-        &self,
-        ledger: Arc<parking_lot::Mutex<crate::agent::compact_v2::exposure::ExposureLedger>>,
-    ) {
-        *self.compact_exposure.write() = ledger;
-    }
-
-    /// 子 agent 运行时宿主（L3）。executor/builder 在主 session 创建后注入；
-    /// 未注入（测试/遗留路径）返回 None。
-    pub fn subagent_host(&self) -> Option<Arc<subagent::SubagentHost>> {
-        self.subagent_host.read().clone()
-    }
-
-    /// 注入子 agent 运行时宿主（L3）。
-    ///
-    /// set-once：重复注入仅记录 warn 并忽略（宿主随主 session 创建，每 turn 重建）。
-    pub fn set_subagent_host(&self, host: subagent::SubagentHost) {
-        let mut guard = self.subagent_host.write();
-        if guard.is_some() {
-            tracing::warn!("set_subagent_host: already set, ignoring duplicate call");
-            return;
-        }
-        *guard = Some(Arc::new(host));
-    }
-
-    /// 可变配置
-    pub fn config(&self) -> &SessionConfig {
-        &self.config
-    }
-
-    /// 启动新 turn — 创建 TurnContext
-    ///
-    /// 共享 cwd 和 cancel token，turn 内 step 从 0 开始。
-    pub fn start_turn(&self) -> TurnContext {
-        TurnContext::new(self.store.cwd.clone(), self.config.cancel_token.clone())
-    }
-
-    /// Session-level inbox（await-wake wrapper）。
-    ///
-    /// 返回 `None` 表示未启用 async owner 路径。
-    /// 启用后，ACP executor 的 `run_session_loop` 可在 idle 期间调用
-    /// `inbox.await_wake()` 阻塞直到新消息到达。
-    ///
-    /// 返回 `RwLockReadGuard`，调用者通过 guard 访问 `SessionInbox`。
-    /// guard drop 后释放读锁。
-    pub fn session_inbox_guard(
-        &self,
-    ) -> Option<parking_lot::RwLockReadGuard<'_, Option<AsyncOwners>>> {
-        self.async_owners.as_ref().map(|m| m.read())
-    }
-
-    /// Async owners 读守卫。
-    ///
-    /// 返回 `RwLockReadGuard<Option<AsyncOwners>>`，调用者可访问
-    /// `.inbox` / `.cron_owner`。
-    pub fn async_owners_guard(
-        &self,
-    ) -> Option<parking_lot::RwLockReadGuard<'_, Option<AsyncOwners>>> {
-        self.async_owners.as_ref().map(|m| m.read())
-    }
-
-    /// 注入异步 owner（SessionInbox + CronOwner）。
-    ///
-    /// 由 `peri-acp` 层在构建 v2 session 后调用，将 cron
-    /// 事件直接桥接到 inbox，绕过 TUI 轮询。
-    ///
-    /// 每个 owner 的 `start()` 方法在此调用前应已执行（background task 已 spawn）。
-    /// 此方法仅设置引用，不启动 background task。
-    ///
-    /// 传入 `None` 的 owner 表示该路径仍由 TUI 轮询处理。
-    ///
-    /// `inbox` 参数为 `Some` 时必须提供——它是 async owner 路径的核心。
-    /// 如果不需要 async owner 路径，不要调用此方法。
-    ///
-    /// Returns `true` if owners were set successfully, `false` if already set or
-    /// no `async_owners` cell was initialized.
-    pub fn set_async_owners(&self, inbox: SessionInbox, cron: Option<CronOwner>) -> bool {
-        if let Some(rwlock) = &self.async_owners {
-            let mut guard = rwlock.write();
-            if guard.is_some() {
-                tracing::warn!("set_async_owners: already set, ignoring duplicate call");
-                return false;
-            }
-            *guard = Some(AsyncOwners {
-                inbox,
-                cron_owner: cron,
-            });
-            true
-        } else {
-            false
-        }
-    }
-
-    /// 检查 async owner 是否已初始化。
-    pub fn has_async_owners(&self) -> bool {
-        self.async_owners
-            .as_ref()
-            .map(|m| m.read().is_some())
-            .unwrap_or(false)
-    }
-}
+pub use session::Session;
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;
+
+#[path = "session.rs"]
+#[expect(
+    clippy::module_inception,
+    reason = "The style guide keeps the facade declarative and names the implementation leaf after its primary type."
+)]
+mod session;

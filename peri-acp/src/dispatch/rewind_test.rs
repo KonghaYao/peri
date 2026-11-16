@@ -4,8 +4,6 @@ use std::path::Path;
 
 use peri_acp_types::messages::{BaseMessage, ContentBlock, ToolCallRequest};
 
-use super::rewind_preview;
-
 /// 跨平台绝对临时目录字符串（Windows 下 `/tmp` 不是绝对路径，
 /// rewind_preview 要求 session cwd 必须绝对）。
 fn temp_dir_str() -> String {
@@ -55,7 +53,7 @@ async fn test_preview_lists_file_changes_after_target() {
     let history = make_history_with_tools();
     let target_id = history[2].id().as_uuid().to_string(); // U2
 
-    let result = rewind_preview(
+    let result = super::rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
         &temp_dir_str(),
@@ -81,7 +79,7 @@ async fn test_preview_reverse_order_newest_first() {
     let history = make_history_with_tools();
     let target_id = history[0].id().as_uuid().to_string(); // U1
 
-    let result = rewind_preview(
+    let result = super::rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
         &temp_dir_str(),
@@ -108,7 +106,7 @@ async fn test_preview_reverse_order_newest_first() {
 async fn test_preview_target_not_found_returns_error() {
     let history = make_history_with_tools();
 
-    let result = rewind_preview(
+    let result = super::rewind_preview(
         &serde_json::json!({ "target_message_id": "nonexistent" }),
         &history,
         &temp_dir_str(),
@@ -127,7 +125,7 @@ async fn test_preview_no_file_changes_returns_empty_list() {
     ];
     let target_id = history[0].id().as_uuid().to_string();
 
-    let result = rewind_preview(
+    let result = super::rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
         &temp_dir_str(),
@@ -160,7 +158,7 @@ async fn test_preview_extracts_anthropic_tool_use() {
     ];
     let target_id = history[0].id().as_uuid().to_string();
 
-    let result = rewind_preview(
+    let result = super::rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
         &temp_dir_str(),
@@ -198,7 +196,7 @@ async fn test_preview_normalizes_inside_absolute_path_to_project_relative() {
         ),
     ];
     let target_id = history[0].id().as_uuid().to_string();
-    let result = rewind_preview(
+    let result = super::rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
         &temp_dir_join("project"),
@@ -228,7 +226,7 @@ async fn test_preview_rejects_path_outside_session_cwd() {
         ),
     ];
     let target_id = history[0].id().as_uuid().to_string();
-    let error = rewind_preview(
+    let error = super::rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
         &temp_dir_join("project"),

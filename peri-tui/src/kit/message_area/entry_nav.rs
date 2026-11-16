@@ -1,5 +1,5 @@
 use super::scroll::GesturePending;
-use crate::kit::atoms::{FOCUSED_ENTRY, FocusedEntry, SELECTED_SUBAGENT_ID, ViewModelsSnapshot};
+
 use crate::kit::tui_render_unit::{
     FoldKey, FoldState, InteractionKind, TuiAskUserBlock, TuiRenderUnit,
 };
@@ -252,13 +252,16 @@ pub(crate) fn submit_interaction_option_with(
 /// `json!("")`）。question IDs 来自 durable block，不读取 active interaction。
 pub(crate) fn build_inline_answers(question_ids: &[String], label: &str) -> serde_json::Value {
     let mut map = serde_json::Map::new();
-    for (i, id) in question_ids.iter().enumerate() {
-        let val = if i == 0 && !label.is_empty() {
-            serde_json::json!(label)
-        } else {
-            serde_json::json!("")
-        };
-        map.insert(id.clone(), val);
+    {
+        let iteration_items = question_ids.iter().enumerate();
+        for (i, id) in iteration_items {
+            let val = if i == 0 && !label.is_empty() {
+                serde_json::json!(label)
+            } else {
+                serde_json::json!("")
+            };
+            map.insert(id.clone(), val);
+        }
     }
     serde_json::Value::Object(map)
 }
@@ -311,3 +314,11 @@ pub(super) fn apply_fold_toggle(
     snapshot.generation = snapshot.generation.wrapping_add(1);
     EventResult::Consumed
 }
+
+use crate::kit::atoms::FOCUSED_ENTRY;
+
+use crate::kit::atoms::FocusedEntry;
+
+use crate::kit::atoms::SELECTED_SUBAGENT_ID;
+
+use crate::kit::atoms::ViewModelsSnapshot;

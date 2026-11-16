@@ -1,7 +1,8 @@
-use super::*;
-use crate::kit::atoms::{BG_LIVE_DETAIL, BG_TASK_IDENTITY, BgTaskIdentity};
-use crate::kit::bg_task_live::{append_bg_text_chunk, init_agent_live_detail};
-use crate::kit::stream_data::TuiTextChunk;
+use super::PublicationIntent;
+use super::PublicationScheduler;
+use super::SessionPhase;
+use super::atoms;
+
 use crate::kit::tui_render_unit::TuiRenderUnit;
 
 struct Fixture;
@@ -15,7 +16,7 @@ impl Fixture {
                 ..Default::default()
             },
         );
-        init_agent_live_detail(
+        crate::kit::bg_task_live::init_agent_live_detail(
             "scheduler-bg-test",
             "scheduler-bg-agent",
             "coder",
@@ -25,7 +26,7 @@ impl Fixture {
     }
 
     fn append(&self, text: &str) {
-        append_bg_text_chunk(
+        crate::kit::bg_task_live::append_bg_text_chunk(
             "scheduler-bg-agent",
             &TuiTextChunk {
                 text: text.into(),
@@ -54,7 +55,7 @@ fn background_deadline_does_not_slide_or_publish_hidden_main_turn() {
     let now = peri_time::monotonic_now();
     fixture.append("first");
     scheduler.accept_at(PublicationIntent::Hidden, &mut state, now);
-    let deadline = scheduler.bg_pending_deadline.unwrap();
+    let deadline = scheduler.bg_pending_deadline.expect("background deadline does not slide or publish hidden main turn: the fixture establishes scheduler.bg_pending_deadline before this assertion");
     fixture.append(" second");
     scheduler.accept_at(
         PublicationIntent::None,
@@ -82,7 +83,7 @@ fn invalidated_background_timer_cannot_republish_removed_session_detail() {
     let now = peri_time::monotonic_now();
     fixture.append("old session output");
     scheduler.accept_at(PublicationIntent::None, &mut state, now);
-    let deadline = scheduler.bg_pending_deadline.unwrap();
+    let deadline = scheduler.bg_pending_deadline.expect("invalidated background timer cannot republish removed session detail: the fixture establishes scheduler.bg_pending_deadline before this assertion");
     BG_LIVE_DETAIL.state().write().remove("scheduler-bg-test");
     scheduler.invalidate();
     assert!(!scheduler.fire_at(&mut state, deadline));
@@ -107,7 +108,7 @@ fn same_session_reset_rearms_preserved_stream_without_another_event() {
     scheduler.invalidate();
     assert!(scheduler.next_deadline().is_none());
     scheduler.schedule_background_at(now);
-    let deadline = scheduler.bg_pending_deadline.unwrap();
+    let deadline = scheduler.bg_pending_deadline.expect("same session reset rearms preserved stream without another event: the fixture establishes scheduler.bg_pending_deadline before this assertion");
     assert!(scheduler.fire_at(&mut state, deadline));
     assert!(
         matches!(&BG_LIVE_DETAIL.state().read()["scheduler-bg-test"].nested_units[0],
@@ -127,7 +128,7 @@ fn receiver_close_flushes_preserved_background_stream_even_when_reset_is_pending
     fixture.append("final background output");
     scheduler.accept(PublicationIntent::None, &mut state);
     let mut last_reset = atoms::BRIDGE_RESET_COUNTER.get().wrapping_sub(1);
-    flush_on_receiver_close(&mut state, &mut scheduler, &mut last_reset);
+    super::flush_on_receiver_close(&mut state, &mut scheduler, &mut last_reset);
     assert!(
         matches!(&BG_LIVE_DETAIL.state().read()["scheduler-bg-test"].nested_units[0],
         TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.text == "final background output")
@@ -135,3 +136,11 @@ fn receiver_close_flushes_preserved_background_stream_even_when_reset_is_pending
     *atoms::VIEW_MODELS.state().write() = saved_view;
     *atoms::ACP_STATE.state().write() = saved_acp;
 }
+
+use crate::kit::atoms::BG_LIVE_DETAIL;
+
+use crate::kit::atoms::BG_TASK_IDENTITY;
+
+use crate::kit::atoms::BgTaskIdentity;
+
+use crate::kit::stream_data::TuiTextChunk;

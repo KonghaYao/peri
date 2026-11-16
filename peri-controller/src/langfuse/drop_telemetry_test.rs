@@ -1,4 +1,7 @@
-use super::*;
+use crate::langfuse::drop_telemetry::LangfuseDropReason;
+use crate::langfuse::drop_telemetry::LangfuseDropRegistry;
+use crate::langfuse::drop_telemetry::LangfuseEventKind;
+use langfuse_client::LangfuseError;
 
 #[test]
 fn test_registry_records_only_safe_drop_dimensions() {

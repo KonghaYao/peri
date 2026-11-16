@@ -6,14 +6,22 @@ use peri_acp_types::session_resources::SessionResourceErrorKind;
 use turso_serverless::Value;
 
 use super::mutation::StoreAccess;
-use super::schema::{
-    acceptance, decode_identity, identity_read_plan, initialization_plan, shape_probe,
-    SchemaAcceptance, ShapeProbe, StoreId, StoreIdentityRead, StoreShapeRead, StoreSnapshot,
-    LEGACY_CURRENT_STORE_CONTRACT, META_INSERT_INDEX, OLDER_CURRENT_STORE_CONTRACT,
-    OLDEST_CURRENT_STORE_CONTRACT, PREVIOUS_CURRENT_STORE_CONTRACT, PREVIOUS_STORE_CONTRACT,
-    REMOTE_SCHEMA_VERSION, STORE_CONTRACT, STORE_META_TABLE,
-};
-use super::session_data::{open_step, OpenStep};
+use super::schema::SchemaAcceptance;
+use super::schema::ShapeProbe;
+use super::schema::StoreId;
+use super::schema::StoreIdentityRead;
+use super::schema::StoreShapeRead;
+use super::schema::StoreSnapshot;
+use super::schema::LEGACY_CURRENT_STORE_CONTRACT;
+use super::schema::META_INSERT_INDEX;
+use super::schema::OLDER_CURRENT_STORE_CONTRACT;
+use super::schema::OLDEST_CURRENT_STORE_CONTRACT;
+use super::schema::PREVIOUS_CURRENT_STORE_CONTRACT;
+use super::schema::PREVIOUS_STORE_CONTRACT;
+use super::schema::REMOTE_SCHEMA_VERSION;
+use super::schema::STORE_CONTRACT;
+use super::schema::STORE_META_TABLE;
+use super::session_data::OpenStep;
 use super::sql::StatementSpec;
 use crate::sessions::schema_shape::{self, ActualColumn};
 
@@ -56,7 +64,7 @@ fn declared_shape_map() -> HashMap<String, Vec<ActualColumn>> {
 
 #[test]
 fn identity_read_plan_is_read_only() {
-    let plan = identity_read_plan();
+    let plan = super::schema::identity_read_plan();
     assert_eq!(plan.len(), 2);
     for spec in &plan {
         assert!(
@@ -73,11 +81,14 @@ fn identity_read_plan_is_read_only() {
 
 #[test]
 fn acceptance_rejects_unknown_versions() {
-    assert_eq!(acceptance(REMOTE_SCHEMA_VERSION), SchemaAcceptance::Accept);
+    assert_eq!(
+        super::schema::acceptance(REMOTE_SCHEMA_VERSION),
+        SchemaAcceptance::Accept
+    );
     // 10..=14 都是可升级来源（搬运 / 增量补齐 / v15 清理）。
     for version in 10..=14 {
         assert_eq!(
-            acceptance(version),
+            super::schema::acceptance(version),
             SchemaAcceptance::Upgradeable,
             "版本 {version} 是已识别的升级来源"
         );
@@ -85,14 +96,14 @@ fn acceptance_rejects_unknown_versions() {
     // 未发布的中间代（16..19）：都是「比本构建新」，不迁移也不降级写入。
     for version in 16..=19 {
         assert_eq!(
-            acceptance(version),
+            super::schema::acceptance(version),
             SchemaAcceptance::TooNew,
             "版本 {version} 是未发布的中间代"
         );
     }
-    assert_eq!(acceptance(9), SchemaAcceptance::Unusable);
-    assert_eq!(acceptance(0), SchemaAcceptance::Unusable);
-    assert_eq!(acceptance(-1), SchemaAcceptance::Unusable);
+    assert_eq!(super::schema::acceptance(9), SchemaAcceptance::Unusable);
+    assert_eq!(super::schema::acceptance(0), SchemaAcceptance::Unusable);
+    assert_eq!(super::schema::acceptance(-1), SchemaAcceptance::Unusable);
 }
 
 /// 读取面只有六个代数：本代（`v9` + 15）、上一代当前形状（`v8` + 14）、再上一代（`v7` + 13）、
@@ -166,7 +177,7 @@ fn open_step_refuses_unreadable_stores() {
     ] {
         let read = StoreIdentityRead::Present(snapshot(version, contract));
         for access in [StoreAccess::ReadOnly, StoreAccess::ReadWrite] {
-            let error = open_step(read.clone(), None, access).unwrap_err();
+            let error = super::session_data::open_step(read.clone(), None, access).unwrap_err();
             assert!(
                 matches!(error.kind(), SessionResourceErrorKind::Unsupported),
                 "({version}, {contract}, {access:?}) 必须被拒绝"
@@ -179,32 +190,32 @@ fn open_step_refuses_unreadable_stores() {
 #[test]
 fn shape_probe_follows_the_readable_surface() {
     assert_eq!(
-        shape_probe(&snapshot(REMOTE_SCHEMA_VERSION, STORE_CONTRACT)),
+        super::schema::shape_probe(&snapshot(REMOTE_SCHEMA_VERSION, STORE_CONTRACT)),
         Some(ShapeProbe::Current)
     );
     assert_eq!(
-        shape_probe(&snapshot(14, PREVIOUS_CURRENT_STORE_CONTRACT)),
+        super::schema::shape_probe(&snapshot(14, PREVIOUS_CURRENT_STORE_CONTRACT)),
         Some(ShapeProbe::PreviousCurrent),
         "上一代当前形状含三列与两表，按 v14 的冻结声明探测"
     );
     assert_eq!(
-        shape_probe(&snapshot(13, LEGACY_CURRENT_STORE_CONTRACT)),
+        super::schema::shape_probe(&snapshot(13, LEGACY_CURRENT_STORE_CONTRACT)),
         Some(ShapeProbe::PreviousCurrent),
         "再上一代当前形状缺两列工作快照，退让到 v13 的冻结声明"
     );
     assert_eq!(
-        shape_probe(&snapshot(12, OLDER_CURRENT_STORE_CONTRACT)),
+        super::schema::shape_probe(&snapshot(12, OLDER_CURRENT_STORE_CONTRACT)),
         Some(ShapeProbe::PreviousCurrent),
         "schema 12 缺 thread_mq 与两列，退让到 v12 的冻结声明"
     );
     assert_eq!(
-        shape_probe(&snapshot(11, OLDEST_CURRENT_STORE_CONTRACT)),
+        super::schema::shape_probe(&snapshot(11, OLDEST_CURRENT_STORE_CONTRACT)),
         Some(ShapeProbe::PreviousCurrent),
         "schema 11 缺派生索引表、thread_mq 与两列，仍按 v12 声明探测（派生表可选）"
     );
     for version in [10, 11] {
         assert_eq!(
-            shape_probe(&snapshot(version, PREVIOUS_STORE_CONTRACT)),
+            super::schema::shape_probe(&snapshot(version, PREVIOUS_STORE_CONTRACT)),
             Some(ShapeProbe::Input),
             "版本 {version} 的 v2 库按迁移输入形状探测"
         );
@@ -221,7 +232,7 @@ fn shape_probe_follows_the_readable_surface() {
         (11, "peri.session.store/v4"),
     ] {
         assert_eq!(
-            shape_probe(&snapshot(version, contract)),
+            super::schema::shape_probe(&snapshot(version, contract)),
             None,
             "({version}, {contract}) 不在读取面内，没有可探的形状"
         );
@@ -288,7 +299,7 @@ fn open_step_requires_a_matching_shape_before_serving() {
     let build = snapshot(REMOTE_SCHEMA_VERSION, STORE_CONTRACT);
     let read = StoreIdentityRead::Present(build.clone());
     assert_eq!(
-        open_step(
+        super::session_data::open_step(
             read.clone(),
             Some(StoreShapeRead::Consistent),
             StoreAccess::ReadWrite
@@ -300,14 +311,15 @@ fn open_step_requires_a_matching_shape_before_serving() {
     // 漂移：拒绝（分类仍是「不认识的 store schema」），诊断在日志里。
     let drifted = StoreShapeRead::Drifted("table threads column sequence drifted".to_owned());
     for access in [StoreAccess::ReadOnly, StoreAccess::ReadWrite] {
-        let error = open_step(read.clone(), Some(drifted.clone()), access).unwrap_err();
+        let error = super::session_data::open_step(read.clone(), Some(drifted.clone()), access)
+            .unwrap_err();
         assert!(matches!(
             error.kind(),
             SessionResourceErrorKind::Unsupported
         ));
     }
     // 读得动却没探过形状：内部矛盾，同样不放行。
-    let error = open_step(read, None, StoreAccess::ReadWrite).unwrap_err();
+    let error = super::session_data::open_step(read, None, StoreAccess::ReadWrite).unwrap_err();
     assert!(matches!(
         error.kind(),
         SessionResourceErrorKind::Internal { .. }
@@ -316,7 +328,7 @@ fn open_step_requires_a_matching_shape_before_serving() {
     // 会话表还没建立：写打开照旧补齐（本代幂等 DDL / v2 的空库分支），只读打开拒绝。
     let unbuilt = StoreIdentityRead::Present(snapshot(REMOTE_SCHEMA_VERSION, STORE_CONTRACT));
     assert!(matches!(
-        open_step(
+        super::session_data::open_step(
             unbuilt.clone(),
             Some(StoreShapeRead::Unbuilt),
             StoreAccess::ReadWrite
@@ -324,7 +336,7 @@ fn open_step_requires_a_matching_shape_before_serving() {
         .unwrap(),
         OpenStep::Existing(_)
     ));
-    let error = open_step(
+    let error = super::session_data::open_step(
         unbuilt,
         Some(StoreShapeRead::Unbuilt),
         StoreAccess::ReadOnly,
@@ -338,7 +350,7 @@ fn open_step_requires_a_matching_shape_before_serving() {
     // 统一前的形状：只读服务、写打开先升级——两者都必须形状相符。
     let previous = StoreIdentityRead::Present(snapshot(10, PREVIOUS_STORE_CONTRACT));
     assert!(matches!(
-        open_step(
+        super::session_data::open_step(
             previous.clone(),
             Some(StoreShapeRead::Consistent),
             StoreAccess::ReadWrite
@@ -347,7 +359,7 @@ fn open_step_requires_a_matching_shape_before_serving() {
         OpenStep::Upgrade(_)
     ));
     assert!(matches!(
-        open_step(
+        super::session_data::open_step(
             previous.clone(),
             Some(StoreShapeRead::Consistent),
             StoreAccess::ReadOnly
@@ -356,7 +368,8 @@ fn open_step_requires_a_matching_shape_before_serving() {
         OpenStep::Existing(_)
     ));
     for access in [StoreAccess::ReadOnly, StoreAccess::ReadWrite] {
-        let error = open_step(previous.clone(), Some(drifted.clone()), access).unwrap_err();
+        let error = super::session_data::open_step(previous.clone(), Some(drifted.clone()), access)
+            .unwrap_err();
         assert!(
             matches!(error.kind(), SessionResourceErrorKind::Unsupported),
             "v2 库的形状漂移同样拒绝（{access:?}）"
@@ -364,7 +377,7 @@ fn open_step_requires_a_matching_shape_before_serving() {
     }
     // v2 的空库：写打开走升级（空库分支直接建当前形状），只读打开没有可读的事实。
     assert!(matches!(
-        open_step(
+        super::session_data::open_step(
             previous.clone(),
             Some(StoreShapeRead::Unbuilt),
             StoreAccess::ReadWrite
@@ -372,7 +385,7 @@ fn open_step_requires_a_matching_shape_before_serving() {
         .unwrap(),
         OpenStep::Upgrade(_)
     ));
-    let error = open_step(
+    let error = super::session_data::open_step(
         previous,
         Some(StoreShapeRead::Unbuilt),
         StoreAccess::ReadOnly,
@@ -410,7 +423,7 @@ fn snapshot_must_match_contract_and_version() {
 #[test]
 fn initialization_plan_parameterizes_identity_and_never_overwrites() {
     let store_id = StoreId::mint();
-    let plan = initialization_plan(&store_id, "2026-09-26T00:00:00+00:00");
+    let plan = super::schema::initialization_plan(&store_id, "2026-09-26T00:00:00+00:00");
     assert_eq!(plan.len(), 4);
 
     // 建表只用 IF NOT EXISTS：已存在即 no-op，绝不改写既有形状。
@@ -451,7 +464,7 @@ fn minted_store_ids_are_opaque_hex_and_unique() {
 
 #[test]
 fn identity_decoding_rejects_shapes_it_cannot_explain() {
-    let ok = decode_identity(&[
+    let ok = super::schema::decode_identity(&[
         Value::Integer(REMOTE_SCHEMA_VERSION),
         text("store-abc"),
         text(STORE_CONTRACT),
@@ -461,10 +474,13 @@ fn identity_decoding_rejects_shapes_it_cannot_explain() {
     assert!(ok.matches_build());
 
     // 列缺失、类型不符、空行：一律拒绝，不猜。
-    assert!(decode_identity(&[Value::Integer(1), text("s")]).is_none());
-    assert!(decode_identity(&[Value::Real(1.0), text("s"), text(STORE_CONTRACT)]).is_none());
-    assert!(decode_identity(&[Value::Null, Value::Null, Value::Null]).is_none());
-    assert!(decode_identity(&[]).is_none());
+    assert!(super::schema::decode_identity(&[Value::Integer(1), text("s")]).is_none());
+    assert!(
+        super::schema::decode_identity(&[Value::Real(1.0), text("s"), text(STORE_CONTRACT)])
+            .is_none()
+    );
+    assert!(super::schema::decode_identity(&[Value::Null, Value::Null, Value::Null]).is_none());
+    assert!(super::schema::decode_identity(&[]).is_none());
 }
 
 #[test]
@@ -472,7 +488,8 @@ fn current_remote_shape_uses_only_declared_tables_and_read_only_pragmas() {
     let tables = super::schema::CURRENT_TABLE_PRAGMAS;
     let declared = crate::sessions::schema_shape::current_tables();
     assert_eq!(tables.len(), declared.len());
-    for ((name, sql), shape) in tables.iter().zip(declared) {
+    let paired_entries = tables.iter().zip(declared);
+    for ((name, sql), shape) in paired_entries {
         assert_eq!(*name, shape.name);
         assert_eq!(*sql, format!("PRAGMA table_xinfo('{name}')"));
     }

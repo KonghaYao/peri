@@ -10,14 +10,16 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::application::operations::{CompletionGate, OperationScope, OperationTicket};
 use crate::i18n;
-use crate::kit::atoms::{
-    ACP_CLIENT_HANDLE, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, SELECTED_SUBAGENT_ID,
-};
-use crate::kit::history_paging::{
-    HistoryBodyRequest, WindowBodyDescriptor, WindowDirection, WindowOpenRequest, WindowPageCursor,
-    WindowPageRequest, WindowPageResponse, WindowRequest, WindowRequestAnchor,
-    decode_window_page_response,
-};
+
+use crate::kit::history_paging::HistoryBodyRequest;
+use crate::kit::history_paging::WindowBodyDescriptor;
+use crate::kit::history_paging::WindowDirection;
+use crate::kit::history_paging::WindowOpenRequest;
+use crate::kit::history_paging::WindowPageCursor;
+use crate::kit::history_paging::WindowPageRequest;
+use crate::kit::history_paging::WindowPageResponse;
+use crate::kit::history_paging::WindowRequest;
+use crate::kit::history_paging::WindowRequestAnchor;
 use crate::kit::history_window::{HistorySource, WindowIdentity};
 
 const PAGE_ITEMS: u16 = 20;
@@ -320,7 +322,7 @@ impl ChildHistoryView {
             };
             match request {
                 Request::Page(request) => {
-                    let response = decode_window_page_response(&raw)
+                    let response = crate::kit::history_paging::decode_window_page_response(&raw)
                         .ok_or_else(|| i18n::tr("subagent-history-invalid-response"))?;
                     let prefix = format!("{}:", ticket.scope().child);
                     if response.session_id != ticket.scope().child
@@ -432,21 +434,24 @@ impl ChildHistoryView {
             );
             return (lines, body.text.clone());
         } else if let Some(page) = &self.page {
-            for (index, body) in page.bodies.iter().enumerate() {
-                let marker = if index == page.selected_body {
-                    ">"
-                } else {
-                    " "
-                };
-                wrap(
-                    &format!(
-                        "{marker} {}: {}",
-                        i18n::tr("subagent-history-large-entry"),
-                        body.entry_id
-                    ),
-                    width,
-                    &mut lines,
-                );
+            {
+                let iteration_items = page.bodies.iter().enumerate();
+                for (index, body) in iteration_items {
+                    let marker = if index == page.selected_body {
+                        ">"
+                    } else {
+                        " "
+                    };
+                    wrap(
+                        &format!(
+                            "{marker} {}: {}",
+                            i18n::tr("subagent-history-large-entry"),
+                            body.entry_id
+                        ),
+                        width,
+                        &mut lines,
+                    );
+                }
             }
             if page.text.is_empty() && page.bodies.is_empty() {
                 wrap(&i18n::tr("subagent-history-empty-page"), width, &mut lines);
@@ -585,14 +590,17 @@ fn wrap(text: &str, width: usize, lines: &mut Vec<Line<'static>>) {
     for input in text.split('\n') {
         let mut output = String::new();
         let mut columns = 0;
-        for ch in input.chars().filter(|ch| !ch.is_control()) {
-            let count = ch.width().unwrap_or(0);
-            if columns + count > width && !output.is_empty() {
-                lines.push(Line::from(std::mem::take(&mut output)));
-                columns = 0;
+        {
+            let iteration_items = input.chars().filter(|ch| !ch.is_control());
+            for ch in iteration_items {
+                let count = ch.width().unwrap_or(0);
+                if columns + count > width && !output.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut output)));
+                    columns = 0;
+                }
+                output.push(ch);
+                columns += count;
             }
-            output.push(ch);
-            columns += count;
         }
         lines.push(Line::from(output));
     }
@@ -639,3 +647,11 @@ pub(super) fn request(view: State<ChildHistoryView>, action: Action) {
 #[cfg(test)]
 #[path = "child_history_detail_test.rs"]
 mod tests;
+
+use crate::kit::atoms::ACP_CLIENT_HANDLE;
+
+use crate::kit::atoms::ACTIVE_SESSION_ID;
+
+use crate::kit::atoms::BRIDGE_RESET_COUNTER;
+
+use crate::kit::atoms::SELECTED_SUBAGENT_ID;

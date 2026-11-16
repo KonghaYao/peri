@@ -1,4 +1,18 @@
-use super::*;
+use crate::host::executor_flow_tests::MockEventSink;
+use crate::host::mcp_v4_wave2::BuiltinHostFixture;
+use crate::host::mcp_v4_wave2::FixtureDirs;
+use crate::host::mcp_v4_wave2::WAVE2_INSTANCES;
+use crate::host::mcp_v4_wire_fixture::WireScriptedModel;
+use peri_acp_types::session::ExecutionFailureKind;
+use peri_middlewares::assembly::BuiltinContextError;
+use peri_middlewares::assembly::BuiltinInstanceContext;
+use peri_middlewares::assembly::CronInstanceInput;
+use peri_middlewares::assembly::WorkflowInstanceInput;
+use peri_middlewares::mcp::McpClientPool;
+use peri_middlewares::mcp::McpInitStatus;
+use peri_middlewares::mcp::McpTaskOwner;
+use serial_test::serial;
+use std::sync::Arc;
 
 // ── 用例 4：ready 闸门矩阵（§8 第 2 行 / R19 / A33 / IF-M3）────────────────────
 
@@ -32,7 +46,7 @@ async fn wave2_ready_gate_matrix() {
     // 注册表声明与本用例的内联期望必须一致（否则下面断言的是用例的臆想而非契约）。
     for (instance, expected) in WAVE2_INSTANCES {
         assert_eq!(
-            declared_tool_names(instance).as_slice(),
+            crate::host::mcp_v4_wave2::declared_tool_names(instance).as_slice(),
             expected,
             "{instance} 的注册表工具声明变了：WAVE2_INSTANCES 必须同步（本用例按下标断言工具面）"
         );
@@ -42,27 +56,29 @@ async fn wave2_ready_gate_matrix() {
     let dirs = FixtureDirs::new();
     let fixture = BuiltinHostFixture::start(dirs, false).await;
     for (instance, expected) in WAVE2_INSTANCES {
-        assert_instance_ready(&fixture.pool, instance, expected);
+        crate::host::mcp_v4_wave2::assert_instance_ready(&fixture.pool, instance, expected);
     }
 
     // 1R 投影：句柄面之外再证「ready 事实已进入首个 LLM 请求的工具面」。
-    let faces = probe_tool_faces(
+    let faces = crate::host::mcp_v4_wave2::probe_tool_faces(
         "ready 矩阵（四实例）",
         fixture.session_context("mcp-v4-wave2-ready").await,
         "cron web fetch artifact",
     )
     .await;
-    for name in declared_direct_effective_names("web")
+    let combined_name = crate::host::mcp_v4_wave2::declared_direct_effective_names("web")
         .into_iter()
-        .chain(declared_direct_effective_names("artifact"))
-    {
+        .chain(crate::host::mcp_v4_wave2::declared_direct_effective_names(
+            "artifact",
+        ));
+    for name in combined_name {
         assert!(
             faces.direct.iter().any(|tool| tool == name),
             "wave 1 的 direct effective name `{name}` 必须在首个请求的直连参数内: {:?}",
             faces.direct
         );
     }
-    for name in declared_model_visible_effective_names("cron") {
+    for name in crate::host::mcp_v4_wave2::declared_model_visible_effective_names("cron") {
         assert!(
             faces.searched.iter().any(|tool| tool == name),
             "cron 在 1R 前 ready ⇒ `{name}` 必须落在搜索面: {:?}",
@@ -95,17 +111,17 @@ async fn wave2_ready_gate_matrix() {
         let fixture = BuiltinHostFixture::start_with_context(dirs, context).await;
 
         // ① 故障实例：ready 面五行全否。
-        assert_no_ready_evidence(&fixture.pool, fault, "缺少上下文输入");
+        crate::host::mcp_v4_wave2::assert_no_ready_evidence(&fixture.pool, fault, "缺少上下文输入");
         // ② 其它实例不受牵连（一个实例装配失败不污染同 pool 的其它实例）。
         for (instance, expected) in WAVE2_INSTANCES {
             if instance != fault {
-                assert_instance_ready(&fixture.pool, instance, expected);
+                crate::host::mcp_v4_wave2::assert_instance_ready(&fixture.pool, instance, expected);
             }
         }
         // ③ fatal：system 闸门在**首个** LLM 请求之前阻塞。
         let sink = Arc::new(MockEventSink::new());
         let model = Arc::new(WireScriptedModel::new(Vec::new()));
-        let result = run_wire_prompt(
+        let result = crate::host::mcp_v4_wire_fixture::run_wire_prompt(
             fixture
                 .session_context(&format!("mcp-v4-wave2-ready-fault-{fault}"))
                 .await,
@@ -246,7 +262,7 @@ async fn context_injected_before_initialize_and_rejects_duplicate() {
         "首个上下文生效 ⇒ {expected_ready} 个实例必须全部 ready（第二份上下文若被静默接受，cron 会以 InstanceInputMissing 失败）: {status:?}"
     );
     for (instance, expected) in WAVE2_INSTANCES {
-        assert_instance_ready(&pool, instance, expected);
+        crate::host::mcp_v4_wave2::assert_instance_ready(&pool, instance, expected);
     }
 
     // ④ 封口**之后**的再注入：typed `InitializationStarted`（封口优先于「已有上下文」）。
@@ -261,7 +277,7 @@ async fn context_injected_before_initialize_and_rejects_duplicate() {
     );
     // 被拒的注入不改变任何事实：四个实例仍 ready、工具面不变。
     for (instance, expected) in WAVE2_INSTANCES {
-        assert_instance_ready(&pool, instance, expected);
+        crate::host::mcp_v4_wave2::assert_instance_ready(&pool, instance, expected);
     }
     println!(
         "[W2 context] inject_seq=1（封口前）→ duplicate_err={duplicate_err:?} → initialize_seq=2（Ready {expected_ready}/{expected_ready}）→ 封口后再注入={late_err:?}；ready 面不受被拒注入影响"
@@ -307,7 +323,7 @@ async fn context_injected_before_initialize_and_rejects_duplicate() {
         "失败原因必须是 typed `ContextMissing` 文本（不 fallback 到别的传输形态）: {failed_text}"
     );
     for (instance, _) in WAVE2_INSTANCES {
-        assert_no_ready_evidence(&pool, instance, "上下文未注入");
+        crate::host::mcp_v4_wave2::assert_no_ready_evidence(&pool, instance, "上下文未注入");
     }
     // 晚注入（**首次**注入，但封口已置真）⇒ typed 拒绝，且不救活任何实例。
     let late_cwd = late_dirs.workspace_str();
@@ -329,7 +345,7 @@ async fn context_injected_before_initialize_and_rejects_duplicate() {
         "晚于 `run_initialize` 的**首次**注入必须是 typed 拒绝（否则会出现「上下文在，但实例按旧上下文建」的假象）"
     );
     for (instance, _) in WAVE2_INSTANCES {
-        assert_no_ready_evidence(&pool, instance, "上下文未注入");
+        crate::host::mcp_v4_wave2::assert_no_ready_evidence(&pool, instance, "上下文未注入");
     }
     println!(
         "[W2 context] 未注入场景：四个实例全部 Failed（ready = 0，pool = {status:?}）；首次晚注入={first_late_err:?}（被拒后仍无实例 ready）"

@@ -1,9 +1,26 @@
 //! before_react_start 闸门准入、失败与工具发布。
-use super::super::*;
+use crate::agent::events::Stage;
+use crate::agent::events::StageStatus;
+
+use crate::agent::events_v2::ObserveEvent;
+use crate::agent::react::ReactLLM;
+
+use crate::agent::stages::context::StageContext;
+
+use crate::agent::stages::LoopResult;
+use crate::agent::stages::SharedToolMap;
+use crate::messages::BaseMessage;
 use crate::middleware::capabilities as hook_state;
+use crate::middleware::chain::MiddlewareChain;
 use crate::session::queue::MessageSource;
 use crate::session::store::FrozenContext;
+use crate::session::tool_catalog::SessionToolCatalog;
+use crate::session::QueuedMessage;
 use crate::session::Session;
+
+use std::collections::BTreeMap;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 #[derive(Debug, Default)]
 struct LoopEventSummary {
@@ -154,7 +171,10 @@ impl crate::middleware::Middleware for StartupGateProbe {
         &self,
         _state: &mut dyn hook_state::BeforeAgentState,
     ) -> crate::error::AgentResult<()> {
-        self.order.lock().unwrap().push("before_agent");
+        self.order
+            .lock()
+            .expect("self order mutex must remain unpoisoned throughout the test")
+            .push("before_agent");
         if self.before_agent_fails {
             return Err(crate::error::AgentError::MiddlewareError {
                 middleware: self.name().to_string(),
@@ -168,7 +188,10 @@ impl crate::middleware::Middleware for StartupGateProbe {
         &self,
         state: &mut dyn hook_state::StartupState,
     ) -> crate::error::AgentResult<()> {
-        self.order.lock().unwrap().push("before_react_start");
+        self.order
+            .lock()
+            .expect("self order mutex must remain unpoisoned throughout the test")
+            .push("before_react_start");
         self.gate_calls.fetch_add(1, Ordering::SeqCst);
         state.stage_startup_tools(startup_gate_candidate())?;
         match self.outcome {
@@ -196,12 +219,15 @@ impl ReactLLM for StartupGateLLM {
         tools: &[&dyn crate::tools::BaseTool],
         _streaming: Option<crate::agent::react::StreamingContext>,
     ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
-        self.seen_tools.lock().unwrap().push(
-            tools
-                .iter()
-                .map(|tool| tool.name().to_string())
-                .collect::<Vec<_>>(),
-        );
+        self.seen_tools
+            .lock()
+            .expect("self seen tools mutex must remain unpoisoned throughout the test")
+            .push(
+                tools
+                    .iter()
+                    .map(|tool| tool.name().to_string())
+                    .collect::<Vec<_>>(),
+            );
         match self.calls.fetch_add(1, Ordering::SeqCst) {
             0 => Ok(crate::agent::react::Reasoning::with_tools(
                 "use the local probe tool",
@@ -258,12 +284,14 @@ async fn test_react_start_gate_publishes_candidate_before_first_reason_and_runs_
     ));
 
     assert!(matches!(
-        run_react_loop(context.clone(), 10).await,
+        crate::agent::stages::run_react_loop(context.clone(), 10).await,
         LoopResult::Completed
     ));
 
     assert_eq!(
-        *order.lock().unwrap(),
+        *order
+            .lock()
+            .expect("order lock mutex must remain unpoisoned throughout the test"),
         vec!["before_agent", "before_react_start"],
         "闸门必须在首批 before_agent 之后执行"
     );
@@ -289,7 +317,9 @@ async fn test_react_start_gate_publishes_candidate_before_first_reason_and_runs_
         snapshot.tools.contains_key("startup_gate_local_tool"),
         "闸门提交不得覆盖既有非 MCP 条目"
     );
-    let seen = seen_tools.lock().unwrap();
+    let seen = seen_tools
+        .lock()
+        .expect("seen tools lock mutex must remain unpoisoned throughout the test");
     assert_eq!(seen.len(), 2, "两轮 Reason 都必须真正调用模型");
     assert!(
         seen[0].iter().any(|name| name == "mcp__system__lookup"),
@@ -336,7 +366,7 @@ async fn test_react_start_gate_error_stops_before_compact_without_publishing_can
         BaseMessage::human("startup gate prompt"),
     ));
 
-    let result = run_react_loop(context.clone(), 10).await;
+    let result = crate::agent::stages::run_react_loop(context.clone(), 10).await;
 
     match result {
         LoopResult::Error(crate::error::AgentError::MiddlewareError { middleware, reason }) => {
@@ -402,7 +432,7 @@ async fn test_react_start_gate_interrupted_maps_to_interrupted_not_fatal() {
         BaseMessage::human("startup gate prompt"),
     ));
 
-    let result = run_react_loop(context.clone(), 10).await;
+    let result = crate::agent::stages::run_react_loop(context.clone(), 10).await;
 
     assert!(
         matches!(result, LoopResult::Interrupted),
@@ -457,13 +487,15 @@ async fn test_before_agent_soft_failure_still_reaches_reason_after_startup_gate(
 
     assert!(
         matches!(
-            run_react_loop(context.clone(), 10).await,
+            crate::agent::stages::run_react_loop(context.clone(), 10).await,
             LoopResult::Completed
         ),
         "既有 before_agent 的软失败必须保持 warn 降级、不阻止 loop"
     );
     assert_eq!(
-        *order.lock().unwrap(),
+        *order
+            .lock()
+            .expect("order lock mutex must remain unpoisoned throughout the test"),
         vec!["before_agent", "before_react_start"],
         "before_agent 软失败不影响闸门按序执行"
     );
@@ -511,7 +543,7 @@ async fn test_react_start_gate_skipped_when_loop_exits_at_receive() {
         .build();
 
     assert!(matches!(
-        run_react_loop(context.clone(), 10).await,
+        crate::agent::stages::run_react_loop(context.clone(), 10).await,
         LoopResult::Completed
     ));
     assert_eq!(
@@ -519,6 +551,9 @@ async fn test_react_start_gate_skipped_when_loop_exits_at_receive() {
         0,
         "Receive 直接退出时不得调用启动闸门"
     );
-    assert!(order.lock().unwrap().is_empty());
+    assert!(order
+        .lock()
+        .expect("order lock mutex must remain unpoisoned throughout the test")
+        .is_empty());
     assert_eq!(llm_calls.load(Ordering::SeqCst), 0);
 }

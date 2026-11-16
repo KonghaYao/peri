@@ -16,31 +16,27 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::service_registry::ProcessResourceMonitor;
-use crate::kit::acp_bridge::spawn_acp_bridge;
-use crate::kit::acp_notifier::spawn_kit_notifier_with_client;
+
 use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::app_shell::AppShell;
-use crate::kit::ask_user_action::{AskUserResponseAction, spawn_ask_user_consumer};
+use crate::kit::ask_user_action::AskUserResponseAction;
 use crate::kit::atoms;
-use crate::kit::hitl_response::{HitlResponseAction, spawn_hitl_response_consumer};
+use crate::kit::hitl_response::HitlResponseAction;
 use crate::kit::input_history;
-use crate::kit::rewind_action::spawn_rewind_consumer;
-use crate::kit::service_snapshot::{SnapshotSource, spawn_service_snapshot};
-use crate::kit::submit_consumer::{spawn_cancel_consumer, spawn_submit_consumer};
+
+use crate::kit::service_snapshot::SnapshotSource;
+
 use crate::kit::submit_request::SubmitRequest;
-use crate::kit::thread_load_consumer::{ThreadLoadDispatcher, spawn_thread_load_consumer};
-use crate::kit::ui_command::ui_command_specs;
-use crate::launch::{TuiLaunchOptions, build_app_and_acp, teardown_app};
-use ratatui_kit::{
-    crossterm::{
-        event::{
-            DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange,
-            EnableMouseCapture,
-        },
-        execute,
-    },
-    prelude::*,
-};
+use crate::kit::thread_load_consumer::ThreadLoadDispatcher;
+
+use crate::launch::TuiLaunchOptions;
+use ratatui_kit::crossterm::event::DisableBracketedPaste;
+use ratatui_kit::crossterm::event::DisableMouseCapture;
+use ratatui_kit::crossterm::event::EnableBracketedPaste;
+use ratatui_kit::crossterm::event::EnableFocusChange;
+use ratatui_kit::crossterm::event::EnableMouseCapture;
+use ratatui_kit::crossterm::execute;
+use ratatui_kit::prelude::*;
 
 /// 使用 ratatui-kit 的全屏模式启动 TUI。
 ///
@@ -67,13 +63,13 @@ pub async fn run_kit_fullscreen(
     // 2. 构建 App + ACP server/client
     // [Fix P0] panic_notify_rx 不再传给 build_app_and_acp（其仅丢弃）——
     // 改由下方 3a 的消费 task 持有，收到 panic 通知后在状态栏提示用户。
-    let (mut app, mut acp_client) = build_app_and_acp(&opts, None).await?;
+    let (mut app, mut acp_client) = crate::launch::build_app_and_acp(&opts, None).await?;
 
     // 2b. H2: 把 peri_config 共享句柄塞到全局 OnceLock，让 ModelPanel 等组件
     //     在 #[component] 闭包里能直接 write active_alias。ACP server 持同一 Arc。
     let _ = atoms::PERI_CONFIG_HANDLE.set(app.services.peri_config.clone());
     // 2b1. 配置源句柄：读写路径决策的唯一事实源（全局 + 工作区布局在
-    //     App::new 时一次性确定）。TUI 面板保存经 save_effective 走此句柄，
+    //     App::try_new 时一次性确定）。TUI 面板保存经 save_effective 走此句柄，
     //     ACP host 的 persist_config 与它共享同一 Arc——两处写回不可能分叉。
     let _ = atoms::CONFIG_SOURCE_HANDLE.set(app.config_source.clone());
     // S7.5：TUI 本地投影默认开启（未配置 = 开启，显式 false = 关闭）；启动时只写一次。
@@ -177,7 +173,12 @@ pub async fn run_kit_fullscreen(
                 }
                 // 同步到 PeriConfig.extra 并保存
                 if let Some(peri_handle) = atoms::PERI_CONFIG_HANDLE.get() {
-                    let tui = atoms::TUI_CONFIG_HANDLE.get().unwrap().read();
+                    let tui = atoms::TUI_CONFIG_HANDLE
+                        .get()
+                        .expect(
+                            "TUI configuration handle is installed before its update listener runs",
+                        )
+                        .read();
                     let mut peri = peri_handle.write();
                     tui.sync_to_extra(&mut peri.config.extra);
                     drop(tui);
@@ -314,13 +315,13 @@ pub async fn run_kit_fullscreen(
         if let Err(error) = setup_result {
             shutdown.cancel();
             crate::kit::program_status::clear();
-            teardown_app(&mut app).await;
+            crate::launch::teardown_app(&mut app).await;
             return Err(error.into());
         }
         if !*atoms::SETUP_COMPLETED.state().read() {
             shutdown.cancel();
             crate::kit::program_status::clear();
-            teardown_app(&mut app).await;
+            crate::launch::teardown_app(&mut app).await;
             return Ok(());
         }
         *atoms::SETUP_PREFLIGHT.state().write() = false;
@@ -329,7 +330,7 @@ pub async fn run_kit_fullscreen(
             Err(error) => {
                 shutdown.cancel();
                 crate::kit::program_status::clear();
-                teardown_app(&mut app).await;
+                crate::launch::teardown_app(&mut app).await;
                 return Err(error);
             }
         };
@@ -340,7 +341,8 @@ pub async fn run_kit_fullscreen(
     // would permanently retain offline session/model state.
     let snapshot_src =
         build_snapshot_source(&app, acp_client.as_ref().map(|(client, _)| client.clone()));
-    let _snapshot_handle = spawn_service_snapshot(snapshot_src, shutdown.clone());
+    let _snapshot_handle =
+        crate::kit::service_snapshot::spawn_service_snapshot(snapshot_src, shutdown.clone());
 
     // A first fullscreen pass owns these transient controls. Clear exit and
     // quit state before mounting the normal shell so a setup cancellation or
@@ -417,13 +419,14 @@ pub async fn run_kit_fullscreen(
         });
 
         // 4d. 启动三链路（render_bridge 已删除）
-        let _notifier_handle = spawn_kit_notifier_with_client(
+        let _notifier_handle = crate::kit::acp_notifier::spawn_kit_notifier_with_client(
             notification_rx,
             bridge_tx,
             shutdown.clone(),
             client.clone(),
         );
-        let _bridge_handle = spawn_acp_bridge(bridge_rx, shutdown.clone(), client.clone());
+        let _bridge_handle =
+            crate::kit::acp_bridge::spawn_acp_bridge(bridge_rx, shutdown.clone(), client.clone());
         let cwd = app.services.cwd.clone();
         let cwd_for_init = cwd.clone();
         // Establish resume/continue ownership before any spawned submit task can
@@ -434,17 +437,18 @@ pub async fn run_kit_fullscreen(
         }
         // 4dz. ACP client handle — for panels to send raw requests
         let _ = atoms::ACP_CLIENT_HANDLE.set(std::sync::Arc::new(client.clone()));
-        let specs: Vec<peri_acp_types::command::command_route::UiCommandSpec> = ui_command_specs()
-            .iter()
-            .map(
-                |spec| peri_acp_types::command::command_route::UiCommandSpec {
-                    name: spec.name.into(),
-                    aliases: spec.aliases.iter().map(|alias| (*alias).into()).collect(),
-                    description: spec.description.into(),
-                    args: None,
-                },
-            )
-            .collect();
+        let specs: Vec<peri_acp_types::command::command_route::UiCommandSpec> =
+            crate::kit::ui_command::ui_command_specs()
+                .iter()
+                .map(
+                    |spec| peri_acp_types::command::command_route::UiCommandSpec {
+                        name: spec.name.into(),
+                        aliases: spec.aliases.iter().map(|alias| (*alias).into()).collect(),
+                        description: spec.description.into(),
+                        args: None,
+                    },
+                )
+                .collect();
         if let Err(error) = client.register_ui_commands(&specs).await {
             tracing::warn!(error = %error, "kit: ui command capability negotiation failed");
         }
@@ -454,15 +458,38 @@ pub async fn run_kit_fullscreen(
             cwd.clone(),
             shutdown.clone(),
         );
-        let _submit_handle =
-            spawn_submit_consumer(client.clone(), submit_rx, cwd.clone(), shutdown.clone());
-        let _rewind_handle = spawn_rewind_consumer(client.clone(), rewind_rx, shutdown.clone());
-        let _ask_user_handle =
-            spawn_ask_user_consumer(client.clone(), ask_user_rx, shutdown.clone());
-        let _hitl_handle = spawn_hitl_response_consumer(client.clone(), hitl_rx, shutdown.clone());
-        let _thread_load_handle =
-            spawn_thread_load_consumer(client.clone(), thread_load_rx, cwd, shutdown.clone());
-        let _cancel_handle = spawn_cancel_consumer(client.clone(), cancel_rx, shutdown.clone());
+        let _submit_handle = crate::kit::submit_consumer::spawn_submit_consumer(
+            client.clone(),
+            submit_rx,
+            cwd.clone(),
+            shutdown.clone(),
+        );
+        let _rewind_handle = crate::kit::rewind_action::spawn_rewind_consumer(
+            client.clone(),
+            rewind_rx,
+            shutdown.clone(),
+        );
+        let _ask_user_handle = crate::kit::ask_user_action::spawn_ask_user_consumer(
+            client.clone(),
+            ask_user_rx,
+            shutdown.clone(),
+        );
+        let _hitl_handle = crate::kit::hitl_response::spawn_hitl_response_consumer(
+            client.clone(),
+            hitl_rx,
+            shutdown.clone(),
+        );
+        let _thread_load_handle = crate::kit::thread_load_consumer::spawn_thread_load_consumer(
+            client.clone(),
+            thread_load_rx,
+            cwd,
+            shutdown.clone(),
+        );
+        let _cancel_handle = crate::kit::submit_consumer::spawn_cancel_consumer(
+            client.clone(),
+            cancel_rx,
+            shutdown.clone(),
+        );
 
         // 4e. workflow snapshot poll — periodic pull of workflow run state
         let _workflow_poll_handle = crate::kit::workflow_snapshot::spawn_workflow_poll(
@@ -599,7 +626,7 @@ pub async fn run_kit_fullscreen(
     shutdown.cancel();
 
     // 7. 单次 teardown；随后 App Drop，不建立后台重试或完整 drain 保证。
-    teardown_app(&mut app).await;
+    crate::launch::teardown_app(&mut app).await;
 
     result?;
     Ok(())

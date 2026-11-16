@@ -1,4 +1,4 @@
-use super::projection::{
+use crate::agent::compact_v2::projection::{
     MessageProjectionDirective, PersistedDirectiveRestore, ProjectionAction, ProjectionActionEntry,
     ProjectionTarget, ProviderCapabilities, ProviderProtocol, PROJECTION_POLICY_VERSION,
 };
@@ -86,7 +86,10 @@ fn test_legacy_v1_compact_tool_input_deserializes_but_is_rejected_by_policy_vers
 
     transcript.set_flags_projection(message_id, directive);
     assert!(matches!(
-        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION,),
+        crate::agent::compact_v2::projection::plan_from_persisted_directives(
+            &transcript,
+            PROJECTION_POLICY_VERSION,
+        ),
         PersistedDirectiveRestore::Invalid
     ));
 }
@@ -144,8 +147,10 @@ fn test_projection_action_exclude_and_keep() {
             target: ProjectionTarget::ContentBlock { index: 2 },
             action,
         };
-        let json = serde_json::to_string(&entry).unwrap();
-        let restored: ProjectionActionEntry = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&entry)
+            .expect("to_string must accept this test fixture representation");
+        let restored: ProjectionActionEntry = serde_json::from_str(&json)
+            .expect("from_str must accept this test fixture representation");
         assert_eq!(restored, entry);
     }
 }

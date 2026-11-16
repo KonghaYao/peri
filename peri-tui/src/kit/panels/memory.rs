@@ -8,22 +8,25 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{LANG_VERSION, MEMORY_LIST, MemoryEntry};
-use crate::kit::list_nav::{next_selection, previous_selection};
-use crate::kit::panel_mouse::{AreaTracker, hit_item, is_scrollbar_column};
-use crate::kit::panels::shared::list::{ListMetrics, ListViewport, content_rows};
+
+use crate::kit::panel_mouse::AreaTracker;
+use crate::kit::panels::shared::list::ListMetrics;
+use crate::kit::panels::shared::list::ListViewport;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
-use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind},
-    prelude::*,
-    ratatui::{
-        layout::{Constraint, Rect},
-        style::{Style, Stylize},
-        text::{Line, Span},
-        widgets::Paragraph,
-    },
-};
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::KeyCode;
+use ratatui_kit::crossterm::event::KeyEventKind;
+use ratatui_kit::crossterm::event::MouseButton;
+use ratatui_kit::crossterm::event::MouseEventKind;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Constraint;
+use ratatui_kit::ratatui::layout::Rect;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::style::Stylize;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
+use ratatui_kit::ratatui::widgets::Paragraph;
 
 /// 列表行度量：header 3 行（统计、导航提示、空行）+ 每项 1 行 + footer 0 行。
 ///
@@ -55,7 +58,7 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 可见（issue 2026-07-06-panels-selection-no-scroll-follow）。
     let (_term_w, term_h) = hooks.use_terminal_size();
     let viewport = ListViewport::for_content_rows(
-        content_rows(area, term_h),
+        crate::kit::panels::shared::list::content_rows(area, term_h),
         LIST_METRICS,
         entries.len(),
         *selected.read(),
@@ -174,14 +177,17 @@ fn format_size(bytes: u64) -> String {
         ("panel-memory-unit-mb", 1024 * 1024),
         ("panel-memory-unit-gb", 1024 * 1024 * 1024),
     ];
-    for (key, threshold) in UNITS.iter().rev() {
-        if bytes >= *threshold {
-            let v = bytes as f64 / *threshold as f64;
-            let unit = i18n::tr(key);
-            if v >= 10.0 {
-                return format!("{:.0} {}", v, unit);
-            } else {
-                return format!("{:.1} {}", v, unit);
+    {
+        let iteration_items = UNITS.iter().rev();
+        for (key, threshold) in iteration_items {
+            if bytes >= *threshold {
+                let v = bytes as f64 / *threshold as f64;
+                let unit = i18n::tr(key);
+                if v >= 10.0 {
+                    return format!("{:.0} {}", v, unit);
+                } else {
+                    return format!("{:.1} {}", v, unit);
+                }
             }
         }
     }
@@ -272,8 +278,9 @@ fn handle_memory_event(event: Event, ctx: &MemoryEventCtx) -> EventResult {
     // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
     if let Event::Mouse(mouse) = event {
         if let Some(area) = ctx.area
-            && !is_scrollbar_column(&mouse, area)
-            && let Some(idx) = hit_item(&mouse, area, ctx.viewport.hit_layout())
+            && !crate::kit::panel_mouse::is_scrollbar_column(&mouse, area)
+            && let Some(idx) =
+                crate::kit::panel_mouse::hit_item(&mouse, area, ctx.viewport.hit_layout())
         {
             *ctx.selected.write() = idx;
             open_entry_at(idx);
@@ -294,13 +301,13 @@ fn handle_memory_event(event: Event, ctx: &MemoryEventCtx) -> EventResult {
         KeyCode::Esc => close_panel(),
         KeyCode::Up => {
             let mut s = ctx.selected.write();
-            *s = previous_selection(*s);
+            *s = crate::kit::list_nav::previous_selection(*s);
         }
         KeyCode::Down => {
             let mut s = ctx.selected.write();
             let count = MEMORY_LIST.state().read().len();
             if count > 0 {
-                *s = next_selection(*s, count);
+                *s = crate::kit::list_nav::next_selection(*s, count);
             }
         }
         KeyCode::Enter => {
@@ -338,3 +345,9 @@ fn close_panel() {
 #[cfg(test)]
 #[path = "memory_test.rs"]
 mod tests;
+
+use crate::kit::atoms::LANG_VERSION;
+
+use crate::kit::atoms::MEMORY_LIST;
+
+use crate::kit::atoms::MemoryEntry;

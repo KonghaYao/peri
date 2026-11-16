@@ -1,6 +1,13 @@
 //! 故障注入与观察：只针对被测试的行为，未覆盖的行为由门面替身按契约拒绝。
 
-use super::*;
+use crate::session::test_resources::mock::MockSessionResources;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::thread::ThreadId;
+use std::collections::HashMap;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 impl MockSessionResources {
     /// 在第 `nth` 次快照读取（1-based）注入失败；0 关闭注入。
@@ -16,19 +23,28 @@ impl MockSessionResources {
     }
 
     pub(crate) fn uncertain_compaction(self: &Arc<Self>) {
-        self.injection.lock().unwrap().uncertain_compaction = true;
+        self.injection
+            .lock()
+            .expect("self injection mutex must remain unpoisoned throughout the test")
+            .uncertain_compaction = true;
     }
 
     pub(crate) fn fail_compaction(self: &Arc<Self>) {
-        self.injection.lock().unwrap().fail_compaction = true;
+        self.injection
+            .lock()
+            .expect("self injection mutex must remain unpoisoned throughout the test")
+            .fail_compaction = true;
     }
 
     /// 全部会话 payload 的合并视图（登记顺序），夹具断言用。
     pub(crate) fn payloads(&self) -> Vec<PersistedPayload> {
-        let regions = self.regions.lock().unwrap();
+        let regions = self
+            .regions
+            .lock()
+            .expect("self regions mutex must remain unpoisoned throughout the test");
         self.order
             .lock()
-            .unwrap()
+            .expect("self order mutex must remain unpoisoned throughout the test")
             .iter()
             .filter_map(|id| regions.get(id))
             .flat_map(|region| region.payloads.clone())
@@ -43,7 +59,7 @@ impl MockSessionResources {
     pub(crate) fn flags(&self, id: &MessageId) -> MessageFlags {
         self.regions
             .lock()
-            .unwrap()
+            .expect("self regions mutex must remain unpoisoned throughout the test")
             .values()
             .find_map(|region| region.flags.get(id).cloned())
             .unwrap_or_default()
@@ -55,14 +71,23 @@ impl MockSessionResources {
     }
 
     pub(crate) fn append_calls(&self) -> usize {
-        self.injection.lock().unwrap().append_calls
+        self.injection
+            .lock()
+            .expect("self injection mutex must remain unpoisoned throughout the test")
+            .append_calls
     }
 
     pub(crate) fn compaction_calls(&self) -> usize {
-        self.injection.lock().unwrap().compaction_calls
+        self.injection
+            .lock()
+            .expect("self injection mutex must remain unpoisoned throughout the test")
+            .compaction_calls
     }
 
     pub(crate) fn rewind_calls(&self) -> usize {
-        self.injection.lock().unwrap().rewind_calls
+        self.injection
+            .lock()
+            .expect("self injection mutex must remain unpoisoned throughout the test")
+            .rewind_calls
     }
 }

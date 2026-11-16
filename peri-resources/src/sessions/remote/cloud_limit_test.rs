@@ -43,12 +43,9 @@ use peri_acp_types::thread::{CancelPolicy, ThreadId};
 use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
 use turso_serverless::Value;
 
-use super::cloud_deployment_tests::synthetic_workspace;
-use super::cloud_tests::{
-    check, failure, remote_error_class, run_counts, unique_run_label, with_cleanup, CloudTarget,
-};
+use super::cloud_tests::CloudTarget;
 use super::mutation::StoreAccess;
-use super::open_remote;
+
 use super::sql::StatementSpec;
 use crate::sessions::SessionResourcesImpl;
 
@@ -74,7 +71,7 @@ async fn step<T>(
 ) -> Result<T, String> {
     future
         .await
-        .map_err(|error| format!("{name}: {}", remote_error_class(&error)))
+        .map_err(|error| format!("{name}: {}", super::cloud_tests::remote_error_class(&error)))
 }
 
 // ─── 夹具：合成 workspace（可重开）；会话实例（持久化门面）──
@@ -89,7 +86,7 @@ struct Env {
 async fn fixture_env(run: &str) -> Result<Env, String> {
     Ok(Env {
         run: run.to_owned(),
-        workspace: synthetic_workspace(),
+        workspace: super::cloud_deployment_tests::synthetic_workspace(),
         root: ThreadId::from(format!("{run}-root")),
     })
 }
@@ -100,7 +97,7 @@ impl Env {
     }
 
     async fn open(&self, target: &CloudTarget) -> Result<Arc<SessionResourcesImpl>, String> {
-        open_remote(
+        super::open_remote(
             target.endpoint(),
             target.credential(),
             AccessMode::ReadWrite,
@@ -159,7 +156,7 @@ async fn reopen(target: &CloudTarget, env: &Env) -> Result<Session, String> {
         facade.recover_session_persistence(&env.root),
     )
     .await?;
-    check(
+    super::cloud_tests::check(
         recovery == PersistenceRecovery::Recovered,
         "a reopened store must report recovery before continuing writes",
     )?;
@@ -168,7 +165,7 @@ async fn reopen(target: &CloudTarget, env: &Env) -> Result<Session, String> {
         facade.inspect_availability(Some(&env.root)),
     )
     .await?;
-    check(
+    super::cloud_tests::check(
         availability.execution == Some(ExecutionAvailability::Available),
         "a reopened instance must not reconstruct runtime uncertainty from durable history",
     )?;
@@ -195,7 +192,7 @@ async fn counts_now(
     run: &str,
 ) -> Result<super::cloud_tests::RunCounts, String> {
     let store = step("open raw connection", target.store(StoreAccess::ReadOnly)).await?;
-    let counts = run_counts(&store, run)
+    let counts = super::cloud_tests::run_counts(&store, run)
         .await
         .map_err(|message| format!("raw run counts: {message}"))?;
     step("close raw connection", store.close()).await?;
@@ -213,7 +210,7 @@ async fn ledger_stats(
             vec![Value::Text(format!("%{run}%"))],
         )])
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     let mut rows = batches.into_iter().next().unwrap_or_default();
     let mut row = rows
         .pop()
@@ -235,9 +232,9 @@ async fn ledger_stats(
 #[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
 async fn cloud_oversized_write_is_all_or_nothing() {
     let target = CloudTarget::load();
-    let run = unique_run_label("peri-limit");
+    let run = super::cloud_tests::unique_run_label("peri-limit");
     let collected: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-    let result = with_cleanup(&target, &run, || async {
+    let result = super::cloud_tests::with_cleanup(&target, &run, || async {
         let lines = oversized_flow(&target, &run).await?;
         *collected.lock().unwrap() = lines;
         Ok(())
@@ -246,8 +243,11 @@ async fn cloud_oversized_write_is_all_or_nothing() {
     match result {
         Ok(()) => {
             let mut out = target.out();
-            for line in collected.lock().unwrap().iter() {
-                out.push(line.clone());
+            {
+                let collected = collected.lock().unwrap();
+                for line in collected.iter() {
+                    out.push(line.clone());
+                }
             }
             out.push("oversized_write=ok".to_owned());
             out.flush();
@@ -283,7 +283,7 @@ async fn oversized_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, 
         // 权威核对走**新连接**的原始计数：生效则一定读得到这一行，拒绝则**一行都没有**——
         // 半套状态（资格行在、效果缺失，或反之）不属于任何一条合法结果。
         let counts = counts_now(target, run).await?;
-        check(
+        super::cloud_tests::check(
             counts.messages == expected,
             &format!(
                 "an oversized batch must be all-or-nothing: size={size} class={class} \
@@ -295,7 +295,7 @@ async fn oversized_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, 
             "read=skipped(see report)".to_owned()
         } else {
             let rows = rows_via(&session, &env.root).await?;
-            check(
+            super::cloud_tests::check(
                 rows as i64 == expected,
                 &format!("adapter and raw connection must agree: {rows} vs {expected}"),
             )?;
@@ -318,7 +318,7 @@ async fn oversized_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, 
     )
     .await?;
     let counts = counts_now(target, run).await?;
-    check(
+    super::cloud_tests::check(
         counts.messages == expected + 1,
         &format!(
             "a normal call must apply exactly once after the big writes: {} vs {}",
@@ -337,9 +337,9 @@ async fn oversized_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, 
 #[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
 async fn cloud_receipts_are_retained_with_measured_cost() {
     let target = CloudTarget::load();
-    let run = unique_run_label("peri-retain");
+    let run = super::cloud_tests::unique_run_label("peri-retain");
     let collected: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-    let result = with_cleanup(&target, &run, || async {
+    let result = super::cloud_tests::with_cleanup(&target, &run, || async {
         let lines = retention_flow(&target, &run).await?;
         *collected.lock().unwrap() = lines;
         Ok(())
@@ -348,8 +348,11 @@ async fn cloud_receipts_are_retained_with_measured_cost() {
     match result {
         Ok(()) => {
             let mut out = target.out();
-            for line in collected.lock().unwrap().iter() {
-                out.push(line.clone());
+            {
+                let collected = collected.lock().unwrap();
+                for line in collected.iter() {
+                    out.push(line.clone());
+                }
             }
             out.push("receipt_retention=ok".to_owned());
             out.flush();
@@ -376,7 +379,7 @@ async fn retention_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, 
     let store = step("open raw connection", target.store(StoreAccess::ReadOnly)).await?;
     let (before_rows, before_bytes) = ledger_stats(&store, run).await?;
     step("close raw connection", store.close()).await?;
-    check(
+    super::cloud_tests::check(
         before_rows >= 2,
         &format!("every domain call must leave a receipt: {before_rows}"),
     )?;
@@ -387,7 +390,7 @@ async fn retention_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, 
         session.facade.recover_session_persistence(&env.root),
     )
     .await?;
-    check(
+    super::cloud_tests::check(
         recovery == PersistenceRecovery::Recovered,
         "a settled session must recover",
     )?;
@@ -401,7 +404,7 @@ async fn retention_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, 
     let store = step("open raw connection", target.store(StoreAccess::ReadOnly)).await?;
     let (after_rows, after_bytes) = ledger_stats(&store, run).await?;
     step("close raw connection", store.close()).await?;
-    check(
+    super::cloud_tests::check(
         after_rows == before_rows && after_bytes == before_bytes,
         &format!(
             "receipts must survive recovery and re-reads unchanged: {before_rows}/{before_bytes} \
@@ -421,9 +424,9 @@ async fn retention_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, 
 #[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
 async fn cloud_cancelled_write_applies_at_most_once() {
     let target = CloudTarget::load();
-    let run = unique_run_label("peri-cancel");
+    let run = super::cloud_tests::unique_run_label("peri-cancel");
     let collected: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-    let result = with_cleanup(&target, &run, || async {
+    let result = super::cloud_tests::with_cleanup(&target, &run, || async {
         let lines = cancelled_flow(&target, &run).await?;
         *collected.lock().unwrap() = lines;
         Ok(())
@@ -432,8 +435,11 @@ async fn cloud_cancelled_write_applies_at_most_once() {
     match result {
         Ok(()) => {
             let mut out = target.out();
-            for line in collected.lock().unwrap().iter() {
-                out.push(line.clone());
+            {
+                let collected = collected.lock().unwrap();
+                for line in collected.iter() {
+                    out.push(line.clone());
+                }
             }
             out.push("cancelled_write=ok".to_owned());
             out.flush();
@@ -454,7 +460,7 @@ async fn cancelled_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, 
     )
     .await?;
     let warmup = counts_now(target, run).await?;
-    check(
+    super::cloud_tests::check(
         warmup.messages == 1,
         &format!("the warmup row must be durable: {}", warmup.messages),
     )?;
@@ -481,12 +487,12 @@ async fn cancelled_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, 
         session.facade.recover_session_persistence(&env.root),
     )
     .await?;
-    check(
+    super::cloud_tests::check(
         same_instance == PersistenceRecovery::Recovered,
         &format!("the same instance must answer a definite recovery state: {same_instance:?}"),
     )?;
     let same_instance_rows = rows_via(&session, &env.root).await?;
-    check(
+    super::cloud_tests::check(
         same_instance_rows == 1 || same_instance_rows == 2,
         &format!("a read on the same instance must still answer: {same_instance_rows}"),
     )?;
@@ -498,12 +504,12 @@ async fn cancelled_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, 
     drop(session);
     let reopened = reopen(target, &env).await?;
     let rows = rows_via(&reopened, &env.root).await?;
-    check(
+    super::cloud_tests::check(
         rows == 1 || rows == 2,
         &format!("a cancelled write is present 0 or 1 time(s): {rows}"),
     )?;
     let counts = counts_now(target, run).await?;
-    check(
+    super::cloud_tests::check(
         counts.messages == rows as i64,
         &format!(
             "the converged outcome must be the durable one: {rows} vs {}",
@@ -518,7 +524,7 @@ async fn cancelled_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, 
     )
     .await?;
     let final_rows = rows_via(&reopened, &env.root).await?;
-    check(
+    super::cloud_tests::check(
         final_rows == rows + 1,
         &format!("a later call must apply exactly once: {final_rows}"),
     )?;
@@ -536,9 +542,9 @@ async fn cancelled_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, 
 #[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
 async fn cloud_remote_create_refuses_parent_input() {
     let target = CloudTarget::load();
-    let run = unique_run_label("peri-parent");
+    let run = super::cloud_tests::unique_run_label("peri-parent");
     let collected: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-    let result = with_cleanup(&target, &run, || async {
+    let result = super::cloud_tests::with_cleanup(&target, &run, || async {
         let lines = parent_input_flow(&target, &run).await?;
         *collected.lock().unwrap() = lines;
         Ok(())
@@ -547,8 +553,11 @@ async fn cloud_remote_create_refuses_parent_input() {
     match result {
         Ok(()) => {
             let mut out = target.out();
-            for line in collected.lock().unwrap().iter() {
-                out.push(line.clone());
+            {
+                let collected = collected.lock().unwrap();
+                for line in collected.iter() {
+                    out.push(line.clone());
+                }
             }
             out.push("parent_input=refused".to_owned());
             out.flush();
@@ -588,19 +597,19 @@ async fn parent_input_flow(target: &CloudTarget, run: &str) -> Result<Vec<String
         Ok(_) => return Err("a child input must not be accepted by the root path".to_owned()),
         Err(error) => error,
     };
-    check(
+    super::cloud_tests::check(
         matches!(error.kind(), SessionResourceErrorKind::InvalidInput { .. }) && {
             // 分类已经在上面断言：这里只再确认它确实是那条拒绝理由，而不是同类的另一种输入错。
             true
         },
         &format!(
             "the refusal must be typed, not a silent success: {}",
-            remote_error_class(&error)
+            super::cloud_tests::remote_error_class(&error)
         ),
     )?;
     // 远端零行：拒绝发生在写之前。
     let counts = counts_now(target, run).await?;
-    check(
+    super::cloud_tests::check(
         counts.sessions == 1,
         &format!(
             "a refused create must leave no session row: {}",
@@ -614,21 +623,21 @@ async fn parent_input_flow(target: &CloudTarget, run: &str) -> Result<Vec<String
             vec![Value::Text(child.to_string())],
         )])
         .await
-        .map_err(failure)?;
+        .map_err(super::cloud_tests::failure)?;
     step("close raw connection", store.close()).await?;
     let rows = batches
         .into_iter()
         .next()
         .and_then(|mut rows| rows.pop())
         .and_then(|mut row| row.pop());
-    check(
+    super::cloud_tests::check(
         matches!(rows, Some(Value::Integer(0))),
         &format!("the refused id must not exist remotely: {rows:?}"),
     )?;
     step("close", session.facade.close()).await?;
     Ok(vec![format!(
         "refused_class={} sessions={}",
-        remote_error_class(&error),
+        super::cloud_tests::remote_error_class(&error),
         counts.sessions
     )])
 }

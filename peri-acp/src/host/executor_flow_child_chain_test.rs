@@ -7,7 +7,23 @@
 //! （`before_agent` 之后的真实贡献到达请求）与 H2（按子链真实装配的能力声明）。
 //! **不使用**空链或合成中间件替身。
 
-use super::*;
+use crate::host::executor_flow_tests::dynamic_tests;
+#[cfg(not(windows))]
+use crate::host::executor_flow_tests::CapturePromptModel;
+use crate::session::executor::FrozenSessionData;
+use crate::session::executor::SessionContext;
+use crate::session::SessionManager;
+use async_trait::async_trait;
+use peri_acp_types::messages::BaseMessage;
+#[cfg(not(windows))]
+use peri_model::Model;
+#[cfg(not(windows))]
+use peri_model::ModelMessage;
+#[cfg(not(windows))]
+use peri_model::ModelRequest;
+use serial_test::serial;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 #[cfg(not(windows))]
 mod captured {
@@ -119,13 +135,20 @@ mod captured {
         });
         let tmp = tempfile::tempdir().unwrap();
         let (mut ctx, manager) =
-            make_session_context_with_manager("child-chain-capture", &tmp).await;
+            crate::host::executor_flow_tests::make_session_context_with_manager(
+                "child-chain-capture",
+                &tmp,
+            )
+            .await;
         let sentinel = chain_frozen(disabled);
         let workspace = tempfile::tempdir().unwrap();
         let _resources =
             dynamic_tests::bind_child_fixture_resources(&mut ctx, workspace.path(), &sentinel)
                 .await;
-        let (out, _) = make_stage_build(&ctx)(make_stage_request(sentinel.clone(), None)).unwrap();
+        let (out, _) = crate::host::executor_flow_tests::make_stage_build(&ctx)(
+            crate::host::executor_flow_tests::make_stage_request(sentinel.clone(), None),
+        )
+        .unwrap();
         // 真实子链装配器（与生产同型：`SubagentChainAssemblerImpl::with_registry`；
         // 生产接线在 middlewares 侧 `assembly.rs`，本层不引用）。
         let chain_assembler = child_chain_assembler(&manager, &ctx.session_id);
@@ -358,7 +381,7 @@ mod captured {
             ChildOptions::DEFINED,
         )
         .await;
-        let system = system_text(&captured[0]);
+        let system = crate::host::executor_flow_tests::system_text(&captured[0]);
         assert_eq!(
             system.matches(IDENTITY).count(),
             1,
@@ -410,7 +433,11 @@ mod captured {
     async fn resume_fixture() -> ResumeFixture {
         let tmp = tempfile::tempdir().unwrap();
         let (mut ctx, manager) =
-            make_session_context_with_manager("child-chain-resume", &tmp).await;
+            crate::host::executor_flow_tests::make_session_context_with_manager(
+                "child-chain-resume",
+                &tmp,
+            )
+            .await;
         let sentinel = chain_frozen(&[]);
         let workspace = tempfile::tempdir().unwrap();
         let _resources =
@@ -420,10 +447,11 @@ mod captured {
         // （会话 thread 身份 + 子会话资源门面），主会话的 SubagentHost 由此携带
         // 自身 thread 身份，供 bound child resume 的 owning-parent 判据使用。
         // 测试夹具的 `make_stage_request` 默认空持久化，这里补上合法前置。
-        let mut request = make_stage_request(sentinel.clone(), None);
+        let mut request =
+            crate::host::executor_flow_tests::make_stage_request(sentinel.clone(), None);
         request.thread_persistence.parent_thread_id = Some(ctx.session_id.clone());
         request.thread_persistence.session_resources = ctx.session_resources.clone();
-        let (out, _) = make_stage_build(&ctx)(request).unwrap();
+        let (out, _) = crate::host::executor_flow_tests::make_stage_build(&ctx)(request).unwrap();
         ResumeFixture {
             ctx,
             parent: out.session,

@@ -1,14 +1,25 @@
-use super::*;
+use crate::agent::compact_v2::config::CompactConfig;
+
+use crate::agent::events_v2::ObserveEvent;
+use crate::agent::react::ReactLLM;
 use crate::agent::react::{AgentOutput, Reasoning, StreamingContext};
+
+use crate::agent::stages::context::StageContext;
+use crate::agent::stages::LoopResult;
+use crate::agent::token::ContextBudget;
 use crate::error::{AgentError, AgentResult};
-use crate::middleware::{
-    capabilities::{AfterAgentState, BeforeAgentState},
-    Middleware,
-};
+use crate::messages::BaseMessage;
+use crate::middleware::capabilities::AfterAgentState;
+use crate::middleware::capabilities::BeforeAgentState;
+use crate::middleware::chain::MiddlewareChain;
+use crate::middleware::Middleware;
 use crate::session::store::FrozenContext;
 use crate::session::test_resources::TestSession;
+use crate::session::MessageTranscript;
+use crate::session::QueuedMessage;
 use crate::session::{MessageKind, MessageQueue, MessageSource};
 use crate::thread::ThreadId;
+use crate::tools::BaseTool;
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
@@ -16,6 +27,8 @@ use peri_acp_types::system_reminder::{
     SYSTEM_REMINDER_VERSION,
 };
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 fn make_reminder(marker: &str) -> TrustedSystemReminder {
     TrustedSystemReminderFactory::for_producer()
@@ -31,7 +44,7 @@ fn make_reminder(marker: &str) -> TrustedSystemReminder {
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap()
+        .expect("the construct fixture result is required for this assertion")
 }
 
 struct ContinuingReminderMiddleware {
@@ -88,7 +101,10 @@ impl ReactLLM for HighUsageAnswerModel {
         let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         self.requests.lock().push(messages.to_vec());
         if self.cancel_on_third && call == 3 {
-            streaming.unwrap().cancel.cancel();
+            streaming
+                .expect("the streaming fixture result is required for this assertion")
+                .cancel
+                .cancel();
         }
         let mut reasoning = Reasoning::with_answer("working", "continue");
         reasoning.usage = Some(peri_model::TokenUsage {
@@ -130,7 +146,7 @@ impl peri_model::Model for CountingSummaryModel {
         _cancellation: tokio_util::sync::CancellationToken,
     ) -> peri_model::ModelResult<peri_model::ModelResponse> {
         let call = self.0.fetch_add(1, Ordering::SeqCst) + 1;
-        peri_model::ModelResponse::new(
+        peri_model::ModelResponse::try_new(
             peri_model::ModelMessage::assistant_text(format!(
                 "<summary>budget-summary-{call}</summary>"
             )),
@@ -154,7 +170,7 @@ struct BudgetScenario {
 }
 
 async fn make_scenario(cancel_on_third: bool) -> BudgetScenario {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
     let bound = TestSession::open().await;
     let store = bound.resources();
     let thread_id = bound.thread_id();
@@ -217,7 +233,7 @@ async fn make_scenario(cancel_on_third: bool) -> BudgetScenario {
 #[tokio::test]
 async fn test_budget_recovery_loop_stops_after_two_committed_fulls() {
     let mut scenario = make_scenario(false).await;
-    let result = run_react_loop(scenario.context.clone(), 6).await;
+    let result = crate::agent::stages::run_react_loop(scenario.context.clone(), 6).await;
     assert!(matches!(
         result,
         LoopResult::Error(AgentError::CompactBudgetUnrecovered {
@@ -246,7 +262,8 @@ async fn test_budget_recovery_loop_stops_after_two_committed_fulls() {
     );
     {
         let requests = scenario.requests.lock();
-        for (index, request) in requests.iter().enumerate() {
+        let paired_items = requests.iter().enumerate();
+        for (index, request) in paired_items {
             for marker in ["initial retained reminder A", "initial retained reminder B"] {
                 assert_eq!(
                     request
@@ -272,13 +289,15 @@ async fn test_budget_recovery_loop_stops_after_two_committed_fulls() {
         .transcript
         .read()
         .persist_tx_handle()
-        .unwrap();
-    MessageTranscript::flush_via_tx(&tx).await.unwrap();
+        .expect("the persist tx handle fixture result is required for this assertion");
+    MessageTranscript::flush_via_tx(&tx)
+        .await
+        .expect("the flush via tx fixture result is required for this assertion");
     let snapshot = scenario
         .store
         .load_session_snapshot(&scenario.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     let payloads = snapshot.payloads;
     let flags = snapshot.flags;
     let reminder_ids: Vec<_> = payloads
@@ -314,7 +333,12 @@ async fn test_budget_recovery_loop_stops_after_two_committed_fulls() {
         })
         .collect();
     assert_eq!(summaries.len(), 2);
-    assert!(flags.get(&summaries[0].id()).unwrap().excluded);
+    assert!(
+        flags
+            .get(&summaries[0].id())
+            .expect("the id fixture result is required for this assertion")
+            .excluded
+    );
     assert!(!flags
         .get(&summaries[1].id())
         .is_some_and(|flag| flag.excluded));
@@ -323,7 +347,7 @@ async fn test_budget_recovery_loop_stops_after_two_committed_fulls() {
 #[tokio::test]
 async fn test_budget_recovery_loop_cancel_wins_over_second_high_observation() {
     let scenario = make_scenario(true).await;
-    let result = run_react_loop(scenario.context.clone(), 6).await;
+    let result = crate::agent::stages::run_react_loop(scenario.context.clone(), 6).await;
     assert!(matches!(result, LoopResult::Interrupted));
     assert_eq!(scenario.reason_calls.load(Ordering::SeqCst), 3);
     assert_eq!(scenario.compact_calls.load(Ordering::SeqCst), 2);

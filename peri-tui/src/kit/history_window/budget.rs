@@ -86,6 +86,7 @@ pub struct WindowBudget {
 }
 
 impl WindowBudget {
+    #[must_use]
     pub fn new(limits: WindowLimits) -> Self {
         Self {
             limits,
@@ -100,12 +101,14 @@ impl WindowBudget {
         }
     }
 
+    #[must_use]
     pub fn evictable_body_bytes(&self) -> usize {
         self.resident_body_bytes
             .saturating_sub(self.pinned_body_bytes)
     }
 
     /// 总驻留正文：可淘汰段 + 尚无持久身份、不可淘汰的实时单元。
+    #[must_use]
     pub fn total_resident_body_bytes(&self) -> usize {
         self.resident_body_bytes
             .saturating_add(self.unattributed_live_bytes)
@@ -131,6 +134,7 @@ impl WindowBudget {
             .min(self.limits.body_bytes.saturating_sub(incoming_body_bytes))
     }
 
+    #[must_use]
     pub fn has_body_capacity_for(&self, incoming_body_bytes: usize) -> bool {
         // 已移除但未 ack 的正文仍保守占额，避免渲染侧未释放就重复接纳。
         // 无持久身份的实时单元同样占用真实内存，必须计入上限。
@@ -146,6 +150,7 @@ impl WindowBudget {
             && self.pending_merge_bytes == 0
     }
 
+    #[must_use]
     pub fn page_reserve_remaining(&self) -> usize {
         self.limits
             .reserved_bytes

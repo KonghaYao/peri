@@ -33,11 +33,13 @@ pub enum PermissionMode {
 
 impl PermissionMode {
     /// 是否启用 HITL 审批
+    #[must_use]
     pub fn hitl_enabled(self) -> bool {
         !matches!(self, Self::Bypass)
     }
 
     /// 是否需要审批指定工具（基于权限模式 + 工具特征）
+    #[must_use]
     pub fn requires_approval(self, is_edit_tool: bool, in_default_list: bool) -> bool {
         match self {
             Self::Bypass => false,
@@ -91,11 +93,13 @@ impl Default for SessionConfig {
 
 impl SessionConfig {
     /// 创建新 SessionConfig
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// 当前权限模式
+    #[must_use]
     pub fn permission_mode(&self) -> PermissionMode {
         *self.permission_mode.read()
     }
@@ -126,6 +130,7 @@ impl SessionConfig {
     }
 
     /// 最大 ReAct 迭代数
+    #[must_use]
     pub fn max_iterations(&self) -> usize {
         *self.max_iterations.read()
     }
@@ -136,6 +141,7 @@ impl SessionConfig {
     }
 
     /// 是否已取消
+    #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.cancel_token.is_cancelled()
     }

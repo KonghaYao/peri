@@ -1,22 +1,21 @@
 //! MCP 面板测试：详情布局契约、弹窗让行、动态视口与稳定身份。
 
-use super::detail::{
-    DETAIL_HEADER_ROW, DETAIL_RIGHT_RESERVE, DETAIL_WRAP_WIDTH, DetailAction, DetailButton,
-    SkillEntry, build_detail_lines, button_style, cache_status_label_key, default_detail_btn,
-    detail_action_at, detail_actions, detail_btn_row, detail_buttons, detail_error_lines,
-    format_connected_at,
-};
-use super::{McpView, detail_copy_text};
+use super::McpView;
+use super::detail::DETAIL_HEADER_ROW;
+use super::detail::DETAIL_RIGHT_RESERVE;
+use super::detail::DETAIL_WRAP_WIDTH;
+use super::detail::DetailAction;
+use super::detail::DetailButton;
+use super::detail::SkillEntry;
 use crate::i18n;
-use crate::kit::atoms::McpServerSummary;
-use crate::kit::text_util::wrap_text;
+
 use ratatui::style::{Modifier, Style};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{ACTIVE_PANEL, MCP_SERVERS, OAUTH_INFO, POPUP_KIND, PopupKind};
-use crate::kit::panels::shared::list::{ListViewport, content_rows};
-use peri_acp_types::event_data::OauthNeeded;
+
+use crate::kit::panels::shared::list::ListViewport;
+
 use ratatui_kit::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -40,7 +39,7 @@ pub(super) fn detail_lines_with_skills(
     skills: &[SkillEntry],
     btn_sel: usize,
 ) -> Vec<ratatui::text::Line<'static>> {
-    build_detail_lines(
+    super::detail::build_detail_lines(
         summary,
         skills,
         btn_sel,
@@ -65,7 +64,7 @@ pub(super) fn rendered_row(lines: &[ratatui::text::Line<'_>], needle: &str) -> u
 }
 
 fn copy_button(summary: &McpServerSummary, width: u16) -> DetailButton {
-    detail_buttons(summary, 0, width)
+    super::detail::detail_buttons(summary, 0, width)
         .into_iter()
         .find(|button| button.action == DetailAction::CopyError)
         .expect("有错误摘要必须布局复制按钮")
@@ -82,7 +81,7 @@ fn span_with<'a>(line: &'a ratatui::text::Line<'a>, text: &str) -> &'a ratatui::
 #[test]
 fn detail_button_row_counts_empty_url_value_line() {
     assert_eq!(
-        detail_btn_row(&McpServerSummary::default(), 0, TEST_WIDTH),
+        super::detail::detail_btn_row(&McpServerSummary::default(), 0, TEST_WIDTH),
         21
     );
 }
@@ -147,7 +146,10 @@ fn detail_button_row_matches_rendered_button_line() {
         let lines = detail_lines(&summary, 0);
         let back = DetailAction::Back.text(&i18n::tr("panel-mcp-detail-btn-back"));
         let rendered = rendered_row(&lines, &back);
-        assert_eq!(rendered, detail_btn_row(&summary, 0, TEST_WIDTH) as usize);
+        assert_eq!(
+            rendered,
+            super::detail::detail_btn_row(&summary, 0, TEST_WIDTH) as usize
+        );
     }
 }
 
@@ -162,7 +164,7 @@ fn long_error_summary_wraps_and_stays_complete() {
         error_summary: Some(error.clone()),
         ..McpServerSummary::default()
     };
-    let wrapped = wrap_text(&error, DETAIL_WRAP_WIDTH);
+    let wrapped = crate::kit::text_util::wrap_text(&error, DETAIL_WRAP_WIDTH);
     assert!(wrapped.len() > 1, "用例必须覆盖多行换行");
 
     let lines = detail_lines(&summary, 0);
@@ -196,7 +198,10 @@ fn long_error_summary_wraps_and_stays_complete() {
             .collect::<String>(),
         error
     );
-    assert_eq!(detail_error_lines(&summary), Some(wrapped.len()));
+    assert_eq!(
+        super::detail::detail_error_lines(&summary),
+        Some(wrapped.len())
+    );
 }
 
 /// 复制按钮与标题同行（header 行）渲染，仅在错误摘要存在时出现。
@@ -245,7 +250,7 @@ fn header_copy_button_is_right_aligned_and_survives_narrow_width() {
     };
     let copy_text = DetailAction::CopyError.text(&i18n::tr("panel-mcp-detail-btn-copy"));
     for width in [80u16, 60, 40, 24, 12] {
-        let lines = build_detail_lines(
+        let lines = super::detail::build_detail_lines(
             &summary,
             &[],
             1, // 默认落在 [ 返回 ]：复制按钮为未选中态
@@ -293,18 +298,21 @@ fn detail_button_styles_match_chat_buttons() {
         .fg(semantic.accent)
         .add_modifier(Modifier::REVERSED);
     assert_eq!(
-        button_style(DetailAction::CopyError, false, &theme),
+        super::detail::button_style(DetailAction::CopyError, false, &theme),
         copy_default
     );
     assert_eq!(
-        button_style(DetailAction::CopyError, true, &theme),
+        super::detail::button_style(DetailAction::CopyError, true, &theme),
         copy_default.add_modifier(Modifier::BOLD)
     );
     // message_area/render/interaction.rs 选项按钮 + message_area/mod.rs:719 选中态
     let plain = Style::default().fg(semantic.text.primary);
-    assert_eq!(button_style(DetailAction::Back, false, &theme), plain);
     assert_eq!(
-        button_style(DetailAction::Auth, true, &theme),
+        super::detail::button_style(DetailAction::Back, false, &theme),
+        plain
+    );
+    assert_eq!(
+        super::detail::button_style(DetailAction::Auth, true, &theme),
         plain
             .bg(semantic.surface.selection)
             .add_modifier(Modifier::BOLD)
@@ -338,7 +346,7 @@ fn detail_button_columns_match_rendered_lines() {
         ..McpServerSummary::default()
     };
     let lines = detail_lines(&summary, 0);
-    for button in detail_buttons(&summary, 0, TEST_WIDTH) {
+    for button in super::detail::detail_buttons(&summary, 0, TEST_WIDTH) {
         let line = lines
             .get(button.row as usize)
             .expect("按钮行必须在渲染范围内");
@@ -362,10 +370,13 @@ fn detail_button_columns_match_rendered_lines() {
 #[test]
 fn detail_actions_order_and_default_selection() {
     assert_eq!(
-        detail_actions(&McpServerSummary::default()),
+        super::detail::detail_actions(&McpServerSummary::default()),
         vec![DetailAction::Back]
     );
-    assert_eq!(default_detail_btn(&McpServerSummary::default()), 0);
+    assert_eq!(
+        super::detail::default_detail_btn(&McpServerSummary::default()),
+        0
+    );
 
     let summary = McpServerSummary {
         error_summary: Some("boom".into()),
@@ -373,7 +384,7 @@ fn detail_actions_order_and_default_selection() {
         ..McpServerSummary::default()
     };
     assert_eq!(
-        detail_actions(&summary),
+        super::detail::detail_actions(&summary),
         vec![
             DetailAction::CopyError,
             DetailAction::Auth,
@@ -381,15 +392,15 @@ fn detail_actions_order_and_default_selection() {
         ]
     );
     assert_eq!(
-        detail_action_at(&summary, default_detail_btn(&summary)),
+        super::detail::detail_action_at(&summary, super::detail::default_detail_btn(&summary)),
         Some(DetailAction::Back)
     );
     assert_eq!(
-        detail_actions(&summary).len(),
-        detail_buttons(&summary, 0, TEST_WIDTH).len(),
+        super::detail::detail_actions(&summary).len(),
+        super::detail::detail_buttons(&summary, 0, TEST_WIDTH).len(),
         "键盘选择索引空间必须与渲染按钮一一对应"
     );
-    assert_eq!(detail_action_at(&summary, 3), None);
+    assert_eq!(super::detail::detail_action_at(&summary, 3), None);
 }
 
 /// 复制按钮相关 key 双语齐备（缺 key 时 tr 回落为 key 原文）。
@@ -416,8 +427,8 @@ fn detail_copy_text_keeps_raw_error_summary() {
         error_summary: Some(raw.clone()),
         ..McpServerSummary::default()
     };
-    assert_eq!(detail_copy_text(&summary), Some(raw.as_str()));
-    assert_eq!(detail_copy_text(&McpServerSummary::default()), None);
+    assert_eq!(super::detail_copy_text(&summary), Some(raw.as_str()));
+    assert_eq!(super::detail_copy_text(&McpServerSummary::default()), None);
 }
 
 #[test]
@@ -449,65 +460,25 @@ fn detail_lines_protocol_falls_back_when_unnegotiated() {
 }
 
 #[test]
-fn connected_at_parses_offsets_to_same_instant() {
-    // %s（Unix 秒）不受本地时区影响：同一时刻的两种写法必须一致。
-    let zulu = format_connected_at("2026-10-11T06:32:05Z", "%s");
-    let offset = format_connected_at("2026-10-11T14:32:05+08:00", "%s");
-    assert!(zulu.is_some());
-    assert_eq!(zulu, offset);
-}
-
-#[test]
-fn connected_at_rejects_invalid_timestamp() {
-    assert_eq!(format_connected_at("not-a-timestamp", "%H:%M"), None);
-}
-
-#[test]
 fn detail_button_row_shifts_with_error_summary() {
     let with_error = McpServerSummary {
         error_summary: Some("boom".into()),
         ..McpServerSummary::default()
     };
     // 单行错误：错误标题 + 摘要 + 空行 = 3 行（复制按钮与标题同行，不占行）
-    assert_eq!(detail_btn_row(&with_error, 0, TEST_WIDTH), 24);
+    assert_eq!(
+        super::detail::detail_btn_row(&with_error, 0, TEST_WIDTH),
+        24
+    );
     // 换行行数增长 → 按钮行同步下移（120 字符按 52 宽 = 3 行）
     let long_error = McpServerSummary {
         error_summary: Some("E".repeat(120)),
         ..McpServerSummary::default()
     };
-    assert_eq!(detail_error_lines(&long_error), Some(3));
-    assert_eq!(detail_btn_row(&long_error, 0, TEST_WIDTH), 26);
-}
-
-#[test]
-fn cache_status_labels_are_explicit() {
+    assert_eq!(super::detail::detail_error_lines(&long_error), Some(3));
     assert_eq!(
-        cache_status_label_key(Some("cache_disabled_by_config")),
-        Some("panel-mcp-cache-disabled-config")
-    );
-    assert_eq!(
-        cache_status_label_key(Some("cache_pending")),
-        Some("panel-mcp-cache-pending")
-    );
-    assert_eq!(
-        cache_status_label_key(Some("cache_ready")),
-        Some("panel-mcp-cache-ready")
-    );
-    assert_eq!(
-        cache_status_label_key(Some("stored_after_fetch")),
-        Some("panel-mcp-cache-saved")
-    );
-    assert_eq!(
-        cache_status_label_key(Some("cached")),
-        Some("panel-mcp-cache-hit")
-    );
-    assert_eq!(
-        cache_status_label_key(Some("cache_disabled")),
-        Some("panel-mcp-cache-disabled")
-    );
-    assert_eq!(
-        cache_status_label_key(Some("live_fetch")),
-        Some("panel-mcp-cache-live-fetch")
+        super::detail::detail_btn_row(&long_error, 0, TEST_WIDTH),
+        26
     );
 }
 
@@ -564,7 +535,7 @@ impl MountedPanel {
     fn event(&self, event: Event) -> EventResult {
         let servers = MCP_SERVERS.state().read().clone();
         let viewport = ListViewport::for_content_rows(
-            content_rows(Some(TEST_AREA), TEST_AREA.height),
+            crate::kit::panels::shared::list::content_rows(Some(TEST_AREA), TEST_AREA.height),
             super::LIST_METRICS,
             servers.len(),
             *self.selected.read(),
@@ -635,6 +606,7 @@ fn left_down(row: u16, column: u16) -> Event {
     })
 }
 
+#[must_use]
 fn server(name: &str) -> McpServerSummary {
     McpServerSummary {
         name: name.to_string(),
@@ -847,7 +819,7 @@ fn detail_click_accounts_for_scroll_offset() {
             "偏移后的旧行号不得命中按钮"
         );
 
-        let btn_row = detail_btn_row(&server("alpha"), 0, TEST_AREA.width);
+        let btn_row = super::detail::detail_btn_row(&server("alpha"), 0, TEST_AREA.width);
         let screen_row = TEST_AREA.y + 1 + btn_row - offset;
         assert_eq!(panel.event(left_down(screen_row, 2)), EventResult::Consumed);
         assert_eq!(
@@ -975,3 +947,20 @@ fn detail_target_disappearing_returns_to_list() {
         }
     });
 }
+
+use crate::kit::atoms::McpServerSummary;
+
+use crate::kit::atoms::ACTIVE_PANEL;
+
+use crate::kit::atoms::MCP_SERVERS;
+
+use crate::kit::atoms::OAUTH_INFO;
+
+use crate::kit::atoms::POPUP_KIND;
+
+use crate::kit::atoms::PopupKind;
+
+use peri_acp_types::event_data::OauthNeeded;
+
+#[path = "tests/status_projection.rs"]
+mod status_projection;

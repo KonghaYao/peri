@@ -1,10 +1,11 @@
-use super::*;
-use peri_acp::transport::{mpsc::mpsc_transport_pair, types::IncomingMessage};
+use super::{AcpTuiClient, CONFIG_REQUEST_TIMEOUT, json};
+
+use peri_acp::transport::types::IncomingMessage;
 
 #[tokio::test(start_paused = true)]
 #[serial_test::serial]
 async fn steer_config_timeout_releases_gate_and_ignores_late_responses() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("session-a", false);
     let original = crate::kit::atoms::SERVICE_SNAPSHOT.state().read().clone();
@@ -30,15 +31,15 @@ async fn steer_config_timeout_releases_gate_and_ignores_late_responses() {
         );
         assert!(client.lifecycle.operation_gate().try_lock().is_err());
         tokio::time::advance(CONFIG_REQUEST_TIMEOUT + std::time::Duration::from_millis(1)).await;
-        let error = request.await.unwrap().unwrap_err();
+        let error = request.await.expect("steer config timeout releases gate and ignores late responses: fixture task and request must complete successfully").expect_err("steer config timeout releases gate and ignores late responses: the invalid fixture must be rejected");
         assert!(error.message.contains("timed out"));
         let gate = client.lifecycle.operation_gate();
         let guard = gate.try_lock().expect("超时必须释放 gate");
         drop(guard);
         client.force_stable_for_test("session-b", false);
-        server.send_response(id, Ok(json!({}))).await.unwrap();
+        server.send_response(id, Ok(json!({}))).await.expect("steer config timeout releases gate and ignores late responses: fixture task and request must complete successfully");
         tokio::task::yield_now().await;
-        assert_eq!(client.stable_session_identity().unwrap().0, "session-b");
+        assert_eq!(client.stable_session_identity().expect("steer config timeout releases gate and ignores late responses: the stable_session_identity fixture operation uses valid inputs").0, "session-b");
         {
             let snapshot = crate::kit::atoms::SERVICE_SNAPSHOT.state();
             let snapshot = snapshot.read();
@@ -54,7 +55,9 @@ async fn steer_config_timeout_releases_gate_and_ignores_late_responses() {
         };
         assert_eq!(params["sessionId"], "session-b");
         assert!(!next.is_finished());
-        server.send_response(id, Ok(json!({}))).await.unwrap();
-        next.await.unwrap().unwrap();
+        server.send_response(id, Ok(json!({}))).await.expect("steer config timeout releases gate and ignores late responses: fixture task and request must complete successfully");
+        next.await.expect("steer config timeout releases gate and ignores late responses: fixture task and request must complete successfully").expect("steer config timeout releases gate and ignores late responses: fixture task and request must complete successfully");
     }
 }
+
+use peri_acp::transport::AcpTransport;

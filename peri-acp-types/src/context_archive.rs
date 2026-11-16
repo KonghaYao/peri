@@ -4,16 +4,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-use crate::{
-    messages::MessageId,
-    projection::MessageProjectionDirective,
-    store::{serialize_persisted_payload, PersistedPayload},
-    thread::ThreadId,
-};
+use crate::messages::MessageId;
+use crate::projection::MessageProjectionDirective;
+use crate::store;
+use crate::store::PersistedPayload;
+use crate::thread::ThreadId;
 
-#[path = "context_archive/batch.rs"]
-mod batch;
-pub use batch::{ArchiveChunkBatch, ARCHIVE_CHUNKS_PER_BATCH};
+pub use crate::archive_chunk_batch::{ArchiveChunkBatch, ARCHIVE_CHUNKS_PER_BATCH};
 
 pub const ARCHIVE_FORMAT_VERSION: u32 = 1;
 pub const ARCHIVE_CHUNK_BYTES: usize = 4096;
@@ -22,6 +19,7 @@ pub const ARCHIVE_MAX_MEMBERS: usize = 32;
 pub const ARCHIVE_DEFAULT_TOKENS: u32 = 2048;
 pub const ARCHIVE_MAX_TOKENS: u32 = 4096;
 
+/// One durable message in an archive catalog, with its canonical and per-chunk digests.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArchiveMember {
     pub message_id: MessageId,
@@ -35,6 +33,7 @@ pub struct ArchiveMember {
     pub block_types: Vec<String>,
 }
 
+/// Durable membership and dependency metadata for an archived context group.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArchiveCatalog {
     pub format_version: u32,
@@ -47,6 +46,7 @@ pub struct ArchiveCatalog {
     pub dependencies: Vec<MessageId>,
 }
 
+/// An inclusive archive range pinned to a committed message tail.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArchiveRoot {
     pub source_thread_id: ThreadId,
@@ -99,6 +99,7 @@ pub fn coalesce_archive_roots(
     merged
 }
 
+/// A durable archive location and digest; possession of it does not grant read access.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ArchiveReference {
@@ -113,6 +114,7 @@ pub enum ArchiveReference {
     },
 }
 
+/// Validation and retrieval failures from bounded context archive reads.
 #[derive(Debug, thiserror::Error)]
 pub enum ArchiveError {
     #[error("archive_invalid_request: {0}")]
@@ -171,7 +173,7 @@ pub fn build_catalog(
                     return Err(ArchiveError::Unsupported);
                 }
             }
-            let encoded = serialize_persisted_payload(payload)
+            let encoded = store::serialize_persisted_payload(payload)
                 .map_err(|e| ArchiveError::Unavailable(e.to_string()))?;
             let bytes = encoded.as_bytes();
             Ok(ArchiveMember {
@@ -408,17 +410,20 @@ pub struct ArchiveMetadataQuery {
     pub committed_tail: Option<MessageId>,
     pub limit: u32,
 }
+/// Projection metadata for one durable message, without loading its body.
 #[derive(Clone, Debug)]
 pub struct ArchiveMetadataItem {
     pub message_id: MessageId,
     pub projection: Option<MessageProjectionDirective>,
 }
+/// A bounded catalog page with its continuation position.
 #[derive(Clone, Debug)]
 pub struct ArchiveMetadataPage {
     pub committed_tail: MessageId,
     pub items: Vec<ArchiveMetadataItem>,
     pub next_after: Option<MessageId>,
 }
+/// A bounded byte-range read pinned to a committed archive tail.
 #[derive(Clone, Debug)]
 pub struct ArchiveChunkQuery {
     pub message_id: MessageId,
@@ -426,12 +431,14 @@ pub struct ArchiveChunkQuery {
     pub offset: u64,
     pub max_bytes: u32,
 }
+/// A bounded canonical byte fragment and the full body's byte length.
 #[derive(Clone, Debug)]
 pub struct ArchiveChunk {
     pub bytes: Vec<u8>,
     pub total_bytes: u64,
 }
 
+/// An opaque archive reference with an optional continuation cursor and read budget.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArchiveReadRequest {
@@ -441,6 +448,7 @@ pub struct ArchiveReadRequest {
     #[serde(default)]
     pub budget_tokens: Option<u32>,
 }
+/// A bounded archive response whose continuation cursor identifies remaining content.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ArchiveReadResponse {
     pub archive_ref: String,
@@ -448,6 +456,7 @@ pub struct ArchiveReadResponse {
     pub next_cursor: Option<String>,
     pub entries: Vec<ArchiveReadEntry>,
 }
+/// One canonical JSON fragment, identified by message, archive reference, and byte offset.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ArchiveReadEntry {
     pub message_id: MessageId,
@@ -462,6 +471,7 @@ pub struct ArchiveReadEntry {
     pub encoding: String,
     pub complete: bool,
 }
+/// Authorization-scoped, bounded access to durable archive metadata and chunks.
 #[async_trait]
 pub trait ContextArchiveReadPort: Send + Sync {
     async fn read(&self, request: ArchiveReadRequest) -> Result<ArchiveReadResponse, ArchiveError>;

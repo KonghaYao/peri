@@ -1,6 +1,21 @@
 //! Panel-level tests for the login authentication sub-views.
 
-use super::*;
+use super::Event;
+use super::EventResult;
+use super::KeyCode;
+use super::KeyModifiers;
+use super::LoginEditState;
+use super::LoginField;
+use super::LoginPanelMode;
+use super::MountedPanel;
+use super::MouseButton;
+use super::MouseEvent;
+use super::MouseEventKind;
+use super::NotificationGuard;
+use super::Position;
+use super::Rect;
+use super::TEST_AREA;
+use super::serial;
 use crate::kit::panels::login::auth;
 use crate::kit::panels::login::auth_render;
 use crate::kit::panels::login::render;
@@ -18,7 +33,7 @@ fn auth_detail_escape_cancels_without_closing_login() {
     let _ = auth::take_test_dispatches();
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_panel_at(3, move |panel| {
+    super::mount_panel_at(3, move |panel| {
         if frame == 0 {
             *panel.edit_state.write() = Some(LoginEditState::new_provider(
                 &crate::config::PeriConfig::default(),
@@ -34,13 +49,13 @@ fn auth_detail_escape_cancels_without_closing_login() {
                 });
         }
         if frame == 1 {
-            let result = panel.event(key(KeyCode::Esc), TEST_AREA);
-            tx.send((result, *panel.mode.read())).unwrap();
+            let result = panel.event(super::key(KeyCode::Esc), TEST_AREA);
+            tx.send((result, *panel.mode.read())).expect("auth detail escape cancels without closing login: isolated fixture workspace must remain accessible");
         }
         frame += 1;
     });
 
-    let (result, mode) = rx.try_recv().unwrap();
+    let (result, mode) = rx.try_recv().expect("auth detail escape cancels without closing login: fixture channel must deliver its expected message");
     assert_eq!(result, EventResult::Consumed);
     assert_eq!(
         mode,
@@ -56,7 +71,7 @@ fn confirm_logout_defaults_to_cancel_and_only_explicit_confirm_dispatches() {
     let _ = auth::take_test_dispatches();
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_panel_at(5, move |panel| {
+    super::mount_panel_at(5, move |panel| {
         if frame == 0 {
             *panel.edit_state.write() = Some(LoginEditState::new_provider(
                 &crate::config::PeriConfig::default(),
@@ -72,10 +87,10 @@ fn confirm_logout_defaults_to_cancel_and_only_explicit_confirm_dispatches() {
             );
         }
         if frame == 1 {
-            let result = panel.event(key(KeyCode::Enter), TEST_AREA);
+            let result = panel.event(super::key(KeyCode::Enter), TEST_AREA);
             let mode = *panel.mode.read();
             let dispatches = auth::take_test_dispatches();
-            tx.send((result, mode, dispatches, 0usize)).unwrap();
+            tx.send((result, mode, dispatches, 0usize)).expect("confirm logout defaults to cancel and only explicit confirm dispatches: fixture channel must deliver its expected message");
             // 重新打开确认视图，验证显式确认才发注销。
             *panel.mode.write() = LoginPanelMode::ConfirmLogout;
             assert!(
@@ -86,23 +101,23 @@ fn confirm_logout_defaults_to_cancel_and_only_explicit_confirm_dispatches() {
             );
         }
         if frame == 2 {
-            let _ = panel.event(key(KeyCode::Right), TEST_AREA);
-            let _ = panel.event(key(KeyCode::Enter), TEST_AREA);
+            let _ = panel.event(super::key(KeyCode::Right), TEST_AREA);
+            let _ = panel.event(super::key(KeyCode::Enter), TEST_AREA);
             let mode = *panel.mode.read();
             let dispatches = auth::take_test_dispatches();
             tx.send((EventResult::Consumed, mode, dispatches, 1usize))
-                .unwrap();
+                .expect("confirm logout defaults to cancel and only explicit confirm dispatches: fixture channel must deliver its expected message");
         }
         frame += 1;
     });
 
-    let (_, mode, dispatches, _) = rx.try_recv().unwrap();
+    let (_, mode, dispatches, _) = rx.try_recv().expect("confirm logout defaults to cancel and only explicit confirm dispatches: fixture channel must deliver its expected message");
     assert_eq!(mode, LoginPanelMode::Edit);
     assert!(
         dispatches.is_empty(),
         "默认焦点是取消，Enter 不得注销：{dispatches:?}"
     );
-    let (_, mode, dispatches, _) = rx.try_recv().unwrap();
+    let (_, mode, dispatches, _) = rx.try_recv().expect("confirm logout defaults to cancel and only explicit confirm dispatches: fixture channel must deliver its expected message");
     assert_eq!(mode, LoginPanelMode::Edit);
     assert_eq!(dispatches, vec!["logout"]);
 }
@@ -114,7 +129,7 @@ fn auth_detail_buttons_hit_only_their_semantic_rows() {
     let _ = auth::take_test_dispatches();
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_panel_at(4, move |panel| {
+    super::mount_panel_at(4, move |panel| {
         if frame == 0 {
             *panel.edit_state.write() = Some(LoginEditState::new_provider(
                 &crate::config::PeriConfig::default(),
@@ -141,7 +156,7 @@ fn auth_detail_buttons_hit_only_their_semantic_rows() {
                     .iter()
                     .find(|(_, action)| *action == auth::DetailAction::CancelLogin)
                     .map(|(row, _)| *row)
-                    .unwrap()
+                    .expect("auth detail buttons hit only their semantic rows: fixture must contain the searched item")
             };
             // 空白行不触发注销/取消。
             let blank = panel.event(
@@ -165,11 +180,11 @@ fn auth_detail_buttons_hit_only_their_semantic_rows() {
                 TEST_AREA,
             );
             tx.send((blank, still_detail, cancel, *panel.mode.read()))
-                .unwrap();
+                .expect("auth detail buttons hit only their semantic rows: isolated fixture workspace must remain accessible");
         }
         frame += 1;
     });
-    let (blank, still_detail, cancel, mode) = rx.try_recv().unwrap();
+    let (blank, still_detail, cancel, mode) = rx.try_recv().expect("auth detail buttons hit only their semantic rows: fixture channel must deliver its expected message");
     assert_eq!(blank, EventResult::Consumed);
     assert_eq!(still_detail, LoginPanelMode::AuthDetail, "空白行不能取消");
     assert_eq!(cancel, EventResult::Consumed);
@@ -227,7 +242,8 @@ fn plan_edit_state() -> LoginEditState {
             models: Default::default(),
             ..Default::default()
         });
-    LoginEditState::edit_provider(&cfg, "plan", None).unwrap()
+    LoginEditState::edit_provider(&cfg, "plan", None)
+        .expect("plan edit state: the edit_provider fixture operation uses valid inputs")
 }
 
 #[test]
@@ -239,21 +255,21 @@ fn editing_plan_store_clears_the_previously_verified_identity() {
 
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_panel_at(3, move |panel| {
+    super::mount_panel_at(3, move |panel| {
         if frame == 0 {
             *panel.edit_state.write() = Some(state.clone());
             *panel.mode.write() = LoginPanelMode::Edit;
             *panel.edit_focus.write() = LoginField::PlanStore;
         }
         if frame == 1 {
-            let _ = panel.event(key(KeyCode::Char('x')), TEST_AREA);
-            let state = panel.edit_state.read().clone().unwrap();
+            let _ = panel.event(super::key(KeyCode::Char('x')), TEST_AREA);
+            let state = panel.edit_state.read().clone().expect("editing plan store clears the previously verified identity: isolated fixture workspace must remain accessible");
             tx.send((state.plan.store.clone(), state.plan.subject.clone()))
-                .unwrap();
+                .expect("editing plan store clears the previously verified identity: fixture channel must deliver its expected message");
         }
         frame += 1;
     });
-    let (store, subject) = rx.try_recv().unwrap();
+    let (store, subject) = rx.try_recv().expect("editing plan store clears the previously verified identity: fixture channel must deliver its expected message");
     assert!(store.starts_with('x'), "store edit applied at the cursor");
     assert!(subject.is_empty(), "changed target cannot inherit identity");
 }
@@ -266,7 +282,7 @@ fn paste_on_auth_actions_is_ignored_without_panicking() {
     let expected_store = state.plan.store.clone();
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_panel_at(3, move |panel| {
+    super::mount_panel_at(3, move |panel| {
         if frame == 0 {
             *panel.edit_state.write() = Some(state.clone());
             *panel.mode.write() = LoginPanelMode::Edit;
@@ -279,11 +295,11 @@ fn paste_on_auth_actions_is_ignored_without_panicking() {
                 .read()
                 .as_ref()
                 .map(|state| state.plan.store.clone());
-            tx.send((result, store)).unwrap();
+            tx.send((result, store)).expect("paste on auth actions is ignored without panicking: fixture channel must deliver its expected message");
         }
         frame += 1;
     });
-    let (result, store) = rx.try_recv().unwrap();
+    let (result, store) = rx.try_recv().expect("paste on auth actions is ignored without panicking: fixture channel must deliver its expected message");
     assert_eq!(result, EventResult::Ignored);
     assert_eq!(store.as_deref(), Some(expected_store.as_str()));
 }
@@ -291,7 +307,7 @@ fn paste_on_auth_actions_is_ignored_without_panicking() {
 // ── 滚动后的子视图鼠标命中（P0-89）────────────────────────────────────────────
 
 use crate::chatgpt_auth::{ChatGptAuthBackend, ChatGptAuthSession};
-use crate::kit::atoms::NOTIFICATION;
+
 use peri_acp::provider::auth::{AccountStatus, AuthError, AuthResult, LogoutOutcome};
 use tokio_util::sync::CancellationToken;
 
@@ -310,6 +326,7 @@ const LOGOUT_AREA: Rect = Rect {
     height: 6,
 };
 
+#[must_use]
 fn long_auth_url() -> String {
     format!(
         "https://auth.example.test/authorize?state={}",
@@ -367,7 +384,7 @@ fn run_detail_input(input: DetailInput, offset: u16) -> DetailSnapshot {
     let url = long_auth_url();
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_panel_at(2, move |panel| {
+    super::mount_panel_at(2, move |panel| {
         if frame == 0 {
             *panel.edit_state.write() = Some(LoginEditState::new_provider(
                 &crate::config::PeriConfig::default(),
@@ -385,17 +402,17 @@ fn run_detail_input(input: DetailInput, offset: u16) -> DetailSnapshot {
             panel.sv.write().set_offset(Position::new(0, offset));
             match input {
                 DetailInput::Key(_) => {
-                    let _ = panel.event(key(KeyCode::Enter), DETAIL_AREA);
+                    let _ = panel.event(super::key(KeyCode::Enter), DETAIL_AREA);
                 }
                 DetailInput::Mouse(action) => {
                     let row = detail_button_screen_row(&panel, action, DETAIL_AREA, offset);
-                    let _ = panel.event(click_at(row, 3), DETAIL_AREA);
+                    let _ = panel.event(super::click_at(row, 3), DETAIL_AREA);
                 }
                 DetailInput::Row(row) => {
-                    let _ = panel.event(click_at(row, 3), DETAIL_AREA);
+                    let _ = panel.event(super::click_at(row, 3), DETAIL_AREA);
                 }
                 DetailInput::Cell(row, column) => {
-                    let _ = panel.event(click_at(row, column), DETAIL_AREA);
+                    let _ = panel.event(super::click_at(row, column), DETAIL_AREA);
                 }
             }
             tx.send(DetailSnapshot {
@@ -409,11 +426,12 @@ fn run_detail_input(input: DetailInput, offset: u16) -> DetailSnapshot {
                     .map(|note| note.message.clone()),
                 url_actions: auth::take_test_url_actions(),
             })
-            .unwrap();
+            .expect("run detail input: isolated fixture workspace must remain accessible");
         }
         frame += 1;
     });
-    rx.try_recv().unwrap()
+    rx.try_recv()
+        .expect("run detail input: fixture channel must deliver its expected message")
 }
 
 #[test]
@@ -507,7 +525,7 @@ fn scrolled_logout_confirm_buttons_match_keyboard_actions() {
     let _note = NotificationGuard::install();
     let mut keyboard_frame = 0usize;
     let (keyboard_tx, keyboard_rx) = std::sync::mpsc::channel();
-    mount_panel_at(2, move |panel| {
+    super::mount_panel_at(2, move |panel| {
         if keyboard_frame == 0 {
             *panel.edit_state.write() = Some(LoginEditState::new_provider(
                 &crate::config::PeriConfig::default(),
@@ -522,25 +540,25 @@ fn scrolled_logout_confirm_buttons_match_keyboard_actions() {
                     .open_logout_confirm(auth_target(), vec!["plan".to_string()])
             );
             let _ = auth::take_test_dispatches();
-            let _ = panel.event(key(KeyCode::Right), LOGOUT_AREA);
-            let _ = panel.event(key(KeyCode::Enter), LOGOUT_AREA);
+            let _ = panel.event(super::key(KeyCode::Right), LOGOUT_AREA);
+            let _ = panel.event(super::key(KeyCode::Enter), LOGOUT_AREA);
             keyboard_tx
                 .send((
                     *panel.mode.read(),
                     *panel.edit_focus.read(),
                     auth::take_test_dispatches(),
                 ))
-                .unwrap();
+                .expect("scrolled logout confirm buttons match keyboard actions: isolated fixture workspace must remain accessible");
         }
         keyboard_frame += 1;
     });
-    let keyboard = keyboard_rx.try_recv().unwrap();
+    let keyboard = keyboard_rx.try_recv().expect("scrolled logout confirm buttons match keyboard actions: fixture channel must deliver its expected message");
     assert_eq!(keyboard.0, LoginPanelMode::Edit);
     assert_eq!(keyboard.2, vec!["logout"]);
 
     let mut mouse_frame = 0usize;
     let (mouse_tx, mouse_rx) = std::sync::mpsc::channel();
-    mount_panel_at(2, move |panel| {
+    super::mount_panel_at(2, move |panel| {
         if mouse_frame == 0 {
             *panel.edit_state.write() = Some(LoginEditState::new_provider(
                 &crate::config::PeriConfig::default(),
@@ -558,7 +576,7 @@ fn scrolled_logout_confirm_buttons_match_keyboard_actions() {
             panel.sv.write().set_offset(Position::new(0, 5));
             let layout = {
                 let auth = panel.auth.read();
-                let confirm = auth.logout_confirm().unwrap();
+                let confirm = auth.logout_confirm().expect("scrolled logout confirm buttons match keyboard actions: the logout_confirm fixture operation uses valid inputs");
                 auth_render::build_logout_layout(confirm, &detail_colors())
             };
             let row = layout
@@ -566,20 +584,20 @@ fn scrolled_logout_confirm_buttons_match_keyboard_actions() {
                 .iter()
                 .find(|(_, focus)| *focus == auth::LogoutFocus::Confirm)
                 .map(|(row, _)| *row as u16)
-                .unwrap();
+                .expect("scrolled logout confirm buttons match keyboard actions: fixture must contain the searched item");
             assert!(row >= 5, "确认按钮必须落在滚动后的可见窗口");
-            let _ = panel.event(click_at(1 + (row - 5), 3), LOGOUT_AREA);
+            let _ = panel.event(super::click_at(1 + (row - 5), 3), LOGOUT_AREA);
             mouse_tx
                 .send((
                     *panel.mode.read(),
                     *panel.edit_focus.read(),
                     auth::take_test_dispatches(),
                 ))
-                .unwrap();
+                .expect("scrolled logout confirm buttons match keyboard actions: isolated fixture workspace must remain accessible");
         }
         mouse_frame += 1;
     });
-    let mouse = mouse_rx.try_recv().unwrap();
+    let mouse = mouse_rx.try_recv().expect("scrolled logout confirm buttons match keyboard actions: fixture channel must deliver its expected message");
     assert_eq!(mouse, keyboard, "滚动后点击确认必须与键盘注销一致");
 }
 
@@ -694,12 +712,12 @@ fn run_detached_logout_case(
     let mut ticket: Option<LogoutTicket> = None;
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_panel_at(9, move |panel| {
+    super::mount_panel_at(9, move |panel| {
         if frame == 0 {
             ticket = Some(begin_logout_wait(&panel));
         }
         if frame == 1 {
-            let _ = panel.event(key(KeyCode::Esc), TEST_AREA);
+            let _ = panel.event(super::key(KeyCode::Esc), TEST_AREA);
             assert!(matches!(
                 panel.auth.read().view(),
                 auth::AuthViewState::CancellingLogout
@@ -707,7 +725,7 @@ fn run_detached_logout_case(
             *NOTIFICATION.state().write() = None;
         }
         if frame == 2 {
-            let _ = panel.event(key(KeyCode::Esc), TEST_AREA);
+            let _ = panel.event(super::key(KeyCode::Esc), TEST_AREA);
             assert_eq!(*panel.mode.read(), LoginPanelMode::Browse);
             assert!(panel.edit_state.read().is_none());
             assert!(matches!(
@@ -716,10 +734,18 @@ fn run_detached_logout_case(
             ));
         }
         if frame == 3 {
-            push_logout_result(&panel, ticket.clone().unwrap(), result());
+            push_logout_result(
+                &panel,
+                ticket.clone().expect(
+                    "run detached logout case: the clone fixture operation uses valid inputs",
+                ),
+                result(),
+            );
         }
         if frame == 5 {
-            tx.send(logout_snapshot(&panel)).unwrap();
+            tx.send(logout_snapshot(&panel)).expect(
+                "run detached logout case: fixture channel must deliver its expected message",
+            );
             *NOTIFICATION.state().write() = None;
         }
         if frame == 6 {
@@ -727,7 +753,9 @@ fn run_detached_logout_case(
             panel.auth.write().shutdown();
             push_logout_result(
                 &panel,
-                ticket.clone().unwrap(),
+                ticket.clone().expect(
+                    "run detached logout case: the clone fixture operation uses valid inputs",
+                ),
                 Ok(LogoutOutcome {
                     local_cleared: true,
                     remote_revoked: false,
@@ -735,11 +763,18 @@ fn run_detached_logout_case(
             );
         }
         if frame == 8 {
-            tx.send(logout_snapshot(&panel)).unwrap();
+            tx.send(logout_snapshot(&panel)).expect(
+                "run detached logout case: fixture channel must deliver its expected message",
+            );
         }
         frame += 1;
     });
-    (rx.recv().unwrap(), rx.recv().unwrap())
+    (
+        rx.recv()
+            .expect("run detached logout case: fixture channel must deliver its expected message"),
+        rx.recv()
+            .expect("run detached logout case: fixture channel must deliver its expected message"),
+    )
 }
 
 #[test]
@@ -805,18 +840,18 @@ fn detached_logout_result_does_not_pollute_next_login_or_logout() {
     let mut ticket: Option<LogoutTicket> = None;
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
-    mount_panel_at(11, move |panel| {
+    super::mount_panel_at(11, move |panel| {
         if frame == 0 {
             ticket = Some(begin_logout_wait(&panel));
         }
         if frame == 1 {
-            let _ = panel.event(key(KeyCode::Esc), TEST_AREA);
-            let _ = panel.event(key(KeyCode::Esc), TEST_AREA);
+            let _ = panel.event(super::key(KeyCode::Esc), TEST_AREA);
+            let _ = panel.event(super::key(KeyCode::Esc), TEST_AREA);
         }
         if frame == 2 {
             push_logout_result(
                 &panel,
-                ticket.clone().unwrap(),
+                ticket.clone().expect("detached logout result does not pollute next login or logout: the clone fixture operation uses valid inputs"),
                 Ok(LogoutOutcome {
                     local_cleared: true,
                     remote_revoked: true,
@@ -838,7 +873,7 @@ fn detached_logout_result_does_not_pollute_next_login_or_logout() {
             ));
             push_logout_result(
                 &panel,
-                ticket.clone().unwrap(),
+                ticket.clone().expect("detached logout result does not pollute next login or logout: the clone fixture operation uses valid inputs"),
                 Ok(LogoutOutcome {
                     local_cleared: true,
                     remote_revoked: true,
@@ -847,7 +882,7 @@ fn detached_logout_result_does_not_pollute_next_login_or_logout() {
         }
         if frame == 6 {
             let next_login = logout_snapshot(&panel);
-            tx.send(("next-login", next_login)).unwrap();
+            tx.send(("next-login", next_login)).expect("detached logout result does not pollute next login or logout: fixture channel must deliver its expected message");
             // 下一次注销：旧代次不得把新注销标记为 detached。
             panel.auth.write().shutdown();
             // 真实的新注销发生在 Edit：保留草稿，避免终态落地后被 Browse 空闲清理覆盖。
@@ -875,16 +910,16 @@ fn detached_logout_result_does_not_pollute_next_login_or_logout() {
             );
         }
         if frame == 8 {
-            tx.send(("next-logout", logout_snapshot(&panel))).unwrap();
+            tx.send(("next-logout", logout_snapshot(&panel))).expect("detached logout result does not pollute next login or logout: fixture channel must deliver its expected message");
         }
         frame += 1;
     });
-    let (_, next_login) = rx.recv().unwrap();
+    let (_, next_login) = rx.recv().expect("detached logout result does not pollute next login or logout: fixture channel must deliver its expected message");
     assert_eq!(next_login.notification, None, "旧结果不得通知到新登录");
     assert!(next_login.starting_login, "旧结果不得改写新登录状态");
     assert_eq!(next_login.mode, LoginPanelMode::Browse);
 
-    let (_, next_logout) = rx.recv().unwrap();
+    let (_, next_logout) = rx.recv().expect("detached logout result does not pollute next login or logout: fixture channel must deliver its expected message");
     assert_eq!(
         next_logout.notification,
         Some(crate::i18n::tr("login-auth-logout-cleared-remote-revoked")),
@@ -896,3 +931,5 @@ fn detached_logout_result_does_not_pollute_next_login_or_logout() {
 
 #[path = "auth_state_test.rs"]
 mod auth_state;
+
+use crate::kit::atoms::NOTIFICATION;

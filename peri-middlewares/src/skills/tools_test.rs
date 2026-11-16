@@ -10,16 +10,19 @@
 //! 由 `crate::mcp::skill_activation_test.rs` 与 `peri-acp` 的端到端用例锚定，
 //! 本文件不重复构造假 peer。
 
-use super::*;
-use peri_acp_types::mcp_skills::{mcp_skill_name, HandleToken, McpSkillRegistry};
+use super::{DiscoverSkillsTool, SkillTool, Value};
+use peri_acp_types::mcp_skills;
+use peri_acp_types::mcp_skills::HandleToken;
+use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::skills::{SkillMetadata, SkillOrigin, SkillSource};
+use peri_agent::tools::BaseTool as _;
 use serde_json::json;
 use std::sync::Arc;
 
 /// 构造一个 MCP 来源条目（workspace 形状的 URI：`skill://{scope}/{name}/SKILL.md`）。
 fn fake_mcp_skill(server: &str, scope: &str, skill: &str) -> SkillMetadata {
     SkillMetadata {
-        name: mcp_skill_name(server, skill),
+        name: mcp_skills::mcp_skill_name(server, skill),
         aliases: Vec::new(),
         description: format!("MCP skill {skill}"),
         path: std::path::PathBuf::new(),

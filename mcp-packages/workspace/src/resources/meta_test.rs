@@ -3,9 +3,11 @@
 
 use std::path::Path;
 
-use peri_acp_types::workspace_resources::{digest_bytes, META_KEY_SCOPE};
+use peri_acp_types::workspace_resources;
+use peri_acp_types::workspace_resources::META_KEY_SCOPE;
 
-use super::*;
+use crate::resources::meta::META_DIR_RELATIVE;
+use crate::resources::ResourceError;
 use crate::resources::{
     ResourceBody, ResourceBudget, WorkspaceResourceProvider, WorkspaceResourcesInput,
 };
@@ -92,7 +94,7 @@ fn read_returns_verbatim_bytes_including_empty_and_cjk() {
     assert_eq!(payload.mime, "text/markdown");
     assert_eq!(
         payload.digest,
-        digest_bytes(verbatim.as_bytes()),
+        workspace_resources::digest_bytes(verbatim.as_bytes()),
         "digest 对原始字节计算"
     );
     assert_eq!(
@@ -265,9 +267,15 @@ fn non_utf8_file_name_yields_no_section_id() {
     bytes.extend_from_slice(b".md");
     let path = std::path::PathBuf::from(OsStr::from_bytes(&bytes));
     assert!(path.to_str().is_none(), "用例本身要求非 UTF-8 路径");
-    assert_eq!(section_id_of(&path), None);
+    assert_eq!(crate::resources::meta::section_id_of(&path), None);
 
     // 对照：合法 UTF-8 名字提取 stem（含 `.md` 之外的后缀由扩展名检查负责）。
-    assert_eq!(section_id_of(Path::new("good.md")), Some("good"));
-    assert_eq!(section_id_of(Path::new("a.b.md")), Some("a.b"));
+    assert_eq!(
+        crate::resources::meta::section_id_of(Path::new("good.md")),
+        Some("good")
+    );
+    assert_eq!(
+        crate::resources::meta::section_id_of(Path::new("a.b.md")),
+        Some("a.b")
+    );
 }

@@ -1,4 +1,13 @@
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::CacheUsageSample;
+use super::CurrentTurn;
+use super::SessionPhase;
+use super::TuiRenderUnit;
+use super::TuiToolStarted;
+use super::TuiUserBubble;
+use super::serial;
+use super::turn;
 
 #[test]
 #[serial]
@@ -32,7 +41,7 @@ fn test_two_turn_done_accumulates_committed() {
     };
 
     // 第一轮：stream one text → TurnDone
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "first turn".into(),
@@ -40,7 +49,7 @@ fn test_two_turn_done_accumulates_committed() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
     assert_eq!(
         state.committed.len(),
@@ -49,7 +58,7 @@ fn test_two_turn_done_accumulates_committed() {
     );
 
     // 第二轮：stream another text → TurnDone
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "second turn".into(),
@@ -57,7 +66,7 @@ fn test_two_turn_done_accumulates_committed() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
     let snapshot = VIEW_MODELS.state().read().clone();
     assert_eq!(
@@ -100,7 +109,7 @@ fn test_turndone_archives_assistant_to_committed() {
     };
 
     // 往 current_turn 写入一条 assistant 文本
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "assistant reply".into(),
@@ -109,7 +118,7 @@ fn test_turndone_archives_assistant_to_committed() {
         }),
     );
 
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
     // TurnDone 后 assistant VM 被归档到 committed
     assert_eq!(
@@ -162,7 +171,7 @@ fn test_turn_interrupted_empty_skips_archive() {
         window: Default::default(),
     };
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "test".into(),
@@ -216,14 +225,14 @@ fn test_turn_done_clears_last_submitted_text() {
         window: Default::default(),
     };
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "hello".into(),
             attachments: Vec::new(),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted { request_id: None },
     );
@@ -235,7 +244,7 @@ fn test_turn_done_clears_last_submitted_text() {
         Some("hello")
     );
 
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
     assert!(
         state.last_submitted_text.is_none(),
@@ -248,7 +257,7 @@ fn test_turn_done_clears_last_submitted_text() {
 #[serial]
 fn test_turn_done_archives_orphan_tool_not_running() {
     let mut state = super::make_fold_test_state();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
             tool_id: "ghost".into(),
@@ -265,7 +274,7 @@ fn test_turn_done_archives_orphan_tool_not_running() {
         matches!(&running.items[0], TuiRenderUnit::TuiToolCard(t) if t.is_running),
         "precondition: tool card running before TurnDone"
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let done = VIEW_MODELS.state().read().clone();
     match &done.items[0] {
         TuiRenderUnit::TuiToolCard(t) => {
@@ -279,7 +288,7 @@ fn test_turn_done_archives_orphan_tool_not_running() {
 #[serial]
 fn test_cache_coverage_uses_latest_sample_once_and_commits_with_turn() {
     let mut state = super::make_fold_test_state();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "assistant reply".into(),
@@ -293,7 +302,7 @@ fn test_cache_coverage_uses_latest_sample_once_and_commits_with_turn() {
         (102_941, 70_000),
         (104_478, 70_000),
     ] {
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::CacheUsageUpdated(Some(CacheUsageSample {
                 input_tokens: input,
@@ -330,7 +339,7 @@ fn test_cache_coverage_uses_latest_sample_once_and_commits_with_turn() {
 fn test_cache_coverage_final_healthy_sample_suppresses_earlier_low_sample() {
     let mut state = super::make_fold_test_state();
     for (input, cached) in [(100, 50), (100, 90)] {
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::CacheUsageUpdated(Some(CacheUsageSample {
                 input_tokens: input,
@@ -355,7 +364,7 @@ fn test_cache_coverage_final_healthy_sample_suppresses_earlier_low_sample() {
 
 fn assert_root_cache_clear_suppresses_earlier_low_sample(observation: &str) {
     let mut state = super::make_fold_test_state();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::CacheUsageUpdated(Some(CacheUsageSample {
             input_tokens: 100,
@@ -363,7 +372,7 @@ fn assert_root_cache_clear_suppresses_earlier_low_sample(observation: &str) {
             request_id: Some("earlier-low".into()),
         })),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::CacheUsageUpdated(None));
+    super::dispatch_and_notify(&mut state, &AcpEventData::CacheUsageUpdated(None));
     assert!(
         state.pending_cache_usage.is_none(),
         "{observation} root observation must clear the earlier low sample"
@@ -403,7 +412,7 @@ fn test_cache_coverage_final_invalid_observation_clears_earlier_low_sample() {
 #[serial]
 fn test_cache_coverage_survives_suspend_and_is_overwritten_before_done() {
     let mut state = super::make_fold_test_state();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::CacheUsageUpdated(Some(CacheUsageSample {
             input_tokens: 100,
@@ -411,17 +420,17 @@ fn test_cache_coverage_survives_suspend_and_is_overwritten_before_done() {
             request_id: Some("before-suspend".into()),
         })),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
     assert_eq!(
         state
             .pending_cache_usage
             .as_ref()
-            .unwrap()
+            .expect("cache coverage survives suspend and is overwritten before done: the fixture must retain its expected variant")
             .request_id
             .as_deref(),
         Some("before-suspend")
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::CacheUsageUpdated(Some(CacheUsageSample {
             input_tokens: 100,
@@ -433,7 +442,7 @@ fn test_cache_coverage_survives_suspend_and_is_overwritten_before_done() {
         state
             .pending_cache_usage
             .as_ref()
-            .unwrap()
+            .expect("cache coverage survives suspend and is overwritten before done: the fixture must retain its expected variant")
             .request_id
             .as_deref(),
         Some("after-wake")
@@ -448,3 +457,5 @@ fn test_cache_coverage_survives_suspend_and_is_overwritten_before_done() {
         "suspend must not remove an already emitted low-coverage warning"
     );
 }
+
+use crate::kit::atoms::{VIEW_MODELS, ViewModelsSnapshot};

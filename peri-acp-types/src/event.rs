@@ -5,9 +5,7 @@
 //! [`crate::event_v2`]，随 ExecutorEvent 全量退役（`2026-07-18-executor-event-retirement.md`）
 //! 一起删除。
 
-#[path = "event_origin.rs"]
-mod origin;
-pub use origin::{ChildEventOrigin, ChildEventStream, OriginatedExecutorEvent};
+pub use crate::event_origin::{ChildEventOrigin, ChildEventStream, OriginatedExecutorEvent};
 
 /// 事件 sink 的发送结果。只有 transport 确认写出后才允许调用方确认交付。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +14,7 @@ pub struct EventSinkError {
 }
 
 impl EventSinkError {
+    #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -489,18 +488,13 @@ pub enum CompactStrategy {
     Smart,
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactTrigger {
+    /// Missing trigger fields in older events default to automatic compaction.
+    #[default]
     Auto,
     Manual,
-}
-
-impl Default for CompactTrigger {
-    /// 反序列化缺省值：旧事件（无 trigger 字段）按 Auto 处理
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 fn default_compact_strategy() -> CompactStrategy {
@@ -919,6 +913,7 @@ pub struct EventMessage {
 
 impl EventMessage {
     /// 构造协议化前事件载体。
+    #[must_use]
     pub fn new(envelope: crate::identity::EventEnvelope, event: Option<ExecutorEvent>) -> Self {
         Self { envelope, event }
     }

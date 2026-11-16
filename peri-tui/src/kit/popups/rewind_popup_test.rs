@@ -1,10 +1,12 @@
 //! Tests
 
-use super::*;
+use super::RewindAction;
+use super::RewindView;
+use super::ThemeDefinition;
 use crate::i18n;
-use crate::kit::atoms::{RewindBudgetState, RewindFileChange};
+
 use fluent_bundle::FluentValue;
-use peri_acp_types::event_data::{RewindMessage, RewindPreview};
+
 use serial_test::serial;
 use std::sync::Arc;
 
@@ -32,7 +34,14 @@ fn test_popup_lines_candidates_view() {
             },
         ],
     });
-    let lines = build_popup_lines(&preview, &RewindBudgetState::Idle, &None, 0, 0, &theme());
+    let lines = super::build_popup_lines(
+        preview.as_ref(),
+        &RewindBudgetState::Idle,
+        None,
+        0,
+        0,
+        &theme(),
+    );
     let text: String = lines
         .iter()
         .map(|l| l.to_string())
@@ -58,13 +67,14 @@ fn test_popup_lines_candidates_view() {
 #[serial]
 fn test_popup_lines_empty_candidates() {
     crate::kit::atoms::init_atoms();
-    let lines = build_popup_lines(
-        &Some(RewindPreview {
+    let lines = super::build_popup_lines(
+        Some(RewindPreview {
             files: vec![],
             messages: vec![],
-        }),
+        })
+        .as_ref(),
         &RewindBudgetState::Idle,
-        &None,
+        None,
         0,
         0,
         &theme(),
@@ -82,10 +92,10 @@ fn test_popup_lines_empty_candidates() {
 #[serial]
 fn test_popup_lines_query_error() {
     crate::kit::atoms::init_atoms();
-    let lines = build_popup_lines(
-        &None,
+    let lines = super::build_popup_lines(
+        None,
         &RewindBudgetState::Idle,
-        &Some("RPC timeout".to_string()),
+        Some("RPC timeout".to_string()).as_deref(),
         0,
         0,
         &theme(),
@@ -109,7 +119,7 @@ fn test_popup_lines_query_error() {
 #[serial]
 fn test_popup_lines_loading() {
     crate::kit::atoms::init_atoms();
-    let lines = build_popup_lines(&None, &RewindBudgetState::Idle, &None, 0, 0, &theme());
+    let lines = super::build_popup_lines(None, &RewindBudgetState::Idle, None, 0, 0, &theme());
     let text: String = lines
         .iter()
         .map(|l| l.to_string())
@@ -133,7 +143,7 @@ fn test_popup_lines_budget_view() {
             kind: "write".into(),
         },
     ]);
-    let lines = build_popup_lines(&None, &budget, &None, 0, 0, &theme());
+    let lines = super::build_popup_lines(None, &budget, None, 0, 0, &theme());
     let text: String = lines
         .iter()
         .map(|l| l.to_string())
@@ -161,7 +171,7 @@ fn test_popup_lines_budget_view() {
 #[serial]
 fn test_popup_lines_executing() {
     crate::kit::atoms::init_atoms();
-    let lines = build_popup_lines(&None, &RewindBudgetState::Executing, &None, 0, 0, &theme());
+    let lines = super::build_popup_lines(None, &RewindBudgetState::Executing, None, 0, 0, &theme());
     let text: String = lines
         .iter()
         .map(|l| l.to_string())
@@ -172,23 +182,23 @@ fn test_popup_lines_executing() {
 
 #[test]
 fn test_truncate_str_short() {
-    assert_eq!(truncate_str("hello", 10), "hello");
+    assert_eq!(super::truncate_str("hello", 10), "hello");
 }
 
 #[test]
 fn test_truncate_str_exact() {
-    assert_eq!(truncate_str("hello", 5), "hello");
+    assert_eq!(super::truncate_str("hello", 5), "hello");
 }
 
 #[test]
 fn test_truncate_str_long() {
-    assert_eq!(truncate_str("hello world", 5), "hello…");
+    assert_eq!(super::truncate_str("hello world", 5), "hello…");
 }
 
 #[test]
 fn test_truncate_str_cjk() {
     // 中文字符 1 char = 3 bytes；chars().take 计 char 数不 panic
-    assert_eq!(truncate_str("你好世界朋友", 4), "你好世界…");
+    assert_eq!(super::truncate_str("你好世界朋友", 4), "你好世界…");
 }
 
 #[test]
@@ -216,7 +226,8 @@ fn test_selected_candidate_enter_submits_selected_message() {
         ],
     });
 
-    let action = preview_action(&preview, 1).expect("移动选择后 Enter 应生成 action");
+    let action =
+        super::preview_action(preview.as_ref(), 1).expect("移动选择后 Enter 应生成 action");
     match action {
         RewindAction::Preview {
             target_message_id,
@@ -232,7 +243,15 @@ fn test_selected_candidate_enter_submits_selected_message() {
 #[test]
 fn test_empty_budget_uses_confirmation_view() {
     assert_eq!(
-        rewind_view(&RewindBudgetState::Files(vec![])),
+        super::rewind_view(&RewindBudgetState::Files(vec![])),
         RewindView::Budget
     );
 }
+
+use crate::kit::atoms::RewindBudgetState;
+
+use crate::kit::atoms::RewindFileChange;
+
+use peri_acp_types::event_data::RewindMessage;
+
+use peri_acp_types::event_data::RewindPreview;

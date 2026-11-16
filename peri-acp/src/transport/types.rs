@@ -52,6 +52,7 @@ pub struct AcpError {
 }
 
 impl AcpError {
+    #[must_use]
     pub fn new(code: i64, message: impl Into<String>) -> Self {
         Self {
             code,

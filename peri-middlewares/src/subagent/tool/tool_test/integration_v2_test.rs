@@ -1,4 +1,11 @@
-use super::*;
+use super::AgentCancellationToken;
+use super::Arc;
+use super::BaseMessage;
+use super::BaseTool;
+use super::HostFixture;
+use super::RwLock;
+use super::SubAgentTool;
+use super::SubagentLlmSource;
 use serial_test::serial;
 
 // ─── SubAgent v2 集成测试（4 场景）──────────────────────────────────────
@@ -167,14 +174,14 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
             request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let _ = &cancellation;
-            let messages = base_messages(&request);
-            let defined = defined_tools(&request);
+            let messages = test_support::base_messages(&request);
+            let defined = test_support::defined_tools(&request);
             let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             *self.captured.lock().unwrap() = messages.iter().map(|m| m.content()).collect();
-            text_events("ctx-preferred")
+            test_support::text_events("ctx-preferred")
         }
     }
     crate::subagent::test_support::fixture_model_impl!(CaptureContentLLM);
@@ -247,14 +254,14 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
             request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let _ = &cancellation;
-            let messages = base_messages(&request);
-            let defined = defined_tools(&request);
+            let messages = test_support::base_messages(&request);
+            let defined = test_support::defined_tools(&request);
             let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             *self.captured.lock().unwrap() = messages.iter().map(|m| m.content()).collect();
-            text_events("fallback-used")
+            test_support::text_events("fallback-used")
         }
     }
     crate::subagent::test_support::fixture_model_impl!(FallbackCaptureLLM);
@@ -329,14 +336,14 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
             request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let _ = &cancellation;
-            let messages = base_messages(&request);
-            let defined = defined_tools(&request);
+            let messages = test_support::base_messages(&request);
+            let defined = test_support::defined_tools(&request);
             let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             *self.captured.lock().unwrap() = messages.iter().map(|m| m.content()).collect();
-            text_events("tool-call-dropped")
+            test_support::text_events("tool-call-dropped")
         }
     }
     crate::subagent::test_support::fixture_model_impl!(DropToolCallCaptureLLM);
@@ -417,13 +424,13 @@ async fn test_integration_background_independent_survives_parent_cancel() {
             _request: peri_model::ModelRequest,
             _cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let receiver = self.release.lock().unwrap().take();
             if let Some(receiver) = receiver {
                 let _ = receiver.await;
             }
             self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            text_events("bg done independent")
+            test_support::text_events("bg done independent")
         }
     }
     crate::subagent::test_support::fixture_model_impl!(CountingLLM);
@@ -589,7 +596,7 @@ async fn test_integration_background_independent_survives_parent_cancel() {
 /// 与"返回值规范化"约定。
 #[tokio::test]
 async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let host = HostFixture::open_in(dir.path(), "fixture-iv2-cascade").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -614,14 +621,14 @@ async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
             request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let _ = &cancellation;
-            let _messages = base_messages(&request);
-            let defined = defined_tools(&request);
+            let _messages = test_support::base_messages(&request);
+            let defined = test_support::defined_tools(&request);
             let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
+            test_support::tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
                 "id1",
                 "nonexistent",
                 serde_json::json!({}),
@@ -651,7 +658,7 @@ async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
         )
         .with_cancel(cancel),
     );
-    let t = with_agent_face(t, dir.path()).await;
+    let t = super::with_agent_face(t, dir.path()).await;
 
     let result = t
         .invoke(
@@ -689,7 +696,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let agents_dir = dir.path().join(".claude").join("agents");
     let skills_dir = dir.path().join(".claude").join("skills").join("p0-2-skill");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -721,10 +728,10 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
             request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let _ = &cancellation;
-            let messages = base_messages(&request);
-            let defined = defined_tools(&request);
+            let messages = test_support::base_messages(&request);
+            let defined = test_support::defined_tools(&request);
             let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -738,7 +745,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
                 .iter()
                 .filter(|message| message.content().contains("P0-2 BACKGROUND SKILL MARKER"))
                 .count();
-            text_events("p0-2 background done")
+            test_support::text_events("p0-2 background done")
         }
     }
     crate::subagent::test_support::fixture_model_impl!(BackgroundSkillLLM);
@@ -772,7 +779,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
         .with_task_manager(registry)
         .with_bg_event_sender(bg_tx),
     );
-    let tool = host.bind(with_agent_face(tool, dir.path()).await);
+    let tool = host.bind(super::with_agent_face(tool, dir.path()).await);
     let tool = super::with_skill_registry(
         tool,
         "workspace",

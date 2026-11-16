@@ -5,7 +5,7 @@ use super::grid::{GridSpec, TextLineSource, ZoneTransition};
 use super::selection::{SlotIndex, SlotLines};
 use super::viewport_anchor::{PrependRelocation, ViewportAnchor};
 use super::vm_cache::VmCacheSlot;
-use crate::kit::atoms::{TranscriptPublication, ViewModelsSnapshot};
+
 use crate::kit::entry_render_cache::{EntryInvalidation, EntryRenderContext};
 use crate::kit::tui_render_unit::TuiRenderUnit;
 
@@ -54,6 +54,7 @@ fn end_zone(vm: &TuiRenderUnit) -> EntryZone {
 
 /// entry 是否产出渲染行——0 行 entry（空 bubble / 空 user prompt）不参与相邻判定（§7）。
 /// 判定条件与 `render::vm_to_lines_cached_with_layout` 的 0 行早返回同源，两处须同步。
+#[must_use]
 fn produces_lines(vm: &TuiRenderUnit) -> bool {
     match vm {
         TuiRenderUnit::TuiAssistantBubble(data) => {
@@ -69,6 +70,7 @@ fn produces_lines(vm: &TuiRenderUnit) -> bool {
 /// 台阶线色来源：按 entry 类型映射文本区左侧线条色——user 气泡用
 /// `text.secondary`、assistant 正文用 `accent`、Divider 用 `text.secondary`（与
 /// `── label ──` 同色）；主题值在渲染层解析（`render/helpers.rs::text_line_color`）。
+#[must_use]
 fn text_line_source(vm: &TuiRenderUnit) -> TextLineSource {
     match vm {
         TuiRenderUnit::TuiUserBubble(_) => TextLineSource::User,
@@ -436,6 +438,7 @@ impl Transcript {
         }
     }
 
+    #[must_use]
     pub(super) fn retained_bytes(&self) -> usize {
         self.retained_bytes
     }
@@ -500,7 +503,10 @@ impl Transcript {
         height: usize,
     ) -> Arc<SlotIndex> {
         let viewport = self.index.visible_slots(scroll_y, height);
-        let context = self.context.clone().unwrap();
+        let context = self
+            .context
+            .clone()
+            .expect("transcript preparation installs context before warming visible slots");
         for slot in viewport.clone() {
             if caches[slot].lines.is_none() {
                 let transition = zone_transition(&snapshot.items, slot);
@@ -508,10 +514,14 @@ impl Transcript {
                     slot,
                     &snapshot.items[slot],
                     caches,
-                    self.grid.unwrap(),
+                    self.grid.expect(
+                        "transcript preparation installs its grid before warming visible slots",
+                    ),
                     self.width,
                     &context,
-                    self.frame.unwrap(),
+                    self.frame.expect(
+                        "transcript preparation starts a frame before warming visible slots",
+                    ),
                     transition,
                 );
             }
@@ -525,3 +535,7 @@ impl Transcript {
 #[cfg(test)]
 #[path = "transcript_test.rs"]
 mod tests;
+
+use crate::kit::atoms::TranscriptPublication;
+
+use crate::kit::atoms::ViewModelsSnapshot;

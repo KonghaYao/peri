@@ -11,7 +11,7 @@ use peri_agent::error::AgentError;
 use peri_agent::messages::BaseMessage;
 use peri_agent::middleware::capabilities::{BeforeToolState, HookOutputState, StateView};
 
-use super::*;
+use super::UNTRUSTED_OWNER_REASON;
 
 /// 审批 hook 状态替身：归属事实按用例显式声明（生产由 `BoundApprovalState` /
 /// `AgentContext` 从真实 `InvocationContext` 投影）。
@@ -90,7 +90,7 @@ fn hook_state_without_attribution_mints_no_owner() {
         attribution: None,
     };
     assert_eq!(
-        owner_from_hook_state(&state),
+        super::owner_from_hook_state(&state),
         None,
         "无归属事实必须返回 None，不得用 session / turn 字段拼装"
     );
@@ -103,7 +103,7 @@ fn hook_state_with_model_attribution_mints_model_owner() {
         session_id: Some("session-a"),
         attribution: Some(InteractionAttribution::model_turn("session-a", binding())),
     };
-    match owner_from_hook_state(&state).expect("真实事实必须铸造归属") {
+    match super::owner_from_hook_state(&state).expect("真实事实必须铸造归属") {
         TrustedInteractionOwner::Model { session_id, .. } => assert_eq!(session_id, "session-a"),
         other => panic!("模型归属事实只铸造模型归属，实际: {other:?}"),
     }
@@ -122,7 +122,7 @@ fn hook_state_with_app_attribution_mints_app_owner() {
             ConnectionEpoch::initial(),
         )),
     };
-    match owner_from_hook_state(&state).expect("App 归属事实必须铸造归属") {
+    match super::owner_from_hook_state(&state).expect("App 归属事实必须铸造归属") {
         TrustedInteractionOwner::App {
             app_id,
             attachment_id,
@@ -142,7 +142,7 @@ fn tool_context_without_attribution_mints_no_owner() {
     let ctx = peri_agent::tools::ToolContext::new(&[], "/tmp")
         .with_session_identity("session-a", "turn-generation-a");
     assert_eq!(
-        owner_from_tool_context(&ctx),
+        super::owner_from_tool_context(&ctx),
         None,
         "工具不得用 session / turn 字段拼装归属"
     );
@@ -154,7 +154,7 @@ fn tool_context_with_real_facts_mints_model_owner() {
     let ctx = peri_agent::tools::ToolContext::new(&[], "/tmp")
         .with_session_identity("session-a", "turn-generation-a")
         .with_attribution(InteractionAttribution::model_turn("session-a", binding()));
-    match owner_from_tool_context(&ctx).expect("真实事实必须铸造归属") {
+    match super::owner_from_tool_context(&ctx).expect("真实事实必须铸造归属") {
         TrustedInteractionOwner::Model { session_id, .. } => assert_eq!(session_id, "session-a"),
         other => panic!("工具上下文只铸造模型归属，实际: {other:?}"),
     }
@@ -163,7 +163,7 @@ fn tool_context_with_real_facts_mints_model_owner() {
 /// 无归属的拒绝必须点名工具、说明「未执行」，且与「用户拒绝」措辞不同。
 #[test]
 fn untrusted_owner_error_is_explicit_and_diagnosable() {
-    let error = untrusted_owner_error("Bash");
+    let error = super::untrusted_owner_error("Bash");
     let AgentError::ToolRejected { tool, reason, .. } = &error else {
         panic!("无归属必须显式拒绝（ToolRejected），实际: {error:?}");
     };

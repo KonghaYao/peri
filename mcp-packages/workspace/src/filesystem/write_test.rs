@@ -1,6 +1,7 @@
 //! Tests for write
 
-use super::*;
+use crate::filesystem::write::WriteFileTool;
+use peri_agent::tools::BaseTool;
 
 /// 从错误消息中提取 draft_id(消息中 draft 信息在开头,hint 内可能出现两次)
 /// 仅被 #[cfg(unix)] 测试使用,需同步 cfg 以免非 unix 平台报 dead_code
@@ -723,7 +724,7 @@ async fn test_write_rejects_sentinel_before_creating_parent() {
         .await
         .unwrap_err()
         .to_string();
-    assert_eq!(err, super::SENTINEL_REJECTION);
+    assert_eq!(err, crate::filesystem::transaction::SENTINEL_REJECTION);
     assert!(!dir.path().join("missing").exists());
 }
 
@@ -842,7 +843,7 @@ async fn test_write_allows_existing_sentinel_without_increase() {
 async fn test_write_draft_rejection_preserves_exact_draft() {
     let dir = tempfile::tempdir().unwrap();
     let tool = WriteFileTool::with_draft(dir.path().to_str().unwrap(), true);
-    let target = super::resolve_path(dir.path().to_str().unwrap(), "f.txt");
+    let target = crate::filesystem::resolve_path(dir.path().to_str().unwrap(), "f.txt");
     let target_id = target.to_string_lossy().to_string();
     let draft_id = tool.drafts.as_ref().unwrap().lock().unwrap().save(
         &target_id,
@@ -858,7 +859,7 @@ async fn test_write_draft_rejection_preserves_exact_draft() {
             .await
             .unwrap_err()
             .to_string();
-        assert_eq!(err, super::SENTINEL_REJECTION);
+        assert_eq!(err, crate::filesystem::transaction::SENTINEL_REJECTION);
     }
     assert!(!target.exists());
 }

@@ -1,6 +1,16 @@
-use super::*;
+use super::oneshot;
+use super::Batcher;
+use super::BatcherConfig;
+use super::BatcherStats;
+use super::IngestionEvent;
+use super::LangfuseClient;
+use super::LangfuseError;
+use super::WorkerOwner;
 use crate::types::TraceBody;
-use std::{collections::HashMap, future::Future, io::Read, time::Duration};
+use std::collections::HashMap;
+use std::future::Future;
+use std::io::Read;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
@@ -46,10 +56,12 @@ async fn server(statuses: Vec<u16>) -> Server {
         statuses.iter().map(|_| oneshot::channel()).unzip();
     let worker = tokio::spawn(async move {
         let mut requests = tokio::task::JoinSet::new();
-        for (status, gate) in statuses.into_iter().zip(receivers) {
-            let (stream, _) = listener.accept().await.unwrap();
-            let started = started_tx.clone();
-            requests.spawn(async move {
+        {
+            let paired_statuses = statuses.into_iter().zip(receivers);
+            for (status, gate) in paired_statuses {
+                let (stream, _) = listener.accept().await.unwrap();
+                let started = started_tx.clone();
+                requests.spawn(async move {
                 let mut reader = BufReader::new(stream);
                 let mut headers = HashMap::new();
                 let mut line = String::new();
@@ -80,6 +92,7 @@ async fn server(statuses: Vec<u16>) -> Server {
                 );
                 let _ = reader.get_mut().write_all(response.as_bytes()).await;
             });
+            }
         }
         while let Some(result) = requests.join_next().await {
             result.unwrap();

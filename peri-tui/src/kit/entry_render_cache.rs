@@ -6,9 +6,9 @@ use ratatui_kit::ratatui::text::Line;
 
 use crate::kit::markdown::MarkdownRenderCache;
 use crate::kit::message_area::grid::{GridSpec, ZoneTransition};
-use crate::kit::message_area::render::{
-    CopyButtonInfo, ImageLineInfo, InteractionLayout, vm_to_lines_cached_with_layout,
-};
+use crate::kit::message_area::render::CopyButtonInfo;
+use crate::kit::message_area::render::ImageLineInfo;
+use crate::kit::message_area::render::InteractionLayout;
 use crate::kit::message_area::selection::{WrappedLineInfo, build_wrap_map};
 use crate::kit::tui_render_unit::TuiRenderUnit;
 
@@ -105,14 +105,15 @@ impl EntryRenderCache {
                     );
                 }
             } else {
-                let (lines, copy_button, interaction, image_lines) = vm_to_lines_cached_with_layout(
-                    vm,
-                    grid,
-                    &mut self.markdown,
-                    None,
-                    context.surface == EntrySurface::Message,
-                    transition,
-                );
+                let (lines, copy_button, interaction, image_lines) =
+                    crate::kit::message_area::render::vm_to_lines_cached_with_layout(
+                        vm,
+                        grid,
+                        &mut self.markdown,
+                        None,
+                        context.surface == EntrySurface::Message,
+                        transition,
+                    );
                 self.lines = Arc::new(lines);
                 self.copy_button = copy_button;
                 self.interaction = interaction;
@@ -120,14 +121,15 @@ impl EntryRenderCache {
             }
         } else {
             self.markdown_lines.stable_start = None;
-            let (lines, copy_button, interaction, image_lines) = vm_to_lines_cached_with_layout(
-                vm,
-                grid,
-                &mut self.markdown,
-                Some(&mut self.markdown_lines),
-                context.surface == EntrySurface::Message,
-                transition,
-            );
+            let (lines, copy_button, interaction, image_lines) =
+                crate::kit::message_area::render::vm_to_lines_cached_with_layout(
+                    vm,
+                    grid,
+                    &mut self.markdown,
+                    Some(&mut self.markdown_lines),
+                    context.surface == EntrySurface::Message,
+                    transition,
+                );
             self.lines = Arc::new(lines);
             self.copy_button = copy_button;
             self.interaction = interaction;
@@ -142,6 +144,7 @@ impl EntryRenderCache {
         invalidation
     }
 
+    #[must_use]
     pub(crate) fn lines(&self) -> &Arc<Vec<Line<'static>>> {
         &self.lines
     }
@@ -151,6 +154,7 @@ impl EntryRenderCache {
         self.transition
     }
 
+    #[must_use]
     pub(crate) fn markdown_lines(&self) -> &MarkdownLineCache {
         &self.markdown_lines
     }
@@ -180,6 +184,7 @@ impl EntryRenderCache {
         self.interaction.as_ref()
     }
 
+    #[must_use]
     pub(crate) fn image_lines(&self) -> &[ImageLineInfo] {
         &self.image_lines
     }
@@ -241,24 +246,27 @@ impl MarkdownLineCache {
             self.width = width;
         }
         let chunk_count = chunks.len();
-        for (index, (identity, lines)) in chunks.into_iter().enumerate() {
-            if self
-                .stable
-                .get(index)
-                .is_some_and(|cached| cached.identity == identity)
-            {
-                continue;
+        {
+            let iteration_items = chunks.into_iter().enumerate();
+            for (index, (identity, lines)) in iteration_items {
+                if self
+                    .stable
+                    .get(index)
+                    .is_some_and(|cached| cached.identity == identity)
+                {
+                    continue;
+                }
+                self.stable.truncate(index);
+                let lines = Arc::new(lines);
+                let (_, wrap_map) = build_wrap_map(&lines, width);
+                let visual_rows = wrap_map.last().map(|entry| entry.visual_end).unwrap_or(0);
+                self.stable.push(MarkdownLineChunk {
+                    identity,
+                    lines,
+                    wrap_map: Arc::new(wrap_map),
+                    visual_rows,
+                });
             }
-            self.stable.truncate(index);
-            let lines = Arc::new(lines);
-            let (_, wrap_map) = build_wrap_map(&lines, width);
-            let visual_rows = wrap_map.last().map(|entry| entry.visual_end).unwrap_or(0);
-            self.stable.push(MarkdownLineChunk {
-                identity,
-                lines,
-                wrap_map: Arc::new(wrap_map),
-                visual_rows,
-            });
         }
         self.stable.truncate(chunk_count);
         self.prefix.clear();
@@ -268,7 +276,7 @@ impl MarkdownLineCache {
                 self.prefix
                     .last()
                     .copied()
-                    .unwrap()
+                    .expect("the prefix table starts with zero before chunk lengths are appended")
                     .saturating_add(chunk.lines.len()),
             );
         }

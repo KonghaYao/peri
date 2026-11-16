@@ -3,22 +3,19 @@
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::acp_types::BgTaskEntry;
-use crate::kit::atoms::{
-    BG_DISPLAY, BG_LIVE_DETAIL, BG_TASKS, BgDisplayEntry, BgLiveDetail, BgLiveStatus, LANG_VERSION,
-    SELECTED_BG_TASK_ID,
-};
+
 use peri_theme::atoms::THEME_ATOM;
 use peri_theme::theme::ThemeDefinition;
-use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind},
-    prelude::*,
-    ratatui::{
-        layout::Constraint,
-        style::{Style, Stylize},
-        text::{Line, Span},
-        widgets::Paragraph,
-    },
-};
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::KeyCode;
+use ratatui_kit::crossterm::event::KeyEventKind;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Constraint;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::style::Stylize;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
+use ratatui_kit::ratatui::widgets::Paragraph;
 
 #[component]
 pub fn ShellDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -256,3 +253,19 @@ fn close_panel() {
 #[cfg(test)]
 #[path = "shell_detail_test.rs"]
 mod tests;
+
+use crate::kit::atoms::BG_DISPLAY;
+
+use crate::kit::atoms::BG_LIVE_DETAIL;
+
+use crate::kit::atoms::BG_TASKS;
+
+use crate::kit::atoms::BgDisplayEntry;
+
+use crate::kit::atoms::BgLiveDetail;
+
+use crate::kit::atoms::BgLiveStatus;
+
+use crate::kit::atoms::LANG_VERSION;
+
+use crate::kit::atoms::SELECTED_BG_TASK_ID;

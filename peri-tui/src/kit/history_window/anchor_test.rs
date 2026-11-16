@@ -1,7 +1,19 @@
 use std::collections::{HashMap, VecDeque};
 
-use super::test_support::*;
-use super::*;
+use super::AnchorRelocation;
+use super::GapId;
+use super::GapPlaceholder;
+use super::GapSeek;
+use super::GapSeekDirection;
+use super::HistoryGap;
+use super::HistorySource;
+use super::PersistentEntryKey;
+use super::PinReason;
+use super::RegionKey;
+use super::SegmentPlacement;
+use super::WindowAnchor;
+use super::WindowAnchorOffset;
+use super::WindowLimits;
 
 #[test]
 fn adjacent_gaps_merge_outer_boundaries_and_inner_cursors() {
@@ -36,7 +48,7 @@ fn adjacent_gaps_merge_outer_boundaries_and_inner_cursors() {
         ),
     ]);
 
-    merge_adjacent_gaps(&mut layout, &mut gaps);
+    super::merge_adjacent_gaps(&mut layout, &mut gaps);
     assert_eq!(layout, VecDeque::from([RegionKey::Gap(GapId(1))]));
     let merged = gaps.get(&GapId(1)).expect("merged gap");
     assert_eq!(merged.before, Some(a));
@@ -51,11 +63,14 @@ fn adjacent_gaps_merge_outer_boundaries_and_inner_cursors() {
 
 #[test]
 fn anchor_on_resident_entry_keeps_identity_and_pins_viewport_segment() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let key = window
-        .register_segment(segment("a", 10, 10, 20), SegmentPlacement::Tail)
+        .register_segment(
+            super::test_support::segment("a", 10, 10, 20),
+            SegmentPlacement::Tail,
+        )
         .expect("segment");
-    let entry = window.segment(key).unwrap().entries[0].key.clone();
+    let entry = window.segment(key).expect("anchor on resident entry keeps identity and pins viewport segment: the segment fixture operation uses valid inputs").entries[0].key.clone();
     let relocation = window.set_anchor(Some(WindowAnchor::new(
         entry.clone(),
         Some(0),
@@ -72,7 +87,7 @@ fn anchor_on_resident_entry_keeps_identity_and_pins_viewport_segment() {
     assert!(
         window
             .segment(key)
-            .unwrap()
+            .expect("anchor on resident entry keeps identity and pins viewport segment: the segment fixture operation uses valid inputs")
             .pins
             .contains(PinReason::Viewport)
     );
@@ -81,22 +96,28 @@ fn anchor_on_resident_entry_keeps_identity_and_pins_viewport_segment() {
 
 #[test]
 fn missing_anchor_relocates_to_gap_and_selects_seek_target() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let a = window
-        .register_segment(segment("a", 10, 10, 20), SegmentPlacement::Tail)
+        .register_segment(
+            super::test_support::segment("a", 10, 10, 20),
+            SegmentPlacement::Tail,
+        )
         .expect("a");
-    let mut draft = segment("b", 20, 10, 20);
+    let mut draft = super::test_support::segment("b", 20, 10, 20);
     draft.before_cursor = Some("before-b".into());
     draft.after_cursor = Some("after-b".into());
     let b = window
         .register_segment(draft, SegmentPlacement::Tail)
         .expect("b");
     let c = window
-        .register_segment(segment("c", 30, 10, 20), SegmentPlacement::Tail)
+        .register_segment(
+            super::test_support::segment("c", 30, 10, 20),
+            SegmentPlacement::Tail,
+        )
         .expect("c");
 
-    let b_entry = window.segment(b).unwrap().entries[0].key.clone();
-    let plan = release_plan_for(&window, b);
+    let b_entry = window.segment(b).expect("missing anchor relocates to gap and selects seek target: the segment fixture operation uses valid inputs").entries[0].key.clone();
+    let plan = super::test_support::release_plan_for(&window, b);
     window.apply_release_plan(&plan).expect("release b");
     assert_eq!(window.gap_count(), 1);
     let (gap_id, gap_before, gap_after) = {
@@ -107,7 +128,7 @@ fn missing_anchor_relocates_to_gap_and_selects_seek_target() {
         gap_before.as_ref(),
         window
             .segment(a)
-            .unwrap()
+            .expect("missing anchor relocates to gap and selects seek target: the segment fixture operation uses valid inputs")
             .entries
             .first()
             .map(|entry| &entry.key)
@@ -116,7 +137,7 @@ fn missing_anchor_relocates_to_gap_and_selects_seek_target() {
         gap_after.as_ref(),
         window
             .segment(c)
-            .unwrap()
+            .expect("missing anchor relocates to gap and selects seek target: the segment fixture operation uses valid inputs")
             .entries
             .last()
             .map(|entry| &entry.key)
@@ -143,23 +164,35 @@ fn missing_anchor_relocates_to_gap_and_selects_seek_target() {
 
 #[test]
 fn two_released_segments_coalesce_into_one_gap() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let a = window
-        .register_segment(segment("a", 10, 10, 20), SegmentPlacement::Tail)
+        .register_segment(
+            super::test_support::segment("a", 10, 10, 20),
+            SegmentPlacement::Tail,
+        )
         .expect("a");
     let b = window
-        .register_segment(segment("b", 20, 10, 20), SegmentPlacement::Tail)
+        .register_segment(
+            super::test_support::segment("b", 20, 10, 20),
+            SegmentPlacement::Tail,
+        )
         .expect("b");
     let c = window
-        .register_segment(segment("c", 30, 10, 20), SegmentPlacement::Tail)
+        .register_segment(
+            super::test_support::segment("c", 30, 10, 20),
+            SegmentPlacement::Tail,
+        )
         .expect("c");
     let d = window
-        .register_segment(segment("d", 40, 10, 20), SegmentPlacement::Tail)
+        .register_segment(
+            super::test_support::segment("d", 40, 10, 20),
+            SegmentPlacement::Tail,
+        )
         .expect("d");
 
-    let plan_b = release_plan_for(&window, b);
+    let plan_b = super::test_support::release_plan_for(&window, b);
     window.apply_release_plan(&plan_b).expect("release b");
-    let plan_c = release_plan_for(&window, c);
+    let plan_c = super::test_support::release_plan_for(&window, c);
     window.apply_release_plan(&plan_c).expect("release c");
 
     assert_eq!(window.gap_count(), 1);
@@ -168,7 +201,7 @@ fn two_released_segments_coalesce_into_one_gap() {
         gap.before.as_ref(),
         window
             .segment(a)
-            .unwrap()
+            .expect("two released segments coalesce into one gap: the segment fixture operation uses valid inputs")
             .entries
             .first()
             .map(|entry| &entry.key)
@@ -177,7 +210,7 @@ fn two_released_segments_coalesce_into_one_gap() {
         gap.after.as_ref(),
         window
             .segment(d)
-            .unwrap()
+            .expect("two released segments coalesce into one gap: the segment fixture operation uses valid inputs")
             .entries
             .first()
             .map(|entry| &entry.key)
@@ -194,35 +227,39 @@ fn two_released_segments_coalesce_into_one_gap() {
 
 #[test]
 fn coalesced_gap_keeps_cursors_to_resident_edges() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let a = window
         .register_segment(
-            segment("a", 10, 10, 20).cursors(Some("before-a".into()), Some("after-a".into())),
+            super::test_support::segment("a", 10, 10, 20)
+                .cursors(Some("before-a".into()), Some("after-a".into())),
             SegmentPlacement::Tail,
         )
         .expect("a");
     let b = window
         .register_segment(
-            segment("b", 20, 10, 20).cursors(Some("before-b".into()), Some("after-b".into())),
+            super::test_support::segment("b", 20, 10, 20)
+                .cursors(Some("before-b".into()), Some("after-b".into())),
             SegmentPlacement::Tail,
         )
         .expect("b");
     let c = window
         .register_segment(
-            segment("c", 30, 10, 20).cursors(Some("before-c".into()), Some("after-c".into())),
+            super::test_support::segment("c", 30, 10, 20)
+                .cursors(Some("before-c".into()), Some("after-c".into())),
             SegmentPlacement::Tail,
         )
         .expect("c");
     let d = window
         .register_segment(
-            segment("d", 40, 10, 20).cursors(Some("before-d".into()), Some("after-d".into())),
+            super::test_support::segment("d", 40, 10, 20)
+                .cursors(Some("before-d".into()), Some("after-d".into())),
             SegmentPlacement::Tail,
         )
         .expect("d");
 
-    let plan_b = release_plan_for(&window, b);
+    let plan_b = super::test_support::release_plan_for(&window, b);
     window.apply_release_plan(&plan_b).expect("release b");
-    let plan_c = release_plan_for(&window, c);
+    let plan_c = super::test_support::release_plan_for(&window, c);
     window.apply_release_plan(&plan_c).expect("release c");
 
     assert_eq!(window.gap_count(), 1);
@@ -257,7 +294,7 @@ fn open_ended_gap_prefers_page_cursor_over_seek() {
         WindowAnchorOffset::CharOffset(0),
     );
     assert_eq!(
-        select_gap_seek(&gap, &anchor),
+        super::select_gap_seek(&gap, &anchor),
         Some(GapSeek::Page {
             gap_id: GapId(7),
             direction: GapSeekDirection::Before,
@@ -268,18 +305,27 @@ fn open_ended_gap_prefers_page_cursor_over_seek() {
 
 #[test]
 fn gap_recovery_maps_missing_anchor_to_seek_or_page_request() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let a = window
-        .register_segment(segment("a", 10, 10, 20), SegmentPlacement::Tail)
+        .register_segment(
+            super::test_support::segment("a", 10, 10, 20),
+            SegmentPlacement::Tail,
+        )
         .expect("a");
     let b = window
-        .register_segment(segment("b", 20, 10, 20), SegmentPlacement::Tail)
+        .register_segment(
+            super::test_support::segment("b", 20, 10, 20),
+            SegmentPlacement::Tail,
+        )
         .expect("b");
     let c = window
-        .register_segment(segment("c", 30, 10, 20), SegmentPlacement::Tail)
+        .register_segment(
+            super::test_support::segment("c", 30, 10, 20),
+            SegmentPlacement::Tail,
+        )
         .expect("c");
-    let b_entry = window.segment(b).unwrap().entries[0].key.clone();
-    let plan = release_plan_for(&window, b);
+    let b_entry = window.segment(b).expect("gap recovery maps missing anchor to seek or page request: the segment fixture operation uses valid inputs").entries[0].key.clone();
+    let plan = super::test_support::release_plan_for(&window, b);
     window.apply_release_plan(&plan).expect("release b");
     window.set_anchor(Some(WindowAnchor::new(
         b_entry.clone(),
@@ -296,27 +342,30 @@ fn gap_recovery_maps_missing_anchor_to_seek_or_page_request() {
 
 #[test]
 fn gap_uses_inner_neighbor_cursors() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let a = window
         .register_segment(
-            segment("a", 10, 10, 20).cursors(Some("before-a".into()), Some("after-a".into())),
+            super::test_support::segment("a", 10, 10, 20)
+                .cursors(Some("before-a".into()), Some("after-a".into())),
             SegmentPlacement::Tail,
         )
         .expect("a");
     let b = window
         .register_segment(
-            segment("b", 20, 10, 20).cursors(Some("before-b".into()), Some("after-b".into())),
+            super::test_support::segment("b", 20, 10, 20)
+                .cursors(Some("before-b".into()), Some("after-b".into())),
             SegmentPlacement::Tail,
         )
         .expect("b");
     let c = window
         .register_segment(
-            segment("c", 30, 10, 20).cursors(Some("before-c".into()), Some("after-c".into())),
+            super::test_support::segment("c", 30, 10, 20)
+                .cursors(Some("before-c".into()), Some("after-c".into())),
             SegmentPlacement::Tail,
         )
         .expect("c");
 
-    let plan = release_plan_for(&window, b);
+    let plan = super::test_support::release_plan_for(&window, b);
     window.apply_release_plan(&plan).expect("release b");
 
     let gap = window.gaps().values().next().expect("gap");
@@ -335,14 +384,20 @@ fn gap_uses_inner_neighbor_cursors() {
 
 #[test]
 fn anchor_relocation_uses_identity_not_layout_index() {
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let a = window
-        .register_segment(segment("a", 10, 10, 20), SegmentPlacement::Tail)
+        .register_segment(
+            super::test_support::segment("a", 10, 10, 20),
+            SegmentPlacement::Tail,
+        )
         .expect("a");
     let b = window
-        .register_segment(segment("b", 20, 10, 20), SegmentPlacement::Tail)
+        .register_segment(
+            super::test_support::segment("b", 20, 10, 20),
+            SegmentPlacement::Tail,
+        )
         .expect("b");
-    let b_entry = window.segment(b).unwrap().entries[0].key.clone();
+    let b_entry = window.segment(b).expect("anchor relocation uses identity not layout index: the segment fixture operation uses valid inputs").entries[0].key.clone();
     window.set_anchor(Some(WindowAnchor::new(
         b_entry.clone(),
         None,
@@ -350,7 +405,10 @@ fn anchor_relocation_uses_identity_not_layout_index() {
     )));
     // 在锚点之前插入一个新段：布局下标变化，但身份重定位仍指向 B。
     window
-        .register_segment(segment("c", 5, 10, 20), SegmentPlacement::BeforeSegment(a))
+        .register_segment(
+            super::test_support::segment("c", 5, 10, 20),
+            SegmentPlacement::BeforeSegment(a),
+        )
         .expect("c");
     assert_eq!(
         window.relocate_anchor(),
@@ -366,18 +424,27 @@ fn anchor_relocation_uses_identity_not_layout_index() {
 #[serial_test::serial]
 fn gap_request_atom_holds_seek_target_until_content_returns() {
     crate::kit::atoms::init_atoms();
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let a = window
-        .register_segment(segment("a", 10, 10, 20), SegmentPlacement::Tail)
+        .register_segment(
+            super::test_support::segment("a", 10, 10, 20),
+            SegmentPlacement::Tail,
+        )
         .expect("a");
     let b = window
-        .register_segment(segment("b", 20, 10, 20), SegmentPlacement::Tail)
+        .register_segment(
+            super::test_support::segment("b", 20, 10, 20),
+            SegmentPlacement::Tail,
+        )
         .expect("b");
     let c = window
-        .register_segment(segment("c", 30, 10, 20), SegmentPlacement::Tail)
+        .register_segment(
+            super::test_support::segment("c", 30, 10, 20),
+            SegmentPlacement::Tail,
+        )
         .expect("c");
-    let b_entry = window.segment(b).unwrap().entries[0].key.clone();
-    let plan = release_plan_for(&window, b);
+    let b_entry = window.segment(b).expect("gap request atom holds seek target until content returns: the segment fixture operation uses valid inputs").entries[0].key.clone();
+    let plan = super::test_support::release_plan_for(&window, b);
     window.apply_release_plan(&plan).expect("release b");
     window.set_anchor(Some(WindowAnchor::new(
         b_entry.clone(),
@@ -417,24 +484,27 @@ fn gap_request_atom_holds_seek_target_until_content_returns() {
 #[serial_test::serial]
 fn viewport_atom_publishes_window_generation_and_stable_anchor() {
     crate::kit::atoms::init_atoms();
-    let mut window = enabled_window(WindowLimits::default());
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
     let key = window
-        .register_segment(segment("a", 10, 10, 20), SegmentPlacement::Tail)
+        .register_segment(
+            super::test_support::segment("a", 10, 10, 20),
+            SegmentPlacement::Tail,
+        )
         .expect("a");
-    let entry = window.segment(key).unwrap().entries[0].key.clone();
+    let entry = window.segment(key).expect("viewport atom publishes window generation and stable anchor: the segment fixture operation uses valid inputs").entries[0].key.clone();
     window.set_anchor(Some(WindowAnchor::new(
         entry.clone(),
         None,
         WindowAnchorOffset::CharOffset(3),
     )));
-    publish_window_viewport(&window);
+    super::publish_window_viewport(&window);
     let viewport = crate::kit::atoms::WINDOW_VIEWPORT
         .state()
         .read()
         .clone()
         .expect("published viewport");
     assert_eq!(viewport.window_generation, window.generation());
-    assert_eq!(viewport.anchor.as_ref().unwrap().entry, entry);
+    assert_eq!(viewport.anchor.as_ref().expect("viewport atom publishes window generation and stable anchor: the fixture must retain its expected variant").entry, entry);
     assert_eq!(
         viewport.relocation,
         Some(AnchorRelocation::Resident {
@@ -443,6 +513,6 @@ fn viewport_atom_publishes_window_generation_and_stable_anchor() {
             sub_item: None,
         })
     );
-    clear_window_viewport();
+    super::clear_window_viewport();
     assert!(crate::kit::atoms::WINDOW_VIEWPORT.state().read().is_none());
 }

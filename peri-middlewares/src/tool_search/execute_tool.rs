@@ -1,21 +1,36 @@
 //! ExecuteExtraTool 元工具 — 代理执行延迟加载的工具
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
-use peri_agent::tools::{bind_target_invocation, BaseTool, DirectToolInvocationResolver};
-use peri_agent::{
-    agent::react::ToolCall,
-    error::{AgentError, AgentResult},
-    tools::{CanonicalToolInvocation, ToolInvocationResolver},
-};
+use peri_agent::agent::react::ToolCall;
+use peri_agent::error::AgentError;
+use peri_agent::error::AgentResult;
+use peri_agent::tools;
+use peri_agent::tools::BaseTool;
+use peri_agent::tools::CanonicalToolInvocation;
+use peri_agent::tools::DirectToolInvocationResolver;
+use peri_agent::tools::ToolInvocationResolver;
 use serde_json::{json, Value};
 
-use super::core_tools::{direct_tools_description, parse_extra_tool_call, EXECUTE_EXTRA_TOOL_NAME};
+use super::core_tools;
+use super::core_tools::direct_tools_description;
+use super::core_tools::EXECUTE_EXTRA_TOOL_NAME;
 
 pub struct ExecuteExtraToolResolver {
     direct: DirectToolInvocationResolver,
+}
+
+impl Debug for ExecuteExtraToolResolver {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecuteExtraToolResolver")
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for ExecuteExtraToolResolver {
@@ -30,11 +45,12 @@ fn resolve_extra_tool_target(
     input: &Value,
     tools: &BTreeMap<String, Arc<dyn BaseTool>>,
 ) -> AgentResult<(Arc<dyn BaseTool>, Value)> {
-    let (target_name, params) =
-        parse_extra_tool_call(input).map_err(|reason| AgentError::ToolExecutionFailed {
+    let (target_name, params) = core_tools::parse_extra_tool_call(input).map_err(|reason| {
+        AgentError::ToolExecutionFailed {
             tool: EXECUTE_EXTRA_TOOL_NAME.to_string(),
             reason,
-        })?;
+        }
+    })?;
     let target = DirectToolInvocationResolver.resolve_model_target(&target_name, tools)?;
     let normalized = peri_agent::tools::normalize_params(params, Some(target.as_ref()));
     Ok((target, normalized))
@@ -56,7 +72,7 @@ impl ToolInvocationResolver for ExecuteExtraToolResolver {
 
         let (target, params) = resolve_extra_tool_target(&raw_call.input, tools)?;
         let normalized = peri_agent::tools::normalize_params(params, Some(target.as_ref()));
-        bind_target_invocation(
+        tools::bind_target_invocation(
             raw_call,
             target,
             normalized,
@@ -76,11 +92,22 @@ pub struct ExecuteExtraTool {
     description: String,
 }
 
+impl Debug for ExecuteExtraTool {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecuteExtraTool")
+            .field("description", &self.description)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ExecuteExtraTool {
+    #[must_use]
     pub fn new(shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>) -> Self {
         Self::with_direct_tools(shared_tools, std::iter::empty())
     }
 
+    #[must_use]
     pub fn with_direct_tools<'a>(
         shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
         direct_tool_names: impl IntoIterator<Item = &'a str>,

@@ -1,5 +1,13 @@
-use super::*;
-use crate::kit::acp_bridge::{perf_counters, reset_perf_counters};
+use super::Arc;
+use super::ComponentDrawer;
+use super::DetailRenderCache;
+use super::FoldKey;
+use super::GridSpec;
+use super::Line;
+use super::Rect;
+use super::ThemeDefinition;
+use super::TuiSubAgentGroup;
+
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldState, TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit, TuiToolCard,
     TuiToolPresentation,
@@ -129,7 +137,7 @@ fn forwarded_reminder_can_expand_inside_child_detail_and_expire_its_fold() {
     cache.focus_next(false);
     assert!(cache.toggle_focused(false));
     assert_eq!(cache.folds.get(&key), Some(&FoldState::Expanded));
-    let expanded = projected(&transcript.view_models[0], cache.folds.get(&key).copied());
+    let expanded = super::projected(&transcript.view_models[0], cache.folds.get(&key).copied());
     assert!(
         matches!(expanded.as_ref(), TuiRenderUnit::TuiSystemReminder(reminder)
         if reminder.fold == FoldState::Expanded && reminder.body.contains("second line"))
@@ -156,7 +164,7 @@ fn detail_fold_is_local_and_survives_stream_update() {
     cache.prepare(&transcript, &grid, theme.clone(), 0, Vec::new());
     assert!(cache.height() > collapsed_height);
     assert_eq!(
-        fold_of(&transcript.view_models[1]),
+        super::detail_render_cache::fold_of(&transcript.view_models[1]),
         Some(FoldState::Collapsed)
     );
     transcript
@@ -205,7 +213,7 @@ fn detail_reasoning_expansion_remeasures_height() {
     cache.prepare(&transcript, &grid, theme, 0, Vec::new());
     assert!(cache.height() > collapsed);
     assert_eq!(
-        fold_of(&transcript.view_models[0]),
+        super::detail_render_cache::fold_of(&transcript.view_models[0]),
         Some(FoldState::Collapsed)
     );
 }
@@ -256,10 +264,10 @@ fn unchanged_detail_reuses_parse_and_context_changes_invalidate() {
     let group = group("first", "# cached text");
     let grid = GridSpec::with_content(60);
     let first = render(&mut cache, &group, &grid, theme.clone(), 0);
-    reset_perf_counters();
+    crate::kit::acp_bridge::reset_perf_counters();
     let second = render(&mut cache, &group, &grid, theme.clone(), 0);
     assert_eq!(first, second);
-    assert_eq!(perf_counters().full_parses, 0);
+    assert_eq!(crate::kit::acp_bridge::perf_counters().full_parses, 0);
     render(
         &mut cache,
         &group,
@@ -267,11 +275,11 @@ fn unchanged_detail_reuses_parse_and_context_changes_invalidate() {
         theme.clone(),
         0,
     );
-    assert!(perf_counters().full_parses > 0);
-    reset_perf_counters();
+    assert!(crate::kit::acp_bridge::perf_counters().full_parses > 0);
+    crate::kit::acp_bridge::reset_perf_counters();
     render(&mut cache, &group, &grid, theme.clone(), 1);
-    assert!(perf_counters().full_parses > 0);
-    reset_perf_counters();
+    assert!(crate::kit::acp_bridge::perf_counters().full_parses > 0);
+    crate::kit::acp_bridge::reset_perf_counters();
     render(
         &mut cache,
         &group,
@@ -279,7 +287,7 @@ fn unchanged_detail_reuses_parse_and_context_changes_invalidate() {
         Arc::new(peri_theme::builtin::light_theme()),
         1,
     );
-    assert!(perf_counters().full_parses > 0);
+    assert!(crate::kit::acp_bridge::perf_counters().full_parses > 0);
 }
 
 #[test]
@@ -295,9 +303,9 @@ fn selected_occurrence_cannot_reuse_previous_slots() {
         theme.clone(),
         0,
     );
-    reset_perf_counters();
+    crate::kit::acp_bridge::reset_perf_counters();
     let result = render(&mut cache, &group("second", "new text"), &grid, theme, 0);
-    assert!(perf_counters().full_parses > 0);
+    assert!(crate::kit::acp_bridge::perf_counters().full_parses > 0);
     let text: String = result
         .iter()
         .flat_map(|line| line.spans.iter())
@@ -327,7 +335,7 @@ fn visible_range_preserves_full_height_and_excludes_offscreen_history() {
     );
     let total = cache.height();
     let rows = cache.prefix[50]..cache.prefix[51];
-    reset_perf_counters();
+    crate::kit::acp_bridge::reset_perf_counters();
     cache.prepare(
         &transcript,
         &GridSpec::with_content(60),
@@ -345,8 +353,11 @@ fn visible_range_preserves_full_height_and_excludes_offscreen_history() {
     assert!(!text.contains("entry-49"));
     assert!(!text.contains("entry-51"));
     assert_eq!(cache.height(), total);
-    assert_eq!(perf_counters().full_parses, 0);
-    assert_eq!(perf_counters().wrap_recalculated_lines, 0);
+    assert_eq!(crate::kit::acp_bridge::perf_counters().full_parses, 0);
+    assert_eq!(
+        crate::kit::acp_bridge::perf_counters().wrap_recalculated_lines,
+        0
+    );
 }
 
 #[test]
@@ -409,13 +420,13 @@ fn detail_draw_shows_nested_record_in_terminal_buffer() {
     let mut terminal = ratatui_kit::ratatui::Terminal::new(
         ratatui_kit::ratatui::backend::TestBackend::new(60, 12),
     )
-    .unwrap();
+    .expect("detail draw shows nested record in terminal buffer: fixture parameters must construct a valid value");
     let frame = terminal
         .draw(|frame| {
             let mut drawer = ComponentDrawer::new(frame, Rect::new(0, 0, 60, 12));
             cache.draw(&mut drawer, Rect::new(0, 1, 59, 10), 0);
         })
-        .unwrap();
+        .expect("detail draw shows nested record in terminal buffer: fixture parameters must construct a valid value");
     let rendered: String = frame
         .buffer
         .content()

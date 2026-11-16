@@ -1,0 +1,921 @@
+//! Implementation of the APIs re-exported by the parent module.
+
+use super::AcpServerConfig;
+use super::AgentCatalogPort;
+use super::Arc;
+use super::CronSchedulerPort;
+use super::HostTaskKind;
+use super::HostTaskOwner;
+use super::HostTaskOwnerKind;
+use super::LlmProvider;
+use super::McpPoolPort;
+use super::McpSubscriptionPort;
+use super::PeriConfig;
+use super::PluginLoadResult;
+use super::PluginManagerPort;
+use super::RegisteredHook;
+use super::RouteEntry;
+use super::RwLock;
+use super::SessionManager;
+use super::SessionResources;
+use super::SessionStoreShutdownPort;
+use super::SettingsHooksPort;
+use super::SharedPermissionMode;
+use super::SkillRoot;
+use super::ToolSearchPort;
+
+/// host 装配输入：调用方（cli/TUI/print/stdio）持有的轻量输入。
+///
+/// M-TUI 收口（`spec/history/2026-08.md` 2026-08-05 条目，原文见 Git 历史）：
+/// middlewares 具体实现（CronScheduler / McpClientPool / ToolSearchIndex /
+/// AgentCatalogProvider / PluginManager / SettingsHooksLoader /
+/// WorkflowAgentMiddlewareFactory / 插件聚合数据）全部由本装配面内部构造
+/// ——「ACP Host = 部署单元」，TUI/print/stdio 只提供协议面输入
+/// （provider / config / permission / session_resources / cwd），不再直接触碰
+/// 业务 crate（§0 依赖方向，`docs/top-level.md` §7/§8）。
+#[derive(Clone)]
+pub(crate) struct WorkspaceAssembly {
+    pub(crate) startup_cwd: String,
+    pub(crate) bare: bool,
+    pub(crate) drive_cron_tick: bool,
+    pub(crate) mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile,
+    pub(crate) capabilities: HostCapabilities,
+}
+
+/// Capabilities supplied by the deployment to every session environment.
+/// A missing capability never acquires a session resource or shutdown right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostCapabilities {
+    pub builtin_mcp: bool,
+    pub stdio_mcp: bool,
+    pub cron: bool,
+    pub plugins: bool,
+    pub settings_hooks: bool,
+}
+
+impl Default for HostCapabilities {
+    fn default() -> Self {
+        Self {
+            builtin_mcp: true,
+            stdio_mcp: true,
+            cron: true,
+            plugins: true,
+            settings_hooks: true,
+        }
+    }
+}
+
+/// 会话准备面的严格只读插件发现（无合成清单、无插件缓存写）。
+///
+/// 会话准备面（`host/prepared.rs`）经本函数调用：具体实现与插件装配同属宿主
+/// 装配面，准备面不新建越层引用（§0 依赖门边 2）。
+///
+/// 用户级 `.claude` 在本装配面解析：`peri_middlewares::plugin::claude_home()`
+/// 是 HOME 优先的唯一权威（Windows 的 `dirs::home_dir()` 读 Profile
+/// known-folder、忽略 HOME/USERPROFILE，自带一份解析会与其余插件入口取到
+/// 不同目录）。准备面因此只提供执行目录。
+///
+/// **M6（唯一闭合位）**：准入由 `PluginSourceAdmission` 单点决定，且与装配面
+/// **同一份决定**——`frozen` 存在（恢复 / fork / legacy 复用）时用持久快照的
+/// 关闭位（ARC-FROZEN-001：禁止回退当轮 config），不存在（新建，快照本次才产出）
+/// 时用即将冻结的 session-local 配置。关闭时不读插件目录、不返回聚合。
+pub(crate) fn discover_prepared_plugins(
+    cwd: &str,
+    frozen: Option<&crate::session::executor::FrozenSessionData>,
+    config: &PeriConfig,
+) -> Result<Option<PluginLoadResult>, peri_middlewares::plugin::LoaderError> {
+    let admission = match frozen {
+        Some(frozen) => peri_middlewares::plugin::PluginSourceAdmission::from_disabled(
+            &frozen.meta_harness().disabled_middlewares,
+        ),
+        None => peri_middlewares::plugin::PluginSourceAdmission::from_meta_harness(
+            config.config.meta_harness.as_ref(),
+        ),
+    };
+    admission.load_aggregated_readonly(
+        &peri_middlewares::plugin::claude_home(),
+        Some(std::path::Path::new(cwd)),
+    )
+}
+
+/// Bind the session execution directory and credentials before MCP discovery.
+/// Host-only assembly does not acquire a session tool environment.
+pub(super) fn pending_mcp_pool(
+    spawner: peri_middlewares::mcp::McpTaskSpawner,
+    profile: peri_middlewares::mcp::apps::McpCapabilityProfile,
+    session_cwd: Option<&std::path::Path>,
+    workspace_id: Option<peri_acp_types::workspace::WorkspaceId>,
+    resources: &Arc<dyn SessionResources>,
+) -> Arc<peri_middlewares::mcp::McpClientPool> {
+    let pool = Arc::new(
+        peri_middlewares::mcp::McpClientPool::new_pending_with_spawner_and_profile(
+            spawner, profile,
+        ),
+    );
+    if let Some(workspace_id) = workspace_id {
+        if let Err(error) = pool.bind_workspace_scope(workspace_id) {
+            tracing::error!(%error, "MCP Workspace binding failed");
+        }
+    }
+    if let Some(credentials) = workspace_id
+        .and_then(|workspace_id| resources.oauth_credentials_for_workspace(workspace_id))
+    {
+        match peri_middlewares::mcp::OAuthCredentialClient::try_new(credentials)
+            .and_then(|client| pool.inject_oauth_credentials(client))
+        {
+            Ok(()) => {}
+            Err(_) => tracing::error!("OAuth credential MCP initialization failed"),
+        }
+    }
+    if let Some(cwd) = session_cwd {
+        if let Err(error) = pool.bind_execution_cwd(cwd) {
+            // The pool records initialization failure and remains unusable for
+            // implicit subprocess launches. Never fall back to the host's cwd.
+            tracing::error!(%error, cwd = %cwd.display(), "MCP session execution directory binding failed");
+        }
+    }
+    pool
+}
+
+/// 准备路径一次加载的插件数据：聚合本身 + 由该聚合派生的 roots。
+///
+/// 装配面消费同一对象，不重读插件目录；准备失败与 host 级/bare 的
+/// `data: None` 分开记录，以便 MCP 侧遵守本会话的降级决定。
+#[derive(Clone)]
+pub struct PreparedPlugins {
+    pub data: Option<PluginLoadResult>,
+    pub skill_roots: Vec<SkillRoot>,
+    /// 会话准备时插件来源失败，禁止 MCP 初始化再次发现插件来源。
+    pub discovery_failed: bool,
+}
+
+pub struct HostAssemblyInput {
+    pub provider: LlmProvider,
+    pub peri_config: Arc<RwLock<PeriConfig>>,
+    /// 配置源（读写路径决策的唯一事实源：TUI/print/stdio 共享，启动早期
+    /// 经 [`crate::provider::ConfigSource::load`] 构建一次）。
+    pub config_source: Arc<crate::provider::ConfigSource>,
+    pub permission_mode: Arc<SharedPermissionMode>,
+    /// 会话资源门面（消费侧唯一会话行为句柄）：Agent transcript/subagent、middleware、
+    /// 协议面与 Controller 都经它访问会话，装配面不再另开裸存储句柄。
+    pub session_resources: Arc<dyn SessionResources>,
+    /// 已保存 Session 的 Workspace 归属；host 级装配为 None。
+    pub workspace_id: Option<peri_acp_types::workspace::WorkspaceId>,
+    /// 部署关闭权（non-Clone）：由部署入口（TUI/print/stdio）从资源工厂取得后注入，
+    /// 宿主在**自己的任务排空之后**消费它关闭会话存储。会话级装配与测试注入 `None`
+    /// ——它们不是部署 owner，没有全局销毁权。
+    pub session_store_shutdown: Option<Box<dyn SessionStoreShutdownPort>>,
+    /// 工作目录（用于加载 project/local settings hooks）
+    pub cwd: String,
+    /// 跳过 settings hooks / 插件（print --bare 语义）
+    pub bare: bool,
+    /// 驱动 cron tick（TUI=true，复刻迁移前 TUI 每秒 tick 行为；print/stdio
+    /// 保持现状无 tick——行为零变化，L2 遗留登记 M-TUI issue）。
+    pub drive_cron_tick: bool,
+    /// 遗留测试输入槽；生产传 `None`，Workspace Bash 在 MCP 侧自持任务。
+    #[cfg(not(target_os = "emscripten"))]
+    pub workspace_input: Option<peri_mcp_workspace::WorkspaceInstanceInput>,
+    /// builtin `workspace` 实例 Bash 的有效 `run_in_background` 缺省（beta flag 投影）。
+    ///
+    /// 会话装配从**会话冻结**的 flag 值派生后随 builtin 实例上下文一次注入 pool；
+    /// 顶层三路径（无会话上下文）恒为 `false`（与 flag 引入前一致）。
+    #[cfg(not(target_os = "emscripten"))]
+    pub workspace_bash_default_run_in_background: bool,
+    /// builtin `workspace` 实例的**资源面**输入（资源根 / builtin 关闭位 / 预算），
+    /// 随 builtin 实例上下文一次注入 pool，早于
+    /// `McpClientPool::run_initialize`（A33）。
+    ///
+    /// `None` = 资源面未接线（`resources/list` 只有 git ref）：顶层三路径保持 `None`
+    /// ——它们不产生会话，资源面没有消费者；会话环境装配传 `Some`，其内容由装配期
+    /// 已有事实源构造（本层不第二次读配置）。
+    #[cfg(not(target_os = "emscripten"))]
+    pub workspace_resources: Option<peri_mcp_workspace::WorkspaceResourcesInput>,
+    /// builtin `workflow` 实例的运行时槽位（会话装配期创建、session/new 之后绑定）。
+    ///
+    /// `None` = 不装配该实例（顶层三路径不产生会话，没有编排状态与消费者）；会话环境
+    /// 装配（`host/workspace.rs`）传 `Some`，并在会话就绪后用**同一份**会话旧链的
+    /// `WorkflowRuntime` 绑定进去（双轨期两条面共享同一状态，见
+    /// `peri_middlewares::assembly::bind_workflow_runtime`）。
+    #[cfg(not(target_os = "emscripten"))]
+    pub workflow_input: Option<peri_mcp_workflow::WorkflowInstanceInput>,
+    /// 准备路径一次加载的插件聚合：`Some` 时装配面不再重读插件目录
+    /// （`None` = 既有语义，由装配面自行加载；仅 host 级/非准备调用点如此）。
+    pub prepared_plugins: Option<PreparedPlugins>,
+    /// ACP session setup MCP servers, bound before the session pool starts initialization.
+    pub session_mcp_servers:
+        Option<std::collections::HashMap<String, peri_acp_types::plugin::McpServerConfig>>,
+    /// A24 关闭集（builtin 实例名）：本会话环境**冻结** policy 的投影
+    /// （`frozen.meta_harness.disabled_middlewares` → `builtin_closed_instances`），
+    /// 随 builtin 实例上下文一次注入 pool。
+    ///
+    /// 消费面只有订阅建立门（`McpClientPool::subscription_allowed`）：关闭的 builtin
+    /// 实例不建立 `subscriptions/listen` 长流（订阅是能力的外部副作用，关闭语义必须
+    /// 覆盖它，ARC-CAPABILITY-CLOSURE-001）。它**不**改变 pool 级就绪判定与实例在 MCP
+    /// 面板上的连接状态（契约明文）。顶层三路径（`session_resources = false`，无会话
+    /// 上下文）传空集；会话装配从 frozen snapshot 派生（禁止回退当轮 config，设计 §2.5）。
+    pub builtin_closed: std::collections::BTreeSet<String>,
+    /// 宿主技能面关闭位：`"SkillsMiddleware" ∈ disabled_middlewares`（与
+    /// [`Self::builtin_closed`] **同一份** disabled 集合的投影，装配期一次派生）。
+    ///
+    /// 语义 = 关闭宿主技能面（`core:{skill}` 裸名命令投影）：链槽关闭
+    /// （`SkillsMiddleware` 不构造 ⇒ 13_skills 段落 + SkillTool/DiscoverSkillsTool
+    /// 消失）时命令面不得留下幽灵路由。**不是**实例关闭——workspace 实例、
+    /// 工具与资源面仍可用；系统来源技能不注册 `{server}:{skill}` 路由。
+    /// 随 builtin 实例上下文注入 pool（发现管线的唯一消费点）。
+    /// 顶层三路径（无会话上下文）恒为 `false`；会话装配从 frozen snapshot 派生。
+    pub skills_face_closed: bool,
+    /// 插件来源闭合位（M6）：`"PluginMiddleware" ∈ disabled_middlewares`
+    /// （与 [`Self::builtin_closed`] / [`Self::skills_face_closed`] **同一份**
+    /// disabled 集合的投影，装配期一次派生）。
+    ///
+    /// `true` ⇒ 插件来源注入面整体关闭：插件 skill/agent roots、commands、hooks、
+    /// MCP 配置贡献与子 Agent 继承面一律不参与本会话装配，且**在读取插件目录之前**
+    /// 生效（`PluginSourceAdmission::Closed`）。关闭的是执行注入面——插件管理
+    /// （安装/卸载/marketplace）不受影响。
+    ///
+    /// 顶层三路径（无会话策略）与 bare 恒为 `false`；会话装配从 frozen snapshot
+    /// 派生（ARC-CAPABILITY-CLOSURE-001）。
+    pub plugin_face_closed: bool,
+}
+
+/// Emscripten deployment inputs. The ACP Host and request dispatch remain the
+/// same as the native deployment; only local capabilities are omitted.
+#[cfg(target_os = "emscripten")]
+pub struct WasmHostAssemblyInput {
+    pub provider: LlmProvider,
+    pub peri_config: Arc<RwLock<PeriConfig>>,
+    pub config_source: Arc<crate::provider::ConfigSource>,
+    pub permission_mode: Arc<SharedPermissionMode>,
+    pub session_resources: Arc<dyn SessionResources>,
+    pub session_store_shutdown: Option<Box<dyn SessionStoreShutdownPort>>,
+    pub cwd: String,
+}
+
+#[cfg(target_os = "emscripten")]
+pub async fn assemble_wasm_server_config(input: WasmHostAssemblyInput) -> AcpServerConfig {
+    assemble_server_config_with_capabilities(
+        HostAssemblyInput {
+            provider: input.provider,
+            peri_config: input.peri_config,
+            config_source: input.config_source,
+            permission_mode: input.permission_mode,
+            session_resources: input.session_resources,
+            workspace_id: None,
+            session_store_shutdown: input.session_store_shutdown,
+            cwd: input.cwd,
+            bare: false,
+            drive_cron_tick: false,
+            // Browser deployments do not discover plugins from a local home directory.
+            prepared_plugins: Some(PreparedPlugins {
+                data: None,
+                skill_roots: Vec::new(),
+                discovery_failed: false,
+            }),
+            session_mcp_servers: None,
+            builtin_closed: Default::default(),
+            skills_face_closed: false,
+            plugin_face_closed: false,
+        },
+        HostCapabilities {
+            builtin_mcp: false,
+            stdio_mcp: false,
+            cron: false,
+            plugins: false,
+            settings_hooks: false,
+        },
+    )
+    .await
+}
+
+/// Construct terminal hook execution; the session environment owns admission and joining.
+pub(in super::super) fn build_session_end_task(
+    hooks: Vec<RegisteredHook>,
+    cwd: String,
+    session_id: String,
+    model: String,
+    tasks: Arc<dyn peri_acp_types::tasks::TaskManager>,
+) -> peri_acp_types::tasks::OwnedTaskFuture {
+    Box::pin(async move {
+        peri_middlewares::hooks::fire_standalone_lifecycle_hooks_owned(
+            &hooks,
+            peri_acp_types::hooks::HookEvent::SessionEnd,
+            &cwd,
+            &session_id,
+            "",
+            &model,
+            None,
+            Some("session_close"),
+            Some(tasks),
+        )
+        .await;
+    })
+}
+
+/// 构造共享 SessionManager（支撑 cascade cancel 子 agent 与 goal_state）。
+///
+/// 装配细节与迁移前 `launch.rs` / `cli_print.rs` / stdio init 三处一致：
+/// peri_config 冻结快照 + cron scheduler（可选）注入。
+#[allow(clippy::too_many_arguments)] // 装配注入面：端口/工厂逐项注入，L5 装配迁出后可分组
+pub fn build_session_manager(
+    session_resources: Arc<dyn SessionResources>,
+    provider: LlmProvider,
+    peri_config: &Arc<RwLock<PeriConfig>>,
+    permission_mode: Arc<SharedPermissionMode>,
+    cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
+    mcp_subscription: Option<Arc<dyn McpSubscriptionPort>>,
+    agent_catalog: Arc<dyn AgentCatalogPort>,
+    plugin_command_entries: Vec<RouteEntry>,
+) -> SessionManager {
+    let peri_config_snapshot = Arc::new(peri_config.read().clone());
+    SessionManager::new(
+        session_resources,
+        provider,
+        peri_config_snapshot,
+        permission_mode,
+        None,
+        cron_scheduler,
+        mcp_subscription,
+        // 装配注入面：Agent 管理 session registry，工具环境提供本地 shell 执行。
+        // ACP 协议面只持有契约 `peri_acp_types::tasks::TaskManager`。
+        Some(Arc::new(|| {
+            #[cfg(not(target_os = "emscripten"))]
+            let manager = peri_mcp_common::create_local_task_manager();
+            #[cfg(target_os = "emscripten")]
+            let manager = peri_agent::agent::async_tasks::TaskManager::new();
+            Arc::new(manager) as Arc<dyn peri_acp_types::tasks::TaskManager>
+        })),
+        agent_catalog,
+        plugin_command_entries,
+    )
+}
+
+/// 组装完整的 ACP host 配置（TUI / print 路径入口）。
+///
+/// 自迁移前 `launch.rs` 的内嵌 server 装配原样搬移：hook 组加载、tool search
+/// index、shared tools、Langfuse（环境启用时创建）、SessionManager。
+///
+/// M-TUI 收口：middlewares 具体实现（cron / MCP 池 / 工具检索索引 / skills /
+/// plugin / settings hooks / workflow 装配端口）与插件聚合数据在本装配面
+/// 内部构造（`peri-middlewares` 引用豁免见 `scripts/import-exemptions.conf`
+/// 边 2 assemble 路径）；行为与迁移前三路径（launch / cli_print / stdio）
+/// 各自装配一致（cron tick 驱动、MCP 初始化、孤儿插件清理时机均复刻）。
+pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig {
+    assemble_server_config_with_capabilities(input, HostCapabilities::default()).await
+}
+
+/// Deployment entry for environments without local optional resources.
+pub async fn assemble_server_config_with_capabilities(
+    input: HostAssemblyInput,
+    capabilities: HostCapabilities,
+) -> AcpServerConfig {
+    assemble_server_config_with_mcp_profile(
+        input,
+        peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        false,
+        None,
+        capabilities,
+    )
+    .await
+}
+
+/// stdio deployment variant. The assembly boundary derives the concrete MCP profile;
+/// TUI/MPSC always use [`assemble_server_config`].
+pub async fn assemble_server_config_with_mcp_apps(
+    input: HostAssemblyInput,
+    apps_enabled: bool,
+) -> AcpServerConfig {
+    assemble_server_config_with_mcp_profile(
+        input,
+        peri_middlewares::mcp::apps::deployment_profile(apps_enabled),
+        false,
+        None,
+        HostCapabilities::default(),
+    )
+    .await
+}
+
+pub(crate) async fn assemble_server_config_with_mcp_profile(
+    input: HostAssemblyInput,
+    mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile,
+    // `true` = 会话级装配（带 workspace 装配与 per-session MCP 池）；`false` = host 级
+    // 装配。与会话资源门面字段 `session_resources` 不同义，故另名 `session_scoped`。
+    session_scoped: bool,
+    activation: Option<tokio_util::sync::CancellationToken>,
+    capabilities: HostCapabilities,
+) -> AcpServerConfig {
+    let (host_task_owner, host_task_spawner) = HostTaskOwner::new();
+    let (mcp_task_owner, mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
+    let HostAssemblyInput {
+        provider,
+        peri_config,
+        config_source,
+        permission_mode,
+        session_resources,
+        workspace_id,
+        session_store_shutdown,
+        cwd,
+        bare,
+        drive_cron_tick,
+        #[cfg(not(target_os = "emscripten"))]
+        workspace_input,
+        #[cfg(not(target_os = "emscripten"))]
+        workspace_bash_default_run_in_background,
+        #[cfg(not(target_os = "emscripten"))]
+        workspace_resources,
+        #[cfg(not(target_os = "emscripten"))]
+        workflow_input,
+        prepared_plugins,
+        session_mcp_servers,
+        builtin_closed,
+        skills_face_closed,
+        plugin_face_closed,
+    } = input;
+
+    let plugin_discovery_failed = prepared_plugins
+        .as_ref()
+        .is_some_and(|prepared| prepared.discovery_failed);
+
+    // 用户级 `.claude` 与准备面、插件 RPC 共用同一权威（HOME 优先）：
+    // 见 `peri_middlewares::plugin::claude_home`。
+    let claude_dir = capabilities
+        .plugins
+        .then(peri_middlewares::plugin::claude_home);
+
+    // ── 插件来源准入（M6 唯一闭合位）：必须在取任何插件来源**之前**决定 ──
+    //
+    // `Closed` ⇒ 不再消费准备面已加载的聚合，也不自行加载：插件 roots / 命令 /
+    // hooks / MCP 贡献与继承面同批缺席（关闭语义要求能力不存在，而不是先读进来
+    // 再藏目录）。准备面已在本会话准备期应用同一策略（`prepared.rs`），这里是
+    // 装配面的第二次防线：策略从 frozen/session-local 派生，不从当轮配置回退。
+    let plugin_admission = if bare || !session_scoped || !capabilities.plugins || plugin_face_closed
+    {
+        peri_middlewares::plugin::PluginSourceAdmission::Closed
+    } else {
+        peri_middlewares::plugin::PluginSourceAdmission::Open
+    };
+
+    // ── 插件聚合数据（bare 时跳过；准备路径消费同一聚合，不重读插件目录）──
+    let (prepared_data, prepared_skill_roots) = match prepared_plugins {
+        Some(prepared) => (Some(prepared.data), Some(prepared.skill_roots)),
+        None => (None, None),
+    };
+    let prepared_supplied = prepared_skill_roots.is_some();
+    let plugin_data: Option<PluginLoadResult> = if plugin_admission.is_closed() {
+        None
+    } else if prepared_supplied {
+        // 准备路径已严格只读加载一次：装配面消费同一聚合，不重读插件目录。
+        prepared_data.flatten()
+    } else {
+        Some(peri_middlewares::plugin::load_enabled_plugins_aggregated(
+            claude_dir.as_ref().expect("plugins enabled"),
+            Some(std::path::Path::new(&cwd)),
+        ))
+    };
+
+    // ── cron 调度器（迁移前 TUI launch / cli_print 各自构造）──
+    //
+    // A1/A32：每个会话环境构造一份 scheduler，并以同一 `Arc` 同时喂给
+    // `CronSchedulerPort`（装配能力标识）与 builtin `cron` 实例的
+    // `CronInstanceInput`（工具面）。1s tick 的唯一 spawn 点是 pool 建立本代
+    // builtin transport 处（`McpClientPool::spawn_builtin_transport`，由
+    // `cron.tick_enabled` 决定）；宿主不再 spawn `HostTaskKind::CronTick`
+    // ——同一 scheduler 任一时刻至多一个驱动，tick 随该代 supervisor 关闭。
+    // 部署层不建 MCP 池；其 tick 策略经 WorkspaceAssembly 原样传入会话。
+    #[cfg(not(target_os = "emscripten"))]
+    let cron_scheduler_concrete = capabilities.cron.then(|| {
+        Arc::new(parking_lot::Mutex::new(peri_mcp_cron::CronScheduler::new(
+            tokio::sync::mpsc::unbounded_channel().0,
+        )))
+    });
+    #[cfg(not(target_os = "emscripten"))]
+    let cron_scheduler: Option<Arc<dyn CronSchedulerPort>> =
+        cron_scheduler_concrete.as_ref().map(|scheduler| {
+            Arc::new(peri_mcp_cron::CronSchedulerPortHandle(Arc::clone(
+                scheduler,
+            ))) as Arc<dyn CronSchedulerPort>
+        });
+    #[cfg(target_os = "emscripten")]
+    let cron_scheduler: Option<Arc<dyn CronSchedulerPort>> = None;
+
+    // ── 会话 MCP 池（bare 仅装配 workspace；后台初始化不阻塞）──
+    // OAuth 授权事件通道：MCP 授权回调（AuthorizationNeeded/Completed/Failed）
+    // 经 tx 转发 AcpEvent，run_acp_server 侧消费者以 peri/agent_event 送达 TUI。
+    let (oauth_event_tx, oauth_event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::event::oauth::HostOAuthEvent>();
+    let mcp_pool_concrete: Option<Arc<peri_middlewares::mcp::McpClientPool>> = if !session_scoped {
+        None
+    } else {
+        let pool = pending_mcp_pool(
+            mcp_task_spawner.clone(),
+            mcp_profile.clone(),
+            Some(std::path::Path::new(&cwd)),
+            workspace_id,
+            &session_resources,
+        );
+        if let Err(error) = pool.set_builtin_available(capabilities.builtin_mcp) {
+            tracing::error!(%error, "MCP builtin availability binding failed");
+        }
+        if let Err(error) = pool.set_plugin_discovery_available(capabilities.plugins) {
+            tracing::error!(%error, "MCP plugin availability binding failed");
+        }
+        // M6：插件来源闭合位随同一批能力位注入 pool，早于 `run_initialize` 的
+        // 配置加载窗口——MCP 合并（快照路径与文件路径）在被读到之前就已决定
+        // 是否读插件来源。判定源是 frozen/session-local 策略，不是当轮配置。
+        if let Err(error) = pool.set_plugin_face_closed(plugin_face_closed) {
+            tracing::error!(%error, "MCP plugin face closure binding failed");
+        }
+        if let Err(error) = pool.set_plugin_source_failed(plugin_discovery_failed) {
+            tracing::error!(%error, "MCP session plugin source binding failed");
+        }
+        if let Err(error) = pool.set_stdio_available(capabilities.stdio_mcp) {
+            tracing::error!(%error, "MCP stdio availability binding failed");
+        }
+        if let Some(snapshot) = config_source.snapshot() {
+            if let Err(error) = pool.set_configuration_snapshot(snapshot) {
+                tracing::error!(error = %error, "MCP configuration snapshot binding failed");
+            }
+        }
+        if let Some(servers) = session_mcp_servers {
+            if let Err(error) = pool.set_session_servers(servers) {
+                tracing::error!(error = %error, "ACP session MCP server binding failed");
+            }
+        }
+        // ── A33：builtin 实例上下文由**宿主装配**构造并注入，必须早于下面的
+        //    `run_initialize` 及其后台 spawn ──
+        //
+        // 同一批 `Arc`（A1）：cron 用组合根唯一 scheduler。`closed` 的**来源**分两处：
+        // `HostAssemblyInput::builtin_closed`（会话装配从 frozen 派生）随本上下文注入
+        // pool，只被订阅建立门消费；链装配（`McpMiddleware` / `open_builtin_bridges`）
+        // 仍从同一 frozen policy 派生本 turn 的工具投影关闭集。
+        //
+        // `tick_enabled` 是 `HostAssemblyInput::drive_cron_tick` 的投影（TUI=true；
+        // print/stdio=false；会话继承所属部署的开关）。
+        //
+        // `workspace` 输入是**唯一 session 级**的一项（AW3-11：per-session
+        // `TaskManager` + session 级 `on_bg_complete`），由会话环境装配原样转交，
+        // 本层不包装、不派生；`None` = 可见但退化（handler 照常构造，只是 `Bash`
+        // 失去后台任务那一路），不是「实例不可装配」——无 `instance_input_ready` arm。
+        #[allow(unused_mut)] // Emscripten omits all builtin inputs.
+        let mut builtin_context =
+            peri_middlewares::assembly::BuiltinInstanceContext::new(cwd.clone());
+        #[cfg(not(target_os = "emscripten"))]
+        if let Some(scheduler) = &cron_scheduler_concrete {
+            builtin_context =
+                builtin_context.with_cron(peri_middlewares::assembly::CronInstanceInput {
+                    scheduler: Arc::clone(scheduler),
+                    tick_enabled: drive_cron_tick,
+                });
+        }
+        #[cfg(not(target_os = "emscripten"))]
+        if let Some(workspace_input) = workspace_input {
+            builtin_context = builtin_context.with_workspace(workspace_input);
+        }
+        // 资源面输入与 session 级输入同批（同一上下文、同一次注入）：`None` 保持
+        // 「资源面未接线」的既有行为。
+        #[cfg(not(target_os = "emscripten"))]
+        if let Some(workspace_resources) = workspace_resources {
+            builtin_context = builtin_context.with_workspace_resources(workspace_resources);
+        }
+        // `workflow` 实例的运行时槽位：会话环境装配创建，session/new 之后由会话旧链
+        // 绑定（同一份运行时）；`None` = 该实例不可装配（顶层三路径）。
+        #[cfg(not(target_os = "emscripten"))]
+        if let Some(workflow_input) = workflow_input {
+            builtin_context = builtin_context.with_workflow(workflow_input);
+        }
+        // beta flag 投影（会话冻结）：Bash 的 `run_in_background` 有效缺省随本上下文
+        // 一次注入；装配面只传值，dispatch 不读配置、不解析 flag 语义。
+        #[cfg(not(target_os = "emscripten"))]
+        let builtin_context = builtin_context.with_workspace_bash_default_run_in_background(
+            workspace_bash_default_run_in_background,
+        );
+        let builtin_context = builtin_context
+            .with_closed(builtin_closed)
+            // W4b 收口：宿主技能面关闭位与关闭集同源（同一份 disabled 集合），
+            // 由发现管线的 core 投影消费（`core:{skill}` 裸名命令撤下）。
+            .with_skills_face_closed(skills_face_closed);
+        let builtin_context = Arc::new(builtin_context);
+        if let Err(error) = pool.set_builtin_instance_context(builtin_context) {
+            // 本池是上一行刚构造的（从未 initialize）⇒ 两个 typed 拒绝都不可能出现：
+            // 出现即装配顺序 bug。不在此处伪造 ready —— 缺上下文的 builtin 实例会在
+            // `run_initialize` 里以 typed 原因走 `insert_failed` +
+            // `commit_discovery_failure` 收口，`system_mcp` 闸门 fatal（A33）。
+            tracing::error!(%error, "builtin 实例上下文注入失败");
+        }
+        let pool_clone = pool.clone();
+        let cwd_clone = cwd.clone();
+        let claude_home_clone = claude_dir.clone();
+        let (init_tx, _init_rx) =
+            tokio::sync::watch::channel(peri_middlewares::mcp::McpInitStatus::Pending);
+        // OAuth 事件回调：AuthorizationNeeded 时注册回传通道（TUI 经
+        // mcp/oauth_callback RPC 投递授权码）并转发 OauthNeeded；完成/失败
+        // 直接转发对应 AcpEvent。L5 装配面豁免全路径引用（import-exemptions
+        // ACP-biz-fullpath），不引入 use 语句。
+        type OAuthFlowEvent = peri_middlewares::mcp::oauth_flow::OAuthFlowEvent;
+        let oauth_event_callback: Option<
+            Box<dyn Fn(peri_middlewares::mcp::oauth_flow::OAuthFlowEvent) + Send + Sync>,
+        > = {
+            let cb_tx = oauth_event_tx.clone();
+            let cb_pool = Arc::downgrade(&pool);
+            Some(Box::new(move |event: OAuthFlowEvent| match event {
+                OAuthFlowEvent::AuthorizationNeeded {
+                    flow_id,
+                    server_name,
+                    authorization_url,
+                    callback_tx,
+                } => {
+                    let Some(cb_pool) = cb_pool.upgrade() else {
+                        return;
+                    };
+                    if !cb_pool.register_oauth_callback(&server_name, &flow_id, callback_tx) {
+                        return;
+                    }
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::AuthorizationNeeded {
+                        flow_id,
+                        server_name,
+                        authorization_url,
+                    });
+                }
+                OAuthFlowEvent::AuthorizationCompleted {
+                    flow_id,
+                    server_name,
+                } => {
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::Completed {
+                        flow_id,
+                        server_name,
+                    });
+                }
+                OAuthFlowEvent::AuthorizationFailed {
+                    flow_id,
+                    server_name,
+                    failure_kind,
+                    error,
+                } => {
+                    let failure_class = match failure_kind {
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::CallbackUnavailable => crate::event::oauth::OAuthFailureClass::CallbackUnavailable,
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::CallbackTimeout => crate::event::oauth::OAuthFailureClass::CallbackTimeout,
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::ProviderRejected => crate::event::oauth::OAuthFailureClass::ProviderRejected,
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::ConnectionFailed => crate::event::oauth::OAuthFailureClass::ConnectionFailed,
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::Internal => crate::event::oauth::OAuthFailureClass::Internal,
+                    };
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::Failed {
+                        flow_id,
+                        server_name,
+                        failure_class,
+                        legacy_error: error,
+                    });
+                }
+                OAuthFlowEvent::AuthorizationCancelled {
+                    flow_id,
+                    server_name,
+                } => {
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::Cancelled {
+                        flow_id,
+                        server_name,
+                    });
+                }
+                OAuthFlowEvent::AuthorizationRestored {
+                    flow_id,
+                    server_name,
+                } => {
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::Restored {
+                        flow_id,
+                        server_name,
+                    });
+                }
+            }))
+        };
+        let _ = pool.spawn_background(peri_middlewares::mcp::McpTaskKey::Initialize, async move {
+            if let Some(activation) = activation {
+                activation.cancelled().await;
+            }
+            if bare {
+                peri_middlewares::mcp::McpClientPool::run_initialize_bare(
+                    pool_clone,
+                    std::path::Path::new(&cwd_clone),
+                    init_tx,
+                )
+                .await;
+            } else {
+                peri_middlewares::mcp::McpClientPool::run_initialize(
+                    pool_clone,
+                    std::path::Path::new(&cwd_clone),
+                    claude_home_clone
+                        .as_deref()
+                        .unwrap_or_else(|| std::path::Path::new("")),
+                    init_tx,
+                    oauth_event_callback,
+                )
+                .await;
+            }
+        });
+        Some(pool)
+    };
+    // 订阅端口同源复用：同一 McpClientPool 同时承担 McpPoolPort（命令面）与
+    // McpSubscriptionPort（订阅通知 → 会话 inbox 唤醒）两个角色。
+    let mcp_pool: Option<Arc<dyn McpPoolPort>> =
+        mcp_pool_concrete.clone().map(|p| p as Arc<dyn McpPoolPort>);
+    let mcp_subscription: Option<Arc<dyn McpSubscriptionPort>> = mcp_pool_concrete
+        .clone()
+        .map(|p| p as Arc<dyn McpSubscriptionPort>);
+    // MCP over ACP 服务：会话 setup 声明的 `type: "acp"` server 经它建连，连接
+    // 进的就是**本装配的池**——会话级装配（`session_scoped`）才有池，连接
+    // 因此只能进声明它的会话的工具面。host 级装配无池即无此服务。
+    let acp_mcp: Option<Arc<dyn peri_acp_types::ports::AcpMcpServerPort>> =
+        mcp_pool_concrete.clone().filter(|_| !bare).map(|pool| {
+            Arc::new(peri_middlewares::mcp::AcpMcpService::new(pool))
+                as Arc<dyn peri_acp_types::ports::AcpMcpServerPort>
+        });
+    // MCP Apps relay：**不在本层构造**。它需要 session-owned canonical 调用入口
+    //（`SessionInvocationService` 必须知道 session id / 关闭集 / 规则链），这些事实
+    // 在本函数之外（`host/workspace.rs` 的会话环境装配点，与同一份池同作用域）
+    // 才具备；host 级装配（`session_scoped = false`）无池，本就不产生 relay。
+    // 因此这里显式留空：App 面不可用时请求按能力关闭拒绝，而不是构造一个未接线
+    // 的 relay。
+    let mcp_apps_relay: Option<Arc<dyn peri_acp_types::mcp_apps::McpAppsRelayPort>> = None;
+
+    // ── 资源类/业务面端口默认实现（构造下沉：ACP Host = 部署单元）──
+    let tool_search_index: Arc<dyn ToolSearchPort> =
+        Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
+    let agent_catalog: Arc<dyn AgentCatalogPort> =
+        Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new());
+    let plugin_manager: Arc<dyn PluginManagerPort> =
+        Arc::new(peri_middlewares::host_ports::PluginManager);
+    let settings_hooks: Arc<dyn SettingsHooksPort> =
+        Arc::new(peri_middlewares::host_ports::SettingsHooksLoader);
+    // A6 面③：workflow agent 的工具面必须同样保留 Web / Artifact 能力（迁移后为
+    // builtin 实例的 direct bridge `mcp__web__*` 等），因此装配点把 deployment pool
+    // 交给工厂；bare 池同样保留 workspace，无 pool 时为 None。
+    // Emscripten：本地 workflow 运行时不在构建面内，不构造该工厂
+    // （`AcpServerConfig` 同名字段随目标移出）。
+    #[cfg(not(target_os = "emscripten"))]
+    let workflow_middleware_factory =
+        peri_middlewares::assembly::default_workflow_middleware_factory_with_pool(
+            mcp_pool_concrete.clone(),
+        );
+
+    // E2：启动时清理孤儿插件文件（迁移前 TUI launch 行为；bare 时跳过）
+    if !bare && !session_scoped && capabilities.plugins {
+        let claude_dir_clone = claude_dir.clone().expect("plugins enabled");
+        let _ = host_task_spawner.spawn(
+            HostTaskOwnerKind::Startup,
+            HostTaskKind::PluginCleanup,
+            async move {
+                if let Err(e) =
+                    peri_middlewares::plugin::cleanup_orphaned_plugins(&claude_dir_clone).await
+                {
+                    tracing::warn!(target: "peri", error = %e, "启动时清理孤儿插件文件失败");
+                } else {
+                    tracing::info!(target: "peri", "启动时清理孤儿插件文件完成");
+                }
+            },
+        );
+    }
+
+    // W4b（F6/J5）：`prepared_skill_roots` 不再经 session 管理器注入命令面
+    // （技能命令改由 MCP 发现投影）；它仍是**技能资源根**的事实源，由会话环境
+    // 装配（`SessionEnvironment::assemble_with_frozen` 的 provider 输入）与
+    // `AcpServerConfig.plugin_skill_roots` 消费。
+    //
+    // M6：关闭位下准备面的 roots 也被丢弃——插件来源必须在取来源之前闭合，
+    // 不能因为「准备阶段已读到」就把内容留在装配面。
+    let plugin_skill_roots = if plugin_admission.is_closed() {
+        Vec::new()
+    } else {
+        prepared_skill_roots.unwrap_or_else(|| {
+            plugin_data
+                .as_ref()
+                .map(|pd| pd.all_skill_roots.clone())
+                .unwrap_or_default()
+        })
+    };
+    // Phase 6 B2：插件命令静态条目预转（全路径引用豁免见
+    // scripts/import-exemptions.conf 边 2 assemble 路径；bare 时为空）。
+    let plugin_command_entries = plugin_data
+        .as_ref()
+        .map(|pd| peri_middlewares::plugin::plugin_route_entries(&pd.all_commands))
+        .unwrap_or_default();
+    let plugin_hooks = plugin_data
+        .as_ref()
+        .map(|pd| pd.all_hooks.clone())
+        .unwrap_or_default();
+    let plugin_loaded = plugin_data
+        .as_ref()
+        .map(|pd| pd.plugins.clone())
+        .unwrap_or_default();
+    // M6：命令面的运行期刷新（install/uninstall RPC）与本装配共用同一闭合位。
+    let plugin_face_closed_bit = plugin_admission.is_closed();
+    tracing::debug!(
+        plugin_face_closed = plugin_admission.is_closed(),
+        plugin_skill_roots = plugin_skill_roots.len(),
+        plugin_commands = plugin_command_entries.len(),
+        plugin_hooks = plugin_hooks.len(),
+        plugin_loaded = plugin_loaded.len(),
+        "插件来源注入面装配（M6 闭合位投影）"
+    );
+
+    let hook_groups = super::assemble_hook_groups(
+        &plugin_hooks,
+        settings_hooks.as_ref(),
+        &cwd,
+        bare || !session_scoped || !capabilities.settings_hooks,
+    );
+    let flat_hooks: Vec<RegisteredHook> = hook_groups.iter().flatten().cloned().collect();
+    tracing::info!(
+        groups = hook_groups.len(),
+        total_hooks = flat_hooks.len(),
+        "Hook groups assembled for ACP host"
+    );
+
+    let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new()));
+
+    let session_manager = build_session_manager(
+        session_resources.clone(),
+        provider.clone(),
+        &peri_config,
+        permission_mode.clone(),
+        cron_scheduler.clone(),
+        mcp_subscription,
+        agent_catalog.clone(),
+        // Phase 6 B2：插件静态命令条目注入 session 管理器（会话创建时注册；
+        // 技能命令面已改由 MCP 发现异步投影，不再经此处）。
+        plugin_command_entries.clone(),
+    );
+    session_manager.bind_cron_mcp(mcp_pool.clone());
+
+    // Langfuse 观测（与迁移前 TUI/stdio/print 一致：环境启用时创建）。
+    // 暂存能力的装配（native 端口与启动恢复）在 `host/telemetry.rs`：本处只把配置与
+    // 装配结果接上，不持有路径或临时目录细节（契约 §6/§7 P4b）。
+    let langfuse_config = if session_scoped {
+        None
+    } else {
+        config_source
+            .snapshot()
+            .map(|snapshot| snapshot.observability().clone())
+            .filter(|config| config.public_key.is_some() && config.secret_key.is_some())
+    };
+    let telemetry = super::super::telemetry::assemble(langfuse_config).await;
+
+    // 指标出口：仅 Langfuse 可用时安装（Langfuse event）；未配置时保持未安装，
+    // 指标事件丢弃——不落盘。
+    if let Some(session) = &telemetry.session {
+        let metrics_session: Arc<dyn peri_controller::langfuse::LangfuseSessionLike> =
+            session.clone();
+        peri_agent::metrics::set_sink(Some(Arc::new(
+            peri_controller::langfuse::LangfuseMetricsSink::new(metrics_session),
+        )));
+    }
+
+    AcpServerConfig {
+        workspace_assembly: (!session_scoped).then(|| WorkspaceAssembly {
+            startup_cwd: cwd.clone(),
+            bare,
+            drive_cron_tick,
+            mcp_profile,
+            capabilities,
+        }),
+        host_task_owner: Some(host_task_owner),
+        host_task_spawner,
+        mcp_task_owner: Some(Box::new(mcp_task_owner)),
+        provider: Arc::new(RwLock::new(provider)),
+        model_transport_route: None,
+        peri_config,
+        permission_mode,
+        cron_scheduler,
+        mcp_pool,
+        mcp_apps_relay,
+        // 会话级 facade 由会话环境装配点构造（本函数只做部署级装配）。
+        mcp_apps_facade: None,
+        // 部署级 entitlement 身份层：本仓装配**不注入**（裁决 R4 方案 b）⇒ `apps/*`
+        // 默认拒绝。SDK / 服务化部署在拿到本返回值后设置该字段即完成注入（字段 pub）。
+        session_authorization: None,
+        acp_mcp,
+        oauth_event_tx: Some(oauth_event_tx),
+        oauth_event_rx: Some(oauth_event_rx),
+        plugin_skill_roots,
+        plugin_command_entries,
+        plugin_face_closed: plugin_face_closed_bit,
+        plugin_hooks: flat_hooks,
+        // 仅插件 hooks（hooks 面板数据源；plugin/list 命令面返回，TUI 不再
+        // 直读 plugin_data）
+        plugin_hooks_only: plugin_hooks,
+        plugin_loaded,
+        hook_groups,
+        tool_search_index,
+        agent_catalog,
+        plugin_manager,
+        settings_hooks,
+        shared_tools,
+        #[cfg(not(target_os = "emscripten"))]
+        workflow_middleware_factory,
+        session_resources: session_resources.clone(),
+        session_store_shutdown,
+        controller: Arc::new(peri_controller::Controller::new(session_resources.clone())),
+        langfuse_session: telemetry.session,
+        langfuse_shutdown_owner: telemetry.shutdown_owner,
+        // 默认 false（TUI/print 保留全部命令）；stdio 装配点（assemble_stdio_config）
+        // 显式置 true，过滤 rewind/clear。
+        stdio_command_filter: false,
+        config_source,
+        session_manager,
+    }
+}

@@ -6,20 +6,22 @@
 //! `SubscriptionProbe` 服务端观测点。T7b 用它接线进 pool 的生产订阅消费循环，
 //! 验证「回读失败 ⇒ 回退通用提醒」路径。
 
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 
-use rmcp::{
-    model::{Implementation, ServerCapabilities, ServerConfig, SubscriptionFilter},
-    service::{Peer, RoleClient, SubscriptionContext, SubscriptionSink},
-    ErrorData as McpError, ServerHandler,
-};
-use tokio::time::timeout;
+use rmcp::model::Implementation;
+use rmcp::model::ServerCapabilities;
+use rmcp::model::ServerConfig;
+use rmcp::model::SubscriptionFilter;
+use rmcp::service::Peer;
+use rmcp::service::RoleClient;
+use rmcp::service::SubscriptionContext;
+use rmcp::service::SubscriptionSink;
+use rmcp::ErrorData as McpError;
+use rmcp::ServerHandler;
+use tokio::time;
 
 use super::apps::McpCapabilityProfile;
 use super::client::{serve_client_auto, McpServiceWrapper};
@@ -105,7 +107,7 @@ impl ServerHandler for SpikeSubscriptionServer {
 
 /// 有界等待一个异步观测成立；超时即 panic（携带 label 便于定位）。
 async fn wait_until(label: &str, mut cond: impl FnMut() -> bool) {
-    let observed = timeout(OBSERVE_TIMEOUT, async {
+    let observed = time::timeout(OBSERVE_TIMEOUT, async {
         while !cond() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }

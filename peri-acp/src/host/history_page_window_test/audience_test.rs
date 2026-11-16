@@ -1,8 +1,20 @@
-use super::*;
+use crate::host::requests::tests::history_page_wire_tests::PageFixture;
+use crate::transport::AcpTransport;
 use peri_acp_types::history_window::HistoryEntryId;
-use peri_acp_types::store::serialize_persisted_payload;
-use peri_acp_types::system_reminder::*;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::store;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+};
+use serde_json::json;
+use serial_test::serial;
+use std::sync::Arc;
 
+// SQLx has no safe allocation-counter API; the memory-bound regression needs
+// SQLite's process-wide counters without allocating a second history buffer.
 extern "C" {
     fn sqlite3_memory_highwater(reset: i32) -> i64;
     fn sqlite3_memory_used() -> i64;
@@ -11,6 +23,7 @@ extern "C" {
 fn sqlite_peak_reset() -> i64 {
     // SAFETY: SQLite 全局分配计数；分配测量用例串行执行（--test-threads=1）。
     let before = unsafe { sqlite3_memory_used() };
+    // SAFETY: The same serialized SQLite allocation measurement resets only the counter.
     unsafe {
         sqlite3_memory_highwater(1);
     }
@@ -86,23 +99,24 @@ async fn tiny_budget_does_not_issue_hidden_body_descriptors_own_or_inherited() {
                 json!("own")
             };
             let entry = HistoryEntryId::new(&sid, payload.id()).encode();
-            let (client, _, task) = spawn_loop(
+            let (client, _, task) = crate::host::requests::tests::history_page_wire_tests::spawn_loop(
                 Arc::clone(&fixture.cfg),
                 fixture.sessions,
-                Some(window_caps()),
+                Some(crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps()),
             )
             .await;
             for budget in [512 * 1024, 1] {
-                let opened = open(
-                    &client,
-                    &sid,
-                    json!({
-                        "kind":"open", "direction":"before", "limit":1, "byteBudget":budget,
-                        "anchor":{"kind":"entry", "entryId":entry, "source":source}
-                    }),
-                )
-                .await
-                .unwrap();
+                let opened =
+                    crate::host::requests::tests::history_page_wire_tests::window_tests::open(
+                        &client,
+                        &sid,
+                        json!({
+                            "kind":"open", "direction":"before", "limit":1, "byteBudget":budget,
+                            "anchor":{"kind":"entry", "entryId":entry, "source":source}
+                        }),
+                    )
+                    .await
+                    .unwrap();
                 assert_eq!(opened["items"], json!([]));
                 assert!(!opened.to_string().contains("hidden_model_body"));
                 assert!(!opened.to_string().contains("hidden_system_body"));
@@ -139,13 +153,13 @@ async fn body_rechecks_visibility_even_after_descriptor_was_issued() {
         .append_history(&sid, &[PersistedPayload::Message(visible)])
         .await
         .unwrap();
-    let (client, _, task) = spawn_loop(
+    let (client, _, task) = crate::host::requests::tests::history_page_wire_tests::spawn_loop(
         Arc::clone(&fixture.cfg),
         Arc::clone(&fixture.sessions),
-        Some(window_caps()),
+        Some(crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps()),
     )
     .await;
-    let opened = open(
+    let opened = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({"kind":"open","direction":"before","limit":1,"byteBudget":1}),
@@ -169,7 +183,7 @@ async fn body_rechecks_visibility_even_after_descriptor_was_issued() {
     .await
     .unwrap();
     sqlx::query("UPDATE messages SET content = ?1 WHERE message_id = ?2")
-        .bind(serialize_persisted_payload(&hidden).unwrap())
+        .bind(store::serialize_persisted_payload(&hidden).unwrap())
         .bind(id.as_uuid().to_string())
         .execute(&pool)
         .await
@@ -221,15 +235,15 @@ async fn visible_oversize_reminder_and_tool_body_remain_complete() {
         .append_history(&sid, &payloads)
         .await
         .unwrap();
-    let (client, _, task) = spawn_loop(
+    let (client, _, task) = crate::host::requests::tests::history_page_wire_tests::spawn_loop(
         Arc::clone(&fixture.cfg),
         fixture.sessions,
-        Some(window_caps()),
+        Some(crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps()),
     )
     .await;
     for payload in payloads {
         let entry = HistoryEntryId::new(&sid, payload.id()).encode();
-        let opened = open(
+        let opened = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
             &client,
             &sid,
             json!({
@@ -261,7 +275,9 @@ async fn visible_oversize_reminder_and_tool_body_remain_complete() {
         }
         assert_eq!(
             collected,
-            serialize_persisted_payload(&payload).unwrap().as_bytes()
+            store::serialize_persisted_payload(&payload)
+                .unwrap()
+                .as_bytes()
         );
     }
     task.abort();
@@ -287,20 +303,20 @@ async fn page_and_seek_do_not_issue_hidden_oversize_descriptors() {
         )
         .await
         .unwrap();
-    let (client, _, task) = spawn_loop(
+    let (client, _, task) = crate::host::requests::tests::history_page_wire_tests::spawn_loop(
         Arc::clone(&fixture.cfg),
         fixture.sessions,
-        Some(window_caps()),
+        Some(crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps()),
     )
     .await;
-    let opened = open(
+    let opened = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({"kind":"open","direction":"before","limit":1}),
     )
     .await
     .unwrap();
-    let fetched = page(
+    let fetched = crate::host::requests::tests::history_page_wire_tests::window_tests::page(
         &client,
         &sid,
         &opened["snapshotToken"],
@@ -313,7 +329,7 @@ async fn page_and_seek_do_not_issue_hidden_oversize_descriptors() {
     .unwrap();
     assert_eq!(fetched["items"], json!([]));
     assert!(fetched["beforeCursor"].is_string(), "隐藏条目仍推进游标");
-    let sought = open(
+    let sought = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({
@@ -346,7 +362,7 @@ async fn visibility_cache_survives_multiple_body_chunks() {
     let sid = fixture.sid.clone();
     let payload =
         PersistedPayload::Message(BaseMessage::human("multi chunk visible ".repeat(20_000)));
-    let expected = serialize_persisted_payload(&payload).unwrap();
+    let expected = store::serialize_persisted_payload(&payload).unwrap();
     assert!(expected.len() > 4 * 64 * 1024);
     fixture
         .cfg
@@ -354,13 +370,13 @@ async fn visibility_cache_survives_multiple_body_chunks() {
         .append_history(&sid, std::slice::from_ref(&payload))
         .await
         .unwrap();
-    let (client, _, task) = spawn_loop(
+    let (client, _, task) = crate::host::requests::tests::history_page_wire_tests::spawn_loop(
         Arc::clone(&fixture.cfg),
         Arc::clone(&fixture.sessions),
-        Some(window_caps()),
+        Some(crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps()),
     )
     .await;
-    let opened = open(
+    let opened = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({"kind":"open","direction":"before","limit":1,"byteBudget":1}),
@@ -414,20 +430,20 @@ async fn body_chunks_do_not_rescan_visibility_after_first_check() {
     let fixture = PageFixture::new(&tmp).await;
     let sid = fixture.sid.clone();
     let payload = PersistedPayload::Message(BaseMessage::human("Z".repeat(16 * 1024 * 1024)));
-    let expected = serialize_persisted_payload(&payload).unwrap();
+    let expected = store::serialize_persisted_payload(&payload).unwrap();
     fixture
         .cfg
         .session_resources
         .append_history(&sid, std::slice::from_ref(&payload))
         .await
         .unwrap();
-    let (client, _, task) = spawn_loop(
+    let (client, _, task) = crate::host::requests::tests::history_page_wire_tests::spawn_loop(
         Arc::clone(&fixture.cfg),
         Arc::clone(&fixture.sessions),
-        Some(window_caps()),
+        Some(crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps()),
     )
     .await;
-    let opened = open(
+    let opened = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({"kind":"open","direction":"before","limit":1,"byteBudget":1}),
@@ -484,13 +500,13 @@ async fn ticket_rotation_clears_visibility_cache() {
         .append_history(&sid, std::slice::from_ref(&payload))
         .await
         .unwrap();
-    let (client, _, task) = spawn_loop(
+    let (client, _, task) = crate::host::requests::tests::history_page_wire_tests::spawn_loop(
         Arc::clone(&fixture.cfg),
         Arc::clone(&fixture.sessions),
-        Some(window_caps()),
+        Some(crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps()),
     )
     .await;
-    let first = open(
+    let first = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({"kind":"open","direction":"before","limit":1,"byteBudget":1}),
@@ -512,7 +528,7 @@ async fn ticket_rotation_clears_visibility_cache() {
         .unwrap();
     assert_eq!(visibility_scans(&fixture, &sid).await, Some(1));
 
-    let second = open(
+    let second = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({"kind":"open","direction":"before","limit":1,"byteBudget":1}),

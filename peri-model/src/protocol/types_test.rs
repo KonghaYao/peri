@@ -226,7 +226,7 @@ fn test_response_and_protocol_metadata_serde_roundtrip() {
         cache_creation_input_tokens: Some(5),
         cache_read_input_tokens: Some(7),
     };
-    let response = ModelResponse::new(
+    let response = ModelResponse::try_new(
         ModelMessage::assistant_text("完成"),
         StopReason::EndTurn,
         Some(usage.clone()),
@@ -294,7 +294,7 @@ fn test_provider_protocols_serde_roundtrip_for_all_variants() {
 
 #[test]
 fn test_model_response_requires_an_assistant_message() {
-    let error = ModelResponse::new(
+    let error = ModelResponse::try_new(
         ModelMessage::user_text("x"),
         StopReason::EndTurn,
         None,

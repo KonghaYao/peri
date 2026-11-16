@@ -1,4 +1,8 @@
-use super::*;
+use crate::archive_chunk_batch::ArchiveChunkBatch;
+use crate::archive_chunk_batch::ARCHIVE_CHUNKS_PER_BATCH;
+use crate::context_archive::ArchiveChunkQuery;
+use crate::context_archive::ArchiveError;
+use crate::context_archive::ARCHIVE_CHUNK_BYTES;
 use crate::messages::MessageId;
 
 fn query(tail: MessageId) -> ArchiveChunkQuery {
@@ -13,7 +17,7 @@ fn query(tail: MessageId) -> ArchiveChunkQuery {
 #[test]
 fn archive_chunk_batch_rejects_unbounded_or_inconsistent_requests() {
     let tail = MessageId::new();
-    assert!(ArchiveChunkBatch::new(vec![query(tail); ARCHIVE_CHUNKS_PER_BATCH]).is_ok());
+    assert!(ArchiveChunkBatch::try_new(vec![query(tail); ARCHIVE_CHUNKS_PER_BATCH]).is_ok());
     for queries in [
         Vec::new(),
         vec![query(tail); ARCHIVE_CHUNKS_PER_BATCH + 1],
@@ -32,7 +36,7 @@ fn archive_chunk_batch_rejects_unbounded_or_inconsistent_requests() {
         }],
     ] {
         assert!(matches!(
-            ArchiveChunkBatch::new(queries),
+            ArchiveChunkBatch::try_new(queries),
             Err(ArchiveError::InvalidRequest(_))
         ));
     }

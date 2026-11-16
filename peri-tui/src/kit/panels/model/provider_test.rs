@@ -1,6 +1,12 @@
 //! 底部“管理 Provider”按钮与 Ctrl+L 的等价回归。
 
-use super::*;
+use super::EventResult;
+use super::KeyCode;
+use super::KeyModifiers;
+use super::ModelPanelGuard;
+use super::PanelKind;
+use super::TEST_AREA;
+use super::serial;
 
 // ── 设计 §7.8：底部“管理 Provider”按钮 ─────────────────────────────────────
 
@@ -27,38 +33,38 @@ fn clear_navigation() {
 #[serial]
 fn manage_provider_button_click_matches_ctrl_l() {
     let guard = ModelPanelGuard::install();
-    guard.set_config(responses_config());
+    guard.set_config(super::responses_config());
     let button_row = TEST_AREA.y + TEST_AREA.height - 2;
     let (tx, rx) = std::sync::mpsc::channel();
 
-    let click_switched = switched();
+    let click_switched = super::switched();
     let click_tx = tx.clone();
-    mount_panel_frames(TEST_AREA, 1, move |frame, panel| {
+    super::mount_panel_frames(TEST_AREA, 1, move |frame, panel| {
         if frame == 0 {
             let result = panel.event(
-                left_down(button_row, TEST_AREA.x + 2),
+                super::left_down(button_row, TEST_AREA.x + 2),
                 TEST_AREA,
                 &click_switched,
             );
-            click_tx.send((result, navigation_snapshot())).unwrap();
+            click_tx.send((result, navigation_snapshot())).expect("manage provider button click matches ctrl l: fixture channel must deliver its expected message");
         }
     });
-    let click = rx.try_recv().unwrap();
+    let click = rx.try_recv().expect("manage provider button click matches ctrl l: fixture channel must deliver its expected message");
 
     clear_navigation();
-    let key_switched = switched();
+    let key_switched = super::switched();
     let key_tx = tx;
-    mount_panel_frames(TEST_AREA, 1, move |frame, panel| {
+    super::mount_panel_frames(TEST_AREA, 1, move |frame, panel| {
         if frame == 0 {
             let result = panel.event(
-                key_with(KeyCode::Char('l'), KeyModifiers::CONTROL),
+                super::key_with(KeyCode::Char('l'), KeyModifiers::CONTROL),
                 TEST_AREA,
                 &key_switched,
             );
-            key_tx.send((result, navigation_snapshot())).unwrap();
+            key_tx.send((result, navigation_snapshot())).expect("manage provider button click matches ctrl l: fixture channel must deliver its expected message");
         }
     });
-    let keyboard = rx.try_recv().unwrap();
+    let keyboard = rx.try_recv().expect("manage provider button click matches ctrl l: fixture channel must deliver its expected message");
 
     assert_eq!(click, keyboard, "按钮点击必须与 Ctrl+L 等价");
     let (result, (open_panels, active, provider_id)) = click;

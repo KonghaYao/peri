@@ -1,22 +1,22 @@
 //! Tests for panels_config
 
-#[cfg(test)]
-use super::*;
+use super::PERMISSION_OPTS;
+use super::i18n;
 
 #[test]
 fn test_parse_permission_mode_roundtrip() {
     for opt in PERMISSION_OPTS {
-        let mode = parse_permission_mode(opt);
+        let mode = super::parse_permission_mode(opt);
         assert!(mode.is_some(), "{} 应解析成功", opt);
-        let label = permission_mode_label(mode.unwrap());
+        let label = super::permission_mode_label(mode.expect("parse permission mode roundtrip: the fixture value must satisfy its target representation"));
         assert_eq!(label, *opt, "label 与原始字符串应一致");
     }
 }
 
 #[test]
 fn test_parse_permission_mode_invalid() {
-    assert!(parse_permission_mode("invalid").is_none());
-    assert!(parse_permission_mode("").is_none());
+    assert!(super::parse_permission_mode("invalid").is_none());
+    assert!(super::parse_permission_mode("").is_none());
 }
 
 // ── 面板级用例：共享视口、命中/绘制同源、保存失败与句柄缺失 ──────────────────
@@ -25,8 +25,8 @@ fn test_parse_permission_mode_invalid() {
 // cron 面板测试）；保存入口经 `activate_row_with` 注入，单测绝不写真实配置文件。
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{NOTIFICATION, Notification, PANEL_SCROLL_OWNER, PERI_CONFIG_HANDLE};
-use crate::kit::panels::shared::list::{ListViewport, content_rows};
+
+use crate::kit::panels::shared::list::ListViewport;
 use fluent_bundle::FluentValue;
 use ratatui_kit::crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui_kit::prelude::{EventResult, State, element};
@@ -54,6 +54,7 @@ const SHORT_AREA: Rect = Rect {
 };
 
 /// beta 区块标题行在行模型中的下标：不可激活（点击只改选中项，不写配置）。
+#[must_use]
 fn beta_section_row() -> usize {
     super::CONFIG_ROWS.len()
 }
@@ -196,7 +197,7 @@ impl MountedPanel {
     fn event(&self, event: Event, area: Rect) -> EventResult {
         let rows = super::config_rows();
         let viewport = ListViewport::for_content_rows(
-            content_rows(Some(area), area.height),
+            crate::kit::panels::shared::list::content_rows(Some(area), area.height),
             super::LIST_METRICS,
             rows.len(),
             *self.cursor.read(),
@@ -544,12 +545,11 @@ fn hooks_stay_stable_across_frames() {
 /// 注册之前没有任何提前 `return`——hook 数量与顺序不可能随渲染路径变化。
 #[test]
 fn config_hooks_precede_event_registration_and_returns() {
-    let src = include_str!("config.rs");
-    let body = src
-        .split("#[path = \"config_test.rs\"]")
-        .next()
-        .expect("组件模块体");
-    let component = body.split("pub fn ConfigPanel").nth(1).expect("组件函数体");
+    let src = include_str!("config/config_panel.rs").replace("\r\n", "\n");
+    let component = src
+        .split_once("pub fn ConfigPanel")
+        .and_then(|(_, rest)| rest.split_once("\n}\n").map(|(body, _)| body))
+        .expect("组件函数体完整");
     let handler = component
         .find("hooks.use_event_handler_with_options")
         .expect("事件注册存在");
@@ -570,3 +570,11 @@ fn config_hooks_precede_event_registration_and_returns() {
         "事件注册之后不得再注册 hook"
     );
 }
+
+use crate::kit::atoms::NOTIFICATION;
+
+use crate::kit::atoms::Notification;
+
+use crate::kit::atoms::PANEL_SCROLL_OWNER;
+
+use crate::kit::atoms::PERI_CONFIG_HANDLE;

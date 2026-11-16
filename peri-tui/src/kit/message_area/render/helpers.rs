@@ -1,7 +1,7 @@
 use crate::kit::message_area::grid::{Breakpoint, GridSpec, TextLineSource};
 use crate::kit::terminal_caps::SymbolSet;
 use crate::kit::tui_render_unit::TuiDiffBlock;
-use crate::truncate::truncate_by_width;
+
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::ratatui::style::{Color, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
@@ -15,7 +15,7 @@ pub(super) fn compact_output_lines(text: &str, max_lines: usize, max_width: usiz
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .take(max_lines)
-        .map(|line| truncate_by_width(line, max_width))
+        .map(|line| crate::truncate::truncate_by_width(line, max_width))
         .collect();
 
     let total = text.lines().filter(|line| !line.trim().is_empty()).count();
@@ -126,6 +126,7 @@ pub(super) fn first_prefix(grid: &GridSpec, symbol: &str, style: Style) -> Vec<S
 }
 
 /// 续行前缀：`[outer 空][语义色竖线][gap]`——竖线颜色由调用方按消息类型传入。
+#[must_use]
 pub(super) fn cont_prefix(grid: &GridSpec, color: Color) -> Vec<Span<'static>> {
     vec![
         Span::raw(" "),
@@ -200,6 +201,7 @@ pub(super) fn text_line_color(source: TextLineSource) -> Color {
 
 /// 台阶行判定（` ╰─╮` / ` ╭─╯`）——Animation 原位刷新（running header 顺延，
 /// `render::running_header_index`）与语义复制剥离共用。
+#[must_use]
 pub(super) fn is_step_line(line: &Line<'static>) -> bool {
     let mut text = String::new();
     for span in &line.spans {
@@ -295,17 +297,20 @@ pub(super) fn fit_summary_to_content(spans: &mut Vec<Span<'static>>, grid: &Grid
         return;
     }
     let overflow = content_total - content;
-    for span in spans.iter_mut().rev() {
-        if span.content.trim().is_empty() {
-            continue;
-        }
-        let w = span.content.width();
-        if w > 0 {
-            let keep = w.saturating_sub(overflow);
-            if keep > 0 {
-                span.content = truncate_by_width(&span.content, keep).into();
+    {
+        let iteration_items = spans.iter_mut().rev();
+        for span in iteration_items {
+            if span.content.trim().is_empty() {
+                continue;
             }
-            return;
+            let w = span.content.width();
+            if w > 0 {
+                let keep = w.saturating_sub(overflow);
+                if keep > 0 {
+                    span.content = crate::truncate::truncate_by_width(&span.content, keep).into();
+                }
+                return;
+            }
         }
     }
 }

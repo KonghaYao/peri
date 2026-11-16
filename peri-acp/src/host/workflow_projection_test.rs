@@ -1,10 +1,18 @@
-use super::*;
-use peri_acp_types::{
-    ports::McpPoolShutdownReport,
-    tasks::{BgTaskKind, BgTaskRegistration},
-    workflow::{AgentExecutor, AgentRunParams, AgentRunResult, WorkflowRunStatus},
-};
+use crate::host::workflow_projection::Client;
+use peri_acp_types::ports::McpPoolPort;
+use peri_acp_types::ports::McpPoolShutdownReport;
+use peri_acp_types::tasks::BgTaskKind;
+use peri_acp_types::tasks::BgTaskRegistration;
+use peri_acp_types::tasks::TaskManager;
+use peri_acp_types::workflow::AgentExecutor;
+use peri_acp_types::workflow::AgentRunParams;
+use peri_acp_types::workflow::AgentRunResult;
+use peri_acp_types::workflow::WorkflowRunStatus;
+use peri_acp_types::workflow::WorkflowTaskResult;
+use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 struct Executor;
 #[async_trait::async_trait]

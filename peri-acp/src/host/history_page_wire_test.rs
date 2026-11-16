@@ -8,12 +8,21 @@
 //! 首屏与初始游标契约、页链与合并、拒绝路径、rewind 与过期游标、能力门控与私有字段。
 //! 子模块经 `use super::*` 复用这里的夹具与 helper，不各自另造连接或存储。
 
-use super::*;
 use crate::host::history_page;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::provider::LlmProvider;
+use crate::transport::types::AcpError;
 use crate::transport::AcpTransport;
 use peri_acp_types::messages::{BaseMessage, MessageId};
+
+use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::store::{CompactionChange, MessageFlags};
 use peri_acp_types::PeriCaps;
+use serde_json::json;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 // ── 子模块：按职责拆分（每个文件 ≤1000 行）──────────────────────────────────
@@ -61,17 +70,24 @@ struct PageFixture {
 
 impl PageFixture {
     async fn new(tmp: &tempfile::TempDir) -> Self {
-        let config = make_peri_config_with_provider(make_provider_config(
-            "a",
-            "openai",
-            "unused-test-key",
-            "gpt-4o",
-        ));
+        let config = crate::host::requests::tests::make_peri_config_with_provider(
+            crate::host::requests::tests::make_provider_config(
+                "a",
+                "openai",
+                "unused-test-key",
+                "gpt-4o",
+            ),
+        );
         let provider = LlmProvider::from_config(&config).unwrap();
-        let cfg = Arc::new(make_server_config(config, provider, tmp).await);
+        let cfg =
+            Arc::new(crate::host::requests::tests::make_server_config(config, provider, tmp).await);
         let mut sessions = HashMap::new();
-        let sid =
-            register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
+        let sid = crate::host::requests::tests::register_session_with_history(
+            &mut sessions,
+            tmp.path().to_str().unwrap(),
+            &cfg,
+        )
+        .await;
         Self {
             cfg,
             sessions: Arc::new(tokio::sync::Mutex::new(sessions)),
@@ -180,7 +196,7 @@ async fn spawn_loop_with_transport(
         }
         let connection = Arc::new(tokio::sync::Mutex::new(context));
         let cancellation = CancellationToken::new();
-        let recovery = recovery_for(&cfg, &sessions, &cont_tx);
+        let recovery = crate::host::requests::tests::recovery_for(&cfg, &sessions, &cont_tx);
         crate::host::server_loop::ServerLoop {
             transport: &server,
             cfg: &cfg,
@@ -371,7 +387,8 @@ async fn session_switch_response_write_failure_only_rolls_back_reservation() {
         crate::host::connection::ConnectionContext::new(false),
     ));
     let cancellation = CancellationToken::new();
-    let recovery = recovery_for(&fixture.cfg, &fixture.sessions, &cont_tx);
+    let recovery =
+        crate::host::requests::tests::recovery_for(&fixture.cfg, &fixture.sessions, &cont_tx);
     crate::host::server_loop::ServerLoop {
         transport: &transport,
         cfg: &fixture.cfg,
@@ -402,7 +419,7 @@ async fn session_switch_history_read_only_bypasses_setup_gate() {
     let recorder: Arc<dyn AcpTransport> = Arc::new(MockTransport::default());
     let other = {
         let mut states = fixture.sessions.lock().await;
-        handle_request(
+        crate::host::requests::handle_request(
             "session/new",
             &json!({ "cwd": tmp.path().to_str().unwrap() }),
             &fixture.cfg,

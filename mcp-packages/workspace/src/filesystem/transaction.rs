@@ -1,14 +1,17 @@
 //! Write/Edit 共用的进程内 per-target 事务。
 
-use std::{
-    collections::HashMap,
-    future::Future,
-    path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, Weak},
-};
+use std::collections::HashMap;
+use std::future::Future;
+use std::path::Component;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::sync::Weak;
 
 use parking_lot::Mutex as TargetMutex;
-use peri_acp_types::sentinel::projection_sentinel_counts_v1;
+use peri_acp_types::sentinel;
 
 pub(crate) const SENTINEL_REJECTION: &str =
     "File change rejected because the result contains newly introduced protected projection text.";
@@ -44,8 +47,8 @@ pub(crate) async fn capture_committed_image<F: Future>(
     (output, captured)
 }
 
-pub(crate) struct LockedTarget<'a> {
-    path: &'a Path,
+pub(crate) struct LockedTarget<'target> {
+    path: &'target Path,
 }
 
 pub(crate) fn with_target_lock<T>(path: &Path, operation: impl FnOnce(LockedTarget<'_>) -> T) -> T {
@@ -142,7 +145,7 @@ fn introduces_projection_sentinel_bytes(pre: &[u8], post: &[u8]) -> bool {
             let Ok(line) = std::str::from_utf8(line) else {
                 continue;
             };
-            for (sentinel, count) in projection_sentinel_counts_v1(line) {
+            for (sentinel, count) in sentinel::projection_sentinel_counts_v1(line) {
                 *counts.entry(sentinel).or_default() += count;
             }
         }
@@ -259,7 +262,9 @@ fn target_lock(path: &Path) -> Arc<TargetMutex<()>> {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
     let registry = REGISTRY.get_or_init(Default::default);
     let key = logical_path_key(path);
-    let mut entries = registry.lock().unwrap();
+    let mut entries = registry
+        .lock()
+        .expect("target-lock registry must preserve one lock identity per logical path");
     entries.retain(|_, lock| lock.strong_count() > 0);
     if let Some(lock) = entries.get(&key).and_then(Weak::upgrade) {
         return lock;

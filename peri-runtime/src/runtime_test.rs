@@ -15,7 +15,10 @@ use peri_acp_types::identity::{
 use peri_acp_types::messages::MessageContent;
 use peri_acp_types::thread::CancelPolicy;
 
-use super::{Runtime, RuntimeError, SessionHandle, UnstampedEvent};
+use crate::error::RuntimeError;
+use crate::runtime::Runtime;
+use peri_acp_types::runtime::SessionHandle;
+use peri_acp_types::runtime::UnstampedEvent;
 
 /// 记录型 mock 句柄：记录阶段调用顺序，join/persist/drain 行为可配置。
 struct MockHandle {
@@ -49,21 +52,30 @@ impl MockHandle {
     }
 
     fn call_sequence(&self) -> Vec<&'static str> {
-        self.calls.lock().unwrap().clone()
+        self.calls
+            .lock()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
+            .clone()
     }
 
     fn last_cancel(&self) -> Option<CancelRequest> {
-        self.last_cancel.lock().unwrap().clone()
+        self.last_cancel
+            .lock()
+            .expect("self last cancel mutex must remain unpoisoned throughout the test")
+            .clone()
     }
 
     fn last_input(&self) -> Option<MessageContent> {
-        self.last_input.lock().unwrap().clone()
+        self.last_input
+            .lock()
+            .expect("self last input mutex must remain unpoisoned throughout the test")
+            .clone()
     }
 
     fn cancel_count(&self) -> usize {
         self.calls
             .lock()
-            .unwrap()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
             .iter()
             .filter(|c| **c == "cancel")
             .count()
@@ -73,18 +85,35 @@ impl MockHandle {
 #[async_trait::async_trait]
 impl SessionHandle for MockHandle {
     async fn run(&self) -> Result<(), anyhow::Error> {
-        self.calls.lock().unwrap().push("run");
+        self.calls
+            .lock()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
+            .push("run");
         Ok(())
     }
 
     fn cancel(&self, request: &CancelRequest) {
-        self.calls.lock().unwrap().push("cancel");
-        *self.last_cancel.lock().unwrap() = Some(request.clone());
+        self.calls
+            .lock()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
+            .push("cancel");
+        *self
+            .last_cancel
+            .lock()
+            .expect("self last cancel mutex must remain unpoisoned throughout the test") =
+            Some(request.clone());
     }
 
     fn submit_input(&self, input: MessageContent) -> Result<(), anyhow::Error> {
-        self.calls.lock().unwrap().push("submit_input");
-        *self.last_input.lock().unwrap() = Some(input);
+        self.calls
+            .lock()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
+            .push("submit_input");
+        *self
+            .last_input
+            .lock()
+            .expect("self last input mutex must remain unpoisoned throughout the test") =
+            Some(input);
         if self.submit_ok.load(Ordering::SeqCst) {
             Ok(())
         } else {
@@ -93,15 +122,24 @@ impl SessionHandle for MockHandle {
     }
 
     fn stop_accepting(&self) {
-        self.calls.lock().unwrap().push("stop_accepting");
+        self.calls
+            .lock()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
+            .push("stop_accepting");
     }
 
     fn cancel_owned(&self) {
-        self.calls.lock().unwrap().push("cancel_owned");
+        self.calls
+            .lock()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
+            .push("cancel_owned");
     }
 
     async fn join(&self, _deadline: Duration) -> bool {
-        self.calls.lock().unwrap().push("join");
+        self.calls
+            .lock()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
+            .push("join");
         if self.pause_join.load(Ordering::SeqCst) {
             self.resume_join.notified().await;
         }
@@ -109,11 +147,17 @@ impl SessionHandle for MockHandle {
     }
 
     fn abort(&self) {
-        self.calls.lock().unwrap().push("abort");
+        self.calls
+            .lock()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
+            .push("abort");
     }
 
     async fn persist(&self) -> Result<(), anyhow::Error> {
-        self.calls.lock().unwrap().push("persist");
+        self.calls
+            .lock()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
+            .push("persist");
         if self.persist_ok.load(Ordering::SeqCst) {
             Ok(())
         } else {
@@ -122,8 +166,15 @@ impl SessionHandle for MockHandle {
     }
 
     fn drain(&self) -> Vec<UnstampedEvent> {
-        self.calls.lock().unwrap().push("drain");
-        self.drained.lock().unwrap().drain(..).collect()
+        self.calls
+            .lock()
+            .expect("self calls mutex must remain unpoisoned throughout the test")
+            .push("drain");
+        self.drained
+            .lock()
+            .expect("self drained mutex must remain unpoisoned throughout the test")
+            .drain(..)
+            .collect()
     }
 }
 
@@ -144,8 +195,10 @@ async fn map_register_lookup_remove() {
     let rt = Runtime::new();
     let h1 = MockHandle::new(true, vec![]);
     let h2 = MockHandle::new(true, vec![]);
-    rt.register("s1", Arc::clone(&h1)).unwrap();
-    rt.register("s2", Arc::clone(&h2)).unwrap();
+    rt.register("s1", Arc::clone(&h1))
+        .expect("the register fixture result is required for this assertion");
+    rt.register("s2", Arc::clone(&h2))
+        .expect("the register fixture result is required for this assertion");
 
     // 查询
     assert!(rt.contains("s1"));
@@ -163,7 +216,9 @@ async fn map_register_lookup_remove() {
     ));
 
     // 销毁后移除
-    rt.destroy("s1", Duration::from_secs(5)).await.unwrap();
+    rt.destroy("s1", Duration::from_secs(5))
+        .await
+        .expect("the destroy fixture result is required for this assertion");
     assert!(!rt.contains("s1"));
     assert!(rt.handle("s1").is_none());
     assert_eq!(rt.session_ids(), vec!["s2".to_string()]);
@@ -174,13 +229,23 @@ async fn map_register_lookup_remove() {
 #[tokio::test]
 async fn stamp_fills_session_id_and_seq_monotonic() {
     let rt = Runtime::new();
-    rt.register("s1", MockHandle::new(true, vec![])).unwrap();
-    rt.register("s2", MockHandle::new(true, vec![])).unwrap();
+    rt.register("s1", MockHandle::new(true, vec![]))
+        .expect("the register fixture result is required for this assertion");
+    rt.register("s2", MockHandle::new(true, vec![]))
+        .expect("the register fixture result is required for this assertion");
 
-    let e1 = rt.stamp("s1", &ev("t1", "a1")).unwrap();
-    let e2 = rt.stamp("s1", &ev("t2", "a1")).unwrap();
-    let e3 = rt.stamp("s1", &ev("t3", "a2")).unwrap();
-    let f1 = rt.stamp("s2", &ev("t1", "a1")).unwrap();
+    let e1 = rt
+        .stamp("s1", &ev("t1", "a1"))
+        .expect("the stamp fixture result is required for this assertion");
+    let e2 = rt
+        .stamp("s1", &ev("t2", "a1"))
+        .expect("the stamp fixture result is required for this assertion");
+    let e3 = rt
+        .stamp("s1", &ev("t3", "a2"))
+        .expect("the stamp fixture result is required for this assertion");
+    let f1 = rt
+        .stamp("s2", &ev("t1", "a1"))
+        .expect("the stamp fixture result is required for this assertion");
 
     // session_id 按 session 维度补打（Agent 层事件不携带）
     assert_eq!(e1.session_id, "s1");
@@ -211,9 +276,13 @@ async fn stamp_fills_session_id_and_seq_monotonic() {
 async fn destroy_follows_order_and_drains_stamped_events() {
     let handle = MockHandle::new(true, vec![ev("t1", "a1"), ev("t2", "a1")]);
     let rt = Runtime::new();
-    rt.register("s1", Arc::clone(&handle)).unwrap();
+    rt.register("s1", Arc::clone(&handle))
+        .expect("the register fixture result is required for this assertion");
 
-    let envelopes = rt.destroy("s1", Duration::from_secs(5)).await.unwrap();
+    let envelopes = rt
+        .destroy("s1", Duration::from_secs(5))
+        .await
+        .expect("the destroy fixture result is required for this assertion");
 
     // 阶段顺序：停收 → 取消 owned → join →（未超时，无 abort）→ 持久化 → drain
     assert_eq!(
@@ -239,9 +308,12 @@ async fn destroy_follows_order_and_drains_stamped_events() {
 async fn destroy_aborts_on_join_timeout() {
     let handle = MockHandle::new(false, vec![]); // join 超时
     let rt = Runtime::new();
-    rt.register("s1", Arc::clone(&handle)).unwrap();
+    rt.register("s1", Arc::clone(&handle))
+        .expect("the register fixture result is required for this assertion");
 
-    rt.destroy("s1", Duration::from_millis(1)).await.unwrap();
+    rt.destroy("s1", Duration::from_millis(1))
+        .await
+        .expect("the destroy fixture result is required for this assertion");
 
     // 超时分支：join 后插入 abort，再继续持久化 → drain
     assert_eq!(
@@ -263,7 +335,8 @@ async fn destroy_persist_failure_keeps_mapping() {
     let handle = MockHandle::new(true, vec![]);
     handle.persist_ok.store(false, Ordering::SeqCst);
     let rt = Runtime::new();
-    rt.register("s1", Arc::clone(&handle)).unwrap();
+    rt.register("s1", Arc::clone(&handle))
+        .expect("the register fixture result is required for this assertion");
 
     let err = rt.destroy("s1", Duration::from_secs(5)).await.unwrap_err();
     assert!(matches!(
@@ -299,11 +372,15 @@ fn cancel_req(session_id: &str, turn_id: &str) -> CancelRequest {
 async fn cancel_and_run_forward_to_handle() {
     let handle = MockHandle::new(true, vec![]);
     let rt = Runtime::new();
-    rt.register("s1", Arc::clone(&handle)).unwrap();
+    rt.register("s1", Arc::clone(&handle))
+        .expect("the register fixture result is required for this assertion");
 
     let req = cancel_req("s1", "t1");
-    rt.cancel(&req).unwrap();
-    rt.run("s1").await.unwrap();
+    rt.cancel(&req)
+        .expect("the cancel fixture result is required for this assertion");
+    rt.run("s1")
+        .await
+        .expect("the run fixture result is required for this assertion");
 
     // 只定位与转发：cancel 与 run 直达句柄
     assert_eq!(handle.call_sequence(), vec!["cancel", "run"]);
@@ -334,16 +411,21 @@ async fn cancel_and_run_forward_to_handle() {
 async fn cancel_idempotent_repeated_forward_same_request() {
     let handle = MockHandle::new(true, vec![]);
     let rt = Runtime::new();
-    rt.register("s1", Arc::clone(&handle)).unwrap();
+    rt.register("s1", Arc::clone(&handle))
+        .expect("the register fixture result is required for this assertion");
 
     let req = cancel_req("s1", "t1");
     // 同一三元组重复 cancel：两次均成功转发同一请求（不报错、不翻转状态）；
     // 终态唯一（Completed/Interrupted）由 Agent 侧判定，Runtime 不解释语义
-    rt.cancel(&req).unwrap();
-    rt.cancel(&req).unwrap();
+    rt.cancel(&req)
+        .expect("the cancel fixture result is required for this assertion");
+    rt.cancel(&req)
+        .expect("the cancel fixture result is required for this assertion");
 
     assert_eq!(handle.cancel_count(), 2);
-    let received = handle.last_cancel().unwrap();
+    let received = handle
+        .last_cancel()
+        .expect("the last cancel fixture result is required for this assertion");
     assert_eq!(received, req, "重复 cancel 转发同一请求（结果一致）");
 
     // 不同 attempt 是不同 cancel 目标（attempt_id 不可复用，幂等按三元组判定）
@@ -351,10 +433,15 @@ async fn cancel_idempotent_repeated_forward_same_request() {
         AttemptIdentity::new("s1", SessionEpoch::initial(), "t1", AttemptId::new()),
         CancelPolicy::Cascade,
     );
-    rt.cancel(&other_req).unwrap();
+    rt.cancel(&other_req)
+        .expect("the cancel fixture result is required for this assertion");
     assert_eq!(handle.cancel_count(), 3);
     assert_ne!(
-        handle.last_cancel().unwrap().identity.attempt_id,
+        handle
+            .last_cancel()
+            .expect("the last cancel fixture result is required for this assertion")
+            .identity
+            .attempt_id,
         req.identity.attempt_id,
         "attempt_id 不可复用：不同 attempt 的 cancel 目标不同"
     );
@@ -366,16 +453,20 @@ async fn cancel_idempotent_repeated_forward_same_request() {
 async fn cancel_passes_clear_queue_and_policy() {
     let handle = MockHandle::new(true, vec![]);
     let rt = Runtime::new();
-    rt.register("s1", Arc::clone(&handle)).unwrap();
+    rt.register("s1", Arc::clone(&handle))
+        .expect("the register fixture result is required for this assertion");
 
     let req = CancelRequest::new(
         AttemptIdentity::new("s1", SessionEpoch::initial(), "t1", AttemptId::new()),
         CancelPolicy::Independent,
     )
     .with_clear_queue(true);
-    rt.cancel(&req).unwrap();
+    rt.cancel(&req)
+        .expect("the cancel fixture result is required for this assertion");
 
-    let received = handle.last_cancel().unwrap();
+    let received = handle
+        .last_cancel()
+        .expect("the last cancel fixture result is required for this assertion");
     assert!(received.clear_queue, "clear_queue 标志透传");
     assert_eq!(received.policy, CancelPolicy::Independent, "policy 透传");
 }
@@ -386,19 +477,25 @@ async fn cancel_passes_clear_queue_and_policy() {
 async fn join_forwards_deadline_result() {
     let handle = MockHandle::new(true, vec![]); // join 在 deadline 内结束
     let rt = Runtime::new();
-    rt.register("s1", Arc::clone(&handle)).unwrap();
+    rt.register("s1", Arc::clone(&handle))
+        .expect("the register fixture result is required for this assertion");
 
     assert!(
-        rt.join("s1", Duration::from_secs(5)).await.unwrap(),
+        rt.join("s1", Duration::from_secs(5))
+            .await
+            .expect("the registered session fixture must be available for joining"),
         "deadline 内结束返回 true"
     );
     assert_eq!(handle.call_sequence(), vec!["join"]);
 
     // 超时分支：返回 false（不自动 abort；abort 由销毁路径编排）
     let slow = MockHandle::new(false, vec![]);
-    rt.register("s2", Arc::clone(&slow)).unwrap();
+    rt.register("s2", Arc::clone(&slow))
+        .expect("the register fixture result is required for this assertion");
     assert!(
-        !rt.join("s2", Duration::from_millis(1)).await.unwrap(),
+        !rt.join("s2", Duration::from_millis(1))
+            .await
+            .expect("the registered session fixture must be available for joining"),
         "超时返回 false"
     );
 
@@ -416,9 +513,11 @@ async fn join_forwards_deadline_result() {
 fn submit_input_forwards_to_handle() {
     let handle = MockHandle::new(true, vec![]);
     let rt = Runtime::new();
-    rt.register("s1", Arc::clone(&handle)).unwrap();
+    rt.register("s1", Arc::clone(&handle))
+        .expect("the register fixture result is required for this assertion");
 
-    rt.submit_input("s1", MessageContent::text("hi")).unwrap();
+    rt.submit_input("s1", MessageContent::text("hi"))
+        .expect("the submit input fixture result is required for this assertion");
     assert_eq!(
         handle.last_input(),
         Some(MessageContent::text("hi")),
@@ -450,21 +549,30 @@ async fn destroy_preserves_replacement_and_continues_shared_sequence() {
     let rt = Runtime::new();
     let old = MockHandle::new(true, vec![ev("old", "agent")]);
     old.pause_join.store(true, Ordering::SeqCst);
-    rt.register("session", old.clone()).unwrap();
+    rt.register("session", old.clone())
+        .expect("the register fixture result is required for this assertion");
     let mut destroy = Box::pin(rt.destroy("session", Duration::from_secs(1)));
     assert_pending(destroy.as_mut());
     let replacement = MockHandle::new(true, vec![]);
     rt.register_or_replace("session", replacement.clone());
-    let before = rt.stamp("session", &ev("new", "agent")).unwrap();
+    let before = rt
+        .stamp("session", &ev("new", "agent"))
+        .expect("the stamp fixture result is required for this assertion");
     old.resume_join.notify_one();
-    let drained = destroy.await.unwrap();
+    let drained = destroy
+        .await
+        .expect("the destroy fixture result is required for this assertion");
     let expected: Arc<dyn SessionHandle> = replacement.clone();
-    assert!(Arc::ptr_eq(&rt.handle("session").unwrap(), &expected));
+    assert!(Arc::ptr_eq(
+        &rt.handle("session")
+            .expect("the handle fixture result is required for this assertion"),
+        &expected
+    ));
     assert_eq!(drained[0].turn_id, "old");
     assert_eq!(drained[0].session_seq, before.session_seq.next());
     assert_eq!(
         rt.stamp("session", &ev("new", "agent"))
-            .unwrap()
+            .expect("the stamp fixture result is required for this assertion")
             .session_seq,
         drained[0].session_seq.next()
     );
@@ -476,12 +584,15 @@ async fn destroy_preserves_a_new_registration_of_the_same_handle() {
     let rt = Runtime::new();
     let handle = MockHandle::new(true, vec![]);
     handle.pause_join.store(true, Ordering::SeqCst);
-    rt.register("session", handle.clone()).unwrap();
+    rt.register("session", handle.clone())
+        .expect("the register fixture result is required for this assertion");
     let mut destroy = Box::pin(rt.destroy("session", Duration::from_secs(1)));
     assert_pending(destroy.as_mut());
     rt.register_or_replace("session", handle.clone());
     handle.resume_join.notify_one();
-    destroy.await.unwrap();
+    destroy
+        .await
+        .expect("the destroy fixture result is required for this assertion");
     assert!(rt.contains("session"));
 }
 
@@ -490,20 +601,26 @@ async fn late_destroy_does_not_consume_a_fresh_registration_sequence() {
     let rt = Runtime::new();
     let old = MockHandle::new(true, vec![ev("old", "agent")]);
     old.pause_join.store(true, Ordering::SeqCst);
-    rt.register("session", old.clone()).unwrap();
-    rt.stamp("session", &ev("old", "agent")).unwrap();
+    rt.register("session", old.clone())
+        .expect("the register fixture result is required for this assertion");
+    rt.stamp("session", &ev("old", "agent"))
+        .expect("the stamp fixture result is required for this assertion");
     let mut destroy = Box::pin(rt.destroy("session", Duration::from_secs(1)));
     assert_pending(destroy.as_mut());
     rt.register_or_replace("session", MockHandle::new(true, vec![]));
-    rt.destroy("session", Duration::from_secs(1)).await.unwrap();
+    rt.destroy("session", Duration::from_secs(1))
+        .await
+        .expect("the destroy fixture result is required for this assertion");
     rt.register("session", MockHandle::new(true, vec![]))
-        .unwrap();
+        .expect("the register fixture result is required for this assertion");
     old.resume_join.notify_one();
-    let drained = destroy.await.unwrap();
+    let drained = destroy
+        .await
+        .expect("the destroy fixture result is required for this assertion");
     assert_eq!(drained[0].session_seq, SessionSeq::initial().next());
     assert_eq!(
         rt.stamp("session", &ev("fresh", "agent"))
-            .unwrap()
+            .expect("the stamp fixture result is required for this assertion")
             .session_seq,
         SessionSeq::initial()
     );
@@ -514,14 +631,24 @@ async fn concurrent_destroy_drains_once() {
     let rt = Runtime::new();
     let handle = MockHandle::new(true, vec![ev("turn", "agent")]);
     handle.pause_join.store(true, Ordering::SeqCst);
-    rt.register("session", handle.clone()).unwrap();
+    rt.register("session", handle.clone())
+        .expect("the register fixture result is required for this assertion");
     let mut first = Box::pin(rt.destroy("session", Duration::from_secs(1)));
     let mut second = Box::pin(rt.destroy("session", Duration::from_secs(1)));
     assert_pending(first.as_mut());
     assert_pending(second.as_mut());
     handle.resume_join.notify_waiters();
-    assert_eq!(first.await.unwrap().len(), 1);
-    assert!(second.await.unwrap().is_empty());
+    assert_eq!(
+        first
+            .await
+            .expect("first await fixture must contain the expected element")
+            .len(),
+        1
+    );
+    assert!(second
+        .await
+        .expect("the second fixture result is required for this assertion")
+        .is_empty());
     assert_eq!(
         handle.call_sequence(),
         vec!["stop_accepting", "cancel_owned", "join", "persist", "drain"]
@@ -533,7 +660,8 @@ async fn cancelled_destroy_can_be_retried() {
     let rt = Runtime::new();
     let handle = MockHandle::new(true, vec![ev("turn", "agent")]);
     handle.pause_join.store(true, Ordering::SeqCst);
-    rt.register("session", handle.clone()).unwrap();
+    rt.register("session", handle.clone())
+        .expect("the register fixture result is required for this assertion");
     let mut interrupted = Box::pin(rt.destroy("session", Duration::from_secs(1)));
     assert_pending(interrupted.as_mut());
     drop(interrupted);
@@ -541,7 +669,7 @@ async fn cancelled_destroy_can_be_retried() {
     assert_eq!(
         rt.destroy("session", Duration::from_secs(1))
             .await
-            .unwrap()
+            .expect("the from secs fixture result is required for this assertion")
             .len(),
         1
     );
@@ -554,7 +682,8 @@ async fn old_persist_failure_preserves_replacement() {
     let old = MockHandle::new(true, vec![ev("old", "agent")]);
     old.pause_join.store(true, Ordering::SeqCst);
     old.persist_ok.store(false, Ordering::SeqCst);
-    rt.register("session", old.clone()).unwrap();
+    rt.register("session", old.clone())
+        .expect("the register fixture result is required for this assertion");
     let mut destroy = Box::pin(rt.destroy("session", Duration::from_secs(1)));
     assert_pending(destroy.as_mut());
     let replacement = MockHandle::new(true, vec![]);
@@ -565,7 +694,17 @@ async fn old_persist_failure_preserves_replacement() {
         Err(RuntimeError::PersistFailed(..))
     ));
     let expected: Arc<dyn SessionHandle> = replacement.clone();
-    assert!(Arc::ptr_eq(&rt.handle("session").unwrap(), &expected));
-    assert_eq!(old.drained.lock().unwrap().len(), 1);
+    assert!(Arc::ptr_eq(
+        &rt.handle("session")
+            .expect("the handle fixture result is required for this assertion"),
+        &expected
+    ));
+    assert_eq!(
+        old.drained
+            .lock()
+            .expect("old drained mutex must remain unpoisoned throughout the test")
+            .len(),
+        1
+    );
     assert!(replacement.call_sequence().is_empty());
 }

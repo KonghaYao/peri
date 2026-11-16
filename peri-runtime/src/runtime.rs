@@ -8,6 +8,7 @@
 //! Controller 通过 [`Runtime::stamp`] 为聚合事件补打身份。
 
 use std::collections::HashMap;
+use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -86,6 +87,7 @@ pub struct Runtime {
 
 impl Runtime {
     /// 创建空 Runtime。
+    #[must_use]
     pub fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
@@ -98,6 +100,10 @@ impl Runtime {
     /// （防双注册撞车）；重建须先 [`Runtime::destroy`] 移除旧实例。
     /// epoch 自 [`SessionEpoch::initial`] 起；重建递增（`SessionEpoch::next`）
     /// 属持久化恢复路径（L5），本映射不持有跨实例记忆（无持久态）。
+    ///
+    /// # Errors
+    ///
+    /// Returns `SessionAlreadyRegistered` when this runtime already owns the session ID.
     pub fn register<H>(
         &self,
         session_id: impl Into<String>,
@@ -140,11 +146,13 @@ impl Runtime {
     }
 
     /// 已注册 session_id 列表（无顺序保证）。
+    #[must_use]
     pub fn session_ids(&self) -> Vec<String> {
         self.sessions.read().keys().cloned().collect()
     }
 
     /// 该 session 是否已注册。
+    #[must_use]
     pub fn contains(&self, session_id: &str) -> bool {
         self.sessions.read().contains_key(session_id)
     }
@@ -166,6 +174,10 @@ impl Runtime {
     ///
     /// 未注册 session 报 [`RuntimeError::UnknownSession`]。本入口只定位当前
     /// 登记；调用方仍须校验事件归属，本映射不保留跨销毁的身份历史。
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::UnknownSession`] when the session has no registered handle.
     pub fn stamp(
         &self,
         session_id: &str,
@@ -185,6 +197,10 @@ impl Runtime {
     /// 定位依据为请求携带的三元组 (session_id, turn_id, attempt_id)
     /// （`CancelRequest.identity`）：session_id 用于查映射，turn_id/attempt_id
     /// 原样透传给句柄，由 Agent 侧判定是否命中当前 attempt。
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::UnknownSession`] when the request identifies an unregistered session.
     pub fn cancel(&self, request: &CancelRequest) -> Result<(), RuntimeError> {
         let handle = self
             .handle(&request.identity.session_id)
@@ -194,6 +210,10 @@ impl Runtime {
     }
 
     /// 启动执行：查映射 → 转发句柄 run（§6：run Session）。
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::UnknownSession`] for an unregistered session, or the execution error returned by its handle.
     pub async fn run(&self, session_id: &str) -> Result<(), RuntimeError> {
         let handle = self
             .handle(session_id)
@@ -211,6 +231,10 @@ impl Runtime {
     /// 继续等待；销毁路径的超时 abort 由 [`Runtime::destroy`] 编排）。
     /// 与 §9 销毁顺序第 3 步复用同一句柄操作，供非销毁场景的「等待会话
     /// 自然终止」（Controller join 面）使用。
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::UnknownSession`] when the session has no registered handle. A deadline expiration is reported as `false`.
     pub async fn join(&self, session_id: &str, deadline: Duration) -> Result<bool, RuntimeError> {
         let handle = self
             .handle(session_id)
@@ -222,6 +246,10 @@ impl Runtime {
     ///
     /// 未知 session 报 [`RuntimeError::UnknownSession`]；句柄注入失败包
     /// context 为 [`RuntimeError::SubmitFailed`]（Agent 侧细节错误 anyhow 穿透）。
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::UnknownSession`] for an unregistered session, or the input rejection returned by its handle.
     pub fn submit_input(
         &self,
         session_id: &str,
@@ -244,6 +272,10 @@ impl Runtime {
     /// 持久化失败时返回错误且**不移除映射**（已执行阶段幂等设计，重试安全）。
     /// 销毁只移除开始时捕获的登记；期间替换的句柄保留。并发销毁同一登记时，
     /// 后续调用等待首次收尾完成并返回空事件，避免重复投递。
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::UnknownSession`] for an unregistered session, or a persistence failure from the handle. The mapping remains available for retry after persistence fails.
     pub async fn destroy(
         &self,
         session_id: &str,
@@ -303,3 +335,9 @@ impl Default for Runtime {
 #[cfg(test)]
 #[path = "runtime_test.rs"]
 mod tests;
+
+impl Debug for Runtime {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("Runtime").finish_non_exhaustive()
+    }
+}

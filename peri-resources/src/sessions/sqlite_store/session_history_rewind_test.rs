@@ -1,7 +1,14 @@
-use super::*;
+use super::{
+    BaseMessage, CompactionChange, MessageFlags, PersistedPayload, RewindBoundary,
+    SqliteSessionData, SqliteThreadStore,
+};
+use crate::sessions::data::SessionDataPort;
+use peri_acp_types::thread::ThreadId;
+use tempfile::TempDir;
+
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::projection::MessageProjectionDirective;
-use peri_acp_types::store::history::{rewind_clear_excluded_ids, rewind_keep_len, RewindFlagEntry};
+use peri_acp_types::store::history::RewindFlagEntry;
 
 // ─── rewind 有效视图重建（A19 矩阵） ──────────────────────────────────────────
 
@@ -39,14 +46,19 @@ async fn two_full_state(
     directory: &TempDir,
     suffix: &str,
 ) -> TwoFullState {
-    let workspace = workspace(store, directory.path()).await;
+    let workspace = super::workspace(store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
     let id = format!("s-{suffix}");
-    data.save_new_session(&session(&id, &cwd, &workspace, frozen(suffix)))
-        .await
-        .unwrap();
+    data.save_new_session(&super::session(
+        &id,
+        &cwd,
+        &workspace,
+        super::frozen(suffix),
+    ))
+    .await
+    .unwrap();
 
-    let covered_by_first = payloads(4);
+    let covered_by_first = super::payloads(4);
     data.append_history(&id, &covered_by_first).await.unwrap();
     let first_summary = BaseMessage::human("summary one");
     data.apply_compaction(
@@ -59,7 +71,7 @@ async fn two_full_state(
     .await
     .unwrap();
 
-    let between_fulls = payloads(2);
+    let between_fulls = super::payloads(2);
     data.append_history(&id, &between_fulls).await.unwrap();
     let second_summary = BaseMessage::human("summary two");
     let mut second_batch = between_fulls.clone();
@@ -74,7 +86,7 @@ async fn two_full_state(
     .await
     .unwrap();
 
-    let after_second = payloads(2);
+    let after_second = super::payloads(2);
     data.append_history(&id, &after_second).await.unwrap();
 
     TwoFullState {
@@ -113,8 +125,8 @@ async fn rewind_effective_view(
         })
         .collect();
     let ids: Vec<MessageId> = entries.iter().map(|(id, _, _)| *id).collect();
-    let keep_len = rewind_keep_len(&ids, boundary).unwrap_or(0);
-    let clear = rewind_clear_excluded_ids(&entries, keep_len);
+    let keep_len = peri_acp_types::store::history::rewind_keep_len(&ids, boundary).unwrap_or(0);
+    let clear = peri_acp_types::store::history::rewind_clear_excluded_ids(&entries, keep_len);
     data.rewind_history(id, boundary, &clear).await
 }
 
@@ -141,7 +153,7 @@ async fn stored_ids(data: &SqliteSessionData, id: &ThreadId) -> Vec<MessageId> {
 
 #[tokio::test]
 async fn test_rewind_between_two_fulls_restores_every_retained_body() {
-    let (store, data, directory) = database().await;
+    let (store, data, directory) = super::database().await;
     let state = two_full_state(&store, &data, &directory, "rewind-between").await;
 
     // rewind 落在两次 Full 之间：保留到 E 为止（S1 也在保留前缀里，它已被 Full#2 排除）。
@@ -173,7 +185,7 @@ async fn test_rewind_between_two_fulls_restores_every_retained_body() {
 
 #[tokio::test]
 async fn test_rewind_before_the_first_full_restores_every_retained_body() {
-    let (store, data, directory) = database().await;
+    let (store, data, directory) = super::database().await;
     let state = two_full_state(&store, &data, &directory, "rewind-before").await;
 
     // rewind 落在第一次 Full 覆盖的区间内：保留 A、B。
@@ -196,7 +208,7 @@ async fn test_rewind_before_the_first_full_restores_every_retained_body() {
 
 #[tokio::test]
 async fn test_rewind_after_the_second_full_keeps_the_summary_covered_prefix_excluded() {
-    let (store, data, directory) = database().await;
+    let (store, data, directory) = super::database().await;
     let state = two_full_state(&store, &data, &directory, "rewind-after").await;
 
     // rewind 落在第二次 Full 之后：S2 仍是有效摘要，前缀的排除依旧有依据。
@@ -230,20 +242,20 @@ async fn test_rewind_after_the_second_full_keeps_the_summary_covered_prefix_excl
 /// 整体覆盖，被排除的行本来就不带渲染指令。
 #[tokio::test]
 async fn test_rewind_clears_the_whole_projection_payload_of_restored_entries() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
     let id: ThreadId = "s-rewind-payload".to_owned();
-    data.save_new_session(&session(
+    data.save_new_session(&super::session(
         "s-rewind-payload",
         &cwd,
         &workspace,
-        frozen("rewind-payload"),
+        super::frozen("rewind-payload"),
     ))
     .await
     .unwrap();
 
-    let covered = payloads(2);
+    let covered = super::payloads(2);
     data.append_history(&id, &covered).await.unwrap();
     let summary = BaseMessage::human("summary");
     let summary_id = summary.id();
@@ -306,22 +318,22 @@ async fn test_rewind_clears_the_whole_projection_payload_of_restored_entries() {
 /// 必须逐位不变（含它们的 `superseded_by` 记录）。
 #[tokio::test]
 async fn test_rewind_leaves_untouched_entries_flags_bit_for_bit() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
     let id: ThreadId = "s-rewind-untouched".to_owned();
-    data.save_new_session(&session(
+    data.save_new_session(&super::session(
         "s-rewind-untouched",
         &cwd,
         &workspace,
-        frozen("rewind-untouched"),
+        super::frozen("rewind-untouched"),
     ))
     .await
     .unwrap();
 
     // 历史：`A B | S1 | P | E | S2 | C`。第一次 Full 排除 A、B（取代者是 S1），第二次排除 E
     // （取代者是 S2）；P 是两次 Full 之间追加的、从未被排除的普通条目，C 是最后一次追加的。
-    let covered = payloads(2);
+    let covered = super::payloads(2);
     data.append_history(&id, &covered).await.unwrap();
     let first_summary = BaseMessage::human("summary one");
     let supersede = |truncated: bool, summary: MessageId| MessageFlags {
@@ -346,9 +358,9 @@ async fn test_rewind_leaves_untouched_entries_flags_bit_for_bit() {
     )
     .await
     .unwrap();
-    let plain = payloads(1);
+    let plain = super::payloads(1);
     data.append_history(&id, &plain).await.unwrap();
-    let covered_by_second = payloads(1);
+    let covered_by_second = super::payloads(1);
     data.append_history(&id, &covered_by_second).await.unwrap();
     let second_summary = BaseMessage::human("summary two");
     data.apply_compaction(
@@ -363,7 +375,7 @@ async fn test_rewind_leaves_untouched_entries_flags_bit_for_bit() {
     )
     .await
     .unwrap();
-    let tail = payloads(1);
+    let tail = super::payloads(1);
     data.append_history(&id, &tail).await.unwrap();
 
     let before = data.load_snapshot(&id).await.unwrap().flags;
@@ -400,7 +412,8 @@ async fn test_rewind_leaves_untouched_entries_flags_bit_for_bit() {
         after, expected,
         "只有本次清零的条目改变，未触及的 entries 连载荷一起原样保留"
     );
-    for (position, message) in covered.iter().enumerate() {
+    let indexed_entries = covered.iter().enumerate();
+    for (position, message) in indexed_entries {
         let flags = after.get(&message.id()).cloned().unwrap_or_default();
         assert!(flags.excluded, "存活摘要 S1 覆盖的排除仍有依据");
         assert_eq!(
@@ -425,7 +438,7 @@ async fn test_rewind_leaves_untouched_entries_flags_bit_for_bit() {
 
 #[tokio::test]
 async fn test_rewind_flag_rebuild_failure_leaves_the_store_unchanged() {
-    let (store, data, directory) = database().await;
+    let (store, data, directory) = super::database().await;
     let state = two_full_state(&store, &data, &directory, "rewind-atomic").await;
     let before_payloads = stored_ids(&data, &state.id).await;
     let before_flags = data.load_snapshot(&state.id).await.unwrap().flags;
@@ -450,8 +463,8 @@ async fn test_rewind_flag_rebuild_failure_leaves_the_store_unchanged() {
             })
             .collect();
         let ids: Vec<MessageId> = entries.iter().map(|(id, _, _)| *id).collect();
-        let keep_len = rewind_keep_len(&ids, boundary).unwrap();
-        rewind_clear_excluded_ids(&entries, keep_len)
+        let keep_len = peri_acp_types::store::history::rewind_keep_len(&ids, boundary).unwrap();
+        peri_acp_types::store::history::rewind_clear_excluded_ids(&entries, keep_len)
     };
     plan.push(MessageId::new());
     let error = data
@@ -477,25 +490,24 @@ async fn test_rewind_flag_rebuild_failure_leaves_the_store_unchanged() {
 
 #[tokio::test]
 async fn test_rewind_atomically_revokes_micro_group_when_anchor_is_removed() {
-    use peri_acp_types::context_archive::build_catalog;
     use peri_acp_types::projection::{
         ArchiveGroupLink, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
     };
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let id = "archive-rewind".to_string();
-    data.save_new_session(&session(
+    data.save_new_session(&super::session(
         &id,
         &workspace.cwd.to_string_lossy(),
         &workspace,
-        frozen("archive"),
+        super::frozen("archive"),
     ))
     .await
     .unwrap();
-    let history = payloads(2);
+    let history = super::payloads(2);
     data.append_history(&id, &history).await.unwrap();
     let anchor = history[1].id();
-    let catalog = build_catalog(
+    let catalog = peri_acp_types::context_archive::build_catalog(
         id.clone(),
         "group".into(),
         anchor,
@@ -558,18 +570,18 @@ async fn test_rewind_atomically_revokes_micro_group_when_anchor_is_removed() {
 #[tokio::test]
 async fn test_compaction_summary_roots_commit_with_append_and_failure_rolls_back() {
     use peri_acp_types::context_archive::ArchiveRoot;
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
+    let (store, data, directory) = super::database().await;
+    let workspace = super::workspace(&store, directory.path()).await;
     let id = "archive-summary-roots".to_string();
-    data.save_new_session(&session(
+    data.save_new_session(&super::session(
         &id,
         &workspace.cwd.to_string_lossy(),
         &workspace,
-        frozen("archive"),
+        super::frozen("archive"),
     ))
     .await
     .unwrap();
-    let history = payloads(1);
+    let history = super::payloads(1);
     data.append_history(&id, &history).await.unwrap();
     let anchor = history[0].id();
     let summary = BaseMessage::human("Summary deliberately contains no archive identifiers");

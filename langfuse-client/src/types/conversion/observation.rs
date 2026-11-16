@@ -1,7 +1,7 @@
-use super::{
-    append_common_obs_attrs, build_span, build_status, span_head, CommonAttrs, EventView,
-    LangfuseError, OtlpSink,
-};
+use super::CommonAttrs;
+use super::EventView;
+use super::LangfuseError;
+use super::OtlpSink;
 use crate::types::{EventBody, ObservationBody, SpanBody};
 
 /// span-create → OTLP span；属性顺序：type、公共观测属性、session、status_message。
@@ -11,7 +11,7 @@ pub(super) fn span_create(
     view: &EventView<'_>,
     sink: &mut OtlpSink<'_>,
 ) -> Result<(), LangfuseError> {
-    let span = build_span(
+    let span = super::build_span(
         body.trace_id.as_deref(),
         body.id.as_deref(),
         body.parent_observation_id.as_deref(),
@@ -19,9 +19,12 @@ pub(super) fn span_create(
         body.end_time.as_deref(),
         timestamp,
     )?;
-    sink.begin_span(&span_head(&span), body.name.as_deref().unwrap_or("span"))?;
+    sink.begin_span(
+        &super::span_head(&span),
+        body.name.as_deref().unwrap_or("span"),
+    )?;
     sink.attr_str("langfuse.observation.type", "span")?;
-    append_common_obs_attrs(
+    super::append_common_obs_attrs(
         sink,
         view,
         CommonAttrs {
@@ -38,7 +41,7 @@ pub(super) fn span_create(
     if let Some(message) = body.status_message.as_deref() {
         sink.attr_str("langfuse.observation.status_message", message)?;
     }
-    sink.end_span(build_status(
+    sink.end_span(super::build_status(
         body.level.as_ref(),
         body.status_message.as_deref(),
     ))
@@ -51,7 +54,7 @@ pub(super) fn event_create(
     view: &EventView<'_>,
     sink: &mut OtlpSink<'_>,
 ) -> Result<(), LangfuseError> {
-    let span = build_span(
+    let span = super::build_span(
         body.trace_id.as_deref(),
         body.id.as_deref(),
         body.parent_observation_id.as_deref(),
@@ -59,9 +62,12 @@ pub(super) fn event_create(
         None,
         timestamp,
     )?;
-    sink.begin_span(&span_head(&span), body.name.as_deref().unwrap_or("event"))?;
+    sink.begin_span(
+        &super::span_head(&span),
+        body.name.as_deref().unwrap_or("event"),
+    )?;
     sink.attr_str("langfuse.observation.type", "event")?;
-    append_common_obs_attrs(
+    super::append_common_obs_attrs(
         sink,
         view,
         CommonAttrs {
@@ -72,7 +78,7 @@ pub(super) fn event_create(
             environment: body.environment.as_ref(),
         },
     )?;
-    sink.end_span(build_status(
+    sink.end_span(super::build_status(
         body.level.as_ref(),
         body.status_message.as_deref(),
     ))
@@ -85,7 +91,7 @@ pub(super) fn observation_create(
     view: &EventView<'_>,
     sink: &mut OtlpSink<'_>,
 ) -> Result<(), LangfuseError> {
-    let span = build_span(
+    let span = super::build_span(
         body.trace_id.as_deref(),
         body.id.as_deref(),
         body.parent_observation_id.as_deref(),
@@ -96,9 +102,9 @@ pub(super) fn observation_create(
     let obs_type = serde_json::to_value(&body.r#type)?;
     let obs_type = obs_type.as_str().unwrap_or("SPAN").to_ascii_lowercase();
     let name = body.name.as_deref().unwrap_or(&obs_type);
-    sink.begin_span(&span_head(&span), name)?;
+    sink.begin_span(&super::span_head(&span), name)?;
     sink.attr_str("langfuse.observation.type", &obs_type)?;
-    append_common_obs_attrs(
+    super::append_common_obs_attrs(
         sink,
         view,
         CommonAttrs {
@@ -118,7 +124,7 @@ pub(super) fn observation_create(
     if let Some(session_id) = body.session_id.as_deref() {
         sink.attr_str("langfuse.session.id", session_id)?;
     }
-    sink.end_span(build_status(
+    sink.end_span(super::build_status(
         body.level.as_ref(),
         body.status_message.as_deref(),
     ))

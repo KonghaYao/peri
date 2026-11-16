@@ -4,10 +4,11 @@ use peri_js_runtime::JsExecutionHost;
 use tokio::sync::watch;
 use tracing::warn;
 
-use super::{WorkflowInput, WorkflowResult};
 use crate::error::WorkflowError;
 use crate::journal::WorkflowJournalStore;
 use crate::progress::WorkflowProgressStore;
+use crate::runner::WorkflowInput;
+use crate::runner::WorkflowResult;
 
 fn public_workflow_error(error: &str) -> String {
     peri_acp_types::session::bounded_error_message(error, 2_000)
@@ -210,11 +211,11 @@ pub(super) fn finalize_workflow(
 /// Cancellation has one projection for both startup and an active message loop.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn send_killed(
-    done: &tokio::sync::watch::Sender<Option<super::WorkflowResult>>,
+    done: &tokio::sync::watch::Sender<Option<crate::runner::WorkflowResult>>,
     journal: &crate::journal::WorkflowJournalStore,
     progress: &crate::progress::WorkflowProgressStore,
     run_id: &str,
-    input: &super::WorkflowInput,
+    input: &crate::runner::WorkflowInput,
     started_at: &str,
     stderr_tail: Option<String>,
 ) {
@@ -249,7 +250,7 @@ pub(super) fn send_killed(
         peri_acp_types::workflow::PostProcessingStatus::Blocked,
         peri_acp_types::workflow::DeliveryStatus::Blocked,
     );
-    let _ = done.send(Some(super::WorkflowResult {
+    let _ = done.send(Some(crate::runner::WorkflowResult {
         run_id: run_id.into(),
         status: "killed".into(),
         return_value: None,

@@ -1,25 +1,27 @@
+use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
 
-use peri_acp_types::{
-    event::ExecutorEvent,
-    session::{ExecutionFailure, PromptResult},
-};
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::session::ExecutionFailure;
+use peri_acp_types::session::PromptResult;
 use tokio::sync::oneshot;
 use tracing::{debug, error};
 
-use super::{event_pump::PumpHandle, ExecOutcome};
+use crate::session::exec::executor_helpers::event_pump::PumpHandle;
+use crate::session::exec::executor_helpers::ExecOutcome;
 
 const EVENT_PUMP_WAIT: Duration = Duration::from_secs(10);
 
 // ── Collect Result Request parameter object ─────────────────────────────────
 
 /// 结果收集请求（参数对象）。
-pub struct CollectRequest<'a> {
-    pub event_tx:
-        &'a Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>>>,
+pub struct CollectRequest<'request> {
+    pub event_tx: &'request Arc<
+        parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>>,
+    >,
     pub pump_handle: PumpHandle,
-    pub session_id: &'a str,
+    pub session_id: &'request str,
     pub exec_outcome: ExecOutcome,
     /// turn 退出时仍未结算的后台任务数（§7.3 摘要，由调用方在 loop 结束后读取）。
     pub pending_tasks: u32,
@@ -112,5 +114,15 @@ pub async fn wait_for_pump(
                 "event pump did not finish within 10s; the terminal done notification may not have been delivered",
             ))
         }
+    }
+}
+
+impl<'request> Debug for CollectRequest<'request> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CollectRequest")
+            .field("session_id", &self.session_id)
+            .field("pending_tasks", &self.pending_tasks)
+            .finish_non_exhaustive()
     }
 }

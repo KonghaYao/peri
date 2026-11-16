@@ -23,7 +23,7 @@ use peri_acp_types::mcp_apps_facade::{
     RequestSeq,
 };
 
-use super::*;
+use super::{AttachmentId, AttachmentRoute, McpAppRecord, PoolMcpAppsRelay};
 use crate::mcp::client::output_store::tests::Wire;
 use crate::mcp::client::McpClientPool;
 use crate::mcp::session_invocation::{SessionInvocationInputs, SessionInvocationService};
@@ -289,7 +289,7 @@ async fn relay_with_service(
     .await;
     let pool = Arc::new(McpClientPool::new_empty());
     install_app_server(&pool, &wire);
-    let server_generation = pool.handle_generation(&pool.get_client(SERVER).unwrap());
+    let server_generation = pool.handle_generation(&pool.client(SERVER).unwrap());
 
     let mut rules = peri_agent::middleware::chain::MiddlewareChain::new();
     rules.add(Box::new(
@@ -435,7 +435,7 @@ async fn binding_protocol_version_reports_negotiated_version_and_rejects_stale_g
     let handle = fixture
         .relay
         .pool
-        .get_client(SERVER)
+        .client(SERVER)
         .expect("fixture server installed");
     fixture.relay.pool.advance_handle_generation(&handle);
     let stale = fixture

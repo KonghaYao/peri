@@ -1,11 +1,14 @@
-use super::*;
 use crate::agent::stages::StageContext;
 use crate::messages::BaseMessage;
-use crate::session::{test_resources::TestSession, FrozenContext, MessageTranscript, Session};
+use crate::session::test_resources::TestSession;
+use crate::session::FrozenContext;
+use crate::session::MessageTranscript;
+use crate::session::Session;
+use crate::tools::ContextRetention;
 use crate::tools::{BaseTool, ToolContext};
-use peri_acp_types::{
-    context_archive::ArchiveRoot, projection::MessageProjectionDirective, store::MessageFlags,
-};
+use peri_acp_types::context_archive::ArchiveRoot;
+use peri_acp_types::projection::MessageProjectionDirective;
+use peri_acp_types::store::MessageFlags;
 use std::sync::Arc;
 
 struct RecoveryTool;
@@ -91,18 +94,25 @@ async fn make_context(inherited: bool) -> (TestSession, StageContext) {
 #[tokio::test]
 async fn test_archive_capability_accepts_empty_own_history_with_inherited_roots() {
     let (bound, ctx) = make_context(true).await;
-    let result = validate(&ctx, &ctx.runtime.tool_catalog.snapshot()).await;
+    let result = crate::agent::stages::archive_capability::validate(
+        &ctx,
+        &ctx.runtime.tool_catalog.snapshot(),
+    )
+    .await;
     drop(bound);
-    result.unwrap();
+    result.expect("the result fixture result is required for this assertion");
 }
 
 /// [回归测试] 已提交own投影的存储变为NotFound时，必须停止而不能携带省略视图继续。
 #[tokio::test]
 async fn test_archive_capability_rejects_missing_committed_own_archive() {
     let (bound, ctx) = make_context(false).await;
-    let error = validate(&ctx, &ctx.runtime.tool_catalog.snapshot())
-        .await
-        .unwrap_err();
+    let error = crate::agent::stages::archive_capability::validate(
+        &ctx,
+        &ctx.runtime.tool_catalog.snapshot(),
+    )
+    .await
+    .unwrap_err();
     drop(bound);
     assert!(
         error

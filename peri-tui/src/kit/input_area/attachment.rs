@@ -8,7 +8,6 @@
 //! 原样（附件记录只在呈现层与提交载荷中出现）。
 
 use crate::components::textarea::TextAreaState;
-use crate::kit::atoms::PENDING_ATTACHMENTS;
 
 /// 文本为空时删除键对附件的去处。
 #[derive(Clone, Copy)]
@@ -47,3 +46,5 @@ pub(super) fn remove_pending_attachment(editor: &TextAreaState, edge: Attachment
 #[cfg(test)]
 #[path = "attachment_test.rs"]
 mod tests;
+
+use crate::kit::atoms::PENDING_ATTACHMENTS;

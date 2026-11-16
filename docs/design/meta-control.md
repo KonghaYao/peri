@@ -155,7 +155,7 @@ CLI 不直接执行 SQL，不依赖 SQLite 表名，也不实例化 session owne
 - 显式 `--db-path` 不存在时不得创建空数据库；
 - 不存在默认数据库时返回 `database_not_found`，不得用新空库伪装成 session 不存在。
 
-`SqliteThreadStore::new` 会创建文件并初始化 schema，因此不能直接作为该只读命令的本地
+`SqliteThreadStore::try_new` 会创建文件并初始化 schema，因此不能直接作为该只读命令的本地
 打开路径。现行实现经 `Resources::open_deployment` 的只读入口复用
 `ThreadStore::load_meta` 的读取语义：本地后端验证数据库是已存在的普通文件，远程后端按
 部署 locator 连接；两者都按查询所需 schema shape fail closed，未来 schema 不兼容时

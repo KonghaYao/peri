@@ -9,7 +9,8 @@
 
 use std::path::Path;
 
-use super::*;
+use super::LoaderError;
+use super::PathBuf;
 use crate::plugin::types::{InstallScope, InstalledPlugin, InstalledPlugins, PluginOrigin};
 use crate::plugin::PluginSourceAdmission;
 
@@ -96,7 +97,8 @@ fn real_loader_preserves_hook_source_identity_for_shared_roots_in_both_orders() 
         }
         std::fs::write(&path, serde_json::to_vec(&installed).unwrap()).unwrap();
         let data =
-            load_enabled_plugins_aggregated_readonly(home.path(), Some(workspace.path())).unwrap();
+            super::load_enabled_plugins_aggregated_readonly(home.path(), Some(workspace.path()))
+                .unwrap();
         assert_eq!(data.all_hooks.len(), 2);
         for hook in &data.all_hooks {
             assert!(data.plugins.iter().any(|plugin| {
@@ -175,7 +177,7 @@ fn open_admission_exposes_every_plugin_face() {
     // 聚合路径的 MCP 合并面（`merge_plugin_mcp_servers`）在开启时确有内容。
     assert!(data.all_mcp_servers.contains_key("plugin:sample:srv"));
     assert_eq!(
-        load_enabled_plugins_aggregated(claude_dir.path(), None).plugins[0].install_path,
+        super::load_enabled_plugins_aggregated(claude_dir.path(), None).plugins[0].install_path,
         plugin_dir
     );
 }
@@ -222,11 +224,11 @@ fn closed_admission_zeroes_both_mcp_merge_paths() {
     let open_plugins = PluginSourceAdmission::Open
         .load_for_mcp(claude_dir.path(), None)
         .unwrap();
-    assert!(merge_plugin_mcp_servers(&open_plugins).contains_key("plugin:sample:srv"));
+    assert!(super::merge_plugin_mcp_servers(&open_plugins).contains_key("plugin:sample:srv"));
     let closed_plugins = PluginSourceAdmission::Closed
         .load_for_mcp(claude_dir.path(), None)
         .unwrap();
-    assert!(merge_plugin_mcp_servers(&closed_plugins).is_empty());
+    assert!(super::merge_plugin_mcp_servers(&closed_plugins).is_empty());
 
     // 路径 B：MCP 配置合并面（`collect_plugin_mcp_servers`）由准入后的同一份
     // 插件列表喂入（调用点见 `mcp/config.rs` 的 snapshot 与文件两条加载路径，

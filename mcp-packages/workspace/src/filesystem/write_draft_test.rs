@@ -1,6 +1,6 @@
-use super::*;
+use crate::filesystem::write::WriteFileTool;
 use peri_agent::tools::BaseTool;
-use peri_mcp_common::invoke_tool_call;
+use peri_mcp_common;
 use rmcp::model::{CallToolRequestParams, CallToolResponse, CallToolResult};
 use serde_json::Value;
 use std::sync::Arc;
@@ -27,7 +27,7 @@ async fn write_draft_receipt_can_restore_without_resending_content() {
     let tools: Vec<Arc<dyn BaseTool>> = vec![Arc::new(WriteFileTool::with_draft(&cwd, true))];
 
     let failed = complete(
-        invoke_tool_call(
+        peri_mcp_common::invoke_tool_call(
             &tools,
             &cwd,
             &call(
@@ -61,7 +61,7 @@ async fn write_draft_receipt_can_restore_without_resending_content() {
 
     std::fs::remove_dir(&target).unwrap();
     let restored = complete(
-        invoke_tool_call(
+        peri_mcp_common::invoke_tool_call(
             &tools,
             &cwd,
             &call(

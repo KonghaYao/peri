@@ -1,6 +1,7 @@
 // ─── Fork 指令模板（自 fork.rs 迁移，纯字符串函数） ────────────────────────
 
 /// Build fork directive message for fork mode.
+#[must_use]
 pub fn build_fork_directive(prompt: &str) -> String {
     format!(
         "<fork_directive>\n\
@@ -25,6 +26,7 @@ pub fn build_fork_directive(prompt: &str) -> String {
 }
 
 /// Build bg-fork directive message for /bg command path.
+#[must_use]
 pub fn build_bg_fork_directive(prompt: &str) -> String {
     // 防御性 XML 注入防护
     let sanitized = prompt.replace("</bg_fork_directive>", "<\u{200b}/bg_fork_directive>");
@@ -55,6 +57,7 @@ pub fn build_bg_fork_directive(prompt: &str) -> String {
 ///
 /// `current_title` 为会话当前标题（`None` 表示尚无标题）。注入后模型才能判断
 /// 现有标题是否需要更新——不传则模型无从得知标题现状，会默认不输出 title 标记。
+#[must_use]
 pub fn build_prediction_directive(current_title: Option<&str>) -> String {
     // 防御性 XML 注入防护（标题可能含闭合标签文本）
     let title_ctx = match current_title {

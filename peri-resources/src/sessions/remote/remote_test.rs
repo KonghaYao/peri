@@ -79,12 +79,12 @@ fn endpoint_debug_preserves_host_and_path() {
 
 #[test]
 fn credential_value_debug_preserves_diagnostics() {
-    let credential = SessionStoreCredential::new(FAKE_SECRET).expect("credential");
+    let credential = SessionStoreCredential::try_new(FAKE_SECRET).expect("credential");
     let rendered = format!("{credential:?}");
     assert!(rendered.contains(FAKE_SECRET));
     assert_eq!(credential.expose(), FAKE_SECRET);
     assert_eq!(
-        SessionStoreCredential::new("").unwrap_err(),
+        SessionStoreCredential::try_new("").unwrap_err(),
         CredentialError::EmptyValue
     );
 }

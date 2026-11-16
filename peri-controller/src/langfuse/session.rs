@@ -1,6 +1,8 @@
+use std::fmt::{self, Debug, Formatter};
 use std::future::Future;
 use std::pin::Pin;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use langfuse_client::client::ExportConfig;
 use langfuse_client::config::{Compression, TelemetryConfig};
@@ -12,10 +14,10 @@ use langfuse_client::{
 
 use peri_config::observability::LangfuseCompression;
 
-use super::config::LangfuseConfig;
-use super::drop_telemetry::LangfuseDropRegistry;
-use super::session_like::LangfuseSessionLike;
-use super::turn_traces::TurnTraceRegistry;
+use crate::langfuse::config::LangfuseConfig;
+use crate::langfuse::drop_telemetry::LangfuseDropRegistry;
+use crate::langfuse::session_like::LangfuseSessionLike;
+use crate::langfuse::turn_traces::TurnTraceRegistry;
 
 /// Langfuse 进程级共享连接状态。
 ///
@@ -69,6 +71,7 @@ impl LangfuseShutdownReport {
     ///
     /// 已移交的持久积压不能再被本进程推进（不轮询、不重发），因此可以缓存为终态；
     /// 其余终态规则不变。
+    #[must_use]
     pub fn retains_ownership(&self) -> bool {
         match self {
             Self::Pending { .. } => true,
@@ -84,11 +87,13 @@ impl LangfuseShutdownReport {
 
 /// 新建部署独占的关闭权限。共享给 turn 的 SessionLike 不包含此权限。
 /// 这里只保留原 session；Batcher 仍是唯一的 worker/join owner。
+#[derive(Debug)]
 pub struct LangfuseShutdownOwner {
     session: Arc<LangfuseSession>,
 }
 
 impl LangfuseShutdownOwner {
+    #[must_use]
     pub async fn shutdown(&self) -> LangfuseShutdownReport {
         self.session.shutdown().await
     }
@@ -114,6 +119,7 @@ impl LangfuseSession {
     ///
     /// 显式映射（契约 §3.6）：Pending/PersistedPending/DeliveryIncomplete 与无事件准备失败
     /// 一律按计数照实上报，绝不落 `UnexpectedFailure`，也不当作成功。
+    #[must_use]
     pub async fn shutdown(&self) -> LangfuseShutdownReport {
         map_shutdown(self.batcher.shutdown().await)
     }
@@ -276,3 +282,12 @@ impl LangfuseSessionLike for LangfuseSession {
 #[cfg(test)]
 #[path = "session_test.rs"]
 mod tests;
+
+impl Debug for LangfuseSession {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LangfuseSession")
+            .field("session_id", &self.session_id)
+            .finish_non_exhaustive()
+    }
+}

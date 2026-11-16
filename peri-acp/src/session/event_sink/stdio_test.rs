@@ -1,6 +1,6 @@
 //! stdio 出口的 reminder 承载决策（H8 过滤 + M13 caps 分流）。
 
-use super::{reminder_carriage, StdioReminderCarriage};
+use super::StdioReminderCarriage;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
     ReminderSource, SystemReminder, SYSTEM_REMINDER_VERSION,
@@ -46,7 +46,7 @@ fn model_only_and_diagnostic_only_reminders_are_filtered_before_carriage() {
             ),
         ] {
             assert_eq!(
-                reminder_carriage(&caps, &filtered),
+                super::reminder_carriage(&caps, &filtered),
                 StdioReminderCarriage::FilteredOut,
                 "未声明客户端受众的内容不得下发（Model-only wire 零泄漏）"
             );
@@ -62,7 +62,7 @@ fn client_audience_reminders_follow_session_caps() {
         vec![ReminderAudience::Tui],
     );
     assert_eq!(
-        reminder_carriage(
+        super::reminder_carriage(
             &PeriCaps {
                 system_reminder: true,
                 ..PeriCaps::default()
@@ -72,7 +72,7 @@ fn client_audience_reminders_follow_session_caps() {
         StdioReminderCarriage::Structured
     );
     assert_eq!(
-        reminder_carriage(&PeriCaps::default(), &client_only),
+        super::reminder_carriage(&PeriCaps::default(), &client_only),
         StdioReminderCarriage::NotCarried,
         "未协商结构化提醒的客户端必须显式不承载，而不是继承默认 no-op"
     );

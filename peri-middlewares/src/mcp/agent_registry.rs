@@ -30,7 +30,10 @@
 //!   目录渲染与新建路径按位跳过 builtin 项，resume 路径允许恢复既有 builtin
 //!   定义（与迁移前的 `include_built_ins` 语义逐位一致）。
 
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 use peri_acp_types::agents::{AgentModelSelection, InvalidModelTier};
@@ -41,7 +44,9 @@ use rmcp::model::ResourceContents;
 use sha2::{Digest, Sha256};
 
 use super::client::{ClientStatus, McpClientHandle, McpClientPool};
-use peri_mcp_core::agent_definition::{parse_agent_file, ClaudeAgent, ClaudeAgentFrontmatter};
+use peri_mcp_core::agent_definition;
+use peri_mcp_core::agent_definition::ClaudeAgent;
+use peri_mcp_core::agent_definition::ClaudeAgentFrontmatter;
 
 const MAX_AGENT_BYTES: usize = 256 * 1024;
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -72,6 +77,7 @@ pub enum AgentSource {
 }
 
 impl AgentSource {
+    #[must_use]
     pub fn is_local(&self) -> bool {
         matches!(self, Self::Local { .. })
     }
@@ -104,6 +110,7 @@ pub struct McpAgentMetadata {
 
 impl McpAgentMetadata {
     /// 目录候选项（`{{available_agents}}` 渲染用）。
+    #[must_use]
     pub fn catalog_entry(&self) -> peri_acp_types::agents::AgentCatalogEntry {
         peri_acp_types::agents::AgentCatalogEntry {
             id: self.id.clone(),
@@ -156,7 +163,18 @@ pub struct McpAgentRegistry {
     approvals: RwLock<std::collections::HashSet<String>>,
 }
 
+impl Debug for McpAgentRegistry {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpAgentRegistry")
+            .field("session_id", &self.session_id)
+            .field("local_face_closed", &self.local_face_closed)
+            .finish_non_exhaustive()
+    }
+}
+
 impl McpAgentRegistry {
+    #[must_use]
     pub fn new(pool: Arc<McpClientPool>) -> Self {
         Self {
             pool,
@@ -168,12 +186,14 @@ impl McpAgentRegistry {
     }
 
     /// 注入会话标识（ACP 归属过滤；`None` = 不过滤，部署面视图）。
+    #[must_use]
     pub fn with_session(mut self, session_id: Option<String>) -> Self {
         self.session_id = session_id;
         self
     }
 
     /// 注入本地 Agent 面关闭位（`SubAgentMiddleware` 链槽）。
+    #[must_use]
     pub fn with_local_face_closed(mut self, closed: bool) -> Self {
         self.local_face_closed = closed;
         self
@@ -195,6 +215,7 @@ impl McpAgentRegistry {
     /// 不经此入口的构造点**有意不同形**，不要为统一而改：`assembly/workflow.rs` 的
     /// workflow agent 面不做会话过滤（部署面视图），`mcp/middleware.rs` 的
     /// DiscoverMCP 投影取自链上既有实例字段。
+    #[must_use]
     pub fn for_session(
         pool: Arc<McpClientPool>,
         session_id: &str,
@@ -207,6 +228,7 @@ impl McpAgentRegistry {
             )
     }
 
+    #[must_use]
     pub fn entries(&self) -> Vec<McpAgentMetadata> {
         self.collect_entries().0
     }
@@ -214,91 +236,95 @@ impl McpAgentRegistry {
     fn collect_entries(&self) -> (Vec<McpAgentMetadata>, Vec<RejectedLocalAgent>) {
         let mut entries = Vec::new();
         let mut rejected = Vec::new();
-        for handle in self
-            .pool
-            .get_all_clients_visible_to(self.session_id.as_deref())
         {
-            // F8（关闭语义）：宿主绑定的资源来源句柄**永远不是远端来源**。
-            // 链槽关闭 / A24 关闭集命中 / 断连时该句柄的本地面不可用 ⇒ 整体跳过，
-            // 不得把同一批资源投影成 `mcp__{instance}__*` 远端条目（X4/J5：关闭 ⇒
-            // 不可发现；否则模型仍能经 `definitions.rs` 加载被关闭的本地定义）。
-            if Self::is_local_source_handle(&handle) && !self.is_local_handle(&handle) {
-                continue;
-            }
-            let local_handle = self.is_local_handle(&handle);
-            for resource in &handle.resources {
-                // 名字合法性**按来源拆分**（F6）：本地走契约段校验（X3：wire 不改写
-                // name，历史名如 `code_reviewer` / `MyAgent` 必须继续可用），远端沿用
-                // HEAD 的严格集（`[a-z0-9-]`）。URI 解析本身对两者一致。
-                let Some(raw_name) = agent_name_from_uri_permissive(&resource.uri) else {
-                    continue;
-                };
-                let name = if local_handle {
-                    let Some(name) = local_agent_name(&raw_name) else {
-                        continue;
-                    };
-                    name
-                } else {
-                    if !is_valid_agent_name(&raw_name) {
-                        continue;
-                    }
-                    raw_name
-                };
-                if !local_handle {
-                    // 远端：严格 v1；目录展示标签取自定义正文（激活期才知道），
-                    // 投影面保持保守（inherit/writes）。
-                    entries.push(McpAgentMetadata {
-                        id: mcp_agent_id(&handle.name, &name),
-                        origin: handle.name.clone(),
-                        source: AgentSource::Remote,
-                        name,
-                        description: resource.description.clone().unwrap_or_default(),
-                        uri: resource.uri.clone(),
-                        model_tier: AgentModelSelection::Inherit,
-                        can_mutate: true,
-                    });
+            let iterated_pool = self.pool.clients_visible_to(self.session_id.as_deref());
+            for handle in iterated_pool {
+                // F8（关闭语义）：宿主绑定的资源来源句柄**永远不是远端来源**。
+                // 链槽关闭 / A24 关闭集命中 / 断连时该句柄的本地面不可用 ⇒ 整体跳过，
+                // 不得把同一批资源投影成 `mcp__{instance}__*` 远端条目（X4/J5：关闭 ⇒
+                // 不可发现；否则模型仍能经 `definitions.rs` 加载被关闭的本地定义）。
+                if Self::is_local_source_handle(&handle) && !self.is_local_handle(&handle) {
                     continue;
                 }
-                // 本地：scope 逐资源取自 `_meta`（provider 产出，宿主绑定的实例），
-                // frontmatter 不可解析的条目与旧扫描口径一致地不进候选。
-                let Some(source) = Self::local_entry_source(resource) else {
-                    tracing::debug!(uri = %resource.uri, "本地 agent 资源缺 scope 元数据，不公开");
-                    continue;
-                };
-                let frontmatter = resource
-                    .meta
-                    .as_ref()
-                    .and_then(|meta| meta.0.get(META_KEY_FRONTMATTER))
-                    .and_then(|value| value.as_object());
-                let fields = match local_catalog_fields(&name, &resource.description, frontmatter) {
-                    Ok(Some(fields)) => fields,
-                    Ok(None) => {
-                        tracing::debug!(agent = %name, "本地 agent frontmatter 不可解析，不公开");
+                let local_handle = self.is_local_handle(&handle);
+                for resource in &handle.resources {
+                    // 名字合法性**按来源拆分**（F6）：本地走契约段校验（X3：wire 不改写
+                    // name，历史名如 `code_reviewer` / `MyAgent` 必须继续可用），远端沿用
+                    // HEAD 的严格集（`[a-z0-9-]`）。URI 解析本身对两者一致。
+                    let Some(raw_name) = agent_name_from_uri_permissive(&resource.uri) else {
                         continue;
-                    }
-                    Err(error) => {
-                        tracing::warn!(agent = %name, origin = %handle.name, source = ?source,
-                            uri = %resource.uri, error = %error, "本地 agent model 档位非法，已隔离");
-                        rejected.push(RejectedLocalAgent {
-                            id: name,
+                    };
+                    let name = if local_handle {
+                        let Some(name) = local_agent_name(&raw_name) else {
+                            continue;
+                        };
+                        name
+                    } else {
+                        if !is_valid_agent_name(&raw_name) {
+                            continue;
+                        }
+                        raw_name
+                    };
+                    if !local_handle {
+                        // 远端：严格 v1；目录展示标签取自定义正文（激活期才知道），
+                        // 投影面保持保守（inherit/writes）。
+                        entries.push(McpAgentMetadata {
+                            id: mcp_agent_id(&handle.name, &name),
                             origin: handle.name.clone(),
-                            source,
+                            source: AgentSource::Remote,
+                            name,
+                            description: resource.description.clone().unwrap_or_default(),
                             uri: resource.uri.clone(),
-                            error,
+                            model_tier: AgentModelSelection::Inherit,
+                            can_mutate: true,
                         });
                         continue;
                     }
-                };
-                entries.push(McpAgentMetadata {
-                    id: name.clone(),
-                    origin: handle.name.clone(),
-                    source,
-                    name: fields.display_name,
-                    description: fields.description,
-                    uri: resource.uri.clone(),
-                    model_tier: fields.model_tier,
-                    can_mutate: fields.can_mutate,
-                });
+                    // 本地：scope 逐资源取自 `_meta`（provider 产出，宿主绑定的实例），
+                    // frontmatter 不可解析的条目与旧扫描口径一致地不进候选。
+                    let Some(source) = Self::local_entry_source(resource) else {
+                        tracing::debug!(uri = %resource.uri, "本地 agent 资源缺 scope 元数据，不公开");
+                        continue;
+                    };
+                    let frontmatter = resource
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.0.get(META_KEY_FRONTMATTER))
+                        .and_then(|value| value.as_object());
+                    let fields = match local_catalog_fields(
+                        &name,
+                        (resource.description).as_deref(),
+                        frontmatter,
+                    ) {
+                        Ok(Some(fields)) => fields,
+                        Ok(None) => {
+                            tracing::debug!(agent = %name, "本地 agent frontmatter 不可解析，不公开");
+                            continue;
+                        }
+                        Err(error) => {
+                            tracing::warn!(agent = %name, origin = %handle.name, source = ?source,
+                            uri = %resource.uri, error = %error, "本地 agent model 档位非法，已隔离");
+                            rejected.push(RejectedLocalAgent {
+                                id: name,
+                                origin: handle.name.clone(),
+                                source,
+                                uri: resource.uri.clone(),
+                                error,
+                            });
+                            continue;
+                        }
+                    };
+                    entries.push(McpAgentMetadata {
+                        id: name.clone(),
+                        origin: handle.name.clone(),
+                        source,
+                        name: fields.display_name,
+                        description: fields.description,
+                        uri: resource.uri.clone(),
+                        model_tier: fields.model_tier,
+                        can_mutate: fields.can_mutate,
+                    });
+                }
             }
         }
         entries.sort_by(|a, b| (&a.origin, &a.name, &a.uri).cmp(&(&b.origin, &b.name, &b.uri)));
@@ -436,6 +462,7 @@ impl McpAgentRegistry {
     ///
     /// 目录渲染面用：`include_builtin=false` 时 builtin 项不进候选
     /// （与迁移前 `scan_agents_detailed(..., include_built_ins)` 一致）。
+    #[must_use]
     pub fn local_catalog(&self, include_builtin: bool) -> Vec<McpAgentMetadata> {
         let (entries, rejected) = self.collect_entries();
         let mut entries: Vec<McpAgentMetadata> = entries
@@ -490,7 +517,7 @@ impl McpAgentRegistry {
     ) -> Result<ActivatedMcpAgent, String> {
         let handle = self
             .pool
-            .get_client(&metadata.origin)
+            .client(&metadata.origin)
             .filter(|handle| matches!(handle.status, ClientStatus::Connected))
             .ok_or_else(|| format!("MCP server '{}' is not connected", metadata.origin))?;
         let _permit = handle.call_gate.try_acquire().map_err(str::to_owned)?;
@@ -534,7 +561,7 @@ impl McpAgentRegistry {
             ));
         }
 
-        let mut definition = parse_agent_file(text)
+        let mut definition = agent_definition::parse_agent_file(text)
             .ok_or_else(|| "failed to parse MCP agent YAML frontmatter".to_string())?;
         if definition.frontmatter.description.trim().is_empty() {
             return Err("MCP agent description must not be empty".to_string());
@@ -590,6 +617,7 @@ impl McpAgentRegistry {
         Ok(activated)
     }
 
+    #[must_use]
     pub fn approval_key(agent: &ActivatedMcpAgent, effective_tools: &[String]) -> String {
         let mut tools = effective_tools.to_vec();
         tools.sort();
@@ -613,6 +641,7 @@ impl McpAgentRegistry {
         )
     }
 
+    #[must_use]
     pub fn is_approved(&self, key: &str) -> bool {
         self.approvals.read().contains(key)
     }
@@ -630,6 +659,7 @@ impl McpAgentRegistry {
 /// 每个条目是 `(scope, agent_id, frontmatter_json)`。
 impl McpAgentRegistry {
     #[doc(hidden)]
+    #[must_use]
     pub fn from_local_catalog_for_test(
         entries: &[(ResourceScope, String, String)],
     ) -> McpAgentRegistry {
@@ -696,7 +726,7 @@ struct LocalCatalogFields {
 
 fn local_catalog_fields(
     agent_id: &str,
-    resource_description: &Option<String>,
+    resource_description: Option<&str>,
     frontmatter: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<Option<LocalCatalogFields>, InvalidModelTier> {
     let Some(frontmatter) = frontmatter else {
@@ -714,7 +744,7 @@ fn local_catalog_fields(
         frontmatter.name.clone()
     };
     let description = if frontmatter.description.trim().is_empty() {
-        resource_description.clone().unwrap_or_default()
+        resource_description.unwrap_or_default().to_owned()
     } else {
         frontmatter.description.trim().to_string()
     };
@@ -726,6 +756,7 @@ fn local_catalog_fields(
     }))
 }
 
+#[must_use]
 pub fn mcp_agent_id(origin: &str, name: &str) -> String {
     format!("mcp__{}__{}", sanitize_id_part(origin), name)
 }
@@ -871,7 +902,7 @@ mod tests {
 
     #[test]
     fn strips_host_local_fields_from_remote_definition() {
-        let mut definition = parse_agent_file(
+        let mut definition = agent_definition::parse_agent_file(
             "---\nname: reviewer\ndescription: review\npermissionMode: bypassPermissions\nmcpServers:\n  - arbitrary\nhooks:\n  PreToolUse: []\nmemory: project\nbackground: true\nisolation: worktree\nskills: [skill://review/SKILL.md]\n---\nReview code.",
         )
         .unwrap();
@@ -890,7 +921,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_remote_model() {
-        let mut definition = parse_agent_file(
+        let mut definition = agent_definition::parse_agent_file(
             "---\nname: reviewer\ndescription: review\nmodel: unrestricted-model\n---\nReview code.",
         )
         .unwrap();
@@ -911,7 +942,7 @@ mod tests {
         // （agent 批准不覆盖 skill：两侧的 `skills` 条目都留在 frontmatter，
         // 由统一 Skill activation 逐项校验——远端不再被整体清空。）
         let text = "---\nname: reviewer\ndescription: review\npermissionMode: acceptEdits\nmemory: project\nskills: [\"skill://review/SKILL.md\"]\n---\nReview code.";
-        let mut remote = parse_agent_file(text).unwrap();
+        let mut remote = agent_definition::parse_agent_file(text).unwrap();
         normalize_remote_definition(&mut remote).unwrap();
         assert!(
             remote.frontmatter.permission_mode.is_none(),
@@ -922,7 +953,7 @@ mod tests {
             "远端 skills 清空（技能级批准面不存在 ⇒ 不构成隐式授权）"
         );
 
-        let local = parse_agent_file(text).unwrap();
+        let local = agent_definition::parse_agent_file(text).unwrap();
         assert_eq!(
             local.frontmatter.permission_mode.as_deref(),
             Some("acceptEdits"),

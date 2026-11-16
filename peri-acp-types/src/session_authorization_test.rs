@@ -1,4 +1,7 @@
-use super::*;
+use crate::session_authorization::SessionAuthorizationPort;
+use crate::session_authorization::SessionCapability;
+use crate::session_authorization::SessionEntitlementRequest;
+use crate::session_authorization::SessionGrant;
 
 /// 未覆写 `grant` 的实现（= 未接入可信身份层）。
 struct NotWired;

@@ -14,11 +14,12 @@
 //! 头部（最旧）淘汰；单条超过 `MAX_ENTRY_BYTES` 不入栈（输入照常提交）。
 //! 浏览路径只复制选中项；持久化由单个 worker 合并写，提交路径不复制整栈。
 
-use crate::kit::atoms::{DRAFT as HISTORY_DRAFT, INPUT_HISTORY, INPUT_HISTORY_INDEX};
+use crate::kit::atoms::DRAFT as HISTORY_DRAFT;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::SyncSender;
 use std::time::Duration;
 
 /// 最大保留历史条数。
@@ -215,7 +216,7 @@ fn request_history_save(path: PathBuf) {
 }
 
 fn spawn_writer() -> Option<SyncSender<PathBuf>> {
-    let (tx, rx) = sync_channel(1);
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let spawned = std::thread::Builder::new()
         .name("input-history-writer".to_string())
         .spawn(move || run_writer(rx, persist_current_history));
@@ -291,3 +292,7 @@ fn persist_history(path: &Path, json: &str) {
 #[cfg(test)]
 #[path = "input_history_test.rs"]
 mod tests;
+
+use crate::kit::atoms::INPUT_HISTORY;
+
+use crate::kit::atoms::INPUT_HISTORY_INDEX;

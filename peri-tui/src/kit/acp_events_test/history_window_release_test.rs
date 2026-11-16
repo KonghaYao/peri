@@ -3,7 +3,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::SessionPhase;
+
 use crate::kit::history_window::{
     HistoryCommitInfo, HistoryEntryView, HistorySource, HistoryWindow, HistoryWindowConfig,
     PersistentEntryKey, ReleasePlan, ReleaseReason, SegmentDraft, SegmentPlacement, WindowIdentity,
@@ -27,7 +30,7 @@ fn release_fixture() -> (BridgeState, Weak<TuiAssistantBubble>, PersistentEntryK
     crate::kit::acp_events::render::invalidate_structural_caches();
     crate::kit::atoms::STRUCTURAL_EPOCH.set(0);
     crate::kit::atoms::RENDER_ACHIEVED_EPOCH.set(0);
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "s1".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state
@@ -80,13 +83,13 @@ fn release_removes_tool_card_with_message_segment() {
     use peri_acp_types::messages::MessageId;
     use peri_acp_types::thread::ThreadId;
 
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "s1".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state
         .window
         .begin_window(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "released live body".into(),
@@ -94,7 +97,7 @@ fn release_removes_tool_card_with_message_segment() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
             tool_id: "tool-release".into(),
@@ -106,7 +109,7 @@ fn release_removes_tool_card_with_message_segment() {
             origin_readable: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let key = PersistentEntryKey::own("s1:m-tool");
     let locator = *state
         .window
@@ -132,7 +135,7 @@ fn release_removes_tool_card_with_message_segment() {
     assert!(state.window.promote_live_seal_position(&key, 10));
     let tail =
         HistoryCommittedTail::new(&ThreadId::from("s1".to_string()), MessageId::new(), 10).encode();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::HistoryCommitted(HistoryCommitInfo {
             session_id: "s1".into(),
@@ -268,7 +271,7 @@ fn release_removes_committed_and_invalidates_holders_before_ack() {
 #[test]
 #[serial]
 fn release_of_newest_segment_recomputes_newer_cursor_from_resident_edge() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     crate::kit::atoms::HISTORY_WINDOW_V1.set(true);
     crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(true);
     crate::kit::history_page_consumer::reset_window_paging_state();
@@ -455,7 +458,7 @@ fn release_prunes_only_pending_tool_ends_of_released_entries() {
     crate::kit::atoms::RENDER_ACHIEVED_EPOCH.set(0);
     crate::kit::acp_events::history_window::clear_pending_tool_ends();
 
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "s1".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state
@@ -465,36 +468,39 @@ fn release_prunes_only_pending_tool_ends_of_released_entries() {
     let released_key = PersistentEntryKey::own("s1:older");
     let kept_key = PersistentEntryKey::own("s1:newer");
     let mut plans = Vec::new();
-    for (slot, key) in [released_key.clone(), kept_key.clone()]
-        .into_iter()
-        .enumerate()
     {
-        let entry = HistoryEntryView::new(key.clone(), Some(slot as u64), 1, 128, 128, Vec::new());
-        let segment_key = state
-            .window
-            .register_segment(
-                SegmentDraft::new(HistorySource::Own, vec![entry], 128, 128),
-                SegmentPlacement::Tail,
-            )
-            .expect("segment");
-        state.window.mark_display_block(&[(key, 1)], slot);
-        state
-            .committed
-            .push_back(TuiRenderUnit::TuiAssistantBubble(bubble("body")));
-        let segment = state.window.segment(segment_key).expect("segment").clone();
-        plans.push(ReleasePlan {
-            segment: segment_key,
-            source: segment.source.clone(),
-            entries: segment.entry_keys(),
-            unit_count: segment.unit_count,
-            body_bytes: segment.body_bytes,
-            reserved_bytes: segment.reserved_bytes,
-            slot_range: state.window.index().slot_range(segment_key),
-            before: None,
-            after: None,
-            before_cursor: None,
-            after_cursor: None,
-        });
+        let iteration_items = [released_key.clone(), kept_key.clone()]
+            .into_iter()
+            .enumerate();
+        for (slot, key) in iteration_items {
+            let entry =
+                HistoryEntryView::new(key.clone(), Some(slot as u64), 1, 128, 128, Vec::new());
+            let segment_key = state
+                .window
+                .register_segment(
+                    SegmentDraft::new(HistorySource::Own, vec![entry], 128, 128),
+                    SegmentPlacement::Tail,
+                )
+                .expect("segment");
+            state.window.mark_display_block(&[(key, 1)], slot);
+            state
+                .committed
+                .push_back(TuiRenderUnit::TuiAssistantBubble(bubble("body")));
+            let segment = state.window.segment(segment_key).expect("segment").clone();
+            plans.push(ReleasePlan {
+                segment: segment_key,
+                source: segment.source.clone(),
+                entries: segment.entry_keys(),
+                unit_count: segment.unit_count,
+                body_bytes: segment.body_bytes,
+                reserved_bytes: segment.reserved_bytes,
+                slot_range: state.window.index().slot_range(segment_key),
+                before: None,
+                after: None,
+                before_cursor: None,
+                after_cursor: None,
+            });
+        }
     }
 
     crate::kit::acp_events::history_window::insert_pending_tool_end_for_tests(

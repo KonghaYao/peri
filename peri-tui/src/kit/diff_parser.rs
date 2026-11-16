@@ -323,6 +323,7 @@ fn extract_path_from_line(line: &str) -> Option<String> {
     None
 }
 
+#[must_use]
 fn strip_ab_prefix(p: &str) -> String {
     if let Some(rest) = p.strip_prefix("a/") {
         rest.to_string()

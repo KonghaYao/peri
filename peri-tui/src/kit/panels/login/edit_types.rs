@@ -22,6 +22,7 @@ pub(super) enum LoginField {
 }
 
 impl LoginField {
+    #[must_use]
     pub(super) fn i18n_key(self) -> &'static str {
         match self {
             Self::ProviderType => "login-field-type",
@@ -40,6 +41,7 @@ impl LoginField {
         }
     }
 
+    #[must_use]
     pub(super) fn is_text(self) -> bool {
         matches!(
             self,
@@ -78,6 +80,7 @@ pub(super) struct LoginError {
 }
 
 impl LoginError {
+    #[must_use]
     pub(super) fn field(field: LoginField, message: String) -> Self {
         Self {
             field,
@@ -87,6 +90,7 @@ impl LoginError {
     }
 
     /// `expected revision` 过期：唯一允许显示“重新载入”提示的类别。
+    #[must_use]
     pub(super) fn conflict(message: String) -> Self {
         Self {
             field: LoginField::Confirm,
@@ -96,6 +100,7 @@ impl LoginError {
     }
 
     /// Plan 身份缺失；保存门据此做状态化文案与自动采用。
+    #[must_use]
     pub(super) fn identity_required(field: LoginField, message: String) -> Self {
         Self {
             field,
@@ -105,6 +110,7 @@ impl LoginError {
     }
 
     /// 凭据引用不可用；与身份缺失分开，便于保存门抑制重复通知。
+    #[must_use]
     pub(super) fn auth_reference(field: LoginField, message: String) -> Self {
         Self {
             field,

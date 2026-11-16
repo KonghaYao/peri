@@ -1,10 +1,11 @@
 //! submit_consumer 测试共享夹具。
 
-use super::super::*;
+use super::super::{AcpTuiClient, SubmitRequest};
 use std::time::Duration;
 
 use peri_acp::transport::AcpTransport;
-use peri_acp::transport::mpsc::{MpscClientTransport, MpscServerTransport, mpsc_transport_pair};
+use peri_acp::transport::mpsc::MpscClientTransport;
+use peri_acp::transport::mpsc::MpscServerTransport;
 use peri_acp::transport::types::{IncomingMessage, RequestId};
 
 pub(super) async fn expect_prompt(server: &MpscServerTransport) -> (RequestId, String, String) {
@@ -60,6 +61,7 @@ pub(super) async fn wait_for_session(client: &AcpTuiClient, expected: &str) {
 }
 
 /// 用户文本提交。
+#[must_use]
 pub(super) fn agent_text(text: &str) -> SubmitRequest {
     SubmitRequest::AgentText {
         text: text.to_string(),
@@ -70,14 +72,14 @@ pub(super) fn agent_text(text: &str) -> SubmitRequest {
 /// 用真实 mpsc transport 对创建 AcpTuiClient（不启动 pump）。
 pub(super) fn make_client_without_pump() -> (AcpTuiClient, MpscServerTransport) {
     let (client_transport, server_transport): (MpscClientTransport, MpscServerTransport) =
-        mpsc_transport_pair();
+        peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
     (client, server_transport)
 }
 
 pub(super) fn make_interactive_client_without_pump() -> (AcpTuiClient, MpscServerTransport) {
     let (client_transport, server_transport): (MpscClientTransport, MpscServerTransport) =
-        mpsc_transport_pair();
+        peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _notification_tx, _notification_rx) =
         AcpTuiClient::new_interactive(client_transport);
     (client, server_transport)

@@ -1,17 +1,26 @@
 //! Tests for service_snapshot
 
-#[cfg(test)]
-use super::*;
+use super::ACTIVE_EXECUTION_CWD;
+use super::ACTIVE_SESSION_ID;
+use super::AcpTuiClient;
+use super::Arc;
+use super::CancellationToken;
+use super::Duration;
+use super::Mutex;
+use super::SlowSnapshotRefresh;
+use super::SnapshotSource;
+use super::THREAD_BROWSER_ARCHIVED;
+use super::THREAD_BROWSER_SCOPE;
+use super::THREAD_LIST_ERROR;
+use super::THREAD_LIST_PAGE_COUNT;
+use super::file_scan;
+use super::memory_scan;
+
 use crate::app::service_registry::ProcessResourceMonitor;
-use crate::kit::atoms::McpInitPhase;
-use crate::kit::atoms::{
-    CRON_JOBS, CURRENT_SESSION_TITLE, FILE_LIST, HOOK_LIST, HookSummary, MCP_SERVERS, PLUGIN_LIST,
-    SERVICE_PROJECTION_ERROR, SERVICE_SNAPSHOT, ServiceSnapshot, THREAD_LIST, ThreadBrowserScope,
-    ThreadSummary,
-};
-use crate::kit::service_snapshot::file_scan::scan_cwd_files_shallow;
+
 use chrono::Utc;
-use peri_acp::transport::{AcpTransport, mpsc::mpsc_transport_pair, types::IncomingMessage};
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::IncomingMessage;
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use serde_json::{Value, json};
 use serial_test::serial;
@@ -60,7 +69,7 @@ fn entry_json(cwd: &str, title: &str) -> Value {
 }
 
 async fn snapshot_client(cwd: &str) -> (AcpTuiClient, tokio::sync::mpsc::UnboundedReceiver<Value>) {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("00000000-0000-0000-0000-000000000003", false);
     let cwd = cwd.to_string();
@@ -88,16 +97,24 @@ async fn snapshot_client(cwd: &str) -> (AcpTuiClient, tokio::sync::mpsc::Unbound
                     json!({"jobs":[{"id":"job-1","expression":"*/5 * * * *","prompt":"test prompt","enabled":true,"next_fire":null}]})
                 }
                 "session/list" => {
-                    queries.send(params).unwrap();
+                    queries.send(params).expect(
+                        "snapshot client: fixture channel must deliver its expected message",
+                    );
                     json!({"sessions":[],"_meta":{"peri.sessionWorkspaceV1":{
                         "threads":[entry_json(&cwd,"Project thread")],"nextCursor":null}}})
                 }
                 other => panic!("unexpected request: {other}"),
             };
-            server.send_response(id, Ok(result)).await.unwrap();
+            server
+                .send_response(id, Ok(result))
+                .await
+                .expect("snapshot client: fixture task and request must complete successfully");
         }
     });
-    client.register_ui_commands(&[]).await.unwrap();
+    client
+        .register_ui_commands(&[])
+        .await
+        .expect("snapshot client: fixture task and request must complete successfully");
     (client, rx)
 }
 
@@ -105,18 +122,18 @@ async fn snapshot_client(cwd: &str) -> (AcpTuiClient, tokio::sync::mpsc::Unbound
 #[serial]
 async fn project_history_uses_host_scope_and_actual_execution_path() {
     reset_snapshot_atoms();
-    let tmp = tempfile::tempdir().unwrap();
-    let cwd = tmp.path().to_str().unwrap();
+    let tmp = tempfile::tempdir().expect("project history uses host scope and actual execution path: isolated fixture workspace must remain accessible");
+    let cwd = tmp.path().to_str().expect("project history uses host scope and actual execution path: fixture paths and protocol text must be valid UTF-8");
     let (client, mut queries) = snapshot_client(cwd).await;
     let mut src = make_minimal_source(Some(client));
     src.cwd = cwd.into();
     let mut slow = isolated_refresh();
-    tick_once(&src, &mut slow).await.unwrap();
+    super::tick_once(&src, &mut slow).await.expect("project history uses host scope and actual execution path: fixture task and request must complete successfully");
     assert_eq!(*THREAD_LIST_ERROR.state().read(), None);
     let project_query = tokio::time::timeout(Duration::from_secs(3), queries.recv())
         .await
         .expect("project scope query must be sent")
-        .unwrap();
+        .expect("project history uses host scope and actual execution path: fixture task and request must complete successfully");
     assert_eq!(
         project_query["_meta"]["peri.sessionWorkspaceV1"]["scope"]["kind"],
         "project"
@@ -126,11 +143,11 @@ async fn project_history_uses_host_scope_and_actual_execution_path() {
     assert_eq!(threads[0].cwd, cwd);
     assert_eq!(threads[0].message_count, 3);
     THREAD_BROWSER_SCOPE.set(ThreadBrowserScope::Workspace);
-    tick_once(&src, &mut slow).await.unwrap();
+    super::tick_once(&src, &mut slow).await.expect("project history uses host scope and actual execution path: fixture task and request must complete successfully");
     let workspace_query = tokio::time::timeout(Duration::from_secs(3), queries.recv())
         .await
         .expect("workspace scope query must be sent")
-        .unwrap();
+        .expect("project history uses host scope and actual execution path: fixture task and request must complete successfully");
     assert_eq!(
         workspace_query["_meta"]["peri.sessionWorkspaceV1"]["scope"]["kind"],
         "workspace"
@@ -141,23 +158,23 @@ async fn project_history_uses_host_scope_and_actual_execution_path() {
 #[serial]
 async fn active_execution_directory_invalidates_file_cache_and_updates_title() {
     reset_snapshot_atoms();
-    let original = tempfile::tempdir().unwrap();
-    let target = tempfile::tempdir().unwrap();
-    std::fs::write(original.path().join("original.rs"), "old").unwrap();
-    std::fs::write(target.path().join("target.rs"), "new").unwrap();
-    let (client, _queries) = snapshot_client(target.path().to_str().unwrap()).await;
+    let original = tempfile::tempdir().expect("active execution directory invalidates file cache and updates title: isolated fixture workspace must remain accessible");
+    let target = tempfile::tempdir().expect("active execution directory invalidates file cache and updates title: isolated fixture workspace must remain accessible");
+    std::fs::write(original.path().join("original.rs"), "old").expect("active execution directory invalidates file cache and updates title: isolated fixture workspace must remain accessible");
+    std::fs::write(target.path().join("target.rs"), "new").expect("active execution directory invalidates file cache and updates title: isolated fixture workspace must remain accessible");
+    let (client, _queries) = snapshot_client(target.path().to_str().expect("active execution directory invalidates file cache and updates title: fixture paths and protocol text must be valid UTF-8")).await;
     let mut src = make_minimal_source(Some(client));
-    src.cwd = original.path().to_str().unwrap().into();
+    src.cwd = original.path().to_str().expect("active execution directory invalidates file cache and updates title: fixture paths and protocol text must be valid UTF-8").into();
     let mut slow = isolated_refresh();
-    tick_once(&src, &mut slow).await.unwrap();
+    super::tick_once(&src, &mut slow).await.expect("active execution directory invalidates file cache and updates title: fixture task and request must complete successfully");
     assert_eq!(*FILE_LIST.state().read(), vec!["original.rs"]);
-    ACTIVE_EXECUTION_CWD.set(Some(target.path().to_str().unwrap().into()));
+    ACTIVE_EXECUTION_CWD.set(Some(target.path().to_str().expect("active execution directory invalidates file cache and updates title: fixture paths and protocol text must be valid UTF-8").into()));
     ACTIVE_SESSION_ID.set("00000000-0000-0000-0000-000000000003".into());
-    tick_once(&src, &mut slow).await.unwrap();
+    super::tick_once(&src, &mut slow).await.expect("active execution directory invalidates file cache and updates title: fixture task and request must complete successfully");
     assert_eq!(*FILE_LIST.state().read(), vec!["target.rs"]);
     assert_eq!(
         SERVICE_SNAPSHOT.state().read().cwd,
-        target.path().to_str().unwrap()
+        target.path().to_str().expect("active execution directory invalidates file cache and updates title: fixture paths and protocol text must be valid UTF-8")
     );
     assert_eq!(*CURRENT_SESSION_TITLE.state().read(), "Session title");
     assert_eq!(
@@ -178,17 +195,17 @@ async fn active_execution_directory_invalidates_file_cache_and_updates_title() {
 #[serial]
 async fn closing_session_clears_session_projection_on_next_commit() {
     reset_snapshot_atoms();
-    let directory = tempfile::tempdir().unwrap();
-    let (client, _queries) = snapshot_client(directory.path().to_str().unwrap()).await;
+    let directory = tempfile::tempdir().expect("closing session clears session projection on next commit: isolated fixture workspace must remain accessible");
+    let (client, _queries) = snapshot_client(directory.path().to_str().expect("closing session clears session projection on next commit: fixture paths and protocol text must be valid UTF-8")).await;
     let mut source = make_minimal_source(Some(client));
-    source.cwd = directory.path().to_str().unwrap().into();
+    source.cwd = directory.path().to_str().expect("closing session clears session projection on next commit: fixture paths and protocol text must be valid UTF-8").into();
     let mut refresh = isolated_refresh();
     ACTIVE_SESSION_ID.set("00000000-0000-0000-0000-000000000003".into());
-    tick_once(&source, &mut refresh).await.unwrap();
+    super::tick_once(&source, &mut refresh).await.expect("closing session clears session projection on next commit: fixture task and request must complete successfully");
     assert_eq!(*CURRENT_SESSION_TITLE.state().read(), "Session title");
     assert!(!CRON_JOBS.state().read().is_empty());
     ACTIVE_SESSION_ID.set(String::new());
-    tick_once(&source, &mut refresh).await.unwrap();
+    super::tick_once(&source, &mut refresh).await.expect("closing session clears session projection on next commit: fixture task and request must complete successfully");
     assert!(CURRENT_SESSION_TITLE.state().read().is_empty());
     assert!(HOOK_LIST.state().read().is_empty());
     assert!(PLUGIN_LIST.state().read().is_empty());
@@ -207,16 +224,16 @@ async fn closing_session_clears_session_projection_on_next_commit() {
 #[serial]
 async fn missing_workspace_capability_is_visible_as_query_error() {
     reset_snapshot_atoms();
-    let (transport, _server) = mpsc_transport_pair();
+    let (transport, _server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     let src = make_minimal_source(Some(client));
-    tick_once(&src, &mut isolated_refresh()).await.unwrap();
+    super::tick_once(&src, &mut isolated_refresh()).await.expect("missing workspace capability is visible as query error: fixture task and request must complete successfully");
     assert!(
         THREAD_LIST_ERROR
             .state()
             .read()
             .clone()
-            .unwrap()
+            .expect("missing workspace capability is visible as query error: the fixture storage and layout must support the requested operation")
             .contains("does not support")
     );
     assert!(THREAD_LIST.state().read().is_empty());
@@ -249,7 +266,7 @@ async fn test_tick_once_writes_atoms() {
 
     let src = make_minimal_source(None);
     let mut slow = isolated_refresh();
-    let result = tick_once(&src, &mut slow).await;
+    let result = super::tick_once(&src, &mut slow).await;
     assert!(result.is_ok(), "tick_once should succeed");
 
     let snap = SERVICE_SNAPSHOT.state().read().clone();
@@ -270,7 +287,7 @@ async fn test_tick_once_empty_thread_list() {
     let src = make_minimal_source(None);
     // ACP 项目列表为空时不生成会话行
     let mut slow = isolated_refresh();
-    let result = tick_once(&src, &mut slow).await;
+    let result = super::tick_once(&src, &mut slow).await;
     assert!(result.is_ok());
 
     let threads = THREAD_LIST.state().read().clone();
@@ -286,7 +303,7 @@ async fn no_session_projection_preserves_only_labeled_startup_plugins_and_hooks(
         plugin_name: "startup-only".into(),
         ..Default::default()
     });
-    tick_once(&source, &mut isolated_refresh()).await.unwrap();
+    super::tick_once(&source, &mut isolated_refresh()).await.expect("no session projection preserves only labeled startup plugins and hooks: fixture task and request must complete successfully");
     assert_eq!(HOOK_LIST.state().read()[0].plugin_name, "startup-only");
     assert!(CRON_JOBS.state().read().is_empty());
     assert!(MCP_SERVERS.state().read().is_empty());
@@ -295,7 +312,7 @@ async fn no_session_projection_preserves_only_labeled_startup_plugins_and_hooks(
         Some(crate::i18n::tr("service-projection-startup").as_str())
     );
     ACTIVE_SESSION_ID.set("session-without-client".into());
-    tick_once(&source, &mut isolated_refresh()).await.unwrap();
+    super::tick_once(&source, &mut isolated_refresh()).await.expect("no session projection preserves only labeled startup plugins and hooks: fixture task and request must complete successfully");
     assert!(HOOK_LIST.state().read().is_empty());
     assert!(PLUGIN_LIST.state().read().is_empty());
     assert_eq!(
@@ -309,13 +326,19 @@ async fn no_session_projection_preserves_only_labeled_startup_plugins_and_hooks(
 async fn test_cron_tasks_collected() {
     reset_snapshot_atoms();
 
-    let tmp = tempfile::tempdir().unwrap();
-    let (client, _queries) = snapshot_client(tmp.path().to_str().unwrap()).await;
+    let tmp = tempfile::tempdir()
+        .expect("cron tasks collected: isolated fixture workspace must remain accessible");
+    let (client, _queries) = snapshot_client(
+        tmp.path()
+            .to_str()
+            .expect("cron tasks collected: fixture paths and protocol text must be valid UTF-8"),
+    )
+    .await;
     let src = make_minimal_source(Some(client));
     ACTIVE_SESSION_ID.set("00000000-0000-0000-0000-000000000003".into());
 
     let mut slow = isolated_refresh();
-    let result = tick_once(&src, &mut slow).await;
+    let result = super::tick_once(&src, &mut slow).await;
     assert!(result.is_ok());
 
     let jobs = CRON_JOBS.state().read().clone();
@@ -332,7 +355,7 @@ async fn test_derive_provider_and_model_default() {
     let peri_config = Arc::new(parking_lot::RwLock::new(
         crate::config::PeriConfig::default(),
     ));
-    let (provider, alias, model_name, effort) = derive_provider_and_model(&peri_config);
+    let (provider, alias, model_name, effort) = super::derive_provider_and_model(&peri_config);
     // 默认 AppConfig:
     assert!(provider.is_empty());
     assert!(alias.is_empty());
@@ -350,8 +373,18 @@ async fn test_derive_provider_and_model_set() {
             active_alias: "sonnet".into(),
             profiles: {
                 let mut profiles = crate::config::Profiles::default();
-                profiles.get_mut("sonnet").unwrap().provider = "p1".into();
-                profiles.get_mut("sonnet").unwrap().effort = "high".into();
+                profiles
+                    .get_mut("sonnet")
+                    .expect(
+                        "derive provider and model set: fixture must contain the requested entry",
+                    )
+                    .provider = "p1".into();
+                profiles
+                    .get_mut("sonnet")
+                    .expect(
+                        "derive provider and model set: fixture must contain the requested entry",
+                    )
+                    .effort = "high".into();
                 profiles
             },
             providers: vec![ProviderConfig {
@@ -369,7 +402,7 @@ async fn test_derive_provider_and_model_set() {
         ..Default::default()
     };
     let peri_config = Arc::new(parking_lot::RwLock::new(cfg));
-    let (provider, alias, model_name, effort) = derive_provider_and_model(&peri_config);
+    let (provider, alias, model_name, effort) = super::derive_provider_and_model(&peri_config);
     assert_eq!(provider, "anthropic");
     assert_eq!(alias, "sonnet");
     assert_eq!(model_name, "claude-sonnet-4-20250514");
@@ -386,7 +419,7 @@ async fn test_derive_provider_and_model_set_empty_model() {
             active_alias: "haiku".into(),
             profiles: {
                 let mut profiles = crate::config::Profiles::default();
-                profiles.get_mut("haiku").unwrap().provider = "p1".into();
+                profiles.get_mut("haiku").expect("derive provider and model set empty model: fixture must contain the requested entry").provider = "p1".into();
                 profiles
             },
             providers: vec![ProviderConfig {
@@ -403,7 +436,7 @@ async fn test_derive_provider_and_model_set_empty_model() {
         ..Default::default()
     };
     let peri_config = Arc::new(parking_lot::RwLock::new(cfg));
-    let (provider, alias, model_name, effort) = derive_provider_and_model(&peri_config);
+    let (provider, alias, model_name, effort) = super::derive_provider_and_model(&peri_config);
     assert_eq!(provider, "anthropic");
     assert_eq!(alias, "haiku");
     // Some("") 应被 filter 掉，回退到 active_alias
@@ -420,7 +453,7 @@ async fn test_derive_provider_and_model_no_models_fallback() {
             active_alias: "haiku".into(),
             profiles: {
                 let mut profiles = crate::config::Profiles::default();
-                profiles.get_mut("haiku").unwrap().provider = "p1".into();
+                profiles.get_mut("haiku").expect("derive provider and model no models fallback: fixture must contain the requested entry").provider = "p1".into();
                 profiles
             },
             providers: vec![ProviderConfig {
@@ -433,7 +466,7 @@ async fn test_derive_provider_and_model_no_models_fallback() {
         ..Default::default()
     };
     let peri_config = Arc::new(parking_lot::RwLock::new(cfg));
-    let (provider, alias, model_name, effort) = derive_provider_and_model(&peri_config);
+    let (provider, alias, model_name, effort) = super::derive_provider_and_model(&peri_config);
     assert_eq!(provider, "anthropic");
     assert_eq!(alias, "haiku");
     // 无模型映射时回退到 active_alias
@@ -467,24 +500,38 @@ fn test_snapshot_source_is_clone() {
 /// C2 回归测试：scan_cwd_files_shallow 在临时目录正确收集文件相对路径。
 #[test]
 fn test_scan_cwd_files_shallow_collects_files() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().expect(
+        "scan cwd files shallow collects files: isolated fixture workspace must remain accessible",
+    );
     let root = tmp.path();
 
     // 顶层文件
-    std::fs::write(root.join("a.txt"), "x").unwrap();
-    std::fs::write(root.join("b.rs"), "x").unwrap();
+    std::fs::write(root.join("a.txt"), "x").expect(
+        "scan cwd files shallow collects files: isolated fixture workspace must remain accessible",
+    );
+    std::fs::write(root.join("b.rs"), "x").expect(
+        "scan cwd files shallow collects files: isolated fixture workspace must remain accessible",
+    );
     // 子目录文件（深度=2）
-    std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(root.join("src").join("mod.rs"), "x").unwrap();
+    std::fs::create_dir_all(root.join("src")).expect(
+        "scan cwd files shallow collects files: isolated fixture workspace must remain accessible",
+    );
+    std::fs::write(root.join("src").join("mod.rs"), "x").expect(
+        "scan cwd files shallow collects files: isolated fixture workspace must remain accessible",
+    );
     // 忽略目录：node_modules 内文件不应出现
-    std::fs::create_dir_all(root.join("node_modules").join("pkg")).unwrap();
+    std::fs::create_dir_all(root.join("node_modules").join("pkg")).expect(
+        "scan cwd files shallow collects files: isolated fixture workspace must remain accessible",
+    );
     std::fs::write(
         root.join("node_modules").join("pkg").join("ignored.js"),
         "x",
     )
-    .unwrap();
+    .expect(
+        "scan cwd files shallow collects files: isolated fixture workspace must remain accessible",
+    );
 
-    let files = scan_cwd_files_shallow(root.to_str().unwrap());
+    let files = crate::kit::service_snapshot::file_scan::scan_cwd_files_shallow(root.to_str().expect("scan cwd files shallow collects files: fixture paths and protocol text must be valid UTF-8"));
     assert!(files.contains(&"a.txt".to_string()));
     assert!(files.contains(&"b.rs".to_string()));
     assert!(files.contains(&"src/mod.rs".to_string()));
@@ -498,26 +545,33 @@ fn test_scan_cwd_files_shallow_collects_files() {
 /// C2 回归测试：不存在的目录返回空 Vec，不 panic。
 #[test]
 fn test_scan_cwd_files_shallow_nonexistent() {
-    let files = scan_cwd_files_shallow("/this/path/does/not/exist");
+    let files = crate::kit::service_snapshot::file_scan::scan_cwd_files_shallow(
+        "/this/path/does/not/exist",
+    );
     assert!(files.is_empty());
 }
 
 /// C2 回归测试：MAX_FILES 上限防止无限增长。
 #[test]
 fn test_scan_cwd_files_shallow_caps_at_max() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().expect(
+        "scan cwd files shallow caps at max: isolated fixture workspace must remain accessible",
+    );
     let root = tmp.path();
     // 创建 600 个文件（超过 MAX_FILES=500）
     for i in 0..600 {
-        std::fs::write(root.join(format!("f{i}.txt")), "x").unwrap();
+        std::fs::write(root.join(format!("f{i}.txt")), "x").expect(
+            "scan cwd files shallow caps at max: isolated fixture workspace must remain accessible",
+        );
     }
-    let files = scan_cwd_files_shallow(root.to_str().unwrap());
+    let files = crate::kit::service_snapshot::file_scan::scan_cwd_files_shallow(root.to_str().expect("scan cwd files shallow caps at max: fixture paths and protocol text must be valid UTF-8"));
     assert!(files.len() <= 500, "should cap at 500, got {}", files.len());
 }
 
 mod startup {
     use super::*;
-    use peri_acp::transport::{mpsc::MpscServerTransport, types::RequestId};
+    use peri_acp::transport::mpsc::MpscServerTransport;
+    use peri_acp::transport::types::RequestId;
 
     const SESSION_ID: &str = "00000000-0000-0000-0000-000000000003";
 
@@ -536,8 +590,9 @@ mod startup {
     async fn setup() -> (SnapshotSource, MpscServerTransport, tempfile::TempDir) {
         reset_snapshot_atoms();
         SERVICE_SNAPSHOT.set(ServiceSnapshot::default());
-        let directory = tempfile::tempdir().unwrap();
-        let (transport, server) = mpsc_transport_pair();
+        let directory =
+            tempfile::tempdir().expect("setup: isolated fixture workspace must remain accessible");
+        let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
         let (client, _, _) = AcpTuiClient::new_interactive(transport);
         let initialize = client.clone();
         let task = tokio::spawn(async move { initialize.register_ui_commands(&[]).await });
@@ -550,10 +605,16 @@ mod startup {
                 }}})),
             )
             .await
-            .unwrap();
-        task.await.unwrap().unwrap();
+            .expect("setup: fixture task and request must complete successfully");
+        task.await
+            .expect("setup: fixture task and request must complete successfully")
+            .expect("setup: fixture task and request must complete successfully");
         let mut source = make_minimal_source(Some(client));
-        source.cwd = directory.path().to_str().unwrap().into();
+        source.cwd = directory
+            .path()
+            .to_str()
+            .expect("setup: fixture paths and protocol text must be valid UTF-8")
+            .into();
         (source, server, directory)
     }
 
@@ -567,7 +628,9 @@ mod startup {
             },
             ..isolated_refresh()
         };
-        tokio::spawn(run_service_snapshot(source, shutdown, refresh))
+        tokio::spawn(crate::kit::service_snapshot::refresh::run_service_snapshot(
+            source, shutdown, refresh,
+        ))
     }
 
     async fn complete_initial_scan(server: &MpscServerTransport, id: RequestId, cwd: &str) {
@@ -579,7 +642,7 @@ mod startup {
                 })),
             )
             .await
-            .unwrap();
+            .expect("complete initial scan: fixture task and request must complete successfully");
         let id = request(server, "session/list").await;
         server
             .send_response(
@@ -589,19 +652,27 @@ mod startup {
                 }})),
             )
             .await
-            .unwrap();
+            .expect("complete initial scan: fixture task and request must complete successfully");
     }
 
     async fn new_session(source: &SnapshotSource, server: &MpscServerTransport) {
-        let client = source.client.clone().unwrap();
+        let client = source
+            .client
+            .clone()
+            .expect("new session: the clone fixture operation uses valid inputs");
         let cwd = source.cwd.clone();
         let task = tokio::spawn(async move { client.new_session(&cwd, None).await });
         let id = request(server, "session/new").await;
         server
             .send_response(id, Ok(json!({"sessionId":SESSION_ID})))
             .await
-            .unwrap();
-        assert_eq!(task.await.unwrap().unwrap(), SESSION_ID);
+            .expect("new session: fixture task and request must complete successfully");
+        assert_eq!(
+            task.await
+                .expect("new session: the fixture operation must finish without an inner failure")
+                .expect("new session: the fixture operation must finish without an inner failure"),
+            SESSION_ID
+        );
     }
 
     async fn complete_session_snapshot(server: &MpscServerTransport, model: &str) {
@@ -610,7 +681,7 @@ mod startup {
             let message = tokio::time::timeout(Duration::from_millis(10), server.recv())
                 .await
                 .expect("必须在周期 tick 前查询会话服务")
-                .unwrap();
+                .expect("complete session snapshot: fixture task and request must complete successfully");
             let IncomingMessage::Request { id, method, params } = message else {
                 panic!("应收到会话服务请求");
             };
@@ -621,7 +692,9 @@ mod startup {
                 "cron/list" => json!({"jobs":[]}),
                 other => panic!("未知请求：{other}"),
             };
-            server.send_response(id, Ok(value)).await.unwrap();
+            server.send_response(id, Ok(value)).await.expect(
+                "complete session snapshot: fixture task and request must complete successfully",
+            );
         }
         let id = request(server, "session/metadata").await;
         server
@@ -632,7 +705,9 @@ mod startup {
                 })),
             )
             .await
-            .unwrap();
+            .expect(
+                "complete session snapshot: fixture task and request must complete successfully",
+            );
         // 暂停时钟下让所有 ready future 完成，仅推进 1 ms，不触发 2 秒周期。
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
@@ -664,8 +739,8 @@ mod startup {
             "就绪通知消费后应回到低频轮询，不能持续查询"
         );
         shutdown.cancel();
-        task.await.unwrap();
-        source.client.unwrap().close();
+        task.await.expect("startup snapshot discard refreshes before periodic tick: fixture task and request must complete successfully");
+        source.client.expect("startup snapshot discard refreshes before periodic tick: the fixture establishes source.client before this assertion").close();
     }
 
     /// [回归测试] 即使第一次快照已发布，随后建立会话也应唤醒快照任务。
@@ -683,8 +758,8 @@ mod startup {
         complete_session_snapshot(&server, "ready-model").await;
         assert_eq!(SERVICE_SNAPSHOT.state().read().model_name, "ready-model");
         shutdown.cancel();
-        task.await.unwrap();
-        source.client.unwrap().close();
+        task.await.expect("startup session after first snapshot refreshes immediately: fixture task and request must complete successfully");
+        source.client.expect("startup session after first snapshot refreshes immediately: the fixture establishes source.client before this assertion").close();
     }
 
     #[tokio::test(start_paused = true)]
@@ -698,7 +773,35 @@ mod startup {
         tokio::time::timeout(Duration::from_millis(10), task)
             .await
             .expect("退出不得等待未返回的 RPC")
-            .unwrap();
-        source.client.unwrap().close();
+            .expect("startup snapshot shutdown cancels pending query: fixture task and request must complete successfully");
+        source.client.expect("startup snapshot shutdown cancels pending query: the fixture establishes source.client before this assertion").close();
     }
 }
+
+use crate::kit::atoms::McpInitPhase;
+
+use crate::kit::atoms::CRON_JOBS;
+
+use crate::kit::atoms::CURRENT_SESSION_TITLE;
+
+use crate::kit::atoms::FILE_LIST;
+
+use crate::kit::atoms::HOOK_LIST;
+
+use crate::kit::atoms::HookSummary;
+
+use crate::kit::atoms::MCP_SERVERS;
+
+use crate::kit::atoms::PLUGIN_LIST;
+
+use crate::kit::atoms::SERVICE_PROJECTION_ERROR;
+
+use crate::kit::atoms::SERVICE_SNAPSHOT;
+
+use crate::kit::atoms::ServiceSnapshot;
+
+use crate::kit::atoms::THREAD_LIST;
+
+use crate::kit::atoms::ThreadBrowserScope;
+
+use crate::kit::atoms::ThreadSummary;

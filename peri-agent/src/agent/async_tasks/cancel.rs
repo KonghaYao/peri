@@ -1,6 +1,7 @@
-use super::{
-    BackgroundRegistryError, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle,
-};
+use crate::agent::async_tasks::registry::BackgroundRegistryError;
+use crate::agent::async_tasks::registry::BackgroundTaskRegistry;
+use crate::agent::async_tasks::registry::BackgroundTaskStatus;
+use crate::agent::async_tasks::registry::BgCancelHandle;
 use peri_acp_types::tasks::{BgRegistryEvent, BgTaskKind};
 use tracing::warn;
 

@@ -1,18 +1,9 @@
-mod anthropic;
-mod openai;
+mod anthropic_adapter;
+use anthropic_adapter as anthropic;
+mod message_adapter;
+mod open_ai_adapter;
+use open_ai_adapter as openai;
 
 pub use anthropic::AnthropicAdapter;
-use anyhow::Result;
+pub use message_adapter::MessageAdapter;
 pub use openai::OpenAiAdapter;
-use serde_json::Value;
-
-use crate::messages::BaseMessage;
-
-/// MessageAdapter trait — BaseMessage 与 provider 原生格式之间的双向转换
-pub trait MessageAdapter {
-    /// BaseMessage 列表 → provider 原生 JSON messages 数组
-    fn from_base_messages(messages: &[BaseMessage]) -> Value;
-
-    /// provider 原生 JSON message → BaseMessage
-    fn to_base_message(value: &Value) -> Result<BaseMessage>;
-}

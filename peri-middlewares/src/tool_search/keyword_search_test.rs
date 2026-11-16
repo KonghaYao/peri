@@ -1,42 +1,43 @@
-use super::*;
-
 #[test]
 fn test_split_camel_case() {
-    assert_eq!(split_camel_case("CronCreate"), vec!["cron", "create"]);
     assert_eq!(
-        split_camel_case("SearchExtraTools"),
+        super::split_camel_case("CronCreate"),
+        vec!["cron", "create"]
+    );
+    assert_eq!(
+        super::split_camel_case("SearchExtraTools"),
         vec!["search", "extra", "tools"]
     );
-    assert_eq!(split_camel_case("Read"), vec!["read"]);
+    assert_eq!(super::split_camel_case("Read"), vec!["read"]);
 }
 
 #[test]
 fn test_split_mcp_prefix() {
     assert_eq!(
-        split_mcp_prefix("mcp__slack__send_message"),
+        super::split_mcp_prefix("mcp__slack__send_message"),
         vec!["slack", "send_message"]
     );
     assert_eq!(
-        split_mcp_prefix("mcp__read_resource"),
+        super::split_mcp_prefix("mcp__read_resource"),
         vec!["read_resource"]
     );
-    assert_eq!(split_mcp_prefix("Read"), vec!["read"]);
+    assert_eq!(super::split_mcp_prefix("Read"), vec!["read"]);
 }
 
 #[test]
 fn test_parse_query() {
-    let (req, opt) = parse_query("+slack message");
+    let (req, opt) = super::parse_query("+slack message");
     assert_eq!(req, vec!["slack"]);
     assert_eq!(opt, vec!["message"]);
 
-    let (req, opt) = parse_query("cron create");
+    let (req, opt) = super::parse_query("cron create");
     assert_eq!(req, Vec::<String>::new());
     assert_eq!(opt, vec!["cron", "create"]);
 }
 
 #[test]
 fn test_keyword_score_required_missing() {
-    let score = keyword_score(
+    let score = super::keyword_score(
         "CronRegister",
         "Register a cron task",
         &["slack".to_string()],
@@ -47,7 +48,7 @@ fn test_keyword_score_required_missing() {
 
 #[test]
 fn test_keyword_score_match() {
-    let score = keyword_score(
+    let score = super::keyword_score(
         "CronRegister",
         "Register a scheduled cron task",
         &[],

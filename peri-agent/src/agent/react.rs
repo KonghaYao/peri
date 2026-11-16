@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::{self, Debug, Formatter};
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -8,12 +9,14 @@ use peri_acp_types::identity::AgentId;
 use peri_model::{StopReason, TokenUsage};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    agent::events_v2::EventBus,
-    messages::{BaseMessage, MessageContent},
-    session::turn::TurnId,
-    tools::{BaseTool, ToolExecutionEvidence, ToolExecutionStatus, ToolOutput},
-};
+use crate::agent::events_v2::EventBus;
+use crate::messages::BaseMessage;
+use crate::messages::MessageContent;
+use crate::session::turn::TurnId;
+use crate::tools::BaseTool;
+use crate::tools::ToolExecutionEvidence;
+use crate::tools::ToolExecutionStatus;
+use crate::tools::ToolOutput;
 
 /// Agent 输入
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +29,7 @@ pub struct AgentInput {
 
 impl AgentInput {
     /// 纯文本输入（最常见场景）
+    #[must_use]
     pub fn text(text: impl Into<String>) -> Self {
         Self {
             content: MessageContent::text(text.into()),
@@ -34,6 +38,7 @@ impl AgentInput {
     }
 
     /// 多模态输入（图片 + 文字等）
+    #[must_use]
     pub fn blocks(content: MessageContent) -> Self {
         Self {
             content,
@@ -41,6 +46,7 @@ impl AgentInput {
         }
     }
 
+    #[must_use]
     pub fn with_param(
         mut self,
         key: impl Into<String>,
@@ -69,6 +75,7 @@ pub struct AgentOutput {
 }
 
 impl AgentOutput {
+    #[must_use]
     pub fn new(text: impl Into<String>, steps: usize) -> Self {
         Self {
             text: text.into(),
@@ -89,6 +96,7 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
+    #[must_use]
     pub fn new(id: impl Into<String>, name: impl Into<String>, input: serde_json::Value) -> Self {
         Self {
             id: id.into(),
@@ -122,6 +130,7 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
+    #[must_use]
     pub fn success(
         tool_call_id: impl Into<String>,
         tool_name: impl Into<String>,
@@ -139,6 +148,7 @@ impl ToolResult {
         }
     }
 
+    #[must_use]
     pub fn error(
         tool_call_id: impl Into<String>,
         tool_name: impl Into<String>,
@@ -156,6 +166,7 @@ impl ToolResult {
         }
     }
 
+    #[must_use]
     pub fn from_output(
         tool_call_id: impl Into<String>,
         tool_name: impl Into<String>,
@@ -215,6 +226,7 @@ pub struct Reasoning {
 }
 
 impl Reasoning {
+    #[must_use]
     pub fn with_tools(thought: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
         Self {
             thought: thought.into(),
@@ -230,6 +242,7 @@ impl Reasoning {
         }
     }
 
+    #[must_use]
     pub fn with_answer(thought: impl Into<String>, answer: impl Into<String>) -> Self {
         Self {
             thought: thought.into(),
@@ -245,6 +258,7 @@ impl Reasoning {
         }
     }
 
+    #[must_use]
     pub fn needs_tool_call(&self) -> bool {
         !self.tool_calls.is_empty()
     }
@@ -310,17 +324,20 @@ pub trait ReactLLM: Send + Sync {
     ) -> crate::error::AgentResult<Reasoning>;
 
     /// 返回当前模型名称（用于 Langfuse Generation 追踪）
+    #[must_use]
     fn model_name(&self) -> String {
         "unknown".to_string()
     }
 
     /// 返回模型的上下文窗口大小（token 数），默认 200K
+    #[must_use]
     fn context_window(&self) -> u32 {
         200_000
     }
 
     /// 纯请求大小估算，用于无 usage 的启动及相邻请求增长；不得调用 provider。
     /// 实现可计入自身持有的静态 system 前缀，但不得重复读取动态贡献。
+    #[must_use]
     fn estimate_request_tokens(&self, messages: &[BaseMessage], tools: &[&dyn BaseTool]) -> u64 {
         crate::agent::token::estimate_request_tokens(messages, tools)
     }
@@ -364,6 +381,7 @@ pub trait ReactLLM: Send + Sync {
 
     /// 返回 Provider 能力（消息协议类型、签名 reasoning 处理规则）。
     /// 默认返回 Generic 安全保守值。
+    #[must_use]
     fn provider_capabilities(&self) -> crate::agent::compact_v2::projection::ProviderCapabilities {
         crate::agent::compact_v2::projection::ProviderCapabilities::default()
     }
@@ -448,5 +466,14 @@ impl ReactLLM for Box<dyn ReactLLM + Send + Sync> {
 
     fn provider_capabilities(&self) -> crate::agent::compact_v2::projection::ProviderCapabilities {
         (**self).provider_capabilities()
+    }
+}
+
+impl Debug for StreamingContext {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StreamingContext")
+            .field("call_context_present", &self.call_context.is_some())
+            .finish_non_exhaustive()
     }
 }

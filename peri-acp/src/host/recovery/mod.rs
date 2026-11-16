@@ -15,9 +15,10 @@
 mod coordinator;
 mod interrupted;
 mod parent_notice;
+mod recovery_partition;
 mod reminder;
 mod runtime_binding;
-mod scope;
+use recovery_partition as scope;
 pub(crate) mod wiring;
 
 #[cfg(test)]

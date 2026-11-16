@@ -2,8 +2,15 @@
 //!
 //! 用 SQLite trigger 让 `work_state` 更新失败，验证 fail-closed 与内存回滚。
 
-use super::*;
-use crate::host::{dispatch_prompt_turn, PromptOrigin};
+use crate::host;
+use crate::host::requests::tests::recovery_tests::RecoveryHarness;
+use crate::host::PromptOrigin;
+
+use peri_acp_types::thread::WorkState;
+use serde_json::json;
+use serde_json::Value;
+use std::sync::Arc;
+use std::time::Duration;
 
 #[tokio::test]
 async fn work_state_commit_failure_rejects_prompt_before_model_call() {
@@ -24,7 +31,7 @@ async fn work_state_commit_failure_rejects_prompt_before_model_call() {
     .unwrap();
     drop(connection);
 
-    let error = dispatch_prompt_turn(
+    let error = host::dispatch_prompt_turn(
         json!({
             "sessionId": thread_id,
             "prompt": [{"type": "text", "text": "hello"}],
@@ -101,7 +108,7 @@ async fn admission_rollback_only_clears_its_own_token() {
         let sender = Arc::clone(&harness.sender);
         let thread_id = thread_id.clone();
         tokio::spawn(async move {
-            dispatch_prompt_turn(
+            host::dispatch_prompt_turn(
                 json!({
                     "sessionId": thread_id,
                     "prompt": [{"type": "text", "text": "hello"}],
@@ -172,7 +179,7 @@ async fn assert_stop_around_work_intent(pause_point: &str) {
         let sender = Arc::clone(&harness.sender);
         let thread_id = thread_id.clone();
         tokio::spawn(async move {
-            dispatch_prompt_turn(
+            host::dispatch_prompt_turn(
                 json!({
                     "sessionId": thread_id,
                     "prompt": [{"type": "text", "text": "hello"}],

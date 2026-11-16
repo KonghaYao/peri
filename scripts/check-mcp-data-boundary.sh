@@ -10,11 +10,12 @@ import re
 root = Path(sys.argv[1])
 checks = {
     'peri-acp/src/host/requests/cron.rs': [r'\.list_tasks\(', r'\.toggle\(', r'\.remove\(', r'downcast'],
-    'peri-acp/src/session/cron_bridge.rs': [r'scheduler\.subscribe', r'CronSchedulerPort'],
+    'peri-acp/src/session/session_cron_bridge.rs': [r'scheduler\.subscribe', r'CronSchedulerPort'],
     'peri-agent/src/session/exec/stage_builder/session_setup.rs': [r'scheduler\.subscribe'],
     'peri-acp/src/host/workflow_consumer.rs': [r'Arc<WorkflowRuntime>', r'runtime\.(tasks|run_capacity|subscribe|set_consumer_ready)\('],
     'peri-acp/src/host/workflow_projection.rs': [r'WorkflowRuntime', r'\.registry\(', r'\.bg_registry\('],
     'peri-acp/src/host/workspace.rs': [r'set_bg_registry\(self\.task_manager\(\)\)'],
+    'peri-acp/src/host/workspace/session_environment.rs': [r'set_bg_registry\(self\.task_manager\(\)\)'],
     'peri-acp/src/host/workspace_workflow.rs': [r'set_bg_registry\(self\.task_manager\(\)\)'],
     'peri-tui/Cargo.toml': [r'^peri-mcp-(cron|workflow)\s*[.=]'],
 }

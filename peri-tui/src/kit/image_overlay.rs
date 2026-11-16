@@ -12,7 +12,7 @@
 //! 安全（§6.1 Q6 / §5.7）：仅受管理目录（`~/.peri/images`，T5 分级）自动
 //! 像素预览；手工路径 `Degraded` 文本降级（提示文案）；T5 全链校验失败 →
 //! `Error`（固定文案，reason 不泄漏路径细节）。TOCTOU（§6.2-3）：校验经
-//! [`read_validated_image`] 返回缓冲，解码线程只消费缓冲、不按路径二次打开
+//! [`read_validated_image`](crate::kit::image_safety::read_validated_image) 返回缓冲，解码线程只消费缓冲、不按路径二次打开
 //! （F2 评审修复）；解码后复核尺寸（纵深防御）。
 //!
 //! 状态机写入边界：事件/effect（`request_preview`）与后台解码线程；渲染
@@ -26,18 +26,13 @@ use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 
 use crate::i18n;
-use crate::kit::atoms::{
-    FOCUSED_ENTRY, FocusedEntry, IMAGE_PREVIEW_HOVER, IMAGE_PREVIEW_STATE, INPUT_SNAPSHOT,
-    ImagePreviewState, InputSnapshot, RENDER_HEARTBEAT,
-};
-use crate::kit::image_preview::{AsyncImage, picker_for, supported as preview_supported};
-use crate::kit::image_safety::{
-    PathGrade, grade_path, read_validated_image, sanitize_for_terminal,
-};
+
+use crate::kit::image_preview::AsyncImage;
+use crate::kit::image_safety::PathGrade;
 use crate::kit::message_area::render::parse_image_line;
 use crate::kit::mouse_router;
 use crate::kit::tui_render_unit::TuiRenderUnit;
-use crate::truncate::truncate_by_width;
+
 use fluent_bundle::FluentValue;
 use image::DynamicImage;
 use image::GenericImageView;
@@ -66,7 +61,7 @@ static PICKER: OnceLock<Picker> = OnceLock::new();
 fn cached_picker() -> &'static Picker {
     PICKER.get_or_init(|| {
         let caps = *crate::kit::atoms::TERMINAL_CAPS.state().read();
-        picker_for(&caps)
+        crate::kit::image_preview::picker_for(&caps)
     })
 }
 
@@ -203,7 +198,7 @@ pub(crate) fn request_preview_with(
     // T5 分级（§6.1 Q6）：canonicalize + 受管理目录判定。
     let (grade, canonical) = match managed_root {
         Some(root) => crate::kit::image_safety::grade_path_with_root(Path::new(path), root),
-        None => grade_path(Path::new(path)),
+        None => crate::kit::image_safety::grade_path(Path::new(path)),
     };
     let Some(canonical) = canonical else {
         *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Error {
@@ -223,7 +218,7 @@ pub(crate) fn request_preview_with(
     // T5 全链校验（常规文件/扩展名/MIME/字节上限/像素上限）；失败 → Error。
     // 返回校验缓冲（≤ MAX_IMAGE_BYTES）——decode 线程只消费缓冲，不再按
     // 路径二次打开（F2：闭合 validate 与 decode 之间的 TOCTOU 窗口）。
-    let (meta, buf) = match read_validated_image(&canonical) {
+    let (meta, buf) = match crate::kit::image_safety::read_validated_image(&canonical) {
         Ok(ok) => ok,
         Err(err) => {
             tracing::warn!(error = %err, "image preview: validation failed");
@@ -371,10 +366,10 @@ fn draw_preview_overlay(
     // 文件名可含 ESC/换行（macOS 允许），不过滤则 escape 随 meta 行进入
     // 终端 buffer（终端控制序列注入）。sanitize 幂等，对固定 i18n 文案无副作用。
     let meta_text = preview_meta_text(state);
-    let meta = sanitize_for_terminal(&meta_text);
+    let meta = crate::kit::image_safety::sanitize_for_terminal(&meta_text);
     if !meta.is_empty() {
         let inner_w = usize::from(rect.width.saturating_sub(2).max(1));
-        let text = truncate_by_width(&meta, inner_w);
+        let text = crate::truncate::truncate_by_width(&meta, inner_w);
         let sem = THEME_ATOM.state().read().semantic;
         buf.set_stringn(
             rect.x.saturating_add(1),
@@ -397,7 +392,9 @@ fn draw_preview_overlay(
     if pixel_area.width < 2 || pixel_area.height < 1 {
         return;
     }
-    if !matches!(state, ImagePreviewState::Ready { .. }) || !preview_supported(caps) {
+    if !matches!(state, ImagePreviewState::Ready { .. })
+        || !crate::kit::image_preview::supported(caps)
+    {
         // [方案 B] 终端不支持图片协议（无协议/ITerm2 disabled）：像素区给出
         // 能力提示而非静默空白（grok 降级面板精神的精简版）；Degraded/Error
         // 状态不重复提示（meta 行已含原因文案，§5.7）。
@@ -416,12 +413,12 @@ fn draw_preview_overlay(
 /// （幂等，§6.2-4）+ 按像素区宽度截断（TUI-TEXT-001）。
 fn paint_no_protocol_hint(buf: &mut Buffer, area: &Rect) {
     let raw = i18n::tr("image-preview-no-protocol");
-    let hint = sanitize_for_terminal(&raw);
+    let hint = crate::kit::image_safety::sanitize_for_terminal(&raw);
     if hint.is_empty() || area.width < 2 {
         return;
     }
     let inner_w = usize::from(area.width.saturating_sub(2).max(1));
-    let text = truncate_by_width(&hint, inner_w);
+    let text = crate::truncate::truncate_by_width(&hint, inner_w);
     let x = area.x + (area.width.saturating_sub(text.width() as u16)) / 2;
     let y = area.y + area.height.saturating_div(2);
     let secondary = THEME_ATOM.state().read().semantic.text.secondary;
@@ -449,6 +446,7 @@ struct OverlayDrawHook {
 }
 
 impl OverlayDrawHook {
+    #[must_use]
     fn new() -> Self {
         Self {
             rect: None,
@@ -475,7 +473,7 @@ impl Hook for OverlayDrawHook {
                     // `picker_for` 的 halfblocks 构造在 TMUX 环境有 spawn 副作用，
                     // None/ITerm2 终端不得触达（image_preview.rs 注释）。
                     let caps = *crate::kit::atoms::TERMINAL_CAPS.state().read();
-                    if preview_supported(&caps) {
+                    if crate::kit::image_preview::supported(&caps) {
                         let img = (**img).clone();
                         self.async_img = Some(AsyncImage::new(cached_picker(), img));
                         self.async_path = Some(path.clone());
@@ -578,3 +576,19 @@ pub fn ImageOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 #[cfg(test)]
 #[path = "image_overlay_test.rs"]
 mod tests;
+
+use crate::kit::atoms::FOCUSED_ENTRY;
+
+use crate::kit::atoms::FocusedEntry;
+
+use crate::kit::atoms::IMAGE_PREVIEW_HOVER;
+
+use crate::kit::atoms::IMAGE_PREVIEW_STATE;
+
+use crate::kit::atoms::INPUT_SNAPSHOT;
+
+use crate::kit::atoms::ImagePreviewState;
+
+use crate::kit::atoms::InputSnapshot;
+
+use crate::kit::atoms::RENDER_HEARTBEAT;

@@ -1,9 +1,11 @@
 use super::current_turn::CurrentTurn;
-use crate::kit::tool_semantics::{TodoSnapshot, presentation_for};
-use crate::kit::tui_render_unit::{
-    EntryStatus, FoldTarget, TuiRenderUnit, TuiToolCard, TuiToolPresentation, fold_for_status,
-};
-use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
+use crate::kit::tool_semantics::TodoSnapshot;
+use crate::kit::tui_render_unit::EntryStatus;
+use crate::kit::tui_render_unit::FoldTarget;
+use crate::kit::tui_render_unit::TuiRenderUnit;
+use crate::kit::tui_render_unit::TuiToolCard;
+use crate::kit::tui_render_unit::TuiToolPresentation;
+
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -57,7 +59,7 @@ pub(crate) fn build_tool_card(t: &ToolCardAccumulator, turn_active: bool) -> Tui
             tool_path_hint(&t.tool_name, &t.raw_input),
         ),
         presentation: t.presentation.clone(),
-        fold: fold_for_status(FoldTarget::Tool, status),
+        fold: crate::kit::tui_render_unit::fold_for_status(FoldTarget::Tool, status),
         user_modified: false,
         tool_calls_count: 0,
         content_hash: 0,
@@ -70,7 +72,8 @@ pub(crate) fn build_tool_card(t: &ToolCardAccumulator, turn_active: bool) -> Tui
 ///
 /// 按名门控先经 IF-D15 归一 helper（effective name → 原始名），未命中回落原样。
 fn tool_path_hint(tool_name: &str, raw_input: &serde_json::Value) -> Option<String> {
-    let name = original_tool_name_of_effective(tool_name).unwrap_or(tool_name);
+    let name = peri_acp_types::builtin_mcp::original_tool_name_of_effective(tool_name)
+        .unwrap_or(tool_name);
     if !matches!(name, "Edit" | "Write") {
         return None;
     }
@@ -92,7 +95,8 @@ pub(crate) fn parse_tool_diff(
     skip: bool,
     path_hint: Option<String>,
 ) -> Option<crate::kit::tui_render_unit::TuiDiffBlock> {
-    let name = original_tool_name_of_effective(tool_name).unwrap_or(tool_name);
+    let name = peri_acp_types::builtin_mcp::original_tool_name_of_effective(tool_name)
+        .unwrap_or(tool_name);
     if skip || !matches!(name, "Edit" | "Write") {
         return None;
     }
@@ -155,6 +159,7 @@ impl ToolCardAccumulator {
     }
 
     /// Create a generic in-progress tool card from a replay or legacy event.
+    #[must_use]
     pub fn new(tool_id: String, tool_name: String, input_summary: String) -> Self {
         Self::with_input(tool_id, tool_name, input_summary, Value::Null, None)
     }
@@ -167,7 +172,8 @@ impl ToolCardAccumulator {
         raw_input: Value,
         previous_todos: Option<&TodoSnapshot>,
     ) -> Self {
-        let presentation = presentation_for(&tool_name, &raw_input, previous_todos);
+        let presentation =
+            crate::kit::tool_semantics::presentation_for(&tool_name, &raw_input, previous_todos);
         Self {
             tool_id,
             tool_name,
@@ -209,6 +215,7 @@ pub struct SubAgentAccumulator {
 }
 
 impl SubAgentAccumulator {
+    #[must_use]
     pub fn new(agent_id: String, agent_name: String) -> Self {
         let child_turn = CurrentTurn::new();
         Self {
@@ -307,7 +314,7 @@ impl SubAgentAccumulator {
             is_running: self.is_running,
             is_error: self.is_error,
             error_reason: self.error_reason.clone(),
-            fold: fold_for_status(FoldTarget::SubAgent, status),
+            fold: crate::kit::tui_render_unit::fold_for_status(FoldTarget::SubAgent, status),
             user_modified: false,
             content_hash: 0,
         };

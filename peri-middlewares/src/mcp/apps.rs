@@ -1,11 +1,12 @@
-use std::{
-    collections::{BTreeSet, HashMap},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::{Duration, Instant},
-};
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use parking_lot::Mutex;
 use peri_acp_types::interaction::{AttachmentId, ConnectionEpoch};
@@ -59,8 +60,8 @@ impl Clone for AttachmentRoute {
     }
 }
 
-impl std::fmt::Debug for AttachmentRoute {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for AttachmentRoute {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("AttachmentRoute")
             .field("connection_id", &self.connection_id)
             .field("attachment_id", &self.attachment_id)
@@ -72,6 +73,7 @@ impl std::fmt::Debug for AttachmentRoute {
 
 impl AttachmentRoute {
     /// 构造附件路由：纪元 / namespace 由**调用方**给出（router 是纪元权威）。
+    #[must_use]
     pub fn new(
         connection_id: impl Into<String>,
         attachment_id: AttachmentId,
@@ -91,6 +93,7 @@ impl AttachmentRoute {
 
     /// wire 绑定值：`next_seq` 由**调用方**（ledger 的当前推进值）传入，
     /// 本层不保存也不推进序号（单一权威）。
+    #[must_use]
     pub fn binding(&self, next_seq: RequestSeq) -> AttachmentBinding {
         AttachmentBinding {
             attachment_id: self.attachment_id.clone(),
@@ -101,6 +104,7 @@ impl AttachmentRoute {
     }
 
     /// descriptor 用的摘要（不含序号）。
+    #[must_use]
     pub fn summary(&self) -> AttachmentSummary {
         AttachmentSummary {
             attachment_id: self.attachment_id.clone(),
@@ -166,6 +170,20 @@ pub struct McpAppRecordSpec {
     pub initial_result: Arc<RawToolResult>,
 }
 
+impl Debug for McpAppRecordSpec {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpAppRecordSpec")
+            .field("owner_session_id", &self.owner_session_id)
+            .field("server_id", &self.server_id)
+            .field("server_generation", &self.server_generation)
+            .field("resource_uri", &self.resource_uri)
+            .field("instantiating_tool", &self.instantiating_tool)
+            .field("incarnation", &self.incarnation)
+            .finish_non_exhaustive()
+    }
+}
+
 /// App 实例的**记录**（取代 `McpAppSelectionLease` 时代的 `McpAppBindingLease`）。
 ///
 /// 纯数据 + 撤销资格 + App 层交付令牌：**不持有** dispatcher、取消令牌
@@ -207,8 +225,26 @@ pub struct McpAppRecord {
     expires_at: Instant,
 }
 
+impl Debug for McpAppRecord {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpAppRecord")
+            .field("owner_session_id", &self.owner_session_id)
+            .field("record_id", &self.record_id)
+            .field("server_id", &self.server_id)
+            .field("server_generation", &self.server_generation)
+            .field("resource_uri", &self.resource_uri)
+            .field("instantiating_tool", &self.instantiating_tool)
+            .field("incarnation", &self.incarnation)
+            .field("ever_attached", &self.ever_attached)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
+}
+
 impl McpAppRecord {
     /// 由**一次**实例化调用的执行事实构造记录（身份字段与模型关联同源构造）。
+    #[must_use]
     pub fn new(spec: McpAppRecordSpec) -> Self {
         Self {
             owner_session_id: spec.owner_session_id,
@@ -236,11 +272,13 @@ impl McpAppRecord {
         }
     }
 
+    #[must_use]
     pub fn state(&self) -> RecordState {
         *self.state.lock()
     }
 
     /// 当前附件集合快照（路由克隆共享同一交付令牌）。
+    #[must_use]
     pub fn attachments(&self) -> Vec<Arc<AttachmentRoute>> {
         self.attachments.lock().clone()
     }
@@ -258,11 +296,13 @@ impl McpAppRecord {
     }
 
     /// 本 record 是否曾被附着过（`reattached` 判据的一部分；无权威，只有界记忆）。
+    #[must_use]
     pub fn ever_attached(&self) -> bool {
         self.ever_attached.load(Ordering::Relaxed)
     }
 
     /// 附件摘要（descriptor 用；detach 后连接字段缺失）。
+    #[must_use]
     pub fn attachment_summaries(&self) -> Vec<AttachmentSummary> {
         self.attachments
             .lock()
@@ -272,27 +312,32 @@ impl McpAppRecord {
     }
 
     /// 模型关联（初始展示事实 ↔ 模型卡片）。
+    #[must_use]
     pub fn model(&self) -> &ModelAssociation {
         &self.model
     }
 
     /// 完整初始 raw 结果（`Arc` 共享：多 tab attach 不复制，设计 §9.1）。
+    #[must_use]
     pub fn initial_result(&self) -> &Arc<RawToolResult> {
         &self.initial_result
     }
 
     /// 保留期剩余（到期即终态撤销）。
+    #[must_use]
     pub fn retention_remaining(&self) -> Duration {
         self.expires_at
             .saturating_duration_since(peri_time::monotonic_now())
     }
 
     /// App 层交付/撤销令牌（`apps/close` 时撤销）。
+    #[must_use]
     pub fn delivery(&self) -> &AppDeliveryToken {
         &self.delivery
     }
 
     /// 记录仍存活：未过期且未撤销（待附着或已附着）；注册表的有界清理用它。
+    #[must_use]
     pub fn is_live(&self) -> bool {
         self.is_live_at(peri_time::monotonic_now())
     }
@@ -307,6 +352,7 @@ impl McpAppRecord {
     }
 
     /// 未过期、有当前附件、未撤销：可以受理新的调用。
+    #[must_use]
     pub fn is_attached(&self) -> bool {
         self.is_live() && !self.attachments.lock().is_empty() && !self.delivery.is_revoked()
     }
@@ -400,6 +446,7 @@ impl McpAppRecord {
     }
 
     /// effective 工具名是否仍在本记录的资格白名单内（提交复核用）。
+    #[must_use]
     pub fn allows_effective_name(&self, effective_name: &str) -> bool {
         self.qualification
             .allowed_tools()
@@ -428,7 +475,7 @@ pub enum IssueRejection {
 }
 
 impl std::fmt::Display for IssueRejection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::IncarnationMismatch { bound, current } => write!(
                 f,
@@ -459,6 +506,14 @@ pub struct McpAppBindingRegistry {
     by_id: Mutex<HashMap<String, Arc<McpAppRecord>>>,
     /// 会话运行时世代（session incarnation）登记；会话关闭即清除（有界）。
     incarnations: Mutex<HashMap<String, u64>>,
+}
+
+impl Debug for McpAppBindingRegistry {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpAppBindingRegistry")
+            .finish_non_exhaustive()
+    }
 }
 
 impl McpAppBindingRegistry {
@@ -566,6 +621,7 @@ impl McpAppBindingRegistry {
     }
 
     /// 本会话的全部记录（会话关闭时撤销）。
+    #[must_use]
     pub fn records_for_session(&self, session_id: &str) -> Vec<Arc<McpAppRecord>> {
         self.by_id
             .lock()
@@ -585,6 +641,7 @@ impl McpAppBindingRegistry {
     }
 
     /// 本连接承载附件的全部记录（连接关闭时该连接的附件 detach）。
+    #[must_use]
     pub fn records_for_connection(&self, connection_id: &str) -> Vec<Arc<McpAppRecord>> {
         self.by_id
             .lock()
@@ -679,6 +736,7 @@ impl McpAppBindingRegistry {
 
 pub const MCP_APPS_ENV: &str = "PERI_MCP_APPS";
 
+#[must_use]
 pub fn deployment_profile(apps_enabled: bool) -> McpCapabilityProfile {
     if apps_enabled {
         McpCapabilityProfile::negotiated([MCP_APP_MIME_TYPE])
@@ -696,10 +754,12 @@ pub struct McpCapabilityProfile {
 }
 
 impl McpCapabilityProfile {
+    #[must_use]
     pub fn disabled() -> Self {
         Self::default()
     }
 
+    #[must_use]
     pub fn negotiated<'a>(mime_types: impl IntoIterator<Item = &'a str>) -> Self {
         let apps_mime_types = mime_types
             .into_iter()
@@ -709,6 +769,7 @@ impl McpCapabilityProfile {
         Self { apps_mime_types }
     }
 
+    #[must_use]
     pub fn apps_enabled(&self) -> bool {
         !self.apps_mime_types.is_empty()
     }
@@ -739,6 +800,7 @@ pub struct ToolVisibility {
 
 impl ToolVisibility {
     /// 缺失时兼容 model + app；任何 malformed、空数组或未知值均关闭两面。
+    #[must_use]
     pub fn from_tool_meta(meta: Option<&Value>) -> Self {
         let Some(meta) = meta else {
             return Self {
@@ -812,6 +874,7 @@ pub fn canonical_resource_uri(meta: Option<&Value>) -> Option<String> {
     }
 }
 
+#[must_use]
 pub fn tool_visibility(tool: &rmcp::model::Tool) -> ToolVisibility {
     let value = serde_json::to_value(tool).unwrap_or(Value::Null);
     ToolVisibility::from_tool_meta(value.get("_meta"))
@@ -822,10 +885,12 @@ pub fn tool_resource_uri(tool: &rmcp::model::Tool) -> Option<String> {
     canonical_resource_uri(value.get("_meta"))
 }
 
+#[must_use]
 pub fn raw_tool(tool: &rmcp::model::Tool) -> RawMcpTool {
     serde_json::to_value(tool).unwrap_or(Value::Null)
 }
 
+#[must_use]
 pub fn raw_resource(resource: &rmcp::model::Resource) -> RawMcpResource {
     serde_json::to_value(resource).unwrap_or(Value::Null)
 }

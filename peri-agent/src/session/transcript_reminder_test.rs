@@ -1,7 +1,9 @@
 //! canonical reminder 的受众投递矩阵（H8）：模型投影与客户端快照各自按目标
 //! audience 过滤，持久化 canonical reminder 不受影响。
 
-use super::*;
+use crate::messages::BaseMessage;
+use crate::session::transcript::entry::TranscriptEntry;
+use crate::session::transcript::MessageTranscript;
 
 /// H8：模型投影与客户端快照各自按目标 audience 过滤，且持久化 canonical
 /// reminder 不受影响。
@@ -27,7 +29,7 @@ fn reminder_with(
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap()
+        .expect("the construct fixture result is required for this assertion")
 }
 
 #[test]
@@ -52,7 +54,9 @@ fn audience_matrix_splits_model_projection_from_client_snapshot() {
         vec![ReminderAudience::Model, ReminderAudience::Tui],
     ));
 
-    let model = transcript.visible_model_messages().unwrap();
+    let model = transcript
+        .visible_model_messages()
+        .expect("the visible model messages fixture result is required for this assertion");
     let model_ids: Vec<_> = model.iter().map(BaseMessage::id).collect();
     assert!(
         !model_ids.contains(&client_only_id),
@@ -91,7 +95,7 @@ fn diagnostic_only_reminders_reach_neither_model_nor_client() {
 
     let model_ids: Vec<_> = transcript
         .visible_model_messages()
-        .unwrap()
+        .expect("the visible model messages fixture result is required for this assertion")
         .iter()
         .map(BaseMessage::id)
         .collect();

@@ -1,7 +1,10 @@
-use super::projection::{
-    render_llm_view, MessageProjectionDirective, PersistedDirectiveRestore, ProjectionAction,
-    ProjectionActionEntry, ProjectionTarget, ProviderCapabilities, PROJECTION_POLICY_VERSION,
-};
+use crate::agent::compact_v2::projection::MessageProjectionDirective;
+use crate::agent::compact_v2::projection::PersistedDirectiveRestore;
+use crate::agent::compact_v2::projection::ProjectionAction;
+use crate::agent::compact_v2::projection::ProjectionActionEntry;
+use crate::agent::compact_v2::projection::ProjectionTarget;
+use crate::agent::compact_v2::projection::ProviderCapabilities;
+use crate::agent::compact_v2::projection::PROJECTION_POLICY_VERSION;
 use crate::messages::{BaseMessage, ContentBlock, MessageId};
 use crate::session::transcript::MessageTranscript;
 fn transcript_with_tool_exchange(
@@ -28,7 +31,10 @@ fn transcript_with_tool_exchange(
 fn test_plan_from_persisted_directives_empty_transcript_is_absent() {
     let transcript = MessageTranscript::new();
     assert!(matches!(
-        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION,),
+        crate::agent::compact_v2::projection::plan_from_persisted_directives(
+            &transcript,
+            PROJECTION_POLICY_VERSION,
+        ),
         PersistedDirectiveRestore::Absent
     ));
 }
@@ -50,7 +56,10 @@ fn test_plan_from_persisted_directives_version_mismatch_is_invalid() {
     );
 
     assert!(matches!(
-        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION,),
+        crate::agent::compact_v2::projection::plan_from_persisted_directives(
+            &transcript,
+            PROJECTION_POLICY_VERSION,
+        ),
         PersistedDirectiveRestore::Invalid
     ));
 }
@@ -72,10 +81,18 @@ fn excluded_legacy_directive_does_not_invalidate_visible_history() {
     let visible = transcript.append(BaseMessage::human("visible message"));
 
     assert!(matches!(
-        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION),
+        crate::agent::compact_v2::projection::plan_from_persisted_directives(
+            &transcript,
+            PROJECTION_POLICY_VERSION
+        ),
         PersistedDirectiveRestore::Absent
     ));
-    let projected = render_llm_view(&transcript, &[], &ProviderCapabilities::default()).unwrap();
+    let projected = crate::agent::compact_v2::projection::render_llm_view(
+        &transcript,
+        &[],
+        &ProviderCapabilities::default(),
+    )
+    .expect("the render llm view fixture result is required for this assertion");
     assert_eq!(projected.len(), 1);
     assert_eq!(projected[0].id(), visible);
     assert_eq!(projected[0].content(), "visible message");
@@ -91,7 +108,10 @@ fn test_plan_from_persisted_directives_truncated_without_directive_is_invalid() 
     transcript.set_truncated(message_id, true);
 
     assert!(matches!(
-        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION,),
+        crate::agent::compact_v2::projection::plan_from_persisted_directives(
+            &transcript,
+            PROJECTION_POLICY_VERSION,
+        ),
         PersistedDirectiveRestore::Invalid
     ));
 }
@@ -121,7 +141,10 @@ fn test_plan_from_persisted_directives_wrong_message_id_is_invalid() {
     );
 
     assert!(matches!(
-        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION,),
+        crate::agent::compact_v2::projection::plan_from_persisted_directives(
+            &transcript,
+            PROJECTION_POLICY_VERSION,
+        ),
         PersistedDirectiveRestore::Invalid
     ));
 }
@@ -201,7 +224,10 @@ fn test_persisted_restore_keeps_only_independent_tool_result_action() {
     );
 
     let PersistedDirectiveRestore::Valid(plan) =
-        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION)
+        crate::agent::compact_v2::projection::plan_from_persisted_directives(
+            &transcript,
+            PROJECTION_POLICY_VERSION,
+        )
     else {
         panic!("当前可解码 legacy directive 应恢复为安全子集");
     };
@@ -214,8 +240,12 @@ fn test_persisted_restore_keeps_only_independent_tool_result_action() {
         }] if *message_id == result_id
     ));
 
-    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
-        .expect("安全子集应可渲染");
+    let projected = crate::agent::compact_v2::projection::render_llm_view(
+        &transcript,
+        &plan.actions,
+        &ProviderCapabilities::default(),
+    )
+    .expect("安全子集应可渲染");
     let BaseMessage::Ai {
         content,
         tool_calls,
@@ -257,12 +287,19 @@ fn test_render_llm_view_from_persisted_tool_result_directive() {
     );
 
     let PersistedDirectiveRestore::Valid(plan) =
-        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION)
+        crate::agent::compact_v2::projection::plan_from_persisted_directives(
+            &transcript,
+            PROJECTION_POLICY_VERSION,
+        )
     else {
         panic!("应恢复 ToolResult action");
     };
-    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
-        .expect("render_llm_view 应成功");
+    let projected = crate::agent::compact_v2::projection::render_llm_view(
+        &transcript,
+        &plan.actions,
+        &ProviderCapabilities::default(),
+    )
+    .expect("render_llm_view 应成功");
     assert!(projected[1].content().contains("字符已省略"));
 }
 
@@ -297,16 +334,18 @@ fn test_plan_from_persisted_directives_does_not_estimate_chars() {
         },
     );
 
-    super::projection::reset_estimate_calls();
-    let restored =
-        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION);
+    crate::agent::compact_v2::projection::reset_estimate_calls();
+    let restored = crate::agent::compact_v2::projection::plan_from_persisted_directives(
+        &transcript,
+        PROJECTION_POLICY_VERSION,
+    );
 
     assert!(
         matches!(restored, PersistedDirectiveRestore::Valid(_)),
         "已提交且版本匹配的 directive 应可直接恢复"
     );
     assert_eq!(
-        super::projection::estimate_call_count(),
+        crate::agent::compact_v2::projection::estimate_call_count(),
         0,
         "纯恢复路径不得调用字符估算"
     );
@@ -330,7 +369,7 @@ fn append_model_reminder(transcript: &mut MessageTranscript) -> MessageId {
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap();
+        .expect("the construct fixture result is required for this assertion");
     transcript.append_system_reminder(reminder)
 }
 
@@ -374,7 +413,7 @@ fn persisted_reminder_metadata_is_validated_before_rendering() {
         }
         assert!(
             matches!(
-                super::projection::plan_from_persisted_directives(
+                crate::agent::compact_v2::projection::plan_from_persisted_directives(
                     &transcript,
                     PROJECTION_POLICY_VERSION
                 ),
@@ -383,7 +422,7 @@ fn persisted_reminder_metadata_is_validated_before_rendering() {
             "invalid reminder metadata must fail closed: {case}"
         );
         assert!(
-            super::projection::render_persisted_llm_view(
+            crate::agent::compact_v2::projection::render_persisted_llm_view(
                 &transcript,
                 &ProviderCapabilities::default(),
             )
@@ -411,7 +450,9 @@ fn excluded_reminder_metadata_is_ignored_and_empty_visible_metadata_is_preserved
     transcript.set_truncated(hidden_without_directive, true);
     transcript.set_excluded(hidden_without_directive, true);
     let visible = append_model_reminder(&mut transcript);
-    let canonical = transcript.visible_model_messages().unwrap();
+    let canonical = transcript
+        .visible_model_messages()
+        .expect("the visible model messages fixture result is required for this assertion");
     transcript.set_flags_projection(
         visible,
         MessageProjectionDirective {
@@ -421,17 +462,24 @@ fn excluded_reminder_metadata_is_ignored_and_empty_visible_metadata_is_preserved
     );
 
     let PersistedDirectiveRestore::Valid(restored) =
-        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION)
+        crate::agent::compact_v2::projection::plan_from_persisted_directives(
+            &transcript,
+            PROJECTION_POLICY_VERSION,
+        )
     else {
         panic!("valid empty reminder metadata must restore despite excluded corrupt history");
     };
     assert!(restored.actions.is_empty());
-    let rendered =
-        super::projection::render_persisted_llm_view(&transcript, &ProviderCapabilities::default())
-            .unwrap();
+    let rendered = crate::agent::compact_v2::projection::render_persisted_llm_view(
+        &transcript,
+        &ProviderCapabilities::default(),
+    )
+    .expect("the render persisted llm view fixture result is required for this assertion");
     assert_eq!(
-        serde_json::to_value(&rendered).unwrap(),
-        serde_json::to_value(&canonical).unwrap()
+        serde_json::to_value(&rendered)
+            .expect("to_value must accept this test fixture representation"),
+        serde_json::to_value(&canonical)
+            .expect("to_value must accept this test fixture representation")
     );
     assert_eq!(rendered.len(), 1);
     assert_eq!(rendered[0].id(), visible);
