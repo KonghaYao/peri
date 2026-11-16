@@ -105,7 +105,6 @@ fn set_closed_instances(pool: &Arc<McpClientPool>, instances: &[&str]) {
             workspace: None,
             workflow: None,
             workspace_resources: None,
-            workspace_bash_default_run_in_background: false,
             skills_face_closed: false,
         },
     ))

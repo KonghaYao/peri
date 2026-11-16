@@ -340,11 +340,6 @@ impl SessionEnvironment {
         for (id, origin) in beta_flags.enabled() {
             tracing::info!(flag = %id, origin = ?origin, "beta flag enabled for session");
         }
-        // Bash 的有效 `run_in_background` 缺省：flag 语义只在此处解析一次，工具侧
-        // 收到语义化布尔值。
-        #[cfg(not(target_os = "emscripten"))]
-        let workspace_bash_default_run_in_background =
-            beta_flags.is_enabled(peri_acp_types::beta_flags::FULL_ASYNC_TOOLS);
         let skills_face_closed = disabled_middlewares.contains("SkillsMiddleware");
         // M6：插件来源闭合位与上面两个是同**一份** disabled 集合的投影（链槽
         // 装配的跳过判据、资源 roots / 命令 / hooks / MCP 合并 / 继承面的派生
@@ -375,8 +370,6 @@ impl SessionEnvironment {
             drive_cron_tick: source.drive_cron_tick,
             #[cfg(not(target_os = "emscripten"))]
             workspace_input: None,
-            #[cfg(not(target_os = "emscripten"))]
-            workspace_bash_default_run_in_background,
             #[cfg(not(target_os = "emscripten"))]
             workspace_resources: Some(workspace_resources),
             #[cfg(not(target_os = "emscripten"))]
@@ -491,16 +484,6 @@ impl SessionEnvironment {
                     as Arc<dyn peri_acp_types::interaction::UserInteractionBroker>,
                 cancel.clone(),
                 &disabled_middlewares,
-                {
-                    #[cfg(not(target_os = "emscripten"))]
-                    {
-                        workspace_bash_default_run_in_background
-                    }
-                    #[cfg(target_os = "emscripten")]
-                    {
-                        false
-                    }
-                },
                 &host.session_resources,
                 &task_manager, // 会话级管理器（同一实例）：idle 期异步 hook 须挂会话作用域
             )
