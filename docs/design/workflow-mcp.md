@@ -4,6 +4,8 @@
 **范围**：`peri-workflow` 子系统从 middleware 槽位迁移为 builtin MCP 实例；Node 引擎保留为实例执行后端；agent 回调改为「任务资源发布 + 工具回填」的标准信道语义。
 **代码事实源**：`peri-middlewares/src/mcp/builtin/`、`peri-acp-types/src/builtin_mcp.rs`、`peri-workflow/`、`npm-packages/@peri-workflow/`、`peri-acp/src/host/{workflow_agent,requests/workflow}.rs`。
 
+**v5 关系（尚未实现）**：workflow 仍是 `mcp-packages/workflow` 的能力实现；v5 中经单出口 `peri` 暴露，deferred 模型名由 `mcp__workflow__*` 改为 `mcp__peri__*`，关闭粒度由实例改为 capability。本文的工具、资源、订阅、任务信道与取消/幂等语义不变；v4 独立实例形态仅在迁移期兼容。目标见 [MCP v5 单出口目标设计](mcp-v5-single-exit.md)。
+
 ## 1. 背景与取代关系
 
 Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请求接入，工具、资源、订阅与关闭都不走标准 MCP 面，双方以「server 向 client 发请求」表达执行依赖。本设计以 builtin MCP 实例承载编排能力，并把 agent 回调改为「任务资源发布 + 工具回填」的标准信道；旧槽位、端口与旧 middleware 目录已由该形态取代。
@@ -12,10 +14,10 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 
 ### 2.1 目标
 
-1. workflow 以 **builtin MCP 实例**（`workflow`，per-session 池内、同进程 `rmcp::serve_server`）接入；工具、资源、订阅、关闭全部走标准 MCP 面。
+1. workflow 以 **builtin MCP 实例**（`workflow`，per-session 池内、同进程 `rmcp::serve_server`）接入；工具、资源、订阅、关闭全部走标准 MCP 面。该形态是 v4 兼容期路径；v5 目标为单出口内的 `workflow` capability。
 2. agent 回调改为 **MCPP Channel 语义**：agent 任务作为 outbound 资源（event-log）发布，宿主消费者发现并执行，经 inbound 工具回填结果。不新增私有 JSON-RPC method 或 vendor capability。
 3. 删除 `ChainSlot::Workflow`、`WorkflowMiddlewarePort`、`WorkflowMiddlewareAdaptor`、`SessionState.workflow_middleware` 与 `peri-resources/src/workflow.rs` 门面。旧槽位、端口、旧 middleware 目录与 Resources 门面均已删除；workflow 接入归 builtin MCP 实例。
-4. 用户可见配置语义保持兼容：MetaHarness 关闭键 `"WorkflowMiddleware"` 沿用（从中间件表迁到 builtin 实例关闭表）；ACP 方法名（`workflow/*`）与 TUI 交互不变。
+4. 用户可见配置语义保持兼容：MetaHarness 关闭键 `"WorkflowMiddleware"` 沿用（从中间件表迁到 builtin 实例关闭表）；ACP 方法名（`workflow/*`）与 TUI 交互不变。v5 中该旧键只做确定性映射或 typed error，能力开关以单出口配置为准。
 
 ### 2.2 非目标
 
@@ -122,7 +124,7 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 
 ### 4.4 关闭
 
-- 关闭键 `"WorkflowMiddleware"` 在 `BUILTIN_INSTANCE_POLICY_KEYS` 中声明；`closed_instances` 命中时实例不 spawn、桥接不建、宿主消费者不启动（与 workspace 同构）。
+- 关闭键 `"WorkflowMiddleware"` 在 `BUILTIN_INSTANCE_POLICY_KEYS` 中声明；`closed_instances` 命中时实例不 spawn、桥接不建、宿主消费者不启动（与 workspace 同构）。v5 目标下关闭单位为 `workflow` capability：工具、`workflow://` 资源与订阅、继承面、消费者与宿主任务必须同时消失；旧键按配置权威规则映射或报错。
 - `MIDDLEWARE_NAMES` 不含该键，`MIDDLEWARE_TOOL_NAMES` 不含 `"Workflow"`；两表零交集由装配测试断言。
 - 工具归一/过滤面（`tool_catalog`、`permission`）按实例身份自动生效（`mcp__workflow__*`）。
 - 子 Agent 按实例身份整体排除 `workflow`（`CHILD_ABSENT_BUILTIN_INSTANCES`），不另立逐工具名单。

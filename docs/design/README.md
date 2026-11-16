@@ -56,7 +56,8 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 
 | 主题 | 文档 | 进度事实源 |
 | --- | --- | --- |
-| MCP 适配 v4-part-1 | [mcp-adaptation-v4-part-1.md](mcp-adaptation-v4-part-1.md) | System MCP 启动依赖、工具注入、MCP 隔离与 middleware 归属；迁移状态以代码与契约测试为准 |
+| MCP 适配 v4-part-1 | [mcp-adaptation-v4-part-1.md](mcp-adaptation-v4-part-1.md) | System MCP 启动依赖、工具注入、MCP 隔离与 middleware 归属；builtin 实例最小隔离单位条款已被 [v5 单出口设计](mcp-v5-single-exit.md) 取代，六实例仅保留为兼容期路径；迁移状态以代码与契约测试为准 |
+| MCP v5 单出口 | [mcp-v5-single-exit.md](mcp-v5-single-exit.md) | builtin 单 `peri` 出口、capability router、workspace 代理、能力关闭矩阵与迁移回滚契约；运行时代码与 wire 验收未实现，见 [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md) |
 | 时间能力边界 | [time-runtime.md](time-runtime.md) | 原生边界已落地；WASM 完整验收与既有公开 Chrono 契约范围仍待核实；入口见 [peri-time 索引](../code-index/peri-time.md) |
 | RCRA 消息、任务归属与激活 | [rcra-message-activation.md](rcra-message-activation.md) | 当前进程 Task/执行、canonical 历史与普通执行；待发送消息持久化见 [Thread MQ](thread-mq.md)，**持久执行恢复仍剥离** |
 | Thread MQ 持久收件箱 | [thread-mq.md](thread-mq.md) | 主、子与 Workflow Agent 的统一持久 MQ、原子 Receive 与 Rust 操作接口；实施与验收见 [active issue](../../spec/issues/2026-11-01-thread-mq-implementation.md) |
