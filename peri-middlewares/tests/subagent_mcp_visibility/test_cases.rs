@@ -117,6 +117,20 @@ impl CatalogState for CatalogProbe {
 #[tokio::test]
 pub(super) async fn fork_inherits_late_static_mcp_tools_and_discovers_then_executes_them() {
     let parent = Session::new(Arc::from("/tmp"), FrozenContext::builder().build(), None);
+    // v5：Agent 调用恒后台，集成夹具必须提供任务管理器与完成回调；
+    // 不提供同步回退，缺管理器时工具会显式报错。
+    let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+    let completed_tx = Arc::new(std::sync::Mutex::new(Some(completed_tx)));
+    parent.set_subagent_host(peri_agent::session::subagent::SubagentHost {
+        task_manager: Some(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
+        on_bg_complete: Some(Arc::new(move |result, _kind| {
+            if let Some(sender) = completed_tx.lock().unwrap().take() {
+                let _ = sender.send(result.clone());
+            }
+            Ok(())
+        })),
+        ..Default::default()
+    });
     let middleware = SubAgentMiddleware::new(
         vec![],
         None,
@@ -147,9 +161,18 @@ pub(super) async fn fork_inherits_late_static_mcp_tools_and_discovers_then_execu
         )
         .await
         .unwrap();
+    assert!(result.contains("Background task"), "{result}");
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(5), completed_rx)
+        .await
+        .expect("background completion")
+        .expect("completion callback");
+    // 集成夹具没有 session_resources：后台终态落库会追加
+    // "session resources unavailable" 并标记 success=false。本用例只验证 fork
+    // 后的动态 MCP 工具发现与执行，仍发生在后台子链内。
     assert!(
-        result.contains("verified deferred MCP execution"),
-        "{result}"
+        completed.output.contains("verified deferred MCP execution"),
+        "{:?}",
+        completed.output
     );
 }
 
