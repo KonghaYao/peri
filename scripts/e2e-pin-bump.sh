@@ -149,7 +149,7 @@ if [[ -n "$pr_number" ]]; then
 else
     if ! pr_url="$(gh pr create --repo "$repo" --base "$base_branch" --head "$bump_branch" \
         --title "$title" --body "$body")"; then
-        die "failed to create PR; enable repository setting 'Allow GitHub Actions to create and approve pull requests'"
+        die "failed to create PR; check for a closed PR on ${bump_branch}, or enable 'Allow GitHub Actions to create and approve pull requests'"
     fi
     echo "created PR: ${pr_url}"
     summary "已创建 PR：${pr_url}（\`${current_pin}\` -> \`${target_sha}\`）。"
