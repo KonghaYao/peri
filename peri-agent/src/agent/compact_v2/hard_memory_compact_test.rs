@@ -215,6 +215,55 @@ async fn second_compaction_keeps_prior_hard_memory_out_of_summary_request() {
 }
 
 #[tokio::test]
+async fn hard_memory_filter_does_not_remove_tool_results_with_the_same_prefix() {
+    let model = RecordingModel {
+        log: Arc::new(OrderLog::default()),
+        requests: Mutex::new(Vec::new()),
+    };
+    let session = crate::session::test_resources::TestSession::open().await;
+    let mut transcript =
+        MessageTranscript::new().with_persistence(session.resources(), session.thread_id.clone());
+    transcript.append(BaseMessage::human("seed"));
+    transcript.append(BaseMessage::ai_with_tool_calls(
+        crate::messages::MessageContent::text("call the tool"),
+        vec![crate::messages::ToolCallRequest::new(
+            "call-1",
+            "Read",
+            serde_json::json!({"file_path": "/tmp/x"}),
+        )],
+    ));
+    transcript.append(BaseMessage::tool_result(
+        "call-1",
+        format!("{HARD_MEMORY_HEADER}\nTOOL_OWNED_MARKER"),
+    ));
+    transcript.append(BaseMessage::human(format!(
+        "{HARD_MEMORY_HEADER}\nOLD_HARD_MEMORY_MARKER"
+    )));
+
+    let _ = crate::agent::compact_v2::full::full_compact_inner_with_hard_memory(
+        &mut transcript,
+        Some(&model),
+        &CompactConfig::default(),
+        "/tmp",
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+        None,
+    )
+    .await
+    .expect("full compact must apply");
+
+    let requests = model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        !requests[0].contains("OLD_HARD_MEMORY_MARKER"),
+        "旧硬记忆 Human 消息仍应从摘要输入排除"
+    );
+    assert!(
+        requests[0].contains("TOOL_OWNED_MARKER"),
+        "同前缀的 ToolResult 属于配对单元，不得被硬记忆过滤器移除"
+    );
+}
+
+#[tokio::test]
 async fn empty_runtime_keeps_single_summary_message() {
     let log = Arc::new(OrderLog::default());
     let model = RecordingModel {

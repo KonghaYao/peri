@@ -134,7 +134,8 @@ pub(in crate::agent::compact_v2) async fn full_compact_inner_with_hard_memory(
     // 旧硬记忆已在 canonical 中作为普通 Human 历史存档，但不得进入新的摘要请求：
     // 本次会按最新运行时快照重新生成，旧 id/status 只会占用预算并诱导模型复述。
     visible.retain(|message| {
-        !crate::agent::compact_v2::hard_memory::is_hard_memory_content(&message.content())
+        !matches!(message, BaseMessage::Human { .. })
+            || !crate::agent::compact_v2::hard_memory::is_hard_memory_content(&message.content())
     });
     // 先固定本次快照的 own IDs；await 期间到达 inbox 的新结果不属于本次摘要。
     // ancestor 与 System 仍由各自 owner 管理；canonical reminder 不是豁免历史。
