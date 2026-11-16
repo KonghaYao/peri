@@ -18,13 +18,17 @@ const input = { schemaVersion: 1, agentId: 'agent-A', sessionId: 'session-A', re
 ] };
 async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'memory-mcp-test-'));
-  const state = { requests: [], docs: new Map(), mode: '', delay: 0 };
+  const state = { requests: [], docs: new Map(), mode: '', delay: 0, paused: false, resumeRetain: () => {} };
+  const retainGate = new Promise(r => { state.resumeRetain = r; });
   const http = createServer(async (req, res) => {
     const chunks = []; for await (const c of req) chunks.push(c);
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : undefined;
     state.requests.push({ path: req.url, method: req.method, body, auth: req.headers.authorization });
     if (state.delay || body?.query === 'slow') await delay(body?.query === 'slow' ? 200 : state.delay);
     if (res.destroyed) return;
+    if (state.mode === 'pause-second' && state.docs.size >= 1 && req.url.endsWith('/memories')) {
+      state.paused = true; await retainGate;
+    }
     res.setHeader('content-type', 'application/json');
     if (state.mode === 'auth') { res.writeHead(401); res.end('{"detail":"secret-token-private-message"}'); return; }
     if (state.mode === 'fail-second' && state.docs.size >= 1 && req.url.endsWith('/memories')) { res.writeHead(503); res.end('{}'); return; }
@@ -68,6 +72,7 @@ test('partial import reports completed receipts; asynchronous acceptance is not 
   const f = await fixture(t); f.state.mode='fail-second'; const receipts=[];
   await assert.rejects(importRecords(input,f.client,{onRecord:r=>receipts.push(r)}),/503/);
   assert.equal(receipts.length,1); assert.equal(f.state.docs.size,1);
+  assert.ok((await readFile(join(f.config.stateDir,'revision'),'utf8')).length);
   f.state.mode='async'; await assert.rejects(importRecords(input,f.client),/synchronous retain/);
 });
 
@@ -90,6 +95,22 @@ test('newer refresh wins, strict bank boundary, token cap and imported data inva
   assert.equal(f.state.requests.at(-1).body.tags_match,'all_strict');
   const bad=await service.call('memory_recall',{query:'x',bankId:'other'});assert.equal(bad.isError,true);
   await importRecords(input,f.client);await until(()=>service.context().status==='stale');
+  assert.equal(service.context().memories.length,0);
+});
+
+test('every confirmed retain invalidates a snapshot refreshed between batch writes', async t=>{
+  const f=await fixture(t);f.state.mode='pause-second';
+  const service=new MemoryService(f.config);t.after(()=>service.close());await service.start();
+  await service.call('memory_context_refresh',{query:'before import'});
+  const importing=importRecords(input,f.client);
+  try {
+    await until(()=>f.state.paused);
+    await until(()=>service.context().status==='stale');
+    assert.equal((await service.call('memory_context_refresh',{query:'between records'})).isError,false);
+    assert.equal(service.context().status,'ready');
+  } finally { f.state.resumeRetain(); }
+  await importing;
+  await until(()=>service.context().status==='stale');
   assert.equal(service.context().memories.length,0);
 });
 

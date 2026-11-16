@@ -50,15 +50,15 @@ export async function importRecords(raw: unknown, client: HindsightClient, optio
   dryRun?: boolean; signal?: AbortSignal; onRecord?: (receipt: Record<string, unknown>) => void;
 } = {}) {
   const items = prepareImport(raw, client.config); // Validate the entire input before any write.
-  // One import invocation is one invalidation event; reusing the value stops a late poll from re-staling a refresh that already consumed this batch.
-  const revision = randomUUID();
+  // Each confirmed retain writes a fresh marker, so a poll between records cannot keep a mid-batch snapshot ready.
+  // Reusing one token per batch would hide later records from the revision poll.
   let completed = 0;
   for (const item of items) {
     if (options.signal?.aborted) throw new MemoryError('CANCELLED', 'Import cancelled');
     if (!options.dryRun) {
       await client.retain(item, options.signal);
       completed++;
-      try { await markImported(client.config, revision); }
+      try { await markImported(client.config); }
       catch { throw new MemoryError('STATE_IO', `Retain completed for ${item.document_id}; local invalidation failed. Explicitly refresh MCP context.`, true); }
     }
     options.onRecord?.({ documentId: item.document_id, sourceHash: item.metadata.source_sha256,

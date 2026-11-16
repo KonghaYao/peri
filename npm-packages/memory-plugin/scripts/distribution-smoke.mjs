@@ -15,7 +15,11 @@ const bytes = await readFile(tarball);
 const cwd = await mkdtemp(join(tmpdir(), 'memory-distribution-'));
 const env = { ...process.env, MCP_USE_ANONYMIZED_TELEMETRY: 'false',
   HINDSIGHT_BANK_ID: 'distribution-bank', MEMORY_AGENT_ID: 'distribution-agent',
-  MEMORY_SESSION_ID: 'distribution-session', MEMORY_STATE_DIR: join(cwd, 'state') };
+  HINDSIGHT_API_KEY: 'distribution-key', MEMORY_SESSION_ID: 'distribution-session',
+  MEMORY_STATE_DIR: join(cwd, 'state'), MEMORY_TIMEOUT_MS: '30000',
+  MEMORY_MAX_TOKENS: '512', MEMORY_POLL_MS: '1000' };
+// The fixture accepts only its own recall, so inherited plugin behavior must not add calls.
+delete env.MEMORY_BOOTSTRAP_QUERY; delete env.MEMORY_ALLOW_HTTP; delete env.MEMORY_MCP_TOKEN;
 let downloads = 0, recalls = 0;
 const registry = createServer((req, res) => {
   downloads++; res.setHeader('content-type', 'application/octet-stream'); res.end(bytes);
