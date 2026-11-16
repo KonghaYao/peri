@@ -478,7 +478,7 @@ fn declared_effective_names(instance: &str) -> Vec<&'static str> {
         .unwrap_or_else(|| panic!("{instance} 必须在 builtin 注册表内"))
         .tools
         .iter()
-        .map(|tool| tool.effective_name)
+        .map(|tool| tool.legacy_name)
         .collect()
 }
 
@@ -489,7 +489,7 @@ fn declared_model_visible_effective_names(instance: &str) -> Vec<&'static str> {
         .tools
         .iter()
         .filter(|tool| tool.model_visible)
-        .map(|tool| tool.effective_name)
+        .map(|tool| tool.legacy_name)
         .collect()
 }
 
@@ -500,7 +500,7 @@ fn declared_direct_effective_names(instance: &str) -> Vec<&'static str> {
         .tools
         .iter()
         .filter(|tool| tool.direct)
-        .map(|tool| tool.effective_name)
+        .map(|tool| tool.legacy_name)
         .collect()
 }
 

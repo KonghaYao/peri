@@ -61,6 +61,18 @@ Middleware；它们把输入交给 core，不能复制 global/project/环境优�
 `mcp::builtin_enabled` 单一解释 `PERI_MCP_BUILTIN`；旧 builtin adapter 只采集
 环境输入再委托该规则，不自行解释开关。
 
+### v5 builtin 单出口配置（目标；standalone 已实现，宿主装配未切换）
+
+普通会话继续以 `ConfigurationSnapshot` 的 `McpConfigFile` 投影为权威；v5 目标不改变这条现行规则，只把 builtin 单出口作为新增配置域：
+
+1. **双入口**：`.mcp.json` 顶层 `mcpServers.peri` 与 `peri mcp-start` 参数都是一等入口。`.mcp.json` 使用 MCP 标准字段（`command` / `args` / `env` / `url` / `headers`），既有 `disabled` 语义不变；`mcp-start` 只解析自己的参数与 `.mcp.json` 片段，不绑定整个 Peri settings 装配，也不控制整个 `peri` 进程。
+2. **优先级**：命令行 > `.mcp.json` > 内置默认；冲突必须能解释来源。能力选择优先放在 `mcp-start` 参数；若持久化到 `.mcp.json`，只能放在该 server 条目的命名空间扩展下，标准客户端忽略它不影响连接。扩展键名在实现前按 MCP 生态复核后裁决，本设计不预占；不得新造顶层 `capabilities` 配置对象。
+3. **旧键**：`WebMiddleware` 等 middleware 策略键不再是能力开关；出现时必须确定性映射到 capability 开关或显式 typed error，不得 silent no-op。v4 逐实例 `.mcp.json` 条目由迁移 adapter 确定性映射；新会话不写回六条目。
+4. **开关边界**：`PERI_MCP_BUILTIN` 只保留部署级 kill switch（全关），不承担逐能力配置；未知能力、非法组合与能力子配置冲突是加载期 typed error。
+5. **宿主与 standalone**：宿主内 builtin 单出口条目由宿主注入，能力开关以 `mcp-start` 参数为准；standalone 与宿主共用能力注册表，但不重新引入完整配置装配。
+
+状态：`mcp-start` 已在配置加载前分派，接受 `--capability` 多能力选择并交给单出口 router；legacy 单 instance 形式保留。standalone 仍不读取 settings，宿主默认装配尚未切换到 `peri`。目标契约与验收见 [MCP v5 单出口目标设计](mcp-v5-single-exit.md) 与 [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md)。
+
 revision 由 scope 和输入内容确定，包含文件正文与具名环境；它是内容版本身份，
 不是时间戳、递增全局序号或访问令牌。`ConfigurationSystem` 按 scope 管理 current
 `Arc<ConfigurationSnapshot>`，完整 resolve 成功才发布。持有旧 Arc 的消费者

@@ -43,6 +43,13 @@ pub fn builtin_closed_instances(
     crate::mcp::builtin::closed_instances(disabled_middlewares)
 }
 
+/// 关闭集的能力身份（v5 名字）：供 router / readiness / 诊断消费。
+pub fn builtin_closed_capabilities(
+    disabled_middlewares: &std::collections::HashSet<String>,
+) -> std::collections::BTreeSet<&'static str> {
+    crate::mcp::builtin::closed_capabilities(disabled_middlewares)
+}
+
 /// 生产链装配器（当前唯一装配实现，见模块文档）。
 #[derive(Debug)]
 pub struct ProductionChainAssembler;

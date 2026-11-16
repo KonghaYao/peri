@@ -36,10 +36,10 @@ fn frozen_effective_literals_match_effective_tool_name() {
         );
     }
     // 注册表字面量 == 函数输出（逐工具，不遗漏）。
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         for tool in instance.tools {
             assert_eq!(
-                tool.effective_name,
+                tool.legacy_name,
                 effective_tool_name(instance.name, tool.original_name).expect("已实现实例可计算"),
                 "注册表字面量与 effective_tool_name() 输出必须逐字相等"
             );
@@ -97,7 +97,7 @@ fn effective_tool_names_covers_registry() {
 
 #[test]
 fn declared_direct_tools_is_derived_from_registry() {
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let declared = declared_direct_tools(instance.name).expect("已实现实例有声明集合");
         let from_registry: Vec<&str> = instance
             .tools
@@ -181,7 +181,7 @@ fn is_declared_direct_true_for_implemented_false_for_unknown() {
 /// 自动覆盖，不需要改；桥接消费点的行为测试在 `mcp::tool_bridge` 侧。
 #[test]
 fn is_declared_model_hidden_is_derived_from_registry() {
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         for tool in instance.tools {
             assert_eq!(
                 super::is_declared_model_hidden(instance.name, tool.original_name),
@@ -203,7 +203,7 @@ fn is_declared_model_hidden_is_derived_from_registry() {
 
 #[test]
 fn builtin_prompt_declaration_matches_registry() {
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         for tool in instance.tools {
             let template = builtin_prompt_declaration(instance.name, tool.original_name);
             match instance.name {
@@ -240,7 +240,7 @@ fn builtin_prompt_declaration_matches_registry() {
 // ─── 关闭集（IF-D10）───────────────────────────────────────────────────────
 
 #[test]
-fn closed_instances_maps_policy_keys_only() {
+fn closed_instances_maps_capability_switches() {
     let none: HashSet<String> = HashSet::new();
     assert!(
         super::closed_instances(&none).is_empty(),
@@ -265,6 +265,24 @@ fn closed_instances_maps_policy_keys_only() {
         BTreeSet::from(["cron".to_string()])
     );
 
+    // v5 能力名是新的开关身份；旧键必须映射到同一实例。
+    for capability in peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES.iter() {
+        let by_capability: HashSet<String> = HashSet::from([capability.name.to_string()]);
+        let by_legacy: HashSet<String> = HashSet::from([capability.legacy_policy_key.to_string()]);
+        assert_eq!(
+            super::closed_instances(&by_capability),
+            super::closed_instances(&by_legacy),
+            "{} 与旧键必须关闭同一实例",
+            capability.name
+        );
+        assert_eq!(
+            super::closed_instances(&by_capability),
+            BTreeSet::from([capability.legacy_instance.to_string()]),
+            "{} 必须关闭对应实例",
+            capability.name
+        );
+    }
+
     let both: HashSet<String> = HashSet::from([
         "WebMiddleware".to_string(),
         "ArtifactMiddleware".to_string(),
@@ -274,14 +292,28 @@ fn closed_instances_maps_policy_keys_only() {
         BTreeSet::from(["artifact".to_string(), "web".to_string()])
     );
 
-    // 未知键 / 非 builtin 策略键：不构成关闭（未知键由 provider 配置层 warn + 忽略）。
-    for unknown in ["SomeOtherMiddleware", "McpMiddleware", "web", "Artifact"] {
+    // 未知键 / 非 builtin 能力键：不构成关闭（未知键由 provider 配置层 warn + 忽略）。
+    for unknown in ["SomeOtherMiddleware", "McpMiddleware", "Artifact", "web2"] {
         let set: HashSet<String> = HashSet::from([unknown.to_string()]);
         assert!(
             super::closed_instances(&set).is_empty(),
             "{unknown} 不得关闭任何 builtin 实例"
         );
     }
+}
+
+#[test]
+fn closed_capabilities_returns_v5_identity() {
+    let mixed: HashSet<String> = HashSet::from([
+        "WebMiddleware".to_string(),
+        "cron".to_string(),
+        "McpMiddleware".to_string(),
+    ]);
+    assert_eq!(
+        super::closed_capabilities(&mixed),
+        BTreeSet::from(["cron", "web"]),
+        "旧键与 v5 能力名必须落到同一能力身份，非 builtin 键忽略"
+    );
 }
 
 #[test]
@@ -330,18 +362,11 @@ impl Drop for BuiltinEnvGuard {
 #[test]
 fn injection_policy_all_and_none_shapes() {
     let all = BuiltinInjectionPolicy::all();
-    assert_eq!(
-        all.enabled.clone(),
-        vec![
-            "web",
-            "artifact",
-            "cron",
-            "monitor",
-            "workspace",
-            "workflow"
-        ],
-        "默认注入全部已实现实例（注册表顺序）"
-    );
+    let expected: Vec<&str> = peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
+        .iter()
+        .map(|capability| capability.name)
+        .collect();
+    assert_eq!(all.enabled, expected, "默认注入全部能力（能力表顺序）");
     assert!(all.enables("web") && all.enables("artifact"));
     assert!(all.enables("cron"));
     assert!(

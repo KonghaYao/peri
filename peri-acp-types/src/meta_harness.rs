@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 /// 冻结期构建的 MetaHarness 状态，随冻结载体（`FrozenContext`）传播；
 /// 会话内不可变（ARC-FROZEN-001）。
@@ -125,40 +126,18 @@ pub const MIDDLEWARE_NAMES: &[&str] = &[
     "GoalMiddleware",
 ];
 
-/// builtin MCP 实例的 MetaHarness 关闭键（A7：与 [`MIDDLEWARE_NAMES`] 分离的第二张表）。
+/// 迁移期 builtin 旧 MetaHarness 关闭键（**兼容期专用**）。
 ///
-/// 每个键对应 [`crate::builtin_mcp::BUILTIN_MCP_INSTANCES`] 中一个实例的
-/// `policy_key`（`"WebMiddleware": false` / `"ArtifactMiddleware": false` ⇒ 关闭
-/// 对应 builtin 实例的工具面）。这些实例不再是链槽位，但关闭语义**不得因此
-/// 消失**（`docs/standards/architecture-contracts.md` 的 ARC-CAPABILITY-CLOSURE-001：
-/// 键仍存在却不再生效即能力闭合退化），因此：
+/// 由 [`crate::builtin_mcp::v5::BUILTIN_V5_CAPABILITIES`] 的 `legacy_policy_key`
+/// 派生；不再手写字面量，也不承担 v5 能力开关语义。运行时经
+/// `builtin_mcp::capability_of_switch` 做确定性映射；M4 清理时删除。
 ///
-/// - 解析期校验（`peri-acp/src/provider/config.rs::validate_meta_harness`）的
-///   「已知键」集合 = [`SECTION_IDS`] ∪ [`MIDDLEWARE_NAMES`] ∪ 本表 ∪
-///   [`BUILT_IN_SUBAGENTS_KEY`]；
-/// - 「全部 middleware 关闭」保险丝的判定面 = [`MIDDLEWARE_NAMES`] ∪ 本表
-///   （否则「只剩两个 builtin 策略键为 false」不再触发全关告警）。
-///
-/// 与声明表的对齐由本文件的 `mod tests` 直接断言集合相等（常量漂移或声明表
-/// 漂移即红）；`assembly_test.rs` 另断言槽位名与本表交集为空。
-///
-/// v4-part-4（W3-C1）：`WorkspaceMiddleware` 随 `workspace` 实例加入——7 个文件/终端
-/// 工具（Read / Write / Edit / Glob / Grep / folder_operations / Bash）的唯一提供面，
-/// 关闭语义与 Web / Artifact 逐位同构。
-///
-/// workflow as MCP（P5 原子切换后）：`"WorkflowMiddleware"` 是 builtin `workflow`
-/// 实例的关闭键，**唯一**归属本表——旧链槽位（[`MIDDLEWARE_NAMES`] 同名键）与
-/// `MIDDLEWARE_TOOL_NAMES` 的 `"Workflow"` 已随 P5 删除，两表零交集。
-/// 口径：命中该键 ⇒ workflow 实例不 spawn（含消费者），见 `docs/design/workflow-mcp.md`。
-pub const BUILTIN_INSTANCE_POLICY_KEYS: &[&str] = &[
-    "WebMiddleware",
-    "ArtifactMiddleware",
-    "CronMiddleware",
-    "MonitorMiddleware",
-    "WorkspaceMiddleware",
-    // workflow builtin 实例的关闭键（用户配置兼容：沿用旧链槽位名，P5 后为唯一持有者）。
-    "WorkflowMiddleware",
-];
+/// - 解析期校验（`peri-config/src/app.rs::validate_meta_harness`）的「已知键」
+///   集合 = [`SECTION_IDS`] ∪ [`MIDDLEWARE_NAMES`] ∪ 本表 ∪
+///   [`BUILT_IN_SUBAGENTS_KEY`] ∪ v5 能力名；
+/// - 「全部 middleware 关闭」保险丝的判定面 = [`MIDDLEWARE_NAMES`] ∪ 本表。
+pub static BUILTIN_INSTANCE_POLICY_KEYS: LazyLock<Vec<&'static str>> =
+    LazyLock::new(|| crate::builtin_mcp::legacy_policy_keys().collect());
 
 /// 段落 → 持有 middleware 名映射表（设计 §3.1.1 拆分持有契约 3）。
 ///
@@ -262,24 +241,23 @@ mod tests {
         }
     }
 
-    /// A7 两表形态：`BUILTIN_INSTANCE_POLICY_KEYS` 必须恰为声明表的 `policy_key`
-    /// 集合（常量漂移、声明表漂移、重复键三种情况都在此变红）。
+    /// 旧关闭键必须由能力表派生（手写常量或声明表漂移即红）。
     #[test]
-    fn builtin_instance_policy_keys_match_declaration_table() {
-        let declared: std::collections::HashSet<&str> = crate::builtin_mcp::BUILTIN_MCP_INSTANCES
+    fn builtin_policy_keys_are_derived_from_capabilities() {
+        let declared: std::collections::HashSet<&str> = crate::builtin_mcp::BUILTIN_V5_CAPABILITIES
             .iter()
-            .map(|instance| instance.policy_key)
+            .map(|capability| capability.legacy_policy_key)
             .collect();
-        let constant: std::collections::HashSet<&str> =
+        let derived: std::collections::HashSet<&str> =
             BUILTIN_INSTANCE_POLICY_KEYS.iter().copied().collect();
         assert_eq!(
-            constant.len(),
+            derived.len(),
             BUILTIN_INSTANCE_POLICY_KEYS.len(),
-            "builtin 策略键不得重复: {BUILTIN_INSTANCE_POLICY_KEYS:?}"
+            "旧关闭键不得重复: {BUILTIN_INSTANCE_POLICY_KEYS:?}"
         );
         assert_eq!(
-            constant, declared,
-            "BUILTIN_INSTANCE_POLICY_KEYS 必须等于声明表的 policy_key 集合"
+            derived, declared,
+            "旧关闭键表必须由能力表 legacy_policy_key 派生"
         );
     }
 
@@ -310,12 +288,12 @@ mod tests {
             .chain(BUILTIN_INSTANCE_POLICY_KEYS.iter())
             .copied()
             .collect();
-        for instance in crate::builtin_mcp::BUILTIN_MCP_INSTANCES {
+        for capability in crate::builtin_mcp::BUILTIN_V5_CAPABILITIES.iter() {
             assert!(
-                union.contains(instance.policy_key),
-                "builtin 实例 {} 的关闭键 {} 必须落在「已知键全集」内",
-                instance.name,
-                instance.policy_key
+                union.contains(capability.legacy_policy_key),
+                "能力 {} 的旧关闭键 {} 必须落在「已知键全集」内",
+                capability.name,
+                capability.legacy_policy_key
             );
         }
     }
@@ -381,7 +359,7 @@ mod tests {
         let declared_originals: std::collections::HashSet<&str> =
             cron.tools.iter().map(|tool| tool.original_name).collect();
         let declared_effectives: std::collections::HashSet<&str> =
-            cron.tools.iter().map(|tool| tool.effective_name).collect();
+            cron.tools.iter().map(|tool| tool.legacy_name).collect();
         assert_eq!(
             declared_originals,
             [
@@ -410,20 +388,32 @@ mod tests {
         );
         for tool in cron.tools {
             assert_eq!(
-                crate::builtin_mcp::original_tool_name_of_effective(tool.effective_name),
+                crate::builtin_mcp::original_tool_name_of_effective(tool.legacy_name),
                 Some(tool.original_name),
                 "{} 的归一查表必须自洽（同一注册表内往返）",
-                tool.effective_name
+                tool.legacy_name
+            );
+            assert_eq!(
+                crate::builtin_mcp::original_tool_name_of_effective(tool.model_name),
+                Some(tool.original_name),
+                "{} 的 v5 模型名归一必须自洽",
+                tool.model_name
             );
         }
-        // effective name 面：全注册表扫描，任一实例的模型面名字都不得落进剔除面。
-        for instance in crate::builtin_mcp::BUILTIN_MCP_INSTANCES {
+        // 模型面名字：全注册表扫描，任一实例的模型面名字都不得落进剔除面。
+        for instance in crate::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
             for tool in instance.tools {
                 assert!(
-                    !MIDDLEWARE_TOOL_NAMES.contains(&tool.effective_name),
-                    "实例 {} 的 effective name {} 不得出现在 MIDDLEWARE_TOOL_NAMES 内",
+                    !MIDDLEWARE_TOOL_NAMES.contains(&tool.model_name),
+                    "实例 {} 的 v5 模型面名字 {} 不得出现在 MIDDLEWARE_TOOL_NAMES 内",
                     instance.name,
-                    tool.effective_name
+                    tool.model_name
+                );
+                assert!(
+                    !MIDDLEWARE_TOOL_NAMES.contains(&tool.legacy_name),
+                    "实例 {} 的迁移期旧名 {} 不得出现在 MIDDLEWARE_TOOL_NAMES 内",
+                    instance.name,
+                    tool.legacy_name
                 );
             }
         }

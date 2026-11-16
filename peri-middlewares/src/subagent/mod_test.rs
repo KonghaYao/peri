@@ -505,21 +505,21 @@ fn effective_name_of(instance: &str, original: &str) -> &'static str {
         .iter()
         .find(|tool| tool.original_name == original)
         .unwrap_or_else(|| panic!("声明表应含 `{instance}` 的原始工具名 `{original}`"))
-        .effective_name
+        .legacy_name
 }
 
 /// IF-D6 ③：builtin 一等工具的 effective name 按原始名判定（判定相等）。
 #[test]
 fn mutation_tool_matches_original_name_policy_for_builtin_names() {
     let mut declared = 0;
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         for tool in instance.tools {
             declared += 1;
             assert_eq!(
-                super::is_mutation_tool(tool.effective_name),
+                super::is_mutation_tool(tool.legacy_name),
                 super::is_mutation_tool(tool.original_name),
                 "`{}` 的 mutation 判定必须等于原始名 `{}`（IF-D6 ③）",
-                tool.effective_name,
+                tool.legacy_name,
                 tool.original_name
             );
         }
@@ -529,7 +529,7 @@ fn mutation_tool_matches_original_name_policy_for_builtin_names() {
     // 由 `peri-acp-types/src/builtin_mcp_test.rs` 的字面量测试锁定。
     let expected: usize = BUILTIN_MCP_INSTANCES.iter().map(|i| i.tools.len()).sum();
     assert_eq!(declared, expected, "遍历必须覆盖注册表全部行");
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         assert!(
             !instance.tools.is_empty(),
             "实例 `{}` 不得声明零工具（实例被清空会使派生期望值同步退化）",
@@ -559,7 +559,7 @@ fn mutation_tool_matches_original_name_policy_for_builtin_names() {
             .iter()
             .find(|tool| tool.original_name == original)
             .unwrap_or_else(|| panic!("声明表应含 `{instance}` 的原始工具名 `{original}`"));
-        for name in [original, tool.effective_name] {
+        for name in [original, tool.legacy_name] {
             assert_eq!(
                 super::is_mutation_tool(name),
                 mutation,
@@ -586,7 +586,7 @@ fn mutation_tool_matches_original_name_policy_for_builtin_names() {
             .iter()
             .find(|tool| tool.original_name == original)
             .unwrap_or_else(|| panic!("声明表应含 workspace 的原始工具名 `{original}`"));
-        for name in [original, tool.effective_name] {
+        for name in [original, tool.legacy_name] {
             assert_eq!(
                 super::is_mutation_tool(name),
                 mutation,

@@ -245,7 +245,7 @@ fn builtin_direct_bridges() -> Vec<Arc<dyn BaseTool>> {
     }
 
     let pool = Arc::new(crate::mcp::McpClientPool::new_empty());
-    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
         let tool_names: Vec<&str> = instance
             .tools
             .iter()
@@ -360,9 +360,9 @@ fn test_all_real_tool_declarations_render_without_placeholder_residue() {
         TOOL_DISCOVER_SKILLS, TOOL_SKILL, TOOL_TODO,
     };
     // 三个已迁移工具的模型面名字（迁移前是裸名 `WebFetch`/`WebSearch`/`artifact`）
-    let web_fetch = declared("web", "WebFetch").effective_name;
-    let web_search = declared("web", "WebSearch").effective_name;
-    let artifact = declared("artifact", "artifact").effective_name;
+    let web_fetch = declared("web", "WebFetch").legacy_name;
+    let web_search = declared("web", "WebSearch").legacy_name;
+    let artifact = declared("artifact", "artifact").legacy_name;
     // 7 个已迁移 workspace 工具的模型面名字（迁移前是裸名 `Read`/…/`Bash`），
     // 逐项从注册表派生（不写第二份清单）。
     let workspace = peri_acp_types::builtin_mcp::find("workspace")
@@ -373,7 +373,7 @@ fn test_all_real_tool_declarations_render_without_placeholder_residue() {
     let mut expected: Vec<&str> = workspace
         .tools
         .iter()
-        .map(|tool| tool.effective_name)
+        .map(|tool| tool.legacy_name)
         .collect();
     expected.extend([
         web_fetch,
@@ -526,7 +526,7 @@ fn wave2_declared_tools() -> Vec<(
 fn wave2_bridged_tools() -> Vec<Arc<dyn BaseTool>> {
     let names: Vec<&str> = wave2_declared_tools()
         .iter()
-        .map(|(_, tool)| tool.effective_name)
+        .map(|(_, tool)| tool.legacy_name)
         .collect();
     let mut bridges: Vec<Arc<dyn BaseTool>> = builtin_direct_bridges()
         .into_iter()
@@ -569,7 +569,7 @@ fn wave2_has_no_prompt_declaration() {
         assert!(
             super::builtin_declaration(instance, tool.original_name).is_none(),
             "{}: 声明段的渲染查表必须为 None（贡献 0）",
-            tool.effective_name
+            tool.legacy_name
         );
     }
 
@@ -579,7 +579,7 @@ fn wave2_has_no_prompt_declaration() {
     bridged_names.sort_unstable();
     let mut declared_names: Vec<&str> = wave2_declared
         .iter()
-        .map(|(_, tool)| tool.effective_name)
+        .map(|(_, tool)| tool.legacy_name)
         .collect();
     declared_names.sort_unstable();
     assert_eq!(
@@ -624,7 +624,7 @@ fn wave2_has_no_prompt_declaration() {
     // 逐字强度，也不把 workspace 的条目混进快照。
     let wave1_effectives: Vec<&str> = WAVE1_FROZEN_TEMPLATES
         .iter()
-        .map(|(instance, original_name, _)| declared(instance, original_name).effective_name)
+        .map(|(instance, original_name, _)| declared(instance, original_name).legacy_name)
         .collect();
     let wave1_lines: Vec<&str> = wave1_rendered
         .lines()

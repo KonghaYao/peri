@@ -532,6 +532,18 @@ fn unknown_key_warns_and_is_ignored() {
 }
 
 #[test]
+fn capability_names_are_valid_meta_harness_keys() {
+    // v5 能力名与迁移期旧键都是合法关闭来源；未知键仍被剔除。
+    let json = r#"{"meta_harness":{"web":false,"WorkspaceMiddleware":false,"unknown":false}}"#;
+    let mut cfg: AppConfig = serde_json::from_str(json).unwrap();
+    cfg.validate_meta_harness();
+    let map = cfg.meta_harness.unwrap();
+    assert_eq!(map.get("web"), Some(&false), "v5 能力名必须保留");
+    assert_eq!(map.get("WorkspaceMiddleware"), Some(&false));
+    assert!(!map.contains_key("unknown"));
+}
+
+#[test]
 fn unknown_key_only_in_workspace_is_ignored_on_merge() {
     let mut global = AppConfig {
         meta_harness: Some(mh(&[("01_intro", true)])),
@@ -678,11 +690,11 @@ fn builtin_instance_policy_keys_are_known_keys() {
         BUILTIN_INSTANCE_POLICY_KEYS.len(),
         "策略键全部保留"
     );
-    for key in BUILTIN_INSTANCE_POLICY_KEYS {
+    for key in BUILTIN_INSTANCE_POLICY_KEYS.iter() {
         assert_eq!(map.get(*key), Some(&false), "{key} 是已知键，必须保留");
     }
     // 两表分离（A7）：策略键不再属于链槽位名表，但仍是合法配置键。
-    for key in BUILTIN_INSTANCE_POLICY_KEYS {
+    for key in BUILTIN_INSTANCE_POLICY_KEYS.iter() {
         assert!(!MIDDLEWARE_NAMES.contains(key), "{key} 不应在链槽位名表内");
     }
 }

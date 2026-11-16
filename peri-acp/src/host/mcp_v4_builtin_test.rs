@@ -286,10 +286,10 @@ async fn builtin_instances_expose_frozen_effective_names_on_first_model_request(
             tool.original_name
         );
         assert!(
-            tool.effective_name == tool.original_name
-                || !names.iter().any(|name| name == tool.effective_name),
+            tool.legacy_name == tool.original_name
+                || !names.iter().any(|name| name == tool.legacy_name),
             "历史前缀名 `{}` 不得作为额外可调用工具出现: {names:?}",
-            tool.effective_name,
+            tool.legacy_name,
         );
         assert_eq!(
             names

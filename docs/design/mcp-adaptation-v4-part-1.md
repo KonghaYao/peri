@@ -2,11 +2,13 @@
 
 > 状态：已批准目标设计（v4-part-1）
 >
-> 目的：定义 MCP 适配的目标架构、System MCP 启动依赖、一等工具注入契约、隔离与复用边界，以及 middleware 拆分分类。本文件是 MCP 迁移范围与验收语义的唯一事实源；代码、协议和契约测试是当前实现行为的事实源，若与本文件冲突，必须先修正实现或明确记录本文件的变更。
+> 目的：定义 MCP 适配的目标架构、System MCP 启动依赖、一等工具注入契约、隔离与复用边界，以及 middleware 拆分分类。本文件是 v4 迁移范围、外部 MCP 规则与兼容期行为的事实源；v5 builtin 单出口目标见 [MCP v5 设计](mcp-v5-single-exit.md)。代码、协议和契约测试是当前实现行为的事实源，若与本文件冲突，必须先修正实现或明确记录本文件的变更。
 >
 > 规范性用语：**必须**表示不可违反的契约，**不得**表示禁止行为，**可以**表示实现选择。本文描述目标契约，不把尚未完成的迁移写成已实现能力；状态列的归属标注表示 v4 目标归属，不表示当前代码已经完成迁移。
 >
 > 版本范围：本文件只覆盖 v4 的 part-1。part-1 解决 MCP 实例划分、启动准入、工具注入和 middleware 归属；具体迁移批次、实现提交和现场验收不得回填到本文件，另以对应 issue 或验收记录为准。
+>
+> **v5 取代关系（2026-11-15，Issue #409）**：builtin MCP 的长期目标已改为单出口 `peri`，见 [MCP v5：builtin 单出口目标设计](mcp-v5-single-exit.md)。本文件关于「隔离单位是 builtin MCP 实例」、逐实例 transport/client pool 与六实例目标形态的条款由 v5 取代；迁移期 v4 六实例仍是兼容期与回滚路径，不是目标设计。外部 MCP（stdio/HTTP/ACP）与本文其余启动依赖、工具注入和隔离规则继续有效。v5 尚未实现，现行行为仍以代码与契约测试为准；进度与验收见 [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md)。
 >
 > 完整性口径：下表只统计具体 `impl Middleware for ...` 类型，不统计 `ChainSlot`、目录名、目标包分组或 builtin MCP 实例（`BUILTIN_MCP_INSTANCES`）；已删除类型不再列入。
 
@@ -30,7 +32,7 @@ v4 允许两种运行形态，但不改变 MCP 实例的隔离契约：
 
 当前客户端统一使用 `rmcp` 的 `Auto` lifecycle：先尝试 `server/discover`，不支持时回退 legacy `initialize`；用户配置不声明 `protocolVersion`。System MCP 不得绕过协议初始化、能力协商或 transport 生命周期；协商结果由实际连接提供，不按配置假定固定版本。
 
-无论使用 builtin 还是 external transport，每个 MCP 实例都必须保持独立的 transport、状态、凭据和 capability root；复用 Rust library、schema、错误类型或测试 fixture 不构成运行时实例复用。
+无论使用 builtin 还是 external transport，每个 MCP 实例都必须保持独立的 transport、状态、凭据和 capability root；复用 Rust library、schema、错误类型或测试 fixture 不构成运行时实例复用。v5 目标下 builtin 收敛为单出口 `peri`：对外 transport 合并，但 capability 级状态、凭据、资源根与任务归属仍保持独立；外部 MCP 与 v4 兼容期实例继续适用本句。
 
 ## System MCP 启动依赖
 
@@ -41,6 +43,7 @@ v4 MCP 配置定义 `system_mcp` 标识，用于声明该 MCP 是 react loop 的
 - 等待超过配置的 timeout 必须返回明确错误并终止本次启动，不得降级、跳过或把未知状态当作 ready。
 - `system_mcp = false` 或未标识的 MCP 可以按普通 MCP 生命周期建立，不阻塞 react loop 启动。
 - `system_mcp` 只表达启动依赖等级，不改变 MCP 的隔离边界；每个 MCP 仍拥有独立 transport、运行时实例、状态、凭据和 capability root。
+- v5 目标中 `peri` 是唯一 builtin system MCP 条目；启动闸门按该条目的有效能力集聚合 readiness，能力级降级不绕过启动依赖语义。实现前仍以现行六实例行为为准。
 
 ### `system_mcp_tools` 一等工具注入
 
@@ -70,6 +73,8 @@ v4 MCP 配置定义 `system_mcp` 标识，用于声明该 MCP 是 react loop 的
 
 ## 最小 MCP 隔离设计
 
+> **状态说明**：本节关于 builtin 实例作为最小隔离单位的长期目标已被 v5 取代（见文首取代关系）。以下保留 v4 兼容期路径与外部 MCP 的隔离事实，不再作为 v5 目标设计；v5 的单出口、capability router 与 workspace 代理见 [MCP v5 设计](mcp-v5-single-exit.md)。
+
 **隔离单位是 builtin MCP 实例**，而不是让每个 middleware 各自实现一套 MCP 协议；实例与工具声明以 `peri-acp-types/src/builtin_mcp.rs::BUILTIN_MCP_INSTANCES` 为准：
 
 1. **Workspace MCP**：由 `peri-mcp-workspace` 提供 handler、文件与进程工具实现（`mcp-packages/workspace/src/`）；宿主在 `peri-middlewares/src/mcp/builtin/` 持有实例 context 与 runtime。schema 与描述从工具实现生成，不维护独立服务器或第二份工具实现。
@@ -78,7 +83,7 @@ v4 MCP 配置定义 `system_mcp` 标识，用于声明该 MCP 是 react loop 的
 4. **Cron MCP**：提供定时任务注册、查询、删除与开关能力。
 5. **Workflow MCP**：提供编排工具与任务资源；任务信道见 [Workflow as MCP](workflow-mcp.md)。
 
-MCP 是最小隔离单位：这些实例可以复用 Rust library、schema、错误类型和测试工具，但不能复用运行时实例、进程、状态、凭据、capability root 或 client pool。不同 MCP 之间不互相调用；如果需要传递内容、文件变更或触发事件，由 Agent/Runtime 分别调用 MCP，并通过宿主端口接收结果。
+MCP 是最小隔离单位：这些实例可以复用 Rust library、schema、错误类型和测试工具，但不能复用运行时实例、进程、状态、凭据、capability root 或 client pool。不同 MCP 之间不互相调用；如果需要传递内容、文件变更或触发事件，由 Agent/Runtime 分别调用 MCP，并通过宿主端口接收结果。v5 目标中，builtin 改为单出口 `peri`；上述隔离要求转为 capability 级状态、凭据、资源根与任务归属隔离，不再要求逐实例 transport。
 
 ### 复用边界
 
@@ -94,7 +99,7 @@ MCP 是最小隔离单位：这些实例可以复用 Rust library、schema、错
 | Plugin MCP/Skills 配置 | Workspace MCP + 宿主语义 | 可以调用 Workspace MCP 读取 manifest 和配置文件，但来源合并、命名空间、去重和插件生命周期仍属于 Plugin/MCP adapter。 |
 | Approval、Question、Hook、SubAgent、Workflow 运行时、Goal | 不经 builtin MCP | 这些需要交互 broker、Agent state、外部 runtime 或宿主生命周期，强行映射为 MCP 会损失契约并扩大权限。 |
 
-因此隔离单位是**彼此隔离、互不调用的 builtin MCP 实例**，不是每个 middleware 对应一个 MCP server；代码可以复用，MCP 运行时不能复用：Workspace MCP 负责本地能力，Artifact MCP 负责发布，Web MCP 负责外部信息读取，Cron MCP 负责调度，Workflow MCP 负责编排，其余 middleware 通过 `peri-agent` / `peri-acp-types` 的宿主 seam 直接实现。实例清单以 `peri-acp-types/src/builtin_mcp.rs::BUILTIN_MCP_INSTANCES` 为事实源。
+因此隔离单位是**彼此隔离、互不调用的 builtin MCP 实例**，不是每个 middleware 对应一个 MCP server；代码可以复用，MCP 运行时不能复用：Workspace MCP 负责本地能力，Artifact MCP 负责发布，Web MCP 负责外部信息读取，Cron MCP 负责调度，Workflow MCP 负责编排，其余 middleware 通过 `peri-agent` / `peri-acp-types` 的宿主 seam 直接实现。实例清单以 `peri-acp-types/src/builtin_mcp.rs::BUILTIN_MCP_INSTANCES` 为事实源。v5 目标以 capability 为隔离与开关单位，六实例仅保留为兼容期路径；见文首取代关系。
 
 ## Middleware 归属
 

@@ -194,7 +194,7 @@ fn declared_effective_names(instance: &BuiltinMcpInstance) -> Vec<String> {
         .tools
         .iter()
         .filter(|tool| tool.model_visible)
-        .map(|tool| tool.effective_name.to_string())
+        .map(|tool| tool.legacy_name.to_string())
         .collect()
 }
 
@@ -208,7 +208,7 @@ fn declared_direct_effective_names(instance: &BuiltinMcpInstance) -> Vec<String>
         .tools
         .iter()
         .filter(|tool| tool.direct)
-        .map(|tool| tool.effective_name.to_string())
+        .map(|tool| tool.legacy_name.to_string())
         .collect()
 }
 
@@ -217,7 +217,7 @@ fn all_direct_effective_names() -> Vec<String> {
     let mut names: Vec<String> = BUILTIN_MCP_INSTANCES
         .iter()
         .flat_map(|instance| instance.tools.iter().filter(|tool| tool.direct))
-        .map(|tool| tool.effective_name.to_string())
+        .map(|tool| tool.legacy_name.to_string())
         .collect();
     names.sort();
     names

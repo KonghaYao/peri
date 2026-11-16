@@ -68,12 +68,17 @@ fn constructors_keep_inputs_and_closed_set_verbatim() {
             .as_ref()
             .expect("夹具必须带 bg 完成回调"),
     );
-    // 关闭集用 A24 唯一派生入口生成：`policy_key ∈ disabled_middlewares` → 实例名。
+    // 关闭集用 A24 唯一派生入口生成：能力开关（旧键或 v5 能力名）→ 实例名。
     let closed = builtin::closed_instances(&HashSet::from(["CronMiddleware".to_string()]));
     assert_eq!(
         closed,
         BTreeSet::from(["cron".to_string()]),
-        "前置：关闭集必须由 policy_key 派生实例名"
+        "前置：旧键必须确定性映射为实例名"
+    );
+    assert_eq!(
+        builtin::closed_instances(&HashSet::from(["cron".to_string()])),
+        closed,
+        "v5 能力名与旧键必须关闭同一实例"
     );
 
     let ctx = BuiltinInstanceContext::new("ctx-cwd")

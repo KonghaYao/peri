@@ -29,7 +29,7 @@ middleware 关闭与内置 Agent 定义策略。
 | --- | --- | --- |
 | 段落 ID = `true` | 用 `.peri/meta/<ID>.md` 整段替换；空正文移除该段 | `peri-acp-types/src/meta_harness.rs::SECTION_IDS` |
 | middleware 名 = `false` | 不装配该 middleware，工具、hook 与提示词贡献随之移除 | 同文件 `MIDDLEWARE_NAMES` |
-| builtin 实例策略键 = `false` | 关闭该会话的实例能力面；具体关闭范围按设计约束 | `peri-acp-types/src/builtin_mcp.rs` 的 `policy_key` |
+| builtin 实例策略键 = `false` | 关闭该会话的实例能力面；具体关闭范围按设计约束 | `peri-acp-types/src/builtin_mcp/v5.rs` 的 `legacy_policy_key`（经 `capability_of_switch` 映射） |
 | `BuiltInSubagents` = bool | 控制编译时内置 Agent 定义，默认开启 | [MetaHarness 设计](design/meta-harness.md) |
 
 `BuiltInSubagents: false` 不关闭项目/plugin agents、fork/resume 或 Agent 工具。

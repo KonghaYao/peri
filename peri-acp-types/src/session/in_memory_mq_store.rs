@@ -66,6 +66,8 @@ pub struct InMemoryMqStore {
     #[cfg(feature = "test-support")]
     receive_gate: Arc<Mutex<Option<super::mq::ReceiveGate>>>,
     #[cfg(feature = "test-support")]
+    enqueue_gate: Arc<Mutex<Option<super::mq::ReceiveGate>>>,
+    #[cfg(feature = "test-support")]
     query_gate: Arc<Mutex<Option<super::mq::ReceiveGate>>>,
 }
 
@@ -87,6 +89,14 @@ impl ThreadMqStore for InMemoryMqStore {
             return Err(invalid_input(
                 "MQ payload id must match the queued message id",
             ));
+        }
+        #[cfg(feature = "test-support")]
+        {
+            let gate = self.enqueue_gate.lock().take();
+            if let Some((entered, release)) = gate {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
         }
         let payload_json = payload_json(&input.payload)?;
         let mut state = self.state.lock();
@@ -350,6 +360,11 @@ impl ThreadMqStore for InMemoryMqStore {
     #[cfg(feature = "test-support")]
     fn install_receive_gate(&self, gate: super::mq::ReceiveGate) {
         *self.receive_gate.lock() = Some(gate);
+    }
+
+    #[cfg(feature = "test-support")]
+    fn install_enqueue_gate(&self, gate: super::mq::ReceiveGate) {
+        *self.enqueue_gate.lock() = Some(gate);
     }
 
     #[cfg(feature = "test-support")]

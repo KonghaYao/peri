@@ -243,7 +243,7 @@ fn test_builtin_unknown_instance_is_typed_error() {
     // 已实现实例 = 注册表全集（wave 1 = web/artifact，wave 2 增 cron，wave 3 增
     // workspace）可解析——正向面从注册表派生，波次增长时不会漏盯一个实例；
     // 名字不在注册表内的一律 typed error（不含路径 / env / 凭据）。
-    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
         assert!(
             super::require_known_builtin_instance(instance.name).is_ok(),
             "注册表实例 `{}` 必须可解析（未实现的预留名不得留在注册表内）",

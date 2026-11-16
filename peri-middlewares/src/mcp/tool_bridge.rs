@@ -861,7 +861,7 @@ mod direct_flag_tests {
     /// 注册落地后自动被覆盖，不需要改本用例。
     #[test]
     fn builtin_declared_model_visibility_is_applied_to_bridges() {
-        for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+        for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
             for tool in instance.tools {
                 let bridge = McpToolBridge::new(
                     instance.name,
@@ -949,7 +949,7 @@ mod direct_flag_tests {
         assert!(
             !typed[0].is_direct(),
             "注册表声明 deferred 的 builtin 工具（{}）在 typed builder 中必须保持 deferred",
-            tool.effective_name
+            tool.legacy_name
         );
         assert!(
             !boxed[0].is_direct(),

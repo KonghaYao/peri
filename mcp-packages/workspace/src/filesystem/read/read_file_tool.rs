@@ -154,7 +154,7 @@ pub(super) fn parse_read_request(
     let limit = parse_line_number(&input["limit"], "limit", MAX_LINES)?;
 
     if input.get("pages").is_some_and(|pages| !pages.is_null()) {
-        let workaround = peri_acp_types::builtin_mcp::effective_name_of("workspace", "Bash")
+        let workaround = peri_acp_types::builtin_mcp::model_tool_name_of("workspace", "Bash")
             .map_or_else(
                 || "Use a shell command with a PDF reader".to_string(),
                 |name| format!("Use the `{name}` tool with a PDF reader command"),

@@ -1,10 +1,12 @@
 # MCP package 代码索引
 
+更新：2026-11-16
+
 Builtin MCP 的工具与 server handler 由独立 crate 持有；配置来源 I/O 由独立 `peri-mcp-config` 数据面持有，session MCP 实例注册、配置投影、transport、宿主 context、policy 与生命周期仍由 `peri-middlewares` 装配。每个 crate 的依赖方向面向 `peri-mcp-common`、`peri-agent` / `peri-acp-types` / `peri-resources` 等稳定能力接口，不依赖 `peri-middlewares`。
 
 Workspace 后台任务的资源结算以 `workspace/src/shell_tasks.rs` 为准：owner 在进程退出、管道回收和终态通知完成后结算；会话释放只取消 TaskManager 已知 external task 并等待 settled。Workspace 自身没有 scope close barrier、旧 owner 扫描、连接重建或跨进程恢复；generic 模式无 owner，不参与 session 隔离。宿主恢复时按 owner 调用 `shell_task_list` 重新发现仍存活的 Shell 并建立当前订阅（见 [peri-middlewares](peri-middlewares.md) 的 `client/workspace_watch.rs`），这不是 Workspace 进程的自我恢复。
 
-宿主侧入口见 [`peri-middlewares` 代码索引](peri-middlewares.md)。本文是插件包的当前路径索引；设计契约见 [`architecture-contracts.md`](../standards/architecture-contracts.md) 与 [`MCP 适配目标设计（v4-part-1）`](../design/mcp-adaptation-v4-part-1.md)。
+宿主侧入口见 [`peri-middlewares` 代码索引](peri-middlewares.md)。本文是插件包的当前路径索引；设计契约见 [`architecture-contracts.md`](../standards/architecture-contracts.md) 与 [`MCP 适配目标设计（v4-part-1）`](../design/mcp-adaptation-v4-part-1.md)。v5 单出口 `peri` 与 capability router 已实现于 `peri-middlewares`（`mcp/builtin/router.rs`），当前通过 `peri mcp-start --capability ...` 显式选择，宿主默认装配仍是 v4 六实例；见 [`MCP v5 单出口目标设计`](../design/mcp-v5-single-exit.md)。
 
 Workspace git ref 更新由 `workspace/src/workspace/workspace_mcp_server.rs` 在 MCP 通知
 `_meta["peri/messageKind"]` 中逐条声明 `info`；其他 MCP server 可按同一字段声明
@@ -57,7 +59,7 @@ Workspace 后台 Bash 当前运行时入口：`workspace/src/shell_tasks.rs` 持
 
 - `peri-middlewares/src/mcp/builtin/builtin_registry.rs` 持有 builtin 配置 overlay、实例关闭策略与名称映射；`dispatch.rs` 构造新 crate 导出的 handler。
 - `context.rs` 持有注入给 server 的宿主上下文，`runtime.rs` 持有内存 transport、server task 与有界关闭；Cron tick 监督也在这里。
-- `peri mcp-start <instance> --stdio|--http [--host HOST] [--port PORT] [--workspace DIR]`：`web` / `artifact` / `cron` / `monitor` / `workspace` / `workflow` 全部进程内服务（HTTP 为 `/mcp` 的 Streamable HTTP）；`workflow` 无 ACP Host 时是 slot-only，运行时未绑定即返回 typed error。
+- `peri mcp-start <instance> --stdio|--http [--host HOST] [--port PORT] [--workspace DIR]`：`web` / `artifact` / `cron` / `monitor` / `workspace` / `workflow` 全部进程内服务（HTTP 为 `/mcp` 的 Streamable HTTP）；`workflow` 无 ACP Host 时是 slot-only，运行时未绑定即返回 typed error。兼容期形式保持不变；v5 形式 `peri mcp-start --capability <name[,name...]|all|none> ...` 与 `<workspace>/.mcp.json` 的 `mcpServers.peri.x-peri.capabilities`（键名待生态复核）由 `peri-config/src/mcp_capabilities.rs` 解析，优先级 CLI > `.mcp.json` > 默认（全开）；旧六条目映射到能力开关，旧 `*Middleware` 键映射或 typed error。选择结果由 `peri-middlewares::mcp::builtin::router` 的单出口聚合；单能力与多能力都走同一 router，不再映射回旧实例。
 - `peri-acp-types` 持有 builtin 实例与工具声明、名称及 direct/deferred 策略。插件 crate 不复制这些策略表。
 - 各插件 crate 内测试覆盖工具行为、handler 路由和 RMCP wire；host transport、dispatch、bridge、policy、tick 与 pool lifecycle 测试留在对应宿主 crate。
 - builtin 派发 Skill（`resources/builtin/skills/{ultracode,multitask}/SKILL.md`）正文带能力预检：表里「谁能跑命令」是对 shipped Agent 定义（`workspace/.../builtin/agents/*.md` 与 `web/src/agents/*.md`）frontmatter 的声明，由 `resources/builtin_skill_capability_test.rs` 从两张 `BUILTIN_AGENTS` 静态表现算逐行核对（缺行、多行、取值非法、与定义冲突都判失败），并用 `plan` + 命令 brief 这类负例证明预检在派发前就给出缺口；`explorer` 用显式 `tools: [Read, Grep, Glob, ReadContextArchive]` 声明工具级只读（表中 runs commands=no），能力表与定义由同一 checker 锁定。provider 侧仍不做能力解释，`resources/agents.rs` 的边界不变。

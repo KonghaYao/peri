@@ -256,13 +256,21 @@ async fn restricted_deployment_omits_local_optional_capabilities_in_session() {
     .await
     .expect("restricted session reloads");
     assert!(shared.lock().await.contains_key(&id));
-    assert!(shared.lock().await[&id]
+    let disabled = shared.lock().await[&id]
         .frozen
         .as_ref()
         .unwrap()
         .meta_harness()
         .disabled_middlewares
-        .contains("CronMiddleware"));
+        .clone();
+    assert!(
+        disabled.contains("cron"),
+        "部署关闭必须按 v5 能力身份写入冻结集"
+    );
+    assert!(
+        peri_middlewares::assembly::builtin_closed_instances(&disabled).contains("cron"),
+        "兼容期实例关闭集必须由同一能力映射派生"
+    );
     crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": id}),
