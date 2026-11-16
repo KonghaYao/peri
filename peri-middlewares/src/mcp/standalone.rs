@@ -110,7 +110,18 @@ async fn run_router(
             .await
         }
     };
-    cleanup_workspace(workspace_handle, served).await
+    // 只有装配了 workspace 能力才存在 shell 任务；关闭 workspace 不是清理失败。
+    let cleanup = match workspace_handle {
+        Some(server) => server.shutdown_shell_tasks().await,
+        None => None,
+    };
+    served?;
+    if let Some(report) = cleanup {
+        if report != peri_acp_types::tasks::TaskShutdownReport::Complete {
+            anyhow::bail!("Workspace shell task cleanup incomplete");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(not(target_os = "emscripten"))]

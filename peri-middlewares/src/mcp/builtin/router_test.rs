@@ -573,3 +573,12 @@ async fn get_task_routes_by_capability_prefix() {
     );
     assert_eq!(unknown.code, rmcp::model::ErrorCode::INVALID_PARAMS);
 }
+
+#[test]
+fn router_without_workspace_has_no_cleanup_handle() {
+    let template =
+        RouterTemplate::new(&["web".to_owned()], std::env::temp_dir()).expect("web-only template");
+    assert!(template.workspace_handle().is_none());
+    let router = template.create().expect("web-only router");
+    assert_eq!(router.effective_capabilities(), vec!["web"]);
+}
