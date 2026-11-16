@@ -110,6 +110,7 @@ async fn test_cancel_drains_elicitation_before_turn_terminal() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn test_new_immediate_post_response_notification_buffered_until_commit() {
     let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);

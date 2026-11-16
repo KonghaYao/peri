@@ -46,6 +46,89 @@ fn context(surface: EntrySurface) -> EntryRenderContext {
 
 #[test]
 #[serial_test::serial]
+fn genui_buttons_rebuild_for_width_theme_and_transition_changes() {
+    let original = Arc::clone(&peri_theme::atoms::THEME_ATOM.state().read());
+    let mut cache = EntryRenderCache::default();
+    let text = format!(
+        "before\n\n```gen-ui\nroot = Stack([Card([Text(\"{}\"), Button(\"继续\", @ToAssistant(\"next\"))], \"标题\")])\n```\n\nafter",
+        "宽度变化的内容 ".repeat(20)
+    );
+    let TuiRenderUnit::TuiAssistantBubble(mut bubble) = bubble(&text) else {
+        unreachable!()
+    };
+    Arc::make_mut(&mut bubble).started_at = Some(peri_time::monotonic_now());
+    let vm = TuiRenderUnit::TuiAssistantBubble(bubble);
+    let mut previous_row = None;
+    let mut previous_style = None;
+    for (width, theme) in [
+        (80, peri_theme::builtin::dark_theme()),
+        (40, peri_theme::builtin::dark_theme()),
+        (40, peri_theme::builtin::light_theme()),
+    ] {
+        let theme = Arc::new(theme);
+        peri_theme::atoms::init_theme_atoms(Arc::clone(&theme));
+        let context = EntryRenderContext {
+            theme,
+            ..context(EntrySurface::Message)
+        };
+        let grid = GridSpec::grid_for(width);
+        let invalidation = cache.ensure(
+            &vm,
+            &grid,
+            context,
+            0,
+            ZoneTransition::ExitProcess(TextLineSource::Assistant),
+        );
+        assert!(matches!(
+            invalidation,
+            EntryInvalidation::Content | EntryInvalidation::Layout
+        ));
+        let [button] = cache.genui_buttons() else {
+            panic!("应暴露一个按钮命中区");
+        };
+        assert_eq!(button.line_end, button.line_start + 1);
+        assert!(
+            cache
+                .line(button.line_start)
+                .unwrap()
+                .to_string()
+                .contains("[ 继续 ]")
+        );
+        assert!(
+            cache
+                .markdown_lines()
+                .genui_ranges
+                .iter()
+                .any(|range| range.contains(&button.line_start))
+        );
+        if width == 80 {
+            previous_row = Some(button.line_start);
+        } else {
+            assert!(button.line_start > previous_row.unwrap());
+        }
+        let style = cache
+            .line(button.line_start)
+            .unwrap()
+            .spans
+            .iter()
+            .find(|span| span.content.contains("[ 继续 ]"))
+            .unwrap()
+            .style;
+        if let Some(previous_style) = previous_style {
+            assert_ne!(style, previous_style);
+        }
+        if width == 40 {
+            previous_style = Some(style);
+        }
+    }
+    cache.evict();
+    assert!(cache.genui_buttons().is_empty());
+    assert!(cache.markdown_lines().genui_ranges.is_empty());
+    peri_theme::atoms::init_theme_atoms(original);
+}
+
+#[test]
+#[serial_test::serial]
 fn unchanged_entry_has_no_parse_or_wrap_work() {
     let mut cache = EntryRenderCache::default();
     let vm = bubble("# cached body");

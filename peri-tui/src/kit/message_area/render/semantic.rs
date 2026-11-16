@@ -4,6 +4,11 @@ use unicode_width::UnicodeWidthStr;
 
 use super::group::SUBAGENT_TOOL_LINES;
 
+pub(crate) fn is_genui_line(ranges: &[std::ops::Range<usize>], logical: usize) -> bool {
+    // 按同帧布局跳过整个结构段，不能从框线字形猜测来源或重新解析消息。
+    ranges.iter().any(|range| range.contains(&logical))
+}
+
 /// §9 语义复制（D3）：按 VM 变体从渲染行提取「语义文本」——复制内容而非
 /// 屏幕像素。供 `extract_visual_range`（selection.rs）在复制时调用（事件时点，
 /// 非渲染路径）；md 复制按钮路径（复制原始 markdown）不动。

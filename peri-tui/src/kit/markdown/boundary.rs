@@ -36,6 +36,14 @@ pub(super) fn stable_end(input: &str, start: usize) -> usize {
         if let Some(marker @ (b'`' | b'~')) = trimmed.bytes().next() {
             let length = trimmed.bytes().take_while(|byte| *byte == marker).count();
             if length >= 3 {
+                let tag = trimmed[length..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default();
+                if tag.eq_ignore_ascii_case("gen-ui") || tag.eq_ignore_ascii_case("gen-ui-partial")
+                {
+                    break;
+                }
                 if marker == b'`' && trimmed[length..].contains('`') {
                     break;
                 }

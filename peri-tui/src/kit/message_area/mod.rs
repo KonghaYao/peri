@@ -8,6 +8,7 @@
 
 mod entry_nav;
 mod footer;
+mod genui_action;
 pub(crate) mod grid;
 mod handlers;
 mod hits;

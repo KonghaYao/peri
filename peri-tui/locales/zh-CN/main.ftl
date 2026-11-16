@@ -828,6 +828,9 @@ msg-spinner-tokens = · ↓ { $count } tokens
 msg-spinner-brewed =   ✻  处理耗时 { $duration }
 msg-keepgoing = 继续
 msg-copy-md = 复制
+genui-run-unsupported = gen-ui：TUI 不支持 @Run、Query 和 Mutation。
+genui-open-url-unsupported = gen-ui：TUI 不支持 @OpenUrl。
+genui-action-failed = gen-ui 动作失败：{ $error }
 msg-tip-prefix =   ⎿  提示: 
 msg-todo-available =  (可开始)
 

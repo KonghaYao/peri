@@ -30,6 +30,7 @@ pub mod event_handlers;
 pub mod exit_hint;
 pub mod focus_router;
 pub(crate) mod fold_overrides;
+pub mod genui;
 pub mod history_page_consumer;
 pub mod history_paging;
 pub mod history_window;

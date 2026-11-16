@@ -319,21 +319,52 @@ pub(crate) fn convert_to_segments_with_state(
                     }
                 }
                 ParsedBlock::CodeBlock(lang, code_lines) => {
-                    for line in super::code_block::code_block_lines(lang, code_lines, theme) {
-                        for mut visual_line in wrap_styled_line(&line, max_width) {
-                            // code block 的背景必须覆盖整个 content 区，而不只是已有字符。
-                            // 折行后逐视觉行补齐，保证超长代码的每一行也铺满右侧。
-                            let width = visual_line.width();
-                            if width < max_width
-                                && let Some(background) =
-                                    visual_line.spans.first().and_then(|span| span.style.bg)
-                            {
-                                visual_line.spans.push(Span::styled(
-                                    " ".repeat(max_width - width),
-                                    Style::default().bg(background),
-                                ));
+                    if lang == "gen-ui" || lang == "gen-ui-partial" {
+                        trim_trailing_blanks(&mut state.current_text);
+                        if !state.current_text.is_empty() {
+                            state.segments.push(MarkdownSegment::Text(std::mem::take(
+                                &mut state.current_text,
+                            )));
+                        }
+                        let source = code_lines
+                            .join("\n")
+                            .replace(super::parser::GENUI_BACKTICKS, "```");
+                        match crate::kit::genui::library::library() {
+                            Ok(library) => state.segments.push(MarkdownSegment::GenUi(
+                                super::types::GenUiSegment::parse(
+                                    source,
+                                    lang == "gen-ui-partial",
+                                    library,
+                                ),
+                            )),
+                            Err(error) => {
+                                let theme_state = peri_theme::atoms::THEME_ATOM.state();
+                                let muted = theme_state.read().semantic.text.muted;
+                                state.current_text.push(Line::from(Span::styled(
+                                    format!("gen-ui: {error}"),
+                                    base_style.fg(muted),
+                                )));
                             }
-                            state.current_text.push(visual_line);
+                        }
+                        // 旧测试缓存不能续跑已移出的结构段，沿用动态块的失效条件。
+                        state.has_table_in_processed_blocks = true;
+                    } else {
+                        for line in super::code_block::code_block_lines(lang, code_lines, theme) {
+                            for mut visual_line in wrap_styled_line(&line, max_width) {
+                                // code block 的背景必须覆盖整个 content 区，而不只是已有字符。
+                                // 折行后逐视觉行补齐，保证超长代码的每一行也铺满右侧。
+                                let width = visual_line.width();
+                                if width < max_width
+                                    && let Some(background) =
+                                        visual_line.spans.first().and_then(|span| span.style.bg)
+                                {
+                                    visual_line.spans.push(Span::styled(
+                                        " ".repeat(max_width - width),
+                                        Style::default().bg(background),
+                                    ));
+                                }
+                                state.current_text.push(visual_line);
+                            }
                         }
                     }
                 }

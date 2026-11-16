@@ -24,6 +24,7 @@ serial_test.workspace = true
 tracing-subscriber.workspace = true
 [dependencies]
 peri-time.workspace = true
+peri-genui = { path = "../peri-genui" }
 serde.workspace = true
 # 3.0 批 3（tui-deps）依赖收紧豁免清单（见 scripts/import-exemptions.conf）：
 # - peri-middlewares：插件子系统直读（cli_plugin.rs 命令面与 host_ports hook

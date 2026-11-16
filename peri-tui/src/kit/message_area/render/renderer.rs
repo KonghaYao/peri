@@ -9,6 +9,7 @@ use super::{error, group, helpers, interaction, reasoning, system, tool_card, us
 use std::sync::Arc;
 
 use crate::i18n;
+use crate::kit::genui::GenUiButtonInfo;
 
 use crate::kit::message_area::grid::{GridSpec, ZoneTransition};
 use crate::kit::tui_render_unit::TuiRenderUnit;
@@ -52,6 +53,16 @@ pub(crate) struct ImageLineInfo {
     /// hover 时不再 stat（§4.4 stat 时机取舍）。
     pub(crate) size_text: String,
 }
+
+/// `vm_to_lines_cached_with_layout` 的渲染产物：行、复制按钮、交互布局、
+/// 图片行、GenUI 按钮。元组过长，用别名避免调用方被类型签名淹没。
+type RenderOutput = (
+    Vec<Line<'static>>,
+    Option<CopyButtonInfo>,
+    Option<InteractionLayout>,
+    Vec<ImageLineInfo>,
+    Vec<GenUiButtonInfo>,
+);
 
 /// md 复制按钮的最小内容长度（字符数，`chars().count()` 口径——与复制反馈
 /// `mark_copy_message` 同一计数方式）。短消息直接选中复制即可，不渲染按钮，
@@ -139,14 +150,15 @@ pub(crate) fn vm_to_lines_cached(
     Option<InteractionLayout>,
     Vec<ImageLineInfo>,
 ) {
-    vm_to_lines_cached_with_layout(
+    let (lines, copy_button, interaction, image_lines, _) = vm_to_lines_cached_with_layout(
         vm,
         grid,
         md_cache,
         None,
         render_copy_button,
         ZoneTransition::None,
-    )
+    );
+    (lines, copy_button, interaction, image_lines)
 }
 
 /// `transition` 为 entry 的过程区转场形态（§6，transcript 按相邻 entry 的起止
@@ -160,13 +172,13 @@ pub(crate) fn vm_to_lines_cached_with_layout(
     md_lines: Option<&mut crate::kit::message_area::vm_cache::MarkdownLineCache>,
     render_copy_button: bool,
     transition: ZoneTransition,
-) -> (
-    Vec<Line<'static>>,
-    Option<CopyButtonInfo>,
-    Option<InteractionLayout>,
-    Vec<ImageLineInfo>,
-) {
+) -> RenderOutput {
     let mut md_lines = md_lines;
+    if let Some(layout) = md_lines.as_deref_mut() {
+        layout.genui_ranges.clear();
+        layout.genui_blocks.clear();
+    }
+    let mut genui_buttons = Vec::new();
     let rendered = match vm {
         TuiRenderUnit::TuiAssistantBubble(data) => {
             let mut lines: Vec<Line<'static>> = Vec::new();
@@ -177,7 +189,7 @@ pub(crate) fn vm_to_lines_cached_with_layout(
             // 台阶，上下也各保留 1 空行（过程带前缀）作分隔。reasoning 是过程
             // entry，不自行增加空行。空 bubble（无 text 无 reasoning）仍返回 0 行。
             if data.text.is_empty() && data.reasoning.is_none() {
-                return (lines, None, None, Vec::new());
+                return (lines, None, None, Vec::new(), Vec::new());
             }
 
             // AI 正文竖线颜色——正文行与前后 turn 节拍空行共用；主题值在
@@ -250,6 +262,16 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                         md_cache,
                     )
                 };
+                debug_assert!(
+                    rendered
+                        .stable
+                        .iter()
+                        .all(|chunk| chunk.iter().all(|segment| !matches!(
+                            segment,
+                            crate::kit::markdown::MarkdownSegment::GenUi(_)
+                        ))),
+                    "gen-ui must stay in the mutable Markdown tail"
+                );
                 if let Some(layout) = md_lines.as_deref_mut() {
                     layout.stable_start = Some(lines.len());
                     let stable_lines: Vec<_> = rendered
@@ -342,6 +364,32 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                                 // 前缀/空行逻辑与 Text 分支一致。
                                 for line in &img.lines {
                                     lines.push(body_line(line.clone()));
+                                }
+                            }
+                            crate::kit::markdown::MarkdownSegment::GenUi(segment) => {
+                                let theme_state = THEME_ATOM.state();
+                                let theme = theme_state.read();
+                                let mut rendered =
+                                    crate::kit::genui::render(segment, body_width, &theme);
+                                let start = lines.len();
+                                let prefix = if brief {
+                                    grid.process_prefix_width()
+                                } else {
+                                    grid.cont_prefix_width()
+                                }
+                                .min(u16::MAX as usize)
+                                    as u16;
+                                for button in &mut rendered.buttons {
+                                    button.line_start = button.line_start.saturating_add(start);
+                                    button.line_end = button.line_end.saturating_add(start);
+                                    button.x_start = button.x_start.saturating_add(prefix);
+                                    button.x_end = button.x_end.saturating_add(prefix);
+                                }
+                                lines.extend(rendered.lines.into_iter().map(&body_line));
+                                genui_buttons.extend(rendered.buttons);
+                                if let Some(layout) = md_lines.as_deref_mut() {
+                                    layout.genui_ranges.push(start..lines.len());
+                                    layout.genui_blocks.push(segment.block_id());
                                 }
                             }
                             crate::kit::markdown::MarkdownSegment::Table(data) => {
@@ -505,14 +553,22 @@ pub(crate) fn vm_to_lines_cached_with_layout(
             for info in image_lines.iter_mut() {
                 info.logical_idx += 1;
             }
-            if let Some(layout) = md_lines
-                && let Some(start) = layout.stable_start.as_mut()
-            {
-                *start += 1;
+            for button in &mut genui_buttons {
+                button.line_start = button.line_start.saturating_add(1);
+                button.line_end = button.line_end.saturating_add(1);
+            }
+            if let Some(layout) = md_lines {
+                if let Some(start) = layout.stable_start.as_mut() {
+                    *start += 1;
+                }
+                for range in &mut layout.genui_ranges {
+                    range.start = range.start.saturating_add(1);
+                    range.end = range.end.saturating_add(1);
+                }
             }
         }
     }
-    (lines, copy_button, interaction, image_lines)
+    (lines, copy_button, interaction, image_lines, genui_buttons)
 }
 
 /// running reasoning header 在 entry lines 中的索引：入口台阶（§6）占 lines[0]

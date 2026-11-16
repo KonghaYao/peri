@@ -117,6 +117,7 @@ pub(super) struct VmCacheSlot {
     pub(super) copy_button: Option<render::CopyButtonInfo>,
     pub(super) interaction: Option<render::InteractionLayout>,
     pub(super) image_lines: Vec<ImageLineInfo>,
+    pub(super) genui_buttons: Vec<crate::kit::genui::GenUiButtonInfo>,
 }
 
 impl VmCacheSlot {
@@ -135,6 +136,13 @@ impl VmCacheSlot {
                 layout.option_rows.capacity() * std::mem::size_of::<usize>()
                     + layout.option_cols.capacity() * std::mem::size_of::<Option<(u16, u16)>>()
             })
+            + self.genui_buttons.capacity()
+                * std::mem::size_of::<crate::kit::genui::GenUiButtonInfo>()
+            + self
+                .genui_buttons
+                .iter()
+                .map(|button| button.label.capacity() + button.action.retained_bytes())
+                .sum::<usize>()
             + self.image_lines.capacity() * std::mem::size_of::<ImageLineInfo>()
             + self
                 .image_lines
@@ -150,6 +158,7 @@ impl VmCacheSlot {
         self.copy_button = None;
         self.interaction = None;
         self.image_lines = Vec::new();
+        self.genui_buttons = Vec::new();
     }
 }
 

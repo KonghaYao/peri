@@ -1,0 +1,36 @@
+OpenUI Lang 1.0 fixtures：归属与覆盖边界
+
+来源：OpenUI commit 1e24d7f5，spec/fixtures/1.0。
+Copyright (c) 2011-2024 Thesys Inc.；MIT，完整许可见 ../../../LICENSE。
+本目录复制 library.json 及 grammar、entry、errors、evaluation、actions、state、
+streaming 的全部 54 个用例目录；原始 .oui/.json 文件保持不变。
+editing 的 5 个用例未复制：本阶段明确不实现程序编辑、GC 或 serialize。
+
+运行方式
+1. tests/conformance.rs 在内存中把 openui/openui-lang fence 转成 gen-ui，
+   提取并连接所有块后调用程序解析器；原始 fixture 不作修改。
+2. root 按 JSON 精确比较；errors 按带重复计数的字段声明比较；
+   unresolved/orphans 按集合比较；expected 中出现的 state/incomplete 也参与比较。
+   errorObjects 只核对上游声明的字段，不要求额外诊断完全相同。
+3. streaming/chunks.json 按 chunk 输入，最终结果同时与 expected 和批量解析比较。
+4. 53 个有程序输入的 fixture 均逐字符边界分成两段 push，并检查 finish 等于 batch；
+   另按原始文本逐字符增长、归一化后 set，再检查最终相等。
+   这包含被跳过的程序，但只验证 Rust 内部最终一致性，不代表其上游预期通过。
+5. interactions.json 原样保留，但不执行宿主事件、表单提交或后台任务；
+   state/actions 的活动测试只断言解析及纯求值结果，不代表完整交互一致性。
+6. grammar/010-roundtrip-tree 仅检查原始程序的树；不执行 serialize/parse 回环。
+7. Upper 由 runner 的同步纯函数回调提供，不增加运行时集成。
+
+明确跳过的 7 个 expected 检查（#[ignore]）
+- evaluation/001-kind-classify：包含 Query 声明；本移植必须显式返回 unsupported，
+  也不接受内联 Query；不能采用上游静默默认结果。
+- evaluation/012-kind-query-dollar-name：Query 不能作为 state 默认结果求值。
+- actions/006-query-rerun-on-state：Query 调度及重跑不在范围内。
+- actions/007-mutation-run：Mutation 执行不在范围内；Run 描述另有核心测试。
+- actions/008-tool-not-found-stops-plan：宿主执行器及动作失败中断不在范围内。
+- state/005-validation-rules：没有程序输入；结构化表单规则不是组件 JSON Schema 校验。
+- streaming/001-worked-example：Query 默认数据与本移植的显式 unsupported 契约冲突。
+
+计数口径
+54 个 fixture expected 中，47 个活动检查，7 个跳过；另有 1 个字符边界测试。
+核心回归测试独立计数；不将字符边界或宿主交互算成额外通过的上游 fixture。

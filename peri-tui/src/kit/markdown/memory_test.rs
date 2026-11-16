@@ -23,6 +23,24 @@ fn cache_for_source(source: &str) -> MarkdownRenderCache {
 }
 
 #[test]
+fn genui_source_and_internal_parse_tree_are_charged() {
+    let source = format!(
+        "```gen-ui\nroot = Stack([Text(\"{}\")])\n```",
+        "数据".repeat(256)
+    );
+    let cache = cache_for_source(&source);
+    let segment = cache.stable_chunks[0]
+        .iter()
+        .find_map(|segment| match segment {
+            MarkdownSegment::GenUi(segment) => Some(segment),
+            _ => None,
+        })
+        .unwrap();
+    assert!(segment.parsed.retained_bytes() > segment.source.len());
+    assert!(cache.retained_bytes() > segment.source.capacity() + segment.parsed.retained_bytes());
+}
+
+#[test]
 fn empty_and_reset_cache_have_no_retained_heap() {
     let mut cache = cache_for_source(&"paragraph\n\n".repeat(128));
     assert!(cache.retained_bytes() > 0);

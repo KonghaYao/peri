@@ -1,0 +1,16 @@
+peri-genui 是 OpenUI Lang 核心语义的 Rust 移植，采用 MIT 许可。
+
+上游：OpenUI，Thesys Inc.
+版本依据：commit 1e24d7f5。
+来源：packages/lang-core；本次移植时的本地副本为 /tmp/openui-src/packages/lang-core。
+Copyright (c) 2011-2024 Thesys Inc.
+完整上游许可见本目录 LICENSE。
+
+移植范围包括 lexer、AST、语句切分与自动补全、表达式解析、schema 编译、
+materialization、validation、内置函数、动作描述、纯求值及 prompt 生成。
+Rust 接口、错误处理、输入预算及 gen-ui 扫描器由 peri-genui 适配；
+没有移植 React、Zustand、宿主执行器、编辑/serialize、云服务或遥测。
+
+tests/fixtures/1.0 中的 library.json 和 54 个用例目录来自相同 commit 的
+spec/fixtures/1.0，按 MIT 许可原样复制；完整归属和测试覆盖边界见
+该目录的 NOTICE。Rust runner 不修改原 fixture，只在内存中归一化 fence。

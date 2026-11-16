@@ -31,5 +31,5 @@ pub(crate) use renderer::vm_to_lines_cached_with_layout;
 pub(crate) use self::error::{copy_text_at, subagent_error_buttons};
 pub(crate) use self::interaction::InteractionLayout;
 pub(crate) use self::reasoning::render_running_reasoning_header;
-pub(crate) use self::semantic::semantic_line_text;
+pub(crate) use self::semantic::{is_genui_line, semantic_line_text};
 pub(crate) use self::user::{parse_image_line, render_image_hover_line};

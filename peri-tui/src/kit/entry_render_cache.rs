@@ -4,6 +4,7 @@ use std::sync::Arc;
 use peri_theme::theme::ThemeDefinition;
 use ratatui_kit::ratatui::text::Line;
 
+use crate::kit::genui::GenUiButtonInfo;
 use crate::kit::markdown::MarkdownRenderCache;
 use crate::kit::message_area::grid::{GridSpec, ZoneTransition};
 use crate::kit::message_area::render::CopyButtonInfo;
@@ -48,6 +49,8 @@ pub(crate) struct EntryRenderCache {
     copy_button: Option<CopyButtonInfo>,
     interaction: Option<InteractionLayout>,
     image_lines: Vec<ImageLineInfo>,
+    genui_buttons: Vec<GenUiButtonInfo>,
+    genui_revisions: Vec<(crate::kit::genui::GenUiBlockId, u64)>,
 }
 
 impl EntryRenderCache {
@@ -72,7 +75,8 @@ impl EntryRenderCache {
             || self.context.as_ref().is_none_or(|previous| {
                 previous.language != context.language
                     || !Arc::ptr_eq(&previous.theme, &context.theme)
-            });
+            })
+            || self.genui_state_changed();
         let period = vm.animation_period_frames();
         let animated = period != 0 && self.frame / period != frame / period;
         let invalidation = if content_changed {
@@ -105,7 +109,7 @@ impl EntryRenderCache {
                     );
                 }
             } else {
-                let (lines, copy_button, interaction, image_lines) =
+                let (lines, copy_button, interaction, image_lines, genui_buttons) =
                     crate::kit::message_area::render::vm_to_lines_cached_with_layout(
                         vm,
                         grid,
@@ -118,10 +122,11 @@ impl EntryRenderCache {
                 self.copy_button = copy_button;
                 self.interaction = interaction;
                 self.image_lines = image_lines;
+                self.genui_buttons = genui_buttons;
             }
         } else {
             self.markdown_lines.stable_start = None;
-            let (lines, copy_button, interaction, image_lines) =
+            let (lines, copy_button, interaction, image_lines, genui_buttons) =
                 crate::kit::message_area::render::vm_to_lines_cached_with_layout(
                     vm,
                     grid,
@@ -134,7 +139,16 @@ impl EntryRenderCache {
             self.copy_button = copy_button;
             self.interaction = interaction;
             self.image_lines = image_lines;
+            self.genui_buttons = genui_buttons;
         }
+        self.genui_revisions = self
+            .markdown_lines
+            .genui_blocks
+            .iter()
+            .copied()
+            .chain(self.genui_buttons.iter().filter_map(|button| button.block))
+            .map(|id| (id, crate::kit::genui::view_state::block_revision(id)))
+            .collect();
         self.hash = Some(vm.content_hash());
         self.variant = Some(variant);
         self.grid = Some(*grid);
@@ -189,12 +203,25 @@ impl EntryRenderCache {
         &self.image_lines
     }
 
+    pub(crate) fn genui_state_changed(&self) -> bool {
+        self.genui_revisions
+            .iter()
+            .any(|&(id, revision)| crate::kit::genui::view_state::block_revision(id) != revision)
+    }
+
+    pub(crate) fn genui_buttons(&self) -> &[GenUiButtonInfo] {
+        &self.genui_buttons
+    }
+
     pub(crate) fn build_wrap_map(&self, width: u16) -> (usize, Vec<WrappedLineInfo>) {
         self.markdown_lines.build_slot_wrap_map(&self.lines, width)
     }
 
     pub(crate) fn evict(&mut self) {
+        // 冷历史仍保留小型版本键，状态改变后才能修正其高度，避免滚动索引沿用旧布局。
+        let genui_revisions = std::mem::take(&mut self.genui_revisions);
         *self = Self::default();
+        self.genui_revisions = genui_revisions;
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {
@@ -206,6 +233,16 @@ impl EntryRenderCache {
         self.markdown.retained_bytes()
             + crate::kit::retained_bytes::retained_arc_lines_bytes(&self.lines, seen)
             + self.markdown_lines.retained_bytes_with(seen)
+            + self.genui_revisions.capacity()
+                * std::mem::size_of::<(crate::kit::genui::GenUiBlockId, u64)>()
+            + self.markdown_lines.genui_blocks.capacity()
+                * std::mem::size_of::<crate::kit::genui::GenUiBlockId>()
+            + self.genui_buttons.capacity() * std::mem::size_of::<GenUiButtonInfo>()
+            + self
+                .genui_buttons
+                .iter()
+                .map(|button| button.label.capacity() + button.action.retained_bytes())
+                .sum::<usize>()
             + self.image_lines.capacity() * std::mem::size_of::<ImageLineInfo>()
             + self
                 .image_lines
@@ -236,6 +273,8 @@ pub(crate) struct MarkdownLineCache {
     pub(crate) width: u16,
     pub(crate) stable_start: Option<usize>,
     pub(crate) stable: Vec<MarkdownLineChunk>,
+    pub(crate) genui_ranges: Vec<std::ops::Range<usize>>,
+    pub(crate) genui_blocks: Vec<crate::kit::genui::GenUiBlockId>,
     prefix: Vec<usize>,
 }
 
@@ -342,6 +381,7 @@ impl MarkdownLineCache {
     fn retained_bytes_with(&self, seen: &mut crate::kit::retained_bytes::SeenAllocations) -> usize {
         self.stable.capacity() * std::mem::size_of::<MarkdownLineChunk>()
             + self.prefix.capacity() * std::mem::size_of::<usize>()
+            + self.genui_ranges.capacity() * std::mem::size_of::<std::ops::Range<usize>>()
             + self
                 .stable
                 .iter()
