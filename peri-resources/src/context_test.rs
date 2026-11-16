@@ -1,6 +1,5 @@
 //! context.rs 单元测试：`Resources::open_with` 显式路径语义。
 
-#[cfg(unix)]
 use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::session_resources::SessionStoreShutdownPort;
 use std::path::PathBuf;

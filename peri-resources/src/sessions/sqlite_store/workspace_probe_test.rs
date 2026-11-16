@@ -1,10 +1,12 @@
-use super::{Duration, Instant, Path, ThreadMeta};
+use super::{Path, ThreadMeta};
 use crate::sessions::SqliteThreadStore;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::store::ThreadStore;
 use peri_acp_types::workspace::ScopedThreadQuery;
 use peri_acp_types::workspace::ThreadScope;
 use std::io::Read;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 // ── 外部探测的时机与次数：写事务内不得执行外部进程 ──
 
