@@ -750,10 +750,7 @@ pub(super) async fn run_sync_subagent(
         stop_result = format!(
             "{agent_name} execution failed: {}",
             error.user_facing_message()
-        )
-        .chars()
-        .take(500)
-        .collect();
+        );
         stop_is_error = true;
         stop_failure = SubagentFailure::safe_failure_from_error(child_thread_id, &error);
     }
@@ -898,6 +895,8 @@ pub(super) async fn run_sync_subagent(
     }
 }
 
+/// `SubagentStop.result` 是子 agent 的最终输出，不在此处截断；显示层可在自己的
+/// 有界预览中裁剪，并负责标记省略。
 fn stop_projection(
     outcome: &ChildRunOutcome,
     agent_name: &str,
@@ -910,10 +909,7 @@ fn stop_projection(
 ) {
     match outcome {
         ChildRunOutcome::Settled => (
-            crate::session::subagent::util::extract_last_ai_text(session)
-                .chars()
-                .take(500)
-                .collect(),
+            crate::session::subagent::util::extract_last_ai_text(session),
             false,
             None,
         ),
@@ -922,10 +918,7 @@ fn stop_projection(
             let failure =
                 SubagentFailure::handed_off(&receipt.child_thread_id, agent_name, receipt.clone());
             (
-                format!("delegation incomplete: {}", failure.public_message())
-                    .chars()
-                    .take(500)
-                    .collect(),
+                format!("delegation incomplete: {}", failure.public_message()),
                 true,
                 failure.safe_failure(),
             )
@@ -934,10 +927,7 @@ fn stop_projection(
             format!(
                 "{agent_name} execution failed: {}",
                 error.user_facing_message()
-            )
-            .chars()
-            .take(500)
-            .collect(),
+            ),
             true,
             SubagentFailure::safe_failure_from_error(child_thread_id, error),
         ),
@@ -964,7 +954,7 @@ fn stop_projection(
                     SubagentFailure::safe_failure_from_error(child_thread_id, &error)
                 }
             };
-            (message.chars().take(500).collect(), true, safe)
+            (message, true, safe)
         }
     }
 }

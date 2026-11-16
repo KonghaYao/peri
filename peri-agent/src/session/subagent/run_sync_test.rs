@@ -738,6 +738,81 @@ async fn handoff_with_closing_parent_finishes_incomplete_without_registration() 
         .any(|task| task.task_id == "shell-task"));
     assert_eq!(parent_manager.active_count(), 0, "不得留下幽灵 sync task");
 }
+
+/// [#425] 同步路径把完整最终文本写入 `SubagentStop.result`，超过 500 字符时
+/// 末尾唯一标记必须保留。
+#[tokio::test]
+async fn settled_sync_subagent_stop_result_keeps_full_text_beyond_500_chars() {
+    use peri_acp_types::identity::AgentId;
+
+    const MARKER: &str = "SYNC_SUBAGENT_STOP_TAIL_MARKER";
+    let manager = Arc::new(TaskManager::new());
+    let (session, _owner, store) = bound_child_with_store(manager);
+    let child_id = session
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
+    store.register_bound_session(&child_id, "/tmp");
+    session.queue().push_sync(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        crate::messages::BaseMessage::human("run sync child"),
+    ));
+    let long_answer: &'static str =
+        Box::leak(format!("{}{MARKER}", "sync-result-".repeat(120)).into_boxed_str());
+    let built = context(&session, long_answer);
+    let mut observe = built.event_handles.subscribe_observe();
+    let run_store: Arc<dyn SessionResources> = store;
+
+    let outcome = crate::session::subagent::run_sync::run_sync_subagent(
+        &child_id,
+        "fixture",
+        "/tmp",
+        10,
+        None,
+        None,
+        None,
+        Some(run_store),
+        None,
+        None,
+        None,
+        Some(AgentId::new()),
+        None,
+        built,
+        session,
+        None,
+        None,
+    )
+    .await
+    .expect("sync child must settle");
+    assert!(matches!(outcome, ChildRunOutcome::Settled), "{outcome:?}");
+
+    let result = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match observe.recv().await {
+                Ok(crate::agent::events_v2::ObserveEvent::SubagentStop { result, .. }) => {
+                    return result;
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(error) => panic!("observe channel closed before SubagentStop: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("SubagentStop event");
+    assert!(
+        result.chars().count() > 500,
+        "SubagentStop.result 必须保留超过 500 字符的完整输出，实际 {} 字符",
+        result.chars().count()
+    );
+    assert!(
+        result.ends_with(MARKER),
+        "SubagentStop.result 必须保留末尾标记，实际结尾: {}",
+        &result[result.len().saturating_sub(80)..]
+    );
+}
+
 include!("run_sync_handoff_lifecycle_test.rs");
 
 #[path = "run_sync_cancellation_test.rs"]
