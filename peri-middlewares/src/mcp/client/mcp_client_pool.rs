@@ -22,6 +22,8 @@ pub struct McpClientPool {
     pub(super) workspace_scope: std::sync::OnceLock<peri_acp_types::workspace::WorkspaceId>,
     pub(in crate::mcp) configuration_snapshot:
         std::sync::OnceLock<Arc<peri_config::ConfigurationSnapshot>>,
+    pub(in crate::mcp) frozen_builtin_mode:
+        std::sync::OnceLock<peri_acp_types::builtin_mcp::BuiltinAssemblyMode>,
     pub(in crate::mcp) session_servers: std::sync::OnceLock<HashMap<String, McpServerConfig>>,
     pub(super) credential_client:
         std::sync::OnceLock<super::super::auth_store::OAuthCredentialClient>,
@@ -235,6 +237,7 @@ impl McpClientPool {
             cache_policy: std::sync::OnceLock::new(),
             workspace_scope: std::sync::OnceLock::new(),
             configuration_snapshot: std::sync::OnceLock::new(),
+            frozen_builtin_mode: std::sync::OnceLock::new(),
             session_servers: std::sync::OnceLock::new(),
             credential_client: std::sync::OnceLock::new(),
             builtin_available: std::sync::atomic::AtomicBool::new(true),
@@ -404,6 +407,24 @@ impl McpClientPool {
             std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 "MCP configuration snapshot is already bound",
+            )
+        })
+    }
+
+    pub fn set_frozen_builtin_mode(
+        &self,
+        mode: peri_acp_types::builtin_mcp::BuiltinAssemblyMode,
+    ) -> std::io::Result<()> {
+        let context = self.builtin_context.lock();
+        if context.initialize_started || !self.is_open() {
+            return Err(std::io::Error::other(
+                "builtin assembly mode must be bound before MCP initialization",
+            ));
+        }
+        self.frozen_builtin_mode.set(mode).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "builtin assembly mode is already bound",
             )
         })
     }

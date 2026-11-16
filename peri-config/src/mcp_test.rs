@@ -82,6 +82,30 @@ fn builtin_switch_disables_only_for_off_and_zero() {
 }
 
 #[test]
+fn builtin_assembly_mode_distinguishes_legacy_and_single_exit() {
+    use peri_acp_types::builtin_mcp::BuiltinAssemblyMode;
+
+    assert_eq!(
+        super::builtin_assembly_mode(&BTreeMap::new()),
+        BuiltinAssemblyMode::SingleExit
+    );
+    for (setting, expected) in [
+        ("legacy", BuiltinAssemblyMode::LegacyInstances),
+        ("V4", BuiltinAssemblyMode::LegacyInstances),
+        ("v5", BuiltinAssemblyMode::SingleExit),
+        ("off", BuiltinAssemblyMode::Disabled),
+    ] {
+        assert_eq!(
+            super::builtin_assembly_mode(&BTreeMap::from([(
+                MCP_BUILTIN_ENV.to_string(),
+                setting.to_string()
+            )])),
+            expected
+        );
+    }
+}
+
+#[test]
 fn plugin_servers_are_namespaced_and_deduplicated_against_manual_servers() {
     assert_eq!(
         super::plugin_server_name("sample", "search"),

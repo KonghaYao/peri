@@ -44,6 +44,20 @@ pub(crate) struct PreparedConfiguration {
     pub(crate) provider: LlmProvider,
 }
 
+impl PreparedConfiguration {
+    pub(crate) fn builtin_assembly_mode(&self) -> peri_acp_types::builtin_mcp::BuiltinAssemblyMode {
+        self.config_source
+            .snapshot()
+            .map(|snapshot| snapshot.builtin_assembly_mode())
+            .unwrap_or_else(|| {
+                let environment =
+                    peri_config::source::read_environment(&[peri_config::mcp::MCP_BUILTIN_ENV])
+                        .unwrap_or_default();
+                peri_config::mcp::builtin_assembly_mode(&environment)
+            })
+    }
+}
+
 /// 会话准备输入（一次准备、后续只读消费）。
 pub(crate) struct PreparedSessionInputs {
     /// 规范化后的执行目录。
@@ -183,14 +197,13 @@ impl PreparedSessionInputs {
                 instructions,
                 &deployment_closed,
             );
+        let mut context = frozen.v2_frozen().clone();
+        context.builtin_assembly_mode = self.configuration.builtin_assembly_mode();
         if let Some(agent_instructions) = self.agent_instructions.as_deref() {
-            let mut context = frozen.v2_frozen().clone();
             context.external_instructions = Some(Arc::from(agent_instructions));
-            frozen = FrozenSessionData::from_frozen_parts(
-                context,
-                frozen.claude_local_md().map(Arc::from),
-            );
         }
+        frozen =
+            FrozenSessionData::from_frozen_parts(context, frozen.claude_local_md().map(Arc::from));
         let encoded = frozen_snapshot::encode_frozen_snapshot(&frozen).map_err(|error| {
             AcpError::new(-32603, format!("Frozen snapshot encode failed: {error}"))
         })?;

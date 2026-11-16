@@ -40,7 +40,7 @@
 | V5-W | 代理 wire | 并发 request id 不串线；取消、进度 token、任务 id/owner、通知、资源订阅与读取、`skills/list`、`skills/get`、`image/read` 透传；上游断线不拖垮其他能力；重连不误接旧任务；资源 URI 保持原名。 | wire-level 测试，不得只用 `tools/list` 通过代替；覆盖并发、取消、断线、重连与三个 workspace 扩展方法。 | 部分：`UpstreamProxy` mock-peer wire 与 router 代理测试通过；Sandbox upstream 端到端与宿主代理接线未验证 |
 | V5-L | 降级与生命周期 | 单能力初始化失败仍保留其他能力；readiness、授权、目录与诊断使用同一运行时能力投影；warning 在会话诊断与 MCP 面板/快照可见；全部能力失败才 fail-closed；能力 panic 不终止 transport；关闭有界收敛且无遗留任务或订阅。 | 故障注入测试 + 诊断/面板投影断言 + 关闭后任务表/订阅表检查。 | 部分：router 降级/panic/全失败 fail-closed 与宿主关闭收敛有 crate 测试；面板/诊断投影与故障注入未全量执行 |
 | V5-N | 命名、审批与历史 | 新 deferred 名为 `mcp__peri__*`；direct 保持原名；旧 transcript 名只做非执行归一；审批按 `(capability, original_name)`；v5 路由不执行 builtin 的 `mcp__<capability>__*` 旧名，v4 路径（`PERI_MCP_BUILTIN=legacy`）继续执行其旧名直到 M4；外部 server 的同形名称不受影响；同出口原始名冲突/跨能力重名/`peri` 被用户抢占在加载期拒绝。 | 工具桥、ToolSearch、审批与历史加载测试；v5 路由负向调用 builtin 旧名必须失败，v4 路径旧名仍可执行，外部同形名称照常可调用。 | 部分：工具桥、ToolSearch、审批与加载期保留名单测通过；真实 transcript 与外部同形 server wire 未执行 |
-| V5-M | 迁移与回滚 | 六实例旧会话行为不变；新会话可在影子/默认路径间独立选择；外部 stdio/HTTP/ACP MCP 不受影响；切换前后首个模型请求、冻结配置能力集与运行时能力投影可对账；回滚只影响新会话，不热切换已冻结会话。 | 新旧会话对照记录；冻结配置能力集与运行时投影快照；回滚后旧会话 transcript 与工具面不变。 | 部分：默认切换与 `PERI_MCP_BUILTIN=legacy` 回滚路径有测试；未引入按会话选择的 beta flag（回滚是部署级），新旧会话对照、观察窗口与外部路径全量回归未执行 |
+| V5-M | 迁移与回滚 | 六实例旧会话行为不变；新会话可在影子/默认路径间独立选择；外部 stdio/HTTP/ACP MCP 不受影响；切换前后首个模型请求、冻结配置能力集与运行时能力投影可对账；回滚只影响新会话，不热切换已冻结会话。 | 新旧会话对照记录；冻结配置能力集与运行时投影快照；回滚后旧会话 transcript 与工具面不变。 | 部分：默认切换与 `PERI_MCP_BUILTIN=legacy` 回滚路径有测试；冷恢复装配模式随 `FrozenSnapshotV4` 持久化、旧 V1–V3 默认为 v4，并有配置加载逆向覆盖测试；未引入按会话选择的 beta flag，新旧会话对照、观察窗口与外部路径全量回归未执行 |
 
 ### 3.1 逐能力 presence/absence 明细
 

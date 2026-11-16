@@ -325,9 +325,30 @@ pub(crate) fn load_merged_config_full_with_capabilities(
     plugin_discovery_available: bool,
     plugin_face_closed: bool,
 ) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
+    load_merged_config_full_with_policy(
+        cwd,
+        claude_home,
+        builtin_available,
+        plugin_discovery_available,
+        plugin_face_closed,
+        None,
+    )
+}
+
+pub(crate) fn load_merged_config_full_with_policy(
+    cwd: &Path,
+    claude_home: &Path,
+    builtin_available: bool,
+    plugin_discovery_available: bool,
+    plugin_face_closed: bool,
+    frozen_mode: Option<peri_acp_types::builtin_mcp::BuiltinAssemblyMode>,
+) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
     let global_path = peri_config::io::global_config_path();
     let policy = if builtin_available {
-        super::builtin::builtin_injection_policy_from_env()
+        frozen_mode.map_or_else(
+            super::builtin::builtin_injection_policy_from_env,
+            crate::platform::builtin_policy_for_mode,
+        )
     } else {
         super::builtin::BuiltinInjectionPolicy::none()
     };
@@ -345,8 +366,22 @@ pub(crate) fn load_merged_config_full_with_capabilities(
 
 /// Bare 保留本地文件/终端能力，不读取用户、插件或项目 MCP 配置。
 /// 显式运维关闭仍生效；工具声明和校验复用普通配置路径的同一实现。
+#[cfg(test)]
 pub(crate) fn load_bare_config() -> Result<McpConfigFile, McpConfigError> {
-    let policy = crate::platform::builtin_workspace_policy(true);
+    load_bare_config_with_mode(None)
+}
+
+pub(crate) fn load_bare_config_with_mode(
+    frozen_mode: Option<peri_acp_types::builtin_mcp::BuiltinAssemblyMode>,
+) -> Result<McpConfigFile, McpConfigError> {
+    let policy = frozen_mode.map_or_else(
+        || crate::platform::builtin_workspace_policy(true),
+        |mode| {
+            crate::platform::builtin_workspace_policy_for_mode(
+                crate::platform::builtin_policy_for_mode(mode),
+            )
+        },
+    );
     let environment = cache_environment_input()?;
     let mut config = peri_config::mcp::resolve_from_files(
         &McpConfigFile::default(),
@@ -460,6 +495,7 @@ pub(crate) fn load_merged_config_from_snapshot(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn load_merged_config_from_snapshot_with_capabilities(
     cwd: &Path,
     claude_home: &Path,
@@ -467,6 +503,26 @@ pub(crate) fn load_merged_config_from_snapshot_with_capabilities(
     builtin_available: bool,
     plugin_discovery_available: bool,
     plugin_face_closed: bool,
+) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
+    load_merged_config_from_snapshot_with_policy(
+        cwd,
+        claude_home,
+        snapshot,
+        builtin_available,
+        plugin_discovery_available,
+        plugin_face_closed,
+        None,
+    )
+}
+
+pub(crate) fn load_merged_config_from_snapshot_with_policy(
+    cwd: &Path,
+    claude_home: &Path,
+    snapshot: &peri_config::ConfigurationSnapshot,
+    builtin_available: bool,
+    plugin_discovery_available: bool,
+    plugin_face_closed: bool,
+    frozen_mode: Option<peri_acp_types::builtin_mcp::BuiltinAssemblyMode>,
 ) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
     let snapshot_cwd = &snapshot.scope().cwd;
     if snapshot_cwd != cwd
@@ -484,7 +540,9 @@ pub(crate) fn load_merged_config_from_snapshot_with_capabilities(
         load_plugin_mcp_servers(claude_home, plugin_discovery_available, plugin_face_closed);
     let merged = snapshot.mcp_with_plugins(&plugin_servers)?;
     let policy = if builtin_available {
-        crate::platform::builtin_policy(snapshot.builtin_mcp_enabled())
+        crate::platform::builtin_policy_for_mode(
+            frozen_mode.unwrap_or_else(|| snapshot.builtin_assembly_mode()),
+        )
     } else {
         super::builtin::BuiltinInjectionPolicy::none()
     };
@@ -492,11 +550,23 @@ pub(crate) fn load_merged_config_from_snapshot_with_capabilities(
     Ok((merged, plugin_sources))
 }
 
+#[cfg(test)]
 pub(crate) fn load_bare_config_from_snapshot(
     snapshot: &peri_config::ConfigurationSnapshot,
 ) -> Result<McpConfigFile, McpConfigError> {
+    load_bare_config_from_snapshot_with_mode(snapshot, None)
+}
+
+pub(crate) fn load_bare_config_from_snapshot_with_mode(
+    snapshot: &peri_config::ConfigurationSnapshot,
+    frozen_mode: Option<peri_acp_types::builtin_mcp::BuiltinAssemblyMode>,
+) -> Result<McpConfigFile, McpConfigError> {
     let mut config = snapshot.bare_mcp()?;
-    let policy = crate::platform::builtin_workspace_policy(snapshot.builtin_mcp_enabled());
+    let policy = crate::platform::builtin_workspace_policy_for_mode(
+        crate::platform::builtin_policy_for_mode(
+            frozen_mode.unwrap_or_else(|| snapshot.builtin_assembly_mode()),
+        ),
+    );
     super::builtin::apply_builtin_overlay(&mut config.mcp_servers, &policy)
         .map_err(builtin_overlay_error)?;
     config.mcp_servers.retain(|name, _| {

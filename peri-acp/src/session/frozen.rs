@@ -169,6 +169,7 @@ impl SessionManager {
             // beta flag 冻结值（设计 §消费契约）：装配期从配置快照投影一次，随冻结
             // 载体传播；SubAgent/fork 复用同一份，执行路径不重读配置。
             beta_flags: beta_flags.clone(),
+            builtin_assembly_mode: peri_acp_types::builtin_mcp::BuiltinAssemblyMode::SingleExit,
             runtime_env: frozen_runtime_env,
         };
 

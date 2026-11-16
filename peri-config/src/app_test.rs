@@ -47,6 +47,30 @@ fn all_known_middleware_keys() -> Vec<&'static str> {
         .collect()
 }
 
+#[test]
+fn all_disabled_detects_canonical_and_legacy_capability_switches() {
+    let middleware = MIDDLEWARE_NAMES
+        .iter()
+        .map(|name| ((*name).to_owned(), false));
+    for switches in [
+        peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
+            .iter()
+            .map(|capability| capability.name)
+            .collect::<Vec<_>>(),
+        peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
+            .iter()
+            .map(|capability| capability.legacy_policy_key)
+            .collect::<Vec<_>>(),
+    ] {
+        let mut map: HashMap<String, bool> = middleware.clone().collect();
+        map.extend(switches.into_iter().map(|name| (name.to_owned(), false)));
+        assert!(super::all_middleware_disabled(&map));
+        map.insert("web".to_owned(), true);
+        map.insert("WebMiddleware".to_owned(), true);
+        assert!(!super::all_middleware_disabled(&map));
+    }
+}
+
 fn make_global() -> AppConfig {
     AppConfig {
         active_alias: "sonnet".to_string(),

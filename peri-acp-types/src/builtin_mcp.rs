@@ -17,7 +17,18 @@
 
 use std::sync::LazyLock;
 
+use serde::{Deserialize, Serialize};
+
 use v5::CapabilityTool;
+
+/// Session-frozen builtin assembly choice; independent of the live deployment environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinAssemblyMode {
+    SingleExit,
+    LegacyInstances,
+    Disabled,
+}
 
 /// 迁移期 v4 工具视图（字段与 v5 声明一致；`legacy_name` 只用于旧展示/匹配）。
 pub type BuiltinMcpTool = CapabilityTool;

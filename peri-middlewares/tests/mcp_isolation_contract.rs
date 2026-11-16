@@ -19,7 +19,7 @@
 //!
 //! 最后一条用例（`instances_have_independent_transport_task_and_state`，I01 / §8 第 15 行）
 //! 走**另一条路径**：不做 `PERI_MCP_BUILTIN=off`，而是按生产装配步骤注入上下文后让真实
-//! builtin `cron` 连上，断言其 transport / server task / 状态对象与 stdio server 互不共享，
+//! builtin `cron` 在显式 v4 回滚模式下连上，断言其 transport / server task / 状态对象与 stdio server 互不共享，
 //! 以及 close / reconnect / pool shutdown 的收敛面（与上面四条 stdio 用例**不同**，见其
 //! 函数文档）。
 //!

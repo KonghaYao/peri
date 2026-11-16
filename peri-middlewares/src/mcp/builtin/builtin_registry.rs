@@ -31,6 +31,17 @@ pub(crate) struct BuiltinInjectionPolicy {
 }
 
 impl BuiltinInjectionPolicy {
+    pub(crate) fn from_assembly_mode(
+        mode: peri_acp_types::builtin_mcp::BuiltinAssemblyMode,
+    ) -> Self {
+        use peri_acp_types::builtin_mcp::BuiltinAssemblyMode;
+        match mode {
+            BuiltinAssemblyMode::SingleExit => Self::all(),
+            BuiltinAssemblyMode::LegacyInstances => Self::legacy_instances(),
+            BuiltinAssemblyMode::Disabled => Self::none(),
+        }
+    }
+
     /// 注入全部能力（v5 默认；`PERI_MCP_BUILTIN` 缺省 / 未知值）。
     pub(crate) fn all() -> Self {
         Self {
@@ -81,6 +92,13 @@ impl BuiltinInjectionPolicy {
         }
     }
 
+    pub(crate) fn legacy_workspace() -> Self {
+        Self {
+            mode: BuiltinInjectionMode::LegacyInstances,
+            enabled: vec!["workspace"],
+        }
+    }
+
     /// 从 env 解析：`off` / `0` → [`Self::none`]；`legacy` / `v4` → v4 回滚；
     /// 缺失 / 其它值 → v5 单出口（未知值 warn + `all`，不引入第三种未知状态）。
     pub(crate) fn from_env() -> Self {
@@ -117,6 +135,10 @@ impl BuiltinInjectionPolicy {
     /// 是否为零注入（`PERI_MCP_BUILTIN=off`）。
     pub(crate) fn is_none(&self) -> bool {
         self.mode == BuiltinInjectionMode::SingleExit && self.enabled.is_empty()
+    }
+
+    pub(crate) fn is_legacy(&self) -> bool {
+        self.mode == BuiltinInjectionMode::LegacyInstances
     }
 
     fn capability_enabled(&self, capability_name: &str) -> bool {

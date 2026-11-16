@@ -27,7 +27,7 @@ Workspace URL 和其他远端 MCP。
 MCP 解析、基础来源合并、typed 校验、插件去重与 cache 关闭规则归
 [`peri-config`](peri-config.md)，`config.rs` re-export core policy，`config/cache_policy.rs` 仅保留测试解析适配。
 宿主装配通过 `McpClientPool::set_configuration_snapshot` 在初始化前绑定 scoped
-snapshot；`initialize.rs` 的普通/bare 路径消费冻结输入，middleware 只负责插件
+snapshot，并通过 `set_frozen_builtin_mode` 绑定会话冻结的单出口/legacy/off 模式；`initialize.rs` 的普通/bare 路径消费冻结输入，middleware 只负责插件
 发现、执行参数展开与 builtin runtime overlay。未注入 snapshot 的 source adapter
 也委托 core 规则，不构成另一份解析权威。`client/cache.rs` 统一 cache 准入与 SDK
 配置，重连/OAuth/动态/ACP 桥接沿用 pool 不可变策略；不提供文件变动热更新。
@@ -304,7 +304,7 @@ CI 回归：`assembly_once_scope_test.rs` 用原生 shell 与 UTF-8 日志验证
 | 功能 | 入口/关键点 |
 | --- | --- |
 | 工具 trait | `peri-acp-types/src/tools.rs`（BaseTool，is_direct 默认 false）；注册面 = 各 middleware `collect_tools()`：mcp/middleware/mcp_middleware.rs、subagent/sub_agent_middleware.rs、hitl/human_in_the_loop_middleware.rs、tool_search/middleware/tool_search_middleware.rs、goal/middleware/goal_middleware.rs 等；builtin handler 不由 middleware 注册，工具声明见 `peri-acp-types/src/builtin_mcp.rs`，实现与 crate 路由见 [MCP packages 代码索引](mcp-packages.md) |
-| builtin 能力声明表 | 唯一手写源是 `peri-acp-types/src/builtin_mcp/v5.rs::BUILTIN_V5_CAPABILITIES`（能力、资源面、宿主注入、执行绑定与依赖）；逐工具声明与 `direct`/`deferred` 命名宏在同目录 `v5/tools.rs`，`v5.rs` 只汇总能力表。`builtin_mcp.rs::BUILTIN_MCP_INSTANCES` / `BUILTIN_RESERVED_INSTANCE_NAMES` 是由能力表派生的**迁移期 v4 视图**（`LazyLock`，M4 删除）；`find` / `is_reserved_instance_name` / `original_tool_name_of_effective` 只做兼容期查找与非执行归一。`mcp::builtin::closed_instances` 经 `capability` 把 v5 能力名映射到实例；`closed_capabilities` 返回 v5 能力身份。名字**计算**在本 crate（`mcp/tool_bridge.rs`、`mcp/builtin/`），本 crate 不得复刻。默认注入与 runtime 走单 `peri` 出口；`legacy` / `v4` 显式回滚才走六实例路径 |
+| builtin 能力声明表 | 唯一手写源是 `peri-acp-types/src/builtin_mcp/v5.rs::BUILTIN_V5_CAPABILITIES`（能力、资源面、宿主注入、执行绑定与依赖）；逐工具声明与 `direct`/`deferred` 命名宏在同目录 `v5/tools.rs`，`v5.rs` 只汇总能力表。`builtin_mcp.rs::BUILTIN_MCP_INSTANCES` / `BUILTIN_RESERVED_INSTANCE_NAMES` 是由能力表派生的**迁移期 v4 视图**（`LazyLock`，M4 删除）；`find` / `is_reserved_instance_name` / `original_tool_name_of_effective` 只做兼容期查找与非执行归一。`mcp::builtin::closed_capabilities` 经 `capability_of_switch` 将 v5 能力名及旧 `*Middleware` 键映射到能力，`closed_instances` 再投影到旧实例名；`capability` 只精确查找能力名。名字**计算**在本 crate（`mcp/tool_bridge.rs`、`mcp/builtin/`），本 crate 不得复刻。默认注入与 runtime 走单 `peri` 出口；`legacy` / `v4` 显式回滚才走六实例路径 |
 | prompt / 指引文案引名约定（锁定面） | `src/prompt_tool_name_lock_test.rs`（`MANAGED_PROMPT_FILES`）——静态 prompt、工具描述、内置 skill 与内置 subagent 定义里的工具引用必须逐字写 effective name（裸名已无提供面）；正向断言字面量在注册表内、反向断言无裸名引用形态（YAML frontmatter 除外，机器字段由匹配型归一处理）。**新增引用 builtin 工具的 prompt 文本文件必须登记进清单**，否则不在保护面内 |
 | MetaHarness 名单 | `peri-acp-types/src/meta_harness.rs`：`MIDDLEWARE_NAMES`（只含链槽位名）、`MIDDLEWARE_TOOL_NAMES`（只含 middleware 工具，不含 builtin 的 web、artifact、cron、monitor、workflow、workspace 工具）；键集合与「全关」判定用两表及 builtin 能力名并集，见 `peri-config/src/app.rs` 的 `AppConfig::validate_meta_harness` |
 | 链序蓝本 | `peri-agent/src/session/factory.rs`（`ChainSlot` / `production_blueprint` / `build_middleware_chain` / `MiddlewareChainAssembler`）；链内无 Web / Artifact / Cron / Filesystem / Terminal 槽位 |

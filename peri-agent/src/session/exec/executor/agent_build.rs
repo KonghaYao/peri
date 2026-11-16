@@ -74,6 +74,8 @@ pub(super) async fn build_and_execute_agent(
                         // 防御性回退：无冻结数据时 beta flag 投影为空（一切按 false，
                         // 不意外开启能力）
                         beta_flags: peri_acp_types::beta_flags::BetaFlags::default(),
+                        builtin_assembly_mode:
+                            peri_acp_types::builtin_mcp::BuiltinAssemblyMode::SingleExit,
                         // 无冻结执行环境：unavailable（不探测本地值冒充，H3）
                         runtime_env: None,
                     },

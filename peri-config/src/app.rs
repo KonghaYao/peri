@@ -453,26 +453,29 @@ impl AppConfig {
                 false
             }
         });
-        let capability_names = peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
-            .iter()
-            .map(|capability| capability.name);
-        let all_disabled = MIDDLEWARE_NAMES
-            .iter()
-            .chain(BUILTIN_INSTANCE_POLICY_KEYS.iter())
-            .copied()
-            .chain(capability_names.clone())
-            .all(|name| map.get(name).copied() == Some(false));
-        if all_disabled {
+        if all_middleware_disabled(map) {
             tracing::warn!(
                 middleware_count = MIDDLEWARE_NAMES.len()
-                    + BUILTIN_INSTANCE_POLICY_KEYS.len()
-                    + capability_names.count(),
+                    + peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES.len(),
                 "meta_harness: ALL middleware disabled — every tool/hook/section holder \
                  will be unavailable; if this was not intentional, remove the meta_harness \
                  keys from settings.json"
             );
         }
     }
+}
+
+fn all_middleware_disabled(map: &HashMap<String, bool>) -> bool {
+    MIDDLEWARE_NAMES
+        .iter()
+        .all(|name| map.get(*name).copied() == Some(false))
+        && peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
+            .iter()
+            .all(|capability| {
+                [capability.name, capability.legacy_policy_key]
+                    .iter()
+                    .any(|key| map.get(*key).copied() == Some(false))
+            })
 }
 
 impl Default for AppConfig {

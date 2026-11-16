@@ -143,6 +143,7 @@ async fn deployment_with_capabilities(
             cwd: cwd.to_string_lossy().into_owned(),
             bare: false,
             drive_cron_tick,
+            builtin_assembly_mode: None,
             workspace_input: None,
             // 本夹具构造顶层装配：资源面输入保持未接线（会话路径才装载）。
             workspace_resources: None,

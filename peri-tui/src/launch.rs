@@ -193,6 +193,7 @@ async fn attach_acp_with_transport_route(
                     // TUI=true：复刻迁移前 TUI 每秒 tick 行为（cron 面板直持
                     // cron_state，tick 由 host 侧 scheduler 驱动执行）。
                     drive_cron_tick: true,
+                    builtin_assembly_mode: None,
                     // 顶层装配不构造 builtin 上下文：session 级 workspace 输入由每
                     // session 的会话环境装配产生（AW3-11）。
                     workspace_input: None,

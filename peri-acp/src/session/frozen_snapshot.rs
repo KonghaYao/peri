@@ -10,7 +10,7 @@ use std::sync::Arc;
 use peri_agent::session::exec::executor::FrozenSessionData;
 use serde::{Deserialize, Serialize};
 
-const FROZEN_SNAPSHOT_VERSION: u64 = 3;
+const FROZEN_SNAPSHOT_VERSION: u64 = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum FrozenSnapshotError {
@@ -24,6 +24,13 @@ pub(crate) enum FrozenSnapshotError {
 struct FrozenSnapshotEnvelope<T> {
     version: u64,
     data: T,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FrozenSnapshotV4 {
+    #[serde(flatten)]
+    previous: FrozenSnapshotV3,
+    builtin_assembly_mode: peri_acp_types::builtin_mcp::BuiltinAssemblyMode,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -153,20 +160,23 @@ pub(crate) fn encode_frozen_snapshot(
     } else {
         serde_json::to_string(&FrozenSnapshotEnvelope {
             version: FROZEN_SNAPSHOT_VERSION,
-            data: FrozenSnapshotV3 {
-                previous: FrozenSnapshotV2 {
-                    legacy: data,
-                    external_instructions: frozen
+            data: FrozenSnapshotV4 {
+                previous: FrozenSnapshotV3 {
+                    previous: FrozenSnapshotV2 {
+                        legacy: data,
+                        external_instructions: frozen
+                            .v2_frozen()
+                            .external_instructions
+                            .as_deref()
+                            .map(str::to_owned),
+                    },
+                    environment_prompt: frozen
                         .v2_frozen()
-                        .external_instructions
+                        .environment_prompt
                         .as_deref()
                         .map(str::to_owned),
                 },
-                environment_prompt: frozen
-                    .v2_frozen()
-                    .environment_prompt
-                    .as_deref()
-                    .map(str::to_owned),
+                builtin_assembly_mode: frozen.v2_frozen().builtin_assembly_mode,
             },
         })
         .map_err(FrozenSnapshotError::Invalid)
@@ -179,15 +189,21 @@ pub(crate) fn decode_frozen_snapshot(raw: &str) -> Result<FrozenSessionData, Fro
         .get("version")
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| invalid_snapshot("missing unsigned version"))?;
-    let (data, external_instructions, legacy_embedded_instructions, environment_prompt) =
+    let (data, external_instructions, legacy_embedded_instructions, environment_prompt, mode) =
         match version {
             1 => {
                 let envelope: FrozenSnapshotEnvelope<FrozenSnapshotV1> =
                     serde_json::from_value(value)?;
                 let legacy = envelope.data.system_prompt.contains("<agent_instructions>");
-                (envelope.data, None, legacy, None)
+                (
+                    envelope.data,
+                    None,
+                    legacy,
+                    None,
+                    peri_acp_types::builtin_mcp::BuiltinAssemblyMode::LegacyInstances,
+                )
             }
-            2 | 3 => {
+            2..=4 => {
                 if value
                     .get("data")
                     .and_then(|data| data.get("external_instructions"))
@@ -195,7 +211,7 @@ pub(crate) fn decode_frozen_snapshot(raw: &str) -> Result<FrozenSessionData, Fro
                 {
                     return Err(invalid_snapshot("missing external_instructions in V2/V3"));
                 }
-                let (data, environment_prompt) = if version == 3 {
+                let (data, environment_prompt, mode) = if version >= 3 {
                     if value
                         .get("data")
                         .and_then(|data| data.get("environment_prompt"))
@@ -203,9 +219,26 @@ pub(crate) fn decode_frozen_snapshot(raw: &str) -> Result<FrozenSessionData, Fro
                     {
                         return Err(invalid_snapshot("missing environment_prompt in V3"));
                     }
-                    let envelope: FrozenSnapshotEnvelope<FrozenSnapshotV3> =
-                        serde_json::from_value(value)?;
-                    let environment = envelope.data.environment_prompt;
+                    let (previous, mode) = if version == 4 {
+                        if value
+                            .get("data")
+                            .and_then(|data| data.get("builtin_assembly_mode"))
+                            .is_none()
+                        {
+                            return Err(invalid_snapshot("missing builtin_assembly_mode in V4"));
+                        }
+                        let envelope: FrozenSnapshotEnvelope<FrozenSnapshotV4> =
+                            serde_json::from_value(value)?;
+                        (envelope.data.previous, envelope.data.builtin_assembly_mode)
+                    } else {
+                        let envelope: FrozenSnapshotEnvelope<FrozenSnapshotV3> =
+                            serde_json::from_value(value)?;
+                        (
+                            envelope.data,
+                            peri_acp_types::builtin_mcp::BuiltinAssemblyMode::LegacyInstances,
+                        )
+                    };
+                    let environment = previous.environment_prompt;
                     if environment.as_deref().is_some_and(|body| {
                         body.contains(
                             peri_agent::agent::model_bridge::SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
@@ -213,11 +246,15 @@ pub(crate) fn decode_frozen_snapshot(raw: &str) -> Result<FrozenSessionData, Fro
                     }) {
                         return Err(invalid_snapshot("invalid environment_prompt in V3"));
                     }
-                    (envelope.data.previous, environment.map(Arc::from))
+                    (previous.previous, environment.map(Arc::from), mode)
                 } else {
                     let envelope: FrozenSnapshotEnvelope<FrozenSnapshotV2> =
                         serde_json::from_value(value)?;
-                    (envelope.data, None)
+                    (
+                        envelope.data,
+                        None,
+                        peri_acp_types::builtin_mcp::BuiltinAssemblyMode::LegacyInstances,
+                    )
                 };
                 if data.external_instructions.as_deref().is_some_and(|text| {
                     text.len() > 64 * 1024
@@ -234,6 +271,7 @@ pub(crate) fn decode_frozen_snapshot(raw: &str) -> Result<FrozenSessionData, Fro
                         .map(Arc::from),
                     false,
                     environment_prompt,
+                    mode,
                 )
             }
             _ => return Err(FrozenSnapshotError::UnsupportedVersion(version)),
@@ -285,6 +323,7 @@ pub(crate) fn decode_frozen_snapshot(raw: &str) -> Result<FrozenSessionData, Fro
                 )
             }),
         ),
+        builtin_assembly_mode: mode,
         // 旧 blob 缺该键（`#[serde(default)]`）→ None = unavailable；不重探
         // 本地环境冒充历史快照（H3 旧数据策略）。
         runtime_env: data.runtime_env,

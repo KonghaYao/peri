@@ -18,19 +18,28 @@ pub const MCP_BUILTIN_ENV: &str = "PERI_MCP_BUILTIN";
 
 #[must_use]
 pub fn builtin_enabled(environment: &BTreeMap<String, String>) -> bool {
+    builtin_assembly_mode(environment) != peri_acp_types::builtin_mcp::BuiltinAssemblyMode::Disabled
+}
+
+#[must_use]
+pub fn builtin_assembly_mode(
+    environment: &BTreeMap<String, String>,
+) -> peri_acp_types::builtin_mcp::BuiltinAssemblyMode {
+    use peri_acp_types::builtin_mcp::BuiltinAssemblyMode;
     match environment
         .get(MCP_BUILTIN_ENV)
         .map(|value| value.trim().to_ascii_lowercase())
         .as_deref()
     {
-        Some("off" | "0") => false,
-        None => true,
+        Some("off" | "0") => BuiltinAssemblyMode::Disabled,
+        Some("legacy" | "v4") => BuiltinAssemblyMode::LegacyInstances,
+        None | Some("on" | "1" | "v5" | "") => BuiltinAssemblyMode::SingleExit,
         Some(_) => {
             tracing::warn!(
                 env = MCP_BUILTIN_ENV,
-                "unknown value; enabling builtin MCP servers"
+                "unknown value; using the v5 single exit"
             );
-            true
+            BuiltinAssemblyMode::SingleExit
         }
     }
 }

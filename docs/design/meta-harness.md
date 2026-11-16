@@ -154,8 +154,8 @@ subagent_mw 槽位）联动置空，禁止半开状态。
 **语义**：
 
 - **关闭面 = 能力提供者**：链槽位 middleware 以 key = `name()` 返回值关闭；builtin
-  MCP 能力以 v5 能力名关闭（`capability` 精确查表）。旧 `*Middleware` 策略键已在
-  M4 退役，不再映射；同一提供者的全部工具随之一并关闭（连坐语义）。
+  MCP 能力以 v5 能力名关闭；旧 `*Middleware` 策略键经 `capability_of_switch`
+  确定性映射到同一能力（M4 清理时删除 adapter）；同一提供者的全部工具随之一并关闭（连坐语义）。
 - 关闭后该 middleware 的钩子（before_agent / before_tool /
   prompt_contribution / first_turn_reminder）全部不执行——工具与提示词贡献
   同时消失。

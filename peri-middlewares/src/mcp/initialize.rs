@@ -265,8 +265,13 @@ impl McpClientPool {
     ) {
         pool.seal_builtin_context();
         let loaded = match pool.configuration_snapshot.get() {
-            Some(snapshot) => super::config::load_bare_config_from_snapshot(snapshot),
-            None => super::config::load_bare_config(),
+            Some(snapshot) => super::config::load_bare_config_from_snapshot_with_mode(
+                snapshot,
+                pool.frozen_builtin_mode.get().copied(),
+            ),
+            None => {
+                super::config::load_bare_config_with_mode(pool.frozen_builtin_mode.get().copied())
+            }
         };
         let mut config = match loaded {
             Ok(config) => config,
@@ -311,7 +316,7 @@ impl McpClientPool {
         // 配置加载失败必须是可见的 Failed：不发布 Ready、不标记 initialized、
         // 不注册任何 server（因而也不会开始 transport）。B 在 1R 消费该失败。
         let loaded = match pool.configuration_snapshot.get() {
-            Some(snapshot) => super::config::load_merged_config_from_snapshot_with_capabilities(
+            Some(snapshot) => super::config::load_merged_config_from_snapshot_with_policy(
                 cwd,
                 claude_home,
                 snapshot,
@@ -319,14 +324,16 @@ impl McpClientPool {
                     .load(std::sync::atomic::Ordering::Acquire),
                 pool.plugin_sources_available(),
                 pool.plugin_face_closed(),
+                pool.frozen_builtin_mode.get().copied(),
             ),
-            None => super::config::load_merged_config_full_with_capabilities(
+            None => super::config::load_merged_config_full_with_policy(
                 cwd,
                 claude_home,
                 pool.builtin_available
                     .load(std::sync::atomic::Ordering::Acquire),
                 pool.plugin_sources_available(),
                 pool.plugin_face_closed(),
+                pool.frozen_builtin_mode.get().copied(),
             ),
         };
         let (mut config, plugin_sources) = match loaded {

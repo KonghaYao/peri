@@ -409,6 +409,17 @@ fn injection_policy_all_and_none_shapes() {
 }
 
 #[test]
+fn bare_legacy_policy_keeps_workspace_as_an_independent_instance() {
+    let _env = BuiltinEnvGuard::set(Some("legacy"));
+    let policy = crate::platform::builtin_workspace_policy(true);
+    let mut servers = std::collections::HashMap::new();
+    super::apply_builtin_overlay(&mut servers, &policy).unwrap();
+    assert_eq!(servers.len(), 1);
+    assert!(servers.contains_key("workspace"));
+    assert!(!servers.contains_key("peri"));
+}
+
+#[test]
 fn injection_policy_from_env_three_states() {
     for off in ["off", "0", "OFF", " 0 "] {
         let _guard = BuiltinEnvGuard::set(Some(off));

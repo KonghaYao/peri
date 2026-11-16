@@ -33,7 +33,17 @@ pub(crate) fn builtin_policy(
     }
 }
 
-/// bare 配置的 builtin 策略：v5 单出口只保留 `workspace` 能力。
+pub(crate) fn builtin_policy_for_mode(
+    mode: peri_acp_types::builtin_mcp::BuiltinAssemblyMode,
+) -> crate::mcp::builtin::BuiltinInjectionPolicy {
+    if IN_PROCESS_BUILTINS {
+        crate::mcp::builtin::BuiltinInjectionPolicy::from_assembly_mode(mode)
+    } else {
+        crate::mcp::builtin::BuiltinInjectionPolicy::none()
+    }
+}
+
+/// bare 配置的 builtin 策略：仅保留 `workspace` 能力，并沿用部署装配模式。
 ///
 /// `PERI_MCP_BUILTIN=off` 是部署级 kill switch，bare 路径也必须遵守；`legacy`
 /// 回滚值在 bare 中只投影 `workspace`（bare 从不注入其他能力）。
@@ -41,8 +51,17 @@ pub(crate) fn builtin_workspace_policy(
     configured_enabled: bool,
 ) -> crate::mcp::builtin::BuiltinInjectionPolicy {
     let deploy_policy = builtin_policy(configured_enabled);
+    builtin_workspace_policy_for_mode(deploy_policy)
+}
+
+pub(crate) fn builtin_workspace_policy_for_mode(
+    deploy_policy: crate::mcp::builtin::BuiltinInjectionPolicy,
+) -> crate::mcp::builtin::BuiltinInjectionPolicy {
     if deploy_policy.is_none() {
-        return deploy_policy;
+        deploy_policy
+    } else if deploy_policy.is_legacy() {
+        crate::mcp::builtin::BuiltinInjectionPolicy::legacy_workspace()
+    } else {
+        crate::mcp::builtin::BuiltinInjectionPolicy::capabilities(&["workspace"])
     }
-    crate::mcp::builtin::BuiltinInjectionPolicy::capabilities(&["workspace"])
 }

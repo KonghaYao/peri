@@ -172,6 +172,7 @@ pub struct HostAssemblyInput {
     /// 驱动 cron tick（TUI=true，复刻迁移前 TUI 每秒 tick 行为；print/stdio
     /// 保持现状无 tick——行为零变化，L2 遗留登记 M-TUI issue）。
     pub drive_cron_tick: bool,
+    pub builtin_assembly_mode: Option<peri_acp_types::builtin_mcp::BuiltinAssemblyMode>,
     /// 遗留测试输入槽；生产传 `None`，Workspace Bash 在 MCP 侧自持任务。
     #[cfg(not(target_os = "emscripten"))]
     pub workspace_input: Option<peri_mcp_workspace::WorkspaceInstanceInput>,
@@ -259,6 +260,7 @@ pub async fn assemble_wasm_server_config(input: WasmHostAssemblyInput) -> AcpSer
             cwd: input.cwd,
             bare: false,
             drive_cron_tick: false,
+            builtin_assembly_mode: None,
             // Browser deployments do not discover plugins from a local home directory.
             prepared_plugins: Some(PreparedPlugins {
                 data: None,
@@ -410,6 +412,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         cwd,
         bare,
         drive_cron_tick,
+        builtin_assembly_mode,
         #[cfg(not(target_os = "emscripten"))]
         workspace_input,
         #[cfg(not(target_os = "emscripten"))]
@@ -504,6 +507,10 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
             workspace_id,
             &session_resources,
         );
+        if let Some(mode) = builtin_assembly_mode {
+            pool.set_frozen_builtin_mode(mode)
+                .expect("frozen builtin assembly mode must bind before initialization");
+        }
         if let Err(error) = pool.set_builtin_available(capabilities.builtin_mcp) {
             tracing::error!(%error, "MCP builtin availability binding failed");
         }

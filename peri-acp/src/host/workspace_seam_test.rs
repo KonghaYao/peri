@@ -57,6 +57,7 @@ async fn seam_fixture() -> SeamFixture {
         // 本文件验证激活前的输入注入与关闭，初始化受 activation 闸门保护。
         bare: true,
         drive_cron_tick: false,
+        builtin_assembly_mode: None,
         workspace_input: None,
         // 本夹具直接构造顶层装配：资源面输入同样保持未接线（会话路径才装载）。
         workspace_resources: None,

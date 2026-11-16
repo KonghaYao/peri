@@ -222,6 +222,7 @@ async fn assemble_stdio_config(
             cwd: cwd.clone(),
             bare: false,
             drive_cron_tick: false,
+            builtin_assembly_mode: None,
             // stdio 顶层装配不构造 builtin 上下文（`session_resources = false`）：
             // session 级输入（AW3-11）由每 session 的 `SessionEnvironment::assemble`
             // 产生，此处恒为 `None`。

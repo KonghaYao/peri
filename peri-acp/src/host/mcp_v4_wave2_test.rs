@@ -368,6 +368,7 @@ async fn assemble_host_with_workspace_input(
             cwd: dirs.workspace_str(),
             bare: false,
             drive_cron_tick,
+            builtin_assembly_mode: None,
             // session 级 `workspace` 输入（AW3-11）由调用方给定：默认 `None` ⇒
             // 可见但退化，本文件断言面（cron）不含它。
             workspace_input,

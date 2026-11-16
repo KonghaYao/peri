@@ -42,7 +42,7 @@ const TICK_WAIT_BOUND: Duration = Duration::from_secs(10);
 const TICK_ABSENCE_WINDOW: Duration = Duration::from_secs(3);
 
 /// 真实 builtin 池夹具：已实现的 `web` / `artifact` / `cron` / `workspace`
-/// 由**缺省注入**产生，本用例只断言 `cron`（其余实例在场不影响这些断言，
+/// 由显式 v4 回滚模式注入，本用例只断言 `cron`（其余实例在场不影响这些断言，
 /// 反而是「关闭一个不影响其他实例」的额外见证）。
 ///
 /// 注入的 `scheduler` 由本夹具持有：被注入状态对象的**身份**因此可观察
@@ -262,7 +262,7 @@ fn content_text(contents: &[ContentBlock]) -> String {
         .join("\n")
 }
 
-/// 生产装配步骤序列 + 缺省 builtin 注入 + 测试持有的状态对象。
+/// 生产装配步骤序列 + v4 builtin 实例注入 + 测试持有的状态对象。
 async fn builtin_isolation_fixture() -> BuiltinIsolationFixture {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
@@ -271,9 +271,8 @@ async fn builtin_isolation_fixture() -> BuiltinIsolationFixture {
     for path in [&home, &claude_home, &cwd] {
         std::fs::create_dir_all(path).unwrap();
     }
-    // 缺省注入（`PERI_MCP_BUILTIN` 缺失 ⇒ 全部已实现实例）；HOME 重定向到临时目录，
-    // 因此读不到开发者本机的 `~/.claude.json` / `~/.peri/settings.json`。
-    let env = EnvIsolation::set_with_builtin_env(&home, None);
+    // 此测试验证独立实例；默认 v5 单出口不提供独立的 cron 连接。
+    let env = EnvIsolation::set_with_builtin_env(&home, Some("legacy"));
     // 不写 `{cwd}/.mcp.json`：本夹具的 server 集合完全由 builtin 默认层注入产生。
     assert!(
         !cwd.join(".mcp.json").exists(),
