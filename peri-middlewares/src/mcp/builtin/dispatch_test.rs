@@ -259,7 +259,7 @@ async fn call_tool_smoke_and_effective_bridge_round_trip() {
                 .iter()
                 .find(|tool| tool.original_name == name)
                 .unwrap_or_else(|| panic!("{}: 注册表必须声明 {name}", case.instance))
-                .effective_name
+                .legacy_name
         };
 
         // 真实链路：dispatch 工厂 → 真实 transport → 生产 client 握手。

@@ -349,7 +349,9 @@ impl UserInputMailbox {
             return Ok(receipt);
         }
         validate_input_id(&request.input_id)?;
-        let queued = {
+        // 先固定记录身份：等待 MQ 取消期间对账可能清掉 Queued 记录，终态仍须
+        // 由这个指纹写入，否则同一 ID 会重新获得执行资格。
+        let queued_fingerprint = {
             let state = self.state.lock();
             self.validate(
                 &state,
@@ -357,11 +359,15 @@ impl UserInputMailbox {
                 &request.generation,
                 &request.command_id,
             )?;
-            state.records.iter().any(|record| {
-                record.input_id == request.input_id && record.state == UserInputState::Queued
-            })
+            state
+                .records
+                .iter()
+                .find(|record| {
+                    record.input_id == request.input_id && record.state == UserInputState::Queued
+                })
+                .map(|record| record.fingerprint)
         };
-        if !queued {
+        let Some(input_fingerprint) = queued_fingerprint else {
             let results = {
                 let mut state = self.state.lock();
                 let results = results_for(&state, std::slice::from_ref(&request.input_id));
@@ -375,7 +381,7 @@ impl UserInputMailbox {
                 results
             };
             return Ok(self.receipt(results, None).await);
-        }
+        };
         let id = MessageId::from(
             uuid::Uuid::parse_str(&request.input_id).expect("input id was validated above"),
         );
@@ -400,7 +406,11 @@ impl UserInputMailbox {
                         record.delivery_reserved = false;
                     }
                     state.revision += 1;
-                    retain_terminal(&mut state, &request.input_id);
+                    retain_terminal(
+                        &mut state,
+                        &request.input_id,
+                        Some((input_fingerprint, UserInputState::Withdrawn)),
+                    );
                     prune_terminal_records(&mut state);
                     taken_back = super::state::user_input_from_entry(&entry);
                 }

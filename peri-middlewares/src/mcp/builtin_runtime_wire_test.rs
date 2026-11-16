@@ -73,7 +73,7 @@ async fn direct_builtin_tool_call_passes_approval_then_touches_wire_once() {
     let link = TappedLink::connect(web, "runtime-fixture-web", vec![stub_tool]).await;
 
     let call = tool_call(
-        declaration.effective_name,
+        declaration.legacy_name,
         json!({ "query": "builtin runtime approval" }),
     );
     let broker = Arc::new(RecordingBroker::approving());
@@ -95,13 +95,13 @@ async fn direct_builtin_tool_call_passes_approval_then_touches_wire_once() {
     };
     assert_eq!(approved.name, call.name, "批准不得改写模型侧工具名");
 
-    let bridge = link.bridge(declaration.effective_name);
+    let bridge = link.bridge(declaration.legacy_name);
     assert!(
         bridge.is_direct(),
         "注册表声明为 direct 的 builtin 工具必须在类型化构造点生效（IF-D13）"
     );
     let invocation_fixture = invocation_fixture::InvocationFixture::new(
-        declaration.effective_name,
+        declaration.legacy_name,
         std::slice::from_ref(&approved.input),
     )
     .await;
@@ -147,7 +147,7 @@ async fn rejected_direct_tool_call_never_reaches_the_wire() {
     let link = TappedLink::connect(web, "runtime-fixture-web", vec![stub_tool]).await;
 
     let call = tool_call(
-        declaration.effective_name,
+        declaration.legacy_name,
         json!({ "query": "builtin runtime rejection" }),
     );
     let broker = Arc::new(RecordingBroker::rejecting());
@@ -246,7 +246,7 @@ async fn large_payload_crosses_builtin_instance_intact() {
     ));
     let stub_tool: Arc<dyn BaseTool> = Arc::clone(&stub) as Arc<dyn BaseTool>;
     let link = TappedLink::connect(web, "runtime-fixture-web", vec![stub_tool]).await;
-    let bridge = link.bridge(declaration.effective_name);
+    let bridge = link.bridge(declaration.legacy_name);
 
     let payload = "y".repeat(LARGE_INPUT_BYTES);
     assert!(
@@ -255,7 +255,7 @@ async fn large_payload_crosses_builtin_instance_intact() {
     );
     let input = json!({ "payload": payload.clone() });
     let invocation_fixture = invocation_fixture::InvocationFixture::new(
-        declaration.effective_name,
+        declaration.legacy_name,
         std::slice::from_ref(&input),
     )
     .await;
@@ -292,13 +292,13 @@ async fn per_instance_wire_does_not_cross_between_instances() {
     let artifact_link =
         TappedLink::connect(artifact, "runtime-fixture-artifact", vec![artifact_tool]).await;
 
-    let web_bridge = web_link.bridge(web.tools[0].effective_name);
-    let artifact_bridge = artifact_link.bridge(artifact.tools[0].effective_name);
+    let web_bridge = web_link.bridge(web.tools[0].legacy_name);
+    let artifact_bridge = artifact_link.bridge(artifact.tools[0].legacy_name);
     assert_eq!(web_bridge.mcp_server_name(), Some("web"));
     assert_eq!(artifact_bridge.mcp_server_name(), Some("artifact"));
     let invocation_fixture = invocation_fixture::InvocationFixture::new_calls(&[
-        (web.tools[0].effective_name, json!({})),
-        (artifact.tools[0].effective_name, json!({})),
+        (web.tools[0].legacy_name, json!({})),
+        (artifact.tools[0].legacy_name, json!({})),
     ])
     .await;
 
@@ -421,15 +421,15 @@ async fn same_pool_instances_never_cross_wires_and_reconnect_touches_one_link() 
         "两条夹具链路的 client 半边都必须登记进 pool.services"
     );
 
-    let web_bridge = web_link.bridge(web.tools[0].effective_name);
-    let artifact_bridge = artifact_link.bridge(artifact.tools[0].effective_name);
+    let web_bridge = web_link.bridge(web.tools[0].legacy_name);
+    let artifact_bridge = artifact_link.bridge(artifact.tools[0].legacy_name);
     assert_eq!(web_bridge.mcp_server_name(), Some("web"));
     assert_eq!(artifact_bridge.mcp_server_name(), Some("artifact"));
     let invocation_fixture = invocation_fixture::InvocationFixture::new_calls(&[
-        (web.tools[0].effective_name, json!({})),
-        (artifact.tools[0].effective_name, json!({})),
+        (web.tools[0].legacy_name, json!({})),
+        (artifact.tools[0].legacy_name, json!({})),
         (
-            artifact.tools[0].effective_name,
+            artifact.tools[0].legacy_name,
             json!({ "after": "reconnect" }),
         ),
     ])

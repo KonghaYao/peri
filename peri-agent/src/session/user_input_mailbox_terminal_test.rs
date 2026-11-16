@@ -269,3 +269,42 @@ fn unpublished_terminal_cannot_be_evicted() {
         TERMINAL_CAPACITY
     );
 }
+
+#[test]
+fn withdrawn_identity_survives_record_pruned_before_settle() {
+    let (mailbox, _) = make_mailbox();
+    let mut input = make_input(&mailbox, "撤回竞态");
+    mailbox.enqueue_sync(&input).unwrap();
+    let mut state = mailbox.state.lock();
+    let fingerprint = state
+        .records
+        .iter()
+        .find(|record| record.input_id == input.input_id)
+        .expect("待发记录必须存在")
+        .fingerprint;
+    // 模拟 take_back 等待 MQ 取消期间，refresh_from_store 先清掉了 Queued 记录。
+    state.records.clear();
+    super::super::window::retain_terminal(
+        &mut state,
+        &input.input_id,
+        Some((fingerprint, UserInputState::Withdrawn)),
+    );
+    let input_uuid = uuid::Uuid::parse_str(&input.input_id).unwrap();
+    assert_eq!(
+        state
+            .terminal_identities
+            .get(&input_uuid)
+            .map(|identity| identity.state),
+        Some(UserInputState::Withdrawn),
+        "记录缺失时仍须用取消条目身份写入 Withdrawn"
+    );
+    drop(state);
+
+    input.command_id = uuid::Uuid::now_v7().to_string();
+    let receipt = mailbox.enqueue_sync(&input).unwrap();
+    assert_eq!(receipt.results[0].state, UserInputState::Withdrawn);
+    assert!(
+        receipt.snapshot.items.is_empty(),
+        "已撤回的 ID 不能重新进入待发投影"
+    );
+}

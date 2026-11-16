@@ -425,7 +425,7 @@ async fn four_close_sources_are_distinct() {
     .await;
     {
         let pool = Arc::clone(&off.pool);
-        for instance in BUILTIN_MCP_INSTANCES {
+        for instance in BUILTIN_MCP_INSTANCES.iter() {
             assert!(
                 !pool.configs.read().contains_key(instance.name),
                 "off 必须零注入：{} 不得出现在配置清单里",
@@ -457,7 +457,7 @@ async fn four_close_sources_are_distinct() {
             "off 下不得有 system 依赖（不宣称任何 builtin ready）"
         );
         let projection = off.projections(&[]);
-        for instance in BUILTIN_MCP_INSTANCES {
+        for instance in BUILTIN_MCP_INSTANCES.iter() {
             assert!(
                 mw_instance_tools(&projection, instance.name).is_empty(),
                 "off 下 {} 的工具不得进入投影",

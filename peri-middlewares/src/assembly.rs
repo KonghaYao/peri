@@ -91,7 +91,7 @@ pub fn plugin_face_closed(disabled_middlewares: &std::collections::HashSet<Strin
     disabled_middlewares.contains(PLUGIN_FACE_CLOSED_KEY)
 }
 
-/// A24 关闭集：`policy_key ∈ disabled_middlewares` 的实例名（BTreeSet，稳定顺序）。
+/// A24 关闭集：能力开关（v5 能力名或迁移期旧键）命中的 v4 实例名（BTreeSet，稳定顺序）。
 ///
 /// **只委托、不复制逻辑**：唯一实现是 `crate::mcp::builtin::closed_instances`，本函数让
 /// 宿主装配经公开面派生关闭集（随 [`BuiltinInstanceContext`] 一起注入），不必 import
@@ -100,6 +100,13 @@ pub fn builtin_closed_instances(
     disabled_middlewares: &std::collections::HashSet<String>,
 ) -> std::collections::BTreeSet<String> {
     crate::mcp::builtin::closed_instances(disabled_middlewares)
+}
+
+/// 关闭集的能力身份（v5 名字）：供后续 router / readiness / 诊断消费。
+pub fn builtin_closed_capabilities(
+    disabled_middlewares: &std::collections::HashSet<String>,
+) -> std::collections::BTreeSet<&'static str> {
+    crate::mcp::builtin::closed_capabilities(disabled_middlewares)
 }
 
 /// 生产链装配器（当前唯一装配实现，见模块文档）。

@@ -399,7 +399,7 @@ fn test_system_mcp_dedup_preserves_required_namespaces() {
     );
     // 同一份 `all()` 策略下 builtin 默认层已注入：上面的去重结论是在**注入发生**
     // 的前提下得到的（注入点在 step 4 去重之后，builtin 条目不进 manual_hashes）。
-    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
         assert!(
             merged.mcp_servers.contains_key(instance.name),
             "默认层应注入 builtin 实例 {}，实际 keys: {:?}",

@@ -593,7 +593,7 @@ fn test_tool_start_infer_tool_kind_variants() {
                     .iter()
                     .find(|tool| tool.original_name == original)
             })
-            .map(|tool| tool.effective_name)
+            .map(|tool| tool.legacy_name)
             .expect("builtin 声明表应声明该 (实例, 原始工具名)")
     };
     let cases = [

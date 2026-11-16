@@ -18,7 +18,7 @@ fn unknown_instance_is_rejected() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("unknown builtin MCP instance: sandbox"));
-    for name in BUILTIN_RESERVED_INSTANCE_NAMES {
+    for name in BUILTIN_RESERVED_INSTANCE_NAMES.iter() {
         assert!(error.contains(name), "error should list {name}: {error}");
     }
 }
@@ -96,7 +96,7 @@ fn allowed_host_requires_http() {
 
 #[test]
 fn every_reserved_instance_parses() {
-    for name in BUILTIN_RESERVED_INSTANCE_NAMES {
+    for name in BUILTIN_RESERVED_INSTANCE_NAMES.iter() {
         let args = Args::try_parse_from(["peri mcp-start", name, "--stdio"])
             .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert_eq!(args.instance, *name);

@@ -227,7 +227,7 @@ impl AssembledHostFixture {
     }
 
     pub(super) fn assert_all_ready(&self) {
-        for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+        for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
             let expected = declared_tool_names(instance.name);
             assert_instance_ready(&self.pool, instance.name, &expected);
         }

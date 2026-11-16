@@ -194,7 +194,7 @@ fn all_registered_instances_have_handler() {
 
     let mut dispatched: Vec<&'static str> = Vec::new();
     let mut server_names: Vec<String> = Vec::new();
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let handler = builtin_server_handler(instance.name, ctx).unwrap_or_else(|| {
             panic!(
                 "{}: 已实现实例必须有 handler（上下文已给齐 cron 输入）",

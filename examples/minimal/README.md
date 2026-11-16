@@ -42,8 +42,11 @@ slots, and `WorkspaceMiddleware` is the fourth key of the same kind (it replaces
 `FilesystemMiddleware` / `TerminalMiddleware` slot names). Web, artifact, cron and file/shell
 capabilities are provided by the built-in in-process MCP instances
 (`web` / `artifact` / `cron` / `workspace`); these four keys are their close keys
-(`BUILTIN_INSTANCE_POLICY_KEYS`), so the rows below stay valid, and old configs using the three
-former slot names are still recognized.
+(`BUILTIN_INSTANCE_POLICY_KEYS`, derived from the capability table's
+`legacy_policy_key`), so the rows below stay valid, and old configs using the three
+former slot names are still recognized. These keys are a migration-period alias: the
+v5 switch identity is the capability name (`web` / `artifact` / `cron` / ...), and both
+forms map to the same capability.
 
 `cron` tools are always **deferred** (`mcp__cron__cron_register` /
 `mcp__cron__cron_list` / `mcp__cron__cron_remove`): the model reaches them

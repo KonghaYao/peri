@@ -67,8 +67,10 @@ pub(super) fn session_mcp_servers(
             McpServer::Acp(_) => continue,
             _ => return Err(AcpError::new(-32602, "Unsupported MCP transport")),
         };
+        // 与 `McpControlAction::Register` 同一判定：v5 出口名 `peri` 与迁移期实例名
+        // 都不可被客户端接管，大小写不敏感以阻止 `Web` 之类的变体绕过。
         if name.is_empty()
-            || (peri_acp_types::builtin_mcp::is_reserved_instance_name(&name)
+            || (peri_acp_types::builtin_mcp::v5::is_reserved_server_name_ignore_ascii_case(&name)
                 && name != "workspace")
             || (name == "workspace" && config.url.is_none())
         {
@@ -184,5 +186,36 @@ mod acp_setup_tests {
             {"type":"http", "name":"workspace", "url":"https://b.test", "headers":[]}
         ]}))
         .is_err());
+    }
+
+    #[test]
+    fn reserved_server_names_are_rejected_case_insensitively() {
+        for name in ["peri", "Web", "Workspace", "workspace"] {
+            let error = session_mcp_servers(&serde_json::json!({"mcpServers": [
+                {"type":"stdio", "name": name, "command": "/bin/echo", "args": [], "env": []}
+            ]}))
+            .unwrap_err();
+            assert_eq!(error.code, -32602, "{name} 必须被拒绝");
+        }
+        let error = session_mcp_servers(&serde_json::json!({"mcpServers": [
+            {"type":"http", "name": "Workspace", "url": "https://example.test/mcp", "headers": []}
+        ]}))
+        .unwrap_err();
+        assert_eq!(
+            error.code, -32602,
+            "大小写变体不得借 workspace remote 例外接管保留名"
+        );
+    }
+
+    #[test]
+    fn workspace_remote_is_the_only_reserved_name_exception() {
+        let servers = session_mcp_servers(&serde_json::json!({"mcpServers": [
+            {"type":"http", "name":"workspace", "url":"https://example.test/mcp", "headers":[]}
+        ]}))
+        .unwrap();
+        assert_eq!(
+            servers["workspace"].source,
+            Some(ConfigSource::WorkspaceRemote)
+        );
     }
 }

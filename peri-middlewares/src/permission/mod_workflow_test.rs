@@ -286,7 +286,7 @@ async fn workflow_non_start_tools_do_not_enter_approval() {
         assert!(
             result.is_ok(),
             "`{}` 不应触发审批，实际: {result:?}",
-            tool.effective_name
+            tool.legacy_name
         );
         assert_eq!(result.unwrap().name, tc.name);
         checked += 1;
@@ -397,7 +397,7 @@ fn cron_sensitive_markdown_uses_registry_effective_name() {
         .expect("cron 实例应声明 cron_register");
     let cron_line = format!(
         "- `{}` — scheduled task registration (can trigger arbitrary prompts later, equivalent to delegated execution rights)",
-        register.effective_name
+        register.legacy_name
     );
     assert!(
         lines.contains(&cron_line.as_str()),
@@ -414,7 +414,7 @@ fn cron_sensitive_markdown_uses_registry_effective_name() {
         lines.contains(
             &format!(
                 "- `{}` — monitor command execution (starts a shell command and watches its output)",
-                start.effective_name
+                start.legacy_name
             )
             .as_str()
         ),
@@ -431,7 +431,7 @@ fn cron_sensitive_markdown_uses_registry_effective_name() {
         *lines.last().expect("敏感工具列表非空"),
         format!(
             "- `{}` — workflow delegation (launches a multi-agent workflow that bypasses HITL, equivalent to delegated execution rights)",
-            workflow_start.effective_name
+            workflow_start.legacy_name
         ),
         "末项（Workflow 启动）显示名必须是注册表解析出的 effective name，实际渲染：\n{rendered}"
     );
@@ -452,9 +452,9 @@ fn cron_sensitive_markdown_uses_registry_effective_name() {
             assert!(
                 !lines
                     .iter()
-                    .any(|line| line.starts_with(&format!("- `{}`", tool.effective_name))),
+                    .any(|line| line.starts_with(&format!("- `{}`", tool.legacy_name))),
                 "`{}` 不应在敏感清单（判定同源，A19）",
-                tool.effective_name
+                tool.legacy_name
             );
         }
     }

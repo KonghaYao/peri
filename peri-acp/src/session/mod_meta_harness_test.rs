@@ -80,6 +80,23 @@ fn build_meta_harness_state_middleware_false_enters_disabled() {
 }
 
 #[test]
+fn build_meta_harness_state_capability_name_enters_disabled() {
+    let state = super::super::frozen::build_meta_harness_state(
+        Some(&mh_cfg(&[("web", false)])),
+        HashMap::new(),
+    );
+    assert!(
+        state.disabled_middlewares.contains("web"),
+        "v5 能力名必须进入关闭集，运行时再映射到同一能力"
+    );
+    let restored = super::super::frozen::build_meta_harness_state(
+        Some(&mh_cfg(&[("web", true)])),
+        HashMap::new(),
+    );
+    assert!(restored.disabled_middlewares.is_empty());
+}
+
+#[test]
 fn build_meta_harness_state_middleware_true_not_disabled() {
     let state = super::super::frozen::build_meta_harness_state(
         Some(&mh_cfg(&[("WebMiddleware", true)])),

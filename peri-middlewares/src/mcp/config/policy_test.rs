@@ -28,7 +28,7 @@ fn explicit_policy_gates_defaults_without_gating_configuration_io() {
             config.mcp_servers["external"].source,
             Some(ConfigSource::Global(global_path.clone()))
         );
-        for instance in BUILTIN_MCP_INSTANCES {
+        for instance in BUILTIN_MCP_INSTANCES.iter() {
             assert_eq!(config.mcp_servers.contains_key(instance.name), enabled);
         }
     }
@@ -61,7 +61,7 @@ fn builtin_closure_list_survives_configuration_reads_and_disabled_updates() {
         &BuiltinInjectionPolicy::all(),
     )
     .unwrap();
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let entry = &config.mcp_servers[instance.name];
         assert_eq!(entry.disabled, Some(true));
         assert_eq!(entry.system_mcp, None);
@@ -81,7 +81,7 @@ fn builtin_closure_list_survives_configuration_reads_and_disabled_updates() {
         &BuiltinInjectionPolicy::all(),
     )
     .unwrap();
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let entry = &config.mcp_servers[instance.name];
         assert_eq!(
             entry.disabled,

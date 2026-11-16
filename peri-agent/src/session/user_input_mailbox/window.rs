@@ -64,23 +64,38 @@ pub(super) fn reserved_delivery_slots(state: &MailboxState) -> usize {
         .count()
 }
 
-pub(super) fn retain_terminal(state: &mut MailboxState, id: &str) {
+/// 记录终态身份；`fallback` 用于记录已在对账中被清理的竞态路径。
+///
+/// takeback 在等待 MQ 取消期间可能被 `refresh_from_store` 清掉 Queued 记录；
+/// 此时仍必须用取消条目自身的身份写入 `Withdrawn`，否则同一 ID 会重新获得
+/// 执行资格。记录存在时以记录为准，`fallback` 不参与。
+pub(super) fn retain_terminal(
+    state: &mut MailboxState,
+    id: &str,
+    fallback: Option<(u64, UserInputState)>,
+) {
     let Ok(input_uuid) = uuid::Uuid::parse_str(id) else {
         return;
     };
-    let record = state
+    let identity = state
         .records
         .iter()
         .find(|record| record.input_id == id)
-        .expect("终态记录存在");
+        .map(|record| (record.fingerprint, record.state))
+        .or(fallback);
+    let Some((fingerprint, terminal_state)) = identity else {
+        // 无记录且调用方无兜底身份：不能假定调用方仍持有记录，否则
+        // dispatch / takeback 同时成功时会 panic。
+        return;
+    };
     if state.terminal_identities.contains_key(&input_uuid) {
         return;
     }
     state.terminal_identities.insert(
         input_uuid,
         TerminalIdentity {
-            fingerprint: record.fingerprint,
-            state: record.state,
+            fingerprint,
+            state: terminal_state,
         },
     );
     state.terminal_display.push(TerminalDisplay {
