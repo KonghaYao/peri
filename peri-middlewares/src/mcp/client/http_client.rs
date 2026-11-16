@@ -168,6 +168,6 @@ impl StreamableHttpClient for PeriHttpClient {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "emscripten")))]
 #[path = "http_client_test.rs"]
 mod tests;
