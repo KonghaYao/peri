@@ -313,7 +313,6 @@ fn base_context() -> AssemblyContext {
         goal_controller: None,
         meta_harness_disabled: std::collections::HashSet::new(),
         // 契约夹具不消费 beta flag 语义：缺省（前台）与 flag 引入前一致。
-        agent_default_run_in_background: false,
         agent_overrides: None,
         language: None,
     }
@@ -592,33 +591,25 @@ mod sections;
 #[path = "assembly_test_workflow.rs"]
 mod workflow;
 
-// ─── beta flag `full-async-tools`（装配面 → Agent 工具 schema）──────────────
+// ─── Agent 工具缺省后台（装配面 → 工具 schema）───────────────────────────────
 
-/// 装配参数 → 链装配产物：`AssemblyContext::agent_default_run_in_background`
-/// 必须到达链上 `Agent` 工具的 schema（`run_in_background.default`），
-/// 且缺省注入与否只改这一项。
+/// 生产链装配出的 `Agent` 工具必须声明 `run_in_background.default = true`。
 ///
-/// 接线断掉（例如 `ProductionChainAssembler` 不再把它交给 `SubAgentMiddleware`、
-/// 或 `build_tool` 不再下传）时本用例报红——工具级用例直接调
-/// `with_default_run_in_background` 绕过装配，覆盖不到这段。
+/// v5 起后台是唯一执行模式；装配面不再构造 SubAgent 工具（或 schema 回退成
+/// 显式开关）时本用例报红。
 #[test]
-fn agent_default_run_in_background_reaches_chain_tool_schema() {
-    fn agent_tool_default(ctx: &AssemblyContext) -> serde_json::Value {
-        let out =
-            factory::build_middleware_chain(&ProductionChainAssembler, ctx).expect("assembly");
-        let tools = out.chain.collect_tools(&ctx.cwd);
-        let agent = tools
-            .iter()
-            .find(|tool| tool.name() == "Agent")
-            .expect("生产链必须提供 Agent 工具");
-        agent.parameters()["properties"]["run_in_background"]["default"].clone()
-    }
-
-    let mut ctx = base_context();
-    assert_eq!(agent_tool_default(&ctx), serde_json::json!(false));
-
-    ctx.agent_default_run_in_background = true;
-    assert_eq!(agent_tool_default(&ctx), serde_json::json!(true));
+fn agent_tool_schema_declares_mandatory_background() {
+    let ctx = base_context();
+    let out = factory::build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
+    let tools = out.chain.collect_tools(&ctx.cwd);
+    let agent = tools
+        .iter()
+        .find(|tool| tool.name() == "Agent")
+        .expect("生产链必须提供 Agent 工具");
+    assert_eq!(
+        agent.parameters()["properties"]["run_in_background"]["default"],
+        serde_json::json!(true)
+    );
 }
 
 // ─── 端口不匹配：fail-closed（不造空池/默认索引） ─────────────────────────────
