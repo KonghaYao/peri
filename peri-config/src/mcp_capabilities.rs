@@ -1,10 +1,10 @@
 //! v5 builtin capability selection for `peri mcp-start` and `.mcp.json`.
 //!
-//! Capability names are a local constant list until the v5 router and its
-//! declaration table land (#417); the router will become the single authority.
-//! This module only parses and resolves selection so configuration errors are
-//! typed and carry their source. The standalone process still serves exactly
-//! one legacy instance until the router exists.
+//! Capability names mirror `peri-acp-types::builtin_mcp::BUILTIN_V5_CAPABILITIES`
+//! (the declaration authority); the local list exists only for the typed parser,
+//! and a unit test locks both lists together. This module only parses and
+//! resolves selection so configuration errors are typed and carry their source;
+//! `peri-middlewares::mcp::builtin::router` serves the resolved capability set.
 //!
 //! The `.mcp.json` extension key is `mcpServers.peri.x-peri.capabilities`.
 //! `x-peri` is provisional: the design (#416) leaves the key name undecided

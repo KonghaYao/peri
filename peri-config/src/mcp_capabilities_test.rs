@@ -523,3 +523,12 @@ fn none_selector_and_disabling_every_legacy_instance_are_empty_errors() {
         }
     );
 }
+
+#[test]
+fn capability_names_match_the_v5_registry() {
+    let registry: Vec<&str> = peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
+        .iter()
+        .map(|capability| capability.name)
+        .collect();
+    assert_eq!(BUILTIN_CAPABILITY_NAMES, registry.as_slice());
+}
