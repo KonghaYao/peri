@@ -25,6 +25,36 @@ use tokio_util::sync::CancellationToken;
 
 use super::SubAgentTool;
 
+#[derive(Clone, Copy)]
+enum FailureFixture {
+    Http(u16),
+    VisibleDeltaThenInterruption,
+}
+
+impl FailureFixture {
+    fn expected_status(self) -> Option<u16> {
+        match self {
+            Self::Http(status) => Some(status),
+            Self::VisibleDeltaThenInterruption => None,
+        }
+    }
+
+    fn expected_request_id(self) -> Option<String> {
+        self.expected_status().map(|status| format!("req-{status}"))
+    }
+
+    /// HTTP 400 不可重试：单次请求即失败。其余场景走满
+    /// `RetryConfig::max_attempts`——含「可见增量后中断」：该路径不再整轮
+    /// 作废，而是保留部分输出续跑，1 次初始请求 + 9 次续跑 = 10 次后耗尽。
+    fn expected_requests(self) -> usize {
+        if matches!(self, Self::Http(400)) {
+            1
+        } else {
+            10
+        }
+    }
+}
+
 /// A loopback-only provider boundary keeps these fixtures on the public model
 /// API while exercising the real OpenAI adapter and ModelRuntime retry stream.
 /// It never contacts the network or reads credentials from the environment.
@@ -35,7 +65,7 @@ struct LocalProvider {
 }
 
 impl LocalProvider {
-    async fn start(status: u16) -> Arc<Self> {
+    async fn start(fixture: FailureFixture) -> Arc<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind loopback model fixture");
@@ -50,8 +80,20 @@ impl LocalProvider {
                 requests_for_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let mut request = [0_u8; 16 * 1024];
                 let _ = socket.read(&mut request).await;
-                let (body, request_id, content_type) =
-                    (String::new(), format!("req-{status}"), "application/json");
+                let (status, body, request_id, content_type) = match fixture {
+                    FailureFixture::Http(status) => (
+                        status,
+                        String::new(),
+                        format!("req-{status}"),
+                        "application/json",
+                    ),
+                    FailureFixture::VisibleDeltaThenInterruption => (
+                        200,
+                        "data: {\"id\":\"resp-stream\",\"choices\":[{\"delta\":{\"content\":\"visible-before-interruption\"},\"finish_reason\":null}]}\n\n".to_string(),
+                        "req-stream".to_string(),
+                        "text/event-stream",
+                    ),
+                };
                 let reason = match status {
                     200 => "OK",
                     400 => "Bad Request",
@@ -95,8 +137,8 @@ struct RuntimeFailureModel {
 }
 
 impl RuntimeFailureModel {
-    async fn new(status: u16) -> (Self, Arc<LocalProvider>) {
-        let provider = LocalProvider::start(status).await;
+    async fn new(fixture: FailureFixture) -> (Self, Arc<LocalProvider>) {
+        let provider = LocalProvider::start(fixture).await;
         let runtime = peri_model::ModelRuntimeConfig::default().with_retry(
             RetryConfig::default()
                 .with_base_delay(Duration::ZERO)
@@ -145,8 +187,28 @@ fn write_agent(dir: &TempDir) {
     .expect("agent definition");
 }
 
-#[tokio::test]
-async fn background_http_429_consumes_typed_result_and_safe_notification() {
+struct BackgroundFailure {
+    result: BackgroundTaskResult,
+    lifecycle: Vec<ExecutorEvent>,
+    provider: Arc<LocalProvider>,
+}
+
+impl BackgroundFailure {
+    fn diagnostic(&self) -> &peri_acp_types::error::SafeModelErrorDiagnostic {
+        self.result
+            .subagent_failure
+            .as_ref()
+            .expect("background result keeps typed child failure")
+            .diagnostic()
+            .expect("model diagnostic")
+    }
+}
+
+/// 跑一次后台委派并收集终态结果、生命周期事件与提供方请求计数。
+///
+/// v5 起 Agent 只有后台执行模式；同步路径的失败断言按同一模型边界迁移到
+/// 后台终态（`BackgroundTaskResult` / `SubagentStopped` / 完成通知）。
+async fn run_background_fixture(fixture: FailureFixture) -> BackgroundFailure {
     let dir = tempfile::tempdir().expect("fixture directory");
     write_agent(&dir);
     // W5：Agent 定义来自会话绑定的资源面（真实 workspace 实例夹具）。
@@ -154,7 +216,7 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
     let bg_agent_registry = std::sync::Arc::clone(&bg_face.registry);
     let _bg_face_guard = bg_face;
     let cwd = dir.path().to_string_lossy().into_owned();
-    let (runtime_model, provider) = RuntimeFailureModel::new(429).await;
+    let (runtime_model, provider) = RuntimeFailureModel::new(fixture).await;
     let model: Arc<dyn Model> = Arc::new(runtime_model);
     let model_for_factory = Arc::clone(&model);
     let (bg_event_tx, mut bg_event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -196,7 +258,7 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
         .expect("background task should register before model execution");
     assert!(launch.contains("Background"));
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(2), completed_rx)
+    let result = tokio::time::timeout(Duration::from_secs(5), completed_rx)
         .await
         .expect("background completion")
         .expect("completion callback");
@@ -206,15 +268,15 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
         .subagent_failure
         .as_ref()
         .expect("background result keeps typed child failure");
+    let diagnostic = failure.diagnostic().expect("model diagnostic");
+    assert_eq!(diagnostic.status(), fixture.expected_status());
     assert_eq!(
-        failure.diagnostic().expect("model diagnostic").status(),
-        Some(429)
+        diagnostic.request_id(),
+        fixture.expected_request_id().as_deref()
     );
-    assert_eq!(
-        failure.diagnostic().expect("model diagnostic").request_id(),
-        Some("req-429")
-    );
-    assert_eq!(provider.request_count(), 10);
+    assert_eq!(diagnostic.provider(), Some("openai-compatible"));
+    assert_eq!(provider.request_count(), fixture.expected_requests());
+
     let encoded_result = serde_json::to_vec(&result).expect("background result JSON");
     let decoded_result: BackgroundTaskResult =
         serde_json::from_slice(&encoded_result).expect("background result roundtrip");
@@ -228,13 +290,14 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
             .diagnostic()
             .expect("model diagnostic")
             .status(),
-        Some(429)
+        fixture.expected_status()
     );
     assert_eq!(
         decoded_result.to_notification(),
         result.to_notification(),
         "safe notification must survive the typed result serde boundary"
     );
+
     let mut lifecycle = Vec::new();
     while let Ok(event) = bg_event_rx.try_recv() {
         lifecycle.push(event);
@@ -267,14 +330,14 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
                 .diagnostic()
                 .expect("model diagnostic")
                 .status(),
-            Some(429)
+            fixture.expected_status()
         );
         assert_eq!(
             stop_failure
                 .diagnostic()
                 .expect("model diagnostic")
                 .request_id(),
-            Some("req-429")
+            fixture.expected_request_id().as_deref()
         );
     } else {
         panic!("background error stop must carry its safe failure facts");
@@ -285,8 +348,75 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
     assert!(!lifecycle
         .iter()
         .any(|event| matches!(event.payload(), ExecutorEvent::BackgroundTaskCompleted(_))));
-    let notification = result.to_notification();
-    assert!(notification.contains("model_error_status: 429"));
-    assert!(notification.contains("model_error_request_id: req-429"));
-    assert!(!notification.contains("provider body"));
+
+    if let Some(status) = fixture.expected_status() {
+        let notification = result.to_notification();
+        assert!(notification.contains(&format!("model_error_status: {status}")));
+        assert!(notification.contains(&format!("model_error_request_id: req-{status}")));
+    }
+    assert!(!result.to_notification().contains("provider body"));
+
+    if matches!(fixture, FailureFixture::VisibleDeltaThenInterruption) {
+        let delta_position = lifecycle
+            .iter()
+            .position(|event| matches!(event.payload(), ExecutorEvent::TextChunk { .. }))
+            .expect("visible delta event");
+        assert!(
+            delta_position < stop_positions[0],
+            "visible output must precede the terminal stop: events={lifecycle:?}"
+        );
+    }
+
+    BackgroundFailure {
+        result,
+        lifecycle,
+        provider,
+    }
+}
+
+#[tokio::test]
+async fn background_http_400_is_not_retried_and_keeps_safe_identity() {
+    let fixture = run_background_fixture(FailureFixture::Http(400)).await;
+    let diagnostic = fixture.diagnostic();
+    assert_eq!(diagnostic.category_name(), "http_status");
+    assert_eq!(diagnostic.status(), Some(400));
+    assert_eq!(diagnostic.request_id(), Some("req-400"));
+    assert_eq!(fixture.provider.request_count(), 1, "HTTP 400 不可重试");
+}
+
+#[tokio::test]
+async fn background_http_500_retries_and_keeps_safe_identity() {
+    let fixture = run_background_fixture(FailureFixture::Http(500)).await;
+    let diagnostic = fixture.diagnostic();
+    assert_eq!(diagnostic.category_name(), "http_status");
+    assert_eq!(diagnostic.status(), Some(500));
+    assert_eq!(diagnostic.request_id(), Some("req-500"));
+    assert_eq!(fixture.provider.request_count(), 10);
+}
+
+#[tokio::test]
+async fn background_http_429_consumes_typed_result_and_safe_notification() {
+    let fixture = run_background_fixture(FailureFixture::Http(429)).await;
+    let diagnostic = fixture.diagnostic();
+    assert_eq!(diagnostic.category_name(), "http_status");
+    assert_eq!(diagnostic.status(), Some(429));
+    assert_eq!(diagnostic.request_id(), Some("req-429"));
+    assert_eq!(fixture.provider.request_count(), 10);
+}
+
+#[tokio::test]
+async fn background_visible_delta_then_interruption_forwards_delta_before_stop() {
+    let fixture = run_background_fixture(FailureFixture::VisibleDeltaThenInterruption).await;
+    let diagnostic = fixture.diagnostic();
+    assert_eq!(diagnostic.category_name(), "stream_interrupted");
+    assert!(diagnostic.status().is_none());
+    assert!(diagnostic.request_id().is_none());
+    let delta = fixture
+        .lifecycle
+        .iter()
+        .find_map(|event| match event.payload() {
+            ExecutorEvent::TextChunk { chunk, .. } => Some(chunk.as_str()),
+            _ => None,
+        });
+    assert_eq!(delta, Some("visible-before-interruption"));
 }
