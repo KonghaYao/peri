@@ -1,7 +1,7 @@
 // Upstream hooks also carried host-integration APIs (global bridge, persisted
-// canvas state, HTTP fetches, imperative state/action). peri-cf renders OpenUI
-// inside a chat message and owns interaction through the renderer, so those
-// APIs are removed.
+// canvas state, HTTP fetches, imperative state/action). OpenUI renders inside a
+// chat message and owns interaction through the renderer, so those APIs are
+// removed.
 // What remains is a process-local theme store: the host pushes CSS-derived
 // colors in, canvas primitives read them through `useHostTheme()`.
 import { useSyncExternalStore } from "react";

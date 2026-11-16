@@ -1,13 +1,17 @@
 import { once } from 'node:events';
-import { createServer, connect } from 'node:net';
+import { createServer } from 'node:net';
 import { mkdtemp, open, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
+// 共享 helper 在仓库根 scripts/ 下，而 SDK 的 demo typecheck 以包根为 rootDir；
+// 用计算后的 URL 动态加载，避免 tsc 把仓库级 .mjs 纳入包内程序。
+const { lookupEnv } = await import(new URL('../../../../scripts/lib/local-store.mjs', import.meta.url).href);
+
 const here = import.meta.dir;
 const sdkRoot = resolve(here, '../..');
 const scratch = await mkdtemp(resolve(tmpdir(), 'peri-wrangler-smoke-'));
-let sqld;
+let loom;
 let wrangler;
 let model;
 let log;
@@ -23,21 +27,6 @@ async function freePort() {
   return port;
 }
 
-async function waitForPort(port, process) {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    if (process.exitCode !== null) throw new Error(`sqld exited: ${process.exitCode}`);
-    try {
-      const socket = connect(port, '127.0.0.1');
-      await once(socket, 'connect');
-      socket.destroy();
-      return;
-    } catch {
-      await Bun.sleep(50);
-    }
-  }
-  throw new Error('sqld did not listen');
-}
-
 async function probe(url) {
   const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
   const body = await response.json();
@@ -51,12 +40,7 @@ try {
   });
   if (await build.exited !== 0) throw new Error('Workers probe build failed');
 
-  const sqlPort = await freePort();
-  sqld = Bun.spawn([
-    'mise', 'exec', '--', 'sqld', '--no-welcome', '--http-listen-addr',
-    `127.0.0.1:${sqlPort}`, '--db-path', resolve(scratch, 'sessions'),
-  ], { cwd: sdkRoot, stdout: 'ignore', stderr: 'ignore' });
-  await waitForPort(sqlPort, sqld);
+  loom = await lookupEnv({ port: await freePort() });
 
   let modelCalls = 0;
   const modelPaths = [];
@@ -80,7 +64,8 @@ try {
     '--local', '--ip', '127.0.0.1',
     '--port', String(workerPort),
     '--persist-to', resolve(scratch, 'wrangler-state'),
-    '--var', `STORAGE_URL:http://127.0.0.1:${sqlPort}`,
+    '--var', `STORAGE_URL:${loom.url}`,
+    '--var', `STORAGE_TOKEN:${loom.token}`,
     '--var', `MODEL_URL:http://127.0.0.1:${model.port}/v1`,
   ], { cwd: sdkRoot, stdout: log.fd, stderr: log.fd });
   const url = `http://127.0.0.1:${workerPort}`;
@@ -97,7 +82,7 @@ try {
   }
   if (!ready) throw new Error('Wrangler did not start');
 
-  // 0) peri-cf 形态：SDK 宿主 + 只注入 moduleFactory（workerd 的 import.meta.url 是 undefined）。
+  // 0) 宿主形态：SDK 宿主 + 只注入 moduleFactory（workerd 的 import.meta.url 是 undefined）。
   const sdkHost = await probe(`${url}/?host=sdk`);
   if (sdkHost.protocolVersion !== 1 || !sdkHost.sessionId || sdkHost.closed !== true) {
     throw new Error(`SDK host mismatch: ${JSON.stringify(sdkHost)}`);
@@ -110,7 +95,7 @@ try {
       !queued.events?.includes('user_input_delivered')) {
     throw new Error(`ACP queue turn mismatch: ${JSON.stringify(queued)}`);
   }
-  // 2) 直连 turn 路径：session/prompt 仍是当前有效方法（peri-cf 在用）。
+  // 2) 直连 turn 路径：session/prompt 仍是当前有效方法。
   const prompted = await probe(`${url}/?turn=prompt`);
   if (!prompted.sessionId || prompted.stopReason !== 'end_turn' || prompted.closed !== true ||
       prompted.notifications === 0) {
@@ -135,7 +120,7 @@ try {
   throw error;
 } finally {
   if (wrangler) { wrangler.kill('SIGINT'); await wrangler.exited; }
-  if (sqld) { sqld.kill('SIGINT'); await sqld.exited; }
+  if (loom) await loom.stop();
   model?.stop(true);
   await log?.close();
   await rm(scratch, { recursive: true, force: true });

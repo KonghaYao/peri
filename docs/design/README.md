@@ -50,7 +50,6 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | System Reminder | [system-reminder.md](system-reminder.md) | canonical DTO、可信生产、队列/持久化、ACP/TUI 投影与 legacy fallback |
 | Beta Flag 系统 | [beta-flags.md](beta-flags.md) | 注册表、`config.betas` 配置面投影与装配期消费注入；不做远程下发、灰度与会话内热生效，安全与兼容语义不使用 flag；验收记录与剩余跟进项见 [2026-10-08 实施 issue](../../spec/issues/2026-10-08-beta-flags-implementation.md) |
 | Peri SDK Chat | [peri-sdk-chat.md](peri-sdk-chat.md) | `ChatManager`/`ChatService`/`ChatUserAction`/`PeriInstance`/`ChatView` 与 `ChatReplica` 的职责、事实/同步、宿主与关闭边界；公开入口见 [TS SDK 索引](../code-index/peri-ts-sdk.md) |
-| peri-cf 服务端 Agent 执行 | [peri-cf-server-agent.md](peri-cf-server-agent.md) | Bun 长驻服务承载 WASM ACP Host 与 SDK Chat 控制面；浏览器经 HTTP Action 与 WebSocket + Yjs 只读副本消费；凭据与远程 MCP 由服务端环境变量管理 |
 
 ## 已批准目标设计
 
@@ -68,8 +67,6 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | MonitorMCP | [monitor-mcp.md](monitor-mcp.md) | v1 command source、标准 MCP Tasks 与 alert 提醒已实现（运行中命中与任务终态都会唤醒，终态合并未报告命中）；实现入口见 [MCP packages 索引](../code-index/mcp-packages.md)，poll/file/WS source 不在范围 |
 | Serverless 执行环境身份 | [serverless-execution-identity.md](serverless-execution-identity.md) | Emscripten/Node/Bun/workerd 宿主可用；Cloudflare 托管部署与跨实例接管未验收 |
 | TUI 面板架构 | [tui-panel-architecture.md](tui-panel-architecture.md) | [TUI 面板架构重构](../../spec/issues/2026-10-15-tui-architecture-refactor.md)；面板外壳、共享视口、事件入口、操作作用域与完成门、快照发布单点、确认版本守卫已落地；未完成项见该 issue |
-| peri-cf 聊天对象契约 | [peri-cf-chat-objects.md](peri-cf-chat-objects.md) | 前端消费面与对象契约完整性；对象语义继续有效，Worker/DO 与旧控制通道已标注为历史；当前实现见 [Peri SDK Chat](peri-sdk-chat.md) 与 [服务端 Agent](peri-cf-server-agent.md) |
-| peri-cf Chat 前端 | [peri-cf-chat-ui.md](peri-cf-chat-ui.md) | 自有 `frontend/chat/{timeline,composer,components}` 渲染；状态来自 SDK `ChatReplica` 经 `ChatProjection` 物化的展示 DTO；`frontend/components/assistant-ui/` 只保留 vendored 审批/问答卡片（无 `@assistant-ui/*` 运行时依赖）；SDK 保持独立 |
 
 ## 维护要求
 

@@ -14,7 +14,7 @@
 2. `chatConfig.runtime.kind = "wasm"`，每个 chat 建立独立 ACP session 后**空转**，不发送 prompt。
 3. 串行启动，启动后不关闭、不销毁；默认每新增一个 Agent 采样一次；从 200 起步时先预热到 200 再逐点采样。
 4. 主指标是宿主进程 RSS：`ps -o rss= -p <pid>`，单位 KiB，除以 1024 得到 MiB。`process.memoryUsage().rss` 只作对照。
-5. 本地 sqld 是独立进程，约 32 MiB，**不计入宿主 RSS**。
+5. 后端容器独立于宿主进程：历史 sqld 测量约 32 MiB，**不计入宿主 RSS**；现行 peri-loom 容器用 `docker stats` 记录，见 §2.2。
 6. 停止条件：宿主 RSS ≥ 1024 MiB，或达到脚本上限，或启动失败。
 7. WASM 线性内存只增不减；同一个进程跑过大 N 后再关闭 chat，RSS 不会回到基线。每轮必须使用全新进程。
 
@@ -41,7 +41,7 @@
 4. 首个 Agent 一次性增量约 **111–114 MiB**；Manager 基线约 **30 MiB**。
 5. 优化前：`N_max=20`、**39.6 MiB/agent**、首个 **+118.8 MiB**、p50 **79.5 ms**。
 6. 优化后：p50 **45.5–46.2 ms**、p95 **49.5–50.0 ms**、峰值约 **1026–1028 MiB**。
-7. sqld 独立进程约 **32 MiB**，不计入宿主 RSS。
+7. 历史 sqld 口径：独立进程约 **32 MiB**，不计入宿主 RSS（§6 的数字即该口径）。
 
 `process.memoryUsage().rss` 不能作为主指标：WASM 线性内存由实例持有，Bun 对该部分记账不完整。优化前 N=21 实测 `ps` 1035.7 MiB、`process.memoryUsage().rss` 676.2 MiB，差 **359.5 MiB**；优化后各轮接近阈值时的最大差约 **174.1–176.5 MiB**。用后者会把容量系统性高估。
 
@@ -66,22 +66,22 @@ ls -la dist/index.js dist/wasm/peri-wasm.js dist/wasm/peri_wasm.wasm
 4. 基准只消费构建后的 `dist`。SDK 入口使用 `file:///.../npm-packages/@peri-sdk/dist/index.js`；WASM glue 使用 `dist/wasm/peri-wasm.js`。不要从 `src` 或上一轮进程缓存的模块启动。
 5. 基准脚本放在仓库外（例如 `/tmp/sdk-wasm-capacity.mjs`），不要提交进仓库。
 
-### 2.2 启动 sqld
+### 2.2 启动 peri-loom
 
-1. 本地 sqld 必须在第一个 WASM 启动前可用。脚本默认在 `npm-packages/@peri-sdk` 下执行 `mise exec -- sqld`；也可用 `PERI_TEST_SQLD_BIN` 指向已安装的 sqld 可执行文件。
-2. 每次 run 选一个空闲 TCP 端口和一个独立 `--db-path`，避免复用旧会话：
+1. 本地后端必须在第一个 WASM 启动前可用。默认启动平台版 peri-loom 容器（镜像 `ghcr.io/konghayao/peri-loom:v1.1.24`，amd64 + arm64）；也可用 `PERI_TEST_STORAGE_URL` / `PERI_TEST_STORAGE_TOKEN` 成对指向外部 libSQL 兼容端点。
+2. 每次 run 选一个空闲 TCP 端口和一个独立 run-dir；run-dir 权限必须是 700，否则平台拒绝启动：
 
 ```bash
-mkdir -p /tmp/sdk-wasm-capacity
-cd npm-packages/@peri-sdk
-mise exec -- sqld --no-welcome \
-  --http-listen-addr 127.0.0.1:8081 \
-  --db-path /tmp/sdk-wasm-capacity/sqld
+run_dir="$(mktemp -d)" && chmod 700 "${run_dir}"
+docker run -d --rm --name "peri-loom-bench-${RANDOM}" --network host \
+  -v "${run_dir}:/data/peri" --env PERI_HRANA_EXPERIMENTAL=1 \
+  ghcr.io/konghayao/peri-loom:v1.1.24 \
+  --run-dir /data/peri --backend local --listen 127.0.0.1:8081 --no-build
 ```
 
-3. 手工命令中的 8081 只是示例，执行前先确认端口空闲；脚本用 `unusedPort()` 选端口，并把 sqld 启动失败（含端口冲突）重试最多 5 次（见第 4 节 `startSqld`）。sqld 不会自动创建 `--db-path` 的父目录，手工执行时先 `mkdir -p`。
-4. 等待 sqld 的 TCP 端口可连接后再启动第一个 Agent；否则 `createNewSession` 会以启动失败结束。
-5. sqld 的 RSS 单独记录，约 32 MiB；不要把它加进 1 GiB 宿主预算。
+3. 手工命令中的 8081 只是示例，执行前先确认端口空闲；脚本用 `unusedPort()` 选端口并等待后端 `"ready": true`（历史 sqld 骨架见第 4 节 `startSqld`）。端点和凭据从容器内 `/data/peri/connection.json` 读取：`endpoint` + `database` 拼 URL，`project_api_key` 作 `authToken`；不要打印 token。
+4. 等待容器 ready 且 `127.0.0.1:<port>` 可连接后再启动第一个 Agent；否则 `createNewSession` 会以启动失败结束。
+5. 后端容器独立于宿主进程：历史 sqld 口径约 32 MiB；现行复测用 `docker stats --no-stream --format '{{.MemUsage}}'` 记录，仍然不要把它加进 1 GiB 宿主预算。
 
 ### 2.3 模型配置
 
@@ -161,7 +161,7 @@ const settings = {
 
 ## 4. 脚本骨架
 
-以下脚本是单文件、可直接复制运行的骨架，放在仓库外，例如 `/tmp/sdk-wasm-capacity.mjs`。运行前置是 Bun、`ps` 和可用的 sqld（默认经 `mise exec -- sqld` 启动，也可用 `PERI_TEST_SQLD_BIN` 指定）；脚本只消费已构建的 `dist`，不 import 仓库源码；`/tmp/peri-dist-bench/bench.mjs` 与 `/tmp/verify-capacity-dist/verify-capacity.mjs` 是历史实现，可能不存在，不作为依赖。脚本默认 `PERI_SDK_DIR=/Users/mino/code/peri/npm-packages/@peri-sdk`、`PERI_BENCH_DIR=/tmp/sdk-wasm-capacity`；仓库在别处或要换输出目录时用环境变量覆盖。执行前先把下面的代码块保存为 `/tmp/sdk-wasm-capacity.mjs`；文件不存在时命令会直接报错。
+以下脚本是单文件、可直接复制运行的骨架，放在仓库外，例如 `/tmp/sdk-wasm-capacity.mjs`。运行前置是 Bun、`ps`、docker 和可用的 peri-loom（§2.2；也可用 `PERI_TEST_STORAGE_URL` / `PERI_TEST_STORAGE_TOKEN` 指向外部端点）；脚本只消费已构建的 `dist`，不 import 仓库源码；`/tmp/peri-dist-bench/bench.mjs` 与 `/tmp/verify-capacity-dist/verify-capacity.mjs` 是历史实现，可能不存在，不作为依赖。**注意：下方骨架保留历史 sqld 启动实现（`startSqld`）以复现 §6 的历史数字；现行复测按 §2.2 起 peri-loom，并把后端连接换成 `PERI_TEST_STORAGE_URL` / `PERI_TEST_STORAGE_TOKEN`。** 脚本默认 `PERI_SDK_DIR=/Users/mino/code/peri/npm-packages/@peri-sdk`、`PERI_BENCH_DIR=/tmp/sdk-wasm-capacity`；仓库在别处或要换输出目录时用环境变量覆盖。执行前先把下面的代码块保存为 `/tmp/sdk-wasm-capacity.mjs`；文件不存在时命令会直接报错。
 
 先用 3 个 Agent 冒烟，确认共享编译和 session 唯一性，再跑大轮：
 
@@ -556,8 +556,8 @@ try {
   manager = new ChatManager({
     store: {
       storage: {
-        url: `http://127.0.0.1:${sqlPort}`,
-        authToken: "local-dev",
+        url: process.env.PERI_TEST_STORAGE_URL ?? `http://127.0.0.1:${sqlPort}`,
+        authToken: process.env.PERI_TEST_STORAGE_TOKEN ?? "sqld-placeholder-token",
       },
       machineId: "00000000-0000-4000-8000-0000000000b0",
     },
@@ -846,7 +846,7 @@ try {
 1. `compileCalls > 1`：检查是否解析出多个不同的 wasm 绝对 URL、是否绕过 SDK loader、是否混用旧 dist；共享缓存按绝对 URL 键控。`ChatCreateOptions.runtime` 只有 `env` 和 `onDiagnostic`，没有 `moduleUrl`；`moduleUrl` 只在 Manager 级 `chatConfig.runtime` 设置，不能按 chat 覆盖产物位置。
 2. `compileCalls == 0`：不能单独断定仍走旧路径。旧 dist 为 0 的主因是旧 loader 没有 `WebAssembly.compile`；Node 回退、注入 `moduleFactory` 也会为 0。`instantiateWasm`/`locateFile` 只经 `PeriWasmInstantiateOptions.moduleOptions` 影响直接调用 loader 的宿主，`ChatManager` 不透传 `moduleOptions`，基准路径不会因它们为 0。先看 `instantiateSources`：`arraybuffer`/`view` 等于 `instantiateCalls` 表示旧 bytes 路径；`module` 等于 `instantiateCalls` 表示预编译或注入模块路径。再检查 `dist/index.js` 是否包含 `loadWasmArtifact`/`WebAssembly.compile`（共享缓存实现），并确认其构建时间晚于 `dcb76ed6b`。若 `compileCalls=1` 但 `arraybuffer`/`view` > 0，同样说明没有把共享 Module 交给 glue。
 3. p50 接近 79–80 ms：很像优化前的每 Agent 编译路径；确认 dist 是最新提交构建、进程是新建的。
-4. `N_max` 比 219–222 低很多：先确认没有并行构建/测试、sqld 未计入、没有发送 prompt、启动失败为 0；再比较 Bun 版本和主机内存。
+4. `N_max` 比 219–222 低很多：先确认没有并行构建/测试、后端容器未计入、没有发送 prompt、启动失败为 0；再比较 Bun 版本和主机内存。
 5. 启动失败含 `No LLM provider configured in settings`：`active_alias` 不是合法档位，改成 `haiku` 等四档之一。
 6. 启动等待约 20 s 后失败：可能是 wasm 产物缺失或 Emscripten 链接失败；检查 `dist/wasm/peri_wasm.wasm`，并看 `onDiagnostic` 输出。SDK 的启动预算是 20 s，脚本外层 watchdog 是 30 s。
 7. `R² < 0.95` 或尾部不足 8 点：该轮未测稳；延长静置、减少并行负载后重跑，不要只挑高 R² 的窗口。
@@ -854,6 +854,8 @@ try {
 ## 6. 历史基线
 
 ### 6.1 环境与来源
+
+本节全部数字来自 sqld 后端时期（2026-10）的历史测量；现行默认后端已换为 peri-loom，重跑属于新口径，不要与本节混用。
 
 1. 日期：2026-10-28（+0800）；分支 `feat/wasm-module-share`。优化前数据对应父提交 `34307c5f7`（原始 JSON 未记录 HEAD，按 09:37–09:40 +0800 的时间戳推断）；优化后数据对应 `dcb76ed6b`（10:41 +0800）。
 2. 环境：Bun 1.4.3、macOS 26.6.2（arm64）、16 GiB RAM；主机负载约 1.7–2.3。
@@ -912,7 +914,7 @@ try {
 5. **容量依赖主机和 Bun 版本。** 219–222 只代表基线环境（macOS arm64、Bun 1.4.3、16 GiB）。换 CPU、内存压力、Bun/JSC 版本或操作系统都要重测，不能直接套用。
 6. **WASM 线性内存不会缩回。** 实例增长过的内存页不会因为关闭 chat 而归还；常驻值由初始化峰值决定。因此不能在同一进程里先跑大 N 再跑小 N，也不能用“关闭后 RSS”证明容量。
 7. **`ps` 是 Unix 口径。** Windows 需要换 RSS 采集方式；不同工具的 RSS 口径（是否含共享页、是否含子进程）不同，不能混用。
-8. **sqld 不计入宿主。** sqld 独立进程约 32 MiB；把它加进 1 GiB 会得到另一条曲线。若业务要求端到端总内存，应另立口径并同时报告宿主与 sqld。
+8. **后端容器不计入宿主。** 历史 sqld 口径约 32 MiB；现行 peri-loom 容器用 `docker stats` 单独记录。把它加进 1 GiB 会得到另一条曲线。若业务要求端到端总内存，应另立口径并同时报告宿主与后端容器。
 9. **容量是同时存活数，不是吞吐。** 本文不测请求速率、并发创建/关闭、长时稳定性或 GC 压力。
 
 ### 7.2 常见误判

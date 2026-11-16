@@ -21,10 +21,14 @@ const wasmEnv = Object.fromEntries(
         entry[0].startsWith("LANGFUSE_") && entry[1] !== undefined),
 );
 const html = await readFile(resolve(import.meta.dir, "demo.html"), "utf8");
-const databaseUrl = Bun.env.PERI_DEMO_TURSO_URL ?? "http://127.0.0.1:8081";
+const databaseUrl = Bun.env.PERI_DEMO_TURSO_URL ?? Bun.env.PERI_STORAGE_URL
+    ?? "http://127.0.0.1:8091/db/local_default/demo/main";
 const databaseEndpoint = new URL(databaseUrl);
 if (databaseEndpoint.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(databaseEndpoint.hostname))
     throw new Error("Demo Session Store must be a local HTTP libSQL listener");
+const storageToken = Bun.env.PERI_STORAGE_TOKEN;
+if (!storageToken)
+    throw new Error("PERI_STORAGE_TOKEN is required; copy project_api_key from the local peri-loom connection.json");
 const sseClient = await Bun.build({
     entrypoints: [resolve(import.meta.dir, "../../node_modules/@microsoft/fetch-event-source/lib/esm/index.js")],
     target: "browser",
@@ -42,8 +46,7 @@ const sessionViewJs = await sessionView.outputs[0]!.text();
 
 const database = new TursoStorage({
     url: databaseUrl,
-    // Peri currently requires a nonempty remote credential even for local sqld without auth.
-    authToken: "local-dev",
+    authToken: storageToken,
 });
 const config = {
     config: {

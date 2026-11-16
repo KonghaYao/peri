@@ -75,14 +75,16 @@
   ],
   "scripts": {
     "build": "bun run scripts/build.ts",
+    "build:ts": "bun run scripts/build.ts --no-wasm",
     "build:workers": "bun examples/workers/build-worker.mjs",
     "openui:spec": "bun scripts/generate-openui-spec.ts",
     "openui:check": "bun scripts/generate-openui-spec.ts --check",
     "prebuild": "bun run openui:check",
+    "prebuild:ts": "bun run openui:check",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.demo.json && tsc --noEmit -p tsconfig.type-tests.json",
     "test": "bun run build && bun test",
     "dev": "bun run examples/demo/demo.ts",
-    "db:dev": "mise exec -- sqld --no-welcome --http-listen-addr 127.0.0.1:8081 --db-path ../../target/peri-sdk-local-turso",
+    "db:dev": "bun -e \"(async () => { const net = await import('node:net'); const url = process.env.PERI_STORAGE_URL ?? 'http://127.0.0.1:8091/db/local_default/demo/main'; const target = new URL(url); try { await new Promise((resolve, reject) => { const socket = net.connect({ host: target.hostname, port: Number(target.port) || 80 }, () => { socket.end(); resolve(); }); socket.on('error', reject); socket.setTimeout(2000, () => { socket.destroy(); reject(new Error('timeout')); }); }); } catch { console.error('local store is not reachable: ' + url); console.error('start peri-loom, then copy project_api_key from its connection.json'); process.exit(1); } console.log('local store endpoint: ' + url); console.log('authToken: project_api_key from docker exec <container> cat /data/peri/connection.json'); })()\"",
     "demo:wasm": "bun run examples/demo/demo-wasm.ts",
     "test:wasm": "bun run build && bun test tests/wasm-acp-integration.test.ts tests/wasm-transport.test.ts",
     "smoke:workers": "bun examples/workers/smoke.mjs"

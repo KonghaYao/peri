@@ -7,7 +7,7 @@
 
 | 入口 | 文件 | 内容 |
 | --- | --- | --- |
-| 主入口 | `npm-packages/@peri-sdk/src/entries/index.ts` → `src/entries/chat.ts` | `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、`TursoStorage`、公开类型/错误（含 `ChatManagerContract`）、ownership 公开面（`KvStorage` 类型、`clearSessionOwnership` 函数）、Store/KV/transport 类型 |
+| 主入口 | `npm-packages/@peri-sdk/src/entries/index.ts` → `src/entries/chat.ts` | `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、`TursoStorage`、`ChatActivityTracker`/`ChatActivitySource`、公开类型/错误（含 `ChatManagerContract`）、ownership 公开面（`KvStorage` 类型、`clearSessionOwnership` 函数）、Store/KV/transport 类型 |
 | `/portable` | `src/entries/portable.ts` | 主入口的 Chat 公共面 + 嵌入方驱动的执行准入核心；准入摘要仍依赖 `node:crypto` |
 | `/view` | `src/entries/view.ts` | 浏览器安全展示：`ChatView`、`ChatReplica`、`readSessionView`、载荷读取、同步协议；不引入 Node 运行时依赖，也不导出 `ChatViewRegistry` |
 | `/wasm` | `src/entries/wasm.ts` | Emscripten ACP 运行后端、loader、`WasmAcpTransport` |
@@ -48,6 +48,7 @@
 | Manager 契约 | `src/chat/types.ts`、`src/entries/chat.ts` | `ChatManager`/`ChatService` 接口；对外类型名 `ChatManagerContract`，具体类 `src/chat/manager.ts` 实现它，调用方可注入自有实现 |
 | Service | `src/chat/service.ts`、`src/chat/binding.ts`、`src/chat/close-chat.ts` | 绑定状态机、九类动作分派（含 `set_config_option`）、回执关联、事实日志、关闭预算与失败保留；载荷读取按发起时的绑定代次校验，换绑后的晚到结果/错误丢弃为 `unavailable` |
 | 观测 | `src/contracts/observability.ts`、`src/chat/observe.ts`、`src/chat/manager.ts`、`src/sandbox/manager.ts`、`src/entries/observe.ts` | 只读快照：`ChatService.observe()` 把内部阶段折算为 `empty/bound/closing/blocked` 并标 `phaseLimited`，MCP 只输出名称/类型/安全 endpoint/header 名；`bindExisting` 标 `unknown`；Manager 按 `chatId` 合并 WASM 池快照；`SandboxManager.snapshot()` 输出脱敏 status；入口按 endpoint 关联 agent 与 sandbox、计算 orphan 与 totals；不启动实例、不改状态 |
+| 活动投影 | `src/chat/activity.ts`、`src/entries/chat.ts` | `ChatActivityTracker` 把 `ChatObservation` 与 `ChatFact`（`task-snapshot` 非终态任务）投影为绝对 `ChatActivitySnapshot`：`revision`、`complete`、根任务/内部任务/排队输入/投递/交互/本地操作计数；无变化不提升 `revision`；可选 `ChatActivitySource` 提供 `activeInternalTasks`/`pendingDeliveries`，缺失时 `complete=false`；只发布事实、不持有租约或做生命周期判定 |
 | 动作 | `src/chat/action.ts`、`src/util/json-value.ts` | 九类纯数据 Action、发送上限常量 `CHAT_SEND_TEXT_MAX_LENGTH`、`requestId`、JSON 深拷贝/冻结、`parseChatUserAction`；不依赖 `instanceof` |
 | 类型/错误 | `src/chat/types.ts`、`src/workspace/*`、`src/agent/port.ts`、`src/chat/errors.ts` | `WorkspaceRef`、`ChatRuntime`、公开 `ChatSessionOptions`、内部 `ChatSessionInit`、`ChatCreateOptions`、`ChatLifecycleOptions`、`PeriInstancePort`、错误 `disposition`、`WorkspaceMismatchError`/`SessionWorkspaceMismatchError`/`SessionWorkspaceConflictError`（均 `workspace_mismatch`）与 `ChatCloseIncompleteError` |
 | Per-chat 配置 | `src/chat/agent-config.ts`、`src/chat/workspace-config.ts`、`src/chat/session-init.ts`、`src/chat/lifecycle.ts` | `store` 快照校验（`machineId` 非空、`storage` JSON 安全）；`workspace` 校验与 `sessionPath` 派生；per-chat `agent` 校验（`cwd` 可选且必须等于 `runtimePath`、禁止 `storage`/`machineId`）与内部 `agentConfig` JSON 的 cwd/store 注入、逐 Chat 深拷贝/冻结/序列化；`mcpServers` 容器/http headers/stdio args/env 按 Chat 复制（`acp.server` 保留引用）；lifecycle 覆盖合并，shutdown 预算保持 Manager 级 |
@@ -96,5 +97,5 @@
 
 ## 消费者
 
-- `npm-packages/peri-cf` 通过主入口与 `/view` 消费 Manager/Action/View/Replica；平台装配、HTTP/WS 与鉴权留在应用。索引见 [peri-cf](peri-cf.md)。
+- 应用层通过主入口与 `/view` 消费 Manager/Action/View/Replica；平台装配、HTTP/WS 与鉴权留在应用。
 - Workers smoke 入口在 `npm-packages/@peri-sdk/examples/workers/`；只证明当前 Host 方法表与本地 `workerd` 路径，不代表 hosted Workers 验收。

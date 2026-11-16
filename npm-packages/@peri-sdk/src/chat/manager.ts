@@ -1,4 +1,5 @@
 import { KvSessionOwnership, LocalSessionIndex } from "./ownership";
+import { createChatSessionIndex } from "./session-index";
 import {
     WasmRuntimePool,
     type WasmRuntimeAcquireOptions,
@@ -61,8 +62,6 @@ export interface ChatManagerInternalOptions extends ChatManagerOptions {
 export class ChatManager implements ChatManagerContract {
     private readonly chats = new Map<string, ChatService>();
     private readonly sessions = new LocalSessionIndex();
-    /** 本 Manager 内 Session → workspace 的内存映射；不写入 Store/ACP 元数据。 */
-    private readonly sessionWorkspaces = new Map<string, string>();
     private readonly index: ChatSessionIndex;
 
     private readonly store: ChatStoreConfig;
@@ -127,25 +126,7 @@ export class ChatManager implements ChatManagerContract {
         );
         // 默认工厂直接使用 per-chat context；生命周期预算已由 ChatService 合并。
         this.instanceFactory = options.instanceFactory ?? createChatInstance;
-        this.index = {
-            reserve: (chatId, sessionId) =>
-                this.sessions.reserve(sessionId, chatId),
-            commit: (chatId, previousSessionId, sessionId) =>
-                this.sessions.commit(
-                    chatId,
-                    previousSessionId,
-                    sessionId,
-                ),
-            release: (chatId, sessionId) =>
-                this.sessions.release(sessionId, chatId),
-            workspaceOf: (sessionId) => this.sessionWorkspaces.get(sessionId),
-            claimWorkspace: (sessionId, workspaceId) => {
-                // 首次记录即归属；同一 Session 不允许在同一 Manager 内改写。
-                if (!this.sessionWorkspaces.has(sessionId)) {
-                    this.sessionWorkspaces.set(sessionId, workspaceId);
-                }
-            },
-        };
+        this.index = createChatSessionIndex(this.sessions);
 
         if (this.runtime.kind === "wasm") {
             const runtime = this.runtime;

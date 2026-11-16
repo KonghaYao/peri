@@ -57,8 +57,8 @@
 ## 5. 验收 A01-A22
 
 状态口径：PASS 表示有声明的自动化行为证据；BLOCKED 表示关键平台/真实运行后端证据不可得，不能以
-typecheck 或旧 dist 冒充。测试名省略文件时均为 `npm-packages/@peri-sdk/tests/` 或
-`npm-packages/peri-cf/` 下同名文件。
+typecheck 或旧 dist 冒充。测试名省略文件时均为 `npm-packages/@peri-sdk/tests/` 下同名文件；
+CF 侧同名测试已随 peri-cf 移除。
 
 | 编号 | 场景 | 证据 | 状态 |
 | --- | --- | --- | --- |
@@ -92,7 +92,7 @@ typecheck 或旧 dist 冒充。测试名省略文件时均为 `npm-packages/@per
 ### 6.1 成功项
 
 > 下表是 2026-10-24 复验的历史记录。其中 `views.test.ts`、`sandbox.test.ts` 已在后续重构删除，
-> 对应命令不可复跑；行内结论保留，不改写历史。
+> 对应命令不可复跑；peri-cf 已从仓库移除，其验证命令不再列出；行内结论保留，不改写历史。
 
 | 命令 | exit | 结果 |
 | --- | --- | --- |
@@ -100,11 +100,6 @@ typecheck 或旧 dist 冒充。测试名省略文件时均为 `npm-packages/@per
 | `cd npm-packages/@peri-sdk && bun test tests/chat-close-bounded.test.ts tests/chat-binding.test.ts tests/chat-manager.test.ts tests/chat-actions.test.ts tests/chat-view.test.ts` | 0 | 52 pass / 0 fail；273 expect；5 files |
 | `cd npm-packages/@peri-sdk && bun test tests/chat-*.test.ts tests/session-sync.test.ts tests/public-view.test.ts tests/sandbox.test.ts` | 0 | 150 pass / 0 fail；806 expect；13 files |
 | `cd npm-packages/@peri-sdk && bun test tests test` | 0 | 427 pass / 0 fail；3017 expect；49 files（含 A15 新增组合用例） |
-| `cd npm-packages/peri-cf && bun run typecheck` | 0 | 根 TS 与 `server/tsconfig.json` 均通过 |
-| `cd npm-packages/peri-cf && bun test server/agent/views.test.ts server/api/index.test.ts` | 0 | 20 pass / 0 fail；73 expect；2 files |
-| `cd npm-packages/peri-cf && bun test frontend/chat/timeline/Timeline.dom.test.tsx` | 0 | 连续 10 次均为 4 pass / 0 fail |
-| `cd npm-packages/peri-cf && bun test` | 0 | 修复后连续 10 次均为 287 pass / 0 fail；另在 8 路并发压力下 32/32 次全量通过 |
-| `cd npm-packages/peri-cf && ./node_modules/.bin/vite build` | 0 | 3441 modules；仅有 >500 kB chunk 提示 |
 | `git diff --check` | 0 | 无空白错误 |
 | 改动文件 `wc -l` | 0 | 最大为 `src/agent/peri-instance.ts` 999 行；`src/chat/service.ts` 967 行（A15 修复前 941）；全部 ≤1000 |
 
@@ -142,10 +137,10 @@ typecheck 或旧 dist 冒充。测试名省略文件时均为 `npm-packages/@per
 | `cd npm-packages/@peri-sdk && MISE_ENV=wasm mise exec -- bun run build` | 0 | release 构建完成；新 `dist/sdk/index.d.ts` 1.3 KB、无旧门面导出；`dist/view/index.js` 含 `pendingConnections`；`dist/wasm/{peri-wasm.js,peri_wasm.wasm}` 为新产物 |
 | `cd npm-packages/@peri-sdk && bun test tests/wasm-acp-integration.test.ts tests/wasm-transport.test.ts` | 0 | 8 pass / 0 fail（真实打包 WASM、真实 Turso listener、fixture 模型） |
 | `cd npm-packages/@peri-sdk && MISE_ENV=wasm mise exec -- bun run smoke:workers` | 0 | `{"passed":true,"modelCalls":3,"queueTurn":"queue","promptTurn":"prompt","persistedAcrossRestart":true}`（本地 workerd） |
-| `cd npm-packages/peri-cf && bun install --force` | 0 | `node_modules/@peri-code/sdk` 为指向 `../@peri-sdk` 的符号链接，CF 直接消费最新 `dist` |
-| `cd npm-packages/peri-cf && bun run typecheck && bun test` | 0 | typecheck 0；287 pass / 0 fail |
-| `cd npm-packages/peri-cf && bun node_modules/vite/bin/vite.js build --outDir /tmp/peri-cf-dist --emptyOutDir` | 0 | 3441 modules；浏览器包无旧门面/SSE 关键词 |
 | `bash scripts/check-file-size.sh` | 1 | 环境缺 `ripgrep (rg)`；改用 `wc -l` 人工核对 |
+
+> peri-cf 侧的 `bun install --force`、typecheck/test 与 vite build 当时均 exit 0
+> （287 pass / 0 fail；3441 modules）；该包已从仓库移除，相关命令不再保留。
 
 **修复点**：
 
@@ -165,7 +160,7 @@ typecheck 或旧 dist 冒充。测试名省略文件时均为 `npm-packages/@per
   `src/chat/service.ts` 967 行（A15 修复前 941）。
 - 全量 `wc -l` 仍列出两个既有超限 vendored 文件：`frontend/components/assistant-ui/elements/tool-fallback.aui.tsx`（1431）、`thread.aui.tsx`（1166）。这是**截至 2026-10-24 的历史文件清单；两者已于 2026-10-26 删除**。本轮未改动；按 `STD-SIZE-001` 另立任务治理，不宣称全库通过。
 - 生产源码无 `TODO`/`FIXME`，无新增兼容 shim；旧符号只保留在负向测试与明确标注的历史文档中。
-- `npm-packages/peri-cf/docker-compose.yml` 为未跟踪文件，未纳入任何提交。工作树副本在 2026-10-25 22:26:02 发生外部变更（size 2765→3082，sha256 `a8af2136…`→`655be552…`）；用户裁决不处理该变更，本轮不修改、不恢复该文件。
+- peri-cf 工作树中的未跟踪 `docker-compose.yml` 未纳入任何提交。工作树副本在 2026-10-25 22:26:02 发生外部变更（size 2765→3082，sha256 `a8af2136…`→`655be552…`）；用户裁决不处理该变更，本轮不修改、不恢复该文件。
 - **CF 测试稳定性**：`Timeline.dom.test.tsx` 的“迟到跨会话信号”用例在修复前 8 路并发压力下
   32 次全量失败 4 次；修复后单文件连续 10 次、全量连续 10 次均为 0 fail，压力下 32/32 通过。
 - **HTTP DELETE 重试已打通**：首次关闭移除句柄后若 View 释放失败，`AppChatManager` 保留 View 条目并

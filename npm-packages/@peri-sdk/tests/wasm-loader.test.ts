@@ -52,7 +52,7 @@ test("注入 factory 不加载文件并保留 preRun 与环境快照", async () 
 });
 
 test("注入 factory 时不解析 moduleUrl，specifier 不可解析也能启动", async () => {
-  // peri-cf 形态：宿主只给 moduleFactory；workerd 的 import.meta.url 是 undefined。
+  // 宿主形态：只给 moduleFactory；workerd 的 import.meta.url 是 undefined。
   // 不可解析的 specifier 证明这条路径根本不解析产物 URL（修复前会抛 TypeError: Invalid URL）。
   let hooks = 0;
   const module = await instantiatePeriWasm({

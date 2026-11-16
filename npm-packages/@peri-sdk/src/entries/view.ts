@@ -2,8 +2,12 @@ export * as Y from "yjs";
 export { readSessionView } from "../view/session-view";
 export { ChatView } from "../view/chat-view";
 export { ChatReplica } from "../view/chat-replica";
+export { ChatFactReplica } from "../view/chat-fact-replica";
 export type { ChatViewOptions, ChatViewSync } from "../view/chat-view";
 export type { ChatReplicaStatus, ChatReplicaConnection } from "../view/chat-replica";
+export type {
+    ChatFactReplicaStatus, ChatFactReplicaOptions, ChatFactSnapshot,
+} from "../view/chat-fact-replica";
 export type { ChatYjsChannel } from "../view/channel";
 export {
     readPayload, limitPayloadReads, PayloadReadError,

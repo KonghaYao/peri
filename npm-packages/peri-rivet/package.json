@@ -1,0 +1,93 @@
+{
+  "name": "@peri-code/rivet",
+  "version": "0.1.0",
+  "description": "Rivet actor adapter for the Peri SDK: chat hosting, activity keep-awake, and HTTP MCP resource access",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "types": "./dist/index.d.ts",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./contracts": {
+      "types": "./dist/contracts/index.d.ts",
+      "import": "./dist/contracts/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "import": "./dist/client/index.js"
+    },
+    "./rivet": {
+      "types": "./dist/rivet/index.d.ts",
+      "import": "./dist/rivet/index.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp/index.d.ts",
+      "import": "./dist/mcp/index.js"
+    },
+    "./evidence": {
+      "types": "./dist/evidence/index.d.ts",
+      "import": "./dist/evidence/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "docs",
+    "scripts/check-engine.mjs",
+    "README.md",
+    "DESIGN.md"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KonghaYao/peri.git",
+    "directory": "npm-packages/peri-rivet"
+  },
+  "homepage": "https://github.com/KonghaYao/peri/tree/main/npm-packages/peri-rivet#readme",
+  "bugs": {
+    "url": "https://github.com/KonghaYao/peri/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "format": "biome check --write src tests package.json tsconfig.json tsconfig.build.json biome.json",
+    "format:check": "biome check src tests package.json tsconfig.json tsconfig.build.json biome.json",
+    "pack:local": "node scripts/pack-local.mjs",
+    "check:engine": "node scripts/check-engine.mjs",
+    "prepublishOnly": "bun run typecheck && bun run test && bun run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/core": "2.4.0",
+    "@modelcontextprotocol/server": "2.4.0",
+    "zod": "4.6.7"
+  },
+  "peerDependencies": {
+    "@peri-code/sdk": "^0.0.0",
+    "rivetkit": "^3.1.1"
+  },
+  "peerDependenciesMeta": {
+    "rivetkit": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.3",
+    "@modelcontextprotocol/client": "2.4.0",
+    "@peri-code/sdk": "file:../@peri-sdk",
+    "@types/node": "^26.6.5",
+    "bun-types": "^1.4.4",
+    "rivetkit": "3.1.1",
+    "typescript": "^7.0.2"
+  }
+}

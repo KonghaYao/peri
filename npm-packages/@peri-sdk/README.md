@@ -4,7 +4,7 @@
 
 SDK 主入口不启动或停止 Peri CLI、Workspace 进程，也不提供本地 SQLite 后端。可选的 `@peri-code/sdk/sandbox` server-side 子入口按宿主显式注入的 adapter 管理 sandbox 生命周期。宿主负责提供 transport、持久化 Store，并在路由层保证同一 Session 只落在一个实例上。
 
-下面的接入代码来自 [`peri-cf`](../peri-cf/server/compose.ts) 的真实装配，而不是抽象伪代码。
+下面的接入代码展示宿主侧的真实装配顺序，而不是抽象伪代码。
 
 ## 适合什么场景
 
@@ -33,10 +33,10 @@ import {
   type PeriConfig, type KvStorage,
 } from "@peri-code/sdk";
 
-// 1. Store 连接只声明一次；本地 sqld 也要求非空 authToken。
+// 1. Store 连接只声明一次；本地 peri-loom 的 authToken 取自容器内 connection.json 的 project_api_key。
 const storeConnection = {
-  url: process.env.PERI_STORAGE_URL ?? "http://127.0.0.1:8081",
-  authToken: process.env.PERI_STORAGE_TOKEN ?? "local-dev",
+  url: process.env.PERI_STORAGE_URL ?? "http://127.0.0.1:8091/db/local_default/demo/main",
+  authToken: process.env.PERI_STORAGE_TOKEN!,
 };
 
 // 2. SDK 会话目录（只读）；store.storage 复用同一连接配置，写入仍由 Peri 完成。
@@ -189,7 +189,7 @@ await database.close(); // Manager 不关闭注入的 database
 
 输入队列由服务端 generation 标识。SDK 会随 `user_input_queue_changed` 通知与队列回执同步 generation；若服务端在持久化不一致后重建 mailbox，`send` 的 `receipt.accepted` 直接抛出 `SessionQueueStaleError`（`requiresRuntimeRestart: true`），`force_send` / `take_back` 则以 `ChatActionError` 失败并在 `cause` 中携带该错误。当前运行实例会被标记为需要重载，后续动作以 `not_ready` 拒绝。SDK 不会自动重放用户输入；宿主应销毁并重建 runtime 后重新加载 Session。`Session.refreshInputQueue()` 可重新读取 generation，但不能修复已关闭的持久化 writer。
 
-传入普通 wire 对象时先经 `parseChatUserAction` 校验。Manager 不接收 `execute`；执行调度属于 Peri。`peri-cf` 的 HTTP 层还会用 `chat.binding` 与 `bindingRevision` 拒绝过期连接的动作。
+传入普通 wire 对象时先经 `parseChatUserAction` 校验。Manager 不接收 `execute`；执行调度属于 Peri。宿主路由层还应使用 `chat.binding` 与 `bindingRevision` 拒绝过期连接的动作。
 
 ## 展示与同步
 
@@ -446,13 +446,30 @@ const snapshot = observeBackend({ chats, sandboxes });
 - HTTP endpoint 去掉 userinfo/query/hash；只输出 header 名称；stdio 只给 `type`/`name`，不输出 command/args/env。
 - `lastError.message` 由共享脱敏函数处理：`Authorization`/`Proxy-Authorization` 与常见敏感 header（`X-Api-Key`、`Cookie`、`Set-Cookie`、`X-Auth-Token`、`Credential`、`Password`、`Secret` 等）的值、独立 `Bearer`/`Basic` 片段、URL 的 userinfo/query/hash，以及非 URL 的 `token=`/`access_token=`/`api_key=`/`secret=` 都替换为 `[redacted]`；文本中的 URL 收敛为 origin + pathname。`SandboxManager.snapshot()` 与 `observeBackend()` 会在输出边界再次脱敏，自定义 `SandboxObservationSource` 也不能绕过。
 - 未 ready（没有 endpoint）的 sandbox 也会被列为 `orphanSandboxes`，快照不含 token。脱敏是纵深防御，不保证任意自由文本绝对无敏感信息。
-- 配置模型、持久化与后端存储归 peri-cf；SDK 不新增存储。
+- 配置模型、持久化与后端存储归宿主应用；SDK 不新增存储。
+
+### 活动投影
+
+`ChatActivityTracker`（主入口导出）把 `ChatService.observe()` 与事实流合并为绝对快照，供宿主编排 sleep/保活，不启动实例、不持有租约：
+
+```ts
+import { ChatActivityTracker } from "@peri-code/sdk";
+
+const tracker = new ChatActivityTracker({ source }); // source 可选
+tracker.applyObservation(chat.observe());
+tracker.applyFact(fact);
+tracker.snapshot(); // revision / complete / rootRunning / activeInternalTasks / ...
+```
+
+- `task-snapshot` 只统计非终态任务；`unobserved:*` 视为非终态。
+- 公开观测是相位受限的，仅靠观测时 `complete` 保持 `false`。宿主能提供 `activeInternalTasks` 与 `pendingDeliveries` 的权威计数时注入 `ChatActivitySource`，`complete` 才可能为 `true`。
+- 相同快照不提升 `revision`；本地操作在 release 前计入 `localOperations`。
 
 ## 公开入口
 
 | 入口 | 内容 |
 | --- | --- |
-| `@peri-code/sdk` | Chat 控制面、展示契约、config/storage 读取工具 |
+| `@peri-code/sdk` | Chat 控制面、展示契约、活动投影、config/storage 读取工具 |
 | `@peri-code/sdk/view` | 浏览器安全展示出口；需要打包包内 Yjs 依赖 |
 | `@peri-code/sdk/wasm` | 平台无关的 WASM ACP 运行后端、loader 与 transport |
 | `@peri-code/sdk/wasm-node` | `/wasm` 加 Node 兼容的网络/DNS 端口 |
@@ -657,7 +674,6 @@ next = Button("展开阻塞项", @ToAssistant("展开阻塞项并给出处理建
 - [Chat 架构设计](../../docs/design/peri-sdk-chat.md)
 - [Ownership 模型](OWNERSHIP-MODEL.md)
 - [代码索引](../../docs/code-index/peri-ts-sdk.md)
-- [peri-cf 服务端装配](../peri-cf/server/compose.ts)
 - [demo.ts](https://github.com/KonghaYao/peri/blob/main/npm-packages/@peri-sdk/examples/demo/demo.ts) 使用 `runtime.kind="wasm"`。
 - [demo-wasm.ts](https://github.com/KonghaYao/peri/blob/main/npm-packages/@peri-sdk/examples/demo/demo-wasm.ts) 使用 `runtime.kind="transport"` 注入 `WasmAcpTransport`。
 

@@ -1,23 +1,18 @@
 // Run after: PERI_WASM_PROFILE=release scripts/cargo-wasm.sh build --locked -p peri-wasm --target wasm32-unknown-emscripten
-// Exercises the real ACP Host and Turso store; only the LLM endpoint is simulated.
+// Exercises the real ACP Host and peri-loom store; only the LLM endpoint is simulated.
 import { once } from 'node:events';
 import { createServer } from 'node:http';
-import { createServer as createTcpServer, connect } from 'node:net';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { resolve } from 'node:path';
-import { spawn } from 'node:child_process';
+import { createServer as createTcpServer } from 'node:net';
+import { writeFile } from 'node:fs/promises';
+import { lookupEnv } from './lib/local-store.mjs';
 
 const output = new URL('../target/wasm32-unknown-emscripten/release/', import.meta.url);
-const sdkDirectory = new URL('../npm-packages/@peri-sdk/', import.meta.url);
-const root = await mkdtemp(resolve(tmpdir(), 'peri-wasm-acp-lifecycle-'));
 const timeoutMs = 30_000;
 const modelRequests = [];
-let sqlProcess;
+let loom;
 let model;
 let acp;
 let wire;
-let sqlError = '';
 let slowRequestArrived;
 const slowRequest = new Promise((resolve) => { slowRequestArrived = resolve; });
 
@@ -38,25 +33,10 @@ function withTimeout(promise, label, ms = timeoutMs) {
 async function unusedPort() {
   const server = createTcpServer();
   server.listen(0, '127.0.0.1');
-  await withTimeout(once(server, 'listening'), 'reserve sqld port');
+  await withTimeout(once(server, 'listening'), 'reserve loom port');
   const port = server.address().port;
   await new Promise((done) => server.close(done));
   return port;
-}
-
-async function waitForPort(port, child) {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    if (child.exitCode !== null) throw new Error(`sqld exited early (${child.exitCode})`);
-    try {
-      const socket = connect(port, '127.0.0.1');
-      await withTimeout(once(socket, 'connect'), 'connect sqld', 250);
-      socket.destroy();
-      return;
-    } catch {
-      await new Promise((done) => setTimeout(done, 50));
-    }
-  }
-  throw new Error('sqld did not listen within five seconds');
 }
 
 // This is only JSON-RPC frame correlation; method behavior stays in peri-acp.
@@ -125,15 +105,7 @@ async function checkedRequest(client, method, params) {
 }
 
 try {
-  const sqlPort = await unusedPort();
-  sqlProcess = spawn('mise', [
-    'exec', '--', 'sqld', '--no-welcome', '--http-listen-addr',
-    `127.0.0.1:${sqlPort}`, '--db-path', resolve(root, 'sessions'),
-  ], { cwd: sdkDirectory, stdio: ['ignore', 'ignore', 'pipe'] });
-  sqlProcess.stderr.on('data', (chunk) => { sqlError += chunk.toString(); });
-  await waitForPort(sqlPort, sqlProcess).catch((error) => {
-    throw new Error(`${error.message}\n${sqlError}`);
-  });
+  loom = await lookupEnv({ port: await unusedPort() });
 
   model = createServer(async (request, response) => {
     try {
@@ -178,7 +150,7 @@ try {
         profiles: { sonnet: { provider: 'fixture', model: 'fixture-model' } },
       },
     },
-    storage: { url: `http://127.0.0.1:${sqlPort}`, authToken: 'local-dev' },
+    storage: { url: loom.url, authToken: loom.token },
     machineId: '00000000-0000-4000-8000-000000000003',
   });
 
@@ -235,7 +207,7 @@ try {
     modelCalls: modelRequests.length, persistedAcrossRestart: true }));
 } catch (error) {
   console.error(JSON.stringify({ passed: false, modelCalls: modelRequests.length,
-    sqldExitCode: sqlProcess?.exitCode, sqldStderr: sqlError.slice(-4000) }));
+    loomLog: (await loom?.logs?.()) ?? '' }));
   throw error;
 } finally {
   if (acp) {
@@ -247,10 +219,5 @@ try {
     model.closeAllConnections();
     await withTimeout(new Promise((done) => model.close(done)), 'close model', 5_000).catch(() => {});
   }
-  if (sqlProcess && sqlProcess.exitCode === null) {
-    sqlProcess.kill('SIGTERM');
-    await Promise.race([once(sqlProcess, 'exit'), new Promise((done) => setTimeout(done, 2_000))]);
-    if (sqlProcess.exitCode === null) sqlProcess.kill('SIGKILL');
-  }
-  await rm(root, { recursive: true, force: true });
+  if (loom) await loom.stop();
 }
