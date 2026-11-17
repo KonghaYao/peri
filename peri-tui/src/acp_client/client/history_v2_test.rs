@@ -283,6 +283,72 @@ async fn failed_initial_keeps_the_previous_window_and_delivery_identity() {
     client.close();
 }
 
+#[tokio::test]
+#[serial]
+async fn failed_initial_releases_the_restored_page_claim() {
+    let _guard = prepare();
+    atoms::init_atoms();
+    crate::kit::history_v2::reset_state();
+    let limits = HistoryLimits::default();
+    let previous = crate::kit::history_v2::initial::admit_load_response(
+        &initial_response_with_item(),
+        SESSION,
+        peri_acp_types::history_v2::DecimalU64::new(1),
+        &limits,
+    )
+    .expect("previous window admitted");
+    crate::kit::history_v2::publish_initial(previous);
+
+    // load 之前登记一页在途：load 与页面请求同 FIFO 串行，load 失败时该页必已结算。
+    {
+        let handle = atoms::HISTORY_V2_STATE.state();
+        let mut state = handle.write();
+        state
+            .window_mut()
+            .expect("window")
+            .request_page(
+                peri_acp_types::history_v2::DecimalU64::new(2),
+                peri_acp_types::history_v2::HistoryDirection::Before,
+                50,
+                &limits,
+            )
+            .expect("page claim");
+    }
+
+    let (transport, server) = mpsc_transport_pair();
+    let (client, _, _) = AcpTuiClient::new(transport);
+    install_v2(&client, true);
+    let loader = client.clone();
+    let load = tokio::spawn(async move { loader.load_session(SESSION, "/tmp", None).await });
+
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/load");
+    // 传输级失败：旧窗口保持可用（不进入 ReopenRequired），用于验证认领释放。
+    server
+        .send_response(id, Err(AcpError::new(-32603, "load failed")))
+        .await
+        .unwrap();
+    assert!(load.await.unwrap().is_err());
+
+    let handle = atoms::HISTORY_V2_STATE.state();
+    let mut state = handle.write();
+    let window = state.window_mut().expect("restored window");
+    assert!(
+        window.paging.in_flight.is_none(),
+        "恢复旧窗口不得保留已结算的 page 认领"
+    );
+    assert_eq!(window.paging.reserved_bytes, 0, "预留字节必须一并释放");
+    window
+        .request_page(
+            peri_acp_types::history_v2::DecimalU64::new(90),
+            peri_acp_types::history_v2::HistoryDirection::Before,
+            50,
+            &limits,
+        )
+        .expect("恢复后必须能继续翻页");
+    client.close();
+}
+
 fn initial_response_with_item() -> Value {
     let mut response = initial_response(true);
     let page = &mut response["_meta"]["peri.history"]["page"];

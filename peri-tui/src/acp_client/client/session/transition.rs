@@ -52,6 +52,18 @@ fn settle_failed_initial_projection(
                     };
             }
         }
+        // 恢复的是 load 前的快照，其中的 page/seek 认领早于 load 入队。load 与页面
+        // 请求共用同一出站 FIFO，能拿到 load 结果时该认领必已结算；恢复它的在途
+        // 标记只会让后续 `request_page` 永远 Busy，因此按其 requestKey 释放。
+        if let Some(request_key) = restored
+            .window
+            .as_ref()
+            .and_then(|window| window.paging.in_flight.as_ref())
+            .map(|in_flight| in_flight.context.request_key)
+            && let Some(window) = restored.window.as_mut()
+        {
+            window.cancel_request(request_key);
+        }
         // 恢复后的高水位必须写回 atom，失败后的实时事件才能继续按连续序号接纳。
         crate::kit::history_v2::restore_published(restored.clone());
         if projection.client.projection_mode == ClientProjectionMode::Interactive {
