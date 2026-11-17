@@ -260,3 +260,37 @@ fn write_state_failure_is_logged_and_declares_stale_disk_state() {
         "progress 不得停留 Running"
     );
 }
+
+#[test]
+fn completion_projects_the_saved_return_value_without_upgrading_acceptance() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let journal = Arc::new(WorkflowJournalStore::new(tmp.path().to_str().unwrap()));
+    journal.init_run("preview-run", "script").unwrap();
+    let output = "Confirmed checks and current artifact. ".repeat(12);
+    journal
+        .write_output("preview-run", "report", &output)
+        .unwrap();
+    let progress = Arc::new(WorkflowProgressStore::new());
+    let completion = make_completion(&journal, &progress, "preview-run");
+    let result = completion.project(crate::runner::WorkflowResult {
+        run_id: "preview-run".into(),
+        status: "completed".into(),
+        return_value: Some(serde_json::json!({"report": "${report}"})),
+        error: None,
+        post_processing_status: PostProcessingStatus::NotRequired,
+        delivery_status: DeliveryStatus::Unknown,
+        stderr_tail: None,
+    });
+    let preview = result.result_preview.as_ref().unwrap();
+    assert!(preview.complete);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&preview.text).unwrap(),
+        serde_json::json!({"report": output})
+    );
+    assert_eq!(result.acceptance_status, AcceptanceStatus::Unknown);
+    assert_eq!(result.delivery_status, DeliveryStatus::Unknown);
+    assert!(result
+        .background_result()
+        .output
+        .contains("Confirmed checks"));
+}

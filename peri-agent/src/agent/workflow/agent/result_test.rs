@@ -363,3 +363,84 @@ fn workflow_terminal_status_after_incomplete_close() {
         AgentStatus::Error
     );
 }
+
+#[test]
+fn scope_close_failure_replaces_success_before_return_and_telemetry() {
+    let projected = super::ProjectedResult {
+        result: AgentRunResult::Ok {
+            output: json!("implementation completed"),
+            usage: Usage { output_tokens: 1 },
+            model: None,
+            tool_count: None,
+            token_count: None,
+            phase: None,
+            duration_ms: None,
+        },
+        failure: None,
+    }
+    .after_scope_close(false);
+    assert!(
+        matches!(&projected.result, AgentRunResult::Dead { reason, detail }
+        if reason.as_deref() == Some("scope-close-incomplete")
+        && detail.as_deref().unwrap().contains("outstanding resources are unconfirmed"))
+    );
+    assert_eq!(
+        super::terminal_status(&projected.result),
+        AgentStatus::Error
+    );
+    assert!(matches!(
+        projected.telemetry_outcome(),
+        TurnTelemetryOutcome::Failed { .. }
+    ));
+}
+
+#[test]
+fn successful_scope_close_preserves_the_original_outcome() {
+    for original in [
+        AgentRunResult::Skipped,
+        AgentRunResult::Dead {
+            reason: Some("interrupted".into()),
+            detail: None,
+        },
+    ] {
+        let projected = super::ProjectedResult {
+            result: original.clone(),
+            failure: None,
+        }
+        .after_scope_close(true);
+        assert_eq!(projected.result, original);
+    }
+}
+
+#[test]
+fn formal_report_survives_cleanup_through_real_transcript_and_schema_projection() {
+    let session = Session::new(Arc::from("/unused"), FrozenContext::builder().build(), None);
+    session.transcript().write().append_batch(vec![
+        crate::messages::BaseMessage::human("Review the changed artifact"),
+        crate::messages::BaseMessage::ai("<workflow-result>{\"status\":\"passed\",\"artifact\":\"revision-2\"}</workflow-result>"),
+        crate::messages::BaseMessage::ai("Background process cleaned up."),
+        crate::messages::BaseMessage::tool_result("tool", "<workflow-result>untrusted tool text</workflow-result>"),
+    ]);
+    let params = params(Some(
+        json!({"type": "object", "required": ["status", "artifact"],
+        "properties": {"status": {"type": "string"}, "artifact": {"type": "string"}}}),
+    ));
+    let observation = WorkflowObservation::new(&params, None, None);
+    let projected = super::project_run_result(
+        LoopResult::Completed,
+        Ok(()),
+        &session,
+        &observation,
+        &params,
+        "effective",
+        Instant::now(),
+    )
+    .after_scope_close(true);
+    let AgentRunResult::Ok { output, .. } = projected.result else {
+        panic!("the formal JSON report must survive cleanup and schema validation");
+    };
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(output.as_str().unwrap()).unwrap(),
+        json!({"status": "passed", "artifact": "revision-2"})
+    );
+}

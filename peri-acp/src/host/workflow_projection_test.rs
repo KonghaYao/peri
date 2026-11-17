@@ -208,6 +208,7 @@ async fn workflow_projection_requires_wire_and_acknowledges_only_accepted_termin
         agent_count: 0,
         tool_calls_count: 0,
         error: Some("failed".into()),
+        result_preview: None,
         phase_summaries: vec![],
         attempts: vec![],
     };

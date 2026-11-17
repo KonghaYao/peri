@@ -22,6 +22,19 @@ pub(super) struct ProjectedResult {
 }
 
 impl ProjectedResult {
+    /// Closing the child scope is a prerequisite for handing its output to a successor.
+    pub(super) fn after_scope_close(mut self, closed: bool) -> Self {
+        if !closed {
+            let detail = "Workflow agent scope did not close; outstanding resources are unconfirmed. Do not start dependent writes or verification.";
+            self.result = AgentRunResult::Dead {
+                reason: Some("scope-close-incomplete".into()),
+                detail: Some(detail.into()),
+            };
+            self.failure = Some(ExecutionFailure::internal(detail));
+        }
+        self
+    }
+
     #[must_use]
     pub fn telemetry_outcome(&self) -> TurnTelemetryOutcome {
         match &self.result {
@@ -91,7 +104,7 @@ pub(super) fn project_run_result(
     }
     match loop_result {
         LoopResult::Completed | LoopResult::HookStopped { .. } => {
-            let output = crate::session::subagent::extract_last_ai_text(session);
+            let output = super::report::extract_output(session);
             ProjectedResult {
                 result: completed_result(
                     output,

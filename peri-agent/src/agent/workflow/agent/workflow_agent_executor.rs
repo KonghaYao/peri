@@ -523,7 +523,9 @@ impl AgentExecutor for WorkflowAgentExecutor {
         );
 
         // push prompt 到 queue
-        if let Err(detail) = enqueue_workflow_initial_prompt(session.queue(), &params.prompt).await
+        let assignment_prompt = super::report::assignment_prompt(&params.prompt);
+        if let Err(detail) =
+            enqueue_workflow_initial_prompt(session.queue(), &assignment_prompt).await
         {
             // 没有接纳到初始指令的任务不得继续跑：先关闭本次会话作用域与转发器，
             // 再把失败原样交给工作流执行器（任务终态为失败）。
@@ -570,29 +572,29 @@ impl AgentExecutor for WorkflowAgentExecutor {
             execution_guard.confirm_stopped();
         }
 
-        // 保持 final event 消费与统计提取之后的终态钩子；flush 仍为 fire-and-forget。
-        if let Some(ref hooks) = self.ctx.langfuse_hooks {
-            let handle = (hooks.on_turn_end)(projected.telemetry_outcome());
-            drop(handle);
-        }
-
         // 外部执行 guard 持有的 tracker token 只有 drop 才释放；若它活到函数返回，
         // `close_session_scope` 会等在同一 tracker 上直到 `ExecutionScope::wait` 的
         // 5 秒预算耗尽，把每次正常 run 的结清都记成失败（并按 scope 数逐次累加）。
         // 未确认执行仍由 `ExternalGuard::drop` 写入 uncertainty 记录，不掩盖证据缺失。
         drop(execution_guard);
 
-        // 终态按 run 结果投影：正常完成 Done、显式取消 Cancelled、其余失败 Error。
-        // close 不完整时不能把本次执行记成成功完成（与 sync child 的收尾语义一致，
-        // 但这里仍写终态，避免 child 留在 active+working 被父会话反复恢复）。
-        // 结算失败只记录（child 仍可能停在 working），不把已完成 run 改写成失败。
+        // Scope-close uncertainty overrides the callback outcome before handoff.
+        // Still settle the child to Error so it is not repeatedly recovered as
+        // active work. A child-metadata persistence error is logged separately.
         let scope_closed = close_session_scope(&session, &session_id).await;
+        let projected = projected.after_scope_close(scope_closed);
         child_settlement
             .settle(result::terminal_status_after_close(
                 &projected.result,
                 scope_closed,
             ))
             .await;
+
+        // Telemetry and the workflow callback must agree on an incomplete close.
+        if let Some(ref hooks) = self.ctx.langfuse_hooks {
+            let handle = (hooks.on_turn_end)(projected.telemetry_outcome());
+            drop(handle);
+        }
 
         projected.result
     }

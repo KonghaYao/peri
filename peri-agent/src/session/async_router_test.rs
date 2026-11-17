@@ -465,6 +465,7 @@ async fn route_workflow_result_reports_persistence_failure() {
         agent_count: 0,
         tool_calls_count: 0,
         error: Some("failed".into()),
+        result_preview: None,
         phase_summaries: vec![],
         attempts: vec![],
     };

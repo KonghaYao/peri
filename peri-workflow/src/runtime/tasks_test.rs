@@ -836,3 +836,150 @@ fn duplicate_settle_redelivers_result_and_counts_tool_calls_once() {
         "另一任务的 3 次调用应正常累计到 6"
     );
 }
+
+fn scope_close_failure() -> AgentRunResult {
+    AgentRunResult::Dead {
+        reason: Some("scope-close-incomplete".into()),
+        detail: Some("Outstanding writer resources are unconfirmed".into()),
+    }
+}
+
+#[test]
+fn committed_scope_failure_fences_only_its_run_and_cancels_peers() {
+    let (table, _rx) = make_table();
+    for (task, agent) in [("failed", 1), ("queued", 2), ("running", 3)] {
+        let _ = table.publish(task.into(), make_params("run-1", agent));
+    }
+    let failed_token = CancellationToken::new();
+    let peer_token = CancellationToken::new();
+    assert!(matches!(
+        table.mark_executing("run-1", "failed", failed_token),
+        ClaimOutcome::Claimed(_)
+    ));
+    assert!(matches!(
+        table.mark_executing("run-1", "running", peer_token.clone()),
+        ClaimOutcome::Claimed(_)
+    ));
+    let _ = table.publish("other".into(), make_params("run-2", 1));
+
+    let failure = scope_close_failure();
+    match table.settle(
+        "run-1",
+        "failed",
+        SettleAdmission::ExecutingOnly,
+        WorkflowTaskState::Failed,
+        Some(failure.clone()),
+        None,
+    ) {
+        SettleOutcome::Settled(record) => {
+            assert_eq!(record.state, WorkflowTaskState::Failed);
+            assert_eq!(record.result, Some(failure));
+        }
+        other => panic!("scope failure must commit: {other:?}"),
+    }
+    assert!(peer_token.is_cancelled(), "active same-run peer must stop");
+    for task in ["queued", "running"] {
+        assert_eq!(
+            table.get("run-1", task).unwrap().state,
+            WorkflowTaskState::Cancelled
+        );
+        assert!(matches!(
+            table.mark_executing("run-1", task, CancellationToken::new()),
+            ClaimOutcome::AlreadyTerminal(_)
+        ));
+        assert!(table
+            .claim_for_consumer("run-1", task, "peer-claim", None)
+            .is_none());
+    }
+
+    match table.publish("retry".into(), make_params("run-1", 4)) {
+        PublishOutcome::Published(record) => assert_eq!(record.state, WorkflowTaskState::Cancelled),
+        other => panic!("retry should have a terminal receipt: {other:?}"),
+    }
+    assert!(matches!(
+        table.mark_executing("run-1", "retry", CancellationToken::new()),
+        ClaimOutcome::AlreadyTerminal(_)
+    ));
+    assert!(table
+        .claim_for_consumer("run-1", "retry", "retry-claim", None)
+        .is_none());
+    assert!(table
+        .claim_for_consumer("run-2", "other", "other-claim", None)
+        .is_some());
+    let _ = table.publish("other-late".into(), make_params("run-2", 2));
+    assert!(matches!(
+        table.mark_executing("run-2", "other-late", CancellationToken::new()),
+        ClaimOutcome::Claimed(_)
+    ));
+}
+
+#[test]
+fn conflicting_late_scope_failure_does_not_fence_a_successful_run() {
+    let (table, _rx) = make_table();
+    let _ = table.publish("completed".into(), make_params("run-1", 1));
+    assert!(matches!(
+        table.mark_executing("run-1", "completed", CancellationToken::new()),
+        ClaimOutcome::Claimed(_)
+    ));
+    let success = ok_result();
+    assert!(matches!(
+        table.settle(
+            "run-1",
+            "completed",
+            SettleAdmission::ExecutingOnly,
+            WorkflowTaskState::Completed,
+            Some(success.clone()),
+            None
+        ),
+        SettleOutcome::Settled(_)
+    ));
+    for _ in 0..2 {
+        match table.settle(
+            "run-1",
+            "completed",
+            SettleAdmission::ExecutingOnly,
+            WorkflowTaskState::Failed,
+            Some(scope_close_failure()),
+            None,
+        ) {
+            SettleOutcome::AlreadyTerminal(record) => {
+                assert_eq!(record.state, WorkflowTaskState::Completed);
+                assert_eq!(record.result, Some(success.clone()));
+            }
+            other => panic!("first terminal result must win: {other:?}"),
+        }
+    }
+    let _ = table.publish("next".into(), make_params("run-1", 2));
+    assert!(table
+        .claim_for_consumer("run-1", "next", "next-claim", None)
+        .is_some());
+}
+
+#[test]
+fn nonadmitted_scope_failure_does_not_fence_pending_work() {
+    let (table, _rx) = make_table();
+    let _ = table.publish("unclaimed".into(), make_params("run-1", 1));
+    assert!(matches!(
+        table.settle(
+            "run-1",
+            "unclaimed",
+            SettleAdmission::ExecutingOnly,
+            WorkflowTaskState::Failed,
+            Some(scope_close_failure()),
+            None
+        ),
+        SettleOutcome::NotAdmitted(_)
+    ));
+    assert_eq!(
+        table.get("run-1", "unclaimed").unwrap().state,
+        WorkflowTaskState::Published
+    );
+    assert!(matches!(
+        table.mark_executing("run-1", "unclaimed", CancellationToken::new()),
+        ClaimOutcome::Claimed(_)
+    ));
+    let _ = table.publish("next".into(), make_params("run-1", 2));
+    assert!(table
+        .claim_for_consumer("run-1", "next", "next-claim", None)
+        .is_some());
+}
