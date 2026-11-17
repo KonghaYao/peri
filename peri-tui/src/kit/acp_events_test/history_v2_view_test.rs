@@ -654,6 +654,68 @@ fn tool_result(invocation: &str, output: &str) -> Value {
 
 #[test]
 #[serial]
+fn tool_result_upgrade_moves_the_input_body_target_to_the_new_hash() {
+    let _guard = setup();
+    let response = json!({"_meta": {"peri.history": {
+        "version": HISTORY_V2_VERSION,
+        "kind": "initial",
+        "requestKey": "1",
+        "executionReady": true,
+        "runtimeGeneration": "runtime-9",
+        "deliveryId": "delivery-51",
+        "liveBoundary": {"streamId": "live-7", "afterSeq": "0"},
+        "page": page(Some("before-1"), json!([
+            item("e1", 7, json!([{
+                "kind": "toolCall",
+                "subItemId": "s1:e1:0",
+                "invocationKey": "s1:inv-1",
+                "title": "Bash",
+                "status": "running",
+                "body": {
+                    "bodyRef": "body-input",
+                    "representation": "display-json",
+                    "mediaType": "application/json",
+                    "totalBytes": "2048",
+                    "chunkBytes": 1024,
+                },
+            }])),
+            item("e2", 8, json!([tool_result("s1:inv-1", "ok")])),
+        ])),
+    }}});
+    let v2 = admit_load_response(
+        &response,
+        "s1",
+        DecimalU64::new(1),
+        &HistoryLimits::default(),
+    )
+    .expect("admitted");
+    let mut state = make_fold_test_state();
+    state.active_session_id = "s1".into();
+    dispatch_view(&mut state, &v2);
+
+    let card = match &state.committed[0] {
+        TuiRenderUnit::TuiToolCard(card) => card,
+        other => panic!("expected upgraded tool card, got {other:?}"),
+    };
+    assert_eq!(card.output_summary, "ok", "结果已原地升级调用卡片");
+    let targets = atoms::HISTORY_DETAIL_TARGETS.state().read().clone();
+    let target = targets
+        .iter()
+        .find(|target| target.content_hash == card.content_hash)
+        .expect("升级后的卡片仍要有详情入口");
+    assert_eq!(
+        target
+            .descriptor
+            .v2
+            .as_ref()
+            .map(|binding| binding.sub_item_id.as_str()),
+        Some("s1:e1:0"),
+        "详情必须指向调用子项的 input 正文"
+    );
+}
+
+#[test]
+#[serial]
 fn seek_dedupes_live_message_already_in_the_new_page() {
     let _guard = setup();
     let mut v2 = admitted();

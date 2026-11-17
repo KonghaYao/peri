@@ -430,17 +430,17 @@ fn project_sub_item(
             if let Some((call_entry, call_slot)) = calls.get(&item.invocation_key).copied() {
                 // 跨条目：按稳定 invocationKey 原地升级更早条目里的调用卡片；渲染
                 // 顺序不变（结果子项不再单独占位）。
+                let previous_hash = entries[call_entry][call_slot].content_hash();
                 let call = as_tool_card(entries[call_entry][call_slot].clone());
                 let completed = super::tool::completed_tool_card(&call, &summary, is_error);
                 entries[call_entry][call_slot] = TuiRenderUnit::TuiToolCard(completed);
+                let upgraded_hash = entries[call_entry][call_slot].content_hash();
                 if let Some(binding) = body {
-                    push_target(
-                        entries[call_entry][call_slot].content_hash(),
-                        binding,
-                        window,
-                        targets,
-                    );
+                    push_target(upgraded_hash, binding, window, targets);
                 }
+                // 升级重算了卡片 hash，调用阶段登记的 input body target 仍挂在旧
+                // hash 上，详情会按新 hash 找不到 descriptor。
+                migrate_target(previous_hash, upgraded_hash, targets);
                 return;
             }
             let card = as_tool_card(super::tool::replay_tool_started_unit(
@@ -590,6 +590,30 @@ fn push_target(
     targets.push(HistoryDetailTarget {
         content_hash,
         descriptor: descriptor_for(window, &entry_id, &source, &descriptor, binding),
+    });
+}
+
+/// 卡片原地升级重算 hash 后，把旧 hash 上的详情 target 迁到新 hash。
+///
+/// 新 hash 已被占用（结果正文自身也外置）时丢弃旧 target：一张卡片只有一个详情
+/// 入口，保留新 hash 的结果正文优先。
+fn migrate_target(previous_hash: u64, upgraded_hash: u64, targets: &mut Vec<HistoryDetailTarget>) {
+    let Some(index) = targets
+        .iter()
+        .position(|target| target.content_hash == previous_hash)
+    else {
+        return;
+    };
+    let target = targets.remove(index);
+    if targets
+        .iter()
+        .any(|existing| existing.content_hash == upgraded_hash)
+    {
+        return;
+    }
+    targets.push(HistoryDetailTarget {
+        content_hash: upgraded_hash,
+        descriptor: target.descriptor,
     });
 }
 
