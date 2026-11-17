@@ -1,3 +1,0 @@
-root = Stack([a])
-a = Card("A", [b])
-b = Card("B", [a])

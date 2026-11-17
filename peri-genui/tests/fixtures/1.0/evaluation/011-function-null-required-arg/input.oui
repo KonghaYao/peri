@@ -1,4 +1,0 @@
-root = Stack([a, b, t])
-a = Input("a", @Upper($unset))
-b = Input("b", @Upper(missing))
-t = Text(@Upper($unset) == null ? "null" : "other")

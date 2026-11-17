@@ -1,2 +1,0 @@
-root = Stack([t])
-t = Text("a", "body", "extra")

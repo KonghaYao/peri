@@ -52,18 +52,14 @@
 
 ## 验收与测试口径
 
-1. 复制上游 grammar/entry/errors/evaluation/actions/state/streaming 的 54 个 fixture 目录，原文件不改；47 个 expected 活动检查，7 个明确忽略，原因见 `peri-genui/tests/fixtures/1.0/NOTICE`。
-2. runner 比较 root、错误声明、unresolved/orphans、可选 state/incomplete/errorObjects；streaming 按 chunks 检查最终 expected 与 batch。
-3. 对全部 53 个程序 fixture 的每个字符边界检查两段 push 的最终一致性，另检查原始文本逐字符增长；不把忽略 fixture 的内部一致性当作上游语义通过。
-4. 不执行 `interactions.json`；`grammar/010-roundtrip-tree` 只检查原始树，不检查 serialize 回环；editing 的 5 个用例不复制。
-5. 核心回归覆盖参数顺序、校验与裁剪、状态覆盖、所有内置函数、动作身份、错误透传、unsupported、扫描器、提示词及畸形/深层/循环输入；crate 文档示例可运行。
-6. 执行 `cargo test -p peri-genui`、`cargo clippy -p peri-genui --all-targets -- -D warnings`、`cargo fmt --all`；workspace 依赖需要既有补丁时使用 `scripts/cargo-rmcp-patched.sh` 的等价 test/clippy 命令，不修改其他 crate 来绕过环境问题。
-7. TUI 侧执行 `cargo test -p peri-tui --lib`、`cargo clippy -p peri-genui -p peri-tui --all-targets -- -D warnings`、`cargo fmt --all --check`、`bash scripts/check-changed.sh`。`cargo test` 全量并行曾观察到一次既有 `FOLD_OVERRIDES` 全局状态竞争，重跑通过；该用例与新 crate 无关。
+1. 不复制上游 fixture 用例；`peri-genui/tests/library.json` 仅作为组件库输入，原文来自上游同一 commit。
+2. 核心回归覆盖参数顺序、校验与裁剪、状态覆盖、所有内置函数、动作身份、错误透传、unsupported、扫描器、提示词及畸形/深层/循环输入；crate 文档示例可运行。
+3. 执行 `cargo test -p peri-genui`、`cargo clippy -p peri-genui --all-targets -- -D warnings`、`cargo fmt --all`；workspace 依赖需要既有补丁时使用 `scripts/cargo-rmcp-patched.sh` 的等价 test/clippy 命令，不修改其他 crate 来绕过环境问题。
+4. TUI 侧执行 `cargo test -p peri-tui --lib`、`cargo clippy -p peri-genui -p peri-tui --all-targets -- -D warnings`、`cargo fmt --all --check`、`bash scripts/check-changed.sh`。`cargo test` 全量并行曾观察到一次既有 `FOLD_OVERRIDES` 全局状态竞争，重跑通过；该用例与新 crate 无关。
 
 ## 本次验证结果
 
-1. `./scripts/cargo-rmcp-patched.sh test -p peri-genui --locked -- --nocapture`：conformance 48 通过、7 忽略，其中 47 个 fixture expected 与 1 个字符边界测试；核心回归 20 通过；doc test 1 通过，失败 0。
-2. 字符边界测试实际覆盖 53 个程序、5776 个切分点，并检查原始 fence 文本逐字符增长的最终一致性；许可及所复制 fixture 原文均与上游比对一致。
-3. `./scripts/cargo-rmcp-patched.sh clippy -p peri-genui --all-targets --locked -- -D warnings`、显式 `test -p peri-genui --doc --locked`、`cargo fmt --all` 及格式复检通过；新增 Rust 文件均小于 1000 行。
-4. 不带补丁脚本的 test/clippy 因 workspace 现有 `turso_serverless 0.1.3` 缺少 `wasm-fetch` feature 而退出 101；没有修改其他依赖来绕过冲突。
-5. 验证环境为 `rustc 1.99.0`，manifest 继承 workspace 的 Rust 1.95 要求；未单独用 1.95 编译。锁文件只保留新 crate 及其依赖所需增量，未保留顺带更新的 libc/windows-sys。
+1. `./scripts/cargo-rmcp-patched.sh test -p peri-genui --locked -- --nocapture`：核心回归 20 通过、doc test 1 通过，失败 0。
+2. `./scripts/cargo-rmcp-patched.sh clippy -p peri-genui --all-targets --locked -- -D warnings`、显式 `test -p peri-genui --doc --locked`、`cargo fmt --all` 及格式复检通过；新增 Rust 文件均小于 1000 行。
+3. 不带补丁脚本的 test/clippy 因 workspace 现有 `turso_serverless 0.1.3` 缺少 `wasm-fetch` feature 而退出 101；没有修改其他依赖来绕过冲突。
+4. 验证环境为 `rustc 1.99.0`，manifest 继承 workspace 的 Rust 1.95 要求；未单独用 1.95 编译。锁文件只保留新 crate 及其依赖所需增量，未保留顺带更新的 libc/windows-sys。

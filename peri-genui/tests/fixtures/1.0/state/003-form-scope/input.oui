@@ -1,3 +1,0 @@
-root = Stack([Form("contact", [email, send])])
-email = Input("email", "Email")
-send = Button("Send", Action([@ToAssistant("Send")]))

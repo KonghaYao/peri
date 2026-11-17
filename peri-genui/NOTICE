@@ -11,6 +11,5 @@ materialization、validation、内置函数、动作描述、纯求值及 prompt
 Rust 接口、错误处理、输入预算及 gen-ui 扫描器由 peri-genui 适配；
 没有移植 React、Zustand、宿主执行器、编辑/serialize、云服务或遥测。
 
-tests/fixtures/1.0 中的 library.json 和 54 个用例目录来自相同 commit 的
-spec/fixtures/1.0，按 MIT 许可原样复制；完整归属和测试覆盖边界见
-该目录的 NOTICE。Rust runner 不修改原 fixture，只在内存中归一化 fence。
+tests/library.json 来自相同 commit 的 spec/fixtures/1.0/library.json，
+按 MIT 许可原样复制；上游用例目录未收录。

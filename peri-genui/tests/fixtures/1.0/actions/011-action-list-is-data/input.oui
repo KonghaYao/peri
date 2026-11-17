@@ -1,3 +1,0 @@
-$saved = false
-root = Stack([save])
-save = Button("Save", [@Set($saved, true), @ToAssistant("Saved")])

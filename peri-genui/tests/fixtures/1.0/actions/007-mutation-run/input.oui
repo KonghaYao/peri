@@ -1,4 +1,0 @@
-$title = "Bug"
-root = Stack([create])
-newTicket = Mutation("createTicket", {title: $title})
-create = Button("Create", Action([@Run(newTicket), @ToAssistant("Created")]))

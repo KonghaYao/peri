@@ -1,2 +1,0 @@
-root = main
-other = Stack([Text("x")])

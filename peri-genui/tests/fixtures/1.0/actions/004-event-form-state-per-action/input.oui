@@ -1,3 +1,0 @@
-$note = "old"
-root = Stack([send])
-send = Button("Send", Action([@Set($note, "new"), @ToAssistant("Send")]))

@@ -1,3 +1,0 @@
-root = Stack([save, zero])
-save = Button("Save", Action([@ToAssistant("Save order", {orderId: 42, tags: ["rush"]})]))
-zero = Button("Zero", Action([@ToAssistant("Pick zero", 0)]))

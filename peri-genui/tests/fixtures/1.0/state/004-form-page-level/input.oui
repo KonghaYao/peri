@@ -1,3 +1,0 @@
-root = Stack([note, send])
-note = Input("note", "Note")
-send = Button("Send", Action([@ToAssistant("Send")]))

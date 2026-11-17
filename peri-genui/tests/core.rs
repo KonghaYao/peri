@@ -7,7 +7,7 @@ use peri_genui::{
 use serde_json::{json, Value};
 
 fn library() -> Library {
-    Library::from_json_str(include_str!("fixtures/1.0/library.json")).unwrap()
+    Library::from_json_str(include_str!("library.json")).unwrap()
 }
 
 #[test]
