@@ -47,9 +47,11 @@ pub(super) fn extract_output(session: &Arc<Session>) -> String {
     let transcript = transcript.read();
     let messages = transcript.visible_messages();
     select_output(
-        messages.iter().rev().filter_map(|message| {
-            matches!(message, BaseMessage::Ai { .. }).then(|| message.content())
-        }),
+        messages
+            .iter()
+            .rev()
+            .filter(|message| matches!(message, BaseMessage::Ai { .. }))
+            .map(|message| message.content()),
     )
 }
 

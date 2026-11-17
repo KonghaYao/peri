@@ -395,6 +395,32 @@ fn scope_close_failure_replaces_success_before_return_and_telemetry() {
 }
 
 #[test]
+fn incomplete_scope_close_keeps_the_first_failure_reason() {
+    // The forwarder join error already blocks handoff; masking it with the close
+    // failure would lose the cause the caller needs to diagnose the run.
+    let original = AgentRunResult::Dead {
+        reason: Some("event-forwarder-failed".into()),
+        detail: Some("Workflow agent event forwarding failed".into()),
+    };
+    let projected = super::ProjectedResult {
+        result: original.clone(),
+        failure: Some(ExecutionFailure::internal(
+            "Workflow agent event forwarding failed",
+        )),
+    }
+    .after_scope_close(false);
+    assert_eq!(projected.result, original);
+    match projected.telemetry_outcome() {
+        TurnTelemetryOutcome::Failed { failure } => assert!(
+            failure.public_message.contains("forwarding failed"),
+            "telemetry 必须保留首个失败: {}",
+            failure.public_message
+        ),
+        other => panic!("失败结果必须投影为 Failed 遥测: {other:?}"),
+    }
+}
+
+#[test]
 fn successful_scope_close_preserves_the_original_outcome() {
     for original in [
         AgentRunResult::Skipped,

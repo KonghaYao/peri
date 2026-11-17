@@ -23,8 +23,9 @@ pub(super) struct ProjectedResult {
 
 impl ProjectedResult {
     /// Closing the child scope is a prerequisite for handing its output to a successor.
+    /// An existing failure already blocks that handoff; replacing it would hide the first cause.
     pub(super) fn after_scope_close(mut self, closed: bool) -> Self {
-        if !closed {
+        if !closed && !matches!(self.result, AgentRunResult::Dead { .. }) {
             let detail = "Workflow agent scope did not close; outstanding resources are unconfirmed. Do not start dependent writes or verification.";
             self.result = AgentRunResult::Dead {
                 reason: Some("scope-close-incomplete".into()),
