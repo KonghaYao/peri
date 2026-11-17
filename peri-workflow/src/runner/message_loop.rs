@@ -88,17 +88,20 @@ impl MessageLoop {
                 let elapsed = run_started.elapsed().as_millis() as u64;
                 let remaining = maximum.saturating_sub(elapsed);
                 if remaining == 0 {
+                    // 超时是后到的失败：已记录的 breach/错误才是首个诊断。
                     let error = format!("workflow exceeded maxElapsedMs ({maximum})");
-                    limit_state.set_breach(error.clone());
-                    final_result.error = Some(error);
+                    limit_state.set_breach(error);
+                    final_result.error = final_result.error.take().or_else(|| limit_state.breach());
                     break;
                 }
                 match peri_time::timeout(Duration::from_millis(remaining), msg_rx.recv()).await {
                     Ok(message) => message,
                     Err(_) => {
+                        // 超时是后到的失败：已记录的 breach/错误才是首个诊断。
                         let error = format!("workflow exceeded maxElapsedMs ({maximum})");
-                        limit_state.set_breach(error.clone());
-                        final_result.error = Some(error);
+                        limit_state.set_breach(error);
+                        final_result.error =
+                            final_result.error.take().or_else(|| limit_state.breach());
                         break;
                     }
                 }
