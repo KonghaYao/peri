@@ -32,8 +32,11 @@ The output is `target/wasm32-unknown-emscripten/debug/peri-wasm.js` with
 
 Run `node scripts/smoke-wasm-acp.mjs` after a debug build, or set
 `PERI_WASM_PROFILE=release` after a release build. The smoke starts a local
-sqld and model fixture, then verifies ACP prompt, Turso persistence and Host
-restart. `scripts/smoke-wasm-remote-mcp.mjs` verifies an ACP-carried MCP tool.
+peri-loom container (libSQL-compatible Hrana) and a model fixture, then
+verifies ACP prompt, store persistence and Host restart. It requires docker;
+set `PERI_TEST_STORAGE_URL` and `PERI_TEST_STORAGE_TOKEN` together to use an
+external endpoint instead. `scripts/smoke-wasm-remote-mcp.mjs` verifies an
+ACP-carried MCP tool.
 
 ## ACP port
 
@@ -73,9 +76,9 @@ the existing Agent and Session interfaces. Its HTTP demo is
 
 The probe lives in `@peri-code/sdk` and uses its Bun dependencies with
 Wrangler's local `workerd`.
-It starts a real local sqld, a simulated model HTTP endpoint, and the existing
-ACP Host. It checks initialize, session creation, prompt completion, model
-HTTP, session listing, and loading after the Host closes.
+It starts a real local peri-loom container, a simulated model HTTP endpoint,
+and the existing ACP Host. It checks initialize, session creation, prompt
+completion, model HTTP, session listing, and loading after the Host closes.
 
 ```bash
 cd npm-packages/@peri-sdk

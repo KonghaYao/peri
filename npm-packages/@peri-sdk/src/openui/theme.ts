@@ -1,7 +1,7 @@
 import { setHostTheme } from "./canvas/hooks";
 
 /**
- * peri-cf 聊天主题 -> canvas host tokens 的桥。
+ * 聊天主题 -> canvas host tokens 的桥。
  *
  * 只读取三个 CSS 变量，避免把 Tailwind 颜色体系整体复制到 canvas：
  * - `--chat-code-bg` -> editorBackground（卡片/代码表面）

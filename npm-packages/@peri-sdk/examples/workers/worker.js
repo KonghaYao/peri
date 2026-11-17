@@ -4,15 +4,15 @@
  * 只用当前 Host 方法表（`peri-acp/src/host/server_loop.rs` 的请求分派）：
  *  - 会话：`session/new` / `session/list` / `session/load` / `session/close`
  *  - Turn：默认走 `session/input/{snapshot,enqueue}` 队列路径，与 SDK `ChatService` 的输入队列相同；
- *    `?turn=prompt` 走 `session/prompt`，这是 SDK 之外的直连 turn 路径（peri-cf 也在用），不是遗留方法。
+ *    `?turn=prompt` 走 `session/prompt`，这是 SDK 之外的直连 turn 路径，不是遗留方法。
  *  - 取消：`session/cancel` 是通知，不是请求。
- *  - `?host=sdk`：peri-cf 形态——调用 SDK 的 `startWasmRuntime` 且**只注入 `moduleFactory`**，
+ *  - `?host=sdk`：宿主形态——调用 SDK 的 `startWasmRuntime` 且**只注入 `moduleFactory`**，
  *    不提供可解析的 `moduleUrl`。workerd 里 `import.meta.url` 是 undefined，SDK 不得在注入
  *    factory 时再去解析产物 URL。
  *
  * 队列路径的执行由 Peri mailbox 调度：入队回执只说明已受理，turn 结束必须等
  * `peri/agent_event_done`，投递必须等 `peri/agent_event` 的 `user_input_delivered`。
- * Store 位置与凭证全部显式传入（`STORAGE_URL` / `MODEL_URL`），不读宿主进程环境。
+ * Store 位置与凭证全部显式传入（`STORAGE_URL` / `STORAGE_TOKEN` / `MODEL_URL`），不读宿主进程环境。
  */
 import Module from './peri-wasm.js';
 import wasmModule from './peri_wasm.wasm';
@@ -72,7 +72,7 @@ function hostConfig(env) {
       providers: [{ id: 'fixture', type: 'openai', apiKey: 'fixture-key', baseUrl: env.MODEL_URL }],
       profiles: { sonnet: { provider: 'fixture', model: 'fixture-model' } },
     } },
-    storage: { url: env.STORAGE_URL, authToken: 'local-dev' },
+    storage: { url: env.STORAGE_URL, authToken: env.STORAGE_TOKEN },
     // smoke fixture 的固定身份；仅用于示例。
     machineId: '00000000-0000-4000-8000-000000000004',
   };
@@ -125,7 +125,7 @@ async function closeSession(acp, sessionId, observe) {
   }
 }
 
-/** peri-cf 形态：宿主只注入 moduleFactory，没有可解析的产物 URL。 */
+/** 宿主形态：只注入 moduleFactory，没有可解析的产物 URL。 */
 async function probeSdkHost(env) {
   const transport = await startWasmRuntime({
     configJson: JSON.stringify(hostConfig(env)),
@@ -173,7 +173,7 @@ export default {
     let acp;
     let sessionId;
     try {
-      // peri-cf 形态放在同一错误通道里，失败原因随响应体返回而不是 workerd 错误页。
+      // 宿主形态放在同一错误通道里，失败原因随响应体返回而不是 workerd 错误页。
       if (url.searchParams.get('host') === 'sdk') return await probeSdkHost(env);
       const wasm = await loadModule(env);
       acp = await withTimeout(wasm.PeriWasmAcp.start(JSON.stringify(hostConfig(env))), 'start ACP');

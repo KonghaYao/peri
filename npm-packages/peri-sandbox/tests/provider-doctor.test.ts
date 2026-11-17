@@ -29,7 +29,16 @@ test('SRT CLI resolves from the installed npm dependency', () => {
 test('sandbox reads only the required SRT npm package, not its parent project', () => {
   const runtime = srtRuntime();
   const sandboxesRoot = '/var/lib/peri/sandboxes';
-  const policy = JSON.parse(policyFor({ sandboxesRoot, sandboxId, profile, periPath: process.execPath }).json);
+  const policy = JSON.parse(
+    policyFor({
+      sandboxesRoot,
+      sandboxId,
+      workspacePath: join(sandboxesRoot, sandboxId, 'workspace'),
+      homePath: join(sandboxesRoot, sandboxId, 'home'),
+      profile,
+      periPath: process.execPath,
+    }).json,
+  );
   assert(policy.filesystem.allowRead.includes(runtime.packageRoot));
   assert(!policy.filesystem.allowRead.includes(dirname(runtime.packageRoot)));
   assert(policy.filesystem.allowRead.includes(process.execPath));
@@ -133,6 +142,8 @@ test('policy denies symlinked runtime reads into managed directories', () => {
         policyFor({
           sandboxesRoot,
           sandboxId,
+          workspacePath: join(sandboxesRoot, sandboxId, 'workspace'),
+          homePath: join(sandboxesRoot, sandboxId, 'home'),
           profile: { ...profile, runtimeReadPaths: [alias] },
           periPath: '/usr/bin/peri',
         }),

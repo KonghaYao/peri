@@ -44,10 +44,17 @@ export function checkFreeSpace(root: string, minFreeBytes: number): void {
 }
 
 /** Create `<sandboxesRoot>/<id>/{workspace,home}` (0700) and the macOS tmp dir. */
-export function makeDirectories(sandboxesRoot: string, sandboxId: string): void {
+export function makeDirectories(sandboxesRoot: string, sandboxId: string, workspacePath?: string): void {
   const base = sandboxPath(sandboxesRoot, sandboxId);
   checkDirectory(base, sandboxesRoot);
-  mkdirSync(join(base, 'workspace'), { recursive: true, mode: 0o700 });
+  if (workspacePath === undefined) {
+    mkdirSync(join(base, 'workspace'), { recursive: true, mode: 0o700 });
+  } else {
+    // 显式 workspace 由 resolveOptions 校验；这里只确认它仍是同一个真实目录。
+    const entry = lstatSync(workspacePath, { throwIfNoEntry: false });
+    if (!entry || entry.isSymbolicLink() || !statSync(workspacePath).isDirectory())
+      throw new SandboxError('invalid_options', `workspacePath is no longer a real directory: ${workspacePath}`);
+  }
   mkdirSync(join(base, 'home'), { recursive: true, mode: 0o700 });
   mkdirSync(join(base, 'home', '.config'), { recursive: true, mode: 0o700 });
   // 空的 git 模板目录：SRT 默认保护 .git/hooks，git init/clone 复制样本

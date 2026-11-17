@@ -15,6 +15,7 @@ import type { WasmRuntimePoolSnapshot } from "../wasm/runtime-pool";
 import type { PeriWasmModuleFactory } from "../wasm/loader";
 import type { PeriInstanceOptions } from "../agent/peri-instance";
 import type { WorkspaceRef } from "../workspace/types";
+import type { ChatObservation } from "../contracts/observability";
 import type {
     AnswerAction, CancelAction, ForceSendAction, HistoryAction, SendAction, SessionAction,
     SetConfigOptionAction, TakeBackAction,
@@ -231,6 +232,12 @@ export interface ChatManager {
     shutdown(): Promise<void>;
     /** 只读 WASM 运行后端快照；transport runtime 返回空快照。 */
     runtimeSnapshot?(): WasmRuntimePoolSnapshot;
+    /**
+     * 只读 Chat 观测快照，按 chatId 稳定排序；不启动运行后端。
+     *
+     * 可选：调用方自有 Manager 实现不提供观测时，`observeBackend` 会拒绝该输入。
+     */
+    observe?(): ChatObservation[];
 }
 
 export interface ChatService {
@@ -255,4 +262,10 @@ export interface ChatService {
     close(): Promise<void>;
     /** 包内事实接入；公开文档标记 internal。 */
     subscribeFacts(observer: ChatFactObserver): () => void;
+    /**
+     * 只读观测投影；不启动运行后端、不改变绑定或队列。
+     *
+     * 可选：调用方自有 Service 实现可以不提供。
+     */
+    observe?(): ChatObservation;
 }

@@ -128,6 +128,6 @@ Peri 层验证。
    对象直接传进 Rust Store。
 5. **运行后端回收与句柄身份分开**：当前只做手动 `closeChat`/`shutdown`，不启用自动 idle 回收。活动运行、
    未处理输入、待决交互、未确认清理不可被回收。
-6. **单进程 CF 部署**：CF 默认 `createStorage()`（unstorage memory driver），不能宣称多实例接管；
+6. **单进程部署**：默认 `createStorage()`（unstorage memory driver），不能宣称多实例接管；
    需要多实例时由部署提供共享 storage，并在路由层完成串行化与崩溃清理。
 7. **WASM 目标不等于 hosted 验收**：WASM 部署是已实现路径；普通浏览器或托管 Workers 的生产部署未验收。

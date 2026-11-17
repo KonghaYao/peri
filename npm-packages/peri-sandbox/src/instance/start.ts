@@ -109,7 +109,11 @@ export async function startSandboxWith(
 
   ensureSandboxesRoot(resolved.sandboxesRoot);
   checkFreeSpace(resolved.sandboxesRoot, resolved.minFreeBytes);
-  makeDirectories(resolved.sandboxesRoot, resolved.sandboxId);
+  makeDirectories(
+    resolved.sandboxesRoot,
+    resolved.sandboxId,
+    options.workspacePath === undefined ? undefined : resolved.workspacePath,
+  );
 
   const lock: SandboxLock = acquireLock(resolved.sandboxRoot);
   const provider =
@@ -168,6 +172,8 @@ export async function startSandboxWith(
     const policy = policyFor({
       sandboxesRoot: resolved.sandboxesRoot,
       sandboxId: resolved.sandboxId,
+      workspacePath: resolved.workspacePath,
+      homePath: resolved.homePath,
       profile: resolved.profile,
       periPath: resolved.periPath,
     });

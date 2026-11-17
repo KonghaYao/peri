@@ -31,6 +31,8 @@ import {
     SessionWorkspaceMismatchError,
 } from "./errors";
 import { ChatFactHub } from "./fact-hub";
+import { buildChatObservation } from "./observe";
+import type { ChatObservation } from "../contracts/observability";
 import type { ChatBindingTarget, ChatFact, ChatFactObserver } from "../contracts/chat";
 import { readChatPayload } from "./payload-access";
 import { ChatSendReceipt, InputCorrelation } from "./send-receipt";
@@ -113,6 +115,8 @@ export class ChatService implements ChatServiceContract {
 
     private active?: Activation;
     private pendingAdmissions = 0;
+    /** 当前绑定的 MCP 配置来源；bindExisting 后 SDK 不持有既有配置。 */
+    private mcpSource: "session-init" | "unknown" = "unknown";
 
     constructor(options: ChatServiceOptions) {
         this.id = options.id;
@@ -188,6 +192,27 @@ export class ChatService implements ChatServiceContract {
     /** 仅供包内诊断/测试；不是公开控制面。 */
     get phase(): string {
         return this.state.phase;
+    }
+
+    /**
+     * 只读观测投影；不启动运行后端、不改变绑定或队列。
+     *
+     * ChatService 不知道 WASM 运行池；`ChatManager.observe()` 会按 chatId
+     * 合并池中的实例信息。
+     */
+    observe(): ChatObservation {
+        return buildChatObservation({
+            chatId: this.id,
+            workspace: this.workspace,
+            phase: this.state.phase,
+            sessionId: this.state.sessionId,
+            bindingRevision: this.state.bindingRevision,
+            mcpSource: this.mcpSource,
+            sessionInit: this.sessionInit,
+            runtimeKind: this.runtime.kind,
+            port: this.active?.port,
+            pendingInputs: this.inputs.size,
+        });
     }
 
     execute(action: SendAction): SendReceipt;
@@ -601,7 +626,12 @@ export class ChatService implements ChatServiceContract {
                     "Chat closed during session creation",
                 );
             }
-            return this.activate(activation, createdSessionId, null);
+            return this.activate(
+                activation,
+                createdSessionId,
+                null,
+                "session-init",
+            );
         } catch (error) {
             // PeriInstance 的阶段错误可能自带已创建的 Session；不依赖其具体类。
             const created = (error as { createdSessionId?: unknown })
@@ -853,7 +883,12 @@ export class ChatService implements ChatServiceContract {
             );
         }
 
-        return this.activate(activation!, sessionId, previousSessionId);
+        return this.activate(
+            activation!,
+            sessionId,
+            previousSessionId,
+            "unknown",
+        );
     }
 
     private async acquireSession(sessionId: string): Promise<void> {
@@ -918,10 +953,12 @@ export class ChatService implements ChatServiceContract {
         activation: Activation,
         sessionId: string,
         previousSessionId: string | null,
+        mcpSource: "session-init" | "unknown",
     ): ChatBindingTarget {
         const target = this.state.commit(sessionId);
         activation.live = true;
         this.active = activation;
+        this.mcpSource = mcpSource;
         this.index.commit(this.id, previousSessionId, sessionId);
         this.facts.bind(target, activation.pending);
         activation.pending.length = 0;

@@ -1,7 +1,13 @@
+import type { SandboxObservationState } from "../contracts/observability";
 import type { WorkspaceRef } from "../workspace/types";
 
-/** Lifecycle states reported by one {@link SandboxHandle}. */
-export type SandboxHandleState = "idle" | "starting" | "ready" | "stopping" | "stopped" | "failed" | "closed";
+/**
+ * Lifecycle states reported by one {@link SandboxHandle}.
+ *
+ * The union is owned by the observability contract so snapshots and handles
+ * cannot drift apart.
+ */
+export type SandboxHandleState = SandboxObservationState;
 
 /** Stable error codes for sandbox lifecycle failures. */
 export type SandboxManagerErrorCode =

@@ -8,7 +8,7 @@
 
 1. `startSandbox(options)` 在调用者进程内启动一个 SRT/Peri backend，返回一个 `SandboxInstance`。
 2. 每个实例提供 `127.0.0.1` 随机端口的 `/mcp` HTTP MCP 端点；token 每实例独立，默认只在内存。
-3. workspace 固定为 `<sandboxesRoot>/<sandboxId>/{workspace,home}`，`close()` 后保留，`close({deleteData:true})` 才删除。
+3. workspace 默认固定为 `<sandboxesRoot>/<sandboxId>/{workspace,home}`；显式 `workspacePath` 只替换工作目录（host 授权的 0700 真实目录，与 `sandboxesRoot` 不重叠），`home` 仍在 `<sandboxRoot>`。`close()` 后保留，`close({deleteData:true})` 只删除托管目录。
 4. Linux 保留 `systemd-run` transient unit（cgroup 隔离）；macOS 保留 SRT + detached 进程组。
 5. 与 Agent 的唯一交界是 `ChatSessionInit.mcpServers`（HTTP descriptor + Bearer）；不改 ACP/Rust。
 
@@ -119,7 +119,7 @@ starting -> ready -> stopping -> closed
     home/               # 持久 HOME/XDG，0700
 ```
 
-- `sandboxId`：显式 `sbx_[a-f0-9]{32}`；或 `sessionKey` 经 `sha256("peri-sandbox-session:" + key)` 取前 32 hex；否则随机生成一次。
+- `sandboxId`：显式 `sbx_[a-f0-9]{32}`；或 `sessionKey` 经 `sha256("peri-sandbox-session:" + key)` 取前 32 hex；否则随机生成一次。它只是状态目录/进程/锁的运行句柄，不是 workspace 业务身份；适配器不得从 workspace URI 派生，也不得用它做 workspace 查找、授权或恢复。
 - macOS 临时目录 `/private/tmp/peri-<id前16位>`；Linux 由 `PrivateTmp=yes` 提供。
 - lock 不写在 workspace 内，避免 Agent 误删；删除数据时在停止确认后、持锁状态下进行。
 
