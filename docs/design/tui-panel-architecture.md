@@ -46,10 +46,11 @@
 
 ### 共享列表视口
 
-`panels::shared::list` 是固定行高列表的可见范围、滚动跟随与命中布局的唯一推导处：
+固定行高列表的可见范围、滚动跟随与命中布局由 `peri-tui-components::list` 唯一推导：
 行度量（header/item/footer）与内容行数进入，`visible_items`、`scroll_start`、绘制窗口与
 命中布局一起产出。列表面板不再各自持有写死的可见项常量；绘制取窗口、事件取命中布局，
-两者必须来自同一实例。选择越界在选择推导处收敛，刷新缩短列表不残留越界选择。
+两者必须来自同一实例。选择越界在组件内收敛，刷新缩短列表不残留越界选择；应用侧
+`panels/shared/list.rs` 仅保留首帧高度策略。
 
 接入范围：固定行高的列表面板（Hooks、MCP、Cron、Memory、Config、Model、Login Browse）
 共用本机制；Login Browse 每项固定 4 行（ID、认证状态、Base URL、分隔空行），header 计数行
