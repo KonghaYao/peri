@@ -129,7 +129,7 @@ Workflow 是 Peri 的多 Agent 编排子系统：用户在 JS 脚本中声明并
 
 任务表是 per-session 运行期状态（process-local，不写 journal）；消费主循环、订阅与就绪语义见 [workflow-mcp.md](workflow-mcp.md) §5.5，入口为 `peri-acp/src/host/workflow_consumer.rs`。
 
-结果与进度类型是契约层单一事实源（`peri-acp-types/src/workflow.rs`）：`AgentRunParams`、`AgentRunResult`（`Ok { output, usage, model, … }` / `Skipped` / `Dead { reason, detail }`）、`ProgressEvent`、四维状态与 `WorkflowTaskResult`；`AgentRunResult` 的 schema/字符串编码由执行体投影统一决定。
+结果与进度类型是契约层单一事实源（`peri-acp-types/src/workflow.rs`）：`AgentRunParams`、`AgentRunResult`（`Ok { output, usage, model, … }` / `Skipped` / `Dead { reason, detail, scope_close_incomplete }`）、`ProgressEvent`、四维状态与 `WorkflowTaskResult`；`AgentRunResult` 的 schema/字符串编码由执行体投影统一决定。
 
 ### 3.4 WorkflowTaskRegistry
 
@@ -396,3 +396,5 @@ wait for relevant resource settlement; stable-input planning and independent tas
 continue. The policies use actual task/run/artifact identities and distinguish execution,
 acceptance, settlement and external delivery. They do not implement durable recovery,
 worktree isolation or transport idempotency. No database migration is introduced.
+
+子作用域关闭失败通过 `scopeCloseIncomplete` 独立传播，不覆盖首个失败的 reason/detail；运行时发布结果前据此 fence 受影响 run。正式 assignment report 从本会话 own transcript 条目读取，不受 compact 的 model-visible 标记影响；没有正式报告时仍回退到最新可见 assistant 消息。

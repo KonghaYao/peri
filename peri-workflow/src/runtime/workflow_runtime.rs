@@ -150,6 +150,7 @@ impl AgentTaskSink for RuntimeAgentTaskSink {
 /// Node 侧按引擎约定抛 `WorkflowAbortedError`）。
 pub(super) fn cancelled_delivery_result(record: &WorkflowTaskRecord) -> AgentRunResult {
     AgentRunResult::Dead {
+        scope_close_incomplete: false,
         reason: Some("killed".into()),
         detail: record
             .reason

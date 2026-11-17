@@ -564,7 +564,7 @@ async fn workflow_initial_prompt_enqueue_failure_is_a_dead_task() {
         .await;
 
     match result {
-        AgentRunResult::Dead { reason, detail } => {
+        AgentRunResult::Dead { reason, detail, .. } => {
             assert_eq!(reason.as_deref(), Some("initial-prompt-enqueue-failed"));
             let detail = detail.unwrap_or_default();
             assert!(

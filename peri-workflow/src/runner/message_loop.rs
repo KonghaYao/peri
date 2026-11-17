@@ -152,6 +152,7 @@ impl MessageLoop {
                                         // 通知形态没有请求 id 可回：能取到 taskId 时就地结算，
                                         // 不留悬挂 promise（被拒绝的任务不会进入任务表）。
                                         let result = AgentRunResult::Dead {
+                                            scope_close_incomplete: false,
                                             reason: Some("invalid-params".into()),
                                             detail: Some(error.clone()),
                                         };
@@ -196,6 +197,7 @@ impl MessageLoop {
                                 // 关闭后不得登记（design §4.4 第 ① 步）：就地结算 Node
                                 // 等待方——任务不进入任务表，不能靠任务表终态投递收口。
                                 let result = AgentRunResult::Dead {
+                                    scope_close_incomplete: false,
                                     reason: Some("killed".into()),
                                     detail: Some(
                                         "workflow instance is closed and no longer accepts new tasks"

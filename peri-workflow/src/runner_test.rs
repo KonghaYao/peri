@@ -89,6 +89,7 @@ impl AgentExecutor for CountingAgentExecutor {
     async fn execute(&self, _params: AgentRunParams) -> AgentRunResult {
         self.calls.fetch_add(1, Ordering::SeqCst);
         AgentRunResult::Dead {
+            scope_close_incomplete: false,
             reason: Some("test executor must not run".into()),
             detail: None,
         }

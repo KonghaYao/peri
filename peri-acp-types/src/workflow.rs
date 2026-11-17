@@ -59,6 +59,13 @@ pub enum AgentRunResult {
     Skipped,
     #[serde(rename = "dead")]
     Dead {
+        /// Independent of the first failure: unsettled resources must fence the run.
+        #[serde(
+            default,
+            skip_serializing_if = "std::ops::Not::not",
+            rename = "scopeCloseIncomplete"
+        )]
+        scope_close_incomplete: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -70,14 +77,35 @@ impl AgentRunResult {
     /// A completed assignment with unconfirmed resources must fence its run before retry.
     pub fn unsettled_scope_error(&self) -> Option<&str> {
         match self {
-            Self::Dead { reason, detail }
-                if reason.as_deref() == Some("scope-close-incomplete") =>
-            {
+            Self::Dead {
+                reason,
+                detail,
+                scope_close_incomplete,
+            } if *scope_close_incomplete || reason.as_deref() == Some("scope-close-incomplete") => {
                 Some(detail.as_deref().unwrap_or(
                     "Workflow agent scope did not close; resource settlement is unconfirmed",
                 ))
             }
             _ => None,
+        }
+    }
+
+    /// Preserve the first failure while independently propagating scope uncertainty.
+    pub fn after_scope_close(self, closed: bool) -> Self {
+        if closed {
+            return self;
+        }
+        match self {
+            Self::Dead { reason, detail, .. } => Self::Dead {
+                reason,
+                detail,
+                scope_close_incomplete: true,
+            },
+            _ => Self::Dead {
+                reason: Some("scope-close-incomplete".into()),
+                detail: Some("Workflow agent scope did not close; outstanding resources are unconfirmed. Do not start dependent writes or verification.".into()),
+                scope_close_incomplete: true,
+            },
         }
     }
 
@@ -708,4 +736,53 @@ pub trait AgentExecutor: Send + Sync {
     }
     /// 执行单个 workflow agent，返回 AgentRunResult
     async fn execute(&self, params: AgentRunParams) -> AgentRunResult;
+}
+
+#[cfg(test)]
+mod scope_close_tests {
+    use super::AgentRunResult;
+
+    #[test]
+    fn first_failure_and_scope_uncertainty_round_trip_independently() {
+        for reason in [
+            "event-forwarder-failed",
+            "initial-prompt-enqueue-failed",
+            "execution-blocked",
+            "interrupted",
+        ] {
+            let original: AgentRunResult = serde_json::from_value(serde_json::json!({
+                "kind": "dead", "reason": reason, "detail": "first cause"
+            }))
+            .unwrap();
+            assert!(original.unsettled_scope_error().is_none());
+            assert!(serde_json::to_value(&original)
+                .unwrap()
+                .get("scopeCloseIncomplete")
+                .is_none());
+            let closed = original.clone().after_scope_close(true);
+            assert_eq!(closed, original);
+            let unsettled = original.after_scope_close(false);
+            assert!(unsettled.unsettled_scope_error().is_some());
+            let wire = serde_json::to_value(&unsettled).unwrap();
+            assert_eq!(wire["reason"], reason);
+            assert_eq!(wire["detail"], "first cause");
+            assert_eq!(wire["scopeCloseIncomplete"], true);
+            let restored: AgentRunResult = serde_json::from_value(wire).unwrap();
+            assert_eq!(restored, unsettled);
+            assert!(restored.unsettled_scope_error().is_some());
+        }
+    }
+
+    #[test]
+    fn legacy_scope_failure_still_fences() {
+        let legacy: AgentRunResult = serde_json::from_value(serde_json::json!({
+            "kind": "dead", "reason": "scope-close-incomplete"
+        }))
+        .unwrap();
+        assert!(legacy.unsettled_scope_error().is_some());
+        assert!(AgentRunResult::Skipped
+            .after_scope_close(false)
+            .unsettled_scope_error()
+            .is_some());
+    }
 }

@@ -250,6 +250,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 Err(detail) => {
                     warn!(agent_type, %detail, "workflow agent: invalid agent type");
                     return AgentRunResult::Dead {
+                        scope_close_incomplete: false,
                         reason: Some("invalid-agent-type".into()),
                         detail: Some(detail),
                     };
@@ -259,6 +260,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
         };
         if params.max_tokens == Some(0) {
             return AgentRunResult::Dead {
+                scope_close_incomplete: false,
                 reason: Some("invalid-max-tokens".into()),
                 detail: Some("maxTokens must be greater than zero".into()),
             };
@@ -405,6 +407,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
             Ok(execution) => execution,
             Err(detail) => {
                 return AgentRunResult::Dead {
+                    scope_close_incomplete: false,
                     reason: Some("execution-blocked".into()),
                     detail: Some(detail),
                 };
@@ -531,9 +534,9 @@ impl AgentExecutor for WorkflowAgentExecutor {
             // 再把失败原样交给工作流执行器（任务终态为失败）。
             drop(context);
             let _ = await_workflow_forwarder(event_bus, forwarder_handle).await;
-            close_session_scope(&session, &session_id).await;
+            let scope_closed = close_session_scope(&session, &session_id).await;
             child_settlement.settle(AgentStatus::Error).await;
-            return initial_prompt_enqueue_failure(detail);
+            return initial_prompt_enqueue_failure(detail).after_scope_close(scope_closed);
         }
 
         let mut execution_guard = match peri_acp_types::tasks::TaskManager::begin_external_execution(
@@ -544,12 +547,14 @@ impl AgentExecutor for WorkflowAgentExecutor {
             Err(detail) => {
                 drop(context);
                 let _ = await_workflow_forwarder(event_bus, forwarder_handle).await;
-                close_session_scope(&session, &session_id).await;
+                let scope_closed = close_session_scope(&session, &session_id).await;
                 child_settlement.settle(AgentStatus::Error).await;
                 return AgentRunResult::Dead {
+                    scope_close_incomplete: false,
                     reason: Some("execution-blocked".into()),
                     detail: Some(detail),
-                };
+                }
+                .after_scope_close(scope_closed);
             }
         };
         // 7. 运行 v2 ReAct 循环
@@ -626,6 +631,7 @@ pub(super) fn initial_prompt_enqueue_failure(
     detail: String,
 ) -> peri_acp_types::workflow::AgentRunResult {
     peri_acp_types::workflow::AgentRunResult::Dead {
+        scope_close_incomplete: false,
         reason: Some("initial-prompt-enqueue-failed".into()),
         detail: Some(detail),
     }

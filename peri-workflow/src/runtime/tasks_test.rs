@@ -737,6 +737,7 @@ fn conflicting_late_settle_keeps_first_result() {
         SettleAdmission::ExecutingOnly,
         WorkflowTaskState::Failed,
         Some(AgentRunResult::Dead {
+            scope_close_incomplete: false,
             reason: Some("conflict".into()),
             detail: None,
         }),
@@ -839,9 +840,11 @@ fn duplicate_settle_redelivers_result_and_counts_tool_calls_once() {
 
 fn scope_close_failure() -> AgentRunResult {
     AgentRunResult::Dead {
-        reason: Some("scope-close-incomplete".into()),
-        detail: Some("Outstanding writer resources are unconfirmed".into()),
+        scope_close_incomplete: false,
+        reason: Some("event-forwarder-failed".into()),
+        detail: Some("Original failure with outstanding writers".into()),
     }
+    .after_scope_close(false)
 }
 
 #[test]

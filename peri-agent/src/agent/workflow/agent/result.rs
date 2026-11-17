@@ -22,16 +22,13 @@ pub(super) struct ProjectedResult {
 }
 
 impl ProjectedResult {
-    /// Closing the child scope is a prerequisite for handing its output to a successor.
-    /// An existing failure already blocks that handoff; replacing it would hide the first cause.
+    /// Preserve execution telemetry without losing the independent run-fence signal.
     pub(super) fn after_scope_close(mut self, closed: bool) -> Self {
-        if !closed && !matches!(self.result, AgentRunResult::Dead { .. }) {
-            let detail = "Workflow agent scope did not close; outstanding resources are unconfirmed. Do not start dependent writes or verification.";
-            self.result = AgentRunResult::Dead {
-                reason: Some("scope-close-incomplete".into()),
-                detail: Some(detail.into()),
-            };
-            self.failure = Some(ExecutionFailure::internal(detail));
+        self.result = self.result.after_scope_close(closed);
+        if !closed && self.failure.is_none() {
+            self.failure = Some(ExecutionFailure::internal(
+                "Workflow agent scope did not close; outstanding resources are unconfirmed",
+            ));
         }
         self
     }
@@ -121,6 +118,7 @@ pub(super) fn project_run_result(
             debug!("Workflow agent: execution interrupted");
             ProjectedResult {
                 result: AgentRunResult::Dead {
+                    scope_close_incomplete: false,
                     reason: Some("interrupted".into()),
                     detail: Some("Workflow agent execution was interrupted".into()),
                 },
@@ -131,6 +129,7 @@ pub(super) fn project_run_result(
             debug!("Workflow agent: settlement window expired");
             ProjectedResult {
                 result: AgentRunResult::Dead {
+                    scope_close_incomplete: false,
                     reason: Some("settlement-due".into()),
                     detail: Some(
                         "Workflow agent stopped admitting new iterations at its settlement deadline"
@@ -145,6 +144,7 @@ pub(super) fn project_run_result(
             ProjectedResult {
                 failure: Some(ExecutionFailure::from_agent_error(&error)),
                 result: AgentRunResult::Dead {
+                    scope_close_incomplete: false,
                     reason: Some("runagent-threw".into()),
                     detail: Some(error.to_string()),
                 },
@@ -170,6 +170,7 @@ fn completed_result(
         if let Err(error) = validate_json_schema(&output, schema) {
             debug!(error = %error, "Workflow agent: schema validation failed");
             return AgentRunResult::Dead {
+                scope_close_incomplete: false,
                 reason: Some("no-structured-output".into()),
                 detail: Some(error),
             };
@@ -190,6 +191,7 @@ fn completed_result(
 
 pub(super) fn workflow_forwarder_dead_result() -> AgentRunResult {
     AgentRunResult::Dead {
+        scope_close_incomplete: false,
         reason: Some("event-forwarder-failed".into()),
         detail: Some("Workflow agent event forwarding failed".into()),
     }

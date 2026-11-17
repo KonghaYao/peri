@@ -24,7 +24,10 @@ pub(super) fn assignment_prompt(prompt: &str) -> String {
 fn report_body(text: &str) -> Option<&str> {
     let body = text.trim().strip_prefix(OPEN)?.strip_suffix(CLOSE)?.trim();
     // A whole-message envelope avoids treating a quoted example as a handoff.
-    (!body.is_empty() && !body.contains(OPEN) && !body.contains(CLOSE)).then_some(body)
+    let contains_delimiter = body.contains(OPEN) || body.contains(CLOSE);
+    (!body.is_empty()
+        && (!contains_delimiter || serde_json::from_str::<serde_json::Value>(body).is_ok()))
+    .then_some(body)
 }
 
 fn select_output<T: AsRef<str>>(messages_newest_first: impl Iterator<Item = T>) -> String {
@@ -45,7 +48,22 @@ fn select_output<T: AsRef<str>>(messages_newest_first: impl Iterator<Item = T>) 
 pub(super) fn extract_output(session: &Arc<Session>) -> String {
     let transcript = session.transcript();
     let transcript = transcript.read();
-    let messages = transcript.visible_messages();
+    // Compaction changes model visibility, not the committed assignment report.
+    // Own entries exclude inherited reports; rewind physically truncates revoked entries.
+    if let Some(body) = transcript.entries()[transcript.ancestor_len()..]
+        .iter()
+        .rev()
+        .filter_map(|entry| entry.as_message())
+        .filter(|message| matches!(message, BaseMessage::Ai { .. }))
+        .find_map(|message| report_body(&message.content()).map(str::to_owned))
+    {
+        return body;
+    }
+    let messages: Vec<_> = transcript.entries()[transcript.ancestor_len()..]
+        .iter()
+        .filter(|entry| !transcript.flags(entry.id()).excluded)
+        .filter_map(|entry| entry.as_message())
+        .collect();
     select_output(
         messages
             .iter()
@@ -58,6 +76,20 @@ pub(super) fn extract_output(session: &Arc<Session>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_delimiters_are_data_but_concatenated_envelopes_are_rejected() {
+        let json = r#"{"text":"<workflow-result>","close":"</workflow-result>"}"#;
+        let message = format!("{OPEN}{json}{CLOSE}");
+        assert_eq!(report_body(&message), Some(json));
+        assert_eq!(select_output([message].into_iter()), json);
+        assert_eq!(
+            report_body(
+                "<workflow-result>one</workflow-result><workflow-result>two</workflow-result>"
+            ),
+            None
+        );
+    }
 
     #[test]
     fn cleanup_does_not_replace_the_formal_report() {
@@ -110,5 +142,55 @@ mod tests {
             "<workflow-result>first</workflow-result><workflow-result>second</workflow-result>"
         )
         .is_none());
+    }
+}
+
+#[cfg(test)]
+mod compact_tests {
+    use super::*;
+    use crate::session::FrozenContext;
+
+    #[test]
+    fn archived_own_report_survives_summary_and_optional_cleanup() {
+        for cleanup in [false, true] {
+            let session =
+                Session::new(Arc::from("/unused"), FrozenContext::builder().build(), None);
+            {
+                let transcript = session.transcript();
+                let mut transcript = transcript.write();
+                let report = transcript.append(BaseMessage::ai(
+                    "<workflow-result>{\"status\":\"passed\"}</workflow-result>",
+                ));
+                // Full compact excludes old entries and adds a Human summary.
+                transcript.set_excluded(report, true);
+                transcript.append(BaseMessage::human("Compacted conversation summary"));
+                if cleanup {
+                    transcript.append(BaseMessage::ai("Background process cleaned up."));
+                }
+            }
+            assert_eq!(extract_output(&session), "{\"status\":\"passed\"}");
+            session.transcript().write().append(BaseMessage::ai(
+                "<workflow-result>Corrected outcome</workflow-result>",
+            ));
+            assert_eq!(extract_output(&session), "Corrected outcome");
+        }
+    }
+
+    #[test]
+    fn archived_unmarked_message_is_not_a_fallback_report() {
+        let session = Session::new(Arc::from("/unused"), FrozenContext::builder().build(), None);
+        {
+            let transcript = session.transcript();
+            let mut transcript = transcript.write();
+            let old = transcript.append(BaseMessage::ai("obsolete unmarked output"));
+            transcript.set_excluded(old, true);
+            transcript.append(BaseMessage::human("Summary"));
+        }
+        assert_eq!(extract_output(&session), "");
+        session
+            .transcript()
+            .write()
+            .append(BaseMessage::ai("Visible output"));
+        assert_eq!(extract_output(&session), "Visible output");
     }
 }

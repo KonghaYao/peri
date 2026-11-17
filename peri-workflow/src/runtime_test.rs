@@ -498,6 +498,7 @@ async fn unsettled_child_scope_fences_real_engine_retries_and_forces_failed_comp
         &first.task_id,
         WorkflowTaskState::Failed,
         Some(AgentRunResult::Dead {
+            scope_close_incomplete: false,
             reason: Some("scope-close-incomplete".into()),
             detail: Some(detail.into()),
         }),
