@@ -320,8 +320,9 @@ effect 与 recovery 的领域错误，旧窗口仍可读。V2 initial 不混入 
 - `open`：`anchor` 为 `{ "kind": "latest" }` 或
   `{ "kind": "entry", "entryId", "source" }`，返回 `windowId`、`snapshotToken`、
   `readTicket`、`committedTail`、`beforeCursor`/`afterCursor` 与页。
-- `page`：`windowId`、`snapshotToken`、`readTicket` 与恰好一个
-  `beforeCursor`/`afterCursor`；游标是 MAC 保护的 opaque 字符串，跨窗口或篡改返回
+- `page`：`windowId`、`snapshotToken`、`readTicket`、`direction`（`before` 或 `after`）
+  与可选 `cursor`；省略 `cursor` 时从窗口该方向的 home 边界开始读取，没有 home 时返回
+  `invalid_cursor`。`cursor` 是 MAC 保护的 opaque 字符串，跨窗口或篡改返回
   `cross_window_cursor` / `invalid_cursor`。
 - `seek`：按稳定 `entryId` 重新定位；锚点被 rewind/删除或越出冻结范围返回
   `anchor_unavailable`，不得降级到 latest。
