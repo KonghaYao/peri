@@ -117,7 +117,10 @@ pub(crate) fn default_value(
         NodeValue::Object(values) => Ok(Value::Object(
             values
                 .iter()
-                .map(|(k, v)| Ok((k.clone(), default_value(v, library, state, budget)?)))
+                .map(|(k, v)| {
+                    spend_default_bytes(budget, k.len())?;
+                    Ok((k.clone(), default_value(v, library, state, budget)?))
+                })
                 .collect::<crate::Result<_>>()?,
         )),
         other => {

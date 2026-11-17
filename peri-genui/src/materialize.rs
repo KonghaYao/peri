@@ -330,6 +330,17 @@ impl<'a> Materializer<'a> {
                         return Expr::Null;
                     }
                     self.remaining -= copies;
+                    let mut copy_bytes = 0usize;
+                    for expr in &lowered {
+                        expr.visit(&mut |e| {
+                            if let Expr::String { v } = e {
+                                copy_bytes = copy_bytes.saturating_add(v.len());
+                            }
+                        });
+                    }
+                    if !self.spend_bytes(copy_bytes) {
+                        return Expr::Null;
+                    }
                 }
                 if let Some(def) = custom {
                     let Some(mapped) = self.map_call(name, &lowered, &def) else {
@@ -411,6 +422,12 @@ impl<'a> Materializer<'a> {
                 target: target.clone(),
                 value: Box::new(self.expr(value, scope, depth + 1)),
             },
+            Expr::String { v } => {
+                if !self.spend_bytes(v.len()) {
+                    return Expr::Null;
+                }
+                Expr::String { v: v.clone() }
+            }
             _ => expr.clone(),
         }
     }

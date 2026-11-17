@@ -531,6 +531,34 @@ fn capture_budget_rejects_repeated_large_loop_values() {
 }
 
 #[test]
+fn expression_lowering_rejects_literal_copy_amplification() {
+    let lib = library();
+    let mut nested = "Text(big)".to_owned();
+    for _ in 0..9 {
+        nested = format!("Stack([{nested}])");
+    }
+    let source = format!(
+        "big = \"{}\"\nroot = Stack(@Each([1], \"item\", {nested}))\n",
+        "x".repeat(3 * 1024 * 1024)
+    );
+    let result = parse(&source, &lib);
+    assert!(result.errors.iter().any(|error| {
+        error.code == ErrorCode::ParseFailed && error.message.contains("安全预算")
+    }));
+}
+
+#[test]
+fn state_default_object_keys_are_charged() {
+    let lib = library();
+    let key = "k".repeat(5 * 1024 * 1024);
+    let source = format!("root = Stack([])\n$obj = {{\"{key}\": 1}}\n");
+    let result = parse(&source, &lib);
+    assert!(result.errors.iter().any(|error| {
+        error.code == ErrorCode::ParseFailed && error.message.contains("state 默认值求值失败")
+    }));
+}
+
+#[test]
 fn stream_replacement_finish_and_incomplete_state_tail() {
     let lib = Arc::new(library());
     let mut stream = StreamParser::new(lib.clone());
