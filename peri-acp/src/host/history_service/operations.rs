@@ -23,7 +23,7 @@ use super::error::{
     default_error, invalid_params, invalid_params_message, timeout_error, ServiceFailure,
 };
 use super::ledger::{fingerprint, Admission};
-use super::state::WindowCancel;
+use super::state::{BodyRefState, WindowCancel};
 use super::{
     bounded_page, bounded_value, build_page, page_body_refs, params_within_limit, resolve_access,
     snapshot_changed, valid_body_shape, AttemptGuard, HistoryServiceRequest, HistoryV2Service,
@@ -494,16 +494,20 @@ impl HistoryV2Service {
                 &request.read_ticket,
                 now,
             ) {
-                Ok(access)
-                    if state
-                        .windows
-                        .body_ref_issued(&request.window_id, &request.body_ref) =>
+                Ok(access) => match state
+                    .windows
+                    .body_ref_state(&request.window_id, &request.body_ref)
                 {
-                    Ok(access)
-                }
-                // bodyRef 不是 MAC cursor：只接受本窗口实际交付过的引用。
-                // 不在集合内与条目不存在返回同一错误，不泄露存在性。
-                Ok(_) => Err(ServiceFailure::from_backend(HistoryBackendError::NotFound)),
+                    BodyRefState::Issued => Ok(access),
+                    // 交付过但已被保留预算淘汰：与窗口过期同一恢复路径（重新 open），
+                    // 不能按 not_found 结束，否则客户端不会再取得可用引用。
+                    BodyRefState::Evicted => Err(ServiceFailure::window_expired()),
+                    // bodyRef 不是 MAC cursor：只接受本窗口实际交付过的引用。
+                    // 未交付与条目不存在返回同一错误，不泄露存在性。
+                    BodyRefState::Unknown => {
+                        Err(ServiceFailure::from_backend(HistoryBackendError::NotFound))
+                    }
+                },
                 Err(failure) => Err(failure),
             }
         };

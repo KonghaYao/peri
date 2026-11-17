@@ -23,15 +23,31 @@ pub(super) const CLOSED_TTL: Duration = Duration::from_secs(30 * 60);
 pub(super) const MAX_CLOSED_WINDOWS: usize = 128;
 /// 单窗口已签发 bodyRef 上限；页交付的 opaque 条目数量本身受 `maxItems`（≤100）约束。
 pub(super) const MAX_ISSUED_BODY_REFS: usize = 100;
+/// 被淘汰 bodyRef 的身份保留上限；继续淘汰后回到 Unknown（与伪造引用同响应）。
+pub(super) const MAX_EVICTED_BODY_REFS: usize = 100;
+
+/// 一个窗口对 `bodyRef` 的授权判定。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BodyRefState {
+    /// 本窗口实际交付过，且仍在保留集合内。
+    Issued,
+    /// 本窗口实际交付过，但已按保留预算淘汰：客户端必须重新 open。
+    Evicted,
+    /// 本窗口从未交付（含伪造/跨窗口引用）：统一按不存在处理，不泄露存在性。
+    Unknown,
+}
 
 /// 一个窗口已交付给客户端的 opaque `bodyRef`。
 ///
-/// body 不是 MAC cursor，无法自证身份；服务端只接受本窗口实际交付过的引用，
-/// 伪造/复用未交付条目的 ref 一律 `not_found`。集合随窗口移除整体丢弃。
+/// body 不是 MAC cursor，无法自证身份；服务端只接受本窗口实际交付过的引用。
+/// 集合随窗口移除整体丢弃；淘汰与从未交付必须区分，否则客户端收到 `not_found`
+/// 不会重新 open，窗口会永久停用。
 #[derive(Default)]
 struct IssuedBodyRefs {
     refs: HashSet<String>,
     order: VecDeque<String>,
+    evicted: HashSet<String>,
+    evicted_order: VecDeque<String>,
 }
 
 impl IssuedBodyRefs {
@@ -40,6 +56,8 @@ impl IssuedBodyRefs {
             if !self.refs.insert(body_ref.clone()) {
                 continue;
             }
+            // 重新交付的引用回到有效集合，不能继续按淘汰处理。
+            self.evicted.remove(&body_ref);
             self.order.push_back(body_ref);
         }
         // 交付量远超窗口保留预算时按交付顺序淘汰最旧引用；被淘汰的 ref 与
@@ -47,12 +65,25 @@ impl IssuedBodyRefs {
         while self.order.len() > MAX_ISSUED_BODY_REFS {
             if let Some(oldest) = self.order.pop_front() {
                 self.refs.remove(&oldest);
+                self.evicted.insert(oldest.clone());
+                self.evicted_order.push_back(oldest);
+            }
+        }
+        while self.evicted_order.len() > MAX_EVICTED_BODY_REFS {
+            if let Some(oldest) = self.evicted_order.pop_front() {
+                self.evicted.remove(&oldest);
             }
         }
     }
 
-    fn contains(&self, body_ref: &str) -> bool {
-        self.refs.contains(body_ref)
+    fn state(&self, body_ref: &str) -> BodyRefState {
+        if self.refs.contains(body_ref) {
+            BodyRefState::Issued
+        } else if self.evicted.contains(body_ref) {
+            BodyRefState::Evicted
+        } else {
+            BodyRefState::Unknown
+        }
     }
 }
 
@@ -337,11 +368,13 @@ impl WindowRegistry {
         true
     }
 
-    /// 该窗口是否实际交付过这个 `bodyRef`。
-    pub(super) fn body_ref_issued(&self, window_id: &str, body_ref: &str) -> bool {
+    /// 该窗口对 `bodyRef` 的授权判定；窗口不存在时等同于从未交付。
+    pub(super) fn body_ref_state(&self, window_id: &str, body_ref: &str) -> BodyRefState {
         self.windows
             .get(window_id)
-            .is_some_and(|record| record.issued_body_refs.contains(body_ref))
+            .map_or(BodyRefState::Unknown, |record| {
+                record.issued_body_refs.state(body_ref)
+            })
     }
 
     /// 关闭某会话在本连接的全部窗口（含仍在 `Opening` 的占位），并记录 closed 身份。

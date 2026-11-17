@@ -6,13 +6,14 @@
 use peri_acp_types::history_v2::{
     DecimalU64, HistoryBodyChunk, HistoryBodyDescriptor, HistoryDurability, HistoryDurabilityState,
     HistoryEntry, HistoryErrorReason, HistoryOpaqueSubItem, HistoryOrder, HistoryOrigin,
-    HistoryPageData, HistoryRepresentation, HistorySource, HistorySubItem,
+    HistoryPageData, HistoryRecovery, HistoryRepresentation, HistorySource, HistorySubItem,
 };
+use serde_json::json;
 
 use super::backend_test::{
     body_params, body_slice, close_params, limits, open_params, page_data, page_params, snap,
 };
-use super::service_test::{call, open_ok, parse_page, reason, setup, window_of, Window};
+use super::service_test::{call, data, open_ok, parse_page, reason, setup, window_of, Window};
 
 /// 一页包含单个 opaque 条目；`bodyRef` 是该条目交付给客户端的唯一读取句柄。
 fn opaque_page(body_ref: &str) -> HistoryPageData {
@@ -139,6 +140,85 @@ async fn body_ref_must_be_issued_by_the_window() {
     .await
     .expect("delivered bodyRef succeeds");
     assert_eq!(fake.body_calls.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn evicted_body_ref_requires_reopen_while_forged_ref_is_not_found() {
+    let (service, _clock, fake) = setup(snap_with_opaque("body-0"));
+    let (_page, window) = open_ok(&service, &fake, 1).await;
+
+    // 第二页交付 `maxItems` 个新引用，合计超过单窗口保留上限，最旧的 `body-0`
+    // 必须按交付顺序淘汰。
+    let mut page = page_data(7, Some("b0"), Some("a0"));
+    page.entries = (0..limit_items())
+        .map(|index| opaque_entry(&format!("body-{}", index + 1), index))
+        .collect();
+    fake.set_page_result(Ok(page));
+    call(
+        &service,
+        &fake,
+        limits(),
+        page_params(
+            2,
+            "s1",
+            &window.id,
+            &window.token,
+            &window.ticket,
+            None,
+            "before",
+            limit_items(),
+        ),
+    )
+    .await
+    .expect("page with fresh opaque entries");
+
+    let mut oldest = body_params(3, "s1", &window.id, &window.token, &window.ticket);
+    oldest["bodyRef"] = json!("body-0");
+    let evicted = call(&service, &fake, limits(), oldest).await.unwrap_err();
+    assert_eq!(
+        reason(&evicted),
+        HistoryErrorReason::WindowExpired,
+        "已交付但被淘汰的引用必须要求重新 open"
+    );
+    assert_eq!(data(&evicted).recovery, HistoryRecovery::Reopen);
+
+    // 从未交付的引用仍是 not_found，不能借淘汰状态探测存在性。
+    let mut forged = body_params(4, "s1", &window.id, &window.token, &window.ticket);
+    forged["bodyRef"] = json!("never-issued");
+    let forged = call(&service, &fake, limits(), forged).await.unwrap_err();
+    assert_eq!(reason(&forged), HistoryErrorReason::NotFound);
+    assert!(fake.body_calls.lock().is_empty(), "未授权不得触达后端");
+}
+
+fn limit_items() -> u32 {
+    limits().max_items
+}
+
+fn opaque_entry(body_ref: &str, ordinal: u32) -> HistoryEntry {
+    HistoryEntry {
+        entry_id: format!("e{ordinal}"),
+        source: HistorySource::Own,
+        content_version: "v1".to_owned(),
+        durability: HistoryDurability {
+            state: HistoryDurabilityState::Sealed,
+            origin: HistoryOrigin::Imported,
+            final_item_seq: None,
+        },
+        order: HistoryOrder {
+            region: "own".to_owned(),
+            ordinal: DecimalU64::new(ordinal as u64),
+        },
+        sub_items: vec![HistorySubItem::Opaque(HistoryOpaqueSubItem {
+            sub_item_id: format!("e{ordinal}:0"),
+            body: HistoryBodyDescriptor {
+                body_ref: body_ref.to_owned(),
+                representation: HistoryRepresentation::DisplayJson,
+                media_type: "application/json".to_owned(),
+                total_bytes: DecimalU64::new(5),
+                chunk_bytes: 64 * 1024,
+            },
+        })],
+    }
 }
 
 #[tokio::test]
