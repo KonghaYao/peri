@@ -5,6 +5,10 @@
 [`peri-tui-components/README.md`](../../peri-tui-components/README.md)。
 `panels/shared/list.rs` 仅保留应用的首帧高度策略；业务对象转换、主题解析、
 焦点路由及动作执行仍由 TUI 持有。
+组件视口在构造边界统一归一化行高，行预算使用饱和运算，完整列表索引保持
+`usize`；终端坐标不承担业务索引。文本输入通过 `TextAreaRenderOptions` 和
+`TextAreaStyles` 明确传入内容、选择范围、视口及样式，widget 与组合文本行
+共用 renderer。加载状态仍由应用决定边框和提示，不穿透无效 loading 标志。
 
 > 状态：已批准目标设计（部分已落地）；未完成项见
 > [2026-10-15 TUI 面板架构重构](../../spec/issues/2026-10-15-tui-architecture-refactor.md)

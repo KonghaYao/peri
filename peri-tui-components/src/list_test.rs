@@ -103,16 +103,22 @@ fn zero_row_height_normalizes_for_both_drawing_and_hits() {
 
 #[test]
 fn oversized_header_and_footer_leave_no_drawable_or_hittable_rows() {
-    let viewport =
-        ListViewport::for_content_rows(12, ListMetrics::new(u16::MAX, 1, u16::MAX), 10, 0);
-    assert_eq!(viewport.visible_items, 0);
-    assert_eq!(viewport.window(&[(); 10]).count(), 0);
-    let rect = area(14);
-    for row in rect.y..rect.y + rect.height {
-        assert_eq!(
-            crate::panel_mouse::hit_row(row, rect, viewport.hit_layout()),
-            None
+    for (header_rows, footer_rows) in [(u16::MAX, 1), (1, u16::MAX), (u16::MAX, u16::MAX)] {
+        let viewport = ListViewport::for_content_rows(
+            12,
+            ListMetrics::new(header_rows, 1, footer_rows),
+            10,
+            0,
         );
+        assert_eq!(viewport.visible_items, 0);
+        assert_eq!(viewport.window(&[(); 10]).count(), 0);
+        let rect = area(14);
+        for row in rect.y..rect.y + rect.height {
+            assert_eq!(
+                crate::panel_mouse::hit_row(row, rect, viewport.hit_layout()),
+                None
+            );
+        }
     }
 }
 

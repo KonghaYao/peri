@@ -51,6 +51,8 @@ impl TextArea {
 
     /// Columns reserved from wrapping width, without shifting the text origin.
     /// Defaults to two; the effective wrapping width is always at least one cell.
+    /// A visible cursor reserves at least one column for its trailing cell, even
+    /// when zero is requested. Hidden cursors allow the full width with zero.
     pub fn width_reserve(mut self, columns: u16) -> Self {
         self.width_reserve = columns;
         self
@@ -66,13 +68,18 @@ impl StatefulWidgetRef for TextArea {
         } else {
             Some(state.placeholder.as_str())
         };
+        let width_reserve = if self.show_cursor {
+            self.width_reserve.max(1)
+        } else {
+            self.width_reserve
+        };
         let lines = render_multiline_with_cursor(TextAreaRenderOptions {
             text: &state.text,
             cursor: state.cursor,
             selection_range: state.selection_range(),
             placeholder,
             styles: self.styles,
-            max_width: area.width.saturating_sub(self.width_reserve).max(1) as usize,
+            max_width: area.width.saturating_sub(width_reserve).max(1) as usize,
             viewport_height: area.height as usize,
             show_cursor: self.show_cursor,
         });

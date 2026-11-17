@@ -43,5 +43,6 @@
 - **Scope**：`peri-tui-components`。
 - **Rule**：仅包含通用展示、局部交互状态与明确输入输出；不得读取应用 atom，
   不依赖 Agent、Session、MCP、配置或持久化 crate。业务对象转换和动作执行归 TUI。
-- **Verify**：`python3 scripts/check-tui-components.py`；
+- **Verify**：Python 3.11+ 的 `python3 scripts/test-tui-components.py` 与
+  `python3 scripts/check-tui-components.py`（CI/pre-commit 执行）；
   `./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui-components`。

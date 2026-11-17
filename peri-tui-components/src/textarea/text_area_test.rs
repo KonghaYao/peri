@@ -42,6 +42,28 @@ fn width_reserve_changes_wrapping_without_moving_origin() {
 }
 
 #[test]
+fn zero_width_reserve_keeps_trailing_cursor_visible_on_a_full_row() {
+    for height in [1, 2] {
+        let mut state = TextAreaState::default();
+        state.insert_str("abcde");
+        let area = Rect::new(0, 0, 5, height);
+        let mut buffer = Buffer::empty(area);
+        TextArea::new(Style::default().bg(Color::Blue), Style::default())
+            .width_reserve(0)
+            .render_ref(area, &mut buffer, &mut state);
+
+        let cursor_row = height - 1;
+        assert_eq!(buffer[(0, cursor_row)].symbol(), "e");
+        assert_eq!(buffer[(1, cursor_row)].symbol(), " ");
+        assert_eq!(buffer[(1, cursor_row)].bg, Color::Blue);
+        if height == 2 {
+            assert_eq!(buffer[(3, 0)].symbol(), "d");
+            assert_eq!(buffer[(4, 0)].symbol(), " ");
+        }
+    }
+}
+
+#[test]
 fn width_reserve_larger_than_area_keeps_a_one_cell_viewport() {
     let mut state = TextAreaState::default();
     state.insert_str("abc");

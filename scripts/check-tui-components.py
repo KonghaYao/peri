@@ -7,13 +7,17 @@ review still own macro expansion, included/generated code and dependency interna
 from pathlib import Path
 import re
 import sys
+
+if sys.version_info < (3, 11):
+    raise SystemExit("TUI component boundary check requires Python 3.11+ (tomllib); select that python3 on PATH.")
+
 import tomllib
 
 
 ALLOWED_PACKAGES = {"ratatui", "ratatui-kit", "unicode-width"}
 DEPENDENCY_SECTIONS = ("dependencies", "dev-dependencies", "build-dependencies")
 BUSINESS_IMPORT = re.compile(r"\bperi_(?:agent|acp|resources|config|tui|middlewares)\b")
-GLOBAL_STATE = re.compile(r"\bstatic\s+(?:mut\s+)?[A-Za-z_]|\b(?:lazy_static|atom)!")
+GLOBAL_STATE = re.compile(r"(?<!')\bstatic\s+(?:mut\s+)?[A-Za-z_]|\b(?:lazy_static|atom)!")
 
 
 def dependency_errors(manifest: dict, workspace: dict) -> list[str]:

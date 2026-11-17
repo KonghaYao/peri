@@ -66,6 +66,17 @@ class ComponentBoundaryTests(unittest.TestCase):
                 }
                 self.assertTrue(guard.dependency_errors(manifest, workspace))
 
+    def test_static_lifetimes_are_not_global_state_declarations(self):
+        for source in (
+            "pub fn label() -> &'static str { \"ready\" }",
+            "pub fn labels() -> &'static [&'static str] { &[] }",
+        ):
+            with self.subTest(source=source):
+                self.assertIsNone(guard.GLOBAL_STATE.search(source))
+        for source in ("static STATE: u8 = 0;", "static mut STATE: u8 = 0;"):
+            with self.subTest(source=source):
+                self.assertIsNotNone(guard.GLOBAL_STATE.search(source))
+
     def test_source_lint_and_dependency_check_run_together(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

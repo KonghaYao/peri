@@ -20,9 +20,9 @@ not a stable business identity; resolve the selected item in the application.
 No background tasks, subscriptions or process-wide caches are added here. Local
 state is dropped with its owner. The application still owns transcript retention.
 
-Run `cargo run -p peri-tui-components --example textarea` for deterministic buffer
+Run `./scripts/cargo-rmcp-patched.sh run --locked -p peri-tui-components --example textarea` for deterministic buffer
 output at four sizes, focused/unfocused states and empty/CJK/wrapped input.
-`cargo test -p peri-tui-components` exercises editing, selection, undo, navigation,
+`./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui-components` exercises editing, selection, undo, navigation,
 resize and hit-layout agreement. Full terminal E2E remains in `KonghaYao/peri-e2e`.
 
 ## Text input composition
@@ -31,6 +31,9 @@ resize and hit-layout agreement. Full terminal E2E remains in `KonghaYao/peri-e2
 allow an application to customize the existing fallback/padding style and wrapping
 width without changing the origin. Defaults remain black background and two
 reserved columns; `show_cursor` is explicitly supplied from application focus.
+When the cursor is visible, at least one column is reserved for its trailing cell;
+`width_reserve(0)` uses the full width only when the cursor is hidden. A viewport
+only one cell wide can still clip a character or its trailing cursor.
 The component has no loading state: application status controls borders/labels.
 
 For composition with surrounding lines, call the same renderer with named props:
@@ -61,6 +64,15 @@ let lines = render_multiline_with_cursor(TextAreaRenderOptions {
 `styles.base` retains the existing cursor-line fallback and row-padding semantics;
 non-cursor spans may inherit their containing line's style. It is not a blanket
 style applied to the whole buffer. Both rendering APIs share one implementation.
+
+## Boundary checks
+
+CI and pre-commit run `python3 scripts/test-tui-components.py` and
+`python3 scripts/check-tui-components.py`. These checks require Python 3.11+
+for the standard-library TOML parser; select that `python3` on PATH. They cover
+all direct dependency tables and source patterns, not macro expansion or a
+transitive dependency audit. The component depends on ratatui-kit without its
+optional `full` feature; workspace feature unification is not an isolation test.
 
 ## Scope of this extraction
 
