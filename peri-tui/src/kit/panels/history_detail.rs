@@ -39,6 +39,8 @@ pub struct HistoryDetailWindow {
     complete: bool,
     /// V2：首块到达后 `descriptor.total_bytes` 已换成服务端的权威展示长度。
     v2_total_authoritative: bool,
+    /// V2：首块声明的正文内容版本；后续块必须一致，reset/重开清空。
+    v2_content_version: Option<String>,
     pub fetch_calls: usize,
     pub exported_bytes: u64,
     pub last_error: Option<String>,
@@ -91,6 +93,7 @@ impl HistoryDetailWindow {
             pending_offset: None,
             complete: false,
             v2_total_authoritative: false,
+            v2_content_version: None,
             fetch_calls: 0,
             exported_bytes: 0,
             last_error: None,
@@ -227,6 +230,14 @@ impl HistoryDetailWindow {
             self.last_error = Some("正文块校验失败".into());
             DetailError::InvalidChunk
         })?;
+        // 同一正文的每个 chunk 共享 contentVersion；版本变化说明正文在读取期间被
+        // 改写，拼接不同版本会得到损坏内容。
+        if let Some(current) = self.v2_content_version.as_deref()
+            && current != chunk.content_version
+        {
+            self.last_error = Some("正文内容版本与首块不一致".into());
+            return Err(DetailError::InvalidChunk);
+        }
         let expected = self.pending_offset.unwrap_or_else(|| {
             self.chunks.last_key_value().map_or(0, |(_, previous)| {
                 previous.offset.saturating_add(previous.bytes.len() as u64)
@@ -283,6 +294,9 @@ impl HistoryDetailWindow {
             return Err(DetailError::InvalidChunk);
         }
         self.pending_offset = None;
+        // 全部校验通过后才记为已见版本：被拒绝的首块不得污染后续请求。
+        self.v2_content_version
+            .get_or_insert_with(|| chunk.content_version.clone());
         let next_offset = chunk.next_offset.map(|offset| offset.get());
         self.insert_chunk(chunk.offset.get(), bytes, chunk.complete, next_offset)
     }
@@ -481,6 +495,7 @@ impl HistoryDetailWindow {
         self.retained_bytes = 0;
         self.pending_offset = None;
         self.complete = false;
+        self.v2_content_version = None;
     }
 }
 

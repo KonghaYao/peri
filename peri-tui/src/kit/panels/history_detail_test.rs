@@ -653,6 +653,22 @@ fn v2_detail_rejects_later_total_mismatch() {
 }
 
 #[test]
+fn v2_detail_rejects_chunks_from_a_different_body_version() {
+    let mut window = HistoryDetailWindow::open(v2_descriptor(11)).expect("open");
+    window
+        .apply_v2_chunk(&v2_chunk(0, b"hello ", false, Some(6), 11), 256 * 1024)
+        .expect("first chunk");
+    let mut changed = v2_chunk(6, b"world", true, None, 11);
+    changed.content_version = "cv-2".into();
+    let error = window
+        .apply_v2_chunk(&changed, 256 * 1024)
+        .expect_err("正文内容版本变化必须拒绝拼接");
+    assert_eq!(error, DetailError::InvalidChunk);
+    assert_eq!(window.chunk_count(), 1, "不一致的块不得并入");
+    assert_eq!(window.loaded_text().expect("utf8"), "hello ");
+}
+
+#[test]
 fn v2_detail_rejects_chunk_range_that_disagrees_with_wire() {
     // complete 块只带 5 字节却声明 11 字节总长：若接受，next_request() 会跳过缺失字节。
     let mut window = HistoryDetailWindow::open(v2_descriptor(11)).expect("open");
