@@ -563,6 +563,14 @@ impl ServerLoop<'_> {
             },
             _ => None,
         };
+        // 本次 load 是否携带 History V2 initial：决定后续 recovery 元数据是否受
+        // `maxResponseBytes` 约束。
+        let history_v2_load_requested = history_load.is_some();
+        let history_max_response_bytes = connection_facts
+            .caps
+            .history_v2
+            .as_ref()
+            .map(|capability| capability.limits.max_response_bytes);
         // `session/history/body`：V1 正文分块，不进入生命周期路由。
         if method == "session/history/body" {
             let result = if !connection_facts.history_window_v1 {
@@ -754,6 +762,9 @@ impl ServerLoop<'_> {
         // V2 initial 的实时流：响应发送成功后才 flush 暂停期缓冲；失败则关闭未发布的流。
         let mut live_v2_initial: Option<(String, Arc<crate::host::live_delivery::LiveDelivery>)> =
             None;
+        // initial 交付失败但冷恢复已发布并保留的会话：错误响应不提交 setup，
+        // 仍需为它补齐任务绑定与在线 endpoint。
+        let mut retained_cold_load: Option<String> = None;
         let mut result = if requests::session_io::handles(&method) {
             let prepared = {
                 let sessions = sessions.lock().await;
@@ -771,6 +782,9 @@ impl ServerLoop<'_> {
             }
         } else if method == "session/load" {
             // 分阶段 load：DB/资源 I/O 在全局 sessions 锁之外；内部只做短锁读写。
+            let load_session_id = super::super::extract_session_id(&params, "").to_string();
+            let existed_before =
+                !load_session_id.is_empty() && sessions.lock().await.contains_key(&load_session_id);
             let history = match history_load {
                 Some(request) => {
                     let live = { self.connection.lock().await.live.clone() };
@@ -788,7 +802,7 @@ impl ServerLoop<'_> {
                 }
                 None => None,
             };
-            requests::session_lifecycle::handle_load_shared(
+            let result = requests::session_lifecycle::handle_load_shared(
                 &params,
                 cfg,
                 sessions,
@@ -796,7 +810,11 @@ impl ServerLoop<'_> {
                 connection_facts.clone(),
                 history,
             )
-            .await
+            .await;
+            if result.is_err() && !existed_before {
+                retained_cold_load = Some(load_session_id);
+            }
+            result
         } else if method == "session/resume" {
             let result = requests::session_lifecycle::handle_resume_shared(
                 &params, cfg, sessions, transport,
@@ -904,6 +922,23 @@ impl ServerLoop<'_> {
                 }
             }
         }
+        // recovery 元数据在 initial 预算定长之后才附加；历史首屏必须保留，
+        // 可选 recovery 事实不得把整个响应推过协商的 `maxResponseBytes`。
+        if history_v2_load_requested {
+            if let Some(max_bytes) = history_max_response_bytes {
+                if super::super::diagnostics::drop_recovery_meta_if_over_budget(
+                    &mut result,
+                    max_bytes,
+                    response_envelope_bytes,
+                ) {
+                    tracing::warn!(
+                        session_id = super::super::extract_session_id(&params, ""),
+                        max_bytes,
+                        "session/load response exceeded maxResponseBytes; dropped recovery metadata"
+                    );
+                }
+            }
+        }
         // `session/new` 的进入在响应之后：新 thread 的工作意图恒为库默认的 idle，
         // 不可能有候选；放在响应前只会推迟会话响应（响应必须是首个帧）。
         let new_session_id = if method == "session/new" && result.is_ok() {
@@ -966,6 +1001,25 @@ impl ServerLoop<'_> {
         }
         let setup_session_id =
             super::super::recovery::wiring::session_setup(&method, &params, result.as_ref().ok());
+        // initial 交付失败但冷恢复已保留会话：错误响应不提交 setup reservation，
+        // 但服务端已绑定该会话，仍需补齐任务绑定与在线 endpoint（重试成功会再走
+        // 一次幂等绑定）。仅认 History 领域失败，避免并发 load 抢发布时误绑。
+        let retained_binding = if setup_session_id.is_none()
+            && result.as_ref().err().is_some_and(history_initial_failure)
+        {
+            match retained_cold_load.as_deref() {
+                Some(session_id) => {
+                    if sessions.lock().await.contains_key(session_id) {
+                        Some(session_id.to_owned())
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
         // 会话级 endpoint 注册（审查中 3①）：**连接归属是会话，不是某一轮**。
         // `session/new` / `session/fork` / `session/load` / `session/resume` 建立会话后
         // 立刻把当前连接登记为在线 endpoint，否则「会话建立后从未 prompt」的连接在调度
@@ -974,7 +1028,7 @@ impl ServerLoop<'_> {
         // `session/restore` 不是本仓的 wire 名：恢复流程即 `session/load` +
         // `session/resume`（`requests/session_restore.rs`）。
         // 注册幂等（同一连接重复注册保留首次纪元），与 `spawn_prompt` 的注册点不冲突。
-        if let Some(session_id) = setup_session_id.as_deref() {
+        if let Some(session_id) = setup_session_id.as_deref().or(retained_binding.as_deref()) {
             // `session/load|resume|fork` 走分阶段恢复路径，不经
             // `handle_request_for_connection`；这里补齐会话任务绑定，否则恢复后
             // 的 MCP 工具调用会因 "session task manager unavailable" 全部失败。
@@ -1081,6 +1135,16 @@ impl ServerLoop<'_> {
             }
         }
     }
+}
+
+/// History V2 initial 的领域失败：`data.effect` 是 `HistoryErrorData` 的必填部分。
+fn history_initial_failure(error: &crate::transport::types::AcpError) -> bool {
+    error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("effect"))
+        .and_then(|effect| effect.get("history"))
+        .is_some()
 }
 
 /// 按批排空 History V2 实时缓冲，直到一次空批确认排空。

@@ -310,7 +310,9 @@ beta 默认关闭，未开启时继续走 V1（见 [beta flags](beta-flags.md)�
 `liveBoundary { streamId, afterSeq }`、`executionReady`、`runtimeGeneration` 与 `page`
 （首屏页形状同 `_peri/history` 的页）。initial 成功前不撤销旧窗口；失败返回带
 effect 与 recovery 的领域错误，旧窗口仍可读。V2 initial 不混入 V1 的
-`periReplay` / `periLoadGeneration` 字段。
+`periReplay` / `periLoadGeneration` 字段。首屏按 `maxResponseBytes` 预算定长，
+后置的 `_meta["peri.recovery"]` 不得使响应越过该上限：超限时服务端移除
+recovery 元数据并保留历史首屏。
 
 **`_peri/history` 请求。** 根对象以 `action` 判别（`open` / `page` / `seek` / `body` /
 `close`），所有变体拒绝未知字段；未协商 V2 时返回 `-32601`

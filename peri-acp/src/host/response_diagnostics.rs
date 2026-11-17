@@ -115,6 +115,36 @@ pub(super) fn response_envelope_bytes(id: &RequestId) -> u64 {
         .unwrap_or_default()
 }
 
+/// `session/load` 的后置 `_meta["peri.recovery"]` 可能把已按预算定长的响应推过
+/// `maxResponseBytes`。历史首屏是必需载荷、recovery 只是附加事实：超限时移除
+/// recovery 元数据，保证单响应不越过协商上限。返回是否发生了移除。
+pub(super) fn drop_recovery_meta_if_over_budget(
+    result: &mut Result<Value, AcpError>,
+    max_bytes: u64,
+    envelope_bytes: u64,
+) -> bool {
+    let Ok(response) = result else {
+        return false;
+    };
+    let has_recovery = response
+        .get("_meta")
+        .and_then(Value::as_object)
+        .is_some_and(|meta| meta.contains_key("peri.recovery"));
+    if !has_recovery {
+        return false;
+    }
+    let over_budget = serde_json::to_vec(&*response)
+        .map(|bytes| (bytes.len() as u64).saturating_add(envelope_bytes) > max_bytes)
+        .unwrap_or(false);
+    if !over_budget {
+        return false;
+    }
+    if let Some(meta) = response.get_mut("_meta").and_then(Value::as_object_mut) {
+        meta.remove("peri.recovery");
+    }
+    true
+}
+
 #[cfg(test)]
 #[path = "diagnostics_test.rs"]
 mod tests;

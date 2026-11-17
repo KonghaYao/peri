@@ -823,7 +823,7 @@ async fn session_load_v2_cold_restore_binds_live_delivery() {
 #[serial]
 async fn session_load_v2_cold_restore_initial_failure_keeps_session() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let (fixture, _cfg, client, task) = v2_fixture(&tmp).await;
+    let (fixture, cfg, client, task) = v2_fixture(&tmp).await;
     let sid = fixture.sid.clone();
 
     client
@@ -847,6 +847,14 @@ async fn session_load_v2_cold_restore_initial_failure_keeps_session() {
     assert!(
         fixture.sessions.lock().await.contains_key(&sid),
         "initial 交付失败不得回滚已发布的冷恢复会话"
+    );
+    assert!(
+        cfg.session_manager
+            .get_session(&sid)
+            .is_some_and(|session| session
+                .task_events_started
+                .load(std::sync::atomic::Ordering::Acquire)),
+        "保留的会话仍须绑定 TaskManager，否则重试前的 MCP 工具全部 unavailable"
     );
 
     task.abort();
