@@ -620,7 +620,6 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
         placeholder_str,
         text_width,
         editor_rows as usize,
-        loading,
         show_cursor,
     );
 

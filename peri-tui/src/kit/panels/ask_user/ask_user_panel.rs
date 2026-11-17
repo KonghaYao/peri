@@ -7,6 +7,7 @@
 //! 通过 panel_shell! 渲染。
 
 use super::form;
+use peri_tui_components::textarea::{TextAreaRenderOptions, TextAreaStyles};
 
 use crate::app::panel_types::PanelKind;
 
@@ -394,18 +395,21 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     let default_style = Style::default().bg(Color::Reset);
 
                     let typed_lines = peri_tui_components::textarea::render_multiline_with_cursor(
-                        &st_read.text,
-                        st_read.cursor,
-                        cursor_style,
-                        None,
-                        cursor_style,
-                        Some(&i18n::tr("ask-user-placeholder")),
-                        placeholder_style,
-                        default_style,
-                        wrap_width,
-                        viewport,
-                        false,
-                        true,
+                        TextAreaRenderOptions {
+                            text: &st_read.text,
+                            cursor: st_read.cursor,
+                            selection_range: None,
+                            placeholder: Some(&i18n::tr("ask-user-placeholder")),
+                            styles: TextAreaStyles {
+                                cursor: cursor_style,
+                                selection: cursor_style,
+                                placeholder: placeholder_style,
+                                base: default_style,
+                            },
+                            max_width: wrap_width,
+                            viewport_height: viewport,
+                            show_cursor: true,
+                        },
                     );
                     for line in typed_lines {
                         // 保留 textarea 返回的 Span 级样式（含光标高亮），仅前置缩进

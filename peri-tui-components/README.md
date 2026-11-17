@@ -25,6 +25,43 @@ output at four sizes, focused/unfocused states and empty/CJK/wrapped input.
 `cargo test -p peri-tui-components` exercises editing, selection, undo, navigation,
 resize and hit-layout agreement. Full terminal E2E remains in `KonghaYao/peri-e2e`.
 
+## Text input composition
+
+`TextArea` renders into a buffer. Its `base_style` and `width_reserve` builders
+allow an application to customize the existing fallback/padding style and wrapping
+width without changing the origin. Defaults remain black background and two
+reserved columns; `show_cursor` is explicitly supplied from application focus.
+The component has no loading state: application status controls borders/labels.
+
+For composition with surrounding lines, call the same renderer with named props:
+
+```rust
+use peri_tui_components::textarea::{
+    render_multiline_with_cursor, TextAreaRenderOptions, TextAreaStyles,
+};
+use ratatui::style::Style;
+
+let lines = render_multiline_with_cursor(TextAreaRenderOptions {
+    text: "hello 世界",
+    cursor: 5,
+    selection_range: None,
+    placeholder: None,
+    styles: TextAreaStyles {
+        cursor: Style::default(),
+        selection: Style::default(),
+        placeholder: Style::default(),
+        base: Style::default(),
+    },
+    max_width: 40,
+    viewport_height: 3,
+    show_cursor: true,
+});
+```
+
+`styles.base` retains the existing cursor-line fallback and row-padding semantics;
+non-cursor spans may inherit their containing line's style. It is not a blanket
+style applied to the whole buffer. Both rendering APIs share one implementation.
+
 ## Scope of this extraction
 
 Spinner labels and modes remain in `peri-tui` because they encode business activity.

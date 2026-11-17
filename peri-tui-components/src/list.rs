@@ -55,9 +55,15 @@ impl ListViewport {
         item_count: usize,
         selected: usize,
     ) -> Self {
-        let item_rows = metrics.item_rows.max(1);
-        let usable = content_rows.saturating_sub(metrics.header_rows + metrics.footer_rows);
-        let visible_items = (usable / item_rows) as usize;
+        // Normalize once so drawing and hit testing use the same row height.
+        let metrics = ListMetrics {
+            item_rows: metrics.item_rows.max(1),
+            ..metrics
+        };
+        let usable = content_rows
+            .saturating_sub(metrics.header_rows)
+            .saturating_sub(metrics.footer_rows);
+        let visible_items = (usable / metrics.item_rows) as usize;
         let selected = crate::list_nav::clamp_selection(selected, item_count);
         let scroll_start =
             crate::list_nav::scroll_start_for_selected(selected, item_count, visible_items);

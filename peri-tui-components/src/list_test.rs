@@ -80,3 +80,54 @@ fn row_beyond_rendered_items_does_not_hit() {
         None
     );
 }
+
+#[test]
+fn zero_row_height_normalizes_for_both_drawing_and_hits() {
+    let items: Vec<usize> = (0..20).collect();
+    let rect = area(8);
+    let viewport = ListViewport::for_content_rows(6, ListMetrics::new(1, 0, 1), 20, 2);
+    let layout = viewport.hit_layout();
+    let visible: Vec<usize> = viewport.window(&items).map(|(index, _)| index).collect();
+    assert_eq!(visible, vec![1, 2, 3, 4]);
+    assert_eq!(layout.item_rows, 1);
+    for (slot, expected) in visible.into_iter().enumerate() {
+        let row = rect.y + 1 + layout.header_rows + slot as u16;
+        assert_eq!(
+            crate::panel_mouse::hit_row(row, rect, layout),
+            Some(expected)
+        );
+    }
+    let footer_row = rect.y + 1 + layout.header_rows + layout.visible_items;
+    assert_eq!(crate::panel_mouse::hit_row(footer_row, rect, layout), None);
+}
+
+#[test]
+fn oversized_header_and_footer_leave_no_drawable_or_hittable_rows() {
+    let viewport =
+        ListViewport::for_content_rows(12, ListMetrics::new(u16::MAX, 1, u16::MAX), 10, 0);
+    assert_eq!(viewport.visible_items, 0);
+    assert_eq!(viewport.window(&[(); 10]).count(), 0);
+    let rect = area(14);
+    for row in rect.y..rect.y + rect.height {
+        assert_eq!(
+            crate::panel_mouse::hit_row(row, rect, viewport.hit_layout()),
+            None
+        );
+    }
+}
+
+#[test]
+fn large_list_indices_survive_hit_testing_without_terminal_coordinate_truncation() {
+    let items = vec![(); 70_010];
+    let rect = area(12);
+    let viewport =
+        ListViewport::for_content_rows(10, ListMetrics::new(0, 1, 0), items.len(), 70_000);
+    assert!(viewport.scroll_start > usize::from(u16::MAX));
+    for (slot, (expected, _)) in viewport.window(&items).enumerate() {
+        let row = rect.y + 1 + slot as u16;
+        assert_eq!(
+            crate::panel_mouse::hit_row(row, rect, viewport.hit_layout()),
+            Some(expected),
+        );
+    }
+}
