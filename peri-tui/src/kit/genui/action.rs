@@ -20,6 +20,7 @@ pub struct GenUiButtonInfo {
     pub x_end: u16,
     pub block: Option<super::GenUiBlockId>,
     pub parsed: Option<std::sync::Arc<peri_genui::ParseResult>>,
+    pub partial: bool,
     pub action: GenUiAction,
     pub label: String,
 }

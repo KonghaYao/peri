@@ -38,6 +38,14 @@ pub(crate) fn retained_bytes(result: &ParseResult) -> usize {
         .saturating_add(result.tree.as_ref().map_or(0, Heap::heap))
 }
 
+pub(crate) fn value_bytes(value: &Value) -> usize {
+    value.heap()
+}
+
+pub(crate) fn node_value_bytes(value: &NodeValue) -> usize {
+    value.heap()
+}
+
 trait Heap {
     fn heap(&self) -> usize;
 }

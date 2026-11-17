@@ -66,11 +66,28 @@ impl<'a> Validation<'a> {
             return Some(value);
         }
         if let NodeValue::Element { element, .. } = &value {
-            if !schema.composite()
-                && (schema.ty.is_some()
-                    || schema.enum_values.is_some()
-                    || schema.const_value.is_some())
-            {
+            if schema.composite() {
+                let names = schema.slot_names();
+                if !names.is_empty()
+                    && names
+                        .iter()
+                        .all(|n| n.is_some_and(|n| self.library.components.contains_key(n)))
+                    && !names
+                        .iter()
+                        .flatten()
+                        .any(|name| *name == element.type_name)
+                {
+                    self.mismatch(
+                        component,
+                        path,
+                        &names.into_iter().flatten().collect::<Vec<_>>().join(" | "),
+                        &format!("component {}", element.type_name),
+                    );
+                    return None;
+                }
+                return Some(value);
+            }
+            if schema.ty.is_some() || schema.enum_values.is_some() || schema.const_value.is_some() {
                 self.mismatch(
                     component,
                     path,
@@ -125,13 +142,7 @@ impl<'a> Validation<'a> {
                     .cloned()
                     .or_else(|| schema.const_value.clone().map(|v| vec![v]));
                 if let Some(allowed) = allowed {
-                    if !self.partial
-                        && matches!(
-                            value_json,
-                            Value::String(_) | Value::Bool(_) | Value::Number(_)
-                        )
-                        && !allowed.iter().any(|a| literal_equal(a, &value_json))
-                    {
+                    if !self.partial && !allowed.iter().any(|a| literal_equal(a, &value_json)) {
                         self.mismatch(
                             component,
                             path,
@@ -140,7 +151,8 @@ impl<'a> Validation<'a> {
                         );
                         return None;
                     }
-                } else if let Some(expected @ ("string" | "boolean" | "number" | "integer")) =
+                }
+                if let Some(expected @ ("string" | "boolean" | "number" | "integer")) =
                     schema.ty.as_deref()
                 {
                     let expected = if expected == "integer" {

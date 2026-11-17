@@ -126,7 +126,8 @@ impl VmCacheSlot {
     }
 
     pub(super) fn retained_bytes(&self) -> usize {
-        self.entry.retained_bytes()
+        let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
+        self.entry.retained_bytes_with(&mut seen)
             + self
                 .lines
                 .as_ref()
@@ -141,7 +142,13 @@ impl VmCacheSlot {
             + self
                 .genui_buttons
                 .iter()
-                .map(|button| button.label.capacity() + button.action.retained_bytes())
+                .map(|button| {
+                    button.label.capacity()
+                        + button.action.retained_bytes()
+                        + button.parsed.as_ref().map_or(0, |parsed| {
+                            seen.account_arc(parsed, parsed.retained_bytes())
+                        })
+                })
                 .sum::<usize>()
             + self.image_lines.capacity() * std::mem::size_of::<ImageLineInfo>()
             + self

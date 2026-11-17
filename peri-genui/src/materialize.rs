@@ -267,21 +267,21 @@ impl<'a> Materializer<'a> {
                     );
                     return Expr::Null;
                 }
-                let mut scope = scope.clone();
+                let outer_scope = scope.clone();
+                let mut inner_scope = scope.clone();
                 if name == "Each" {
-                    if let Some(Expr::Ref { n } | Expr::String { v: n }) = args.get(1) {
-                        scope.insert(n.clone());
+                    if let Some(var) = args.get(1).and_then(crate::actions::each_var_name) {
+                        inner_scope.insert(var.to_owned());
                     }
                 }
                 let lowered: Vec<_> = args
                     .iter()
                     .enumerate()
-                    .map(|(i, e)| {
-                        if name == "Each" && i == 1 {
-                            e.clone()
-                        } else {
-                            self.expr(e, &scope, depth + 1)
-                        }
+                    .map(|(i, e)| match (name.as_str(), i) {
+                        ("Each", 0) => self.expr(e, &outer_scope, depth + 1),
+                        ("Each", 1) => e.clone(),
+                        ("Each", _) => self.expr(e, &inner_scope, depth + 1),
+                        _ => self.expr(e, scope, depth + 1),
                     })
                     .collect();
                 let custom = self

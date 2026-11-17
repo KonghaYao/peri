@@ -50,6 +50,39 @@ fn library_rejects_missing_root_collisions_and_action_cycles() {
 }
 
 #[test]
+fn action_schema_expansion_is_bounded() {
+    let mut defs = serde_json::Map::new();
+    defs.insert(
+        "Text".into(),
+        json!({"properties": {"x": {"$ref": "#/$defs/A0"}}}),
+    );
+    let mut actions = serde_json::Map::new();
+    for i in 0..25 {
+        let next = i + 1;
+        let def = if i == 24 {
+            json!({"type": "object"})
+        } else {
+            json!({"anyOf": [
+                {"$ref": format!("#/$defs/A{next}")},
+                {"$ref": format!("#/$defs/A{next}")}
+            ]})
+        };
+        defs.insert(format!("A{i}"), def);
+        actions.insert(format!("A{i}"), json!({"params": {"type": "object"}}));
+    }
+    let document = json!({
+        "root": "Text",
+        "schema": {
+            "properties": {"Text": {}},
+            "$defs": defs,
+            "actions": actions
+        }
+    });
+    let error = Library::from_json_str(&document.to_string()).unwrap_err();
+    assert!(error.to_string().contains("预算"), "{error}");
+}
+
+#[test]
 fn state_reacts_without_mutating_parse_result() {
     let lib = library();
     let result = parse(
@@ -68,6 +101,23 @@ fn state_reacts_without_mutating_parse_result() {
         "after"
     );
     assert_eq!(result.state["$q"], "before");
+}
+
+#[test]
+fn ternary_keeps_its_else_after_a_trailing_colon_newline() {
+    let lib = library();
+    for (show, expected) in [(false, "no"), (true, "yes")] {
+        let source = format!("root = $show ? Text(\"yes\") :\nText(\"no\")\n$show = {show}");
+        let actual = parse(&source, &lib).to_fixture_json();
+        assert_eq!(actual["errors"], json!([]));
+        assert_eq!(actual["root"]["props"]["text"], expected);
+    }
+    for (show, expected) in [(false, "no"), (true, "yes")] {
+        let source = format!("root = $show\n  ? Text(\"yes\")\n  : Text(\"no\")\n$show = {show}");
+        let actual = parse(&source, &lib).to_fixture_json();
+        assert_eq!(actual["errors"], json!([]));
+        assert_eq!(actual["root"]["props"]["text"], expected);
+    }
 }
 
 #[test]
@@ -116,6 +166,77 @@ fn each_captures_loop_values_in_deferred_set_actions() {
         children[1]["props"]["action"]["actions"][0]["args"],
         json!(["$chosen", 2])
     );
+}
+
+#[test]
+fn each_binds_loop_variables_only_inside_its_template() {
+    let lib = library();
+    for inner_var in ["\"item\"", "item"] {
+        let nested = parse(
+            &format!(
+                r#"root = Stack(@Each([{{name:"outer"}}], "item", Stack(@Each([{{name:"inner"}}], {inner_var}, Text(item.name)))))"#
+            ),
+            &lib,
+        );
+        let actual = nested.to_fixture_json();
+        assert_eq!(actual["errors"], json!([]));
+        assert_eq!(
+            actual["root"]["props"]["children"][0]["props"]["children"][0]["props"]["text"],
+            "inner"
+        );
+    }
+    let same_name = parse(
+        r#"items = [{name:"a"}, {name:"b"}]
+root = Stack(@Each(items, "items", Text(items.name)))"#,
+        &lib,
+    );
+    let actual = same_name.to_fixture_json();
+    assert_eq!(actual["errors"], json!([]));
+    assert_eq!(
+        actual["root"]["props"]["children"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(actual["root"]["props"]["children"][0]["props"]["text"], "a");
+}
+
+#[test]
+fn evaluated_props_are_validated_and_defaults_applied() {
+    let lib = library();
+    let actual = parse("root = Text($text)\n$text = 7", &lib).to_fixture_json();
+    assert!(actual["root"].is_null());
+    assert!(actual["errorObjects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|error| {
+            error["code"] == "type-mismatch"
+                && error["statementId"] == "root"
+                && error["component"] == "Text"
+                && error["path"] == "/text"
+        }));
+
+    let actual = parse(r#"root = Stack(@Each([1], "item", Text()))"#, &lib).to_fixture_json();
+    assert!(actual["errorObjects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|error| {
+            error["code"] == "missing-required"
+                && error["component"] == "Text"
+                && error["path"] == "/text"
+        }));
+
+    let actual = parse("root = Text($text)\n$text = \"hi\"", &lib).to_fixture_json();
+    assert_eq!(actual["errors"], json!([]));
+    assert_eq!(actual["root"]["props"]["text"], "hi");
+
+    let lib = Library::from_json_str(r#"{"$defs":{"Widget":{"properties":{"config":{"type":"object","properties":{"x":{"type":"number"}},"required":["x"]},"title":{"type":"string","default":"fallback"}},"required":["config","title"]}}}"#).unwrap();
+    let actual = parse("root = Widget({x:1}, $title)\n$title = null", &lib).to_fixture_json();
+    assert_eq!(actual["errors"], json!([]));
+    assert_eq!(actual["root"]["props"]["title"], "fallback");
 }
 
 #[test]
@@ -180,6 +301,21 @@ fn inline_reserved_calls_drop_only_that_node() {
 }
 
 #[test]
+fn newline_inside_parentheses_keeps_binary_minus() {
+    let lib = library();
+    let actual = parse("root = Metric(\"n\", (4\n-1))", &lib).to_fixture_json();
+    assert_eq!(actual["errors"], json!([]));
+    assert_eq!(actual["root"]["props"]["value"], 3);
+
+    let actual = parse("root = Stack([Col(\"c\", [1 -2, 3, 4 - 1,\n-5])])", &lib).to_fixture_json();
+    assert_eq!(actual["errors"], json!([]));
+    assert_eq!(
+        actual["root"]["props"]["children"][0]["props"]["data"],
+        json!([-1, 3, 3, -5])
+    );
+}
+
+#[test]
 fn validation_prunes_nested_data_and_uses_schema_defaults() {
     let lib = Library::from_json_str(r#"{"$defs":{"Widget":{"properties":{"config":{"type":"object","properties":{"x":{"type":"number","default":5},"y":{"type":"string"},"items":{"type":"array","items":{"type":"number"}}},"required":["x"]},"title":{"type":"string","default":"fallback"}},"required":["config","title"]}}}"#).unwrap();
     let result = parse(
@@ -197,6 +333,32 @@ fn validation_prunes_nested_data_and_uses_schema_defaults() {
         .map(|e| e.path.as_str())
         .collect::<Vec<_>>();
     assert_eq!(paths, ["/config/x", "/config/y", "/config/items/1"]);
+}
+
+#[test]
+fn typed_slots_reject_wrong_components_and_structured_enum_values() {
+    let lib = library();
+    let result = parse("root = Table([Text(\"wrong\")])", &lib);
+    assert!(result
+        .errors
+        .iter()
+        .any(|error| { error.code == ErrorCode::TypeMismatch && error.path == "/columns/0" }));
+    assert!(result.errors.iter().any(|error| {
+        error.code == ErrorCode::TypeMismatch && error.message.contains("component Text")
+    }));
+
+    let result = parse("root = Table([Col(\"ok\")])", &lib);
+    assert_eq!(result.errors, vec![]);
+
+    for value in ["{}", "[]"] {
+        let result = parse(&format!("root = Stack([Tag(\"x\", {value})])"), &lib);
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| { error.code == ErrorCode::TypeMismatch && error.path == "/color" }));
+    }
+    let result = parse("root = Stack([Tag(\"x\", \"green\")])", &lib);
+    assert_eq!(result.errors, vec![]);
 }
 
 #[test]
@@ -269,6 +431,54 @@ fn custom_actions_fail_closed_and_plain_data_cannot_forge_callbacks() {
 }
 
 #[test]
+fn generated_values_and_state_defaults_are_bounded() {
+    let lib = library();
+    let mut source = String::from("root = Stack([])\n$s0 = \"x\"\n");
+    for i in 1..=30 {
+        source.push_str(&format!("$s{i} = $s{} + $s{}\n", i - 1, i - 1));
+    }
+    let result = parse(&source, &lib);
+    assert!(result.errors.iter().any(|error| {
+        error.code == ErrorCode::ParseFailed && error.message.contains("安全预算")
+    }));
+    assert!(result.state.values().all(|value| {
+        value
+            .as_str()
+            .is_none_or(|text| text.len() <= 4 * 1024 * 1024)
+    }));
+
+    let mut source = String::from("root = Stack([])\n$s0 = \"x\"\n");
+    for i in 1..=22 {
+        source.push_str(&format!("$s{i} = $s{} + $s{}\n", i - 1, i - 1));
+    }
+    for copy in 1..=4 {
+        source.push_str(&format!("$c{copy} = $s22\n"));
+    }
+    let result = parse(&source, &lib);
+    assert!(result.errors.iter().any(|error| {
+        error.code == ErrorCode::ParseFailed && error.message.contains("state 默认值超过安全预算")
+    }));
+    assert_eq!(
+        result.state["$c2"].as_str().map(str::len),
+        Some(4 * 1024 * 1024)
+    );
+    assert!(result.state["$c3"].is_null());
+
+    let mut source =
+        String::from("root = Stack([Text($s22 + $s22), Col(\"c\", [$s22, $s22])])\n$s0 = \"x\"\n");
+    for i in 1..=22 {
+        source.push_str(&format!("$s{i} = $s{} + $s{}\n", i - 1, i - 1));
+    }
+    let result = parse(&source, &lib);
+    assert_eq!(result.errors, vec![]);
+    let evaluated = evaluate_root(&result, &EvalContext::default());
+    assert!(evaluated
+        .errors
+        .iter()
+        .any(|error| matches!(error, EvalError::LimitExceeded)));
+}
+
+#[test]
 fn stream_replacement_finish_and_incomplete_state_tail() {
     let lib = Arc::new(library());
     let mut stream = StreamParser::new(lib.clone());
@@ -318,6 +528,19 @@ fn scanner_ignores_other_blocks_inline_fences_and_string_fences() {
 }
 
 #[test]
+fn tilde_fence_opener_allows_backticks_in_same_line_code() {
+    let input = "~~~gen-ui root = Text(\"```\")\n~~~\n";
+    let blocks = scan_blocks(input);
+    assert_eq!(blocks.len(), 1);
+    assert!(blocks[0].closed);
+    assert!(blocks[0].source.contains("root = Text(\"```\")"));
+    assert_eq!(
+        blocks[0].opener_code.as_deref(),
+        Some("root = Text(\"```\")")
+    );
+}
+
+#[test]
 fn prompt_only_advertises_implemented_capabilities() {
     let prompt = system_prompt(&library(), &PromptOptions::default());
     assert!(prompt.contains("```gen-ui\nroot = Stack("));
@@ -343,6 +566,19 @@ fn prompt_only_advertises_implemented_capabilities() {
     ] {
         assert!(!prompt.contains(name), "{name}");
     }
+}
+
+#[test]
+fn state_default_errors_use_the_state_statement_id() {
+    let lib = library();
+    let result = parse("root = Stack([])\n$bad = Text()", &lib);
+    assert!(result.errors.iter().any(|error| {
+        error.code == ErrorCode::MissingRequired && error.statement_id.as_deref() == Some("$bad")
+    }));
+    assert!(!result
+        .errors
+        .iter()
+        .any(|error| error.statement_id.as_deref() == Some("root")));
 }
 
 #[test]

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
@@ -9,7 +11,7 @@ use crate::{
     types::NodeValue,
     validation::Validation,
     Element, ErrorCode, EvalError, EvalResult, Expr, Library, ParseResult, StatementKind,
-    MAX_DEPTH, MAX_NODES,
+    MAX_DEPTH, MAX_NODES, MAX_VALUE_BYTES,
 };
 
 pub type RuntimeFunction =
@@ -87,7 +89,7 @@ pub(crate) fn default_value(
     value: &NodeValue,
     library: &Library,
     state: &IndexMap<String, Value>,
-) -> Value {
+) -> crate::Result<Value> {
     match value {
         NodeValue::Expr(expr) => {
             let mut only_functions = true;
@@ -97,34 +99,31 @@ pub(crate) fn default_value(
                 }
             });
             if !only_functions {
-                return Value::Null;
+                return Ok(Value::Null);
             }
             let context = EvalContext::default();
             let mut engine = Engine::new(library, state, &context);
-            engine
-                .value(value, false, 0)
-                .map(|v| v.public_json())
-                .unwrap_or(Value::Null)
+            engine.value(value, false, 0).map(|v| v.public_json())
         }
-        NodeValue::Array(values) => Value::Array(
+        NodeValue::Array(values) => Ok(Value::Array(
             values
                 .iter()
                 .map(|v| default_value(v, library, state))
-                .collect(),
-        ),
-        NodeValue::Object(values) => Value::Object(
+                .collect::<crate::Result<_>>()?,
+        )),
+        NodeValue::Object(values) => Ok(Value::Object(
             values
                 .iter()
-                .map(|(k, v)| (k.clone(), default_value(v, library, state)))
-                .collect(),
-        ),
-        other => other.public_json(),
+                .map(|(k, v)| Ok((k.clone(), default_value(v, library, state)?)))
+                .collect::<crate::Result<_>>()?,
+        )),
+        other => Ok(other.public_json()),
     }
 }
 
 pub(crate) struct Engine<'a> {
     pub library: &'a Library,
-    pub state: IndexMap<String, Value>,
+    pub state: Cow<'a, IndexMap<String, Value>>,
     pub context: &'a EvalContext,
     pub scope: IndexMap<String, Value>,
     pub errors: Vec<EvalError>,
@@ -135,11 +134,16 @@ pub(crate) struct Engine<'a> {
 impl<'a> Engine<'a> {
     fn new(
         library: &'a Library,
-        defaults: &IndexMap<String, Value>,
+        defaults: &'a IndexMap<String, Value>,
         context: &'a EvalContext,
     ) -> Self {
-        let mut state = defaults.clone();
-        state.extend(context.state.clone());
+        let state = if context.state.is_empty() {
+            Cow::Borrowed(defaults)
+        } else {
+            let mut state = defaults.clone();
+            state.extend(context.state.clone());
+            Cow::Owned(state)
+        };
         Self {
             library,
             state,
@@ -194,17 +198,33 @@ impl<'a> Engine<'a> {
                     statement_id: n.clone(),
                 })
             }
-            Expr::Array { els } => NodeValue::Array(
-                els.iter()
-                    .map(|e| self.expr(e, depth + 1))
-                    .collect::<crate::Result<_>>()?,
-            ),
-            Expr::Object { entries } => NodeValue::Object(
-                entries
-                    .iter()
-                    .map(|(k, e)| Ok((k.clone(), self.expr(e, depth + 1)?)))
-                    .collect::<crate::Result<_>>()?,
-            ),
+            Expr::Array { els } => {
+                let mut values = Vec::new();
+                let mut bytes = 0usize;
+                for expr in els {
+                    let value = self.expr(expr, depth + 1)?;
+                    bytes = bytes
+                        .saturating_add(std::mem::size_of::<NodeValue>())
+                        .saturating_add(crate::memory::node_value_bytes(&value));
+                    check_value_size(bytes)?;
+                    values.push(value);
+                }
+                NodeValue::Array(values)
+            }
+            Expr::Object { entries } => {
+                let mut values = IndexMap::new();
+                let mut bytes = 0usize;
+                for (key, expr) in entries {
+                    let value = self.expr(expr, depth + 1)?;
+                    bytes = bytes
+                        .saturating_add(std::mem::size_of::<(String, NodeValue)>())
+                        .saturating_add(key.capacity())
+                        .saturating_add(crate::memory::node_value_bytes(&value));
+                    check_value_size(bytes)?;
+                    values.insert(key.clone(), value);
+                }
+                NodeValue::Object(values)
+            }
             Expr::BinOp { op, left, right } => {
                 let left = self.expr(left, depth + 1)?;
                 let left_json = left.public_json();
@@ -223,6 +243,11 @@ impl<'a> Engine<'a> {
                     };
                 }
                 let right = self.expr(right, depth + 1)?.public_json();
+                if op == "+" && (left_json.is_string() || right.is_string()) {
+                    check_value_size(
+                        string_bytes(&left_json).saturating_add(string_bytes(&right)),
+                    )?;
+                }
                 NodeValue::Json(binary(op, &left_json, &right))
             }
             Expr::UnaryOp { op, operand } => {
@@ -371,34 +396,50 @@ impl<'a> Engine<'a> {
                 }
                 Ok(value)
             }
-            NodeValue::Array(values) => Ok(NodeValue::Array(
-                values
-                    .iter()
-                    .map(|v| self.value(v, binding, depth + 1))
-                    .collect::<crate::Result<_>>()?,
-            )),
-            NodeValue::Object(values) => Ok(NodeValue::Object(
-                values
-                    .iter()
-                    .map(|(k, v)| Ok((k.clone(), self.value(v, binding, depth + 1)?)))
-                    .collect::<crate::Result<_>>()?,
-            )),
+            NodeValue::Array(values) => {
+                let mut out = Vec::new();
+                let mut bytes = 0usize;
+                for value in values {
+                    let value = self.value(value, binding, depth + 1)?;
+                    bytes = bytes
+                        .saturating_add(std::mem::size_of::<NodeValue>())
+                        .saturating_add(crate::memory::node_value_bytes(&value));
+                    check_value_size(bytes)?;
+                    out.push(value);
+                }
+                Ok(NodeValue::Array(out))
+            }
+            NodeValue::Object(values) => {
+                let mut out = IndexMap::new();
+                let mut bytes = 0usize;
+                for (key, value) in values {
+                    let value = self.value(value, binding, depth + 1)?;
+                    bytes = bytes
+                        .saturating_add(std::mem::size_of::<(String, NodeValue)>())
+                        .saturating_add(key.capacity())
+                        .saturating_add(crate::memory::node_value_bytes(&value));
+                    check_value_size(bytes)?;
+                    out.insert(key.clone(), value);
+                }
+                Ok(NodeValue::Object(out))
+            }
             NodeValue::Element { element, props } => {
                 let previous = self.statement_id.clone();
                 if element.statement_id.is_some() {
                     self.statement_id = element.statement_id.clone();
                 }
+                let component = self.library.components.get(&element.type_name).cloned();
                 let mut evaluated = IndexMap::new();
+                let mut present = HashSet::new();
+                let mut invalid = false;
                 for (key, value) in props {
-                    let binding = self
-                        .library
-                        .components
-                        .get(&element.type_name)
-                        .is_some_and(|c| c.params.iter().any(|p| p.name == *key && p.binding));
-                    match self.value(value, binding, depth + 1) {
-                        Ok(value) => {
-                            evaluated.insert(key.clone(), crate::actions::own_steps(value));
-                        }
+                    present.insert(key.clone());
+                    let param = component
+                        .as_ref()
+                        .and_then(|c| c.params.iter().find(|p| p.name == *key));
+                    let binding = param.is_some_and(|p| p.binding);
+                    let value = match self.value(value, binding, depth + 1) {
+                        Ok(value) => value,
                         Err(mut error) => {
                             if let EvalError::Runtime {
                                 statement_id,
@@ -419,17 +460,128 @@ impl<'a> Engine<'a> {
                             }
                             self.report(error);
                             evaluated.insert(key.clone(), NodeValue::null());
+                            if param.is_some_and(|p| p.required) {
+                                invalid = true;
+                            }
+                            continue;
+                        }
+                    };
+                    let Some(param) = param else {
+                        evaluated.insert(key.clone(), crate::actions::own_steps(value));
+                        continue;
+                    };
+                    let (checked, errors) =
+                        if matches!(value, NodeValue::Binding { .. } | NodeValue::Expr(_)) {
+                            (Some(value), Vec::new())
+                        } else {
+                            let mut validation = Validation::new(self.library, false);
+                            let checked = validation.validate(
+                                value,
+                                &param.schema,
+                                &element.type_name,
+                                &format!("/{key}"),
+                                0,
+                            );
+                            (checked, validation.errors)
+                        };
+                    for error in errors {
+                        self.report_evaluated_prop_error(&element.type_name, key, error);
+                    }
+                    match checked {
+                        Some(value) if value.is_null() && param.required => {
+                            if let Some(default) = &param.schema.default {
+                                evaluated.insert(key.clone(), NodeValue::Json(default.clone()));
+                            } else {
+                                self.report_missing_prop(
+                                    ErrorCode::NullRequired,
+                                    &element.type_name,
+                                    key,
+                                    format!("缺少非空必填参数 {key}"),
+                                );
+                                invalid = true;
+                            }
+                        }
+                        Some(value) => {
+                            evaluated.insert(key.clone(), crate::actions::own_steps(value));
+                        }
+                        None => {
+                            if let Some(default) = &param.schema.default {
+                                evaluated.insert(key.clone(), NodeValue::Json(default.clone()));
+                            } else if param.required {
+                                invalid = true;
+                            }
+                        }
+                    }
+                }
+                if let Some(component) = &component {
+                    for param in &component.params {
+                        if !param.required || present.contains(&param.name) {
+                            continue;
+                        }
+                        if let Some(default) = &param.schema.default {
+                            evaluated.insert(param.name.clone(), NodeValue::Json(default.clone()));
+                        } else {
+                            self.report_missing_prop(
+                                ErrorCode::MissingRequired,
+                                &element.type_name,
+                                &param.name,
+                                format!("缺少非空必填参数 {}", param.name),
+                            );
+                            invalid = true;
                         }
                     }
                 }
                 self.statement_id = previous;
-                Ok(NodeValue::Element {
-                    element: element.clone(),
-                    props: evaluated,
-                })
+                if invalid {
+                    Ok(NodeValue::null())
+                } else {
+                    Ok(NodeValue::Element {
+                        element: element.clone(),
+                        props: evaluated,
+                    })
+                }
             }
             other => Ok(other.clone()),
         }
+    }
+
+    fn report_evaluated_prop_error(
+        &mut self,
+        element_type: &str,
+        key: &str,
+        error: crate::ParseError,
+    ) {
+        self.report(EvalError::Runtime {
+            code: error.code,
+            message: error.message,
+            statement_id: self.statement_id.clone(),
+            component: Some(if error.component.is_empty() {
+                element_type.to_owned()
+            } else {
+                error.component
+            }),
+            path: Some(if error.path.is_empty() {
+                format!("/{key}")
+            } else {
+                error.path
+            }),
+        });
+    }
+
+    fn report_missing_prop(
+        &mut self,
+        code: ErrorCode,
+        element_type: &str,
+        key: &str,
+        message: String,
+    ) {
+        self.report(EvalError::Runtime {
+            code,
+            message,
+            statement_id: self.statement_id.clone(),
+            component: Some(element_type.to_owned()),
+            path: Some(format!("/{key}")),
+        });
     }
 
     fn function(
@@ -447,6 +599,7 @@ impl<'a> Engine<'a> {
             return Err(EvalError::runtime(format!("@{name} 缺少运行时实现")));
         };
         let result = function(&values)?;
+        check_value_size(crate::memory::value_bytes(&result))?;
         if let Some(returns) = &def.returns {
             let mut validation = Validation::new(self.library, false);
             let result = validation.validate(NodeValue::Json(result), returns, name, "/returns", 0);
@@ -549,13 +702,43 @@ impl<'a> Engine<'a> {
             _ => return Ok(NodeValue::Array(Vec::new())),
         };
         let mut values = Vec::new();
+        let mut bytes = 0usize;
         for item in array {
             let mut scope = self.scope.clone();
             scope.insert(name.clone(), item.clone());
             let template = crate::actions::capture(template, &scope);
-            values.push(self.expr(&template, depth + 1)?);
+            let value = self.expr(&template, depth + 1)?;
+            bytes = bytes.saturating_add(
+                std::mem::size_of::<NodeValue>()
+                    .saturating_add(crate::memory::node_value_bytes(&value)),
+            );
+            check_value_size(bytes)?;
+            values.push(value);
         }
         Ok(NodeValue::Array(values))
+    }
+}
+
+fn check_value_size(bytes: usize) -> crate::Result<()> {
+    if bytes > MAX_VALUE_BYTES {
+        return Err(EvalError::LimitExceeded);
+    }
+    Ok(())
+}
+
+fn string_bytes(value: &Value) -> usize {
+    match value {
+        Value::Null => 0,
+        Value::String(text) => text.len(),
+        Value::Bool(true) => 4,
+        Value::Bool(false) => 5,
+        Value::Number(_) => 24,
+        Value::Array(values) => values
+            .iter()
+            .map(string_bytes)
+            .sum::<usize>()
+            .saturating_add(values.len().saturating_sub(1)),
+        Value::Object(_) => 15,
     }
 }
 

@@ -99,15 +99,39 @@ fn parse_inner(source: &str, library: Arc<Library>) -> ParseResult {
             }
         }
     }
+    let mut state_bytes = 0usize;
     for statement in result.statements.values() {
         if statement.kind == StatementKind::State {
-            materializer.validation.statement_id = entry.as_ref().map(|(id, _)| id.clone());
+            materializer.validation.statement_id = Some(statement.id.clone());
             // 默认值按声明顺序求一次；运行时自定义回调不参与初始化。
             let value = materializer.value(&statement.expr, 0);
-            result.state.insert(
-                statement.id.clone(),
-                default_value(&value, &library, &result.state),
-            );
+            let value = match default_value(&value, &library, &result.state) {
+                Ok(value) => {
+                    let bytes = crate::memory::value_bytes(&value);
+                    if state_bytes.saturating_add(bytes) > crate::MAX_STATE_BYTES {
+                        materializer.validation.issue(
+                            ErrorCode::ParseFailed,
+                            "",
+                            "",
+                            format!("state 默认值超过安全预算（{}）", statement.id),
+                        );
+                        serde_json::Value::Null
+                    } else {
+                        state_bytes = state_bytes.saturating_add(bytes);
+                        value
+                    }
+                }
+                Err(error) => {
+                    materializer.validation.issue(
+                        ErrorCode::ParseFailed,
+                        "",
+                        "",
+                        format!("state 默认值求值失败（{}）：{error}", statement.id),
+                    );
+                    serde_json::Value::Null
+                }
+            };
+            result.state.insert(statement.id.clone(), value);
         } else if matches!(
             statement.kind,
             StatementKind::Query | StatementKind::Mutation

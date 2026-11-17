@@ -229,7 +229,10 @@ impl EntryRenderCache {
         self.retained_bytes_with(&mut seen)
     }
 
-    fn retained_bytes_with(&self, seen: &mut crate::kit::retained_bytes::SeenAllocations) -> usize {
+    pub(crate) fn retained_bytes_with(
+        &self,
+        seen: &mut crate::kit::retained_bytes::SeenAllocations,
+    ) -> usize {
         self.markdown.retained_bytes()
             + crate::kit::retained_bytes::retained_arc_lines_bytes(&self.lines, seen)
             + self.markdown_lines.retained_bytes_with(seen)
@@ -241,7 +244,13 @@ impl EntryRenderCache {
             + self
                 .genui_buttons
                 .iter()
-                .map(|button| button.label.capacity() + button.action.retained_bytes())
+                .map(|button| {
+                    button.label.capacity()
+                        + button.action.retained_bytes()
+                        + button.parsed.as_ref().map_or(0, |parsed| {
+                            seen.account_arc(parsed, parsed.retained_bytes())
+                        })
+                })
                 .sum::<usize>()
             + self.image_lines.capacity() * std::mem::size_of::<ImageLineInfo>()
             + self

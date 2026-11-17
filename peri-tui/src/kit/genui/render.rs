@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::kit::markdown::{GenUiSegment, TableData, table_data_to_lines};
 
-use super::{GenUiButton, GenUiButtonInfo};
+use super::{GenUiAction, GenUiButton, GenUiButtonInfo};
 
 #[derive(Debug, Default)]
 pub struct GenUiRender {
@@ -48,7 +48,9 @@ pub fn render(segment: &GenUiSegment, width: usize, theme: &ThemeDefinition) -> 
     }
     for button in &mut output.buttons {
         button.block = Some(block);
-        button.parsed = Some(std::sync::Arc::clone(&segment.parsed));
+        button.partial = segment.partial;
+        button.parsed = matches!(button.action, GenUiAction::Set(..) | GenUiAction::Reset(..))
+            .then(|| std::sync::Arc::clone(&segment.parsed));
     }
     output
 }
@@ -307,6 +309,7 @@ fn button(
             x_end: label.width().saturating_add(2).min(u16::MAX as usize) as u16,
             block: None,
             parsed: None,
+            partial: false,
             action,
             label: descriptor.label,
         }],

@@ -46,6 +46,50 @@ fn context(surface: EntrySurface) -> EntryRenderContext {
 
 #[test]
 #[serial_test::serial]
+fn genui_parse_payload_is_counted_once_per_shared_arc() {
+    let library = crate::kit::genui::library::library().unwrap();
+    let source = format!(
+        "$count = 1\nroot = Stack([Text(\"{}\"), Button(\"add\", @Set($count, $count + 1))])",
+        "数据".repeat(2048)
+    );
+    let parsed = Arc::new(peri_genui::parse(&source, library));
+    let parsed_bytes = parsed.retained_bytes();
+    let action = crate::kit::genui::GenUiAction::Set("$count".into(), peri_genui::Expr::Null);
+    let make = || crate::kit::genui::GenUiButtonInfo {
+        line_start: 0,
+        line_end: 1,
+        x_start: 0,
+        x_end: 1,
+        block: None,
+        parsed: Some(Arc::clone(&parsed)),
+        partial: false,
+        action: action.clone(),
+        label: "add".into(),
+    };
+    let single = EntryRenderCache {
+        genui_buttons: vec![make()],
+        ..Default::default()
+    };
+    let double = EntryRenderCache {
+        genui_buttons: vec![make(), make()],
+        ..Default::default()
+    };
+
+    let sample = make();
+    let per_button = std::mem::size_of::<crate::kit::genui::GenUiButtonInfo>()
+        + sample.label.capacity()
+        + sample.action.retained_bytes();
+    let single_bytes = single.retained_bytes();
+    assert!(single_bytes >= parsed_bytes);
+    assert_eq!(
+        double.retained_bytes() - single_bytes,
+        per_button,
+        "the second button shares the same ParseResult Arc"
+    );
+}
+
+#[test]
+#[serial_test::serial]
 fn genui_buttons_rebuild_for_width_theme_and_transition_changes() {
     let original = Arc::clone(&peri_theme::atoms::THEME_ATOM.state().read());
     let mut cache = EntryRenderCache::default();

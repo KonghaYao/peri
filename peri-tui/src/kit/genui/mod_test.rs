@@ -135,6 +135,12 @@ root = Stack([
         segment.buttons[4].action,
         Ok(GenUiAction::OpenUrl("https://example.com".into()))
     );
+    let rendered = render(&segment, 80, &peri_theme::builtin::dark_theme());
+    assert!(rendered.buttons[0].parsed.is_none());
+    assert!(rendered.buttons[1].parsed.is_some());
+    assert!(rendered.buttons[2].parsed.is_some());
+    assert!(rendered.buttons[3].parsed.is_none());
+    assert!(rendered.buttons[4].parsed.is_none());
 }
 
 #[test]
@@ -170,7 +176,7 @@ fn unsupported_actions_are_visible_muted_errors_without_hit_areas() {
 }
 
 #[test]
-fn text_renders_scalars_and_reports_structured_content() {
+fn text_reports_non_string_content() {
     let theme = peri_theme::builtin::dark_theme();
     let render_source = |source: &str| {
         let segment = GenUiSegment::parse(source.into(), false, library::library().unwrap());
@@ -186,31 +192,42 @@ fn text_renders_scalars_and_reports_structured_content() {
         )
     };
 
-    for (source, expected) in [
-        ("$count = 1\nroot = Stack([Text($count)])", "1"),
-        ("$seven = 7\nroot = Stack([Text($seven)])", "7"),
-        ("$flag = true\nroot = Stack([Text($flag)])", "true"),
-        ("$off = false\nroot = Stack([Text($off)])", "false"),
-        ("root = Stack([Text(\"原样显示\", \"muted\")])", "原样显示"),
-    ] {
-        let (text, _) = render_source(source);
-        assert!(text.contains(expected), "missing={expected}: {text}");
-        assert!(!text.contains("gen-ui:"), "{text}");
-    }
+    let (text, _) = render_source("root = Stack([Text(\"原样显示\", \"muted\")])");
+    assert!(text.contains("原样显示"), "{text}");
+    assert!(!text.contains("gen-ui:"), "{text}");
 
-    for source in [
-        "$obj = {key: 1}\nroot = Stack([Text($obj)])",
-        "$arr = [1, 2]\nroot = Stack([Text($arr)])",
-        "$none = null\nroot = Stack([Text($none)])",
+    for (source, expected) in [
+        ("$count = 1\nroot = Stack([Text($count)])", "number"),
+        ("$seven = 7\nroot = Stack([Text($seven)])", "number"),
+        ("$flag = true\nroot = Stack([Text($flag)])", "boolean"),
+        ("$off = false\nroot = Stack([Text($off)])", "boolean"),
+        ("$obj = {key: 1}\nroot = Stack([Text($obj)])", "object"),
+        ("$arr = [1, 2]\nroot = Stack([Text($arr)])", "array"),
+        ("$none = null\nroot = Stack([Text($none)])", "content"),
     ] {
         let (text, rendered) = render_source(source);
-        assert_eq!(
-            text.trim(),
-            "gen-ui: Text content must be a string",
-            "{source}: {text}"
-        );
+        assert!(text.contains("gen-ui:"), "{source}: {text}");
+        assert!(text.contains(expected), "{source}: {text}");
         assert!(rendered.lines[0].spans[0].style.fg == Some(theme.semantic.text.muted));
     }
+}
+
+#[test]
+fn generation_budget_errors_render_as_genui_errors() {
+    let mut source = String::from("root = Stack([])\n$s0 = \"x\"\n");
+    for i in 1..=30 {
+        source.push_str(&format!("$s{i} = $s{} + $s{}\n", i - 1, i - 1));
+    }
+    let segment = GenUiSegment::parse(source, false, library::library().unwrap());
+    let rendered = render(&segment, 80, &peri_theme::builtin::dark_theme());
+    let text = rendered
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("gen-ui:"), "{text}");
+    assert!(text.contains("安全预算"), "{text}");
 }
 
 #[test]

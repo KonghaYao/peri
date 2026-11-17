@@ -831,6 +831,7 @@ msg-copy-md = 复制
 genui-run-unsupported = gen-ui：TUI 不支持 @Run、Query 和 Mutation。
 genui-open-url-unsupported = gen-ui：TUI 不支持 @OpenUrl。
 genui-action-failed = gen-ui 动作失败：{ $error }
+genui-partial-state-unsupported = gen-ui：块仍在流式生成，状态操作暂不可用。
 msg-tip-prefix =   ⎿  提示: 
 msg-todo-available =  (可开始)
 

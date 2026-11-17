@@ -304,6 +304,74 @@ fn wrapped_button_hit_rows_match_paragraph_after_viewport_width_correction() {
 
 #[test]
 #[serial_test::serial]
+fn streaming_blocks_reject_state_actions_until_closed() {
+    let _guard = Guard::new();
+    let source = r#"$count = 1
+root = Stack([Text("stream=" + $count), Button("advance", @Set($count, $count + 1))])"#;
+    let library = crate::kit::genui::library::library().unwrap();
+    let theme = peri_theme::builtin::dark_theme();
+    let partial = GenUiSegment::parse(source.into(), true, library);
+    let rendered = crate::kit::genui::render(&partial, 80, &theme);
+    assert!(rendered.buttons[0].partial);
+    assert!(rendered.buttons[0].parsed.is_some());
+    dispatch_action(&rendered.buttons[0]);
+    assert_eq!(view_state::block_revision(partial.block_id()), 0);
+    assert!(
+        NOTIFICATION
+            .state()
+            .read()
+            .as_ref()
+            .is_some_and(|notification| notification.message.contains("state actions"))
+    );
+
+    let complete = GenUiSegment::parse(source.into(), false, library);
+    let rendered = crate::kit::genui::render(&complete, 80, &theme);
+    dispatch_action(&rendered.buttons[0]);
+    assert!(view_state::block_revision(complete.block_id()) > 0);
+    let rendered = crate::kit::genui::render(&complete, 80, &theme);
+    assert!(
+        rendered
+            .lines
+            .iter()
+            .any(|line| line.to_string().contains("stream=2"))
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn genui_state_updates_enforce_budget_per_slot() {
+    let _guard = Guard::new();
+    let text = r#"```gen-ui
+$count = 1
+root = Stack([Text("count=" + $count), Button("add", @Set($count, $count + 1))])
+```"#;
+    let items: im::Vector<TuiRenderUnit> = (0..4).map(|_| bubble(text.into())).collect();
+    let mut fixture = Fixture {
+        snapshot: ViewModelsSnapshot {
+            generation: 1,
+            items,
+        },
+        transcript: Transcript::default(),
+        caches: Vec::new(),
+        context: EntryRenderContext {
+            theme: Arc::clone(&peri_theme::atoms::THEME_ATOM.state().read()),
+            language: 0,
+            surface: EntrySurface::Message,
+            occurrence: BRIDGE_RESET_COUNTER.get(),
+        },
+        grid: GridSpec::grid_for(80),
+    };
+    fixture.prepare();
+    let button = fixture.caches[0].genui_buttons[0].clone();
+    dispatch_action(&button);
+    fixture.prepare();
+    assert_eq!(fixture.transcript.genui_budget_checks, 4);
+    let (budget, _) = Transcript::render_cache_budgets();
+    assert!(fixture.transcript.retained_bytes() <= budget);
+}
+
+#[test]
+#[serial_test::serial]
 fn set_and_reset_re_render_without_changing_transcript_or_other_blocks() {
     let _guard = Guard::new();
     let source = r#"$count = 1

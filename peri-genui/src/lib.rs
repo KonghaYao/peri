@@ -66,3 +66,8 @@ pub type Result<T> = std::result::Result<T, EvalError>;
 // 限制输入递归及展开预算，避免模型输出把进程栈或内存耗尽。
 pub(crate) const MAX_DEPTH: usize = 64;
 pub(crate) const MAX_NODES: usize = 100_000;
+// action schema 是配置输入；共享预算防止双引用链在编译期指数展开。
+pub(crate) const MAX_SCHEMA_EXPANSIONS: usize = 4_096;
+// 生成值上限按 100k AST 节点的结构开销估算；state 总量允许四个满额值。
+pub(crate) const MAX_VALUE_BYTES: usize = 4 << 20;
+pub(crate) const MAX_STATE_BYTES: usize = 16 << 20;

@@ -144,6 +144,8 @@ pub(super) struct Transcript {
     pub(super) scanned_slots: usize,
     pub(super) updated_slots: usize,
     pub(super) evictions: usize,
+    #[cfg(test)]
+    pub(super) genui_budget_checks: usize,
     pub(super) invalidation: &'static str,
 }
 
@@ -166,6 +168,10 @@ impl Transcript {
         self.scanned_slots = 0;
         self.updated_slots = 0;
         self.evictions = 0;
+        #[cfg(test)]
+        {
+            self.genui_budget_checks = 0;
+        }
         let structural_epoch = crate::kit::atoms::STRUCTURAL_EPOCH.get();
         let structural_changed = structural_epoch != self.structural_epoch_seen;
         if structural_changed {
@@ -296,6 +302,15 @@ impl Transcript {
                         frame,
                         transition,
                     );
+                    let visible = self.index.visible_slots(
+                        scroll_y.min(self.index.total_visual().saturating_sub(height)),
+                        height,
+                    );
+                    self.enforce_budget(caches, &visible);
+                    #[cfg(test)]
+                    {
+                        self.genui_budget_checks += 1;
+                    }
                 }
             }
             self.genui_revision = genui_revision;

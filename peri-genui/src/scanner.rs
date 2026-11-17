@@ -100,7 +100,7 @@ fn opener(text: &str) -> Option<Fence> {
         return None;
     }
     let rest = trimmed[length..].trim_start();
-    if rest.contains("```") {
+    if marker == '`' && rest.contains("```") {
         return None;
     }
     let tag_len = rest.find(char::is_whitespace).unwrap_or(rest.len());

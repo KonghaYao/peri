@@ -94,8 +94,9 @@ pub(crate) fn split(tokens: &[Token]) -> Vec<(String, bool, Vec<Token>)> {
         let mut expr = Vec::new();
         let mut depth: usize = 0;
         let mut ternary: usize = 0;
+        let mut pending_else = false;
         while let Some(token) = tokens.get(pos) {
-            if *token == Token::Newline && depth == 0 && ternary == 0 {
+            if *token == Token::Newline && depth == 0 && ternary == 0 && !pending_else {
                 let next = tokens[pos + 1..].iter().find(|t| **t != Token::Newline);
                 if next != Some(&Token::Symbol("?")) {
                     break;
@@ -109,8 +110,14 @@ pub(crate) fn split(tokens: &[Token]) -> Vec<(String, bool, Vec<Token>)> {
                 Token::Symbol("(" | "[" | "{") => depth += 1,
                 Token::Symbol(")" | "]" | "}") => depth = depth.saturating_sub(1),
                 Token::Symbol("?") if depth == 0 => ternary += 1,
-                Token::Symbol(":") if depth == 0 => ternary = ternary.saturating_sub(1),
+                Token::Symbol(":") if depth == 0 && ternary > 0 => {
+                    ternary -= 1;
+                    pending_else = true;
+                }
                 _ => {}
+            }
+            if *token != Token::Symbol(":") {
+                pending_else = false;
             }
             expr.push(token.clone());
             pos += 1;

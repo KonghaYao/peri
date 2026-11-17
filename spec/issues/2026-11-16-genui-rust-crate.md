@@ -36,10 +36,10 @@
 2. `StreamParser` 重解析完整缓冲区；最终结果与 batch 一致。逐字符输入累计成本为二次量级，不移植上游增量缓存，也不保证每个中间快照一致。
 3. `scan_blocks` 只识别 `gen-ui`，支持反引号/波浪号 fence 和未关闭块；保留开启行代码便于诊断，但 prompt 禁止这种输出。runner 单独归一化上游 fence 名称。
 4. Sort 使用 ICU 固定 root collation，不依赖宿主 locale；混合类型比较沿用上游规则，但不保证非传递比较下与任意 JS 引擎得到同一排列。
-5. schema 校验实现上游子集，不宣称完整 JSON Schema 支持；复合 schema 对普通数据保留上游宽容行为，缺失/类型/枚举/默认值/数组项裁剪单独校验。
+5. schema 校验实现上游子集，不宣称完整 JSON Schema 支持；复合 schema 对普通数据保留上游宽容行为，缺失/类型/枚举/默认值/数组项裁剪单独校验。组件 slot 按 `type_name` 匹配；枚举对所有 JSON 值精确比较且不跳过声明类型；求值阶段对组件属性再校验类型/required/default，`Binding` 跳过。
 6. binding 标记来自 LibrarySpec 的 `$binding<...>` 组件签名；裸 schema 没有该标记，不能据此推断双向绑定。
 7. 内部类型区分 Expr、ActionPlan、Binding 和普通 JSON；普通数据不能伪造自定义动作身份。公开 JSON 只作数据，不能作为宿主执行授权。
-8. 输入递归、token 和引用/AST 展开受预算限制；超限显式报错。Query 依赖环的 `query-cycle` 专用诊断未移植，仍由 unsupported 阻止执行。
+8. 输入递归、token 和引用/AST 展开受预算限制；action schema 展开共享预算 4096 次，生成值单值 4 MiB、state 默认值总量 16 MiB；超限显式报错。Query 依赖环的 `query-cycle` 专用诊断未移植，仍由 unsupported 阻止执行。
 9. 同步宿主回调的 panic、耗时和宿主自行构造的极深 `Value` 不属于模型文本解析器的隔离保证；本阶段不引入线程或沙箱。
 
 ## TUI 接入（第二阶段）
@@ -47,7 +47,7 @@
 1. `markdown/parser.rs` 在 Markdown 解析前用 `scan_blocks` 提取 `gen-ui` 围栏，将块内三反引号替换为占位符并规范化为 `gen-ui`/`gen-ui-partial`；`convert.rs` 还原后调用 `parse`，产出 `MarkdownSegment::GenUi`。
 2. `boundary.rs` 在 `gen-ui` opener 处停止 stable chunk，块留在可变 tail；首版不做块级稳定缓存，避免复用时序问题。
 3. 渲染器位于 `peri-tui/src/kit/genui/`，首版组件为 Stack、Card、Text、Heading、List、Table、KeyValue、Progress、Divider、Button；后续补充 BarChart、Sparkline。Text 按纯文本换行，不递归 Markdown。
-4. Button 支持整行点击；`@ToAssistant` 回填输入区，`@Set`/`@Reset` 修改块级视图状态并重渲染，`@Run`/`@OpenUrl` 显示未支持提示。视图状态不进 transcript，相同源码和入口的重复块共享状态。
+4. Button 支持整行点击；`@ToAssistant` 回填输入区，`@Set`/`@Reset` 修改块级视图状态并重渲染，`@Run`/`@OpenUrl` 显示未支持提示。视图状态不进 transcript，相同源码和入口的重复块共享状态；流式未闭合块期间 Set/Reset 禁用并提示，闭合后恢复。
 5. 尚未把 `system_prompt` 注入 Agent 系统提示词；模型当前需要由宿主另行告知组件库与 `gen-ui` 围栏约定。SDK 的 32 组件 OpenUI 库与当前 12 组件库是两套定义，后续需要收敛或显式区分。
 
 ## 验收与测试口径
@@ -59,7 +59,7 @@
 
 ## 本次验证结果
 
-1. `./scripts/cargo-rmcp-patched.sh test -p peri-genui --locked -- --nocapture`：核心回归 20 通过、doc test 1 通过，失败 0。
+1. `./scripts/cargo-rmcp-patched.sh test -p peri-genui --locked -- --nocapture`：核心回归 29 通过、unit 1 通过、doc test 1 通过，失败 0。
 2. `./scripts/cargo-rmcp-patched.sh clippy -p peri-genui --all-targets --locked -- -D warnings`、显式 `test -p peri-genui --doc --locked`、`cargo fmt --all` 及格式复检通过；新增 Rust 文件均小于 1000 行。
 3. 不带补丁脚本的 test/clippy 因 workspace 现有 `turso_serverless 0.1.3` 缺少 `wasm-fetch` feature 而退出 101；没有修改其他依赖来绕过冲突。
 4. 验证环境为 `rustc 1.99.0`，manifest 继承 workspace 的 Rust 1.95 要求；未单独用 1.95 编译。锁文件只保留新 crate 及其依赖所需增量，未保留顺带更新的 libc/windows-sys。

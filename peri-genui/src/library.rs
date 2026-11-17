@@ -173,6 +173,7 @@ impl Library {
                 }
             }
         }
+        let mut expansions = 0;
         let mut components = IndexMap::new();
         for (name, def) in &schema.defs {
             let component = schema
@@ -194,7 +195,12 @@ impl Library {
                 .iter()
                 .map(|(key, property)| {
                     let mut property = property.clone();
-                    inline_actions(&mut property, &action_defs, &mut HashSet::new())?;
+                    inline_actions(
+                        &mut property,
+                        &action_defs,
+                        &mut HashSet::new(),
+                        &mut expansions,
+                    )?;
                     Ok(Param {
                         name: key.clone(),
                         required: def.required.contains(key),
@@ -237,9 +243,14 @@ impl Library {
             .values_mut()
             .chain(library.actions.values_mut())
         {
-            inline_actions(&mut def.params, &action_defs, &mut HashSet::new())?;
+            inline_actions(
+                &mut def.params,
+                &action_defs,
+                &mut HashSet::new(),
+                &mut expansions,
+            )?;
             if let Some(returns) = &mut def.returns {
-                inline_actions(returns, &action_defs, &mut HashSet::new())?;
+                inline_actions(returns, &action_defs, &mut HashSet::new(), &mut expansions)?;
             }
         }
         Ok(library)
@@ -250,6 +261,7 @@ fn inline_actions(
     schema: &mut Schema,
     defs: &IndexMap<String, Schema>,
     seen: &mut HashSet<String>,
+    expansions: &mut usize,
 ) -> std::result::Result<(), LibraryError> {
     if let Some(name) = schema.ref_name().map(str::to_owned) {
         if let Some(def) = defs.get(&name) {
@@ -258,8 +270,14 @@ fn inline_actions(
                     "action schema 循环或过深引用 {name}"
                 )));
             }
+            if *expansions >= crate::MAX_SCHEMA_EXPANSIONS {
+                return Err(LibraryError::Invalid(
+                    "action schema 展开超过安全预算".into(),
+                ));
+            }
+            *expansions += 1;
             *schema = def.clone();
-            inline_actions(schema, defs, seen)?;
+            inline_actions(schema, defs, seen, expansions)?;
             seen.remove(&name);
             return Ok(());
         }
@@ -271,10 +289,10 @@ fn inline_actions(
         .chain(schema.one_of.iter_mut())
         .chain(schema.all_of.iter_mut())
     {
-        inline_actions(child, defs, seen)?;
+        inline_actions(child, defs, seen, expansions)?;
     }
     if let Some(items) = &mut schema.items {
-        inline_actions(items, defs, seen)?;
+        inline_actions(items, defs, seen, expansions)?;
     }
     Ok(())
 }

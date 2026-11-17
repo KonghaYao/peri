@@ -166,17 +166,21 @@ fn dispatch_action(button: &GenUiButtonInfo) {
             crate::kit::input_history::reset_history_cursor();
         }
         action @ (GenUiAction::Set(..) | GenUiAction::Reset(..)) => {
-            let result = button
-                .block
-                .zip(button.parsed.as_ref())
-                .ok_or_else(|| "missing gen-ui block".to_owned())
-                .and_then(|(id, parsed)| view_state::apply(id, parsed, action));
-            if let Err(error) = result {
-                tracing::warn!(error = %error, "gen-ui state action failed");
-                notify(crate::i18n::tr_args(
-                    "genui-action-failed",
-                    &[("error".into(), error.into())],
-                ));
+            if button.partial {
+                notify(crate::i18n::tr("genui-partial-state-unsupported"));
+            } else {
+                let result = button
+                    .block
+                    .zip(button.parsed.as_ref())
+                    .ok_or_else(|| "missing gen-ui block".to_owned())
+                    .and_then(|(id, parsed)| view_state::apply(id, parsed, action));
+                if let Err(error) = result {
+                    tracing::warn!(error = %error, "gen-ui state action failed");
+                    notify(crate::i18n::tr_args(
+                        "genui-action-failed",
+                        &[("error".into(), error.into())],
+                    ));
+                }
             }
         }
         GenUiAction::Run(_) => notify(crate::i18n::tr("genui-run-unsupported")),

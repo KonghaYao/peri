@@ -123,16 +123,42 @@ pub(crate) fn capture(expr: &Expr, scope: &IndexMap<String, Value>) -> Expr {
             args,
             function,
             mapped_props,
-        } => Expr::Call {
-            name: name.clone(),
-            args: args.iter().map(|e| capture(e, scope)).collect(),
-            function: *function,
-            mapped_props: mapped_props.as_ref().map(|p| {
-                p.iter()
-                    .map(|(k, e)| (k.clone(), capture(e, scope)))
-                    .collect()
-            }),
-        },
+        } => {
+            // Each 是绑定边界：input 仍在外层作用域，template 不能看到同名循环变量。
+            let (args, mapped_props) = if name == "Each" && args.len() >= 3 {
+                let mut inner = scope.clone();
+                if let Some(var) = each_var_name(&args[1]) {
+                    inner.shift_remove(var);
+                }
+                let mut captured = Vec::with_capacity(args.len());
+                captured.push(capture(&args[0], scope));
+                captured.push(args[1].clone());
+                captured.extend(args[2..].iter().map(|e| capture(e, &inner)));
+                (
+                    captured,
+                    mapped_props.as_ref().map(|p| {
+                        p.iter()
+                            .map(|(k, e)| (k.clone(), capture(e, &inner)))
+                            .collect()
+                    }),
+                )
+            } else {
+                (
+                    args.iter().map(|e| capture(e, scope)).collect(),
+                    mapped_props.as_ref().map(|p| {
+                        p.iter()
+                            .map(|(k, e)| (k.clone(), capture(e, scope)))
+                            .collect()
+                    }),
+                )
+            };
+            Expr::Call {
+                name: name.clone(),
+                args,
+                function: *function,
+                mapped_props,
+            }
+        }
         Expr::Array { els } => Expr::Array {
             els: els.iter().map(|e| capture(e, scope)).collect(),
         },
@@ -181,6 +207,13 @@ pub(crate) fn capture(expr: &Expr, scope: &IndexMap<String, Value>) -> Expr {
             value: Box::new(capture(value, scope)),
         },
         _ => expr.clone(),
+    }
+}
+
+pub(crate) fn each_var_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Ref { n } | Expr::String { v: n } => Some(n),
+        _ => None,
     }
 }
 
