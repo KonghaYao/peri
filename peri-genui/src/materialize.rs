@@ -159,12 +159,16 @@ impl<'a> Materializer<'a> {
                 }
                 NodeValue::Array(values)
             }
-            Expr::Object { entries } => NodeValue::Object(
-                entries
-                    .iter()
-                    .map(|(k, e)| (k.clone(), self.value(e, depth + 1)))
-                    .collect(),
-            ),
+            Expr::Object { entries } => {
+                let mut fields = IndexMap::new();
+                for (k, e) in entries {
+                    if !self.spend_bytes(k.len()) {
+                        return NodeValue::null();
+                    }
+                    fields.insert(k.clone(), self.value(e, depth + 1));
+                }
+                NodeValue::Object(fields)
+            }
             Expr::Call {
                 name,
                 args,
@@ -332,10 +336,16 @@ impl<'a> Materializer<'a> {
                     self.remaining -= copies;
                     let mut copy_bytes = 0usize;
                     for expr in &lowered {
-                        expr.visit(&mut |e| {
-                            if let Expr::String { v } = e {
+                        expr.visit(&mut |e| match e {
+                            Expr::String { v } => {
                                 copy_bytes = copy_bytes.saturating_add(v.len());
                             }
+                            Expr::Object { entries } => {
+                                for key in entries.keys() {
+                                    copy_bytes = copy_bytes.saturating_add(key.len());
+                                }
+                            }
+                            _ => {}
                         });
                     }
                     if !self.spend_bytes(copy_bytes) {
@@ -386,12 +396,16 @@ impl<'a> Materializer<'a> {
             Expr::Array { els } => Expr::Array {
                 els: els.iter().map(|e| self.expr(e, scope, depth + 1)).collect(),
             },
-            Expr::Object { entries } => Expr::Object {
-                entries: entries
-                    .iter()
-                    .map(|(k, e)| (k.clone(), self.expr(e, scope, depth + 1)))
-                    .collect(),
-            },
+            Expr::Object { entries } => {
+                let mut fields = IndexMap::new();
+                for (k, e) in entries {
+                    if !self.spend_bytes(k.len()) {
+                        return Expr::Null;
+                    }
+                    fields.insert(k.clone(), self.expr(e, scope, depth + 1));
+                }
+                Expr::Object { entries: fields }
+            }
             Expr::BinOp { op, left, right } => Expr::BinOp {
                 op: op.clone(),
                 left: Box::new(self.expr(left, scope, depth + 1)),

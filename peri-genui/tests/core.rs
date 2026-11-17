@@ -548,6 +548,20 @@ fn expression_lowering_rejects_literal_copy_amplification() {
 }
 
 #[test]
+fn expression_lowering_rejects_object_key_amplification() {
+    let lib = library();
+    let mut nested = format!("{{ \"{}\": 1 }}", "k".repeat(512 * 1024));
+    for _ in 0..9 {
+        nested = format!("Stack([{nested}])");
+    }
+    let source = format!("root = Stack(@Each([1], \"item\", {nested}))\n");
+    let result = parse(&source, &lib);
+    assert!(result.errors.iter().any(|error| {
+        error.code == ErrorCode::ParseFailed && error.message.contains("安全预算")
+    }));
+}
+
+#[test]
 fn state_default_object_keys_are_charged() {
     let lib = library();
     let key = "k".repeat(5 * 1024 * 1024);
