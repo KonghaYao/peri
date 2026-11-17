@@ -316,6 +316,8 @@ jobs:
               run: npm --prefix peri-e2e run e2e:replay:unit
 
             - name: Verify replay fixtures
+              env:
+                  PERI_SOURCE_ROOT: ${{ github.workspace }}
               run: npm --prefix peri-e2e run e2e:replay:verify
 
             # world seal 对应本 Peri 检出：未映射 leaf 变动但未 bump pin 时在此失败。
