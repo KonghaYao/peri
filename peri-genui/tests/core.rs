@@ -479,6 +479,58 @@ fn generated_values_and_state_defaults_are_bounded() {
 }
 
 #[test]
+fn materializer_memo_budget_rejects_reference_amplification() {
+    let lib = library();
+    let mut source = format!("seed = \"{}\"\n", "x".repeat(64 * 1024));
+    for level in 1..=12 {
+        source.push_str(&format!("a{level} = [a{}, a{}]\n", level - 1, level - 1));
+    }
+    source = source.replace("a0", "seed");
+    source.push_str("root = Stack(a12)\n");
+    let result = parse(&source, &lib);
+    assert!(result.errors.iter().any(|error| {
+        error.code == ErrorCode::ParseFailed && error.message.contains("安全预算")
+    }));
+}
+
+#[test]
+fn state_default_value_budget_rejects_repeated_large_values() {
+    let lib = library();
+    let refs = std::iter::repeat_n("seed", 100)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!(
+        "root = Stack([])\nseed = \"{}\"\n$many = [{refs}]\n",
+        "x".repeat(64 * 1024)
+    );
+    let result = parse(&source, &lib);
+    assert!(result.errors.iter().any(|error| {
+        error.code == ErrorCode::ParseFailed && error.message.contains("state 默认值求值失败")
+    }));
+}
+
+#[test]
+fn capture_budget_rejects_repeated_large_loop_values() {
+    let lib = library();
+    let terms = std::iter::repeat_n("item.text", 20)
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let source = format!(
+        "big = \"{}\"\nroot = Stack(@Each([{{text: big}}], \"item\", Text({terms})))\n",
+        "x".repeat(256 * 1024)
+    );
+    let result = parse(&source, &lib);
+    assert!(result
+        .errors
+        .iter()
+        .all(|error| { error.code != ErrorCode::ParseFailed }));
+    let evaluated = evaluate_root(&result, &EvalContext::default());
+    assert!(evaluated.errors.iter().any(|error| {
+        matches!(error, EvalError::Runtime { message, .. } if message.contains("生成值超过安全预算"))
+    }));
+}
+
+#[test]
 fn stream_replacement_finish_and_incomplete_state_tail() {
     let lib = Arc::new(library());
     let mut stream = StreamParser::new(lib.clone());

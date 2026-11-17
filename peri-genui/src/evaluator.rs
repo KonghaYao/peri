@@ -89,6 +89,7 @@ pub(crate) fn default_value(
     value: &NodeValue,
     library: &Library,
     state: &IndexMap<String, Value>,
+    budget: &mut usize,
 ) -> crate::Result<Value> {
     match value {
         NodeValue::Expr(expr) => {
@@ -103,21 +104,26 @@ pub(crate) fn default_value(
             }
             let context = EvalContext::default();
             let mut engine = Engine::new(library, state, &context);
-            engine.value(value, false, 0).map(|v| v.public_json())
+            let value = engine.value(value, false, 0)?;
+            spend_default_bytes(budget, crate::memory::node_value_bytes(&value))?;
+            Ok(value.public_json())
         }
         NodeValue::Array(values) => Ok(Value::Array(
             values
                 .iter()
-                .map(|v| default_value(v, library, state))
+                .map(|v| default_value(v, library, state, budget))
                 .collect::<crate::Result<_>>()?,
         )),
         NodeValue::Object(values) => Ok(Value::Object(
             values
                 .iter()
-                .map(|(k, v)| Ok((k.clone(), default_value(v, library, state)?)))
+                .map(|(k, v)| Ok((k.clone(), default_value(v, library, state, budget)?)))
                 .collect::<crate::Result<_>>()?,
         )),
-        other => Ok(other.public_json()),
+        other => {
+            spend_default_bytes(budget, crate::memory::node_value_bytes(other))?;
+            Ok(other.public_json())
+        }
     }
 }
 
@@ -305,10 +311,13 @@ impl<'a> Engine<'a> {
                     builtins::direct_field(&object, &key)
                 })
             }
-            Expr::Assign { target, value } => NodeValue::Binding {
-                target: target.clone(),
-                expr: crate::actions::capture(value, &self.scope),
-            },
+            Expr::Assign { target, value } => {
+                let mut budget = MAX_VALUE_BYTES;
+                NodeValue::Binding {
+                    target: target.clone(),
+                    expr: crate::actions::capture(value, &self.scope, &mut budget)?,
+                }
+            }
             Expr::Call {
                 name,
                 args,
@@ -706,7 +715,8 @@ impl<'a> Engine<'a> {
         for item in array {
             let mut scope = self.scope.clone();
             scope.insert(name.clone(), item.clone());
-            let template = crate::actions::capture(template, &scope);
+            let mut budget = MAX_VALUE_BYTES;
+            let template = crate::actions::capture(template, &scope, &mut budget)?;
             let value = self.expr(&template, depth + 1)?;
             bytes = bytes.saturating_add(
                 std::mem::size_of::<NodeValue>()
@@ -717,6 +727,15 @@ impl<'a> Engine<'a> {
         }
         Ok(NodeValue::Array(values))
     }
+}
+
+fn spend_default_bytes(budget: &mut usize, bytes: usize) -> crate::Result<()> {
+    if bytes > *budget {
+        *budget = 0;
+        return Err(EvalError::LimitExceeded);
+    }
+    *budget -= bytes;
+    Ok(())
 }
 
 fn check_value_size(bytes: usize) -> crate::Result<()> {

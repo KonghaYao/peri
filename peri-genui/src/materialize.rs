@@ -19,6 +19,7 @@ pub(crate) struct Materializer<'a> {
     visited: HashSet<String>,
     memo: HashMap<(bool, String), NodeValue>,
     remaining: usize,
+    bytes_remaining: usize,
 }
 
 impl<'a> Materializer<'a> {
@@ -35,23 +36,38 @@ impl<'a> Materializer<'a> {
             visited: HashSet::new(),
             memo: HashMap::new(),
             remaining: MAX_NODES,
+            bytes_remaining: crate::MAX_STATE_BYTES,
+        }
+    }
+
+    fn budget_error(&mut self) {
+        if !self
+            .validation
+            .errors
+            .iter()
+            .any(|e| e.code == ErrorCode::ParseFailed)
+        {
+            self.validation
+                .issue(ErrorCode::ParseFailed, "", "", "引用展开超过安全预算");
         }
     }
 
     fn enter(&mut self, depth: usize) -> bool {
         if depth >= MAX_DEPTH || self.remaining == 0 {
-            if !self
-                .validation
-                .errors
-                .iter()
-                .any(|e| e.code == ErrorCode::ParseFailed)
-            {
-                self.validation
-                    .issue(ErrorCode::ParseFailed, "", "", "引用展开超过安全预算");
-            }
+            self.budget_error();
             return false;
         }
         self.remaining -= 1;
+        true
+    }
+
+    fn spend_bytes(&mut self, bytes: usize) -> bool {
+        if bytes > self.bytes_remaining {
+            self.bytes_remaining = 0;
+            self.budget_error();
+            return false;
+        }
+        self.bytes_remaining -= bytes;
         true
     }
 
@@ -78,11 +94,17 @@ impl<'a> Materializer<'a> {
             });
         }
         let key = (expression, name.to_owned());
-        if let Some(value) = self.memo.get(&key) {
-            let weight = weight(value);
+        if let Some((weight, bytes)) = self
+            .memo
+            .get(&key)
+            .map(|value| (weight(value), crate::memory::node_value_bytes(value)))
+        {
             if weight <= self.remaining {
                 self.remaining -= weight;
-                return value.clone();
+                if !self.spend_bytes(bytes) {
+                    return NodeValue::null();
+                }
+                return self.memo.get(&key).cloned().unwrap_or_else(NodeValue::null);
             }
             self.remaining = 0;
             self.enter(depth);
@@ -115,7 +137,12 @@ impl<'a> Materializer<'a> {
         match expr {
             Expr::Ref { n } => self.resolve(n, false, depth),
             Expr::Ph { .. } | Expr::Null => NodeValue::null(),
-            Expr::String { v } => NodeValue::Json(Value::String(v.clone())),
+            Expr::String { v } => {
+                if !self.spend_bytes(v.len()) {
+                    return NodeValue::null();
+                }
+                NodeValue::Json(Value::String(v.clone()))
+            }
             Expr::Number { v } => NodeValue::Json(crate::builtins::number(*v)),
             Expr::Bool { v } => NodeValue::Json(Value::Bool(*v)),
             Expr::Array { els } => {

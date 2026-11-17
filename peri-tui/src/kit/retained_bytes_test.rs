@@ -20,6 +20,38 @@ fn bubble(text: &str) -> Arc<TuiAssistantBubble> {
 }
 
 #[test]
+fn account_arc_with_only_measures_unseen_arcs() {
+    let first = Arc::new(vec![1u8; 32]);
+    let second = Arc::new(vec![2u8; 32]);
+    let mut seen = SeenAllocations::default();
+    let mut calls = 0;
+    assert_eq!(
+        seen.account_arc_with(&first, || {
+            calls += 1;
+            64
+        }),
+        64
+    );
+    assert_eq!(calls, 1);
+    assert_eq!(
+        seen.account_arc_with(&first, || {
+            calls += 1;
+            64
+        }),
+        0
+    );
+    assert_eq!(calls, 1);
+    assert_eq!(
+        seen.account_arc_with(&second, || {
+            calls += 1;
+            32
+        }),
+        32
+    );
+    assert_eq!(calls, 2);
+}
+
+#[test]
 fn shared_arc_bubble_is_counted_once_across_units() {
     let shared = bubble("same allocation");
     let first = TuiRenderUnit::TuiAssistantBubble(Arc::clone(&shared));

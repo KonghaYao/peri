@@ -248,7 +248,7 @@ impl EntryRenderCache {
                     button.label.capacity()
                         + button.action.retained_bytes()
                         + button.parsed.as_ref().map_or(0, |parsed| {
-                            seen.account_arc(parsed, parsed.retained_bytes())
+                            seen.account_arc_with(parsed, || parsed.retained_bytes())
                         })
                 })
                 .sum::<usize>()

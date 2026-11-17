@@ -80,24 +80,25 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Token>, String> {
             tokens.push(Token::String(value));
             continue;
         }
-        let after_value = tokens
-            .iter()
-            .rev()
-            .find(|token| **token != Token::Newline)
-            .is_some_and(|t| {
-                matches!(
-                    t,
-                    Token::Name(_)
-                        | Token::State(_)
-                        | Token::Call(_)
-                        | Token::String(_)
-                        | Token::Number(_)
-                        | Token::True
-                        | Token::False
-                        | Token::Null
-                        | Token::Symbol(")" | "]")
-                )
-            });
+        let after_value = c == '-'
+            && tokens
+                .iter()
+                .rev()
+                .find(|token| **token != Token::Newline)
+                .is_some_and(|t| {
+                    matches!(
+                        t,
+                        Token::Name(_)
+                            | Token::State(_)
+                            | Token::Call(_)
+                            | Token::String(_)
+                            | Token::Number(_)
+                            | Token::True
+                            | Token::False
+                            | Token::Null
+                            | Token::Symbol(")" | "]")
+                    )
+                });
         if c.is_ascii_digit()
             || (c == '-' && !after_value && chars.get(i + 1).is_some_and(char::is_ascii_digit))
         {

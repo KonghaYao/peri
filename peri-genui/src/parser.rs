@@ -105,7 +105,8 @@ fn parse_inner(source: &str, library: Arc<Library>) -> ParseResult {
             materializer.validation.statement_id = Some(statement.id.clone());
             // 默认值按声明顺序求一次；运行时自定义回调不参与初始化。
             let value = materializer.value(&statement.expr, 0);
-            let value = match default_value(&value, &library, &result.state) {
+            let mut default_budget = crate::MAX_VALUE_BYTES;
+            let value = match default_value(&value, &library, &result.state, &mut default_budget) {
                 Ok(value) => {
                     let bytes = crate::memory::value_bytes(&value);
                     if state_bytes.saturating_add(bytes) > crate::MAX_STATE_BYTES {

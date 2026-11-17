@@ -2,7 +2,8 @@ use indexmap::IndexMap;
 use serde_json::{json, Value};
 
 use crate::{
-    builtins::js_string, evaluator::Engine, library::CallDef, types::NodeValue, Action, Expr,
+    builtins::js_string, evaluator::Engine, library::CallDef, types::NodeValue, Action, EvalError,
+    Expr, MAX_VALUE_BYTES,
 };
 
 impl Engine<'_> {
@@ -42,10 +43,13 @@ impl Engine<'_> {
                 _ => Vec::new(),
             },
             "Set" => match args {
-                [Expr::StateRef { n }, value, ..] => vec![Action::Set {
-                    target: n.clone(),
-                    value: capture(value, &self.scope),
-                }],
+                [Expr::StateRef { n }, value, ..] => {
+                    let mut budget = MAX_VALUE_BYTES;
+                    vec![Action::Set {
+                        target: n.clone(),
+                        value: capture(value, &self.scope, &mut budget)?,
+                    }]
+                }
                 _ => Vec::new(),
             },
             "Reset" => {
@@ -112,12 +116,19 @@ impl Engine<'_> {
     }
 }
 
-pub(crate) fn capture(expr: &Expr, scope: &IndexMap<String, Value>) -> Expr {
+pub(crate) fn capture(
+    expr: &Expr,
+    scope: &IndexMap<String, Value>,
+    budget: &mut usize,
+) -> crate::Result<Expr> {
     match expr {
-        Expr::Ref { n } => scope
-            .get(n)
-            .map(Expr::literal)
-            .unwrap_or_else(|| expr.clone()),
+        Expr::Ref { n } => {
+            let Some(value) = scope.get(n) else {
+                return Ok(expr.clone());
+            };
+            spend_capture_bytes(budget, crate::memory::value_bytes(value))?;
+            Ok(Expr::literal(value))
+        }
         Expr::Call {
             name,
             args,
@@ -131,83 +142,109 @@ pub(crate) fn capture(expr: &Expr, scope: &IndexMap<String, Value>) -> Expr {
                     inner.shift_remove(var);
                 }
                 let mut captured = Vec::with_capacity(args.len());
-                captured.push(capture(&args[0], scope));
+                captured.push(capture(&args[0], scope, budget)?);
                 captured.push(args[1].clone());
-                captured.extend(args[2..].iter().map(|e| capture(e, &inner)));
-                (
-                    captured,
-                    mapped_props.as_ref().map(|p| {
-                        p.iter()
-                            .map(|(k, e)| (k.clone(), capture(e, &inner)))
-                            .collect()
-                    }),
-                )
+                for arg in &args[2..] {
+                    captured.push(capture(arg, &inner, budget)?);
+                }
+                let mapped = match mapped_props {
+                    Some(props) => {
+                        let mut captured = IndexMap::new();
+                        for (key, expr) in props {
+                            captured.insert(key.clone(), capture(expr, &inner, budget)?);
+                        }
+                        Some(captured)
+                    }
+                    None => None,
+                };
+                (captured, mapped)
             } else {
-                (
-                    args.iter().map(|e| capture(e, scope)).collect(),
-                    mapped_props.as_ref().map(|p| {
-                        p.iter()
-                            .map(|(k, e)| (k.clone(), capture(e, scope)))
-                            .collect()
-                    }),
-                )
+                let mut captured = Vec::with_capacity(args.len());
+                for arg in args {
+                    captured.push(capture(arg, scope, budget)?);
+                }
+                let mapped = match mapped_props {
+                    Some(props) => {
+                        let mut captured = IndexMap::new();
+                        for (key, expr) in props {
+                            captured.insert(key.clone(), capture(expr, scope, budget)?);
+                        }
+                        Some(captured)
+                    }
+                    None => None,
+                };
+                (captured, mapped)
             };
-            Expr::Call {
+            Ok(Expr::Call {
                 name: name.clone(),
                 args,
                 function: *function,
                 mapped_props,
-            }
+            })
         }
-        Expr::Array { els } => Expr::Array {
-            els: els.iter().map(|e| capture(e, scope)).collect(),
-        },
-        Expr::Object { entries } => Expr::Object {
-            entries: entries
-                .iter()
-                .map(|(k, e)| (k.clone(), capture(e, scope)))
-                .collect(),
-        },
-        Expr::BinOp { op, left, right } => Expr::BinOp {
+        Expr::Array { els } => {
+            let mut captured = Vec::with_capacity(els.len());
+            for expr in els {
+                captured.push(capture(expr, scope, budget)?);
+            }
+            Ok(Expr::Array { els: captured })
+        }
+        Expr::Object { entries } => {
+            let mut captured = IndexMap::new();
+            for (key, expr) in entries {
+                captured.insert(key.clone(), capture(expr, scope, budget)?);
+            }
+            Ok(Expr::Object { entries: captured })
+        }
+        Expr::BinOp { op, left, right } => Ok(Expr::BinOp {
             op: op.clone(),
-            left: Box::new(capture(left, scope)),
-            right: Box::new(capture(right, scope)),
-        },
-        Expr::UnaryOp { op, operand } => Expr::UnaryOp {
+            left: Box::new(capture(left, scope, budget)?),
+            right: Box::new(capture(right, scope, budget)?),
+        }),
+        Expr::UnaryOp { op, operand } => Ok(Expr::UnaryOp {
             op: op.clone(),
-            operand: Box::new(capture(operand, scope)),
-        },
+            operand: Box::new(capture(operand, scope, budget)?),
+        }),
         Expr::Ternary {
             cond,
             then_expr,
             else_expr,
-        } => Expr::Ternary {
-            cond: Box::new(capture(cond, scope)),
-            then_expr: Box::new(capture(then_expr, scope)),
-            else_expr: Box::new(capture(else_expr, scope)),
-        },
+        } => Ok(Expr::Ternary {
+            cond: Box::new(capture(cond, scope, budget)?),
+            then_expr: Box::new(capture(then_expr, scope, budget)?),
+            else_expr: Box::new(capture(else_expr, scope, budget)?),
+        }),
         Expr::Member { obj, field } => {
-            let obj = capture(obj, scope);
+            let obj = capture(obj, scope, budget)?;
             if let Expr::Object { entries } = &obj {
                 if let Some(value) = entries.get(field) {
-                    return value.clone();
+                    return Ok(value.clone());
                 }
             }
-            Expr::Member {
+            Ok(Expr::Member {
                 obj: Box::new(obj),
                 field: field.clone(),
-            }
+            })
         }
-        Expr::Index { obj, index } => Expr::Index {
-            obj: Box::new(capture(obj, scope)),
-            index: Box::new(capture(index, scope)),
-        },
-        Expr::Assign { target, value } => Expr::Assign {
+        Expr::Index { obj, index } => Ok(Expr::Index {
+            obj: Box::new(capture(obj, scope, budget)?),
+            index: Box::new(capture(index, scope, budget)?),
+        }),
+        Expr::Assign { target, value } => Ok(Expr::Assign {
             target: target.clone(),
-            value: Box::new(capture(value, scope)),
-        },
-        _ => expr.clone(),
+            value: Box::new(capture(value, scope, budget)?),
+        }),
+        _ => Ok(expr.clone()),
     }
+}
+
+fn spend_capture_bytes(budget: &mut usize, bytes: usize) -> crate::Result<()> {
+    if bytes > *budget {
+        *budget = 0;
+        return Err(EvalError::runtime("生成值超过安全预算"));
+    }
+    *budget -= bytes;
+    Ok(())
 }
 
 pub(crate) fn each_var_name(expr: &Expr) -> Option<&str> {
