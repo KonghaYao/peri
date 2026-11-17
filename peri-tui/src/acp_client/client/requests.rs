@@ -168,10 +168,10 @@ impl AcpTuiClient {
         // History V2 只认服务端明确回显的 version=2 + selectedProfile=windowed。
         // 未请求、未回显或形状不符都保持关闭；本地开关与服务端事实同时为真才启用。
         let negotiated_v2 = crate::kit::history_v2::negotiate_from_initialize_response(&result);
+        let was_history_v2_capable = crate::kit::atoms::HISTORY_V2_CAPABLE.get();
         let history_v2 = match negotiated_v2 {
             Ok(Some(capability)) if history_v2_requested => {
-                self.set_history_v2_negotiation(true, capability.limits.clone());
-                crate::kit::atoms::HISTORY_V2_LIMITS.set(capability.limits);
+                self.set_history_v2_negotiation(true, capability.limits);
                 true
             }
             Ok(Some(_)) => {
@@ -198,8 +198,6 @@ impl AcpTuiClient {
                 false
             }
         };
-        let was_history_v2_capable = crate::kit::atoms::HISTORY_V2_CAPABLE.get();
-        crate::kit::atoms::HISTORY_V2_CAPABLE.set(history_v2);
         if !history_v2 && was_history_v2_capable {
             crate::kit::history_v2::reset_state();
         }

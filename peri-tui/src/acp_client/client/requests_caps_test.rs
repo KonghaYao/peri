@@ -315,5 +315,99 @@ async fn test_history_v2_declaration_requires_explicit_server_selection() {
     client.close();
     client2.close();
 }
+
+/// 协商写入收敛到单一入口：V2 连接的投影不得残留到下一条非 V2 连接。
+#[tokio::test]
+#[serial_test::serial]
+async fn non_v2_connection_resets_previous_negotiation_atoms() {
+    use peri_acp_types::history_v2::HistoryLimits;
+
+    crate::kit::atoms::HISTORY_V2.set(true);
+    crate::kit::atoms::HISTORY_WINDOW_V1.set(true);
+    crate::kit::atoms::HISTORY_V2_CAPABLE.set(false);
+    crate::kit::atoms::HISTORY_V2_LIMITS.set(HistoryLimits::default());
+
+    let selected = HistoryLimits {
+        default_items: 10,
+        ..HistoryLimits::default()
+    };
+    let response_meta = json!({
+        "peri.history": {
+            "version": 2,
+            "selectedProfile": "windowed",
+            "method": "_peri/history",
+            "notification": "_peri/history/changed",
+            "limits": &selected,
+        }
+    });
+
+    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client, notification_tx, _) = AcpTuiClient::new(client_transport);
+    client.spawn_pump(notification_tx);
+    let server = tokio::spawn(async move {
+        let IncomingMessage::Request { id, method, .. } = server_transport.recv().await.unwrap()
+        else {
+            panic!("应收到 initialize");
+        };
+        assert_eq!(method, "initialize");
+        server_transport
+            .send_response(
+                id,
+                Ok(json!({"agentCapabilities": {"_meta": response_meta}})),
+            )
+            .await
+            .unwrap();
+    });
+    client.register_ui_commands(&[]).await.unwrap();
+    server.await.unwrap();
+    assert!(
+        crate::kit::atoms::HISTORY_V2_CAPABLE.get(),
+        "第一条连接协商到 V2"
+    );
+    assert_eq!(
+        crate::kit::atoms::HISTORY_V2_LIMITS.state().read().clone(),
+        selected,
+        "第一条连接写入服务端预算"
+    );
+
+    // beta 关闭：第二条连接未请求 V2，不得继承上一条连接的能力与预算。
+    crate::kit::atoms::HISTORY_V2.set(false);
+    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client2, notification_tx, _) = AcpTuiClient::new(client_transport);
+    client2.spawn_pump(notification_tx);
+    let server = tokio::spawn(async move {
+        let IncomingMessage::Request { id, method, .. } = server_transport.recv().await.unwrap()
+        else {
+            panic!("应收到 initialize");
+        };
+        assert_eq!(method, "initialize");
+        server_transport
+            .send_response(id, Ok(json!({"agentCapabilities": {}})))
+            .await
+            .unwrap();
+    });
+    client2.register_ui_commands(&[]).await.unwrap();
+    server.await.unwrap();
+    assert!(
+        !crate::kit::atoms::HISTORY_V2_CAPABLE.get(),
+        "非 V2 连接必须清除投影能力"
+    );
+    assert_eq!(
+        crate::kit::atoms::HISTORY_V2_LIMITS.state().read().clone(),
+        HistoryLimits::default(),
+        "非 V2 连接不得残留上一条连接的预算"
+    );
+    assert_eq!(
+        client2.history_v2_limits(),
+        HistoryLimits::default(),
+        "连接事实同样回落到默认预算"
+    );
+
+    client.close();
+    client2.close();
+    crate::kit::atoms::HISTORY_V2_LIMITS.set(HistoryLimits::default());
+    crate::kit::atoms::HISTORY_WINDOW_V1.set(false);
+    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(false);
+}
 use peri_acp::transport::AcpTransport;
 use peri_acp::transport::mpsc::mpsc_transport_pair;

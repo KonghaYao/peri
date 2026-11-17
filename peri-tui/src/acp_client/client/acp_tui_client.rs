@@ -196,15 +196,26 @@ impl AcpTuiClient {
         self.history_v2_limits.lock().unwrap().clone()
     }
 
-    /// initialize 结果落账：能力与服务端预算绑定在同一条连接上。
+    /// initialize 结果落账：能力与服务端预算同时写入连接事实与 UI 投影。
+    ///
+    /// 连接事实用于本连接的 `session/load` 决策，不受其他连接或测试改写 atom 影响；
+    /// `HISTORY_V2_CAPABLE` / `HISTORY_V2_LIMITS` 是进程级 UI 投影。未协商到 V2 时
+    /// 预算回落到协议默认值，避免沿用上一条连接的协商结果。
     pub(crate) fn set_history_v2_negotiation(
         &self,
         capable: bool,
         limits: peri_acp_types::history_v2::HistoryLimits,
     ) {
+        let limits = if capable {
+            limits
+        } else {
+            peri_acp_types::history_v2::HistoryLimits::default()
+        };
         self.history_v2_capable
             .store(capable, std::sync::atomic::Ordering::Release);
-        *self.history_v2_limits.lock().unwrap() = limits;
+        *self.history_v2_limits.lock().unwrap() = limits.clone();
+        crate::kit::atoms::HISTORY_V2_CAPABLE.set(capable);
+        crate::kit::atoms::HISTORY_V2_LIMITS.set(limits);
     }
 
     #[cfg(test)]
