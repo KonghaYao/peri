@@ -34,7 +34,13 @@ use crate::kit::tui_render_unit::{
 pub(crate) const DEFERRED_TOOL_RESULT_TEXT: &str = "结果正文较大，展开后按需加载";
 
 /// 应用一次 V2 整体状态发布；调用方已保证事件串行。
-pub(super) fn handle_view(state: &mut BridgeState, v2: &HistoryV2State) {
+///
+/// `view_generation` 是发布时的视图代次；reset/rewind 之后到达的旧视图必须丢弃，
+/// 否则会用 reset 前的窗口覆盖回填内容。
+pub(super) fn handle_view(state: &mut BridgeState, v2: &HistoryV2State, view_generation: u64) {
+    if view_generation != atoms::HISTORY_V2_VIEW_GENERATION.get() {
+        return;
+    }
     let Some(session_id) = v2.session_id.as_deref() else {
         clear_prefix(state);
         return;
@@ -673,6 +679,7 @@ fn paging_note(window: &HistoryV2Window) -> Option<TuiRenderUnit> {
 pub(crate) fn view_event(state: HistoryV2State) -> AcpEventData {
     AcpEventData::HistoryV2ViewChanged {
         state: Box::new(state),
+        view_generation: atoms::HISTORY_V2_VIEW_GENERATION.get(),
     }
 }
 

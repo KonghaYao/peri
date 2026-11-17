@@ -204,9 +204,15 @@ pub fn publish_failure(session_id: &str, failure: HistoryV2Failure) {
     consumer::notify_view(&state);
 }
 
+/// 视图代次：reset 之前发布、仍在 FIFO 中的视图不得再改写桥接内容。
+fn bump_view_generation() {
+    atoms::HISTORY_V2_VIEW_GENERATION.set(atoms::HISTORY_V2_VIEW_GENERATION.get().wrapping_add(1));
+}
+
 /// 会话边界/切换连接时清空；在途响应随后按 sessionId 自判丢弃。
 pub fn reset_state() {
     live::clear_all_pending();
+    bump_view_generation();
     atoms::HISTORY_V2_STATE.set(HistoryV2State::default());
 }
 
@@ -216,6 +222,7 @@ pub fn reset_state() {
 /// 否则它们既不在快照高水位内、也不会被服务端重发。
 pub(crate) fn reset_state_preserving_pending(session_id: &str) {
     live::retain_pending_only(session_id);
+    bump_view_generation();
     atoms::HISTORY_V2_STATE.set(HistoryV2State::default());
 }
 
@@ -226,6 +233,7 @@ pub(crate) fn reset_state_preserving_pending(session_id: &str) {
 /// delivery 与已接纳高水位；不发布视图，避免旧窗口投影覆盖 rewind 回填内容。
 pub fn reset_for_rewind() {
     live::clear_all_pending();
+    bump_view_generation();
     let previous = atoms::HISTORY_V2_STATE.state().read().clone();
     let live_boundary = previous.live_boundary.map(|boundary| HistoryLiveBoundary {
         stream_id: boundary.stream_id,

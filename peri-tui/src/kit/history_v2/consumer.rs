@@ -162,6 +162,7 @@ pub(crate) fn notify_view(state: &HistoryV2State) {
         view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
         event: AcpEventData::HistoryV2ViewChanged {
             state: Box::new(state.clone()),
+            view_generation: atoms::HISTORY_V2_VIEW_GENERATION.get(),
         },
         active_session_id: state.session_id.clone().unwrap_or_default(),
     });

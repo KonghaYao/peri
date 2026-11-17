@@ -33,6 +33,7 @@ fn setup() -> V2Guard {
     atoms::HISTORY_V2_LIMITS.set(HistoryLimits::default());
     atoms::HISTORY_V2_PREFIX_LEN.set(0);
     atoms::HISTORY_V2_VIEW_EPOCH.set(0);
+    atoms::HISTORY_V2_VIEW_GENERATION.set(0);
     atoms::HISTORY_DETAIL_TARGETS.set(Vec::new());
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     V2Guard
@@ -124,6 +125,35 @@ fn dispatch_view(state: &mut BridgeState, v2: &crate::kit::history_v2::HistoryV2
         state,
         &crate::kit::acp_events::history_v2::view_event(v2.clone()),
     );
+}
+
+#[test]
+#[serial]
+fn view_queued_before_rewind_cannot_overwrite_the_backfill() {
+    let _guard = setup();
+    let v2 = admitted();
+    let mut state = make_fold_test_state();
+    state.active_session_id = "s1".into();
+    dispatch_view(&mut state, &v2);
+    assert_eq!(state.committed.len(), 2);
+
+    // 旧视图在 reset 之前入队；rewind 回填发生在它被桥接消费之前。
+    let stale = crate::kit::acp_events::history_v2::view_event(v2);
+    crate::kit::history_v2::reset_for_rewind();
+    state.committed.clear();
+    state
+        .committed
+        .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
+            "rewind".into(),
+        )));
+
+    dispatch_and_notify(&mut state, &stale);
+
+    assert_eq!(state.committed.len(), 1, "旧代次视图不得替换 rewind 回填");
+    assert!(matches!(
+        &state.committed[0],
+        TuiRenderUnit::TuiUserBubble(bubble) if bubble.text == "rewind"
+    ));
 }
 
 #[test]

@@ -467,6 +467,8 @@ pub enum AcpEventData {
     /// `consumer::publish_state` 发出本事件；桥接据此重建 `committed` 的 V2 前缀。
     HistoryV2ViewChanged {
         state: Box<crate::kit::history_v2::HistoryV2State>,
+        /// 发布时的视图代次；与当前代次不一致说明视图产生于 reset 之前。
+        view_generation: u64,
     },
 
     /// 回放条目位置标记：从 wire 的 `_meta.periEntryId` / `_meta.periPosition` 解出，

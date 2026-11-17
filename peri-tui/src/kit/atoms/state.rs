@@ -536,6 +536,9 @@ pub(crate) static HISTORY_V2_NEXT_KEY: std::sync::atomic::AtomicU64 =
 pub static HISTORY_V2_PREFIX_LEN: AtomStatic<usize> = AtomStatic::new(|| 0);
 /// H5c：上次投影的导航代次。代次变化（seek/reopen）时连同 live 尾部一起重建。
 pub static HISTORY_V2_VIEW_EPOCH: AtomStatic<u64> = AtomStatic::new(|| 0);
+/// H5c：History V2 视图代次。reset/rewind 时递增；已入队的旧视图携带旧代次，
+/// 桥接据此丢弃，不得覆盖 reset 后的回填内容。
+pub static HISTORY_V2_VIEW_GENERATION: AtomStatic<u64> = AtomStatic::new(|| 0);
 /// 桥接窗口当前代次；consumer 用它给页请求盖代次。
 pub static HISTORY_WINDOW_GENERATION: AtomStatic<u64> = AtomStatic::new(|| 0);
 /// S5.4 consumer 侧窗口请求/在途/待合并状态。
