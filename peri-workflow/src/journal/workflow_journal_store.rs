@@ -33,6 +33,9 @@ pub struct RunState {
     pub post_processing_status: PostProcessingStatus,
     #[serde(default)]
     pub delivery_status: DeliveryStatus,
+    /// 引擎级三态；与 acceptance 分开，旧 state.json 缺省为 `unknown`。
+    #[serde(default)]
+    pub outcome: peri_acp_types::workflow::WorkflowOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_intent: Option<peri_acp_types::workflow::WorkflowWriteIntent>,
     #[serde(default, skip_serializing_if = "limits_are_empty")]

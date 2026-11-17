@@ -480,6 +480,7 @@ impl WorkflowRunner {
             run_started,
             msg_rx,
             done_tx,
+            attempts: crate::journal::AttemptTracker::default(),
         };
         let mut msg_loop = tokio::spawn(message_loop.run());
 

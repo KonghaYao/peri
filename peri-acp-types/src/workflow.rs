@@ -63,6 +63,20 @@ pub enum AgentRunResult {
         reason: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+        /// Measured execution time for this attempt; `None` means not measured.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            rename = "durationMs"
+        )]
+        duration_ms: Option<u64>,
+        /// Output tokens observed before the attempt died; `None` means not reported.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            rename = "tokenCount"
+        )]
+        token_count: Option<u64>,
     },
 }
 
@@ -75,10 +89,12 @@ impl AgentRunResult {
         }
     }
 
-    /// 提取 agent 执行中的 token 消耗（仅 Ok 变体有值）
+    /// 提取 agent 执行中的 token 消耗（Ok 与带指标的 Dead 变体）
     pub fn token_count(&self) -> Option<u64> {
         match self {
-            AgentRunResult::Ok { token_count, .. } => *token_count,
+            AgentRunResult::Ok { token_count, .. } | AgentRunResult::Dead { token_count, .. } => {
+                *token_count
+            }
             _ => None,
         }
     }
@@ -314,6 +330,45 @@ pub enum DeliveryStatus {
     Unknown,
 }
 
+/// 引擎级结论：只聚合 execution 与 post-processing/delivery，不代替语义验收。
+///
+/// `Completed` 仅表示执行完成且 post-condition 未阻断；`acceptance_status` 仍是
+/// 独立字段，内核恒为 `unknown`（ADLC-DELIVERY-STATUS-001）。因此报告不得把
+/// `Completed` 读成“任务成功”，三态必须与 acceptance 分开呈现。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowOutcome {
+    Completed,
+    Blocked,
+    Failed,
+    Killed,
+    #[default]
+    Unknown,
+}
+
+impl WorkflowOutcome {
+    /// 单一派生点：execution 终态优先，其次 delivery/acceptance 阻断。
+    #[must_use]
+    pub fn project(
+        execution: ExecutionStatus,
+        acceptance: AcceptanceStatus,
+        delivery: DeliveryStatus,
+    ) -> Self {
+        match execution {
+            ExecutionStatus::Failed => Self::Failed,
+            ExecutionStatus::Killed => Self::Killed,
+            ExecutionStatus::Running | ExecutionStatus::Unknown => Self::Unknown,
+            ExecutionStatus::Completed => {
+                if acceptance == AcceptanceStatus::Failed || delivery == DeliveryStatus::Blocked {
+                    Self::Blocked
+                } else {
+                    Self::Completed
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkflowWriteIntent {
@@ -336,6 +391,10 @@ pub struct WorkflowAttempt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<u64>,
     pub journal_seq: u64,
+    /// 1-based execution attempt ordinal for this journal sequence. Host-enriched;
+    /// `None` for legacy entries and cache hits whose original ordinal is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_index: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovered_from: Option<RecoveredAttempt>,
     pub consumed: bool,
@@ -396,6 +455,9 @@ pub struct WorkflowTaskResult {
     pub post_processing_status: PostProcessingStatus,
     #[serde(default)]
     pub delivery_status: DeliveryStatus,
+    /// 引擎级三态（`completed` / `blocked` / `unknown`）；acceptance 仍是独立事实。
+    #[serde(default)]
+    pub outcome: WorkflowOutcome,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub state_artifact_exists: bool,
     pub duration_ms: u64,
@@ -456,6 +518,16 @@ fn delivery_status_word(status: DeliveryStatus) -> &'static str {
     }
 }
 
+fn outcome_word(outcome: WorkflowOutcome) -> &'static str {
+    match outcome {
+        WorkflowOutcome::Completed => "completed (engine-level; acceptance not judged)",
+        WorkflowOutcome::Blocked => "blocked",
+        WorkflowOutcome::Failed => "failed",
+        WorkflowOutcome::Killed => "killed",
+        WorkflowOutcome::Unknown => "unknown",
+    }
+}
+
 /// `return_value` **对象字段**的长文本外置阈值（**字节**，非字符数）：超过它的
 /// 字符串在写 `state.json` 前被抽出到 `outputs/<label>.txt`，原位替换为 `${label}`
 /// 引用。
@@ -501,8 +573,7 @@ impl WorkflowTaskResult {
     /// 主 Agent 是否应把 workflow 视为「成功交付」（非仅 engine 跑完）。
     #[must_use]
     pub fn agent_facing_success(&self) -> bool {
-        self.status == WorkflowRunStatus::Completed
-            && self.delivery_status != DeliveryStatus::Blocked
+        self.outcome == WorkflowOutcome::Completed
     }
 
     /// Defer / 通知用状态短语：`delivery_status=blocked` 时不得写 "completed"。
@@ -585,10 +656,12 @@ impl WorkflowTaskResult {
             "Result state file was not generated.\n".to_string()
         };
         let projection_line = format!(
-            "Execution: {}; acceptance: {}; post-condition: {}; delivery: {}.\n\
+            "Execution: {}; outcome: {}; acceptance: {}; post-condition: {}; delivery: {}.\n\
              Acceptance is judged outside the engine, so it reads `unknown` unless the calling \
-             layer (ADLC/skill) supplies a verdict.\n",
+             layer (ADLC/skill) supplies a verdict; outcome `completed` is engine-level and does \
+             not mean task success.\n",
             execution_status_word(self.execution_status),
+            outcome_word(self.outcome),
             acceptance_status_word(self.acceptance_status),
             post_condition_word(self.post_processing_status),
             delivery_status_word(self.delivery_status),

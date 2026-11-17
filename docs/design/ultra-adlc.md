@@ -102,7 +102,9 @@ postcondition 比较前后 porcelain 状态，不覆盖 ignored path，也可能
 Workflow engine 的 execution、acceptance、post-processing 和 delivery 四维独立解释。
 execution/post-processing 成功但 acceptance 未知时，delivery 仍为 `unknown`；明确执行失败、
 acceptance failed、缺少可验证 write intent 或 post-processing failed/blocked 才是 `blocked`；
-引擎不产出 `deliverable`，该判定由引擎之外的验收层给出。
+引擎不产出 `deliverable`，该判定由引擎之外的验收层给出。引擎另投影 `outcome`
+（completed/blocked/failed/killed/unknown）；它只聚合 execution 与 delivery，不代替验收，
+`outcome=completed` 不得写成任务成功。
 
 ### ADLC-COMPLETE-001
 

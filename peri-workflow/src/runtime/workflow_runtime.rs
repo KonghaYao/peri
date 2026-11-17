@@ -155,6 +155,8 @@ pub(super) fn cancelled_delivery_result(record: &WorkflowTaskRecord) -> AgentRun
             .reason
             .clone()
             .or_else(|| Some("workflow task cancelled".into())),
+        duration_ms: None,
+        token_count: None,
     }
 }
 

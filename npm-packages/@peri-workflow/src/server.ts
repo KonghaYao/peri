@@ -109,6 +109,7 @@ function createPorts(): WorkflowPorts {
             attempt: {
               runId: currentRunId,
               journalSeq: entry.seq,
+              attemptIndex: entry.attempt?.attemptIndex,
               recoveredFrom: {
                 runId: currentResumeRunId ?? currentRunId,
                 agentId: entry.attempt?.agentId,

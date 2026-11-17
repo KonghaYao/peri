@@ -48,6 +48,7 @@ pub(super) struct MessageLoop {
     pub(super) run_started: std::time::Instant,
     pub(super) msg_rx: tokio::sync::mpsc::Receiver<IncomingMessage>,
     pub(super) done_tx: watch::Sender<Option<WorkflowResult>>,
+    pub(super) attempts: crate::journal::AttemptTracker,
 }
 
 impl MessageLoop {
@@ -66,6 +67,7 @@ impl MessageLoop {
             run_started,
             mut msg_rx,
             done_tx,
+            mut attempts,
         } = self;
         let run_limits = input.limits.clone();
         let mut final_result = WorkflowResult {
@@ -154,6 +156,8 @@ impl MessageLoop {
                                         let result = AgentRunResult::Dead {
                                             reason: Some("invalid-params".into()),
                                             detail: Some(error.clone()),
+                                            duration_ms: Some(0),
+                                            token_count: None,
                                         };
                                         if let Err(error) =
                                             send_agent_result(&channel, &run_id, &rejected, &result)
@@ -190,8 +194,11 @@ impl MessageLoop {
                             }
                             continue;
                         };
+                        let agent_id = params.agent_id;
                         match sink.publish_agent_task(task_id.clone(), params) {
-                            AgentTaskPublish::Accepted => {}
+                            AgentTaskPublish::Accepted => {
+                                attempts.record_dispatch(&run_id, agent_id, &task_id);
+                            }
                             AgentTaskPublish::Closed => {
                                 // 关闭后不得登记（design §4.4 第 ① 步）：就地结算 Node
                                 // 等待方——任务不进入任务表，不能靠任务表终态投递收口。
@@ -201,6 +208,8 @@ impl MessageLoop {
                                         "workflow instance is closed and no longer accepts new tasks"
                                             .into(),
                                     ),
+                                    duration_ms: Some(0),
+                                    token_count: None,
                                 };
                                 if let Err(error) =
                                     send_agent_result(&channel, &run_id, &task_id, &result).await
@@ -245,10 +254,11 @@ impl MessageLoop {
                     }
                     "journal/append" => {
                         if let Some(p) = params {
-                            if let Ok(parsed) = crate::runner::run_protocol::parse_run_scoped::<
+                            if let Ok(mut parsed) = crate::runner::run_protocol::parse_run_scoped::<
                                 JournalAppendParams,
                             >(Some(p), &run_id)
                             {
+                                attempts.annotate(&mut parsed.entry);
                                 if let Err(e) = journal_store.append(&parsed.run_id, &parsed.entry)
                                 {
                                     warn!(target: "workflow", run_id = %parsed.run_id, error = %e, "journal/append: write failed");

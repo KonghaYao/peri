@@ -739,6 +739,8 @@ fn conflicting_late_settle_keeps_first_result() {
         Some(AgentRunResult::Dead {
             reason: Some("conflict".into()),
             detail: None,
+            duration_ms: None,
+            token_count: None,
         }),
         Some("conflict".into()),
     ) {

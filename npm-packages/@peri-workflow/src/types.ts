@@ -119,6 +119,8 @@ export type WorkflowAcceptanceStatus = 'passed' | 'failed' | 'unknown'
 export type WorkflowPostProcessingStatus = 'not_required' | 'passed' | 'failed' | 'blocked' | 'unknown'
 /** 内核只产出 `blocked` / `unknown`；历史 state.json 可能写着 `deliverable`，按 `unknown` 看待。 */
 export type WorkflowDeliveryStatus = 'blocked' | 'unknown'
+/** 引擎级三态/终态；`completed` 不代表验收通过（acceptance 仍是独立字段）。 */
+export type WorkflowOutcome = 'completed' | 'blocked' | 'failed' | 'killed' | 'unknown'
 
 export type AttemptDisposition = 'produced' | 'recovered' | 'rejected'
 
@@ -127,6 +129,8 @@ export type WorkflowAttempt = {
   /** Absent when the engine journal callback cannot prove the originating agent identity. */
   agentId?: number
   journalSeq: number
+  /** 1-based execution attempt ordinal; host-enriched, absent for legacy/cache entries. */
+  attemptIndex?: number
   recoveredFrom?: { runId: string; agentId?: number; journalSeq: number }
   consumed: boolean
   disposition: AttemptDisposition
@@ -144,6 +148,8 @@ export interface RunState {
   acceptance_status?: WorkflowAcceptanceStatus
   post_processing_status?: WorkflowPostProcessingStatus
   delivery_status?: WorkflowDeliveryStatus
+  /** Engine-level outcome; absent in legacy snapshots and never a task-success verdict. */
+  outcome?: WorkflowOutcome
   limits?: WorkflowLimits
   budget_total?: number
   /** Exact workflow script arguments; absent in legacy state snapshots. */

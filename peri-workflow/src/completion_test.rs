@@ -203,6 +203,7 @@ fn write_state_failure_is_logged_and_declares_stale_disk_state() {
         acceptance_status: AcceptanceStatus::Unknown,
         post_processing_status: PostProcessingStatus::Blocked,
         delivery_status: DeliveryStatus::Blocked,
+        outcome: peri_acp_types::workflow::WorkflowOutcome::Blocked,
         write_intent: None,
         limits: WorkflowLimits::default(),
         budget_total: None,

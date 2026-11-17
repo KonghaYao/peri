@@ -16,10 +16,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::protocol::JournalEntry;
 
+mod attempts;
+pub(crate) use attempt_tracker::AttemptTracker;
+use attempts as attempt_tracker;
 mod git_baseline;
 use git_baseline as git;
 mod output;
 pub use git::GitBaseline;
+pub use git::PostconditionFailure;
 pub use output::extract_long_texts;
 
 pub use workflow_journal_store::RunState;

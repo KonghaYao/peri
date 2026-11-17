@@ -90,9 +90,11 @@ fn completed_structured_output_validates_without_changing_wire_or_actual_usage()
         "effective",
         Instant::now(),
     );
-    assert!(matches!(invalid, AgentRunResult::Dead { reason, detail }
+    assert!(
+        matches!(invalid, AgentRunResult::Dead { reason, detail, .. }
         if reason.as_deref() == Some("no-structured-output")
-        && detail.as_deref() == Some("missing required field: answer")));
+        && detail.as_deref() == Some("missing required field: answer"))
+    );
 }
 
 #[test]
@@ -191,7 +193,7 @@ fn completed_structured_output_rejects_fractional_integer() {
 
     assert!(matches!(
         result,
-        AgentRunResult::Dead { reason, detail }
+        AgentRunResult::Dead { reason, detail, .. }
         if reason.as_deref() == Some("no-structured-output")
             && detail.as_deref()
                 == Some("field 'packet_revision': expected type 'integer', got 'number'")
@@ -222,7 +224,7 @@ fn completed_structured_output_rejects_missing_nested_required_field() {
 
     assert!(matches!(
         result,
-        AgentRunResult::Dead { reason, detail }
+        AgentRunResult::Dead { reason, detail, .. }
         if reason.as_deref() == Some("no-structured-output")
             && detail.as_deref() == Some("missing required field: attempts[0].attempt_number")
     ));
@@ -244,6 +246,23 @@ fn run_projection_keeps_forwarder_failure_priority_and_cancel_terminal() {
     );
     assert!(matches!(&failed.result, AgentRunResult::Dead { reason, .. }
         if reason.as_deref() == Some("event-forwarder-failed")));
+    let AgentRunResult::Dead {
+        duration_ms,
+        token_count,
+        ..
+    } = &failed.result
+    else {
+        panic!("forwarder failure must project to dead");
+    };
+    assert!(
+        duration_ms.is_some(),
+        "dead attempt must carry measured duration"
+    );
+    assert_eq!(
+        *token_count,
+        Some(0),
+        "observed token count must survive death"
+    );
     assert!(
         matches!(failed.telemetry_outcome(), TurnTelemetryOutcome::Failed { failure }
         if failure.public_message == "forwarder join failed")
@@ -263,6 +282,20 @@ fn run_projection_keeps_forwarder_failure_priority_and_cancel_terminal() {
             reason: PromptStopReason::Cancelled
         }
     ));
+    let AgentRunResult::Dead {
+        duration_ms,
+        token_count,
+        ..
+    } = &interrupted.result
+    else {
+        panic!("interrupt must project to dead");
+    };
+    assert!(
+        duration_ms.is_some(),
+        "interrupted dead attempt must carry duration"
+    );
+    assert_eq!(*token_count, Some(0));
+    assert_eq!(interrupted.result.token_count(), Some(0));
     let completed = crate::agent::workflow::agent::result::project_run_result(
         LoopResult::Completed,
         Ok(()),
@@ -304,6 +337,8 @@ fn workflow_terminal_status_follows_child_lifecycle_mapping() {
         crate::agent::workflow::agent::result::terminal_status(&AgentRunResult::Dead {
             reason: Some("interrupted".into()),
             detail: None,
+            duration_ms: None,
+            token_count: None,
         }),
         AgentStatus::Cancelled
     );
@@ -319,7 +354,9 @@ fn workflow_terminal_status_follows_child_lifecycle_mapping() {
         assert_eq!(
             crate::agent::workflow::agent::result::terminal_status(&AgentRunResult::Dead {
                 reason,
-                detail: None
+                detail: None,
+                duration_ms: None,
+                token_count: None,
             }),
             AgentStatus::Error
         );
@@ -349,6 +386,8 @@ fn workflow_terminal_status_after_incomplete_close() {
     let cancelled = AgentRunResult::Dead {
         reason: Some("interrupted".into()),
         detail: None,
+        duration_ms: None,
+        token_count: None,
     };
     assert_eq!(
         crate::agent::workflow::agent::result::terminal_status_after_close(&cancelled, false),
@@ -357,6 +396,8 @@ fn workflow_terminal_status_after_incomplete_close() {
     let failed = AgentRunResult::Dead {
         reason: None,
         detail: None,
+        duration_ms: None,
+        token_count: None,
     };
     assert_eq!(
         crate::agent::workflow::agent::result::terminal_status_after_close(&failed, false),

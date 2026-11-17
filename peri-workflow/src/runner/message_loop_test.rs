@@ -110,6 +110,7 @@ async fn run_messages(
         run_started: std::time::Instant::now(),
         msg_rx,
         done_tx,
+        attempts: crate::journal::AttemptTracker::default(),
     };
     message_loop.run().await;
     host.kill().await.expect("应回收本地管道进程");

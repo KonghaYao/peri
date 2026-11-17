@@ -5,6 +5,63 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PostconditionFailure {
+    /// 观察到的变化落在本 run 声明写入范围之外：可以报告，但不能归因给本 run。
+    Unattributed(String),
+    /// 可归因的后置条件违例（越界、HEAD 变化、提交含范围外路径等）。
+    Violation(String),
+}
+
+impl PostconditionFailure {
+    #[must_use]
+    pub fn is_violation(&self) -> bool {
+        matches!(self, Self::Violation(_))
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Unattributed(message) | Self::Violation(message) => message,
+        }
+    }
+}
+
+impl std::fmt::Display for PostconditionFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+impl std::error::Error for PostconditionFailure {}
+
+fn with_paths(message: &str, paths: &BTreeSet<String>) -> String {
+    const MAX_PATHS: usize = 20;
+    if paths.is_empty() {
+        return message.to_string();
+    }
+    let listed = paths
+        .iter()
+        .take(MAX_PATHS)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remaining = paths.len().saturating_sub(MAX_PATHS);
+    if remaining == 0 {
+        format!("{message}; paths: {listed}")
+    } else {
+        format!("{message}; paths: {listed} (+{remaining} more)")
+    }
+}
+
+fn unattributed(message: impl Into<String>) -> PostconditionFailure {
+    PostconditionFailure::Unattributed(message.into())
+}
+
+fn violation(message: impl Into<String>) -> PostconditionFailure {
+    PostconditionFailure::Violation(message.into())
+}
+
 #[derive(Debug, Clone)]
 pub struct GitBaseline {
     pub repo_root: PathBuf,
@@ -18,12 +75,17 @@ impl GitBaseline {
     ///
     /// `write` 必须位于可验证的 Git 仓库；legacy/read-only 在普通目录仍可执行，
     /// 但没有 baseline 时不能据此宣称 post-processing 或 delivery 已通过。
+    /// 未声明 intent 时没有可验证的后置条件，不捕获 baseline（也不再对并发变化
+    /// 报“不可归因”）：该 run 的 post-processing 只能是 blocked。
     pub fn capture_for_intent(
         cwd: &Path,
         intent: Option<&peri_acp_types::workflow::WorkflowWriteIntent>,
     ) -> Result<Option<Self>, String> {
         cwd.canonicalize()
             .map_err(|error| format!("cannot canonicalize workflow cwd: {error}"))?;
+        if intent.is_none() {
+            return Ok(None);
+        }
         match Self::capture(cwd) {
             Ok(baseline) => {
                 if let Some(intent) = intent {
@@ -124,7 +186,7 @@ impl GitBaseline {
     pub fn verify_postcondition(
         &self,
         intent: Option<&peri_acp_types::workflow::WorkflowWriteIntent>,
-    ) -> Result<(), String> {
+    ) -> Result<(), PostconditionFailure> {
         let Some(peri_acp_types::workflow::WorkflowWriteIntent::Write {
             path_allowlist,
             head_may_change,
@@ -134,38 +196,60 @@ impl GitBaseline {
         else {
             return self.verify_unchanged();
         };
-        let after = Self::capture(&self.cwd)?;
+        let after = Self::capture(&self.cwd).map_err(|error| {
+            unattributed(format!(
+                "cannot capture git postcondition baseline: {error}"
+            ))
+        })?;
         if after.repo_root != self.repo_root {
-            return Err("canonical git repository changed during workflow".to_string());
+            return Err(violation(
+                "canonical git repository changed during workflow",
+            ));
         }
-        let before = parse_status_paths(&self.status_porcelain_v2)?;
-        let after_status = parse_status_paths(&after.status_porcelain_v2)?;
+        let before = parse_status_paths(&self.status_porcelain_v2)
+            .map_err(|error| unattributed(format!("cannot parse baseline git status: {error}")))?;
+        let after_status = parse_status_paths(&after.status_porcelain_v2)
+            .map_err(|error| unattributed(format!("cannot parse post-run git status: {error}")))?;
         let changed_paths: BTreeSet<String> = before
             .keys()
             .chain(after_status.keys())
             .filter(|path| before.get(*path) != after_status.get(*path))
             .cloned()
             .collect();
-        if changed_paths.iter().any(|path| {
-            !path_allowlist
-                .iter()
-                .any(|allowed| path_is_allowed(path, allowed))
-        }) {
-            return Err("git changes escaped writeIntent.path_allowlist".to_string());
+        let escaped: BTreeSet<String> = changed_paths
+            .iter()
+            .filter(|path| {
+                !path_allowlist
+                    .iter()
+                    .any(|allowed| path_is_allowed(path, allowed))
+            })
+            .cloned()
+            .collect();
+        if !escaped.is_empty() {
+            return Err(violation(with_paths(
+                "git changes escaped writeIntent.path_allowlist",
+                &escaped,
+            )));
         }
         let head_changed = after.head != self.head;
         if head_changed && !head_may_change {
-            return Err("git HEAD changed but writeIntent.head_may_change is false".to_string());
+            return Err(violation(
+                "git HEAD changed but writeIntent.head_may_change is false",
+            ));
         }
         if commit_required == &Some(true) && !head_changed {
-            return Err("writeIntent requires a commit but git HEAD did not change".to_string());
+            return Err(violation(
+                "writeIntent requires a commit but git HEAD did not change",
+            ));
         }
         if head_changed {
             if before
                 .values()
                 .any(|record| record.starts_with('1') || record.starts_with('2'))
             {
-                return Err("cannot attribute a commit while the baseline index already contains staged changes".to_string());
+                return Err(violation(
+                    "cannot attribute a commit while the baseline index already contains staged changes",
+                ));
             }
             let committed = git_output(
                 &self.cwd,
@@ -176,35 +260,69 @@ impl GitBaseline {
                     "-r",
                     &after.head,
                 ],
-            )?;
-            let committed_paths =
-                String::from_utf8(committed).map_err(|_| "git commit path list is not UTF-8")?;
+            )
+            .map_err(|error| {
+                unattributed(format!("cannot inspect the committed path list: {error}"))
+            })?;
+            let committed_paths = String::from_utf8(committed)
+                .map_err(|_| unattributed("git commit path list is not UTF-8"))?;
             let path_items = committed_paths.lines();
-            for path in path_items {
-                if !path_allowlist
-                    .iter()
-                    .any(|allowed| path_is_allowed(path, allowed))
-                {
-                    return Err(
-                        "git commit contains a path outside writeIntent.path_allowlist".to_string(),
-                    );
-                }
+            let outside: BTreeSet<String> = path_items
+                .filter(|path| !path.is_empty())
+                .filter(|path| {
+                    !path_allowlist
+                        .iter()
+                        .any(|allowed| path_is_allowed(path, allowed))
+                })
+                .map(str::to_string)
+                .collect();
+            if !outside.is_empty() {
+                return Err(violation(with_paths(
+                    "git commit contains a path outside writeIntent.path_allowlist",
+                    &outside,
+                )));
             }
         }
         Ok(())
     }
 
     /// 验证运行后没有改写任何 Git 可见事实。失败只报告，不恢复用户内容。
-    pub fn verify_unchanged(&self) -> Result<(), String> {
-        let after = Self::capture(&self.cwd)?;
+    ///
+    /// 没有 write footprint 时发生的变化只能报告为未归因（`blocked`），不能当作
+    /// 本 run 的后置条件失败；真实的写意图越界由 `verify_postcondition` 判定。
+    pub fn verify_unchanged(&self) -> Result<(), PostconditionFailure> {
+        let after = Self::capture(&self.cwd).map_err(|error| {
+            unattributed(format!(
+                "cannot capture git postcondition baseline: {error}"
+            ))
+        })?;
         if after.repo_root != self.repo_root {
-            return Err("canonical git repository changed during workflow".to_string());
+            return Err(unattributed(
+                "canonical git repository changed outside the run's write footprint",
+            ));
         }
         if after.head != self.head {
-            return Err("git HEAD changed without an attributable write postcondition".to_string());
+            return Err(unattributed(
+                "git HEAD changed outside the run's write footprint; attribution unavailable",
+            ));
         }
         if after.status_porcelain_v2 != self.status_porcelain_v2 {
-            return Err("git index/worktree/untracked facts changed without an attributable write postcondition".to_string());
+            let before = parse_status_paths(&self.status_porcelain_v2).map_err(|error| {
+                unattributed(format!("cannot parse baseline git status: {error}"))
+            })?;
+            let after_status = parse_status_paths(&after.status_porcelain_v2).map_err(|error| {
+                unattributed(format!("cannot parse post-run git status: {error}"))
+            })?;
+            let changed_paths: BTreeSet<String> = before
+                .keys()
+                .chain(after_status.keys())
+                .filter(|path| before.get(*path) != after_status.get(*path))
+                .cloned()
+                .collect();
+            return Err(unattributed(with_paths(
+                "git index/worktree/untracked facts changed outside the run's write footprint; attribution unavailable",
+                &changed_paths,
+            )));
         }
         Ok(())
     }

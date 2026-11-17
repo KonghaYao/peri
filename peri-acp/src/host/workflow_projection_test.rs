@@ -203,6 +203,7 @@ async fn workflow_projection_requires_wire_and_acknowledges_only_accepted_termin
         acceptance_status: Default::default(),
         post_processing_status: Default::default(),
         delivery_status: Default::default(),
+        outcome: Default::default(),
         state_artifact_exists: false,
         duration_ms: 10,
         agent_count: 0,

@@ -51,6 +51,7 @@ fn terminal_result(run_id: &str) -> WorkflowTaskResult {
         acceptance_status: AcceptanceStatus::Unknown,
         post_processing_status: PostProcessingStatus::NotRequired,
         delivery_status: DeliveryStatus::Unknown,
+        outcome: Default::default(),
         state_artifact_exists: false,
         duration_ms: 100,
         agent_count: 0,
@@ -100,6 +101,7 @@ async fn test_complete_sends_notification() {
             acceptance_status: AcceptanceStatus::Unknown,
             post_processing_status: PostProcessingStatus::Blocked,
             delivery_status: DeliveryStatus::Blocked,
+            outcome: Default::default(),
             state_artifact_exists: false,
             duration_ms: 100,
             agent_count: 3,
@@ -155,6 +157,7 @@ async fn test_complete_retains_unacknowledged_run_with_status() {
             acceptance_status: AcceptanceStatus::Unknown,
             post_processing_status: PostProcessingStatus::Blocked,
             delivery_status: DeliveryStatus::Blocked,
+            outcome: Default::default(),
             state_artifact_exists: false,
             duration_ms: 100,
             agent_count: 3,
@@ -187,6 +190,7 @@ fn test_notification_includes_error_when_failed() {
         acceptance_status: AcceptanceStatus::Unknown,
         post_processing_status: PostProcessingStatus::Blocked,
         delivery_status: DeliveryStatus::Blocked,
+        outcome: Default::default(),
         state_artifact_exists: false,
         duration_ms: 58,
         agent_count: 0,
@@ -230,6 +234,7 @@ fn test_notification_preserves_and_limits_error() {
         acceptance_status: AcceptanceStatus::Unknown,
         post_processing_status: PostProcessingStatus::Blocked,
         delivery_status: DeliveryStatus::Blocked,
+        outcome: Default::default(),
         state_artifact_exists: false,
         duration_ms: 1,
         agent_count: 0,
@@ -253,6 +258,18 @@ fn test_notification_preserves_and_limits_error() {
 }
 
 #[test]
+fn blocked_outcome_is_not_agent_facing_success() {
+    let mut result = terminal_result("run-outcome");
+    result.outcome = peri_acp_types::workflow::WorkflowOutcome::Blocked;
+    result.delivery_status = DeliveryStatus::Blocked;
+    assert!(!result.agent_facing_success());
+
+    result.outcome = peri_acp_types::workflow::WorkflowOutcome::Completed;
+    result.delivery_status = DeliveryStatus::Unknown;
+    assert!(result.agent_facing_success());
+}
+
+#[test]
 fn test_notification_projects_structured_attempt_identity() {
     let result = WorkflowTaskResult {
         run_id: "019-current".into(),
@@ -263,6 +280,7 @@ fn test_notification_projects_structured_attempt_identity() {
         acceptance_status: AcceptanceStatus::Unknown,
         post_processing_status: PostProcessingStatus::Blocked,
         delivery_status: DeliveryStatus::Blocked,
+        outcome: Default::default(),
         state_artifact_exists: true,
         duration_ms: 1,
         agent_count: 0,
@@ -273,6 +291,7 @@ fn test_notification_projects_structured_attempt_identity() {
             run_id: "019-current".into(),
             agent_id: Some(17),
             journal_seq: 4,
+            attempt_index: Some(1),
             recovered_from: Some(peri_acp_types::workflow::RecoveredAttempt {
                 run_id: "018-source".into(),
                 agent_id: Some(9),
@@ -329,6 +348,7 @@ fn test_notification_includes_saved_state_only_when_artifact_exists() {
         acceptance_status: AcceptanceStatus::Passed,
         post_processing_status: PostProcessingStatus::NotRequired,
         delivery_status: DeliveryStatus::Unknown,
+        outcome: Default::default(),
         state_artifact_exists: true,
         duration_ms: 1000,
         agent_count: 2,

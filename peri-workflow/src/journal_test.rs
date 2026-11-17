@@ -1,12 +1,15 @@
 use crate::journal::git::GitBaseline;
+use crate::journal::AttemptTracker;
 use crate::journal::RunState;
 use crate::journal::WorkflowJournalStore;
 use crate::protocol::JournalEntry;
 use crate::protocol::{AgentRunResult, Usage};
 use peri_acp_types::workflow::AcceptanceStatus;
+use peri_acp_types::workflow::AttemptDisposition;
 use peri_acp_types::workflow::DeliveryStatus;
 use peri_acp_types::workflow::ExecutionStatus;
 use peri_acp_types::workflow::PostProcessingStatus;
+use peri_acp_types::workflow::WorkflowAttempt;
 
 use tempfile::TempDir;
 
@@ -145,6 +148,7 @@ fn test_write_and_read_state() {
         acceptance_status: AcceptanceStatus::Unknown,
         post_processing_status: PostProcessingStatus::Blocked,
         delivery_status: DeliveryStatus::Blocked,
+        outcome: peri_acp_types::workflow::WorkflowOutcome::Blocked,
         write_intent: None,
         limits: crate::protocol::WorkflowLimits::default(),
         budget_total: Some(9_007_199_254_740_991),
@@ -168,6 +172,11 @@ fn test_write_and_read_state() {
     assert_eq!(read.budget_total, Some(9_007_199_254_740_991));
     assert_eq!(read.args, Some(serde_json::json!({"task": "round-trip"})));
     assert_eq!(read.max_concurrency, 7);
+    assert_eq!(
+        read.outcome,
+        peri_acp_types::workflow::WorkflowOutcome::Blocked,
+        "state.json 必须保留独立的引擎级 outcome"
+    );
 }
 
 #[test]
@@ -201,6 +210,7 @@ fn test_state_error_field_round_trip() {
         acceptance_status: AcceptanceStatus::Unknown,
         post_processing_status: PostProcessingStatus::Failed,
         delivery_status: DeliveryStatus::Blocked,
+        outcome: peri_acp_types::workflow::WorkflowOutcome::Blocked,
         write_intent: None,
         limits: crate::protocol::WorkflowLimits::default(),
         budget_total: None,
@@ -241,6 +251,7 @@ fn test_state_error_skipped_when_none() {
         acceptance_status: AcceptanceStatus::Passed,
         post_processing_status: PostProcessingStatus::NotRequired,
         delivery_status: DeliveryStatus::Unknown,
+        outcome: peri_acp_types::workflow::WorkflowOutcome::Completed,
         write_intent: None,
         limits: crate::protocol::WorkflowLimits::default(),
         budget_total: None,
@@ -418,7 +429,16 @@ fn test_git_baseline_detects_unattributed_change_without_restoring_it() {
     .expect("the test fixture file must be writable");
 
     let error = baseline.verify_unchanged().unwrap_err();
-    assert!(error.contains("changed without an attributable"));
+    assert!(
+        !error.is_violation(),
+        "无 write footprint 时变化只能判为未归因"
+    );
+    let message = error.to_string();
+    assert!(message.contains("outside the run's write footprint"));
+    assert!(
+        message.contains("tracked.txt"),
+        "报告必须带可定位路径: {message}"
+    );
     assert_eq!(
         std::fs::read_to_string(tmp.path().join("tracked.txt"))
             .expect("the test fixture text file must be readable"),
@@ -518,10 +538,14 @@ fn test_write_postcondition_allows_only_allowlisted_change() {
         .expect("the verify postcondition fixture result is required for this assertion");
     std::fs::write(tmp.path().join("outside.txt"), "escaped\n")
         .expect("the test fixture file must be writable");
-    assert!(baseline
-        .verify_postcondition(Some(&intent))
-        .unwrap_err()
-        .contains("escaped"));
+    let error = baseline.verify_postcondition(Some(&intent)).unwrap_err();
+    assert!(error.is_violation(), "allowlist 越界必须是可归因违例");
+    let message = error.to_string();
+    assert!(message.contains("escaped"));
+    assert!(
+        message.contains("outside.txt"),
+        "越界报告必须带路径: {message}"
+    );
 }
 
 #[test]
@@ -783,4 +807,102 @@ fn test_extract_long_texts_preserves_content_when_output_write_fails() {
             .expect("the test fixture text file must be readable"),
         saved
     );
+}
+
+#[test]
+fn attempt_tracker_makes_engine_retries_visible_and_preserves_recovery() {
+    let mut tracker = AttemptTracker::default();
+    tracker.record_dispatch("run-1", 7, "task-1");
+    tracker.record_dispatch("run-1", 7, "task-2");
+    // 同一 task 的重复通知不得重复计数。
+    tracker.record_dispatch("run-1", 7, "task-2");
+    let mut entry = JournalEntry {
+        key: "key-7".into(),
+        seq: 7,
+        result: AgentRunResult::Skipped,
+        attempt: Some(WorkflowAttempt {
+            run_id: "run-1".into(),
+            agent_id: None,
+            journal_seq: 7,
+            attempt_index: None,
+            recovered_from: None,
+            consumed: true,
+            disposition: AttemptDisposition::Produced,
+        }),
+    };
+    tracker.annotate(&mut entry);
+    let attempt = entry.attempt.as_ref().expect("attempt must remain present");
+    assert_eq!(attempt.attempt_index, Some(2), "两次派发必须计为两次尝试");
+    assert_eq!(
+        attempt.agent_id,
+        Some(7),
+        "host 可证明的 agent identity 应回填"
+    );
+
+    let mut recovered = JournalEntry {
+        key: "key-8".into(),
+        seq: 8,
+        result: AgentRunResult::Skipped,
+        attempt: Some(WorkflowAttempt {
+            run_id: "run-1".into(),
+            agent_id: Some(8),
+            journal_seq: 8,
+            attempt_index: Some(3),
+            recovered_from: None,
+            consumed: true,
+            disposition: AttemptDisposition::Recovered,
+        }),
+    };
+    tracker.annotate(&mut recovered);
+    assert_eq!(
+        recovered
+            .attempt
+            .as_ref()
+            .and_then(|attempt| attempt.attempt_index),
+        Some(3),
+        "缓存恢复不得把旧尝试序号重置为本 run 的派发数"
+    );
+}
+
+#[test]
+fn no_write_intent_skips_git_baseline_even_inside_a_repository() {
+    let tmp = TempDir::new().expect("the temporary test directory must be available");
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(tmp.path())
+        .status()
+        .expect("the status fixture result is required for this assertion")
+        .success());
+    std::fs::write(tmp.path().join("tracked.txt"), "base\n")
+        .expect("the test fixture file must be writable");
+    assert!(std::process::Command::new("git")
+        .args(["add", "tracked.txt"])
+        .current_dir(tmp.path())
+        .status()
+        .expect("the status fixture result is required for this assertion")
+        .success());
+    assert!(std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Peri Test",
+            "-c",
+            "user.email=peri-test@example.invalid",
+            "commit",
+            "-qm",
+            "baseline",
+        ])
+        .current_dir(tmp.path())
+        .status()
+        .expect("the status fixture result is required for this assertion")
+        .success());
+
+    assert!(GitBaseline::capture_for_intent(tmp.path(), None)
+        .expect("without an intent there is no baseline to capture")
+        .is_none());
+    assert!(GitBaseline::capture_for_intent(
+        tmp.path(),
+        Some(&peri_acp_types::workflow::WorkflowWriteIntent::ReadOnly),
+    )
+    .expect("read-only still captures a verification baseline")
+    .is_some());
 }

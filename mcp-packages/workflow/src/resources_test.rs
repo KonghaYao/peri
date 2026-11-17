@@ -66,6 +66,7 @@ fn completed_workflow(run_id: &str) -> peri_workflow::registry::WorkflowTaskResu
         acceptance_status: Default::default(),
         post_processing_status: Default::default(),
         delivery_status: Default::default(),
+        outcome: Default::default(),
         state_artifact_exists: false,
         duration_ms: 1,
         agent_count: 0,

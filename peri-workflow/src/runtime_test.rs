@@ -120,6 +120,7 @@ async fn resume_rejects_unsafe_run_id_and_mismatched_state() {
                 acceptance_status: Default::default(),
                 post_processing_status: Default::default(),
                 delivery_status: Default::default(),
+                outcome: Default::default(),
                 write_intent: None,
                 limits: Default::default(),
                 budget_total: None,

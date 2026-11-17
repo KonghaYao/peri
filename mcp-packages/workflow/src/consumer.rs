@@ -77,6 +77,8 @@ impl WorkflowMcpServer {
                                     Some(AgentRunResult::Dead {
                                         reason: Some("consumer disconnected".into()),
                                         detail: None,
+                                        duration_ms: None,
+                                        token_count: None,
                                     }),
                                     Some("consumer disconnected".into()),
                                 );
