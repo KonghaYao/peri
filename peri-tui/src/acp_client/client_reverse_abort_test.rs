@@ -109,6 +109,7 @@ async fn test_aborted_transition_guard_queues_unexecuted_claims_once() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn test_aborted_real_transition_future_fails_closed_and_can_recover() {
     let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);

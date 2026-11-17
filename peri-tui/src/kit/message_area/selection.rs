@@ -65,6 +65,7 @@ struct SlotLinePart {
 pub(super) struct SlotLines {
     parts: Vec<SlotLinePart>,
     prefix: Vec<usize>,
+    genui_ranges: Vec<std::ops::Range<usize>>,
 }
 
 impl SlotLines {
@@ -119,7 +120,11 @@ impl SlotLines {
                     .saturating_add(part.end.saturating_sub(part.start)),
             );
         }
-        Self { parts, prefix }
+        Self {
+            parts,
+            prefix,
+            genui_ranges: Vec::new(),
+        }
     }
 
     #[must_use]
@@ -127,9 +132,19 @@ impl SlotLines {
         self.prefix.last().copied().unwrap_or(0)
     }
 
+    pub(super) fn with_genui_ranges(mut self, ranges: &[std::ops::Range<usize>]) -> Self {
+        self.genui_ranges = ranges.to_vec();
+        self
+    }
+
+    pub(super) fn is_genui_line(&self, logical: usize) -> bool {
+        super::render::is_genui_line(&self.genui_ranges, logical)
+    }
+
     pub(super) fn retained_metadata_bytes(&self) -> usize {
         self.parts.capacity() * std::mem::size_of::<SlotLinePart>()
             + self.prefix.capacity() * std::mem::size_of::<usize>()
+            + self.genui_ranges.capacity() * std::mem::size_of::<std::ops::Range<usize>>()
     }
 
     pub(super) fn get(&self, logical: usize) -> Option<&Line<'static>> {
@@ -253,7 +268,7 @@ pub(super) fn visual_to_logical(visual_row: usize, wrap_map: &[WrappedLineInfo])
 ///
 /// 返回值长度 = 视觉行数 + 1，元素依次是 row 0 起始 byte、row 1 起始 byte、...
 /// 末行结束 byte（= `plain.len()`）。
-fn wrap_byte_starts(line: &Line<'_>, plain: &str, width: u16) -> Vec<usize> {
+pub(super) fn wrap_byte_starts(line: &Line<'_>, plain: &str, width: u16) -> Vec<usize> {
     use ratatui_kit::ratatui::buffer::Buffer;
     use ratatui_kit::ratatui::layout::Rect;
     use ratatui_kit::ratatui::widgets::Widget;
@@ -651,7 +666,11 @@ pub(super) fn extract_visual_range_index(
         {
             materialized = Some((lookup.slot_index, index.materialize(lookup.slot_index)?));
         }
-        let line = materialized.as_ref()?.1.line(local_idx)?;
+        let slot_lines = &materialized.as_ref()?.1;
+        let line = slot_lines.line(local_idx)?;
+        if slot_lines.is_genui_line(local_idx) {
+            continue;
+        }
         let plain = text_selection::line_to_plain_text(line);
         // 台阶行（§6 ` ╰─╮` / ` ╭─╯`）是纯结构 chrome——整行跳过，既不进入
         // 复制文本也不为其保留空行。

@@ -132,6 +132,7 @@ pub(super) struct Transcript {
     retained_bytes: usize,
     clock: u64,
     frame: Option<u64>,
+    genui_revision: u64,
     /// [REQ-C01-3 / A20] 最近一次发布的重定位结果（仅当该次发布与一次更早历史并入配对）。
     /// 渲染 body 取走（一次性）后交给 `run_auto_follow` 的并入分支消费；
     /// 语义与身份口径见 [`super::viewport_anchor`]。
@@ -143,6 +144,8 @@ pub(super) struct Transcript {
     pub(super) scanned_slots: usize,
     pub(super) updated_slots: usize,
     pub(super) evictions: usize,
+    #[cfg(test)]
+    pub(super) genui_budget_checks: usize,
     pub(super) invalidation: &'static str,
 }
 
@@ -165,6 +168,10 @@ impl Transcript {
         self.scanned_slots = 0;
         self.updated_slots = 0;
         self.evictions = 0;
+        #[cfg(test)]
+        {
+            self.genui_budget_checks = 0;
+        }
         let structural_epoch = crate::kit::atoms::STRUCTURAL_EPOCH.get();
         let structural_changed = structural_epoch != self.structural_epoch_seen;
         if structural_changed {
@@ -279,6 +286,34 @@ impl Transcript {
                     self.enforce_budget(caches, &pinned);
                 }
             }
+        }
+        let genui_revision = crate::kit::genui::view_state::revision();
+        if self.genui_revision != genui_revision {
+            for slot in 0..caches.len() {
+                if caches[slot].entry.genui_state_changed() {
+                    let transition = zone_transition(&snapshot.items, slot);
+                    self.ensure_slot(
+                        slot,
+                        &snapshot.items[slot],
+                        caches,
+                        grid,
+                        width,
+                        &context,
+                        frame,
+                        transition,
+                    );
+                    let visible = self.index.visible_slots(
+                        scroll_y.min(self.index.total_visual().saturating_sub(height)),
+                        height,
+                    );
+                    self.enforce_budget(caches, &visible);
+                    #[cfg(test)]
+                    {
+                        self.genui_budget_checks += 1;
+                    }
+                }
+            }
+            self.genui_revision = genui_revision;
         }
         // ── [REQ-C01-3 / A20] 发布**后**的重定位：同一身份在新索引里重查视觉起点 ──
         // 只在「本次发布」与「一次更早历史并入」配对时产出：`HISTORY_PREPEND_EPOCH`
@@ -405,12 +440,16 @@ impl Transcript {
         cache.copy_button = cache.entry.copy_button().cloned();
         cache.interaction = cache.entry.interaction().cloned();
         cache.image_lines = cache.entry.image_lines().to_vec();
-        let lines = Arc::new(match cache.entry.markdown_lines().stable_overlay() {
-            Some((start, stable)) => {
-                SlotLines::composite(Arc::clone(cache.entry.lines()), start, stable)
-            }
-            None => SlotLines::single(Arc::clone(cache.entry.lines())),
-        });
+        cache.genui_buttons = cache.entry.genui_buttons().to_vec();
+        let lines = Arc::new(
+            (match cache.entry.markdown_lines().stable_overlay() {
+                Some((start, stable)) => {
+                    SlotLines::composite(Arc::clone(cache.entry.lines()), start, stable)
+                }
+                None => SlotLines::single(Arc::clone(cache.entry.lines())),
+            })
+            .with_genui_ranges(&cache.entry.markdown_lines().genui_ranges),
+        );
         if !layout_changed {
             Arc::make_mut(&mut self.index).replace_lines(slot, Arc::clone(&lines));
         } else {
@@ -477,7 +516,8 @@ impl Transcript {
             }
             caches[slot].evict();
             self.retained_bytes = self.retained_bytes.saturating_sub(self.bytes[slot]);
-            self.bytes[slot] = 0;
+            self.bytes[slot] = caches[slot].retained_bytes();
+            self.retained_bytes = self.retained_bytes.saturating_add(self.bytes[slot]);
             self.evictions += 1;
         }
         self.recency.extend(visible);
@@ -531,6 +571,10 @@ impl Transcript {
         Arc::clone(&self.index)
     }
 }
+
+#[cfg(test)]
+#[path = "genui_test.rs"]
+mod genui_tests;
 
 #[cfg(test)]
 #[path = "transcript_test.rs"]

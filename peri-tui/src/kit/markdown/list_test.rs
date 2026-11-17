@@ -13,6 +13,9 @@ fn render(md: &str) -> Vec<String> {
             MarkdownSegment::Text(lines) => lines.clone(),
             MarkdownSegment::Table(_) => Vec::new(),
             MarkdownSegment::Image(image) => image.lines.clone(),
+            MarkdownSegment::GenUi(segment) => {
+                crate::kit::genui::render(segment, 80, &peri_theme::builtin::dark_theme()).lines
+            }
         })
         .map(|line| {
             line.spans

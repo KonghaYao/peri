@@ -65,6 +65,10 @@ mod cache_lifecycle_tests;
 mod boundary_tests;
 
 #[cfg(test)]
+#[path = "genui_test.rs"]
+mod genui_tests;
+
+#[cfg(test)]
 #[path = "memory_test.rs"]
 mod memory_tests;
 
@@ -87,4 +91,4 @@ mod parser;
 pub use parser::*;
 
 pub use table::table_data_to_lines;
-pub use types::{ImageSegment, MarkdownSegment, TableData};
+pub use types::{GenUiSegment, ImageSegment, MarkdownSegment, TableData};

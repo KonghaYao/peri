@@ -828,6 +828,10 @@ msg-spinner-tokens = · ↓ { $count } tokens
 msg-spinner-brewed =   ✻  Brewed for { $duration }
 msg-keepgoing = Keep Going
 msg-copy-md = Copy
+genui-run-unsupported = gen-ui: @Run, Query and Mutation are not supported in the TUI.
+genui-open-url-unsupported = gen-ui: @OpenUrl is not supported in the TUI.
+genui-action-failed = gen-ui action failed: { $error }
+genui-partial-state-unsupported = gen-ui: state actions are disabled while the block is still streaming.
 msg-tip-prefix =   ⎿  Tip: 
 msg-todo-available =  (available)
 

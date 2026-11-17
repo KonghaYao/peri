@@ -50,7 +50,8 @@ pub fn parse_markdown(
     // [防御] ratatui-kit-markdown parser 在 finalize() 已修复未闭合 ``` 代码块，
     // 但 peri-tui 仍保留兜底：流式期间偶发 fence 计数为奇数时，主动补一个闭合 fence，
     // 保证未闭合代码块内容不被丢弃。简单按行扫描，3+ backtick 开头记一次 fence。
-    let sanitized = ensure_closed_code_fences(input);
+    let preprocessed = preprocess_genui_fences(input);
+    let sanitized = ensure_closed_code_fences(&preprocessed);
     // [图片前置扫描] sanitize 之后、rk_parse 之前：`![alt](url)` → 占位 token
     // （S1 §4 管线硬性约束）。Options 与 rk_parse 逐位一致（scan::md_options，
     // S3 §3.5 漂移风险）；side table 供 T3 convert 查表（token → ImageInfo）。
@@ -83,6 +84,7 @@ pub fn parse_markdown(
                 MarkdownSegment::Text(lines) => lines.len(),
                 MarkdownSegment::Table(table) => table.rows.len().saturating_add(1),
                 MarkdownSegment::Image(image) => image.lines.len(),
+                MarkdownSegment::GenUi(segment) => segment.source.lines().count(),
             })
             .sum::<usize>() as u64,
     );
@@ -98,7 +100,8 @@ pub(super) fn parse_markdown_piece(
     if input.is_empty() {
         return (Vec::new(), Vec::new());
     }
-    let sanitized = ensure_closed_code_fences(input);
+    let preprocessed = preprocess_genui_fences(input);
+    let sanitized = ensure_closed_code_fences(&preprocessed);
     let (placeholder, image_infos) = preprocess_images(&sanitized);
     let parsed = ratatui_kit_markdown::parse_markdown(&placeholder);
     let theme = MarkdownTheme::from_palette(&palette);
@@ -271,8 +274,58 @@ pub(super) fn segment_line_count(segments: &[MarkdownSegment]) -> u64 {
             MarkdownSegment::Text(lines) => lines.len(),
             MarkdownSegment::Table(table) => table.rows.len().saturating_add(1),
             MarkdownSegment::Image(image) => image.lines.len(),
+            MarkdownSegment::GenUi(segment) => segment.source.lines().count(),
         })
         .sum::<usize>() as u64
+}
+
+pub(super) const GENUI_BACKTICKS: &str = "\0GENUI_BACKTICKS\0";
+
+pub fn preprocess_genui_fences(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut end = 0;
+    for block in peri_genui::scan_blocks(input) {
+        output.push_str(&input[end..block.raw_range.start]);
+        output.push_str(if block.closed {
+            "```gen-ui\n"
+        } else {
+            "```gen-ui-partial\n"
+        });
+        // 扫描器的 source 已包含 opener_code，统一移到独立行以免被当作语言标签。
+        let mut chars = block.source.chars().peekable();
+        while let Some(character) = chars.next() {
+            if character != '`' {
+                output.push(character);
+                continue;
+            }
+            let mut count = 1;
+            while chars.peek() == Some(&'`') {
+                chars.next();
+                count += 1;
+            }
+            if count >= 3 {
+                // 每个占位符固定代表 3 个反引号，余数原样保留，避免 4 个以上被压缩。
+                for _ in 0..count / 3 {
+                    output.push_str(GENUI_BACKTICKS);
+                }
+                output.extend(std::iter::repeat_n('`', count % 3));
+            } else {
+                output.extend(std::iter::repeat_n('`', count));
+            }
+        }
+        if block.closed {
+            if !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str("```");
+            if block.raw.ends_with('\n') {
+                output.push('\n');
+            }
+        }
+        end = block.raw_range.end;
+    }
+    output.push_str(&input[end..]);
+    output
 }
 
 /// 检测未闭合 fenced code block：逐行统计 ``` fence 数，奇数则末尾补一个闭合 fence。
@@ -430,7 +483,8 @@ pub fn parse_markdown_cached(
     if input.is_empty() {
         return vec![];
     }
-    let sanitized = ensure_closed_code_fences(input);
+    let preprocessed = preprocess_genui_fences(input);
+    let sanitized = ensure_closed_code_fences(&preprocessed);
     // [图片前置扫描] 同 parse_markdown：sanitize 之后、rk_parse 之前替换为占位
     // token。占位替换后的文本是 rk_parse 输入，**也是缓存键**（S1 §2.3：
     // 占位替换必须参与缓存键，否则图片闭合瞬间 placeholder 前缀断裂时会
@@ -511,6 +565,7 @@ pub fn parse_markdown_cached(
                 MarkdownSegment::Text(lines) => lines.len(),
                 MarkdownSegment::Table(table) => table.rows.len().saturating_add(1),
                 MarkdownSegment::Image(image) => image.lines.len(),
+                MarkdownSegment::GenUi(segment) => segment.source.lines().count(),
             })
             .sum::<usize>() as u64,
     );

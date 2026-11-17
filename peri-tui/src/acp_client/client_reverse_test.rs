@@ -592,6 +592,7 @@ async fn test_ordinary_load_reservation_blocks_prompt_until_target_commits() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_multiple_load_reservations_release_only_after_last_guard() {
     let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
@@ -634,6 +635,7 @@ async fn test_multiple_load_reservations_release_only_after_last_guard() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_failed_load_dispatch_releases_reservation() {
     let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
@@ -749,6 +751,7 @@ async fn next_command_names(
 /// 必须继续排队。旧实现立即 Forward 新帧，再 flush 旧帧，导致启动后 `/` 列表
 /// 被不含 skill 的旧快照覆盖。
 #[tokio::test]
+#[serial]
 async fn test_new_session_flushes_notifications_in_wire_order_across_initialization() {
     let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);

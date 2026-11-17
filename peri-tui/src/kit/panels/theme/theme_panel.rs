@@ -100,6 +100,9 @@ pub(super) fn build_preview(theme_name: &str) -> Vec<Line<'static>> {
             MarkdownSegment::Text(lines) => lines.clone(),
             MarkdownSegment::Table(_) => vec![],
             MarkdownSegment::Image(_) => vec![],
+            MarkdownSegment::GenUi(segment) => {
+                crate::kit::genui::render(segment, PREVIEW_WIDTH, &theme).lines
+            }
         })
         .collect()
 }

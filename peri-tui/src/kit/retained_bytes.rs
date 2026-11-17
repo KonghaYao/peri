@@ -137,6 +137,14 @@ impl SeenAllocations {
         self.account_ptr(Arc::as_ptr(arc) as usize, bytes)
     }
 
+    pub fn account_arc_with<T>(&mut self, arc: &Arc<T>, bytes: impl FnOnce() -> usize) -> usize {
+        let ptr = Arc::as_ptr(arc) as usize;
+        if self.seen.contains_key(&ptr) {
+            return 0;
+        }
+        self.account_ptr(ptr, bytes())
+    }
+
     pub fn account_ptr(&mut self, ptr: usize, bytes: usize) -> usize {
         match self.seen.entry(ptr) {
             std::collections::hash_map::Entry::Occupied(_) => 0,

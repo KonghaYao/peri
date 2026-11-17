@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "peri-config",
+    "peri-genui",
     "peri-acp",
     "peri-acp-types",
     "peri-agent",
@@ -79,6 +80,8 @@ async-trait = "0.1"
 # --- Serde ecosystem ---
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
+indexmap = { version = "2.14", features = ["serde"] }
+icu_collator = "2.1"
 serde_norway = "0.9.42"
 
 # --- HTTP ---
