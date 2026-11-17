@@ -461,6 +461,16 @@ pub enum AcpEventData {
         reason: String,
     },
 
+    /// History V2 状态整体发布（本地事件，非 wire）。
+    ///
+    /// H5c 的全部 V2 触发（initial / page / seek / 失败恢复）都只经
+    /// `consumer::publish_state` 发出本事件；桥接据此重建 `committed` 的 V2 前缀。
+    HistoryV2ViewChanged {
+        state: Box<crate::kit::history_v2::HistoryV2State>,
+        /// 发布时的视图代次；与当前代次不一致说明视图产生于 reset 之前。
+        view_generation: u64,
+    },
+
     /// 回放条目位置标记：从 wire 的 `_meta.periEntryId` / `_meta.periPosition` 解出，
     /// 由 notifier 在实际回放通知**之前**注入桥接任务。
     ///

@@ -1,12 +1,15 @@
 use std::sync::Arc;
 
+use base64::Engine as _;
+use peri_acp_types::history_v2::{
+    DecimalU64 as V2U64, HISTORY_V2_VERSION, HistoryBodyChunk as V2BodyChunk, HistoryBodyKind,
+    HistoryEncoding, HistoryRepresentation,
+};
 use peri_acp_types::history_window::HistoryBodyChunk;
 
-use super::DETAIL_WINDOW_MAX_BYTES;
-use super::DetailError;
-use super::HistoryDetailWindow;
+use super::{DETAIL_WINDOW_MAX_BYTES, DetailError, HistoryDetailWindow};
 
-use crate::kit::history_window::{DetailDescriptor, HistorySource};
+use crate::kit::history_window::{DetailDescriptor, HistorySource, HistoryV2BodyBinding};
 
 #[must_use]
 fn descriptor(total: u64) -> DetailDescriptor {
@@ -28,6 +31,54 @@ fn chunk(offset: u64, bytes: &[u8], complete: bool, next: Option<u64>) -> Histor
         bytes: bytes.to_vec(),
         next_offset: next,
         complete,
+    }
+}
+
+fn v2_descriptor(total: u64) -> DetailDescriptor {
+    DetailDescriptor::new(
+        HistorySource::Own,
+        "s1:m1",
+        total,
+        256 * 1024,
+        "snap-1",
+        "ticket-1",
+    )
+    .with_v2(HistoryV2BodyBinding {
+        session_id: "s1".into(),
+        window_id: "w1".into(),
+        snapshot_token: "snap-1".into(),
+        read_ticket: "ticket-1".into(),
+        source: peri_acp_types::history_v2::HistorySource::Own,
+        entry_id: "s1:m1".into(),
+        sub_item_id: "s1:m1:0".into(),
+        body_ref: "body-1".into(),
+        representation: peri_acp_types::history_v2::HistoryRepresentation::DisplayText,
+        media_type: "text/plain".into(),
+    })
+}
+
+fn v2_chunk(
+    offset: u64,
+    bytes: &[u8],
+    complete: bool,
+    next: Option<u64>,
+    total: u64,
+) -> V2BodyChunk {
+    V2BodyChunk {
+        version: HISTORY_V2_VERSION,
+        kind: HistoryBodyKind::Body,
+        session_id: "s1".into(),
+        window_id: "w1".into(),
+        snapshot_token: "snap-1".into(),
+        body_ref: "body-1".into(),
+        content_version: "cv-1".into(),
+        representation: HistoryRepresentation::DisplayText,
+        encoding: HistoryEncoding::Base64,
+        offset: V2U64::new(offset),
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        next_offset: next.map(V2U64::new),
+        complete,
+        total_bytes: V2U64::new(total),
     }
 }
 
@@ -273,7 +324,7 @@ fn detail_scroll_event_path_uses_one_registered_request_per_chunk() {
     crate::kit::atoms::HISTORY_DETAIL
         .set(Some(HistoryDetailWindow::open(descriptor).expect("open")));
 
-    let first = super::scroll_detail_request(1).expect("first scroll must request a chunk");
+    let (first, _, _) = super::scroll_detail_request(1).expect("first scroll must request a chunk");
     assert_eq!(
         first.offset, 1024,
         "scroll_to registers the uncovered offset"
@@ -296,7 +347,8 @@ fn detail_scroll_event_path_uses_one_registered_request_per_chunk() {
         .expect("detail")
         .apply_chunk(chunk(1024, &vec![b'a'; 1024], false, Some(2048)), 1024)
         .expect("apply first request");
-    let second = super::scroll_detail_request(1).expect("second scroll must request a chunk");
+    let (second, _, _) =
+        super::scroll_detail_request(1).expect("second scroll must request a chunk");
     assert_eq!(second.offset, 2048);
     super::close_history_detail();
 }
@@ -566,4 +618,87 @@ fn detail_export_reports_prefix_gap_instead_of_copying_empty() {
         detail.last_error
     );
     super::close_history_detail();
+}
+
+#[test]
+fn v2_detail_renders_text_and_adopts_authoritative_total() {
+    // 页面描述符给的是 canonical 预估（5）；body 首块给出真实展示长度（11）。
+    let mut window = HistoryDetailWindow::open(v2_descriptor(5)).expect("open");
+    window
+        .apply_v2_chunk(&v2_chunk(0, b"hello ", false, Some(6), 11), 256 * 1024)
+        .expect("first chunk");
+    assert_eq!(window.descriptor.total_bytes, 11, "首块修正滚动范围");
+    assert_eq!(window.loaded_text().expect("utf8"), "hello ");
+
+    window
+        .apply_v2_chunk(&v2_chunk(6, b"world", true, None, 11), 256 * 1024)
+        .expect("second chunk");
+    assert_eq!(window.loaded_text().expect("utf8"), "hello world");
+    assert!(window.is_complete());
+    assert_eq!(window.scroll_to(10), None, "修正后的范围覆盖末尾");
+}
+
+#[test]
+fn v2_detail_rejects_later_total_mismatch() {
+    let mut window = HistoryDetailWindow::open(v2_descriptor(2048)).expect("open");
+    window
+        .apply_v2_chunk(&v2_chunk(0, b"hello", false, Some(5), 11), 256 * 1024)
+        .expect("first chunk");
+    let error = window
+        .apply_v2_chunk(&v2_chunk(5, b"world", true, None, 12), 256 * 1024)
+        .expect_err("后续块 total 不一致");
+    assert_eq!(error, DetailError::InvalidChunk);
+    assert_eq!(window.descriptor.total_bytes, 11);
+    assert_eq!(window.loaded_text().expect("utf8"), "hello");
+}
+
+#[test]
+fn v2_detail_rejects_chunks_from_a_different_body_version() {
+    let mut window = HistoryDetailWindow::open(v2_descriptor(11)).expect("open");
+    window
+        .apply_v2_chunk(&v2_chunk(0, b"hello ", false, Some(6), 11), 256 * 1024)
+        .expect("first chunk");
+    let mut changed = v2_chunk(6, b"world", true, None, 11);
+    changed.content_version = "cv-2".into();
+    let error = window
+        .apply_v2_chunk(&changed, 256 * 1024)
+        .expect_err("正文内容版本变化必须拒绝拼接");
+    assert_eq!(error, DetailError::InvalidChunk);
+    assert_eq!(window.chunk_count(), 1, "不一致的块不得并入");
+    assert_eq!(window.loaded_text().expect("utf8"), "hello ");
+}
+
+#[test]
+fn v2_detail_rejects_chunk_range_that_disagrees_with_wire() {
+    // complete 块只带 5 字节却声明 11 字节总长：若接受，next_request() 会跳过缺失字节。
+    let mut window = HistoryDetailWindow::open(v2_descriptor(11)).expect("open");
+    let error = window
+        .apply_v2_chunk(&v2_chunk(0, b"hello", true, None, 11), 256 * 1024)
+        .expect_err("complete 块必须恰好止于 totalBytes");
+    assert_eq!(error, DetailError::InvalidChunk);
+    assert!(!window.is_complete());
+    assert!(window.chunk_arc(0).is_none(), "拒绝的块不得进入保留窗口");
+
+    // 非 EOF 块必须止于 nextOffset；否则同样会留下无法请求的空洞。
+    let error = window
+        .apply_v2_chunk(&v2_chunk(0, b"hello", false, Some(9), 11), 256 * 1024)
+        .expect_err("nextOffset 必须等于 offset + 解码长度");
+    assert_eq!(error, DetailError::InvalidChunk);
+    assert!(window.chunk_arc(0).is_none());
+}
+
+#[test]
+fn reopening_same_detail_slot_assigns_a_new_generation() {
+    let first = HistoryDetailWindow::open(descriptor(4)).expect("open");
+    let second = HistoryDetailWindow::open(descriptor(4)).expect("open");
+    assert_ne!(
+        first.opening(),
+        second.opening(),
+        "同一槽位每次打开都必须有唯一代次"
+    );
+    assert!(first.accepts_opening(first.opening()));
+    assert!(
+        !second.accepts_opening(first.opening()),
+        "新窗口不得接受旧窗口的在途响应"
+    );
 }

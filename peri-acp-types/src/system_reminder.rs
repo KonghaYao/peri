@@ -271,6 +271,12 @@ fn valid_identifier(value: &str) -> bool {
         && value.as_bytes()[0].is_ascii_lowercase()
 }
 
+/// `valid_identifier` 的只读视图：供有界历史前缀判定复用同一 schema 规则，
+/// 不给 adapter 复制一份标识符规则。
+pub fn reminder_identifier_is_valid(value: &str) -> bool {
+    valid_identifier(value)
+}
+
 /// Trusted provenance is deliberately non-serializable.
 ///
 /// Only an explicit [`TrustedSystemReminderFactory`] at a trusted producer or recovery boundary can

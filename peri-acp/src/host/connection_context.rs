@@ -110,19 +110,32 @@ pub(crate) struct ConnectionContext {
     apps_enabled: bool,
     session_switch: Arc<parking_lot::Mutex<SessionSwitchState>>,
     pub(crate) acp_mcp: Arc<peri_acp_types::acp_mcp::AcpMcpRegistry>,
+    /// 本连接的 History V2 服务（窗口与幂等账本不跨连接共享）。
+    pub(crate) history_v2: std::sync::Arc<super::history_service::HistoryV2Service>,
+    /// 本连接的实时投递注册表（按会话索引；连接关闭时整体清理）。
+    pub(crate) live: std::sync::Arc<super::live_delivery::LiveDelivery>,
+    /// 测试专用历史后端注入点；生产连接恒为 `None`（`#[cfg(test)]`，不进入 API）。
+    #[cfg(test)]
+    pub(crate) history_v2_backend_override:
+        Option<std::sync::Arc<dyn peri_acp_types::history_v2::HistoryV2Backend>>,
     cancellation: tokio_util::sync::CancellationToken,
 }
 
 impl ConnectionContext {
     pub(crate) fn new(apps_enabled: bool) -> Self {
+        let id = uuid::Uuid::now_v7().to_string();
         Self {
-            id: uuid::Uuid::now_v7().to_string(),
+            id: id.clone(),
             lifecycle: ConnectionLifecycle::Open,
             initialized: false,
             negotiated_caps: None,
             apps_enabled,
             session_switch: Default::default(),
             acp_mcp: Default::default(),
+            history_v2: std::sync::Arc::new(super::history_service::HistoryV2Service::system()),
+            live: std::sync::Arc::new(super::live_delivery::LiveDelivery::for_connection(id)),
+            #[cfg(test)]
+            history_v2_backend_override: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -186,6 +199,19 @@ impl ConnectionContext {
                 .is_some_and(|caps| caps.history_window_v1)
     }
 
+    /// `peri.history` V2 准入：只有本连接成功协商出 `HistoryServerCapability` 才为 true。
+    ///
+    /// 与分页/窗口同一失败关闭规则：未 `initialize`、未请求 V2，或协商失败（不提交
+    /// caps）都不会把连接变成 V2。后续 `_peri/history` 分流必须读本方法。
+    pub(crate) fn history_v2(&self) -> bool {
+        self.initialized
+            && self
+                .negotiated_caps
+                .as_ref()
+                .and_then(|caps| caps.history_v2.as_ref())
+                .is_some()
+    }
+
     pub(crate) fn mcp_control_v1(&self) -> bool {
         self.initialized
             && self.lifecycle == ConnectionLifecycle::Open
@@ -208,8 +234,27 @@ impl ConnectionContext {
             apps_enabled: self.apps_enabled,
             session_switch: Arc::clone(&self.session_switch),
             acp_mcp: self.acp_mcp.clone(),
+            history_v2: self.history_v2.clone(),
+            live: self.live.clone(),
+            #[cfg(test)]
+            history_v2_backend_override: self.history_v2_backend_override.clone(),
             cancellation: self.cancellation.clone(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_history_v2_backend_override(
+        &mut self,
+        backend: std::sync::Arc<dyn peri_acp_types::history_v2::HistoryV2Backend>,
+    ) {
+        self.history_v2_backend_override = Some(backend);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn history_v2_backend_for_test(
+        &self,
+    ) -> Option<std::sync::Arc<dyn peri_acp_types::history_v2::HistoryV2Backend>> {
+        self.history_v2_backend_override.clone()
     }
 
     pub(crate) fn reserve_session_setup_for(
@@ -325,6 +370,7 @@ impl ConnectionContext {
             connection_id: self.id.clone(),
             history_pagination: self.history_pagination(),
             history_window_v1: self.history_window_v1(),
+            history_v2: self.history_v2(),
             mcp_control_v1: self.mcp_control_v1(),
             caps: self.caps(),
             admission_caps: self.admission_caps(),
@@ -341,6 +387,8 @@ pub(crate) struct ConnectionFacts {
     pub(crate) history_pagination: bool,
     /// `peri.historyWindowV1` 是否由**当前连接**协商。与分页独立、失败关闭。
     pub(crate) history_window_v1: bool,
+    /// `peri.history` V2 是否由**当前连接**成功协商（存在服务端回显）。失败关闭。
+    pub(crate) history_v2: bool,
     pub(crate) mcp_control_v1: bool,
     /// **当前连接**的 peri 能力集（[`ConnectionContext::caps`] 的原样取值）。
     ///
@@ -365,6 +413,7 @@ impl ConnectionFacts {
             connection_id: "unnegotiated-test".into(),
             history_pagination: false,
             history_window_v1: false,
+            history_v2: false,
             mcp_control_v1: false,
             caps: PeriCaps::all_enabled(),
             admission_caps: PeriCaps::default(),

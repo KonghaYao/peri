@@ -8,6 +8,7 @@ mod compact;
 mod display_retention;
 mod fold;
 mod history_page;
+pub(crate) mod history_v2;
 pub(crate) mod history_window;
 mod live_seal;
 pub(crate) mod live_tool_links;

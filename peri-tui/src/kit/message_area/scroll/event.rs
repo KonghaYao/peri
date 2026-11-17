@@ -74,7 +74,11 @@ pub(super) fn request_newer_page_at_scroll_facts(
     if !viewport_at_backward_boundary(follow_bottom, offset, content_length, viewport_length) {
         return false;
     }
-    crate::kit::history_page_consumer::request_window_newer_page_if_due()
+    if crate::kit::history_v2::consumer::v2_path_active() {
+        crate::kit::history_v2::consumer::request_newer_page_if_due()
+    } else {
+        crate::kit::history_page_consumer::request_window_newer_page_if_due()
+    }
 }
 
 fn request_newer_page_after_scroll(
@@ -111,6 +115,25 @@ fn request_pages_after_scroll(
 pub(super) fn request_gap_page_after_scroll(
     direction: Option<crate::kit::history_window::GapSeekDirection>,
 ) -> bool {
+    if crate::kit::history_v2::consumer::v2_path_active() {
+        // V2 的缺口由 reducer 的 coverage 判定，不依赖 V1 窗口视口锚点。
+        // 同一滚动事件可能刚排队 page；在途时再 seek 会取消它并跳到缺口。
+        // 方向未知（滚动条跳转等）同样不主动 seek：V2 没有视口↔gap 映射，
+        // 只按已知滚动方向做最小回读。
+        if direction.is_none() {
+            return false;
+        }
+        let busy = crate::kit::atoms::HISTORY_V2_STATE
+            .state()
+            .read()
+            .window
+            .as_ref()
+            .is_some_and(|window| window.paging.in_flight.is_some());
+        if busy {
+            return false;
+        }
+        return crate::kit::history_v2::consumer::request_gap_if_due();
+    }
     if !crate::kit::history_page_consumer::window_path_enabled() {
         return false;
     }

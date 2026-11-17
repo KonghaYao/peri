@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::service_registry::ProcessResourceMonitor;
-
+use crate::kit::acp_notifier::BridgeSink;
 use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::app_shell::AppShell;
 use crate::kit::ask_user_action::AskUserResponseAction;
@@ -29,7 +29,7 @@ use crate::kit::service_snapshot::SnapshotSource;
 use crate::kit::submit_request::SubmitRequest;
 use crate::kit::thread_load_consumer::ThreadLoadDispatcher;
 
-use crate::launch::TuiLaunchOptions;
+use crate::launch::{TuiLaunchOptions, teardown_app};
 use ratatui_kit::crossterm::event::DisableBracketedPaste;
 use ratatui_kit::crossterm::event::DisableMouseCapture;
 use ratatui_kit::crossterm::event::EnableBracketedPaste;
@@ -86,6 +86,18 @@ pub async fn run_kit_fullscreen(
             )
         });
     crate::kit::history_window::apply_history_window_beta(history_window_beta);
+    // H5a：History V2 本地 beta 默认关闭；只有显式 `history-v2=true` 才尝试协商。
+    // 是否真正启用仍由 initialize 的服务端回显决定（fail-closed）。
+    let history_v2_beta = app
+        .config_source
+        .snapshot()
+        .map(|snapshot| {
+            crate::kit::history_v2::history_v2_beta_enabled_from_flags(snapshot.flags())
+        })
+        .unwrap_or_else(|| {
+            crate::kit::history_v2::history_v2_beta_enabled(&app.services.peri_config.read())
+        });
+    crate::kit::history_v2::apply_history_v2_beta(history_v2_beta);
     // 2b0. 从 AppConfig.extra 提取旧 TUI 键初始化 TuiConfig（向后兼容）
     {
         let cfg = app.services.peri_config.read();
@@ -397,22 +409,34 @@ pub async fn run_kit_fullscreen(
                 shutdown.clone(),
             );
 
+        // 4b2c. HISTORY_V2 channel：H5c 的 open/page/seek/详情正文（V2 激活时唯一入口）。
+        // 与 V1 窗口队列互斥：`window_path_enabled()` 在 V2 激活时返回 false。
+        let (history_v2_tx, history_v2_rx) = mpsc::unbounded_channel();
+        *atoms::HISTORY_V2_TX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(history_v2_tx);
+        let _history_v2_consumer = crate::kit::history_v2::consumer::spawn_history_v2_consumer(
+            client.clone(),
+            history_v2_rx,
+            shutdown.clone(),
+        );
+
         // 4a2. CANCEL channel：event_handlers Ctrl+C → cancel_consumer
         let (cancel_tx, cancel_rx) = mpsc::unbounded_channel::<()>();
         let _ = atoms::CANCEL_TX.set(cancel_tx);
 
-        // 4c. bridge channel：notifier → acp_bridge
+        // 4c. bridge channel：唯一 forwarder → acp_bridge
         let (bridge_tx, bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
-        // LOCAL_EVENT_TX：input_area 本地提交 → acp_bridge
+        // LOCAL_EVENT_TX：本地提交、V2 视图/恢复重放与 notifier 实时通知的唯一有序
+        // 入口。notifier 也写入这条 FIFO，恢复重放未转发完时实时通知不会越序到达
+        // bridge；有界背压只作用在 forwarder 与 bridge 之间。
         let (local_event_tx, mut local_event_rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
-        let _ = atoms::LOCAL_EVENT_TX.set(local_event_tx);
-        // Mini bridge task：转发 local event 到 bridge channel。local event 由
-        // 用户输入节奏驱动、单任务串行产生，故保留无界入口；写入 bridge 的
-        // 边界仍受 BRIDGE_QUEUE_CAPACITY 约束。
-        let bridge_tx_clone = bridge_tx.clone();
+        atoms::install_local_event_tx(local_event_tx.clone());
+        // Mini bridge task：把本地 FIFO 串行送入 bridge。local event 由用户输入节奏
+        // 驱动，入口保持无界；写入 bridge 的边界仍受 BRIDGE_QUEUE_CAPACITY 约束。
         tokio::spawn(async move {
             while let Some(ev) = local_event_rx.recv().await {
-                if bridge_tx_clone.send(ev).await.is_err() {
+                if bridge_tx.send(ev).await.is_err() {
                     break;
                 }
             }
@@ -421,7 +445,7 @@ pub async fn run_kit_fullscreen(
         // 4d. 启动三链路（render_bridge 已删除）
         let _notifier_handle = crate::kit::acp_notifier::spawn_kit_notifier_with_client(
             notification_rx,
-            bridge_tx,
+            BridgeSink::ordered(local_event_tx),
             shutdown.clone(),
             client.clone(),
         );
@@ -450,7 +474,22 @@ pub async fn run_kit_fullscreen(
                 )
                 .collect();
         if let Err(error) = client.register_ui_commands(&specs).await {
+            if crate::kit::atoms::HISTORY_V2.get() {
+                // beta 开启时 initialize 失败不能继续：后续 session/new|load 会落到标准
+                // 全量回放，UI 看起来正常但协议已与用户选择不符。启动期显式失败。
+                shutdown.cancel();
+                client.close();
+                teardown_app(&mut app).await;
+                return Err(anyhow::anyhow!(
+                    "History V2 initialize failed: {error}. 服务端未启用/不支持 History V2；关闭 beta 后重试"
+                ));
+            }
             tracing::warn!(error = %error, "kit: ui command capability negotiation failed");
+        } else if let Err(message) = client.require_history_v2_startup() {
+            shutdown.cancel();
+            client.close();
+            teardown_app(&mut app).await;
+            return Err(anyhow::anyhow!(message));
         }
         let _steer_handle = crate::kit::steer_consumer::spawn_steer_consumer(
             client.clone(),
@@ -607,6 +646,29 @@ pub async fn run_kit_fullscreen(
             }
         }
     });
+
+    // 5a2. SIGTERM 走正常退出：外部停止（PTY/服务管理）若直接终止进程，host 来不及
+    // 排空 turn 的 durable 工作意图，下一次进入会把刚完成的会话误判为中断恢复。
+    // 复用 /exit 的退出通道，让 fullscreen 返回后执行既有的 shutdown + teardown。
+    #[cfg(unix)]
+    {
+        let sigterm_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let Ok(mut sigterm) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            else {
+                return;
+            };
+            tokio::select! {
+                _ = sigterm_shutdown.cancelled() => {}
+                _ = sigterm.recv() => {
+                    tracing::info!("SIGTERM received; requesting graceful TUI shutdown");
+                    atoms::EXIT_REQUESTED.set(true);
+                    atoms::RENDER_HEARTBEAT.set(atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
+                }
+            }
+        });
+    }
 
     let result = element!(AppShell).fullscreen().await;
     let _ = execute!(

@@ -7,6 +7,7 @@ use super::INPUT_BUFFER;
 use super::NOTIFICATION;
 use super::RENDER_HEARTBEAT;
 use super::mpsc;
+use super::{BridgeSink, spawn_kit_notifier, spawn_kit_notifier_with_client};
 
 use crate::acp_client::AcpTuiClient;
 
@@ -22,7 +23,7 @@ fn spawn_test_notifier() -> (
         mpsc::channel(crate::acp_client::client::NOTIFICATION_QUEUE_CAPACITY);
     let (bridge_tx, bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let shutdown = CancellationToken::new();
-    let _handle = super::spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
+    let _handle = spawn_kit_notifier(notif_rx, BridgeSink::direct(bridge_tx), shutdown.clone());
     (notif_tx, bridge_rx, shutdown)
 }
 
@@ -36,8 +37,12 @@ async fn bridge_delivery_failure_claims_and_settles_registered_interaction() {
     let (bridge_tx, bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     drop(bridge_rx);
     let shutdown = CancellationToken::new();
-    let _notifier =
-        super::spawn_kit_notifier_with_client(notification_rx, bridge_tx, shutdown.clone(), client);
+    let _notifier = spawn_kit_notifier_with_client(
+        notification_rx,
+        BridgeSink::direct(bridge_tx),
+        shutdown.clone(),
+        client,
+    );
 
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(2),
@@ -190,7 +195,11 @@ async fn test_real_wiring_transport_death_resets_loading() {
     client.spawn_pump(notification_tx);
     let (bridge_tx, _bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let shutdown = CancellationToken::new();
-    let _h = super::spawn_kit_notifier(notification_rx, bridge_tx, shutdown.clone());
+    let _h = spawn_kit_notifier(
+        notification_rx,
+        BridgeSink::direct(bridge_tx),
+        shutdown.clone(),
+    );
 
     // 模拟生产 wiring 的额外 client 克隆（ACP_CLIENT_HANDLE / consumer / panel）
     let extra_clone = client.clone();
@@ -241,7 +250,7 @@ async fn unreachable_failure_event_converges_via_notification_close() {
         mpsc::channel(crate::acp_client::client::NOTIFICATION_QUEUE_CAPACITY);
     let (bridge_tx, _bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let shutdown = CancellationToken::new();
-    let handle = super::spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
+    let handle = spawn_kit_notifier(notif_rx, BridgeSink::direct(bridge_tx), shutdown.clone());
     // 不发送 AgentExecutionFailed；直接模拟 transport 关闭。
     drop(notif_tx);
 

@@ -51,6 +51,7 @@ pub(super) use session_lifecycle_dispatch::attach_session_workflow;
 
 pub(crate) use session_lifecycle_dispatch::handle_initialize;
 
+pub(crate) use session_lifecycle_dispatch::initialize_client_meta;
 pub(crate) use session_lifecycle_dispatch::initialize_peri_caps;
 
 pub(super) use session_lifecycle_dispatch::enabled_meta_sections;

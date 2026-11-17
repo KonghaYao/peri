@@ -511,6 +511,68 @@ async fn rewind_past_the_fixed_tail_invalidates_the_old_snapshot() {
 }
 
 #[tokio::test]
+async fn rewind_past_tail_invalidates_old_window_body_and_metadata_reads() {
+    let history = super::payloads(6);
+    let (_store, data, _directory) = session_with_history(&history).await;
+    let id = WINDOW_SESSION.to_owned();
+    let opened = data
+        .load_history_window_page(
+            &id,
+            &HistoryWindowPagePlan::open(
+                HistorySource::Own,
+                None,
+                HistoryWindowDirection::Before,
+                2,
+                0,
+                BUDGET,
+            ),
+        )
+        .await
+        .unwrap();
+    let tail = opened.committed_tail.clone();
+
+    data.rewind_history(&id, RewindBoundary::KeepThrough(history[3].id()), &[])
+        .await
+        .unwrap();
+
+    // 更早条目仍在，但旧 tail 行已被 rewind 删除：旧窗口的正文读取必须与页读取
+    // 同一判据，不能只按 `rowid <= tail.position` 读到失效快照内的内容。
+    let error = data
+        .load_history_body_chunk(
+            &id,
+            HistorySource::Own,
+            history[2].id(),
+            0,
+            16,
+            tail.as_ref(),
+            &peri_acp_types::history_window::HistoryReadTicket::new("ticket"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.history_window_error().map(|error| error.code()),
+        Some(-32012),
+        "旧窗口的正文读取必须返回 window_invalidated"
+    );
+
+    let error = data
+        .read_history_entry_metadata(
+            &id,
+            HistorySource::Own,
+            history[2].id(),
+            tail.as_ref(),
+            &peri_acp_types::history_window::HistoryReadTicket::new("ticket"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.history_window_error().map(|error| error.code()),
+        Some(-32012),
+        "旧窗口的元数据读取必须返回 window_invalidated"
+    );
+}
+
+#[tokio::test]
 async fn seek_includes_the_anchor_and_returns_both_sides_without_gaps() {
     let history = super::payloads(7);
     let (_store, data, _directory) = session_with_history(&history).await;

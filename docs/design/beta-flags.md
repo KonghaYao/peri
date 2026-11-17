@@ -37,7 +37,7 @@ Flag 是受控的 beta 能力开关：能力已在代码中实现但不默认启
 | 有效值 | `覆盖.get(id).unwrap_or(false)` | resolve 投影 `BetaFlags` |
 
 ACP flag 默认值恒为 false，注册表不得声明默认开启条目；TUI 本地 beta 的未配置语义按其
-发布绑定，`history-window-v1` 未配置视为开启（见「TUI 本地 beta」）。
+发布绑定，`history-window-v1` 未配置视为开启、`history-v2` 未配置视为关闭（见「TUI 本地 beta」）。
 id 一经发布不得改名（settings 键、日志与面板身份），改名等同于「废除 + 引入」。面板操作产生的
 覆盖是用户偏好数据，不因能力转正而被改写（残留键按未知键规则失效）。
 
@@ -46,7 +46,7 @@ id 一经发布不得改名（settings 键、日志与面板身份），改名�
 ACP 注册表在 `peri-acp-types` 集中声明（与 MetaHarness 常量表同址），供配置校验、装配方
 （peri-middlewares、peri-mcp-workspace）与 TUI 共同消费。条目字段：id、canonical
 description。消费方以注册表常量（而非字符串字面量）引用 id。TUI 历史窗口的
-`history-window-v1` 不在 ACP 注册表，另见「TUI 本地 beta」。
+`history-window-v1` 与 History V2 的 `history-v2` 不在 ACP 注册表，另见「TUI 本地 beta」。
 
 生命周期：
 
@@ -75,7 +75,7 @@ flowchart LR
 | 规则 | 内容 |
 | --- | --- |
 | 合并 | global 与 workspace 逐 key 覆盖（workspace 同名键胜出），不做整体替换；workspace 显式 false 可关闭 global 的 true。差异提取与 MetaHarness 同款 |
-| 校验 | 键必须在 ACP 注册表或 TUI 本地 beta 清单内（当前 `history-window-v1`）；未知键在解析后从内存配置剔除并记录 warning（`validate_meta_harness` 同款语义），不进入快照、投影与面板；磁盘残留键在下一次经权威保存路径写回时清理 |
+| 校验 | 键必须在 ACP 注册表或 TUI 本地 beta 清单内（当前 `history-window-v1`、`history-v2`）；未知键在解析后从内存配置剔除并记录 warning（`validate_meta_harness` 同款语义），不进入快照、投影与面板；磁盘残留键在下一次经权威保存路径写回时清理 |
 | 类型 | 值必须为 bool；非 bool 使该来源解析失败，不静默降级为 false 或 true |
 | 投影 | `ConfigurationSnapshot` 新增 `BetaFlags` 投影（与 `resources()` 同级），由合并后 settings 派生；`is_enabled(id)` 对未覆盖或未知 id 返回 false |
 | 解释 | `ConfigurationField::Betas`，DOMAINS 声明来源为 Global + Workspace |
@@ -129,6 +129,25 @@ TUI 启动时（`peri-tui/src/kit/entry.rs`）读取一次快照 flags，调用
 响应中明确回显 `true`（未回显一律 fail-closed）；两者之一为 false 时保留旧 `HISTORY_PAGING`
 行为。Beta 面板未列出该键是当前限制；在把它纳入面板前，键的定义与消费仍以
 `peri-config::betas` 和 TUI 启动路径为准。
+
+## TUI 本地 beta：history-v2
+
+`history-v2` 是 History V2（统一历史加载）的 TUI 本地 beta，键定义在
+`peri-config/src/betas.rs`，**默认关闭**：未配置或显式 `false` 时 TUI 继续走 V1
+（`history-window-v1` / 旧分页）；只有显式 `true` 才在 initialize 请求中声明
+`_meta["peri.history"]`。该键同样不在 ACP 注册表，ConfigPanel 不列出，需手动写入 settings：
+
+```json
+{ "config": { "betas": { "history-v2": true } } }
+```
+
+TUI 启动时（`peri-tui/src/kit/entry.rs`）读取一次快照 flags，写入 `HISTORY_V2` atom，
+无热重载。是否真正启用仍由服务端在 initialize 响应中明确回显 `peri.history` 决定：
+beta 开启但服务端未选择 V2 时启动显式失败，不静默回退到标准全量回放。
+
+**与 V1 互斥**：V2 激活后，客户端只声明 `peri.history`，不再声明 V1 私有能力；
+`window_path_enabled()` 在 V2 激活时返回 false，V1 窗口队列、旧页分页与 gap seek
+全部让位，两套窗口状态不得混用。beta 关闭时 V1 语义保持不变。
 
 ## ACP 注册表现状
 

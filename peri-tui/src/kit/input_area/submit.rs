@@ -3,9 +3,8 @@ use ratatui_kit::prelude::State;
 use crate::components::textarea::TextAreaState;
 use crate::i18n;
 use crate::kit::acp_types::AcpEventWithEpoch;
-
-use crate::kit::submit_request::SessionControlRequest;
-use crate::kit::submit_request::SubmitRequest;
+use crate::kit::atoms::{ACP_STATE, INPUT_BUFFER, SUBMIT_TX, WIZARD_ACTIVE, local_event_tx};
+use crate::kit::submit_request::{SessionControlRequest, SubmitRequest};
 
 /// 取出待发送附件。附件只在「确定要提交 agent 文本」时消费——控制类请求
 /// （`/clear` 等）不碰 `PENDING_ATTACHMENTS`，图片保留在 composer 供下次提交。
@@ -188,7 +187,7 @@ pub(crate) fn send_local_user_bubble(
     attachments: &[crate::kit::atoms::PendingAttachment],
 ) {
     use crate::kit::acp_types::AcpEventData;
-    if let Some(tx) = LOCAL_EVENT_TX.get() {
+    if let Some(tx) = local_event_tx() {
         let _ = tx.send(AcpEventWithEpoch {
             child_origin: None,
             view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
@@ -216,13 +215,3 @@ pub(super) fn exit_history_mode_if_active() {
 #[cfg(test)]
 #[path = "submit_test.rs"]
 mod tests;
-
-use crate::kit::atoms::ACP_STATE;
-
-use crate::kit::atoms::INPUT_BUFFER;
-
-use crate::kit::atoms::LOCAL_EVENT_TX;
-
-use crate::kit::atoms::SUBMIT_TX;
-
-use crate::kit::atoms::WIZARD_ACTIVE;

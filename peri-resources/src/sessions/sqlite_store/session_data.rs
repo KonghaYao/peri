@@ -65,6 +65,8 @@ mod inherited_blob;
 mod inherited_facts;
 #[path = "session_data/inherited_page.rs"]
 mod inherited_page;
+#[path = "session_data/inherited_read.rs"]
+mod inherited_read;
 #[path = "session_data/interrupted.rs"]
 mod interrupted;
 #[path = "session_data/lifecycle.rs"]

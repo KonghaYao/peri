@@ -78,7 +78,7 @@
 //!   会把它的 `rowid` 复用给新插入的行，这类新行 `rowid <= tail` 因而会被本次遍历读到，而被
 //!   删行的内容静默消失（实测见 `.recon/S9-boundedness.md` 第 3.4 节第 6 点与第 6 节 R1）。
 
-pub use crate::history_page_visibility::history_body_displayable_to_client;
+pub use crate::history_page_visibility::{history_body_displayable_to_client, HistoryEntryRole};
 
 use serde::{Deserialize, Serialize};
 
@@ -555,6 +555,8 @@ pub struct HistoryPageCandidate {
     pub position: u64,
     /// 持久化信封的编码字节数。
     pub encoded_bytes: usize,
+    /// `messages.role` 的粗分类；窗口读取用它判定 oversize 可见性。
+    pub role: HistoryEntryRole,
 }
 
 impl HistoryPageCandidate {
@@ -571,12 +573,28 @@ impl HistoryPageCandidate {
         position: i64,
         encoded_bytes: i64,
     ) -> SessionResourceResult<Self> {
+        Self::try_new_with_role(
+            message_id,
+            position,
+            encoded_bytes,
+            HistoryEntryRole::Unknown,
+        )
+    }
+
+    /// 带存储 role 的候选行；窗口读取用它避免为可见性判定解码正文。
+    pub fn try_new_with_role(
+        message_id: &str,
+        position: i64,
+        encoded_bytes: i64,
+        role: HistoryEntryRole,
+    ) -> SessionResourceResult<Self> {
         Ok(Self {
             message_id: message_id_of(message_id)?,
             position: u64::try_from(position)
                 .map_err(|_| corrupt("history row position is negative"))?,
             encoded_bytes: usize::try_from(encoded_bytes)
                 .map_err(|_| corrupt("history entry length is negative"))?,
+            role,
         })
     }
 }
