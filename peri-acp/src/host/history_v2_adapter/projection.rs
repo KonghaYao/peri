@@ -534,15 +534,15 @@ impl<'a> PrefixCursor<'a> {
             return Err(ScanError::Invalid);
         }
         let mut code = u32::from(self.read_hex4()?);
-        if (0xD800..=0xDBFF).contains(&code) {
+        if (0xd800..=0xdbff).contains(&code) {
             self.expect(b'\\')?;
             self.expect(b'u')?;
             let low = u32::from(self.read_hex4()?);
-            if !(0xDC00..=0xDFFF).contains(&low) {
+            if !(0xdc00..=0xdfff).contains(&low) {
                 return Err(ScanError::Invalid);
             }
-            code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
-        } else if (0xDC00..=0xDFFF).contains(&code) {
+            code = 0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00);
+        } else if (0xdc00..=0xdfff).contains(&code) {
             return Err(ScanError::Invalid);
         }
         let character = char::from_u32(code).ok_or(ScanError::Invalid)?;

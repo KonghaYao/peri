@@ -27,7 +27,9 @@ use std::sync::Arc;
 use super::blob_reader::BlobReadError;
 use super::blob_reader::BlobReader;
 use super::history::HISTORY_WINDOW_INHERITED_HEADER_SQL;
-use super::inherited_facts::{CachedInheritedFacts, InheritedCacheLookup, InheritedLayout, PayloadSpan};
+use super::inherited_facts::{
+    CachedInheritedFacts, InheritedCacheLookup, InheritedLayout, PayloadSpan,
+};
 use super::{
     SessionResourceError, SessionResourceResult, SqliteConnection, SqliteSessionData, ThreadId,
 };

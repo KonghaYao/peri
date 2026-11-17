@@ -89,4 +89,3 @@ pub(super) fn present(session_id: &str, view: &RecoveryView) {
 mod tests;
 
 use peri_acp_types::event_data::SystemNotification;
-

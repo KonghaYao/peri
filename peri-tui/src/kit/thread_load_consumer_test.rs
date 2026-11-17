@@ -73,7 +73,8 @@ async fn test_confirmed_history_switch_loads_once_with_running_tasks() {
     let (tx, rx) = mpsc::unbounded_channel();
     let dispatcher = ThreadLoadDispatcher::new(tx, client.clone());
     let shutdown = CancellationToken::new();
-    let consumer = super::spawn_thread_load_consumer(client.clone(), rx, "/tmp".into(), shutdown.clone());
+    let consumer =
+        super::spawn_thread_load_consumer(client.clone(), rx, "/tmp".into(), shutdown.clone());
     dispatcher.send("target".into()).unwrap();
     wait_for_switch_confirmation().await;
     assert!(
@@ -159,7 +160,8 @@ async fn test_confirmation_for_previous_session_does_not_authorize_new_session()
         .unwrap();
     atoms::BG_TASKS.set(vec![running_task()]);
     let shutdown = CancellationToken::new();
-    let consumer = super::spawn_thread_load_consumer(client.clone(), rx, "/tmp".into(), shutdown.clone());
+    let consumer =
+        super::spawn_thread_load_consumer(client.clone(), rx, "/tmp".into(), shutdown.clone());
     wait_for_switch_confirmation().await;
     assert!(
         tokio::time::timeout(Duration::from_millis(50), server.recv())

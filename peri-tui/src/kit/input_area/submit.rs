@@ -215,4 +215,3 @@ pub(super) fn exit_history_mode_if_active() {
 #[cfg(test)]
 #[path = "submit_test.rs"]
 mod tests;
-

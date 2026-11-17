@@ -5,8 +5,8 @@ use std::sync::atomic::Ordering;
 
 use crate::kit::atoms;
 
-use super::super::outbound::{self, Submit};
 use super::super::HistoryV2State;
+use super::super::outbound::{self, Submit};
 use super::CONSUMER_EPOCH;
 
 /// 一个已交付窗口的关闭身份。关闭只依赖服务端事实，不读回当前状态，避免在持有

@@ -489,8 +489,9 @@ impl SqliteSessionData {
         let committed_tail = committed_tail.ok_or_else(|| {
             HistoryWindowError::invalid_request("own history metadata requires a committed tail")
         })?;
-        let tail_position = i64::try_from(committed_tail.position)
-            .map_err(|_| super::corrupt("history window tail position exceeds the supported range"))?;
+        let tail_position = i64::try_from(committed_tail.position).map_err(|_| {
+            super::corrupt("history window tail position exceeds the supported range")
+        })?;
         let mut connection = self
             .database
             .pool

@@ -25,9 +25,9 @@ use super::{
     ActiveSessionSnapshot, BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot,
     CloseSettlement, ForkSnapshot, FrozenSnapshotBytes, FrozenState, HistoryEntryMetadata,
     HistoryWindowPagePlan, HistoryWindowRows, NewSession, NewSessionDraft, PersistenceRecovery,
-    RewindBoundary, RewindCandidate, RewindOutcome, SessionAvailability, SessionHistoryWindowBounds,
-    SessionInitialization, SessionMetaPatch, SessionResourceError, SessionResourceErrorKind,
-    SessionResourceResult, SessionSnapshot, TerminalSettlementOutcome,
+    RewindBoundary, RewindCandidate, RewindOutcome, SessionAvailability,
+    SessionHistoryWindowBounds, SessionInitialization, SessionMetaPatch, SessionResourceError,
+    SessionResourceErrorKind, SessionResourceResult, SessionSnapshot, TerminalSettlementOutcome,
 };
 
 /// 会话资源门面：业务侧唯一的会话行为入口。

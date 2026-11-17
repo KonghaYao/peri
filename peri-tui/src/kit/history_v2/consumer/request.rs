@@ -5,9 +5,7 @@ use peri_acp_types::history_v2::{
 };
 use serde_json::{Value, json};
 
-use super::super::request::{
-    HistoryV2PageRequest, HistoryV2RequestIdentity, HistoryV2SeekRequest,
-};
+use super::super::request::{HistoryV2PageRequest, HistoryV2RequestIdentity, HistoryV2SeekRequest};
 
 /// 消费者队列里的请求；`Open` 只用于失败恢复后的重建与 V2 新会话首窗。
 #[derive(Clone, Debug, PartialEq, Eq)]

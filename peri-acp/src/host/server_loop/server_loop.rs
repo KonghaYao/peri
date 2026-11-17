@@ -3,9 +3,9 @@
 use crate::host::history_v2_load;
 
 use super::{
-    history_page, history_window, mcp_apps, requests, session_endpoint,
-    task_scope, AcpError, AcpServerConfig, Arc, CancellationToken, ConnectionContext,
-    IncomingMessage, PromptLocks, RequestId, ResponseDiagnostics, SharedSessions, Value,
+    history_page, history_window, mcp_apps, requests, session_endpoint, task_scope, AcpError,
+    AcpServerConfig, Arc, CancellationToken, ConnectionContext, IncomingMessage, PromptLocks,
+    RequestId, ResponseDiagnostics, SharedSessions, Value,
 };
 
 pub(super) fn cleanup_incomplete_session_id(result: &Result<Value, AcpError>) -> Option<&str> {
@@ -749,7 +749,8 @@ impl ServerLoop<'_> {
             None
         };
         // V2 initial 的实时流：响应发送成功后才 flush 暂停期缓冲；失败则关闭未发布的流。
-        let mut live_v2_initial: Option<(String, Arc<crate::host::live_delivery::LiveDelivery>)> = None;
+        let mut live_v2_initial: Option<(String, Arc<crate::host::live_delivery::LiveDelivery>)> =
+            None;
         let mut result = if requests::session_io::handles(&method) {
             let prepared = {
                 let sessions = sessions.lock().await;

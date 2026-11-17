@@ -78,9 +78,7 @@
 //!   会把它的 `rowid` 复用给新插入的行，这类新行 `rowid <= tail` 因而会被本次遍历读到，而被
 //!   删行的内容静默消失（实测见 `.recon/S9-boundedness.md` 第 3.4 节第 6 点与第 6 节 R1）。
 
-pub use crate::history_page_visibility::{
-    history_body_displayable_to_client, HistoryEntryRole,
-};
+pub use crate::history_page_visibility::{history_body_displayable_to_client, HistoryEntryRole};
 
 use serde::{Deserialize, Serialize};
 

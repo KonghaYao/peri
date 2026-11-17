@@ -178,6 +178,4 @@ fn test_bridge_reset_clears_input_buffer() {
     );
 }
 
-use crate::kit::atoms::{
-    BufferedInput, INPUT_BUFFER, SUBMIT_TX, VIEW_MODELS,
-};
+use crate::kit::atoms::{BufferedInput, INPUT_BUFFER, SUBMIT_TX, VIEW_MODELS};

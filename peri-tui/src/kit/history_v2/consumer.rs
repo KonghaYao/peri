@@ -13,8 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use peri_acp_types::history_v2::{
-    DecimalU64, HistoryDirection, HistoryEntryAnchor, HistoryLimits,
-    HistoryWindowPage,
+    DecimalU64, HistoryDirection, HistoryEntryAnchor, HistoryLimits, HistoryWindowPage,
 };
 use tracing::{debug, warn};
 
@@ -34,9 +33,7 @@ mod request;
 pub use request::HistoryV2ConsumerRequest;
 
 mod support;
-pub(crate) use support::{
-    HistoryV2WindowIdentity, reset_consumer_state, submit_body,
-};
+pub(crate) use support::{HistoryV2WindowIdentity, reset_consumer_state, submit_body};
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -81,7 +78,6 @@ impl HistoryV2RequestIdentity<'_> {
     }
 }
 
-
 /// 本地 beta 与连接协商同时为真；V1 窗口路径据此让位。
 pub(crate) fn v2_path_active() -> bool {
     atoms::HISTORY_V2_CAPABLE.get()
@@ -101,7 +97,6 @@ pub(crate) fn next_request_key() -> DecimalU64 {
 pub(crate) fn reset_request_key_for_test() {
     atoms::HISTORY_V2_NEXT_KEY.store(0, Ordering::Relaxed);
 }
-
 
 fn open_claim_slot() -> std::sync::MutexGuard<'static, Option<OpenClaim>> {
     OPEN_IN_FLIGHT

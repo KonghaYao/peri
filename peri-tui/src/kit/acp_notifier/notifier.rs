@@ -278,8 +278,7 @@ pub(super) async fn forward_notification(
             params,
         } => {
             let rejected_owner = owner.clone();
-            if !interaction::handle_request_permission(owner, request_id_json, &params, sink)
-                .await
+            if !interaction::handle_request_permission(owner, request_id_json, &params, sink).await
             {
                 return Some(rejected_owner);
             }

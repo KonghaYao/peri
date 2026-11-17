@@ -441,12 +441,8 @@ async fn read_only_store_closes_views_without_mutating_history() {
     .await
     .unwrap();
     assert_eq!(history["payloads"].as_array().unwrap().len(), 1);
-    for method in [
-        "session/load",
-        "session/resume",
-        "session/close",
-        "session/delete",
-    ] {
+    // 只读视图的 close 是幂等的本地回收，不写 closing；load/resume/delete 仍需写权限。
+    for method in ["session/load", "session/resume", "session/delete"] {
         assert!(crate::host::requests::handle_request(
             method,
             &json!({"sessionId":id}),

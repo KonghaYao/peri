@@ -1,10 +1,10 @@
 //! `betas` 投影测试：来源层标注与默认 false。
 
+use super::from_merged;
+use super::is_known;
 use super::BetaFlagOrigin;
 use super::HISTORY_V2;
 use super::HISTORY_WINDOW_V1;
-use super::from_merged;
-use super::is_known;
 use crate::app::PeriConfig;
 
 fn config_with(betas: &[(&str, bool)]) -> PeriConfig {

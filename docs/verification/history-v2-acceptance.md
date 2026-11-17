@@ -83,16 +83,16 @@
 
 ## 2.1 本轮验证结果
 
-命令：`./scripts/cargo-rmcp-patched.sh test --locked -p <crate> --lib`。以下为交付前全量
-lib 测试记录，五个 crate 均 0 failed；本次文档修改未重跑测试。
+命令：`./scripts/cargo-rmcp-patched.sh test --locked -p <crate> --lib`。以下为重放合并后的
+全量 lib 测试记录，五个 crate 均 0 failed。
 
 | Crate | 通过 | 忽略 | 结果 |
 | --- | --- | --- | --- |
-| `peri-acp-types` | 691 | 未单列 | 通过 |
-| `peri-config` | 160 | 未单列 | 通过 |
-| `peri-resources` | 581 | 32 | 通过 |
-| `peri-tui` | 2214 | 6 | 通过 |
-| `peri-acp` | 1151 | 未单列 | 通过 |
+| `peri-acp-types` | 832 | 0 | 通过 |
+| `peri-config` | 221 | 1 | 通过 |
+| `peri-resources` | 759 | 34 | 通过 |
+| `peri-tui` | 2880 | 9 | 通过 |
+| `peri-acp` | 1453 | 2 | 通过 |
 
 ## 3. 本轮修复证据（FIX-01～05、CLEAN-01）
 
