@@ -8,7 +8,7 @@ import { WORKSPACE_MISMATCH } from "../workspace/errors";
  * - `unknown`：动作可能已写出/执行，不得自动重试业务动作；先核对会话事实。
  * - `not_sent`：只由调用端在请求尚未提交时产生，不进入服务器 wire。
  *
- * Phase 5 的 CF 映射依据：`invalid_action` → 400；`busy`/`binding_conflict`/`not_ready`
+ * Phase 5 的宿主 HTTP 映射依据：`invalid_action` → 400；`busy`/`binding_conflict`/`not_ready`
  * → 409；`closed` → 503；`unknown`/内部错误 → 500。不得用 HTTP 状态反推 disposition。
  */
 export type ChatDisposition = "rejected" | "unknown" | "not_sent";

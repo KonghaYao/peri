@@ -251,7 +251,7 @@ impl ToolSearchIndex {
     /// 混合搜索
     ///
     /// 查询语法：
-    /// - `select:mcp__cron__cron_list,mcp__cron__cron_remove` — 按精确名称查找，逗号分隔
+    /// - `select:mcp__peri__cron_list,mcp__peri__cron_remove` — 按精确名称查找，逗号分隔
     /// - `+slack message` — `+` 前缀词为必选，其余为可选关键词
     /// - `slack message` — 纯关键词搜索
     ///

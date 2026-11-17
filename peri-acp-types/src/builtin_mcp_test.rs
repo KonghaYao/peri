@@ -123,8 +123,9 @@ fn tools_are_non_empty_and_unique_per_instance() {
             }
             // wave 3：7 个工具迁移前都在直连声明段内，模板逐字搬运各自的
             // `BaseTool::prompt_declaration()`（工具实现侧恒返回 `Some`）。
+            // v5 新增的 host-only 工具不进入 wire `tools/list`，不属于 v4 视图。
             "workspace" => {
-                for tool in instance.tools {
+                for tool in instance.tools.iter().filter(|tool| tool.advertised) {
                     let template = tool.prompt_declaration.unwrap_or_else(|| {
                         panic!(
                             "实例 {} 的工具 {} 必须携带声明模板（逐字搬运 BaseTool::prompt_declaration()）",
@@ -156,11 +157,6 @@ fn names_and_identities_are_legal_components() {
             is_legal_component(instance.instance),
             "非法实例身份: {}",
             instance.instance
-        );
-        assert!(
-            is_legal_component(instance.legacy_policy_key),
-            "非法关闭键: {}",
-            instance.legacy_policy_key
         );
         for tool in instance.tools {
             assert!(
@@ -236,16 +232,13 @@ fn task_owner_scoping_is_a_registry_field() {
 
 #[test]
 fn legacy_policy_keys_are_unique_and_frozen_for_migration() {
-    let keys: HashSet<&str> = BUILTIN_MCP_INSTANCES
-        .iter()
-        .map(|instance| instance.legacy_policy_key)
-        .collect();
+    let keys: HashSet<&str> = crate::builtin_mcp::legacy_policy_keys().collect();
     assert_eq!(
         keys.len(),
-        BUILTIN_MCP_INSTANCES.len(),
+        crate::builtin_mcp::BUILTIN_V5_CAPABILITIES.len(),
         "旧关闭键必须逐能力唯一"
     );
-    // 兼容期契约：旧键集合冻结，运行时经 `capability_of_switch` 映射到能力。
+    // 兼容 adapter 契约：旧键集合冻结，运行时经 `capability_of_switch` 映射到能力。
     // `"WorkflowMiddleware"` 沿用旧链槽位名，旧链已删除，见 `docs/design/workflow-mcp.md`。
     let expected: HashSet<&str> = [
         "WebMiddleware",
@@ -296,9 +289,11 @@ fn find_hits_only_implemented_instances() {
     let workspace = find("workspace").expect("workspace 是已实现实例（AW3-06）");
     assert_eq!(workspace.name, "workspace");
     // 工具面成员冻结为迁移前的 7 个本地工具（AW3-03：成员集合零变化）。
+    // host-only 工具不进入 wire `tools/list`，不计入 v4 advertised 视图。
     let originals: HashSet<&str> = workspace
         .tools
         .iter()
+        .filter(|tool| tool.advertised)
         .map(|tool| tool.original_name)
         .collect();
     assert_eq!(
@@ -489,7 +484,7 @@ fn wave1_tools_are_all_declared_direct() {
     // wave 3 的 7 个 workspace 工具迁移前已在首个请求的直连工具表内，全 `direct: true`
     // （AW3-03：成员集合零变化）。
     for instance in BUILTIN_MCP_INSTANCES.iter() {
-        for tool in instance.tools {
+        for tool in instance.tools.iter().filter(|tool| tool.advertised) {
             match instance.name {
                 "web" | "artifact" => assert!(
                     tool.direct,

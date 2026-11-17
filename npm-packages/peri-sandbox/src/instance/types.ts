@@ -76,6 +76,11 @@ export interface StartSandboxOptions {
   sandboxId?: string;
   /** Alternative to `sandboxId`; derived deterministically. */
   sessionKey?: string;
+  /**
+   * Explicit workspace root. Must be an existing private (0700) real directory
+   * outside `sandboxesRoot`; the default is `<sandboxRoot>/workspace`.
+   */
+  workspacePath?: string;
   sandboxesRoot?: string;
   settingsPath?: string;
   profileName?: string;

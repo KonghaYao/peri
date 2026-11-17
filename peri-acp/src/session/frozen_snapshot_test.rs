@@ -11,7 +11,7 @@ fn make_frozen() -> FrozenSessionData {
     let mut section_overrides = HashMap::new();
     section_overrides.insert("persona".to_string(), Arc::<str>::from("custom persona"));
     let mut disabled_middlewares = HashSet::new();
-    disabled_middlewares.insert("WebMiddleware".to_string());
+    disabled_middlewares.insert("web".to_string());
     let context = peri_agent::session::FrozenContext {
         system_prompt: Arc::from("system-v1"),
         external_instructions: None,
@@ -35,6 +35,7 @@ fn make_frozen() -> FrozenSessionData {
                 origin: peri_acp_types::beta_flags::BetaFlagOrigin::Workspace,
             },
         )]),
+        builtin_assembly_mode: peri_acp_types::builtin_mcp::BuiltinAssemblyMode::LegacyInstances,
         // H3：冻结运行环境随快照持久化。
         runtime_env: Some(peri_acp_types::frozen::FrozenRuntimeEnv {
             platform: "macos".to_string(),
@@ -53,7 +54,7 @@ fn test_frozen_snapshot_roundtrip_preserves_all_fields() {
     let raw = crate::session::frozen_snapshot::encode_frozen_snapshot(&original).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&raw).unwrap()["version"],
-        3
+        4
     );
     assert!(
         serde_json::from_str::<serde_json::Value>(&raw).unwrap()["data"]
@@ -69,6 +70,10 @@ fn test_frozen_snapshot_roundtrip_preserves_all_fields() {
     assert_eq!(restored.date(), original.date());
     assert_eq!(restored.language(), original.language());
     assert_eq!(restored.meta_harness(), original.meta_harness());
+    assert_eq!(
+        restored.v2_frozen().builtin_assembly_mode,
+        original.v2_frozen().builtin_assembly_mode
+    );
     // beta flag 冻结值逐条往返（含来源层）：恢复路径不按当前配置重建。
     assert_eq!(
         restored.v2_frozen().beta_flags,
@@ -171,13 +176,13 @@ fn test_frozen_snapshot_v1_without_runtime_env_decodes_as_unavailable() {
 #[test]
 fn test_frozen_snapshot_future_version_fails_closed() {
     // Arrange
-    let raw = r#"{"version":4,"data":{}}"#;
+    let raw = r#"{"version":5,"data":{}}"#;
     // Act
     let Err(error) = crate::session::frozen_snapshot::decode_frozen_snapshot(raw) else {
         panic!("future versions must fail closed")
     };
     // Assert
-    assert!(matches!(error, FrozenSnapshotError::UnsupportedVersion(4)));
+    assert!(matches!(error, FrozenSnapshotError::UnsupportedVersion(5)));
 }
 
 #[test]
@@ -268,6 +273,42 @@ fn test_frozen_snapshot_environment_required_in_v3_and_absent_in_v2() {
     value["version"] = serde_json::json!(3);
     value["data"]["environment_prompt"] =
         serde_json::json!(peri_agent::agent::model_bridge::SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
+    assert!(matches!(
+        crate::session::frozen_snapshot::decode_frozen_snapshot(&value.to_string()),
+        Err(FrozenSnapshotError::Invalid(_))
+    ));
+}
+
+#[test]
+fn frozen_assembly_mode_survives_restore_and_old_snapshots_keep_v4_identity() {
+    use peri_acp_types::builtin_mcp::BuiltinAssemblyMode;
+
+    let mut context = make_frozen().v2_frozen().clone();
+    context.builtin_assembly_mode = BuiltinAssemblyMode::SingleExit;
+    let frozen = FrozenSessionData::from_frozen_parts(context, None);
+    let mut value: serde_json::Value = serde_json::from_str(
+        &crate::session::frozen_snapshot::encode_frozen_snapshot(&frozen).unwrap(),
+    )
+    .unwrap();
+    let restored =
+        crate::session::frozen_snapshot::decode_frozen_snapshot(&value.to_string()).unwrap();
+    assert_eq!(
+        restored.v2_frozen().builtin_assembly_mode,
+        BuiltinAssemblyMode::SingleExit
+    );
+
+    value["version"] = serde_json::json!(3);
+    value["data"]
+        .as_object_mut()
+        .unwrap()
+        .remove("builtin_assembly_mode");
+    let old = crate::session::frozen_snapshot::decode_frozen_snapshot(&value.to_string()).unwrap();
+    assert_eq!(
+        old.v2_frozen().builtin_assembly_mode,
+        BuiltinAssemblyMode::LegacyInstances
+    );
+
+    value["version"] = serde_json::json!(4);
     assert!(matches!(
         crate::session::frozen_snapshot::decode_frozen_snapshot(&value.to_string()),
         Err(FrozenSnapshotError::Invalid(_))

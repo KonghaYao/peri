@@ -152,14 +152,12 @@ pub struct SensitiveToolEntry {
 
 /// builtin 工具的模型面名字查表。
 ///
-/// 迁移期使用能力表声明的 `legacy_name`（模型在 v4 六实例路径实际看到的名字）；
-/// P4 切换单出口后改为 `model_tool_name_of`。名字字面量只在
-/// `peri_acp_types::builtin_mcp::v5` 声明一份（A4/IF-D6：禁止在消费点硬编码
-/// effective name 字面量或自建第二张反查表）。声明表由 `mcp::builtin::tests`
-/// 与 `builtin_mcp_test.rs` 锁定，因此这里的查表失败只可能是改坏了声明表。
+/// v5 单出口是默认路径：模型实际看到的是 `model_name`（direct 原名，
+/// deferred `mcp__peri__*`）。旧 `legacy_name` 只用于旧 transcript 归一，
+/// 不再写入敏感工具清单。
 pub(super) fn builtin_tool_effective_name(instance: &str, original_name: &str) -> &'static str {
-    peri_acp_types::builtin_mcp::legacy_display_name_of(instance, original_name).expect(
-        "builtin 声明表必须声明该 (实例, 原始工具名)：见 peri-acp-types/src/builtin_mcp/v5.rs",
+    peri_acp_types::builtin_mcp::model_tool_name_of(instance, original_name).expect(
+        "builtin 声明表必须声明该 (能力, 原始工具名)：见 peri-acp-types/src/builtin_mcp/v5.rs",
     )
 }
 
@@ -260,13 +258,11 @@ pub fn format_sensitive_tools_for_disabled(disabled: &std::collections::HashSet<
             !peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
                 .iter()
                 .any(|capability| {
-                    let closed = disabled.contains(capability.name)
-                        || disabled.contains(capability.legacy_policy_key);
-                    closed
+                    disabled.contains(capability.name)
                         && capability
                             .tools
                             .iter()
-                            .any(|tool| tool.legacy_name == entry.name)
+                            .any(|tool| tool.model_name == entry.name)
                 })
         })
         .map(|e| {

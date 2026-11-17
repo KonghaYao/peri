@@ -2,19 +2,15 @@
 // parsing, connection management, discovery, and tool execution stay in Rust.
 import { once } from 'node:events';
 import { createServer } from 'node:http';
-import { createServer as createTcpServer, connect } from 'node:net';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { resolve } from 'node:path';
-import { spawn } from 'node:child_process';
+import { createServer as createTcpServer } from 'node:net';
+import { writeFile } from 'node:fs/promises';
+import { lookupEnv } from './lib/local-store.mjs';
 
 const profile = process.env.PERI_WASM_PROFILE === 'debug' ? 'debug' : 'release';
 const output = new URL(`../target/wasm32-unknown-emscripten/${profile}/`, import.meta.url);
-const root = await mkdtemp(resolve(tmpdir(), 'peri-wasm-mcp-'));
-let sqlProcess;
+let loom;
 let model;
 let acp;
-let sqlError = '';
 const modelRequests = [];
 const mcpMethods = [];
 const toolCalls = [];
@@ -40,21 +36,6 @@ async function unusedPort() {
   const port = server.address().port;
   await new Promise((done) => server.close(done));
   return port;
-}
-
-async function waitForPort(port, child) {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    if (child.exitCode !== null) throw new Error(`sqld exited early (${child.exitCode})`);
-    try {
-      const socket = connect(port, '127.0.0.1');
-      await once(socket, 'connect');
-      socket.destroy();
-      return;
-    } catch {
-      await new Promise((done) => setTimeout(done, 50));
-    }
-  }
-  throw new Error('sqld did not listen within five seconds');
 }
 
 async function waitUntil(label, predicate) {
@@ -137,12 +118,7 @@ function modelEvent(response, message, finishReason) {
 }
 
 try {
-  const sqlPort = await unusedPort();
-  sqlProcess = spawn('mise', ['exec', '--', 'sqld', '--no-welcome', '--http-listen-addr',
-    `127.0.0.1:${sqlPort}`, '--db-path', resolve(root, 'sessions')],
-  { cwd: new URL('../npm-packages/@peri-sdk/', import.meta.url), stdio: ['ignore', 'ignore', 'pipe'] });
-  sqlProcess.stderr.on('data', (chunk) => { sqlError += chunk.toString(); });
-  await waitForPort(sqlPort, sqlProcess);
+  loom = await lookupEnv({ port: await unusedPort() });
 
   model = createServer(async (request, response) => {
     const chunks = [];
@@ -186,7 +162,7 @@ try {
       meta_harness: { McpMiddleware: true, ToolSearch: true,
         PermissionMiddleware: false, HumanInTheLoopMiddleware: false, WorkspaceMiddleware: false },
     } },
-    storage: { url: `http://127.0.0.1:${sqlPort}`, authToken: 'local-dev' },
+    storage: { url: loom.url, authToken: loom.token },
     machineId: '00000000-0000-4000-8000-000000000003',
   })), 'start ACP Host');
   const wire = acpClient(acp);
@@ -217,7 +193,7 @@ try {
     toolCalls: toolCalls.length, notificationCount: wire.notifications.length }));
 } catch (error) {
   console.error(JSON.stringify({ passed: false, mcpMethods, modelCalls: modelRequests.length,
-    toolCalls, sqldExitCode: sqlProcess?.exitCode, sqldStderr: sqlError.slice(-4000) }));
+    toolCalls, loomLog: (await loom?.logs?.()) ?? '' }));
   throw error;
 } finally {
   if (acp) {
@@ -225,10 +201,5 @@ try {
     acp.free();
   }
   if (model) await new Promise((done) => model.close(done));
-  if (sqlProcess && sqlProcess.exitCode === null) {
-    sqlProcess.kill('SIGTERM');
-    await Promise.race([once(sqlProcess, 'exit'), new Promise((done) => setTimeout(done, 2_000))]);
-    if (sqlProcess.exitCode === null) sqlProcess.kill('SIGKILL');
-  }
-  await rm(root, { recursive: true, force: true });
+  if (loom) await loom.stop();
 }

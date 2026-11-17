@@ -27,6 +27,41 @@ fn snapshot_for(
     .unwrap()
 }
 
+#[test]
+fn frozen_assembly_mode_overrides_current_snapshot_mode() {
+    use peri_acp_types::builtin_mcp::BuiltinAssemblyMode;
+
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let claude_home = temp.path().join("claude");
+    let global_path = temp.path().join("settings.json");
+    for (current, frozen, expected, absent) in [
+        ("v5", BuiltinAssemblyMode::LegacyInstances, "cron", "peri"),
+        ("legacy", BuiltinAssemblyMode::SingleExit, "peri", "cron"),
+    ] {
+        let snapshot = snapshot_for(
+            &cwd,
+            &global_path,
+            "{}",
+            "{}",
+            HashMap::from([("PERI_MCP_BUILTIN".to_owned(), current.to_owned())]),
+        );
+        let (config, _) = super::load_merged_config_from_snapshot_with_policy(
+            &cwd,
+            &claude_home,
+            &snapshot,
+            true,
+            false,
+            false,
+            Some(frozen),
+        )
+        .unwrap();
+        assert!(config.mcp_servers.contains_key(expected));
+        assert!(!config.mcp_servers.contains_key(absent));
+    }
+}
+
 fn install_enabled_plugin(claude_home: &Path) {
     use crate::plugin::types::{InstallScope, InstalledPlugin, InstalledPlugins};
     use crate::plugin::PluginOrigin;
@@ -317,8 +352,17 @@ fn snapshot_loader_process_probe() {
         ]),
     );
     let enabled_bare = super::load_bare_config_from_snapshot(&enabled_snapshot).unwrap();
-    assert!(enabled_bare.mcp_servers.contains_key("workspace"));
+    assert!(enabled_bare.mcp_servers.contains_key("peri"));
     assert_eq!(enabled_bare.mcp_servers.len(), 1);
+    assert_eq!(
+        enabled_bare.mcp_servers["peri"]
+            .env
+            .as_ref()
+            .and_then(|env| env.get("PERI_MCP_V5_CAPABILITIES"))
+            .map(String::as_str),
+        Some("workspace"),
+        "bare 只启用 workspace 能力"
+    );
 }
 
 /// M6：插件来源闭合位在 MCP 合并路径上的真实回归。

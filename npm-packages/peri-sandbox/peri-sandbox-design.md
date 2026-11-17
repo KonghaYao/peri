@@ -8,7 +8,7 @@
 
 1. `startSandbox(options)` 在调用者进程内启动一个 SRT/Peri backend，返回一个 `SandboxInstance`。
 2. 每个实例提供 `127.0.0.1` 随机端口的 `/mcp` HTTP MCP 端点；token 每实例独立，默认只在内存。
-3. workspace 固定为 `<sandboxesRoot>/<sandboxId>/{workspace,home}`，`close()` 后保留，`close({deleteData:true})` 才删除。
+3. workspace 默认固定为 `<sandboxesRoot>/<sandboxId>/{workspace,home}`；显式 `workspacePath` 只替换工作目录（host 授权的 0700 真实目录，与 `sandboxesRoot` 不重叠），`home` 仍在 `<sandboxRoot>`。`close()` 后保留，`close({deleteData:true})` 只删除托管目录。
 4. Linux 保留 `systemd-run` transient unit（cgroup 隔离）；macOS 保留 SRT + detached 进程组。
 5. 与 Agent 的唯一交界是 `ChatSessionInit.mcpServers`（HTTP descriptor + Bearer）；不改 ACP/Rust。
 
@@ -26,7 +26,7 @@ Host process (SDK / CLI / 测试)
     └─ SandboxAdapter.start()          ← createPeriSandboxAdapter()
          └─ startSandbox()
               ├─ settings/profile → random token → workspace lock
-              ├─ Provider.start() ──> SRT CLI ──> peri mcp-start workspace --stdio
+              ├─ Provider.start() ──> SRT CLI ──> peri mcp-start peri --capability workspace --stdio
               ├─ PeriBackend (MCP stdio client; capability mirror, request/notification relay, Bash limits, runId)
               └─ HTTP MCP server 127.0.0.1:<ephemeral>/mcp (Bearer, Host/Origin)
                    └─ ChatSessionInit.mcpServers
@@ -119,7 +119,7 @@ starting -> ready -> stopping -> closed
     home/               # 持久 HOME/XDG，0700
 ```
 
-- `sandboxId`：显式 `sbx_[a-f0-9]{32}`；或 `sessionKey` 经 `sha256("peri-sandbox-session:" + key)` 取前 32 hex；否则随机生成一次。
+- `sandboxId`：显式 `sbx_[a-f0-9]{32}`；或 `sessionKey` 经 `sha256("peri-sandbox-session:" + key)` 取前 32 hex；否则随机生成一次。它只是状态目录/进程/锁的运行句柄，不是 workspace 业务身份；适配器不得从 workspace URI 派生，也不得用它做 workspace 查找、授权或恢复。
 - macOS 临时目录 `/private/tmp/peri-<id前16位>`；Linux 由 `PrivateTmp=yes` 提供。
 - lock 不写在 workspace 内，避免 Agent 误删；删除数据时在停止确认后、持锁状态下进行。
 
@@ -147,7 +147,7 @@ starting -> ready -> stopping -> closed
 
 ### macOS（`macos-process-group`）
 
-- `spawn(node, [srt.cli, '--settings', policy, '--', peri, 'mcp-start', ...], { detached: true })`。
+- `spawn(node, [srt.cli, '--settings', policy, '--', peri, 'mcp-start', 'peri', '--capability', 'workspace', ...], { detached: true })`。
 - `stop`：`ps` 校验 leader 命令行含 SRT CLI 与 policy 路径、启动时间一致后，对进程组 SIGTERM/SIGKILL，等待组消失；随后清理 `/private/tmp/peri-*`。
 - 不写 process record 文件，不做 `listOwned`/`pruneStopped`。
 

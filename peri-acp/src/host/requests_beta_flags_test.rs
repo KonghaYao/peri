@@ -79,7 +79,8 @@ fn workspace_bash_schema(
     let pool = environment?.cfg.mcp_pool.as_ref()?;
     let pool = (pool.as_ref() as &dyn std::any::Any)
         .downcast_ref::<peri_middlewares::mcp::McpClientPool>()?;
-    let handle = pool.client("workspace")?;
+    // v5 默认装配只有一个 `peri` 出口；回滚路径仍保留 `workspace` 实例。
+    let handle = pool.client("peri").or_else(|| pool.client("workspace"))?;
     let tool = handle
         .tools
         .iter()

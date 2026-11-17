@@ -63,7 +63,7 @@ impl McpClientPool {
             if cancel.is_cancelled() {
                 break;
             }
-            if self.clients.read().contains_key(WORKSPACE_INSTANCE) {
+            if self.capability_client("workspace").is_some() {
                 match self
                     .adopt_workspace_tasks_before(session_id, &cutoff, &mut adopted, &cancel)
                     .await
@@ -176,9 +176,7 @@ impl McpClientPool {
         started_at: Option<&str>,
     ) -> Result<AdoptionOutcome, String> {
         let peer = self
-            .clients
-            .read()
-            .get(WORKSPACE_INSTANCE)
+            .capability_client("workspace")
             .and_then(|client| client.peer.clone())
             .ok_or_else(|| "workspace shell task owner is not connected".to_owned())?;
         let owner_scoped = self

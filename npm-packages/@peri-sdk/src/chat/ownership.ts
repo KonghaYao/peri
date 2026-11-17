@@ -18,7 +18,8 @@ export function sessionOwnershipKey(sessionId: string): string {
     .replace(/=+$/u, "")}`;
 }
 
-interface SessionOwnershipRecord {
+/** 共享 ownership 记录；`owner` 是 Manager 实例的协调身份，不是用户身份。 */
+export interface SessionOwnershipRecord {
   readonly sessionId: string;
   readonly owner: string;
 }
@@ -98,6 +99,24 @@ export class KvSessionOwnership implements SessionOwnership {
     }
     this.owned.delete(sessionId);
   }
+}
+
+/**
+ * 路由层读取入口：返回当前 Session 的归属记录，不改变归属。
+ *
+ * 记录非法时 fail closed 抛出，调用方不能把它当作“无归属”。
+ */
+export async function readSessionOwnership(
+  storage: KvStorage,
+  sessionId: string,
+): Promise<SessionOwnershipRecord | null> {
+  if (!storage || typeof storage.getItem !== "function") {
+    throw new TypeError("readSessionOwnership requires storage with getItem");
+  }
+  assertSessionId(sessionId);
+  const value = await storage.getItem(sessionOwnershipKey(sessionId));
+  if (value === null || value === undefined) return null;
+  return parseRecord(value, sessionId);
 }
 
 /**

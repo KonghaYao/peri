@@ -42,6 +42,35 @@ pub(crate) struct PreparedConfiguration {
     pub(crate) config_source: Arc<ConfigSource>,
     pub(crate) config: Arc<PeriConfig>,
     pub(crate) provider: LlmProvider,
+    builtin_assembly_mode: peri_acp_types::builtin_mcp::BuiltinAssemblyMode,
+}
+
+impl PreparedConfiguration {
+    fn new(
+        config_source: Arc<ConfigSource>,
+        config: Arc<PeriConfig>,
+        provider: LlmProvider,
+    ) -> Self {
+        let builtin_assembly_mode = config_source
+            .snapshot()
+            .map(|snapshot| snapshot.builtin_assembly_mode())
+            .unwrap_or_else(|| {
+                let environment =
+                    peri_config::source::read_environment(&[peri_config::mcp::MCP_BUILTIN_ENV])
+                        .unwrap_or_default();
+                peri_config::mcp::builtin_assembly_mode(&environment)
+            });
+        Self {
+            config_source,
+            config,
+            provider,
+            builtin_assembly_mode,
+        }
+    }
+
+    pub(crate) fn builtin_assembly_mode(&self) -> peri_acp_types::builtin_mcp::BuiltinAssemblyMode {
+        self.builtin_assembly_mode
+    }
 }
 
 /// 会话准备输入（一次准备、后续只读消费）。
@@ -183,14 +212,13 @@ impl PreparedSessionInputs {
                 instructions,
                 &deployment_closed,
             );
+        let mut context = frozen.v2_frozen().clone();
+        context.builtin_assembly_mode = self.configuration.builtin_assembly_mode();
         if let Some(agent_instructions) = self.agent_instructions.as_deref() {
-            let mut context = frozen.v2_frozen().clone();
             context.external_instructions = Some(Arc::from(agent_instructions));
-            frozen = FrozenSessionData::from_frozen_parts(
-                context,
-                frozen.claude_local_md().map(Arc::from),
-            );
         }
+        frozen =
+            FrozenSessionData::from_frozen_parts(context, frozen.claude_local_md().map(Arc::from));
         let encoded = frozen_snapshot::encode_frozen_snapshot(&frozen).map_err(|error| {
             AcpError::new(-32603, format!("Frozen snapshot encode failed: {error}"))
         })?;
@@ -254,11 +282,11 @@ impl PreparedSessionInputs {
             std::fs::canonicalize(&source.startup_cwd).ok().as_deref() == Some(Path::new(cwd))
         });
         if same_directory {
-            return Ok(PreparedConfiguration {
-                config_source: host.config_source.clone(),
-                config: Arc::new(host.peri_config.read().clone()),
-                provider: host.provider.read().clone(),
-            });
+            return Ok(PreparedConfiguration::new(
+                host.config_source.clone(),
+                Arc::new(host.peri_config.read().clone()),
+                host.provider.read().clone(),
+            ));
         }
         let source = Arc::new(
             ConfigSource::load_at(Path::new(cwd), host.config_source.global_path().to_owned())
@@ -267,11 +295,11 @@ impl PreparedSessionInputs {
         let config = source.loaded_merged();
         let provider = LlmProvider::from_source(&source)
             .ok_or_else(|| AcpError::new(-32603, "No provider configured for session workspace"))?;
-        Ok(PreparedConfiguration {
-            config_source: source,
-            config: Arc::new(config),
+        Ok(PreparedConfiguration::new(
+            source,
+            Arc::new(config),
             provider,
-        })
+        ))
     }
 
     /// 插件发现：session 级装配经**严格只读**入口一次加载，失败时记录诊断并

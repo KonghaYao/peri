@@ -234,7 +234,7 @@ async fn construct_time_workspace_closure_is_enforced() {
     let reader = McpWorkspaceFileReader::new(
         Some(fixture.pool.clone()),
         Some("session".to_string()),
-        &std::collections::HashSet::from(["WorkspaceMiddleware".to_string()]),
+        &std::collections::HashSet::from(["workspace".to_string()]),
     );
     assert_eq!(
         reader.read_text(Path::new("remote.txt")).await.unwrap_err(),
@@ -251,7 +251,7 @@ async fn remote_workspace_file_reader_stays_available_when_builtin_is_closed() {
     let reader = McpWorkspaceFileReader::new(
         Some(fixture.pool.clone()),
         Some("session".to_string()),
-        &std::collections::HashSet::from(["WorkspaceMiddleware".to_string()]),
+        &std::collections::HashSet::from(["workspace".to_string()]),
     );
     let read = tokio::spawn(async move { reader.read_text(Path::new("remote.txt")).await });
     fixture.entered.notified().await;
@@ -317,7 +317,7 @@ async fn branch_construct_time_workspace_closure_is_enforced() {
     let reader = McpWorkspaceFileReader::new(
         Some(fixture.pool.clone()),
         Some("session".to_string()),
-        &std::collections::HashSet::from(["WorkspaceMiddleware".to_string()]),
+        &std::collections::HashSet::from(["workspace".to_string()]),
     );
     assert_eq!(
         reader.current_branch().await.unwrap_err(),

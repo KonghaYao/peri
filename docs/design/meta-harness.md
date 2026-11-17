@@ -14,7 +14,7 @@ MetaHarness 一个 kv 字段承载三项能力，key 类型决定动作：
 | key 类型 | value | 动作 |
 | --- | --- | --- |
 | 段落 ID | `true` | **覆盖系统提示词**（第一能力） |
-| middleware 名 / builtin 实例策略键 | `false` | **关闭能力**（第二能力）：链槽位名 ⇒ 该 middleware 不进链；builtin 实例策略键（`WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` / `MonitorMiddleware` / `WorkspaceMiddleware` / `WorkflowMiddleware`）⇒ 该实例的工具面关闭 |
+| middleware 名 / builtin 能力名 | `false` | **关闭能力**（第二能力）：链槽位名 ⇒ 该 middleware 不进链；builtin 能力名（`workspace` / `web` / `artifact` / `cron` / `monitor` / `workflow`）⇒ 该能力的工具面关闭。旧 `*Middleware` 键保留为确定性映射 adapter（M4 删除），加载期告警 |
 | `BuiltInSubagents` | `true` / `false` | 启用 / 屏蔽 compile-time built-in subagent definitions（默认启用） |
 
 `BuiltInSubagents` 只控制 built-in definition provider，不关闭 `SubAgentMiddleware`；
@@ -57,8 +57,8 @@ pub meta_harness: Option<HashMap<String, bool>>,
 serde 类型错误 fail**——"warn 不 fail"仅适用于成功解析后的未知 key）：
 
 合法键集合由 `peri-acp-types/src/meta_harness.rs` 的 `SECTION_IDS`、
-`MIDDLEWARE_NAMES`、`BUILTIN_INSTANCE_POLICY_KEYS` 与 `BUILT_IN_SUBAGENTS_KEY`
-共同定义；校验实现为 `peri-config/src/app.rs::AppConfig::validate_meta_harness`，设计不复制校验代码。
+`MIDDLEWARE_NAMES`、v5 能力名（`BUILTIN_V5_CAPABILITIES`）与
+`BUILT_IN_SUBAGENTS_KEY` 共同定义；校验实现为 `peri-config/src/app.rs::AppConfig::validate_meta_harness`，设计不复制校验代码。
 段落的 `false` 与链槽位/实例策略的 `true` 都是合法的显式恢复值。
 
 ### 2.2 段落覆盖来源：workspace `peri-meta://`
@@ -143,9 +143,8 @@ if !disabled.contains("TodoMiddleware") {
     chain.add(Box::new(TodoMiddleware::new(...)));   // 关闭 → 不构造、不进链
 }
 
-// builtin MCP 实例（`WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` /
-// `MonitorMiddleware` / `WorkspaceMiddleware` / `WorkflowMiddleware`）不走链构造：它们由关闭集映射为实例关闭集，
-// 再交给工具面过滤（`assembly.rs`）。
+// builtin MCP 能力（`workspace` / `web` / `artifact` / `cron` / `monitor` /
+// `workflow`）不走链构造：能力名进入关闭集，再交给工具面过滤（`assembly.rs`）。
 let closed_instances = crate::mcp::builtin::closed_instances(&disabled);
 ```
 
@@ -155,9 +154,8 @@ subagent_mw 槽位）联动置空，禁止半开状态。
 **语义**：
 
 - **关闭面 = 能力提供者**：链槽位 middleware 以 key = `name()` 返回值关闭；builtin
-  MCP 能力以能力名或迁移期旧策略键（`BUILTIN_INSTANCE_POLICY_KEYS`，由能力表的
-  `legacy_policy_key` 派生）关闭，两者经 `capability_of_switch` 映射到同一能力。
-  同一提供者的全部工具随之一并关闭（连坐语义）。
+  MCP 能力以 v5 能力名关闭；旧 `*Middleware` 策略键经 `capability_of_switch`
+  确定性映射到同一能力（M4 清理时删除 adapter）；同一提供者的全部工具随之一并关闭（连坐语义）。
 - 关闭后该 middleware 的钩子（before_agent / before_tool /
   prompt_contribution / first_turn_reminder）全部不执行——工具与提示词贡献
   同时消失。
@@ -174,13 +172,12 @@ subagent_mw 槽位）联动置空，禁止半开状态。
 - 插件无独立 meta_harness 条目：关闭 `PluginMiddleware` 即关闭插件整体注入；
   插件卸载/管理走既有机制。
 - Artifact 上传由 builtin `artifact` MCP 实例承载（`mcp-packages/artifact/src/{server,tool}.rs`；宿主实例注册与 dispatch 仍在 `peri-middlewares/src/mcp/builtin/`）；
-  策略键 `ArtifactMiddleware: false` 关闭该实例的工具面，仅移除 `artifact`（模型面
+  能力开关 `"artifact": false` 关闭该能力的工具面，仅移除 `artifact`（模型面
   `artifact`），不影响 `ToolSearch` 的 `SearchExtraTools` / `ExecuteExtraTool`。
-- `CronMiddleware` 是 `cron` 实例的策略键，语义与
-  `ArtifactMiddleware` 同构，但该实例的工具是 deferred：关闭只收缩 deferred 目录与
-  检索结果（`parent_tools` 与 workflow 工具列表本来就不含 deferred 工具），实例、handler
-  与 readiness 仍保留。
-- `WorkspaceMiddleware` 是 `workspace` 实例的策略键：7 个文件/终端
+- `"cron": false` 关闭 `cron` 能力，语义与 `artifact` 同构，但该能力的工具是 deferred：
+  关闭同时收缩首个模型请求、deferred 目录与检索、subagent 继承面及 workflow 工具列表；
+  运行时拒绝调用并停止 cron 宿主 tick，连接与其他能力的 readiness 仍保留。
+- `"workspace": false` 关闭 `workspace` 能力：7 个文件/终端
   工具（`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` /
   `Bash`）在声明表中**全部**标为 direct，因此关闭必须在同一 turn 同时收缩三个真实面——
   首个模型请求的 tools、subagent `parent_tools` 与 workflow agent 工具列表（deferred 目录
@@ -188,8 +185,8 @@ subagent_mw 槽位）联动置空，禁止半开状态。
   shell 工具（`FilesystemMiddleware` / `TerminalMiddleware` 与 `ChainSlot::Filesystem` /
   `ChainSlot::Terminal` 已删除，没有回退的 middleware 提供面），实例、handler 与
   pool 级连接状态仍保留。
-- `WorkflowMiddleware` 是 `workflow` 实例的策略键（沿用旧链槽位名以兼容既有配置）：
-  命中后 workflow 实例不 spawn，实例工具与其消费者一并不可用。
+- `"workflow": false` 关闭 `workflow` 能力：命中后 workflow 实例不 spawn，实例工具与
+  其消费者一并不可用。
 
 ### 2.6 生命周期
 

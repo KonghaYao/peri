@@ -1,4 +1,5 @@
 import { DeadlineError, withDeadline } from "../util/deadline";
+import { redactObservationText } from "../util/observability";
 import { normalizeAbsolutePath } from "../workspace/paths";
 import type { WorkspaceRef } from "../workspace/types";
 import {
@@ -471,8 +472,8 @@ export class SandboxHandle<TOptions = unknown> {
   }
 
   private redact(message: string, token?: string): string {
-    let text = message;
-    if (token) text = text.split(token).join("[redacted]");
-    return text.replace(/Bearer\s+[^\s"']+/gi, "Bearer [redacted]");
+    // 已知 token 先做精确替换，其余交给共享脱敏规则（header/URL/赋值形式）。
+    const text = token ? message.split(token).join("[redacted]") : message;
+    return redactObservationText(text);
   }
 }

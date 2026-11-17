@@ -24,16 +24,17 @@ use peri_middlewares::mcp::standalone::{self, Options, Target, Transport};
 #[command(
     name = "peri mcp-start",
     about = "Serve builtin MCP capabilities without the Peri Agent",
-    after_help = "Legacy compatibility: `peri mcp-start <instance> --stdio|--http` remains \
-                  available during the v5 migration.\n\
-                  v5: `peri mcp-start --capability web,cron --stdio`; selection priority is \
-                  command line > <workspace>/.mcp.json > builtin default (all capabilities).\n\
+    after_help = "v5: `peri mcp-start peri --stdio` (optionally `--capability web,cron`); \
+                  selection priority is command line > <workspace>/.mcp.json > builtin default \
+                  (all capabilities).\n\
+                  Legacy compatibility: `peri mcp-start <instance> --stdio|--http` maps the \
+                  instance to its capability on the same single exit (until M4).\n\
                   .mcp.json extension: `mcpServers.peri.x-peri.capabilities` (provisional key)."
 )]
 #[command(group(ArgGroup::new("transport").required(true).args(["stdio", "http"])))]
 struct Args {
-    /// Legacy builtin instance to serve (web, artifact, cron, monitor, workspace, workflow).
-    /// Omit when selecting capabilities with --capability or .mcp.json.
+    /// Server identity: v5 single exit `peri` or a legacy builtin instance (mapped to
+    /// its capability). Omit when selecting capabilities with --capability or .mcp.json.
     instance: Option<String>,
     /// Capability to serve; repeatable or comma-separated. Accepts all/none.
     /// Selected capabilities are served by the single `peri` router.
@@ -75,12 +76,6 @@ pub(super) fn run(args: &[OsString]) -> Result<()> {
 }
 
 fn resolve_options(args: Args) -> Result<Options> {
-    if args.instance.is_some() && !args.capability.is_empty() {
-        bail!(
-            "mcp-start accepts either a legacy instance argument or --capability, not both; \
-             use one form"
-        );
-    }
     if !args.allowed_host.is_empty() && !args.http {
         bail!("--allowed-host requires --http");
     }
@@ -104,15 +99,36 @@ fn resolve_options(args: Args) -> Result<Options> {
         }
     };
     let target = match args.instance {
+        Some(instance) if peri_acp_types::builtin_mcp::is_v5_server_name(&instance) => {
+            Target::Capabilities(resolve_capability_selection(&args.capability, &workspace)?)
+        }
         Some(instance) => {
             if !BUILTIN_RESERVED_INSTANCE_NAMES.contains(&instance.as_str()) {
+                let mut expected = vec!["peri"];
+                expected.extend(BUILTIN_RESERVED_INSTANCE_NAMES.iter().copied());
                 bail!(
                     "unknown builtin MCP instance: {} (expected one of: {})",
                     instance,
-                    BUILTIN_RESERVED_INSTANCE_NAMES.join(", ")
+                    expected.join(", ")
                 );
             }
-            Target::Instance(instance)
+            if !args.capability.is_empty() {
+                bail!(
+                    "mcp-start accepts either a legacy instance argument or --capability, not both; \
+                     use `peri mcp-start peri --capability ...`"
+                );
+            }
+            // 兼容 adapter：旧单实例形式不再启动独立 server，只映射到同一单出口能力。
+            let capability = peri_acp_types::builtin_mcp::capability_of_legacy_instance(&instance)
+                .map_err(|error| {
+                    anyhow::anyhow!("unknown builtin MCP instance: {instance}: {error}")
+                })?;
+            tracing::warn!(
+                instance = %instance,
+                capability = capability.name,
+                "legacy mcp-start instance maps to the v5 single exit; use `peri mcp-start peri --capability`"
+            );
+            Target::Capabilities(vec![capability.name.to_owned()])
         }
         None => Target::Capabilities(resolve_capability_selection(&args.capability, &workspace)?),
     };

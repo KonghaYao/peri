@@ -139,7 +139,11 @@ fn workspace_resource_uris(sessions: &HashMap<String, SessionState>, id: &str) -
     else {
         return vec!["池不是生产 McpClientPool".to_owned()];
     };
-    pool.resources_for_server("workspace")
+    let mut resources = pool.resources_for_server("peri");
+    if resources.is_empty() {
+        resources = pool.resources_for_server("workspace");
+    }
+    resources
         .iter()
         .map(|resource| resource.uri.clone())
         .collect()
@@ -346,7 +350,7 @@ async fn disable_bundled_skills_true_hides_builtin_catalog() {
 async fn closed_workspace_instance_makes_skills_unavailable_without_disk_fallback() {
     // 同 `new_session_frozen_summary_comes_from_workspace_origin` 的夹具，
     // 只差关闭位 `meta_harness.WorkspaceMiddleware=false`。
-    let fixture = SkillFixture::new(r#""01_intro":true,"WorkspaceMiddleware":false"#, false);
+    let fixture = SkillFixture::new(r#""01_intro":true,"workspace":false"#, false);
     let cfg = skill_server_config(&fixture._tmp, fixture.startup.clone()).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
@@ -519,7 +523,9 @@ async fn skills_middleware_disabled_hides_all_system_skill_commands() {
         .mcp_skill_registry_for(&id)
         .expect("会话技能注册表");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    while skill_registry.skills_of("workspace").is_empty() {
+    while skill_registry.skills_of("peri").is_empty()
+        && skill_registry.skills_of("workspace").is_empty()
+    {
         assert!(std::time::Instant::now() < deadline, "系统 skill 发现超时");
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
@@ -605,7 +611,7 @@ async fn closed_workspace_instance_makes_instructions_unavailable_without_disk_f
     .unwrap();
 
     // ── 关闭实例（同一夹具，只差关闭位） ──
-    let closed = SkillFixture::new(r#""01_intro":true,"WorkspaceMiddleware":false"#, false);
+    let closed = SkillFixture::new(r#""01_intro":true,"workspace":false"#, false);
     let closed_cfg = skill_server_config(&closed._tmp, closed.startup.clone()).await;
     let mut sessions = HashMap::new();
     let created = crate::host::requests::handle_request(
@@ -674,7 +680,11 @@ fn workspace_resource_description(
     let pool = environment.cfg.mcp_pool.as_ref()?;
     let pool = (pool.as_ref() as &dyn std::any::Any)
         .downcast_ref::<peri_middlewares::mcp::McpClientPool>()?;
-    pool.resources_for_server("workspace")
+    let mut resources = pool.resources_for_server("peri");
+    if resources.is_empty() {
+        resources = pool.resources_for_server("workspace");
+    }
+    resources
         .iter()
         .find(|resource| resource.uri == uri)
         .and_then(|resource| resource.description.clone())

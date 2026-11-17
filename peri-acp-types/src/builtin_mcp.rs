@@ -5,8 +5,8 @@
 //! 两类派生物：
 //!
 //! - **迁移期 v4 兼容视图**：[`BUILTIN_MCP_INSTANCES`] / [`BUILTIN_RESERVED_INSTANCE_NAMES`]
-//!   由能力表投影，供尚未切换的六实例注入、关闭集与 standalone 路径使用；M4 清理时
-//!   与 v4 路径一并删除。
+//!   由能力表投影，供 `PERI_MCP_BUILTIN=legacy` 回滚注入、关闭集与 standalone CLI
+//!   adapter 使用；M4 清理时与 v4 路径一并删除。
 //! - **旧名非执行归一**：[`original_tool_name_of_effective`] 与
 //!   [`legacy_display_name_of`] 只服务旧 transcript / allowlist / 展示匹配；旧前缀永远
 //!   不是执行别名。v5 模型面名查询走 [`model_tool_name_of`]。
@@ -17,7 +17,18 @@
 
 use std::sync::LazyLock;
 
+use serde::{Deserialize, Serialize};
+
 use v5::CapabilityTool;
+
+/// Session-frozen builtin assembly choice; independent of the live deployment environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinAssemblyMode {
+    SingleExit,
+    LegacyInstances,
+    Disabled,
+}
 
 /// 迁移期 v4 工具视图（字段与 v5 声明一致；`legacy_name` 只用于旧展示/匹配）。
 pub type BuiltinMcpTool = CapabilityTool;
@@ -29,25 +40,22 @@ pub struct BuiltinMcpInstance {
     pub name: &'static str,
     /// `TransportConfig::Builtin.instance` 身份（迁移期等于能力名）。
     pub instance: &'static str,
-    /// 旧 MetaHarness 关闭键；只做确定性映射，不再是能力开关事实源。
-    pub legacy_policy_key: &'static str,
     /// 是否按直接发起会话隔离后台任务与资源。
     pub task_owner_scoped: bool,
-    /// 能力工具表。
+    /// 能力工具表（含 host-only 工具；v4 消费方按 `advertised` 过滤）。
     pub tools: &'static [BuiltinMcpTool],
 }
 
 /// 迁移期 v4 实例视图（顺序即能力表顺序）。
 ///
-/// **兼容期专用**：默认注入、关闭集与 standalone 仍消费它；所有字段都来自
-/// [`BUILTIN_V5_CAPABILITIES`]，不另存字面量。M4 删除。
+/// **回滚专用**：`PERI_MCP_BUILTIN=legacy` 的六实例注入、关闭集与 standalone
+/// CLI adapter 消费它；所有字段都来自 [`BUILTIN_V5_CAPABILITIES`]，不另存字面量。M4 删除。
 pub static BUILTIN_MCP_INSTANCES: LazyLock<Vec<BuiltinMcpInstance>> = LazyLock::new(|| {
     BUILTIN_V5_CAPABILITIES
         .iter()
         .map(|capability| BuiltinMcpInstance {
             name: capability.name,
             instance: capability.legacy_instance,
-            legacy_policy_key: capability.legacy_policy_key,
             task_owner_scoped: capability.host_injection.task_owner_scoped,
             tools: capability.tools,
         })
@@ -80,9 +88,15 @@ pub fn is_reserved_instance_name(name: &str) -> bool {
 
 pub use v5::{
     capability, capability_of_legacy_instance, capability_of_legacy_policy_key,
-    capability_of_resource_uri, capability_of_switch, is_reserved_server_name, legacy_policy_keys,
-    BUILTIN_V5_CAPABILITIES,
+    capability_of_original_tool, capability_of_resource_uri, capability_of_switch, capability_tool,
+    is_reserved_server_name, is_v5_server_name, legacy_policy_keys, BUILTIN_V5_CAPABILITIES,
+    BUILTIN_V5_CAPABILITIES_ENV, BUILTIN_V5_SERVER_NAME,
 };
+
+/// 名字是否为 builtin server（迁移期六实例或 v5 单出口 `peri`）。
+pub fn is_builtin_server_name(name: &str) -> bool {
+    is_v5_server_name(name) || find(name).is_some()
+}
 
 /// 旧模型面名字 → 原始工具名（纯查表）：**只用于展示 / 过滤匹配，不是执行别名**。
 ///
@@ -136,7 +150,7 @@ pub fn model_tool_name_of(capability_name: &str, original_name: &str) -> Option<
         .map(|tool| tool.model_name)
 }
 
-/// v5 单出口能力声明源（默认装配尚未切换；迁移期由本模块投影为 v4 实例视图）。
+/// v5 单出口能力声明源（宿主默认装配；迁移期由本模块投影为 v4 回滚视图）。
 pub mod v5;
 
 #[cfg(test)]

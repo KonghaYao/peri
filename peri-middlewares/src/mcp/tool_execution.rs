@@ -44,15 +44,20 @@ pub(super) fn complete(
     text: String,
     raw: RawToolResult,
 ) -> Result<ToolOutput, Box<dyn std::error::Error + Send + Sync>> {
-    let declaration = tool
-        .builtin_mcp_instance()
-        .and_then(peri_acp_types::builtin_mcp::find)
-        .and_then(|instance| {
+    let declaration = tool.builtin_mcp_instance().and_then(|instance| {
+        let original = tool.mcp_tool_name()?;
+        if peri_acp_types::builtin_mcp::is_v5_server_name(instance) {
+            // v5 单出口的执行身份是 (capability, original_name)；server 名是 `peri`。
+            return peri_acp_types::builtin_mcp::capability_of_original_tool(original)
+                .map(|(_, declaration)| declaration);
+        }
+        peri_acp_types::builtin_mcp::find(instance).and_then(|instance| {
             instance
                 .tools
                 .iter()
-                .find(|declaration| Some(declaration.original_name) == tool.mcp_tool_name())
-        });
+                .find(|declaration| declaration.original_name == original)
+        })
+    });
     let execution = if let Some(declaration) = declaration {
         match raw
             .meta()

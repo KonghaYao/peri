@@ -84,6 +84,7 @@ pub struct FrozenContext {
     ///
     /// 装配面（工具池 / middleware）只消费它，不回读配置源；空投影 = 全部按 false。
     pub beta_flags: peri_acp_types::beta_flags::BetaFlags,
+    pub builtin_assembly_mode: peri_acp_types::builtin_mcp::BuiltinAssemblyMode,
     /// 冻结运行环境（平台 / OS 版本 / 是否 Git 仓库；H3）。
     ///
     /// 内容准入期由选定执行环境探测一次后随冻结持久化；主/子/workflow 的
@@ -199,6 +200,7 @@ impl FrozenContextBuilder {
             language: self.language.flatten().map(Into::into),
             meta_harness: self.meta_harness.unwrap_or_default(),
             beta_flags: self.beta_flags.unwrap_or_default(),
+            builtin_assembly_mode: peri_acp_types::builtin_mcp::BuiltinAssemblyMode::SingleExit,
             runtime_env: self.runtime_env,
         }
     }

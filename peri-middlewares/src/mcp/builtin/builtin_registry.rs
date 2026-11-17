@@ -13,17 +13,78 @@ pub(crate) fn default_subscriptions_for(
 /// `PERI_MCP_BUILTIN` 环境变量名（紧急闸门，A2：显式运维开关，不是静默降级）。
 pub(crate) const BUILTIN_INJECTION_ENV: &str = peri_config::mcp::MCP_BUILTIN_ENV;
 
+/// 默认层注入形态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinInjectionMode {
+    /// v5 默认：只注入单出口 `peri`。
+    SingleExit,
+    /// 迁移期回滚：逐能力写回 v4 六实例条目（M4 截止）。
+    LegacyInstances,
+}
+
 /// 默认层注入策略（显式参数；`_with_paths` 与 overlay 都不读 env）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BuiltinInjectionPolicy {
-    /// 允许注入的已实现实例名（注册表子集）。
+    mode: BuiltinInjectionMode,
+    /// v5 模式承载能力名；v4 回滚模式承载迁移期实例名。
     pub(super) enabled: Vec<&'static str>,
 }
 
 impl BuiltinInjectionPolicy {
-    /// 注入全部已实现实例（`PERI_MCP_BUILTIN` 缺省 / 未知值）。
+    pub(crate) fn from_assembly_mode(
+        mode: peri_acp_types::builtin_mcp::BuiltinAssemblyMode,
+    ) -> Self {
+        use peri_acp_types::builtin_mcp::BuiltinAssemblyMode;
+        match mode {
+            BuiltinAssemblyMode::SingleExit => Self::all(),
+            BuiltinAssemblyMode::LegacyInstances => Self::legacy_instances(),
+            BuiltinAssemblyMode::Disabled => Self::none(),
+        }
+    }
+
+    /// 注入全部能力（v5 默认；`PERI_MCP_BUILTIN` 缺省 / 未知值）。
     pub(crate) fn all() -> Self {
         Self {
+            mode: BuiltinInjectionMode::SingleExit,
+            enabled: builtin_mcp::BUILTIN_V5_CAPABILITIES
+                .iter()
+                .map(|capability| capability.name)
+                .collect(),
+        }
+    }
+
+    /// v5 单出口的显式能力子集（bare 配置只启用 workspace）。
+    pub(crate) fn capabilities(names: &[&'static str]) -> Self {
+        debug_assert!(
+            names
+                .iter()
+                .all(|name| builtin_mcp::capability(name).is_some()),
+            "capability policy names must come from the registry"
+        );
+        Self {
+            mode: BuiltinInjectionMode::SingleExit,
+            enabled: builtin_mcp::BUILTIN_V5_CAPABILITIES
+                .iter()
+                .filter(|capability| names.contains(&capability.name))
+                .map(|capability| capability.name)
+                .collect(),
+        }
+    }
+
+    /// 零注入（`PERI_MCP_BUILTIN=off` / `0`）。
+    ///
+    /// **语义**：off 的退回态没有 builtin 能力；这是显式运维开关。
+    pub(crate) fn none() -> Self {
+        Self {
+            mode: BuiltinInjectionMode::SingleExit,
+            enabled: Vec::new(),
+        }
+    }
+
+    /// 迁移期回滚：逐能力写回 v4 六实例条目（仅 `PERI_MCP_BUILTIN=legacy`）。
+    pub(crate) fn legacy_instances() -> Self {
+        Self {
+            mode: BuiltinInjectionMode::LegacyInstances,
             enabled: BUILTIN_MCP_INSTANCES
                 .iter()
                 .map(|instance| instance.name)
@@ -31,20 +92,15 @@ impl BuiltinInjectionPolicy {
         }
     }
 
-    /// 零注入（`PERI_MCP_BUILTIN=off` / `0`）。
-    ///
-    /// **语义**：off 的退回态**没有** Web/Artifact 能力（middleware 提供面已删除，
-    /// 不存在「回退到旧实现」这条路径），这是显式运维开关。与 `disabled: true` 的
-    /// 区别：后者仍保留该实例的 builtin 配置（注册为 `Disabled`），另一实例与其它
-    /// capability 不受影响。
-    pub(crate) fn none() -> Self {
+    pub(crate) fn legacy_workspace() -> Self {
         Self {
-            enabled: Vec::new(),
+            mode: BuiltinInjectionMode::LegacyInstances,
+            enabled: vec!["workspace"],
         }
     }
 
-    /// 从 env 解析：`off` / `0` → [`Self::none`]；缺失 / 其它值 → [`Self::all`]
-    /// （未知值 warn + `all`，不引入第三种未知状态）。
+    /// 从 env 解析：`off` / `0` → [`Self::none`]；`legacy` / `v4` → v4 回滚；
+    /// 缺失 / 其它值 → v5 单出口（未知值 warn + `all`，不引入第三种未知状态）。
     pub(crate) fn from_env() -> Self {
         if !crate::platform::IN_PROCESS_BUILTINS {
             // 浏览器 worker 不能托管任何进程内 builtin 实例（平台能力平面的
@@ -54,16 +110,39 @@ impl BuiltinInjectionPolicy {
         }
         let environment =
             peri_config::source::read_environment(&[BUILTIN_INJECTION_ENV]).unwrap_or_default();
-        if peri_config::mcp::builtin_enabled(&environment) {
-            Self::all()
-        } else {
-            Self::none()
+        let raw = environment
+            .get(BUILTIN_INJECTION_ENV)
+            .map(|value| value.trim().to_ascii_lowercase());
+        match raw.as_deref() {
+            Some("off" | "0") => Self::none(),
+            Some("legacy" | "v4") => Self::legacy_instances(),
+            Some("on" | "1" | "v5" | "") | None => Self::all(),
+            Some(other) => {
+                tracing::warn!(
+                    value = other,
+                    "unknown PERI_MCP_BUILTIN value; using the v5 single exit"
+                );
+                Self::all()
+            }
         }
     }
 
-    /// 该实例是否在策略内（`false` ⇒ overlay 不注入、不填 `source`）。
-    pub(crate) fn enables(&self, instance: &str) -> bool {
-        self.enabled.contains(&instance)
+    /// v5 模式下为能力名；v4 回滚模式下为实例名。
+    pub(super) fn enables(&self, name: &str) -> bool {
+        self.enabled.contains(&name)
+    }
+
+    /// 是否为零注入（`PERI_MCP_BUILTIN=off`）。
+    pub(crate) fn is_none(&self) -> bool {
+        self.mode == BuiltinInjectionMode::SingleExit && self.enabled.is_empty()
+    }
+
+    pub(crate) fn is_legacy(&self) -> bool {
+        self.mode == BuiltinInjectionMode::LegacyInstances
+    }
+
+    fn capability_enabled(&self, capability_name: &str) -> bool {
+        self.mode == BuiltinInjectionMode::SingleExit && self.enables(capability_name)
     }
 }
 
@@ -93,7 +172,14 @@ pub(crate) enum BuiltinOverlayError {
 }
 
 /// `(server_name, original_tool)` 是否为已实现实例声明为 direct 的工具。
+///
+/// `peri` 单出口按原始工具名在整张能力表中定位（原始名全局唯一）；迁移期六实例
+/// 仍按实例声明表判定。
 pub(crate) fn is_declared_direct(server_name: &str, original_tool: &str) -> bool {
+    if builtin_mcp::is_v5_server_name(server_name) {
+        return builtin_mcp::capability_of_original_tool(original_tool)
+            .is_some_and(|(_, tool)| tool.direct);
+    }
     builtin_mcp::find(server_name).is_some_and(|instance| {
         instance
             .tools
@@ -110,6 +196,10 @@ pub(crate) fn is_declared_direct(server_name: &str, original_tool: &str) -> bool
 /// `tool_bridge::McpToolBridge` 构造点消费；本函数不是授权边界——服务端仍须
 /// 自行校验调用上下文。
 pub(crate) fn is_declared_model_hidden(server_name: &str, original_tool: &str) -> bool {
+    if builtin_mcp::is_v5_server_name(server_name) {
+        return builtin_mcp::capability_of_original_tool(original_tool)
+            .is_some_and(|(_, tool)| !tool.model_visible);
+    }
     builtin_mcp::find(server_name).is_some_and(|instance| {
         instance
             .tools
@@ -118,11 +208,11 @@ pub(crate) fn is_declared_model_hidden(server_name: &str, original_tool: &str) -
     })
 }
 
-/// IF-D10 的唯一判定入口：能力开关（v5 能力名或迁移期旧键）命中即关闭对应能力。
+/// IF-D10 的唯一判定入口：v5 能力名命中即关闭对应能力。
 ///
-/// `disabled_middlewares` 同时承载链槽位键与其他 middleware 键；本函数只接受能
-/// 映射到 builtin 能力的键（`capability_of_switch`），其余键静默跳过。旧键不是
-/// 第二套开关：两者都经同一能力表映射，输出仍是 v4 实例名供迁移期面消费。
+/// `disabled_middlewares` 同时承载链槽位键与其他 middleware 键；本函数接受 v5
+/// 能力名与 builtin 旧 `*Middleware` 键（确定性映射 adapter，M4 删除），其余键
+/// 静默跳过。
 pub(crate) fn closed_instances(disabled_middlewares: &HashSet<String>) -> BTreeSet<String> {
     closed_capabilities(disabled_middlewares)
         .into_iter()
@@ -136,6 +226,9 @@ pub(crate) fn closed_instances(disabled_middlewares: &HashSet<String>) -> BTreeS
 }
 
 /// 关闭集的能力身份（v5 名字）；供 router / readiness 等后续消费方使用。
+///
+/// 同时接受能力名与迁移期旧 `*Middleware` 键；旧键经
+/// [`builtin_mcp::capability_of_switch`] 确定性映射，不能 silent no-op（#409 §8.6）。
 pub(crate) fn closed_capabilities(
     disabled_middlewares: &HashSet<String>,
 ) -> BTreeSet<&'static str> {
@@ -143,6 +236,99 @@ pub(crate) fn closed_capabilities(
         .iter()
         .filter_map(|key| builtin_mcp::capability_of_switch(key).ok())
         .map(|capability| capability.name)
+        .collect()
+}
+
+/// 当前会话可见的能力名（声明顺序）：迁移期关闭集（旧实例名）减去后剩余。
+pub(crate) fn enabled_capabilities(closed: &BTreeSet<String>) -> Vec<&'static str> {
+    builtin_mcp::BUILTIN_V5_CAPABILITIES
+        .iter()
+        .filter(|capability| !closed.contains(capability.legacy_instance))
+        .map(|capability| capability.name)
+        .collect()
+}
+
+/// 能力是否被会话关闭集命中（旧实例名身份）。
+pub(crate) fn capability_closed(capability_name: &str, closed: &BTreeSet<String>) -> bool {
+    builtin_mcp::capability(capability_name)
+        .is_some_and(|capability| closed.contains(capability.legacy_instance))
+}
+
+/// 该来源承载的能力是否在关闭集内。
+///
+/// - 迁移期六实例：来源实例名就是能力身份；
+/// - v5 单出口 `peri`：按调用方给出的能力判定；
+/// - 其它来源：永不受 builtin 关闭集影响。
+pub(crate) fn is_capability_closed(
+    capability_name: &str,
+    source: Option<&ConfigSource>,
+    closed: &BTreeSet<String>,
+) -> bool {
+    match source {
+        Some(ConfigSource::Builtin { instance }) if instance == capability_name => {
+            closed.contains(capability_name)
+        }
+        Some(ConfigSource::Builtin { instance }) if builtin_mcp::is_v5_server_name(instance) => {
+            capability_closed(capability_name, closed)
+        }
+        _ => false,
+    }
+}
+
+/// `(server, original_tool)` 是否属于关闭的能力。
+pub(crate) fn is_tool_closed(
+    server_name: &str,
+    original_tool: &str,
+    closed: &BTreeSet<String>,
+) -> bool {
+    if builtin_mcp::is_v5_server_name(server_name) {
+        return builtin_mcp::capability_of_original_tool(original_tool)
+            .is_some_and(|(capability, _)| closed.contains(capability.legacy_instance));
+    }
+    closed.contains(server_name)
+}
+
+/// 必需工具清单按会话关闭集过滤（v5 单出口按工具所属能力）。
+///
+/// 迁移期实例整体关闭由调用方先行过滤；本函数只处理同一 server 内的逐工具关闭
+/// （`peri` 的 direct 工具跨能力聚合）。
+pub(crate) fn visible_required_tools(
+    server_name: &str,
+    tools: &[String],
+    closed: &BTreeSet<String>,
+) -> Vec<String> {
+    if !builtin_mcp::is_v5_server_name(server_name) {
+        return tools.to_vec();
+    }
+    tools
+        .iter()
+        .filter(|tool| !is_tool_closed(server_name, tool, closed))
+        .cloned()
+        .collect()
+}
+
+/// 资源 URI 是否属于关闭的能力（只对 v5 `peri` 有意义）。
+pub(crate) fn is_resource_closed(uri: &str, closed: &BTreeSet<String>) -> bool {
+    builtin_mcp::capability_of_resource_uri(uri)
+        .is_ok_and(|capability| closed.contains(capability.legacy_instance))
+}
+
+/// 订阅资源清单按会话关闭集过滤。
+///
+/// 迁移期实例：整体关闭由 [`is_closed_source`] 先行判定，本函数原样返回；
+/// v5 `peri`：按 URI 归属能力过滤（workspace 关闭时不再订阅 `workspace://git/ref`）。
+pub(crate) fn visible_subscription_resources(
+    server_name: &str,
+    resources: &[String],
+    closed: &BTreeSet<String>,
+) -> Vec<String> {
+    if !builtin_mcp::is_v5_server_name(server_name) {
+        return resources.to_vec();
+    }
+    resources
+        .iter()
+        .filter(|uri| !is_resource_closed(uri, closed))
+        .cloned()
         .collect()
 }
 
@@ -169,7 +355,7 @@ pub(crate) fn is_closed_source(
 /// 不要求来源是 workspace；本函数只决定哪些连接可以承载 `peri-instruction://`
 /// / `peri-meta://` 等宿主系统 URI。
 pub(crate) fn is_workspace_source(source: Option<&ConfigSource>) -> bool {
-    matches!(source, Some(ConfigSource::Builtin { instance }) if instance == "workspace")
+    matches!(source, Some(ConfigSource::Builtin { instance }) if instance == "workspace" || builtin_mcp::is_v5_server_name(instance))
         || matches!(source, Some(ConfigSource::WorkspaceRemote))
 }
 
@@ -252,7 +438,18 @@ pub(crate) fn apply_builtin_overlay(
         return Err(err);
     }
     // 规则 1 / 2：只处理策略启用且**已实现**的实例。
-    // 兼容期：逐能力写回 v4 六实例条目；M4 切换单出口后本循环删除。
+    match policy.mode {
+        BuiltinInjectionMode::LegacyInstances => apply_v4_instances(servers, policy),
+        BuiltinInjectionMode::SingleExit => apply_v5_single_exit(servers, policy),
+    }
+    Ok(())
+}
+
+/// v4 回滚路径：逐能力写回六实例条目（`PERI_MCP_BUILTIN=legacy`，M4 截止）。
+fn apply_v4_instances(
+    servers: &mut HashMap<String, McpServerConfig>,
+    policy: &BuiltinInjectionPolicy,
+) {
     for instance in BUILTIN_MCP_INSTANCES.iter() {
         if instance.name == "workspace" {
             if let Some(entry) = servers.get_mut("workspace") {
@@ -290,7 +487,131 @@ pub(crate) fn apply_builtin_overlay(
             entry.system_mcp_tools = Some(direct_tool_name_strings(instance));
         }
     }
-    Ok(())
+}
+
+/// v5 默认路径：把旧逐实例条目确定性映射为能力开关，只注入 `peri` 单出口。
+///
+/// 映射规则：
+/// 1. `{"<instance>": {"disabled": true}}` → 对应能力关闭；条目本身被移除，
+///    不再产生第二个 builtin endpoint。
+/// 2. `{"<instance>": {}}` / 未声明 → 能力开启（默认层）。
+/// 3. `{"workspace": {"url": ...}}` → 远端 Workspace 保持独立来源身份
+///    （`WorkspaceRemote`），不进入 `peri`；这是宿主任命的外部执行环境。
+/// 4. `{"peri": {"env": ...}}` 的 env 保留（能力凭据），但 `system_mcp` /
+///    `system_mcp_tools` / 能力集合由宿主重算；`command` / `url` 接管在规则 3 拒绝。
+fn apply_v5_single_exit(
+    servers: &mut HashMap<String, McpServerConfig>,
+    policy: &BuiltinInjectionPolicy,
+) {
+    if policy.enabled.is_empty() {
+        // `PERI_MCP_BUILTIN=off`：只抑制注入，不改写用户条目。
+        return;
+    }
+    let mut remote_workspace = false;
+    if let Some(entry) = servers.get_mut("workspace") {
+        if entry.url.is_some() {
+            entry.source = Some(ConfigSource::WorkspaceRemote);
+            if entry.disabled != Some(true) {
+                entry.system_mcp = Some(true);
+                // The live tools/list result, including an empty list, is authoritative.
+                entry.system_mcp_tools = None;
+            }
+            remote_workspace = true;
+        }
+    }
+    let mut disabled_capabilities = BTreeSet::new();
+    let mut legacy_web_env = None;
+    for capability in builtin_mcp::BUILTIN_V5_CAPABILITIES {
+        if capability.name == "workspace" && remote_workspace {
+            continue;
+        }
+        let Some(legacy) = servers.remove(capability.legacy_instance) else {
+            continue;
+        };
+        if legacy.disabled == Some(true) {
+            disabled_capabilities.insert(capability.name);
+        } else if capability.name == "web" {
+            legacy_web_env = legacy.env;
+        }
+    }
+    if remote_workspace {
+        disabled_capabilities.insert("workspace");
+    }
+    let enabled: Vec<&'static str> = builtin_mcp::BUILTIN_V5_CAPABILITIES
+        .iter()
+        .filter(|capability| policy.capability_enabled(capability.name))
+        .filter(|capability| !disabled_capabilities.contains(capability.name))
+        .map(|capability| capability.name)
+        .collect();
+    if enabled.is_empty() {
+        // 全部能力关闭（或部署关闭）：不注入空的 system 依赖。
+        servers.remove(builtin_mcp::BUILTIN_V5_SERVER_NAME);
+        return;
+    }
+
+    let existing = servers.remove(builtin_mcp::BUILTIN_V5_SERVER_NAME);
+    let disabled = existing.as_ref().and_then(|entry| entry.disabled);
+    let mut env = existing
+        .as_ref()
+        .and_then(|entry| entry.env.clone())
+        .unwrap_or_default();
+    if enabled.contains(&"web") {
+        for (key, value) in legacy_web_env.unwrap_or_default() {
+            env.entry(key).or_insert(value);
+        }
+    }
+    // 运行时标记：宿主每次注入都覆盖，用户配置不能扩大能力集。
+    env.insert(
+        builtin_mcp::BUILTIN_V5_CAPABILITIES_ENV.to_string(),
+        enabled.join(","),
+    );
+    let subscriptions = existing
+        .as_ref()
+        .and_then(|entry| entry.subscriptions.clone())
+        .or_else(|| {
+            enabled
+                .contains(&"workspace")
+                .then(|| super::default_subscriptions_for("workspace"))
+                .flatten()
+        });
+    let direct_tools = direct_tool_names_for(&enabled);
+    servers.insert(
+        builtin_mcp::BUILTIN_V5_SERVER_NAME.to_string(),
+        McpServerConfig {
+            command: None,
+            args: None,
+            env: Some(env),
+            url: None,
+            headers: None,
+            oauth: None,
+            disabled,
+            subscriptions,
+            system_mcp: (disabled != Some(true)).then_some(true),
+            system_mcp_tools: (disabled != Some(true)).then_some(direct_tools),
+            system_mcp_timeout: existing.and_then(|entry| entry.system_mcp_timeout),
+            source: Some(ConfigSource::Builtin {
+                instance: builtin_mcp::BUILTIN_V5_SERVER_NAME.to_string(),
+            }),
+        },
+    );
+}
+
+/// 启用能力集合的 direct 工具原始名（v5 模型面保持原名）。
+fn direct_tool_names_for(capabilities: &[&'static str]) -> Vec<String> {
+    let mut names = Vec::new();
+    for capability in builtin_mcp::BUILTIN_V5_CAPABILITIES {
+        if !capabilities.contains(&capability.name) {
+            continue;
+        }
+        names.extend(
+            capability
+                .tools
+                .iter()
+                .filter(|tool| tool.direct)
+                .map(|tool| tool.original_name.to_string()),
+        );
+    }
+    names
 }
 
 /// 保留名被 `command`/`url` 接管的首个错误（按名字排序，稳定可复核）。
@@ -323,15 +644,21 @@ pub(super) fn reserved_name_takeover(
 pub(super) fn disabled_with_system_mcp(
     servers: &HashMap<String, McpServerConfig>,
 ) -> Option<BuiltinOverlayError> {
+    let configured = |name: &str| {
+        servers
+            .get(name)
+            .is_some_and(|config| config.disabled == Some(true) && config.system_mcp == Some(true))
+    };
     BUILTIN_MCP_INSTANCES
         .iter()
-        .find(|instance| {
-            servers.get(instance.name).is_some_and(|config| {
-                config.disabled == Some(true) && config.system_mcp == Some(true)
-            })
-        })
+        .find(|instance| configured(instance.name))
         .map(|instance| BuiltinOverlayError::DisabledWithSystemMcp {
             name: instance.name.to_string(),
+        })
+        .or_else(|| {
+            configured("peri").then(|| BuiltinOverlayError::DisabledWithSystemMcp {
+                name: "peri".to_string(),
+            })
         })
 }
 

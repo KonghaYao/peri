@@ -50,14 +50,13 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | System Reminder | [system-reminder.md](system-reminder.md) | canonical DTO、可信生产、队列/持久化、ACP/TUI 投影与 legacy fallback |
 | Beta Flag 系统 | [beta-flags.md](beta-flags.md) | 注册表、`config.betas` 配置面投影与装配期消费注入；不做远程下发、灰度与会话内热生效，安全与兼容语义不使用 flag；验收记录与剩余跟进项见 [2026-10-08 实施 issue](../../spec/issues/2026-10-08-beta-flags-implementation.md) |
 | Peri SDK Chat | [peri-sdk-chat.md](peri-sdk-chat.md) | `ChatManager`/`ChatService`/`ChatUserAction`/`PeriInstance`/`ChatView` 与 `ChatReplica` 的职责、事实/同步、宿主与关闭边界；公开入口见 [TS SDK 索引](../code-index/peri-ts-sdk.md) |
-| peri-cf 服务端 Agent 执行 | [peri-cf-server-agent.md](peri-cf-server-agent.md) | Bun 长驻服务承载 WASM ACP Host 与 SDK Chat 控制面；浏览器经 HTTP Action 与 WebSocket + Yjs 只读副本消费；凭据与远程 MCP 由服务端环境变量管理 |
 
 ## 已批准目标设计
 
 | 主题 | 文档 | 进度事实源 |
 | --- | --- | --- |
 | MCP 适配 v4-part-1 | [mcp-adaptation-v4-part-1.md](mcp-adaptation-v4-part-1.md) | System MCP 启动依赖、工具注入、MCP 隔离与 middleware 归属；builtin 实例最小隔离单位条款已被 [v5 单出口设计](mcp-v5-single-exit.md) 取代，六实例仅保留为兼容期路径；迁移状态以代码与契约测试为准 |
-| MCP v5 单出口 | [mcp-v5-single-exit.md](mcp-v5-single-exit.md) | builtin 单 `peri` 出口、capability router、workspace 代理、能力关闭矩阵与迁移回滚契约；standalone router 与 `mcp-start --capability` 已实现并有 crate 级测试，宿主默认装配、Sandbox 端到端与切换验收未完成，见 [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md) |
+| MCP v5 单出口 | [mcp-v5-single-exit.md](mcp-v5-single-exit.md) | builtin 单 `peri` 出口、capability router、workspace 代理、能力关闭矩阵与迁移回滚契约；`peri` 已是宿主默认装配，旧 policy 键保留为确定性映射 adapter（M4 删除），`PERI_MCP_BUILTIN=legacy` 保留六实例回滚到 M4 截止决定；Sandbox workspace 代理接线与端到端验收见 [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md) |
 | 时间能力边界 | [time-runtime.md](time-runtime.md) | 原生边界已落地；WASM 完整验收与既有公开 Chrono 契约范围仍待核实；入口见 [peri-time 索引](../code-index/peri-time.md) |
 | RCRA 消息、任务归属与激活 | [rcra-message-activation.md](rcra-message-activation.md) | 当前进程 Task/执行、canonical 历史与普通执行；待发送消息持久化见 [Thread MQ](thread-mq.md)，**持久执行恢复仍剥离** |
 | Thread MQ 持久收件箱 | [thread-mq.md](thread-mq.md) | 主、子与 Workflow Agent 的统一持久 MQ、原子 Receive 与 Rust 操作接口；实施与验收见 [active issue](../../spec/issues/2026-11-01-thread-mq-implementation.md) |
@@ -68,8 +67,6 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | MonitorMCP | [monitor-mcp.md](monitor-mcp.md) | v1 command source、标准 MCP Tasks 与 alert 提醒已实现（运行中命中与任务终态都会唤醒，终态合并未报告命中）；实现入口见 [MCP packages 索引](../code-index/mcp-packages.md)，poll/file/WS source 不在范围 |
 | Serverless 执行环境身份 | [serverless-execution-identity.md](serverless-execution-identity.md) | Emscripten/Node/Bun/workerd 宿主可用；Cloudflare 托管部署与跨实例接管未验收 |
 | TUI 面板架构 | [tui-panel-architecture.md](tui-panel-architecture.md) | [TUI 面板架构重构](../../spec/issues/2026-10-15-tui-architecture-refactor.md)；面板外壳、共享视口、事件入口、操作作用域与完成门、快照发布单点、确认版本守卫已落地；未完成项见该 issue |
-| peri-cf 聊天对象契约 | [peri-cf-chat-objects.md](peri-cf-chat-objects.md) | 前端消费面与对象契约完整性；对象语义继续有效，Worker/DO 与旧控制通道已标注为历史；当前实现见 [Peri SDK Chat](peri-sdk-chat.md) 与 [服务端 Agent](peri-cf-server-agent.md) |
-| peri-cf Chat 前端 | [peri-cf-chat-ui.md](peri-cf-chat-ui.md) | 自有 `frontend/chat/{timeline,composer,components}` 渲染；状态来自 SDK `ChatReplica` 经 `ChatProjection` 物化的展示 DTO；`frontend/components/assistant-ui/` 只保留 vendored 审批/问答卡片（无 `@assistant-ui/*` 运行时依赖）；SDK 保持独立 |
 
 ## 维护要求
 

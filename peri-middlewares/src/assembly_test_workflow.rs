@@ -74,7 +74,7 @@ fn workflow_build_tools_filters_disabled() {
     // workspace 实例的 7 个工具按原名进入 workflow 工具面。
     let workspace = peri_acp_types::builtin_mcp::find("workspace")
         .expect("workspace 必须是已实现实例（W3-A 冻结注册表）");
-    for declaration in workspace.tools {
+    for declaration in workspace.tools.iter().filter(|tool| tool.advertised) {
         assert!(
             all_names.contains(&declaration.legacy_name),
             "全开时 workflow 工具 {} 应存在: {all_names:?}",
@@ -99,7 +99,7 @@ fn workflow_build_tools_filters_disabled() {
     // 7 个 `*` 一个不剩。名字面从注册表派生。
     {
         let disabled: std::collections::HashSet<String> =
-            std::iter::once("WorkspaceMiddleware".to_string()).collect();
+            std::iter::once("workspace".to_string()).collect();
         let tools = pool_factory.build_tools("/tmp/contract-test", &disabled, None, None);
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         for declaration in workspace.tools {
@@ -117,8 +117,8 @@ fn workflow_build_tools_filters_disabled() {
 
     // builtin 实例关闭：workflow agent 的工具列表同样归零（IF-D10 面③）。
     for (policy_key, gone, survivor) in [
-        ("WebMiddleware", "WebSearch", "artifact"),
-        ("ArtifactMiddleware", "artifact", "WebSearch"),
+        ("web", "WebSearch", "artifact"),
+        ("artifact", "artifact", "WebSearch"),
     ] {
         let disabled: std::collections::HashSet<String> =
             std::iter::once(policy_key.to_string()).collect();
@@ -139,7 +139,7 @@ fn workflow_build_tools_filters_disabled() {
     let all_keys: std::collections::HashSet<String> =
         peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
             .iter()
-            .map(|instance| instance.legacy_policy_key.to_string())
+            .map(|instance| instance.name.to_string())
             .collect();
     let tools = pool_factory.build_tools("/tmp/contract-test", &all_keys, None, None);
     assert!(

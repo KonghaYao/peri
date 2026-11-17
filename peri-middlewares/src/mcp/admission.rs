@@ -95,7 +95,12 @@ impl SystemReadySnapshot {
             if super::builtin::is_closed(&item.requirement.server, &self.closed_instances) {
                 continue;
             }
-            for tool in &item.requirement.required_tools {
+            let required_tools = super::builtin::visible_required_tools(
+                &item.requirement.server,
+                &item.requirement.required_tools,
+                &self.closed_instances,
+            );
+            for tool in &required_tools {
                 let already = required.iter().any(|entry| {
                     entry.server_name == item.requirement.server
                         && entry.original_tool_name == *tool
@@ -187,12 +192,25 @@ impl McpAdmissionPreparation {
         super::builtin::is_closed_source(server, source.as_ref(), &self.closed_instances)
     }
 
+    /// 本会话冻结的 builtin 关闭集（供同批必需工具校验投影）。
+    pub(crate) fn closed_instances(&self) -> &BTreeSet<String> {
+        &self.closed_instances
+    }
+
     /// 该 bridge 所属实例是否在本 session 被关闭（唯一判定入口
     /// `builtin::is_closed`）。
     fn is_bridge_closed(&self, bridge: &McpToolBridge) -> bool {
-        bridge
-            .builtin_mcp_instance()
-            .is_some_and(|server| super::builtin::is_closed(server, &self.closed_instances))
+        bridge.builtin_mcp_instance().is_some_and(|server| {
+            if peri_acp_types::builtin_mcp::is_v5_server_name(server) {
+                super::builtin::is_tool_closed(
+                    server,
+                    bridge.original_tool_name(),
+                    &self.closed_instances,
+                )
+            } else {
+                super::builtin::is_closed(server, &self.closed_instances)
+            }
+        })
     }
 
     /// System MCP 启动闸门（冻结签名：IF-M3 / sub-plan B §4.3）。
@@ -235,7 +253,11 @@ impl McpAdmissionPreparation {
             .map(|item| {
                 (
                     item.requirement.server.clone(),
-                    item.requirement.required_tools.clone(),
+                    super::builtin::visible_required_tools(
+                        &item.requirement.server,
+                        &item.requirement.required_tools,
+                        &self.closed_instances,
+                    ),
                 )
             })
             .collect();

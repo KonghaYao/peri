@@ -17,6 +17,7 @@ macro_rules! direct {
             legacy_name: $original,
             direct: true,
             model_visible: true,
+            advertised: true,
             prompt_declaration: $prompt,
             context_retention: $retention,
             completes_on_response: $completes,
@@ -33,6 +34,24 @@ macro_rules! deferred {
             legacy_name: concat!("mcp__", $instance, "__", $original),
             direct: false,
             model_visible: $visible,
+            advertised: true,
+            prompt_declaration: None,
+            context_retention: $retention,
+            completes_on_response: $completes,
+        }
+    };
+}
+
+/// 仅宿主调用的工具：可执行、可路由，但不进入 wire `tools/list` 与模型面。
+macro_rules! host_only {
+    ($instance:literal, $original:literal, $retention:expr, $completes:literal) => {
+        CapabilityTool {
+            original_name: $original,
+            model_name: concat!("mcp__peri__", $original),
+            legacy_name: concat!("mcp__", $instance, "__", $original),
+            direct: false,
+            model_visible: false,
+            advertised: false,
             prompt_declaration: None,
             context_retention: $retention,
             completes_on_response: $completes,
@@ -96,6 +115,14 @@ pub(super) const WORKSPACE_CAPABILITY_TOOLS: &[CapabilityTool] = &[
         Some(
             "Run a shell command → `{{name}}` ({{title}}). Prefer the purpose-built tools above when applicable: they give structured output and enforce permission rules.",
         )
+    ),
+    // 宿主恢复面（session-durability）：按 owner 查询存活 Shell 任务。
+    // 仅由 handler 直接应答，不进入 wire 目录与模型面。
+    host_only!(
+        "workspace",
+        "shell_task_list",
+        ContextRetention::Recomputable,
+        true
     ),
 ];
 

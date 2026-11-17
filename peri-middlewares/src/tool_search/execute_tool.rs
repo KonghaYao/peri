@@ -159,7 +159,7 @@ impl BaseTool for ExecuteExtraTool {
             "properties": {
                 "tool_name": {
                     "type": "string",
-                    "description": "已注册的目标工具名称、大小写变体或声明的别名（例如 mcp__cron__cron_list）；以当前会话目录为准"
+                    "description": "已注册的目标工具名称、大小写变体或声明的别名（例如 mcp__peri__cron_list）；以当前会话目录为准"
                 },
                 "params": {
                     "type": "object",

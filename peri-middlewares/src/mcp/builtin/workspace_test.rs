@@ -79,6 +79,7 @@ async fn workspace_handler_handshakes_and_lists_seven_tools_over_wire() {
     let declared_order: Vec<&str> = declared
         .tools
         .iter()
+        .filter(|tool| tool.advertised)
         .map(|tool| tool.original_name)
         .collect();
     let wire_order: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();

@@ -276,3 +276,48 @@ async fn test_bg_fork_path_emits_v2_start_stop_exactly_once() {
         "C1：Start.child_agent_id 必须等于 child_thread_id（身份统一）"
     );
 }
+
+/// [#425] `SubagentStop.result` 是子 agent 的完整最终输出：超过 500 字符时
+/// 不得静默截断，末尾唯一标记必须保留。
+#[tokio::test]
+async fn test_background_subagent_stop_result_keeps_full_text_beyond_500_chars() {
+    const MARKER: &str = "SUBAGENT_STOP_RESULT_TAIL_MARKER";
+    let dir = tempfile::tempdir().unwrap();
+    super::write_test_agent(&dir);
+    let bridge = make_bridge();
+    let host = durable_host_with_bridge(dir.path(), "fixture-events-long-result", &bridge).await;
+    let t = host.bind(super::with_agent_face(make_tool_with_bridge(&bridge), dir.path()).await);
+    let prompt = format!("{}{MARKER}", "x".repeat(1200));
+
+    let result = host
+        .invoke_and_wait(
+            &t,
+            serde_json::json!({
+                "subagent_type": "test-agent",
+                "cwd": host.cwd.clone(),
+                "prompt": prompt,
+            }),
+            host.context(&[]),
+        )
+        .await;
+    assert!(result.is_ok(), "define 应成功: {:?}", result.err());
+
+    let evs = wait_for_observe_start_stop(&bridge, 5000).await;
+    let stop_result = evs
+        .iter()
+        .find_map(|event| match event {
+            ObserveEvent::SubagentStop { result, .. } => Some(result.as_str()),
+            _ => None,
+        })
+        .expect("事件流中应有 SubagentStop");
+    assert!(
+        stop_result.chars().count() > 500,
+        "SubagentStop.result 必须保留超过 500 字符的完整输出，实际 {} 字符",
+        stop_result.chars().count()
+    );
+    assert!(
+        stop_result.ends_with(MARKER),
+        "SubagentStop.result 必须保留末尾标记，实际结尾: {}",
+        &stop_result[stop_result.len().saturating_sub(80)..]
+    );
+}

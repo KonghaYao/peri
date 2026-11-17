@@ -125,7 +125,8 @@ impl McpClientPool {
         let subscriptions = server_config
             .subscriptions
             .as_ref()
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            .and_then(|subscriptions| self.filter_subscriptions(server_name, subscriptions));
 
         let mut used_oauth = false;
         let result = match &tc {
@@ -355,7 +356,7 @@ impl McpClientPool {
                 // 订阅配置存在：按 server 配置重建 subscriptions/listen 长流
                 // （2026-07-28）。失败仅告警——server 可能不支持，连接本身仍可用。
                 // A24 关闭门与 initialize 同源（`pool.subscription_allowed` 唯一判定）。
-                if let Some(sub) = subscriptions {
+                if let Some(sub) = &subscriptions {
                     if self.subscription_allowed(server_name) {
                         client::setup_subscription(self, &rs, server_name, sub).await;
                     } else {

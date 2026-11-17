@@ -18,7 +18,7 @@ pub(crate) const STDIO_UNAVAILABLE: &str = "stdio subprocesses are unavailable i
 
 /// 该 builtin 实例在本部署能否装配（注册表内 + 平台支持）。
 pub(crate) fn builtin_instance_supported(instance: &str) -> bool {
-    IN_PROCESS_BUILTINS && peri_acp_types::builtin_mcp::find(instance).is_some()
+    IN_PROCESS_BUILTINS && peri_acp_types::builtin_mcp::is_builtin_server_name(instance)
 }
 
 /// 从配置启用位派生默认层注入策略：部署不支持托管时恒为 `none`。
@@ -26,8 +26,42 @@ pub(crate) fn builtin_policy(
     configured_enabled: bool,
 ) -> crate::mcp::builtin::BuiltinInjectionPolicy {
     if IN_PROCESS_BUILTINS && configured_enabled {
-        crate::mcp::builtin::BuiltinInjectionPolicy::all()
+        // Snapshot 只冻结 on/off；`legacy` 回滚值仍由唯一 env 解析点解释。
+        crate::mcp::builtin::builtin_injection_policy_from_env()
     } else {
         crate::mcp::builtin::BuiltinInjectionPolicy::none()
+    }
+}
+
+pub(crate) fn builtin_policy_for_mode(
+    mode: peri_acp_types::builtin_mcp::BuiltinAssemblyMode,
+) -> crate::mcp::builtin::BuiltinInjectionPolicy {
+    if IN_PROCESS_BUILTINS {
+        crate::mcp::builtin::BuiltinInjectionPolicy::from_assembly_mode(mode)
+    } else {
+        crate::mcp::builtin::BuiltinInjectionPolicy::none()
+    }
+}
+
+/// bare 配置的 builtin 策略：仅保留 `workspace` 能力，并沿用部署装配模式。
+///
+/// `PERI_MCP_BUILTIN=off` 是部署级 kill switch，bare 路径也必须遵守；`legacy`
+/// 回滚值在 bare 中只投影 `workspace`（bare 从不注入其他能力）。
+pub(crate) fn builtin_workspace_policy(
+    configured_enabled: bool,
+) -> crate::mcp::builtin::BuiltinInjectionPolicy {
+    let deploy_policy = builtin_policy(configured_enabled);
+    builtin_workspace_policy_for_mode(deploy_policy)
+}
+
+pub(crate) fn builtin_workspace_policy_for_mode(
+    deploy_policy: crate::mcp::builtin::BuiltinInjectionPolicy,
+) -> crate::mcp::builtin::BuiltinInjectionPolicy {
+    if deploy_policy.is_none() {
+        deploy_policy
+    } else if deploy_policy.is_legacy() {
+        crate::mcp::builtin::BuiltinInjectionPolicy::legacy_workspace()
+    } else {
+        crate::mcp::builtin::BuiltinInjectionPolicy::capabilities(&["workspace"])
     }
 }

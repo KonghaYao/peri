@@ -94,6 +94,8 @@ export class MacProvider implements Provider {
         '--',
         options.periPath,
         'mcp-start',
+        'peri',
+        '--capability',
         'workspace',
         '--stdio',
         '--workspace',

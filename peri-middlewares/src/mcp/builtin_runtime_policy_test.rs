@@ -76,7 +76,7 @@ async fn policy_close_dimensions() {
         cells += 1;
         let mut disabled: HashSet<String> = HashSet::new();
         if !cron_open {
-            disabled.insert("CronMiddleware".to_string());
+            disabled.insert("cron".to_string());
         }
         let disabled_list: Vec<&str> = disabled.iter().map(String::as_str).collect();
         let closed = crate::mcp::builtin::closed_instances(&disabled);
@@ -235,7 +235,7 @@ async fn policy_close_dimensions() {
     // ── 「cron 工具仍可见可调用」与「策略关闭不是物理销毁」───────────────────────
     // `CronMiddleware=false`（实例键）：**投影**归零，但物理 handler 仍在（raw typed bridge
     // 仍可调用成功）——策略关闭是投影关闭，不是物理销毁。
-    let cron_off = ["CronMiddleware"];
+    let cron_off = ["cron"];
     let projection = fixture.projections(&cron_off);
     assert!(
         super::mw_instance_tools(&projection, "cron").is_empty(),

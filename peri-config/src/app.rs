@@ -430,7 +430,8 @@ impl AppConfig {
             .chain(BUILTIN_INSTANCE_POLICY_KEYS.iter())
             .copied()
             .chain(std::iter::once(BUILT_IN_SUBAGENTS_KEY))
-            // v5 能力名与旧键等价：运行时关闭集统一经 `capability_of_switch` 映射。
+            // v5 能力名是 builtin 能力的开关身份；旧 `*Middleware` 键保留为
+            // 确定性映射的兼容 adapter（#409 §8.6），M4 清理时删除。
             .chain(
                 peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
                     .iter()
@@ -439,25 +440,42 @@ impl AppConfig {
             .collect();
         map.retain(|key, _| {
             if known.contains(key.as_str()) {
+                if peri_acp_types::builtin_mcp::capability_of_legacy_policy_key(key).is_ok() {
+                    tracing::warn!(
+                        key = %key,
+                        "meta_harness: legacy builtin policy key mapped to its capability; \
+                         use the capability name (retired at M4)"
+                    );
+                }
                 true
             } else {
                 tracing::warn!(key = %key, "meta_harness: unknown key ignored");
                 false
             }
         });
-        let all_disabled = MIDDLEWARE_NAMES
-            .iter()
-            .chain(BUILTIN_INSTANCE_POLICY_KEYS.iter())
-            .all(|name| map.get(*name).copied() == Some(false));
-        if all_disabled {
+        if all_middleware_disabled(map) {
             tracing::warn!(
-                middleware_count = MIDDLEWARE_NAMES.len() + BUILTIN_INSTANCE_POLICY_KEYS.len(),
+                middleware_count = MIDDLEWARE_NAMES.len()
+                    + peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES.len(),
                 "meta_harness: ALL middleware disabled — every tool/hook/section holder \
                  will be unavailable; if this was not intentional, remove the meta_harness \
                  keys from settings.json"
             );
         }
     }
+}
+
+fn all_middleware_disabled(map: &HashMap<String, bool>) -> bool {
+    MIDDLEWARE_NAMES
+        .iter()
+        .all(|name| map.get(*name).copied() == Some(false))
+        && peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
+            .iter()
+            .all(|capability| {
+                [capability.name, capability.legacy_policy_key]
+                    .iter()
+                    .any(|key| map.get(*key).copied() == Some(false))
+            })
 }
 
 impl Default for AppConfig {

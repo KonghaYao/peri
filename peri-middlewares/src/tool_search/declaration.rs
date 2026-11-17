@@ -62,6 +62,10 @@ fn declaration_template(tool: &dyn BaseTool, name: &str) -> Option<String> {
 
 /// Only a bridge with verified builtin provenance may use a builtin declaration.
 fn builtin_declaration(instance_name: &str, original_name: &str) -> Option<&'static str> {
+    if peri_acp_types::builtin_mcp::is_v5_server_name(instance_name) {
+        return peri_acp_types::builtin_mcp::capability_of_original_tool(original_name)
+            .and_then(|(_, tool)| tool.prompt_declaration);
+    }
     peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
         .iter()
         .find(|instance| instance.name == instance_name)?

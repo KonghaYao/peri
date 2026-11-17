@@ -368,6 +368,10 @@ impl SessionEnvironment {
             cwd: cwd.clone(),
             bare: source.bare,
             drive_cron_tick: source.drive_cron_tick,
+            builtin_assembly_mode: Some(frozen.map_or_else(
+                || configuration.builtin_assembly_mode(),
+                |frozen| frozen.v2_frozen().builtin_assembly_mode,
+            )),
             #[cfg(not(target_os = "emscripten"))]
             workspace_input: None,
             #[cfg(not(target_os = "emscripten"))]

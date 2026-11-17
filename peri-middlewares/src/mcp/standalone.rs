@@ -1,11 +1,11 @@
-//! In-process serving for builtin MCP instances (`peri mcp-start`).
+//! In-process serving for the v5 builtin single exit (`peri mcp-start`).
 //!
-//! `peri mcp-start <instance> --stdio|--http` serves the named legacy instance
-//! from this binary. `peri mcp-start --capability ... --stdio|--http` serves the
-//! v5 single exit (`peri`) through the capability router; the selection is
-//! resolved by `peri-tui` before this module runs. HTTP mode is MCP Streamable
-//! HTTP at `/mcp` and is unauthenticated: bind a non-loopback host only on an
-//! isolated network.
+//! `peri mcp-start peri --stdio|--http` serves the single exit through the
+//! capability router; the selection is resolved by `peri-tui` before this module
+//! runs. Legacy `mcp-start <instance>` is a CLI adapter that maps the instance to
+//! its capability in `peri-tui`, so this module has no per-instance serving path.
+//! HTTP mode is MCP Streamable HTTP at `/mcp` and is unauthenticated: bind a
+//! non-loopback host only on an isolated network.
 //!
 //! `workflow` is served slot-only: without an ACP host nothing binds a
 //! `WorkflowRuntime`, so tool calls that need the runtime return the existing typed
@@ -19,8 +19,6 @@ use peri_mcp_common::standalone;
 
 #[cfg(not(target_os = "emscripten"))]
 use super::builtin::router::RouterTemplate;
-#[cfg(not(target_os = "emscripten"))]
-use super::builtin::standalone::StandaloneFactory;
 
 #[cfg(not(target_os = "emscripten"))]
 pub use super::builtin::router::{CapabilityReadiness, CapabilityStatus, RouterReadiness};
@@ -28,8 +26,6 @@ pub use super::builtin::router::{CapabilityReadiness, CapabilityStatus, RouterRe
 /// What the standalone process serves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
-    /// Legacy single builtin instance (migration/rollback path).
-    Instance(String),
     /// v5 single exit with the resolved capability set.
     Capabilities(Vec<String>),
 }
@@ -58,29 +54,8 @@ pub struct Options {
 /// Serve `options.target` until the transport closes.
 #[cfg(not(target_os = "emscripten"))]
 pub async fn run(options: Options) -> Result<()> {
-    match options.target {
-        Target::Instance(instance) => {
-            run_instance(instance, options.transport, options.workspace).await
-        }
-        Target::Capabilities(capabilities) => {
-            run_router(capabilities, options.transport, options.workspace).await
-        }
-    }
-}
-
-#[cfg(not(target_os = "emscripten"))]
-async fn run_instance(instance: String, transport: Transport, workspace: PathBuf) -> Result<()> {
-    let factory = StandaloneFactory::try_new(&instance, workspace)?;
-    let workspace = factory.workspace_handle();
-    let served = match transport {
-        Transport::Stdio => standalone::serve_stdio(factory.create()?).await,
-        Transport::Http {
-            host,
-            port,
-            allowed_hosts,
-        } => standalone::serve_http(move || factory.create(), &host, port, &allowed_hosts).await,
-    };
-    cleanup_workspace(workspace, served).await
+    let Target::Capabilities(capabilities) = options.target;
+    run_router(capabilities, options.transport, options.workspace).await
 }
 
 #[cfg(not(target_os = "emscripten"))]
@@ -120,22 +95,6 @@ async fn run_router(
         if report != peri_acp_types::tasks::TaskShutdownReport::Complete {
             anyhow::bail!("Workspace shell task cleanup incomplete");
         }
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "emscripten"))]
-async fn cleanup_workspace(
-    workspace: Option<peri_mcp_workspace::WorkspaceMcpServer>,
-    served: Result<()>,
-) -> Result<()> {
-    let cleanup = match workspace {
-        Some(server) => server.shutdown_shell_tasks().await,
-        None => None,
-    };
-    served?;
-    if cleanup != Some(peri_acp_types::tasks::TaskShutdownReport::Complete) {
-        anyhow::bail!("Workspace shell task cleanup incomplete");
     }
     Ok(())
 }

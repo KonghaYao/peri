@@ -296,6 +296,9 @@ pub(super) fn inherited_frozen_context(
         beta_flags: parent
             .map(|p| p.store().frozen.beta_flags.clone())
             .unwrap_or_default(),
+        builtin_assembly_mode: parent
+            .map(|p| p.store().frozen.builtin_assembly_mode)
+            .unwrap_or(peri_acp_types::builtin_mcp::BuiltinAssemblyMode::SingleExit),
         // 冻结运行环境同样随父 session 复制：子 Agent 只消费继承的冻结输入，
         // 不在恢复/派生时重探（H3）。
         runtime_env: parent.and_then(|p| p.store().frozen.runtime_env.clone()),

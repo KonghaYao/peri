@@ -172,10 +172,7 @@ async fn main_initial_before_agent_observes_filtered_mcp_catalog() {
     use crate::session::Session;
 
     for (policy, expected) in [
-        (
-            "WorkspaceMiddleware",
-            vec!["Read", "RemoteRead", "WebSearch"],
-        ),
+        ("workspace", vec!["Read", "RemoteRead", "WebSearch"]),
         ("McpMiddleware", vec!["Read"]),
     ] {
         let core: Arc<dyn BaseTool> = Arc::new(SourceTool("Read", None, None));

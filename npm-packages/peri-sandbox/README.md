@@ -144,7 +144,8 @@ adapter 不持久化 token，也不把它放进 `workspace` 或错误消息。`w
 
 1. `sandboxId` 必须是 `sbx_[a-f0-9]{32}`；传 `sessionKey` 时按 `sha256("peri-sandbox-session:" + key)` 确定性派生。
 2. 两者都不传时随机生成一次。重启后要回到同一 workspace，必须自行保存 `sandboxId` 或重传相同的 `sessionKey`。
-3. 目录为 `<sandboxesRoot>/<sandboxId>/{workspace,home}`，权限 0700，`close()` 后保留。
+3. 默认目录为 `<sandboxesRoot>/<sandboxId>/{workspace,home}`，权限 0700，`close()` 后保留。传 `workspacePath` 时 workspace 使用该显式目录（不拼 root、不 hash URI），`home` 仍位于 `<sandboxRoot>`；显式目录必须是宿主的授权结果并满足上述权限/边界。
+4. `sandboxId`/`sessionKey` 只是调用方的运行句柄，用于状态目录、进程与锁；不是 workspace 业务身份，也不用于 workspace 查找、授权或恢复。适配器不得从 workspace URI 派生它们；不需要复用托管状态时应省略二者，让本包生成一次性随机句柄。
 4. `policy.json`、`token`、`.lock`、`diagnostics/` 位于 `<sandboxRoot>`，不在 SRT 的 `allowRead` 中。
 
 Workspace 是路径引用，不拥有 sandbox 或 session：
@@ -211,6 +212,7 @@ function startSandbox(options?: StartSandboxOptions): Promise<SandboxInstance>;
 | --- | --- | --- |
 | `sandboxId` | 随机 `sbx_<32 hex>` | 必须匹配 `sbx_[a-f0-9]{32}` |
 | `sessionKey` | — | 与 `sandboxId` 同时存在时以 `sandboxId` 为准；非空且不超过 1024 字节 |
+| `workspacePath` | `<sandboxRoot>/workspace` | 显式 workspace；必须存在、0700、真实目录，且与 `sandboxesRoot` 不重叠。`close({deleteData:true})` 只删除托管目录，不删除显式 workspace |
 | `sandboxesRoot` | settings 值 | 规范化绝对路径；覆盖 settings |
 | `settingsPath` | `defaultSettingsPath()` | 显式传入时文件必须存在 |
 | `profileName` | `settings.defaultProfile` 或首个 profile | 未知名称报 `invalid_options` |

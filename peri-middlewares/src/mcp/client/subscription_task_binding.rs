@@ -236,9 +236,9 @@ impl McpClientPool {
                     .upgrade()
                     .ok_or_else(|| "MCP pool unavailable".to_owned())?;
                 let peer = pool
-                    .clients
-                    .read()
-                    .get(&server)
+                    .capability_server_name(&server)
+                    .or_else(|| pool.client(&server).map(|_| server.clone()))
+                    .and_then(|resolved| pool.clients.read().get(&resolved).cloned())
                     .and_then(|client| client.peer.clone())
                     .ok_or_else(|| "MCP task owner disconnected".to_owned())?;
                 let mut params = CancelTaskParams::new(raw_id);
@@ -300,10 +300,15 @@ impl McpClientPool {
                     >
             },
         );
+        // `server` 是任务面板身份（v5 下为 capability 名）；客户端仍按 wire
+        // server（`peri`）查，否则单出口的能力任务会被判成 owner 缺失。
+        let wire_server = self
+            .capability_server_name(server)
+            .unwrap_or_else(|| server.to_owned());
         let owner_identity = self
             .clients
             .read()
-            .get(server)
+            .get(&wire_server)
             .map(|client| format!("mcp:{server}:{:?}", client.source))
             .ok_or_else(|| "MCP task owner unavailable".to_owned())?;
         Ok((
