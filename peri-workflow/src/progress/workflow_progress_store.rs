@@ -51,6 +51,18 @@ pub struct RunProgress {
     pub completed_at: Option<std::time::Instant>,
 }
 
+impl RunProgress {
+    /// 供报告/telemetry 直接读取的三态；acceptance 仍是独立字段。
+    #[must_use]
+    pub fn outcome(&self) -> peri_acp_types::workflow::WorkflowOutcome {
+        peri_acp_types::workflow::WorkflowOutcome::project(
+            self.execution_status,
+            self.acceptance_status,
+            self.delivery_status,
+        )
+    }
+}
+
 // ─── Store ──────────────────────────────────────────────────
 
 /// One run owns both its public projection and this execution's accounting provenance.
@@ -360,7 +372,8 @@ pub(super) fn apply_state_event(
                     }
                     if executed_in_this_run {
                         agent.duration_ms = match result {
-                            AgentRunResult::Ok { duration_ms, .. } => *duration_ms,
+                            AgentRunResult::Ok { duration_ms, .. }
+                            | AgentRunResult::Dead { duration_ms, .. } => *duration_ms,
                             _ => None,
                         };
                         agent.tool_count = result.tool_count().or(agent.tool_count);

@@ -258,6 +258,8 @@ snake_case 命名（`serde` 未做 rename，Rust `RunState` 直出）：
 | `run_id` | string | 运行 UUID（与目录名一致） |
 | `workflow_name` | string | 脚本 `meta.name` |
 | `status` | string | `"completed"` \| `"failed"` \| `"killed"` |
+| `outcome` | string \| 省略 | 引擎级 `"completed"` \| `"blocked"` \| `"failed"` \| `"killed"` \| `"unknown"`；`completed` 不代表验收通过，旧记录缺省为 unknown |
+| `attempts` | array \| 省略 | journal attempt 记录；`attemptIndex` 为宿主观测到的执行尝试序号（引擎重试递增，cache 命中保留原值） |
 | `return_value` | unknown | 脚本顶层 return（超长字符串已外置为占位符，见下） |
 | `script` | string | 脚本源码副本 |
 | `args` | unknown \| 省略 | 新运行保存的启动参数，ACP resume 原样恢复；旧记录缺失时不可重建 |
@@ -280,9 +282,9 @@ snake_case 命名（`serde` 未做 rename，Rust `RunState` 直出）：
 
 - `{ "kind": "ok", "output": string\|object, "usage": { "outputTokens": number }, "model"?, "toolCount"?, "tokenCount"?, "phase"?, "durationMs"? }`
 - `{ "kind": "skipped" }`
-- `{ "kind": "dead", "reason"?, "detail"? }`
+- `{ "kind": "dead", "reason"?, "detail"?, "durationMs"?, "tokenCount"? }`
 
-其中 `toolCount` / `tokenCount` / `durationMs` / `phase` / `model` / `reason` / `detail` 均为可选，宿主未提供时省略；reader 读取时 `tokens` 取 `tokenCount`，缺失时回退 `usage.outputTokens`。
+其中 `toolCount` / `tokenCount` / `durationMs` / `phase` / `model` / `reason` / `detail` 均为可选，宿主未提供时省略；reader 读取时 `tokens` 取 `tokenCount`，缺失时回退 `usage.outputTokens`。dead 的 `durationMs`/`tokenCount` 缺省表示宿主未测量，不得当作 0。
 
 ### outputs/*.txt 与 `${label}` 占位符
 

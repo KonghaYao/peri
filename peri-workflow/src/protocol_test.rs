@@ -150,6 +150,7 @@ fn test_journal_attempt_round_trip_and_legacy_default() {
             run_id: "019-run".into(),
             agent_id: Some(42),
             journal_seq: 7,
+            attempt_index: Some(2),
             recovered_from: Some(RecoveredAttempt {
                 run_id: "018-source".into(),
                 agent_id: Some(9),

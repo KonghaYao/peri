@@ -78,6 +78,8 @@ impl WorkflowMcpServer {
                                         scope_close_incomplete: false,
                                         reason: Some("consumer disconnected".into()),
                                         detail: None,
+                                        duration_ms: None,
+                                        token_count: None,
                                     }),
                                     Some("consumer disconnected".into()),
                                 );

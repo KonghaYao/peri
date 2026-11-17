@@ -70,6 +70,20 @@ pub enum AgentRunResult {
         reason: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+        /// Measured execution time for this attempt; `None` means not measured.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            rename = "durationMs"
+        )]
+        duration_ms: Option<u64>,
+        /// Output tokens observed before the attempt died; `None` means not reported.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            rename = "tokenCount"
+        )]
+        token_count: Option<u64>,
     },
 }
 
@@ -81,6 +95,7 @@ impl AgentRunResult {
                 reason,
                 detail,
                 scope_close_incomplete,
+                ..
             } if *scope_close_incomplete || reason.as_deref() == Some("scope-close-incomplete") => {
                 Some(detail.as_deref().unwrap_or(
                     "Workflow agent scope did not close; resource settlement is unconfirmed",
@@ -96,15 +111,25 @@ impl AgentRunResult {
             return self;
         }
         match self {
-            Self::Dead { reason, detail, .. } => Self::Dead {
+            Self::Dead {
+                reason,
+                detail,
+                duration_ms,
+                token_count,
+                ..
+            } => Self::Dead {
                 reason,
                 detail,
                 scope_close_incomplete: true,
+                duration_ms,
+                token_count,
             },
             _ => Self::Dead {
                 reason: Some("scope-close-incomplete".into()),
                 detail: Some("Workflow agent scope did not close; outstanding resources are unconfirmed. Do not start dependent writes or verification.".into()),
                 scope_close_incomplete: true,
+                duration_ms: None,
+                token_count: None,
             },
         }
     }
@@ -117,10 +142,12 @@ impl AgentRunResult {
         }
     }
 
-    /// 提取 agent 执行中的 token 消耗（仅 Ok 变体有值）
+    /// 提取 agent 执行中的 token 消耗（Ok 与带指标的 Dead 变体）
     pub fn token_count(&self) -> Option<u64> {
         match self {
-            AgentRunResult::Ok { token_count, .. } => *token_count,
+            AgentRunResult::Ok { token_count, .. } | AgentRunResult::Dead { token_count, .. } => {
+                *token_count
+            }
             _ => None,
         }
     }
@@ -356,6 +383,58 @@ pub enum DeliveryStatus {
     Unknown,
 }
 
+/// 引擎级结论：只聚合 execution 与 post-processing/delivery，不代替语义验收。
+///
+/// `Completed` 仅表示执行完成且 post-condition 未阻断；`acceptance_status` 仍是
+/// 独立字段，内核恒为 `unknown`（ADLC-DELIVERY-STATUS-001）。因此报告不得把
+/// `Completed` 读成“任务成功”，三态必须与 acceptance 分开呈现。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowOutcome {
+    Completed,
+    Blocked,
+    Failed,
+    Killed,
+    #[default]
+    Unknown,
+}
+
+impl WorkflowOutcome {
+    /// 单一派生点：execution 终态优先，其次 delivery/acceptance 阻断。
+    #[must_use]
+    pub fn project(
+        execution: ExecutionStatus,
+        acceptance: AcceptanceStatus,
+        delivery: DeliveryStatus,
+    ) -> Self {
+        match execution {
+            ExecutionStatus::Failed => Self::Failed,
+            ExecutionStatus::Killed => Self::Killed,
+            ExecutionStatus::Running | ExecutionStatus::Unknown => Self::Unknown,
+            ExecutionStatus::Completed => {
+                if acceptance == AcceptanceStatus::Failed || delivery == DeliveryStatus::Blocked {
+                    Self::Blocked
+                } else {
+                    Self::Completed
+                }
+            }
+        }
+    }
+}
+
+/// 旧 payload 没有 `outcome` 时的派生：沿用当时的成功口径
+/// （`status == completed && delivery != blocked`），acceptance 不参与，
+/// 避免回填一个旧数据从未携带的裁决。
+fn legacy_outcome(status: WorkflowRunStatus, delivery: DeliveryStatus) -> WorkflowOutcome {
+    let execution = match status {
+        WorkflowRunStatus::Running => ExecutionStatus::Running,
+        WorkflowRunStatus::Completed => ExecutionStatus::Completed,
+        WorkflowRunStatus::Failed => ExecutionStatus::Failed,
+        WorkflowRunStatus::Killed => ExecutionStatus::Killed,
+    };
+    WorkflowOutcome::project(execution, AcceptanceStatus::Unknown, delivery)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkflowWriteIntent {
@@ -378,6 +457,10 @@ pub struct WorkflowAttempt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<u64>,
     pub journal_seq: u64,
+    /// 1-based execution attempt ordinal for this journal sequence. Host-enriched;
+    /// `None` for legacy entries and cache hits whose original ordinal is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_index: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovered_from: Option<RecoveredAttempt>,
     pub consumed: bool,
@@ -425,6 +508,7 @@ impl WorkflowRunStatus {
 
 /// Workflow 完成后通过 broadcast channel 推送的结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "WorkflowTaskResultWire")]
 pub struct WorkflowTaskResult {
     pub run_id: String,
     pub workflow_name: String,
@@ -438,6 +522,10 @@ pub struct WorkflowTaskResult {
     pub post_processing_status: PostProcessingStatus,
     #[serde(default)]
     pub delivery_status: DeliveryStatus,
+    /// 引擎级三态（`completed` / `blocked` / `unknown`）；acceptance 仍是独立事实。
+    /// 旧 payload 缺字段时由 `status + delivery_status` 派生，显式 `unknown` 保持
+    /// `unknown`（反序列化经 `WorkflowTaskResultWire` 区分两种输入）。
+    pub outcome: WorkflowOutcome,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub state_artifact_exists: bool,
     pub duration_ms: u64,
@@ -452,6 +540,66 @@ pub struct WorkflowTaskResult {
     pub phase_summaries: Vec<PhaseSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attempts: Vec<WorkflowAttempt>,
+}
+
+/// `WorkflowTaskResult` 的反序列化影子：`outcome` 用 `Option` 保留「字段缺失」
+/// 与「显式 `unknown`」的区别，其余字段保持 wire 形状；新增 wire 字段需与公开
+/// 结构同步。
+#[derive(Deserialize)]
+struct WorkflowTaskResultWire {
+    run_id: String,
+    workflow_name: String,
+    success: bool,
+    status: WorkflowRunStatus,
+    #[serde(default)]
+    execution_status: ExecutionStatus,
+    #[serde(default)]
+    acceptance_status: AcceptanceStatus,
+    #[serde(default)]
+    post_processing_status: PostProcessingStatus,
+    #[serde(default)]
+    delivery_status: DeliveryStatus,
+    #[serde(default)]
+    outcome: Option<WorkflowOutcome>,
+    #[serde(default)]
+    state_artifact_exists: bool,
+    duration_ms: u64,
+    agent_count: usize,
+    tool_calls_count: usize,
+    error: Option<String>,
+    #[serde(default)]
+    result_preview: Option<WorkflowResultPreview>,
+    #[serde(default)]
+    phase_summaries: Vec<PhaseSummary>,
+    #[serde(default)]
+    attempts: Vec<WorkflowAttempt>,
+}
+
+impl From<WorkflowTaskResultWire> for WorkflowTaskResult {
+    fn from(wire: WorkflowTaskResultWire) -> Self {
+        let outcome = wire
+            .outcome
+            .unwrap_or_else(|| legacy_outcome(wire.status, wire.delivery_status));
+        Self {
+            run_id: wire.run_id,
+            workflow_name: wire.workflow_name,
+            success: wire.success,
+            status: wire.status,
+            execution_status: wire.execution_status,
+            acceptance_status: wire.acceptance_status,
+            post_processing_status: wire.post_processing_status,
+            delivery_status: wire.delivery_status,
+            outcome,
+            state_artifact_exists: wire.state_artifact_exists,
+            duration_ms: wire.duration_ms,
+            agent_count: wire.agent_count,
+            tool_calls_count: wire.tool_calls_count,
+            error: wire.error,
+            result_preview: wire.result_preview,
+            phase_summaries: wire.phase_summaries,
+            attempts: wire.attempts,
+        }
+    }
 }
 
 pub const WORKFLOW_RESULT_PREVIEW_BYTES: usize = 8_192;
@@ -521,6 +669,16 @@ fn delivery_status_word(status: DeliveryStatus) -> &'static str {
     }
 }
 
+fn outcome_word(outcome: WorkflowOutcome) -> &'static str {
+    match outcome {
+        WorkflowOutcome::Completed => "completed (engine-level; acceptance not judged)",
+        WorkflowOutcome::Blocked => "blocked",
+        WorkflowOutcome::Failed => "failed",
+        WorkflowOutcome::Killed => "killed",
+        WorkflowOutcome::Unknown => "unknown",
+    }
+}
+
 /// `return_value` **对象字段**的长文本外置阈值（**字节**，非字符数）：超过它的
 /// 字符串在写 `state.json` 前被抽出到 `outputs/<label>.txt`，原位替换为 `${label}`
 /// 引用。
@@ -557,8 +715,7 @@ impl WorkflowTaskResult {
     /// 主 Agent 是否应把 workflow 视为「成功交付」（非仅 engine 跑完）。
     #[must_use]
     pub fn agent_facing_success(&self) -> bool {
-        self.status == WorkflowRunStatus::Completed
-            && self.delivery_status != DeliveryStatus::Blocked
+        self.outcome == WorkflowOutcome::Completed
     }
 
     /// Defer / 通知用状态短语：`delivery_status=blocked` 时不得写 "completed"。
@@ -671,10 +828,12 @@ impl WorkflowTaskResult {
             "Result state file was not generated.\n".to_string()
         };
         let projection_line = format!(
-            "Execution: {}; acceptance: {}; post-condition: {}; delivery: {}.\n\
+            "Execution: {}; outcome: {}; acceptance: {}; post-condition: {}; delivery: {}.\n\
              Acceptance is judged outside the engine, so it reads `unknown` unless the calling \
-             layer (ADLC/skill) supplies a verdict.\n",
+             layer (ADLC/skill) supplies a verdict; outcome `completed` is engine-level and does \
+             not mean task success.\n",
             execution_status_word(self.execution_status),
+            outcome_word(self.outcome),
             acceptance_status_word(self.acceptance_status),
             post_condition_word(self.post_processing_status),
             delivery_status_word(self.delivery_status),
@@ -737,6 +896,10 @@ pub trait AgentExecutor: Send + Sync {
     /// 执行单个 workflow agent，返回 AgentRunResult
     async fn execute(&self, params: AgentRunParams) -> AgentRunResult;
 }
+
+#[cfg(test)]
+#[path = "workflow_test.rs"]
+mod tests;
 
 #[cfg(test)]
 mod scope_close_tests {

@@ -101,7 +101,12 @@ pub(super) fn project_run_result(
     if let Err(failure) = forwarder_result {
         warn!(message = %failure.public_message, "Workflow agent: event forwarder failed");
         return ProjectedResult {
-            result: workflow_forwarder_dead_result(),
+            result: dead_result(
+                "event-forwarder-failed",
+                Some("Workflow agent event forwarding failed".into()),
+                started_at,
+                Some(observation.snapshot()),
+            ),
             failure: Some(failure),
         };
     }
@@ -122,25 +127,27 @@ pub(super) fn project_run_result(
         LoopResult::Interrupted => {
             debug!("Workflow agent: execution interrupted");
             ProjectedResult {
-                result: AgentRunResult::Dead {
-                    scope_close_incomplete: false,
-                    reason: Some("interrupted".into()),
-                    detail: Some("Workflow agent execution was interrupted".into()),
-                },
+                result: dead_result(
+                    "interrupted",
+                    Some("Workflow agent execution was interrupted".into()),
+                    started_at,
+                    Some(observation.snapshot()),
+                ),
                 failure: None,
             }
         }
         LoopResult::SettlementDue { .. } => {
             debug!("Workflow agent: settlement window expired");
             ProjectedResult {
-                result: AgentRunResult::Dead {
-                    scope_close_incomplete: false,
-                    reason: Some("settlement-due".into()),
-                    detail: Some(
+                result: dead_result(
+                    "settlement-due",
+                    Some(
                         "Workflow agent stopped admitting new iterations at its settlement deadline"
                             .into(),
                     ),
-                },
+                    started_at,
+                    Some(observation.snapshot()),
+                ),
                 failure: None,
             }
         }
@@ -148,13 +155,31 @@ pub(super) fn project_run_result(
             debug!(error = %error, "Workflow agent: execution failed");
             ProjectedResult {
                 failure: Some(ExecutionFailure::from_agent_error(&error)),
-                result: AgentRunResult::Dead {
-                    scope_close_incomplete: false,
-                    reason: Some("runagent-threw".into()),
-                    detail: Some(error.to_string()),
-                },
+                result: dead_result(
+                    "runagent-threw",
+                    Some(error.to_string()),
+                    started_at,
+                    Some(observation.snapshot()),
+                ),
             }
         }
+    }
+}
+
+/// Dead attempts must carry measured duration when the host observed execution;
+/// `None` stays an explicit "not measured" rather than silently missing metrics.
+fn dead_result(
+    reason: &str,
+    detail: Option<String>,
+    started_at: Instant,
+    stats: Option<RunStats>,
+) -> AgentRunResult {
+    AgentRunResult::Dead {
+        scope_close_incomplete: false,
+        reason: Some(reason.into()),
+        detail,
+        duration_ms: Some(started_at.elapsed().as_millis() as u64),
+        token_count: stats.and_then(|stats| stats.reported_output_tokens()),
     }
 }
 
@@ -170,17 +195,13 @@ fn completed_result(
     if tokens == 0 && !output.is_empty() {
         tokens = (output.len() as u64 / 4).max(1);
     }
-    let model = reported_model(stats.last_model, effective_model);
     if let Some(schema) = &params.schema {
         if let Err(error) = validate_json_schema(&output, schema) {
             debug!(error = %error, "Workflow agent: schema validation failed");
-            return AgentRunResult::Dead {
-                scope_close_incomplete: false,
-                reason: Some("no-structured-output".into()),
-                detail: Some(error),
-            };
+            return dead_result("no-structured-output", Some(error), started_at, Some(stats));
         }
     }
+    let model = reported_model(stats.last_model, effective_model);
     AgentRunResult::Ok {
         output: serde_json::Value::String(output),
         usage: Usage {
@@ -194,11 +215,14 @@ fn completed_result(
     }
 }
 
+#[cfg(test)]
 pub(super) fn workflow_forwarder_dead_result() -> AgentRunResult {
     AgentRunResult::Dead {
         scope_close_incomplete: false,
         reason: Some("event-forwarder-failed".into()),
         detail: Some("Workflow agent event forwarding failed".into()),
+        duration_ms: None,
+        token_count: None,
     }
 }
 

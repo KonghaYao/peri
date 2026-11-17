@@ -253,6 +253,8 @@ impl AgentExecutor for WorkflowAgentExecutor {
                         scope_close_incomplete: false,
                         reason: Some("invalid-agent-type".into()),
                         detail: Some(detail),
+                        duration_ms: Some(started_at.elapsed().as_millis() as u64),
+                        token_count: None,
                     };
                 }
             },
@@ -263,6 +265,8 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 scope_close_incomplete: false,
                 reason: Some("invalid-max-tokens".into()),
                 detail: Some("maxTokens must be greater than zero".into()),
+                duration_ms: Some(started_at.elapsed().as_millis() as u64),
+                token_count: None,
             };
         }
 
@@ -410,6 +414,8 @@ impl AgentExecutor for WorkflowAgentExecutor {
                     scope_close_incomplete: false,
                     reason: Some("execution-blocked".into()),
                     detail: Some(detail),
+                    duration_ms: Some(started_at.elapsed().as_millis() as u64),
+                    token_count: observation.snapshot().reported_output_tokens(),
                 };
             }
         };
@@ -536,7 +542,8 @@ impl AgentExecutor for WorkflowAgentExecutor {
             let _ = await_workflow_forwarder(event_bus, forwarder_handle).await;
             let scope_closed = close_session_scope(&session, &session_id).await;
             child_settlement.settle(AgentStatus::Error).await;
-            return initial_prompt_enqueue_failure(detail).after_scope_close(scope_closed);
+            return initial_prompt_enqueue_failure(detail, started_at, &observation)
+                .after_scope_close(scope_closed);
         }
 
         let mut execution_guard = match peri_acp_types::tasks::TaskManager::begin_external_execution(
@@ -553,6 +560,8 @@ impl AgentExecutor for WorkflowAgentExecutor {
                     scope_close_incomplete: false,
                     reason: Some("execution-blocked".into()),
                     detail: Some(detail),
+                    duration_ms: Some(started_at.elapsed().as_millis() as u64),
+                    token_count: observation.snapshot().reported_output_tokens(),
                 }
                 .after_scope_close(scope_closed);
             }
@@ -629,11 +638,15 @@ pub(super) async fn enqueue_workflow_initial_prompt(
 /// 初始指令未接纳时的任务终态：失败，绝不继续运行。
 pub(super) fn initial_prompt_enqueue_failure(
     detail: String,
+    started_at: std::time::Instant,
+    observation: &crate::agent::workflow::agent::observation::WorkflowObservation,
 ) -> peri_acp_types::workflow::AgentRunResult {
     peri_acp_types::workflow::AgentRunResult::Dead {
         scope_close_incomplete: false,
         reason: Some("initial-prompt-enqueue-failed".into()),
         detail: Some(detail),
+        duration_ms: Some(started_at.elapsed().as_millis() as u64),
+        token_count: observation.snapshot().reported_output_tokens(),
     }
 }
 

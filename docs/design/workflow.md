@@ -166,7 +166,8 @@ run 终态进入 registry 的完成 outbox（`pending_completions` / `acknowledg
 ```
 
 - `key` 是 agent 参数的 SHA256（resume cache-hit 匹配依据），`seq` 是调用顺序号。
-- `state.json` 保存 status、四维状态、`write_intent`、limits、`args`、`max_concurrency`、attempts 与 `return_value`；写入失败必须使对外结果降级为 failed/blocked。
+- `state.json` 保存 status、四维状态、派生的 `outcome`、`write_intent`、limits、`args`、`max_concurrency`、attempts 与 `return_value`；写入失败必须使对外结果降级为 failed/blocked。
+- `attempt` 记录宿主观测到的执行尝试序号（引擎重试会递增，journal cache 命中保留原序号）；dead 结果的 `durationMs`/`tokenCount` 可缺省，缺省表示未测量。
 - 保留策略：按 mtime 保留最新 50 个目录，run 结束时清理。
 - resume 读取使用 `read_all_strict`：缺失、损坏或序号不连续/重复一律报错，不降级为无缓存新运行。
 - 调用方读取长结果必须跟随 `outputs/` 占位符，不把 agent 全文作为顶层返回值。
@@ -236,10 +237,11 @@ results may still become `null` after engine retry, so scripts must check requir
 
 - **execution**：由 run 状态投影（completed / failed / killed）。
 - **acceptance**：语义验收不由运行内核判定；内核当前投影为 `unknown`，验收结论属 ADLC/skill 层（`ADLC-DELIVERY-STATUS-001`，[Ultra-ADLC 设计](ultra-adlc.md)）。
-- **post-processing**：Git postcondition 结果——read_only 通过为 `not_required`，write 通过为 `passed`，失败或缺少可验证基线为 `failed`/`blocked`。
+- **outcome**：引擎级派生三态——execution 失败/取消为 `failed`/`killed`，completed 且 delivery 或 acceptance 阻断为 `blocked`，completed 且未阻断为 `completed`，其余为 `unknown`。`completed` 只表示引擎执行完成，不表示任务成功。
+- **post-processing**：Git postcondition 结果——read_only 通过为 `not_required`，write 通过为 `passed`，可归因违例为 `failed`，无 writeIntent 或观察到 footprint 外变化为 `blocked`。
 - **delivery**：内核只投影 `blocked` / `unknown`——execution 完成、acceptance 非 failed、存在 write intent 且 post-processing 通过时为 `unknown`，其余为 `blocked`；`deliverable` 判定属引擎之外的验收层（ADLC/skill），内核不产出。
 
-Git postcondition 只比较 Workflow 前后发生变化的路径，已有且未变化的无关 dirty path 不阻塞；异常只报告并 blocked，不执行 add/commit/stash/reset/restore/clean。`state.json` 写入失败使对外结果降级 failed/blocked——不能继续通知 completed。
+Git postcondition 只比较 Workflow 前后发生变化的路径，已有且未变化的无关 dirty path 不阻塞；未声明 `writeIntent` 时不捕获 baseline、不做 Git 检查（post-processing 为 blocked），避免把父会话并发改动报成不可归因。read_only/无写 footprint 时观察到的变化只标为 blocked 并给出路径；write 的 allowlist 越界、非法 HEAD 变化与提交越界仍失败。异常只报告，不执行 add/commit/stash/reset/restore/clean。`state.json` 写入失败使对外结果降级 failed/blocked——不能继续通知 completed。
 
 ### 5.3 通知与投递
 

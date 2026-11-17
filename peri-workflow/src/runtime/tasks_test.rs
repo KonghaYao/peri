@@ -740,6 +740,8 @@ fn conflicting_late_settle_keeps_first_result() {
             scope_close_incomplete: false,
             reason: Some("conflict".into()),
             detail: None,
+            duration_ms: None,
+            token_count: None,
         }),
         Some("conflict".into()),
     ) {
@@ -843,6 +845,8 @@ fn scope_close_failure() -> AgentRunResult {
         scope_close_incomplete: false,
         reason: Some("event-forwarder-failed".into()),
         detail: Some("Original failure with outstanding writers".into()),
+        duration_ms: None,
+        token_count: None,
     }
     .after_scope_close(false)
 }

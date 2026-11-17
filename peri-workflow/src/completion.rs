@@ -187,6 +187,7 @@ impl RunCompletion {
                 state.execution_status = ExecutionStatus::Failed;
                 state.post_processing_status = PostProcessingStatus::Failed;
                 state.delivery_status = DeliveryStatus::Blocked;
+                state.outcome = peri_acp_types::workflow::WorkflowOutcome::Failed;
                 state.error = Some(error.to_string());
                 if let Err(write_error) = self.journal.write_state(&self.run_id, &state) {
                     tracing::warn!(
@@ -244,8 +245,6 @@ impl RunCompletion {
             .map(|state| state.acceptance_status)
             .unwrap_or_default();
         let delivery_status = result.delivery_status;
-        let success = result.status == "completed"
-            && delivery_status != peri_acp_types::workflow::DeliveryStatus::Blocked;
         let status = match result.status.as_str() {
             "completed" => WorkflowRunStatus::Completed,
             "killed" => WorkflowRunStatus::Killed,
@@ -256,6 +255,12 @@ impl RunCompletion {
             "killed" => peri_acp_types::workflow::ExecutionStatus::Killed,
             _ => peri_acp_types::workflow::ExecutionStatus::Failed,
         };
+        let outcome = peri_acp_types::workflow::WorkflowOutcome::project(
+            execution_status,
+            acceptance_status,
+            delivery_status,
+        );
+        let success = outcome == peri_acp_types::workflow::WorkflowOutcome::Completed;
         WorkflowTaskResult {
             run_id: self.run_id.clone(),
             workflow_name: self.name.clone(),
@@ -265,6 +270,7 @@ impl RunCompletion {
             acceptance_status,
             post_processing_status: result.post_processing_status,
             delivery_status: result.delivery_status,
+            outcome,
             state_artifact_exists: self
                 .journal
                 .run_dir(&self.run_id)

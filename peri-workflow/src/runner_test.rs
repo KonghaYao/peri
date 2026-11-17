@@ -92,6 +92,8 @@ impl AgentExecutor for CountingAgentExecutor {
             scope_close_incomplete: false,
             reason: Some("test executor must not run".into()),
             detail: None,
+            duration_ms: None,
+            token_count: None,
         }
     }
 }
@@ -379,7 +381,9 @@ fn postcondition_projection_fails_safe_without_evidence() {
             "completed",
             AcceptanceStatus::Unknown,
             Some(&write),
-            Some(&Err("credential token=secret".into())),
+            Some(&Err(crate::journal::PostconditionFailure::Violation(
+                "credential token=secret".into(),
+            ),)),
         ),
         (PostProcessingStatus::Failed, DeliveryStatus::Blocked)
     );
@@ -391,6 +395,103 @@ fn postcondition_projection_fails_safe_without_evidence() {
             Some(&Ok(())),
         ),
         (PostProcessingStatus::Blocked, DeliveryStatus::Blocked)
+    );
+}
+
+#[test]
+fn postcondition_projection_separates_unattributed_changes_from_violations() {
+    use crate::journal::PostconditionFailure;
+    use peri_acp_types::workflow::{
+        AcceptanceStatus, DeliveryStatus, PostProcessingStatus, WorkflowWriteIntent,
+    };
+
+    let read_only = WorkflowWriteIntent::ReadOnly;
+    let unattributed =
+        PostconditionFailure::Unattributed("git changes outside the run's write footprint".into());
+    assert_eq!(
+        crate::runner::terminal::project_postcondition(
+            "completed",
+            AcceptanceStatus::Unknown,
+            Some(&read_only),
+            Some(&Err(unattributed)),
+        ),
+        (PostProcessingStatus::Blocked, DeliveryStatus::Blocked)
+    );
+    let violation = PostconditionFailure::Violation("escaped allowlist".into());
+    assert_eq!(
+        crate::runner::terminal::project_postcondition(
+            "completed",
+            AcceptanceStatus::Unknown,
+            Some(&read_only),
+            Some(&Err(violation)),
+        ),
+        (PostProcessingStatus::Failed, DeliveryStatus::Blocked)
+    );
+}
+
+#[test]
+fn outcome_separates_execution_from_delivery() {
+    use peri_acp_types::workflow::{
+        AcceptanceStatus, DeliveryStatus, ExecutionStatus, WorkflowOutcome,
+    };
+
+    assert_eq!(
+        WorkflowOutcome::project(
+            ExecutionStatus::Completed,
+            AcceptanceStatus::Unknown,
+            DeliveryStatus::Unknown,
+        ),
+        WorkflowOutcome::Completed
+    );
+    assert_eq!(
+        WorkflowOutcome::project(
+            ExecutionStatus::Completed,
+            AcceptanceStatus::Unknown,
+            DeliveryStatus::Blocked,
+        ),
+        WorkflowOutcome::Blocked
+    );
+    assert_eq!(
+        WorkflowOutcome::project(
+            ExecutionStatus::Completed,
+            AcceptanceStatus::Failed,
+            DeliveryStatus::Unknown,
+        ),
+        WorkflowOutcome::Blocked
+    );
+    assert_eq!(
+        WorkflowOutcome::project(
+            ExecutionStatus::Failed,
+            AcceptanceStatus::Unknown,
+            DeliveryStatus::Blocked,
+        ),
+        WorkflowOutcome::Failed
+    );
+    assert_eq!(
+        WorkflowOutcome::project(
+            ExecutionStatus::Running,
+            AcceptanceStatus::Unknown,
+            DeliveryStatus::Unknown,
+        ),
+        WorkflowOutcome::Unknown
+    );
+}
+
+#[test]
+fn failed_terminal_without_error_gets_a_readable_fallback() {
+    let mut result = completed_workflow_result();
+    result.status = "failed".into();
+    result.error = None;
+    crate::runner::terminal::ensure_failure_error(&mut result);
+    assert_eq!(
+        result.error.as_deref(),
+        Some("workflow failed without error details")
+    );
+    result.error = Some("   ".into());
+    crate::runner::terminal::ensure_failure_error(&mut result);
+    assert_eq!(
+        result.error.as_deref(),
+        Some("workflow failed without error details")
     );
 }
 

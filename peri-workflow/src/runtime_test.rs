@@ -120,6 +120,7 @@ async fn resume_rejects_unsafe_run_id_and_mismatched_state() {
                 acceptance_status: Default::default(),
                 post_processing_status: Default::default(),
                 delivery_status: Default::default(),
+                outcome: Default::default(),
                 write_intent: None,
                 limits: Default::default(),
                 budget_total: None,
@@ -501,6 +502,8 @@ async fn unsettled_child_scope_fences_real_engine_retries_and_forces_failed_comp
             scope_close_incomplete: false,
             reason: Some("scope-close-incomplete".into()),
             detail: Some(detail.into()),
+            duration_ms: None,
+            token_count: None,
         }),
         Some(detail.into()),
     );
