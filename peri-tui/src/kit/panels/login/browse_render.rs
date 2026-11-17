@@ -20,7 +20,7 @@ use ratatui_kit::ratatui::text::Span;
 
 use crate::i18n;
 
-use crate::kit::panels::shared::list::{ListMetrics, ListViewport};
+use peri_tui_components::list::{ListMetrics, ListViewport};
 
 /// Browse 列表内容的固定行度量：计数行 1 行、每项 4 行、提示行 1 行。
 pub(super) const BROWSE_METRICS: ListMetrics = ListMetrics::new(1, 4, 1);

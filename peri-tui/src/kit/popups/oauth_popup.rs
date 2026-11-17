@@ -41,7 +41,7 @@ use ratatui_kit::ratatui::text::Span;
 
 use crate::i18n;
 
-use crate::kit::panel_mouse::AreaTracker;
+use peri_tui_components::panel_mouse::AreaTracker;
 
 use peri_theme::atoms::THEME_ATOM;
 
@@ -186,7 +186,7 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
             // ── 鼠标：按钮行左键点击 = 激活按钮；授权码行 = 焦点切回输入框 ──
             if let Event::Mouse(mouse) = event {
-                let Some((row, col)) = crate::kit::panel_mouse::left_down(&mouse) else {
+                let Some((row, col)) = peri_tui_components::panel_mouse::left_down(&mouse) else {
                     return EventResult::Ignored;
                 };
                 let Some(area) = area else {

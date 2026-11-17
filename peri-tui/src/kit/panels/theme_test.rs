@@ -159,7 +159,7 @@ impl MountedPanel {
                 tab: self.tab,
                 selected_theme: self.selected_theme,
                 header_rows: super::list_header_rows(super::build_preview(&selected_theme).len()),
-                scroll_start: crate::kit::list_nav::scroll_start_for_selected(
+                scroll_start: peri_tui_components::list_nav::scroll_start_for_selected(
                     selection.index,
                     themes.len(),
                     super::VISIBLE_ITEMS,

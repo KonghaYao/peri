@@ -5,8 +5,6 @@ use ratatui_kit::prelude::ComponentDrawer;
 use ratatui_kit::ratatui::layout::Rect;
 use ratatui_kit::ratatui::style::Modifier;
 use ratatui_kit::ratatui::style::Style;
-use ratatui_kit::ratatui::widgets::Scrollbar;
-use ratatui_kit::ratatui::widgets::ScrollbarOrientation;
 use ratatui_kit::ratatui::widgets::ScrollbarState;
 
 pub(crate) fn draw_scrollbar(
@@ -25,14 +23,10 @@ pub(crate) fn draw_scrollbar(
     let arrow = Style::default()
         .fg(semantic.text.muted)
         .add_modifier(Modifier::BOLD);
-    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-        .thumb_symbol(" ")
-        .thumb_style(Style::default().fg(thumb).bg(thumb))
-        .track_symbol(None)
-        .begin_symbol(Some("▲"))
-        .begin_style(arrow)
-        .end_symbol(Some("▼"))
-        .end_style(arrow);
+    let scrollbar = peri_tui_components::scrollbar::vertical_scrollbar(
+        Style::default().fg(thumb).bg(thumb),
+        arrow,
+    );
     let mut state = ScrollbarState::new(content_length)
         .position(position)
         .viewport_content_length(viewport_length);

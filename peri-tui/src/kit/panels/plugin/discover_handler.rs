@@ -5,7 +5,7 @@ use super::PluginSearchResultItem;
 use super::VISIBLE_ITEMS;
 use super::discover::DiscoverState;
 
-use crate::kit::panel_mouse::ListLayout;
+use peri_tui_components::panel_mouse::ListLayout;
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui_kit::prelude::{EventResult, State};
 use ratatui_kit::ratatui::layout::Rect;
@@ -59,11 +59,11 @@ pub(super) fn decide(
             let Some(area) = area else {
                 return SearchAction::Pass;
             };
-            if crate::kit::panel_mouse::is_scrollbar_column(mouse, area) {
+            if peri_tui_components::panel_mouse::is_scrollbar_column(mouse, area) {
                 return SearchAction::Pass;
             }
             if state.detail.is_some() {
-                return crate::kit::panel_mouse::hit_item(
+                return peri_tui_components::panel_mouse::hit_item(
                     mouse,
                     area,
                     ListLayout {
@@ -78,7 +78,7 @@ pub(super) fn decide(
                 .map(SearchAction::DetailAction)
                 .unwrap_or(SearchAction::Consume);
             }
-            if crate::kit::panel_mouse::hit_item(
+            if peri_tui_components::panel_mouse::hit_item(
                 mouse,
                 area,
                 ListLayout {
@@ -102,7 +102,7 @@ pub(super) fn decide(
                 return SearchAction::Consume;
             }
             let count = state.visible_items(local).len();
-            crate::kit::panel_mouse::hit_item(
+            peri_tui_components::panel_mouse::hit_item(
                 mouse,
                 area,
                 ListLayout {
@@ -110,7 +110,7 @@ pub(super) fn decide(
                     item_rows: 3,
                     footer_rows: 0,
                     visible_items: VISIBLE_ITEMS as u16,
-                    scroll_start: crate::kit::list_nav::scroll_start_for_selected(
+                    scroll_start: peri_tui_components::list_nav::scroll_start_for_selected(
                         state.selected,
                         count,
                         VISIBLE_ITEMS,
@@ -153,10 +153,11 @@ pub(super) fn apply(
         SearchAction::Submit => return SearchEffect::Submit,
         SearchAction::Open(index) => state.open_selected(index, local),
         SearchAction::Up if state.detail.is_some() => {
-            state.detail_action = crate::kit::list_nav::previous_selection(state.detail_action)
+            state.detail_action =
+                peri_tui_components::list_nav::previous_selection(state.detail_action)
         }
         SearchAction::Down if state.detail.is_some() => {
-            state.detail_action = crate::kit::list_nav::next_selection(
+            state.detail_action = peri_tui_components::list_nav::next_selection(
                 state.detail_action,
                 DiscoverDetailAction::ALL.len(),
             )
@@ -165,14 +166,14 @@ pub(super) fn apply(
             if state.selected == 0 {
                 state.focused = true;
             } else {
-                state.selected = crate::kit::list_nav::previous_selection(state.selected);
+                state.selected = peri_tui_components::list_nav::previous_selection(state.selected);
             }
         }
         SearchAction::Down => {
             if state.focused {
                 state.focused = false;
             } else {
-                state.selected = crate::kit::list_nav::next_selection(
+                state.selected = peri_tui_components::list_nav::next_selection(
                     state.selected,
                     state.visible_items(local).len(),
                 );

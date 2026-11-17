@@ -9,7 +9,7 @@ use crate::kit::atoms;
 use crate::kit::bg_task_click::BgTaskLineHit;
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::mouse_router;
-use crate::kit::panel_mouse::AreaTracker;
+use peri_tui_components::panel_mouse::AreaTracker;
 use ratatui_kit::crossterm::event::Event;
 use ratatui_kit::crossterm::event::MouseButton;
 use ratatui_kit::crossterm::event::MouseEventKind;

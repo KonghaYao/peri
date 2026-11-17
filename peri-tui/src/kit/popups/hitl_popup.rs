@@ -34,7 +34,7 @@ use ratatui_kit::ratatui::text::Line;
 use crate::i18n;
 
 use crate::kit::hitl_response::HitlResponseAction;
-use crate::kit::panel_mouse::AreaTracker;
+use peri_tui_components::panel_mouse::AreaTracker;
 
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;

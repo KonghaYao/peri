@@ -34,12 +34,12 @@ use crate::app::panel_types::PanelKind;
 use crate::i18n;
 
 use crate::kit::markdown::{self, MarkdownSegment};
-use crate::kit::panel_mouse::AreaTracker;
-use crate::kit::panel_mouse::ListLayout;
 use peri_theme::atoms::{PALETTE_ATOM, PERI_COLORS_ATOM, THEME_ATOM};
 use peri_theme::bridge::ThemeDefinitionExt;
 use peri_theme::loader::list_available_themes;
 use peri_theme::theme::ThemeMode;
+use peri_tui_components::panel_mouse::AreaTracker;
+use peri_tui_components::panel_mouse::ListLayout;
 
 pub(super) static THEME_LIST: AtomStatic<Vec<String>> = AtomStatic::new(list_available_themes);
 
@@ -264,7 +264,7 @@ pub(super) fn resolve_selection(
             missing: false,
         },
         None => Selection {
-            index: crate::kit::list_nav::clamp_selection(fallback, list.len()),
+            index: peri_tui_components::list_nav::clamp_selection(fallback, list.len()),
             missing: true,
         },
     }
@@ -378,7 +378,7 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let scroll_start = if count == 0 {
         0
     } else {
-        crate::kit::list_nav::scroll_start_for_selected(sel, count, VISIBLE_ITEMS)
+        peri_tui_components::list_nav::scroll_start_for_selected(sel, count, VISIBLE_ITEMS)
     };
     let orig = original_theme.read().clone();
     let persisted_name = persisted_theme_name();
@@ -563,8 +563,9 @@ pub(super) fn handle_theme_event(event: Event, ctx: &ThemeEventCtx) -> EventResu
     // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
     if let Event::Mouse(mouse) = event {
         if let Some(area) = ctx.area
-            && !crate::kit::panel_mouse::is_scrollbar_column(&mouse, area)
-            && let Some(idx) = crate::kit::panel_mouse::hit_item(&mouse, area, ctx.hit_layout())
+            && !peri_tui_components::panel_mouse::is_scrollbar_column(&mouse, area)
+            && let Some(idx) =
+                peri_tui_components::panel_mouse::hit_item(&mouse, area, ctx.hit_layout())
         {
             select_theme_at(ctx, idx, true);
             return EventResult::Consumed;
@@ -588,7 +589,7 @@ pub(super) fn handle_theme_event(event: Event, ctx: &ThemeEventCtx) -> EventResu
                 if !ctx.themes.is_empty() {
                     select_theme_at(
                         ctx,
-                        crate::kit::list_nav::previous_selection(ctx.selected_index),
+                        peri_tui_components::list_nav::previous_selection(ctx.selected_index),
                         false,
                     );
                 }
@@ -598,7 +599,10 @@ pub(super) fn handle_theme_event(event: Event, ctx: &ThemeEventCtx) -> EventResu
                 if !ctx.themes.is_empty() {
                     select_theme_at(
                         ctx,
-                        crate::kit::list_nav::next_selection(ctx.selected_index, ctx.themes.len()),
+                        peri_tui_components::list_nav::next_selection(
+                            ctx.selected_index,
+                            ctx.themes.len(),
+                        ),
                         false,
                     );
                 }

@@ -60,7 +60,7 @@ fn window_and_hit_layout_agree() {
             let visual_row = layout.header_rows + (slot as u16) * layout.item_rows;
             let mouse_row = rect.y + 1 + visual_row;
             assert_eq!(
-                crate::kit::panel_mouse::hit_row(mouse_row, rect, layout),
+                crate::panel_mouse::hit_row(mouse_row, rect, layout),
                 Some(*expected),
                 "第 {slot} 个可见槽位命中索引应与 window 一致"
             );
@@ -76,21 +76,7 @@ fn row_beyond_rendered_items_does_not_hit() {
     let layout = vp.hit_layout();
     let third_slot_row = rect.y + 1 + layout.header_rows + 2 * layout.item_rows;
     assert_eq!(
-        crate::kit::panel_mouse::hit_row(third_slot_row, rect, layout),
+        crate::panel_mouse::hit_row(third_slot_row, rect, layout),
         None
     );
-}
-
-#[test]
-fn first_frame_prediction_is_not_empty() {
-    // 首帧 AreaTracker 未测量（Rect::default()）：不能按 0 行渲染空面板
-    let predicted = super::content_rows(None, 30);
-    assert_eq!(predicted, crate::kit::panel_overlay::panel_content_rows(30));
-    assert!(predicted > 0);
-}
-
-#[test]
-fn measured_height_wins_over_prediction() {
-    let measured = Some(area(18));
-    assert_eq!(super::content_rows(measured, 30), 16);
 }

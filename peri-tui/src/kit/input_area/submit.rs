@@ -1,8 +1,8 @@
 use ratatui_kit::prelude::State;
 
-use crate::components::textarea::TextAreaState;
 use crate::i18n;
 use crate::kit::acp_types::AcpEventWithEpoch;
+use peri_tui_components::textarea::TextAreaState;
 
 use crate::kit::submit_request::SessionControlRequest;
 use crate::kit::submit_request::SubmitRequest;

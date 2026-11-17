@@ -1,5 +1,11 @@
 # TUI 面板架构目标设计
 
+通用输入编辑、固定行高视口、导航与鼠标命中由 `peri-tui-components`
+提供，TUI 直接单向消费。组件 API 与使用示例见
+[`peri-tui-components/README.md`](../../peri-tui-components/README.md)。
+`panels/shared/list.rs` 仅保留应用的首帧高度策略；业务对象转换、主题解析、
+焦点路由及动作执行仍由 TUI 持有。
+
 > 状态：已批准目标设计（部分已落地）；未完成项见
 > [2026-10-15 TUI 面板架构重构](../../spec/issues/2026-10-15-tui-architecture-refactor.md)
 > 范围：`peri-tui` 的面板外壳、列表视口、面板事件路由、面板操作的作用域与完成门
@@ -85,7 +91,7 @@
 详情视图的行构造、按钮布局与命中几何是纯推导，渲染与命中共用同一结果。
 
 共享外壳只提取真实重复：目前由 `panel_shell!` 提供框线与底栏，`panel_height` /
-`panel_content_rows`（`kit/panel_overlay.rs`）与 `panels/shared/list.rs` 的视口提供高度、
+`panel_content_rows`（`kit/panel_overlay.rs`）与 `peri-tui-components::list` 的视口提供高度、
 滚动与命中，其他「详情外壳」不因形态相似而抽取——例如滚动条几何（`ScrollbarGeometry`）
 目前唯一使用者是 SubAgent 详情，保持面板私有，不预先抽象成通用组件。
 
@@ -182,7 +188,7 @@ snapshot。revision 冲突单独提示 `config-draft-conflict`，草稿保留且
 | AskUser | `ASK_USER_PENDING` + 面板内 `FormState` | bridge `handle_ask_user` | 内联 handler | owner 指纹重置；提交携固定 owner/request_id |
 | SubAgentDetail | `SELECTED_SUBAGENT_ID` | `VIEW_MODELS` / `BG_LIVE_DETAIL` | 内联 handler | 无 mutation（只读） |
 
-已接入的固定行高列表面板统一走 `panels/shared/list.rs` 视口；分段（Tasks）、可变行高
+已接入的固定行高列表面板统一走 `peri-tui-components::list` 视口；分段（Tasks）、可变行高
 （Agent）与无列表（Status、Goal）面板按「公共组件边界」自持测量，Theme 因预览正文行数
 可变亦自持行度量，理由写在各自文件内。
 

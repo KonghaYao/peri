@@ -16,10 +16,10 @@ use self::rows::{build_row_line, config_rows};
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 
-use crate::kit::panel_mouse::AreaTracker;
-use crate::kit::panels::shared::list::ListMetrics;
-use crate::kit::panels::shared::list::ListViewport;
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::list::ListMetrics;
+use peri_tui_components::list::ListViewport;
+use peri_tui_components::panel_mouse::AreaTracker;
 use ratatui_kit::crossterm::event::Event;
 use ratatui_kit::crossterm::event::KeyCode;
 use ratatui_kit::crossterm::event::KeyEventKind;
@@ -146,9 +146,9 @@ pub(super) fn handle_config_event(event: Event, ctx: &ConfigEventCtx) -> EventRe
     // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
     if let Event::Mouse(mouse) = event {
         if let Some(area) = ctx.area
-            && !crate::kit::panel_mouse::is_scrollbar_column(&mouse, area)
+            && !peri_tui_components::panel_mouse::is_scrollbar_column(&mouse, area)
             && let Some(idx) =
-                crate::kit::panel_mouse::hit_item(&mouse, area, ctx.viewport.hit_layout())
+                peri_tui_components::panel_mouse::hit_item(&mouse, area, ctx.viewport.hit_layout())
         {
             *ctx.cursor.write() = idx;
             activate_row(idx, true);
@@ -173,10 +173,10 @@ pub(super) fn handle_config_event(event: Event, ctx: &ConfigEventCtx) -> EventRe
             close_panel();
         }
         KeyCode::Up => {
-            *ctx.cursor.write() = crate::kit::list_nav::previous_selection(sel);
+            *ctx.cursor.write() = peri_tui_components::list_nav::previous_selection(sel);
         }
         KeyCode::Down => {
-            *ctx.cursor.write() = crate::kit::list_nav::next_selection(sel, ctx.row_count);
+            *ctx.cursor.write() = peri_tui_components::list_nav::next_selection(sel, ctx.row_count);
         }
         KeyCode::Char(' ') | KeyCode::Enter => {
             activate_row(sel, true);

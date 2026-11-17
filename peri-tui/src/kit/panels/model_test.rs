@@ -47,7 +47,7 @@ mod commit;
 
 use crate::app::panel_types::PanelKind;
 
-use crate::kit::panels::shared::list::ListViewport;
+use peri_tui_components::list::ListViewport;
 use ratatui_kit::components::scroll_view::ScrollViewState;
 use ratatui_kit::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,

@@ -37,3 +37,11 @@
 - **Scope**：输入、截断、换行和终端坐标。
 - **Rule**：输入与显示文本按 Unicode 字符边界处理；终端列宽用 `unicode_width`；`u16` 几何计算做饱和或显式边界处理，不以 `.len()` 代表显示宽度。
 - **Verify**：`cargo test -p peri-tui --lib`；人工检查新增文本测量、截断和坐标运算。
+
+### TUI-COMPONENT-001
+
+- **Scope**：`peri-tui-components`。
+- **Rule**：仅包含通用展示、局部交互状态与明确输入输出；不得读取应用 atom，
+  不依赖 Agent、Session、MCP、配置或持久化 crate。业务对象转换和动作执行归 TUI。
+- **Verify**：`python3 scripts/check-tui-components.py`；
+  `./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui-components`。

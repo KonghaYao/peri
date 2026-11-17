@@ -23,6 +23,7 @@ tempfile.workspace = true
 serial_test.workspace = true
 tracing-subscriber.workspace = true
 [dependencies]
+peri-tui-components = { path = "../peri-tui-components" }
 peri-time.workspace = true
 peri-genui = { path = "../peri-genui" }
 serde.workspace = true

@@ -7,7 +7,7 @@ use super::MouseButton;
 
 use crate::app::panel_types::PanelKind;
 
-use crate::kit::panels::shared::list::ListViewport;
+use peri_tui_components::list::ListViewport;
 use ratatui_kit::crossterm::event::{KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui_kit::prelude::{EventResult, State, element};
 use ratatui_kit::ratatui::buffer::Buffer;

@@ -293,7 +293,7 @@ pub(super) fn render_multiline_with_cursor_for_themed(
         .add_modifier(Modifier::DIM);
     let placeholder_style = Style::default().fg(tokens.placeholder);
     let default_style = Style::default().bg(Color::Reset);
-    crate::components::textarea::render_multiline_with_cursor(
+    peri_tui_components::textarea::render_multiline_with_cursor(
         text,
         cursor,
         cursor_style,
