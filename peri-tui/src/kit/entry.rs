@@ -647,6 +647,29 @@ pub async fn run_kit_fullscreen(
         }
     });
 
+    // 5a2. SIGTERM 走正常退出：外部停止（PTY/服务管理）若直接终止进程，host 来不及
+    // 排空 turn 的 durable 工作意图，下一次进入会把刚完成的会话误判为中断恢复。
+    // 复用 /exit 的退出通道，让 fullscreen 返回后执行既有的 shutdown + teardown。
+    #[cfg(unix)]
+    {
+        let sigterm_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let Ok(mut sigterm) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            else {
+                return;
+            };
+            tokio::select! {
+                _ = sigterm_shutdown.cancelled() => {}
+                _ = sigterm.recv() => {
+                    tracing::info!("SIGTERM received; requesting graceful TUI shutdown");
+                    atoms::EXIT_REQUESTED.set(true);
+                    atoms::RENDER_HEARTBEAT.set(atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
+                }
+            }
+        });
+    }
+
     let result = element!(AppShell).fullscreen().await;
     let _ = execute!(
         std::io::stdout(),
