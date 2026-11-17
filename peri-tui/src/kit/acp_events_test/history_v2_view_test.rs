@@ -1068,3 +1068,57 @@ fn historical_tool_card_uses_bare_tool_call_id_and_dedupes_live_card() {
 
     assert_eq!(state.committed.len(), 1, "同一 toolCallId 只保留一张卡片");
 }
+
+/// 页面只有 ToolCall、live 已完成：同 `toolId` 不能删掉唯一带结果的 live 卡片。
+#[test]
+#[serial]
+fn call_only_page_preserves_completed_live_tool_card() {
+    let _guard = setup();
+    let mut v2 = admitted();
+    let mut state = make_fold_test_state();
+    state.active_session_id = "s1".into();
+    v2.window.as_mut().unwrap().items = serde_json::from_value(json!([item(
+        "e1",
+        1,
+        json!([tool_call("s1:inv-1", "Read")])
+    )]))
+    .unwrap();
+    dispatch_view(&mut state, &v2);
+    assert_eq!(state.committed.len(), 1);
+
+    let started = crate::kit::acp_events::tool::replay_tool_started_unit(
+        "inv-1",
+        "Read",
+        "src/main.rs",
+        &json!({"path": "/tmp/a"}),
+        None,
+        false,
+    );
+    let mut completed = match started {
+        TuiRenderUnit::TuiToolCard(card) => card,
+        other => panic!("expected tool card, got {other:?}"),
+    };
+    completed.output_summary = "done".into();
+    completed.is_error = false;
+    completed.is_running = false;
+    completed.recompute_hash();
+    state
+        .committed
+        .push_back(TuiRenderUnit::TuiToolCard(completed));
+
+    dispatch_view(&mut state, &v2);
+    let outputs: Vec<&str> = state
+        .committed
+        .iter()
+        .filter_map(|unit| match unit {
+            TuiRenderUnit::TuiToolCard(card) if card.tool_id == "inv-1" => {
+                Some(card.output_summary.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        outputs.contains(&"done"),
+        "调用页不得删除已完成 live 卡片的输出：{outputs:?}"
+    );
+}

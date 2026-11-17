@@ -171,11 +171,12 @@ fn live_unit_matches(page: &TuiRenderUnit, live: &TuiRenderUnit) -> bool {
                     && assistant_matches(page, live))
         }
         (TuiRenderUnit::TuiToolCard(page), TuiRenderUnit::TuiToolCard(live)) => {
-            if !page.tool_id.is_empty() && !live.tool_id.is_empty() {
+            let same_tool = if !page.tool_id.is_empty() && !live.tool_id.is_empty() {
                 page.tool_id == live.tool_id
             } else {
                 page.tool_name == live.tool_name && page.input_summary == live.input_summary
-            }
+            };
+            same_tool && projected_tool_card_covers(page, live)
         }
         (TuiRenderUnit::TuiSystemNote(page), TuiRenderUnit::TuiSystemNote(live)) => {
             page.text == live.text
@@ -186,6 +187,23 @@ fn live_unit_matches(page: &TuiRenderUnit, live: &TuiRenderUnit) -> bool {
 
 fn same_identity(page: Option<&str>, live: Option<&str>) -> bool {
     matches!((page, live), (Some(page), Some(live)) if !live.is_empty() && page == live)
+}
+
+/// 页面卡片是否覆盖 live 卡片的输出与完成态。
+///
+/// seek 页可能只包含 `ToolCall` 而不含后续 `ToolResult`；同 `toolId` 不能证明
+/// live 卡片已重复，否则会删掉唯一带结果的卡片、只剩「结果缺失」占位。
+fn projected_tool_card_covers(page: &TuiToolCard, live: &TuiToolCard) -> bool {
+    if tool_card_is_call_only(live) || live.is_running {
+        // live 本身没有结果，页面保留同一调用即可。
+        return true;
+    }
+    !page.is_running && !tool_card_is_call_only(page)
+}
+
+/// 调用卡片（页面只有 `ToolCall`）的固定「结果缺失」占位。
+fn tool_card_is_call_only(card: &TuiToolCard) -> bool {
+    card.is_error && card.output_summary == crate::i18n::tr("msg-history-tool-result-missing")
 }
 
 /// 至少一方缺少稳定身份时，才允许退回内容指纹。双方身份都存在且不同，

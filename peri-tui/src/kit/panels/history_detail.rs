@@ -15,6 +15,9 @@ pub const DETAIL_WINDOW_MAX_BYTES: usize = 4 * 1024 * 1024;
 pub const DETAIL_MAX_CHUNK_BYTES: u32 = 256 * 1024;
 const V2_DETAIL_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// 每次 `open` 的唯一代次：同一槽位重开时，旧请求的响应不得改写新窗口。
+static DETAIL_OPENING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DetailChunk {
     pub offset: u64,
@@ -26,6 +29,8 @@ pub struct DetailChunk {
 #[derive(Clone, Debug)]
 pub struct HistoryDetailWindow {
     pub descriptor: DetailDescriptor,
+    /// 本次打开的代次；在途响应必须匹配当前代次才能应用。
+    opening: u64,
     pub scroll_offset: u64,
     chunks: BTreeMap<u64, DetailChunk>,
     retained_bytes: usize,
@@ -78,6 +83,7 @@ impl HistoryDetailWindow {
         }
         Ok(Self {
             descriptor,
+            opening: DETAIL_OPENING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             scroll_offset: 0,
             chunks: BTreeMap::new(),
             retained_bytes: 0,
@@ -111,6 +117,16 @@ impl HistoryDetailWindow {
     #[must_use]
     pub fn is_complete(&self) -> bool {
         self.complete
+    }
+
+    /// 在途响应是否仍属于当前打开代次：同一槽位重开后旧响应必须整体丢弃。
+    fn accepts_opening(&self, opening: u64) -> bool {
+        self.opening == opening
+    }
+
+    #[cfg(test)]
+    pub(crate) fn opening(&self) -> u64 {
+        self.opening
     }
 
     pub fn pending_offset(&self) -> Option<u64> {
@@ -228,6 +244,25 @@ impl HistoryDetailWindow {
             })?;
         if bytes.len() > max_bytes.min(DETAIL_MAX_CHUNK_BYTES) as usize {
             self.last_error = Some("正文块校验失败".into());
+            return Err(DetailError::InvalidChunk);
+        }
+        // 解码后的区间必须与 wire 声明一致，否则 `next_request()` 会跳过缺失字节：
+        // 非 EOF 块止于 `nextOffset`，EOF 块恰好止于权威总长。
+        let end = chunk
+            .offset
+            .get()
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| {
+                self.last_error = Some("正文块校验失败".into());
+                DetailError::InvalidChunk
+            })?;
+        let range_ok = if chunk.complete {
+            end == chunk.total_bytes.get()
+        } else {
+            !bytes.is_empty() && chunk.next_offset.map(|next| next.get()) == Some(end)
+        };
+        if !range_ok {
+            self.last_error = Some("正文块区间与声明不一致".into());
             return Err(DetailError::InvalidChunk);
         }
         // 首块可以用服务端的权威展示长度修正描述符里的 canonical 预估；
@@ -571,28 +606,34 @@ pub fn request_detail_chunk(offset: u64) {
                 offset,
                 detail.descriptor.chunk_size.min(DETAIL_MAX_CHUNK_BYTES),
             )?;
-            Some((request, detail.descriptor.v2.clone()))
+            Some((request, detail.descriptor.v2.clone(), detail.opening))
         })
     };
-    let Some((request, v2)) = prepared else {
+    let Some((request, v2, opening)) = prepared else {
         return;
     };
-    dispatch_detail_request(request, v2);
+    dispatch_detail_request(request, v2, opening);
 }
 
 /// V1/V2 共用入口：V2 只换传输，不改变面板的登记/在途/预算语义。
-fn dispatch_detail_request(request: HistoryBodyRequest, v2: Option<HistoryV2BodyBinding>) {
+fn dispatch_detail_request(
+    request: HistoryBodyRequest,
+    v2: Option<HistoryV2BodyBinding>,
+    opening: u64,
+) {
     match v2 {
-        Some(binding) => spawn_v2_detail_chunk(binding, request.offset, request.max_bytes),
-        None => spawn_detail_chunk(request),
+        Some(binding) => spawn_v2_detail_chunk(binding, request.offset, request.max_bytes, opening),
+        None => spawn_detail_chunk(request, opening),
     }
 }
 
 /// 发送一个**已登记**的详情请求。调用方必须持有 `HistoryDetailWindow::request`
 /// 返回的请求；否则 `pending_offset` 与真实 RPC 会脱节，后续请求被自己阻断。
-fn spawn_detail_chunk(request: HistoryBodyRequest) {
+fn spawn_detail_chunk(request: HistoryBodyRequest, opening: u64) {
     let Some(client) = crate::kit::atoms::ACP_CLIENT_HANDLE.get().cloned() else {
-        if let Some(detail) = crate::kit::atoms::HISTORY_DETAIL.state().write().as_mut() {
+        if let Some(detail) = crate::kit::atoms::HISTORY_DETAIL.state().write().as_mut()
+            && detail.opening == opening
+        {
             detail.fail("ACP client unavailable");
         }
         return;
@@ -612,7 +653,8 @@ fn spawn_detail_chunk(request: HistoryBodyRequest) {
         let Some(detail) = guard.as_mut() else {
             return;
         };
-        if detail.descriptor.key != key {
+        // 同一槽位可能已重新打开；代次或身份不匹配的响应整体丢弃（成功与失败都算）。
+        if !detail.accepts_opening(opening) || detail.descriptor.key != key {
             return;
         }
         match result {
@@ -630,10 +672,12 @@ fn spawn_detail_chunk(request: HistoryBodyRequest) {
     });
 }
 
-/// V2 正文块：严格解码 `_peri/history` 的 body 结果，只应用到同一 binding。
-fn spawn_v2_detail_chunk(binding: HistoryV2BodyBinding, offset: u64, max_bytes: u32) {
+/// V2 正文块：严格解码 `_peri/history` 的 body 结果，只应用到同一 binding 与代次。
+fn spawn_v2_detail_chunk(binding: HistoryV2BodyBinding, offset: u64, max_bytes: u32, opening: u64) {
     let Some(client) = crate::kit::atoms::ACP_CLIENT_HANDLE.get().cloned() else {
-        if let Some(detail) = crate::kit::atoms::HISTORY_DETAIL.state().write().as_mut() {
+        if let Some(detail) = crate::kit::atoms::HISTORY_DETAIL.state().write().as_mut()
+            && detail.opening == opening
+        {
             detail.fail("ACP client unavailable");
         }
         return;
@@ -673,7 +717,7 @@ fn spawn_v2_detail_chunk(binding: HistoryV2BodyBinding, offset: u64, max_bytes: 
         let Some(detail) = guard.as_mut() else {
             return;
         };
-        if detail.descriptor.v2.as_ref() != Some(&binding) {
+        if !detail.accepts_opening(opening) || detail.descriptor.v2.as_ref() != Some(&binding) {
             return;
         }
         match result {
@@ -698,21 +742,16 @@ fn spawn_v2_detail_chunk(binding: HistoryV2BodyBinding, offset: u64, max_bytes: 
 fn scroll_detail(delta: i64) {
     // `scroll_to` 已登记 pending；这里只发送它返回的那一个请求。再调用
     // `request_detail_chunk` 会因 `pending_offset.is_some()` 被拒绝，第二个 RPC
-    // 根本不会发出。
-    let v2 = {
-        let handle = crate::kit::atoms::HISTORY_DETAIL.state();
-        let guard = handle.read();
-        guard
-            .as_ref()
-            .and_then(|detail| detail.descriptor.v2.clone())
-    };
-    if let Some(request) = scroll_detail_request(delta) {
-        dispatch_detail_request(request, v2);
+    // 根本不会发出。binding 与打开代次在登记请求的同一把锁内捕获。
+    if let Some((request, v2, opening)) = scroll_detail_request(delta) {
+        dispatch_detail_request(request, v2, opening);
     }
 }
 
 /// 计算一次滚动是否触发新块请求（已登记 `pending_offset`）。
-fn scroll_detail_request(delta: i64) -> Option<HistoryBodyRequest> {
+fn scroll_detail_request(
+    delta: i64,
+) -> Option<(HistoryBodyRequest, Option<HistoryV2BodyBinding>, u64)> {
     let handle = crate::kit::atoms::HISTORY_DETAIL.state();
     let mut guard = handle.write();
     let detail = guard.as_mut()?;
@@ -720,7 +759,10 @@ fn scroll_detail_request(delta: i64) -> Option<HistoryBodyRequest> {
     let next = (detail.scroll_offset as i64 + delta.saturating_mul(step))
         .max(0)
         .min(detail.descriptor.total_bytes.saturating_sub(1) as i64) as u64;
-    detail.scroll_to(next)
+    let request = detail.scroll_to(next)?;
+    let v2 = detail.descriptor.v2.clone();
+    let opening = detail.opening;
+    Some((request, v2, opening))
 }
 
 fn export_detail_to_clipboard() {

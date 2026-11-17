@@ -324,7 +324,7 @@ fn detail_scroll_event_path_uses_one_registered_request_per_chunk() {
     crate::kit::atoms::HISTORY_DETAIL
         .set(Some(HistoryDetailWindow::open(descriptor).expect("open")));
 
-    let first = super::scroll_detail_request(1).expect("first scroll must request a chunk");
+    let (first, _, _) = super::scroll_detail_request(1).expect("first scroll must request a chunk");
     assert_eq!(
         first.offset, 1024,
         "scroll_to registers the uncovered offset"
@@ -347,7 +347,8 @@ fn detail_scroll_event_path_uses_one_registered_request_per_chunk() {
         .expect("detail")
         .apply_chunk(chunk(1024, &vec![b'a'; 1024], false, Some(2048)), 1024)
         .expect("apply first request");
-    let second = super::scroll_detail_request(1).expect("second scroll must request a chunk");
+    let (second, _, _) =
+        super::scroll_detail_request(1).expect("second scroll must request a chunk");
     assert_eq!(second.offset, 2048);
     super::close_history_detail();
 }
@@ -649,4 +650,39 @@ fn v2_detail_rejects_later_total_mismatch() {
     assert_eq!(error, DetailError::InvalidChunk);
     assert_eq!(window.descriptor.total_bytes, 11);
     assert_eq!(window.loaded_text().expect("utf8"), "hello");
+}
+
+#[test]
+fn v2_detail_rejects_chunk_range_that_disagrees_with_wire() {
+    // complete 块只带 5 字节却声明 11 字节总长：若接受，next_request() 会跳过缺失字节。
+    let mut window = HistoryDetailWindow::open(v2_descriptor(11)).expect("open");
+    let error = window
+        .apply_v2_chunk(&v2_chunk(0, b"hello", true, None, 11), 256 * 1024)
+        .expect_err("complete 块必须恰好止于 totalBytes");
+    assert_eq!(error, DetailError::InvalidChunk);
+    assert!(!window.is_complete());
+    assert!(window.chunk_arc(0).is_none(), "拒绝的块不得进入保留窗口");
+
+    // 非 EOF 块必须止于 nextOffset；否则同样会留下无法请求的空洞。
+    let error = window
+        .apply_v2_chunk(&v2_chunk(0, b"hello", false, Some(9), 11), 256 * 1024)
+        .expect_err("nextOffset 必须等于 offset + 解码长度");
+    assert_eq!(error, DetailError::InvalidChunk);
+    assert!(window.chunk_arc(0).is_none());
+}
+
+#[test]
+fn reopening_same_detail_slot_assigns_a_new_generation() {
+    let first = HistoryDetailWindow::open(descriptor(4)).expect("open");
+    let second = HistoryDetailWindow::open(descriptor(4)).expect("open");
+    assert_ne!(
+        first.opening(),
+        second.opening(),
+        "同一槽位每次打开都必须有唯一代次"
+    );
+    assert!(first.accepts_opening(first.opening()));
+    assert!(
+        !second.accepts_opening(first.opening()),
+        "新窗口不得接受旧窗口的在途响应"
+    );
 }
