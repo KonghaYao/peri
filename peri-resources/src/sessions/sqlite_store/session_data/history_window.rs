@@ -173,28 +173,7 @@ impl SqliteSessionData {
             HistoryWindowTailExpectation::Current => Self::read_window_tail(&mut tx, id).await?,
             HistoryWindowTailExpectation::Fixed(None) => None,
             HistoryWindowTailExpectation::Fixed(Some(expected)) => {
-                if expected.thread_id != *id {
-                    return Err(HistoryWindowError::CrossSession {
-                        expected: id.clone(),
-                        actual: expected.thread_id.clone(),
-                    }
-                    .into());
-                }
-                let exists: Option<(i64,)> = sqlx::query_as(HISTORY_WINDOW_TAIL_CHECK_SQL)
-                    .bind(id.as_str())
-                    .bind(expected.entry_id.as_uuid().to_string())
-                    .bind(i64::try_from(expected.position).map_err(|_| {
-                        super::corrupt("history window tail position exceeds the supported range")
-                    })?)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(|error| super::map_sqlx(&error))?;
-                if exists.is_none() {
-                    return Err(HistoryWindowError::window_invalidated(
-                        "committed tail no longer matches the snapshot",
-                    )
-                    .into());
-                }
+                require_committed_tail(&mut tx, id, expected).await?;
                 Some(expected.clone())
             }
         };
@@ -406,6 +385,7 @@ impl SqliteSessionData {
             let mut tx = sqlx::Connection::begin(&mut *connection)
                 .await
                 .map_err(|error| super::map_sqlx(&error))?;
+            require_committed_tail(&mut tx, id, committed_tail).await?;
             let row: Option<(i64,)> = sqlx::query_as(HISTORY_WINDOW_BODY_ROWID_SQL)
                 .bind(id.as_str())
                 .bind(&expected)
@@ -502,6 +482,7 @@ impl SqliteSessionData {
             .await
             .map_err(|error| super::map_sqlx(&error))?;
         self.require_session(&mut tx, id).await?;
+        require_committed_tail(&mut tx, id, committed_tail).await?;
         let row: Option<(i64, String)> = sqlx::query_as(HISTORY_WINDOW_ENTRY_METADATA_SQL)
             .bind(id.as_str())
             .bind(entry_id.as_uuid().to_string())
@@ -670,6 +651,40 @@ impl SqliteSessionData {
         })
         .transpose()
     }
+}
+
+/// 固定 tail 复核：页、元数据与正文读取共用同一判据。
+///
+/// 只绑定 `rowid <= tail.position` 不够：rewind 删除尾部条目但保留更早条目时，
+/// 旧窗口仍能读到已失效快照内的内容。必须在同一事务内确认 tail 身份仍存在。
+async fn require_committed_tail(
+    connection: &mut SqliteConnection,
+    id: &ThreadId,
+    expected: &HistoryCommittedTail,
+) -> SessionResourceResult<()> {
+    if expected.thread_id != *id {
+        return Err(HistoryWindowError::CrossSession {
+            expected: id.clone(),
+            actual: expected.thread_id.clone(),
+        }
+        .into());
+    }
+    let exists: Option<(i64,)> = sqlx::query_as(HISTORY_WINDOW_TAIL_CHECK_SQL)
+        .bind(id.as_str())
+        .bind(expected.entry_id.as_uuid().to_string())
+        .bind(i64::try_from(expected.position).map_err(|_| {
+            super::corrupt("history window tail position exceeds the supported range")
+        })?)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|error| super::map_sqlx(&error))?;
+    if exists.is_none() {
+        return Err(HistoryWindowError::window_invalidated(
+            "committed tail no longer matches the snapshot",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn validate_history_window_plan(plan: &HistoryWindowPagePlan) -> SessionResourceResult<()> {
