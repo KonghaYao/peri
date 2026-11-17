@@ -40,9 +40,10 @@ fn settle_failed_initial_projection(
     let restore = previous_v2.is_ready() && previous_v2.session_id.as_deref() == Some(session_id);
     if restore {
         let mut restored = previous_v2.clone();
+        let (events, replay) = crate::kit::acp_notifier::replay_pending_into_guarded(&mut restored);
         if let Some(reason) = detached_reason {
-            // 服务端已提交候选流：旧窗口的 delivery/live 身份不再匹配，恢复内容但
-            // 要求重新 open，避免状态仍报 Ready 却收不到后续更新。
+            // 先并入同流暂存（连续 seq 仍属于旧窗口），再把窗口标记为需重开：
+            // 服务端已提交候选流，旧 delivery/live 身份不再匹配后续更新。
             if let Some(window) = restored.window.as_mut() {
                 window.paging.live.detached = true;
                 window.paging.status =
@@ -51,7 +52,6 @@ fn settle_failed_initial_projection(
                     };
             }
         }
-        let (events, replay) = crate::kit::acp_notifier::replay_pending_into_guarded(&mut restored);
         // 恢复后的高水位必须写回 atom，失败后的实时事件才能继续按连续序号接纳。
         crate::kit::history_v2::restore_published(restored.clone());
         if projection.client.projection_mode == ClientProjectionMode::Interactive {

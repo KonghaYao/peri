@@ -141,9 +141,14 @@ fn release_open_for(session_id: &str, request_key: DecimalU64) {
     }
 }
 
+/// 是否有 Open 认领在途；在途时新的 open 无法入队，重试也不得清空它的暂存。
+fn open_claim_active() -> bool {
+    open_claim_slot().is_some()
+}
+
 #[cfg(test)]
 fn open_claim_is_some() -> bool {
-    open_claim_slot().is_some()
+    open_claim_active()
 }
 
 pub(crate) fn notify_view(state: &HistoryV2State) {
@@ -804,10 +809,19 @@ pub(crate) fn spawn_history_v2_consumer(
                     if let Some(session_id) = outcome.retry_open {
                         // rewind 后的空窗口没有 `request_reopen` 入口；重试预算内
                         // 由消费循环自己重排，耗尽则丢弃暂存，避免无限缓冲。
+                        if open_claim_active() {
+                            // 另一个 Open 仍在途（可能是该会话的新 open）：暂存留给
+                            // 它结算，既不能重排也不能清空。
+                            continue;
+                        }
                         let attempts = empty_window_retries.entry(session_id.clone()).or_default();
                         if *attempts < EMPTY_WINDOW_OPEN_RETRIES {
                             *attempts += 1;
                             if request_open_latest(&session_id) {
+                                continue;
+                            }
+                            // 竞态：检查与入队之间另一个 Open 抢到了认领。
+                            if open_claim_active() {
                                 continue;
                             }
                         }
