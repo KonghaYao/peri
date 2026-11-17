@@ -820,6 +820,19 @@ fn open_failure_releases_the_claim_so_the_next_open_can_start() {
         panic!("expected a new open request");
     };
 }
+
+/// rewind 后窗口已丢弃：open 失败必须识别为「空窗口需重排」，而不是普通窗口
+/// 失效——没有 window 可以承载 `ReopenRequired`。
+#[test]
+fn empty_window_open_failure_is_detected_for_retry() {
+    let empty = HistoryV2State {
+        session_id: Some("s1".into()),
+        ..HistoryV2State::default()
+    };
+    assert!(super::window_missing_for(&empty, "s1"));
+    assert!(!super::window_missing_for(&empty, "other"));
+    assert!(!super::window_missing_for(&admitted(), "s1"));
+}
 // ---------------------------------------------------------------------------
 // 真实出站顺序：记录型 mock client。
 // ---------------------------------------------------------------------------

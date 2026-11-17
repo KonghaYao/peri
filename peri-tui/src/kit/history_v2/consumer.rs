@@ -763,6 +763,8 @@ pub(crate) fn spawn_history_v2_consumer(
     shutdown: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let mut empty_window_retries: std::collections::HashMap<String, u8> =
+            std::collections::HashMap::new();
         loop {
             let command = tokio::select! {
                 _ = shutdown.cancelled() => break,
@@ -791,10 +793,26 @@ pub(crate) fn spawn_history_v2_consumer(
                     let _ = reply.send(result);
                 }
                 OutboundCommand::Request(request) => {
-                    let close_target = handle_window_request(&client, request).await;
-                    if let Some(identity) = close_target {
+                    let outcome = handle_window_request(&client, request).await;
+                    if let Some(identity) = outcome.close {
                         // Open 已被接纳：此时才释放旧窗口身份。
                         let _ = request_close_window(identity);
+                    }
+                    if let Some(session_id) = outcome.opened {
+                        empty_window_retries.remove(&session_id);
+                    }
+                    if let Some(session_id) = outcome.retry_open {
+                        // rewind 后的空窗口没有 `request_reopen` 入口；重试预算内
+                        // 由消费循环自己重排，耗尽则丢弃暂存，避免无限缓冲。
+                        let attempts = empty_window_retries.entry(session_id.clone()).or_default();
+                        if *attempts < EMPTY_WINDOW_OPEN_RETRIES {
+                            *attempts += 1;
+                            if request_open_latest(&session_id) {
+                                continue;
+                            }
+                        }
+                        empty_window_retries.remove(&session_id);
+                        crate::kit::history_v2::live::clear_pending(&session_id);
                     }
                 }
             }
@@ -802,11 +820,30 @@ pub(crate) fn spawn_history_v2_consumer(
     })
 }
 
-/// 发送并结算一个窗口请求；成功接纳新窗口时返回待关闭的旧窗口身份。
+/// 空窗口 open 失败后的自动重试次数：超过后丢弃暂存并等待会话重新 load。
+const EMPTY_WINDOW_OPEN_RETRIES: u8 = 2;
+
+/// 窗口请求结算结果。
+#[derive(Default)]
+struct WindowRequestOutcome {
+    /// 成功接纳新窗口后待关闭的旧窗口身份。
+    close: Option<HistoryV2WindowIdentity>,
+    /// 成功建立窗口的会话（用于清除重试计数）。
+    opened: Option<String>,
+    /// 空窗口 open 失败：消费循环应在预算内重新 open。
+    retry_open: Option<String>,
+}
+
+/// 空窗口（rewind 后重建）判定：会话仍在、但窗口已被丢弃。
+fn window_missing_for(state: &HistoryV2State, session_id: &str) -> bool {
+    state.session_id.as_deref() == Some(session_id) && state.window.is_none()
+}
+
+/// 发送并结算一个窗口请求。
 async fn handle_window_request(
     client: &AcpTuiClient,
     request: HistoryV2ConsumerRequest,
-) -> Option<HistoryV2WindowIdentity> {
+) -> WindowRequestOutcome {
     let limits = current_limits();
     let identity = request.identity();
     let params = request.params(&limits);
@@ -820,36 +857,50 @@ async fn handle_window_request(
             }
             Err(_) => debug!("history_v2: window close timed out"),
         }
-        return None;
+        return WindowRequestOutcome::default();
     }
     match response {
         Ok(Ok(raw)) => {
             let page = match parse_page_result(&raw) {
                 Ok(page) => page,
                 Err(_) => {
-                    let notify = {
+                    let (notify, retry_open) = {
                         let handle = atoms::HISTORY_V2_STATE.state();
                         let mut state = handle.write();
                         if matches!(&request, HistoryV2ConsumerRequest::Open { .. }) {
-                            apply_open_failure(
-                                &mut state,
-                                identity.session_id,
-                                identity.request_key,
-                                "invalid_page_shape",
+                            let retry = window_missing_for(&state, identity.session_id);
+                            (
+                                apply_open_failure(
+                                    &mut state,
+                                    identity.session_id,
+                                    identity.request_key,
+                                    "invalid_page_shape",
+                                ),
+                                retry,
                             )
                         } else {
-                            apply_transport_failure_core(&mut state, identity, "invalid_page_shape")
+                            (
+                                apply_transport_failure_core(
+                                    &mut state,
+                                    identity,
+                                    "invalid_page_shape",
+                                ),
+                                false,
+                            )
                         }
                     };
                     if notify {
                         notify_current_state();
                     }
-                    return None;
+                    return WindowRequestOutcome {
+                        retry_open: retry_open.then(|| identity.session_id.to_owned()),
+                        ..WindowRequestOutcome::default()
+                    };
                 }
             };
             // 原子写锁内只修改状态；发布（notify_view）必须等锁释放后，否则
             // `Atom::set` 会再次申请同一把写锁而自我阻塞。
-            let (close_target, notify, replay_pending) = {
+            let (close_target, notify, replay_pending, opened) = {
                 let handle = atoms::HISTORY_V2_STATE.state();
                 let mut state = handle.write();
                 match &request {
@@ -865,7 +916,7 @@ async fn handle_window_request(
                                 session_id,
                                 "history_v2: ignoring an open response without a live claim"
                             );
-                            return None;
+                            return WindowRequestOutcome::default();
                         };
                         match apply_open(
                             &mut state,
@@ -875,22 +926,26 @@ async fn handle_window_request(
                             &page,
                             &limits,
                         ) {
-                            OpenSettlement::Unchanged => (None, false, false),
-                            OpenSettlement::Changed { close, accepted } => (close, true, accepted),
+                            OpenSettlement::Unchanged => (None, false, false, None),
+                            OpenSettlement::Changed { close, accepted } => {
+                                (close, true, accepted, accepted.then(|| session_id.clone()))
+                            }
                         }
                     }
                     HistoryV2ConsumerRequest::Page(page_request) => (
                         None,
                         apply_page(&mut state, page_request, &page, &limits),
                         false,
+                        None,
                     ),
                     HistoryV2ConsumerRequest::Seek(seek_request) => (
                         None,
                         apply_seek(&mut state, seek_request, &page, &limits),
                         false,
+                        None,
                     ),
                     // Close 已在解析页之前处理并返回。
-                    HistoryV2ConsumerRequest::Close { .. } => (None, false, false),
+                    HistoryV2ConsumerRequest::Close { .. } => (None, false, false, None),
                 }
             };
             if notify {
@@ -908,7 +963,11 @@ async fn handle_window_request(
                     replay.finish();
                 }
             }
-            close_target
+            WindowRequestOutcome {
+                close: close_target,
+                opened,
+                retry_open: None,
+            }
         }
         Ok(Err(error)) => {
             let failure = HistoryV2WireFailure::from_error(&error);
@@ -916,38 +975,62 @@ async fn handle_window_request(
                 reason = failure.label(),
                 "history_v2: request failed with a domain error"
             );
-            if matches!(&request, HistoryV2ConsumerRequest::Open { .. }) {
-                release_open_for(identity.session_id, identity.request_key);
-            }
-            let notify = {
-                let handle = atoms::HISTORY_V2_STATE.state();
-                let mut state = handle.write();
-                apply_failure_core(&mut state, identity, &failure).is_some()
-            };
-            if notify {
-                notify_current_state();
-            }
-            None
-        }
-        Err(_) => {
-            let notify = {
+            let (notify, retry_open) = {
                 let handle = atoms::HISTORY_V2_STATE.state();
                 let mut state = handle.write();
                 if matches!(&request, HistoryV2ConsumerRequest::Open { .. }) {
-                    apply_open_failure(
-                        &mut state,
-                        identity.session_id,
-                        identity.request_key,
-                        "timeout",
+                    release_open_for(identity.session_id, identity.request_key);
+                    // 原操作仍在服务端执行时不得再排一次 open，避免重复建窗。
+                    let retry = !failure.operation_in_progress()
+                        && window_missing_for(&state, identity.session_id);
+                    (
+                        apply_failure_core(&mut state, identity, &failure).is_some(),
+                        retry,
                     )
                 } else {
-                    apply_transport_failure_core(&mut state, identity, "timeout")
+                    (
+                        apply_failure_core(&mut state, identity, &failure).is_some(),
+                        false,
+                    )
                 }
             };
             if notify {
                 notify_current_state();
             }
-            None
+            WindowRequestOutcome {
+                retry_open: retry_open.then(|| identity.session_id.to_owned()),
+                ..WindowRequestOutcome::default()
+            }
+        }
+        Err(_) => {
+            let (notify, retry_open) = {
+                let handle = atoms::HISTORY_V2_STATE.state();
+                let mut state = handle.write();
+                if matches!(&request, HistoryV2ConsumerRequest::Open { .. }) {
+                    let retry = window_missing_for(&state, identity.session_id);
+                    (
+                        apply_open_failure(
+                            &mut state,
+                            identity.session_id,
+                            identity.request_key,
+                            "timeout",
+                        ),
+                        retry,
+                    )
+                } else {
+                    (
+                        apply_transport_failure_core(&mut state, identity, "timeout"),
+                        false,
+                    )
+                }
+            };
+            if notify {
+                notify_current_state();
+            }
+            WindowRequestOutcome {
+                retry_open: retry_open.then(|| identity.session_id.to_owned()),
+                ..WindowRequestOutcome::default()
+            }
         }
     }
 }

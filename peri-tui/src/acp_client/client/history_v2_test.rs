@@ -261,15 +261,24 @@ async fn failed_initial_keeps_the_previous_window_and_delivery_identity() {
 
     assert!(load.await.unwrap().is_err());
     let state = crate::kit::history_v2::snapshot();
-    assert_eq!(
-        state, previous,
-        "initial 失败不得清空旧 HISTORY_V2_STATE 或改变 live/delivery 身份"
+    assert!(
+        state.is_ready(),
+        "旧窗口内容仍可展示，失败不得清空 HISTORY_V2_STATE"
     );
-    assert!(state.is_ready());
     assert_eq!(state.delivery_id.as_deref(), Some("delivery-1"));
     assert_eq!(
         state.window().map(|window| window.window_id.as_str()),
         Some("w1")
+    );
+    assert_eq!(
+        state.window().map(|window| window.items.clone()),
+        previous.window().map(|window| window.items.clone()),
+        "旧窗口条目必须保留"
+    );
+    let window = state.window().expect("restored window");
+    assert!(
+        window.paging.live.detached && window.paging.status.is_reopen_required(),
+        "服务端已提交候选流：旧 delivery/live 身份失效，恢复窗口必须 detached 并等待 reopen"
     );
     client.close();
 }
@@ -338,10 +347,17 @@ async fn failed_initial_reprojects_the_previous_same_session_view() {
         SESSION,
         "同会话失败必须保留 load 起点已投影的会话边界"
     );
+    let restored = crate::kit::history_v2::snapshot();
+    assert!(restored.is_ready(), "失败路径不得清空旧窗口内容");
+    assert_eq!(restored.delivery_id, previous.delivery_id);
     assert_eq!(
-        crate::kit::history_v2::snapshot(),
-        previous,
-        "失败路径不得清空旧窗口"
+        restored.window().map(|window| window.items.clone()),
+        previous.window().map(|window| window.items.clone())
+    );
+    let window = restored.window().expect("restored window");
+    assert!(
+        window.paging.live.detached && window.paging.status.is_reopen_required(),
+        "候选已提交：恢复窗口必须 detached 并等待 reopen"
     );
     assert!(
         crate::kit::history_v2::consumer::notify_count() > notifications_before,
