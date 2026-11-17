@@ -446,7 +446,22 @@ impl WorkflowTaskTable {
         {
             return SettleOutcome::NotAdmitted(entry.record.clone());
         }
+        // Fence before the terminal sink can deliver the result to the engine: a
+        // generic dead result may trigger an immediate retry. Only an admitted,
+        // first terminal result can install the fence; rejected reports cannot.
+        let scope_failure = result
+            .as_ref()
+            .and_then(AgentRunResult::unsettled_scope_error)
+            .map(str::to_owned);
+        if let Some(detail) = &scope_failure {
+            inner
+                .run_kills
+                .insert(run_id.to_string(), Some(detail.clone()));
+        }
         let record = self.write_terminal_locked(&mut inner, &key, state, result, reason, now_ms());
+        if let Some(detail) = scope_failure {
+            self.cancel_matching_locked(&mut inner, |record| record.run_id == run_id, Some(detail));
+        }
         match record {
             Some(record) => SettleOutcome::Settled(record),
             None => SettleOutcome::NotFound,

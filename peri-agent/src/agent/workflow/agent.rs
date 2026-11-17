@@ -30,6 +30,7 @@ mod workflow_agent_executor;
 
 mod execution;
 mod observation;
+mod report;
 mod result;
 
 pub use workflow_agent_executor::WorkflowLangfuseEventHandler;

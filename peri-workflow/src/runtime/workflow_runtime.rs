@@ -150,6 +150,7 @@ impl AgentTaskSink for RuntimeAgentTaskSink {
 /// Node 侧按引擎约定抛 `WorkflowAbortedError`）。
 pub(super) fn cancelled_delivery_result(record: &WorkflowTaskRecord) -> AgentRunResult {
     AgentRunResult::Dead {
+        scope_close_incomplete: false,
         reason: Some("killed".into()),
         detail: record
             .reason
@@ -219,6 +220,11 @@ impl WorkflowRuntime {
                 .result
                 .clone()
                 .unwrap_or_else(|| cancelled_delivery_result(record));
+            // The task table has already fenced this run atomically. Record the
+            // committed failure before the engine can react to its notification.
+            if let Some(detail) = result.unsettled_scope_error() {
+                runner.note_run_failure(&record.run_id, detail);
+            }
             // tool 计数与投递同点（任务终态先提交后投递）：计数只影响 run 终态投影，
             // 不改变已提交结果（design §5.2 第 5 条 limits 计费）；重复回投按 taskId 去重。
             if let Some(count) = result.tool_count() {

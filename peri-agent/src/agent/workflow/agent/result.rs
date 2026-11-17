@@ -22,10 +22,26 @@ pub(super) struct ProjectedResult {
 }
 
 impl ProjectedResult {
+    /// Preserve execution telemetry without losing the independent run-fence signal.
+    pub(super) fn after_scope_close(mut self, closed: bool) -> Self {
+        self.result = self.result.after_scope_close(closed);
+        if !closed && self.failure.is_none() {
+            self.failure = Some(ExecutionFailure::internal(
+                "Workflow agent scope did not close; outstanding resources are unconfirmed",
+            ));
+        }
+        self
+    }
+
     #[must_use]
     pub fn telemetry_outcome(&self) -> TurnTelemetryOutcome {
         match &self.result {
-            AgentRunResult::Dead { reason, .. } if reason.as_deref() == Some("interrupted") => {
+            // scope 未结清时终态已按失败收口，中断不能再投影为取消。
+            AgentRunResult::Dead {
+                reason,
+                scope_close_incomplete,
+                ..
+            } if !*scope_close_incomplete && reason.as_deref() == Some("interrupted") => {
                 TurnTelemetryOutcome::Stopped {
                     reason: PromptStopReason::Cancelled,
                 }
@@ -91,7 +107,7 @@ pub(super) fn project_run_result(
     }
     match loop_result {
         LoopResult::Completed | LoopResult::HookStopped { .. } => {
-            let output = crate::session::subagent::extract_last_ai_text(session);
+            let output = super::report::extract_output(session);
             ProjectedResult {
                 result: completed_result(
                     output,
@@ -107,6 +123,7 @@ pub(super) fn project_run_result(
             debug!("Workflow agent: execution interrupted");
             ProjectedResult {
                 result: AgentRunResult::Dead {
+                    scope_close_incomplete: false,
                     reason: Some("interrupted".into()),
                     detail: Some("Workflow agent execution was interrupted".into()),
                 },
@@ -117,6 +134,7 @@ pub(super) fn project_run_result(
             debug!("Workflow agent: settlement window expired");
             ProjectedResult {
                 result: AgentRunResult::Dead {
+                    scope_close_incomplete: false,
                     reason: Some("settlement-due".into()),
                     detail: Some(
                         "Workflow agent stopped admitting new iterations at its settlement deadline"
@@ -131,6 +149,7 @@ pub(super) fn project_run_result(
             ProjectedResult {
                 failure: Some(ExecutionFailure::from_agent_error(&error)),
                 result: AgentRunResult::Dead {
+                    scope_close_incomplete: false,
                     reason: Some("runagent-threw".into()),
                     detail: Some(error.to_string()),
                 },
@@ -156,6 +175,7 @@ fn completed_result(
         if let Err(error) = validate_json_schema(&output, schema) {
             debug!(error = %error, "Workflow agent: schema validation failed");
             return AgentRunResult::Dead {
+                scope_close_incomplete: false,
                 reason: Some("no-structured-output".into()),
                 detail: Some(error),
             };
@@ -176,6 +196,7 @@ fn completed_result(
 
 pub(super) fn workflow_forwarder_dead_result() -> AgentRunResult {
     AgentRunResult::Dead {
+        scope_close_incomplete: false,
         reason: Some("event-forwarder-failed".into()),
         detail: Some("Workflow agent event forwarding failed".into()),
     }

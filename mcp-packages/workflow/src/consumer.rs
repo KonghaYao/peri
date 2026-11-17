@@ -75,6 +75,7 @@ impl WorkflowMcpServer {
                                     &task.task_id,
                                     WorkflowTaskState::Cancelled,
                                     Some(AgentRunResult::Dead {
+                                        scope_close_incomplete: false,
                                         reason: Some("consumer disconnected".into()),
                                         detail: None,
                                     }),

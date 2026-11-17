@@ -89,6 +89,7 @@ impl AgentExecutor for CountingAgentExecutor {
     async fn execute(&self, _params: AgentRunParams) -> AgentRunResult {
         self.calls.fetch_add(1, Ordering::SeqCst);
         AgentRunResult::Dead {
+            scope_close_incomplete: false,
             reason: Some("test executor must not run".into()),
             detail: None,
         }
@@ -743,4 +744,26 @@ throw new Error('intentional crash after agent')
         run.completed_at.is_some(),
         "Failed 条目必须设置 completed_at，否则 cleanup_completed 永不清理"
     );
+}
+
+#[test]
+fn fatal_host_failure_uses_the_existing_first_failure_slot_per_run() {
+    let executor = Arc::new(MockAgentExecutor {
+        delay: std::time::Duration::ZERO,
+    }) as Arc<dyn AgentExecutor>;
+    let runner = WorkflowRunner::new(executor, ".", None);
+    let failed = Arc::new(RunLimitState::new(None));
+    let independent = Arc::new(RunLimitState::new(None));
+    runner
+        .run_limit_states
+        .insert("failed".into(), Arc::clone(&failed));
+    runner
+        .run_limit_states
+        .insert("independent".into(), Arc::clone(&independent));
+    runner.note_run_failure("failed", "scope not closed");
+    runner.note_run_failure("failed", "later failure");
+    assert_eq!(failed.breach().as_deref(), Some("scope not closed"));
+    assert_eq!(independent.breach(), None);
+    runner.note_run_failure("already retired", "late result");
+    assert_eq!(runner.run_limit_states.len(), 2);
 }

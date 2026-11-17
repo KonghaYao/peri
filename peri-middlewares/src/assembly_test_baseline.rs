@@ -367,7 +367,7 @@ async fn test_workflow_executor_cancel_during_model_stream_is_interrupted() {
     let result = task.await.expect("workflow executor task 不得 panic");
 
     match result {
-        AgentRunResult::Dead { reason, detail } => {
+        AgentRunResult::Dead { reason, detail, .. } => {
             assert_eq!(reason.as_deref(), Some("interrupted"));
             assert!(
                 detail

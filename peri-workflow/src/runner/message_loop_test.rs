@@ -44,6 +44,7 @@ async fn run_messages(
     method: &str,
     params: serde_json::Value,
     limits: WorkflowLimits,
+    breach: Option<&str>,
 ) -> (WorkflowResult, RunState, RunProgress) {
     let tmp = tempfile::tempdir().expect("the temporary test directory must be available");
     let journal = Arc::new(WorkflowJournalStore::new(
@@ -86,10 +87,14 @@ async fn run_messages(
         .expect("msg tx send test receiver must remain available for this delivery");
     drop(msg_tx);
     let (done_tx, mut done_rx) = watch::channel(None);
+    let limit_state = Arc::new(RunLimitState::new(limits.max_tool_calls));
+    if let Some(breach) = breach {
+        limit_state.set_breach(breach.to_string());
+    }
     let message_loop = MessageLoop {
         run_scope: Arc::new(crate::runner::scope::RunScope::new()),
         agent_task_sink: Some(sink),
-        limit_state: Arc::new(RunLimitState::new(limits.max_tool_calls)),
+        limit_state,
         channel: Arc::new(RpcChannel::new(host.channel())),
         journal_store: Arc::clone(&journal),
         progress_store: Arc::clone(&progress),
@@ -140,6 +145,7 @@ async fn test_invalid_agent_task_continues_to_workflow_done() {
         // 跨 run 的发布：runId 与当前 run 不匹配，必须在准入前被拒绝。
         json!({"runId": "other-run", "taskId": "t-1", "agentId": 7, "prompt": "inspect"}),
         WorkflowLimits::default(),
+        None,
     )
     .await;
     assert_eq!(calls.load(Ordering::SeqCst), 0, "跨 run 发布不得进入准入");
@@ -164,6 +170,7 @@ async fn test_agent_limit_stops_before_queued_workflow_done() {
         "agent/task",
         json!({"runId": "run-1", "taskId": "t-1", "agentId": 7, "prompt": "inspect"}),
         limits,
+        None,
     )
     .await;
     assert_eq!(calls.load(Ordering::SeqCst), 1, "准入被调用一次并拒绝");
@@ -174,5 +181,35 @@ async fn test_agent_limit_stops_before_queued_workflow_done() {
     );
     assert_eq!(state.status, "failed");
     assert_eq!(state.error, result.error);
+    assert!(matches!(progress.status, RunStatus::Failed));
+}
+
+/// maxElapsedMs 超时是后到的失败：终态必须保留先前记录的首个 breach 诊断。
+#[tokio::test]
+async fn test_elapsed_timeout_keeps_the_first_breach() {
+    let calls = Arc::new(AtomicU64::new(0));
+    let sink = RecordingSink {
+        calls: Arc::clone(&calls),
+        outcome: AgentTaskPublish::Accepted,
+    };
+    let limits = WorkflowLimits {
+        max_elapsed_ms: Some(0),
+        ..WorkflowLimits::default()
+    };
+    let (result, state, progress) = run_messages(
+        Arc::new(sink),
+        "agent/task",
+        json!({"runId": "run-1", "taskId": "t-1", "agentId": 7, "prompt": "inspect"}),
+        limits,
+        Some("workflow exceeded maxToolCalls (5)"),
+    )
+    .await;
+    assert_eq!(
+        result.error.as_deref(),
+        Some("workflow exceeded maxToolCalls (5)"),
+        "超时不得覆写首个 breach"
+    );
+    assert_eq!(state.error, result.error);
+    assert_eq!(result.status, "failed");
     assert!(matches!(progress.status, RunStatus::Failed));
 }

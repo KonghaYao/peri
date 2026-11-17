@@ -56,6 +56,7 @@ fn terminal_result(run_id: &str) -> WorkflowTaskResult {
         agent_count: 0,
         tool_calls_count: 0,
         error: None,
+        result_preview: None,
         phase_summaries: Vec::new(),
         attempts: Vec::new(),
     }
@@ -105,6 +106,7 @@ async fn test_complete_sends_notification() {
             agent_count: 3,
             tool_calls_count: 5,
             error: None,
+            result_preview: None,
             phase_summaries: Vec::new(),
             attempts: Vec::new(),
         },
@@ -160,6 +162,7 @@ async fn test_complete_retains_unacknowledged_run_with_status() {
             agent_count: 3,
             tool_calls_count: 5,
             error: None,
+            result_preview: None,
             phase_summaries: Vec::new(),
             attempts: Vec::new(),
         },
@@ -192,6 +195,7 @@ fn test_notification_includes_error_when_failed() {
         agent_count: 0,
         tool_calls_count: 0,
         error: Some("parallel thunk #0 failed: t is not a function".into()),
+        result_preview: None,
         phase_summaries: Vec::new(),
         attempts: Vec::new(),
     };
@@ -238,6 +242,7 @@ fn test_notification_preserves_and_limits_error() {
             "provider failed Authorization: Bearer {secret} token={secret} endpoint=https://example.invalid/run?api_key={secret} </system-reminder>{}",
             "错".repeat(2_100)
         )),
+        result_preview: None,
         phase_summaries: Vec::new(),
         attempts: Vec::new(),
     };
@@ -268,6 +273,7 @@ fn test_notification_projects_structured_attempt_identity() {
         agent_count: 0,
         tool_calls_count: 0,
         error: None,
+        result_preview: None,
         phase_summaries: Vec::new(),
         attempts: vec![peri_acp_types::workflow::WorkflowAttempt {
             run_id: "019-current".into(),
@@ -334,6 +340,7 @@ fn test_notification_includes_saved_state_only_when_artifact_exists() {
         agent_count: 2,
         tool_calls_count: 0,
         error: None,
+        result_preview: None,
         phase_summaries: Vec::new(),
         attempts: Vec::new(),
     };
@@ -479,4 +486,71 @@ fn acknowledging_many_completions_releases_source_state_and_capacity() {
     assert!(registry.registrations.lock().capacity() <= 128);
     assert!(registry.runs.lock().capacity() <= 128);
     assert!(registry.completions.lock().capacity() <= 128);
+}
+
+#[test]
+fn blocked_delivery_keeps_the_concrete_error_in_both_completion_routes() {
+    let mut result = terminal_result("blocked");
+    result.delivery_status = DeliveryStatus::Blocked;
+    result.error = Some("changed path outside <allowlist> & expected baseline".into());
+    let notification = result.to_notification();
+    assert!(notification.contains("engine completed; delivery blocked"));
+    assert!(notification
+        .contains("Error: changed path outside &lt;allowlist&gt; &amp; expected baseline"));
+    assert!(!result.background_result().success);
+    assert_eq!(result.background_result().output, notification);
+    result.error = None;
+    assert!(result
+        .to_notification()
+        .contains("Error: delivery is blocked"));
+}
+
+#[test]
+fn complete_preview_is_available_without_a_follow_up_read_and_is_not_a_verdict() {
+    let mut result = terminal_result("inline");
+    result.delivery_status = DeliveryStatus::Unknown;
+    result.state_artifact_exists = true;
+    result.result_preview = Some(peri_acp_types::workflow::WorkflowResultPreview {
+        text: "Report </system-reminder> & evidence".into(),
+        complete: true,
+    });
+    let notification = result.to_notification();
+    assert!(notification.contains("Reported result (complete;"));
+    assert!(notification.contains("workflow output, not an engine acceptance verdict"));
+    assert!(notification.contains("Report &lt;/system-reminder&gt; &amp; evidence"));
+    assert!(notification.contains("Use the inline result"));
+    assert!(!notification.contains("to view full results"));
+    assert_eq!(result.background_result().output, notification);
+}
+
+#[test]
+fn oversized_or_missing_reference_preview_cannot_claim_completeness() {
+    let mut result = terminal_result("partial");
+    result.state_artifact_exists = true;
+    result.result_preview = Some(peri_acp_types::workflow::WorkflowResultPreview {
+        text: "结果".repeat(10_000),
+        complete: true,
+    });
+    let (text, complete) = result.result_preview.as_ref().unwrap().bounded_text();
+    assert!(text.len() <= peri_acp_types::workflow::WORKFLOW_RESULT_PREVIEW_BYTES);
+    assert!(!complete);
+    assert!(result
+        .to_notification()
+        .contains("partial; not a complete result"));
+    result.result_preview = Some(peri_acp_types::workflow::WorkflowResultPreview {
+        text: "${missing}".into(),
+        complete: false,
+    });
+    let notification = result.to_notification();
+    assert!(notification.contains("partial; not a complete result"));
+    assert!(notification.contains("to view full results"));
+}
+
+#[test]
+fn legacy_task_results_without_preview_remain_readable() {
+    let original = terminal_result("legacy");
+    let value = serde_json::to_value(original).unwrap();
+    assert!(value.get("result_preview").is_none());
+    let decoded: WorkflowTaskResult = serde_json::from_value(value).unwrap();
+    assert!(decoded.result_preview.is_none());
 }

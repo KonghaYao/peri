@@ -59,6 +59,13 @@ pub enum AgentRunResult {
     Skipped,
     #[serde(rename = "dead")]
     Dead {
+        /// Independent of the first failure: unsettled resources must fence the run.
+        #[serde(
+            default,
+            skip_serializing_if = "std::ops::Not::not",
+            rename = "scopeCloseIncomplete"
+        )]
+        scope_close_incomplete: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -67,6 +74,41 @@ pub enum AgentRunResult {
 }
 
 impl AgentRunResult {
+    /// A completed assignment with unconfirmed resources must fence its run before retry.
+    pub fn unsettled_scope_error(&self) -> Option<&str> {
+        match self {
+            Self::Dead {
+                reason,
+                detail,
+                scope_close_incomplete,
+            } if *scope_close_incomplete || reason.as_deref() == Some("scope-close-incomplete") => {
+                Some(detail.as_deref().unwrap_or(
+                    "Workflow agent scope did not close; resource settlement is unconfirmed",
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// Preserve the first failure while independently propagating scope uncertainty.
+    pub fn after_scope_close(self, closed: bool) -> Self {
+        if closed {
+            return self;
+        }
+        match self {
+            Self::Dead { reason, detail, .. } => Self::Dead {
+                reason,
+                detail,
+                scope_close_incomplete: true,
+            },
+            _ => Self::Dead {
+                reason: Some("scope-close-incomplete".into()),
+                detail: Some("Workflow agent scope did not close; outstanding resources are unconfirmed. Do not start dependent writes or verification.".into()),
+                scope_close_incomplete: true,
+            },
+        }
+    }
+
     /// 提取 agent 执行中的 tool call 次数（仅 Ok 变体有值）
     pub fn tool_count(&self) -> Option<u64> {
         match self {
@@ -403,10 +445,33 @@ pub struct WorkflowTaskResult {
     pub tool_calls_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Bounded script output for the completion consumer, not an engine verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_preview: Option<WorkflowResultPreview>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phase_summaries: Vec<PhaseSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attempts: Vec<WorkflowAttempt>,
+}
+
+pub const WORKFLOW_RESULT_PREVIEW_BYTES: usize = 8_192;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowResultPreview {
+    pub text: String,
+    /// False when output was truncated or an external reference could not be read.
+    #[serde(default)]
+    pub complete: bool,
+}
+
+impl WorkflowResultPreview {
+    pub fn bounded_text(&self) -> (&str, bool) {
+        let mut end = self.text.len().min(WORKFLOW_RESULT_PREVIEW_BYTES);
+        while !self.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        (&self.text[..end], self.complete && end == self.text.len())
+    }
 }
 
 fn escape_reminder_text(input: &str) -> String {
@@ -479,16 +544,7 @@ impl WorkflowTaskResult {
             agent_name: format!("workflow:{}", self.workflow_name),
             prompt_summary: self.workflow_name.clone(),
             success: self.agent_facing_success(),
-            output: format!(
-                "Workflow '{}' finished with status {:?} ({}ms, {} agents, {} tool calls). \
-             Results in .claude/workflow-runs/{}/state.json",
-                self.workflow_name,
-                self.status,
-                self.duration_ms,
-                self.agent_count,
-                self.tool_calls_count,
-                self.run_id
-            ),
+            output: self.to_notification(),
             tool_calls_count: self.tool_calls_count,
             duration_ms: self.duration_ms,
             child_thread_id: None,
@@ -551,12 +607,22 @@ impl WorkflowTaskResult {
             }
         }
 
-        let error_line = if self.status == WorkflowRunStatus::Failed {
+        let error_line = if self.status == WorkflowRunStatus::Failed
+            || self.delivery_status == DeliveryStatus::Blocked
+            || self
+                .error
+                .as_deref()
+                .is_some_and(|error| !error.trim().is_empty())
+        {
             let error = self
                 .error
                 .as_deref()
                 .filter(|error| !error.trim().is_empty())
-                .unwrap_or("no error details available");
+                .unwrap_or(if self.delivery_status == DeliveryStatus::Blocked {
+                    "delivery is blocked; inspect the post-condition and required evidence"
+                } else {
+                    "no error details available"
+                });
             let error = escape_reminder_text(&crate::session::bounded_error_message(error, 2_000));
             format!("Error: {error}\n")
         } else {
@@ -566,7 +632,27 @@ impl WorkflowTaskResult {
             ".claude/workflow-runs/{}/state.json",
             escape_reminder_text(&self.run_id)
         );
-        let artifact_lines = if self.state_artifact_exists {
+        let (result_lines, inline_complete) = match &self.result_preview {
+            Some(preview) => {
+                let (text, complete) = preview.bounded_text();
+                let completeness = if complete {
+                    "complete"
+                } else {
+                    "partial; not a complete result"
+                };
+                (format!(
+                    "Reported result ({completeness}; workflow output, not an engine acceptance verdict):\n{}\n",
+                    escape_reminder_text(text)
+                ), complete)
+            }
+            None => (String::new(), false),
+        };
+        let artifact_lines = if self.state_artifact_exists && inline_complete {
+            format!(
+                "Full artifacts saved to {state_path}. Use the inline result when it contains the \
+                 evidence needed for the handoff; do not restart agents just to repeat their report.\n"
+            )
+        } else if self.state_artifact_exists {
             // 指引指代 builtin 文件工具时必须用**模型面名字**（裸名已无提供面）；
             // 查表未命中的兜底不含工具名，不得回落到裸名。
             // `${label}` 是写入期契约（阈值见 LONGTEXT_EXTRACT_THRESHOLD_BYTES）：
@@ -622,7 +708,7 @@ impl WorkflowTaskResult {
 
         format!(
             "Workflow '{}' {}. ({}ms, {} agents, {} tool calls)\n\
-            {}{}{}{}{}",
+            {}{}{}{}{}{}",
             escape_reminder_text(&self.workflow_name),
             success_msg,
             self.duration_ms,
@@ -632,6 +718,7 @@ impl WorkflowTaskResult {
             error_line,
             projection_line,
             attempt_lines,
+            result_lines,
             artifact_lines,
         )
     }
@@ -649,4 +736,53 @@ pub trait AgentExecutor: Send + Sync {
     }
     /// 执行单个 workflow agent，返回 AgentRunResult
     async fn execute(&self, params: AgentRunParams) -> AgentRunResult;
+}
+
+#[cfg(test)]
+mod scope_close_tests {
+    use super::AgentRunResult;
+
+    #[test]
+    fn first_failure_and_scope_uncertainty_round_trip_independently() {
+        for reason in [
+            "event-forwarder-failed",
+            "initial-prompt-enqueue-failed",
+            "execution-blocked",
+            "interrupted",
+        ] {
+            let original: AgentRunResult = serde_json::from_value(serde_json::json!({
+                "kind": "dead", "reason": reason, "detail": "first cause"
+            }))
+            .unwrap();
+            assert!(original.unsettled_scope_error().is_none());
+            assert!(serde_json::to_value(&original)
+                .unwrap()
+                .get("scopeCloseIncomplete")
+                .is_none());
+            let closed = original.clone().after_scope_close(true);
+            assert_eq!(closed, original);
+            let unsettled = original.after_scope_close(false);
+            assert!(unsettled.unsettled_scope_error().is_some());
+            let wire = serde_json::to_value(&unsettled).unwrap();
+            assert_eq!(wire["reason"], reason);
+            assert_eq!(wire["detail"], "first cause");
+            assert_eq!(wire["scopeCloseIncomplete"], true);
+            let restored: AgentRunResult = serde_json::from_value(wire).unwrap();
+            assert_eq!(restored, unsettled);
+            assert!(restored.unsettled_scope_error().is_some());
+        }
+    }
+
+    #[test]
+    fn legacy_scope_failure_still_fences() {
+        let legacy: AgentRunResult = serde_json::from_value(serde_json::json!({
+            "kind": "dead", "reason": "scope-close-incomplete"
+        }))
+        .unwrap();
+        assert!(legacy.unsettled_scope_error().is_some());
+        assert!(AgentRunResult::Skipped
+            .after_scope_close(false)
+            .unsettled_scope_error()
+            .is_some());
+    }
 }

@@ -1,4 +1,6 @@
-//! 单 run 的 limits 运行期状态：tool 调用计数与 breach 的共享真相。
+//! Per-run tool accounting and the first fatal failure used by terminal projection.
+//! A fatal child scope-close failure shares this existing failure slot with limits;
+//! task admission is fenced separately and atomically by WorkflowTaskTable.
 //!
 //! P6 前计数发生在 `agent/run` 分派路径（执行 task 持有 permit）；改为任务表驱动后，
 //! 计数来源是任务终态结果（投递路径前置观察），读取方是消息循环

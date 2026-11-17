@@ -129,7 +129,7 @@ Workflow 是 Peri 的多 Agent 编排子系统：用户在 JS 脚本中声明并
 
 任务表是 per-session 运行期状态（process-local，不写 journal）；消费主循环、订阅与就绪语义见 [workflow-mcp.md](workflow-mcp.md) §5.5，入口为 `peri-acp/src/host/workflow_consumer.rs`。
 
-结果与进度类型是契约层单一事实源（`peri-acp-types/src/workflow.rs`）：`AgentRunParams`、`AgentRunResult`（`Ok { output, usage, model, … }` / `Skipped` / `Dead { reason, detail }`）、`ProgressEvent`、四维状态与 `WorkflowTaskResult`；`AgentRunResult` 的 schema/字符串编码由执行体投影统一决定。
+结果与进度类型是契约层单一事实源（`peri-acp-types/src/workflow.rs`）：`AgentRunParams`、`AgentRunResult`（`Ok { output, usage, model, … }` / `Skipped` / `Dead { reason, detail, scope_close_incomplete }`）、`ProgressEvent`、四维状态与 `WorkflowTaskResult`；`AgentRunResult` 的 schema/字符串编码由执行体投影统一决定。
 
 ### 3.4 WorkflowTaskRegistry
 
@@ -198,6 +198,27 @@ run 终态进入 registry 的完成 outbox（`pending_completions` / `acknowledg
 
 ## 5. 启动、完成与通知
 
+### Assignment handoff
+
+Each workflow assignment receives an English handoff instruction. The latest complete
+whole-message `<workflow-result>...</workflow-result>` supplies the result body; later
+cleanup-only text cannot replace it. A correction must publish a new complete block.
+Schema validation applies to the unwrapped body. For legacy unmarked agents, the last
+nonempty assistant message remains the fallback. This is a reporting convention, not
+proof that the reported checks passed.
+
+Child scope closure is checked before the callback result and final telemetry are
+published. An incomplete close replaces an otherwise successful result with
+`dead / scope-close-incomplete` and failed telemetry. Before publishing that committed
+result, the task table installs the existing run cancellation fence under its lock and
+cancels other unsettled tasks of that run. Late retries cannot be claimed. The existing
+first-failure slot preserves the scope error and forces failed/blocked completion even
+if the script catches aborts. Rejected or conflicting late results cannot install this
+fence. Other runs remain unaffected. This conservative boundary is the entire affected
+run; the host does not have a per-resource dependency graph. Ordinary dead/skipped
+results may still become `null` after engine retry, so scripts must check required outputs.
+
+
 ### 5.1 启动准入
 
 `start_prepared_run` 的固定顺序（任一步失败不留 detached 执行）：
@@ -221,6 +242,19 @@ run 终态进入 registry 的完成 outbox（`pending_completions` / `acknowledg
 Git postcondition 只比较 Workflow 前后发生变化的路径，已有且未变化的无关 dirty path 不阻塞；异常只报告并 blocked，不执行 add/commit/stash/reset/restore/clean。`state.json` 写入失败使对外结果降级 failed/blocked——不能继续通知 completed。
 
 ### 5.3 通知与投递
+
+The completion contract carries an optional `result_preview: { text, complete }`.
+`RunCompletion::project` constructs it from the script return value after execution
+settles. Serialization is bounded to 8192 UTF-8 bytes; externalized `${label}` values
+are restored only from regular output files under this run. Truncation or a missing,
+unsafe, or unreadable reference sets `complete=false`; partial text need not be valid
+JSON. No second unbounded result is retained. Existing results without this field
+remain readable. `background_result()` and the host notification share the same
+projection, including concrete errors when execution completed but delivery is blocked.
+A complete preview can close the reporting loop if it contains the required evidence;
+it is script output, not an engine acceptance verdict. Otherwise consumers retrieve
+saved aggregate evidence instead of restarting finished agents.
+
 
 `RunCompletion::project` 结算外部执行证据后写入 registry 完成 outbox，并发出仅供唤醒的内部通知：
 
@@ -349,3 +383,18 @@ Git postcondition 只比较 Workflow 前后发生变化的路径，已有且未�
 - **关闭**：v5 能力名 `"workflow": false`（旧 `"WorkflowMiddleware"` 键保留为确定性映射 adapter，M4 删除）进会话关闭集；单出口不 spawn 独立 workflow 实例、关闭时不建桥接且宿主消费者不启动；legacy 六实例回滚下命中关闭集时不 spawn 该实例（`ARC-CAPABILITY-CLOSURE-001`）。
 - **模型手册**：builtin skill `ultracode`（`mcp-packages/workspace/src/resources/builtin/skills/ultracode/SKILL.md`，宿主注册表经 `include_str!` 引用），按需加载，不常驻系统提示词；复杂全生命周期交付由 `ultra-adlc` skill 与 [Ultra-ADLC 设计](ultra-adlc.md)约束。
 - **入口命令**：`/workflows` 打开面板（`PanelKind::Workflow`）；ACP 方法名（`workflow/list_runs`、`workflow/kill_run`、`workflow/kill_agent`、`workflow/resume`）与 TUI 交互保持不变。
+
+### Multitask and Ultracode routing
+
+The English built-in policies use one independently deliverable business outcome as
+the task boundary. One role uses one fresh Agent; ordered multi-agent stages within
+one task use one Ultracode run. Optional planning and independent verification follow
+actual risk and requested acceptance, not a fixed role count. Main owns task contracts;
+the script owns its stage dependencies and aggregates results without a reporting agent.
+Clarification alone does not cancel valid work. Conflicting writes and acceptance checks
+wait for relevant resource settlement; stable-input planning and independent tasks can
+continue. The policies use actual task/run/artifact identities and distinguish execution,
+acceptance, settlement and external delivery. They do not implement durable recovery,
+worktree isolation or transport idempotency. No database migration is introduced.
+
+子作用域关闭失败通过 `scopeCloseIncomplete` 独立传播，不覆盖首个失败的 reason/detail；运行时发布结果前据此 fence 受影响 run。正式 assignment report 从本会话 own transcript 条目读取，不受 compact 的 model-visible 标记影响；没有正式报告时仍回退到最新可见 assistant 消息。
