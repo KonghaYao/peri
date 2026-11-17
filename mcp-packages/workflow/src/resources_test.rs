@@ -4,7 +4,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use peri_acp_types::workflow::{AgentExecutor, AgentRunParams, AgentRunResult, Usage};
+use peri_acp_types::workflow::{
+    AgentExecutor, AgentRunParams, AgentRunResult, Usage, WorkflowOutcome,
+};
 use peri_workflow::protocol::ProgressEvent;
 use peri_workflow::runtime::{SettleAdmission, WorkflowRuntime, WorkflowTaskState};
 
@@ -66,7 +68,7 @@ fn completed_workflow(run_id: &str) -> peri_workflow::registry::WorkflowTaskResu
         acceptance_status: Default::default(),
         post_processing_status: Default::default(),
         delivery_status: Default::default(),
-        outcome: Default::default(),
+        outcome: WorkflowOutcome::Completed,
         state_artifact_exists: false,
         duration_ms: 1,
         agent_count: 0,

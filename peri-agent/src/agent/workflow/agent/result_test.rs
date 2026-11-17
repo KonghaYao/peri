@@ -4,6 +4,7 @@ use crate::agent::workflow::agent::observation::WorkflowObservation;
 use crate::session::FrozenContext;
 use crate::session::Session;
 use peri_acp_types::command::PromptStopReason;
+use peri_acp_types::event::ExecutorEvent;
 use peri_acp_types::session::ExecutionFailure;
 use peri_acp_types::session::TurnTelemetryOutcome;
 use peri_acp_types::thread::AgentStatus;
@@ -63,6 +64,7 @@ fn completed_structured_output_validates_without_changing_wire_or_actual_usage()
         output.into(),
         RunStats {
             output_tokens: 37,
+            usage_reported: true,
             last_model: Some("provider-model".into()),
             tool_count: 2,
         },
@@ -259,9 +261,8 @@ fn run_projection_keeps_forwarder_failure_priority_and_cancel_terminal() {
         "dead attempt must carry measured duration"
     );
     assert_eq!(
-        *token_count,
-        Some(0),
-        "observed token count must survive death"
+        *token_count, None,
+        "a dead attempt without provider usage must not claim a measured zero"
     );
     assert!(
         matches!(failed.telemetry_outcome(), TurnTelemetryOutcome::Failed { failure }
@@ -294,8 +295,8 @@ fn run_projection_keeps_forwarder_failure_priority_and_cancel_terminal() {
         duration_ms.is_some(),
         "interrupted dead attempt must carry duration"
     );
-    assert_eq!(*token_count, Some(0));
-    assert_eq!(interrupted.result.token_count(), Some(0));
+    assert_eq!(*token_count, None);
+    assert_eq!(interrupted.result.token_count(), None);
     let completed = crate::agent::workflow::agent::result::project_run_result(
         LoopResult::Completed,
         Ok(()),
@@ -310,6 +311,36 @@ fn run_projection_keeps_forwarder_failure_priority_and_cancel_terminal() {
         TurnTelemetryOutcome::Completed
     ));
     assert_eq!(completed.result.token_count(), Some(0));
+}
+
+#[test]
+fn dead_result_reports_tokens_only_when_usage_was_reported() {
+    let session = Session::new(Arc::from("/unused"), FrozenContext::builder().build(), None);
+    let params = params(None);
+    let observation = WorkflowObservation::new(&params, None, None);
+    observation.handler().on_event(ExecutorEvent::LlmCallEnd {
+        step: 1,
+        model: "provider".into(),
+        output: String::new(),
+        usage: Some(peri_model::TokenUsage::new(10, 0)),
+        stop_reason: None,
+        request_id: None,
+        source_agent_id: None,
+    });
+    let interrupted = crate::agent::workflow::agent::result::project_run_result(
+        LoopResult::Interrupted,
+        Ok(()),
+        &session,
+        &observation,
+        &params,
+        "effective",
+        Instant::now(),
+    );
+    assert_eq!(
+        interrupted.result.token_count(),
+        Some(0),
+        "a reported zero is a measurement and must survive death"
+    );
 }
 
 /// child 终态与 sync/background 生命周期约定一致：完成 Done、取消 Cancelled、

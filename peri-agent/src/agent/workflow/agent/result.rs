@@ -162,7 +162,7 @@ fn dead_result(
         reason: Some(reason.into()),
         detail,
         duration_ms: Some(started_at.elapsed().as_millis() as u64),
-        token_count: stats.map(|stats| stats.output_tokens),
+        token_count: stats.and_then(|stats| stats.reported_output_tokens()),
     }
 }
 

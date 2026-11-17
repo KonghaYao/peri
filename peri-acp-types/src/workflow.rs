@@ -369,6 +369,19 @@ impl WorkflowOutcome {
     }
 }
 
+/// 旧 payload 没有 `outcome` 时的派生：沿用当时的成功口径
+/// （`status == completed && delivery != blocked`），acceptance 不参与，
+/// 避免回填一个旧数据从未携带的裁决。
+fn legacy_outcome(status: WorkflowRunStatus, delivery: DeliveryStatus) -> WorkflowOutcome {
+    let execution = match status {
+        WorkflowRunStatus::Running => ExecutionStatus::Running,
+        WorkflowRunStatus::Completed => ExecutionStatus::Completed,
+        WorkflowRunStatus::Failed => ExecutionStatus::Failed,
+        WorkflowRunStatus::Killed => ExecutionStatus::Killed,
+    };
+    WorkflowOutcome::project(execution, AcceptanceStatus::Unknown, delivery)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkflowWriteIntent {
@@ -442,6 +455,7 @@ impl WorkflowRunStatus {
 
 /// Workflow 完成后通过 broadcast channel 推送的结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "WorkflowTaskResultWire")]
 pub struct WorkflowTaskResult {
     pub run_id: String,
     pub workflow_name: String,
@@ -456,7 +470,8 @@ pub struct WorkflowTaskResult {
     #[serde(default)]
     pub delivery_status: DeliveryStatus,
     /// 引擎级三态（`completed` / `blocked` / `unknown`）；acceptance 仍是独立事实。
-    #[serde(default)]
+    /// 旧 payload 缺字段时由 `status + delivery_status` 派生，显式 `unknown` 保持
+    /// `unknown`（反序列化经 `WorkflowTaskResultWire` 区分两种输入）。
     pub outcome: WorkflowOutcome,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub state_artifact_exists: bool,
@@ -469,6 +484,63 @@ pub struct WorkflowTaskResult {
     pub phase_summaries: Vec<PhaseSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attempts: Vec<WorkflowAttempt>,
+}
+
+/// `WorkflowTaskResult` 的反序列化影子：`outcome` 用 `Option` 保留「字段缺失」
+/// 与「显式 `unknown`」的区别，其余字段保持 wire 形状；新增 wire 字段需与公开
+/// 结构同步。
+#[derive(Deserialize)]
+struct WorkflowTaskResultWire {
+    run_id: String,
+    workflow_name: String,
+    success: bool,
+    status: WorkflowRunStatus,
+    #[serde(default)]
+    execution_status: ExecutionStatus,
+    #[serde(default)]
+    acceptance_status: AcceptanceStatus,
+    #[serde(default)]
+    post_processing_status: PostProcessingStatus,
+    #[serde(default)]
+    delivery_status: DeliveryStatus,
+    #[serde(default)]
+    outcome: Option<WorkflowOutcome>,
+    #[serde(default)]
+    state_artifact_exists: bool,
+    duration_ms: u64,
+    agent_count: usize,
+    tool_calls_count: usize,
+    error: Option<String>,
+    #[serde(default)]
+    phase_summaries: Vec<PhaseSummary>,
+    #[serde(default)]
+    attempts: Vec<WorkflowAttempt>,
+}
+
+impl From<WorkflowTaskResultWire> for WorkflowTaskResult {
+    fn from(wire: WorkflowTaskResultWire) -> Self {
+        let outcome = wire
+            .outcome
+            .unwrap_or_else(|| legacy_outcome(wire.status, wire.delivery_status));
+        Self {
+            run_id: wire.run_id,
+            workflow_name: wire.workflow_name,
+            success: wire.success,
+            status: wire.status,
+            execution_status: wire.execution_status,
+            acceptance_status: wire.acceptance_status,
+            post_processing_status: wire.post_processing_status,
+            delivery_status: wire.delivery_status,
+            outcome,
+            state_artifact_exists: wire.state_artifact_exists,
+            duration_ms: wire.duration_ms,
+            agent_count: wire.agent_count,
+            tool_calls_count: wire.tool_calls_count,
+            error: wire.error,
+            phase_summaries: wire.phase_summaries,
+            attempts: wire.attempts,
+        }
+    }
 }
 
 fn escape_reminder_text(input: &str) -> String {
@@ -723,3 +795,7 @@ pub trait AgentExecutor: Send + Sync {
     /// 执行单个 workflow agent，返回 AgentRunResult
     async fn execute(&self, params: AgentRunParams) -> AgentRunResult;
 }
+
+#[cfg(test)]
+#[path = "workflow_test.rs"]
+mod tests;

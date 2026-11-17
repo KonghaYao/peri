@@ -412,7 +412,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
                     reason: Some("execution-blocked".into()),
                     detail: Some(detail),
                     duration_ms: Some(started_at.elapsed().as_millis() as u64),
-                    token_count: Some(observation.snapshot().output_tokens),
+                    token_count: observation.snapshot().reported_output_tokens(),
                 };
             }
         };
@@ -554,7 +554,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
                     reason: Some("execution-blocked".into()),
                     detail: Some(detail),
                     duration_ms: Some(started_at.elapsed().as_millis() as u64),
-                    token_count: Some(observation.snapshot().output_tokens),
+                    token_count: observation.snapshot().reported_output_tokens(),
                 };
             }
         };
@@ -637,7 +637,7 @@ pub(super) fn initial_prompt_enqueue_failure(
         reason: Some("initial-prompt-enqueue-failed".into()),
         detail: Some(detail),
         duration_ms: Some(started_at.elapsed().as_millis() as u64),
-        token_count: Some(observation.snapshot().output_tokens),
+        token_count: observation.snapshot().reported_output_tokens(),
     }
 }
 
