@@ -342,6 +342,15 @@ Rust 单测与 E2E 分离：E2E 套件与 fixture 在公开仓 `KonghaYao/peri-e
 `.github/peri-e2e.rev` 固定其 40 位 commit；CI 校验 pin 格式后 checkout 该 commit 运行。
 新增或修改 E2E 命令时改新仓 README/scripts，并同步本节；不要写逐文件手跑清单。
 
+两个仓各有一个方向相反的 pin，更新顺序固定：
+
+1. Peri 源码变更先落到 Peri commit 并 push（可以是待合并 PR 的 head）。
+2. 在 `peri-e2e` 把 `.github/peri-rev` 更新到该 Peri commit，运行 `e2e:replay:world-sync`，
+   提交 world leaf 与 `world/seal.json`，通过 e2e CI 后合并。`peri-rev` 决定 e2e CI 构建和
+   world-check 使用的 Peri 源码，必须在 e2e CI 前更新。
+3. 把 Peri `.github/peri-e2e.rev` bump 到第 2 步的 e2e 合并 commit；Peri CI 用它 checkout
+   套件，并用当前 Peri 检出作为 world-check 的源码根。
+
 首次使用把新仓 checkout 到 Peri 同级目录（CI 为 `$GITHUB_WORKSPACE/peri-e2e`）：
 
 ```bash
@@ -351,12 +360,13 @@ npm ci --prefix ../peri-e2e
 ```
 
 ```bash
-npm --prefix ../peri-e2e run e2e:replay:check      # 录放 runner 与业务场景类型检查
-npm --prefix ../peri-e2e run e2e:replay:unit       # 录放代理与动态绑定契约
-npm --prefix ../peri-e2e run e2e:replay:verify     # fixture 完整性（cassette/stub/seal）
+npm --prefix ../peri-e2e run e2e:replay:check          # 录放 runner 与业务场景类型检查
+npm --prefix ../peri-e2e run e2e:replay:unit           # 录放代理与动态绑定契约
+npm --prefix ../peri-e2e run e2e:replay:verify         # fixture 完整性，source-anchored（CI 入口）
+npm --prefix ../peri-e2e run e2e:replay:verify:strict  # 本地全等核对：任何 drift 都失败
 PERI_SOURCE_ROOT="$PWD" npm --prefix ../peri-e2e run e2e:replay:world-check
 PERI_BINARY="$PWD/target/debug/peri" npm --prefix ../peri-e2e run e2e:replay
-npm --prefix ../peri-e2e run e2e:replay:record     # 显式重录，仅本地；CI 拒绝 record 模式
+npm --prefix ../peri-e2e run e2e:replay:record         # 显式重录，仅本地；CI 拒绝 record 模式
 ```
 
 `PERI_BINARY` 是已构建 `peri` 的绝对路径；`PERI_SOURCE_ROOT` 指向 Peri 检出，world-check 用它
@@ -364,10 +374,32 @@ npm --prefix ../peri-e2e run e2e:replay:record     # 显式重录，仅本地；
 在线模型。fixture 的 seed/configure 约束、每场景报告与终态断言以新仓 README 为准，报告落在新仓
 `results/replay-v2/`。
 
-升级契约：改 world 映射 leaf（skills、Agent description/schema、compact summary）时，在
-`peri-e2e` 运行 `e2e:replay:world-sync` 并提交，再 bump `.github/peri-e2e.rev`；改未映射 leaf
-（如 `block1.prefix`、单条消息）须重录受影响场景或受控 re-anchor，`verify` 归零后再 bump pin。
-不得为过门禁修改 fixture 而不更新 pin。
+world 映射的唯一事实源是 `peri-e2e/scripts/replay-world-sources.mjs`：`sys.block0.main`
+（`01_intro`–`06_tone_style` 组合）、`sys.skills`、`sys.compact.summary`、`sys.compact.user`
+与 `tools.Agent.*`。`sys.compact.user` 的 `{summary_target_tokens}` 按运行时目标值替换后冻结；
+`tools.Agent.*` 只有 description 与 send_only 从源同步，其余字段锚定在
+`llm-replay/world-source-templates/` 的全量模板。只改这些源文件时，world-sync 只写对应 leaf
+与 `world/seal.json`：单个非 block0 源为 1 leaf + seal，block0 固定为 2 个文件；源未变化时
+不写文件。未映射 leaf（如 `block1.prefix`、单条消息）无法由 world-sync 解释，必须重录受影响
+场景。
+
+verify 的 drift 策略：CI 入口 `e2e:replay:verify` 使用 `--drift-policy=source-anchored`，
+只放行与当前 Peri 源逐字节等价的 mapped leaf drift，并在 `approvedDrift` 中列出 cassette、
+entry 与 recorded/current/source 哈希；未映射、源不等价或源定义不可用仍失败。strict 策略
+（`e2e:replay:verify:strict`）要求 worldDrift=0，仅用于本地全等核对和负例，不是 CI 门禁。
+world-check 另按 cassette seal 的 `worldRefs` 交叉校验：源等价的 mapped drift 归入
+`sourceAnchoredDrift`（不要求重录），其余归入 `unanchoredDrift` 并给出 `staleReasons`。
+
+重录注意：录制路径仍可能把 compact user prompt 写成 literal 而非 `sys.compact.user` ref。
+重录 U06 后在 `peri-e2e` 仓运行
+`PERI_SOURCE_ROOT=<peri> node scripts/migrate-compact-user-ref.mjs`（可先加 `--dry-run`）
+迁成 ref；脚本要求 raw/canonical/response 字节等价。禁止手改 cassette JSON 或 seal 绕过校验。
+
+升级契约：改 world 映射源文件时，按上面的顺序运行 `e2e:replay:world-sync` 并提交，再 bump
+`.github/peri-e2e.rev`；source-anchored verify 负责证明 mapped drift 与源等价，不需要把
+worldDrift 压到 0。通用 re-anchor 脚本已被 ref + source-anchored 取代；`reanchor-world.mjs`
+仍是 #374 的一次性迁移脚本，不得用于日常同步。录放 fixture 的任何改动都必须进入 e2e commit
+并随 pin 一起审查。
 
 自主委派评测需要真实模型，默认跳过：
 `PERI_E2E_AUTONOMY=1 npm --prefix ../peri-e2e run e2e -- --file tests/subagent/autonomous-delegation.test.ts --serial --retry 0`。

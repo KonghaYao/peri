@@ -310,6 +310,13 @@ jobs:
             - name: Type-check replay harness
               run: npm --prefix peri-e2e run e2e:replay:check
 
+            # world seal 对应本 Peri 检出：源码已变但未同步 world / bump pin 时先于单测失败。
+            # 输出含 staleReasons 与 leaf id；cassette/entry/哈希明细由后续 verify 给出。
+            - name: Check world snapshot against this checkout
+              env:
+                  PERI_SOURCE_ROOT: ${{ github.workspace }}
+              run: npm --prefix peri-e2e run e2e:replay:world-check
+
             - name: Run replay unit tests
               env:
                   PERI_SOURCE_ROOT: ${{ github.workspace }}
@@ -319,12 +326,6 @@ jobs:
               env:
                   PERI_SOURCE_ROOT: ${{ github.workspace }}
               run: npm --prefix peri-e2e run e2e:replay:verify
-
-            # world seal 对应本 Peri 检出：未映射 leaf 变动但未 bump pin 时在此失败。
-            - name: Check world snapshot against this checkout
-              env:
-                  PERI_SOURCE_ROOT: ${{ github.workspace }}
-              run: npm --prefix peri-e2e run e2e:replay:world-check
 
             # 场景被 skip 时 Vitest 仍以 0 退出：回放前后各核对一次 catalog，
             # 并清空旧报告，避免历史结果满足门禁。
