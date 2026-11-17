@@ -1303,3 +1303,97 @@ async fn load_session_waits_behind_a_blocked_queue() {
     consumer.abort();
     client.close();
 }
+
+/// load 永不返回时，串行 dispatcher 不能被它永久占住。
+///
+/// 超时按可恢复错误结算（服务端 load 不取消），后续 body 与窗口请求仍能上线。
+#[tokio::test(start_paused = true)]
+#[serial]
+async fn load_timeout_releases_the_serial_dispatcher() {
+    let _guard = atomics_guard();
+    reset_request_key_for_test();
+    let limits = HistoryLimits::default();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
+    let (client, _, _) = crate::acp_client::client::AcpTuiClient::new(transport);
+    client.install_history_v2_for_test(true, true, limits.clone());
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    *atoms::HISTORY_V2_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tx);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let consumer = spawn_history_v2_consumer(client.clone(), rx, shutdown.clone());
+
+    let (load_key, load_submission) = crate::kit::history_v2::outbound::submit_load(|request_key| {
+        json!({
+            "sessionId": "s1",
+            "_meta": {
+                peri_acp_types::history_v2::HISTORY_META_KEY:
+                    crate::kit::history_v2::initial::initial_request_value(&limits, request_key),
+            },
+        })
+    })
+    .expect("scheduler installed");
+    let load_receiver = match load_submission {
+        crate::kit::history_v2::outbound::Submit::Queued(receiver) => receiver,
+        crate::kit::history_v2::outbound::Submit::Direct(_) => panic!("load must be queued"),
+    };
+    let (_id, method, params) = next_wire_request(&server).await;
+    assert_eq!(method, "session/load");
+    assert_eq!(
+        wire_key(&params["_meta"]["peri.history"]["requestKey"]),
+        load_key.get()
+    );
+
+    // 服务端永不应答；paused 时钟越过 FETCH_TIMEOUT 后必须结算为超时错误。
+    let error = load_receiver
+        .await
+        .expect("dispatcher must reply")
+        .expect_err("a load that never returns must time out");
+    assert_eq!(error.code, -32603);
+    assert!(error.message.contains("timed out"), "{error:?}");
+
+    // body 仍能被调度：dispatcher 已从超时的 load 中恢复。
+    let binding = crate::kit::history_detail_binding::HistoryV2BodyBinding {
+        session_id: "s1".into(),
+        window_id: "w0".into(),
+        snapshot_token: "snap-0".into(),
+        read_ticket: "ticket-0".into(),
+        source: peri_acp_types::history_v2::HistorySource::Own,
+        entry_id: "s1:e2".into(),
+        sub_item_id: "s1:e2:0".into(),
+        body_ref: "body-1".into(),
+        representation: peri_acp_types::history_v2::HistoryRepresentation::DisplayText,
+        media_type: "text/plain; charset=utf-8".into(),
+    };
+    let body_receiver = match submit_body(&binding, 0, 128).expect("scheduler installed") {
+        crate::kit::history_v2::outbound::Submit::Queued(receiver) => receiver,
+        crate::kit::history_v2::outbound::Submit::Direct(_) => panic!("body must be queued"),
+    };
+    let (id, method, params) = next_wire_request(&server).await;
+    assert_eq!(method, peri_acp_types::history_v2::HISTORY_METHOD);
+    assert_eq!(params["action"], json!("body"));
+    respond_wire(&server, id, json!({})).await;
+    assert!(body_receiver.await.unwrap().is_ok());
+
+    // 后续窗口请求同样不被阻塞。
+    let _close_key = match crate::kit::history_v2::outbound::enqueue_window(|request_key| {
+        Some(HistoryV2ConsumerRequest::Close {
+            session_id: "s1".into(),
+            request_key,
+            window_id: "w0".into(),
+            snapshot_token: "snap-0".into(),
+            read_ticket: "ticket-0".into(),
+        })
+    }) {
+        crate::kit::history_v2::outbound::WindowEnqueue::Sent(key) => key,
+        other => panic!("close request must enqueue: {other:?}"),
+    };
+    let (id, method, params) = next_wire_request(&server).await;
+    assert_eq!(method, peri_acp_types::history_v2::HISTORY_METHOD);
+    assert_eq!(params["action"], json!("close"));
+    respond_wire(&server, id, json!({})).await;
+
+    shutdown.cancel();
+    consumer.abort();
+    client.close();
+}

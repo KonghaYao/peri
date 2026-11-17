@@ -782,7 +782,18 @@ pub(crate) fn spawn_history_v2_consumer(
             match command {
                 OutboundCommand::Load { params, reply } => {
                     // 生命周期仍由 session.rs 负责；调度器只保证发送顺序。
-                    let result = client.send_session_load(params).await;
+                    // 串行 dispatcher 不能被一次永不返回的 load 永久占住：超时按可恢复
+                    // 错误交给上层恢复旧窗口，服务端 load 本身不取消。
+                    let result =
+                        match peri_time::timeout(FETCH_TIMEOUT, client.send_session_load(params))
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => Err(peri_acp::transport::types::AcpError::new(
+                                -32603,
+                                "history load request timed out",
+                            )),
+                        };
                     let _ = reply.send(result);
                 }
                 OutboundCommand::Body { params, reply } => {
