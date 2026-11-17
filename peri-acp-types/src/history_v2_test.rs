@@ -577,6 +577,52 @@ fn subitem_kinds_round_trip() {
 }
 
 #[test]
+fn tool_call_input_null_is_preserved_and_missing_input_rejected() {
+    let mut value = serde_json::to_value(window_page()).unwrap();
+    value["items"] = json!([{
+        "entryId": "e42",
+        "source": {"kind": "own"},
+        "contentVersion": "1",
+        "durability": {"state": "sealed", "origin": "live", "finalItemSeq": "42"},
+        "order": {"region": "own", "ordinal": "42"},
+        "subItems": [{
+            "kind": "toolCall",
+            "subItemId": "e42:0",
+            "invocationKey": "s1:call-1",
+            "title": "Bash",
+            "status": "running",
+            "input": null,
+        }],
+    }]);
+
+    let page: HistoryWindowPage = serde_json::from_value(value.clone()).unwrap();
+    let item = &page.items[0].sub_items[0];
+    assert!(
+        matches!(item, HistorySubItem::ToolCall(call) if call.input == Some(Value::Null)),
+        "显式 JSON null 不能再折叠成字段缺失"
+    );
+    item.validate_bounded(&limits())
+        .expect("input: null 是合法的内联内容");
+
+    // round-trip 仍写出显式 null，并保持 Some(Null)。
+    let encoded = serde_json::to_value(&page).unwrap();
+    assert!(encoded["items"][0]["subItems"][0]["input"].is_null());
+    let back: HistoryWindowPage = serde_json::from_value(encoded).unwrap();
+    assert_eq!(back, page);
+
+    // 字段缺失仍是 None；input/body 恰有一个的契约会拒绝该子项。
+    let mut missing = value;
+    missing["items"][0]["subItems"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("input");
+    let page: HistoryWindowPage = serde_json::from_value(missing).unwrap();
+    let item = &page.items[0].sub_items[0];
+    assert!(matches!(item, HistorySubItem::ToolCall(call) if call.input.is_none()));
+    assert!(item.validate_bounded(&limits()).is_err());
+}
+
+#[test]
 fn text_subitem_requires_exactly_one_payload() {
     let both = HistorySubItem::Text(HistoryTextSubItem {
         sub_item_id: "text-0".to_owned(),

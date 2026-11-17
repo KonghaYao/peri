@@ -3,7 +3,7 @@
 //! 页面是逻辑顺序上的一页；coverage 描述已消费半开区间，而不是由 items 首尾推导。
 //! 条目身份由存储/投影稳定产生；客户端只做类型层校验，不推断时间戳或连续行号。
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use super::body::HistoryBodyDescriptor;
@@ -178,10 +178,26 @@ pub struct HistoryToolCallSubItem {
     pub invocation_key: String,
     pub title: String,
     pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_json_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub input: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<HistoryBodyDescriptor>,
+}
+
+/// 区分字段缺失与显式 JSON null。
+///
+/// 默认的 `Option<Value>` 反序列化会把 `null` 折叠成 `None`，而投影会用
+/// `"input": null` 表达「调用参数就是 JSON null」；契约要求 input/body 恰有一个，
+/// 显式 null 不能被当成缺失而整页拒收。
+fn deserialize_optional_json_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
 }
 
 impl HistoryToolCallSubItem {
