@@ -1,8 +1,8 @@
 //! History V2 测试共用夹具：真实 SQLite 门面、真实 `ServerLoop` 与传输。
 //!
-//! 旧 V1 分页测试删除后，V2 的 adapter / initial / wire 用例仍需要同一份
-//! 已注册会话与连接夹具；本模块是它们的父模块，子模块经 `use super::*`
-//! 复用夹具与 `requests_test` 的装配 helper。
+//! V2 的 adapter / initial / wire 用例复用既有夹具：同一份已注册会话与连接。
+//! 本模块是它们的父模块，子模块经 `use super::*` 复用夹具与 `requests_test`
+//! 的装配 helper。
 
 use super::*;
 use crate::transport::AcpTransport;
