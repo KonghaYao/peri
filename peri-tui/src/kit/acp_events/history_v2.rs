@@ -140,13 +140,25 @@ fn merge_live_tail(
     let mut cursor = window_start;
     let mut duplicate = 0;
     for unit in &live {
-        let Some(offset) = page[cursor..]
+        let windowed = page[cursor..]
             .iter()
             .position(|candidate| live_unit_matches(candidate, unit))
-        else {
+            .map(|offset| cursor + offset);
+        // 稳定身份不受尾部窗口限制：窗口只约束可能误判的指纹匹配，而
+        // messageId/toolCallId 全局唯一。整页页尾都是同一批单元时（> 窗口），
+        // 只回扫窗口会一个都裁不掉。
+        let matched = windowed.or_else(|| {
+            if !has_stable_identity(unit) {
+                return None;
+            }
+            page.iter()
+                .position(|candidate| live_unit_matches(candidate, unit))
+        });
+        let Some(index) = matched else {
             break;
         };
-        cursor += offset + 1;
+        // cursor 只增不减：整页回扫命中窗口起点之前时，不重复消费更早单元。
+        cursor = cursor.max(index + 1);
         duplicate += 1;
     }
     live.drain(..duplicate);
@@ -193,6 +205,22 @@ fn live_unit_matches(page: &TuiRenderUnit, live: &TuiRenderUnit) -> bool {
 
 fn same_identity(page: Option<&str>, live: Option<&str>) -> bool {
     matches!((page, live), (Some(page), Some(live)) if !live.is_empty() && page == live)
+}
+
+/// 是否有可跨整页唯一定位同一单元的稳定身份；指纹匹配不得越过尾部窗口。
+fn has_stable_identity(unit: &TuiRenderUnit) -> bool {
+    match unit {
+        TuiRenderUnit::TuiUserBubble(bubble) => bubble
+            .message_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty()),
+        TuiRenderUnit::TuiAssistantBubble(bubble) => bubble
+            .message_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty()),
+        TuiRenderUnit::TuiToolCard(card) => !card.tool_id.is_empty(),
+        _ => false,
+    }
 }
 
 /// 页面卡片是否覆盖 live 卡片的输出与完成态。
@@ -727,6 +755,30 @@ mod tests {
             tool_calls_count: 0,
             content_hash: 0,
         })
+    }
+
+    #[test]
+    fn stable_identity_matches_beyond_the_tail_window() {
+        let page: Vec<TuiRenderUnit> = (0..13)
+            .map(|index| user(&format!("消息{index}"), Some(&format!("msg-{index}"))))
+            .collect();
+        let live = page.clone();
+        assert!(
+            merge_live_tail(&page, live, false).is_empty(),
+            "页尾全部是同一批稳定身份时必须整页回扫，而不是只裁窗口内的部分"
+        );
+    }
+
+    #[test]
+    fn fingerprint_matching_stays_within_the_tail_window() {
+        let mut page = vec![user("继续", None)];
+        page.extend((0..12).map(|index| user(&format!("其它{index}"), None)));
+        let live = vec![user("继续", None)];
+        assert_eq!(
+            merge_live_tail(&page, live, false).len(),
+            1,
+            "无稳定身份的指纹匹配仍受尾部窗口约束"
+        );
     }
 
     #[test]
