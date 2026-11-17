@@ -450,3 +450,76 @@ fn drain_updates(
     }
     seen
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn unsettled_child_scope_fences_real_engine_retries_and_forces_failed_completion() {
+    if std::env::var_os("PERI_WORKFLOW_ARTIFACT_DIR").is_none() {
+        eprintln!("Set PERI_WORKFLOW_ARTIFACT_DIR to exercise the real engine scope fence");
+        return;
+    }
+    use crate::runtime::tasks::{ClaimOutcome, WorkflowTaskState};
+    use peri_acp_types::workflow::{DeliveryStatus, WorkflowRunStatus};
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, mut completions) = broadcast::channel(8);
+    let runtime = Arc::new(WorkflowRuntime::new(
+        Arc::new(NullExecutor),
+        dir.path().to_str().unwrap(),
+        tx,
+        None,
+    ));
+    let mut updates = runtime.subscribe();
+    let mut input = minimal_input();
+    // Even a script that swallows aborts must not acquire another assignment or
+    // turn a host scope failure back into a successful completion.
+    input.script = "export const meta = { name: 'scope-fence', description: 'scope-close retry regression' }; try { await agent('first'); } catch (_) {} try { await agent('must not execute'); } catch (_) {} return { status: 'completed' };".into();
+    let launching = Arc::clone(&runtime);
+    let launch = tokio::spawn(async move { launching.start_prepared_run(input).await });
+    let first = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(task) = runtime.tasks().active().first().cloned() {
+                break task;
+            }
+            let _ = updates.recv().await;
+        }
+    })
+    .await
+    .expect("the real engine must publish its first assignment");
+    assert!(matches!(
+        runtime.tasks().mark_executing(
+            &first.run_id,
+            &first.task_id,
+            tokio_util::sync::CancellationToken::new()
+        ),
+        ClaimOutcome::Claimed(_)
+    ));
+    let detail = "Scope close incomplete: background writer has not settled";
+    let _ = runtime.settle_agent_task(
+        &first.run_id,
+        &first.task_id,
+        WorkflowTaskState::Failed,
+        Some(AgentRunResult::Dead {
+            scope_close_incomplete: false,
+            reason: Some("scope-close-incomplete".into()),
+            detail: Some(detail.into()),
+            duration_ms: None,
+            token_count: None,
+        }),
+        Some(detail.into()),
+    );
+    let completion = tokio::time::timeout(std::time::Duration::from_secs(10), completions.recv())
+        .await
+        .expect("a fenced run must terminate")
+        .unwrap();
+    assert_eq!(completion.status, WorkflowRunStatus::Failed);
+    assert_eq!(completion.delivery_status, DeliveryStatus::Blocked);
+    assert_eq!(completion.error.as_deref(), Some(detail));
+    assert!(completion.to_notification().contains(detail));
+    let records = runtime.tasks().snapshot();
+    assert!(records
+        .iter()
+        .filter(|task| task.task_id != first.task_id)
+        .all(|task| task.state == WorkflowTaskState::Cancelled));
+    assert!(runtime.tasks().active().is_empty());
+    let _ = launch.await.unwrap();
+}

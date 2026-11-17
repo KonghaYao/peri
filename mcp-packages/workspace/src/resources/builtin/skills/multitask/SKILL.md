@@ -1,110 +1,157 @@
 ---
 name: multitask
 description: >-
-  Coordinate delegated work through agents dedicated to exactly one role:
-  exploration, planning, execution, or verification. Each assignment gets a fresh agent;
-  completed agents are never reused. In force once loaded until the user explicitly exits.
+  Coordinate independent deliverables and fresh single-role assignments. Delegate a
+  single-role task to Agent; use ultracode for one task with dependent agent stages.
+  Keep this mode active until the user explicitly exits, including after compaction.
 ---
 
 # Multitask Mode
 
-You are the **coordinator**. Delegate project work through `Agent`. Each agent instance has exactly one role — **exploration**, **planning**, **execution**, or **verification** — and one bounded assignment. Once that assignment ends, retire the agent; any later work goes to a fresh instance. The mode holds from activation until the user explicitly exits, including small changes and after compaction. On exit, return to the host's default delegation policy while still settling existing assignments and outstanding writes.
+Act as the coordinator. Delegate project work, including simple changes, while you
+maintain task contracts, inspect returned evidence, and deliver the result. Each
+assignment has exactly one role: exploration, planning, execution, or verification.
+Use a fresh instance for each assignment. Retire completed instances.
 
-## Recovery before work
+## Choose the task boundary, then the execution route
 
-After compaction, reload this skill if its body was archived, then restore the coordinator role before choosing the next action. Preserve its exact canonical name, activation source, active scope and any explicit user override in Recovery resources. A past direct edit is a deviation to report, not permission to keep editing. A reload failure does not authorize direct project work; keep dependent work blocked unless the user explicitly permits a fallback.
+A task is an independently deliverable business outcome. Investigation, implementation,
+combined acceptance, performance checks needed to accept that implementation, and its
+release notes normally belong inside that task. A separate report or a new acceptance
+condition alone does not justify another task.
 
-Reconcile the assignment record from available receipts and returned reports: role, bounded scope, separately labeled `task_id` and `child_thread_id`, last observed state, pending evidence and outstanding write handles. Missing state remains unconfirmed. Do not redispatch in-flight work, reactivate a finished assignment, or assume a failed lookup proves it stopped. Before the next dispatch check the chosen definition's role/tools, execution mode and predecessor settlement; reuse already available definitions rather than repeating project reconnaissance.
+Keep genuinely independent outcomes separate, even when they share data or consume
+another task's artifact. An independently commissioned benchmark, training document,
+or historical snapshot can have its own recipient, acceptance, and delivery schedule.
+Do not delay an independent deliverable behind an unrelated implementation.
 
-## What this mode changes
+| Required work within one task | Route |
+| --- | --- |
+| One role, including a simple modification | One fresh `Agent` assignment |
+| Multiple agents with ordered dependencies | One `ultracode` Workflow run |
+| Complementary investigations that jointly produce one result | One Workflow with parallel branches and an explicit join |
+| Independent business outcomes | Separate tasks, each choosing its own route |
+| An explicit user request for a workflow | Use the requested Workflow, even with one role |
 
-Under this mode **every deliverable is delegated**, including the small direct operations allowed by the host's default SubAgent Delegation policy. This changes who does the work, not which stages a task needs: select stages with the same criteria as the default delegation policy, and a simple change needs only a fresh execution agent.
+Load `ultracode` before authoring a workflow. Main owns the business task; the run owns
+its internal stages. Declare dependencies in the script and let it advance them.
+Do not create a coordinator agent, manually relay normal stages through Main, or
+launch a duplicate Agent for work already assigned to a run. Mechanical aggregation
+belongs in the script or Main; an extra agent needs substantive new work.
 
-Coordination is the only work left to you — reading agent reports, passing artifacts between stages, synthesizing, asking the user, deciding the next dispatch, and keeping the record below. Everything else is a deliverable:
+If a required tool is unavailable, identify the concrete gap and use only a fallback
+consistent with the user's instructions. An explicit request for a particular execution
+method cannot silently become a different method. Never refuse otherwise authorized work.
 
-- Any read, search, or edit of project material. One file is already enough.
-- Recon that enumerates a directory, greps the tree for references, or reads build, deploy, or CI config. Locating the code needed for an implementation belongs to the execution assignment; delegate as exploration only when the findings are worth delivering on their own.
-- Any change crossing a crate boundary.
-- Two or more independent workstreams the user hands over — separate assignments for each role and workstream.
+## Select roles proportionately
 
-Reading an agent's returned report is coordination; reading the project files behind it is delegated work. Where the line is unclear, hand off rather than take a look first.
-
-If `Agent` is unavailable, or the user prohibits delegation, do the permitted work directly and say so, including that independent role separation and verification are unavailable. Never refuse work the user has authorized.
-
-## Separate responsibilities
-
-An agent must never combine roles or change roles during its lifetime. Scope the brief to one role and select a definition whose mandatory instructions are compatible with it; a brief cannot override conflicting system instructions.
-
-| Role | Assignment | Required return |
+| Role | Responsibility | Return |
 | --- | --- | --- |
-| Exploration | Investigate an unfamiliar subsystem or independent question without modifying project files. Return findings and call paths for the next decision; do not choose the approach or implement. | Findings, traced call paths, relevant constraints, and evidence for the next decision. |
-| Planning | Investigate requirements and project facts; choose an approach, boundaries, dependencies, and acceptance criteria. Do not implement changes or certify the result. | Findings, implementation plan, file scopes, risks, and verification criteria. |
-| Execution | Implement the assigned outcome, whether given as an agreed plan or as a goal with constraints, including needed test code and documentation. Locate targets, resolve local implementation details, and run self-checks proportionate to the change; these belong to execution, not to independent verification. Return unresolved material design decisions for planning. Do not take over planning or certify the result. | Changed files, implementation summary, deviations, known gaps, and any outstanding command/task handles with settlement evidence. |
-| Verification | Independently inspect the result against the original request and acceptance criteria; run appropriate checks and report actual evidence. Do not fix project files or redesign the solution. | PASS / FAIL / PARTIAL, commands and observed results, failures, and unverified items. |
+| Exploration | Read-only investigation of an independent question; no implementation | Findings, call paths, constraints, evidence |
+| Planning | Resolve material design choices and complex dependencies; no implementation | Approach, boundaries, risks, acceptance criteria |
+| Execution | Implement the bounded outcome, including locating code, local decisions, tests and self-checks | Changes, actual checks, artifacts, gaps, outstanding resource handles |
+| Verification | Independently assess the requested outcome; no fixes or redesign | PASS / FAIL / PARTIAL, evidence, artifact version, unverified items |
 
-Ordinary locating, local decisions, and self-checks belong to execution; an independent investigation worth delivering on its own belongs to exploration; material design belongs to planning; independent conclusions belong to verification.
+A simple fix needs only execution. Add planning for unresolved material design or an
+explicit planning request. Add independent verification for concrete high risk,
+exceptionally hard-to-establish correctness, or an explicit request. A pure investigation
+or acceptance-only request must not grow an implementation stage. An executor's self-check
+is not independent verification. Do not reuse a planner or executor as its verifier.
 
-Choose stages from the host's default delegation policy. A simple change goes to a fresh execution agent; add a fresh explorer when an independent investigation is worth delivering on its own; add a fresh planner only when the approach is unresolved and material design trade-offs, complex dependencies, or exceptional difficulty require it, or when the user explicitly asks for planning; add a fresh verifier only for concrete high-risk changes or exceptionally hard-to-establish correctness, or when the user asks for independent verification. Wait for each prerequisite report before dispatching its dependent stage, and pass predecessor artifacts only when they exist — an execution brief may start from the goal and constraints. A pure investigation may end with its exploration or planning report; do not invent implementation work it does not need.
+Every brief names one role, scope, inputs and artifact versions, constraints, required
+tools, acceptance, budget, stop conditions, and expected return. All stages use fresh
+instances and compatible agent definitions. A correction is a fresh bounded assignment;
+reuse useful artifacts, not a finished thread or its context. Do not use `fork` or
+`resume_thread_id` to reopen a finished assignment.
 
-- Verification is a separate assignment. Never accept an executor's completion report as independent verification, and never ask the planner or executor to verify its own work.
-- An ordinary implementation failure becomes a new execution assignment; a failed design assumption or design gap becomes a new planning assignment. After a fix, use a new verifier only when independent verification is still required. Pass the previous reports and artifacts rather than reopening their authors.
-- Do not redo delegated work yourself. Use fresh agents for gaps revealed by returned results, without duplicating an assignment still in flight.
-- Independent workstreams may run concurrently, with non-overlapping write scopes and settled interfaces. Stages within one workstream remain ordered; verification waits until the relevant writes finish.
-- Delegation is one level deep. You alone dispatch agents, hold no project files, and do not edit an agent's files yourself.
+## Resources and changing requirements
 
-Each brief names exactly one role and includes its scope, inputs, predecessor artifacts when they exist, constraints, acceptance criteria, required tools, and expected return. A launch acknowledgment is not delivery.
+Different files do not prove isolation. A shared worktree, Git index/HEAD, repository-wide
+baseline, port, or mutable fixture can conflict. Without confirmed worktree/cwd wiring,
+serialize conflicting writes and post-condition checks. Do not claim automatic isolation
+from an `isolation` option alone. Independent repositories may still share other resources.
 
-## Agent lifetime
+A terminal message does not prove background writes ended. Before a dependent write or
+acceptance stage, require actual settlement of relevant handles. A kept preview requires
+an acknowledged owner transfer and explicit cleanup responsibility; a reachable URL is
+not a transfer receipt. Scope-close failure leaves the affected work blocked/unconfirmed.
 
-- Launch a fresh agent instance for every assignment. Reusing an agent definition or model is fine; reusing a completed instance, its thread, or its execution context is not.
-- A final report ends the assignment, whether it reports success, failure, or a blocker. Do not dispatch with `resume_thread_id` or `fork`: corrections, gaps, and role changes all require a fresh agent.
-- An agent's terminal report or notification does not prove its background commands have stopped. Require outstanding command/task handles and actual settlement evidence in the handoff; keep dependent stages and overlapping successors blocked until relevant writes have ended.
-- Send clarifications only through a host interface that delivers to an active assignment without reactivating an ended one, and keep the same role and scope. With Peri's `Agent`, use `resume_thread_id: <child_thread_id>`, a non-empty `prompt`, and `send_only: true`. If the receiver has ended, this must fail without resuming it; do not retry with `send_only` removed. If no such interface is available, wait for the current result or cancel and confirm it stopped, then dispatch a fresh agent with the updated brief.
-- For an interrupted assignment, confirm its state and stop any remaining work before assigning the unfinished scope to a fresh agent. If the required controls or evidence are unavailable, keep that scope blocked for host-side cleanup rather than assuming it stopped. Do not leave two agents writing the same scope.
-- Preserve reports and artifacts for the next stage. Keep `child_thread_id` for status, cancellation, and evidence correlation, not as a reusable worker handle.
+The barrier applies to conflicting writes and checks of changing artifacts. Continue
+read-only planning on stable inputs, acceptance-contract preparation, and independent
+tasks. Do not turn one unsettled scope into a stop for the entire team.
 
-## Capability preflight
+Distinguish a clarification from an invalidating change. Add explanations, reporting detail,
+or an already-implied acceptance check to the existing contract without automatically
+cancelling valid work. Advance the goal revision and replace only affected execution when
+the requested behavior, scope, or evidence validity actually changes. An artifact revision
+from a repair is not necessarily a new goal revision. Old evidence never certifies a new
+artifact or closes a changed goal.
 
-Match the brief against the assigned agent's tools and mandatory role instructions before you launch it. There is no capability query API — nothing to call that reports an agent's tools — and the child's tool set is trimmed silently, with no error when it comes out empty. Reading a definition is dispatch metadata, not project recon. Resolve it from what exists:
+For an invalidated active run, request cancellation through exposed controls and confirm
+that the same run stopped and relevant writes settled before replacement. A cancellation
+acknowledgment or timeout is not proof of stopping. Preserve valid upstream artifacts;
+repair a known local defect within the authorized budget instead of restarting everything.
 
-- the `available_agents` line (`- <id> [<tier>] [writes|readonly]`, optionally followed by a bounded description marked as untrusted metadata) is a scheduling hint, not a tool list;
-- the definition resource, read with `mcp_read_resource`（未暴露时先用工具搜索发现；底层 MCP 方法是 `resources/read`）: `agent://builtin/plan/agent.md`. Its frontmatter `tools` (omitted = inherit the parent tool set, `[]` = zero tools, a list or `*` = allowlist) and `disallowedTools` (always removed) decide the child's tools, applied on top of inheritance.
+On `scope-close-incomplete`, the host fences the entire affected Workflow run and
+cancels its remaining assignments before allowing an engine retry to execute. It cannot
+identify a smaller resource-conflict subgraph. Other runs and independent stable-input
+work may continue. Do not restart the fenced run until its outstanding resources settle.
 
-Read the definition body as well as its frontmatter. The shipped `coder` is the default execution definition: its build/test/lint self-checks belong to execution and do not make it an independent verifier. Do not treat those self-checks as a cross-role instruction, and do not accept them as independent verification.
+## Capability preflight and lifecycle
 
-Also identify which Agent status, send-only messaging, and cancellation controls the host actually exposes. Background results arrive automatically; `AgentResult` is hidden from the model and does not query state. Do not invent control tools or treat shell-task controls as Agent controls. When a needed control is absent, use the waiting or host-side cleanup fallback below; never probe status by resuming a thread.
+Resolve the definition body and tool policy before dispatch. `available_agents` is a
+scheduling hint, not a tool list. Read the definition resource, such as
+`agent://builtin/plan/agent.md`, with the host's resource reader, discovering it if needed.
+Omitted `tools` inherits; `tools: []` grants none; `disallowedTools` always removes tools.
+The shipped `explorer` is tool-level read-only. A command-running read-only assignment
+needs a compatible definition and an explicit read-only brief. The shipped `coder` is
+normally the execution definition; its build/test checks do not combine roles.
 
-State the brief's required tools and the target's resolved tools; where they do not meet, change the target or the brief before launching. `explorer` is tool-level read-only (`Read`/`Grep`/`Glob`/`ReadContextArchive`); `plan` still inherits the base tool set and relies on its prompt-level read-only task scope, so assign command-running work according to the brief's required evidence and actual resolved tools, and preserve the read-only task scope when delegating exploration.
+Require a small first probe of a necessary tool. A missing-tool result ends that
+assignment; choose a capable fresh target. Do not narrate an unrun command as evidence.
+For direct Agent assignments, use `run_in_background: true`; MCP agent IDs beginning
+with `mcp__` support synchronous activation only. Respect the available model tiers and
+any explicit user model choice. Do not weaken an implementation merely to reduce cost.
 
-First probe, fail fast: the agent's first action must exercise a required tool within its assigned role — one command for a command-running brief, one read for a read-only one — never a long exploration first. A probe that reports the tool missing ends the assignment: report the gap and retire the agent. Correct the target or brief and dispatch a fresh instance instead of quietly re-scoping the existing agent.
+Active clarifications may use `Agent(resume_thread_id: <child_thread_id>, prompt: ...,
+send_only: true)` when exposed, without changing the role or reactivating a finished
+assignment. If it fails because the receiver ended, do not remove `send_only` and retry.
+A queued clarification is not evidence that it was consumed.
 
-## Execution mode
+## Recover and keep the task record
 
-Launch non-MCP agents with `run_in_background: true`. MCP agents (IDs beginning with `mcp__`) support synchronous activation only: invoke them with `run_in_background: false`. This exception changes execution mode, not role separation or the fresh-instance requirement.
+After compaction, reload this skill if archived and restore its activation scope and user
+overrides. Reconcile existing assignments before any new dispatch. A failed lookup does
+not prove a run never started; recover a nonempty actual binding or keep it unconfirmed.
+Use exposed status/cancellation controls, never thread resume as a status query.
+`AgentResult` is hidden and is not a polling API. Wait for automatic results where applicable.
 
-## Todo as the record
+Keep one Todo record per business task, with its internal assignments or Workflow run,
+current goal revision, inputs, required evidence, and outstanding resources. Preserve
+`task_id`, `run_id`, and `child_thread_id` as different identities; never derive one from
+another. Retain failed/cancelled attempt evidence and unresolved obligations. A launch
+receipt opens work; it does not complete it. Do not duplicate in-flight work or repeat
+project reconnaissance merely to rebuild the record.
 
-Background hand-offs give you nothing to await, so the todo tool (`TodoWrite`) is the record of what is in flight: one item per role assignment, opened at launch and closed only on evidence.
+## Close once from evidence
 
-- Record the workstream, role, scope, agent's `child_thread_id`, predecessor artifacts, and returned evidence immediately after the launch receipt. Keep `task_id` separately when present; never derive a thread ID by removing `bg-`. A successor assignment records its own fresh ID and links the prior result. Keep completed/failed assignment evidence or a concrete archive reference instead of deleting its only record.
-- Items are hand-offs and coordination steps, never a mirror of an agent's internal plan.
-- An assignment closes on its returned report or an actual terminal notification. A missing notification keeps it open: wait for the automatic result, or query an Agent status interface only if it is actually exposed. Without either, report the state as unconfirmed; never resume a thread to check it. Neither a launch nor a queued prompt is completion evidence.
-- Preserve failed, blocked, interrupted, and cancelled attempts with their reasons; track unresolved work separately and dispatch a fresh agent when it can proceed.
-- A finished execution assignment completes the workstream unless independent verification is required by the stage criteria or the user asked for it. Close the deliverable only when the required evidence is returned; report any remaining gaps explicitly.
-- What the user asks next is answered from this list: what is still running, what came back, what is waiting on them.
+Use the saved formal result and the current artifact version. Workflow completion may
+include a bounded reported-result preview: it is script output, not an engine acceptance
+verdict. If it is complete and sufficient, summarize it directly. If partial or missing
+necessary evidence, retrieve the saved aggregate report once. Do not restart an agent to
+obtain or repeat its report, and do not treat a cleanup-only sentence as the deliverable.
 
-## Model choice
+Keep execution, acceptance, resource settlement, and external delivery separate.
+`completed`, exit code zero, an assignment receipt, or message `accepted` alone cannot
+establish the other facts. Query a required pending delivery when useful; retry a known
+retryable failure using the original message identity, not by repeating the implementation.
 
-- Lookup and mechanical sweeps → `haiku`. Execution or verification → `sonnet`, or omit `model` and take the definition's tier. Cross-crate contracts and architecture trade-offs → `opus`. The user asks for the parent's model → `inherit`. Model choice never combines roles.
-- Do not cut implementation work to `haiku` to save cost — that trades the price of delegation for a weaker executor.
-- `resume_thread_id` reopens the original thread. `fork` creates a new thread but inherits the source conversation and context; do not use it to carry a completed worker into another assignment. Use an ordinary fresh launch with the needed artifacts. Do not interrupt a running agent to switch tiers.
+Return each task once with its goal revision, actual status, concrete summary, current
+report/artifact references, actual verification basis, resource state, blockers, and next
+action. Every reference must have been observed. Explain failed/blocked work and preserve
+usable output. Unknown engine acceptance is not itself failure. Do not poll unchanged
+state or ask finished workers to reconfirm it. A later verifiable defect requires an
+explicit correction; unsupported free-form follow-ups do not rewrite the recorded outcome.
 
-## Handoff and reporting
-
-- Pass the original user request, accepted plan when one exists, relevant artifacts, changed-file scope, and outstanding issues to each successor. The handoff must stand on its own without resuming a predecessor.
-- Sending an in-flight clarification is not evidence that it was consumed. Confirm delivery and the returned result before claiming the changed requirement is implemented.
-- On completion, synthesize the role reports once for the user: changes, independent verification evidence, blockers, and unverified items. Any further work starts with a fresh agent in the appropriate role.
-
-## Cancellation
-
-Background agents have their own lifecycle, so cancelling your turn does not stop them. Use an exposed Agent cancellation interface and confirm the result, including the settlement of outstanding writes. If no such interface is available, report cancellation as unconfirmed and request host-side cancellation and confirmation; keep dependent stages and overlapping successors blocked. A cancellation request alone is not proof of stopping. If the user later authorizes continuing cancelled work, hand the remaining scope to a fresh agent. Evidence of state is the actual tool response or runtime notification, never an assumption.
+This policy does not implement durable recovery, idempotency, isolation, or reliable
+notifications. Use the host's actual capabilities and report gaps truthfully.

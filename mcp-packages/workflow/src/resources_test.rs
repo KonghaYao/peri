@@ -74,6 +74,7 @@ fn completed_workflow(run_id: &str) -> peri_workflow::registry::WorkflowTaskResu
         agent_count: 0,
         tool_calls_count: 0,
         error: None,
+        result_preview: None,
         phase_summaries: vec![],
         attempts: vec![],
     }

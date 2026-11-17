@@ -191,6 +191,13 @@ impl WorkflowRunner {
         true
     }
 
+    /// Preserve the first fatal host failure even if the engine later reports completion.
+    pub(crate) fn note_run_failure(&self, run_id: &str, detail: &str) {
+        if let Some(state) = self.run_limit_states.get(run_id) {
+            state.set_breach(detail.to_string());
+        }
+    }
+
     /// 记录一次任务结果的 tool 调用数（design §5.2 第 5 条：与 run limits 同一权威）。
     ///
     /// `task_id` 是去重身份：任务终态回投是投递重试，同一任务只计入首次。
