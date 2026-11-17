@@ -197,6 +197,74 @@ async fn execution_not_ready_keeps_history_ready_and_blocks_execution() {
     client.close();
 }
 
+/// `session/input/snapshot` 失败只关闭执行：已接纳的首屏必须仍是可见历史。
+#[tokio::test]
+#[serial]
+async fn snapshot_failure_keeps_admitted_history_readable() {
+    let _guard = prepare();
+    atoms::init_atoms();
+    atoms::HISTORY_V2_CAPABLE.set(true);
+    crate::kit::history_v2::reset_state();
+    let (transport, server) = mpsc_transport_pair();
+    let (client, _, _) = AcpTuiClient::new_interactive(transport);
+    install_v2(&client, true);
+    client
+        .user_input_queue
+        .store(true, std::sync::atomic::Ordering::Release);
+    let loader = client.clone();
+    let load = tokio::spawn(async move { loader.load_session(SESSION, "/tmp", None).await });
+
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/load");
+    server
+        .send_response(id, Ok(initial_response_with_item()))
+        .await
+        .unwrap();
+
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/input/snapshot");
+    server
+        .send_response(id, Err(AcpError::new(-32603, "snapshot unavailable")))
+        .await
+        .unwrap();
+
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/close");
+    respond_ok(&server, id).await;
+
+    let error = load.await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("snapshot unavailable"));
+    assert_eq!(
+        atoms::ACTIVE_SESSION_ID.state().read().as_str(),
+        SESSION,
+        "失败重投影必须保留会话锚点，否则 handle_view 会丢弃只读历史"
+    );
+    let state = crate::kit::history_v2::snapshot();
+    assert!(state.is_ready(), "历史仍可读");
+    assert!(!state.is_executable(), "执行必须关闭");
+    let window = state.window().expect("admitted window");
+    assert!(
+        window.paging.status.is_reopen_required(),
+        "窗口身份随初始化失败失效，等待 reopen"
+    );
+
+    let mut bridge = crate::kit::acp_events::acp_events_test::make_fold_test_state();
+    bridge.active_session_id = atoms::ACTIVE_SESSION_ID.state().read().clone();
+    crate::kit::acp_events::dispatch_and_notify(
+        &mut bridge,
+        &crate::kit::acp_events::history_v2::view_event(state),
+    );
+    assert!(
+        !bridge.committed.is_empty(),
+        "committed 必须仍含 initial 页"
+    );
+    assert!(
+        atoms::HISTORY_V2_PREFIX_LEN.get() > 0,
+        "V2 前缀必须保留 initial 页"
+    );
+    client.close();
+}
+
 #[tokio::test]
 #[serial]
 async fn missing_initial_fails_explicitly_and_publishes_failure() {

@@ -210,7 +210,8 @@ impl AcpTuiClient {
         }
         self.lifecycle
             .commit_stable(start.generation, session_id.clone());
-        self.finish_session_initialization(start.generation, &session_id)
+        // 新会话尚无历史可保留：初始化失败时按原语义清空会话边界。
+        self.finish_session_initialization(start.generation, &session_id, false)
             .await?;
         // S5.4：新建与恢复统一建立窗口。服务端只向持有 window ticket 的连接发送
         // `peri/history_committed`；新会话不 open 会让实时段永远停在 position=None。
@@ -520,10 +521,13 @@ impl AcpTuiClient {
                 let _ = crate::kit::history_v2::consumer::request_close_window(previous);
             }
             if let Err(error) = self
-                .finish_session_initialization(start.generation, session_id)
+                .finish_session_initialization(start.generation, session_id, true)
                 .await
             {
                 crate::kit::history_v2::live::clear_pending(session_id);
+                // 守卫 Drop 会按未提交状态清空会话边界；这里要保留只读历史视图，
+                // 必须显式续命，否则刚重锚定的会话身份随即被丢弃。
+                projection.retain_projection = true;
                 let mut restored = restore;
                 restored.execution_ready = false;
                 if let Some(window) = restored.window.as_mut() {
@@ -566,7 +570,7 @@ impl AcpTuiClient {
                     crate::kit::context_usage::from_load_response(&loaded),
                 );
             }
-            self.finish_session_initialization(start.generation, session_id)
+            self.finish_session_initialization(start.generation, session_id, false)
                 .await?;
             if let Some(view) = recovery.as_ref() {
                 crate::acp_client::client::recovery_view::present(session_id, view);
@@ -606,10 +610,13 @@ impl AcpTuiClient {
         Ok(session_id.to_string())
     }
 
+    /// `retain_history_on_failure` 表示首屏已经发布：初始化失败只关闭执行，
+    /// 不能把会话锚点清空，否则调用方的失败重投影会被 `handle_view` 丢弃。
     async fn finish_session_initialization(
         &self,
         generation: u64,
         session_id: &str,
+        retain_history_on_failure: bool,
     ) -> Result<(), AcpError> {
         if let Err(error) = self.initialize_user_inputs_under_gate(session_id).await {
             let claims = self.lifecycle.fail_transition(generation);
@@ -620,7 +627,16 @@ impl AcpTuiClient {
                 .lock()
                 .expect("restore_error mutex must not be poisoned") = Some(error.to_string());
             if self.projection_mode == ClientProjectionMode::Interactive {
-                crate::kit::session_boundary::project_session_boundary(None);
+                if retain_history_on_failure {
+                    // 历史已接纳：边界清理保留会话身份与窗口（由收尾的
+                    // `session/close` 负责服务端拆除），再用 ReopenRequired
+                    // 只读视图重发布。
+                    crate::kit::session_boundary::project_session_boundary_retaining_history(Some(
+                        session_id,
+                    ));
+                } else {
+                    crate::kit::session_boundary::project_session_boundary(None);
+                }
             }
             if let Err(close_error) = self
                 .transport
