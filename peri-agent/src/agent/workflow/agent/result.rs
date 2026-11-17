@@ -36,7 +36,12 @@ impl ProjectedResult {
     #[must_use]
     pub fn telemetry_outcome(&self) -> TurnTelemetryOutcome {
         match &self.result {
-            AgentRunResult::Dead { reason, .. } if reason.as_deref() == Some("interrupted") => {
+            // scope 未结清时终态已按失败收口，中断不能再投影为取消。
+            AgentRunResult::Dead {
+                reason,
+                scope_close_incomplete,
+                ..
+            } if !*scope_close_incomplete && reason.as_deref() == Some("interrupted") => {
                 TurnTelemetryOutcome::Stopped {
                     reason: PromptStopReason::Cancelled,
                 }

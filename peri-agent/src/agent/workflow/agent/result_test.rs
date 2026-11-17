@@ -429,6 +429,37 @@ fn incomplete_scope_close_keeps_the_first_failure_reason() {
 }
 
 #[test]
+fn interrupted_after_incomplete_close_reports_failure_telemetry() {
+    // scope 未结清时终态已按失败收口；遥测不能再把中断投影为取消。
+    let session = Session::new(Arc::from("/unused"), FrozenContext::builder().build(), None);
+    let params = params(None);
+    let observation = WorkflowObservation::new(&params, None, None);
+    let projected = super::project_run_result(
+        LoopResult::Interrupted,
+        Ok(()),
+        &session,
+        &observation,
+        &params,
+        "effective",
+        Instant::now(),
+    )
+    .after_scope_close(false);
+    assert!(matches!(&projected.result, AgentRunResult::Dead {
+        scope_close_incomplete: true,
+        reason,
+        ..
+    } if reason.as_deref() == Some("interrupted")));
+    match projected.telemetry_outcome() {
+        TurnTelemetryOutcome::Failed { failure } => assert!(
+            failure.public_message.contains("scope did not close"),
+            "scope 未结清必须报告失败原因: {}",
+            failure.public_message
+        ),
+        other => panic!("scope 未结清的中断必须投影为 Failed 遥测: {other:?}"),
+    }
+}
+
+#[test]
 fn successful_scope_close_preserves_the_original_outcome() {
     for original in [
         AgentRunResult::Skipped,
