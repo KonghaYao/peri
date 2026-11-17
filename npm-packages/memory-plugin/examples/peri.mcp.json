@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "memory": {
+      "command": "node",
+      "args": ["/absolute/path/peri/npm-packages/memory-plugin/dist/index.js", "mcp"],
+      "env": {
+        "HINDSIGHT_BASE_URL": "https://your-existing-hindsight.example",
+        "HINDSIGHT_BANK_ID": "existing-agent-bank",
+        "MEMORY_AGENT_ID": "peri-agent-example",
+        "MEMORY_SESSION_ID": "session-example"
+      },
+      "subscriptions": { "resources": ["memory://context"] }
+    }
+  }
+}
