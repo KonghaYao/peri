@@ -161,9 +161,10 @@ fn click_dispatch_accounts_for_entry_prefix_card_and_scrolled_viewport() {
             .line(logical)
             .unwrap()
             .to_string();
-        let prefix = line[..line.find('[').unwrap()].width() as u16;
+        let label_at = line.find("继续中文").unwrap();
+        let prefix = line[..label_at].width() as u16 - 1;
         assert_eq!(info.x_start, prefix);
-        assert_eq!(info.x_end - info.x_start, "[ 继续中文 ]".width() as u16);
+        assert_eq!(info.x_end - info.x_start, " 继续中文 ".width() as u16);
         let visual =
             index.slot_visual_start(1).unwrap() + fixture.caches[1].wrap_map[logical].visual_start;
         let area = Rect::new(9, 7, fixture.grid.line_width() + 1, 5);

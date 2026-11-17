@@ -92,7 +92,7 @@ fn genui_buttons_rebuild_for_width_theme_and_transition_changes() {
                 .line(button.line_start)
                 .unwrap()
                 .to_string()
-                .contains("[ 继续 ]")
+                .contains(" 继续 ")
         );
         assert!(
             cache
@@ -111,7 +111,7 @@ fn genui_buttons_rebuild_for_width_theme_and_transition_changes() {
             .unwrap()
             .spans
             .iter()
-            .find(|span| span.content.contains("[ 继续 ]"))
+            .find(|span| span.content.contains(" 继续 "))
             .unwrap()
             .style;
         if let Some(previous_style) = previous_style {

@@ -46,9 +46,9 @@
 
 1. `markdown/parser.rs` 在 Markdown 解析前用 `scan_blocks` 提取 `gen-ui` 围栏，将块内三反引号替换为占位符并规范化为 `gen-ui`/`gen-ui-partial`；`convert.rs` 还原后调用 `parse`，产出 `MarkdownSegment::GenUi`。
 2. `boundary.rs` 在 `gen-ui` opener 处停止 stable chunk，块留在可变 tail；首版不做块级稳定缓存，避免复用时序问题。
-3. 渲染器位于 `peri-tui/src/kit/genui/`，首版组件为 Stack、Card、Text、Heading、List、Table、KeyValue、Progress、Divider、Button。Text 按纯文本换行，不递归 Markdown。
+3. 渲染器位于 `peri-tui/src/kit/genui/`，首版组件为 Stack、Card、Text、Heading、List、Table、KeyValue、Progress、Divider、Button；后续补充 BarChart、Sparkline。Text 按纯文本换行，不递归 Markdown。
 4. Button 支持整行点击；`@ToAssistant` 回填输入区，`@Set`/`@Reset` 修改块级视图状态并重渲染，`@Run`/`@OpenUrl` 显示未支持提示。视图状态不进 transcript，相同源码和入口的重复块共享状态。
-5. 尚未把 `system_prompt` 注入 Agent 系统提示词；模型当前需要由宿主另行告知组件库与 `gen-ui` 围栏约定。SDK 的 32 组件 OpenUI 库与本首版 10 组件库是两套定义，后续需要收敛或显式区分。
+5. 尚未把 `system_prompt` 注入 Agent 系统提示词；模型当前需要由宿主另行告知组件库与 `gen-ui` 围栏约定。SDK 的 32 组件 OpenUI 库与当前 12 组件库是两套定义，后续需要收敛或显式区分。
 
 ## 验收与测试口径
 

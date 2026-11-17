@@ -54,7 +54,7 @@ fn components_render_within_40_80_120_columns() {
                 "Agent",
                 "耗时: 12",
                 "50%",
-                "[ 继续 ]",
+                " 继续 ",
                 "左侧",
                 "右侧",
             ] {
@@ -74,7 +74,7 @@ fn components_render_within_40_80_120_columns() {
             assert!(
                 rendered.lines[button.line_start]
                     .to_string()
-                    .contains("[ 继续 ]")
+                    .contains(" 继续 ")
             );
         }
     }
@@ -170,6 +170,50 @@ fn unsupported_actions_are_visible_muted_errors_without_hit_areas() {
 }
 
 #[test]
+fn text_renders_scalars_and_reports_structured_content() {
+    let theme = peri_theme::builtin::dark_theme();
+    let render_source = |source: &str| {
+        let segment = GenUiSegment::parse(source.into(), false, library::library().unwrap());
+        let rendered = render(&segment, 80, &theme);
+        (
+            rendered
+                .lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            rendered,
+        )
+    };
+
+    for (source, expected) in [
+        ("$count = 1\nroot = Stack([Text($count)])", "1"),
+        ("$seven = 7\nroot = Stack([Text($seven)])", "7"),
+        ("$flag = true\nroot = Stack([Text($flag)])", "true"),
+        ("$off = false\nroot = Stack([Text($off)])", "false"),
+        ("root = Stack([Text(\"原样显示\", \"muted\")])", "原样显示"),
+    ] {
+        let (text, _) = render_source(source);
+        assert!(text.contains(expected), "missing={expected}: {text}");
+        assert!(!text.contains("gen-ui:"), "{text}");
+    }
+
+    for source in [
+        "$obj = {key: 1}\nroot = Stack([Text($obj)])",
+        "$arr = [1, 2]\nroot = Stack([Text($arr)])",
+        "$none = null\nroot = Stack([Text($none)])",
+    ] {
+        let (text, rendered) = render_source(source);
+        assert_eq!(
+            text.trim(),
+            "gen-ui: Text content must be a string",
+            "{source}: {text}"
+        );
+        assert!(rendered.lines[0].spans[0].style.fg == Some(theme.semantic.text.muted));
+    }
+}
+
+#[test]
 fn narrow_nested_layouts_and_oversized_tables_do_not_panic() {
     let source = format!(
         "root = Stack([Table([\"x\"], [[\"{}\"]]), Button(\"非常长的按钮名称\", @ToAssistant(\"next\"))])",
@@ -179,5 +223,115 @@ fn narrow_nested_layouts_and_oversized_tables_do_not_panic() {
     for width in [0, 1, 2, 3, 4, 8, 40] {
         let rendered = render(&segment, width, &peri_theme::builtin::dark_theme());
         assert!(rendered.lines.iter().all(|line| line.width() <= width));
+    }
+}
+
+#[test]
+fn button_uses_filled_copy_style_without_brackets() {
+    let theme = peri_theme::builtin::dark_theme();
+    let source = r#"
+$count = 0
+root = Stack([
+  Button("Go", @ToAssistant("go"), "primary"),
+  Button("Reset", @Reset($count))
+])"#;
+    let segment = GenUiSegment::parse(source.into(), false, library::library().unwrap());
+    assert!(segment.errors.is_empty(), "{:?}", segment.errors);
+    let rendered = render(&segment, 40, &theme);
+    let text = rendered
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!text.contains('['), "{text}");
+    let primary = rendered
+        .lines
+        .iter()
+        .flat_map(|line| &line.spans)
+        .find(|span| span.content.as_ref() == " Go ")
+        .expect("primary button span");
+    assert_eq!(primary.style.fg, Some(theme.semantic.accent));
+    assert!(
+        primary
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::REVERSED)
+    );
+    let secondary = rendered
+        .lines
+        .iter()
+        .flat_map(|line| &line.spans)
+        .find(|span| span.content.as_ref() == " Reset ")
+        .expect("default button span");
+    assert_eq!(secondary.style.fg, Some(theme.semantic.text.muted));
+    assert!(
+        secondary
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::REVERSED)
+    );
+    let button = rendered
+        .buttons
+        .iter()
+        .find(|button| button.label == "Go")
+        .expect("primary hit area");
+    assert_eq!(button.x_end, 4);
+}
+
+#[test]
+fn charts_render_bars_and_sparklines() {
+    let source = r#"
+root = Stack([
+  BarChart([{label: "API", value: 80}, {label: "Web", value: 40}], "Traffic", 100),
+  Sparkline([1, 3, 2, 5, 4, 7], "Requests")
+])"#;
+    let segment = GenUiSegment::parse(source.into(), false, library::library().unwrap());
+    assert!(segment.errors.is_empty(), "{:?}", segment.errors);
+    for theme in [
+        peri_theme::builtin::dark_theme(),
+        peri_theme::builtin::light_theme(),
+    ] {
+        for width in [40, 80, 120] {
+            let rendered = render(&segment, width, &theme);
+            let text = rendered
+                .lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            for expected in ["Traffic", "API", "Web", "█", "Requests", "7"] {
+                assert!(
+                    text.contains(expected),
+                    "width={width}, missing={expected}: {text}"
+                );
+            }
+            assert!(
+                rendered.lines.iter().all(|line| line.width() <= width),
+                "{text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn charts_report_invalid_data() {
+    let theme = peri_theme::builtin::dark_theme();
+    for source in [
+        "root = Stack([BarChart([])])",
+        "root = Stack([BarChart([{label: \"x\", value: -1}])])",
+        "root = Stack([BarChart([{label: \"x\", value: 1}], \"t\", 0)])",
+        "root = Stack([Sparkline([])])",
+        "root = Stack([Sparkline([1, \"x\"])])",
+    ] {
+        let segment = GenUiSegment::parse(source.into(), false, library::library().unwrap());
+        let rendered = render(&segment, 80, &theme);
+        let text = rendered
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("gen-ui:"), "{source}: {text}");
     }
 }

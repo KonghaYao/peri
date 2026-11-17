@@ -8,7 +8,8 @@ const SCHEMA: &str = r##"{
   "schema": {
     "properties": {
       "Stack": {}, "Card": {}, "Text": {}, "Heading": {}, "List": {},
-      "Table": {}, "KeyValue": {}, "Progress": {}, "Divider": {}, "Button": {}
+      "Table": {}, "KeyValue": {}, "Progress": {}, "Divider": {}, "Button": {},
+      "BarChart": {}, "Sparkline": {}
     },
     "$defs": {
       "Stack": {"properties": {
@@ -17,7 +18,8 @@ const SCHEMA: &str = r##"{
           {"$ref": "#/$defs/Text"}, {"$ref": "#/$defs/Heading"},
           {"$ref": "#/$defs/List"}, {"$ref": "#/$defs/Table"},
           {"$ref": "#/$defs/KeyValue"}, {"$ref": "#/$defs/Progress"},
-          {"$ref": "#/$defs/Divider"}, {"$ref": "#/$defs/Button"}
+          {"$ref": "#/$defs/Divider"}, {"$ref": "#/$defs/Button"},
+          {"$ref": "#/$defs/BarChart"}, {"$ref": "#/$defs/Sparkline"}
         ]}},
         "direction": {"type": "string", "enum": ["column", "row"]}
       }, "required": ["children"]},
@@ -27,7 +29,8 @@ const SCHEMA: &str = r##"{
           {"$ref": "#/$defs/Text"}, {"$ref": "#/$defs/Heading"},
           {"$ref": "#/$defs/List"}, {"$ref": "#/$defs/Table"},
           {"$ref": "#/$defs/KeyValue"}, {"$ref": "#/$defs/Progress"},
-          {"$ref": "#/$defs/Divider"}, {"$ref": "#/$defs/Button"}
+          {"$ref": "#/$defs/Divider"}, {"$ref": "#/$defs/Button"},
+          {"$ref": "#/$defs/BarChart"}, {"$ref": "#/$defs/Sparkline"}
         ]}},
         "title": {"type": "string"}
       }, "required": ["children"]},
@@ -59,7 +62,17 @@ const SCHEMA: &str = r##"{
       "Divider": {"properties": {}},
       "Button": {"properties": {
         "label": {"type": "string"}, "action": {}, "variant": {"type": "string"}
-      }, "required": ["label", "action"]}
+      }, "required": ["label", "action"]},
+      "BarChart": {"properties": {
+        "items": {"type": "array", "items": {"type": "object", "properties": {
+          "label": {"type": "string"}, "value": {"type": "number"}
+        }, "required": ["label", "value"]}},
+        "title": {"type": "string"}, "max": {"type": "number"}
+      }, "required": ["items"]},
+      "Sparkline": {"properties": {
+        "values": {"type": "array", "items": {"type": "number"}},
+        "label": {"type": "string"}
+      }, "required": ["values"]}
     }
   }
 }"##;

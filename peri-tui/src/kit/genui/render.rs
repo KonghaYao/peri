@@ -131,7 +131,15 @@ fn element(
                 "code" => body.fg(theme.component.markdown.code),
                 _ => body,
             };
-            plain(text("content"), width, style)
+            match props.get("content") {
+                Some(Value::String(content)) => plain(content, width, style),
+                Some(value @ (Value::Number(_) | Value::Bool(_))) => {
+                    plain(&display_value(value), width, style)
+                }
+                Some(_) => muted_error("Text content must be a string", width, theme),
+                // 流式解析可能在 content 参数生成前渲染，保留原有空行占位。
+                None => plain("", width, style),
+            }
         }
         "Heading" => {
             let level = props.get("level").and_then(Value::as_u64).unwrap_or(1);
@@ -180,6 +188,8 @@ fn element(
             output
         }
         "Progress" => progress(props, width, theme),
+        "BarChart" => bar_chart(props, width, theme),
+        "Sparkline" => sparkline(props, width, theme),
         "Divider" => GenUiRender {
             lines: vec![Line::from(Span::styled(
                 "─".repeat(width),
@@ -275,20 +285,26 @@ fn button(
     if width < 4 {
         return muted_error("button needs at least four columns", width, theme);
     }
-    let label = fit(&sanitize(&descriptor.label).replace('\n', " "), width - 4);
+    let label = fit(
+        &sanitize(&descriptor.label).replace('\n', " "),
+        width.saturating_sub(2),
+    );
     let primary = props.get("variant").and_then(Value::as_str) == Some("primary");
-    let style = Style::default().fg(theme.semantic.accent).bg(if primary {
-        theme.semantic.surface.raised
-    } else {
-        theme.semantic.surface.default
-    });
+    // 复制按钮同款：两侧 padding + 反色填充，无括号；primary 用 accent，普通按钮用弱化文字色。
+    let style = Style::default()
+        .fg(if primary {
+            theme.semantic.accent
+        } else {
+            theme.semantic.text.muted
+        })
+        .add_modifier(Modifier::REVERSED);
     GenUiRender {
-        lines: vec![Line::from(Span::styled(format!("[ {label} ]"), style))],
+        lines: vec![Line::from(Span::styled(format!(" {label} "), style))],
         buttons: vec![GenUiButtonInfo {
             line_start: 0,
             line_end: 1,
             x_start: 0,
-            x_end: label.width().saturating_add(4).min(u16::MAX as usize) as u16,
+            x_end: label.width().saturating_add(2).min(u16::MAX as usize) as u16,
             block: None,
             parsed: None,
             action,
@@ -333,6 +349,172 @@ fn progress(
         ]));
     }
     output
+}
+
+fn bar_chart(
+    props: &serde_json::Map<String, Value>,
+    width: usize,
+    theme: &ThemeDefinition,
+) -> GenUiRender {
+    let Some(items) = props.get("items").and_then(Value::as_array) else {
+        return muted_error("bar chart needs an items array", width, theme);
+    };
+    if items.is_empty() {
+        return muted_error("bar chart needs at least one item", width, theme);
+    }
+    if items.len() > 64 {
+        return muted_error("bar chart supports at most 64 items", width, theme);
+    }
+    let mut entries = Vec::with_capacity(items.len());
+    for item in items {
+        let label = item
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let Some(raw) = item.get("value") else {
+            return muted_error("bar chart items need a value", width, theme);
+        };
+        let Some(value) = raw.as_f64() else {
+            return muted_error("bar chart values must be numbers", width, theme);
+        };
+        if !value.is_finite() || value < 0.0 {
+            return muted_error(
+                "bar chart values must be non-negative numbers",
+                width,
+                theme,
+            );
+        }
+        entries.push((label, value, display_value(raw)));
+    }
+    let max = match props.get("max") {
+        None => entries
+            .iter()
+            .map(|(_, value, _)| *value)
+            .fold(0.0, f64::max)
+            .max(1.0),
+        Some(raw) => match raw.as_f64() {
+            Some(max) if max.is_finite() && max > 0.0 => max,
+            _ => return muted_error("bar chart max must be a positive number", width, theme),
+        },
+    };
+    let value_width = entries
+        .iter()
+        .map(|(_, _, value)| value.width())
+        .max()
+        .unwrap_or(1);
+    let label_cap = width.saturating_sub(value_width.saturating_add(4));
+    let label_width = entries
+        .iter()
+        .map(|(label, _, _)| sanitize(label).width())
+        .max()
+        .unwrap_or(0)
+        .min(label_cap);
+    let label_gap = usize::from(label_width > 0);
+    let bar_width = width.saturating_sub(label_width + label_gap + value_width + 1);
+    if bar_width < 2 {
+        return muted_error("bar chart needs more width", width, theme);
+    }
+    let body = Style::default().fg(theme.component.markdown.text);
+    let heading = Style::default()
+        .fg(theme.semantic.accent)
+        .add_modifier(Modifier::BOLD);
+    let bar = Style::default().fg(theme.semantic.accent);
+    let track = Style::default().fg(theme.semantic.border.dim);
+    let mut output = GenUiRender::default();
+    if let Some(title) = props.get("title").and_then(Value::as_str)
+        && !title.is_empty()
+    {
+        output.append(plain(title, width, heading));
+    }
+    for (label, value, text) in entries {
+        let label = fit(&sanitize(&label).replace('\n', " "), label_width);
+        let label_padding = label_width.saturating_sub(label.width());
+        let value_padding = value_width.saturating_sub(text.width());
+        let filled = ((value / max).clamp(0.0, 1.0) * bar_width as f64).round() as usize;
+        let mut spans = Vec::new();
+        if label_width > 0 {
+            spans.push(Span::styled(
+                format!("{label}{}", " ".repeat(label_padding)),
+                body,
+            ));
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled("█".repeat(filled), bar));
+        spans.push(Span::styled("░".repeat(bar_width - filled), track));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!("{}{text}", " ".repeat(value_padding)),
+            body,
+        ));
+        output.lines.push(Line::from(spans));
+    }
+    output
+}
+
+fn sparkline(
+    props: &serde_json::Map<String, Value>,
+    width: usize,
+    theme: &ThemeDefinition,
+) -> GenUiRender {
+    let Some(values) = props.get("values").and_then(Value::as_array) else {
+        return muted_error("sparkline needs a values array", width, theme);
+    };
+    if values.is_empty() {
+        return muted_error("sparkline needs at least one value", width, theme);
+    }
+    if values.len() > 4096 {
+        return muted_error("sparkline supports at most 4096 values", width, theme);
+    }
+    let mut numbers = Vec::with_capacity(values.len());
+    for value in values {
+        let Some(number) = value.as_f64() else {
+            return muted_error("sparkline values must be numbers", width, theme);
+        };
+        if !number.is_finite() {
+            return muted_error("sparkline values must be finite numbers", width, theme);
+        }
+        numbers.push(number);
+    }
+    let label = props
+        .get("label")
+        .and_then(Value::as_str)
+        .map(|label| sanitize(label).replace('\n', " "))
+        .unwrap_or_default();
+    let prefix = if label.is_empty() {
+        String::new()
+    } else {
+        format!("{label}  ")
+    };
+    let last = values.last().map(display_value).unwrap_or_default();
+    let suffix = format!("  {last}");
+    let available = width.saturating_sub(prefix.width() + suffix.width());
+    if available < 2 {
+        return muted_error("sparkline needs more width", width, theme);
+    }
+    let visible = &numbers[numbers.len().saturating_sub(available)..];
+    let min = visible.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = visible.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let glyphs = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let spark: String = visible
+        .iter()
+        .map(|value| {
+            let level = if (max - min).abs() < f64::EPSILON {
+                3
+            } else {
+                (((value - min) / (max - min)) * 7.0).round() as usize
+            };
+            glyphs[level.min(7)]
+        })
+        .collect();
+    GenUiRender {
+        lines: vec![Line::from(vec![
+            Span::styled(prefix, Style::default().fg(theme.component.markdown.text)),
+            Span::styled(spark, Style::default().fg(theme.semantic.accent)),
+            Span::styled(suffix, Style::default().fg(theme.semantic.text.muted)),
+        ])],
+        buttons: vec![],
+    }
 }
 
 fn table(
