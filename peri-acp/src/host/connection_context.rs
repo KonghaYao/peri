@@ -123,8 +123,9 @@ pub(crate) struct ConnectionContext {
 
 impl ConnectionContext {
     pub(crate) fn new(apps_enabled: bool) -> Self {
+        let id = uuid::Uuid::now_v7().to_string();
         Self {
-            id: uuid::Uuid::now_v7().to_string(),
+            id: id.clone(),
             lifecycle: ConnectionLifecycle::Open,
             initialized: false,
             negotiated_caps: None,
@@ -132,7 +133,7 @@ impl ConnectionContext {
             session_switch: Default::default(),
             acp_mcp: Default::default(),
             history_v2: std::sync::Arc::new(super::history_service::HistoryV2Service::system()),
-            live: std::sync::Arc::new(super::live_delivery::LiveDelivery::new()),
+            live: std::sync::Arc::new(super::live_delivery::LiveDelivery::for_connection(id)),
             #[cfg(test)]
             history_v2_backend_override: None,
             cancellation: tokio_util::sync::CancellationToken::new(),

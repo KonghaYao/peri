@@ -133,6 +133,9 @@ impl LiveStream {
 
 /// 每个连接一份的实时投递注册表。
 pub(crate) struct LiveDelivery {
+    /// 注册表所属连接：会话侧只保存 `Arc`，`session/resume` 据此区分「本连接」
+    /// 与「另一连接留下的绑定」。
+    connection_id: String,
     inner: Mutex<Inner>,
 }
 
@@ -176,10 +179,20 @@ impl Default for LiveDelivery {
 }
 
 impl LiveDelivery {
+    /// 无连接上下文的测试/进程内注册表；连接性判定不会命中它。
     pub(crate) fn new() -> Self {
+        Self::for_connection(String::new())
+    }
+
+    pub(crate) fn for_connection(connection_id: String) -> Self {
         Self {
+            connection_id,
             inner: Mutex::new(Inner::default()),
         }
+    }
+
+    pub(crate) fn connection_id(&self) -> &str {
+        &self.connection_id
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -459,6 +472,30 @@ pub(crate) async fn detach_session(sessions: &super::SharedSessions, session_id:
     let previous = {
         let mut states = sessions.lock().await;
         take_live_delivery(&mut states, session_id)
+    };
+    if let Some(previous) = previous {
+        previous.close(session_id);
+    }
+}
+
+/// V2 `session/resume` 的绑定核对：只有拥有该注册表的连接可以保留绑定，其他
+/// 连接恢复会话时撤销上一条连接的投递身份，避免后续 prompt 把更新发布到旧流。
+pub(crate) async fn detach_unless_owned_by(
+    sessions: &super::SharedSessions,
+    session_id: &str,
+    connection_id: &str,
+) {
+    let previous = {
+        let mut states = sessions.lock().await;
+        let owned_here = states
+            .get(session_id)
+            .and_then(|state| state.live_delivery.as_ref())
+            .is_none_or(|live| live.connection_id() == connection_id);
+        if owned_here {
+            None
+        } else {
+            take_live_delivery(&mut states, session_id)
+        }
     };
     if let Some(previous) = previous {
         previous.close(session_id);

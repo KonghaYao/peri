@@ -72,6 +72,7 @@ pub(crate) async fn handle_load_shared(
             return Err(error);
         }
     };
+    let mut restored = false;
     let outcome: Result<Value, AcpError> = async {
         // 窗口连接的首屏不是 load 响应里的回放：声明 `peri.historyWindowV1` 后，
         // `session/load` 只装配会话，历史由随后的 `history.open` 提供。判据取本连接
@@ -102,6 +103,9 @@ pub(crate) async fn handle_load_shared(
             context_usage,
         )
         .await?;
+        // 会话已恢复：之后 initial 交付失败只回领域错误、保留会话（同 requestKey 可重试），
+        // 不能再走 cold publication 回滚把已装配的会话拆掉。
+        restored = true;
         if let Some(initial) = history {
             attach_history_initial(
                 local,
@@ -113,9 +117,6 @@ pub(crate) async fn handle_load_shared(
             )
             .await?;
         } else {
-            // 非 V2 连接成功接管会话：撤销上一条连接留下的实时投递绑定，事件回到 V1
-            // wire 形状。失败路径（装配/回放拒绝）不破坏既有交付。
-            crate::host::live_delivery::detach_session(sessions, &prepared.id).await;
             if connection.history_pagination {
                 crate::host::history_page::attach_initial_cursor(
                     cfg,
@@ -125,15 +126,35 @@ pub(crate) async fn handle_load_shared(
                 )
                 .await?;
             }
+            // 非 V2 连接成功接管会话：撤销上一条连接留下的实时投递绑定，事件回到 V1
+            // wire 形状。失败路径（装配/回放拒绝）不破坏既有交付；cursor 失败同样
+            // 保留旧流，因此 detach 放在它之后。
+            crate::host::live_delivery::detach_session(sessions, &prepared.id).await;
         }
         Ok(response)
     }
     .await;
     match outcome {
         Ok(response) => Ok(response),
-        Err(error) => {
-            Err(rollback_after_restore_error(cfg, sessions, publication.as_ref(), error).await)
-        }
+        Err(error) => Err(rollback_after_restore_error(
+            cfg,
+            sessions,
+            publication_for(restored, &publication),
+            error,
+        )
+        .await),
+    }
+}
+
+/// 只有恢复尚未完成时才允许回滚 cold publication。
+fn publication_for(
+    restored: bool,
+    publication: &Option<RestorePublication>,
+) -> Option<&RestorePublication> {
+    if restored {
+        None
+    } else {
+        publication.as_ref()
     }
 }
 
@@ -159,7 +180,9 @@ async fn attach_history_initial(
     let reserved_response_bytes = serde_json::to_vec(response)
         .map_err(|error| AcpError::new(-32603, error.to_string()))?
         .len()
-        .saturating_sub(2) as u64;
+        .saturating_sub(2) as u64
+        // result 之外的 JSON-RPC 包络也必须计入预算，页面才能用满剩余额度。
+        + initial.envelope_bytes;
 
     let (runtime_generation, execution_ready) = execution_facts(sessions, session_id).await?;
     let backend: Arc<dyn HistoryV2Backend> = Arc::new(HistoryV2BackendAdapter::new(
@@ -202,14 +225,26 @@ async fn attach_history_initial(
         AcpError::new(-32603, error.to_string())
     })?;
     // 成功交付之后才把注册表绑定到会话：load 期间没有可执行的 prompt，绑定点
-    // 与响应发布之间不存在「sink 拿不到流」的窗口。
-    let previous = {
+    // 与响应发布之间不存在「sink 拿不到流」的窗口。绑定前复核代次：initial 期间
+    // 另一连接可能关闭并重建会话，旧代次的流与元数据不得挂到新代次上。
+    let (previous, generation_changed) = {
         let mut states = sessions.lock().await;
         let state = states.get_mut(session_id).ok_or_else(|| {
             AcpError::new(-32603, "session disappeared while loading history initial")
         })?;
-        state.live_delivery.replace(Arc::clone(&live))
+        if runtime_generation != format!("runtime-{}", state.session_generation) {
+            (None, true)
+        } else {
+            (state.live_delivery.replace(Arc::clone(&live)), false)
+        }
     };
+    if generation_changed {
+        live.close_if_paused(session_id);
+        return Err(AcpError::new(
+            -32010,
+            "session changed while loading history initial; retry the load",
+        ));
+    }
     if let Some(previous) = previous {
         if !Arc::ptr_eq(&previous, &live) {
             // A44：新 initial 原子替换旧 delivery，旧流关闭且不再投递。
@@ -893,6 +928,7 @@ async fn serve_view_only_load(
 ) -> Result<Value, AcpError> {
     let (session_id, thread, failure, publication) =
         ensure_view_only_state(params, cfg, sessions, kind, error).await?;
+    let mut restored = false;
     let outcome: Result<Value, AcpError> = async {
         // 与正常 load 同一条回放路径：窗口连接跳过首屏回放，其余连接读存储回放。
         replay_after_load(
@@ -920,6 +956,8 @@ async fn serve_view_only_load(
             context_usage,
         )
         .await?;
+        // 只读会话同样在恢复完成后才交付历史；initial 失败不得回滚已发布状态。
+        restored = true;
         response["_meta"]["peri.recovery"] = view_only_recovery_view(&thread, failure)?;
         if let Some(initial) = history {
             // 历史可读与执行可用是独立事实：只读进入也遵守已协商的 initial 契约。
@@ -933,7 +971,6 @@ async fn serve_view_only_load(
             )
             .await?;
         } else {
-            crate::host::live_delivery::detach_session(sessions, &session_id).await;
             if connection.history_pagination {
                 crate::host::history_page::attach_initial_cursor(
                     cfg,
@@ -943,15 +980,20 @@ async fn serve_view_only_load(
                 )
                 .await?;
             }
+            crate::host::live_delivery::detach_session(sessions, &session_id).await;
         }
         Ok(response)
     }
     .await;
     match outcome {
         Ok(response) => Ok(response),
-        Err(error) => {
-            Err(rollback_after_restore_error(cfg, sessions, publication.as_ref(), error).await)
-        }
+        Err(error) => Err(rollback_after_restore_error(
+            cfg,
+            sessions,
+            publication_for(restored, &publication),
+            error,
+        )
+        .await),
     }
 }
 

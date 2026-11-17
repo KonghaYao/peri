@@ -26,6 +26,8 @@ pub(crate) struct LoadInitial {
     pub(crate) limits: HistoryLimits,
     /// 本连接的实时投递注册表：initial 成功装配时绑定到会话，供执行轮 sink 使用。
     pub(crate) live: Arc<super::live_delivery::LiveDelivery>,
+    /// 本次 `session/load` 成功响应的 JSON-RPC 包络字节数（按实际请求 id 计算）。
+    pub(crate) envelope_bytes: u64,
 }
 
 /// 解析 `session/load` 的 `_meta["peri.history"]`。

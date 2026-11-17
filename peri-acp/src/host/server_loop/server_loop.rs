@@ -499,6 +499,9 @@ impl ServerLoop<'_> {
     }
 
     pub(super) async fn dispatch_request(&self, id: RequestId, method: String, params: Value) {
+        // History V2 initial 的响应预算需要按实际请求 id 计入 JSON-RPC 包络；
+        // `diagnostics` 会取走 id，因此先量。
+        let response_envelope_bytes = super::super::diagnostics::response_envelope_bytes(&id);
         let diagnostics = ResponseDiagnostics::new(id, &method, &params);
         let transport = self.transport;
         let cfg = self.cfg;
@@ -780,6 +783,7 @@ impl ServerLoop<'_> {
                         service: connection_history_v2.clone(),
                         limits: history_v2_load::limits(&connection_facts),
                         live,
+                        envelope_bytes: response_envelope_bytes,
                     })
                 }
                 None => None,
@@ -798,10 +802,20 @@ impl ServerLoop<'_> {
                 &params, cfg, sessions, transport,
             )
             .await;
-            // 标准连接恢复会话后不得继承其他连接的实时投递身份。
-            if result.is_ok() && !connection_facts.history_v2 {
+            // 恢复会话后不得继承其他连接的实时投递身份：标准连接一律撤销；
+            // V2 连接只有注册表属于本连接时才保留（resume 不建立新流）。
+            if result.is_ok() {
                 let session_id = super::super::extract_session_id(&params, "").to_string();
-                super::super::live_delivery::detach_session(sessions, &session_id).await;
+                if connection_facts.history_v2 {
+                    super::super::live_delivery::detach_unless_owned_by(
+                        sessions,
+                        &session_id,
+                        &connection_facts.connection_id,
+                    )
+                    .await;
+                } else {
+                    super::super::live_delivery::detach_session(sessions, &session_id).await;
+                }
             }
             result
         } else if method == "session/fork" {

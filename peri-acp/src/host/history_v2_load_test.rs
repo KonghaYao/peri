@@ -817,6 +817,96 @@ async fn session_load_v2_cold_restore_binds_live_delivery() {
     task.abort();
 }
 
+/// 冷恢复已发布会话后 initial 交付失败：保留会话供同 requestKey 重试，
+/// 不得按「恢复失败」回滚拆掉已装配的 SessionState。
+#[tokio::test]
+#[serial]
+async fn session_load_v2_cold_restore_initial_failure_keeps_session() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (fixture, _cfg, client, task) = v2_fixture(&tmp).await;
+    let sid = fixture.sid.clone();
+
+    client
+        .send_request(
+            "session/load",
+            load_params(&sid, initial_meta("3", 524_288)),
+        )
+        .await
+        .expect("首次 initial 成功并登记连接级账本");
+    fixture.sessions.lock().await.remove(&sid);
+
+    // 同键不同预算：冷恢复发布后 initial 拒绝，恢复本身已经完成。
+    let error = client
+        .send_request("session/load", load_params(&sid, initial_meta("3", 65_536)))
+        .await
+        .expect_err("同键不同参数必须显式失败");
+    assert_eq!(
+        error_data(&error).reason,
+        HistoryErrorReason::RequestConflict
+    );
+    assert!(
+        fixture.sessions.lock().await.contains_key(&sid),
+        "initial 交付失败不得回滚已发布的冷恢复会话"
+    );
+
+    task.abort();
+}
+
+/// V2 resume 不建立新流：另一连接恢复同一会话时，必须撤销它不拥有的实时绑定；
+/// 拥有该流的连接 resume 时保留绑定。
+#[tokio::test]
+#[serial]
+async fn session_resume_v2_detaches_live_delivery_owned_by_another_connection() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (fixture, cfg, client_a, task_a) = v2_fixture(&tmp).await;
+    let sid = fixture.sid.clone();
+    let sessions = fixture.sessions.clone();
+
+    let response = client_a
+        .send_request(
+            "session/load",
+            load_params(&sid, initial_meta("1", 524_288)),
+        )
+        .await
+        .expect("A 连接建立 V2 会话");
+    assert!(response["_meta"]["peri.history"]["liveBoundary"]["streamId"].is_string());
+
+    // 拥有者 resume：绑定保留。
+    client_a
+        .send_request("session/resume", json!({"sessionId": sid}))
+        .await
+        .expect("A 连接恢复同一会话");
+    assert!(
+        sessions
+            .lock()
+            .await
+            .get(&sid)
+            .and_then(|state| state.live_delivery.clone())
+            .is_some(),
+        "流的拥有连接 resume 不得撤销自己的绑定"
+    );
+
+    // 另一 V2 连接 resume：不得继承 A 的投递身份。
+    let (client_b, _observed, task_b) =
+        super::spawn_loop(cfg, sessions.clone(), Some(history_v2_caps())).await;
+    client_b
+        .send_request("session/resume", json!({"sessionId": sid}))
+        .await
+        .expect("B 连接恢复同一会话");
+    assert!(
+        sessions
+            .lock()
+            .await
+            .get(&sid)
+            .and_then(|state| state.live_delivery.clone())
+            .is_none(),
+        "非拥有连接的 resume 必须清除上一条连接留下的实时绑定"
+    );
+
+    task_b.abort();
+    task_a.abort();
+}
+
 /// 等待 load 响应之后的 flush 完成：服务端在 `diagnostics.send` 返回后才恢复直发。
 async fn wait_live_resumed(live: &crate::host::live_delivery::LiveDelivery, session_id: &str) {
     for _ in 0..400 {
